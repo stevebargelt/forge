@@ -27,9 +27,10 @@ import { gate } from "./gate.js";
 import { retry } from "./retry.js";
 import { reconcileRun } from "./reconcile.js";
 import { tasksForRun, getTask } from "../store/tasks.js";
+import { verdictsForTask } from "../store/verdicts.js";
 import { eventsForTask } from "../store/events.js";
 import { registerShow } from "../cli/commands/show.js";
-import type { Workflow } from "./schema.js";
+import type { Workflow, RedDef } from "./schema.js";
 
 function ensureRuntime(): void {
   const runtimePath = join(process.env.FORGE_HOME!, "runtimes", "claude.yml");
@@ -207,6 +208,86 @@ test("FG-523 F19 degraded: a clean exit with NO result.json still FAILS — an i
   const build = buildTask(runId);
   assert.equal(build.status, "failed", "missing result.json keeps its existing failure handling");
   assert.deepEqual(w.failedSteps, ["build"]);
+});
+
+// --- the contract vs the reds: which outcome claims the task? --------------
+//
+// The contract used to be evaluated only AFTER dispatchReds returned, so an
+// authoritative red fail reached markTaskBlockedByRed first: an implementer
+// completion with no tests_run came out as blocked_by_red — a status that names
+// the red's finding, says nothing about the missing validation, and takes a
+// --force to clear. The hold is now evaluated before the reds are dispatched.
+
+const RED_FINDINGS = [{ severity: "high", summary: "a real defect", evidence: "in the diff", hypothesis: "regression" }];
+
+function workflowWithRed(agent: string, reds: RedDef[]): Workflow {
+  return {
+    name: `fg523-red-${agent}`,
+    description: "validation contract vs. red dispatch",
+    inputs: [],
+    steps: [
+      { id: "build", agent, gate: "verdict", manual: false, depends_on: [], runtime: "claude", reds },
+    ],
+  };
+}
+
+// The red returns a FAILING verdict — if it ever runs, it blocks the primary.
+function execPrimaryThenRed(primaryResult: unknown): DockerExecFn {
+  return async ({ args, stdoutPath, stderrPath }) => {
+    const nameIdx = args.indexOf("--name");
+    const taskId = (nameIdx >= 0 ? args[nameIdx + 1] ?? "" : "").replace(/^forge-/, "");
+    const role = getTask(taskId)?.agentRole ?? "";
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const result = role.startsWith("red-")
+      ? { status: "complete", verdict: "fail", confidence: 0.9, findings: RED_FINDINGS }
+      : primaryResult;
+    writeFileSync(join(dir, "result.json"), JSON.stringify(result));
+    writeFileSync(stdoutPath, "stub stdout");
+    writeFileSync(stderrPath, "");
+    return 0;
+  };
+}
+
+async function runWithRed(agent: string, primaryResult: unknown) {
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  ensureRuntime();
+  const wf = workflowWithRed(agent, [{ agent: "red-wide", authority: "authoritative", gate_on_verdict: true }]);
+  const { runId } = startRun({ workflow: wf, title: wf.name, inputs: {}, projectDir: "/tmp/test-project" });
+  await runNext({ runId, workflow: wf, dockerExec: execPrimaryThenRed(primaryResult) });
+  return { runId, primary: getTask(tasksForRun(runId).find((t) => t.parentId === undefined)!.id)! };
+}
+
+test("FG-523 F19: no tests_run + an authoritative red that FAILS → the named validation hold, not blocked_by_red", async () => {
+  const { runId, primary } = await runWithRed("engineer", { status: "complete" });
+
+  assert.equal(
+    primary.status,
+    "awaiting_gate",
+    "the validation hold owns the outcome — blocked_by_red would hide the missing tests_run behind the red's finding",
+  );
+
+  const held = eventsForTask(primary.id).find((e) => e.eventType === "task.awaiting_gate");
+  const payload = held?.payload as Record<string, unknown>;
+  assert.equal(payload["kind"], "validation_contract");
+  assert.match(String(payload["reason"]), /validation contract: engineer returned status=complete with no tests_run/);
+  assert.equal(
+    eventsForTask(primary.id).some((e) => e.eventType === "task.blocked_by_red"),
+    false,
+  );
+
+  // The hold precedes dispatch: a result that fails the contract is not worth
+  // spending reds on, so no red task (and no verdict) exists at all.
+  assert.deepEqual(tasksForRun(runId).filter((t) => t.parentId !== undefined), []);
+  assert.deepEqual(verdictsForTask(primary.id), []);
+});
+
+test("FG-523 F19 parity: WITH tests_run, the same failing authoritative red still blocks the primary", async () => {
+  const { runId, primary } = await runWithRed("engineer", { status: "complete", tests_run: 8, tests_passed: 8 });
+
+  assert.equal(primary.status, "blocked_by_red", "the contract must not swallow a real red block");
+  assert.equal(tasksForRun(runId).filter((t) => t.parentId !== undefined).length, 1, "the red ran");
+  assert.equal(verdictsForTask(primary.id)[0]!.verdict, "fail");
 });
 
 test("FG-523 F19 re-entry: reconcile over a held task leaves it held; retry refuses it", async () => {

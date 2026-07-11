@@ -5,10 +5,12 @@
 // runner used to advance such a result silently. This module is the ONE place
 // that decides whether a primary result satisfies the validation contract.
 //
-// Coverage: workflow PRIMARY results, via finalizePrimary (runNext.ts) — its
-// only caller. Nothing else re-enters a held task: gate.ts's advance IS the
-// human override, `forge retry` only re-enters failed tasks, and reconcile
-// never completes a workflow primary (it fails them unfinalized).
+// Coverage: workflow PRIMARY results, via holdIfValidationContractFails
+// (runNext.ts) — its only caller, run BEFORE reds dispatch so a held result can
+// never be re-labelled blocked_by_red by an authoritative red fail. Nothing else
+// re-enters a held task: gate.ts's advance IS the human override, `forge retry`
+// only re-enters failed tasks, and reconcile never completes a workflow primary
+// (it fails them unfinalized).
 //
 // Two ingestion paths complete an implementer result WITHOUT this evaluator,
 // both knowingly:

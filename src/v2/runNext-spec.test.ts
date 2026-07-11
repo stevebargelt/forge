@@ -167,7 +167,7 @@ test("FG-270 (1): renderTaskPackage emits ## Spec with architect intent and tech
     {
       // engineer primary → phase "build" (task-build-*, NOT task-red-build-*)
       matches: (id) => id.startsWith("task-build-"),
-      result: { status: "complete", diff_summary: "implemented it", files_modified: [] },
+      result: { status: "complete", diff_summary: "implemented it", files_modified: [], tests_run: 4, tests_passed: 4 },
     },
     {
       // red on "build" step → task-red-build-*
@@ -252,7 +252,7 @@ test("FG-270 (2): renderTaskPackage omits ## Spec entirely on bare-invoke path (
   const exec = makeRoutingExec([
     {
       matches: (id) => id.startsWith("task-build-"),
-      result: { status: "complete", diff_summary: "done", files_modified: [] },
+      result: { status: "complete", diff_summary: "done", files_modified: [], tests_run: 4, tests_passed: 4 },
     },
     {
       matches: (id) => id.startsWith("task-red-build-"),
@@ -299,7 +299,7 @@ test("FG-270 (3): buildRedSpec returns undefined when no architect/tech-lead tas
   const exec = makeRoutingExec([
     {
       matches: (id) => id.startsWith("task-build-"),
-      result: { status: "complete", diff_summary: "done", files_modified: [] },
+      result: { status: "complete", diff_summary: "done", files_modified: [], tests_run: 4, tests_passed: 4 },
     },
     {
       matches: (id) => id.startsWith("task-red-build-"),

@@ -653,6 +653,18 @@ async function dispatchSingleStep(args: {
     }
   }
 
+  // FG-523 (F19): the validation contract is evaluated BEFORE reds dispatch.
+  // A primary that fails it must land the NAMED validation hold — evaluating it
+  // after the reds would let an authoritative red fail win the race and park the
+  // task at blocked_by_red, which says nothing about the missing tests_run and
+  // takes a --force to clear. A result that doesn't meet the contract isn't
+  // worth spending reds on either.
+  const contractHold = holdIfValidationContractFails(taskId, args.runId, result);
+  if (contractHold) {
+    finalizeContainerRetention(containerName, false);
+    return contractHold;
+  }
+
   // Reds: spawn after primary completes. Each red is a child task.
   // Aggregate verdicts then set primary status per policy.
   if (step.reds.length > 0) {
@@ -701,7 +713,7 @@ async function dispatchSingleStep(args: {
       return "blocked_by_red";
     }
     // No authoritative fail — proceed to normal gate semantics.
-    const statusAfterReds = finalizePrimary(taskId, args.runId, step.gate, result, { enforceValidationContract: true });
+    const statusAfterReds = finalizePrimary(taskId, args.runId, step.gate, result);
     // FG-492 review: reap only on the real "complete" outcome — gate=human/
     // verdict returns "awaiting_gate" (paused, not failed, but not done
     // either), and a lost CAS race reports the task's actual terminal status.
@@ -715,7 +727,7 @@ async function dispatchSingleStep(args: {
     return statusAfterReds;
   }
 
-  const finalStatus = finalizePrimary(taskId, args.runId, step.gate, result, { enforceValidationContract: true });
+  const finalStatus = finalizePrimary(taskId, args.runId, step.gate, result);
   // FG-492 review: same reap-only-on-complete rule as the reds branch above.
   // FG-503: same reap_failed durability rule too — see reapContainerAndReportFailure.
   reapContainerAndReportFailure(containerName, finalStatus === "complete", args.runId, taskId);
@@ -727,46 +739,50 @@ async function dispatchSingleStep(args: {
   return finalStatus;
 }
 
-// Final status write for a primary task (no reds path, or reds passed).
+// FG-523 (F19): enforce the validation contract on a workflow primary's result,
+// BEFORE anything else can claim the task's outcome (reds dispatch, the gate).
+// Returns the task's status when the result is held (or when a concurrent cancel
+// won the CAS), and null when the result may proceed.
 //
-// FG-523 (F19): the single ingestion point for a primary's final status, and so
-// the single site that enforces the validation contract. `enforceValidationContract`
-// is false only for a fanout PARENT: its result is a synthetic aggregate
-// ({status, children}) that never carries tests_run — the agent results live on
-// the children, which are not primaries and finalize through markTaskComplete.
+// Only the primary path calls this. A fanout PARENT is exempt: its result is a
+// synthetic aggregate ({status, children}) that never carries tests_run — the
+// agent results live on the children, which are not primaries and finalize
+// through markTaskComplete.
+function holdIfValidationContractFails(taskId: string, runId: string, result: unknown): string | null {
+  const role = getTask(taskId)?.agentRole ?? "";
+  const contract = evaluateValidationContract({ role, result });
+  if (contract.held) {
+    // Fail-safe: hold for a gate decision rather than advance. CAS'd so a
+    // concurrent cancel that already failed the task isn't resurrected.
+    if (!markTaskHeldForGate(taskId, result)) {
+      return getTask(taskId)?.status ?? "failed";
+    }
+    logEvent("task.awaiting_gate", {
+      runId,
+      taskId,
+      payload: { kind: "validation_contract", reason: contract.reason },
+    });
+    notifyGateAwaiting(taskId);
+    return "awaiting_gate";
+  }
+  if (contract.waiver !== undefined) {
+    // The waiver advances the task, but it must leave a record.
+    logEvent("task.decision", {
+      runId,
+      taskId,
+      payload: { kind: "validation_waiver", reason: contract.waiver },
+    });
+  }
+  return null;
+}
+
+// Final status write for a primary task (no reds path, or reds passed).
 function finalizePrimary(
   taskId: string,
   runId: string,
   gate: Step["gate"],
   result: unknown,
-  opts: { enforceValidationContract: boolean },
 ): string {
-  if (opts.enforceValidationContract) {
-    const role = getTask(taskId)?.agentRole ?? "";
-    const contract = evaluateValidationContract({ role, result });
-    if (contract.held) {
-      // Fail-safe: hold for a gate decision rather than advance. CAS'd so a
-      // concurrent cancel that already failed the task isn't resurrected.
-      if (!markTaskHeldForGate(taskId, result)) {
-        return getTask(taskId)?.status ?? "failed";
-      }
-      logEvent("task.awaiting_gate", {
-        runId,
-        taskId,
-        payload: { kind: "validation_contract", reason: contract.reason },
-      });
-      notifyGateAwaiting(taskId);
-      return "awaiting_gate";
-    }
-    if (contract.waiver !== undefined) {
-      // The waiver advances the task, but it must leave a record.
-      logEvent("task.decision", {
-        runId,
-        taskId,
-        payload: { kind: "validation_waiver", reason: contract.waiver },
-      });
-    }
-  }
   switch (gate) {
     case "auto":
     case "none":
@@ -1745,7 +1761,7 @@ async function dispatchFanoutStep(args: {
       }
       cleanupIntegrationWorktree(args.projectDir, args.runId, parentId);
     }
-    return finalizePrimary(parentId, args.runId, step.gate, parentResult, { enforceValidationContract: false });
+    return finalizePrimary(parentId, args.runId, step.gate, parentResult);
   }
 
   // No reds path: merge integration to HEAD directly before finalizing.
@@ -1792,7 +1808,7 @@ async function dispatchFanoutStep(args: {
     cleanupIntegrationWorktree(args.projectDir, args.runId, parentId);
   }
 
-  return finalizePrimary(parentId, args.runId, step.gate, parentResult, { enforceValidationContract: false });
+  return finalizePrimary(parentId, args.runId, step.gate, parentResult);
 }
 
 type ChildOutcome = {
