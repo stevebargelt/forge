@@ -5,7 +5,7 @@ import { buildReleaseReport, summarizeProblems, type ReleaseInputs } from "./rel
 // A fully-green baseline; each test overrides one surface to exercise a scenario.
 function green(over: Partial<ReleaseInputs> = {}): ReleaseInputs {
   return {
-    image: { name: "agent-dev-worker:latest", present: true, createdMs: 2000, dockerfileMtimeMs: 1000 },
+    image: { name: "agent-dev-worker:latest", present: true, createdMs: 2000, buildInputMtimeMs: 1000 },
     clis: [
       { command: "claude", present: true, neededBy: ["claude-oauth"] },
       { command: "codex", present: true, neededBy: ["codex-subscription"] },
@@ -37,7 +37,7 @@ test("#229 image missing → fail with a rebuild next-command, overall NOT ready
 });
 
 test("#229 image stale (Dockerfile newer than image) → warn, but not blocking", () => {
-  const r = buildReleaseReport(green({ image: { name: "agent-dev-worker:latest", present: true, createdMs: 1000, dockerfileMtimeMs: 5000 } }));
+  const r = buildReleaseReport(green({ image: { name: "agent-dev-worker:latest", present: true, createdMs: 1000, buildInputMtimeMs: 5000 } }));
   assert.equal(status(r, "image"), "warn");
   assert.match(r.checks.find((c) => c.name.includes("image"))!.detail, /STALE/);
   assert.equal(r.ok, true, "a stale image warns, doesn't block");

@@ -34,8 +34,10 @@ export type ImageInputs = {
   present: boolean;
   /** image creation time (ms) — undefined when absent. */
   createdMs?: number;
-  /** Dockerfile mtime (ms) — undefined when the source repo isn't locatable. */
-  dockerfileMtimeMs?: number;
+  /** Newest mtime (ms) across the image's build inputs — the Dockerfile and every
+   *  file it COPYs (forge-test.sh, agent-entrypoint.sh). Undefined when the source
+   *  repo isn't locatable. */
+  buildInputMtimeMs?: number;
   /** Set when docker itself couldn't be probed (daemon down / not installed) —
    *  distinct from a genuine "No such image". Makes the check skip, not fail, so
    *  a transient daemon hiccup never tells the user to rebuild a present image. */
@@ -91,15 +93,15 @@ function imageCheck(img: ImageInputs): ReleaseCheck {
   if (!img.present) {
     return { name: `image ${img.name}`, status: "fail", detail: "not built on this host", next: REBUILD };
   }
-  if (img.dockerfileMtimeMs !== undefined && img.createdMs !== undefined && img.dockerfileMtimeMs > img.createdMs) {
+  if (img.buildInputMtimeMs !== undefined && img.createdMs !== undefined && img.buildInputMtimeMs > img.createdMs) {
     return {
       name: `image ${img.name}`,
       status: "warn",
-      detail: "STALE — the Dockerfile is newer than the built image; runtime CLIs/deps may be out of date",
+      detail: "STALE — a build input (Dockerfile or a COPYed script, e.g. forge-test.sh) is newer than the built image; runtime CLIs/deps/wrappers may be out of date",
       next: REBUILD,
     };
   }
-  return { name: `image ${img.name}`, status: "ok", detail: "present and not older than the Dockerfile" };
+  return { name: `image ${img.name}`, status: "ok", detail: "present and not older than its build inputs (Dockerfile + COPYed scripts)" };
 }
 
 function cliCheck(c: CliInputs): ReleaseCheck {

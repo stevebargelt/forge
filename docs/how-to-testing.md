@@ -80,6 +80,22 @@ Within an agent's in-loop validation, use `forge-test` at the right tier:
 
 **A green unit tier is in-loop confidence for most changes; it is not, by itself, proof the integration/worktree tiers still pass.** Since FG-495 the unit tier is the fast gate the review-loop re-runs every round via `runVerification` (`npm run --silent typecheck` + `npm run --silent test` — not the literal `npm run test:all` command, and never the dashboard workspace), and CI's `test-extended` job independently re-verifies the integration/worktree tiers as its own required check before merge — both `test` and `test-extended` must be green to merge, not just the fast one. If your change touches CLI-spawn, real-FS/DB, or git-worktree/dispatch code, also run the matching `forge-test --integration` / `--worktree` / `--extended` before reporting complete: the fast gate proves the fast tier, not the slow tiers CI's `test-extended` job covers. Agents must report their validation tier honestly in their result — `status: "complete"` means the diff was validated at the level appropriate for its change.
 
+### What `forge-test` does before it runs anything (FG-520)
+
+`forge-test` never runs the tests against `/project` directly — the host's `node_modules` carries native modules built for the host platform, so `better-sqlite3` would fail to `dlopen` inside the container. It runs them from a writable scratch at `/tmp/forge-work` instead. Two things happen on **every** invocation, before a single test executes:
+
+- **Source re-sync.** The scratch is mirrored from `/project`: changed files copied in, deleted files removed, `node_modules` / `.git` / `.terraform` left alone. Edit source and re-run `forge-test`, and you are testing the code you just wrote — no cache to bust, nothing to clean out by hand. The scratch keeps its own natively-built `node_modules` (that's the whole point of the scratch) and its own `.git`, copied once when the scratch is created.
+- **Dependency validation and repair.** The scratch has to be able to actually load `tsx` and `better-sqlite3`. If `node_modules` is empty, if `package.json`/`package-lock.json` changed since the last install, or if `tsx` won't load, `forge-test` reinstalls (`npm ci`) and rebuilds the native/platform binaries — announcing each step on stderr (`forge-test: installing deps in /tmp/forge-work — …`, `forge-test: deps installed`). The first run in a fresh container therefore takes a minute; later runs are near-instant unless deps actually changed.
+
+**Exit code 2 with a `FATAL` line is an environment failure, not a test failure.** If the scratch can't be repaired — `tsx` still won't load after an install and an esbuild rebuild, or `better-sqlite3` won't load after a from-source rebuild — `forge-test` stops before running the suite and says so:
+
+```
+forge-test: FATAL: 'tsx' cannot load from /tmp/forge-work after install + esbuild rebuild.
+forge-test: this is an ENVIRONMENT failure, not a test failure — do not report it as red tests.
+```
+
+Read that as **infra broken, tests unknown** — no test result was produced. Report it as an infra/environment problem (agents: surface it in `evidence`, not as `tests_failed`); do not report red tests, and do not treat it as a regression in your diff. The failure modes it forecloses are exactly the two that used to look like red tests: a suite silently run against a stale snapshot of the source, and an empty scratch `node_modules` failing every test with `ERR_MODULE_NOT_FOUND: 'tsx'`.
+
 ## Naming a new test file
 
 Pick the suffix that matches the slowest operation the test performs:
