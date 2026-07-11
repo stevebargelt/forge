@@ -17,9 +17,10 @@ docs/how-to-new-agent.md:83 documents the workflow YAML field as `model:` — pe
 
 ## Also batch (from the FG-520 docs sweep, 2026-07-11)
 
-Seed under-descriptions of forge-test (accurate but pre-FG-520 in emphasis) — one-line touch-ups: seeds/agents/engineer/CLAUDE.md:40 ("subsequent runs reuse the work dir" → note every run re-syncs source + validates deps), frontend-specialist:70 + backend-specialist:67 (same), agentic-platform-builder:63 (name exit 2 + FATAL as the concrete infra-failure signal).
+RESOLVED IN FG-520 ITSELF (review round 1, 2026-07-11): the engineer/frontend-specialist/backend-specialist/test-engineer seed forge-test prose was reconciled on the FG-520 branch (commit 33e64c8). Remaining for this batch: agentic-platform-builder:63 — name exit 2 + FATAL as the concrete infra-failure signal (the one seed the FG-520 round did not touch).
 
 ## Notes
 
 Filed 2026-07-10. Small — fold into the next documentation reconciliation batch (candidate companion: FG-522, the forge status redTaskId polish item).
+
 

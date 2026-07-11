@@ -191,6 +191,23 @@ _node_modules_is_empty() {
   [[ ! -d node_modules ]] || [[ -z "$(ls -A node_modules 2>/dev/null)" ]]
 }
 
+# Every install/rebuild on the repair path runs through here. Under `set -e` a bare
+# `npm ci` that fails (no network, corrupt lockfile, compile error) would kill the
+# script with npm's own exit code — indistinguishable from a red test run, and the
+# FATAL diagnostic below would never print. The contract is: a scratch that cannot
+# be repaired exits 2 with a FATAL line, never test results. npm's stderr passes
+# through untouched so the actual cause is still on screen.
+_npm_or_fatal() {
+  local what="$1"; shift
+  local code=0
+  "$@" >&2 || code=$?
+  if [[ $code -ne 0 ]]; then
+    echo "forge-test: FATAL: \`$*\` failed with exit $code while $what in $WORK_DIR (see npm's output above)." >&2
+    echo "forge-test: this is an ENVIRONMENT failure, not a test failure — do not report it as red tests." >&2
+    exit 2
+  fi
+}
+
 # Every invocation: prove the scratch can actually load the deps the tests need,
 # and repair it if it can't. Loud on stderr about what it is doing and why — a
 # silent broken scratch is how ERR_MODULE_NOT_FOUND gets reported as failing tests.
@@ -208,9 +225,9 @@ _ensure_deps() {
     echo "forge-test: installing deps in $WORK_DIR — $reason" >&2
     echo "forge-test: this must succeed before any test result is trustworthy; installing now (first run in a container takes a minute)" >&2
     if [[ -f package-lock.json ]]; then
-      npm ci >&2
+      _npm_or_fatal "installing deps" npm ci
     else
-      npm install >&2
+      _npm_or_fatal "installing deps" npm install
     fi
     _deps_fingerprint > "$DEPS_MARKER"
     echo "forge-test: deps installed" >&2
@@ -218,7 +235,7 @@ _ensure_deps() {
 
   if _declares_dep tsx && ! _tsx_loads; then
     echo "forge-test: 'tsx' still will not load — rebuilding esbuild's platform binary (npm's ignore-scripts default blocks it)" >&2
-    npm rebuild esbuild >&2 || true
+    _npm_or_fatal "rebuilding esbuild's platform binary" npm rebuild esbuild
     if ! _tsx_loads; then
       echo "forge-test: FATAL: 'tsx' cannot load from $WORK_DIR after install + esbuild rebuild." >&2
       echo "forge-test: this is an ENVIRONMENT failure, not a test failure — do not report it as red tests." >&2
@@ -230,7 +247,7 @@ _ensure_deps() {
     echo "forge-test: better-sqlite3's native binding will not load — rebuilding it from source for this container" >&2
     # --build-from-source forces a native compile rather than reusing a prebuilt
     # .node from another platform. The image ships build-essential + python3.
-    npm rebuild better-sqlite3 --build-from-source >&2
+    _npm_or_fatal "rebuilding better-sqlite3 from source" npm rebuild better-sqlite3 --build-from-source
     if ! _sqlite_loads; then
       echo "forge-test: FATAL: better-sqlite3 will not load after a from-source rebuild." >&2
       echo "forge-test: this is an ENVIRONMENT failure, not a test failure — do not report it as red tests." >&2

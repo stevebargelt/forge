@@ -287,6 +287,104 @@ test("FG-520: the mirror handles the tree-shape edits an agent actually makes", 
   }
 });
 
+// The script runs under `set -e`: a bare `npm ci` that fails would terminate it right
+// there with npm's exit code, so the FATAL line and the documented exit 2 never happen
+// and a broken environment reaches the caller looking like an ordinary test failure.
+test("FG-520: npm failing on the repair path is a FATAL/exit-2 ENVIRONMENT error", async (t) => {
+  function stubNpm(f: Fixture, body: string) {
+    writeFileSync(join(f.base, "bin", "npm"), `#!/usr/bin/env bash\necho "npm $*" >> "$NPM_LOG"\n${body}\n`);
+    chmodSync(join(f.base, "bin", "npm"), 0o755);
+  }
+
+  await t.test("a failing `npm ci` exits 2 with FATAL, not npm's raw code", () => {
+    const f = makeFixture();
+    try {
+      stubNpm(f, `if [[ "$1" == "ci" ]]; then echo "npm ERR! network unreachable" >&2; exit 254; fi\nexit 0`);
+
+      const r = runForgeTest(f);
+      assert.equal(r.status, 2, `a failed install must exit 2, got ${r.status}`);
+      assert.match(r.stderr, /FATAL: `npm ci` failed with exit 254/);
+      assert.match(r.stderr, /ENVIRONMENT failure, not a test failure/);
+      assert.match(r.stderr, /npm ERR! network unreachable/, "npm's own stderr must survive");
+      assert.ok(
+        !npmCalls(f).includes("npm run test:unit"),
+        "the tier must never run against a scratch whose install failed"
+      );
+    } finally {
+      rmSync(f.base, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("a failing `npm install` (no lockfile) exits 2 with FATAL", () => {
+    const f = makeFixture();
+    try {
+      rmSync(join(f.src, "package-lock.json"));
+      stubNpm(f, `if [[ "$1" == "install" ]]; then echo "npm ERR! EACCES" >&2; exit 1; fi\nexit 0`);
+
+      const r = runForgeTest(f);
+      assert.equal(r.status, 2);
+      assert.match(r.stderr, /FATAL: `npm install` failed with exit 1/);
+      assert.match(r.stderr, /ENVIRONMENT failure, not a test failure/);
+    } finally {
+      rmSync(f.base, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("a failing `npm rebuild esbuild` exits 2 with FATAL", () => {
+    const f = makeFixture();
+    try {
+      // Install "succeeds" but materialises no tsx, so the script reaches the esbuild
+      // rebuild — which is where the compile blows up.
+      stubNpm(f, `if [[ "$1" == "rebuild" ]]; then echo "npm ERR! esbuild postinstall failed" >&2; exit 7; fi\nexit 0`);
+
+      const r = runForgeTest(f);
+      assert.equal(r.status, 2);
+      assert.match(r.stderr, /FATAL: `npm rebuild esbuild` failed with exit 7/);
+      assert.match(r.stderr, /ENVIRONMENT failure, not a test failure/);
+      assert.match(r.stderr, /npm ERR! esbuild postinstall failed/);
+      assert.ok(!npmCalls(f).includes("npm run test:unit"));
+    } finally {
+      rmSync(f.base, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("a failing `npm rebuild better-sqlite3` exits 2 with FATAL", () => {
+    const f = makeFixture();
+    try {
+      writeFileSync(
+        join(f.src, "package.json"),
+        JSON.stringify({
+          name: "fixture",
+          scripts: { "test:unit": "echo ran" },
+          devDependencies: { tsx: "*", "better-sqlite3": "*" },
+        })
+      );
+      // ci installs a loadable tsx (so the run gets past the tsx probe) but no
+      // better-sqlite3 — the native rebuild that would fix that is what fails.
+      stubNpm(
+        f,
+        `if [[ "$1" == "ci" ]]; then
+  mkdir -p node_modules/tsx
+  printf '%s' '{"name":"tsx","version":"0.0.0","type":"module","exports":"./index.js"}' > node_modules/tsx/package.json
+  : > node_modules/tsx/index.js
+  exit 0
+fi
+if [[ "$1" == "rebuild" ]]; then echo "npm ERR! gyp ERR! build error" >&2; exit 1; fi
+exit 0`
+      );
+
+      const r = runForgeTest(f);
+      assert.equal(r.status, 2);
+      assert.match(r.stderr, /FATAL: `npm rebuild better-sqlite3 --build-from-source` failed with exit 1/);
+      assert.match(r.stderr, /ENVIRONMENT failure, not a test failure/);
+      assert.match(r.stderr, /gyp ERR! build error/);
+      assert.ok(!npmCalls(f).includes("npm run test:unit"));
+    } finally {
+      rmSync(f.base, { recursive: true, force: true });
+    }
+  });
+});
+
 test("FG-520: a scratch that cannot load tsx fails as an ENVIRONMENT error, not red tests", () => {
   const f = makeFixture();
   try {
