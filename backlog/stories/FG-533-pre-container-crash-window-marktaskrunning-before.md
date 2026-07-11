@@ -14,7 +14,7 @@ src/v2/runNext.ts (runContainer, ~:2100) calls markTaskRunning + logs task.start
 - src/ops/reconcile-candidate.ts's SQL gates on the same event
 - `forge retry` refuses a non-failed task
 
-Permanent wedge, same family as FG-531 (awaiting_red crash window). Found by FG-530's write-surface guard (documented in the guard's GAP allowlist entry, fg530-probe-inertness.test.ts ~:900); surfaced in the operator's 2026-07-11 review (finding 1), filed on their direction.
+Permanent wedge, same family as FG-531 (awaiting_red crash window). Found by FG-530's write-surface guard during development. The shipped harness carries NO deferred gap entries (DEFERRED_GAPS = 0): the window is probed at runContainer's pre-container span and pinned as an FG-533 known-failure matrix cell (both documented in docs/how-to-testing.md). Surfaced in the operator's 2026-07-11 review, filed on their direction.
 
 ## Acceptance Criteria
 
@@ -24,5 +24,6 @@ Permanent wedge, same family as FG-531 (awaiting_red crash window). Found by FG-
 
 ## Notes
 
-Filed 2026-07-11 from the FG-530 write-surface guard + operator review finding 1. Siblings: FG-531, FG-532 (same crash-window family). NOTE: an earlier same-day filing of this ticket briefly collided with sticky number FG-530 because the crash-simulator's ticket file lived only on PR #103's branch — corrected by landing FG-530's file on main and re-filing; concrete evidence for FG-496 (DB-backed backlog).
+Filed 2026-07-11 during FG-530 + operator review finding 1. Siblings: FG-531, FG-532 (same crash-window family).
+
 
