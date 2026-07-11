@@ -8,18 +8,25 @@ created: 2026-07-11
 
 ## Problem
 
-computeReadyQueue's "is any row pending" check (src/v2/ready-queue.ts:~105) runs over all non-adhoc rows — red/fanout/recovery children included. So a phase shaped [terminally FAILED primary + pending red child] falls through to the deps check and goes READY; dispatchSingleStep finds no pending workflow-primary row to reuse and mints a FRESH primary, silently re-running a failed step.
+computeReadyQueue's "is any row pending" check (src/v2/ready-queue.ts:~105) ran over all non-adhoc rows — red/fanout/recovery children included. So a phase shaped [terminally FAILED primary + pending red child] fell through to the deps check and went READY; dispatchSingleStep found no pending workflow-primary row to reuse and minted a FRESH primary, silently re-running a failed step.
 
-Verified empirically by the FG-477 slice-1 test-engineer BOTH against the migrated ready-queue and against `git show HEAD:src/v2/ready-queue.ts` — pre-existing, not a slice-1 regression (with a COMPLETE red child both correctly return []). Deliberately NOT pinned by a test (pinning would enshrine it).
+Found by the FG-477 slice-1 test-engineer (verified pre-existing on HEAD, both against the migrated ready-queue and `git show HEAD:src/v2/ready-queue.ts`); independently re-found by the FG-477/FG-529 review-loop reviewer (round 1), whose fixer applied the fix in the same round.
 
-It contradicts the classifier's thesis (only primaries drive a phase's dispatch decision) — exactly what FG-477 exists to make true.
+## Status: FIXED in PR #102 (branch feat/fg-477-slice1-lineage-classifier, commit 04b3706)
+
+computeReadyQueue now answers "does this step still need dispatch" from ATTEMPT rows only — the classifier's primary kinds plus on_reject recovery; red/fanout children are not attempts. Regression tests pinned in src/v2/ready-queue.test.ts:
+- failed primary + pending red child → NOT ready (FG-528)
+- failed primary + pending fanout child → NOT ready (FG-528)
+- failed primary + pending on_reject recovery → ready (FG-476 preserved)
 
 ## Acceptance Criteria
 
-- A phase with a terminally failed primary is not re-admitted by pending non-primary children; the failed primary's recovery goes through the existing verbs (retry / gate on_reject), never a silently minted fresh primary.
-- Regression test for [failed primary + pending red child] → not ready; [failed primary + pending recovery row] keeps today's recovery-dispatch behavior.
-- Behavior change is deliberate and documented (this is a state-derivation change — out of slice-1's classification-only scope by design).
+- [met] A phase with a terminally failed primary is not re-admitted by pending non-primary children; recovery goes through the existing verbs — enforced by the attempts filter, pinned by the two NOT-ready regressions.
+- [met] Regression test for [failed primary + pending red child] → not ready; [failed primary + pending recovery row] keeps recovery-dispatch behavior — the three tests above.
+- [met] Behavior change deliberate and documented — the FG-528-numbered comment block at the fix site + review round 1 record (run-review-loop-fg-477-09a484).
+
+Close against PR #102's merge commit once it lands.
 
 ## Notes
 
-Filed 2026-07-10 from the FG-477 slice-1 test-engineer report (run-fg-477-slice-1-lineage-classifier-060342, task-task-6fc14f, FINDING 1). Parent umbrella: FG-477; sibling: FG-527.
+Filed 2026-07-10 from the FG-477 slice-1 test-engineer report. Parent umbrella: FG-477; siblings: FG-527, FG-529.
