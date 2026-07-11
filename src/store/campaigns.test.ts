@@ -12,9 +12,11 @@ import {
   listCampaignItems,
   updateCampaignItem,
   updateCampaignItemIfCampaignPaused,
+  updateCampaignItemIfCampaignRunning,
   approveCampaign,
   setPlanHash,
 } from "./campaigns.js";
+import type { CampaignItemUpdate } from "./campaigns.js";
 import {
   isCampaignTransitionAllowed,
 } from "../types/index.js";
@@ -248,6 +250,93 @@ test("updateCampaignItem: partial update preserves unset fields", () => {
   assert.equal(loaded?.outcome, "shipped");
 });
 
+// ── FG-410: column-targeted updates (lost-update safety) ───────────────────
+
+test("updateCampaignItem: concurrent writers on disjoint fields both persist", () => {
+  const campaign = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
+  const item = addCampaignItem({ campaignId: campaign.id, itemOrder: 0, ticketId: "FG-001" });
+
+  // Both writers construct their update from the SAME starting snapshot — the
+  // interleaving that read-merge-write loses. Writer B's write must not restore
+  // the branch it saw before writer A set it.
+  const writerA: CampaignItemUpdate = { branch: "forge/lane-a" };
+  const writerB: CampaignItemUpdate = { prUrl: "https://github.com/example/repo/pull/7" };
+
+  updateCampaignItem(item.id, writerA);
+  updateCampaignItem(item.id, writerB);
+
+  const loaded = getCampaignItem(item.id);
+  assert.equal(loaded?.branch, "forge/lane-a", "writer A's field was clobbered by writer B's stale snapshot");
+  assert.equal(loaded?.prUrl, "https://github.com/example/repo/pull/7");
+});
+
+// The lost update is a cross-connection interleaving (read A, read B, write A,
+// write B), and better-sqlite3 is synchronous — a single connection cannot
+// interleave a read-merge-write's read with another writer's write from the
+// outside. So the load-bearing proof is the emitted statement itself: a writer
+// that never names a column it wasn't asked to change cannot clobber a concurrent
+// writer's disjoint field, whatever the interleaving. Under read-merge-write this
+// assertion fails — every write named all ten mutable columns.
+test("updateCampaignItem: the emitted UPDATE names only the columns the caller passed", () => {
+  const campaign = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
+  const item = addCampaignItem({ campaignId: campaign.id, itemOrder: 0, ticketId: "FG-001" });
+
+  const statements: string[] = [];
+  const realPrepare = db.prepare.bind(db);
+  db.prepare = ((sql: string) => {
+    statements.push(sql);
+    return realPrepare(sql);
+  }) as typeof db.prepare;
+
+  updateCampaignItem(item.id, { branch: "forge/lane-a" });
+
+  db.prepare = realPrepare;
+  const update = statements.find((sql) => sql.includes("UPDATE campaign_items"));
+  assert.ok(update, "expected an UPDATE against campaign_items");
+  assert.match(update, /SET branch = \?, updated_at = \?/);
+  for (const column of ["run_id", "pr_url", "worktree_path", "outcome", "blocker_kind", "reason"]) {
+    assert.ok(!update.includes(`${column} = ?`), `write must not name ${column} — the caller never asked to change it`);
+  }
+});
+
+test("updateCampaignItem: a key present with undefined clears the column; an absent key is untouched", () => {
+  const campaign = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
+  const item = addCampaignItem({ campaignId: campaign.id, itemOrder: 0, ticketId: "FG-001" });
+  updateCampaignItem(item.id, {
+    lifecycleStatus: "failed",
+    outcome: "blocked",
+    blockerKind: "tests",
+    reason: "Tests are failing",
+    branch: "forge/lane-a",
+  });
+
+  updateCampaignItem(item.id, { outcome: undefined, blockerKind: undefined, reason: undefined });
+
+  const loaded = getCampaignItem(item.id);
+  assert.equal(loaded?.outcome, undefined, "explicit undefined must clear the column");
+  assert.equal(loaded?.blockerKind, undefined);
+  assert.equal(loaded?.reason, undefined);
+  assert.equal(loaded?.branch, "forge/lane-a", "an absent key must leave its column untouched");
+  assert.equal(loaded?.lifecycleStatus, "failed");
+});
+
+test("updateCampaignItem: missing id is a silent no-op", () => {
+  assert.doesNotThrow(() => updateCampaignItem("citem-nonexistent", { lifecycleStatus: "running" }));
+});
+
+test("updateCampaignItem: an empty update touches updated_at and nothing else", () => {
+  const campaign = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
+  const item = addCampaignItem({ campaignId: campaign.id, itemOrder: 0, ticketId: "FG-001" });
+  updateCampaignItem(item.id, { lifecycleStatus: "running", branch: "forge/lane-a" });
+  const before = getCampaignItem(item.id);
+
+  updateCampaignItem(item.id, {});
+
+  const loaded = getCampaignItem(item.id);
+  assert.equal(loaded?.lifecycleStatus, before?.lifecycleStatus);
+  assert.equal(loaded?.branch, before?.branch);
+});
+
 test("campaign items are scoped by campaign_id", () => {
   const c1 = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
   const c2 = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
@@ -296,6 +385,142 @@ test("updateCampaignItemIfCampaignPaused: refuses and mutates nothing when campa
 
   assert.equal(applied, false, "campaignB being paused must not authorize a write to campaignA's item");
   assert.deepEqual(getCampaignItem(item.id), before, "item row must be byte-identical — zero mutation");
+});
+
+test("updateCampaignItemIfCampaignPaused: refuses when the campaign is not paused", () => {
+  const campaign = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
+  updateCampaignStatus(campaign.id, "running");
+  const item = addCampaignItem({ campaignId: campaign.id, itemOrder: 0, ticketId: "FG-001" });
+  const before = getCampaignItem(item.id);
+
+  const applied = updateCampaignItemIfCampaignPaused(item.id, campaign.id, { lifecycleStatus: "complete" });
+
+  assert.equal(applied, false);
+  assert.deepEqual(getCampaignItem(item.id), before);
+});
+
+test("updateCampaignItemIfCampaignPaused: returns false for a missing item", () => {
+  const campaign = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
+  updateCampaignStatus(campaign.id, "running");
+  updateCampaignStatus(campaign.id, "paused");
+
+  const applied = updateCampaignItemIfCampaignPaused("citem-nonexistent", campaign.id, {
+    lifecycleStatus: "complete",
+  });
+
+  assert.equal(applied, false);
+});
+
+test("updateCampaignItemIfCampaignPaused: writes only the columns the caller named", () => {
+  const campaign = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
+  updateCampaignStatus(campaign.id, "running");
+  updateCampaignStatus(campaign.id, "paused");
+  const item = addCampaignItem({ campaignId: campaign.id, itemOrder: 0, ticketId: "FG-001" });
+  updateCampaignItem(item.id, { branch: "forge/lane-a" });
+
+  const applied = updateCampaignItemIfCampaignPaused(item.id, campaign.id, { lifecycleStatus: "complete" });
+
+  assert.equal(applied, true);
+  const loaded = getCampaignItem(item.id);
+  assert.equal(loaded?.lifecycleStatus, "complete");
+  assert.equal(loaded?.branch, "forge/lane-a");
+});
+
+// ── updateCampaignItemIfCampaignRunning: CAS ownership + running guard ─────
+
+test("updateCampaignItemIfCampaignRunning: applies the write when the item belongs to the running campaign", () => {
+  const campaign = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
+  updateCampaignStatus(campaign.id, "running");
+  const item = addCampaignItem({ campaignId: campaign.id, itemOrder: 0, ticketId: "FG-001" });
+  updateCampaignItem(item.id, { branch: "forge/lane-a" });
+
+  const applied = updateCampaignItemIfCampaignRunning(item.id, campaign.id, {
+    lifecycleStatus: "complete",
+    outcome: "shipped",
+  });
+
+  assert.equal(applied, true);
+  const loaded = getCampaignItem(item.id);
+  assert.equal(loaded?.lifecycleStatus, "complete");
+  assert.equal(loaded?.outcome, "shipped");
+  assert.equal(loaded?.branch, "forge/lane-a", "a column the caller never named must survive");
+});
+
+test("updateCampaignItemIfCampaignRunning: refuses when the campaign is paused, or when campaignId names another campaign", () => {
+  const campaignA = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
+  const campaignB = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
+  updateCampaignStatus(campaignA.id, "running");
+  updateCampaignStatus(campaignB.id, "running");
+  const item = addCampaignItem({ campaignId: campaignA.id, itemOrder: 0, ticketId: "FG-001" });
+
+  assert.equal(
+    updateCampaignItemIfCampaignRunning(item.id, campaignB.id, { lifecycleStatus: "complete" }),
+    false,
+    "campaignB being running must not authorize a write to campaignA's item"
+  );
+
+  updateCampaignStatus(campaignA.id, "paused");
+  const before = getCampaignItem(item.id);
+  assert.equal(
+    updateCampaignItemIfCampaignRunning(item.id, campaignA.id, { lifecycleStatus: "complete" }),
+    false
+  );
+  assert.deepEqual(getCampaignItem(item.id), before, "item row must be byte-identical — zero mutation");
+});
+
+test("updateCampaignItemIfCampaignRunning: returns false for a missing item", () => {
+  const campaign = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
+  updateCampaignStatus(campaign.id, "running");
+
+  assert.equal(
+    updateCampaignItemIfCampaignRunning("citem-nonexistent", campaign.id, { lifecycleStatus: "complete" }),
+    false
+  );
+});
+
+test("updateCampaignItemIfCampaignRunning: an explicit undefined clears the column under the guard", () => {
+  const campaign = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
+  updateCampaignStatus(campaign.id, "running");
+  const item = addCampaignItem({ campaignId: campaign.id, itemOrder: 0, ticketId: "FG-001" });
+  updateCampaignItem(item.id, { outcome: "blocked", blockerKind: "tests", branch: "forge/lane-a" });
+
+  const applied = updateCampaignItemIfCampaignRunning(item.id, campaign.id, {
+    outcome: undefined,
+    blockerKind: undefined,
+  });
+
+  assert.equal(applied, true);
+  const loaded = getCampaignItem(item.id);
+  assert.equal(loaded?.outcome, undefined);
+  assert.equal(loaded?.blockerKind, undefined);
+  assert.equal(loaded?.branch, "forge/lane-a");
+});
+
+test("updateCampaignItemIfCampaignRunning: guarded writers on disjoint fields both persist", () => {
+  const campaign = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
+  updateCampaignStatus(campaign.id, "running");
+  const item = addCampaignItem({ campaignId: campaign.id, itemOrder: 0, ticketId: "FG-001" });
+
+  const writerA: CampaignItemUpdate = { runId: "run-lane-a" };
+  const writerB: CampaignItemUpdate = { worktreePath: "/tmp/worktrees/lane-b" };
+
+  assert.equal(updateCampaignItemIfCampaignRunning(item.id, campaign.id, writerA), true);
+  assert.equal(updateCampaignItemIfCampaignRunning(item.id, campaign.id, writerB), true);
+
+  const loaded = getCampaignItem(item.id);
+  assert.equal(loaded?.runId, "run-lane-a", "writer A's field was clobbered by writer B's stale snapshot");
+  assert.equal(loaded?.worktreePath, "/tmp/worktrees/lane-b");
+});
+
+test("updateCampaignItemIfCampaignRunning: an empty update reports whether the guard passed", () => {
+  const campaign = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
+  updateCampaignStatus(campaign.id, "running");
+  const item = addCampaignItem({ campaignId: campaign.id, itemOrder: 0, ticketId: "FG-001" });
+
+  assert.equal(updateCampaignItemIfCampaignRunning(item.id, campaign.id, {}), true);
+
+  updateCampaignStatus(campaign.id, "paused");
+  assert.equal(updateCampaignItemIfCampaignRunning(item.id, campaign.id, {}), false);
 });
 
 // ── Transition legality ────────────────────────────────────────────────────

@@ -233,6 +233,50 @@ export type CampaignItemUpdate = {
   prUrl?: string;
 };
 
+const ITEM_UPDATE_COLUMNS: Record<keyof CampaignItemUpdate, string> = {
+  lifecycleStatus: "lifecycle_status",
+  outcome: "outcome",
+  blockerKind: "blocker_kind",
+  continuePolicy: "continue_policy",
+  reason: "reason",
+  requestedHumanAction: "requested_human_action",
+  runId: "run_id",
+  branch: "branch",
+  worktreePath: "worktree_path",
+  prUrl: "pr_url",
+};
+
+// FG-410: the three campaign-item writers below used to read the row, merge the
+// update over it, and write back all ten mutable columns. Two writers touching
+// DISJOINT fields of one item lost the first writer's field: both read before
+// either wrote, and the second full-row write restored the stale value it had
+// read. This builds a SET clause from only the columns the caller actually named,
+// so a writer never writes a column it didn't ask to change — the FG-396
+// parallel-lanes prerequisite.
+//
+// Presence, not definedness, is what selects a column: callers CLEAR fields by
+// passing an explicit `undefined` (executor.ts's reset-before-retry paths), which
+// must still write NULL, while an absent key must leave the column untouched.
+// TypeScript's optional properties make those two cases indistinguishable at the
+// type level, so the runtime own-property check is the whole mechanism.
+//
+// An update naming zero columns still touches updated_at (and, for the guarded
+// variants, still reports whether the guard passed) — that is exactly what the
+// read-merge-write version did, and no caller depends on it either way.
+function buildItemUpdateSet(update: CampaignItemUpdate): { setClause: string; params: unknown[] } {
+  const assignments: string[] = [];
+  const params: unknown[] = [];
+  for (const key of Object.keys(update) as (keyof CampaignItemUpdate)[]) {
+    const column = ITEM_UPDATE_COLUMNS[key];
+    if (!column) continue;
+    assignments.push(`${column} = ?`);
+    params.push(update[key] ?? null);
+  }
+  assignments.push("updated_at = ?");
+  params.push(nowIso());
+  return { setClause: assignments.join(", "), params };
+}
+
 // FG-442: a campaign may also be re-approved while 'paused' — the escalation
 // path (updateCampaignPlanForReapproval below) produces a fresh unapproved
 // plan_hash on a paused campaign, and this is the SAME confirm/override point
@@ -321,41 +365,23 @@ export function tryTransitionCampaignToRunning(id: string): boolean {
 // campaignId, so a caller cannot mutate one campaign's item by naming a different
 // (paused) campaignId.
 // Returns true iff the item belonged to campaignId, that campaign was still
-// 'paused', and the write landed.
+// 'paused', and the write landed. FG-410 dropped the pre-read, so a missing item
+// and a status mismatch both surface as zero rows changed — both returned false
+// before, so the contract is unchanged.
 export function updateCampaignItemIfCampaignPaused(
   id: string,
   campaignId: string,
   update: CampaignItemUpdate
 ): boolean {
-  const existing = getCampaignItem(id);
-  if (!existing) return false;
-  const next = { ...existing, ...update };
+  const { setClause, params } = buildItemUpdateSet(update);
   const result = getDb()
     .prepare(
-      `UPDATE campaign_items SET
-         lifecycle_status = ?, outcome = ?, blocker_kind = ?, continue_policy = ?,
-         reason = ?, requested_human_action = ?, run_id = ?, branch = ?,
-         worktree_path = ?, pr_url = ?, updated_at = ?
+      `UPDATE campaign_items SET ${setClause}
        WHERE id = ?
          AND campaign_id = ?
          AND (SELECT status FROM campaigns WHERE id = ?) = 'paused'`
     )
-    .run(
-      next.lifecycleStatus,
-      next.outcome ?? null,
-      next.blockerKind ?? null,
-      next.continuePolicy ?? null,
-      next.reason ?? null,
-      next.requestedHumanAction ?? null,
-      next.runId ?? null,
-      next.branch ?? null,
-      next.worktreePath ?? null,
-      next.prUrl ?? null,
-      nowIso(),
-      id,
-      campaignId,
-      campaignId
-    );
+    .run(...params, id, campaignId, campaignId);
   return (result.changes ?? 0) > 0;
 }
 
@@ -373,62 +399,21 @@ export function updateCampaignItemIfCampaignRunning(
   campaignId: string,
   update: CampaignItemUpdate
 ): boolean {
-  const existing = getCampaignItem(id);
-  if (!existing) return false;
-  const next = { ...existing, ...update };
+  const { setClause, params } = buildItemUpdateSet(update);
   const result = getDb()
     .prepare(
-      `UPDATE campaign_items SET
-         lifecycle_status = ?, outcome = ?, blocker_kind = ?, continue_policy = ?,
-         reason = ?, requested_human_action = ?, run_id = ?, branch = ?,
-         worktree_path = ?, pr_url = ?, updated_at = ?
+      `UPDATE campaign_items SET ${setClause}
        WHERE id = ?
          AND campaign_id = ?
          AND (SELECT status FROM campaigns WHERE id = ?) = 'running'`
     )
-    .run(
-      next.lifecycleStatus,
-      next.outcome ?? null,
-      next.blockerKind ?? null,
-      next.continuePolicy ?? null,
-      next.reason ?? null,
-      next.requestedHumanAction ?? null,
-      next.runId ?? null,
-      next.branch ?? null,
-      next.worktreePath ?? null,
-      next.prUrl ?? null,
-      nowIso(),
-      id,
-      campaignId,
-      campaignId
-    );
+    .run(...params, id, campaignId, campaignId);
   return (result.changes ?? 0) > 0;
 }
 
 export function updateCampaignItem(id: string, update: CampaignItemUpdate): void {
-  const existing = getCampaignItem(id);
-  if (!existing) return;
-  const next = { ...existing, ...update };
+  const { setClause, params } = buildItemUpdateSet(update);
   getDb()
-    .prepare(
-      `UPDATE campaign_items SET
-         lifecycle_status = ?, outcome = ?, blocker_kind = ?, continue_policy = ?,
-         reason = ?, requested_human_action = ?, run_id = ?, branch = ?,
-         worktree_path = ?, pr_url = ?, updated_at = ?
-       WHERE id = ?`
-    )
-    .run(
-      next.lifecycleStatus,
-      next.outcome ?? null,
-      next.blockerKind ?? null,
-      next.continuePolicy ?? null,
-      next.reason ?? null,
-      next.requestedHumanAction ?? null,
-      next.runId ?? null,
-      next.branch ?? null,
-      next.worktreePath ?? null,
-      next.prUrl ?? null,
-      nowIso(),
-      id
-    );
+    .prepare(`UPDATE campaign_items SET ${setClause} WHERE id = ?`)
+    .run(...params, id);
 }
