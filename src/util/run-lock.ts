@@ -101,6 +101,28 @@ export function acquireRunLock(
   return false;
 }
 
+/** FG-531: read-only liveness probe — the current lock holder iff it is a LIVE
+ *  foreign process (pid alive, not stale, not us). Never creates, steals, or
+ *  mutates the lock. reconcile's awaiting_red sweep uses this to distinguish "a
+ *  forge process is actively driving this run" (skip — the state is presumptively
+ *  in-flight) from "nobody is driving it" (the crash-orphan shape it recovers).
+ *  Our own pid is NOT a live holder: `forge next` runs reconcile under its own
+ *  lock, and that is precisely the recovery pass that must be allowed to sweep. */
+export function liveRunLockHolder(
+  runId: string,
+  opts?: { staleMs?: number; nowMs?: number; isAlive?: (pid: number) => boolean },
+): LockInfo | null {
+  const held = readLock(lockPath(runId));
+  if (!held) return null;
+  if (held.pid === process.pid) return null;
+  const alive = opts?.isAlive ?? pidAlive;
+  const staleMs = opts?.staleMs ?? DEFAULT_STALE_MS;
+  const nowMs = opts?.nowMs ?? Date.now();
+  if (!alive(held.pid)) return null;
+  if (nowMs - held.acquiredAtMs > staleMs) return null;
+  return held;
+}
+
 /** Release the lock if (and only if) WE still hold it — never unlink a holder
  *  that stole it from us. */
 export function releaseRunLock(runId: string): void {

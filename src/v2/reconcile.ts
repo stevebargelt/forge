@@ -40,6 +40,7 @@ import { parseDockerInspectState } from "./failure-kind.js";
 import { taskHasPipelineFinalize } from "./run-kind.js";
 import { isPhasePrimaryRow } from "./lifecycle-evaluator.js";
 import { shouldRetainContainer } from "./docker-exec.js";
+import { liveRunLockHolder } from "../util/run-lock.js";
 
 export type ContainerAlive = (containerName: string) => boolean;
 
@@ -881,6 +882,110 @@ export function reconcileRun(
     }
     } catch { /* FG-459: never throw — a DB throw finalizing one fanout parent must not abort the rest */ }
   }
+
+  // ── FG-531: the awaiting_red crash window ──────────────────────────────────
+  // dispatchSingleStep (and dispatchFanoutStep for a wave's parent) writes
+  // awaiting_red AFTER the step's work is done, merged, and integration-gated,
+  // immediately BEFORE dispatchReds runs the red reviewers ATTACHED to the
+  // dispatching process. A crash in that span leaves the task at awaiting_red
+  // with reds that died with the process (or were never inserted): the per-task
+  // loop above only sweeps `running` rows, computeReadyQueue treats
+  // awaiting_red as live work (the phase is never re-admitted), and neither
+  // `forge gate` nor `forge retry` accepts the status — a permanent wedge (the
+  // FG-530-A matrix cells).
+  //
+  // Deliberate recovery transition (documented here; no new status): land the
+  // task fail-safe with the SAME preserved-work kinds the container-gone sweeps
+  // use — orphaned_needs_finalize for a single-step primary (operator verb:
+  // `forge retry <id> --force`, re-driving the step through the real
+  // merge → gate → reds path) and fanout_wave_orphaned for a wave's parent
+  // (operator verb: `forge recover <id> --re-drive`; the completed children's
+  // rows and results stay untouched as the audit trail, exactly like the
+  // FG-455-p2 parent sweep above). Adopting partially-delivered red verdicts
+  // and finalizing the primary from reconcile was considered and deliberately
+  // REJECTED: it would duplicate dispatchReds' aggregation + finalizePrimary
+  // semantics at a second site — the drift FG-477's evaluator exists to prevent
+  // — and a re-driven red pass is strictly safer than adopting a half-delivered
+  // one.
+  //
+  // Liveness guard: the dispatching process holds the run's dispatch lock for
+  // the whole wave (`forge next` wraps dispatch in withRunLock), so a LIVE
+  // foreign lock holder means the awaiting_red state is presumptively
+  // in-flight — including the minutes-long red pre-container window where no
+  // red container exists yet to probe. The sweep therefore runs only when no
+  // live foreign process holds the lock (dead/stale/absent holders don't
+  // count; nor does our own pid — `forge next` reconciles under its own lock,
+  // and that is exactly the recovery pass that must be able to sweep).
+  try {
+    const awaitingRed = tasksForRun(runId).filter((t) => t.status === "awaiting_red");
+    if (awaitingRed.length > 0 && liveRunLockHolder(runId) === null) {
+      for (const t of awaitingRed) {
+        try {
+          const children = tasksForRun(runId).filter((c) => c.parentId === t.id);
+          // A non-terminal child of an awaiting_red task can only be a red
+          // reviewer (wave children are terminal before the parent reaches
+          // awaiting_red; on_reject recovery rows parent to a FAILED task). A
+          // live red container means the review is genuinely in flight.
+          const deadReds = children.filter((c) => !TERMINAL_TASK.has(c.status));
+          if (deadReds.some((c) => containerAlive(`forge-${c.id}`))) continue;
+
+          // Reds can never deliver a verdict for this task again. First settle
+          // the dead red rows themselves (pending never-dispatched, or running
+          // without a container.started — shapes the per-task loop can't sweep)
+          // so they don't wedge as non-terminal orphans behind the primary.
+          for (const red of deadReds) {
+            const redError =
+              "orphaned: red reviewer died with the crashed forge process before delivering a verdict — " +
+              `its primary ${t.id} was landed fail-safe by the awaiting_red sweep (FG-531) and re-driving it re-runs the reds`;
+            crashPoint("reconcile:before-fail-dead-red-child");
+            getDb().transaction(() => { // FG-463: fail write + its events atomic
+              markTaskFailed(red.id, redError);
+              crashPoint("reconcile:inside-fail-dead-red-child-txn");
+              logEvent("task.failed", { runId, taskId: red.id, payload: { failure_kind: "orphaned", error: redError } });
+              logEvent("task.reconciled", { runId, taskId: red.id, payload: { from: red.status, to: "failed", reason: "awaiting_red_dead_red" } });
+            })();
+            taskChanges.push({ taskId: red.id, from: red.status, to: "failed", reason: "awaiting_red_dead_red" });
+          }
+
+          const result = readResult(runId, t.id);
+          const isFanoutParent = children.some(
+            (c) => typeof c.taskPackage.inputs["fanoutIndex"] === "number",
+          );
+          if (isFanoutParent) {
+            const waveChildren = children.filter(
+              (c) => typeof c.taskPackage.inputs["fanoutIndex"] === "number",
+            );
+            const completeChildren = waveChildren.filter((c) => c.status === "complete");
+            const error =
+              `fanout parent orphaned at awaiting_red: the wave's ${completeChildren.length}/${waveChildren.length} completed children ` +
+              "(rows and results preserved) merged and gated, but the forge process died before the red reviewers delivered a verdict — " +
+              `inspect with \`forge show ${t.id}\` and re-drive the wave with \`forge recover ${t.id} --re-drive\`.`;
+            crashPoint("reconcile:before-fail-awaiting-red-fanout-parent");
+            getDb().transaction(() => { // FG-463: fail write + its events atomic
+              markTaskFailed(t.id, error, result);
+              crashPoint("reconcile:inside-fail-awaiting-red-fanout-parent-txn");
+              logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "fanout_wave_orphaned", error, childSummary: { total: waveChildren.length, complete: completeChildren.length } } });
+              logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "awaiting_red", to: "failed", reason: "awaiting_red_fanout_reds_dead" } });
+            })();
+            taskChanges.push({ taskId: t.id, from: "awaiting_red", to: "failed", reason: "awaiting_red_fanout_reds_dead" });
+          } else {
+            const error =
+              "orphaned_needs_finalize: the step's work is done and merged (it reached awaiting_red), but the forge process died " +
+              "before its red reviewers delivered a verdict — the step cannot be trusted complete. The result is preserved; " +
+              `inspect with \`forge show ${t.id}\`, then re-dispatch through the real finalize path with \`forge retry ${t.id} --force\`.`;
+            crashPoint("reconcile:before-fail-awaiting-red-orphaned");
+            getDb().transaction(() => { // FG-463: fail write + its events atomic
+              markTaskFailed(t.id, error, result);
+              crashPoint("reconcile:inside-fail-awaiting-red-orphaned-txn");
+              logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "orphaned_needs_finalize", error } });
+              logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "awaiting_red", to: "failed", reason: "awaiting_red_reds_dead" } });
+            })();
+            taskChanges.push({ taskId: t.id, from: "awaiting_red", to: "failed", reason: "awaiting_red_reds_dead" });
+          }
+        } catch { /* FG-459: never throw — one task's sweep must not abort the rest */ }
+      }
+    }
+  } catch { /* FG-459: never throw — the lock probe / task scan must not abort reconcile */ }
 
   // Orphaned duplicate primaries: a pending primary in a phase that another
   // primary already completed. Produced by the duplicate-primary bug (`forge

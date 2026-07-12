@@ -717,7 +717,84 @@ const SCENARIOS: Scenario[] = [
       });
     },
   },
+  {
+    // FG-531: the awaiting_red crash window, single-step callsite. The strand IS
+    // the first crash — a real kill inside dispatchSingleStep's window between
+    // the awaiting_red status write and dispatchReds — so reconcile's awaiting_red
+    // sweep faces the exact production shape: primary at awaiting_red, its reds
+    // dead with the process. A pending red row is seeded alongside it (the
+    // insert→dispatch window inside runOneRed carries no probe of its own to
+    // crash into — FG-530 scopes probes to the status-write boundaries — so the
+    // row a crash there leaves behind is reconstructed, nothing else touched):
+    // that is the dead-red settlement write's only reachable path.
+    name: "awaiting-red-orphaned",
+    workflow: RED_WF,
+    yaml: RED_YAML,
+    exec: { redVerdict: "pass" },
+    drive: async (runId, workflow, exec) => {
+      await runNext({ runId, workflow, dockerExec: exec });
+    },
+    strand: async (sc, runId, exec) => {
+      const fired = await crashAt("dispatchSingleStep:after-awaiting-red", () =>
+        sc.drive(runId, sc.workflow, exec),
+      );
+      assert.ok(fired, "the awaiting_red kill must fire for this strand to build the FG-531 shape");
+      const t = primaryOf(runId, "build");
+      assert.ok(t, "the primary must exist for this strand to mean anything");
+      assert.equal(t.status, "awaiting_red", "the crash leaves the primary at awaiting_red");
+      seedPendingRedChild(runId, t.id, "red-security");
+    },
+  },
+  {
+    // FG-531: the same window on the fanout PARENT callsite (dispatchFanoutStep).
+    // The wave ran for real — children dispatched and completed — then the kill
+    // lands between the parent's awaiting_red write and its reds, stranding the
+    // parent with terminal children behind it. Reconcile's sweep must land the
+    // parent as fanout_wave_orphaned WITHOUT touching the completed children.
+    name: "awaiting-red-fanout-orphaned",
+    workflow: FANOUT_WF,
+    yaml: FANOUT_YAML,
+    exec: { redVerdict: "pass" },
+    drive: async (runId, workflow, exec) => {
+      await runNext({ runId, workflow, dockerExec: exec }); // plan → complete
+      await runNext({ runId, workflow, dockerExec: exec }); // wave + parent finalize
+    },
+    strand: async (sc, runId, exec) => {
+      await runNext({ runId, workflow: sc.workflow, dockerExec: exec }); // plan → complete
+      const fired = await crashAt("dispatchFanoutStep:after-awaiting-red", () =>
+        runNext({ runId, workflow: sc.workflow, dockerExec: exec }),
+      );
+      assert.ok(fired, "the fanout awaiting_red kill must fire for this strand to build the FG-531 shape");
+      const parent = primaryOf(runId, "build");
+      assert.ok(parent, "the fanout parent must exist for this strand to mean anything");
+      assert.equal(parent.status, "awaiting_red", "the crash leaves the parent at awaiting_red");
+    },
+  },
 ];
+
+/** FG-531: the pending red row a crash inside runOneRed's insert→dispatch window
+ *  leaves behind — the dead-red settlement's only reachable input shape. */
+function seedPendingRedChild(runId: string, parentId: string, role: string): void {
+  const id = newTaskId("red-build");
+  insertTask({
+    id,
+    runId,
+    parentId,
+    phase: "build",
+    agentRole: role,
+    status: "pending",
+    taskPackage: {
+      taskId: id,
+      runId,
+      phase: "build",
+      role,
+      dispatchSource: "workflow",
+      inputs: {},
+      composedSystemPrompt: "",
+    },
+    createdAt: nowIso(),
+  });
+}
 
 /** The lockfile hash a real provision plan would carry. Any stable string does —
  *  reconcile's branch only requires containerName + cacheKey to be present, and the
@@ -1152,22 +1229,23 @@ test("FG-530 invariant 4 [worktree discard]: a worktree that existed at the kill
   assert.match(violations[0]!.detail, /worktree for task task-build-crashed .* is GONE after recovery/);
 });
 
-// ── the two REAL bugs this harness found on HEAD (filed, not fixed) ────────────
+// ── the REAL bugs this harness found on HEAD ───────────────────────────────────
 //
-// Marked `todo`: node:test RUNS them and reports the failure as expected, so the
-// suite stays green (FG-530's scope guard forbids fixing them here) while the
-// repro stays live. When either bug is fixed, its todo starts PASSING and node
-// flags it — the prompt to delete the pin.
+// Fixed bugs keep their repro here, flipped to a plain passing assertion of the
+// recovery (FG-530-B → FG-532; FG-530-A both callsites → FG-531). A still-open
+// bug is marked `todo`: node:test RUNS it and reports the failure as expected,
+// so the suite stays green (FG-530's scope guard forbids fixing them in that
+// ticket) while the repro stays live. When the bug is fixed, its todo starts
+// PASSING and node flags it — the prompt to delete the pin and flip the repro.
 
 test(
-  "FG-530-A [KNOWN FAILURE — real bug on HEAD, filed not fixed]: a crash between the awaiting_red status write and the reds' terminal write wedges the task at awaiting_red permanently — reconcile won't sweep it, the ready queue won't re-admit it, and neither `forge gate` nor `forge retry` accepts that status",
-  { todo: "real crash-window wedge found by the FG-530 matrix; scope guard says file it, don't fix it in this ticket" },
+  "FG-530-A [FIXED by FG-531]: a crash between the awaiting_red status write and the reds' terminal write is RECOVERED — reconcile's awaiting_red sweep lands the primary fail-safe as orphaned_needs_finalize with a named operator verb (forge retry --force)",
   async () => {
     ensureRuntime();
     writeWorkflowYaml(RED_WF.name, RED_YAML);
     const projectDir = makeTmpDir();
     const exec = makeExec({ redVerdict: "fail" });
-    const { runId } = startRun({ workflow: RED_WF, title: "fg530-A wedge repro", inputs: {}, projectDir });
+    const { runId } = startRun({ workflow: RED_WF, title: "fg530-A recovery", inputs: {}, projectDir });
 
     // Kill in the window: the primary is marked awaiting_red, then the process dies.
     const fired = await crashAt("dispatchSingleStep:after-awaiting-red", () =>
@@ -1178,29 +1256,30 @@ test(
 
     await recoverToFixpoint(runId, RED_WF, exec);
 
-    // The bug: recovery converges to a fixpoint that is a WEDGE.
-    assert.equal(
-      primaryOf(runId, "build")!.status,
-      "awaiting_red",
-      "recovery leaves it at awaiting_red — reconcile only sweeps `running` rows",
+    const primary = primaryOf(runId, "build")!;
+    assert.equal(primary.status, "failed", "the sweep lands the orphaned awaiting_red primary fail-safe");
+    assert.match(
+      primary.error ?? "",
+      /orphaned_needs_finalize: .*reached awaiting_red.*forge retry .* --force/s,
+      "the landing names the window and the real re-drive verb",
     );
+    assert.ok(primary.result != null, "the step's persisted result rides the failed row as evidence (invariant 4)");
     assert.deepEqual(
       checkNoPermanentWedge(runId, RED_WF),
       [],
-      "INVARIANT 2: an awaiting_red task orphaned by a crash has no enabled transition and no operator verb",
+      "INVARIANT 2: the recovered state has an enabled transition or a named operator verb everywhere",
     );
   },
 );
 
 test(
-  "FG-530-A [KNOWN FAILURE — the fanout PARENT's copy of the same window]: a crash between dispatchFanoutStep's awaiting_red status write and its reds' terminal write wedges the parent at awaiting_red with dead red children — the wave's completed children are stranded behind it",
-  { todo: "same FG-530-A wedge, second callsite (dispatchFanoutStep); scope guard says pin the repro, don't fix it in this ticket" },
+  "FG-530-A [FIXED by FG-531 — the fanout PARENT's copy of the same window]: a crash between dispatchFanoutStep's awaiting_red status write and its reds' terminal write is RECOVERED — the parent lands as fanout_wave_orphaned (forge recover --re-drive) and the wave's completed children stay complete with their results preserved",
   async () => {
     ensureRuntime();
     writeWorkflowYaml(FANOUT_WF.name, FANOUT_YAML);
     const projectDir = makeTmpDir();
     const exec = makeExec({ redVerdict: "fail" });
-    const { runId } = startRun({ workflow: FANOUT_WF, title: "fg530-A fanout wedge repro", inputs: {}, projectDir });
+    const { runId } = startRun({ workflow: FANOUT_WF, title: "fg530-A fanout recovery", inputs: {}, projectDir });
 
     await runNext({ runId, workflow: FANOUT_WF, dockerExec: exec }); // plan → complete
     const fired = await crashAt("dispatchFanoutStep:after-awaiting-red", () =>
@@ -1208,24 +1287,31 @@ test(
     );
     assert.ok(fired, "the kill must fire for this repro to mean anything");
 
-    const parent = primaryOf(runId, "build")!;
-    assert.equal(parent.status, "awaiting_red", "the crash leaves the fanout parent at awaiting_red");
-    assert.ok(
-      tasksForRun(runId).some((t) => t.parentId === parent.id && t.status === "complete"),
-      "and its wave's children already terminal — the work the wedge strands",
-    );
+    const parentAtCrash = primaryOf(runId, "build")!;
+    assert.equal(parentAtCrash.status, "awaiting_red", "the crash leaves the fanout parent at awaiting_red");
+    const completeChildIds = tasksForRun(runId)
+      .filter((t) => t.parentId === parentAtCrash.id && t.status === "complete")
+      .map((t) => t.id);
+    assert.ok(completeChildIds.length > 0, "the wave's children were already terminal — the work the wedge used to strand");
 
     await recoverToFixpoint(runId, FANOUT_WF, exec);
 
-    assert.equal(
-      primaryOf(runId, "build")!.status,
-      "awaiting_red",
-      "recovery leaves the parent at awaiting_red — reconcile's fanout-parent recovery only acts on `running` parents",
+    const parent = primaryOf(runId, "build")!;
+    assert.equal(parent.status, "failed", "the sweep lands the orphaned awaiting_red fanout parent fail-safe");
+    assert.match(
+      parent.error ?? "",
+      /fanout parent orphaned at awaiting_red: .*forge recover .* --re-drive/s,
+      "the landing names the window and recover --re-drive as the wave-coherent verb",
     );
+    for (const childId of completeChildIds) {
+      const child = getTask(childId)!;
+      assert.equal(child.status, "complete", "a completed wave child is never touched by the sweep");
+      assert.ok(child.result != null, "its persisted result is preserved untouched");
+    }
     assert.deepEqual(
       checkNoPermanentWedge(runId, FANOUT_WF),
       [],
-      "INVARIANT 2: a fanout parent orphaned at awaiting_red has no enabled transition and no operator verb",
+      "INVARIANT 2: the recovered state has an enabled transition or a named operator verb everywhere",
     );
   },
 );

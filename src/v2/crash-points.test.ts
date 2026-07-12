@@ -135,6 +135,12 @@ const PROBE_NAMES = [
   "reconcile:inside-fail-fanout-wave-orphaned-txn",
   "reconcile:before-fail-provisioning-phase-crash",
   "reconcile:inside-fail-provisioning-phase-crash-txn",
+  "reconcile:before-fail-dead-red-child",
+  "reconcile:inside-fail-dead-red-child-txn",
+  "reconcile:before-fail-awaiting-red-orphaned",
+  "reconcile:inside-fail-awaiting-red-orphaned-txn",
+  "reconcile:before-fail-awaiting-red-fanout-parent",
+  "reconcile:inside-fail-awaiting-red-fanout-parent-txn",
 ];
 
 test("FG-530 (b) runtime inertness: with NO hook installed, every probe name is a silent no-op", () => {
