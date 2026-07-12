@@ -89,3 +89,16 @@ Controlled queue run in session 293c91fc (iTerm, `SUPACODE_*`/`ZMX_*` confirmed 
 - **Work persisted**: the fixer's partial edit survived on disk (`M src/v2/fg530-crash-worktree.worktree.test.ts` on branch `fix/fg-531-awaiting-red-crash-window`); diff snapshot preserved at `~/.forge/sigterm-probe/fg531-fixer-partial-93be42.diff`.
 - **No si_pid capture for THIS kill** — the sentinel died with the previous session at 18:13:49 (its capture: si_pid 17165 = that session's own harness). The signature here (harness-tracked background task reported killed by the harness itself + attached docker child exits 143 in the same instant) matches the 18:13 proven mechanism, but the sender for this event is unproven by construction.
 - **Conclusion this event supports**: an unsolicited kill of in-flight agent work occurred OUTSIDE Supacode/zmx in a plain iTerm session — Supacode is NOT necessary for the failure. (Necessity claim only; sender attribution for this specific event not asserted.)
+
+## Validation evidence — representative >10-minute durable launch (2026-07-11)
+
+`forge launch run --name fg535-loop -- forge review-loop FG-535 --max-rounds 2 --route implementation_full --since 9487474` (launch `launch-fg535-loop-mfs2vv`, started 2026-07-12T05:34:40Z) ran ~34 minutes under its tmux owner in a session with `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` armed:
+
+- No harness kill and no killed notification — the submitting Bash call returned in <1s and nothing was ever registered with the harness's background-task registry (the proven kill path).
+- The tmux owner stayed alive for the full run; `forge launch show` read `running` throughout and `exited 1` at the end (the loop's own needs_fix verdict — a NORMAL command exit, recorded as `{code:1}` in the persisted exit record).
+- Forge recorded the work: run `run-review-loop-fg-535-eee87b`, with the red-wide reviewer and engineer fixer containers reaching normal terminal events (reviewer verdicts delivered both rounds; fixer committed 2e701f6). `forge launch show` extracted the run id from the log.
+- Two shorter live dispatches through the same path also completed with `exited 0` and forge results recorded: `launch-fg535-docs-9xo1b4` and the FG-533-era docs run (documentation-maintainer invokes, ~5 min each).
+
+## Scope resolution — attribution ACs (operator-directed, 2026-07-11)
+
+Per the operator's queue directive resuming this work: attribution is **operationally sufficient** — the 18:13:49 si_pid capture (sender 17165 = the session's own harness process, sweeping both bait tasks in one second) directly identifies the harness as the SIGTERM sender, and the second confirmed kill in a plain-iTerm session with `SUPACODE_*`/`ZMX_*` absent proves Supacode/zmx is not necessary for the failure. The A/B matrix cells and further Supacode/zmx instrumentation are therefore NOT run in this pass (the operator directed no further spend unless new evidence emerges); they remain documented above as the optional trigger-characterization protocol. `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` is confirmed effective on harness 2.1.207 — background dispatch is absent in a restarted session (env-var change requires the session restart to take effect).

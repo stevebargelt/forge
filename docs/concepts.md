@@ -55,14 +55,17 @@ Everything about the launch is persisted under `~/.forge/launches/<id>/`, so a l
 
 - `meta.json` — command argv, tmux session name, start time, cwd, log path.
 - `out.log` — the command's combined stdout+stderr.
-- `exit` — the command's numeric exit code, written by the wrapper as its *last* act. An exit file existing is therefore proof the command itself finished, not that the wrapper was torn down.
+- `exit` — the command's exit record, `{"code":<n|null>,"signal":<"SIGTERM"|null>}`, written by the wrapper as its *last* act. The wrapper is a node runner, so the record carries the OS's own verdict: `signal` is set only when the kernel actually killed the process (`WIFSIGNALED`), separately from the numeric `code`. An exit file existing is therefore proof the command itself finished, not that the wrapper was torn down.
 
 Status is **derived at read time**, never stored. `forge launch list` and `forge launch show <id>` (both `--json`-able) classify each record:
 
 - **running** — no exit file, tmux session alive.
 - **exited 0** / **exited N** — the command finished on its own.
-- **externally terminated** — an exit code above 128, i.e. killed by signal `code - 128`, printed with the signal named. `exit 143 = SIGTERM` is the harness-kill signature FG-535 exists to make legible.
-- **unknown** — no exit record *and* no live session (e.g. a host reboot took the tmux server with it). Attribution is preserved as unknown rather than guessed.
+- **terminated by `<SIGNAL>` (signal sender not recorded — origin unknown)** — the record carries signal evidence (`{"code":null,"signal":"SIGTERM"}`), so the kernel proved a signal landed. *Who* sent it is not recorded anywhere, so forge names the signal and stops there — it never claims the kill was external.
+- **exited N (signal-range code, no signal evidence — origin unknown)** — a bare exit code in the signal range (`{"code":143,"signal":null}`) with no signal evidence. A command may deliberately return 143, so this is never upgraded to a kill claim; the code is reported as the code it is.
+- **unknown (no exit record, owner gone)** — no exit record *and* no live session (e.g. a host reboot took the tmux server with it).
+
+The through-line: forge reports only what the record proves. Signal evidence names a signal, a signal-range code names a code, and a missing record names nothing — attribution is left unknown rather than inferred.
 
 `forge launch show` also prints a log tail and any forge `run-`/`task-` ids it can extract from the log, which is how a launched `forge next` hands its run id back to whoever checks on it later. `forge launch rm <id>` removes a finished launch's record and its tmux remains; it refuses a running launch unless `--force` is passed, so removal is never the thing that kills work.
 

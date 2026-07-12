@@ -241,12 +241,13 @@ forge launch rm launch-next-a1b2c3                                 # after it's 
 Status is derived when you read it, not stored, so it stays honest about what forge can actually prove:
 
 ```
-launch-next-a1b2c3  running                                       started 2026-07-11T22:04:11Z  — forge next run-add-login-7c2a91
-launch-tests-9f0e21  exited 0                                     started 2026-07-11T21:38:02Z  — npm test
-launch-loop-4c7d10   externally terminated (exit 143 = SIGTERM)   started 2026-07-11T20:11:57Z  — forge review-loop
-launch-next-88ab04   unknown (no exit record, owner gone — e.g. host reboot)  started 2026-07-10T18:02:44Z  — forge next run-atlas-audit-51ff08
+launch-next-a1b2c3   running                                                            started 2026-07-11T22:04:11Z  — forge next run-add-login-7c2a91
+launch-tests-9f0e21  exited 0                                                           started 2026-07-11T21:38:02Z  — npm test
+launch-loop-4c7d10   terminated by SIGTERM (signal sender not recorded — origin unknown)  started 2026-07-11T20:11:57Z  — forge review-loop
+launch-build-2e5b77  exited 143 (signal-range code, no signal evidence — origin unknown)  started 2026-07-11T19:44:30Z  — npm run build
+launch-next-88ab04   unknown (no exit record, owner gone — e.g. host reboot)             started 2026-07-10T18:02:44Z  — forge next run-atlas-audit-51ff08
 ```
 
-`externally terminated` means something killed the command — exit 143 is the SIGTERM signature above. `unknown` means the exit record and the tmux session are both gone (a host reboot), and forge says so rather than guessing that the command succeeded or failed. `forge launch rm` refuses a launch that is still running unless you pass `--force`, so cleaning up can't be the thing that kills the run.
+The wrapper records the OS's verdict, so the three failure lines say three different things. `terminated by SIGTERM` means the kernel really did kill the command; nothing records *who* sent the signal, so forge names the signal and makes no claim about the sender. `exited 143` means the command returned a signal-range code with no signal evidence behind it — a command is free to return 143 on purpose, so forge reports the code rather than upgrading it to a kill. `unknown` means the exit record and the tmux session are both gone (a host reboot), and forge says so rather than guessing that the command succeeded or failed. `forge launch rm` refuses a launch that is still running unless you pass `--force`, so cleaning up can't be the thing that kills the run.
 
 Concept reference: `docs/concepts.md` → **Durable launch**.
