@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { extractCodexTerminalJsonObject, recoverStructuredStreamResult } from "./stream-result-recovery.js";
-import { parseReviewerVerdict } from "./review-loop.js";
+import { parseReviewerVerdict, runReviewLoop } from "./review-loop.js";
 
 // ── FG-540 regression fixture ────────────────────────────────────────────────
 // Sanitized from the preserved incident stream (run-review-loop-fg-536-eaa5be /
@@ -100,17 +100,66 @@ test("FG-540 AC5: fail-closed — every non-clean or non-object shape recovers n
   assert.equal(extractCodexTerminalJsonObject(""), undefined);
 });
 
-test("FG-540 AC5: a malformed/truncated JSONL record fails the whole stream closed", () => {
+test("FG-540: non-JSONL noise lines are skipped, not fatal — a real log is not guaranteed pure JSONL", () => {
+  const started = `{"type":"turn.started"}`;
   const terminal = `{"type":"item.completed","item":{"id":"x","type":"agent_message","text":"{\\"verdict\\":\\"pass\\"}"}}`;
   const done = `{"type":"turn.completed","usage":{}}`;
+  const pass = { verdict: "pass" };
 
-  // A truncated final record: the earlier terminal object must NOT be recovered.
-  assert.equal(extractCodexTerminalJsonObject([terminal, done, `{"type":"turn.co`].join("\n")), undefined);
-  // Corruption anywhere in the stream, not just at the end.
-  assert.equal(extractCodexTerminalJsonObject([`{"type":"thread.started"`, terminal, done].join("\n")), undefined);
-  // A well-formed JSON line that isn't an event object is equally not-a-stream.
-  assert.equal(extractCodexTerminalJsonObject([terminal, `["not","an","event"]`, done].join("\n")), undefined);
-  assert.equal(extractCodexTerminalJsonObject([terminal, `"noise"`, done].join("\n")), undefined);
+  // Wrapper noise on stdout, a truncated trailing record, a corrupt line mid-stream,
+  // and well-formed JSON that isn't an event object: each is skipped, and the intact
+  // turn envelope around the terminal message still recovers it — the same tolerance
+  // every other codex stdout consumer (provider-failure.ts's eachJsonl) already has.
+  assert.deepEqual(extractCodexTerminalJsonObject([started, "warning: sandbox slow", terminal, done].join("\n")), pass);
+  assert.deepEqual(extractCodexTerminalJsonObject([started, terminal, done, `{"type":"turn.co`].join("\n")), pass);
+  assert.deepEqual(extractCodexTerminalJsonObject([`{"type":"thread.started"`, started, terminal, done].join("\n")), pass);
+  assert.deepEqual(extractCodexTerminalJsonObject([started, terminal, `["not","an","event"]`, done].join("\n")), pass);
+  assert.deepEqual(extractCodexTerminalJsonObject([started, terminal, `"noise"`, done].join("\n")), pass);
+
+  // Tolerance does NOT weaken the envelope: a stream truncated before its
+  // turn.completed still recovers nothing.
+  assert.equal(extractCodexTerminalJsonObject([started, terminal, `{"type":"turn.comp`].join("\n")), undefined);
+});
+
+test("FG-540 AC6: a recovered object that violates the REVIEWER schema is never converted to a pass", async () => {
+  const stream = (text: string) =>
+    [
+      `{"type":"turn.started"}`,
+      `{"type":"item.completed","item":{"id":"x","type":"agent_message","text":${JSON.stringify(text)}}}`,
+      `{"type":"turn.completed","usage":{}}`,
+    ].join("\n");
+
+  // Well-formed JSON objects that recovery DOES return — the extraction rule only
+  // requires an object — but that are not valid reviewer verdicts.
+  const cases = [
+    '{"status":"complete","summary":"looks fine to me"}', // engineer-shaped: no verdict at all
+    '{"verdict":"lgtm","findings":[]}', // unknown verdict vocabulary
+    '{"verdict":"needs_fix","findings":[]}', // needs_fix with no findings
+  ];
+
+  for (const text of cases) {
+    const recovered = recoverStructuredStreamResult({ logFormat: "codex-jsonl", stdoutRaw: stream(text) });
+    assert.notEqual(recovered, undefined, "the object recovers — schema validation is the consumer's job, not recovery's");
+
+    // The consumer's normal validation rejects it...
+    const parsed = parseReviewerVerdict(recovered);
+    assert.equal(parsed.ok, false, `must not validate: ${text}`);
+
+    // ...and the review loop stops structurally rather than treating it as a pass,
+    // exactly as it does for a reviewer that returned an invalid result.json itself
+    // (cli/commands/review-loop.ts maps !parsed.ok → review dispatch not ok).
+    const r = await runReviewLoop(
+      { maxRounds: 1 },
+      {
+        verify: () => ({ ok: true, steps: [{ name: "test", ok: true, output: "" }] }),
+        review: () => ({ ok: false, error: `reviewer result.json invalid: ${(parsed as { error: string }).error}` }),
+        fix: () => ({ ok: true }),
+      },
+    );
+    assert.equal(r.stopReason, "reviewer_failed");
+    assert.equal(r.closeable, false);
+    assert.notEqual(r.rounds[0]!.verdict, "pass");
+  }
 });
 
 test("FG-540 AC7: recovery is scoped to the final completed turn's OWN started→completed envelope", () => {

@@ -24,9 +24,15 @@ function isObj(v: unknown): v is Record<string, unknown> {
 }
 
 /** Extract the terminal completed agent_message JSON object from a codex
- *  `exec --json` JSONL stream. Returns undefined (no recovery) unless ALL of:
- *  - every non-empty line parses as a JSON object (one malformed/truncated
- *    record means the stream is not intact, so nothing is recoverable from it);
+ *  `exec --json` JSONL stream. Lines that don't parse as a JSON object (wrapper
+ *  warnings, a truncated trailing record, any other stdout noise) are SKIPPED,
+ *  exactly as every other codex stdout consumer reads the same log
+ *  (provider-failure.ts's eachJsonl, the usage parser) — a real container log is
+ *  not guaranteed to be pure JSONL, and refusing the whole stream over one stray
+ *  line made recovery inert in production. Safety comes from the turn-envelope
+ *  conditions below, not from line purity: a stream truncated before its
+ *  `turn.completed` still recovers nothing.
+ *  Returns undefined (no recovery) unless ALL of:
  *  - no top-level `{type:"error"}` and no `{type:"turn.failed"}` anywhere;
  *  - at least one `{type:"turn.completed"}`, and the turn markers strictly
  *    alternate `turn.started` → `turn.completed` (overlapping turns, a
@@ -46,8 +52,8 @@ export function extractCodexTerminalJsonObject(stdoutRaw: string): Record<string
     const t = line.trim();
     if (!t) continue;
     let ev: unknown;
-    try { ev = JSON.parse(t); } catch { return undefined; }
-    if (!isObj(ev)) return undefined;
+    try { ev = JSON.parse(t); } catch { continue; }
+    if (!isObj(ev)) continue;
     events.push(ev);
   }
 

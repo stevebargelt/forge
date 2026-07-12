@@ -191,10 +191,11 @@ export const FIRED = new Set<string>();
 // ── runtimes + workflow YAML ──────────────────────────────────────────────────
 
 export const RUNTIME = "fg530-runtime";
-/** reconcile's stdout-recovery (FG-455 → FG-337 inferredResultFrom) only fires for a
- *  runtime whose log_format the provider-failure analyzer can read a final assistant
- *  message out of — today that is pi-jsonl. Without a pi-format runtime there is no
- *  path to the stdout-recovered completion write at all. */
+/** reconcile's stdout-recovery reaches its completion write only for a log_format
+ *  it can read a result out of: FG-337 narrative synthesis (inferredResultFrom) for
+ *  pi-jsonl, and FG-540 structured stream recovery for codex-jsonl. This lane drives
+ *  the pi-jsonl half; without a pi-format runtime there is no narrative path to that
+ *  write at all. */
 export const PI_RUNTIME = "fg530-pi-runtime";
 /** The worktree lane's runtime: identical, plus the PROJECT_DIR mount. In worktree
  *  mode that mount IS the task's worktree, so the fake container reaches its real
