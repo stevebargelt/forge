@@ -145,7 +145,7 @@ Exit criteria:
 - integrated output passes post-merge validation before campaign-level success;
 - campaign reports explain what ran in parallel and how it was integrated.
 
-Prerequisites already filed: **FG-410** (`updateCampaignItem`'s read-merge-write is lost-update-unsafe under concurrent writers and must land before parallel lanes go live) and **FG-424**/**FG-425**/**FG-426** sharpen the shared gate/lock surface that parallel lanes will contend on — **FG-424** (post-merge integration gate distinguishes real test failures from infra/platform failures) and **FG-426** (classify `integration_failed` as a scoped item blocker) have landed; **FG-425** (scope gate locking per `projectDir`) is still open.
+Prerequisites already filed: **FG-410** (`updateCampaignItem`'s read-merge-write is lost-update-unsafe under concurrent writers and must land before parallel lanes go live) and **FG-424**/**FG-425**/**FG-426** sharpen the shared gate/lock surface that parallel lanes will contend on — **FG-424** (post-merge integration gate distinguishes real test failures from infra/platform failures), **FG-426** (classify `integration_failed` as a scoped item blocker), and **FG-425** (gate locking scoped per `projectDir` — the merge→gate→finalize window is now mutually exclusive per project, while different projects stay fully parallel; see [Post-merge integration gate](concepts.md#post-merge-integration-gate)) have all landed.
 
 ### Phase 6: Campaign Completion & Reconciliation Honesty
 
