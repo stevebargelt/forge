@@ -97,6 +97,7 @@ export type KillPoint = { point: string; surface: Surface };
 
 export const KILL_POINTS: KillPoint[] = [
   { point: "runContainer:after-mark-running-before-container-launch", surface: "dispatch" },
+  { point: "runContainer:after-container-started-before-exec", surface: "dispatch" },
   { point: "dispatchSingleStep:after-result-ingest", surface: "dispatch" },
   { point: "dispatchSingleStep:before-validation-contract", surface: "dispatch" },
   { point: "holdIfValidationContractFails:between-hold-status-and-event", surface: "dispatch" },

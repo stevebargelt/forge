@@ -20,7 +20,8 @@
 // shouldRetainContainer / finalizeContainerRetention below.
 
 import { spawn as cpSpawn, execFile, execFileSync } from "node:child_process";
-import { createWriteStream } from "node:fs";
+import { appendFileSync, chmodSync, createWriteStream, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { startIdleWatchdog, resolveIdleTimeoutMs, IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
 import { parseDockerInspectState, type ContainerCausalEvidence } from "./failure-kind.js";
 
@@ -56,6 +57,11 @@ export type DockerExecArgs = {
   // exactly as it did before FG-492. Every other exec() caller (task/reviewer
   // containers) leaves this unset and keeps the capture behavior unconditionally.
   isProvisionerExec?: boolean;
+  // FG-536: index of the image in `args` (spawn.ts's BuildArgsResult.imageIndex).
+  // The detached executor interposes its entry script right after it. Optional:
+  // fakes and legacy callers omit it, and detachedDockerExec falls back to the
+  // attached executor when it's absent (never guesses the boundary).
+  imageIndex?: number;
 };
 
 export type DockerExecFn = (args: DockerExecArgs) => Promise<number>;
@@ -229,3 +235,150 @@ export const defaultDockerExec: DockerExecFn = async ({ args, stdin, stdoutPath,
     }
   });
 };
+
+// ── FG-536: detached execution — the container survives host-side parent death ──
+//
+// The attached executor above proxies signals: SIGTERM of the forge CLI reaches
+// the `docker run` client, which forwards it into the container — a harness
+// sweep of the CLI's process tree (si_pid-proven, FG-535) kills the agent
+// mid-work. Detached execution severs that lifeline BY CONSTRUCTION:
+//
+//   docker run -d …            the daemon owns the container
+//   docker logs -f <name>      a WATCHER streams output to disk + feeds the
+//                              idle watchdog — it may die freely; logs live in
+//                              the daemon and re-attach re-delivers them
+//   docker wait <name>         a second watcher collects the exit code
+//
+// If the CLI dies mid-wait the container runs to completion, writes
+// /task/result.json through its bind mount, and exits normally; the next
+// reconcile pass finalizes the task from that REAL result through the ordinary
+// container-gone evidence path (validation contract included, FG-523) — the
+// recovery model is unchanged, only the container's survival is new.
+//
+// stdin delivery: a detached container has no client pipe, so the payload goes
+// through the /task bind mount instead — the SAME BYTES land on the agent
+// CLI's fd0 via an entry script (`exec "$@" < /task/detached-stdin`). The
+// script takes the original command as "$@", so every argv element stays a
+// separate arg (FG-497's per-arg E2BIG bound is unchanged — nothing is merged
+// into one shell string).
+//
+// The dependency provisioner stays ATTACHED deliberately: FG-437 owns its
+// lifecycle (short-lived, --rm, provision_* events), and its crash windows are
+// separately swept. Fallback to attached is also taken when imageIndex is
+// absent (a legacy caller) — the boundary is never guessed.
+
+export const DETACHED_STDIN_FILE = "detached-stdin";
+export const DETACHED_ENTRY_FILE = "detached-entry.sh";
+
+/** The argv transformation, pure and testable: `run -i […] IMAGE cmd…` →
+ *  `run -d […] IMAGE sh /task/detached-entry.sh cmd…`. `-i` (an option, so
+ *  always before the image) is replaced in place; without one, `-d` is
+ *  inserted right after `run` and the image position shifts by one. */
+export function toDetachedArgs(args: string[], imageIndex: number): string[] {
+  const out = [...args];
+  const iFlag = out.indexOf("-i");
+  let idx = imageIndex;
+  if (iFlag > 0 && iFlag < imageIndex) {
+    out.splice(iFlag, 1, "-d");
+  } else {
+    out.splice(1, 0, "-d");
+    idx = imageIndex + 1;
+  }
+  out.splice(idx + 1, 0, "sh", `/task/${DETACHED_ENTRY_FILE}`);
+  return out;
+}
+
+/** Entry script content. With a stdin payload the command's fd0 is the mounted
+ *  file; without one it inherits /dev/null (docker -d default). */
+export function detachedEntryScript(hasStdin: boolean): string {
+  return hasStdin ? `#!/bin/sh\nexec "$@" < /task/${DETACHED_STDIN_FILE}\n` : `#!/bin/sh\nexec "$@"\n`;
+}
+
+export const detachedDockerExec: DockerExecFn = async (execArgs) => {
+  const { args, stdin, stdoutPath, stderrPath, idleTimeoutMs, onContainerEvidence, isProvisionerExec, imageIndex } = execArgs;
+  // Provisioner and boundary-unknown callers keep the attached executor.
+  if (isProvisionerExec || imageIndex === undefined || args[imageIndex] === undefined) {
+    return defaultDockerExec(execArgs);
+  }
+
+  const taskDir = dirname(stdoutPath);
+  const containerName = containerNameFromArgs(args);
+  try {
+    writeFileSync(join(taskDir, DETACHED_ENTRY_FILE), detachedEntryScript(stdin !== undefined));
+    chmodSync(join(taskDir, DETACHED_ENTRY_FILE), 0o755);
+    if (stdin !== undefined) writeFileSync(join(taskDir, DETACHED_STDIN_FILE), stdin);
+  } catch (e) {
+    appendFileSync(stderrPath, `forge detached exec: failed to stage entry/stdin files — ${(e as Error).message}\n`);
+    return 1;
+  }
+
+  const detachedArgs = toDetachedArgs(args, imageIndex);
+
+  // Start detached. `docker run -d` returns once the container is created and
+  // started; a failure here (bad image, name clash) is a plain failure.
+  const started = await new Promise<boolean>((resolve) => {
+    execFile("docker", detachedArgs, (err, _stdout, stderr) => {
+      if (err) {
+        try { appendFileSync(stderrPath, String(stderr ?? err.message)); } catch { /* best-effort */ }
+        resolve(false);
+      } else {
+        resolve(true);
+      }
+    });
+  });
+  if (!started) return 1;
+
+  return new Promise<number>((resolve) => {
+    const outStream = createWriteStream(stdoutPath);
+    const errStream = createWriteStream(stderrPath, { flags: "a" });
+
+    // The WATCHER half: docker logs -f re-delivers the container's output from
+    // t=0 and keeps streaming. It is disposable — if this process dies, the
+    // container is untouched and a later reconcile finalizes from disk.
+    const logsProc = cpSpawn("docker", ["logs", "-f", containerName ?? ""], { stdio: ["ignore", "pipe", "pipe"] });
+
+    let killedForIdle = false;
+    const idleMs = idleTimeoutMs ?? resolveIdleTimeoutMs();
+    const watchdog = startIdleWatchdog(idleMs, () => {
+      killedForIdle = true;
+      killContainer(containerName); // authoritative — the daemon stops the container
+    });
+
+    logsProc.stdout.on("data", (c: Buffer) => {
+      outStream.write(c);
+      watchdog.bump();
+    });
+    logsProc.stderr.on("data", (c: Buffer) => {
+      errStream.write(c);
+      watchdog.bump();
+    });
+    logsProc.on("error", () => { /* watcher-only failure — never fatal to the run */ });
+
+    // The WAITER half: docker wait blocks until the container exits and prints
+    // its exit code. Also disposable — reconcile is the backstop.
+    execFile("docker", ["wait", containerName ?? ""], (err, stdout) => {
+      watchdog.stop();
+      // Give the log stream a beat to drain the final chunks, then settle.
+      setTimeout(() => {
+        try { logsProc.kill(); } catch { /* already gone */ }
+        let pending = 2;
+        const settle = () => {
+          if (--pending === 0) {
+            const code = err ? 1 : Number(String(stdout).trim());
+            const exitCode = killedForIdle ? IDLE_TIMEOUT_EXIT_CODE : (Number.isInteger(code) ? code : 1);
+            onContainerEvidence?.(captureContainerCausalEvidence(containerName));
+            resolve(exitCode);
+          }
+        };
+        outStream.end(settle);
+        errStream.end(settle);
+      }, 250);
+    });
+  });
+};
+
+// The production default: detached unless explicitly disabled. The attached
+// executor remains reachable via FORGE_DETACHED_EXEC=off (operational escape
+// hatch) and for the provisioner/legacy-caller fallbacks above.
+export const productionDockerExec: DockerExecFn = (execArgs) =>
+  process.env.FORGE_DETACHED_EXEC === "off" ? defaultDockerExec(execArgs) : detachedDockerExec(execArgs);

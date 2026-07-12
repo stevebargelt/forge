@@ -27,7 +27,7 @@ import {
   provisionerContainerName,
   type DependencyVolumePlan,
 } from "./dependency-provisioning.js";
-import { defaultDockerExec, finalizeContainerRetention, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
+import { productionDockerExec, finalizeContainerRetention, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
 import { join } from "node:path";
 import type { Task, TaskPackage, Verdict, Finding, RedAuthority, ReviewerContextPacket, DoneAuditResult } from "../types/index.js";
 import type { Workflow, Step, Runtime, RedDef, FanoutDef } from "./schema.js";
@@ -2332,7 +2332,7 @@ async function runContainer(args: {
   const dependencyCacheEligible = process.platform === "darwin" && process.env.FORGE_NO_NM_SHADOW !== "1";
   const depSpawnFields: Pick<SpawnContext, "IS_WORKTREE_DISPATCH" | "DEPENDENCY_CACHE_MOUNT_RO"> = {};
 
-  const exec = args.dockerExec ?? defaultDockerExec;
+  const exec = args.dockerExec ?? productionDockerExec;
 
   if (dependencyCacheEligible && isWorktreeRwDispatch) {
     depSpawnFields.IS_WORKTREE_DISPATCH = "1";
@@ -2458,6 +2458,13 @@ async function runContainer(args: {
   const stderrPath = join(dir, "container.stderr.log");
   const containerName = `forge-${args.taskId}`;
   logEvent("container.started", { runId: args.runId, taskId: args.taskId, payload: { containerName } });
+  // FG-536: the detached-execution watcher window. From here until exec returns
+  // the host process is only a WATCHER (docker-exec.ts runs the container
+  // detached); a crash in this span leaves the container running to completion
+  // and the task `running` with container.started on the record — the shape the
+  // container-gone sweep and its invoke-like/needs-finalize landings already
+  // recover from the REAL result once the container exits.
+  crashPoint("runContainer:after-container-started-before-exec");
   let exitCode: number;
   // FG-492: populated by docker-exec.ts's capture-at-close. Attached onto
   // every terminal container event below (mirrors invoke.ts). FG-492 review:
@@ -2468,6 +2475,7 @@ async function runContainer(args: {
     exitCode = await exec({
       args: dockerArgs.args,
       stdin: dockerArgs.stdin,
+      imageIndex: dockerArgs.imageIndex,
       stdoutPath,
       stderrPath,
       idleTimeoutMs,

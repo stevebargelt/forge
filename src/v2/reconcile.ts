@@ -20,7 +20,7 @@
 // it is unambiguous there is no further work — single-step invoke runs. Multi-
 // step pipelines are finalized by `forge next`, which has the workflow.
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync as cpSpawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getRun } from "../store/runs.js";
@@ -28,6 +28,7 @@ import { finalizeRunIfSettled } from "./run-finalize.js";
 import { tasksForRun, markTaskComplete, markTaskFailed, backfillTaskResult } from "../store/tasks.js";
 import { logEvent, eventsForTask } from "../store/events.js";
 import { crashPoint } from "./crash-points.js";
+import { resolveIdleTimeoutMs } from "./idle-watchdog.js";
 import { getDb } from "../store/db.js";
 import { taskDir } from "../util/paths.js";
 import { cleanupStagedAuth } from "./auth-state.js";
@@ -298,6 +299,76 @@ function toContainerCausalEvidence(evidence: OrphanEvidence): ContainerCausalEvi
   };
 }
 
+// ── FG-536: the surviving idle bound for detached containers ─────────────────
+// Detached execution (docker-exec.ts) means the in-process idle watchdog can
+// die with its watcher process while the container lives on. Reconcile is the
+// bound that survives: for a LIVE container whose last observable activity
+// exceeds the task's idle budget, it kills the container — authoritative, the
+// same `docker kill` the watchdog uses — and records container.idle_timeout.
+// The task stays `running` that pass; the next pass finds the container gone
+// and lands it through the ordinary evidence path. Unknowable activity (docker
+// can't answer) enforces NOTHING — never kill on missing evidence.
+
+/** Last-activity probe for a live container: epoch ms of its most recent log
+ *  line (stdout or stderr; docker --timestamps), falling back to the
+ *  container's StartedAt when it has produced no output yet — the same
+ *  "silence since start counts" semantics as the in-process watchdog. */
+export type ContainerIdleBound = {
+  activity: (containerName: string) => number | null;
+  kill: (containerName: string) => void;
+};
+
+function parseDockerLogTimestamp(line: string): number | null {
+  const token = line.split(" ", 1)[0] ?? "";
+  // RFC3339Nano — Date.parse only understands millisecond precision, so the
+  // fractional part is truncated to three digits before parsing.
+  const normalized = token.replace(/\.(\d{3})\d*(Z|[+-]\d\d:\d\d)$/, ".$1$2");
+  const ms = Date.parse(normalized);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+export function defaultContainerActivity(containerName: string): number | null {
+  try {
+    const r = cpSpawnSync("docker", ["logs", "--tail", "5", "--timestamps", containerName], { encoding: "utf8" });
+    if (r.status !== 0) return null;
+    let latest: number | null = null;
+    for (const line of `${r.stdout}\n${r.stderr}`.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const ms = parseDockerLogTimestamp(trimmed);
+      if (ms !== null) latest = latest === null ? ms : Math.max(latest, ms);
+    }
+    if (latest !== null) return latest;
+    const raw = execFileSync("docker", ["inspect", containerName], { stdio: ["ignore", "pipe", "pipe"] }).toString();
+    const startedAt = parseDockerInspectState(raw).startedAt;
+    const startedMs = startedAt !== undefined ? Date.parse(startedAt) : NaN;
+    return Number.isNaN(startedMs) ? null : startedMs;
+  } catch {
+    return null;
+  }
+}
+
+export const defaultIdleBound: ContainerIdleBound = {
+  activity: defaultContainerActivity,
+  kill: (name) => {
+    try {
+      execFileSync("docker", ["kill", name], { stdio: ["ignore", "ignore", "ignore"] });
+    } catch { /* container may already be gone — the next pass settles it */ }
+  },
+};
+
+/** The task's idle budget, from its manifest (written at dispatch) — the same
+ *  resolution `forge show`'s countdown uses. */
+function manifestIdleTimeoutMs(taskDirPath: string): number | undefined {
+  try {
+    const raw = readFileSync(join(taskDirPath, "manifest.json"), "utf8");
+    const v = (JSON.parse(raw) as { container?: { idleTimeoutMs?: unknown } }).container?.idleTimeoutMs;
+    return typeof v === "number" ? v : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Reconcile a single run's task + run state against reality. Returns what (if
  *  anything) changed. */
 export function reconcileRun(
@@ -306,6 +377,7 @@ export function reconcileRun(
   reapContainer: ContainerReap = defaultContainerReap,
   containerExitInfo: ContainerExitInfo = defaultContainerExitInfo,
   writers: ReconcileWriters = defaultReconcileWriters,
+  idleBound: ContainerIdleBound = defaultIdleBound,
 ): ReconcileResult {
   const { markTaskComplete, markTaskFailed, backfillTaskResult } = writers;
   const run = getRun(runId);
@@ -563,7 +635,28 @@ export function reconcileRun(
         continue;
       }
     }
-    if (containerAlive(`forge-${t.id}`)) continue; // genuinely still running
+    if (containerAlive(`forge-${t.id}`)) {
+      // FG-536: the surviving idle bound (see defaultIdleBound above). A live
+      // container past its idle budget is killed here — the same authoritative
+      // `docker kill` the in-process watchdog uses — and the NEXT pass lands
+      // the task through the ordinary container-gone evidence path. No status
+      // is written this pass, and unknowable activity enforces nothing.
+      try {
+        const last = idleBound.activity(`forge-${t.id}`);
+        if (last !== null) {
+          const idleMs = manifestIdleTimeoutMs(taskDir(t.runId, t.id)) ?? resolveIdleTimeoutMs();
+          if (idleMs > 0 && Date.now() - last > idleMs) {
+            idleBound.kill(`forge-${t.id}`);
+            logEvent("container.idle_timeout", {
+              runId,
+              taskId: t.id,
+              payload: { source: "reconcile_idle_bound", lastActivityAt: new Date(last).toISOString(), idleTimeoutMs: idleMs, reason: "no container output within the idle budget and no live in-process watchdog to enforce it (FG-536 detached execution)" },
+            });
+          }
+        }
+      } catch { /* FG-459 posture: the idle bound must never abort the pass */ }
+      continue; // genuinely still running (or just killed — next pass settles it)
+    }
 
     // Container is gone. If it left a usable result, finalize as complete (the
     // work finished but the DB write was lost); otherwise it was orphaned.

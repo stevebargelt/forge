@@ -32,3 +32,10 @@ Run agent containers DETACHED (`docker run -d`) with the host-side CLI as a watc
 
 Filed 2026-07-11 from the background-kill investigation (evidence: ~/.forge/sigterm-probe/, session transcript forensics, upstream #72851/#68625/#25188). Relates: FG-535 (owns launcher durability + Claude/Supacode attribution — its durable tmux launcher is the operational mitigation until this lands), FG-513 (resilience scope), FG-533 (pre-container window), the pipeline long-build memory. Until this lands, unattended dispatch should prefer setsid-detached parents.
 
+
+## Validation evidence — live CLI-kill smokes (2026-07-12, detached executor live via linked source)
+
+- Parity smoke: `forge invoke engineer` (run-fg-536-detached-exec-live-smoke-344dbd) ran DETACHED end-to-end on the normal path — detached-entry.sh + detached-stdin staged in the task dir, container ran, result ingested by the surviving CLI, task complete, container reaped.
+- SIGKILL smoke (launch-fg536-kill2): forge CLI pid SIGKILLed ~9s after container.started — container observed still running after the kill, ran to completion, wrote result.json; reconcile finalized the task `complete` from the REAL result (events: container.started → container.exited exitCode 0 with evidence → task.completed). Launch record: terminated by SIGKILL (signal sender not recorded).
+- SIGTERM-tree smoke (launch-fg536-kill3): the forge CLI AND its descendants SIGTERMed — the exact FG-535 harness-kill signature that used to exit containers 143. Container observed alive after the kill ("Up 9 seconds"), completed, reconcile finalized from the real result. Launch record: terminated by SIGTERM (signal sender not recorded).
+- Idle bound with a dead watcher: reconcile-side enforcement (manifest budget, docker-kill + container.idle_timeout evidence, no same-pass status write, fail-safe on unknowable activity) pinned by fg536-idle-bound.integration.test.ts.

@@ -586,6 +586,19 @@ function writeSitesIn(rel: string, src: string, calls: Set<string>): WriteSite[]
 type Allow = { file: string; fn: string; call: string; near?: string; reason: string; gap?: true };
 
 const ALLOWLIST: Allow[] = [
+  // ── reconcile.ts: the FG-536 idle bound over a LIVE container ───────────────
+  {
+    file: "v2/reconcile.ts",
+    fn: "reconcileRun",
+    call: "logEvent",
+    near: "reconcile_idle_bound",
+    reason:
+      "the container.idle_timeout audit append after the FG-536 idle bound's `docker kill` of a LIVE container — " +
+      "append-only evidence with NO paired status write (the task deliberately stays `running`; the NEXT pass lands it " +
+      "through the container-gone evidence path). A crash before the append re-evaluates idleness next pass (the kill " +
+      "is authoritative and idempotent); a crash after it leaves the event without consequence until the same next-pass " +
+      "landing. Nothing reads this event to decide a transition, so there is no window to strand or ship through.",
+  },
   // ── runNext.ts: the PRE-container dispatch path ─────────────────────────────
   // FG-530's covered surface is runNext's POST-container finalize path — the
   // sequence that turns an agent's result into lifecycle state. Everything below

@@ -38,7 +38,7 @@ import { resolvePolicyPath } from "../raci/project.js";
 import { explainRouteFile } from "../cli/commands/route.js";
 import { resolveIdleTimeoutMs, IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
 import { DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE } from "./dependency-provisioning.js";
-import { defaultDockerExec, finalizeContainerRetention, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
+import { productionDockerExec, finalizeContainerRetention, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
 import { composeSystemPrompt } from "./compose.js";
 import { buildDockerArgs, preflightProjectMount, type SpawnContext } from "./spawn.js";
 import { loadRuntimeWithSource, loadModelPolicyWithSource } from "./loader.js";
@@ -553,7 +553,7 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     return { runId, taskId, status: "failed", error };
   }
 
-  const exec = args.dockerExec ?? defaultDockerExec;
+  const exec = args.dockerExec ?? productionDockerExec;
   const stdoutPath = join(dir, "container.stdout.log");
   const stderrPath = join(dir, "container.stderr.log");
   const containerName = `forge-${taskId}`;
@@ -570,6 +570,7 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     exitCode = await exec({
       args: dockerArgs.args,
       stdin: dockerArgs.stdin,
+      imageIndex: dockerArgs.imageIndex,
       stdoutPath,
       stderrPath,
       idleTimeoutMs,

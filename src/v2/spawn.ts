@@ -90,6 +90,11 @@ export type BuildArgsResult = {
   args: string[];
   // stdin payload, if the runtime YAML declared one. Caller pipes it.
   stdin: string | undefined;
+  // FG-536: index of the image in `args`. The detached executor
+  // (docker-exec.ts) interposes its entry script immediately after the image
+  // without re-deriving docker's [OPTIONS] IMAGE [COMMAND] boundary from flag
+  // knowledge it doesn't have.
+  imageIndex: number;
 };
 
 // FG-497: Linux caps a single argv/env string at MAX_ARG_STRLEN (131072 bytes,
@@ -379,6 +384,7 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
   }
 
   // Image.
+  const imageIndex = args.length;
   args.push(runtime.image);
 
   // Invocation command + args (each arg substituted).
@@ -411,7 +417,7 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
     assertWithinArgLimit(label, args[i]!);
   }
 
-  return { args, stdin };
+  return { args, stdin, imageIndex };
 }
 
 /** The in-container path the runtime's project mount lands at (e.g.

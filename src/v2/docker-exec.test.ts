@@ -5,7 +5,7 @@
 
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, chmodSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync, chmodSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -15,6 +15,10 @@ import {
   shouldRetainContainer,
   finalizeContainerRetention,
   defaultDockerExec,
+  detachedDockerExec,
+  productionDockerExec,
+  toDetachedArgs,
+  detachedEntryScript,
 } from "./docker-exec.js";
 
 test("containerNameFromArgs: extracts the value after --name", () => {
@@ -306,4 +310,93 @@ test("defaultDockerExec: isProvisionerExec: true still invokes the caller's onCo
       rmSync(dir, { recursive: true, force: true });
     }
   });
+});
+
+// ── FG-536: detached execution — the pure transformation halves ───────────────
+
+test("FG-536 toDetachedArgs: `run -i` becomes `run -d` in place, entry script interposed right after the image", () => {
+  const args = ["run", "-i", "--name", "forge-t1", "-v", "/x:/task", "img:latest", "claude", "-p", "--flag"];
+  const out = toDetachedArgs(args, 6);
+  assert.deepEqual(out, [
+    "run", "-d", "--name", "forge-t1", "-v", "/x:/task", "img:latest",
+    "sh", "/task/detached-entry.sh", "claude", "-p", "--flag",
+  ]);
+  assert.deepEqual(args[1], "-i", "the input argv is not mutated");
+});
+
+test("FG-536 toDetachedArgs: no -i flag — -d is inserted after `run` and the image position shifts", () => {
+  const args = ["run", "--name", "forge-t2", "img", "cmd"];
+  const out = toDetachedArgs(args, 3);
+  assert.deepEqual(out, ["run", "-d", "--name", "forge-t2", "img", "sh", "/task/detached-entry.sh", "cmd"]);
+});
+
+test("FG-536 toDetachedArgs: every original argv element survives as its own element — nothing is merged into a shell string (FG-497)", () => {
+  const bigPrompt = "x".repeat(100_000);
+  const args = ["run", "-i", "--name", "forge-t3", "img", "claude", "--append-system-prompt", bigPrompt];
+  const out = toDetachedArgs(args, 4);
+  assert.ok(out.includes(bigPrompt), "the big arg is still a single, separate argv element");
+  assert.equal(out.filter((a) => a.includes("x".repeat(1000))).length, 1, "…and was not merged into any other element");
+});
+
+test("FG-536 detachedEntryScript: with stdin the command's fd0 is the mounted payload; without, plain exec", () => {
+  assert.equal(detachedEntryScript(true), `#!/bin/sh\nexec "$@" < /task/detached-stdin\n`);
+  assert.equal(detachedEntryScript(false), `#!/bin/sh\nexec "$@"\n`);
+});
+
+test("FG-536 detachedDockerExec: provisioner execs keep the ATTACHED executor (FG-437 owns that lifecycle)", async () => {
+  // The provisioner fallback delegates to defaultDockerExec, whose failure mode
+  // for an unavailable docker binary path is a plain resolve(1) after spawn
+  // error — reaching that (rather than staging detached-entry files) IS the
+  // delegation proof: no detached-entry.sh appears in the task dir.
+  const dir = mkdtempSync(join(tmpdir(), "fg536-prov-"));
+  try {
+    await detachedDockerExec({
+      args: ["run", "--rm", "-i", "--name", "forge-provision-x", "img"],
+      stdin: undefined,
+      stdoutPath: join(dir, "stdout.log"),
+      stderrPath: join(dir, "stderr.log"),
+      idleTimeoutMs: 1,
+      isProvisionerExec: true,
+      imageIndex: 5,
+    });
+    assert.ok(!existsSync(join(dir, "detached-entry.sh")), "no detached staging for a provisioner exec");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("FG-536 detachedDockerExec: an absent imageIndex falls back to the attached executor — the boundary is never guessed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "fg536-noidx-"));
+  try {
+    await detachedDockerExec({
+      args: ["run", "-i", "--name", "forge-noidx", "img"],
+      stdin: "payload",
+      stdoutPath: join(dir, "stdout.log"),
+      stderrPath: join(dir, "stderr.log"),
+      idleTimeoutMs: 1,
+    });
+    assert.ok(!existsSync(join(dir, "detached-entry.sh")), "no detached staging without a known image boundary");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("FG-536 productionDockerExec: FORGE_DETACHED_EXEC=off routes to the attached executor", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "fg536-off-"));
+  const prev = process.env.FORGE_DETACHED_EXEC;
+  process.env.FORGE_DETACHED_EXEC = "off";
+  try {
+    await productionDockerExec({
+      args: ["run", "-i", "--name", "forge-off", "img"],
+      stdin: "payload",
+      stdoutPath: join(dir, "stdout.log"),
+      stderrPath: join(dir, "stderr.log"),
+      idleTimeoutMs: 1,
+      imageIndex: 4,
+    });
+    assert.ok(!existsSync(join(dir, "detached-entry.sh")), "attached executor stages nothing");
+  } finally {
+    if (prev === undefined) delete process.env.FORGE_DETACHED_EXEC; else process.env.FORGE_DETACHED_EXEC = prev;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
