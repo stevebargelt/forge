@@ -1,9 +1,11 @@
 ---
 id: FG-540
 type: story
-status: active
+status: done
 title: Codex structured-role result recovery from a completed terminal agent message
 created: 2026-07-12
+closed: 2026-07-12
+closed_commit: 0a2ce3e
 ---
 
 ## Problem
