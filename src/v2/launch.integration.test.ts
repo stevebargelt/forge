@@ -136,6 +136,22 @@ test("FG-535 rm: a finished launch removes cleanly and kills the remain-on-exit 
   assert.ok(stub.calls.some((c) => c[0] === "kill-session"), "the dead-pane session is cleaned up");
 });
 
+test("FG-535 traversal guard: a crafted --name is slugified into the safe charset — it can never escape the launches dir", () => {
+  const { tmux } = tmuxStub();
+  const meta = startLaunch(["true"], { name: "../../../etc/passwd", tmux });
+
+  assert.match(meta.id, /^launch-etc-passwd-[a-z0-9]{6}$/);
+  assert.ok(existsSync(join(LAUNCHES_DIR, meta.id, "meta.json")), "the record landed INSIDE the launches dir");
+});
+
+test("FG-535 traversal guard: show/rm reject a path-shaped id at the chokepoint instead of joining it", () => {
+  const { tmux } = tmuxStub();
+  for (const evil of ["../../../etc", "a/b", "..", ".hidden"]) {
+    assert.throws(() => readLaunch(evil, tmux), /invalid launch id/);
+    assert.throws(() => removeLaunch(evil, { force: true, tmux }), /invalid launch id/);
+  }
+});
+
 test("FG-535 start: refuses when tmux is unavailable, before writing anything", () => {
   const noTmux: TmuxRunner = () => { throw new Error("not found"); };
   assert.throws(() => startLaunch(["true"], { tmux: noTmux }), /requires tmux/);

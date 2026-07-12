@@ -134,6 +134,10 @@ export function extractForgeIds(log: string): { runIds: string[]; taskIds: strin
 }
 
 function launchDir(id: string): string {
+  // Every path under LAUNCHES_DIR is derived here; ids come from operator
+  // input (show/rm) as well as startLaunch, so the traversal guard lives at
+  // the single chokepoint rather than per caller.
+  if (!/^[a-z0-9][a-z0-9-]*$/i.test(id)) throw new Error(`forge launch: invalid launch id '${id}'`);
   return join(LAUNCHES_DIR, id);
 }
 
@@ -169,7 +173,11 @@ export function startLaunch(argv: string[], opts: { name?: string; cwd?: string;
 
   const now = opts.now ?? new Date();
   const rand = Math.random().toString(36).slice(2, 8);
-  const id = `launch-${opts.name ?? slugOf(argv)}-${rand}`;
+  // The name becomes a directory segment under LAUNCHES_DIR and a tmux session
+  // name — slugify it through the SAME charset as the auto-derived slug so a
+  // crafted --name (path separators, "..") can never escape the launches dir.
+  const name = opts.name === undefined ? slugOf(argv) : slugOf([opts.name]);
+  const id = `launch-${name}-${rand}`;
   const session = `forge-${id}`;
   const dir = launchDir(id);
   mkdirSync(dir, { recursive: true });
@@ -235,6 +243,8 @@ export function listLaunches(tmux: TmuxRunner = defaultTmux): LaunchView[] {
   if (!existsSync(LAUNCHES_DIR)) return [];
   const out: LaunchView[] = [];
   for (const entry of readdirSync(LAUNCHES_DIR)) {
+    // Stray entries (.DS_Store, editor droppings) fail the id guard — skip them.
+    if (!/^[a-z0-9][a-z0-9-]*$/i.test(entry)) continue;
     const v = readLaunch(entry, tmux);
     if (v) out.push(v);
   }
