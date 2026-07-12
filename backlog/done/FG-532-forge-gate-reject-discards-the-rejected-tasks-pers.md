@@ -1,9 +1,11 @@
 ---
 id: FG-532
 type: story
-status: active
+status: done
 title: forge gate reject discards the rejected task's persisted result — failTask() called without result, losing the audit record
 created: 2026-07-11
+closed: 2026-07-12
+closed_commit: 09ac1ea
 ---
 
 ## Problem
