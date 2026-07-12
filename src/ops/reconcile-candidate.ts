@@ -122,16 +122,22 @@ function classify(liveness: LivenessState, hasResult: boolean): {
 /** FG-533: the pre-container window — a `running` row with no container.started.
  *  The SQL below has already applied the shape guards (workflow provenance, not
  *  manual, no children, not mid-provisioning); what remains is the liveness half,
- *  and it reads STRICTER than the container-gone case because there is no result
- *  to recover and no container to inspect:
+ *  and it reads STRICTER than the container-gone case because there is no
+ *  container to inspect:
  *    alive   → docker started the container but the container.started append was
  *              lost. Real work is running; never a candidate.
  *    unknown → docker can't tell us. Same conservatism as everywhere else here.
  *    gone    → a live run-lock holder means forge is STILL in the pre-container
  *              span (image pull / auth staging / provisioning), so it is ordinary
  *              running work. Only with no live holder is the row genuinely
- *              stranded — nothing on the host or in docker can advance it. */
-function classifyPreContainer(liveness: LivenessState, lockLive: boolean): {
+ *              stranded — nothing on the host or in docker can advance it. And
+ *              stranded HOW depends on the result: a valid result.json is proof
+ *              the agent ran and exited before the container.started append
+ *              landed (an event-lost completion) — reconcile preserves and
+ *              finalizes that through the ordinary container-gone path, so the
+ *              candidate reason mirrors it (container_gone_result_present, never
+ *              "retry"). Only with NO result is it a true pre_container_crash. */
+function classifyPreContainer(liveness: LivenessState, lockLive: boolean, hasResult: boolean): {
   classification: ReconcileClassification;
   reason: ReconcileReason;
 } {
@@ -141,8 +147,9 @@ function classifyPreContainer(liveness: LivenessState, lockLive: boolean): {
     case "alive":
       return { classification: "running", reason: null };
     case "gone":
-      return lockLive
-        ? { classification: "running", reason: null }
+      if (lockLive) return { classification: "running", reason: null };
+      return hasResult
+        ? { classification: "reconcile_candidate", reason: "container_gone_result_present" }
         : { classification: "reconcile_candidate", reason: "pre_container_crash" };
   }
 }
@@ -240,7 +247,7 @@ export function findReconcileCandidates(
     const liveness = probe(`forge-${row.taskId}`);
     const { classification, reason } = row.containerStarted
       ? classify(liveness, hasResult)
-      : classifyPreContainer(liveness, liveness === "gone" ? runLockLive(row.runId) : false);
+      : classifyPreContainer(liveness, liveness === "gone" ? runLockLive(row.runId) : false, hasResult);
     return { taskId: row.taskId, runId: row.runId, classification, reason, hasResult };
   });
 }

@@ -238,6 +238,27 @@ test("FG-533: workflow-dispatched running task, container never started, no live
   assert.equal(got[0]!.hasResult, false);
 });
 
+test("FG-533: an event-lost COMPLETION (container ran, exited, and wrote a result before the container.started append landed) is container_gone_result_present — never a retry-shaped pre_container_crash", () => {
+  mkPreContainerRunning("task-engineer-evlost", "run-evlost");
+
+  const got = findReconcileCandidates(
+    db,
+    {},
+    probeOf({ "forge-task-engineer-evlost": "gone" }),
+    resultOf({ "task-engineer-evlost": true }),
+    lockLiveOf(),
+  );
+
+  assert.equal(got.length, 1);
+  assert.equal(got[0]!.classification, "reconcile_candidate", "still a candidate — reconcile must finalize it");
+  assert.equal(
+    got[0]!.reason,
+    "container_gone_result_present",
+    "the result is proof the agent ran: the reason mirrors reconcile's container-gone path, not a retry verb",
+  );
+  assert.equal(got[0]!.hasResult, true);
+});
+
 test("FG-533: a LIVE run-lock holder of any age blocks the sweep — forge is still in the pre-container window", () => {
   mkPreContainerRunning("task-provisioning", "run-live-lock");
 
