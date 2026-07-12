@@ -29,6 +29,7 @@ function renderView(v: LaunchView, logTailLines = 15): string {
     `launch:   ${v.id}`,
     `command:  ${v.command.join(" ")}`,
     `session:  ${v.tmuxSession}  (tmux attach -t ${v.tmuxSession})`,
+    `owner:    ${v.ownerPid === null || v.ownerPid === undefined ? "pid not recorded" : `pid ${v.ownerPid} (tmux pane)`}  launched by pid ${v.launcherPid ?? "unrecorded"}`,
     `cwd:      ${v.cwd}`,
     `started:  ${v.startedAt}`,
     `log:      ${v.logPath}`,

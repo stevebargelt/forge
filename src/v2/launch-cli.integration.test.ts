@@ -134,6 +134,26 @@ test("FG-535 CLI: tmux owns the process — it outlives the submitting CLI call,
   rmSync(pidFile, { force: true });
 });
 
+test("FG-535 CLI: the persisted owner pid names the REAL live process that owns the command", async () => {
+  const meta = launchRun("ownerpid", ["sleep", "300"]);
+
+  // The record is only useful for attribution if the pid it names is the actual
+  // owner: alive, owned by the tmux server, and not a child of the submitter
+  // (which has already exited).
+  assert.ok(typeof meta.ownerPid === "number" && meta.ownerPid > 0, `owner pid was not recorded: ${meta.ownerPid}`);
+  process.kill(meta.ownerPid!, 0);
+
+  const paneOwner = spawnSync("tmux", ["display-message", "-p", "-t", `${meta.tmuxSession}:`, "#{pane_pid}"], { encoding: "utf8" });
+  assert.equal(Number(paneOwner.stdout.trim()), meta.ownerPid, "the record names the pane tmux itself owns");
+
+  const ppid = spawnSync("ps", ["-o", "ppid=", "-p", String(meta.ownerPid)], { encoding: "utf8" }).stdout.trim();
+  assert.notEqual(Number(ppid), meta.launcherPid, "the owner is not a child of the launcher");
+
+  const human = forge(["launch", "show", meta.id]);
+  assert.match(human.stdout, new RegExp(`owner:\\s+pid ${meta.ownerPid} \\(tmux pane\\)  launched by pid ${meta.launcherPid}`));
+  assert.equal(show(meta.id).status.state, "running");
+});
+
 test("FG-535 CLI: a REAL SIGTERM records WIFSIGNALED evidence and still refuses to name a sender", async () => {
   const pidFile = join(tmpdir(), `fg535-term-${process.pid}.pid`);
   rmSync(pidFile, { force: true });

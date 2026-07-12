@@ -53,7 +53,7 @@ A long-running host command whose owner is a tmux server rather than the shell t
 
 Everything about the launch is persisted under `~/.forge/launches/<id>/`, so a later session can read what happened without having watched it:
 
-- `meta.json` — command argv, tmux session name, start time, cwd, log path.
+- `meta.json` — command argv, tmux session name, launcher identity (`launcherPid`, the forge process that submitted the launch; `ownerPid`, the tmux pane process that actually owns the command and the pid to inspect or attribute a signal to later — `null` if tmux could not report it), start time, cwd, log path.
 - `out.log` — the command's combined stdout+stderr.
 - `exit` — the command's exit record, `{"code":<n|null>,"signal":<"SIGTERM"|null>}`, written by the wrapper as its *last* act. The wrapper is a node runner, so the record carries the OS's own verdict: `signal` is set only when the kernel actually killed the process (`WIFSIGNALED`), separately from the numeric `code`. An exit file existing is therefore proof the command itself finished, not that the wrapper was torn down.
 

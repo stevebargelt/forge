@@ -28,6 +28,7 @@ function tmuxStub(alive: Set<string> = new Set()): { tmux: TmuxRunner; calls: st
     }
     if (args[0] === "new-session") alive.add(args[args.indexOf("-s") + 1]!);
     if (args[0] === "kill-session") alive.delete(args[args.indexOf("-t") + 1]!);
+    if (args[0] === "display-message") return "4242\n";
   };
   return { tmux, calls, alive };
 }
@@ -58,10 +59,40 @@ test("FG-535 start: persists meta.json (command, session, start time, log path) 
 
   // The ORDER is the invariant: remain-on-exit must be armed before the target
   // command can ever run, or a fast command destroys the session first.
-  assert.deepEqual(names(startup), ["-V", "new-session", "set-option", "respawn-pane"]);
+  assert.deepEqual(names(startup), ["-V", "new-session", "set-option", "respawn-pane", "display-message"]);
   assert.ok(!newSession.includes("forge"), "the session is born with an inert pane, not the target command");
   const respawn = startup.find((c) => c[0] === "respawn-pane")!;
   assert.ok(respawn.some((a) => a.includes("review-loop")), "the target command arrives via respawn-pane");
+});
+
+test("FG-535 start: persists launcher identity — the submitting pid and the tmux-owned pane pid", () => {
+  const { tmux, calls } = tmuxStub();
+  const meta = startLaunch(["sleep", "600"], { name: "pids", tmux });
+
+  assert.equal(meta.launcherPid, process.pid, "the submitting process is named in the record");
+  assert.equal(meta.ownerPid, 4242, "the tmux pane's pid — the process that actually owns the command");
+
+  // The owner pid must be read AFTER the real command takes the pane, or it
+  // would name the inert bootstrap pane instead.
+  const askedAt = calls.findIndex((c) => c[0] === "display-message");
+  assert.ok(askedAt > calls.findIndex((c) => c[0] === "respawn-pane"), "owner pid is queried after respawn-pane");
+
+  const persisted = readLaunch(meta.id, tmux)!;
+  assert.equal(persisted.launcherPid, process.pid, "and survives to any later session");
+  assert.equal(persisted.ownerPid, 4242);
+});
+
+test("FG-535 start: an owner pid tmux cannot report stays null — never inferred", () => {
+  const alive = new Set<string>();
+  const tmux: TmuxRunner = (args) => {
+    if (args[0] === "has-session" && !alive.has(args[2]!)) throw new Error("no such session");
+    if (args[0] === "new-session") alive.add(args[args.indexOf("-s") + 1]!);
+    if (args[0] === "display-message") throw new Error("lost server");
+  };
+  const meta = startLaunch(["sleep", "600"], { name: "nopid", tmux });
+
+  assert.equal(meta.ownerPid, null);
+  assert.equal(readLaunch(meta.id, tmux)!.status.state, "running", "an unreadable owner pid does not break the record");
 });
 
 test("FG-535 status: the exit record is authoritative — 0 is exited_ok, WIFSIGNALED is signaled with no sender claim", () => {

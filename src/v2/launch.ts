@@ -9,7 +9,8 @@
 // turn/session lifecycle, and everything about the launch is persisted under
 // ~/.forge/launches/<id>/ so any later session can read what happened:
 //
-//   meta.json  — command argv, tmux session name, start time, log path
+//   meta.json  — command argv, tmux session name, launcher + owner pids, start
+//                time, log path
 //   exit       — {"code": <n>|null, "signal": "SIGTERM"|null}, written by the
 //                wrapper the moment the command finishes. The wrapper is a node
 //                runner, so `signal` is the OS's WIFSIGNALED verdict — NOT a
@@ -44,6 +45,13 @@ export type LaunchMeta = {
   id: string;
   command: string[];
   tmuxSession: string;
+  // Who submitted the launch (the forge CLI process — long gone by the time
+  // anyone reads this) and who OWNS the work: the tmux pane's process, i.e. the
+  // wrapper running the command. The owner pid is what a later session inspects
+  // (`ps -p`, `lsof`) or attributes a signal to; null only if tmux could not
+  // report it, which is never inferred into a claim about the owner.
+  launcherPid: number;
+  ownerPid: number | null;
   startedAt: string;
   logPath: string;
   cwd: string;
@@ -145,10 +153,23 @@ function slugOf(argv: string[]): string {
   return argv.slice(0, 3).join("-").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "cmd";
 }
 
-export type TmuxRunner = (args: string[]) => void;
+export type TmuxRunner = (args: string[]) => string | void;
 
-export function defaultTmux(args: string[]): void {
-  execFileSync("tmux", args, { stdio: ["ignore", "ignore", "pipe"] });
+export function defaultTmux(args: string[]): string {
+  return execFileSync("tmux", args, { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" });
+}
+
+/** The pid of the tmux pane's process — the wrapper that owns the command, and
+ *  the only process identity worth persisting for later attribution. */
+function ownerPidOf(session: string, tmux: TmuxRunner): number | null {
+  let out: string | void;
+  try {
+    out = tmux(["display-message", "-p", "-t", `${session}:`, "#{pane_pid}"]);
+  } catch {
+    return null;
+  }
+  const pid = Number(String(out ?? "").trim());
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
 }
 
 function tmuxSessionAlive(session: string, tmux: TmuxRunner): boolean {
@@ -186,11 +207,14 @@ export function startLaunch(argv: string[], opts: { name?: string; cwd?: string;
     id,
     command: argv,
     tmuxSession: session,
+    launcherPid: process.pid,
+    ownerPid: null,
     startedAt: now.toISOString(),
     logPath: join(dir, "out.log"),
     cwd: opts.cwd ?? process.cwd(),
   };
-  writeFileSync(join(dir, "meta.json"), JSON.stringify(meta, null, 2));
+  const metaPath = join(dir, "meta.json");
+  writeFileSync(metaPath, JSON.stringify(meta, null, 2));
 
   const wrapped = buildWrapperCommand(argv, meta.logPath, join(dir, "exit"));
   try {
@@ -208,6 +232,12 @@ export function startLaunch(argv: string[], opts: { name?: string; cwd?: string;
     rmSync(dir, { recursive: true, force: true });
     throw new Error(`forge launch: tmux failed to start the session — ${(e as Error).message}`);
   }
+
+  // Only knowable once the pane holds the real command, so the record is
+  // rewritten rather than written once — an owner pid queried before
+  // respawn-pane would name the inert bootstrap pane instead.
+  meta.ownerPid = ownerPidOf(session, tmux);
+  writeFileSync(metaPath, JSON.stringify(meta, null, 2));
   return meta;
 }
 
