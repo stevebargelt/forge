@@ -1,9 +1,11 @@
 ---
 id: FG-542
 type: story
-status: active
+status: done
 title: forge claude must disable harness-owned background tasks for every orchestrator session
 created: 2026-07-12
+closed: 2026-07-12
+closed_commit: 931d6e3
 ---
 
 ## Problem
