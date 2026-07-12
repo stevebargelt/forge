@@ -341,6 +341,27 @@ test("recover --continue: adopts a stdout-recoverable result (stdout became read
   assert.deepEqual(getTask(taskId)!.result, { contract: "inferred", summary: "Recovered narrative output.", status: "complete" });
 });
 
+// FG-540 final pass: the malformed-file refusal gates ALL stdout recovery —
+// including FG-337 narrative inference — never just the structured half. A
+// present-but-corrupt result.json is evidence and is never replaced.
+test("recover --continue: a non-empty MALFORMED result.json refuses narrative stdout inference too — the file is never overwritten", () => {
+  const taskId = "t-continue-malformed-narrative";
+  insertContainerized(mkTask(taskId, { status: "running", worktreePath: trackedCleanGitRepo(), agentRole: "research-specialist" }));
+  reconcileRun(RUN.id, () => false);
+  assert.equal(getTask(taskId)!.status, "failed");
+
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writePiManifest(dir);
+  writeFileSync(join(dir, "container.stdout.log"), piCleanEndStdout("Recovered narrative output."));
+  writeFileSync(join(dir, "result.json"), "{truncated-non-json");
+
+  const outcome = performContinue(taskId);
+  assert.notEqual(outcome.kind, "continued", "a malformed result.json must not be laundered into an adopted narrative");
+  assert.equal(getTask(taskId)!.status, "failed", "the task stays failed");
+  assert.equal(readFileSync(join(dir, "result.json"), "utf8"), "{truncated-non-json", "the malformed file is preserved as evidence");
+});
+
 // FG-540: recover reads stdout through the SAME shared extraction rule as
 // invoke/runNext/reconcile — a codex stream that cleanly completed with a
 // terminal JSON result object is recoverable HERE too, or the operator surface

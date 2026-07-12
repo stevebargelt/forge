@@ -815,16 +815,18 @@ export function reconcileRun(
         });
         // FG-540: structured recovery first — the same shared extraction rule
         // as the dispatch-time paths (invoke.ts/runNext.ts), so watcher loss
-        // cannot change the result contract. Gated on no CONTRARY exit
-        // evidence (a known non-zero exit or OOM refuses; an unknown exit
-        // defers to the stream's own turn.completed proof) and on the on-disk
-        // state being absent/empty — a non-empty (malformed) result.json wins
-        // as a failure and is never overwritten by recovery.
+        // cannot change the result contract. Structured recovery is gated on
+        // no CONTRARY exit evidence (a known non-zero exit or OOM refuses; an
+        // unknown exit defers to the stream's own turn.completed proof), and
+        // ALL stdout recovery — structured or FG-337 narrative — refuses when
+        // the on-disk result.json is non-empty (malformed): that file is
+        // evidence, it wins as a failure, and it is never overwritten.
+        const fileMalformed = resultFileState(t.runId, t.id) === "malformed";
         const noContraryExit = exitInfo.oomKilled !== true && (exitInfo.exitCode === undefined || exitInfo.exitCode === 0);
-        const structured = noContraryExit && !analysis.modelError && resultFileState(t.runId, t.id) !== "malformed"
+        const structured = !fileMalformed && noContraryExit && !analysis.modelError
           ? recoverStructuredStreamResult({ logFormat: runtimeMeta?.logFormat, runtimeKind: runtimeMeta?.kind, stdoutRaw })
           : undefined;
-        inferred = structured ?? inferredResultFrom(analysis, t.agentRole);
+        inferred = structured ?? (fileMalformed ? undefined : inferredResultFrom(analysis, t.agentRole));
         recoveredSource = structured !== undefined ? "structured_stream" : inferred !== undefined ? "stdout_inferred" : undefined;
         recoveredLogFormat = runtimeMeta?.logFormat ?? runtimeMeta?.kind;
       } catch {
@@ -1034,11 +1036,15 @@ export function reconcileRun(
         } catch {
           exitInfo = {};
         }
+        // FG-540 final pass: the malformed-file refusal gates ALL stdout
+        // recovery here too — a non-empty result.json is never overwritten by
+        // a backfill, structured or narrative.
+        const fileMalformed = resultFileState(t.runId, t.id) === "malformed";
         const noContraryExit = exitInfo.oomKilled !== true && (exitInfo.exitCode === undefined || exitInfo.exitCode === 0);
-        const structured = noContraryExit && !analysis.modelError && resultFileState(t.runId, t.id) !== "malformed"
+        const structured = !fileMalformed && noContraryExit && !analysis.modelError
           ? recoverStructuredStreamResult({ logFormat: runtimeMeta?.logFormat, runtimeKind: runtimeMeta?.kind, stdoutRaw })
           : undefined;
-        recovered = structured ?? inferredResultFrom(analysis, t.agentRole);
+        recovered = structured ?? (fileMalformed ? undefined : inferredResultFrom(analysis, t.agentRole));
         if (structured !== undefined) {
           backfillSource = "structured_stream";
           backfillLogFormat = runtimeMeta?.logFormat ?? runtimeMeta?.kind;

@@ -1830,6 +1830,36 @@ test("FG-540 rec: Mode-A backfill — a complete task with an empty result is ba
   assert.equal((streamEv!.payload as Record<string, unknown>)["source"], "reconcile_backfill");
 });
 
+test("FG-540 final pass: running-orphan — a MALFORMED result.json refuses NARRATIVE inference too; the file survives untouched", () => {
+  const taskId = "t-fg540-malformed-narrative";
+  insertContainerized(mkTask(taskId, { status: "running", agentRole: "research-specialist" }));
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writePiManifest(dir);
+  writeFileSync(join(dir, "container.stdout.log"), piCleanEndStdout("narrative output"));
+  writeFileSync(join(dir, "result.json"), "{truncated-non-json");
+
+  const r = reconcileRun(RUN.id, GONE);
+  assert.deepEqual(r.taskChanges.map((c) => c.to), ["failed"], "no stdout recovery of any kind over a malformed file");
+  assert.equal(getTask(taskId)!.status, "failed");
+  assert.equal(readFileSync(join(dir, "result.json"), "utf8"), "{truncated-non-json");
+});
+
+test("FG-540 final pass: Mode-A backfill — a MALFORMED result.json refuses NARRATIVE backfill too; the file survives untouched", () => {
+  const taskId = "t-fg540-backfill-malformed-narrative";
+  insertContainerized(mkTask(taskId, { status: "complete", agentRole: "research-specialist" })); // result undefined
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writePiManifest(dir);
+  writeFileSync(join(dir, "container.stdout.log"), piCleanEndStdout("narrative output"));
+  writeFileSync(join(dir, "result.json"), "{truncated-non-json");
+
+  const r = reconcileRun(RUN.id, GONE);
+  assert.deepEqual(r.taskChanges, [], "no backfill of any kind over a malformed file");
+  assert.equal(getTask(taskId)!.result, undefined);
+  assert.equal(readFileSync(join(dir, "result.json"), "utf8"), "{truncated-non-json");
+});
+
 test("FG-540 rec: FG-337 narrative synthesis never emits the stream-recovery event — the two provenances stay distinguishable", () => {
   const taskId = "t-fg540-narrative-no-event";
   insertContainerized(mkTask(taskId, { status: "running", agentRole: "research-specialist" }));

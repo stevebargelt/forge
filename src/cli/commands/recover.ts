@@ -97,9 +97,14 @@ type StdoutRecovered = { result: unknown; from: "stream_recovered" | "stdout_inf
 // same task has a recoverable result. Guards mirror reconcile's container-gone
 // branch: no contrary exit evidence (a recorded non-zero exit or OOM refuses; an
 // unknown exit defers to the stream's own turn.completed proof), no provider
-// error, and a non-empty malformed result.json is never overwritten by recovery.
+// error, and a non-empty malformed result.json is never overwritten by ANY
+// stdout recovery — structured OR narrative — it stays a failure on disk.
 function recoverStdoutResult(task: Task): StdoutRecovered | undefined {
   try {
+    // The malformed-file refusal gates ALL stdout recovery, not just the
+    // structured half: a present-but-corrupt result.json is evidence, and
+    // adopting a synthesized narrative over it would silently replace it.
+    if (resultFileMalformed(task.runId, task.id)) return undefined;
     const dir = taskDir(task.runId, task.id);
     const runtimeMeta = getManifestRuntime(dir);
     const stdoutRaw = readStdoutLog(task.runId, task.id);
@@ -111,7 +116,7 @@ function recoverStdoutResult(task: Task): StdoutRecovered | undefined {
     const exit = getOrphanEvidenceFromEvents(eventsForTask(task.id));
     const exitCode = exit?.exitCode;
     const noContraryExit = exit?.oomKilled !== true && (exitCode === undefined || exitCode === 0);
-    if (noContraryExit && !analysis.modelError && !resultFileMalformed(task.runId, task.id)) {
+    if (noContraryExit && !analysis.modelError) {
       const structured = recoverStructuredStreamResult({
         logFormat: runtimeMeta?.logFormat,
         runtimeKind: runtimeMeta?.kind,
