@@ -52,6 +52,7 @@ test("FG-540 AC7: selection is deterministic — the earlier narrative agent_mes
 
   // Two JSON-object agent_messages: the LAST completed one wins.
   const twoJson = [
+    `{"type":"turn.started"}`,
     `{"type":"item.completed","item":{"id":"a","type":"agent_message","text":"{\\"verdict\\":\\"needs_fix\\",\\"findings\\":[{\\"summary\\":\\"draft\\"}]}"}}`,
     `{"type":"item.completed","item":{"id":"b","type":"agent_message","text":"{\\"verdict\\":\\"pass\\",\\"findings\\":[]}"}}`,
     `{"type":"turn.completed","usage":{}}`,
@@ -63,36 +64,39 @@ test("FG-540 AC5: fail-closed — every non-clean or non-object shape recovers n
   const terminal = (text: string) =>
     `{"type":"item.completed","item":{"id":"x","type":"agent_message","text":${JSON.stringify(text)}}}`;
   const done = `{"type":"turn.completed","usage":{}}`;
+  const started = `{"type":"turn.started"}`;
 
+  // Each fixture carries a proper turn envelope so the NAMED condition is what
+  // refuses, not a missing turn.started.
   // Malformed JSON text.
-  assert.equal(extractCodexTerminalJsonObject([terminal("{not json"), done].join("\n")), undefined);
+  assert.equal(extractCodexTerminalJsonObject([started, terminal("{not json"), done].join("\n")), undefined);
   // JSON array.
-  assert.equal(extractCodexTerminalJsonObject([terminal("[1,2]"), done].join("\n")), undefined);
+  assert.equal(extractCodexTerminalJsonObject([started, terminal("[1,2]"), done].join("\n")), undefined);
   // JSON primitives.
-  assert.equal(extractCodexTerminalJsonObject([terminal("42"), done].join("\n")), undefined);
-  assert.equal(extractCodexTerminalJsonObject([terminal("\"ok\""), done].join("\n")), undefined);
-  assert.equal(extractCodexTerminalJsonObject([terminal("null"), done].join("\n")), undefined);
+  assert.equal(extractCodexTerminalJsonObject([started, terminal("42"), done].join("\n")), undefined);
+  assert.equal(extractCodexTerminalJsonObject([started, terminal("\"ok\""), done].join("\n")), undefined);
+  assert.equal(extractCodexTerminalJsonObject([started, terminal("null"), done].join("\n")), undefined);
   // Narrative prose.
-  assert.equal(extractCodexTerminalJsonObject([terminal("All checks passed, looks good."), done].join("\n")), undefined);
+  assert.equal(extractCodexTerminalJsonObject([started, terminal("All checks passed, looks good."), done].join("\n")), undefined);
   // Missing turn.completed (incomplete stream).
-  assert.equal(extractCodexTerminalJsonObject(terminal("{\"verdict\":\"pass\"}")), undefined);
+  assert.equal(extractCodexTerminalJsonObject([started, terminal("{\"verdict\":\"pass\"}")].join("\n")), undefined);
   // turn.failed anywhere.
   assert.equal(
-    extractCodexTerminalJsonObject([terminal("{\"verdict\":\"pass\"}"), `{"type":"turn.failed","error":{"message":"boom"}}`, done].join("\n")),
+    extractCodexTerminalJsonObject([started, terminal("{\"verdict\":\"pass\"}"), `{"type":"turn.failed","error":{"message":"boom"}}`, done].join("\n")),
     undefined,
   );
   // Top-level provider error anywhere.
   assert.equal(
-    extractCodexTerminalJsonObject([`{"type":"error","message":"quota"}`, terminal("{\"verdict\":\"pass\"}"), done].join("\n")),
+    extractCodexTerminalJsonObject([`{"type":"error","message":"quota"}`, started, terminal("{\"verdict\":\"pass\"}"), done].join("\n")),
     undefined,
   );
   // Ambiguous: an agent_message completing AFTER the last turn.completed.
   assert.equal(
-    extractCodexTerminalJsonObject([done, terminal("{\"verdict\":\"pass\"}")].join("\n")),
+    extractCodexTerminalJsonObject([started, done, terminal("{\"verdict\":\"pass\"}")].join("\n")),
     undefined,
   );
   // No agent_message at all / empty stream.
-  assert.equal(extractCodexTerminalJsonObject(done), undefined);
+  assert.equal(extractCodexTerminalJsonObject([started, done].join("\n")), undefined);
   assert.equal(extractCodexTerminalJsonObject(""), undefined);
 });
 
@@ -109,24 +113,49 @@ test("FG-540 AC5: a malformed/truncated JSONL record fails the whole stream clos
   assert.equal(extractCodexTerminalJsonObject([terminal, `"noise"`, done].join("\n")), undefined);
 });
 
-test("FG-540 AC7: recovery is scoped to the final completed turn", () => {
+test("FG-540 AC7: recovery is scoped to the final completed turn's OWN started→completed envelope", () => {
   const terminal = (text: string) =>
     `{"type":"item.completed","item":{"id":"x","type":"agent_message","text":${JSON.stringify(text)}}}`;
   const done = `{"type":"turn.completed","usage":{}}`;
+  const started = `{"type":"turn.started"}`;
 
   // Turn 1 completes with a JSON agent_message; turn 2 completes with none. The
   // stale turn-1 object must not be promoted into turn 2's recovery.
   assert.equal(
     extractCodexTerminalJsonObject(
-      [terminal('{"verdict":"pass"}'), done, `{"type":"turn.started"}`, done].join("\n"),
+      [started, terminal('{"verdict":"pass"}'), done, started, done].join("\n"),
     ),
+    undefined,
+  );
+
+  // Round-2 review finding: a message stranded BETWEEN turns (after turn 1
+  // completed, before turn 2 started) is not part of the final completed turn
+  // and must refuse — the previous-turn.completed boundary admitted it.
+  assert.equal(
+    extractCodexTerminalJsonObject(
+      [started, terminal('{"verdict":"needs_fix"}'), done, terminal('{"verdict":"pass"}'), started, done].join("\n"),
+    ),
+    undefined,
+  );
+
+  // A trailing turn that began but never completed makes the stream ambiguous.
+  assert.equal(
+    extractCodexTerminalJsonObject(
+      [started, terminal('{"verdict":"pass"}'), done, started].join("\n"),
+    ),
+    undefined,
+  );
+
+  // A completed turn with no turn.started envelope is ambiguous.
+  assert.equal(
+    extractCodexTerminalJsonObject([terminal('{"verdict":"pass"}'), done].join("\n")),
     undefined,
   );
 
   // The final turn's own terminal message still recovers across a multi-turn stream.
   assert.deepEqual(
     extractCodexTerminalJsonObject(
-      [terminal('{"verdict":"needs_fix"}'), done, terminal('{"verdict":"pass"}'), done].join("\n"),
+      [started, terminal('{"verdict":"needs_fix"}'), done, started, terminal('{"verdict":"pass"}'), done].join("\n"),
     ),
     { verdict: "pass" },
   );
@@ -134,6 +163,7 @@ test("FG-540 AC7: recovery is scoped to the final completed turn", () => {
 
 test("FG-540: dispatch is keyed by log format — non-codex formats recover nothing", () => {
   const stream = [
+    `{"type":"turn.started"}`,
     `{"type":"item.completed","item":{"id":"x","type":"agent_message","text":"{\\"verdict\\":\\"pass\\"}"}}`,
     `{"type":"turn.completed","usage":{}}`,
   ].join("\n");

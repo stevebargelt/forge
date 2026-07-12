@@ -28,11 +28,13 @@ function isObj(v: unknown): v is Record<string, unknown> {
  *  - every non-empty line parses as a JSON object (one malformed/truncated
  *    record means the stream is not intact, so nothing is recoverable from it);
  *  - no top-level `{type:"error"}` and no `{type:"turn.failed"}` anywhere;
- *  - at least one `{type:"turn.completed"}`;
- *  - at least one completed agent_message, and the LAST one falls INSIDE the
- *    final completed turn — after the preceding `turn.completed` and before the
- *    last one (a message from an earlier turn, or one completing after the turn
- *    ended, is ambiguous);
+ *  - at least one `{type:"turn.completed"}`, and no `turn.started` AFTER the
+ *    last one (a trailing turn that began but never completed makes the whole
+ *    stream ambiguous);
+ *  - the final completed turn has its own `turn.started`, and the LAST
+ *    completed agent_message in the stream falls strictly INSIDE that
+ *    started→completed envelope — a message from an earlier turn, one stranded
+ *    BETWEEN turns, or one completing after the turn ended all refuse;
  *  - that terminal message's text parses as a JSON OBJECT (arrays, primitives,
  *    prose, and malformed JSON all refuse).
  *  Deterministic selection: the last completed agent_message of the final
@@ -48,18 +50,16 @@ export function extractCodexTerminalJsonObject(stdoutRaw: string): Record<string
     events.push(ev);
   }
 
+  const turnStarted: number[] = [];
   let lastTurnCompleted = -1;
-  let prevTurnCompleted = -1;
   let lastAgentMessage = -1;
   let terminalText: string | undefined;
   for (let i = 0; i < events.length; i++) {
     const ev = events[i]!;
     const type = ev["type"];
     if (type === "error" || type === "turn.failed") return undefined;
-    if (type === "turn.completed") {
-      prevTurnCompleted = lastTurnCompleted;
-      lastTurnCompleted = i;
-    }
+    if (type === "turn.started") turnStarted.push(i);
+    if (type === "turn.completed") lastTurnCompleted = i;
     if (type === "item.completed") {
       const item = ev["item"];
       if (isObj(item) && item["type"] === "agent_message" && typeof item["text"] === "string") {
@@ -70,9 +70,15 @@ export function extractCodexTerminalJsonObject(stdoutRaw: string): Record<string
   }
 
   if (lastTurnCompleted === -1) return undefined;             // never completed
+  if (turnStarted.some((i) => i > lastTurnCompleted)) return undefined; // trailing turn began but never completed
+  // The final completed turn's envelope: its own turn.started → the last
+  // turn.completed. Requiring the start marker (not just the previous turn's
+  // completion) is what refuses a message stranded BETWEEN turns.
+  const finalTurnStarted = [...turnStarted].reverse().find((i) => i < lastTurnCompleted);
+  if (finalTurnStarted === undefined) return undefined;       // no envelope — ambiguous
   if (lastAgentMessage === -1 || terminalText === undefined) return undefined; // no candidate
   if (lastAgentMessage > lastTurnCompleted) return undefined; // ambiguous post-turn message
-  if (lastAgentMessage < prevTurnCompleted) return undefined; // belongs to an earlier turn
+  if (lastAgentMessage < finalTurnStarted) return undefined;  // earlier turn or stranded between turns
 
   let parsed: unknown;
   try { parsed = JSON.parse(terminalText); } catch { return undefined; }
