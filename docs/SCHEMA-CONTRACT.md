@@ -92,6 +92,14 @@ Unlike the four FG-487 event types above, this one is **not run-scoped-only**: i
 
 **No dashboard consumer reads this event.** It exists for post-hoc audit/forensics (why did this loop's reviewer change profile mid-round?), alongside the same fact rendered into the review-loop run note. Adding a dashboard read is a future change, not an existing contract — but the payload above is what a reader would get.
 
+#### FG-540: stream-recovered structured result (audit-only)
+
+- `task.result_recovered_from_stream` — emitted whenever a missing `result.json` was recovered as the exact structured JSON object the agent emitted into its stream (the terminal `agent_message` of a cleanly-completed codex JSONL stream). See [Recovering a result from stdout](concepts.md#recovering-a-result-from-stdout) for the extraction rule and its guards. Sets both `run_id` and `task_id`, so it surfaces on the per-task Timeline through a strict `task_id` match. Payload: `{ source, logFormat? }`.
+
+`source` names the consumer that adopted the recovered result — one of `"invoke"` (dispatch via `invoke.ts`), `"workflow"` (dispatch via `runNext.ts`), `"recover --continue"`, `"reconcile"` (running-orphan adoption), `"reconcile_pipeline_unfinalized"` (the FG-479 fail-safe landing, where the recovered result is preserved on the failed row rather than completing the task), or `"reconcile_backfill"` (the Mode A empty-result pass). `logFormat` is the runtime's log format (or kind) the recovery ran against, `null` when the manifest records neither; it is **absent** on the `"recover --continue"` source. `forge recover --continue`'s machine output carries the same fact in its `adoptedFrom` field, whose value is `"stream_recovered"` on exactly the adoptions that emit this event.
+
+The event's presence is the *only* durable signal separating structured recovery from FG-337 narrative synthesis (below) — both land a result the agent never wrote to disk, but synthesis never emits this event, and a structured recovery carries the role's ordinary result shape rather than the `contract: "inferred"` shape. No dashboard consumer reads it today; it exists for post-hoc audit (where did this task's result actually come from?).
+
 #### Campaign-item reconcile decision events
 
 Emitted by `forge campaign reconcile`'s (or the drive-time equivalent's) write path the moment an item is shipped, carrying the re-derived evidence in `payload.evidence` for audit purposes. `run_id` is the events-table column, set to the item's `runId` (nullable). No schema/column change accompanies any of these — they differ only in `event_type` and are how the audit trail distinguishes *why* an item was recoverable.
@@ -280,7 +288,10 @@ rather than failing the task (FG-337). This shape can appear in `tasks.result` a
 
 The `contract: "inferred"` field distinguishes a synthesized result from one the
 agent produced. Only fires on pi; only for the three narrative roles; only on a
-clean completion (no truncation, no model error). The dashboard falls back to
+clean completion (no truncation, no model error). It is **not** the FG-540
+structured stream recovery (above), which takes precedence over it and yields the
+role's ordinary result shape — the agent's own JSON object, recovered from the
+stream — never this one. The dashboard falls back to
 JSON pretty-print for this shape — there is no per-role renderer for it.
 
 ## HTTP API surface (read-only)
