@@ -78,3 +78,14 @@ Set `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, restart the Claude orchestrator se
 
 
 
+
+## SECOND CONFIRMED KILL — new session, work-in-flight casualty (2026-07-11 19:10:57 PDT)
+
+Controlled queue run in session 293c91fc (iTerm, `SUPACODE_*`/`ZMX_*` confirmed absent at 17:38 and re-confirmed at 19:11; harness pid 29185, `claude -n forge --dangerously-skip-permissions`, started 17:38:32). Constraints held: normal `Bash run_in_background` + ScheduleWakeup, no tmux/nohup/setsid, FG-535/FG-536 not implemented. Cause deliberately NOT assigned; facts only:
+
+- **Killed harness background task**: id `b9cr8t82y` — `forge review-loop FG-531 --max-rounds 2 --route implementation_quick --since abee0bf`, launched 19:02. Harness notification verbatim: `status: killed — Background command "Run review-loop for FG-531" was stopped`. No TaskStop was issued. Its output file is 0 bytes (created 19:02) — the `| tail -60` pipeline died before flush, i.e. the whole process group went down together.
+- **Prior identical launches survived**: the same backgrounded review-loop pattern completed normally 3× earlier in the same session (FG-532 ×2, FG-513 ×1, longest ~8 min). This kill landed ~9 min after launch, while the operator was away between turns.
+- **Forge casualties** (run `run-review-loop-fg-531-dd1eda`): round-1 reviewer `task-red-wide-6e37ed` COMPLETE 19:09:31 (verdict needs_fix — a real stale-fixture find in the worktree lane). Fixer `task-engineer-93be42` dispatched 19:09:32; DB row stranded `running` (container.started logged 19:09:32, no terminal event); container `forge-task-engineer-93be42` **ExitCode 143, OOMKilled false, State.Error ""**, StartedAt 2026-07-12T02:09:32Z, FinishedAt 2026-07-12T02:10:57Z (~85s of real work, killed mid-tool-call — container.stdout.log 228KB ends mid `stream_event`; result.json 0 bytes; container.stderr.log 0 bytes).
+- **Work persisted**: the fixer's partial edit survived on disk (`M src/v2/fg530-crash-worktree.worktree.test.ts` on branch `fix/fg-531-awaiting-red-crash-window`); diff snapshot preserved at `~/.forge/sigterm-probe/fg531-fixer-partial-93be42.diff`.
+- **No si_pid capture for THIS kill** — the sentinel died with the previous session at 18:13:49 (its capture: si_pid 17165 = that session's own harness). The signature here (harness-tracked background task reported killed by the harness itself + attached docker child exits 143 in the same instant) matches the 18:13 proven mechanism, but the sender for this event is unproven by construction.
+- **Conclusion this event supports**: an unsolicited kill of in-flight agent work occurred OUTSIDE Supacode/zmx in a plain iTerm session — Supacode is NOT necessary for the failure. (Necessity claim only; sender attribution for this specific event not asserted.)
