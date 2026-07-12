@@ -8,12 +8,18 @@ import { listLaunches, readLaunch, removeLaunch, startLaunch, type LaunchStatus,
 // the submitting shell is owned by an interactive orchestrator harness that
 // may SIGTERM its children. See src/v2/launch.ts for the ownership model.
 
+// FG-535 AC: never infer the sender from exit 143 alone. `signaled` carries the
+// kernel's WIFSIGNALED verdict — real evidence a signal landed — but nothing
+// records WHO sent it, so the line says so instead of claiming "externally
+// terminated". `terminated_unattributed` has even less: a signal-shaped code
+// that a deliberate exit(143) would produce identically.
 function statusLine(s: LaunchStatus): string {
   switch (s.state) {
     case "running": return "running";
     case "exited_ok": return "exited 0";
     case "exited_error": return `exited ${s.code}`;
-    case "externally_terminated": return `externally terminated (exit ${s.code} = ${s.signal})`;
+    case "signaled": return `terminated by ${s.signal} (signal sender not recorded — origin unknown)`;
+    case "terminated_unattributed": return `exited ${s.code} (signal-range code, no signal evidence — origin unknown)`;
     case "unknown": return "unknown (no exit record, owner gone — e.g. host reboot)";
   }
 }

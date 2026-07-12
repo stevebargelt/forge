@@ -32,6 +32,10 @@ function tmuxStub(alive: Set<string> = new Set()): { tmux: TmuxRunner; calls: st
   return { tmux, calls, alive };
 }
 
+function names(calls: string[][]): string[] {
+  return calls.map((c) => c[0]!);
+}
+
 beforeEach(() => {
   rmSync(LAUNCHES_DIR, { recursive: true, force: true });
 });
@@ -39,6 +43,7 @@ beforeEach(() => {
 test("FG-535 start: persists meta.json (command, session, start time, log path) and hands ownership to tmux with remain-on-exit", () => {
   const { tmux, calls } = tmuxStub();
   const meta = startLaunch(["forge", "review-loop", "FG-1"], { name: "loop", tmux });
+  const startup = [...calls];
 
   assert.match(meta.id, /^launch-loop-[a-z0-9]{6}$/);
   assert.equal(meta.tmuxSession, `forge-${meta.id}`);
@@ -48,20 +53,36 @@ test("FG-535 start: persists meta.json (command, session, start time, log path) 
   assert.deepEqual(persisted.command, ["forge", "review-loop", "FG-1"]);
   assert.equal(persisted.status.state, "running", "no exit file + live session = running");
 
-  const newSession = calls.find((c) => c[0] === "new-session")!;
+  const newSession = startup.find((c) => c[0] === "new-session")!;
   assert.ok(newSession.includes("-d"), "the session is detached — the submitter never owns the process");
-  assert.ok(calls.some((c) => c[0] === "set-option" && c.includes("remain-on-exit")));
+
+  // The ORDER is the invariant: remain-on-exit must be armed before the target
+  // command can ever run, or a fast command destroys the session first.
+  assert.deepEqual(names(startup), ["-V", "new-session", "set-option", "respawn-pane"]);
+  assert.ok(!newSession.includes("forge"), "the session is born with an inert pane, not the target command");
+  const respawn = startup.find((c) => c[0] === "respawn-pane")!;
+  assert.ok(respawn.some((a) => a.includes("review-loop")), "the target command arrives via respawn-pane");
 });
 
-test("FG-535 status: the exit file is authoritative — 0 reads exited_ok, 143 reads externally_terminated SIGTERM", () => {
+test("FG-535 status: the exit record is authoritative — 0 is exited_ok, WIFSIGNALED is signaled with no sender claim", () => {
   const { tmux } = tmuxStub();
   const ok = startLaunch(["true"], { name: "ok", tmux });
   const killed = startLaunch(["sleep", "600"], { name: "killed", tmux });
-  writeFileSync(join(LAUNCHES_DIR, ok.id, "exit"), "0\n");
-  writeFileSync(join(LAUNCHES_DIR, killed.id, "exit"), "143\n");
+  writeFileSync(join(LAUNCHES_DIR, ok.id, "exit"), `{"code":0,"signal":null}`);
+  writeFileSync(join(LAUNCHES_DIR, killed.id, "exit"), `{"code":null,"signal":"SIGTERM"}`);
 
   assert.deepEqual(readLaunch(ok.id, tmux)!.status, { state: "exited_ok", code: 0 });
-  assert.deepEqual(readLaunch(killed.id, tmux)!.status, { state: "externally_terminated", code: 143, signal: "SIGTERM" });
+  assert.deepEqual(readLaunch(killed.id, tmux)!.status, {
+    state: "signaled", signal: "SIGTERM", sender: "unrecorded",
+  });
+});
+
+test("FG-535 status: a deliberate exit 143 is never reported as a kill", () => {
+  const { tmux } = tmuxStub();
+  const meta = startLaunch(["sh", "-c", "exit 143"], { name: "deliberate", tmux });
+  writeFileSync(join(LAUNCHES_DIR, meta.id, "exit"), `{"code":143,"signal":null}`);
+
+  assert.deepEqual(readLaunch(meta.id, tmux)!.status, { state: "terminated_unattributed", code: 143 });
 });
 
 test("FG-535 status: no exit record and no live session is UNKNOWN — never guessed into a terminal claim", () => {

@@ -10,15 +10,24 @@
 // ~/.forge/launches/<id>/ so any later session can read what happened:
 //
 //   meta.json  — command argv, tmux session name, start time, log path
+//   exit       — {"code": <n>|null, "signal": "SIGTERM"|null}, written by the
+//                wrapper the moment the command finishes. The wrapper is a node
+//                runner, so `signal` is the OS's WIFSIGNALED verdict — NOT a
+//                guess from a 143-shaped exit code. A command that deliberately
+//                returns 143 records {code:143, signal:null} and is never
+//                confused with one the kernel killed.
 //   out.log    — combined stdout+stderr of the command
-//   exit       — the command's numeric exit code, written by the wrapper the
-//                moment the command finishes (rc > 128 ⇒ terminated by signal
-//                rc-128, the durable evidence for "externally terminated")
 //
-// Status is DERIVED at read time, never stored: exit file ⇒ finished (ok /
-// error / externally_terminated); no exit file + live tmux session ⇒ running;
-// no exit file + no session ⇒ unknown (e.g. host reboot took the tmux server —
-// attribution is preserved as unknown rather than guessed, per FG-535's AC).
+// Status is DERIVED at read time, never stored: exit record ⇒ finished (ok /
+// error / signaled); no exit record + live tmux session ⇒ running; no exit
+// record + no session ⇒ unknown (e.g. host reboot took the tmux server).
+//
+// ATTRIBUTION (FG-535 AC: "do not infer the sender from exit 143 alone"): even
+// a WIFSIGNALED record proves only THAT a signal landed, never WHO sent it —
+// nothing here captures si_pid. So a signaled launch reports the signal with
+// sender "unrecorded", and a signal-range exit code with no signal evidence
+// stays `terminated_unattributed`. Neither is ever upgraded to a claim that
+// something external killed the command.
 //
 // The tmux server is the OWNER; this module never keeps a process attached.
 // Forge run/task ids are extracted from the log opportunistically ("when
@@ -44,30 +53,47 @@ export type LaunchStatus =
   | { state: "running" }
   | { state: "exited_ok"; code: 0 }
   | { state: "exited_error"; code: number }
-  // The durable-evidence classification FG-535 asks for: the command was
-  // terminated by a signal (rc > 128). The signal name is derived, the raw
-  // code kept as the primary record.
-  | { state: "externally_terminated"; code: number; signal: string }
+  // Durable WIFSIGNALED evidence: the OS reported the command died on a signal.
+  // The SENDER is not recorded (no SA_SIGINFO here), so attribution stays open.
+  | { state: "signaled"; signal: string; sender: "unrecorded" }
+  // A signal-range exit code with NO signal evidence — could equally be a
+  // command that deliberately returned 143. Terminal, but origin undeterminable.
+  | { state: "terminated_unattributed"; code: number }
   // No exit record and no live session — the owner itself is gone without
   // evidence (host reboot, tmux server killed). Never guessed further.
   | { state: "unknown" };
+
+/** What the wrapper writes to the exit file. `signal` is the kernel's verdict,
+ *  not an inference from `code`; exactly one of the two is set. */
+export type ExitRecord = { code: number | null; signal: string | null };
 
 export type LaunchView = LaunchMeta & {
   status: LaunchStatus;
   forgeIds: { runIds: string[]; taskIds: string[] };
 };
 
-const SIGNAL_NAMES: Record<number, string> = {
-  1: "SIGHUP", 2: "SIGINT", 3: "SIGQUIT", 6: "SIGABRT", 9: "SIGKILL", 13: "SIGPIPE", 14: "SIGALRM", 15: "SIGTERM",
-};
+export function classifyExit(rec: ExitRecord): LaunchStatus {
+  if (rec.signal) return { state: "signaled", signal: rec.signal, sender: "unrecorded" };
+  if (rec.code === null) return { state: "unknown" };
+  if (rec.code === 0) return { state: "exited_ok", code: 0 };
+  if (rec.code > 128 && rec.code < 165) return { state: "terminated_unattributed", code: rec.code };
+  return { state: "exited_error", code: rec.code };
+}
 
-export function classifyExitCode(code: number): LaunchStatus {
-  if (code === 0) return { state: "exited_ok", code: 0 };
-  if (code > 128 && code < 165) {
-    const sig = code - 128;
-    return { state: "externally_terminated", code, signal: SIGNAL_NAMES[sig] ?? `signal ${sig}` };
+/** Tolerate an exit file written by an older wrapper (a bare number, no signal
+ *  evidence) — a signal-range code from that shape can only be unattributed. */
+export function parseExitRecord(raw: string): ExitRecord | undefined {
+  const text = raw.trim();
+  if (text === "") return undefined;
+  if (/^-?\d+$/.test(text)) return { code: Number(text), signal: null };
+  try {
+    const parsed = JSON.parse(text) as Partial<ExitRecord>;
+    const code = typeof parsed.code === "number" ? parsed.code : null;
+    const signal = typeof parsed.signal === "string" ? parsed.signal : null;
+    return { code, signal };
+  } catch {
+    return undefined;
   }
-  return { state: "exited_error", code };
 }
 
 /** POSIX single-quote escaping: safe to embed in a sh -c '<...>' string. */
@@ -75,13 +101,27 @@ export function shellQuote(arg: string): string {
   return `'${arg.replaceAll("'", `'\\''`)}'`;
 }
 
-/** The command the tmux session runs: the target command with stdout+stderr
- *  redirected to the log, then its exit code written to the exit file. The
- *  exit write is the LAST thing the wrapper does, so an exit file existing is
- *  proof the command itself finished (not the wrapper being torn down). */
-export function buildWrapperCommand(argv: string[], logPath: string, exitPath: string): string {
-  const cmd = argv.map(shellQuote).join(" ");
-  return `${cmd} > ${shellQuote(logPath)} 2>&1; echo $? > ${shellQuote(exitPath)}`;
+// A shell wrapper could only ever report `$?`, which folds "killed by SIGTERM"
+// and "deliberately returned 143" into the same 143 — the exact inference
+// FG-535's AC forbids. This node runner asks the OS instead: spawnSync reports
+// `signal` (WIFSIGNALED) separately from `status`, so the two cases stay
+// distinguishable in the durable record forever.
+const EXIT_RECORDER = [
+  `const{spawnSync}=require("child_process"),fs=require("fs");`,
+  `const[e,l,...a]=process.argv.slice(1);`,
+  `const fd=fs.openSync(l,"a");`,
+  `const r=spawnSync(a[0],a.slice(1),{stdio:["ignore",fd,fd]});`,
+  `if(r.error)fs.writeSync(fd,String(r.error.message)+"\\n");`,
+  `fs.writeFileSync(e,JSON.stringify({code:r.error?127:r.status,signal:r.signal??null}));`,
+].join("");
+
+/** The command the tmux pane runs: the target command with stdout+stderr sent
+ *  to the log, then its terminal record written to the exit file. That write is
+ *  the LAST thing the wrapper does, so an exit file existing is proof the
+ *  command itself finished (not the wrapper being torn down). */
+export function buildWrapperCommand(argv: string[], logPath: string, exitPath: string, node = process.execPath): string {
+  const parts = [node, "-e", EXIT_RECORDER, exitPath, logPath, ...argv];
+  return parts.map(shellQuote).join(" ");
 }
 
 /** Forge run/task ids, opportunistically, from whatever the command logged. */
@@ -146,11 +186,16 @@ export function startLaunch(argv: string[], opts: { name?: string; cwd?: string;
 
   const wrapped = buildWrapperCommand(argv, meta.logPath, join(dir, "exit"));
   try {
-    tmux(["new-session", "-d", "-s", session, "-c", meta.cwd, wrapped]);
-    // remain-on-exit keeps the (dead) pane inspectable via tmux until the
-    // operator removes the launch — the exit file is the durable record, this
-    // is the debugging convenience on top.
-    tmux(["set-option", "-t", session, "remain-on-exit", "on"]);
+    // Order matters. Starting the target command AS the session command races
+    // it against `set-option`: a command that finishes first destroys the
+    // session (remain-on-exit is not on yet), set-option then fails, and the
+    // catch below would delete the record of a command that actually RAN.
+    // So the session is born holding an inert pane (`cat` blocks on the tty and
+    // never exits on its own), remain-on-exit is set while nothing can race it,
+    // and only then does respawn-pane hand the pane to the real command.
+    tmux(["new-session", "-d", "-s", session, "-c", meta.cwd, "cat"]);
+    tmux(["set-option", "-w", "-t", `${session}:`, "remain-on-exit", "on"]);
+    tmux(["respawn-pane", "-k", "-t", `${session}:`, wrapped]);
   } catch (e) {
     rmSync(dir, { recursive: true, force: true });
     throw new Error(`forge launch: tmux failed to start the session — ${(e as Error).message}`);
@@ -172,9 +217,8 @@ export function readLaunch(id: string, tmux: TmuxRunner = defaultTmux): LaunchVi
   let status: LaunchStatus;
   const exitPath = join(dir, "exit");
   if (existsSync(exitPath)) {
-    const raw = readFileSync(exitPath, "utf8").trim();
-    const code = Number(raw);
-    status = Number.isInteger(code) ? classifyExitCode(code) : { state: "unknown" };
+    const rec = parseExitRecord(readFileSync(exitPath, "utf8"));
+    status = rec ? classifyExit(rec) : { state: "unknown" };
   } else {
     status = tmuxSessionAlive(meta.tmuxSession, tmux) ? { state: "running" } : { state: "unknown" };
   }
