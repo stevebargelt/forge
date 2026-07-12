@@ -222,6 +222,21 @@ test("FG-535 start: refuses when tmux is unavailable, before writing anything", 
   assert.ok(!existsSync(LAUNCHES_DIR) || listLaunches(noTmux).length === 0);
 });
 
+test("FG-535 start: a tmux failure AFTER new-session kills the half-built session — no untracked pane survives the deleted record", () => {
+  for (const failing of ["set-option", "respawn-pane"]) {
+    rmSync(LAUNCHES_DIR, { recursive: true, force: true });
+    const stub = tmuxStub();
+    const tmux: TmuxRunner = (args) => {
+      if (args[0] === failing) throw new Error(`tmux ${failing} exploded`);
+      return stub.tmux(args);
+    };
+
+    assert.throws(() => startLaunch(["sleep", "600"], { name: "half", tmux }), /tmux failed to start the session/);
+    assert.equal(stub.alive.size, 0, `${failing}: the session created by new-session was killed, not stranded`);
+    assert.equal(listLaunches(tmux).length, 0, `${failing}: no record left behind either`);
+  }
+});
+
 test("FG-535: LAUNCHES_DIR is test-scoped, not the real home", () => {
   // test-setup points FORGE_HOME at a scratch dir; guard the suite against
   // ever writing launch records into the operator's real ~/.forge.

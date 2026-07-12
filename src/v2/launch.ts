@@ -251,6 +251,13 @@ export function startLaunch(argv: string[], opts: { name?: string; cwd?: string;
     tmux(["set-option", "-w", "-t", `${session}:`, "remain-on-exit", "on"]);
     tmux(["respawn-pane", "-k", "-t", `${session}:`, wrapped]);
   } catch (e) {
+    // new-session may already have succeeded (set-option or respawn-pane is
+    // what failed). Deleting the record alone would strand that session — an
+    // untracked pane no `forge launch` command can see or remove. Kill it
+    // first, so the failed start leaves nothing behind either way.
+    if (tmuxSessionAlive(session, tmux)) {
+      try { tmux(["kill-session", "-t", session]); } catch { /* already gone */ }
+    }
     rmSync(dir, { recursive: true, force: true });
     throw new Error(`forge launch: tmux failed to start the session — ${(e as Error).message}`);
   }
