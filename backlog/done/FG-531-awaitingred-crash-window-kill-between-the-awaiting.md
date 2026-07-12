@@ -1,9 +1,11 @@
 ---
 id: FG-531
 type: story
-status: active
+status: done
 title: "awaiting_red crash window: kill between the awaiting_red status write and the reds' terminal write wedges the task permanently (no sweep, no re-admit, no operator verb)"
 created: 2026-07-11
+closed: 2026-07-12
+closed_commit: 670ebaf
 ---
 
 ## Problem
