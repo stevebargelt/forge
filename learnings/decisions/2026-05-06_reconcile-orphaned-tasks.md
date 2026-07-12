@@ -1,5 +1,7 @@
 # Decision: Reconcile orphaned tasks at the top of every `forge next` and `forge status`
 
+> **Scope note (amended).** The core decision — reconcile at the top of every `forge next` / `forge status`, act on durable evidence, stay idempotent — holds. But the "only acts on tasks in `running` status" claim below is no longer an accurate description of reconcile: the sweep has since widened to fanout parents (FG-455), `pending` duplicate primaries, and — since FG-531 — `awaiting_red` tasks whose reds died with the process, plus their dead `pending`/`running` red rows. Idempotence is still the invariant; `running` is no longer the boundary. See [Orphaned task recovery](../../docs/concepts.md#orphaned-task-recovery).
+
 **ID**: FORGE-DEC-009
 **Date**: 2026-05-06
 **Status**: Decided
