@@ -178,6 +178,29 @@ test("FG-535 CLI: a REAL SIGTERM records WIFSIGNALED evidence and still refuses 
   rmSync(pidFile, { force: true });
 });
 
+test("FG-535 CLI: killing the OWNER itself (the wrapper, SIGKILL — no exit record possible) reads owner_terminated, not running-forever", async () => {
+  const meta = launchRun("ownerkill", ["sleep", "300"]);
+  assert.ok(typeof meta.ownerPid === "number" && meta.ownerPid > 0, `owner pid was not recorded: ${meta.ownerPid}`);
+
+  // SIGKILL the wrapper: it cannot run any handler, so the exit record is
+  // never written — the exact shape a harness sweep of the pane's process
+  // leaves behind. remain-on-exit keeps the session alive holding a dead pane.
+  process.kill(meta.ownerPid!, "SIGKILL");
+  await waitFor("the dead pane to be classified", () => show(meta.id).status.state === "owner_terminated");
+
+  assert.ok(!existsSync(join(LAUNCHES_DIR, meta.id, "exit")), "precondition: no exit record was ever written");
+  assert.ok(tmuxSessionAlive(meta.tmuxSession), "precondition: the session itself is still alive (remain-on-exit)");
+  assert.deepEqual(show(meta.id).status, { state: "owner_terminated", sender: "unrecorded" });
+
+  const human = forge(["launch", "show", meta.id]);
+  assert.match(human.stdout, /owner terminated \(wrapper died before recording an exit — sender not recorded\)/);
+
+  // Terminal-by-evidence, so cleanup no longer demands --force.
+  const rm = forge(["launch", "rm", meta.id]);
+  assert.equal(rm.status, 0, `rm of a terminated owner must not need --force: ${rm.stderr}`);
+  assert.ok(!tmuxSessionAlive(meta.tmuxSession));
+});
+
 test("FG-535 CLI: a command that DELIBERATELY exits 143 is not reported as a kill", async () => {
   const meta = launchRun("selfexit", ["sh", "-c", "exit 143"]);
   await waitFor("the terminal record", () => existsSync(join(LAUNCHES_DIR, meta.id, "exit")));

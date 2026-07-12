@@ -20,6 +20,7 @@ function statusLine(s: LaunchStatus): string {
     case "exited_error": return `exited ${s.code}`;
     case "signaled": return `terminated by ${s.signal} (signal sender not recorded — origin unknown)`;
     case "terminated_unattributed": return `exited ${s.code} (signal-range code, no signal evidence — origin unknown)`;
+    case "owner_terminated": return "owner terminated (wrapper died before recording an exit — sender not recorded)";
     case "unknown": return "unknown (no exit record, owner gone — e.g. host reboot)";
   }
 }

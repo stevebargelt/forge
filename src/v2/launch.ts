@@ -67,6 +67,12 @@ export type LaunchStatus =
   // A signal-range exit code with NO signal evidence — could equally be a
   // command that deliberately returned 143. Terminal, but origin undeterminable.
   | { state: "terminated_unattributed"; code: number }
+  // The OWNER (the tmux pane's wrapper process) died without writing its
+  // last-act exit record: live session, dead pane, no exit file. Durable
+  // evidence that the launcher/parent itself was terminated — the AC's
+  // "externally terminated launcher/parent" classification. The sender is
+  // still not recorded, so no claim is made about who did it.
+  | { state: "owner_terminated"; sender: "unrecorded" }
   // No exit record and no live session — the owner itself is gone without
   // evidence (host reboot, tmux server killed). Never guessed further.
   | { state: "unknown" };
@@ -181,6 +187,22 @@ function tmuxSessionAlive(session: string, tmux: TmuxRunner): boolean {
   }
 }
 
+/** Whether the session's pane is DEAD (remain-on-exit retained it after its
+ *  process ended). With remain-on-exit on, `has-session` alone proves nothing
+ *  about the wrapper: a killed wrapper leaves a live session holding a dead
+ *  pane. Returns null when tmux can't answer — never guessed. */
+function paneDead(session: string, tmux: TmuxRunner): boolean | null {
+  try {
+    const out = tmux(["display-message", "-p", "-t", `${session}:`, "#{pane_dead}"]);
+    const v = String(out ?? "").trim();
+    if (v === "1") return true;
+    if (v === "0") return false;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 /** Start a command under a durable tmux owner. Returns the persisted record.
  *  Throws (before anything is written) if tmux is unavailable. */
 export function startLaunch(argv: string[], opts: { name?: string; cwd?: string; tmux?: TmuxRunner; now?: Date } = {}): LaunchMeta {
@@ -257,8 +279,18 @@ export function readLaunch(id: string, tmux: TmuxRunner = defaultTmux): LaunchVi
   if (existsSync(exitPath)) {
     const rec = parseExitRecord(readFileSync(exitPath, "utf8"));
     status = rec ? classifyExit(rec) : { state: "unknown" };
+  } else if (!tmuxSessionAlive(meta.tmuxSession, tmux)) {
+    status = { state: "unknown" };
   } else {
-    status = tmuxSessionAlive(meta.tmuxSession, tmux) ? { state: "running" } : { state: "unknown" };
+    // The session is alive, but with remain-on-exit that is not proof the
+    // wrapper is: a wrapper killed before its last-act exit write leaves a
+    // live session holding a DEAD pane and no exit record. That combination
+    // is the durable evidence for "the owner was terminated" (the wrapper
+    // writes the exit record even for a signaled child — only the wrapper
+    // itself dying can produce a dead pane with no record). A pane tmux can't
+    // classify stays running (fail-safe: rm keeps refusing without --force).
+    const dead = paneDead(meta.tmuxSession, tmux);
+    status = dead === true ? { state: "owner_terminated", sender: "unrecorded" } : { state: "running" };
   }
 
   let log = "";

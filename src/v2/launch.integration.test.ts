@@ -17,9 +17,12 @@ import {
   type TmuxRunner,
 } from "./launch.js";
 
-/** tmux stub: records calls; `has-session` consults a mutable alive set. */
-function tmuxStub(alive: Set<string> = new Set()): { tmux: TmuxRunner; calls: string[][]; alive: Set<string> } {
+/** tmux stub: records calls; `has-session` consults a mutable alive set;
+ *  `display-message` answers by format — pane pid, or pane_dead from the
+ *  mutable deadPanes set. */
+function tmuxStub(alive: Set<string> = new Set()): { tmux: TmuxRunner; calls: string[][]; alive: Set<string>; deadPanes: Set<string> } {
   const calls: string[][] = [];
+  const deadPanes = new Set<string>();
   const tmux: TmuxRunner = (args) => {
     calls.push(args);
     if (args[0] === "has-session") {
@@ -28,9 +31,13 @@ function tmuxStub(alive: Set<string> = new Set()): { tmux: TmuxRunner; calls: st
     }
     if (args[0] === "new-session") alive.add(args[args.indexOf("-s") + 1]!);
     if (args[0] === "kill-session") alive.delete(args[args.indexOf("-t") + 1]!);
-    if (args[0] === "display-message") return "4242\n";
+    if (args[0] === "display-message") {
+      const target = args[args.indexOf("-t") + 1]!.replace(/:$/, "");
+      if (args.includes("#{pane_dead}")) return deadPanes.has(target) ? "1\n" : "0\n";
+      return "4242\n";
+    }
   };
-  return { tmux, calls, alive };
+  return { tmux, calls, alive, deadPanes };
 }
 
 function names(calls: string[][]): string[] {
@@ -114,6 +121,32 @@ test("FG-535 status: a deliberate exit 143 is never reported as a kill", () => {
   writeFileSync(join(LAUNCHES_DIR, meta.id, "exit"), `{"code":143,"signal":null}`);
 
   assert.deepEqual(readLaunch(meta.id, tmux)!.status, { state: "terminated_unattributed", code: 143 });
+});
+
+test("FG-535 status: a live session holding a DEAD pane with no exit record is owner_terminated — the wrapper died before its last-act write", () => {
+  const stub = tmuxStub();
+  const meta = startLaunch(["sleep", "600"], { name: "wrapperkilled", tmux: stub.tmux });
+  stub.deadPanes.add(meta.tmuxSession); // remain-on-exit retained the pane; no exit file was ever written
+
+  assert.deepEqual(readLaunch(meta.id, stub.tmux)!.status, { state: "owner_terminated", sender: "unrecorded" });
+
+  // Not "running", so cleanup no longer demands --force — but the record must
+  // survive intact up to the explicit rm.
+  removeLaunch(meta.id, { tmux: stub.tmux });
+  assert.equal(readLaunch(meta.id, stub.tmux), undefined);
+});
+
+test("FG-535 status: a pane tmux cannot classify stays running — fail-safe, rm keeps refusing", () => {
+  const alive = new Set<string>();
+  const tmux: TmuxRunner = (args) => {
+    if (args[0] === "has-session" && !alive.has(args[2]!)) throw new Error("no such session");
+    if (args[0] === "new-session") alive.add(args[args.indexOf("-s") + 1]!);
+    if (args[0] === "display-message") throw new Error("cannot answer");
+  };
+  const meta = startLaunch(["sleep", "600"], { name: "unanswerable", tmux });
+
+  assert.deepEqual(readLaunch(meta.id, tmux)!.status, { state: "running" });
+  assert.throws(() => removeLaunch(meta.id, { tmux }), /still running .* --force/);
 });
 
 test("FG-535 status: no exit record and no live session is UNKNOWN — never guessed into a terminal claim", () => {
