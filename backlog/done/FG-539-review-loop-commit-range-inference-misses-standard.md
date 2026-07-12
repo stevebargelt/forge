@@ -1,9 +1,11 @@
 ---
 id: FG-539
 type: story
-status: active
+status: done
 title: review-loop commit-range inference misses standard Forge ticket IDs without a hash prefix
 created: 2026-07-12
+closed: 2026-07-12
+closed_commit: 739b0b2
 ---
 
 ## Problem
