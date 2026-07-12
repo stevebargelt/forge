@@ -58,6 +58,67 @@ test("#301 range: no --since and no matching commits → mode none", async () =>
   assert.deepEqual(r, { mode: "none", diffRange: "", shas: [], spansUnmatched: false });
 });
 
+// ── FG-539: structured ticket ids match without a hash prefix ────────────────
+
+/** Capture the --grep pattern the resolver hands to git. */
+function capturedGrepPattern(ticketId: string): string {
+  let pattern = "";
+  const git: GitRunner = (args) => {
+    const grep = args.find((a) => a.startsWith("--grep="));
+    if (grep) pattern = grep.slice("--grep=".length);
+    return "";
+  };
+  resolveCommitRange(ticketId, { git });
+  return pattern;
+}
+
+test("FG-539 range: structured id emits a hash-optional boundary pattern that matches Forge's subject forms", async () => {
+  const pattern = capturedGrepPattern("FG-536");
+  // The emitted ERE uses only constructs shared with JS RegExp — evaluate the
+  // grammar itself, not just the string.
+  const re = new RegExp(pattern);
+  for (const subject of [
+    "fix: durable launch ownership (FG-536)",
+    "fix: durable launch ownership #FG-536",
+    "FG-536: durable launch ownership",
+    "chore(backlog): close FG-536 — shipped",
+  ]) {
+    assert.ok(re.test(subject), `expected match: ${subject}`);
+  }
+  for (const subject of [
+    "feat: adjacent ticket (FG-5360)",     // shared numeric prefix
+    "feat: other id family (XFG-536)",     // left boundary must be non-alphanumeric
+  ]) {
+    assert.ok(!re.test(subject), `expected NO match: ${subject}`);
+  }
+});
+
+test("FG-539 range: a leading hash on a structured id is accepted and matches the same forms", async () => {
+  assert.equal(capturedGrepPattern("#FG-536"), capturedGrepPattern("FG-536"));
+});
+
+test("FG-539 range: purely numeric ids keep the mandatory hash (bare '301' in prose must not match)", async () => {
+  const pattern = capturedGrepPattern("301");
+  assert.equal(pattern, "#301([^0-9]|$)");
+  const re = new RegExp(pattern);
+  assert.ok(re.test("fix the thing (#301)"));
+  assert.ok(!re.test("bump to version 301 of the spec"));
+  assert.ok(!re.test("fix the thing (#3010)"));
+});
+
+test("FG-539 range: structured-id inference still returns precise shas and span detection", async () => {
+  const git: GitRunner = (args) => {
+    const grep = args.find((a) => a.startsWith("--grep="));
+    if (grep) return "hNew\nhOld\n";                              // 2 matched
+    if (args[2] === "hOld^..hNew") return "hNew\nhUnrelated\nhOld\n"; // span has an unrelated commit
+    return "";
+  };
+  const r = resolveCommitRange("FG-536", { git });
+  assert.equal(r.mode, "inferred");
+  assert.equal(r.spansUnmatched, true);
+  assert.deepEqual(r.shas, ["hNew", "hOld"]);
+});
+
 // ── Slice 2: parseReviewerVerdict ────────────────────────────────────────────
 
 test("#301 verdict: valid pass with no findings", async () => {

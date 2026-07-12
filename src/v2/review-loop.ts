@@ -47,11 +47,22 @@ export function resolveCommitRange(
     return { mode: "since", diffRange, shas: shasOf(diffRange), spansUnmatched: false };
   }
 
-  const num = ticketId.replace(/^#/, "").trim();
-  // Commits whose subject/body references the ticket, e.g. "(#301)" or "#301".
-  // POSIX ERE (git --extended-regexp) has no `\b`; match #<num> not followed by a
-  // digit (so #301 doesn't also catch #3010) — `([^0-9]|$)`.
-  const matched = git(["log", "--format=%H", `--grep=#${num}([^0-9]|$)`, "--extended-regexp"])
+  const id = ticketId.replace(/^#/, "").trim();
+  // Commits whose subject/body references the ticket. Two reference grammars
+  // (FG-539):
+  //  - legacy purely-numeric ids ("301") require the hash — "#301" — because a
+  //    bare number matches far too much prose;
+  //  - structured ids ("FG-536") match with or without the hash, since Forge's
+  //    established subject convention is "(FG-536)". The left boundary is
+  //    any non-alphanumeric or start-of-line, so "#FG-536", "(FG-536)", and a
+  //    leading "FG-536:" all match while "XFG-536" does not.
+  // POSIX ERE (git --extended-regexp) has no `\b`; the right boundary rejects a
+  // following digit so FG-536 never also catches FG-5360 (nor #301 → #3010).
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = /^[0-9]+$/.test(id)
+    ? `#${escaped}([^0-9]|$)`
+    : `(^|[^A-Za-z0-9])${escaped}([^0-9]|$)`;
+  const matched = git(["log", "--format=%H", `--grep=${pattern}`, "--extended-regexp"])
     .split("\n").map((s) => s.trim()).filter(Boolean);
   if (matched.length === 0) return { mode: "none", diffRange: "", shas: [], spansUnmatched: false };
 

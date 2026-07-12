@@ -2746,3 +2746,79 @@ test("FG-513 legacy mode: a model_error still gets one bounded same-resolution r
   assert.deepEqual(calls, [undefined, undefined]);
   assert.equal(r.ok, true);
 });
+
+// ── FG-539: commit-range inference recognizes Forge's real subject convention ─
+// Production-shaped: a real git repo whose subjects use the established
+// "(FG-xxx)" form (no hash), exercised through resolveCommitRange with the
+// REAL git binary and through the registered CLI command itself.
+
+function commit(subject: string, file: string): string {
+  writeFileSync(join(projectDir, file), `// ${subject}\n`);
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", subject], projectDir);
+  return gitExec(["rev-parse", "HEAD"], projectDir).trim();
+}
+
+test("FG-539: real-git inference over the FG-533/FG-535/FG-536 subject convention → mode inferred, precise shas, exact boundaries", async () => {
+  commit("fix(review-loop): stash notes handling (FG-533)", "a.ts");
+  commit("feat(launch): durable exit records (FG-535)", "b.ts");
+  const fg536a = commit("fix(spawn): detached agent execution (FG-536)", "c.ts");
+  commit("chore: unrelated housekeeping", "d.ts");
+  const fg5360 = commit("feat: adjacent ticket (FG-5360)", "e.ts");
+  const fg536b = commit("docs(spawn): detached execution ADR (FG-536)", "f.ts");
+
+  const git = (args: string[]) => gitExec(args, projectDir);
+  const r = resolveCommitRange("FG-536", { git });
+
+  assert.equal(r.mode, "inferred");
+  assert.deepEqual(r.shas, [fg536b, fg536a], "precise set: both FG-536 commits, newest first, nothing else");
+  assert.ok(!r.shas.includes(fg5360), "FG-5360 must not match FG-536");
+  assert.equal(r.spansUnmatched, true, "unrelated + FG-5360 commits sit inside the span");
+  assert.equal(r.diffRange, `${fg536a}^..${fg536b}`);
+});
+
+test("FG-539: hash-prefixed and legacy forms still resolve against real git", async () => {
+  const hashed = commit("fix: hash-prefixed reference #FG-536", "g.ts");
+  const legacy = commit("fix: legacy numeric reference (#301)", "h.ts");
+
+  const git = (args: string[]) => gitExec(args, projectDir);
+  assert.deepEqual(resolveCommitRange("#FG-536", { git }).shas, [hashed]);
+  assert.deepEqual(resolveCommitRange("301", { git }).shas, [legacy]);
+});
+
+test("FG-539: --since precedence is unchanged — explicit range wins over inference", async () => {
+  const base = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  const tip = commit("fix: some work (FG-536)", "i.ts");
+
+  const git = (args: string[]) => gitExec(args, projectDir);
+  const r = resolveCommitRange("FG-536", { since: base, git });
+  assert.equal(r.mode, "since");
+  assert.equal(r.diffRange, `${base}..HEAD`);
+  assert.deepEqual(r.shas, [tip]);
+});
+
+test("FG-539 AC7: `forge review-loop FG-539 --dry-run` no longer emits 'no commits reference' for standard subjects", async () => {
+  mkdirSync(join(projectDir, "backlog", "stories"), { recursive: true });
+  writeFileSync(
+    join(projectDir, "backlog", "stories", "FG-539-range-inference.md"),
+    "---\nid: FG-539\ntype: story\nstatus: active\ntitle: range inference\n---\n\nBody.\n",
+  );
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add backlog fixture"], projectDir);
+  commit("fix(review-loop): recognize standard ticket subjects (FG-539)", "j.ts");
+
+  const lines = captureConsoleLog();
+  try {
+    const program = new Command();
+    registerReviewLoop(program, async () => { throw new Error("must not dispatch on --dry-run"); });
+    await program.parseAsync(
+      ["review-loop", "FG-539", "--project", projectDir, "--unrouted", "--dry-run"],
+      { from: "user" },
+    );
+    const printed = lines.join("\n");
+    assert.match(printed, /\(dry run — no dispatch\)/);
+    assert.doesNotMatch(printed, /no commits reference/);
+  } finally {
+    mock.restoreAll();
+  }
+});
