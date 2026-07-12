@@ -1,6 +1,6 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -1817,4 +1817,34 @@ test("FG-540 rec: Mode-A backfill — a complete task with an empty result is ba
   const t = getTask(taskId)!;
   assert.equal(t.status, "complete");
   assert.deepEqual(t.result, FG540_PASS, "backfilled with the exact structured object, not an inferred narrative");
+});
+
+test("FG-540 rec: Mode-A backfill — a known non-zero container exit refuses structured recovery (same no-contrary-exit guard as the running branch)", () => {
+  const taskId = "t-fg540-backfill-nonzero";
+  insertContainerized(mkTask(taskId, { status: "complete" })); // result undefined
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writeCodexManifest(dir);
+  writeFileSync(join(dir, "container.stdout.log"), codexCleanStdout(JSON.stringify(FG540_PASS)));
+  const exitInfo = () => ({ exitCode: 137 });
+
+  const r = reconcileRun(RUN.id, GONE, undefined, exitInfo);
+  assert.deepEqual(r.taskChanges, [], "no backfill may occur off a known-bad container exit");
+  const t = getTask(taskId)!;
+  assert.equal(t.result, undefined, "the empty result stays empty — fail closed");
+  assert.ok(!existsSync(join(dir, "result.json")), "no result.json is fabricated");
+});
+
+test("FG-540 rec: Mode-A backfill — an OOM-killed container refuses structured recovery", () => {
+  const taskId = "t-fg540-backfill-oom";
+  insertContainerized(mkTask(taskId, { status: "complete" })); // result undefined
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writeCodexManifest(dir);
+  writeFileSync(join(dir, "container.stdout.log"), codexCleanStdout(JSON.stringify(FG540_PASS)));
+  const exitInfo = () => ({ exitCode: 0, oomKilled: true });
+
+  const r = reconcileRun(RUN.id, GONE, undefined, exitInfo);
+  assert.deepEqual(r.taskChanges, []);
+  assert.equal(getTask(taskId)!.result, undefined);
 });

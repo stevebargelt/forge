@@ -999,10 +999,19 @@ export function reconcileRun(
           stdoutRaw,
         });
         // FG-540: structured recovery first (shared rule with the dispatch-time
-        // paths). The task is already `complete`, so clean completion rests on
-        // the stream's own turn.completed; a non-empty malformed result.json
-        // refuses recovery rather than being overwritten.
-        recovered = (!analysis.modelError && resultFileState(t.runId, t.id) !== "malformed"
+        // paths), under the SAME no-contrary-exit guard as the running-orphan
+        // branch: a known non-zero/OOM container exit refuses recovery even
+        // though the DB row says complete (the row is exactly what Mode A
+        // distrusts); an unknown exit defers to the stream's own turn.completed.
+        // A non-empty malformed result.json refuses rather than be overwritten.
+        let exitInfo: ReturnType<ContainerExitInfo>;
+        try {
+          exitInfo = containerExitInfo(recordedContainerId(eventsForTask(t.id)) ?? `forge-${t.id}`);
+        } catch {
+          exitInfo = {};
+        }
+        const noContraryExit = exitInfo.oomKilled !== true && (exitInfo.exitCode === undefined || exitInfo.exitCode === 0);
+        recovered = (noContraryExit && !analysis.modelError && resultFileState(t.runId, t.id) !== "malformed"
           ? recoverStructuredStreamResult({ logFormat: runtimeMeta?.logFormat, runtimeKind: runtimeMeta?.kind, stdoutRaw })
           : undefined) ?? inferredResultFrom(analysis, t.agentRole);
       }
