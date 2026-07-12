@@ -834,25 +834,38 @@ export function reconcileRun(
         recoveredSource = undefined;
       }
 
+      // FG-540 review: persist BEFORE the completion decision. A structured
+      // stream recovery stands in for the agent's OWN result.json — the
+      // dispatch-time path (invoke.ts) persists it and only then completes, so
+      // reconcile must not complete a structured recovery it could not persist.
+      // A failed write voids that recovery: the task falls through to the
+      // ordinary oom/worktree-dirty/orphaned classification below, with the
+      // write failure carried in evidence. FG-337 narrative synthesis stays
+      // best-effort (FG-455 finding 1) — it is a summary of a dead run, not the
+      // agent's result contract, so it still completes from memory.
+      let resultWriteFailed = false;
+      if (inferred !== undefined) {
+        try {
+          writeFileSync(join(dir, "result.json"), JSON.stringify(inferred));
+        } catch {
+          resultWriteFailed = true;
+          if (recoveredSource === "structured_stream") {
+            inferred = undefined;
+            recoveredSource = undefined;
+          }
+        }
+      }
+
       // Reuse baseEvidence gathered above the split — only resultState and
       // recoverableStdoutResult vary per outcome.
       const evidence: OrphanEvidence = {
         ...baseEvidence,
         resultState: resultFileState(t.runId, t.id),
         recoverableStdoutResult: inferred !== undefined,
+        ...(resultWriteFailed ? { resultWriteFailed: true } : {}),
       };
 
       if (inferred) {
-        // FG-455 review finding 1: completion must come from the in-memory
-        // recovered result, never depend on the disk write succeeding — the
-        // write is best-effort only. If result.json is a directory, unwritable,
-        // or the path races invalid, note the failure in evidence and still
-        // complete the task from `inferred`.
-        try {
-          writeFileSync(join(dir, "result.json"), JSON.stringify(inferred));
-        } catch {
-          evidence.resultWriteFailed = true;
-        }
         if (!isInvokeLikeRun) {
           // FG-479: same guard as the valid-result branch above — a recovered
           // stdout result proves the agent finished, not that the pipeline's
@@ -860,7 +873,7 @@ export function reconcileRun(
           failPipelineUnfinalized(t.id, inferred, evidence, recoveredSource === "structured_stream" ? (recoveredLogFormat ?? null) : undefined);
         } else {
           // FG-463: complete write + its events atomic (the result.json write above
-          // is best-effort and deliberately stays OUTSIDE the transaction).
+          // stays OUTSIDE the transaction — never hold a write lock across disk IO).
           const containerEvidence = toContainerCausalEvidence(evidence);
           crashPoint("reconcile:before-complete-invoke-like-from-stdout");
           const completed = getDb().transaction(() => {

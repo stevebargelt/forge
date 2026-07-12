@@ -1800,6 +1800,37 @@ test("FG-540 rec: a non-empty MALFORMED result.json wins as a failure — recove
   assert.equal(readFileSync(join(dir, "result.json"), "utf8"), "{truncated-non-json", "the malformed file is evidence — never overwritten by recovery");
 });
 
+test("FG-540 review: a structured stream recovery whose result.json write FAILS never completes — the recovery is void, the task lands orphaned with resultWriteFailed in evidence", () => {
+  const taskId = "t-fg540-write-throws";
+  insertContainerized(mkTask(taskId, { status: "running", agentRole: "red-wide" }));
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writeCodexManifest(dir);
+  writeFileSync(join(dir, "container.stdout.log"), codexCleanStdout(JSON.stringify(FG540_PASS)));
+  // result.json is a directory — writeFileSync throws EISDIR when reconcile tries
+  // to persist the recovered result. Unlike FG-337 narrative synthesis, a
+  // structured recovery stands in for the agent's own result contract: it may not
+  // complete a task it could not persist the way a normal run does.
+  mkdirSync(join(dir, "result.json"), { recursive: true });
+
+  let r: ReturnType<typeof reconcileRun> | undefined;
+  assert.doesNotThrow(() => { r = reconcileRun(RUN.id, GONE); });
+  assert.deepEqual(r!.taskChanges.map((c) => c.to), ["failed"], "no persisted result.json → no completion");
+
+  const t = getTask(taskId)!;
+  assert.equal(t.status, "failed");
+  assert.equal(t.result, undefined, "the unpersisted structured result is not adopted as the task result");
+
+  const types = eventsForTask(taskId).map((e) => e.eventType);
+  assert.ok(!types.includes("task.completed"));
+  assert.ok(!types.includes("task.result_recovered_from_stream"), "no provenance event for a recovery that did not happen");
+
+  const reconciled = eventsForTask(taskId).find((e) => e.eventType === "task.reconciled")!;
+  const evidence = (reconciled.payload as Record<string, unknown>).evidence as OrphanEvidence;
+  assert.equal(evidence.resultWriteFailed, true, "the write failure is the reason recovery was refused — it must be visible");
+  assert.equal(evidence.recoverableStdoutResult, false, "the voided recovery is not advertised as recoverable");
+});
+
 test("FG-540 rec: prose terminal message for a STRUCTURED role recovers nothing (no narrative synthesis) → orphaned", () => {
   const taskId = "t-fg540-prose-structured";
   insertContainerized(mkTask(taskId, { status: "running", agentRole: "red-wide" }));
