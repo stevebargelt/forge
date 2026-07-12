@@ -30,4 +30,5 @@ Run agent containers DETACHED (`docker run -d`) with the host-side CLI as a watc
 
 ## Notes
 
-Filed 2026-07-11 from the background-kill investigation (evidence: ~/.forge/sigterm-probe/, session transcript forensics, upstream #72851/#68625/#25188). Relates: FG-513 (resilience scope), FG-533 (pre-container window), the pipeline long-build memory. Until this lands, unattended dispatch should prefer setsid-detached parents.
+Filed 2026-07-11 from the background-kill investigation (evidence: ~/.forge/sigterm-probe/, session transcript forensics, upstream #72851/#68625/#25188). Relates: FG-535 (owns launcher durability + Claude/Supacode attribution — its durable tmux launcher is the operational mitigation until this lands), FG-513 (resilience scope), FG-533 (pre-container window), the pipeline long-build memory. Until this lands, unattended dispatch should prefer setsid-detached parents.
+

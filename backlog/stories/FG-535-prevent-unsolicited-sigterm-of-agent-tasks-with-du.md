@@ -56,6 +56,12 @@ Prevent orchestrator lifecycle events from terminating Forge work, and identify 
 - Confirm whether `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` removes `run_in_background` on installed Claude Code 2.1.207 and document the required restart/session scope.
 - Add an operator-visible classification for externally terminated launcher/parent when durable evidence supports it; preserve unknown attribution when the signal sender is not recorded.
 
+## Additional instrumentation available (2026-07-11, complements the A/B matrix)
+
+A SA_SIGINFO sentinel is compiled at ~/.forge/sigterm-probe/sentinel (takes a log path as argv[1]) — it records the SENDER pid/uid (si_pid/si_uid) of any SIGTERM/SIGHUP/SIGINT it receives, which removes the need to infer the sender in every matrix cell. One instance is live as a harness background task in session fff3e306 (log: sentinel.log), alongside a node-shaped decoy (node-decoy.log) and a setsid-detached 2s process-table sampler (ps-samples.log) to resolve transient sender pids. Use the same binary in each A/B cell with a distinct log path.
+
+Related: FG-536 (in-product fix — docker-detached agent execution, results survive any owner death by construction; this ticket's durable launcher is the operational path until that lands).
+
 ## Non-Goals
 
 - Do not reopen already-shipped orphan reconciliation and container evidence work.
@@ -65,3 +71,4 @@ Prevent orchestrator lifecycle events from terminating Forge work, and identify 
 ## Immediate Operational Mitigation
 
 Set `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, restart the Claude orchestrator session, launch long Forge commands under a durable tmux session using a short synchronous Bash call, and poll Forge durable state/logs rather than process-name matches. A controlled tmux test already showed the tmux-owned attached Docker container remained alive after the submitting command returned.
+
