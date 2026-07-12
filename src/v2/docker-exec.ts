@@ -111,17 +111,23 @@ export function killContainer(
 // defaultContainerExitInfo posture; an unreachable daemon or an
 // already-vanished container just yields the observed-only shape (still
 // evidence: "Forge watched this exit; docker itself couldn't be probed after").
+// FG-536: `inspectRef` is what docker is ASKED about (the daemon's container ID
+// when the detached executor has one — a name can be re-bound to a replacement
+// container the moment the original exits); `containerName` stays what the
+// evidence REPORTS, so `forge show` keeps naming forge-<taskId>. They differ only
+// on the detached path; every other caller passes the name and gets today's behavior.
 export function captureContainerCausalEvidence(
   containerName: string | undefined,
   execFileSyncFn: typeof execFileSync = execFileSync,
+  inspectRef: string | undefined = containerName,
 ): ContainerCausalEvidence {
   const base: ContainerCausalEvidence = {
     containerName: containerName ?? "(unknown)",
     containerExitedEventObserved: true,
   };
-  if (!containerName) return base;
+  if (!inspectRef) return base;
   try {
-    const raw = execFileSyncFn("docker", ["inspect", containerName], {
+    const raw = execFileSyncFn("docker", ["inspect", inspectRef], {
       stdio: ["ignore", "pipe", "pipe"],
     }).toString();
     const parsed = parseDockerInspectState(raw);
@@ -357,6 +363,12 @@ export const detachedDockerExec: DockerExecFn = async (execArgs) => {
   // watcher half, which the host may lose without touching the run.
   onContainerStarted?.(started.containerId);
 
+  // Every docker call below addresses the daemon's container ID when we have it.
+  // `forge-<taskId>` is REUSABLE: the moment this container exits, a retry can
+  // bind the name to a different container — and a `docker kill` or `docker
+  // inspect` racing that would hit the replacement. The ID cannot be re-bound.
+  const containerRef = started.containerId ?? containerName;
+
   return new Promise<number>((resolve) => {
     const outStream = createWriteStream(stdoutPath);
     const errStream = createWriteStream(stderrPath, { flags: "a" });
@@ -364,13 +376,13 @@ export const detachedDockerExec: DockerExecFn = async (execArgs) => {
     // The WATCHER half: docker logs -f re-delivers the container's output from
     // t=0 and keeps streaming. It is disposable — if this process dies, the
     // container is untouched and a later reconcile finalizes from disk.
-    const logsProc = cpSpawn("docker", ["logs", "-f", containerName ?? ""], { stdio: ["ignore", "pipe", "pipe"] });
+    const logsProc = cpSpawn("docker", ["logs", "-f", containerRef ?? ""], { stdio: ["ignore", "pipe", "pipe"] });
 
     let killedForIdle = false;
     const idleMs = idleTimeoutMs ?? resolveIdleTimeoutMs();
     const watchdog = startIdleWatchdog(idleMs, () => {
       killedForIdle = true;
-      killContainer(containerName); // authoritative — the daemon stops the container
+      killContainer(containerRef); // authoritative — the daemon stops the container
     });
 
     logsProc.stdout.on("data", (c: Buffer) => {
@@ -385,7 +397,7 @@ export const detachedDockerExec: DockerExecFn = async (execArgs) => {
 
     // The WAITER half: docker wait blocks until the container exits and prints
     // its exit code. Also disposable — reconcile is the backstop.
-    execFile("docker", ["wait", containerName ?? ""], (err, stdout) => {
+    execFile("docker", ["wait", containerRef ?? ""], (err, stdout) => {
       watchdog.stop();
       // Give the log stream a beat to drain the final chunks, then settle.
       setTimeout(() => {
@@ -395,7 +407,7 @@ export const detachedDockerExec: DockerExecFn = async (execArgs) => {
           if (--pending === 0) {
             const code = err ? 1 : Number(String(stdout).trim());
             const exitCode = killedForIdle ? IDLE_TIMEOUT_EXIT_CODE : (Number.isInteger(code) ? code : 1);
-            onContainerEvidence?.(captureContainerCausalEvidence(containerName));
+            onContainerEvidence?.(captureContainerCausalEvidence(containerName, execFileSync, containerRef));
             resolve(exitCode);
           }
         };

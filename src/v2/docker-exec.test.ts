@@ -455,6 +455,46 @@ test("FG-536 detachedDockerExec: a FAILED `docker run -d` (bad image, name clash
   }
 });
 
+// FG-536 review: `forge-<taskId>` is a REUSABLE name — once the container exits,
+// a retry can bind it to a different container. Every docker call the watcher half
+// makes must therefore address the ID `docker run -d` printed, which the daemon
+// never re-binds.
+test("FG-536 detachedDockerExec: the watcher, waiter and evidence probe all address the container ID `docker run -d` printed, not the reusable name", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "fg536-id-"));
+  const binDir = mkdtempSync(join(tmpdir(), "fg536-id-stub-"));
+  const calls = join(dir, "calls.log");
+  writeFileSync(
+    join(binDir, "docker"),
+    `#!/bin/sh\necho "$@" >> ${calls}\ncase "$1" in\n  run) echo sha256-c0ffee ;;\n  wait) echo 0 ;;\n  logs) : ;;\n  inspect) echo '[]' ;;\nesac\nexit 0\n`,
+  );
+  chmodSync(join(binDir, "docker"), 0o755);
+  const origPath = process.env.PATH;
+  process.env.PATH = `${binDir}:${origPath ?? ""}`;
+  try {
+    let startedWith: string | undefined;
+    await detachedDockerExec({
+      args: ["run", "-i", "--name", "forge-idtest", "img", "claude"],
+      stdin: undefined,
+      stdoutPath: join(dir, "stdout.log"),
+      stderrPath: join(dir, "stderr.log"),
+      idleTimeoutMs: 60_000,
+      imageIndex: 4,
+      onContainerStarted: (id) => { startedWith = id; },
+    });
+
+    assert.equal(startedWith, "sha256-c0ffee", "the daemon's ID is what the start record gets");
+    const logged = readFileSync(calls, "utf8").split("\n").filter(Boolean).filter((l) => !l.startsWith("run "));
+    assert.ok(logged.length > 0, "the watcher half ran");
+    assert.ok(logged.some((l) => l === "logs -f sha256-c0ffee"), `docker logs addressed the ID — saw ${JSON.stringify(logged)}`);
+    assert.ok(logged.some((l) => l === "wait sha256-c0ffee"), `docker wait addressed the ID — saw ${JSON.stringify(logged)}`);
+    assert.ok(!logged.some((l) => l.includes("forge-idtest")), `no post-start call addressed the reusable NAME — saw ${JSON.stringify(logged)}`);
+  } finally {
+    process.env.PATH = origPath;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(binDir, { recursive: true, force: true });
+  }
+});
+
 test("FG-536 productionDockerExec: FORGE_DETACHED_EXEC=off routes to the attached executor", async () => {
   const dir = mkdtempSync(join(tmpdir(), "fg536-off-"));
   const prev = process.env.FORGE_DETACHED_EXEC;

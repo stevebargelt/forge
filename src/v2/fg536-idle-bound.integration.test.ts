@@ -5,6 +5,13 @@
 // kill + container.idle_timeout evidence trail, no status write in the same
 // pass, and the fail-safe non-enforcement cases (recent activity, unknowable
 // activity, disabled budget).
+//
+// Plus the two review findings this file also covers:
+//   - the daemon-start-to-callback window: an INVOKE row killed after
+//     `docker run -d` but before the container.started append, whose detached
+//     container ran on and left a real result.json.
+//   - container IDENTITY: every docker call reconcile makes must address the
+//     daemon's recorded container ID, not the reusable forge-<taskId> name.
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -109,6 +116,105 @@ test("FG-536 idle bound: a zero/disabled budget enforces nothing", () => {
 
   assert.deepEqual(kills, []);
   assert.equal(idleEvents("task-build-nolimit").length, 0);
+});
+
+// ── the daemon-start-to-callback window (review finding 1) ──────────────────
+// `docker run -d` created the container; the CLI was killed before the
+// container.started append. The container ran to completion and left a real
+// result.json. The FG-533 sweep is (correctly) inert for invoke rows, so
+// without the result-on-disk branch this row strands `running` forever.
+
+const INVOKE_RUN: Run = { id: "run-fg536-inv", workflow: "invoke", title: "fg536 invoke", status: "active", createdAt: "2026-07-12T00:00:00Z" };
+
+function insertInvokeRunning(id: string): void {
+  insertTask({
+    id, runId: INVOKE_RUN.id, phase: "task", agentRole: "engineer", status: "running",
+    taskPackage: {
+      taskId: id, runId: INVOKE_RUN.id, phase: "task", role: "engineer",
+      inputs: {}, composedSystemPrompt: "", dispatchSource: "invoke",
+    },
+    createdAt: "2026-07-12T00:00:00Z", startedAt: "2026-07-12T00:00:01Z",
+  });
+}
+
+function writeResult(runId: string, taskId: string, result: unknown): void {
+  const dir = taskDir(runId, taskId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "result.json"), JSON.stringify(result));
+}
+
+test("FG-536 start-callback window: an invoke row with NO container.started whose detached container left a real result is finalized, not stranded", () => {
+  insertRun(INVOKE_RUN);
+  insertInvokeRunning("task-inv-window");
+  writeResult(INVOKE_RUN.id, "task-inv-window", { status: "complete", answer: 42 });
+
+  const r = reconcileRun(INVOKE_RUN.id, () => false);
+
+  const t = getTask("task-inv-window")!;
+  assert.equal(t.status, "complete");
+  assert.deepEqual(t.result, { status: "complete", answer: 42 }, "the REAL result the detached container wrote — not a synthesized one");
+  assert.ok(r.taskChanges.some((c) => c.taskId === "task-inv-window" && c.to === "complete" && c.reason === "container_gone_result_present"));
+
+  try { rmSync(runDir(INVOKE_RUN.id), { recursive: true, force: true }); } catch { /* absent */ }
+});
+
+test("FG-536 start-callback window: the same invoke row while its container is still ALIVE is left running (no result yet is not evidence of death)", () => {
+  insertRun(INVOKE_RUN);
+  insertInvokeRunning("task-inv-live");
+
+  const r = reconcileRun(INVOKE_RUN.id, ALIVE);
+
+  assert.equal(getTask("task-inv-live")!.status, "running");
+  assert.equal(r.taskChanges.length, 0);
+});
+
+// ── container identity (review finding 2) ───────────────────────────────────
+
+test("FG-536 identity: liveness and the idle kill address the RECORDED daemon container ID, never the reusable forge-<taskId> name", () => {
+  const id = insertLiveContainerTask("task-build-detached", 60_000).id;
+  logEvent("container.started", { runId: RUN.id, taskId: id, payload: { containerName: `forge-${id}`, containerId: "c0ffee1234" } });
+
+  const probed: string[] = [];
+  const { idleBound, kills } = bound(Date.now() - 120_000);
+
+  reconcileRun(RUN.id, (n) => { probed.push(n); return true; }, undefined, undefined, undefined, idleBound);
+
+  assert.deepEqual(probed, ["c0ffee1234"], "liveness probes the container ID");
+  assert.deepEqual(kills, ["c0ffee1234"], "the idle bound kills the container ID — a name kill could hit a replacement that acquired forge-<taskId>");
+});
+
+test("FG-536 identity: exit-info and the reap address the recorded container ID too", () => {
+  insertRun(INVOKE_RUN);
+  const id = "task-inv-identity";
+  insertInvokeRunning(id);
+  logEvent("container.started", { runId: INVOKE_RUN.id, taskId: id, payload: { containerName: `forge-${id}`, containerId: "dead1234beef" } });
+  writeResult(INVOKE_RUN.id, id, { status: "complete" });
+
+  const exitInfoSeen: string[] = [];
+  const reaped: string[] = [];
+  reconcileRun(
+    INVOKE_RUN.id,
+    () => false,
+    (n) => { reaped.push(n); return "killed" as const; },
+    (n) => { exitInfoSeen.push(n); return {}; },
+  );
+
+  assert.equal(getTask(id)!.status, "complete");
+  assert.deepEqual(exitInfoSeen, ["dead1234beef"], "exit info is read from the container ID");
+  assert.deepEqual(reaped, ["dead1234beef"], "`docker rm -f` targets the container ID — never a name another container may now hold");
+
+  try { rmSync(runDir(INVOKE_RUN.id), { recursive: true, force: true }); } catch { /* absent */ }
+});
+
+test("FG-536 identity: a task whose container.started carries no ID (attached executor, legacy rows) still addresses the name", () => {
+  insertLiveContainerTask("task-build-legacy", 60_000);
+  const probed: string[] = [];
+  const { idleBound, kills } = bound(Date.now() - 120_000);
+
+  reconcileRun(RUN.id, (n) => { probed.push(n); return true; }, undefined, undefined, undefined, idleBound);
+
+  assert.deepEqual(probed, ["forge-task-build-legacy"]);
+  assert.deepEqual(kills, ["forge-task-build-legacy"]);
 });
 
 test("FG-536 idle bound: a task without container.started (host-side / pre-container) is never idle-probed", () => {
