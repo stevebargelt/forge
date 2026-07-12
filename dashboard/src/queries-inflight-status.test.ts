@@ -60,7 +60,7 @@ const NON_STATUS_BADGES = new Set(["pass", "fail", "reconcile_candidate"]);
   const db = new Database(join(tmpHome, "forge.db"));
   db.exec(`
     CREATE TABLE runs (id TEXT PRIMARY KEY, title TEXT, workflow TEXT, project_dir TEXT, status TEXT, created_at TEXT);
-    CREATE TABLE tasks (id TEXT PRIMARY KEY, run_id TEXT, phase TEXT, agent_role TEXT, agent_model TEXT, status TEXT, started_at TEXT, created_at TEXT, parent_id TEXT);
+    CREATE TABLE tasks (id TEXT PRIMARY KEY, run_id TEXT, phase TEXT, agent_role TEXT, agent_model TEXT, status TEXT, started_at TEXT, created_at TEXT, parent_id TEXT, task_package TEXT NOT NULL);
     CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, task_id TEXT, event_type TEXT, payload TEXT, created_at TEXT);
 
     INSERT INTO runs VALUES ('run-active','Active run','feature','/proj/a','active', datetime('now','-2 hours'));
@@ -68,7 +68,10 @@ const NON_STATUS_BADGES = new Set(["pass", "fail", "reconcile_candidate"]);
     INSERT INTO runs VALUES ('run-done','Complete run','feature','/proj/a','complete', datetime('now','-3 hours'));
   `);
 
-  const insert = db.prepare("INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,NULL)");
+  // task_package carries no dispatchSource, so no row here is eligible for the
+  // FG-533 pre-container classification — this fixture pins the status partition
+  // and must stay docker-free.
+  const insert = db.prepare("INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,NULL,'{}')");
   for (const status of ALL_STATUSES) {
     insert.run(`task-${status}`, "run-active", "engineer", "engineer", "sonnet", status, null, "2026-07-11T10:00:00Z");
   }
