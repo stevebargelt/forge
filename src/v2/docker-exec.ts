@@ -2,12 +2,16 @@
 // path (runNext.ts). Single source of truth so liveness/streaming fixes can't
 // land in one path and miss the other (they did diverge once — #173/#174).
 //
-// Each agent runs as `docker run --name forge-<taskId> ...` in the foreground;
-// we stream its stdout/stderr to disk live and run an idle watchdog over the
-// stdout chunks. On idle, killing the docker CLI client is NOT enough — SIGKILL
-// can't be forwarded, so the daemon keeps the container running and the agent
-// orphans. We `docker kill <name>` the container itself (authoritative), then
-// kill the client to unblock the stream.
+// PRODUCTION DEFAULT (FG-536): agents run DETACHED — see detachedDockerExec
+// below; the daemon owns the container and the host process is a disposable
+// watcher. The attached executor (defaultDockerExec) remains for the
+// dependency provisioner, imageIndex-less legacy callers, and the
+// FORGE_DETACHED_EXEC=off escape hatch. In attached mode each agent runs as a
+// foreground `docker run --name forge-<taskId> ...`; stdout/stderr stream to
+// disk live and an idle watchdog rides the chunks. On idle, killing the docker
+// CLI client is NOT enough — SIGKILL can't be forwarded, so the daemon keeps
+// the container running and the agent orphans. We `docker kill <name>` the
+// container itself (authoritative), then kill the client to unblock the stream.
 //
 // FG-492: task containers no longer run with `--rm` (see spawn.ts), so a
 // failed container survives long enough to `docker inspect` for causal

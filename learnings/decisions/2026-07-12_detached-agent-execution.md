@@ -49,7 +49,7 @@ Run the agent with `docker run -d`. The **daemon** owns the container. The host 
 - `docker logs -f <name>` — re-delivers the container's output from t=0, streams it to the task dir, and bumps the idle watchdog. It may die freely: the logs live in the daemon, and re-attaching re-delivers them.
 - `docker wait <name>` — blocks and yields the exit code.
 
-Kill either watcher, or the whole host process, and the container is untouched. It runs to completion, writes `/task/result.json` through its bind mount, and exits normally. The next reconcile pass finalizes the task from that **real result** through the ordinary container-gone evidence path — which already existed and is unchanged (invoke-like completion with the FG-523 validation contract; `orphaned_needs_finalize` for a pipeline step, which must not skip its host-side finalize).
+Kill either watcher, or the whole host process, and the container is untouched. It runs to completion, writes `/task/result.json` through its bind mount, and exits normally. The next reconcile pass finalizes the task from that **real result** through the ordinary container-gone evidence path — which already existed and is unchanged (invoke-like completion exactly as the live invoke path would — the FG-523 validation contract is a pipeline implementer-step gate, not an invoke gate; `orphaned_needs_finalize` for a pipeline step, which must not skip its host-side finalize, and whose `forge retry --force` re-drive runs that real finalize path including the contract).
 
 **Pros**: survival is structural, not a countermeasure — it holds for *any* signal from *any* sender, including SIGKILL. The recovery model is not new code: detached execution only changes whether the container is still alive to finish its own work.
 
