@@ -2125,8 +2125,8 @@ async function runContainer(args: {
   // FG-533: the pre-container window. Everything from here to the container.started
   // append below (image pull, auth staging, dependency provisioning — minutes) runs
   // with the task already `running` and no container.started event, which is the
-  // signal BOTH sweeps gate on. A crash in this span is a permanent wedge; the
-  // matrix pins it as a known failure until FG-533 lands the recovery path.
+  // signal BOTH sweeps gate on. Reconcile's pre-container sweep recovers a crash
+  // here: it lands as `pre_container_crash`, retryable without --force (no work yet).
   crashPoint("runContainer:after-mark-running-before-container-launch");
 
   let runtime: Runtime;
