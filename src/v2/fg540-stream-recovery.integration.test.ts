@@ -9,7 +9,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
+import { writeFileSync, mkdirSync, existsSync, readFileSync, chmodSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { runNext, type DockerExecFn } from "./runNext.js";
 import { invoke } from "./invoke.js";
@@ -202,6 +202,43 @@ test("FG-540 int: invoke — an existing non-empty result.json ALWAYS wins; stre
   assert.ok(!evTypes.includes("task.result_recovered_from_stream"));
 });
 
+// Leaves result.json empty but unwritable, so the recovery write throws EACCES.
+function makeUnwritableResultExec(stdoutJsonl: string): DockerExecFn {
+  return async ({ stdoutPath, stderrPath }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(stdoutPath, stdoutJsonl);
+    writeFileSync(stderrPath, "");
+    const resultPath = join(dir, "result.json");
+    writeFileSync(resultPath, "");
+    chmodSync(resultPath, 0o444);
+    return 0;
+  };
+}
+
+test("FG-540 int: invoke — recovered result that cannot be persisted FAILS CLOSED as result_missing (no throw out of dispatch)", async () => {
+  ensureCodexRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  const r = await invoke({
+    agentRole: "red-wide",
+    task: "review the diff",
+    projectDir: "/tmp/test-project",
+    readOnlyProject: true,
+    runtimeName: "codex-stub",
+    dockerExec: makeUnwritableResultExec(codexStream(JSON.stringify(PASS_OBJECT))),
+  });
+
+  assert.equal(r.status, "failed");
+  assert.match(r.error ?? "", /could not be persisted/);
+  assert.equal(failureKindForTask(r.taskId), "result_missing");
+  const task = getTask(r.taskId)!;
+  assert.equal(task.status, "failed");
+  const evTypes = eventsForTask(r.taskId).map((e) => e.eventType);
+  assert.ok(!evTypes.includes("task.result_recovered_from_stream"), "no recovery provenance for a result that never landed");
+  assert.ok(!evTypes.includes("task.completed"));
+});
+
 // ---------------------------------------------------------------------------
 // runNext (workflow) path — symmetry with invoke via the one shared rule
 // ---------------------------------------------------------------------------
@@ -250,6 +287,26 @@ test("FG-540 int: runNext — a recovered object that satisfies the validation c
   const evTypes = eventsForTask(task.id).map((e) => e.eventType);
   assert.ok(evTypes.includes("task.result_recovered_from_stream"));
   assert.ok(evTypes.includes("task.completed"));
+});
+
+test("FG-540 int: runNext — recovered result that cannot be persisted FAILS the step closed (dispatcher records the failure, never throws)", async () => {
+  ensureCodexRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const wf = makeWorkflow("engineer");
+  const { runId } = startRun({
+    workflow: wf, title: "fg540-rn-unwritable", inputs: { brief: "x" }, projectDir: "/tmp/test-project",
+  });
+
+  const validated = { ...PASS_OBJECT, tests_run: 12, tests_passed: 12 };
+  const wave = await runNext({ runId, workflow: wf, dockerExec: makeUnwritableResultExec(codexStream(JSON.stringify(validated))) });
+
+  assert.deepEqual(wave.failedSteps, ["step"]);
+  const task = tasksForRun(runId).find((t) => t.phase === "step")!;
+  assert.equal(task.status, "failed");
+  assert.equal(failureKindForTask(task.id), "result_missing");
+  assert.match(task.error ?? "", /could not be persisted/);
+  const evTypes = eventsForTask(task.id).map((e) => e.eventType);
+  assert.ok(!evTypes.includes("task.result_recovered_from_stream"));
 });
 
 test("FG-540 int: runNext — prose terminal message on a structured step still fails result_missing (no narrative inference for structured roles)", async () => {

@@ -741,7 +741,19 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
       ? recoverStructuredStreamResult({ logFormat: runtimeMeta.logFormat, runtimeKind: runtimeMeta.runtimeKind, stdoutRaw })
       : undefined;
     if (recovered) {
-      writeFileSync(resultPath, JSON.stringify(recovered));
+      // FG-540 review: persist-or-fail-closed. If the recovered result can't be
+      // written (unwritable dir, a directory at result.json), the task has no
+      // durable result — fail it through the normal result-missing path rather
+      // than throwing out of dispatch with the task left running.
+      try {
+        writeFileSync(resultPath, JSON.stringify(recovered));
+      } catch (e) {
+        const err = `${error} (stream-recovered result could not be persisted: ${e instanceof Error ? e.message : String(e)})`;
+        failTask(taskId, { runId, kind, error: err, evidence: recoveryEvidenceFor(kind) });
+        finalizeContainerRetention(containerName, false);
+        closeRunIfIdle(false);
+        return { runId, taskId, status: "failed", error: err, failureKind: kind };
+      }
       logEvent("task.result_recovered_from_stream", {
         runId, taskId,
         payload: { source: "invoke", logFormat: runtimeMeta.logFormat ?? runtimeMeta.runtimeKind ?? null },

@@ -2624,7 +2624,17 @@ async function runContainer(args: {
       ? recoverStructuredStreamResult({ logFormat: runtimeMeta.logFormat, runtimeKind: runtimeMeta.runtimeKind, stdoutRaw })
       : undefined;
     if (recovered) {
-      writeFileSync(join(dir, "result.json"), JSON.stringify(recovered));
+      // FG-540 review: persist-or-fail-closed. An unwritable result.json must
+      // fail the task through the normal result-missing path (retention
+      // included), not throw out of the workflow dispatcher.
+      try {
+        writeFileSync(join(dir, "result.json"), JSON.stringify(recovered));
+      } catch (e) {
+        const err = `${msg} (stream-recovered result could not be persisted: ${e instanceof Error ? e.message : String(e)})`;
+        failTask(args.taskId, { runId: args.runId, kind, error: err, evidence: recoveryEvidenceFor(kind) });
+        finalizeContainerRetention(containerName, false);
+        return { kind: "failed", error: err };
+      }
       logEvent("task.result_recovered_from_stream", {
         runId: args.runId, taskId: args.taskId,
         payload: { source: "workflow", logFormat: runtimeMeta.logFormat ?? runtimeMeta.runtimeKind ?? null },
