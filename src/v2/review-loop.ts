@@ -31,8 +31,27 @@ export type CommitRange = {
   spansUnmatched: boolean;
 };
 
+/** The grammar for "this commit SUBJECT references ticket <id>" (FG-539):
+ *  - legacy purely-numeric ids ("301") require the hash — "#301" — because a
+ *    bare number matches far too much prose;
+ *  - structured ids ("FG-536") match with or without it, since Forge's
+ *    established subject convention is "(FG-536)". The left boundary is any
+ *    non-alphanumeric or start-of-subject, so "#FG-536", "(FG-536)", and a
+ *    leading "FG-536:" all match while "XFG-536" does not.
+ *  The right boundary rejects a following digit — FG-536 never also catches
+ *  FG-5360 (nor #301 → #3010) — and a hyphen-continuation, so FG-409 never
+ *  also catches a hyphen-suffixed sibling id like FG-409-a. */
+export function ticketSubjectPattern(ticketId: string): RegExp {
+  const id = ticketId.replace(/^#/, "").trim();
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const rightBoundary = "(?![0-9]|-[A-Za-z0-9])";
+  return /^[0-9]+$/.test(id)
+    ? new RegExp(`#${escaped}${rightBoundary}`)
+    : new RegExp(`(^|[^A-Za-z0-9])${escaped}${rightBoundary}`);
+}
+
 /** Resolve the commits under review for a ticket: an explicit `--since <sha>`
- *  (→ <sha>..HEAD), else infer from commits whose message references #<ticket>.
+ *  (→ <sha>..HEAD), else infer from commits whose SUBJECT references <ticket>.
  *  Pure but for `git` — injectable for tests. */
 export function resolveCommitRange(
   ticketId: string,
@@ -47,12 +66,22 @@ export function resolveCommitRange(
     return { mode: "since", diffRange, shas: shasOf(diffRange), spansUnmatched: false };
   }
 
-  const num = ticketId.replace(/^#/, "").trim();
-  // Commits whose subject/body references the ticket, e.g. "(#301)" or "#301".
-  // POSIX ERE (git --extended-regexp) has no `\b`; match #<num> not followed by a
-  // digit (so #301 doesn't also catch #3010) — `([^0-9]|$)`.
-  const matched = git(["log", "--format=%H", `--grep=#${num}([^0-9]|$)`, "--extended-regexp"])
-    .split("\n").map((s) => s.trim()).filter(Boolean);
+  const re = ticketSubjectPattern(ticketId);
+  // Match the SUBJECT only, not the whole message: `git log --grep` searches
+  // subject AND body, so a commit whose body merely *discusses* FG-536 (while
+  // its subject says FG-539) would be pulled into FG-536's range. Read the
+  // subjects and filter here instead. `%s` is newline-free, so one line per
+  // commit: "<sha> <subject>".
+  const matched = git(["log", "--format=%H %s"])
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const sp = line.indexOf(" ");
+      return sp === -1 ? { sha: line, subject: "" } : { sha: line.slice(0, sp), subject: line.slice(sp + 1) };
+    })
+    .filter(({ subject }) => re.test(subject))
+    .map(({ sha }) => sha);
   if (matched.length === 0) return { mode: "none", diffRange: "", shas: [], spansUnmatched: false };
 
   // git log is newest-first: newest = matched[0], oldest = matched[last]. The

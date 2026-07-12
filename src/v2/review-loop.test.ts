@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   resolveCommitRange,
+  ticketSubjectPattern,
   parseReviewerVerdict,
   runVerification,
   runReviewLoop,
@@ -29,12 +30,24 @@ test("#301 range: --since yields <sha>..HEAD with its shas", async () => {
   assert.equal(r.spansUnmatched, false);
 });
 
-test("#301 range: inferred, contiguous → oldest^..newest, spansUnmatched false", async () => {
-  const git: GitRunner = (args) => {
-    if (args.includes("--grep=#301([^0-9]|$)")) return "hNew\nhMid\nhOld\n"; // 3 matched, newest-first
-    if (args[2] === "hOld^..hNew") return "hNew\nhMid\nhOld\n";        // span == matched
-    return "";
+/** A fake git over a history (newest first) of [sha, subject] pairs: serves the
+ *  resolver's subject log (`log --format=%H %s`) and any `<range>` span log. */
+function fakeGit(history: Array<[string, string]>): GitRunner {
+  const shas = history.map(([sha]) => sha);
+  return (args) => {
+    if (args[1] === "--format=%H %s") return history.map(([sha, s]) => `${sha} ${s}`).join("\n") + "\n";
+    const [from, to] = (args[2] ?? "").replace(/\^/g, "").split("..");
+    const span = shas.slice(shas.indexOf(to!), shas.indexOf(from!) + 1);
+    return span.join("\n") + "\n";
   };
+}
+
+test("#301 range: inferred, contiguous → oldest^..newest, spansUnmatched false", async () => {
+  const git = fakeGit([
+    ["hNew", "fix: c (#301)"],
+    ["hMid", "fix: b (#301)"],
+    ["hOld", "fix: a (#301)"],
+  ]);
   const r = resolveCommitRange("#301", { git });
   assert.equal(r.mode, "inferred");
   assert.equal(r.diffRange, "hOld^..hNew");
@@ -43,11 +56,11 @@ test("#301 range: inferred, contiguous → oldest^..newest, spansUnmatched false
 });
 
 test("#301 range: inferred span containing unrelated commits → spansUnmatched true; shas stays precise", async () => {
-  const git: GitRunner = (args) => {
-    if (args.includes("--grep=#777([^0-9]|$)")) return "hNew\nhOld\n";        // 2 matched
-    if (args[2] === "hOld^..hNew") return "hNew\nhUnrelated\nhOld\n";  // span has a 3rd, non-ticket commit
-    return "";
-  };
+  const git = fakeGit([
+    ["hNew", "fix: b (#777)"],
+    ["hUnrelated", "chore: housekeeping"],
+    ["hOld", "fix: a (#777)"],
+  ]);
   const r = resolveCommitRange("777", { git });
   assert.equal(r.spansUnmatched, true, "caller must diff the precise shas, not the span");
   assert.deepEqual(r.shas, ["hNew", "hOld"]);
@@ -56,6 +69,75 @@ test("#301 range: inferred span containing unrelated commits → spansUnmatched 
 test("#301 range: no --since and no matching commits → mode none", async () => {
   const r = resolveCommitRange("999", { git: () => "\n  \n" });
   assert.deepEqual(r, { mode: "none", diffRange: "", shas: [], spansUnmatched: false });
+});
+
+// ── FG-539: structured ticket ids match without a hash prefix ────────────────
+
+test("FG-539 range: structured id matches Forge's subject forms, hash-optional, with exact boundaries", async () => {
+  const re = ticketSubjectPattern("FG-536");
+  for (const subject of [
+    "fix: durable launch ownership (FG-536)",
+    "fix: durable launch ownership #FG-536",
+    "FG-536: durable launch ownership",
+    "chore(backlog): close FG-536 — shipped",
+  ]) {
+    assert.ok(re.test(subject), `expected match: ${subject}`);
+  }
+  for (const subject of [
+    "feat: adjacent ticket (FG-5360)",     // shared numeric prefix
+    "feat: other id family (XFG-536)",     // left boundary must be non-alphanumeric
+    "feat: hyphen-suffixed sibling (FG-536-a)", // round-2 finding: hyphen continuation is a different id
+  ]) {
+    assert.ok(!re.test(subject), `expected NO match: ${subject}`);
+  }
+});
+
+test("FG-539 range: hyphen-suffixed sibling ids never cross-match, in either direction", async () => {
+  assert.ok(!ticketSubjectPattern("FG-409").test("fix: sibling work (FG-409-a)"));
+  assert.ok(ticketSubjectPattern("FG-409").test("fix: the base ticket (FG-409)"));
+  // The suffixed id itself still resolves exactly.
+  assert.ok(ticketSubjectPattern("FG-409-a").test("fix: sibling work (FG-409-a)"));
+  assert.ok(!ticketSubjectPattern("FG-409-a").test("fix: the base ticket (FG-409)"));
+  // Numeric legacy ids get the same protection.
+  assert.ok(!ticketSubjectPattern("301").test("fix the thing (#301-a)"));
+});
+
+test("FG-539 range: a leading hash on a structured id is accepted and matches the same forms", async () => {
+  assert.equal(ticketSubjectPattern("#FG-536").source, ticketSubjectPattern("FG-536").source);
+});
+
+test("FG-539 range: purely numeric ids keep the mandatory hash (bare '301' in prose must not match)", async () => {
+  const re = ticketSubjectPattern("301");
+  assert.ok(re.test("fix the thing (#301)"));
+  assert.ok(!re.test("bump to version 301 of the spec"));
+  assert.ok(!re.test("fix the thing (#3010)"));
+});
+
+test("FG-539 range: structured-id inference still returns precise shas and span detection", async () => {
+  const git = fakeGit([
+    ["hNew", "docs: b (FG-536)"],
+    ["hUnrelated", "chore: housekeeping"],
+    ["hOld", "fix: a (FG-536)"],
+  ]);
+  const r = resolveCommitRange("FG-536", { git });
+  assert.equal(r.mode, "inferred");
+  assert.equal(r.spansUnmatched, true);
+  assert.deepEqual(r.shas, ["hNew", "hOld"]);
+});
+
+test("FG-539 range: inference reads SUBJECTS, never `--grep` (which would also search bodies)", async () => {
+  // A commit whose subject is FG-539 but whose body discusses FG-536 must not
+  // land in FG-536's range; `git log --grep` matches the whole message, so the
+  // resolver must not use it. Body-level proof is in the real-git integration
+  // test — this pins the mechanism at the unit tier.
+  const args: string[][] = [];
+  const git: GitRunner = (a) => {
+    args.push(a);
+    return "hOne subject (FG-536)\n";
+  };
+  resolveCommitRange("FG-536", { git });
+  assert.ok(!args.flat().some((a) => a.startsWith("--grep")), "must not grep the full commit message");
+  assert.deepEqual(args[0], ["log", "--format=%H %s"]);
 });
 
 // ── Slice 2: parseReviewerVerdict ────────────────────────────────────────────
