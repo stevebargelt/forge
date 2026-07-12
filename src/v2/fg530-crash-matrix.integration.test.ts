@@ -52,7 +52,7 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
@@ -1252,6 +1252,76 @@ test("FG-530 invariant 4 [worktree discard]: a worktree that existed at the kill
   assert.equal(violations.length, 1, "exactly the failed task's worktree is a discard; the merged one's removal is sanctioned");
   assert.equal(violations[0]!.invariant, "4-persisted-work-never-discarded");
   assert.match(violations[0]!.detail, /worktree for task task-build-crashed .* is GONE after recovery/);
+});
+
+// ── FG-536: the watcher window, with the container still RUNNING ──────────────
+//
+// The matrix cells at runContainer:after-container-started-before-exec establish that
+// the invariants hold when the host dies mid-watch. They cannot establish the thing
+// detached execution is FOR: that the container the host stopped watching runs on, and
+// that the result it produces after the host is gone is recovered rather than lost. So
+// this cell pins the two halves of that window apart — nothing on disk at the kill, the
+// container's result on disk after it, and reconcile landing THAT result on the row.
+// Without it, a regression that kills or stops the container with the parent (an
+// attached exec, a `--rm` teardown, a process-group kill) leaves every matrix cell green.
+
+test("FG-536 [detached durability]: the host dies in the WATCHER window — the container had started and produced NOTHING; it runs to completion unwatched, and reconcile recovers its POST-KILL result", async () => {
+  ensureRuntime();
+  writeWorkflowYaml(PLAIN_WF.name, PLAIN_YAML);
+  const projectDir = makeTmpDir();
+  const exec = makeExec({ redVerdict: "pass" });
+  const { runId } = startRun({ workflow: PLAIN_WF, title: "fg536 watcher death", inputs: {}, projectDir });
+
+  let atKill: PersistedWork | undefined;
+  const fired = await crashAt(
+    "runContainer:after-container-started-before-exec",
+    () => runNext({ runId, workflow: PLAIN_WF, dockerExec: exec }),
+    () => {
+      atKill = capturePersistedWork(runId);
+    },
+  );
+  assert.ok(fired, "the watcher-window kill must fire");
+
+  const primary = primaryOf(runId, "build")!;
+  assert.equal(primary.status, "running", "the host died watching a live container: the row is still `running`");
+  assert.ok(
+    eventsForTask(primary.id).some((e) => e.eventType === "container.started"),
+    "with container.started on the record — `docker run -d` had returned before the kill",
+  );
+  assert.deepEqual(
+    atKill!.results,
+    [],
+    "and NOTHING persisted at the kill — the container was still RUNNING. This is what makes the cell a durability " +
+      "test: a result already on disk would only prove reconcile re-reads work that was never at risk",
+  );
+
+  // The dead process has unwound; the container it started never noticed. It runs to
+  // completion with no watcher and its result lands — the window detached execution opens.
+  const resultPath = join(taskDir(runId, primary.id), "result.json");
+  const postKill = readFileSync(resultPath, "utf8");
+  assert.match(postKill, /"tests_run":1/, "the container's result landed AFTER the host was gone");
+
+  await recoverToFixpoint(runId, PLAIN_WF, exec);
+
+  const recovered = getTask(primary.id)!;
+  assert.equal(
+    recovered.status,
+    "failed",
+    "a pipeline step whose host died before its finalize lands fail-safe, not complete (orphaned_needs_finalize)",
+  );
+  assert.match(recovered.error ?? "", /orphaned_needs_finalize/, "the landing names the window it recovered from");
+  assert.deepEqual(
+    recovered.result,
+    JSON.parse(postKill),
+    "and carries the POST-KILL result on its row — a container killed with its parent, or a result reaped with it, " +
+      "leaves this null. That is the FG-536 regression this cell exists to catch",
+  );
+  assert.equal(readFileSync(resultPath, "utf8"), postKill, "the result on disk is preserved verbatim");
+  assert.deepEqual(
+    checkNoPermanentWedge(runId, PLAIN_WF),
+    [],
+    "INVARIANT 2: the recovered state leaves the operator a named verb (forge retry --force)",
+  );
 });
 
 // ── the REAL bugs this harness found on HEAD ───────────────────────────────────

@@ -298,65 +298,77 @@ export function projectMountHost(dockerArgs: string[]): string | undefined {
  *  present ⇒ no severity downgrade) — an authoritative fail that actually
  *  blocks, which is what the blocked_by_red kill points need. */
 export function makeExec(opts: ExecOpts): DockerExecFn {
-  // FG-536: the real executors signal the start only once `docker run -d` has
-  // succeeded, and the container then runs to completion whatever happens to the
-  // host. This fake models that faithfully: the container's outputs are on disk
-  // BEFORE the start is signalled, so a kill at
-  // runContainer:after-container-started-before-exec strands the task in the shape
-  // a real watcher death leaves — running, container.started, result.json written
-  // by a container the host no longer watches. Signalling before writing would
-  // model a container that never produced anything, which detached execution makes
-  // impossible.
   const exec: DockerExecFn = async ({ args, stdoutPath, stderrPath, onContainerStarted }) => {
     const nameIdx = args.indexOf("--name");
     const taskId = (nameIdx >= 0 ? (args[nameIdx + 1] ?? "") : "").replace(/^forge-/, "");
     const dir = dirname(stdoutPath);
     mkdirSync(dir, { recursive: true });
 
-    if (opts.narrativeStdoutOnly) {
-      writeFileSync(stdoutPath, PI_NARRATIVE_STDOUT);
+    // The container's whole life, from the agent's work in the project mount to the
+    // outputs it leaves in the task dir. It is a closure because the container is
+    // NOT the host's to cancel: see the start signal below.
+    const containerRunsToCompletion = (): void => {
+      if (opts.narrativeStdoutOnly) {
+        writeFileSync(stdoutPath, PI_NARRATIVE_STDOUT);
+        writeFileSync(stderrPath, "");
+        return;
+      }
+
+      const isRed = taskId.includes("red") || taskId.includes("reviewer");
+      // Reds are read-only reviewers and get no worktree (FG-351), so only a primary
+      // has a work tree to write into.
+      if (!isRed && opts.agentWork) opts.agentWork({ projectMountHost: projectMountHost(args), taskId });
+
+      // The fanout scenario's upstream step: its result carries the array the
+      // fanout step reads (`from_upstream.array_key`). One element ⇒ one child.
+      const isFanoutUpstream = taskId.startsWith("task-plan-");
+      const filesModified = opts.filesModified ?? [];
+      const result = isRed
+        ? {
+            status: "complete",
+            verdict: opts.redVerdict,
+            confidence: 0.9,
+            findings:
+              opts.redVerdict === "fail"
+                ? [
+                    {
+                      severity: "high",
+                      summary: "seeded authoritative failure (FG-530 crash-matrix fixture)",
+                      evidence:
+                        "the crash-matrix arms this red to fail so the primary reaches the blocked_by_red write boundary",
+                      hypothesis: "n/a — fixture",
+                    },
+                  ]
+                : [],
+          }
+        : opts.primaryFailsContract
+          ? { status: "complete", files_modified: filesModified }
+          : isFanoutUpstream
+            ? { status: "complete", tests_run: 1, files_modified: filesModified, units: ["alpha"] }
+            : { status: "complete", tests_run: 1, files_modified: filesModified };
+
+      writeFileSync(join(dir, "result.json"), JSON.stringify(result));
+      writeFileSync(stdoutPath, "stub stdout");
       writeFileSync(stderrPath, "");
+    };
+
+    // FG-536: the real detached executor signals the start the instant `docker run -d`
+    // returns — the container exists and has produced NOTHING yet. If the host dies at
+    // that instant (the runContainer:after-container-started-before-exec probe throws
+    // from inside onContainerStarted), the container is not the host's to cancel: it
+    // goes on running with no watcher and its result lands AFTER the host is gone.
+    // That is the durability property detached execution exists for, so the fake
+    // models it — the container is handed to LIVE_CONTAINERS, and crashAt runs it once
+    // the dead process has unwound. Writing the outputs BEFORE the start signal would
+    // put the result on disk pre-kill and reduce this cell to reconciling work that was
+    // already safe — no live container, nothing detached execution could regress.
+    try {
       onContainerStarted?.();
-      return 0;
+    } catch (hostDied) {
+      LIVE_CONTAINERS.push(containerRunsToCompletion);
+      throw hostDied;
     }
-
-    const isRed = taskId.includes("red") || taskId.includes("reviewer");
-    // Reds are read-only reviewers and get no worktree (FG-351), so only a primary
-    // has a work tree to write into.
-    if (!isRed && opts.agentWork) opts.agentWork({ projectMountHost: projectMountHost(args), taskId });
-
-    // The fanout scenario's upstream step: its result carries the array the
-    // fanout step reads (`from_upstream.array_key`). One element ⇒ one child.
-    const isFanoutUpstream = taskId.startsWith("task-plan-");
-    const filesModified = opts.filesModified ?? [];
-    const result = isRed
-      ? {
-          status: "complete",
-          verdict: opts.redVerdict,
-          confidence: 0.9,
-          findings:
-            opts.redVerdict === "fail"
-              ? [
-                  {
-                    severity: "high",
-                    summary: "seeded authoritative failure (FG-530 crash-matrix fixture)",
-                    evidence:
-                      "the crash-matrix arms this red to fail so the primary reaches the blocked_by_red write boundary",
-                    hypothesis: "n/a — fixture",
-                  },
-                ]
-              : [],
-        }
-      : opts.primaryFailsContract
-        ? { status: "complete", files_modified: filesModified }
-        : isFanoutUpstream
-          ? { status: "complete", tests_run: 1, files_modified: filesModified, units: ["alpha"] }
-          : { status: "complete", tests_run: 1, files_modified: filesModified };
-
-    writeFileSync(join(dir, "result.json"), JSON.stringify(result));
-    writeFileSync(stdoutPath, "stub stdout");
-    writeFileSync(stderrPath, "");
-    onContainerStarted?.();
+    containerRunsToCompletion();
     return 0;
   };
   exec.signalsContainerStart = true;
@@ -446,6 +458,22 @@ function deadDb(point: string): DatabaseInstance {
   });
 }
 
+/** FG-536: the containers the kill left RUNNING — one closure per fake container
+ *  that had started (and produced nothing) when the host died. crashAt releases
+ *  them once the dead process has unwound, which is when a detached container's
+ *  outputs actually land: after the host is gone, with nothing watching. */
+const LIVE_CONTAINERS: Array<() => void> = [];
+
+/** Let every container the kill orphaned run to completion. Exported so a lane can
+ *  assert the two halves of the watcher window apart — the state at the kill (the
+ *  container still running, no result) and the state once it exits (its result on
+ *  disk, waiting for a reconcile that never watched it). */
+export function completeLiveContainers(): number {
+  const n = LIVE_CONTAINERS.length;
+  for (const container of LIVE_CONTAINERS.splice(0)) container();
+  return n;
+}
+
 /** Arm the hook at ONE point, run `fn`, swallow only OUR injected crash.
  *  Any other throw is a real failure and propagates.
  *
@@ -453,7 +481,11 @@ function deadDb(point: string): DatabaseInstance {
  *  goes up. Whatever catches it (reconcile's FG-459 guards; a runNext/gate handler)
  *  can no longer read or write a row, so no state mutates after the kill and the
  *  fresh pass in step 3 starts from exactly the world the crash left behind. The real
- *  DB is restored when the crashed call unwinds. */
+ *  DB is restored when the crashed call unwinds.
+ *
+ *  The containers, though, do NOT die with it (FG-536): any that had started are
+ *  released here, after the dead process is fully unwound, so their results land on
+ *  disk with no host watching — exactly the window detached execution opens. */
 export async function crashAt(
   point: string,
   fn: () => Promise<unknown> | unknown,
@@ -479,6 +511,7 @@ export async function crashAt(
   } finally {
     setCrashHookForTest(undefined);
     setDbForTest(live); // the crashed process is gone; the fresh pass gets a live store
+    completeLiveContainers(); // the containers it left behind are not gone — they finish
   }
   if (fired) FIRED.add(point);
   return fired;
