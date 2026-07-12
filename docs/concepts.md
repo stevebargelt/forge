@@ -428,6 +428,29 @@ forge record-host-verification \
 
 On a tiered project (`test:extended` present in `package.json`, `requiredHostGate` still the default), this single call is not enough — repeat it with `--command "npm run test:extended"` at the same commit to cover the rest of the derived gate list, or skip manual recording for the extended tier and let `forge campaign reconcile` or a whole-workflow-green CI run capture it.
 
+## Review-loop reviewer
+
+The agent (role `red-wide`) that `forge review-loop` dispatches once per round to review the diff after that round's verification comes back green. Distinct from the [Shipping Reviewer](#shipping-reviewer), which is a workflow red gated on a verdict; this one is the loop's own reviewer, and its verdict (`pass` / findings) is what decides whether the loop closes or runs another fix round.
+
+**The reviewer's model profile is pinned for the whole loop run (FG-513).** `resolveReviewerProfilePlan` (`src/cli/commands/review-loop.ts`) resolves the profile **once, at loop start**, and passes it explicitly to every round's dispatch. Precedence is identical to what a normal dispatch would apply — `--review-profile`, then `overrides.agents["red-wide"]`, then `defaults.activity.review`, then `defaults.profile` — so the pin does not change *which* profile you get; it changes *when* that decision is made. One loop run is reviewed by one reviewer; the `model_error` retry below is the single, deliberate exception.
+
+This matters because model-policy resolution is otherwise per-dispatch: `resolveModel` re-reads `model-policy.yml` from disk every time, so before FG-513 an operator editing the policy while a loop was running would change the reviewer *between rounds of that loop*. That is the FG-502 incident — there is no "rotation" mechanism in forge; a mid-loop edit adding `overrides.agents.red-wide` moved round 2's reviewer onto a then-provider-broken profile and structurally killed an otherwise-passing run. A mid-loop policy edit now takes effect on the **next** loop run, not the current one. See [When a policy edit takes effect](how-to-model-policy.md#when-a-policy-edit-takes-effect).
+
+**A provider failure gets exactly one same-round retry.** If a reviewer dispatch fails with `failure_kind: "model_error"` — provider/model infrastructure, not the agent's own work: invalid model, quota, provider 4xx, a broken provider CLI — the loop retries the reviewer **once, in the same round**, on the policy's default review path (`defaults.activity.review ?? defaults.profile`). The retry deliberately bypasses `overrides.agents` — that override is what selected the broken profile in the first place. Two qualifications:
+
+- **An operator pin is never silently switched.** When the profile came from `--review-profile`, the retry stays on that same profile — a bounded transient-tolerance retry, not a reroute. Forge does not overrule an explicit operator choice by picking a different model for them.
+- **Legacy (no `model-policy.yml`) has no profiles**, so the retry is a bounded same-resolution retry.
+
+The retry is bounded at exactly one: if it also fails — a second `model_error`, or any other failure — the loop stops as `reviewer_failed`, exactly as before. The retry raises the floor under an infrastructure blip; it does not make the reviewer unfailable. And failures that are *not* `model_error` on the **first** dispatch (a genuine agent failure, a crash, a malformed `result.json`) are **never** retried at all: they are real signal about the work, and re-rolling them would launder a structural failure into a pass.
+
+Either way the retry is durable, not just a log line: the loop emits `review_loop.reviewer_model_error_retry` (payload `{ ticketId, round, failedProfile?, retryProfile?, cause }` — see [SCHEMA-CONTRACT](SCHEMA-CONTRACT.md#fg-513-reviewer-model-error-retry-audit-only)) and the run note records a per-round line naming both profiles and the cause:
+
+```
+- reviewer model_error retry: profile 'codex-subscription' failed (model_error: ...) — retried same round on 'claude-subscription'
+```
+
+The event and the note line are written **whether or not the retry succeeded** — an infrastructure failure the retry absorbed still leaves a trail, so a run that looks clean in its verdict can still be audited for what it survived.
+
 ## Shipping Reviewer
 
 An acceptance reviewer (agent role `shipping-reviewer`) that runs as a red at the end of a workflow phase when the workflow explicitly lists it in `reds`. The Shipping Reviewer evaluates whether the engineer's implementation satisfies the original product and technical requirements — acceptance in the production call path, not style, lint, or tests in isolation.
