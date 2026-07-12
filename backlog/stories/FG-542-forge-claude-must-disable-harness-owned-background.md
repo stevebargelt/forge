@@ -10,7 +10,11 @@ created: 2026-07-12
 
 FG-535 proved that Claude Code's harness can SIGTERM all registered background tasks in a session, killing attached Forge work and previously propagating exit 143 into agent containers. `forge launch` and detached agent execution now make long work durable, but operators can still accidentally expose work through Claude's `run_in_background` channel unless the orchestrator session starts with `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`.
 
-The operator requested that Forge enforce this at its own Claude launch boundary rather than relying on shell setup. Implementation commit `380c79c` on `origin/chore/fg536-close` adds `buildClaudeChildEnv` and injects the variable into every `forge claude` child. The change needs normal ticketed review, exact-head CI, documentation reconciliation, merge, and AC closeout.
+The operator requested that Forge enforce this at its own Claude launch boundary rather than relying on shell setup. Implementation commit `380c79c` added `buildClaudeChildEnv` and injects the variable into every `forge claude` child.
+
+## Merge State Correction
+
+PR #111 merged `380c79c` to main as `931d6e3` while this ticket was being filed. Both required CI checks were green, but no FG-542 review-loop ran because the ticket did not yet exist. Treat the remaining work as an honest post-merge audit and retrospective AC closeout: do not reimplement or remerge the change, do not claim that review-loop authorized the already-completed merge, and route any substantive audit finding through a new corrective PR before closing.
 
 ## Goal
 
@@ -25,6 +29,8 @@ Every orchestrator session started through `forge claude` has Claude's harness-o
 - [ ] Regression coverage exercises non-Bedrock, Bedrock, hostile inherited-value, and parent-nonmutation cases at the launch-environment boundary.
 - [ ] Operator documentation states that the setting applies to newly started sessions and requires restarting an existing Claude session to take effect.
 - [ ] Durable-work guidance remains consistent: `forge launch run` owns long commands, ScheduleWakeup owns delays, and short synchronous status checks inspect durable state.
+- [ ] Run and record a post-merge reviewer audit of the shipped diff. If it finds substantive issues, fix them through a normal reviewed PR; if it passes, explicitly label it post-merge evidence rather than merge authorization.
+- [ ] Close with merge commit `931d6e3` only after the per-AC evidence walk; record that PR #111 preceded ticket/review-loop creation.
 
 ## Non-Goals
 
