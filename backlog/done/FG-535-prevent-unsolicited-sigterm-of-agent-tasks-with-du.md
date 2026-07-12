@@ -1,9 +1,11 @@
 ---
 id: FG-535
 type: story
-status: active
+status: done
 title: Prevent unsolicited SIGTERM of agent tasks with durable launcher and Claude/Supacode attribution
 created: 2026-07-12
+closed: 2026-07-12
+closed_commit: af57d25
 ---
 
 ## Problem
