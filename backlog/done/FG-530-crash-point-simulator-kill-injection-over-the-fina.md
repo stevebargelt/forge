@@ -62,3 +62,7 @@ AC walk:
 - **Real bugs FILED, not fixed**: FG-531 (awaiting_red wedge, single-step + fanout-parent variants — 2 pinned cells), FG-532 (gate reject discards the rejected result), FG-533 (pre-container running wedge) — four known-failure cells total, each flipping to a passing assertion when its ticket lands. Worktree-leak evidence recorded in FG-356.
 
 Gates: review-loop closeable (run-review-loop-fg-530-1815ec; tip 96b9ede = remote head; CI test + test-extended evidence reused at that sha). The operator's 2026-07-11 ruling (build the coverage, do not narrow) is fully implemented. Docs impact: **updated** — docs/how-to-testing.md (crash-matrix conventions, three-list lockstep, kill-vs-smoke semantics, known-failure pins incl. FG-533).
+
+## Status update (2026-07-11, post-close)
+
+All three bugs this harness found and filed have since LANDED: FG-532 (gate reject preserves the rejected result), FG-531 (awaiting_red sweep, both callsites), and FG-533 (pre-container sweep — `pre_container_crash`, retryable). Every KNOWN_FAILURES pin is deleted; all four known-failure cells are plain passing recovery assertions now. The "filed, not fixed" AC line above is the historical record of FG-530's own scope guard at close time, not the current state.
