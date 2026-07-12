@@ -426,7 +426,7 @@ export function reconcileRun(
   const workMayPersistAdvice = (taskId: string) =>
     isInvokeLikeRun ? `continue from it or \`forge retry ${taskId} --force\`` : `\`forge retry ${taskId} --force\``;
 
-  const failPipelineUnfinalized = (taskId: string, result: unknown, evidence: OrphanEvidence) => {
+  const failPipelineUnfinalized = (taskId: string, result: unknown, evidence: OrphanEvidence, streamLogFormat?: string | null) => {
     const error =
       "orphaned_needs_finalize: container finished with a usable result, but the forge process died before this pipeline step's host-side finalize (worktree merge → integration gate → reds → gates) could run — the step cannot be trusted complete. " +
       `The result is preserved (result.json + this task's row); inspect with \`forge show ${taskId}\`, then re-dispatch through the real finalize path with \`forge retry ${taskId} --force\`.`;
@@ -437,6 +437,13 @@ export function reconcileRun(
       crashPoint("reconcile:inside-fail-pipeline-unfinalized-txn");
       logEvent("task.failed", { runId, taskId, payload: { failure_kind: "orphaned_needs_finalize", error, evidence, containerEvidence } });
       logEvent("task.reconciled", { runId, taskId, payload: { from: "running", to: "failed", reason: "container_gone_pipeline_unfinalized", evidence, containerEvidence } });
+      // FG-540 provenance: the preserved result came from the structured stream.
+      // Inside the same transaction as the fail write — the landing is terminal and
+      // reconcile only revisits `running` tasks, so an event appended after the commit
+      // would be lost for good if the process died in between.
+      if (streamLogFormat !== undefined) {
+        logEvent("task.result_recovered_from_stream", { runId, taskId, payload: { source: "reconcile_pipeline_unfinalized", logFormat: streamLogFormat } });
+      }
     })();
     taskChanges.push({ taskId, from: "running", to: "failed", reason: "container_gone_pipeline_unfinalized" });
   };
@@ -848,13 +855,7 @@ export function reconcileRun(
           // FG-479: same guard as the valid-result branch above — a recovered
           // stdout result proves the agent finished, not that the pipeline's
           // host-side finalize ran.
-          failPipelineUnfinalized(t.id, inferred, evidence);
-          // FG-540 provenance: the preserved result came from the structured
-          // stream — recorded even on the fail-safe landing so a later
-          // re-drive's audit trail knows where the artifact originated.
-          if (recoveredSource === "structured_stream") {
-            logEvent("task.result_recovered_from_stream", { runId, taskId: t.id, payload: { source: "reconcile_pipeline_unfinalized", logFormat: recoveredLogFormat ?? null } });
-          }
+          failPipelineUnfinalized(t.id, inferred, evidence, recoveredSource === "structured_stream" ? (recoveredLogFormat ?? null) : undefined);
         } else {
           // FG-463: complete write + its events atomic (the result.json write above
           // is best-effort and deliberately stays OUTSIDE the transaction).
