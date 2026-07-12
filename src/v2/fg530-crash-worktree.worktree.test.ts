@@ -341,8 +341,10 @@ const KILLS: Cell[] = [
     scenario: "red-blocks",
     point: "dispatchSingleStep:after-awaiting-red",
     why:
-      "the FG-530-A wedge window, now with a real worktree behind it — the task is stranded at awaiting_red forever, and " +
-      "the work in its tree is what the operator must still be able to rescue.",
+      "the FG-530-A window, now with a real worktree behind it. The step's work is merged (awaiting_red is written after the " +
+      "merge) but the reds died with the process, so FG-531's sweep lands the primary failed/orphaned_needs_finalize — a " +
+      "recovery the operator resumes with `forge retry --force`. The tree must survive THAT: the retry re-drives the step, " +
+      "and the uncommitted half of the agent's work only exists inside it.",
   },
   {
     scenario: "red-blocks",

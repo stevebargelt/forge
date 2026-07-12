@@ -157,6 +157,14 @@ export const KILL_POINTS: KillPoint[] = [
   { point: "reconcile:inside-fail-fanout-wave-orphaned-txn", surface: "reconcile" },
   { point: "reconcile:before-fail-provisioning-phase-crash", surface: "reconcile" },
   { point: "reconcile:inside-fail-provisioning-phase-crash-txn", surface: "reconcile" },
+  // FG-531: the awaiting_red sweep's own writes (dead red rows, then the
+  // single-step / fanout-parent fail-safe landings).
+  { point: "reconcile:before-fail-dead-red-child", surface: "reconcile" },
+  { point: "reconcile:inside-fail-dead-red-child-txn", surface: "reconcile" },
+  { point: "reconcile:before-fail-awaiting-red-orphaned", surface: "reconcile" },
+  { point: "reconcile:inside-fail-awaiting-red-orphaned-txn", surface: "reconcile" },
+  { point: "reconcile:before-fail-awaiting-red-fanout-parent", surface: "reconcile" },
+  { point: "reconcile:inside-fail-awaiting-red-fanout-parent-txn", surface: "reconcile" },
 ];
 
 /** Look a kill point up BY NAME, so a lane that names one can never invent a probe
@@ -1051,19 +1059,12 @@ export function formatViolations(vs: Violation[]): string {
 export type KnownFailure = { id: string; invariant: string; match: RegExp; summary: string };
 
 export const KNOWN_FAILURES: KnownFailure[] = [
-  {
-    id: "FG-530-A",
-    invariant: "2-no-permanent-wedge",
-    match: /is non-terminal \('awaiting_red'\)/,
-    summary:
-      "a crash in the window between the awaiting_red status write and the reds' terminal write wedges the task at " +
-      "awaiting_red FOREVER — on BOTH callsites that make it (dispatchSingleStep's primary and dispatchFanoutStep's " +
-      "fanout parent, each with its own probe trio and its own matrix cells): reconcile only sweeps `running` rows, " +
-      "computeReadyQueue treats awaiting_red as live work " +
-      "(so the phase is never re-admitted and the run never settles), `forge gate` refuses any status but " +
-      "awaiting_gate/blocked_by_red, and `forge retry` refuses any status but failed. advise.ts tells the operator to " +
-      "'wait for reds to finish' — reds that died with the crashed process.",
-  },
+  // FG-530-A (the awaiting_red crash-window wedge, both callsites) was fixed by
+  // FG-531 — reconcile's awaiting_red sweep lands the task fail-safe as
+  // orphaned_needs_finalize (single-step) / fanout_wave_orphaned (fanout
+  // parent) when no live process holds the run lock and no red container is
+  // alive. Its matrix cells assert the recovery as plain passing tests now;
+  // the pin is gone so a regression fails loudly.
   // FG-530-B (gate reject NULLing the rejected task's result) was fixed by
   // FG-532 — the reject branch now passes `result: task.result` through
   // failTask, matching request-changes. Its matrix cell asserts the invariant

@@ -1,5 +1,7 @@
 # Decision: `awaiting_red` task status
 
+> **Amended by FG-531 (2026-07-12).** The status and its placement are unchanged, but this ADR's "reconcile must never touch `awaiting_red`" consequence no longer holds. Reconcile now sweeps an `awaiting_red` task that is genuinely orphaned — no live process holds the run's dispatch lock and no red container is alive — and lands it fail-safe (`orphaned_needs_finalize` for a single-step primary, `fanout_wave_orphaned` for a fanout parent). The Revisit Condition that anticipated this (below) is RESOLVED. See [Orphaned task recovery](../../docs/concepts.md#the-awaiting_red-crash-window).
+
 **ID**: FORGE-DEC-017
 **Date**: 2026-05-08
 **Status**: Decided
@@ -148,6 +150,8 @@ No code change required. Today's reconcile filters `tasks.status === "running"` 
 
 If a red task crashes mid-run, the blue stays in `awaiting_red` indefinitely. This is a real gap (similar in shape to #74, the zero-stdout orphan bug). Track as a separate follow-up; the new status doesn't make it worse, just more visible.
 
+> **Resolved by FG-531.** The two sections above describe the decision-time state, not current behavior. Reconcile's `awaiting_red` sweep now recovers this: gated on no live foreign holder of the run's dispatch lock (a read-only liveness probe) and no live red container, it settles the dead red rows as `orphaned` and lands the primary fail-safe with a named operator verb (`forge retry <id> --force`, or `forge recover <id> --re-drive` for a fanout parent). Adopting a half-delivered red verdict from reconcile was considered and rejected — it would duplicate `dispatchReds`' aggregation at a second site.
+
 ### Dashboard render
 
 `awaiting_red` gets its own status badge tone. In #72's render-key, status is already a primary input — no cache-key changes needed.
@@ -167,6 +171,6 @@ New arm: when `counts.awaiting_red > 0`, recommend "wait for reds; check the das
 
 ## Revisit Conditions
 
-- **Reds that crash leave blue in awaiting_red forever.** When this becomes a real friction (probably soon), add reconcile handling for awaiting_red blues whose red children are gone. Separate task.
+- ~~**Reds that crash leave blue in awaiting_red forever.** When this becomes a real friction (probably soon), add reconcile handling for awaiting_red blues whose red children are gone. Separate task.~~ **RESOLVED by FG-531** — reconcile handles exactly this, for both the single-step and fanout-parent callsites.
 - **The microsecond `complete` window starts mattering.** If a future feature observes that window (e.g., a webhook fires on `complete` events and we don't want it firing for "transient complete"), promote to Option C — refactor spawn/dispatch boundary.
 - **A workflow appears where reds run on a phase that's NOT a blue task (e.g., reds on a gate, or reds on a manual-phase result).** Then `awaiting_red` semantics need to be revisited — is the wait state on the manual-phase task? Today's manual phases (`ui-design.review`) have `reds: undefined` so this doesn't apply yet. #51 (design-reviewer) might change this.
