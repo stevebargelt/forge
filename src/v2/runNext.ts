@@ -54,6 +54,7 @@ import { classifyTaskLineage, isWorkflowPrimaryRow } from "./lifecycle-evaluator
 import { finalizeOrphanedPrimaries, attachedExitEvidence } from "./reconcile.js";
 import { checkResultPersistence, persistenceErrorMessage } from "./persistence-check.js";
 import { runIntegrationGate } from "./integration-gate.js";
+import { withProjectIntegrationLock } from "./project-integration-lock.js";
 import { verdictBlocksGate } from "./gate.js";
 import { evaluateValidationContract } from "./validation-contract.js";
 import { deriveUpstream } from "./inputs.js";
@@ -618,143 +619,151 @@ async function dispatchSingleStep(args: {
     return "failed";
   }
 
-  // FG-352: merge the task worktree branch into run.projectDir (main checkout).
-  // Skipped entirely when primaryWorktreePath is undefined — the default/non-worktree
-  // path is byte-for-byte unchanged.
-  if (primaryWorktreePath) {
-    const merge = mergeWorktreeBranch(args.projectDir, primaryWorktreePath, args.runId, taskId);
-    if (!merge.ok) {
-      failTask(taskId, { runId: args.runId, kind: "merge_conflict", error: merge.error, result });
-      // Retain worktree and branch for inspection — do NOT call removeWorktreeIfSafe.
-      finalizeContainerRetention(containerName, false);
-      return "failed";
-    }
-    // FG-357: post-merge integration gate. The merge above only proves the
-    // worktree branch fast-forwarded cleanly — it does NOT prove the merged
-    // tree still builds+tests. Gate here, before reds dispatch / phase advance,
-    // and return BEFORE any cleanup so the worktree/branch stay available for
-    // inspection (mirrors the merge_conflict no-discard contract above).
-    const gate = runIntegrationGate(args.projectDir);
-    if (!gate.ok) {
-      failTask(taskId, {
-        runId: args.runId,
-        kind: classify({ integrationGate: { status: gate.status, signal: gate.signal, timedOut: gate.timedOut } }),
-        error: `post-merge integration gate failed: ${gate.error}\n${gate.output}`,
-        result,
-      });
-      finalizeContainerRetention(containerName, false);
-      return "failed";
-    }
-
-    // FG-367: best-effort gap-fill — record the merge-HEAD SHA on the ticket
-    // when the agent did not capture it at close time. Swallowed entirely so
-    // a git or backlog error never fails the run.
-    try {
-      const headSha = execFileSync("git", ["rev-parse", "HEAD"], {
-        cwd: args.projectDir,
-        encoding: "utf8",
-        timeout: 5000,
-      });
-      const ticketId = getRun(args.runId)?.title;
-      if (ticketId) {
-        fillClosedCommit(args.projectDir, ticketId, headSha.trim());
+  // FG-425: everything below — worktree merge, host integration gate, the
+  // gap-fill HEAD read, reds (mounted read-only on the SHARED checkout), and
+  // worktree cleanup — reads or mutates run.projectDir. Exclude other runs
+  // targeting the same (canonicalized) project for the whole window. The
+  // non-worktree path has no merge→gate window, so it takes no lock
+  // (projectDir === undefined ⇒ passthrough).
+  return await withProjectIntegrationLock(primaryWorktreePath ? args.projectDir : undefined, args.runId, async () => {
+    // FG-352: merge the task worktree branch into run.projectDir (main checkout).
+    // Skipped entirely when primaryWorktreePath is undefined — the default/non-worktree
+    // path is byte-for-byte unchanged.
+    if (primaryWorktreePath) {
+      const merge = mergeWorktreeBranch(args.projectDir, primaryWorktreePath, args.runId, taskId);
+      if (!merge.ok) {
+        failTask(taskId, { runId: args.runId, kind: "merge_conflict", error: merge.error, result });
+        // Retain worktree and branch for inspection — do NOT call removeWorktreeIfSafe.
+        finalizeContainerRetention(containerName, false);
+        return "failed";
       }
-    } catch {
-      // swallow — gap-fill is advisory, must not fail the run
-    }
-  }
+      // FG-357: post-merge integration gate. The merge above only proves the
+      // worktree branch fast-forwarded cleanly — it does NOT prove the merged
+      // tree still builds+tests. Gate here, before reds dispatch / phase advance,
+      // and return BEFORE any cleanup so the worktree/branch stay available for
+      // inspection (mirrors the merge_conflict no-discard contract above).
+      const gate = runIntegrationGate(args.projectDir);
+      if (!gate.ok) {
+        failTask(taskId, {
+          runId: args.runId,
+          kind: classify({ integrationGate: { status: gate.status, signal: gate.signal, timedOut: gate.timedOut } }),
+          error: `post-merge integration gate failed: ${gate.error}\n${gate.output}`,
+          result,
+        });
+        finalizeContainerRetention(containerName, false);
+        return "failed";
+      }
 
-  // FG-523 (F19): the validation contract is evaluated BEFORE reds dispatch.
-  // A primary that fails it must land the NAMED validation hold — evaluating it
-  // after the reds would let an authoritative red fail win the race and park the
-  // task at blocked_by_red, which says nothing about the missing tests_run and
-  // takes a --force to clear. A result that doesn't meet the contract isn't
-  // worth spending reds on either.
-  crashPoint("dispatchSingleStep:before-validation-contract");
-  const contractHold = holdIfValidationContractFails(taskId, args.runId, result);
-  if (contractHold) {
-    finalizeContainerRetention(containerName, false);
-    return contractHold;
-  }
-
-  // Reds: spawn after primary completes. Each red is a child task.
-  // Aggregate verdicts then set primary status per policy.
-  if (step.reds.length > 0) {
-    // Per FORGE-DEC-017: blue is done, reds are about to run.
-    crashPoint("dispatchSingleStep:before-awaiting-red");
-    setTaskStatus(taskId, "awaiting_red");
-    crashPoint("dispatchSingleStep:between-awaiting-red-status-and-event");
-    logEvent("task.awaiting_red", { runId: args.runId, taskId });
-    crashPoint("dispatchSingleStep:after-awaiting-red");
-
-    const aggregate = await dispatchReds({
-      runId: args.runId,
-      workflow: args.workflow,
-      step,
-      primaryTaskId: taskId,
-      primaryResult: result,
-      projectDir: args.projectDir,
-      designDir: args.designDir,
-      runMetadata: args.runMetadata,
-      dockerExec: args.dockerExec,
-      getModelPolicy: args.getModelPolicy,
-    });
-
-    // Aggregation policy mirrors v1 gate.ts:
-    //   - any authoritative fail with gate_on_verdict ⇒ blocked_by_red
-    //   - otherwise (verdict gate) ⇒ awaiting_gate (orchestrator/human reads verdicts)
-    //   - gate: auto with no authoritative fail ⇒ complete
-    if (aggregate.authoritativeFail) {
-      // FG-482: status + result written together in one CAS'd UPDATE — the
-      // task is never observable as awaiting_gate mid-transition. If the CAS
-      // lost a race (task no longer awaiting_red), report its actual status
-      // rather than logging/notifying a transition that didn't happen.
-      let blockedByRedApplied = false;
-      crashPoint("dispatchSingleStep:before-blocked-by-red");
-      getDb().transaction(() => {
-        blockedByRedApplied = markTaskBlockedByRed(taskId, result);
-        crashPoint("dispatchSingleStep:inside-blocked-by-red-txn");
-        if (blockedByRedApplied) {
-          logEvent("task.blocked_by_red", { runId: args.runId, taskId });
+      // FG-367: best-effort gap-fill — record the merge-HEAD SHA on the ticket
+      // when the agent did not capture it at close time. Swallowed entirely so
+      // a git or backlog error never fails the run.
+      try {
+        const headSha = execFileSync("git", ["rev-parse", "HEAD"], {
+          cwd: args.projectDir,
+          encoding: "utf8",
+          timeout: 5000,
+        });
+        const ticketId = getRun(args.runId)?.title;
+        if (ticketId) {
+          fillClosedCommit(args.projectDir, ticketId, headSha.trim());
         }
-      })();
-      crashPoint("dispatchSingleStep:after-blocked-by-red");
-      // FG-492 review: blocked_by_red (whether applied here or lost to a
-      // concurrent transition) is never "complete" — retain either way.
-      finalizeContainerRetention(containerName, false);
-      if (!blockedByRedApplied) {
-        return getTask(taskId)?.status ?? "failed";
+      } catch {
+        // swallow — gap-fill is advisory, must not fail the run
       }
-      // Fire-and-forget SMS notification (no-op unless FORGE_NOTIFY=twilio).
-      const runForNotify = getRun(args.runId);
-      if (runForNotify) void notifyOnTaskBlockedByRed(runForNotify);
-      return "blocked_by_red";
     }
-    // No authoritative fail — proceed to normal gate semantics.
-    const statusAfterReds = finalizePrimary(taskId, args.runId, step.gate, result);
-    // FG-492 review: reap only on the real "complete" outcome — gate=human/
-    // verdict returns "awaiting_gate" (paused, not failed, but not done
-    // either), and a lost CAS race reports the task's actual terminal status.
-    // Either way, anything other than "complete" retains.
-    reapContainerAndReportFailure(containerName, statusAfterReds === "complete", args.runId, taskId);
+
+    // FG-523 (F19): the validation contract is evaluated BEFORE reds dispatch.
+    // A primary that fails it must land the NAMED validation hold — evaluating it
+    // after the reds would let an authoritative red fail win the race and park the
+    // task at blocked_by_red, which says nothing about the missing tests_run and
+    // takes a --force to clear. A result that doesn't meet the contract isn't
+    // worth spending reds on either.
+    crashPoint("dispatchSingleStep:before-validation-contract");
+    const contractHold = holdIfValidationContractFails(taskId, args.runId, result);
+    if (contractHold) {
+      finalizeContainerRetention(containerName, false);
+      return contractHold;
+    }
+
+    // Reds: spawn after primary completes. Each red is a child task.
+    // Aggregate verdicts then set primary status per policy.
+    if (step.reds.length > 0) {
+      // Per FORGE-DEC-017: blue is done, reds are about to run.
+      crashPoint("dispatchSingleStep:before-awaiting-red");
+      setTaskStatus(taskId, "awaiting_red");
+      crashPoint("dispatchSingleStep:between-awaiting-red-status-and-event");
+      logEvent("task.awaiting_red", { runId: args.runId, taskId });
+      crashPoint("dispatchSingleStep:after-awaiting-red");
+
+      const aggregate = await dispatchReds({
+        runId: args.runId,
+        workflow: args.workflow,
+        step,
+        primaryTaskId: taskId,
+        primaryResult: result,
+        projectDir: args.projectDir,
+        designDir: args.designDir,
+        runMetadata: args.runMetadata,
+        dockerExec: args.dockerExec,
+        getModelPolicy: args.getModelPolicy,
+      });
+
+      // Aggregation policy mirrors v1 gate.ts:
+      //   - any authoritative fail with gate_on_verdict ⇒ blocked_by_red
+      //   - otherwise (verdict gate) ⇒ awaiting_gate (orchestrator/human reads verdicts)
+      //   - gate: auto with no authoritative fail ⇒ complete
+      if (aggregate.authoritativeFail) {
+        // FG-482: status + result written together in one CAS'd UPDATE — the
+        // task is never observable as awaiting_gate mid-transition. If the CAS
+        // lost a race (task no longer awaiting_red), report its actual status
+        // rather than logging/notifying a transition that didn't happen.
+        let blockedByRedApplied = false;
+        crashPoint("dispatchSingleStep:before-blocked-by-red");
+        getDb().transaction(() => {
+          blockedByRedApplied = markTaskBlockedByRed(taskId, result);
+          crashPoint("dispatchSingleStep:inside-blocked-by-red-txn");
+          if (blockedByRedApplied) {
+            logEvent("task.blocked_by_red", { runId: args.runId, taskId });
+          }
+        })();
+        crashPoint("dispatchSingleStep:after-blocked-by-red");
+        // FG-492 review: blocked_by_red (whether applied here or lost to a
+        // concurrent transition) is never "complete" — retain either way.
+        finalizeContainerRetention(containerName, false);
+        if (!blockedByRedApplied) {
+          return getTask(taskId)?.status ?? "failed";
+        }
+        // Fire-and-forget SMS notification (no-op unless FORGE_NOTIFY=twilio).
+        const runForNotify = getRun(args.runId);
+        if (runForNotify) void notifyOnTaskBlockedByRed(runForNotify);
+        return "blocked_by_red";
+      }
+      // No authoritative fail — proceed to normal gate semantics.
+      const statusAfterReds = finalizePrimary(taskId, args.runId, step.gate, result);
+      // FG-492 review: reap only on the real "complete" outcome — gate=human/
+      // verdict returns "awaiting_gate" (paused, not failed, but not done
+      // either), and a lost CAS race reports the task's actual terminal status.
+      // Either way, anything other than "complete" retains.
+      reapContainerAndReportFailure(containerName, statusAfterReds === "complete", args.runId, taskId);
+      // FG-352: cleanup after proven-merged worktree (provenMerged=true because
+      // the merge-back succeeded above). Also removes in EPHEMERAL test mode.
+      if (statusAfterReds === "complete" && primaryWorktreePath) {
+        removeWorktreeIfSafe(primaryWorktreePath, args.runId, taskId, args.projectDir, true);
+      }
+      return statusAfterReds;
+    }
+
+    const finalStatus = finalizePrimary(taskId, args.runId, step.gate, result);
+    // FG-492 review: same reap-only-on-complete rule as the reds branch above.
+    // FG-503: same reap_failed durability rule too — see reapContainerAndReportFailure.
+    reapContainerAndReportFailure(containerName, finalStatus === "complete", args.runId, taskId);
     // FG-352: cleanup after proven-merged worktree (provenMerged=true because
     // the merge-back succeeded above). Also removes in EPHEMERAL test mode.
-    if (statusAfterReds === "complete" && primaryWorktreePath) {
+    if (finalStatus === "complete" && primaryWorktreePath) {
       removeWorktreeIfSafe(primaryWorktreePath, args.runId, taskId, args.projectDir, true);
     }
-    return statusAfterReds;
-  }
-
-  const finalStatus = finalizePrimary(taskId, args.runId, step.gate, result);
-  // FG-492 review: same reap-only-on-complete rule as the reds branch above.
-  // FG-503: same reap_failed durability rule too — see reapContainerAndReportFailure.
-  reapContainerAndReportFailure(containerName, finalStatus === "complete", args.runId, taskId);
-  // FG-352: cleanup after proven-merged worktree (provenMerged=true because
-  // the merge-back succeeded above). Also removes in EPHEMERAL test mode.
-  if (finalStatus === "complete" && primaryWorktreePath) {
-    removeWorktreeIfSafe(primaryWorktreePath, args.runId, taskId, args.projectDir, true);
-  }
-  return finalStatus;
+    return finalStatus;
+  });
 }
 
 // FG-523 (F19): enforce the validation contract on a workflow primary's result,
@@ -1414,54 +1423,60 @@ async function dispatchFanoutStep(args: {
         integrationBranchExists(args.projectDir, args.runId, existingParent.id)
       ) {
         // Skip child dispatch and red dispatch — go directly to integration->HEAD merge.
-        const headMerge = mergeIntegrationBranchToHead(args.projectDir, args.runId, existingParent.id);
-        logEvent("integration.merged_to_head", {
-          runId: args.runId,
-          taskId: existingParent.id,
-          payload: {
-            ok: headMerge.ok,
-            branch: integrationBranchName(args.runId, existingParent.id),
-            reEntry: true,
-            error: !headMerge.ok ? headMerge.error : undefined,
-          },
-        });
-        if (!headMerge.ok) {
-          failTask(existingParent.id, {
+        // FG-425: integration→HEAD merge + host gate + shared-checkout cleanup —
+        // exclusive per (canonicalized) projectDir across runs.
+        const gateWindow = await withProjectIntegrationLock(args.projectDir, args.runId, async (): Promise<"ok" | "failed"> => {
+          const headMerge = mergeIntegrationBranchToHead(args.projectDir, args.runId, existingParent.id);
+          logEvent("integration.merged_to_head", {
             runId: args.runId,
-            kind: "merge_conflict",
-            error: headMerge.error,
-            result: savedResult,
+            taskId: existingParent.id,
+            payload: {
+              ok: headMerge.ok,
+              branch: integrationBranchName(args.runId, existingParent.id),
+              reEntry: true,
+              error: !headMerge.ok ? headMerge.error : undefined,
+            },
           });
-          return "failed";
-        }
-        // FG-357: post-merge integration gate. Return BEFORE any cleanup on
-        // failure so the integration/child worktrees and branches stay
-        // available for inspection (no-discard, same as merge_conflict above).
-        const gate = runIntegrationGate(args.projectDir);
-        if (!gate.ok) {
-          failTask(existingParent.id, {
-            runId: args.runId,
-            kind: classify({ integrationGate: { status: gate.status, signal: gate.signal, timedOut: gate.timedOut } }),
-            error: `post-merge integration gate failed: ${gate.error}\n${gate.output}`,
-            result: savedResult,
-          });
-          return "failed";
-        }
-        // Only proven-merged (completed) children may be cleaned up; failed children
-        // were never integrated and must retain their worktree/branch (no-discard).
-        const childTasksForCleanup = allTasks.filter(
-          (t) =>
-            t.parentId === existingParent.id &&
-            !t.agentRole.startsWith("red-") &&
-            t.status === "complete",
-        );
-        for (const child of childTasksForCleanup) {
-          const childWtPath = child.worktreePath as string | undefined;
-          if (childWtPath) {
-            removeWorktreeIfSafe(childWtPath, args.runId, child.id, args.projectDir, true);
+          if (!headMerge.ok) {
+            failTask(existingParent.id, {
+              runId: args.runId,
+              kind: "merge_conflict",
+              error: headMerge.error,
+              result: savedResult,
+            });
+            return "failed";
           }
-        }
-        cleanupIntegrationWorktree(args.projectDir, args.runId, existingParent.id);
+          // FG-357: post-merge integration gate. Return BEFORE any cleanup on
+          // failure so the integration/child worktrees and branches stay
+          // available for inspection (no-discard, same as merge_conflict above).
+          const gate = runIntegrationGate(args.projectDir);
+          if (!gate.ok) {
+            failTask(existingParent.id, {
+              runId: args.runId,
+              kind: classify({ integrationGate: { status: gate.status, signal: gate.signal, timedOut: gate.timedOut } }),
+              error: `post-merge integration gate failed: ${gate.error}\n${gate.output}`,
+              result: savedResult,
+            });
+            return "failed";
+          }
+          // Only proven-merged (completed) children may be cleaned up; failed children
+          // were never integrated and must retain their worktree/branch (no-discard).
+          const childTasksForCleanup = allTasks.filter(
+            (t) =>
+              t.parentId === existingParent.id &&
+              !t.agentRole.startsWith("red-") &&
+              t.status === "complete",
+          );
+          for (const child of childTasksForCleanup) {
+            const childWtPath = child.worktreePath as string | undefined;
+            if (childWtPath) {
+              removeWorktreeIfSafe(childWtPath, args.runId, child.id, args.projectDir, true);
+            }
+          }
+          cleanupIntegrationWorktree(args.projectDir, args.runId, existingParent.id);
+          return "ok";
+        });
+        if (gateWindow === "failed") return "failed";
       } else if (isWorktreeModeEnabled() && redsAlreadyRan) {
         // Worktree mode is on and reds already ran (integration was built and
         // reviewed) but the integration branch is now missing — inconsistent state.
@@ -1752,6 +1767,61 @@ async function dispatchFanoutStep(args: {
 
     // FG-353 Change 7: reds passed — merge integration branch to HEAD and clean up.
     if (integrationWorktreePath) {
+      // FG-425: integration→HEAD merge + host gate + shared-checkout cleanup —
+      // exclusive per (canonicalized) projectDir across runs.
+      const gateWindow = await withProjectIntegrationLock(args.projectDir, args.runId, async (): Promise<"ok" | "failed"> => {
+        const headMerge = mergeIntegrationBranchToHead(args.projectDir, args.runId, parentId);
+        logEvent("integration.merged_to_head", {
+          runId: args.runId,
+          taskId: parentId,
+          payload: {
+            ok: headMerge.ok,
+            branch: integrationBranchName(args.runId, parentId),
+            error: !headMerge.ok ? headMerge.error : undefined,
+          },
+        });
+        if (!headMerge.ok) {
+          failTask(parentId, {
+            runId: args.runId,
+            kind: "merge_conflict",
+            error: headMerge.error,
+            result: parentResult,
+          });
+          return "failed";
+        }
+        // FG-357: post-merge integration gate. Return BEFORE any cleanup on
+        // failure so the integration/child worktrees and branches stay
+        // available for inspection (no-discard, same as merge_conflict above).
+        const gate = runIntegrationGate(args.projectDir);
+        if (!gate.ok) {
+          failTask(parentId, {
+            runId: args.runId,
+            kind: classify({ integrationGate: { status: gate.status, signal: gate.signal, timedOut: gate.timedOut } }),
+            error: `post-merge integration gate failed: ${gate.error}\n${gate.output}`,
+            result: parentResult,
+          });
+          return "failed";
+        }
+        // Only proven-merged (completed) children may be cleaned up; failed children
+        // were never integrated and must retain their worktree/branch (no-discard).
+        for (const child of childOutcomes.filter((c) => c.status === "complete")) {
+          if (child.worktreePath) {
+            removeWorktreeIfSafe(child.worktreePath, args.runId, child.childTaskId, args.projectDir, true);
+          }
+        }
+        cleanupIntegrationWorktree(args.projectDir, args.runId, parentId);
+        return "ok";
+      });
+      if (gateWindow === "failed") return "failed";
+    }
+    return finalizePrimary(parentId, args.runId, step.gate, parentResult);
+  }
+
+  // No reds path: merge integration to HEAD directly before finalizing.
+  if (integrationWorktreePath) {
+    // FG-425: integration→HEAD merge + host gate + shared-checkout cleanup —
+    // exclusive per (canonicalized) projectDir across runs.
+    const gateWindow = await withProjectIntegrationLock(args.projectDir, args.runId, async (): Promise<"ok" | "failed"> => {
       const headMerge = mergeIntegrationBranchToHead(args.projectDir, args.runId, parentId);
       logEvent("integration.merged_to_head", {
         runId: args.runId,
@@ -1772,8 +1842,8 @@ async function dispatchFanoutStep(args: {
         return "failed";
       }
       // FG-357: post-merge integration gate. Return BEFORE any cleanup on
-      // failure so the integration/child worktrees and branches stay
-      // available for inspection (no-discard, same as merge_conflict above).
+      // failure so the integration/child worktrees and branches stay available
+      // for inspection (no-discard, same as merge_conflict above).
       const gate = runIntegrationGate(args.projectDir);
       if (!gate.ok) {
         failTask(parentId, {
@@ -1792,52 +1862,9 @@ async function dispatchFanoutStep(args: {
         }
       }
       cleanupIntegrationWorktree(args.projectDir, args.runId, parentId);
-    }
-    return finalizePrimary(parentId, args.runId, step.gate, parentResult);
-  }
-
-  // No reds path: merge integration to HEAD directly before finalizing.
-  if (integrationWorktreePath) {
-    const headMerge = mergeIntegrationBranchToHead(args.projectDir, args.runId, parentId);
-    logEvent("integration.merged_to_head", {
-      runId: args.runId,
-      taskId: parentId,
-      payload: {
-        ok: headMerge.ok,
-        branch: integrationBranchName(args.runId, parentId),
-        error: !headMerge.ok ? headMerge.error : undefined,
-      },
+      return "ok";
     });
-    if (!headMerge.ok) {
-      failTask(parentId, {
-        runId: args.runId,
-        kind: "merge_conflict",
-        error: headMerge.error,
-        result: parentResult,
-      });
-      return "failed";
-    }
-    // FG-357: post-merge integration gate. Return BEFORE any cleanup on
-    // failure so the integration/child worktrees and branches stay available
-    // for inspection (no-discard, same as merge_conflict above).
-    const gate = runIntegrationGate(args.projectDir);
-    if (!gate.ok) {
-      failTask(parentId, {
-        runId: args.runId,
-        kind: classify({ integrationGate: { status: gate.status, signal: gate.signal, timedOut: gate.timedOut } }),
-        error: `post-merge integration gate failed: ${gate.error}\n${gate.output}`,
-        result: parentResult,
-      });
-      return "failed";
-    }
-    // Only proven-merged (completed) children may be cleaned up; failed children
-    // were never integrated and must retain their worktree/branch (no-discard).
-    for (const child of childOutcomes.filter((c) => c.status === "complete")) {
-      if (child.worktreePath) {
-        removeWorktreeIfSafe(child.worktreePath, args.runId, child.childTaskId, args.projectDir, true);
-      }
-    }
-    cleanupIntegrationWorktree(args.projectDir, args.runId, parentId);
+    if (gateWindow === "failed") return "failed";
   }
 
   return finalizePrimary(parentId, args.runId, step.gate, parentResult);

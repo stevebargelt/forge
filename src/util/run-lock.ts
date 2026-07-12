@@ -195,11 +195,17 @@ export async function acquireFileLockBlocking(
     isAlive?: (pid: number) => boolean;
     holderId?: string;
     onDeadHolder?: (held: LockInfo) => "steal" | "wait";
+    /** FG-425: called once per poll while blocked behind a holder, with the
+     *  current holder's LockInfo and the total elapsed wait so far — so a
+     *  caller can surface WHO is holding the resource and for how long
+     *  instead of appearing to hang. Throttling is the caller's business. */
+    onWaiting?: (held: LockInfo, elapsedMs: number) => void;
   },
 ): Promise<void> {
   const pollMs = opts?.pollMs ?? 500;
   const alive = opts?.isAlive ?? pidAlive;
   const now = opts?.nowMs ?? (() => Date.now());
+  const waitStartMs = now();
   // Default is an immediate steal — correct only when a dead pid IS the whole
   // holder (nothing else outlives it). Any resource class where the real work
   // can outlive the host pid (e.g. FG-376's dependency-cache lock, whose
@@ -234,6 +240,7 @@ export async function acquireFileLockBlocking(
         try { unlinkSync(path); } catch { /* raced — loop and retry */ }
         continue;
       }
+      opts?.onWaiting?.(held, now() - waitStartMs);
       await new Promise<void>((resolve) => setTimeout(resolve, pollMs));
     }
   }
