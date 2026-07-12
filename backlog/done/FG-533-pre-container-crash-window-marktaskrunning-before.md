@@ -1,9 +1,11 @@
 ---
 id: FG-533
 type: story
-status: active
+status: done
 title: "pre-container crash window: markTaskRunning before container.started leaves a running task invisible to reconcile and ops sweeps — permanent wedge"
 created: 2026-07-11
+closed: 2026-07-12
+closed_commit: "9487474"
 ---
 
 ## Problem
