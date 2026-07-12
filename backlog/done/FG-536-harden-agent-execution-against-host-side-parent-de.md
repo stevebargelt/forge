@@ -1,9 +1,11 @@
 ---
 id: FG-536
 type: story
-status: active
+status: done
 title: "harden agent execution against host-side parent death: docker-detached invoke (results survive any orchestrator/harness process kill by construction)"
 created: 2026-07-12
+closed: 2026-07-12
+closed_commit: 07cb63e
 ---
 
 ## Problem
