@@ -14,6 +14,12 @@
 // files — its branch merge resolves "already up to date" whatever order the
 // runs land in, so BOTH runs reach the integration gate and the serialization
 // claim is exercised on the gate window itself.
+//
+// Platform: worktree mode is faked to darwin the way every other
+// *.worktree.test.ts suite does — preflightWorktreeGate hard-fails on Linux and
+// that gate is FG-358, not this ticket. The in-process test patches its own
+// process; the cross-process drivers are fresh node processes, so the driver
+// script patches itself before importing anything that reads the platform.
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -44,6 +50,8 @@ const tmpDirs: string[] = [];
 const ENV_VARS = ["FORGE_WORKTREES", "FORGE_NO_WORKTREES", "FORGE_WORKTREE_IGNORE_DIRTY", "FORGE_WORKTREES_EPHEMERAL", "ANTHROPIC_API_KEY"] as const;
 const savedEnv: Partial<Record<(typeof ENV_VARS)[number], string>> = {};
 
+const realPlatform = process.platform;
+
 beforeEach(() => {
   db = makeInMemoryDb();
   prev = setDbForTest(db);
@@ -52,6 +60,7 @@ beforeEach(() => {
     delete process.env[k];
   }
   process.env.ANTHROPIC_API_KEY = "sk-stub";
+  setPlatform("darwin");
   ensureRuntimeStub();
 });
 
@@ -62,10 +71,21 @@ afterEach(() => {
     if (savedEnv[k] === undefined) delete process.env[k];
     else process.env[k] = savedEnv[k] as string;
   }
+  setPlatform(realPlatform);
+  setPlatform(ORIGINAL_PLATFORM);
   for (const dir of tmpDirs.splice(0)) {
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
 });
+
+function setPlatform(p: string): void {
+  Object.defineProperty(process, "platform", { value: p, configurable: true });
+}
+
+const ORIGINAL_PLATFORM = process.platform;
+function setPlatform(p: string): void {
+  Object.defineProperty(process, "platform", { value: p, configurable: true });
+}
 
 function makeTmpDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "forge-fg425-e2e-"));
@@ -185,6 +205,7 @@ function overlaps(a: Window, b: Window): boolean {
 }
 
 test("FG-425 e2e (in-process): two concurrent runs on ONE projectDir both complete green — no deadlock, windows serialized", async () => {
+  setPlatform("darwin"); // worktree mode refuses real Linux (FG-358) — docker is stubbed here, same as fg357-dispatch
   process.env.FORGE_WORKTREES = "1";
   process.env.FORGE_WORKTREE_IGNORE_DIRTY = "1";
 
@@ -232,7 +253,13 @@ import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
+Object.defineProperty(process, "platform", { value: "darwin", configurable: true }); // FG-358: worktree mode refuses Linux; docker is stubbed in this driver
 const [, , projectDir, title, fileName] = process.argv;
+
+// See the platform note at the top of the suite: this child is a fresh node
+// process, so it must fake darwin itself before anything reads the platform.
+Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
+
 const TASKS_PATH = ${JSON.stringify(join(repoRoot, "src/store/tasks.ts"))};
 const { startRun } = await import(pathToFileURL(${JSON.stringify(join(repoRoot, "src/v2/startRun.ts"))}).href);
 const { runNext } = await import(pathToFileURL(${JSON.stringify(join(repoRoot, "src/v2/runNext.ts"))}).href);
