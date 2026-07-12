@@ -152,6 +152,27 @@ test("FG-540 AC7: recovery is scoped to the final completed turn's OWN started�
     undefined,
   );
 
+  // Overlapping turns: a second turn.started while the first is still open. The
+  // trailing started→completed pair looks like a clean envelope, but the first
+  // turn never completed — the stream is not intact, so refuse.
+  assert.equal(
+    extractCodexTerminalJsonObject([started, started, terminal('{"verdict":"pass"}'), done].join("\n")),
+    undefined,
+  );
+  assert.equal(
+    extractCodexTerminalJsonObject(
+      [started, terminal('{"verdict":"needs_fix"}'), started, terminal('{"verdict":"pass"}'), done].join("\n"),
+    ),
+    undefined,
+  );
+
+  // A turn.completed with no matching turn.started (extra completion) is equally
+  // not a real envelope.
+  assert.equal(
+    extractCodexTerminalJsonObject([started, terminal('{"verdict":"pass"}'), done, done].join("\n")),
+    undefined,
+  );
+
   // The final turn's own terminal message still recovers across a multi-turn stream.
   assert.deepEqual(
     extractCodexTerminalJsonObject(

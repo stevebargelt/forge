@@ -28,9 +28,10 @@ function isObj(v: unknown): v is Record<string, unknown> {
  *  - every non-empty line parses as a JSON object (one malformed/truncated
  *    record means the stream is not intact, so nothing is recoverable from it);
  *  - no top-level `{type:"error"}` and no `{type:"turn.failed"}` anywhere;
- *  - at least one `{type:"turn.completed"}`, and no `turn.started` AFTER the
- *    last one (a trailing turn that began but never completed makes the whole
- *    stream ambiguous);
+ *  - at least one `{type:"turn.completed"}`, and the turn markers strictly
+ *    alternate `turn.started` → `turn.completed` (overlapping turns, a
+ *    completion with no start, or a trailing turn that began but never
+ *    completed all make the stream ambiguous);
  *  - the final completed turn has its own `turn.started`, and the LAST
  *    completed agent_message in the stream falls strictly INSIDE that
  *    started→completed envelope — a message from an earlier turn, one stranded
@@ -50,7 +51,12 @@ export function extractCodexTerminalJsonObject(stdoutRaw: string): Record<string
     events.push(ev);
   }
 
-  const turnStarted: number[] = [];
+  // Turn markers must strictly alternate started → completed. A second
+  // turn.started while a turn is still open, or a turn.completed with no open
+  // turn, means the stream's turns overlap or are incomplete — the envelope we
+  // would scope recovery to is then not a real turn boundary, so refuse.
+  let openTurnStarted = -1;
+  let finalTurnStarted = -1;
   let lastTurnCompleted = -1;
   let lastAgentMessage = -1;
   let terminalText: string | undefined;
@@ -58,8 +64,16 @@ export function extractCodexTerminalJsonObject(stdoutRaw: string): Record<string
     const ev = events[i]!;
     const type = ev["type"];
     if (type === "error" || type === "turn.failed") return undefined;
-    if (type === "turn.started") turnStarted.push(i);
-    if (type === "turn.completed") lastTurnCompleted = i;
+    if (type === "turn.started") {
+      if (openTurnStarted !== -1) return undefined;           // overlapping turns
+      openTurnStarted = i;
+    }
+    if (type === "turn.completed") {
+      if (openTurnStarted === -1) return undefined;           // completion with no envelope
+      finalTurnStarted = openTurnStarted;
+      openTurnStarted = -1;
+      lastTurnCompleted = i;
+    }
     if (type === "item.completed") {
       const item = ev["item"];
       if (isObj(item) && item["type"] === "agent_message" && typeof item["text"] === "string") {
@@ -69,13 +83,8 @@ export function extractCodexTerminalJsonObject(stdoutRaw: string): Record<string
     }
   }
 
+  if (openTurnStarted !== -1) return undefined;               // trailing turn began but never completed
   if (lastTurnCompleted === -1) return undefined;             // never completed
-  if (turnStarted.some((i) => i > lastTurnCompleted)) return undefined; // trailing turn began but never completed
-  // The final completed turn's envelope: its own turn.started → the last
-  // turn.completed. Requiring the start marker (not just the previous turn's
-  // completion) is what refuses a message stranded BETWEEN turns.
-  const finalTurnStarted = [...turnStarted].reverse().find((i) => i < lastTurnCompleted);
-  if (finalTurnStarted === undefined) return undefined;       // no envelope — ambiguous
   if (lastAgentMessage === -1 || terminalText === undefined) return undefined; // no candidate
   if (lastAgentMessage > lastTurnCompleted) return undefined; // ambiguous post-turn message
   if (lastAgentMessage < finalTurnStarted) return undefined;  // earlier turn or stranded between turns
