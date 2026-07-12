@@ -1231,8 +1231,7 @@ test(
 );
 
 test(
-  "FG-530-B [KNOWN FAILURE — real bug on HEAD, filed not fixed]: `forge gate <id> reject` NULLs the rejected task's result — gate.ts's reject branch calls failTask() without `result`, unlike the adjacent request-changes branch that passes it deliberately",
-  { todo: "real data-loss bug found by the FG-530 matrix; scope guard says file it, don't fix it in this ticket" },
+  "FG-530-B [FIXED by FG-532]: `forge gate <id> reject` preserves the rejected task's result — gate.ts's reject branch now passes `result: task.result` through failTask, matching the adjacent request-changes branch",
   async () => {
     ensureRuntime();
     writeWorkflowYaml(REJECT_WF.name, REJECT_YAML);

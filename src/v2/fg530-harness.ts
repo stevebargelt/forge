@@ -1064,18 +1064,10 @@ export const KNOWN_FAILURES: KnownFailure[] = [
       "awaiting_gate/blocked_by_red, and `forge retry` refuses any status but failed. advise.ts tells the operator to " +
       "'wait for reds to finish' — reds that died with the crashed process.",
   },
-  {
-    id: "FG-530-B",
-    invariant: "4-persisted-work-never-discarded",
-    match: /is now terminal \('failed'\) with NO result on its row/,
-    summary:
-      "gate.ts's REJECT branch calls failTask() without `result`, and markTaskFailed's UPDATE writes `result = ?` with " +
-      "null when it is absent — so rejecting a task NULLs the result markTaskAwaitingGate had put on its row. The " +
-      "adjacent request-changes branch passes `result: task.result` precisely to avoid this ('preserving its result so " +
-      "it stays an audit record'), which makes the asymmetry look unintended. Not crash-specific: a clean `forge gate " +
-      "<id> reject` discards it. result.json survives on disk, so the work is recoverable, but the row the operator " +
-      "surfaces read loses the rejected artifact.",
-  },
+  // FG-530-B (gate reject NULLing the rejected task's result) was fixed by
+  // FG-532 — the reject branch now passes `result: task.result` through
+  // failTask, matching request-changes. Its matrix cell asserts the invariant
+  // as a plain passing test now; the pin is gone so a regression fails loudly.
   {
     id: "FG-533",
     invariant: "2-no-permanent-wedge",

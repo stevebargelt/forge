@@ -230,10 +230,14 @@ export async function gate(
     // verdict-insert transaction in runNext.ts.
     crashPoint("gate:reject:before-fail-write");
     getDb().transaction(() => {
+      // FG-532: pass the task's persisted result through, matching the
+      // request-changes branch — the rejected artifact is the audit record
+      // for WHY it was rejected; failTask without it NULLs the row's result.
       failTask(taskId, {
         runId: run.id,
         kind: classify({ source: "gate_rejected" }),
         error: rationale ?? "rejected by gate",
+        result: task.result,
       });
       crashPoint("gate:reject:inside-txn-between-fail-and-recovery-mint");
 
