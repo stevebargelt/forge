@@ -396,6 +396,39 @@ test("recover --continue: adopts the structured result from a cleanly-completed 
   );
 });
 
+test("recover --continue: a stream_recovered result whose result.json write FAILS is refused — task stays failed, no completion/reconciled/provenance events", () => {
+  const gitDir = trackedDirtyGitRepo();
+  const taskId = "t-continue-codex-write-throws";
+  insertContainerized(mkTask(taskId, { status: "running", worktreePath: gitDir, agentRole: "red-wide" }));
+  reconcileRun(RUN.id, () => false);
+  assert.equal(getTask(taskId)!.status, "failed");
+
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writeCodexManifest(dir);
+  writeFileSync(join(dir, "container.stdout.log"), codexCleanStreamStdout({ verdict: "pass", findings: [] }));
+  // result.json is a DIRECTORY — persisting the structured result throws
+  // EISDIR before markTaskRecovered ever runs (d82e136 rule: a structured
+  // recovery may not complete a task it could not persist).
+  mkdirSync(join(dir, "result.json"), { recursive: true });
+
+  const outcome = performContinue(taskId, { force: true });
+  assert.equal(outcome.kind, "continue-refused");
+  if (outcome.kind !== "continue-refused") return;
+  assert.match(outcome.reason, /could not persist/);
+
+  const t = getTask(taskId)!;
+  assert.equal(t.status, "failed", "the task stays failed — no completion without persistence");
+  const types = getEvents(taskId).map((e) => e.eventType);
+  assert.ok(!types.includes("task.completed"));
+  assert.ok(!types.includes("task.result_recovered_from_stream"));
+  assert.ok(
+    !types.some((ty) => ty === "task.reconciled" && true) ||
+      !getEvents(taskId).some((e) => e.eventType === "task.reconciled" && (e.payload as Record<string, unknown>).via === "forge recover --continue"),
+    "no operator-recovered reconciliation event",
+  );
+});
+
 test("recover --continue: a codex stream whose turn never completed recovers nothing (fail-closed)", () => {
   const taskId = "t-continue-codex-unfinished";
   insertContainerized(mkTask(taskId, { status: "running", worktreePath: trackedCleanGitRepo(), agentRole: "red-wide" }));

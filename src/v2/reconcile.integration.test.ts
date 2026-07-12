@@ -1876,6 +1876,28 @@ test("FG-540 final pass: running-orphan — a MALFORMED result.json refuses NARR
   assert.equal(readFileSync(join(dir, "result.json"), "utf8"), "{truncated-non-json");
 });
 
+test("FG-540 parity: Mode-A backfill — a structured recovery whose result.json write FAILS backfills nothing: no DB write, no reconciled event, no provenance event", () => {
+  const taskId = "t-fg540-backfill-write-throws";
+  insertContainerized(mkTask(taskId, { status: "complete", agentRole: "red-wide" })); // result undefined
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writeCodexManifest(dir);
+  writeFileSync(join(dir, "container.stdout.log"), codexCleanStdout(JSON.stringify(FG540_PASS)));
+  // result.json is a DIRECTORY — the persist step throws EISDIR (same
+  // injection as the running-orphan regression for d82e136's rule).
+  mkdirSync(join(dir, "result.json"), { recursive: true });
+
+  let r: ReturnType<typeof reconcileRun> | undefined;
+  assert.doesNotThrow(() => { r = reconcileRun(RUN.id, GONE); });
+  assert.deepEqual(r!.taskChanges, [], "no persisted result.json → no backfill of a structured recovery");
+
+  const t = getTask(taskId)!;
+  assert.equal(t.result, undefined, "the DB result stays empty");
+  const types = eventsForTask(taskId).map((e) => e.eventType);
+  assert.ok(!types.includes("task.reconciled"), "no backfill event for a backfill that did not happen");
+  assert.ok(!types.includes("task.result_recovered_from_stream"), "no provenance event for a recovery that was voided");
+});
+
 test("FG-540 final pass: Mode-A backfill — a MALFORMED result.json refuses NARRATIVE backfill too; the file survives untouched", () => {
   const taskId = "t-fg540-backfill-malformed-narrative";
   insertContainerized(mkTask(taskId, { status: "complete", agentRole: "research-specialist" })); // result undefined

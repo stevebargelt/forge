@@ -1083,6 +1083,12 @@ export function reconcileRun(
         writeFileSync(join(taskDir(t.runId, t.id), "result.json"), JSON.stringify(recovered));
       } catch {
         evidence.resultWriteFailed = true;
+        // FG-540 (d82e136 rule, applied at this sibling too): a structured
+        // stream recovery may not land ANYWHERE it could not be persisted —
+        // no DB backfill, no reconciled event, no provenance event. The task
+        // keeps its empty result untouched. On-disk and FG-337 narrative
+        // backfills keep their existing best-effort behavior.
+        if (backfillSource === "structured_stream") continue;
       }
       crashPoint("reconcile:before-backfill-complete-empty-result");
       const backfilled = getDb().transaction(() => {

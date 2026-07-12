@@ -433,15 +433,39 @@ export function performContinue(taskId: string, opts: { force?: boolean } = {}):
 
   acquireRunLock(task.runId, "recover --continue");
   try {
+    // FG-540 (d82e136 rule, applied here too): a stream_recovered result
+    // stands in for the agent's OWN result contract, so it must be PERSISTED
+    // before any completion write — the dispatch paths persist-then-complete,
+    // and reconcile's running-orphan recovery voids an unpersistable
+    // structured recovery. On a failed write: refuse, leave the task failed,
+    // emit nothing. Every other adoption source (result_json already on disk,
+    // narrative stdout_inferred, diff_adopted) keeps its best-effort write.
+    if (adopted.adoptedFrom === "stream_recovered") {
+      try {
+        writeFileSync(join(taskDir(task.runId, task.id), "result.json"), JSON.stringify(adopted.result));
+      } catch {
+        return {
+          kind: "continue-refused",
+          id: taskId,
+          reason:
+            `task ${taskId} has a stream-recoverable structured result, but persisting it to result.json failed — ` +
+            "a structured recovery may not complete a task it could not persist. Fix the task directory (result.json may be " +
+            "a directory or unwritable) and re-run `forge recover " + taskId + " --continue`.",
+        };
+      }
+    }
     if (!markTaskRecovered(task.id, adopted.result)) {
       return { kind: "continue-refused", id: taskId, reason: `task ${taskId} was concurrently finalized by another process — not overwriting` };
     }
-    // Best-effort disk write, mirroring reconcile.ts: completion proceeds from
-    // the in-memory result regardless of whether the write below succeeds.
-    try {
-      writeFileSync(join(taskDir(task.runId, task.id), "result.json"), JSON.stringify(adopted.result));
-    } catch {
-      // best-effort only
+    // Best-effort disk write for the non-structured sources, mirroring
+    // reconcile.ts: their completion proceeds from the in-memory result
+    // regardless of whether the write below succeeds.
+    if (adopted.adoptedFrom !== "stream_recovered") {
+      try {
+        writeFileSync(join(taskDir(task.runId, task.id), "result.json"), JSON.stringify(adopted.result));
+      } catch {
+        // best-effort only
+      }
     }
     if (adopted.adoptedFrom === "stream_recovered") {
       logEvent("task.result_recovered_from_stream", {
