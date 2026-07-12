@@ -86,9 +86,20 @@ test("FG-539 range: structured id matches Forge's subject forms, hash-optional, 
   for (const subject of [
     "feat: adjacent ticket (FG-5360)",     // shared numeric prefix
     "feat: other id family (XFG-536)",     // left boundary must be non-alphanumeric
+    "feat: hyphen-suffixed sibling (FG-536-a)", // round-2 finding: hyphen continuation is a different id
   ]) {
     assert.ok(!re.test(subject), `expected NO match: ${subject}`);
   }
+});
+
+test("FG-539 range: hyphen-suffixed sibling ids never cross-match, in either direction", async () => {
+  assert.ok(!ticketSubjectPattern("FG-409").test("fix: sibling work (FG-409-a)"));
+  assert.ok(ticketSubjectPattern("FG-409").test("fix: the base ticket (FG-409)"));
+  // The suffixed id itself still resolves exactly.
+  assert.ok(ticketSubjectPattern("FG-409-a").test("fix: sibling work (FG-409-a)"));
+  assert.ok(!ticketSubjectPattern("FG-409-a").test("fix: the base ticket (FG-409)"));
+  // Numeric legacy ids get the same protection.
+  assert.ok(!ticketSubjectPattern("301").test("fix the thing (#301-a)"));
 });
 
 test("FG-539 range: a leading hash on a structured id is accepted and matches the same forms", async () => {

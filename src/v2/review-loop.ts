@@ -38,14 +38,16 @@ export type CommitRange = {
  *    established subject convention is "(FG-536)". The left boundary is any
  *    non-alphanumeric or start-of-subject, so "#FG-536", "(FG-536)", and a
  *    leading "FG-536:" all match while "XFG-536" does not.
- *  The right boundary rejects a following digit, so FG-536 never also catches
- *  FG-5360 (nor #301 → #3010). */
+ *  The right boundary rejects a following digit — FG-536 never also catches
+ *  FG-5360 (nor #301 → #3010) — and a hyphen-continuation, so FG-409 never
+ *  also catches a hyphen-suffixed sibling id like FG-409-a. */
 export function ticketSubjectPattern(ticketId: string): RegExp {
   const id = ticketId.replace(/^#/, "").trim();
   const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const rightBoundary = "(?![0-9]|-[A-Za-z0-9])";
   return /^[0-9]+$/.test(id)
-    ? new RegExp(`#${escaped}(?![0-9])`)
-    : new RegExp(`(^|[^A-Za-z0-9])${escaped}(?![0-9])`);
+    ? new RegExp(`#${escaped}${rightBoundary}`)
+    : new RegExp(`(^|[^A-Za-z0-9])${escaped}${rightBoundary}`);
 }
 
 /** Resolve the commits under review for a ticket: an explicit `--since <sha>`
