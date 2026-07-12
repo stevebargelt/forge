@@ -44,6 +44,24 @@ import { newRunId, newTaskId, nowIso } from "../../util/ids.js";
 
 const ORCHESTRATOR_MARKER = "<!-- forge:orchestrator-start -->";
 
+export function buildClaudeChildEnv(
+  parentEnv: NodeJS.ProcessEnv,
+  bedrockProfile?: string,
+): NodeJS.ProcessEnv {
+  return {
+    ...parentEnv,
+    // Forge-owned sessions put durable work in tmux via `forge launch`.
+    // Claude's background-task registry is vulnerable to harness-wide reaping.
+    CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
+    ...(bedrockProfile
+      ? {
+          CLAUDE_CODE_USE_BEDROCK: "1",
+          AWS_PROFILE: bedrockProfile,
+        }
+      : {}),
+  };
+}
+
 export function registerClaude(program: Command): void {
   program
     .command("claude")
@@ -81,7 +99,6 @@ export function registerClaude(program: Command): void {
       }
 
       let resolvedProfile: string | undefined;
-      let childEnv: NodeJS.ProcessEnv = process.env;
 
       if (bedrockActive) {
         // Profile resolution order: --aws-profile flag > project.json.awsProfile > AWS_PROFILE env > "default"
@@ -149,14 +166,12 @@ export function registerClaude(program: Command): void {
             );
           }
         }
-
-        // Arm the child env without mutating the parent shell.
-        childEnv = {
-          ...process.env,
-          CLAUDE_CODE_USE_BEDROCK: "1",
-          AWS_PROFILE: resolvedProfile,
-        };
       }
+
+      // Disable Claude's harness-owned background tasks for every Forge
+      // orchestrator session. Long-running work must use the durable tmux
+      // launcher instead. The parent shell remains unchanged.
+      const childEnv = buildClaudeChildEnv(process.env, resolvedProfile);
 
       // 5. Resolve the display name. Honor user-supplied -n / --name override.
       const userSuppliedName = extractNameFromArgs(argsWithoutBedrockFlags);
@@ -214,8 +229,8 @@ export function registerClaude(program: Command): void {
       const finalArgs: string[] = ["-n", resolvedName, ...passthrough];
 
       // 11. Exec claude with stdio inherited so the user gets a real interactive
-      //     session. Child env has bedrock vars injected when active (parent shell
-      //     is never mutated).
+      //     session. Child env has background tasks disabled and bedrock vars
+      //     injected when active (parent shell is never mutated).
       const child = spawn("claude", finalArgs, {
         cwd: projectRoot,
         stdio: "inherit",
