@@ -36,6 +36,10 @@ Preliminary attribution favors Claude Code, without yet excluding Supacode:
 
 FG-455, FG-185, and FG-492 improve diagnosis and recovery after parent loss. They do not prevent an interactive orchestrator harness from owning and killing the Forge process.
 
+## ATTRIBUTION RESOLVED (2026-07-11 18:13:49 PDT — si_pid capture)
+
+The live SA_SIGINFO sentinel caught the kill: SIGNAL sig=15 si_pid=17165 si_uid=501 si_code=0 (sentinel.log, 2026-07-11T18:13:49-0700; display was ON, so display-off is not a necessary trigger condition). **PID 17165 is the Claude Code harness process of session fff3e306 itself** (alive since Jul 10 19:59 — no restart). It SIGTERMed the sentinel AND the node decoy in the same second: a sweep of all its registered background tasks. Claude Code confirmed as the sender; Supacode/zmx exonerated. The A/B attribution matrix in the AC is now OPTIONAL (useful only to characterize the trigger condition, e.g. lock/user-away timing, not the sender). The durable-launcher mitigation remains the required work — it defends against exactly this, now-proven, in-harness kill path.
+
 ## Goal
 
 Prevent orchestrator lifecycle events from terminating Forge work, and identify whether Claude Code or Supacode/zmx sends the unsolicited SIGTERM.
@@ -71,4 +75,6 @@ Related: FG-536 (in-product fix — docker-detached agent execution, results sur
 ## Immediate Operational Mitigation
 
 Set `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, restart the Claude orchestrator session, launch long Forge commands under a durable tmux session using a short synchronous Bash call, and poll Forge durable state/logs rather than process-name matches. A controlled tmux test already showed the tmux-owned attached Docker container remained alive after the submitting command returned.
+
+
 
