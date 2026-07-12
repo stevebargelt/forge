@@ -36,6 +36,7 @@ import { removeWorktreeIfSafe } from "./worktree-lifecycle.js";
 import { getManifestRuntime } from "./task-manifest.js";
 import { analyzeProviderFailure } from "./provider-failure.js";
 import { inferredResultFrom } from "./inferred-result.js";
+import { recoverStructuredStreamResult } from "./stream-result-recovery.js";
 import type { OrphanEvidence, ContainerExitInfo, ContainerCausalEvidence } from "./failure-kind.js";
 import { parseDockerInspectState } from "./failure-kind.js";
 import { taskHasPipelineFinalize } from "./run-kind.js";
@@ -791,7 +792,7 @@ export function reconcileRun(
       // unexpected shape in the stdout analysis must never propagate out of
       // reconcileRun. Any error here safe-denies to "no recoverable result",
       // falling through to the worktree-dirty / ordinary-orphaned path below.
-      let inferred: ReturnType<typeof inferredResultFrom>;
+      let inferred: unknown;
       try {
         const runtimeMeta = getManifestRuntime(dir);
         const stdoutRaw = readStdoutLog(t.runId, t.id);
@@ -800,7 +801,18 @@ export function reconcileRun(
           runtimeKind: runtimeMeta?.kind,
           stdoutRaw,
         });
-        inferred = inferredResultFrom(analysis, t.agentRole);
+        // FG-540: structured recovery first — the same shared extraction rule
+        // as the dispatch-time paths (invoke.ts/runNext.ts), so watcher loss
+        // cannot change the result contract. Gated on no CONTRARY exit
+        // evidence (a known non-zero exit or OOM refuses; an unknown exit
+        // defers to the stream's own turn.completed proof) and on the on-disk
+        // state being absent/empty — a non-empty (malformed) result.json wins
+        // as a failure and is never overwritten by recovery.
+        const noContraryExit = exitInfo.oomKilled !== true && (exitInfo.exitCode === undefined || exitInfo.exitCode === 0);
+        const structured = noContraryExit && !analysis.modelError && resultFileState(t.runId, t.id) !== "malformed"
+          ? recoverStructuredStreamResult({ logFormat: runtimeMeta?.logFormat, runtimeKind: runtimeMeta?.kind, stdoutRaw })
+          : undefined;
+        inferred = structured ?? inferredResultFrom(analysis, t.agentRole);
       } catch {
         inferred = undefined;
       }
@@ -986,7 +998,13 @@ export function reconcileRun(
           runtimeKind: runtimeMeta?.kind,
           stdoutRaw,
         });
-        recovered = inferredResultFrom(analysis, t.agentRole);
+        // FG-540: structured recovery first (shared rule with the dispatch-time
+        // paths). The task is already `complete`, so clean completion rests on
+        // the stream's own turn.completed; a non-empty malformed result.json
+        // refuses recovery rather than being overwritten.
+        recovered = (!analysis.modelError && resultFileState(t.runId, t.id) !== "malformed"
+          ? recoverStructuredStreamResult({ logFormat: runtimeMeta?.logFormat, runtimeKind: runtimeMeta?.kind, stdoutRaw })
+          : undefined) ?? inferredResultFrom(analysis, t.agentRole);
       }
     } catch {
       recovered = undefined;

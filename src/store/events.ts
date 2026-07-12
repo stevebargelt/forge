@@ -18,6 +18,11 @@ export type EventType =
   | "task.awaiting_gate"
   | "task.retried"
   | "task.reconciled"
+  // FG-540: a missing result.json was recovered as the exact structured JSON
+  // object from the runtime's cleanly-completed stream (codex-jsonl terminal
+  // agent_message). Dispatch-time provenance; the reconcile-time recovery
+  // paths keep recording task.reconciled with their evidence tuple instead.
+  | "task.result_recovered_from_stream"
   | "task.progress"
   | "task.artifact"
   | "task.decision"

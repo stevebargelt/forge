@@ -77,6 +77,7 @@ import { CONTROL_PLANE_METADATA_KEYS } from "./startRun.js";
 import { newTaskId, newVerdictId, nowIso } from "../util/ids.js";
 import { fillClosedCommit } from "../backlog/structured.js";
 import { inferredResultFrom } from "./inferred-result.js";
+import { recoverStructuredStreamResult } from "./stream-result-recovery.js";
 // FG-351/FG-352: worktree lifecycle — gate check, create, merge-back, cleanup.
 // FG-353: integration worktree helpers added.
 import {
@@ -2606,13 +2607,30 @@ async function runContainer(args: {
     // not generic result_missing.
     let msg = "no_result_json";
     let kind = classify({ resultState: "missing" });
+    const stdoutRaw = existsSync(stdoutPath) ? readFileSync(stdoutPath, "utf8") : "";
     const a = analyzeProviderFailure({
       logFormat: runtimeMeta.logFormat,
       runtimeKind: runtimeMeta.runtimeKind,
-      stdoutRaw: existsSync(stdoutPath) ? readFileSync(stdoutPath, "utf8") : "",
+      stdoutRaw,
     });
     if (a.error) msg = a.error;
     if (a.modelError) kind = classify({ source: "model_error" });
+    // FG-540: provider-adapter recovery — same shared extraction rule as
+    // invoke.ts/reconcile.ts. A recovered object is returned exactly like a
+    // file-written result: the caller still runs persistence, merge,
+    // integration gate, reds, and gate before any outcome is decided.
+    // A non-empty result.json never reaches here, so it is never overwritten.
+    const recovered = exitCode === 0 && resultRaw.length === 0 && !a.modelError
+      ? recoverStructuredStreamResult({ logFormat: runtimeMeta.logFormat, runtimeKind: runtimeMeta.runtimeKind, stdoutRaw })
+      : undefined;
+    if (recovered) {
+      writeFileSync(join(dir, "result.json"), JSON.stringify(recovered));
+      logEvent("task.result_recovered_from_stream", {
+        runId: args.runId, taskId: args.taskId,
+        payload: { source: "workflow", logFormat: runtimeMeta.logFormat ?? runtimeMeta.runtimeKind ?? null },
+      });
+      return { kind: "ok", result: recovered, containerName };
+    }
     // FG-337: clean completion + captured assistant text + narrative role →
     // synthesize an inferred result instead of hard-failing.
     const inferred = inferredResultFrom(a, args.role);

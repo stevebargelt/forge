@@ -52,6 +52,7 @@ import { loadAllConstraints, filterConstraints } from "./constraints.js";
 import { resolveDocsSurfacesReceipt } from "./contract.js";
 import { emitAgentProgressEvents } from "./agent-progress.js";
 import { inferredResultFrom } from "./inferred-result.js";
+import { recoverStructuredStreamResult } from "./stream-result-recovery.js";
 
 export type InvokeArgs = {
   agentRole: string;
@@ -721,13 +722,32 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     // not generic result_missing.
     let error = "no_result_json";
     let kind = classify({ resultState: "missing" });
+    const stdoutRaw = existsSync(stdoutPath) ? readFileSync(stdoutPath, "utf8") : "";
     const a = analyzeProviderFailure({
       logFormat: runtimeMeta.logFormat,
       runtimeKind: runtimeMeta.runtimeKind,
-      stdoutRaw: existsSync(stdoutPath) ? readFileSync(stdoutPath, "utf8") : "",
+      stdoutRaw,
     });
     if (a.error) error = a.error;
     if (a.modelError) kind = classify({ source: "model_error" });
+    // FG-540: provider-adapter recovery — a cleanly-exited run whose stream
+    // carries an unambiguous terminal JSON-object agent_message supplies the
+    // structured result the agent failed to write. The recovered object then
+    // falls THROUGH to the normal completion path below (persistence check,
+    // CAS complete, task.completed, retention) exactly like a file result.
+    // A non-empty result.json never reaches here (parsed or malformed above),
+    // so recovery can never overwrite one.
+    const recovered = exitCode === 0 && resultRaw.length === 0 && !a.modelError
+      ? recoverStructuredStreamResult({ logFormat: runtimeMeta.logFormat, runtimeKind: runtimeMeta.runtimeKind, stdoutRaw })
+      : undefined;
+    if (recovered) {
+      writeFileSync(resultPath, JSON.stringify(recovered));
+      logEvent("task.result_recovered_from_stream", {
+        runId, taskId,
+        payload: { source: "invoke", logFormat: runtimeMeta.logFormat ?? runtimeMeta.runtimeKind ?? null },
+      });
+      result = recovered;
+    } else {
     // FG-337: clean completion + captured assistant text + narrative role →
     // synthesize an inferred result instead of hard-failing.
     const inferred = inferredResultFrom(a, agentRole);
@@ -756,6 +776,7 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     finalizeContainerRetention(containerName, false);
     closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error, failureKind: kind };
+    }
   }
 
   // #254: persistence assertion (rw project only — a read-only mount can't
