@@ -1,9 +1,11 @@
 ---
 id: FG-513
 type: story
-status: active
+status: done
 title: "review-loop reviewer profile rotation: mid-loop model_error kills the run — pin per-loop or same-round retry on default profile"
 created: 2026-07-10
+closed: 2026-07-12
+closed_commit: 56c0d07
 ---
 
 Split out of FG-508 (operator descope decision, 2026-07-10): FG-508 covered the codex CLI version mismatch only; the loop-resilience scope it originally bundled lives here.
