@@ -17,7 +17,7 @@ import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
 import { insertTask, getTask } from "../store/tasks.js";
 import { eventsForTask, logEvent } from "../store/events.js";
-import { runDir } from "../util/paths.js";
+import { runDir, taskDir } from "../util/paths.js";
 import { reconcileRun } from "./reconcile.js";
 import type { Run, Task, TaskPackage } from "../types/index.js";
 
@@ -52,6 +52,14 @@ function writeLock(pid: number, ageMs = 0): void {
 }
 
 const GONE = () => false;
+const NO_REAP = () => "not_found" as const;
+const NO_EXIT_INFO = () => ({});
+
+function writeResult(taskId: string, result: unknown): void {
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "result.json"), JSON.stringify(result));
+}
 
 function failureKindOf(taskId: string): string | undefined {
   const failed = eventsForTask(taskId).filter((e) => e.eventType === "task.failed");
@@ -170,6 +178,19 @@ test("FG-533 container guard: a live agent container without container.started (
 
   assert.equal(getTask("task-build-racing")!.status, "running");
   assert.equal(r.taskChanges.length, 0);
+});
+
+test("FG-533 container guard: a container that launched, ran, and EXITED before the container.started append is an event-lost completion — its result is preserved, never swept as pre_container_crash", () => {
+  mkRunning("task-build-eventlost", { dispatchSource: "workflow" });
+  writeResult("task-build-eventlost", { status: "complete", tests_run: 3 });
+
+  const r = reconcileRun(RUN.id, GONE, NO_REAP, NO_EXIT_INFO);
+
+  const t = getTask("task-build-eventlost")!;
+  assert.notEqual(failureKindOf("task-build-eventlost"), "pre_container_crash", "real agent work exists — 'no work exists to lose' is false here");
+  assert.equal(failureKindOf("task-build-eventlost"), "orphaned_needs_finalize", "a pipeline step's result never completes without the host-side finalize");
+  assert.deepEqual(t.result, { status: "complete", tests_run: 3 }, "the agent's result must be preserved on the row, not discarded");
+  assert.ok(r.taskChanges.some((c) => c.taskId === "task-build-eventlost" && c.reason === "container_gone_pipeline_unfinalized"));
 });
 
 test("FG-533 provisioning handoff: a live provisioner keeps FG-437 ownership — the pre-container sweep never reaches the row", () => {

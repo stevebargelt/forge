@@ -490,10 +490,15 @@ export function reconcileRun(
       //      scope, by construction rather than by sweep.
       //   2. agentRole !== "manual": runner-minted manual steps carry the
       //      "workflow" marker but run host-side, never containerized.
-      //   3. No live agent container. Covers the sub-window where docker
-      //      started the container but the process died before the
-      //      container.started append — the work is real; let a later pass see
-      //      its exit through the normal evidence path rather than false-fail.
+      //   3. No live agent container, AND no result.json on disk. Together these
+      //      cover the whole sub-window where docker started the container but
+      //      the process died before the container.started append: while it is
+      //      alive the liveness probe holds it; once it EXITS, liveness says
+      //      "gone" and only the result proves the agent ran. Either way the
+      //      work is real, so the row falls through to the ordinary
+      //      container-gone evidence path below (complete for an invoke-like
+      //      run, orphaned_needs_finalize for a pipeline step) rather than
+      //      being false-failed as "no work exists to lose".
       //   4. No children: a fanout PARENT runs `running` with no container of
       //      its own for the whole wave — the FG-455-p2 pass below and the
       //      FG-531 sweep own parent recovery, and a parent is never "pre-
@@ -510,13 +515,21 @@ export function reconcileRun(
       // The FG-437 mid-provisioning branch above runs FIRST and keeps owning
       // its sub-window (live provisioner → skip; dead provisioner → its own
       // landing); everything else in the pre-container span lands here.
-      if (
+      const preContainerSweepable =
         t.taskPackage.dispatchSource === "workflow" &&
         t.agentRole !== "manual" &&
         !tasksForRun(runId).some((c) => c.parentId === t.id) &&
         !containerAlive(`forge-${t.id}`) &&
-        liveRunLockHolder(runId, { staleMs: Number.MAX_SAFE_INTEGER }) === null
-      ) {
+        liveRunLockHolder(runId, { staleMs: Number.MAX_SAFE_INTEGER }) === null;
+      if (!preContainerSweepable) continue;
+
+      // The container may have launched, run, and EXITED before the
+      // container.started append — the liveness probe above only holds that row
+      // while the container is still alive. A result.json is proof the agent
+      // ran, so this is an event-lost completion, not a pre-container crash:
+      // fall through to the container-gone evidence path below, which preserves
+      // or finalizes it exactly as it would with the event present.
+      if (readResult(t.runId, t.id) === undefined) {
         const error =
           "pre_container_crash: the forge process died in the pre-container window — the task was marked running, but its " +
           "agent container never launched (the span covers image pull, auth staging, and dependency provisioning), so no " +
@@ -547,8 +560,8 @@ export function reconcileRun(
         if (t.worktreePath && run.projectDir) {
           removeWorktreeIfSafe(t.worktreePath, t.runId, t.id, run.projectDir);
         }
+        continue;
       }
-      continue;
     }
     if (containerAlive(`forge-${t.id}`)) continue; // genuinely still running
 
