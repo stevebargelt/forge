@@ -45,10 +45,13 @@ function isObj(v: unknown): v is Record<string, unknown> {
  *    completed agent_message in the stream falls strictly INSIDE that
  *    started→completed envelope — a message from an earlier turn, one stranded
  *    BETWEEN turns, or one completing after the turn ended all refuse;
- *  - that terminal message's text parses as a JSON OBJECT (arrays, primitives,
- *    prose, and malformed JSON all refuse).
+ *  - that terminal message's text is a STRING parsing to a JSON OBJECT (missing
+ *    or non-string text, arrays, primitives, prose, and malformed JSON all
+ *    refuse).
  *  Deterministic selection: the last completed agent_message of the final
- *  completed turn wins; earlier progress/narration messages can never outrank it. */
+ *  completed turn wins, whatever its text — earlier progress/narration messages
+ *  can never outrank it, and an unusable terminal message refuses the stream
+ *  rather than falling back to an earlier one. */
 export function extractCodexTerminalJsonObject(stdoutRaw: string): Record<string, unknown> | undefined {
   const events: Record<string, unknown>[] = [];
   for (const line of stdoutRaw.split("\n")) {
@@ -86,9 +89,12 @@ export function extractCodexTerminalJsonObject(stdoutRaw: string): Record<string
     }
     if (type === "item.completed") {
       const item = ev["item"];
-      if (isObj(item) && item["type"] === "agent_message" && typeof item["text"] === "string") {
+      if (isObj(item) && item["type"] === "agent_message") {
+        // EVERY completed agent_message is a terminal candidate — including one
+        // with missing or non-string text. Skipping it would let an earlier JSON
+        // message be promoted past a later, unusable terminal one.
         lastAgentMessage = i;
-        terminalText = item["text"];
+        terminalText = typeof item["text"] === "string" ? item["text"] : undefined;
       }
     }
   }

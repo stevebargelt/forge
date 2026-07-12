@@ -135,6 +135,42 @@ test("FG-540 intactness: non-object noise lines are tolerated anywhere; a corrup
   assert.equal(extractCodexTerminalJsonObject([started, terminal, `{"type":"turn.comp`].join("\n")), undefined);
 });
 
+test("FG-540 AC7: a terminal agent_message with no usable text refuses — an earlier JSON message is never promoted", () => {
+  const started = `{"type":"turn.started"}`;
+  const done = `{"type":"turn.completed","usage":{}}`;
+  const earlierPass = `{"type":"item.completed","item":{"id":"a","type":"agent_message","text":"{\\"verdict\\":\\"pass\\",\\"findings\\":[]}"}}`;
+
+  // The stream's LAST completed agent_message is the terminal candidate even
+  // when its text is absent or the wrong type. Each of these is an incomplete
+  // stream, not a licence to fall back on the earlier valid pass.
+  const unusableTerminals = [
+    `{"type":"item.completed","item":{"id":"z","type":"agent_message"}}`, // text missing
+    `{"type":"item.completed","item":{"id":"z","type":"agent_message","text":null}}`,
+    `{"type":"item.completed","item":{"id":"z","type":"agent_message","text":42}}`,
+    `{"type":"item.completed","item":{"id":"z","type":"agent_message","text":{"verdict":"pass"}}}`, // object, not JSON text
+    `{"type":"item.completed","item":{"id":"z","type":"agent_message","text":["{\\"verdict\\":\\"pass\\"}"]}}`,
+  ];
+
+  for (const terminal of unusableTerminals) {
+    assert.equal(
+      extractCodexTerminalJsonObject([started, earlierPass, terminal, done].join("\n")),
+      undefined,
+      `unusable terminal must refuse, not fall back: ${terminal}`,
+    );
+  }
+
+  // Same shape with no earlier message at all still refuses.
+  assert.equal(extractCodexTerminalJsonObject([started, unusableTerminals[0]!, done].join("\n")), undefined);
+
+  // Control: with the SAME earlier message and a usable terminal one, recovery works —
+  // so the refusals above are caused by the terminal message, not the fixture shape.
+  const terminalOk = `{"type":"item.completed","item":{"id":"z","type":"agent_message","text":"{\\"verdict\\":\\"needs_fix\\",\\"findings\\":[{\\"summary\\":\\"real\\"}]}"}}`;
+  assert.deepEqual(extractCodexTerminalJsonObject([started, earlierPass, terminalOk, done].join("\n")), {
+    verdict: "needs_fix",
+    findings: [{ summary: "real" }],
+  });
+});
+
 test("FG-540 AC6: a recovered object that violates the REVIEWER schema is never converted to a pass", async () => {
   const stream = (text: string) =>
     [
