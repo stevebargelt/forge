@@ -42,6 +42,7 @@ learnings/
 | FORGE-DEC-021 | 2026-06-20 | [Remove TaskContract feature (AWN-4 phase 1, closes FG-223 unbuilt)](decisions/2026-06-20_remove-taskcontract-feature.md) |
 | FORGE-DEC-022 | 2026-06-23 | [Resolve project mount root on invoke/new; hard-fail on suspicious subdir mounts (FG-374)](decisions/2026-06-23_project-mount-root-resolution.md) |
 | FORGE-DEC-024 | 2026-07-03 | [Fail-safe recovery for lost containers: adopt vs. re-drive, gated behind `forge recover` (FG-455 p2/p3)](decisions/2026-07-03_fanout-orphan-recovery-fail-safe.md) |
+| FORGE-DEC-025 | 2026-07-12 | [Run agent containers docker-detached — survive host-side parent death by construction (FG-536)](decisions/2026-07-12_detached-agent-execution.md) |
 
 ## Patterns index
 

@@ -75,6 +75,7 @@ test("FG-530 (a) content guard: the hook module reads no env and does no I/O —
 // real names, not a synthetic one.
 const PROBE_NAMES = [
   "runContainer:after-mark-running-before-container-launch",
+  "runContainer:after-container-started-before-exec",
   "dispatchSingleStep:after-result-ingest",
   "dispatchSingleStep:before-validation-contract",
   "holdIfValidationContractFails:between-hold-status-and-event",

@@ -20,7 +20,7 @@
 // it is unambiguous there is no further work — single-step invoke runs. Multi-
 // step pipelines are finalized by `forge next`, which has the workflow.
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync as cpSpawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getRun } from "../store/runs.js";
@@ -28,6 +28,7 @@ import { finalizeRunIfSettled } from "./run-finalize.js";
 import { tasksForRun, markTaskComplete, markTaskFailed, backfillTaskResult } from "../store/tasks.js";
 import { logEvent, eventsForTask } from "../store/events.js";
 import { crashPoint } from "./crash-points.js";
+import { resolveIdleTimeoutMs } from "./idle-watchdog.js";
 import { getDb } from "../store/db.js";
 import { taskDir } from "../util/paths.js";
 import { cleanupStagedAuth } from "./auth-state.js";
@@ -298,6 +299,94 @@ function toContainerCausalEvidence(evidence: OrphanEvidence): ContainerCausalEvi
   };
 }
 
+// ── FG-536: the surviving idle bound for detached containers ─────────────────
+// Detached execution (docker-exec.ts) means the in-process idle watchdog can
+// die with its watcher process while the container lives on. Reconcile is the
+// bound that survives: for a LIVE container whose last observable activity
+// exceeds the task's idle budget, it kills the container — authoritative, the
+// same `docker kill` the watchdog uses — and records container.idle_timeout.
+// The task stays `running` that pass; the next pass finds the container gone
+// and lands it through the ordinary evidence path. Unknowable activity (docker
+// can't answer) enforces NOTHING — never kill on missing evidence.
+
+/** Last-activity probe for a live container: epoch ms of its most recent log
+ *  line (stdout or stderr; docker --timestamps), falling back to the
+ *  container's StartedAt when it has produced no output yet — the same
+ *  "silence since start counts" semantics as the in-process watchdog. */
+export type ContainerIdleBound = {
+  activity: (containerName: string) => number | null;
+  kill: (containerName: string) => void;
+};
+
+function parseDockerLogTimestamp(line: string): number | null {
+  const token = line.split(" ", 1)[0] ?? "";
+  // RFC3339Nano — Date.parse only understands millisecond precision, so the
+  // fractional part is truncated to three digits before parsing.
+  const normalized = token.replace(/\.(\d{3})\d*(Z|[+-]\d\d:\d\d)$/, ".$1$2");
+  const ms = Date.parse(normalized);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+export function defaultContainerActivity(containerName: string): number | null {
+  try {
+    const r = cpSpawnSync("docker", ["logs", "--tail", "5", "--timestamps", containerName], { encoding: "utf8" });
+    if (r.status !== 0) return null;
+    let latest: number | null = null;
+    for (const line of `${r.stdout}\n${r.stderr}`.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const ms = parseDockerLogTimestamp(trimmed);
+      if (ms !== null) latest = latest === null ? ms : Math.max(latest, ms);
+    }
+    if (latest !== null) return latest;
+    const raw = execFileSync("docker", ["inspect", containerName], { stdio: ["ignore", "pipe", "pipe"] }).toString();
+    const startedAt = parseDockerInspectState(raw).startedAt;
+    const startedMs = startedAt !== undefined ? Date.parse(startedAt) : NaN;
+    return Number.isNaN(startedMs) ? null : startedMs;
+  } catch {
+    return null;
+  }
+}
+
+export const defaultIdleBound: ContainerIdleBound = {
+  activity: defaultContainerActivity,
+  kill: (name) => {
+    try {
+      execFileSync("docker", ["kill", name], { stdio: ["ignore", "ignore", "ignore"] });
+    } catch { /* container may already be gone — the next pass settles it */ }
+  },
+};
+
+/** FG-536: the daemon's container ID, as recorded in the task's container.started
+ *  event. `forge-<taskId>` is a REUSABLE name — once the original container exits,
+ *  a retry (or any other docker client) can bind it to a different container, and
+ *  every by-name docker call reconcile makes would then address the replacement:
+ *  probing its liveness, killing it on the idle bound, reading its exit code as
+ *  the original's, reaping it. The recorded ID is the daemon's authoritative
+ *  identity for THIS run of the task, so it is what reconcile addresses whenever
+ *  it exists. The name stays the fallback for rows with no ID on the record
+ *  (attached executor, `docker run -d` output unparseable, pre-FG-536 rows). */
+function recordedContainerId(taskEvents: { eventType: string; payload: unknown }[]): string | undefined {
+  for (const e of taskEvents) {
+    if (e.eventType !== "container.started") continue;
+    const id = (e.payload as { containerId?: unknown } | null)?.containerId;
+    if (typeof id === "string" && id !== "") return id;
+  }
+  return undefined;
+}
+
+/** The task's idle budget, from its manifest (written at dispatch) — the same
+ *  resolution `forge show`'s countdown uses. */
+function manifestIdleTimeoutMs(taskDirPath: string): number | undefined {
+  try {
+    const raw = readFileSync(join(taskDirPath, "manifest.json"), "utf8");
+    const v = (JSON.parse(raw) as { container?: { idleTimeoutMs?: unknown } }).container?.idleTimeoutMs;
+    return typeof v === "number" ? v : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Reconcile a single run's task + run state against reality. Returns what (if
  *  anything) changed. */
 export function reconcileRun(
@@ -306,6 +395,7 @@ export function reconcileRun(
   reapContainer: ContainerReap = defaultContainerReap,
   containerExitInfo: ContainerExitInfo = defaultContainerExitInfo,
   writers: ReconcileWriters = defaultReconcileWriters,
+  idleBound: ContainerIdleBound = defaultIdleBound,
 ): ReconcileResult {
   const { markTaskComplete, markTaskFailed, backfillTaskResult } = writers;
   const run = getRun(runId);
@@ -367,6 +457,12 @@ export function reconcileRun(
     try {
     const taskEvents = eventsForTask(t.id);
     const hasContainerStarted = taskEvents.some((e) => e.eventType === "container.started");
+    // The task's container NAME (what forge asked docker for) and the docker
+    // ADDRESS reconcile actually uses (the recorded daemon ID when there is one
+    // — see recordedContainerId). Evidence keeps reporting the name; every
+    // docker call — liveness, activity, kill, exit info, reap — goes to the ref.
+    const containerName = `forge-${t.id}`;
+    const containerRef = recordedContainerId(taskEvents) ?? containerName;
     // FG-492 review (final round): hasContainerExited CAN be true here — it is
     // not just a defensive placeholder. Forge can log container.exited (or
     // .idle_timeout / .dependency_provisioning_failed) and then crash BEFORE
@@ -476,6 +572,21 @@ export function reconcileRun(
     // wrongly orphan them. The authoritative signal that forge launched a
     // container is a container.started event for the task.
     if (!hasContainerStarted) {
+      // FG-536 (review): the daemon-start-to-callback window. `docker run -d`
+      // creates the container under the daemon and the container.started append
+      // happens only once the client returns — a CLI kill in between leaves a
+      // `running` row with no start event while the container runs on, writes
+      // /task/result.json through its bind mount, and exits. For an INVOKE row
+      // the FG-533 sweep below is deliberately inert (dispatchSource gate 1), so
+      // without this the row would strand `running` forever even though its real
+      // result is sitting on disk. A result.json is proof the agent ran: land it
+      // through the ordinary container-gone evidence path below (which re-checks
+      // liveness first, so a container still writing is left alone). Absent a
+      // result there is nothing to finalize — an invoke row stays exempt from
+      // the sweep, exactly as FG-536's scope note says.
+      const invokeResultOnDisk =
+        t.taskPackage.dispatchSource === "invoke" && readResult(t.runId, t.id) !== undefined;
+      if (!invokeResultOnDisk) {
       // FG-533: the pre-container crash window. runContainer marks the task
       // `running` and logs task.started BEFORE the container launches; the span
       // that follows (image pull, auth staging, dependency provisioning) is
@@ -486,8 +597,10 @@ export function reconcileRun(
       // comment defends stays intact:
       //   1. dispatchSource === "workflow" only (FG-512 provenance, total for
       //      new rows). Session/design/legacy rows are marker-less and invoke
-      //      rows are "invoke" — all exempt. Invoke survivability is FG-536's
-      //      scope, by construction rather than by sweep.
+      //      rows are "invoke" — all exempt from being FAILED here. Invoke
+      //      survivability is FG-536's scope, by construction rather than by
+      //      sweep; an invoke row with a real result on disk is finalized by the
+      //      branch above instead, never failed by this one.
       //   2. agentRole !== "manual": runner-minted manual steps carry the
       //      "workflow" marker but run host-side, never containerized.
       //   3. No live agent container, AND no result.json on disk. Together these
@@ -519,7 +632,7 @@ export function reconcileRun(
         t.taskPackage.dispatchSource === "workflow" &&
         t.agentRole !== "manual" &&
         !tasksForRun(runId).some((c) => c.parentId === t.id) &&
-        !containerAlive(`forge-${t.id}`) &&
+        !containerAlive(containerRef) &&
         liveRunLockHolder(runId, { staleMs: Number.MAX_SAFE_INTEGER }) === null;
       if (!preContainerSweepable) continue;
 
@@ -536,7 +649,7 @@ export function reconcileRun(
           `work exists to lose. Re-dispatch with \`forge retry ${t.id}\`.`;
         const evidence = {
           dispatchSource: "workflow" as const,
-          expectedContainer: `forge-${t.id}`,
+          expectedContainer: containerName,
           containerStarted: false,
           reason: error,
         };
@@ -562,13 +675,34 @@ export function reconcileRun(
         }
         continue;
       }
+      }
     }
-    if (containerAlive(`forge-${t.id}`)) continue; // genuinely still running
+    if (containerAlive(containerRef)) {
+      // FG-536: the surviving idle bound (see defaultIdleBound above). A live
+      // container past its idle budget is killed here — the same authoritative
+      // `docker kill` the in-process watchdog uses — and the NEXT pass lands
+      // the task through the ordinary container-gone evidence path. No status
+      // is written this pass, and unknowable activity enforces nothing.
+      try {
+        const last = idleBound.activity(containerRef);
+        if (last !== null) {
+          const idleMs = manifestIdleTimeoutMs(taskDir(t.runId, t.id)) ?? resolveIdleTimeoutMs();
+          if (idleMs > 0 && Date.now() - last > idleMs) {
+            idleBound.kill(containerRef);
+            logEvent("container.idle_timeout", {
+              runId,
+              taskId: t.id,
+              payload: { source: "reconcile_idle_bound", containerName, containerRef, lastActivityAt: new Date(last).toISOString(), idleTimeoutMs: idleMs, reason: "no container output within the idle budget and no live in-process watchdog to enforce it (FG-536 detached execution)" },
+            });
+          }
+        }
+      } catch { /* FG-459 posture: the idle bound must never abort the pass */ }
+      continue; // genuinely still running (or just killed — next pass settles it)
+    }
 
     // Container is gone. If it left a usable result, finalize as complete (the
     // work finished but the DB write was lost); otherwise it was orphaned.
     const result = readResult(t.runId, t.id);
-    const containerName = `forge-${t.id}`;
 
     // FG-455 p1 review: gather the worktree/changedFiles evidence ONCE, before
     // the result-present/absent split, so all four container-gone outcomes
@@ -586,7 +720,7 @@ export function reconcileRun(
     // just yields {} (unknown), same as today's behavior.
     let exitInfo: ReturnType<ContainerExitInfo>;
     try {
-      exitInfo = containerExitInfo(containerName);
+      exitInfo = containerExitInfo(containerRef);
     } catch {
       exitInfo = {};
     }
@@ -789,7 +923,10 @@ export function reconcileRun(
     if (!shouldRetainContainer(taskCompletedSuccessfully)) {
       let reapOutcome: ContainerReapResult;
       try {
-        reapOutcome = reapContainer(containerName);
+        // Addressed by the recorded daemon ID when there is one: `docker rm -f`
+        // by NAME would destroy whatever container holds the name now, which
+        // after a retry is not the one this task ran.
+        reapOutcome = reapContainer(containerRef);
       } catch {
         // best-effort — a later reconcile pass or `forge ops reap-containers` can retry
         reapOutcome = "error";
@@ -1014,7 +1151,7 @@ export function reconcileRun(
           // awaiting_red; on_reject recovery rows parent to a FAILED task). A
           // live red container means the review is genuinely in flight.
           const deadReds = children.filter((c) => !TERMINAL_TASK.has(c.status));
-          if (deadReds.some((c) => containerAlive(`forge-${c.id}`))) continue;
+          if (deadReds.some((c) => containerAlive(recordedContainerId(eventsForTask(c.id)) ?? `forge-${c.id}`))) continue;
 
           // Reds can never deliver a verdict for this task again. First settle
           // the dead red rows themselves (pending never-dispatched, or running

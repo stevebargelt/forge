@@ -38,7 +38,7 @@ import { resolvePolicyPath } from "../raci/project.js";
 import { explainRouteFile } from "../cli/commands/route.js";
 import { resolveIdleTimeoutMs, IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
 import { DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE } from "./dependency-provisioning.js";
-import { defaultDockerExec, finalizeContainerRetention, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
+import { productionDockerExec, finalizeContainerRetention, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
 import { composeSystemPrompt } from "./compose.js";
 import { buildDockerArgs, preflightProjectMount, type SpawnContext } from "./spawn.js";
 import { loadRuntimeWithSource, loadModelPolicyWithSource } from "./loader.js";
@@ -553,11 +553,22 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     return { runId, taskId, status: "failed", error };
   }
 
-  const exec = args.dockerExec ?? defaultDockerExec;
+  const exec = args.dockerExec ?? productionDockerExec;
   const stdoutPath = join(dir, "container.stdout.log");
   const stderrPath = join(dir, "container.stderr.log");
   const containerName = `forge-${taskId}`;
-  logEvent("container.started", { runId, taskId, payload: { containerName } });
+  // FG-536: the start record lands from the executor's post-`docker run -d`
+  // callback, so container.started means a container really exists and the
+  // watcher-death window (host gone, container running on) starts where the
+  // container does. Legacy/fake executors give no signal and keep the up-front
+  // record.
+  let containerStartRecorded = false;
+  const recordContainerStarted = (containerId?: string): void => {
+    if (containerStartRecorded) return;
+    containerStartRecorded = true;
+    logEvent("container.started", { runId, taskId, payload: { containerName, ...(containerId !== undefined ? { containerId } : {}) } });
+  };
+  if (!exec.signalsContainerStart) recordContainerStarted();
   let exitCode: number;
   // FG-492: populated by docker-exec.ts's capture-at-close. Attached onto
   // every terminal container event below so `forge show`/`status`/`ops check`
@@ -570,10 +581,12 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     exitCode = await exec({
       args: dockerArgs.args,
       stdin: dockerArgs.stdin,
+      imageIndex: dockerArgs.imageIndex,
       stdoutPath,
       stderrPath,
       idleTimeoutMs,
       onContainerEvidence: (e) => { containerEvidence = e; },
+      onContainerStarted: recordContainerStarted,
     });
   } catch (e) {
     // #155: capture usage even on docker failure — the task may have streamed

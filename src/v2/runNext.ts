@@ -27,7 +27,7 @@ import {
   provisionerContainerName,
   type DependencyVolumePlan,
 } from "./dependency-provisioning.js";
-import { defaultDockerExec, finalizeContainerRetention, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
+import { productionDockerExec, finalizeContainerRetention, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
 import { join } from "node:path";
 import type { Task, TaskPackage, Verdict, Finding, RedAuthority, ReviewerContextPacket, DoneAuditResult } from "../types/index.js";
 import type { Workflow, Step, Runtime, RedDef, FanoutDef } from "./schema.js";
@@ -2332,7 +2332,7 @@ async function runContainer(args: {
   const dependencyCacheEligible = process.platform === "darwin" && process.env.FORGE_NO_NM_SHADOW !== "1";
   const depSpawnFields: Pick<SpawnContext, "IS_WORKTREE_DISPATCH" | "DEPENDENCY_CACHE_MOUNT_RO"> = {};
 
-  const exec = args.dockerExec ?? defaultDockerExec;
+  const exec = args.dockerExec ?? productionDockerExec;
 
   if (dependencyCacheEligible && isWorktreeRwDispatch) {
     depSpawnFields.IS_WORKTREE_DISPATCH = "1";
@@ -2457,7 +2457,25 @@ async function runContainer(args: {
   const stdoutPath = join(dir, "container.stdout.log");
   const stderrPath = join(dir, "container.stderr.log");
   const containerName = `forge-${args.taskId}`;
-  logEvent("container.started", { runId: args.runId, taskId: args.taskId, payload: { containerName } });
+  // FG-536: the durable start record and the FG-530 kill point both fire from the
+  // executor's start callback — for the detached executor, the instant after
+  // `docker run -d` returns success. Before that instant there is no container, so
+  // a death there is a PRE-container crash (FG-533's window, its own probe above)
+  // and container.started would be a lie. From this callback until exec returns the
+  // host is only a WATCHER; a crash in that span leaves the container running to
+  // completion and the task `running` with container.started on the record — the
+  // shape the container-gone sweep and its invoke-like/needs-finalize landings
+  // recover from the REAL result once the container exits.
+  let containerStartRecorded = false;
+  const recordContainerStarted = (containerId?: string): void => {
+    if (containerStartRecorded) return;
+    containerStartRecorded = true;
+    logEvent("container.started", { runId: args.runId, taskId: args.taskId, payload: { containerName, ...(containerId !== undefined ? { containerId } : {}) } });
+    crashPoint("runContainer:after-container-started-before-exec");
+  };
+  // Legacy/fake executors give no start signal; they get the record up-front, which
+  // is where it always sat for them.
+  if (!exec.signalsContainerStart) recordContainerStarted();
   let exitCode: number;
   // FG-492: populated by docker-exec.ts's capture-at-close. Attached onto
   // every terminal container event below (mirrors invoke.ts). FG-492 review:
@@ -2468,10 +2486,12 @@ async function runContainer(args: {
     exitCode = await exec({
       args: dockerArgs.args,
       stdin: dockerArgs.stdin,
+      imageIndex: dockerArgs.imageIndex,
       stdoutPath,
       stderrPath,
       idleTimeoutMs,
       onContainerEvidence: (e) => { containerEvidence = e; },
+      onContainerStarted: recordContainerStarted,
     });
   } catch (e) {
     // #155: capture usage on docker failure too — tokens may have flown before crash.
