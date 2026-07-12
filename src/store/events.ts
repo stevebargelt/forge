@@ -18,6 +18,16 @@ export type EventType =
   | "task.awaiting_gate"
   | "task.retried"
   | "task.reconciled"
+  // FG-540: a missing result.json was recovered as the exact structured JSON
+  // object from the runtime's cleanly-completed stream (codex-jsonl terminal
+  // agent_message). Emitted by EVERY consumer that adopts a stream-recovered
+  // structured result — dispatch (invoke.ts / runNext.ts, payload.source
+  // "invoke"/"workflow"), `forge recover --continue` (adoptedFrom
+  // "stream_recovered"), and reconcile (payload.source "reconcile" /
+  // "reconcile_pipeline_unfinalized" / "reconcile_backfill") — so structured
+  // recovery is always distinguishable from FG-337 narrative synthesis, which
+  // never emits this event.
+  | "task.result_recovered_from_stream"
   | "task.progress"
   | "task.artifact"
   | "task.decision"

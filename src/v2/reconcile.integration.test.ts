@@ -1,6 +1,6 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -1701,4 +1701,262 @@ test("FG-492 review round 2 (state 3): a REAL fanout-parent derived failure from
     "must explicitly disclaim a killed-agent cause — the parent's failure is derived from its children's outcomes",
   );
   assert.doesNotMatch(evidenceText, /\bwas killed\b/i, "must never read as if the fanout parent itself was killed");
+});
+
+// ----- FG-540: reconcile-time Codex structured-result recovery -----
+// Same shared extraction rule as the dispatch paths (stream-result-recovery.ts).
+// A STRUCTURED role's missing result.json can be recovered as the exact JSON
+// object from a cleanly-completed codex stream — fail-closed everywhere else.
+
+const FG540_PASS = {
+  status: "complete", verdict: "pass", findings: [],
+  notes: "sanitized from run-review-loop-fg-536-eaa5be / task-red-wide-0dc174",
+};
+
+function codexCleanStdout(terminalText: string): string {
+  return [
+    `{"type":"turn.started"}`,
+    `{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"progress narration"}}`,
+    `{"type":"item.completed","item":{"id":"i4","type":"agent_message","text":${JSON.stringify(terminalText)}}}`,
+    `{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`,
+  ].join("\n");
+}
+
+function writeCodexManifest(dir: string): void {
+  writeFileSync(join(dir, "manifest.json"), JSON.stringify({
+    runtime: { name: "codex-stub", kind: "codex", logFormat: "codex-jsonl", promptStrategy: "stdin", authStrategy: "codex-auth" },
+  }));
+}
+
+test("FG-540 rec: container gone, STRUCTURED role, no result.json, clean codex stream → task COMPLETES with the exact recovered object (invoke-like run)", () => {
+  const taskId = "t-fg540-structured-recover";
+  insertContainerized(mkTask(taskId, { status: "running", agentRole: "red-wide" }));
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writeCodexManifest(dir);
+  writeFileSync(join(dir, "container.stdout.log"), codexCleanStdout(JSON.stringify(FG540_PASS)));
+
+  const r = reconcileRun(RUN.id, GONE);
+  assert.deepEqual(r.taskChanges, [{ taskId, from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout" }]);
+
+  const t = getTask(taskId)!;
+  assert.equal(t.status, "complete");
+  assert.deepEqual(t.result, FG540_PASS, "the EXACT terminal JSON object, not an inferred narrative wrapper");
+  const onDisk = JSON.parse(readFileSync(join(dir, "result.json"), "utf8"));
+  assert.deepEqual(onDisk, FG540_PASS);
+
+  // FG-540 provenance: structured recovery is recorded distinctly.
+  const streamEv = eventsForTask(taskId).find((e) => e.eventType === "task.result_recovered_from_stream");
+  assert.ok(streamEv, "reconcile's structured adoption must emit task.result_recovered_from_stream");
+  assert.equal((streamEv!.payload as Record<string, unknown>)["source"], "reconcile");
+});
+
+test("FG-540 rec: PIPELINE run — a structured stream recovery still lands orphaned_needs_finalize (FG-479 guard), result preserved, never complete", () => {
+  insertRun({ id: "run-fg540-pipe", workflow: "feature", title: "p", status: "active", createdAt: "2026-05-30T00:00:00Z" });
+  const taskId = "t-fg540-pipe";
+  insertContainerized(mkTask(taskId, { runId: "run-fg540-pipe", status: "running", phase: "build", agentRole: "red-wide",
+    taskPackage: { taskId, runId: "run-fg540-pipe", phase: "build", role: "red-wide", inputs: {}, composedSystemPrompt: "" } }));
+  const dir = taskDir("run-fg540-pipe", taskId);
+  mkdirSync(dir, { recursive: true });
+  writeCodexManifest(dir);
+  writeFileSync(join(dir, "container.stdout.log"), codexCleanStdout(JSON.stringify(FG540_PASS)));
+
+  const r = reconcileRun("run-fg540-pipe", GONE);
+  assert.deepEqual(r.taskChanges, [{ taskId, from: "running", to: "failed", reason: "container_gone_pipeline_unfinalized" }]);
+  const t = getTask(taskId)!;
+  assert.equal(t.status, "failed");
+  assert.deepEqual(t.result, FG540_PASS, "the recovered result is preserved as the audit record on the fail-safe landing");
+  const streamEv = eventsForTask(taskId).find((e) => e.eventType === "task.result_recovered_from_stream");
+  assert.ok(streamEv, "provenance is recorded even on the fail-safe pipeline landing");
+  assert.equal((streamEv!.payload as Record<string, unknown>)["source"], "reconcile_pipeline_unfinalized");
+});
+
+test("FG-540 rec: contrary exit evidence (known non-zero exit) refuses structured recovery — fail-closed", () => {
+  const taskId = "t-fg540-nonzero-exit";
+  insertContainerized(mkTask(taskId, { status: "running", agentRole: "red-wide" }));
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writeCodexManifest(dir);
+  writeFileSync(join(dir, "container.stdout.log"), codexCleanStdout(JSON.stringify(FG540_PASS)));
+  const exitInfo = () => ({ exitCode: 1 });
+
+  const r = reconcileRun(RUN.id, GONE, undefined, exitInfo);
+  assert.deepEqual(r.taskChanges.map((c) => c.to), ["failed"], "a known non-zero exit must not recover a structured result");
+  assert.equal(getTask(taskId)!.status, "failed");
+});
+
+test("FG-540 rec: a non-empty MALFORMED result.json wins as a failure — recovery never overwrites it", () => {
+  const taskId = "t-fg540-malformed-wins";
+  insertContainerized(mkTask(taskId, { status: "running", agentRole: "red-wide" }));
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writeCodexManifest(dir);
+  writeFileSync(join(dir, "result.json"), "{truncated-non-json");
+  writeFileSync(join(dir, "container.stdout.log"), codexCleanStdout(JSON.stringify(FG540_PASS)));
+
+  const r = reconcileRun(RUN.id, GONE);
+  assert.deepEqual(r.taskChanges.map((c) => c.to), ["failed"]);
+  assert.equal(getTask(taskId)!.status, "failed");
+  assert.equal(readFileSync(join(dir, "result.json"), "utf8"), "{truncated-non-json", "the malformed file is evidence — never overwritten by recovery");
+});
+
+test("FG-540 review: a structured stream recovery whose result.json write FAILS never completes — the recovery is void, the task lands orphaned with resultWriteFailed in evidence", () => {
+  const taskId = "t-fg540-write-throws";
+  insertContainerized(mkTask(taskId, { status: "running", agentRole: "red-wide" }));
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writeCodexManifest(dir);
+  writeFileSync(join(dir, "container.stdout.log"), codexCleanStdout(JSON.stringify(FG540_PASS)));
+  // result.json is a directory — writeFileSync throws EISDIR when reconcile tries
+  // to persist the recovered result. Unlike FG-337 narrative synthesis, a
+  // structured recovery stands in for the agent's own result contract: it may not
+  // complete a task it could not persist the way a normal run does.
+  mkdirSync(join(dir, "result.json"), { recursive: true });
+
+  let r: ReturnType<typeof reconcileRun> | undefined;
+  assert.doesNotThrow(() => { r = reconcileRun(RUN.id, GONE); });
+  assert.deepEqual(r!.taskChanges.map((c) => c.to), ["failed"], "no persisted result.json → no completion");
+
+  const t = getTask(taskId)!;
+  assert.equal(t.status, "failed");
+  assert.equal(t.result, undefined, "the unpersisted structured result is not adopted as the task result");
+
+  const types = eventsForTask(taskId).map((e) => e.eventType);
+  assert.ok(!types.includes("task.completed"));
+  assert.ok(!types.includes("task.result_recovered_from_stream"), "no provenance event for a recovery that did not happen");
+
+  const reconciled = eventsForTask(taskId).find((e) => e.eventType === "task.reconciled")!;
+  const evidence = (reconciled.payload as Record<string, unknown>).evidence as OrphanEvidence;
+  assert.equal(evidence.resultWriteFailed, true, "the write failure is the reason recovery was refused — it must be visible");
+  assert.equal(evidence.recoverableStdoutResult, false, "the voided recovery is not advertised as recoverable");
+});
+
+test("FG-540 rec: prose terminal message for a STRUCTURED role recovers nothing (no narrative synthesis) → orphaned", () => {
+  const taskId = "t-fg540-prose-structured";
+  insertContainerized(mkTask(taskId, { status: "running", agentRole: "red-wide" }));
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writeCodexManifest(dir);
+  writeFileSync(join(dir, "container.stdout.log"), codexCleanStdout("all good, passing"));
+
+  const r = reconcileRun(RUN.id, GONE);
+  assert.deepEqual(r.taskChanges.map((c) => c.to), ["failed"]);
+});
+
+test("FG-540 rec: Mode-A backfill — a complete task with an empty result is backfilled from the structured stream", () => {
+  const taskId = "t-fg540-backfill";
+  insertContainerized(mkTask(taskId, { status: "complete" })); // result undefined
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writeCodexManifest(dir);
+  writeFileSync(join(dir, "container.stdout.log"), codexCleanStdout(JSON.stringify(FG540_PASS)));
+
+  const r = reconcileRun(RUN.id, GONE);
+  assert.deepEqual(r.taskChanges, [{ taskId, from: "complete", to: "complete", reason: "complete_empty_result_backfilled" }]);
+  const t = getTask(taskId)!;
+  assert.equal(t.status, "complete");
+  assert.deepEqual(t.result, FG540_PASS, "backfilled with the exact structured object, not an inferred narrative");
+  const streamEv = eventsForTask(taskId).find((e) => e.eventType === "task.result_recovered_from_stream");
+  assert.ok(streamEv, "a structured-stream backfill must record its provenance");
+  assert.equal((streamEv!.payload as Record<string, unknown>)["source"], "reconcile_backfill");
+});
+
+test("FG-540 final pass: running-orphan — a MALFORMED result.json refuses NARRATIVE inference too; the file survives untouched", () => {
+  const taskId = "t-fg540-malformed-narrative";
+  insertContainerized(mkTask(taskId, { status: "running", agentRole: "research-specialist" }));
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writePiManifest(dir);
+  writeFileSync(join(dir, "container.stdout.log"), piCleanEndStdout("narrative output"));
+  writeFileSync(join(dir, "result.json"), "{truncated-non-json");
+
+  const r = reconcileRun(RUN.id, GONE);
+  assert.deepEqual(r.taskChanges.map((c) => c.to), ["failed"], "no stdout recovery of any kind over a malformed file");
+  assert.equal(getTask(taskId)!.status, "failed");
+  assert.equal(readFileSync(join(dir, "result.json"), "utf8"), "{truncated-non-json");
+});
+
+test("FG-540 parity: Mode-A backfill — a structured recovery whose result.json write FAILS backfills nothing: no DB write, no reconciled event, no provenance event", () => {
+  const taskId = "t-fg540-backfill-write-throws";
+  insertContainerized(mkTask(taskId, { status: "complete", agentRole: "red-wide" })); // result undefined
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writeCodexManifest(dir);
+  writeFileSync(join(dir, "container.stdout.log"), codexCleanStdout(JSON.stringify(FG540_PASS)));
+  // result.json is a DIRECTORY — the persist step throws EISDIR (same
+  // injection as the running-orphan regression for d82e136's rule).
+  mkdirSync(join(dir, "result.json"), { recursive: true });
+
+  let r: ReturnType<typeof reconcileRun> | undefined;
+  assert.doesNotThrow(() => { r = reconcileRun(RUN.id, GONE); });
+  assert.deepEqual(r!.taskChanges, [], "no persisted result.json → no backfill of a structured recovery");
+
+  const t = getTask(taskId)!;
+  assert.equal(t.result, undefined, "the DB result stays empty");
+  const types = eventsForTask(taskId).map((e) => e.eventType);
+  assert.ok(!types.includes("task.reconciled"), "no backfill event for a backfill that did not happen");
+  assert.ok(!types.includes("task.result_recovered_from_stream"), "no provenance event for a recovery that was voided");
+});
+
+test("FG-540 final pass: Mode-A backfill — a MALFORMED result.json refuses NARRATIVE backfill too; the file survives untouched", () => {
+  const taskId = "t-fg540-backfill-malformed-narrative";
+  insertContainerized(mkTask(taskId, { status: "complete", agentRole: "research-specialist" })); // result undefined
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writePiManifest(dir);
+  writeFileSync(join(dir, "container.stdout.log"), piCleanEndStdout("narrative output"));
+  writeFileSync(join(dir, "result.json"), "{truncated-non-json");
+
+  const r = reconcileRun(RUN.id, GONE);
+  assert.deepEqual(r.taskChanges, [], "no backfill of any kind over a malformed file");
+  assert.equal(getTask(taskId)!.result, undefined);
+  assert.equal(readFileSync(join(dir, "result.json"), "utf8"), "{truncated-non-json");
+});
+
+test("FG-540 rec: FG-337 narrative synthesis never emits the stream-recovery event — the two provenances stay distinguishable", () => {
+  const taskId = "t-fg540-narrative-no-event";
+  insertContainerized(mkTask(taskId, { status: "running", agentRole: "research-specialist" }));
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writePiManifest(dir);
+  writeFileSync(join(dir, "container.stdout.log"), piCleanEndStdout("narrative research output"));
+
+  const r = reconcileRun(RUN.id, GONE);
+  assert.deepEqual(r.taskChanges.map((c) => c.to), ["complete"], "narrative recovery still completes the task");
+  const t = getTask(taskId)!;
+  assert.equal((t.result as Record<string, unknown>)["contract"], "inferred");
+  assert.ok(
+    !eventsForTask(taskId).some((e) => e.eventType === "task.result_recovered_from_stream"),
+    "narrative synthesis must NOT claim structured-stream provenance",
+  );
+});
+
+test("FG-540 rec: Mode-A backfill — a known non-zero container exit refuses structured recovery (same no-contrary-exit guard as the running branch)", () => {
+  const taskId = "t-fg540-backfill-nonzero";
+  insertContainerized(mkTask(taskId, { status: "complete" })); // result undefined
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writeCodexManifest(dir);
+  writeFileSync(join(dir, "container.stdout.log"), codexCleanStdout(JSON.stringify(FG540_PASS)));
+  const exitInfo = () => ({ exitCode: 137 });
+
+  const r = reconcileRun(RUN.id, GONE, undefined, exitInfo);
+  assert.deepEqual(r.taskChanges, [], "no backfill may occur off a known-bad container exit");
+  const t = getTask(taskId)!;
+  assert.equal(t.result, undefined, "the empty result stays empty — fail closed");
+  assert.ok(!existsSync(join(dir, "result.json")), "no result.json is fabricated");
+});
+
+test("FG-540 rec: Mode-A backfill — an OOM-killed container refuses structured recovery", () => {
+  const taskId = "t-fg540-backfill-oom";
+  insertContainerized(mkTask(taskId, { status: "complete" })); // result undefined
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writeCodexManifest(dir);
+  writeFileSync(join(dir, "container.stdout.log"), codexCleanStdout(JSON.stringify(FG540_PASS)));
+  const exitInfo = () => ({ exitCode: 0, oomKilled: true });
+
+  const r = reconcileRun(RUN.id, GONE, undefined, exitInfo);
+  assert.deepEqual(r.taskChanges, []);
+  assert.equal(getTask(taskId)!.result, undefined);
 });

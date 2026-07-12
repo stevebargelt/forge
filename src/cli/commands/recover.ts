@@ -22,7 +22,8 @@ import { changedWorktreeFiles, defaultContainerAlive, reconcileRun } from "../..
 import type { ContainerAlive } from "../../v2/reconcile.js";
 import { getManifestRuntime } from "../../v2/task-manifest.js";
 import { analyzeProviderFailure } from "../../v2/provider-failure.js";
-import { inferredResultFrom, type InferredResult } from "../../v2/inferred-result.js";
+import { inferredResultFrom } from "../../v2/inferred-result.js";
+import { recoverStructuredStreamResult } from "../../v2/stream-result-recovery.js";
 
 // FG-455 p4 review finding 2: oom_killed carries the same worktree-evidence
 // shape as orphaned_work_may_persist (both gathered on reconcile.ts's shared
@@ -71,8 +72,39 @@ function readStdoutLog(runId: string, taskId: string): string {
   }
 }
 
-function inferStdoutResult(task: Task): InferredResult | undefined {
+function resultFileMalformed(runId: string, taskId: string): boolean {
+  let raw: string;
   try {
+    raw = readFileSync(join(taskDir(runId, taskId), "result.json"), "utf8").trim();
+  } catch {
+    return false;
+  }
+  if (raw.length === 0) return false;
+  try {
+    JSON.parse(raw);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+type StdoutRecovered = { result: unknown; from: "stream_recovered" | "stdout_inferred" };
+
+// FG-540: `forge recover` is a missing-result consumer like invoke/runNext/
+// reconcile, so it reads stdout through the SAME shared extraction rule — a
+// structured terminal result first, FG-337 narrative synthesis only after.
+// Without this, the operator surface and reconcile disagree about whether the
+// same task has a recoverable result. Guards mirror reconcile's container-gone
+// branch: no contrary exit evidence (a recorded non-zero exit or OOM refuses; an
+// unknown exit defers to the stream's own turn.completed proof), no provider
+// error, and a non-empty malformed result.json is never overwritten by ANY
+// stdout recovery — structured OR narrative — it stays a failure on disk.
+function recoverStdoutResult(task: Task): StdoutRecovered | undefined {
+  try {
+    // The malformed-file refusal gates ALL stdout recovery, not just the
+    // structured half: a present-but-corrupt result.json is evidence, and
+    // adopting a synthesized narrative over it would silently replace it.
+    if (resultFileMalformed(task.runId, task.id)) return undefined;
     const dir = taskDir(task.runId, task.id);
     const runtimeMeta = getManifestRuntime(dir);
     const stdoutRaw = readStdoutLog(task.runId, task.id);
@@ -81,7 +113,19 @@ function inferStdoutResult(task: Task): InferredResult | undefined {
       runtimeKind: runtimeMeta?.kind,
       stdoutRaw,
     });
-    return inferredResultFrom(analysis, task.agentRole);
+    const exit = getOrphanEvidenceFromEvents(eventsForTask(task.id));
+    const exitCode = exit?.exitCode;
+    const noContraryExit = exit?.oomKilled !== true && (exitCode === undefined || exitCode === 0);
+    if (noContraryExit && !analysis.modelError) {
+      const structured = recoverStructuredStreamResult({
+        logFormat: runtimeMeta?.logFormat,
+        runtimeKind: runtimeMeta?.kind,
+        stdoutRaw,
+      });
+      if (structured) return { result: structured, from: "stream_recovered" };
+    }
+    const inferred = inferredResultFrom(analysis, task.agentRole);
+    return inferred ? { result: inferred, from: "stdout_inferred" } : undefined;
   } catch {
     return undefined;
   }
@@ -92,7 +136,7 @@ type LiveEvidence = {
   source: "worktree" | "project_dir_shared";
   changedFiles: string[];
   validResult?: unknown;
-  stdoutInferredResult?: InferredResult;
+  stdoutRecovered?: StdoutRecovered;
 };
 
 function gatherLiveEvidence(task: Task, run: Run): LiveEvidence {
@@ -100,8 +144,8 @@ function gatherLiveEvidence(task: Task, run: Run): LiveEvidence {
   const source: LiveEvidence["source"] = task.worktreePath ? "worktree" : "project_dir_shared";
   const changedFiles = changedWorktreeFiles(worktreePathChecked);
   const validResult = readResult(task.runId, task.id);
-  const stdoutInferredResult = validResult === undefined ? inferStdoutResult(task) : undefined;
-  return { worktreePathChecked: worktreePathChecked ?? null, source, changedFiles, validResult, stdoutInferredResult };
+  const stdoutRecovered = validResult === undefined ? recoverStdoutResult(task) : undefined;
+  return { worktreePathChecked: worktreePathChecked ?? null, source, changedFiles, validResult, stdoutRecovered };
 }
 
 // FG-481/FG-486: only a run whose tasks have NO host-side pipeline finalize
@@ -126,7 +170,7 @@ function renderRecommendation(r: Recommendation): string {
 function recommendationForKind(task: Task, evidence: LiveEvidence, failureKind: string | undefined, run: Run): Recommendation {
   const continuable = CONTINUABLE_KINDS.has(failureKind ?? "") && !taskHasPipelineFinalize(run);
   const hasRecoverableWork =
-    evidence.validResult !== undefined || evidence.stdoutInferredResult !== undefined || evidence.changedFiles.length > 0;
+    evidence.validResult !== undefined || evidence.stdoutRecovered !== undefined || evidence.changedFiles.length > 0;
   if (continuable && hasRecoverableWork) {
     return evidence.source === "project_dir_shared"
       ? { commands: [`forge recover ${task.id} --continue --force`], note: "shared project dir — confirm the diff is this task's before forcing" }
@@ -220,7 +264,7 @@ function buildTaskView(task: Task, run: Run, containerAlive: ContainerAlive): Ta
     source: evidence.source,
     changedFiles: evidence.changedFiles,
     hasValidResult: evidence.validResult !== undefined,
-    hasStdoutRecoverableResult: evidence.stdoutInferredResult !== undefined,
+    hasStdoutRecoverableResult: evidence.stdoutRecovered !== undefined,
     recommendation: renderRecommendation(recommendation),
     recommendationCommands: recommendation.commands,
     verification: VERIFICATION_HINT,
@@ -269,11 +313,13 @@ function buildFanoutView(task: Task, allTasks: Task[]): FanoutParentView {
   };
 }
 
+export type AdoptedFrom = "result_json" | "stream_recovered" | "stdout_inferred" | "diff_adopted";
+
 export type RecoverOutcome =
   | { kind: "inspect-task"; task: TaskEvidenceView }
   | { kind: "inspect-fanout-parent"; parent: FanoutParentView }
   | { kind: "inspect-run"; runId: string; tasks: TaskEvidenceView[]; fanoutParents: FanoutParentView[] }
-  | { kind: "continued"; taskId: string; runId: string; adoptedFrom: "result_json" | "stdout_inferred" | "diff_adopted"; result: unknown }
+  | { kind: "continued"; taskId: string; runId: string; adoptedFrom: AdoptedFrom; result: unknown }
   | { kind: "continue-refused"; id: string; reason: string }
   | { kind: "re-drive-done"; parentId: string; runId: string; newTaskId: string }
   | { kind: "re-drive-refused"; id: string; reason: string }
@@ -346,11 +392,11 @@ export function performContinue(taskId: string, opts: { force?: boolean } = {}):
   }
 
   const evidence = gatherLiveEvidence(task, run);
-  const adopted: { result: unknown; adoptedFrom: "result_json" | "stdout_inferred" | "diff_adopted" } | undefined =
+  const adopted: { result: unknown; adoptedFrom: AdoptedFrom } | undefined =
     evidence.validResult !== undefined
       ? { result: evidence.validResult, adoptedFrom: "result_json" }
-      : evidence.stdoutInferredResult !== undefined
-        ? { result: evidence.stdoutInferredResult, adoptedFrom: "stdout_inferred" }
+      : evidence.stdoutRecovered !== undefined
+        ? { result: evidence.stdoutRecovered.result, adoptedFrom: evidence.stdoutRecovered.from }
         : evidence.changedFiles.length > 0
           ? {
               result: {
@@ -387,15 +433,46 @@ export function performContinue(taskId: string, opts: { force?: boolean } = {}):
 
   acquireRunLock(task.runId, "recover --continue");
   try {
+    // FG-540 (d82e136 rule, applied here too): a stream_recovered result
+    // stands in for the agent's OWN result contract, so it must be PERSISTED
+    // before any completion write — the dispatch paths persist-then-complete,
+    // and reconcile's running-orphan recovery voids an unpersistable
+    // structured recovery. On a failed write: refuse, leave the task failed,
+    // emit nothing. Every other adoption source (result_json already on disk,
+    // narrative stdout_inferred, diff_adopted) keeps its best-effort write.
+    if (adopted.adoptedFrom === "stream_recovered") {
+      try {
+        writeFileSync(join(taskDir(task.runId, task.id), "result.json"), JSON.stringify(adopted.result));
+      } catch {
+        return {
+          kind: "continue-refused",
+          id: taskId,
+          reason:
+            `task ${taskId} has a stream-recoverable structured result, but persisting it to result.json failed — ` +
+            "a structured recovery may not complete a task it could not persist. Fix the task directory (result.json may be " +
+            "a directory or unwritable) and re-run `forge recover " + taskId + " --continue`.",
+        };
+      }
+    }
     if (!markTaskRecovered(task.id, adopted.result)) {
       return { kind: "continue-refused", id: taskId, reason: `task ${taskId} was concurrently finalized by another process — not overwriting` };
     }
-    // Best-effort disk write, mirroring reconcile.ts: completion proceeds from
-    // the in-memory result regardless of whether the write below succeeds.
-    try {
-      writeFileSync(join(taskDir(task.runId, task.id), "result.json"), JSON.stringify(adopted.result));
-    } catch {
-      // best-effort only
+    // Best-effort disk write for the non-structured sources, mirroring
+    // reconcile.ts: their completion proceeds from the in-memory result
+    // regardless of whether the write below succeeds.
+    if (adopted.adoptedFrom !== "stream_recovered") {
+      try {
+        writeFileSync(join(taskDir(task.runId, task.id), "result.json"), JSON.stringify(adopted.result));
+      } catch {
+        // best-effort only
+      }
+    }
+    if (adopted.adoptedFrom === "stream_recovered") {
+      logEvent("task.result_recovered_from_stream", {
+        runId: task.runId,
+        taskId: task.id,
+        payload: { source: "recover --continue" },
+      });
     }
     logEvent("task.completed", { runId: task.runId, taskId: task.id });
     logEvent("task.reconciled", {

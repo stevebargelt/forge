@@ -2846,3 +2846,114 @@ test("FG-539 AC7: `forge review-loop FG-539 --dry-run` no longer emits 'no commi
     mock.restoreAll();
   }
 });
+
+// ── FG-540 E2E: Codex stream recovery through the PRODUCTION reviewer path ──
+// The incident (run-review-loop-fg-536-eaa5be / task-red-wide-0dc174) was a
+// review-loop reviewer whose valid pass lived only in the stream. These tests
+// drive the real chain — buildReviewLoopDeps.review → invoke() (real dispatch,
+// only the docker boundary stubbed) → stream recovery → parseReviewerVerdict →
+// runReviewLoop — proving the recovered result behaves exactly like a
+// file-written one at the loop's own gates (AC3), and that a recovered but
+// schema-invalid object stops the loop structurally (AC6).
+
+function ensureFg540CodexRuntime(): void {
+  const p = join(process.env.FORGE_HOME!, "runtimes", "codex-e2e-stub.yml");
+  if (existsSync(p)) return;
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, `name: codex-e2e-stub
+description: test stub codex runtime (FG-540 E2E)
+log_format: codex-jsonl
+image: test-image:latest
+models:
+  default: test-model
+auth:
+  mode: apikey
+mounts:
+  - { host: "\${TASK_DIR}", container: /task }
+invocation:
+  command: echo
+  args: ["stub"]
+container:
+  name: "forge-\${TASK_ID}"
+result:
+  file: /task/result.json
+`);
+}
+
+// Sanitized incident shape: clean exit 0, turn envelope, terminal JSON
+// agent_message, result.json never written.
+function fg540CodexStream(terminalText: string): string {
+  return [
+    `{"type":"thread.started","thread_id":"019f557b-3c14-7f50-92fa-d38a1675ecb6"}`,
+    `{"type":"turn.started"}`,
+    `{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"Auditing the diff against the acceptance path."}}`,
+    `{"type":"item.completed","item":{"id":"item_4","type":"agent_message","text":${JSON.stringify(terminalText)}}}`,
+    `{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`,
+  ].join("\n");
+}
+
+function fg540NoResultExec(stdoutJsonl: string): DockerExecFn {
+  return async ({ stdoutPath, stderrPath }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(stdoutPath, stdoutJsonl);
+    writeFileSync(stderrPath, "");
+    return 0;
+  };
+}
+
+test("FG-540 E2E (AC3): a reviewer pass living only in the Codex stream flows through the production review path to a passed, closeable round", async () => {
+  ensureFg540CodexRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  const passText = JSON.stringify({ status: "complete", verdict: "pass", findings: [] });
+  // Real invoke(), real dispatch, real recovery, real parse — only docker and
+  // the runtime name are test-controlled.
+  const { deps } = buildReviewLoopDeps(
+    ctx(),
+    (args) => invoke({ ...args, runtimeName: "codex-e2e-stub", dockerExec: fg540NoResultExec(fg540CodexStream(passText)) }),
+  );
+
+  let fixerDispatched = 0;
+  const r = await runReviewLoop(
+    { maxRounds: 1 },
+    {
+      verify: () => ({ ok: true, steps: [{ name: "test", ok: true, output: "" }] }),
+      review: deps.review,
+      fix: () => { fixerDispatched++; return { ok: true }; },
+    },
+  );
+
+  assert.equal(r.stopReason, "passed", "the recovered pass drives the round exactly like a file-written pass");
+  assert.equal(r.rounds[0]!.verdict, "pass");
+  assert.equal(r.closeable, true, "the round is closeable off the recovered result");
+  assert.equal(fixerDispatched, 0);
+});
+
+test("FG-540 E2E (AC6): a recovered but schema-INVALID object stops the production review path as reviewer_failed — no fixer, never a pass", async () => {
+  ensureFg540CodexRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  // A well-formed JSON object (so transport-level recovery succeeds and the
+  // reviewer task completes) that is NOT a valid reviewer verdict.
+  const invalidText = JSON.stringify({ status: "complete", summary: "looks fine to me" });
+  const { deps } = buildReviewLoopDeps(
+    ctx(),
+    (args) => invoke({ ...args, runtimeName: "codex-e2e-stub", dockerExec: fg540NoResultExec(fg540CodexStream(invalidText)) }),
+  );
+
+  let fixerDispatched = 0;
+  const r = await runReviewLoop(
+    { maxRounds: 2 },
+    {
+      verify: () => ({ ok: true, steps: [{ name: "test", ok: true, output: "" }] }),
+      review: deps.review,
+      fix: () => { fixerDispatched++; return { ok: true }; },
+    },
+  );
+
+  assert.equal(r.stopReason, "reviewer_failed", "an invalid recovered object is a structural stop, not a verdict");
+  assert.equal(r.closeable, false);
+  assert.equal(fixerDispatched, 0, "no fixer round is driven off an invalid recovered object");
+  assert.ok(r.rounds.every((round) => round.verdict !== "pass"), "never converted to a pass");
+});

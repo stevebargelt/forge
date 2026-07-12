@@ -60,6 +60,21 @@ function piCleanEndStdout(text: string): string {
   );
 }
 
+function codexCleanStreamStdout(terminalObject: unknown): string {
+  return (
+    JSON.stringify({ type: "turn.started" }) + "\n" +
+    JSON.stringify({ type: "item.completed", item: { id: "i0", type: "agent_message", text: JSON.stringify(terminalObject) } }) + "\n" +
+    JSON.stringify({ type: "turn.completed", usage: {} }) + "\n"
+  );
+}
+
+function writeCodexManifest(dir: string): void {
+  writeFileSync(
+    join(dir, "manifest.json"),
+    JSON.stringify({ runtime: { name: "codex-stub", kind: "codex", logFormat: "codex-jsonl", promptStrategy: "message-arg", authStrategy: "env-provider-api-key" } }),
+  );
+}
+
 function writePiManifest(dir: string): void {
   writeFileSync(
     join(dir, "manifest.json"),
@@ -324,6 +339,110 @@ test("recover --continue: adopts a stdout-recoverable result (stdout became read
   if (outcome.kind !== "continued") return;
   assert.equal(outcome.adoptedFrom, "stdout_inferred");
   assert.deepEqual(getTask(taskId)!.result, { contract: "inferred", summary: "Recovered narrative output.", status: "complete" });
+});
+
+// FG-540 final pass: the malformed-file refusal gates ALL stdout recovery —
+// including FG-337 narrative inference — never just the structured half. A
+// present-but-corrupt result.json is evidence and is never replaced.
+test("recover --continue: a non-empty MALFORMED result.json refuses narrative stdout inference too — the file is never overwritten", () => {
+  const taskId = "t-continue-malformed-narrative";
+  insertContainerized(mkTask(taskId, { status: "running", worktreePath: trackedCleanGitRepo(), agentRole: "research-specialist" }));
+  reconcileRun(RUN.id, () => false);
+  assert.equal(getTask(taskId)!.status, "failed");
+
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writePiManifest(dir);
+  writeFileSync(join(dir, "container.stdout.log"), piCleanEndStdout("Recovered narrative output."));
+  writeFileSync(join(dir, "result.json"), "{truncated-non-json");
+
+  const outcome = performContinue(taskId);
+  assert.notEqual(outcome.kind, "continued", "a malformed result.json must not be laundered into an adopted narrative");
+  assert.equal(getTask(taskId)!.status, "failed", "the task stays failed");
+  assert.equal(readFileSync(join(dir, "result.json"), "utf8"), "{truncated-non-json", "the malformed file is preserved as evidence");
+});
+
+// FG-540: recover reads stdout through the SAME shared extraction rule as
+// invoke/runNext/reconcile — a codex stream that cleanly completed with a
+// terminal JSON result object is recoverable HERE too, or the operator surface
+// and reconcile would disagree about whether the task has a recoverable result.
+test("recover --continue: adopts the structured result from a cleanly-completed codex stream (FG-540)", () => {
+  const gitDir = trackedDirtyGitRepo();
+  const taskId = "t-continue-codex-stream";
+  insertContainerized(mkTask(taskId, { status: "running", worktreePath: gitDir, agentRole: "red-wide" }));
+  reconcileRun(RUN.id, () => false);
+  assert.equal(getTask(taskId)!.status, "failed");
+
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writeCodexManifest(dir);
+  writeFileSync(join(dir, "container.stdout.log"), codexCleanStreamStdout({ verdict: "pass", findings: [] }));
+
+  // The inspect view agrees with reconcile that there is something to recover —
+  // red-wide is not a narrative role, so FG-337 synthesis alone recovers nothing.
+  const inspected = performInspect(taskId);
+  assert.equal(inspected.kind, "inspect-task");
+  if (inspected.kind !== "inspect-task") return;
+  assert.equal(inspected.task.hasStdoutRecoverableResult, true);
+
+  const outcome = performContinue(taskId);
+  assert.equal(outcome.kind, "continued");
+  if (outcome.kind !== "continued") return;
+  assert.equal(outcome.adoptedFrom, "stream_recovered");
+  assert.deepEqual(getTask(taskId)!.result, { verdict: "pass", findings: [] });
+  assert.ok(
+    getEvents(taskId).some((e) => e.eventType === "task.result_recovered_from_stream"),
+    "the recovery is recorded with the same provenance event as every other recovery site",
+  );
+});
+
+test("recover --continue: a stream_recovered result whose result.json write FAILS is refused — task stays failed, no completion/reconciled/provenance events", () => {
+  const gitDir = trackedDirtyGitRepo();
+  const taskId = "t-continue-codex-write-throws";
+  insertContainerized(mkTask(taskId, { status: "running", worktreePath: gitDir, agentRole: "red-wide" }));
+  reconcileRun(RUN.id, () => false);
+  assert.equal(getTask(taskId)!.status, "failed");
+
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writeCodexManifest(dir);
+  writeFileSync(join(dir, "container.stdout.log"), codexCleanStreamStdout({ verdict: "pass", findings: [] }));
+  // result.json is a DIRECTORY — persisting the structured result throws
+  // EISDIR before markTaskRecovered ever runs (d82e136 rule: a structured
+  // recovery may not complete a task it could not persist).
+  mkdirSync(join(dir, "result.json"), { recursive: true });
+
+  const outcome = performContinue(taskId, { force: true });
+  assert.equal(outcome.kind, "continue-refused");
+  if (outcome.kind !== "continue-refused") return;
+  assert.match(outcome.reason, /could not persist/);
+
+  const t = getTask(taskId)!;
+  assert.equal(t.status, "failed", "the task stays failed — no completion without persistence");
+  const types = getEvents(taskId).map((e) => e.eventType);
+  assert.ok(!types.includes("task.completed"));
+  assert.ok(!types.includes("task.result_recovered_from_stream"));
+  assert.ok(
+    !types.some((ty) => ty === "task.reconciled" && true) ||
+      !getEvents(taskId).some((e) => e.eventType === "task.reconciled" && (e.payload as Record<string, unknown>).via === "forge recover --continue"),
+    "no operator-recovered reconciliation event",
+  );
+});
+
+test("recover --continue: a codex stream whose turn never completed recovers nothing (fail-closed)", () => {
+  const taskId = "t-continue-codex-unfinished";
+  insertContainerized(mkTask(taskId, { status: "running", worktreePath: trackedCleanGitRepo(), agentRole: "red-wide" }));
+  reconcileRun(RUN.id, () => false);
+
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writeCodexManifest(dir);
+  const truncated = codexCleanStreamStdout({ verdict: "pass", findings: [] }).split("\n").slice(0, -2).join("\n");
+  writeFileSync(join(dir, "container.stdout.log"), truncated);
+
+  const outcome = performContinue(taskId);
+  assert.equal(outcome.kind, "continue-refused");
+  assert.equal(getTask(taskId)!.status, "failed");
 });
 
 test("recover --continue: changed files with no computed result still adopts the diff (worktree source, no --force needed)", () => {

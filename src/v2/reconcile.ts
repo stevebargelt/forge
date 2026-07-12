@@ -36,6 +36,7 @@ import { removeWorktreeIfSafe } from "./worktree-lifecycle.js";
 import { getManifestRuntime } from "./task-manifest.js";
 import { analyzeProviderFailure } from "./provider-failure.js";
 import { inferredResultFrom } from "./inferred-result.js";
+import { recoverStructuredStreamResult } from "./stream-result-recovery.js";
 import type { OrphanEvidence, ContainerExitInfo, ContainerCausalEvidence } from "./failure-kind.js";
 import { parseDockerInspectState } from "./failure-kind.js";
 import { taskHasPipelineFinalize } from "./run-kind.js";
@@ -425,7 +426,7 @@ export function reconcileRun(
   const workMayPersistAdvice = (taskId: string) =>
     isInvokeLikeRun ? `continue from it or \`forge retry ${taskId} --force\`` : `\`forge retry ${taskId} --force\``;
 
-  const failPipelineUnfinalized = (taskId: string, result: unknown, evidence: OrphanEvidence) => {
+  const failPipelineUnfinalized = (taskId: string, result: unknown, evidence: OrphanEvidence, streamLogFormat?: string | null) => {
     const error =
       "orphaned_needs_finalize: container finished with a usable result, but the forge process died before this pipeline step's host-side finalize (worktree merge → integration gate → reds → gates) could run — the step cannot be trusted complete. " +
       `The result is preserved (result.json + this task's row); inspect with \`forge show ${taskId}\`, then re-dispatch through the real finalize path with \`forge retry ${taskId} --force\`.`;
@@ -436,6 +437,13 @@ export function reconcileRun(
       crashPoint("reconcile:inside-fail-pipeline-unfinalized-txn");
       logEvent("task.failed", { runId, taskId, payload: { failure_kind: "orphaned_needs_finalize", error, evidence, containerEvidence } });
       logEvent("task.reconciled", { runId, taskId, payload: { from: "running", to: "failed", reason: "container_gone_pipeline_unfinalized", evidence, containerEvidence } });
+      // FG-540 provenance: the preserved result came from the structured stream.
+      // Inside the same transaction as the fail write — the landing is terminal and
+      // reconcile only revisits `running` tasks, so an event appended after the commit
+      // would be lost for good if the process died in between.
+      if (streamLogFormat !== undefined) {
+        logEvent("task.result_recovered_from_stream", { runId, taskId, payload: { source: "reconcile_pipeline_unfinalized", logFormat: streamLogFormat } });
+      }
     })();
     taskChanges.push({ taskId, from: "running", to: "failed", reason: "container_gone_pipeline_unfinalized" });
   };
@@ -791,7 +799,12 @@ export function reconcileRun(
       // unexpected shape in the stdout analysis must never propagate out of
       // reconcileRun. Any error here safe-denies to "no recoverable result",
       // falling through to the worktree-dirty / ordinary-orphaned path below.
-      let inferred: ReturnType<typeof inferredResultFrom>;
+      let inferred: unknown;
+      // FG-540 provenance: which recovery produced the result — the event
+      // consumers (below) record structured recovery distinctly from FG-337
+      // narrative synthesis, mirroring recover --continue's adoptedFrom.
+      let recoveredSource: "structured_stream" | "stdout_inferred" | undefined;
+      let recoveredLogFormat: string | undefined;
       try {
         const runtimeMeta = getManifestRuntime(dir);
         const stdoutRaw = readStdoutLog(t.runId, t.id);
@@ -800,9 +813,47 @@ export function reconcileRun(
           runtimeKind: runtimeMeta?.kind,
           stdoutRaw,
         });
-        inferred = inferredResultFrom(analysis, t.agentRole);
+        // FG-540: structured recovery first — the same shared extraction rule
+        // as the dispatch-time paths (invoke.ts/runNext.ts), so watcher loss
+        // cannot change the result contract. Structured recovery is gated on
+        // no CONTRARY exit evidence (a known non-zero exit or OOM refuses; an
+        // unknown exit defers to the stream's own turn.completed proof), and
+        // ALL stdout recovery — structured or FG-337 narrative — refuses when
+        // the on-disk result.json is non-empty (malformed): that file is
+        // evidence, it wins as a failure, and it is never overwritten.
+        const fileMalformed = resultFileState(t.runId, t.id) === "malformed";
+        const noContraryExit = exitInfo.oomKilled !== true && (exitInfo.exitCode === undefined || exitInfo.exitCode === 0);
+        const structured = !fileMalformed && noContraryExit && !analysis.modelError
+          ? recoverStructuredStreamResult({ logFormat: runtimeMeta?.logFormat, runtimeKind: runtimeMeta?.kind, stdoutRaw })
+          : undefined;
+        inferred = structured ?? (fileMalformed ? undefined : inferredResultFrom(analysis, t.agentRole));
+        recoveredSource = structured !== undefined ? "structured_stream" : inferred !== undefined ? "stdout_inferred" : undefined;
+        recoveredLogFormat = runtimeMeta?.logFormat ?? runtimeMeta?.kind;
       } catch {
         inferred = undefined;
+        recoveredSource = undefined;
+      }
+
+      // FG-540 review: persist BEFORE the completion decision. A structured
+      // stream recovery stands in for the agent's OWN result.json — the
+      // dispatch-time path (invoke.ts) persists it and only then completes, so
+      // reconcile must not complete a structured recovery it could not persist.
+      // A failed write voids that recovery: the task falls through to the
+      // ordinary oom/worktree-dirty/orphaned classification below, with the
+      // write failure carried in evidence. FG-337 narrative synthesis stays
+      // best-effort (FG-455 finding 1) — it is a summary of a dead run, not the
+      // agent's result contract, so it still completes from memory.
+      let resultWriteFailed = false;
+      if (inferred !== undefined) {
+        try {
+          writeFileSync(join(dir, "result.json"), JSON.stringify(inferred));
+        } catch {
+          resultWriteFailed = true;
+          if (recoveredSource === "structured_stream") {
+            inferred = undefined;
+            recoveredSource = undefined;
+          }
+        }
       }
 
       // Reuse baseEvidence gathered above the split — only resultState and
@@ -811,27 +862,18 @@ export function reconcileRun(
         ...baseEvidence,
         resultState: resultFileState(t.runId, t.id),
         recoverableStdoutResult: inferred !== undefined,
+        ...(resultWriteFailed ? { resultWriteFailed: true } : {}),
       };
 
       if (inferred) {
-        // FG-455 review finding 1: completion must come from the in-memory
-        // recovered result, never depend on the disk write succeeding — the
-        // write is best-effort only. If result.json is a directory, unwritable,
-        // or the path races invalid, note the failure in evidence and still
-        // complete the task from `inferred`.
-        try {
-          writeFileSync(join(dir, "result.json"), JSON.stringify(inferred));
-        } catch {
-          evidence.resultWriteFailed = true;
-        }
         if (!isInvokeLikeRun) {
           // FG-479: same guard as the valid-result branch above — a recovered
           // stdout result proves the agent finished, not that the pipeline's
           // host-side finalize ran.
-          failPipelineUnfinalized(t.id, inferred, evidence);
+          failPipelineUnfinalized(t.id, inferred, evidence, recoveredSource === "structured_stream" ? (recoveredLogFormat ?? null) : undefined);
         } else {
           // FG-463: complete write + its events atomic (the result.json write above
-          // is best-effort and deliberately stays OUTSIDE the transaction).
+          // stays OUTSIDE the transaction — never hold a write lock across disk IO).
           const containerEvidence = toContainerCausalEvidence(evidence);
           crashPoint("reconcile:before-complete-invoke-like-from-stdout");
           const completed = getDb().transaction(() => {
@@ -839,6 +881,12 @@ export function reconcileRun(
             crashPoint("reconcile:inside-complete-invoke-like-from-stdout-txn");
             logEvent("task.completed", { runId, taskId: t.id });
             logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout", evidence, containerEvidence } });
+            // FG-540 provenance: distinguish structured stream recovery from
+            // FG-337 narrative synthesis, mirroring the dispatch paths and
+            // recover --continue's adoptedFrom vocabulary.
+            if (recoveredSource === "structured_stream") {
+              logEvent("task.result_recovered_from_stream", { runId, taskId: t.id, payload: { source: "reconcile", logFormat: recoveredLogFormat ?? null } });
+            }
             return true;
           })();
           if (completed) taskChanges.push({ taskId: t.id, from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout" });
@@ -970,9 +1018,12 @@ export function reconcileRun(
 
     // Best-effort recovery, same precedence as the running-orphan path above:
     // 1. result.json may have been written after the DB row was marked complete.
-    // 2. else synthesize from stdout (FG-337), same as the running-orphan path.
+    // 2. else recover the structured stream (FG-540), else synthesize from
+    //    stdout (FG-337), same as the running-orphan path.
     // Any error here safe-denies to "nothing recovered" — never throws.
     let recovered: unknown;
+    let backfillSource: "structured_stream" | undefined;
+    let backfillLogFormat: string | undefined;
     try {
       const onDisk = readResult(t.runId, t.id);
       if (onDisk !== undefined) {
@@ -986,7 +1037,31 @@ export function reconcileRun(
           runtimeKind: runtimeMeta?.kind,
           stdoutRaw,
         });
-        recovered = inferredResultFrom(analysis, t.agentRole);
+        // FG-540: structured recovery first (shared rule with the dispatch-time
+        // paths), under the SAME no-contrary-exit guard as the running-orphan
+        // branch: a known non-zero/OOM container exit refuses recovery even
+        // though the DB row says complete (the row is exactly what Mode A
+        // distrusts); an unknown exit defers to the stream's own turn.completed.
+        // A non-empty malformed result.json refuses rather than be overwritten.
+        let exitInfo: ReturnType<ContainerExitInfo>;
+        try {
+          exitInfo = containerExitInfo(recordedContainerId(eventsForTask(t.id)) ?? `forge-${t.id}`);
+        } catch {
+          exitInfo = {};
+        }
+        // FG-540 final pass: the malformed-file refusal gates ALL stdout
+        // recovery here too — a non-empty result.json is never overwritten by
+        // a backfill, structured or narrative.
+        const fileMalformed = resultFileState(t.runId, t.id) === "malformed";
+        const noContraryExit = exitInfo.oomKilled !== true && (exitInfo.exitCode === undefined || exitInfo.exitCode === 0);
+        const structured = !fileMalformed && noContraryExit && !analysis.modelError
+          ? recoverStructuredStreamResult({ logFormat: runtimeMeta?.logFormat, runtimeKind: runtimeMeta?.kind, stdoutRaw })
+          : undefined;
+        recovered = structured ?? (fileMalformed ? undefined : inferredResultFrom(analysis, t.agentRole));
+        if (structured !== undefined) {
+          backfillSource = "structured_stream";
+          backfillLogFormat = runtimeMeta?.logFormat ?? runtimeMeta?.kind;
+        }
       }
     } catch {
       recovered = undefined;
@@ -1008,12 +1083,23 @@ export function reconcileRun(
         writeFileSync(join(taskDir(t.runId, t.id), "result.json"), JSON.stringify(recovered));
       } catch {
         evidence.resultWriteFailed = true;
+        // FG-540 (d82e136 rule, applied at this sibling too): a structured
+        // stream recovery may not land ANYWHERE it could not be persisted —
+        // no DB backfill, no reconciled event, no provenance event. The task
+        // keeps its empty result untouched. On-disk and FG-337 narrative
+        // backfills keep their existing best-effort behavior.
+        if (backfillSource === "structured_stream") continue;
       }
       crashPoint("reconcile:before-backfill-complete-empty-result");
       const backfilled = getDb().transaction(() => {
         if (!backfillTaskResult(t.id, recovered)) return false; // result written concurrently since our read — no-op
         crashPoint("reconcile:inside-backfill-complete-empty-result-txn");
         logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "complete", to: "complete", reason: "complete_empty_result_backfilled", evidence } });
+        // FG-540 provenance: a structured-stream backfill is recorded
+        // distinctly from an on-disk read or FG-337 narrative synthesis.
+        if (backfillSource === "structured_stream") {
+          logEvent("task.result_recovered_from_stream", { runId, taskId: t.id, payload: { source: "reconcile_backfill", logFormat: backfillLogFormat ?? null } });
+        }
         return true;
       })();
       if (backfilled) taskChanges.push({ taskId: t.id, from: "complete", to: "complete", reason: "complete_empty_result_backfilled" });
