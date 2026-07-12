@@ -1,6 +1,8 @@
 // #290: inFlight annotates a running task whose container is gone as a reconcile
-// candidate instead of ordinary running. Same temp-forge.db harness as
-// queries-ops.test.ts; the liveness probe is injected so no docker is needed.
+// candidate instead of ordinary running. FG-533 adds the second shape it must
+// annotate: a running row whose container NEVER launched. Same temp-forge.db
+// harness as queries-ops.test.ts; the liveness probe is injected so no docker is
+// needed.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -18,18 +20,25 @@ const { inFlight } = await import("./queries.js");
   const db = new Database(join(tmpHome, "forge.db"));
   db.exec(`
     CREATE TABLE runs (id TEXT PRIMARY KEY, title TEXT, workflow TEXT, project_dir TEXT, status TEXT, created_at TEXT);
-    CREATE TABLE tasks (id TEXT PRIMARY KEY, run_id TEXT, phase TEXT, agent_role TEXT, agent_model TEXT, status TEXT, started_at TEXT, created_at TEXT, parent_id TEXT);
+    CREATE TABLE tasks (id TEXT PRIMARY KEY, run_id TEXT, phase TEXT, agent_role TEXT, agent_model TEXT, status TEXT, started_at TEXT, created_at TEXT, parent_id TEXT, task_package TEXT NOT NULL);
     CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, task_id TEXT, event_type TEXT, payload TEXT, created_at TEXT);
 
     INSERT INTO runs VALUES ('run-pixtron','Pixtron NBA','feature','/proj/pixtron','active', datetime('now','-2 hours'));
 
     -- The Pixtron shape: running row, container.started, container gone, valid result.
-    INSERT INTO tasks VALUES ('task-engineer-de709d','run-pixtron','engineer','engineer','sonnet','running','2026-06-05T14:36:00Z','2026-06-05T14:36:00Z',NULL);
+    INSERT INTO tasks VALUES ('task-engineer-de709d','run-pixtron','engineer','engineer','sonnet','running','2026-06-05T14:36:00Z','2026-06-05T14:36:00Z',NULL,'{"dispatchSource":"workflow"}');
     INSERT INTO events VALUES (NULL,'run-pixtron','task-engineer-de709d','container.started',NULL, datetime('now','-2 hours'));
 
     -- A genuinely-live task: container.started, container alive → ordinary running.
-    INSERT INTO tasks VALUES ('task-live','run-pixtron','test-engineer','test-engineer','sonnet','running','2026-06-05T15:00:00Z','2026-06-05T15:00:00Z',NULL);
+    INSERT INTO tasks VALUES ('task-live','run-pixtron','test-engineer','test-engineer','sonnet','running','2026-06-05T15:00:00Z','2026-06-05T15:00:00Z',NULL,'{"dispatchSource":"workflow"}');
     INSERT INTO events VALUES (NULL,'run-pixtron','task-live','container.started',NULL, datetime('now','-1 hour'));
+
+    -- FG-533: the pre-container crash window — the runner marked it running, then
+    -- forge died before the agent container launched. No container.started at all,
+    -- so #290's containerized-only gate omitted it and the dashboard showed it as
+    -- ordinary running forever.
+    INSERT INTO tasks VALUES ('task-pre-container','run-pixtron','red-wide','red-wide','sonnet','running','2026-06-05T15:10:00Z','2026-06-05T15:10:00Z',NULL,'{"dispatchSource":"workflow"}');
+    INSERT INTO events VALUES (NULL,'run-pixtron','task-pre-container','task.started',NULL, datetime('now','-1 hour'));
   `);
   db.close();
 
@@ -40,7 +49,7 @@ const { inFlight } = await import("./queries.js");
 }
 
 const probe = (name: string) =>
-  name === "forge-task-engineer-de709d" ? "gone" : "alive" as const;
+  name === "forge-task-engineer-de709d" || name === "forge-task-pre-container" ? "gone" : "alive" as const;
 
 test("inFlight: Pixtron shape is badged as a reconcile candidate, not ordinary running", () => {
   const rows = inFlight(undefined, probe);
@@ -58,6 +67,15 @@ test("inFlight: a genuinely-live task carries no reconcile annotation", () => {
   assert.equal(live.reconcile, null);
 });
 
+test("FG-533: a task whose container never launched is badged pre_container_crash, not ordinary running", () => {
+  const rows = inFlight(undefined, probe);
+  const pre = rows.find((r) => r.taskId === "task-pre-container")!;
+  assert.ok(pre.reconcile, "expected a reconcile annotation — this row can never self-heal");
+  assert.equal(pre.reconcile!.classification, "reconcile_candidate");
+  assert.equal(pre.reconcile!.reason, "pre_container_crash");
+  assert.equal(pre.status, "running");
+});
+
 test("inFlight: detection is read-only — no task status mutated by the read", () => {
   const db = new Database(join(tmpHome, "forge.db"), { readonly: true });
   inFlight(undefined, probe);
@@ -66,5 +84,6 @@ test("inFlight: detection is read-only — no task status mutated by the read", 
   assert.deepEqual(statuses, [
     { id: "task-engineer-de709d", status: "running" },
     { id: "task-live", status: "running" },
+    { id: "task-pre-container", status: "running" },
   ]);
 });

@@ -145,6 +145,7 @@ export type FailureKind =
   | "red_blocked"
   | "gate_rejected"
   | "verification_environment_unavailable"  // FG-376: dependency provisioning failed before tests could run
+  | "pre_container_crash"  // FG-533: the forge process died between markTaskRunning and container.started — no container ran, no work exists; reconcile's pre-container sweep lands this and a plain `forge retry` re-dispatches
   | "unknown";
 
 export type FailureContext = {

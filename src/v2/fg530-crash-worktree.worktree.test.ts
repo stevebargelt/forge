@@ -255,8 +255,9 @@ const SCENARIOS: Record<string, Scenario> = {
     // uncommitted sentinel — dirty, so reconcile takes the may-persist branch.
     strand: strandWithNoRecoverableResult,
   },
-  // FG-437's mid-provisioning landing is the only reconcile branch that CALLS
-  // removeWorktreeIfSafe. Crash in the pre-container window (the worktree exists;
+  // FG-437's mid-provisioning landing — one of the two failed-task reconcile
+  // branches that CALL removeWorktreeIfSafe (the other is the FG-533 pre-container
+  // sweep below). Crash in the pre-container window (the worktree exists;
   // the agent never ran), then let reconcile land it.
   "provisioning-crash": {
     name: "provisioning-crash",
@@ -283,6 +284,28 @@ const SCENARIOS: Record<string, Scenario> = {
           phase: "dependency_provisioning",
         },
       });
+    },
+  },
+  // The FG-533 pre-container sweep — the OTHER failed-task reconcile branch that
+  // calls removeWorktreeIfSafe. Same crash as provisioning-crash but with NO
+  // provisioning event, so reconcile lands it via the pre-container sweep instead
+  // of the FG-437 branch. The worktree exists and points at a tree the agent
+  // never touched.
+  "pre-container-crash": {
+    name: "pre-container-crash",
+    workflow: PLAIN_WF,
+    yaml: PLAIN_YAML,
+    exec: { redVerdict: "pass", filesModified: [COMMITTED_WORK], agentWork },
+    drive: async (runId, workflow, exec) => {
+      await runNext({ runId, workflow, dockerExec: exec });
+    },
+    strand: async (sc, runId, exec) => {
+      const fired = await crashAt("runContainer:after-mark-running-before-container-launch", () =>
+        sc.drive(runId, sc.workflow, exec),
+      );
+      assert.ok(fired, "the pre-container kill must fire for this strand to build the FG-533 shape");
+      const t = primaryOf(runId, "build");
+      assert.ok(t, "the primary must exist for this strand to mean anything");
     },
   },
 };
@@ -381,13 +404,26 @@ const KILLS: Cell[] = [
     scenario: "provisioning-crash",
     point: "reconcile:before-fail-provisioning-phase-crash",
     why:
-      "the ONLY reconcile callsite that calls removeWorktreeIfSafe (reconcile.ts, the FG-437 landing). It passes " +
-      "provenMerged=false, so outside EPHEMERAL mode it must be a no-op — this cell is what proves the guard holds on a " +
-      "live tree instead of trusting the flag.",
+      "a reconcile callsite that calls removeWorktreeIfSafe (the FG-437 landing; the FG-533 sweep below is the other). " +
+      "It passes provenMerged=false, so outside EPHEMERAL mode it must be a no-op — this cell is what proves the guard " +
+      "holds on a live tree instead of trusting the flag.",
   },
   {
     scenario: "provisioning-crash",
     point: "reconcile:inside-fail-provisioning-phase-crash-txn",
+    why: "the same landing, killed inside its transaction, with the worktree-removal call sitting right after it.",
+  },
+  {
+    scenario: "pre-container-crash",
+    point: "reconcile:before-fail-pre-container-crash",
+    why:
+      "the FG-533 pre-container sweep's landing — the other failed-task reconcile callsite that calls " +
+      "removeWorktreeIfSafe(provenMerged=false). Same no-op guard, proven on a live tree the agent never touched: the " +
+      "row must land failed/retryable while the tree survives (invariant 4 — discarding is never reconcile's call).",
+  },
+  {
+    scenario: "pre-container-crash",
+    point: "reconcile:inside-fail-pre-container-crash-txn",
     why: "the same landing, killed inside its transaction, with the worktree-removal call sitting right after it.",
   },
 ];

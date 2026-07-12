@@ -70,6 +70,19 @@ export function showReconcileStep(
   return { reconciled: false, candidateReason: null, runCandidates };
 }
 
+/** The human `reconcile:` line for a running task the read path flagged. FG-533:
+ *  a pre-container candidate's agent container NEVER launched, so the #290
+ *  wording ("the container is gone") would name the wrong cause and send the
+ *  operator looking for a container/worktree that never existed. Pure + exported
+ *  so the human surface is testable without docker. */
+export function reconcileCandidateLine(reason: ReconcileReason, taskId: string): string {
+  const cause =
+    reason === "pre_container_crash"
+      ? "DB says running, but the agent container never launched and no live forge process holds the run lock — forge died in the pre-container window (image pull, auth staging, dependency provisioning)"
+      : "DB says running but the container is gone";
+  return `CANDIDATE (${reason}) — ${cause}; run \`forge show --reconcile ${taskId}\` to finalize`;
+}
+
 // ─── Pure helpers, exported for testing ─────────────────────────────────────
 
 // The failure-kind scan lives in the neutral failure-kind module (single source
@@ -698,7 +711,9 @@ function printTimeline(events: Event[]): void {
   }
 }
 
-export function registerShow(program: Command): void {
+export type ShowDeps = { containerAlive?: ContainerAlive; probe?: LivenessProbe; resultPresent?: ResultProbe };
+
+export function registerShow(program: Command, deps: ShowDeps = {}): void {
   program
     .command("show")
     .argument("<id>", "task or run identifier")
@@ -716,7 +731,7 @@ export function registerShow(program: Command): void {
       // this fixes — inspecting a stale-running task silently reconciled it. The
       // mutating path is now opt-in via --reconcile (alongside the lifecycle
       // commands that intentionally reconcile: next / status / gate).
-      const { candidateReason, runCandidates } = showReconcileStep(id, opts);
+      const { candidateReason, runCandidates } = showReconcileStep(id, opts, deps);
 
       getDb({ readOnly: true });
       const result = performShow(id);
@@ -887,7 +902,7 @@ export function registerShow(program: Command): void {
         console.log(`  status:    ${task.status}`);
         // #298: surface a reconcile candidate read-only — never silently mutate.
         if (reconcileReason) {
-          console.log(`  reconcile: CANDIDATE (${reconcileReason}) — DB says running but the container is gone; run \`forge show --reconcile ${task.id}\` to finalize`);
+          console.log(`  reconcile: ${reconcileCandidateLine(reconcileReason, task.id)}`);
         }
         if (failureKind) console.log(`  failure:   ${failureKind}`);
         if (holdReason) console.log(`  gate hold: ${holdReason}`);
@@ -1086,7 +1101,7 @@ export function registerShow(program: Command): void {
       // path without forge show having mutated anything.
       if (runCandidates.length > 0) {
         console.log("");
-        console.log("Reconcile candidates (DB says running, container gone — read-only; nothing was changed):");
+        console.log("Reconcile candidates (DB says running, no live container — read-only; nothing was changed):");
         for (const c of runCandidates) {
           console.log(`  ${c.taskId}  ${c.reason}  →  forge show --reconcile ${c.taskId}`);
         }

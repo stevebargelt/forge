@@ -35,3 +35,7 @@ Acceptance:
 - The surfaced metadata includes the reason and an orchestrator-facing recommended action.
 
 Relations: #214, #250, #285, `src/v2/reconcile.ts`, `dashboard/src/queries.ts`.
+
+## Status update (2026-07-11, post-close — FG-533)
+
+The "task has a container.started event or manifest container name, proving it was containerized" clause in the detection predicate above is the ORIGINAL candidate shape, not the only one anymore. FG-533 extended the read-only classifier (src/ops/reconcile-candidate.ts) with a SECOND shape: a workflow-dispatched, non-manual, childless `running` row with NO container.started, no live agent container, no in-flight provisioning, and no live run-lock holder now classifies as a `pre_container_crash` reconcile candidate (mirroring reconcile's pre-container sweep guards exactly). Each shape keeps its own distinct guards; the dashboard/ops surface stays read-only.

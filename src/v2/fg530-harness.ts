@@ -157,6 +157,8 @@ export const KILL_POINTS: KillPoint[] = [
   { point: "reconcile:inside-fail-fanout-wave-orphaned-txn", surface: "reconcile" },
   { point: "reconcile:before-fail-provisioning-phase-crash", surface: "reconcile" },
   { point: "reconcile:inside-fail-provisioning-phase-crash-txn", surface: "reconcile" },
+  { point: "reconcile:before-fail-pre-container-crash", surface: "reconcile" },
+  { point: "reconcile:inside-fail-pre-container-crash-txn", surface: "reconcile" },
   // FG-531: the awaiting_red sweep's own writes (dead red rows, then the
   // single-step / fanout-parent fail-safe landings).
   { point: "reconcile:before-fail-dead-red-child", surface: "reconcile" },
@@ -1069,18 +1071,12 @@ export const KNOWN_FAILURES: KnownFailure[] = [
   // FG-532 — the reject branch now passes `result: task.result` through
   // failTask, matching request-changes. Its matrix cell asserts the invariant
   // as a plain passing test now; the pin is gone so a regression fails loudly.
-  {
-    id: "FG-533",
-    invariant: "2-no-permanent-wedge",
-    match: /is still 'running' at fixpoint .*\[container\.started seen: no\]/,
-    summary:
-      "runContainer marks the task `running` and appends task.started BEFORE the container launches; the span that follows " +
-      "(image pull, auth staging, dependency provisioning) is minutes long. A crash inside it leaves a `running` task with " +
-      "NO container.started — and container.started is exactly the event both rescue paths gate on (reconcile.ts's per-task " +
-      "loop, `if (!hasContainerStarted) continue`, and src/ops/reconcile-candidate.ts's SQL), while `forge retry` refuses " +
-      "any status but failed. Permanent wedge, same family as FG-530-A. Filed as FG-533; the pin flips to a passing " +
-      "assertion when its recovery path lands.",
-  },
+  // FG-533 (the pre-container crash-window wedge) was fixed by its own ticket —
+  // reconcile's pre-container sweep lands a runner-dispatched `running` row
+  // with no container.started as retryable pre_container_crash when no live
+  // process holds the run lock and no agent container is alive. Its matrix
+  // cell asserts the recovery as a plain passing test now; the pin is gone so
+  // a regression fails loudly.
 ];
 
 export const KNOWN_HIT = new Set<string>();

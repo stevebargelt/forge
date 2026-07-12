@@ -34,6 +34,7 @@ import {
   groupFailedByKind,
   getBlockerTasks,
   showReconcileStep,
+  reconcileCandidateLine,
   registerShow,
 } from "./show.js";
 import { getTask } from "../../store/tasks.js";
@@ -1451,4 +1452,106 @@ test("CLI: `forge show <id> --json` emits an empty verdicts array for a task wit
   } finally {
     mock.restoreAll();
   }
+});
+
+// ── FG-533: the pre-container crash window on `forge show` ───────────────────
+//
+// The task was marked running by the workflow runner, then forge died before the
+// agent container launched — no container.started, so plain `forge show` used to
+// list it as ordinary running work with nothing to reconcile.
+
+/** A workflow-dispatched running task whose agent container never launched. */
+function setupPreContainerRunning(taskId: string): void {
+  const t = makeTask(taskId, { status: "running", phase: taskId, startedAt: "2026-05-29T10:00:00Z" });
+  insertTask({ ...t, taskPackage: { ...t.taskPackage, dispatchSource: "workflow" } });
+  logEvent("task.started", { runId: RUN.id, taskId }); // …and no container.started.
+}
+
+test("FG-533: plain show surfaces a pre_container_crash candidate — read-only, nothing reconciled", () => {
+  setupPreContainerRunning("task-pre-container");
+  const { reconciled, candidateReason } = showReconcileStep("task-pre-container", {}, { probe: () => "gone" });
+  assert.equal(reconciled, false);
+  assert.equal(candidateReason, "pre_container_crash");
+  assert.equal(getTask("task-pre-container")!.status, "running");
+  assert.equal(eventsForTask("task-pre-container").filter((e) => e.eventType === "task.reconciled").length, 0);
+});
+
+test("FG-533: reconcileCandidateLine names the never-launched container, not a gone one", () => {
+  const line = reconcileCandidateLine("pre_container_crash", "task-pre-container");
+  assert.match(line, /CANDIDATE \(pre_container_crash\)/);
+  assert.match(line, /never launched/);
+  assert.doesNotMatch(line, /the container is gone/);
+  assert.match(line, /forge show --reconcile task-pre-container/);
+  // The #290 wording is untouched for a container that really did go away.
+  assert.match(reconcileCandidateLine("container_gone_result_present", "t"), /the container is gone/);
+});
+
+test("FG-533: CLI human `forge show <taskId>` prints the reconcile-candidate line", async () => {
+  setupPreContainerRunning("task-pre-human");
+  const lines = captureConsoleLog();
+  try {
+    const program = new Command();
+    registerShow(program, { probe: () => "gone" });
+    await program.parseAsync(["show", "task-pre-human"], { from: "user" });
+
+    const out = lines.join("\n");
+    assert.match(out, /reconcile: CANDIDATE \(pre_container_crash\)/);
+    assert.match(out, /never launched/);
+    assert.match(out, /forge show --reconcile task-pre-human/);
+  } finally {
+    mock.restoreAll();
+  }
+});
+
+test("FG-533: CLI `forge show <taskId> --json` carries the candidate reason in diagnostic.reconcileCandidate", async () => {
+  setupPreContainerRunning("task-pre-json");
+  const lines = captureConsoleLog();
+  try {
+    const program = new Command();
+    registerShow(program, { probe: () => "gone" });
+    await program.parseAsync(["show", "task-pre-json", "--json"], { from: "user" });
+
+    const parsed = JSON.parse(lines.join("\n")) as { diagnostic: { reconcileCandidate: string | null } };
+    assert.equal(parsed.diagnostic.reconcileCandidate, "pre_container_crash");
+  } finally {
+    mock.restoreAll();
+  }
+});
+
+test("FG-533: CLI `forge show <runId>` lists the stranded task as a reconcile candidate (human + --json)", async () => {
+  setupPreContainerRunning("task-pre-run");
+  const humanLines = captureConsoleLog();
+  try {
+    const program = new Command();
+    registerShow(program, { probe: () => "gone" });
+    await program.parseAsync(["show", RUN.id], { from: "user" });
+
+    const out = humanLines.join("\n");
+    assert.match(out, /Reconcile candidates/);
+    assert.match(out, /task-pre-run\s+pre_container_crash\s+→\s+forge show --reconcile task-pre-run/);
+    assert.match(out, /reconcile candidate \(pre_container_crash\)/, "and flagged inline under Running tasks");
+  } finally {
+    mock.restoreAll();
+  }
+
+  const jsonLines = captureConsoleLog();
+  try {
+    const program = new Command();
+    registerShow(program, { probe: () => "gone" });
+    await program.parseAsync(["show", RUN.id, "--json"], { from: "user" });
+
+    const parsed = JSON.parse(jsonLines.join("\n")) as {
+      diagnostic: { reconcileCandidates: Array<{ taskId: string; reason: string }> };
+    };
+    assert.deepEqual(parsed.diagnostic.reconcileCandidates, [{ taskId: "task-pre-run", reason: "pre_container_crash" }]);
+  } finally {
+    mock.restoreAll();
+  }
+});
+
+test("FG-533: a live container (container.started event lost) is not flagged by show", () => {
+  setupPreContainerRunning("task-pre-live");
+  const { candidateReason } = showReconcileStep("task-pre-live", {}, { probe: () => "alive" });
+  assert.equal(candidateReason, null);
+  assert.equal(getTask("task-pre-live")!.status, "running");
 });

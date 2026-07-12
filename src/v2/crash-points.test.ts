@@ -135,6 +135,8 @@ const PROBE_NAMES = [
   "reconcile:inside-fail-fanout-wave-orphaned-txn",
   "reconcile:before-fail-provisioning-phase-crash",
   "reconcile:inside-fail-provisioning-phase-crash-txn",
+  "reconcile:before-fail-pre-container-crash",
+  "reconcile:inside-fail-pre-container-crash-txn",
   "reconcile:before-fail-dead-red-child",
   "reconcile:inside-fail-dead-red-child-txn",
   "reconcile:before-fail-awaiting-red-orphaned",

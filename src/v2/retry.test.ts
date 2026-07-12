@@ -160,6 +160,25 @@ test("retry after red_blocked: refused without --force", async () => {
   await assert.rejects(retry("t-red"), RetryNotAllowedError);
 });
 
+// FG-533: the crash landed before the container ever launched, so no agent work
+// exists to clobber. This is the OPPOSITE of the orphaned_* kinds below — it must
+// stay retryable with a bare `forge retry`, and must never grow a --force gate.
+test("retryPolicy: pre_container_crash is retryable with no --force gate", () => {
+  const d = retryPolicy("pre_container_crash");
+  assert.equal(d.retryable, true);
+  assert.equal(d.advice, undefined, "no work to salvage → no inspect-then---force advice");
+});
+
+test("retry after pre_container_crash: allowed without --force", async () => {
+  failedTask("t-pre-container", "pre_container_crash");
+  const out = await retry("t-pre-container");
+  assert.equal(out.failureKind, "pre_container_crash");
+  assert.equal(out.disposition.retryable, true);
+  assert.equal(out.newTask.status, "pending");
+  const retried = eventsForTask("t-pre-container").find((e) => e.eventType === "task.retried")!;
+  assert.equal((retried.payload as Record<string, unknown>).forced, false, "a bare retry must not be recorded as forced");
+});
+
 // FG-455: a dirty worktree may hold real, unreviewed work — a blind retry
 // would re-dispatch over it. Same "needs --force" shape as gate_rejected/red_blocked.
 test("retryPolicy: orphaned_work_may_persist is NOT retryable (don't clobber a dirty worktree)", () => {

@@ -126,17 +126,20 @@ export function detectInconsistentRunState(db: DatabaseInstance, opts: OpsCheckO
   );
 }
 
-/** A `running` task whose container is GONE (#290). The DB row is stale — the
- *  work finished (or the container died) but no lifecycle command has run
- *  reconcileRun to finalize it, so it shows as live for hours. Unlike the two
- *  detectors above this needs an external probe (docker + result.json on disk),
- *  so confidence is `external-required` and the only safe action is to ASK the
+/** A `running` task with no live container (#290, extended by FG-533). The DB row
+ *  is stale — either the container is GONE (the work finished, or it died) or it
+ *  never launched at all — but no lifecycle command has run reconcileRun to
+ *  finalize it, so it shows as live for hours. Unlike the two detectors above
+ *  this needs an external probe (docker + result.json on disk + the run lock), so
+ *  confidence is `external-required` and the only safe action is to ASK the
  *  orchestrator to run a lifecycle command — detection itself never reconciles.
  *
  *  Conservative by the shared classifier: `liveness_unknown` (docker down/
  *  ambiguous) and `anomalous_result_while_alive` (container still up) are NOT
- *  reconcile candidates and emit no incident here. The SQL guard means only
- *  running+containerized tasks are ever docker-probed. */
+ *  reconcile candidates and emit no incident here. The SQL guards mean only
+ *  eligible running tasks are ever docker-probed, and a pre-container row
+ *  (FG-533) is only ever reported under the same provenance/manual/child/liveness
+ *  safeguards reconcile.ts sweeps it with. */
 export function detectReconcileCandidate(
   db: DatabaseInstance,
   opts: OpsCheckOptions = {},
@@ -146,23 +149,36 @@ export function detectReconcileCandidate(
     .filter((c) => c.classification === "reconcile_candidate")
     .map((c) => {
       const finished = c.reason === "container_gone_result_present";
+      // FG-533: this row's container NEVER launched — saying "its container is
+      // gone" would name the wrong cause and point an operator at a worktree
+      // diff that cannot exist. The rescue is the same lifecycle command, but
+      // reconcile lands it as a retryable pre_container_crash, so the follow-up
+      // is a plain `forge retry` rather than an inspect-then-force.
+      const preContainer = c.reason === "pre_container_crash";
       return makeIncident({
         kind: "reconcile_candidate",
         severity: "medium",
         confidence: "external-required",
         runId: c.runId,
         taskId: c.taskId,
-        evidence: [
-          `task ${c.taskId} is recorded running but its container forge-${c.taskId} is gone`,
-          finished ? "a valid result.json exists — the work finished but the DB write was lost" : "no valid result.json — the container died without usable output (orphan)",
-        ],
+        evidence: preContainer
+          ? [
+              `task ${c.taskId} is recorded running but its agent container forge-${c.taskId} never launched (no container.started event)`,
+              `no live agent container and no live forge process holding run ${c.runId}'s lock — the forge process died in the pre-container window (image pull, auth staging, dependency provisioning), so no agent work exists to lose`,
+            ]
+          : [
+              `task ${c.taskId} is recorded running but its container forge-${c.taskId} is gone`,
+              finished ? "a valid result.json exists — the work finished but the DB write was lost" : "no valid result.json — the container died without usable output (orphan)",
+            ],
         recommendedAction: {
           type: "repair",
           autonomy: "ask",
-          command: `forge show ${c.taskId} --json`,
-          reason: finished
-            ? "run a lifecycle command (forge show/status/next) to let reconcile finalize this task — an invoke task with a valid result completes; a pipeline step lands fail-safe as orphaned_needs_finalize for re-dispatch (FG-479). Detection is read-only — confirm before reconciling."
-            : "run a lifecycle command (forge show/status/next) to let reconcile finalize this orphaned task as failed. Detection is read-only — confirm before reconciling.",
+          command: preContainer ? `forge show --reconcile ${c.taskId}` : `forge show ${c.taskId} --json`,
+          reason: preContainer
+            ? `run a lifecycle command (forge show --reconcile / status / next) to let reconcile sweep this stranded task to failed (pre_container_crash), then re-dispatch it with \`forge retry ${c.taskId}\` — nothing else can advance it (the ready queue never re-admits a running phase, and forge retry refuses a non-failed task). Detection is read-only — confirm before reconciling.`
+            : finished
+              ? "run a lifecycle command (forge show/status/next) to let reconcile finalize this task — an invoke task with a valid result completes; a pipeline step lands fail-safe as orphaned_needs_finalize for re-dispatch (FG-479). Detection is read-only — confirm before reconciling."
+              : "run a lifecycle command (forge show/status/next) to let reconcile finalize this orphaned task as failed. Detection is read-only — confirm before reconciling.",
         },
       });
     });
