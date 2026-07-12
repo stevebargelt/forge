@@ -429,6 +429,87 @@ test("recover --continue: a stream_recovered result whose result.json write FAIL
   );
 });
 
+// FG-540 AC: "a recovered JSON object that violates the consumer's reviewer/result
+// schema still fails as invalid; it is never converted to a pass or inferred
+// summary." The dispatch path gets that from review-loop's parseReviewerVerdict;
+// --continue must apply the same schema before it completes the task, or the
+// operator surface launders an invalid reviewer object into a complete review.
+test("recover --continue: a stream_recovered object that violates the reviewer schema is refused, not adopted (FG-540)", () => {
+  const gitDir = trackedDirtyGitRepo();
+  const taskId = "t-continue-codex-invalid-verdict";
+  insertContainerized(mkTask(taskId, { status: "running", worktreePath: gitDir, agentRole: "red-wide" }));
+  reconcileRun(RUN.id, () => false);
+  assert.equal(getTask(taskId)!.status, "failed");
+
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writeCodexManifest(dir);
+  // A clean codex stream carrying a well-formed JSON object that is NOT a
+  // reviewer verdict — the incident shape from the review finding.
+  writeFileSync(join(dir, "container.stdout.log"), codexCleanStreamStdout({ status: "complete", summary: "looks fine" }));
+
+  const inspected = performInspect(taskId);
+  assert.equal(inspected.kind, "inspect-task");
+  if (inspected.kind !== "inspect-task") return;
+  assert.equal(inspected.task.hasStdoutRecoverableResult, false, "an unadoptable object is not reported recoverable");
+  assert.ok(inspected.task.streamResultSchemaError, "the inspect view names the schema violation");
+  assert.match(inspected.task.recommendation, /forge retry/);
+
+  const outcome = performContinue(taskId, { force: true });
+  assert.equal(outcome.kind, "continue-refused");
+  if (outcome.kind !== "continue-refused") return;
+  assert.match(outcome.reason, /violates red-wide's result schema/);
+
+  const t = getTask(taskId)!;
+  assert.equal(t.status, "failed", "the task stays failed — an invalid reviewer result is not a completed review");
+  assert.equal(t.result, undefined);
+  const types = getEvents(taskId).map((e) => e.eventType);
+  assert.ok(!types.includes("task.completed"));
+  assert.ok(!types.includes("task.result_recovered_from_stream"));
+});
+
+// The refusal is schema-driven, not role-name-driven: a red-wide result that DOES
+// satisfy the reviewer contract (here: fail + an anchored finding) still adopts.
+test("recover --continue: a schema-valid fail verdict recovered from the stream is still adopted (FG-540)", () => {
+  const gitDir = trackedDirtyGitRepo();
+  const taskId = "t-continue-codex-valid-fail";
+  insertContainerized(mkTask(taskId, { status: "running", worktreePath: gitDir, agentRole: "red-wide" }));
+  reconcileRun(RUN.id, () => false);
+
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writeCodexManifest(dir);
+  const verdict = { verdict: "fail", confidence: 0.9, findings: [{ summary: "unchecked index", file: "src/a.ts", line: 12 }] };
+  writeFileSync(join(dir, "container.stdout.log"), codexCleanStreamStdout(verdict));
+
+  const outcome = performContinue(taskId);
+  assert.equal(outcome.kind, "continued");
+  if (outcome.kind !== "continued") return;
+  assert.equal(outcome.adoptedFrom, "stream_recovered");
+  assert.deepEqual(getTask(taskId)!.result, verdict);
+});
+
+// A non-reviewer role has no consumer-enforced result schema here — its recovered
+// object is adopted exactly as before (no new refusal surface for engineers).
+test("recover --continue: a non-reviewer role's stream_recovered object is unaffected by the reviewer schema check (FG-540)", () => {
+  const gitDir = trackedDirtyGitRepo();
+  const taskId = "t-continue-codex-engineer";
+  insertContainerized(mkTask(taskId, { status: "running", worktreePath: gitDir, agentRole: "engineer" }));
+  reconcileRun(RUN.id, () => false);
+
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writeCodexManifest(dir);
+  const engineerResult = { status: "complete", tests_run: 3, tests_passed: 3, files_modified: ["src/a.ts"] };
+  writeFileSync(join(dir, "container.stdout.log"), codexCleanStreamStdout(engineerResult));
+
+  const outcome = performContinue(taskId);
+  assert.equal(outcome.kind, "continued");
+  if (outcome.kind !== "continued") return;
+  assert.equal(outcome.adoptedFrom, "stream_recovered");
+  assert.deepEqual(getTask(taskId)!.result, engineerResult);
+});
+
 test("recover --continue: a codex stream whose turn never completed recovers nothing (fail-closed)", () => {
   const taskId = "t-continue-codex-unfinished";
   insertContainerized(mkTask(taskId, { status: "running", worktreePath: trackedCleanGitRepo(), agentRole: "red-wide" }));

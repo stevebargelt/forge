@@ -24,6 +24,7 @@ import { getManifestRuntime } from "../../v2/task-manifest.js";
 import { analyzeProviderFailure } from "../../v2/provider-failure.js";
 import { inferredResultFrom } from "../../v2/inferred-result.js";
 import { recoverStructuredStreamResult } from "../../v2/stream-result-recovery.js";
+import { parseReviewerVerdict } from "../../v2/review-loop.js";
 
 // FG-455 p4 review finding 2: oom_killed carries the same worktree-evidence
 // shape as orphaned_work_may_persist (both gathered on reconcile.ts's shared
@@ -131,12 +132,28 @@ function recoverStdoutResult(task: Task): StdoutRecovered | undefined {
   }
 }
 
+// FG-540: a stream-recovered object is forge's reconstruction of the agent's
+// result contract, not the agent's own write — so it only stands in for that
+// contract if it satisfies the consumer's role schema. On the dispatch path an
+// invalid reviewer object fails as invalid (review-loop's parseReviewerVerdict
+// → reviewer_failed); --continue must not launder the same object into a
+// complete task. Reviewer roles (red-*) are the roles with a schema a consumer
+// enforces here — invoke/invoke_chain runs are the only ones --continue adopts,
+// and the reviewer contract is theirs. Returns the schema error, or undefined
+// when the result is valid (or the role has no enforced schema).
+function streamResultSchemaError(role: string, result: unknown): string | undefined {
+  if (!role.startsWith("red-")) return undefined;
+  const parsed = parseReviewerVerdict(result);
+  return parsed.ok ? undefined : parsed.error;
+}
+
 type LiveEvidence = {
   worktreePathChecked: string | null;
   source: "worktree" | "project_dir_shared";
   changedFiles: string[];
   validResult?: unknown;
   stdoutRecovered?: StdoutRecovered;
+  streamSchemaError?: string;
 };
 
 function gatherLiveEvidence(task: Task, run: Run): LiveEvidence {
@@ -145,7 +162,17 @@ function gatherLiveEvidence(task: Task, run: Run): LiveEvidence {
   const changedFiles = changedWorktreeFiles(worktreePathChecked);
   const validResult = readResult(task.runId, task.id);
   const stdoutRecovered = validResult === undefined ? recoverStdoutResult(task) : undefined;
-  return { worktreePathChecked: worktreePathChecked ?? null, source, changedFiles, validResult, stdoutRecovered };
+  const streamSchemaError =
+    stdoutRecovered?.from === "stream_recovered"
+      ? streamResultSchemaError(task.agentRole, stdoutRecovered.result)
+      : undefined;
+  return { worktreePathChecked: worktreePathChecked ?? null, source, changedFiles, validResult, stdoutRecovered, streamSchemaError };
+}
+
+/** A stdout recovery --continue can actually adopt: narrative synthesis, or a
+ *  structured stream result that clears its role schema. */
+function usableStdoutRecovery(e: LiveEvidence): boolean {
+  return e.stdoutRecovered !== undefined && e.streamSchemaError === undefined;
 }
 
 // FG-481/FG-486: only a run whose tasks have NO host-side pipeline finalize
@@ -168,9 +195,22 @@ function renderRecommendation(r: Recommendation): string {
 // task that happened to have a dirty worktree). A non-continuable kind falls
 // back to the plain retry recommendation instead.
 function recommendationForKind(task: Task, evidence: LiveEvidence, failureKind: string | undefined, run: Run): Recommendation {
+  // FG-540: performContinue refuses a schema-violating stream recovery outright
+  // (it is never downgraded to a diff/narrative adoption), so never recommend
+  // --continue here — same rule as the non-continuable kinds below: don't print a
+  // command performContinue will then refuse.
+  if (evidence.streamSchemaError !== undefined) {
+    const force = retryPolicy(failureKind).retryable ? "" : " --force";
+    return {
+      commands: [`forge retry ${task.id}${force}`],
+      note:
+        `a structured result was recovered from the stream but violates ${task.agentRole}'s result schema ` +
+        `(${evidence.streamSchemaError}) — --continue refuses it as invalid; re-dispatch instead`,
+    };
+  }
   const continuable = CONTINUABLE_KINDS.has(failureKind ?? "") && !taskHasPipelineFinalize(run);
   const hasRecoverableWork =
-    evidence.validResult !== undefined || evidence.stdoutRecovered !== undefined || evidence.changedFiles.length > 0;
+    evidence.validResult !== undefined || usableStdoutRecovery(evidence) || evidence.changedFiles.length > 0;
   if (continuable && hasRecoverableWork) {
     return evidence.source === "project_dir_shared"
       ? { commands: [`forge recover ${task.id} --continue --force`], note: "shared project dir — confirm the diff is this task's before forcing" }
@@ -241,6 +281,9 @@ export type TaskEvidenceView = {
   changedFiles: string[];
   hasValidResult: boolean;
   hasStdoutRecoverableResult: boolean;
+  /** FG-540: set when a structured result WAS recovered from the stream but fails
+   *  the role's schema — it is reported not-recoverable, and this is why. */
+  streamResultSchemaError?: string;
   recommendation: string;
   /** FG-507: the recommendation as discrete commands, in order. Usually one;
    *  two for the cancel→retry sequence a running task with a dead container needs. */
@@ -264,7 +307,8 @@ function buildTaskView(task: Task, run: Run, containerAlive: ContainerAlive): Ta
     source: evidence.source,
     changedFiles: evidence.changedFiles,
     hasValidResult: evidence.validResult !== undefined,
-    hasStdoutRecoverableResult: evidence.stdoutRecovered !== undefined,
+    hasStdoutRecoverableResult: usableStdoutRecovery(evidence),
+    ...(evidence.streamSchemaError !== undefined ? { streamResultSchemaError: evidence.streamSchemaError } : {}),
     recommendation: renderRecommendation(recommendation),
     recommendationCommands: recommendation.commands,
     verification: VERIFICATION_HINT,
@@ -392,6 +436,22 @@ export function performContinue(taskId: string, opts: { force?: boolean } = {}):
   }
 
   const evidence = gatherLiveEvidence(task, run);
+
+  // FG-540 AC: a recovered object that violates the consumer's role schema fails
+  // as invalid — it is never adopted, and never silently downgraded to a diff or
+  // narrative adoption either (that would convert an invalid reviewer result into
+  // a completed task, the exact bypass the AC forbids).
+  if (evidence.streamSchemaError !== undefined) {
+    return {
+      kind: "continue-refused",
+      id: taskId,
+      reason:
+        `task ${taskId} has a structured result recoverable from its stream, but it violates ${task.agentRole}'s result schema ` +
+        `(${evidence.streamSchemaError}) — a stream-recovered result stands in for the agent's own contract, so an invalid one fails ` +
+        `as invalid rather than being adopted as complete. Re-dispatch with \`forge retry ${taskId}\`.`,
+    };
+  }
+
   const adopted: { result: unknown; adoptedFrom: AdoptedFrom } | undefined =
     evidence.validResult !== undefined
       ? { result: evidence.validResult, adoptedFrom: "result_json" }
@@ -626,6 +686,9 @@ function renderTaskEvidence(v: TaskEvidenceView): string[] {
   }
   lines.push(`    changed files: ${v.changedFiles.length > 0 ? v.changedFiles.join(", ") : "(none)"}`);
   lines.push(`    valid result.json: ${v.hasValidResult}   stdout-recoverable: ${v.hasStdoutRecoverableResult}`);
+  if (v.streamResultSchemaError !== undefined) {
+    lines.push(`    ⚠ a stream-recovered result was found but violates this role's result schema: ${v.streamResultSchemaError}`);
+  }
   lines.push(`    verify:  ${v.verification}`);
   lines.push(`    next:    ${v.recommendation}`);
   return lines;
