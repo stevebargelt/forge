@@ -72,17 +72,11 @@ afterEach(() => {
     else process.env[k] = savedEnv[k] as string;
   }
   setPlatform(realPlatform);
-  setPlatform(ORIGINAL_PLATFORM);
   for (const dir of tmpDirs.splice(0)) {
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
 });
 
-function setPlatform(p: string): void {
-  Object.defineProperty(process, "platform", { value: p, configurable: true });
-}
-
-const ORIGINAL_PLATFORM = process.platform;
 function setPlatform(p: string): void {
   Object.defineProperty(process, "platform", { value: p, configurable: true });
 }
@@ -205,7 +199,6 @@ function overlaps(a: Window, b: Window): boolean {
 }
 
 test("FG-425 e2e (in-process): two concurrent runs on ONE projectDir both complete green — no deadlock, windows serialized", async () => {
-  setPlatform("darwin"); // worktree mode refuses real Linux (FG-358) — docker is stubbed here, same as fg357-dispatch
   process.env.FORGE_WORKTREES = "1";
   process.env.FORGE_WORKTREE_IGNORE_DIRTY = "1";
 
@@ -253,7 +246,6 @@ import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
-Object.defineProperty(process, "platform", { value: "darwin", configurable: true }); // FG-358: worktree mode refuses Linux; docker is stubbed in this driver
 const [, , projectDir, title, fileName] = process.argv;
 
 // See the platform note at the top of the suite: this child is a fresh node
