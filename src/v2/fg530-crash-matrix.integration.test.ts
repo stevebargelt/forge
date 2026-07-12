@@ -718,6 +718,31 @@ const SCENARIOS: Scenario[] = [
     },
   },
   {
+    // FG-533: the pre-container crash window with NO provisioning evidence — the
+    // shape reconcile's pre-container sweep (not the FG-437 branch) owns. The
+    // strand is a real kill at runContainer's pre-container probe: the row is
+    // `running`, task.started is on the record, and neither a provisioning event
+    // nor container.started ever lands. This scenario is what makes the sweep's
+    // own write probes (reconcile:before-fail-pre-container-crash / -txn)
+    // reachable in the matrix.
+    name: "pre-container-crash",
+    workflow: PLAIN_WF,
+    yaml: PLAIN_YAML,
+    exec: { redVerdict: "pass" },
+    drive: async (runId, workflow, exec) => {
+      await runNext({ runId, workflow, dockerExec: exec });
+    },
+    strand: async (sc, runId, exec) => {
+      const fired = await crashAt("runContainer:after-mark-running-before-container-launch", () =>
+        sc.drive(runId, sc.workflow, exec),
+      );
+      assert.ok(fired, "the pre-container kill must fire for this strand to build the FG-533 shape");
+      const t = primaryOf(runId, "build");
+      assert.ok(t, "the primary must exist for this strand to mean anything");
+      assert.equal(t.status, "running", "the pre-container crash leaves the row `running`");
+    },
+  },
+  {
     // FG-531: the awaiting_red crash window, single-step callsite. The strand IS
     // the first crash — a real kill inside dispatchSingleStep's window between
     // the awaiting_red status write and dispatchReds — so reconcile's awaiting_red
@@ -1232,7 +1257,8 @@ test("FG-530 invariant 4 [worktree discard]: a worktree that existed at the kill
 // ── the REAL bugs this harness found on HEAD ───────────────────────────────────
 //
 // Fixed bugs keep their repro here, flipped to a plain passing assertion of the
-// recovery (FG-530-B → FG-532; FG-530-A both callsites → FG-531). A still-open
+// recovery (FG-530-B → FG-532; FG-530-A both callsites → FG-531; the
+// pre-container wedge → FG-533). A still-open
 // bug is marked `todo`: node:test RUNS it and reports the failure as expected,
 // so the suite stays green (FG-530's scope guard forbids fixing them in that
 // ticket) while the repro stays live. When the bug is fixed, its todo starts
@@ -1346,14 +1372,13 @@ test(
 );
 
 test(
-  "FG-533 [KNOWN FAILURE — real bug on HEAD, filed not fixed]: a crash in the PRE-container window (markTaskRunning + task.started, then minutes of image pull / auth staging / provisioning before container.started) wedges the task at `running` permanently — reconcile's per-task loop and ops' reconcile-candidate SQL both gate on container.started, and `forge retry` refuses a non-failed task",
-  { todo: "FG-533 — real pre-container crash-window wedge; scope guard says pin the repro, don't fix it in this ticket" },
+  "FG-533 [FIXED]: a crash in the PRE-container window (markTaskRunning + task.started, then minutes of image pull / auth staging / provisioning before container.started) is RECOVERED — reconcile's pre-container sweep lands the runner-dispatched task as retryable pre_container_crash with a named operator verb (forge retry)",
   async () => {
     ensureRuntime();
     writeWorkflowYaml(PLAIN_WF.name, PLAIN_YAML);
     const projectDir = makeTmpDir();
     const exec = makeExec({ redVerdict: "pass" });
-    const { runId } = startRun({ workflow: PLAIN_WF, title: "fg533 pre-container wedge repro", inputs: {}, projectDir });
+    const { runId } = startRun({ workflow: PLAIN_WF, title: "fg533 pre-container recovery", inputs: {}, projectDir });
 
     const fired = await crashAt("runContainer:after-mark-running-before-container-launch", () =>
       runNext({ runId, workflow: PLAIN_WF, dockerExec: exec }),
@@ -1365,21 +1390,22 @@ test(
     assert.equal(
       eventsForTask(primary.id).some((e) => e.eventType === "container.started"),
       false,
-      "and with NO container.started — the event every rescue path keys on",
+      "and with NO container.started — the event every rescue path used to key on",
     );
 
     await recoverToFixpoint(runId, PLAIN_WF, exec);
 
-    // The bug: recovery converges to a fixpoint that is a WEDGE.
-    assert.equal(
-      primaryOf(runId, "build")!.status,
-      "running",
-      "recovery leaves it `running` — reconcile skips it for want of a container.started event",
+    const recovered = primaryOf(runId, "build")!;
+    assert.equal(recovered.status, "failed", "the sweep lands the stranded pre-container task fail-safe");
+    assert.match(
+      recovered.error ?? "",
+      /pre_container_crash: .*agent container never launched.*forge retry/s,
+      "the landing names the window and the plain re-dispatch verb (no work exists, so no --force)",
     );
     assert.deepEqual(
       checkNoPermanentWedge(runId, PLAIN_WF),
       [],
-      "INVARIANT 2: a task stranded in the pre-container window has no enabled transition and no operator verb",
+      "INVARIANT 2: the recovered state has an enabled transition or a named operator verb everywhere",
     );
   },
 );

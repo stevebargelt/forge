@@ -23,6 +23,7 @@ const POLICY: Record<string, RetryDisposition> = {
   result_missing:       { retryable: true, reason: "no result was written; re-dispatch" },
   result_malformed:     { retryable: true, reason: "the result was unparseable; the agent may produce valid output on retry" },
   work_not_persisted:   { retryable: true, reason: "the agent's output never reached the host project mount; re-dispatch", advice: "ensure containers run with cwd = the /project bind mount (spawn.ts -w) so cwd-relative writes persist" },
+  pre_container_crash:  { retryable: true, reason: "the forge process died before the agent container launched — no work exists to clobber; re-dispatch" },
   model_error:          { retryable: true, reason: "model/provider error; re-dispatch" },
   tool_error:           { retryable: true, reason: "a tool failed; re-dispatch" },
   cancelled:            { retryable: true, reason: "the task was cancelled; re-dispatch to resume the work" },

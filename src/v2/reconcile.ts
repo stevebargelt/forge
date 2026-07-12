@@ -475,7 +475,81 @@ export function reconcileRun(
     // launch a container, so `docker inspect` would always say "gone" and we'd
     // wrongly orphan them. The authoritative signal that forge launched a
     // container is a container.started event for the task.
-    if (!hasContainerStarted) continue;
+    if (!hasContainerStarted) {
+      // FG-533: the pre-container crash window. runContainer marks the task
+      // `running` and logs task.started BEFORE the container launches; the span
+      // that follows (image pull, auth staging, dependency provisioning) is
+      // minutes long. A crash inside it leaves a `running` row with no
+      // container.started — invisible to the container-gone sweep below, never
+      // re-admitted by the ready queue, and refused by `forge retry` (not
+      // failed). Sweep it here, gated four ways so the host-side exemption this
+      // comment defends stays intact:
+      //   1. dispatchSource === "workflow" only (FG-512 provenance, total for
+      //      new rows). Session/design/legacy rows are marker-less and invoke
+      //      rows are "invoke" — all exempt. Invoke survivability is FG-536's
+      //      scope, by construction rather than by sweep.
+      //   2. agentRole !== "manual": runner-minted manual steps carry the
+      //      "workflow" marker but run host-side, never containerized.
+      //   3. No live agent container. Covers the sub-window where docker
+      //      started the container but the process died before the
+      //      container.started append — the work is real; let a later pass see
+      //      its exit through the normal evidence path rather than false-fail.
+      //   4. No children: a fanout PARENT runs `running` with no container of
+      //      its own for the whole wave — the FG-455-p2 pass below and the
+      //      FG-531 sweep own parent recovery, and a parent is never "pre-
+      //      container" (it has no container to be pre- of). Same shape test
+      //      the FG-455-p2 pass uses.
+      //   5. No live run-lock holder of ANY age (staleMs: MAX_SAFE_INTEGER —
+      //      deliberately stricter than the FG-531 sweep's default). The
+      //      awaiting_red sweep has a second liveness signal (live red
+      //      containers); here the lock is the ONLY one, and the pre-container
+      //      span can legitimately run long (cold image pull) under a lock
+      //      acquired much earlier, so a LIVE holder must block the sweep no
+      //      matter how old. Dead holders return null regardless of age, so a
+      //      genuine crash is still swept on the next pass.
+      // The FG-437 mid-provisioning branch above runs FIRST and keeps owning
+      // its sub-window (live provisioner → skip; dead provisioner → its own
+      // landing); everything else in the pre-container span lands here.
+      if (
+        t.taskPackage.dispatchSource === "workflow" &&
+        t.agentRole !== "manual" &&
+        !tasksForRun(runId).some((c) => c.parentId === t.id) &&
+        !containerAlive(`forge-${t.id}`) &&
+        liveRunLockHolder(runId, { staleMs: Number.MAX_SAFE_INTEGER }) === null
+      ) {
+        const error =
+          "pre_container_crash: the forge process died in the pre-container window — the task was marked running, but its " +
+          "agent container never launched (the span covers image pull, auth staging, and dependency provisioning), so no " +
+          `work exists to lose. Re-dispatch with \`forge retry ${t.id}\`.`;
+        const evidence = {
+          dispatchSource: "workflow" as const,
+          expectedContainer: `forge-${t.id}`,
+          containerStarted: false,
+          reason: error,
+        };
+        // FG-463: status write + its paired audit events commit atomically. A
+        // SQLITE_BUSY on any statement rolls the whole group back (the FG-459
+        // outer catch swallows the throw; a later idempotent pass re-applies it).
+        crashPoint("reconcile:before-fail-pre-container-crash");
+        getDb().transaction(() => {
+          markTaskFailed(t.id, error);
+          crashPoint("reconcile:inside-fail-pre-container-crash-txn");
+          logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "pre_container_crash", error, evidence } });
+          logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "pre_container_crash", evidence } });
+        })();
+        taskChanges.push({ taskId: t.id, from: "running", to: "failed", reason: "pre_container_crash" });
+
+        // AWN-8: same terminal cleanup as the FG-437 landing above. The
+        // worktree call passes provenMerged=false, so outside EPHEMERAL mode it
+        // is a no-op — a pre-container tree holds no agent work, but discarding
+        // is never reconcile's call (invariant 4).
+        cleanupStagedAuth(taskDir(t.runId, t.id));
+        if (t.worktreePath && run.projectDir) {
+          removeWorktreeIfSafe(t.worktreePath, t.runId, t.id, run.projectDir);
+        }
+      }
+      continue;
+    }
     if (containerAlive(`forge-${t.id}`)) continue; // genuinely still running
 
     // Container is gone. If it left a usable result, finalize as complete (the
