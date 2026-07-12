@@ -10,6 +10,7 @@ import {
   extractBedrockFromArgs,
   extractAwsProfileFromArgs,
   stripBedrockFlagsFromArgs,
+  buildClaudeChildEnv,
 } from "./claude.js";
 
 const MARKER = "<!-- forge:orchestrator-start -->";
@@ -190,4 +191,45 @@ test("stripBedrockFlagsFromArgs: removes both --bedrock and --aws-profile togeth
     stripBedrockFlagsFromArgs(["--bedrock", "--aws-profile=adx-dev", "--model", "sonnet"]),
     ["--model", "sonnet"],
   );
+});
+
+// ----- buildClaudeChildEnv -----
+
+test("buildClaudeChildEnv: disables background tasks for non-Bedrock sessions", () => {
+  const parentEnv: NodeJS.ProcessEnv = { PATH: "/test/bin" };
+
+  const childEnv = buildClaudeChildEnv(parentEnv);
+
+  assert.equal(childEnv.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, "1");
+  assert.equal(childEnv.PATH, "/test/bin");
+  assert.equal(childEnv.CLAUDE_CODE_USE_BEDROCK, undefined);
+  assert.equal(childEnv.AWS_PROFILE, undefined);
+  assert.deepEqual(parentEnv, { PATH: "/test/bin" });
+});
+
+test("buildClaudeChildEnv: overrides an unsafe parent value without mutating it", () => {
+  const parentEnv: NodeJS.ProcessEnv = {
+    CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "0",
+  };
+
+  const childEnv = buildClaudeChildEnv(parentEnv);
+
+  assert.equal(childEnv.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, "1");
+  assert.equal(parentEnv.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, "0");
+});
+
+test("buildClaudeChildEnv: combines the invariant with Bedrock configuration", () => {
+  const parentEnv: NodeJS.ProcessEnv = {
+    PATH: "/test/bin",
+    AWS_PROFILE: "old-profile",
+  };
+
+  const childEnv = buildClaudeChildEnv(parentEnv, "forge-profile");
+
+  assert.equal(childEnv.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, "1");
+  assert.equal(childEnv.CLAUDE_CODE_USE_BEDROCK, "1");
+  assert.equal(childEnv.AWS_PROFILE, "forge-profile");
+  assert.equal(childEnv.PATH, "/test/bin");
+  assert.equal(parentEnv.AWS_PROFILE, "old-profile");
+  assert.equal(parentEnv.CLAUDE_CODE_USE_BEDROCK, undefined);
 });
