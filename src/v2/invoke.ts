@@ -557,7 +557,18 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
   const stdoutPath = join(dir, "container.stdout.log");
   const stderrPath = join(dir, "container.stderr.log");
   const containerName = `forge-${taskId}`;
-  logEvent("container.started", { runId, taskId, payload: { containerName } });
+  // FG-536: the start record lands from the executor's post-`docker run -d`
+  // callback, so container.started means a container really exists and the
+  // watcher-death window (host gone, container running on) starts where the
+  // container does. Legacy/fake executors give no signal and keep the up-front
+  // record.
+  let containerStartRecorded = false;
+  const recordContainerStarted = (): void => {
+    if (containerStartRecorded) return;
+    containerStartRecorded = true;
+    logEvent("container.started", { runId, taskId, payload: { containerName } });
+  };
+  if (!exec.signalsContainerStart) recordContainerStarted();
   let exitCode: number;
   // FG-492: populated by docker-exec.ts's capture-at-close. Attached onto
   // every terminal container event below so `forge show`/`status`/`ops check`
@@ -575,6 +586,7 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
       stderrPath,
       idleTimeoutMs,
       onContainerEvidence: (e) => { containerEvidence = e; },
+      onContainerStarted: recordContainerStarted,
     });
   } catch (e) {
     // #155: capture usage even on docker failure — the task may have streamed

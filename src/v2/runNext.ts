@@ -2457,14 +2457,25 @@ async function runContainer(args: {
   const stdoutPath = join(dir, "container.stdout.log");
   const stderrPath = join(dir, "container.stderr.log");
   const containerName = `forge-${args.taskId}`;
-  logEvent("container.started", { runId: args.runId, taskId: args.taskId, payload: { containerName } });
-  // FG-536: the detached-execution watcher window. From here until exec returns
-  // the host process is only a WATCHER (docker-exec.ts runs the container
-  // detached); a crash in this span leaves the container running to completion
-  // and the task `running` with container.started on the record — the shape the
-  // container-gone sweep and its invoke-like/needs-finalize landings already
+  // FG-536: the durable start record and the FG-530 kill point both fire from the
+  // executor's start callback — for the detached executor, the instant after
+  // `docker run -d` returns success. Before that instant there is no container, so
+  // a death there is a PRE-container crash (FG-533's window, its own probe above)
+  // and container.started would be a lie. From this callback until exec returns the
+  // host is only a WATCHER; a crash in that span leaves the container running to
+  // completion and the task `running` with container.started on the record — the
+  // shape the container-gone sweep and its invoke-like/needs-finalize landings
   // recover from the REAL result once the container exits.
-  crashPoint("runContainer:after-container-started-before-exec");
+  let containerStartRecorded = false;
+  const recordContainerStarted = (): void => {
+    if (containerStartRecorded) return;
+    containerStartRecorded = true;
+    logEvent("container.started", { runId: args.runId, taskId: args.taskId, payload: { containerName } });
+    crashPoint("runContainer:after-container-started-before-exec");
+  };
+  // Legacy/fake executors give no start signal; they get the record up-front, which
+  // is where it always sat for them.
+  if (!exec.signalsContainerStart) recordContainerStarted();
   let exitCode: number;
   // FG-492: populated by docker-exec.ts's capture-at-close. Attached onto
   // every terminal container event below (mirrors invoke.ts). FG-492 review:
@@ -2480,6 +2491,7 @@ async function runContainer(args: {
       stderrPath,
       idleTimeoutMs,
       onContainerEvidence: (e) => { containerEvidence = e; },
+      onContainerStarted: recordContainerStarted,
     });
   } catch (e) {
     // #155: capture usage on docker failure too — tokens may have flown before crash.

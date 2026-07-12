@@ -381,6 +381,80 @@ test("FG-536 detachedDockerExec: an absent imageIndex falls back to the attached
   }
 });
 
+// ── FG-536 review: the start signal — a container really exists, or nothing is claimed ──
+//
+// container.started is the record every rescue path keys on (the container-gone
+// sweep, FG-533's pre-container sweep, FG-536's idle bound). It may only be written
+// once `docker run -d` has actually started a container, so the callback that emits
+// it fires there and nowhere earlier.
+
+/** A docker stub whose `run` succeeds or fails on demand; `wait` reports exit 0. */
+function makeRunStub(runExit: number): string {
+  const binDir = mkdtempSync(join(tmpdir(), "fg536-start-stub-"));
+  writeFileSync(
+    join(binDir, "docker"),
+    `#!/bin/sh\ncase "$1" in\n  run) exit ${runExit} ;;\n  wait) echo 0 ;;\n  logs) : ;;\nesac\nexit 0\n`,
+  );
+  chmodSync(join(binDir, "docker"), 0o755);
+  return binDir;
+}
+
+async function withRunStub<T>(runExit: number, fn: () => Promise<T>): Promise<T> {
+  const binDir = makeRunStub(runExit);
+  const origPath = process.env.PATH;
+  process.env.PATH = `${binDir}:${origPath ?? ""}`;
+  try {
+    return await fn();
+  } finally {
+    process.env.PATH = origPath;
+    rmSync(binDir, { recursive: true, force: true });
+  }
+}
+
+test("FG-536 detachedDockerExec: onContainerStarted fires exactly once, AFTER `docker run -d` succeeds — the watcher window starts where the container does", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "fg536-started-"));
+  try {
+    let starts = 0;
+    const exitCode = await withRunStub(0, () =>
+      detachedDockerExec({
+        args: ["run", "-i", "--name", "forge-started", "img", "claude"],
+        stdin: "payload",
+        stdoutPath: join(dir, "stdout.log"),
+        stderrPath: join(dir, "stderr.log"),
+        idleTimeoutMs: 60_000,
+        imageIndex: 4,
+        onContainerStarted: () => { starts++; },
+      }),
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(starts, 1, "one start signal for one container");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("FG-536 detachedDockerExec: a FAILED `docker run -d` (bad image, name clash) never signals a start — no container, no start record", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "fg536-nostart-"));
+  try {
+    let starts = 0;
+    const exitCode = await withRunStub(1, () =>
+      detachedDockerExec({
+        args: ["run", "-i", "--name", "forge-nostart", "img", "claude"],
+        stdin: undefined,
+        stdoutPath: join(dir, "stdout.log"),
+        stderrPath: join(dir, "stderr.log"),
+        idleTimeoutMs: 60_000,
+        imageIndex: 4,
+        onContainerStarted: () => { starts++; },
+      }),
+    );
+    assert.equal(exitCode, 1);
+    assert.equal(starts, 0, "docker run -d failed — claiming a start here is the misleading record this callback exists to prevent");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("FG-536 productionDockerExec: FORGE_DETACHED_EXEC=off routes to the attached executor", async () => {
   const dir = mkdtempSync(join(tmpdir(), "fg536-off-"));
   const prev = process.env.FORGE_DETACHED_EXEC;

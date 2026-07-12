@@ -62,9 +62,23 @@ export type DockerExecArgs = {
   // fakes and legacy callers omit it, and detachedDockerExec falls back to the
   // attached executor when it's absent (never guesses the boundary).
   imageIndex?: number;
+  // FG-536 review: called once, synchronously, the moment the container is
+  // REALLY running under the daemon — for the detached executor that is after
+  // `docker run -d` returns success, not before it. The caller records
+  // container.started from here (invoke.ts / runNext.ts), so the durable start
+  // record means "a container exists" and the watcher-death window (the span the
+  // FG-530 probe kills in) begins where the container actually does.
+  onContainerStarted?: () => void;
 };
 
-export type DockerExecFn = (args: DockerExecArgs) => Promise<number>;
+export type DockerExecFn = {
+  (args: DockerExecArgs): Promise<number>;
+  // FG-536 review: set on the executors here, which report a real container
+  // start via onContainerStarted. Test fakes and legacy executors leave it
+  // unset, and their callers record the start up-front (they have no other
+  // signal) — see runContainer / invoke.
+  signalsContainerStart?: boolean;
+};
 
 // The container name buildDockerArgs put after `--name` (spawn.ts always emits
 // it). Lets the watchdog kill the container, not just the local docker client.
@@ -162,9 +176,12 @@ export function finalizeContainerRetention(
   }
 }
 
-export const defaultDockerExec: DockerExecFn = async ({ args, stdin, stdoutPath, stderrPath, idleTimeoutMs, onContainerEvidence, isProvisionerExec }) => {
+export const defaultDockerExec: DockerExecFn = async ({ args, stdin, stdoutPath, stderrPath, idleTimeoutMs, onContainerEvidence, isProvisionerExec, onContainerStarted }) => {
   return new Promise<number>((resolve) => {
     const proc = cpSpawn("docker", args, { stdio: ["pipe", "pipe", "pipe"] });
+    // Attached: the client owns the container from the spawn onward, so this is
+    // as close to "the container is up" as this executor can get.
+    onContainerStarted?.();
     // Stream to disk live (not buffered-until-close): partial logs are readable
     // mid-run by the dashboard/humans, and a noisy 30-min agent doesn't grow an
     // unbounded in-memory buffer.
@@ -295,7 +312,7 @@ export function detachedEntryScript(hasStdin: boolean): string {
 }
 
 export const detachedDockerExec: DockerExecFn = async (execArgs) => {
-  const { args, stdin, stdoutPath, stderrPath, idleTimeoutMs, onContainerEvidence, isProvisionerExec, imageIndex } = execArgs;
+  const { args, stdin, stdoutPath, stderrPath, idleTimeoutMs, onContainerEvidence, isProvisionerExec, imageIndex, onContainerStarted } = execArgs;
   // Provisioner and boundary-unknown callers keep the attached executor.
   if (isProvisionerExec || imageIndex === undefined || args[imageIndex] === undefined) {
     return defaultDockerExec(execArgs);
@@ -327,6 +344,9 @@ export const detachedDockerExec: DockerExecFn = async (execArgs) => {
     });
   });
   if (!started) return 1;
+  // The container exists under the daemon from here on: every span below is the
+  // watcher half, which the host may lose without touching the run.
+  onContainerStarted?.();
 
   return new Promise<number>((resolve) => {
     const outStream = createWriteStream(stdoutPath);
@@ -382,3 +402,7 @@ export const detachedDockerExec: DockerExecFn = async (execArgs) => {
 // hatch) and for the provisioner/legacy-caller fallbacks above.
 export const productionDockerExec: DockerExecFn = (execArgs) =>
   process.env.FORGE_DETACHED_EXEC === "off" ? defaultDockerExec(execArgs) : detachedDockerExec(execArgs);
+
+defaultDockerExec.signalsContainerStart = true;
+detachedDockerExec.signalsContainerStart = true;
+productionDockerExec.signalsContainerStart = true;

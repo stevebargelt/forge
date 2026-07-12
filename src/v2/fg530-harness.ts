@@ -298,7 +298,16 @@ export function projectMountHost(dockerArgs: string[]): string | undefined {
  *  present ⇒ no severity downgrade) — an authoritative fail that actually
  *  blocks, which is what the blocked_by_red kill points need. */
 export function makeExec(opts: ExecOpts): DockerExecFn {
-  return async ({ args, stdoutPath, stderrPath }) => {
+  // FG-536: the real executors signal the start only once `docker run -d` has
+  // succeeded, and the container then runs to completion whatever happens to the
+  // host. This fake models that faithfully: the container's outputs are on disk
+  // BEFORE the start is signalled, so a kill at
+  // runContainer:after-container-started-before-exec strands the task in the shape
+  // a real watcher death leaves — running, container.started, result.json written
+  // by a container the host no longer watches. Signalling before writing would
+  // model a container that never produced anything, which detached execution makes
+  // impossible.
+  const exec: DockerExecFn = async ({ args, stdoutPath, stderrPath, onContainerStarted }) => {
     const nameIdx = args.indexOf("--name");
     const taskId = (nameIdx >= 0 ? (args[nameIdx + 1] ?? "") : "").replace(/^forge-/, "");
     const dir = dirname(stdoutPath);
@@ -307,6 +316,7 @@ export function makeExec(opts: ExecOpts): DockerExecFn {
     if (opts.narrativeStdoutOnly) {
       writeFileSync(stdoutPath, PI_NARRATIVE_STDOUT);
       writeFileSync(stderrPath, "");
+      onContainerStarted?.();
       return 0;
     }
 
@@ -346,8 +356,11 @@ export function makeExec(opts: ExecOpts): DockerExecFn {
     writeFileSync(join(dir, "result.json"), JSON.stringify(result));
     writeFileSync(stdoutPath, "stub stdout");
     writeFileSync(stderrPath, "");
+    onContainerStarted?.();
     return 0;
   };
+  exec.signalsContainerStart = true;
+  return exec;
 }
 
 export function step(id: string, over: Partial<Step> = {}): Step {

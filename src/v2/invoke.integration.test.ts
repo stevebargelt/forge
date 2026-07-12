@@ -6,6 +6,8 @@ import { writeFileSync, mkdirSync, existsSync, readFileSync, statSync, mkdtempSy
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { invoke, type DockerExecFn } from "./invoke.js";
+import { containerNameFromArgs } from "./docker-exec.js";
+import { reconcileRun } from "./reconcile.js";
 import { IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
 import { DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE } from "./dependency-provisioning.js";
 import { getRun } from "../store/runs.js";
@@ -1825,4 +1827,74 @@ test("FG-492 review round 2 (state 1): a REAL confirmed attached exit (container
     /container exit was directly observed by forge \(attached-exit\) — exit code 1/,
     "the confirmed-exit containerEvidenceLine — code known because Forge itself watched this exit, not a disappearance",
   );
+});
+
+// ── FG-536 review: CLI death in the WATCHER window, on the invoke path ────────
+//
+// The invoke path is the one FG-535/FG-536 exist for: `forge invoke` from a tmux
+// pane, the CLI killed mid-run. With detached execution the container is the
+// daemon's, so the kill lands on a watcher — these pin what the runner must have
+// written by then (container.started, and only when a container really exists) and
+// that the run finishes from the container's own result, without the CLI.
+
+test("FG-536 invoke: the CLI is KILLED after the container starts — the detached container's result still lands, and reconcile finalizes the task from it", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  let taskId = "";
+  // The detached container: started by the daemon, runs to completion, writes its
+  // result — while this CLI is SIGKILLed the instant the start is recorded. Modeled
+  // by an exec that never resolves: the host process is gone, so nothing after the
+  // start callback ever runs on the host again.
+  const cliKilledAfterStart: DockerExecFn = async ({ args, stdoutPath, stderrPath, onContainerStarted }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", tests_run: 3 }));
+    writeFileSync(stdoutPath, "stub stdout");
+    writeFileSync(stderrPath, "");
+    taskId = (containerNameFromArgs(args) ?? "").replace(/^forge-/, "");
+    onContainerStarted!();
+    return new Promise<number>(() => {}); // the CLI dies here — it never returns
+  };
+  cliKilledAfterStart.signalsContainerStart = true;
+
+  void invoke({ agentRole: "engineer", task: "do work", projectDir: "/tmp/x", dockerExec: cliKilledAfterStart });
+  while (taskId === "") await new Promise((r) => setTimeout(r, 5));
+
+  const stranded = getTask(taskId)!;
+  assert.equal(stranded.status, "running", "the CLI died mid-run: nothing finalized the task");
+  assert.ok(
+    eventsForTask(taskId).some((e) => e.eventType === "container.started"),
+    "container.started must be on the record — the container exists, and every rescue path keys on this event",
+  );
+  assert.ok(existsSync(join(taskDir(stranded.runId, taskId), "result.json")), "the container's work survived the CLI");
+
+  // The recovery pass the next `forge` command runs: the container is gone (it
+  // finished while the host was dead), and its result is on disk.
+  const r = reconcileRun(stranded.runId, () => false, () => "not_found" as const);
+  assert.equal(r.taskChanges.length, 1, "reconcile must finalize the task the dead CLI left running");
+  const recovered = getTask(taskId)!;
+  assert.equal(recovered.status, "complete", "the run completes from the container's REAL result, with no CLI to watch it");
+  assert.deepEqual(recovered.result, { status: "complete", tests_run: 3 });
+});
+
+test("FG-536 invoke: `docker run -d` FAILS — no container.started is written, so no sweep mistakes a never-launched container for a live one", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  // What detachedDockerExec does when the daemon refuses the run: exit 1, no start
+  // signal (proven at the executor level in docker-exec.test.ts).
+  const runFailed: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(stdoutPath, "");
+    writeFileSync(stderrPath, "docker: Error response from daemon: no such image\n");
+    return 1;
+  };
+  runFailed.signalsContainerStart = true;
+
+  const r = await invoke({ agentRole: "engineer", task: "do work", projectDir: "/tmp/x", dockerExec: runFailed });
+  assert.equal(r.status, "failed");
+  const types = eventsForTask(r.taskId).map((e) => e.eventType);
+  assert.ok(!types.includes("container.started"), "no container was launched — claiming one started is a lie the rescue paths would act on");
 });
