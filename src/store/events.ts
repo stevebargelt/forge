@@ -116,6 +116,11 @@ export type EventType =
   // round/ticket/sha identity can never be mispaired with the wrong finish.
   | "review_loop.verification_started"
   | "review_loop.verification_finished"
+  // FG-513: the loop's reviewer hit a provider/model infrastructure failure
+  // (failure_kind=model_error) and was retried once, same round, on the
+  // fallback profile — payload carries {ticketId, round, failedProfile?,
+  // retryProfile?, cause}. Emitted whether or not the retry then succeeded.
+  | "review_loop.reviewer_model_error_retry"
   | "campaign_item.host_gate_started"
   | "campaign_item.host_gate_finished";
 

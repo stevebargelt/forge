@@ -61,6 +61,35 @@ unavailable rather than silently switching.
 The concrete model is then `profile.map[capability]` (falling back to
 `map.default`); an unmapped capability with no `default` fails loud.
 
+## When a policy edit takes effect
+
+Resolution is **per dispatch, from disk**: `resolveModel` re-reads
+`model-policy.yml` every time a task is dispatched. There is no daemon and no
+cached policy — so an edit takes effect on the **next task dispatched**, with no
+restart, and tasks already in flight keep the profile they were dispatched with.
+A task's resolution is recorded on the task itself (`manifest.json` +
+`model.profile_resolved`), so what a past task ran on is history, never
+recomputed from today's policy.
+
+**Exception — `forge review-loop`'s reviewer is pinned per loop run (FG-513).**
+The loop resolves its reviewer's profile **once, at loop start** (same precedence
+as above) and reuses it for every round. Editing the policy while a loop is
+running does **not** change that loop's reviewer between rounds; the edit lands on
+the next loop run. This is deliberate: because resolution is otherwise
+per-dispatch, a mid-loop edit used to move the reviewer onto a different profile
+partway through — and when that profile was provider-broken, it structurally
+killed an otherwise-passing run (the FG-502 incident). One loop run gets one
+reviewer.
+
+If a reviewer dispatch fails on **provider/model infrastructure**
+(`failure_kind: model_error` — invalid model, quota, provider 4xx, broken provider
+CLI), the loop retries it once, same round, on the default review path
+(`defaults.activity.review ?? defaults.profile`), bypassing `overrides.agents`
+— that override is what selected the broken profile. A profile you pinned with
+`--review-profile` is never silently switched: the retry stays on it. The retry
+is bounded at one — if it also fails, the loop stops (`reviewer_failed`). See
+[Review-loop reviewer](concepts.md#review-loop-reviewer).
+
 ## Pin a whole run
 
 ```bash

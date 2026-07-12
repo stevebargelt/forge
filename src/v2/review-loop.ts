@@ -293,9 +293,20 @@ export function runVerification(
 
 // ── Slice 4: the bounded loop engine ─────────────────────────────────────────
 
+// FG-513: record of a same-round reviewer retry after a provider/model
+// infrastructure failure (failure_kind=model_error). Populated by the CLI's
+// review dep on BOTH arms — ok:true when the retry produced a usable verdict
+// (the run survived the infra failure), ok:false when the retry also failed.
+// Profiles are undefined in legacy (no-model-policy) resolution.
+export type ReviewerModelErrorRetry = {
+  failedProfile?: string;
+  retryProfile?: string;
+  cause: string;
+};
+
 export type ReviewDispatch =
-  | { ok: true; verdict: ReviewerVerdict; findings: Finding[] }
-  | { ok: false; error: string };
+  | { ok: true; verdict: ReviewerVerdict; findings: Finding[]; modelErrorRetry?: ReviewerModelErrorRetry }
+  | { ok: false; error: string; modelErrorRetry?: ReviewerModelErrorRetry };
 
 // FG-502: a path the fixer touched but that fell outside the scope guard
 // (backlog/ticket-closeout — always; docs/learnings/README — only when not
@@ -351,6 +362,10 @@ export type RoundRecord = {
   /** FG-502: disallowed paths whose revert could not be verified clean/absent —
    *  the round aborted fail-safe with nothing staged/committed. */
   scopeGuardFailedPaths?: string[];
+  /** FG-513: the reviewer hit a provider/model_error this round and was retried
+   *  same-round on the fallback profile (see ReviewerModelErrorRetry). Present
+   *  whether the retry succeeded (round continued) or failed (reviewer_failed). */
+  reviewerModelErrorRetry?: ReviewerModelErrorRetry;
 };
 
 /** Turn failed verification steps into fixer findings (unanchored — typecheck/test
@@ -436,11 +451,15 @@ export async function runReviewLoop(opts: { maxRounds?: number; ticketId?: strin
     // Verification green → review.
     const review = await deps.review(verification);
     if (!review.ok) {
-      rounds.push({ round, verification, findings: [], fixAttempted: false });
+      rounds.push({
+        round, verification, findings: [], fixAttempted: false,
+        ...(review.modelErrorRetry ? { reviewerModelErrorRetry: review.modelErrorRetry } : {}),
+      });
       return { stopReason: "reviewer_failed", closeable: false, rounds };
     }
 
     const rec: RoundRecord = { round, verification, verdict: review.verdict, findings: review.findings, fixAttempted: false };
+    if (review.modelErrorRetry) rec.reviewerModelErrorRetry = review.modelErrorRetry;
 
     if (review.verdict === "pass") {
       // verification.ok is guaranteed here, so pass ⟹ closeable.
@@ -607,6 +626,15 @@ export function renderReviewLoopNote(meta: ReviewLoopNoteMeta, outcome: ReviewLo
         L.push(`- CI: local fallback — ${outcome.reason}`);
         L.push(`- local fallback tier: ${outcome.extendedDelegatedToCi ? "fast only (test:extended delegated to CI)" : "full (incl. test:extended)"}`);
       }
+    }
+    // FG-513: a same-round reviewer retry after a provider/model_error is part
+    // of the round's audit record — name both profiles and the cause, so an
+    // infra failure that the retry absorbed is still visible after the fact.
+    if (r.reviewerModelErrorRetry) {
+      const rr = r.reviewerModelErrorRetry;
+      L.push(
+        `- reviewer model_error retry: profile '${rr.failedProfile ?? "(legacy)"}' failed (${rr.cause}) — retried same round on '${rr.retryProfile ?? "(legacy)"}'`,
+      );
     }
     L.push(r.verdict
       ? `- reviewer verdict: ${r.verdict}`

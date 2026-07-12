@@ -18,7 +18,10 @@ import {
   resolveCommitRange, runVerification, runReviewLoop, renderReviewLoopNote, parseReviewerVerdict,
   type CommitRange, type ReviewLoopDeps, type VerificationResult, type Finding,
   type ReviewedTipTrust, type RevertedPathGuidance, type GitRunner,
+  type ReviewDispatch, type ReviewerModelErrorRetry,
 } from "../../v2/review-loop.js";
+import { resolveModel } from "../../v2/model-resolution.js";
+import { loadModelPolicy } from "../../v2/loader.js";
 import { getRequiredHostGate } from "../../campaign/reconcile-collect.js";
 import {
   findCoveringGateEvidence, describeGateEvidence, deriveRequiredGateList, probeCiGateStatus,
@@ -30,6 +33,66 @@ import { newAttemptId } from "../../util/ids.js";
 type InvokeFn = (args: InvokeArgs) => Promise<InvokeResult>;
 type RunVerificationFn = typeof runVerification;
 type SleepFn = (ms: number) => Promise<void>;
+
+// ── FG-513: reviewer profile pinning + same-round model_error retry ──────────
+//
+// WHY the reviewer "rotated" between rounds (the FG-502 incident, run
+// run-review-loop-fg-502-eeba99): there is NO rotation mechanism in forge.
+// resolveModel re-reads model-policy.yml from disk at EVERY dispatch, so a
+// concurrent operator edit to the policy file lands mid-loop: round 1's
+// reviewer resolved via defaults.activity.review → claude-subscription
+// (task-red-wide-05b0c7, resolvedBy=defaults.activity.review), the operator
+// added `overrides.agents.red-wide: codex-subscription` at 16:36 local (file
+// mtime, between round 1 at 16:21 and round 2 at 16:37), and round 2 resolved
+// via the new override → codex-subscription (task-red-wide-ce6cab,
+// resolvedBy=overrides.agents.red-wide) — which was provider-broken at the
+// time, structurally killing an otherwise-passing run.
+//
+// Intended behavior, decided here:
+//  1. PIN per loop run: the reviewer profile is resolved ONCE at deps-build
+//     time and passed explicitly to every round's dispatch. One loop run is
+//     reviewed by one reviewer; mid-loop policy edits take effect on the NEXT
+//     loop run. (--review-profile already pinned explicitly; this extends the
+//     same determinism to the policy-resolved default. It does NOT pin review
+//     to any particular provider — it pins whatever the policy resolves at
+//     loop start.)
+//  2. Same-round BOUNDED retry on model_error: a provider/model infrastructure
+//     failure (failure_kind=model_error — invalid model, quota, provider 4xx,
+//     broken provider CLI) must not structurally kill the run. The reviewer is
+//     retried ONCE, same round, on the policy's default review path
+//     (defaults.activity.review ?? defaults.profile) — deliberately bypassing
+//     the agent override that selected the broken profile. When the pinned
+//     profile came from --review-profile (operator-explicit), the retry stays
+//     on THAT profile — a bounded transient-tolerance retry; forge never
+//     silently overrides an operator pin. If pinned and fallback coincide, the
+//     retry is a plain same-profile transient retry. A second model_error
+//     stops the loop as reviewer_failed, exactly as before.
+//
+// Legacy (no model-policy) resolution has no profiles: pinned/retry stay
+// undefined and the retry is a bounded same-resolution retry.
+
+export type ReviewerProfilePlan = { pinned?: string; retryProfile?: string };
+
+export function resolveReviewerProfilePlan(projectDir: string, cliProfile?: string): ReviewerProfilePlan {
+  if (cliProfile) return { pinned: cliProfile, retryProfile: cliProfile };
+  let policyDefault: string | undefined;
+  try {
+    const policy = loadModelPolicy({ projectDir });
+    if (!policy) return {}; // legacy mode — no profiles to pin
+    policyDefault = policy.defaults.activity["review"] ?? policy.defaults.profile;
+  } catch {
+    return {}; // unloadable policy — dispatch will surface the real error
+  }
+  let pinned: string | undefined;
+  try {
+    // Same pass-2 precedence a round-1 dispatch would apply (overrides.agents
+    // beats defaults.activity beats defaults.profile) — resolved once, here.
+    pinned = resolveModel({ agentRole: "red-wide", ctx: { projectDir } }).profile;
+  } catch {
+    pinned = policyDefault; // e.g. unmapped capability — let dispatch surface it
+  }
+  return { pinned, retryProfile: policyDefault };
+}
 
 // FG-501: review-loop must consume in-flight CI as the verification authority
 // rather than starting duplicate local work. Defaults chosen for an unattended
@@ -612,19 +675,58 @@ export function buildReviewLoopDeps(
     return result;
   };
 
+  // FG-513: resolved ONCE per loop — see resolveReviewerProfilePlan's header
+  // comment for why (mid-loop policy edits rotated the reviewer in FG-502).
+  const reviewerPlan = resolveReviewerProfilePlan(ctx.projectDir, ctx.reviewProfile);
+
   const deps: ReviewLoopDeps = {
     verify: () => verifyWithEvents(),
     review: async (verification) => {
       preflight();
-      const res = await invokeFn({
-        agentRole: "red-wide", task: reviewTask(ctx.acceptance, ctx.diffProvider(), verification),
-        projectDir: ctx.projectDir, readOnlyProject: true, runId,
-        runTitle: `review-loop #${ctx.ticketId.replace(/^#/, "")}`, modelProfile: ctx.reviewProfile,
-      });
+      const dispatchReviewer = (profile: string | undefined): Promise<InvokeResult> =>
+        invokeFn({
+          agentRole: "red-wide", task: reviewTask(ctx.acceptance, ctx.diffProvider(), verification),
+          projectDir: ctx.projectDir, readOnlyProject: true, runId,
+          runTitle: `review-loop #${ctx.ticketId.replace(/^#/, "")}`, modelProfile: profile,
+        });
+      const parse = (res: InvokeResult, modelErrorRetry?: ReviewerModelErrorRetry): ReviewDispatch => {
+        const parsed = parseReviewerVerdict(res.result);
+        return parsed.ok
+          ? { ok: true, verdict: parsed.verdict, findings: parsed.findings, ...(modelErrorRetry ? { modelErrorRetry } : {}) }
+          : { ok: false, error: `reviewer result.json invalid: ${parsed.error}`, ...(modelErrorRetry ? { modelErrorRetry } : {}) };
+      };
+
+      const res = await dispatchReviewer(reviewerPlan.pinned);
       runId ??= res.runId;
-      if (res.status !== "complete") return { ok: false, error: res.error ?? "reviewer dispatch failed" };
-      const parsed = parseReviewerVerdict(res.result);
-      return parsed.ok ? { ok: true, verdict: parsed.verdict, findings: parsed.findings } : { ok: false, error: `reviewer result.json invalid: ${parsed.error}` };
+      if (res.status === "complete") return parse(res);
+
+      // FG-513: a provider/model infrastructure failure is retried ONCE, same
+      // round, on the plan's fallback profile — never more, and only for
+      // model_error (a genuine task failure or crash still fails structurally).
+      if (res.failureKind !== "model_error") {
+        return { ok: false, error: res.error ?? "reviewer dispatch failed" };
+      }
+      const retry: ReviewerModelErrorRetry = {
+        ...(reviewerPlan.pinned !== undefined ? { failedProfile: reviewerPlan.pinned } : {}),
+        ...(reviewerPlan.retryProfile !== undefined ? { retryProfile: reviewerPlan.retryProfile } : {}),
+        cause: res.error ?? "model_error",
+      };
+      logEvent("review_loop.reviewer_model_error_retry", {
+        runId: runId!,
+        taskId: res.taskId,
+        payload: { ticketId: ctx.ticketId, round: verificationRound, ...retry },
+      });
+      console.log(
+        `review-loop: reviewer hit model_error on profile '${retry.failedProfile ?? "(legacy)"}' — ` +
+        `retrying this round once on '${retry.retryProfile ?? "(legacy)"}' (${retry.cause})`,
+      );
+      const second = await dispatchReviewer(reviewerPlan.retryProfile);
+      if (second.status === "complete") return parse(second, retry);
+      return {
+        ok: false,
+        error: `reviewer failed after same-round model_error retry on '${retry.retryProfile ?? "(legacy)"}': ${second.error ?? "reviewer dispatch failed"} (first failure: ${retry.cause})`,
+        modelErrorRetry: retry,
+      };
     },
     fix: async (findings) => {
       round++;

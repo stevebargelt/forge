@@ -91,6 +91,13 @@ export type InvokeResult = {
   status: "complete" | "failed";
   result?: unknown;
   error?: string;
+  /** FG-513: the classified FailureKind for a failed dispatch, when one was
+   *  determined at the failure site (e.g. "model_error", "idle_timeout",
+   *  "container_crash"). Lets in-process callers (review-loop's same-round
+   *  reviewer retry) react to the KIND without re-reading the task's event
+   *  stream. Absent on success and on failure paths that don't classify
+   *  in-hand (e.g. a lost CAS race to a concurrent cancel). */
+  failureKind?: string;
 };
 
 // FG-503: wraps finalizeContainerRetention for every call site where the task
@@ -629,7 +636,7 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     // FORGE_CONTAINER_RETENTION=off forces an immediate reap regardless.
     finalizeContainerRetention(containerName, false);
     closeRunIfIdle(false);
-    return { runId, taskId, status: "failed", error };
+    return { runId, taskId, status: "failed", error, failureKind: kind };
   }
 
   // FG-376: the entrypoint's dependency install (npm ci/install from
@@ -642,11 +649,12 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     const stderrTail = existsSync(stderrPath) ? readFileSync(stderrPath, "utf8").trim() : "";
     logEvent("container.dependency_provisioning_failed", { runId, taskId, payload: { containerName, exitCode, ...(containerEvidence ? { containerEvidence } : {}) } });
     const error = `verification_environment_unavailable: dependency install failed${stderrTail ? ` — ${stderrTail}` : ""}`;
-    failTask(taskId, { runId, kind: classify({ source: "verification_environment_unavailable" }), error });
+    const kind = classify({ source: "verification_environment_unavailable" });
+    failTask(taskId, { runId, kind, error });
     // FG-492 review: task failed — retain (see finalizeContainerRetention above).
     finalizeContainerRetention(containerName, false);
     closeRunIfIdle(false);
-    return { runId, taskId, status: "failed", error };
+    return { runId, taskId, status: "failed", error, failureKind: kind };
   }
 
   logEvent("container.exited", { runId, taskId, payload: { containerName, exitCode, ...(containerEvidence ? { containerEvidence } : {}) } });
@@ -678,7 +686,7 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     // FG-492 review: task failed — retain (see finalizeContainerRetention above).
     finalizeContainerRetention(containerName, false);
     closeRunIfIdle(false);
-    return { runId, taskId, status: "failed", error };
+    return { runId, taskId, status: "failed", error, failureKind: kind };
   }
 
   let result: unknown = undefined;
@@ -686,11 +694,12 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     if (resultRaw.length > 0) result = JSON.parse(resultRaw);
   } catch {
     const error = "result.json malformed";
-    failTask(taskId, { runId, kind: classify({ resultState: "malformed" }), error });
+    const kind = classify({ resultState: "malformed" });
+    failTask(taskId, { runId, kind, error });
     // FG-492 review: task failed — retain (see finalizeContainerRetention above).
     finalizeContainerRetention(containerName, false);
     closeRunIfIdle(false);
-    return { runId, taskId, status: "failed", error };
+    return { runId, taskId, status: "failed", error, failureKind: kind };
   }
   if (!result) {
     // #264: pi exits 0 even on a provider error, so a missing result.json here is
@@ -733,7 +742,7 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     // — a clean exit that produced no result.json is retained, not reaped.
     finalizeContainerRetention(containerName, false);
     closeRunIfIdle(false);
-    return { runId, taskId, status: "failed", error };
+    return { runId, taskId, status: "failed", error, failureKind: kind };
   }
 
   // #254: persistence assertion (rw project only — a read-only mount can't
@@ -747,7 +756,7 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
       // FG-492 review: task failed — retain (see finalizeContainerRetention above).
       finalizeContainerRetention(containerName, false);
       closeRunIfIdle(false);
-      return { runId, taskId, status: "failed", error };
+      return { runId, taskId, status: "failed", error, failureKind: "work_not_persisted" };
     }
   }
 

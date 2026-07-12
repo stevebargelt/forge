@@ -82,6 +82,16 @@ Because these four event types are RUN-scoped (`task_id` is never set — the lo
 
 A review-loop run's current phase (`reviewLoopRunPhases()` / `GET /api/review-loop/phases`, one of `verifying | waiting-on-ci | reviewing | fixing`) is derived per run_id as whichever is more recent: a running task (`agent_role = 'engineer'` → `fixing`, else → `reviewing`), or the latest still-open `review_loop.verification_started` (→ `verifying`/`waiting-on-ci` per `mode`). A run is considered a "review-loop run" purely by having ever emitted a `review_loop.verification_started` event — there is no assumption about the `runs.workflow` column's value.
 
+#### FG-513: reviewer model-error retry (audit-only)
+
+The two host-verification events above are not the whole `review_loop.*` family. `review_loop.reviewer_model_error_retry` is emitted by `forge review-loop` when a round's reviewer dispatch fails with `failure_kind: "model_error"` (a provider/model infrastructure failure — invalid model, quota, provider 4xx, broken provider CLI) and the loop retries it once, same round, on the plan's retry profile (the policy's default review path — or the *same* profile, when it was operator-pinned with `--review-profile`). See [Review-loop reviewer](concepts.md#review-loop-reviewer) for the pinning and retry rules the event records.
+
+Payload: `{ ticketId, round, failedProfile?, retryProfile?, cause }`. `failedProfile` is the profile the reviewer was pinned to for this loop run; `retryProfile` is the profile the retry ran on. **Both profile fields are absent under legacy (no `model-policy.yml`) resolution** — there are no profiles to name, and the retry is a bounded same-resolution retry — so a consumer must treat them as optional, not merely nullable. `cause` (string) is the failing dispatch's error text. The event is emitted **whether or not the retry then succeeded**: its presence means an infrastructure failure occurred, not that the round failed. The round's outcome is carried by the loop's own result (`reviewer_failed` only when the retry also failed), never inferred from this event.
+
+Unlike the four FG-487 event types above, this one is **not run-scoped-only**: it sets both `run_id` and `task_id` (the failed reviewer task), so it surfaces on the per-task Timeline through a strict `task_id` match without needing the run-level fold. It carries no `attemptId` and has no paired start/finish — it is a single point-in-time record, not a spanning activity.
+
+**No dashboard consumer reads this event.** It exists for post-hoc audit/forensics (why did this loop's reviewer change profile mid-round?), alongside the same fact rendered into the review-loop run note. Adding a dashboard read is a future change, not an existing contract — but the payload above is what a reader would get.
+
 #### Campaign-item reconcile decision events
 
 Emitted by `forge campaign reconcile`'s (or the drive-time equivalent's) write path the moment an item is shipped, carrying the re-derived evidence in `payload.evidence` for audit purposes. `run_id` is the events-table column, set to the item's `runId` (nullable). No schema/column change accompanies any of these — they differ only in `event_type` and are how the audit trail distinguishes *why* an item was recoverable.

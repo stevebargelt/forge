@@ -403,6 +403,39 @@ test("#301 loop: reviewer dispatch failure → reviewer_failed", async () => {
   assert.equal(r.stopReason, "reviewer_failed");
 });
 
+// ── FG-513: a same-round reviewer model_error retry is part of the round record ──
+
+const FG513_RETRY = { failedProfile: "codex-subscription", retryProfile: "claude-subscription", cause: "codex run failed: model not found" };
+
+test("FG-513 loop: a survived reviewer retry rides the round record (run continues to its verdict)", async () => {
+  const r = await runReviewLoop({}, deps({
+    review: () => ({ ok: true, verdict: "pass", findings: [], modelErrorRetry: FG513_RETRY }),
+  }));
+  assert.equal(r.stopReason, "passed");
+  assert.equal(r.closeable, true);
+  assert.deepEqual(r.rounds[0]!.reviewerModelErrorRetry, FG513_RETRY);
+});
+
+test("FG-513 loop: a failed retry still stops as reviewer_failed, with the retry recorded on the round", async () => {
+  const r = await runReviewLoop({}, deps({
+    review: () => ({ ok: false, error: "reviewer failed after same-round model_error retry", modelErrorRetry: FG513_RETRY }),
+  }));
+  assert.equal(r.stopReason, "reviewer_failed");
+  assert.deepEqual(r.rounds[0]!.reviewerModelErrorRetry, FG513_RETRY);
+});
+
+test("FG-513 note: the retry line names both profiles and the cause", () => {
+  const note = renderReviewLoopNote(
+    { ticketId: "513", maxRounds: 2, range: { mode: "since", diffRange: "a..HEAD", shas: [], spansUnmatched: false }, reviewedTipSha: "deadbeef", remoteTrust: { kind: "trusted", remoteRef: "origin/main" } },
+    {
+      stopReason: "passed", closeable: true,
+      rounds: [{ round: 1, verification: VERIFY_OK, verdict: "pass", findings: [], fixAttempted: false, reviewerModelErrorRetry: FG513_RETRY }],
+    },
+  );
+  assert.match(note, /reviewer model_error retry: profile 'codex-subscription' failed \(codex run failed: model not found\) — retried same round on 'claude-subscription'/);
+  assert.match(note, /reviewer verdict: pass/);
+});
+
 test("#301 loop: fixer failure → fixer_failed", async () => {
   const r = await runReviewLoop({ maxRounds: 3 }, deps({
     review: () => ({ ok: true, verdict: "needs_fix", findings: ANCHORED }),
