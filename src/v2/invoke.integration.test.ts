@@ -1424,6 +1424,9 @@ test("#264: a pi run with a provider error and no result.json fails with an attr
   assert.doesNotMatch(r.error ?? "", /^no_result_json$/);
   // #267: a provider error is classified model_error (with the cause), not generic.
   assert.equal(failureKindForTask(r.taskId), "model_error");
+  // FG-513: the classified kind also rides the InvokeResult itself, so in-process
+  // callers (review-loop's same-round reviewer retry) can react without a re-read.
+  assert.equal(r.failureKind, "model_error");
 });
 
 test("#264: a pi run that completes but writes no result.json blames the agent contract", async () => {

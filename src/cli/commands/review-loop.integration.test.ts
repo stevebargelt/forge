@@ -14,7 +14,7 @@ import type { Database as DatabaseInstance } from "better-sqlite3";
 import { invoke, type InvokeArgs, type InvokeResult, type DockerExecFn } from "../../v2/invoke.js";
 import {
   buildReviewLoopDeps, assertCleanWorkingTree, registerReviewLoop, computeInRangeDocsPaths,
-  resolveReviewedTipTrust, type ReviewLoopContext,
+  resolveReviewedTipTrust, resolveReviewerProfilePlan, type ReviewLoopContext,
 } from "./review-loop.js";
 import { runReviewLoop, renderReviewLoopNote, resolveCommitRange, type VerificationResult, type GitRunner } from "../../v2/review-loop.js";
 import { runDir } from "../../util/paths.js";
@@ -2597,4 +2597,152 @@ test("FG-502 CLI end-to-end: computeInRangeDocsPaths threads through registerRev
   const committedFiles = gitExec(["show", "--name-only", "--format=", headSha], projectDir).trim().split("\n");
   assert.ok(committedFiles.includes("docs/reviewed.md"), `expected docs/reviewed.md in the fixer's commit, got: ${JSON.stringify(committedFiles)}`);
   process.exitCode = prevExitCode;
+});
+
+// ── FG-513: reviewer profile pinning + same-round model_error retry ──────────
+//
+// The FG-502 incident (run run-review-loop-fg-502-eeba99): resolveModel re-reads
+// model-policy.yml at every dispatch, so a mid-loop operator edit rotated the
+// reviewer from claude-subscription (round 1, defaults.activity.review) to
+// codex-subscription (round 2, overrides.agents.red-wide) — which was provider-
+// broken, structurally killing an otherwise-passing run. These tests pin the two
+// behaviors that prevent a recurrence: the profile is resolved ONCE per loop,
+// and a reviewer model_error gets ONE same-round retry on the fallback profile.
+
+const FG513_POLICY_WITH_OVERRIDE = `
+model_profiles:
+  prof-a:
+    provider: anthropic
+    auth: subscription
+    map:
+      review:  { model: model-a, cost_tier: standard }
+      default: { model: model-a, cost_tier: standard }
+  prof-b:
+    provider: anthropic
+    auth: subscription
+    map:
+      review:  { model: model-b, cost_tier: standard }
+      default: { model: model-b, cost_tier: standard }
+defaults:
+  profile: prof-b
+  activity:
+    review: prof-b
+overrides:
+  agents:
+    red-wide: prof-a
+`;
+
+const FG513_POLICY_NO_OVERRIDE = `
+model_profiles:
+  prof-b:
+    provider: anthropic
+    auth: subscription
+    map:
+      review:  { model: model-b, cost_tier: standard }
+      default: { model: model-b, cost_tier: standard }
+defaults:
+  profile: prof-b
+  activity:
+    review: prof-b
+`;
+
+function fg513WritePolicy(yaml: string): void {
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  writeFileSync(join(projectDir, ".forge", "model-policy.yml"), yaml);
+}
+
+test("FG-513 plan: policy mode pins the agent-override profile and retries on the defaults path", () => {
+  fg513WritePolicy(FG513_POLICY_WITH_OVERRIDE);
+  assert.deepEqual(resolveReviewerProfilePlan(projectDir), { pinned: "prof-a", retryProfile: "prof-b" });
+});
+
+test("FG-513 plan: --review-profile (operator pin) retries on ITSELF — never silently switched away", () => {
+  fg513WritePolicy(FG513_POLICY_WITH_OVERRIDE);
+  assert.deepEqual(resolveReviewerProfilePlan(projectDir, "prof-b"), { pinned: "prof-b", retryProfile: "prof-b" });
+});
+
+test("FG-513 plan: legacy mode (no model-policy anywhere) has no profiles to pin", () => {
+  // projectDir has no .forge/model-policy.yml and the test FORGE_HOME has none.
+  assert.deepEqual(resolveReviewerProfilePlan(projectDir), {});
+});
+
+test("FG-513 pinning: the reviewer profile is resolved once at loop start — a mid-loop policy edit no longer rotates the reviewer between rounds (the FG-502 incident shape)", async () => {
+  fg513WritePolicy(FG513_POLICY_WITH_OVERRIDE);
+  const profiles: (string | undefined)[] = [];
+  const { deps } = buildReviewLoopDeps(ctx(), async (a) => {
+    profiles.push(a.modelProfile);
+    return RESULT({ result: { verdict: "pass" } });
+  });
+  await deps.review({ ok: true, steps: [] }); // round 1
+  // the incident mechanism: the policy file changes between rounds
+  fg513WritePolicy(FG513_POLICY_NO_OVERRIDE);
+  await deps.review({ ok: true, steps: [] }); // round 2
+  assert.deepEqual(profiles, ["prof-a", "prof-a"], "both rounds must dispatch the SAME loop-start profile");
+});
+
+test("FG-513 retry: reviewer model_error → exactly one same-round retry on the fallback profile; the run survives with the retry recorded", async () => {
+  fg513WritePolicy(FG513_POLICY_WITH_OVERRIDE);
+  const calls: (string | undefined)[] = [];
+  const { deps } = buildReviewLoopDeps(ctx(), async (a) => {
+    calls.push(a.modelProfile);
+    if (calls.length === 1) {
+      return RESULT({ status: "failed", error: "codex run failed: model not found", failureKind: "model_error" });
+    }
+    return RESULT({ result: { verdict: "pass" } });
+  });
+  const r = await deps.review({ ok: true, steps: [] });
+  assert.deepEqual(calls, ["prof-a", "prof-b"], "retry must land on the defaults-path profile, same round");
+  assert.equal(r.ok, true, "the infra failure must not kill the round");
+  assert.deepEqual(
+    (r as { modelErrorRetry?: unknown }).modelErrorRetry,
+    { failedProfile: "prof-a", retryProfile: "prof-b", cause: "codex run failed: model not found" },
+    "the retry is part of the dispatch record",
+  );
+  // Durable audit trail: the retry event was logged against the loop's run.
+  const retryEvents = eventsForRun("run-1").filter((e) => e.eventType === "review_loop.reviewer_model_error_retry");
+  assert.equal(retryEvents.length, 1);
+  assert.equal((retryEvents[0]!.payload as Record<string, unknown>)["failedProfile"], "prof-a");
+  assert.equal((retryEvents[0]!.payload as Record<string, unknown>)["retryProfile"], "prof-b");
+});
+
+test("FG-513 retry is bounded: a second model_error stops the round as a reviewer failure — exactly two dispatches, never a loop", async () => {
+  fg513WritePolicy(FG513_POLICY_WITH_OVERRIDE);
+  let calls = 0;
+  const { deps } = buildReviewLoopDeps(ctx(), async () => {
+    calls++;
+    return RESULT({ status: "failed", error: "provider quota exhausted", failureKind: "model_error" });
+  });
+  const r = await deps.review({ ok: true, steps: [] });
+  assert.equal(calls, 2, "one dispatch + one bounded retry, nothing more");
+  assert.equal(r.ok, false);
+  assert.match((r as { error: string }).error, /after same-round model_error retry on 'prof-b'/);
+  assert.match((r as { error: string }).error, /provider quota exhausted/);
+});
+
+test("FG-513: a non-model_error reviewer failure is NOT retried (structural failures still fail structurally)", async () => {
+  fg513WritePolicy(FG513_POLICY_WITH_OVERRIDE);
+  let calls = 0;
+  const { deps } = buildReviewLoopDeps(ctx(), async () => {
+    calls++;
+    return RESULT({ status: "failed", error: "container_crash (exit 1)", failureKind: "container_crash" });
+  });
+  const r = await deps.review({ ok: true, steps: [] });
+  assert.equal(calls, 1, "no retry for a non-provider failure");
+  assert.equal(r.ok, false);
+});
+
+test("FG-513 legacy mode: a model_error still gets one bounded same-resolution retry", async () => {
+  // No policy file → pinned/retry undefined; the retry dispatch re-runs the
+  // same legacy resolution once (bounded transient tolerance).
+  const calls: (string | undefined)[] = [];
+  const { deps } = buildReviewLoopDeps(ctx(), async (a) => {
+    calls.push(a.modelProfile);
+    if (calls.length === 1) {
+      return RESULT({ status: "failed", error: "claude run failed: overloaded", failureKind: "model_error" });
+    }
+    return RESULT({ result: { verdict: "pass" } });
+  });
+  const r = await deps.review({ ok: true, steps: [] });
+  assert.deepEqual(calls, [undefined, undefined]);
+  assert.equal(r.ok, true);
 });
