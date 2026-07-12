@@ -24,14 +24,17 @@ function isObj(v: unknown): v is Record<string, unknown> {
 }
 
 /** Extract the terminal completed agent_message JSON object from a codex
- *  `exec --json` JSONL stream. Lines that don't parse as a JSON object (wrapper
- *  warnings, a truncated trailing record, any other stdout noise) are SKIPPED,
- *  exactly as every other codex stdout consumer reads the same log
- *  (provider-failure.ts's eachJsonl, the usage parser) — a real container log is
- *  not guaranteed to be pure JSONL, and refusing the whole stream over one stray
- *  line made recovery inert in production. Safety comes from the turn-envelope
- *  conditions below, not from line purity: a stream truncated before its
- *  `turn.completed` still recovers nothing.
+ *  `exec --json` JSONL stream.
+ *
+ *  Intactness rule (operator-decided, FG-540 final pass): codex event records
+ *  are JSON OBJECTS, so only a `{`-prefixed line can be a record. A line that
+ *  does not begin with `{` is wrapper/log noise — tolerated and skipped
+ *  wherever it appears, so ordinary warning text never makes recovery silently
+ *  inert. A line that DOES begin with `{` but cannot be parsed as a JSON
+ *  object is a truncated/corrupt RECORD; one corrupt record makes the whole
+ *  stream untrustworthy, so recovery refuses outright REGARDLESS of position —
+ *  a corrupt terminal record can therefore never silently promote an earlier
+ *  intermediate agent_message to the result.
  *  Returns undefined (no recovery) unless ALL of:
  *  - no top-level `{type:"error"}` and no `{type:"turn.failed"}` anywhere;
  *  - at least one `{type:"turn.completed"}`, and the turn markers strictly
@@ -51,9 +54,10 @@ export function extractCodexTerminalJsonObject(stdoutRaw: string): Record<string
   for (const line of stdoutRaw.split("\n")) {
     const t = line.trim();
     if (!t) continue;
+    if (!t.startsWith("{")) continue; // wrapper/noise line — cannot be a codex event object
     let ev: unknown;
-    try { ev = JSON.parse(t); } catch { continue; }
-    if (!isObj(ev)) continue;
+    try { ev = JSON.parse(t); } catch { return undefined; } // corrupt record — refuse the stream
+    if (!isObj(ev)) return undefined; // `{`-prefixed yet not an object — not a trustworthy record
     events.push(ev);
   }
 

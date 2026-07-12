@@ -793,6 +793,11 @@ export function reconcileRun(
       // reconcileRun. Any error here safe-denies to "no recoverable result",
       // falling through to the worktree-dirty / ordinary-orphaned path below.
       let inferred: unknown;
+      // FG-540 provenance: which recovery produced the result — the event
+      // consumers (below) record structured recovery distinctly from FG-337
+      // narrative synthesis, mirroring recover --continue's adoptedFrom.
+      let recoveredSource: "structured_stream" | "stdout_inferred" | undefined;
+      let recoveredLogFormat: string | undefined;
       try {
         const runtimeMeta = getManifestRuntime(dir);
         const stdoutRaw = readStdoutLog(t.runId, t.id);
@@ -813,8 +818,11 @@ export function reconcileRun(
           ? recoverStructuredStreamResult({ logFormat: runtimeMeta?.logFormat, runtimeKind: runtimeMeta?.kind, stdoutRaw })
           : undefined;
         inferred = structured ?? inferredResultFrom(analysis, t.agentRole);
+        recoveredSource = structured !== undefined ? "structured_stream" : inferred !== undefined ? "stdout_inferred" : undefined;
+        recoveredLogFormat = runtimeMeta?.logFormat ?? runtimeMeta?.kind;
       } catch {
         inferred = undefined;
+        recoveredSource = undefined;
       }
 
       // Reuse baseEvidence gathered above the split — only resultState and
@@ -841,6 +849,12 @@ export function reconcileRun(
           // stdout result proves the agent finished, not that the pipeline's
           // host-side finalize ran.
           failPipelineUnfinalized(t.id, inferred, evidence);
+          // FG-540 provenance: the preserved result came from the structured
+          // stream — recorded even on the fail-safe landing so a later
+          // re-drive's audit trail knows where the artifact originated.
+          if (recoveredSource === "structured_stream") {
+            logEvent("task.result_recovered_from_stream", { runId, taskId: t.id, payload: { source: "reconcile_pipeline_unfinalized", logFormat: recoveredLogFormat ?? null } });
+          }
         } else {
           // FG-463: complete write + its events atomic (the result.json write above
           // is best-effort and deliberately stays OUTSIDE the transaction).
@@ -851,6 +865,12 @@ export function reconcileRun(
             crashPoint("reconcile:inside-complete-invoke-like-from-stdout-txn");
             logEvent("task.completed", { runId, taskId: t.id });
             logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout", evidence, containerEvidence } });
+            // FG-540 provenance: distinguish structured stream recovery from
+            // FG-337 narrative synthesis, mirroring the dispatch paths and
+            // recover --continue's adoptedFrom vocabulary.
+            if (recoveredSource === "structured_stream") {
+              logEvent("task.result_recovered_from_stream", { runId, taskId: t.id, payload: { source: "reconcile", logFormat: recoveredLogFormat ?? null } });
+            }
             return true;
           })();
           if (completed) taskChanges.push({ taskId: t.id, from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout" });
@@ -982,9 +1002,12 @@ export function reconcileRun(
 
     // Best-effort recovery, same precedence as the running-orphan path above:
     // 1. result.json may have been written after the DB row was marked complete.
-    // 2. else synthesize from stdout (FG-337), same as the running-orphan path.
+    // 2. else recover the structured stream (FG-540), else synthesize from
+    //    stdout (FG-337), same as the running-orphan path.
     // Any error here safe-denies to "nothing recovered" — never throws.
     let recovered: unknown;
+    let backfillSource: "structured_stream" | undefined;
+    let backfillLogFormat: string | undefined;
     try {
       const onDisk = readResult(t.runId, t.id);
       if (onDisk !== undefined) {
@@ -1011,9 +1034,14 @@ export function reconcileRun(
           exitInfo = {};
         }
         const noContraryExit = exitInfo.oomKilled !== true && (exitInfo.exitCode === undefined || exitInfo.exitCode === 0);
-        recovered = (noContraryExit && !analysis.modelError && resultFileState(t.runId, t.id) !== "malformed"
+        const structured = noContraryExit && !analysis.modelError && resultFileState(t.runId, t.id) !== "malformed"
           ? recoverStructuredStreamResult({ logFormat: runtimeMeta?.logFormat, runtimeKind: runtimeMeta?.kind, stdoutRaw })
-          : undefined) ?? inferredResultFrom(analysis, t.agentRole);
+          : undefined;
+        recovered = structured ?? inferredResultFrom(analysis, t.agentRole);
+        if (structured !== undefined) {
+          backfillSource = "structured_stream";
+          backfillLogFormat = runtimeMeta?.logFormat ?? runtimeMeta?.kind;
+        }
       }
     } catch {
       recovered = undefined;
@@ -1041,6 +1069,11 @@ export function reconcileRun(
         if (!backfillTaskResult(t.id, recovered)) return false; // result written concurrently since our read — no-op
         crashPoint("reconcile:inside-backfill-complete-empty-result-txn");
         logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "complete", to: "complete", reason: "complete_empty_result_backfilled", evidence } });
+        // FG-540 provenance: a structured-stream backfill is recorded
+        // distinctly from an on-disk read or FG-337 narrative synthesis.
+        if (backfillSource === "structured_stream") {
+          logEvent("task.result_recovered_from_stream", { runId, taskId: t.id, payload: { source: "reconcile_backfill", logFormat: backfillLogFormat ?? null } });
+        }
         return true;
       })();
       if (backfilled) taskChanges.push({ taskId: t.id, from: "complete", to: "complete", reason: "complete_empty_result_backfilled" });

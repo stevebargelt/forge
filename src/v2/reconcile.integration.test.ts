@@ -1744,6 +1744,11 @@ test("FG-540 rec: container gone, STRUCTURED role, no result.json, clean codex s
   assert.deepEqual(t.result, FG540_PASS, "the EXACT terminal JSON object, not an inferred narrative wrapper");
   const onDisk = JSON.parse(readFileSync(join(dir, "result.json"), "utf8"));
   assert.deepEqual(onDisk, FG540_PASS);
+
+  // FG-540 provenance: structured recovery is recorded distinctly.
+  const streamEv = eventsForTask(taskId).find((e) => e.eventType === "task.result_recovered_from_stream");
+  assert.ok(streamEv, "reconcile's structured adoption must emit task.result_recovered_from_stream");
+  assert.equal((streamEv!.payload as Record<string, unknown>)["source"], "reconcile");
 });
 
 test("FG-540 rec: PIPELINE run — a structured stream recovery still lands orphaned_needs_finalize (FG-479 guard), result preserved, never complete", () => {
@@ -1761,6 +1766,9 @@ test("FG-540 rec: PIPELINE run — a structured stream recovery still lands orph
   const t = getTask(taskId)!;
   assert.equal(t.status, "failed");
   assert.deepEqual(t.result, FG540_PASS, "the recovered result is preserved as the audit record on the fail-safe landing");
+  const streamEv = eventsForTask(taskId).find((e) => e.eventType === "task.result_recovered_from_stream");
+  assert.ok(streamEv, "provenance is recorded even on the fail-safe pipeline landing");
+  assert.equal((streamEv!.payload as Record<string, unknown>)["source"], "reconcile_pipeline_unfinalized");
 });
 
 test("FG-540 rec: contrary exit evidence (known non-zero exit) refuses structured recovery — fail-closed", () => {
@@ -1817,6 +1825,27 @@ test("FG-540 rec: Mode-A backfill — a complete task with an empty result is ba
   const t = getTask(taskId)!;
   assert.equal(t.status, "complete");
   assert.deepEqual(t.result, FG540_PASS, "backfilled with the exact structured object, not an inferred narrative");
+  const streamEv = eventsForTask(taskId).find((e) => e.eventType === "task.result_recovered_from_stream");
+  assert.ok(streamEv, "a structured-stream backfill must record its provenance");
+  assert.equal((streamEv!.payload as Record<string, unknown>)["source"], "reconcile_backfill");
+});
+
+test("FG-540 rec: FG-337 narrative synthesis never emits the stream-recovery event — the two provenances stay distinguishable", () => {
+  const taskId = "t-fg540-narrative-no-event";
+  insertContainerized(mkTask(taskId, { status: "running", agentRole: "research-specialist" }));
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writePiManifest(dir);
+  writeFileSync(join(dir, "container.stdout.log"), piCleanEndStdout("narrative research output"));
+
+  const r = reconcileRun(RUN.id, GONE);
+  assert.deepEqual(r.taskChanges.map((c) => c.to), ["complete"], "narrative recovery still completes the task");
+  const t = getTask(taskId)!;
+  assert.equal((t.result as Record<string, unknown>)["contract"], "inferred");
+  assert.ok(
+    !eventsForTask(taskId).some((e) => e.eventType === "task.result_recovered_from_stream"),
+    "narrative synthesis must NOT claim structured-stream provenance",
+  );
 });
 
 test("FG-540 rec: Mode-A backfill — a known non-zero container exit refuses structured recovery (same no-contrary-exit guard as the running branch)", () => {

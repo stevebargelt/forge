@@ -100,24 +100,38 @@ test("FG-540 AC5: fail-closed — every non-clean or non-object shape recovers n
   assert.equal(extractCodexTerminalJsonObject(""), undefined);
 });
 
-test("FG-540: non-JSONL noise lines are skipped, not fatal — a real log is not guaranteed pure JSONL", () => {
+test("FG-540 intactness: non-object noise lines are tolerated anywhere; a corrupt `{`-record refuses the stream regardless of position", () => {
   const started = `{"type":"turn.started"}`;
   const terminal = `{"type":"item.completed","item":{"id":"x","type":"agent_message","text":"{\\"verdict\\":\\"pass\\"}"}}`;
+  const intermediate = `{"type":"item.completed","item":{"id":"i","type":"agent_message","text":"{\\"verdict\\":\\"needs_fix\\",\\"findings\\":[{\\"summary\\":\\"draft\\"}]}"}}`;
   const done = `{"type":"turn.completed","usage":{}}`;
   const pass = { verdict: "pass" };
 
-  // Wrapper noise on stdout, a truncated trailing record, a corrupt line mid-stream,
-  // and well-formed JSON that isn't an event object: each is skipped, and the intact
-  // turn envelope around the terminal message still recovers it — the same tolerance
-  // every other codex stdout consumer (provider-failure.ts's eachJsonl) already has.
-  assert.deepEqual(extractCodexTerminalJsonObject([started, "warning: sandbox slow", terminal, done].join("\n")), pass);
-  assert.deepEqual(extractCodexTerminalJsonObject([started, terminal, done, `{"type":"turn.co`].join("\n")), pass);
-  assert.deepEqual(extractCodexTerminalJsonObject([`{"type":"thread.started"`, started, terminal, done].join("\n")), pass);
+  // TOLERATED (fail-open on noise only): lines that don't begin with `{`
+  // cannot be codex event records — wrapper warnings, arrays, bare strings —
+  // before the envelope AND inside it.
+  assert.deepEqual(extractCodexTerminalJsonObject(["warning: sandbox slow", started, terminal, done].join("\n")), pass);
+  assert.deepEqual(extractCodexTerminalJsonObject([started, "warning: retrying transport", terminal, done].join("\n")), pass);
   assert.deepEqual(extractCodexTerminalJsonObject([started, terminal, `["not","an","event"]`, done].join("\n")), pass);
   assert.deepEqual(extractCodexTerminalJsonObject([started, terminal, `"noise"`, done].join("\n")), pass);
 
-  // Tolerance does NOT weaken the envelope: a stream truncated before its
-  // turn.completed still recovers nothing.
+  // REFUSED (fail-closed on corruption): a `{`-prefixed line that cannot parse
+  // is a truncated/corrupt RECORD — before, inside, or after the envelope.
+  assert.equal(extractCodexTerminalJsonObject([`{"type":"thread.started"`, started, terminal, done].join("\n")), undefined);
+  assert.equal(extractCodexTerminalJsonObject([started, `{"type":"item.comp`, terminal, done].join("\n")), undefined);
+  assert.equal(extractCodexTerminalJsonObject([started, terminal, done, `{"type":"turn.co`].join("\n")), undefined);
+
+  // The load-bearing case: the TRUE terminal record is corrupt, an earlier
+  // intermediate JSON agent_message is intact — the stale intermediate must
+  // NEVER be promoted to the result.
+  assert.equal(
+    extractCodexTerminalJsonObject(
+      [started, intermediate, `{"type":"item.completed","item":{"id":"t","type":"agent_message","text":"{\\"verdict\\":\\"pa`, done].join("\n"),
+    ),
+    undefined,
+  );
+
+  // A stream truncated before its turn.completed still recovers nothing.
   assert.equal(extractCodexTerminalJsonObject([started, terminal, `{"type":"turn.comp`].join("\n")), undefined);
 });
 
