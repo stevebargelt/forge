@@ -59,10 +59,11 @@ Everything about the launch is persisted under `~/.forge/launches/<id>/`, so a l
 
 Status is **derived at read time**, never stored. `forge launch list` and `forge launch show <id>` (both `--json`-able) classify each record:
 
-- **running** — no exit file, tmux session alive.
+- **running** — no exit file, tmux session alive, pane still live. With `remain-on-exit` a live session is not by itself proof the wrapper is alive, so a pane tmux cannot classify also reads as running (fail-safe: `rm` keeps refusing it).
 - **exited 0** / **exited N** — the command finished on its own.
 - **terminated by `<SIGNAL>` (signal sender not recorded — origin unknown)** — the record carries signal evidence (`{"code":null,"signal":"SIGTERM"}`), so the kernel proved a signal landed. *Who* sent it is not recorded anywhere, so forge names the signal and stops there — it never claims the kill was external.
 - **exited N (signal-range code, no signal evidence — origin unknown)** — a bare exit code in the signal range (`{"code":143,"signal":null}`) with no signal evidence. A command may deliberately return 143, so this is never upgraded to a kill claim; the code is reported as the code it is.
+- **owner terminated (wrapper died before recording an exit — sender not recorded)** — a live session holding a *dead* pane with no exit record. The wrapper writes an exit record even for a signaled child, so only the wrapper itself dying can leave this shape: durable evidence that the owner was terminated before its last act. As with a signaled command, *who* killed it is not recorded, so forge names the shape and stops there. Terminal by evidence, so `rm` takes it without `--force`.
 - **unknown (no exit record, owner gone)** — no exit record *and* no live session (e.g. a host reboot took the tmux server with it).
 
 The through-line: forge reports only what the record proves. Signal evidence names a signal, a signal-range code names a code, and a missing record names nothing — attribution is left unknown rather than inferred.
