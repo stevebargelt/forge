@@ -116,7 +116,7 @@ Colocate the file next to the module it tests (`src/foo/bar.ts` → `src/foo/bar
 
 **Adding a probe means updating three lists, not one.** A `crashPoint()` callsite in production must also be registered in:
 
-- `KILL_POINTS` in `src/v2/fg530-crash-matrix.integration.test.ts` — the registry the matrix iterates. A probe with no entry here is a write boundary no cell ever kills at.
+- `KILL_POINTS` in `src/v2/fg530-harness.ts` — the registry the matrix imports and iterates. A probe with no entry here is a write boundary no cell ever kills at.
 - `PROBE_NAMES` in `src/v2/crash-points.test.ts` — the list inertness is proven against.
 
 `src/v2/fg530-probe-inertness.test.ts` (unit tier) asserts those two sets and the probe names production actually carries are **one set**, in both directions, by reading the sources as text. Add a probe without registering it and that lockstep test fails loudly; delete a probe without dropping its registry entry and it fails the other way. The same file pins the surrounding rules: probes may exist only in the three known write-boundary files, production may import `crashPoint` and never the setter, and the matrix's own coverage test requires every registered kill point to have fired in at least one cell.
