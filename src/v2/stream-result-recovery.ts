@@ -25,32 +25,41 @@ function isObj(v: unknown): v is Record<string, unknown> {
 
 /** Extract the terminal completed agent_message JSON object from a codex
  *  `exec --json` JSONL stream. Returns undefined (no recovery) unless ALL of:
+ *  - every non-empty line parses as a JSON object (one malformed/truncated
+ *    record means the stream is not intact, so nothing is recoverable from it);
  *  - no top-level `{type:"error"}` and no `{type:"turn.failed"}` anywhere;
  *  - at least one `{type:"turn.completed"}`;
- *  - at least one completed agent_message, and the LAST one precedes the last
- *    `turn.completed` (a message completing after the turn ended is ambiguous);
+ *  - at least one completed agent_message, and the LAST one falls INSIDE the
+ *    final completed turn — after the preceding `turn.completed` and before the
+ *    last one (a message from an earlier turn, or one completing after the turn
+ *    ended, is ambiguous);
  *  - that terminal message's text parses as a JSON OBJECT (arrays, primitives,
  *    prose, and malformed JSON all refuse).
- *  Deterministic selection: the last completed agent_message of the completed
- *  turn wins; earlier progress/narration messages can never outrank it. */
+ *  Deterministic selection: the last completed agent_message of the final
+ *  completed turn wins; earlier progress/narration messages can never outrank it. */
 export function extractCodexTerminalJsonObject(stdoutRaw: string): Record<string, unknown> | undefined {
   const events: Record<string, unknown>[] = [];
   for (const line of stdoutRaw.split("\n")) {
     const t = line.trim();
     if (!t) continue;
     let ev: unknown;
-    try { ev = JSON.parse(t); } catch { continue; }
-    if (isObj(ev)) events.push(ev);
+    try { ev = JSON.parse(t); } catch { return undefined; }
+    if (!isObj(ev)) return undefined;
+    events.push(ev);
   }
 
   let lastTurnCompleted = -1;
+  let prevTurnCompleted = -1;
   let lastAgentMessage = -1;
   let terminalText: string | undefined;
   for (let i = 0; i < events.length; i++) {
     const ev = events[i]!;
     const type = ev["type"];
     if (type === "error" || type === "turn.failed") return undefined;
-    if (type === "turn.completed") lastTurnCompleted = i;
+    if (type === "turn.completed") {
+      prevTurnCompleted = lastTurnCompleted;
+      lastTurnCompleted = i;
+    }
     if (type === "item.completed") {
       const item = ev["item"];
       if (isObj(item) && item["type"] === "agent_message" && typeof item["text"] === "string") {
@@ -63,6 +72,7 @@ export function extractCodexTerminalJsonObject(stdoutRaw: string): Record<string
   if (lastTurnCompleted === -1) return undefined;             // never completed
   if (lastAgentMessage === -1 || terminalText === undefined) return undefined; // no candidate
   if (lastAgentMessage > lastTurnCompleted) return undefined; // ambiguous post-turn message
+  if (lastAgentMessage < prevTurnCompleted) return undefined; // belongs to an earlier turn
 
   let parsed: unknown;
   try { parsed = JSON.parse(terminalText); } catch { return undefined; }

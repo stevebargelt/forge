@@ -96,6 +96,42 @@ test("FG-540 AC5: fail-closed — every non-clean or non-object shape recovers n
   assert.equal(extractCodexTerminalJsonObject(""), undefined);
 });
 
+test("FG-540 AC5: a malformed/truncated JSONL record fails the whole stream closed", () => {
+  const terminal = `{"type":"item.completed","item":{"id":"x","type":"agent_message","text":"{\\"verdict\\":\\"pass\\"}"}}`;
+  const done = `{"type":"turn.completed","usage":{}}`;
+
+  // A truncated final record: the earlier terminal object must NOT be recovered.
+  assert.equal(extractCodexTerminalJsonObject([terminal, done, `{"type":"turn.co`].join("\n")), undefined);
+  // Corruption anywhere in the stream, not just at the end.
+  assert.equal(extractCodexTerminalJsonObject([`{"type":"thread.started"`, terminal, done].join("\n")), undefined);
+  // A well-formed JSON line that isn't an event object is equally not-a-stream.
+  assert.equal(extractCodexTerminalJsonObject([terminal, `["not","an","event"]`, done].join("\n")), undefined);
+  assert.equal(extractCodexTerminalJsonObject([terminal, `"noise"`, done].join("\n")), undefined);
+});
+
+test("FG-540 AC7: recovery is scoped to the final completed turn", () => {
+  const terminal = (text: string) =>
+    `{"type":"item.completed","item":{"id":"x","type":"agent_message","text":${JSON.stringify(text)}}}`;
+  const done = `{"type":"turn.completed","usage":{}}`;
+
+  // Turn 1 completes with a JSON agent_message; turn 2 completes with none. The
+  // stale turn-1 object must not be promoted into turn 2's recovery.
+  assert.equal(
+    extractCodexTerminalJsonObject(
+      [terminal('{"verdict":"pass"}'), done, `{"type":"turn.started"}`, done].join("\n"),
+    ),
+    undefined,
+  );
+
+  // The final turn's own terminal message still recovers across a multi-turn stream.
+  assert.deepEqual(
+    extractCodexTerminalJsonObject(
+      [terminal('{"verdict":"needs_fix"}'), done, terminal('{"verdict":"pass"}'), done].join("\n"),
+    ),
+    { verdict: "pass" },
+  );
+});
+
 test("FG-540: dispatch is keyed by log format — non-codex formats recover nothing", () => {
   const stream = [
     `{"type":"item.completed","item":{"id":"x","type":"agent_message","text":"{\\"verdict\\":\\"pass\\"}"}}`,
