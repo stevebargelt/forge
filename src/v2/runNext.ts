@@ -2467,10 +2467,10 @@ async function runContainer(args: {
   // shape the container-gone sweep and its invoke-like/needs-finalize landings
   // recover from the REAL result once the container exits.
   let containerStartRecorded = false;
-  const recordContainerStarted = (): void => {
+  const recordContainerStarted = (containerId?: string): void => {
     if (containerStartRecorded) return;
     containerStartRecorded = true;
-    logEvent("container.started", { runId: args.runId, taskId: args.taskId, payload: { containerName } });
+    logEvent("container.started", { runId: args.runId, taskId: args.taskId, payload: { containerName, ...(containerId !== undefined ? { containerId } : {}) } });
     crashPoint("runContainer:after-container-started-before-exec");
   };
   // Legacy/fake executors give no start signal; they get the record up-front, which

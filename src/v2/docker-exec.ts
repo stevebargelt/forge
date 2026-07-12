@@ -68,7 +68,11 @@ export type DockerExecArgs = {
   // container.started from here (invoke.ts / runNext.ts), so the durable start
   // record means "a container exists" and the watcher-death window (the span the
   // FG-530 probe kills in) begins where the container actually does.
-  onContainerStarted?: () => void;
+  // The detached executor passes the container ID `docker run -d` printed —
+  // the daemon's identity for the container, recorded alongside the name so a
+  // replaced/renamed container can never be confused with the one this task
+  // actually started. Attached execution has no id to offer and passes none.
+  onContainerStarted?: (containerId?: string) => void;
 };
 
 export type DockerExecFn = {
@@ -333,20 +337,25 @@ export const detachedDockerExec: DockerExecFn = async (execArgs) => {
 
   // Start detached. `docker run -d` returns once the container is created and
   // started; a failure here (bad image, name clash) is a plain failure.
-  const started = await new Promise<boolean>((resolve) => {
-    execFile("docker", detachedArgs, (err, _stdout, stderr) => {
+  const started = await new Promise<{ ok: boolean; containerId?: string }>((resolve) => {
+    execFile("docker", detachedArgs, (err, stdout, stderr) => {
       if (err) {
         try { appendFileSync(stderrPath, String(stderr ?? err.message)); } catch { /* best-effort */ }
-        resolve(false);
+        resolve({ ok: false });
       } else {
-        resolve(true);
+        // `docker run -d` prints the new container's ID — the daemon's
+        // authoritative identity, recorded so the task's start evidence names
+        // more than a reusable container NAME. Success is the exit status;
+        // the id is evidence, and its absence never fails the launch.
+        const containerId = String(stdout).trim();
+        resolve({ ok: true, ...(containerId !== "" ? { containerId } : {}) });
       }
     });
   });
-  if (!started) return 1;
+  if (!started.ok) return 1;
   // The container exists under the daemon from here on: every span below is the
   // watcher half, which the host may lose without touching the run.
-  onContainerStarted?.();
+  onContainerStarted?.(started.containerId);
 
   return new Promise<number>((resolve) => {
     const outStream = createWriteStream(stdoutPath);

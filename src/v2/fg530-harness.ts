@@ -363,7 +363,7 @@ export function makeExec(opts: ExecOpts): DockerExecFn {
     // put the result on disk pre-kill and reduce this cell to reconciling work that was
     // already safe — no live container, nothing detached execution could regress.
     try {
-      onContainerStarted?.();
+      onContainerStarted?.("fake-container-id-" + (args[args.indexOf("--name") + 1] ?? "unknown"));
     } catch (hostDied) {
       LIVE_CONTAINERS.push(containerRunsToCompletion);
       throw hostDied;

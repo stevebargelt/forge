@@ -563,10 +563,10 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
   // container does. Legacy/fake executors give no signal and keep the up-front
   // record.
   let containerStartRecorded = false;
-  const recordContainerStarted = (): void => {
+  const recordContainerStarted = (containerId?: string): void => {
     if (containerStartRecorded) return;
     containerStartRecorded = true;
-    logEvent("container.started", { runId, taskId, payload: { containerName } });
+    logEvent("container.started", { runId, taskId, payload: { containerName, ...(containerId !== undefined ? { containerId } : {}) } });
   };
   if (!exec.signalsContainerStart) recordContainerStarted();
   let exitCode: number;
