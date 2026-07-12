@@ -47,6 +47,31 @@ A liveness signal for the Claude Code session that's currently acting as a proje
 
 Projects installed before this convention shipped had forge hooks in `<project>/.claude/settings.json` (the committed file). `forge upgrade` migrates those automatically — strips the forge entries from `settings.json` (preserving any other user keys + hooks) and writes a fresh `settings.local.json`.
 
+## Durable launch
+
+A long-running host command whose owner is a tmux server rather than the shell that submitted it (FG-535). `forge launch run [--name <n>] -- <command...>` starts the command in a detached, uniquely named tmux session (`forge-launch-<name>-<suffix>`, `remain-on-exit` on) and returns immediately; the submitting shell — typically a Bash call inside an interactive Claude Code session, which SIGTERMs its own registered background tasks on internal sweeps — can exit without touching the work. Requires `tmux` on the host.
+
+Everything about the launch is persisted under `~/.forge/launches/<id>/`, so a later session can read what happened without having watched it:
+
+- `meta.json` — command argv, tmux session name, launcher identity (`launcherPid`, the forge process that submitted the launch; `ownerPid`, the tmux pane process that actually owns the command and the pid to inspect or attribute a signal to later — `null` if tmux could not report it), start time, cwd, log path.
+- `out.log` — the command's combined stdout+stderr.
+- `exit` — the command's exit record, `{"code":<n|null>,"signal":<"SIGTERM"|null>}`, written by the wrapper as its *last* act. The wrapper is a node runner, so the record carries the OS's own verdict: `signal` is set only when the kernel actually killed the process (`WIFSIGNALED`), separately from the numeric `code`. An exit file existing is therefore proof the command itself finished, not that the wrapper was torn down.
+
+Status is **derived at read time**, never stored. `forge launch list` and `forge launch show <id>` (both `--json`-able) classify each record:
+
+- **running** — no exit file, tmux session alive, pane still live. With `remain-on-exit` a live session is not by itself proof the wrapper is alive, so a pane tmux cannot classify also reads as running (fail-safe: `rm` keeps refusing it).
+- **exited 0** / **exited N** — the command finished on its own.
+- **terminated by `<SIGNAL>` (signal sender not recorded — origin unknown)** — the record carries signal evidence (`{"code":null,"signal":"SIGTERM"}`), so the kernel proved a signal landed. *Who* sent it is not recorded anywhere, so forge names the signal and stops there — it never claims the kill was external.
+- **exited N (signal-range code, no signal evidence — origin unknown)** — a bare exit code in the signal range (`{"code":143,"signal":null}`) with no signal evidence. A command may deliberately return 143, so this is never upgraded to a kill claim; the code is reported as the code it is.
+- **owner gone without an exit record (wrapper killed, or failed before recording — cause and sender not recorded)** — a live session holding a *dead* pane with no exit record. The wrapper writes an exit record even for a signaled child, so this shape is durable evidence that the wrapper never completed its last act — but not that it was killed: a wrapper that died on an I/O failure *writing* the record leaves exactly the same evidence. Cause and sender are both unrecorded, so forge names the shape and asserts neither. Terminal by evidence, so `rm` takes it without `--force`.
+- **unknown (no exit record, owner gone)** — no exit record *and* no live session (e.g. a host reboot took the tmux server with it).
+
+The through-line: forge reports only what the record proves. Signal evidence names a signal, a signal-range code names a code, and a missing record names nothing — attribution is left unknown rather than inferred.
+
+`forge launch show` also prints a log tail and any forge `run-`/`task-` ids it can extract from the log, which is how a launched `forge next` hands its run id back to whoever checks on it later. `forge launch rm <id>` removes a finished launch's record and its tmux remains; it refuses a running launch unless `--force` is passed, so removal is never the thing that kills work.
+
+Operational guidance: `docs/quick-start.md` §13.
+
 ## Design corpus
 
 The per-project shared design directory (#67). Default location: `<project>/designs/` — version-controlled with the project, treated as a project artifact rather than a peer dir. Every design-touching workflow run (`ui-design`, `ui-design-revise`, `feature-ui-design-needed`) targets the SAME corpus, which grows monotonically across runs.

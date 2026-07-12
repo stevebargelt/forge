@@ -2,7 +2,7 @@
   <img src="./assets/logo-wordmark.svg" alt="forge" width="320">
 </p>
 
-A TypeScript CLI for orchestrating multi-agent AI workflows on a personal machine. Forge runs on the host; each agent runs as an ephemeral Docker container. SQLite is the blackboard. Core CLI: `init`, `new`, `next`, `gate`, `show`, `status`, `invoke`, `backlog`, plus `auth` for personal-Mac OAuth.
+A TypeScript CLI for orchestrating multi-agent AI workflows on a personal machine. Forge runs on the host; each agent runs as an ephemeral Docker container. SQLite is the blackboard. Core CLI: `init`, `new`, `next`, `gate`, `show`, `status`, `invoke`, `backlog`, `launch` (durable tmux owner for long-running commands), plus `auth` for personal-Mac OAuth.
 
 Forge is host-global: one install, one `~/.forge/forge.db`, used against any project on the machine. Each project gets a per-project setup (`forge init`) that wires the orchestrator block into its `CLAUDE.md`, creates a `.forge/` directory for project-level workflow overrides, and scaffolds a `backlog/` directory so `forge backlog` commands work immediately.
 
@@ -72,6 +72,7 @@ Shows agent outputs across every project on the host, live-polling every 2s. Rea
 | `learnings/` | ADRs and patterns for forge itself |
 | `~/.forge/forge.db` | SQLite blackboard (host-global; one DB across all projects) |
 | `~/.forge/runs/<run-id>/` | Per-task packages, results, stderr |
+| `~/.forge/launches/<id>/` | Durable launch records: command, tmux session, log, exit code (`forge launch`) |
 | `<project>/.forge/workflows/<name>.yml` | Optional per-project workflow override |
 | `<project>/CLAUDE.md` | Per-project orchestrator block (installed by `forge init`) |
 
