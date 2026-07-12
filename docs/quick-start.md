@@ -139,6 +139,8 @@ forge next run-add-login-7c2a91
 
 Forge picks up the pending `architect` task, launches an agent container, captures the result. The architecture-advisor surfaces risks, constraints, and boundaries before the tech-lead plans steps.
 
+This blocks for as long as the agent runs. That's what you want in your own terminal; it is not what you want when a Claude Code session is the one shelling out — see step 13 for `forge launch`, the durable owner for long commands.
+
 While running:
 ```
 Run run-add-login-7c2a91: 1 task(s) running.
@@ -220,3 +222,31 @@ forge dashboard start --port 8025  # custom port
 ```
 
 Reads `~/.forge/forge.db` directly (read-only — won't contend with `forge next`). Renders agent results as markdown cards by agent type (architect risks, tech-lead plans, engineer diffs, red verdicts). Always cross-project: the dashboard intentionally shows runs across every project on the host (the cross-project survey surface), independent of `forge status`'s workspace filter. Schema contract: `docs/SCHEMA-CONTRACT.md`.
+
+## 13. Long-running commands under an interactive session (`forge launch`)
+
+Steps 6 and 8 dispatch containers that can run for many minutes. When you type `forge next` yourself in a terminal, that's fine — you own the shell. When a **Claude Code session** runs it for you, it is not: the harness SIGTERMs its own registered background tasks on internal sweeps, and an attached `docker run` forwards the signal straight into the agent container, which dies with exit 143 and takes the work with it. `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` (recommended; a session restart is required for it to take effect) removes background dispatch entirely, which makes the durable path the only path.
+
+`forge launch` is that path. It hands ownership of the process to a tmux server, so the submitting shell — the harness's Bash call — can return, or die, without touching the command. Use it for anything long: `forge next`, `forge invoke`, a review-loop, a full test suite. Requires `tmux` on the host (`brew install tmux` / `apt install tmux`).
+
+```bash
+forge launch run --name next -- forge next run-add-login-7c2a91   # returns immediately
+forge launch list                                                  # every launch + derived status
+forge launch show launch-next-a1b2c3                               # record, forge run/task ids, log tail
+forge launch rm launch-next-a1b2c3                                 # after it's finished
+```
+
+`run` prints the launch id, the tmux session (`tmux attach -t <session>` to watch it live), and the log path. Poll with `show` — or, better, with forge's own durable state (`forge status <run-id>`, the task rows, the dashboard). Never poll by matching process names: the tmux-owned process is not a child of your shell, and forge's DB is the record that survives a session, a reboot, and a kill.
+
+Status is derived when you read it, not stored, so it stays honest about what forge can actually prove:
+
+```
+launch-next-a1b2c3  running                                       started 2026-07-11T22:04:11Z  — forge next run-add-login-7c2a91
+launch-tests-9f0e21  exited 0                                     started 2026-07-11T21:38:02Z  — npm test
+launch-loop-4c7d10   externally terminated (exit 143 = SIGTERM)   started 2026-07-11T20:11:57Z  — forge review-loop
+launch-next-88ab04   unknown (no exit record, owner gone — e.g. host reboot)  started 2026-07-10T18:02:44Z  — forge next run-atlas-audit-51ff08
+```
+
+`externally terminated` means something killed the command — exit 143 is the SIGTERM signature above. `unknown` means the exit record and the tmux session are both gone (a host reboot), and forge says so rather than guessing that the command succeeded or failed. `forge launch rm` refuses a launch that is still running unless you pass `--force`, so cleaning up can't be the thing that kills the run.
+
+Concept reference: `docs/concepts.md` → **Durable launch**.

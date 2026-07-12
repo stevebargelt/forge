@@ -47,6 +47,27 @@ A liveness signal for the Claude Code session that's currently acting as a proje
 
 Projects installed before this convention shipped had forge hooks in `<project>/.claude/settings.json` (the committed file). `forge upgrade` migrates those automatically — strips the forge entries from `settings.json` (preserving any other user keys + hooks) and writes a fresh `settings.local.json`.
 
+## Durable launch
+
+A long-running host command whose owner is a tmux server rather than the shell that submitted it (FG-535). `forge launch run [--name <n>] -- <command...>` starts the command in a detached, uniquely named tmux session (`forge-launch-<name>-<suffix>`, `remain-on-exit` on) and returns immediately; the submitting shell — typically a Bash call inside an interactive Claude Code session, which SIGTERMs its own registered background tasks on internal sweeps — can exit without touching the work. Requires `tmux` on the host.
+
+Everything about the launch is persisted under `~/.forge/launches/<id>/`, so a later session can read what happened without having watched it:
+
+- `meta.json` — command argv, tmux session name, start time, cwd, log path.
+- `out.log` — the command's combined stdout+stderr.
+- `exit` — the command's numeric exit code, written by the wrapper as its *last* act. An exit file existing is therefore proof the command itself finished, not that the wrapper was torn down.
+
+Status is **derived at read time**, never stored. `forge launch list` and `forge launch show <id>` (both `--json`-able) classify each record:
+
+- **running** — no exit file, tmux session alive.
+- **exited 0** / **exited N** — the command finished on its own.
+- **externally terminated** — an exit code above 128, i.e. killed by signal `code - 128`, printed with the signal named. `exit 143 = SIGTERM` is the harness-kill signature FG-535 exists to make legible.
+- **unknown** — no exit record *and* no live session (e.g. a host reboot took the tmux server with it). Attribution is preserved as unknown rather than guessed.
+
+`forge launch show` also prints a log tail and any forge `run-`/`task-` ids it can extract from the log, which is how a launched `forge next` hands its run id back to whoever checks on it later. `forge launch rm <id>` removes a finished launch's record and its tmux remains; it refuses a running launch unless `--force` is passed, so removal is never the thing that kills work.
+
+Operational guidance: `docs/quick-start.md` §13.
+
 ## Design corpus
 
 The per-project shared design directory (#67). Default location: `<project>/designs/` — version-controlled with the project, treated as a project artifact rather than a peer dir. Every design-touching workflow run (`ui-design`, `ui-design-revise`, `feature-ui-design-needed`) targets the SAME corpus, which grows monotonically across runs.
