@@ -2777,6 +2777,30 @@ test("FG-539: real-git inference over the FG-533/FG-535/FG-536 subject conventio
   assert.equal(r.diffRange, `${fg536a}^..${fg536b}`);
 });
 
+test("FG-539: a ticket referenced only in a commit BODY stays out of that ticket's range", async () => {
+  // The real shape this guards: FG-539's own implementation commit has an FG-539
+  // subject and a body that *explains itself by discussing FG-536*. `git log
+  // --grep` searches subject AND body, so it would pull this commit into an
+  // FG-536 review diff. Subject-only matching is what keeps the diff honest —
+  // and only a real body (not a subject-only fixture) can prove it.
+  const fg536 = commit("fix(spawn): detached agent execution (FG-536)", "k.ts");
+  writeFileSync(join(projectDir, "l.ts"), "// range inference\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(
+    ["commit", "-m", "fix(review-loop): commit-range inference (FG-539)",
+     "-m", "The reviewer for FG-536 saw an empty diff because inference missed the subject convention."],
+    projectDir,
+  );
+  const fg539 = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  const git = (args: string[]) => gitExec(args, projectDir);
+  const r = resolveCommitRange("FG-536", { git });
+
+  assert.ok(!r.shas.includes(fg539), "an FG-536 mention in FG-539's BODY must not add it to FG-536's range");
+  assert.equal(r.shas[0], fg536, "the FG-536 subject commit is still the newest match");
+  assert.deepEqual(resolveCommitRange("FG-539", { git }).shas, [fg539], "FG-539 resolves by its own subject");
+});
+
 test("FG-539: hash-prefixed and legacy forms still resolve against real git", async () => {
   const hashed = commit("fix: hash-prefixed reference #FG-536", "g.ts");
   const legacy = commit("fix: legacy numeric reference (#301)", "h.ts");
