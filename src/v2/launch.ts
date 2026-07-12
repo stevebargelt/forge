@@ -67,12 +67,13 @@ export type LaunchStatus =
   // A signal-range exit code with NO signal evidence — could equally be a
   // command that deliberately returned 143. Terminal, but origin undeterminable.
   | { state: "terminated_unattributed"; code: number }
-  // The OWNER (the tmux pane's wrapper process) died without writing its
-  // last-act exit record: live session, dead pane, no exit file. Durable
-  // evidence that the launcher/parent itself was terminated — the AC's
-  // "externally terminated launcher/parent" classification. The sender is
-  // still not recorded, so no claim is made about who did it.
-  | { state: "owner_terminated"; sender: "unrecorded" }
+  // The OWNER (the tmux pane's wrapper process) is gone without its last-act
+  // exit record: live session, dead pane, no exit file. Durable evidence that
+  // the wrapper never completed — but deliberately an INDETERMINATE claim:
+  // the wrapper may have been killed (the FG-535 launcher/parent-termination
+  // case) OR exited on an unhandled I/O failure writing its record. Cause and
+  // sender are both unrecorded, so neither is ever asserted.
+  | { state: "owner_gone"; cause: "unrecorded"; sender: "unrecorded" }
   // No exit record and no live session — the owner itself is gone without
   // evidence (host reboot, tmux server killed). Never guessed further.
   | { state: "unknown" };
@@ -297,7 +298,7 @@ export function readLaunch(id: string, tmux: TmuxRunner = defaultTmux): LaunchVi
     // itself dying can produce a dead pane with no record). A pane tmux can't
     // classify stays running (fail-safe: rm keeps refusing without --force).
     const dead = paneDead(meta.tmuxSession, tmux);
-    status = dead === true ? { state: "owner_terminated", sender: "unrecorded" } : { state: "running" };
+    status = dead === true ? { state: "owner_gone", cause: "unrecorded", sender: "unrecorded" } : { state: "running" };
   }
 
   let log = "";

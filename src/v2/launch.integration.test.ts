@@ -123,12 +123,12 @@ test("FG-535 status: a deliberate exit 143 is never reported as a kill", () => {
   assert.deepEqual(readLaunch(meta.id, tmux)!.status, { state: "terminated_unattributed", code: 143 });
 });
 
-test("FG-535 status: a live session holding a DEAD pane with no exit record is owner_terminated — the wrapper died before its last-act write", () => {
+test("FG-535 status: a live session holding a DEAD pane with no exit record is owner_gone — an indeterminate claim (killed OR failed its last-act write)", () => {
   const stub = tmuxStub();
   const meta = startLaunch(["sleep", "600"], { name: "wrapperkilled", tmux: stub.tmux });
   stub.deadPanes.add(meta.tmuxSession); // remain-on-exit retained the pane; no exit file was ever written
 
-  assert.deepEqual(readLaunch(meta.id, stub.tmux)!.status, { state: "owner_terminated", sender: "unrecorded" });
+  assert.deepEqual(readLaunch(meta.id, stub.tmux)!.status, { state: "owner_gone", cause: "unrecorded", sender: "unrecorded" });
 
   // Not "running", so cleanup no longer demands --force — but the record must
   // survive intact up to the explicit rm.

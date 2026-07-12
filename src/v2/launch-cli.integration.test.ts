@@ -178,7 +178,7 @@ test("FG-535 CLI: a REAL SIGTERM records WIFSIGNALED evidence and still refuses 
   rmSync(pidFile, { force: true });
 });
 
-test("FG-535 CLI: killing the OWNER itself (the wrapper, SIGKILL — no exit record possible) reads owner_terminated, not running-forever", async () => {
+test("FG-535 CLI: killing the OWNER itself (the wrapper, SIGKILL — no exit record possible) reads owner_gone, not running-forever", async () => {
   const meta = launchRun("ownerkill", ["sleep", "300"]);
   assert.ok(typeof meta.ownerPid === "number" && meta.ownerPid > 0, `owner pid was not recorded: ${meta.ownerPid}`);
 
@@ -186,19 +186,34 @@ test("FG-535 CLI: killing the OWNER itself (the wrapper, SIGKILL — no exit rec
   // never written — the exact shape a harness sweep of the pane's process
   // leaves behind. remain-on-exit keeps the session alive holding a dead pane.
   process.kill(meta.ownerPid!, "SIGKILL");
-  await waitFor("the dead pane to be classified", () => show(meta.id).status.state === "owner_terminated");
+  await waitFor("the dead pane to be classified", () => show(meta.id).status.state === "owner_gone");
 
   assert.ok(!existsSync(join(LAUNCHES_DIR, meta.id, "exit")), "precondition: no exit record was ever written");
   assert.ok(tmuxSessionAlive(meta.tmuxSession), "precondition: the session itself is still alive (remain-on-exit)");
-  assert.deepEqual(show(meta.id).status, { state: "owner_terminated", sender: "unrecorded" });
+  assert.deepEqual(show(meta.id).status, { state: "owner_gone", cause: "unrecorded", sender: "unrecorded" });
 
   const human = forge(["launch", "show", meta.id]);
-  assert.match(human.stdout, /owner terminated \(wrapper died before recording an exit — sender not recorded\)/);
+  assert.match(human.stdout, /owner gone without an exit record \(wrapper killed, or failed before recording — cause and sender not recorded\)/);
 
   // Terminal-by-evidence, so cleanup no longer demands --force.
   const rm = forge(["launch", "rm", meta.id]);
   assert.equal(rm.status, 0, `rm of a terminated owner must not need --force: ${rm.stderr}`);
   assert.ok(!tmuxSessionAlive(meta.tmuxSession));
+});
+
+test("FG-535 CLI: a wrapper that FAILS its last-act write (I/O failure, no kill at all) also reads owner_gone — which is why the claim stays indeterminate", async () => {
+  const meta = launchRun("iofail", ["sleep", "2"]);
+  // Force the exit-record write to fail: the log fd is already open (appends
+  // keep working), but a read-only launch dir makes the exit writeFileSync
+  // throw — the wrapper then exits NORMALLY, never killed by anyone.
+  execFileSync("chmod", ["555", join(LAUNCHES_DIR, meta.id)]);
+
+  await waitFor("the dead pane to be classified", () => show(meta.id).status.state === "owner_gone", 30_000);
+  assert.ok(!existsSync(join(LAUNCHES_DIR, meta.id, "exit")), "no exit record could be written");
+  assert.deepEqual(show(meta.id).status, { state: "owner_gone", cause: "unrecorded", sender: "unrecorded" },
+    "identical evidence shape to a killed wrapper — so the status must not claim a termination");
+
+  execFileSync("chmod", ["755", join(LAUNCHES_DIR, meta.id)]); // let cleanup remove it
 });
 
 test("FG-535 CLI: a command that DELIBERATELY exits 143 is not reported as a kill", async () => {

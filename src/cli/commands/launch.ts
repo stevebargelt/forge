@@ -20,7 +20,7 @@ function statusLine(s: LaunchStatus): string {
     case "exited_error": return `exited ${s.code}`;
     case "signaled": return `terminated by ${s.signal} (signal sender not recorded — origin unknown)`;
     case "terminated_unattributed": return `exited ${s.code} (signal-range code, no signal evidence — origin unknown)`;
-    case "owner_terminated": return "owner terminated (wrapper died before recording an exit — sender not recorded)";
+    case "owner_gone": return "owner gone without an exit record (wrapper killed, or failed before recording — cause and sender not recorded)";
     case "unknown": return "unknown (no exit record, owner gone — e.g. host reboot)";
   }
 }
@@ -75,7 +75,7 @@ export function registerLaunch(program: Command): void {
 
   launch
     .command("list")
-    .description("List launches with derived status (running / exited / externally terminated / unknown)")
+    .description("List launches with derived status (running / exited N / terminated-by-signal with unrecorded sender / owner gone / unknown)")
     .option("--json", "machine-readable output")
     .action((opts: { json?: boolean }) => {
       const all = listLaunches();
