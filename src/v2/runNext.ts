@@ -642,7 +642,7 @@ async function dispatchSingleStep(args: {
       // tree still builds+tests. Gate here, before reds dispatch / phase advance,
       // and return BEFORE any cleanup so the worktree/branch stay available for
       // inspection (mirrors the merge_conflict no-discard contract above).
-      const gate = runIntegrationGate(args.projectDir);
+      const gate = await runIntegrationGate(args.projectDir, { runId: args.runId });
       if (!gate.ok) {
         failTask(taskId, {
           runId: args.runId,
@@ -1464,7 +1464,7 @@ async function dispatchFanoutStep(args: {
           // FG-357: post-merge integration gate. Return BEFORE any cleanup on
           // failure so the integration/child worktrees and branches stay
           // available for inspection (no-discard, same as merge_conflict above).
-          const gate = runIntegrationGate(args.projectDir);
+          const gate = await runIntegrationGate(args.projectDir, { runId: args.runId });
           if (!gate.ok) {
             failTask(existingParent.id, {
               runId: args.runId,
@@ -1801,7 +1801,7 @@ async function dispatchFanoutStep(args: {
         // FG-357: post-merge integration gate. Return BEFORE any cleanup on
         // failure so the integration/child worktrees and branches stay
         // available for inspection (no-discard, same as merge_conflict above).
-        const gate = runIntegrationGate(args.projectDir);
+        const gate = await runIntegrationGate(args.projectDir, { runId: args.runId });
         if (!gate.ok) {
           failTask(parentId, {
             runId: args.runId,
@@ -1852,7 +1852,7 @@ async function dispatchFanoutStep(args: {
       // FG-357: post-merge integration gate. Return BEFORE any cleanup on
       // failure so the integration/child worktrees and branches stay available
       // for inspection (no-discard, same as merge_conflict above).
-      const gate = runIntegrationGate(args.projectDir);
+      const gate = await runIntegrationGate(args.projectDir, { runId: args.runId });
       if (!gate.ok) {
         failTask(parentId, {
           runId: args.runId,

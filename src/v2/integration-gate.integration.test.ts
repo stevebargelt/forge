@@ -40,48 +40,48 @@ function writePackageJson(scripts: Record<string, string> | undefined): void {
 
 // ─── Skip (no-op pass-through) branches ───────────────────────────────────────
 
-test("runIntegrationGate: no package.json at all → skipped, ok:true", () => {
-  const result = runIntegrationGate(dir);
+test("runIntegrationGate: no package.json at all → skipped, ok:true", async () => {
+  const result = await runIntegrationGate(dir);
   assert.equal(result.ok, true);
   if (result.ok) assert.match(result.output, /skipped/i);
 });
 
-test("runIntegrationGate: package.json with no scripts field → skipped, ok:true", () => {
+test("runIntegrationGate: package.json with no scripts field → skipped, ok:true", async () => {
   writePackageJson(undefined);
-  const result = runIntegrationGate(dir);
+  const result = await runIntegrationGate(dir);
   assert.equal(result.ok, true);
   if (result.ok) assert.match(result.output, /skipped/i);
 });
 
-test("runIntegrationGate: package.json with scripts but no test:unit → skipped, ok:true", () => {
+test("runIntegrationGate: package.json with scripts but no test:unit → skipped, ok:true", async () => {
   writePackageJson({ build: "true" });
-  const result = runIntegrationGate(dir);
+  const result = await runIntegrationGate(dir);
   assert.equal(result.ok, true);
   if (result.ok) assert.match(result.output, /skipped/i);
 });
 
-test("runIntegrationGate: malformed package.json (invalid JSON) → skipped, ok:true, no throw", () => {
+test("runIntegrationGate: malformed package.json (invalid JSON) → skipped, ok:true, no throw", async () => {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "package.json"), "{ not valid json");
-  const result = runIntegrationGate(dir);
+  const result = await runIntegrationGate(dir);
   assert.equal(result.ok, true, "a malformed package.json must not crash the gate or block the merge");
   if (result.ok) assert.match(result.output, /skipped/i);
 });
 
 // ─── Real npm run test:unit — pass/fail branches ──────────────────────────────
 
-test("runIntegrationGate: test:unit script exits 0 → ok:true with captured output", () => {
+test("runIntegrationGate: test:unit script exits 0 → ok:true with captured output", async () => {
   writePackageJson({ "test:unit": "echo integration-gate-pass-marker" });
-  const result = runIntegrationGate(dir);
+  const result = await runIntegrationGate(dir);
   assert.equal(result.ok, true);
   if (result.ok) assert.match(result.output, /integration-gate-pass-marker/);
 });
 
-test("runIntegrationGate: test:unit script exits non-zero → ok:false with captured stdout/stderr and error", () => {
+test("runIntegrationGate: test:unit script exits non-zero → ok:false with captured stdout/stderr and error", async () => {
   writePackageJson({
     "test:unit": "echo integration-gate-fail-stdout && echo integration-gate-fail-stderr 1>&2 && exit 1",
   });
-  const result = runIntegrationGate(dir);
+  const result = await runIntegrationGate(dir);
   assert.equal(result.ok, false);
   if (!result.ok) {
     assert.match(result.output, /integration-gate-fail-stdout/, "stdout must be captured");
@@ -93,9 +93,9 @@ test("runIntegrationGate: test:unit script exits non-zero → ok:false with capt
   }
 });
 
-test("runIntegrationGate: test:unit script killed by signal (not timeout, not a normal exit) → ok:false with signal populated", () => {
+test("runIntegrationGate: test:unit script killed by signal (not timeout, not a normal exit) → ok:false with signal populated", async () => {
   writePackageJson({ "test:unit": "kill -9 $$" });
-  const result = runIntegrationGate(dir);
+  const result = await runIntegrationGate(dir);
   assert.equal(result.ok, false);
   if (!result.ok) {
     assert.ok(result.signal, "a signal-killed script must report the signal");
@@ -105,12 +105,12 @@ test("runIntegrationGate: test:unit script killed by signal (not timeout, not a 
 
 // ─── FORGE_INTEGRATION_GATE_TIMEOUT_MS override ───────────────────────────────
 
-test("runIntegrationGate: FORGE_INTEGRATION_GATE_TIMEOUT_MS cuts off a hanging test:unit script → ok:false", () => {
+test("runIntegrationGate: FORGE_INTEGRATION_GATE_TIMEOUT_MS cuts off a hanging test:unit script → ok:false", async () => {
   writePackageJson({ "test:unit": "sleep 5" });
   process.env.FORGE_INTEGRATION_GATE_TIMEOUT_MS = "300";
 
   const start = Date.now();
-  const result = runIntegrationGate(dir);
+  const result = await runIntegrationGate(dir);
   const elapsed = Date.now() - start;
 
   assert.equal(result.ok, false, "a script that outlives the configured timeout must fail the gate");
@@ -118,10 +118,10 @@ test("runIntegrationGate: FORGE_INTEGRATION_GATE_TIMEOUT_MS cuts off a hanging t
   if (!result.ok) assert.equal(result.timedOut, true, "a timeout-cutoff run must report timedOut: true");
 });
 
-test("runIntegrationGate: non-numeric FORGE_INTEGRATION_GATE_TIMEOUT_MS falls back to default without crashing", () => {
+test("runIntegrationGate: non-numeric FORGE_INTEGRATION_GATE_TIMEOUT_MS falls back to default without crashing", async () => {
   writePackageJson({ "test:unit": "true" });
   process.env.FORGE_INTEGRATION_GATE_TIMEOUT_MS = "not-a-number";
 
-  const result = runIntegrationGate(dir);
+  const result = await runIntegrationGate(dir);
   assert.equal(result.ok, true, "an invalid timeout override must not break the gate — falls back to the default");
 });
