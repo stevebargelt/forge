@@ -1,9 +1,11 @@
 ---
 id: FG-425
 type: story
-status: active
+status: done
 title: "Serialized integration publisher: validate a candidate in an isolated worktree, publish the exact tested commit via a short CAS window"
 created: 2026-07-01
+closed: 2026-07-13
+closed_commit: 4762b1f
 ---
 
 ## Problem
