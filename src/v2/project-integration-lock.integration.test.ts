@@ -9,7 +9,7 @@ import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import {
   projectIntegrationLockKey, withProjectIntegrationLock,
-  recordGateProcessGroup, clearGateProcessGroup, readGateProcessGroup,
+  recordGateProcessGroup, recordGateSpawnPending, clearGateProcessGroup, readGateProcessGroup,
 } from "./project-integration-lock.js";
 
 function sleep(ms: number): Promise<void> {
@@ -277,6 +277,43 @@ await withProjectIntegrationLock(${JSON.stringify(dir)}, "run-orphaned-holder", 
     rmSync(dir, { recursive: true, force: true });
     rmSync(pidDir, { recursive: true, force: true });
     rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test("FG-425 ownership: a crash mid-SPAWN (sidecar claimed, pgid never recorded) fails CLOSED — an unknown group is possibly-live, never absent", async () => {
+  const dir = tmp("forge-fg425-own-pending-");
+  try {
+    const { lockFilePath } = projectIntegrationLockKey(dir);
+    // Exactly the state a SIGKILL between spawn() and the pgid record leaves:
+    // the gate claimed ownership, but its process group was never recorded.
+    recordGateSpawnPending(dir, "run-killed-at-spawn");
+    assert.equal(readGateProcessGroup(dir)?.pgid, null, "sanity: the pre-spawn claim is durable and carries no pgid");
+
+    let entered = false;
+    await assert.rejects(
+      withProjectIntegrationLock(dir, "run-contender", async () => { entered = true; }, {
+        pollMs: 10,
+        log: () => { /* silence */ },
+      }),
+      (e: Error) => /died while starting its integration gate/.test(e.message)
+        && /run-killed-at-spawn/.test(e.message)
+        && e.message.includes(`${lockFilePath}.gate`),
+      "the error must name the run that died and the sidecar to clear",
+    );
+    assert.equal(entered, false, "the window must never be entered over a gate group that cannot be confirmed dead");
+    assert.equal(existsSync(lockFilePath), false, "the lock is released on the fail-closed path");
+    assert.notEqual(readGateProcessGroup(dir), undefined, "the sidecar is retained until the operator clears it");
+
+    // A torn/corrupt sidecar is the same unknown group — not an absent one.
+    writeFileSync(`${lockFilePath}.gate`, '{"pgid":123');
+    await assert.rejects(
+      withProjectIntegrationLock(dir, "run-contender-2", async () => { entered = true; }, { pollMs: 10, log: () => {} }),
+      /died while starting its integration gate/,
+    );
+    assert.equal(entered, false);
+  } finally {
+    clearGateProcessGroup(dir);
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

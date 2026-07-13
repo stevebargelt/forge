@@ -14,18 +14,21 @@
 //
 // FG-425 (crash/timeout ownership): the gate runs in its OWN process group,
 // durably associated with the project's integration lock (sidecar next to the
-// lock file). On timeout the WHOLE group is terminated — SIGTERM, grace,
-// SIGKILL — and confirmed gone before this function returns; a lingering
-// descendant after a natural exit gets the same treatment. The sidecar is
-// cleared only on confirmed termination, so a forge crash mid-gate leaves it
-// behind for the next lock acquirer to reap (see project-integration-lock.ts).
-// An unconfirmable group is surfaced in the result (and the sidecar retained)
-// rather than silently released over.
+// lock file). The sidecar is claimed BEFORE the spawn (pending, pgid unknown)
+// and upgraded with the pgid the moment spawn returns, so no SIGKILL of forge
+// can leave a live gate group with no sidecar. On timeout the WHOLE group is
+// terminated — SIGTERM, grace, SIGKILL — and confirmed gone before this
+// function returns; a lingering descendant after a natural exit gets the same
+// treatment. The sidecar is cleared only on confirmed termination, so a forge
+// crash mid-gate leaves it behind for the next lock acquirer to reap (see
+// project-integration-lock.ts). An unconfirmable group is surfaced in the
+// result (and the sidecar retained) rather than silently released over.
 
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  recordGateSpawnPending,
   recordGateProcessGroup,
   clearGateProcessGroup,
   terminateProcessGroup,
@@ -82,6 +85,12 @@ export async function runIntegrationGate(
   const envTimeout = Number(process.env.FORGE_INTEGRATION_GATE_TIMEOUT_MS);
   const timeout = Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : DEFAULT_TIMEOUT_MS;
 
+  // Claim the sidecar BEFORE the group can exist. A SIGKILL of forge between
+  // spawn and the pgid record would otherwise leave a live gate with no
+  // sidecar and no live lock holder — the next acquirer steals the dead lock,
+  // sees nothing residual, and merges under the orphan.
+  recordGateSpawnPending(dir, opts?.runId);
+
   // detached: true makes the child a process-group LEADER (pgid === pid), so
   // group signals reach every descendant the test runner forks.
   const child = spawn("npm", ["run", "test:unit"], {
@@ -91,6 +100,7 @@ export async function runIntegrationGate(
   });
   const pgid = child.pid;
   if (pgid === undefined) {
+    clearGateProcessGroup(dir); // nothing was spawned — the pending claim is stale
     return { ok: false, output: "", error: "integration gate failed to spawn npm", status: null, signal: null, timedOut: false };
   }
   recordGateProcessGroup(dir, pgid, opts?.runId);

@@ -32,7 +32,7 @@
 //   pass, gate fail, thrown merge/cleanup errors all release; a crashed
 //   holder is released by the next contender's dead-pid steal.
 
-import { mkdirSync, realpathSync, writeFileSync, readFileSync, unlinkSync } from "node:fs";
+import { mkdirSync, realpathSync, writeFileSync, readFileSync, renameSync, unlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { FORGE_HOME } from "../util/paths.js";
@@ -65,17 +65,28 @@ export function projectIntegrationLockKey(projectDir: string): ProjectLockKey {
 // The integration gate's npm child is spawned as its own PROCESS GROUP and
 // durably associated with the project lock via a sidecar file next to it:
 // `<lock>.gate` = { pgid, runId, recordedAt }. The sidecar exists exactly
-// while a gate group MAY be alive: written at spawn, removed only once the
-// group is CONFIRMED gone (natural exit with no survivors, or a confirmed
-// group kill). A forge crash mid-gate leaves the sidecar behind, so the next
-// acquirer of this project's lock reaps the recorded group — confirming
+// while a gate group MAY be alive, and it must exist BEFORE the group can:
+// the gate writes a `pgid: null` PENDING marker before spawning, upgrades it
+// to the real pgid once spawn returns, and removes it only once the group is
+// CONFIRMED gone (natural exit with no survivors, or a confirmed group kill).
+// Recording only after spawn would leave a SIGKILL-sized hole — a live gate
+// group with no sidecar, which the next acquirer would merge straight over.
+// A forge crash mid-gate therefore always leaves a sidecar behind, and the
+// next acquirer of this project's lock reaps the recorded group — confirming
 // termination before entering the window — instead of merging under an
 // orphaned test runner. An unconfirmable group (still alive after bounded
 // TERM→KILL, or unsignalable) fails CLOSED: the acquirer releases the lock and
 // throws an actionable operator-visible error naming the pgid, never entering
-// silently and never waiting forever.
+// silently and never waiting forever. A sidecar with NO usable pgid (the
+// pending marker, or a torn/corrupt file) is the same fail-closed path with an
+// unknown group: forge cannot reap what it cannot name, so it refuses the
+// window and hands the operator the manual check.
 
 export type GateGroupRecord = { pgid: number; runId?: string; recordedAt: string };
+/** Pre-spawn marker: a gate group may already exist for this project, but its
+ *  pgid is not knowable yet (spawn hasn't returned). */
+export type GatePendingRecord = { pgid: null; runId?: string; recordedAt: string };
+export type GateSidecarRecord = GateGroupRecord | GatePendingRecord;
 
 export type KillFn = (pid: number, signal: NodeJS.Signals | 0) => void;
 
@@ -83,11 +94,26 @@ function gateSidecarPath(lockFilePath: string): string {
   return `${lockFilePath}.gate`;
 }
 
-export function recordGateProcessGroup(projectDir: string, pgid: number, runId?: string): void {
+function writeGateSidecar(projectDir: string, pgid: number | null, runId?: string): void {
   const { lockFilePath } = projectIntegrationLockKey(projectDir);
   mkdirSync(LOCKS_DIR, { recursive: true });
-  const rec: GateGroupRecord = { pgid, ...(runId !== undefined ? { runId } : {}), recordedAt: new Date().toISOString() };
-  writeFileSync(gateSidecarPath(lockFilePath), JSON.stringify(rec));
+  const rec: GateSidecarRecord = { pgid, ...(runId !== undefined ? { runId } : {}), recordedAt: new Date().toISOString() } as GateSidecarRecord;
+  const path = gateSidecarPath(lockFilePath);
+  // rename, so a crash mid-write can never leave a half-written record that a
+  // reaper has to guess about.
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(rec));
+  renameSync(tmp, path);
+}
+
+/** Claim gate ownership BEFORE the process group exists. Must be called before
+ *  spawning the gate child — see the fail-closed rationale above. */
+export function recordGateSpawnPending(projectDir: string, runId?: string): void {
+  writeGateSidecar(projectDir, null, runId);
+}
+
+export function recordGateProcessGroup(projectDir: string, pgid: number, runId?: string): void {
+  writeGateSidecar(projectDir, pgid, runId);
 }
 
 export function clearGateProcessGroup(projectDir: string): void {
@@ -95,12 +121,27 @@ export function clearGateProcessGroup(projectDir: string): void {
   try { unlinkSync(gateSidecarPath(lockFilePath)); } catch { /* already gone */ }
 }
 
-export function readGateProcessGroup(projectDir: string): GateGroupRecord | undefined {
+export function readGateProcessGroup(projectDir: string): GateSidecarRecord | undefined {
   const { lockFilePath } = projectIntegrationLockKey(projectDir);
+  return readGateSidecar(gateSidecarPath(lockFilePath));
+}
+
+/** `undefined` = no sidecar at all. A sidecar that exists but doesn't parse
+ *  into a usable pgid reads as `{ pgid: null }` — an unknown group, not an
+ *  absent one. */
+function readGateSidecar(path: string): GateSidecarRecord | undefined {
+  let raw: string;
   try {
-    return JSON.parse(readFileSync(gateSidecarPath(lockFilePath), "utf8")) as GateGroupRecord;
+    raw = readFileSync(path, "utf8");
   } catch {
     return undefined;
+  }
+  try {
+    const rec = JSON.parse(raw) as GateSidecarRecord;
+    if (typeof rec?.pgid === "number") return rec;
+    return { pgid: null, ...(typeof rec?.runId === "string" ? { runId: rec.runId } : {}), recordedAt: rec?.recordedAt ?? "" };
+  } catch {
+    return { pgid: null, recordedAt: "" };
   }
 }
 
@@ -158,15 +199,20 @@ async function reapResidualGateGroup(
   log: (line: string) => void,
   opts?: { killFn?: KillFn; pollMs?: number; graceMs?: number; confirmTimeoutMs?: number },
 ): Promise<void> {
-  let rec: GateGroupRecord | undefined;
-  try {
-    rec = JSON.parse(readFileSync(gateSidecarPath(lockFilePath), "utf8")) as GateGroupRecord;
-  } catch {
-    return; // no sidecar — nothing residual
-  }
-  if (!rec || typeof rec.pgid !== "number") {
-    try { unlinkSync(gateSidecarPath(lockFilePath)); } catch { /* gone */ }
-    return;
+  const sidecarPath = gateSidecarPath(lockFilePath);
+  const rec = readGateSidecar(sidecarPath);
+  if (rec === undefined) return; // no sidecar — nothing residual
+  if (rec.pgid === null) {
+    // A gate spawn was in flight (or its record was torn) when the previous
+    // holder died: a group MAY be live, and we don't know its pgid, so it
+    // cannot be reaped or confirmed. Fail closed rather than merge over it.
+    throw new Error(
+      `project integration window on ${canonicalDir} is blocked: a previous holder` +
+      `${rec.runId ? ` (run ${rec.runId})` : ""} died while starting its integration gate, so the gate's ` +
+      `process group was never recorded and cannot be confirmed dead. ` +
+      `Check for a stray gate (e.g. \`pgrep -af "npm run test:unit"\`), terminate it if it is running against ${canonicalDir}, ` +
+      `then remove ${sidecarPath} and re-run \`forge next\`.`,
+    );
   }
   const killFn: KillFn = opts?.killFn ?? ((pid, sig) => process.kill(pid, sig));
   if (probeGroup(rec.pgid, killFn) === "gone") {
