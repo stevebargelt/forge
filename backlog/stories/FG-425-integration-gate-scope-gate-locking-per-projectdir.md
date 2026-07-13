@@ -31,7 +31,7 @@ Test first in isolation; publish the exact tested commit afterward through a tin
 
 Target-kind specifics:
 - **Local checked-out target:** the short lock protects ONLY the final fast-forward and the working-tree checkout update.
-- **Remote target:** explicit expected-SHA lease or equivalent compare-and-swap push (e.g. `push --force-with-lease=<ref>:<B>`).
+- **Remote target:** explicit expected-SHA lease or equivalent compare-and-swap push. Before any push, prove `candidateSha` descends from `baseSha`; the lease is only the atomic stale-base guard and is never authorization for a non-fast-forward rewrite. A naked `push --force-with-lease=<ref>:<B>` without that ancestry proof is insufficient.
 
 ## Architecture decisions (operator-recorded 2026-07-13 — binding on implementation)
 
@@ -40,6 +40,8 @@ Target-kind specifics:
 > Interaction with AD-2, recorded so the bound is not later "tuned" for the wrong reason: with a FIFO integration lane, Forge-owned attempts cannot move each other's base. `publish_base_churn` therefore fires essentially only on an EXTERNAL writer (an operator pushing to the target mid-run). Repeated churn parks are a signal about external write traffic, NOT about forge-internal contention — do not respond by raising the bound.
 
 **AD-2 — One FIFO integration lane per canonical project identity** for Forge-owned publication attempts. Worker execution stays **parallel**; candidate integration, final validation, and publication are **ordered**. CAS is still required — it protects against external writers and stale state, and is not made redundant by the lane.
+
+The architecture pass must make "FIFO" mechanically testable rather than treating ordinary lock acquisition as ordered: define a durable enqueue-order key assigned when the publication request is recorded, preserve that order across Forge processes, expose the queued/holding attempt to the operator, and ensure an abandoned or terminal attempt can be skipped/recovered without permanently wedging the lane.
 
 **AD-3 — A dirty local publish target is a named `dirty_publish_target` blocker.** Refuse **before** any mutation. **Never** automatically stash, reset, clean, checkout-over, or otherwise modify operator-owned dirty state.
 
@@ -86,16 +88,18 @@ DISCARD: the long-gate locking and the entire process-supervision layer (`GateGr
 - The commit published to the target is byte-identical to the commit that was validated (`publishedSha === candidateSha`), resolved from the recorded immutable SHA and not from a branch tip or worktree state (AD-6).
 - Publication is compare-and-swap against the captured base: if the target moved off `B`, the publish is refused and the candidate is rebuilt on the new base with gates rerun — bounded to ONE such rebuild, after which the run parks with `publish_base_churn` and preserves evidence (AD-1).
 - Forge-owned publication attempts for one canonical project identity are FIFO-ordered across candidate integration, final validation, and publication; worker execution remains parallel (AD-2).
+- FIFO order derives from a durable publication-request enqueue key and is honored across Forge processes; queued/holding state is operator-visible, and an abandoned or terminal lane entry cannot permanently wedge later attempts.
 - The publication lock is held only across the compare-and-swap + fast-forward (+ working-tree checkout update for a local target) — NOT across validation.
 - A dirty local publish target is refused with a named `dirty_publish_target` blocker BEFORE any mutation; no automatic stash/reset/clean of operator-owned state (AD-3).
 - Every publication attempt uses a fresh, uniquely identified integration worktree; no pooling, no reuse after crash or moved-base retry (AD-4).
 - Publication intent is durably recorded BEFORE target mutation; a crash between advancing the local target ref and updating its checked-out worktree is recoverable from `{ baseSha, candidateSha, currentTargetSha }` without inspecting working-tree contents (AD-5).
-- Remote targets publish via an explicit expected-SHA lease / CAS push.
+- Remote targets publish via an explicit expected-SHA lease / CAS push only after proving `candidateSha` descends from `baseSha`; a lease must never permit a non-fast-forward target rewrite.
 - `{ baseSha, candidateSha, publishedSha, target }` is durably recorded per publication attempt and visible to the operator.
 - Finalize/cleanup is idempotent (safe to re-run after a crash at any step); worktree cleanup is never a precondition for a correct publication.
 - No regression to independent runs targeting DIFFERENT `projectDir`s — they proceed fully in parallel.
 - A test demonstrates two runs on the same `projectDir` cannot interleave publication, and that a run whose base moved rebuilds once rather than publishing an unvalidated merge.
 - No gate process-group supervision (sidecar / nonce / reap) is required for correctness (AD-7).
+- A `learnings/decisions/` ADR lands with the implementation, documenting the serialized integration publisher and explicitly superseding the abandoned long-lock/process-supervision design.
 
 ## Relations
 
