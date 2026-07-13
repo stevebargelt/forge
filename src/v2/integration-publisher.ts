@@ -94,8 +94,8 @@ const MUTEX_POLL_MS = 250;
  *  the window. TERMINAL and NAMED (as LaneTakenOverError is for the lane) — the
  *  publisher FAILS CLOSED rather than keep writing to a working tree it no longer
  *  owns. Nothing that mutates the target runs after this throws: it can only fire
- *  before the CAS, or from inside the checkout, whose failure path rolls the ref
- *  advance back by CAS. */
+ *  before the CAS, from a CAS that FAILED (nothing written), or from inside the
+ *  checkout, whose failure path rolls the ref advance back by CAS. */
 export class PublicationMutexLostError extends Error {
   readonly reason = "publication_mutex_lost" as const;
   constructor(public readonly attemptId: string, canonicalDir: string) {
@@ -520,9 +520,12 @@ export async function publishIntegration(req: PublishRequest): Promise<PublishOu
           // byte-for-byte where it started, so this is a refusal like any other
           // and it leaves nothing behind to block the next publication.
           //
-          // PublicationMutexLostError is the same shape — it fires only BEFORE the
-          // CAS (a lost hold inside the checkout surfaces as CheckoutSyncError,
-          // rolled back), so nothing of ours is on the target either way.
+          // PublicationMutexLostError is the same shape — it fires before the CAS, or
+          // from a FAILED CAS (which wrote nothing, and where a lost hold means the
+          // attempt that took the window moved the ref: that is a mutex loss, not a
+          // base churn to rebuild on). A lost hold inside the checkout surfaces as
+          // CheckoutSyncError, rolled back. Nothing of ours is on the target in any
+          // of the three.
           updatePublicationAttempt(attemptId, { state: "failed" });
           logEvent("publication.refused", {
             runId: req.runId,

@@ -130,6 +130,42 @@ test("FG-425 target: the base moved — the CAS is LOST and the target is not to
   }
 });
 
+// The other reason a CAS can fail, and the one that must NOT be reported as a moved
+// base: our hold lapsed in the sliver between the window's last renewal and the
+// update-ref, and the attempt that TOOK the window is what advanced the ref. Calling
+// that `cas_lost` would send the publisher off to rebuild and re-enter a window it no
+// longer owns; a lost hold must fail CLOSED.
+test("FG-425 target: a CAS lost because the HOLD was lost fails CLOSED — never reported as cas_lost", () => {
+  const repo = initRepo();
+  try {
+    const target = localTargetFor(repo);
+    const base = readTargetSha(target);
+    const candidate = buildCandidate(repo, base, "cand", "feature.txt");
+
+    class HoldLost extends Error {}
+    // The window's renewals, in order: ancestry, tracked-dirt, untracked, ref read,
+    // and then the LAST renewal before the CAS. The takeover fires on that last one:
+    // the winner advances the ref and our hold is gone from there on.
+    const RENEWALS_BEFORE_CAS = 5;
+    let calls = 0;
+    let stolen = false;
+    let winner = "";
+    const renewHold = () => {
+      if (stolen) throw new HoldLost();
+      if (++calls === RENEWALS_BEFORE_CAS) {
+        winner = commit(repo, "winner.txt", "the attempt that took the window\n");
+        stolen = true;
+      }
+    };
+
+    assert.throws(() => publishToTarget(target, base, candidate, { renewHold }), HoldLost);
+    assert.ok(stolen, "the takeover must have fired INSIDE the window, on the renewal before the CAS");
+    assert.equal(readTargetSha(target), winner, "a lost hold must never land the candidate over the winner");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 // AD-3. The operator's dirty state is sacred: refuse BEFORE any mutation, and
 // never stash / reset / clean / checkout over it.
 test("FG-425 target (AD-3): a DIRTY local target is refused before any mutation, and the operator's dirty state is byte-identical afterward", () => {

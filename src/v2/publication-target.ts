@@ -317,6 +317,15 @@ function publishLocal(
   try {
     git(t.projectDir, ["update-ref", refOf(t), candidateSha, baseSha]);
   } catch {
+    // The CAS failed, and there are two very different reasons it can have. If we
+    // still hold the window, an EXTERNAL writer moved the ref and `cas_lost` is the
+    // truth — the caller rebuilds on the new base. If our lease lapsed in the sliver
+    // between the renewal above and this write, the attempt that TOOK the window is
+    // what moved the ref, and reporting `cas_lost` would send us off to rebuild and
+    // re-enter a window we no longer own. So prove the hold before naming the cause:
+    // renew?.() throws if it is gone, and the publisher fails closed. It is safe to
+    // throw from here — the CAS failed, so nothing was written.
+    renew?.();
     return { ok: false, kind: "cas_lost", currentSha: readTargetSha(t) };
   }
 
