@@ -31,15 +31,17 @@ import { PUBLICATIONS_DIR, publicationWorktreeDir } from "../util/paths.js";
 import { logEvent } from "../store/events.js";
 import {
   getPublicationAttempt,
+  laneForProject,
   recordPublicationIntent,
   releasePublicationMutex,
   renewPublicationMutex,
+  storeNowMs,
   tryAcquirePublicationMutex,
   unfinishedPublications,
   updatePublicationAttempt,
   type ParkReason,
 } from "../store/publications.js";
-import { projectIdentity, describeWait } from "./project-identity.js";
+import { projectIdentity, describeRefusal, describeWait } from "./project-identity.js";
 import {
   awaitLaneTurn,
   LaneTakenOverError,
@@ -659,6 +661,89 @@ export function recoverPublicationAttempt(
   }
   if (attempt.state !== "abandoned") updatePublicationAttempt(attemptId, { state: "abandoned" });
   return { kind: "refused", attemptId, error: "recovery: nothing was published; the attempt is abandoned (AD-7)" };
+}
+
+/** AD-5 recovery driven BY HAND (`forge publish recover`), which is the same
+ *  target-mutating work the run-path sweep does and therefore carries the same
+ *  serialization contract. recoverPublicationAttempt itself takes no lock: it
+ *  re-runs the checkout (a write to the target's working tree) and it can mark an
+ *  attempt abandoned. Run bare while another attempt is inside its CAS/checkout
+ *  window, it would put TWO processes in one working tree, or declare abandoned an
+ *  attempt whose ref is about to advance — the exact serialization the short mutex
+ *  exists to provide.
+ *
+ *  So an operator recovery either takes the window or REFUSES, and the refusal
+ *  names the holder (AD-7's asymmetry, respected exactly: an EXPIRED holder is
+ *  takeable — that IS the lease design, and tryAcquirePublicationMutex takes it
+ *  over in-txn with no liveness probe; a LIVE one is not).
+ *
+ *  Two distinct live owners must both be checked, because they are different rows:
+ *    - the ATTEMPT's own lane lease — a live owner still validating or waiting is
+ *      not crashed, and must not be converged out from under itself; and
+ *    - the project's publication MUTEX — whoever holds it is inside the window
+ *      right now, touching the very working tree recovery wants to write. */
+export type OperatorRecovery =
+  | PublishOutcome
+  | { kind: "unknown_attempt" }
+  | { kind: "blocked"; attemptId: string; error: string };
+
+export function recoverPublicationAttemptForOperator(attemptId: string): OperatorRecovery {
+  const attempt = getPublicationAttempt(attemptId);
+  if (!attempt) return { kind: "unknown_attempt" };
+
+  const own = laneForProject(attempt.projectKey).find((e) => e.attemptId === attemptId);
+  if (own && (own.state === "queued" || own.state === "holding") && own.leaseExpiresAtMs >= storeNowMs()) {
+    return {
+      kind: "blocked",
+      attemptId,
+      error: describeRefusal({
+        what: "lane",
+        canonicalDir: attempt.canonicalDir,
+        action: `recover attempt ${attemptId}`,
+        holderRunId: own.runId,
+        holderAttemptId: own.attemptId,
+        remedy:
+          `That attempt is the live owner of its own lane entry — it is still running, not crashed, and recovery ` +
+          `would mark a LIVE attempt abandoned. Let it finish, or cancel run ${own.runId}; once its lease lapses ` +
+          `(AD-7 — a durable timestamp, never a liveness probe) recovery is takeable and this command will proceed.`,
+      }),
+    };
+  }
+
+  // Nothing below runs unless we hold the window. An expired holder is taken over
+  // here in the same immediate txn — that is the lease, not a liveness judgement.
+  const recoverer = `recover-${newAttemptId()}`;
+  const got = tryAcquirePublicationMutex({
+    projectKey: attempt.projectKey,
+    attemptId: recoverer,
+    runId: `operator-recover-${attemptId}`,
+    ttlMs: MUTEX_TTL_MS,
+  });
+  if (!got.acquired) {
+    return {
+      kind: "blocked",
+      attemptId,
+      error: describeRefusal({
+        what: "publication-window",
+        canonicalDir: attempt.canonicalDir,
+        action: `recover attempt ${attemptId}`,
+        holderRunId: got.holder.runId,
+        holderAttemptId: got.holder.attemptId,
+        remedy:
+          `Recovery re-runs the checkout, so it writes to the SAME working tree that holder is inside. Running it ` +
+          `now would put two processes in one tree. The window is short (CAS + fast-forward); wait for it to close ` +
+          `and re-run this command — it is idempotent.`,
+      }),
+    };
+  }
+  try {
+    return recoverPublicationAttempt(
+      attemptId,
+      windowHold(attempt.projectKey, recoverer, attempt.canonicalDir),
+    );
+  } finally {
+    releasePublicationMutex(attempt.projectKey, recoverer);
+  }
 }
 
 /** AD-5 recovery ON THE RUN PATH. Called before forge publishes anything against

@@ -27,7 +27,9 @@ import {
   getPublicationAttempt,
   publicationAttemptsForProject,
   recordPublicationIntent,
+  releasePublicationMutex,
   tryAcquirePublicationMutex,
+  updatePublicationAttempt,
   laneTick,
 } from "../../store/publications.js";
 import { projectIdentity } from "../../v2/project-identity.js";
@@ -257,6 +259,103 @@ test("FG-425 (AD-5): `forge publish recover` converges an attempt crashed inside
   assert.equal(git(dir, ["rev-parse", "refs/heads/main"]), candidateSha, "a re-run must never discard a correct publication");
   assert.equal(readFileSync(join(dir, "feature.txt"), "utf8"), "the agent's work\n");
   assert.equal(getPublicationAttempt(attempt.attemptId)?.state, "published");
+});
+
+test("FG-425 (serialization): `forge publish recover` REFUSES while another attempt holds the publication window — and mutates NOTHING", async () => {
+  const { dir, branch, seed } = makeProject("run-cli-contended");
+
+  // The same crash state as above: ref advanced, checked-out tree still at base,
+  // the attempt row left `publishing` — i.e. genuinely recoverable.
+  await assert.rejects(
+    publishIntegration({
+      runId: "run-cli-contended",
+      taskId: "task-build-1",
+      projectDir: dir,
+      sources: [{ branch, label: "task" }],
+      lane: { pollMs: 10, log: () => {} },
+      alsoValidate: () => ({ ok: true }),
+      afterRefAdvance: () => { throw new Error("simulated crash inside the publication window"); },
+    }),
+    /simulated crash inside the publication window/,
+  );
+  const attempt = publicationAttemptsForProject(projectIdentity(dir).key)[0];
+  assert.ok(attempt?.candidateSha);
+  assert.equal(attempt.state, "publishing");
+
+  // A DIFFERENT attempt is now inside the window: it holds the short publication
+  // mutex with a live lease, meaning it is at this moment CAS-ing and updating the
+  // very working tree recovery wants to write. This is the state in which a bare
+  // recovery would put two processes in one tree.
+  const { key } = projectIdentity(dir);
+  const got = tryAcquirePublicationMutex({
+    projectKey: key,
+    attemptId: "att-live-holder",
+    runId: "run-live-holder",
+    ttlMs: 120_000,
+  });
+  assert.equal(got.acquired, true, "setup: the live holder must actually hold the window");
+
+  const refused = await forgePublish("recover", attempt.attemptId);
+
+  assert.equal(refused.exitCode, 1, "a refusal must be a non-zero exit, not a silent no-op");
+  assert.match(refused.err, /refusing to recover/, "the operator must be told the command REFUSED");
+  assert.match(refused.err, /att-live-holder/, "the refusal must NAME the holding attempt");
+  assert.match(refused.err, /run-live-holder/, "the refusal must NAME the holding run");
+  assert.match(refused.err, /forge publish lane --project/, "the refusal must be ACTIONABLE");
+
+  // The enforcement half: it refused, and it also DID NOTHING.
+  assert.throws(
+    () => readFileSync(join(dir, "feature.txt"), "utf8"),
+    "a refused recovery must NOT run the checkout — the live holder owns that working tree",
+  );
+  assert.equal(
+    getPublicationAttempt(attempt.attemptId)?.state,
+    "publishing",
+    "a refused recovery must not converge the attempt record either",
+  );
+  assert.equal(git(dir, ["rev-parse", "refs/heads/main"]), attempt.candidateSha, "the ref must be untouched");
+  assert.notEqual(seed, attempt.candidateSha);
+
+  // And it is a REFUSAL, not a wedge: once the holder leaves the window, the same
+  // command converges normally.
+  releasePublicationMutex(key, "att-live-holder");
+  const after = await forgePublish("recover", attempt.attemptId);
+  assert.match(after.out, new RegExp(`attempt ${attempt.attemptId}: published`));
+  assert.equal(readFileSync(join(dir, "feature.txt"), "utf8"), "the agent's work\n");
+  assert.equal(getPublicationAttempt(attempt.attemptId)?.state, "published");
+});
+
+test("FG-425 (serialization): `forge publish recover` REFUSES to abandon an attempt whose own lane lease is still LIVE", async () => {
+  const { dir } = makeProject("run-cli-live-attempt");
+  const { key, canonicalDir } = projectIdentity(dir);
+
+  // An attempt that is alive and mid-validation: it holds its lane turn, its lease
+  // is in the future, and the target is still at its base. Bare recovery would read
+  // "target at baseSha → nothing published" and mark this LIVE attempt abandoned —
+  // stealing the lane out from under a process that is about to CAS.
+  recordPublicationIntent({
+    attemptId: "att-alive",
+    projectKey: key,
+    canonicalDir,
+    runId: "run-cli-live-attempt",
+    taskId: "task-build-1",
+    target: `local:${dir}#main`,
+    leaseTtlMs: 90_000,
+  });
+  const base = git(dir, ["rev-parse", "HEAD"]);
+  updatePublicationAttempt("att-alive", { baseSha: base, candidateSha: base, state: "validating" });
+  assert.equal(laneTick("att-alive", 90_000).ready, true, "setup: the live attempt holds its lane turn");
+
+  const refused = await forgePublish("recover", "att-alive");
+
+  assert.equal(refused.exitCode, 1);
+  assert.match(refused.err, /refusing to recover attempt att-alive/);
+  assert.match(refused.err, /run-cli-live-attempt/, "the refusal must name the live owner's run");
+  assert.equal(
+    getPublicationAttempt("att-alive")?.state,
+    "validating",
+    "recovery must NEVER mark a live attempt abandoned — its lease has not lapsed (AD-7)",
+  );
 });
 
 test("FG-425: `forge publish recover` on an unknown attempt fails loudly rather than inventing a publication", async () => {

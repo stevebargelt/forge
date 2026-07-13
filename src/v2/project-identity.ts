@@ -64,3 +64,28 @@ export function describeWait(opts: {
     `.`
   );
 }
+
+/** The same contention surface for a caller that must REFUSE rather than wait —
+ *  an operator command that would otherwise mutate a target another attempt is
+ *  currently inside. It names the holder for the same reason describeWait does:
+ *  a refusal the operator cannot act on is indistinguishable from a wall. */
+export function describeRefusal(opts: {
+  what: "lane" | "publication-window";
+  canonicalDir: string;
+  action: string;
+  holderRunId?: string | undefined;
+  holderAttemptId?: string | undefined;
+  /** What the operator should do about it — this is the actionable half. */
+  remedy: string;
+}): string {
+  const holder = opts.holderRunId ? `run ${opts.holderRunId}` : "another attempt";
+  const attempt = opts.holderAttemptId ? ` (attempt ${opts.holderAttemptId})` : "";
+  const subject = opts.what === "lane" ? "the integration lane" : "the publication window";
+  return (
+    `forge: refusing to ${opts.action} — ${subject} on ${opts.canonicalDir} is HELD by ${holder}${attempt}. ` +
+    `${opts.remedy} ` +
+    `Inspect with \`forge publish lane --project ${opts.canonicalDir}\`` +
+    (opts.holderRunId ? ` or \`forge show ${opts.holderRunId}\`` : "") +
+    `.`
+  );
+}

@@ -17,7 +17,7 @@ import {
   type PublicationAttempt,
 } from "../../store/publications.js";
 import { projectIdentity } from "../../v2/project-identity.js";
-import { recoverPublicationAttempt } from "../../v2/integration-publisher.js";
+import { recoverPublicationAttemptForOperator } from "../../v2/integration-publisher.js";
 
 function sha(s: string | undefined): string {
   return s ? s.slice(0, 12) : "—";
@@ -113,7 +113,16 @@ export function registerPublish(program: Command): void {
         process.exitCode = 1;
         return;
       }
-      const outcome = recoverPublicationAttempt(attemptId);
+      // Recovery mutates the target's working tree and the attempt record, so it
+      // goes through the publication mutex like every other target write — or it
+      // refuses, naming the live holder. Never bare: a hand-run recovery inside
+      // someone else's CAS window is two processes in one working tree.
+      const outcome = recoverPublicationAttemptForOperator(attemptId);
+      if (outcome.kind === "blocked") {
+        console.error(outcome.error);
+        process.exitCode = 1;
+        return;
+      }
       console.log(`attempt ${attemptId}: ${outcome.kind}`);
       if (outcome.kind === "published") {
         console.log(`  published ${outcome.publishedSha} to ${outcome.target}`);

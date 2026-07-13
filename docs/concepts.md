@@ -367,6 +367,10 @@ forge publish recover <attemptId>       # converge an attempt interrupted mid-pu
 
 A crash inside the short publication window — between advancing the target's ref and updating its checked-out working tree — has a defined recovery: it is re-derived from `{baseSha, candidateSha, currentTargetSha}` alone, never from working-tree contents. Recovery runs automatically at the top of every `forge next` wave, so it needs no operator action; `forge publish recover <attemptId>` runs the same idempotent convergence by hand. If the ref carries the candidate but the working tree could not be brought up to it (usually an untracked file in the way), the command says so explicitly and exits non-zero: the publication is durable, but your checkout is not yet at it.
 
+Note that a crash mid-publish does **not** mean nothing was published. If the candidate already won the CAS, the publication is durable and recovery *completes* it (finishing the checkout) — it never rolls the target back. Do not hand-roll a `git reset` on a target you found mid-recovery; run `forge publish recover` and read what it tells you.
+
+Because recovery re-runs the checkout, it is a write to the target's working tree — so `forge publish recover` takes the same short publication mutex a publish does. If another attempt is inside its window, or the named attempt is itself still live (its lane lease has not lapsed), the command **refuses**, names the holder, and exits non-zero rather than running a second checkout in the same tree or marking a live attempt abandoned. Wait for the holder and re-run; the command is idempotent. An *expired* holder is taken over as normal — an expiring lease is a durable timestamp lapsing, never a liveness probe (AD-7).
+
 The publisher's lifecycle is also on the run timeline (`forge show`, dashboard): `publication.requested`, `publication.base_moved`, `publication.published`, `publication.refused`, `publication.parked`, `publication.recovered`, and the run-level `integration.published`, whose payload carries the recorded `{target, baseSha, candidateSha, publishedSha}`.
 
 ## Agent worktree dependency parity
