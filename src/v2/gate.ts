@@ -24,7 +24,7 @@
 
 import type { GateDecision, RedAuthority, Task, TaskPackage, VerdictRow } from "../types/index.js";
 import { getTask, setTaskStatus, setTaskParentId, insertTask, markTaskComplete, updateTaskPackageInputs } from "../store/tasks.js";
-import { getDb } from "../store/db.js";
+import { getDb, writeTransaction } from "../store/db.js";
 import { crashPoint } from "./crash-points.js";
 import { verdictsForTask } from "../store/verdicts.js";
 import { insertGate } from "../store/gates.js";
@@ -141,7 +141,7 @@ export async function gate(
   // gates table with a row that has no matching events-table entry —
   // FG-427 makes the events table the sole source for outcome derivation.
   crashPoint("gate:before-decision-write");
-  getDb().transaction(() => {
+  writeTransaction(() => {
     insertGate({
       id: newGateId(),
       taskId,
@@ -156,7 +156,7 @@ export async function gate(
       taskId,
       payload: { decision, rationale, force: opts.force ?? false },
     });
-  })();
+  });
   crashPoint("gate:after-decision-write");
 
   let nextTasks: Task[] = [];
@@ -184,11 +184,11 @@ export async function gate(
       // Atomic: both writes must succeed together so a crash cannot leave
       // the task in blocked_by_red with gateForced:true set (wedged).
       crashPoint("gate:advance:fanout-reentry:before-reentry-write");
-      getDb().transaction(() => {
+      writeTransaction(() => {
         updateTaskPackageInputs(taskId, { ...task.taskPackage.inputs, gateForced: true });
         crashPoint("gate:advance:fanout-reentry:inside-reentry-write-txn");
         setTaskStatus(taskId, "pending");
-      })();
+      });
       crashPoint("gate:advance:fanout-reentry:after-reentry-write");
       return { task: getTask(taskId)!, nextTasks: [] };
     }
@@ -242,7 +242,7 @@ export async function gate(
     // trail — mirrors the fanout re-entry transaction below and dispatchReds'
     // verdict-insert transaction in runNext.ts.
     crashPoint("gate:reject:before-fail-write");
-    getDb().transaction(() => {
+    writeTransaction(() => {
       // FG-532: pass the task's persisted result through, matching the
       // request-changes branch — the rejected artifact is the audit record
       // for WHY it was rejected; failTask without it NULLs the row's result.
@@ -334,7 +334,7 @@ export async function gate(
           nextTasks = [newTask];
         }
       }
-    })();
+    });
     crashPoint("gate:reject:after-recovery-mint");
     // A rejected gate with no on_reject leaves this step terminally failed with
     // no replacement task — parity with the advance branch's finalizeRunIfDone

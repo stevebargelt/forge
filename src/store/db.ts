@@ -188,6 +188,28 @@ export function getDb(opts?: { readOnly?: boolean }): DatabaseInstance {
   return db;
 }
 
+// FG-548: the ONE way to run a write transaction. BEGIN IMMEDIATE, always.
+//
+// A DEFERRED transaction (better-sqlite3's default) takes its read snapshot on
+// the first statement and only tries to upgrade to a writer when the first
+// write runs. Under multi-process WAL, if another process committed in that
+// window the upgrade throws SQLITE_BUSY *immediately* — busy_timeout does not
+// apply to a stale-snapshot upgrade, only to waiting for a held write lock.
+// Taking the write lock up front means contention queues on busy_timeout
+// instead of crashing whichever process happened to read first.
+//
+// Every read-modify-write transaction reachable from two forge processes must
+// go through here. A pure-read transaction must NOT — taking the write lock to
+// read is a pessimization, not a fix; read it without a transaction, or with a
+// plain deferred one.
+//
+// On a single-connection :memory: DB there is nothing to contend with: SQLite
+// treats BEGIN IMMEDIATE as BEGIN when no other connection exists, so test DBs
+// see no behavior or performance change.
+export function writeTransaction<T>(fn: () => T): T {
+  return getDb().transaction(fn).immediate();
+}
+
 export function closeDb(): void {
   if (_dbRW) { _dbRW.close(); _dbRW = null; }
   if (_dbRO) { _dbRO.close(); _dbRO = null; }

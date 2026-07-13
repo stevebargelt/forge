@@ -11,7 +11,7 @@
 
 import type { Command } from "commander";
 import { ensureForgeDirs } from "../../util/paths.js";
-import { getDb } from "../../store/db.js";
+import { getDb, writeTransaction } from "../../store/db.js";
 
 type PhantomRow = {
   id: string;
@@ -95,14 +95,13 @@ function closeRuns(phantoms: PhantomRow[]): number {
   // Use the existing updateRunStatus shape would always set completedAt to
   // NOW; we want the historical timestamp instead, so direct UPDATE.
   const upd = db.prepare(`UPDATE runs SET status = 'complete', completed_at = ? WHERE id = ? AND status = 'active'`);
-  const tx = db.transaction((rows: PhantomRow[]) => {
+  return writeTransaction(() => {
     let count = 0;
-    for (const p of rows) {
+    for (const p of phantoms) {
       const ts = p.last_completed_at ?? new Date().toISOString();
       const info = upd.run(ts, p.id);
       if (info.changes > 0) count += 1;
     }
     return count;
   });
-  return tx(phantoms);
 }

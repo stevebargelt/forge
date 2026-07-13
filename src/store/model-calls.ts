@@ -24,7 +24,7 @@
 // time in the rollup CLI.
 
 import { readFileSync } from "node:fs";
-import { getDb } from "./db.js";
+import { getDb, writeTransaction } from "./db.js";
 
 export type UsageRow = {
   taskId: string | null;
@@ -440,12 +440,11 @@ export function insertUsageRows(rows: UsageRow[]): number {
     INSERT INTO model_calls (task_id, request_id, model, alias, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
-  const tx = db.transaction((batch: UsageRow[]) => {
-    for (const r of batch) {
+  writeTransaction(() => {
+    for (const r of rows) {
       del.run(r.taskId, r.requestId);
       ins.run(r.taskId, r.requestId, r.model, r.alias, r.inputTokens, r.outputTokens, r.cacheReadTokens, r.cacheCreationTokens, r.createdAt);
     }
   });
-  tx(rows);
   return rows.length;
 }
