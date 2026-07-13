@@ -25,7 +25,7 @@ Test first in isolation; publish the exact tested commit afterward through a tin
 5. Acquire a **short project publication lock**.
 6. Confirm the target is still `B`.
 7. Fast-forward / publish target to `C`.
-8. If the target changed, release, rebuild on the new base, rerun gates (**bounded retry** — see open design questions).
+8. If the target changed, release, rebuild on the new base, rerun gates (bounded — see AD-1).
 9. Record `{ baseSha, candidateSha, publishedSha, target }` durably.
 10. Finalize and clean up idempotently.
 
@@ -33,11 +33,29 @@ Target-kind specifics:
 - **Local checked-out target:** the short lock protects ONLY the final fast-forward and the working-tree checkout update.
 - **Remote target:** explicit expected-SHA lease or equivalent compare-and-swap push (e.g. `push --force-with-lease=<ref>:<B>`).
 
+## Architecture decisions (operator-recorded 2026-07-13 — binding on implementation)
+
+**AD-1 — Bounded publication attempts.** A publication attempt is bounded to **two full validations**: the initial attempt plus ONE rebuild after a moved base. A second moved-base result **parks** with a named `publish_base_churn` reason and **preserves evidence**. No candidate batching in FG-425 v1.
+
+> Interaction with AD-2, recorded so the bound is not later "tuned" for the wrong reason: with a FIFO integration lane, Forge-owned attempts cannot move each other's base. `publish_base_churn` therefore fires essentially only on an EXTERNAL writer (an operator pushing to the target mid-run). Repeated churn parks are a signal about external write traffic, NOT about forge-internal contention — do not respond by raising the bound.
+
+**AD-2 — One FIFO integration lane per canonical project identity** for Forge-owned publication attempts. Worker execution stays **parallel**; candidate integration, final validation, and publication are **ordered**. CAS is still required — it protects against external writers and stale state, and is not made redundant by the lane.
+
+**AD-3 — A dirty local publish target is a named `dirty_publish_target` blocker.** Refuse **before** any mutation. **Never** automatically stash, reset, clean, checkout-over, or otherwise modify operator-owned dirty state.
+
+**AD-4 — Fresh, uniquely identified integration worktree per publication attempt.** Do **not** pool it; do **not** reuse an earlier attempt's worktree after a crash or a moved-base retry. FG-356 owns eventual orphan cleanup; **cleanup is not a correctness prerequisite for publication.**
+
+**AD-5 — Crash between ref-advance and checkout-update must have a defined recovery.** The architecture must explicitly define recovery for a crash occurring after the local target ref has advanced but before its checked-out working tree is updated. Durably record **publication intent BEFORE mutation**; recover from `baseSha`, `candidateSha`, and `currentTargetSha`. **Do not infer publication state from working-tree contents.**
+
+**AD-6 — Validation evidence binds to the immutable `candidateSha`.** Publication must use that **recorded SHA** — never a mutable candidate branch tip, never current worktree state.
+
+**AD-7 — No automatic gate-process reaping in FG-425.** A crashed attempt is **abandoned**; any retry uses a **new** worktree.
+
 ## Why this deletes the process-supervision machinery
 
 The load-bearing point, recorded so it is not re-derived: gate process supervision was only ever necessary **because the gate ran against the publish target**. An orphaned gate process group mattered only because it could still be mutating the thing about to be published.
 
-Once validation runs in a throwaway integration worktree, a forge crash that orphans a gate process group is a **resource leak, not a correctness hazard** — the orphan churns inside a worktree whose candidate cannot reach the target without a fresh CAS check at publish time. A stale candidate simply loses the CAS and is rebuilt.
+Once validation runs in a throwaway integration worktree, a forge crash that orphans a gate process group is a **resource leak, not a correctness hazard** — the orphan churns inside a worktree whose candidate cannot reach the target without a fresh CAS check at publish time, and (AD-6) publication uses the recorded immutable SHA regardless of what that worktree now contains. A stale candidate simply loses the CAS and is abandoned (AD-7).
 
 Therefore this design removes the need for ALL of:
 - long-held integration locks
@@ -47,40 +65,42 @@ Therefore this design removes the need for ALL of:
 - automatic orphan reaping before merge
 - process identity nonces
 
-Orphaned gate process groups become a **cleanup/GC concern** (reclaim the worktree, reap the strays on a best-effort basis), never a correctness gate. Do not reintroduce pre-merge reaping as a safety mechanism.
+Orphaned gate process groups become a **cleanup/GC concern** (FG-356), never a correctness gate. **Do not reintroduce pre-merge reaping as a safety mechanism.**
 
 ## Salvage from the abandoned branch
 
 Branch `fix/fg425-project-gate-locking` (`ce22024`, pushed, DELIBERATELY UNMERGED — do not delete, do not merge) contains reusable work:
-- **Canonical project identity** — `projectIntegrationLockKey`: realpath-canonicalized `projectDir` → stable lock path (symlink / trailing-slash / relative spellings collapse to one identity). Directly reusable for the publication lock.
-- **Contention visibility** — the operator-visible waiting line (`describeWait`): names the holding run, project, elapsed wait, and next action. Reusable for the short publication window.
+- **Canonical project identity** — `projectIntegrationLockKey`: realpath-canonicalized `projectDir` → stable lock path (symlink / trailing-slash / relative spellings collapse to one identity). This is the key AD-2's FIFO lane and the publication lock are both keyed on.
+- **Contention visibility** — the operator-visible waiting line (`describeWait`): names the holding run, project, elapsed wait, and next action. Reusable for the lane queue and the short publication window.
 - **Cross-process publication tests** — the multi-process harness in `project-integration-lock.integration.test.ts` / `fg425-project-gate-lock.worktree.test.ts` exercises real cross-process contention; retarget it at CAS publish rather than long-lock exclusion.
 
 DISCARD: the long-gate locking and the entire process-supervision layer (`GateGroupRecord` sidecars, `leaderCommandOf` / `LeaderProbe`, `terminateProcessGroup`, `reapResidualGateGroup`, the leader nonce in `integration-gate.ts`).
 
-## Open design questions (settle in the architecture pass, before implementation)
+## Remaining design question for the architecture pass
 
-1. **Bounded retry on a moved base.** Step 8 is a retry loop; each rebuild re-runs a ~10-minute suite. Under steady merge traffic a run can starve. Decide the bound (N attempts → actionable failure) and whether candidate batching is ever warranted at forge's concurrency.
-2. **Dirty target working tree.** The publication window is only "tiny" if the target checkout is clean. Decide whether publish refuses on a dirty target working tree or stashes — a dirty target otherwise converts the short window into a blocking operator question.
-3. Whether the integration worktree is per-run-ephemeral or pooled/reused, and how it interacts with FG-345 (git worktrees for ALL agents) and FG-356 (orphan worktree cleanup).
+- Integration-worktree lifecycle mechanics under AD-4: naming/identity scheme for the per-attempt worktree, and how its creation/teardown interacts with FG-345 (git worktrees for ALL agents) and FG-356 (orphan worktree cleanup). AD-4 settles the policy (fresh per attempt, never pooled, cleanup non-blocking); the mechanics are open.
 
 ## Acceptance Criteria
 
 - Validation (tests / integration gate / reds / review) runs against a candidate commit `C` built in a dedicated integration worktree — never against the publish target.
-- The commit published to the target is byte-identical to the commit that was validated (`publishedSha === candidateSha`).
-- Publication is compare-and-swap against the captured base: if the target moved off `B`, the publish is refused, the candidate is rebuilt on the new base, and gates rerun (bounded).
+- The commit published to the target is byte-identical to the commit that was validated (`publishedSha === candidateSha`), resolved from the recorded immutable SHA and not from a branch tip or worktree state (AD-6).
+- Publication is compare-and-swap against the captured base: if the target moved off `B`, the publish is refused and the candidate is rebuilt on the new base with gates rerun — bounded to ONE such rebuild, after which the run parks with `publish_base_churn` and preserves evidence (AD-1).
+- Forge-owned publication attempts for one canonical project identity are FIFO-ordered across candidate integration, final validation, and publication; worker execution remains parallel (AD-2).
 - The publication lock is held only across the compare-and-swap + fast-forward (+ working-tree checkout update for a local target) — NOT across validation.
+- A dirty local publish target is refused with a named `dirty_publish_target` blocker BEFORE any mutation; no automatic stash/reset/clean of operator-owned state (AD-3).
+- Every publication attempt uses a fresh, uniquely identified integration worktree; no pooling, no reuse after crash or moved-base retry (AD-4).
+- Publication intent is durably recorded BEFORE target mutation; a crash between advancing the local target ref and updating its checked-out worktree is recoverable from `{ baseSha, candidateSha, currentTargetSha }` without inspecting working-tree contents (AD-5).
 - Remote targets publish via an explicit expected-SHA lease / CAS push.
-- `{ baseSha, candidateSha, publishedSha, target }` is durably recorded per publish attempt and visible to the operator.
-- Finalize/cleanup is idempotent (safe to re-run after a crash at any step).
+- `{ baseSha, candidateSha, publishedSha, target }` is durably recorded per publication attempt and visible to the operator.
+- Finalize/cleanup is idempotent (safe to re-run after a crash at any step); worktree cleanup is never a precondition for a correct publication.
 - No regression to independent runs targeting DIFFERENT `projectDir`s — they proceed fully in parallel.
-- A test demonstrates two runs on the same `projectDir` cannot interleave publication, and that a run whose base moved rebuilds rather than publishing an unvalidated merge.
-- No gate process-group supervision (sidecar / nonce / reap) is required for correctness.
+- A test demonstrates two runs on the same `projectDir` cannot interleave publication, and that a run whose base moved rebuilds once rather than publishing an unvalidated merge.
+- No gate process-group supervision (sidecar / nonce / reap) is required for correctness (AD-7).
 
 ## Relations
 
 - Follow-up to FG-357 (post-merge integration gate).
 - Supersedes the process-supervision design carried on `fix/fg425-project-gate-locking`.
-- Merging FG-425 is the prerequisite that clears the FG-396 (parallel campaign lanes) integration-lock blocker. FG-410 already closed.
-- Touches FG-345 / FG-356 (worktree lifecycle + orphan cleanup).
-- FG-548 (store deferred-write-txn SQLITE_BUSY under multi-process WAL) was surfaced by this ticket's cross-process harness.
+- Merging FG-425 is the prerequisite that clears the FG-396 (parallel campaign lanes) integration-lock blocker. NOTE: AD-2's FIFO lane orders *publication*, not execution — FG-396's parallel lanes stay parallel through worker execution and serialize only at integration/publish. FG-410 already closed.
+- FG-356 owns orphan worktree cleanup (AD-4 depends on it existing eventually, but not for correctness). FG-345 owns the broader worktree model.
+- FG-548 (store deferred-write-txn SQLITE_BUSY under multi-process WAL) was surfaced by this ticket's cross-process harness; it is independent of this redesign and now lives on main.
