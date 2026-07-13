@@ -38,3 +38,5 @@
 - Process lessons: `forge backlog file` prints the assigned id — READ it; launch-record `running` = the wrapper, not the work; concurrent sessions/fixers edit the same tree — never assume sole authorship of working-tree changes.
 
 **Shipped (for reference):** FG-539 (PR #112 / `739b0b2`) · FG-540 (PR #113 / `0a2ce3e`) · FG-542 (`931d6e3`, PR #111). FG-543 + FG-548 filed.
+
+**Added 2026-07-13 (late):** **FG-549** filed — `ops check`'s `orphaned_work_may_persist` detector never clears. `detectOrphanedWorkMayPersist` (src/ops/detect.ts:247) JOINs `runs` but never filters `r.status`, so every historical failed task re-surfaces as a HIGH-severity incident forever (the 12 stale ones on this project). Sibling detectors (detect.ts:69, :105) already filter on `TERMINAL_RUN_STATES` (:55) — but note the POLARITY INVERTS: for `retry_orphan` a terminal parent run MAKES the incident; for `orphaned_work_may_persist` a terminal parent run makes it STALE. Same class as the closed FG-504/FG-505 (incidents that never clear). Ticket carries three candidate policies (suppress / downgrade / evidence-conditional) — pick one and state the reasoning in code. Does NOT block FG-425.
