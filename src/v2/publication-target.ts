@@ -107,20 +107,48 @@ export class NonFastForwardError extends Error {
   }
 }
 
-function git(cwd: string, args: string[]): string {
+/** THE CEILING ON ONE OP INSIDE THE WINDOW, and the reason the publication mutex
+ *  is safe to expire at all.
+ *
+ *  The window is a SYNCHRONOUS span — execFileSync blocks the event loop — so the
+ *  holder's mutex lease cannot be renewed by a heartbeat, and an UNBOUNDED op (a
+ *  `read-tree -m -u` over a huge tree on a slow disk) could therefore outlive a
+ *  fixed TTL while the holder was still mid-checkout. A second attempt would then
+ *  read the lease as lapsed and enter its own CAS+checkout concurrently: the CAS
+ *  still protects ref ancestry, but NOTHING would serialize the two working-tree
+ *  updates.
+ *
+ *  So each op is bounded HERE (execFileSync kills the child at the bound), the
+ *  holder renews its lease BETWEEN ops, and the publisher DERIVES its mutex TTL
+ *  from this constant — never a duplicated literal. A live holder can then never be
+ *  inside the window when its lease lapses, which is exactly what takeover assumes.
+ *  A blown ceiling surfaces as a checkout failure, which publishLocal already
+ *  rolls back by CAS. */
+export const WINDOW_GIT_TIMEOUT_MS = 120_000;
+
+/** Renew the caller's hold on the publication window. Called immediately BEFORE
+ *  each git op the window makes; it THROWS if the hold is gone, so an attempt that
+ *  lost the mutex stops writing rather than racing the attempt that took it. */
+export type RenewHold = () => void;
+
+function git(cwd: string, args: string[], renew?: RenewHold): string {
+  renew?.();
   return execFileSync("git", args, {
     cwd,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
+    timeout: WINDOW_GIT_TIMEOUT_MS,
   }).trim();
 }
 
 /** True iff `ancestor` is an ancestor of `descendant` — the fast-forward proof. */
-export function isAncestor(repoDir: string, ancestor: string, descendant: string): boolean {
+export function isAncestor(repoDir: string, ancestor: string, descendant: string, renew?: RenewHold): boolean {
+  renew?.();
   try {
     execFileSync("git", ["merge-base", "--is-ancestor", ancestor, descendant], {
       cwd: repoDir,
       stdio: ["ignore", "ignore", "ignore"],
+      timeout: WINDOW_GIT_TIMEOUT_MS,
     });
     return true;
   } catch {
@@ -129,9 +157,9 @@ export function isAncestor(repoDir: string, ancestor: string, descendant: string
 }
 
 /** The target's CURRENT sha, read from the REF (never from working-tree state). */
-export function readTargetSha(t: PublicationTarget): string {
-  if (t.kind === "local") return git(t.projectDir, ["rev-parse", refOf(t)]);
-  const out = git(t.projectDir, ["ls-remote", t.remote, refOf(t)]);
+export function readTargetSha(t: PublicationTarget, renew?: RenewHold): string {
+  if (t.kind === "local") return git(t.projectDir, ["rev-parse", refOf(t)], renew);
+  const out = git(t.projectDir, ["ls-remote", t.remote, refOf(t)], renew);
   const first = out.split("\n")[0]?.trim() ?? "";
   const sha = first.split(/\s+/)[0] ?? "";
   if (!/^[0-9a-f]{40}$/.test(sha)) {
@@ -142,23 +170,28 @@ export function readTargetSha(t: PublicationTarget): string {
 
 /** Tracked-dirt: uncommitted changes to files git already knows about, matching
  *  preflightWorktreeGate's own definition of dirty (`git diff --quiet HEAD`). */
-export function dirtyTrackedFiles(projectDir: string): string[] {
-  const out = git(projectDir, ["status", "--porcelain", "--untracked-files=no"]);
+export function dirtyTrackedFiles(projectDir: string, renew?: RenewHold): string[] {
+  const out = git(projectDir, ["status", "--porcelain", "--untracked-files=no"], renew);
   return out.split("\n").map((l) => l.trim()).filter(Boolean);
 }
 
 /** Untracked (and not ignored) paths in the target's working tree. `--exclude-standard`
  *  matches what `read-tree -m -u` itself protects: git will happily overwrite an
  *  IGNORED file, and refuses only on an untracked-and-not-ignored one. */
-function untrackedFiles(projectDir: string): string[] {
-  const out = git(projectDir, ["ls-files", "--others", "--exclude-standard"]);
+function untrackedFiles(projectDir: string, renew?: RenewHold): string[] {
+  const out = git(projectDir, ["ls-files", "--others", "--exclude-standard"], renew);
   return out.split("\n").map((l) => l.trim()).filter(Boolean);
 }
 
 /** The paths base→candidate touches. These are exactly the paths the checkout
  *  update will write, and therefore the only ones that can collide. */
-function pathsTouchedByCandidate(repoDir: string, baseSha: string, candidateSha: string): string[] {
-  const out = git(repoDir, ["diff", "--name-only", baseSha, candidateSha]);
+function pathsTouchedByCandidate(
+  repoDir: string,
+  baseSha: string,
+  candidateSha: string,
+  renew?: RenewHold,
+): string[] {
+  const out = git(repoDir, ["diff", "--name-only", baseSha, candidateSha], renew);
   return out.split("\n").map((l) => l.trim()).filter(Boolean);
 }
 
@@ -170,10 +203,11 @@ export function untrackedCollisions(
   projectDir: string,
   baseSha: string,
   candidateSha: string,
+  renew?: RenewHold,
 ): string[] {
-  const untracked = new Set(untrackedFiles(projectDir));
+  const untracked = new Set(untrackedFiles(projectDir, renew));
   if (untracked.size === 0) return [];
-  return pathsTouchedByCandidate(projectDir, baseSha, candidateSha).filter((p) => untracked.has(p));
+  return pathsTouchedByCandidate(projectDir, baseSha, candidateSha, renew).filter((p) => untracked.has(p));
 }
 
 /** The local checked-out branch, i.e. the default publish target of a repo. */
@@ -224,6 +258,11 @@ export type PublishOpts = {
    *  recoverCheckout() must then converge from {baseSha, candidateSha,
    *  currentTargetSha} ALONE. */
   afterRefAdvance?: () => void;
+  /** The caller's hold on the publication window, renewed before every git op the
+   *  window makes (see WINDOW_GIT_TIMEOUT_MS). It THROWS if the hold is gone, so a
+   *  publisher that lost the mutex stops rather than updating a working tree
+   *  another attempt now owns. */
+  renewHold?: RenewHold;
 };
 
 /** Publish the RECORDED candidate to the target. Both checks, in order.
@@ -240,12 +279,12 @@ export function publishToTarget(
   opts?: PublishOpts,
 ): PublishResult {
   // (a) ANCESTRY PROOF — before any mutation, local or remote.
-  if (!isAncestor(t.projectDir, baseSha, candidateSha)) {
+  if (!isAncestor(t.projectDir, baseSha, candidateSha, opts?.renewHold)) {
     throw new NonFastForwardError(baseSha, candidateSha);
   }
   return t.kind === "local"
     ? publishLocal(t, baseSha, candidateSha, opts)
-    : publishRemote(t, baseSha, candidateSha);
+    : publishRemote(t, baseSha, candidateSha, opts);
 }
 
 function publishLocal(
@@ -254,14 +293,22 @@ function publishLocal(
   candidateSha: string,
   opts?: PublishOpts,
 ): PublishResult {
+  const renew = opts?.renewHold;
+
   // AD-3: refuse a dirty target BEFORE anything is written — BOTH shapes.
-  const dirty = dirtyTrackedFiles(t.projectDir);
+  const dirty = dirtyTrackedFiles(t.projectDir, renew);
   if (dirty.length > 0) throw new DirtyPublishTargetError(t.projectDir, dirty, "tracked");
-  const collisions = untrackedCollisions(t.projectDir, baseSha, candidateSha);
+  const collisions = untrackedCollisions(t.projectDir, baseSha, candidateSha, renew);
   if (collisions.length > 0) throw new DirtyPublishTargetError(t.projectDir, collisions, "untracked");
 
-  const current = readTargetSha(t);
+  const current = readTargetSha(t, renew);
   if (current !== baseSha) return { ok: false, kind: "cas_lost", currentSha: current };
+
+  // The LAST renewal before we mutate anything: from here on the window is
+  // provably ours, or we do not write. Renewing inside the try below would let a
+  // lost-hold throw be swallowed as `cas_lost` and trigger a rebuild, which is a
+  // very different (and wrong) story about what happened.
+  renew?.();
 
   // (b) COMPARE-AND-SWAP. `update-ref <ref> <new> <old>` is atomic at the git
   // level: it fails if the ref is not still at <old>. The candidate SHA is
@@ -281,7 +328,7 @@ function publishLocal(
   opts?.afterRefAdvance?.();
 
   try {
-    syncCheckout(t, candidateSha);
+    syncCheckout(t, candidateSha, renew);
   } catch (e) {
     // A checkout FAILURE (not a crash) after the ref advanced is the one thing a
     // publication must never leave behind: the ref carries the candidate while the
@@ -301,6 +348,10 @@ function publishLocal(
     // published, nothing staged, nothing to clean up, and the NEXT publication is
     // not blocked. This is the AD-5 rule applied to a failure rather than a crash
     // — state is defined, idempotent, and derived from the three SHAs alone.
+    //
+    // The rollback deliberately does NOT renew the hold: it is a CAS on a ref we
+    // ourselves just wrote, so it is safe with or without the mutex, and it must
+    // still run when the reason we are HERE is that the hold was lost.
     try {
       git(t.projectDir, ["update-ref", refOf(t), baseSha, candidateSha]);
     } catch {
@@ -349,8 +400,8 @@ export class CheckoutSyncError extends Error {
  *  Idempotent: when index and working tree already match the candidate this is a
  *  no-op, which is what makes AD-5 recovery safe to re-run after a crash at any
  *  step. */
-function syncCheckout(t: LocalTarget, candidateSha: string): void {
-  git(t.projectDir, ["read-tree", "-m", "-u", candidateSha]);
+function syncCheckout(t: LocalTarget, candidateSha: string, renew?: RenewHold): void {
+  git(t.projectDir, ["read-tree", "-m", "-u", candidateSha], renew);
 }
 
 /** AD-5 recovery. Derived ONLY from the three SHAs — the working tree is never
@@ -365,8 +416,9 @@ export function recoverCheckout(
   t: PublicationTarget,
   baseSha: string,
   candidateSha: string,
+  renew?: RenewHold,
 ): RecoveryOutcome {
-  const current = readTargetSha(t);
+  const current = readTargetSha(t, renew);
   if (current === baseSha) return { state: "not_published" };
   if (current !== candidateSha) return { state: "external_writer", currentSha: current };
   // The ref carries the candidate: the CAS succeeded and the publication IS
@@ -382,7 +434,7 @@ export function recoverCheckout(
   // error rather than throwing recovery itself into a loop.
   if (t.kind === "local") {
     try {
-      syncCheckout(t, candidateSha);
+      syncCheckout(t, candidateSha, renew);
     } catch (e) {
       return { state: "published", publishedSha: candidateSha, checkoutError: (e as Error).message };
     }
@@ -390,13 +442,19 @@ export function recoverCheckout(
   return { state: "published", publishedSha: candidateSha };
 }
 
-function publishRemote(t: RemoteTarget, baseSha: string, candidateSha: string): PublishResult {
+function publishRemote(
+  t: RemoteTarget,
+  baseSha: string,
+  candidateSha: string,
+  opts?: PublishOpts,
+): PublishResult {
   // The ancestry proof already ran in publishToTarget — BEFORE this network
   // write, which is the whole point: no push may happen until the candidate is
   // proven to be a fast-forward of the validated base.
   //
   // The lease is EXPLICIT (<ref>:<baseSha>), never the implicit form. It is the
   // atomic stale-base guard and nothing more.
+  opts?.renewHold?.();
   try {
     execFileSync(
       "git",
@@ -406,7 +464,12 @@ function publishRemote(t: RemoteTarget, baseSha: string, candidateSha: string): 
         t.remote,
         `${candidateSha}:${refOf(t)}`,
       ],
-      { cwd: t.projectDir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+      {
+        cwd: t.projectDir,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: WINDOW_GIT_TIMEOUT_MS,
+      },
     );
   } catch (e) {
     const stderr = String((e as { stderr?: string | Buffer }).stderr ?? "");

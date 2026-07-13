@@ -452,6 +452,29 @@ export function tryAcquirePublicationMutex(rec: {
   }).immediate();
 }
 
+/** Push OUR mutex lease out. Returns false when the row is no longer ours — a
+ *  later attempt found the lease lapsed and took the window over — so the caller
+ *  can FAIL CLOSED rather than keep writing to a working tree it no longer owns.
+ *  Scoped to (project_key, attempt_id), so it can never re-take a mutex someone
+ *  else now holds.
+ *
+ *  The window is a SYNCHRONOUS span of git calls: no timer can fire inside it, so
+ *  the holder renews BETWEEN ops instead of on a heartbeat. That is only sufficient
+ *  because each op carries its own hard ceiling (WINDOW_GIT_TIMEOUT_MS in
+ *  publication-target.ts) — bounded op + TTL derived from that bound means a LIVE
+ *  holder's lease cannot lapse mid-window, so an expired lease still means what
+ *  takeover assumes it means: the holder is gone (AD-7 — a durable timestamp
+ *  lapsing, never a liveness probe). */
+export function renewPublicationMutex(projectKey: string, attemptId: string, ttlMs: number): boolean {
+  const db = getDb();
+  return db.transaction((): boolean => {
+    const res = db
+      .prepare(`UPDATE publication_locks SET expires_at_ms = ? WHERE project_key = ? AND attempt_id = ?`)
+      .run(storeNowMs() + ttlMs, projectKey, attemptId);
+    return res.changes > 0;
+  }).immediate();
+}
+
 /** Release the mutex iff WE still hold it — never unlink a holder that took it
  *  over from us after our lease expired. */
 export function releasePublicationMutex(projectKey: string, attemptId: string): void {

@@ -24,8 +24,10 @@ import {
   getPublicationAttempt,
   laneForProject,
   laneTick,
+  publicationMutexHolder,
   recordPublicationIntent,
   releasePublicationMutex,
+  setPublicationClockOffsetForTest,
   storeNowMs,
   tryAcquirePublicationMutex,
   updatePublicationAttempt,
@@ -34,12 +36,13 @@ import { insertRun } from "../store/runs.js";
 import { newAttemptId } from "../util/ids.js";
 import { projectIdentity } from "./project-identity.js";
 import {
+  MUTEX_TTL_MS,
   publishIntegration,
   recoverPublicationAttempt,
   recoverUnfinishedPublications,
   type ValidationResult,
 } from "./integration-publisher.js";
-import { readTargetSha, localTargetFor } from "./publication-target.js";
+import { readTargetSha, localTargetFor, WINDOW_GIT_TIMEOUT_MS } from "./publication-target.js";
 import { LANE_BASE_TTL_MS } from "./publication-lane.js";
 
 let prevDb: DatabaseInstance | null;
@@ -50,6 +53,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setPublicationClockOffsetForTest(0);
   setDbForTest(prevDb as DatabaseInstance);
   for (const d of cleanup.splice(0)) rmSync(d, { recursive: true, force: true });
 });
@@ -514,6 +518,133 @@ test("FG-425: the run-path recovery sweep skips a LIVE in-window attempt — onl
     getPublicationAttempt(live)?.state,
     "publishing",
     "an attempt whose lease has lapsed is abandoned, and the sweep converges it",
+  );
+});
+
+// ─── the publication mutex covers the WHOLE window, not a fixed 120s ──────────
+//
+// THE DEFECT: the mutex was taken with a fixed 120s TTL and never renewed, while
+// the window it covers (CAS → ref advance → `read-tree -m -u`) is a SYNCHRONOUS
+// span with no ceiling — no timer can fire inside an execFileSync, so a heartbeat
+// could not renew it either. A checkout slower than the TTL (a big tree, a slow
+// disk, a loaded machine) left the holder mid-write with a lease that read as
+// lapsed, and a second attempt would take the mutex over and enter its OWN
+// CAS+checkout concurrently. The CAS still protects ref ancestry — but nothing
+// serialized the two WORKING-TREE updates, which is exactly the same-project
+// non-interleaving guarantee this ticket exists to provide.
+//
+// THE FIX, in two halves that only work together:
+//   - every git op inside the window is BOUNDED (WINDOW_GIT_TIMEOUT_MS, enforced by
+//     execFileSync, which kills the child)
+//   - the holder RENEWS its lease before each op, and the TTL is DERIVED from that
+//     per-op ceiling — so a live holder can never be inside the window when its
+//     lease lapses, and a renewal that finds the mutex gone FAILS CLOSED.
+
+test("FG-425: MUTEX_TTL_MS is derived from the per-op ceiling — a bounded op can never outlive the lease", () => {
+  assert.ok(
+    MUTEX_TTL_MS > WINDOW_GIT_TIMEOUT_MS,
+    "the mutex TTL must exceed the ceiling on the longest single git op in the window " +
+      `(${MUTEX_TTL_MS}ms vs ${WINDOW_GIT_TIMEOUT_MS}ms). The holder renews BETWEEN ops — it cannot renew ` +
+      "DURING one, because the window is a synchronous span. So this inequality is the whole proof that a live " +
+      "holder's lease cannot lapse mid-checkout and let a second attempt into the working tree.",
+  );
+});
+
+test("FG-425: a checkout that outlives the OLD fixed TTL keeps the mutex — no second attempt can enter the tree", async () => {
+  const runId = "run-slowcheckout";
+  const { dir, branch } = makeProject(runId);
+  const { key } = projectIdentity(dir);
+
+  // Inside the window, with the ref advanced and the checkout still to run: age the
+  // store clock past what the OLD fixed 120s TTL would have survived. This is a slow
+  // `read-tree`, faithfully — the clock is the only thing a takeover ever reads.
+  let holderStillOwnedIt: boolean | undefined;
+  let contenderLockedOut: boolean | undefined;
+  const out = await publishIntegration({
+    runId,
+    taskId: "task-build-1",
+    projectDir: dir,
+    sources: [{ branch, label: "task" }],
+    lane: { pollMs: 10, log: () => {} },
+    alsoValidate: ok,
+    afterRefAdvance: () => {
+      setPublicationClockOffsetForTest(WINDOW_GIT_TIMEOUT_MS + 30_000);
+      const holder = publicationMutexHolder(key);
+      holderStillOwnedIt = !!holder && holder.expiresAtMs > storeNowMs();
+      contenderLockedOut = !tryAcquirePublicationMutex({
+        projectKey: key,
+        attemptId: "attempt-contender",
+        runId: "run-contender",
+        ttlMs: MUTEX_TTL_MS,
+      }).acquired;
+    },
+  });
+
+  assert.equal(
+    holderStillOwnedIt,
+    true,
+    "a publisher mid-checkout, 150s into its window, must STILL hold a live mutex lease — under the old fixed " +
+      "120s TTL it had already lapsed, with the ref advanced and the working tree half-updated",
+  );
+  assert.equal(
+    contenderLockedOut,
+    true,
+    "and a second attempt must therefore be REFUSED the mutex. The CAS protects ref ancestry; only the mutex " +
+      "serializes the two working-tree updates, so a takeover here is the concurrency break itself.",
+  );
+  assert.equal(out.kind, "published", `the slow-but-live publisher still publishes: ${JSON.stringify(out)}`);
+});
+
+test("FG-425: a publisher that LOST the mutex fails closed — it never checks out over the attempt that took it", async () => {
+  const runId = "run-mutexlost";
+  const { dir, branch } = makeProject(runId);
+  const { key } = projectIdentity(dir);
+  const target = localTargetFor(dir);
+  const base = readTargetSha(target);
+
+  // Inside the window: push the clock past even the NEW TTL and let a contender take
+  // the mutex over. The holder's next renewal — the one before `read-tree` — must
+  // find the window gone and refuse to touch the tree.
+  const out = await publishIntegration({
+    runId,
+    taskId: "task-build-1",
+    projectDir: dir,
+    sources: [{ branch, label: "task" }],
+    lane: { pollMs: 10, log: () => {} },
+    alsoValidate: ok,
+    afterRefAdvance: () => {
+      setPublicationClockOffsetForTest(MUTEX_TTL_MS + 60_000);
+      const stolen = tryAcquirePublicationMutex({
+        projectKey: key,
+        attemptId: "attempt-thief",
+        runId: "run-thief",
+        ttlMs: MUTEX_TTL_MS,
+      });
+      assert.equal(stolen.acquired, true, "with the lease genuinely lapsed, a later attempt DOES take the window");
+    },
+  });
+
+  assert.equal(out.kind, "refused", `a publisher that lost the mutex must refuse, not publish: ${JSON.stringify(out)}`);
+  assert.match(
+    (out as { error: string }).error,
+    /no longer holds the publication mutex/,
+    "and the refusal must NAME the lost window rather than surface as some incidental git error",
+  );
+  assert.equal(
+    readTargetSha(target),
+    base,
+    "its own ref advance is rolled back by CAS — the target is byte-for-byte where it started, so the attempt " +
+      "that took the window is not left publishing on top of a half-applied one",
+  );
+  assert.equal(
+    existsSync(join(dir, "agent-work.txt")),
+    false,
+    "and the working tree was NEVER updated: the checkout is the write the mutex exists to serialize",
+  );
+  assert.equal(
+    publicationMutexHolder(key)?.attemptId,
+    "attempt-thief",
+    "releasing our own mutex must not unlink the holder that took it over from us",
   );
 });
 

@@ -33,6 +33,7 @@ import {
   getPublicationAttempt,
   recordPublicationIntent,
   releasePublicationMutex,
+  renewPublicationMutex,
   tryAcquirePublicationMutex,
   unfinishedPublications,
   updatePublicationAttempt,
@@ -58,7 +59,9 @@ import {
   readTargetSha,
   recoverCheckout,
   targetDescriptor,
+  WINDOW_GIT_TIMEOUT_MS,
   type PublicationTarget,
+  type RenewHold,
 } from "./publication-target.js";
 import { runIntegrationGate } from "./integration-gate.js";
 
@@ -72,9 +75,46 @@ export const MAX_REBUILDS = 1;
 
 /** The mutex covers a CAS, a ref write and a checkout — seconds, not minutes. The
  *  TTL exists solely so a crashed holder cannot wedge the project; it is never a
- *  liveness judgement about another process (AD-7). */
-const MUTEX_TTL_MS = 120_000;
+ *  liveness judgement about another process (AD-7).
+ *
+ *  DERIVED, never a literal: it must comfortably exceed the ceiling on the longest
+ *  SINGLE git op the window can block in, because that op is what the lease has to
+ *  survive. The window is SYNCHRONOUS (execFileSync blocks the event loop), so no
+ *  heartbeat can renew inside it — the holder renews BETWEEN ops instead, and the
+ *  per-op ceiling is what makes renewing between ops sufficient. Get this pair
+ *  wrong and a live publisher mid-`read-tree` can have its lease read as lapsed and
+ *  a second attempt enter the tree with it: the CAS would still protect ref
+ *  ancestry, but nothing would serialize the two working-tree updates. */
+export const MUTEX_TTL_MS = WINDOW_GIT_TIMEOUT_MS + 60_000;
 const MUTEX_POLL_MS = 250;
+
+/** The mutex we held was taken over: our lease lapsed and another attempt entered
+ *  the window. TERMINAL and NAMED (as LaneTakenOverError is for the lane) — the
+ *  publisher FAILS CLOSED rather than keep writing to a working tree it no longer
+ *  owns. Nothing that mutates the target runs after this throws: it can only fire
+ *  before the CAS, or from inside the checkout, whose failure path rolls the ref
+ *  advance back by CAS. */
+export class PublicationMutexLostError extends Error {
+  readonly reason = "publication_mutex_lost" as const;
+  constructor(public readonly attemptId: string, canonicalDir: string) {
+    super(
+      `publication window: attempt ${attemptId} no longer holds the publication mutex on ${canonicalDir} — its ` +
+        `lease lapsed and another attempt took the window. Refusing to write to the target any further; nothing ` +
+        `was published by this attempt. A retry enqueues a new attempt (AD-7).`,
+    );
+    this.name = "PublicationMutexLostError";
+  }
+}
+
+/** The hold the window's git ops renew against. Bounded op + renewal between ops
+ *  is what lets the mutex expire safely at all — see MUTEX_TTL_MS. */
+function windowHold(projectKey: string, attemptId: string, canonicalDir: string): RenewHold {
+  return () => {
+    if (!renewPublicationMutex(projectKey, attemptId, MUTEX_TTL_MS)) {
+      throw new PublicationMutexLostError(attemptId, canonicalDir);
+    }
+  };
+}
 
 /** A branch to fold into the candidate. `worktreePath`, when present, is
  *  auto-committed first — the FG-352 no-discard contract: agent work that was
@@ -422,6 +462,7 @@ export async function publishIntegration(req: PublishRequest): Promise<PublishOu
       let moved: { currentSha: string } | undefined;
       try {
         const published = publishToTarget(target, baseSha, candidateSha, {
+          renewHold: windowHold(identity.key, attemptId, identity.canonicalDir),
           ...(req.afterRefAdvance ? { afterRefAdvance: req.afterRefAdvance } : {}),
         });
         if (published.ok) {
@@ -468,10 +509,18 @@ export async function publishIntegration(req: PublishRequest): Promise<PublishOu
           // untouched, and forge will never touch it.
           return park(attemptId, req, "dirty_publish_target", e.message, candidate.path);
         }
-        if (e instanceof NonFastForwardError || e instanceof CheckoutSyncError) {
+        if (
+          e instanceof NonFastForwardError ||
+          e instanceof CheckoutSyncError ||
+          e instanceof PublicationMutexLostError
+        ) {
           // CheckoutSyncError already rolled the ref back by CAS: the target is
           // byte-for-byte where it started, so this is a refusal like any other
           // and it leaves nothing behind to block the next publication.
+          //
+          // PublicationMutexLostError is the same shape — it fires only BEFORE the
+          // CAS (a lost hold inside the checkout surfaces as CheckoutSyncError,
+          // rolled back), so nothing of ours is on the target either way.
           updatePublicationAttempt(attemptId, { state: "failed" });
           logEvent("publication.refused", {
             runId: req.runId,
@@ -560,7 +609,14 @@ function park(
  *  ref, park a publication that actually landed, or throw outright.
  *
  *  Idempotent and safe to re-run after a crash at ANY step. */
-export function recoverPublicationAttempt(attemptId: string): PublishOutcome | { kind: "unknown_attempt" } {
+export function recoverPublicationAttempt(
+  attemptId: string,
+  /** The sweep's hold on the publication window. Recovery RE-RUNS the checkout, so
+   *  it is a target working-tree write and carries the same bounded-op + renewal
+   *  contract a publish does. `forge publish recover` (an operator running it by
+   *  hand, with no window held) passes nothing. */
+  renew?: RenewHold,
+): PublishOutcome | { kind: "unknown_attempt" } {
   const attempt = getPublicationAttempt(attemptId);
   if (!attempt) return { kind: "unknown_attempt" };
   if (!attempt.baseSha || !attempt.candidateSha) {
@@ -572,7 +628,7 @@ export function recoverPublicationAttempt(attemptId: string): PublishOutcome | {
   const target: PublicationTarget =
     recorded.kind === "remote" ? { ...recorded, projectDir: attempt.canonicalDir } : recorded;
 
-  const outcome = recoverCheckout(target, attempt.baseSha, attempt.candidateSha);
+  const outcome = recoverCheckout(target, attempt.baseSha, attempt.candidateSha, renew);
   if (outcome.state === "published") {
     // Converge the record on the truth the REF tells us. Idempotent: re-running
     // this never discards a correct publication.
@@ -637,7 +693,7 @@ export function recoverUnfinishedPublications(projectDir: string, runId?: string
     for (const attempt of pending) {
       let outcome: PublishOutcome | { kind: "unknown_attempt" };
       try {
-        outcome = recoverPublicationAttempt(attempt.attemptId);
+        outcome = recoverPublicationAttempt(attempt.attemptId, windowHold(key, recoverer, projectDir));
       } catch (e) {
         logEvent("publication.recovered", {
           ...(runId ? { runId } : {}),
