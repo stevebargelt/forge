@@ -47,13 +47,23 @@ function hasTestUnitScript(dir: string): boolean {
   }
 }
 
+/** The gate's own configurable ceiling — the SINGLE source of truth for how long
+ *  a gate may block. Exported because FG-425's publication lane must pre-extend
+ *  the holder's lease across this span: the gate below is a SYNCHRONOUS
+ *  execFileSync that blocks the event loop, so no timer-driven heartbeat can fire
+ *  while it runs. Duplicating the literal there would mean raising the gate
+ *  timeout silently breaks the lease and lets a mid-gate holder be taken over. */
+export function integrationGateTimeoutMs(): number {
+  const envTimeout = Number(process.env.FORGE_INTEGRATION_GATE_TIMEOUT_MS);
+  return Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : DEFAULT_TIMEOUT_MS;
+}
+
 /** Build+test the merged tree at `dir` via the project's own test:unit entrypoint. */
 export function runIntegrationGate(dir: string): IntegrationGateResult {
   if (!hasTestUnitScript(dir)) {
     return { ok: true, output: "no test:unit script in package.json — integration gate skipped" };
   }
-  const envTimeout = Number(process.env.FORGE_INTEGRATION_GATE_TIMEOUT_MS);
-  const timeout = Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : DEFAULT_TIMEOUT_MS;
+  const timeout = integrationGateTimeoutMs();
   try {
     const output = execFileSync("npm", ["run", "test:unit"], {
       cwd: dir,

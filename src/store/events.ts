@@ -74,7 +74,31 @@ export type EventType =
   // FG-353: worktree integration git mutation events for forge show / dashboard.
   | "integration.worktree_created"
   | "integration.child_merged"
+  // Retained: no longer emitted (FG-425 replaced it with integration.published),
+  // but historical rows in existing DBs still carry it and must keep rendering.
   | "integration.merged_to_head"
+  // FG-425: publication of a validated candidate to the project's target ref,
+  // through the serialized integration publisher. Replaces the FG-353
+  // "integration.merged_to_head" event, which recorded a merge that landed on the
+  // target BEFORE it was validated — the defect FG-425 removes. The payload
+  // carries the durable {target, baseSha, candidateSha, publishedSha} record.
+  | "integration.published"
+  // The publisher's own lifecycle, per attempt. requested: intent recorded (AD-5),
+  // before any target mutation. base_moved: the CAS found the target off its
+  // validated base — one rebuild follows (AD-1). parked: a named blocker
+  // (publish_base_churn | dirty_publish_target), evidence preserved.
+  | "publication.requested"
+  | "publication.merge_failed"
+  | "publication.validation_failed"
+  | "publication.base_moved"
+  | "publication.published"
+  | "publication.refused"
+  | "publication.parked"
+  // AD-5 recovery converged an attempt left in the non-terminal `publishing`
+  // state (a crash inside the publication window). Emitted by the run-path sweep
+  // AND by `forge publish recover` — a defined recovery nothing invokes is not a
+  // defined recovery.
+  | "publication.recovered"
   // FG-428: operator-triggered `campaign reconcile` shipped a wedged item after
   // re-deriving its outcome from durable evidence. Distinct from run.reconciled /
   // task.reconciled (crash-recovery) — this is a trust-gate write, not a crash repair.

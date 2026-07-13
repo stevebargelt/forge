@@ -201,6 +201,15 @@ export const defaultDockerExec: DockerExecFn = async ({ args, stdin, stdoutPath,
     // unbounded in-memory buffer.
     const outStream = createWriteStream(stdoutPath);
     const errStream = createWriteStream(stderrPath);
+    // createWriteStream opens the fd ASYNCHRONOUSLY, so an open failure (the task
+    // dir went away, a full disk) surfaces as an 'error' event some ticks later —
+    // possibly after this executor has already resolved, e.g. on the spawn-error
+    // path below. With no listener that event is an unhandled 'error' and takes the
+    // whole forge process down over a LOG file. Logs are evidence, not control flow:
+    // absorb it. The exit code, the result.json and the container evidence are all
+    // decided elsewhere and none of them depend on these streams.
+    outStream.on("error", () => { /* log-file write failure — never fatal to the run */ });
+    errStream.on("error", () => { /* log-file write failure — never fatal to the run */ });
     const containerName = containerNameFromArgs(args);
 
     // Idle watchdog (#173): each stdout/stderr chunk is a sign of life; silence
@@ -376,6 +385,9 @@ export const detachedDockerExec: DockerExecFn = async (execArgs) => {
   return new Promise<number>((resolve) => {
     const outStream = createWriteStream(stdoutPath);
     const errStream = createWriteStream(stderrPath, { flags: "a" });
+    // Same rule as the attached executor: a log-file write failure is never fatal.
+    outStream.on("error", () => { /* log-file write failure — never fatal to the run */ });
+    errStream.on("error", () => { /* log-file write failure — never fatal to the run */ });
 
     // The WATCHER half: docker logs -f re-delivers the container's output from
     // t=0 and keeps streaming. It is disposable — if this process dies, the

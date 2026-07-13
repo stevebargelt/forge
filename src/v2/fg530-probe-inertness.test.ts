@@ -767,6 +767,88 @@ const ALLOWLIST: Allow[] = [
       "fails the just-minted parent on the no-upstream-array error path. Nothing ran; a crash before it leaves a pending or " +
       "running parent with zero children, which reconcile's fanout pass skips (no children) and the ready queue re-derives.",
   },
+  // ── runNext.ts: FG-425's gate-forced single-primary re-entry ───────────────
+  //
+  // The single-primary analogue of dispatchFanoutStep's gateForced re-entry (whose
+  // writes are allowlisted above for the same reasons). It exists because FG-425
+  // stopped publishing a red-REJECTED candidate: force-advancing over the rejection
+  // now has to actually publish the work, so the advance re-enters dispatch here.
+  //
+  // The whole function is IDEMPOTENT, which is what makes every crash window in it
+  // a no-op rather than a state to reconcile: on a re-run, the publisher rebuilds
+  // the candidate on the target's CURRENT base. If the previous attempt already
+  // published, that base already contains the task branch, the merge is "already up
+  // to date", candidateSha === baseSha, and the CAS is a no-op that re-reports the
+  // same publication. Nothing is published twice and nothing is lost.
+  {
+    file: "v2/runNext.ts",
+    fn: "republishForcedPrimary",
+    call: "markTaskRunning",
+    reason:
+      "opens the task's `running` span on the gate-forced re-entry. A crash on either side leaves it either still " +
+      "blocked_by_red+pending with gateForced set — which the runner simply re-enters, idempotently (see above) — or " +
+      "`running` with its result on disk and an UNPUBLISHED target, which is the state reconcile's container-gone / " +
+      "orphaned_needs_finalize sweep re-derives, and that landing IS probed " +
+      "(reconcile:{before,inside}-fail-pipeline-unfinalized).",
+  },
+  {
+    file: "v2/runNext.ts",
+    fn: "republishForcedPrimary",
+    call: "failTask",
+    reason:
+      "the terminal failure writes for a re-entry that could NOT publish (no worktree to publish from; a refused, parked, " +
+      "merge-failed or gate-failed publication). By construction nothing was published on any of those paths — the " +
+      "publisher mutates the target only inside its CAS window, and its own attempt record (written before any mutation, " +
+      "AD-5) says whether it did. Same crash landing as dispatchSingleStep/failTask above.",
+  },
+  {
+    file: "v2/runNext.ts",
+    fn: "republishForcedPrimary",
+    call: "markTaskComplete",
+    reason:
+      "the re-entry's terminal completion write. The HUMAN's advance decision is already durable before this function ever " +
+      "runs — gate.ts wrote the gates row and the gate.decided event (probed at gate:{before,inside,after}-decision-write) " +
+      "and only then set the task pending. A crash before this write therefore leaves a pending gateForced task the runner " +
+      "re-enters, and the re-entry is idempotent, so it converges on exactly this write.",
+  },
+  {
+    file: "v2/runNext.ts",
+    fn: "republishForcedPrimary",
+    call: "logEvent",
+    reason:
+      "integration.published is an audit append about git state (the authoritative record is the publication_attempts row, " +
+      "written inside the publisher before any target mutation), and task.completed sits against the markTaskComplete above, " +
+      "which carries its own reason. Neither event is read to decide a transition.",
+  },
+  // ── runNext.ts: FG-425's publication step ──────────────────────────────────
+  // The publisher owns its OWN durable record (publication_attempts), written
+  // inside integration-publisher.ts — outside this file, and therefore outside
+  // this guard's surface. That record is what makes these two writes non-windows:
+  // it is written BEFORE any target mutation (AD-5), and publication state is
+  // re-derivable from {baseSha, candidateSha, currentTargetSha} at any time.
+  {
+    file: "v2/runNext.ts",
+    fn: "publishFanoutIntegration",
+    call: "logEvent",
+    reason:
+      "the integration.published audit append AFTER the publisher returned — append-only evidence with no lifecycle state. " +
+      "The authoritative record of what was published is the publication_attempts row (written inside the publisher, before " +
+      "any target mutation, and carrying {baseSha, candidateSha, publishedSha, target}), never this event: nothing reads it " +
+      "to decide a transition, and `forge publish recover` re-derives the outcome from the attempt record and the target REF " +
+      "alone (AD-5). A crash on either side of the append therefore loses no state — only a line of audit.",
+  },
+  {
+    file: "v2/runNext.ts",
+    fn: "publishFanoutIntegration",
+    call: "failTask",
+    reason:
+      "the terminal failure write for a publication that did NOT land (merge_failed / validation_failed / parked / refused). " +
+      "By construction nothing was published on any of those paths — the publisher mutates the target only inside its CAS " +
+      "window, and its own attempt record says whether it did. A crash BEFORE this write therefore leaves the parent `running` " +
+      "with its result on disk and an UNPUBLISHED target, which is exactly the shape reconcile's container-gone / " +
+      "orphaned_needs_finalize sweep re-derives — and that landing IS probed " +
+      "(reconcile:{before,inside}-fail-pipeline-unfinalized). Same argument as the dispatchSingleStep/failTask entry above.",
+  },
   {
     file: "v2/runNext.ts",
     fn: "runFanoutChild",

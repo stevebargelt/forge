@@ -409,12 +409,20 @@ test("fg357 (1): clean merge whose merged tree fails build/test → task fails w
     "failure kind must be integration_failed, distinct from merge_conflict",
   );
 
-  // The merge itself succeeded (ff-only, no divergence) — the file must be in
-  // run.projectDir even though the task failed the integration gate.
-  assert.ok(
+  // FG-425 INVERTED THIS ASSERTION, and the inversion is the whole point of that
+  // ticket. This used to assert that output.ts WAS in run.projectDir — that the
+  // merge landed on the publish target and the gate then failed against the
+  // already-published tree, leaving the target merged-but-unvalidated. That was
+  // the defect. The gate now runs against a candidate in its own integration
+  // worktree, and a candidate that fails it is NEVER published.
+  assert.equal(
     existsSync(join(repo, "output.ts")),
-    "output.ts must be present in run.projectDir — the merge itself was clean",
+    false,
+    "output.ts must NOT be in run.projectDir: the integration gate failed, so the candidate was never published. " +
+      "A failing gate leaving its merge on the target is exactly the FG-425 defect.",
   );
+  // The work is not lost — it is retained on the task branch for inspection
+  // (asserted by fg357 (3)), which is where a failed candidate belongs.
 });
 
 // ─── (2) integration_failed is non-retryable ──────────────────────────────────
@@ -658,10 +666,13 @@ test("fg357 (5): fanout post-reds seam — red passes, merge to HEAD clean, merg
     "failure kind must be integration_failed, distinct from merge_conflict",
   );
 
-  // The integration→HEAD merge itself succeeded (children touch disjoint files)
-  // before the gate ran — both child files must be in run.projectDir.
-  assert.ok(existsSync(join(repo, "child0.ts")), "child0.ts must be present — integration merged to HEAD before the gate ran");
-  assert.ok(existsSync(join(repo, "child1.ts")), "child1.ts must be present — integration merged to HEAD before the gate ran");
+  // FG-425 INVERTED THIS. It used to assert the child files WERE on the target —
+  // that the integration branch merged to HEAD and the gate then failed against
+  // the already-published tree. That merged-but-unvalidated target is the defect.
+  // The gate now runs against a candidate worktree; a candidate that fails it is
+  // never published, and the children's work stays on their retained branches.
+  assert.equal(existsSync(join(repo, "child0.ts")), false, "child0.ts must NOT be published — the integration gate failed");
+  assert.equal(existsSync(join(repo, "child1.ts")), false, "child1.ts must NOT be published — the integration gate failed");
 
   // Integration worktree directory retained — cleanupIntegrationWorktree is
   // only reached after a passing gate.
@@ -740,8 +751,10 @@ test("fg357 (6): fanout no-reds seam — merge to HEAD clean, merged tree fails 
     "failure kind must be integration_failed, distinct from merge_conflict",
   );
 
-  assert.ok(existsSync(join(repo, "child0.ts")), "child0.ts must be present — integration merged to HEAD before the gate ran");
-  assert.ok(existsSync(join(repo, "child1.ts")), "child1.ts must be present — integration merged to HEAD before the gate ran");
+  // FG-425 INVERTED THIS (see the seams above): a candidate that fails the gate is
+  // never published to the target.
+  assert.equal(existsSync(join(repo, "child0.ts")), false, "child0.ts must NOT be published — the integration gate failed");
+  assert.equal(existsSync(join(repo, "child1.ts")), false, "child1.ts must NOT be published — the integration gate failed");
 
   const integPath = integrationWorktreeDir(runId, parentTask!.id);
   assert.ok(existsSync(integPath), "integration worktree must be retained after integration gate failure");
@@ -757,24 +770,38 @@ test("fg357 (6): fanout no-reds seam — merge to HEAD clean, merged tree fails 
 
 // ─── (7) Fanout re-entry: forced gate advance, broken integration ────────────
 //
-// FANOUT_WITH_RED_WORKFLOW. Wave 2: children complete, integration built, the
-// authoritative red FAILS → parent blocked_by_red (integration branch/worktree
-// retained, HEAD not yet touched). gate(parentId, 'advance', { force: true })
-// force-advances the parent to pending with gateForced=true. Wave 3 re-entry
-// (runNext.ts ~1193) detects redsAlreadyRan + an existing integration branch,
-// skips child/red dispatch, and merges integration to HEAD — but the merged
-// tree fails test:unit, so the re-entry gate check must fail the parent with
-// integration_failed and retain all worktree/branch state (no silent completion).
+// FANOUT_WITH_RED_WORKFLOW. Wave 2: children complete, the candidate is built and
+// GATED (it passes), the authoritative red FAILS → parent blocked_by_red, nothing
+// published. gate(parentId, 'advance', { force: true }) force-advances the parent
+// to pending with gateForced=true. Wave 3 re-entry detects redsAlreadyRan + an
+// existing integration branch, skips child/red dispatch, and re-validates the
+// candidate — but by then the tree fails test:unit, so the re-entry's gate must
+// fail the parent with integration_failed, publish NOTHING, and retain all
+// worktree/branch state (no silent completion).
+//
+// FG-425 RESHAPED THE SETUP, and the reshape is forced by the ticket. The gate
+// script used to be `test ! -f child1.ts`, i.e. the candidate failed the gate from
+// the very first wave. That was only reachable BECAUSE the old order ran the reds
+// against a tree nobody had gated: under the ticket's order (gate → reds → review,
+// then publish) a candidate that fails the gate never reaches a red at all, so wave
+// 2 would fail on the gate and the blocked_by_red state this test needs could never
+// arise. Spending reds on a tree that doesn't build is not a behavior worth keeping.
+//
+// So the gate now fails on a marker the test lands on the TARGET between the waves.
+// Wave 2 gates clean → red rejects → blocked_by_red. The operator's own commit then
+// breaks the tree, and wave 3's re-entry rebuilds the candidate on that new base
+// (AD-1), gates it, and fails. Same seam, same assertions, reachable order.
 
-test("fg357 (7): fanout re-entry seam — forced gate advance, merge to HEAD clean, merged tree fails test:unit → integration_failed, all state retained", async () => {
+test("fg357 (7): fanout re-entry seam — forced gate advance, candidate re-gated on the new base, fails test:unit → integration_failed, nothing published, all state retained", async () => {
   setPlatform("darwin");
   process.env.FORGE_WORKTREES = "1";
   process.env.FORGE_WORKTREE_IGNORE_DIRTY = "1";
 
   const repo = makeTmpDir();
-  // Fails once BOTH fanout children's files have merged in — passes for the
-  // earlier "source" step, which touches no files.
-  initGitRepoWithTestUnitScript(repo, "test ! -f child1.ts");
+  // Passes until a `BROKEN` file exists in the tree under test. The test commits
+  // that file to the TARGET after wave 2, so only the re-entry's candidate (which
+  // is rebuilt on the target's CURRENT base) carries it.
+  initGitRepoWithTestUnitScript(repo, "test ! -f BROKEN");
   ensureFanoutRedWorkflowYaml();
 
   const { runId } = startRun({
@@ -843,6 +870,9 @@ test("fg357 (7): fanout re-entry seam — forced gate advance, merge to HEAD cle
   const integPath = integrationWorktreeDir(runId, parentId);
   assert.ok(existsSync(integPath), "integration worktree must be retained when parent is blocked_by_red");
 
+  // Nothing may be on the target yet: the red REJECTED the candidate.
+  assert.equal(existsSync(join(repo, "child0.ts")), false, "nothing may be published while the parent is blocked_by_red");
+
   // ── Force-advance via gate ────────────────────────────────────────────────
   await gate(parentId, "advance", "forced: fg357 re-entry test", { force: true });
 
@@ -855,7 +885,13 @@ test("fg357 (7): fanout re-entry seam — forced gate advance, merge to HEAD cle
     "gateForced flag must be set on parent inputs",
   );
 
-  // ── Wave 3: re-entry — integration merges to HEAD, then the gate fails ────
+  // The operator breaks the tree on the TARGET. The re-entry's candidate is rebuilt
+  // on this base, so THAT is the tree the re-entry gate runs against.
+  writeFileSync(join(repo, "BROKEN"), "the merged tree no longer builds\n");
+  execFileSync("git", ["add", "."], { cwd: repo, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "break the tree"], { cwd: repo, stdio: "ignore" });
+
+  // ── Wave 3: re-entry — the candidate is re-gated on the new base, and fails ──
   const wave3ExecsBefore = wave3ExecCount;
   const wave3 = await runNext({ runId, workflow: FANOUT_WITH_RED_WORKFLOW, dockerExec: stubExec });
   assert.deepEqual(wave3.failedSteps, ["build"], "build must FAIL in wave 3 re-entry when the merged tree fails test:unit");
@@ -874,9 +910,10 @@ test("fg357 (7): fanout re-entry seam — forced gate advance, merge to HEAD cle
     "failure kind must be integration_failed for the re-entry gate failure",
   );
 
-  // Integration→HEAD merge succeeded before the gate ran — both child files present.
-  assert.ok(existsSync(join(repo, "child0.ts")), "child0.ts must be present — re-entry integration merged to HEAD before the gate ran");
-  assert.ok(existsSync(join(repo, "child1.ts")), "child1.ts must be present — re-entry integration merged to HEAD before the gate ran");
+  // FG-425 INVERTED THIS (same reason as the seams above): on the re-entry path
+  // too, a candidate that fails the gate is never published to the target.
+  assert.equal(existsSync(join(repo, "child0.ts")), false, "child0.ts must NOT be published — the integration gate failed");
+  assert.equal(existsSync(join(repo, "child1.ts")), false, "child1.ts must NOT be published — the integration gate failed");
 
   // Integration worktree retained — cleanupIntegrationWorktree is only reached
   // after a passing gate in the re-entry branch too.
@@ -1052,9 +1089,12 @@ test("fg424 (10): fanout no-reds seam — test:unit killed by signal → failure
   assert.doesNotMatch(disposition.advice ?? "", /git reset/i, "advice must not offer the integration_failed git-reset remedy");
 
   // Same no-discard contract as (6)'s integration_failed case: integration
-  // worktree and both children's worktrees/branches retained.
-  assert.ok(existsSync(join(repo, "child0.ts")), "child0.ts must be present — integration merged to HEAD before the gate ran");
-  assert.ok(existsSync(join(repo, "child1.ts")), "child1.ts must be present — integration merged to HEAD before the gate ran");
+  // worktree and both children's worktrees/branches retained. FG-425: and, as
+  // there, a gate that CRASHED is a gate that did not pass — so nothing was
+  // published. An abruptly-killed gate leaving its merge on the target is exactly
+  // the state the publisher makes unreachable.
+  assert.equal(existsSync(join(repo, "child0.ts")), false, "child0.ts must NOT be published — the gate was killed, not passed");
+  assert.equal(existsSync(join(repo, "child1.ts")), false, "child1.ts must NOT be published — the gate was killed, not passed");
 
   const integPath = integrationWorktreeDir(runId, parentTask!.id);
   assert.ok(existsSync(integPath), "integration worktree must be retained after a signal-killed integration gate");

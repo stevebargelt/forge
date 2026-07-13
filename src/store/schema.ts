@@ -175,4 +175,64 @@ CREATE TABLE IF NOT EXISTS host_verifications (
 );
 CREATE INDEX IF NOT EXISTS idx_host_verifications_lookup
   ON host_verifications(ticket_id, project_dir, commit_sha, gate_name);
+
+-- FG-425: the serialized integration publisher's durable state. Three tables,
+-- all keyed on CANONICAL project identity (realpath-canonicalized projectDir).
+-- New tables, so no ALTER migration is needed: getDb() execs this SCHEMA_SQL on
+-- every open, and CREATE TABLE IF NOT EXISTS brings an existing DB forward.
+--
+-- publication_attempts is the AD-5/AD-6 record: publication INTENT is written
+-- here BEFORE any target mutation, and recovery is derived from
+-- {base_sha, candidate_sha, current target sha} alone — never from working-tree
+-- contents. published_sha must always equal candidate_sha (AD-6).
+CREATE TABLE IF NOT EXISTS publication_attempts (
+  attempt_id    TEXT PRIMARY KEY,
+  project_key   TEXT NOT NULL,
+  canonical_dir TEXT NOT NULL,
+  run_id        TEXT NOT NULL,
+  task_id       TEXT NOT NULL,
+  target        TEXT NOT NULL,
+  base_sha      TEXT,
+  candidate_sha TEXT,
+  published_sha TEXT,
+  state         TEXT NOT NULL,
+  park_reason   TEXT,
+  worktree_path TEXT,
+  rebuild_count INTEGER NOT NULL DEFAULT 0,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_publication_attempts_project
+  ON publication_attempts(project_key, created_at);
+
+-- The FIFO lane (AD-2). ORDERING authority, and only that: enqueue_seq is the
+-- DURABLE enqueue key, assigned when the request is RECORDED — before any
+-- contention. FIFO derives from this column, never from lock-acquisition order
+-- (OS lock grants are unordered). lease_expires_at_ms is owner-written and
+-- owner-renewed; a takeover is permitted ONLY when it is actually in the past.
+-- Waiting is not evidence of abandonment: a live waiter renews and is never
+-- evictable, however long it waits.
+CREATE TABLE IF NOT EXISTS publication_lane (
+  attempt_id          TEXT PRIMARY KEY REFERENCES publication_attempts(attempt_id),
+  project_key         TEXT NOT NULL,
+  enqueue_seq         INTEGER NOT NULL,
+  run_id              TEXT NOT NULL,
+  state               TEXT NOT NULL,
+  lease_expires_at_ms INTEGER NOT NULL,
+  enqueued_at         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_publication_lane_order
+  ON publication_lane(project_key, enqueue_seq);
+
+-- The publication MUTEX. Mutual-exclusion authority, deliberately SEPARATE from
+-- the lane's ordering authority — collapsing the two would make correctness
+-- depend on the lane being exact, and it is only approximate. Held ONLY across
+-- CAS + fast-forward (+ working-tree checkout update); NEVER across validation.
+CREATE TABLE IF NOT EXISTS publication_locks (
+  project_key    TEXT PRIMARY KEY,
+  attempt_id     TEXT NOT NULL,
+  run_id         TEXT NOT NULL,
+  acquired_at_ms INTEGER NOT NULL,
+  expires_at_ms  INTEGER NOT NULL
+);
 `;

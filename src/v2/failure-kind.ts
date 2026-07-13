@@ -137,6 +137,10 @@ export type FailureKind =
   | "integration_failed"  // FG-357: clean merge, but build+test of the merged tree failed
   | "integration_gate_timeout"  // FG-424: post-merge gate run hit its timeout — transient, may complete on retry
   | "integration_gate_crashed"  // FG-424: post-merge gate run was killed by a signal outside the timeout path (e.g. kill -9/SIGSEGV) — worktree state after an abrupt kill is not trustworthy to blindly re-run against
+  | "publish_base_churn"   // FG-425 (AD-1): the publish target moved off the validated base twice. Forge-owned attempts are FIFO-ordered and cannot move each other's base, so this means an EXTERNAL writer is pushing to the target mid-run. Evidence (candidate worktrees) preserved. Do NOT respond by raising the rebuild bound — find the other writer.
+  | "dirty_publish_target" // FG-425 (AD-3): the local publish target has uncommitted tracked changes. Refused BEFORE any mutation; forge never stashes, resets, cleans, or checks out over operator-owned state. Commit or stash, then re-run.
+  | "publication_refused"  // FG-425: the candidate did not descend from the base it was validated against (or its checkout could not be applied and the ref advance was rolled back). Nothing was published; the target is unchanged.
+  | "lane_taken_over"      // FG-425 (AD-2/AD-7): this attempt's lane lease lapsed and a later attempt claimed the lane. Terminal — nothing was published. A retry enqueues a NEW attempt with a fresh worktree; nothing is signalled or reaped.
   | "auth_missing"
   | "auth_expired"
   | "auth_injection_failed"
