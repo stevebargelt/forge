@@ -9,6 +9,11 @@ export const CONSTRAINTS_DIR = join(FORGE_HOME, "constraints");
 // FG-351: git worktrees live under WORKTREES_DIR/<runId>/<taskId>. Inside
 // Docker Desktop's macOS file-sharing allowlist (under ~/.forge).
 export const WORKTREES_DIR = join(FORGE_HOME, "worktrees");
+// FG-425: per-ATTEMPT integration worktrees for the serialized publisher. Lives
+// under FORGE_HOME, NEVER inside projectDir: publisher bookkeeping written into
+// the publish target would register as target dirt (tripping AD-3's dirty check
+// against itself) and would be swept into the very fast-forward it coordinates.
+export const PUBLICATIONS_DIR = join(WORKTREES_DIR, "publications");
 // The installed host RACI source (authoring view). `forge raci validate` lints
 // this by default.
 export const RACI_PATH = join(FORGE_HOME, "forge-raci.md");
@@ -45,6 +50,14 @@ export function worktreeDir(runId: string, taskId: string): string {
 // FG-353: path where the fan-out integration worktree is checked out.
 export function integrationWorktreeDir(runId: string, parentTaskId: string): string {
   return join(WORKTREES_DIR, runId, parentTaskId, "integration");
+}
+
+// FG-425 (AD-4): path for a publication attempt's candidate worktree. Keyed on
+// the ATTEMPT (and the rebuild ordinal within it), never on (runId, taskId) —
+// a moved-base rebuild must get a FRESH tree and must not destroy the first
+// attempt's tree, which is the evidence AD-1 requires be preserved on a park.
+export function publicationWorktreeDir(attemptId: string, rebuild = 0): string {
+  return join(PUBLICATIONS_DIR, `${attemptId}-r${rebuild}`);
 }
 
 // Host path of the PROMPT.md a prompt-author task wrote. The agent writes to

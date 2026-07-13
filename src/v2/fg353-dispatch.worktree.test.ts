@@ -35,7 +35,8 @@ import { startRun } from "./startRun.js";
 import { runNext, type DockerExecFn } from "./runNext.js";
 import type { Workflow } from "./schema.js";
 import { failureKindForTask } from "./failure-kind.js";
-import { integrationWorktreeDir, taskDir } from "../util/paths.js";
+import { integrationWorktreeDir, taskDir, PUBLICATIONS_DIR } from "../util/paths.js";
+import { allPublicationAttempts } from "../store/publications.js";
 import { gate } from "./gate.js";
 import { integrationBranchName } from "./worktree-lifecycle.js";
 
@@ -608,14 +609,30 @@ test("fg353 (2): child branches merged into integration branch in index order", 
   );
 });
 
-// ─── (3) Fan-out red /project mount is the integration worktree ───────────────
+// ─── (3) Fan-out red /project mount is the PUBLICATION CANDIDATE ──────────────
 //
-// FORGE_WORKTREES=1, FANOUT_WITH_RED_WORKFLOW. After children complete and
-// integration is built, reds are dispatched with projectDir = integrationPath.
-// Their /project docker mount must be the integration worktree path, not
-// run.projectDir and not any individual child worktree path.
+// CONTRACT NARROWED BY FG-425 (2026-07-13). This test used to pin the red's mount
+// to the FG-353 integration worktree specifically. It is now the publisher's
+// per-attempt CANDIDATE worktree — which the ticket's acceptance criteria require:
+//
+//   "Validation (tests / integration gate / reds / review) runs against a candidate
+//    commit C built in a dedicated integration worktree — never against the publish
+//    target."
+//   "The commit published to the target is byte-identical to the commit that was
+//    validated (publishedSha === candidateSha)."
+//
+// The two cannot both be true of the FG-353 integration worktree: it is built on
+// whatever base the run started from, whereas the candidate is rebuilt on the base
+// actually being published to (and rebuilt AGAIN, with the reds re-run, if that base
+// moves — AD-1). Reviewing the integration tree would mean reviewing a tree that
+// merely resembles what ships.
+//
+// The INVARIANT this test exists to protect is unchanged and still asserted: the red
+// reviews a merged integration tree, and NEVER run.projectDir (the publish target)
+// and never an individual child worktree. It is now additionally asserted that the
+// tree the red reviewed is the exact commit that got published.
 
-test("fg353 (3): fan-out red /project mount is the integration worktree, not projectDir", async () => {
+test("fg353 (3): fan-out red /project mount is the publication candidate — never projectDir, and it is the exact commit published", async () => {
   setPlatform("darwin");
   process.env.FORGE_WORKTREES = "1";
   process.env.FORGE_WORKTREE_IGNORE_DIRTY = "1";
@@ -670,17 +687,30 @@ test("fg353 (3): fan-out red /project mount is the integration worktree, not pro
 
   const expectedIntegrationPath = integrationWorktreeDir(runId, parentId);
 
-  // The red invocation must have used the integration tree as /project.
+  // The red reviewed a PUBLICATION CANDIDATE worktree.
   const redCapture = capturedMounts.find((c) => c.taskId.startsWith("task-red-build-"));
   assert.ok(redCapture, "red task must have been dispatched");
+  assert.notEqual(redCapture!.projectMount, repo, "red /project must NOT be run.projectDir (the publish target)");
+  assert.ok(
+    redCapture!.projectMount.startsWith(PUBLICATIONS_DIR),
+    `red /project must be the publisher's candidate worktree (under ${PUBLICATIONS_DIR}), got ${redCapture!.projectMount}`,
+  );
+
+  // And it is the EXACT tree that got published: the attempt's candidateSha is what
+  // landed on the target, and the worktree the red was mounted on is that attempt's.
+  const attempt = allPublicationAttempts().find((a) => a.taskId === parentId);
+  assert.ok(attempt, "a publication attempt must have been recorded for the parent");
+  assert.equal(attempt!.state, "published");
+  assert.equal(attempt!.publishedSha, attempt!.candidateSha, "publishedSha === candidateSha (AD-6)");
   assert.equal(
     redCapture!.projectMount,
-    expectedIntegrationPath,
-    "red /project must be the integration worktree path",
+    attempt!.worktreePath,
+    "the tree the red reviewed must be the candidate worktree whose commit was published",
   );
-  assert.notEqual(redCapture!.projectMount, repo, "red /project must NOT be run.projectDir");
+  const targetSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+  assert.equal(targetSha, attempt!.candidateSha, "the target now carries exactly the commit the red reviewed");
 
-  // Child invocations must NOT use the integration path.
+  // Child invocations must NOT use the integration path and must not be the target.
   const childCaptures = capturedMounts.filter(
     (c) => (c.taskId.startsWith("task-build-0-") || c.taskId.startsWith("task-build-1-")),
   );
@@ -1713,15 +1743,27 @@ test("fg353 (12): merge --abort leaves integration worktree in clean non-MERGING
 //
 //   gate(parentId, 'advance', ..., { force: true }) → parent pending + gateForced.
 //
-//   Wave 3 re-entry: mergeIntegrationBranchToHead fails → parent FAILED with
-//   merge_conflict. Integration branch and worktree are retained (cleanupIntegrationWorktree
-//   is only called after a successful HEAD merge).
+//   Wave 3 re-entry: the target has MOVED off the base the integration branch was
+//   built from.
 //
-// This is independent of test 7 (covers re-entry SUCCESS) and test 11
-// (covers missing integration branch). Test 13 covers re-entry HEAD-merge FAILURE
-// with the integration branch present — a distinct, previously unasserted path.
+// CONTRACT CHANGED BY FG-425 (2026-07-13). This test used to assert that a diverged
+// HEAD FAILED the parent with merge_conflict, because the old path published with
+// `git merge --ff-only <integration>` into the target and a fast-forward was no
+// longer possible. Under the serialized integration publisher a moved base is the
+// case the design exists to HANDLE, not to fail on: the publisher builds the
+// candidate on the target's CURRENT base, runs the integration gate against THAT
+// merged tree, and CAS-publishes the exact commit it gated (ticket step 8 / AD-1).
+//
+// So a NON-CONFLICTING divergence now publishes — and, unlike the old --ff-only
+// path, what lands has actually been validated. A divergence that genuinely
+// CONFLICTS still fails and retains its evidence; that is covered at the publisher
+// layer in fg425-publication-cas.worktree.test.ts ("a source that conflicts with
+// the moved base").
+//
+// This is independent of test 7 (covers re-entry SUCCESS on an unmoved base) and
+// test 11 (covers a missing integration branch).
 
-test("fg353 (13): forced re-entry HEAD-merge failure => parent FAILED with merge_conflict, integration branch+worktree retained", async () => {
+test("fg353 (13): forced re-entry with a MOVED target — the publisher rebuilds on the new base, gates it, and publishes (supersedes the old --ff-only failure)", async () => {
   setPlatform("darwin");
   process.env.FORGE_WORKTREES = "1";
   process.env.FORGE_WORKTREE_IGNORE_DIRTY = "1";
@@ -1835,57 +1877,36 @@ test("fg353 (13): forced re-entry HEAD-merge failure => parent FAILED with merge
     "gateForced flag must be set",
   );
 
-  // ── Wave 3: re-entry — integration→HEAD merge fails due to diverged HEAD ──
+  // ── Wave 3: re-entry — the target has moved off the integration branch's base ──
+  // FG-425: this is no longer a failure. The publisher captures the CURRENT base,
+  // merges the integration branch onto it in a fresh candidate worktree, gates that
+  // merged tree, and publishes the exact commit it gated.
   const wave3 = await runNext({ runId, workflow: FANOUT_WITH_RED_WORKFLOW, dockerExec: stubExec });
   assert.deepEqual(
     wave3.failedSteps,
-    ["build"],
-    "build must FAIL in wave 3 because integration→HEAD --ff-only merge is impossible",
-  );
-  assert.deepEqual(
-    wave3.completedSteps,
     [],
-    "build must NOT silently complete when HEAD-merge fails",
+    "a NON-CONFLICTING moved base must not fail the run — the publisher rebuilds on it (FG-425 step 8)",
   );
+  assert.deepEqual(wave3.completedSteps, ["build"], "build must complete after the rebuild-and-publish");
 
   const finalTasks = tasksForRun(runId);
   const finalParent = finalTasks.find((t) => t.id === parentId);
-  assert.equal(finalParent!.status, "failed", "parent must be FAILED after HEAD-merge failure");
-  assert.equal(
-    failureKindForTask(finalParent!.id),
-    "merge_conflict",
-    "failure kind must be merge_conflict for HEAD-merge failure",
-  );
+  assert.equal(finalParent!.status, "complete", "parent must be COMPLETE after publishing onto the moved base");
 
-  // Integration branch must be RETAINED — cleanupIntegrationWorktree is only
-  // called after a successful HEAD merge, never on failure.
-  let intBranchStillExists = false;
-  try {
-    execFileSync("git", ["rev-parse", "--verify", intBranch], { cwd: repo, stdio: "ignore" });
-    intBranchStillExists = true;
-  } catch { /* branch gone */ }
+  // What landed is a MERGE of the integration branch onto the diverged commit —
+  // and, crucially, it was gated in the candidate worktree BEFORE it landed. The
+  // old --ff-only path could never produce this; it just failed.
+  assert.ok(existsSync(join(repo, "child0.ts")), "child0.ts must be on the target");
+  assert.ok(existsSync(join(repo, "child1.ts")), "child1.ts must be on the target");
   assert.ok(
-    intBranchStillExists,
-    "integration branch must be retained after re-entry HEAD-merge failure",
+    existsSync(join(repo, "diverging-commit.ts")),
+    "the external writer's commit must survive — the publish fast-forwards it, never rewrites over it",
   );
 
-  // Integration worktree directory must also be retained.
-  assert.ok(
-    existsSync(integPath),
-    "integration worktree directory must be retained after re-entry HEAD-merge failure",
-  );
-
-  // Child files must NOT be in run.projectDir (HEAD-merge never succeeded).
-  assert.equal(
-    existsSync(join(repo, "child0.ts")),
-    false,
-    "child0.ts must NOT be in run.projectDir — integration→HEAD merge never succeeded",
-  );
-  assert.equal(
-    existsSync(join(repo, "child1.ts")),
-    false,
-    "child1.ts must NOT be in run.projectDir — integration→HEAD merge never succeeded",
-  );
+  // A published attempt reclaims its evidence: the integration worktree/branch are
+  // cleaned up, exactly as on the unmoved-base success path (test 7).
+  assert.equal(existsSync(integPath), false, "the integration worktree is reclaimed after a successful publish");
+  void intBranch;
 });
 
 // ─── (14) Forced re-entry with gate:verdict — parent COMPLETE (not awaiting_gate) ─

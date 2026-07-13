@@ -401,11 +401,19 @@ test("fg352 (4): merge failure leaves task failed with failure_kind merge_confli
     execFileSync("git", ["add", "."], { cwd: worktreePath!, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "worktree commit"], { cwd: worktreePath!, stdio: "ignore" });
 
-    // Diverge main by making an independent commit on run.projectDir (repo).
-    // Both branches now have a commit that the other doesn't → FF impossible.
-    writeFileSync(join(repo, "main-diverge.ts"), "export const z = 3;\n");
+    // Land a CONFLICTING commit on the target: the same file, different content.
+    //
+    // FG-425 changed what "merge failure" means here. This used to write an
+    // INDEPENDENT file, which made the target diverge and defeated the old
+    // `git merge --ff-only <branch>` publish — a failure of the mechanism, not of
+    // the merge. The publisher builds its candidate on the target's CURRENT base,
+    // so a non-conflicting divergence now merges, gates, and publishes (that path
+    // is covered in fg353 (13)). A real CONTENT conflict is what must still fail —
+    // and it must fail the same way: merge_conflict, evidence retained, nothing
+    // published.
+    writeFileSync(join(repo, "task.ts"), "export const y = 999; // the operator's conflicting edit\n");
     execFileSync("git", ["add", "."], { cwd: repo, stdio: "ignore" });
-    execFileSync("git", ["commit", "-m", "main diverge"], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "conflicting commit on the target"], { cwd: repo, stdio: "ignore" });
 
     writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, files_modified: ["task.ts"] });
     return 0;
@@ -461,10 +469,12 @@ test("fg352 (5): merge failure retains worktree directory and task branch", asyn
     execFileSync("git", ["add", "."], { cwd: worktreePath!, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "worktree commit"], { cwd: worktreePath!, stdio: "ignore" });
 
-    // Diverge main to make FF fail.
-    writeFileSync(join(repo, "diverge.ts"), "export const b = 2;\n");
+    // A CONFLICTING commit on the target — same file, different content. See the
+    // note in fg352 (4): under FG-425 a merely-diverged target is rebuilt onto and
+    // published, so a real content conflict is what exercises the failure path.
+    writeFileSync(join(repo, "task.ts"), "export const a = 999; // the operator's conflicting edit\n");
     execFileSync("git", ["add", "."], { cwd: repo, stdio: "ignore" });
-    execFileSync("git", ["commit", "-m", "diverge main"], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "conflicting commit on the target"], { cwd: repo, stdio: "ignore" });
 
     writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, files_modified: ["task.ts"] });
     return 0;
@@ -608,14 +618,17 @@ test("fg352 (7): no downstream step dispatched after merge failure", async () =>
     writeFileSync(stderrPath, "");
 
     if (stepCount === 1) {
-      // Step 1: commit on worktree + diverge main → merge will fail.
+      // Step 1: commit on the worktree + a CONFLICTING commit on the target →
+      // the merge into the candidate genuinely fails. (See fg352 (4): under FG-425
+      // a merely-diverged target is rebuilt onto, so it takes a real content
+      // conflict to exercise the merge-failure path.)
       writeFileSync(join(worktreePath!, "task.ts"), "x");
       execFileSync("git", ["add", "."], { cwd: worktreePath!, stdio: "ignore" });
       execFileSync("git", ["commit", "-m", "worktree commit"], { cwd: worktreePath!, stdio: "ignore" });
 
-      writeFileSync(join(repo, "diverge.ts"), "y");
+      writeFileSync(join(repo, "task.ts"), "conflicting content on the target");
       execFileSync("git", ["add", "."], { cwd: repo, stdio: "ignore" });
-      execFileSync("git", ["commit", "-m", "diverge main"], { cwd: repo, stdio: "ignore" });
+      execFileSync("git", ["commit", "-m", "conflicting commit on the target"], { cwd: repo, stdio: "ignore" });
 
       writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, files_modified: ["task.ts"] });
     } else {

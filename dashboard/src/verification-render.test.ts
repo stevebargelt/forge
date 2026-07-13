@@ -46,6 +46,60 @@ test("eventBadgeClass: a verification_started event is always running, regardles
   assert.equal(eventBadgeClass({ eventType: "review_loop.verification_started", payload: { ok: false } }), "status-running");
 });
 
+// ─── FG-425: the publisher's TERMINAL events must not render as in-flight ─────
+//
+// publication.published / .refused / .parked matched NONE of the classifier's
+// generic patterns ("published" contains no "complete"; "refused" and "parked"
+// contain no "failed"), so all three fell through to status-pending — the same dim
+// grey as an event that is still running. An operator could not tell a publication
+// that landed from one that is stuck, which is the one distinction that matters
+// when a run is sitting on the publish step.
+
+test("eventBadgeClass (FG-425): publication.published is a SUCCESS badge, not the dim in-flight one", () => {
+  assert.equal(eventBadgeClass({ eventType: "publication.published", payload: {} }), "status-complete");
+});
+
+test("eventBadgeClass (FG-425): publication.refused (non-fast-forward) is a FAILURE badge", () => {
+  assert.equal(eventBadgeClass({ eventType: "publication.refused", payload: {} }), "status-failed");
+});
+
+test("eventBadgeClass (FG-425): publication.parked (publish_base_churn / dirty_publish_target) is a FAILURE badge", () => {
+  assert.equal(
+    eventBadgeClass({ eventType: "publication.parked", payload: { reason: "publish_base_churn" } }),
+    "status-failed",
+  );
+  assert.equal(
+    eventBadgeClass({ eventType: "publication.parked", payload: { reason: "dirty_publish_target" } }),
+    "status-failed",
+  );
+});
+
+test("eventBadgeClass (FG-425): none of the publisher's terminal events renders as status-pending", () => {
+  for (const eventType of ["publication.published", "publication.refused", "publication.parked"]) {
+    assert.notEqual(
+      eventBadgeClass({ eventType, payload: {} }),
+      "status-pending",
+      `${eventType} is TERMINAL — rendering it as pending makes a landed publication look like a stuck one`,
+    );
+  }
+});
+
+test("eventBadgeClass (FG-425): integration.published reads its PAYLOAD — the event fires whatever the outcome was", () => {
+  // The run-level event is emitted for every outcome, so the name alone says nothing.
+  assert.equal(
+    eventBadgeClass({ eventType: "integration.published", payload: { outcome: "published" } }),
+    "status-complete",
+  );
+  assert.equal(
+    eventBadgeClass({ eventType: "integration.published", payload: { outcome: "parked" } }),
+    "status-failed",
+  );
+  assert.equal(
+    eventBadgeClass({ eventType: "integration.published", payload: { outcome: "validation_failed" } }),
+    "status-failed",
+  );
+});
+
 test("reviewLoopVerificationDetail: ci_wait detail line shows the required check contexts", () => {
   const detail = reviewLoopVerificationDetail({
     mode: "ci_wait", round: 2, checkContexts: ["CI / test", "CI / test-extended"],

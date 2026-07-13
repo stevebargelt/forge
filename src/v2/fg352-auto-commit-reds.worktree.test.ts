@@ -349,25 +349,32 @@ test("fg352 (9): worktree has no changes — Already-up-to-date merge, task comp
   assert.equal(branchExists, false, `task branch ${branch} must be removed after no-op merge cleanup`);
 });
 
-// ─── (10) Merge happens BEFORE reds; cleanup runs AFTER reds pass ─────────────
+// ─── (10) Reds run BEFORE publication; cleanup runs AFTER reds pass ───────────
 //
-// A worktree task with a non-blocking red:
-//   1. Primary commits output.ts on the task branch.
-//   2. mergeWorktreeBranch fast-forwards output.ts into run.projectDir.
-//   3. The red runs (its stub verifies output.ts IS present in projectDir — the
-//      merge has already happened before it was called).
-//   4. After the red passes (returns pass/inconclusive), finalizePrimary is
-//      called → complete status.
-//   5. removeWorktreeIfSafe(provenMerged=true) fires only on the complete path,
-//      so the worktree and branch are gone after the wave.
+// CONTRACT INVERTED BY FG-425 (2026-07-13), deliberately: this test's original
+// "core ordering assertion" was that the red saw the merged file in run.projectDir
+// — i.e. that the merge had ALREADY landed on the publish target before the red was
+// dispatched. That is precisely the defect FG-425 exists to remove: it means a red
+// can only ever REJECT work that has already shipped. The ticket's step order is
 //
-// NOTE: exercising reds through the dispatch harness IS practical here because
-// the red uses the same fg352-dispatch-test runtime and the dockerExec stub
-// handles both the primary call (call 1) and the red call (call 2). The ordering
-// proof is direct: the red stub reads run.projectDir and confirms output.ts is
-// present before it returns — this can only be true if the merge ran first.
+//     validate candidate C (gate → reds → review) → short lock → CAS-publish C
+//
+// so the red must run BEFORE anything reaches the target, and must review the
+// CANDIDATE (see fg425-red-rejection.worktree.test.ts for the negative case: a red
+// that REJECTS leaves the target provably unchanged).
+//
+// What this test pins now:
+//   1. Primary commits its output on the task branch.
+//   2. The publisher builds a candidate worktree and gates it.
+//   3. The red runs against that CANDIDATE — its /project mount holds the file, and
+//      run.projectDir (the publish target) does NOT: nothing is published yet.
+//   4. The red passes → the candidate is CAS-published → the file lands on the target.
+//   5. removeWorktreeIfSafe(provenMerged=true) fires only on the complete path, so
+//      the worktree and branch are gone after the wave.
+//
+// The cleanup half of the original contract is unchanged.
 
-test("fg352 (10): merge runs before reds; proven-merged cleanup only after reds complete", async () => {
+test("fg352 (10): reds run before publication (target untouched at red time); proven-merged cleanup only after reds complete", async () => {
   setPlatform("darwin");
   process.env.FORGE_WORKTREES = "1";
   process.env.FORGE_WORKTREE_IGNORE_DIRTY = "1";
@@ -383,7 +390,8 @@ test("fg352 (10): merge runs before reds; proven-merged cleanup only after reds 
   });
 
   let callCount = 0;
-  let redSawMergedFile = false;
+  let redSawFileInCandidate = false;
+  let targetHadFileAtRedTime = true;
 
   const stubExec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
     callCount++;
@@ -400,9 +408,12 @@ test("fg352 (10): merge runs before reds; proven-merged cleanup only after reds 
 
       writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, files_modified: ["merge-before-reds.ts"] });
     } else {
-      // Red agent (call 2): the merge has already happened at this point.
-      // Verify the merged file is visible in run.projectDir (not just the worktree).
-      redSawMergedFile = existsSync(join(repo, "merge-before-reds.ts"));
+      // Red agent (call 2). The ORDER PROOF, both halves:
+      //   - the red's /project mount is the publisher's CANDIDATE, so the file is there;
+      //   - run.projectDir (the publish TARGET) is still untouched, so it is NOT there.
+      const candidate = findProjectMountHost(args);
+      redSawFileInCandidate = existsSync(join(candidate!, "merge-before-reds.ts"));
+      targetHadFileAtRedTime = existsSync(join(repo, "merge-before-reds.ts"));
 
       // Return a passing verdict so the primary reaches the complete path.
       writeTaskResult(stdoutPath, {
@@ -426,17 +437,23 @@ test("fg352 (10): merge runs before reds; proven-merged cleanup only after reds 
   assert.deepEqual(wave.completedSteps, ["build"], "build must complete after reds pass");
   assert.deepEqual(wave.failedSteps, [], "no steps must fail");
 
-  // Core ordering assertion: the red saw the merged file in projectDir, proving
-  // that mergeWorktreeBranch ran BEFORE the red was dispatched.
+  // Core ordering assertion (FG-425), both halves.
   assert.ok(
-    redSawMergedFile,
-    "red must see merge-before-reds.ts in run.projectDir — merge must run before reds dispatch",
+    redSawFileInCandidate,
+    "red must see merge-before-reds.ts in its own /project mount — it reviews the publisher's CANDIDATE",
+  );
+  assert.equal(
+    targetHadFileAtRedTime,
+    false,
+    "run.projectDir (the publish TARGET) must NOT have the file while the red is still running: " +
+      "publication happens only after ALL validation for the candidate passes. A red that can only reject " +
+      "work already on the target is the FG-425 defect.",
   );
 
-  // Merged file must be in run.projectDir (basic merge sanity).
+  // And once the red passed, the candidate WAS published — the file is on the target.
   assert.ok(
     existsSync(join(repo, "merge-before-reds.ts")),
-    "merge-before-reds.ts must exist in run.projectDir after merge-back",
+    "merge-before-reds.ts must exist in run.projectDir after the red passed and the candidate was published",
   );
 
   // Cleanup (provenMerged=true) must fire AFTER the red passes (complete path).

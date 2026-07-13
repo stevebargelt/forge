@@ -163,11 +163,24 @@ export async function gate(
 
   if (decision === "advance") {
     const isFanoutParent = typeof task.taskPackage?.inputs?.["fanout"] === "object";
-    if (blocked && isFanoutParent) {
-      // FG-353: blocked_by_red fanout parent needs re-entry into dispatchFanoutStep
-      // so the integration branch can be merged to HEAD before the parent completes.
-      // Set gateForced in inputs so dispatchFanoutStep detects re-entry, then
-      // transition to pending so the runner picks it up.
+    // FG-425: a blocked_by_red task's work is UNPUBLISHED. The publisher validates
+    // the candidate (gate → reds → review) and only publishes if all of it passes,
+    // so a red rejection means nothing reached the target. Force-advancing over that
+    // rejection is the human saying "publish it anyway" — and it can only mean that
+    // if the advance actually re-enters dispatch and publishes.
+    //
+    // Before FG-425 only a FANOUT parent re-entered (its integration branch still
+    // needed merging to HEAD); a non-fanout task had already been merged BEFORE the
+    // reds ran, so completing it in place was enough. That merge is exactly the
+    // defect FG-425 removed — so now BOTH shapes need the re-entry, or a forced
+    // advance would mark the task complete and silently drop its work.
+    //
+    // A task with no worktree published nothing and has nothing to publish (the
+    // non-worktree path never enters the publisher): complete it in place, as before.
+    const needsPublishReentry = blocked && (isFanoutParent || typeof task.worktreePath === "string");
+    if (needsPublishReentry) {
+      // Set gateForced in inputs so dispatch detects re-entry, then transition to
+      // pending so the runner picks it up.
       // Atomic: both writes must succeed together so a crash cannot leave
       // the task in blocked_by_red with gateForced:true set (wedged).
       crashPoint("gate:advance:fanout-reentry:before-reentry-write");

@@ -23,6 +23,21 @@ export function eventBadgeClass(e) {
   const type = e.eventType;
   if (/verification_started|host_gate_started/.test(type)) return "status-running";
   if (/verification_finished|host_gate_finished/.test(type)) return verificationOutcomeClass(e.payload);
+  // FG-425's publisher events are TERMINAL but match none of the generic patterns
+  // below — "published", "refused" and "parked" contain no "complete" and no
+  // "failed". They fell through to status-pending, rendering a landed publication
+  // in the same dim grey as an in-flight one: an operator could not tell a
+  // publication that shipped from one that is stuck. They are named explicitly.
+  //
+  // integration.published is the RUN-level outcome and carries `outcome` in its
+  // payload (published | refused | parked | validation_failed | merge_failed) — the
+  // event fires whatever happened, so the badge must read the payload, not the name.
+  if (type === "integration.published") {
+    return e.payload && e.payload.outcome === "published" ? "status-complete" : "status-failed";
+  }
+  if (type === "publication.published") return "status-complete";
+  if (type === "publication.refused" || type === "publication.parked") return "status-failed";
+  if (type === "publication.recovered") return "status-complete";
   if (/failed|blocked|killed|idle_timeout|abandoned|cancelled/.test(type)) return "status-failed";
   if (/completed|complete/.test(type)) return "status-complete";
   if (/awaiting/.test(type)) return "status-awaiting_gate";

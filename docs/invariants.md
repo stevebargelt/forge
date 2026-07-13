@@ -25,7 +25,8 @@ If a discussion needs a rule not listed here, that's a signal the rule should ei
 10. **All state mutation goes through the forge control plane.** The dashboard reads `~/.forge/forge.db` directly but mutates nothing itself — any dashboard action that changes state shells out to the `forge` CLI, keeping one enforcement path for auth and validation.
 11. **Agents are fallible workers, not the trust boundary.** Gates, red review, host verification/tests, and CI are the trust boundary — a task or agent claiming success is not itself sufficient evidence that it's true.
 12. **Durable docs are maintained deliberately, not as a side effect.** A dedicated pass (the documentation-maintainer, or an explicit docs-impact resolution) reconciles docs against ground truth; nobody edits `docs/**` or `README*` casually mid-conversation.
-13. **Accountability for what ships is always human.** Automation can gate, verify, and recommend, but responsibility for what merges or ships is never delegated to an agent or a passing check alone.
+13. **The publish target never holds unvalidated work — it fast-forwards to a fully-validated commit, or it does not move.** Validation (tests, integration gate, reds, review) runs against a candidate commit built in a throwaway integration worktree, never against the target; the exact validated SHA is then published through a short compare-and-swap window. A failed gate, a refused CAS, a dirty target, or a crash mid-publish all leave the target byte-for-byte where it was — so there is never a bad merge on the target to undo. (FG-425; `learnings/decisions/serialized-integration-publisher.md`.)
+14. **Accountability for what ships is always human.** Automation can gate, verify, and recommend, but responsibility for what merges or ships is never delegated to an agent or a passing check alone.
 
 ## Non-goals
 
