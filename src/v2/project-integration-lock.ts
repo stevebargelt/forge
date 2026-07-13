@@ -33,6 +33,7 @@
 //   holder is released by the next contender's dead-pid steal.
 
 import { mkdirSync, realpathSync, writeFileSync, readFileSync, renameSync, unlinkSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { FORGE_HOME } from "../util/paths.js";
@@ -82,7 +83,16 @@ export function projectIntegrationLockKey(projectDir: string): ProjectLockKey {
 // unknown group: forge cannot reap what it cannot name, so it refuses the
 // window and hands the operator the manual check.
 
-export type GateGroupRecord = { pgid: number; runId?: string; recordedAt: string };
+export type GateGroupRecord = {
+  pgid: number;
+  runId?: string;
+  recordedAt: string;
+  /** Leader-identity token (its `ps lstart` start time), captured at record
+   *  time. POSIX reserves a pid while it is the pgid of a live group, so a
+   *  MISMATCHED token later proves the original group is entirely dead and
+   *  the id was reused — the reaper must not signal the impostor. */
+  leaderStartedAt?: string;
+};
 /** Pre-spawn marker: a gate group may already exist for this project, but its
  *  pgid is not knowable yet (spawn hasn't returned). */
 export type GatePendingRecord = { pgid: null; runId?: string; recordedAt: string };
@@ -94,10 +104,28 @@ function gateSidecarPath(lockFilePath: string): string {
   return `${lockFilePath}.gate`;
 }
 
+/** The leader's kernel-recorded start time via `ps -p <pid> -o lstart=` —
+ *  a non-reusable identity for (pid, start-time). undefined when the process
+ *  is unreadable (already gone, or ps failed). Injectable in the reap opts. */
+export function leaderStartTimeOf(pid: number): string | undefined {
+  try {
+    const out = execFileSync("ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8", timeout: 5_000 }).trim();
+    return out.length > 0 ? out : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function writeGateSidecar(projectDir: string, pgid: number | null, runId?: string): void {
   const { lockFilePath } = projectIntegrationLockKey(projectDir);
   mkdirSync(LOCKS_DIR, { recursive: true });
-  const rec: GateSidecarRecord = { pgid, ...(runId !== undefined ? { runId } : {}), recordedAt: new Date().toISOString() } as GateSidecarRecord;
+  const leaderStartedAt = pgid !== null ? leaderStartTimeOf(pgid) : undefined;
+  const rec: GateSidecarRecord = {
+    pgid,
+    ...(runId !== undefined ? { runId } : {}),
+    recordedAt: new Date().toISOString(),
+    ...(leaderStartedAt !== undefined ? { leaderStartedAt } : {}),
+  } as GateSidecarRecord;
   const path = gateSidecarPath(lockFilePath);
   // rename, so a crash mid-write can never leave a half-written record that a
   // reaper has to guess about.
@@ -197,7 +225,7 @@ async function reapResidualGateGroup(
   lockFilePath: string,
   canonicalDir: string,
   log: (line: string) => void,
-  opts?: { killFn?: KillFn; pollMs?: number; graceMs?: number; confirmTimeoutMs?: number },
+  opts?: { killFn?: KillFn; pollMs?: number; graceMs?: number; confirmTimeoutMs?: number; leaderStartOf?: (pid: number) => string | undefined },
 ): Promise<void> {
   const sidecarPath = gateSidecarPath(lockFilePath);
   const rec = readGateSidecar(sidecarPath);
@@ -218,6 +246,37 @@ async function reapResidualGateGroup(
   if (probeGroup(rec.pgid, killFn) === "gone") {
     try { unlinkSync(gateSidecarPath(lockFilePath)); } catch { /* gone */ }
     return;
+  }
+  // The group id is signalable — but is it still the ORIGINAL group? POSIX
+  // reserves a pid while it is the pgid of a live group, so the recorded
+  // leader-identity token decides:
+  //  - token matches the leader's current start time → the original group;
+  //    safe to reap.
+  //  - token MISMATCHES → the original group is entirely dead (its pgid could
+  //    only be reused after every member exited) and a new process/group owns
+  //    the id — do NOT signal it; the residual is resolved.
+  //  - identity unverifiable (no recorded token, or the leader can't be read
+  //    while the group is alive) → fail closed; never kill an unverified group.
+  const leaderStartOf = opts?.leaderStartOf ?? leaderStartTimeOf;
+  const currentLeaderStart = leaderStartOf(rec.pgid);
+  const recordedToken = (rec as GateGroupRecord).leaderStartedAt;
+  if (recordedToken !== undefined && currentLeaderStart !== undefined && currentLeaderStart !== recordedToken) {
+    try { unlinkSync(gateSidecarPath(lockFilePath)); } catch { /* gone */ }
+    log(
+      `forge: recorded gate group id ${rec.pgid} on ${canonicalDir} has been REUSED by an unrelated process ` +
+      `(leader identity changed) — the original gate group is dead; not signalling the new owner.`,
+    );
+    return;
+  }
+  if (recordedToken === undefined || currentLeaderStart === undefined) {
+    throw new Error(
+      `project integration window on ${canonicalDir} is blocked: a process group answers for recorded gate pgid ${rec.pgid}, ` +
+      `but its identity cannot be verified against the original gate ` +
+      `(${recordedToken === undefined ? "no leader identity was recorded" : "the group leader is not readable"}). ` +
+      `Refusing to signal an unverified group and refusing to enter the window over it. ` +
+      `Inspect with \`ps -g ${rec.pgid}\`; if it is the stray gate, terminate it (e.g. \`kill -9 -${rec.pgid}\`), ` +
+      `then remove ${sidecarPath} and re-run \`forge next\`.`,
+    );
   }
   log(
     `forge: reaping an orphaned integration-gate process group (pgid ${rec.pgid}${rec.runId ? `, run ${rec.runId}` : ""}) ` +
@@ -263,8 +322,8 @@ export async function withProjectIntegrationLock<T>(
     log?: (line: string) => void;
     pollMs?: number;
     isAlive?: (pid: number) => boolean;
-    /** Injectable group kill/confirm knobs for the residual-gate reap (tests). */
-    reap?: { killFn?: KillFn; pollMs?: number; graceMs?: number; confirmTimeoutMs?: number };
+    /** Injectable group kill/confirm/identity knobs for the residual-gate reap (tests). */
+    reap?: { killFn?: KillFn; pollMs?: number; graceMs?: number; confirmTimeoutMs?: number; leaderStartOf?: (pid: number) => string | undefined };
   },
 ): Promise<T> {
   if (projectDir === undefined) return await fn();

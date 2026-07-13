@@ -321,15 +321,25 @@ test("FG-425 ownership: an UNCONFIRMABLE orphan fails CLOSED — actionable erro
   const dir = tmp("forge-fg425-own-unconf-");
   try {
     const { lockFilePath } = projectIntegrationLockKey(dir);
-    // A sidecar pointing at a group our injected killFn reports as immortal.
-    recordGateProcessGroup(dir, 424242, "run-ghost");
+    // A verified-identity sidecar whose group our injected killFn reports as
+    // immortal — identity matches, so the reaper proceeds to TERM→KILL and
+    // hits the bounded-confirmation wall.
+    mkdirSync(dirname(lockFilePath), { recursive: true });
+    writeFileSync(`${lockFilePath}.gate`, JSON.stringify({
+      pgid: 424242, runId: "run-ghost", recordedAt: new Date().toISOString(),
+      leaderStartedAt: "GHOST-LEADER-TOKEN",
+    }));
 
     let entered = false;
     await assert.rejects(
       withProjectIntegrationLock(dir, "run-contender", async () => { entered = true; }, {
         pollMs: 10,
         log: () => { /* silence the reap lines */ },
-        reap: { killFn: () => { /* signals swallowed — group never dies */ }, pollMs: 10, graceMs: 30, confirmTimeoutMs: 60 },
+        reap: {
+          killFn: () => { /* signals swallowed — group never dies */ },
+          leaderStartOf: () => "GHOST-LEADER-TOKEN",
+          pollMs: 10, graceMs: 30, confirmTimeoutMs: 60,
+        },
       }),
       (e: Error) => /could not be confirmed terminated/.test(e.message)
         && /424242/.test(e.message)
@@ -340,6 +350,78 @@ test("FG-425 ownership: an UNCONFIRMABLE orphan fails CLOSED — actionable erro
     assert.equal(existsSync(lockFilePath), false, "the lock is released on the fail-closed path — no permanent lock");
     assert.notEqual(readGateProcessGroup(dir), undefined, "the sidecar is retained so the orphan stays visible to the next attempt");
   } finally {
+    clearGateProcessGroup(dir);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The 424242 sidecar above carries a MATCHING injected identity. These two pin
+// the pgid-REUSE half (final-loop round-2 finding): a live group answering for
+// a recorded id is only reaped when it provably IS the original gate group.
+
+test("FG-425 ownership: a REUSED pgid (leader identity mismatch) is never signalled — the original group is provably dead; sidecar cleared, window entered", async () => {
+  const dir = tmp("forge-fg425-own-reuse-");
+  const { spawn } = await import("node:child_process");
+  // A live DECOY process group standing in for an unrelated process that got
+  // the recorded id after the original gate group fully exited.
+  const decoy = spawn(process.execPath, ["-e", "setTimeout(()=>{}, 30000)"], { detached: true, stdio: "ignore" });
+  const decoyPid = decoy.pid!;
+  try {
+    const { lockFilePath } = projectIntegrationLockKey(dir);
+    mkdirSync(dirname(lockFilePath), { recursive: true });
+    // Recorded token ≠ the decoy leader's real start time → id reuse.
+    writeFileSync(`${lockFilePath}.gate`, JSON.stringify({
+      pgid: decoyPid, runId: "run-original", recordedAt: new Date().toISOString(),
+      leaderStartedAt: "Thu Jan  1 00:00:00 1970",
+    }));
+
+    const lines: string[] = [];
+    let entered = false;
+    await withProjectIntegrationLock(dir, "run-contender", async () => { entered = true; }, {
+      pollMs: 10, log: (l) => lines.push(l), reap: { pollMs: 10 },
+    });
+
+    assert.equal(entered, true, "a provably-dead original group must not block the window");
+    assert.equal(readGateProcessGroup(dir), undefined, "the residual is resolved — sidecar cleared");
+    assert.ok(lines.some((l) => /REUSED by an unrelated process/.test(l)), `operator sees the reuse resolution: ${JSON.stringify(lines)}`);
+    // THE point: the unrelated group was never killed.
+    assert.doesNotThrow(() => process.kill(decoyPid, 0), "the impostor group must be untouched");
+  } finally {
+    try { process.kill(-decoyPid, "SIGKILL"); } catch { /* already gone */ }
+    clearGateProcessGroup(dir);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("FG-425 ownership: a live group with UNVERIFIABLE identity (no recorded token) fails CLOSED without signalling it", async () => {
+  const dir = tmp("forge-fg425-own-noident-");
+  const { spawn } = await import("node:child_process");
+  const decoy = spawn(process.execPath, ["-e", "setTimeout(()=>{}, 30000)"], { detached: true, stdio: "ignore" });
+  const decoyPid = decoy.pid!;
+  try {
+    const { lockFilePath } = projectIntegrationLockKey(dir);
+    mkdirSync(dirname(lockFilePath), { recursive: true });
+    // A legacy/degraded sidecar: pgid recorded, no leader identity.
+    writeFileSync(`${lockFilePath}.gate`, JSON.stringify({
+      pgid: decoyPid, runId: "run-legacy", recordedAt: new Date().toISOString(),
+    }));
+
+    let entered = false;
+    await assert.rejects(
+      withProjectIntegrationLock(dir, "run-contender", async () => { entered = true; }, {
+        pollMs: 10, log: () => { /* silence */ }, reap: { pollMs: 10 },
+      }),
+      (e: Error) => /identity cannot be verified/.test(e.message)
+        && new RegExp(String(decoyPid)).test(e.message)
+        && /no leader identity was recorded/.test(e.message),
+      "the error must say WHY the group can't be reaped and hand over the manual check",
+    );
+    assert.equal(entered, false);
+    assert.equal(existsSync(lockFilePath), false, "lock released — no permanent lock");
+    assert.notEqual(readGateProcessGroup(dir), undefined, "sidecar retained for the operator");
+    assert.doesNotThrow(() => process.kill(decoyPid, 0), "an UNVERIFIED group must never be signalled");
+  } finally {
+    try { process.kill(-decoyPid, "SIGKILL"); } catch { /* already gone */ }
     clearGateProcessGroup(dir);
     rmSync(dir, { recursive: true, force: true });
   }
