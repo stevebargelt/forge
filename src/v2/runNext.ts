@@ -1417,15 +1417,30 @@ async function dispatchFanoutStep(args: {
         });
         return "failed";
       }
+      // For non-worktree re-entry (or worktree re-entry before reds ran),
+      // complete directly — the human advance decision was already recorded when
+      // gate advance --force ran, so re-gating via finalizePrimary would bounce
+      // a verdict/human gate back to awaiting_gate instead of completing (FG-353).
+      const completeReEntry = (): string => {
+        if (!markTaskComplete(existingParent.id, savedResult)) {
+          return getTask(existingParent.id)?.status ?? "failed";
+        }
+        logEvent("task.completed", { runId: args.runId, taskId: existingParent.id });
+        return "complete";
+      };
+
       if (
         isWorktreeModeEnabled() &&
         redsAlreadyRan &&
         integrationBranchExists(args.projectDir, args.runId, existingParent.id)
       ) {
         // Skip child dispatch and red dispatch — go directly to integration->HEAD merge.
-        // FG-425: integration→HEAD merge + host gate + shared-checkout cleanup —
-        // exclusive per (canonicalized) projectDir across runs.
-        const gateWindow = await withProjectIntegrationLock(args.projectDir, args.runId, async (): Promise<"ok" | "failed"> => {
+        // FG-425: integration→HEAD merge + host gate + shared-checkout cleanup +
+        // the parent's completion — exclusive per (canonicalized) projectDir
+        // across runs. markTaskComplete stays INSIDE the window: a contender that
+        // entered between cleanup and completion would gate against a HEAD this
+        // run has not yet claimed.
+        return await withProjectIntegrationLock(args.projectDir, args.runId, async (): Promise<string> => {
           const headMerge = mergeIntegrationBranchToHead(args.projectDir, args.runId, existingParent.id);
           logEvent("integration.merged_to_head", {
             runId: args.runId,
@@ -1474,9 +1489,8 @@ async function dispatchFanoutStep(args: {
             }
           }
           cleanupIntegrationWorktree(args.projectDir, args.runId, existingParent.id);
-          return "ok";
+          return completeReEntry();
         });
-        if (gateWindow === "failed") return "failed";
       } else if (isWorktreeModeEnabled() && redsAlreadyRan) {
         // Worktree mode is on and reds already ran (integration was built and
         // reviewed) but the integration branch is now missing — inconsistent state.
@@ -1492,15 +1506,7 @@ async function dispatchFanoutStep(args: {
         });
         return "failed";
       }
-      // For non-worktree re-entry (or worktree re-entry before reds ran),
-      // complete directly — the human advance decision was already recorded when
-      // gate advance --force ran, so re-gating via finalizePrimary would bounce
-      // a verdict/human gate back to awaiting_gate instead of completing (FG-353).
-      if (!markTaskComplete(existingParent.id, savedResult)) {
-        return getTask(existingParent.id)?.status ?? "failed";
-      }
-      logEvent("task.completed", { runId: args.runId, taskId: existingParent.id });
-      return "complete";
+      return completeReEntry();
     }
     // Original pendingHasChildren guard unchanged below.
     const pendingHasChildren = allTasks.some(
@@ -1767,9 +1773,12 @@ async function dispatchFanoutStep(args: {
 
     // FG-353 Change 7: reds passed — merge integration branch to HEAD and clean up.
     if (integrationWorktreePath) {
-      // FG-425: integration→HEAD merge + host gate + shared-checkout cleanup —
-      // exclusive per (canonicalized) projectDir across runs.
-      const gateWindow = await withProjectIntegrationLock(args.projectDir, args.runId, async (): Promise<"ok" | "failed"> => {
+      // FG-425: integration→HEAD merge + host gate + shared-checkout cleanup +
+      // the parent's finalize — exclusive per (canonicalized) projectDir across
+      // runs. finalizePrimary stays INSIDE the window: a contender that entered
+      // between cleanup and finalize would gate against a HEAD this run has not
+      // yet claimed.
+      return await withProjectIntegrationLock(args.projectDir, args.runId, async (): Promise<string> => {
         const headMerge = mergeIntegrationBranchToHead(args.projectDir, args.runId, parentId);
         logEvent("integration.merged_to_head", {
           runId: args.runId,
@@ -1810,18 +1819,17 @@ async function dispatchFanoutStep(args: {
           }
         }
         cleanupIntegrationWorktree(args.projectDir, args.runId, parentId);
-        return "ok";
+        return finalizePrimary(parentId, args.runId, step.gate, parentResult);
       });
-      if (gateWindow === "failed") return "failed";
     }
     return finalizePrimary(parentId, args.runId, step.gate, parentResult);
   }
 
   // No reds path: merge integration to HEAD directly before finalizing.
   if (integrationWorktreePath) {
-    // FG-425: integration→HEAD merge + host gate + shared-checkout cleanup —
-    // exclusive per (canonicalized) projectDir across runs.
-    const gateWindow = await withProjectIntegrationLock(args.projectDir, args.runId, async (): Promise<"ok" | "failed"> => {
+    // FG-425: integration→HEAD merge + host gate + shared-checkout cleanup +
+    // the parent's finalize — exclusive per (canonicalized) projectDir across runs.
+    return await withProjectIntegrationLock(args.projectDir, args.runId, async (): Promise<string> => {
       const headMerge = mergeIntegrationBranchToHead(args.projectDir, args.runId, parentId);
       logEvent("integration.merged_to_head", {
         runId: args.runId,
@@ -1862,9 +1870,8 @@ async function dispatchFanoutStep(args: {
         }
       }
       cleanupIntegrationWorktree(args.projectDir, args.runId, parentId);
-      return "ok";
+      return finalizePrimary(parentId, args.runId, step.gate, parentResult);
     });
-    if (gateWindow === "failed") return "failed";
   }
 
   return finalizePrimary(parentId, args.runId, step.gate, parentResult);

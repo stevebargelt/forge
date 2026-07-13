@@ -408,3 +408,252 @@ function makeTmpAsGitRepo(logPath: string): string {
   initGitRepoWithJournalingGate(dir, logPath, "W", 10);
   return dir;
 }
+
+// ── The finalize edge of the window (FG-425 review) ─────────────────────────
+// The three fan-out merge/gate sites used to release the project lock after
+// cleanup but BEFORE finalizing the parent task, so the protected window ended
+// one step early: a same-project contender could enter it while the holding run
+// had merged to HEAD but not yet claimed that HEAD by completing its parent.
+// The single-step path never had the gap (its finalize is inside the closure).
+//
+// The proof holds the holder INSIDE finalizePrimary (the crash-point seam) for
+// HOLD_MS and starts a real second process that tries to take the same
+// project's window during that hold. With finalize inside the window the
+// contender is excluded until the parent is complete; with finalize outside it
+// walks straight in and observes a `running` parent.
+
+const FANOUT_WORKFLOW: Workflow = {
+  name: "fg425-gate-lock-fanout-test",
+  description: "FG-425 finalize-inside-the-window regression: source → fanout build, no reds",
+  inputs: [],
+  steps: [
+    { id: "source", agent: "planner", gate: "auto", manual: false, depends_on: [], runtime: "fg425-gate-lock-test", reds: [] },
+    {
+      id: "build",
+      agent: "engineer",
+      gate: "auto",
+      manual: false,
+      depends_on: ["source"],
+      runtime: "fg425-gate-lock-test",
+      reds: [],
+      fanout: {
+        from_upstream: { step: "source", array_key: "items", input_key: "item" },
+        max_concurrency: 2,
+        failure_mode: "continue",
+      },
+    },
+  ],
+};
+
+const FINALIZE_HOLD_MS = 1500;
+
+/** The holder: a real forge process running the fan-out workflow, which blocks
+ *  synchronously inside the fan-out parent's finalizePrimary and journals the
+ *  hold. Hit 1 of the crash point is the `source` primary; hit 2 is the fan-out
+ *  parent (children complete via markTaskComplete and never reach it). */
+function writeFanoutHolderScript(dir: string): string {
+  const repoRoot = process.cwd();
+  const p = join(dir, "fg425-finalize-holder.mjs");
+  writeFileSync(p, `
+import { writeFileSync, mkdirSync, appendFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
+
+const [, , projectDir, title, finalizeLog, runIdFile] = process.argv;
+
+Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
+
+const { startRun } = await import(pathToFileURL(${JSON.stringify(join(repoRoot, "src/v2/startRun.ts"))}).href);
+const { runNext } = await import(pathToFileURL(${JSON.stringify(join(repoRoot, "src/v2/runNext.ts"))}).href);
+const { setCrashHookForTest } = await import(pathToFileURL(${JSON.stringify(join(repoRoot, "src/v2/crash-points.ts"))}).href);
+const { tasksForRun } = await import(pathToFileURL(${JSON.stringify(join(repoRoot, "src/store/tasks.ts"))}).href);
+
+const WORKFLOW = ${JSON.stringify(FANOUT_WORKFLOW)};
+const HOLD_MS = ${FINALIZE_HOLD_MS};
+
+// A SYNCHRONOUS hold — finalizePrimary is sync, so this pins the process
+// mid-finalize exactly as a slow status write would.
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+let finalizeHits = 0;
+setCrashHookForTest((point) => {
+  if (point !== "finalizePrimary:before-status-write") return;
+  finalizeHits++;
+  if (finalizeHits !== 2) return;
+  appendFileSync(finalizeLog, "F start " + Date.now() + "\\n");
+  sleepSync(HOLD_MS);
+  appendFileSync(finalizeLog, "F end " + Date.now() + "\\n");
+});
+
+function extractTaskId(args) {
+  const i = args.indexOf("--name");
+  return i >= 0 ? (args[i + 1] ?? "").replace(/^forge-/, "") : "";
+}
+
+function findProjectMountHost(args) {
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "-v") {
+      const [host, container] = (args[i + 1] ?? "").split(":");
+      if (container?.startsWith("/project")) return host;
+    }
+  }
+  return undefined;
+}
+
+const dockerExec = async ({ args, stdoutPath, stderrPath }) => {
+  const taskId = extractTaskId(args);
+  const worktreePath = findProjectMountHost(args);
+  writeFileSync(stderrPath, "");
+  let result;
+  if (taskId.startsWith("task-source-")) {
+    // The source primary commits nothing — its merge is "already up to date".
+    result = { status: "complete", tests_run: 1, items: ["item-a", "item-b"] };
+  } else {
+    // Each child commits a distinct file so the integration merge is clean.
+    const fileName = taskId + ".ts";
+    writeFileSync(join(worktreePath, fileName), "export const x = 1;\\n");
+    execFileSync("git", ["add", "."], { cwd: worktreePath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "child output"], { cwd: worktreePath, stdio: "ignore" });
+    result = { status: "complete", tests_run: 1, files_modified: [fileName] };
+  }
+  const dir = dirname(stdoutPath);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "result.json"), JSON.stringify(result));
+  writeFileSync(stdoutPath, "stub stdout");
+  writeFileSync(join(dir, "container.stderr.log"), "");
+  return 0;
+};
+
+const { runId } = startRun({ workflow: WORKFLOW, title, inputs: {}, projectDir });
+writeFileSync(runIdFile, runId);
+
+await runNext({ runId, workflow: WORKFLOW, dockerExec });  // wave 1: source
+await runNext({ runId, workflow: WORKFLOW, dockerExec });  // wave 2: fanout children + parent
+
+const parent = tasksForRun(runId).find((t) => t.phase === "build" && t.parentId === undefined);
+console.log(JSON.stringify({ runId, buildStatus: parent?.status ?? "missing", buildError: parent?.error ?? null }));
+`);
+  return p;
+}
+
+/** The contender: a second real process that waits until the holder is INSIDE
+ *  its finalize, then tries to take the same project's integration window and
+ *  records the holder's parent status at the moment it gets in. */
+function writeContenderScript(dir: string): string {
+  const repoRoot = process.cwd();
+  const p = join(dir, "fg425-contender.mjs");
+  writeFileSync(p, `
+import { appendFileSync, readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const [, , projectDir, finalizeLog, runIdFile, contenderLog] = process.argv;
+
+Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
+
+const { withProjectIntegrationLock } = await import(pathToFileURL(${JSON.stringify(join(repoRoot, "src/v2/project-integration-lock.ts"))}).href);
+const { tasksForRun } = await import(pathToFileURL(${JSON.stringify(join(repoRoot, "src/store/tasks.ts"))}).href);
+
+function read(file) {
+  try { return readFileSync(file, "utf8"); } catch { return ""; }
+}
+
+const deadline = Date.now() + 60_000;
+while (!read(finalizeLog).includes("F start")) {
+  if (Date.now() > deadline) throw new Error("contender: holder never reached its finalize");
+  await new Promise((r) => setTimeout(r, 10));
+}
+
+const runId = read(runIdFile).trim();
+appendFileSync(contenderLog, "C attempt " + Date.now() + "\\n");
+await withProjectIntegrationLock(projectDir, "contender-run", () => {
+  const parent = tasksForRun(runId).find((t) => t.phase === "build" && t.parentId === undefined);
+  appendFileSync(contenderLog, "C enter " + Date.now() + " " + (parent?.status ?? "missing") + "\\n");
+}, { pollMs: 25 });
+
+console.log(JSON.stringify({ ok: true }));
+`);
+  return p;
+}
+
+function spawnScript(script: string, dbPath: string, argv: string[], label: string): Promise<Record<string, unknown>> {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(process.execPath, ["--import", "tsx", script, ...argv], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        FORGE_DB_PATH: dbPath,
+        FORGE_WORKTREES: "1",
+        FORGE_WORKTREE_IGNORE_DIRTY: "1",
+        ANTHROPIC_API_KEY: "sk-stub",
+        NO_NOTIFY: "1",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (d) => { out += String(d); });
+    child.stderr.on("data", (d) => { err += String(d); });
+    child.on("close", (code) => {
+      if (code !== 0) return reject(new Error(`${label} exited ${code}: ${err}\n${out}`));
+      try {
+        resolvePromise(JSON.parse(out.trim().split("\n").filter(Boolean).pop()!) as Record<string, unknown>);
+      } catch (e) {
+        reject(new Error(`${label} output unparseable: ${String(e)}\n${out}\n${err}`));
+      }
+    });
+  });
+}
+
+test("FG-425 e2e (cross-process): a same-project contender is excluded until the fan-out parent is FINALIZED, not merely merged", async () => {
+  const repo = makeTmpDir();
+  const scratch = makeTmpDir();
+  const gateLog = join(scratch, "gate.log");
+  const finalizeLog = join(scratch, "finalize.log");
+  const contenderLog = join(scratch, "contender.log");
+  const runIdFile = join(scratch, "holder-runid.txt");
+  const dbPath = join(scratch, "forge-test.db");
+  initGitRepoWithJournalingGate(repo, gateLog, "P", 50);
+
+  const holderScript = writeFanoutHolderScript(scratch);
+  const contenderScript = writeContenderScript(scratch);
+
+  // Same schema-migration warmup as the tests above (own repo, tag W).
+  await spawnDriver(writeDriverScript(scratch), dbPath, makeTmpAsGitRepo(gateLog), "fg425 migrate-warmup-3", "none");
+
+  // Contender first: it boots and parks on the finalize journal, so node/tsx
+  // startup is not part of the race it has to win.
+  const contenderDone = spawnScript(contenderScript, dbPath, [repo, finalizeLog, runIdFile, contenderLog], "contender");
+  const holderDone = spawnScript(holderScript, dbPath, [repo, "fg425 finalize-holder", finalizeLog, runIdFile], "holder");
+  const [holder] = await Promise.all([holderDone, contenderDone]);
+
+  assert.equal(holder["buildStatus"], "complete", `fan-out parent must complete green: ${String(holder["buildError"])}`);
+
+  const fin = readFileSync(finalizeLog, "utf8");
+  const con = readFileSync(contenderLog, "utf8");
+  const fStart = Number(/F start (\d+)/.exec(fin)?.[1]);
+  const fEnd = Number(/F end (\d+)/.exec(fin)?.[1]);
+  const cAttempt = Number(/C attempt (\d+)/.exec(con)?.[1]);
+  const enter = /C enter (\d+) (\w+)/.exec(con);
+  assert.ok(fStart && fEnd && cAttempt && enter, `expected both journals populated — finalize: ${fin} contender: ${con}`);
+  const cEnter = Number(enter![1]);
+
+  // Guard against a vacuous pass: the contender must genuinely have been
+  // contending WHILE the parent was mid-finalize.
+  assert.ok(
+    cAttempt < fEnd,
+    `inconclusive, not a pass: the contender only attempted the window after the finalize hold ended (attempt ${cAttempt}, hold ended ${fEnd})`,
+  );
+  assert.ok(
+    cEnter >= fEnd,
+    `FG-425 REGRESSION: a same-project contender entered the integration window while the fan-out parent was still being finalized ` +
+      `(entered ${cEnter}, finalize ran ${fStart}→${fEnd}) — the merge landed on HEAD but the holding run had not yet claimed it`,
+  );
+  assert.equal(
+    enter![2],
+    "complete",
+    "a contender inside the window must never observe a merged-but-unfinalized parent",
+  );
+});
