@@ -37,6 +37,7 @@ import {
   renewPublicationMutex,
   storeNowMs,
   tryAcquirePublicationMutex,
+  tryAcquirePublicationMutexAsLaneOwner,
   unfinishedPublications,
   updatePublicationAttempt,
   type ParkReason,
@@ -303,7 +304,16 @@ function mergeSourceIntoCandidate(
  *  but not across the mutex wait would leave a live holder able to lapse while
  *  blocked here and be marked abandoned by a later attempt: the same FIFO break
  *  the lease exists to prevent, moved one span later. Every span the owner can
- *  block in renews. */
+ *  block in renews.
+ *
+ *  And renewal is not enough on its own: an owner CAN still be taken over across a
+ *  span it did not renew (validation that outran the pre-extended lease, a mutex
+ *  wait entered after that). Such an owner is no longer in the lane, so it must
+ *  never enter the window — a taken-over attempt that published anyway would move
+ *  the base of the attempt that stepped past it, out of FIFO order. Two checks,
+ *  because a renewal alone is a TOCTOU: the lease renewal tells us we still own the
+ *  entry, and the GRANT itself re-checks lane ownership inside the same immediate
+ *  txn, so a takeover cannot land between them. */
 async function acquireMutex(
   projectKey: string,
   attemptId: string,
@@ -314,9 +324,10 @@ async function acquireMutex(
   const startedAt = Date.now();
   let lastReportMs = -Infinity;
   for (;;) {
-    renewLease(attemptId);
-    const got = tryAcquirePublicationMutex({ projectKey, attemptId, runId, ttlMs: MUTEX_TTL_MS });
+    if (!renewLease(attemptId)) throw new LaneTakenOverError(attemptId, canonicalDir);
+    const got = tryAcquirePublicationMutexAsLaneOwner({ projectKey, attemptId, runId, ttlMs: MUTEX_TTL_MS });
     if (got.acquired) return;
+    if (got.reason === "lane_lost") throw new LaneTakenOverError(attemptId, canonicalDir);
     const elapsedMs = Date.now() - startedAt;
     if (elapsedMs - lastReportMs >= 10_000) {
       lastReportMs = elapsedMs;

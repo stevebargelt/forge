@@ -56,13 +56,20 @@ export function registerPublish(program: Command): void {
     .description("Show the FIFO publication lane, in durable enqueue order")
     .option("-p, --project <dir>", "project directory (canonicalized); defaults to every project")
     .option("-a, --all", "include terminal (done/abandoned) entries")
-    .action((opts: { project?: string; all?: boolean }) => {
+    .option("--json", "emit the lane, the window holder and the store clock as JSON")
+    .action((opts: { project?: string; all?: boolean; json?: boolean }) => {
       const nowMs = storeNowMs();
       if (opts.project) {
         const { key, canonicalDir } = projectIdentity(opts.project);
         const entries = opts.all ? laneForProject(key) : activeLaneForProject(key);
-        console.log(`lane for ${canonicalDir}`);
         const holder = publicationMutexHolder(key);
+        if (opts.json) {
+          console.log(
+            JSON.stringify({ nowMs, projectKey: key, canonicalDir, holder: holder ?? null, entries }, null, 2),
+          );
+          return;
+        }
+        console.log(`lane for ${canonicalDir}`);
         if (holder) {
           console.log(
             `  publication window HELD by run ${holder.runId} (attempt ${holder.attemptId}) — CAS + fast-forward only`,
@@ -76,6 +83,12 @@ export function registerPublish(program: Command): void {
         return;
       }
       const all = allLaneEntries().filter((e) => opts.all || e.state === "queued" || e.state === "holding");
+      if (opts.json) {
+        // No project means no single window to name: the holder is per-project, and
+        // reporting one project's holder against every project's lane would be a lie.
+        console.log(JSON.stringify({ nowMs, entries: all }, null, 2));
+        return;
+      }
       if (all.length === 0) {
         console.log("no publication lane entries");
         return;
@@ -87,10 +100,15 @@ export function registerPublish(program: Command): void {
     .command("attempts")
     .description("Show the durable {baseSha, candidateSha, publishedSha, target} record per publication attempt")
     .option("-p, --project <dir>", "project directory (canonicalized); defaults to every project")
-    .action((opts: { project?: string }) => {
+    .option("--json", "emit the durable per-attempt record as JSON")
+    .action((opts: { project?: string; json?: boolean }) => {
       const attempts = opts.project
         ? publicationAttemptsForProject(projectIdentity(opts.project).key)
         : allPublicationAttempts();
+      if (opts.json) {
+        console.log(JSON.stringify({ attempts }, null, 2));
+        return;
+      }
       if (attempts.length === 0) {
         console.log("no publication attempts");
         return;

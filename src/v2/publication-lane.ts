@@ -136,8 +136,14 @@ export function preExtendLeaseForGate(attemptId: string): void {
   extendLaneLease(attemptId, gateSpanLeaseMs());
 }
 
-export function renewLease(attemptId: string, ttlMs: number = LANE_BASE_TTL_MS): void {
-  extendLaneLease(attemptId, ttlMs);
+/** Renew our lease. Returns false when we NO LONGER OWN an active lane entry — a
+ *  later attempt found our lease lapsed and took the lane over while we were in a
+ *  span we could not renew across. A caller about to do anything that touches the
+ *  target must fail closed on that (LaneTakenOverError); a caller that is merely
+ *  keeping the lease warm (the heartbeat) can ignore it, because the load-bearing
+ *  check is the one the window makes. */
+export function renewLease(attemptId: string, ttlMs: number = LANE_BASE_TTL_MS): boolean {
+  return extendLaneLease(attemptId, ttlMs);
 }
 
 /** Renew cadence for the heartbeat below: comfortably inside LANE_BASE_TTL_MS, so

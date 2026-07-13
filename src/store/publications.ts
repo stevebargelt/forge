@@ -362,19 +362,36 @@ export function laneTick(attemptId: string, leaseTtlMs: number): LaneTurn {
 }
 
 /** Pre-extend OUR lease across a declared blocking span (the synchronous gate).
- *  See publication-lane.ts for why a timer-driven heartbeat cannot do this job. */
-export function extendLaneLease(attemptId: string, ttlMs: number): void {
+ *  See publication-lane.ts for why a timer-driven heartbeat cannot do this job.
+ *
+ *  Scoped to an ACTIVE entry, and returns false when there isn't one: a renewal
+ *  that wrote to a row a takeover had already marked terminal would resurrect the
+ *  lease of an attempt a second process has stepped past — the lane would then
+ *  hold two live owners, which is the FIFO break the lease exists to prevent. The
+ *  caller must fail closed on false. */
+export function extendLaneLease(attemptId: string, ttlMs: number): boolean {
   const db = getDb();
-  db.transaction(() => {
-    db.prepare(`UPDATE publication_lane SET lease_expires_at_ms = ? WHERE attempt_id = ?`)
+  return db.transaction((): boolean => {
+    const res = db
+      .prepare(
+        `UPDATE publication_lane SET lease_expires_at_ms = ?
+          WHERE attempt_id = ? AND state IN ('queued', 'holding')`,
+      )
       .run(storeNowMs() + ttlMs, attemptId);
+    return res.changes > 0;
   }).immediate();
 }
 
+/** Leave the lane. Scoped to an ACTIVE entry so a takeover's `abandoned` mark is
+ *  never overwritten with `done` on the way out — the row is the durable evidence
+ *  that this attempt was stepped past. */
 export function releaseLaneEntry(attemptId: string, state: Extract<LaneState, "done" | "abandoned">): void {
   const db = getDb();
   db.transaction(() => {
-    db.prepare(`UPDATE publication_lane SET state = ? WHERE attempt_id = ?`).run(state, attemptId);
+    db.prepare(
+      `UPDATE publication_lane SET state = ?
+        WHERE attempt_id = ? AND state IN ('queued', 'holding')`,
+    ).run(state, attemptId);
   }).immediate();
 }
 
@@ -411,7 +428,10 @@ export type MutexHolder = {
  *  else has it (caller waits and retries). An EXPIRED holder is taken over in
  *  this same immediate txn — no liveness probe, no reaping (AD-7): a crashed
  *  holder's mutex must never wedge the project, and taking it over is safe
- *  because the CAS inside the window is what actually protects the target. */
+ *  because the CAS inside the window is what actually protects the target.
+ *
+ *  Used bare ONLY by recovery, which holds the window without a lane entry by
+ *  design. A PUBLISHER must go through tryAcquirePublicationMutexAsLaneOwner. */
 export function tryAcquirePublicationMutex(rec: {
   projectKey: string;
   attemptId: string;
@@ -430,6 +450,67 @@ export function tryAcquirePublicationMutex(rec: {
     if (held && held.expires_at_ms >= now && held.attempt_id !== rec.attemptId) {
       return {
         acquired: false,
+        holder: {
+          projectKey: held.project_key,
+          attemptId: held.attempt_id,
+          runId: held.run_id,
+          acquiredAtMs: held.acquired_at_ms,
+          expiresAtMs: held.expires_at_ms,
+        },
+      };
+    }
+    db.prepare(
+      `INSERT INTO publication_locks (project_key, attempt_id, run_id, acquired_at_ms, expires_at_ms)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(project_key) DO UPDATE SET
+         attempt_id = excluded.attempt_id,
+         run_id = excluded.run_id,
+         acquired_at_ms = excluded.acquired_at_ms,
+         expires_at_ms = excluded.expires_at_ms`,
+    ).run(rec.projectKey, rec.attemptId, rec.runId, now, now + rec.ttlMs);
+    return { acquired: true };
+  }).immediate();
+}
+
+export type LaneOwnerAcquisition =
+  | { acquired: true }
+  | { acquired: false; reason: "held"; holder: MutexHolder }
+  /** Our lane entry went terminal underneath us: a later attempt found our lease
+   *  lapsed and took the lane over. We are not in the lane any more, so we must
+   *  never enter the window — a taken-over attempt that published anyway would move
+   *  the base of the attempt that stepped past it, out of FIFO order. */
+  | { acquired: false; reason: "lane_lost" };
+
+/** The PUBLISHER's acquire: the same mutex, granted only while the caller still
+ *  owns an ACTIVE lane entry — checked in the SAME immediate txn as the grant, so a
+ *  takeover cannot land between the check and the window. A renewal alone would be
+ *  a TOCTOU; this is what actually keeps a taken-over owner out of the target. */
+export function tryAcquirePublicationMutexAsLaneOwner(rec: {
+  projectKey: string;
+  attemptId: string;
+  runId: string;
+  ttlMs: number;
+}): LaneOwnerAcquisition {
+  const db = getDb();
+  return db.transaction((): LaneOwnerAcquisition => {
+    const now = storeNowMs();
+    const lane = db
+      .prepare(`SELECT state FROM publication_lane WHERE attempt_id = ?`)
+      .get(rec.attemptId) as { state: string } | undefined;
+    if (!lane || (lane.state !== "queued" && lane.state !== "holding")) {
+      return { acquired: false, reason: "lane_lost" };
+    }
+
+    const held = db
+      .prepare(`SELECT * FROM publication_locks WHERE project_key = ?`)
+      .get(rec.projectKey) as
+      | { project_key: string; attempt_id: string; run_id: string; acquired_at_ms: number; expires_at_ms: number }
+      | undefined;
+
+    if (held && held.expires_at_ms >= now && held.attempt_id !== rec.attemptId) {
+      return {
+        acquired: false,
+        reason: "held",
         holder: {
           projectKey: held.project_key,
           attemptId: held.attempt_id,

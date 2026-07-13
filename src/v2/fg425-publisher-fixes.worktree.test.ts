@@ -30,6 +30,7 @@ import {
   setPublicationClockOffsetForTest,
   storeNowMs,
   tryAcquirePublicationMutex,
+  tryAcquirePublicationMutexAsLaneOwner,
   updatePublicationAttempt,
 } from "../store/publications.js";
 import { insertRun } from "../store/runs.js";
@@ -646,6 +647,121 @@ test("FG-425: a publisher that LOST the mutex fails closed — it never checks o
     "attempt-thief",
     "releasing our own mutex must not unlink the holder that took it over from us",
   );
+});
+
+// ─── (8) a TAKEN-OVER owner can never enter the publication window ────────────
+//
+// THE DEFECT: renewal wrote the lease of whatever row it named, and the mutex was
+// granted to whoever asked. So an owner taken over during validation — or while
+// BLOCKED on the mutex, a span it enters only after the takeover could have landed
+// — resurrected its own abandoned lease on the next renewal tick, took the window,
+// and published. Two Forge-owned attempts would then be publishing out of FIFO
+// order, moving each other's base: exactly what the lane exists to prevent.
+//
+// The fix fails closed in the same immediate txn that grants the window: renewal is
+// scoped to an ACTIVE entry (so it cannot resurrect a terminal one), and the grant
+// re-checks lane ownership itself, so a takeover cannot race the check.
+
+test("FG-425 (finding 1): an owner TAKEN OVER while blocked on the mutex never enters the window — it parks", async () => {
+  const runId = "run-takenover-at-mutex";
+  const { dir, branch } = makeProject(runId);
+  const { key } = projectIdentity(dir);
+  const baseBefore = readTargetSha(localTargetFor(dir));
+
+  // A squatter holds the window, so our publisher validates and then BLOCKS in the
+  // mutex wait — the span where a takeover can land on an owner that is still alive.
+  const squatter = "attempt-squatter";
+  assert.equal(
+    tryAcquirePublicationMutex({ projectKey: key, attemptId: squatter, runId: "run-other", ttlMs: 600_000 }).acquired,
+    true,
+    "setup: the squatter holds the window",
+  );
+
+  const publishing = publishIntegration({
+    runId,
+    taskId: "task-build-1",
+    projectDir: dir,
+    sources: [{ branch, label: "task" }],
+    lane: { pollMs: 10, log: () => {} },
+    alsoValidate: ok,
+  });
+
+  const attemptId = await (async () => {
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const entry = laneForProject(key)[0];
+      if (entry && getPublicationAttempt(entry.attemptId)?.state === "publishing") return entry.attemptId;
+      assert.ok(Date.now() < deadline, "setup: the publisher never reached the mutex wait");
+      await new Promise<void>((r) => setTimeout(r, 10));
+    }
+  })();
+
+  // A later attempt takes the lane over (written directly — AD-7 forbids any probe;
+  // a takeover is nothing but a durable timestamp having lapsed).
+  markLaneAbandoned(attemptId);
+  const leaseAtTakeover = laneForProject(key).find((e) => e.attemptId === attemptId)!.leaseExpiresAtMs;
+
+  // Now let it through the mutex. It must NOT publish: it is no longer in the lane.
+  releasePublicationMutex(key, squatter);
+  const out = await withTimeout(publishing, 15_000, "a taken-over publisher HUNG in the mutex wait");
+
+  assert.equal(out.kind, "parked", `a taken-over owner must PARK, not publish: ${JSON.stringify(out)}`);
+  if (out.kind !== "parked") return;
+  assert.equal(out.reason, "lane_taken_over", "and the reason must be NAMED");
+  assert.equal(
+    readTargetSha(localTargetFor(dir)),
+    baseBefore,
+    "a taken-over attempt publishes NOTHING — it lost the lane, so it may not move the base of the attempt " +
+      "that stepped past it",
+  );
+  assert.equal(
+    publicationMutexHolder(key)?.attemptId,
+    undefined,
+    "and it never took the publication window at all — the grant re-checks lane ownership in its own txn",
+  );
+
+  // The two halves of the fix, each pinned: a terminal entry's lease is NOT
+  // resurrected by a renewal, and leaving the lane does not overwrite the takeover.
+  assert.equal(
+    laneForProject(key).find((e) => e.attemptId === attemptId)!.leaseExpiresAtMs,
+    leaseAtTakeover,
+    "renewal must not write to an abandoned row — a resurrected lease is a second live owner in the lane",
+  );
+  assert.equal(
+    laneForProject(key).find((e) => e.attemptId === attemptId)!.state,
+    "abandoned",
+    "the takeover mark is durable evidence; leaving the lane must not paper over it with `done`",
+  );
+});
+
+test("FG-425 (finding 1): the publisher's mutex grant is refused outright once the lane entry is gone", () => {
+  const runId = "run-laneowner-grant";
+  const { dir } = makeProject(runId);
+  const { key } = projectIdentity(dir);
+
+  const mine = newAttemptId();
+  recordPublicationIntent({
+    attemptId: mine,
+    projectKey: key,
+    canonicalDir: dir,
+    runId,
+    taskId: "task-build-1",
+    target: `local:${dir}#main`,
+    leaseTtlMs: LANE_BASE_TTL_MS,
+  });
+  assert.equal(laneTick(mine, LANE_BASE_TTL_MS).ready, true, "setup: we are head of the lane");
+  assert.equal(
+    tryAcquirePublicationMutexAsLaneOwner({ projectKey: key, attemptId: mine, runId, ttlMs: MUTEX_TTL_MS }).acquired,
+    true,
+    "an ACTIVE lane owner takes the window normally",
+  );
+  releasePublicationMutex(key, mine);
+
+  markLaneAbandoned(mine);
+  const got = tryAcquirePublicationMutexAsLaneOwner({ projectKey: key, attemptId: mine, runId, ttlMs: MUTEX_TTL_MS });
+  assert.equal(got.acquired, false, "a taken-over attempt is refused the window even when NOBODY else holds it");
+  assert.equal(got.acquired === false && got.reason, "lane_lost", "and the refusal is NAMED, not a generic contention");
+  assert.equal(publicationMutexHolder(key), undefined, "a refused grant writes no lock row");
 });
 
 // ── helpers ───────────────────────────────────────────────────────────────────

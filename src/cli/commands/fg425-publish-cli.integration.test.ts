@@ -31,6 +31,9 @@ import {
   tryAcquirePublicationMutex,
   updatePublicationAttempt,
   laneTick,
+  type LaneEntry,
+  type MutexHolder,
+  type PublicationAttempt,
 } from "../../store/publications.js";
 import { projectIdentity } from "../../v2/project-identity.js";
 import { publishIntegration } from "../../v2/integration-publisher.js";
@@ -362,6 +365,65 @@ test("FG-425: `forge publish recover` on an unknown attempt fails loudly rather 
   const { err, exitCode } = await forgePublish("recover", "att-does-not-exist");
   assert.match(err, /no publication attempt att-does-not-exist/);
   assert.equal(exitCode, 1, "an unknown attempt must be a non-zero exit, not a silent no-op");
+});
+
+test("FG-425 (operator surface): `--json` gives the durable SHA record and the queue/holder state a machine can read", async () => {
+  const { dir, branch, seed } = makeProject("run-cli-json");
+  const { key, canonicalDir } = projectIdentity(dir);
+
+  const outcome = await publishIntegration({
+    runId: "run-cli-json",
+    taskId: "task-build-1",
+    projectDir: dir,
+    sources: [{ branch, label: "task" }],
+    lane: { pollMs: 10, log: () => {} },
+    alsoValidate: () => ({ ok: true }),
+  });
+  assert.equal(outcome.kind, "published", `setup: publication failed: ${JSON.stringify(outcome)}`);
+  if (outcome.kind !== "published") return;
+
+  // The durable quad, machine-readable — and in FULL, not the 12-char human form: a
+  // caller that has to un-truncate a SHA cannot use it as a SHA.
+  const attempts = JSON.parse((await forgePublish("attempts", "--project", dir, "--json")).out) as {
+    attempts: PublicationAttempt[];
+  };
+  const a = attempts.attempts.find((x) => x.attemptId === outcome.attemptId);
+  assert.ok(a, "the attempt must be present in the JSON record");
+  assert.equal(a.baseSha, seed);
+  assert.equal(a.candidateSha, outcome.candidateSha);
+  assert.equal(a.publishedSha, outcome.candidateSha, "AD-6, off the machine surface: publishedSha === candidateSha");
+  assert.equal(a.target, `local:${dir}#main`);
+  assert.equal(a.state, "published");
+
+  // The queue and the window holder, machine-readable. Built durably so the ORDER
+  // under assertion is the recorded one.
+  const common = { projectKey: key, canonicalDir, taskId: "t", target: `local:${dir}#main`, leaseTtlMs: 90_000 };
+  recordPublicationIntent({ ...common, attemptId: "att-a", runId: "run-a" });
+  recordPublicationIntent({ ...common, attemptId: "att-b", runId: "run-b" });
+  laneTick("att-a", 90_000);
+  tryAcquirePublicationMutex({ projectKey: key, attemptId: "att-a", runId: "run-a", ttlMs: 120_000 });
+
+  const lane = JSON.parse((await forgePublish("lane", "--project", dir, "--json")).out) as {
+    canonicalDir: string;
+    holder: MutexHolder | null;
+    entries: LaneEntry[];
+  };
+  assert.equal(lane.canonicalDir, canonicalDir);
+  assert.equal(lane.holder?.attemptId, "att-a", "the window holder must be machine-readable, not only prose");
+  assert.equal(lane.holder?.runId, "run-a");
+  assert.equal(typeof lane.holder?.expiresAtMs, "number", "including the lease a caller would reason about");
+  assert.deepEqual(
+    lane.entries.map((e) => e.attemptId),
+    ["att-a", "att-b"],
+    "the queue must be emitted in durable enqueue order — the FIFO key, not lock-acquisition order",
+  );
+  assert.equal(lane.entries[0]?.state, "holding");
+  assert.equal(lane.entries[1]?.state, "queued");
+
+  // The all-projects path is machine-readable too: a caller must get parseable JSON,
+  // never the prose line it would choke on.
+  const global = JSON.parse((await forgePublish("lane", "--json")).out) as { entries: LaneEntry[] };
+  assert.ok(global.entries.some((e) => e.attemptId === "att-a"));
 });
 
 test("FG-425: the publish operator surface is empty-safe — no lane, no attempts, no crash", async () => {
