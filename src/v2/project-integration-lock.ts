@@ -82,16 +82,30 @@ export function projectIntegrationLockKey(projectDir: string): ProjectLockKey {
 // pending marker, or a torn/corrupt file) is the same fail-closed path with an
 // unknown group: forge cannot reap what it cannot name, so it refuses the
 // window and hands the operator the manual check.
+//
+// Identity, and why a pid is not one: a recorded pgid alone cannot be signalled
+// safely, because once the original group is fully gone the OS may hand the id
+// to an unrelated process group. The gate therefore stamps a per-spawn NONCE
+// into its leader's argv and records it in the sidecar; the reaper only signals
+// a group whose leader still carries that nonce. The one case where the nonce
+// is not needed is the one where the kernel already guarantees identity: a pgid
+// is RESERVED while its group has any member, so a live group whose leader has
+// exited (npm gone, forked test-runner descendants still running) provably is
+// the original — and is reaped rather than refused.
 
 export type GateGroupRecord = {
   pgid: number;
   runId?: string;
   recordedAt: string;
-  /** Leader-identity token (its `ps lstart` start time), captured at record
-   *  time. POSIX reserves a pid while it is the pgid of a live group, so a
-   *  MISMATCHED token later proves the original group is entirely dead and
-   *  the id was reused — the reaper must not signal the impostor. */
-  leaderStartedAt?: string;
+  /** Leader-identity token: the per-spawn nonce the gate embeds in its leader's
+   *  ARGV (see integration-gate.ts). POSIX reserves a pid while it is the pgid
+   *  of a live group, so a live group whose leader still carries this token is
+   *  provably the original gate group, and one carrying a different command
+   *  line is provably an impostor that reused the id — the reaper must not
+   *  signal it. A start-time token cannot do this job: `ps lstart` renders to
+   *  whole seconds, so a reused pid within the same displayed second would
+   *  match a foreign group. */
+  leaderToken?: string;
 };
 /** Pre-spawn marker: a gate group may already exist for this project, but its
  *  pgid is not knowable yet (spawn hasn't returned). */
@@ -100,31 +114,42 @@ export type GateSidecarRecord = GateGroupRecord | GatePendingRecord;
 
 export type KillFn = (pid: number, signal: NodeJS.Signals | 0) => void;
 
+/** What the leader pid of a recorded gate group currently looks like.
+ *  `absent` (no such process) and `unreadable` (the probe itself failed) are
+ *  DIFFERENT answers and drive opposite decisions — see reapResidualGateGroup. */
+export type LeaderProbe =
+  | { kind: "command"; command: string }
+  | { kind: "absent" }
+  | { kind: "unreadable" };
+
 function gateSidecarPath(lockFilePath: string): string {
   return `${lockFilePath}.gate`;
 }
 
-/** The leader's kernel-recorded start time via `ps -p <pid> -o lstart=` —
- *  a non-reusable identity for (pid, start-time). undefined when the process
- *  is unreadable (already gone, or ps failed). Injectable in the reap opts. */
-export function leaderStartTimeOf(pid: number): string | undefined {
+/** The leader's full command line via `ps -ww -p <pid> -o args=`, which carries
+ *  the gate's identity nonce. `ps` exits 1 with no output for a pid that does
+ *  not exist — that is `absent`, not a failed probe. Injectable in the reap
+ *  opts. */
+export function leaderCommandOf(pid: number): LeaderProbe {
   try {
-    const out = execFileSync("ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8", timeout: 5_000 }).trim();
-    return out.length > 0 ? out : undefined;
-  } catch {
-    return undefined;
+    const out = execFileSync("ps", ["-ww", "-p", String(pid), "-o", "args="], { encoding: "utf8", timeout: 5_000 }).trim();
+    return out.length > 0 ? { kind: "command", command: out } : { kind: "absent" };
+  } catch (e) {
+    const err = e as { status?: number | null; stdout?: string | Buffer };
+    const out = String(err.stdout ?? "").trim();
+    if (out.length > 0) return { kind: "command", command: out };
+    return err.status === 1 ? { kind: "absent" } : { kind: "unreadable" };
   }
 }
 
-function writeGateSidecar(projectDir: string, pgid: number | null, runId?: string): void {
+function writeGateSidecar(projectDir: string, pgid: number | null, runId?: string, leaderToken?: string): void {
   const { lockFilePath } = projectIntegrationLockKey(projectDir);
   mkdirSync(LOCKS_DIR, { recursive: true });
-  const leaderStartedAt = pgid !== null ? leaderStartTimeOf(pgid) : undefined;
   const rec: GateSidecarRecord = {
     pgid,
     ...(runId !== undefined ? { runId } : {}),
     recordedAt: new Date().toISOString(),
-    ...(leaderStartedAt !== undefined ? { leaderStartedAt } : {}),
+    ...(leaderToken !== undefined ? { leaderToken } : {}),
   } as GateSidecarRecord;
   const path = gateSidecarPath(lockFilePath);
   // rename, so a crash mid-write can never leave a half-written record that a
@@ -140,8 +165,12 @@ export function recordGateSpawnPending(projectDir: string, runId?: string): void
   writeGateSidecar(projectDir, null, runId);
 }
 
-export function recordGateProcessGroup(projectDir: string, pgid: number, runId?: string): void {
-  writeGateSidecar(projectDir, pgid, runId);
+export function recordGateProcessGroup(
+  projectDir: string,
+  pgid: number,
+  opts?: { runId?: string; leaderToken?: string },
+): void {
+  writeGateSidecar(projectDir, pgid, opts?.runId, opts?.leaderToken);
 }
 
 export function clearGateProcessGroup(projectDir: string): void {
@@ -225,7 +254,7 @@ async function reapResidualGateGroup(
   lockFilePath: string,
   canonicalDir: string,
   log: (line: string) => void,
-  opts?: { killFn?: KillFn; pollMs?: number; graceMs?: number; confirmTimeoutMs?: number; leaderStartOf?: (pid: number) => string | undefined },
+  opts?: { killFn?: KillFn; pollMs?: number; graceMs?: number; confirmTimeoutMs?: number; leaderCommandOf?: (pid: number) => LeaderProbe },
 ): Promise<void> {
   const sidecarPath = gateSidecarPath(lockFilePath);
   const rec = readGateSidecar(sidecarPath);
@@ -248,19 +277,21 @@ async function reapResidualGateGroup(
     return;
   }
   // The group id is signalable — but is it still the ORIGINAL group? POSIX
-  // reserves a pid while it is the pgid of a live group, so the recorded
-  // leader-identity token decides:
-  //  - token matches the leader's current start time → the original group;
-  //    safe to reap.
-  //  - token MISMATCHES → the original group is entirely dead (its pgid could
-  //    only be reused after every member exited) and a new process/group owns
-  //    the id — do NOT signal it; the residual is resolved.
-  //  - identity unverifiable (no recorded token, or the leader can't be read
-  //    while the group is alive) → fail closed; never kill an unverified group.
-  const leaderStartOf = opts?.leaderStartOf ?? leaderStartTimeOf;
-  const currentLeaderStart = leaderStartOf(rec.pgid);
-  const recordedToken = (rec as GateGroupRecord).leaderStartedAt;
-  if (recordedToken !== undefined && currentLeaderStart !== undefined && currentLeaderStart !== recordedToken) {
+  // reserves a pid while it is the pgid of a live group, so a live group can
+  // only be an impostor if the original exited COMPLETELY and something else
+  // took the freed id. The leader's current command line decides:
+  //  - leader ABSENT while the group is alive → the id is still held by (and
+  //    thus reserved for) the original group; its npm leader has exited and
+  //    left descendants behind. Not reusable, not an impostor — reap it.
+  //  - leader carries our recorded nonce → the original group; safe to reap.
+  //  - leader carries a DIFFERENT command line → the id was reused after the
+  //    original group fully exited; do NOT signal the new owner.
+  //  - identity unverifiable (no recorded nonce, or the leader can't be read
+  //    at all) → fail closed; never kill an unverified group.
+  const leaderOf = opts?.leaderCommandOf ?? leaderCommandOf;
+  const leader = leaderOf(rec.pgid);
+  const recordedToken = (rec as GateGroupRecord).leaderToken;
+  if (leader.kind === "command" && recordedToken !== undefined && !leader.command.includes(recordedToken)) {
     try { unlinkSync(gateSidecarPath(lockFilePath)); } catch { /* gone */ }
     log(
       `forge: recorded gate group id ${rec.pgid} on ${canonicalDir} has been REUSED by an unrelated process ` +
@@ -268,7 +299,7 @@ async function reapResidualGateGroup(
     );
     return;
   }
-  if (recordedToken === undefined || currentLeaderStart === undefined) {
+  if (leader.kind === "unreadable" || (leader.kind === "command" && recordedToken === undefined)) {
     throw new Error(
       `project integration window on ${canonicalDir} is blocked: a process group answers for recorded gate pgid ${rec.pgid}, ` +
       `but its identity cannot be verified against the original gate ` +
@@ -323,7 +354,7 @@ export async function withProjectIntegrationLock<T>(
     pollMs?: number;
     isAlive?: (pid: number) => boolean;
     /** Injectable group kill/confirm/identity knobs for the residual-gate reap (tests). */
-    reap?: { killFn?: KillFn; pollMs?: number; graceMs?: number; confirmTimeoutMs?: number; leaderStartOf?: (pid: number) => string | undefined };
+    reap?: { killFn?: KillFn; pollMs?: number; graceMs?: number; confirmTimeoutMs?: number; leaderCommandOf?: (pid: number) => LeaderProbe };
   },
 ): Promise<T> {
   if (projectDir === undefined) return await fn();

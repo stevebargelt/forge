@@ -25,6 +25,7 @@
 // result (and the sidecar retained) rather than silently released over.
 
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -37,6 +38,23 @@ import {
 
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_OUTPUT_BYTES = 20 * 1024 * 1024;
+
+// The gate leader is a thin node supervisor around `npm run test:unit`, not npm
+// itself, for ONE reason: a recorded pgid is not an identity. Once a group is
+// fully gone the OS may hand its id to an unrelated group, and a would-be
+// reaper that signals on the id alone can kill a stranger. Start-time is not a
+// fix either — `ps lstart` renders whole seconds, so a pid reused within the
+// same displayed second still matches. The supervisor exists to carry a
+// per-spawn nonce in the leader's ARGV, where `ps -o args=` can read it back:
+// an unforgeable answer to "is this still MY gate group?" (see
+// project-integration-lock.ts). It runs npm on the caller's stdio and mirrors
+// npm's own exit FAITHFULLY — re-raising a signal death rather than flattening
+// it to a status, so the gate can still tell an infra signal-kill from a real
+// test failure — which makes it invisible to every other caller; and being the
+// group leader, it dies with the group on every TERM→KILL path.
+const GATE_SUPERVISOR =
+  "const c=require('node:child_process').spawn(process.argv[2],process.argv.slice(3),{stdio:'inherit'});" +
+  "c.on('close',(code,signal)=>{if(signal)process.kill(process.pid,signal);else process.exit(code??1);});";
 
 export type IntegrationGateResult =
   | { ok: true; output: string }
@@ -93,7 +111,8 @@ export async function runIntegrationGate(
 
   // detached: true makes the child a process-group LEADER (pgid === pid), so
   // group signals reach every descendant the test runner forks.
-  const child = spawn("npm", ["run", "test:unit"], {
+  const leaderToken = `forge-gate-${randomBytes(16).toString("hex")}`;
+  const child = spawn(process.execPath, ["-e", GATE_SUPERVISOR, leaderToken, "npm", "run", "test:unit"], {
     cwd: dir,
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
@@ -103,7 +122,7 @@ export async function runIntegrationGate(
     clearGateProcessGroup(dir); // nothing was spawned — the pending claim is stale
     return { ok: false, output: "", error: "integration gate failed to spawn npm", status: null, signal: null, timedOut: false };
   }
-  recordGateProcessGroup(dir, pgid, opts?.runId);
+  recordGateProcessGroup(dir, pgid, { ...(opts?.runId !== undefined ? { runId: opts.runId } : {}), leaderToken });
 
   let stdout = "";
   let stderr = "";

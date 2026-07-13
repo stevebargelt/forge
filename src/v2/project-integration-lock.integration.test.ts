@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import {
-  projectIntegrationLockKey, withProjectIntegrationLock,
+  projectIntegrationLockKey, withProjectIntegrationLock, leaderCommandOf,
   recordGateProcessGroup, recordGateSpawnPending, clearGateProcessGroup, readGateProcessGroup,
 } from "./project-integration-lock.js";
 
@@ -327,7 +327,7 @@ test("FG-425 ownership: an UNCONFIRMABLE orphan fails CLOSED — actionable erro
     mkdirSync(dirname(lockFilePath), { recursive: true });
     writeFileSync(`${lockFilePath}.gate`, JSON.stringify({
       pgid: 424242, runId: "run-ghost", recordedAt: new Date().toISOString(),
-      leaderStartedAt: "GHOST-LEADER-TOKEN",
+      leaderToken: "forge-gate-ghost",
     }));
 
     let entered = false;
@@ -337,7 +337,7 @@ test("FG-425 ownership: an UNCONFIRMABLE orphan fails CLOSED — actionable erro
         log: () => { /* silence the reap lines */ },
         reap: {
           killFn: () => { /* signals swallowed — group never dies */ },
-          leaderStartOf: () => "GHOST-LEADER-TOKEN",
+          leaderCommandOf: () => ({ kind: "command", command: "node -e <supervisor> forge-gate-ghost npm run test:unit" }),
           pollMs: 10, graceMs: 30, confirmTimeoutMs: 60,
         },
       }),
@@ -355,24 +355,32 @@ test("FG-425 ownership: an UNCONFIRMABLE orphan fails CLOSED — actionable erro
   }
 });
 
-// The 424242 sidecar above carries a MATCHING injected identity. These two pin
-// the pgid-REUSE half (final-loop round-2 finding): a live group answering for
-// a recorded id is only reaped when it provably IS the original gate group.
+// The 424242 sidecar above carries a MATCHING injected identity. These pin the
+// pgid-REUSE half (final-loop round-2 finding): a live group answering for a
+// recorded id is only reaped when it provably IS the original gate group.
 
-test("FG-425 ownership: a REUSED pgid (leader identity mismatch) is never signalled — the original group is provably dead; sidecar cleared, window entered", async () => {
+test("FG-425 ownership: a pgid REUSED WITHIN THE SAME SECOND is still caught — a start-time token would have collided and killed the stranger", async () => {
   const dir = tmp("forge-fg425-own-reuse-");
   const { spawn } = await import("node:child_process");
-  // A live DECOY process group standing in for an unrelated process that got
-  // the recorded id after the original gate group fully exited.
-  const decoy = spawn(process.execPath, ["-e", "setTimeout(()=>{}, 30000)"], { detached: true, stdio: "ignore" });
+  // The collision the `ps lstart` token could not survive: an unrelated group
+  // that took the recorded id in the SAME displayed second the original gate
+  // was recorded in — here, another project's gate, so even its argv SHAPE
+  // matches. Only the per-spawn nonce distinguishes them.
+  const decoy = spawn(
+    process.execPath,
+    ["-e", "setTimeout(()=>{}, 30000)", "forge-gate-beef0000beef0000", "npm", "run", "test:unit"],
+    { detached: true, stdio: "ignore" },
+  );
   const decoyPid = decoy.pid!;
   try {
     const { lockFilePath } = projectIntegrationLockKey(dir);
     mkdirSync(dirname(lockFilePath), { recursive: true });
-    // Recorded token ≠ the decoy leader's real start time → id reuse.
+    // Recorded in the same wall-clock second the decoy started in: an lstart
+    // token would MATCH here and the reaper would signal the decoy. The nonce
+    // does not match, so it must not.
     writeFileSync(`${lockFilePath}.gate`, JSON.stringify({
       pgid: decoyPid, runId: "run-original", recordedAt: new Date().toISOString(),
-      leaderStartedAt: "Thu Jan  1 00:00:00 1970",
+      leaderToken: "forge-gate-0123456789abcdef",
     }));
 
     const lines: string[] = [];
@@ -424,5 +432,54 @@ test("FG-425 ownership: a live group with UNVERIFIABLE identity (no recorded tok
     try { process.kill(-decoyPid, "SIGKILL"); } catch { /* already gone */ }
     clearGateProcessGroup(dir);
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("FG-425 ownership: a live group whose LEADER already exited is reaped, not refused — a pgid is reserved while its group lives, so it cannot be an impostor", async () => {
+  const dir = tmp("forge-fg425-own-leaderless-");
+  const pidDir = tmp("forge-fg425-own-leaderless-pids-");
+  const { spawn } = await import("node:child_process");
+  // The crash window the reaper used to fail closed on: npm (the group leader)
+  // has exited, but a forked test-runner descendant is still running in its
+  // group. `kill(-pgid, 0)` proves the group is alive; `ps -p <pgid>` reports
+  // NOTHING, because the leader itself is gone.
+  const leader = spawn(process.execPath, [
+    "-e",
+    `const cp=require('child_process');const f=require('fs');` +
+    `const d=cp.spawn(process.execPath,['-e','setTimeout(()=>{},30000)'],{stdio:'ignore'});` +
+    `f.writeFileSync(${JSON.stringify(join(pidDir, "descendant.pid"))},String(d.pid));d.unref();process.exit(0);`,
+    "forge-gate-leaderless",
+  ], { detached: true, stdio: "ignore" });
+  const pgid = leader.pid!;
+  try {
+    await new Promise<void>((r) => leader.on("exit", () => r()));
+    await waitFor(() => existsSync(join(pidDir, "descendant.pid")), 10_000, "the descendant to record its pid");
+    const descendantPid = Number(readFileSync(join(pidDir, "descendant.pid"), "utf8"));
+
+    const { lockFilePath } = projectIntegrationLockKey(dir);
+    mkdirSync(dirname(lockFilePath), { recursive: true });
+    writeFileSync(`${lockFilePath}.gate`, JSON.stringify({
+      pgid, runId: "run-crashed", recordedAt: new Date().toISOString(),
+      leaderToken: "forge-gate-leaderless",
+    }));
+
+    assert.doesNotThrow(() => process.kill(-pgid, 0), "sanity: the group outlives its leader");
+    assert.equal(leaderCommandOf(pgid).kind, "absent", "sanity: the leader itself is unreadable — this is what used to fail closed");
+
+    const lines: string[] = [];
+    let entered = false;
+    await withProjectIntegrationLock(dir, "run-contender", async () => {
+      entered = true;
+      assert.equal(pidAliveProbe(descendantPid), false, "the surviving descendant must be dead BEFORE the window is entered");
+    }, { pollMs: 10, log: (l) => lines.push(l), reap: { pollMs: 10 } });
+
+    assert.equal(entered, true, "a crash after the gate's npm leader exits must not wedge the project for manual intervention");
+    assert.equal(readGateProcessGroup(dir), undefined, "sidecar cleared after confirmed reap");
+    assert.ok(lines.some((l) => /reaping an orphaned integration-gate process group/.test(l)), `operator sees the reap: ${JSON.stringify(lines)}`);
+  } finally {
+    try { process.kill(-pgid, "SIGKILL"); } catch { /* already reaped */ }
+    clearGateProcessGroup(dir);
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(pidDir, { recursive: true, force: true });
   }
 });
