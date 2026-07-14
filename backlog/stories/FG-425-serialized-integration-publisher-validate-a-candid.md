@@ -148,3 +148,23 @@ State the layering in substance: the lane provides ordering; the mutex + CAS + a
 - Run all focused FG-425 publication / recovery / FIFO / CAS / target / failure-policy tests, plus typecheck, the normal suite, and `test:extended`. Report exact `tests_run` evidence.
 - Confirm the four call sites and every settled decision above are unchanged.
 - NOT complete while any documentation still contradicts the implemented ordering or the ownership invariants.
+
+### AC5 (BLOCKER — folded in 2026-07-13, was wrongly classified a follow-up) — one truthful final disposition after a lost mutex
+
+**No unreachability defense.** `MutexLostMidPublishError` is REACHABLE in production: any deschedule longer than the mutex lease TTL (laptop suspend, SIGSTOP, container pause, swap thrash, a long IO/GC stall) opens the window between operations. Do NOT attempt to close this by arguing it cannot happen.
+
+**The contradiction (must be eliminated, not documented):** today `publishLocal` throws `MutexLostMidPublishError`; `abandonedMidWindow` returns a TERMINAL `refused` while the attempt row remains `publishing`; `runNext` maps that to `publication_refused` and marks the task FAILED. A later AD-5 recovery converges the attempt to `published` — but `recoverUnfinishedPublications` does not reconcile the already-failed task/run/campaign. Result: two durable records that contradict each other, with the failed one advising a RETRY of work that already landed.
+
+**Invariant: a terminal refusal may never be returned over an attempt that remains `publishing`.** A lost mutex after the ref advance must resolve to exactly ONE truthful final disposition.
+
+Acceptable shapes (pick one and justify it): a distinct non-terminal `recovery_pending` outcome/state, or an in-run wait/reconciliation path that converges and then reports the TRUE disposition. NOT acceptable: returning a terminal refusal while preserving a `publishing` attempt.
+
+**Production-boundary regression must prove, through the real path (publishIntegration → runNext → the durable task/run rows), that a lost mutex AFTER the ref advance yields:**
+- NO premature `publication_refused` / task failure while the attempt is still `publishing`;
+- recovery converges ref, index, AND worktree;
+- the publication attempt becomes `published`;
+- the owning task/run/campaign reaches the matching truthful state, OR remains in an explicit RECOVERABLE non-terminal state until that reconciliation occurs;
+- NO operator surface says "nothing was published" or "the target is unchanged" when the ref carries the candidate;
+- NO retry can duplicate already-published work.
+
+FG-425 does NOT merge while this task-versus-publication contradiction stands.
