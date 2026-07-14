@@ -37,13 +37,30 @@ unchanged. Do not let "make the tests pass" drift into "let agents launch under 
 
 ## Acceptance Criteria
 
-- The standard `agent-dev-worker` image runs the FG-535 launch integration tier **with no failures and no
-  skips**, without any in-container `apt-get`.
+**First, record the PRE-FIX INVENTORY.** Before changing anything, run the launch tier inside the **current**
+`agent-dev-worker` image and record the **exact test inventory**: every test in the tier, its outcome, and —
+critically — **every existing INTENTIONAL skip together with its stated reason.** Closure is judged against
+this inventory. Without it, "no skips" is unmeasurable and a pre-existing skip can be silently reclassified
+as either a success or a new problem.
+
+Closure means **all** of:
+
+- **No tmux-caused failures and no tmux-caused skips.**
+- **Every test intended to exercise the production tmux path actually RUNS** (it is not skipped, stubbed,
+  or gated away).
+- **No NEW skip is introduced to obtain green.** Adding a skip to turn a failure green is a coverage
+  regression wearing a green suite, and it fails this ticket.
+- **Pre-existing intentional skips unrelated to tmux are NOT silently pulled into FG-551's scope** — but they
+  **must be listed explicitly**, with their reasons, in the closure evidence. They are neither fixed here nor
+  hidden here.
+- **Skipping the production behavior remains forbidden.** If a test is skipped rather than made to pass, the
+  production behavior it covered must be shown to be covered elsewhere, explicitly — otherwise the skip is a
+  coverage regression disguised as a green suite.
+
+Additionally:
+
 - The image is rebuilt and the tier is executed **inside it** — a host-side or CI-side pass does not
   satisfy this, because the host and CI already pass today. That is the whole point.
-- **Skipping the tests is not an acceptable fix.** If a test is skipped rather than made to pass, the
-  production behavior it covered must be shown to be covered elsewhere, explicitly, or the skip is a
-  regression in coverage disguised as a green suite.
 - No agent needs to mutate its own environment to get a green suite; the `apt-get install tmux` workaround
   is gone.
 - Work ownership is unchanged: no agent owns its task work under tmux; the FG-535/FG-536 boundaries (BD-2)

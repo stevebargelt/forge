@@ -92,8 +92,31 @@ recorded, and **ignored** — not advanced.
 
 A test in which a **late completion from launch A** arrives **after the controller has advanced to phase B**
 must show that it **does not advance phase B**, writes no state, and is recorded as a stale/ignored
-observation. **This test must be observed RED against a claim implementation that checks only uniqueness**
-— a claim that is merely exactly-once will pass a naive duplicate test and fail this one. That is the point.
+observation.
+
+**⚠️ THE RED BASELINE IS THE HARD PART, AND IT IS ENFORCEABLE — READ THIS.**
+
+**Observing the stale-completion test red against "no claim primitive exists yet" is INSUFFICIENT and does
+NOT satisfy the falsification gate.** Of course it fails when nothing exists; that proves only that the
+feature is unbuilt. It says nothing about whether the **binding** is what saves you.
+
+**The red evidence must specifically FALSIFY A UNIQUENESS-ONLY CLAIM IMPLEMENTATION** — one that is
+correctly exactly-once but not bound to the phase. That implementation is the plausible wrong answer, it
+passes a naive duplicate-event test, and it is still wrong.
+
+**Satisfy this in ONE of exactly two ways:**
+
+1. **Staged implementation.** Build the **uniqueness-only** claim first; observe the stale-completion test
+   **RED against it**; *then* add the `sourceLaunchId` + consumer/`currentPhase` + structured `nextAction` +
+   expected-prior-state binding and observe it green. The red run must be against a claim that genuinely
+   exists and is genuinely exactly-once.
+2. **Mutation test.** Against the finished implementation, **remove or bypass** the binding
+   (`sourceLaunchId` + consumer/`currentPhase` + structured `nextAction` + expected-prior-state) and
+   **demonstrate the regression goes RED.** The mutation must isolate the binding, not the whole claim.
+
+**The final green test must prove that a delayed completion from launch A cannot advance phase B.** **A
+naive duplicate-event test is NOT substitute evidence** — it passes against the very implementation this
+regression exists to reject.
 
 ## New durable state must carry BD-15 (schema/version policy)
 

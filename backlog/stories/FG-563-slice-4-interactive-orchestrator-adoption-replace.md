@@ -78,6 +78,28 @@ orchestrator authors the seed and re-renders via `forge upgrade`.
 - Seed → generated `CLAUDE.md` block → installed-surface parity is **tested**, not assumed.
 - The BD-9 contradiction is gone from the installed policy, not merely from the PRD.
 
+## Handoff obligation — flag memory this slice invalidates
+
+This slice **changes what is true** about `ScheduleWakeup` and the `Monitor` workaround. Any project or
+session memory asserting the old behavior becomes **actively misleading** the moment this lands — and a
+stale memory is worse than no memory, because it is trusted.
+
+**At Slice 4 handoff:**
+
+- **Flag every project/session memory whose `ScheduleWakeup` or `Monitor` claims this implementation
+  invalidated.** Name each one.
+- **Propose a one-line correction** for each.
+
+**Hard limits — this is a handoff obligation, NOT an expansion of implementation scope:**
+
+- **Do NOT edit memory automatically.**
+- **NEVER write a `reviewed` stamp.**
+- Do not treat this as licence to audit memory generally — only memories *this slice's own changes*
+  invalidated.
+
+The orchestrator (or operator) applies the corrections. The slice's job is to **surface** the drift it
+caused, not to silently repair it.
+
 ## Falsification
 
 **Every new regression test must be observed RED against its pre-fix baseline** (campaign rule). A test that

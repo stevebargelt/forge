@@ -50,6 +50,32 @@ implementation PR, and no single reviewer can hold it.
    - **T9** — whether an already-running process is affected by a mid-flight promotion (dynamic
      `import()`, lazy requires, open handles). **Settle empirically. The PRD asserts neither immunity nor
      exposure.**
+   - **OQ-2 FEASIBILITY SPIKE (probe only — see below).**
+
+### OQ-2 feasibility spike — a PROBE, not a decision
+
+**Decision ownership for OQ-2 remains with FG-563.** This spike exists only so Slice 2 is not designed
+against an adapter that cannot exist. **It must NOT select the adapter, and must NOT expand FG-553 into
+orchestrator adoption.**
+
+**Before Slice 2 (FG-552) begins**, establish **with host evidence**:
+
+- Whether **any supported mechanism** can convert a `forge launch wait` completion into a **Claude session
+  wake** when `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`.
+- **Who owns that adapter's lifetime.**
+- How it behaves **when swept**, **when the session disappears**, and **after restart**.
+- Whether it can produce a **supported wake directly**, or whether the honest production shape is a
+  **disposable Monitor running one blocking `forge launch wait`**.
+
+> **"A disposable Monitor running one blocking `forge launch wait`" is an ACCEPTABLE RESULT — not a
+> failure of the spike.** It still removes fixed-estimate model polling, still uses the canonical terminal
+> classifier, and still permits durable lost-signal evidence. **Do NOT require "Monitor eliminated" if the
+> harness exposes no supported external wake channel.** FG-563 still selects and adopts the production
+> adapter and decides whether the Monitor is retired or retained as a **named fallback**.
+
+**Reporting contract:** the spike must report **VERIFIED FACT**, **INFERENCE**, and **OPEN QUESTION**
+**separately**. An inference presented as a fact here would design Slice 2 against a wake channel that does
+not exist.
 2. **Then create bounded implementation children** from that plan, each independently reviewable with its
    own acceptance evidence.
 3. **FG-553 closes only when its children's AGGREGATE evidence passes** the acceptance criteria below.
@@ -153,15 +179,25 @@ Each is a separate acceptance case with a separate pass condition:
     list` and `forge status --json` exit 1 with empty stdout — evidence-honest, but **the control plane did
     not run**.* **"Fails cleanly" is NOT a pass for F29. It must RUN.**
   - **A caller-applied PATH pin is containment, not isolation, and does NOT satisfy F29.**
-- **F30 (this slice's HALF) — PROVENANCE of R1 and R2.** **R1 and R2 are each independently accounted for**
-  — captured, derived, or **explicitly declared unknowable** — **plus** a **provenance contract that is
-  compatible with R3/R4** (the record shape, vocabulary, and semantics FG-555 will populate). Recording one
+- **F30 (this slice's HALF) — PROVENANCE of R1 and R2, plus the CONTRACT for R3/R4.** **R1 and R2 are each
+  independently accounted for** — captured, derived, or **explicitly declared unknowable**. Recording one
   runtime is **not** proof of another: the exit recorder's `process.execPath` satisfies **R2 only** and does
   **not** satisfy R1, R3, or R4.
-  > **FG-553 does NOT wait on FG-555 to close.** This slice closes on **R1 + R2 + an R3/R4-compatible
-  > provenance contract**. FG-555 (Slice 1b) then completes **R3/R4**. **FULL F30 — all four runtimes
-  > accounted for — is a CAMPAIGN-LEVEL condition satisfied after FG-555 and verified again by FG-565.**
-  > (FG-555 depends on FG-553; FG-553 must therefore not depend on FG-555, or the two deadlock.)
+
+  **The provenance contract this slice ships must EXPLICITLY establish the future R3/R4 dispositions** — a
+  contract that merely leaves room for them is not sufficient, because FG-555 would then be free to satisfy
+  it with a substitution the PRD forbids:
+
+  - **R3 — the launched top-level executable — MUST be captured or derived as the executable RESOLVED AT
+    SPAWN TIME. Argv alone is NOT R3 evidence** (argv is a string, not a resolution).
+  - **R4 — nested-shell resolution — MUST be captured, derived, or EXPLICITLY DECLARED UNKNOWABLE.** The
+    contract **must never imply that argv, or the exit recorder's `process.execPath`, proves R4.**
+  - **FG-555 implements and proves the R3/R4 dispositions against this contract** — it does not renegotiate
+    them.
+  - **Full F30 remains a CAMPAIGN-LEVEL condition, satisfied after FG-555 and verified by FG-565.**
+
+  > **FG-553 does NOT wait on FG-555 to close.** This slice closes on **R1 + R2 + the R3/R4 contract above**.
+  > FG-555 depends on FG-553; FG-553 must therefore never depend back on FG-555, or the two deadlock.
 - **F31 — REFUSAL.** Forcing an **incompatible interpreter** is **REFUSED by the bounded ABI assertion
   BEFORE any native module is loaded**, with a named, actionable mismatch. Test **ENV-C**: Homebrew-first
   PATH → v26.3.1 / ABI 147. **Never tested today, and expected to fail badly** — the minimum-major preflight
