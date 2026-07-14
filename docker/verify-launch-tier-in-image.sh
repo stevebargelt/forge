@@ -19,10 +19,15 @@
 #
 #   ./docker/verify-launch-tier-in-image.sh
 #
-# To reproduce the PRE-FIX inventory (the tmux-less image, 10 hard failures), check
-# out a commit before the Dockerfile's tmux install and run this same script: it will
-# print the failing inventory and exit non-zero. Nothing about the script is
-# tmux-aware; it just runs the tier in whatever image build.sh produces.
+# SCOPE — what this script can and cannot do. It reproducibly verifies the POST-FIX
+# image: run it on any Docker host and it re-derives, from scratch, that the launch tier
+# is clean inside the image forge actually ships.
+#
+# It does NOT reproduce the pre-fix inventory (36 tests / 26 pass / 10 fail / 0 skip on
+# the tmux-less image). It cannot: neither this script nor the FG-551 guard tests exist
+# at the pre-fix commit, and running today's tree against the old Dockerfile would
+# execute a different, larger test set. That inventory is preserved as historical
+# evidence in the FG-551 ticket, not re-derivable here. There is no pre-fix mode.
 
 set -euo pipefail
 

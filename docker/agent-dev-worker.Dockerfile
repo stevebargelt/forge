@@ -145,6 +145,14 @@ RUN useradd -m -s /bin/bash -u 1000 agent \
     && mkdir -p /home/agent/.claude/skills \
     && chown -R agent:agent /home/agent
 
+# FG-551 final smoke. The install-layer `tmux -V` at the top only proves tmux worked
+# THEN — seven RUN layers follow it, and any of them can break tmux without tripping a
+# thing (`mv /usr/bin/tmux /usr/bin/tmux.disabled`, `chmod -x`, a purge, an overwriting
+# stub). This is the LAST RUN in the image on purpose: it re-proves, against the final
+# filesystem, that a working `tmux` is on PATH. Nothing may run after it. It must stay
+# failure-propagating — no `|| true`, no `; true` — a smoke that cannot fail is not a smoke.
+RUN command -v tmux >/dev/null && tmux -V
+
 USER agent
 WORKDIR /workspace
 

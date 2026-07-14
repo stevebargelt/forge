@@ -52,8 +52,36 @@ function finalStageInstructions(): string[] {
 
 const runLayers = (): string[] => finalStageInstructions().filter((l) => /^RUN\s/i.test(l));
 
+/**
+ * The package names passed to every `apt-get install` in one RUN layer.
+ *
+ * Splitting on shell separators FIRST is the whole point. The install layer folds to
+ * `RUN apt-get update && apt-get install -y ... && rm -rf ... && tmux -V`, so a regex
+ * like /apt-get install\b.*\btmux\b/ matches across the `&&` and finds the tmux in the
+ * SMOKE (`&& tmux -V`) — not a package. Delete tmux from the package list, keep the
+ * layer's smoke, and that assertion stays green against an image that installs no tmux.
+ * Same class of bug as the Dockerfile comment that satisfied the first `tmux -V` check:
+ * an assertion answered by a nearby token instead of the thing it claims to check.
+ *
+ * Packages are returned as whole tokens, so `libtmux-dev` / `tmux-plugin-manager` are
+ * `!== "tmux"` and cannot pass for it.
+ */
+function aptInstallPackages(layer: string): string[] {
+  return layer
+    .replace(/^RUN\s+/i, "")
+    .split(/&&|\|\||;/)
+    .filter((segment) => /^\s*(?:\S+=\S+\s+|sudo\s+)*apt-get\s+install\b/.test(segment))
+    .flatMap((segment) =>
+      segment
+        .replace(/^\s*(?:\S+=\S+\s+|sudo\s+)*apt-get\s+install\b/, "")
+        .trim()
+        .split(/\s+/)
+        .filter((token) => token && !token.startsWith("-"))
+    );
+}
+
 test("FG-551: the agent image apt-installs tmux in the stage that actually ships", () => {
-  const layer = runLayers().find((l) => /apt-get install\b.*\btmux\b(?!-)/.test(l));
+  const layer = runLayers().find((l) => aptInstallPackages(l).includes("tmux"));
   assert.ok(
     layer,
     "an apt-get install layer in the FINAL build stage must install tmux — without it the FG-535 launch tier hard-fails in every agent container. " +
@@ -84,6 +112,58 @@ test("FG-551: no later layer removes tmux back out of the image", () => {
       layer,
       /apt-get\s+(?:remove|purge|autoremove)\b[^&|;]*\btmux\b|\brm\b[^&|;]*\btmux\b/,
       `a layer removes tmux after installing it — the image would ship without tmux and the FG-535 launch tier would hard-fail: ${layer}`
+    );
+    // Removal is only the most obvious way to un-ship tmux. Renaming it off PATH,
+    // stripping its exec bit, or dpkg-removing the package all leave a tmux-less
+    // image with the predicate above green. The final-RUN smoke below is the real
+    // catch-all; these are named here so the failure says WHY, not just "smoke moved".
+    assert.doesNotMatch(
+      layer,
+      /\bmv\b[^&|;]*\btmux\b|\bchmod\b[^&|;]*\btmux\b|\bdpkg\b[^&|;]*--(?:remove|purge)\b[^&|;]*\btmux\b/,
+      `a layer disables tmux without removing it (mv/chmod/dpkg) — the image would ship with no working tmux: ${layer}`
+    );
+  }
+});
+
+test("FG-551: the tmux smoke is the LAST RUN in the final stage, and it cannot be masked", () => {
+  // THE hole this guard exists to close. The install-layer smoke fires at layer 1 of
+  // 8; seven RUN layers follow it before `USER agent`. A single later
+  // `RUN mv /usr/bin/tmux /usr/bin/tmux.disabled` builds clean, ships an image with no
+  // tmux command, and leaves install ✓ / earlier-smoke ✓ / no-removal ✓ — all green.
+  // "A smoke somewhere in the stage" is worthless; only a smoke that runs LAST proves
+  // tmux survived every preceding layer, whatever they did to it.
+  const layers = runLayers();
+  const last = layers[layers.length - 1];
+  assert.ok(last, "the final build stage must have at least one RUN layer");
+
+  assert.match(
+    last,
+    /^RUN\s+command\s+-v\s+tmux\s*>\s*\/dev\/null\s*&&\s*tmux\s+-V$/,
+    "the LAST RUN in the final stage must be exactly the tmux smoke `RUN command -v tmux >/dev/null && tmux -V`. " +
+      `Found instead: ${last}\n` +
+      "If a RUN layer follows the smoke, that layer is untested — it can rename, chmod -x, purge or stub out tmux " +
+      "and every other assertion here still passes. Move the smoke back to last."
+  );
+
+  // A smoke that cannot fail is not a smoke. `... || true`, `; true`, a trailing `|| :`
+  // — each keeps the literal `tmux -V` in the file while making the RUN exit 0 no matter
+  // what. The anchored shape above already rejects these; assert it explicitly so the
+  // failure names the sin.
+  assert.doesNotMatch(
+    last,
+    /\|\||;\s*(?:true|:)\s*$|\btrue\s*$/,
+    `the final tmux smoke must propagate failure — no \`|| true\`, \`; true\`, or trailing \`|| :\`. A smoke that cannot fail gates nothing: ${last}`
+  );
+
+  // The smoke proves the filesystem as of the last RUN. A COPY/ADD after it can still
+  // drop a broken binary over /usr/bin/tmux, so nothing that writes files may follow.
+  const stage = finalStageInstructions();
+  const afterSmoke = stage.slice(stage.lastIndexOf(last) + 1);
+  for (const instr of afterSmoke) {
+    assert.doesNotMatch(
+      instr,
+      /^(?:COPY|ADD)\s/i,
+      `a COPY/ADD lands after the final tmux smoke, so it is not covered by any smoke — it could overwrite tmux: ${instr}`
     );
   }
 });
