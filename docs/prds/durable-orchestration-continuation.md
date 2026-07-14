@@ -1,15 +1,15 @@
 # Durable Orchestration Continuation
 
-**Status:** WORKING — audit corrections applied (C1–C8); binding decisions BD-14 and BD-15 are new and await operator acceptance; not yet an implementation contract  
+**Status:** ACCEPTED — audit corrections applied (C1–C8); binding decisions BD-14 and BD-15 are accepted; pending campaign decomposition, not yet an implementation contract  
 **Captured:** 2026-07-13  
 **Last revised:** 2026-07-14  
-**Primary backlog:** FG-551, FG-552, FG-553
+**Primary backlog:** FG-551, FG-552, FG-553, FG-555
 **Landed foundation:** FG-535, FG-536, FG-542  
 **Upstream context:** [anthropics/claude-code#76249](https://github.com/anthropics/claude-code/issues/76249), [#25188](https://github.com/anthropics/claude-code/issues/25188), [#72851](https://github.com/anthropics/claude-code/issues/72851), [#68625](https://github.com/anthropics/claude-code/issues/68625)
 
 ## How to use this document
 
-This is the shared working document for the next durability campaign after the FG-425 corrective run lands. It exists because the relevant behavior is currently split across landed tickets, active tickets, source comments, orchestrator prose, and one live-session workaround. No agent should be asked to reconstruct the system from those fragments again.
+This is the shared working document for the next durability campaign, which follows the now-landed FG-425 corrective run. It exists because the relevant behavior is currently split across landed tickets, active tickets, source comments, orchestrator prose, and one live-session workaround. No agent should be asked to reconstruct the system from those fragments again.
 
 Sections marked **Binding decision** are operator-controlled constraints. An agent may find a contradiction or propose a change, but it must surface that conflict rather than silently revise the decision. Sections marked **Open question** are deliberately unresolved and may be decided during planning, subject to the binding decisions and acceptance matrix here.
 
@@ -34,7 +34,7 @@ Claude/orchestrator session
 stable, last-known-good Forge control runtime
         │ durable launch
         ▼
-tmux-owned Forge command (must record runtime identity R1-R4 -- none recorded today; BD-14)
+tmux-owned Forge command (must account durably for R1-R4: capture, derive, or explicitly declare unknowable; BD-14)
         │ detached dispatch
         ▼
 Docker-daemon-owned agent container
@@ -94,7 +94,8 @@ Forge must not make correct ownership depend on a particular upstream diagnosis 
 | Agent result | Bind-mounted task directory and Forge store | Existing + FG-536 recovery | Landed |
 | Unsafe harness background dispatch | Disabled for `forge claude` children | FG-542 | Landed |
 | tmux availability in agent test image | `agent-dev-worker` image | FG-551 | Active gap |
-| Control-plane executable | npm-linked mutable Forge working tree | FG-553 | Active gap |
+| Control-plane executable (Forge's own runtime, R1) | npm-linked mutable Forge working tree | FG-553 | Active gap |
+| Launched-workload environment (R3/R4) | Caller's ambient environment; `forge launch` preserves argv and owns no environment contract | FG-555 | Active gap |
 | Launch completion notification | Hand-built Monitor polling | FG-552 | Active gap |
 | Notification delivery evidence | None | New slice | Missing |
 | Idempotent continuation claim | Consumer-specific/implicit | New slice | Missing |
@@ -136,7 +137,11 @@ The terminal record must become complete and readable before any happy-path comp
 
 **A reader must not treat an empty or unparseable record as terminal.** BD-7 already states that transient missing or unreadable files are not terminal on their own, and the current reader contradicts it: it maps an empty or unparseable exit file to a terminal `unknown`, which is exactly the write window BD-4 exists to close. An unreadable record is an invitation to retry, not a disposition. Only bounded retry plus independent terminal evidence may produce `unknown`.
 
-Record and notification do not need impossible cross-system exactly-once atomicity. A crash after the record commit but before notification is a lost-signal case and must be recovered from the record. A signal without a matching terminal record is a defect and must not advance a phase.
+Record and notification do not need impossible cross-system exactly-once atomicity. A crash after the record commit but before notification is a lost-signal case and must be recovered from the record.
+
+**The matching-record requirement is scoped to exit-record-driven completion events.** For any completion event that claims an exit, the exit record must already be committed and readable: a signal asserting an exit that never happened is a defect and must not advance a phase.
+
+This requirement does **not** extend to the reconciled dispositions. `owner_gone` and `unknown` produce **no filesystem artifact at all** (see the reconciliation requirement under the controller-facing subscription, and F34) and are discovered only through reconciliation. They rely on **durable launch metadata plus independent owner evidence**, and they advance under their own explicit failure/blocker policy (BD-7, F9, F10) — not under an exit record. **A reconciled disposition must never fabricate an exit record to satisfy this decision.** Requiring one would demand the invention of a terminal result the system elsewhere proves cannot exist, which BD-3 forbids outright.
 
 ### BD-5 — Delivery is at least once; advancement is exactly once claimed
 
@@ -324,7 +329,7 @@ Campaigns already have durable campaign/item state and may satisfy much of this 
 
 ## Proposed campaign decomposition
 
-Allocate final IDs only after FG-425 lands and this document is accepted. Execute sequentially unless the approved campaign plan proves independence.
+Allocate final IDs only once this document is accepted. Execute sequentially unless the approved campaign plan proves independence.
 
 ### Slice 0 — FG-551: agent test-environment parity
 
@@ -380,6 +385,26 @@ Separate from the atomic closure above, these surfaces are **installed copies th
 For each surface, the design must state whether promotion **re-installs** it, **version-pins** it, or leaves it **explicitly out of the control path** — and what happens when an installed copy is older than the promoted runtime. "It is installed by `forge upgrade`" is not an answer to that question.
 
 The direct tmux-pane watcher remains only an emergency advisory signal until this slice lands. It never interprets pane death as the launch result.
+
+### Slice 1b — FG-555: the launched workload's execution environment
+
+**Coordinated with Slice 1/BD-14, but a distinct boundary with a distinct owner. Do not fold this into FG-553.**
+
+BD-14 protects the **Forge control runtime** — the interpreter, ABI, and dependency set executing `forge` itself (R1). FG-555 governs the **environment of the launched workload** — what the submitted command resolves once it is running. These are not the same boundary:
+
+> A Forge running a stable, pinned Node 24 control runtime can faithfully launch a caller-supplied `bash -lc <chain>` whose login shell resolves Node 23, and reproduce the original ABI-mismatch false-red **with BD-14 fully satisfied.** Control-runtime provenance does not imply launched-workload provenance.
+
+Closing FG-553 therefore does not close this. A slice that pins Forge's own interpreter and leaves the launched workload's environment to the caller's login shell has not reached the failure that actually burned a verification cycle.
+
+Binding outcome:
+
+- **Exact argv preservation.** `forge launch run` is an argv launcher: it preserves and executes the submitted argv and **does not insert or rewrite a shell.** The recorder wraps the supplied argv and spawns `argv[0]` with the remaining arguments directly. The earlier claim that Forge synthesized a `bash -lc` login shell was false and **must not be reintroduced** — the caller supplied the shell. Generic operator argv is never silently transformed; a caller may still intentionally supply `bash -lc`.
+- **An explicit environment contract for Forge-owned unattended callers.** Define what execution environment a Forge-owned caller may rely on when it submits a command, so an unattended verification does not depend on ambient login-shell `PATH` mutation as an implementation detail. A workload that requires a shell declares it and gets a contract; it does not inherit one accidentally.
+- **Honest R3/R4 provenance** (BD-14's table). R3 — the launched top-level executable, as resolved at spawn time — must be captured or derived; argv is a *string*, not a resolution. R4 — how a caller-supplied nested shell later resolves `node`, `npm`, or `forge` *inside* the launched command — must be captured, derived, or **explicitly declared unknowable.** R4 may be inherently unknowable, and the design must say so rather than imply argv covers it. The exit recorder's `process.execPath` identifies R2 only and proves nothing about R3 or R4.
+- Either the workload runs under the intended compatible toolchain, or the launch **refuses before executing it** with a named, actionable runtime/toolchain mismatch — not hundreds of downstream test failures the controller must reverse-engineer.
+- No remediation rebuilds or replaces shared native dependencies merely to match an accidentally selected runtime.
+
+Coordination fence: FG-555 consumes BD-14's R1–R4 vocabulary and must not grow a second, conflicting runtime-selection mechanism alongside FG-553's. It reuses that vocabulary on the other side of the launch boundary.
 
 ### Slice 2 — FG-552: atomic terminal record plus launch wait primitive
 
@@ -595,6 +620,15 @@ The initiative is complete only when all of the following are true:
 - A final reviewer maps evidence to every binding decision and matrix row rather than approving from green CI alone.
 
 ## Revision log
+
+### 2026-07-14 — acceptance-review corrections (D1–D4)
+
+- Bounded correction set from the operator's acceptance review. No redesign, no re-audit, no ticket allocation.
+- **D1:** added **FG-555** to the primary backlog, the current system map, and the decomposition as **Slice 1b** — a distinct slice coordinated with FG-553/BD-14, not folded into it. BD-14 protects the Forge control runtime (R1); FG-555 governs the launched workload's environment (R3/R4). A stable control runtime can still launch a caller-supplied `bash -lc` whose login shell resolves an incompatible Node, with BD-14 fully satisfied. The slice requires exact argv preservation (Forge does not insert a shell — an earlier false claim that must not return), an explicit environment contract for Forge-owned unattended callers, and honest R3/R4 provenance including R4's possible inherent unknowability.
+- **D2:** narrowed **BD-4**'s matching-terminal-record requirement to *exit-record-driven completion events*. Reconciled `owner_gone` and `unknown` produce no filesystem artifact and rely on durable metadata plus independent owner evidence under their own failure/blocker policy; they must never fabricate an exit record. BD-4's intent is unchanged — a completion signal claiming an exit that never happened still must not advance a phase.
+- **D3:** the executive-outcome diagram no longer says Forge must *record* all of R1–R4; it must **account durably** for them — capture, derive, or explicitly declare unknowable — matching BD-14, which allows R4 to be inherently unknowable.
+- **D4:** removed stale pre-FG-425 temporal framing (FG-425 has landed and merged) and updated the header status from "awaits operator acceptance" to accepted, pending decomposition.
+- No other normative content changed. BD-13/BD-14/BD-15, BD-5/6/7/10/11, the C1–C8 corrections, and the F-row matrix are untouched.
 
 ### 2026-07-14 — audit correction pass (C1–C8)
 
