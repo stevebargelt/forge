@@ -669,6 +669,26 @@ export function publicationRecoveryMessage(a: PublicationAttempt): string {
   );
 }
 
+/** FG-425: what `forge show` tells an operator about a CANCELLED task whose publication
+ *  nevertheless landed on the target.
+ *
+ *  A cancel is terminal and wins: recovery leaves this task cancelled rather than
+ *  completing it onto the publication. But the candidate IS in the target's history —
+ *  durable fact — and an operator who reads only "cancelled" would take the target to be
+ *  untouched. That is the same lie AC5 forbids, arriving from the cancel direction. So
+ *  this names the sha that landed and says what forge will NOT do about it: the task is
+ *  not re-driven, and the publication is not rolled back. Reverting is a human call. */
+export function publicationAfterCancelMessage(a: PublicationAttempt): string {
+  const sha = (a.publishedSha ?? "").slice(0, 12);
+  return (
+    `publication attempt ${a.attemptId} PUBLISHED candidate ${sha} to ${a.target} — the target ALREADY CARRIES ` +
+    `this task's work. The cancel came too late to stop it, and it stands: forge will NOT re-drive this task, and ` +
+    `it does not roll the publication back.\n` +
+    `    guidance:      if the cancel meant this work must not be on ${a.target}, revert ${sha} there yourself — ` +
+    `forge never rewrites a published target.`
+  );
+}
+
 export function getBlockerTasks(tasks: Task[]): Task[] {
   return tasks.filter(
     (t) =>
@@ -830,6 +850,14 @@ export function registerShow(program: Command, deps: ShowDeps = {}): void {
         const recoveringAttempt = task.status === "awaiting_recovery"
           ? publicationAttemptsForTask(task.id).find((a) => a.state === "publishing")
           : undefined;
+        // FG-425: a cancel is terminal — recovery leaves this task failed rather than
+        // completing it — but its candidate is on the target and the operator must see
+        // that. Keyed on the cancel's durable failure kind, not on `failed`: a
+        // crash-stranded failed row beside a published attempt is a different thing
+        // (reconciliation repairs THAT one onto the publication).
+        const publishedAfterCancel = failureKind === "cancelled"
+          ? publicationAttemptsForTask(task.id).find((a) => a.state === "published")
+          : undefined;
         const containerCausalEvidence = getContainerCausalEvidenceFromEvents(events);
         const containerEvidenceSummary = isFanoutParentFailure
           ? "n/a — this is a fanout parent with no agent container of its own; its failure is derived from its children's outcomes, not from a killed agent."
@@ -884,6 +912,15 @@ export function registerShow(program: Command, deps: ShowDeps = {}): void {
                   reconcileCandidate: reconcileReason, // #298: null unless running + container gone
                   failureKind: failureKind ?? null,
                   gateHold: holdReason, // FG-523: null unless held with a named reason
+                  // FG-425: null unless this task was cancelled AND its publication landed anyway.
+                  publishedAfterCancel: publishedAfterCancel
+                    ? {
+                        attemptId: publishedAfterCancel.attemptId,
+                        publishedSha: publishedAfterCancel.publishedSha,
+                        target: publishedAfterCancel.target,
+                        message: publicationAfterCancelMessage(publishedAfterCancel),
+                      }
+                    : null,
                   orphanRecovery: orphanEvidence
                     ? { evidence: orphanEvidence, message: orphanRecoveryMessage(task.runId, task.id, orphanEvidence, failureKind ?? "orphaned_work_may_persist", taskIsInvokeRun) }
                     : null,
@@ -947,6 +984,9 @@ export function registerShow(program: Command, deps: ShowDeps = {}): void {
         if (holdReason) console.log(`  gate hold: ${holdReason}`);
         if (recoveringAttempt) {
           console.log(`  publication: ${publicationRecoveryMessage(recoveringAttempt)}`);
+        }
+        if (publishedAfterCancel) {
+          console.log(`  publication: ${publicationAfterCancelMessage(publishedAfterCancel)}`);
         }
         // FG-455: don't let this collapse into a generic "failed" — the worktree
         // may hold real, unreviewed work.

@@ -38,7 +38,7 @@ import { getRun } from "../store/runs.js";
 import { finalizeRunIfSettled } from "./run-finalize.js";
 import { notifyOnTaskBlockedByRed, notifyOnGateAwaiting } from "../notify/trigger.js";
 import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskAwaitingGate, markTaskAwaitingRecovery, markTaskHeldForGate, markTaskBlockedByRed, markTaskFailed, setTaskStatus, setTaskWorktreePath } from "../store/tasks.js";
-import { failTask, classify, ORPHAN_EVIDENCE_KINDS } from "./failure-kind.js";
+import { failTask, classify, failureKindFromEvents, ORPHAN_EVIDENCE_KINDS } from "./failure-kind.js";
 import type { FailureKind, OrphanEvidence, ContainerCausalEvidence } from "./failure-kind.js";
 import { captureUsageForTask } from "../store/model-calls.js";
 import { insertVerdict, verdictsForTask } from "../store/verdicts.js";
@@ -47,7 +47,7 @@ import { crashPoint } from "./crash-points.js";
 import { assembleReviewerContextPacket } from "./reviewer-context-packet.js";
 import { validateVerdict } from "./validate-findings.js";
 import { gradeFindings } from "./review-quality.js";
-import { logEvent } from "../store/events.js";
+import { logEvent, eventsForTask } from "../store/events.js";
 import { taskDir, integrationWorktreeDir } from "../util/paths.js";
 import { computeReadyQueue, isRunSettled, resolvePhasePrimary } from "./ready-queue.js";
 import { classifyTaskLineage, isWorkflowPrimaryRow } from "./lifecycle-evaluator.js";
@@ -105,7 +105,7 @@ import {
   type PublishOutcome,
   type ValidationResult,
 } from "./integration-publisher.js";
-import { getPublicationAttempt, publicationAttemptsForTask } from "../store/publications.js";
+import { getPublicationAttempt, publicationAttemptsForTask, type PublicationAttempt } from "../store/publications.js";
 
 // Resolve the agent role for a fanout child. When fanout.agent_map is set and
 // the input value carries a discipline string that's in the map, route to the
@@ -2105,6 +2105,41 @@ function awaitPublicationRecovery(
  *  a second process converging that from underneath the live one would be the race the
  *  lease exists to prevent. Crash-stranded `running` rows are reconcile.ts's, and they
  *  arrive here as `failed` on the pass after it lands them. */
+/** FG-425: was this task's terminal state CHOSEN by a human, or inflicted on it?
+ *
+ *  `failed` alone cannot answer that — `forge cancel` and a crash-stranded publication
+ *  land in the same status — so this reads the evidence `forge cancel` durably writes
+ *  and a crash cannot: the `task.cancelled` event, and the `cancelled` failure kind on
+ *  the task.failed event beside it. Both are written by cancel.ts and nothing else.
+ *  Either one is proof; the reconciler needs proof of the ABSENCE of a cancel before it
+ *  may touch a terminal row, so it fails closed on either. */
+function taskWasCancelled(taskId: string): boolean {
+  const events = eventsForTask(taskId);
+  return events.some((e) => e.eventType === "task.cancelled") || failureKindFromEvents(events) === "cancelled";
+}
+
+/** FG-425: the cancel stands — and the candidate is on the target anyway.
+ *
+ *  Leaving that silent would re-create the AC5 contradiction from the other direction:
+ *  an operator reads `cancelled`, takes the target to be untouched, and the publication
+ *  sitting in its history is a surprise waiting for them. So the fact is recorded once,
+ *  durably, naming the sha — which is what `forge show` renders (publicationAfterCancel)
+ *  and what `forge publish recover` reports back. Once, not once per wave: reconciliation
+ *  re-sweeps every terminal task on every wave, and an event stream that grows a line per
+ *  wave forever is noise, not a record. */
+function announcePublicationAfterCancel(runId: string, taskId: string, attempt: PublicationAttempt): void {
+  if (eventsForTask(taskId).some((e) => e.eventType === "task.published_after_cancel")) return;
+  logEvent("task.published_after_cancel", {
+    runId,
+    taskId,
+    payload: {
+      attemptId: attempt.attemptId,
+      publishedSha: attempt.publishedSha,
+      target: attempt.target,
+    },
+  });
+}
+
 function reconcilePublicationRecoveries(runId: string, workflow: Workflow, projectDir: string): void {
   const recovering = tasksForRun(runId).filter(
     (t) =>
@@ -2119,6 +2154,17 @@ function reconcilePublicationRecoveries(runId: string, workflow: Workflow, proje
     const attempts = publicationAttemptsForTask(task.id);
     const attempt = attempts.find((a) => a.state === "published") ?? attempts.find((a) => a.state !== "intent");
     if (!attempt || attempt.state === "publishing") continue;
+
+    // A CANCEL IS TERMINAL AND WINS. `forge cancel` writes the same `failed` row a
+    // crash-stranded task ends up in, and the two are opposite things: one is damage
+    // to repair, the other is a human's decision to stop. Reconciling a cancelled task
+    // would override that decision — and a cancel a background sweep can undo is not a
+    // cancel. So the CONTRADICTION rule above applies only where the failure was NOT
+    // chosen, and this task is left exactly where the operator put it.
+    if (taskWasCancelled(task.id)) {
+      if (attempt.state === "published") announcePublicationAfterCancel(runId, task.id, attempt);
+      continue;
+    }
 
     if (attempt.state === "published") {
       // Clear the terminal claim FIRST, through the state that means exactly "the
@@ -2210,6 +2256,10 @@ export type HandRecovery = {
   /** Set when the publication converged but its task could NOT be reconciled here.
    *  Says why, and what the operator must do instead. */
   unreconciled?: string;
+  /** FG-425: set when the owning task was CANCELLED and its attempt published anyway.
+   *  Nothing was reconciled — a cancel is terminal — but the candidate IS on the target,
+   *  and the operator who cancelled it may not be left thinking otherwise. */
+  publishedAfterCancel?: { taskId: string; runId: string; publishedSha: string; target: string };
 };
 
 export function recoverPublicationByHand(attemptId: string): HandRecovery {
@@ -2241,6 +2291,22 @@ export function recoverPublicationByHand(attemptId: string): HandRecovery {
 
   const task = getTask(attempt.taskId);
   if (!task) return { outcome };
+  // The hand path goes through the same reconciliation as a wave, so it refuses the
+  // same resurrection — and it owes the operator the same account of it. Nothing was
+  // reconciled here (the cancel stands), so reporting a reconciliation would be a
+  // second lie on top of the one this guard exists to prevent.
+  const settled = getPublicationAttempt(attemptId);
+  if (taskWasCancelled(task.id) && settled?.state === "published" && settled.publishedSha) {
+    return {
+      outcome,
+      publishedAfterCancel: {
+        taskId: task.id,
+        runId: attempt.runId,
+        publishedSha: settled.publishedSha,
+        target: settled.target,
+      },
+    };
+  }
   return { outcome, task: { taskId: task.id, runId: attempt.runId, status: task.status } };
 }
 

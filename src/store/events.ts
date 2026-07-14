@@ -24,6 +24,13 @@ export type EventType =
   // onto the truth it recorded (complete when the candidate landed; failed with the
   // converged kind when it did not).
   | "task.publication_reconciled"
+  // FG-425: the task was CANCELLED and its publication attempt nevertheless converged
+  // to `published` — the candidate is on the target. The cancel is terminal and stands
+  // (recovery never resurrects it, so no task.publication_reconciled is written), which
+  // is exactly why this exists: it is the durable record that the target carries work
+  // from a task the operator stopped. Emitted once, on the first reconciliation pass
+  // that sees the pair — never once per wave.
+  | "task.published_after_cancel"
   | "task.retried"
   | "task.reconciled"
   // FG-540: a missing result.json was recovered as the exact structured JSON

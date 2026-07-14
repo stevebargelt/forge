@@ -53,7 +53,8 @@ import {
   type ValidationResult,
 } from "./integration-publisher.js";
 import { localTargetFor, readTargetSha } from "./publication-target.js";
-import { deriveNextCommandForTask, deriveNextCommandForRun, publicationRecoveryMessage } from "../cli/commands/show.js";
+import { deriveNextCommandForTask, deriveNextCommandForRun, publicationRecoveryMessage, publicationAfterCancelMessage } from "../cli/commands/show.js";
+import { performCancel } from "../cli/commands/cancel.js";
 import type { Workflow } from "./schema.js";
 
 const WORKFLOW: Workflow = {
@@ -619,5 +620,154 @@ test("FG-425 (AC5): an attempt whose ref advance never landed still converges to
     retryPolicy(failureKindForTask(task.id), task.id).reason,
     /[Nn]othing was published/,
     "and HERE the retry advice SHOULD say nothing was published — because nothing was",
+  );
+});
+
+// ─── (6) a CANCEL is terminal, and recovery may never resurrect it ────────────
+//
+// THE DEFECT THIS PINS (round 2 of the AC5 fix). The repair above was scoped to "a
+// `failed` task beside a `published` attempt is the contradiction, however it arrived".
+// That is true of a crash-stranded row. It is FALSE of a row that is failed because a
+// HUMAN CANCELLED IT — there the terminal state is intent, not damage. `forge cancel`
+// writes exactly that failed row, so a cancel that races a lost-window publication was
+// later OVERRIDDEN: reconciliation walked the cancelled task back through
+// awaiting_recovery and COMPLETED it. A cancel that a background sweep can undo is not
+// a cancel.
+//
+// The two properties are BOTH non-negotiable, and the fix must not trade one for the
+// other: the cancel STANDS (terminal, never resurrected), AND the operator is still
+// told the candidate is on the target — silence there would just re-create the AC5
+// contradiction from the cancel direction.
+//
+// The cancel is driven through the PRODUCTION path (`performCancel`, the function
+// `forge cancel` calls), and the distinction is read from the durable evidence it
+// writes — never inferred from `failed`, which is the same status both ways.
+
+/** The operator cancels this task, exactly as `forge cancel <taskId>` does. The docker
+ *  kill is the only thing stubbed: there is no container in this test. */
+function cancelTask(taskId: string): void {
+  const outcome = performCancel(taskId, {}, () => {}, () => false);
+  assert.equal(outcome.kind, "task-cancelled", `precondition: the cancel must land: ${JSON.stringify(outcome)}`);
+}
+
+test("FG-425: a CANCELLED task whose publication then converges to `published` STAYS cancelled — recovery never resurrects it, and the operator is still told the candidate landed", async () => {
+  const repo = makeRepo();
+  const target = localTargetFor(projectIdentity(repo).canonicalDir);
+  const { runId } = startRun({ workflow: WORKFLOW, title: "cancel-vs-recovery", projectDir: repo, inputs: {} });
+
+  // The window is lost after the ref advance and never comes back inside the wave, so
+  // the task parks in awaiting_recovery over an attempt still `publishing`.
+  const { thief } = stealWindowAfterRefAdvance(repo);
+  await runNext({ runId: runId, workflow: WORKFLOW, dockerExec: stubExec("src/feature.ts") });
+
+  const task = primaryOf(runId);
+  assert.equal(task.status, "awaiting_recovery", "precondition: the task is parked on an unsettled publication");
+  assert.equal(publicationAttemptsForTask(task.id)[0]!.state, "publishing", "precondition: the attempt is unsettled");
+
+  // THE HUMAN DECIDES: stop this. `forge cancel` fails the task with kind `cancelled`
+  // and writes the task.cancelled event — the durable evidence a crash cannot forge.
+  cancelTask(task.id);
+  const cancelled = getTask(task.id)!;
+  assert.equal(cancelled.status, "failed", "precondition: a cancel lands as a terminal `failed` row");
+  assert.equal(failureKindForTask(task.id), "cancelled", "precondition: with the cancelled failure kind");
+  assert.equal(eventTypes(task.id).includes("task.cancelled"), true, "precondition: and the durable cancel event");
+
+  // The window frees and a wave runs. AD-5 converges the ATTEMPT from the ref (it
+  // carries the candidate — that is durable fact, and the record must say so).
+  releasePublicationMutex(projectIdentity(repo).key, thief);
+  setPublisherSeamsForTest({});
+  await runNext({ runId: runId, workflow: WORKFLOW, dockerExec: stubExec("src/feature.ts") });
+
+  // THE INVARIANT: the cancel WON.
+  const after = getTask(task.id)!;
+  assert.equal(after.status, "failed", "the cancelled task is STILL terminal — recovery did not resurrect it");
+  assert.equal(failureKindForTask(task.id), "cancelled", "and it is still recorded as a cancel, not re-kinded");
+  const events = eventTypes(task.id);
+  assert.equal(
+    events.includes("task.publication_reconciled"),
+    false,
+    "the cancelled task was NEVER walked onto the publication — no reconciliation was recorded for it",
+  );
+  assert.equal(
+    events.lastIndexOf("task.awaiting_recovery") < events.indexOf("task.cancelled"),
+    true,
+    "and it was never pushed back through awaiting_recovery after the cancel",
+  );
+  assert.equal(events.includes("task.completed"), false, "the cancelled task was never completed");
+  // NOR IS THE RUN RESURRECTED THROUGH IT. (The run does reach `complete` — that is
+  // forge's SETTLED semantics, which any terminally-failed step produces, cancel or
+  // not. What must never happen is the cancelled work being counted as done or quietly
+  // re-driven: no completed primary in the phase, and no replacement task minted to
+  // redo what the human just stopped.)
+  const primaries = tasksForRun(runId).filter((t) => t.phase === "build" && t.parentId === undefined);
+  assert.deepEqual(primaries.map((t) => t.id), [task.id], "no replacement primary was dispatched to redo the cancelled work");
+  assert.equal(primaries.every((t) => t.status !== "complete"), true, "and the cancelled phase has NO completed primary");
+
+  // AND THE PUBLICATION RECORD STILL TELLS THE TRUTH: the candidate IS on the target.
+  const attempt = publicationAttemptsForTask(task.id)[0]!;
+  assert.equal(attempt.state, "published", "the attempt converged to the disposition the REF proves");
+  assert.equal(attempt.publishedSha, attempt.candidateSha, "AD-6: what landed IS the recorded candidate");
+  assert.equal(readTargetSha(target), attempt.publishedSha, "and the target ref carries it");
+  assert.equal(publicationAttemptsForTask(task.id).length, 1, "nothing was published a second time");
+
+  // THE OPERATOR IS TOLD. Cancelling did not un-publish the candidate, and no surface
+  // may imply it did — the same AC5 rule, arriving from the cancel direction.
+  const surfaces = operatorSurfaces(runId, task.id);
+  const shown = publicationAfterCancelMessage(attempt);
+  assertNoFalseUnpublishedClaim([...surfaces, shown]);
+  assert.match(shown, new RegExp(attempt.publishedSha!.slice(0, 12)), "the published sha is discoverable in what forge RENDERS");
+  assert.match(shown, /ALREADY CARRIES/, "and it says plainly that the target carries this task's work");
+  assert.equal(
+    eventTypes(task.id).includes("task.published_after_cancel"),
+    true,
+    "and it is on the durable record too — not only in a rendered string",
+  );
+
+  // IDEMPOTENT: a second wave neither resurrects the task nor re-announces the event.
+  await runNext({ runId: runId, workflow: WORKFLOW, dockerExec: stubExec("src/feature.ts") });
+  assert.equal(getTask(task.id)!.status, "failed", "still cancelled after another wave");
+  assert.equal(
+    eventTypes(task.id).filter((e) => e === "task.published_after_cancel").length,
+    1,
+    "and the announcement is made ONCE, not once per wave",
+  );
+});
+
+test("FG-425: `forge publish recover` on a CANCELLED task converges the attempt but REFUSES to resurrect the task — and reports the sha that landed", async () => {
+  ensureWorkflowOnDisk();
+  const repo = makeRepo();
+  const target = localTargetFor(projectIdentity(repo).canonicalDir);
+  const { runId } = startRun({ workflow: WORKFLOW, title: "cancel-vs-hand-recovery", projectDir: repo, inputs: {} });
+
+  const { thief } = stealWindowAfterRefAdvance(repo);
+  await runNext({ runId: runId, workflow: WORKFLOW, dockerExec: stubExec("src/feature.ts") });
+  const task = primaryOf(runId);
+  const unsettled = publicationAttemptsForTask(task.id)[0]!;
+  assert.equal(unsettled.state, "publishing", "precondition: the attempt is unsettled");
+
+  cancelTask(task.id);
+  releasePublicationMutex(projectIdentity(repo).key, thief);
+  setPublisherSeamsForTest({});
+
+  // The hand half of recovery — the other door into the same reconciliation. It must
+  // refuse the resurrection too, or the guard is only half a guard.
+  const { outcome, task: reported, publishedAfterCancel } = recoverPublicationByHand(unsettled.attemptId);
+
+  assert.equal(outcome.kind, "published", "AD-5 convergence settles the ATTEMPT — the ref carries the candidate");
+  const attempt = publicationAttemptsForTask(task.id)[0]!;
+  assert.equal(attempt.state, "published");
+  assert.equal(readTargetSha(target), attempt.publishedSha, "the target ref carries it");
+
+  const settled = getTask(task.id)!;
+  assert.equal(settled.status, "failed", "the CANCELLED task is not resurrected by the hand command either");
+  assert.equal(failureKindForTask(task.id), "cancelled", "and it is still a cancel");
+  assert.equal(reported, undefined, "so there is no 'reconciled onto it' to report — nothing was reconciled");
+  assert.notEqual(publishedAfterCancel, undefined, "instead the operator is told the candidate landed anyway");
+  assert.equal(publishedAfterCancel!.publishedSha, attempt.publishedSha, "naming the sha that is on the target");
+  assert.equal(publishedAfterCancel!.taskId, task.id);
+  assert.equal(
+    eventTypes(task.id).includes("task.publication_reconciled"),
+    false,
+    "and no reconciliation was recorded over the cancel",
   );
 });

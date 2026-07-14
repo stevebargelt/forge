@@ -18,6 +18,7 @@ import {
 } from "../../store/publications.js";
 import { projectIdentity } from "../../v2/project-identity.js";
 import { recoverPublicationByHand } from "../../v2/runNext.js";
+import { publicationAfterCancelMessage } from "./show.js";
 
 function sha(s: string | undefined): string {
   return s ? s.slice(0, 12) : "—";
@@ -139,7 +140,7 @@ export function registerPublish(program: Command): void {
       // Both halves, or this command settles the publication and leaves the task that
       // owns it stuck in `awaiting_recovery`: converge the attempt, then reconcile the
       // task from it — the same reconciliation `forge next` runs.
-      const { outcome, task, unreconciled } = recoverPublicationByHand(attemptId);
+      const { outcome, task, unreconciled, publishedAfterCancel } = recoverPublicationByHand(attemptId);
       if (outcome.kind === "blocked") {
         console.error(outcome.error);
         process.exitCode = 1;
@@ -176,6 +177,14 @@ export function registerPublish(program: Command): void {
       }
       if (task) {
         console.log(`  task ${task.taskId} (run ${task.runId}) reconciled onto it: ${task.status}`);
+      }
+      // FG-425: the task was cancelled and its candidate landed anyway. Recovery
+      // settles the publication and leaves the cancel standing — say both, or an
+      // operator reads "published" and never learns their cancel did not stop it.
+      if (publishedAfterCancel) {
+        const a = getPublicationAttempt(attemptId)!;
+        console.log(`  task ${publishedAfterCancel.taskId} (run ${publishedAfterCancel.runId}) was CANCELLED and stays cancelled — NOT reconciled onto this publication.`);
+        console.log(`  ${publicationAfterCancelMessage(a)}`);
       }
       if (unreconciled) {
         console.error(`  WARNING: ${unreconciled}`);

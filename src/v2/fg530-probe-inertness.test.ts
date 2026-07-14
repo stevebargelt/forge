@@ -907,6 +907,17 @@ const ALLOWLIST: Allow[] = [
   },
   {
     file: "v2/runNext.ts",
+    fn: "announcePublicationAfterCancel",
+    call: "logEvent",
+    reason:
+      "the task.published_after_cancel audit append: a CANCELLED task's attempt converged to `published`, so the target carries " +
+      "its candidate and the operator must be told. It writes NO task state at all — the cancel is terminal and reconciliation " +
+      "refuses to touch it, which is the whole point of this branch — and no transition reads this event; the only read is this " +
+      "function's own once-per-task idempotency check, re-derived from the event stream itself. A crash before it leaves exactly " +
+      "the durable pair (cancelled task + `published` attempt) the next wave re-announces from; a crash after it changes nothing.",
+  },
+  {
+    file: "v2/runNext.ts",
     fn: "runFanoutChild",
     call: "insertTask",
     reason: "pre-container mint of a fanout child row as pending — no agent work exists yet. See dispatchSingleStep/insertTask.",
