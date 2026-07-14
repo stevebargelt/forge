@@ -45,28 +45,34 @@ after(() => rmSync(dir, { recursive: true, force: true }));
 
 /** Spawns the wrapper as a DIRECT child of this test process and reports what we observe of it. */
 function observeWrapper(childScript: string): Promise<{ code: number | null; signal: string | null }> {
-  return new Promise((res) => {
+  return new Promise((res, rej) => {
     const wrapper = spawn(process.execPath, [harness, "-e", childScript], { stdio: "ignore" });
     wrapper.on("exit", (code, signal) => res({ code, signal }));
+    wrapper.on("error", rej);
   });
 }
 
-test("bin/forge: child exits 0 → observer sees code=0, signal=null", async () => {
+// A wrapper that never exits (e.g. a future bin/forge that swallows the re-raised signal while
+// holding the event loop open) would otherwise stall `node --test` indefinitely — it has no
+// default per-test timeout. Cap each case so a regression fails loudly instead of hanging CI.
+const CASE = { timeout: 10_000 };
+
+test("bin/forge: child exits 0 → observer sees code=0, signal=null", CASE, async () => {
   assert.deepEqual(await observeWrapper("process.exit(0)"), { code: 0, signal: null });
 });
 
-test("bin/forge: child NUMERICALLY exits 143 → observer sees code=143, signal=null (stays numeric)", async () => {
+test("bin/forge: child NUMERICALLY exits 143 → observer sees code=143, signal=null (stays numeric)", CASE, async () => {
   // A deliberate exit(143) is NOT a signalled death. The wrapper must pass the number through
   // rather than translating it into SIGTERM — otherwise "exited 143" and "killed by SIGTERM"
   // become indistinguishable to anything reading forge's exit.
   assert.deepEqual(await observeWrapper("process.exit(143)"), { code: 143, signal: null });
 });
 
-test("bin/forge: child killed by SIGTERM → observer sees code=null, signal=SIGTERM", async () => {
+test("bin/forge: child killed by SIGTERM → observer sees code=null, signal=SIGTERM", CASE, async () => {
   assert.deepEqual(await observeWrapper("process.kill(process.pid, 'SIGTERM')"), { code: null, signal: "SIGTERM" });
 });
 
-test("bin/forge: child killed by SIGKILL → observer sees code=null, signal=SIGKILL (never exit 0)", async () => {
+test("bin/forge: child killed by SIGKILL → observer sees code=null, signal=SIGKILL (never exit 0)", CASE, async () => {
   // The reported bug: SIGKILL gives code=null, and `code ?? 0` turned that into a success exit.
   assert.deepEqual(await observeWrapper("process.kill(process.pid, 'SIGKILL')"), { code: null, signal: "SIGKILL" });
 });
