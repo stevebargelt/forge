@@ -1,1 +1,37 @@
-FAIL: no docker on PATH — run this on the forge host.
+=== setup ===
+  worktree .git pointer : gitdir: /Users/stevebargelt/code/p5tmp/fg559-p5/proj/.git/worktrees/task1
+  common dir            : /Users/stevebargelt/code/p5tmp/fg559-p5/proj/.git
+  SHAs                  : A=72beb0ea2fe2250d34b1e8c6b38cfcae664bbfb6  B=4563b4626eda870bbfa589d7c68a045591afb6f6
+  image                 : alpine/git:latest
+
+=== DIRECTION 1 — TODAY: only the worktree is mounted  [MUST FAIL] ===
+      git log    -> FAIL fatal: not a git repository: (null)
+      git diff   -> FAIL fatal: not a git repository: (null)
+      git show   -> FAIL fatal: not a git repository: (null)
+      git blame  -> FAIL fatal: not a git repository: (null)
+      git diff   -> FAIL fatal: not a git repository: (null)
+
+=== DIRECTION 2 — FIXED: + parent .git at its HOST ABSOLUTE PATH, READ-ONLY  [MUST WORK] ===
+    (this is the shape the plan chooses: -v /Users/stevebargelt/code/p5tmp/fg559-p5/proj/.git:/Users/stevebargelt/code/p5tmp/fg559-p5/proj/.git:ro)
+      git log    -> OK   4563b46 c2
+      git diff   -> OK   diff --git a/a.txt b/a.txt
+      git show   -> OK   commit 4563b4626eda870bbfa589d7c68a045591afb6f6
+      git blame  -> OK   ^72beb0e (forge             2026-07-14 15:25:02 
+      git diff   -> OK   diff --git a/a.txt b/a.txt
+
+=== DIRECTION 3 — the RED shape: /project ro AND .git ro; prove WRITES are refused ===
+      read  : OK (git log works)
+      WRITE : refused (read-only .git) — host repo cannot be mutated
+      OBJECT: refused (read-only .git)
+      HOOK  : refused (read-only .git) — P3 escape closed
+sh: can't create /Users/stevebargelt/code/p5tmp/fg559-p5/proj/.git/hooks/pre-commit: Read-only file system
+
+=== DIRECTION 4 — the rejected RW shape: prove the P3 escape is REAL in a container ===
+    (only run this to confirm the danger; the plan REJECTS this shape)
+      *** container REWROTE the host repo main ref ***
+      *** container PLANTED a hook in the shared .git/hooks ***
+    now the HOST runs forge's merge-back auto-commit (worktree-lifecycle.ts:274-279):
+      *** HOST EXECUTED THE CONTAINER'S HOOK: PWNED ***
+      => confirms P3 in a real container. RW .git is a container->host escape.
+
+=== done ===

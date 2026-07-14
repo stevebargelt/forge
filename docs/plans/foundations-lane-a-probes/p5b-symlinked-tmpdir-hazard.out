@@ -1,0 +1,58 @@
+=== setup ===
+  worktree .git pointer : gitdir: /private/var/folders/6v/r_n13rx54q3fpz4d5hq5qpnh0000gn/T/fg559-p5/proj/.git/worktrees/task1
+  common dir            : /var/folders/6v/r_n13rx54q3fpz4d5hq5qpnh0000gn/T//fg559-p5/proj/.git
+  SHAs                  : A=e92bfeb8a753f1c46f43853ccd333cc3d11d824e  B=57d77d7bc167f8ff548e7ae6d723ddf118b79e6f
+  image                 : alpine/git:latest
+
+=== DIRECTION 1 — TODAY: only the worktree is mounted  [MUST FAIL] ===
+      git log    -> FAIL fatal: not a git repository: (null)
+      git diff   -> FAIL fatal: not a git repository: (null)
+      git show   -> FAIL fatal: not a git repository: (null)
+      git blame  -> FAIL fatal: not a git repository: (null)
+      git diff   -> FAIL fatal: not a git repository: (null)
+
+=== DIRECTION 2 — FIXED: + parent .git at its HOST ABSOLUTE PATH, READ-ONLY  [MUST WORK] ===
+    (this is the shape the plan chooses: -v /var/folders/6v/r_n13rx54q3fpz4d5hq5qpnh0000gn/T//fg559-p5/proj/.git:/var/folders/6v/r_n13rx54q3fpz4d5hq5qpnh0000gn/T//fg559-p5/proj/.git:ro)
+      git log    -> FAIL fatal: not a git repository: (null)
+      git diff   -> FAIL fatal: not a git repository: (null)
+      git show   -> FAIL fatal: not a git repository: (null)
+      git blame  -> FAIL fatal: not a git repository: (null)
+      git diff   -> FAIL fatal: not a git repository: (null)
+
+=== DIRECTION 3 — the RED shape: /project ro AND .git ro; prove WRITES are refused ===
+      read  : FAIL
+      WRITE : refused (read-only .git) — host repo cannot be mutated
+      OBJECT: refused (read-only .git)
+sh: can't create /var/folders/6v/r_n13rx54q3fpz4d5hq5qpnh0000gn/T//fg559-p5/proj/.git/hooks/pre-commit: Read-only file system
+      HOOK  : refused (read-only .git) — P3 escape closed
+
+=== DIRECTION 4 — the rejected RW shape: prove the P3 escape is REAL in a container ===
+    (only run this to confirm the danger; the plan REJECTS this shape)
+fatal: not a git repository: (null)
+      refs not writable
+      *** container PLANTED a hook in the shared .git/hooks ***
+    now the HOST runs forge's merge-back auto-commit (worktree-lifecycle.ts:274-279):
+      *** HOST EXECUTED THE CONTAINER'S HOOK: PWNED ***
+      => confirms P3 in a real container. RW .git is a container->host escape.
+
+=== done ===
+
+################################################################################
+## OPERATOR ANNOTATION (host, 2026-07-14) — WHY THIS RUN FAILED, AND WHY IT MATTERS
+##
+## This run used the DEFAULT macOS $TMPDIR = /var/folders/... , which is a SYMLINK
+## to /private/var/folders/... . Under that prefix, DIRECTION 2 (the plan's chosen
+## fix) and DIRECTION 3's reads BOTH FAIL with the identical error the bug produces:
+##     fatal: not a git repository: (null)
+##
+## The same script, same Docker, same mount shape, run under a NON-symlinked prefix
+## (/Users/...) PASSES all of DIRECTION 2 and 3 — see p5-docker-container-git.out.
+##
+## FINDING (VERIFIED, executed both ways): PATH-IDENTITY MOUNTING IS NOT SYMLINK-SAFE.
+## If the host .git path traverses a symlink, the container resolves a different
+## absolute path than the .git pointer file records, and git fails EXACTLY as it does
+## in the unfixed case. The implementation MUST canonicalize (realpath) the host path
+## before constructing the mount, and the fail-loud detector MUST compare CANONICAL
+## paths -- otherwise the fix silently no-ops on any symlinked checkout and looks
+## identical to the defect it was shipped to eliminate.
+################################################################################
