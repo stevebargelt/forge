@@ -912,6 +912,22 @@ export function registerShow(program: Command, deps: ShowDeps = {}): void {
                   reconcileCandidate: reconcileReason, // #298: null unless running + container gone
                   failureKind: failureKind ?? null,
                   gateHold: holdReason, // FG-523: null unless held with a named reason
+                  // FG-425: null unless this task is parked in `awaiting_recovery` over an
+                  // unsettled attempt. `task.status` alone tells a machine consumer the task
+                  // is parked but not that a candidate may ALREADY be on the target — which is
+                  // exactly the distinction that decides whether retrying is safe. retrySafe is
+                  // false, and stays false, until convergence settles the disposition.
+                  recoveryPending: recoveringAttempt
+                    ? {
+                        attemptId: recoveringAttempt.attemptId,
+                        target: recoveringAttempt.target,
+                        candidateSha: recoveringAttempt.candidateSha,
+                        retrySafe: false,
+                        recoverCommand: `forge publish recover ${recoveringAttempt.attemptId}`,
+                        convergeCommand: `forge next ${task.runId}`,
+                        message: publicationRecoveryMessage(recoveringAttempt),
+                      }
+                    : null,
                   // FG-425: null unless this task was cancelled AND its publication landed anyway.
                   publishedAfterCancel: publishedAfterCancel
                     ? {
