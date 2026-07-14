@@ -150,24 +150,68 @@ failed with **no pending replacement**, **or** any dependency is itself permanen
 a terminally-failed dependency is **unreachable, not pending** — it never acquires a task row, and a naive
 "does every step have a row" check waits forever.
 
+*Non-primary dispatchability — binding, and it must be stated because S2/S4 otherwise specify only primaries.* An
+`on_reject_recovery` row (rule 3: parented, carrying `inputs.rejectedTaskId`; `lifecycle-evaluator.ts:96`) is
+**parented, not a primary**, so a step-state that keys only off primaries never marks it ready. **Step state must
+admit a pending `on_reject_recovery` row as dispatchable in its phase, independent of that phase's primary
+settle-state.** The load-bearing case is the schema-legal **self-referencing** `on_reject` (`on_reject === step.id`,
+FG-476): rule 3 is ranked **above** rules 4/5 precisely because such a recovery row **lands in the SAME phase as
+the task that rejected it** (`lifecycle-evaluator.ts:100-103`), a phase that is by then **already settled**. A
+settle-state derivation that treats "phase settled" as "phase closed to further dispatch" **wedges that recovery
+row forever.** This is FG-477's AC line *"on_reject recovery targeting an already-complete phase dispatches
+correctly"*; it is a binding contract obligation, not an implementation detail. **Fanout and red children remain
+governed by their parent's dispatch (D-5); this rule is specifically about the recovery kind's independent
+readiness.**
+
 **S3 — Run state.** **`abandoned` is an INPUT, not a derivation.** `run.status` is authoritative and **the
 evaluator must never be able to resurrect it.**
 
-> **Boundary (binding):** `run-finalize.ts:31-46` remains the **SOLE writer** of run completion. **VERIFIED
-> FACT:** `completeRun(` has exactly **one** non-test caller in the tree — `run-finalize.ts:40` — and
-> `finalizeRunIfSettled` re-reads the run and refuses any non-`active` run at `:38-39`. All seven finalization
-> sites route through it (`gate.ts:460`, `runNext.ts:220`, `runNext.ts:307`, `runNext.ts:2289`,
-> `reconcile.ts:1342`, `invoke.ts:312`, `review-loop.ts:923`).
+> **Boundary (binding), stated precisely — the earlier "SOLE writer" phrasing was an overclaim and is
+> corrected here.**
+>
+> **What is VERIFIED FACT (narrow, and true):** `completeRun(` has exactly **one** non-test caller in the tree
+> — `run-finalize.ts:40` — so it is the sole `completeRun`-mediated completion path. All seven *lifecycle*
+> finalization sites route through `finalizeRunIfSettled` (`gate.ts:460`, `runNext.ts:220`, `runNext.ts:307`,
+> `runNext.ts:2289`, `reconcile.ts:1342`, `invoke.ts:312`, `review-loop.ts:923`), which re-reads the run and
+> refuses any non-`active` run at `:38-39`; and `completeRun`'s guarded write is `UPDATE … WHERE id = ? AND
+> status = 'active'` (`store/runs.ts:147`), so it applies to an active run **only**.
+>
+> **What CONTRADICTS the old "SOLE writer" sentence (VERIFIED FACT):** completion is **also written from OUTSIDE
+> this boundary** by `updateRunStatus(runId, "complete")` — `design.ts:139`, `:147`, `:151` and `claude.ts:405`,
+> `:408` — which never touches `completeRun` / `finalizeRunIfSettled`. These are the single-shot telemetry /
+> usage-capture runs of `forge design` and `forge claude` (they `insertRun` and self-complete for usage
+> accounting), not lifecycle-driven workflow runs. So run-finalize is the sole completion writer **for the runs
+> it owns — the workflow/lifecycle-driven ones — and is NOT the sole completion writer in the tree.**
+>
+> **Where the no-resurrection guarantee ACTUALLY lives (VERIFIED FACT — and it is NOT `completeRun`'s single
+> caller):** it is a **store-layer** guard that holds regardless of which caller reaches it. Two independent
+> guards, one per write path: (1) `completeRun`'s `AND status = 'active'` (`store/runs.ts:147`) refuses any
+> non-active run; (2) `updateRunStatus`'s FG-484 backstop (`store/runs.ts:174-179`) refuses `abandoned →
+> complete` inside the same transaction as the read. Since `abandoned` is the only terminal non-`active` status
+> (`RunStatus = "active" | "complete" | "abandoned"`, `types/index.ts:78`), those two guards together mean **no
+> path — inside the boundary or the design.ts/claude.ts writers outside it — can resurrect a settled run.** That
+> is the property INV-2 must pin, and it is met **at the store, not at the finalize boundary.**
+>
+> **NORMATIVE-UNMET (target, not verified fact):** *"run-finalize is the single completion writer"* as a
+> **global** claim is a contract to be **established**, by routing `design.ts` / `claude.ts` through the boundary
+> (or by a decision to accept them as out-of-boundary telemetry writers the store guard already makes safe). It
+> is **not true today.** Do not assert it as verified; if the cluster wants it, it is a normative target with its
+> own acceptance condition — the store-layer no-resurrection guarantee above is what carries the safety in the
+> meantime.
 >
 > **The evaluator answers "is it settled". It does NOT answer "write complete".** Anything else re-opens the
-> AWN-2 cancel/complete race that is currently closed. **This is the interaction of cancellation and completion
-> on every finalization path: it is a single-writer guarantee, and it is already met — the cluster's job is to
-> not break it.**
+> AWN-2 cancel/complete race that is currently closed. **The cluster's job is to not break the store-layer
+> no-resurrection guard, and to not add a third completion-writing path.**
 
 **S4 — Ready work.** Must name **the task attempt to dispatch**, not merely the step. This is the load-bearing
 requirement: `dispatchSingleStep` already re-derives that pick from rows (`runNext.ts:441-449`) and
 `dispatchFanoutStep` re-derives it **differently and destructively** (`:1572-1574`; probe p3). **A ready-work
 surface that returns only a step id does not kill the second derivation and does not satisfy this PRD.**
+
+**Ready work is not primaries-only.** The pick must include a pending `on_reject_recovery` row in a settled phase
+per the S2 rule above — the self-referencing on_reject (FG-476) is exactly the attempt that a step-id-only or
+primary-only ready-work surface silently drops. Ready work names **the attempt to dispatch**, and an
+`on_reject_recovery` row is one such attempt.
 
 **S5 — Terminal blockers.** The *lineage-correct* failed-primary set, with **SHARED-wins** aggregation over
 **all** failed primaries. The aggregation itself already exists and is correct (`executor.ts:496-503`;
@@ -286,7 +330,7 @@ adversarial review and is not authored here. This PRD defines the acceptance a d
 | # | Invariant | Verification method |
 |---|---|---|
 | **INV-1** | No consumer re-derives lifecycle semantics locally (D-6). | Shrinking-allowlist guard test over `src/`. Must reach empty but for the two annotated non-lifecycle exclusions. |
-| **INV-2** | `run-finalize.ts` is the **sole writer** of run completion; an abandoned/cancelled run is never resurrected by a completion on **any** finalization path. | Single-caller assertion on `completeRun` + the existing non-`active` refusal. **Already met at `f3bfee0`** — the cluster must not break it. |
+| **INV-2** | An abandoned run is **never resurrected** to `complete` by **any** completion write — through the finalize boundary or through the out-of-boundary `updateRunStatus` writers (`design.ts:139/147/151`, `claude.ts:405/408`). *(The stronger "run-finalize is the sole completion writer" is NORMATIVE-UNMET, not this invariant — see S3; it is false today because of those writers.)* | The guarantee is **store-layer**, not single-caller: assert (a) `completeRun`'s `AND status = 'active'` write (`store/runs.ts:147`) and (b) `updateRunStatus`'s FG-484 `abandoned → complete` refusal (`store/runs.ts:174-179`) each hold, **and exercise the `updateRunStatus` path directly** (an abandoned run + `updateRunStatus(id,"complete")` must stay abandoned) — a `completeRun`-only single-caller assertion does NOT cover it. **Already met at `f3bfee0`** — the cluster must not break either guard, and must not add a third completion-writing path. |
 | **INV-3** | The evaluator is **pure**: no DB reads; verdict rows passed in, never fetched. | Import-boundary test: the evaluator module imports no store module. |
 | **INV-4** | The evaluator is **total, order-insensitive, and exactly-one-primary-per-phase** — for every surface, not just lineage. | Extend the existing property/parity harness (`lifecycle-evaluator.test.ts:399-585`) to the new surfaces. |
 | **INV-5** | Ready work names a **task attempt**, not a step (S4). | A dispatch path that must not re-derive the pick cannot compile against a step-only result. |
@@ -403,7 +447,7 @@ and one it conceded was "the weakest RED in the set". §0 records the reclassifi
 | # | Norm (UNMET) | Acceptance condition | Verification method |
 |---|---|---|---|
 | **N-1** | **S2 step state** — one derivation; ready-queue and settle-states become projections. | No consumer-visible behavior change. `computeReadyQueue` becomes a thin projection **or is made structurally impossible to drift**. | **Parity property test** over the seeded generated corpus (the harness that made the lineage layer safe): the projection equals today's `computeReadyQueue` / `isRunSettled` on **every** generated shape. Parity against the *current* behavior — not a red against a strawman. |
-| **N-2** | **S3 run state** — run-completion's superseded-primary logic (`runNext.ts:298-303`) is a **fourth** lineage heuristic and becomes evaluator-derived. | INV-2 preserved: single-writer, no resurrection of an abandoned run. | Parity harness + the existing single-caller assertion on `completeRun`. (Its ad-hoc-row defect is **A-6** and needs its own red.) |
+| **N-2** | **S3 run state** — run-completion's superseded-primary logic (`runNext.ts:298-303`) is a **fourth** lineage heuristic and becomes evaluator-derived. | INV-2 preserved: no resurrection of an abandoned run, on **both** the finalize path and the `updateRunStatus` path; no third completion-writing path added. | Parity harness + INV-2's **store-layer** guards (`completeRun`'s `AND status='active'` at `store/runs.ts:147` and `updateRunStatus`'s FG-484 refusal at `:174-179`) — **not** a `completeRun`-only single-caller assertion, which stays green while `updateRunStatus` writes completion outside the boundary. (Its ad-hoc-row defect is **A-6** and needs its own red.) |
 | **N-3** | **S4 ready work** — names the task attempt, not the step. | `dispatchSingleStep` and `dispatchFanoutStep` **stop re-deriving the pick**. | INV-5 + parity on dispatch decisions across the corpus. |
 | **N-4** | **S5 terminal blockers** — consume the evaluator's failed-primary set. | SHARED-wins preserved; local tiebreak becomes deterministic under a total order. | Parity on the mixed local/shared case as a regression pin; determinism pinned by an order-insensitivity property test (as the classifier already has). |
 | **N-5** | **S6 operator reason** — one explanation consumed by `show` / `report` / dashboard / campaign hold reasons; validation-contract hold rendered distinctly. | One source. Internal union **not** shipped to the client. | Assert a single source across the surfaces. **Scope against the real surfaces before decomposing** — the dashboard transport is unaudited (**OQ-4**). |
@@ -481,11 +525,13 @@ graph TD
   EVAL -->|"ready work = a task ATTEMPT, not a step"| RN["runNext (dispatch)"]
   EVAL -->|"settled? + reason"| GATE["gate<br/>(verdictBlocksGate stays HERE until relocated)"]
   EVAL -->|"failure kinds + lineage-correct failed primaries"| CAMP["campaign/policy<br/>TRANSLATION LAYER — BlockerKind vocabulary stays HERE"]
-  RN --> RF["run-finalize — SOLE writer of run completion<br/>(refuses non-active: no resurrection)"]
+  RN --> RF["run-finalize — sole completion writer for LIFECYCLE runs<br/>(NOT sole in the tree: design.ts/claude.ts write via updateRunStatus)"]
   GATE --> RF
+  DESIGN["forge design / forge claude<br/>(telemetry runs, out of boundary)"] -->|"updateRunStatus(_, 'complete')"| STORE["store/runs.ts — no-resurrection guards live HERE<br/>completeRun: WHERE status='active' · updateRunStatus: refuse abandoned→complete"]
+  RF -->|completeRun| STORE
+  STORE --> DB[("SQLite — task / run rows")]
   REC["reconcile (never-throw, NO workflow in hand)"] -.->|"workflow-free primitives ONLY"| EVAL
   REC -.->|"worktree ownership answered from the ROW,<br/>never from lineage (cross-cluster)"| ROW["Task.worktreePath"]
-  RF --> DB[("SQLite — task / run rows")]
   RN --> DB
   REC --> DB
   DB -.->|"rows IN — no DB reads inside the evaluator"| EVAL
