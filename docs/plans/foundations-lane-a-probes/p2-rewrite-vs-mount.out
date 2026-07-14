@@ -1,0 +1,60 @@
+=== git version: git version 2.34.1 ===
+
+==== Q1: minimal set MINUS objects (everything else present) ====
+  (mounted: HEAD config refs worktrees  — note: NO objects/)
+--- no objects mounted (refs/HEAD/config/gitdir all present)
+      git log -> FAIL: fatal: not a git repository: /tmp/fg559-p2/host/code/proj/.git/worktre
+      git diff -> FAIL: fatal: not a git repository: /tmp/fg559-p2/host/code/proj/.git/worktre
+      git show -> FAIL: fatal: not a git repository: /tmp/fg559-p2/host/code/proj/.git/worktre
+      git blame -> FAIL: fatal: not a git repository: /tmp/fg559-p2/host/code/proj/.git/worktre
+      git diff -> FAIL: fatal: not a git repository: /tmp/fg559-p2/host/code/proj/.git/worktre
+  [Q1 VERDICT] objects are the CONTENT of every history command.
+               No rewrite can synthesize them. If the commands above failed,
+               the object store is UNAVOIDABLE.
+
+==== Q2: parent .git mounted at a CLEAN container path (/tmp/fg559-p2/ctr/gitcommon), host path ABSENT ====
+  (the host path /tmp/fg559-p2/host/code/proj/.git does NOT exist in this view)
+
+--- 2a: .git pointer untouched, /gitcommon mounted  [EXPECT: FAIL — pointer names a path that isn't there]
+      git log -> FAIL: fatal: not a git repository: /tmp/fg559-p2/host/code/proj/.git/worktre
+      git diff -> FAIL: fatal: not a git repository: /tmp/fg559-p2/host/code/proj/.git/worktre
+      git show -> FAIL: fatal: not a git repository: /tmp/fg559-p2/host/code/proj/.git/worktre
+      git blame -> FAIL: fatal: not a git repository: /tmp/fg559-p2/host/code/proj/.git/worktre
+      git diff -> FAIL: fatal: not a git repository: /tmp/fg559-p2/host/code/proj/.git/worktre
+
+--- 2b: .git pointer REWRITTEN to /tmp/fg559-p2/ctr/gitcommon/worktrees/task1
+      git log -> OK  (1b89ddf c2)
+      git diff -> OK  (diff --git a/a.txt b/a.txt)
+      git show -> OK  (commit 1b89ddf59219fc07f00299b90348c4df70a855a2)
+      git blame -> OK  (^ee74974 (forge             2026-07-14 22:05:29 +0)
+      git diff -> OK  (diff --git a/a.txt b/a.txt)
+      (note: commondir inside that dir is the RELATIVE '../..' -> /tmp/fg559-p2/ctr/gitcommon, so the
+       layout carries over intact; nothing else needed rewriting)
+
+--- 2c: GIT_DIR + GIT_WORK_TREE env set (broken .git pointer file still on disk)
+      git log -> OK  (1b89ddf c2)
+      git diff -> OK  (diff --git a/a.txt b/a.txt)
+      git show -> OK  (commit 1b89ddf59219fc07f00299b90348c4df70a855a2)
+      git blame -> OK  (^ee74974 (forge             2026-07-14 22:05:29 +0)
+      git diff -> OK  (diff --git a/a.txt b/a.txt)
+
+--- 2d: GIT_DIR + GIT_COMMON_DIR + GIT_WORK_TREE env set
+      git log -> OK  (1b89ddf c2)
+      git diff -> OK  (diff --git a/a.txt b/a.txt)
+      git show -> OK  (commit 1b89ddf59219fc07f00299b90348c4df70a855a2)
+      git blame -> OK  (^ee74974 (forge             2026-07-14 22:05:29 +0)
+      git diff -> OK  (diff --git a/a.txt b/a.txt)
+
+--- 2e: the back-pointer /tmp/fg559-p2/ctr/gitcommon/worktrees/task1/gitdir currently reads:
+        /tmp/fg559-p2/host/dotforge/worktrees/run1/task1/.git   <- names the HOST worktree path
+--- 2e: back-pointer left naming the (absent) host worktree path, pointer rewritten
+      git log -> OK  (1b89ddf c2)
+      git diff -> OK  (diff --git a/a.txt b/a.txt)
+      git show -> OK  (commit 1b89ddf59219fc07f00299b90348c4df70a855a2)
+      git blame -> OK  (^ee74974 (forge             2026-07-14 22:05:29 +0)
+      git diff -> OK  (diff --git a/a.txt b/a.txt)
+      [if OK] git does NOT need the back-pointer to resolve for read commands;
+              it is used by 'git worktree list/prune' bookkeeping, not by log/diff.
+
+=== SHAs: A=ee7497459a5e8047b24313d1b33bcef2b478dfc0 B=1b89ddf59219fc07f00299b90348c4df70a855a2 ===
+=== done ===

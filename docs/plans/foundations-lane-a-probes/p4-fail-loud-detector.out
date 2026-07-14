@@ -1,0 +1,30 @@
+=== HOST-SIDE PREDICATE ===
+--- case 1: the MAIN CHECKOUT (what preflightProjectMount is handed today)
+    => OK plain-checkout
+       NOTE: this is why the bug is invisible to the current preflight —
+       it is never handed the worktree, so it always sees a plain checkout.
+
+--- case 2: the WORKTREE (the dir actually bind-mounted at /project)
+    => NEEDS_MOUNT /tmp/fg559-p4/host/code/proj/.git (gitdir=/tmp/fg559-p4/host/code/proj/.git/worktrees/task1)
+       the detector names the exact host path that must also be mounted.
+
+--- case 3: a worktree whose parent repo is GONE (corrupt on the host)
+    => DANGLING /tmp/fg559-p4/host/code/proj/.git/worktrees/task1
+
+--- case 4: a plain non-git directory
+    => OK not-a-git-repo
+
+=== CONTAINER-SIDE ASSERTION (executed, not inferred) ===
+--- TODAY'S SHAPE: only the worktree is mounted (parent .git absent)
+REFUSE  /project is a git worktree whose gitdir is NOT reachable in this
+        container. Every git command would fail. An agent that consults
+        history (reviewer/red/fixer) would silently work from the file
+        tree and report success on evidence it never had.
+        detail: fatal: not a git repository: /tmp/fg559-p4/host/code/proj/.git/worktrees/task1
+  [OK] detector REFUSED — silent degradation prevented
+
+--- FIXED SHAPE: parent .git also mounted, at its host absolute path (read-only)
+PASS  git is usable inside the container
+  [OK] detector PASSES — git works, agent starts
+
+=== done ===

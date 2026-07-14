@@ -1,0 +1,51 @@
+=== SETUP ===
+  host repo main = 2581354c44fb98f29797f487453eb44bcf3172a0
+  worktree       = /tmp/fg559-p3/host/dotforge/worktrees/run1/task1  (branch forge/run1/task1)
+  the container's /project is the worktree; the fix also mounts /tmp/fg559-p3/host/code/proj/.git
+
+############ SCENARIO A: parent .git mounted RW (the BLUE shape) ############
+
+--- A1. Can the container REWRITE THE HOST REPO'S BRANCH REFS?
+    *** YES — HOST REPO'S main WAS REWRITTEN FROM INSIDE THE CONTAINER ***
+        main: 2581354c44fb98f29797f487453eb44bcf3172a0  ->  7b9fd0e5b18718efe9ada21ba174b183fa8fb054
+
+--- A2. Can the container write LOOSE OBJECTS into the host object store?
+    *** YES — object 1c7eb1dc9ac813fc4f425509312bae5151273f9e is now in the HOST's .git/objects ***
+
+--- A3. HOST CODE EXECUTION: plant a hook in the SHARED .git/hooks,
+        then let FORGE'S OWN HOST-SIDE MERGE-BACK run it.
+        planted: /tmp/fg559-p3/host/code/proj/.git/hooks/pre-commit
+
+        >>> now the HOST runs forge's real merge-back sequence
+            (worktree-lifecycle.ts mergeWorktreeBranch: git add . ; git commit ; git merge --ff-only)
+
+    *** YES — THE HOST EXECUTED THE CONTAINER'S CODE ***
+        loot file written by the hook, on the host:
+          HOST CODE EXECUTION as agent at /tmp/fg559-p3/host/dotforge/worktrees/run1/task1
+        => a rw .git mount is a CONTAINER -> HOST ESCAPE, triggered by
+           forge's own merge-back. No agent misbehaviour needed beyond
+           writing one file into the mounted .git.
+
+############ SCENARIO B: parent .git mounted READ-ONLY ############
+
+--- B1. rewrite host refs?
+    NO — refused (read-only .git)
+
+--- B2. write objects into the host store?
+    NO — refused (read-only .git)
+
+--- B3. plant a hook?
+p3-write-exposure.sh: line 140: /tmp/fg559-p3/host/code/proj/.git/hooks/pre-commit: Permission denied
+    NO — refused (read-only .git)
+
+--- B4. do the READ commands the agents actually need still work? (see P1 SET5)
+    git log -> OK
+    git show -> OK
+    git blame -> OK
+
+--- B5. can the agent still COMMIT inside the container? (the contract question)
+    NO — in-container commit FAILS under a read-only .git.
+         (worktree-lifecycle.ts's HOST-SIDE auto-commit still captures the work:
+          mergeWorktreeBranch git add . + git commit, run on the host — :270-287)
+
+=== done ===
