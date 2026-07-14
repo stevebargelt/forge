@@ -526,10 +526,21 @@ export function recoverCheckout(
     // Still derived from {baseSha, candidateSha, currentTargetSha} alone: ancestry
     // is a property of those SHAs, not of the working tree, which AD-5 never
     // inspects.
-    if (candidateIsInTargetHistory(t, candidateSha, current, renew)) {
-      return { state: "published", publishedSha: candidateSha, superseded: true };
+    //
+    // `current` is a READ of the ref, and for a remote that read is one round trip
+    // old by the time we ask about history. The disposition is therefore derived from
+    // `observedSha` — the tip the ancestry check itself OBSERVED — never from the sha
+    // we happened to read first. Terminalizing an attempt from an obsolete snapshot
+    // of the target is the same lie as parking a publication that landed.
+    const observed = candidateInTargetHistory(t, candidateSha, current, renew);
+    if (observed.inHistory) {
+      return {
+        state: "published",
+        publishedSha: candidateSha,
+        superseded: observed.observedSha !== candidateSha,
+      };
     }
-    return { state: "external_writer", currentSha: current };
+    return { state: "external_writer", currentSha: observed.observedSha };
   }
   // The ref carries the candidate: the CAS succeeded and the publication IS
   // durable. Only the checked-out tree may still be behind — re-run the update.
@@ -552,59 +563,63 @@ export function recoverCheckout(
   return { state: "published", publishedSha: candidateSha };
 }
 
-/** Is the candidate in the target's CURRENT history — i.e. did our CAS/push land and
- *  a later publication simply build on top of it?
+/** The ancestry answer AND the tip it was answered against: is the candidate in the
+ *  target's history, as OBSERVED at `observedSha`? The caller classifies from
+ *  `observedSha`, never from the sha it read before asking. */
+type TargetAncestry = { inHistory: boolean; observedSha: string };
+
+/** Is the candidate in the target's history — i.e. did our CAS/push land and a later
+ *  publication simply build on top of it?
  *
- *  For a LOCAL target both SHAs are already in the repo. For a REMOTE one the target's
- *  tip is not, so fetch the target ref into the pushing repo's object store first — a
- *  local-object write, never a mutation of the target. Refusing to ask the question of
- *  a remote is what made a superseded remote publication indistinguishable from one
- *  that never landed: recovery reported `external_writer`, parked the attempt as
- *  `publish_base_churn`, and told the operator nothing had been published while the
- *  candidate sat in the remote's history (FG-425 AC5).
+ *  For a LOCAL target both SHAs are already in the repo, and the ref read IS the
+ *  observation: nothing can move between the two under the mutex. For a REMOTE one the
+ *  target's tip is not in the repo, so fetch the target ref into the pushing repo's
+ *  object store first — a local-object write, never a mutation of the target. Refusing
+ *  to ask the question of a remote is what made a superseded remote publication
+ *  indistinguishable from one that never landed: recovery reported `external_writer`,
+ *  parked the attempt as `publish_base_churn`, and told the operator nothing had been
+ *  published while the candidate sat in the remote's history (FG-425 AC5).
  *
- *  The question can also be UNANSWERABLE — the fetch fails, or the ref moved again
- *  between our ls-remote and the fetch onto a tip that does not contain the sha we
- *  read. Recovery then settles nothing and throws: it is idempotent and the next sweep
- *  re-reads the ref, which is the only honest disposition when "did it land?" has no
- *  answer yet. Guessing `external_writer` here is precisely the bug. */
-function candidateIsInTargetHistory(
+ *  The remote answer is derived from the tip THE FETCH BROUGHT BACK, re-resolved from
+ *  FETCH_HEAD — not from the ls-remote sha the caller read a round trip earlier. A
+ *  remote that moves in that window (a later publication, a force-update) would
+ *  otherwise have recovery decide — and TERMINALIZE — from a target snapshot that was
+ *  already obsolete when it was fetched. That the `current` OBJECT exists locally after
+ *  the fetch is not the same question as "is the ref still there": a force-moved ref
+ *  leaves that object perfectly readable and utterly stale.
+ *
+ *  The question can still be UNANSWERABLE — the fetch fails, the remote ref is gone,
+ *  FETCH_HEAD does not resolve. Recovery then settles nothing and throws: it is
+ *  idempotent and the next sweep re-reads the ref, which is the only honest disposition
+ *  when "did it land?" has no answer yet. Guessing `external_writer` here is precisely
+ *  the bug. */
+function candidateInTargetHistory(
   t: PublicationTarget,
   candidateSha: string,
   current: string,
   renew?: RenewHold,
-): boolean {
-  if (t.kind === "local") return isAncestor(t.projectDir, candidateSha, current, renew);
+): TargetAncestry {
+  if (t.kind === "local") {
+    return { inHistory: isAncestor(t.projectDir, candidateSha, current, renew), observedSha: current };
+  }
 
   renew?.();
+  let tip: string;
   try {
     git(t.projectDir, ["fetch", "--quiet", t.remote, refOf(t)]);
+    tip = git(t.projectDir, ["rev-parse", "FETCH_HEAD"], renew);
   } catch (e) {
     throw new RemoteAncestryUnknownError(t, candidateSha, current, (e as Error).message);
   }
-  if (!hasCommit(t.projectDir, current, renew)) {
+  if (!/^[0-9a-f]{40}$/.test(tip)) {
     throw new RemoteAncestryUnknownError(
       t,
       candidateSha,
       current,
-      `${refOf(t)} no longer contains ${current.slice(0, 12)} — it moved again while recovery was reading it`,
+      `the fetched tip of ${refOf(t)} did not resolve (FETCH_HEAD = "${tip}")`,
     );
   }
-  return isAncestor(t.projectDir, candidateSha, current, renew);
-}
-
-function hasCommit(repoDir: string, sha: string, renew?: RenewHold): boolean {
-  renew?.();
-  try {
-    execFileSync("git", ["cat-file", "-e", `${sha}^{commit}`], {
-      cwd: repoDir,
-      stdio: ["ignore", "ignore", "ignore"],
-      timeout: WINDOW_GIT_TIMEOUT_MS,
-    });
-    return true;
-  } catch {
-    return false;
-  }
+  return { inHistory: isAncestor(t.projectDir, candidateSha, tip, renew), observedSha: tip };
 }
 
 /** Recovery could not fetch the remote target's history, so whether the candidate

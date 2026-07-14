@@ -400,3 +400,158 @@ test("FG-425 remote (AD-5): a remote moved off the candidate's history IS an ext
     rmSync(work, { recursive: true, force: true });
   }
 });
+
+// ── AD-5 remote recovery classifies from the FETCHED tip, not the pre-fetch read ──
+//
+// The remote's sha is READ (ls-remote) before recovery fetches its history, and the
+// remote can move in that window. Recovery must therefore decide from the tip the
+// FETCH observed, never from the sha it read a round trip earlier: a disposition
+// derived from an obsolete snapshot of the target — above all a TERMINAL one — is the
+// AC5 lie (one truthful final disposition) wearing a different hat.
+//
+// `renew` is the honest seam for that window: recoverCheckout renews the hold before
+// each git op, so the SECOND renewal lands after the ls-remote read and before the
+// fetch. `moveRemote` fires exactly once, there.
+function movesRemoteAfterTheRead(move: () => void): () => void {
+  let calls = 0;
+  let moved = false;
+  return () => {
+    if (++calls >= 2 && !moved) {
+      moved = true;
+      move();
+    }
+  };
+}
+
+/** A throwaway clone that commits on top of the remote's main and pushes. */
+function pushOnTop(bare: string, file: string): string {
+  const other = mkdtempSync(join(tmpdir(), "fg425-other-"));
+  git(other, ["clone", "-q", bare, "."]);
+  const sha = commit(other, file, `${file}\n`);
+  git(other, ["push", "-q", "origin", "main"]);
+  rmSync(other, { recursive: true, force: true });
+  return sha;
+}
+
+test("FG-425 remote (AD-5): the ref moves between the READ and the FETCH onto a tip that still contains the candidate — published, not churn", () => {
+  const { bare, work } = initRemotePair();
+  try {
+    const target: RemoteTarget = { kind: "remote", projectDir: work, remote: "origin", branch: "main" };
+    const base = readTargetSha(target);
+    const candidate = buildCandidate(work, base, "cand", "feature.txt");
+
+    assert.deepEqual(publishToTarget(target, base, candidate), { ok: true, publishedSha: candidate });
+    const laterD = pushOnTop(bare, "later-d.txt");
+    assert.equal(readTargetSha(target), laterD, "precondition: the pre-fetch read sees D");
+
+    // A third writer rewrites the tip onto E — still built on our candidate, but D is
+    // no longer in the target's history. Recovery reads D, and the ref becomes E before
+    // its fetch. The candidate is in the target's history either way: it is published.
+    const rewrite = mkdtempSync(join(tmpdir(), "fg425-rewrite-"));
+    git(rewrite, ["clone", "-q", bare, "."]);
+    git(rewrite, ["reset", "-q", "--hard", candidate]);
+    const tipE = commit(rewrite, "e.txt", "rewritten on top of the candidate\n");
+
+    const outcome = recoverCheckout(
+      target,
+      base,
+      candidate,
+      movesRemoteAfterTheRead(() => {
+        git(rewrite, ["push", "-q", "--force", "origin", "main"]);
+      }),
+    );
+    rmSync(rewrite, { recursive: true, force: true });
+
+    assert.equal(git(bare, ["rev-parse", "refs/heads/main"]), tipE, "precondition: the remote really did move to E");
+    assert.deepEqual(
+      outcome,
+      { state: "published", publishedSha: candidate, superseded: true },
+      "the FETCHED tip contains the candidate — recovery must report it published, never external_writer or churn",
+    );
+  } finally {
+    rmSync(bare, { recursive: true, force: true });
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test("FG-425 remote (AD-5): the ref moves between the READ and the FETCH onto a tip WITHOUT the candidate — classified from the fetched tip, never the stale sha", () => {
+  const { bare, work } = initRemotePair();
+  try {
+    const target: RemoteTarget = { kind: "remote", projectDir: work, remote: "origin", branch: "main" };
+    const base = readTargetSha(target);
+    const candidate = buildCandidate(work, base, "cand", "feature.txt");
+
+    // Our candidate never landed: an external writer holds the ref at X.
+    const staleX = pushOnTop(bare, "theirs-x.txt");
+    assert.equal(readTargetSha(target), staleX, "precondition: the pre-fetch read sees X");
+
+    let tipY = "";
+    const outcome = recoverCheckout(
+      target,
+      base,
+      candidate,
+      movesRemoteAfterTheRead(() => {
+        tipY = pushOnTop(bare, "theirs-y.txt");
+      }),
+    );
+
+    assert.notEqual(tipY, staleX);
+    assert.deepEqual(
+      outcome,
+      { state: "external_writer", currentSha: tipY },
+      "the reported target sha must be the tip the FETCH observed, not the sha read before it",
+    );
+  } finally {
+    rmSync(bare, { recursive: true, force: true });
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+// The terminalizing shape of the same defect, and the one AC5 exists to forbid: the
+// stale sha CONTAINS the candidate (so the stale snapshot says "published" — terminal,
+// immutable) while the tip the fetch actually observed does NOT. Deciding from the
+// pre-fetch sha here settles the attempt, permanently, on a target state that no longer
+// exists.
+test("FG-425 remote (AD-5): a stale pre-fetch sha that contains the candidate must NOT terminalize the attempt when the FETCHED tip does not", () => {
+  const { bare, work } = initRemotePair();
+  try {
+    const target: RemoteTarget = { kind: "remote", projectDir: work, remote: "origin", branch: "main" };
+    const base = readTargetSha(target);
+    const candidate = buildCandidate(work, base, "cand", "feature.txt");
+
+    assert.deepEqual(publishToTarget(target, base, candidate), { ok: true, publishedSha: candidate });
+    const staleD = pushOnTop(bare, "later-d.txt");
+
+    // An earlier recovery pass already fetched D into this repo's object store, so D is
+    // a perfectly readable local object — which is exactly why "the object exists" is
+    // not the question. The question is where the REF is.
+    git(work, ["fetch", "-q", "origin", "refs/heads/main"]);
+    assert.equal(git(work, ["rev-parse", `${staleD}^{commit}`]), staleD, "precondition: D is a local object");
+    assert.ok(isAncestor(work, candidate, staleD), "precondition: the STALE sha contains the candidate");
+
+    // The ref is then force-moved off our candidate entirely, between the read and the
+    // fetch. Our commit is NOT in the target's history any more.
+    const wiped = commit(work, "wipe.txt", "no candidate here\n");
+    git(work, ["reset", "-q", "--hard", "HEAD~1"]);
+    assert.ok(!isAncestor(work, candidate, wiped), "precondition: the new tip does NOT contain the candidate");
+
+    const outcome = recoverCheckout(
+      target,
+      base,
+      candidate,
+      movesRemoteAfterTheRead(() => {
+        git(work, ["push", "-q", "--force", "origin", `${wiped}:refs/heads/main`]);
+      }),
+    );
+
+    assert.notEqual(readTargetSha(target), staleD, "precondition: the remote really did move off D");
+    assert.deepEqual(
+      outcome,
+      { state: "external_writer", currentSha: wiped },
+      "recovery must never settle `published` from a target snapshot the fetch has already disproved",
+    );
+  } finally {
+    rmSync(bare, { recursive: true, force: true });
+    rmSync(work, { recursive: true, force: true });
+  }
+});
