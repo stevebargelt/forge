@@ -1,0 +1,25 @@
+✔ rule 0: a runner-stamped `task`-phase row is a primary, not ambiguous (FG-512) (1.705959ms)
+✔ rule 0: a marker-less legacy `task`-phase row in a `task`-declaring workflow is named, not guessed (0.225208ms)
+✔ rule 0: a marker-less legacy row in a phase the workflow does NOT call `task` is ordinary lineage (0.832625ms)
+✔ a row in a phase the workflow does not declare still classifies (totality, no throw) (0.146375ms)
+✔ rule 0 wins over rule 3 on the (unmintable) parented invoke row — provenance before lineage (0.079ms)
+✔ TOTALITY: every generated row maps to exactly one known kind (136.138125ms)
+✔ TOTALITY: the kind space is exhaustively switchable — no default case is ever hit (56.746167ms)
+✔ ORDER-INSENSITIVITY: classification does not depend on input array order (144.175209ms)
+✔ EXACTLY-ONE-PRIMARY: a phase's non-invoke parent-less rows hold exactly one `primary` (27.034083ms)
+✔ isPhasePrimaryRow is exactly the classifier's phase-primary rule (workflow-free view) (15.066209ms)
+✔ PARITY (ready-queue): isOnRejectRecoveryTask decides identically to kind === on_reject_recovery (27.662666ms)
+✔ PARITY (ready-queue): the ad-hoc exclusion decides identically to kind === adhoc_invoke (25.503584ms)
+✔ PARITY (ready-queue + runNext): isWorkflowPrimaryRow decides identically to the legacy primary predicate (24.62425ms)
+✔ PARITY (runNext): dispatchSingleStep's pending-row pick is unchanged (34.458042ms)
+✔ PARITY (reconcile): finalizeOrphanedPrimaries sweeps exactly the same rows (26.563375ms)
+✔ DISAGREEMENT (retry.ts, unmigrated): the `red-` prefix heuristic calls a shipping-reviewer red a fanout child (0.425041ms)
+✔ DISAGREEMENT (runNext dispatchFanoutStep, unmigrated): its parent lookup does not exclude ad-hoc invoke rows (0.155542ms)
+ℹ tests 32
+ℹ suites 0
+ℹ pass 32
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1104.170001

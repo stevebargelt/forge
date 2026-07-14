@@ -1,0 +1,16 @@
+### feature.yml `build` step: fanout = true | reds = red-wide, red-narrow, red-frontend, red-backend, red-security, shipping-reviewer
+
+### A. TODAY (unmigrated retry.ts)
+classifier kind of red-build-sr: red_review
+retry() threw: FanoutChildRetryError
+  fanout child? true
+  message: Task red-build-sr is a fanout child (parent build-primary) — retrying it directly would strand a detached primary in the fanout's phase. Use `forge recover build-primary --re-drive` to re-drive the whole wave, or pass --force to retry this child anyway.
+
+### B. POST-MIGRATION SHAPE (retry --force mints the same row a migrated retry.ts would)
+new row: {"id":"task-build-e55d65","phase":"build","agentRole":"shipping-reviewer","parentId":null,"status":"pending"}
+classifier kind of the NEW row: retry_replacement
+rows in phase `build`: build-primary[blocked_by_red,parent=-,kind=primary]  red-build-sr[failed,parent=build-primary,kind=red_review]  task-build-e55d65[pending,parent=-,kind=retry_replacement]
+computeReadyQueue -> build
+isRunSettled -> false
+dispatchFanoutStep existingParent (mirror of runNext.ts:1572-1574) -> task-build-e55d65 (agentRole=shipping-reviewer)
+  => the next `forge next` adopts the RED's retry row as the fanout PARENT of a fresh wave.
