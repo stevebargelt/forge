@@ -45,7 +45,7 @@ import { retry, PublishedTaskRetryError } from "./retry.js";
 import { gate as doGate } from "./gate.js";
 import { projectIdentity } from "./project-identity.js";
 import { startRun } from "./startRun.js";
-import { runNext, type DockerExecFn } from "./runNext.js";
+import { runNext, recoverPublicationByHand, type DockerExecFn } from "./runNext.js";
 import {
   MUTEX_TTL_MS,
   publishIntegration,
@@ -163,6 +163,26 @@ container:
   remove_on_exit: true
 result:
   file: /task/result.json
+`,
+  );
+}
+
+/** `forge publish recover` runs OUTSIDE a wave: it has an attempt id and nothing else,
+ *  so it reloads the run's workflow from disk exactly as `forge next` does. The
+ *  installed YAML is therefore part of the production shape this test drives. */
+function ensureWorkflowOnDisk(): void {
+  const path = join(process.env.FORGE_HOME!, "workflows", `${WORKFLOW.name}.yml`);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(
+    path,
+    `name: ${WORKFLOW.name}
+description: ${JSON.stringify(WORKFLOW.description)}
+inputs: []
+steps:
+  - id: build
+    agent: engineer
+    gate: auto
+    runtime: fg425-ac5-test
 `,
   );
 }
@@ -389,6 +409,85 @@ test("FG-425 (AC5): a window that never frees yields a NON-TERMINAL awaiting_rec
   );
   assert.equal(after.runStatus, "complete", "the RUN reaches the matching truthful state too");
   assert.equal(publicationAttemptsForTask(task.id).length, 1, "and nothing was published a second time");
+});
+
+// ─── (2b) the HAND half: `forge publish recover` settles the TASK too ────────
+//
+// The ADR names two mechanisms that clear `awaiting_recovery`: the next `forge next`,
+// and `forge publish recover` by hand. The hand one used to be only HALF a recovery —
+// it converged the attempt and synchronized the target, then left the task that owns
+// it parked in `awaiting_recovery` with `forge show` still calling the publication
+// unsettled, until some later wave happened to run the other half. A `published`
+// attempt beside a task that disagrees with it is the SAME contradiction AC5 forbids;
+// it just arrives by a different door. So: NO `forge next` runs after the recovery in
+// this test. The hand command settles the attempt, the task, the run and the operator
+// surfaces on its own, or it is not the mechanism the ADR says it is.
+
+test("FG-425 (AC4): `forge publish recover` is the WHOLE recovery — it converges the attempt AND reconciles the owning task, with no `forge next` after it", async () => {
+  ensureWorkflowOnDisk();
+  const repo = makeRepo();
+  const target = localTargetFor(projectIdentity(repo).canonicalDir);
+  const { runId } = startRun({ workflow: WORKFLOW, title: "ac4-hand-recovery", projectDir: repo, inputs: {} });
+
+  // Held, never released: the wave's bounded wait gives up and parks the task.
+  const { thief } = stealWindowAfterRefAdvance(repo);
+  await runNext({ runId: runId, workflow: WORKFLOW, dockerExec: stubExec("src/feature.ts") });
+
+  const task = primaryOf(runId);
+  const unsettled = publicationAttemptsForTask(task.id)[0]!;
+  assert.equal(unsettled.state, "publishing", "precondition: the attempt is unsettled INSIDE the window");
+  assert.equal(task.status, "awaiting_recovery", "precondition: and its task is parked on it");
+  assert.match(
+    publicationRecoveryMessage(unsettled),
+    /publish recover/,
+    "precondition: `forge show` points the operator at the HAND command — so that command had better finish the job",
+  );
+
+  // The crashed holder's lease lapses (a durable timestamp — AD-7; never a probe), and
+  // the operator types exactly what forge told them to. Nothing else runs.
+  releasePublicationMutex(projectIdentity(repo).key, thief);
+  setPublisherSeamsForTest({});
+  const { outcome, task: reported } = recoverPublicationByHand(unsettled.attemptId);
+
+  // THE PUBLICATION — converged from the three SHAs, and the target synchronized.
+  const attempt = publicationAttemptsForTask(task.id)[0]!;
+  assert.equal(outcome.kind, "published", "AD-5 convergence settled the attempt");
+  assert.equal(attempt.state, "published");
+  assert.equal(attempt.publishedSha, attempt.candidateSha, "AD-6: what landed IS the recorded candidate");
+  assert.equal(readTargetSha(target), attempt.publishedSha, "the target ref carries it");
+  assert.equal(readFileSync(join(repo, "src/feature.ts"), "utf8"), "the agent's output\n", "the worktree converged");
+  assert.equal(git(repo, ["status", "--porcelain"]), "", "index and worktree agree with the ref — the target is CLEAN");
+
+  // THE DURABLE TASK AND CAMPAIGN — the half that used to be missing.
+  const settled = getTask(task.id)!;
+  assert.equal(settled.status, "complete", `the TASK was reconciled by the hand command itself: ${settled.error ?? ""}`);
+  assert.equal(
+    eventTypes(task.id).includes("task.publication_reconciled"),
+    true,
+    "and the reconciliation is on the durable record, not merely implied by the status",
+  );
+  assert.equal(getRun(runId)!.status, "complete", "the RUN reaches the matching truthful state — without another wave");
+  assert.equal(publicationAttemptsForTask(task.id).length, 1, "nothing was published a second time");
+
+  // WHAT THE OPERATOR IS TOLD — by the command itself, and by every surface after it.
+  assert.deepEqual(
+    reported,
+    { taskId: task.id, runId, status: "complete" },
+    "`forge publish recover` reports the task it reconciled — the operator never has to go look",
+  );
+  const surfaces = operatorSurfaces(runId, task.id);
+  assertNoFalseUnpublishedClaim(surfaces);
+  for (const s of surfaces) {
+    assert.doesNotMatch(s, /UNSETTLED/i, `a surface still calls the publication unsettled after recovery:\n  "${s}"`);
+    assert.doesNotMatch(s, /publish recover/, `a surface still tells the operator to recover what is already recovered:\n  "${s}"`);
+  }
+
+  // IDEMPOTENT. Re-running it re-derives nothing and un-completes nothing.
+  const again = recoverPublicationByHand(unsettled.attemptId);
+  assert.equal(again.outcome.kind, "published", "the RECORDED disposition is reported, not re-derived");
+  assert.equal(publicationAttemptsForTask(task.id)[0]!.publishedSha, attempt.publishedSha, "the publishedSha is never rewritten");
+  assert.equal(getTask(task.id)!.status, "complete", "and the task stays complete");
+  assert.equal(readTargetSha(target), attempt.publishedSha, "the target ref is untouched by the second run");
 });
 
 // ─── (3) retry safety ─────────────────────────────────────────────────────────

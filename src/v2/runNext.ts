@@ -64,7 +64,7 @@ import { loadProjectAuthProfile, resolveProjectAuthForContainer, ProjectAuthErro
 import { writeTaskManifest, manifestControlPlaneBlock } from "./task-manifest.js";
 import { resolveDocsSurfacesReceipt } from "./contract.js";
 import { emitAgentProgressEvents } from "./agent-progress.js";
-import { loadRuntimeWithSource, loadModelPolicyWithSource, loadWorkflowWithSource, type ModelPolicyWithSource } from "./loader.js";
+import { loadRuntimeWithSource, loadModelPolicyWithSource, loadWorkflow, loadWorkflowWithSource, type ModelPolicyWithSource } from "./loader.js";
 import {
   resolveModel,
   taskModelFields,
@@ -100,10 +100,12 @@ import {
   publishIntegration,
   finalizePublication,
   recoverUnfinishedPublications,
+  recoverPublicationAttemptForOperator,
+  type OperatorRecovery,
   type PublishOutcome,
   type ValidationResult,
 } from "./integration-publisher.js";
-import { publicationAttemptsForTask } from "../store/publications.js";
+import { getPublicationAttempt, publicationAttemptsForTask } from "../store/publications.js";
 
 // Resolve the agent role for a fanout child. When fanout.agent_map is set and
 // the input value carries a discipline string that's in the map, route to the
@@ -2172,6 +2174,74 @@ function reconcilePublicationRecoveries(runId: string, workflow: Workflow, proje
       payload: { attemptId: attempt.attemptId, outcome: attempt.state, failureKind: kind },
     });
   }
+}
+
+/** FG-425 (AC4/AC5): `forge publish recover` — the HAND half of the two mechanisms
+ *  that clear `awaiting_recovery`, and the whole of it.
+ *
+ *  Recovery is TWO halves, and the operator command used to be only the first:
+ *  converge the PUBLICATION from the ref, then reconcile the TASK from the
+ *  publication. Run bare, it would mark the attempt `published`, synchronize the
+ *  target — and leave the task that owns it sitting in `awaiting_recovery`, with
+ *  `forge show` still calling the publication unsettled, until some later `forge next`
+ *  happened to run the other half. A hand recovery that only settles the attempt is
+ *  the same contradiction between two durable records that AC5 exists to forbid; it
+ *  just arrives by a different door.
+ *
+ *  So the run path and the hand path converge on the SAME reconciliation, and the
+ *  only difference between them is who invoked it. Idempotent: re-running it against a
+ *  settled attempt whose task already caught up reconciles nothing.
+ *
+ *  The reconciliation is skipped when the run is no longer active — a cancelled or
+ *  completed run's tasks are terminal, and recovery settles the publication record
+ *  without resurrecting them.
+ *
+ *  It is also skipped, REPORTED rather than thrown, when the run's workflow no longer
+ *  resolves: the task's landing needs the step's gate, and that lives in the workflow
+ *  definition. The publication is already converged and the target already synchronized
+ *  by the time we get here, so a missing workflow may not turn a successful recovery
+ *  into a crash — it may only leave the task uncaught-up, which is the pre-fix
+ *  behaviour and which the operator is then told about by name. */
+export type HandRecovery = {
+  outcome: OperatorRecovery;
+  /** The owning task's status AFTER reconciliation — what the operator is told, and
+   *  the thing that used to be a lie. Absent when nothing was reconciled. */
+  task?: { taskId: string; runId: string; status: string };
+  /** Set when the publication converged but its task could NOT be reconciled here.
+   *  Says why, and what the operator must do instead. */
+  unreconciled?: string;
+};
+
+export function recoverPublicationByHand(attemptId: string): HandRecovery {
+  const outcome = recoverPublicationAttemptForOperator(attemptId);
+  if (outcome.kind === "unknown_attempt" || outcome.kind === "blocked") return { outcome };
+
+  const attempt = getPublicationAttempt(attemptId);
+  if (!attempt) return { outcome };
+  const run = getRun(attempt.runId);
+  if (!run || run.status !== "active" || !run.projectDir) return { outcome };
+
+  let workflow: Workflow;
+  try {
+    workflow = loadWorkflow(run.workflow, { projectDir: run.projectDir });
+  } catch (e) {
+    return {
+      outcome,
+      unreconciled:
+        `the publication is converged, but task ${attempt.taskId} could NOT be reconciled onto it here: run ` +
+        `${attempt.runId}'s workflow (${run.workflow}) does not load — ${(e as Error).message}. Restore the workflow ` +
+        `definition and run \`forge next ${attempt.runId}\`, which runs the same reconciliation.`,
+    };
+  }
+
+  reconcilePublicationRecoveries(attempt.runId, workflow, run.projectDir);
+  if (isRunSettled(workflow, tasksForRun(attempt.runId))) {
+    finalizeRunIfSettled(attempt.runId, "publish-recover-reconciled");
+  }
+
+  const task = getTask(attempt.taskId);
+  if (!task) return { outcome };
+  return { outcome, task: { taskId: task.id, runId: attempt.runId, status: task.status } };
 }
 
 /** Map a non-published publication outcome onto forge's failure-kind vocabulary.

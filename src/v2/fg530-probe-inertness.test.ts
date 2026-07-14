@@ -1005,6 +1005,17 @@ const ALLOWLIST: Allow[] = [
       "with every task terminal — the next reconcile pass re-derives and completes it (idempotent, and the reconcile cells " +
       "drive exactly that).",
   },
+  {
+    file: "v2/runNext.ts",
+    fn: "recoverPublicationByHand",
+    call: "finalizeRunIfSettled",
+    reason:
+      "the SAME run-level completion as runNext's, reached from `forge publish recover` instead of from a wave, and " +
+      "identical in its crash window: atomic inside run-finalize.ts, and re-derived by the next reconcile pass if a crash " +
+      "lands on either side. The reconciliation that precedes it (reconcilePublicationRecoveries — probed where its own " +
+      "writes live) is the only thing here that can strand a TASK, and a crash before this call simply leaves a settled " +
+      "run `active`: the operator re-runs the command (idempotent) or the next wave completes it.",
+  },
 
   // ── gate.ts ────────────────────────────────────────────────────────────────
   {
