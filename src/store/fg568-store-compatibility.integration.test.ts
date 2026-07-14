@@ -26,6 +26,7 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import {
   getDb,
+  closeDb,
   applyMigrations,
   assertSchemaVersionSupported,
   runDestructiveConvergenceMigration,
@@ -331,6 +332,67 @@ before(() => {
     )
     .run("req_legacy", "claude-opus-4-7", 10, 5, "2026-01-01T00:00:00Z", 10, 5, 0.0);
   legacy.close();
+});
+
+// ===========================================================================
+// E7 (production getDb path) — the forward gate is WIRED INTO the real getDb()
+// open sequence, not merely available as a standalone function. The E7 test
+// above drives the test file's OWN copy of that sequence (openAsNewBinary),
+// which would keep passing even if getDb() itself never called the gate. This
+// test drives the REAL getDb() singleton against a store a newer forge stamped
+// past a boundary this binary doesn't understand, and proves getDb() refuses —
+// and refuses BEFORE it touches the schema.
+//
+// Mutation-adequacy: kills the "delete assertSchemaVersionSupported() from
+// getDb" mutant. That mutant leaves the whole E1/E2/E3/E4/E5/E6/E7 suite green
+// (verified) because nothing else exercises the production open path's gate —
+// this case is what makes the gate's wiring load-bearing rather than decorative.
+//
+// Ordering: this runs BEFORE the E3/E5 test so getDb()'s singleton is still
+// cold and getDb() actually opens DB_PATH here (a cached handle would bypass the
+// gate entirely). The store at DB_PATH is the legacy fixture the before() hook
+// built; we bump its user_version to a future boundary, assert the refusal, then
+// restore it to 0 (in finally) so the E3/E5 test still sees an untouched legacy
+// store at user_version 0. Isolation is preserved: DB_PATH lives under the
+// per-process temp FORGE_HOME (src/test-setup.ts), never ~/.forge/forge.db.
+// ===========================================================================
+test("E7(getDb): the production getDb() open path itself refuses a future-boundary store, before migrating", () => {
+  // getDb()'s singleton is still cold here: this test is defined before the E3/E5
+  // test and no earlier test in the file calls getDb(), so getDb() below opens
+  // DB_PATH for real and runs the forward gate (a cached handle would bypass it).
+  assert.equal(existsSync(DB_PATH), true, "precondition: the before() hook already built the legacy store at DB_PATH");
+
+  // A newer forge stamped this shared store past a one-way boundary we don't know.
+  const stamp = new Database(DB_PATH);
+  stamp.pragma(`user_version = ${SCHEMA_VERSION + 7}`);
+  stamp.close();
+
+  try {
+    // The REAL getDb() (not the test's openAsNewBinary) must refuse the future store.
+    assert.throws(
+      () => getDb(),
+      /newer than this binary understands/i,
+      "the production getDb() open path refuses a store newer than this binary understands",
+    );
+    // And it refused BEFORE migrating: the gate runs ahead of SCHEMA_SQL/applyMigrations,
+    // so the legacy `runs` table still has no project_dir — no additive ALTER touched the
+    // store getDb declined to open.
+    const inspect = new Database(DB_PATH);
+    assert.equal(
+      columnNames(inspect, "runs").has("project_dir"),
+      false,
+      "the gate short-circuited getDb ahead of applyMigrations — the refused store was never migrated",
+    );
+    inspect.close();
+  } finally {
+    // Restore the boundary and drop any handle so the E3/E5 test opens the legacy
+    // store fresh at user_version 0. (Under the mutant getDb() would have opened and
+    // cached the future store; closeDb() clears it either way.)
+    const restore = new Database(DB_PATH);
+    restore.pragma("user_version = 0");
+    restore.close();
+    closeDb();
+  }
 });
 
 test("E3/E5: a read-only FIRST open still migrates (defect reproduced) — additively, running NO destructive DDL", () => {
