@@ -12,9 +12,16 @@ RUN update-ca-certificates
 # sudo: the agent user gets NOPASSWD sudo (DEC-009) and the entrypoint uses it
 # to chown the #245 node_modules shadow volume — but Ubuntu's base image has no
 # sudo binary, so the sudoers line below was previously inert. Install it here.
+# tmux (FG-551): `forge launch` owns long host-side commands under tmux (FG-535),
+# and its launch tier exercises that real tmux-owned path. Without tmux in the
+# image those tests hard-fail in every agent container, so a real tmux regression
+# would be invisible in the noise. This does NOT let agents own task work under
+# tmux — that boundary (BD-1/BD-2/BD-8) is unchanged. `tmux -V` is a build-time
+# smoke: the image cannot be built without a working tmux.
 RUN apt-get update && apt-get install -y \
-    git wget jq openssh-client python3 python3-pip build-essential sudo \
-    && rm -rf /var/lib/apt/lists/*
+    git wget jq openssh-client python3 python3-pip build-essential sudo tmux \
+    && rm -rf /var/lib/apt/lists/* \
+    && tmux -V
 
 # GitHub CLI
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
