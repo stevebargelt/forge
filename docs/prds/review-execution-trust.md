@@ -37,20 +37,57 @@ and the instances will keep arriving until the default is inverted.
 
 ## 2. Central invariant — declared finalize sites (the cluster's spine)
 
-**Enforcement lives at the CALLER, not at the primitive.** `evaluateValidationContract` is a correct pure
-function (VERIFIED FACT, plan §2.3 ARM 1 — the evaluator returns the right hold decision for every site's
-contraband); the gap is that most finalize callers never invoke it. Therefore:
+**Enforcement lives at the finalize DECISION, not at the terminal-write primitive.**
+`evaluateValidationContract` is a correct pure function (VERIFIED FACT, plan §2.3 ARM 1 — the evaluator
+returns the right hold decision for every site's contraband); the gap is that most finalize paths never
+reach it. But the enumeration unit must be chosen at the granularity where the gate actually discriminates,
+because **the store primitive is the wrong granularity to enumerate at:**
 
-> **INV-1 (DECLARED FINALIZE SITES).** Every call site that writes a task to a terminal `complete`/
-> `recovered` status (`markTaskComplete`, `markTaskRecovered`) is an **enumerated, annotated, machine-
-> checked** member of a declared set. Each member states one of: *gated by the validation contract*,
-> *exempt by role* (non-implementer), *intentional human override* (`forge gate advance`), or *sweeper-
-> declines* (crash recovery must not complete contraband). Adding a finalize site that is not annotated is
-> a **build failure**, not a silent omission. An ungated implementer-reachable finalize is thereby an
-> explicit, greppable, reviewable act.
+> **VERIFIED FACT — the wrapper collapses classes the gate must separate.** `finalizePrimary`
+> (`runNext.ts:997`) is the **fail-open finalize wrapper** and the semantic boundary between a *gated
+> workflow primary* and an *exempt synthetic aggregate*. It is called from three sites — the gated
+> single-step primary (`:838`), the **exempt** fanout parent aggregate (`:1955`), and the
+> publication/crash-recovery reconcile (`:2180`) — and **all three funnel through its single terminal
+> write, `markTaskComplete` at `:1010`.** A guard placed literally at that `markTaskComplete` call site is
+> **blind** to which class it is finalizing: `:838` (must enforce `tests_run`) and `:1955` (exempt by
+> FG-524's design) are indistinguishable there. The discriminating information lives in `finalizePrimary`'s
+> **caller class**, not at the primitive. Enumerating `markTaskComplete`/`markTaskRecovered` call sites
+> (INV-1's prior unit) therefore cannot express the gate, and does not match the plan's census, which keys
+> `:838` and `:1955` on their *`finalizePrimary` call sites* — **two different units** the PRD must
+> reconcile.
+
+Therefore the enumeration unit is the **finalize EVENT, classified by the lineage/role the FG-523 evaluator
+already keys on** — not a flat list of terminal-write call sites, and never an `agentRole.startsWith("red-")`
+heuristic (§9.1):
+
+> **INV-1 (DECLARED FINALIZE SITES).** Every path that writes a task to a terminal `complete`/`recovered`
+> status is an **enumerated, annotated, machine-checked** member of a declared set, and each member is
+> classified **by the semantic class the gate treats differently** — not by the name of the store function
+> it calls. A guard must be able to look at a finalize event and know **which class it is** from the run's
+> lineage (`isInvokeLikeRun` / `taskHasPipelineFinalize`, `run-kind.ts`) and the task's role
+> (`IMPLEMENTER_ROLES`, `validation-contract.ts:53`) — the SAME signals the evaluator uses. The classes and
+> their gate disposition (this table reconciles the plan §1.1 census — keyed by store-function call site —
+> into the buildable semantic unit; plan §1.1 carries the line-level evidence):
+>
+> | Finalize class | Terminal write path | Disposition |
+> |---|---|---|
+> | **gated workflow primary** | `finalizePrimary` ← single-step `runNext.ts:838` → `:1010` | **gated** by the validation contract |
+> | **exempt synthetic aggregate** | `finalizePrimary` ← fanout parent `runNext.ts:1955` → `:1010` | **exempt by construction** — the aggregate carries no `tests_run`; sound **only if the children are gated** (D3) |
+> | **gated fanout implementer child** | `markTaskComplete` direct, `runNext.ts:2541` | **gated** — FG-524 (D3); this is the child site D3 acts on, distinct from the parent aggregate above |
+> | **exempt red-review child** | `markTaskComplete` direct, `runNext.ts:1381` | **exempt by role** (reds ∉ `IMPLEMENTER_ROLES`) |
+> | **gated ad-hoc invoke** | `markTaskComplete` direct, `invoke.ts:813` | **gated** — FG-525 (D4) |
+> | **crash-recovery finalize** | `reconcile.ts:779`/`:880`, `recover.ts:457` (`markTaskRecovered`), `finalizePrimary` ← `:2180` | **sweeper-declines** — must not complete contraband (D4); `reconcile`/`recover` are the sites *unnamed by any ticket* until this cluster |
+> | **intentional human override** | `gate.ts:209` | **exempt** — this IS the override |
+> | **post-gate re-entry** | `runNext.ts:936`, `:1661` | **exempt** — the advance decision was already recorded |
+> | **non-implementer task** | `design.ts`, `claude.ts` | **exempt by role** |
+>
+> Adding a terminal-status write that is not classified is a **build failure**, not a silent omission.
+> **An unclassified terminal-write path is a defect** — the exact hole (the reconcile/recover sites, plan
+> §1.1) this invariant exists to close. An ungated implementer-reachable finalize is thereby an explicit,
+> greppable, reviewable act.
 
 This is a **machine backstop for the failure class**, not a fifth patch. It is what stops FG-524/FG-525
-recurring when finalize site #N is added later — the same way they were added: by nobody noticing the
+recurring when finalize path #N is added later — the same way they were added: by nobody noticing the
 default (plan §4).
 
 - **Classification: NORMATIVE-UNMET.** No such guard exists today; the census in plan §1.1 is prose, not
@@ -58,8 +95,11 @@ default (plan §4).
   such guard exists." **This PRD reclassifies that as NORMATIVE-UNMET and says so explicitly:** a guard
   that can only "go red" because it has not been written yet is not evidence of a defect — it is an
   unbuilt contract. It gets an acceptance condition (§8), not a fabricated baseline red.
-- **Prior art / evidence:** the seven-site census (one gated, six ungated by construction, plus the
-  intentional overrides) is enumerated and evidenced in plan §1.1.
+- **Prior art / evidence:** the class boundaries above are already documented in prose at the evaluator's
+  header (`validation-contract.ts:12-21` — it names the invoke and fanout-child paths as knowingly ungated,
+  and asserts "reconcile never completes a workflow primary"); the guard makes that prose executable and
+  extends it to the reconcile/recover sites the header does not mention. The line-level census (one gated,
+  six ungated by construction, plus the intentional/role-exempt sites) is enumerated in plan §1.1.
 
 ---
 
@@ -221,8 +261,12 @@ that fails loudly rather than rotting.
 
 ## 4. Invariants
 
-- **INV-1 — DECLARED FINALIZE SITES.** As §2. Every terminal-status writer is enumerated, annotated, and
-  machine-checked; an unannotated finalize site is a build failure.
+- **INV-1 — DECLARED FINALIZE SITES.** As §2. The enumeration unit is the **finalize event classified by
+  lineage/role** (the signals the FG-523 evaluator keys on), **not** a flat `markTaskComplete`/
+  `markTaskRecovered` call-site list — because `finalizePrimary` collapses the gated primary and the exempt
+  aggregate onto one terminal write (`runNext.ts:1010`), a primitive-site guard cannot tell them apart.
+  Every finalize event is classified (gated / exempt-with-reason / sweeper-declines); an unclassified
+  terminal-write path is a build failure.
 - **INV-2 — GATE COUPLES TO RE-AGGREGATION / NO SILENT PUBLICATION.** A held fanout child holds its parent
   and **withholds publication**; the parent's stored aggregate is recomputed from the children's current
   results on re-drive. Publication of a subtree containing an unvalidated child is forbidden. Held ≠
@@ -301,10 +345,14 @@ fabricated red**. Where the plan asserted a red for an unimplemented norm, this 
 
 ### 7.2 NORMATIVE-UNMET (acceptance condition + verification method; no fabricated red)
 
-- **N-1 (INV-1, declared finalize sites).** *Acceptance:* an unannotated `markTaskComplete`/
-  `markTaskRecovered` site added to `src/` fails the build. *Verification:* the guard test enumerates the
-  §1.1 census and rejects a wildcard/blanket allowlist. *(Reclassified from plan B0/F0 — "red by
-  construction" is not a baseline red.)*
+- **N-1 (INV-1, declared finalize sites).** *Acceptance:* a terminal-status write reachable by an
+  implementer role that is not classified into one of the §2 finalize classes fails the build — including a
+  new `finalizePrimary` caller (whose class is decided at the caller, not at `:1010`) and a new direct
+  `markTaskComplete`/`markTaskRecovered` site. *Verification:* the guard test enumerates the §2 classes
+  (reconciled with the plan §1.1 census), asserts each of the census sites maps to its declared class, and
+  rejects a wildcard/blanket allowlist; it keys class membership on lineage/role, not on
+  `agentRole.startsWith("red-")` (§9.1). *(Reclassified from plan B0/F0 — "red by construction" is not a
+  baseline red.)*
 - **N-2 (INV-3 + D1, zero-round env-unavailable).** *Acceptance:* a forced install failure stops **before
   round 1** as `verification_environment_unavailable` with no reviewer/fixer dispatch; deps absent **or
   built for an incompatible ABI** are not accepted as ready. *Verification:* exercise the readiness gate
