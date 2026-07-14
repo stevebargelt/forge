@@ -11,3 +11,7 @@ runtime: v24.17.0 ABI 137
   DIRECT observer of WRAPPER: code=null signal=SIGTERM   (shell would encode as $?=143)
   observer: child code=null signal=SIGTERM
   decision: RE-RAISE SIGTERM
+### child killed by SIGKILL
+  DIRECT observer of WRAPPER: code=null signal=SIGKILL   (shell would encode as $?=137)
+  observer: child code=null signal=SIGKILL
+  decision: RE-RAISE SIGKILL

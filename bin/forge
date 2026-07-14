@@ -8,4 +8,13 @@ const entry = resolve(here, "..", "src", "cli", "index.ts");
 const tsx = resolve(here, "..", "node_modules", ".bin", "tsx");
 
 const child = spawn(tsx, [entry, ...process.argv.slice(2)], { stdio: "inherit" });
-child.on("exit", (code) => process.exit(code ?? 0));
+child.on("exit", (code, signal) => {
+  // Re-raise the child's OWN signal so a direct observer still sees `signal`, not a
+  // numeric stand-in. `process.exit(128)` would erase the OS-signal evidence, and
+  // `code ?? 0` reported a SIGKILLed control plane as success.
+  if (signal) {
+    process.kill(process.pid, signal);
+    return;
+  }
+  process.exit(code ?? 0);
+});
