@@ -1,0 +1,16 @@
+=== STEP 1 — TODAY, standalone-gitdir + alternates: reproduce the HIGH [PWNED expected] ===
+  git-dir resolves to  : /Users/stevebargelt/code/p6btmp/fg559-p6b/worktrees/task1/.eg
+  hooksPath IS honored : /Users/stevebargelt/code/p6btmp/fg559-p6b/evil/hooks
+  D6 Layer-2 detector  : PASSES (blind — objects resolve via alternates)
+  *** HOST EXECUTED AGENT HOOK: pre-commit-RCE — container->host RCE ***
+
+=== STEP 2 — FIX-A only (host git -c core.hooksPath=/dev/null): hook vector dies ===
+  hook DEAD under FIX-A (but see D10 residual table: filter/textconv are config-defined, not hooks)
+
+=== STEP 3 — FIX-B (worktree-local .git pointer immutable / ro bind): agent cannot repoint ===
+p6b-real-vector-standalone-alternates.sh: line 55: /Users/stevebargelt/code/p6btmp/fg559-p6b/worktrees/task1/.git: Operation not permitted
+  pointer overwrite REFUSED — standalone-gitdir substitution impossible => no agent-writable config => hooksPath/filter/textconv/alternates ALL inert
+
+CONCLUSION: the HIGH is REAL via the standalone+alternates vector (STEP 1). FIX-A is PARTIAL
+(kills hooks, not filters). FIX-B (immutable pointer) is the load-bearing fix: it removes the
+attack's precondition (repointing .git), closing every config-driven exec vector at once.

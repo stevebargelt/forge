@@ -1,0 +1,21 @@
+NOT EXECUTED BY THE ARCHITECTURE PASS.
+
+This .out is a placeholder. The planning container has no docker daemon, no
+root, and an empty node_modules; it also should not self-certify a security
+claim. p6-blue-worktree-git-pointer-hijack.sh is written to be run BY THE
+OPERATOR on the macOS host where forge actually runs.
+
+Until this file contains real captured output, the HIGH it reproduces (host
+execution of a blue agent's worktree-supplied hook/filter via a hijacked
+worktree-local `.git` pointer) is INFERENCE from source reading
+(integration-publisher.ts:304-312, the live host-side autoCommitSource), NOT an
+observed container-executed fact — the same discipline P5 held before its .out
+existed.
+
+EXPECTED, when the operator runs it:
+  STEP A (today):      "*** HOST EXECUTED AGENT CODE: ... PWNED ***"
+                       AND "D6 Layer-2 detector : PASSES against the hijacked pointer"
+  STEP B (FIX-A only): filter vector still fires (hook vector dead) — the honest residual
+  STEP C (FIX-B):      "pointer overwrite: REFUSED" and "no host execution under FIX-B"
+
+Run on the host:  bash p6-blue-worktree-git-pointer-hijack.sh > p6-blue-worktree-git-pointer-hijack.out 2>&1
