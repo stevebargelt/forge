@@ -440,7 +440,22 @@ function reconcileTerminalOutcome(run: Run, itemId: string, projectDir?: string)
       }
     }
     if (auditResult?.outcome === "pass") {
-      updateCampaignItem(itemId, { lifecycleStatus: "complete", outcome: "shipped" });
+      // FG-425 (AC5): a SHIPPED item carries no actionable blocker. The
+      // awaiting_recovery park (driveWorkflowItem, below) is the one campaign park
+      // that stamps a blockerKind on an item still expected to ship — 'git_state',
+      // a SHARED kind. Left behind by this terminal write, the stamp outlives the
+      // unsettled publication that justified it: the next drive reads it off an
+      // already-shipped item and pauses the whole campaign on a blocker that
+      // converged. Shipment is the moment the git state is durably settled, so this
+      // is where the stamp (and the recovery guidance beside it) is cleared. Only
+      // durable shipment clears it — an item still parked on an unconverged
+      // publication never reaches this branch and keeps its blocker.
+      updateCampaignItem(itemId, {
+        lifecycleStatus: "complete",
+        outcome: "shipped",
+        blockerKind: undefined,
+        requestedHumanAction: undefined,
+      });
     } else {
       const auditGap = auditResult?.requestedAction ?? "done-audit not evaluated";
       updateCampaignItem(itemId, {
@@ -652,7 +667,9 @@ async function driveWorkflowItem(
   const ticketId = item.ticketId;
   const doGate = fns.gateFn ?? gate;
   const NO_PROGRESS_LIMIT = 2;
+  const CONVERGE_LIMIT = 2;
   let noProgressStreak = 0;
+  let convergeAttempts = 0;
   let lastSnapshot: string | null = null;
 
   while (true) {
@@ -709,18 +726,47 @@ async function driveWorkflowItem(
     // the target ref and then lost the window. Its candidate may ALREADY be on the
     // target, so the campaign must not report it as failed, must not retry it, and
     // must not let it fall through to the no-progress backstop (which would mislabel
-    // it awaiting_gate). Park with the truth; a resume re-drives the run, whose next
-    // wave converges the publication (AD-5) and reconciles the task.
+    // it awaiting_gate).
+    //
+    // But it must not park INSTEAD of converging, either. runNext's wave prologue is
+    // the ONLY caller of the AD-5 convergence authority (recoverUnfinishedPublications,
+    // then reconcilePublicationRecoveries) — so a branch that parks and returns here,
+    // ahead of the runNext call in Step 5, can never converge anything: every resume
+    // re-enters, re-parks identically, and the item the park tells the operator to
+    // `forge campaign resume` is the one command guaranteed not to help. That is the
+    // FG-475 wedge shape.
+    //
+    // So: DRIVE THE EXISTING AUTHORITY FIRST. Call runNext (which converges the
+    // publication from the recorded ref and reconciles the task onto whatever landed)
+    // and loop — a converged task falls through to the normal drive path at the top.
+    // Nothing is re-dispatched: convergence reconciles the task onto the candidate
+    // that is already on the target, it never re-runs it. Bounded by CONVERGE_LIMIT
+    // per drive, in kind with NO_PROGRESS_LIMIT below, so an attempt that genuinely
+    // cannot settle (a live publisher still owns the window) parks instead of spinning.
     const recoveringTask = tasks.find((t) => t.status === "awaiting_recovery");
     if (recoveringTask) {
+      if (convergeAttempts < CONVERGE_LIMIT) {
+        convergeAttempts++;
+        try {
+          await fns.runNextFn({ runId, workflow });
+        } catch (err) {
+          throw await parkCampaignOnDriveThrow(campaignId, itemId, ticketId, runId, err);
+        }
+        continue;
+      }
+
+      // Convergence was attempted and the attempt is still unsettled — the window is
+      // held by someone else, or the publisher has not released it yet. Park on the
+      // truth, with guidance that names commands which now genuinely converge it.
       updateCampaignItem(itemId, {
         lifecycleStatus: "awaiting_recovery",
         blockerKind: "git_state",
         requestedHumanAction:
           `step ${recoveringTask.phase} lost the publication window AFTER its ref advance landed — the publish ` +
-          `target may ALREADY carry its candidate. Nothing was lost and nothing needs re-running: do NOT retry ` +
-          `${recoveringTask.id}. Run \`forge campaign resume ${campaignId}\` (or \`forge next ${runId}\`) to converge ` +
-          `the publication (AD-5) and reconcile the task onto what actually landed.`,
+          `target may ALREADY carry its candidate, and AD-5 convergence could not settle the attempt on this drive ` +
+          `(the publication window is still held). Nothing was lost and nothing needs re-running: do NOT retry ` +
+          `${recoveringTask.id}. Once the window is free, run \`forge campaign resume ${campaignId}\` (or ` +
+          `\`forge next ${runId}\`) to converge the publication (AD-5) and reconcile the task onto what actually landed.`,
       });
       await parkCampaign(campaignId, itemId, "blocked", { exemption: "item-carries-context" });
       return {
