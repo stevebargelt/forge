@@ -2,11 +2,18 @@
 // converge to that same shape. The bug: insertUsageRows wrote the legacy
 // prompt_tokens/completion_tokens/cost columns, which a fresh SCHEMA_SQL doesn't
 // create — so every insert threw (silently swallowed) on a brand-new install.
+//
+// FG-568 (BD-15): the convergence DROP moved OFF the ordinary open path (it is
+// destructive DDL that would break an in-flight old peer) into the explicit,
+// quiesce-gated runDestructiveConvergenceMigration. So applyMigrations is now
+// additive-only and leaves the legacy columns in place; converging them to the
+// fresh shape is the explicit migration's job. These tests are updated to that
+// split.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import Database from "better-sqlite3";
-import { makeInMemoryDb, setDbForTest, applyMigrations } from "./db.js";
+import { makeInMemoryDb, setDbForTest, applyMigrations, runDestructiveConvergenceMigration } from "./db.js";
 import { SCHEMA_SQL } from "./schema.js";
 import { insertUsageRows } from "./model-calls.js";
 import { insertRun } from "./runs.js";
@@ -41,7 +48,7 @@ test("#295: usage capture works on a FRESH schema (no 0.1.x migration history)",
   }
 });
 
-test("#295: applyMigrations drops the legacy columns on a 0.1.x-migrated-shaped DB, and insert then works", () => {
+test("#295/FG-568: applyMigrations LEAVES the legacy columns (additive-only); the explicit convergence migration drops them so insert works", () => {
   const db = new Database(":memory:");
   db.pragma("foreign_keys = ON");
   db.exec(SCHEMA_SQL);
@@ -67,23 +74,34 @@ test("#295: applyMigrations drops the legacy columns on a 0.1.x-migrated-shaped 
 
   applyMigrations(db);
 
-  const cols = new Set((db.prepare("PRAGMA table_info(model_calls)").all() as { name: string }[]).map((r) => r.name));
-  assert.ok(!cols.has("prompt_tokens"), "prompt_tokens dropped");
-  assert.ok(!cols.has("completion_tokens"), "completion_tokens dropped");
-  assert.ok(!cols.has("cost"), "cost dropped");
-  assert.ok(cols.has("input_tokens"), "new columns retained");
+  // FG-568: the ordinary open path is additive-only — it must NOT drop.
+  const afterMigrate = new Set((db.prepare("PRAGMA table_info(model_calls)").all() as { name: string }[]).map((r) => r.name));
+  assert.ok(afterMigrate.has("prompt_tokens"), "additive-only: prompt_tokens NOT dropped on the open path");
+  assert.ok(afterMigrate.has("completion_tokens"), "additive-only: completion_tokens NOT dropped on the open path");
+  assert.ok(afterMigrate.has("cost"), "additive-only: cost NOT dropped on the open path");
 
-  // The real assertion: an insert omitting the (now-gone) legacy columns succeeds.
+  // Because the legacy NOT NULL columns survive, a current insert omitting them
+  // still throws — which is exactly why an EXPLICIT convergence migration exists.
   const prev = setDbForTest(db);
   try {
     seedTask("t-migrated");
-    assert.equal(insertUsageRows([usageRow("t-migrated")]), 1, "insert works after legacy columns dropped");
+    assert.throws(() => insertUsageRows([usageRow("t-migrated")]), /NOT NULL|constraint/i, "unconverged legacy shape rejects the current insert");
+
+    // Now converge explicitly (quiesce is a no-op on :memory:), then it works.
+    const { dropped } = runDestructiveConvergenceMigration(db);
+    assert.deepEqual(dropped.sort(), ["completion_tokens", "cost", "prompt_tokens"], "the explicit migration drops the legacy columns");
+    const afterConverge = new Set((db.prepare("PRAGMA table_info(model_calls)").all() as { name: string }[]).map((r) => r.name));
+    assert.ok(!afterConverge.has("prompt_tokens") && !afterConverge.has("completion_tokens") && !afterConverge.has("cost"), "legacy columns gone");
+    assert.ok(afterConverge.has("input_tokens"), "new columns retained");
+    assert.equal(insertUsageRows([usageRow("t-migrated")]), 1, "insert works after explicit convergence");
   } finally {
     if (prev) setDbForTest(prev);
   }
 });
 
-test("#295: applyMigrations is idempotent on the drop (second run is a no-op)", () => {
-  const db = makeInMemoryDb(); // already has no legacy columns
-  assert.doesNotThrow(() => applyMigrations(db), "re-running migrations must not throw when legacy columns are already absent");
+test("#295: applyMigrations is idempotent and additive-only (a fresh DB never has the legacy columns)", () => {
+  const db = makeInMemoryDb(); // fresh schema — legacy columns never created
+  assert.doesNotThrow(() => applyMigrations(db), "re-running migrations must not throw");
+  const cols = new Set((db.prepare("PRAGMA table_info(model_calls)").all() as { name: string }[]).map((r) => r.name));
+  assert.ok(!cols.has("prompt_tokens") && !cols.has("cost"), "fresh schema has no legacy columns to converge");
 });
