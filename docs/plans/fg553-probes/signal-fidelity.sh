@@ -25,3 +25,4 @@ EOF
 echo "### child exits 0";            : > l; "$NODE" observe.mjs "$PWD/l" -e 'process.exit(0)';   cat l
 echo "### child NUMERIC exit 143";   : > l; "$NODE" observe.mjs "$PWD/l" -e 'process.exit(143)'; cat l
 echo "### child killed by SIGTERM";  : > l; "$NODE" observe.mjs "$PWD/l" -e 'process.kill(process.pid,"SIGTERM")'; cat l
+echo "### child killed by SIGKILL";  : > l; "$NODE" observe.mjs "$PWD/l" -e 'process.kill(process.pid,"SIGKILL")'; cat l
