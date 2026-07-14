@@ -57,7 +57,17 @@ its pre-fix baseline** — a test that cannot go red proves nothing:
   state (F14).
 - **Watchdog fires after a normal event already advanced** → no duplicate action, and no false
   lost-signal claim recorded (F18).
-- A claim is never granted on a terminal disposition the launch record does not support (BD-3).
+- **A claim is only ever granted on a canonical classification supported by authoritative durable
+  evidence (BD-3).** Note carefully: that evidence is **not always an exit record.** `owner_gone` and
+  `unknown` produce **no exit record at all** — they are reconciled from durable launch metadata plus
+  independent owner evidence, and they are legitimate terminal dispositions a claim may advance on, under
+  their own failure/blocker policy (BD-7, F9, F10). **A claim must never require, nor fabricate, an exit
+  record for a reconciled disposition** — the corrected BD-4 scopes the matching-record requirement to
+  exit-record-driven completion events. What is forbidden is granting a claim on a disposition the
+  authoritative evidence does not support — e.g. a signal asserting an exit that never happened.
+- **OQ-5 (with FG-552):** FG-552 decides the post-reboot *terminal classification*; this slice decides the
+  *continuation policy* that consumes it — what a controller is permitted to do with an `unknown` after a
+  host restart, and whether it may advance, must block, or must surface an operator blocker.
 
 ## Not in scope
 

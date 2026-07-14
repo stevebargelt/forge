@@ -41,6 +41,14 @@ running."**
   `forge launch wait` completion into a session wake when `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`
   disables ordinary Bash background dispatch, and state its restart behavior. Do not assume
   `<task-notification>` can be emitted externally.
+- **OQ-3 is answered here:** which durable component schedules lost-signal recovery, and how recovery
+  evidence is recorded. The interval is a **health bound**, not a guessed task duration.
+- **OQ-4 (with FG-552):** FG-552 decides the waiter's own cancel semantics; this slice decides the
+  **adoption** half — how an operator cancels the orchestrator's *observation* of a launch without
+  cancelling the tmux-owned *work*, as distinct commands with distinct audit events.
+- **The `Monitor`-polling workaround's fate is decided HERE** — retired, or explicitly retained as a named
+  fallback adapter. FG-552 supplies the primitive but builds no consumer and cannot make this call;
+  FG-565 only confirms the decision was carried out.
 
 ## Propagation surfaces — update the SOURCE, not just the current checkout
 

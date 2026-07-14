@@ -23,12 +23,35 @@ So the only push-completion channel available today is welded to the mechanism t
 
 A launch's terminal state is **pushed**, not polled: any controller (orchestrator session, campaign runner, future daemon) can subscribe to launch completion and advance a phase immediately, without owning the work and without re-entering the harness's tracked-background set.
 
-## Design questions (decide at plan time — do NOT assume one)
+## Design — SETTLED BY THE ACCEPTED PRD. These are no longer open choices.
 
-- **Signal mechanism.** Candidates: a completion hook (`forge launch run --on-complete <cmd>`), an event row in the store the controller can wait on, a `forge launch wait <id>` that blocks with a real terminal condition (still pull, but bounded and honest), a fifo/unix-socket, or a `notify`-style dispatch reusing the existing `forge notify` delivery. The consumer is the orchestrator, so prefer whatever composes with an event stream the harness can surface.
-- **Who observes the tmux pane's exit?** The launch record already captures the OS exit record — establish exactly where that write happens and whether a signal can be emitted in the same place (atomically with the record, so a signal can never claim a terminal state the record doesn't have).
-- **Lost-signal semantics.** The signal must be a fast path, never the source of truth: the durable launch record stays authoritative, and a controller that missed a signal must be able to reconstruct the same conclusion from the record. Fail-closed: a signal that fires without a matching terminal record is a bug, not a completion.
-- **Does the campaign runner want the same primitive?** It drives phases too; a shared completion event is likely the right shape rather than two mechanisms.
+> The original ticket weighed completion hooks, unix sockets, event rows, fifos, and `notify`-style
+> dispatch, and asked whether the campaign runner wanted the same primitive. **The accepted PRD decides all
+> of it. Do not reopen these as plan-time options.**
+
+- **The primitive is `forge launch wait <launch-id> [--json]`** — a blocking controller-facing subscription.
+  Rationale (PRD "Why this shape first"): a completion callback executes arbitrary commands from a
+  lifecycle wrapper and creates new quoting, security, and crash windows; a socket/daemon introduces a
+  long-lived service before the consumer contract is proven; an event row alone still needs a blocking
+  consumer or polling adapter.
+- **No arbitrary `--on-complete <shell command>` hook in this slice** — explicit PRD non-scope.
+- **No generic daemon. No campaign-specific event format. No phase advancement embedded in the launch
+  wrapper.**
+- **Yes, the campaign runner consumes the same primitive** (BD-10) — that is FG-564, and it is settled, not
+  an open question. This slice must not grow a second transport or a second terminal vocabulary.
+- A later event stream or daemon is not forbidden, but any later transport must preserve the same
+  record-first, at-least-once, replayable contract.
+
+## Open questions THIS slice owns (decide here, before implementation closes)
+
+- **OQ-4 — cancellation.** How does an operator cancel a **waiter** without cancelling the **tmux-owned
+  work**? Cancellation of *observation* and cancellation of *work* must remain **distinct commands and
+  distinct audit events**. The waiter's own cancel semantics are decided here; FG-563 decides the
+  orchestrator-adoption half. This cannot wait for closeout — it is part of the waiter's contract.
+- **OQ-5 — host-reboot semantics.** Today no exit record + no tmux session reads `unknown`. Decide what
+  terminal classification is safe after a reboot, **including whether Docker/reconcile evidence may refine
+  the result** for Forge commands that dispatched agents. This is terminal-classification policy, so it is
+  decided here (with FG-562 owning the continuation policy that consumes it) — not at closeout.
 
 ## Slice 2 of the FG-561 campaign
 
@@ -85,10 +108,11 @@ editing — or selecting its interpreter from the caller's PATH — can itself f
   `unknown`; and any timeout is an explicit `wait_timeout` result, **never a fabricated launch terminal
   state**.
 - Reuses `readLaunch` / one canonical classifier — **no second status vocabulary** (BD-10).
+- **OQ-4 is answered:** cancelling the waiter is a distinct command from cancelling the tmux-owned work,
+  and produces a distinct audit event. Cancelling observation must never cancel the work.
+- **OQ-5 is answered:** the post-reboot terminal classification is decided and recorded.
 - `forge launch` docs describe the completion contract for controllers, including the record-first and
   advisory-delivery semantics.
-- The FG-425-era `Monitor`-polling workaround is no longer necessary for the orchestrator's phase chain
-  (state whether it is retired or retained as a fallback).
 
 **Every falsification test must be observed RED against its pre-fix baseline.** A test that cannot go red
 does not prove the defect was covered.
@@ -101,3 +125,8 @@ does not prove the defect was covered.
 - No phase advancement embedded in the launch wrapper.
 - The durable continuation **claim** is FG-562 (Slice 3), not this slice. Notification without a claim is
   not continuation.
+- **Orchestrator adoption and the retirement of the `Monitor`-polling workaround are NOT this slice.**
+  Slice 2 supplies the primitive; **FG-563 (Slice 4)** adopts it and decides the workaround's fate, and
+  **FG-565 (Slice 6)** confirms the retirement was carried out. Do not accept "the Monitor workaround is no
+  longer necessary" as an acceptance criterion here — this slice cannot demonstrate it, because it builds
+  no consumer.

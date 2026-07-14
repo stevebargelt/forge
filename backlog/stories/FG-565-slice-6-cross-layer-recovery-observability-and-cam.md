@@ -52,19 +52,35 @@ in a transcript or Monitor output.
     the stable runtime.
   - **F26/F27/F28** — validated promotion is atomic; an interrupted promotion leaves the previous stable
     runtime selected and usable; a promotion with an in-flight launch keeps runtime identity diagnosable
-    and follows the recorded store/schema-compatibility policy. Includes the **open** lazy-import case:
-    determine empirically whether a process running under runtime A is affected by a mid-flight promotion
-    to runtime B (dynamic `import()`, lazy requires, open handles). The PRD asserts **neither** immunity
-    **nor** exposure — this slice must settle it.
+    and follows the recorded store/schema-compatibility policy. **Includes T9** (the in-flight/lazy-import
+    case), which is **DECIDED IN FG-553** — this slice verifies the decision holds under the full matrix.
   - **F29/F30/F31** — the control plane runs correctly from **two incompatible PATH/Node environments**,
     invoked as bare `forge` from a shell the operator did **not** pre-sanitize. *"Fails cleanly" is not a
     pass — it must RUN.* A caller-applied PATH pin is containment, not isolation, and does not satisfy this.
-  - **F35** — version-skew store compatibility: old and new Forge processes against one SQLite.
-- **OQ-4** — cancelling an *observer* and cancelling the *work* remain distinct commands and distinct
-  audit events.
-- **OQ-5** — host-reboot continuation policy is decided and recorded (today: no exit record + no tmux
-  session reads `unknown`; decide whether Docker/reconcile evidence may refine it).
-- The `Monitor` workaround's status is explicit: retired, or retained as a named fallback adapter.
+  - **F35** — version-skew store compatibility: old and new Forge processes against one SQLite, under the
+    **BD-15 policy decided in FG-553**.
+- The `Monitor` workaround's status is explicit: retired, or retained as a named fallback adapter (the
+  retirement decision itself belongs to **FG-563**; this slice confirms it was carried out).
+
+## This slice VERIFIES decisions; it does not MAKE them
+
+Every open question this campaign must answer is owned by the slice whose implementation it constrains. A
+decision made for the first time at closeout is a decision made after the code that depends on it was
+already written.
+
+| Open question | **Decided in** | Verified here |
+|---|---|---|
+| **T9** — is a running process affected by a mid-flight promotion (dynamic `import()`, lazy requires, open handles)? | **FG-553** — it constrains the promotion mechanism | under the full matrix (F26–F28) |
+| **BD-15 store-version policy** — concurrent Forge versions against one SQLite | **FG-553** — it constrains the promotion mechanism | F35 |
+| **OQ-4** — cancelling an *observer* vs. cancelling the *work* (distinct commands, distinct audit events) | **FG-552** (the waiter's own cancel semantics) + **FG-563** (adoption) | end-to-end |
+| **OQ-5** — host-reboot continuation policy (today: no exit record + no tmux session ⇒ `unknown`; may Docker/reconcile evidence refine it?) | **FG-552** (terminal classification) + **FG-562** (continuation policy on `unknown`) | after a real restart |
+| **OQ-2** — the production session adapter | **FG-563** | end-to-end |
+| **OQ-1** — durable continuation storage | **FG-562** | end-to-end |
+| **OQ-3** — watchdog owner + interval | **FG-563** | end-to-end |
+| **OQ-6** — stable-runtime packaging/promotion mechanism | **FG-553** | F26–F28 |
+
+If this slice discovers an open question that was never decided upstream, that is a **finding against the
+owning slice**, not a decision to be improvised here.
 - A final reviewer **maps evidence to every binding decision and matrix row** — approving from green CI
   alone is explicitly insufficient.
 

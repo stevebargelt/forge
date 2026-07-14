@@ -68,16 +68,34 @@ Execute sequentially unless the approved campaign plan proves independence.
 
 ## Operating constraints for this campaign
 
-**FG-559 — do not run any history-dependent agent against a linked-worktree project mount until FG-559
-lands.** A linked worktree's `.git` is a pointer file into the parent repo, which is outside the
-container mount, so **every git command fails inside the agent** — silently, today. Any agent that must
-consult history (every reviewer, every fixer, anything diffing a range) must be given a **git-capable
-`main` checkout or a standalone clone**, and its brief must make the required `git diff` / `git log` /
-`git show` evidence **explicit** so it fails closed rather than substituting a working-tree read.
+**Two constraints compose here, and getting them wrong recreates FG-553. Read both.**
 
-This is not optional hygiene: a reviewer that cannot see the diff it is reviewing is not a reviewer. It
-was caught only because one brief made a diff mandatory and the reviewer honestly returned
-`inconclusive` instead of certifying what it could not check.
+**(a) FG-559 — no history-dependent agent runs against a linked-worktree project mount until FG-559
+lands.** A linked worktree's `.git` is a pointer file into the parent repo, which is outside the container
+mount, so **every git command fails inside the agent** — silently, today. Any agent that must consult
+history (every reviewer, every fixer, anything diffing a range) must be given a git-capable mount, and its
+brief must make the required `git diff` / `git log` / `git show` evidence **explicit** so it fails closed
+rather than substituting a working-tree read.
+
+This is not optional hygiene: a reviewer that cannot see the diff it is reviewing is not a reviewer. It was
+caught only because one brief made a diff mandatory and the reviewer honestly returned `inconclusive`
+instead of certifying what it could not check.
+
+**(b) But "use a git-capable `main` checkout" is NOT safe for a WRITER before FG-553 lands.** `main` IS the
+live control runtime — the machine-wide `forge` is npm-linked to it. A **writing** fixer mounted on `main`
+mutates the control plane while it runs, which is precisely the FG-553 hazard this campaign exists to
+eliminate. A workaround for FG-559 must not resurrect FG-553.
+
+**The rule, by agent kind:**
+
+| Agent | Mount | Why |
+|---|---|---|
+| **Read-only reviewer** | clean `main` mounted **read-only**, or a standalone clone | Cannot mutate the control runtime; OS-level read-only mount enforces it. |
+| **Any writer / fixer, BEFORE FG-553 lands** | **standalone clone ONLY** | A writer on `main` mutates the live control plane. Never mount `main` writable for an agent until FG-553's isolation is in force. |
+| **Any history-dependent agent** | never a linked worktree, until FG-559 | Git is silently broken in that mount. |
+
+After FG-553 lands, the machine-wide `forge` no longer executes the working tree, and (b) relaxes — but
+(a) stands until FG-559 is closed.
 
 ## Code defects the PRD documents (owned by the slices, not by this epic)
 
