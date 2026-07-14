@@ -79,16 +79,17 @@ Validate a candidate commit in a dedicated, per-attempt integration worktree tha
 
 ### The shape
 
-1. Capture the target's base SHA `B`.
-2. Create a **fresh, per-attempt** integration worktree.
-3. Merge the task branch(es) there, producing candidate commit `C`.
-4. Run validation — build, integration gate, reds, review — against **exactly `C`**, in that worktree. Never against the target.
-5. Enqueue on the project's FIFO lane; take the short publication mutex.
-6. Confirm the target is still at `B` (compare-and-swap).
-7. Fast-forward the target to the **recorded** `C`.
-8. If the target moved, release, rebuild on the new base, rerun gates — bounded (AD-1).
-9. Record `{ baseSha, candidateSha, publishedSha, target }` durably.
-10. Finalize and clean up idempotently.
+The lane comes **first**, not last. It is what makes the candidate's base stable for the whole of validation, and an attempt that validated before taking its turn would be validating against a base another forge attempt is still free to move.
+
+1. **Record the attempt and enqueue it on the project's FIFO lane.** The durable enqueue key is assigned here — at record time, before any contention — together with the `attemptId` everything downstream (worktree, branch, lane entry, recovery) is keyed on. This is also AD-5's publication intent: it is durable before anything is touched.
+2. **Once the attempt owns the active lane turn**: capture the target's base SHA `B`; create the **fresh, per-attempt** integration worktree; merge the task branch(es) there, producing candidate commit `C`; and run the **COMPLETE validation set** — integration gate, then reds and any review gate — against **exactly `C`**, in that worktree. Never against the target.
+3. **Still within that same lane turn**, enter the **short publication mutex window**: final target checks (AD-3), the compare-and-swap against `B`, the ancestry proof, the ref update / lease push, and — for a local target — the checked-out tree synchronization.
+4. **A moved-base rebuild and its full revalidation remain within the SAME lane turn.** The attempt does not go back to the end of the queue to rebuild; it rebuilds on the new base and re-runs the whole validation set, bounded to one such rebuild (AD-1).
+5. **Release the mutex when the publication window closes; release/complete the lane only once the attempt's publication disposition is durable.**
+
+`{ baseSha, candidateSha, publishedSha, target }` is recorded durably per attempt throughout, and finalize/cleanup is idempotent.
+
+The two spans are different sizes and they protect different things — see the next section. The lane turn spans candidate integration and the full validation set (minutes). The mutex window spans the target-mutating operations alone (milliseconds). **Do not describe the ref update as "the only serialized operation":** it is the only operation inside the *mutex*, but validation is serialized too — by the *lane*.
 
 ### The binding operator decisions (AD-1..AD-7)
 
@@ -131,7 +132,9 @@ Orphaned gate process groups are a cleanup/GC concern, owned by FG-356, and are 
 
 Read this before "hardening" anything.
 
-**The lane provides ORDERING only** — FIFO fairness across Forge-owned publication attempts on one canonical project identity (AD-2). That is its whole job.
+**The lane provides ORDERING only** — FIFO fairness across Forge-owned publication attempts on one canonical project identity (AD-2). That is its whole job. Its *turn* spans candidate integration, the full validation set, and the publication window (including a moved-base rebuild); its *guarantee* is nothing more than "attempts get their turn in the order they were recorded."
+
+**The mutex is a different span with a different job.** It is held only across the target-mutating operations — final AD-3 checks, CAS, ancestry proof, ref update/push, local checkout sync — and never across validation. Ordering authority and mutual-exclusion authority are separate mechanisms, and neither substitutes for the other.
 
 **CORRECTNESS is provided independently, and redundantly, by four mechanisms that do not depend on the lane at all**:
 
@@ -217,9 +220,54 @@ The first implementation moved the *gate* off the publish target but got the res
 - **The lease must be renewed across EVERY span the owner can block in.** It was renewed across the lane wait and across validation, but not across the wait for the publication mutex — so a live holder blocked on the mutex could lapse and be taken over: the exact FIFO break the lease exists to prevent, one span later. Both mechanisms are needed and neither covers both cases: a **timer heartbeat** for async spans (reds are containers), and a **pre-extension** for the synchronous gate, inside which no timer can fire at all.
 - **A takeover is a defined terminal state, not an invariant violation.** `laneTick` assumed its own entry was still active. A live owner whose lease lapsed gets marked `abandoned` by another process, and on its next tick could then neither become head nor exit — it dereferenced an undefined head (TypeError) or waited forever (production passes no `maxWaitMs`). It now returns `takenOver`, and the owner **parks with a named `lane_taken_over` reason**. Nothing is signalled, probed, or reaped — AD-7 is untouched; a takeover is still nothing but a durable timestamp being in the past.
 - **AD-3 refuses BOTH shapes of operator-owned state.** `git read-tree -m -u` refuses to clobber an *untracked* file — and it refuses **after** the ref has advanced. The dirty pre-check ignored untracked files, so the target's ref could advance, the checkout then fail, and the target be left with its ref ahead of its index — which every later publication's AD-3 check reads as tracked dirt. One publication wedged the project permanently. The pre-check now computes the base→candidate diff against the target's untracked set and refuses the collision **before any mutation**, with a named blocker. Forge still never deletes, stashes, or checks out over an untracked file.
-- **A checkout FAILURE after the ref advance is ROLLED BACK; a CRASH there is recovered.** These are different, and both must be defined. On failure, the ref advance is undone by CAS (`update-ref <ref> <base> <candidate>` only lands if the ref is still the candidate *we* just wrote — we hold the mutex, so it can only be undoing our own write), and the publication is refused. The target ends byte-for-byte where it started: nothing published, nothing staged, and **the next publication is not blocked**. On a crash there is no rollback, and AD-5 recovery re-runs the idempotent checkout instead. *A publication must never leave the target in a state that blocks the next publication* — that is the rule the rollback exists to keep.
+- **A checkout FAILURE after the ref advance is ROLLED BACK — but ONLY while mutex ownership is CURRENTLY PROVEN. A CRASH there is recovered.** These are different, and both must be defined. On failure, the ref advance is undone by CAS (`update-ref <ref> <base> <candidate>` only lands if the ref is still the candidate *we* just wrote), the publication is refused, and the target ends byte-for-byte where it started: nothing published, nothing staged, and **the next publication is not blocked**. On a crash there is no rollback, and AD-5 recovery re-runs the idempotent checkout instead. *A publication must never leave the target in a state that blocks the next publication* — that is the rule the rollback exists to keep.
+
+  **The CAS is NOT what makes the rollback safe, and an earlier version of this ADR said it was.** That claim — that the rollback "deliberately does not renew the hold" because a CAS "is safe with or without the mutex" — was false, and it was the defect. A publisher whose lease lapsed may have been overtaken by a thief that already AD-5-recovered *index and worktree* onto the candidate. The lapsed publisher's CAS "undo" would then still succeed against the *ref* — leaving ref=base with the tree at the candidate: a dirty, divergent target that no later publication can pass AD-3 against. The CAS proves only that the ref is still our own write. It proves nothing about the tree.
+
+  **The invariant, absolute: once a publisher discovers it no longer owns the mutex, it executes NO target-mutating command — not `update-ref`, not `read-tree`, not `checkout`, not `reset`, not cleanup, not even an undo of its own write.** The rollback is itself a target mutation, so it runs only under ownership renewed/pre-extended *for that rollback*, immediately before it. If ownership cannot be confirmed, the publisher touches nothing and preserves the durable publishing intent instead — the ref carries the candidate, the attempt still records `{baseSha, candidateSha, target}`, and the window's **current owner** converges it through AD-5 from those three facts. See the next two sections for what that convergence is and who is allowed to perform it.
 - **AD-6 means `publishedSha` IS the recorded `candidateSha` — including on the way out.** It was being read *back* from the target after the CAS. An external writer landing between the CAS and the readback would turn a publication that **actually landed** into a `publish_base_churn` park claiming nothing was published. The CAS wrote exactly `candidateSha` or it failed; there is no third outcome, so the AC's proof (`publishedSha === candidateSha`) is an assertion, never a lookup. Same rule on the remote path: no confirming `ls-remote` after a successful push.
 - **AD-5 recovery reads the RECORDED target ref, and RUNS BY ITSELF.** It was re-deriving the local target from the repo's current `HEAD`, discarding the branch recorded on the attempt — so an operator who checked out another branch after the crash would have recovery read the wrong ref, and a detached HEAD made it throw outright. It now parses the recorded target descriptor. And it is invoked automatically at the top of every `runNext` wave (`recoverUnfinishedPublications`), not left for a human to happen to type `forge publish recover`: **a defined recovery that nothing ever invokes is not a recovery, it is a manual procedure nobody knows to run.**
+
+---
+
+## Only AD-5 convergence may terminalize a `publishing` attempt
+
+`publishing` is the one non-terminal attempt state in which **the target may already carry the candidate** — its ref advance has landed. Everything below follows from that single fact.
+
+`laneTick` sweeps the lane: an entry whose lease has lapsed is marked `abandoned` so the next attempt can take its turn. It used to terminalize that entry's **attempt record** in the same sweep, and `publishing` was not excluded. A foreign lane poll therefore flipped a `publishing` attempt to `abandoned` — which hid it from `unfinishedPublications` (which selects `publishing` only) *and* from `recoverPublicationAttempt` (which refuses to rewrite a terminal record). The durable `{baseSha, candidateSha, target}` intent was stranded, and the target was left permanently divergent: ref at the candidate, tree at the base, with the next publication's AD-3 check reading the whole diff as operator dirt and blaming a human for it.
+
+**The rule, and the reasoning that must not be re-derived: a lane lease lapsing means the OWNER is gone. It does NOT mean the owner's ref advance is gone.** Those are different facts about different things, and only the first is a timestamp in the past.
+
+So the two are separated:
+
+- **The LANE entry is still abandoned.** That is ordering, and losing a turn costs **fairness** only — the layering section above is what licenses this.
+- **The ATTEMPT record is never touched by the lane.** Only the convergence path — AD-5 recovery, derived from `{baseSha, candidateSha, currentTargetSha}` — may terminalize a `publishing` attempt, because only it looks at the ref, which is the only thing that knows whether the candidate landed.
+
+A takeover therefore parks the *displaced attempt's task* with `lane_taken_over` (nothing was published; the lane entry was lost before the window), while an attempt that reached `publishing` is settled by recovery and by nothing else.
+
+---
+
+## A lost publication window yields exactly ONE truthful disposition (AC5)
+
+`MutexLostMidPublishError` is **reachable in production**. Any deschedule longer than the mutex lease TTL opens the window between two operations: laptop suspend, SIGSTOP, a container pause, swap thrash, a long IO or GC stall. Do not argue it away; it is a state the system must have a defined, truthful answer for.
+
+**The contradiction this replaces.** A publisher that advanced the ref and then lost the window used to return a **terminal `refused`** while its attempt row remained `publishing`. `runNext` mapped that to `publication_refused` and failed the task. A later AD-5 sweep then converged the very same attempt to `published` — and nothing reconciled the already-failed task. The result was two durable records contradicting each other, and the *failed* one advised a **retry of work that had already landed on the target**.
+
+**The invariant: a terminal refusal may NEVER stand over an attempt still recorded `publishing`.** A refusal says "nothing was published"; over a `publishing` attempt whose ref advance landed, that is the most dangerous available lie, because the operator's natural response to it duplicates published work.
+
+So the publisher **converges instead of guessing**:
+
+1. It takes the window **back** — a bounded **lease wait** (`2 × MUTEX_TTL`), and nothing more. Nothing is probed, signalled, nonced, classified, or reaped (AD-7 is untouched). The bound is honest rather than arbitrary: the mutex covers a CAS, a ref write and a checkout, so a **live** holder is out of it in seconds and a **dead** one is out of it in one lease TTL. Waiting past both bounds is the point at which "we should have had our turn by now" is true.
+2. With the window held, it converges **its own attempt** through the same AD-5 path the sweep uses — derived from `{baseSha, candidateSha, currentTargetSha}`, never from working-tree contents — and reports the disposition **the ref proves**. (A settled record needs no window at all: whoever took the mutex may have swept it already, and a settled attempt is *reported*, never re-derived.)
+3. If the window never comes free within that bound, it returns the **NON-TERMINAL `recovery_pending`** outcome, and the owning task parks in the **non-terminal `awaiting_recovery`** status. No terminal claim is written over an unsettled publication — forge says "I do not know yet", because that is the truth.
+
+**Recovery is not left to a human noticing.** `reconcilePublicationRecoveries` runs at the top of **every** wave, immediately after the AD-5 sweep: the sweep converges the **publication** from the ref, then reconciliation moves the **task** onto whatever the publication converged to. A `published` attempt completes its task through the gate its step declares (a lost mutex is not a reason to skip a human gate); an attempt converged to a non-published disposition fails its task with the **converged** failure kind — never with a kind guessed back when the window was lost. `forge publish recover <attemptId>` does the same by hand.
+
+That reconciliation also **REPAIRS a task recorded `failed` beside a `published` attempt**. It has to: the contradiction has more than one way in — a database written by a build predating this fix, and the crash window between the publisher returning and the `awaiting_recovery` status landing, after which reconcile lands the stranded `running` row as a terminal failure while the sweep converges its attempt to `published`. The rule is about the **contradiction**, not about how it arrived: a `published` attempt's task tells the truth, whatever it said before. A `failed` task with no published attempt is a real failure and is never touched.
+
+**Do not read this section back onto the original implementation.** "An attempt interrupted inside the publication window is always converged by AD-5 recovery" became true only with the laneTick fix above — before it, a foreign lane poll could terminalize the `publishing` record and put the attempt permanently beyond recovery's reach.
+
+The new task status this requires (`awaiting_recovery`) is its own schema change and has its own ADR — **FORGE-DEC-027** (`2026-07-13_awaiting-recovery-task-status.md`).
 
 ---
 
