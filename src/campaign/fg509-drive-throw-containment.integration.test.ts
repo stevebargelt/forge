@@ -320,7 +320,7 @@ async function driveToReconcileThrowPark(campaignId: string): Promise<string> {
       });
       updateRunStatus(runId, "complete");
     }
-    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: "complete" };
+    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], awaitingRecovery: [], runStatus: "complete" };
   };
 
   await assertRejectsWithEnrichedError(() =>

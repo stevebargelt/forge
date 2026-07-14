@@ -17,7 +17,8 @@ import {
   type PublicationAttempt,
 } from "../../store/publications.js";
 import { projectIdentity } from "../../v2/project-identity.js";
-import { recoverPublicationAttemptForOperator } from "../../v2/integration-publisher.js";
+import { recoverPublicationByHand } from "../../v2/runNext.js";
+import { publicationAfterCancelMessage } from "./show.js";
 
 function sha(s: string | undefined): string {
   return s ? s.slice(0, 12) : "—";
@@ -122,7 +123,7 @@ export function registerPublish(program: Command): void {
   publish
     .command("recover <attemptId>")
     .description(
-      "Re-derive a publication attempt's outcome from {baseSha, candidateSha, currentTargetSha} and converge it (AD-5). Idempotent.",
+      "Re-derive a publication attempt's outcome from {baseSha, candidateSha, currentTargetSha} and converge it (AD-5), then reconcile the task that owns it. Idempotent.",
     )
     .action((attemptId: string) => {
       const before = getPublicationAttempt(attemptId);
@@ -135,7 +136,11 @@ export function registerPublish(program: Command): void {
       // goes through the publication mutex like every other target write — or it
       // refuses, naming the live holder. Never bare: a hand-run recovery inside
       // someone else's CAS window is two processes in one working tree.
-      const outcome = recoverPublicationAttemptForOperator(attemptId);
+      //
+      // Both halves, or this command settles the publication and leaves the task that
+      // owns it stuck in `awaiting_recovery`: converge the attempt, then reconcile the
+      // task from it — the same reconciliation `forge next` runs.
+      const { outcome, task, unreconciled, publishedAfterCancel } = recoverPublicationByHand(attemptId);
       if (outcome.kind === "blocked") {
         console.error(outcome.error);
         process.exitCode = 1;
@@ -144,6 +149,15 @@ export function registerPublish(program: Command): void {
       console.log(`attempt ${attemptId}: ${outcome.kind}`);
       if (outcome.kind === "published") {
         console.log(`  published ${outcome.publishedSha} to ${outcome.target}`);
+        if (outcome.superseded) {
+          // The ref moved PAST this candidate: it landed, and a later publication
+          // built on top of it. Say so, or "published" beside a target ref that
+          // isn't this SHA reads like a contradiction.
+          console.log(
+            `  (superseded: the target ref has since moved past ${outcome.publishedSha.slice(0, 12)} — this ` +
+              `candidate IS in the target's history; a later publication built on top of it. Nothing to re-run.)`,
+          );
+        }
         if (outcome.checkoutError) {
           // The ref carries the candidate, so the publication IS durable — but the
           // checked-out tree could not be brought up to it. Say both things, or the
@@ -160,6 +174,20 @@ export function registerPublish(program: Command): void {
         console.log(`  ${outcome.reason}: ${outcome.error}`);
       } else if (outcome.kind === "refused") {
         console.log(`  ${outcome.error}`);
+      }
+      if (task) {
+        console.log(`  task ${task.taskId} (run ${task.runId}) reconciled onto it: ${task.status}`);
+      }
+      // FG-425: the task was cancelled and its candidate landed anyway. Recovery
+      // settles the publication and leaves the cancel standing — say both, or an
+      // operator reads "published" and never learns their cancel did not stop it.
+      if (publishedAfterCancel) {
+        const a = getPublicationAttempt(attemptId)!;
+        console.log(`  task ${publishedAfterCancel.taskId} (run ${publishedAfterCancel.runId}) was CANCELLED and stays cancelled — NOT reconciled onto this publication.`);
+        console.log(`  ${publicationAfterCancelMessage(a)}`);
+      }
+      if (unreconciled) {
+        console.error(`  WARNING: ${unreconciled}`);
       }
     });
 }

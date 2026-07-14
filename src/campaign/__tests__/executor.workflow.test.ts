@@ -177,7 +177,7 @@ test("workflow item ships when run completes with passing authoritative verdict"
       updateRunStatus(runId, "complete");
     }
     const runRow = db.prepare("SELECT status FROM runs WHERE id = ?").get(runId) as { status: string } | undefined;
-    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: runRow?.status ?? "active" };
+    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], awaitingRecovery: [], runStatus: runRow?.status ?? "active" };
   };
 
   const result = await startCampaign(campaign.id, {
@@ -225,7 +225,7 @@ test("gate:verdict auto-advance — passing verdict advances gate, item ships wi
       logEvent("verdict.received", { runId, taskId, payload: { redRole: "shipping-reviewer", verdict: "pass", authority: "authoritative" } });
     }
     const runRow = db.prepare("SELECT status FROM runs WHERE id = ?").get(runId) as { status: string } | undefined;
-    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: runRow?.status ?? "active" };
+    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], awaitingRecovery: [], runStatus: runRow?.status ?? "active" };
   };
 
   let gateFnCallCount = 0;
@@ -279,7 +279,7 @@ test("gate:human pause — human gate parks item and pauses campaign without cal
         createdAt: nowIso(),
       });
     }
-    return { dispatchedSteps: [], completedSteps: [], awaitingGate: ["architect"], failedSteps: [], runStatus: "active" };
+    return { dispatchedSteps: [], completedSteps: [], awaitingGate: ["architect"], failedSteps: [], awaitingRecovery: [], runStatus: "active" };
   };
 
   let gateFnCallCount = 0;
@@ -327,7 +327,7 @@ test("Shipping Reviewer block — blocked_by_red task parks campaign with scope 
       taskPackage: { taskId: "task-t4-eng", runId, phase: "engineer", role: "engineer", inputs: {}, composedSystemPrompt: "" },
       createdAt: nowIso(),
     });
-    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: ["engineer"], runStatus: "active" };
+    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: ["engineer"], awaitingRecovery: [], runStatus: "active" };
   };
 
   const result = await startCampaign(campaign.id, {
@@ -351,7 +351,7 @@ test("abandoned run — campaign_system shared blocker pauses campaign with fail
 
   const runNextFn = async ({ runId }: { runId: string; workflow: Workflow }): Promise<RunNextResult> => {
     updateRunStatus(runId, "abandoned");
-    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: "abandoned" };
+    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], awaitingRecovery: [], runStatus: "abandoned" };
   };
 
   const result = await startCampaign(campaign.id, {
@@ -376,7 +376,7 @@ test("complete run with no verdicts — inconclusive aggregate maps to blocked, 
   const runNextFn = async ({ runId }: { runId: string; workflow: Workflow }): Promise<RunNextResult> => {
     // Mark run complete but insert NO tasks or verdicts — empty verdict set
     updateRunStatus(runId, "complete");
-    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: "complete" };
+    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], awaitingRecovery: [], runStatus: "complete" };
   };
 
   const result = await startCampaign(campaign.id, {
@@ -427,7 +427,7 @@ test("workflow requiring 'brief' input — executor derives brief from ticket an
       updateRunStatus(runId, "complete");
     }
     const runRow = db.prepare("SELECT status FROM runs WHERE id = ?").get(runId) as { status: string } | undefined;
-    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: runRow?.status ?? "active" };
+    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], awaitingRecovery: [], runStatus: runRow?.status ?? "active" };
   };
 
   const result = await startCampaign(campaign.id, {
@@ -460,7 +460,7 @@ test("startRun input validation failure — campaign paused with the item parked
   const campaign = setupCampaign();
 
   const runNextFn = async (): Promise<RunNextResult> => {
-    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: "active" };
+    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], awaitingRecovery: [], runStatus: "active" };
   };
 
   await assert.rejects(
@@ -526,7 +526,7 @@ test("passing verdict with failing done-audit — outcome is blocked, not shippe
       updateRunStatus(runId, "complete");
     }
     const runRow = db.prepare("SELECT status FROM runs WHERE id = ?").get(runId) as { status: string } | undefined;
-    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: runRow?.status ?? "active" };
+    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], awaitingRecovery: [], runStatus: runRow?.status ?? "active" };
   };
 
   const result = await startCampaign(campaign.id, {
@@ -560,7 +560,7 @@ test("FG-427: fail/authoritative then later pass/authoritative on the same task 
     logEvent("verdict.received", { runId, taskId: "task-fg427-a", payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
     logEvent("verdict.received", { runId, taskId: "task-fg427-a", payload: { redRole: "shipping-reviewer", verdict: "pass", authority: "authoritative" } });
     updateRunStatus(runId, "complete");
-    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: "complete" };
+    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], awaitingRecovery: [], runStatus: "complete" };
   };
 
   const result = await startCampaign(campaign.id, { loadWorkflowFn: () => SIMPLE_WORKFLOW, runNextFn });
@@ -577,7 +577,7 @@ test("FG-427: fail/authoritative then later qualifying force-advance on the same
     logEvent("verdict.received", { runId, taskId: "task-fg427-b", payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
     logEvent("gate.decided", { runId, taskId: "task-fg427-b", payload: { decision: "advance", rationale: "operator override: verified out of band", force: true } });
     updateRunStatus(runId, "complete");
-    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: "complete" };
+    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], awaitingRecovery: [], runStatus: "complete" };
   };
 
   const result = await startCampaign(campaign.id, { loadWorkflowFn: () => SIMPLE_WORKFLOW, runNextFn });
@@ -593,7 +593,7 @@ test("FG-427: unresolved, un-overridden authoritative fail still blocks with blo
   const runNextFn = async ({ runId }: { runId: string; workflow: Workflow }): Promise<RunNextResult> => {
     logEvent("verdict.received", { runId, taskId: "task-fg427-c", payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
     updateRunStatus(runId, "complete");
-    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: "complete" };
+    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], awaitingRecovery: [], runStatus: "complete" };
   };
 
   const result = await startCampaign(campaign.id, { loadWorkflowFn: () => SIMPLE_WORKFLOW, runNextFn });
@@ -616,7 +616,7 @@ test("FG-427: a force-advance without rationale, or a non-force advance, does NO
     logEvent("verdict.received", { runId, taskId: "task-fg427-d1", payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
     logEvent("gate.decided", { runId, taskId: "task-fg427-d1", payload: { decision: "advance", rationale: "", force: true } });
     updateRunStatus(runId, "complete");
-    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: "complete" };
+    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], awaitingRecovery: [], runStatus: "complete" };
   };
   const resultNoRationale = await startCampaign(campaignNoRationale.id, { loadWorkflowFn: () => SIMPLE_WORKFLOW, runNextFn: runNextFnNoRationale });
   assert.equal(resultNoRationale.itemRecords[0]!.outcome, "blocked", "force-advance without rationale must not supersede a fail");
@@ -627,7 +627,7 @@ test("FG-427: a force-advance without rationale, or a non-force advance, does NO
     logEvent("verdict.received", { runId, taskId: "task-fg427-d2", payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
     logEvent("gate.decided", { runId, taskId: "task-fg427-d2", payload: { decision: "advance", rationale: "human said ok, but forgot --force", force: false } });
     updateRunStatus(runId, "complete");
-    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: "complete" };
+    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], awaitingRecovery: [], runStatus: "complete" };
   };
   const resultNonForce = await startCampaign(campaignNonForce.id, { loadWorkflowFn: () => SIMPLE_WORKFLOW, runNextFn: runNextFnNonForce });
   assert.equal(resultNonForce.itemRecords[0]!.outcome, "blocked", "a non-force advance must not supersede a fail");
@@ -640,7 +640,7 @@ test("FG-427: standalone force-advance with rationale but ZERO authoritative ver
   const runNextFn = async ({ runId }: { runId: string; workflow: Workflow }): Promise<RunNextResult> => {
     logEvent("gate.decided", { runId, taskId: "task-fg427-e", payload: { decision: "advance", rationale: "trust me", force: true } });
     updateRunStatus(runId, "complete");
-    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: "complete" };
+    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], awaitingRecovery: [], runStatus: "complete" };
   };
 
   const result = await startCampaign(campaign.id, { loadWorkflowFn: () => SIMPLE_WORKFLOW, runNextFn });
@@ -665,7 +665,7 @@ test("FG-427: run-wide masking regression — task A later authoritative pass, t
     logEvent("verdict.received", { runId, taskId: "task-fg427-f-a", payload: { redRole: "shipping-reviewer", verdict: "pass", authority: "authoritative" } });
     logEvent("verdict.received", { runId, taskId: "task-fg427-f-b", payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
     updateRunStatus(runId, "complete");
-    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: "complete" };
+    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], awaitingRecovery: [], runStatus: "complete" };
   };
 
   const result = await startCampaign(campaign.id, { loadWorkflowFn: () => SIMPLE_WORKFLOW, runNextFn });

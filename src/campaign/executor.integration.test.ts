@@ -3311,7 +3311,7 @@ test("FG-442 escalateCampaignItemLane: mutates plan_hash + resets the item; requ
     },
     runNextFn: async ({ runId }) => {
       updateRunStatus(runId, "complete");
-      return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: "complete" };
+      return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], awaitingRecovery: [], runStatus: "complete" };
     },
   });
 
@@ -3621,7 +3621,7 @@ test("FG-488: drive loop no-progress bound — active run + zero dispatch + unch
       runNextCallCount += 1;
       // Mirrors runNext.ts's real "ready.length === 0 && !isRunSettled" shape:
       // nothing dispatched, nothing parked, run stays active.
-      return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: "active" };
+      return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], awaitingRecovery: [], runStatus: "active" };
     },
   });
 
@@ -3646,7 +3646,7 @@ test("FG-488: drive loop no-progress bound — active run + zero dispatch + unch
   // stuck 'running' item (compare the FG-394-fix recovery_needed tests above).
   const resumeResult = await resumeCampaign(campaign.id, {
     loadWorkflowFn: FG488_WORKFLOW,
-    runNextFn: async () => ({ dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: "active" }),
+    runNextFn: async () => ({ dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], awaitingRecovery: [], runStatus: "active" }),
   });
   assert.notEqual(resumeResult.stopReason, "not_paused", "campaign must accept a resume attempt after the no-progress pause");
 });
@@ -3741,7 +3741,7 @@ test("FG-490: thrown runNextFn parks the campaign (running->paused) with a recov
     loadWorkflowFn: FG488_WORKFLOW,
     runNextFn: async () => {
       updateRunStatus(RUN_ID, "complete");
-      return { dispatchedSteps: [], completedSteps: ["engineer"], awaitingGate: [], failedSteps: [], runStatus: "complete" };
+      return { dispatchedSteps: [], completedSteps: ["engineer"], awaitingGate: [], failedSteps: [], awaitingRecovery: [], runStatus: "complete" };
     },
   });
   assert.notEqual(resumeResult.stopReason, "not_paused", "forge campaign resume must succeed (not refuse) after the F7 park");
@@ -3885,7 +3885,7 @@ test("FG-490 review (round 2, F1): thrown startRunFn parks the item directly at 
     },
     runNextFn: async () => {
       updateRunStatus(RESUME_RUN_ID, "complete");
-      return { dispatchedSteps: [], completedSteps: ["engineer"], awaitingGate: [], failedSteps: [], runStatus: "complete" };
+      return { dispatchedSteps: [], completedSteps: ["engineer"], awaitingGate: [], failedSteps: [], awaitingRecovery: [], runStatus: "complete" };
     },
   });
   assert.notEqual(resumeResult.stopReason, "not_paused", "forge campaign resume must succeed (not refuse) after retry");

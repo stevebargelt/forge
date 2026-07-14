@@ -99,7 +99,7 @@ export type ProjectAggregate = {
 // `status = 'active'` over-counted: it included orchestrator rows that never
 // terminate on a crashed session, and stuck_run/un-reconciled orphans whose
 // tasks are all terminal despite the run row still saying active.
-const NON_TERMINAL_TASK_STATES = ["running", "awaiting_gate", "awaiting_red", "blocked_by_red"];
+const NON_TERMINAL_TASK_STATES = ["running", "awaiting_gate", "awaiting_red", "blocked_by_red", "awaiting_recovery"];
 
 export function uniqueProjectDirs(): ProjectAggregate[] {
   const rows = getDb().prepare(`

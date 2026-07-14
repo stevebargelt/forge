@@ -37,8 +37,8 @@ import { tasksForRun } from "../store/tasks.js";
 import { getRun } from "../store/runs.js";
 import { finalizeRunIfSettled } from "./run-finalize.js";
 import { notifyOnTaskBlockedByRed, notifyOnGateAwaiting } from "../notify/trigger.js";
-import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskAwaitingGate, markTaskHeldForGate, markTaskBlockedByRed, markTaskFailed, setTaskStatus, setTaskWorktreePath } from "../store/tasks.js";
-import { failTask, classify, ORPHAN_EVIDENCE_KINDS } from "./failure-kind.js";
+import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskAwaitingGate, markTaskAwaitingRecovery, markTaskHeldForGate, markTaskBlockedByRed, markTaskFailed, setTaskStatus, setTaskWorktreePath } from "../store/tasks.js";
+import { failTask, classify, failureKindFromEvents, ORPHAN_EVIDENCE_KINDS } from "./failure-kind.js";
 import type { FailureKind, OrphanEvidence, ContainerCausalEvidence } from "./failure-kind.js";
 import { captureUsageForTask } from "../store/model-calls.js";
 import { insertVerdict, verdictsForTask } from "../store/verdicts.js";
@@ -47,7 +47,7 @@ import { crashPoint } from "./crash-points.js";
 import { assembleReviewerContextPacket } from "./reviewer-context-packet.js";
 import { validateVerdict } from "./validate-findings.js";
 import { gradeFindings } from "./review-quality.js";
-import { logEvent } from "../store/events.js";
+import { logEvent, eventsForTask } from "../store/events.js";
 import { taskDir, integrationWorktreeDir } from "../util/paths.js";
 import { computeReadyQueue, isRunSettled, resolvePhasePrimary } from "./ready-queue.js";
 import { classifyTaskLineage, isWorkflowPrimaryRow } from "./lifecycle-evaluator.js";
@@ -64,7 +64,7 @@ import { loadProjectAuthProfile, resolveProjectAuthForContainer, ProjectAuthErro
 import { writeTaskManifest, manifestControlPlaneBlock } from "./task-manifest.js";
 import { resolveDocsSurfacesReceipt } from "./contract.js";
 import { emitAgentProgressEvents } from "./agent-progress.js";
-import { loadRuntimeWithSource, loadModelPolicyWithSource, loadWorkflowWithSource, type ModelPolicyWithSource } from "./loader.js";
+import { loadRuntimeWithSource, loadModelPolicyWithSource, loadWorkflow, loadWorkflowWithSource, type ModelPolicyWithSource } from "./loader.js";
 import {
   resolveModel,
   taskModelFields,
@@ -100,9 +100,12 @@ import {
   publishIntegration,
   finalizePublication,
   recoverUnfinishedPublications,
+  recoverPublicationAttemptForOperator,
+  type OperatorRecovery,
   type PublishOutcome,
   type ValidationResult,
 } from "./integration-publisher.js";
+import { getPublicationAttempt, publicationAttemptsForTask, type PublicationAttempt } from "../store/publications.js";
 
 // Resolve the agent role for a fanout child. When fanout.agent_map is set and
 // the input value carries a discipline string that's in the map, route to the
@@ -122,6 +125,10 @@ export type RunNextResult = {
   completedSteps: string[];       // step ids that completed (auto gate)
   awaitingGate: string[];         // step ids that hit awaiting_gate (human/verdict)
   failedSteps: string[];          // step ids that failed
+  // FG-425 (AC5): step ids whose publication advanced the target ref and then lost the
+  // window — non-terminal, and NOT failures. Reported separately precisely so nothing
+  // downstream can read them as "this step failed, retry it".
+  awaitingRecovery: string[];
   runStatus: string;              // post-call run status
 };
 
@@ -164,6 +171,7 @@ export async function runNext(args: {
       completedSteps: [],
       awaitingGate: [],
       failedSteps: [],
+      awaitingRecovery: [],
       runStatus: run.status,
     };
   }
@@ -181,6 +189,15 @@ export async function runNext(args: {
   // same project. A defined recovery that nothing invokes is not a recovery — it is
   // a manual procedure nobody knows to run. No-op on healthy projects.
   if (run.projectDir) recoverUnfinishedPublications(run.projectDir, args.runId);
+
+  // FG-425 (AC5): converge the PUBLICATION from the ref (above), then reconcile the
+  // TASK from the publication. A task parked in `awaiting_recovery` by a lost window
+  // is moved onto whatever that convergence recorded — complete when its candidate
+  // landed, terminally failed when it provably did not. Without this second half, a
+  // converged `published` attempt would sit forever beside a task that disagrees with
+  // it. Runs BEFORE the ready queue, so a reconciled task advances its phase in the
+  // same wave.
+  if (run.projectDir) reconcilePublicationRecoveries(args.runId, args.workflow, run.projectDir);
 
   const tasks = tasksForRun(args.runId);
   const ready = computeReadyQueue(args.workflow, tasks);
@@ -207,6 +224,7 @@ export async function runNext(args: {
         completedSteps: [],
         awaitingGate: [],
         failedSteps: [],
+        awaitingRecovery: [],
         runStatus: currentStatus,
       };
     }
@@ -215,6 +233,7 @@ export async function runNext(args: {
       completedSteps: [],
       awaitingGate: [],
       failedSteps: [],
+      awaitingRecovery: [],
       runStatus: run.status,
     };
   }
@@ -249,11 +268,16 @@ export async function runNext(args: {
   const completed: string[] = [];
   const awaitingGate: string[] = [];
   const failed: string[] = [];
+  // FG-425 (AC5): its OWN bucket. Folding it into failedSteps would be the same lie
+  // one layer up — a step whose candidate may already be on the target is not a
+  // failed step, and nothing downstream may treat it as one.
+  const awaitingRecovery: string[] = [];
   for (let i = 0; i < ready.length; i++) {
     const stepId = ready[i]!.id;
     const status = outcomes[i]!;
     if (status === "complete") completed.push(stepId);
     else if (status === "awaiting_gate" || status === "blocked_by_red") awaitingGate.push(stepId);
+    else if (status === "awaiting_recovery") awaitingRecovery.push(stepId);
     else if (status === "failed") failed.push(stepId);
   }
 
@@ -297,6 +321,7 @@ export async function runNext(args: {
     completedSteps: completed,
     awaitingGate,
     failedSteps: failed,
+    awaitingRecovery,
     runStatus,
   };
 }
@@ -767,6 +792,13 @@ async function dispatchSingleStep(args: {
     });
 
     if (publication.kind !== "published") {
+      // FG-425 (AC5): the ref advance landed and the window was lost. There is no
+      // terminal truth to write yet — least of all a failure telling the operator
+      // nothing was published. Land the task RECOVERABLE and leave it there.
+      if (publication.kind === "recovery_pending") {
+        finalizeContainerRetention(containerName, false);
+        return awaitPublicationRecovery(taskId, args.runId, publication, result);
+      }
       // A red REJECTED the candidate: that is blocked_by_red (a human decision to
       // make), not a task failure — and, critically, NOTHING was published. The
       // target is still at the base the candidate was built on.
@@ -886,6 +918,9 @@ async function republishForcedPrimary(
     },
   });
   if (publication.kind !== "published") {
+    if (publication.kind === "recovery_pending") {
+      return awaitPublicationRecovery(task.id, args.runId, publication, task.result);
+    }
     failTask(task.id, {
       runId: args.runId,
       kind: publicationFailureKind(publication),
@@ -1980,6 +2015,12 @@ async function publishFanoutIntegration(
     },
   });
   if (publication.kind !== "published") {
+    // FG-425 (AC5): the ref advance landed and the window was lost — not a refusal,
+    // and not something a red rejection can explain (the reds passed, or the
+    // publisher would never have reached the window). Recoverable, non-terminal.
+    if (publication.kind === "recovery_pending") {
+      return awaitPublicationRecovery(parentId, args.runId, publication, parentResult);
+    }
     // The caller distinguishes a RED rejection (blocked_by_red — a human decision)
     // from every other refusal (a task failure). Nothing was published either way;
     // the integration branch and child worktrees are retained for inspection.
@@ -2004,10 +2045,287 @@ async function publishFanoutIntegration(
   return "complete";
 }
 
+/** FG-425 (AC5): the ONE landing a lost-window publication may have when its
+ *  disposition is not yet settled. NON-TERMINAL by construction: the attempt is still
+ *  `publishing`, the target ref carries its candidate, and the only honest thing forge
+ *  can say is "this is not settled yet, and you must not retry it". The next
+ *  `forge next` converges the attempt (AD-5) and reconciles this task onto the truth.
+ *
+ *  The CAS mirrors every other non-terminal landing: a concurrent `forge cancel`
+ *  already holds the task, and it wins. */
+function awaitPublicationRecovery(
+  taskId: string,
+  runId: string,
+  p: Extract<PublishOutcome, { kind: "recovery_pending" }>,
+  result: unknown,
+): string {
+  if (!markTaskAwaitingRecovery(taskId, p.error, result)) {
+    return getTask(taskId)?.status ?? "failed";
+  }
+  logEvent("task.awaiting_recovery", {
+    runId,
+    taskId,
+    payload: {
+      attemptId: p.attemptId,
+      target: p.target,
+      baseSha: p.baseSha,
+      candidateSha: p.candidateSha,
+    },
+  });
+  return "awaiting_recovery";
+}
+
+/** FG-425 (AC5): move every task parked in `awaiting_recovery` onto the truth AD-5
+ *  convergence recorded for its attempt. Runs at the top of every wave, immediately
+ *  after recoverUnfinishedPublications — which is what settles the attempt in the
+ *  first place — so the pair is: converge the PUBLICATION from the ref, then
+ *  reconcile the TASK from the publication.
+ *
+ *  This is the half the old code was missing. Recovery already converged the attempt
+ *  to `published`; nothing ever went back and told the task, so the task stayed
+ *  `failed` with retry advice for work that was already on the target. A `published`
+ *  attempt whose task says `failed` is the defect, not a cosmetic mismatch.
+ *
+ *  An attempt still `publishing` (the window was busy, or a live publisher owns it)
+ *  is LEFT ALONE and the task stays recoverable — an unsettled publication is not a
+ *  failure, and waiting is not a wedge: the next wave sweeps again.
+ *
+ *  It reconciles a task ALREADY RECORDED `failed` beside a `published` attempt too,
+ *  because that contradiction has more than one way in: a DB written by a build that
+ *  predates this fix, and — the window this function's own writes open — a crash
+ *  between the publisher returning and the awaiting_recovery landing, after which
+ *  reconcile lands the stranded `running` row as a terminal failure while the AD-5
+ *  sweep converges its attempt to `published`. The rule is about the CONTRADICTION,
+ *  not about how it arrived: a `published` attempt's task tells the truth, whatever it
+ *  said before. A `failed` task with NO published attempt is a real failure and is
+ *  never touched.
+ *
+ *  `running` is deliberately NOT reconciled here: a task is legitimately `running`
+ *  with a `published` attempt for the instant between the CAS and finalizePrimary, and
+ *  a second process converging that from underneath the live one would be the race the
+ *  lease exists to prevent. Crash-stranded `running` rows are reconcile.ts's, and they
+ *  arrive here as `failed` on the pass after it lands them. */
+/** FG-425: was this task's terminal state CHOSEN by a human, or inflicted on it?
+ *
+ *  `failed` alone cannot answer that — `forge cancel` and a crash-stranded publication
+ *  land in the same status — so this reads the evidence `forge cancel` durably writes
+ *  and a crash cannot: the `task.cancelled` event, and the `cancelled` failure kind on
+ *  the task.failed event beside it. Both are written by cancel.ts and nothing else.
+ *  Either one is proof; the reconciler needs proof of the ABSENCE of a cancel before it
+ *  may touch a terminal row, so it fails closed on either. */
+function taskWasCancelled(taskId: string): boolean {
+  const events = eventsForTask(taskId);
+  return events.some((e) => e.eventType === "task.cancelled") || failureKindFromEvents(events) === "cancelled";
+}
+
+/** FG-425: the cancel stands — and the candidate is on the target anyway.
+ *
+ *  Leaving that silent would re-create the AC5 contradiction from the other direction:
+ *  an operator reads `cancelled`, takes the target to be untouched, and the publication
+ *  sitting in its history is a surprise waiting for them. So the fact is recorded once,
+ *  durably, naming the sha — which is what `forge show` renders (publicationAfterCancel)
+ *  and what `forge publish recover` reports back. Once, not once per wave: reconciliation
+ *  re-sweeps every terminal task on every wave, and an event stream that grows a line per
+ *  wave forever is noise, not a record. */
+function announcePublicationAfterCancel(runId: string, taskId: string, attempt: PublicationAttempt): void {
+  if (eventsForTask(taskId).some((e) => e.eventType === "task.published_after_cancel")) return;
+  logEvent("task.published_after_cancel", {
+    runId,
+    taskId,
+    payload: {
+      attemptId: attempt.attemptId,
+      publishedSha: attempt.publishedSha,
+      target: attempt.target,
+    },
+  });
+}
+
+function reconcilePublicationRecoveries(runId: string, workflow: Workflow, projectDir: string): void {
+  const recovering = tasksForRun(runId).filter(
+    (t) =>
+      t.status === "awaiting_recovery" ||
+      (t.status === "failed" && publicationAttemptsForTask(t.id).some((a) => a.state === "published")),
+  );
+  for (const task of recovering) {
+    // A `published` attempt is the authoritative one whatever else this task tried:
+    // its candidate is in the target's history, and no later disposition un-publishes
+    // it (the publisher short-circuits a task that already landed, so there is no
+    // later attempt — but the record, not that invariant, is what decides here).
+    const attempts = publicationAttemptsForTask(task.id);
+    const attempt = attempts.find((a) => a.state === "published") ?? attempts.find((a) => a.state !== "intent");
+    if (!attempt || attempt.state === "publishing") continue;
+
+    // A CANCEL IS TERMINAL AND WINS. `forge cancel` writes the same `failed` row a
+    // crash-stranded task ends up in, and the two are opposite things: one is damage
+    // to repair, the other is a human's decision to stop. Reconciling a cancelled task
+    // would override that decision — and a cancel a background sweep can undo is not a
+    // cancel. So the CONTRADICTION rule above applies only where the failure was NOT
+    // chosen, and this task is left exactly where the operator put it.
+    if (taskWasCancelled(task.id)) {
+      if (attempt.state === "published") announcePublicationAfterCancel(runId, task.id, attempt);
+      continue;
+    }
+
+    if (attempt.state === "published") {
+      // Clear the terminal claim FIRST, through the state that means exactly "the
+      // publication is settled; this task has not caught up yet". finalizePrimary's
+      // completion CAS refuses to overwrite a `failed` row on purpose (it guards a
+      // completing container against a concurrent cancel) — and that guard must not be
+      // relaxed, so the repair steps through awaiting_recovery rather than around it.
+      if (task.status === "failed") setTaskStatus(task.id, "awaiting_recovery");
+      // The candidate LANDED. The task's work is on the target, so the task finishes
+      // exactly as it would have had the window never been lost — through the same
+      // gate its step declares (a lost mutex is not a reason to skip a human gate).
+      const step = workflow.steps.find((s) => s.id === task.phase);
+      const status = finalizePrimary(task.id, runId, step?.gate ?? "auto", task.result);
+      logEvent("task.publication_reconciled", {
+        runId,
+        taskId: task.id,
+        payload: {
+          attemptId: attempt.attemptId,
+          outcome: "published",
+          publishedSha: attempt.publishedSha,
+          target: attempt.target,
+          status,
+        },
+      });
+      if (status === "complete") {
+        if (typeof task.worktreePath === "string") {
+          removeWorktreeIfSafe(task.worktreePath, runId, task.id, projectDir, true);
+        }
+        finalizePublication(projectDir, attempt.attemptId);
+      }
+      continue;
+    }
+
+    // Converged to a NON-published disposition: the ref did not carry the candidate,
+    // so nothing of this task's work is on the target and a terminal failure is now
+    // the truthful record. The kind is the converged one — never a guess made back
+    // when the window was lost.
+    const kind: FailureKind = attempt.state === "parked" && attempt.parkReason
+      ? attempt.parkReason
+      : "publication_refused";
+    failTask(task.id, {
+      runId,
+      kind,
+      error:
+        `publication attempt ${attempt.attemptId} was converged by AD-5 recovery to \`${attempt.state}\`: the target ` +
+        `ref does not carry candidate ${(attempt.candidateSha ?? "").slice(0, 12)}, so nothing from this task was ` +
+        `published and the target is unchanged.`,
+      result: task.result,
+    });
+    logEvent("task.publication_reconciled", {
+      runId,
+      taskId: task.id,
+      payload: { attemptId: attempt.attemptId, outcome: attempt.state, failureKind: kind },
+    });
+  }
+}
+
+/** FG-425 (AC4/AC5): `forge publish recover` — the HAND half of the two mechanisms
+ *  that clear `awaiting_recovery`, and the whole of it.
+ *
+ *  Recovery is TWO halves, and the operator command used to be only the first:
+ *  converge the PUBLICATION from the ref, then reconcile the TASK from the
+ *  publication. Run bare, it would mark the attempt `published`, synchronize the
+ *  target — and leave the task that owns it sitting in `awaiting_recovery`, with
+ *  `forge show` still calling the publication unsettled, until some later `forge next`
+ *  happened to run the other half. A hand recovery that only settles the attempt is
+ *  the same contradiction between two durable records that AC5 exists to forbid; it
+ *  just arrives by a different door.
+ *
+ *  So the run path and the hand path converge on the SAME reconciliation, and the
+ *  only difference between them is who invoked it. Idempotent: re-running it against a
+ *  settled attempt whose task already caught up reconciles nothing.
+ *
+ *  The reconciliation is skipped when the run is no longer active — a cancelled or
+ *  completed run's tasks are terminal, and recovery settles the publication record
+ *  without resurrecting them.
+ *
+ *  It is also skipped, REPORTED rather than thrown, when the run's workflow no longer
+ *  resolves: the task's landing needs the step's gate, and that lives in the workflow
+ *  definition. The publication is already converged and the target already synchronized
+ *  by the time we get here, so a missing workflow may not turn a successful recovery
+ *  into a crash — it may only leave the task uncaught-up, which is the pre-fix
+ *  behaviour and which the operator is then told about by name. */
+export type HandRecovery = {
+  outcome: OperatorRecovery;
+  /** The owning task's status AFTER reconciliation — what the operator is told, and
+   *  the thing that used to be a lie. Absent when nothing was reconciled. */
+  task?: { taskId: string; runId: string; status: string };
+  /** Set when the publication converged but its task could NOT be reconciled here.
+   *  Says why, and what the operator must do instead. */
+  unreconciled?: string;
+  /** FG-425: set when the owning task was CANCELLED and its attempt published anyway.
+   *  Nothing was reconciled — a cancel is terminal — but the candidate IS on the target,
+   *  and the operator who cancelled it may not be left thinking otherwise. */
+  publishedAfterCancel?: { taskId: string; runId: string; publishedSha: string; target: string };
+};
+
+export function recoverPublicationByHand(attemptId: string): HandRecovery {
+  const outcome = recoverPublicationAttemptForOperator(attemptId);
+  if (outcome.kind === "unknown_attempt" || outcome.kind === "blocked") return { outcome };
+
+  const attempt = getPublicationAttempt(attemptId);
+  if (!attempt) return { outcome };
+  const run = getRun(attempt.runId);
+  if (!run || run.status !== "active" || !run.projectDir) return { outcome };
+
+  let workflow: Workflow;
+  try {
+    workflow = loadWorkflow(run.workflow, { projectDir: run.projectDir });
+  } catch (e) {
+    return {
+      outcome,
+      unreconciled:
+        `the publication is converged, but task ${attempt.taskId} could NOT be reconciled onto it here: run ` +
+        `${attempt.runId}'s workflow (${run.workflow}) does not load — ${(e as Error).message}. Restore the workflow ` +
+        `definition and run \`forge next ${attempt.runId}\`, which runs the same reconciliation.`,
+    };
+  }
+
+  reconcilePublicationRecoveries(attempt.runId, workflow, run.projectDir);
+  if (isRunSettled(workflow, tasksForRun(attempt.runId))) {
+    finalizeRunIfSettled(attempt.runId, "publish-recover-reconciled");
+  }
+
+  const task = getTask(attempt.taskId);
+  if (!task) return { outcome };
+  // The hand path goes through the same reconciliation as a wave, so it refuses the
+  // same resurrection — and it owes the operator the same account of it. Nothing was
+  // reconciled here (the cancel stands), so reporting a reconciliation would be a
+  // second lie on top of the one this guard exists to prevent.
+  const settled = getPublicationAttempt(attemptId);
+  if (taskWasCancelled(task.id) && settled?.state === "published" && settled.publishedSha) {
+    return {
+      outcome,
+      publishedAfterCancel: {
+        taskId: task.id,
+        runId: attempt.runId,
+        publishedSha: settled.publishedSha,
+        target: settled.target,
+      },
+    };
+  }
+  return { outcome, task: { taskId: task.id, runId: attempt.runId, status: task.status } };
+}
+
 /** Map a non-published publication outcome onto forge's failure-kind vocabulary.
  *  A gate failure against the CANDIDATE keeps the same infra-vs-test-failure
  *  classification the post-merge gate had — only the tree it ran against moved. */
 function publicationFailureKind(p: PublishOutcome): FailureKind {
+  if (p.kind === "recovery_pending") {
+    // FG-425 (AC5): NOT a failure kind, because this is not a failure — it is an
+    // unsettled publication whose ref advance already landed. Every caller routes it
+    // to awaitPublicationRecovery BEFORE reaching here; a call that got this far
+    // would be about to write a terminal task row over a `publishing` attempt, which
+    // is the exact contradiction AC5 forbids.
+    throw new Error(
+      `publication ${p.attemptId} is awaiting AD-5 recovery (the ref carries candidate ` +
+        `${p.candidateSha.slice(0, 12)}) — it has NO failure kind, and no terminal disposition may be written for ` +
+        `it. This is a caller bug: route recovery_pending to awaitPublicationRecovery.`,
+    );
+  }
   if (p.kind === "validation_failed") {
     return classify({
       integrationGate: {

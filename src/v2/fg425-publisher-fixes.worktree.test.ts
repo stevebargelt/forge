@@ -15,8 +15,8 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { getDb, makeInMemoryDb, setDbForTest } from "../store/db.js";
@@ -41,6 +41,7 @@ import {
   publishIntegration,
   recoverPublicationAttempt,
   recoverUnfinishedPublications,
+  setPublisherSeamsForTest,
   type ValidationResult,
 } from "./integration-publisher.js";
 import { readTargetSha, localTargetFor, WINDOW_GIT_TIMEOUT_MS } from "./publication-target.js";
@@ -54,6 +55,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setPublisherSeamsForTest({});
   setPublicationClockOffsetForTest(0);
   setDbForTest(prevDb as DatabaseInstance);
   for (const d of cleanup.splice(0)) rmSync(d, { recursive: true, force: true });
@@ -64,6 +66,7 @@ function git(cwd: string, args: string[]): string {
 }
 
 function commit(dir: string, file: string, body: string): string {
+  mkdirSync(dirname(join(dir, file)), { recursive: true });
   writeFileSync(join(dir, file), body);
   git(dir, ["add", "."]);
   git(dir, ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", `add ${file}`]);
@@ -596,7 +599,7 @@ test("FG-425: a checkout that outlives the OLD fixed TTL keeps the mutex — no 
   assert.equal(out.kind, "published", `the slow-but-live publisher still publishes: ${JSON.stringify(out)}`);
 });
 
-test("FG-425: a publisher that LOST the mutex fails closed — it never checks out over the attempt that took it", async () => {
+test("FG-425: a publisher that LOST the mutex fails closed — it never checks out over the attempt that took it, and never claims a terminal disposition it cannot prove", async () => {
   const runId = "run-mutexlost";
   const { dir, branch } = makeProject(runId);
   const { key } = projectIdentity(dir);
@@ -606,6 +609,14 @@ test("FG-425: a publisher that LOST the mutex fails closed — it never checks o
   // Inside the window: push the clock past even the NEW TTL and let a contender take
   // the mutex over. The holder's next renewal — the one before `read-tree` — must
   // find the window gone and refuse to touch the tree.
+  //
+  // FG-425 (AC5): the thief here KEEPS the window (it is a live holder for the whole
+  // span this test observes), so the losing publisher never gets it back to converge
+  // with. That is what isolates the property this test is about — what a publisher does
+  // while it owns NOTHING — from what it may do later, legitimately, as the window's
+  // owner. The convergence wait is shortened to keep that span short; the production
+  // bound is derived from MUTEX_TTL_MS and is not what this test is pinning.
+  setPublisherSeamsForTest({ convergeWaitMs: 500 });
   const out = await publishIntegration({
     runId,
     taskId: "task-build-1",
@@ -625,17 +636,33 @@ test("FG-425: a publisher that LOST the mutex fails closed — it never checks o
     },
   });
 
-  assert.equal(out.kind, "refused", `a publisher that lost the mutex must refuse, not publish: ${JSON.stringify(out)}`);
+  // NOT a terminal refusal (FG-425 AC5). The ref carries this attempt's candidate, so
+  // "refused — nothing was published" is the one thing this cannot be: it would be a
+  // terminal claim standing over an attempt still recorded `publishing`, and it would
+  // invite a retry of work that is already on the target. Unable to prove a disposition,
+  // the publisher reports a NON-TERMINAL one.
+  assert.equal(
+    out.kind,
+    "recovery_pending",
+    `a publisher that lost the mutex with its ref advance LANDED must report a non-terminal, recoverable ` +
+      `disposition — never a terminal refusal, and never a publication it cannot prove: ${JSON.stringify(out)}`,
+  );
   assert.match(
     (out as { error: string }).error,
-    /no longer holds the publication mutex/,
-    "and the refusal must NAME the lost window rather than surface as some incidental git error",
+    /publication window can no longer be proven/,
+    "and it must NAME the lost window rather than surface as some incidental git error",
   );
-  assert.equal(
+  assert.doesNotMatch(
+    (out as { error: string }).error,
+    /[Nn]othing was published/,
+    "and it must NOT tell the operator nothing was published — the target ref carries the candidate",
+  );
+  assert.notEqual(
     readTargetSha(target),
     base,
-    "its own ref advance is rolled back by CAS — the target is byte-for-byte where it started, so the attempt " +
-      "that took the window is not left publishing on top of a half-applied one",
+    "the ref advance is NOT rolled back: a rollback is a target mutation, and this attempt can no longer prove it " +
+      "owns the window. The attempt that took the mutex may already have synchronized index and worktree onto the " +
+      "candidate, and an unguarded CAS undo would strand the target at ref=base with the tree at the candidate.",
   );
   assert.equal(
     existsSync(join(dir, "agent-work.txt")),
@@ -643,9 +670,117 @@ test("FG-425: a publisher that LOST the mutex fails closed — it never checks o
     "and the working tree was NEVER updated: the checkout is the write the mutex exists to serialize",
   );
   assert.equal(
+    getPublicationAttempt(attemptOf(key))?.state,
+    "publishing",
+    "the durable publishing intent STANDS — {baseSha, candidateSha, target} is what the mutex's current owner " +
+      "converges the target from through AD-5 recovery. A record rewritten to `failed` here would tell recovery " +
+      "there is nothing to converge, with the ref already carrying the candidate.",
+  );
+  assert.equal(
     publicationMutexHolder(key)?.attemptId,
     "attempt-thief",
     "releasing our own mutex must not unlink the holder that took it over from us",
+  );
+});
+
+// ─── (9) AD-1 of the ownership invariant: an ACTIVE thief ─────────────────────
+//
+// THE DEFECT (FG-425 AC1): the checkout-failure path rolled the ref advance back by
+// an UNGUARDED CAS, on the theory that a CAS on a ref we ourselves wrote is safe
+// with or without the mutex. It is not — because the mutex is what serializes the
+// WORKING TREE, and the attempt that takes it does not merely sit there:
+//
+//   1. A advances the ref from base to candidate C.
+//   2. A's mutex lease lapses.
+//   3. B takes the window and AD-5-recovers: index and worktree are synchronized
+//      onto C, which is what the REF says is published.
+//   4. A resumes; its renewal finds the window gone.
+//   5. A's catch rolls the REF back to base — a mutation performed by a process that
+//      demonstrably owns nothing.
+//
+// Final state: ref=base, index/worktree=C. Every file of the candidate now reads as
+// tracked dirt, so every LATER publication's AD-3 pre-check refuses: the target is
+// wedged, and the publication B legitimately converged has been un-published behind
+// its back.
+//
+// The invariant is absolute: once a publisher discovers it no longer owns the mutex,
+// it executes NO target-mutating command — not update-ref, not read-tree, not
+// cleanup. It leaves the durable intent for the mutex's owner to converge.
+
+test("FG-425 (AC1): a publisher that lost the mutex to an ACTIVE thief mutates NOTHING — no rollback, and the target converges on the candidate", async () => {
+  const runId = "run-active-thief";
+  const { dir, branch } = makeProject(runId);
+  const { key } = projectIdentity(dir);
+  const target = localTargetFor(dir);
+  const base = readTargetSha(target);
+
+  let candidateSha = "";
+  let refAfterThief = "";
+  const out = await publishIntegration({
+    runId,
+    taskId: "task-build-1",
+    projectDir: dir,
+    sources: [{ branch, label: "task" }],
+    lane: { pollMs: 10, log: () => {} },
+    alsoValidate: (_d, sha) => { candidateSha = sha; return ok(); },
+    // Inside the window, with our ref advance ALREADY on the target: our lease
+    // lapses, and B — a real publisher, not a squatter — takes over and does the
+    // work the ref entitles it to. It runs the AD-5 sweep (which takes the window
+    // from our lapsed lease, converges the tree onto C, and records the truth), then
+    // holds the window as the current owner.
+    afterRefAdvance: () => {
+      setPublicationClockOffsetForTest(MUTEX_TTL_MS + 60_000);
+      recoverUnfinishedPublications(dir, "run-thief");
+      const stolen = tryAcquirePublicationMutex({
+        projectKey: key,
+        attemptId: "attempt-thief",
+        runId: "run-thief",
+        ttlMs: MUTEX_TTL_MS,
+      });
+      assert.equal(stolen.acquired, true, "setup: with the lease genuinely lapsed, B takes the window");
+      refAfterThief = readTargetSha(target);
+    },
+  });
+
+  // What B left: the ref carries C and the tree was synchronized onto it.
+  assert.equal(refAfterThief, candidateSha, "setup: B recovered the tree onto the candidate the REF already carried");
+  assert.equal(readFileSync(join(dir, "agent-work.txt"), "utf8"), "the agent's output\n", "setup: B's checkout ran");
+
+  // ── A resumes with the window gone, and touches NOTHING ─────────────────────
+  assert.equal(
+    readTargetSha(target),
+    candidateSha,
+    "the ref must STILL carry the candidate. A rolled it back to the base here — an update-ref executed by a " +
+      "process that had already discovered it owns nothing, un-publishing what B had just converged.",
+  );
+  assert.notEqual(readTargetSha(target), base, "the ref was NOT rolled back to the base");
+
+  // ref, index and tracked worktree ALL converge on C. A dirty status is the exact
+  // signature of the rollback: ref=base with the candidate's content on disk.
+  assert.equal(
+    git(dir, ["status", "--porcelain"]),
+    "",
+    "index and worktree agree with the ref — the target is clean and converged on the candidate, not left " +
+      "divergent (ref=base, tree=candidate) by an unowned rollback",
+  );
+  assert.equal(git(dir, ["rev-parse", "HEAD"]), candidateSha, "HEAD, the index and the tree are all at C");
+
+  // The durable record tells the truth: the candidate IS published, and A never
+  // rewrote the record B converged.
+  const attempt = getPublicationAttempt(attemptOf(key));
+  assert.equal(attempt?.state, "published", "the record B converged must not be rewritten by the attempt that lost the window");
+  assert.equal(attempt?.publishedSha, candidateSha, "AD-6: bound to the recorded candidateSha");
+  assert.equal(attempt?.parkReason, undefined, "a landed publication is not retro-parked");
+
+  // And the outcome A reports is that durable truth, not a fabricated failure.
+  assert.equal(out.kind, "published", `A must report what the RECORD says, not rewrite it: ${JSON.stringify(out)}`);
+  if (out.kind !== "published") return;
+  assert.equal(out.publishedSha, candidateSha);
+
+  assert.equal(
+    publicationMutexHolder(key)?.attemptId,
+    "attempt-thief",
+    "and A's own release must not unlink the holder that took the window over from it",
   );
 });
 
@@ -764,7 +899,250 @@ test("FG-425 (finding 1): the publisher's mutex grant is refused outright once t
   assert.equal(publicationMutexHolder(key), undefined, "a refused grant writes no lock row");
 });
 
+// ─── (10) recovery is IDEMPOTENT w.r.t. TERMINAL records ─────────────────────
+//
+// THE DEFECT (FG-425 AC2): recovery re-derived every attempt it was handed from the
+// CURRENT ref, whatever the attempt's stored state said. So:
+//
+//   1. A publishes. Its record is `published`, publishedSha = C_a.
+//   2. B publishes on top of A. The ref is now C_b.
+//   3. Recovery runs for A. The ref is neither A's base nor A's candidate, so the
+//      "external writer" branch REWRITES A into parked/publish_base_churn, claiming
+//      "nothing from this attempt was published" — while A's commit sits on the
+//      target, in the history of everything published since.
+//
+// That is corruption of durable publication history, and the durable record is the
+// only account of what forge published. Only an UNFINISHED attempt (`publishing`) —
+// the one state in which the target may already have been mutated — may be
+// re-derived from the ref. Terminal records are reported, never rewritten.
+
+test("FG-425 (AC2): recovering a PUBLISHED attempt after a later attempt published on top of it changes NOTHING", async () => {
+  const runId = "run-terminal-a";
+  const { dir, branch } = makeProject(runId);
+
+  const first = await publishIntegration({
+    runId,
+    taskId: "task-a",
+    projectDir: dir,
+    sources: [{ branch, label: "a" }],
+    lane: { pollMs: 10, log: () => {} },
+    alsoValidate: ok,
+  });
+  assert.equal(first.kind, "published", `setup: A must publish: ${JSON.stringify(first)}`);
+  if (first.kind !== "published") return;
+
+  // B publishes on top of A: the target now carries neither A's base nor A's candidate.
+  const secondBranch = "forge/run-terminal-b/task";
+  git(dir, ["checkout", "-q", "-b", secondBranch, "main"]);
+  commit(dir, "second.txt", "the second agent's output\n");
+  git(dir, ["checkout", "-q", "main"]);
+  insertRun({
+    id: "run-terminal-b",
+    workflow: "fg425",
+    title: "fg425 fix test",
+    status: "active",
+    projectDir: dir,
+    createdAt: new Date().toISOString(),
+    metadata: {},
+  });
+  const second = await publishIntegration({
+    runId: "run-terminal-b",
+    taskId: "task-b",
+    projectDir: dir,
+    sources: [{ branch: secondBranch, label: "b" }],
+    lane: { pollMs: 10, log: () => {} },
+    alsoValidate: ok,
+  });
+  assert.equal(second.kind, "published", `setup: B must publish on top of A: ${JSON.stringify(second)}`);
+  if (second.kind !== "published") return;
+
+  const recordBefore = getPublicationAttempt(first.attemptId);
+  const refBefore = readTargetSha(localTargetFor(dir));
+
+  const recovered = recoverPublicationAttempt(first.attemptId);
+
+  assert.deepEqual(
+    getPublicationAttempt(first.attemptId),
+    recordBefore,
+    "A's TERMINAL record must be byte-for-byte unchanged. Re-deriving it from the current ref — which is now B's " +
+      "candidate, so neither A's base nor A's candidate — rewrote a `published` attempt into a churn park claiming " +
+      "nothing of A ever landed. A's commit is in the history of what B published.",
+  );
+  assert.equal(recovered.kind, "published", `recovery must REPORT the recorded publication: ${JSON.stringify(recovered)}`);
+  if (recovered.kind !== "published") return;
+  assert.equal(recovered.publishedSha, first.publishedSha, "including its recorded publishedSha");
+  assert.equal(getPublicationAttempt(first.attemptId)?.state, "published", "and its terminal state");
+  assert.equal(readTargetSha(localTargetFor(dir)), refBefore, "recovering a settled attempt touches no target either");
+  assert.equal(git(dir, ["status", "--porcelain"]), "", "and leaves the target clean");
+});
+
+test("FG-425 (AC2): recovery performs NO state transition on any other terminal record", async () => {
+  const { dir } = makeProject("run-terminal-others");
+  const { key, canonicalDir } = projectIdentity(dir);
+  const base = readTargetSha(localTargetFor(dir));
+  // A sha the target does NOT carry, so a ref-derived recovery would have something
+  // to (wrongly) say about every one of these records.
+  const stranger = commit(dir, "stranger.txt", "an external writer's commit\n");
+  git(dir, ["reset", "-q", "--hard", base]);
+  git(dir, ["clean", "-qfd"]);
+
+  const terminal = [
+    { attemptId: "att-failed", state: "failed" as const, candidateSha: base },
+    { attemptId: "att-parked-dirty", state: "parked" as const, parkReason: "dirty_publish_target" as const, candidateSha: stranger },
+    { attemptId: "att-parked-churn", state: "parked" as const, parkReason: "publish_base_churn" as const, candidateSha: stranger },
+    { attemptId: "att-parked-lane", state: "parked" as const, parkReason: "lane_taken_over" as const, candidateSha: base },
+    // candidateSha === the current ref: pre-fix, THIS is the record recovery would
+    // have promoted to `published` — inventing a publication out of an attempt that
+    // was already settled as abandoned.
+    { attemptId: "att-abandoned", state: "abandoned" as const, candidateSha: base },
+  ];
+
+  for (const t of terminal) {
+    recordPublicationIntent({
+      attemptId: t.attemptId,
+      projectKey: key,
+      canonicalDir,
+      runId: "run-terminal-others",
+      taskId: `task-${t.attemptId}`,
+      target: `local:${dir}#main`,
+      leaseTtlMs: LANE_BASE_TTL_MS,
+    });
+    updatePublicationAttempt(t.attemptId, {
+      baseSha: base,
+      candidateSha: t.candidateSha,
+      state: t.state,
+      ...(t.parkReason ? { parkReason: t.parkReason } : {}),
+    });
+  }
+
+  for (const t of terminal) {
+    const before = getPublicationAttempt(t.attemptId);
+    const outcome = recoverPublicationAttempt(t.attemptId);
+    assert.deepEqual(
+      getPublicationAttempt(t.attemptId),
+      before,
+      `recovering a ${t.state}${t.parkReason ? `/${t.parkReason}` : ""} attempt must perform NO state transition — ` +
+        "a terminal record is the durable account of what forge did, and recovery is not licensed to rewrite it " +
+        `(got ${JSON.stringify(getPublicationAttempt(t.attemptId))})`,
+    );
+    assert.notEqual(outcome.kind, "unknown_attempt", "and it is still a known attempt, reported with its recorded disposition");
+    if (t.state === "parked") {
+      assert.equal(outcome.kind, "parked", `a parked attempt reports its stable recorded disposition: ${JSON.stringify(outcome)}`);
+      assert.equal(outcome.kind === "parked" && outcome.reason, t.parkReason, "with its RECORDED park reason, not a re-derived one");
+    } else {
+      assert.equal(outcome.kind, "refused", `a ${t.state} attempt is reported as not recoverable: ${JSON.stringify(outcome)}`);
+    }
+  }
+
+  assert.equal(readTargetSha(localTargetFor(dir)), base, "and no terminal recovery touched the target");
+  assert.equal(git(dir, ["status", "--porcelain"]), "", "or its working tree");
+});
+
+// ─── (11) AD-3 collisions are PREFIX-AWARE ───────────────────────────────────
+//
+// THE DEFECT (FG-425 AC3): the untracked-collision pre-check compared paths by exact
+// EQUALITY, but git's collisions are file-vs-directory: a path is one or the other
+// and cannot be both. So the two prefix shapes slipped past AD-3 entirely, the ref
+// advanced, and `read-tree -m -u` discovered the collision on the FAR SIDE of the
+// CAS — reaching the operator as a checkout failure rather than the named blocker,
+// having already mutated the target it was supposed to refuse to touch.
+
+test("FG-425 (AC3): candidate adds the FILE `conf`; the operator has untracked `conf/local.txt` — refused before any mutation", async () => {
+  const runId = "run-collide-file-over-dir";
+  const { dir, branch } = makeProject(runId, "conf");
+  const baseBefore = readTargetSha(localTargetFor(dir));
+
+  // The operator's own directory sits where the candidate wants a FILE.
+  const operatorFile = join(dir, "conf", "local.txt");
+  mkdirSync(join(dir, "conf"), { recursive: true });
+  writeFileSync(operatorFile, "the operator's UNTRACKED config — never destroy this\n");
+
+  const out = await publishIntegration({
+    runId,
+    taskId: "task-build-1",
+    projectDir: dir,
+    sources: [{ branch, label: "task" }],
+    lane: { pollMs: 10, log: () => {} },
+    alsoValidate: ok,
+  });
+
+  assertRefusedAsDirtyTarget(out, dir, baseBefore, "conf/local.txt");
+  assert.equal(
+    readFileSync(operatorFile, "utf8"),
+    "the operator's UNTRACKED config — never destroy this\n",
+    "the operator's file is byte-for-byte untouched — forge never deletes, stashes, moves, or checks out over it",
+  );
+});
+
+test("FG-425 (AC3): candidate adds `conf/settings.json`; the operator has an untracked FILE at `conf` — refused before any mutation", async () => {
+  const runId = "run-collide-dir-over-file";
+  const { dir, branch } = makeProject(runId, "conf/settings.json");
+  const baseBefore = readTargetSha(localTargetFor(dir));
+
+  // The operator's own FILE sits where the candidate needs a DIRECTORY.
+  const operatorFile = join(dir, "conf");
+  writeFileSync(operatorFile, "the operator's UNTRACKED note — never destroy this\n");
+
+  const out = await publishIntegration({
+    runId,
+    taskId: "task-build-1",
+    projectDir: dir,
+    sources: [{ branch, label: "task" }],
+    lane: { pollMs: 10, log: () => {} },
+    alsoValidate: ok,
+  });
+
+  assertRefusedAsDirtyTarget(out, dir, baseBefore, "conf");
+  assert.equal(
+    readFileSync(operatorFile, "utf8"),
+    "the operator's UNTRACKED note — never destroy this\n",
+    "the operator's file is byte-for-byte untouched — forge never deletes, stashes, moves, or checks out over it",
+  );
+});
+
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+/** AD-3's contract, whichever direction the collision runs in: the NAMED blocker,
+ *  and a target nothing has been written to. */
+function assertRefusedAsDirtyTarget(
+  out: Awaited<ReturnType<typeof publishIntegration>>,
+  dir: string,
+  baseBefore: string,
+  offendingPath: string,
+): void {
+  assert.equal(
+    out.kind,
+    "parked",
+    "a git file/directory collision with an untracked path is `dirty_publish_target`, refused BEFORE the window — " +
+      `not a checkout failure discovered on the far side of the CAS: ${JSON.stringify(out)}`,
+  );
+  if (out.kind !== "parked") return;
+  assert.equal(out.reason, "dirty_publish_target", "AD-3's named blocker, not a fallback refusal");
+  assert.match(out.error, /untracked/i, "the blocker must name WHAT it refused on");
+  assert.match(out.error, new RegExp(offendingPath.replace(/[/.]/g, "\\$&")), "and it must name the offending path");
+  assert.doesNotMatch(
+    out.error,
+    /could not be updated|ROLLED BACK/,
+    "and it must NOT be a CheckoutSyncError in disguise — that one has already advanced the ref",
+  );
+  assert.equal(
+    readTargetSha(localTargetFor(dir)),
+    baseBefore,
+    "the target ref must be provably UNCHANGED: the collision is refused before ANY mutation",
+  );
+  assert.equal(
+    git(dir, ["status", "--porcelain", "--untracked-files=no"]),
+    "",
+    "the index and the tracked working tree are unchanged — nothing staged, nothing to clean up",
+  );
+}
+
+/** The one publication attempt this project's lane carries. */
+function attemptOf(projectKey: string): string {
+  const entry = laneForProject(projectKey)[0];
+  assert.ok(entry, "expected the project's lane to carry the publisher's attempt");
+  return entry.attemptId;
+}
 
 /** Age a lane entry's lease into the past. This is the ONLY thing a takeover keys
  *  on (AD-7: no probe, no signal, no liveness classification) — so writing the

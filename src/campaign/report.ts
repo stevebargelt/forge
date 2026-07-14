@@ -188,6 +188,19 @@ function isCampaignSystemRecoverable(item: CampaignItem): boolean {
   );
 }
 
+/** FG-425 (AC5): the campaign report's line for an item whose publication advanced
+ *  the target ref and then lost its window. It says the one thing every other
+ *  paused-item line must not say here — that the work may ALREADY be published — and
+ *  it points at convergence rather than at the retry that would duplicate it. */
+function recoveringPublicationGuidance(campaignId: string, item: CampaignItem): string {
+  return (
+    `${item.ticketId}: its publication lost the window AFTER the target ref advanced — the target may ALREADY carry ` +
+    `the candidate, so nothing was lost and the work must NOT be re-run. ` +
+    `\`forge campaign resume ${campaignId}\` converges the publication (AD-5) and reconciles the item onto what ` +
+    `actually landed${item.runId ? ` (\`forge show ${item.runId}\` to inspect first)` : ""}.`
+  );
+}
+
 // FG-502: the campaign_system counterpart to outOfBandCompletableAction — same
 // paused-only gate (reconcile refuses categorically unless paused), routed off
 // isCampaignSystemRecoverable instead of the awaiting_gate/no-blockerKind shape.
@@ -427,6 +440,11 @@ function computeNextShowAction(
       }
       return blockedItemGuidance(campaign.id, blockedItem);
     }
+    // FG-425 (AC5): checked FIRST. An item parked on an unsettled publication has a
+    // remedy nothing else on this list shares — converge, never retry — and the report
+    // is exactly where an operator goes to find out what to do next.
+    const recoveringItem = items.find((i) => i.lifecycleStatus === "awaiting_recovery");
+    if (recoveringItem) return recoveringPublicationGuidance(campaign.id, recoveringItem);
     const gateParkedItem = items.find((i) => i.lifecycleStatus === "awaiting_gate" || i.lifecycleStatus === "blocked_by_red");
     if (gateParkedItem) {
       // FG-502: a blocked_by_red item can ALSO be the campaign_system shape (e.g.
@@ -545,6 +563,11 @@ function computeNextOperatorAction(
       return blockedItemGuidance(campaign.id, blockedItem);
     }
     // Parked at a human gate or red block: surface the specific gate/block action.
+    // FG-425 (AC5): checked FIRST. An item parked on an unsettled publication has a
+    // remedy nothing else on this list shares — converge, never retry — and the report
+    // is exactly where an operator goes to find out what to do next.
+    const recoveringItem = items.find((i) => i.lifecycleStatus === "awaiting_recovery");
+    if (recoveringItem) return recoveringPublicationGuidance(campaign.id, recoveringItem);
     const gateParkedItem = items.find((i) => i.lifecycleStatus === "awaiting_gate" || i.lifecycleStatus === "blocked_by_red");
     if (gateParkedItem) {
       // FG-502: same campaign_system routing as computeNextShowAction above — a

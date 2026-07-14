@@ -878,6 +878,11 @@ export function checkNoPermanentWedge(runId: string, workflow: Workflow): Violat
     // Non-terminal: an enabled transition, or a named operator verb.
     if (ready.has(t.phase)) continue;
     if (t.status === "awaiting_gate" || t.status === "blocked_by_red") continue; // `forge gate <id> ...`
+    // FG-425 (AC5): `forge next <runId>` — the AD-5 sweep at the top of every wave
+    // converges the publication and reconcilePublicationRecoveries lands this task on the
+    // truth. `forge publish recover <attemptId>` is the by-hand form. Not a wedge: the
+    // transition is forge's own and it is enabled on every subsequent wave.
+    if (t.status === "awaiting_recovery") continue;
     if (t.status === "running") {
       // Whether container.started landed is the discriminator, not colour: it is the
       // event BOTH sweeps gate on, so a `running` row without it is unsweepable BY

@@ -16,6 +16,21 @@ export type EventType =
   | "task.blocked_by_red"
   | "task.awaiting_red"
   | "task.awaiting_gate"
+  // FG-425 (AC5): the task's publication attempt lost the publication window with
+  // its ref advance already on the target. Non-terminal — no claim is made about
+  // what landed until AD-5 convergence settles the attempt.
+  | "task.awaiting_recovery"
+  // FG-425 (AC5): AD-5 convergence settled that attempt, and this task was moved
+  // onto the truth it recorded (complete when the candidate landed; failed with the
+  // converged kind when it did not).
+  | "task.publication_reconciled"
+  // FG-425: the task was CANCELLED and its publication attempt nevertheless converged
+  // to `published` — the candidate is on the target. The cancel is terminal and stands
+  // (recovery never resurrects it, so no task.publication_reconciled is written), which
+  // is exactly why this exists: it is the durable record that the target carries work
+  // from a task the operator stopped. Emitted once, on the first reconciliation pass
+  // that sees the pair — never once per wave.
+  | "task.published_after_cancel"
   | "task.retried"
   | "task.reconciled"
   // FG-540: a missing result.json was recovered as the exact structured JSON
@@ -94,6 +109,17 @@ export type EventType =
   | "publication.published"
   | "publication.refused"
   | "publication.parked"
+  // FG-425 (AC5): the publisher's ref advance LANDED and it then lost the
+  // publication window. NOT a refusal — the target carries the candidate, and the
+  // attempt stays `publishing` until AD-5 convergence settles it. Recorded instead
+  // of publication.refused, which claimed the opposite of what happened.
+  | "publication.window_lost"
+  // FG-425 (AC5): the window did not come free within the convergence bound, so the
+  // attempt's disposition is still unsettled. No terminal claim is made about it.
+  | "publication.recovery_pending"
+  // FG-425 (AC5): the publisher was asked to publish a task whose work is ALREADY on
+  // the target (an attempt recorded `published`). It republished nothing.
+  | "publication.already_published"
   // AD-5 recovery converged an attempt left in the non-terminal `publishing`
   // state (a crash inside the publication window). Emitted by the run-path sweep
   // AND by `forge publish recover` — a defined recovery nothing invokes is not a

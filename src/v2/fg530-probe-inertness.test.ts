@@ -849,6 +849,73 @@ const ALLOWLIST: Allow[] = [
       "orphaned_needs_finalize sweep re-derives — and that landing IS probed " +
       "(reconcile:{before,inside}-fail-pipeline-unfinalized). Same argument as the dispatchSingleStep/failTask entry above.",
   },
+  // ── runNext.ts: FG-425 (AC5)'s lost-window landing and its reconciliation ───
+  //
+  // These writes exist to REMOVE a contradiction, and the argument for not probing
+  // them is that a crash cannot re-create it. Both are re-derivable from the SAME
+  // durable pair every other publication write is: the publication_attempts row and
+  // the target REF. Neither invents state; both COPY state that already exists.
+  {
+    file: "v2/runNext.ts",
+    fn: "awaitPublicationRecovery",
+    call: "markTaskAwaitingRecovery",
+    reason:
+      "lands the task in the NON-TERMINAL awaiting_recovery state after its publication lost the window with the ref advance " +
+      "already on the target. A crash BEFORE this write leaves the task `running` with its result on disk and an attempt still " +
+      "`publishing` — reconcile's container-gone sweep lands that as a terminal failure, and reconcilePublicationRecoveries " +
+      "then REPAIRS it on the next wave (it reconciles a `failed` task beside a `published` attempt, precisely so this crash " +
+      "window cannot strand the contradiction AC5 exists to remove). A crash AFTER it leaves the task in the state the next " +
+      "wave reconciles anyway. Neither side can produce a terminal claim that outlives the truth.",
+  },
+  {
+    file: "v2/runNext.ts",
+    fn: "awaitPublicationRecovery",
+    call: "logEvent",
+    reason:
+      "the task.awaiting_recovery audit append against the status write above — append-only evidence, read by no transition. " +
+      "The authoritative record of the unsettled publication is the publication_attempts row (`publishing`, with its " +
+      "{baseSha, candidateSha, target}), which the publisher wrote before it touched anything.",
+  },
+  {
+    file: "v2/runNext.ts",
+    fn: "reconcilePublicationRecoveries",
+    call: "setTaskStatus",
+    reason:
+      "clears a terminal `failed` claim that a crash (or a pre-fix build) left standing over an attempt AD-5 recovery has since " +
+      "converged to `published`, moving it to awaiting_recovery so finalizePrimary's completion CAS — which refuses to overwrite " +
+      "a failed row on purpose — can land it. Idempotent and derived ENTIRELY from the durable attempt record: a crash on either " +
+      "side leaves the same record for the next wave to re-derive the same repair from, and re-running it changes nothing.",
+  },
+  {
+    file: "v2/runNext.ts",
+    fn: "reconcilePublicationRecoveries",
+    call: "failTask",
+    reason:
+      "the terminal failure for a task whose attempt AD-5 recovery converged to a NON-published disposition — the target ref " +
+      "provably does not carry its candidate, so nothing of it was published. A crash before this write leaves the task in the " +
+      "non-terminal awaiting_recovery state with the attempt already settled, and the next wave re-derives exactly this landing " +
+      "from that same settled record. The failure kind is READ from the converged record, never guessed.",
+  },
+  {
+    file: "v2/runNext.ts",
+    fn: "reconcilePublicationRecoveries",
+    call: "logEvent",
+    reason:
+      "the task.publication_reconciled audit append against the two writes above — append-only evidence naming which durable " +
+      "attempt the task was reconciled from. Nothing reads it to decide a transition; the attempt record is what the next wave " +
+      "re-derives from.",
+  },
+  {
+    file: "v2/runNext.ts",
+    fn: "announcePublicationAfterCancel",
+    call: "logEvent",
+    reason:
+      "the task.published_after_cancel audit append: a CANCELLED task's attempt converged to `published`, so the target carries " +
+      "its candidate and the operator must be told. It writes NO task state at all — the cancel is terminal and reconciliation " +
+      "refuses to touch it, which is the whole point of this branch — and no transition reads this event; the only read is this " +
+      "function's own once-per-task idempotency check, re-derived from the event stream itself. A crash before it leaves exactly " +
+      "the durable pair (cancelled task + `published` attempt) the next wave re-announces from; a crash after it changes nothing.",
+  },
   {
     file: "v2/runNext.ts",
     fn: "runFanoutChild",
@@ -948,6 +1015,17 @@ const ALLOWLIST: Allow[] = [
       "(FG-463/FG-484), so the window is in that file, not a covered one. A crash on either side leaves the run `active` " +
       "with every task terminal — the next reconcile pass re-derives and completes it (idempotent, and the reconcile cells " +
       "drive exactly that).",
+  },
+  {
+    file: "v2/runNext.ts",
+    fn: "recoverPublicationByHand",
+    call: "finalizeRunIfSettled",
+    reason:
+      "the SAME run-level completion as runNext's, reached from `forge publish recover` instead of from a wave, and " +
+      "identical in its crash window: atomic inside run-finalize.ts, and re-derived by the next reconcile pass if a crash " +
+      "lands on either side. The reconciliation that precedes it (reconcilePublicationRecoveries — probed where its own " +
+      "writes live) is the only thing here that can strand a TASK, and a crash before this call simply leaves a settled " +
+      "run `active`: the operator re-runs the command (idempotent) or the next wave completes it.",
   },
 
   // ── gate.ts ────────────────────────────────────────────────────────────────

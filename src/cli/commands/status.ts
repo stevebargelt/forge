@@ -204,6 +204,8 @@ function statusIcon(s: string): string {
     case "awaiting_gate": return "⚠";
     case "awaiting_red": return "⏵";
     case "blocked_by_red": return "✗";
+    // FG-425 (AC5): unsettled publication — not a failure, not a pass.
+    case "awaiting_recovery": return "⧗";
     case "failed": return "☠";
     case "pending": return "○";
     default: return "?";

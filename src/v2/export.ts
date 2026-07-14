@@ -51,6 +51,10 @@ function attr(key: string, value: string | number | boolean) {
 function statusCode(status: string): number {
   if (status === "failed" || status === "blocked_by_red") return 2;
   if (status === "complete") return 1;
+  // FG-425 (AC5): awaiting_recovery lands here — UNSET, deliberately. It is not an
+  // ERROR (nothing has failed; the candidate may be on the target) and it is not OK
+  // (nothing is settled). A span that claimed either would be the same lie the task
+  // row is forbidden to tell.
   return 0;
 }
 

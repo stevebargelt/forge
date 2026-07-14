@@ -60,6 +60,16 @@ export function registerNext(program: Command): void {
           if (result.failedSteps.length > 0) {
             console.log(`  ✗ failed: ${result.failedSteps.join(", ")}`);
           }
+          // FG-425 (AC5): reported apart from failures, and worded so nobody reads it
+          // as one. The candidate may already be on the target; a retry here is the
+          // duplicate-publication path.
+          if (result.awaitingRecovery.length > 0) {
+            console.log(
+              `  ⧗ awaiting publication recovery: ${result.awaitingRecovery.join(", ")}\n` +
+                `    Their ref advance LANDED and the publication window was lost — the target may already carry the\n` +
+                `    candidate. Do NOT retry them. Re-run 'forge next ${runId}' to converge (AD-5) and reconcile.`,
+            );
+          }
           if (result.runStatus === "complete") {
             console.log(`\nRun complete.`);
           } else {

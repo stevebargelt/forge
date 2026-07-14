@@ -163,7 +163,7 @@ export function inFlight(projectDir?: string, probe?: LivenessProbe): InFlightEn
            r.title, r.workflow, r.project_dir
     FROM tasks t
     JOIN runs r ON r.id = t.run_id
-    WHERE t.status IN ('running', 'awaiting_gate', 'awaiting_red', 'blocked_by_red')
+    WHERE t.status IN ('running', 'awaiting_gate', 'awaiting_red', 'blocked_by_red', 'awaiting_recovery')
       AND r.status = 'active'
       ${where}
     ORDER BY t.started_at DESC NULLS LAST, t.created_at DESC

@@ -1,11 +1,9 @@
 ---
 id: FG-425
 type: story
-status: done
+status: active
 title: "Serialized integration publisher: validate a candidate in an isolated worktree, publish the exact tested commit via a short CAS window"
 created: 2026-07-01
-closed: 2026-07-13
-closed_commit: 4762b1f
 ---
 
 ## Problem
@@ -110,3 +108,63 @@ DISCARD: the long-gate locking and the entire process-supervision layer (`GateGr
 - Merging FG-425 is the prerequisite that clears the FG-396 (parallel campaign lanes) integration-lock blocker. NOTE: AD-2's FIFO lane orders *publication*, not execution — FG-396's parallel lanes stay parallel through worker execution and serialize only at integration/publish. FG-410 already closed.
 - FG-356 owns orphan worktree cleanup (AD-4 depends on it existing eventually, but not for correctness). FG-345 owns the broader worktree model.
 - FG-548 (store deferred-write-txn SQLITE_BUSY under multi-process WAL) was surfaced by this ticket's cross-process harness; it is independent of this redesign and now lives on main.
+
+---
+
+## REOPENED 2026-07-13 — targeted corrective changes (request-changes on the landed implementation)
+
+The binding architecture is CORRECT and is NOT up for redesign. The landed implementation has two blocking correctness defects, one AD-3 preflight defect, and documentation that contradicts the implementation.
+
+**Settled — do not re-litigate, do not "harden":** the lane provides ORDERING and spans candidate integration + full validation + publication; the short mutex + CAS + ancestry proof + immutable `candidateSha` binding provide CORRECTNESS; validation stays inside the exclusive lane turn and outside the short mutex window; the lane is a renewable durable lease — NO PID probing, signalling, nonces, zombie classification, or reaping; remote publication requires BOTH ancestry proof AND an explicit expected-SHA lease; publication worktrees stay fresh/create-only/per-attempt (never routed through prune-then-create lifecycle helpers); publisher state stays under FORGE_HOME, never projectDir; the four publication call sites and candidate-mounted reds are preserved.
+
+### AC1 (BLOCKER) — no target mutation after mutex ownership is lost
+`src/v2/publication-target.ts` `syncCheckout`'s catch block performs an unguarded `update-ref <ref> <baseSha> <candidateSha>` even when the failure was mutex-renewal discovering another publisher owns the mutex. Race: A advances ref B→C; A's mutex expires; B acquires it and AD-5-recovers index/worktree to C; A resumes, renewal fails, A's catch rolls the ref back to B without ownership → ref=B while index/worktree=C (target dirty and divergent).
+
+Invariant (absolute): once a publisher discovers it no longer owns the mutex it executes NO target-mutating command — not `update-ref`, `read-tree`, `checkout`, `reset`, or cleanup. A checkout failure may be rolled back ONLY while ownership has been successfully renewed/pre-extended for that rollback operation. If ownership cannot be confirmed: do not roll back, do not touch the target — preserve the durable publishing intent so the current/new mutex owner converges it through AD-5 recovery from the recorded `baseSha`, `candidateSha`, and target ref.
+
+Regression test must use an ACTIVE thief (not a thief that takes the mutex and does nothing): A advances the ref → B takes the expired mutex → B runs recovery and synchronizes the tree → A resumes and observes lost ownership. Assert: A performs no later target mutation; final ref, index, and worktree all converge on C; the durable attempt record truthfully reflects the result. Keep the existing simpler lost-mutex test — it is not sufficient alone.
+
+### AC2 (BLOCKER) — recovery is idempotent w.r.t. terminal attempt records
+`src/v2/integration-publisher.ts` `recoverPublicationAttempt` re-derives and rewrites attempts regardless of stored state. Race: A publishes; B publishes on top of A; recovering A finds the ref is neither A's base nor A's candidate and rewrites A from `published` to parked/`publish_base_churn`, claiming nothing from A was published — corrupting durable publication history.
+
+Only an UNFINISHED attempt in the `publishing` state may undergo ref-derived AD-5 convergence. Terminal records are IMMUTABLE. Recovering a published attempt returns its recorded published result without changing the record. Recovering parked / failed / refused-equivalent / abandoned attempts returns their stable recorded disposition or reports not-recoverable — without mutating them.
+
+Regression test: publish A, publish B, recover A → A remains semantically byte-for-byte unchanged as published (including `publishedSha` and terminal state). Add coverage for EVERY other terminal state proving recovery performs no state transition.
+
+### AC3 (MEDIUM) — AD-3 untracked-collision detection must be prefix-aware
+`src/v2/publication-target.ts` `untrackedCollisions` uses exact path equality and misses git file/directory collisions: candidate adds tracked `foo` while target holds untracked `foo/bar`; candidate adds tracked `foo/bar` while target holds untracked file `foo`. Both must be detected BEFORE any target mutation and classified `dirty_publish_target`. Use git path semantics including ancestor/descendant conflicts. Never delete, stash, move, or overwrite operator-owned files.
+
+Tests for BOTH directions, each asserting: `dirty_publish_target` returned; target ref never changes; index and tracked worktree unchanged; the operator's untracked content byte-for-byte unchanged; no fallback `publication_refused`/`CheckoutSyncError`.
+
+### AC4 — correct the binding ADR and operator docs in the SAME change
+`learnings/decisions/serialized-integration-publisher.md` "The shape" puts enqueueing AFTER candidate construction and validation, contradicting AD-2 and the implementation. Record the correct order: record/enqueue the attempt on the project lane → once it owns the active lane turn, capture the base, create the fresh candidate worktree, integrate, run the COMPLETE validation set → still within that lane turn, enter the short publication mutex window for final target checks, CAS/ancestry protection, ref update/push, and local checked-out-tree sync → a moved-base rebuild and its full revalidation remain within the SAME lane turn → release the mutex after the publication window; release/complete the lane after the attempt's publication disposition is durable.
+
+State the layering in substance: the lane provides ordering; the mutex + CAS + ancestry proof + `candidateSha` binding provide correctness; the lane may be approximate because an erroneous skip costs fairness, never publication correctness. Do NOT describe the ref update as the only serialized operation — distinguish lane serialization from the short mutex window. Correct the checkout-failure discussion that says rollback is safe because "we hold the mutex": rollback is permitted only when ownership is CURRENTLY PROVEN; a process that lost ownership performs no mutation.
+
+`docs/concepts.md` must describe the same ordering and mutex scope, and its claim that `dirty_publish_target`, `publish_base_churn`, `publication_refused`, and `lane_taken_over` fall through to `campaign_system` must be corrected — the implementation maps the first three to `git_state` and `lane_taken_over` to `scope`.
+
+### Validation
+- Each regression test must FAIL against merged FG-425 commit `4762b1f` before the fix and PASS after (falsification-first — a test that cannot go red proves nothing).
+- Run all focused FG-425 publication / recovery / FIFO / CAS / target / failure-policy tests, plus typecheck, the normal suite, and `test:extended`. Report exact `tests_run` evidence.
+- Confirm the four call sites and every settled decision above are unchanged.
+- NOT complete while any documentation still contradicts the implemented ordering or the ownership invariants.
+
+### AC5 (BLOCKER — folded in 2026-07-13, was wrongly classified a follow-up) — one truthful final disposition after a lost mutex
+
+**No unreachability defense.** `MutexLostMidPublishError` is REACHABLE in production: any deschedule longer than the mutex lease TTL (laptop suspend, SIGSTOP, container pause, swap thrash, a long IO/GC stall) opens the window between operations. Do NOT attempt to close this by arguing it cannot happen.
+
+**The contradiction (must be eliminated, not documented):** today `publishLocal` throws `MutexLostMidPublishError`; `abandonedMidWindow` returns a TERMINAL `refused` while the attempt row remains `publishing`; `runNext` maps that to `publication_refused` and marks the task FAILED. A later AD-5 recovery converges the attempt to `published` — but `recoverUnfinishedPublications` does not reconcile the already-failed task/run/campaign. Result: two durable records that contradict each other, with the failed one advising a RETRY of work that already landed.
+
+**Invariant: a terminal refusal may never be returned over an attempt that remains `publishing`.** A lost mutex after the ref advance must resolve to exactly ONE truthful final disposition.
+
+Acceptable shapes (pick one and justify it): a distinct non-terminal `recovery_pending` outcome/state, or an in-run wait/reconciliation path that converges and then reports the TRUE disposition. NOT acceptable: returning a terminal refusal while preserving a `publishing` attempt.
+
+**Production-boundary regression must prove, through the real path (publishIntegration → runNext → the durable task/run rows), that a lost mutex AFTER the ref advance yields:**
+- NO premature `publication_refused` / task failure while the attempt is still `publishing`;
+- recovery converges ref, index, AND worktree;
+- the publication attempt becomes `published`;
+- the owning task/run/campaign reaches the matching truthful state, OR remains in an explicit RECOVERABLE non-terminal state until that reconciliation occurs;
+- NO operator surface says "nothing was published" or "the target is unchanged" when the ref carries the candidate;
+- NO retry can duplicate already-published work.
+
+FG-425 does NOT merge while this task-versus-publication contradiction stands.

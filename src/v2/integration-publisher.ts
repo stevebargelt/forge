@@ -32,6 +32,7 @@ import { logEvent } from "../store/events.js";
 import {
   getPublicationAttempt,
   laneForProject,
+  publicationAttemptsForTask,
   recordPublicationIntent,
   releasePublicationMutex,
   renewPublicationMutex,
@@ -41,6 +42,7 @@ import {
   unfinishedPublications,
   updatePublicationAttempt,
   type ParkReason,
+  type PublicationAttempt,
 } from "../store/publications.js";
 import { projectIdentity, describeRefusal, describeWait } from "./project-identity.js";
 import {
@@ -55,6 +57,7 @@ import {
 import {
   CheckoutSyncError,
   DirtyPublishTargetError,
+  MutexLostMidPublishError,
   NonFastForwardError,
   localTargetFor,
   parseTargetDescriptor,
@@ -94,9 +97,12 @@ const MUTEX_POLL_MS = 250;
 /** The mutex we held was taken over: our lease lapsed and another attempt entered
  *  the window. TERMINAL and NAMED (as LaneTakenOverError is for the lane) — the
  *  publisher FAILS CLOSED rather than keep writing to a working tree it no longer
- *  owns. Nothing that mutates the target runs after this throws: it can only fire
- *  before the CAS, from a CAS that FAILED (nothing written), or from inside the
- *  checkout, whose failure path rolls the ref advance back by CAS. */
+ *  owns. Nothing that mutates the target runs after this throws: it fires before the
+ *  CAS, or from a CAS that FAILED, and in both cases NOTHING of ours is on the
+ *  target. A hold lost with the ref advance already landed is the OTHER shape —
+ *  MutexLostMidPublishError — because there the target does carry our candidate, and
+ *  the two must not be conflated: this one means "nothing was published", that one
+ *  means "the ref carries the candidate and the mutex's owner converges it". */
 export class PublicationMutexLostError extends Error {
   readonly reason = "publication_mutex_lost" as const;
   constructor(public readonly attemptId: string, canonicalDir: string) {
@@ -152,6 +158,9 @@ export type PublishOutcome =
       /** AD-5 recovery only: the publication IS durable (the ref carries the
        *  candidate), but the checked-out tree could not be brought up to it. */
       checkoutError?: string;
+      /** AD-5 recovery only: the ref has already moved PAST this candidate — a later
+       *  publication built on top of it. It landed; it is simply no longer the tip. */
+      superseded?: boolean;
     }
   | { kind: "merge_failed"; attemptId: string; error: string; candidateWorktree: string }
   | {
@@ -171,7 +180,26 @@ export type PublishOutcome =
       error: string;
       candidateWorktree?: string;
     }
-  | { kind: "refused"; attemptId: string; error: string; candidateWorktree?: string };
+  | { kind: "refused"; attemptId: string; error: string; candidateWorktree?: string }
+  /** FG-425 (AC5): the ref advance LANDED and the window was then lost, and this
+   *  process could not re-take the window within RECOVERY_CONVERGE_WAIT_MS to settle
+   *  what that means. The attempt is still `publishing`, so there is NO terminal truth
+   *  to report — and a terminal refusal returned over it would be the worst of the
+   *  available lies: it says nothing was published while the target ref carries the
+   *  candidate, and it invites a retry of work that already landed.
+   *
+   *  NON-TERMINAL. The caller must land its task in a RECOVERABLE state and leave it
+   *  there until AD-5 convergence settles the attempt (the run-path sweep at the top
+   *  of the next `forge next`, or `forge publish recover <attemptId>`). */
+  | {
+      kind: "recovery_pending";
+      attemptId: string;
+      baseSha: string;
+      candidateSha: string;
+      target: string;
+      candidateWorktree: string;
+      error: string;
+    };
 
 export type PublishRequest = {
   runId: string;
@@ -196,6 +224,21 @@ export type PublishRequest = {
    *  updated). Inert in production — nothing passes it. */
   afterRefAdvance?: () => void;
 };
+
+/** Test-only seams, for the tests that must drive the REAL dispatch path (runNext →
+ *  publishIntegration) and therefore cannot hand a PublishRequest of their own in.
+ *  Same posture as the store's setPublicationClockOffsetForTest: inert unless a test
+ *  sets it, and nothing in production ever does.
+ *
+ *  `convergeWaitMs` exists because the production bound is derived from MUTEX_TTL_MS
+ *  (minutes) — a test that has to observe the wait give up cannot wait that long, and
+ *  shortening the production constant to make a test convenient would be shortening a
+ *  correctness bound to make a test convenient. */
+let SEAMS: { afterRefAdvance?: () => void; convergeWaitMs?: number } = {};
+
+export function setPublisherSeamsForTest(seams: { afterRefAdvance?: () => void; convergeWaitMs?: number }): void {
+  SEAMS = seams;
+}
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -374,6 +417,40 @@ export async function publishIntegration(req: PublishRequest): Promise<PublishOu
   };
   const log = req.lane?.log ?? ((line: string) => console.log(line));
 
+  // FG-425 (AC5) RETRY SAFETY. A task whose work is already ON the target must never
+  // publish it a second time — and after a lost window, a retry/re-drive is exactly
+  // what an operator (or the reconciler) reaches for. The durable attempt record is
+  // what makes that decidable: an attempt recorded `published` for THIS task landed
+  // its candidate through a CAS, and re-running the publisher would build a fresh
+  // candidate, re-validate it and enqueue a second publication of work that is
+  // already in the target's history.
+  //
+  // So the publisher is IDEMPOTENT PER TASK: it reports the recorded publication and
+  // records no new intent. Checked before the lane, the worktree and the mutex —
+  // nothing about a no-op publication should queue behind anything.
+  // Scoped to THIS project: "already published" is a claim about a task's work being on
+  // a specific target, and an attempt on some other project says nothing about this one.
+  const landed = publicationAttemptsForTask(req.taskId).find(
+    (a) => a.state === "published" && a.projectKey === identity.key,
+  );
+  if (landed?.baseSha && landed.candidateSha && landed.publishedSha) {
+    logEvent("publication.already_published", {
+      runId: req.runId,
+      taskId: req.taskId,
+      payload: { attemptId: landed.attemptId, target: landed.target, publishedSha: landed.publishedSha },
+    });
+    return {
+      kind: "published",
+      attemptId: landed.attemptId,
+      baseSha: landed.baseSha,
+      candidateSha: landed.candidateSha,
+      publishedSha: landed.publishedSha,
+      target: landed.target,
+      candidateWorktree: landed.worktreePath ?? "",
+      rebuilds: landed.rebuildCount,
+    };
+  }
+
   // AD-5: publication INTENT is durably recorded BEFORE any target mutation, and
   // the durable FIFO enqueue key is assigned HERE — at record time, before any
   // contention. attemptId is minted now and is the identity everything downstream
@@ -474,9 +551,10 @@ export async function publishIntegration(req: PublishRequest): Promise<PublishOu
       await acquireMutex(identity.key, attemptId, req.runId, identity.canonicalDir, log);
       let moved: { currentSha: string } | undefined;
       try {
+        const afterRefAdvance = req.afterRefAdvance ?? SEAMS.afterRefAdvance;
         const published = publishToTarget(target, baseSha, candidateSha, {
           renewHold: windowHold(identity.key, attemptId, identity.canonicalDir),
-          ...(req.afterRefAdvance ? { afterRefAdvance: req.afterRefAdvance } : {}),
+          ...(afterRefAdvance ? { afterRefAdvance } : {}),
         });
         if (published.ok) {
           // AD-6: publishedSha IS the recorded candidateSha. publishToTarget CAS'd
@@ -521,6 +599,15 @@ export async function publishIntegration(req: PublishRequest): Promise<PublishOu
           // AD-3: refused BEFORE any mutation. The operator's dirty state is
           // untouched, and forge will never touch it.
           return park(attemptId, req, "dirty_publish_target", e.message, candidate.path);
+        }
+        if (e instanceof MutexLostMidPublishError) {
+          // Our ref advance is ON the target and we lost the window before the
+          // checkout, so we mutated nothing further — including the durable record.
+          // The attempt stays `publishing`: that is the intent AD-5 recovery
+          // converges from. We do not GUESS at what that means (a terminal refusal
+          // over a `publishing` attempt is the AC5 defect); we take the window back
+          // and converge it, and report the truth that comes out (AC5).
+          return await convergeAfterLostWindow(attemptId, req, identity, e, candidate.path);
         }
         if (
           e instanceof NonFastForwardError ||
@@ -608,6 +695,107 @@ function park(
   return { kind: "parked", attemptId, reason, error, ...(candidateWorktree ? { candidateWorktree } : {}) };
 }
 
+/** We advanced the ref, then lost the window before the checkout. AC1 stands: this
+ *  process has mutated NOTHING further, and it will not — not the target, not the
+ *  record. What it may not do EITHER is invent a disposition.
+ *
+ *  It used to return a terminal `refused` here, over an attempt still recorded
+ *  `publishing`. That was two durable records contradicting each other: the task said
+ *  "nothing was published, retry" while the ref carried the candidate and AD-5
+ *  recovery later converged the very same attempt to `published`. A terminal refusal
+ *  may NEVER be returned over an attempt that remains `publishing` (AC5).
+ *
+ *  So we CONVERGE instead of guessing — in-run, through the same AD-5 path the sweep
+ *  uses, which is derived from {baseSha, candidateSha, currentTargetSha} and nothing
+ *  else. That needs the window back, because convergence RE-RUNS THE CHECKOUT: a write
+ *  to the target's working tree, which is exactly what the mutex serializes.
+ *
+ *  The wait is a LEASE wait and nothing more (AD-7). We do not probe, signal, nonce,
+ *  classify or reap the holder — we wait for a durable timestamp to lapse or for its
+ *  owner to release. The mutex covers a CAS, a ref write and a checkout, so a LIVE
+ *  holder is gone from it in seconds; a DEAD one is gone in MUTEX_TTL_MS. Waiting past
+ *  both bounds is therefore the honest bound on "we should have had our turn by now",
+ *  and if we still do not, we report `recovery_pending` — NOT a refusal. */
+const RECOVERY_CONVERGE_WAIT_MS = 2 * MUTEX_TTL_MS;
+
+/** recoverPublicationAttempt's `unknown_attempt` is for an operator naming an attempt
+ *  that does not exist. Ours does — publishIntegration recorded its intent before it
+ *  touched anything, and attempt rows are never deleted — so a miss here is a corrupt
+ *  durable record, not a disposition. Fail loud rather than fold it into an outcome. */
+function convergeOwnAttempt(attemptId: string, renew?: RenewHold): PublishOutcome {
+  const out = recoverPublicationAttempt(attemptId, renew);
+  if (out.kind === "unknown_attempt") {
+    throw new Error(`publication attempt ${attemptId} is gone from the durable record mid-publication`);
+  }
+  return out;
+}
+
+async function convergeAfterLostWindow(
+  attemptId: string,
+  req: PublishRequest,
+  identity: { key: string; canonicalDir: string },
+  e: MutexLostMidPublishError,
+  candidateWorktree: string,
+): Promise<PublishOutcome> {
+  // NOT publication.refused. The ref carries the candidate; an event named "refused"
+  // is the same lie in the event stream that the terminal outcome was in the task row.
+  logEvent("publication.window_lost", {
+    runId: req.runId,
+    taskId: req.taskId,
+    payload: {
+      attemptId,
+      baseSha: e.baseSha,
+      candidateSha: e.candidateSha,
+      reason: e.reason,
+      error: e.message,
+    },
+  });
+
+  const recoverer = `recover-${newAttemptId()}`;
+  const deadline = Date.now() + (SEAMS.convergeWaitMs ?? RECOVERY_CONVERGE_WAIT_MS);
+  for (;;) {
+    // A settled record needs no window at all: whoever took the mutex may already have
+    // swept us (the sweep runs at the top of every run), and recoverPublicationAttempt
+    // REPORTS a settled attempt rather than re-deriving it (AC2).
+    const attempt = getPublicationAttempt(attemptId);
+    if (attempt && attempt.state !== "publishing") return convergeOwnAttempt(attemptId);
+
+    if (tryAcquirePublicationMutex({ projectKey: identity.key, attemptId: recoverer, runId: req.runId, ttlMs: MUTEX_TTL_MS }).acquired) {
+      try {
+        // AD-5 convergence, for our OWN attempt, under the window. It converges ref,
+        // index and worktree, and it is the ONLY thing permitted to terminalize a
+        // `publishing` attempt.
+        return convergeOwnAttempt(attemptId, windowHold(identity.key, recoverer, identity.canonicalDir));
+      } finally {
+        releasePublicationMutex(identity.key, recoverer);
+      }
+    }
+    if (Date.now() >= deadline) break;
+    await new Promise<void>((r) => setTimeout(r, MUTEX_POLL_MS));
+  }
+
+  logEvent("publication.recovery_pending", {
+    runId: req.runId,
+    taskId: req.taskId,
+    payload: { attemptId, baseSha: e.baseSha, candidateSha: e.candidateSha },
+  });
+  return {
+    kind: "recovery_pending",
+    attemptId,
+    baseSha: e.baseSha,
+    candidateSha: e.candidateSha,
+    target: getPublicationAttempt(attemptId)?.target ?? targetDescriptor(req.target ?? localTargetFor(identity.canonicalDir)),
+    candidateWorktree,
+    error:
+      `${e.message}\n\nThe publication window did not come free within ` +
+      `${Math.round((SEAMS.convergeWaitMs ?? RECOVERY_CONVERGE_WAIT_MS) / 1000)}s, so this attempt's disposition is NOT yet settled and forge ` +
+      `will not guess at one. Attempt ${attemptId} remains \`publishing\`; the target ref carries candidate ` +
+      `${e.candidateSha.slice(0, 12)}. Do NOT retry this work — it may already be on the target. The next ` +
+      `\`forge next\` on this project converges the attempt (AD-5) and reconciles this task onto the truth; ` +
+      `\`forge publish recover ${attemptId}\` does the same by hand.`,
+  };
+}
+
 /** AD-5 recovery, derived from {baseSha, candidateSha, currentTargetSha} ALONE.
  *  The working tree is never inspected — mid-checkout contents are ambiguous, and
  *  that ambiguity is exactly why the rule exists.
@@ -615,7 +803,12 @@ function park(
  *    target at baseSha       → nothing published; clean to retry or abandon
  *    target at candidateSha  → the ref advanced; only the checkout update may be
  *                              outstanding, so re-run it (idempotent)
- *    target at neither       → an external writer; the publish_base_churn path
+ *    target at neither       → ancestry decides: if the candidate is in the target's
+ *                              history a LATER publication built on it, so this one
+ *                              landed (superseded); otherwise an external writer moved
+ *                              the target and the publish_base_churn path applies. For
+ *                              a remote target the history is fetched to ask this —
+ *                              recovery throws rather than guess if it cannot.
  *
  *  The target is rebuilt from the descriptor RECORDED on the attempt, never
  *  re-derived from the repo's CURRENT HEAD. AD-5 says recovery reads the recorded
@@ -635,6 +828,19 @@ export function recoverPublicationAttempt(
 ): PublishOutcome | { kind: "unknown_attempt" } {
   const attempt = getPublicationAttempt(attemptId);
   if (!attempt) return { kind: "unknown_attempt" };
+
+  // ONLY an UNFINISHED attempt — one left in `publishing`, the single state in which
+  // the target may already have been mutated — may undergo ref-derived convergence.
+  // Every other record is REPORTED, never rewritten.
+  //
+  // Re-deriving a settled attempt from the CURRENT ref is corruption, not recovery:
+  // once a LATER attempt has published on top of it the ref is neither its base nor
+  // its candidate, so the "external writer" branch below would rewrite a `published`
+  // record into a churn park claiming nothing of it ever landed — while its commit
+  // sits on the target, in the history of everything published since. The three SHAs
+  // answer "what happened to the attempt that was interrupted", and nothing else.
+  if (attempt.state !== "publishing") return recordedDisposition(attempt);
+
   if (!attempt.baseSha || !attempt.candidateSha) {
     return { kind: "refused", attemptId, error: "attempt crashed before a candidate existed — nothing was published" };
   }
@@ -659,6 +865,7 @@ export function recoverPublicationAttempt(
       candidateWorktree: attempt.worktreePath ?? "",
       rebuilds: attempt.rebuildCount,
       ...(outcome.checkoutError ? { checkoutError: outcome.checkoutError } : {}),
+      ...(outcome.superseded ? { superseded: true } : {}),
     };
   }
   if (outcome.state === "external_writer") {
@@ -673,8 +880,48 @@ export function recoverPublicationAttempt(
       ...(attempt.worktreePath ? { candidateWorktree: attempt.worktreePath } : {}),
     };
   }
-  if (attempt.state !== "abandoned") updatePublicationAttempt(attemptId, { state: "abandoned" });
+  updatePublicationAttempt(attemptId, { state: "abandoned" });
   return { kind: "refused", attemptId, error: "recovery: nothing was published; the attempt is abandoned (AD-7)" };
+}
+
+/** The stable, RECORDED disposition of an attempt recovery may not re-derive: it
+ *  already reached a settled state, and that record is the durable publication
+ *  history. Reads only; writes nothing. */
+function recordedDisposition(a: PublicationAttempt): PublishOutcome {
+  const worktree = a.worktreePath ? { candidateWorktree: a.worktreePath } : {};
+  if (a.state === "published" && a.baseSha && a.candidateSha && a.publishedSha) {
+    return {
+      kind: "published",
+      attemptId: a.attemptId,
+      baseSha: a.baseSha,
+      candidateSha: a.candidateSha,
+      publishedSha: a.publishedSha,
+      target: a.target,
+      candidateWorktree: a.worktreePath ?? "",
+      rebuilds: a.rebuildCount,
+    };
+  }
+  if (a.state === "parked" && a.parkReason) {
+    return {
+      kind: "parked",
+      attemptId: a.attemptId,
+      reason: a.parkReason,
+      error:
+        `recovery: attempt ${a.attemptId} is already parked (${a.parkReason}) — a settled disposition, reported ` +
+        `as recorded. Recovery converges attempts left INSIDE the publication window; it never re-derives one ` +
+        `that finished.`,
+      ...worktree,
+    };
+  }
+  return {
+    kind: "refused",
+    attemptId: a.attemptId,
+    error:
+      `recovery: attempt ${a.attemptId} is recorded as ${a.state} and is not recoverable. Only an attempt left ` +
+      `INSIDE the publication window (\`publishing\`) can have mutated the target, and only that state is ` +
+      `converged from {baseSha, candidateSha, currentTargetSha}. The record stands as written.`,
+    ...worktree,
+  };
 }
 
 /** AD-5 recovery driven BY HAND (`forge publish recover`), which is the same

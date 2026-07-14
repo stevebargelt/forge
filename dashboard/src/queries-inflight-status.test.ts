@@ -39,6 +39,10 @@ const EXPECTED_IN_FLIGHT: Record<TaskStatus, boolean> = {
   awaiting_gate: true,
   awaiting_red: true,
   blocked_by_red: true,
+  // FG-425 (AC5): a publication that advanced the target ref and then lost the window.
+  // Non-terminal and un-settled — the dashboard must show it as in-flight, or a run
+  // whose publication is mid-convergence would look idle and finished.
+  awaiting_recovery: true,
   complete: false,
   failed: false,
 };
@@ -88,12 +92,12 @@ const NON_STATUS_BADGES = new Set(["pass", "fail", "reconcile_candidate"]);
 // probe is injected anyway so the test can never depend on a live docker.
 const probe = () => "alive" as const;
 
-test("inFlight: returns exactly the in-flight statuses — running, awaiting_gate, awaiting_red, blocked_by_red", () => {
+test("inFlight: returns exactly the in-flight statuses — running, awaiting_gate, awaiting_red, blocked_by_red, awaiting_recovery", () => {
   const rows = inFlight(undefined, probe);
   const returned = [...new Set(rows.map((r) => r.status))].sort();
 
   assert.deepEqual(returned, [...IN_FLIGHT_STATUSES].sort());
-  assert.deepEqual(returned, ["awaiting_gate", "awaiting_red", "blocked_by_red", "running"]);
+  assert.deepEqual(returned, ["awaiting_gate", "awaiting_recovery", "awaiting_red", "blocked_by_red", "running"]);
 });
 
 test("inFlight: every non-in-flight TaskStatus is excluded — pending and terminal rows never appear", () => {
@@ -127,7 +131,7 @@ test("inFlight: an in-flight-status task under a non-active run stays out (the r
 
 test("inFlight: projectDir filter narrows without changing the status partition", () => {
   const scoped = inFlight("/proj/a", probe);
-  assert.deepEqual([...new Set(scoped.map((r) => r.status))].sort(), ["awaiting_gate", "awaiting_red", "blocked_by_red", "running"]);
+  assert.deepEqual([...new Set(scoped.map((r) => r.status))].sort(), ["awaiting_gate", "awaiting_recovery", "awaiting_red", "blocked_by_red", "running"]);
   assert.deepEqual(inFlight("/proj/nonexistent", probe), []);
 });
 

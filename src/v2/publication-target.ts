@@ -195,19 +195,51 @@ function pathsTouchedByCandidate(
   return out.split("\n").map((l) => l.trim()).filter(Boolean);
 }
 
+/** Every proper directory prefix of a path: "a/b/c" → ["a", "a/b"]. */
+function pathPrefixes(p: string): string[] {
+  const parts = p.split("/");
+  const out: string[] = [];
+  for (let i = 1; i < parts.length; i++) out.push(parts.slice(0, i).join("/"));
+  return out;
+}
+
 /** Untracked files in the target that the candidate would clobber (AD-3).
  *  Computed BEFORE any mutation — see DirtyPublishTargetError's header for why
  *  letting `read-tree` discover this on the far side of the ref advance is the
- *  bug and not the check. */
+ *  bug and not the check.
+ *
+ *  PREFIX-AWARE, because git's collisions are: a path is a FILE or a DIRECTORY and
+ *  it cannot be both. Exact equality catches only one of the three shapes:
+ *
+ *    - EXACT     — candidate writes `foo`; the operator has untracked `foo`.
+ *    - ANCESTOR  — candidate writes `foo/bar`, so it needs `foo` to be a DIRECTORY;
+ *                  the operator has an untracked FILE at `foo`.
+ *    - DESCENDANT— candidate writes the FILE `foo`; the operator has untracked
+ *                  `foo/bar`, so `foo` is a directory in their tree.
+ *
+ *  All three make `read-tree -m -u` fail, and it fails on the FAR SIDE of the ref
+ *  advance. All three are therefore refused HERE, before anything is written. The
+ *  paths reported are the OPERATOR'S — the files forge will never touch. */
 export function untrackedCollisions(
   projectDir: string,
   baseSha: string,
   candidateSha: string,
   renew?: RenewHold,
 ): string[] {
-  const untracked = new Set(untrackedFiles(projectDir, renew));
-  if (untracked.size === 0) return [];
-  return pathsTouchedByCandidate(projectDir, baseSha, candidateSha, renew).filter((p) => untracked.has(p));
+  const untracked = untrackedFiles(projectDir, renew);
+  if (untracked.length === 0) return [];
+  const untrackedSet = new Set(untracked);
+  const collisions = new Set<string>();
+  for (const p of pathsTouchedByCandidate(projectDir, baseSha, candidateSha, renew)) {
+    if (untrackedSet.has(p)) collisions.add(p);
+    for (const prefix of pathPrefixes(p)) {
+      if (untrackedSet.has(prefix)) collisions.add(prefix);
+    }
+    for (const u of untracked) {
+      if (u.startsWith(`${p}/`)) collisions.add(u);
+    }
+  }
+  return [...collisions];
 }
 
 /** The local checked-out branch, i.e. the default publish target of a repo. */
@@ -345,22 +377,37 @@ function publishLocal(
     // AD-3 pre-check sees the whole diff as tracked dirt and refuses — the target
     // is wedged, permanently, by a publication that reported nothing.
     //
-    // So we UNDO our own ref advance, by CAS, and refuse. The CAS is what makes
-    // this safe: `update-ref <ref> <base> <candidate>` only lands if the ref is
-    // STILL the candidate we just wrote — i.e. only if we are undoing our own
-    // write and nobody else's. We hold the publication mutex, so nothing
-    // forge-owned can be in here with us; an external writer that got in anyway
-    // fails the CAS and we leave their commit alone and report the publication as
-    // landed (the ref moved past us; recovery re-derives the truth from the REF).
+    // So — WHILE WE STILL PROVABLY OWN THE WINDOW — we UNDO our own ref advance, by
+    // CAS, and refuse. The CAS is what makes the undo precise: `update-ref <ref>
+    // <base> <candidate>` only lands if the ref is STILL the candidate we just wrote
+    // — i.e. only if we are undoing our own write and nobody else's. An external
+    // writer that got in anyway fails the CAS, so we leave their commit alone and
+    // report the publication as landed (the ref moved past us; recovery re-derives
+    // the truth from the REF).
     //
     // The result is a target that is byte-for-byte where it started: nothing
     // published, nothing staged, nothing to clean up, and the NEXT publication is
     // not blocked. This is the AD-5 rule applied to a failure rather than a crash
     // — state is defined, idempotent, and derived from the three SHAs alone.
     //
-    // The rollback deliberately does NOT renew the hold: it is a CAS on a ref we
-    // ourselves just wrote, so it is safe with or without the mutex, and it must
-    // still run when the reason we are HERE is that the hold was lost.
+    // THE ROLLBACK IS ITSELF A TARGET MUTATION, so it runs ONLY while ownership is
+    // CURRENTLY PROVEN — renew?.() throws if the hold is gone, and it is called FOR
+    // this rollback, immediately before it. A CAS is not a substitute for the mutex
+    // here: once our lease lapsed, the attempt that TOOK the window may already have
+    // AD-5-recovered index and worktree onto our candidate, and our CAS "undo" would
+    // then still succeed against the ref — leaving ref=base with the tree at the
+    // candidate, i.e. a dirty, divergent target that no later publication can pass
+    // AD-3 against. Once a publisher discovers it no longer owns the mutex it
+    // executes NO target-mutating command, not even an undo of its own write.
+    //
+    // What we leave behind instead is the state AD-5 is FOR: the ref carries the
+    // candidate, the durable attempt still records {baseSha, candidateSha, target},
+    // and whoever owns the mutex now converges the tree from those three facts.
+    try {
+      renew?.();
+    } catch (lost) {
+      throw new MutexLostMidPublishError(t.projectDir, baseSha, candidateSha, (lost as Error).message);
+    }
     try {
       git(t.projectDir, ["update-ref", refOf(t), baseSha, candidateSha]);
     } catch {
@@ -391,6 +438,41 @@ export class CheckoutSyncError extends Error {
   }
 }
 
+/** The ref advance LANDED, the checkout did not, and the publisher can no longer
+ *  prove it owns the publication mutex — so it stopped, with the target ref carrying
+ *  the candidate and the checked-out tree still at the base.
+ *
+ *  This is NOT a wedged target and NOT a half-publication to clean up: it is the
+ *  ordinary AD-5 window, reached by a lost lease rather than a crash. The durable
+ *  attempt still records {baseSha, candidateSha, target}, so the publisher that owns
+ *  the mutex NOW converges the tree from those three facts. The one thing this
+ *  process may not do is touch the target — including rolling back its own advance,
+ *  which would strand a target whose tree the new owner has already synchronized. */
+export class MutexLostMidPublishError extends Error {
+  readonly reason = "publication_mutex_lost" as const;
+  /** The lost-hold error that caused this, kept as EVIDENCE and deliberately NOT
+   *  interpolated into the message. That error is the pre-CAS story — its prose says
+   *  "nothing was published by this attempt", which is true where it is thrown and a
+   *  LIE here: the ref carries the candidate. A cause chain is not exempt from the
+   *  rule that no operator surface may claim nothing landed when something did
+   *  (FG-425 AC5), and this message is read straight onto the task row. */
+  constructor(
+    public readonly projectDir: string,
+    public readonly baseSha: string,
+    public readonly candidateSha: string,
+    public readonly detail: string,
+  ) {
+    super(
+      `stopped mid-publication on ${projectDir}: the target ref carries ${candidateSha.slice(0, 12)} — the CAS ` +
+        `LANDED — but its checked-out tree could not be updated to it, and ownership of the publication window can ` +
+        `no longer be proven. NO further target mutation was performed — not even a rollback of this attempt's own ` +
+        `ref advance — because a publisher that lost the mutex may write nothing at all. The publication intent is ` +
+        `durable; AD-5 recovery converges the target from {baseSha, candidateSha, currentTargetSha}.`,
+    );
+    this.name = "MutexLostMidPublishError";
+  }
+}
+
 /** Bring the checked-out working tree and index up to the (already advanced) ref.
  *
  *  `read-tree -m -u`, deliberately, and NOT `reset --keep` or `reset --hard`:
@@ -418,7 +500,11 @@ function syncCheckout(t: LocalTarget, candidateSha: string, renew?: RenewHold): 
  *  at any step. */
 export type RecoveryOutcome =
   | { state: "not_published" }
-  | { state: "published"; publishedSha: string; checkoutError?: string }
+  /** `superseded`: the ref has moved PAST our candidate — a later publication built
+   *  on top of it. Our commit is in the target's history, so this attempt DID land;
+   *  the checkout is NOT re-run, because the tree belongs to the newer publication
+   *  and rewinding it to our candidate would un-publish work that came after. */
+  | { state: "published"; publishedSha: string; checkoutError?: string; superseded?: boolean }
   | { state: "external_writer"; currentSha: string };
 
 export function recoverCheckout(
@@ -429,7 +515,33 @@ export function recoverCheckout(
 ): RecoveryOutcome {
   const current = readTargetSha(t, renew);
   if (current === baseSha) return { state: "not_published" };
-  if (current !== candidateSha) return { state: "external_writer", currentSha: current };
+  if (current !== candidateSha) {
+    // The ref is at neither SHA, and there are two utterly different reasons for
+    // that. If our candidate is an ANCESTOR of where the ref now sits, our CAS
+    // landed and a LATER publication simply built on top of it — our work is in the
+    // target's history, and reporting "nothing was published" here would be a lie
+    // that invites a retry of work that is already on the target. Only when the
+    // candidate is NOT in that history did we genuinely publish nothing.
+    //
+    // Still derived from {baseSha, candidateSha, currentTargetSha} alone: ancestry
+    // is a property of those SHAs, not of the working tree, which AD-5 never
+    // inspects.
+    //
+    // `current` is a READ of the ref, and for a remote that read is one round trip
+    // old by the time we ask about history. The disposition is therefore derived from
+    // `observedSha` — the tip the ancestry check itself OBSERVED — never from the sha
+    // we happened to read first. Terminalizing an attempt from an obsolete snapshot
+    // of the target is the same lie as parking a publication that landed.
+    const observed = candidateInTargetHistory(t, candidateSha, current, renew);
+    if (observed.inHistory) {
+      return {
+        state: "published",
+        publishedSha: candidateSha,
+        superseded: observed.observedSha !== candidateSha,
+      };
+    }
+    return { state: "external_writer", currentSha: observed.observedSha };
+  }
   // The ref carries the candidate: the CAS succeeded and the publication IS
   // durable. Only the checked-out tree may still be behind — re-run the update.
   //
@@ -449,6 +561,87 @@ export function recoverCheckout(
     }
   }
   return { state: "published", publishedSha: candidateSha };
+}
+
+/** The ancestry answer AND the tip it was answered against: is the candidate in the
+ *  target's history, as OBSERVED at `observedSha`? The caller classifies from
+ *  `observedSha`, never from the sha it read before asking. */
+type TargetAncestry = { inHistory: boolean; observedSha: string };
+
+/** Is the candidate in the target's history — i.e. did our CAS/push land and a later
+ *  publication simply build on top of it?
+ *
+ *  For a LOCAL target both SHAs are already in the repo, and the ref read IS the
+ *  observation: nothing can move between the two under the mutex. For a REMOTE one the
+ *  target's tip is not in the repo, so fetch the target ref into the pushing repo's
+ *  object store first — a local-object write, never a mutation of the target. Refusing
+ *  to ask the question of a remote is what made a superseded remote publication
+ *  indistinguishable from one that never landed: recovery reported `external_writer`,
+ *  parked the attempt as `publish_base_churn`, and told the operator nothing had been
+ *  published while the candidate sat in the remote's history (FG-425 AC5).
+ *
+ *  The remote answer is derived from the tip THE FETCH BROUGHT BACK, re-resolved from
+ *  FETCH_HEAD — not from the ls-remote sha the caller read a round trip earlier. A
+ *  remote that moves in that window (a later publication, a force-update) would
+ *  otherwise have recovery decide — and TERMINALIZE — from a target snapshot that was
+ *  already obsolete when it was fetched. That the `current` OBJECT exists locally after
+ *  the fetch is not the same question as "is the ref still there": a force-moved ref
+ *  leaves that object perfectly readable and utterly stale.
+ *
+ *  The question can still be UNANSWERABLE — the fetch fails, the remote ref is gone,
+ *  FETCH_HEAD does not resolve. Recovery then settles nothing and throws: it is
+ *  idempotent and the next sweep re-reads the ref, which is the only honest disposition
+ *  when "did it land?" has no answer yet. Guessing `external_writer` here is precisely
+ *  the bug. */
+function candidateInTargetHistory(
+  t: PublicationTarget,
+  candidateSha: string,
+  current: string,
+  renew?: RenewHold,
+): TargetAncestry {
+  if (t.kind === "local") {
+    return { inHistory: isAncestor(t.projectDir, candidateSha, current, renew), observedSha: current };
+  }
+
+  renew?.();
+  let tip: string;
+  try {
+    git(t.projectDir, ["fetch", "--quiet", t.remote, refOf(t)]);
+    tip = git(t.projectDir, ["rev-parse", "FETCH_HEAD"], renew);
+  } catch (e) {
+    throw new RemoteAncestryUnknownError(t, candidateSha, current, (e as Error).message);
+  }
+  if (!/^[0-9a-f]{40}$/.test(tip)) {
+    throw new RemoteAncestryUnknownError(
+      t,
+      candidateSha,
+      current,
+      `the fetched tip of ${refOf(t)} did not resolve (FETCH_HEAD = "${tip}")`,
+    );
+  }
+  return { inHistory: isAncestor(t.projectDir, candidateSha, tip, renew), observedSha: tip };
+}
+
+/** Recovery could not fetch the remote target's history, so whether the candidate
+ *  LANDED is unknown. Nothing is settled and nothing is retried — the attempt stays
+ *  `publishing` and the next recovery pass asks again. */
+export class RemoteAncestryUnknownError extends Error {
+  readonly reason = "remote_ancestry_unknown" as const;
+  constructor(
+    public readonly target: RemoteTarget,
+    public readonly candidateSha: string,
+    public readonly currentSha: string,
+    public readonly detail: string,
+  ) {
+    super(
+      `recovery cannot yet tell whether ${candidateSha.slice(0, 12)} landed on ${targetDescriptor(target)}: the ` +
+        `remote sits at ${currentSha.slice(0, 12)}, which is neither the validated base nor the candidate, and its ` +
+        `history could not be read (${detail}). The candidate MAY be published — do NOT retry this work. The attempt ` +
+        `stays \`publishing\`; recovery is idempotent and the next \`forge next\` (or \`forge publish recover\`) ` +
+        `re-derives the truth once the remote is reachable.`,
+    );
+    this.name = "RemoteAncestryUnknownError";
+  }
 }
 
 function publishRemote(

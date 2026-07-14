@@ -259,6 +259,17 @@ export function unfinishedPublications(projectKey: string): PublicationAttempt[]
   return rows.map(toAttempt);
 }
 
+/** Every attempt this task ever made to publish, newest first. The task→attempt
+ *  direction is what reconciliation and retry-safety read: a task whose latest
+ *  attempt is `published` has ALREADY landed its work on the target, and neither a
+ *  retry nor a re-drive may publish it a second time. */
+export function publicationAttemptsForTask(taskId: string): PublicationAttempt[] {
+  const rows = getDb()
+    .prepare(`SELECT * FROM publication_attempts WHERE task_id = ? ORDER BY created_at DESC`)
+    .all(taskId) as AttemptRow[];
+  return rows.map(toAttempt);
+}
+
 export function allPublicationAttempts(): PublicationAttempt[] {
   const rows = getDb()
     .prepare(`SELECT * FROM publication_attempts ORDER BY created_at DESC`)
@@ -326,10 +337,19 @@ export function laneTick(attemptId: string, leaseTtlMs: number): LaneTurn {
           AND attempt_id != ?
           AND lease_expires_at_ms < ?`,
     ).run(me.project_key, attemptId, now);
+    // `publishing` is NOT swept here. It is the one non-terminal state in which the
+    // target may ALREADY carry the attempt's candidate, and the `publishing` record
+    // is the durable {baseSha, candidateSha, target} intent AD-5 convergence reads.
+    // A lane lease lapsing means the OWNER is gone; it does not mean its ref advance
+    // is gone. Terminalizing it here would hide it from unfinishedPublications (which
+    // selects `publishing` only) and from recoverPublicationAttempt (which refuses to
+    // rewrite a terminal record), stranding a target whose ref and tree disagree. Only
+    // the convergence path may terminalize a `publishing` attempt. The LANE entry is
+    // still abandoned above — that is ordering, and losing a turn costs fairness only.
     db.prepare(
       `UPDATE publication_attempts
           SET state = 'abandoned', updated_at = ?
-        WHERE state NOT IN ('published', 'failed', 'parked', 'abandoned')
+        WHERE state NOT IN ('publishing', 'published', 'failed', 'parked', 'abandoned')
           AND attempt_id IN (SELECT attempt_id FROM publication_lane WHERE project_key = ? AND state = 'abandoned')`,
     ).run(nowIso(now), me.project_key);
 
