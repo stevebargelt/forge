@@ -345,3 +345,58 @@ test("FG-425 remote: the lease REJECTS a stale base — the remote moved, so the
     rmSync(work, { recursive: true, force: true });
   }
 });
+
+// The remote half of AD-5's "target at neither SHA" branch. A candidate that WON its
+// lease push and was then fast-forwarded on top of is IN the remote's history — it
+// landed. Recovery must fetch that history and say so; parking it as churn tells the
+// operator nothing was published while the commit sits on the target (FG-425 AC5).
+test("FG-425 remote (AD-5): a candidate the remote FAST-FORWARDED past is published, not parked as churn", () => {
+  const { bare, work } = initRemotePair();
+  try {
+    const target: RemoteTarget = { kind: "remote", projectDir: work, remote: "origin", branch: "main" };
+    const base = readTargetSha(target);
+    const candidate = buildCandidate(work, base, "cand", "feature.txt");
+
+    assert.deepEqual(publishToTarget(target, base, candidate), { ok: true, publishedSha: candidate });
+
+    // A later writer builds ON TOP of our candidate and pushes: the remote is now at
+    // D, which descends from C. The publisher crashed before it recorded anything.
+    const other = mkdtempSync(join(tmpdir(), "fg425-other-"));
+    git(other, ["clone", "-q", bare, "."]);
+    const later = commit(other, "later.txt", "built on our candidate\n");
+    git(other, ["push", "-q", "origin", "main"]);
+    rmSync(other, { recursive: true, force: true });
+
+    assert.equal(readTargetSha(target), later, "precondition: the remote is at neither the base nor the candidate");
+
+    assert.deepEqual(recoverCheckout(target, base, candidate), {
+      state: "published",
+      publishedSha: candidate,
+      superseded: true,
+    });
+  } finally {
+    rmSync(bare, { recursive: true, force: true });
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test("FG-425 remote (AD-5): a remote moved off the candidate's history IS an external writer", () => {
+  const { bare, work } = initRemotePair();
+  try {
+    const target: RemoteTarget = { kind: "remote", projectDir: work, remote: "origin", branch: "main" };
+    const base = readTargetSha(target);
+    const candidate = buildCandidate(work, base, "cand", "feature.txt");
+
+    // Someone else pushes a commit on the base — our candidate never landed.
+    const other = mkdtempSync(join(tmpdir(), "fg425-other-"));
+    git(other, ["clone", "-q", bare, "."]);
+    const theirs = commit(other, "theirs.txt", "another writer\n");
+    git(other, ["push", "-q", "origin", "main"]);
+    rmSync(other, { recursive: true, force: true });
+
+    assert.deepEqual(recoverCheckout(target, base, candidate), { state: "external_writer", currentSha: theirs });
+  } finally {
+    rmSync(bare, { recursive: true, force: true });
+    rmSync(work, { recursive: true, force: true });
+  }
+});

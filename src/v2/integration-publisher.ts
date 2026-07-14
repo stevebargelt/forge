@@ -803,7 +803,12 @@ async function convergeAfterLostWindow(
  *    target at baseSha       → nothing published; clean to retry or abandon
  *    target at candidateSha  → the ref advanced; only the checkout update may be
  *                              outstanding, so re-run it (idempotent)
- *    target at neither       → an external writer; the publish_base_churn path
+ *    target at neither       → ancestry decides: if the candidate is in the target's
+ *                              history a LATER publication built on it, so this one
+ *                              landed (superseded); otherwise an external writer moved
+ *                              the target and the publish_base_churn path applies. For
+ *                              a remote target the history is fetched to ask this —
+ *                              recovery throws rather than guess if it cannot.
  *
  *  The target is rebuilt from the descriptor RECORDED on the attempt, never
  *  re-derived from the repo's CURRENT HEAD. AD-5 says recovery reads the recorded

@@ -525,10 +525,8 @@ export function recoverCheckout(
     //
     // Still derived from {baseSha, candidateSha, currentTargetSha} alone: ancestry
     // is a property of those SHAs, not of the working tree, which AD-5 never
-    // inspects. (Ancestry is not asked of a remote target: answering it would need
-    // the remote's history fetched, and a remote publication that was superseded is
-    // indistinguishable here from one that never landed.)
-    if (t.kind === "local" && isAncestor(t.projectDir, candidateSha, current, renew)) {
+    // inspects.
+    if (candidateIsInTargetHistory(t, candidateSha, current, renew)) {
       return { state: "published", publishedSha: candidateSha, superseded: true };
     }
     return { state: "external_writer", currentSha: current };
@@ -552,6 +550,83 @@ export function recoverCheckout(
     }
   }
   return { state: "published", publishedSha: candidateSha };
+}
+
+/** Is the candidate in the target's CURRENT history — i.e. did our CAS/push land and
+ *  a later publication simply build on top of it?
+ *
+ *  For a LOCAL target both SHAs are already in the repo. For a REMOTE one the target's
+ *  tip is not, so fetch the target ref into the pushing repo's object store first — a
+ *  local-object write, never a mutation of the target. Refusing to ask the question of
+ *  a remote is what made a superseded remote publication indistinguishable from one
+ *  that never landed: recovery reported `external_writer`, parked the attempt as
+ *  `publish_base_churn`, and told the operator nothing had been published while the
+ *  candidate sat in the remote's history (FG-425 AC5).
+ *
+ *  The question can also be UNANSWERABLE — the fetch fails, or the ref moved again
+ *  between our ls-remote and the fetch onto a tip that does not contain the sha we
+ *  read. Recovery then settles nothing and throws: it is idempotent and the next sweep
+ *  re-reads the ref, which is the only honest disposition when "did it land?" has no
+ *  answer yet. Guessing `external_writer` here is precisely the bug. */
+function candidateIsInTargetHistory(
+  t: PublicationTarget,
+  candidateSha: string,
+  current: string,
+  renew?: RenewHold,
+): boolean {
+  if (t.kind === "local") return isAncestor(t.projectDir, candidateSha, current, renew);
+
+  renew?.();
+  try {
+    git(t.projectDir, ["fetch", "--quiet", t.remote, refOf(t)]);
+  } catch (e) {
+    throw new RemoteAncestryUnknownError(t, candidateSha, current, (e as Error).message);
+  }
+  if (!hasCommit(t.projectDir, current, renew)) {
+    throw new RemoteAncestryUnknownError(
+      t,
+      candidateSha,
+      current,
+      `${refOf(t)} no longer contains ${current.slice(0, 12)} — it moved again while recovery was reading it`,
+    );
+  }
+  return isAncestor(t.projectDir, candidateSha, current, renew);
+}
+
+function hasCommit(repoDir: string, sha: string, renew?: RenewHold): boolean {
+  renew?.();
+  try {
+    execFileSync("git", ["cat-file", "-e", `${sha}^{commit}`], {
+      cwd: repoDir,
+      stdio: ["ignore", "ignore", "ignore"],
+      timeout: WINDOW_GIT_TIMEOUT_MS,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Recovery could not fetch the remote target's history, so whether the candidate
+ *  LANDED is unknown. Nothing is settled and nothing is retried — the attempt stays
+ *  `publishing` and the next recovery pass asks again. */
+export class RemoteAncestryUnknownError extends Error {
+  readonly reason = "remote_ancestry_unknown" as const;
+  constructor(
+    public readonly target: RemoteTarget,
+    public readonly candidateSha: string,
+    public readonly currentSha: string,
+    public readonly detail: string,
+  ) {
+    super(
+      `recovery cannot yet tell whether ${candidateSha.slice(0, 12)} landed on ${targetDescriptor(target)}: the ` +
+        `remote sits at ${currentSha.slice(0, 12)}, which is neither the validated base nor the candidate, and its ` +
+        `history could not be read (${detail}). The candidate MAY be published — do NOT retry this work. The attempt ` +
+        `stays \`publishing\`; recovery is idempotent and the next \`forge next\` (or \`forge publish recover\`) ` +
+        `re-derives the truth once the remote is reachable.`,
+    );
+    this.name = "RemoteAncestryUnknownError";
+  }
 }
 
 function publishRemote(
