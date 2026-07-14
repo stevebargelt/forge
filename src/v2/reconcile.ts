@@ -29,7 +29,7 @@ import { tasksForRun, markTaskComplete, markTaskFailed, backfillTaskResult } fro
 import { logEvent, eventsForTask } from "../store/events.js";
 import { crashPoint } from "./crash-points.js";
 import { resolveIdleTimeoutMs } from "./idle-watchdog.js";
-import { getDb } from "../store/db.js";
+import { getDb, writeTransaction } from "../store/db.js";
 import { taskDir } from "../util/paths.js";
 import { cleanupStagedAuth } from "./auth-state.js";
 import { removeWorktreeIfSafe } from "./worktree-lifecycle.js";
@@ -432,7 +432,7 @@ export function reconcileRun(
       `The result is preserved (result.json + this task's row); inspect with \`forge show ${taskId}\`, then re-dispatch through the real finalize path with \`forge retry ${taskId} --force\`.`;
     const containerEvidence = toContainerCausalEvidence(evidence);
     crashPoint("reconcile:before-fail-pipeline-unfinalized");
-    getDb().transaction(() => { // FG-463: fail write + its events atomic
+    writeTransaction(() => { // FG-463: fail write + its events atomic
       markTaskFailed(taskId, error, result);
       crashPoint("reconcile:inside-fail-pipeline-unfinalized-txn");
       logEvent("task.failed", { runId, taskId, payload: { failure_kind: "orphaned_needs_finalize", error, evidence, containerEvidence } });
@@ -444,7 +444,7 @@ export function reconcileRun(
       if (streamLogFormat !== undefined) {
         logEvent("task.result_recovered_from_stream", { runId, taskId, payload: { source: "reconcile_pipeline_unfinalized", logFormat: streamLogFormat } });
       }
-    })();
+    });
     taskChanges.push({ taskId, from: "running", to: "failed", reason: "container_gone_pipeline_unfinalized" });
   };
 
@@ -547,12 +547,12 @@ export function reconcileRun(
           // SQLITE_BUSY on any statement rolls the whole group back (the FG-459
           // outer catch swallows the throw; a later idempotent pass re-applies it).
           crashPoint("reconcile:before-fail-provisioning-phase-crash");
-          getDb().transaction(() => {
+          writeTransaction(() => {
             markTaskFailed(t.id, error);
             crashPoint("reconcile:inside-fail-provisioning-phase-crash-txn");
             logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "verification_environment_unavailable", error, evidence } });
             logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "provisioning_phase_crash", evidence } });
-          })();
+          });
           taskChanges.push({ taskId: t.id, from: "running", to: "failed", reason: "provisioning_phase_crash" });
 
           // FG-437 AC: deliberately do NOT hand-clear the cacheKey's .lock /
@@ -665,12 +665,12 @@ export function reconcileRun(
         // SQLITE_BUSY on any statement rolls the whole group back (the FG-459
         // outer catch swallows the throw; a later idempotent pass re-applies it).
         crashPoint("reconcile:before-fail-pre-container-crash");
-        getDb().transaction(() => {
+        writeTransaction(() => {
           markTaskFailed(t.id, error);
           crashPoint("reconcile:inside-fail-pre-container-crash-txn");
           logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "pre_container_crash", error, evidence } });
           logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "pre_container_crash", evidence } });
-        })();
+        });
         taskChanges.push({ taskId: t.id, from: "running", to: "failed", reason: "pre_container_crash" });
 
         // AWN-8: same terminal cleanup as the FG-437 landing above. The
@@ -775,13 +775,13 @@ export function reconcileRun(
         // nothing logged. A SQLITE_BUSY rolls the whole group back for a later pass.
         const containerEvidence = toContainerCausalEvidence(evidence);
         crashPoint("reconcile:before-complete-invoke-like");
-        const completed = getDb().transaction(() => {
+        const completed = writeTransaction(() => {
           if (!markTaskComplete(t.id, result)) return false;
           crashPoint("reconcile:inside-complete-invoke-like-txn");
           logEvent("task.completed", { runId, taskId: t.id });
           logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "complete", reason: "container_gone_result_present", evidence, containerEvidence } });
           return true;
-        })();
+        });
         if (completed) taskChanges.push({ taskId: t.id, from: "running", to: "complete", reason: "container_gone_result_present" });
         taskCompletedSuccessfully = completed;
       }
@@ -876,7 +876,7 @@ export function reconcileRun(
           // stays OUTSIDE the transaction — never hold a write lock across disk IO).
           const containerEvidence = toContainerCausalEvidence(evidence);
           crashPoint("reconcile:before-complete-invoke-like-from-stdout");
-          const completed = getDb().transaction(() => {
+          const completed = writeTransaction(() => {
             if (!markTaskComplete(t.id, inferred)) return false;
             crashPoint("reconcile:inside-complete-invoke-like-from-stdout-txn");
             logEvent("task.completed", { runId, taskId: t.id });
@@ -888,7 +888,7 @@ export function reconcileRun(
               logEvent("task.result_recovered_from_stream", { runId, taskId: t.id, payload: { source: "reconcile", logFormat: recoveredLogFormat ?? null } });
             }
             return true;
-          })();
+          });
           if (completed) taskChanges.push({ taskId: t.id, from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout" });
           taskCompletedSuccessfully = completed;
         }
@@ -908,12 +908,12 @@ export function reconcileRun(
             : " (reconciled after crash)");
         const containerEvidence = toContainerCausalEvidence(evidence);
         crashPoint("reconcile:before-fail-oom-killed");
-        getDb().transaction(() => { // FG-463: fail write + its events atomic
+        writeTransaction(() => { // FG-463: fail write + its events atomic
           markTaskFailed(t.id, error);
           crashPoint("reconcile:inside-fail-oom-killed-txn");
           logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "oom_killed", error, evidence, containerEvidence } });
           logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_oom_killed", evidence, containerEvidence } });
-        })();
+        });
         taskChanges.push({ taskId: t.id, from: "running", to: "failed", reason: "container_oom_killed" });
       } else if (changedFiles.length > 0) {
         const error =
@@ -924,23 +924,23 @@ export function reconcileRun(
           `work may have persisted. Inspect the diff, verify it, then ${workMayPersistAdvice(t.id)}.`;
         const containerEvidence = toContainerCausalEvidence(evidence);
         crashPoint("reconcile:before-fail-orphaned-work-may-persist");
-        getDb().transaction(() => { // FG-463: fail write + its events atomic
+        writeTransaction(() => { // FG-463: fail write + its events atomic
           markTaskFailed(t.id, error);
           crashPoint("reconcile:inside-fail-orphaned-work-may-persist-txn");
           logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "orphaned_work_may_persist", error, evidence, containerEvidence } });
           logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_gone_worktree_dirty", evidence, containerEvidence } });
-        })();
+        });
         taskChanges.push({ taskId: t.id, from: "running", to: "failed", reason: "container_gone_worktree_dirty" });
       } else {
         const error = "orphaned: container gone with no result (reconciled after crash)";
         const containerEvidence = toContainerCausalEvidence(evidence);
         crashPoint("reconcile:before-fail-orphaned-no-result");
-        getDb().transaction(() => { // FG-463: fail write + its events atomic
+        writeTransaction(() => { // FG-463: fail write + its events atomic
           markTaskFailed(t.id, error);
           crashPoint("reconcile:inside-fail-orphaned-no-result-txn");
           logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "orphaned", error, containerEvidence } });
           logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_gone_no_result", evidence, containerEvidence } });
-        })();
+        });
         taskChanges.push({ taskId: t.id, from: "running", to: "failed", reason: "container_gone_no_result" });
       }
     }
@@ -1091,7 +1091,7 @@ export function reconcileRun(
         if (backfillSource === "structured_stream") continue;
       }
       crashPoint("reconcile:before-backfill-complete-empty-result");
-      const backfilled = getDb().transaction(() => {
+      const backfilled = writeTransaction(() => {
         if (!backfillTaskResult(t.id, recovered)) return false; // result written concurrently since our read — no-op
         crashPoint("reconcile:inside-backfill-complete-empty-result-txn");
         logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "complete", to: "complete", reason: "complete_empty_result_backfilled", evidence } });
@@ -1101,7 +1101,7 @@ export function reconcileRun(
           logEvent("task.result_recovered_from_stream", { runId, taskId: t.id, payload: { source: "reconcile_backfill", logFormat: backfillLogFormat ?? null } });
         }
         return true;
-      })();
+      });
       if (backfilled) taskChanges.push({ taskId: t.id, from: "complete", to: "complete", reason: "complete_empty_result_backfilled" });
     } catch { /* FG-459: never throw — keep reconciling the rest */ }
   }
@@ -1170,24 +1170,24 @@ export function reconcileRun(
         `fanout parent unfinalized: all ${children.length} children completed, but the parent's own merge/integration-gate/reds sequence never ran ` +
         `(the process died before it started) — inspect with \`forge show ${parent.id}\` and re-drive the wave with \`forge recover ${parent.id} --re-drive\`.`;
       crashPoint("reconcile:before-fail-fanout-parent-unfinalized");
-      getDb().transaction(() => { // FG-463: fail write + its events atomic
+      writeTransaction(() => { // FG-463: fail write + its events atomic
         markTaskFailed(parent.id, error, parentResult);
         crashPoint("reconcile:inside-fail-fanout-parent-unfinalized-txn");
         logEvent("task.failed", { runId, taskId: parent.id, payload: { failure_kind: "fanout_wave_orphaned", error, childSummary: { total: children.length, complete: completeChildren.length } } });
         logEvent("task.reconciled", { runId, taskId: parent.id, payload: { from: "running", to: "failed", reason: "fanout_wave_unfinalized", childSummary: { total: children.length, complete: completeChildren.length } } });
-      })();
+      });
       taskChanges.push({ taskId: parent.id, from: "running", to: "failed", reason: "fanout_wave_unfinalized" });
     } else {
       const error =
         `fanout wave orphaned: ${completeChildren.length}/${children.length} children complete, the rest failed or never finished — ` +
         `inspect with \`forge show ${parent.id}\` and re-drive the wave with \`forge recover ${parent.id} --re-drive\`.`;
       crashPoint("reconcile:before-fail-fanout-wave-orphaned");
-      getDb().transaction(() => { // FG-463: fail write + its events atomic
+      writeTransaction(() => { // FG-463: fail write + its events atomic
         markTaskFailed(parent.id, error, parentResult);
         crashPoint("reconcile:inside-fail-fanout-wave-orphaned-txn");
         logEvent("task.failed", { runId, taskId: parent.id, payload: { failure_kind: "fanout_wave_orphaned", error, childSummary: { total: children.length, complete: completeChildren.length } } });
         logEvent("task.reconciled", { runId, taskId: parent.id, payload: { from: "running", to: "failed", reason: "fanout_wave_orphaned", childSummary: { total: children.length, complete: completeChildren.length } } });
-      })();
+      });
       taskChanges.push({ taskId: parent.id, from: "running", to: "failed", reason: "fanout_wave_orphaned" });
     }
     } catch { /* FG-459: never throw — a DB throw finalizing one fanout parent must not abort the rest */ }
@@ -1248,12 +1248,12 @@ export function reconcileRun(
               "orphaned: red reviewer died with the crashed forge process before delivering a verdict — " +
               `its primary ${t.id} was landed fail-safe by the awaiting_red sweep (FG-531) and re-driving it re-runs the reds`;
             crashPoint("reconcile:before-fail-dead-red-child");
-            getDb().transaction(() => { // FG-463: fail write + its events atomic
+            writeTransaction(() => { // FG-463: fail write + its events atomic
               markTaskFailed(red.id, redError);
               crashPoint("reconcile:inside-fail-dead-red-child-txn");
               logEvent("task.failed", { runId, taskId: red.id, payload: { failure_kind: "orphaned", error: redError } });
               logEvent("task.reconciled", { runId, taskId: red.id, payload: { from: red.status, to: "failed", reason: "awaiting_red_dead_red" } });
-            })();
+            });
             taskChanges.push({ taskId: red.id, from: red.status, to: "failed", reason: "awaiting_red_dead_red" });
           }
 
@@ -1271,12 +1271,12 @@ export function reconcileRun(
               "(rows and results preserved) merged and gated, but the forge process died before the red reviewers delivered a verdict — " +
               `inspect with \`forge show ${t.id}\` and re-drive the wave with \`forge recover ${t.id} --re-drive\`.`;
             crashPoint("reconcile:before-fail-awaiting-red-fanout-parent");
-            getDb().transaction(() => { // FG-463: fail write + its events atomic
+            writeTransaction(() => { // FG-463: fail write + its events atomic
               markTaskFailed(t.id, error, result);
               crashPoint("reconcile:inside-fail-awaiting-red-fanout-parent-txn");
               logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "fanout_wave_orphaned", error, childSummary: { total: waveChildren.length, complete: completeChildren.length } } });
               logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "awaiting_red", to: "failed", reason: "awaiting_red_fanout_reds_dead" } });
-            })();
+            });
             taskChanges.push({ taskId: t.id, from: "awaiting_red", to: "failed", reason: "awaiting_red_fanout_reds_dead" });
           } else {
             const error =
@@ -1284,12 +1284,12 @@ export function reconcileRun(
               "before its red reviewers delivered a verdict — the step cannot be trusted complete. The result is preserved; " +
               `inspect with \`forge show ${t.id}\`, then re-dispatch through the real finalize path with \`forge retry ${t.id} --force\`.`;
             crashPoint("reconcile:before-fail-awaiting-red-orphaned");
-            getDb().transaction(() => { // FG-463: fail write + its events atomic
+            writeTransaction(() => { // FG-463: fail write + its events atomic
               markTaskFailed(t.id, error, result);
               crashPoint("reconcile:inside-fail-awaiting-red-orphaned-txn");
               logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "orphaned_needs_finalize", error } });
               logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "awaiting_red", to: "failed", reason: "awaiting_red_reds_dead" } });
-            })();
+            });
             taskChanges.push({ taskId: t.id, from: "awaiting_red", to: "failed", reason: "awaiting_red_reds_dead" });
           }
         } catch { /* FG-459: never throw — one task's sweep must not abort the rest */ }
@@ -1384,11 +1384,11 @@ export function finalizeOrphanedPrimaries(runId: string): TaskReconcileChange[] 
       try {
         const error =
           "orphaned: duplicate pending primary in a phase already completed by another primary";
-        getDb().transaction(() => { // FG-463: fail write + its events atomic
+        writeTransaction(() => { // FG-463: fail write + its events atomic
           markTaskFailed(p.id, error);
           logEvent("task.failed", { runId, taskId: p.id, payload: { failure_kind: "orphaned", error } });
           logEvent("task.reconciled", { runId, taskId: p.id, payload: { from: "pending", to: "failed", reason: "orphaned_duplicate_primary" } });
-        })();
+        });
         changes.push({ taskId: p.id, from: "pending", to: "failed", reason: "orphaned_duplicate_primary" });
       } catch { /* FG-459: never throw */ }
     }

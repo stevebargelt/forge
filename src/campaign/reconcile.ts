@@ -24,7 +24,7 @@
 // driveRemainingItems's existing bottom-of-loop transition once every item
 // lands in a terminal lifecycle status.
 
-import { getDb } from "../store/db.js";
+import { getDb, writeTransaction } from "../store/db.js";
 import { getCampaign, listCampaignItems, updateCampaignItemIfCampaignPaused } from "../store/campaigns.js";
 import { logEvent } from "../store/events.js";
 import type { EventType } from "../store/events.js";
@@ -238,7 +238,7 @@ export function reconcileCampaign(
     // resume/start that flips the campaign out of 'paused' between our up-front
     // check (above) and this write is caught here: the write becomes a no-op and
     // no audit event is logged.
-    const shipped = getDb().transaction(() => {
+    const shipped = writeTransaction(() => {
       const applied = updateCampaignItemIfCampaignPaused(item.id, campaignId, {
         lifecycleStatus: "complete",
         outcome: "shipped",
@@ -259,7 +259,7 @@ export function reconcileCampaign(
         },
       });
       return true;
-    })();
+    });
 
     if (!shipped) {
       // The campaign left 'paused' mid-reconcile — stop here rather than keep

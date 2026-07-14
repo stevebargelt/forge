@@ -42,7 +42,7 @@ import { failTask, classify, ORPHAN_EVIDENCE_KINDS } from "./failure-kind.js";
 import type { FailureKind, OrphanEvidence, ContainerCausalEvidence } from "./failure-kind.js";
 import { captureUsageForTask } from "../store/model-calls.js";
 import { insertVerdict, verdictsForTask } from "../store/verdicts.js";
-import { getDb } from "../store/db.js";
+import { getDb, writeTransaction } from "../store/db.js";
 import { crashPoint } from "./crash-points.js";
 import { assembleReviewerContextPacket } from "./reviewer-context-packet.js";
 import { validateVerdict } from "./validate-findings.js";
@@ -715,13 +715,13 @@ async function dispatchSingleStep(args: {
     // logging/notifying a transition that didn't happen.
     let blockedByRedApplied = false;
     crashPoint("dispatchSingleStep:before-blocked-by-red");
-    getDb().transaction(() => {
+    writeTransaction(() => {
       blockedByRedApplied = markTaskBlockedByRed(taskId, result);
       crashPoint("dispatchSingleStep:inside-blocked-by-red-txn");
       if (blockedByRedApplied) {
         logEvent("task.blocked_by_red", { runId: args.runId, taskId });
       }
-    })();
+    });
     crashPoint("dispatchSingleStep:after-blocked-by-red");
     // FG-492 review: blocked_by_red (whether applied here or lost to a concurrent
     // transition) is never "complete" — retain either way.
@@ -1157,7 +1157,7 @@ async function dispatchReds(args: {
     // verdicts table with a row that has no matching events-table entry —
     // FG-427 makes the events table the sole source for outcome derivation.
     crashPoint("dispatchReds:before-verdict-insert");
-    getDb().transaction(() => {
+    writeTransaction(() => {
       insertVerdict({
         id: newVerdictId(),
         taskId: args.primaryTaskId,
@@ -1178,7 +1178,7 @@ async function dispatchReds(args: {
         taskId: args.primaryTaskId,
         payload: { redRole: r.red.agent, verdict: finalVerdict.verdict, authority: r.red.authority },
       });
-    })();
+    });
     crashPoint("dispatchReds:after-verdict-insert");
     // Gate on the GRADED verdict — a fail emptied by grading no longer blocks.
     // FG-523: same predicate aggregateVerdicts applies to the persisted row.
@@ -1886,13 +1886,13 @@ async function dispatchFanoutStep(args: {
     // a transition that didn't happen.
     let blockedByRedApplied = false;
     crashPoint("dispatchFanoutStep:before-blocked-by-red");
-    getDb().transaction(() => {
+    writeTransaction(() => {
       blockedByRedApplied = markTaskBlockedByRed(parentId, parentResult);
       crashPoint("dispatchFanoutStep:inside-blocked-by-red-txn");
       if (blockedByRedApplied) {
         logEvent("task.blocked_by_red", { runId: args.runId, taskId: parentId });
       }
-    })();
+    });
     crashPoint("dispatchFanoutStep:after-blocked-by-red");
     if (!blockedByRedApplied) {
       return getTask(parentId)?.status ?? "failed";

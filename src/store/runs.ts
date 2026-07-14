@@ -1,4 +1,4 @@
-import { getDb } from "./db.js";
+import { getDb, writeTransaction } from "./db.js";
 import type { Run, RunStatus } from "../types/index.js";
 import { nowIso } from "../util/ids.js";
 import { notifyOnRunTransition } from "../notify/trigger.js";
@@ -139,7 +139,7 @@ export function uniqueProjectDirs(): ProjectAggregate[] {
 // run.completed/run.reconciled events atomic with the status write (FG-463).
 export function completeRun(id: string, opts?: { onApplied?: () => void }): boolean {
   const completedAt = nowIso();
-  const { applied, prevStatus } = getDb().transaction(() => {
+  const { applied, prevStatus } = writeTransaction(() => {
     const prev = getDb()
       .prepare(`SELECT status FROM runs WHERE id = ?`)
       .get(id) as { status: string } | undefined;
@@ -149,7 +149,7 @@ export function completeRun(id: string, opts?: { onApplied?: () => void }): bool
     const applied = info.changes === 1;
     if (applied) opts?.onApplied?.();
     return { applied, prevStatus: prev?.status };
-  })();
+  });
 
   if (!applied) return false;
 
@@ -166,7 +166,7 @@ export function updateRunStatus(id: string, status: RunStatus): void {
   // writer can interleave between the read and the UPDATE. This is the store
   // layer's own guard — it holds regardless of which caller reaches it,
   // unlike relying on every call site to route through completeRun.
-  const { applied, prevStatus } = getDb().transaction(() => {
+  const { applied, prevStatus } = writeTransaction(() => {
     const prev = getDb()
       .prepare(`SELECT status FROM runs WHERE id = ?`)
       .get(id) as { status: string } | undefined;
@@ -183,7 +183,7 @@ export function updateRunStatus(id: string, status: RunStatus): void {
       .prepare(`UPDATE runs SET status = ?, completed_at = ? WHERE id = ?`)
       .run(status, completedAt, id);
     return { applied: true, prevStatus: prev?.status };
-  })();
+  });
 
   if (!applied) return;
 

@@ -13,7 +13,7 @@ import {
   updateCampaignPlanForReapproval,
   tryTransitionCampaignToRunning,
 } from "../store/campaigns.js";
-import { getDb } from "../store/db.js";
+import { getDb, writeTransaction } from "../store/db.js";
 import { logEvent } from "../store/events.js";
 import { tasksForRun } from "../store/tasks.js";
 import type { Campaign, CampaignItem, CampaignItemLifecycleStatus, CampaignItemOutcome, BlockerKind, Run } from "../types/index.js";
@@ -902,7 +902,7 @@ function finalizeInvokeLaneOutcome(
     return { outcome: "parked", missing: evaluated.missing };
   }
 
-  const shipped = getDb().transaction(() => {
+  const shipped = writeTransaction(() => {
     // Only touch `reason` when the caller has one to set (e.g. quick_implementation's
     // docs-impact warning) — an omitted key preserves whatever pre-dispatch reason is
     // already on the item (e.g. FG-393's "continued because ..." for an item that
@@ -927,7 +927,7 @@ function finalizeInvokeLaneOutcome(
       },
     });
     return true;
-  })();
+  });
 
   return shipped ? { outcome: "shipped" } : { outcome: "parked", missing: [] };
 }
@@ -1083,7 +1083,7 @@ export async function driveRemainingItems(
             // would make this write a permanent no-op. A concurrent pause/abandon
             // between the evidence check and this write still lands as a no-op here,
             // never an optimistic ship.
-            const shipped = getDb().transaction(() => {
+            const shipped = writeTransaction(() => {
               const applied = updateCampaignItemIfCampaignRunning(item.id, campaignId, {
                 lifecycleStatus: "complete",
                 outcome: "shipped",
@@ -1104,7 +1104,7 @@ export async function driveRemainingItems(
                 },
               });
               return true;
-            })();
+            });
             if (shipped) {
               itemRecords.push({
                 itemId: item.id,
@@ -2167,7 +2167,7 @@ export function retryCampaignItem(campaignId: string, ticketId: string): RetryIt
   // precedent — updateCampaignItemIfCampaignPaused reads campaigns.status inside
   // its own UPDATE, so a concurrent unpause makes the write a no-op and no audit
   // event is logged for a reset that never happened.
-  const applied = getDb().transaction(() => {
+  const applied = writeTransaction(() => {
     const wrote = updateCampaignItemIfCampaignPaused(targetItem.id, campaignId, {
       lifecycleStatus: "pending",
       outcome: undefined,
@@ -2188,7 +2188,7 @@ export function retryCampaignItem(campaignId: string, ticketId: string): RetryIt
       });
     }
     return true;
-  })();
+  });
   if (!applied) return { ok: false, reason: "campaign is no longer paused (concurrent state change)" };
 
   return { ok: true };
