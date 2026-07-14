@@ -195,19 +195,51 @@ function pathsTouchedByCandidate(
   return out.split("\n").map((l) => l.trim()).filter(Boolean);
 }
 
+/** Every proper directory prefix of a path: "a/b/c" → ["a", "a/b"]. */
+function pathPrefixes(p: string): string[] {
+  const parts = p.split("/");
+  const out: string[] = [];
+  for (let i = 1; i < parts.length; i++) out.push(parts.slice(0, i).join("/"));
+  return out;
+}
+
 /** Untracked files in the target that the candidate would clobber (AD-3).
  *  Computed BEFORE any mutation — see DirtyPublishTargetError's header for why
  *  letting `read-tree` discover this on the far side of the ref advance is the
- *  bug and not the check. */
+ *  bug and not the check.
+ *
+ *  PREFIX-AWARE, because git's collisions are: a path is a FILE or a DIRECTORY and
+ *  it cannot be both. Exact equality catches only one of the three shapes:
+ *
+ *    - EXACT     — candidate writes `foo`; the operator has untracked `foo`.
+ *    - ANCESTOR  — candidate writes `foo/bar`, so it needs `foo` to be a DIRECTORY;
+ *                  the operator has an untracked FILE at `foo`.
+ *    - DESCENDANT— candidate writes the FILE `foo`; the operator has untracked
+ *                  `foo/bar`, so `foo` is a directory in their tree.
+ *
+ *  All three make `read-tree -m -u` fail, and it fails on the FAR SIDE of the ref
+ *  advance. All three are therefore refused HERE, before anything is written. The
+ *  paths reported are the OPERATOR'S — the files forge will never touch. */
 export function untrackedCollisions(
   projectDir: string,
   baseSha: string,
   candidateSha: string,
   renew?: RenewHold,
 ): string[] {
-  const untracked = new Set(untrackedFiles(projectDir, renew));
-  if (untracked.size === 0) return [];
-  return pathsTouchedByCandidate(projectDir, baseSha, candidateSha, renew).filter((p) => untracked.has(p));
+  const untracked = untrackedFiles(projectDir, renew);
+  if (untracked.length === 0) return [];
+  const untrackedSet = new Set(untracked);
+  const collisions = new Set<string>();
+  for (const p of pathsTouchedByCandidate(projectDir, baseSha, candidateSha, renew)) {
+    if (untrackedSet.has(p)) collisions.add(p);
+    for (const prefix of pathPrefixes(p)) {
+      if (untrackedSet.has(prefix)) collisions.add(prefix);
+    }
+    for (const u of untracked) {
+      if (u.startsWith(`${p}/`)) collisions.add(u);
+    }
+  }
+  return [...collisions];
 }
 
 /** The local checked-out branch, i.e. the default publish target of a repo. */
@@ -345,22 +377,37 @@ function publishLocal(
     // AD-3 pre-check sees the whole diff as tracked dirt and refuses — the target
     // is wedged, permanently, by a publication that reported nothing.
     //
-    // So we UNDO our own ref advance, by CAS, and refuse. The CAS is what makes
-    // this safe: `update-ref <ref> <base> <candidate>` only lands if the ref is
-    // STILL the candidate we just wrote — i.e. only if we are undoing our own
-    // write and nobody else's. We hold the publication mutex, so nothing
-    // forge-owned can be in here with us; an external writer that got in anyway
-    // fails the CAS and we leave their commit alone and report the publication as
-    // landed (the ref moved past us; recovery re-derives the truth from the REF).
+    // So — WHILE WE STILL PROVABLY OWN THE WINDOW — we UNDO our own ref advance, by
+    // CAS, and refuse. The CAS is what makes the undo precise: `update-ref <ref>
+    // <base> <candidate>` only lands if the ref is STILL the candidate we just wrote
+    // — i.e. only if we are undoing our own write and nobody else's. An external
+    // writer that got in anyway fails the CAS, so we leave their commit alone and
+    // report the publication as landed (the ref moved past us; recovery re-derives
+    // the truth from the REF).
     //
     // The result is a target that is byte-for-byte where it started: nothing
     // published, nothing staged, nothing to clean up, and the NEXT publication is
     // not blocked. This is the AD-5 rule applied to a failure rather than a crash
     // — state is defined, idempotent, and derived from the three SHAs alone.
     //
-    // The rollback deliberately does NOT renew the hold: it is a CAS on a ref we
-    // ourselves just wrote, so it is safe with or without the mutex, and it must
-    // still run when the reason we are HERE is that the hold was lost.
+    // THE ROLLBACK IS ITSELF A TARGET MUTATION, so it runs ONLY while ownership is
+    // CURRENTLY PROVEN — renew?.() throws if the hold is gone, and it is called FOR
+    // this rollback, immediately before it. A CAS is not a substitute for the mutex
+    // here: once our lease lapsed, the attempt that TOOK the window may already have
+    // AD-5-recovered index and worktree onto our candidate, and our CAS "undo" would
+    // then still succeed against the ref — leaving ref=base with the tree at the
+    // candidate, i.e. a dirty, divergent target that no later publication can pass
+    // AD-3 against. Once a publisher discovers it no longer owns the mutex it
+    // executes NO target-mutating command, not even an undo of its own write.
+    //
+    // What we leave behind instead is the state AD-5 is FOR: the ref carries the
+    // candidate, the durable attempt still records {baseSha, candidateSha, target},
+    // and whoever owns the mutex now converges the tree from those three facts.
+    try {
+      renew?.();
+    } catch (lost) {
+      throw new MutexLostMidPublishError(t.projectDir, baseSha, candidateSha, (lost as Error).message);
+    }
     try {
       git(t.projectDir, ["update-ref", refOf(t), baseSha, candidateSha]);
     } catch {
@@ -388,6 +435,35 @@ export class CheckoutSyncError extends Error {
         `blocked. Resolve the working-tree state and re-run \`forge next\`.`,
     );
     this.name = "CheckoutSyncError";
+  }
+}
+
+/** The ref advance LANDED, the checkout did not, and the publisher can no longer
+ *  prove it owns the publication mutex — so it stopped, with the target ref carrying
+ *  the candidate and the checked-out tree still at the base.
+ *
+ *  This is NOT a wedged target and NOT a half-publication to clean up: it is the
+ *  ordinary AD-5 window, reached by a lost lease rather than a crash. The durable
+ *  attempt still records {baseSha, candidateSha, target}, so the publisher that owns
+ *  the mutex NOW converges the tree from those three facts. The one thing this
+ *  process may not do is touch the target — including rolling back its own advance,
+ *  which would strand a target whose tree the new owner has already synchronized. */
+export class MutexLostMidPublishError extends Error {
+  readonly reason = "publication_mutex_lost" as const;
+  constructor(
+    public readonly projectDir: string,
+    public readonly baseSha: string,
+    public readonly candidateSha: string,
+    detail: string,
+  ) {
+    super(
+      `stopped mid-publication on ${projectDir}: the target ref carries ${candidateSha.slice(0, 12)} but its ` +
+        `checked-out tree could not be updated to it, and ownership of the publication window can no longer be ` +
+        `proven (${detail}). NO further target mutation was performed — not even a rollback of this attempt's own ` +
+        `ref advance — because a publisher that lost the mutex may write nothing at all. The publication intent is ` +
+        `durable; the mutex's current owner converges the target through AD-5 recovery.`,
+    );
+    this.name = "MutexLostMidPublishError";
   }
 }
 
