@@ -1,0 +1,92 @@
+=== repo identity ===
+HEAD   : 185afc3cd7559a2c6338fb3996b06dee39e586af
+origin : git@github.com:stevebargelt/forge.git
+
+############################################################
+# A. STRUCTURAL — the fixer path performs NO push.          #
+############################################################
+
+-- every git verb invoked by the review-loop fixer/verify path --
+add checkout clean commit rev-parse rm status 
+
+-- grep for a push in EITHER review-loop file --
+NO MATCH. There is no push in src/cli/commands/review-loop.ts or src/v2/review-loop.ts.
+
+-- the fixer's commit (the SHA the next round will probe CI for) --
+862-        gitInDir(["add", "-A"]);
+863:        gitInDir(["commit", "-m", `fix(review-loop): address ${ctx.ticketId} review findings (round ${round})`]);
+864-        const sha = gitInDir(["rev-parse", "HEAD"]).trim();
+865-        return revertedPaths.length > 0
+
+-- the next round's verification resolves the sha as rev-parse HEAD --
+548:    const headSha = gitInDir(["rev-parse", "HEAD"]).trim();
+571:    const probe = (): CiGateStatus => probeCiGateStatus({
+572-      projectDir: ctx.projectDir, sha: headSha, command: requiredGate, checkStatusProvider: ctx.checkStatusProvider,
+573-    });
+
+-- THE STALE COMMENT FG-541 NAMES (it asserts the opposite of the code) --
+847-
+848-        // In-scope changes from this round survive the revert — verify + commit
+849-        // them normally rather than aborting the whole round. Fast tier by
+850:        // default (FG-501 AC5): the fixer's commit gets pushed and CI runs
+851-        // test:extended as a required check; --local-extended restores the full tier.
+852-        stage = "post-revert verification";
+
+-- and the outcome field that inherits the false claim --
+620-    console.log(`review-loop: CI unavailable: ${status.reason} — falling back to local verification.`);
+621:    const extendedDelegatedToCi = !ctx.localExtended;
+622-    const result = runVerify(localFallbackScripts(), { cwd: ctx.projectDir });
+623-    return {
+624-      ...result, ciOutcome: { kind: "local_fallback", reason: status.reason, extendedDelegatedToCi },
+
+############################################################
+# B. HISTORICAL — the six SHAs, and when they reached origin #
+############################################################
+
+SHA       COMMITTED (local)          ON ORIGIN/MAIN BY (merge)  LAG
+--------- -------------------------- -------------------------- ------
+17087bd   2026-07-11T23:30:47-07:00  2026-07-12T00:36:14-07:00  65m  (via af57d25)
+afce93d   2026-07-12T00:05:53-07:00  2026-07-12T00:36:14-07:00  30m  (via af57d25)
+2e701f6   2026-07-11T23:00:08-07:00  2026-07-12T00:36:14-07:00  96m  (via af57d25)
+8a652ad   2026-07-12T02:00:59-07:00  2026-07-12T03:09:17-07:00  68m  (via 07cb63e)
+5bc8ae2   2026-07-12T01:39:12-07:00  2026-07-12T03:09:17-07:00  90m  (via 07cb63e)
+c77c9a4   2026-07-12T02:42:40-07:00  2026-07-12T03:09:17-07:00  26m  (via 07cb63e)
+
+-- are they really review-loop FIXER commits? (subject must match review-loop.ts:863) --
+   format string in source: fix(review-loop): address <TICKET> review findings (round <N>)
+   17087bd  fix(review-loop): address FG-535 review findings (round 1)
+   afce93d  fix(review-loop): address FG-535 review findings (round 1)
+   2e701f6  fix(review-loop): address FG-535 review findings (round 1)
+   8a652ad  fix(review-loop): address FG-536 review findings (round 1)
+   5bc8ae2  fix(review-loop): address FG-536 review findings (round 1)
+   c77c9a4  fix(review-loop): address FG-536 review findings (round 1)
+
+-- the merge commits that carried them to origin/main --
+   07cb63e 2026-07-12T03:09:17-07:00 Merge pull request #110 from stevebargelt/fix/fg-536-detached-agent-execution
+   af57d25 2026-07-12T00:36:14-07:00 Merge pull request #109 from stevebargelt/fix/fg-535-durable-launcher
+
+=== CONCLUSION ===
+The ticket's corrected conclusion is CONFIRMED.
+
+(A) is decisive and timing-independent: the review-loop's fixer commits (git add
+    -A; git commit) and NEVER pushes -- there is no push verb anywhere in either
+    review-loop source file. The following round computes the sha to probe as
+    `git rev-parse HEAD`, which IS that unpushed commit. GitHub cannot hold a
+    check-run for an object it has never received, so probeCiGateStatus can only
+    return `unavailable`, the loop falls back to local verification, and the
+    reviewed tip classifies as `local_only` -> never closeable.
+
+    This is an ABSENCE, not a RACE. The "CI registration delay" hypothesis
+    predicts that waiting longer would help. It cannot: the commit is not there
+    to be registered. Any blind registration delay is therefore a non-fix, which
+    is exactly why FG-541 lists it as a NON-GOAL.
+
+(B) corroborates: all six subjects match the fixer format string at
+    review-loop.ts:863, and each reached origin/main only later via a PR merge
+    (30-96 minutes after the commit) -- long after the next round had already
+    probed and fallen back.
+
+HONEST LIMIT: (B) bounds "on origin BY the merge", not "first on origin AT". A
+clone carries no reflog of origin's push history, so the exact instant the PR
+branch was first pushed is NOT recoverable here. That instant is irrelevant to
+the conclusion, because (A) does not depend on it.
