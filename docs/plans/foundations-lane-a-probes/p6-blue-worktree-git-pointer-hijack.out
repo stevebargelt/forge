@@ -1,21 +1,55 @@
-NOT EXECUTED BY THE ARCHITECTURE PASS.
+NEGATIVE CONTROL — captured result (git 2.34.1, Linux, 2026-07-14).
 
-This .out is a placeholder. The planning container has no docker daemon, no
-root, and an empty node_modules; it also should not self-certify a security
-claim. p6-blue-worktree-git-pointer-hijack.sh is written to be run BY THE
-OPERATOR on the macOS host where forge actually runs.
+This is the EXPECTED outcome of the P6 negative control, NOT an inconclusive
+unexecuted run. P6 attempts the pointer hijack via a *linked* fake gitdir (one
+carrying a `commondir`). Git reads a linked worktree's config from the COMMON
+dir, never from a plain `config` in the per-worktree gitdir, so the planted
+`core.hooksPath`/`filter.*.clean` are IGNORED — git never reads them. The clean
+"no host execution" below is therefore the control WORKING: it proves the
+linked-gitdir path is a vector git ALREADY DEFEATS, so that specific path is NOT
+a viable escape. It is NOT evidence the seam is closed.
 
-Until this file contains real captured output, the HIGH it reproduces (host
-execution of a blue agent's worktree-supplied hook/filter via a hijacked
-worktree-local `.git` pointer) is INFERENCE from source reading
-(integration-publisher.ts:304-312, the live host-side autoCommitSource), NOT an
-observed container-executed fact — the same discipline P5 held before its .out
-existed.
+The real, observed-red reproduction is the sibling probe P6b
+(p6b-real-vector-standalone-alternates.{sh,out}, executed on the host
+2026-07-14), which uses a STANDALONE fake gitdir (no `commondir`) +
+`objects/info/alternates` — git DOES read that config, `hooksPath IS honored`,
+and the host executes the agent's hook. P6b is the reproduction; P6 is the
+negative control. No reader should read P6's clean result as "the escape
+doesn't work" — read it as "this particular repoint is the one git defeats."
+See PRD D10 / AC-7 (docs/prds/agent-workspace-isolation.md).
 
-EXPECTED, when the operator runs it:
-  STEP A (today):      "*** HOST EXECUTED AGENT CODE: ... PWNED ***"
-                       AND "D6 Layer-2 detector : PASSES against the hijacked pointer"
-  STEP B (FIX-A only): filter vector still fires (hook vector dead) — the honest residual
-  STEP C (FIX-B):      "pointer overwrite: REFUSED" and "no host execution under FIX-B"
+EXPECTED / OBSERVED (this run):
+  STEP A: no host execution — git ignored the linked-gitdir config.
+  STEP B: still no execution — no honored hook OR filter exists to kill here
+          (the FIX-A-kills-hook / filter-survives result is P6b STEP 2).
+  STEP C: pointer overwrite REFUSED under the immutable-pointer emulation.
 
-Run on the host:  bash p6-blue-worktree-git-pointer-hijack.sh > p6-blue-worktree-git-pointer-hijack.out 2>&1
+Reproduce (git-only, no docker): bash p6-blue-worktree-git-pointer-hijack.sh
+---------------------------------------------------------------------------
+=== setup ===
+  genuine pointer : gitdir: /tmp/fg559-p6/proj/.git/worktrees/task1
+  common dir (ro) : /tmp/fg559-p6/proj/.git
+
+=== STEP A — NEGATIVE CONTROL, TODAY (no fix): linked-gitdir config  [NO execution expected] ===
+    git reads a linked worktree's config from the COMMON dir, so the planted hooksPath/filter is IGNORED
+  D6 Layer-2 detector : PASSES against the hijacked pointer (blind to it)
+  no host execution — EXPECTED: git ignored the linked-gitdir config (see P6b for the real vector)
+
+=== STEP B — FIX-A only (host git -c core.hooksPath=/dev/null) ===
+    NEGATIVE CONTROL: still no execution — git ignored the whole linked-gitdir config, so
+    there is no hook OR filter to kill here. The FIX-A-kills-hook / filter-survives result
+    lives in P6b STEP 2 (the working standalone-gitdir vector), not in this control.
+  clean     : no execution (expected — config never read)
+
+=== STEP C — FIX-B (pointer made immutable) + FIX-A ===
+    expected: pointer overwrite REFUSED — no agent-writable git config can exist
+p6-blue-worktree-git-pointer-hijack.sh: line 156: .../worktrees/run1/task1/.git: Permission denied
+  pointer overwrite: REFUSED — agent cannot repoint the worktree gitdir
+  clean     : no host execution under FIX-B
+
+=== NOTE ON RESIDUAL (see PRD D10 residual table) ===
+  FIX-B closes config-driven exec (hooksPath/filter/textconv/fsmonitor/merge-driver)
+  because it removes the only agent-writable git config. What REMAINS after FIX-B:
+   - a LEGIT common-config driver (e.g. git-lfs smudge) triggered on agent-chosen
+     paths via .gitattributes in the tree — trusted code, attacker-influenced input.
+   - objects/info/alternates lives in the ro common dir: not agent-writable. Closed.
