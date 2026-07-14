@@ -1,9 +1,11 @@
 ---
 id: FG-548
 type: story
-status: active
+status: done
 title: "store: deferred write transactions hit SQLITE_BUSY under multi-process WAL (snapshot upgrade bypasses busy_timeout)"
 created: 2026-07-13
+closed: 2026-07-14
+closed_commit: 5bb675b
 ---
 
 ## Problem
