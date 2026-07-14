@@ -159,6 +159,21 @@ export function markTaskRecovered(id: string, result: unknown): boolean {
   return info.changes === 1;
 }
 
+// FG-425 (AC5): the task's publication attempt advanced the target ref and then
+// lost the publication window, so its disposition is not yet knowable — the ONE
+// thing forge may not do here is claim a terminal outcome. CAS'd like the other
+// non-terminal landings: a concurrent `forge cancel` (or any terminal write) wins,
+// and this call reports that it did not land.
+export function markTaskAwaitingRecovery(id: string, error: string, result: unknown): boolean {
+  const info = getDb()
+    .prepare(
+      `UPDATE tasks SET status = 'awaiting_recovery', result = ?, error = ?, completed_at = NULL
+       WHERE id = ? AND status NOT IN ('complete', 'failed')`
+    )
+    .run(JSON.stringify(result), error, id);
+  return info.changes === 1;
+}
+
 // FG-455 p4 Mode A: a detached `forge invoke` whose wrapper died can leave a
 // task `complete` in the DB with no result ever written. reconcile discovers
 // this out-of-band and needs to persist a recovered result WITHOUT touching

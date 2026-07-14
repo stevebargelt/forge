@@ -450,18 +450,24 @@ export class CheckoutSyncError extends Error {
  *  which would strand a target whose tree the new owner has already synchronized. */
 export class MutexLostMidPublishError extends Error {
   readonly reason = "publication_mutex_lost" as const;
+  /** The lost-hold error that caused this, kept as EVIDENCE and deliberately NOT
+   *  interpolated into the message. That error is the pre-CAS story — its prose says
+   *  "nothing was published by this attempt", which is true where it is thrown and a
+   *  LIE here: the ref carries the candidate. A cause chain is not exempt from the
+   *  rule that no operator surface may claim nothing landed when something did
+   *  (FG-425 AC5), and this message is read straight onto the task row. */
   constructor(
     public readonly projectDir: string,
     public readonly baseSha: string,
     public readonly candidateSha: string,
-    detail: string,
+    public readonly detail: string,
   ) {
     super(
-      `stopped mid-publication on ${projectDir}: the target ref carries ${candidateSha.slice(0, 12)} but its ` +
-        `checked-out tree could not be updated to it, and ownership of the publication window can no longer be ` +
-        `proven (${detail}). NO further target mutation was performed — not even a rollback of this attempt's own ` +
+      `stopped mid-publication on ${projectDir}: the target ref carries ${candidateSha.slice(0, 12)} — the CAS ` +
+        `LANDED — but its checked-out tree could not be updated to it, and ownership of the publication window can ` +
+        `no longer be proven. NO further target mutation was performed — not even a rollback of this attempt's own ` +
         `ref advance — because a publisher that lost the mutex may write nothing at all. The publication intent is ` +
-        `durable; the mutex's current owner converges the target through AD-5 recovery.`,
+        `durable; AD-5 recovery converges the target from {baseSha, candidateSha, currentTargetSha}.`,
     );
     this.name = "MutexLostMidPublishError";
   }
@@ -494,7 +500,11 @@ function syncCheckout(t: LocalTarget, candidateSha: string, renew?: RenewHold): 
  *  at any step. */
 export type RecoveryOutcome =
   | { state: "not_published" }
-  | { state: "published"; publishedSha: string; checkoutError?: string }
+  /** `superseded`: the ref has moved PAST our candidate — a later publication built
+   *  on top of it. Our commit is in the target's history, so this attempt DID land;
+   *  the checkout is NOT re-run, because the tree belongs to the newer publication
+   *  and rewinding it to our candidate would un-publish work that came after. */
+  | { state: "published"; publishedSha: string; checkoutError?: string; superseded?: boolean }
   | { state: "external_writer"; currentSha: string };
 
 export function recoverCheckout(
@@ -505,7 +515,24 @@ export function recoverCheckout(
 ): RecoveryOutcome {
   const current = readTargetSha(t, renew);
   if (current === baseSha) return { state: "not_published" };
-  if (current !== candidateSha) return { state: "external_writer", currentSha: current };
+  if (current !== candidateSha) {
+    // The ref is at neither SHA, and there are two utterly different reasons for
+    // that. If our candidate is an ANCESTOR of where the ref now sits, our CAS
+    // landed and a LATER publication simply built on top of it — our work is in the
+    // target's history, and reporting "nothing was published" here would be a lie
+    // that invites a retry of work that is already on the target. Only when the
+    // candidate is NOT in that history did we genuinely publish nothing.
+    //
+    // Still derived from {baseSha, candidateSha, currentTargetSha} alone: ancestry
+    // is a property of those SHAs, not of the working tree, which AD-5 never
+    // inspects. (Ancestry is not asked of a remote target: answering it would need
+    // the remote's history fetched, and a remote publication that was superseded is
+    // indistinguishable here from one that never landed.)
+    if (t.kind === "local" && isAncestor(t.projectDir, candidateSha, current, renew)) {
+      return { state: "published", publishedSha: candidateSha, superseded: true };
+    }
+    return { state: "external_writer", currentSha: current };
+  }
   // The ref carries the candidate: the CAS succeeded and the publication IS
   // durable. Only the checked-out tree may still be behind — re-run the update.
   //

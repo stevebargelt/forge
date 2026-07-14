@@ -144,6 +144,15 @@ export function registerPublish(program: Command): void {
       console.log(`attempt ${attemptId}: ${outcome.kind}`);
       if (outcome.kind === "published") {
         console.log(`  published ${outcome.publishedSha} to ${outcome.target}`);
+        if (outcome.superseded) {
+          // The ref moved PAST this candidate: it landed, and a later publication
+          // built on top of it. Say so, or "published" beside a target ref that
+          // isn't this SHA reads like a contradiction.
+          console.log(
+            `  (superseded: the target ref has since moved past ${outcome.publishedSha.slice(0, 12)} — this ` +
+              `candidate IS in the target's history; a later publication built on top of it. Nothing to re-run.)`,
+          );
+        }
         if (outcome.checkoutError) {
           // The ref carries the candidate, so the publication IS durable — but the
           // checked-out tree could not be brought up to it. Say both things, or the

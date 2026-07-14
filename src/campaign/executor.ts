@@ -123,14 +123,17 @@ export function campaignBlocker(
   intent: "start" | "resume"
 ): CampaignStopReason | null {
   // awaiting_gate and blocked_by_red are explicitly parked workflow states — they
-  // are resumable and must NOT trigger recovery_needed.
+  // are resumable and must NOT trigger recovery_needed. FG-425 (AC5): awaiting_recovery
+  // is the third — an unsettled publication is resumed by CONVERGING it (the AD-5 sweep
+  // at the top of the next wave), which is exactly what a resume drives.
   const inFlight = items.find(
     (i) =>
       i.lifecycleStatus !== "pending" &&
       i.lifecycleStatus !== "complete" &&
       i.lifecycleStatus !== "failed" &&
       i.lifecycleStatus !== "awaiting_gate" &&
-      i.lifecycleStatus !== "blocked_by_red"
+      i.lifecycleStatus !== "blocked_by_red" &&
+      i.lifecycleStatus !== "awaiting_recovery"
   );
   if (inFlight) return "recovery_needed";
 
@@ -701,6 +704,37 @@ async function driveWorkflowItem(
 
     // Step 3: blocked_by_red takes priority.
     const tasks = tasksForRun(runId);
+
+    // FG-425 (AC5): ahead of every other branch — a task whose publication advanced
+    // the target ref and then lost the window. Its candidate may ALREADY be on the
+    // target, so the campaign must not report it as failed, must not retry it, and
+    // must not let it fall through to the no-progress backstop (which would mislabel
+    // it awaiting_gate). Park with the truth; a resume re-drives the run, whose next
+    // wave converges the publication (AD-5) and reconciles the task.
+    const recoveringTask = tasks.find((t) => t.status === "awaiting_recovery");
+    if (recoveringTask) {
+      updateCampaignItem(itemId, {
+        lifecycleStatus: "awaiting_recovery",
+        blockerKind: "git_state",
+        requestedHumanAction:
+          `step ${recoveringTask.phase} lost the publication window AFTER its ref advance landed — the publish ` +
+          `target may ALREADY carry its candidate. Nothing was lost and nothing needs re-running: do NOT retry ` +
+          `${recoveringTask.id}. Run \`forge campaign resume ${campaignId}\` (or \`forge next ${runId}\`) to converge ` +
+          `the publication (AD-5) and reconcile the task onto what actually landed.`,
+      });
+      await parkCampaign(campaignId, itemId, "blocked", { exemption: "item-carries-context" });
+      return {
+        outcome: "paused",
+        itemRecord: {
+          itemId,
+          ticketId,
+          runId,
+          lifecycleStatus: "awaiting_recovery",
+          blockerKind: "git_state",
+        },
+      };
+    }
+
     const blockedRedTask = tasks.find((t) => t.status === "blocked_by_red");
     if (blockedRedTask) {
       updateCampaignItem(itemId, {
@@ -994,7 +1028,13 @@ export async function driveRemainingItems(
     // When a run cannot be found or the workflow cannot be loaded, transition the campaign
     // back to paused (running→paused is valid) before returning recovery_needed. This
     // preserves the invariant that a paused campaign can always be safely re-examined.
-    if (item.lifecycleStatus === "awaiting_gate" || item.lifecycleStatus === "blocked_by_red") {
+    if (
+      item.lifecycleStatus === "awaiting_gate" ||
+      item.lifecycleStatus === "blocked_by_red" ||
+      // FG-425 (AC5): a parked-on-unsettled-publication item reattaches like any other
+      // parked workflow item. Re-driving its run is what converges the publication.
+      item.lifecycleStatus === "awaiting_recovery"
+    ) {
       // Populated by the FG-485 liveness probe below when it successfully loads
       // the active run's workflow, so the driveWorkflowItem call further down
       // reuses that fetch instead of re-deriving the same run/workflow.

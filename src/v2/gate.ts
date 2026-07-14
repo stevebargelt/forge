@@ -105,6 +105,19 @@ export async function gate(
       `Cannot force-advance blocked_by_red task ${taskId}: --rationale is required (it is the human decision record).`,
     );
   }
+  // FG-425 (AC5): refused, and refused BY NAME — including under --force. There is no
+  // human decision to record here: the task's publication is UNSETTLED, and advancing
+  // (or rejecting) it would write a terminal task row over an attempt still recorded
+  // `publishing`. Converge the publication first; then the task lands on the truth and
+  // any gate it actually has is decided against a settled record.
+  if (task.status === "awaiting_recovery") {
+    throw new Error(
+      `Task ${taskId} lost the publication window AFTER its target-ref advance landed — its publication is not ` +
+        `settled, so there is nothing to gate yet (and --force cannot settle it). Its candidate may ALREADY be on ` +
+        `the target. Run \`forge next ${task.runId}\` to converge the publication (AD-5) and reconcile the task; ` +
+        `\`forge show ${taskId}\` names the attempt.`,
+    );
+  }
   if (task.status !== "awaiting_gate" && !blocked) {
     throw new Error(
       `Task ${taskId} is in status '${task.status}', not awaiting_gate. Cannot gate.`,

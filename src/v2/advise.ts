@@ -14,6 +14,7 @@ export type AdviceKind =
   | "awaiting_gate"
   | "awaiting_red"
   | "blocked_by_red"
+  | "awaiting_recovery"
   | "crashed"
   | "ready_to_dispatch"
   | "stuck";
@@ -35,6 +36,7 @@ export type Advice = {
     awaiting_gate: number;
     awaiting_red: number;
     blocked_by_red: number;
+    awaiting_recovery: number;
     failed: number;
     complete: number;
   };
@@ -47,6 +49,7 @@ export function adviseRun(run: Run, tasks: Task[]): Advice {
     awaiting_gate: tasks.filter((t) => t.status === "awaiting_gate").length,
     awaiting_red: tasks.filter((t) => t.status === "awaiting_red").length,
     blocked_by_red: tasks.filter((t) => t.status === "blocked_by_red").length,
+    awaiting_recovery: tasks.filter((t) => t.status === "awaiting_recovery").length,
     failed: tasks.filter((t) => t.status === "failed").length,
     complete: tasks.filter((t) => t.status === "complete").length,
   };
@@ -65,6 +68,24 @@ export function adviseRun(run: Run, tasks: Task[]): Advice {
       kind: "abandoned",
       summary: `Run ${run.id} was abandoned.`,
       command: "",
+      counts,
+    };
+  }
+
+  // FG-425 (AC5): an unsettled publication outranks every other advice. Its candidate
+  // may ALREADY be on the target, so any advice that sends the operator to retry,
+  // gate or re-dispatch the task first would be advice to duplicate published work.
+  // The remedy is forge's own, not the human's: `forge next` runs AD-5 convergence
+  // and reconciles the task onto the truth.
+  if (counts.awaiting_recovery > 0) {
+    const t = tasks.find((x) => x.status === "awaiting_recovery")!;
+    return {
+      kind: "awaiting_recovery",
+      summary:
+        `${counts.awaiting_recovery} task(s) lost the publication window after the target ref already advanced. ` +
+        `Their work may ALREADY be published — do not retry them. Converge the publication first.`,
+      command: `forge next ${run.id}`,
+      alternativeCommand: `forge show ${t.id}`,
       counts,
     };
   }

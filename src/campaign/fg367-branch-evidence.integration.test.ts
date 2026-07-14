@@ -62,7 +62,7 @@ function makeWorkflowStubs(taskId: string, worktreePath?: string): {
       insertVerdict({ id: `verdict-${taskId}`, taskId, redTaskId: taskId, redRole: "red-wide", verdict: "pass", confidence: 0.9, authority: "authoritative", findings: [], createdAt: nowIso() });
       logEvent("verdict.received", { runId, taskId, payload: { redRole: "red-wide", verdict: "pass", authority: "authoritative" } });
       updateRunStatus(runId, "complete");
-      return { dispatchedSteps: [], completedSteps: ["build"], awaitingGate: [], failedSteps: [], runStatus: "complete" };
+      return { dispatchedSteps: [], completedSteps: ["build"], awaitingGate: [], failedSteps: [], awaitingRecovery: [], runStatus: "complete" };
     },
   };
 }

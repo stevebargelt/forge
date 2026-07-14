@@ -83,7 +83,15 @@ export type TaskStatus =
   | "awaiting_red"
   | "complete"
   | "failed"
-  | "blocked_by_red";
+  | "blocked_by_red"
+  // FG-425 (AC5): the task's publication attempt advanced the target ref and then
+  // lost the publication window before its disposition could be settled. NON-TERMINAL
+  // and RECOVERABLE: the attempt is still `publishing`, so no terminal claim about it
+  // may be made — least of all a refusal saying nothing was published, which would
+  // invite a retry of work that already landed. `forge next` converges the attempt
+  // (AD-5) and reconciles this task onto the truth; `forge publish recover <attemptId>`
+  // does it by hand.
+  | "awaiting_recovery";
 
 export type Run = {
   id: string;

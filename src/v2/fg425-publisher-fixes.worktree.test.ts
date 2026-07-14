@@ -41,6 +41,7 @@ import {
   publishIntegration,
   recoverPublicationAttempt,
   recoverUnfinishedPublications,
+  setPublisherSeamsForTest,
   type ValidationResult,
 } from "./integration-publisher.js";
 import { readTargetSha, localTargetFor, WINDOW_GIT_TIMEOUT_MS } from "./publication-target.js";
@@ -54,6 +55,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setPublisherSeamsForTest({});
   setPublicationClockOffsetForTest(0);
   setDbForTest(prevDb as DatabaseInstance);
   for (const d of cleanup.splice(0)) rmSync(d, { recursive: true, force: true });
@@ -597,7 +599,7 @@ test("FG-425: a checkout that outlives the OLD fixed TTL keeps the mutex — no 
   assert.equal(out.kind, "published", `the slow-but-live publisher still publishes: ${JSON.stringify(out)}`);
 });
 
-test("FG-425: a publisher that LOST the mutex fails closed — it never checks out over the attempt that took it", async () => {
+test("FG-425: a publisher that LOST the mutex fails closed — it never checks out over the attempt that took it, and never claims a terminal disposition it cannot prove", async () => {
   const runId = "run-mutexlost";
   const { dir, branch } = makeProject(runId);
   const { key } = projectIdentity(dir);
@@ -607,6 +609,14 @@ test("FG-425: a publisher that LOST the mutex fails closed — it never checks o
   // Inside the window: push the clock past even the NEW TTL and let a contender take
   // the mutex over. The holder's next renewal — the one before `read-tree` — must
   // find the window gone and refuse to touch the tree.
+  //
+  // FG-425 (AC5): the thief here KEEPS the window (it is a live holder for the whole
+  // span this test observes), so the losing publisher never gets it back to converge
+  // with. That is what isolates the property this test is about — what a publisher does
+  // while it owns NOTHING — from what it may do later, legitimately, as the window's
+  // owner. The convergence wait is shortened to keep that span short; the production
+  // bound is derived from MUTEX_TTL_MS and is not what this test is pinning.
+  setPublisherSeamsForTest({ convergeWaitMs: 500 });
   const out = await publishIntegration({
     runId,
     taskId: "task-build-1",
@@ -626,11 +636,26 @@ test("FG-425: a publisher that LOST the mutex fails closed — it never checks o
     },
   });
 
-  assert.equal(out.kind, "refused", `a publisher that lost the mutex must refuse, not publish: ${JSON.stringify(out)}`);
+  // NOT a terminal refusal (FG-425 AC5). The ref carries this attempt's candidate, so
+  // "refused — nothing was published" is the one thing this cannot be: it would be a
+  // terminal claim standing over an attempt still recorded `publishing`, and it would
+  // invite a retry of work that is already on the target. Unable to prove a disposition,
+  // the publisher reports a NON-TERMINAL one.
+  assert.equal(
+    out.kind,
+    "recovery_pending",
+    `a publisher that lost the mutex with its ref advance LANDED must report a non-terminal, recoverable ` +
+      `disposition — never a terminal refusal, and never a publication it cannot prove: ${JSON.stringify(out)}`,
+  );
   assert.match(
     (out as { error: string }).error,
-    /no longer holds the publication mutex/,
-    "and the refusal must NAME the lost window rather than surface as some incidental git error",
+    /publication window can no longer be proven/,
+    "and it must NAME the lost window rather than surface as some incidental git error",
+  );
+  assert.doesNotMatch(
+    (out as { error: string }).error,
+    /[Nn]othing was published/,
+    "and it must NOT tell the operator nothing was published — the target ref carries the candidate",
   );
   assert.notEqual(
     readTargetSha(target),

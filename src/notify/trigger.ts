@@ -24,6 +24,12 @@ function statusToNotifyState(status: string): NotifyState | null {
   if (status === "abandoned") return "failed";
   if (status === "blocked_by_red") return "blocked_by_red";
   if (status === "awaiting_gate") return "awaiting_gate";
+  // FG-425 (AC5): awaiting_recovery deliberately does NOT page. It is not a failure
+  // and it is not a gate: no human decision unblocks it — the next `forge next`
+  // converges the publication and reconciles the task on its own. The states forge
+  // pages on are the ones a HUMAN has to act on, and an SMS here would be noise that
+  // invites exactly the retry the state exists to prevent. It is surfaced on every
+  // inspection surface (forge show / status / advise / dashboard) instead.
   return null;
 }
 

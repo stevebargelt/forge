@@ -23,6 +23,7 @@ import { logEvent, eventsForTask } from "../store/events.js";
 import { newTaskId, nowIso } from "../util/ids.js";
 import { taskDir } from "../util/paths.js";
 import { failureKindForTask } from "./failure-kind.js";
+import { publicationAttemptsForTask } from "../store/publications.js";
 import { retryPolicy, type RetryDisposition } from "./retry-policy.js";
 import { taskDispatchKind } from "./run-kind.js";
 import { readTaskManifest } from "./task-manifest.js";
@@ -83,6 +84,24 @@ export class FanoutChildRetryError extends Error {
         `Use \`forge recover ${parentId} --re-drive\` to re-drive the whole wave, or pass --force to retry this child anyway.`,
     );
     this.name = "FanoutChildRetryError";
+  }
+}
+
+/** FG-425 (AC5): this task's candidate is ALREADY on the publish target — a durable
+ *  attempt records the CAS that landed it. A retry re-runs the agent and publishes
+ *  again, so it is refused with the fact that makes it refusable: the published SHA.
+ *  --force is deliberately NOT an override here. There is no "retry it anyway" reading
+ *  of published work: to build on it, dispatch new work; to undo it, that is a git
+ *  operation on the target, not a forge retry. */
+export class PublishedTaskRetryError extends Error {
+  constructor(public taskId: string, public attemptId: string, public publishedSha: string) {
+    super(
+      `Task ${taskId} has ALREADY published its work to the target (attempt ${attemptId}, published ` +
+        `${publishedSha.slice(0, 12)}). Retrying would re-dispatch the agent and publish a second time — the target ` +
+        `already carries this task's candidate. Inspect it with \`forge show ${taskId}\`; if the published work needs ` +
+        `changing, dispatch new work on top of it rather than re-running a publication that succeeded.`,
+    );
+    this.name = "PublishedTaskRetryError";
   }
 }
 
@@ -354,7 +373,31 @@ export async function retry(taskId: string, opts?: { force?: boolean }): Promise
   const task = getTask(taskId);
   if (!task) throw new Error(`Task not found: ${taskId}`);
 
+  // FG-425 (AC5) RETRY SAFETY, and it is checked FIRST — before the status rule, which
+  // would otherwise refuse a published task with a generic "not failed, gate instead"
+  // that says nothing about the reason that actually matters. A durable `published`
+  // attempt means this task's candidate LANDED on the target through a CAS: retrying
+  // re-dispatches the agent and publishes a second time, duplicating work already in
+  // the target's history. The publisher is idempotent per TASK, but a retry mints a NEW
+  // task id, so that guard can never see this one; the refusal has to live here, where
+  // the lineage is still visible.
+  const published = publicationAttemptsForTask(taskId).find((a) => a.state === "published");
+  if (published) {
+    throw new PublishedTaskRetryError(taskId, published.attemptId, published.publishedSha ?? "");
+  }
+
   if (task.status !== "failed") {
+    // FG-425 (AC5): awaiting_recovery names itself. A generic "not failed, gate or
+    // submit instead" would send the operator looking for a gate that does not exist,
+    // on a task whose candidate may already be on the target.
+    if (task.status === "awaiting_recovery") {
+      throw new Error(
+        `Task ${taskId} lost the publication window AFTER its target-ref advance landed — its work may ALREADY be ` +
+          `published, so a retry would publish it twice. The disposition is not settled yet and forge will not guess ` +
+          `at one. Run \`forge next ${task.runId}\` (AD-5 convergence + reconciliation), or ` +
+          `\`forge publish recover <attemptId>\` to converge it by hand; \`forge show ${taskId}\` names the attempt.`,
+      );
+    }
     throw new Error(
       `Task ${taskId} is in status '${task.status}', not failed. Retry only resets failed tasks; for other states, gate or submit instead.`
     );

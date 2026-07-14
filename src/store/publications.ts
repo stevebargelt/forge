@@ -259,6 +259,17 @@ export function unfinishedPublications(projectKey: string): PublicationAttempt[]
   return rows.map(toAttempt);
 }
 
+/** Every attempt this task ever made to publish, newest first. The task→attempt
+ *  direction is what reconciliation and retry-safety read: a task whose latest
+ *  attempt is `published` has ALREADY landed its work on the target, and neither a
+ *  retry nor a re-drive may publish it a second time. */
+export function publicationAttemptsForTask(taskId: string): PublicationAttempt[] {
+  const rows = getDb()
+    .prepare(`SELECT * FROM publication_attempts WHERE task_id = ? ORDER BY created_at DESC`)
+    .all(taskId) as AttemptRow[];
+  return rows.map(toAttempt);
+}
+
 export function allPublicationAttempts(): PublicationAttempt[] {
   const rows = getDb()
     .prepare(`SELECT * FROM publication_attempts ORDER BY created_at DESC`)
