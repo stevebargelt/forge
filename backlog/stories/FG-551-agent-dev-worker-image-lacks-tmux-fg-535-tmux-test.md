@@ -67,6 +67,55 @@ Additionally:
   are untouched.
 - A regression guard prevents the image from silently losing tmux again.
 
+## RECORDED EVIDENCE — pre-fix inventory and post-fix result
+
+Reproduce either half with **`docker/verify-launch-tier-in-image.sh`** (builds the agent image via
+`docker/build.sh`, runs the launch tier **inside** the built image with the TAP reporter, prints the exact
+per-test inventory, and **exits non-zero on any failure OR any skip** — a skip is a failure here on purpose).
+
+### PRE-FIX — `agent-dev-worker:latest`, tmux ABSENT (`command -v tmux` → not found)
+
+```
+# tests 36   # pass 26   # fail 10   # skipped 0   # todo 0
+```
+
+**Intentional skips present pre-fix: ZERO.** The tier had no intentional skips of any kind, so there are no
+unrelated skips to carry forward, exclude from scope, or disentangle. Closure is unambiguous.
+
+**All 10 failures asserted the same message — `these tests require tmux — install it`** — thrown from the
+file-wide `before()` hook at `src/v2/launch-cli.integration.test.ts:62`. A throwing `before` hook fails every
+test in the file, which is why these are hard FAILURES and not skips. The ten:
+
+1. FG-535 CLI: a FAST command keeps its durable record and its inspectable pane (remain-on-exit is armed before the command runs)
+2. FG-535 tmux: a command that finishes BEFORE remain-on-exit could be armed still keeps its record
+3. FG-535 CLI: tmux owns the process — it outlives the submitting CLI call, which returns at once
+4. FG-535 CLI: the persisted owner pid names the REAL live process that owns the command
+5. FG-535 CLI: a REAL SIGTERM records WIFSIGNALED evidence and still refuses to name a sender
+6. FG-535 CLI: killing the OWNER itself (the wrapper, SIGKILL — no exit record possible) reads owner_gone, not running-forever
+7. FG-535 CLI: a wrapper that FAILS its last-act write (I/O failure, no kill at all) also reads owner_gone — which is why the claim stays indeterminate
+8. FG-535 CLI: a command that DELIBERATELY exits 143 is not reported as a kill
+9. FG-535 CLI: list and show render the operator surface, and rm cleans up
+10. FG-535 CLI: rm refuses a RUNNING launch without --force — removal must never be what kills the work
+
+### POST-FIX — rebuilt image, tmux 3.2a at `/usr/bin/tmux`
+
+```
+# tests 41   # pass 41   # fail 0   # skipped 0   # todo 0
+```
+
+`docker/verify-launch-tier-in-image.sh` → **exit 0**, *"PASS: 41 tests ran inside agent-dev-worker, all
+passed, none skipped."*
+
+All 10 above now pass. The 5 new FG-551 guard tests pass. **No new skip was introduced** (skip count is 0
+both before and after), and `src/v2/launch-cli.integration.test.ts` is **byte-identical** to its pre-fix
+state — no launch test was skipped, stubbed, gated, or weakened.
+
+> **Rejected during review:** a fixer attempt added an "integration test" titled *"execute the real launch
+> tier in the shipped image"* that **never invoked Docker** — it ran the tier in the ambient process and
+> simulated the pre-fix image with a PATH shim making `tmux -V` exit 127. A test whose name claims
+> verification it does not perform is worse than no test. It was discarded. The script above does the real
+> thing, and its result is reproducible by anyone with a Docker daemon.
+
 ## Falsification
 
 Per the PRD's campaign rule — **the guard must be observed RED against the pre-fix image.** Build the
