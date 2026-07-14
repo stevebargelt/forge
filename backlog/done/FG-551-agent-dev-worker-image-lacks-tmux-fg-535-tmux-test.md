@@ -5,16 +5,16 @@ status: done
 title: agent-dev-worker image lacks tmux — FG-535 tmux tests hard-fail in every agent container (10 failures per run; agents must apt-get install tmux to get a green suite)
 created: 2026-07-13
 closed: 2026-07-14
-closed_commit: b3d77b3
+closed_commit: 7f6091b
 ---
 
 **Epic:** FG-561 · **PRD:** `docs/prds/durable-orchestration-continuation.md` @ `e6fd56b` (Slice 0)
 **Blocks:** nothing structurally — but it poisons the test signal every other slice depends on, which is
 why it runs first.
 
-## Problem
+## Problem (RESOLVED — merged `7f6091b`; stated in the past tense below)
 
-`docker/agent-dev-worker.Dockerfile` does not install `tmux`. FG-535's launch tests exercise the real
+`docker/agent-dev-worker.Dockerfile` **did not** install `tmux`. FG-535's launch tests exercise the real
 tmux-owned launch path, so **10 tests hard-fail in every agent container, on every run.**
 
 The cost is not the ten failures. It is that **every agent's suite looks red**, so:
@@ -99,24 +99,80 @@ test in the file, which is why these are hard FAILURES and not skips. The ten:
 9. FG-535 CLI: list and show render the operator surface, and rm cleans up
 10. FG-535 CLI: rm refuses a RUNNING launch without --force — removal must never be what kills the work
 
-### POST-FIX — rebuilt image, tmux 3.2a at `/usr/bin/tmux`
+### POST-FIX — rebuilt image, tmux 3.2a at `/usr/bin/tmux` (merged `7f6091b`)
 
 ```
-# tests 41   # pass 41   # fail 0   # skipped 0   # todo 0
+# tests 42   # pass 42   # fail 0   # skipped 0   # todo 0
 ```
 
-`docker/verify-launch-tier-in-image.sh` → **exit 0**, *"PASS: 41 tests ran inside agent-dev-worker, all
-passed, none skipped."*
+`docker/verify-launch-tier-in-image.sh` → **exit 0**, *"PASS (post-fix): 42 tests ran inside
+agent-dev-worker, all passed, none skipped."*
 
-All 10 above now pass. The 5 new FG-551 guard tests pass. **No new skip was introduced** (skip count is 0
+All 10 above now pass. **All 6 FG-551 guard tests pass.** **No new skip was introduced** (skip count is 0
 both before and after), and `src/v2/launch-cli.integration.test.ts` is **byte-identical** to its pre-fix
 state — no launch test was skipped, stubbed, gated, or weakened.
+
+> **Inventory note:** an earlier revision of this block recorded **41 tests / 5 guards**. That was accurate
+> at `b3d77b3` and went stale when the corrective (`7f6091b`) added a **sixth** guard assertion — the
+> final-RUN smoke check. A reviewer caught the drift. The counts above (**42 / 6**) are the merged truth.
+
+### EXECUTABLE FALSIFICATION — the red baseline is now re-derivable
+
+```
+docker/verify-launch-tier-in-image.sh --pre-fix
+```
+
+Derives a **tmux-less** image and runs today's tier against it. It asserts the **tmux-specific** inventory —
+not merely "something failed":
+
+- exactly **10** tests fail (`EXPECTED_TMUX_FAILURES`, a named constant),
+- **each** citing the launch tier's precondition `these tests require tmux` — so they failed **because** tmux
+  is absent, not incidentally,
+- **zero** skips and **zero** todos (a skip route is how a missing tmux goes quietly green),
+- a **drifted count fails loudly** and prints the inventory rather than being silently accepted.
+
+Host run: *"PASS (pre-fix falsification): 42 tests — 10 FAILED, 0 skipped. All 10 expected tmux-gated tests
+failed, each citing 'these tests require tmux'. The tmux path itself went red."*
+
+### The regression guard is MUTATION-PROVEN (8 mutations, all RED; baseline GREEN)
+
+| mutation | guard |
+|---|---|
+| later `RUN mv /usr/bin/tmux /usr/bin/tmux.disabled` | **RED** |
+| later `RUN chmod -x /usr/bin/tmux` | **RED** |
+| later `RUN apt-get purge -y tmux` | **RED** |
+| final smoke deleted | **RED** |
+| final smoke masked (`\|\| true`) | **RED** |
+| tmux removed from the apt-get install list (smoke kept) | **RED** |
+| near-miss `libtmux-dev` | **RED** |
+| near-miss `tmux-plugin-manager` | **RED** |
+
+### Four checks that passed WITHOUT CHECKING (the lesson of this ticket)
+
+Every one was green, and every one was hollow — an assertion satisfied by something *adjacent* to what it
+claimed to verify:
+
+1. **A Dockerfile comment** containing the words `tmux -V` satisfied the build-smoke assertion (delete the
+   real smoke, keep the comment → green).
+2. **`{ skip: !hasTmux }`** satisfied the anti-skip assertion (the before-hook `assert.ok` stayed intact
+   while all ten tests silently skipped).
+3. **An adjacent `&& tmux -V`** on the same line satisfied the install assertion, because `.*` crossed shell
+   boundaries (strip tmux from the packages, keep the smoke → green).
+4. **`FAIL_N != 0`** satisfied the falsification (any unrelated failing test would do, even with the ten
+   deleted).
+
+Plus one in the tooling: the orchestrator's first mutation harness printed `GUARD RED ✓` for every case
+while grepping for a string the test reporter never emits — it would have certified a completely broken
+guard.
+
+**What held were the checks that EXECUTE rather than pattern-match**: a final `RUN` that actually runs tmux
+against the finished filesystem, and a falsification that actually builds a tmux-less image and counts the
+specific failures.
 
 > **Rejected during review:** a fixer attempt added an "integration test" titled *"execute the real launch
 > tier in the shipped image"* that **never invoked Docker** — it ran the tier in the ambient process and
 > simulated the pre-fix image with a PATH shim making `tmux -V` exit 127. A test whose name claims
-> verification it does not perform is worse than no test. It was discarded. The script above does the real
-> thing, and its result is reproducible by anyone with a Docker daemon.
+> verification it does not perform is worse than no test. It was discarded.
 
 ## Falsification
 

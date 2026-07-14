@@ -93,7 +93,7 @@ Forge must not make correct ownership depend on a particular upstream diagnosis 
 | Agent container | Docker daemon via `docker run -d` | FG-536 | Landed |
 | Agent result | Bind-mounted task directory and Forge store | Existing + FG-536 recovery | Landed |
 | Unsafe harness background dispatch | Disabled for `forge claude` children | FG-542 | Landed |
-| tmux availability in agent test image | `agent-dev-worker` image | FG-551 | Active gap |
+| tmux availability in agent test image | `agent-dev-worker` image | FG-551 | Landed (`7f6091b`) |
 | Control-plane executable (Forge's own runtime, R1) | npm-linked mutable Forge working tree | FG-553 | Active gap |
 | Launched-workload environment (R3/R4) | Caller's ambient environment; `forge launch` preserves argv and owns no environment contract | FG-555 | Active gap |
 | Launch completion notification | Hand-built Monitor polling | FG-552 | Active gap |
@@ -629,6 +629,7 @@ The initiative is complete only when all of the following are true:
 - **D3:** the executive-outcome diagram no longer says Forge must *record* all of R1–R4; it must **account durably** for them — capture, derive, or explicitly declare unknowable — matching BD-14, which allows R4 to be inherently unknowable.
 - **D4:** removed stale pre-FG-425 temporal framing (FG-425 has landed and merged) and updated the header status from "awaits operator acceptance" to accepted, pending decomposition.
 - No other normative content changed. BD-13/BD-14/BD-15, BD-5/6/7/10/11, the C1–C8 corrections, and the F-row matrix are untouched.
+- **System-map reconciliation:** the FG-551 row (tmux availability in the agent test image) moved from `Active gap` to `Landed (7f6091b)`. Slice 0 merged; the `agent-dev-worker` image installs tmux and guards it with a final-RUN smoke assertion, and the FG-535 launch tier runs clean inside it. Factual status only — no normative content changed.
 
 ### 2026-07-14 — audit correction pass (C1–C8)
 
