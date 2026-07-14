@@ -23,11 +23,15 @@ of the launch boundary.
 **Closing FG-553 therefore does not close this.** Do not fold this slice into FG-553.
 
 **Runtime ownership (BD-14's four identities):** **R1 (control runtime) and R2 (exit-recorder runtime) are
-FG-553's. R3 (launched top-level executable) and R4 (nested-shell resolution) are THIS slice's.** F30 is not
-satisfied until all four are independently accounted for across the two slices — captured, derived, or
-explicitly declared unknowable. Neither slice may assume the other covered its half. Note especially: the
-exit recorder's `process.execPath` identifies **R2 only** and proves nothing about R3 or R4, and recording
-argv is **not** a resolution of R3.
+FG-553's. R3 (launched top-level executable) and R4 (nested-shell resolution) are THIS slice's.** Each must
+be captured, derived, or explicitly declared unknowable. Neither slice may assume the other covered its half.
+Note especially: the exit recorder's `process.execPath` identifies **R2 only** and proves nothing about R3 or
+R4, and recording argv is **not** a resolution of R3.
+
+**F30 ownership — no dependency cycle.** FG-553 closes on **R1 + R2 + a provenance contract compatible with
+R3/R4**; it does **not** wait on this slice. **This slice completes R3/R4 against that contract.** **FULL F30
+— all four runtimes accounted for — is a CAMPAIGN-LEVEL condition satisfied after FG-555 lands, and verified
+again by FG-565.** FG-555 depends on FG-553; FG-553 must never depend back on FG-555.
 
 ## Falsification
 

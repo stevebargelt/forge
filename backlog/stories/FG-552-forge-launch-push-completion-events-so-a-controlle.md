@@ -2,7 +2,7 @@
 id: FG-552
 type: story
 status: active
-title: "forge launch: push completion events so a controller can advance phases without fixed-estimate wakeups (durable event-driven continuation)"
+title: "forge launch: completion-driven phase advancement via a blocking launch-wait primitive (atomic records + mandatory reconciliation, no fixed-estimate model polling)"
 created: 2026-07-14
 ---
 
@@ -138,11 +138,15 @@ a test that cannot go red does not prove the defect was covered.
 | **F9** | Wrapper/pane dies before the exit record | `owner_gone` is detected; **the work's result is not invented**. |
 | **F10** | Host/session restarts with no exit record and no owner | Known launch reads `unknown`; the controller surfaces recovery/blocker policy (**OQ-5**). |
 | **F11** | Record is transiently unreadable | **Bounded retry; NO premature terminal failure.** *(Today the reader maps an empty exit file straight to terminal `unknown` — `launch.ts:102,287,289`.)* |
-| **F32** | Meta-record publication interrupted | A **running** launch is never reported as "no such launch". *(Today `meta.json` is written twice — `launch.ts:240,269-270`.)* |
-| **F33** | Artifact-less terminal disposition (`owner_gone` / `unknown`) | Found by **mandatory reconciliation** — a watch-then-reread design structurally cannot see them. |
-| **F34** | tmux degraded / absent | Observation still behaves correctly. *(`readLaunch` shells out to the `tmux` binary — it is not a pure record read.)* |
+| **F32** | A reader arrives during meta-record publication | A **running** launch never reads as absent or as "no such launch". *(Today `meta.json` is written twice — `launch.ts:240,269-270`.)* |
+| **F33** | **Observer runs where `better-sqlite3` cannot load** | **`forge launch wait` still observes and reports terminal dispositions** — the observer path does **not** transitively load the native binding or the command registry. *(Today `src/cli/index.ts` eagerly imports all command modules before argv is parsed, pulling in `better-sqlite3`, while `readLaunch` needs only `node:fs` + the tmux binary.)* **This is the row that proves source isolation alone (FG-553) does not save the observer.** |
+| **F34** | **Launch reaches `owner_gone` or `unknown`, producing no filesystem artifact** | **Reconciliation observes BOTH dispositions. A watch-only design must be OBSERVED FAILING this row.** |
 
-F1/F2/F3 (subscribe race, missed FS event) are covered by the BD-6 criterion above.
+**F1/F2/F3** (subscribe race, missed FS event) are covered by the BD-6 criterion above.
+
+**Degraded / absent tmux** is a required acceptance test of this slice, but it is **NOT an F-row** — do not
+label it F34 or any other number. `readLaunch` shells out to the `tmux` binary and is therefore not a pure
+durable-record read; observation must behave correctly when tmux is degraded or absent.
 
 ## Non-scope (from the PRD)
 

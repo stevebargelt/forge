@@ -17,7 +17,10 @@ lose or duplicate work.
 
 ## Scope
 
-- The **end-to-end fault matrix** (F1–F35 plus the open in-flight/lazy-import case) exercised as one system.
+- The **end-to-end fault matrix** — **F1–F35 plus T9 as decided by FG-553** — exercised as one system. **T9
+  is not open at closeout:** FG-553 settles the in-flight/lazy-import question empirically because it
+  constrains the promotion mechanism FG-553 builds. This slice **verifies that decision holds** under the
+  full matrix; it does not re-open it.
 - Delivery / claim / watchdog-recovery evidence exposed through an **operator surface**.
 - Clear retirement — or explicit fallback status — for the hand-built `Monitor` polling workaround.
 - Update the FG-542-era prose that still says `ScheduleWakeup` owns ordinary delays.
@@ -57,9 +60,20 @@ transcript or Monitor output.
     runtime selected and usable; a promotion with an in-flight launch keeps runtime identity diagnosable
     and follows the recorded store/schema-compatibility policy. **Includes T9** (the in-flight/lazy-import
     case), which is **DECIDED IN FG-553** — this slice verifies the decision holds under the full matrix.
-  - **F29/F30/F31** — the control plane runs correctly from **two incompatible PATH/Node environments**,
-    invoked as bare `forge` from a shell the operator did **not** pre-sanitize. *"Fails cleanly" is not a
-    pass — it must RUN.* A caller-applied PATH pin is containment, not isolation, and does not satisfy this.
+  - **F29, F30, and F31 are THREE DISTINCT CLOSEOUT ASSERTIONS. Do not recombine them** — they have
+    different, partly *opposite* pass conditions, and asserting "the control plane must run" across all three
+    would **REJECT a correct F31 implementation**, whose whole point is a clean refusal.
+    - **F29 — RUNS.** The bare stable `forge` **runs correctly** from a shell whose PATH resolves a different
+      interpreter, invoked from a shell the operator did **not** pre-sanitize. *"Fails cleanly" is NOT a pass
+      for F29.* A caller-applied PATH pin is containment, not isolation, and does not satisfy it.
+    - **F30 — PROVENANCE (campaign-level).** **R1–R4 are EACH durably captured, derived, or explicitly
+      recorded as unknowable.** R1/R2 land in FG-553, R3/R4 in FG-555 — **full F30 is only satisfiable after
+      FG-555**, and this slice is where it is verified end to end. Argv alone does not satisfy R3; the exit
+      recorder's `process.execPath` does not satisfy R1, R3, or R4.
+    - **F31 — REFUSED.** An interpreter whose ABI the native bindings were not built for is **refused by a
+      bounded ABI assertion, before any native module loads** — a too-new major with an incompatible ABI must
+      be **rejected, not admitted**. **F31's pass condition IS a clean refusal, not a successful run.** An
+      opaque `ERR_DLOPEN_FAILED` is a FAIL; so is running anyway.
   - **F35** — version-skew store compatibility: old and new Forge processes against one SQLite, under the
     **BD-15 policy decided in FG-553**.
 - The `Monitor` workaround's status is explicit: retired, or retained as a named fallback adapter (the

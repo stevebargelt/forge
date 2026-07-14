@@ -153,10 +153,15 @@ Each is a separate acceptance case with a separate pass condition:
     list` and `forge status --json` exit 1 with empty stdout — evidence-honest, but **the control plane did
     not run**.* **"Fails cleanly" is NOT a pass for F29. It must RUN.**
   - **A caller-applied PATH pin is containment, not isolation, and does NOT satisfy F29.**
-- **F30 — PROVENANCE.** **R1, R2, R3, and R4 are each independently accounted for** — captured, derived, or
-  **explicitly declared unknowable**. Recording one is **not** proof of another. R1/R2 are this slice's;
-  R3/R4 are FG-555's; **F30 is not satisfied until all four are accounted for across the two slices.**
-  Recording argv, or recording the exit recorder's `process.execPath`, does **not** satisfy F30.
+- **F30 (this slice's HALF) — PROVENANCE of R1 and R2.** **R1 and R2 are each independently accounted for**
+  — captured, derived, or **explicitly declared unknowable** — **plus** a **provenance contract that is
+  compatible with R3/R4** (the record shape, vocabulary, and semantics FG-555 will populate). Recording one
+  runtime is **not** proof of another: the exit recorder's `process.execPath` satisfies **R2 only** and does
+  **not** satisfy R1, R3, or R4.
+  > **FG-553 does NOT wait on FG-555 to close.** This slice closes on **R1 + R2 + an R3/R4-compatible
+  > provenance contract**. FG-555 (Slice 1b) then completes **R3/R4**. **FULL F30 — all four runtimes
+  > accounted for — is a CAMPAIGN-LEVEL condition satisfied after FG-555 and verified again by FG-565.**
+  > (FG-555 depends on FG-553; FG-553 must therefore not depend on FG-555, or the two deadlock.)
 - **F31 — REFUSAL.** Forcing an **incompatible interpreter** is **REFUSED by the bounded ABI assertion
   BEFORE any native module is loaded**, with a named, actionable mismatch. Test **ENV-C**: Homebrew-first
   PATH → v26.3.1 / ABI 147. **Never tested today, and expected to fail badly** — the minimum-major preflight
