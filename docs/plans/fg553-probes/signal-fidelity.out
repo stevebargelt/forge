@@ -1,0 +1,13 @@
+runtime: v24.17.0 ABI 137
+### child exits 0
+  DIRECT observer of WRAPPER: code=0 signal=null   (shell would encode as $?=0)
+  observer: child code=0 signal=null
+  decision: EXIT 0
+### child NUMERIC exit 143
+  DIRECT observer of WRAPPER: code=143 signal=null   (shell would encode as $?=143)
+  observer: child code=143 signal=null
+  decision: EXIT 143
+### child killed by SIGTERM
+  DIRECT observer of WRAPPER: code=null signal=SIGTERM   (shell would encode as $?=143)
+  observer: child code=null signal=SIGTERM
+  decision: RE-RAISE SIGTERM

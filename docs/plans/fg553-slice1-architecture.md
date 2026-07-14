@@ -160,14 +160,24 @@ never automatically.
 wait` **does not exist** (`run|list|show|rm` only). The **disposable Monitor is a working external wake
 channel.**
 
-**Specific durable evidence (correction #3), not "all session":** the Monitor watching launch
-**`launch-fg551-corrective-cf4yks`** (a `forge launch run` started `2026-07-14T19:16:17.736Z`) polled that
-launch's durable status via `forge launch show`; on the launch reaching terminal `exited 0` the Monitor
-emitted one stdout line, which arrived as the session wake event *"TERMINAL launch-fg551-corrective-cf4yks
--> exited 0"* — under `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, with no harness background task. That is one
-observed launch → Monitor → wake → result, recorded, reproducible from the launch record. So **Slice 2 is not
-being designed against a channel that cannot exist**, and *"a disposable Monitor running one blocking `forge
-launch wait`"* is a legitimate production shape. **Do not require "Monitor eliminated."**
+**Specific evidence (correction #3/#4), with the layers kept honest:**
+- **DURABLE (reproducible from the forge launch record):** launch **`launch-fg551-corrective-cf4yks`**
+  (`forge launch run`, started `2026-07-14T19:16:17.736Z`) reached terminal **`exited 0`**. `forge launch
+  show <id>` re-derives this. **This is all the launch record proves.**
+- **OPERATOR-OBSERVED (NOT reproducible from the launch record alone):** a disposable Monitor watching that
+  launch emitted one stdout line on the terminal transition, and that line arrived in *this* session as the
+  wake event *"TERMINAL launch-fg551-corrective-cf4yks -> exited 0"*, under
+  `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` with no harness background task. **The forge launch record does
+  NOT prove the wake reached the session** — that coupling lives in the harness's Monitor-task output
+  (`…/tasks/<taskid>.output`), which is harness-side, not Forge durable state. So this is a **specific
+  operator-observed fact**, classified as such, not something re-derivable from the launch record.
+
+**Feasibility conclusion stands on the combination:** the wake channel demonstrably worked at least once
+under the disabling env. So **Slice 2 is not being designed against a channel that cannot exist**, and *"a
+disposable Monitor running one blocking `forge launch wait`"* is a legitimate production shape. **Do not
+require "Monitor eliminated."** (A design consequence, noted for FG-563: because the wake→session hop is
+*not* in Forge durable state today, Forge cannot itself prove a wake was delivered — which is one more reason
+Monitor liveness must be made observable.)
 
 **Its failure mode is SILENCE — with a specific instance.** The Monitor for run `launch-fg552-audit-*` used a
 bash-4 `declare -A` on this host's bash 3.2; it died on its **first line**, wrote the error to **stderr**
@@ -211,9 +221,13 @@ from a running one.
 - **C3 — `bin/forge` launders a killed child into success.** `bin/forge:11` is
   `child.on("exit", (code) => process.exit(code ?? 0))`. **Verified by execution:** a SIGKILL'd child gives
   `code=null` → **`forge` exits 0.** Anything checking `forge`'s exit code — CI, scripts, the review-loop's own
-  verification — reads **success** when forge was killed. This violates BD-3 in the live artifact. The repo
-  already has the correct pattern 200 lines away (`claude.ts:241`: `if (signal) process.exit(128)`).
-  **exec-not-spawn deletes this defect by construction** (no child to mis-mirror).
+  verification — reads **success** when forge was killed. This violates BD-3 in the live artifact.
+  **`claude.ts:241` (`if (signal) process.exit(128)`) is NOT the pattern to copy** (correction #1): it
+  *prevents the false exit 0*, but it is **insufficient for signal fidelity** — it converts OS-signal evidence
+  into an ordinary numeric 128, which is the same F7/F8 attribution loss Child 0 must avoid. **Child 0 must
+  RE-RAISE the child's actual signal** (`process.kill(process.pid, signal)`), so a direct observer of `forge`
+  still sees `signal=SIGTERM/SIGKILL`, not a number. **exec-not-spawn deletes this defect by construction**
+  (no child to mis-mirror at all).
 
 ---
 
@@ -314,69 +328,61 @@ only** (the signal/exit-fidelity prerequisite) — because every later child's e
 
 ---
 
-## Appendix A — Durable, reproducible architecture probes (correction #3)
+## Appendix A — Durable, reproducible architecture probes (corrections #2, #3)
 
-**Runtime identity for every probe below:** `node v24.17.0`, `NODE_MODULE_VERSION` (ABI) **137**, platform
-`darwin arm64`. Native binding under test:
-`node_modules/better-sqlite3/build/Release/better_sqlite3.node` (ABI 137). Each probe is a self-contained
-script; re-running it reproduces the quoted output.
+**These are genuinely rerunnable, not pseudocode.** The actual self-contained scripts and their literal
+captured outputs are committed alongside this plan:
 
-### A1 — T9 anchoring: ESM + CJS + native dlopen (the rule and the fatal case)
+| probe | script (rerunnable) | literal output |
+|---|---|---|
+| T9 anchoring — ESM + CJS + native dlopen | `docs/plans/fg553-probes/t9-anchoring.sh` | `…/t9-anchoring.out` |
+| NODE_OPTIONS subverts a pinned interpreter | `docs/plans/fg553-probes/node-options-injection.sh` | `…/node-options-injection.out` |
+| bin/forge signal fidelity (Child 0) | `docs/plans/fg553-probes/signal-fidelity.sh` | `…/signal-fidelity.out` |
 
-**Setup:** two release dirs `rel-A`, `rel-B`, each with an entry module that resolves a sibling and dlopens
-its own module-relative copy of the real binding; a `current` symlink; a long-running process that anchors by
-importing through `current` at start, then does a lazy resolution *after* a mid-flight swap.
+Each script builds its own fixtures (including a fresh copy of the repo's real
+`node_modules/better-sqlite3/build/Release/better_sqlite3.node`), prints its runtime identity, and reproduces
+its `.out` verbatim. Run: `NODE=<abs-node> bash docs/plans/fg553-probes/<script>.sh`.
+**Runtime identity captured in every `.out`:** `node v24.17.0`, `NODE_MODULE_VERSION` (ABI) **137**,
+`darwin arm64`.
 
-**ESM (`app` anchors via eager import, probe file `t9-final`):**
+### A1 — T9 anchoring (literal output, `t9-anchoring.out`)
 ```
-entry.mjs: const here=dirname(fileURLToPath(import.meta.url)); loadNative()=process.dlopen(join(here,"binding.node"))
-probe: import {loadNative} from "./current/entry.mjs"  → 2s → swap current→rel-B → loadNative()
-RETAIN rel-A: lazy native dlopen -> from release A            (safe: anchored view held)
-DELETE rel-A: lazy native dlopen FAILED -> dlopen(...rel-A...) no such file   (FATAL — Forge's real hot path)
+mjs — swap, RETAIN old release:  anchored to A → lazy native dlopen -> release A          (SAFE)
+mjs — swap AND DELETE:           anchored to A → lazy native dlopen FAILED -> dlopen(...)  (FATAL)
+cjs — swap, RETAIN old release:  anchored to A → lazy require -> A ; native dlopen -> A    (SAFE, == ESM)
+cjs — swap AND DELETE:           anchored to A → lazy require FAILED -> MODULE_NOT_FOUND    (FATAL, == ESM)
 ```
+**Conclusion (uniform ESM/CJS/native):** a process anchors at first resolution and stays in that release;
+swap-and-retain is safe; **deleting an anchored release is fatal at the next lazy load** (native dlopen is
+Forge's real hot path). → retention invariant; **no automatic GC this slice.**
 
-**CJS (`cjs-t9`):**
+### A2 — NODE_OPTIONS subverts an absolute pinned interpreter (literal output, `node-options-injection.out`)
 ```
-entry.cjs: lazySibling()=require("./sibling.cjs"); loadNative()=process.dlopen(join(__dirname,"binding.node"))
-probe: const e=require("./current/entry.cjs")  → 2s → swap [±rm rel-A]
-RETAIN rel-A: lazy require -> A ; native dlopen -> A          (safe — IDENTICAL to ESM)
-DELETE rel-A: lazy require -> MODULE_NOT_FOUND (require stack names rel-A/entry.cjs)   (FATAL — IDENTICAL to ESM)
-```
-
-**Anchoring precision (`t9-rule`):** a process that anchored to A resolves *both* a module-relative sibling
-*and* a specifier re-traversing `current` to **A** after the swap — `SAME release`, **no mixing**. A process
-that had **not** yet traversed `current` before the swap resolves to **B** (it anchors late). Forge anchors at
-process start, so it is the first case.
-
-**Conclusion (uniform across ESM/CJS/native):** a process anchors at first resolution and stays within that
-release; swap-and-retain is safe; **deleting an anchored release is fatal at the next lazy load.** → the
-retention invariant, and **no automatic GC this slice.**
-
-### A2 — NODE_OPTIONS / NODE_PATH can subvert an ABSOLUTE pinned interpreter (`env-probe`)
-
-**Setup:** absolute pinned interpreter `/Users/.../v24.17.0/bin/node`, clean env (`env -i PATH=/usr/bin:/bin`),
-a real entry `entry.mjs` and an attacker `evil.mjs`.
-```
-baseline  env -i PATH=... node entry.mjs                         → "[forge] I am the real entry point"
-MUT-1     env -i PATH=... NODE_OPTIONS="--import ./evil.mjs" node entry.mjs
-          → "[INJECTED] attacker code ran BEFORE forge"  THEN  "[forge] ..."     (INJECTION SUCCEEDS)
-MUT-2     env -i PATH=... NODE_OPTIONS="--max-old-space-size=1" node entry.mjs   (forge PREVENTED from running normally — GC death)
-MUT-3     env -i PATH=... NODE_OPTIONS="--not-a-real-flag" node entry.mjs        ("... is not allowed in NODE_OPTIONS" — interpreter refuses to start)
+baseline (clean env, absolute interpreter):   [forge] real entry point ran
+NODE_OPTIONS=--import ./evil.mjs:              [INJECTED] attacker code ran BEFORE forge   THEN  [forge] real entry point ran
+NODE_OPTIONS=--not-a-real-flag:                node: --not-a-real-flag is not allowed in NODE_OPTIONS   (startup blocked)
 ```
 **Conclusion:** an absolute pinned interpreter path is necessary but **NOT sufficient** — ambient
-`NODE_OPTIONS` injects code before forge and can block startup entirely. F29 must include an
-env-sanitization contract (Child 4), and its mutant (pin PATH but leave `NODE_OPTIONS` live) is proven red.
+`NODE_OPTIONS` injects before forge and can block startup. F29 needs the env-sanitization contract (Child 4);
+the mutant "pin PATH but leave `NODE_OPTIONS` live" is proven red.
 
-### A3 — bin/forge signal fidelity (`sig-probe2`) — proves the Child 0 fix
+### A3 — bin/forge signal fidelity (literal output, `signal-fidelity.out`) — proves the Child 0 fix
 
-**Setup:** a wrapper that spawns a child and, on the child's exit, **re-raises the child's signal on itself**
-(`if(signal) process.kill(process.pid,signal); else process.exit(code??0)`), logging its decision.
+The wrapper re-raises the child's own signal (`if(signal) process.kill(process.pid,signal); else
+process.exit(code??0)`). The script uses a **direct process observer** of the wrapper, so the two layers are
+kept explicit (correction #3):
 ```
-child exits 0            → child_exit code=0   signal=null    → decision=EXIT 0      (wrapper rc 0)
-child NUMERIC exit 143    → child_exit code=143 signal=null    → decision=EXIT 143    (stays numeric — F8 case)
-child killed by SIGTERM   → child_exit code=null signal=SIGTERM → decision=RE-RAISE SIGTERM  (wrapper dies by SIGTERM)
-child killed by SIGKILL   → child_exit code=null signal=SIGKILL → decision=RE-RAISE SIGKILL  (wrapper rc 137)
+child exits 0:            DIRECT observer of WRAPPER: code=0    signal=null      → decision=EXIT 0
+child NUMERIC exit 143:   DIRECT observer of WRAPPER: code=143  signal=null      → decision=EXIT 143   (stays numeric — the F8 case)
+child killed by SIGTERM:  DIRECT observer of WRAPPER: code=null signal=SIGTERM   → decision=RE-RAISE SIGTERM
 ```
-**Conclusion:** re-raising the actual signal preserves the numeric-143-vs-SIGTERM distinction that
-`process.exit(128)` destroys. This is the Child 0 acceptance in executable form; today's `bin/forge`
-(`code ?? 0`) turns the SIGKILL case into rc **0**.
+**Layering, stated explicitly (correction #3):** a **direct process observer** (parent `waitpid`, forge's own
+watcher, Docker) sees the wrapper's true disposition — for a signalled death, **`code=null, signal=SIGTERM`
+(or `SIGKILL`)**; that is the OS-signal evidence. A **shell** later encodes a signalled child as
+`$? = 128+signum` (SIGTERM→143, SIGKILL→137), **but that number is NOT itself OS-signal evidence** — a
+program can also deliberately `exit(143)` (the F8 case above, where the direct observer correctly sees
+`signal=null`). The two must never be conflated: Child 0 preserves `signal` for the direct observer;
+`process.exit(128)` would erase it and leave only an ambiguous number.
+
+**Today's `bin/forge`** (`process.exit(code ?? 0)`): a SIGKILL'd child gives `code=null` → forge exits **0**
+— the red baseline Child 0 removes.

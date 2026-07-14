@@ -1,0 +1,18 @@
+runtime: v24.17.0 ABI 137 darwin arm64
+### mjs — swap, RETAIN old release
+  anchored to A
+  [swap current->rel-B]
+  lazy native dlopen -> release A
+### mjs — swap AND DELETE old release
+  anchored to A
+  [swap current->rel-B + DELETE rel-A]
+  lazy native dlopen FAILED -> dlopen(/private/var/folders/6v/r_n13rx54q3
+### cjs — swap, RETAIN old release
+  anchored to A
+  [swap current->rel-B]
+  lazy require -> A
+  native dlopen -> A
+### cjs — swap AND DELETE old release
+  anchored to A
+  [swap current->rel-B + DELETE rel-A]
+  lazy require FAILED -> MODULE_NOT_FOUND

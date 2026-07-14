@@ -1,0 +1,8 @@
+runtime: v24.17.0 ABI 137
+### baseline (clean env, absolute interpreter)
+  [forge] real entry point ran
+### NODE_OPTIONS=--import ./evil.mjs
+  [INJECTED] attacker code ran BEFORE forge
+  [forge] real entry point ran
+### NODE_OPTIONS=--not-a-real-flag (blocks startup)
+/Users/stevebargelt/.nvm/versions/node/v24.17.0/bin/node: --not-a-real-flag is not allowed in NODE_OPTIONS
