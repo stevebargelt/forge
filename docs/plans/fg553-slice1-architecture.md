@@ -4,6 +4,11 @@
 **Status:** architecture + planning complete; **REVISED after operator review (8 bounded corrections applied);
 awaiting re-review before any implementation begins.** Direction (OQ-6/BD-15) accepted and unchanged.
 
+**Status update (2026-07-14):** **Child 0 (`bin/forge` signal/exit fidelity) has LANDED as `97363ca` (PR #119)** —
+the signal-fidelity prerequisite is satisfied and verified by execution (four cases, three mutants killed).
+Children **1–5 remain planned**; the analysis, decisions (OQ-6/BD-15/T9), Appendix A probes, and mutation
+reasoning below are unchanged.
+
 **The rule this slice is planned under (from FG-551):** *a property concerning the FINAL RUNTIME must be
 demonstrated by EXECUTING or MUTATION-TESTING the final artifact. A source-pattern match is not evidence.*
 
@@ -227,7 +232,9 @@ from a running one.
   into an ordinary numeric 128, which is the same F7/F8 attribution loss Child 0 must avoid. **Child 0 must
   RE-RAISE the child's actual signal** (`process.kill(process.pid, signal)`), so a direct observer of `forge`
   still sees `signal=SIGTERM/SIGKILL`, not a number. **exec-not-spawn deletes this defect by construction**
-  (no child to mis-mirror at all).
+  (no child to mis-mirror at all). **STATUS: LANDED as `97363ca` (PR #119)** — Child 0 shipped the re-raise
+  fix; `bin/forge:11` now re-raises the child's own signal, verified by execution across all four cases with
+  all three mutants killed.
 
 ---
 
@@ -238,7 +245,7 @@ its **red baseline** and the **hollow version to reject**.
 
 | # | Child | Scope | Owns | Acceptance (executed) |
 |---|---|---|---|---|
-| **0** | **`bin/forge` signal/exit fidelity** (PLANNED PREREQUISITE — correction #8; **not landed**) | Fix the entry point that launders a killed child into exit 0 (`bin/forge:11`, `code ?? 0`). **Correct fix is SIGNAL FIDELITY, not `process.exit(128)`** (correction #1): re-raise the child's OWN signal on the wrapper (`child.on("exit",(code,signal)=>{ if(signal){process.kill(process.pid,signal);return;} process.exit(code??0); })`). **`process.exit(128)` is insufficient — it converts OS signal evidence into an ordinary numeric exit**, exactly the F7/F8 attribution loss this campaign forbids. (`claude.ts:241`'s `exit(128)` is *better than laundering to 0* but still collapses signal→numeric; do NOT copy it here.) Small, isolated, no dependency on any other child. | — | **EXECUTE, three cases, all mutation-tested:** (1) child exits **0** → wrapper exits **0**; (2) child **numerically** returns **143** → wrapper stays **numeric 143, no signal** (`signal===null`, decision=EXIT 143) — the F8 case, must NOT become a signal; (3) child **terminated by SIGTERM** → **wrapper itself terminates by SIGTERM** (re-raised), not a numeric code. **Red baseline proven today** (SIGKILL child → forge exits 0). **Mutants, each must redden a distinct case:** restore `code ?? 0` → case 3 goes green-wrong (kill→0); use `process.exit(128)` → case 3 fails (wrapper exits numeric 128, no signal) AND risks conflating case 2; treat numeric 143 as a signal → case 2 reddens. **Why first:** a killed child reading exit 0 (or a signal laundered to a number) can silently corrupt the evidence of *every later child's* executed acceptance test — a promotion/ABI/F35 test that KILLS a process and trusts `forge`'s exit code/signal would misread it. This must be true before any later test is trustworthy. |
+| **0** | **`bin/forge` signal/exit fidelity** (**LANDED as `97363ca`, PR #119** — correction #8; prerequisite satisfied. **Four-case signal fidelity verified by execution:** child exits 0 → `code=0, signal=null`; child numerically exits 143 → `code=143, signal=null` (stays numeric — the F8 case); child killed by SIGTERM → `code=null, signal=SIGTERM`; child killed by SIGKILL → `code=null, signal=SIGKILL`. **All three mutants killed:** revert to `code ?? 0` → SIGKILL laundered to 0; `process.exit(128)` → signal erased to a numeric 128; numeric-143-as-signal → the F8 case reddens — proving `process.exit(128)` is insufficient because it erases the signal.) | Fix the entry point that launders a killed child into exit 0 (`bin/forge:11`, `code ?? 0`). **Correct fix is SIGNAL FIDELITY, not `process.exit(128)`** (correction #1): re-raise the child's OWN signal on the wrapper (`child.on("exit",(code,signal)=>{ if(signal){process.kill(process.pid,signal);return;} process.exit(code??0); })`). **`process.exit(128)` is insufficient — it converts OS signal evidence into an ordinary numeric exit**, exactly the F7/F8 attribution loss this campaign forbids. (`claude.ts:241`'s `exit(128)` is *better than laundering to 0* but still collapses signal→numeric; do NOT copy it here.) Small, isolated, no dependency on any other child. | — | **EXECUTE, three cases, all mutation-tested:** (1) child exits **0** → wrapper exits **0**; (2) child **numerically** returns **143** → wrapper stays **numeric 143, no signal** (`signal===null`, decision=EXIT 143) — the F8 case, must NOT become a signal; (3) child **terminated by SIGTERM** → **wrapper itself terminates by SIGTERM** (re-raised), not a numeric code. **Red baseline proven today** (SIGKILL child → forge exits 0). **Mutants, each must redden a distinct case:** restore `code ?? 0` → case 3 goes green-wrong (kill→0); use `process.exit(128)` → case 3 fails (wrapper exits numeric 128, no signal) AND risks conflating case 2; treat numeric 143 as a signal → case 2 reddens. **Why first:** a killed child reading exit 0 (or a signal laundered to a number) can silently corrupt the evidence of *every later child's* executed acceptance test — a promotion/ABI/F35 test that KILLS a process and trusts `forge`'s exit code/signal would misread it. This must be true before any later test is trustworthy. |
 | **1** | **Store-compatibility policy** | Destructive DDL off the open path; schema-version stamp + forward refusal gate; legacy-column convergence → explicit quiesce-gated migration; **backward-compatible overlap-window evolution** (correction #5: nullable/defaulted-only additions, no new constraint rejecting an in-flight old writer, old-writer/new-reader tolerated, destructive migration as a one-way rollback boundary). Fixes read-only-open-still-migrates (`db.ts:169`). | BD-15 | Two-process **F35** on one real DB, **incl. the read-only-command variant AND both directions** (old-writer/new-reader; new-writer/old-reader). Red today: `DROP COLUMN` killing A's insert. Mutants: re-add destructive DDL to the open path; add a `NOT NULL`-no-default column and show an old writer breaks; guard only the writable entry. |
 | **2** | **Release closure + manifest + R1/R2 provenance** (inert — no promotion yet) | Builder producing a self-contained release: entry + source + **entire `node_modules`** + **compiled native binding** + manifest (commit SHA, absolute interpreter path, ABI, lockfile identity). **exec-not-spawn lands here**; the two-process `spawn(tsx)` structure dies. **R1** provenance (`process.execPath` of the CLI process). **R2 provenance (correction #1): the exit RECORDER captures its OWN interpreter path, ABI, and release identity, from inside the recorder process — NEVER inferred from R1.** | **R1, R2** | **EXECUTE the release entry under a hostile PATH — incl. NO NODE AT ALL** — real output. Assert **from the running process** `process.execPath`==manifest interpreter and `process.versions.modules`==manifest ABI (**R1**). **R2: EXECUTE the recorder and assert IT records its own `process.execPath`/ABI/release id from inside itself; mutant — infer R2 from R1 (copy the CLI's value) → must go red because the recorder can run under a different interpreter than the CLI.** Torn-closure: release with mismatched `node_modules` **refused at build**. |
 | **3** | **Bounded ABI assertion** | Replace `node-preflight`'s minimum-major floor with an exact ABI assertion against the manifest, before any native load. | — | **EXECUTE under a real too-NEW ABI-incompatible Node** (v26/ABI 147, on this host) → named refusal, **not** opaque `ERR_DLOPEN_FAILED`; likewise too-old. **Red baseline today** (`node-preflight.ts:26` admits Node 26). Mutant: revert to `>=` → too-new red. |
@@ -298,11 +305,11 @@ Every case **executes**; each names the mutant that must redden it and the **hol
 - **MEDIUM — disk retention is unbounded by design; this slice ships NO automatic GC** (correction #6). A
   release is reclaimed only by explicit operator sweep; automatic GC waits for a proven anchored-process
   lifetime mechanism in a later ticket.
-- **`bin/forge` exit laundering is now scoped as CHILD 0, a PLANNED prerequisite (NOT landed)** (correction
-  #8). Until Child 0 lands, **every executed acceptance test in this slice that kills a process and trusts
-  `forge`'s exit code/signal would misread it** (a kill reads as success today), which is exactly why it goes
-  first. The fix is signal fidelity (re-raise the child's signal), not `process.exit(128)` — see the Child 0
-  row.
+- **RESOLVED — `bin/forge` exit laundering was scoped as CHILD 0 and has LANDED (`97363ca`, PR #119)**
+  (correction #8). Before it landed, **every executed acceptance test in this slice that kills a process and
+  trusts `forge`'s exit code/signal would have misread it** (a kill read as success), which is exactly why it
+  went first. The shipped fix is signal fidelity (re-raise the child's signal), not `process.exit(128)` —
+  verified by execution across all four cases, all three mutants killed. See the Child 0 row.
 
 ---
 
@@ -324,7 +331,8 @@ Every case **executes**; each names the mutant that must redden it and the **hol
 **STOP. Operator re-review required before any implementation begins.** No child tickets filed. On approval:
 reconcile C1 into the PRD (maintainer), file children **0–5** against this plan, then dispatch **Child 0
 only** (the signal/exit-fidelity prerequisite) — because every later child's executed evidence depends on
-`forge` not reporting success on a kill.
+`forge` not reporting success on a kill. **UPDATE: Child 0 has since LANDED as `97363ca` (PR #119)**; the
+prerequisite is satisfied. Children **1–5 remain planned** and unchanged.
 
 ---
 
@@ -384,5 +392,6 @@ program can also deliberately `exit(143)` (the F8 case above, where the direct o
 `signal=null`). The two must never be conflated: Child 0 preserves `signal` for the direct observer;
 `process.exit(128)` would erase it and leave only an ambiguous number.
 
-**Today's `bin/forge`** (`process.exit(code ?? 0)`): a SIGKILL'd child gives `code=null` → forge exits **0**
-— the red baseline Child 0 removes.
+**The pre-fix `bin/forge`** (`process.exit(code ?? 0)`, before `97363ca`): a SIGKILL'd child gave `code=null` → forge
+exited **0** — the red baseline Child 0 **removed**. `bin/forge` now re-raises the child's own signal, so a SIGKILL'd
+child gives `code=null, signal=SIGKILL` and the direct observer sees the signal.

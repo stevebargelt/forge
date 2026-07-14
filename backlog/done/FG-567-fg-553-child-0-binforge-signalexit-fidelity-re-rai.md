@@ -1,9 +1,11 @@
 ---
 id: FG-567
 type: story
-status: active
+status: done
 title: "FG-553 Child 0: bin/forge signal/exit fidelity — re-raise the child's actual signal, never launder a kill to exit 0 or exit 128"
 created: 2026-07-14
+closed: 2026-07-14
+closed_commit: 97363ca
 ---
 
 **Parent:** FG-553 (Slice 1) · **Epic:** FG-561 · **Plan:** `docs/plans/fg553-slice1-architecture.md` @ `4d986ec` (Child 0)
