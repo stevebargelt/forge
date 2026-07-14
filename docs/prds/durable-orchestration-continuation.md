@@ -244,7 +244,7 @@ Subordinate acceptance: **F29**, **F30**, **F31**.
 
 Concurrent Forge processes of **different versions** share one SQLite database by default. This is the ordinary case, not an edge case: a long tmux-owned launch starts under version A, the operator promotes, and a new command runs under version B against the same store while the launch is still in flight.
 
-Two facts make this unsafe today. Migrations run **unconditionally on every writable open**, and they include a **destructive `DROP COLUMN`**. An older process opening the store after a newer one has migrated it, or a newer process migrating a store an older in-flight process is still reading, is not a hypothetical.
+Two facts make this unsafe today. Migrations run **unconditionally on every open** — not merely every writable one — and they include a **destructive `DROP COLUMN`**. Every process migrates the store on its first open, including a logically read-only caller: `getDb({ readOnly: true })` (`src/store/db.ts:156`) finds no writable handle in-process, falls through to the writable `getDb()` (`:169`), and that path runs `SCHEMA_SQL` plus the migrations — including the `DROP COLUMN` (`:91`). The read-only callers that therefore migrate on their first open are `show`, `status`, `runs`, `export`, `metrics`, `ops`, `report`, and `sweep` (`src/cli/commands/`). An older process opening the store after a newer one has migrated it, or a newer process migrating a store an older in-flight process is still reading, is not a hypothetical — and no command is exempt by virtue of only reading.
 
 The design must **decide the policy** and record it. The candidates:
 
@@ -620,6 +620,10 @@ The initiative is complete only when all of the following are true:
 - A final reviewer maps evidence to every binding decision and matrix row rather than approving from green CI alone.
 
 ## Revision log
+
+### 2026-07-14 — BD-15 premise correction
+
+- **BD-15's premise corrected from "every writable open" to "every open."** The code is stronger and worse than the accepted revision (`e6fd56b`) stated: a process's *first* store open runs the migrations — including the destructive `DROP COLUMN` — even when the caller is logically read-only, because `getDb({ readOnly: true })` bootstraps a writable handle when none exists in-process. This **strengthens** BD-15's evidence; it does not contradict it. BD-15's decision, its candidate policies, F35, and every other binding decision, slice, and matrix row are unchanged. The "every writable open" phrasing in the C1–C8 entry below is superseded by this correction.
 
 ### 2026-07-14 — acceptance-review corrections (D1–D4)
 
