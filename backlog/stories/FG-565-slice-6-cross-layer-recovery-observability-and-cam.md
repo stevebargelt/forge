@@ -34,8 +34,11 @@ lose or duplicate work.
 - Did a duplicate event arrive, and was it ignored safely?
 - Is continuation blocked, and what explicit operator action is required?
 
-Exact event/table names are **OQ-open**; the evidence must live in **Forge-owned durable state**, not only
-in a transcript or Monitor output.
+Exact event/table names are **not prescribed by the PRD** — but by the time this slice runs they have
+**already been selected and implemented upstream** (FG-562 owns the continuation storage, OQ-1). **They are
+NOT open at closeout.** This slice **verifies** that the selected names/tables actually answer the questions
+above; it does not choose them. The evidence must live in **Forge-owned durable state**, not only in a
+transcript or Monitor output.
 
 ## Acceptance Criteria
 
@@ -83,6 +86,27 @@ If this slice discovers an open question that was never decided upstream, that i
 owning slice**, not a decision to be improvised here.
 - A final reviewer **maps evidence to every binding decision and matrix row** — approving from green CI
   alone is explicitly insufficient.
+
+## The PRD's closeout gate, restated in full — every line is required
+
+- **Focused tests pass after EACH slice** (not only at the end).
+- **The full and extended suites pass at final closeout** — `npm run test:all` **and** `npm run test:extended`
+  (required CI checks `test` **and** `test-extended`; a red `test-extended` blocks exactly like a red `test`).
+- **FG-551's image parity remains GREEN.** The `agent-dev-worker` image still runs the launch tier with no
+  failures and no skips. Slice 0's fix must not have rotted across the campaign — if the image regressed,
+  every agent's suite is untrustworthy again and the campaign's own test evidence is in doubt.
+- **Canonical seed → generated project block → docs → installed surfaces all AGREE.**
+  `seeds/orchestrator-template.md`, the marker-managed `CLAUDE.md` block (re-rendered via `forge upgrade`),
+  `docs/quick-start.md`, `docs/concepts.md`, `docs/autonomous-run-prompt.md`, and any installed host skill
+  that independently prescribes launch waiting must all say the same thing. **Parity is TESTED, not assumed.**
+  *(Ownership note, FG-347: the seed and the marker block are orchestrator-policy surfaces — the
+  documentation-maintainer must not hand-edit them.)*
+- **`ScheduleWakeup` is documented and used ONLY as a lost-signal watchdog** — the BD-9 contradiction is gone
+  from the installed policy, not merely from the PRD.
+- **Every falsification test was observed RED against its appropriate baseline and green after its slice.**
+- **The `Monitor` workaround's status is explicit** (decided in FG-563; confirmed here).
+- **Every non-`none` docs-impact across the campaign is resolved** — updated, `not_needed: <reason>`, or
+  `deferred: #<ticket>`.
 
 ## Not in scope
 

@@ -69,6 +69,48 @@ its pre-fix baseline** — a test that cannot go red proves nothing:
   *continuation policy* that consumes it — what a controller is permitted to do with an `unknown` after a
   host restart, and whether it may advance, must block, or must surface an operator blocker.
 
+## The claim must be BOUND, not merely unique — exactly-once on the WRONG phase is still wrong
+
+A claim that is idempotent but unbound is a correctness bug wearing a safety hat. **A delayed completion
+from launch A can arrive after the controller has moved on, and claim a NEWER phase B — exactly once — and
+still be completely wrong.** Uniqueness of the claim does not make it *correct*.
+
+**The claim MUST be a compare-and-set against the durable pre-transition state.** A claim is granted only
+if ALL of the following still match at the moment of the write:
+
+- **`sourceLaunchId`** — the claim is for **this** launch, not a launch the controller has since replaced.
+- **`consumerKind` + `currentPhase`** — the consumer is still on the phase this completion belongs to. A
+  completion for phase A must **never** advance phase B.
+- **`nextAction`** — the structured action selected (**never an opaque shell string**) is the one being
+  claimed.
+- **The expected durable pre-transition state** — the CAS fails if the underlying state has moved at all.
+
+If any of these has changed, the claim **fails and no state is written.** A stale completion is observed,
+recorded, and **ignored** — not advanced.
+
+### Required regression: stale-completion / phase-binding
+
+A test in which a **late completion from launch A** arrives **after the controller has advanced to phase B**
+must show that it **does not advance phase B**, writes no state, and is recorded as a stale/ignored
+observation. **This test must be observed RED against a claim implementation that checks only uniqueness**
+— a claim that is merely exactly-once will pass a naive duplicate test and fail this one. That is the point.
+
+## New durable state must carry BD-15 (schema/version policy)
+
+**OQ-1 permits a new continuation/receipt table. If one is introduced, it is correctness-bearing state on
+the control path, and it inherits the concurrent-version problem — it does not get a pass because it is new.**
+
+- **The schema and its migration MUST obey the concurrent-version policy selected by FG-553 (BD-15).**
+  Migrations run unconditionally on every writable DB open, and concurrent Forge processes of *different
+  versions* against one store is the **default** state, not an edge case.
+- **Any new state must be propagated to `docs/SCHEMA-CONTRACT.md`.** A correctness-bearing table that is not
+  in the schema contract is invisible to every future change.
+- **Old/new-process coverage is required**, not optional: a process running the *old* Forge must not be
+  broken by the new table or its migration, and a *new* process must behave correctly against a store an old
+  process is still reading. Test both directions.
+- A destructive migration (cf. the existing unguarded `DROP COLUMN`, `src/store/db.ts:91`) is **not**
+  acceptable for this table without the BD-15 policy explicitly permitting it.
+
 ## Not in scope
 
 - The wait/subscription primitive itself (FG-552).

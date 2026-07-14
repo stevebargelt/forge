@@ -6,6 +6,35 @@ title: "forge launch: caller-supplied execution environment can select a Node AB
 created: 2026-07-14
 ---
 
+**Epic:** FG-561 · **PRD:** `docs/prds/durable-orchestration-continuation.md` @ `e6fd56b` (**Slice 1b**)
+**Depends on:** **FG-553** (Slice 1). FG-555 consumes BD-14's R1–R4 vocabulary and must not grow a second,
+conflicting runtime-selection mechanism alongside FG-553's — it reuses that vocabulary on the *other side*
+of the launch boundary.
+
+## Boundary — distinct from FG-553, and NOT closed by it
+
+**BD-14 protects the Forge CONTROL runtime (R1) — this slice governs the LAUNCHED WORKLOAD's environment
+(R3/R4).** These are different boundaries with different owners:
+
+> A Forge running a stable, pinned Node 24 control runtime can faithfully launch a caller-supplied
+> `bash -lc <chain>` whose login shell resolves Node 23, and reproduce the original ABI-mismatch false-red
+> **with BD-14 fully satisfied.** Control-runtime provenance does not imply launched-workload provenance.
+
+**Closing FG-553 therefore does not close this.** Do not fold this slice into FG-553.
+
+**Runtime ownership (BD-14's four identities):** **R1 (control runtime) and R2 (exit-recorder runtime) are
+FG-553's. R3 (launched top-level executable) and R4 (nested-shell resolution) are THIS slice's.** F30 is not
+satisfied until all four are independently accounted for across the two slices — captured, derived, or
+explicitly declared unknowable. Neither slice may assume the other covered its half. Note especially: the
+exit recorder's `process.execPath` identifies **R2 only** and proves nothing about R3 or R4, and recording
+argv is **not** a resolution of R3.
+
+## Falsification
+
+**Every new regression test must be observed RED against its pre-fix baseline** (campaign rule). A test that
+cannot go red does not prove the defect was covered. Concretely: the ABI-mismatch false-red must be
+reproducible against the current code before the guard/refusal that prevents it is accepted.
+
 ## Problem
 
 An FG-425 verification was submitted to `forge launch run` with the explicit

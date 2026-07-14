@@ -51,6 +51,29 @@ classifier is used"):
   campaign-only completion table** (or a documented storage boundary justifying one).
 - A continuation claim on a campaign item preserves each of the four FG-425 constraints above —
   demonstrated by test, not asserted.
+
+## Falsification — PRODUCTION PATH, not fixtures
+
+**Every new regression test must be observed RED against its pre-fix baseline** (campaign rule). A test that
+cannot go red does not prove the defect was covered.
+
+**"Demonstrated by test" is NOT satisfied by fixture or unit coverage here — and this is the single most
+likely way this slice ships broken.** A campaign test built on simplified fixtures can go green while the
+real `drive`/`resume` → task → run → campaign-item → campaign → publication path stays **wedged**. **That is
+exactly the FG-425 failure pattern** — a green suite over fixtures while the production path could not
+converge — and FG-425's own proof had to be rebuilt on the real path (`real runNext`, real publisher, real
+durable rows) before it meant anything.
+
+**Required:**
+
+- A **production-path campaign regression**: real `runNext`, the real publisher, real durable rows. No
+  simplified workflow fixtures standing in for the real contract (a fixture whose `inputs: []` does not match
+  the real `feature.yml` has already hidden a P1 once).
+- The regression drives a real **`campaign resume` / `drive`** cycle through a completion, and asserts
+  **truthful convergence of ALL FIVE state levels**: **task**, **run**, **campaign item**, **campaign**, and
+  **publication** state. A test that asserts only the item advanced, while the run or publication state is
+  left inconsistent, is not evidence — it is the wedge.
+- Red-before-fix evidence for each new test.
 - Campaign ordering, gates, cancellation, recovery, and publication states do not introduce a continuation
   constraint that the primitive cannot express. If they do, that is a finding against FG-562, not a local
   workaround here.

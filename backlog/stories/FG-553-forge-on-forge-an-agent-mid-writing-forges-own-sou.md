@@ -34,6 +34,30 @@ This is a forge-on-forge hazard specifically: agents editing forge are now the p
 
 **Epic:** FG-561 · **PRD:** `docs/prds/durable-orchestration-continuation.md` @ `e6fd56b` (Slice 1)
 
+## ⚠️ FG-553 IS A SLICE-LEVEL PARENT — DO NOT DISPATCH IT AS ONE IMPLEMENTATION STORY
+
+The scope below spans packaging/promotion, ABI enforcement, launch provenance, installed-surface
+compatibility, and SQLite version policy — **several subsystems.** It cannot responsibly land as one
+implementation PR, and no single reviewer can hold it.
+
+**Required sequence:**
+
+1. **Architecture / planning FIRST.** Route `architecture` (and then `planning`) to decide the three
+   questions that constrain everything downstream:
+   - **OQ-6** — the stable-runtime packaging and promotion mechanism (pinned snapshot / dedicated stable
+     worktree / release dir + atomic `current` symlink / vendored interpreter / equivalent).
+   - **BD-15** — the concurrent-version store policy.
+   - **T9** — whether an already-running process is affected by a mid-flight promotion (dynamic
+     `import()`, lazy requires, open handles). **Settle empirically. The PRD asserts neither immunity nor
+     exposure.**
+2. **Then create bounded implementation children** from that plan, each independently reviewable with its
+   own acceptance evidence.
+3. **FG-553 closes only when its children's AGGREGATE evidence passes** the acceptance criteria below.
+   It is not closed by any single child.
+
+Do not create the children before the architecture pass — their boundaries are an *output* of the OQ-6
+decision, not an input to it.
+
 > **The two options this ticket originally left open are now CLOSED by the accepted PRD. Do not reopen them.**
 >
 > - **"Is a health-check + fallback enough?" — NO.** BD-13: *"A read-only fallback observer is useful
@@ -64,10 +88,20 @@ This is a forge-on-forge hazard specifically: agents editing forge are now the p
   loads the repo's `better-sqlite3`; Node 23/ABI 131 and Node 26/ABI 147 both fail).
 - **Atomic promotion and rollback**, identifying the exact runtime commit/path. An interrupted promotion
   leaves the previous stable runtime selected and usable.
-- **R1 provenance** (BD-14's control runtime) is captured and durably recorded. `forge launch` records
-  enough runtime identity to diagnose which control version owns an in-flight command. **Today `LaunchMeta`
-  is 8 fields with no interpreter, Node version, ABI, PATH, or source SHA — no runtime provenance is
-  recoverable post-launch at all** (`src/v2/launch.ts:44-58`).
+- **R1 and R2 provenance** (BD-14). **This slice owns BOTH:**
+  - **R1 — the control runtime**: the interpreter + native-binding ABI + dependency set actually executing
+    the `forge` CLI, its launch observer, and every routine state-reader.
+  - **R2 — the exit-recorder runtime**: the interpreter executing the launch wrapper's exit recorder
+    (`process.execPath` of *that* process). **R2 was previously unowned by any ticket — it is assigned here.**
+    R2 must be captured, derived, or explicitly declared unknowable, **like every other runtime identity.**
+    **Critically: `process.execPath` of the exit recorder identifies R2 and NOTHING ELSE.** It is not
+    evidence of R3 (the launched top-level executable) or R4 (nested-shell resolution). Recording R2 and
+    calling the launch "provenanced" is precisely the substitution BD-14 forbids.
+  - `forge launch` records enough runtime identity to diagnose which control version owns an in-flight
+    command. **Today `LaunchMeta` is 8 fields with no interpreter, Node version, ABI, PATH, or source SHA —
+    no runtime provenance is recoverable post-launch at all** (`src/v2/launch.ts:44-58`).
+  - **R3/R4 are FG-555's** (Slice 1b). Together the two slices must account for all four; neither may
+    assume the other covered its half.
 - **Bounded ABI enforcement.** Assert `NODE_MODULE_VERSION` against the ABI the native bindings were built
   for — an **upper AND lower** bound, not a version floor. *Today `src/cli/node-preflight.ts:26` admits any
   major ≥ 24, so it passes Node 26, whose ABI cannot load the binding — the operator gets an opaque native
@@ -109,21 +143,30 @@ pinned tsx snapshot remains consistent with the no-build decision.
 - **F27** — promotion is interrupted: the previous stable runtime remains selected and usable.
 - **F28** — promotion occurs with an in-flight launch: runtime identity stays diagnosable and
   store/schema compatibility follows the recorded policy. **Includes T9** (settled above).
-- **F29 / F30 / F31 — the control plane RUNS from at least two incompatible PATH/Node environments**,
-  invoked as **bare `forge` from a shell the operator did NOT pre-sanitize**:
+**F29, F30, and F31 are THREE DIFFERENT OUTCOMES. Do not collapse them into "the control plane runs."**
+Each is a separate acceptance case with a separate pass condition:
+
+- **F29 — AVAILABILITY.** The **bare, stable `forge`** command **RUNS CORRECTLY** regardless of the
+  caller's ambient PATH, invoked **from a shell the operator did NOT pre-sanitize**. Test at minimum:
   - **ENV-A** nvm Node v24.17.0 / ABI 137 — the only environment proven to work today.
   - **ENV-B** login shell (`bash -lc`) → `/usr/local/bin/node` v23.3.0 / ABI 131. *Today `forge launch
     list` and `forge status --json` exit 1 with empty stdout — evidence-honest, but **the control plane did
-    not run**.* **"Fails cleanly" is NOT a pass. It must RUN.**
-  - **ENV-C** Homebrew-first PATH → v26.3.1 / ABI 147. **Never tested; expected to fail badly** — the
-    preflight passes and `better-sqlite3` then throws an opaque native error. This is the disproof of the
-    claim that the existing guard is adequate closure, and it **must** be in the suite, or the fix is
-    validated only against the downgrade direction it already handles.
-  - **A caller-applied PATH pin is containment, not isolation, and does NOT satisfy these.**
+    not run**.* **"Fails cleanly" is NOT a pass for F29. It must RUN.**
+  - **A caller-applied PATH pin is containment, not isolation, and does NOT satisfy F29.**
+- **F30 — PROVENANCE.** **R1, R2, R3, and R4 are each independently accounted for** — captured, derived, or
+  **explicitly declared unknowable**. Recording one is **not** proof of another. R1/R2 are this slice's;
+  R3/R4 are FG-555's; **F30 is not satisfied until all four are accounted for across the two slices.**
+  Recording argv, or recording the exit recorder's `process.execPath`, does **not** satisfy F30.
+- **F31 — REFUSAL.** Forcing an **incompatible interpreter** is **REFUSED by the bounded ABI assertion
+  BEFORE any native module is loaded**, with a named, actionable mismatch. Test **ENV-C**: Homebrew-first
+  PATH → v26.3.1 / ABI 147. **Never tested today, and expected to fail badly** — the minimum-major preflight
+  *passes* (26 ≥ 24) and `better-sqlite3` then throws an opaque native error. **F31's pass condition is a
+  clean, pre-load refusal — NOT an opaque `ERR_DLOPEN_FAILED`, and NOT a successful run.** This is the
+  disproof of the claim that the existing guard is adequate closure; without ENV-C the fix is validated only
+  against the downgrade direction it already handles.
 - **F35** — version-skew store compatibility: old and new Forge processes against one SQLite, under the
   BD-15 policy decided in this slice.
 - `forge upgrade` and the "commit and it's live" workflow are reconciled, and the docs say which is in force.
-- The FG-425-era tmux-pane-polling workaround is retired or documented as the sanctioned pattern.
 
 **Every falsification test must be observed RED against its pre-fix baseline.** A test that cannot go red
 does not prove the defect was covered.
@@ -135,3 +178,7 @@ does not prove the defect was covered.
   Forge on pinned Node 24 can still faithfully launch a caller-supplied `bash -lc` that resolves Node 23
   and reproduce the ABI false-red **with BD-14 fully satisfied**. **Closing FG-553 does not close FG-555.**
 - The wait primitive (FG-552) and the continuation claim (FG-562).
+- **The fate of the FG-425-era Monitor / tmux-pane-polling workaround is NOT this slice's call.** **FG-563**
+  decides whether it is retired or retained as a named fallback; **FG-565** confirms the decision was
+  carried out. This slice makes the workaround *unnecessary* by fixing the control plane; it does not
+  declare it retired.

@@ -21,7 +21,16 @@ So the only push-completion channel available today is welded to the mechanism t
 
 ## Goal
 
-A launch's terminal state is **pushed**, not polled: any controller (orchestrator session, campaign runner, future daemon) can subscribe to launch completion and advance a phase immediately, without owning the work and without re-entering the harness's tracked-background set.
+A launch's terminal state is **completion-driven, without fixed-estimate model polling**: any controller
+(orchestrator session, campaign runner, future daemon) can subscribe to launch completion and advance a
+phase immediately, without owning the work and without re-entering the harness's tracked-background set.
+
+> **Precision matters here — the original "pushed, not polled" framing contradicts the accepted design.**
+> The selected primitive is a **blocking `forge launch wait`** built on **filesystem observation plus
+> MANDATORY internal reconciliation**. Bounded internal reconciliation is **allowed and in fact required** —
+> `owner_gone` and `unknown` produce no filesystem artifact and cannot be observed any other way. What is
+> **forbidden** is **fixed-estimate model polling**: waking a model on a guessed interval (BD-9). The
+> waiter blocks without waking a model; it does not "push."
 
 ## Design — SETTLED BY THE ACCEPTED PRD. These are no longer open choices.
 
@@ -114,8 +123,26 @@ editing — or selecting its interpreter from the caller's PATH — can itself f
 - `forge launch` docs describe the completion contract for controllers, including the record-first and
   advisory-delivery semantics.
 
-**Every falsification test must be observed RED against its pre-fix baseline.** A test that cannot go red
-does not prove the defect was covered.
+## Acceptance matrix rows THIS slice owns
+
+Every row below must be an explicit, named test. **Each must be observed RED against its pre-fix baseline** —
+a test that cannot go red does not prove the defect was covered.
+
+| Row | Fault / interleaving | Required result |
+|---|---|---|
+| **F4** | Exit-record writer interrupted mid-write | No partial terminal JSON is observable; status stays evidence-honest. *(Today: bare `writeFileSync`, `launch.ts:130`.)* |
+| **F5** | Command exits 0 | Controller reads `exited_ok`. |
+| **F6** | Command exits ordinary non-zero | Controller reads `exited_error`; **failure does not look like still-running**. |
+| **F7** | Command is OS-signalled | Signal evidence recorded, **with no sender attribution**. |
+| **F8** | **Command DELIBERATELY returns 143** | **Remains a NUMERIC exit with NO invented signal.** ⚠️ **Load-bearing attribution guard — do not omit.** 143 is in the signal range, so a naive classifier will silently promote a deliberate `exit 143` into "terminated by SIGTERM." **Exit 143 alone is NEVER attribution evidence.** A recorded OS signal proves a signal landed, not who sent it (BD-3). |
+| **F9** | Wrapper/pane dies before the exit record | `owner_gone` is detected; **the work's result is not invented**. |
+| **F10** | Host/session restarts with no exit record and no owner | Known launch reads `unknown`; the controller surfaces recovery/blocker policy (**OQ-5**). |
+| **F11** | Record is transiently unreadable | **Bounded retry; NO premature terminal failure.** *(Today the reader maps an empty exit file straight to terminal `unknown` — `launch.ts:102,287,289`.)* |
+| **F32** | Meta-record publication interrupted | A **running** launch is never reported as "no such launch". *(Today `meta.json` is written twice — `launch.ts:240,269-270`.)* |
+| **F33** | Artifact-less terminal disposition (`owner_gone` / `unknown`) | Found by **mandatory reconciliation** — a watch-then-reread design structurally cannot see them. |
+| **F34** | tmux degraded / absent | Observation still behaves correctly. *(`readLaunch` shells out to the `tmux` binary — it is not a pure record read.)* |
+
+F1/F2/F3 (subscribe race, missed FS event) are covered by the BD-6 criterion above.
 
 ## Non-scope (from the PRD)
 

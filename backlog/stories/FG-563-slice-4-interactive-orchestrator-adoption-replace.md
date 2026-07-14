@@ -78,6 +78,16 @@ orchestrator authors the seed and re-renders via `forge upgrade`.
 - Seed → generated `CLAUDE.md` block → installed-surface parity is **tested**, not assumed.
 - The BD-9 contradiction is gone from the installed policy, not merely from the PRD.
 
+## Falsification
+
+**Every new regression test must be observed RED against its pre-fix baseline** (campaign rule). A test that
+cannot go red does not prove the defect was covered.
+
+Specifically: **F19** (a happy-path job outrunning any estimate produces no model wake) and **F22** (a routine
+chain reaching its next decision with the operator sending **no messages at all**) must both be demonstrated
+against the *current* fixed-estimate/Monitor-polling behavior first — otherwise the tests are asserting a
+property the old code already accidentally satisfies on a lucky timing, and prove nothing.
+
 ## Not in scope
 
 - The wait primitive (FG-552) or the claim primitive (FG-562).
