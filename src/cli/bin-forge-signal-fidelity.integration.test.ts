@@ -7,6 +7,11 @@ import { join, resolve } from "node:path";
 
 // FG-567 — bin/forge must report the child's fate faithfully.
 //
+// TIER: integration. These cases spawn real processes and kill them, so per FG-408 they are excluded
+// from the fast unit tier — `npm test` does NOT execute them, and a green `npm test` is NOT evidence
+// for this ticket. Verify with `npm run test:integration` (or `test:extended`); merges are gated on
+// them by CI's required `test-extended` job (FG-495).
+//
 // The harness below is bin/forge's REAL source with ONLY the spawn TARGET swapped (so the
 // child is a script this test controls instead of the tsx CLI). The exit handler under test
 // is bin/forge's own, verbatim — so the mutations this file exists to catch are mutations of
