@@ -158,22 +158,38 @@ never automatically.
 ### OQ-2 — FEASIBILITY: **YES.** (Decision remains FG-563's.)
 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` is set (`claude.ts:55`, deliberately, per FG-542). `forge launch
 wait` **does not exist** (`run|list|show|rm` only). The **disposable Monitor is a working external wake
-channel** — proven all session. So **Slice 2 is not being designed against a channel that cannot exist**, and
-*"a disposable Monitor running one blocking `forge launch wait`"* is a legitimate production shape. **Do not
-require "Monitor eliminated."**
-**Its failure mode is SILENCE** — one died on its first line, wrote to stderr (not surfaced as an event), and
-sat quiet for an hour while the work had finished. Any design leaning on it must make liveness observable.
+channel.**
+
+**Specific durable evidence (correction #3), not "all session":** the Monitor watching launch
+**`launch-fg551-corrective-cf4yks`** (a `forge launch run` started `2026-07-14T19:16:17.736Z`) polled that
+launch's durable status via `forge launch show`; on the launch reaching terminal `exited 0` the Monitor
+emitted one stdout line, which arrived as the session wake event *"TERMINAL launch-fg551-corrective-cf4yks
+-> exited 0"* — under `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, with no harness background task. That is one
+observed launch → Monitor → wake → result, recorded, reproducible from the launch record. So **Slice 2 is not
+being designed against a channel that cannot exist**, and *"a disposable Monitor running one blocking `forge
+launch wait`"* is a legitimate production shape. **Do not require "Monitor eliminated."**
+
+**Its failure mode is SILENCE — with a specific instance.** The Monitor for run `launch-fg552-audit-*` used a
+bash-4 `declare -A` on this host's bash 3.2; it died on its **first line**, wrote the error to **stderr**
+(the Monitor tool does not surface stderr as an event), and sat armed and silent until timeout while the three
+reds it watched had already reached terminal — the durable launch records were correct the whole time. Any
+design leaning on Monitor must make its **liveness observable**, because a dead Monitor is indistinguishable
+from a running one.
 
 ---
 
 ## 2. Conflicts surfaced against the accepted PRD — **NOT amended**
 
-- **C1 — BD-15's premise is understated.** BD-15 says migrations run on every *writable* open. **They run on
-  EVERY open:** `getDb({readOnly:true})` bootstraps a writable handle (`db.ts:169`) and runs `applyMigrations`
-  incl. the `DROP COLUMN` (`db.ts:91`). Confirmed read-only callers that therefore migrate: `show.ts:57`,
-  `status.ts:26`, `runs.ts:38`, `export.ts:20`, `metrics.ts:36`, `ops.ts:157`, `report.ts:17`, `sweep.ts:85`.
-  **Strengthens BD-15; kills promotion-quiesce as a sufficient policy** — a purely observational command
-  mutates the schema under an in-flight launch. *(Verified by orchestrator.)*
+- **C1 — BD-15's premise is understated. STATUS: PENDING PRD reconciliation (not yet reconciled).** Precise
+  statement: **each process's FIRST store open — INCLUDING a logically read-only caller — can bootstrap a
+  WRITABLE handle and run migrations.** `getDb({readOnly:true})` (`db.ts:156`) computes `wantReadOnly`
+  (`db.ts:161`) and, when no writable handle exists in-process, falls through to the writable `getDb()`
+  (`db.ts:169`), which runs `db.exec(SCHEMA_SQL)` + `applyMigrations` incl. the `DROP COLUMN` (`db.ts:91`).
+  Confirmed read-only callers that therefore migrate on first open: `show.ts:57`, `status.ts:26`, `runs.ts:38`,
+  `export.ts:20`, `metrics.ts:36`, `ops.ts:157`, `report.ts:17`, `sweep.ts:85`. **Strengthens BD-15; kills
+  promotion-quiesce as a sufficient policy** — even a logically read-only command mutates the schema under an
+  in-flight launch. *(Verified by orchestrator.)* **This correction is queued for the documentation-maintainer
+  (see §6); it has NOT been applied to the PRD yet.**
 - **C2 — CORRECTED per review #3. tmux changes the ENVIRONMENT in which R3 is resolved; it does NOT make R4
   exist for every launch.** The distinction, stated precisely:
   - **R3** is the resolution of the launched command's **`argv[0]`, performed by the recorder** (the exit
@@ -208,7 +224,7 @@ its **red baseline** and the **hollow version to reject**.
 
 | # | Child | Scope | Owns | Acceptance (executed) |
 |---|---|---|---|---|
-| **0** | **`bin/forge` signal/exit fidelity** (PREREQUISITE — correction #8) | Fix the entry point that launders a killed child into exit 0 (`bin/forge:11`, `code ?? 0`). Adopt the repo's own correct pattern (`claude.ts:241`: `if (signal) process.exit(128)`). Small, isolated, no dependency on any other child. | — | **EXECUTE:** spawn the real entry, SIGKILL its child, assert `forge` exits **non-zero** (≥128), not 0. **Red baseline exists today** (proven: SIGKILL → exit 0). Mutant: restore `code ?? 0` → red. **Why first:** a killed child reading exit 0 can silently corrupt the evidence of *every later child's* executed acceptance test — a promotion/ABI/F35 test that KILLS a process and trusts `forge`'s exit code would read success on a kill. This must be true before any later test is trustworthy. |
+| **0** | **`bin/forge` signal/exit fidelity** (PLANNED PREREQUISITE — correction #8; **not landed**) | Fix the entry point that launders a killed child into exit 0 (`bin/forge:11`, `code ?? 0`). **Correct fix is SIGNAL FIDELITY, not `process.exit(128)`** (correction #1): re-raise the child's OWN signal on the wrapper (`child.on("exit",(code,signal)=>{ if(signal){process.kill(process.pid,signal);return;} process.exit(code??0); })`). **`process.exit(128)` is insufficient — it converts OS signal evidence into an ordinary numeric exit**, exactly the F7/F8 attribution loss this campaign forbids. (`claude.ts:241`'s `exit(128)` is *better than laundering to 0* but still collapses signal→numeric; do NOT copy it here.) Small, isolated, no dependency on any other child. | — | **EXECUTE, three cases, all mutation-tested:** (1) child exits **0** → wrapper exits **0**; (2) child **numerically** returns **143** → wrapper stays **numeric 143, no signal** (`signal===null`, decision=EXIT 143) — the F8 case, must NOT become a signal; (3) child **terminated by SIGTERM** → **wrapper itself terminates by SIGTERM** (re-raised), not a numeric code. **Red baseline proven today** (SIGKILL child → forge exits 0). **Mutants, each must redden a distinct case:** restore `code ?? 0` → case 3 goes green-wrong (kill→0); use `process.exit(128)` → case 3 fails (wrapper exits numeric 128, no signal) AND risks conflating case 2; treat numeric 143 as a signal → case 2 reddens. **Why first:** a killed child reading exit 0 (or a signal laundered to a number) can silently corrupt the evidence of *every later child's* executed acceptance test — a promotion/ABI/F35 test that KILLS a process and trusts `forge`'s exit code/signal would misread it. This must be true before any later test is trustworthy. |
 | **1** | **Store-compatibility policy** | Destructive DDL off the open path; schema-version stamp + forward refusal gate; legacy-column convergence → explicit quiesce-gated migration; **backward-compatible overlap-window evolution** (correction #5: nullable/defaulted-only additions, no new constraint rejecting an in-flight old writer, old-writer/new-reader tolerated, destructive migration as a one-way rollback boundary). Fixes read-only-open-still-migrates (`db.ts:169`). | BD-15 | Two-process **F35** on one real DB, **incl. the read-only-command variant AND both directions** (old-writer/new-reader; new-writer/old-reader). Red today: `DROP COLUMN` killing A's insert. Mutants: re-add destructive DDL to the open path; add a `NOT NULL`-no-default column and show an old writer breaks; guard only the writable entry. |
 | **2** | **Release closure + manifest + R1/R2 provenance** (inert — no promotion yet) | Builder producing a self-contained release: entry + source + **entire `node_modules`** + **compiled native binding** + manifest (commit SHA, absolute interpreter path, ABI, lockfile identity). **exec-not-spawn lands here**; the two-process `spawn(tsx)` structure dies. **R1** provenance (`process.execPath` of the CLI process). **R2 provenance (correction #1): the exit RECORDER captures its OWN interpreter path, ABI, and release identity, from inside the recorder process — NEVER inferred from R1.** | **R1, R2** | **EXECUTE the release entry under a hostile PATH — incl. NO NODE AT ALL** — real output. Assert **from the running process** `process.execPath`==manifest interpreter and `process.versions.modules`==manifest ABI (**R1**). **R2: EXECUTE the recorder and assert IT records its own `process.execPath`/ABI/release id from inside itself; mutant — infer R2 from R1 (copy the CLI's value) → must go red because the recorder can run under a different interpreter than the CLI.** Torn-closure: release with mismatched `node_modules` **refused at build**. |
 | **3** | **Bounded ABI assertion** | Replace `node-preflight`'s minimum-major floor with an exact ABI assertion against the manifest, before any native load. | — | **EXECUTE under a real too-NEW ABI-incompatible Node** (v26/ABI 147, on this host) → named refusal, **not** opaque `ERR_DLOPEN_FAILED`; likewise too-old. **Red baseline today** (`node-preflight.ts:26` admits Node 26). Mutant: revert to `>=` → too-new red. |
@@ -268,18 +284,22 @@ Every case **executes**; each names the mutant that must redden it and the **hol
 - **MEDIUM — disk retention is unbounded by design; this slice ships NO automatic GC** (correction #6). A
   release is reclaimed only by explicit operator sweep; automatic GC waits for a proven anchored-process
   lifetime mechanism in a later ticket.
-- **`bin/forge` exit laundering is now CHILD 0, a landed prerequisite** (correction #8) — not a lingering
-  risk. Until Child 0 lands, **every executed acceptance test in this slice that kills a process and trusts
-  `forge`'s exit code would read success on a kill**, which is exactly why it goes first.
+- **`bin/forge` exit laundering is now scoped as CHILD 0, a PLANNED prerequisite (NOT landed)** (correction
+  #8). Until Child 0 lands, **every executed acceptance test in this slice that kills a process and trusts
+  `forge`'s exit code/signal would misread it** (a kill reads as success today), which is exactly why it goes
+  first. The fix is signal fidelity (re-raise the child's signal), not `process.exit(128)` — see the Child 0
+  row.
 
 ---
 
 ## 6. PRD reconciliation (correction #7)
 
-- **C1 (migrations run on EVERY open, not just writable) IS reconciled into the PRD** — it is a factual
-  correction to BD-15's own evidence, strengthening not contradicting it. Routed to the
-  **documentation-maintainer** (durable design record; not orchestrator-hand-edited). Governing references
-  (the system map's "Launch completion"/store rows and BD-15's premise) updated to say "every open".
+- **C1 is PENDING PRD reconciliation — NOT yet reconciled.** It is a factual correction to BD-15's own
+  evidence (each process's first store open, including a logically read-only caller, can bootstrap a writable
+  handle and migrate), strengthening not contradicting it. On approval it will be **routed to the
+  documentation-maintainer** (durable design record; not orchestrator-hand-edited) to update BD-15's premise
+  and the system map's store rows from "every writable open" to "every open, including read-only callers'
+  first open". **This has not happened yet and must not until the gate below clears.**
 - **C2 does NOT go into the PRD** (corrections #3 + #7) — in any wording. It is an implementation-informing
   note for FG-553/FG-555, recorded in §2 only. Its earlier "R4 exists on every launch" phrasing was wrong and
   has been corrected here; nothing about it reaches the accepted contract.
@@ -291,3 +311,72 @@ Every case **executes**; each names the mutant that must redden it and the **hol
 reconcile C1 into the PRD (maintainer), file children **0–5** against this plan, then dispatch **Child 0
 only** (the signal/exit-fidelity prerequisite) — because every later child's executed evidence depends on
 `forge` not reporting success on a kill.
+
+---
+
+## Appendix A — Durable, reproducible architecture probes (correction #3)
+
+**Runtime identity for every probe below:** `node v24.17.0`, `NODE_MODULE_VERSION` (ABI) **137**, platform
+`darwin arm64`. Native binding under test:
+`node_modules/better-sqlite3/build/Release/better_sqlite3.node` (ABI 137). Each probe is a self-contained
+script; re-running it reproduces the quoted output.
+
+### A1 — T9 anchoring: ESM + CJS + native dlopen (the rule and the fatal case)
+
+**Setup:** two release dirs `rel-A`, `rel-B`, each with an entry module that resolves a sibling and dlopens
+its own module-relative copy of the real binding; a `current` symlink; a long-running process that anchors by
+importing through `current` at start, then does a lazy resolution *after* a mid-flight swap.
+
+**ESM (`app` anchors via eager import, probe file `t9-final`):**
+```
+entry.mjs: const here=dirname(fileURLToPath(import.meta.url)); loadNative()=process.dlopen(join(here,"binding.node"))
+probe: import {loadNative} from "./current/entry.mjs"  → 2s → swap current→rel-B → loadNative()
+RETAIN rel-A: lazy native dlopen -> from release A            (safe: anchored view held)
+DELETE rel-A: lazy native dlopen FAILED -> dlopen(...rel-A...) no such file   (FATAL — Forge's real hot path)
+```
+
+**CJS (`cjs-t9`):**
+```
+entry.cjs: lazySibling()=require("./sibling.cjs"); loadNative()=process.dlopen(join(__dirname,"binding.node"))
+probe: const e=require("./current/entry.cjs")  → 2s → swap [±rm rel-A]
+RETAIN rel-A: lazy require -> A ; native dlopen -> A          (safe — IDENTICAL to ESM)
+DELETE rel-A: lazy require -> MODULE_NOT_FOUND (require stack names rel-A/entry.cjs)   (FATAL — IDENTICAL to ESM)
+```
+
+**Anchoring precision (`t9-rule`):** a process that anchored to A resolves *both* a module-relative sibling
+*and* a specifier re-traversing `current` to **A** after the swap — `SAME release`, **no mixing**. A process
+that had **not** yet traversed `current` before the swap resolves to **B** (it anchors late). Forge anchors at
+process start, so it is the first case.
+
+**Conclusion (uniform across ESM/CJS/native):** a process anchors at first resolution and stays within that
+release; swap-and-retain is safe; **deleting an anchored release is fatal at the next lazy load.** → the
+retention invariant, and **no automatic GC this slice.**
+
+### A2 — NODE_OPTIONS / NODE_PATH can subvert an ABSOLUTE pinned interpreter (`env-probe`)
+
+**Setup:** absolute pinned interpreter `/Users/.../v24.17.0/bin/node`, clean env (`env -i PATH=/usr/bin:/bin`),
+a real entry `entry.mjs` and an attacker `evil.mjs`.
+```
+baseline  env -i PATH=... node entry.mjs                         → "[forge] I am the real entry point"
+MUT-1     env -i PATH=... NODE_OPTIONS="--import ./evil.mjs" node entry.mjs
+          → "[INJECTED] attacker code ran BEFORE forge"  THEN  "[forge] ..."     (INJECTION SUCCEEDS)
+MUT-2     env -i PATH=... NODE_OPTIONS="--max-old-space-size=1" node entry.mjs   (forge PREVENTED from running normally — GC death)
+MUT-3     env -i PATH=... NODE_OPTIONS="--not-a-real-flag" node entry.mjs        ("... is not allowed in NODE_OPTIONS" — interpreter refuses to start)
+```
+**Conclusion:** an absolute pinned interpreter path is necessary but **NOT sufficient** — ambient
+`NODE_OPTIONS` injects code before forge and can block startup entirely. F29 must include an
+env-sanitization contract (Child 4), and its mutant (pin PATH but leave `NODE_OPTIONS` live) is proven red.
+
+### A3 — bin/forge signal fidelity (`sig-probe2`) — proves the Child 0 fix
+
+**Setup:** a wrapper that spawns a child and, on the child's exit, **re-raises the child's signal on itself**
+(`if(signal) process.kill(process.pid,signal); else process.exit(code??0)`), logging its decision.
+```
+child exits 0            → child_exit code=0   signal=null    → decision=EXIT 0      (wrapper rc 0)
+child NUMERIC exit 143    → child_exit code=143 signal=null    → decision=EXIT 143    (stays numeric — F8 case)
+child killed by SIGTERM   → child_exit code=null signal=SIGTERM → decision=RE-RAISE SIGTERM  (wrapper dies by SIGTERM)
+child killed by SIGKILL   → child_exit code=null signal=SIGKILL → decision=RE-RAISE SIGKILL  (wrapper rc 137)
+```
+**Conclusion:** re-raising the actual signal preserves the numeric-143-vs-SIGTERM distinction that
+`process.exit(128)` destroys. This is the Child 0 acceptance in executable form; today's `bin/forge`
+(`code ?? 0`) turns the SIGKILL case into rc **0**.
