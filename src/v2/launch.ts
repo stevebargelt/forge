@@ -36,8 +36,10 @@
 
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { FORGE_HOME } from "../util/paths.js";
+import { readReleaseManifest } from "./release.js";
 
 export const LAUNCHES_DIR = join(FORGE_HOME, "launches");
 
@@ -85,8 +87,10 @@ export type ExitRecord = { code: number | null; signal: string | null };
 // FG-569 (R2): the exit recorder (this launch's OWN launch-time process) is a
 // distinct runtime from the forge CLI (R1) that submitted the launch — it can
 // run under a different interpreter (buildWrapperCommand takes a `node`). So its
-// runtime is captured from INSIDE the recorder (process.execPath /
-// process.versions.modules / its own env), NEVER copied from the CLI's values.
+// execPath/ABI are captured from INSIDE the recorder (process.execPath /
+// process.versions.modules), NEVER copied from the CLI's values. releaseId is
+// the TRUSTED, manifest-derived id baked into the recorder wrapper — never the
+// recorder's ambient FORGE_RELEASE_ID, which a caller could forge.
 export type RecorderRuntime = {
   execPath: string;
   abi: string;
@@ -130,31 +134,54 @@ export function shellQuote(arg: string): string {
   return `'${arg.replaceAll("'", `'\\''`)}'`;
 }
 
+// FG-569 (R2): the TRUSTED release id — derived from the running forge's OWN
+// release manifest (the forge-release.json that ships INSIDE a built release),
+// found by walking up from THIS module's location. NEVER read from process.env:
+// a dev caller can set FORGE_RELEASE_ID to any value, so the ambient env cannot
+// distinguish a genuine release entry from a poisoned dev launch. Non-null IFF
+// forge is genuinely running from a release, and equal to that release's
+// manifest id; a dev launch is ALWAYS null regardless of any caller-supplied
+// FORGE_RELEASE_ID.
+function trustedReleaseId(): string | null {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return readReleaseManifest(here)?.manifest.id ?? null;
+}
+
 // A shell wrapper could only ever report `$?`, which folds "killed by SIGTERM"
 // and "deliberately returned 143" into the same 143 — the exact inference
 // FG-535's AC forbids. This node runner asks the OS instead: spawnSync reports
 // `signal` (WIFSIGNALED) separately from `status`, so the two cases stay
 // distinguishable in the durable record forever.
 // FG-569 (R2): the recorder's FIRST act is to write its OWN runtime — evaluated
-// here, inside the recorder process — to `rt`. execPath/ABI/env are the
-// recorder's, so a recorder running under a different interpreter than the CLI
-// records a different value; nothing is ever copied in from the launching CLI.
-const EXIT_RECORDER = [
-  `const{spawnSync}=require("child_process"),fs=require("fs");`,
-  `const[e,l,rt,...a]=process.argv.slice(1);`,
-  `fs.writeFileSync(rt,JSON.stringify({execPath:process.execPath,abi:process.versions.modules,nodeVersion:process.version,releaseId:process.env.FORGE_RELEASE_ID||null}));`,
-  `const fd=fs.openSync(l,"a");`,
-  `const r=spawnSync(a[0],a.slice(1),{stdio:["ignore",fd,fd]});`,
-  `if(r.error)fs.writeSync(fd,String(r.error.message)+"\\n");`,
-  `fs.writeFileSync(e,JSON.stringify({code:r.error?127:r.status,signal:r.signal??null}));`,
-].join("");
+// here, inside the recorder process — to `rt`. execPath/ABI are the recorder's,
+// so a recorder running under a different interpreter than the CLI records a
+// different value; nothing is ever copied in from the launching CLI. The
+// releaseId is BAKED IN by buildWrapperCommand as a JSON literal (below), NOT
+// read from process.env — a poisoned FORGE_RELEASE_ID in the ambient environment
+// therefore has ZERO effect on the recorded provenance.
+function exitRecorderScript(releaseIdLiteral: string): string {
+  return [
+    `const{spawnSync}=require("child_process"),fs=require("fs");`,
+    `const[e,l,rt,...a]=process.argv.slice(1);`,
+    `fs.writeFileSync(rt,JSON.stringify({execPath:process.execPath,abi:process.versions.modules,nodeVersion:process.version,releaseId:${releaseIdLiteral}}));`,
+    `const fd=fs.openSync(l,"a");`,
+    `const r=spawnSync(a[0],a.slice(1),{stdio:["ignore",fd,fd]});`,
+    `if(r.error)fs.writeSync(fd,String(r.error.message)+"\\n");`,
+    `fs.writeFileSync(e,JSON.stringify({code:r.error?127:r.status,signal:r.signal??null}));`,
+  ].join("");
+}
 
 /** The command the tmux pane runs: the recorder writes its own R2 runtime, then
  *  runs the target with stdout+stderr to the log, then writes the terminal exit
  *  record. The exit write is the LAST act, so an exit file existing is proof the
- *  command itself finished (not the wrapper being torn down). */
-export function buildWrapperCommand(argv: string[], logPath: string, exitPath: string, runtimePath: string, node = process.execPath): string {
-  const parts = [node, "-e", EXIT_RECORDER, exitPath, logPath, runtimePath, ...argv];
+ *  command itself finished (not the wrapper being torn down).
+ *
+ *  FG-569 (R2): `releaseId` is the TRUSTED, manifest-derived id (or null). It is
+ *  string-interpolated into the recorder script as a JSON literal, so the recorded
+ *  release identity has NO ambient-env dependency. */
+export function buildWrapperCommand(argv: string[], logPath: string, exitPath: string, runtimePath: string, node = process.execPath, releaseId: string | null = null): string {
+  const script = exitRecorderScript(JSON.stringify(releaseId));
+  const parts = [node, "-e", script, exitPath, logPath, runtimePath, ...argv];
   return parts.map(shellQuote).join(" ");
 }
 
@@ -270,7 +297,7 @@ export function startLaunch(argv: string[], opts: { name?: string; cwd?: string;
   const metaPath = join(dir, "meta.json");
   writeFileSync(metaPath, JSON.stringify(meta, null, 2));
 
-  const wrapped = buildWrapperCommand(argv, meta.logPath, join(dir, "exit"), join(dir, "runtime.json"));
+  const wrapped = buildWrapperCommand(argv, meta.logPath, join(dir, "exit"), join(dir, "runtime.json"), process.execPath, trustedReleaseId());
   try {
     // Order matters. Starting the target command AS the session command races
     // it against `set-option`: a command that finishes first destroys the
@@ -280,17 +307,12 @@ export function startLaunch(argv: string[], opts: { name?: string; cwd?: string;
     // never exits on its own), remain-on-exit is set while nothing can race it,
     // and only then does respawn-pane hand the pane to the real command.
     //
-    // FG-569 (R2): a built release's entry exports FORGE_RELEASE_ID into forge's
-    // OWN environment, but tmux does NOT copy an arbitrary client env var into a
-    // session it creates on an ALREADY-RUNNING server — only `new-session -e`
-    // reaches the session env, which respawn-pane then inherits. So forward it
-    // explicitly here; without this the recorder would read null whenever the
-    // operator already had a tmux server up (the common case). A dev launch (no
-    // release, var unset) adds no -e and the recorder records releaseId: null.
-    const sessionEnv = process.env.FORGE_RELEASE_ID
-      ? ["-e", `FORGE_RELEASE_ID=${process.env.FORGE_RELEASE_ID}`]
-      : [];
-    tmux(["new-session", "-d", "-s", session, "-c", meta.cwd, ...sessionEnv, "cat"]);
+    // FG-569 (R2): the release identity is NOT forwarded through the tmux session
+    // env. It is derived from forge's OWN release manifest (trustedReleaseId) and
+    // baked into the recorder wrapper as a JSON literal, so the recorded id cannot
+    // be forged by a caller-supplied FORGE_RELEASE_ID and does not depend on tmux
+    // propagating any client env var into the session.
+    tmux(["new-session", "-d", "-s", session, "-c", meta.cwd, "cat"]);
     tmux(["set-option", "-w", "-t", `${session}:`, "remain-on-exit", "on"]);
     tmux(["respawn-pane", "-k", "-t", `${session}:`, wrapped]);
   } catch (e) {

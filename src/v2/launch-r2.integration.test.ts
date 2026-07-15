@@ -42,29 +42,36 @@ after(() => {
 });
 
 /** EXECUTE the real recorder: run its wrapper command through /bin/sh, exactly
- *  as the tmux pane does. Returns the R2 record it wrote from inside itself. */
-function runRecorder(opts: { node?: string; env?: NodeJS.ProcessEnv; argv?: string[] }): { runtime: RecorderRuntime | undefined; exitExists: boolean; dir: string } {
+ *  as the tmux pane does. Returns the R2 record it wrote from inside itself.
+ *  `releaseId` is the TRUSTED, manifest-derived id forge bakes into the wrapper;
+ *  a dev launch bakes null. `env` is the recorder's AMBIENT environment — a
+ *  poisoned FORGE_RELEASE_ID here must have zero effect on what gets recorded. */
+function runRecorder(opts: { node?: string; env?: NodeJS.ProcessEnv; argv?: string[]; releaseId?: string | null }): { runtime: RecorderRuntime | undefined; exitExists: boolean; dir: string } {
   const dir = mkdtempSync(join(scratch, "run-"));
   const exitPath = join(dir, "exit");
   const logPath = join(dir, "out.log");
   const rtPath = join(dir, "runtime.json");
   const argv = opts.argv ?? ["true"];
-  const wrapper = buildWrapperCommand(argv, logPath, exitPath, rtPath, opts.node ?? process.execPath);
+  const wrapper = buildWrapperCommand(argv, logPath, exitPath, rtPath, opts.node ?? process.execPath, opts.releaseId ?? null);
   const r = spawnSync("/bin/sh", ["-c", wrapper], { encoding: "utf8", env: opts.env ?? process.env });
   assert.equal(r.status, 0, `recorder wrapper failed: ${r.stderr}`);
   const runtime = existsSync(rtPath) ? parseRecorderRuntime(readFileSync(rtPath, "utf8")) : undefined;
   return { runtime, exitExists: existsSync(exitPath), dir };
 }
 
-test("FG-569 R2: the recorder records its OWN execPath / ABI / release id, from inside itself, before running the target", () => {
+test("FG-569 R2: the recorder records its OWN execPath / ABI, and the BAKED trusted release id — never its ambient FORGE_RELEASE_ID", () => {
   const { runtime, exitExists } = runRecorder({
-    env: { ...process.env, FORGE_RELEASE_ID: "release-r2-inside" },
+    // A POISONED ambient env: a caller sets a forged FORGE_RELEASE_ID. It must be
+    // discarded — the recorded id is the trusted value forge baked in.
+    env: { ...process.env, FORGE_RELEASE_ID: "forged-by-caller" },
+    releaseId: "release-r2-inside",
     argv: ["true"],
   });
   assert.ok(runtime, "the recorder wrote its R2 runtime as its first act");
   assert.equal(runtime!.execPath, process.execPath, "execPath is the recorder's own process.execPath");
   assert.equal(runtime!.abi, process.versions.modules, "ABI is the recorder's own process.versions.modules");
-  assert.equal(runtime!.releaseId, "release-r2-inside", "release id comes from the recorder's OWN environment");
+  assert.equal(runtime!.releaseId, "release-r2-inside", "release id is the BAKED trusted value, not read from the recorder's environment");
+  assert.notEqual(runtime!.releaseId, "forged-by-caller", "a poisoned ambient FORGE_RELEASE_ID has ZERO effect on recorded release identity");
   assert.ok(exitExists, "and the recorder still ran the target and wrote its exit record");
 });
 
@@ -84,19 +91,22 @@ test("FG-569 R2 (MUTANT killed): one launcher, TWO recorders under different int
   assert.notEqual(underAlt.runtime!.execPath, underReal.runtime!.execPath, "two recorders, two interpreters, two values — a copy-from-R1 recorder cannot do this");
 });
 
-test("FG-569 R2 (MUTANT killed): one launcher, two recorders with different release env record DIFFERENT release ids", () => {
-  const a = runRecorder({ env: { ...process.env, FORGE_RELEASE_ID: "rel-A" } });
-  const b = runRecorder({ env: { ...process.env, FORGE_RELEASE_ID: "rel-B" } });
-  assert.equal(a.runtime!.releaseId, "rel-A");
-  assert.equal(b.runtime!.releaseId, "rel-B");
-  assert.notEqual(a.runtime!.releaseId, b.runtime!.releaseId, "each recorder read its own env — a value copied from the single R1 could not differ");
+test("FG-569 R2 (MUTANT killed): the recorded release id is the BAKED trusted value; a poisoned ambient FORGE_RELEASE_ID never overrides it", () => {
+  // The mutant this kills: "read releaseId from the recorder's ambient env." Each
+  // recorder is baked with a distinct trusted id AND handed a DIFFERENT poison in
+  // its env — a recorder that trusted its env would record the poison, not the id.
+  const a = runRecorder({ env: { ...process.env, FORGE_RELEASE_ID: "poison-A" }, releaseId: "rel-A" });
+  const b = runRecorder({ env: { ...process.env, FORGE_RELEASE_ID: "poison-B" }, releaseId: "rel-B" });
+  assert.equal(a.runtime!.releaseId, "rel-A", "recorder A records its baked trusted id, not poison-A");
+  assert.equal(b.runtime!.releaseId, "rel-B", "recorder B records its baked trusted id, not poison-B");
+  assert.notEqual(a.runtime!.releaseId, b.runtime!.releaseId, "each recorded its OWN baked id — the ambient poison is irrelevant");
 });
 
-test("FG-569 R2: no release env ⇒ releaseId is null, never fabricated", () => {
-  const env = { ...process.env };
-  delete env.FORGE_RELEASE_ID;
-  const { runtime } = runRecorder({ env });
-  assert.equal(runtime!.releaseId, null);
+test("FG-569 R2: a DEV launch records releaseId null EVEN WITH a poisoned FORGE_RELEASE_ID in the environment", () => {
+  // The confirmed spoof: `FORGE_RELEASE_ID=forged-by-caller <dev forge> launch ...`.
+  // A dev launch bakes null (no trusted manifest id), so the forged env is discarded.
+  const { runtime } = runRecorder({ env: { ...process.env, FORGE_RELEASE_ID: "forged-by-caller" } });
+  assert.equal(runtime!.releaseId, null, "a poisoned dev launch records null — the forged id never reaches runtime.json");
 });
 
 // The END-TO-END proof the review-loop demanded: the prior tests inject
@@ -131,13 +141,15 @@ test("FG-569 R2 (END-TO-END, through a BUILT release entry): the recorder record
 
   try {
     const forgeHome = mkdtempSync(join(scratch, "home-"));
-    // Run the launch THROUGH the built release entry. The entry (not this test)
-    // exports FORGE_RELEASE_ID from its own manifest before exec'ing node.
+    // Run the launch THROUGH the built release entry. A caller POISONS the ambient
+    // FORGE_RELEASE_ID with a forged value; the recorded id must still be the
+    // release's manifest id (derived from forge's OWN manifest), never the poison.
     const entryEnv = {
       PATH: process.env.PATH ?? "/usr/bin:/bin",
       HOME: process.env.HOME ?? "/tmp",
       FORGE_HOME: forgeHome,
       TMUX_TMPDIR: tmuxTmpdir,
+      FORGE_RELEASE_ID: "forged-by-caller-poison",
     };
     const run = spawnSync(built.entryPath, ["launch", "run", "--name", "r2e2e", "--json", "--", "true"], { env: entryEnv, encoding: "utf8" });
     assert.equal(run.status, 0, `forge launch run through the release entry failed: ${run.stderr}`);
@@ -151,7 +163,8 @@ test("FG-569 R2 (END-TO-END, through a BUILT release entry): the recorder record
 
     const runtime = parseRecorderRuntime(readFileSync(rtPath, "utf8"));
     assert.ok(runtime, "runtime.json parses as an R2 record");
-    assert.equal(runtime!.releaseId, built.manifest.id, "the recorder captured THIS release's id — sourced from the entry's manifest, forwarded through tmux");
+    assert.equal(runtime!.releaseId, built.manifest.id, "the recorder captured THIS release's manifest id — derived from forge's OWN manifest, not the ambient env");
+    assert.notEqual(runtime!.releaseId, "forged-by-caller-poison", "the poisoned ambient FORGE_RELEASE_ID did NOT override the manifest-derived id");
     assert.notEqual(runtime!.releaseId, null, "R2 release-id is live for a real release, not the null the bug shipped");
   } finally {
     spawnSync("tmux", ["kill-server"], { env: serverEnv, encoding: "utf8" });
