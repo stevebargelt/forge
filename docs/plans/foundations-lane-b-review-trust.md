@@ -155,7 +155,7 @@ local-fallback outcome (`:624`), including when HEAD is a local-only fixer commi
 delegation that does not happen.
 
 **VERIFIED FACT — the machinery to detect this ALREADY EXISTS, and is consulted too late.**
-`classifyRemoteTrust` (`cli/commands/review-loop.ts:448-466`) already returns
+`resolveReviewedTipTrust` (`cli/commands/review-loop.ts:454-468`) already returns
 `trusted | local_only | remote_ahead | diverged | remote_unavailable`, and `local_only` already withholds
 closeability with the correct instruction — *"Push the branch and re-run `forge review-loop`"* (`:1078-1084`,
 `process.exitCode = 1`). But it is computed **at the end**, for the closeability verdict only. `verifyWithReuse`
@@ -433,7 +433,7 @@ independent questions:
 **Q1 — is the verification outcome HONEST? (not optional; not a choice)**
 Every option needs this. Even auto-push must land honestly when the push fails. So this ships **unconditionally,
 first, and alone**:
-1. **Ask `classifyRemoteTrust` BEFORE probing CI, not after.** The function already exists (`:448-466`) and already
+1. **Ask `resolveReviewedTipTrust` BEFORE probing CI, not after.** The function already exists (`:454-468`) and already
    computes exactly the needed fact; it is simply consulted too late (only at `:1073`, for closeability). If HEAD
    is `local_only`, **skip the CI probe entirely** — do not poll, do not wait out `CI_WAIT_TIMEOUT` (`:580-594`)
    for a check-run that **cannot exist**. *The machinery is there; wire it earlier.*
@@ -460,7 +460,7 @@ default and costs one flag.
 - **No force. Ever.** No `--force`, no `--force-with-lease`. Plain fast-forward only. Non-ff → **abort**, report
   `diverged`, no retry, no "fix-up".
 - **No branch creation by guess.** Push **only** to the branch's **existing** upstream (`@{u}`). No upstream → no
-  push; land `local_only` and say so. (`classifyRemoteTrust` already resolves `@{u}` — `:372`.)
+  push; land `local_only` and say so. (`resolveReviewedTipTrust` already resolves `@{u}` — `:372`.)
 - **No push from detached HEAD.** Refuse.
 - **Clean tree required at push time.** Assert it; do not infer it from the fixer having just committed.
 - **THE SHARP ONE — pre-existing local commits.** Compute the local-only set vs `@{u}` **before the loop's first
@@ -665,11 +665,11 @@ graph TD
   RL["review-loop verification<br/>HOST execFileSync, cwd=projectDir"]
   RL -->|"exit 127 = env fault,<br/>DISCARDED at review-loop.ts:297"| VF["verification_failed<br/>(reviewer never dispatched,<br/>round burned) — FG-566"]
   RL -->|"fixer commits, NEVER pushes<br/>review-loop.ts:862-864"| LO["local-only SHA →<br/>CI can never exist — FG-541"]
-  LO -.->|"classifyRemoteTrust ALREADY<br/>knows this — asked too late"| RL
+  LO -.->|"resolveReviewedTipTrust ALREADY<br/>knows this — asked too late"| RL
 ```
 
 The dashed `invoke → reconcile` edge is the load-bearing claim of this diagram: **it is the path that walks around
-the FG-525 fix.** The dashed `classifyRemoteTrust` edge is FG-541's: the answer is already computed, just not in
+the FG-525 fix.** The dashed `resolveReviewedTipTrust` edge is FG-541's: the answer is already computed, just not in
 time to be useful.
 
 ---
@@ -689,7 +689,7 @@ Ordered. Each is independently implementable and reviewable. Each names a falsif
 | # | Story | Scope | Depends on | Falsification (must be RED at baseline) |
 |---|---|---|---|---|
 | **B0** | **Finalize-site census guard** *(§4 — the failure-class backstop)* | ~~The allowlist guard test over every `markTaskComplete`/`markTaskRecovered` call site.~~ **[SUPERSEDED → PRD INV-1:** the unit is the **lineage-classified finalize EVENT**, not a call-site allowlist — `finalizePrimary` collapses the gated primary and the exempt aggregate onto one `markTaskComplete` write (`:1010`), so a call-site allowlist cannot express the gate.**]** **No behaviour change.** Ships the census of §1.1 as executable truth. | — | **F0:** add an unannotated finalize path → the guard **must** go red. ~~**Red today by construction:** no such guard exists.~~ **[SUPERSEDED → PRD: NORMATIVE-UNMET, not a baseline red** — an unbuilt guard "goes red" only because it has not been written, which is not defect evidence; it gets an acceptance condition (PRD §7 N-1), not a fabricated red.**]** *Mutant: allowlist-by-wildcard → F0 must still redden.* |
-| **B1** | **FG-541 honesty** *(no push; unconditional)* | Consult `classifyRemoteTrust` **before** the CI probe; distinct `local_only` verification outcome; `extendedDelegatedToCi=false` when local-only; fix the comment at `:848-851`. **No push authority.** | — | **F6:** fixer commits in round 1 → round 2 **must not** probe/poll CI for the local-only SHA, **must** report `local_only` (not generic "CI unavailable"), and **must not** claim extended was delegated. **Red today** (§2.2). *Mutant: restore the unconditional `extendedDelegatedToCi` → F6 reddens.* |
+| **B1** | **FG-541 honesty** *(no push; unconditional)* | Consult `resolveReviewedTipTrust` **before** the CI probe; distinct `local_only` verification outcome; `extendedDelegatedToCi=false` when local-only; fix the comment at `:848-851`. **No push authority.** | — | **F6:** fixer commits in round 1 → round 2 **must not** probe/poll CI for the local-only SHA, **must** report `local_only` (not generic "CI unavailable"), and **must not** claim extended was delegated. **Red today** (§2.2). *Mutant: restore the unconditional `extendedDelegatedToCi` → F6 reddens.* |
 | **B2** | **FG-566 detect + classify** *(no provisioning yet)* | Readiness pre-check at **all three** local-run sites (`:544`, `:622`, `:853`); **stop discarding the exit code** in `makeDefaultRunner`; `verification_environment_unavailable` as a **zero-round** loop outcome; distinguish it on CLI / `--json` / run note / events / dashboard. Reuse `failure-kind.ts:151` + forge-test's reason vocabulary. | — | **F2:** forced install failure → stops **before round 1** as `verification_environment_unavailable`, **no** reviewer/fixer dispatch. **F3:** deps absent **or built for an incompatible ABI** → not accepted as ready; no wall of false product-test failures. **F4:** trusted covering CI evidence → **no** provisioning, reuse semantics unchanged (*guards the ordering constraint*). **F5:** a **real** typecheck/test regression in a **prepared** env → ordinary verification/fixer policy, **unchanged** (*the anti-laundering test*). ~~**All red today** (§2.1).~~ **[SUPERSEDED → PRD §7.2/§7.3 four-label method:** only the underlying misclassification is an observed baseline red (**R-566**, §2.1). **F2/F3/F4/F5 are NORMATIVE-UNMET acceptance conditions** (PRD **N-2/N-3/N-4**) — the `verification_environment_unavailable` disposition, the readiness pre-check, and the ordering/anti-laundering guards do **not exist at baseline**, so they cannot be observed red. **F5** (real regression in a prepared env → policy unchanged) is in fact **green today** (the anti-laundering guard, not a red). They get acceptance conditions + verification methods, not fabricated reds.**]** |
 | **B3** | **FG-525 — gate `invoke`, AND its crash-recovery bypasses** | The evaluator at `invoke.ts:813`; held invoke returns `awaiting_gate` + non-zero exit; **and** `reconcile.ts:779`/`:880` + `recover.ts:457` decline to complete contraband (FG-479's `failPipelineUnfinalized` shape). Correct `validation-contract.ts:15-21`. | B0 | **F7:** implementer invoke, `status:complete`, no `tests_run`, no waiver → **held**, not complete. **Red today (EXECUTED, §2.3 ARM 3).** **F9 — THE ONE THAT MATTERS:** the same invoke, container orphaned → reconciled / `recover --continue` → **must NOT complete**. **This is the bypass of the fix.** *Currently INFERENCE only (§2.4) — B3 must EXECUTE it.* *Mutant: gate only `invoke.ts:813` → F9 reddens.* |
 | **B4** | **FG-524 — gate the fanout child AND make re-entry re-aggregate** | Evaluator at the child finalize (`runNext.ts:2541`); `held` variant on `ChildOutcome` (`:2353`); aggregation learns it (`:1762`/`:1791`/`:1807`); **parent holds, publication withheld, reds do not run**; `failure_mode:"continue"` must not swallow a hold; **fanout re-entry RE-AGGREGATES** (`:1668-1671`); held child's worktree retained **intentionally**. | B0; **coordinate with FG-527** (§7) | **F8:** fanout implementer child, no `tests_run` → child **held**, **parent held**, **nothing published**. **Red today (EXECUTED, §2.3 ARM 2 — child *and* parent completed).** **F10 — THE WEDGE:** advance the held child → `forge run next` → parent **re-aggregates, publishes, completes**. **[SUPERSEDED → PRD: NORMATIVE-UNMET, not a baseline red** — there is no held-child state at baseline, so the wedge cannot be observed red without first building the gate; the `:1671` no-op is a VERIFIED FACT feeding the design, not a falsification (PRD §2, D3, §7 N-7).**]** `:1671` makes the re-drive a no-op, so *the gate alone wedges the fanout permanently.* **F11:** `failure_mode:"continue"` must **not** step over a held child. |
@@ -804,7 +804,7 @@ layer. FG-345 is a design brief, not a code lane in flight. FG-356 touches **`re
 | `validation-contract.ts` | **B3/B4** (header + call sites) | — |
 | `lifecycle-evaluator.ts` | **not touched** (§7.1 decision) | FG-527/FG-477 own it |
 | `cli/commands/review-loop.ts:544/:622/:853` | **B2** (readiness) | — |
-| `cli/commands/review-loop.ts:448-466/:621/:848-851/:1073` | **B1** (trust, honesty) | — |
+| `cli/commands/review-loop.ts:454-468/:621/:848-851/:1073` | **B1** (trust, honesty) | — |
 | `v2/review-loop.ts:292-321/:441` | **B2** (exit code; zero-round outcome) | — |
 | `store/host-verifications.ts` + `host_verifications` schema | **read-only — deliberately NOT changed** (§3) | — |
 | Task row / `tasks` schema | **no migration** (§1.3) | — |
@@ -862,7 +862,7 @@ orchestrator's lane. **Named conclusions that must be re-verified when they land
   shrinks; if it confirms me, B3 was mis-scoped in the ticket.
 - **MEDIUM — held child ⇒ pinned worktree with no reaper** (§7.3). A trust fix that leaks disk is a bad trade;
   name the reclaim path in B4.
-- **MEDIUM — B1 changes when `classifyRemoteTrust` is called**, and it performs a **bounded network fetch**
+- **MEDIUM — B1 changes when `resolveReviewedTipTrust` is called**, and it performs a **bounded network fetch**
   (`:456-458`). Moving it *earlier* moves a network dependency earlier in the loop. Its `remote_unavailable` arm
   already fails closed, so a fetch failure must **not** become a new way to skip verification. Watch this in review.
 - **MEDIUM — two cache-key schemes already exist** (§3). B5 must adopt **one**, not mint a third. I have no
