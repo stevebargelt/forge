@@ -29,10 +29,14 @@ export const DESTRUCTIVE_BOUNDARY_VERSION = 1;
 
 // The 0.1.x legacy model_calls columns the destructive convergence migration
 // removes. NOT NULL with no DEFAULT and write-only dead weight — a fresh
-// SCHEMA_SQL never creates them, so a 0.1.x-migrated DB that still has them makes
-// the current insertUsageRows (which omits them) throw. Converging the two shapes
-// is a real problem, but a CONVERGENCE one, not an every-open one — so the drop
-// lives here, off the ordinary open path, behind an explicit quiesce gate.
+// SCHEMA_SQL never creates them. The additive-only open path never drops them, so
+// an unconverged 0.1.x store still carries all three; the current insertUsageRows
+// is dual-shape — it inspects the schema and, when these columns are present,
+// writes them with 0/0/0 placeholders, so usage capture SUCCEEDS on both the fresh
+// and the unconverged 0.1.x shape. Converging the two shapes is a real problem, but
+// a CONVERGENCE one, not an every-open one — so the drop lives here (in
+// runDestructiveConvergenceMigration, run explicitly via `forge store converge`),
+// off the ordinary open path, behind an explicit quiesce gate.
 export const LEGACY_MODEL_CALLS_COLUMNS = ["prompt_tokens", "completion_tokens", "cost"] as const;
 
 // Idempotent ALTERs for existing DBs whose `runs` table predates a column added
@@ -116,9 +120,10 @@ export function applyMigrations(db: DatabaseInstance): void {
   // DDL that would remove schema an in-flight version-A peer still depends on — so
   // it moved OFF this additive-only path into runDestructiveConvergenceMigration
   // (explicit, operator-invoked, quiesce-gated). A migrated DB that still carries
-  // the legacy NOT NULL columns keeps working for old writers; converging it to
-  // the fresh shape so current inserts succeed is that migration's job, not this
-  // one's. See LEGACY_MODEL_CALLS_COLUMNS.
+  // the legacy NOT NULL columns keeps working for old writers AND for current
+  // inserts — insertUsageRows is dual-shape and fills the legacy columns with 0/0/0
+  // when present. Converging it to the fresh shape (dropping the dead columns) is
+  // that migration's job, not this one's. See LEGACY_MODEL_CALLS_COLUMNS.
   // Created indexes (created_at index too — used by --since time filters).
   db.exec(`CREATE INDEX IF NOT EXISTS idx_model_calls_request ON model_calls(request_id)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_model_calls_created ON model_calls(created_at)`);
