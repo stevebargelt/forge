@@ -384,27 +384,36 @@ outcome (the row is OWNED even while that outcome is open). Per the **decision-c
 - **STATE-TRUTH CONSTRAINT ON OPTION (i) — cleanup must not invent lifecycle truth to make a reaper predicate
   match (binds the gate's selection).** An unresolved validation hold **cannot truthfully become `complete`** —
   `complete` asserts a validation pass that never happened, so `awaiting_gate → complete` is **forbidden** here
-  regardless of what makes the reaper predicate convenient. `failed` (or `cancelled`) is truthful **only when there
-  is a durable actual cancellation/abandonment transition** — i.e. the terminal status is written **as a
-  consequence of a real run-end/abandon event** (`updateRunStatus(..., "abandoned")` at `runs.ts:181-193`, the
-  cancel/abandon path), **never** a status flip synthesized purely so `{complete, failed}` matches. If neither a
-  truthful `failed`/`cancelled` transition nor a genuine terminal event is available, option (i) is **not
-  admissible** and the mechanism MUST be option (ii) (a direct reclaim that reaps the worktree **without**
-  re-labeling the child's lifecycle state). This constraint is resolved in the decision-closure gate before the
+  regardless of what makes the reaper predicate convenient. The only truthful terminal shape for a held child is
+  **TaskStatus=`failed`, backed by durable task-level cancellation evidence** — `failure_kind=cancelled` (a
+  **FailureKind/event, NOT a TaskStatus**; `failure-kind.ts:125`) plus a **`task.cancelled`** record. **RunStatus=
+  `abandoned` alone does NOT terminalize the held child or prove its transition** — `updateRunStatus(..., "abandoned")`
+  at `runs.ts:181-193` sets the RUN status and does not, by itself, move the child task out of `awaiting_gate`.
+  Option (i) is admissible **only if** a real cancellation/abandonment path **causally transitions the held child
+  from `awaiting_gate` to TaskStatus=`failed` and records the task-level evidence** (`failure_kind=cancelled` +
+  `task.cancelled`); a status flip synthesized purely so `{complete, failed}` matches is forbidden. If no such
+  causal, evidence-backed transition exists, option (i) is **not admissible** and the mechanism MUST be option (ii)
+  (a direct reclaim that reaps the worktree **without** re-labeling the child's lifecycle state). This constraint is
+  resolved in the decision-closure gate before the
   ticket runs.
 - **ACCEPTANCE ROWS:** a run that ENDS (or is abandoned) with a child still `awaiting_gate` **does NOT leak** its
   worktree or its `forge/<runId>/<taskId>` branch; a test drives **run-end-while-held → reclaimed**. Under
-  option (i) the held child is first moved to a **terminal** status (so A-FG356's `{complete, failed}` predicate
-  matches) AND its worktree must satisfy **A-FG356's retain predicate** before reap (dirty / retain-set kind ⇒
+  option (i) the held child is first transitioned to **TaskStatus=`failed` via a real cancellation/abandonment path
+  that records the task-level evidence** (`failure_kind=cancelled` + `task.cancelled`; NOT `complete`, and NOT a
+  RunStatus-`abandoned`-only flip — see the STATE-TRUTH CONSTRAINT above) so A-FG356's `{complete, failed}` predicate
+  matches, AND its worktree must satisfy **A-FG356's retain predicate** before reap (dirty / retain-set kind ⇒
   retained, never silently discarded — I-6); under option (ii) the direct path honors the same retain predicate.
 - **FILES / SCHEMAS (all VERIFIED existing; no new file):** the run-END finalize path =
   `src/v2/run-finalize.ts:31` `finalizeRunIfSettled` (called on the settled-no-dispatch run-end at
   `src/v2/runNext.ts:220`, imported `runNext.ts:38`); the ABANDON transition (the other acceptance arm) =
   `forge cancel --abandon-run` at `src/cli/commands/cancel.ts:115` and `:166`
-  (`updateRunStatus(task.runId/run.id, "abandoned")`), which writes the terminal `abandoned` status via
+  (`updateRunStatus(task.runId/run.id, "abandoned")`), which writes the terminal `abandoned` **RunStatus** via
   `updateRunStatus` in `src/store/runs.ts:181-193` — guarded against resurrection by the FG-484
   `abandoned → complete` refusal at `runs.ts:177` (`RunStatus = "active" | "complete" | "abandoned"`, terminal /
-  non-resumable); the A-FG356 terminal-reaper hook (option (i)) = the tail of
+  non-resumable). **Note:** this sets the RUN status only; **RunStatus=`abandoned` alone does NOT terminalize the
+  held child task or prove its transition.** Under option (i) the abandon path must ALSO causally transition the
+  child TaskStatus `awaiting_gate → failed` and record the task-level evidence (`failure_kind=cancelled` +
+  `task.cancelled`), else the child stays non-terminal and A-FG356 never (and must never) reap it; the A-FG356 terminal-reaper hook (option (i)) = the tail of
   `src/v2/reconcile.ts:393` `reconcileRun` (`finalizeOrphanedPrimaries` `:1361`); reclaim =
   `src/v2/worktree-lifecycle.ts:179` `removeWorktreeIfSafe` (already invoked from reconcile at
   `reconcile.ts:570/682/1003`). Reuses the **existing**
@@ -420,7 +429,8 @@ outcome (the row is OWNED even while that outcome is open). Per the **decision-c
   (i) routes reclaim through its terminal reaper, which must treat the newly-terminalized child under its retain
   predicate; option (ii) must not double-reap a child A's reaper also sees. (iii) the shared constant
   `awaiting_gate ∈ non-terminal` (map §3 row 10) — until the child is terminalized (option i), A must not reap it.
-  **NOT blocked on FG-561.**
+  **No additional semantic dependency beyond the mandatory program-wide post-FG-561 delta-audit and
+  decision-closure gates. No child or implementing decision may dispatch before those gates pass.**
 - **CONCURRENCY CONSTRAINTS:** touches the run-end finalize region of `runNext.ts` and (option i) the A-FG356
   reaper tail of `reconcile.ts` — **coordinate with A-FG356** if it lands option (i) (shared reaper predicate) and
   with **B-FG524** (shared held-child lifecycle). Must NOT introduce a **second** held-child retention path —
@@ -432,10 +442,12 @@ outcome (the row is OWNED even while that outcome is open). Per the **decision-c
   child never resolves (that is the whole seam). (4) A **mid-hold** status flip dressed up as a run-end
   terminalization — the transition must be a genuine run-end, else it desyncs C-S2's ACTIVE-hold contract (INV-7).
   (5) **STATE-TRUTH VIOLATION — the hard reject:** marking an unresolved `awaiting_gate` child **`complete`** (it
-  asserts a validation pass that never occurred), or **`failed`/`cancelled` with no durable actual cancellation/
-  abandonment transition** to back it — i.e. **inventing lifecycle truth solely to make A-FG356's `{complete,
-  failed}` predicate match.** A reaper predicate is not a licence to falsify a child's lifecycle state; if the
-  truthful terminal transition does not exist, use option (ii).
+  asserts a validation pass that never occurred), or setting TaskStatus=**`failed` with no durable task-level
+  cancellation evidence** (`failure_kind=cancelled` + `task.cancelled`) causally produced by a real cancellation/
+  abandonment path — i.e. **inventing lifecycle truth solely to make A-FG356's `{complete, failed}` predicate
+  match.** Note `cancelled` is a **FailureKind/event, not a TaskStatus**, and **RunStatus=`abandoned` alone does not
+  terminalize the child or prove its transition.** A reaper predicate is not a licence to falsify a child's
+  lifecycle state; if the causal, evidence-backed `awaiting_gate → failed` transition does not exist, use option (ii).
 
 ### B-FG525 — gate `forge invoke` AND its crash-recovery bypasses
 
