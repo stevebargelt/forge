@@ -60,7 +60,7 @@ The FG-553/FG-555 mechanism surfaces, plus **every file the three PRDs assume be
 | **`src/v2/spawn.ts`** (mount construction path — the `.git` mount and `PROJECT_MODE`) | A §7.3 — the acceptance tests for AC-1/AC-2/AC-3/AC-7 edit `spawn.ts`; confirm they run against the artifact they think they test. |
 | **`src/store/runs.ts`** (`completeRun` `:140` / its `AND status='active'` guard `:147`; `updateRunStatus` FG-484 refusal `:174-179`) | C INV-2 — the no-resurrection guarantee is store-layer; confirm both guards survive the FG-553 store changes and that no new completion-writing path appeared. **(There is no `src/v2/store/` directory — the store lives at `src/store/`.)** |
 | **`src/cli/commands/review-loop.ts`** (the three local-run sites `:544`/`:622`/`:853`) | B OQ-4 — after FG-553 these run the promoted release, not the working tree. |
-| **`src/v2/retry.ts`** (`:263` mount-mode fallback; `:427-466` mint) | C OQ-2 / map OQ-INT-1 — the fail-open mount-mode fallback is the unowned seam; confirm FG-553 did not change mount-mode provenance under it. |
+| **`src/v2/retry.ts`** (`:263` mount-mode fallback; `:427-466` mint) | C OQ-2 / map OQ-INT-1 (OWNED-BY-A, row 12) — the fail-open mount-mode fallback; confirm FG-553 did not change mount-mode provenance under it. |
 | **`src/v2/lifecycle-evaluator.ts`** (classifier rule 0, `:110`/`:116-127`) | C §8 — two Forge versions with different classifier rules writing one store disagree about one row. |
 
 ## 4. ASSUMPTIONS to revalidate — per cluster, cited to the PRD decision
