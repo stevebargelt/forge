@@ -75,6 +75,21 @@ after(() => {
   rmSync(workspace, { recursive: true, force: true });
 });
 
+test("FG-569 (finding): an --out path INSIDE the source tree is REFUSED before any staging dir is created — else the copy recurses into itself", () => {
+  // --out src/<x> makes src/<x>.building-* part of the copied src/ input, so the
+  // recursive cpSync of src/ + node_modules/ would copy the growing staging tree into
+  // itself. The build must refuse the path before creating anything.
+  const badOut = join(sourceRoot, "src", "release-would-recurse");
+  assert.throws(
+    () => buildRelease({ sourceRoot, outDir: badOut }),
+    /inside the source root/i,
+    "an out dir contained by sourceRoot must be refused",
+  );
+  assert.ok(!existsSync(badOut), "no out dir was created");
+  const leaked = readdirSync(join(sourceRoot, "src")).filter((n) => n.startsWith("release-would-recurse"));
+  assert.deepEqual(leaked, [], "no `.building-*` staging dir leaked into the source tree");
+});
+
 test("FG-569 build: the manifest pins the building interpreter, its ABI, the commit, and a lockfile identity", () => {
   const m = built.manifest;
   assert.equal(m.interpreter, process.execPath, "the absolute interpreter is the building process's execPath");

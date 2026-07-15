@@ -43,7 +43,7 @@ import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, chmodSync } from "node:fs";
-import { dirname, join, isAbsolute, resolve } from "node:path";
+import { dirname, join, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { findGitRoot } from "../util/git-root.js";
@@ -477,6 +477,13 @@ export function thawReleaseTree(dir: string): void {
   }
 }
 
+/** True when `child` is `parent` itself or a path nested under it. Both must already be
+ *  resolved absolute paths. Used to keep the release out dir out of the source tree. */
+function isWithin(parent: string, child: string): boolean {
+  const rel = relative(parent, child);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
 /** Build an immutable release closure from `sourceRoot` into `outDir`. Refuses a
  *  torn closure before writing anything. Builds into a sibling temp dir and
  *  renames into place, so an interrupted build never leaves a partial release. */
@@ -491,6 +498,13 @@ export function buildRelease(opts: BuildReleaseOptions): BuildReleaseResult {
   }
   if (existsSync(outDir)) {
     throw new Error(`forge release: ${outDir} already exists — a release directory is immutable and never overwritten`);
+  }
+  // The out dir (and thus its sibling `.building-*` staging dir) must live OUTSIDE the
+  // source tree: staging inside sourceRoot makes the staging dir part of the copy input,
+  // so the recursive cpSync of src/ + node_modules/ would copy the growing staging tree
+  // into itself. Refuse before anything is created.
+  if (isWithin(sourceRoot, outDir)) {
+    throw new Error(`forge release: --out ${outDir} is inside the source root ${sourceRoot} — the release (and its staging dir) must be built outside the source tree, or the copy would recurse into itself. Choose an --out path outside ${sourceRoot}.`);
   }
 
   // FG-569 (Finding 4): select the ONE effective lockfile up front (input validation)
