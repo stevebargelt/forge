@@ -392,13 +392,36 @@ post-merge hooks are **not reachable at any live agent-written-worktree site**; 
 (`filter.<name>.*`, `diff.<name>.textconv`, `merge.<name>.driver`) survive FIX-A for the reason unchanged below —
 this is why **D10a is PARTIAL and D10b is LOAD-BEARING**.
 
-**FIX-A, part 2 — the GUARD (this is what makes "complete" true).** A greppable/AST build check **FAILS the
-build** when any host-side `execFileSync("git", …, { cwd })` whose `cwd` resolves to an agent-written worktree is
-**not** the wrapper. An unwrapped host-git-in-worktree call is a **build failure, not a review miss** — so a
-newly-added site (or a revived dead one) cannot ship unhardened, and the "second missed site in two rounds" class
-of defect is closed structurally rather than by adding one more list entry. **(NORMATIVE-UNMET — the wrapper and
-guard are decisions this PRD establishes; the shipped forge has neither, so no baseline red for the fix itself;
-the underlying defect's observed-red remains AC-7 / probe P6b.)**
+**FIX-A, part 2 — the GUARD (this is what makes "complete" true).** The guard is a **SYNTACTIC, FAIL-CLOSED,
+DEFAULT-DENY** check — it keys on the **shape of the call site**, never on where `cwd` points at run time. This is
+deliberate: *"`cwd` resolves to an agent-written worktree"* is a **semantic/dataflow property** — the `cwd`
+argument is an arbitrary runtime expression — and **no greppable/AST check can decide it** (INFERENCE — a static
+check cannot evaluate a runtime path). A guard phrased that way would not be buildable. So the guard is phrased
+over the **syntactic** classification instead, which IS decidable:
+
+> **Every host-side git exec in the codebase — every `execFileSync`/`execFile`/`spawn`/`spawnSync` whose `argv[0]`
+> is `git` (or a path ending `/git`) — MUST be EITHER (a) routed through the SINGLE hardened wrapper (the only
+> sanctioned way to exec git that MAY run in an agent worktree), OR (b) an entry on an EXPLICIT, ANNOTATED
+> ALLOWLIST of git plumbing that provably never executes repo-provided content and/or never runs with an
+> agent-worktree `cwd`. Each allowlist entry carries a one-line justification. Any raw git exec that is neither the
+> wrapper nor an annotated allowlist entry FAILS THE BUILD.**
+
+Because the check is over a syntactic property (is this call the wrapper? is its source location on the allowlist?)
+it is **decidable by grep/AST** and needs no dataflow analysis. **Fail-closed is the whole point:** a
+new-or-unclassified git exec is **DENIED by default** — it reddens the build until someone either wraps it or adds
+an annotated allowlist entry. A future site therefore **cannot ship unhardened OR unreviewed**; the "second missed
+site in two rounds" class of defect is closed structurally, not by trusting a hand-curated list to stay complete.
+
+**The allowlist IS the auditable surface** — the exec-vector analog of Lane B's declared finalize sites. Adding an
+entry is a **reviewable act** (a diff a human signs off on with its justification), and an allowlist entry that
+**actually can run with an agent-worktree `cwd`** is a **review defect** — the entry lied about the very property
+that qualifies it. The known non-wrapper plumbing that seeds the allowlist (each with its one-line why): `git
+worktree add/remove/prune` and `branch -D` (`cwd = projectDir`, never an agent worktree — the live/dead audit);
+`rev-parse --verify` and other forge-dir-scoped refname/plumbing calls that never execute repo-provided content.
+The wrapper's own internal `execFileSync("git", …)` is the (a) sanctioned path, not an allowlist entry. **(NORMATIVE-UNMET
+— the wrapper, the allowlist, and the default-deny guard are decisions this PRD establishes; the shipped forge has
+none of them, so no baseline red for the fix itself; the underlying defect's observed-red remains AC-7 / probe
+P6b.)**
 
 **KNOWN LIVE sites at the reviewed baseline (185afc3) — the guard's STARTING set, labeled honestly (NOT a
 completeness claim)** (host git with `cwd` = an agent-**written** worktree; swept `src`, `execFileSync("git", …)`
@@ -658,7 +681,7 @@ nothing.
 | **N-6** | **The reaper's retain predicate, `provenEmpty` condition, branch pruning, and idempotency** (D9b/c/d, I-6/7/9). | Terminal + reapable-kind + clean → reaped (dir **and** branch). Any retain clause → retained. Twice ≡ once. Never writes task state. **Test-strength check on the delivered code (NOT baseline evidence):** a mutant passing `provenMerged: true` in place of the new condition must redden the retain tests. |
 | **N-7** | **The ignored-files second diagnostic is surfaced to the agent** (D8.1). | The agent's context contains the "present in the main checkout, absent from your worktree" list. |
 | **N-8** | **Sequential chaining is pinned** (D8.3). | Step N+1's worktree base **contains** step N's published commit. |
-| **N-9** | **The host executes no exec driver DEFINED in an agent-writable git config — no worktree-supplied hook, filter, textconv, fsmonitor, or merge driver** (D10/I-10). *(Scope matches I-10: a legit driver defined in the trusted `:ro` common config but triggered on agent-chosen paths via an agent-written `.gitattributes` is the named residual OQ-7, not covered by this norm.)* Two obligations: **(a)** every host-side git run with `cwd` inside an agent-written worktree routes through the **single hardened wrapper**, which passes the fixed-key exec-disabling flags `-c core.hooksPath=/dev/null -c core.fsmonitor=`; the **guard's starting set** is `autoCommitSource` `status`/`add`/`commit` (`integration-publisher.ts:305,307,308`), `changedWorktreeFiles` `status` (`reconcile.ts:229-240`), **and** `mergeChildIntoIntegration` `status`/`add`/`commit` (`worktree-lifecycle.ts:420,434,439`) — completeness is enforced by the guard, not by this list; **(b)** the worktree-local `.git` pointer is bind-mounted `:ro` over itself for every rw class. | **(a)** assert the wrapper injects both `core.hooksPath=/dev/null` and `core.fsmonitor=` for worktree-cwd invocations; **and — the load-bearing part — a greppable/AST guard FAILS the build** when any host-side `execFileSync("git", …, {cwd: <agent-written worktree>})` bypasses the wrapper (verify: introduce a raw unwrapped host-git-in-worktree call — including reviving the dead `mergeWorktreeBranch` — and the build must red). Behaviorally, an in-worktree `pre-commit` hook does not run on `autoCommitSource` or `mergeChildIntoIntegration`, and an in-worktree `core.fsmonitor` command does not run on `changedWorktreeFiles`'s `git status`. **(b)** the mount set for a blue dispatch contains a `:ro` bind of `realpath(worktreePath/.git)`; an in-container attempt to overwrite `/project/.git` with a **standalone** gitdir fails. **The observed-red for the underlying defect is AC-7 / probe P6b (`p6b` STEP 1) — do NOT fabricate a second red here.** **Test-strength check on delivered code (NOT baseline evidence):** a mutant that drops `hooksPath=/dev/null` **while the pointer bind is also absent** must redden; with the pointer bind present, dropping `hooksPath` still leaves the filter/textconv vectors (P6b STEP 2 shows FIX-A closes only the hook) — so the pointer-bind test is the load-bearing one. |
+| **N-9** | **The host executes no exec driver DEFINED in an agent-writable git config — no worktree-supplied hook, filter, textconv, fsmonitor, or merge driver** (D10/I-10). *(Scope matches I-10: a legit driver defined in the trusted `:ro` common config but triggered on agent-chosen paths via an agent-written `.gitattributes` is the named residual OQ-7, not covered by this norm.)* Two obligations: **(a)** every host-side git run with `cwd` inside an agent-written worktree routes through the **single hardened wrapper**, which passes the fixed-key exec-disabling flags `-c core.hooksPath=/dev/null -c core.fsmonitor=`; the **guard's starting set** is `autoCommitSource` `status`/`add`/`commit` (`integration-publisher.ts:305,307,308`), `changedWorktreeFiles` `status` (`reconcile.ts:229-240`), **and** `mergeChildIntoIntegration` `status`/`add`/`commit` (`worktree-lifecycle.ts:420,434,439`) — completeness is enforced by the guard, not by this list; **(b)** the worktree-local `.git` pointer is bind-mounted `:ro` over itself for every rw class. | **(a)** assert the wrapper injects both `core.hooksPath=/dev/null` and `core.fsmonitor=` for worktree-cwd invocations; **and — the load-bearing part — a SYNTACTIC, DEFAULT-DENY greppable/AST guard FAILS the build** for any host-side git exec (`execFileSync`/`execFile`/`spawn`/`spawnSync` with `argv[0]` = `git`) that is **neither** the single hardened wrapper **nor** an annotated allowlist entry — the check keys on the call's syntactic classification, **not** on a runtime `cwd` dataflow test (which a static check cannot decide). Verify three ways: (1) introduce a raw unwrapped git exec — including reviving the dead `mergeWorktreeBranch` — and the build reds (fail-closed: unclassified → denied); (2) remove an allowlist entry's annotation and the build reds; (3) an allowlist entry that can actually run with an agent-worktree `cwd` is a **review defect** (the entry lied about the property that qualifies it), caught in review of the allowlist diff, not by the static guard. Behaviorally, an in-worktree `pre-commit` hook does not run on `autoCommitSource` or `mergeChildIntoIntegration`, and an in-worktree `core.fsmonitor` command does not run on `changedWorktreeFiles`'s `git status`. **(b)** the mount set for a blue dispatch contains a `:ro` bind of `realpath(worktreePath/.git)`; an in-container attempt to overwrite `/project/.git` with a **standalone** gitdir fails. **The observed-red for the underlying defect is AC-7 / probe P6b (`p6b` STEP 1) — do NOT fabricate a second red here.** **Test-strength check on delivered code (NOT baseline evidence):** a mutant that drops `hooksPath=/dev/null` **while the pointer bind is also absent** must redden; with the pointer bind present, dropping `hooksPath` still leaves the filter/textconv vectors (P6b STEP 2 shows FIX-A closes only the hook) — so the pointer-bind test is the load-bearing one. |
 
 ### 7.3 — A revalidation trigger that would make green tests worthless
 
