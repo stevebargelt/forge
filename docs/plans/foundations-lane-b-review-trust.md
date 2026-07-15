@@ -51,9 +51,9 @@ they are two *instances* of a defaulting rule, and the instances will keep comin
 
 ### 1.1 The finalize seams (the FG-523/524/525 surface)
 
-**VERIFIED FACT — the complete census.** Every writer of `status='complete'` in `src/` (three store functions:
-`markTaskComplete` `tasks.ts:126`, `markTaskRecovered` `tasks.ts:154`, plus run-level closers which are not task
-finalizes). Classification of each call site:
+**VERIFIED FACT — the complete census.** Every writer of `status='complete'` in `src/` (two task-finalize store
+functions: `markTaskComplete` `tasks.ts:126`, `markTaskRecovered` `tasks.ts:154`; run-level closers exist too but
+are **not** task finalizes and are excluded here). Classification of each call site:
 
 | # | Site | file:line | Implementer-reachable? | Gated? |
 |---|---|---|---|---|
@@ -705,8 +705,10 @@ Ordered. Each is independently implementable and reviewable. Each names a falsif
   > out as optional. "B5 can be cut" is superseded: provisioning ships. Only the story *decomposition* is
   > non-binding (PRD §6 "No decomposition"); the FG-555 re-validation gate still applies to the runtime
   > declaration (PRD OQ-1).**]**
-- **B1+B2 deliver the FG-566/FG-541 trust fix with zero new authority.** B5 is the only story that acquires any new
-  power (writing into a workspace), and `--push-fixes` (deferred, see below) is the only other.
+- **B1+B2 deliver the local_only/honesty portion of the fix with zero new authority — but the FG-566 trust fix as a
+  whole REQUIRES B5 provisioning** (unconditional per PRD D1.3 / N-8; see the marker directly above). B5 is the only
+  story that acquires any new power (writing into a workspace), and `--push-fixes` (deferred, see below) is the only
+  other. FG-541's honesty lands with B1; FG-566 is not fully delivered until B5 ships.
 
 **Deferred out of this lane, deliberately:** `--push-fixes` itself. B1 lands the honesty; the *authority* to push is
 a separable, opt-in convenience with its own safety contract (§3, FG-541 Q2). **Do not bundle an authority
@@ -878,8 +880,9 @@ orchestrator's lane. **Named conclusions that must be re-verified when they land
 
 On approval, the recommended dispatch is **B0 first** (it makes B3/B4 reviewable and encodes the seven-site census
 as executable truth), with **B1 and B2 in parallel immediately** (independent files, no new authority, and together
-they deliver the entire FG-566/FG-541 trust fix). **B3 and B4 follow, in parallel, after B0.** **B5 is the only
-story gated on another lane (FG-555) and the only one that can be cut without losing the trust fix.**
+they deliver the local_only/honesty portion of the fix — the FG-566 trust fix as a whole also requires B5
+provisioning, see the marker below). **B3 and B4 follow, in parallel, after B0.** **B5 is the only
+story gated on another lane (FG-555); per PRD D1.3 / N-8 it ships unconditionally and does not get cut.**
 
 > **[SUPERSEDED → PRD D1.3 / N-8:** provisioning is a **binding decision** (D1.3) with **unconditional
 > acceptance** (**N-8**); it is not optional and does not "get cut." The FG-555 gate applies only to the
