@@ -358,7 +358,7 @@ fabricated red**. Where the plan asserted a red for an unimplemented norm, this 
 | R-566 | Unprepared env misclassified as code failure: reviewer dispatched 0×, both rounds burned, fixer handed `tsc: not found`. **Prepared-repo control arm** proves attribution to the environment. | §2.1 EXECUTED | red captured |
 | R-524 | Contraband fanout implementer child **and** its parent complete silently, via the real `dispatchFanoutStep` against real SQLite. | §2.3 ARM 2 EXECUTED | red captured |
 | R-525 | Contraband ad-hoc implementer `invoke` completes silently, via the real invoke path. | §2.3 ARM 3 EXECUTED | red captured |
-| R-541 | Fixer commits and never pushes (source census: no `git push` verb) → next round probes CI for a SHA GitHub never received; `extendedDelegatedToCi` unconditionally true; stale comment. | §2.2 EXECUTED (structural decisive + historical corroborating) | red captured |
+| R-541 | Fixer commits and never pushes (source census: no `git push` verb) → next round probes CI for a SHA GitHub never received; `extendedDelegatedToCi === !localExtended` (true only on the default CI-unavailable fallback of typecheck+test; `--local-extended` runs the extended tier locally, so it is false); stale comment. | §2.2 EXECUTED (structural decisive + historical corroborating) | red captured |
 | R-525b (**F9**) | Held implementer invoke whose container dies is completed **ungated** by `reconcile.ts:779`/`:880` or adopted by `recover.ts:457`, bypassing the D4 fix. **Currently INFERENCE only** (§2.4). | §2.4 | **observed-red REQUIRED at implementation** — needs a container-gone state; write the probe for host execution; claim stays INFERENCE until run |
 
 ### 7.2 NORMATIVE-UNMET (acceptance condition + verification method; no fabricated red)
