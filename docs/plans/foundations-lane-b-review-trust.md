@@ -565,10 +565,15 @@ change for every invoke caller — **but only for implementer roles**, because t
 by role (`validation-contract.ts:53`). The blast radius is *exactly* the set that should be gated. That bound is
 what makes this safe to do.
 
-**And it must not ship with a hole (see §1.1, §2.4).** Gating `invoke.ts:813` alone leaves the crash-recovery
-bypass: an implementer invoke that is held, whose container then dies, is completed **ungated** by
-`reconcile.ts:779`/`:880` or adopted by `recover.ts:457`. **The gate must cover those sites too**, or a container
-crash launders contraband past it. *There is prior art for exactly this reasoning:* FG-479 already refused to let
+**And it must not ship with a hole (see §1.1, §2.4)** — two claims of different epistemic status, kept
+separate per this plan's own §2.4. **VERIFIED FACT:** the three sites `reconcile.ts:779`/`:880` and
+`recover.ts:457` **exist and complete an invoke-like task ungated**, including one carrying an implementer
+role (`reconcile.ts:416` = `!taskHasPipelineFinalize`, `run-kind.ts:22`; readable in source, §1.1).
+**INFERENCE (not yet observed, §2.4):** that a held implementer invoke, whose container then dies, is
+**actually completed through** those sites — thereby bypassing the D4 fix. That runtime bypass stays
+INFERENCE until the §2.4 probe (F9) is run at implementation, because it needs a container-gone state Docker
+could not stage here. **On that basis the gate must still cover those sites** — because if the inference
+holds, a container crash launders contraband past it, and F9 is where it gets confirmed or refuted. *There is prior art for exactly this reasoning:* FG-479 already refused to let
 reconcile complete a **pipeline** task, because *"adopting the result as complete would recreate the exact bypass"*
 (`reconcile.ts:418-425`) — and landed `failPipelineUnfinalized` instead. **We are extending FG-479's principle from
 the pipeline finalize to the validation gate.** The precedent is in the file already.

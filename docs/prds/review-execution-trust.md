@@ -363,12 +363,19 @@ fabricated red**. Where the plan asserted a red for an unimplemented norm, this 
 
 ### 7.2 NORMATIVE-UNMET (acceptance condition + verification method; no fabricated red)
 
-- **N-1 (INV-1, declared finalize sites).** *Acceptance:* a terminal-status write reachable by an
-  implementer role that is not classified into one of the §2 finalize classes fails the build — including a
-  new `finalizePrimary` caller (whose class is decided at the caller, not at `:1010`) and a new direct
-  `markTaskComplete`/`markTaskRecovered` site. *Verification:* the guard test enumerates the §2 classes
-  (reconciled with the plan §1.1 census), asserts each of the census sites maps to its declared class, and
-  rejects a wildcard/blanket allowlist; it keys class membership on lineage/role, not on
+- **N-1 (INV-1, declared finalize sites).** *Acceptance:* **any** terminal-status write path — of **any**
+  role, not only implementer-reachable ones — that is not classified into one of the §2 finalize classes
+  fails the build, matching INV-1's "**every** path that writes a task to a terminal `complete`/`recovered`
+  status." This includes a new `finalizePrimary` caller (whose class is decided at the caller, not at
+  `:1010`), a new direct `markTaskComplete`/`markTaskRecovered` site, **and** a new non-implementer terminal
+  writer — a red-review completer, a run-level closer, or a future reconcile/recover path — which must be
+  classified rather than added silently. The trust distinction lives in the **disposition each classification
+  records**, not in which paths fail the build: an implementer-reachable class is recorded **GATED**; a
+  non-implementer class may be recorded **EXEMPT-with-reason** (role, construction, or override). What over-
+  gates nothing yet closes the census is the rule that an **UNCLASSIFIED path of any role is the build
+  failure**. *Verification:* the guard test enumerates the §2 classes (reconciled with the plan §1.1 census),
+  asserts each census site maps to its declared class **and its recorded gated-vs-exempt-with-reason
+  disposition**, and rejects a wildcard/blanket allowlist; it keys class membership on lineage/role, not on
   `agentRole.startsWith("red-")` (§9.1). *(Reclassified from plan B0/F0 — "red by construction" is not a
   baseline red.)*
 - **N-2 (INV-3 + D1, zero-round env-unavailable).** *Acceptance:* a forced install failure stops **before
