@@ -5,7 +5,7 @@ triggers (`docs/plans/foundations-integration.md`) into a concrete, rerunnable p
 **once FG-561/FG-553 lands and before any foundation child begins implementation.** It cites the three PRDs; it
 invents no normative decisions and allocates no tickets.
 
-**Keyed to the three FINAL PRD SHAs** — PRD-a `863dfe4`, PRD-b `68ee713`, PRD-c `c55da4a` — and the campaign
+**Keyed to the three FINAL PRD SHAs** — PRD-a `a0064d5`, PRD-b `68ee713`, PRD-c `c55da4a` — and the campaign
 baseline **`185afc3`**. Each PRD's revalidation triggers (A §7.3, B OQ-4 / §9.4, C §8, and the map §5
 cross-cutting) are the source; this brief is their union, made executable.
 
@@ -62,7 +62,7 @@ The FG-553/FG-555 mechanism surfaces, plus **every file the three PRDs assume be
 
 ## 4. ASSUMPTIONS to revalidate — per cluster, cited to the PRD decision
 
-### Cluster A (PRD `863dfe4`)
+### Cluster A (PRD `a0064d5`)
 
 - **A §7.3 — "forge executes the working tree."** Every executed acceptance test in A §7.1/§7.2 (AC-3…AC-7,
   N-1…N-9) must be confirmed to run against the artifact it thinks it is testing (`forge-dev` vs `forge`). This

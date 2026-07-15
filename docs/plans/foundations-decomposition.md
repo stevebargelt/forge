@@ -11,7 +11,7 @@ it.
 
 | Cluster | PRD | SHA |
 |---|---|---|
-| **A** — agent workspace isolation | `docs/prds/agent-workspace-isolation.md` | **`863dfe4`** |
+| **A** — agent workspace isolation | `docs/prds/agent-workspace-isolation.md` | **`a0064d5`** |
 | **B** — review execution trust | `docs/prds/review-execution-trust.md` | **`68ee713`** |
 | **C** — workflow lifecycle semantics | `docs/prds/workflow-lifecycle-semantics.md` | **`c55da4a`** |
 | campaign baseline | (origin/main at campaign start) | **`185afc3`** |
@@ -31,7 +31,7 @@ acceptance condition and **no fabricated red** — inventing a strawman to redde
 
 ---
 
-## Cluster A — agent workspace isolation (PRD `863dfe4`)
+## Cluster A — agent workspace isolation (PRD `a0064d5`)
 
 Three bounded children. FG-559 (mount + detector) and FG-345 (remaining scope) are independent of the rest of
 the campaign; FG-356 (reaper) carries the one **hard red gate** in the cluster.
@@ -41,17 +41,23 @@ the campaign; FG-356 (reaper) carries the one **hard red gate** in the cluster.
 - **OWNING PRD DECISIONS:** D1 (common-`.git` `:ro` mount, every class), D2 (`:ro` is the security boundary),
   D3 (canonicalized path identity), D4 (boundary code-constructed, not template-derived), D5/D5a/D5b
   (read-only history lens + agent-facing + refusal-message contract text), D6 (two-layer detector), D7
-  (preflight the effective mount root), D10/D10a/D10b (blue worktree-local `.git` pointer freeze + host
-  hook-disable).
+  (preflight the effective mount root), D10/D10a/D10b (blue worktree-local `.git` pointer freeze +
+  a **single hardened host-git wrapper** prepending fixed-key `-c core.hooksPath=/dev/null -c core.fsmonitor=`,
+  its completeness ENFORCED — not enumerated — by a **FAIL-CLOSED DEFAULT-DENY SYNTACTIC guard** over every
+  host-side git exec: wrapper, or annotated plumbing-allowlist entry, or the build fails).
 - **ACCEPTANCE ROWS:** AC-1, AC-2, AC-3, AC-4, AC-7 (factual defects); N-1, N-2, N-3, N-4, N-5, N-9
   (NORMATIVE-UNMET). Invariants I-1, I-2, I-3, I-4, I-5, I-8, I-10.
 - **FILES / SCHEMAS:** `src/v2/spawn.ts` (mount construction + Layer-1 preflight home `preflightProjectMount`
   `:479`; mode currently a template substitution `:255-257` from `SpawnContext.PROJECT_MODE` `:40`);
   `docker/agent-entrypoint.sh` (Layer-2 executed assertion — zero git awareness today); the preflight
   **argument** at all four call sites (`runNext.ts:572`, `:2467`, `:2957`, `invoke.ts:548` — must become
-  `worktreePath ?? projectDir`); the agent-facing seed/task-package text (D5a); `integration-publisher.ts`
-  host-side git sites `autoCommitSource` `:305-311` (D10a `-c core.hooksPath=/dev/null`). **No schema, no
-  `tasks` column, no failure-kind added** (§4).
+  `worktreePath ?? projectDir`); the agent-facing seed/task-package text (D5a); the single hardened host-git
+  wrapper + its fail-closed default-deny syntactic guard over every host-side git exec (D10a) — the guard's
+  KNOWN-LIVE **starting set** (labeled honestly, NOT a completeness claim): `autoCommitSource`
+  (`integration-publisher.ts:305-308`), `changedWorktreeFiles` (`reconcile.ts:229-240`), **and**
+  `mergeChildIntoIntegration` (`worktree-lifecycle.ts:420-439`, missed by the prior "COMPLETE set"); the wrapper
+  prepends `-c core.hooksPath=/dev/null -c core.fsmonitor=`. **No schema, no `tasks` column, no failure-kind
+  added** (§4).
 - **RED PREREQUISITES:** all **VERIFIED/captured** — AC-1 `p5-docker-container-git.out` DIRECTION 1; AC-2 `p5`
   DIRECTION 4; AC-3 `p5b-symlinked-tmpdir-hazard.out`; AC-4 probe P4; AC-7 `p6b-real-vector-standalone-alternates.out`
   STEP 1 (with **P6 retained as a NEGATIVE CONTROL** — its clean result is a false negative, not evidence the
@@ -70,17 +76,31 @@ the campaign; FG-356 (reaper) carries the one **hard red gate** in the cluster.
   it silently no-ops on a symlinked `$TMPDIR` with the byte-identical `fatal: not a git repository: (null)` and
   is indistinguishable from the defect (D3/AC-3) — a detector comparing uncanonicalized paths reports PASS where
   the fix does not work. (3) A Layer-2 that checks `/project/.git` **exists** rather than **executing**
-  `git log -1` — today's broken shape has a `.git` file that exists and is useless (N-4). (4) Closing the blue
-  seam with **D10a alone** (`hooksPath=/dev/null`): it kills only the hook vector; filters/textconv/fsmonitor/
-  merge-drivers survive — D10b (pointer `:ro`) is the load-bearing closure (AC-7 / `p6b` STEP 2). (5) Expressing
-  the `.git` mount or its mode as a runtime-template entry — an agent-writable `.forge/runtimes/*.yml` would
-  then control its own containment (D4). (6) A "warn for blue, refuse for red" policy — the door by which a
-  reviewer ends up reviewing without git (D6).
+  `git log -1` — today's broken shape has a `.git` file that exists and is useless (N-4). (4) A wrapper that
+  disables **only `core.hooksPath`** and not the other per-command vectors — `core.fsmonitor` is a **fixed-key**
+  vector on `status`/`add`, closable by the same `-c` mechanism, and MUST also be disabled (`-c core.fsmonitor=`);
+  and even a full fixed-key wrapper leaves the **attacker-named** vectors — `filter.<name>.clean` on `add`,
+  `diff.<name>.textconv`, `merge.<name>.driver` — OPEN (no fixed `-c key=` can name them), so **D10b (pointer
+  `:ro`) is the load-bearing closure** (AC-7 / `p6b` STEPS 2–3). D10a alone is PARTIAL by construction. (5)
+  Expressing the `.git` mount or its mode as a runtime-template entry — an agent-writable `.forge/runtimes/*.yml`
+  would then control its own containment (D4). (6) A "warn for blue, refuse for red" policy — the door by which a
+  reviewer ends up reviewing without git (D6). (7) A **hand-enumerated "COMPLETE set"** of host-side git sites
+  asserted exhaustive — that enumeration was **falsified TWICE in two review rounds** (first `changedWorktreeFiles`,
+  then `mergeChildIntoIntegration` at `worktree-lifecycle.ts:410+`); D10a retires the list for a fail-closed
+  default-deny guard where any raw git exec that is neither the wrapper nor an annotated plumbing-allowlist entry
+  **FAILS THE BUILD** — completeness by construction, not by a curated list (D10a). (8) A guard keyed on a
+  **runtime "cwd resolves to an agent worktree" dataflow test** instead of the **syntactic call-site check** — a
+  runtime `cwd` is an arbitrary expression no grep/AST can decide, so such a guard is not buildable; the guard
+  keys on the decidable syntactic property (is this exec the wrapper? is its source location on the annotated
+  allowlist?), fail-closed by default (D10a).
 
 ### A-FG356 — terminal-task worktree + branch reaper
 
-- **OWNING PRD DECISIONS:** D9 (reaper is a **separate pass over TERMINAL tasks**, not a running-loop bolt-on),
-  D9a (row-only input, no FS scan), D9b (retain predicate), D9c (new `provenEmpty` condition — NOT
+- **OWNING PRD DECISIONS:** D9 (reaper is a **separate pass over TERMINAL tasks**, not a running-loop bolt-on;
+  TERMINAL is **exactly `{complete, failed}`** — the canonical set at `fg530-harness.ts:735` — so the net reapable
+  status set is `{complete, failed}`, NOT a broader `{complete, failed, cancelled, blocked_by_red}`),
+  D9a (row-only input, no FS scan), D9b (retain predicate — clause (c) RETAINS every non-terminal state, notably
+  `blocked_by_red`, operator-force-advanceable per `gate.ts:97-107`), D9c (new `provenEmpty` condition — NOT
   `provenMerged`), D9d (branch pruned under the same predicate).
 - **ACCEPTANCE ROWS:** AC-5 (factual defect — **the hard gate**); N-6 (reaper retain predicate / `provenEmpty` /
   branch prune / idempotency, NORMATIVE-UNMET). Invariants I-6, I-7, I-9.
@@ -117,7 +137,14 @@ the campaign; FG-356 (reaper) carries the one **hard red gate** in the cluster.
   other caller (D9c — "the single easiest way to implement FG-356 wrongly"). (4) Reaping the **directory but not
   the branch** — refs accumulate forever, `git worktree prune` will not touch them (D9d). (5) Reaping a worktree
   with **changed files** or a **retain-set kind** (e.g. `merge_conflict`) — the load-bearing dirty clause (D9b(a))
-  and the kind clause (D9b(b)) exist to prevent exactly this.
+  and the kind clause (D9b(b)) exist to prevent exactly this. (6) A reaper whose reapable / terminal set includes
+  **`blocked_by_red`** — it is NOT terminal but RECOVERABLE and **operator-force-advanceable** (`gate.ts:97-107`);
+  its worktree holds committed-but-unmerged work the operator can still force-advance, so reaping it **DISCARDS
+  operator-actionable work — a direct I-6 violation.** `blocked_by_red` is RETAINED by D9b clause (c) exactly like
+  the held-child case (D9). (7) A reaper that lists **`cancelled`** as a reapable status — **DEAD CODE that can
+  never match:** `cancelled` is a `FailureKind` (`failure-kind.ts:125`), not a `TaskStatus`; a cancelled task
+  carries status **`failed`** and is already covered by `failed`. The corrected reapable set is exactly
+  `{complete, failed}` (D9).
 
 ### A-FG345 — remaining worktree-isolation scope (ignored-files diagnostic · stale advisory · chaining pin)
 
