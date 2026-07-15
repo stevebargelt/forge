@@ -287,8 +287,12 @@ has no filesystem side-effect at all.**
 > campaign forbids.
 
 **BINDING: the reaper is a SEPARATE pass over every task of the run whose `worktree_path` is NOT NULL and whose
-status is TERMINAL** (complete, failed, cancelled, blocked_by_red). One predicate covers **both** the
-crashed-after-status-write leak (FG-530) and the orphaned-and-finalized case.
+status is TERMINAL** — and TERMINAL is **exactly `{complete, failed}`**, the canonical set
+(**VERIFIED FACT — `fg530-harness.ts:735`: `export const TERMINAL: ReadonlySet<TaskStatus> = new Set(["complete","failed"])`**). One predicate covers **both** the crashed-after-status-write leak (FG-530) and the orphaned-and-finalized case.
+
+**TERMINAL is `{complete, failed}` — NOT broader. A naïve list of `{complete, failed, cancelled, blocked_by_red}` is WRONG on two counts, one dangerous and one dead:**
+- **`blocked_by_red` is NOT terminal — it is RECOVERABLE and operator-force-advanceable** (**VERIFIED FACT — `gate.ts:97-107`: a `blocked_by_red` task's block is *overridable*, not final — `if (blocked && opts.force …)` advances it under `forge … --force --rationale`; the rationale is the recorded human decision**). Its worktree holds committed-but-unmerged work the operator can still force-advance, so reaping it would **DISCARD operator-actionable work — a direct violation of I-6.** A `blocked_by_red` task's worktree is **RETAINED** (caught by D9b clause (c): not terminal), exactly like the held-child case. **NORMATIVE-UNMET if the shipped reaper's predicate includes it.**
+- **`cancelled` is NOT a `TaskStatus` — the entry is DEAD CODE that can never match** (**VERIFIED FACT — `types/index.ts:79-90` enumerates `pending | running | awaiting_gate | awaiting_red | complete | failed | blocked_by_red | awaiting_recovery`; there is no `cancelled` status. `cancelled` is a `FailureKind` (`failure-kind.ts:125`)**). A cancelled task carries status **`failed`** with `FailureKind cancelled` — **already covered by `failed`**; no separate entry is needed and one would be inert. **The net reapable status set after both corrections is `{complete, failed}`.**
 
 **D9a — Input: the Task row, and nothing else.** `worktreePath`, `status`, failure kind, `runId`, `taskId`, plus
 `run.projectDir`. **NO filesystem scanning of the worktrees directory.** This is a hard constraint, not a
@@ -304,7 +308,9 @@ worktree from an orphan**. A scan-based reaper eventually deletes live work.
   `integration_gate_crashed`, `publish_base_churn`, `dirty_publish_target`, `publication_refused`,
   `orphaned_work_may_persist`, `orphaned_needs_finalize`, `oom_killed`, `fanout_wave_orphaned` —
   `failure-kind.ts:125-143`).
-- **(c) the task is not terminal.**
+- **(c) the task is not terminal** — with TERMINAL = `{complete, failed}` (`fg530-harness.ts:735`), this clause
+  RETAINS every recoverable / force-advanceable state, **notably `blocked_by_red`** (operator-force-advanceable per
+  `gate.ts:97-107`) and `awaiting_recovery`. Their worktrees hold operator-actionable work (I-6).
 
 **REAP only when: terminal AND kind ∉ retain-set AND the worktree is CLEAN.** That is provably-nothing-to-lose.
 
@@ -361,24 +367,34 @@ so the blue-only seam was structurally outside its coverage.
    not cover. (The dead `mergeWorktreeBranch` path is **not** the live site — D8; the live site is the publisher's
    auto-commit.)
 
-**VERIFIED FACT — the live host-side git sites that run IN the agent's worktree** (so would honor its config):
-`autoCommitSource` `git status`/`add`/`commit` (`integration-publisher.ts:305,307,308`), and any host git run
-with that cwd. Hook-bearing operations there are `add` (clean **filters**) and `commit` (**pre-commit /
-commit-msg / post-commit**); `status` honors **`core.fsmonitor`**. `git worktree add/remove/prune` and
-`branch -D` run with `cwd = projectDir` (the main checkout), not the agent worktree.
+**VERIFIED FACT — the COMPLETE set of live host-side git sites that run with `cwd` = an agent worktree** (so
+would honor its config — swept across `src`, `execFileSync("git", …)` with `cwd`, non-test):
+1. **`autoCommitSource`** — `git status --porcelain` → `git add .` → `git … commit` (`integration-publisher.ts:305,307,308`), all `cwd` = the agent worktree (`:323`).
+2. **`changedWorktreeFiles`** — `git status --porcelain`, `cwd` = the agent worktree (`reconcile.ts:229-240`, run live at `reconcile.ts:269` and `:725`). **This site was previously omitted from this enumeration; it is added here.** A bare `git status` **honors `core.fsmonitor`** — a config-defined exec vector — so it belongs in D10a's coverage.
+
+Per-command exec vectors at these sites: `add` honors clean **filters** (`filter.*.clean`); `commit` honors **hooks** (pre-commit / commit-msg / post-commit); `status`/`add` honor **`core.fsmonitor`**. No `git diff` or `git merge` runs at a live agent-worktree site, so `diff.*.textconv` and `merge.*.driver` are not reachable *there* (they remain in the residual table as general standalone-gitdir vectors, closed only by D10b).
+
+**Swept-and-excluded** (host git NOT in an agent worktree, or dead): `mergeWorktreeBranch` runs `status`/`add`/`commit` with `cwd` = the agent worktree (`worktree-lifecycle.ts:258,274,279`) but is **DEAD code — D8**, so not a live site; `mergeSourceIntoCandidate`'s `git merge`/`merge --abort` run with `cwd` = the forge-created *candidate* worktree (`integration-publisher.ts:329,337`), not an agent-written one; and `git worktree add/remove/prune` / `branch -D` run with `cwd = projectDir` (the main checkout).
 
 **The fix is TWO parts; part B is load-bearing, part A is necessary-not-sufficient:**
 
 - **D10a — host hardening (PARTIAL — necessary, NOT sufficient; VERIFIED by `p6b` STEP 2).** Every host-side git
-  invocation that runs with `cwd` inside an agent worktree MUST disable worktree-supplied hooks, e.g.
-  `-c core.hooksPath=/dev/null`. `autoCommitSource` already prepends `-c` identity flags, so this composes at zero
-  cost. **VERIFIED FACT — `p6b` STEP 2: under `-c core.hooksPath=/dev/null` the hook is DEAD.** **But it is
-  hook-scoped and closes ONLY the hook vector.** clean/smudge **filters** (`filter.*.clean/smudge`),
-  `diff.*.textconv`, `core.fsmonitor`, and custom **merge drivers** are *separate* config-defined command
-  execution that a hook-scoped flag does not touch — and as long as the agent's standalone gitdir `config` is read
-  at all (which it is, until D10b), they remain honored. **(INFERENCE from git config semantics — a hook flag
-  cannot disable config reads that are not hooks; `p6b` STEP 2 confirms only the hook death, not filter closure.)**
-  So D10a alone leaves the seam OPEN.
+  invocation that runs with `cwd` inside an agent worktree (the COMPLETE set enumerated above:
+  `autoCommitSource` **and** `changedWorktreeFiles`) MUST disable **every FIXED-KEY config-defined exec vector such
+  a `git status`/`add`/`commit` honors** — not hooks alone. The wrapper prepends
+  **`-c core.hooksPath=/dev/null -c core.fsmonitor=`** (`autoCommitSource` already prepends `-c` identity flags, so
+  this composes at zero cost; `changedWorktreeFiles`'s `git status` gains the same prefix). `hooksPath` closes the
+  hook vector on `add`/`commit`; `core.fsmonitor=` (empty) closes the fsmonitor vector on `status`/`add`. **VERIFIED
+  FACT — `p6b` STEP 2: under `-c core.hooksPath=/dev/null` the hook is DEAD.** `core.fsmonitor` is closed by the
+  **identical mechanism** — a fixed-key `-c` override of a config value git resolves at run time (INFERENCE from git
+  config semantics; the mechanism is the one `p6b` STEP 2 exercised for `hooksPath`).
+  **But this reaches only the FIXED-KEY vectors** (`core.hooksPath`, `core.fsmonitor`), whose keys are known a
+  priori. The **ATTACKER-NAMED** vectors — clean/smudge **filters** (`filter.<name>.clean/smudge`),
+  `diff.<name>.textconv`, and custom **merge drivers** (`merge.<name>.driver`) — carry an attacker-chosen `<name>`,
+  so **no fixed `-c key=` flag can blanket-disable them**; as long as the agent's standalone gitdir `config` is read
+  at all (which it is, until D10b), they remain honored. **(INFERENCE from git config semantics — a `-c` flag can
+  neutralize only the specific keys it names; it cannot disable config reads whose section name the attacker
+  controls.)** So D10a alone still leaves the seam OPEN — **this is exactly why D10b is load-bearing.**
 - **D10b — structural closure (SUFFICIENT and LOAD-BEARING; VERIFIED by `p6b` STEP 3).** The worktree-local `.git`
   **pointer file MUST be non-writable to the container**: bind-mount `realpath(/project/.git)` **`:ro` OVER
   itself**, on top of the rw `/project` mount (canonicalized per D3). This is coherent with a rw worktree — the
@@ -403,18 +419,20 @@ HEAD resolves. The standalone gitdir's `config` is then read by git, which turns
 below. **D10a is hook-scoped; only D10b removes the precondition.** Coverage per vector — VERIFIED where `p6b`
 executed it, INFERENCE (git config semantics) where it did not:
 
-| config-driven exec vector | mechanism (once the standalone gitdir's config is read) | FIX-A alone (D10a `hooksPath=/dev/null`) | FIX-B (D10b pointer `:ro`) |
+| config-driven exec vector | mechanism (once the standalone gitdir's config is read) | FIX-A alone (D10a fixed-key `-c` overrides: `core.hooksPath=/dev/null core.fsmonitor=`) | FIX-B (D10b pointer `:ro`) |
 |---|---|---|---|
 | worktree hooks (`core.hooksPath`, `$GIT_DIR/hooks`) | hook run on `add`/`commit` | **CLOSED** — VERIFIED `p6b` STEP 2 (`hook DEAD`) | **CLOSED** — no agent-writable config |
 | clean/smudge **filters** (`filter.*.clean/smudge`) | config-defined command on `git add`/checkout | **OPEN** — hook flag does not touch filters (INFERENCE, git config semantics) | **CLOSED** — config `:ro` |
 | `diff.*.textconv` (config form); `GIT_EXTERNAL_DIFF` (env form) | config-defined command on diff / host env | config-form **OPEN**; env-form never reachable (agent cannot set host env) | config-form **CLOSED**; env-form n/a |
 | custom **merge drivers** (`merge.*.driver`) | config on `git merge` | **OPEN** (INFERENCE) | **CLOSED** |
-| `core.fsmonitor` | config-defined command on `status`/`add` | **OPEN** (INFERENCE) | **CLOSED** |
+| `core.fsmonitor` | config-defined command on `status`/`add` | **CLOSED** — fixed-key vector; D10a passes `-c core.fsmonitor=` (same mechanism as `hooksPath`; INFERENCE, git config semantics) | **CLOSED** — no agent-writable config |
 | `objects/info/alternates` (object supply — the vector's enabler, not itself exec) | file in the standalone gitdir → resolves objects into `:ro` common store | still supplies objects (no exec if hooks/filters are otherwise blocked) | **CLOSED** — no standalone gitdir can exist to hold it |
 | **a LEGIT common-config driver** (e.g. git-lfs smudge) triggered on agent-chosen paths via tree `.gitattributes` | trusted config in the `:ro` common dir, attacker-influenced *input* | **OPEN, accepted** | **OPEN, accepted** — driver is operator-trusted code; the agent controls only which tracked paths route through it. Out of this cluster's scope; **OQ-7**. |
 
-**Load-bearing conclusion (VERIFIED, `p6b` STEPS 2–3):** **FIX-A (D10a) is PARTIAL** — it kills only the hook
-vector; filters/textconv/fsmonitor/merge-driver survive it because they are separate config reads. **FIX-B (D10b,
+**Load-bearing conclusion (VERIFIED, `p6b` STEPS 2–3):** **FIX-A (D10a) is PARTIAL** — it closes the **fixed-key**
+vectors it can name (`core.hooksPath`, `core.fsmonitor`), but the **attacker-named** vectors
+(`filter.<name>.*`/`diff.<name>.textconv`/`merge.<name>.driver`) survive it, because no fixed `-c key=` override can
+disable a config section whose name the attacker chooses. **FIX-B (D10b,
 immutable / `:ro`-bound worktree-local `.git` pointer) is the LOAD-BEARING fix** — it removes the attack's
 precondition (repointing `.git` at a standalone gitdir) and closes **every** config-driven exec vector at once.
 
@@ -547,7 +565,7 @@ graph TD
   WT -->|"-v realpath(.git pointer):same:ro  ← D10b<br/>frozen even under rw /project"| PTR
   REPO -->|"-v realpath(common .git):same:ro  ← D1/D2"| GIT
   GIT -.->|"WRITES REFUSED — closes the<br/>common-dir hook-plant escape"| REPO
-  PTR -.->|"pointer frozen + host git -c core.hooksPath=/dev/null (D10a)<br/>⇒ host runs NO worktree-supplied hook/filter"| PUB
+  PTR -.->|"pointer frozen + host git -c core.hooksPath=/dev/null -c core.fsmonitor= (D10a)<br/>⇒ host runs NO worktree-supplied hook/fsmonitor"| PUB
   PROJ -->|"entrypoint EXECUTES git log -1<br/>or REFUSES to start the agent"| GIT
 ```
 
@@ -574,9 +592,9 @@ it is cited — not re-derived.
 | **AC-2** | **RW `.git` is a container→host code-execution escape** | ✅ **OBSERVED, real container.** `p5` DIRECTION 4: `*** HOST EXECUTED THE CONTAINER'S HOOK: PWNED ***`. | Under the shipped `:ro` mount, ref write, object write, and hook plant are **all refused** — as `p5` DIRECTION 3 already demonstrates (`can't create …/.git/hooks/pre-commit: Read-only file system`). |
 | **AC-3** | **Path-identity mounting silently no-ops on a symlinked path** | ✅ **OBSERVED, both ways.** `p5b-symlinked-tmpdir-hazard.out`: under `/var/folders/...` (a symlink) the **chosen fix's** DIRECTION 2 fails with the **identical** `fatal: not a git repository: (null)`; the same script under `/Users/...` passes. | The mount is built from `realpath`'d paths and the detector compares canonical paths (D3). **The regression test MUST execute under a SYMLINKED path prefix** — a test that only runs under a canonical prefix cannot observe this defect and is worthless against it. |
 | **AC-4** | **The preflight inspects a path that is not the one mounted** | ✅ **OBSERVED** (probe P4, plan §1.5, cases 1–2): handed the main checkout the predicate says `OK plain-checkout`; handed the worktree it says `NEEDS_MOUNT`. Every call site passes the main checkout (`runNext.ts:572`, `:2467`, `:2957`; `invoke.ts:548`). | The preflight receives `worktreePath ?? projectDir` at all four call sites (D7). |
-| **AC-5** | **FG-530: a terminal task's worktree + branch leak forever** | ⚠️ **NOT YET OBSERVED — PREDICTED ONLY.** `reconcile.ts:452` makes it a near-certainty, but the planning container could not execute the test (empty `node_modules`; `*.worktree.test.ts` hard-fails on Linux by design). **This red is a GATE, not a formality** — see below. | The leak is reaped; a `merge_conflict` worktree is **RETAINED**; a worktree with changed files is **RETAINED even under a reapable kind**; a **concurrent live run's** worktrees are untouched; the **branch** is pruned with the directory. |
+| **AC-5** | **FG-530: a terminal task's worktree + branch leak forever** | ⚠️ **NOT YET OBSERVED — PREDICTED ONLY.** `reconcile.ts:452` makes it a near-certainty, but the planning container could not execute the test (empty `node_modules`; `*.worktree.test.ts` hard-fails on Linux by design). **This red is a GATE, not a formality** — see below. | The leak (`complete`/`failed`) is reaped; a `merge_conflict` worktree is **RETAINED**; a worktree with changed files is **RETAINED even under a reapable kind**; a **`blocked_by_red` task's worktree is RETAINED** (non-terminal, operator-force-advanceable — `gate.ts:97-107`); a **concurrent live run's** worktrees are untouched; the **branch** is pruned with the directory. |
 | **AC-6** | **The FG-354 advisory lies to operators on every worktree creation** | ✅ **OBSERVABLE, trivially:** the `console.warn` at `worktree-lifecycle.ts:130-134` says FG-354 has not landed; `runNext.ts:665` and `invoke.ts:798` show it has. | The advisory is gone. |
-| **AC-7** | **BLUE seam: a rw agent hijacks the worktree-local `.git` pointer → forge's host-side auto-commit runs an agent-supplied hook/filter as the host user** (D10) | ✅ **OBSERVED, on the host 2026-07-14.** `p6b-real-vector-standalone-alternates.out` STEP 1, verbatim: `hooksPath IS honored`; `D6 Layer-2 detector PASSES (blind — objects resolve via alternates)`; `*** HOST EXECUTED AGENT HOOK: pre-commit-RCE — container->host RCE ***`. The vector is a **STANDALONE** fake gitdir (no `commondir`) + `objects/info/alternates` into the `:ro` common store, against the **live** site `autoCommitSource` (`integration-publisher.ts:304-312`, cwd = agent worktree per `:323`). **P5 could not observe it — every P5 direction mounted `/project:ro`. Probe P6 is a NEGATIVE CONTROL** — its *linked*-gitdir config is ignored by git, so its clean result is a false negative, NOT evidence the seam is closed; P6b is the reproduction. | Under D10: (i) the pointer bind (`realpath(/project/.git):same:ro`) makes the agent's overwrite **fail** — VERIFIED `p6b` STEP 3 (`pointer overwrite REFUSED`); (ii) with the frozen pointer, config resolves into the `:ro` common dir, so **no** filter/textconv/fsmonitor/merge-driver survives, and host git run as `-c core.hooksPath=/dev/null` executes **no** hook. **`p6b` STEP 2 shows FIX-A alone kills only the hook (`hook DEAD`), leaving the filter/textconv vectors OPEN — proving why D10b, not just D10a, is load-bearing.** |
+| **AC-7** | **BLUE seam: a rw agent hijacks the worktree-local `.git` pointer → forge's host-side auto-commit runs an agent-supplied hook/filter as the host user** (D10) | ✅ **OBSERVED, on the host 2026-07-14.** `p6b-real-vector-standalone-alternates.out` STEP 1, verbatim: `hooksPath IS honored`; `D6 Layer-2 detector PASSES (blind — objects resolve via alternates)`; `*** HOST EXECUTED AGENT HOOK: pre-commit-RCE — container->host RCE ***`. The vector is a **STANDALONE** fake gitdir (no `commondir`) + `objects/info/alternates` into the `:ro` common store, against the **live** site `autoCommitSource` (`integration-publisher.ts:304-312`, cwd = agent worktree per `:323`). **P5 could not observe it — every P5 direction mounted `/project:ro`. Probe P6 is a NEGATIVE CONTROL** — its *linked*-gitdir config is ignored by git, so its clean result is a false negative, NOT evidence the seam is closed; P6b is the reproduction. | Under D10: (i) the pointer bind (`realpath(/project/.git):same:ro`) makes the agent's overwrite **fail** — VERIFIED `p6b` STEP 3 (`pointer overwrite REFUSED`); (ii) with the frozen pointer, config resolves into the `:ro` common dir, so **no** filter/textconv/fsmonitor/merge-driver survives, and host git run as `-c core.hooksPath=/dev/null -c core.fsmonitor=` executes **no** hook and **no** fsmonitor command. **`p6b` STEP 2 shows FIX-A alone kills the fixed-key vectors it names (VERIFIED `hook DEAD`; `core.fsmonitor=` closes fsmonitor by the same mechanism), but leaves the attacker-NAMED filter/textconv/merge-driver vectors OPEN — proving why D10b, not just D10a, is load-bearing.** |
 
 > **AC-5 is a HARD GATE on the FG-356 work.** Run
 > `src/v2/fg530-crash-worktree.worktree.test.ts` (crash point `finalizePrimary:between-complete-status-and-event`,
@@ -602,7 +620,7 @@ nothing.
 | **N-6** | **The reaper's retain predicate, `provenEmpty` condition, branch pruning, and idempotency** (D9b/c/d, I-6/7/9). | Terminal + reapable-kind + clean → reaped (dir **and** branch). Any retain clause → retained. Twice ≡ once. Never writes task state. **Test-strength check on the delivered code (NOT baseline evidence):** a mutant passing `provenMerged: true` in place of the new condition must redden the retain tests. |
 | **N-7** | **The ignored-files second diagnostic is surfaced to the agent** (D8.1). | The agent's context contains the "present in the main checkout, absent from your worktree" list. |
 | **N-8** | **Sequential chaining is pinned** (D8.3). | Step N+1's worktree base **contains** step N's published commit. |
-| **N-9** | **The host executes no exec driver DEFINED in an agent-writable git config — no worktree-supplied hook, filter, textconv, fsmonitor, or merge driver** (D10/I-10). *(Scope matches I-10: a legit driver defined in the trusted `:ro` common config but triggered on agent-chosen paths via an agent-written `.gitattributes` is the named residual OQ-7, not covered by this norm.)* Two obligations: **(a)** every host-side git run with `cwd` inside an agent worktree (`autoCommitSource` `status`/`add`/`commit`, `integration-publisher.ts:305-311`, and any future such site) passes `-c core.hooksPath=/dev/null`; **(b)** the worktree-local `.git` pointer is bind-mounted `:ro` over itself for every rw class. | **(a)** grep/assert the host git wrapper injects hooks-disabled for worktree-cwd invocations; an in-worktree `pre-commit` hook does not run on `autoCommitSource`. **(b)** the mount set for a blue dispatch contains a `:ro` bind of `realpath(worktreePath/.git)`; an in-container attempt to overwrite `/project/.git` with a **standalone** gitdir fails. **The observed-red for the underlying defect is AC-7 / probe P6b (`p6b` STEP 1) — do NOT fabricate a second red here.** **Test-strength check on delivered code (NOT baseline evidence):** a mutant that drops `hooksPath=/dev/null` **while the pointer bind is also absent** must redden; with the pointer bind present, dropping `hooksPath` still leaves the filter/textconv vectors (P6b STEP 2 shows FIX-A closes only the hook) — so the pointer-bind test is the load-bearing one. |
+| **N-9** | **The host executes no exec driver DEFINED in an agent-writable git config — no worktree-supplied hook, filter, textconv, fsmonitor, or merge driver** (D10/I-10). *(Scope matches I-10: a legit driver defined in the trusted `:ro` common config but triggered on agent-chosen paths via an agent-written `.gitattributes` is the named residual OQ-7, not covered by this norm.)* Two obligations: **(a)** every host-side git run with `cwd` inside an agent worktree — the complete swept set is `autoCommitSource` `status`/`add`/`commit` (`integration-publisher.ts:305,307,308`) **and** `changedWorktreeFiles` `status` (`reconcile.ts:229-240`), plus any future such site — passes the fixed-key exec-disabling flags `-c core.hooksPath=/dev/null -c core.fsmonitor=`; **(b)** the worktree-local `.git` pointer is bind-mounted `:ro` over itself for every rw class. | **(a)** grep/assert the host git wrapper injects both `core.hooksPath=/dev/null` and `core.fsmonitor=` for worktree-cwd invocations (both `autoCommitSource` and `changedWorktreeFiles`); an in-worktree `pre-commit` hook does not run on `autoCommitSource`, and an in-worktree `core.fsmonitor` command does not run on `changedWorktreeFiles`'s `git status`. **(b)** the mount set for a blue dispatch contains a `:ro` bind of `realpath(worktreePath/.git)`; an in-container attempt to overwrite `/project/.git` with a **standalone** gitdir fails. **The observed-red for the underlying defect is AC-7 / probe P6b (`p6b` STEP 1) — do NOT fabricate a second red here.** **Test-strength check on delivered code (NOT baseline evidence):** a mutant that drops `hooksPath=/dev/null` **while the pointer bind is also absent** must redden; with the pointer bind present, dropping `hooksPath` still leaves the filter/textconv vectors (P6b STEP 2 shows FIX-A closes only the hook) — so the pointer-bind test is the load-bearing one. |
 
 ### 7.3 — A revalidation trigger that would make green tests worthless
 
