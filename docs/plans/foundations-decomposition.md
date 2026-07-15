@@ -580,7 +580,7 @@ child C-FG477-S7** (OQ-4 follow-up / OQ-INT-3), not by S1–S6.
 - **ACCEPTANCE ROWS:** N-2 (NORMATIVE-UNMET). INV-2. Acceptance = parity of the run-state projection against
   today's completion behavior.
 - **FILES / SCHEMAS:** run-completion's superseded-primary logic (`runNext.ts:298-303`) becomes evaluator-derived.
-  The no-resurrection guarantee stays **store-layer** (`completeRun`'s `AND status='active'` `store/runs.ts:147`;
+  The no-resurrection guarantee stays **store-layer** (`completeRun`'s `AND status='active'` `src/store/runs.ts:147`;
   `updateRunStatus`'s FG-484 refusal `:174-179`) — this child must **not break either guard and must not add a
   third completion-writing path** (map §3 consolidated row 7). No task-row migration.
 - **RED PREREQUISITES:** **NORMATIVE-UNMET** — **no fabricated red.** Parity property test over the seeded corpus
@@ -589,7 +589,7 @@ child C-FG477-S7** (OQ-4 follow-up / OQ-INT-3), not by S1–S6.
   one grows a second heuristic). **Cross-cluster:** none; the store-layer guards it must not break are
   OWNED-BY-store-layer (map §3 row 7), a read-only boundary shared with A and B.
 - **CONCURRENCY CONSTRAINTS:** touches the `runNext.ts:298-303` run-completion region — **disjoint** from
-  `dispatchFanoutStep`'s shared region; no A/B conflict. Must add no completion-writing path to `store/runs.ts`.
+  `dispatchFanoutStep`'s shared region; no A/B conflict. Must add no completion-writing path to `src/store/runs.ts`.
 - **HOLLOW VERSION TO REJECT:** (1) building it **before S2** (D-7 item 3). (2) Resurrecting an `abandoned` run or
   adding a **third** completion-writing path that bypasses the store-layer guards (INV-2 / map §3 row 7). (3) An
   evaluator that **reads the DB** (INV-3).
@@ -704,19 +704,26 @@ transport out — it **owns the audit** N-5 names but S6 does not perform.
   **distinctly** from a human gate across the serialization boundary, and **no internal step-state union crosses
   the client boundary** (else every new state is a client-breaking change). **Hollow = either consumer still
   computing its own "why" string**, or the internal union leaking over the transport.
-- **FILES / SCHEMAS:** the operator-reason API/serialization is itself PLANNED NEW (the C-FG477-S6 output, UNBUILT
-  — no operator-reason surface exists in `src/` today), so both consumptions are NEW integrations. **Dashboard
-  consumer (VERIFIED existing):** `dashboard/src/server.ts:91-96` (`/api/in-flight` → `inFlight`) and `:208-211`
-  (`/api/task/:id` → `taskDetail`); `dashboard/src/queries.ts:158` `inFlight` / `:320` `taskDetail`;
-  `dashboard/client/main.js:439` `InFlightSection`, `:529-530` status badge, `:676` detail render — the
-  operator-reason **route + serialization schema are the NEW work THIS child owns** (new query + route + client
-  render). **Campaign consumer (VERIFIED existing):** `src/campaign/executor.ts:104-105` — its OWN `blockerKind`/
-  `reason` (populated at `:326/:352/:373-374/:560/:621/:995/:1370`), which is the campaign's own hold reason, NOT
-  the FG-477 operator-reason; consuming the S6 API is a NEW path THIS child owns, and the audit states whether it
-  **augments or replaces** that own `reason`. C's **operator-reason serialization** = the C-FG477-S6 output / API
-  contract. Test surfaces (existing): `dashboard/src/queries-inflight-status.test.ts` (+ siblings) and the campaign
-  executor tests. **Do NOT ship the evaluator's internal step-state union across either transport** (N-5). No
-  task-row migration.
+- **FILES / SCHEMAS (each NEW surface is an explicitly-named planned file/schema with exactly ONE creation
+  owner):**
+  - **NEW SCHEMA — the S6 operator-reason API contract (a single explanation type / serialization), in
+    `src/v2/lifecycle-evaluator.ts`, creation owner C-FG477-S6.** The type does NOT exist in that module today;
+    S6 owns creating it (the file already holds the FG-477 evaluator surfaces). Per PRD-c **N-5 / S6** — "an API
+    contract to `show`/`report`/dashboard/campaign … one source, internal union NOT shipped to the client." S6
+    creates this schema; S7 audits its consumption.
+  - **NEW DASHBOARD transport (creation owner C-FG477-S7)** — three named additions that read the S6
+    operator-reason schema: a **NEW read route in `dashboard/src/server.ts`** (alongside the VERIFIED-existing
+    `/api/in-flight` `:91-96` and `/api/task/:id` `:208-211`); a **NEW query function in `dashboard/src/queries.ts`**
+    (alongside `inFlight` `:158` / `taskDetail` `:320`); a **NEW render in `dashboard/client/main.js`** (alongside
+    `InFlightSection` `:439`, `:529-530` status badge, `:676` detail render).
+  - **NEW CAMPAIGN transport — a NEW read of the S6 operator-reason schema in `src/campaign/executor.ts`, creation
+    owner C-FG477-S7.** The executor today computes its OWN `blockerKind`/`reason` (`:104-105`, populated at
+    `:326/:352/:373-374/:560/:621/:995/:1370`) — the campaign's own hold reason, NOT the FG-477 operator-reason;
+    the audit states whether the S6 read **augments or replaces** that own `reason`.
+
+  Test surfaces (existing): `dashboard/src/queries-inflight-status.test.ts` (+ siblings) and the campaign executor
+  tests. **Do NOT ship the evaluator's internal step-state union across either transport** (N-5). No task-row
+  migration.
 - **RED PREREQUISITES:** **NORMATIVE-UNMET** — the transport audit is prose until executed; **no fabricated red.**
   Acceptance is the per-transport contract test above. **Both consumer subsystems are VERIFIED EXISTING** — the
   dashboard read surface (`dashboard/src/server.ts:91-96`/`:208-211` → `queries.ts:158`/`:320` →
