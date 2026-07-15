@@ -13,10 +13,11 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, cpSync, writeFileSync, existsSync, lstatSync, readdirSync, rmSync, symlinkSync, appendFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, cpSync, writeFileSync, existsSync, lstatSync, readdirSync, rmSync, symlinkSync, appendFileSync, readFileSync, chmodSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildRelease, assertReleaseCloses, renderEntry, RELEASE_BINDING_REL, RELEASE_LOADER_NAME, RELEASE_MANIFEST_NAME, type BuildReleaseResult } from "./release.js";
+import { buildRelease, assertReleaseCloses, thawReleaseTree, renderEntry, RELEASE_BINDING_REL, RELEASE_LOADER_NAME, RELEASE_MANIFEST_NAME, type BuildReleaseResult } from "./release.js";
 import { findGitRoot } from "../util/git-root.js";
 
 const sourceRoot = findGitRoot(process.cwd());
@@ -31,6 +32,10 @@ before(() => {
 });
 
 after(() => {
+  // The releases built under this workspace are FROZEN (read-only directories), so a
+  // recursive unlink can't traverse them — restore write bits across the whole tree
+  // first. (thawReleaseTree is idempotent on the non-frozen scratch dirs alongside them.)
+  thawReleaseTree(workspace);
   rmSync(workspace, { recursive: true, force: true });
 });
 
@@ -51,6 +56,45 @@ test("FG-569 INERT: the builder promotes nothing — no `current` symlink, no po
     assert.ok(!existsSync(p), `no promotion artifact at ${p}`);
   }
   assert.ok(lstatSync(built.releaseDir).isDirectory(), "the release is a plain directory, not a symlink");
+});
+
+test("FG-569 Finding 3 (immutability): the built release is read-only at rest — a write into any file FAILS, directories stay traversable, executables stay executable", () => {
+  // The release was FROZEN in staging BEFORE the atomic rename, so its final path was
+  // never observed with a writable file. Every kind of file under the release —
+  // manifest, entry, a source file, a dependency file — refuses a write.
+  const files = [
+    join(built.releaseDir, RELEASE_MANIFEST_NAME),
+    built.entryPath,
+    join(built.releaseDir, "src", "cli", "index.ts"),
+    join(built.releaseDir, RELEASE_BINDING_REL),
+  ];
+  for (const f of files) {
+    assert.ok(existsSync(f), `${f} exists in the release`);
+    assert.throws(() => appendFileSync(f, "x"), /EACCES|EPERM|EROFS/, `writing ${f} must fail — the release is immutable at rest`);
+    // Read still works: immutable, not inaccessible.
+    assert.ok(readFileSync(f).length > 0, `${f} is still readable`);
+  }
+  // Directories keep their search bit, so the tree stays traversable.
+  assert.ok(readdirSync(join(built.releaseDir, "src", "cli")).length > 0, "release directories remain traversable");
+  // The entry keeps its executable bit — only write bits were cleared.
+  assert.ok((statSync(built.entryPath).mode & 0o111) !== 0, "the entry remains executable");
+});
+
+test("FG-569 Finding 3 (immutability, DIR-tamper): the release directories are frozen too — rm+recreate a file, and inject a new file, both FAIL", () => {
+  // Read-only files are meaningless if their parent directory stays writable: any file
+  // can be unlink+recreated, or a brand-new file injected, through the writable dir.
+  // The freeze clears directory write bits too, so both dir-level tampers are refused.
+  const target = join(built.releaseDir, RELEASE_MANIFEST_NAME);
+  assert.ok(existsSync(target), "the manifest exists in the release");
+  // (a) rm a release file — unlink needs write on the PARENT dir, which is frozen.
+  assert.throws(() => rmSync(target), /EACCES|EPERM|EROFS|ENOTEMPTY/, "rm of a release file must fail — its parent directory is frozen");
+  assert.ok(existsSync(target), "the file survives the refused rm (so rm+recreate is impossible)");
+  // (b) inject a brand-new file into a release dir — create needs write on the dir.
+  const injected = join(built.releaseDir, "src", "cli", "injected-by-attacker.ts");
+  assert.throws(() => writeFileSync(injected, "malicious\n"), /EACCES|EPERM|EROFS/, "injecting a new file into a release dir must fail — the dir is frozen");
+  assert.ok(!existsSync(injected), "no injected file exists in the frozen release dir");
+  // (c) the release ROOT itself is frozen — a top-level entry can't be planted either.
+  assert.throws(() => writeFileSync(join(built.releaseDir, "planted.txt"), "x"), /EACCES|EPERM|EROFS/, "the release root is frozen — no top-level file can be planted");
 });
 
 // The R1 acceptance in its sharpest form: run the release entry with an
@@ -210,6 +254,7 @@ test("FG-569 torn closure: a MISSING native binding is REFUSED at build, and no 
   const torn = mkdtempSync(join(workspace, "torn-missing-"));
   mkdirSync(join(torn, "src"));
   writeFileSync(join(torn, "package.json"), `{"name":"torn"}`);
+  writeFileSync(join(torn, "package-lock.json"), `{"name":"torn","lockfileVersion":3}`);
   // better-sqlite3 present but its compiled binding is absent — a torn closure.
   mkdirSync(join(torn, "node_modules", "better-sqlite3", "build", "Release"), { recursive: true });
 
@@ -232,7 +277,11 @@ test("FG-569 FIX 4: the COPIED-closure gate REJECTS a release whose OWN binding 
   // BEFORE the copy, so only a gate over the COPY catches this. assertReleaseCloses
   // loads the release's own binding under the pinned interpreter and must throw.
   const rel = buildRelease({ sourceRoot, outDir: join(workspace, "corrupt-copy-release") });
-  writeFileSync(join(rel.releaseDir, RELEASE_BINDING_REL), "not a real .node\n");
+  // The build freezes the closure (files read-only), so make this one file writable
+  // before corrupting it — the tamper we then prove assertReleaseCloses catches.
+  const binding = join(rel.releaseDir, RELEASE_BINDING_REL);
+  chmodSync(binding, 0o644);
+  writeFileSync(binding, "not a real .node\n");
   assert.throws(
     () => assertReleaseCloses(rel.releaseDir, process.execPath),
     /torn closure — the COPIED better-sqlite3 binding/i,
@@ -243,6 +292,7 @@ test("FG-569 torn closure: a CORRUPT / ABI-mismatched native binding is REFUSED 
   const torn = mkdtempSync(join(workspace, "torn-corrupt-"));
   mkdirSync(join(torn, "src"));
   writeFileSync(join(torn, "package.json"), `{"name":"torn"}`);
+  writeFileSync(join(torn, "package-lock.json"), `{"name":"torn","lockfileVersion":3}`);
   // Real better-sqlite3 JS + its runtime deps, so require() reaches the binding —
   // then corrupt the binding so the load throws exactly as a torn closure would.
   for (const dep of ["better-sqlite3", "bindings", "file-uri-to-path"]) {
@@ -254,4 +304,61 @@ test("FG-569 torn closure: a CORRUPT / ABI-mismatched native binding is REFUSED 
   const out = join(workspace, "torn-corrupt-release");
   assert.throws(() => buildRelease({ sourceRoot: torn, outDir: out }), /torn closure/i);
   assert.ok(!existsSync(out), "a refused build leaves no release directory behind");
+});
+
+/** A git-initialized buildable source with THIS project's real node_modules +
+ *  package.json (so the closure gates pass and the npm cache holds every pinned
+ *  tarball for the byte-binding). The caller adds whichever lockfile(s) the test
+ *  exercises. */
+function makeLockSource(label: string): string {
+  const src = mkdtempSync(join(workspace, label));
+  execFileSync("git", ["init", "-q"], { cwd: src });
+  execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"], { cwd: src });
+  mkdirSync(join(src, "src"));
+  cpSync(join(sourceRoot, "package.json"), join(src, "package.json"));
+  cpSync(join(sourceRoot, "node_modules"), join(src, "node_modules"), { recursive: true, dereference: true });
+  return src;
+}
+
+test("FG-569 Finding 4 (lockfile selection): a package-lock-only source builds and binds+manifests against package-lock.json", () => {
+  const src = makeLockSource("lock-pl-only-");
+  cpSync(join(sourceRoot, "package-lock.json"), join(src, "package-lock.json"));
+
+  const rel = buildRelease({ sourceRoot: src, outDir: join(workspace, "lock-pl-only-rel") });
+  assert.equal(rel.manifest.lockfile.name, "package-lock.json", "the manifest names the only lockfile present");
+  assert.ok(existsSync(join(rel.releaseDir, "package-lock.json")), "the selected lockfile is copied into the release");
+});
+
+test("FG-569 Finding 4 (lockfile selection): a shrinkwrap-only source builds — binds+manifests against npm-shrinkwrap.json, NO false failure", () => {
+  // The prior hole: lockfileIdentity accepted npm-shrinkwrap.json but the byte-binding
+  // hardcoded package-lock.json, so a shrinkwrap-only source always failed the binding.
+  const src = makeLockSource("lock-sw-only-");
+  // npm-shrinkwrap.json has the same shape as package-lock.json, so reuse the real one.
+  cpSync(join(sourceRoot, "package-lock.json"), join(src, "npm-shrinkwrap.json"));
+
+  const rel = buildRelease({ sourceRoot: src, outDir: join(workspace, "lock-sw-only-rel") });
+  assert.equal(rel.manifest.lockfile.name, "npm-shrinkwrap.json", "the manifest names the shrinkwrap it bound against");
+  assert.ok(existsSync(join(rel.releaseDir, "npm-shrinkwrap.json")), "the shrinkwrap is copied into the release");
+  assert.ok(!existsSync(join(rel.releaseDir, "package-lock.json")), "no package-lock.json was invented");
+  const shipped = readFileSync(join(rel.releaseDir, "npm-shrinkwrap.json"));
+  assert.equal(rel.manifest.lockfile.sha256, createHash("sha256").update(shipped).digest("hex"), "the manifest sha is of the SHIPPED shrinkwrap bytes");
+});
+
+test("FG-569 Finding 4 (lockfile selection): both present ⇒ shrinkwrap WINS for copy, verify, and manifest", () => {
+  const src = makeLockSource("lock-both-");
+  cpSync(join(sourceRoot, "package-lock.json"), join(src, "npm-shrinkwrap.json"));
+  // A DECOY package-lock.json that, if it were the one selected, would FAIL the
+  // byte-binding (it pins a package that isn't installed / isn't in the npm cache).
+  // A clean build therefore proves the shrinkwrap — not this file — was selected.
+  writeFileSync(
+    join(src, "package-lock.json"),
+    JSON.stringify({ name: "decoy", lockfileVersion: 3, packages: { "node_modules/not-installed": { integrity: "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", resolved: "https://example.invalid/x.tgz" } } }, null, 2),
+  );
+
+  const rel = buildRelease({ sourceRoot: src, outDir: join(workspace, "lock-both-rel") });
+  assert.equal(rel.manifest.lockfile.name, "npm-shrinkwrap.json", "shrinkwrap wins the manifest identity");
+  assert.ok(existsSync(join(rel.releaseDir, "npm-shrinkwrap.json")), "shrinkwrap is the lockfile copied into the release");
+  assert.ok(!existsSync(join(rel.releaseDir, "package-lock.json")), "the decoy package-lock.json was NOT copied — shrinkwrap won the copy");
+  const shipped = readFileSync(join(rel.releaseDir, "npm-shrinkwrap.json"));
+  assert.equal(rel.manifest.lockfile.sha256, createHash("sha256").update(shipped).digest("hex"), "the manifest sha is of the shrinkwrap, not the decoy");
 });

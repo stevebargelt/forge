@@ -117,14 +117,25 @@ function gitCommit(sourceRoot: string): string {
   }
 }
 
-function lockfileIdentity(sourceRoot: string): { name: string; sha256: string } {
-  for (const name of ["package-lock.json", "npm-shrinkwrap.json"]) {
-    const p = join(sourceRoot, name);
-    if (existsSync(p)) {
-      return { name, sha256: createHash("sha256").update(readFileSync(p)).digest("hex") };
-    }
+const LOCKFILE_PRECEDENCE = ["npm-shrinkwrap.json", "package-lock.json"] as const;
+
+/** FG-569 (Finding 4): the ONE effective lockfile, selected the way npm selects it —
+ *  npm-shrinkwrap.json takes precedence over package-lock.json when both are present.
+ *  The copy, the byte-binding (assertShippedClosureMatchesLockfile), and the manifest
+ *  identity (lockfileIdentity) all read THIS one selection, so no part of the binding
+ *  path hardcodes a lockfile name. Throws if neither exists. */
+function selectLockfile(root: string): string {
+  for (const name of LOCKFILE_PRECEDENCE) {
+    if (existsSync(join(root, name))) return name;
   }
-  throw new Error(`forge release: no lockfile (package-lock.json) at ${sourceRoot} — a release must pin an exact dependency closure`);
+  throw new Error(`forge release: no lockfile (npm-shrinkwrap.json or package-lock.json) at ${root} — a release must pin an exact dependency closure`);
+}
+
+/** The lockfile identity recorded in the manifest: the SELECTED lockfile's name and a
+ *  sha256 of its bytes. The caller passes the single selection so the manifest binds
+ *  the same lockfile the copy and the byte-binding used. */
+function lockfileIdentity(root: string, name: string): { name: string; sha256: string } {
+  return { name, sha256: createHash("sha256").update(readFileSync(join(root, name))).digest("hex") };
 }
 
 /** Load the SOURCE ROOT's compiled better-sqlite3 under the building interpreter,
@@ -263,10 +274,10 @@ function readTarFiles(tarball: Buffer): Map<string, Buffer> {
  *     equality does not hold for them BY DESIGN. better-sqlite3 is separately proven
  *     to load under the pinned interpreter (assertReleaseCloses); the rest are the
  *     only closure members not content-bound, a handful out of ~60+ verified. */
-export function assertShippedClosureMatchesLockfile(root: string): void {
-  const lockPath = join(root, "package-lock.json");
+export function assertShippedClosureMatchesLockfile(root: string, lockfileName: string): void {
+  const lockPath = join(root, lockfileName);
   if (!existsSync(lockPath)) {
-    throw new Error(`forge release: no package-lock.json at ${root} — cannot bind the shipped closure to a lockfile`);
+    throw new Error(`forge release: no ${lockfileName} at ${root} — cannot bind the shipped closure to a lockfile`);
   }
   const cacheDir = execFileSync("npm", ["config", "get", "cache"], { cwd: root, encoding: "utf8" }).trim();
   const lock = JSON.parse(readFileSync(lockPath, "utf8")) as { packages?: Record<string, LockPackage> };
@@ -336,6 +347,46 @@ function dereferenceSymlinks(dir: string): void {
   }
 }
 
+/** FG-569 (Finding 3): freeze the staging tree for shipping — recursively clear the
+ *  write bits on every FILE **and DIRECTORY** so the released closure is immutable at
+ *  rest. Read-only files alone are defeatable: a writable parent directory lets any
+ *  file be unlink+recreated or a brand-new file injected, so the frozen files mean
+ *  nothing. Directories keep their read + search/execute bits (the tree stays
+ *  traversable and the release still runs) but lose write, so no entry can be added or
+ *  removed. POST-ORDER — freeze a directory's children BEFORE the directory itself, so
+ *  children can still be chmod'd while their parent is writable — and the passed-in ROOT
+ *  is frozen last (top-level entries like forge-release.json must not be rm+recreatable).
+ *  An existing-executable file stays executable (only write bits are cleared). Runs on
+ *  the STAGING dir BEFORE the atomic rename, so the FINAL release path is never observed
+ *  writable. (Symlinks are already dereferenced away, so every entry is a real file or
+ *  directory.) A fully frozen tree cannot be rmSync'd without restoring write bits first
+ *  — see thawReleaseTree, used on the build's own cleanup path. */
+function freezeReleaseFiles(dir: string): void {
+  for (const ent of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, ent.name);
+    if (ent.isDirectory()) freezeReleaseFiles(p);
+    else chmodSync(p, statSync(p).mode & ~0o222);
+  }
+  chmodSync(dir, statSync(dir).mode & ~0o222);
+}
+
+/** Restore write bits across a (possibly) frozen release tree so it can be removed:
+ *  freezeReleaseFiles clears directory write bits, and a recursive unlink needs write
+ *  on every parent directory. Used on the build's own cleanup path (a refused build
+ *  must leave no release behind, even after the tree was frozen) and exported for tests
+ *  that build a release and must tear it down. This is ONLY for removing a tree
+ *  wholesale — never call it to weaken the freeze on a published release. Skips symlinks
+ *  so it never chmods a link's out-of-tree target. */
+export function thawReleaseTree(dir: string): void {
+  chmodSync(dir, statSync(dir).mode | 0o200);
+  for (const ent of readdirSync(dir, { withFileTypes: true })) {
+    if (ent.isSymbolicLink()) continue;
+    const p = join(dir, ent.name);
+    if (ent.isDirectory()) thawReleaseTree(p);
+    else chmodSync(p, statSync(p).mode | 0o200);
+  }
+}
+
 /** Build an immutable release closure from `sourceRoot` into `outDir`. Refuses a
  *  torn closure before writing anything. Builds into a sibling temp dir and
  *  renames into place, so an interrupted build never leaves a partial release. */
@@ -352,6 +403,11 @@ export function buildRelease(opts: BuildReleaseOptions): BuildReleaseResult {
     throw new Error(`forge release: ${outDir} already exists — a release directory is immutable and never overwritten`);
   }
 
+  // FG-569 (Finding 4): select the ONE effective lockfile up front (input validation)
+  // and thread this single selection through copy, byte-binding, and manifest —
+  // npm-shrinkwrap.json wins over package-lock.json; neither present is a clear error.
+  const lockfileName = selectLockfile(sourceRoot);
+
   // Gate FIRST: a torn closure must be refused BEFORE any copy so no partial
   // release survives the refusal.
   assertClosureLoads(sourceRoot);
@@ -366,9 +422,8 @@ export function buildRelease(opts: BuildReleaseOptions): BuildReleaseResult {
   rmSync(tmpDir, { recursive: true, force: true });
   mkdirSync(tmpDir, { recursive: true });
   try {
-    for (const rel of ["src", "node_modules", "package.json", "package-lock.json", "npm-shrinkwrap.json"]) {
+    for (const rel of ["src", "node_modules", "package.json", lockfileName]) {
       const from = join(sourceRoot, rel);
-      if (!existsSync(from)) continue;
       const dest = join(tmpDir, rel);
       cpSync(from, dest, { recursive: true, dereference: true });
       // cpSync's `dereference` follows ONLY the top-level path — a NESTED symlink
@@ -383,19 +438,9 @@ export function buildRelease(opts: BuildReleaseOptions): BuildReleaseResult {
     writeFileSync(entryPath, renderEntry(interpreter));
     chmodSync(entryPath, 0o755);
 
-    // FIX 4 + FIX 5: validate the COPIED closure (binding + tsx loader) by running
-    // it under the pinned interpreter, before we describe it in a manifest.
-    assertReleaseCloses(tmpDir, interpreter);
-
-    // FG-569: bind the SHIPPED closure to the lockfile — every lockfile-pinned
-    // dependency in the COPIED node_modules must match its lockfile'd tarball byte
-    // for byte. Load-checks (above) prove the closure RUNS; this proves it is the
-    // closure the lockfile names, so a content-mutated dep with an untouched
-    // lockfile is refused rather than shipped.
-    assertShippedClosureMatchesLockfile(tmpDir);
-
-    // MUST-FIX 3: the manifest's lockfile SHA must describe the SHIPPED closure,
-    // so hash the release's OWN copied lockfile — not the source at build time.
+    // MUST-FIX 3: the manifest's lockfile SHA must describe the SHIPPED closure, so
+    // hash the release's OWN copied lockfile (the selected one) — not the source at
+    // build time.
     const manifest: ReleaseManifest = {
       schema: 1,
       id,
@@ -403,19 +448,40 @@ export function buildRelease(opts: BuildReleaseOptions): BuildReleaseResult {
       interpreter,
       abi: process.versions.modules,
       nodeVersion: process.version,
-      lockfile: lockfileIdentity(tmpDir),
+      lockfile: lockfileIdentity(tmpDir, lockfileName),
       builtAt: now.toISOString(),
       entry: RELEASE_ENTRY_SOURCE,
       binding: RELEASE_BINDING_REL,
     };
     writeFileSync(join(tmpDir, RELEASE_MANIFEST_NAME), JSON.stringify(manifest, null, 2) + "\n");
 
+    // FG-569 (Finding 3): FREEZE the staging tree BEFORE the atomic rename — clear the
+    // write bits on every file so the closure is immutable at rest — then VERIFY the
+    // now-frozen tree, THEN rename the already-frozen tree into place. The final
+    // release path is never observed with a writable file, so there is no post-rename
+    // mutation window.
+    freezeReleaseFiles(tmpDir);
+
+    // Verify the FROZEN closure — both gates only READ the tree:
+    //  - FIX 4 + FIX 5: it RUNS under the pinned interpreter (the tsx loader loads and
+    //    better-sqlite3 loads from the release's OWN node_modules), and
+    //  - FG-569: its shipped bytes MATCH the selected lockfile — a content-mutated dep
+    //    with an untouched lockfile is refused rather than shipped.
+    // Proven AFTER the freeze, so the thing that ships is exactly what was verified.
+    assertReleaseCloses(tmpDir, interpreter);
+    assertShippedClosureMatchesLockfile(tmpDir, lockfileName);
+
     mkdirSync(dirname(outDir), { recursive: true });
-    // Rename is the atomic publish of the whole closure into its final path.
+    // Atomic publish of the already-frozen closure into its final, immutable path.
     renameSync(tmpDir, outDir);
 
     return { manifest, releaseDir: outDir, entryPath: join(outDir, RELEASE_ENTRY_NAME) };
   } catch (e) {
+    // The freeze may already have run (a post-freeze gate can throw — e.g. the
+    // lockfile byte-binding), leaving read-only directories a recursive unlink
+    // can't traverse. Restore write bits before removing, so a refused build
+    // still leaves no release behind.
+    if (existsSync(tmpDir)) thawReleaseTree(tmpDir);
     rmSync(tmpDir, { recursive: true, force: true });
     throw e;
   }
