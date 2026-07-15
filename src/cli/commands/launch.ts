@@ -36,6 +36,11 @@ function renderView(v: LaunchView, logTailLines = 15): string {
     `log:      ${v.logPath}`,
     `status:   ${statusLine(v.status)}`,
   ];
+  if (v.recorder) {
+    // FG-569 (R2): the recorder's OWN runtime, captured inside the recorder — not
+    // the forge CLI (R1) that submitted the launch.
+    lines.push(`recorder: ${v.recorder.execPath}  abi ${v.recorder.abi} (node ${v.recorder.nodeVersion})${v.recorder.releaseId ? `  release ${v.recorder.releaseId}` : ""}`);
+  }
   if (v.forgeIds.runIds.length > 0) lines.push(`runs:     ${v.forgeIds.runIds.join(", ")}`);
   if (v.forgeIds.taskIds.length > 0) lines.push(`tasks:    ${v.forgeIds.taskIds.join(", ")}`);
   if (logTailLines > 0) {

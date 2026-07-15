@@ -82,9 +82,23 @@ export type LaunchStatus =
  *  not an inference from `code`; exactly one of the two is set. */
 export type ExitRecord = { code: number | null; signal: string | null };
 
+// FG-569 (R2): the exit recorder (this launch's OWN launch-time process) is a
+// distinct runtime from the forge CLI (R1) that submitted the launch — it can
+// run under a different interpreter (buildWrapperCommand takes a `node`). So its
+// runtime is captured from INSIDE the recorder (process.execPath /
+// process.versions.modules / its own env), NEVER copied from the CLI's values.
+export type RecorderRuntime = {
+  execPath: string;
+  abi: string;
+  nodeVersion: string;
+  releaseId: string | null;
+};
+
 export type LaunchView = LaunchMeta & {
   status: LaunchStatus;
   forgeIds: { runIds: string[]; taskIds: string[] };
+  // R2 provenance, present once the recorder has written it (its first act).
+  recorder?: RecorderRuntime;
 };
 
 export function classifyExit(rec: ExitRecord): LaunchStatus {
@@ -121,22 +135,39 @@ export function shellQuote(arg: string): string {
 // FG-535's AC forbids. This node runner asks the OS instead: spawnSync reports
 // `signal` (WIFSIGNALED) separately from `status`, so the two cases stay
 // distinguishable in the durable record forever.
+// FG-569 (R2): the recorder's FIRST act is to write its OWN runtime — evaluated
+// here, inside the recorder process — to `rt`. execPath/ABI/env are the
+// recorder's, so a recorder running under a different interpreter than the CLI
+// records a different value; nothing is ever copied in from the launching CLI.
 const EXIT_RECORDER = [
   `const{spawnSync}=require("child_process"),fs=require("fs");`,
-  `const[e,l,...a]=process.argv.slice(1);`,
+  `const[e,l,rt,...a]=process.argv.slice(1);`,
+  `fs.writeFileSync(rt,JSON.stringify({execPath:process.execPath,abi:process.versions.modules,nodeVersion:process.version,releaseId:process.env.FORGE_RELEASE_ID||null}));`,
   `const fd=fs.openSync(l,"a");`,
   `const r=spawnSync(a[0],a.slice(1),{stdio:["ignore",fd,fd]});`,
   `if(r.error)fs.writeSync(fd,String(r.error.message)+"\\n");`,
   `fs.writeFileSync(e,JSON.stringify({code:r.error?127:r.status,signal:r.signal??null}));`,
 ].join("");
 
-/** The command the tmux pane runs: the target command with stdout+stderr sent
- *  to the log, then its terminal record written to the exit file. That write is
- *  the LAST thing the wrapper does, so an exit file existing is proof the
+/** The command the tmux pane runs: the recorder writes its own R2 runtime, then
+ *  runs the target with stdout+stderr to the log, then writes the terminal exit
+ *  record. The exit write is the LAST act, so an exit file existing is proof the
  *  command itself finished (not the wrapper being torn down). */
-export function buildWrapperCommand(argv: string[], logPath: string, exitPath: string, node = process.execPath): string {
-  const parts = [node, "-e", EXIT_RECORDER, exitPath, logPath, ...argv];
+export function buildWrapperCommand(argv: string[], logPath: string, exitPath: string, runtimePath: string, node = process.execPath): string {
+  const parts = [node, "-e", EXIT_RECORDER, exitPath, logPath, runtimePath, ...argv];
   return parts.map(shellQuote).join(" ");
+}
+
+/** Parse the R2 runtime record the recorder wrote. Returns undefined if absent
+ *  or malformed — R2 is never guessed. */
+export function parseRecorderRuntime(raw: string): RecorderRuntime | undefined {
+  try {
+    const p = JSON.parse(raw) as Partial<RecorderRuntime>;
+    if (typeof p.execPath !== "string" || typeof p.abi !== "string" || typeof p.nodeVersion !== "string") return undefined;
+    return { execPath: p.execPath, abi: p.abi, nodeVersion: p.nodeVersion, releaseId: typeof p.releaseId === "string" ? p.releaseId : null };
+  } catch {
+    return undefined;
+  }
 }
 
 /** Forge run/task ids, opportunistically, from whatever the command logged. */
@@ -239,7 +270,7 @@ export function startLaunch(argv: string[], opts: { name?: string; cwd?: string;
   const metaPath = join(dir, "meta.json");
   writeFileSync(metaPath, JSON.stringify(meta, null, 2));
 
-  const wrapped = buildWrapperCommand(argv, meta.logPath, join(dir, "exit"));
+  const wrapped = buildWrapperCommand(argv, meta.logPath, join(dir, "exit"), join(dir, "runtime.json"));
   try {
     // Order matters. Starting the target command AS the session command races
     // it against `set-option`: a command that finishes first destroys the
@@ -306,7 +337,13 @@ export function readLaunch(id: string, tmux: TmuxRunner = defaultTmux): LaunchVi
     log = readFileSync(meta.logPath, "utf8");
   } catch { /* not written yet */ }
 
-  return { ...meta, status, forgeIds: extractForgeIds(log) };
+  let recorder: RecorderRuntime | undefined;
+  const rtPath = join(dir, "runtime.json");
+  if (existsSync(rtPath)) {
+    try { recorder = parseRecorderRuntime(readFileSync(rtPath, "utf8")); } catch { /* not readable yet */ }
+  }
+
+  return { ...meta, status, forgeIds: extractForgeIds(log), ...(recorder ? { recorder } : {}) };
 }
 
 export function listLaunches(tmux: TmuxRunner = defaultTmux): LaunchView[] {
