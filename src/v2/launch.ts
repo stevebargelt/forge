@@ -279,7 +279,18 @@ export function startLaunch(argv: string[], opts: { name?: string; cwd?: string;
     // So the session is born holding an inert pane (`cat` blocks on the tty and
     // never exits on its own), remain-on-exit is set while nothing can race it,
     // and only then does respawn-pane hand the pane to the real command.
-    tmux(["new-session", "-d", "-s", session, "-c", meta.cwd, "cat"]);
+    //
+    // FG-569 (R2): a built release's entry exports FORGE_RELEASE_ID into forge's
+    // OWN environment, but tmux does NOT copy an arbitrary client env var into a
+    // session it creates on an ALREADY-RUNNING server — only `new-session -e`
+    // reaches the session env, which respawn-pane then inherits. So forward it
+    // explicitly here; without this the recorder would read null whenever the
+    // operator already had a tmux server up (the common case). A dev launch (no
+    // release, var unset) adds no -e and the recorder records releaseId: null.
+    const sessionEnv = process.env.FORGE_RELEASE_ID
+      ? ["-e", `FORGE_RELEASE_ID=${process.env.FORGE_RELEASE_ID}`]
+      : [];
+    tmux(["new-session", "-d", "-s", session, "-c", meta.cwd, ...sessionEnv, "cat"]);
     tmux(["set-option", "-w", "-t", `${session}:`, "remain-on-exit", "on"]);
     tmux(["respawn-pane", "-k", "-t", `${session}:`, wrapped]);
   } catch (e) {

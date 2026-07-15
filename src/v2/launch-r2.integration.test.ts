@@ -18,6 +18,8 @@ import { mkdtempSync, mkdirSync, readFileSync, existsSync, copyFileSync, chmodSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildWrapperCommand, parseRecorderRuntime, type RecorderRuntime } from "./launch.js";
+import { buildRelease, type BuildReleaseResult } from "./release.js";
+import { findGitRoot } from "../util/git-root.js";
 
 let scratch: string;
 let altNode: string;
@@ -92,4 +94,63 @@ test("FG-569 R2: no release env ⇒ releaseId is null, never fabricated", () => 
   delete env.FORGE_RELEASE_ID;
   const { runtime } = runRecorder({ env });
   assert.equal(runtime!.releaseId, null);
+});
+
+// The END-TO-END proof the review-loop demanded: the prior tests inject
+// FORGE_RELEASE_ID by hand, so they'd pass even if NOTHING in a real release set
+// it (the confirmed bug — releaseId was null in production). This test BUILDS a
+// real release and starts a launch THROUGH its generated entry, with NOBODY
+// injecting the env var: the entry itself must export it from its own manifest,
+// forge must forward it into the tmux session, and the recorder must capture it.
+// The launch runs against a PRE-EXISTING tmux server started WITHOUT the var — the
+// realistic operator case, and the exact one where naive client-env inheritance
+// fails — so a green result proves the id reached the recorder by design, not luck.
+const hasTmux = spawnSync("tmux", ["-V"], { encoding: "utf8" }).status === 0;
+
+test("FG-569 R2 (END-TO-END, through a BUILT release entry): the recorder records the release's manifest id — not null, not injected", { skip: hasTmux ? false : "tmux not available" }, async () => {
+  const sourceRoot = findGitRoot(process.cwd());
+  const releaseDir = join(scratch, "e2e-release");
+  const built: BuildReleaseResult = buildRelease({ sourceRoot, outDir: releaseDir });
+
+  // An ISOLATED tmux server, started WITHOUT FORGE_RELEASE_ID in its environment —
+  // this is what makes the test meaningful: on an already-running server tmux does
+  // not copy an arbitrary client env var into a new session, so only forge's
+  // explicit `new-session -e` forwarding can carry the id to the recorder.
+  const tmuxTmpdir = mkdtempSync(join(scratch, "tmux-"));
+  const serverEnv = { ...process.env };
+  delete serverEnv.FORGE_RELEASE_ID;
+  serverEnv.TMUX_TMPDIR = tmuxTmpdir;
+  assert.equal(
+    spawnSync("tmux", ["new-session", "-d", "-s", "fg569-pre", "cat"], { env: serverEnv, encoding: "utf8" }).status,
+    0,
+    "pre-existing tmux server (without FORGE_RELEASE_ID) should start",
+  );
+
+  try {
+    const forgeHome = mkdtempSync(join(scratch, "home-"));
+    // Run the launch THROUGH the built release entry. The entry (not this test)
+    // exports FORGE_RELEASE_ID from its own manifest before exec'ing node.
+    const entryEnv = {
+      PATH: process.env.PATH ?? "/usr/bin:/bin",
+      HOME: process.env.HOME ?? "/tmp",
+      FORGE_HOME: forgeHome,
+      TMUX_TMPDIR: tmuxTmpdir,
+    };
+    const run = spawnSync(built.entryPath, ["launch", "run", "--name", "r2e2e", "--json", "--", "true"], { env: entryEnv, encoding: "utf8" });
+    assert.equal(run.status, 0, `forge launch run through the release entry failed: ${run.stderr}`);
+    const view = JSON.parse(run.stdout) as { id: string };
+    assert.match(view.id, /^launch-r2e2e-/, `unexpected launch id: ${run.stdout}`);
+
+    const rtPath = join(forgeHome, "launches", view.id, "runtime.json");
+    const deadline = Date.now() + 20_000;
+    while (!existsSync(rtPath) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(existsSync(rtPath), "the recorder wrote runtime.json (its first act inside the tmux pane)");
+
+    const runtime = parseRecorderRuntime(readFileSync(rtPath, "utf8"));
+    assert.ok(runtime, "runtime.json parses as an R2 record");
+    assert.equal(runtime!.releaseId, built.manifest.id, "the recorder captured THIS release's id — sourced from the entry's manifest, forwarded through tmux");
+    assert.notEqual(runtime!.releaseId, null, "R2 release-id is live for a real release, not the null the bug shipped");
+  } finally {
+    spawnSync("tmux", ["kill-server"], { env: serverEnv, encoding: "utf8" });
+  }
 });
