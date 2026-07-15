@@ -185,6 +185,34 @@ test("FG-569 MUST-FIX 1 (EXECUTED THROUGH A SYMLINK): the release entry resolves
   assert.equal(prov.bindingLoads, true, "and loaded the closure's native binding");
 });
 
+test("FG-569 bundled assets (EXECUTED, NO node on PATH): `forge init` runs FROM THE RELEASE, resolving seeds/ and scripts/ module-relative to the closure", () => {
+  // The release claims to be self-contained, but shipped commands read bundled
+  // assets MODULE-RELATIVE to the release root: `forge init` renders CLAUDE.md
+  // from seeds/orchestrator-template.md and installs the commit-msg hook from
+  // scripts/git-hooks/. If the build shipped only src/+node_modules, init would
+  // die looking for its own seeds. Run the entry under a node-free PATH against a
+  // fresh git project and prove BOTH assets resolved from inside the release.
+  assert.ok(existsSync(join(built.releaseDir, "seeds")), "seeds/ is bundled into the closure");
+  assert.ok(existsSync(join(built.releaseDir, "scripts")), "scripts/ is bundled into the closure");
+
+  const project = mkdtempSync(join(workspace, "init-proj-"));
+  execFileSync("git", ["init", "-q"], { cwd: project });
+
+  const emptyDir = mkdtempSync(join(workspace, "init-nopath-"));
+  const env = { PATH: emptyDir, HOME: process.env.HOME ?? "/tmp", FORGE_HOME: process.env.FORGE_HOME ?? "" };
+  const r = spawnSync(built.entryPath, ["init", "--project", project, "--prefix", "TST"], { encoding: "utf8", env });
+  assert.equal(r.status, 0, `forge init from the release failed: ${r.stderr}`);
+
+  const claudeMd = join(project, "CLAUDE.md");
+  assert.ok(existsSync(claudeMd), "init wrote CLAUDE.md");
+  const body = readFileSync(claudeMd, "utf8");
+  assert.match(body, /<!-- forge:orchestrator-start -->/, "CLAUDE.md carries the seed-rendered orchestrator block — seeds/ resolved from the release");
+  assert.match(body, /You are this project's forge orchestrator/, "the block body is the bundled seed's content");
+
+  const hook = join(project, ".git", "hooks", "commit-msg");
+  assert.ok(existsSync(hook), "the commit-msg hook installed from scripts/git-hooks/ — scripts/ resolved from the release");
+});
+
 test("FG-569 closure: a symlinked node_modules dependency is DEREFERENCED into the release, not left pointing outside it", () => {
   // An npm-linked (or otherwise absolute-target) dependency is a symlink in
   // node_modules pointing OUTSIDE the source tree. Preserving it verbatim would

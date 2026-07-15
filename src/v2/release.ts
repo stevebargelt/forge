@@ -8,6 +8,7 @@
 //     forge                the entry: `#!/bin/sh` that execs the PINNED absolute node
 //     forge-loader.mjs     the in-process tsx loader (import "tsx")
 //     src/                 the source tree
+//     seeds/, scripts/     bundled runtime assets shipped commands resolve module-relative
 //     node_modules/        the ENTIRE dependency closure, incl. the compiled native binding
 //     package.json, package-lock.json
 //
@@ -491,9 +492,22 @@ export function buildRelease(opts: BuildReleaseOptions): BuildReleaseResult {
   rmSync(tmpDir, { recursive: true, force: true });
   mkdirSync(tmpDir, { recursive: true });
   try {
-    for (const rel of ["src", "node_modules", "package.json", lockfileName]) {
-      const from = join(sourceRoot, rel);
-      const dest = join(tmpDir, rel);
+    // FG-569: `src` + `node_modules` is not the whole runtime. Shipped commands
+    // resolve bundled assets MODULE-RELATIVE to the release root — `forge init`
+    // reads `seeds/` (also seed-drift/raci) and copies hooks out of `scripts/`
+    // (git-hooks, claude-hooks, claude-commands). Omit these and the "self-contained"
+    // release ships a `forge init` that cannot find its own seeds, so copy them into
+    // the closure alongside src. A real forge checkout always carries both; the
+    // trailing `?` optional set is skipped when absent so a minimal synthetic source
+    // (fixtures that only exercise closure/lockfile logic) still builds. (`dashboard/`
+    // is a SEPARATE npm workspace with its own dependency tree — a distinct closure,
+    // not bundled by this control-plane release; `forge dashboard` is not release-critical.)
+    for (const rel of ["src", "node_modules", "package.json", lockfileName, "seeds?", "scripts?"]) {
+      const optional = rel.endsWith("?");
+      const name = optional ? rel.slice(0, -1) : rel;
+      const from = join(sourceRoot, name);
+      if (optional && !existsSync(from)) continue;
+      const dest = join(tmpDir, name);
       cpSync(from, dest, { recursive: true, dereference: true });
       // cpSync's `dereference` follows ONLY the top-level path — a NESTED symlink
       // (an npm-linked dependency, a .bin entry) survives the recursive copy as a
