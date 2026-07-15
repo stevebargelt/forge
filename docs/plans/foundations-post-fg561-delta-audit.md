@@ -153,12 +153,20 @@ ABI) / **DISSOLVED** (assumption no longer holds — e.g. store-version policy a
 the PRD conclusion that must be re-derived and route it back to that cluster). The bound `$POST_FG561_SHA`,
 the audited range, and the owner are stamped at the top.
 
-## 8. PRE-IMPLEMENTATION GATE (HARD — enforced at decomposition/campaign INTAKE)
+## 8. PRE-IMPLEMENTATION GATE (MANDATORY PROCESS PRECONDITION on orchestrator dispatch)
 
-**Where the gate is enforced.** This is a **precondition check in the primary orchestrator's campaign /
-decomposition INTAKE transition** — a required, blocking gate condition — **not** a prohibition sentence a reader
-is trusted to honor. Before the orchestrator dispatches **any** foundation child (any A-\*, B-\*, or C-\* slice),
-its intake step must verify, as a hard precondition, that:
+**What kind of gate this is.** This is a **mandatory process precondition binding on the primary orchestrator's
+decision to dispatch any foundation child** — a required, non-optional step the orchestrator MUST perform, whose
+enforcement is the orchestrator's own responsibility. It is an **operator / process gate, not a code-enforced
+production check**: no production intake path — no code-gated campaign or decomposition transition — auto-verifies
+the audit result or blocks child dispatch on it today. Nothing in the codebase "fails closed" here; the fail-closed
+behavior is a **rule the orchestrator is obligated to follow**, and skipping it is a **process violation**, not a
+mechanism the system prevents. (If a code-enforced intake check that programmatically blocks dispatch on the audit
+result is wanted, that is **net-new follow-up work** to be named and built — it does not exist and cannot exist
+pre-implementation, since the orchestrator's "intake" is an operator/process decision, not a code-gated transition.)
+
+**The precondition.** Before the orchestrator dispatches **any** foundation child (any A-\*, B-\*, or C-\* slice),
+it MUST verify, as a required precondition, that:
 
 1. the delta-audit **result artifact EXISTS** at its committed output path
    `docs/plans/foundations-post-fg561-delta-audit-result.md` (§7) on the integration branch; **AND**
@@ -166,10 +174,12 @@ its intake step must verify, as a hard precondition, that:
 3. every §4 assumption in it is recorded **RE-CONFIRMED** or **CHANGED-with-a-named-rebinding**, and every
    **DISSOLVED** assumption carries a recorded route back to its cluster's PRD for re-derivation.
 
-If any of (1)–(3) is unmet, the intake transition **fails closed** and dispatches no foundation child. "Has the
-gate been satisfied?" is therefore a **yes/no check against a durable committed artifact** — the
-presence-and-PASS of `…-delta-audit-result.md` — not a request, and not a manual reading step that can be
-skipped.
+If any of (1)–(3) is unmet, the orchestrator **must not** dispatch any foundation child — it is obligated to hold
+until the audit result exists and records PASS. "Has the gate been satisfied?" is a **yes/no check against a
+durable committed artifact** — the presence-and-PASS of `…-delta-audit-result.md` — so the precondition is
+objectively decidable rather than a matter of judgment; but the act of checking it, and of holding dispatch when it
+fails, is the **orchestrator's responsibility as a process obligation**, not something the system enforces. Not a
+request, not a manual reading step that can be skipped — but also not code-gated.
 
 This precondition sits **above** the per-child red prerequisites in
 `docs/plans/foundations-decomposition.md` (A-FG356's AC-5 host gate, B-FG525's F9 container-gone red,
