@@ -573,30 +573,44 @@ them deliberately). **No surface migrates the `tasks` schema** — persisting th
 
 - **OWNING PRD DECISIONS:** N-5 (an **API contract** to `show`/`report`/dashboard/campaign, **NOT** an internal
   union).
-- **ACCEPTANCE ROWS:** N-5 (NORMATIVE-UNMET). Acceptance = **each named operator surface below consumes the
-  evaluator's operator-reason and re-derives none of it** (PRD-c FG-477 AC: "reconcile/show/report operator
-  surfaces consume the same lifecycle explanation"); a validation-contract hold renders **distinctly** from a
-  human gate; no internal step-state union crosses the client boundary.
+- **ACCEPTANCE ROWS:** N-5 (NORMATIVE-UNMET). Acceptance = **each in-scope operator surface below consumes the
+  evaluator's operator-reason API and re-derives NONE of it** (PRD-c FG-477 AC: "reconcile/show/report operator
+  surfaces consume the same lifecycle explanation") — the four surfaces this child audits are **`reconcile`,
+  `forge show`, `forge status`, and `report`**; a validation-contract hold renders **distinctly** from a human
+  gate; no internal step-state union crosses the client boundary. Concrete hollow acceptance-failure = **any of
+  these four still computing its own 'why' string.**
 - **FILES / SCHEMAS:** the **operator-reason API contract** is the single source of the "why can nothing run /
-  why is this run waiting / blocked / terminal" explanation, and **each** of the following operator surfaces
-  consumes it (none re-derives it): **(1) `reconcile`** — the waiting/blocked/terminal reason it surfaces;
-  **(2) `forge show`** — the per-run "why" (`runNext.ts:977-981` is the reason-render seam: a validation-contract
-  hold renders **distinctly** from a human gate); **(3) `forge status` / report surfaces** — the "why nothing
-  runs" explanation; **(4) `dashboard` / `campaign`** clients (N-5's named API consumers). **Do NOT ship the
-  evaluator's internal step-state union to the client** (else every new state is a client-breaking change) — the
-  contract is a stable projection, not the union. `dashboard/` transport is unaudited (OQ-4). No task-row migration.
+  why is this run waiting / blocked / terminal" explanation, and **each of the four in-scope surfaces this child
+  audits** consumes it (none re-derives it): **(1) `reconcile`** — the waiting/blocked/terminal reason it
+  surfaces; **(2) `forge show`** — the per-run "why" (`runNext.ts:977-981` is the reason-render seam: a
+  validation-contract hold renders **distinctly** from a human gate); **(3) `forge status`** — the "why nothing
+  runs" explanation; **(4) the `report` surface** — the same lifecycle explanation in its rendered output.
+  **Do NOT ship the evaluator's internal step-state union to the client** (else every new state is a
+  client-breaking change) — the contract is a stable projection, not the union. No task-row migration.
+- **BOUND OUT OF THIS CHILD (`dashboard` / `campaign-runner` consumption):** N-5 names `dashboard` and `campaign`
+  as API consumers, but they consume the **same** operator-reason over a **serialization/API transport** whose
+  audit is a **separate concern** — the dashboard-integration surface and the campaign executor are each their
+  **own** consumer, out of THIS child's scope. **This child audits neither their transport nor their
+  re-derivation** (naming them without auditing their transport is exactly the hollow this scoping closes). That
+  transport audit is tracked as **OQ-4** (dashboard) and belongs with the owning dashboard-integration /
+  campaign-executor work as a **follow-up**, NOT here. S6 audits exactly the four surfaces above and claims
+  nothing about dashboard/campaign consumption beyond "they read the same contract."
 - **RED PREREQUISITES:** **NORMATIVE-UNMET** — **no fabricated red.** Contract test that a hold renders distinctly
   from a human gate and no internal union leaks to the client.
 - **DEPENDENCIES:** **intra-C:** after **S2** (it consumes the step-state derivation to render the reason).
-  **Cross-cluster:** none; `dashboard/` transport is OQ-4 (unaudited).
-- **CONCURRENCY CONSTRAINTS:** touches the `runNext.ts:977-981` reason-rendering plus `show`/`report`/dashboard
-  consumers — no A/B shared-file conflict.
+  **Cross-cluster:** none; `dashboard`/`campaign` transport consumption is **out of scope** (OQ-4 follow-up, see
+  BOUND OUT above).
+- **CONCURRENCY CONSTRAINTS:** touches the `runNext.ts:977-981` reason-rendering plus the `reconcile`/`forge
+  show`/`forge status`/`report` consumers — no A/B shared-file conflict. (Dashboard/campaign transport is not
+  touched by this child.)
 - **HOLLOW VERSION TO REJECT:** (1) Shipping the **internal step-state union to the client** — every new state
   becomes a client-breaking change (N-5). (2) Rendering a validation-contract hold **identically** to a human
-  gate. (3) **Any named surface still computing its own "why" string** — `reconcile`, `forge show`, `forge
-  status`/`report`, or `dashboard`/`campaign` re-deriving the blocked/waiting/terminal reason locally instead of
-  consuming the operator-reason contract (the surface count is the audit: leave one re-deriving and the contract
-  is hollow — a second lifecycle explanation the evaluator does not own). (4) building it **before S2**.
+  gate. (3) **Any of the four in-scope surfaces still computing its own "why" string** — `reconcile`, `forge
+  show`, `forge status`, or `report` re-deriving the blocked/waiting/terminal reason locally instead of
+  consuming the operator-reason contract (the four-surface count is the audit: leave one re-deriving and the
+  contract is hollow — a second lifecycle explanation the evaluator does not own). (4) **Half-claiming
+  dashboard/campaign** — naming them as consumers here while leaving their transport unaudited (they are BOUND
+  OUT; their transport is OQ-4's follow-up, not this child's claim). (5) building it **before S2**.
 
 **FG-477 family closure (§7.3 — spans all surfaces, no single child claims it).** FG-477 closes only when **all
 five surfaces exist as projections of one derivation**, INV-1's allowlist is **EMPTY** (but for `project-auth.ts:79`
