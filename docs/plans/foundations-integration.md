@@ -61,7 +61,7 @@ creates it.
 
 | Dependency | Direction | Why (cited) | Strength |
 |---|---|---|---|
-| **D1** | **C-FG527 (D-5b) ⇄ B-FG524 — shared `dispatchFanoutStep`** | Both edit `dispatchFanoutStep`'s child filters `runNext.ts:1620-1626` and `:1668-1671` (B §9.1, C §5.2(a), both VERIFIED via plan §7.1) — a **shared-file overlap**. There is **no semantic prerequisite** (VERIFIED, B §9.1): B's child gate is **role-scoped and unconditional** — it calls the `IMPLEMENTER_ROLES`-scoped evaluator (`validation-contract.ts:53`), never the `agentRole.startsWith("red-")` heuristic. B §9.1 verbatim: "FG-524 must not ask that question at all — the evaluator is already role-scoped (`IMPLEMENTER_ROLES` excludes reds) … adds no lineage dependency." So B is **robust to** C-FG527's `red-` prefix removal (C D-5b): `IMPLEMENTER_ROLES` excludes reds regardless of the prefix. **B landing first does NOT re-introduce the prefix or regress C's shrinking allowlist** — B never uses the prefix. The only cost of either landing order is a routine rebase of the shared function. | **Textual only — shared-file merge coordination.** PARALLELIZABLE with a rebase, **not** serialized (VERIFIED: no semantic dep, B §9.1 · INFERENCE: the rebase). |
+| **D1** | **C-FG527 (D-5b) ⇄ B-FG524 — shared `dispatchFanoutStep`** | Both edit `dispatchFanoutStep`'s child filters `runNext.ts:1620-1626` and `:1668-1671` (B §9.1, C §5.2(a), both VERIFIED via plan §7.1) — a **shared-file overlap**. There is **no semantic prerequisite** (VERIFIED, B §9.1): B's child gate is **role-scoped and unconditional** — it calls the `IMPLEMENTER_ROLES`-scoped evaluator (`validation-contract.ts:53`), never the `agentRole.startsWith("red-")` heuristic. B §9.1 verbatim: "FG-524 must not ask that question at all — the evaluator is already role-scoped (`IMPLEMENTER_ROLES` excludes reds) … adds no lineage dependency." So B is **robust to** C-FG527's `red-` prefix removal (C D-5b): `IMPLEMENTER_ROLES` excludes reds regardless of the prefix. **B landing first does NOT re-introduce the prefix or regress C's shrinking allowlist** — B never uses the prefix. But **both edit the same function region** (`:1620-1626`, `:1668-1671`), so whichever lands second requires a **COORDINATED rebase** — a deliberate re-verification of the child-filter semantics after the other's migration — **NOT** a routine/automatic one. | **Shared-file merge coordination.** **VERIFIED: no SEMANTIC dependency** (B §9.1 — the gate is role-scoped via `IMPLEMENTER_ROLES`). **INFERENCE: the conclusion that they are therefore PARALLELIZABLE** — it follows from the no-semantic-dep fact but is this map's reasoning, not a PRD citation. **The shared-`dispatchFanoutStep` overlap is a COORDINATED rebase, not a routine/trivial one** (both change the same lines; see §2.1, §4). |
 | **D2** | **B-INV-1 needs no C surface** | B's finalize-EVENT census keys on `isInvokeLikeRun`/`taskHasPipelineFinalize` (`run-kind.ts`) and `IMPLEMENTER_ROLES` (`validation-contract.ts:53`) — B §2 / INV-1, VERIFIED. Those are **shipped** surfaces, **not** C's unbuilt S2–S6. | **None** — B-INV-1 is independent (see §2.4, §4-Q3). |
 | **D3** | **A-FG356 vs B-FG524** | A's reaper is a **terminal-task-only** pass (A D9) and B's held child is `awaiting_gate` = **non-terminal** (B D3/N-9). A's own predicate already excludes it (D9 terminal filter + D9b clause (c) "not terminal → RETAIN"). B N-9(a) additionally requires the reaper treat `awaiting_gate` as a live child state. | **Weak** — one shared constant to agree on (`awaiting_gate` ∈ non-terminal). PARALLELIZABLE (see §4-Q2). |
 | **D4** | **C-S2 union ⇄ B-FG524 hold** | Coupled, order **deferred to this map by C OQ-6**. The invariant either order must preserve: S2 models a held child as **ACTIVE, never blocked/terminal** (C INV-7 / §5.2(a)). The pre-existing `awaiting_gate` status (B D3: no schema migration — status + payload already exist) **decouples** them: C can model `awaiting_gate → ACTIVE` and B can populate it, in either order, provided both honor that mapping. | **Soft** — decoupled by the pre-existing status (see §4). |
@@ -71,9 +71,12 @@ creates it.
 internal `dispatchFanoutStep` sequence is fixed by C D-7: the `retry.ts` correction (D-1/D-4) first, then D-5a
 (ad-hoc exclusion, three sites) **before** D-5b (`red-` prefix removal). That D-5a → D-5b order is **intra-C**
 and preserved. **B-FG524 is not serialized behind it** — B and C share the function, so whichever lands second
-rebases; because B's gate is role-scoped (B §9.1, VERIFIED), the rebase is textual, not a semantic rewrite, and
-either order is safe. The PRDs state the overlap and defer the ordering to this artifact (C §5.2 opening;
-C OQ-6).
+rebases. **VERIFIED:** there is **no semantic dependency** (B's gate is role-scoped, B §9.1), so neither order
+re-adds the prefix or regresses the allowlist. **But the rebase is COORDINATED, not routine:** both edit the
+same lines (`:1620-1626`, `:1668-1671`), so the second to land must **deliberately re-verify the child-filter
+semantics against the other's migration** — it is not a purely textual/mechanical merge. **That either order is
+therefore "safe" is INFERENCE** (this map's reasoning from the no-semantic-dep fact), not a PRD-verified claim.
+The PRDs state the overlap and defer the ordering to this artifact (C §5.2 opening; C OQ-6).
 
 ---
 
@@ -96,13 +99,16 @@ B's boundary decision (B §9.1): FG-524 must **not** ask that question at all �
 role-scoped (`IMPLEMENTER_ROLES` excludes reds, `validation-contract.ts:53`), so calling it unconditionally at the
 child finalize lets *role* do the exempting, adds no lineage dependency, and is strictly less code.
 
-**Which lands first, and is it a trivial rebase (INFERENCE).** Either order works — whichever cluster lands
-second rebases on the shared function (there is **no** hard requirement that C-FG527 land first; B's gate is
-role-scoped, so it never re-adds the prefix regardless — see the seam below). At `:1620-1626` the rebase is
-close to trivial once child identity is classifier-based (B layers a
-retain-on-held semantic onto C's rewritten predicate). At `:1668-1671` it is **not** a trivial rebase — both
-clusters rewrite the same branch (C swaps the predicate; B replaces the branch body with re-aggregation), so this
-is a **coordinated change**, not a mechanical merge. The child-gate at `:2541` is disjoint and rebases trivially.
+**Which lands first, and how coordinated is the rebase.** **VERIFIED: no SEMANTIC dependency** — there is **no**
+hard requirement that C-FG527 land first; B's gate is role-scoped, so it never re-adds the prefix regardless (see
+the seam below). **INFERENCE (this map, not a PRD citation): the conclusion that either order therefore works is
+reasoning, not verified fact — and the rebase is COORDINATED, not routine.** At `:1620-1626` B layers a
+retain-on-held semantic onto C's classifier-based predicate — the two changes must be **reconciled deliberately**,
+and the child-filter semantics **re-verified** after the other's migration; it is **not** a trivial/mechanical
+merge even though child identity is classifier-based. At `:1668-1671` it is emphatically **not** a trivial rebase
+— both clusters rewrite the **same branch** (C swaps the predicate; B replaces the branch body with
+re-aggregation), so this is a **coordinated change requiring deliberate re-verification**, not a mechanical merge.
+Only the child-gate at `:2541` is disjoint and rebases trivially — that region is **not** the coordinated seam.
 
 ### 2.2 `src/v2/reconcile.ts` — three clusters, mostly disjoint regions
 
@@ -185,6 +191,36 @@ finalize-event enumeration needs C's evaluator surface to exist first. **INFEREN
 
 ## 3. Ownership conflicts — who decides, who conforms
 
+### 3.0 CONSOLIDATED ownership/conflict classification (every cross-cluster touch, one row)
+
+**One row per cross-cluster shared surface**, classified **OWNED-BY-`<cluster>`** (one cluster decides, the
+others conform) or **UNOWNED** (no PRD closes it — it needs an operator decision). This table consolidates the
+§1 dependencies, the §2 file/schema overlaps, and the detailed ownership rows in §3.1 below into a single
+classification. Evidence labels: **VERIFIED (via PRD)** / **INFERENCE** / **OPEN QUESTION**.
+
+| # | Shared surface | Clusters that touch it | Classification — who decides / who conforms (or the operator decision needed) | Basis |
+|---|---|---|---|---|
+| **1** | Fanout **child identity** in `dispatchFanoutStep` (`:1587`/`:1624`/`:1669`) | C (D-5b), B (D3 gate) | **OWNED-BY-C.** C decides identity comes from the evaluator, never a `red-` prefix. **B conforms** — calls the role-scoped evaluator unconditionally, introduces **no** `red-` check. | VERIFIED — C D-5b; B §9.1 |
+| **2** | **Lineage classification** vs the **trust gate** that consumes it | C (lineage), B (gate) | **OWNED-BY-C** (lineage). **B conforms** — the gate consumes lineage/role; it does not re-derive lineage. | VERIFIED — C D-2; B §2 |
+| **3** | The **held-child state** `awaiting_gate` | B (owns the hold), C (models it), A (must not reap it) | **OWNED-BY-B** (the *hold*, FG-524 D3). **C conforms** — models it ACTIVE in S2 (INV-7); **A conforms** — treats it as live/non-terminal, never reaps it. | VERIFIED — B D3/N-9; C INV-7; A D9 |
+| **4** | **Worktree ownership** in `reconcile` | A (row-based predicate), C (lineage sweeps) | **OWNED-BY-A** (row-based, D9a). **C conforms** — worktree ownership answered from the ROW, never lineage. *Convergence, not conflict* — both agree by construction. | VERIFIED — A D9a; C §5.2(b) |
+| **5** | `verdictBlocksGate` gate-blocking predicate (`gate.ts:59-65`) | C (owns placement), B (edits in place) | **OWNED-BY-C** (placement — stays in `gate.ts` until C relocates it). **B conforms** — edits it **in place**; the two clusters must **NOT fork it** (a fork re-opens the F16 divergence FG-523 closed). | VERIFIED — C §5.2(c) |
+| **6** | `merge_conflict` failure-kind **membership** | A (retains on it), C (holds campaign on it) | **OWNED-BY-A** (the worktree ticket owns any broadening — "should be in the worktree ticket, not discovered in a campaign"). Shared **read**; **neither may broaden membership unilaterally** — broadening it broadens campaign holds (C's SHARED-blocker). | VERIFIED — A §4 ("adds no kind"); C §5.2(b) |
+| **7** | **Run completion writes** (no-resurrection) | A, B, C (all must not cross) | **OWNED-BY-store-layer** (`store/runs.ts:147`, `:174-179`). **All three clusters conform** — none may add a **third** completion-writing path. | VERIFIED — C INV-2/S3 |
+| **8** | **Shared `dispatchFanoutStep` function region** (`:1620-1626`, `:1668-1671`) — B-FG524 ⇄ C-FG527 | B (D3), C (D-5b) | **CO-OWNED / COORDINATED, no single owner of the merge.** No *semantic* dependency (VERIFIED — B's gate is role-scoped, B §9.1); the conclusion that they **parallelize** is **INFERENCE**; both edit the same lines, so the second to land requires a **COORDINATED** rebase — re-verify child-filter semantics after the other's migration — **not** a routine/automatic one (see §4, D1). | VERIFIED (no semantic dep) + INFERENCE (parallelizable / rebase) |
+| **9** | `reconcile.ts` tail (`reconcileRun`) — reaper vs `finalizeOrphanedPrimaries` vs crash-recovery gate | A (D9), C (FG-477/527), B (D4) | **PARTITIONED — no single owner; disjoint line regions, COEXIST.** Each owns its own region; three semantic convergences must be preserved (A keys on ROW / C on lineage; A reads C's finalized row idempotently; B's decline keeps contraband non-terminal so A leaves it). | INFERENCE (reconciling the three PRDs) — §2.2 |
+| **10** | The constant `awaiting_gate ∈ {non-terminal, ACTIVE}` | A, B, C | **CO-OWNED — a shared constant all three must agree on** before any of them changes a status set. If any treats it as terminal → premature reap (A) or permanent wedge (C). | VERIFIED — A D9; B D3/N-9; C INV-7 |
+| **11** | **FG-527 ticket AC-2** — "a failed shipping-reviewer (non-`red-`-prefixed red) on a fanout step is retryable as `red_review`" | C (corrects it), B (adopts the fanout adopting the minted primary) | **OWNED-BY-C — AC-2 AS WRITTEN IS REJECTED.** PRD-c owns the correction: migrating retry to **allow** a red retry mints a **detached primary the fanout adopts** as parent of a fresh wave (probe p2); **PRD-c D-4 REFUSES it** — classify with the evaluator and **KEEP REFUSING**, refuse under `--force` too. FG-527's AC #2 is **amended to D-1**. **A PRD that quietly inherits AC-2 ships this bug.** | VERIFIED — C §2 / D-1 / D-4 (`retry.ts:427-466`; p2) |
+| **12** | `retry.ts:263` **fail-open mount-mode fallback** (a non-prefixed red gets a **writable** mount) | C (flags, does not fix), A (security boundary D2/D10) | **UNOWNED.** **Operator must decide:** does `retry.ts:263`'s mount-mode fallback fall inside **Cluster A's D2/D10 security boundary**, or is it a **separate finding needing its own owner**? Confirm A's D10b keys the pointer-freeze on **mount-mode** (rw ⇒ freeze), not on "is this a blue agent," so the mitigation actually covers a fail-open red. **The fail-open grant itself (a red becoming rw at all) is owned by neither A nor C.** | OPEN QUESTION — carried from §3.2 OQ-INT-1 (C D-6/OQ-2 VERIFIED; A-boundary fit INFERENCE) |
+| **13** | **Held-child worktree reclaim at RUN-END** (run ends with the child still `awaiting_gate`) | B (N-9(b) requires reclaim), A (reaper is terminal-only) | **UNOWNED.** A's FG-356 reaper is **terminal-only**; a still-held child is **non-terminal**, so A's reaper **never reclaims it**. Neither PRD nails the run-end arm. **Operator/decomposition must decide:** either **(i)** run-end/abandon **terminalizes** held children (then A's reaper collects them next pass), or **(ii)** **Cluster B owns the run-end reclaim path** directly. This is the one held-child seam A's design does not close. | OPEN QUESTION — carried from §3.2 OQ-INT-2 (B N-9(b) VERIFIED; the gap INFERENCE) |
+
+**Reading the table:** rows 1–7 are **settled** (a cluster owns, the others conform — the PRDs decide). Rows
+8–10 are **coordinated but ownerless-by-design** (a shared region/constant no single cluster owns; the map
+sequences them — §2, §4). Rows 11–13 are the **corrections and the two genuinely UNOWNED seams**: AC-2 is
+rejected-and-owned (C corrects it), while **OQ-INT-1 and OQ-INT-2 need an operator decision no PRD makes.**
+
+### 3.1 Detailed ownership rows (the settled surfaces above, with full basis)
+
 | Shared semantics | OWNS | CONFORMS | Basis (cited) |
 |---|---|---|---|
 | Fanout **child identity** in `dispatchFanoutStep` | **C** (D-5b: identity from the evaluator, never a role-name prefix) | **B** — calls the role-scoped evaluator unconditionally; introduces **no** `red-` check (B §9.1) | C D-5b; B §9.1 |
@@ -195,7 +231,10 @@ finalize-event enumeration needs C's evaluator surface to exist first. **INFEREN
 | `merge_conflict` failure-kind membership | **shared read**; neither may broaden it unilaterally | A retains on it (D9b), C holds the campaign on it (S5) | A §4 ("adds no kind"); C §5.2(b) |
 | **Run completion writes** (no-resurrection) | **store layer** owns the guarantee (`store/runs.ts:147`, `:174-179`) | all clusters must **not add a third completion-writing path** (C INV-2) | C INV-2/S3 — a boundary A and B must not cross |
 
-### Genuine unresolved ownership → OPEN QUESTIONS for the operator
+### 3.2 Genuine unresolved ownership → OPEN QUESTIONS for the operator
+
+**These two are the UNOWNED rows (12, 13) of the consolidated table above.** They are the only cross-cluster
+seams no PRD closes; every other surface in §3.0 is owned or coordinated.
 
 - **OQ-INT-1 — `retry.ts:263` fail-open mount mode has no owner, and it collides with A's security boundary.**
   C D-6 / OQ-2 (VERIFIED) flags that `retry.ts:263`'s prefix fallback fails **OPEN**: a **non-prefixed red gets a
@@ -222,12 +261,15 @@ finalize-event enumeration needs C's evaluator surface to exist first. **INFEREN
 
 The task's three questions, answered concretely:
 
-- **Q1 — Does B-FG524 require C-FG527's classifier migration first?** **NO (parallelizable with a rebase).** They
-  share `dispatchFanoutStep` lines (`:1620-1626`, `:1668-1671`), so whichever lands second rebases on the shared
-  function — a **textual** coordination point. But there is **no semantic prerequisite**: B's gate is role-scoped
-  and unconditional (`IMPLEMENTER_ROLES`, B §9.1), so it neither re-adds the `red-` prefix C is deleting nor
-  regresses C's shrinking allowlist, whichever order they land. **COORDINATE on the shared function (rebase); do
-  not serialize.** (The intra-C order D-5a → D-5b still holds — that is C-internal.)
+- **Q1 — Does B-FG524 require C-FG527's classifier migration first?** **No SEMANTIC prerequisite (VERIFIED); the
+  parallelizable conclusion is INFERENCE.** They share `dispatchFanoutStep` lines (`:1620-1626`, `:1668-1671`), so
+  whichever lands second must rebase on the shared function. **VERIFIED — no semantic prerequisite:** B's gate is
+  role-scoped and unconditional (`IMPLEMENTER_ROLES`, B §9.1), so it neither re-adds the `red-` prefix C is
+  deleting nor regresses C's shrinking allowlist, whichever order they land. **INFERENCE (this map): that they are
+  therefore parallelizable.** But because both edit the same lines, the rebase is a **COORDINATED** one — after
+  either lands, **re-verify the child-filter semantics against the other's migration** — **NOT** a
+  routine/automatic rebase. **COORDINATE deliberately on the shared function; do not serialize.** (The intra-C
+  order D-5a → D-5b still holds — that is C-internal.)
 - **Q2 — Does A-FG356's reaper require B's N-9 held-child rule first?** **NO (parallelizable).** A's reaper is
   terminal-only and a held child is non-terminal, so A's own predicate (D9 + D9b clause (c)) already excludes it.
   The only shared obligation is the constant `awaiting_gate ∈ non-terminal` — both must honor it (A must not add
@@ -249,10 +291,12 @@ INDEPENDENT — can start in parallel (no cross-cluster dependency):
 INTRA-C SERIAL CHAIN on dispatchFanoutStep (C-internal only):
   C-FG527 D-5a (ad-hoc exclusion, 3 sites)  →  C-FG527 D-5b (red- prefix → classifier, + worktreePath guard)
 
-SHARED-FUNCTION REBASE on dispatchFanoutStep (textual coordination, NOT a semantic serialize):
+SHARED-FUNCTION COORDINATED REBASE on dispatchFanoutStep (NOT a semantic serialize, NOT a routine rebase):
   C-FG527 (dispatchFanoutStep)   ‖   B-FG524 (child gate + parent re-aggregation)
-      whoever lands SECOND rebases the shared function; B's gate is role-scoped
-      (IMPLEMENTER_ROLES), so either order is free of semantic dependency        [Q1: parallel + rebase]
+      no SEMANTIC dependency (VERIFIED, B §9.1: gate is role-scoped via IMPLEMENTER_ROLES);
+      the PARALLELIZABLE conclusion is INFERENCE. Both edit the same lines (:1620-1626, :1668-1671),
+      so whoever lands SECOND must do a COORDINATED rebase — re-verify child-filter semantics
+      after the other's migration — not an automatic one                          [Q1: no semantic dep VERIFIED; parallel = INFERENCE]
 
 COUPLED, order-flexible (decoupled by pre-existing awaiting_gate status):
   C-S2 (models awaiting_gate → ACTIVE, INV-7)  ⇄  B-FG524 hold      [C OQ-6; either order if both honor ACTIVE]
@@ -265,9 +309,11 @@ CROSS-CUTTING PREREQUISITE (must be fixed before A-FG356, B-FG524, or C-S2 chang
 ```
 
 **Recommended concrete order:** land **B-INV-1**, **C-retry**, **A-FG559** first (fully independent).
-**C-FG527 (D-5a → D-5b)** and **B-FG524** both edit `dispatchFanoutStep` and can land in **either order**, with
-whichever lands second doing a routine rebase of the shared function — B's gate is role-scoped, so there is no
-semantic prerequisite (D1 / Q1). **C-S2** (modelling `awaiting_gate → ACTIVE`) is coupled to B-FG524's held
+**C-FG527 (D-5a → D-5b)** and **B-FG524** both edit `dispatchFanoutStep`. There is **no semantic prerequisite**
+between them (VERIFIED, B §9.1: B's gate is role-scoped), and the conclusion that they can therefore land in
+**either order** is **INFERENCE** (D1 / Q1). Whichever lands second must do a **COORDINATED rebase — re-verifying
+the child-filter semantics against the other's migration — NOT a routine one**, because both edit the same
+function region (`:1620-1626`, `:1668-1671`). **C-S2** (modelling `awaiting_gate → ACTIVE`) is coupled to B-FG524's held
 state but decoupled in practice by the pre-existing status, so it too may land in any order provided all honor
 `awaiting_gate = ACTIVE`. **A-FG356** and **B-FG566** can run alongside the whole chain. This map does **not** decompose these into child
 stories — that is gated on each PRD passing review (A §10, B §6, C §7.3).
