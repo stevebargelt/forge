@@ -1,0 +1,64 @@
+{
+  "taskId": "task-red-wide-2082ce",
+  "runId": "run-p7-diag-claude-0746ee",
+  "files": {
+    "prompt": "CLAUDE.md",
+    "package": "package.md",
+    "result": "result.json",
+    "stdout": "container.stdout.log",
+    "stderr": "container.stderr.log"
+  },
+  "container": {
+    "name": "forge-task-red-wide-2082ce",
+    "idleTimeoutMs": 600000
+  },
+  "auth": {
+    "profileRequested": false,
+    "stateMounted": false
+  },
+  "runtime": {
+    "name": "claude-oauth",
+    "kind": "claude-code",
+    "logFormat": "claude-stream-json",
+    "promptStrategy": "claude-stdin-package",
+    "authStrategy": "oauth-volume"
+  },
+  "model": {
+    "alias": "review",
+    "model": "claude-opus-4-8",
+    "profile": "claude-subscription",
+    "provider": "anthropic",
+    "auth": "subscription",
+    "costTier": "standard",
+    "resolvedBy": "cli.--profile",
+    "runtime": "claude-oauth"
+  },
+  "controlPlane": {
+    "workflow": {
+      "name": "invoke",
+      "source": "synthetic"
+    },
+    "runtime": {
+      "name": "claude-oauth",
+      "source": "host",
+      "path": "/Users/stevebargelt/.forge/runtimes/claude-oauth.yml"
+    },
+    "modelPolicy": {
+      "source": "host",
+      "path": "/Users/stevebargelt/.forge/model-policy.yml"
+    },
+    "docsSurfaces": {
+      "source": "built-in"
+    },
+    "constraints": {
+      "dir": "/Users/stevebargelt/.forge/constraints",
+      "suggestCount": 0,
+      "forceCount": 2
+    },
+    "mountMode": "ro",
+    "projectDir": "/Users/stevebargelt/code/forge-plan-a",
+    "invocationCwd": "/Users/stevebargelt/code/forge-foundation-planning",
+    "resolvedFromSubdir": false,
+    "explicitSubproject": false
+  }
+}

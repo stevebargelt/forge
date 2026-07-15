@@ -1,0 +1,21 @@
+P7 ARM C — Pi — NOT DISPATCHABLE AS A RED ON THIS HOST (no container, no manifest, no execution).
+
+Dispatch: forge invoke red-wide --profile pi-groq --read-only --project forge-plan-a
+Run/task: run-p7-diag-pi-51ca9a / task-red-wide-5bf8c0   (status=failed)
+
+Verbatim forge refusal (from `forge invoke ... --json`, field "error"):
+  "role 'red-wide' requires a tool-capable model (it produces structured result.json output) but the
+   resolved model is not tool-capable (profile 'pi-groq', model 'openai/gpt-oss-120b', alias 'review').
+   Fix: set tool_capable: true on the capability entry in your model-policy.yml, or switch to a profile
+   using a tool-capable model (anthropic or openai)."
+
+Root cause: the ONLY installed Pi profile is `pi-groq` (~/.forge/model-policy.yml) -> runtime pi-apikey,
+model openai/gpt-oss-120b (Groq), which is not tool-capable. Reds require a tool-capable model, so forge
+FAIL-CLOSES the dispatch BEFORE spawning a container. No manifest.json is written (spawn never occurs);
+result.json is empty. Double-confirmed: identical refusal via a detached tmux launch and a synchronous run,
+both with full PATH.
+
+Per campaign scope the model policy / installed runtimes were NOT modified to force tool-capability. Therefore
+there is NO genuine Pi red execution, and the campaign makes NO Pi runtime-capability claim. The reds-capability
+evidence rests on the two genuinely-distinct runtimes that DID execute (codex-subscription, claude-oauth) plus
+the image-level presence of bash/git, and the write-refusal is an OS-level `:ro`-mount property below the runtime.

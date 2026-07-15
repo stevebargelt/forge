@@ -21,6 +21,10 @@ executable orchestrated the task. The Codex arm was genuine; the "claude" and "p
 SECTION 1 — GENUINE REPLACEMENT EVIDENCE (this is the authoritative record)
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 
+RAW EVIDENCE FOR REVIEWER INSPECTION: the durable manifests + stdout-log signatures for every arm below are
+materialized in `./p7-manifests/` (see its README) so a containerized reviewer can verify runtime identity from
+the raw JSON directly, not from this summary. Any expected/actual mismatch is an automatic finding.
+
 METHOD: dispatch is forced with `forge invoke red-wide --profile <profile> --read-only` (project forge-plan-a
 @ 3b76153). `--profile` (AWN-7) is highest profile-selection precedence and OVERRIDES `overrides.agents.red-wide`
 (confirmed: every arm's manifest shows `model.resolvedBy = cli.--profile`). Runtime identity was VERIFIED from

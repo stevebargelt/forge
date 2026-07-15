@@ -1,0 +1,64 @@
+{
+  "taskId": "task-red-wide-06d844",
+  "runId": "run-runtime-capability-probe-pi-oauth-3dd9b5",
+  "files": {
+    "prompt": "CLAUDE.md",
+    "package": "package.md",
+    "result": "result.json",
+    "stdout": "container.stdout.log",
+    "stderr": "container.stderr.log"
+  },
+  "container": {
+    "name": "forge-task-red-wide-06d844",
+    "idleTimeoutMs": 600000
+  },
+  "auth": {
+    "profileRequested": false,
+    "stateMounted": false
+  },
+  "runtime": {
+    "name": "codex-subscription",
+    "kind": "codex",
+    "logFormat": "codex-jsonl",
+    "promptStrategy": "stdin-prepend",
+    "authStrategy": "codex-auth"
+  },
+  "model": {
+    "alias": "review",
+    "model": "gpt-5.6-terra",
+    "profile": "codex-subscription",
+    "provider": "openai",
+    "auth": "subscription",
+    "costTier": "standard",
+    "resolvedBy": "overrides.agents.red-wide",
+    "runtime": "codex-subscription"
+  },
+  "controlPlane": {
+    "workflow": {
+      "name": "invoke",
+      "source": "synthetic"
+    },
+    "runtime": {
+      "name": "codex-subscription",
+      "source": "host",
+      "path": "/Users/stevebargelt/.forge/runtimes/codex-subscription.yml"
+    },
+    "modelPolicy": {
+      "source": "host",
+      "path": "/Users/stevebargelt/.forge/model-policy.yml"
+    },
+    "docsSurfaces": {
+      "source": "built-in"
+    },
+    "constraints": {
+      "dir": "/Users/stevebargelt/.forge/constraints",
+      "suggestCount": 0,
+      "forceCount": 2
+    },
+    "mountMode": "ro",
+    "projectDir": "/Users/stevebargelt/code/forge-plan-a",
+    "invocationCwd": "/Users/stevebargelt/code/forge-foundation-planning",
+    "resolvedFromSubdir": false,
+    "explicitSubproject": false
+  }
+}
