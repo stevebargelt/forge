@@ -13,18 +13,16 @@ it.
 |---|---|---|
 | **A** — agent workspace isolation | `docs/prds/agent-workspace-isolation.md` | **`a0064d5`** |
 | **B** — review execution trust | `docs/prds/review-execution-trust.md` | **`20c8f59`** |
-| **C** — workflow lifecycle semantics | `docs/prds/workflow-lifecycle-semantics.md` | **`c55da4a`** |
+| **C** — workflow lifecycle semantics | `docs/prds/workflow-lifecycle-semantics.md` | **`7e32080`** |
 | campaign baseline | (origin/main at campaign start) | **`185afc3`** |
 
 **SHA semantics (uniform across all three clusters).** Each cluster SHA above is the **review-clean lane HEAD**,
-not necessarily the commit that finalized the PRD *file*. Only **A** (`a0064d5`) is simultaneously the
-PRD-finalizing commit **and** the lane HEAD. **B** and **C** are the same case — each has a later **plan-only**
-commit as its lane HEAD. For **B**, the PRD file `docs/prds/review-execution-trust.md` was finalized at
-**`68ee713`**; `20c8f59` is a later plan-only citation fix on the same lane branch (it edits
-`docs/plans/foundations-lane-b-review-trust.md`, not the PRD). For **C**, the PRD file
-`docs/prds/workflow-lifecycle-semantics.md` was finalized at **`31a690d`**; `c55da4a` is a later plan-only
-census fix on the same lane branch (it edits `docs/plans/foundations-lane-c-lifecycle-semantics.md`, not the
-PRD) — cited here as lane HEADs, so neither `20c8f59` nor `c55da4a` must be read as a PRD edit.
+not necessarily the commit that finalized the PRD *file*. **A** (`a0064d5`) **and C** (`7e32080`) are each
+simultaneously the PRD-finalizing commit **and** the lane HEAD — the same commit edits the PRD file *and* is the
+lane HEAD. **Only B** has a later **plan-only** commit as its lane HEAD: the PRD file
+`docs/prds/review-execution-trust.md` was finalized at **`68ee713`**, and `20c8f59` is a later plan-only citation
+fix on the same lane branch (it edits `docs/plans/foundations-lane-b-review-trust.md`, not the PRD) — cited here
+as the lane HEAD, so `20c8f59` must not be read as a PRD edit.
 
 Cross-references to ordering/coupling cite `docs/plans/foundations-integration.md` (the integration MAP).
 
@@ -362,7 +360,7 @@ Five bounded children. INV-1's guard is the **highest-leverage, land-first** ite
 
 ---
 
-## Cluster C — workflow lifecycle semantics (lane HEAD `c55da4a`; PRD file finalized at `31a690d`)
+## Cluster C — workflow lifecycle semantics (PRD `7e32080`)
 
 Two ticket families. **FG-527** splits into **three risk classes** (per binding D-7); **FG-477** decomposes as
 its **five evaluator surfaces S1–S6** emerge from the single derivation, with S2 gating S3/S5/S6.
