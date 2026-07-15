@@ -422,7 +422,9 @@ NEWLY-OWNED SEAM CHILDREN (assigned by §3.0 rows 12-17 / §3.2 — the DECISION
   C-FG477-S7  dashboard + campaign operator-reason transport audit   OWNED-BY-C   [OQ-INT-3]
       depends on: C-FG477-S6 (the operator-reason API/contract exists first)
   (OQ-INT-1 → A, folded into A-FG559/D10b audit; OQ-INT-4/5/6 → B decisions, no new child —
-   OQ-INT-4 standalone, OQ-INT-5 & OQ-INT-6 depend on A-FG559's :ro mount / D10a wrapper)
+   OQ-INT-4 and OQ-INT-5 standalone (OQ-INT-5's reds already have git-read independent of FG-559 — accept-vs-
+   enforce is decidable now; if B chooses ENFORCE, the mechanism is a NEW runtime/OS-level control, not A-FG559);
+   OQ-INT-6 depends on A-FG559's D10a wrapper (its mitigation extends it))
 
 CROSS-CUTTING PREREQUISITE (must be fixed before A-FG356, B-FG524, or C-S2 changes any status set):
   Agree awaiting_gate ∈ {non-terminal, ACTIVE}
