@@ -12,16 +12,19 @@ it.
 | Cluster | PRD file | Review-clean lane HEAD |
 |---|---|---|
 | **A** — agent workspace isolation | `docs/prds/agent-workspace-isolation.md` | **`a0064d5`** |
-| **B** — review execution trust | `docs/prds/review-execution-trust.md` | **`68ee713`** |
+| **B** — review execution trust | `docs/prds/review-execution-trust.md` | **`20c8f59`** |
 | **C** — workflow lifecycle semantics | `docs/prds/workflow-lifecycle-semantics.md` | **`c55da4a`** |
 | campaign baseline | (origin/main at campaign start) | **`185afc3`** |
 
 **SHA semantics (uniform across all three clusters).** Each cluster SHA above is the **review-clean lane HEAD**,
-not necessarily the commit that finalized the PRD *file*. A (`a0064d5`) and B (`68ee713`) are each simultaneously
-the PRD-finalizing commit **and** the lane HEAD. For **C**, the PRD file
-`docs/prds/workflow-lifecycle-semantics.md` was finalized at **`31a690d`**; `c55da4a` is a later **plan-only**
+not necessarily the commit that finalized the PRD *file*. Only **A** (`a0064d5`) is simultaneously the
+PRD-finalizing commit **and** the lane HEAD. **B** and **C** are the same case — each has a later **plan-only**
+commit as its lane HEAD. For **B**, the PRD file `docs/prds/review-execution-trust.md` was finalized at
+**`68ee713`**; `20c8f59` is a later plan-only citation fix on the same lane branch (it edits
+`docs/plans/foundations-lane-b-review-trust.md`, not the PRD). For **C**, the PRD file
+`docs/prds/workflow-lifecycle-semantics.md` was finalized at **`31a690d`**; `c55da4a` is a later plan-only
 census fix on the same lane branch (it edits `docs/plans/foundations-lane-c-lifecycle-semantics.md`, not the
-PRD) — cited here as the lane HEAD, so `c55da4a` must not be read as a PRD edit.
+PRD) — cited here as lane HEADs, so neither `20c8f59` nor `c55da4a` must be read as a PRD edit.
 
 Cross-references to ordering/coupling cite `docs/plans/foundations-integration.md` (the integration MAP).
 
@@ -177,7 +180,7 @@ the campaign; FG-356 (reaper) carries the one **hard red gate** in the cluster.
 
 ---
 
-## Cluster B — review execution trust (PRD `68ee713`)
+## Cluster B — review execution trust (lane HEAD `20c8f59`; PRD file finalized at `68ee713`)
 
 Five bounded children. INV-1's guard is the **highest-leverage, land-first** item (D5). FG-524 is
 **one indivisible child** (gate + re-aggregation — gating alone is a regression). FG-525 carries the one
@@ -359,7 +362,7 @@ Five bounded children. INV-1's guard is the **highest-leverage, land-first** ite
 
 ---
 
-## Cluster C — workflow lifecycle semantics (PRD `c55da4a`)
+## Cluster C — workflow lifecycle semantics (lane HEAD `c55da4a`; PRD file finalized at `31a690d`)
 
 Two ticket families. **FG-527** splits into **three risk classes** (per binding D-7); **FG-477** decomposes as
 its **five evaluator surfaces S1–S6** emerge from the single derivation, with S2 gating S3/S5/S6.
@@ -546,7 +549,7 @@ them deliberately). **No surface migrates the `tasks` schema** — persisting th
   tiebreak). A-6 (factual defect feeding this surface).
 - **ACCEPTANCE ROWS:** N-4 (NORMATIVE-UNMET); A-6 (factual defect, **INFERENCE-only, red REQUIRED**).
 - **FILES / SCHEMAS:** the aggregation exists and is correct (`executor.ts:496-503`; `isSharedBlocker →
-  "hold_campaign"` `policy.ts:139-141`) — **what is wrong is the ROW SET** (`executor.ts:494`/`:2183`: raw
+  "hold_campaign"` `policy.ts:144`) — **what is wrong is the ROW SET** (`executor.ts:494`/`:2183`: raw
   `parentId === undefined && status === "failed"` admits a failed **ad-hoc invoke** into a workflow's blocker
   set). Fix the local tiebreak's **array-order nondeterminism** (`executor.ts:497`). `BlockerKind` vocabulary
   **stays in `types/`** (`:291-303`); `policy.ts` stays a translation layer (§5.1). No task-row migration.
@@ -570,11 +573,18 @@ them deliberately). **No surface migrates the `tasks` schema** — persisting th
 
 - **OWNING PRD DECISIONS:** N-5 (an **API contract** to `show`/`report`/dashboard/campaign, **NOT** an internal
   union).
-- **ACCEPTANCE ROWS:** N-5 (NORMATIVE-UNMET). Acceptance = a validation-contract hold renders **distinctly** from
-  a human gate, with no internal union crossing the client boundary.
-- **FILES / SCHEMAS:** renders a validation-contract hold **distinctly** from a human gate (`runNext.ts:977-981`).
-  **Do NOT ship the evaluator's internal step-state union to the client** (else every new state is a
-  client-breaking change). `dashboard/` transport is unaudited (OQ-4). No task-row migration.
+- **ACCEPTANCE ROWS:** N-5 (NORMATIVE-UNMET). Acceptance = **each named operator surface below consumes the
+  evaluator's operator-reason and re-derives none of it** (PRD-c FG-477 AC: "reconcile/show/report operator
+  surfaces consume the same lifecycle explanation"); a validation-contract hold renders **distinctly** from a
+  human gate; no internal step-state union crosses the client boundary.
+- **FILES / SCHEMAS:** the **operator-reason API contract** is the single source of the "why can nothing run /
+  why is this run waiting / blocked / terminal" explanation, and **each** of the following operator surfaces
+  consumes it (none re-derives it): **(1) `reconcile`** — the waiting/blocked/terminal reason it surfaces;
+  **(2) `forge show`** — the per-run "why" (`runNext.ts:977-981` is the reason-render seam: a validation-contract
+  hold renders **distinctly** from a human gate); **(3) `forge status` / report surfaces** — the "why nothing
+  runs" explanation; **(4) `dashboard` / `campaign`** clients (N-5's named API consumers). **Do NOT ship the
+  evaluator's internal step-state union to the client** (else every new state is a client-breaking change) — the
+  contract is a stable projection, not the union. `dashboard/` transport is unaudited (OQ-4). No task-row migration.
 - **RED PREREQUISITES:** **NORMATIVE-UNMET** — **no fabricated red.** Contract test that a hold renders distinctly
   from a human gate and no internal union leaks to the client.
 - **DEPENDENCIES:** **intra-C:** after **S2** (it consumes the step-state derivation to render the reason).
@@ -583,7 +593,10 @@ them deliberately). **No surface migrates the `tasks` schema** — persisting th
   consumers — no A/B shared-file conflict.
 - **HOLLOW VERSION TO REJECT:** (1) Shipping the **internal step-state union to the client** — every new state
   becomes a client-breaking change (N-5). (2) Rendering a validation-contract hold **identically** to a human
-  gate. (3) building it **before S2**.
+  gate. (3) **Any named surface still computing its own "why" string** — `reconcile`, `forge show`, `forge
+  status`/`report`, or `dashboard`/`campaign` re-deriving the blocked/waiting/terminal reason locally instead of
+  consuming the operator-reason contract (the surface count is the audit: leave one re-deriving and the contract
+  is hollow — a second lifecycle explanation the evaluator does not own). (4) building it **before S2**.
 
 **FG-477 family closure (§7.3 — spans all surfaces, no single child claims it).** FG-477 closes only when **all
 five surfaces exist as projections of one derivation**, INV-1's allowlist is **EMPTY** (but for `project-auth.ts:79`
