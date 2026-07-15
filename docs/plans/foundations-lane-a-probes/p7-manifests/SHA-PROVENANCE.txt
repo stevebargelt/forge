@@ -3,24 +3,23 @@ Reviewer: this file exists because the PRD-finalizing SHA is a forge-plan-a comm
 container reviewer cannot 'git show'. Cross-check the CLAIMS in decomposition/delta-audit against this.
 
 ### 1. HEAD of forge-plan-a (== claimed PRD-a finalizing SHA == lane HEAD):
-13d3142 docs(prd+probe): lane A P7 — genuine two-runtime red-capability evidence; withdraw fake three-runtime claim
+f1bd97d docs(prd): lane A header + discovery-plan — baseline 185afc3, detach epic from FG-561 (post-FG-561 program)
 
-### 2. Does 13d3142 (HEAD) edit the PRD file?  git show --stat 13d3142:
-13d3142 docs(prd+probe): lane A P7 — genuine two-runtime red-capability evidence; withdraw fake three-runtime claim
- .../p7-red-runtime-capability.out                  | 158 ++++++++++++++-------
- .../foundations-lane-a-workspace-isolation.md      |  17 ++-
- docs/prds/agent-workspace-isolation.md             |  51 ++++---
- 3 files changed, 150 insertions(+), 76 deletions(-)
+### 2. Does HEAD edit the PRD file?  git show --stat HEAD (also edits the discovery plan — one commit, coincides holds):
+f1bd97d docs(prd): lane A header + discovery-plan — baseline 185afc3, detach epic from FG-561 (post-FG-561 program)
+ docs/plans/foundations-lane-a-workspace-isolation.md | 2 +-
+ docs/prds/agent-workspace-isolation.md               | 5 ++++-
+ 2 files changed, 5 insertions(+), 2 deletions(-)
 
 ### 3. Commit history of the PRD file (docs/prds/agent-workspace-isolation.md):
-    Confirms 13d3142 is the LATEST PRD-editing commit; c1a77e3 was the prior one;
-    and 3b76153 does NOT appear (it was plan-only, never edited the PRD):
+    PRD-EDITING chain: c1a77e3 -> 13d3142 (P7 evidence) -> f1bd97d (identity), f1bd97d latest.
+    3b76153 does NOT appear here (plan-only, never edited the PRD):
+f1bd97d docs(prd): lane A header + discovery-plan — baseline 185afc3, detach epic from FG-561 (post-FG-561 program)
 13d3142 docs(prd+probe): lane A P7 — genuine two-runtime red-capability evidence; withdraw fake three-runtime claim
 c1a77e3 docs(prd): lane A §4.2/OQ-4 — reds ALREADY have bash+git-read (P7 executed); accept-vs-enforce
 a0064d5 docs(prd): lane A — D10a guard is fail-closed default-deny syntactic (buildable)
 de5917e docs(prd): lane A — D10a completeness ENFORCED by wrapper+guard, not a hand-enumerated list
 8c8e5c1 docs(prd): lane A narrow-review fixes — reaper {complete,failed} only; D10a covers changedWorktreeFiles + fsmonitor
-863dfe4 docs: lane A — FG-530 leak relabeled INFERENCE/predicted (matches AC-5 gate); P5 probe cites live autoCommitSource not dead merge-back
 
 ### 4. What 3b76153 actually changed (plan-only — NOT the PRD):  git show --stat 3b76153:
 3b76153 docs(plan): lane-A discovery plan — mark 'reds have no Bash/never invoke git' SUPERSEDED by P7 executed evidence

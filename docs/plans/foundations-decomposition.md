@@ -1,4 +1,4 @@
-# Proposed decomposition — FG-561 foundations campaign
+# Proposed decomposition — post-FG-561 foundations program
 
 **This is a PROPOSAL, not an allocation.** It decomposes each cluster's PRD into bounded implementation
 children so the **primary orchestrator** can act on it. **It allocates NO tickets, files no backlog, decomposes
@@ -11,19 +11,23 @@ it.
 
 | Cluster | PRD file | Review-clean lane HEAD |
 |---|---|---|
-| **A** — agent workspace isolation | `docs/prds/agent-workspace-isolation.md` | **`13d3142`** |
-| **B** — review execution trust | `docs/prds/review-execution-trust.md` | **`bf906b4`** |
-| **C** — workflow lifecycle semantics | `docs/prds/workflow-lifecycle-semantics.md` | **`b5d7417`** |
-| campaign baseline | (origin/main at campaign start) | **`185afc3`** |
+| **A** — agent workspace isolation | `docs/prds/agent-workspace-isolation.md` | **`f1bd97d`** |
+| **B** — review execution trust | `docs/prds/review-execution-trust.md` | **`d2837fd`** |
+| **C** — workflow lifecycle semantics | `docs/prds/workflow-lifecycle-semantics.md` | **`6371787`** |
+| program baseline | (origin/main at program start) | **`185afc3`** |
 
-**SHA semantics (uniform across all three clusters).** Each cluster SHA is the **review-clean lane HEAD** and is
-simultaneously that PRD's finalizing commit (all three coincide — the same commit edits the PRD file and is the
-lane HEAD; no plan-only-HEAD cluster remains): **A** (`13d3142`), **B** (`bf906b4`), **and C** (`b5d7417`). **A**
-(`13d3142`) reclassifies §4.2/OQ-4 reds-capability (probe P7 falsified the "no Bash / do not invoke git" claim) and
-carries the corrected P7 probe. *(A was re-finalized at `13d3142`: the prior `3b76153` was a plan-only commit that
-did NOT edit the PRD — the PRD had last been edited at `c1a77e3` — so `3b76153` never satisfied "coincides." The
-re-finalization commit `13d3142` edits the PRD file (genuine two-runtime P7 evidence) AND is the lane HEAD, so A
-now genuinely coincides. This SHA is under the fresh strict integration review described below.)*
+**Program identity.** This is the **post-FG-561 foundations program** — its children are **gated until after
+FG-561 lands** and are **NOT attached to FG-561** (FG-561 is the durable-continuation campaign they are gated
+behind). **A new epic is allocated only after the post-FG-561 delta-audit passes** — it is deliberately unset here.
+
+**SHA semantics (uniform across all three clusters).** Each cluster SHA is the **lane HEAD** and is simultaneously
+that PRD's finalizing commit (all three coincide — the same commit edits the PRD file and is the lane HEAD; no
+plan-only-HEAD cluster remains): **A** (`f1bd97d`), **B** (`d2837fd`), **and C** (`6371787`). **A** (`f1bd97d`)
+reclassifies §4.2/OQ-4 reds-capability (probe P7 falsified the "no Bash / do not invoke git" claim, corrected P7
+probe) and fixes the header identity (baseline `185afc3`, epic detached from FG-561). *(Provenance audit trail for
+A: the earlier `3b76153` was plan-only and did NOT edit the PRD; `c1a77e3` → `13d3142` (P7 evidence) → `f1bd97d`
+(identity) are the PRD-editing commits, `f1bd97d` current HEAD. Full chain in
+`docs/plans/foundations-lane-a-probes/p7-manifests/SHA-PROVENANCE.txt`.)*
 
 Cross-references to ordering/coupling cite `docs/plans/foundations-integration.md` (the integration MAP).
 
@@ -32,15 +36,37 @@ Cross-references to ordering/coupling cite `docs/plans/foundations-integration.m
 precondition on the implementing child (cite what must be run and where); a **NORMATIVE-UNMET** contract gets an
 acceptance condition and **no fabricated red** — inventing a strawman to redden is itself a reject condition.
 
-> **Hard campaign-wide precondition (from the map §5 / Deliverable 2).** No child below may begin implementation
-> until the **post-FG-561 delta-audit** (`docs/plans/foundations-post-fg561-delta-audit.md`) passes. Several
-> children's captured reds and acceptance probes are **FG-553-sensitive** (they ran the working tree via `tsx`
-> or a real container against the current mount logic); the audit rebinds them to the promoted artifact. This is
-> stated per child under RED PREREQUISITES where it bites.
+> **Hard program-wide precondition 1 — delta-audit (from the map §5 / Deliverable 2).** No child below may begin
+> implementation until the **post-FG-561 delta-audit** (`docs/plans/foundations-post-fg561-delta-audit.md`) passes.
+> Several children's captured reds and acceptance probes are **FG-553-sensitive** (they ran the working tree via
+> `tsx` or a real container against the current mount logic); the audit rebinds them to the promoted artifact. This
+> is stated per child under RED PREREQUISITES where it bites.
+
+> **Hard program-wide precondition 2 — DECISION-CLOSURE GATE (mandatory, AFTER the delta-audit, BEFORE any
+> implementation dispatch).** "Owned" is not "decided." Every OQ-INT seam below has a single accountable owner, but
+> several still have an **OPEN architectural outcome**. An implementation child may **NOT** "decide and deliver" its
+> mechanism — that recreates design discovery inside implementation. For each open outcome, its owner must, before
+> the implementing ticket runs: **(1) SELECT** the outcome; **(2) RECORD** it in the relevant **normative PRD/ADR**
+> (not only in this decomposition or the non-normative map); **(3) REVIEW** the recorded decision (bounded
+> adversarial review). Only then may the implementation ticket that delivers the selected mechanism be dispatched.
+> The gate applies to these open outcomes (owner · normative home):
+>
+> | Open outcome | Seam | Owner | Record in |
+> |---|---|---|---|
+> | Retry's fail-open mount-mode fallback (`retry.ts:263`) — accept vs fix | OQ-INT-1 | **A** | PRD-a / ADR |
+> | Held-child **run-end** reclamation mechanism | OQ-INT-2 (B-FG524b) | **B** | PRD-b §9.2 / ADR |
+> | Dashboard/campaign operator-reason transport | OQ-INT-3 | **C** (C-FG477-S7) | PRD-c §S6 / ADR |
+> | Missing `test:unit` gate policy | OQ-INT-4 | **B** | PRD-b §9.4 / ADR |
+> | Reds' git-read: ACCEPT vs ENFORCE | OQ-INT-5 | **B** | PRD-b §9.4 / ADR |
+> | Git attribute/filter execution policy | OQ-INT-6 | **B** | PRD-b §9.4 / ADR |
+>
+> A ticket whose acceptance still contains an unresolved "decide between (i)/(ii)…" is **blocked at this gate** — the
+> decision belongs here, the delivery belongs in the ticket. Selecting `held → {complete|failed}` to satisfy a reaper
+> predicate is specifically constrained by the state-truth rule in **OQ-INT-2 / B-FG524b** below.
 
 ---
 
-## Cluster A — agent workspace isolation (PRD `13d3142`)
+## Cluster A — agent workspace isolation (PRD `f1bd97d`)
 
 Three bounded children. FG-559 (mount + detector) and FG-345 (remaining scope) are independent of the rest of
 the campaign; FG-356 (reaper) carries the one **hard red gate** in the cluster.
@@ -181,7 +207,7 @@ the campaign; FG-356 (reaper) carries the one **hard red gate** in the cluster.
 
 ---
 
-## Cluster B — review execution trust (PRD `bf906b4`)
+## Cluster B — review execution trust (PRD `d2837fd`)
 
 Five bounded children. INV-1's guard is the **highest-leverage, land-first** item (D5). FG-524 is
 **one indivisible child** (gate + re-aggregation — gating alone is a regression). FG-525 carries the one
@@ -346,14 +372,26 @@ Five bounded children. INV-1's guard is the **highest-leverage, land-first** ite
 **PROPOSED bounded child added by the ownership-assignment correction** (map §3.0 consolidated row 13 / §3.2):
 B-FG524b is the **one accountable owner** of **OQ-INT-2**. It does not restate a PRD decision — no PRD closes the
 run-end arm — it **owns the decision** and delivers the reclaim. The mechanism choice is the open architectural
-outcome this child decides (the row is OWNED even while that outcome is open).
+outcome (the row is OWNED even while that outcome is open). Per the **decision-closure gate**, that outcome is
+**SELECTED and recorded in PRD-b §9.2 (or an ADR) and reviewed BEFORE this child's ticket runs** — B-FG524b then
+**delivers the selected mechanism; it does not decide it during implementation.**
 
-- **OWNING DECISION (the map assigns the owner; the mechanism is B-FG524b's to decide):** the run-end reclaim
-  mechanism for a fanout child still `awaiting_gate` when the run ends/abandons — **(i)** run-end/abandon
-  **terminalizes** the held child (status → a terminal `{complete, failed}` value) so **A-FG356's terminal-only
-  reaper collects it** next pass, or **(ii)** B-FG524b owns a **direct** run-end reclaim path in the
-  run-end/abandon finalize. Grounded in **B N-9(b)** (the worktree must be "reclaimed, never leaked … or the run
-  ends with the child still held").
+- **OWNING DECISION (the map assigns the owner; the mechanism is SELECTED in the decision-closure gate):** the
+  run-end reclaim mechanism for a fanout child still `awaiting_gate` when the run ends/abandons — **(i)** run-end/
+  abandon **terminalizes** the held child to a terminal status so **A-FG356's terminal-only reaper collects it**
+  next pass, or **(ii)** B-FG524b owns a **direct** run-end reclaim path in the run-end/abandon finalize. Grounded
+  in **B N-9(b)** (the worktree must be "reclaimed, never leaked … or the run ends with the child still held").
+- **STATE-TRUTH CONSTRAINT ON OPTION (i) — cleanup must not invent lifecycle truth to make a reaper predicate
+  match (binds the gate's selection).** An unresolved validation hold **cannot truthfully become `complete`** —
+  `complete` asserts a validation pass that never happened, so `awaiting_gate → complete` is **forbidden** here
+  regardless of what makes the reaper predicate convenient. `failed` (or `cancelled`) is truthful **only when there
+  is a durable actual cancellation/abandonment transition** — i.e. the terminal status is written **as a
+  consequence of a real run-end/abandon event** (`updateRunStatus(..., "abandoned")` at `runs.ts:181-193`, the
+  cancel/abandon path), **never** a status flip synthesized purely so `{complete, failed}` matches. If neither a
+  truthful `failed`/`cancelled` transition nor a genuine terminal event is available, option (i) is **not
+  admissible** and the mechanism MUST be option (ii) (a direct reclaim that reaps the worktree **without**
+  re-labeling the child's lifecycle state). This constraint is resolved in the decision-closure gate before the
+  ticket runs.
 - **ACCEPTANCE ROWS:** a run that ENDS (or is abandoned) with a child still `awaiting_gate` **does NOT leak** its
   worktree or its `forge/<runId>/<taskId>` branch; a test drives **run-end-while-held → reclaimed**. Under
   option (i) the held child is first moved to a **terminal** status (so A-FG356's `{complete, failed}` predicate
@@ -393,6 +431,11 @@ outcome this child decides (the row is OWNED even while that outcome is open).
   covered" by the resolve-time path **without capturing the leak** — the resolve-time arm never fires when the
   child never resolves (that is the whole seam). (4) A **mid-hold** status flip dressed up as a run-end
   terminalization — the transition must be a genuine run-end, else it desyncs C-S2's ACTIVE-hold contract (INV-7).
+  (5) **STATE-TRUTH VIOLATION — the hard reject:** marking an unresolved `awaiting_gate` child **`complete`** (it
+  asserts a validation pass that never occurred), or **`failed`/`cancelled` with no durable actual cancellation/
+  abandonment transition** to back it — i.e. **inventing lifecycle truth solely to make A-FG356's `{complete,
+  failed}` predicate match.** A reaper predicate is not a licence to falsify a child's lifecycle state; if the
+  truthful terminal transition does not exist, use option (ii).
 
 ### B-FG525 — gate `forge invoke` AND its crash-recovery bypasses
 
@@ -427,7 +470,7 @@ outcome this child decides (the row is OWNED even while that outcome is open).
 
 ---
 
-## Cluster C — workflow lifecycle semantics (PRD `b5d7417`)
+## Cluster C — workflow lifecycle semantics (PRD `6371787`)
 
 Two ticket families. **FG-527** splits into **three risk classes** (per binding D-7); **FG-477** decomposes as
 its **five evaluator surfaces S1–S6** emerge from the single derivation, with S2 gating S3/S5/S6 — **plus the

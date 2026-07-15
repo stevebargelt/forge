@@ -5,13 +5,15 @@ triggers (`docs/plans/foundations-integration.md`) into a concrete, rerunnable p
 **once FG-561/FG-553 lands and before any foundation child begins implementation.** It cites the three PRDs; it
 invents no normative decisions and allocates no tickets.
 
-**Keyed to each cluster's review-clean lane HEAD** — A `13d3142`, B `bf906b4`, C `b5d7417` — and the campaign
+**Keyed to each cluster's lane HEAD** — A `f1bd97d`, B `d2837fd`, C `6371787` — and the program
 baseline **`185afc3`**. Each cluster SHA is the lane HEAD and is simultaneously that PRD's finalizing
 commit (all three coincide — the same commit edits the PRD file and is the lane HEAD; no plan-only-HEAD cluster
-remains). **A** (`13d3142`) reclassifies §4.2/OQ-4 reds-capability (probe P7 falsified the "no Bash / do not invoke
-git" assertion) and carries the corrected P7 probe. *(A was re-finalized at `13d3142`; the earlier `3b76153` was
-plan-only and did NOT edit the PRD — PRD last edited at `c1a77e3` — so it never satisfied "coincides." `13d3142`
-edits the PRD (genuine two-runtime P7 evidence) and is the lane HEAD. This SHA is under the fresh strict
+remains). **A** (`f1bd97d`) reclassifies §4.2/OQ-4 reds-capability (probe P7 falsified the "no Bash / do not invoke
+git" assertion, corrected P7 probe) and fixes the header identity. *(Provenance audit trail for A: `3b76153` was
+plan-only and did NOT edit the PRD; `c1a77e3` → `13d3142` (P7 evidence) → `f1bd97d` (identity) are the PRD-editing
+commits, `f1bd97d` current HEAD; full chain in `p7-manifests/SHA-PROVENANCE.txt`.) This is the **post-FG-561
+foundations program** (children gated behind FG-561, not attached to it; new epic allocated after this audit). This
+SHA set is under the fresh strict
 integration review this round.)* Each PRD's revalidation triggers (A §7.3, B OQ-4 / §9.4, C §8, and the map §5
 cross-cutting) are the source; this brief is their union, made executable.
 
@@ -68,7 +70,7 @@ The FG-553/FG-555 mechanism surfaces, plus **every file the three PRDs assume be
 
 ## 4. ASSUMPTIONS to revalidate — per cluster, cited to the PRD decision
 
-### Cluster A (PRD `13d3142`)
+### Cluster A (PRD `f1bd97d`)
 
 - **A §7.3 — "forge executes the working tree."** Every executed acceptance test in A §7.1/§7.2 (AC-3…AC-7,
   N-1…N-9) must be confirmed to run against the artifact it thinks it is testing (`forge-dev` vs `forge`). This
@@ -76,7 +78,7 @@ The FG-553/FG-555 mechanism surfaces, plus **every file the three PRDs assume be
 - **Explicitly NOT a trigger (A §7.3):** the git-path-resolution facts (probes p5/p5b/p6b — AC-1/AC-2/AC-3/AC-7's
   git semantics) are about **git's** path resolution, not forge's runtime, and are **insensitive** to FG-553.
   **Do not re-run p5 for FG-553** — it remains the acceptance probe for AC-1/AC-2 across the change.
-- **Corrected runtime boundary (§4.2/OQ-4, PRD-a `13d3142`) — do NOT re-assume reds lack Bash/git.** P7
+- **Corrected runtime boundary (§4.2/OQ-4, PRD-a `f1bd97d`) — do NOT re-assume reds lack Bash/git.** P7
   (`docs/plans/foundations-lane-a-probes/p7-red-runtime-capability.out` SECTION 1, executed under two
   genuinely-distinct manifest-verified runtimes — codex-subscription and claude-oauth; Pi is not tool-capable for
   reds on this host, so no Pi red execution exists) proved reds **already have effective Bash + git-read**
@@ -88,7 +90,7 @@ The FG-553/FG-555 mechanism surfaces, plus **every file the three PRDs assume be
   refused `Read-only file system`, exit 1 — is the acceptance check; re-run it against the promoted artifact, not
   the git-read capability).
 
-### Cluster B (PRD `bf906b4`)
+### Cluster B (PRD `d2837fd`)
 
 - **B OQ-4 — "forge executes the working tree" + "which artifact."** The FG-566/541/524/525 probes ran the
   working tree via `tsx`. After FG-553, `forge review-loop` runs the promoted release; a fix in `src/` is not
@@ -101,7 +103,7 @@ The FG-553/FG-555 mechanism surfaces, plus **every file the three PRDs assume be
   ABI are not accepted as ready). `INV-4`'s `project_dir` keying is **insensitive** (the reviewed project's dir
   is unchanged); only the **recorded ABI** is sensitive — do not conflate them.
 
-### Cluster C (PRD `b5d7417`)
+### Cluster C (PRD `6371787`)
 
 - **C §8 — "a single Forge version owns the store."** IF FG-553's store-version policy admits **>1 Forge version
   writing one store**, re-verify: (1) **A-5's safety argument** — rule 0 reads a provenance marker written by the
