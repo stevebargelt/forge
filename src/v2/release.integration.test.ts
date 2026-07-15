@@ -614,6 +614,46 @@ function makeFullSource(label: string): string {
   return src;
 }
 
+test("FG-569 successor build (EXECUTED, RED pre-fix / GREEN after): release A builds release B from a clean checkout, B runs, and B records A's builder identity SEPARATELY from B's source commit", () => {
+  // The HIGH production-path gap: a BUILT release must be able to build its successor.
+  // Pre-fix, builderRoot() = findGitRoot(<release>/src/v2); a release has no .git, so
+  // it fell back to <release>/src/v2 (no lockfile there) and `forge release build` from
+  // the release exited 1 with "no lockfile … at <release>/src/v2". The control runtime
+  // could not build the next release. Here we EXECUTE release A's own entry to build B.
+  assert.ok(!existsSync(join(built.releaseDir, ".git")), "release A is an immutable copy — it has NO .git (the crux of the bug)");
+
+  // B's source: an isolated, committed clean checkout whose HEAD is DISTINCT from A's
+  // commit — so builderCommit (A's) vs commit (B's source) are provably separate SHAs.
+  const bSource = makeFullSource("successor-bsrc-");
+  const bSourceHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: bSource, encoding: "utf8" }).trim();
+  assert.notEqual(bSourceHead, built.manifest.commit, "B's source HEAD differs from A's commit — the separation is observable");
+
+  // Run `release-A/forge release build --source <bSource> --out <releaseB>` — release A's
+  // OWN entry (its pinned interpreter, its own src/v2/release.ts). This is the exact
+  // command that exited 1 pre-fix. git/npm come from the inherited PATH (the build shells
+  // out to them); the entry needs no node on PATH — it execs A's pinned interpreter.
+  const releaseB = join(workspace, "successor-releaseB");
+  const buildR = spawnSync(built.entryPath, ["release", "build", "--source", bSource, "--out", releaseB, "--json"], { encoding: "utf8", env: process.env });
+  assert.equal(buildR.status, 0, `release A failed to build successor B: ${buildR.stderr}`);
+  const bResult = JSON.parse(buildR.stdout) as { manifest: { commit: string; builderCommit: string; id: string }; entryPath: string };
+
+  // B RUNS — a real command from the freshly built successor.
+  const verR = spawnSync(bResult.entryPath, ["--version"], { encoding: "utf8", env: process.env });
+  assert.equal(verR.status, 0, `successor release B did not run: ${verR.stderr}`);
+  assert.match(verR.stdout.trim(), /^\d+\.\d+\.\d+/, "release B's --version prints from its own package.json");
+
+  // The two identities are recorded SEPARATELY:
+  //  - builderCommit == A's manifest commit (WHO built B — A's trusted builder identity),
+  //  - commit        == B's source HEAD       (WHAT B was built from).
+  assert.equal(bResult.manifest.builderCommit, built.manifest.commit, "B's builderCommit is release A's OWN commit (A built B)");
+  assert.equal(bResult.manifest.commit, bSourceHead, "B's commit is B's --source HEAD");
+
+  // MUTATION PROOF: if the release-builder path had used the --source commit (B's source)
+  // for builderCommit instead of A's manifest commit, builderCommit would EQUAL commit —
+  // this assertion goes RED for that substitution, killing the mutant.
+  assert.notEqual(bResult.manifest.builderCommit, bResult.manifest.commit, "builderCommit is A's identity, NOT B's source commit — substituting the source commit must go RED");
+});
+
 test("FG-569 Resolution B (EXECUTED, SOURCE RENAMED AWAY): supported commands run FROM THE RELEASE with the source checkout inaccessible — no fallback", () => {
   // The sharpest proof of self-containment for the control-plane set: build a release
   // from an isolated source, then RENAME the source away so it cannot be resolved, and
