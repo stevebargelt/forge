@@ -12,17 +12,18 @@ it.
 | Cluster | PRD file | Review-clean lane HEAD |
 |---|---|---|
 | **A** — agent workspace isolation | `docs/prds/agent-workspace-isolation.md` | **`a0064d5`** |
-| **B** — review execution trust | `docs/prds/review-execution-trust.md` | **`20c8f59`** |
+| **B** — review execution trust | `docs/prds/review-execution-trust.md` | **`8b7f955`** |
 | **C** — workflow lifecycle semantics | `docs/prds/workflow-lifecycle-semantics.md` | **`b5d7417`** |
 | campaign baseline | (origin/main at campaign start) | **`185afc3`** |
 
 **SHA semantics (uniform across all three clusters).** Each cluster SHA above is the **review-clean lane HEAD**,
-not necessarily the commit that finalized the PRD *file*. **A** (`a0064d5`) **and C** (`b5d7417`) are each
-simultaneously the PRD-finalizing commit **and** the lane HEAD — the same commit edits the PRD file *and* is the
-lane HEAD. **Only B** has a later **plan-only** commit as its lane HEAD: the PRD file
-`docs/prds/review-execution-trust.md` was finalized at **`68ee713`**, and `20c8f59` is a later plan-only citation
-fix on the same lane branch (it edits `docs/plans/foundations-lane-b-review-trust.md`, not the PRD) — cited here
-as the lane HEAD, so `20c8f59` must not be read as a PRD edit.
+not necessarily the commit that finalized the PRD *file* — but as of this bump **all three coincide**: **A**
+(`a0064d5`), **B** (`8b7f955`), **and C** (`b5d7417`) are each **simultaneously the PRD-finalizing commit AND the
+lane HEAD** — the same commit edits the PRD file *and* is the lane HEAD. **No plan-only-HEAD cluster remains.** B
+was previously the exception (its PRD file `docs/prds/review-execution-trust.md` finalized at **`68ee713`** with a
+later plan-only citation-fix HEAD `20c8f59`); that split is **superseded** because `8b7f955` — a later PRD-path
+citation fix that **edits `docs/prds/review-execution-trust.md` itself** — **re-finalizes the PRD** and is now B's
+lane HEAD, so B's HEAD is again a PRD edit, exactly like A and C.
 
 Cross-references to ordering/coupling cite `docs/plans/foundations-integration.md` (the integration MAP).
 
@@ -178,7 +179,7 @@ the campaign; FG-356 (reaper) carries the one **hard red gate** in the cluster.
 
 ---
 
-## Cluster B — review execution trust (lane HEAD `20c8f59`; PRD file finalized at `68ee713`)
+## Cluster B — review execution trust (lane HEAD `8b7f955` — a PRD edit; supersedes the prior `68ee713`-finalized / `20c8f59`-plan-only split)
 
 Five bounded children. INV-1's guard is the **highest-leverage, land-first** item (D5). FG-524 is
 **one indivisible child** (gate + re-aggregation — gating alone is a regression). FG-525 carries the one
@@ -223,7 +224,7 @@ Five bounded children. INV-1's guard is the **highest-leverage, land-first** ite
   search PATH). INV-4 (covering-evidence identity → `ctx.projectDir`).
 - **ACCEPTANCE ROWS:** R-566 (factual defect); N-2, N-3, N-4, N-8 (NORMATIVE-UNMET); F1–F5 mapping (§7.3).
   INV-3, INV-4.
-- **FILES / SCHEMAS:** `cli/commands/review-loop.ts` local-run sites `:544` (dirty-tree), `:622`
+- **FILES / SCHEMAS:** `src/cli/commands/review-loop.ts` local-run sites `:544` (dirty-tree), `:622`
   (CI-unavailable fallback), `:853` (fixer pre-commit) — all `runVerify(..., {cwd: ctx.projectDir})`; the
   verification runner's dropped **child exit code** at the exec boundary (`127`/`ENOENT`); the existing
   `FailureKind` `verification_environment_unavailable` (`failure-kind.ts:151` → `policy.ts:62` `campaign_system`);
@@ -260,7 +261,7 @@ Five bounded children. INV-1's guard is the **highest-leverage, land-first** ite
   its implementation is a separable opt-in NOT part of this cluster's shipping acceptance.**
 - **ACCEPTANCE ROWS:** R-541 (factual defect); N-5 (`local_only` honesty — ships here); N-6 (INV-5, **CONDITIONAL
   — NOT shipping acceptance**). INV-5.
-- **FILES / SCHEMAS:** `cli/commands/review-loop.ts` — consult `resolveReviewedTipTrust` (defined `:454`,
+- **FILES / SCHEMAS:** `src/cli/commands/review-loop.ts` — consult `resolveReviewedTipTrust` (defined `:454`,
   currently called only at `:1040`) before the CI probe; emit `local_only` distinct from the generic
   "CI unavailable" (`:620`); `extendedDelegatedToCi` currently unconditional `!ctx.localExtended` at `:621`; the
   stale comment at `:848-851`. **No push verb exists** in either review-loop file today (git-verb set:
@@ -286,9 +287,20 @@ Five bounded children. INV-1's guard is the **highest-leverage, land-first** ite
 - **OWNING PRD DECISIONS:** D3 (gate the child **and** couple to re-aggregation — gating alone is a regression),
   INV-2 (gate couples to re-aggregation / no silent publication; held ≠ failed; `continue` may not step over a
   hold). §9.1 boundary (role-scoped via `IMPLEMENTER_ROLES`, **no** `red-` check). §9.2 (held-child worktree
-  retention → reclaim).
+  retention → reclaim — **RESOLVE-TIME arm only**; see the SCOPE carve-out below for the run-end arm).
 - **ACCEPTANCE ROWS:** R-524 (factual defect); N-7 (re-aggregation + hold semantics), N-9 (held-child worktree
-  retention → reclaim) — both NORMATIVE-UNMET. INV-2.
+  retention → **resolve-time** reclaim: retain the held child's worktree while `awaiting_gate`, reclaim it once
+  the child resolves and the parent re-aggregates/finalizes) — both NORMATIVE-UNMET. INV-2. **N-9's RUN-END
+  reclaim arm is carved OUT — see SCOPE below.**
+- **SCOPE — BLOCKED on OQ-INT-2 (the held-child RUN-END reclaim arm is NOT owned here).** N-9(b) also names the
+  case where **the run ends with the child still `awaiting_gate`** (never resolved). That reclaim is the **UNOWNED
+  seam OQ-INT-2** (map §3.2 / consolidated ownership row 13): **neither PRD-a nor PRD-b nails who reclaims it.**
+  A's FG-356 reaper is **terminal-only** and a still-held child is non-terminal, so A never collects it; and this
+  child owns only the *resolve-time* reclaim path. **This child does NOT silently own the run-end arm** — that arm
+  is **BLOCKED until OQ-INT-2 has EXACTLY ONE named owner and concrete files** (the operator must decide between
+  (i) run-end/abandon *terminalizes* held children so A's reaper collects them, or (ii) Cluster B owns a dedicated
+  run-end reclaim path). B-FG524 ships its gate + re-aggregation + resolve-time reclaim **without** waiting on that
+  decision; only the run-end reclaim arm is held. This proposal does not resolve OQ-INT-2 (map owns the seam).
 - **FILES / SCHEMAS:** `src/v2/runNext.ts` `dispatchFanoutStep` — child gate at `markTaskComplete` `:2541`
   (add validation-contract gate + a **`held` `ChildOutcome` variant** at `:2353`); re-entry branch
   `:1668-1671` (**replace outright** to re-aggregate — today returns `existingParent.status` and stops);
@@ -592,12 +604,16 @@ them deliberately). **No surface migrates the `tasks` schema** — persisting th
   re-derivation** (naming them without auditing their transport is exactly the hollow this scoping closes). That
   transport audit is tracked as **OQ-4** (dashboard) and belongs with the owning dashboard-integration /
   campaign-executor work as a **follow-up**, NOT here. S6 audits exactly the four surfaces above and claims
-  nothing about dashboard/campaign consumption beyond "they read the same contract."
+  nothing about dashboard/campaign consumption beyond "they read the same contract." **These two bound-out
+  propagation surfaces have NO owner today** — the map classifies them as the **UNOWNED seam OQ-INT-3**
+  (`docs/plans/foundations-integration.md` §3.0 consolidated row 14 / §3.2): the operator/decomposition must name
+  an owner (a bounded dashboard-consumer child and a bounded campaign-consumer child, each owner + files +
+  acceptance, or one owner for both) before the transport audit lands. This proposal does not resolve OQ-INT-3.
 - **RED PREREQUISITES:** **NORMATIVE-UNMET** — **no fabricated red.** Contract test that a hold renders distinctly
   from a human gate and no internal union leaks to the client.
 - **DEPENDENCIES:** **intra-C:** after **S2** (it consumes the step-state derivation to render the reason).
-  **Cross-cluster:** none; `dashboard`/`campaign` transport consumption is **out of scope** (OQ-4 follow-up, see
-  BOUND OUT above).
+  **Cross-cluster:** none; `dashboard`/`campaign` transport consumption is **out of scope** and **UNOWNED**
+  (OQ-4 follow-up → map's **OQ-INT-3**, see BOUND OUT above).
 - **CONCURRENCY CONSTRAINTS:** touches the `runNext.ts:977-981` reason-rendering plus the `reconcile`/`forge
   show`/`forge status`/`report` consumers — no A/B shared-file conflict. (Dashboard/campaign transport is not
   touched by this child.)
@@ -631,6 +647,7 @@ pushes campaign policy into a module `ready-queue`/`gate`/`runNext`/`reconcile` 
   adversarial review** (A §10, B §6 non-goal, C §7.3) and on the **post-FG-561 delta-audit** passing
   (Deliverable 2).
 - **No normative decisions are invented.** Every "must/owns/refuses" above is a citation of a PRD id or the
-  integration map; where the PRDs leave a seam unowned (OQ-INT-1, OQ-INT-2) this proposal carries it as
-  unresolved, it does not resolve it.
+  integration map; where the PRDs leave a seam unowned (the map's **six** UNOWNED seams — OQ-INT-1, OQ-INT-2, the
+  OQ-INT-3 dashboard/campaign transport, and OQ-INT-4/5/6 = Lane A OQ-3/OQ-4/OQ-7 punted to the Review-trust lane
+  but never adopted by PRD-b) this proposal carries it as unresolved, it does not resolve it.
 - **No PRD or source is edited by this document.**

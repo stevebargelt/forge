@@ -5,14 +5,14 @@ triggers (`docs/plans/foundations-integration.md`) into a concrete, rerunnable p
 **once FG-561/FG-553 lands and before any foundation child begins implementation.** It cites the three PRDs; it
 invents no normative decisions and allocates no tickets.
 
-**Keyed to each cluster's review-clean lane HEAD** — A `a0064d5`, B `20c8f59`, C `b5d7417` — and the campaign
-baseline **`185afc3`**. Each SHA is the **review-clean lane HEAD**, not necessarily the PRD-file-finalizing
-commit: **A** (`a0064d5`) **and C** (`b5d7417`) are each simultaneously their PRD's finalizing commit **and**
-their lane HEAD — the same commit edits the PRD file *and* is the lane HEAD. **Only B** has a later **plan-only**
-commit as its lane HEAD: B's PRD file `docs/prds/review-execution-trust.md` was finalized at **`68ee713`** and
-`20c8f59` is a later plan-only citation fix on the same lane branch (it edits
-`docs/plans/foundations-lane-b-review-trust.md`, not the PRD) — cited here as the lane HEAD, so `20c8f59` must
-not be read as a PRD edit. Each PRD's revalidation triggers (A §7.3, B OQ-4 / §9.4, C §8, and the map §5
+**Keyed to each cluster's review-clean lane HEAD** — A `a0064d5`, B `8b7f955`, C `b5d7417` — and the campaign
+baseline **`185afc3`**. Each SHA is the **review-clean lane HEAD**, and as of this bump **all three coincide with
+the PRD-finalizing commit**: **A** (`a0064d5`), **B** (`8b7f955`), **and C** (`b5d7417`) each simultaneously
+finalize their PRD file **and** are the lane HEAD — the same commit edits the PRD file *and* is the lane HEAD.
+**No plan-only-HEAD cluster remains.** B was previously the exception (PRD `docs/prds/review-execution-trust.md`
+finalized at **`68ee713`** with a later plan-only citation-fix HEAD `20c8f59`); that split is **superseded**
+because `8b7f955` — a later PRD-path citation fix that **edits `docs/prds/review-execution-trust.md` itself** —
+**re-finalizes the PRD** and is now B's lane HEAD, so B's HEAD is again a PRD edit, like A and C. Each PRD's revalidation triggers (A §7.3, B OQ-4 / §9.4, C §8, and the map §5
 cross-cutting) are the source; this brief is their union, made executable.
 
 ---
@@ -62,7 +62,7 @@ The FG-553/FG-555 mechanism surfaces, plus **every file the three PRDs assume be
 | **the `dispatchSource` dispatch sites** — WRITE: `invoke.ts:151` stamps `"invoke"`; workflow sites `reconcile.ts:659`, `gate.ts:322`/`:411`, `runNext.ts:498`/`:1276`/`:1709`. READ: classifier rule 0 at `lifecycle-evaluator.ts:179-183` | C D-2 rule 0 / C §8 — rule 0 reads the `dispatchSource` marker **written at dispatch time by the current Forge version**; if marker-less rows become reachable on **live** runs, `legacy_ambiguous_invoke`'s bound dissolves. Audit the marker **at the dispatch sites**. **NOT `src/v2/launch.ts`** — that file is FG-535 tmux durable-launch (exit-record + launcher-attribution) and records **no** `dispatchSource`; if its tmux launch-record / R2 exit-recorder provenance is relevant it is a **separate** FG-535 concern, not the `dispatchSource` marker. |
 | **`src/v2/spawn.ts`** (mount construction path — the `.git` mount and `PROJECT_MODE`) | A §7.3 — the acceptance tests for AC-1/AC-2/AC-3/AC-7 edit `spawn.ts`; confirm they run against the artifact they think they test. |
 | **`src/store/runs.ts`** (`completeRun` `:140` / its `AND status='active'` guard `:147`; `updateRunStatus` FG-484 refusal `:174-179`) | C INV-2 — the no-resurrection guarantee is store-layer; confirm both guards survive the FG-553 store changes and that no new completion-writing path appeared. **(There is no `src/v2/store/` directory — the store lives at `src/store/`.)** |
-| **`cli/commands/review-loop.ts`** (the three local-run sites `:544`/`:622`/`:853`) | B OQ-4 — after FG-553 these run the promoted release, not the working tree. |
+| **`src/cli/commands/review-loop.ts`** (the three local-run sites `:544`/`:622`/`:853`) | B OQ-4 — after FG-553 these run the promoted release, not the working tree. |
 | **`src/v2/retry.ts`** (`:263` mount-mode fallback; `:427-466` mint) | C OQ-2 / map OQ-INT-1 — the fail-open mount-mode fallback is the unowned seam; confirm FG-553 did not change mount-mode provenance under it. |
 | **`src/v2/lifecycle-evaluator.ts`** (classifier rule 0, `:110`/`:116-127`) | C §8 — two Forge versions with different classifier rules writing one store disagree about one row. |
 
@@ -77,7 +77,7 @@ The FG-553/FG-555 mechanism surfaces, plus **every file the three PRDs assume be
   git semantics) are about **git's** path resolution, not forge's runtime, and are **insensitive** to FG-553.
   **Do not re-run p5 for FG-553** — it remains the acceptance probe for AC-1/AC-2 across the change.
 
-### Cluster B (lane HEAD `20c8f59`; PRD file finalized at `68ee713`)
+### Cluster B (lane HEAD `8b7f955` — a PRD edit; supersedes the prior `68ee713`-finalized / `20c8f59`-plan-only split)
 
 - **B OQ-4 — "forge executes the working tree" + "which artifact."** The FG-566/541/524/525 probes ran the
   working tree via `tsx`. After FG-553, `forge review-loop` runs the promoted release; a fix in `src/` is not
@@ -115,11 +115,37 @@ The FG-553/FG-555 mechanism surfaces, plus **every file the three PRDs assume be
 
 ## 5. PROBES to run (concrete, rerunnable)
 
-1. **Artifact-identity probe (A §7.3 / B OQ-4).** After building, edit a sentinel line in `src/v2/spawn.ts` (and
-   separately `cli/commands/review-loop.ts`), run `forge` through the promotion mechanism, and **assert the edit
-   is observed at runtime.** If it is not, tests edit the working tree while `forge` runs the promoted release —
-   every executed acceptance test in A §7 and B §7 is invalid until re-bound. Output: PASS/FAIL + which artifact
-   ran.
+1. **Artifact-identity probe (A §7.3 / B OQ-4) — THREE separately-recorded arms.** FG-553 introduces a
+   **stable-vs-dev runtime split**: `forge-dev` (or `npm run forge` / whatever live-source launcher FG-553
+   preserves) runs the **working tree**, while machine-wide `forge` runs the **promoted release**, not the edited
+   source. This probe proves that split in three arms so that an acceptance test knows which artifact its `forge`
+   invocation actually exercises. **Each arm states its command and RECORDS WHICH EXECUTABLE/ARTIFACT IT RAN.**
+   Mechanism names (the dev entry point / live-source launcher, the promotion mechanism, and the version /
+   release-identity surface that reports the promoted SHA) are **whatever FG-553's OQ-6 introduces** — bind them
+   at run time; do not assume the spellings here. It runs **post-FG-553**; keep it a rerunnable BRIEF and **do not
+   claim results**.
+
+   - **ARM 1 — forge-dev sees the working tree.** Edit a sentinel line in the working-tree source (e.g.
+     `src/v2/spawn.ts`, and **separately** `src/cli/commands/review-loop.ts`). Run the **DEV** entry point
+     (`forge-dev` / `npm run forge` / the live-source launcher FG-553 preserves). **ASSERT the sentinel IS
+     observed at runtime.** **Record:** *forge-dev ran the working tree.* Output: **PASS/FAIL** + the
+     executable/artifact identity actually run.
+   - **ARM 2 — stable forge does NOT see an unpromoted edit, and reports the promoted SHA.** With that **same
+     working-tree sentinel edit STILL PRESENT and UNPROMOTED**, run the **STABLE** machine-wide `forge`. **ASSERT
+     the sentinel is NOT observed** (stable runs the promoted release, not the edited working tree) **AND** that
+     stable `forge` **reports/identifies the CURRENTLY PROMOTED SHA** (e.g. via a version / release-identity
+     surface). **Record:** *stable forge ran the promoted release `<SHA>`, not the working tree.* Output:
+     **PASS/FAIL** + the executable/artifact identity actually run.
+   - **ARM 3 — after promoting the exact candidate SHA, stable forge runs and identifies it.** Promote the
+     **EXACT candidate SHA** through FG-553's promotion mechanism. Run stable `forge`. **ASSERT the promoted
+     change IS now observed AND** stable `forge` **identifies the promoted artifact as that exact candidate SHA.**
+     **Record:** *stable forge ran promoted artifact = candidate SHA.* Output: **PASS/FAIL** + the
+     executable/artifact identity actually run.
+
+   **Interpretation:** if ARM 1 fails to observe the sentinel, or ARM 2 observes it (stable ran the working tree),
+   or ARM 3 fails to identify the promoted SHA, then tests edit the working tree while `forge` runs a different
+   artifact — **every executed acceptance test in A §7 and B §7 is invalid until re-bound to the promoted
+   artifact.**
 2. **Store-version probe (map §5 / C §8).** Inspect `db.ts` in the merged range for (a) migration-on-open /
    writable-open policy and (b) whether >1 Forge version may write one store. If either changed vs `185afc3`,
    run the C §8 re-verification (probes below) and flag the A/B/C no-migration stance.
