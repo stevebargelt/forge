@@ -76,6 +76,7 @@ heuristic (§9.1):
 > | **gated fanout implementer child** | `markTaskComplete` direct, `runNext.ts:2541` | **gated** — FG-524 (D3); this is the child site D3 acts on, distinct from the parent aggregate above |
 > | **exempt red-review child** | `markTaskComplete` direct, `runNext.ts:1381` | **exempt by role** (reds ∉ `IMPLEMENTER_ROLES`) |
 > | **gated ad-hoc invoke** | `markTaskComplete` direct, `invoke.ts:813` | **gated** — FG-525 (D4) |
+> | **exempt inferred-result invoke** | `markTaskComplete` direct, `invoke.ts:768` (FG-337 inferred-result) | **exempt by role** — the inferred-result composer returns `undefined` for every implementer role (`requiresStructuredResult` true; only `NARRATIVE_ROLES` reach it), so no gated role can finalize here; a live invoke-lineage terminal write the census must still classify, not omit (plan §1.1) |
 > | **crash-recovery finalize** | `reconcile.ts:779`/`:880`, `recover.ts:457` (`markTaskRecovered`), `finalizePrimary` ← `:2180` | **sweeper-declines** — must not complete contraband (D4); `reconcile`/`recover` are the sites *unnamed by any ticket* until this cluster |
 > | **intentional human override** | `gate.ts:209` | **exempt** — this IS the override |
 > | **post-gate re-entry** | `runNext.ts:936`, `:1661` | **exempt** — the advance decision was already recorded |
