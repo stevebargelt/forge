@@ -29,6 +29,7 @@ import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, chmodSync } from "node:fs";
 import { dirname, join, isAbsolute, resolve } from "node:path";
+import { gunzipSync } from "node:zlib";
 
 export const RELEASE_MANIFEST_NAME = "forge-release.json";
 export const RELEASE_ENTRY_NAME = "forge";
@@ -184,6 +185,120 @@ export function assertReleaseCloses(releaseRoot: string, interpreter: string): v
   }
 }
 
+type LockPackage = { resolved?: string; integrity?: string; link?: boolean; hasInstallScript?: boolean };
+
+/** The npm content-addressable cache holds every tarball the lockfile pins, keyed
+ *  BY its integrity — npm verifies the bytes against that integrity on write, so a
+ *  cache hit IS the authentic, lockfile-pinned tarball. Derive the store path the
+ *  way cacache does: hex-encode the digest, split 2/2/rest. Returns null on a miss
+ *  (the tarball for that integrity is not local). */
+function cacheTarballPath(cacheDir: string, integrity: string): string | null {
+  for (const entry of integrity.trim().split(/\s+/)) {
+    const dash = entry.indexOf("-");
+    if (dash < 0) continue;
+    const algo = entry.slice(0, dash);
+    const hex = Buffer.from(entry.slice(dash + 1), "base64").toString("hex");
+    const p = join(cacheDir, "_cacache", "content-v2", algo, hex.slice(0, 2), hex.slice(2, 4), hex.slice(4));
+    if (existsSync(p)) return p;
+  }
+  return null;
+}
+
+/** Read a gzipped npm package tarball into a map of regular-file entry -> bytes.
+ *  A minimal ustar reader (no dependency): honours the PAX 'x' and GNU 'L' long-
+ *  name extensions that appear when a path exceeds the 100+155-char header fields
+ *  (some deep dependency trees hit this), so every file name is recovered exactly. */
+function readTarFiles(tarball: Buffer): Map<string, Buffer> {
+  const files = new Map<string, Buffer>();
+  let longName: string | null = null;
+  let paxPath: string | null = null;
+  let off = 0;
+  while (off + 512 <= tarball.length) {
+    const hdr = tarball.subarray(off, off + 512);
+    off += 512;
+    if (hdr.every((b) => b === 0)) break;
+    const field = (start: number, len: number): string => hdr.subarray(start, start + len).toString("utf8").replace(/\0.*$/s, "");
+    let name = field(0, 100);
+    const prefix = field(345, 155);
+    if (prefix) name = `${prefix}/${name}`;
+    const size = parseInt(field(124, 12).trim() || "0", 8) || 0;
+    const type = String.fromCharCode(hdr[156]!);
+    const data = tarball.subarray(off, off + size);
+    off += Math.ceil(size / 512) * 512;
+    if (type === "x" || type === "g") {
+      const m = /(?:^|\n)\d+ path=([^\n]*)\n/.exec(data.toString("utf8"));
+      if (type === "x" && m) paxPath = m[1]!;
+      continue;
+    }
+    if (type === "L") {
+      longName = data.toString("utf8").replace(/\0.*$/s, "");
+      continue;
+    }
+    const entryName = paxPath ?? longName ?? name;
+    paxPath = null;
+    longName = null;
+    if (type === "0" || type === "\0" || type === "") files.set(entryName, Buffer.from(data));
+  }
+  return files;
+}
+
+/** BIND the SHIPPED closure to the lockfile (FG-569). Hashing the lockfile bytes
+ *  proves only WHICH lockfile was copied, not that the installed tree MATCHES it —
+ *  a content-mutated dependency with an unchanged lockfile slips through. This
+ *  closes that hole: for every package the lockfile pins by `integrity` that is
+ *  present in the shipped node_modules, compare each of its tarball's files, byte
+ *  for byte, against the shipped file. The lockfile-pinned tarball comes from the
+ *  npm content cache (keyed by integrity — the authentic bytes), so this ties the
+ *  SHIPPED content to the lockfile, not merely the lockfile file to itself.
+ *
+ *  Carve-outs, each principled — NOT a weakening to "just tsx + better-sqlite3":
+ *   - Packages absent from node_modules (optional / other-platform deps like
+ *     @esbuild/darwin-*) are not shipped, so nothing to bind.
+ *   - `hasInstallScript` packages (better-sqlite3, esbuild, fsevents, sharp) mutate
+ *     their OWN files at install time (a built .node, a downloaded platform binary),
+ *     so their on-disk bytes are post-install artifacts, not the tarball's — tarball
+ *     equality does not hold for them BY DESIGN. better-sqlite3 is separately proven
+ *     to load under the pinned interpreter (assertReleaseCloses); the rest are the
+ *     only closure members not content-bound, a handful out of ~60+ verified. */
+export function assertShippedClosureMatchesLockfile(root: string): void {
+  const lockPath = join(root, "package-lock.json");
+  if (!existsSync(lockPath)) {
+    throw new Error(`forge release: no package-lock.json at ${root} — cannot bind the shipped closure to a lockfile`);
+  }
+  const cacheDir = execFileSync("npm", ["config", "get", "cache"], { cwd: root, encoding: "utf8" }).trim();
+  const lock = JSON.parse(readFileSync(lockPath, "utf8")) as { packages?: Record<string, LockPackage> };
+  const packages = lock.packages ?? {};
+
+  for (const [key, meta] of Object.entries(packages)) {
+    if (!key.startsWith("node_modules/")) continue; // the "" root + workspace entries
+    if (meta.link || !meta.integrity || meta.hasInstallScript) continue;
+    const pkgDir = join(root, key);
+    if (!existsSync(pkgDir)) continue; // not shipped (optional / other-platform)
+
+    const tarballPath = cacheTarballPath(cacheDir, meta.integrity);
+    if (!tarballPath) {
+      // Fail closed: without the authentic tarball we cannot prove the shipped
+      // bytes match the lockfile. A warm cache is the norm right after install; a
+      // miss means the cache was cleared — repopulate it rather than ship unbound.
+      throw new Error(`forge release: cannot bind ${key} to the lockfile — its tarball (integrity ${meta.integrity}) is not in the npm cache at ${cacheDir}. Run 'npm ci' to repopulate the cache, then rebuild the release.`);
+    }
+    const tarFiles = readTarFiles(gunzipSync(readFileSync(tarballPath)));
+    for (const [entryName, content] of tarFiles) {
+      // npm strips the tarball's single top-level dir (usually `package/`, but
+      // e.g. `node v22.19/` for @types/node) on extract — strip the first segment.
+      const rel = entryName.replace(/^[^/]*\//, "");
+      if (!rel || rel.endsWith("/")) continue;
+      const shipped = join(pkgDir, rel);
+      if (!existsSync(shipped)) {
+        throw new Error(`forge release: shipped closure does not match the lockfile — ${key}/${rel} is pinned by package-lock.json but MISSING from the shipped node_modules. The installed tree is incomplete or was tampered; refusing to ship.`);
+      }
+      if (Buffer.compare(readFileSync(shipped), content) !== 0) {
+        throw new Error(`forge release: shipped closure does not match the lockfile — ${key}/${rel} differs from the bytes pinned by package-lock.json (integrity ${meta.integrity}). A dependency was modified after install; refusing to ship a closure that does not match its lockfile.`);
+      }
+    }
+  }
+}
+
 export type BuildReleaseOptions = {
   sourceRoot: string;
   outDir: string;
@@ -268,6 +383,13 @@ export function buildRelease(opts: BuildReleaseOptions): BuildReleaseResult {
     // FIX 4 + FIX 5: validate the COPIED closure (binding + tsx loader) by running
     // it under the pinned interpreter, before we describe it in a manifest.
     assertReleaseCloses(tmpDir, interpreter);
+
+    // FG-569: bind the SHIPPED closure to the lockfile — every lockfile-pinned
+    // dependency in the COPIED node_modules must match its lockfile'd tarball byte
+    // for byte. Load-checks (above) prove the closure RUNS; this proves it is the
+    // closure the lockfile names, so a content-mutated dep with an untouched
+    // lockfile is refused rather than shipped.
+    assertShippedClosureMatchesLockfile(tmpDir);
 
     // MUST-FIX 3: the manifest's lockfile SHA must describe the SHIPPED closure,
     // so hash the release's OWN copied lockfile — not the source at build time.

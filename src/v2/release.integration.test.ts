@@ -13,7 +13,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, cpSync, writeFileSync, existsSync, lstatSync, readdirSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, cpSync, writeFileSync, existsSync, lstatSync, readdirSync, rmSync, symlinkSync, appendFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildRelease, assertReleaseCloses, renderEntry, RELEASE_BINDING_REL, RELEASE_LOADER_NAME, RELEASE_MANIFEST_NAME, type BuildReleaseResult } from "./release.js";
@@ -166,6 +166,45 @@ function firstSymlink(dir: string): string | null {
   }
   return null;
 }
+
+test("FG-569 lockfile binding (RED pre-fix, GREEN after): a content-mutated installed dependency with a BYTE-IDENTICAL lockfile is REFUSED", () => {
+  // The prior fix hashed the lockfile bytes — that proves only WHICH lockfile was
+  // copied, NOT that the installed node_modules matches it. A dependency mutated in
+  // place, with package-lock.json left byte-identical, slipped straight through and
+  // was copied into the release. This binds the SHIPPED closure to the lockfile, so
+  // that tamper is refused. Against the pre-binding builder this test is RED (the
+  // mutant builds); with the binding it is GREEN (the mutant is refused).
+  const src = mkdtempSync(join(workspace, "lockbind-src-"));
+  execFileSync("git", ["init", "-q"], { cwd: src });
+  execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"], { cwd: src });
+  mkdirSync(join(src, "src"));
+  // Build from THIS project's real lockfile + node_modules, so the npm cache holds
+  // every pinned tarball (the scratch install populated it) and the binding has an
+  // authentic tarball to compare each shipped dependency against.
+  for (const f of ["package.json", "package-lock.json"]) cpSync(join(sourceRoot, f), join(src, f));
+  cpSync(join(sourceRoot, "node_modules"), join(src, "node_modules"), { recursive: true, dereference: true });
+
+  // Untampered: the SAME tree builds cleanly — the binding never false-refuses a
+  // node_modules that genuinely matches its lockfile.
+  buildRelease({ sourceRoot: src, outDir: join(workspace, "lockbind-clean") });
+
+  // The mutant: a pure (no install-script), types-only leaf dependency. Appending a
+  // valid comment keeps it loadable (it is never required at runtime) but changes
+  // its bytes, while package-lock.json stays BYTE-IDENTICAL — exactly the tamper the
+  // lockfile-hash gate is blind to.
+  const victim = join(src, "node_modules", "undici-types", "index.d.ts");
+  assert.ok(existsSync(victim), "the mutation-target dependency (undici-types) is installed");
+  const lockBefore = readFileSync(join(src, "package-lock.json"));
+  appendFileSync(victim, "\n// FG-569 tamper: valid TypeScript, still loads, lockfile untouched\n");
+  assert.deepEqual(readFileSync(join(src, "package-lock.json")), lockBefore, "the tamper left package-lock.json byte-identical");
+
+  assert.throws(
+    () => buildRelease({ sourceRoot: src, outDir: join(workspace, "lockbind-tampered") }),
+    /shipped closure does not match the lockfile/i,
+    "the builder must REFUSE a content-mutated dependency whose lockfile is unchanged",
+  );
+  assert.ok(!existsSync(join(workspace, "lockbind-tampered")), "a refused build leaves no release directory behind");
+});
 
 test("FG-569 torn closure: a MISSING native binding is REFUSED at build, and no release directory is produced", () => {
   const torn = mkdtempSync(join(workspace, "torn-missing-"));
