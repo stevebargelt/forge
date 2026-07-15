@@ -18,7 +18,7 @@ import { mkdtempSync, mkdirSync, readFileSync, existsSync, copyFileSync, chmodSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildWrapperCommand, parseRecorderRuntime, type RecorderRuntime } from "./launch.js";
-import { buildRelease, type BuildReleaseResult } from "./release.js";
+import { buildRelease, thawReleaseTree, type BuildReleaseResult } from "./release.js";
 import { findGitRoot } from "../util/git-root.js";
 
 let scratch: string;
@@ -35,6 +35,9 @@ before(() => {
 });
 
 after(() => {
+  // FG-569 freezes release trees read-only at rest; force:true ignores ENOENT but
+  // cannot traverse a read-only parent. Restore write bits across scratch first.
+  thawReleaseTree(scratch);
   rmSync(scratch, { recursive: true, force: true });
 });
 
