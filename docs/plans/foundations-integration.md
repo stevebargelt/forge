@@ -335,8 +335,9 @@ state before this assignment.
   lane, now formally accepted by Cluster B.** **VERIFIED FACT:** PRD-a (`agent-workspace-isolation.md`) defers
   **three** OQs explicitly to "the Review-trust lane": **OQ-3** (the `test:unit` integration-gate silent no-op,
   `integration-gate.ts:63-65` — "not this cluster's to decide," §4.3); **OQ-4** (reds' git-read —
-  "Review-trust lane," §4.2; **PRD-a SHA `3b76153` reclassified this** — P7 proved reds ALREADY have effective
-  git-read, so the question B inherits is accept-vs-enforce, not grant-vs-withhold); **OQ-7** (a legit common-config driver, e.g. `git-lfs` smudge,
+  "Review-trust lane," §4.2; **PRD-a SHA `13d3142` reclassified this** — P7 proved reds ALREADY have effective
+  git-read (executed under two genuinely-distinct manifest-verified runtimes; Pi not tool-capable for reds here),
+  so the question B inherits is accept-vs-enforce, not grant-vs-withhold); **OQ-7** (a legit common-config driver, e.g. `git-lfs` smudge,
   triggered via an agent-written `.gitattributes` — "Review-trust lane, out of this cluster's scope," D10 residual
   table). PRD-b's own OQ-3/OQ-4 are the **unrelated** cache-key scheme and FG-553 revalidation trigger, so PRD-b
   had not yet textually adopted them. **The map now assigns all three to Cluster B (Review Execution Trust)** — the
@@ -362,7 +363,7 @@ state before this assignment.
       `-c filter.<name>.process=` / `GIT_LFS_SKIP_SMUDGE` to it. Guarded existing call sites:
       `integration-publisher.ts:305/307/308`, `reconcile.ts:229-240`, `worktree-lifecycle.ts:420/434/439`. DEPENDS
       ON A-FG559 / D10a — a NOTED cross-cluster coordination.
-  Each is a recorded B decision (PRD-a's suggested defaults: OQ-3 → durable marker; OQ-4 (post-`3b76153`) →
+  Each is a recorded B decision (PRD-a's suggested defaults: OQ-3 → durable marker; OQ-4 (post-`13d3142`) →
   ACCEPT the already-effective git-read (P7) unless B defines a real runtime-level enforcement mechanism;
   OQ-7 → accept for A, revisit for sensitive filters — B may adopt or override with rationale). These are no longer
   UNOWNED handoffs: **Cluster B is the one accountable owner of each.**
