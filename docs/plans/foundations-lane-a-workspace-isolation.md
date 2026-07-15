@@ -1,3 +1,22 @@
+> # ⚠ STATUS — SUPERSEDED DISCOVERY INPUT
+>
+> This is a **point-in-time architecture/discovery record.** The **binding contract** is
+> [`docs/prds/agent-workspace-isolation.md`](../prds/agent-workspace-isolation.md). **Where this plan and the PRD
+> differ, THE PRD GOVERNS.** This document remains valid as *evidence* (its executed probes P1–P4 are cited by the
+> PRD) but is **not accepted** and is **not a contract**. Do not implement from it where it conflicts with the PRD.
+>
+> **Known supersessions:**
+> - **(a) Red-baseline method.** The red-baseline method used throughout this plan is **replaced by the PRD's
+>   four-label method** — VERIFIED FACT / INFERENCE / OPEN QUESTION / **NORMATIVE-UNMET** (PRD §0). Under it, a
+>   decision this cluster establishes that the system does not yet implement is **NORMATIVE-UNMET** — it has **no
+>   baseline and gets NO red**; it is UNMET, not falsified. So this plan's blanket claim that *every* proposed
+>   child carries a baseline-observable red is **wrong for norms** and superseded by **PRD §8.6 + §7.2**.
+> - **(b) D10a host-hook-disabling is MANDATORY.** Disabling worktree-supplied hooks on host-side git that runs
+>   inside an agent worktree (`-c core.hooksPath=/dev/null`) is **part of the security boundary (PRD D10a)** and
+>   **narrows non-goal 4** — it is **NOT** optional defense-in-depth. Everywhere this plan frames host hook
+>   disabling as deferred / operator-optional / "worth a story, not required," the PRD governs and it is
+>   **mandatory**.
+
 # Foundations — Lane A: workspace isolation (FG-559 + FG-345 + FG-356). **PLAN ONLY. No implementation. No tickets filed.**
 
 **Baseline:** standalone clone at `185afc3` (`origin/main`). · **Epic:** FG-561 foundations campaign.
@@ -333,6 +352,15 @@ existing kill-switch idiom (`FORGE_NO_WORKTREES`, `FORGE_NO_NM_SHADOW`, `FORGE_W
 
 ### 2.6 Defense in depth — worth a story, not required by the decision
 
+> **⚠ SUPERSEDED → PRD D10 / D10a (and PRD §8.7).** This section frames disabling repo hooks in forge's host-side
+> plumbing as optional hardening ("worth a story, not required by the decision," "belongs in its own reviewable
+> story … not smuggled into the mount fix"). **The PRD makes it MANDATORY for host git that runs inside an agent
+> worktree** — after the PRD's P6b observed-red, the worktree-local `.git` pointer is attacker-controlled for a rw
+> class, so `-c core.hooksPath=/dev/null` on agent-worktree-cwd invocations (D10a) plus freezing the pointer
+> `:ro` (D10b) **is the security boundary, not defense-in-depth.** Non-goal 4 is narrowed to match: only the
+> **non-agent-worktree** broadening stays operator-optional (PRD OQ-5). The reasoning below stands as discovery;
+> its "not required" conclusion does not. **THE PRD GOVERNS.**
+
 **INFERENCE from P3/A3.** Forge's own host-side git plumbing (auto-commit, merges) runs the repo's hooks. With
 `.git` mounted `:ro` the container cannot plant one, so the escape is closed *by the mount*. But forge's
 **bookkeeping commits are forge's plumbing, not the user's commits**, and running arbitrary repo hooks inside
@@ -447,6 +475,13 @@ FG-356 wrongly.
 
 ## 5. Proposed child stories — **PLAN CONTENT ONLY. NOT FILED.**
 
+> **⚠ SUPERSEDED → PRD §8.6 + the four-label method (PRD §0).** The claim that **every** child carries a
+> falsification test "observed RED against this baseline" is **correct for factual defects and wrong for norms.**
+> The PRD reclassifies Child 3 (agent-facing read-only-git contract) and the Child 2 / Child 4 **mutants** as
+> **NORMATIVE-UNMET / test-strength checks with NO baseline red** — they mutate code that does not exist yet, so
+> there is nothing to redden against this baseline. Only genuine defects (Child 0/1/4-leak/5) take observed-red.
+> **THE PRD GOVERNS.**
+
 Ordered. Each is independently implementable, independently reviewable, and carries a **falsification test that
 can be observed RED against this baseline**.
 
@@ -458,12 +493,15 @@ can be observed RED against this baseline**.
 | **3** | **Agent-facing read-only-git contract** | Task package / seed text: */project's git history is READ-ONLY; read with log/diff/show/blame; do not commit — forge commits and publishes for you.* Resolves the §2.4 cost. | 1 | A blue agent that attempts `git commit` gets a **self-explaining** refusal, not a bare permission error. **Blocked on the §2.4 OPEN QUESTION** (do installed seeds tell agents to commit?). |
 | **4** | **FG-356 reaper** | The terminal-task pass of §4.2: Task-row-only input, the three-clause retain predicate, the **new explicit `provenEmpty` condition** on `removeWorktreeIfSafe`, branch pruning, idempotency. | — (parallel with 0–3) | **RED baseline — MUST BE OBSERVED FIRST, and I could NOT observe it (§0):** run `src/v2/fg530-crash-worktree.worktree.test.ts` **on the macOS host** and confirm that killing at `finalizePrimary:between-complete-status-and-event` leaks a worktree + branch that **no reconcile pass ever removes** (predicted by `reconcile.ts:452`, but **predicted, not executed**). **If that RED does not reproduce, this child's premise is wrong and the spec must be re-derived before any code is written.** Then: (i) the leak is reaped; (ii) a `merge_conflict` worktree is **RETAINED**; (iii) a worktree with changed files is **RETAINED** even under a reapable kind; (iv) running the reaper twice ≡ once; (v) a **concurrent live run's** worktrees are untouched. **Mutant:** pass `provenMerged:true` instead of the new condition → the retain tests must redden. |
 | **5** | **FG-345 truth-up: diagnostics + the stale advisory + pin the chaining** | Delete the false FG-354 advisory (`worktree-lifecycle.ts:130-134`). Add the **ignored-files** second diagnostic (§4.1) and surface it to the agent. Add the test that **pins sequential chaining** (§1.6 #2). | — (parallel) | **RED today:** a test asserting `createWorktree` does not warn about FG-354 fails (the `console.warn` is there). Chaining test: step 2's worktree base **contains** step 1's published commit — red if a future change makes steps branch all-off-a-stale-HEAD. |
-| **6** | **Defense in depth: no repo hooks in forge's own git plumbing** | `-c core.hooksPath=/dev/null` on forge's internal auto-commit/merge invocations (§2.6). **Behavior change — needs the operator's call.** | 1 | **RED today — and it is P3/A3, already captured:** a hook planted in `.git/hooks/pre-commit` **is executed by the host** during forge's auto-commit. After this child, the same hook does **not** run. |
+| **6** | **Defense in depth: no repo hooks in forge's own git plumbing** ⚠ **SUPERSEDED → PRD D10a.** Disabling worktree-supplied hooks on host-side git that runs **inside an agent worktree** is **MANDATORY** — part of D10a's security boundary, **not** optional defense-in-depth. The PRD narrows non-goal 4 accordingly: only broadening hook-disabling to forge's git against the **main checkout / fresh candidate worktrees** (no agent has written) stays operator-optional (PRD OQ-5). The "needs the operator's call" framing below applies ONLY to that broader, non-agent-worktree case; the agent-worktree case is not optional. **THE PRD GOVERNS.** | `-c core.hooksPath=/dev/null` on forge's internal auto-commit/merge invocations (§2.6). ~~**Behavior change — needs the operator's call.**~~ *(superseded — mandatory for agent-worktree cwd per D10a)* | 1 | **RED today — and it is P3/A3, already captured:** a hook planted in `.git/hooks/pre-commit` **is executed by the host** during forge's auto-commit. After this child, the same hook does **not** run. |
 
 **Dependencies and parallelism.** **0 → 1 → 2 → 3** is the FG-559 chain and must be sequential (each keys off
 the previous one's argument/mount). **4 (FG-356)** and **5 (FG-345 truth-up)** are **fully independent of the
 FG-559 chain and of each other** — three lanes can run in parallel. **6** depends on 1 landing (it is only
-*needed* once the mount exists) and is gated on an operator decision.
+*needed* once the mount exists) and is gated on an operator decision. **⚠ SUPERSEDED → PRD D10a / OQ-5:** the
+**agent-worktree** hook-disabling in Child 6 is **MANDATORY (D10a)**, not operator-gated; only broadening it to
+forge's git against the **main checkout / fresh candidate worktrees** remains an operator decision (OQ-5). **THE
+PRD GOVERNS.**
 
 **Ship 0 before anything else.** It is small and boring, and every later check keys off the argument it fixes.
 
