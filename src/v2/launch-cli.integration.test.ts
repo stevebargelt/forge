@@ -11,11 +11,13 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { LAUNCHES_DIR, startLaunch, type LaunchView, type TmuxRunner } from "./launch.js";
+import { buildRelease, thawReleaseTree, type BuildReleaseResult } from "./release.js";
+import { findGitRoot } from "../util/git-root.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const entry = resolve(here, "..", "cli", "index.ts");
@@ -252,6 +254,56 @@ test("FG-535 CLI: list and show render the operator surface, and rm cleans up", 
   assert.equal(rm.status, 0, rm.stderr);
   assert.ok(!existsSync(join(LAUNCHES_DIR, meta.id)), "the record is gone");
   assert.ok(!tmuxSessionAlive(meta.tmuxSession), "the remain-on-exit pane is cleaned up");
+});
+
+test("FG-569 R2 (END-TO-END through a BUILT release): forge launch show surfaces the recorder's provenance in BOTH --json and human output", async () => {
+  // The R1 operator-surface test above checks only pre-FG-569 fields; the R2
+  // end-to-end test (launch-r2.integration.test.ts) reads runtime.json DIRECTLY,
+  // never through the CLI. This closes the gap: BUILD a real release, launch through
+  // its generated entry (which exports FORGE_RELEASE_ID from its own manifest — no
+  // hand-injected env), and assert the recorder provenance the whole way through the
+  // OPERATOR SURFACE — `forge launch show --json` and the human `recorder:` line.
+  const relParent = mkdtempSync(join(tmpdir(), "fg569-show-release-"));
+  const releaseDir = join(relParent, "release");
+  let built: BuildReleaseResult;
+  try {
+    built = buildRelease({ sourceRoot: findGitRoot(process.cwd()), outDir: releaseDir });
+  } catch (e) {
+    // A dirty/non-git source can't be built into a release (assertCommitDescribesTree);
+    // that is an environment precondition, not a launch-surface regression.
+    thawReleaseTree(relParent);
+    rmSync(relParent, { recursive: true, force: true });
+    assert.fail(`could not build a release to drive the operator surface: ${(e as Error).message}`);
+  }
+
+  try {
+    // Launch THROUGH the built entry so FORGE_RELEASE_ID is exported by the entry
+    // from its manifest, into the SAME FORGE_HOME the forge() CLI reads back.
+    const run = spawnSync(built.entryPath, ["launch", "run", "--name", "r2show", "--json", "--", "true"], { encoding: "utf8", env: process.env });
+    assert.equal(run.status, 0, `forge launch run through the release entry failed: ${run.stderr}`);
+    const meta = JSON.parse(run.stdout) as LaunchView;
+    started.push(meta.id);
+
+    // Poll the OPERATOR SURFACE (not runtime.json) for the recorder record.
+    await waitFor("recorder provenance to appear in show --json", () => show(meta.id).recorder !== undefined);
+    const v = show(meta.id);
+    assert.ok(v.recorder, "forge launch show --json surfaces the recorder's runtime");
+    // execPath: the recorder ran under the release's PINNED interpreter. realpath both
+    // sides — the recorder canonicalizes process.execPath (macOS /var → /private/var).
+    assert.equal(realpathSync(v.recorder!.execPath), realpathSync(built.manifest.interpreter), "recorder.execPath is the release's pinned interpreter");
+    assert.equal(v.recorder!.abi, process.versions.modules, "recorder.abi is the running ABI");
+    assert.equal(v.recorder!.releaseId, built.manifest.id, "recorder.releaseId is the release's manifest id — reached via the CLI, sourced from the entry's manifest");
+    assert.notEqual(v.recorder!.releaseId, null, "R2 release-id is live for a real release, not the null the bug shipped");
+
+    // The HUMAN surface renders the recorder line with the same provenance.
+    const human = forge(["launch", "show", meta.id]);
+    assert.equal(human.status, 0, human.stderr);
+    assert.match(human.stdout, new RegExp(`recorder:\\s+\\S+\\s+abi ${v.recorder!.abi} \\(node ${process.version.replace(/\./g, "\\.")}\\)`), "human output carries the recorder execPath + abi line");
+    assert.match(human.stdout, new RegExp(`release ${built.manifest.id}`), "human recorder line names the release id");
+  } finally {
+    thawReleaseTree(relParent);
+    rmSync(relParent, { recursive: true, force: true });
+  }
 });
 
 test("FG-535 CLI: rm refuses a RUNNING launch without --force — removal must never be what kills the work", () => {

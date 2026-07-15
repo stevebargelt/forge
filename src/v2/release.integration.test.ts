@@ -186,14 +186,19 @@ test("FG-569 R2 entry (EXECUTED): the FORGE_RELEASE_ID block parses the id strai
   assert.equal(run.stdout, "release-feedb0d-9xk2z", "the entry's shell parses the id straight out of its manifest");
 });
 
-test("FG-569 MUST-FIX 1 (EXECUTED THROUGH A SYMLINK): the release entry resolves its release root through a promotion symlink", () => {
+test("FG-569 MUST-FIX 1 (EXECUTED THROUGH A SYMLINK, NO node on PATH): the release entry resolves its release root through a promotion symlink under a hostile PATH", () => {
   // A promoted release is reached via a `current`/PATH symlink, so $0 is the
   // symlink, not the release file. The entry must canonicalize $0 first, else
   // $here/src/cli/index.ts resolves next to the symlink and node can't find it.
+  // Run it under a node-free PATH: the canonicalization must NOT reach for a
+  // PATH-resolved `readlink` (the old shape), or the promised current/PATH symlink
+  // breaks in exactly the hostile environment the whole closure exists to survive.
   const link = join(workspace, "forge-current-link");
   symlinkSync(built.entryPath, link);
-  const r = spawnSync(link, ["release", "provenance", "--json"], { encoding: "utf8", env: process.env });
-  assert.equal(r.status, 0, `release entry via symlink failed: ${r.stderr}`);
+  const emptyDir = mkdtempSync(join(workspace, "symlink-nopath-"));
+  const env = { PATH: emptyDir, HOME: process.env.HOME ?? "/tmp", FORGE_HOME: process.env.FORGE_HOME ?? "" };
+  const r = spawnSync(link, ["release", "provenance", "--json"], { encoding: "utf8", env });
+  assert.equal(r.status, 0, `release entry via symlink failed under a node-free PATH: ${r.stderr}`);
   const prov = JSON.parse(r.stdout);
   assert.equal(prov.release.id, built.manifest.id, "the symlinked entry located its OWN release manifest through the symlink");
   assert.equal(prov.bindingLoads, true, "and loaded the closure's native binding");

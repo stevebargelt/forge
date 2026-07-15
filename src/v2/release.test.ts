@@ -23,20 +23,26 @@ test("FG-569 entry: execs the PINNED absolute interpreter with tsx loaded in-pro
   assert.ok(entry.includes("d=${p%/*}"), "dir is derived with parameter expansion, not an external");
 });
 
-test("FG-569 entry: canonicalizes $0 through symlinks (a promoted release is reached via a symlink)", () => {
+test("FG-569 entry: canonicalizes $0 through symlinks with the pinned interpreter (a promoted release is reached via a symlink)", () => {
   const entry = renderEntry("/opt/node-24/bin/node");
   // MUST-FIX 1: $0 is the SYMLINK path when forge is on PATH as a current/PATH
-  // shim; resolve the chain to the real release file before deriving $here.
-  assert.ok(entry.includes("while [ -L \"$p\" ]"), "follows a symlink chain to the real path");
-  assert.ok(entry.includes("readlink \"$p\""), "uses portable one-arg readlink to canonicalize each hop");
-  // Portability: `readlink -f` and `readlink --` are GNU extensions absent on
-  // BSD/macOS, so the entry must use neither — a leading-dash path is disarmed
-  // with a ./ prefix, not --.
-  assert.ok(!entry.includes("readlink -"), "uses no GNU-only readlink flag (-f / --)");
-  // readlink must be reached ONLY inside the symlink loop, so a DIRECT invocation
-  // under a node-free PATH never runs an external before the pinned interpreter.
+  // shim; resolve it to the real release file before deriving $here. `readlink` is
+  // NOT a shell builtin — it is resolved through PATH, so a symlinked entry under a
+  // node-free PATH could not find it. Canonicalize with the PINNED interpreter (an
+  // absolute path, no PATH lookup) instead, whose realpathSync resolves the whole
+  // chain in one call.
+  assert.ok(entry.includes(`if [ -L "$p" ]`), "canonicalizes only when $0 is actually a symlink");
+  // Scan CODE lines only — the comment legitimately names readlink to explain its
+  // absence, exactly as the R2 manifest test's comment names sed/grep.
+  const code = entry.split("\n").filter((l) => !l.trimStart().startsWith("#")).join("\n");
+  assert.ok(!code.includes("readlink"), "does NOT reach for a PATH-resolved readlink — that breaks a symlinked entry under a node-free PATH");
+  assert.ok(entry.includes(`realpathSync(process.argv[1])`), "resolves the symlink with the pinned interpreter's realpathSync");
+  assert.ok(entry.includes(`'/opt/node-24/bin/node' -e`), "the canonicalizer runs the ABSOLUTE pinned interpreter, not a PATH lookup");
+  assert.ok(entry.includes(`-e 'process.stdout.write(require("fs").realpathSync(process.argv[1]))' -- "$p"`), "passes the link path after -- so a leading-dash name is not read as a node option");
+  // The canonicalization must be reached ONLY when $0 is a symlink, so a DIRECT
+  // invocation stays a single node exec (no interpreter double-start on the hot path).
   const beforeExec = entry.slice(0, entry.indexOf("exec '"));
-  assert.equal(beforeExec.match(/readlink "/g)?.length, 2, "readlink is invoked only inside the [ -L ] loop (the dash-guarded case, two forms)");
+  assert.equal(beforeExec.match(/realpathSync\(process\.argv\[1\]\)/g)?.length, 1, "the interpreter is invoked for canonicalization at most once, inside the [ -L ] guard");
 });
 
 test("FG-569 entry: a space in the interpreter path cannot split the exec argv", () => {
