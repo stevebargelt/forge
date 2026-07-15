@@ -1,0 +1,54 @@
+FG-559 / PRD-a §4.2 PROBE 7 — RED RUNTIME CAPABILITY vs FILESYSTEM MUTATION AUTHORITY.
+EXECUTED ON FINAL RUNTIME (not a source-pattern read). A read-only red-wide agent (`forge invoke red-wide
+--read-only --runtime <rt>`) mounted on forge-plan-a @ a0064d5, one dispatch per supported runtime.
+
+WHY: PRD-a §4.2 asserted as VERIFIED FACT that reds have "no Bash" and "do not invoke git today." That was
+inferred from the seed pattern (settings.json `tools: ["read"]` + CLAUDE.md prose "you have no Bash"). The
+final runtime falsifies it: every supported runtime ships bash+git in the agent image and exposes command
+execution; the seed `tools` array is never read by forge compose (compose reads CLAUDE.md), and the CLAUDE.md
+prose is intent, not enforcement. The `:ro` mount enforces filesystem READ-ONLY (mutation authority), which is
+a DIFFERENT property from capability availability.
+
+PROVENANCE (durable run/task rows):
+  codex : run-runtime-capability-probe-codex-subscription-57d5ae
+  claude: run-runtime-capability-probe-claude-oauth-a7c1f4
+  pi    : run-runtime-capability-probe-pi-oauth-3dd9b5
+Corroborating incidental evidence (the closeout reviews themselves): red-wide
+run-files-audit-red-wide-a009cb3-02489f container.stdout.log ran `/bin/bash -lc "git rev-parse HEAD ..."`;
+red-narrow run-files-audit-red-narrow-a009cb3-01bbb6 result.json "HEAD == a009cb3 confirmed (git rev-parse HEAD)".
+
+VERBATIM EXECUTED OUTPUT — IDENTICAL ACROSS codex-subscription, claude-oauth, AND pi-oauth:
+
+=== IDENTITY ===
+/usr/bin/bash
+/usr/bin/git
+/usr/bin/node
+/usr/bin/codex
+/usr/bin/claude
+/usr/bin/pi
+/usr/bin/node v24.18.0
+SHELL=/bin/bash uname=Linux <container> 6.10.14-linuxkit ... aarch64 GNU/Linux
+
+=== GIT READ ===           (capability AVAILABLE — executed successfully)
+a0064d5e51c4630b14c2449417b21467d05b0c7a
+git version 2.34.1
+a0064d5 docs(prd): lane A — D10a guard is fail-closed default-deny syntactic (buildable)
+
+=== BOUNDED WRITE ATTEMPT ===   (mutation authority DENIED — refused by :ro mount)
+touch: cannot touch '/project/.red-write-canary': Read-only file system
+touch_exit=1
+bash: line 1: /project/CANARY: Read-only file system
+redir_exit=1
+ls: cannot access '/project/.red-write-canary': No such file or directory
+ls: cannot access '/project/CANARY': No such file or directory
+
+CONCLUSIONS (VERIFIED FACT, executed, per-runtime):
+1. bash + git + node are present at /usr/bin in the agent image for ALL THREE supported runtimes; all three
+   runtime executables (codex, claude, pi) are also present.
+2. A read-only red EXECUTES Bash and `git rev-parse HEAD` / `git log` successfully — reds have EFFECTIVE
+   git-read capability today. PRD-a §4.2's "no Bash / do not invoke git" is FALSE on the final runtime.
+3. The `:ro` project mount REFUSES every write (touch and redirect both fail "Read-only file system", exit 1;
+   no file created). Filesystem mutation authority is denied by the OS mount — independent of capability.
+4. CAPABILITY AVAILABILITY (can run commands / read git = YES) and FILESYSTEM MUTATION AUTHORITY (can write =
+   NO) are DISTINCT properties. PROJECT_MODE=ro governs (4), NOT (2). Granting/removing git-read is NOT a mount
+   change. FG-559 repairs repository VISIBILITY for linked worktrees; it does not affect tool availability.
