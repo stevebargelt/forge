@@ -11,15 +11,18 @@ it.
 
 | Cluster | PRD file | Review-clean lane HEAD |
 |---|---|---|
-| **A** — agent workspace isolation | `docs/prds/agent-workspace-isolation.md` | **`a0064d5`** |
+| **A** — agent workspace isolation | `docs/prds/agent-workspace-isolation.md` | **`c1a77e3`** |
 | **B** — review execution trust | `docs/prds/review-execution-trust.md` | **`bf906b4`** |
 | **C** — workflow lifecycle semantics | `docs/prds/workflow-lifecycle-semantics.md` | **`b5d7417`** |
 | campaign baseline | (origin/main at campaign start) | **`185afc3`** |
 
 **SHA semantics (uniform across all three clusters).** Each cluster SHA above is the **review-clean lane HEAD**,
 not necessarily the commit that finalized the PRD *file* — but as of this bump **all three coincide**: **A**
-(`a0064d5`), **B** (`bf906b4`), **and C** (`b5d7417`) are each **simultaneously the PRD-finalizing commit AND the
-lane HEAD** — the same commit edits the PRD file *and* is the lane HEAD. **No plan-only-HEAD cluster remains.** B
+(`c1a77e3`), **B** (`bf906b4`), **and C** (`b5d7417`) are each **simultaneously the PRD-finalizing commit AND the
+lane HEAD** — the same commit edits the PRD file *and* is the lane HEAD. **All three HEADs are PRD edits; no
+plan-only-HEAD cluster remains.** A's HEAD advanced from the prior `a0064d5` to **`c1a77e3`** — a PRD-a edit that
+**reclassifies §4.2/OQ-4 reds-capability** (probe P7 falsified the "no Bash / do not invoke git" claim) and adds
+the P7 probe. B
 was previously the exception (its PRD file `docs/prds/review-execution-trust.md` finalized at **`68ee713`** with a
 later plan-only citation-fix HEAD `20c8f59`); that split is **superseded** because `bf906b4` — a later PRD-path
 citation fix that **edits `docs/prds/review-execution-trust.md` itself** — **re-finalizes the PRD** and is now B's
@@ -40,7 +43,7 @@ acceptance condition and **no fabricated red** — inventing a strawman to redde
 
 ---
 
-## Cluster A — agent workspace isolation (PRD `a0064d5`)
+## Cluster A — agent workspace isolation (PRD `c1a77e3`)
 
 Three bounded children. FG-559 (mount + detector) and FG-345 (remaining scope) are independent of the rest of
 the campaign; FG-356 (reaper) carries the one **hard red gate** in the cluster.
