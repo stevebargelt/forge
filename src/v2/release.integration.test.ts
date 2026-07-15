@@ -13,7 +13,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, cpSync, writeFileSync, existsSync, lstatSync, readdirSync, rmSync, symlinkSync, appendFileSync, readFileSync, chmodSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, cpSync, writeFileSync, existsSync, lstatSync, readdirSync, rmSync, renameSync, symlinkSync, appendFileSync, readFileSync, chmodSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -31,13 +31,27 @@ let built: BuildReleaseResult;
  *  lockfile separately, not part of the commit's source identity (and it is huge).
  *  A no-op when the tree is already clean (CI runs on a committed checkout). */
 function commitSource(root: string): void {
-  const paths = ["src", "package.json"].filter((p) => existsSync(join(root, p)));
+  // FG-569 Resolution B: the commit now binds the bundled asset dirs too (seeds/,
+  // scripts/, docker/), so a build refuses a dirty seed/hook/docker file. Stage them
+  // here alongside src/+package.json+lockfile, else buildRelease would refuse the
+  // scratch's synced-but-uncommitted assets.
+  const paths = ["src", "package.json", "seeds", "scripts", "docker"].filter((p) => existsSync(join(root, p)));
   for (const lf of ["package-lock.json", "npm-shrinkwrap.json"]) {
     if (existsSync(join(root, lf))) paths.push(lf);
   }
   execFileSync("git", ["add", "--", ...paths], { cwd: root });
   if (spawnSync("git", ["diff", "--cached", "--quiet"], { cwd: root }).status !== 0) {
     execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "source snapshot"], { cwd: root });
+  }
+}
+
+/** FG-569 Resolution B: copy the REAL bundled asset dirs (seeds/, scripts/, docker/)
+ *  from this project into a synthetic fixture. buildRelease now REQUIRES these — a source
+ *  lacking one is refused as a torn closure — so every buildable fixture must carry them.
+ *  Real bytes (not stubs) so the dirty-seed/hook rejection test can mutate a genuine file. */
+function copyBundledAssets(root: string): void {
+  for (const asset of ["seeds", "scripts", "docker"]) {
+    cpSync(join(sourceRoot, asset), join(root, asset), { recursive: true, dereference: true });
   }
 }
 
@@ -194,6 +208,9 @@ test("FG-569 bundled assets (EXECUTED, NO node on PATH): `forge init` runs FROM 
   // fresh git project and prove BOTH assets resolved from inside the release.
   assert.ok(existsSync(join(built.releaseDir, "seeds")), "seeds/ is bundled into the closure");
   assert.ok(existsSync(join(built.releaseDir, "scripts")), "scripts/ is bundled into the closure");
+  assert.ok(existsSync(join(built.releaseDir, "docker")), "docker/ is bundled into the closure");
+  // The claim is scoped honestly to the control plane — the release does NOT run the dashboard.
+  assert.equal(built.manifest.selfContainedFor, "control-plane", "the manifest scopes self-containment to the control-plane command set");
 
   const project = mkdtempSync(join(workspace, "init-proj-"));
   execFileSync("git", ["init", "-q"], { cwd: project });
@@ -232,6 +249,7 @@ test("FG-569 closure: a symlinked node_modules dependency is DEREFERENCED into t
   writeFileSync(join(external, "index.js"), `module.exports = "from the external host location";\n`);
   writeFileSync(join(external, "package.json"), `{"name":"linked-dep","main":"index.js"}`);
   symlinkSync(external, join(src, "node_modules", "linked-dep"));
+  copyBundledAssets(src);
   commitSource(src);
 
   const out = join(workspace, "symlink-release");
@@ -278,6 +296,7 @@ test("FG-569 lockfile binding (RED pre-fix, GREEN after): a content-mutated inst
   // authentic tarball to compare each shipped dependency against.
   for (const f of ["package.json", "package-lock.json"]) cpSync(join(sourceRoot, f), join(src, f));
   cpSync(join(sourceRoot, "node_modules"), join(src, "node_modules"), { recursive: true, dereference: true });
+  copyBundledAssets(src);
   commitSource(src);
 
   // Untampered: the SAME tree builds cleanly — the binding never false-refuses a
@@ -369,6 +388,7 @@ function makeLockSource(label: string): string {
   mkdirSync(join(src, "src"));
   cpSync(join(sourceRoot, "package.json"), join(src, "package.json"));
   cpSync(join(sourceRoot, "node_modules"), join(src, "node_modules"), { recursive: true, dereference: true });
+  copyBundledAssets(src);
   return src;
 }
 
@@ -496,4 +516,123 @@ test("FG-569 GAP 2 (builder identity): builderCommit is recorded and EQUALS comm
     execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceRoot, encoding: "utf8" }).trim(),
     "and both name the committed source HEAD the release was built from",
   );
+});
+
+test("FG-569 Resolution B (dashboard refusal, EXECUTED, NO node on PATH): `forge dashboard` refuses in release mode — named, nonzero — before resolving dashboard/", () => {
+  // The dashboard is a SEPARATE workspace, deliberately not bundled. Run from the built
+  // release under a node-free PATH: both the bare command and `dashboard start` must exit
+  // nonzero with the named refusal, never the confusing "could not locate the dashboard
+  // workspace" from resolveForgeRoot (which would mean it tried to resolve dashboard/ first).
+  for (const args of [["dashboard"], ["dashboard", "start"]]) {
+    const { r } = runEntryUnderHostilePath(args);
+    assert.notEqual(r.status, 0, `forge ${args.join(" ")} must exit nonzero in release mode: ${r.stdout}`);
+    assert.match(r.stderr, /not available from a control-plane release build/i, `named refusal for: ${args.join(" ")}`);
+    assert.match(r.stderr, /FG-572|Child 5/, "the refusal points at the later owner");
+    assert.doesNotMatch(r.stderr, /could not locate the dashboard workspace/i, "it refused BEFORE resolving dashboard/src/server.ts");
+  }
+});
+
+test("FG-569 Resolution B (dirty seed/hook REFUSED at build): an uncommitted edit to a bundled seed OR script refuses the build — the manifest commit would not describe the shipped bytes", () => {
+  const src = makeLockSource("dirty-asset-");
+  cpSync(join(sourceRoot, "package-lock.json"), join(src, "package-lock.json"));
+  commitSource(src);
+  // Baseline: the committed tree (with real seeds/scripts/docker) builds cleanly.
+  buildRelease({ sourceRoot: src, outDir: join(workspace, "dirty-asset-clean") });
+
+  // (a) Dirty a bundled SEED — appending a comment keeps it valid but makes seeds/ dirty
+  // relative to HEAD, so the commit binding no longer describes the shipped seed bytes.
+  const seed = join(src, "seeds", "orchestrator-template.md");
+  assert.ok(existsSync(seed), "the bundled seed is present in the fixture");
+  appendFileSync(seed, "\n<!-- FG-569 uncommitted seed edit -->\n");
+  assert.throws(
+    () => buildRelease({ sourceRoot: src, outDir: join(workspace, "dirty-seed-rel") }),
+    /refusing to build a release from a dirty source/i,
+    "a dirty bundled SEED must refuse the build",
+  );
+  assert.ok(!existsSync(join(workspace, "dirty-seed-rel")), "a refused build leaves no release behind");
+
+  // (b) Commit the seed, then dirty a bundled SCRIPT — proves scripts/ is bound too.
+  commitSource(src);
+  const script = join(src, "scripts", "install-seeds.sh");
+  assert.ok(existsSync(script), "the bundled script is present in the fixture");
+  appendFileSync(script, "\n# FG-569 uncommitted script edit\n");
+  assert.throws(
+    () => buildRelease({ sourceRoot: src, outDir: join(workspace, "dirty-script-rel") }),
+    /refusing to build a release from a dirty source/i,
+    "a dirty bundled SCRIPT must refuse the build",
+  );
+  assert.ok(!existsSync(join(workspace, "dirty-script-rel")), "a refused build leaves no release behind");
+});
+
+test("FG-569 Resolution B (required asset missing): a source lacking a bundled asset dir is REFUSED as a torn closure, no release produced", () => {
+  const src = makeLockSource("missing-asset-");
+  cpSync(join(sourceRoot, "package-lock.json"), join(src, "package-lock.json"));
+  // Remove a required asset dir that makeLockSource copied — the closure gate (binding)
+  // passes, so this proves the DEDICATED required-asset refusal, not an optional skip.
+  rmSync(join(src, "docker"), { recursive: true, force: true });
+  commitSource(src);
+  assert.throws(
+    () => buildRelease({ sourceRoot: src, outDir: join(workspace, "missing-asset-rel") }),
+    /torn closure — required asset directory 'docker'/i,
+    "a missing required asset dir must REFUSE the build, not silently skip it",
+  );
+  assert.ok(!existsSync(join(workspace, "missing-asset-rel")), "a refused build leaves no release behind");
+});
+
+/** A full, committed COPY of this project (real src/ + node_modules + bundled assets)
+ *  as an isolated git checkout, so a release built from it can have its source RENAMED
+ *  away and the release still proven to run with NO source-checkout fallback. */
+function makeFullSource(label: string): string {
+  const src = mkdtempSync(join(workspace, label));
+  execFileSync("git", ["init", "-q"], { cwd: src });
+  for (const rel of ["src", "package.json", "package-lock.json", "seeds", "scripts", "docker"]) {
+    const from = join(sourceRoot, rel);
+    if (existsSync(from)) cpSync(from, join(src, rel), { recursive: true, dereference: true });
+  }
+  cpSync(join(sourceRoot, "node_modules"), join(src, "node_modules"), { recursive: true, dereference: true });
+  commitSource(src);
+  return src;
+}
+
+test("FG-569 Resolution B (EXECUTED, SOURCE RENAMED AWAY): supported commands run FROM THE RELEASE with the source checkout inaccessible — no fallback", () => {
+  // The sharpest proof of self-containment for the control-plane set: build a release
+  // from an isolated source, then RENAME the source away so it cannot be resolved, and
+  // exercise the release's own entry. Every supported command must run from the release's
+  // OWN bundled bytes; forge dashboard must refuse (release mode) rather than reach out.
+  const fullSrc = makeFullSource("srcgone-");
+  const built2 = buildRelease({ sourceRoot: fullSrc, outDir: join(workspace, "srcgone-release") });
+  renameSync(fullSrc, `${fullSrc}.GONE`);
+  assert.ok(!existsSync(fullSrc), "the source checkout is now inaccessible");
+
+  const nopath = mkdtempSync(join(workspace, "srcgone-nopath-"));
+  const baseEnv = { PATH: nopath, HOME: process.env.HOME ?? "/tmp", FORGE_HOME: process.env.FORGE_HOME ?? "" };
+
+  // 1) forge init SUCCEEDS from the release's OWN bundled seeds/ + scripts/ (source gone).
+  const project = mkdtempSync(join(workspace, "srcgone-proj-"));
+  execFileSync("git", ["init", "-q"], { cwd: project });
+  const initR = spawnSync(built2.entryPath, ["init", "--project", project, "--prefix", "TST"], { encoding: "utf8", env: baseEnv });
+  assert.equal(initR.status, 0, `forge init from the release (source gone) failed: ${initR.stderr}`);
+  assert.match(readFileSync(join(project, "CLAUDE.md"), "utf8"), /<!-- forge:orchestrator-start -->/, "init rendered CLAUDE.md from the release's bundled seed");
+  assert.ok(existsSync(join(project, ".git", "hooks", "commit-msg")), "init installed the git hook from the release's bundled scripts/");
+
+  // 2) forge dashboard REFUSES in release mode — nonzero + named — without consulting the source.
+  const dashR = spawnSync(built2.entryPath, ["dashboard"], { encoding: "utf8", env: baseEnv });
+  assert.notEqual(dashR.status, 0, "forge dashboard must refuse in release mode");
+  assert.match(dashR.stderr, /not available from a control-plane release build/i, "named release-mode refusal");
+
+  // 3) A representative set of OTHER supported commands START without the source checkout.
+  const verR = spawnSync(built2.entryPath, ["--version"], { encoding: "utf8", env: baseEnv });
+  assert.equal(verR.status, 0, `--version failed: ${verR.stderr}`);
+  assert.match(verR.stdout.trim(), /^\d+\.\d+\.\d+/, "forge --version prints a version from the release's package.json");
+
+  const forgeHome = mkdtempSync(join(workspace, "srcgone-fh-"));
+  const statR = spawnSync(built2.entryPath, ["status", "--json"], { encoding: "utf8", env: { ...baseEnv, FORGE_HOME: forgeHome } });
+  assert.equal(statR.status, 0, `status --json failed: ${statR.stderr}`);
+  assert.doesNotThrow(() => JSON.parse(statR.stdout), "status --json emitted valid JSON from the release");
+  assert.doesNotMatch(statR.stderr, /\.GONE/, "status did not try to reach the renamed-away source checkout");
+
+  // 4) provenance runs — the native binding loads from the RELEASE's OWN node_modules.
+  const provR = spawnSync(built2.entryPath, ["release", "provenance", "--json"], { encoding: "utf8", env: baseEnv });
+  assert.equal(provR.status, 0, `release provenance failed: ${provR.stderr}`);
+  assert.equal(JSON.parse(provR.stdout).bindingLoads, true, "the closure's binding loaded from the release, source gone");
 });

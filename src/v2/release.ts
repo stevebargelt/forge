@@ -1,16 +1,30 @@
 // FG-569 (FG-553 Child 2) — the release-closure BUILDER + R1 provenance.
 //
 // A release is a self-contained, IMMUTABLE directory that carries everything the
-// control plane needs to run without consulting PATH or the ambient environment:
+// declared CONTROL-PLANE command set needs to run without consulting PATH or the
+// ambient environment. "Self-contained" is scoped HONESTLY to that set (recorded on
+// the manifest as `selfContainedFor: "control-plane"`): the dashboard is a SEPARATE
+// application workspace with its OWN dependency tree and is deliberately NOT bundled
+// (deferred to FG-572 / Child 5), so `forge dashboard` refuses in release mode rather
+// than pretending to run. Every SUPPORTED control command's module-relative assets ARE
+// bundled, so none of them silently falls back to a source checkout:
 //
 //   <release>/
 //     forge-release.json   the manifest (commit, absolute interpreter, ABI, lockfile identity)
 //     forge                the entry: `#!/bin/sh` that execs the PINNED absolute node
 //     forge-loader.mjs     the in-process tsx loader (import "tsx")
 //     src/                 the source tree
-//     seeds/, scripts/     bundled runtime assets shipped commands resolve module-relative
+//     seeds/               agent seeds, forge-raci.md, orchestrator-template.md, seed-drift baseline
+//     scripts/             git-hooks, claude-hooks, claude-commands, install-seeds.sh
+//     docker/              build.sh + Dockerfile (doctor image probe, upgrade --rebuild-image)
 //     node_modules/        the ENTIRE dependency closure, incl. the compiled native binding
 //     package.json, package-lock.json
+//
+// seeds/ + scripts/ + docker/ are REQUIRED, not optional: a supported command whose
+// module-relative asset dir is absent at build time is a TORN CLOSURE refusal, not a
+// silent skip (the shipped release would carry a command that cannot find its own
+// assets). They are commit-bound like src/ (see assertCommitDescribesTree), so a dirty
+// seed/hook/docker file refuses the build for the same reason a dirty src/ does.
 //
 // The entry execs an ABSOLUTE interpreter with tsx loaded in-process (--import),
 // so exactly one process exists and it is the one that loads better-sqlite3 — its
@@ -63,7 +77,22 @@ export type ReleaseManifest = {
   builtAt: string;
   entry: string; // RELEASE_ENTRY_SOURCE, relative to the release root
   binding: string; // RELEASE_BINDING_REL, relative to the release root
+  // FG-569 (Resolution B): the "self-contained" claim, scoped honestly. This release
+  // closes over the CONTROL-PLANE command set — not the dashboard application (its own
+  // workspace/deps, deferred to FG-572). Recorded so nothing downstream reads the
+  // release as if it could run `forge dashboard`.
+  selfContainedFor: "control-plane";
 };
+
+// FG-569 (Resolution B): asset directories a SUPPORTED control command resolves
+// module-relative to the release root (seeds via init/upgrade/doctor-seed-drift,
+// scripts via init hooks + upgrade install-seeds, docker via doctor image probe +
+// upgrade --rebuild-image). REQUIRED — absence is a torn-closure refusal, and each is
+// commit-bound so a dirty asset refuses the build. `dashboard/` is deliberately absent:
+// a separate workspace, not a control-plane asset (forge dashboard refuses in release
+// mode). Bound paths for the commit check add package.json + the selected lockfile;
+// node_modules is lockfile-bound separately, not part of the commit's source identity.
+const REQUIRED_ASSET_DIRS = ["seeds", "scripts", "docker"] as const;
 
 const LOADER_SHIM = `// FG-569: in-process tsx loader for this release's entry. import "tsx" resolves
 // tsx from THIS release's node_modules (relative to this file), not the caller's
@@ -137,21 +166,25 @@ function builderRoot(): string {
   return findGitRoot(dirname(fileURLToPath(import.meta.url)));
 }
 
-/** Refuse to build when the SHIPPED source paths of `root` are dirty relative to
- *  HEAD, so the recorded commit can never lie about the copied bytes (FG-569 GAP 2).
- *  Only what actually goes into the release is checked — src/, package.json, and the
- *  selected lockfile; node_modules is install OUTPUT, bound separately to the lockfile
+/** Refuse to build when ANY commit-bound SHIPPED source path of `root` is dirty
+ *  relative to HEAD, so the recorded commit can never lie about the copied bytes
+ *  (FG-569 GAP 2, extended by Resolution B to EVERY copied source asset). `paths` is
+ *  the exact set copied under the commit's identity — src/, package.json, the selected
+ *  lockfile, AND the bundled asset dirs (seeds/, scripts/, docker/). A dirty seed OR
+ *  hook OR docker file therefore refuses the build for the same reason a dirty src/
+ *  does: the manifest commit would not describe the shipped bytes. node_modules is NOT
+ *  here — it is install OUTPUT, bound to the lockfile separately
  *  (assertShippedClosureMatchesLockfile), not part of the commit's source identity.
  *  `label` names which checkout (source / builder) so the refusal is actionable. */
-function assertCommitDescribesTree(root: string, lockfileName: string, label: string): void {
+function assertCommitDescribesTree(root: string, paths: readonly string[], label: string): void {
   let porcelain: string;
   try {
-    porcelain = execFileSync("git", ["status", "--porcelain", "--", "src", "package.json", lockfileName], { cwd: root, encoding: "utf8" });
+    porcelain = execFileSync("git", ["status", "--porcelain", "--", ...paths], { cwd: root, encoding: "utf8" });
   } catch (e) {
     throw new Error(`forge release: cannot check the ${label} tree at ${root} for uncommitted changes (not a git repo?) — ${(e as Error).message}`);
   }
   if (porcelain.trim() !== "") {
-    throw new Error(`forge release: refusing to build a release from a dirty ${label} at ${root} — src/, package.json, or ${lockfileName} has uncommitted changes relative to HEAD, so the manifest commit would not describe the shipped bytes. Commit or stash these changes, then rebuild:\n${porcelain.trimEnd()}`);
+    throw new Error(`forge release: refusing to build a release from a dirty ${label} at ${root} — one of the shipped source paths (${paths.join(", ")}) has uncommitted changes relative to HEAD, so the manifest commit would not describe the shipped bytes. Commit or stash these changes, then rebuild:\n${porcelain.trimEnd()}`);
   }
 }
 
@@ -467,21 +500,38 @@ export function buildRelease(opts: BuildReleaseOptions): BuildReleaseResult {
   // release survives the refusal.
   assertClosureLoads(sourceRoot);
 
+  // FG-569 (Resolution B): a SUPPORTED control command resolves these module-relative
+  // to the release root (init → seeds/ + scripts/, doctor → seeds/ via seed-drift, etc.).
+  // A missing one is a TORN CLOSURE — the release would ship a command that cannot find
+  // its own assets — so REFUSE the build rather than optionally skip (the round-1
+  // seeds?/scripts? glob was too loose). Checked AFTER the native-binding gate so a torn
+  // binding is still reported as such; this is not a silent optional-skip either way.
+  for (const rel of REQUIRED_ASSET_DIRS) {
+    if (!existsSync(join(sourceRoot, rel))) {
+      throw new Error(`forge release: torn closure — required asset directory '${rel}' is missing at ${join(sourceRoot, rel)}. A supported control-plane command resolves it module-relative to the release; a release without it ships a command that cannot find its own assets. Add ${rel}/ to the source, then rebuild.`);
+    }
+  }
+
   // FG-569 (GAP 2): bind the recorded commit(s) to the shipped bytes. Refuse a dirty
   // SOURCE (its src/+package.json+lockfile are what gets copied) so `commit` cannot
   // lie, and record the BUILDER's own identity separately — the entry/loader bytes are
   // generated by THIS forge, not by --source. On a self-build the builder IS the source
   // checkout, so one dirty-check covers both and the two commits are equal.
   const now = opts.now ?? new Date();
-  assertCommitDescribesTree(sourceRoot, lockfileName, "source");
+  // The commit-bound source paths: src/, package.json, the selected lockfile, AND every
+  // bundled asset dir. A dirty seed/hook/docker file refuses the build (Resolution B).
+  const sourceBoundPaths = ["src", "package.json", lockfileName, ...REQUIRED_ASSET_DIRS];
+  assertCommitDescribesTree(sourceRoot, sourceBoundPaths, "source");
   const commit = gitCommit(sourceRoot);
   const bRoot = builderRoot();
   let builderCommit: string;
   if (bRoot === sourceRoot) {
     builderCommit = commit;
   } else {
+    // The builder contributes only the generated entry/loader bytes (from src/), so bind
+    // its own src/package.json/lockfile — the assets come from --source, checked above.
     const builderLockfile = selectLockfile(bRoot);
-    assertCommitDescribesTree(bRoot, builderLockfile, "builder");
+    assertCommitDescribesTree(bRoot, ["src", "package.json", builderLockfile], "builder");
     builderCommit = gitCommit(bRoot);
   }
   const rand = opts.rand ?? Math.random().toString(36).slice(2, 8);
@@ -492,22 +542,17 @@ export function buildRelease(opts: BuildReleaseOptions): BuildReleaseResult {
   rmSync(tmpDir, { recursive: true, force: true });
   mkdirSync(tmpDir, { recursive: true });
   try {
-    // FG-569: `src` + `node_modules` is not the whole runtime. Shipped commands
-    // resolve bundled assets MODULE-RELATIVE to the release root — `forge init`
-    // reads `seeds/` (also seed-drift/raci) and copies hooks out of `scripts/`
-    // (git-hooks, claude-hooks, claude-commands). Omit these and the "self-contained"
-    // release ships a `forge init` that cannot find its own seeds, so copy them into
-    // the closure alongside src. A real forge checkout always carries both; the
-    // trailing `?` optional set is skipped when absent so a minimal synthetic source
-    // (fixtures that only exercise closure/lockfile logic) still builds. (`dashboard/`
-    // is a SEPARATE npm workspace with its own dependency tree — a distinct closure,
-    // not bundled by this control-plane release; `forge dashboard` is not release-critical.)
-    for (const rel of ["src", "node_modules", "package.json", lockfileName, "seeds?", "scripts?"]) {
-      const optional = rel.endsWith("?");
-      const name = optional ? rel.slice(0, -1) : rel;
-      const from = join(sourceRoot, name);
-      if (optional && !existsSync(from)) continue;
-      const dest = join(tmpDir, name);
+    // FG-569 (Resolution B): `src` + `node_modules` is not the whole runtime. Shipped
+    // commands resolve bundled assets MODULE-RELATIVE to the release root — `forge init`
+    // reads `seeds/` (also seed-drift/raci) and copies hooks out of `scripts/` (git-hooks,
+    // claude-hooks, claude-commands); doctor reads seeds/ via seed-drift; docker/ carries
+    // the build inputs upgrade/doctor consult. All three are REQUIRED (their presence was
+    // asserted above), so no optional-skip here. (`dashboard/` is a SEPARATE npm workspace
+    // with its own dependency tree — deliberately NOT bundled; `forge dashboard` refuses in
+    // release mode, deferred to FG-572 / Child 5.)
+    for (const rel of ["src", "node_modules", "package.json", lockfileName, ...REQUIRED_ASSET_DIRS]) {
+      const from = join(sourceRoot, rel);
+      const dest = join(tmpDir, rel);
       cpSync(from, dest, { recursive: true, dereference: true });
       // cpSync's `dereference` follows ONLY the top-level path — a NESTED symlink
       // (an npm-linked dependency, a .bin entry) survives the recursive copy as a
@@ -536,6 +581,7 @@ export function buildRelease(opts: BuildReleaseOptions): BuildReleaseResult {
       builtAt: now.toISOString(),
       entry: RELEASE_ENTRY_SOURCE,
       binding: RELEASE_BINDING_REL,
+      selfContainedFor: "control-plane",
     };
     writeFileSync(join(tmpDir, RELEASE_MANIFEST_NAME), JSON.stringify(manifest, null, 2) + "\n");
 
