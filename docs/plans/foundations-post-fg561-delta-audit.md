@@ -5,8 +5,13 @@ triggers (`docs/plans/foundations-integration.md`) into a concrete, rerunnable p
 **once FG-561/FG-553 lands and before any foundation child begins implementation.** It cites the three PRDs; it
 invents no normative decisions and allocates no tickets.
 
-**Keyed to the three FINAL PRD SHAs** — PRD-a `a0064d5`, PRD-b `68ee713`, PRD-c `c55da4a` — and the campaign
-baseline **`185afc3`**. Each PRD's revalidation triggers (A §7.3, B OQ-4 / §9.4, C §8, and the map §5
+**Keyed to each cluster's review-clean lane HEAD** — A `a0064d5`, B `68ee713`, C `c55da4a` — and the campaign
+baseline **`185afc3`**. Each SHA is the **review-clean lane HEAD**, not necessarily the PRD-file-finalizing
+commit: A (`a0064d5`) and B (`68ee713`) are each simultaneously their PRD's finalizing commit **and** their lane
+HEAD; for **C**, the PRD file `docs/prds/workflow-lifecycle-semantics.md` was finalized at **`31a690d`** and
+`c55da4a` is a later **plan-only** census fix on the same lane branch (it edits
+`docs/plans/foundations-lane-c-lifecycle-semantics.md`, not the PRD) — cited here as the lane HEAD, so `c55da4a`
+must not be read as a PRD edit. Each PRD's revalidation triggers (A §7.3, B OQ-4 / §9.4, C §8, and the map §5
 cross-cutting) are the source; this brief is their union, made executable.
 
 ---
@@ -53,9 +58,9 @@ The FG-553/FG-555 mechanism surfaces, plus **every file the three PRDs assume be
 | **the promotion mechanism** (promoted release dir / `forge` vs `forge-dev` launcher; whatever FG-553 introduces) | A §7.3, B OQ-4 — an acceptance test may run the OLD promoted artifact and prove nothing. **The single highest-value surface.** |
 | **`src/store/db.ts`** (migration policy — on-open / writable-open / per-version schema) | map §5 cross-cutting; baseline `185afc3` commit itself corrects "migrations run on EVERY open, not just writable". The A/B/C shared **no-`tasks`-migration** stance is safe only while the store schema is stable across the versions that open it. |
 | **node-preflight / ABI surface** (`process.execPath`, `process.versions.modules`, the recorded provisioning ABI) | B D1.4 / OQ-1 / §9.4 — FG-555's launched-workload runtime can change the ABI FG-566 provisioning keys on; N-2/F3 must be re-derived against the **pinned post-FG-553 ABI**, not `137`. |
-| **`launch.ts`** (provenance / `dispatchSource` recording; how a run records which Forge version launched it) | C D-2 rule 0 / C §8 — the classifier's rule 0 reads a provenance marker **written by the current Forge version**; if marker-less rows become reachable on **live** runs, `legacy_ambiguous_invoke`'s bound dissolves. |
+| **the `dispatchSource` dispatch sites** — WRITE: `invoke.ts:151` stamps `"invoke"`; workflow sites `reconcile.ts:659`, `gate.ts:322`/`:411`, `runNext.ts:498`/`:1276`/`:1709`. READ: classifier rule 0 at `lifecycle-evaluator.ts:179-183` | C D-2 rule 0 / C §8 — rule 0 reads the `dispatchSource` marker **written at dispatch time by the current Forge version**; if marker-less rows become reachable on **live** runs, `legacy_ambiguous_invoke`'s bound dissolves. Audit the marker **at the dispatch sites**. **NOT `src/v2/launch.ts`** — that file is FG-535 tmux durable-launch (exit-record + launcher-attribution) and records **no** `dispatchSource`; if its tmux launch-record / R2 exit-recorder provenance is relevant it is a **separate** FG-535 concern, not the `dispatchSource` marker. |
 | **`src/v2/spawn.ts`** (mount construction path — the `.git` mount and `PROJECT_MODE`) | A §7.3 — the acceptance tests for AC-1/AC-2/AC-3/AC-7 edit `spawn.ts`; confirm they run against the artifact they think they test. |
-| **`src/v2/store/runs.ts`** (`completeRun` `:147`, `updateRunStatus` FG-484 refusal `:174-179`) | C INV-2 — the no-resurrection guarantee is store-layer; confirm both guards survive the FG-553 store changes and that no new completion-writing path appeared. |
+| **`src/store/runs.ts`** (`completeRun` `:140` / its `AND status='active'` guard `:147`; `updateRunStatus` FG-484 refusal `:174-179`) | C INV-2 — the no-resurrection guarantee is store-layer; confirm both guards survive the FG-553 store changes and that no new completion-writing path appeared. **(There is no `src/v2/store/` directory — the store lives at `src/store/`.)** |
 | **`cli/commands/review-loop.ts`** (the three local-run sites `:544`/`:622`/`:853`) | B OQ-4 — after FG-553 these run the promoted release, not the working tree. |
 | **`src/v2/retry.ts`** (`:263` mount-mode fallback; `:427-466` mint) | C OQ-2 / map OQ-INT-1 — the fail-open mount-mode fallback is the unowned seam; confirm FG-553 did not change mount-mode provenance under it. |
 | **`src/v2/lifecycle-evaluator.ts`** (classifier rule 0, `:110`/`:116-127`) | C §8 — two Forge versions with different classifier rules writing one store disagree about one row. |
@@ -147,14 +152,26 @@ ABI) / **DISSOLVED** (assumption no longer holds — e.g. store-version policy a
 the PRD conclusion that must be re-derived and route it back to that cluster). The bound `$POST_FG561_SHA`,
 the audited range, and the owner are stamped at the top.
 
-## 8. PRE-IMPLEMENTATION GATE (HARD)
+## 8. PRE-IMPLEMENTATION GATE (HARD — enforced at decomposition/campaign INTAKE)
 
-> **No foundation child may begin implementation until this delta-audit PASSES** — where PASS means every §4
-> assumption is recorded RE-CONFIRMED or CHANGED-with-a-named-rebinding, and every DISSOLVED assumption has been
-> routed back to its cluster's PRD for re-derivation **before** the affected child starts.
->
-> This is a **hard gate**, not advisory. It sits **above** the per-child red prerequisites in
-> `docs/plans/foundations-decomposition.md` (A-FG356's AC-5 host gate, B-FG525's F9 container-gone red,
-> C-FG527-c's A-4 red, C-A-6's probe): those reds must be observed against **the audited artifact**, so they are
-> downstream of this gate. A child whose captured red or acceptance probe is FG-553-sensitive (A-FG559,
-> B-FG566, C-FG477/A-6 per §4) **may not treat that evidence as valid until the audit re-binds it.**
+**Where the gate is enforced.** This is a **precondition check in the primary orchestrator's campaign /
+decomposition INTAKE transition** — a required, blocking gate condition — **not** a prohibition sentence a reader
+is trusted to honor. Before the orchestrator dispatches **any** foundation child (any A-\*, B-\*, or C-\* slice),
+its intake step must verify, as a hard precondition, that:
+
+1. the delta-audit **result artifact EXISTS** at its committed output path
+   `docs/plans/foundations-post-fg561-delta-audit-result.md` (§7) on the integration branch; **AND**
+2. that artifact records a bound `$POST_FG561_SHA` and an overall **PASS** verdict; **AND**
+3. every §4 assumption in it is recorded **RE-CONFIRMED** or **CHANGED-with-a-named-rebinding**, and every
+   **DISSOLVED** assumption carries a recorded route back to its cluster's PRD for re-derivation.
+
+If any of (1)–(3) is unmet, the intake transition **fails closed** and dispatches no foundation child. "Has the
+gate been satisfied?" is therefore a **yes/no check against a durable committed artifact** — the
+presence-and-PASS of `…-delta-audit-result.md` — not a request, and not a manual reading step that can be
+skipped.
+
+This precondition sits **above** the per-child red prerequisites in
+`docs/plans/foundations-decomposition.md` (A-FG356's AC-5 host gate, B-FG525's F9 container-gone red,
+C-FG527-c's A-4 red, C-FG477-S5 / A-6's probe): those reds must be observed against **the audited artifact**, so
+they are downstream of this gate. A child whose captured red or acceptance probe is FG-553-sensitive (A-FG559,
+B-FG566, C-FG527 / C-FG477-S5 per §4) **may not treat that evidence as valid until the audit re-binds it.**

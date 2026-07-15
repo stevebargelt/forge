@@ -193,10 +193,17 @@ finalize-event enumeration needs C's evaluator surface to exist first. **INFEREN
 
 ### 3.0 CONSOLIDATED ownership/conflict classification (every cross-cluster touch, one row)
 
-**One row per cross-cluster shared surface**, classified **OWNED-BY-`<cluster>`** (one cluster decides, the
-others conform) or **UNOWNED** (no PRD closes it — it needs an operator decision). This table consolidates the
-§1 dependencies, the §2 file/schema overlaps, and the detailed ownership rows in §3.1 below into a single
-classification. Evidence labels: **VERIFIED (via PRD)** / **INFERENCE** / **OPEN QUESTION**.
+**One row per cross-cluster shared surface**, classified into exactly one of **three classes**:
+
+- **OWNED-BY-`<cluster>`** — one cluster's PRD decides the semantics; the others conform.
+- **COORDINATED** — a shared surface, region, or constant that **no single cluster owns the merge of**. The
+  per-row **semantic** ownership may still be stated (e.g. child identity is OWNED-BY-C), but the **file edit**
+  requires a coordinated rebase: two or more clusters touch the same lines, or must agree on the same constant,
+  so the second to land **re-verifies against the other's change** rather than merging mechanically.
+- **UNOWNED** — no PRD closes it; it needs an operator decision.
+
+This table consolidates the §1 dependencies, the §2 file/schema overlaps, and the detailed ownership rows in §3.1
+below into a single classification. Evidence labels: **VERIFIED (via PRD)** / **INFERENCE** / **OPEN QUESTION**.
 
 | # | Shared surface | Clusters that touch it | Classification — who decides / who conforms (or the operator decision needed) | Basis |
 |---|---|---|---|---|
@@ -207,17 +214,17 @@ classification. Evidence labels: **VERIFIED (via PRD)** / **INFERENCE** / **OPEN
 | **5** | `verdictBlocksGate` gate-blocking predicate (`gate.ts:59-65`) | C (owns placement), B (edits in place) | **OWNED-BY-C** (placement — stays in `gate.ts` until C relocates it). **B conforms** — edits it **in place**; the two clusters must **NOT fork it** (a fork re-opens the F16 divergence FG-523 closed). | VERIFIED — C §5.2(c) |
 | **6** | `merge_conflict` failure-kind **membership** | A (retains on it), C (holds campaign on it) | **OWNED-BY-A** (the worktree ticket owns any broadening — "should be in the worktree ticket, not discovered in a campaign"). Shared **read**; **neither may broaden membership unilaterally** — broadening it broadens campaign holds (C's SHARED-blocker). | VERIFIED — A §4 ("adds no kind"); C §5.2(b) |
 | **7** | **Run completion writes** (no-resurrection) | A, B, C (all must not cross) | **OWNED-BY-store-layer** (`store/runs.ts:147`, `:174-179`). **All three clusters conform** — none may add a **third** completion-writing path. | VERIFIED — C INV-2/S3 |
-| **8** | **Shared `dispatchFanoutStep` function region** (`:1620-1626`, `:1668-1671`) — B-FG524 ⇄ C-FG527 | B (D3), C (D-5b) | **CO-OWNED / COORDINATED, no single owner of the merge.** No *semantic* dependency (VERIFIED — B's gate is role-scoped, B §9.1); the conclusion that they **parallelize** is **INFERENCE**; both edit the same lines, so the second to land requires a **COORDINATED** rebase — re-verify child-filter semantics after the other's migration — **not** a routine/automatic one (see §4, D1). | VERIFIED (no semantic dep) + INFERENCE (parallelizable / rebase) |
-| **9** | `reconcile.ts` tail (`reconcileRun`) — reaper vs `finalizeOrphanedPrimaries` vs crash-recovery gate | A (D9), C (FG-477/527), B (D4) | **PARTITIONED — no single owner; disjoint line regions, COEXIST.** Each owns its own region; three semantic convergences must be preserved (A keys on ROW / C on lineage; A reads C's finalized row idempotently; B's decline keeps contraband non-terminal so A leaves it). | INFERENCE (reconciling the three PRDs) — §2.2 |
-| **10** | The constant `awaiting_gate ∈ {non-terminal, ACTIVE}` | A, B, C | **CO-OWNED — a shared constant all three must agree on** before any of them changes a status set. If any treats it as terminal → premature reap (A) or permanent wedge (C). | VERIFIED — A D9; B D3/N-9; C INV-7 |
+| **8** | **Shared `dispatchFanoutStep` function region** (`:1620-1626`, `:1668-1671`) — B-FG524 ⇄ C-FG527 | B (D3), C (D-5b) | **COORDINATED.** The **semantic** ownership is settled — **child identity is OWNED-BY-C** (D-5b: from the evaluator, never a `red-` prefix), and **B conforms** (role-scoped gate, B §9.1). But the **file edit** is coordinated: both clusters change the same lines, there is no *semantic* dependency (VERIFIED — B §9.1) and the parallelizable conclusion is **INFERENCE**, so the second to land does a **COORDINATED** rebase — re-verify child-filter semantics against the other's migration — **not** a routine/automatic one (see §4, D1). | VERIFIED (semantic: child identity OWNED-BY-C; no semantic dep) + INFERENCE (parallelizable / rebase) |
+| **9** | `reconcile.ts` tail (`reconcileRun`) — reaper vs `finalizeOrphanedPrimaries` vs crash-recovery gate | A (D9), C (FG-477/527), B (D4) | **COORDINATED — no single owner; disjoint line regions, COEXIST.** Each cluster owns its own region (so the merge is textually trivial), but three semantic convergences must be preserved (A keys on ROW / C on lineage; A reads C's finalized row idempotently; B's decline keeps contraband non-terminal so A leaves it). | INFERENCE (reconciling the three PRDs) — §2.2 |
+| **10** | The constant `awaiting_gate ∈ {non-terminal, ACTIVE}` | A, B, C | **COORDINATED — a shared constant all three must agree on** before any of them changes a status set. If any treats it as terminal → premature reap (A) or permanent wedge (C). | VERIFIED — A D9; B D3/N-9; C INV-7 |
 | **11** | **FG-527 ticket AC-2** — "a failed shipping-reviewer (non-`red-`-prefixed red) on a fanout step is retryable as `red_review`" | C (corrects it), B (adopts the fanout adopting the minted primary) | **OWNED-BY-C — AC-2 AS WRITTEN IS REJECTED.** PRD-c owns the correction: migrating retry to **allow** a red retry mints a **detached primary the fanout adopts** as parent of a fresh wave (probe p2); **PRD-c D-4 REFUSES it** — classify with the evaluator and **KEEP REFUSING**, refuse under `--force` too. FG-527's AC #2 is **amended to D-1**. **A PRD that quietly inherits AC-2 ships this bug.** | VERIFIED — C §2 / D-1 / D-4 (`retry.ts:427-466`; p2) |
 | **12** | `retry.ts:263` **fail-open mount-mode fallback** (a non-prefixed red gets a **writable** mount) | C (flags, does not fix), A (security boundary D2/D10) | **UNOWNED.** **Operator must decide:** does `retry.ts:263`'s mount-mode fallback fall inside **Cluster A's D2/D10 security boundary**, or is it a **separate finding needing its own owner**? Confirm A's D10b keys the pointer-freeze on **mount-mode** (rw ⇒ freeze), not on "is this a blue agent," so the mitigation actually covers a fail-open red. **The fail-open grant itself (a red becoming rw at all) is owned by neither A nor C.** | OPEN QUESTION — carried from §3.2 OQ-INT-1 (C D-6/OQ-2 VERIFIED; A-boundary fit INFERENCE) |
 | **13** | **Held-child worktree reclaim at RUN-END** (run ends with the child still `awaiting_gate`) | B (N-9(b) requires reclaim), A (reaper is terminal-only) | **UNOWNED.** A's FG-356 reaper is **terminal-only**; a still-held child is **non-terminal**, so A's reaper **never reclaims it**. Neither PRD nails the run-end arm. **Operator/decomposition must decide:** either **(i)** run-end/abandon **terminalizes** held children (then A's reaper collects them next pass), or **(ii)** **Cluster B owns the run-end reclaim path** directly. This is the one held-child seam A's design does not close. | OPEN QUESTION — carried from §3.2 OQ-INT-2 (B N-9(b) VERIFIED; the gap INFERENCE) |
 
-**Reading the table:** rows 1–7 are **settled** (a cluster owns, the others conform — the PRDs decide). Rows
-8–10 are **coordinated but ownerless-by-design** (a shared region/constant no single cluster owns; the map
-sequences them — §2, §4). Rows 11–13 are the **corrections and the two genuinely UNOWNED seams**: AC-2 is
-rejected-and-owned (C corrects it), while **OQ-INT-1 and OQ-INT-2 need an operator decision no PRD makes.**
+**Reading the table (by class):** rows 1–7 are **OWNED-BY** a cluster (it decides, the others conform — the PRDs
+settle them). Rows 8–10 are **COORDINATED** (a shared region/constant no single cluster owns the merge of; the
+map sequences them — §2, §4). Row 11 is **OWNED-BY-C** (AC-2 rejected-and-corrected). Rows 12–13 are the two
+genuinely **UNOWNED** seams — **OQ-INT-1 and OQ-INT-2 need an operator decision no PRD makes.**
 
 ### 3.1 Detailed ownership rows (the settled surfaces above, with full basis)
 

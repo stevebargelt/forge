@@ -7,14 +7,21 @@ PRDs; this document only proposes *how the already-decided work would be sliced*
 satisfies. Where a slice's ordering or coupling is asserted, it cites the integration map — it does not re-derive
 it.
 
-**Keyed to the three FINAL, review-clean PRD SHAs (and the campaign baseline):**
+**Keyed to each cluster's review-clean lane HEAD (and the campaign baseline):**
 
-| Cluster | PRD | SHA |
+| Cluster | PRD file | Review-clean lane HEAD |
 |---|---|---|
 | **A** — agent workspace isolation | `docs/prds/agent-workspace-isolation.md` | **`a0064d5`** |
 | **B** — review execution trust | `docs/prds/review-execution-trust.md` | **`68ee713`** |
 | **C** — workflow lifecycle semantics | `docs/prds/workflow-lifecycle-semantics.md` | **`c55da4a`** |
 | campaign baseline | (origin/main at campaign start) | **`185afc3`** |
+
+**SHA semantics (uniform across all three clusters).** Each cluster SHA above is the **review-clean lane HEAD**,
+not necessarily the commit that finalized the PRD *file*. A (`a0064d5`) and B (`68ee713`) are each simultaneously
+the PRD-finalizing commit **and** the lane HEAD. For **C**, the PRD file
+`docs/prds/workflow-lifecycle-semantics.md` was finalized at **`31a690d`**; `c55da4a` is a later **plan-only**
+census fix on the same lane branch (it edits `docs/plans/foundations-lane-c-lifecycle-semantics.md`, not the
+PRD) — cited here as the lane HEAD, so `c55da4a` must not be read as a PRD edit.
 
 Cross-references to ordering/coupling cite `docs/plans/foundations-integration.md` (the integration MAP).
 
@@ -246,14 +253,14 @@ Five bounded children. INV-1's guard is the **highest-leverage, land-first** ite
 
 ### B-FG541 — honest `local_only` outcome now; `--push-fixes` safety contract designed, deferred
 
-- **OWNING PRD DECISIONS:** D2(a) (consult `classifyRemoteTrust` **before** probing CI; emit a distinct
+- **OWNING PRD DECISIONS:** D2(a) (consult `resolveReviewedTipTrust` **before** probing CI; emit a distinct
   `local_only` outcome; `extendedDelegatedToCi` FALSE when local-only; fix the stale comment) — **ships and is
   verified here.** D2(b) + INV-5 (`--push-fixes` safety contract) — **fully designed, binding whenever on, but
   its implementation is a separable opt-in NOT part of this cluster's shipping acceptance.**
 - **ACCEPTANCE ROWS:** R-541 (factual defect); N-5 (`local_only` honesty — ships here); N-6 (INV-5, **CONDITIONAL
   — NOT shipping acceptance**). INV-5.
-- **FILES / SCHEMAS:** `cli/commands/review-loop.ts` — consult `classifyRemoteTrust` (computed at `:465`,
-  currently consulted only at `:1078`) before the CI probe; emit `local_only` distinct from the generic
+- **FILES / SCHEMAS:** `cli/commands/review-loop.ts` — consult `resolveReviewedTipTrust` (defined `:454`,
+  currently called only at `:1040`) before the CI probe; emit `local_only` distinct from the generic
   "CI unavailable" (`:620`); `extendedDelegatedToCi` currently unconditional `!ctx.localExtended` at `:621`; the
   stale comment at `:848-851`. **No push verb exists** in either review-loop file today (git-verb set:
   `add checkout clean commit rev-parse rm status` + `fetch`) — building `--push-fixes` would add one, deferred.
@@ -451,78 +458,144 @@ D-7 forbids shipping FG-527 as one ticket — three different risk classes, thre
   comment `:1567-1571` records). (3) Deriving child identity from anything **structural** (`parentId`/prefix)
   rather than the evaluator (D-5b / INV-1).
 
-### C-FG477 — the five evaluator surfaces S1–S6 (as they decompose; S2 gates S3/S5/S6)
+### C-FG477 — the lifecycle evaluator, decomposed by surface (S1 shipped; S2 gates S3/S4/S5/S6)
 
 FG-477 does not close on any single change and **no slice may claim it** (§7.3 closure condition). S1 is shipped;
-S2–S6 do not exist. Proposed decomposition tracks the surfaces; the **engineer picks type/function/file names**
-(D-3 defers them deliberately).
+S2–S6 do not exist. **D-7 item 3 binds the intra-family order: S2 is the one step-state derivation and it GATES
+the other surfaces** — S3/S5/S6 explicitly (D-7 item 3), and S4 as the ready-work *projection* of S2's derivation
+(it cannot name the attempt before the derivation it reads exists). Each surface below is a **bounded child** at
+the same granularity as the other clusters' children. The **engineer picks type/function/file names** (D-3 defers
+them deliberately). **No surface migrates the `tasks` schema** — persisting the attempt kind is deferred
+**inside** FG-553's store-version policy (OQ-3); `dashboard/` transport stays unaudited (OQ-4).
 
-- **S1 — lineage / attempt kind (SHIPPED).** D-2. `lifecycle-evaluator.ts` `LineageKind` `:22-61`,
-  `classifyTaskLineage` `:110` (204 lines today — the lineage layer only). Not re-litigable; consumed, not
-  rebuilt.
-- **S2 — step state (one derivation; ready-queue + settle-states become projections).** N-1. Reconciles
-  `computeReadyQueue` (`ready-queue.ts:63-134`) and `computeStepSettleStates` (`:221-307`) — today two
-  vocabularies agreeing only by hand-maintenance (`:169-187`). **Must admit a pending `on_reject_recovery` row
-  (rule 3, `lifecycle-evaluator.ts:96`) as dispatchable in an already-settled phase** — the self-referencing
-  `on_reject` (FG-476, `:100-103`); a settle-derivation that reads "phase settled" as "closed to dispatch"
-  wedges it forever. **Gates S3/S5/S6** (D-7 item 3). **Must model a validation-contract hold as ACTIVE, never
-  blocked/terminal (INV-7)** — the cross-cluster coupling with B-FG524.
-- **S3 — run state.** N-2. Run-completion's superseded-primary logic (`runNext.ts:298-303`) becomes
-  evaluator-derived. **`abandoned` is an INPUT, never resurrected (INV-2).** The no-resurrection guarantee is
-  **store-layer** (`completeRun`'s `AND status='active'` `store/runs.ts:147`; `updateRunStatus`'s FG-484 refusal
-  `:174-179`) — the cluster must **not break either guard and must not add a third completion-writing path.**
-- **S4 — ready work (names the task ATTEMPT, not the step).** N-3 / INV-5. `dispatchSingleStep` (`:441-449`) and
-  `dispatchFanoutStep` (`:1572-1574`) **stop re-deriving the pick**. A step-id-only surface does not satisfy the
-  PRD and silently drops the `on_reject_recovery` attempt.
-- **S5 — terminal blockers (the lineage-correct failed-primary set; SHARED-wins; deterministic local
-  tiebreak).** N-4. The aggregation exists and is correct (`executor.ts:496-503`; `isSharedBlocker →
-  "hold_campaign"` `policy.ts:139-141`) — **what is wrong is the row set** (`executor.ts:494`/`:2183`: raw
+**S1 — lineage / attempt kind (SHIPPED — not a child).** D-2. `lifecycle-evaluator.ts` `LineageKind` `:22-61`,
+`classifyTaskLineage` `:110` (204 lines today — the lineage layer only). Not re-litigable; consumed, not rebuilt.
+
+#### C-FG477-S2 — step-state derivation (ships FIRST; gates S3/S4/S5/S6)
+
+- **OWNING PRD DECISIONS:** N-1 (one step-state derivation; `computeReadyQueue` + `computeStepSettleStates` become
+  projections). INV-7 (a validation-contract hold is modeled **ACTIVE, never blocked/terminal** — the
+  cross-cluster coupling with B-FG524). D-7 item 3 (S2 gates the other surfaces).
+- **ACCEPTANCE ROWS:** N-1 (NORMATIVE-UNMET). INV-7. Acceptance = parity of the ready-queue and settle-state
+  projections against today's behavior.
+- **FILES / SCHEMAS:** `src/v2/lifecycle-evaluator.ts` (the new step-state surface — stays in `src/v2/`, **NOT**
+  under `src/campaign/`, §5.1); reconciles `computeReadyQueue` (`ready-queue.ts:63-134`) and
+  `computeStepSettleStates` (`:221-307`) — today two vocabularies agreeing only by hand-maintenance
+  (`:169-187`) — into projections of one derivation. **Must admit a pending `on_reject_recovery` row (rule 3,
+  `lifecycle-evaluator.ts:96`) as dispatchable in an already-settled phase** — the self-referencing `on_reject`
+  (FG-476, `:100-103`). No task-row migration.
+- **RED PREREQUISITES:** **NORMATIVE-UNMET** — you cannot falsify an absent module; **no fabricated red.**
+  Acceptance is a **parity property test** over the seeded corpus (the harness that made the lineage layer safe,
+  `lifecycle-evaluator.test.ts:399-585`): the ready-queue and settle-state projections equal today's behavior on
+  every generated shape. FG-553 sensitivity: only the cluster-wide store-version trigger (delta-audit); no S2
+  probe of its own.
+- **DEPENDENCIES:** **intra-C:** **gates S3/S4/S5/S6** (D-7 item 3 — starting them first grows private
+  derivations and the cluster ends with *more* heuristics). **Cross-cluster:** S2 ⇄ B-FG524 hold — coupled, order
+  deferred to the map (OQ-6); **either order if both honor `awaiting_gate → ACTIVE`** (INV-7). `A is deliberately
+  NOT a consumer` (worktree ownership from the ROW, §5.2b).
+- **CONCURRENCY CONSTRAINTS:** touches `lifecycle-evaluator.ts` (C-owned) and its `ready-queue.ts` consumer — no
+  A/B shared-file edit here. The `awaiting_gate ∈ {non-terminal, ACTIVE}` mapping is the shared constant with
+  B-FG524 and A-FG356 (map §3 consolidated row 10) — all three must agree before any changes a status set.
+- **HOLLOW VERSION TO REJECT:** (1) A settle-state that treats "phase settled" as "closed to dispatch" —
+  **wedges the self-referencing `on_reject` recovery row forever.** (2) An evaluator that **reads the DB** —
+  breaks reconcile's never-throw / no-workflow-in-hand contract and the parity harness (INV-3). (3) Modeling a
+  validation-contract hold as **blocked/terminal** instead of ACTIVE (INV-7) — desyncs from B-FG524's held child.
+
+#### C-FG477-S3 — run-state derivation (after S2)
+
+- **OWNING PRD DECISIONS:** N-2 (run-completion's superseded-primary logic becomes evaluator-derived). INV-2
+  (`abandoned` is an INPUT, **never resurrected**).
+- **ACCEPTANCE ROWS:** N-2 (NORMATIVE-UNMET). INV-2. Acceptance = parity of the run-state projection against
+  today's completion behavior.
+- **FILES / SCHEMAS:** run-completion's superseded-primary logic (`runNext.ts:298-303`) becomes evaluator-derived.
+  The no-resurrection guarantee stays **store-layer** (`completeRun`'s `AND status='active'` `store/runs.ts:147`;
+  `updateRunStatus`'s FG-484 refusal `:174-179`) — this child must **not break either guard and must not add a
+  third completion-writing path** (map §3 consolidated row 7). No task-row migration.
+- **RED PREREQUISITES:** **NORMATIVE-UNMET** — **no fabricated red.** Parity property test over the seeded corpus
+  (`lifecycle-evaluator.test.ts:399-585`).
+- **DEPENDENCIES:** **intra-C:** after **S2** (D-7 item 3 — a private run-state derivation before the step-state
+  one grows a second heuristic). **Cross-cluster:** none; the store-layer guards it must not break are
+  OWNED-BY-store-layer (map §3 row 7), a read-only boundary shared with A and B.
+- **CONCURRENCY CONSTRAINTS:** touches the `runNext.ts:298-303` run-completion region — **disjoint** from
+  `dispatchFanoutStep`'s shared region; no A/B conflict. Must add no completion-writing path to `store/runs.ts`.
+- **HOLLOW VERSION TO REJECT:** (1) building it **before S2** (D-7 item 3). (2) Resurrecting an `abandoned` run or
+  adding a **third** completion-writing path that bypasses the store-layer guards (INV-2 / map §3 row 7). (3) An
+  evaluator that **reads the DB** (INV-3).
+
+#### C-FG477-S4 — ready-work / attempt surface (after S2)
+
+- **OWNING PRD DECISIONS:** N-3 / INV-5 (the surface names the task **ATTEMPT**, not the step; dispatch stops
+  re-deriving the pick).
+- **ACCEPTANCE ROWS:** N-3 (NORMATIVE-UNMET). INV-5.
+- **FILES / SCHEMAS:** `dispatchSingleStep` (`runNext.ts:441-449`) and `dispatchFanoutStep` (`:1572-1574`)
+  **stop re-deriving the pick** — they consume S2's derivation. No task-row migration.
+- **RED PREREQUISITES:** **NORMATIVE-UNMET** — **no fabricated red.** Parity property test over the seeded corpus.
+- **DEPENDENCIES:** **intra-C:** after **S2** — it is the ready-work *projection* of S2's step-state derivation.
+  **Cross-cluster:** its `:1572-1574` site is inside `dispatchFanoutStep`, shared with B-FG524 and C-FG527 — the
+  `:1572-1574` region itself is **C-only (COEXIST)**, but it participates in the shared-function **COORDINATED**
+  rebase (map §2.1 / §3 consolidated row 8; see C-FG527-c).
+- **CONCURRENCY CONSTRAINTS:** participates in the `dispatchFanoutStep` shared-function coordination — the
+  `:1572-1574` lookup is a C-only region (COEXIST) but rebases with whoever else lands in the function.
+- **HOLLOW VERSION TO REJECT:** (1) A ready-work surface that returns **only a step id** — does not kill
+  `dispatchFanoutStep`'s destructive re-derivation and silently drops the `on_reject_recovery` attempt (INV-5).
+  (2) building it **before S2**. (3) Re-deriving the pick inside dispatch rather than consuming S2's derivation.
+
+#### C-FG477-S5 — terminal-blocker set (after S2; carries A-6's REQUIRED red)
+
+- **OWNING PRD DECISIONS:** N-4 (the lineage-correct failed-primary set; **SHARED-wins**; **deterministic** local
+  tiebreak). A-6 (factual defect feeding this surface).
+- **ACCEPTANCE ROWS:** N-4 (NORMATIVE-UNMET); A-6 (factual defect, **INFERENCE-only, red REQUIRED**).
+- **FILES / SCHEMAS:** the aggregation exists and is correct (`executor.ts:496-503`; `isSharedBlocker →
+  "hold_campaign"` `policy.ts:139-141`) — **what is wrong is the ROW SET** (`executor.ts:494`/`:2183`: raw
   `parentId === undefined && status === "failed"` admits a failed **ad-hoc invoke** into a workflow's blocker
-  set). Fix the local tiebreak's array-order nondeterminism (`executor.ts:497`).
-- **S6 — operator reason (an API contract to `show`/`report`/dashboard/campaign, NOT an internal union).** N-5.
-  Renders a validation-contract hold **distinctly** from a human gate (`runNext.ts:977-981`). **Do NOT ship the
-  evaluator's internal step-state union to the client** (else every new state is a client-breaking change).
+  set). Fix the local tiebreak's **array-order nondeterminism** (`executor.ts:497`). `BlockerKind` vocabulary
+  **stays in `types/`** (`:291-303`); `policy.ts` stays a translation layer (§5.1). No task-row migration.
+- **RED PREREQUISITES:** N-4 **NORMATIVE-UNMET** — **no fabricated red.** **A-6 is INFERENCE-only and its red is
+  REQUIRED before its fix ships** — predicates verified at `executor.ts:494`/`:497`/`:2183` and
+  `runNext.ts:298-303`, runtime manifestation unconfirmed; **if the probe shows it does not manifest, it is
+  DROPPED, not fixed** (PRD §7.1). **FG-553 sensitivity (map §5 / C §8):** IF the store-version policy admits >1
+  Forge version writing one store, A-5's marker bound and this surface's / A-6's classifier determinism must be
+  re-verified (two versions can disagree about one row). FG-553's exec-not-spawn work is **explicitly NOT a
+  trigger**.
+- **DEPENDENCIES:** **intra-C:** after **S2** (D-7 item 3). **Cross-cluster:** none direct; the store-version
+  trigger is the FG-553 delta-audit gate.
+- **CONCURRENCY CONSTRAINTS:** touches `executor.ts`'s blocker aggregation — **disjoint** from A/B regions; no
+  shared-file conflict.
+- **HOLLOW VERSION TO REJECT:** (1) building it **before S2** (D-7 item 3). (2) "Fixing" A-6 while keeping the
+  **array-order-dependent** local tiebreak (`executor.ts:497`) — a latent nondeterminism, not a fix. (3)
+  Rewriting the aggregation (which is **correct**) instead of narrowing the **row set**. (4) An evaluator that
+  **reads the DB** (INV-3).
 
-- **ACCEPTANCE ROWS:** N-1…N-5 (all NORMATIVE-UNMET — the evaluator proper does not exist); A-6 (factual defect,
-  **INFERENCE-only, red REQUIRED**, feeds S5); INV-1, INV-3, INV-4, INV-6, INV-7. Closure §7.3: all five surfaces
-  exist as projections of one derivation, INV-1's allowlist EMPTY (but for `project-auth.ts:79` and
-  `retry.ts:263`), the three "is this a fanout parent?" structural probes (`gate.ts:178`,
-  `reconcile.ts:1261-1263`, `recover.ts:285`) + the raw gate (`reconcile.ts:1120`) gone.
-- **FILES / SCHEMAS:** `src/v2/lifecycle-evaluator.ts` (the new surfaces — stays in `src/v2/`, **NOT** under
-  `src/campaign/`, §5.1); `ready-queue.ts`, `runNext.ts`, `gate.ts`, `reconcile.ts`, `recover.ts`,
-  `executor.ts`, `campaign/policy.ts` (consumers/migration targets). `BlockerKind` vocabulary **stays in
-  `types/`** (`:291-303`); `policy.ts` stays a translation layer. **No task-row migration** — persisting the
-  attempt kind is deferred **inside** FG-553's store-version policy (OQ-3). `dashboard/` transport unaudited
-  (OQ-4).
-- **RED PREREQUISITES:** S2–S6 are **NORMATIVE-UNMET** — you cannot falsify an absent module; **no fabricated
-  red.** Acceptance is a **parity property test** over the seeded corpus (the harness that made the lineage layer
-  safe, `lifecycle-evaluator.test.ts:399-585`): each projection equals today's behavior on every generated shape.
-  **A-6 (feeding S5) is INFERENCE-only and its red is REQUIRED before its fix ships** — predicates verified at
-  `executor.ts:494`/`:497`/`:2183` and `runNext.ts:298-303`, runtime manifestation unconfirmed; **if the probe
-  shows it does not manifest, it is dropped, not fixed** (PRD §7.1). **FG-553 sensitivity (map §5 / C §8):** IF
-  the store-version policy admits >1 Forge version writing one store, A-5's marker bound and S5/A-6's classifier
-  determinism must be re-verified (two versions can disagree about one row). FG-553's exec-not-spawn work is
-  **explicitly NOT a trigger**.
-- **DEPENDENCIES:** **intra-C:** S2 **gates** S3/S5/S6 (D-7 item 3 — starting them first grows private
-  derivations and ends with *more* heuristics). **Cross-cluster:** S2 ⇄ B-FG524 hold (coupled, order deferred to
-  the map by OQ-6; either order if both honor `awaiting_gate → ACTIVE`); reconcile consumes **only** the
-  workflow-free primitives (INV-3, `:192-201`); **A is deliberately NOT a consumer** (worktree ownership from the
-  ROW, §5.2b) — the non-dependency that keeps A independent of C.
-- **CONCURRENCY CONSTRAINTS:** shares `dispatchFanoutStep` with B-FG524 (see C-FG527-c) and `reconcile.ts`
-  `finalizeOrphanedPrimaries` (`:1361`) + fanout sweeps (`:1120`/`:1261-1263`) with A-FG356 and B-FG525 —
-  **disjoint regions, COEXIST** (map §2.2), with the three preserved semantic convergences. The gate-blocking
-  predicate `verdictBlocksGate` (`gate.ts:59-65`) **stays in `gate.ts`**; B edits it **in place** — the two
-  clusters must **not fork it** (a fork re-opens the F16 divergence FG-523 closed, map §3).
-- **HOLLOW VERSION TO REJECT:** (1) building S3/S5/S6 **before** S2 — each grows a private derivation and the
-  cluster ends with more heuristics than it started with (D-7 item 3). (2) A ready-work surface that returns
-  **only a step id** — does not kill `dispatchFanoutStep`'s destructive re-derivation and silently drops the
-  `on_reject_recovery` attempt (S4/INV-5). (3) A settle-state that treats "phase settled" as "closed to
-  dispatch" — **wedges the self-referencing `on_reject` recovery row forever** (S2). (4) Folding `BlockerKind`
-  into the evaluator — pushes campaign policy into a module `ready-queue`/`gate`/`runNext`/`reconcile` all depend
-  on (§5.1). (5) Shipping the **internal step-state union to the client** (S6/N-5). (6) An evaluator that **reads
-  the DB** — breaks reconcile's never-throw / no-workflow-in-hand contract and the parity harness (INV-3). (7)
-  Adding a **fourth** structural lineage probe to reconcile — A/C both forbid it (§5.2b). (8) "Fixing" A-6 that
-  keeps the **array-order-dependent** local tiebreak (`executor.ts:497`) — a latent nondeterminism, not fixed.
+#### C-FG477-S6 — operator-reason API contract (after S2)
+
+- **OWNING PRD DECISIONS:** N-5 (an **API contract** to `show`/`report`/dashboard/campaign, **NOT** an internal
+  union).
+- **ACCEPTANCE ROWS:** N-5 (NORMATIVE-UNMET). Acceptance = a validation-contract hold renders **distinctly** from
+  a human gate, with no internal union crossing the client boundary.
+- **FILES / SCHEMAS:** renders a validation-contract hold **distinctly** from a human gate (`runNext.ts:977-981`).
+  **Do NOT ship the evaluator's internal step-state union to the client** (else every new state is a
+  client-breaking change). `dashboard/` transport is unaudited (OQ-4). No task-row migration.
+- **RED PREREQUISITES:** **NORMATIVE-UNMET** — **no fabricated red.** Contract test that a hold renders distinctly
+  from a human gate and no internal union leaks to the client.
+- **DEPENDENCIES:** **intra-C:** after **S2** (it consumes the step-state derivation to render the reason).
+  **Cross-cluster:** none; `dashboard/` transport is OQ-4 (unaudited).
+- **CONCURRENCY CONSTRAINTS:** touches the `runNext.ts:977-981` reason-rendering plus `show`/`report`/dashboard
+  consumers — no A/B shared-file conflict.
+- **HOLLOW VERSION TO REJECT:** (1) Shipping the **internal step-state union to the client** — every new state
+  becomes a client-breaking change (N-5). (2) Rendering a validation-contract hold **identically** to a human
+  gate. (3) building it **before S2**.
+
+**FG-477 family closure (§7.3 — spans all surfaces, no single child claims it).** FG-477 closes only when **all
+five surfaces exist as projections of one derivation**, INV-1's allowlist is **EMPTY** (but for `project-auth.ts:79`
+and `retry.ts:263`), and the three "is this a fanout parent?" structural probes (`gate.ts:178`,
+`reconcile.ts:1261-1263`, `recover.ts:285`) + the raw gate (`reconcile.ts:1120`) are **gone**. Cross-surface
+invariants every child must honor: `reconcile` consumes **only** the workflow-free primitives (INV-3,
+`lifecycle-evaluator.ts:192-201`) and must never throw; **A is deliberately NOT a consumer** (§5.2b) — the
+non-dependency that keeps A independent of C; the gate-blocking predicate `verdictBlocksGate` (`gate.ts:59-65`)
+**stays in `gate.ts`** and B edits it **in place** — the two clusters must **not fork it** (a fork re-opens the
+F16 divergence FG-523 closed, map §3). **Hollow at the family level:** folding `BlockerKind` into the evaluator
+pushes campaign policy into a module `ready-queue`/`gate`/`runNext`/`reconcile` all depend on (§5.1); adding a
+**fourth** structural lineage probe to reconcile is forbidden by A/C both (§5.2b).
 
 ---
 
