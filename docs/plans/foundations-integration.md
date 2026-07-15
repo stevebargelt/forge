@@ -206,7 +206,9 @@ finalize-event enumeration needs C's evaluator surface to exist first. **INFEREN
   cluster's PRD can verify it alone (e.g. `reconcile.ts`, row 9). The per-row **semantic** ownership may still be
   stated (e.g. child identity is OWNED-BY-C); COORDINATED names only that the *merge* — textual (a) or
   semantic (b) — crosses cluster boundaries. **Every COORDINATED row must cite the sub-case it is.**
-- **UNOWNED** — no PRD closes it; it needs an operator decision.
+- **UNOWNED** — no PRD *outcome* closes it and no decider is named. **After the §3.0 ownership assignment (rows
+  12-17), NO row falls in this class** — every seam a PRD leaves open now has **exactly one named owner** (a
+  cluster, or a proposed bounded child) responsible for DECIDING it; the class is retained only as vocabulary.
 
 This table consolidates the §1 dependencies, the §2 file/schema overlaps, and the detailed ownership rows in §3.1
 below into a single classification. Evidence labels: **VERIFIED (via PRD)** / **INFERENCE** / **OPEN QUESTION**.
@@ -224,25 +226,28 @@ below into a single classification. Evidence labels: **VERIFIED (via PRD)** / **
 | **9** | `reconcile.ts` tail (`reconcileRun`) — reaper vs `finalizeOrphanedPrimaries` vs crash-recovery gate | A (D9), C (FG-477/527), B (D4) | **COORDINATED — sub-case (b): DISJOINT-REGION, JOINT INVARIANT.** Each cluster owns its own region so the merge is textually trivial, **but** three semantic convergences must all hold and no single PRD verifies them alone: A keys on ROW / C on lineage; A reads C's finalized row idempotently; B's decline keeps contraband non-terminal so A leaves it. | INFERENCE (reconciling the three PRDs) — §2.2 |
 | **10** | The constant `awaiting_gate ∈ {non-terminal, ACTIVE}` | A, B, C | **COORDINATED — sub-case (a): SAME-REGION** (a shared constant all three must agree on) before any of them changes a status set. If any treats it as terminal → premature reap (A) or permanent wedge (C). | VERIFIED — A D9; B D3/N-9; C INV-7 |
 | **11** | **FG-527 ticket AC-2** — "a failed shipping-reviewer (non-`red-`-prefixed red) on a fanout step is retryable as `red_review`" | C (corrects it), B (adopts the fanout adopting the minted primary) | **OWNED-BY-C — AC-2 AS WRITTEN IS REJECTED.** PRD-c owns the correction: migrating retry to **allow** a red retry mints a **detached primary the fanout adopts** as parent of a fresh wave (probe p2); **PRD-c D-4 REFUSES it** — classify with the evaluator and **KEEP REFUSING**, refuse under `--force` too. FG-527's AC #2 is **amended to D-1**. **A PRD that quietly inherits AC-2 ships this bug.** | VERIFIED — C §2 / D-1 / D-4 (`retry.ts:427-466`; p2) |
-| **12** | `retry.ts:263` **fail-open mount-mode fallback** (a non-prefixed red gets a **writable** mount) | C (flags, does not fix), A (security boundary D2/D10) | **UNOWNED.** **Operator must decide:** does `retry.ts:263`'s mount-mode fallback fall inside **Cluster A's D2/D10 security boundary**, or is it a **separate finding needing its own owner**? Confirm A's D10b keys the pointer-freeze on **mount-mode** (rw ⇒ freeze), not on "is this a blue agent," so the mitigation actually covers a fail-open red. **The fail-open grant itself (a red becoming rw at all) is owned by neither A nor C.** | OPEN QUESTION — carried from §3.2 OQ-INT-1 (C D-6/OQ-2 VERIFIED; A-boundary fit INFERENCE) |
-| **13** | **Held-child worktree reclaim at RUN-END** (run ends with the child still `awaiting_gate`) | B (N-9(b) requires reclaim), A (reaper is terminal-only) | **UNOWNED.** A's FG-356 reaper is **terminal-only**; a still-held child is **non-terminal**, so A's reaper **never reclaims it**. Neither PRD nails the run-end arm. **Operator/decomposition must decide:** either **(i)** run-end/abandon **terminalizes** held children (then A's reaper collects them next pass), or **(ii)** **Cluster B owns the run-end reclaim path** directly. This is the one held-child seam A's design does not close. | OPEN QUESTION — carried from §3.2 OQ-INT-2 (B N-9(b) VERIFIED; the gap INFERENCE) |
-| **14** | **Dashboard + campaign-runner consumption of C's operator-reason API** (C-FG477-S6 / N-5 names `dashboard` and `campaign` as consumers over a **serialization/API transport**) | C (owns the operator-reason contract; S6 **BOUNDS this OUT**), the dashboard-integration surface, the campaign executor | **UNOWNED — OQ-INT-3.** C-FG477-S6 audits only its four in-cluster surfaces (`reconcile` / `forge show` / `forge status` / `report`) and **explicitly bounds out** the dashboard + campaign transport as an "OQ-4 follow-up" **with no named owner**. Neither PRD-c (which bounds it out) nor any dashboard/campaign-owning PRD adopts the transport audit, so no PRD closes it. **Operator/decomposition must decide:** name an owner — either the dashboard-integration work owns the dashboard transport audit and the campaign-executor work owns the campaign transport audit (each a bounded consumer child with owner + files + acceptance), or a single owner is named for both. Until then both propagation surfaces are UNOWNED; S6 claims nothing about them beyond "they read the same contract." | OPEN QUESTION — C-FG477-S6 BOUND-OUT / C OQ-4 (VERIFIED via decomposition C-FG477-S6); the no-owner gap INFERENCE |
-| **15** | **Lane A OQ-3 — the `test:unit` integration-gate silent no-op** (`integration-gate.ts:63-65` returns `{ok:true, "integration gate skipped"}` for any project with no `test:unit` script) | A (**punts** it to the Review-trust lane), Review-Trust lane (does **NOT** adopt it) | **UNOWNED — OQ-INT-4 (A → Review-Trust cross-cluster handoff, UNADOPTED).** PRD-a explicitly defers this to "the **Review-trust lane** — not this cluster's to decide" (PRD-a OQ-3 / §4.3). **But PRD-b (Review Execution Trust) does NOT accept or own it** — PRD-b's own OQ-3 is the cache-key scheme, unrelated. So no PRD closes it. **Operator must name an owner and decide:** keep skipping / record a durable "gate not enforced" marker / refuse to publish without a gate (PRD-a's suggested default is the durable marker) — PRD-b has not taken it. | OPEN QUESTION — PRD-a OQ-3 punt VERIFIED; PRD-b non-adoption VERIFIED (PRD-b OQ-3 = cache-key, unrelated) |
-| **16** | **Lane A OQ-4 — should reds get a git-read capability** (Bash, or a narrower git-read tool, now that the `:ro` mount makes reads safe) | A (**punts** it to the Review-trust lane), Review-Trust lane (does **NOT** adopt it) | **UNOWNED — OQ-INT-5 (A → Review-Trust cross-cluster handoff, UNADOPTED).** PRD-a defers to "the **Review-trust lane**" (PRD-a OQ-4 / §4.2), keeping reds at `tools: ["read"]` with "no change in this cluster." **PRD-b does NOT adopt it** — PRD-b's OQ-4 is the FG-553/FG-555 revalidation trigger, unrelated. No PRD closes it. **Operator must name an owner and decide** whether reds gain a git-read capability. | OPEN QUESTION — PRD-a OQ-4 punt VERIFIED; PRD-b non-adoption VERIFIED (PRD-b OQ-4 = FG-553 revalidation, unrelated) |
-| **17** | **Lane A OQ-7 — a LEGIT operator-installed common-config driver** (e.g. `git-lfs` smudge/clean, a repo `diff.*.textconv`) **triggered on agent-chosen tracked paths via an agent-written `.gitattributes`** (attacker-influenced input to operator-trusted code) | A (**punts** it, accepts for its own cluster only), Review-Trust lane (does **NOT** adopt it) | **UNOWNED — OQ-INT-6 (A → Review-Trust cross-cluster handoff, UNADOPTED).** PRD-a's D10/I-10 close config-DEFINED exec but leave attribute-TRIGGERED legit-driver exec **OPEN/accepted**, deferring the decision to "the **Review-trust lane** — out of this cluster's scope" (PRD-a OQ-7 / residual table). **PRD-b does NOT adopt it.** No PRD closes it. **Operator must name an owner and decide:** neutralize (e.g. `-c filter.<name>.process=` / `GIT_LFS_SKIP_SMUDGE` on host bookkeeping git) or accept. | OPEN QUESTION — PRD-a OQ-7 punt VERIFIED; PRD-b non-adoption VERIFIED |
+| **12** | `retry.ts:263` **fail-open mount-mode fallback** (a non-prefixed red gets a **writable** mount) | C (flags, does not fix), A (security boundary D2/D10) | **OWNED-BY-A.** **(1) OWNER:** Cluster A (workspace-isolation security boundary, D2/D10). **(2) DECISION AUTHORITY:** A decides whether D10b's mount-mode-keyed pointer-freeze (rw ⇒ freeze, independent of agent class) already covers a fail-open red, OR a mitigation is required. **(3) SCOPE:** audit `retry.ts:263`'s mount-mode fallback against D10b; decide covered-vs-mitigation. **(4) FILES/SCHEMAS:** `src/v2/retry.ts:263` (mount-mode fallback); A's D10b mount/pointer-freeze logic. **(5) ACCEPTANCE:** a recorded decision — either "D10b covers it (rw ⇒ freeze regardless of class), evidence cited" **or** a named mitigation (e.g. `retry.ts` must not grant rw to a red). **(6) DEPENDENCIES:** A-FG559 (mount/D10 work); if a `retry.ts` fix is chosen, COORDINATE with **C** (C-FG527-a owns `retry.ts` and its scope must-not-touch `:263`). **The decision A must make (open UNDER A):** covered-by-D10b vs mitigation-required — the architectural outcome stays open, but the row is OWNED. | OWNED-BY-A — owner assigned; §3.2 OQ-INT-1 (C D-6/OQ-2 VERIFIED; A-boundary fit INFERENCE) |
+| **13** | **Held-child worktree reclaim at RUN-END** (run ends with the child still `awaiting_gate`) | B (N-9(b) requires reclaim), A (reaper is terminal-only) | **OWNED-BY-B (proposed child B-FG524b).** **(1) OWNER:** proposed bounded child **B-FG524b** (Cluster B) — added to the decomposition. **(2) DECISION AUTHORITY:** B decides the run-end reclaim mechanism — **(i)** run-end/abandon **terminalizes** held children (then A-FG356's reaper collects them), or **(ii)** B owns a direct run-end reclaim path. **(3) SCOPE:** the run-end reclaim of a still-held fanout child's worktree ONLY (retention-while-held stays in B-FG524). **(4) FILES/SCHEMAS:** `src/v2/reconcile.ts` (reaper hook), the run-end/abandon finalize path in `runNext.ts`, `worktree-lifecycle.ts`. **(5) ACCEPTANCE:** a run ending with a held child does NOT leak its worktree/branch; a test drives run-end-while-held → reclaimed. **(6) DEPENDENCIES:** A-FG356 (reaper terminal-only), B-FG524 (held-child retention), the `awaiting_gate ∈ non-terminal` constant. **The decision B must make (open UNDER B):** terminalize-then-reap (i) vs direct-reclaim (ii). | OWNED-BY-B — owner assigned (B-FG524b); §3.2 OQ-INT-2 (B N-9(b) VERIFIED; the gap INFERENCE) |
+| **14** | **Dashboard + campaign-runner consumption of C's operator-reason API** (C-FG477-S6 / N-5 names `dashboard` and `campaign` as consumers over a **serialization/API transport**) | C (owns the operator-reason contract; S6 **BOUNDS this OUT**), the dashboard-integration surface, the campaign executor | **OWNED-BY-C (proposed child C-FG477-S7).** **(1) OWNER:** proposed bounded child **C-FG477-S7** (Cluster C) — added to the decomposition. **(2) DECISION AUTHORITY:** C decides/audits how the dashboard-integration surface and the campaign executor consume the serialized operator-reason contract. **(3) SCOPE:** audit BOTH consumer transports (dashboard + campaign) of the operator-reason API — one bounded child, two consumers. **(4) FILES/SCHEMAS:** the dashboard-integration operator-reason read surface; the campaign executor's operator-reason consumption; C's operator-reason serialization (C-FG477-S6 output). **(5) ACCEPTANCE:** each named consumer reads the operator-reason contract and RE-DERIVES NONE of it; hollow = a consumer computing its own "why". **(6) DEPENDENCIES:** C-FG477-S6 (the operator-reason API/contract must exist first). **The decision C must make (open UNDER C):** confirm both transports consume the contract without re-derivation — S6 previously bounded this out with no named owner; C-FG477-S7 is now that owner. | OWNED-BY-C — owner assigned (C-FG477-S7); C-FG477-S6 BOUND-OUT / C OQ-4 (VERIFIED via decomposition C-FG477-S6) |
+| **15** | **Lane A OQ-3 — the `test:unit` integration-gate silent no-op** (`integration-gate.ts:63-65` returns `{ok:true, "integration gate skipped"}` for any project with no `test:unit` script) | A (**punts** it to the Review-trust lane), **Cluster B (Review Execution Trust) OWNS it here** | **OWNED-BY-B.** **(1) OWNER:** Cluster B (Review Execution Trust) — A explicitly punted the publication-gate trust decision to "the Review-trust lane"; formally assigned to B here. **(2) DECISION AUTHORITY:** B decides the no-`test:unit` gate policy — keep skipping / record a durable "gate not enforced" marker (PRD-a's suggested default) / refuse to publish without a gate. **(3) SCOPE:** the integration-gate no-op policy for projects lacking a `test:unit` script. **(4) FILES/SCHEMAS:** `src/v2/integration-gate.ts:63-65`. **(5) ACCEPTANCE:** a recorded B decision; if the marker default is chosen, a durable visible "gate not enforced" marker on the publication attempt. **(6) DEPENDENCIES:** none blocking (independent of FG-561 sequencing). **The decision B must make (open UNDER B):** skip / durable-marker / refuse. B may adopt PRD-a's suggested default (durable marker) or override with rationale. | OWNED-BY-B — owner assigned; PRD-a OQ-3 punt VERIFIED, formally accepted by B here (PRD-b's own OQ-3 = unrelated cache-key scheme) |
+| **16** | **Lane A OQ-4 — should reds get a git-read capability** (Bash, or a narrower git-read tool, now that the `:ro` mount makes reads safe) | A (**punts** it to the Review-trust lane), **Cluster B (Review Execution Trust) OWNS it here** | **OWNED-BY-B.** **(1) OWNER:** Cluster B (Review Execution Trust) — A punted the capability decision to the Review-trust lane. **(2) DECISION AUTHORITY:** B decides whether reds gain a git-read capability (Bash or a narrower git-read tool) now that the `:ro` mount makes reads safe. **(3) SCOPE:** the red-agent git-read capability decision only. **(4) FILES/SCHEMAS:** the red agent seed capability set (currently `tools: ["read"]`). **(5) ACCEPTANCE:** a recorded B decision (keep read-only, or add git-read with rationale + the reviewable capability change). **(6) DEPENDENCIES:** A-FG559 (the `:ro` mount precondition that makes reads safe). **The decision B must make (open UNDER B):** keep `read`-only vs add git-read. | OWNED-BY-B — owner assigned; PRD-a OQ-4 punt VERIFIED, formally accepted by B here (PRD-b's own OQ-4 = unrelated FG-553 revalidation trigger) |
+| **17** | **Lane A OQ-7 — a LEGIT operator-installed common-config driver** (e.g. `git-lfs` smudge/clean, a repo `diff.*.textconv`) **triggered on agent-chosen tracked paths via an agent-written `.gitattributes`** (attacker-influenced input to operator-trusted code) | A (**punts** it, accepts for its own cluster only), **Cluster B (Review Execution Trust) OWNS it here** | **OWNED-BY-B.** **(1) OWNER:** Cluster B (Review Execution Trust) — A punted it ("out of this cluster's scope, Review-trust lane"). **(2) DECISION AUTHORITY:** B decides neutralize-vs-accept for the attribute-TRIGGERED legit-driver exec. **(3) SCOPE:** the neutralize-or-accept decision for attribute-triggered legit-driver exec at host bookkeeping git. **(4) FILES/SCHEMAS:** the D10a host-git wrapper (a mitigation would add `-c filter.<name>.process=` / `GIT_LFS_SKIP_SMUDGE`). **(5) ACCEPTANCE:** a recorded B decision (accept, or neutralize via the wrapper). **(6) DEPENDENCIES:** A-FG559 / D10a (the host-git wrapper the mitigation would extend) — a NOTED cross-cluster coordination. **The decision B must make (open UNDER B):** accept vs neutralize-via-wrapper. | OWNED-BY-B — owner assigned; PRD-a OQ-7 punt VERIFIED, formally accepted by B here |
 
 **Reading the table (by class):** rows 1–5 and 7 are **OWNED-BY** a single owner (a cluster's PRD for rows 1–5, the
 pre-existing store invariant for row 7 — the owner decides, the others conform). Rows 6, 8–10 are **COORDINATED**
 (a shared region/constant no single cluster owns the merge of — rows 6, 8 & 10 are sub-case (a) SAME-REGION, row 9 is
 sub-case (b) DISJOINT-REGION/JOINT-INVARIANT; the map sequences them — §2, §4). Row 6's per-cluster consumers stay
 OWNED (A's retention, C's campaign hold), but the shared `merge_conflict` membership SET no single cluster owns the
-merge of. Row 11 is **OWNED-BY-C** (AC-2 rejected-and-corrected). Rows 12–17 are the genuinely **UNOWNED**
-seams — **SIX of them, each needing an operator decision no PRD makes** (there are NOT "only two"): **OQ-INT-1**
-(row 12, `retry.ts:263` fail-open mount mode) and **OQ-INT-2** (row 13, held-child run-end reclaim) are the two
-intra-campaign A/B/C seams; **OQ-INT-3** (row 14) is the dashboard/campaign transport C-FG477-S6 bounds out; and
-**OQ-INT-4 / OQ-INT-5 / OQ-INT-6** (rows 15–17) are Lane A OQ-3 / OQ-4 / OQ-7 — open questions PRD-a **punts to
-the Review-trust lane** that **PRD-b never adopts** (PRD-b's own OQ-3/OQ-4 are the unrelated cache-key scheme and
-FG-553 revalidation trigger), leaving them UNOWNED cross-cluster handoffs.
+merge of. Row 11 is **OWNED-BY-C** (AC-2 rejected-and-corrected). Rows 12–17 were the six formerly-UNOWNED seams;
+**each now has EXACTLY ONE named owner** responsible for DECIDING it (the architectural OUTCOME may remain open
+UNDER that owner, but the row is OWNED — no row is UNOWNED). **OQ-INT-1** (row 12, `retry.ts:263` fail-open mount
+mode) → **OWNED-BY-A**; **OQ-INT-2** (row 13, held-child run-end reclaim) → **OWNED-BY-B** via the proposed child
+**B-FG524b**; **OQ-INT-3** (row 14, dashboard/campaign operator-reason transport) → **OWNED-BY-C** via the proposed
+child **C-FG477-S7**; **OQ-INT-4 / OQ-INT-5 / OQ-INT-6** (rows 15–17, Lane A OQ-3 / OQ-4 / OQ-7) → **OWNED-BY-B**
+(the Review-trust lane PRD-a named formally accepts the three A→Review-trust handoffs here). **No seam is
+duplicately owned:** A owns row 12; B owns rows 13 (via B-FG524b), 15, 16, 17; C owns row 14 (via C-FG477-S7) —
+six rows, six single owners. Earlier drafts labelled these six UNOWNED; that reflected the state before this
+assignment.
 
 ### 3.1 Detailed ownership rows (the settled surfaces above, with full basis)
 
@@ -256,55 +261,73 @@ FG-553 revalidation trigger), leaving them UNOWNED cross-cluster handoffs.
 | `merge_conflict` failure-kind membership | **COORDINATED — sub-case (a):** the membership SET is **shared**; neither may broaden it unilaterally (broadening broadens campaign holds) | A retains on it (D9b) and C holds the campaign on it (S5) — **disjoint consumers that COEXIST**, each OWNED per-cluster; any change to the SET requires joint agreement | A §4 ("adds no kind") / D9b; C §5.2(b), S5 |
 | **Run completion writes** (no-resurrection) | **store layer** owns the guarantee (`store/runs.ts:147`, `:174-179`) | all clusters must **not add a third completion-writing path** (C INV-2) | C INV-2/S3 — a boundary A and B must not cross |
 
-### 3.2 Genuine unresolved ownership → OPEN QUESTIONS for the operator
+### 3.2 The six seams — each now OWNED by exactly one decider (the architectural outcome may stay open UNDER that owner)
 
-**These are the UNOWNED rows (12–17) of the consolidated table above** — **SIX** cross-cluster seams no PRD
-closes; every other surface in §3.0 is owned or coordinated. **OQ-INT-1** and **OQ-INT-2** are the two
-intra-campaign A/B/C seams; **OQ-INT-3** is the dashboard/campaign transport C-FG477-S6 bounds out; and
-**OQ-INT-4 / OQ-INT-5 / OQ-INT-6** are Lane A OQ-3 / OQ-4 / OQ-7 — punted by PRD-a to the Review-trust lane but
-**never adopted by PRD-b** (whose own OQ-3/OQ-4 are the unrelated cache-key scheme and FG-553 revalidation
-trigger). Earlier drafts said "only two" UNOWNED seams; that count was wrong.
+**These are rows (12–17) of the consolidated table above — the six cross-cluster seams no PRD *outcome* closes,
+now each assigned EXACTLY ONE accountable owner responsible for DECIDING it.** No row remains UNOWNED; the
+architectural ANSWER may still be open, but it is open **UNDER a named decider**, never ownerless. **OQ-INT-1 →
+Cluster A**; **OQ-INT-2 → Cluster B (proposed child B-FG524b)**; **OQ-INT-3 → Cluster C (proposed child
+C-FG477-S7)**; **OQ-INT-4 / OQ-INT-5 / OQ-INT-6 → Cluster B** (the Review-trust lane formally accepts the three
+A→Review-trust handoffs PRD-a punted; PRD-b's own OQ-3/OQ-4 remain the unrelated cache-key scheme and FG-553
+revalidation trigger, untouched by these assignments). Each bullet below states the ONE owner, the decision that
+owner must make, and the acceptance obligation. Earlier drafts labelled these six UNOWNED; that reflected the
+state before this assignment.
 
-- **OQ-INT-1 — `retry.ts:263` fail-open mount mode has no owner, and it collides with A's security boundary.**
+- **OQ-INT-1 (OWNED-BY-A) — `retry.ts:263` fail-open mount mode: Cluster A owns the decision.**
   C D-6 / OQ-2 (VERIFIED) flags that `retry.ts:263`'s prefix fallback fails **OPEN**: a **non-prefixed red gets a
-  writable mount**, "plausibly a security finding for another cluster … flagged, not fixed. It needs an owner, and
-  it does not have one." **INFERENCE (this map):** a non-prefixed red with a *writable* `/project` is exactly A
-  D10's "any agent whose `/project` is writable" attacker-controlled-pointer class — A's D10b pointer-freeze
-  *would* mitigate the RCE **if A keys the freeze on mount-mode (rw ⇒ freeze), not on "is this a blue agent."**
-  But the fail-open **grant itself** (a red becoming rw at all) is owned by neither A nor C. **Operator must
-  decide:** does `retry.ts:263`'s mount-mode fallback fall inside Cluster A's D2/D10 security boundary, or is it a
-  separate finding needing its own owner? Confirm A's D10b keys on mount-mode so the mitigation actually covers a
-  fail-open red.
+  writable mount**, "plausibly a security finding for another cluster … flagged, not fixed. It needs an owner" —
+  **the map now assigns that owner: Cluster A** (the workspace-isolation security boundary, D2/D10). **INFERENCE
+  (this map):** a non-prefixed red with a *writable* `/project` is exactly A D10's "any agent whose `/project` is
+  writable" attacker-controlled-pointer class — A's D10b pointer-freeze *would* mitigate the RCE **if A keys the
+  freeze on mount-mode (rw ⇒ freeze), not on "is this a blue agent."** **The decision A must make (open UNDER A):**
+  whether D10b's mount-mode-keyed pointer-freeze already covers a fail-open red (rw ⇒ freeze regardless of class,
+  evidence cited), OR a mitigation is required (e.g. `retry.ts` must not grant rw to a red). **DEPENDENCIES:**
+  A-FG559 (mount/D10 work); if a `retry.ts` fix is chosen, COORDINATE with C (C-FG527-a owns `retry.ts`, whose
+  scope already forbids touching `:263`). **ACCEPTANCE:** a recorded A decision — covered-with-evidence, or a named
+  mitigation. The row is OWNED; only the answer is open.
 
-- **OQ-INT-2 — who reclaims a held child's worktree when the run ends with the child still held?**
+- **OQ-INT-2 (OWNED-BY-B, proposed child B-FG524b) — run-end reclaim of a still-held child's worktree.**
   B N-9(b) requires the worktree be **reclaimed, never leaked**, "once the held child resolves and the parent
   finalizes, **or the run ends** with the child still held." **INFERENCE (this map):** A's FG-356 reaper is
   **terminal-only** (D9); a still-held child at run-end is **non-terminal** (`awaiting_gate`), so **A's reaper
-  never reclaims it.** Either (i) run-end/abandon must *terminalize* held children (then A's reaper collects them
-  on the next pass), or (ii) Cluster B owns the run-end reclaim path directly. Neither PRD nails the run-end arm.
-  **Operator/decomposition must assign this** — it is the one held-child seam A's design does not close.
+  never reclaims it.** The map assigns this to **proposed bounded child B-FG524b** (added to the decomposition).
+  **The decision B must make (open UNDER B):** either **(i)** run-end/abandon *terminalizes* held children (then
+  A-FG356's reaper collects them next pass), or **(ii)** B owns a direct run-end reclaim path. **SCOPE:** the
+  run-end arm ONLY — retention-while-held stays in B-FG524. **FILES:** `reconcile.ts` (reaper hook), the
+  run-end/abandon finalize path in `runNext.ts`, `worktree-lifecycle.ts`. **DEPENDENCIES:** A-FG356 (terminal-only
+  reaper), B-FG524 (held-child retention), the `awaiting_gate ∈ non-terminal` constant. **ACCEPTANCE:** a run
+  ending with a held child does NOT leak its worktree/branch; a test drives run-end-while-held → reclaimed.
 
-- **OQ-INT-3 — dashboard + campaign-runner consumption of C's operator-reason API has no owner.**
-  C-FG477-S6 (N-5) names `dashboard` and `campaign` as consumers of C's operator-reason contract but **BOUNDS
-  their transport OUT** as an "OQ-4 follow-up," auditing only the four in-cluster surfaces (`reconcile` / `forge
-  show` / `forge status` / `report`). **VERIFIED (this map, via decomposition C-FG477-S6):** PRD-c does not audit
-  the dashboard/campaign serialization/API transport, and no dashboard-integration / campaign-executor PRD adopts
-  it. So the two propagation surfaces are UNOWNED. **Operator/decomposition must name an owner** — a bounded
-  dashboard-consumer child and a bounded campaign-consumer child (each owner + files + acceptance), or a single
-  named owner for both. Until then S6 claims nothing about them beyond "they read the same contract."
+- **OQ-INT-3 (OWNED-BY-C, proposed child C-FG477-S7) — dashboard + campaign-runner consumption of C's
+  operator-reason API.** C-FG477-S6 (N-5) names `dashboard` and `campaign` as consumers of C's operator-reason
+  contract but **BOUNDS their transport OUT** as an "OQ-4 follow-up," auditing only the four in-cluster surfaces
+  (`reconcile` / `forge show` / `forge status` / `report`). **VERIFIED (this map, via decomposition C-FG477-S6):**
+  PRD-c does not audit the dashboard/campaign serialization/API transport in S6. The map assigns the follow-up to
+  **proposed bounded child C-FG477-S7** (added to the decomposition) — **one child, two consumers.** **The
+  decision/audit C must make (open UNDER C):** confirm both the dashboard-integration read surface and the campaign
+  executor consume the serialized operator-reason contract and **re-derive NONE of it.** **DEPENDENCIES:**
+  C-FG477-S6 (the API/contract must exist first). **ACCEPTANCE:** each named consumer reads the contract; hollow =
+  a consumer computing its own "why". S6's bound-out surfaces are no longer ownerless — C-FG477-S7 owns them.
 
-- **OQ-INT-4 / OQ-INT-5 / OQ-INT-6 — three Lane A open questions PRD-a punts to the Review-trust lane that PRD-b
-  never adopts.** **VERIFIED FACT:** PRD-a (`agent-workspace-isolation.md`) defers **three** OQs explicitly to
-  "the Review-trust lane": **OQ-3** (the `test:unit` integration-gate silent no-op, `integration-gate.ts:63-65` —
-  "not this cluster's to decide," §4.3); **OQ-4** (should reds get a git-read capability — "Review-trust lane,"
-  §4.2); **OQ-7** (a legit common-config driver, e.g. `git-lfs` smudge, triggered via an agent-written
-  `.gitattributes` — "Review-trust lane, out of this cluster's scope," D10 residual table). **But PRD-b (Review
-  Execution Trust) does NOT accept or own any of them** — PRD-b's own OQ-3 and OQ-4 are the **unrelated**
-  cache-key scheme and FG-553 revalidation trigger. So these are **UNOWNED cross-cluster handoffs (A → Review-Trust,
-  UNADOPTED)** that no PRD closes. **Operator must name an owner for each** and settle it (PRD-a's suggested
-  defaults: OQ-3 → durable "gate not enforced" marker; OQ-4 → reds stay `read`-only; OQ-7 → accept for A, revisit
-  for sensitive filters) — but with an owner, since PRD-b has not taken them. These correct the earlier "only two
-  UNOWNED seams" claim: there are six.
+- **OQ-INT-4 / OQ-INT-5 / OQ-INT-6 (all OWNED-BY-B) — three Lane A open questions PRD-a punted to the Review-trust
+  lane, now formally accepted by Cluster B.** **VERIFIED FACT:** PRD-a (`agent-workspace-isolation.md`) defers
+  **three** OQs explicitly to "the Review-trust lane": **OQ-3** (the `test:unit` integration-gate silent no-op,
+  `integration-gate.ts:63-65` — "not this cluster's to decide," §4.3); **OQ-4** (should reds get a git-read
+  capability — "Review-trust lane," §4.2); **OQ-7** (a legit common-config driver, e.g. `git-lfs` smudge,
+  triggered via an agent-written `.gitattributes` — "Review-trust lane, out of this cluster's scope," D10 residual
+  table). PRD-b's own OQ-3/OQ-4 are the **unrelated** cache-key scheme and FG-553 revalidation trigger, so PRD-b
+  had not yet textually adopted them. **The map now assigns all three to Cluster B (Review Execution Trust)** — the
+  lane PRD-a named — as the single accountable decider of each:
+    - **OQ-INT-4 (row 15):** B decides the no-`test:unit` gate policy — keep skipping / durable "gate not enforced"
+      marker (PRD-a's default) / refuse to publish. FILES: `integration-gate.ts:63-65`. No blocking dependency.
+    - **OQ-INT-5 (row 16):** B decides whether reds gain a git-read capability now the `:ro` mount makes reads
+      safe. FILES: the red seed capability set (`tools: ["read"]`). DEPENDS ON A-FG559 (the `:ro` precondition).
+    - **OQ-INT-6 (row 17):** B decides neutralize-vs-accept for the attribute-triggered legit-driver exec. FILES:
+      the D10a host-git wrapper (a mitigation adds `-c filter.<name>.process=` / `GIT_LFS_SKIP_SMUDGE`). DEPENDS ON
+      A-FG559 / D10a — a NOTED cross-cluster coordination.
+  Each is a recorded B decision (PRD-a's suggested defaults: OQ-3 → durable marker; OQ-4 → reds stay `read`-only;
+  OQ-7 → accept for A, revisit for sensitive filters — B may adopt or override with rationale). These are no longer
+  UNOWNED handoffs: **Cluster B is the one accountable owner of each.**
 
 ---
 
@@ -354,6 +377,14 @@ COUPLED, order-flexible (decoupled by pre-existing awaiting_gate status):
 
 PARALLEL, one shared constant:
   A-FG356 reaper   ‖   B-FG524          [Q2; shared: awaiting_gate is non-terminal]
+
+NEWLY-OWNED SEAM CHILDREN (assigned by §3.0 rows 12-17 / §3.2 — the DECISION may stay open UNDER the owner):
+  B-FG524b  run-end reclaim of a still-held child          OWNED-BY-B   [OQ-INT-2]
+      depends on: B-FG524 (held-child retention) + A-FG356 (terminal-only reaper) + awaiting_gate ∈ non-terminal
+  C-FG477-S7  dashboard + campaign operator-reason transport audit   OWNED-BY-C   [OQ-INT-3]
+      depends on: C-FG477-S6 (the operator-reason API/contract exists first)
+  (OQ-INT-1 → A, folded into A-FG559/D10b audit; OQ-INT-4/5/6 → B decisions, no new child —
+   OQ-INT-4 standalone, OQ-INT-5 & OQ-INT-6 depend on A-FG559's :ro mount / D10a wrapper)
 
 CROSS-CUTTING PREREQUISITE (must be fixed before A-FG356, B-FG524, or C-S2 changes any status set):
   Agree awaiting_gate ∈ {non-terminal, ACTIVE}

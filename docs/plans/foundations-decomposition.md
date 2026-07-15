@@ -131,7 +131,9 @@ the campaign; FG-356 (reaper) carries the one **hard red gate** in the cluster.
 - **DEPENDENCIES:** **cross-cluster, weak** — shares one constant with B-FG524: `awaiting_gate ∈ non-terminal`
   (map D3 / §4-Q2). A's terminal-only predicate already excludes a held child; B N-9(a) additionally requires
   the reaper be *aware* of `awaiting_gate` as a live child state. **Parallelizable** with B-FG524 (map §4). The
-  run-end reclaim of a still-held child is **NOT** owned here — it is the unowned seam OQ-INT-2 (map §3).
+  run-end reclaim of a still-held child is **NOT** owned here — it is **OWNED-BY-B via the sibling child B-FG524b**
+  (OQ-INT-2, map §3), whose option (i) (run-end/abandon *terminalizes* held children) would route the reclaim back
+  through this reaper's terminal pass; A-FG356 exposes no run-end reclaim path of its own.
 - **CONCURRENCY CONSTRAINTS:** shares `reconcile.ts` with **C** (`finalizeOrphanedPrimaries` `:1361`, fanout
   sweeps `:1120`/`:1261-1263`) and **B** (crash-recovery gate `:779`/`:880`). **Disjoint line regions** →
   COEXIST textually (map §2.2), but three semantic convergences must be preserved: A keys on the ROW / C keys on
@@ -292,15 +294,15 @@ Five bounded children. INV-1's guard is the **highest-leverage, land-first** ite
   retention → **resolve-time** reclaim: retain the held child's worktree while `awaiting_gate`, reclaim it once
   the child resolves and the parent re-aggregates/finalizes) — both NORMATIVE-UNMET. INV-2. **N-9's RUN-END
   reclaim arm is carved OUT — see SCOPE below.**
-- **SCOPE — BLOCKED on OQ-INT-2 (the held-child RUN-END reclaim arm is NOT owned here).** N-9(b) also names the
-  case where **the run ends with the child still `awaiting_gate`** (never resolved). That reclaim is the **UNOWNED
-  seam OQ-INT-2** (map §3.2 / consolidated ownership row 13): **neither PRD-a nor PRD-b nails who reclaims it.**
-  A's FG-356 reaper is **terminal-only** and a still-held child is non-terminal, so A never collects it; and this
-  child owns only the *resolve-time* reclaim path. **This child does NOT silently own the run-end arm** — that arm
-  is **BLOCKED until OQ-INT-2 has EXACTLY ONE named owner and concrete files** (the operator must decide between
-  (i) run-end/abandon *terminalizes* held children so A's reaper collects them, or (ii) Cluster B owns a dedicated
-  run-end reclaim path). B-FG524 ships its gate + re-aggregation + resolve-time reclaim **without** waiting on that
-  decision; only the run-end reclaim arm is held. This proposal does not resolve OQ-INT-2 (map owns the seam).
+- **SCOPE — the held-child RUN-END reclaim arm DEPENDS ON sibling B-FG524b (no longer BLOCKED on an unowned seam).**
+  N-9(b) also names the case where **the run ends with the child still `awaiting_gate`** (never resolved). That
+  reclaim is now **OWNED-BY-B via the bounded child B-FG524b** (map §3.2 / consolidated ownership row 13 —
+  assigned): **OQ-INT-2 has exactly one named owner.** A's FG-356 reaper is **terminal-only** and a still-held
+  child is non-terminal, so A never collects it; and this child (B-FG524) owns only the *resolve-time* reclaim
+  path. **This child does NOT own the run-end arm** — B-FG524 **DEPENDS ON B-FG524b** for it (B-FG524b decides
+  between (i) run-end/abandon *terminalizes* held children so A's reaper collects them, or (ii) a dedicated run-end
+  reclaim path). B-FG524 ships its gate + re-aggregation + resolve-time reclaim independently; the run-end arm is
+  delivered by B-FG524b. The prior block is resolved to a dependency, not an unowned seam.
 - **FILES / SCHEMAS:** `src/v2/runNext.ts` `dispatchFanoutStep` — child gate at `markTaskComplete` `:2541`
   (add validation-contract gate + a **`held` `ChildOutcome` variant** at `:2353`); re-entry branch
   `:1668-1671` (**replace outright** to re-aggregate — today returns `existingParent.status` and stops);
@@ -319,8 +321,8 @@ Five bounded children. INV-1's guard is the **highest-leverage, land-first** ite
   does a **COORDINATED** rebase (map D1 / §4-Q1 — see the map's relabel: the *parallelizable* conclusion is
   INFERENCE, and the `:1668-1671` overlap is a coordinated change, not a routine one). (ii) Coupled to **C-S2**:
   S2 must model `awaiting_gate → ACTIVE`, decoupled in practice by the pre-existing status (map D4 / §4; C OQ-6).
-  (iii) One shared constant with **A-FG356**: `awaiting_gate ∈ non-terminal` (map D3). Run-end reclaim of a
-  still-held child is the **unowned** seam OQ-INT-2.
+  (iii) One shared constant with **A-FG356**: `awaiting_gate ∈ non-terminal` (map D3). (iv) **B-FG524b**: run-end
+  reclaim of a still-held child is delivered by the sibling child **B-FG524b** (OQ-INT-2, OWNED-BY-B).
 - **CONCURRENCY CONSTRAINTS:** `dispatchFanoutStep` is **the sharpest collision in the program** (C §5.2a). At
   `:1620-1626` and `:1668-1671` **both B and C change the same lines** — CONFLICT (map §2.1). Coordinate: after
   the other cluster's migration lands, **re-verify the child-filter semantics** (child identity is
@@ -338,6 +340,50 @@ Five bounded children. INV-1's guard is the **highest-leverage, land-first** ite
   the silent advance the contract prevents (INV-2). (6) Treating the held-child worktree retention as the
   **accidental** side effect of the `status === "complete"` filter rather than making it intentional with a named
   reclaim path (N-9).
+
+### B-FG524b — run-end reclaim of a still-held fanout child's worktree (owns OQ-INT-2)
+
+**PROPOSED bounded child added by the ownership-assignment correction** (map §3.0 consolidated row 13 / §3.2):
+B-FG524b is the **one accountable owner** of **OQ-INT-2**. It does not restate a PRD decision — no PRD closes the
+run-end arm — it **owns the decision** and delivers the reclaim. The mechanism choice is the open architectural
+outcome this child decides (the row is OWNED even while that outcome is open).
+
+- **OWNING DECISION (the map assigns the owner; the mechanism is B-FG524b's to decide):** the run-end reclaim
+  mechanism for a fanout child still `awaiting_gate` when the run ends/abandons — **(i)** run-end/abandon
+  **terminalizes** the held child (status → a terminal `{complete, failed}` value) so **A-FG356's terminal-only
+  reaper collects it** next pass, or **(ii)** B-FG524b owns a **direct** run-end reclaim path in the
+  run-end/abandon finalize. Grounded in **B N-9(b)** (the worktree must be "reclaimed, never leaked … or the run
+  ends with the child still held").
+- **ACCEPTANCE ROWS:** a run that ENDS (or is abandoned) with a child still `awaiting_gate` **does NOT leak** its
+  worktree or its `forge/<runId>/<taskId>` branch; a test drives **run-end-while-held → reclaimed**. Under
+  option (i) the held child is first moved to a **terminal** status (so A-FG356's `{complete, failed}` predicate
+  matches) AND its worktree must satisfy **A-FG356's retain predicate** before reap (dirty / retain-set kind ⇒
+  retained, never silently discarded — I-6); under option (ii) the direct path honors the same retain predicate.
+- **FILES / SCHEMAS:** the run-end / abandon finalize path in `src/v2/runNext.ts`; `src/v2/reconcile.ts` (the
+  A-FG356 terminal-reaper hook, option (i)); `src/v2/worktree-lifecycle.ts` (reclaim). Reuses the **existing**
+  `awaiting_gate` + terminal statuses — **NO schema migration, NO new `tasks` column, NO new failure kind**
+  (consistent with the campaign-wide no-migration stance, map §5 / A §4 / B §5 / C §6).
+- **RED PREREQUISITES:** **REQUIRED at implementation** — capture the **leak** first: drive a run to end with a
+  fanout child still `awaiting_gate` and **observe** the orphaned worktree + branch no reconcile pass removes (the
+  same leak *class* A-FG356's AC-5 captures for the crash arm, but on the run-end-while-held path). **If it does
+  not reproduce, the run-end arm is already covered by the resolve-time path + A's reaper and this child is
+  DROPPED, not implemented.** No fabricated red.
+- **DEPENDENCIES:** **cross-cluster.** (i) **B-FG524** — held-child retention + the `awaiting_gate` state must
+  exist first (B-FG524 owns the resolve-time arm; B-FG524b owns only the run-end arm). (ii) **A-FG356** — option
+  (i) routes reclaim through its terminal reaper, which must treat the newly-terminalized child under its retain
+  predicate; option (ii) must not double-reap a child A's reaper also sees. (iii) the shared constant
+  `awaiting_gate ∈ non-terminal` (map §3 row 10) — until the child is terminalized (option i), A must not reap it.
+  **NOT blocked on FG-561.**
+- **CONCURRENCY CONSTRAINTS:** touches the run-end finalize region of `runNext.ts` and (option i) the A-FG356
+  reaper tail of `reconcile.ts` — **coordinate with A-FG356** if it lands option (i) (shared reaper predicate) and
+  with **B-FG524** (shared held-child lifecycle). Must NOT introduce a **second** held-child retention path —
+  retention stays in B-FG524; this child owns only the run-end reclaim.
+- **HOLLOW VERSION TO REJECT:** (1) **terminalizing a held child `failed`/`complete` without running A-FG356's
+  retain predicate** — silently discards a dirty or retain-set-kind worktree (I-6). (2) A direct reclaim path that
+  **races** A-FG356's reaper and double-frees (or leaves) the worktree. (3) Claiming the run-end arm is "already
+  covered" by the resolve-time path **without capturing the leak** — the resolve-time arm never fires when the
+  child never resolves (that is the whole seam). (4) A **mid-hold** status flip dressed up as a run-end
+  terminalization — the transition must be a genuine run-end, else it desyncs C-S2's ACTIVE-hold contract (INV-7).
 
 ### B-FG525 — gate `forge invoke` AND its crash-recovery bypasses
 
@@ -375,7 +421,9 @@ Five bounded children. INV-1's guard is the **highest-leverage, land-first** ite
 ## Cluster C — workflow lifecycle semantics (PRD `b5d7417`)
 
 Two ticket families. **FG-527** splits into **three risk classes** (per binding D-7); **FG-477** decomposes as
-its **five evaluator surfaces S1–S6** emerge from the single derivation, with S2 gating S3/S5/S6.
+its **five evaluator surfaces S1–S6** emerge from the single derivation, with S2 gating S3/S5/S6 — **plus the
+added consumer-audit child C-FG477-S7** (the dashboard/campaign operator-reason transport audit, owner of
+OQ-INT-3, after S6; not itself an evaluator surface).
 
 ### C-FG527 — split by risk (D-7 is binding: three children, ordered)
 
@@ -393,7 +441,8 @@ D-7 forbids shipping FG-527 as one ticket — three different risk classes, thre
   comment `:435-438`); `FanoutChildRetryError` (`:72-88`) keeps firing for genuine `fanout_child` rows; the
   pinned classifier tests `lifecycle-evaluator.test.ts:603`/`:623` (flip DISAGREEMENT→agreement; delete legacy
   fixtures `:596-601`/`:642`, do not invert). **Must NOT touch `retry.ts:263`** (mount-mode predicate — the
-  permanent INV-1 allowlist exclusion; also the unowned seam OQ-INT-1).
+  permanent INV-1 allowlist exclusion; also seam **OQ-INT-1, now OWNED-BY-A** — if A's decision picks a `retry.ts`
+  mitigation, that edit is A's to COORDINATE with this child, not this child's to make).
 - **RED PREREQUISITES:** **VERIFIED/captured** — A-1 `p2` part A (`FanoutChildRetryError` … "is a fanout child"
   on a row whose classifier kind is `red_review`); A-2 `p1` (32/32 green incl. two DISAGREEMENT tests). Accept:
   refused **as a red**, accurate message, **no `retry_replacement` row exists in the phase afterwards, incl.
@@ -479,7 +528,8 @@ the other surfaces** — S3/S5/S6 explicitly (D-7 item 3), and S4 as the ready-w
 (it cannot name the attempt before the derivation it reads exists). Each surface below is a **bounded child** at
 the same granularity as the other clusters' children. The **engineer picks type/function/file names** (D-3 defers
 them deliberately). **No surface migrates the `tasks` schema** — persisting the attempt kind is deferred
-**inside** FG-553's store-version policy (OQ-3); `dashboard/` transport stays unaudited (OQ-4).
+**inside** FG-553's store-version policy (OQ-3); the `dashboard/` + campaign transport is **audited by the added
+child C-FG477-S7** (OQ-4 follow-up / OQ-INT-3), not by S1–S6.
 
 **S1 — lineage / attempt kind (SHIPPED — not a child).** D-2. `lifecycle-evaluator.ts` `LineageKind` `:22-61`,
 `classifyTaskLineage` `:110` (204 lines today — the lineage layer only). Not re-litigable; consumed, not rebuilt.
@@ -602,18 +652,18 @@ them deliberately). **No surface migrates the `tasks` schema** — persisting th
   audit is a **separate concern** — the dashboard-integration surface and the campaign executor are each their
   **own** consumer, out of THIS child's scope. **This child audits neither their transport nor their
   re-derivation** (naming them without auditing their transport is exactly the hollow this scoping closes). That
-  transport audit is tracked as **OQ-4** (dashboard) and belongs with the owning dashboard-integration /
-  campaign-executor work as a **follow-up**, NOT here. S6 audits exactly the four surfaces above and claims
-  nothing about dashboard/campaign consumption beyond "they read the same contract." **These two bound-out
-  propagation surfaces have NO owner today** — the map classifies them as the **UNOWNED seam OQ-INT-3**
-  (`docs/plans/foundations-integration.md` §3.0 consolidated row 14 / §3.2): the operator/decomposition must name
-  an owner (a bounded dashboard-consumer child and a bounded campaign-consumer child, each owner + files +
-  acceptance, or one owner for both) before the transport audit lands. This proposal does not resolve OQ-INT-3.
+  transport audit is tracked as **OQ-4** (dashboard) and is delivered by the **sibling child C-FG477-S7**, NOT
+  here. S6 audits exactly the four surfaces above and claims nothing about dashboard/campaign consumption beyond
+  "they read the same contract." **These two bound-out propagation surfaces are now OWNED-BY-C via C-FG477-S7**
+  (`docs/plans/foundations-integration.md` §3.0 consolidated row 14 / §3.2 — assigned): OQ-INT-3 has **exactly one
+  named owner**, a single bounded child auditing both consumer transports (dashboard + campaign). This child (S6)
+  does not itself resolve OQ-INT-3 — it produces the operator-reason contract that C-FG477-S7 audits against.
 - **RED PREREQUISITES:** **NORMATIVE-UNMET** — **no fabricated red.** Contract test that a hold renders distinctly
   from a human gate and no internal union leaks to the client.
-- **DEPENDENCIES:** **intra-C:** after **S2** (it consumes the step-state derivation to render the reason).
-  **Cross-cluster:** none; `dashboard`/`campaign` transport consumption is **out of scope** and **UNOWNED**
-  (OQ-4 follow-up → map's **OQ-INT-3**, see BOUND OUT above).
+- **DEPENDENCIES:** **intra-C:** after **S2** (it consumes the step-state derivation to render the reason);
+  **feeds C-FG477-S7** (the operator-reason contract this child produces is C-FG477-S7's input). **Cross-cluster:**
+  none; `dashboard`/`campaign` transport consumption is **out of scope of THIS child** and **OWNED-BY-C via
+  C-FG477-S7** (OQ-4 follow-up → map's **OQ-INT-3**, see BOUND OUT above).
 - **CONCURRENCY CONSTRAINTS:** touches the `runNext.ts:977-981` reason-rendering plus the `reconcile`/`forge
   show`/`forge status`/`report` consumers — no A/B shared-file conflict. (Dashboard/campaign transport is not
   touched by this child.)
@@ -625,6 +675,41 @@ them deliberately). **No surface migrates the `tasks` schema** — persisting th
   contract is hollow — a second lifecycle explanation the evaluator does not own). (4) **Half-claiming
   dashboard/campaign** — naming them as consumers here while leaving their transport unaudited (they are BOUND
   OUT; their transport is OQ-4's follow-up, not this child's claim). (5) building it **before S2**.
+
+#### C-FG477-S7 — dashboard + campaign-runner operator-reason transport audit (owns OQ-INT-3; after S6)
+
+**PROPOSED bounded child added by the ownership-assignment correction** (map §3.0 consolidated row 14 / §3.2):
+C-FG477-S7 is the **one accountable owner** of **OQ-INT-3** — the dashboard + campaign consumption C-FG477-S6
+**BOUNDS OUT**. **One child, two consumers.** It does not restate a PRD decision — S6 explicitly bounds the
+transport out — it **owns the audit** N-5 names but S6 does not perform.
+
+- **OWNING DECISION (the map assigns the owner; the audit outcome is C-FG477-S7's to decide):** whether the
+  **dashboard-integration** read surface and the **campaign executor** each consume C's serialized operator-reason
+  contract (the C-FG477-S6 output) over their serialization/API transport and **re-derive NONE of it.** Grounded
+  in **N-5** ("an **API contract** to `show`/`report`/dashboard/campaign, **NOT** an internal union") — S6 audits
+  the four in-cluster surfaces; S7 audits the two bound-out transport consumers.
+- **ACCEPTANCE ROWS:** **each** named consumer (dashboard, campaign) reads the operator-reason contract and
+  computes **no** "why" of its own; a **contract test per transport** that a validation-contract hold renders
+  **distinctly** from a human gate across the serialization boundary, and **no internal step-state union crosses
+  the client boundary** (else every new state is a client-breaking change). **Hollow = either consumer still
+  computing its own "why" string**, or the internal union leaking over the transport.
+- **FILES / SCHEMAS:** the **dashboard-integration operator-reason read surface**; the **campaign executor's**
+  operator-reason consumption; C's **operator-reason serialization** (the C-FG477-S6 output / API contract). **Do
+  NOT ship the evaluator's internal step-state union across either transport** (N-5). No task-row migration.
+- **RED PREREQUISITES:** **NORMATIVE-UNMET** — the transport audit is prose until executed; **no fabricated red.**
+  Acceptance is the per-transport contract test above. (If a consumer surface does not exist yet, its arm is a
+  standing acceptance obligation, not a fabricated red.)
+- **DEPENDENCIES:** **intra-C:** after **C-FG477-S6** (the operator-reason API/contract must exist first — S7 has
+  nothing to audit against until S6 ships the contract). **Cross-cluster:** the dashboard-integration and
+  campaign-executor surfaces are the audited consumers; S7 does not migrate them, it audits their consumption.
+- **CONCURRENCY CONSTRAINTS:** touches the dashboard + campaign consumer surfaces and reads C's operator-reason
+  contract — **no A/B shared-file conflict** (dashboard/campaign transport is not touched by any A/B child). Must
+  not fork the contract: both consumers read the **same** S6 contract, never a parallel projection.
+- **HOLLOW VERSION TO REJECT:** (1) **Half-claiming** — auditing the dashboard transport and leaving campaign (or
+  vice-versa) — the child owns **both** consumers; leaving one re-derives the exact hollow S6's bound-out closes.
+  (2) A consumer **computing its own "why"** instead of reading the contract. (3) Shipping the **internal
+  step-state union** across the transport (N-5). (4) Rendering a validation-contract hold **identically** to a
+  human gate over the serialization boundary. (5) building it **before S6** (nothing to audit against).
 
 **FG-477 family closure (§7.3 — spans all surfaces, no single child claims it).** FG-477 closes only when **all
 five surfaces exist as projections of one derivation**, INV-1's allowlist is **EMPTY** (but for `project-auth.ts:79`
@@ -647,7 +732,10 @@ pushes campaign policy into a module `ready-queue`/`gate`/`runNext`/`reconcile` 
   adversarial review** (A §10, B §6 non-goal, C §7.3) and on the **post-FG-561 delta-audit** passing
   (Deliverable 2).
 - **No normative decisions are invented.** Every "must/owns/refuses" above is a citation of a PRD id or the
-  integration map; where the PRDs leave a seam unowned (the map's **six** UNOWNED seams — OQ-INT-1, OQ-INT-2, the
-  OQ-INT-3 dashboard/campaign transport, and OQ-INT-4/5/6 = Lane A OQ-3/OQ-4/OQ-7 punted to the Review-trust lane
-  but never adopted by PRD-b) this proposal carries it as unresolved, it does not resolve it.
+  integration map. The six seams the PRDs leave open now each have **EXACTLY ONE named owner** (map §3.0 rows
+  12-17, assigned): **OQ-INT-1 → Cluster A**; **OQ-INT-2 → B-FG524b**; **OQ-INT-3 → C-FG477-S7**; **OQ-INT-4/5/6 →
+  Cluster B** (Lane A OQ-3/OQ-4/OQ-7, formally accepted by the Review-trust lane). This proposal adds the two
+  proposed children (B-FG524b, C-FG477-S7) and carries the assigned owners; the **architectural outcome** of each
+  seam may still be open, but it is open **UNDER its named owner** — no seam is UNOWNED, and none is invented
+  beyond these ownership assignments.
 - **No PRD or source is edited by this document.**
