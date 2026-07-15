@@ -711,19 +711,35 @@ transport out — it **owns the audit** N-5 names but S6 does not perform.
     S6 owns creating it (the file already holds the FG-477 evaluator surfaces). Per PRD-c **N-5 / S6** — "an API
     contract to `show`/`report`/dashboard/campaign … one source, internal union NOT shipped to the client." S6
     creates this schema; S7 audits its consumption.
-  - **NEW DASHBOARD transport (creation owner C-FG477-S7)** — three named additions that read the S6
-    operator-reason schema: a **NEW read route in `dashboard/src/server.ts`** (alongside the VERIFIED-existing
-    `/api/in-flight` `:91-96` and `/api/task/:id` `:208-211`); a **NEW query function in `dashboard/src/queries.ts`**
-    (alongside `inFlight` `:158` / `taskDetail` `:320`); a **NEW render in `dashboard/client/main.js`** (alongside
-    `InFlightSection` `:439`, `:529-530` status badge, `:676` detail render).
+  - **NEW DASHBOARD transport (creation owner C-FG477-S7)** — three concretely-named additions that read the S6
+    operator-reason schema:
+    - a **NEW HTTP route `GET /api/operator-reason/:runId`** (proposed name — implementer may rename) ADDED to
+      `dashboard/src/server.ts`, alongside the VERIFIED-existing `/api/in-flight` (`:91-96`) and `/api/task/:id`
+      (`:208-211`);
+    - a **NEW query function `operatorReason(runId)`** (proposed name — implementer may rename) ADDED to
+      `dashboard/src/queries.ts`, alongside `inFlight` (`:158`) / `taskDetail` (`:320`);
+    - a **NEW client render `OperatorReasonBadge`** (proposed name — implementer may rename; a render element in the
+      run/task detail view) ADDED to `dashboard/client/main.js`, alongside `InFlightSection` (`:439`), the status
+      badge (`:529-530`) and the detail render (`:676`).
   - **NEW CAMPAIGN transport — a NEW read of the S6 operator-reason schema in `src/campaign/executor.ts`, creation
-    owner C-FG477-S7.** The executor today computes its OWN `blockerKind`/`reason` (`:104-105`, populated at
-    `:326/:352/:373-374/:560/:621/:995/:1370`) — the campaign's own hold reason, NOT the FG-477 operator-reason;
-    the audit states whether the S6 read **augments or replaces** that own `reason`.
+    owner C-FG477-S7.** Proposed insertion point: the executor's own **hold-reason computation site** — the
+    `blockerKind`/`reason` type at `:104-105`, populated at `:326`/`:352`/`:373-374`/`:560`/`:621`/`:995`/`:1370` —
+    where the S6 read (proposed — the call that **replaces or augments the executor's own `reason`**; implementer may
+    rename) is sited. That `reason` is the campaign's own hold reason, NOT the FG-477 operator-reason; **the audit
+    decides augment-vs-replace.**
 
-  Test surfaces (existing): `dashboard/src/queries-inflight-status.test.ts` (+ siblings) and the campaign executor
-  tests. **Do NOT ship the evaluator's internal step-state union across either transport** (N-5). No task-row
-  migration.
+  Test surfaces:
+  - **Dashboard (existing):** `dashboard/src/queries-inflight-status.test.ts` (+ siblings
+    `queries-reconcile.test.ts`, `routes-verification.integration.test.ts`).
+  - **Campaign (existing):** `src/campaign/executor.integration.test.ts`,
+    `src/campaign/fg521-show-report-agreement.integration.test.ts`, `src/campaign/report.integration.test.ts`.
+  - **NEW contract tests (creation owner C-FG477-S7)** — the per-transport contract tests S7's acceptance requires:
+    a **dashboard contract test** (proposed, alongside `dashboard/src/queries-inflight-status.test.ts`; implementer
+    may rename) and a **campaign contract test** (proposed, alongside `src/campaign/executor.integration.test.ts`;
+    implementer may rename) — each asserting the consumer reads the operator-reason contract and re-derives no
+    "why" of its own.
+
+  **Do NOT ship the evaluator's internal step-state union across either transport** (N-5). No task-row migration.
 - **RED PREREQUISITES:** **NORMATIVE-UNMET** — the transport audit is prose until executed; **no fabricated red.**
   Acceptance is the per-transport contract test above. **Both consumer subsystems are VERIFIED EXISTING** — the
   dashboard read surface (`dashboard/src/server.ts:91-96`/`:208-211` → `queries.ts:158`/`:320` →
