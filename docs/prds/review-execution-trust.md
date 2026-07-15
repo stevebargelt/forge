@@ -113,7 +113,7 @@ failure**, at every local-run site, and must never spend a review round or dispa
 environment fault.
 
 1. **Detect + classify (the floor, always safe).** Readiness is asserted immediately before **each** of
-   the three host-local verification sites (`cli/commands/review-loop.ts:544` dirty-tree, `:622`
+   the three host-local verification sites (`src/cli/commands/review-loop.ts:544` dirty-tree, `:622`
    CI-unavailable fallback, `:853` fixer pre-commit — VERIFIED, all `runVerify(..., {cwd: ctx.projectDir})`).
    Independently, the verification runner must **stop discarding the child exit code** (the env signal
    already exists at the exec boundary and is dropped — plan §1.2; an unprepared toolchain exits `127`),
