@@ -303,8 +303,10 @@ of scope: they ask security and mount-mode questions, not lineage questions). FG
   and it must never throw. **Architectural recommendation to Lane A: answer worktree ownership from the ROW
   (`worktreePath` presence), never from lineage.** That keeps A independent of C entirely. If A instead adds a
   fourth structural lineage probe, Lane C inherits it as debt.
-- **Order:** Lane A first (leaf addition to an existing sweep); Lane C's reconcile work (part of C4/C5) rebases
-  onto it. Lane C changes what "primary" *means*; Lane A should not be re-deriving it in the same window.
+- **Order:** the cross-cluster **landing order (Lane A / FG-356 vs. Lane C's reconcile work) is owned by the
+  integration artifact, not decided here** (PRD §5.2 opening / §5.2b). The **constraint that survives**,
+  whichever lands first: Lane C changes what "primary" *means*, so Lane A must not be re-deriving it in the same
+  window — and worktree ownership is answered from the ROW (`worktreePath`), never from lineage.
 
 ### 6.2 `runNext.ts` `dispatchFanoutStep` × Lane B (FG-524, validation contract on fanout children)
 
@@ -321,11 +323,19 @@ of scope: they ask security and mount-mode questions, not lineage questions). FG
   step-state union (C4) is frozen before FG-524 lands, FG-524 breaks it; if FG-524 lands first without C4
   knowing, a held child is an unmodelled state that the settle logic will read as "not terminal" forever
   (wedge).**
-  **Decision: FG-524 lands BEFORE C4, and C4's step-state union must explicitly model "child held for
-  validation" as ACTIVE (work outstanding, human decision pending) — never as blocked/terminal.** C2/C3 are
-  unaffected either way and can go first regardless.
-- **Order:** C2 → C3 → FG-524 → C4. (C2/C3 first because they are small and mechanical; making FG-524 rebase
-  over them is cheaper than the reverse.)
+  **Constraint (survives, binding): C4's step-state union must model "child held for validation" as ACTIVE
+  (work outstanding, human decision pending) — never as blocked/terminal; whichever of {FG-524's hold, C4's
+  union} lands first must not freeze a shape the other needs.** C2/C3 are unaffected either way and can go
+  first regardless.
+  > **Cross-cluster LANDING ORDER not decided here (superseded by PRD).** This plan is a point-in-time
+  > discovery record. An earlier draft of this line fixed "FG-524 lands BEFORE C4"; that ordering is **owned by
+  > the integration artifact**, not chosen here. The PRD (`docs/prds/workflow-lifecycle-semantics.md`, §5.2a /
+  > OQ-6) deliberately does NOT pick the order and binds only the ACTIVE-not-terminal invariant above. The
+  > constraint stays; the order does not.
+- **Order:** C2 → C3 first — this part is intra-cluster and PRD-bound (D-5a before D-5b). The relative
+  placement of **FG-524 and C4** around them is a **cross-cluster landing order owned by the integration
+  artifact, not decided here** (see the note above; PRD §5.2a / OQ-6). C2/C3 lead because they are small and
+  mechanical.
 
 ### 6.3 The Task row / `worktreePath` / `merge_conflict` failure kind × Lane A
 
