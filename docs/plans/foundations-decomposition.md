@@ -13,11 +13,11 @@ it.
 |---|---|---|
 | **A** — agent workspace isolation | `docs/prds/agent-workspace-isolation.md` | **`a0064d5`** |
 | **B** — review execution trust | `docs/prds/review-execution-trust.md` | **`20c8f59`** |
-| **C** — workflow lifecycle semantics | `docs/prds/workflow-lifecycle-semantics.md` | **`7e32080`** |
+| **C** — workflow lifecycle semantics | `docs/prds/workflow-lifecycle-semantics.md` | **`b5d7417`** |
 | campaign baseline | (origin/main at campaign start) | **`185afc3`** |
 
 **SHA semantics (uniform across all three clusters).** Each cluster SHA above is the **review-clean lane HEAD**,
-not necessarily the commit that finalized the PRD *file*. **A** (`a0064d5`) **and C** (`7e32080`) are each
+not necessarily the commit that finalized the PRD *file*. **A** (`a0064d5`) **and C** (`b5d7417`) are each
 simultaneously the PRD-finalizing commit **and** the lane HEAD — the same commit edits the PRD file *and* is the
 lane HEAD. **Only B** has a later **plan-only** commit as its lane HEAD: the PRD file
 `docs/prds/review-execution-trust.md` was finalized at **`68ee713`**, and `20c8f59` is a later plan-only citation
@@ -360,7 +360,7 @@ Five bounded children. INV-1's guard is the **highest-leverage, land-first** ite
 
 ---
 
-## Cluster C — workflow lifecycle semantics (PRD `7e32080`)
+## Cluster C — workflow lifecycle semantics (PRD `b5d7417`)
 
 Two ticket families. **FG-527** splits into **three risk classes** (per binding D-7); **FG-477** decomposes as
 its **five evaluator surfaces S1–S6** emerge from the single derivation, with S2 gating S3/S5/S6.

@@ -5,9 +5,9 @@ triggers (`docs/plans/foundations-integration.md`) into a concrete, rerunnable p
 **once FG-561/FG-553 lands and before any foundation child begins implementation.** It cites the three PRDs; it
 invents no normative decisions and allocates no tickets.
 
-**Keyed to each cluster's review-clean lane HEAD** — A `a0064d5`, B `20c8f59`, C `7e32080` — and the campaign
+**Keyed to each cluster's review-clean lane HEAD** — A `a0064d5`, B `20c8f59`, C `b5d7417` — and the campaign
 baseline **`185afc3`**. Each SHA is the **review-clean lane HEAD**, not necessarily the PRD-file-finalizing
-commit: **A** (`a0064d5`) **and C** (`7e32080`) are each simultaneously their PRD's finalizing commit **and**
+commit: **A** (`a0064d5`) **and C** (`b5d7417`) are each simultaneously their PRD's finalizing commit **and**
 their lane HEAD — the same commit edits the PRD file *and* is the lane HEAD. **Only B** has a later **plan-only**
 commit as its lane HEAD: B's PRD file `docs/prds/review-execution-trust.md` was finalized at **`68ee713`** and
 `20c8f59` is a later plan-only citation fix on the same lane branch (it edits
@@ -90,7 +90,7 @@ The FG-553/FG-555 mechanism surfaces, plus **every file the three PRDs assume be
   ABI are not accepted as ready). `INV-4`'s `project_dir` keying is **insensitive** (the reviewed project's dir
   is unchanged); only the **recorded ABI** is sensitive — do not conflate them.
 
-### Cluster C (PRD `7e32080`)
+### Cluster C (PRD `b5d7417`)
 
 - **C §8 — "a single Forge version owns the store."** IF FG-553's store-version policy admits **>1 Forge version
   writing one store**, re-verify: (1) **A-5's safety argument** — rule 0 reads a provenance marker written by the
