@@ -53,8 +53,8 @@ This is the single most load-bearing finding in the lane, and it is why FG-527 m
 
 ### 1.1 What actually shipped (slice 1)
 
-**VERIFIED FACT.** `src/v2/lifecycle-evaluator.ts` (204 lines) exports exactly four things:
-`classifyTaskLineage` (`:110`), and three single-row primitives — `isWorkflowPrimaryRow` (`:74`),
+**VERIFIED FACT.** `src/v2/lifecycle-evaluator.ts` (204 lines) exports exactly five things:
+`classifyTaskLineage` (`:110`), and four single-row primitives — `isWorkflowPrimaryRow` (`:74`),
 `isAdHocInvokeRow` (`:182`), `isOnRejectRecoveryRow` (`:188`), `isPhasePrimaryRow` (`:202`). The 7-kind union
 is at `:22-61`. **There is no step-state, run-state, ready-work, terminal-blocker or operator-reason surface
 yet.** FG-477's evaluator *proper* is entirely unbuilt; what exists is its lineage layer.
@@ -144,6 +144,13 @@ context, and `feature.yml`'s `build` step is genuinely both a `fanout` step and 
 first. p2's part B uses `retry --force` **because `--force` bypasses exactly the refusal under discussion and
 mints exactly the row a classifier-migrated `retry.ts` would mint** — it is the post-migration row shape, not a
 simulation of it.
+
+> **SUPERSEDED — the PRD (D-4) governs: migration REFUSES a red retry even under `--force`; the row shown here is
+> today's pre-decision behavior, not the migrated outcome.** The claim above that `--force` "mints exactly the row
+> a classifier-migrated `retry.ts` would mint" is DISCOVERY EVIDENCE of today's `--force` path, not the migrated
+> result. D-4 decides that a classifier-migrated `retry.ts` REFUSES a red even under `--force` — precisely because
+> allowing it would mint the detached primary the fanout then adopts. Keep this row as evidence of the pre-decision
+> behavior; the migrated outcome is a refusal, not this row.
 
 **Environment note (affects reproduction, not conclusions):** the clone's `node_modules` was empty on arrival;
 `npm install` + `npm rebuild better-sqlite3 --foreground-scripts` was required before any DB-touching probe
