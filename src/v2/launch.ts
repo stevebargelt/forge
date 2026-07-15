@@ -43,6 +43,28 @@ import { readReleaseManifest } from "./release.js";
 
 export const LAUNCHES_DIR = join(FORGE_HOME, "launches");
 
+// FG-569 (R1): the release identity of the SUBMITTING forge CLI, derived from
+// the CLI's OWN release manifest. `release` carries the manifest id, the commit,
+// and the release dir; `dev` is the explicit unversioned marker for a CLI NOT
+// running from a release (bin/forge) — releaseId is null, never a manufactured
+// id and never omitted-as-if-release.
+export type ControlRelease =
+  | { kind: "release"; releaseId: string; commit: string; path: string }
+  | { kind: "dev"; releaseId: null };
+
+// FG-569 (R1): the SUBMITTING forge CLI's OWN runtime, captured INSIDE the CLI
+// process at launch submission — process.execPath / process.versions.modules /
+// process.version, plus its release identity. This is a DISTINCT runtime from the
+// exit recorder (R2, RecorderRuntime): the recorder can run under a different
+// interpreter, so R1 is NEVER inferred from R2. Captured once, at submission,
+// because the CLI process is gone by the time anyone inspects the launch.
+export type ControlRuntime = {
+  execPath: string;
+  abi: string;
+  nodeVersion: string;
+  release: ControlRelease;
+};
+
 export type LaunchMeta = {
   id: string;
   command: string[];
@@ -57,6 +79,10 @@ export type LaunchMeta = {
   startedAt: string;
   logPath: string;
   cwd: string;
+  // FG-569 (R1): the submitting CLI's own runtime + release identity, captured at
+  // submission and persisted here. Optional so a launch record written before
+  // FG-569 still loads — its absence surfaces as "not recorded", never inferred.
+  control?: ControlRuntime;
 };
 
 export type LaunchStatus =
@@ -145,6 +171,26 @@ export function shellQuote(arg: string): string {
 function trustedReleaseId(): string | null {
   const here = dirname(fileURLToPath(import.meta.url));
   return readReleaseManifest(here)?.manifest.id ?? null;
+}
+
+// FG-569 (R1): capture the SUBMITTING forge CLI's OWN runtime — its execPath,
+// ABI, and node version are read from THIS process (the CLI), never from the
+// recorder (R2). The release identity comes from the CLI's OWN release manifest,
+// walked up from this module's location — the SAME trusted source as
+// trustedReleaseId, so a dev CLI (bin/forge, no manifest) is an explicit `dev`
+// marker with releaseId null rather than a manufactured or omitted identity.
+function collectControlRuntime(): ControlRuntime {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const found = readReleaseManifest(here);
+  const release: ControlRelease = found
+    ? { kind: "release", releaseId: found.manifest.id, commit: found.manifest.commit, path: found.releaseDir }
+    : { kind: "dev", releaseId: null };
+  return {
+    execPath: process.execPath,
+    abi: process.versions.modules,
+    nodeVersion: process.version,
+    release,
+  };
 }
 
 // A shell wrapper could only ever report `$?`, which folds "killed by SIGTERM"
@@ -293,6 +339,9 @@ export function startLaunch(argv: string[], opts: { name?: string; cwd?: string;
     startedAt: now.toISOString(),
     logPath: join(dir, "out.log"),
     cwd: opts.cwd ?? process.cwd(),
+    // FG-569 (R1): captured here, in the submitting CLI, INDEPENDENTLY of the
+    // recorder (R2) — the CLI is gone by the time anyone inspects this launch.
+    control: collectControlRuntime(),
   };
   const metaPath = join(dir, "meta.json");
   writeFileSync(metaPath, JSON.stringify(meta, null, 2));
