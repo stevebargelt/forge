@@ -368,11 +368,16 @@ program.*
   **child** into a status that is **neither complete nor failed**. Today **three** places assume children settle
   terminally: `dispatchFanoutStep`'s child-settlement path, reconcile's "all children terminal" fanout sweep
   (`reconcile.ts:1124`), and reconcile's awaiting_red sweep (`:1261-1263`).
-- > **Ownership, binding:** **this cluster owns the step-state union; FG-524 owns the hold.** If the union is
-  > frozen before FG-524 lands, FG-524 breaks it. If FG-524 lands without the union modelling the hold, a held
-  > child is an **unmodelled state that settle logic reads as "not terminal" forever — a permanent wedge.**
-  > Therefore **FG-524 lands BEFORE the step-state surface (S2), and S2 must model "child held for validation"
-  > as ACTIVE** (work outstanding, human decision pending) — **never blocked/terminal** (INV-7). D-5a/D-5b are
+- > **Ownership, binding:** **this cluster owns the step-state union; FG-524 owns the hold.** The two are
+  > **coupled**: FG-524's hold puts a fanout child into a status that is neither complete nor failed, and the S2
+  > union is the surface that must model it. **The invariant this PRD binds — and the integration artifact must
+  > preserve — is that S2 models "child held for validation" as ACTIVE** (work outstanding, human decision
+  > pending), **never blocked/terminal** (INV-7). Whichever of {FG-524's hold, the S2 union} lands first **must
+  > not freeze a shape the other needs**: freezing S2 before it models the hold leaves a held child as an
+  > **unmodelled state that settle logic reads as "not terminal" forever — a permanent wedge**; landing FG-524
+  > against an S2 that already omits the hold has the same effect.
+  > **This PRD does NOT pick the landing order** — that ordering decision belongs to the integration artifact
+  > (§5.2 opening; **OQ-6**). This PRD states only the invariant the chosen order must preserve. D-5a/D-5b are
   > unaffected either way and go first regardless.
 
 **(b) `reconcile.ts` × Agent Workspace Isolation (FG-356, worktree reaper).**
@@ -421,8 +426,14 @@ it is a pure relocation.** (The FG-477 slice-5 prose is **STALE** — plan §1.2
 
 ### 7.1 Factual defects — **observed-red REQUIRED**
 
-Each already has captured, re-executed evidence. **No fix in this group ships without its red observed against
-the pre-fix baseline.**
+**Per-item evidence state is MIXED — do not read this group as uniformly captured.** **A-1, A-2, A-3, A-5
+already have captured, re-executed observed-red** against the pre-fix baseline (`p2`, `p1`, `p3`, `p4`
+respectively, named in the table). **A-4 and A-6 do NOT yet have observed-red** — A-4's red is *not yet
+captured* (the prefix filters agree with the classifier **by accident** today, D-5b); A-6 is **INFERENCE only —
+NOT yet observed** (predicates verified at their lines, runtime manifestation unconfirmed). **Binding, per
+item:** every fix in this group ships only after **its own** red is observed against the pre-fix baseline — for
+A-4 and A-6 that observed-red is a **pending precondition on the implementing child**, not a claim already met.
+If A-6's probe shows it does not manifest, it is dropped rather than fixed.
 
 | # | Defect | Observed-red evidence at `f3bfee0` |
 |---|---|---|
@@ -513,6 +524,10 @@ Defaults are stated; **work proceeds on the default**. Each names what would set
   parent-less row in the phase, **including a `failed` one**, and returns its status. Intentional (a manual step,
   once failed, stays failed) or a latent bug? **Default: preserve behavior** (add only the ad-hoc exclusion) and
   flag it. **Owner: operator.**
+- **OQ-6 — Landing order for FG-524's hold vs. the S2 step-state union (§5.2a).** The two are coupled; this PRD
+  binds only the invariant the order must preserve (S2 models the held child as ACTIVE, never blocked/terminal —
+  INV-7). **This PRD does NOT pick the order.** Default: **defer the ordering decision to the integration
+  artifact** — whichever lands first must not freeze a shape the other needs. **Owner: integration artifact.**
 
 ---
 

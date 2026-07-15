@@ -165,6 +165,12 @@ The engineer picks the names. These are the constraints the surfaces must satisf
    evaluator must never be able to resurrect it. **Boundary decision: `run-finalize.ts:31-46` remains the ONLY
    writer of run completion** (verified single-caller of `completeRun`); the evaluator answers *"is it settled"*,
    it does not answer *"write complete"*. Anything else re-opens the AWN-2 race that is currently closed.
+   > **SUPERSEDED BY PRD (this claim is stale — the PRD governs).** This plan is a point-in-time discovery
+   > record. Its "ONLY writer of run completion" is disproved: `design.ts` and `claude.ts` independently call
+   > `updateRunStatus(runId, "complete")`, so `run-finalize.ts` is the sole caller of **`completeRun`** but NOT
+   > the sole writer of run completion. The PRD (`docs/prds/workflow-lifecycle-semantics.md`, N-2) documents the
+   > real completion-writer set and the store-layer guards that hold INV-2; where this plan and the PRD differ on
+   > it, the PRD is authoritative.
 4. **Ready work.** Must name the **task attempt to dispatch**, not just the step — because `dispatchSingleStep`
    already re-derives that pick from rows (`runNext.ts:441-449`) and `dispatchFanoutStep` re-derives it
    *differently and wrongly* (`:1572-1574`, probe 3). The ready-work result is what kills that second derivation.
