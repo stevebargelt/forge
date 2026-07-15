@@ -359,8 +359,12 @@ outcome this child decides (the row is OWNED even while that outcome is open).
   option (i) the held child is first moved to a **terminal** status (so A-FG356's `{complete, failed}` predicate
   matches) AND its worktree must satisfy **A-FG356's retain predicate** before reap (dirty / retain-set kind ⇒
   retained, never silently discarded — I-6); under option (ii) the direct path honors the same retain predicate.
-- **FILES / SCHEMAS:** the run-end / abandon finalize path in `src/v2/runNext.ts`; `src/v2/reconcile.ts` (the
-  A-FG356 terminal-reaper hook, option (i)); `src/v2/worktree-lifecycle.ts` (reclaim). Reuses the **existing**
+- **FILES / SCHEMAS (all VERIFIED existing; no new file):** the run-end / abandon finalize path =
+  `src/v2/run-finalize.ts:31` `finalizeRunIfSettled` (called on the settled-no-dispatch run-end at
+  `src/v2/runNext.ts:220`, imported `runNext.ts:38`); the A-FG356 terminal-reaper hook (option (i)) = the tail of
+  `src/v2/reconcile.ts:393` `reconcileRun` (`finalizeOrphanedPrimaries` `:1361`); reclaim =
+  `src/v2/worktree-lifecycle.ts:179` `removeWorktreeIfSafe` (already invoked from reconcile at
+  `reconcile.ts:570/682/1003`). Reuses the **existing**
   `awaiting_gate` + terminal statuses — **NO schema migration, NO new `tasks` column, NO new failure kind**
   (consistent with the campaign-wide no-migration stance, map §5 / A §4 / B §5 / C §6).
 - **RED PREREQUISITES:** **REQUIRED at implementation** — capture the **leak** first: drive a run to end with a
@@ -649,8 +653,8 @@ child C-FG477-S7** (OQ-4 follow-up / OQ-INT-3), not by S1–S6.
   client-breaking change) — the contract is a stable projection, not the union. No task-row migration.
 - **BOUND OUT OF THIS CHILD (`dashboard` / `campaign-runner` consumption):** N-5 names `dashboard` and `campaign`
   as API consumers, but they consume the **same** operator-reason over a **serialization/API transport** whose
-  audit is a **separate concern** — the dashboard-integration surface and the campaign executor are each their
-  **own** consumer, out of THIS child's scope. **This child audits neither their transport nor their
+  audit is a **separate concern** — the dashboard (`dashboard/src/{server,queries}.ts` + `client/main.js`) and the
+  campaign executor (`src/campaign/executor.ts`) are each their **own** consumer, out of THIS child's scope. **This child audits neither their transport nor their
   re-derivation** (naming them without auditing their transport is exactly the hollow this scoping closes). That
   transport audit is tracked as **OQ-4** (dashboard) and is delivered by the **sibling child C-FG477-S7**, NOT
   here. S6 audits exactly the four surfaces above and claims nothing about dashboard/campaign consumption beyond
@@ -684,8 +688,10 @@ C-FG477-S7 is the **one accountable owner** of **OQ-INT-3** — the dashboard + 
 transport out — it **owns the audit** N-5 names but S6 does not perform.
 
 - **OWNING DECISION (the map assigns the owner; the audit outcome is C-FG477-S7's to decide):** whether the
-  **dashboard-integration** read surface and the **campaign executor** each consume C's serialized operator-reason
-  contract (the C-FG477-S6 output) over their serialization/API transport and **re-derive NONE of it.** Grounded
+  **dashboard** read surface (`dashboard/src/server.ts:91-96`/`:208-211` → `queries.ts:158`/`:320` →
+  `client/main.js:439`) and the **campaign executor** (`src/campaign/executor.ts:104-105`) each consume C's
+  serialized operator-reason contract (the C-FG477-S6 output) over their serialization/API transport and
+  **re-derive NONE of it.** Grounded
   in **N-5** ("an **API contract** to `show`/`report`/dashboard/campaign, **NOT** an internal union") — S6 audits
   the four in-cluster surfaces; S7 audits the two bound-out transport consumers.
 - **ACCEPTANCE ROWS:** **each** named consumer (dashboard, campaign) reads the operator-reason contract and
@@ -693,12 +699,26 @@ transport out — it **owns the audit** N-5 names but S6 does not perform.
   **distinctly** from a human gate across the serialization boundary, and **no internal step-state union crosses
   the client boundary** (else every new state is a client-breaking change). **Hollow = either consumer still
   computing its own "why" string**, or the internal union leaking over the transport.
-- **FILES / SCHEMAS:** the **dashboard-integration operator-reason read surface**; the **campaign executor's**
-  operator-reason consumption; C's **operator-reason serialization** (the C-FG477-S6 output / API contract). **Do
-  NOT ship the evaluator's internal step-state union across either transport** (N-5). No task-row migration.
+- **FILES / SCHEMAS:** the operator-reason API/serialization is itself PLANNED NEW (the C-FG477-S6 output, UNBUILT
+  — no operator-reason surface exists in `src/` today), so both consumptions are NEW integrations. **Dashboard
+  consumer (VERIFIED existing):** `dashboard/src/server.ts:91-96` (`/api/in-flight` → `inFlight`) and `:208-211`
+  (`/api/task/:id` → `taskDetail`); `dashboard/src/queries.ts:158` `inFlight` / `:320` `taskDetail`;
+  `dashboard/client/main.js:439` `InFlightSection`, `:529-530` status badge, `:676` detail render — the
+  operator-reason **route + serialization schema are the NEW work THIS child owns** (new query + route + client
+  render). **Campaign consumer (VERIFIED existing):** `src/campaign/executor.ts:104-105` — its OWN `blockerKind`/
+  `reason` (populated at `:326/:352/:373-374/:560/:621/:995/:1370`), which is the campaign's own hold reason, NOT
+  the FG-477 operator-reason; consuming the S6 API is a NEW path THIS child owns, and the audit states whether it
+  **augments or replaces** that own `reason`. C's **operator-reason serialization** = the C-FG477-S6 output / API
+  contract. Test surfaces (existing): `dashboard/src/queries-inflight-status.test.ts` (+ siblings) and the campaign
+  executor tests. **Do NOT ship the evaluator's internal step-state union across either transport** (N-5). No
+  task-row migration.
 - **RED PREREQUISITES:** **NORMATIVE-UNMET** — the transport audit is prose until executed; **no fabricated red.**
-  Acceptance is the per-transport contract test above. (If a consumer surface does not exist yet, its arm is a
-  standing acceptance obligation, not a fabricated red.)
+  Acceptance is the per-transport contract test above. **Both consumer subsystems are VERIFIED EXISTING** — the
+  dashboard read surface (`dashboard/src/server.ts:91-96`/`:208-211` → `queries.ts:158`/`:320` →
+  `client/main.js:439`) and the campaign executor (`src/campaign/executor.ts:104-105`). What is NEW is the
+  **operator-reason API/serialization** they will consume (the C-FG477-S6 output, UNBUILT in `src/` today), so
+  each audit arm is a standing acceptance obligation **against that NEW API contract** — not a fabricated red, and
+  **NOT conditional on a consumer's existence** (both exist).
 - **DEPENDENCIES:** **intra-C:** after **C-FG477-S6** (the operator-reason API/contract must exist first — S7 has
   nothing to audit against until S6 ships the contract). **Cross-cluster:** the dashboard-integration and
   campaign-executor surfaces are the audited consumers; S7 does not migrate them, it audits their consumption.
