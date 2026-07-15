@@ -6,15 +6,10 @@ triggers (`docs/plans/foundations-integration.md`) into a concrete, rerunnable p
 invents no normative decisions and allocates no tickets.
 
 **Keyed to each cluster's review-clean lane HEAD** — A `3b76153`, B `bf906b4`, C `b5d7417` — and the campaign
-baseline **`185afc3`**. Each SHA is the **review-clean lane HEAD**, and as of this bump **all three coincide with
-the PRD-finalizing commit**: **A** (`3b76153`), **B** (`bf906b4`), **and C** (`b5d7417`) each simultaneously
-finalize their PRD file **and** are the lane HEAD — the same commit edits the PRD file *and* is the lane HEAD.
-**All three HEADs are PRD edits; no plan-only-HEAD cluster remains.** A's HEAD advanced from the prior `a0064d5`
-to **`3b76153`** — a PRD-a edit that **reclassifies §4.2/OQ-4 reds-capability** (probe P7 falsified the "no Bash /
-do not invoke git" assertion) and adds the P7 probe. B was previously the exception (PRD `docs/prds/review-execution-trust.md`
-finalized at **`68ee713`** with a later plan-only citation-fix HEAD `20c8f59`); that split is **superseded**
-because `bf906b4` — a later PRD-path citation fix that **edits `docs/prds/review-execution-trust.md` itself** —
-**re-finalizes the PRD** and is now B's lane HEAD, so B's HEAD is again a PRD edit, like A and C. Each PRD's revalidation triggers (A §7.3, B OQ-4 / §9.4, C §8, and the map §5
+baseline **`185afc3`**. Each cluster SHA is the review-clean lane HEAD and is simultaneously that PRD's finalizing
+commit (all three coincide — the same commit edits the PRD file and is the lane HEAD; no plan-only-HEAD cluster
+remains). **A** (`3b76153`) reclassifies §4.2/OQ-4 reds-capability (probe P7 falsified the "no Bash / do not invoke
+git" assertion) and adds the P7 probe. Each PRD's revalidation triggers (A §7.3, B OQ-4 / §9.4, C §8, and the map §5
 cross-cutting) are the source; this brief is their union, made executable.
 
 ---
@@ -89,7 +84,7 @@ The FG-553/FG-555 mechanism surfaces, plus **every file the three PRDs assume be
   refused `Read-only file system`, exit 1 — is the acceptance check; re-run it against the promoted artifact, not
   the git-read capability).
 
-### Cluster B (lane HEAD `bf906b4` — a PRD edit; supersedes the prior `68ee713`-finalized / `20c8f59`-plan-only split)
+### Cluster B (PRD `bf906b4`)
 
 - **B OQ-4 — "forge executes the working tree" + "which artifact."** The FG-566/541/524/525 probes ran the
   working tree via `tsx`. After FG-553, `forge review-loop` runs the promoted release; a fix in `src/` is not
