@@ -6,7 +6,25 @@ awaiting re-review before any implementation begins.** Direction (OQ-6/BD-15) ac
 
 **Status update (2026-07-14):** **Child 0 (`bin/forge` signal/exit fidelity) has LANDED as `97363ca` (PR #119)** —
 the signal-fidelity prerequisite is satisfied and verified by execution (four cases, three mutants killed).
-Children **1–5 remain planned**; the analysis, decisions (OQ-6/BD-15/T9), Appendix A probes, and mutation
+**Child 1 (store-compatibility policy) has LANDED as `275ac63` (PR #120).** It shipped the additive-only
+open path, the reader-excluding quiesce (`journal_mode=DELETE` → `BEGIN EXCLUSIVE`, host-verified to refuse a
+held reader with no corruption), the one-way boundary that never downgrades, the forward schema-version gate,
+and `forge store converge` (operator-invoked, `--confirm-quiesced`, quiesce-gated). Two design outcomes
+emerged during implementation and are now part of Child 1, beyond the original plan:
+- **Dual-shape usage insertion.** Additive-only alone would have made a version-B usage writer *lose* capture
+  on an unconverged 0.1.x store (the fresh-only INSERT violates the preserved legacy NOT NULL columns and the
+  failure was silent in the production callers). Operator decision rejected that loss: `insertUsageRows` now
+  inspects `model_calls` once and writes the legacy columns with 0/0/0 placeholders when present, so capture
+  works on both shapes; a partial/inconsistent legacy shape raises a named actionable error.
+- **The convergence operational contract, not a cross-process registry.** A PID-marker opener registry /
+  maintenance lease was attempted and REVERTED — it cannot observe an already-deployed ungated binary (the
+  exact BD-15 principle), broadens every open path, and adds stale-marker/liveness failure modes. Instead:
+  `forge store converge` ends the overlap window (one-way); the operator must quiesce all forge processes
+  first; the journal-mode gate is a best-effort active-connection backstop, not proof every process is dead;
+  a pre-FG-568 process resuming after convergence fails its legacy inserts ATOMICALLY (lost captures, no
+  partial write, no corruption — host-verified); the forward gate cannot constrain already-installed ungated
+  binaries (HONEST LIMIT preserved).
+Children **2–5 remain planned**; the analysis, decisions (OQ-6/BD-15/T9), Appendix A probes, and mutation
 reasoning below are unchanged.
 
 **The rule this slice is planned under (from FG-551):** *a property concerning the FINAL RUNTIME must be

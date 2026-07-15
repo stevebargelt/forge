@@ -244,7 +244,9 @@ Subordinate acceptance: **F29**, **F30**, **F31**.
 
 Concurrent Forge processes of **different versions** share one SQLite database by default. This is the ordinary case, not an edge case: a long tmux-owned launch starts under version A, the operator promotes, and a new command runs under version B against the same store while the launch is still in flight.
 
-Two facts make this unsafe today. Migrations run **unconditionally on every open** — not merely every writable one — and they include a **destructive `DROP COLUMN`**. Every process migrates the store on its first open, including a logically read-only caller: `getDb({ readOnly: true })` (`src/store/db.ts:156`) finds no writable handle in-process, falls through to the writable `getDb()` (`:169`), and that path runs `SCHEMA_SQL` plus the migrations — including the `DROP COLUMN` (`:91`). The read-only callers that therefore migrate on their first open are `show`, `status`, `runs`, `export`, `metrics`, `ops`, `report`, and `sweep` (`src/cli/commands/`). An older process opening the store after a newer one has migrated it, or a newer process migrating a store an older in-flight process is still reading, is not a hypothetical — and no command is exempt by virtue of only reading.
+Two facts once made this unsafe. Migrations ran **unconditionally on every open** — not merely every writable one — and they included a **destructive `DROP COLUMN`**. Every process migrates the store on its first open, including a logically read-only caller: `getDb({ readOnly: true })` finds no writable handle in-process, falls through to the writable `getDb()`, and that path runs `SCHEMA_SQL` plus the migrations (`applyMigrations`, `src/store/db.ts`). The read-only callers that therefore migrate on their first open are `show`, `status`, `runs`, `export`, `metrics`, `ops`, `report`, and `sweep` (`src/cli/commands/`). An older process opening the store after a newer one has migrated it, or a newer process migrating a store an older in-flight process is still reading, is not a hypothetical — and no command is exempt by virtue of only reading.
+
+**As shipped in FG-568 (`275ac63`), the ordinary open path is now additive-only.** `applyMigrations` runs ONLY additive, backward-compatible migrations — on every open, logically read-only callers' first opens included — and executes no `DROP` and no destructive DDL; old readers and writers of an in-flight peer keep working by construction. The destructive `DROP COLUMN` that once ran here now lives ONLY in `runDestructiveConvergenceMigration`, invoked explicitly via `forge store converge`: an operator-invoked, quiesce-gated, one-way boundary — never the ordinary open path. This does not change BD-15's decision (additive-only was always the decision); it records that the premise's destructive-open hazard has been removed from the shared path and confined to an explicit operator step.
 
 The design must **decide the policy** and record it. The candidates:
 
@@ -620,6 +622,12 @@ The initiative is complete only when all of the following are true:
 - A final reviewer maps evidence to every binding decision and matrix row rather than approving from green CI alone.
 
 ## Revision log
+
+### 2026-07-15 — BD-15 premise reconciled to shipped behavior (FG-568, `275ac63`)
+
+- **BD-15's premise is now reconciled to the shipped store evolution.** FG-568 (FG-553 Child 1, `275ac63`) made the ordinary open path (`applyMigrations`) **additive-only**: every open — logically read-only callers' first opens included — runs only additive, backward-compatible migrations and no destructive DDL. The destructive `DROP COLUMN` that previously ran on every open was moved OFF that path into `runDestructiveConvergenceMigration`, invoked explicitly via `forge store converge` (operator-invoked, quiesce-gated, one-way boundary).
+- The "migrations run **unconditionally on every open** … including a **destructive `DROP COLUMN`**" phrasing in the BD-15 body and in the two 2026-07-14 entries below (the "BD-15 premise correction" and the "every writable open … destructive `DROP COLUMN`" line in the audit-correction pass) described the pre-FG-568 code and is **superseded by this reconciliation**.
+- **BD-15's decision is unchanged** — additive-only was always the decision, and it is now implemented. Only the premise/evidence is updated; F35, the candidate policies, and every other binding decision, slice, and matrix row are untouched.
 
 ### 2026-07-14 — BD-15 premise correction
 

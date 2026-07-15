@@ -1,9 +1,11 @@
 ---
 id: FG-568
 type: story
-status: active
+status: done
 title: "FG-553 Child 1: store-compatibility policy — additive-only open path, schema-version stamp, quiesce-gated destructive migration, backward-compatible overlap window"
 created: 2026-07-14
+closed: 2026-07-15
+closed_commit: 275ac63
 ---
 
 ## Clarifications (operator decisions, 2026-07-14)

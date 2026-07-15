@@ -37,3 +37,13 @@ Verify against BOTH a fresh DB and a legacy-migrated DB (legacy columns are NOT 
 - `forge usage` shows non-empty data after a real run on a fresh install.
 
 Relations: #141, #155, src/store/model-calls.ts, src/store/db.ts, src/store/schema.ts.
+
+---
+
+**2026-07-15 — Superseded by FG-568 (`275ac63`).** The **Fix** above prescribed *dropping* the three legacy columns (`prompt_tokens/completion_tokens/cost`) from the INSERT, and warned that a 0.1.x-migrated store would need a column DEFAULT or destructive removal for the fresh-only INSERT to work. FG-568 (FG-553 Child 1) took a different, backward-compatible path and that prescription no longer describes the code:
+
+- `insertUsageRows` (`src/store/model-calls.ts`) is now **dual-shape**. It inspects `model_calls` at write time: on a fresh store (legacy columns absent) it runs the fresh-only INSERT; on an unconverged 0.1.x store (all three legacy columns present, NOT NULL) it appends them to the column list and writes the established `0/0/0` placeholders as SQL literals. A store carrying only *some* legacy columns is an inconsistent schema and is rejected explicitly rather than written.
+- **Nothing is dropped to make usage capture work.** Usage capture now succeeds on both shapes without altering the schema, so FG-295's fresh-install failure stays fixed while a 0.1.x-migrated store keeps working with no destructive change.
+- Removing the legacy columns is no longer coupled to this fix. It is now the separate, explicit operator step `forge store converge` (`runDestructiveConvergenceMigration` in `src/store/db.ts`) — quiesce-gated and a one-way boundary — not something the usage-capture path performs. The ordinary store-open path is additive-only and drops nothing.
+
+FG-295's acceptance still holds; this note records only that the prescribed *mechanism* (drop the legacy columns) was superseded by the dual-shape writer.
