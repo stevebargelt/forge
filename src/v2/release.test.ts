@@ -16,10 +16,23 @@ test("FG-569 entry: execs the PINNED absolute interpreter with tsx loaded in-pro
   assert.ok(entry.includes("exec '/opt/node-24/bin/node' --import"), "execs the absolute interpreter, not a PATH lookup");
   assert.ok(entry.includes(`"$here/${RELEASE_LOADER_NAME}"`), "loads tsx in-process via the release's own loader shim");
   assert.ok(entry.includes(`"$here/${RELEASE_ENTRY_SOURCE}"`), "runs the source entry in the SAME process");
-  // No external command may be invoked to resolve the dir, or a node-free /
-  // minimal PATH breaks the bootstrap before the absolute interpreter is reached.
+  // No external command may be invoked to resolve the dir for a DIRECT invocation,
+  // or a node-free / minimal PATH breaks the bootstrap before the absolute
+  // interpreter is reached. Dir + link-relative joins use parameter expansion.
   assert.ok(!entry.includes("$(dirname"), "the dir is resolved with shell builtins (case/parameter expansion), not dirname(1)");
-  assert.ok(entry.includes(`case "$0" in`), "uses builtin case-based dir resolution");
+  assert.ok(entry.includes("d=${p%/*}"), "dir is derived with parameter expansion, not an external");
+});
+
+test("FG-569 entry: canonicalizes $0 through symlinks (a promoted release is reached via a symlink)", () => {
+  const entry = renderEntry("/opt/node-24/bin/node");
+  // MUST-FIX 1: $0 is the SYMLINK path when forge is on PATH as a current/PATH
+  // shim; resolve the chain to the real release file before deriving $here.
+  assert.ok(entry.includes("while [ -L \"$p\" ]"), "follows a symlink chain to the real path");
+  assert.ok(entry.includes("readlink -- \"$p\""), "uses readlink to canonicalize each hop");
+  // readlink must be reached ONLY inside the symlink loop, so a DIRECT invocation
+  // under a node-free PATH never runs an external before the pinned interpreter.
+  const beforeExec = entry.slice(0, entry.indexOf("exec '"));
+  assert.equal(beforeExec.match(/readlink -- /g)?.length, 1, "the readlink invocation appears once, guarded by the [ -L ] loop");
 });
 
 test("FG-569 entry: a space in the interpreter path cannot split the exec argv", () => {

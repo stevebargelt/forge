@@ -15,6 +15,19 @@
 # forge-loader.mjs resolves tsx relative to its own location, so this works from
 # any cwd. bin/forge stays on PATH node (this is the live dev/control entry); the
 # absolute-interpreter pin lives in the built RELEASE entry (see forge release).
-case "$0" in */*) d=${0%/*} ;; *) d=. ;; esac
+#
+# MUST resolve $0 through symlinks first: the machine-wide `forge` is installed by
+# npm-link as a SYMLINK on PATH (e.g. ~/.nvm/.../bin/forge → this file). $0 is then
+# the SYMLINK's path, so $here/../src/cli/index.ts would resolve NEXT TO THE SYMLINK
+# — not the repo — and node dies with ERR_MODULE_NOT_FOUND. Canonicalize the chain
+# to the real file (a POSIX readlink loop) before deriving the source root. readlink
+# runs ONLY when $0 is actually a symlink, so a direct invocation stays PATH-free.
+p=$0
+case "$p" in */*) ;; *) p=$(command -v "$p") ;; esac
+while [ -L "$p" ]; do
+  t=$(readlink -- "$p")
+  case "$t" in /*) p=$t ;; *) p=${p%/*}/$t ;; esac
+done
+case "$p" in */*) d=${p%/*} ;; *) d=. ;; esac
 here=$(CDPATH= cd -- "$d" && pwd)
 exec node --import "$here/forge-loader.mjs" "$here/../src/cli/index.ts" "$@"

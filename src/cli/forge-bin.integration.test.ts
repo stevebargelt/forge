@@ -13,7 +13,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, symlinkSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { findGitRoot } from "../util/git-root.js";
 import { version as pkgVersion } from "../../package.json" with { type: "json" };
 
@@ -43,4 +44,27 @@ test("FG-569 exec-not-spawn (EXECUTED): the CLI runs in ONE process — its pid 
   assert.equal(prov.pid, r.pid, "the process that loaded better-sqlite3 IS the one we launched (exec, not spawn)");
   assert.equal(prov.bindingLoads, true, "and it loaded the native binding in that same process");
   assert.equal(prov.release, null, "the dev entry is not a release — INERT, no promotion");
+});
+
+test("FG-569 MUST-FIX 1 (EXECUTED THROUGH A SYMLINK): forge on PATH as a symlink still resolves its source root", () => {
+  // npm-link installs the machine-wide `forge` as a SYMLINK on PATH (e.g.
+  // ~/.nvm/.../bin/forge → repo/bin/forge). A $0-relative source root would then
+  // resolve NEXT TO THE SYMLINK and die with ERR_MODULE_NOT_FOUND. bin/forge must
+  // canonicalize $0 through the symlink FIRST. Proven by running THROUGH a symlink.
+  const linkDir = mkdtempSync(join(tmpdir(), "fg569-symlink-"));
+  const link = join(linkDir, "forge");
+  try {
+    symlinkSync(forgeBin, link);
+
+    const v = spawnSync(link, ["--version"], { encoding: "utf8", env: process.env });
+    assert.equal(v.status, 0, `forge via symlink failed to run: ${v.stderr}`);
+    assert.equal(v.stdout.trim(), pkgVersion, "the symlinked entry resolved the repo and ran the real CLI");
+
+    // And a real command that loads the native binding runs end to end through the symlink.
+    const p = spawnSync(link, ["release", "provenance", "--json"], { encoding: "utf8", env: process.env });
+    assert.equal(p.status, 0, `provenance via symlink failed: ${p.stderr}`);
+    assert.equal(JSON.parse(p.stdout).bindingLoads, true, "the binding loaded — source root resolved through the symlink");
+  } finally {
+    rmSync(linkDir, { recursive: true, force: true });
+  }
 });

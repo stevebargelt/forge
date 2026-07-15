@@ -13,10 +13,10 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, cpSync, writeFileSync, existsSync, lstatSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, cpSync, writeFileSync, existsSync, lstatSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildRelease, RELEASE_BINDING_REL, type BuildReleaseResult } from "./release.js";
+import { buildRelease, assertReleaseCloses, RELEASE_BINDING_REL, RELEASE_LOADER_NAME, type BuildReleaseResult } from "./release.js";
 import { findGitRoot } from "../util/git-root.js";
 
 const sourceRoot = findGitRoot(process.cwd());
@@ -93,6 +93,19 @@ test("FG-569 exec-not-spawn (EXECUTED): the release entry runs in ONE process �
   assert.equal(prov.pid, r.pid, "the process that loaded the binding IS the one we launched — exec, not spawn");
 });
 
+test("FG-569 MUST-FIX 1 (EXECUTED THROUGH A SYMLINK): the release entry resolves its release root through a promotion symlink", () => {
+  // A promoted release is reached via a `current`/PATH symlink, so $0 is the
+  // symlink, not the release file. The entry must canonicalize $0 first, else
+  // $here/src/cli/index.ts resolves next to the symlink and node can't find it.
+  const link = join(workspace, "forge-current-link");
+  symlinkSync(built.entryPath, link);
+  const r = spawnSync(link, ["release", "provenance", "--json"], { encoding: "utf8", env: process.env });
+  assert.equal(r.status, 0, `release entry via symlink failed: ${r.stderr}`);
+  const prov = JSON.parse(r.stdout);
+  assert.equal(prov.release.id, built.manifest.id, "the symlinked entry located its OWN release manifest through the symlink");
+  assert.equal(prov.bindingLoads, true, "and loaded the closure's native binding");
+});
+
 test("FG-569 torn closure: a MISSING native binding is REFUSED at build, and no release directory is produced", () => {
   const torn = mkdtempSync(join(workspace, "torn-missing-"));
   mkdirSync(join(torn, "src"));
@@ -103,6 +116,27 @@ test("FG-569 torn closure: a MISSING native binding is REFUSED at build, and no 
   const out = join(workspace, "torn-missing-release");
   assert.throws(() => buildRelease({ sourceRoot: torn, outDir: out }), /torn closure/i);
   assert.ok(!existsSync(out), "a refused build leaves no release directory behind");
+});
+
+test("FG-569 FIX 5: the COPIED-closure gate REJECTS a release whose tsx loader can't load (the entry would not start)", () => {
+  // A dir with the loader shim but no tsx: `node --import forge-loader.mjs` fails
+  // at `import "tsx"`. assertReleaseCloses must catch it — a release can otherwise
+  // pass the better-sqlite3 gate yet fail to run because tsx is missing.
+  const noTsx = mkdtempSync(join(workspace, "no-tsx-"));
+  writeFileSync(join(noTsx, RELEASE_LOADER_NAME), `import "tsx";\n`);
+  assert.throws(() => assertReleaseCloses(noTsx, process.execPath), /tsx loader did not run/i);
+});
+
+test("FG-569 FIX 4: the COPIED-closure gate REJECTS a release whose OWN binding was corrupted post-copy (the source gate cannot)", () => {
+  // Build a valid release, then corrupt its OWN copied binding. The source gate ran
+  // BEFORE the copy, so only a gate over the COPY catches this. assertReleaseCloses
+  // loads the release's own binding under the pinned interpreter and must throw.
+  const rel = buildRelease({ sourceRoot, outDir: join(workspace, "corrupt-copy-release") });
+  writeFileSync(join(rel.releaseDir, RELEASE_BINDING_REL), "not a real .node\n");
+  assert.throws(
+    () => assertReleaseCloses(rel.releaseDir, process.execPath),
+    /torn closure — the COPIED better-sqlite3 binding/i,
+  );
 });
 
 test("FG-569 torn closure: a CORRUPT / ABI-mismatched native binding is REFUSED at build (it cannot load)", () => {

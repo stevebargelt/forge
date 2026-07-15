@@ -69,9 +69,20 @@ export function renderEntry(interpreter: string): string {
     "#!/bin/sh",
     "# FG-569 release entry — exec the pinned interpreter, tsx in-process, ONE process.",
     "# Works under a hostile PATH (incl. NO node at all): the interpreter path is",
-    "# absolute AND the release dir is resolved with shell builtins only (no",
-    "# dirname/pwd-on-PATH external), so nothing here consults PATH.",
-    `case "$0" in */*) d=\${0%/*} ;; *) d=. ;; esac`,
+    "# absolute AND (for a direct invocation) the release dir is resolved with shell",
+    "# builtins only (no dirname/pwd-on-PATH external), so nothing consults PATH.",
+    "#",
+    "# A promoted release is reached via a symlink (current/PATH shim), so canonicalize",
+    "# $0 through symlinks before deriving the release root — else $here/src would",
+    "# resolve next to the symlink, not the release. readlink runs ONLY when $0 is a",
+    "# symlink, so a DIRECT invocation under a node-free PATH touches no external.",
+    `p=$0`,
+    `case "$p" in */*) ;; *) p=$(command -v "$p") ;; esac`,
+    `while [ -L "$p" ]; do`,
+    `  t=$(readlink -- "$p")`,
+    `  case "$t" in /*) p=$t ;; *) p=\${p%/*}/$t ;; esac`,
+    `done`,
+    `case "$p" in */*) d=\${p%/*} ;; *) d=. ;; esac`,
     `here=$(CDPATH= cd -- "$d" && pwd)`,
     `exec ${q} --import "$here/${RELEASE_LOADER_NAME}" "$here/${RELEASE_ENTRY_SOURCE}" "$@"`,
     "",
@@ -96,9 +107,13 @@ function lockfileIdentity(sourceRoot: string): { name: string; sha256: string } 
   throw new Error(`forge release: no lockfile (package-lock.json) at ${sourceRoot} — a release must pin an exact dependency closure`);
 }
 
-/** Load the SOURCE ROOT's compiled better-sqlite3 under the building interpreter.
- *  This is the torn-closure gate: a missing / corrupt / ABI-mismatched binding
- *  throws here, before any copy, so a torn closure is REFUSED at build. */
+/** Load the SOURCE ROOT's compiled better-sqlite3 under the building interpreter,
+ *  and confirm the tsx loader the entry depends on is installed. This is the
+ *  pre-copy gate: a missing / corrupt / ABI-mismatched binding (or a missing tsx)
+ *  throws here, BEFORE any copy, so a torn closure never becomes a release. The
+ *  COPIED closure is validated again post-copy under the pinned interpreter — see
+ *  assertReleaseCloses (the manifest must describe the SHIPPED closure, not the
+ *  source at build time). */
 export function assertClosureLoads(sourceRoot: string): void {
   const bindingPath = join(sourceRoot, RELEASE_BINDING_REL);
   if (!existsSync(bindingPath)) {
@@ -118,6 +133,38 @@ export function assertClosureLoads(sourceRoot: string): void {
     throw new Error(`forge release: torn closure — the native binding at ${bindingPath} did not load (corrupt or ABI-mismatched) under this interpreter (ABI ${process.versions.modules}): ${(e as Error).message}`);
   } finally {
     db?.close();
+  }
+  // FIX 5: the release entry runs `node --import forge-loader.mjs` and the shim
+  // does `import "tsx"`. If tsx is absent the entry can't even start, gate green
+  // or not — so require its presence before we bother copying the closure.
+  if (!existsSync(join(sourceRoot, "node_modules", "tsx", "package.json"))) {
+    throw new Error(`forge release: the tsx loader is not installed at ${join(sourceRoot, "node_modules", "tsx")} — the release entry (node --import forge-loader.mjs) could not start. Run npm install, then rebuild the release.`);
+  }
+}
+
+/** Validate the COPIED release closure by RUNNING it under the pinned interpreter
+ *  — the release's actual runtime, a fresh process (no in-process double-load of
+ *  the native addon). Proves two things the source pre-check cannot, because it
+ *  exercises the shipped copy exactly as the entry will:
+ *   - FIX 5: the tsx loader shim actually loads (`node --import <loader> -e ""`),
+ *   - FIX 4: better-sqlite3 loads from the RELEASE's own node_modules and opens.
+ *  A copy that corrupts the binding, drops tsx, or otherwise fails to run is
+ *  caught here, before the release is published. */
+export function assertReleaseCloses(releaseRoot: string, interpreter: string): void {
+  const loader = join(releaseRoot, RELEASE_LOADER_NAME);
+  // 1) tsx: the entry can't run at all if `import "tsx"` throws.
+  try {
+    execFileSync(interpreter, ["--import", loader, "-e", ""], { cwd: releaseRoot, stdio: ["ignore", "ignore", "pipe"] });
+  } catch (e) {
+    const stderr = (e as { stderr?: Buffer }).stderr?.toString() ?? (e as Error).message;
+    throw new Error(`forge release: the COPIED closure's tsx loader did not run under the pinned interpreter (${interpreter}) — the release would not start: ${stderr.trim()}`);
+  }
+  // 2) better-sqlite3: load the RELEASE's own binding and open an in-memory DB.
+  try {
+    execFileSync(interpreter, ["--import", loader, "-e", "new (require('better-sqlite3'))(':memory:').close()"], { cwd: releaseRoot, stdio: ["ignore", "ignore", "pipe"] });
+  } catch (e) {
+    const stderr = (e as { stderr?: Buffer }).stderr?.toString() ?? (e as Error).message;
+    throw new Error(`forge release: torn closure — the COPIED better-sqlite3 binding did not load under the pinned interpreter (${interpreter}, ABI ${process.versions.modules}): ${stderr.trim()}`);
   }
 }
 
@@ -158,43 +205,50 @@ export function buildRelease(opts: BuildReleaseOptions): BuildReleaseResult {
   const commit = gitCommit(sourceRoot);
   const rand = opts.rand ?? Math.random().toString(36).slice(2, 8);
   const id = `release-${commit.slice(0, 7)}-${rand}`;
-
-  const manifest: ReleaseManifest = {
-    schema: 1,
-    id,
-    commit,
-    interpreter: process.execPath,
-    abi: process.versions.modules,
-    nodeVersion: process.version,
-    lockfile: lockfileIdentity(sourceRoot),
-    builtAt: now.toISOString(),
-    entry: RELEASE_ENTRY_SOURCE,
-    binding: RELEASE_BINDING_REL,
-  };
+  const interpreter = process.execPath;
 
   const tmpDir = `${outDir}.building-${rand}`;
   rmSync(tmpDir, { recursive: true, force: true });
   mkdirSync(tmpDir, { recursive: true });
   try {
-    for (const rel of ["src", "node_modules", "package.json", "package-lock.json"]) {
+    for (const rel of ["src", "node_modules", "package.json", "package-lock.json", "npm-shrinkwrap.json"]) {
       const from = join(sourceRoot, rel);
       if (existsSync(from)) cpSync(from, join(tmpDir, rel), { recursive: true, verbatimSymlinks: true });
     }
     writeFileSync(join(tmpDir, RELEASE_LOADER_NAME), LOADER_SHIM);
-    writeFileSync(join(tmpDir, RELEASE_MANIFEST_NAME), JSON.stringify(manifest, null, 2) + "\n");
     const entryPath = join(tmpDir, RELEASE_ENTRY_NAME);
-    writeFileSync(entryPath, renderEntry(manifest.interpreter));
+    writeFileSync(entryPath, renderEntry(interpreter));
     chmodSync(entryPath, 0o755);
+
+    // FIX 4 + FIX 5: validate the COPIED closure (binding + tsx loader) by running
+    // it under the pinned interpreter, before we describe it in a manifest.
+    assertReleaseCloses(tmpDir, interpreter);
+
+    // MUST-FIX 3: the manifest's lockfile SHA must describe the SHIPPED closure,
+    // so hash the release's OWN copied lockfile — not the source at build time.
+    const manifest: ReleaseManifest = {
+      schema: 1,
+      id,
+      commit,
+      interpreter,
+      abi: process.versions.modules,
+      nodeVersion: process.version,
+      lockfile: lockfileIdentity(tmpDir),
+      builtAt: now.toISOString(),
+      entry: RELEASE_ENTRY_SOURCE,
+      binding: RELEASE_BINDING_REL,
+    };
+    writeFileSync(join(tmpDir, RELEASE_MANIFEST_NAME), JSON.stringify(manifest, null, 2) + "\n");
 
     mkdirSync(dirname(outDir), { recursive: true });
     // Rename is the atomic publish of the whole closure into its final path.
     renameSync(tmpDir, outDir);
+
+    return { manifest, releaseDir: outDir, entryPath: join(outDir, RELEASE_ENTRY_NAME) };
   } catch (e) {
     rmSync(tmpDir, { recursive: true, force: true });
     throw e;
   }
-
-  return { manifest, releaseDir: outDir, entryPath: join(outDir, RELEASE_ENTRY_NAME) };
 }
 
 /** Walk up from `startDir` to the nearest release root (a dir holding
