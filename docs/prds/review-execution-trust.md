@@ -162,7 +162,7 @@ There are **two independent questions**; conflating them is what produced the st
   delegated.** Say so.
 - Correct the stale comment (`:848-851`) so it states what the code does.
 
-**(b) Should Forge acquire PUSH authority? — `--push-fixes`, opt-in, default OFF.**
+**(b) Should Forge acquire PUSH authority? — `--push-fixes`, opt-in, default OFF, implementation deferred.**
 The review-loop operates on the operator's **live checkout** (`projectDir = resolve(opts.project ??
 process.cwd())`), not an isolated worktree. Silently acquiring publish authority over a human's working
 branch is a large, hard-to-reverse escalation bought for a convenience. Default-off preserves today's
@@ -170,7 +170,15 @@ authority boundary (Forge never publishes); the opt-in makes the escalation an e
 human act. **The push authority is deferred out of the critical path** so that the honest default is fully
 functional even if the answer to OQ-2 is "never."
 
-The full `--push-fixes` safety contract (binding **whenever** the flag is on) is INV-5.
+**Scope split — do not conflate the three parts.** (1) Only (a) — the default no-push behavior and the
+honest `local_only` outcome — **ships and is verified in this cluster** (N-5); that is the FG-541 design
+stance's required-now surface ("no production push behavior changes under this design ticket alone").
+(2) The full `--push-fixes` safety contract is **fully designed here and binding whenever the flag is on**
+(INV-5) — but building the flag is a **separable opt-in whose implementation is NORMATIVE-UNMET and NOT
+part of this cluster's shipping acceptance** (N-6 is conditional). The invariant governs the design; it
+does not force the feature into this cluster. (3) Whether Forge should ever hold push authority at all
+stays the **open human policy question** (OQ-2); the default in force now is no-push, and enabling push
+authority is the deferred opt-in gated on that answer.
 
 - **Classification.** The underlying defect is a **FACTUAL DEFECT with observed-red evidence** (plan §2.2,
   EXECUTED — the structural census is decisive: no `git push` verb exists in either review-loop file
@@ -180,7 +188,10 @@ The full `--push-fixes` safety contract (binding **whenever** the flag is on) is
   CI-registration race — is confirmed; carry its stated HONEST LIMIT** (a clone carries no reflog of when
   `origin` first received a push, so the historical arm bounds "on origin BY the merge," not "first on
   origin AT"; the conclusion does not depend on that instant — the structural arm carries it). The
-  `local_only` outcome and the `--push-fixes` contract are **NORMATIVE-UNMET** (contracts to build).
+  `local_only` outcome is **NORMATIVE-UNMET** and **must be built and verified in this cluster** (N-5). The
+  `--push-fixes` safety contract is likewise **NORMATIVE-UNMET**, but it is a **design-only obligation
+  here**: binding whenever the flag is on (INV-5), while its implementation is the deferred opt-in of
+  D2(b) — **not** part of this cluster's shipping acceptance (N-6 is conditional, gated on OQ-2).
 
 ### D3 — FG-524: gate the fanout child, AND couple the gate to parent re-aggregation
 
@@ -292,7 +303,9 @@ that fails loudly rather than rotting.
   this loop saw — **refuse to push**, land `local_only`. One attempt; on failure land the honest
   `local_only` with the push error named. **A push never confers closeability** — closeable still requires
   BOTH FG-514 fetched remote-head EQUALITY AND the required CI green (`test` AND `test-extended`) on the
-  published exact head.
+  published exact head. **This contract is fully designed here and binds whenever the flag is on; building
+  the flag is the deferred opt-in of D2(b), gated on OQ-2 — it is not part of this cluster's shipping
+  acceptance (N-6 is conditional).**
 
 ---
 
@@ -369,9 +382,12 @@ fabricated red**. Where the plan asserted a red for an unimplemented norm, this 
   probe/poll CI for the local-only SHA, reports `local_only` (not generic "CI unavailable"), and does not
   claim extended was delegated. *Verification:* drive the loop; assert the pre-CI `classifyRemoteTrust`
   consult and `extendedDelegatedToCi === false`.
-- **N-6 (INV-5, `--push-fixes`).** *Acceptance:* each INV-5 clause holds under the flag (no force, upstream-
-  only, no detached HEAD, clean tree, refuse on pre-existing unrelated local commits, one attempt, no
-  closeability from push alone). *Verification:* per-clause tests against a real upstream.
+- **N-6 (INV-5, `--push-fixes`) — CONDITIONAL; NOT part of this cluster's shipping acceptance.**
+  *Acceptance:* **IF/when `--push-fixes` is implemented** (the deferred opt-in of D2(b), gated on OQ-2),
+  each INV-5 clause holds under the flag (no force, upstream-only, no detached HEAD, clean tree, refuse on
+  pre-existing unrelated local commits, one attempt, no closeability from push alone). *Verification:*
+  per-clause tests against a real upstream, run when the flag lands. The invariant **governs the design
+  now**; it does **not** require the feature to be built in this cluster — only (a)/N-5 ships here.
 - **N-7 (INV-2, re-aggregation + hold semantics).** *Acceptance:* a held fanout child holds the parent with
   publication withheld and reds not run; advancing the child then `forge run next` makes the parent
   **re-aggregate, publish, and complete**; `failure_mode: "continue"` does not step over a hold.
