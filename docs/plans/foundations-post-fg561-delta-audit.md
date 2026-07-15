@@ -5,12 +5,12 @@ triggers (`docs/plans/foundations-integration.md`) into a concrete, rerunnable p
 **once FG-561/FG-553 lands and before any foundation child begins implementation.** It cites the three PRDs; it
 invents no normative decisions and allocates no tickets.
 
-**Keyed to each cluster's review-clean lane HEAD** — A `c1a77e3`, B `bf906b4`, C `b5d7417` — and the campaign
+**Keyed to each cluster's review-clean lane HEAD** — A `3b76153`, B `bf906b4`, C `b5d7417` — and the campaign
 baseline **`185afc3`**. Each SHA is the **review-clean lane HEAD**, and as of this bump **all three coincide with
-the PRD-finalizing commit**: **A** (`c1a77e3`), **B** (`bf906b4`), **and C** (`b5d7417`) each simultaneously
+the PRD-finalizing commit**: **A** (`3b76153`), **B** (`bf906b4`), **and C** (`b5d7417`) each simultaneously
 finalize their PRD file **and** are the lane HEAD — the same commit edits the PRD file *and* is the lane HEAD.
 **All three HEADs are PRD edits; no plan-only-HEAD cluster remains.** A's HEAD advanced from the prior `a0064d5`
-to **`c1a77e3`** — a PRD-a edit that **reclassifies §4.2/OQ-4 reds-capability** (probe P7 falsified the "no Bash /
+to **`3b76153`** — a PRD-a edit that **reclassifies §4.2/OQ-4 reds-capability** (probe P7 falsified the "no Bash /
 do not invoke git" assertion) and adds the P7 probe. B was previously the exception (PRD `docs/prds/review-execution-trust.md`
 finalized at **`68ee713`** with a later plan-only citation-fix HEAD `20c8f59`); that split is **superseded**
 because `bf906b4` — a later PRD-path citation fix that **edits `docs/prds/review-execution-trust.md` itself** —
@@ -70,7 +70,7 @@ The FG-553/FG-555 mechanism surfaces, plus **every file the three PRDs assume be
 
 ## 4. ASSUMPTIONS to revalidate — per cluster, cited to the PRD decision
 
-### Cluster A (PRD `c1a77e3`)
+### Cluster A (PRD `3b76153`)
 
 - **A §7.3 — "forge executes the working tree."** Every executed acceptance test in A §7.1/§7.2 (AC-3…AC-7,
   N-1…N-9) must be confirmed to run against the artifact it thinks it is testing (`forge-dev` vs `forge`). This
@@ -78,7 +78,7 @@ The FG-553/FG-555 mechanism surfaces, plus **every file the three PRDs assume be
 - **Explicitly NOT a trigger (A §7.3):** the git-path-resolution facts (probes p5/p5b/p6b — AC-1/AC-2/AC-3/AC-7's
   git semantics) are about **git's** path resolution, not forge's runtime, and are **insensitive** to FG-553.
   **Do not re-run p5 for FG-553** — it remains the acceptance probe for AC-1/AC-2 across the change.
-- **Corrected runtime boundary (§4.2/OQ-4, PRD-a `c1a77e3`) — do NOT re-assume reds lack Bash/git.** P7
+- **Corrected runtime boundary (§4.2/OQ-4, PRD-a `3b76153`) — do NOT re-assume reds lack Bash/git.** P7
   (`docs/plans/foundations-lane-a-probes/p7-red-runtime-capability.out`, executed per-runtime under codex, claude,
   AND pi) proved reds **already have effective Bash + git-read** on every supported runtime (`/usr/bin/{bash,git}`
   ship in the agent image). A post-FG-561/FG-553 revalidation must NOT re-derive the falsified "no Bash / do not
