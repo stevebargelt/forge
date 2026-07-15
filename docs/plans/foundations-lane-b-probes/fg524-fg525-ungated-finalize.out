@@ -1,0 +1,62 @@
+=== runtime identity ===
+node : v24.18.0   ABI: 137   linux arm64
+repo HEAD : 185afc3cd7559a2c6338fb3996b06dee39e586af
+
+=== running the probe against a REAL sqlite store (only dockerExec is stubbed) ===
+
+=== ARM 1 (control) — the FG-523 evaluator, run directly ===
+  result under test : {"status":"complete","summary":"shipped it, trust me"}
+  waiver field      : no_validation_reason (absent)
+  evaluator says    : {"held":true,"reason":"validation contract: engineer returned status=complete with no tests_run and no no_validation_reason waiver — held for a gate decision"}
+  >>> CONFIRMED contraband. A PRIMARY carrying this result is HELD at awaiting_gate.
+forge: project mount preflight: /tmp/test-project is empty — verify the correct project directory is mounted at /project
+forge: project mount preflight: /tmp/test-project is empty — verify the correct project directory is mounted at /project
+forge: project mount preflight: /tmp/test-project is empty — verify the correct project directory is mounted at /project
+forge: project mount preflight: /tmp/test-project is empty — verify the correct project directory is mounted at /project
+forge: project mount preflight: /tmp/test-project is empty — verify the correct project directory is mounted at /project
+forge: project mount preflight: /tmp/test-project is empty — verify the correct project directory is mounted at /project
+
+=== ARM 2 (FG-524) — fanout implementer CHILDREN, via the real dispatchFanoutStep ===
+  children dispatched : 2
+    child task-build-0-b6b95d
+      agentRole : engineer
+      result    : {"status":"complete","summary":"shipped it, trust me"}
+      STATUS    : complete   <-- COMPLETED SILENTLY. No tests_run. No waiver. No hold.
+    child task-build-1-6953f5
+      agentRole : engineer
+      result    : {"status":"complete","summary":"shipped it, trust me"}
+      STATUS    : complete   <-- COMPLETED SILENTLY. No tests_run. No waiver. No hold.
+  fanout PARENT status : complete
+  parent result        : {"status":"complete","children":[{"index":0,"status":"complete","childTaskId":"task-build-0-b6b95d","result":{"status":"complete","summary":"shipped it, trust me"}},{"index":1,"status":"complete","childTaskId":"task-build-1-6953f5","result":{"status":"complete","summary":"shipped it, trust me"}}]}
+forge: project mount preflight: /tmp/test-project is empty — verify the correct project directory is mounted at /project
+
+=== ARM 3 (FG-525) — `forge invoke` ad-hoc implementer, via the real invoke path ===
+  taskId    : task-engineer-8a1bc1
+  agentRole : engineer
+  result    : {"status":"complete","summary":"shipped it, trust me"}
+  STATUS    : complete   <-- COMPLETED SILENTLY. No tests_run. No waiver. No hold.
+
+=== VERDICT ===
+  Same role. Same result. Three finalize paths:
+    PRIMARY        (runNext.ts:681 holdIfValidationContractFails) -> HELD      (gate enforced)
+    FANOUT CHILD   (runNext.ts:2541 markTaskComplete)             -> COMPLETE  (gate absent)  FG-524
+    INVOKE         (invoke.ts:813  markTaskComplete)              -> COMPLETE  (gate absent)  FG-525
+✔ FG-524 / FG-525 — the tests_run gate is enforced on one finalize path and absent on the others (299.070334ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 5529.373044
+
+=== CONCLUSION ===
+BOTH gaps are REACHABLE through the real dispatch paths. This is not a
+documentation defect; it is a live trust hole.
+
+The FG-523 evaluator is real and correct -- ARM 1 proves it holds the result. It
+is simply NOT CALLED on two of the three finalize paths. The gate is enforced at
+the CALLER (runNext.ts:681), not at the finalize primitive (markTaskComplete),
+so every finalize site that does not happen to route through
+holdIfValidationContractFails is silently ungated by construction.

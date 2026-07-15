@@ -1,0 +1,47 @@
+=== runtime identity ===
+node        : v24.18.0
+NODE_MODULE_VERSION (ABI): 137
+platform    : linux arm64
+repo        : /project
+repo HEAD   : 185afc3cd7559a2c6338fb3996b06dee39e586af
+
+=== step 1: clone the repo at HEAD into a scratch dir, WITHOUT installing deps ===
+clone HEAD  : 185afc3cd7559a2c6338fb3996b06dee39e586af
+same SHA as host repo? : YES
+node_modules present in clone? : NO  <-- the unprepared environment
+package.json present in clone? : YES (so the scripts ARE discoverable — this is not a 'no checks' case)
+
+=== step 2: runVerification in the UNPREPARED clone (no node_modules) ===
+verification.ok : false
+  step typecheck  ok=false output: sh: 1: tsc: not found
+  step test       ok=false output: node:internal/modules/package_json_reader:301 | throw new ERR_MODULE_NOT_FOUND(packageName, fileURLToPath(base), null); | ^
+
+=== step 3: CONTROL — runVerification on the SAME SHA in the PREPARED repo ===
+(typecheck only, to stay bounded; it is the same step that failed above)
+verification.ok : true
+  step typecheck  ok=true
+
+>>> SAME SOURCE. Unprepared env => ok=false ; prepared env => ok=true
+>>> The ok:false is attributable to the ENVIRONMENT, not the code.
+
+=== step 4: drive the REAL runReviewLoop with that unprepared-env verification ===
+stopReason              : verification_failed
+closeable               : false
+ROUNDS CONSUMED         : 2 of maxRounds=2
+REVIEWER dispatched     : 0   <-- REVIEW NEVER HAPPENED
+FIXER dispatched        : 1   <-- the fixer got the ENVIRONMENT error as a code finding
+
+What the fixer was actually asked to fix:
+  - deterministic verification step 'typecheck' failed: / sh: 1: tsc: not found
+  - deterministic verification step 'test' failed: / node:internal/modules/package_json_reader:301
+
+=== CONCLUSION ===
+An unprepared verification environment is INDISTINGUISHABLE from broken code at
+the runVerification boundary (review-loop.ts:309-321 returns only {ok, steps} --
+there is no environment-readiness channel). runReviewLoop's verification-first
+short-circuit (review-loop.ts:441) therefore:
+  - never dispatches the reviewer (:481 unreachable on this path),
+  - hands the environment error to the FIXER as an unanchored code finding
+    (verificationFindings, review-loop.ts:402-406),
+  - and CONSUMES a bounded round.
+Review that never happened reads as review that failed.
