@@ -508,6 +508,29 @@ FG-559 lands as a Forge-owned workspace (linked worktree vs standalone clone), n
 assumption. FG-566 does not fix git-in-container; FG-559 does not fix deps — these are distinct contracts
 (plan §7.3).
 
+### 9.4 Lane A handoffs ACCEPTED — this cluster is the accountable decider of three PRD-a open questions
+
+PRD-a (`agent-workspace-isolation.md`) explicitly defers **three** open questions to "the Review-trust lane."
+The integration map assigns them to this cluster as OQ-INT-4/5/6; **this section is Cluster B's textual acceptance
+of that ownership** (so the normative PRD, not only the non-normative map, records it). These are distinct from
+PRD-b's own OQ-3/OQ-4 (the unrelated cache-key scheme and FG-553 revalidation trigger). Each is **OWNED (decider =
+Cluster B) but its architectural outcome is OPEN**, and each MUST be closed in the decision-closure gate — selected,
+recorded here or in an ADR, and reviewed — **before its implementing ticket runs**:
+
+- **OQ-INT-4 — missing `test:unit` integration-gate policy** (PRD-a OQ-3; `integration-gate.ts:63-65` silent
+  no-op). B decides: keep skipping / write a durable "gate not enforced" marker / refuse to publish. Outcome open.
+- **OQ-INT-5 — reds' git-read: ACCEPT-vs-ENFORCE** (PRD-a OQ-4/§4.2, reclassified at PRD-a `13d3142`: P7 proved
+  reds ALREADY have effective Bash+git-read, executed under two genuinely-distinct manifest-verified runtimes —
+  codex-subscription + claude-oauth; Pi not tool-capable for reds on this host). So B's decision is **accept the
+  already-effective git-read and formally support it, OR define a real runtime/OS-level enforcement mechanism** —
+  NOT grant-vs-withhold. Prompt prose and the seed `tools` field are not enforcement. Outcome open.
+- **OQ-INT-6 — git attribute/filter execution policy** (PRD-a OQ-7; e.g. a `git-lfs` smudge / `.gitattributes`
+  filter driver invoked during a git read). B decides the policy for filter/driver execution under review. Outcome
+  open, and it DEPENDS ON A-FG559/D10a — a noted cross-cluster coordination.
+
+**Acceptance:** a recorded Cluster-B decision on each of OQ-INT-4/5/6, closed in the decision-closure gate before
+implementation; leaving any of the three to be "decided and delivered" by its implementation ticket is a reject.
+
 ---
 
 ## 10. Open questions
