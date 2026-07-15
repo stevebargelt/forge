@@ -514,6 +514,67 @@ test("HIGH1: a concurrent reader blocks the destructive migration — no half-dr
 });
 
 // ===========================================================================
+// HIGH 1 (handoff race) — a reader that attaches AFTER the journal-mode quiesce
+// but BEFORE the DDL is still fenced out.
+//
+// Leaving WAL (journal_mode=DELETE) proves the store quiescent only for the
+// instant of the switch; it then RELEASES its exclusive lock, so a peer can
+// BEGIN a rollback-journal read before the migration takes its own lock. The old
+// BEGIN IMMEDIATE took only a RESERVED lock and PERMITTED that reader to hold a
+// schema snapshot while DROP COLUMN ran. BEGIN EXCLUSIVE fences it. This test
+// drives a reader into that exact window via the onQuiescedBeforeDdl seam.
+//
+// Mutation intent: revert BEGIN EXCLUSIVE → BEGIN IMMEDIATE and this test FAILS.
+// BEGIN IMMEDIATE takes only a RESERVED lock, which coexists with the handoff
+// reader's SHARED lock — so the reader-excluding refusal never happens. The
+// migration instead limps to the DROP and dies there with a raw SQLITE_BUSY (no
+// "quiesce" message), so the /quiesce/ assertion below no longer matches: the
+// clean fail-closed refusal is what BEGIN EXCLUSIVE buys, and the mutant loses it.
+// ===========================================================================
+test("HIGH1(handoff): a reader attaching after the journal-mode gate but before the DDL fences the migration", () => {
+  const path = tempDb("high1-handoff-reader.db");
+  buildLegacyModelCallsStore(path);
+
+  const migrator = new Database(path);
+  migrator.pragma("journal_mode = WAL");
+
+  let raceReader: Database.Database | null = null;
+  assert.throws(
+    () =>
+      runDestructiveConvergenceMigration(migrator, {
+        // The store is now in rollback (delete) journal mode and momentarily
+        // unlocked. A peer that opens and BEGINs a read HERE holds a SHARED lock
+        // and a schema snapshot — exactly the reader BEGIN IMMEDIATE used to let
+        // slip past. Open it WITHOUT forcing WAL: the file is in delete mode now.
+        onQuiescedBeforeDdl: () => {
+          raceReader = new Database(path);
+          raceReader.pragma("busy_timeout = 0");
+          raceReader.exec("BEGIN");
+          raceReader.prepare(`SELECT COUNT(*) AS n FROM model_calls`).get();
+        },
+      }),
+    /quiesce/i,
+    "a reader attaching in the journal-mode→DDL handoff window fences the migration (BEGIN EXCLUSIVE cannot lock)",
+  );
+
+  // Release the racing reader.
+  assert.ok(raceReader, "the race reader was opened in the handoff window");
+  (raceReader as Database.Database).exec("ROLLBACK");
+  (raceReader as Database.Database).close();
+
+  // The refusal was total — nothing dropped, no boundary stamped.
+  assert.ok(columnNames(migrator, "model_calls").has("prompt_tokens"), "the handoff-fenced migration drops nothing");
+  assert.equal(migrator.pragma("user_version", { simple: true }), 0, "the handoff-fenced migration stamps no boundary");
+
+  // With the racer gone the store is quiescent again — the migration converges.
+  const { dropped } = runDestructiveConvergenceMigration(migrator);
+  assert.deepEqual(dropped.sort(), ["completion_tokens", "cost", "prompt_tokens"], "the now-quiescent migration converges");
+  assert.equal(migrator.pragma("user_version", { simple: true }), DESTRUCTIVE_BOUNDARY_VERSION, "the boundary is stamped once quiescent");
+  assert.equal(migrator.pragma("journal_mode", { simple: true }), "wal", "WAL is restored for the caller");
+  migrator.close();
+});
+
+// ===========================================================================
 // HIGH 2 — the migration REFUSES a store whose user_version is past the boundary
 // it would set; it never downgrades user_version and never drops columns there.
 //

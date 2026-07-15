@@ -280,16 +280,24 @@ function convergeLegacyModelCalls(db: DatabaseInstance): { dropped: string[]; bo
 //     requires SQLite to acquire an exclusive lock and fully checkpoint the WAL,
 //     which it CANNOT do while ANY other connection — reader OR writer — holds the
 //     database; the switch then leaves the mode as "wal" (or raises SQLITE_BUSY).
-//     A successful switch to "delete" is therefore proof the store is quiescent.
-//     The DROPs then run in a rollback-journal write transaction whose RESERVED→
-//     EXCLUSIVE lock blocks any reader that attaches afterward (busy_timeout=0, so
-//     a contending reader reddens the migration rather than seeing a half-drop).
-//     WAL is restored before returning.
+//     A successful switch to "delete" is therefore proof the store was quiescent
+//     AT THAT INSTANT — but journal_mode=DELETE RELEASES its exclusive lock as it
+//     returns, reopening a window in which a peer can BEGIN a rollback-journal
+//     read. So the DROPs run under BEGIN EXCLUSIVE, not BEGIN IMMEDIATE: a plain
+//     RESERVED lock would PERMIT such a reader to hold a schema snapshot while
+//     DROP COLUMN runs, whereas EXCLUSIVE takes the reader-excluding lock up
+//     front. If a peer grabbed the store in that handoff window, EXCLUSIVE cannot
+//     be acquired (busy_timeout=0) and the migration FAILS CLOSED rather than
+//     dropping under a live reader. WAL is restored before returning.
 //
 // The host-level two-version stress test (two real processes) is the
 // orchestrator's; this function guarantees the single-process-provable half.
 export function runDestructiveConvergenceMigration(
   db: DatabaseInstance,
+  // Test seam only: invoked in the window AFTER the journal-mode quiesce and
+  // BEFORE the reader-excluding lock, so a test can prove a reader attaching
+  // there is fenced out (the HIGH-1 handoff race). Never passed in production.
+  opts?: { onQuiescedBeforeDdl?: () => void },
 ): { dropped: string[]; boundaryVersion: number } {
   // HIGH 2 — refuse a store past this boundary BEFORE any schema or lock work.
   assertSchemaVersionSupported(db);
@@ -332,7 +340,26 @@ export function runDestructiveConvergenceMigration(
       );
     }
     leftWal = true;
-    db.exec("BEGIN IMMEDIATE");
+
+    opts?.onQuiescedBeforeDdl?.();
+
+    // READER-EXCLUDING lock (HIGH 1 handoff race). journal_mode=DELETE proved the
+    // store quiescent only for the instant of the switch — it releases its
+    // exclusive lock as it returns, so a peer can BEGIN a rollback-journal read
+    // before we lock. BEGIN IMMEDIATE takes only a RESERVED lock, which PERMITS
+    // that reader to hold a schema snapshot while DROP COLUMN runs. BEGIN
+    // EXCLUSIVE takes the reader-excluding lock up front; if a peer grabbed a
+    // SHARED lock in the handoff window it cannot be acquired (busy_timeout=0),
+    // so the migration fails closed instead of dropping under a live reader.
+    try {
+      db.exec("BEGIN EXCLUSIVE");
+    } catch (e) {
+      throw new Error(
+        `forge: refusing the destructive convergence migration — the store is in use by ` +
+          `another forge process (quiesce required): a reader attached before the ` +
+          `reader-excluding lock could be taken. Underlying: ${(e as Error).message}`,
+      );
+    }
     try {
       const result = convergeLegacyModelCalls(db);
       db.exec("COMMIT");
@@ -342,7 +369,16 @@ export function runDestructiveConvergenceMigration(
       throw e;
     }
   } finally {
-    if (leftWal) db.pragma("journal_mode = WAL");
+    // Best-effort WAL restore: a peer holding the store in the handoff window can
+    // block the switch back; never let that mask the migration's own error — leave
+    // the mode for the next open to re-establish.
+    if (leftWal) {
+      try {
+        db.pragma("journal_mode = WAL");
+      } catch {
+        /* next open re-establishes WAL */
+      }
+    }
     db.pragma(`busy_timeout = ${priorBusyTimeout}`);
   }
 }

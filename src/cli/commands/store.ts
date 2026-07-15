@@ -40,8 +40,9 @@ import {
 const CONVERGENCE_CONTRACT = [
   "OPERATIONAL CONTRACT — read before you converge:",
   "  1. This ENDS the supported old/new overlap window. It is ONE-WAY: once the",
-  "     boundary is stamped, a forge that understands only an older schema version",
-  "     refuses the store.",
+  "     boundary is stamped, a forge that HAS THE FORWARD GATE but understands only",
+  "     an older schema version refuses the store. A pre-FG-568 binary predates the",
+  "     gate and will still open it — see point 5.",
   "  2. STOP ALL forge processes using this FORGE_HOME first — launches, campaigns,",
   "     dashboards, and interactive sessions. --confirm-quiesced ASSERTS you have.",
   "  3. The journal-mode gate detects active locks/snapshots and refuses; it is a",
