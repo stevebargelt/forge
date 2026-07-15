@@ -5,13 +5,13 @@ triggers (`docs/plans/foundations-integration.md`) into a concrete, rerunnable p
 **once FG-561/FG-553 lands and before any foundation child begins implementation.** It cites the three PRDs; it
 invents no normative decisions and allocates no tickets.
 
-**Keyed to each cluster's review-clean lane HEAD** — A `a0064d5`, B `8b7f955`, C `b5d7417` — and the campaign
+**Keyed to each cluster's review-clean lane HEAD** — A `a0064d5`, B `bf906b4`, C `b5d7417` — and the campaign
 baseline **`185afc3`**. Each SHA is the **review-clean lane HEAD**, and as of this bump **all three coincide with
-the PRD-finalizing commit**: **A** (`a0064d5`), **B** (`8b7f955`), **and C** (`b5d7417`) each simultaneously
+the PRD-finalizing commit**: **A** (`a0064d5`), **B** (`bf906b4`), **and C** (`b5d7417`) each simultaneously
 finalize their PRD file **and** are the lane HEAD — the same commit edits the PRD file *and* is the lane HEAD.
 **No plan-only-HEAD cluster remains.** B was previously the exception (PRD `docs/prds/review-execution-trust.md`
 finalized at **`68ee713`** with a later plan-only citation-fix HEAD `20c8f59`); that split is **superseded**
-because `8b7f955` — a later PRD-path citation fix that **edits `docs/prds/review-execution-trust.md` itself** —
+because `bf906b4` — a later PRD-path citation fix that **edits `docs/prds/review-execution-trust.md` itself** —
 **re-finalizes the PRD** and is now B's lane HEAD, so B's HEAD is again a PRD edit, like A and C. Each PRD's revalidation triggers (A §7.3, B OQ-4 / §9.4, C §8, and the map §5
 cross-cutting) are the source; this brief is their union, made executable.
 
@@ -77,7 +77,7 @@ The FG-553/FG-555 mechanism surfaces, plus **every file the three PRDs assume be
   git semantics) are about **git's** path resolution, not forge's runtime, and are **insensitive** to FG-553.
   **Do not re-run p5 for FG-553** — it remains the acceptance probe for AC-1/AC-2 across the change.
 
-### Cluster B (lane HEAD `8b7f955` — a PRD edit; supersedes the prior `68ee713`-finalized / `20c8f59`-plan-only split)
+### Cluster B (lane HEAD `bf906b4` — a PRD edit; supersedes the prior `68ee713`-finalized / `20c8f59`-plan-only split)
 
 - **B OQ-4 — "forge executes the working tree" + "which artifact."** The FG-566/541/524/525 probes ran the
   working tree via `tsx`. After FG-553, `forge review-loop` runs the promoted release; a fix in `src/` is not

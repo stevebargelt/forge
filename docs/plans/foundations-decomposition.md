@@ -12,16 +12,16 @@ it.
 | Cluster | PRD file | Review-clean lane HEAD |
 |---|---|---|
 | **A** — agent workspace isolation | `docs/prds/agent-workspace-isolation.md` | **`a0064d5`** |
-| **B** — review execution trust | `docs/prds/review-execution-trust.md` | **`8b7f955`** |
+| **B** — review execution trust | `docs/prds/review-execution-trust.md` | **`bf906b4`** |
 | **C** — workflow lifecycle semantics | `docs/prds/workflow-lifecycle-semantics.md` | **`b5d7417`** |
 | campaign baseline | (origin/main at campaign start) | **`185afc3`** |
 
 **SHA semantics (uniform across all three clusters).** Each cluster SHA above is the **review-clean lane HEAD**,
 not necessarily the commit that finalized the PRD *file* — but as of this bump **all three coincide**: **A**
-(`a0064d5`), **B** (`8b7f955`), **and C** (`b5d7417`) are each **simultaneously the PRD-finalizing commit AND the
+(`a0064d5`), **B** (`bf906b4`), **and C** (`b5d7417`) are each **simultaneously the PRD-finalizing commit AND the
 lane HEAD** — the same commit edits the PRD file *and* is the lane HEAD. **No plan-only-HEAD cluster remains.** B
 was previously the exception (its PRD file `docs/prds/review-execution-trust.md` finalized at **`68ee713`** with a
-later plan-only citation-fix HEAD `20c8f59`); that split is **superseded** because `8b7f955` — a later PRD-path
+later plan-only citation-fix HEAD `20c8f59`); that split is **superseded** because `bf906b4` — a later PRD-path
 citation fix that **edits `docs/prds/review-execution-trust.md` itself** — **re-finalizes the PRD** and is now B's
 lane HEAD, so B's HEAD is again a PRD edit, exactly like A and C.
 
@@ -179,7 +179,7 @@ the campaign; FG-356 (reaper) carries the one **hard red gate** in the cluster.
 
 ---
 
-## Cluster B — review execution trust (lane HEAD `8b7f955` — a PRD edit; supersedes the prior `68ee713`-finalized / `20c8f59`-plan-only split)
+## Cluster B — review execution trust (lane HEAD `bf906b4` — a PRD edit; supersedes the prior `68ee713`-finalized / `20c8f59`-plan-only split)
 
 Five bounded children. INV-1's guard is the **highest-leverage, land-first** item (D5). FG-524 is
 **one indivisible child** (gate + re-aggregation — gating alone is a regression). FG-525 carries the one
