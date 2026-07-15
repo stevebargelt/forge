@@ -124,8 +124,9 @@ builds a **candidate** worktree, merges the task/child branches into it, **valid
 ### 1.4 **FG-559 hits REDs directly** — and reds are the population that most needs git
 
 > ⚠ SUPERSEDED by executed evidence — P7 (`docs/plans/foundations-lane-a-probes/p7-red-runtime-capability.out`)
-> and PRD-a §4.2/OQ-4 (SHA c1a77e3): reds ALREADY have effective Bash + git-read on every supported runtime
-> (codex/claude/pi — a read-only red EXECUTES `git rev-parse`/`git log`); the `:ro` mount denies filesystem
+> and PRD-a §4.2/OQ-4: reds ALREADY have effective Bash + git-read, executed under two genuinely-distinct
+> manifest-verified runtimes (codex-subscription + claude-oauth — a read-only red EXECUTES `git rev-parse`/`git
+> log`; Pi is not tool-capable for reds on this host, so no Pi red execution exists); the `:ro` mount denies filesystem
 > WRITES only (a distinct property). The 'no Bash / never invoke git' claim below is FALSIFIED. The mount is NOT
 > what grants git-read; FG-559 repairs repository VISIBILITY, not tool availability.
 >
@@ -152,9 +153,10 @@ broken** — including `git diff`, which is the reviewer's primary instrument. F
 framing is exactly right, and it lands hardest precisely where trust is being established.
 
 > ⚠ SUPERSEDED by executed evidence — P7 (`docs/plans/foundations-lane-a-probes/p7-red-runtime-capability.out`)
-> and PRD-a §4.2/OQ-4 (SHA c1a77e3): the INFERENCE above is FALSIFIED as to *tool availability*. Reds ALREADY
-> have effective Bash + git-read on every supported runtime (codex/claude/pi — a read-only red EXECUTES
-> `git rev-parse`/`git log`); `git` is NOT "100% broken" for reds. The `:ro` mount denies filesystem WRITES only
+> and PRD-a §4.2/OQ-4: the INFERENCE above is FALSIFIED as to *tool availability*. Reds ALREADY
+> have effective Bash + git-read, executed under two genuinely-distinct manifest-verified runtimes
+> (codex-subscription + claude-oauth — a read-only red EXECUTES `git rev-parse`/`git log`; Pi not tool-capable for
+> reds on this host); `git` is NOT "100% broken" for reds. The `:ro` mount denies filesystem WRITES only
 > (a distinct property). What FG-559 actually repairs is repository **VISIBILITY** in the worktree case, not tool
 > availability — the mount is NOT what grants git-read.
 
@@ -585,8 +587,9 @@ This campaign also runs a **review-trust lane** (FG-566/FG-541/FG-524/FG-525) an
 | **Agent seeds / task-package text** | Child 3 adds the read-only-git contract line. | **Review-trust lane, moderate** — it also edits reviewer-facing seed text. Textual collision likely; semantic conflict unlikely. |
 
 > ⚠ SUPERSEDED by executed evidence — P7 (`docs/plans/foundations-lane-a-probes/p7-red-runtime-capability.out`)
-> and PRD-a §4.2/OQ-4 (SHA c1a77e3): reds ALREADY have effective Bash + git-read on every supported runtime
-> (codex/claude/pi — a read-only red EXECUTES `git rev-parse`/`git log`); the `:ro` mount denies filesystem
+> and PRD-a §4.2/OQ-4: reds ALREADY have effective Bash + git-read, executed under two genuinely-distinct
+> manifest-verified runtimes (codex-subscription + claude-oauth — a read-only red EXECUTES `git rev-parse`/`git
+> log`; Pi is not tool-capable for reds on this host, so no Pi red execution exists); the `:ro` mount denies filesystem
 > WRITES only (a distinct property). BOTH the `spawn.ts` row's *"reds get working `git diff` for the first time"*
 > AND the pre-P7 correction below (*"reds have no Bash and never invoke git"*) are FALSIFIED. The mount is NOT
 > what grants git-read; FG-559 repairs repository VISIBILITY, not tool availability. (The mount-as-precondition

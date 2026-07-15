@@ -1,54 +1,106 @@
 FG-559 / PRD-a §4.2 PROBE 7 — RED RUNTIME CAPABILITY vs FILESYSTEM MUTATION AUTHORITY.
-EXECUTED ON FINAL RUNTIME (not a source-pattern read). A read-only red-wide agent (`forge invoke red-wide
---read-only --runtime <rt>`) mounted on forge-plan-a @ a0064d5, one dispatch per supported runtime.
 
-WHY: PRD-a §4.2 asserted as VERIFIED FACT that reds have "no Bash" and "do not invoke git today." That was
-inferred from the seed pattern (settings.json `tools: ["read"]` + CLAUDE.md prose "you have no Bash"). The
-final runtime falsifies it: every supported runtime ships bash+git in the agent image and exposes command
-execution; the seed `tools` array is never read by forge compose (compose reads CLAUDE.md), and the CLAUDE.md
-prose is intent, not enforcement. The `:ro` mount enforces filesystem READ-ONLY (mutation authority), which is
-a DIFFERENT property from capability availability.
+╔══════════════════════════════════════════════════════════════════════════════════════════════════╗
+║ SECTION 0 — SUPERSEDED: the original "one dispatch per supported runtime / identical across three"  ║
+║ conclusion below (SECTION 2) is INVALID. It did NOT execute three runtimes.                         ║
+╚══════════════════════════════════════════════════════════════════════════════════════════════════╝
 
-PROVENANCE (durable run/task rows):
-  codex : run-runtime-capability-probe-codex-subscription-57d5ae
-  claude: run-runtime-capability-probe-claude-oauth-a7c1f4
-  pi    : run-runtime-capability-probe-pi-oauth-3dd9b5
-Corroborating incidental evidence (the closeout reviews themselves): red-wide
-run-files-audit-red-wide-a009cb3-02489f container.stdout.log ran `/bin/bash -lc "git rev-parse HEAD ..."`;
-red-narrow run-files-audit-red-narrow-a009cb3-01bbb6 result.json "HEAD == a009cb3 confirmed (git rev-parse HEAD)".
+WHAT WAS WRONG (operator finding, verified against durable manifests):
+The three original probe runs were dispatched with `forge invoke red-wide --runtime <rt>`. On this host
+`~/.forge/model-policy.yml` pins `overrides.agents.red-wide: codex-subscription`, and that pin OVERRIDES the
+`--runtime` flag. All three original runs therefore resolved to codex-subscription — three Codex executions,
+not one-per-runtime. Proof (durable `manifest.json`, field `model.resolvedBy` / `runtime.name`):
+  labelled codex  run-runtime-capability-probe-codex-subscription-57d5ae → runtime.name=codex-subscription  resolvedBy=overrides.agents.red-wide
+  labelled claude run-runtime-capability-probe-claude-oauth-a7c1f4       → runtime.name=codex-subscription  resolvedBy=overrides.agents.red-wide   [NOT claude]
+  labelled pi     run-runtime-capability-probe-pi-oauth-3dd9b5           → runtime.name=codex-subscription  resolvedBy=overrides.agents.red-wide   [NOT pi]
+A run-title or a requested `--runtime` value is NOT runtime identity. The durable manifest is. `command -v codex
+claude pi` in the IDENTITY block proves the three binaries EXIST in the shared image; it does NOT prove which
+executable orchestrated the task. The Codex arm was genuine; the "claude" and "pi" arms were duplicate Codex.
 
-VERBATIM EXECUTED OUTPUT — IDENTICAL ACROSS codex-subscription, claude-oauth, AND pi-oauth:
+────────────────────────────────────────────────────────────────────────────────────────────────────
+SECTION 1 — GENUINE REPLACEMENT EVIDENCE (this is the authoritative record)
+────────────────────────────────────────────────────────────────────────────────────────────────────
 
-=== IDENTITY ===
-/usr/bin/bash
-/usr/bin/git
-/usr/bin/node
-/usr/bin/codex
-/usr/bin/claude
-/usr/bin/pi
-/usr/bin/node v24.18.0
-SHELL=/bin/bash uname=Linux <container> 6.10.14-linuxkit ... aarch64 GNU/Linux
+METHOD: dispatch is forced with `forge invoke red-wide --profile <profile> --read-only` (project forge-plan-a
+@ 3b76153). `--profile` (AWN-7) is highest profile-selection precedence and OVERRIDES `overrides.agents.red-wide`
+(confirmed: every arm's manifest shows `model.resolvedBy = cli.--profile`). Runtime identity was VERIFIED from
+the durable manifest BEFORE the arm was accepted. No installed runtime or model policy was modified.
 
-=== GIT READ ===           (capability AVAILABLE — executed successfully)
-a0064d5e51c4630b14c2449417b21467d05b0c7a
-git version 2.34.1
-a0064d5 docs(prd): lane A — D10a guard is fail-closed default-deny syntactic (buildable)
+── ARM A — codex-subscription  [VERIFIED FACT, executed] ──
+  1. run / task            : run-p7-diag-codex-2078bf / task-red-wide-ae10ef
+  2. manifest.runtime      : name=codex-subscription  kind=codex          logFormat=codex-jsonl
+  3. manifest.model        : profile=codex-subscription  runtime=codex-subscription  resolvedBy=cli.--profile
+  4. controlPlane.runtime  : name=codex-subscription  source=host  path=~/.forge/runtimes/codex-subscription.yml
+  5. log-format signature  : container.stdout.log line 1 = {"type":"thread.started","thread_id":"019f66ee-..."}   (codex-jsonl)
+  6. GIT-READ (verbatim)   : 3b76153a10360cdd30ef1c79d090c329d14fa91a
+                             git version 2.34.1
+                             3b76153 docs(plan): lane-A discovery plan — mark 'reds have no Bash/never invoke git' SUPERSEDED by P7 executed evidence
+  7. BOUNDED-WRITE (verbatim, refused):
+                             touch: cannot touch '/project/.red-write-canary': Read-only file system   → touch_exit=1
+                             bash: line 1: /project/CANARY: Read-only file system                        → redir_exit=1
+                             ls: cannot access '/project/.red-write-canary': No such file or directory   (canary NOT created)
+                             MOUNT: /run/host_mark/Users on /project type fakeowner (ro,nosuid,nodev,relatime,fakeowner)
 
-=== BOUNDED WRITE ATTEMPT ===   (mutation authority DENIED — refused by :ro mount)
-touch: cannot touch '/project/.red-write-canary': Read-only file system
-touch_exit=1
-bash: line 1: /project/CANARY: Read-only file system
-redir_exit=1
-ls: cannot access '/project/.red-write-canary': No such file or directory
-ls: cannot access '/project/CANARY': No such file or directory
+── ARM B — claude-oauth  [VERIFIED FACT, executed — this is the runtime the original run FAKED] ──
+  1. run / task            : run-p7-diag-claude-0746ee / task-red-wide-2082ce
+  2. manifest.runtime      : name=claude-oauth  kind=claude-code           logFormat=claude-stream-json
+  3. manifest.model        : profile=claude-subscription  runtime=claude-oauth  resolvedBy=cli.--profile
+  4. controlPlane.runtime  : name=claude-oauth  source=host  path=~/.forge/runtimes/claude-oauth.yml
+  5. log-format signature  : container.stdout.log line 1 = {"type":"system","subtype":"init","cwd":"/project",...}   (claude-stream-json — DISTINCT from codex-jsonl)
+  6. GIT-READ (verbatim)   : 3b76153a10360cdd30ef1c79d090c329d14fa91a
+                             git version 2.34.1
+                             3b76153 docs(plan): lane-A discovery plan — mark 'reds have no Bash/never invoke git' SUPERSEDED by P7 executed evidence
+  7. BOUNDED-WRITE (verbatim, refused):
+                             touch: cannot touch '/project/.red-write-canary': Read-only file system   → touch_exit=1
+                             bash: line 1: /project/CANARY: Read-only file system                        → redir_exit=1
+                             (canary NOT created; shell exited non-zero because both writes failed — that failure IS the evidence)
+                             MOUNT: /run/host_mark/Users on /project type fakeowner (ro,nosuid,nodev,relatime,fakeowner)
 
-CONCLUSIONS (VERIFIED FACT, executed, per-runtime):
-1. bash + git + node are present at /usr/bin in the agent image for ALL THREE supported runtimes; all three
-   runtime executables (codex, claude, pi) are also present.
-2. A read-only red EXECUTES Bash and `git rev-parse HEAD` / `git log` successfully — reds have EFFECTIVE
-   git-read capability today. PRD-a §4.2's "no Bash / do not invoke git" is FALSE on the final runtime.
-3. The `:ro` project mount REFUSES every write (touch and redirect both fail "Read-only file system", exit 1;
-   no file created). Filesystem mutation authority is denied by the OS mount — independent of capability.
-4. CAPABILITY AVAILABILITY (can run commands / read git = YES) and FILESYSTEM MUTATION AUTHORITY (can write =
-   NO) are DISTINCT properties. PROJECT_MODE=ro governs (4), NOT (2). Granting/removing git-read is NOT a mount
-   change. FG-559 repairs repository VISIBILITY for linked worktrees; it does not affect tool availability.
+── ARM C — pi  [VERIFIED FACT: NOT DISPATCHABLE AS A RED ON THIS HOST — no execution exists] ──
+  run / task               : run-p7-diag-pi-51ca9a / task-red-wide-5bf8c0   (status=failed, no container, no manifest)
+  forge refusal (verbatim) : "role 'red-wide' requires a tool-capable model (it produces structured result.json
+                             output) but the resolved model is not tool-capable (profile 'pi-groq', model
+                             'openai/gpt-oss-120b', alias 'review')."
+  Root cause               : the ONLY installed Pi profile is `pi-groq` → runtime pi-apikey, model openai/gpt-oss-120b
+                             (Groq), which is not tool-capable. Reds require a tool-capable model, so forge FAIL-CLOSES
+                             the dispatch before spawning a container. Double-confirmed (tmux launch + synchronous run,
+                             both full-PATH). Per campaign scope the policy/runtime was NOT modified to force a pass.
+                             ⇒ There is NO genuine Pi red execution. Any claim that "Pi executed Bash/git-read under a
+                             red dispatch" or "all three runtimes executed the write-refusal arm" is FALSE / withdrawn.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+SECTION 1b — CORRECTED CONCLUSIONS (what the genuine evidence supports, and at what label)
+────────────────────────────────────────────────────────────────────────────────────────────────────
+C1. [VERIFIED FACT, 2 distinct runtimes] A read-only red EXECUTES Bash and `git rev-parse HEAD` / `git log`.
+    Demonstrated under TWO genuinely-distinct, manifest-verified runtimes: codex-subscription (kind=codex) and
+    claude-oauth (kind=claude-code) — distinct kind, logFormat, controlPlane path, AND distinct stdout log-line
+    signatures. PRD-a §4.2's original "no Bash / do not invoke git" is FALSIFIED.
+C2. [VERIFIED FACT] The `:ro` project mount REFUSES every write (touch + redirect both "Read-only file system",
+    exit 1; no file created). Demonstrated under BOTH executed runtimes; mount line `fakeowner (ro,...)`.
+C3. [INFERENCE — NOT three-runtime execution] Capability-PRESENCE (bash/git/node in the container) is a property
+    of the shared agent IMAGE, not of the runtime: the IDENTITY block finds the same `/usr/bin/{bash,git,node}`
+    regardless of which CLI orchestrates. So the capability holds for any runtime that CAN dispatch a red; the two
+    that ran corroborate it. This is an image-level inference, not a per-runtime execution claim.
+C4. [INFERENCE — OS-level, below the runtime] The write-refusal is enforced by forge's spawn mounting /project
+    `:ro` on the container (kernel EROFS), INDEPENDENT of the CLI inside. Two genuinely-distinct runtimes hitting
+    identical EROFS corroborates that the enforcement is runtime-independent by construction. It is NOT, and must
+    not be stated as, "all three runtimes executed the write-refusal arm."
+C5. [VERIFIED FACT] Capability-availability (run commands / read git = YES) and filesystem-mutation-authority
+    (write = NO) are DISTINCT. PROJECT_MODE=ro governs mutation authority only; it neither grants nor removes
+    git-read. FG-559 repairs repository VISIBILITY for linked worktrees; it does not affect tool availability.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+SECTION 2 — ORIGINAL (SUPERSEDED) EVIDENCE, retained verbatim for audit. DO NOT CITE AS THREE-RUNTIME.
+────────────────────────────────────────────────────────────────────────────────────────────────────
+[SUPERSEDED] "one dispatch per supported runtime" — the three runs below were all codex-subscription (SECTION 0).
+PROVENANCE (durable run/task rows) — all three resolved to codex-subscription:
+  codex : run-runtime-capability-probe-codex-subscription-57d5ae   (genuine codex)
+  claude: run-runtime-capability-probe-claude-oauth-a7c1f4         (FAKE label — was codex-subscription)
+  pi    : run-runtime-capability-probe-pi-oauth-3dd9b5             (FAKE label — was codex-subscription)
+[SUPERSEDED] "VERBATIM EXECUTED OUTPUT — IDENTICAL ACROSS codex/claude/pi" — it was Codex three times; identity
+across genuinely-distinct runtimes is now shown in SECTION 1 (codex + claude only). Codex arm content was valid.
+
+GENUINELY CORROBORATING INCIDENTAL EVIDENCE (unchanged, valid): the closeout reviews themselves —
+red-narrow run-files-audit-red-narrow-a009cb3-01bbb6 ran under manifest.runtime.name=claude-oauth
+(resolvedBy=defaults.activity.review) and its result records "HEAD == a009cb3 confirmed (git rev-parse HEAD)":
+a genuine Claude red that executed Bash+git-read (though it did not run the bounded-write arm).
