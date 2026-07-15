@@ -24,7 +24,7 @@
 // time in the rollup CLI.
 
 import { readFileSync } from "node:fs";
-import { getDb, writeTransaction } from "./db.js";
+import { getDb, writeTransaction, LEGACY_MODEL_CALLS_COLUMNS } from "./db.js";
 
 export type UsageRow = {
   taskId: string | null;
@@ -432,14 +432,54 @@ export function insertUsageRows(rows: UsageRow[]): number {
   if (rows.length === 0) return 0;
   const db = getDb();
   const del = db.prepare(`DELETE FROM model_calls WHERE task_id = ? AND request_id = ?`);
-  // #295: do NOT write the 0.1.x legacy columns (prompt_tokens/completion_tokens/
-  // cost). They don't exist on a fresh schema, and a migration now drops them from
-  // older DBs — writing them made usage capture throw (silently swallowed) on every
-  // fresh install. The column list here matches the current SCHEMA_SQL exactly.
-  const ins = db.prepare(`
-    INSERT INTO model_calls (task_id, request_id, model, alias, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
+
+  // FG-568: dual-shape insertion. A version-B writer must capture usage on BOTH
+  // schema shapes — the fresh schema AND an unconverged 0.1.x-migrated store that
+  // still carries the legacy NOT NULL columns (prompt_tokens/completion_tokens/
+  // cost). The additive-only open path deliberately does NOT drop those columns
+  // (only `forge store converge` does), so a real store can carry them for the
+  // whole version-overlap window.
+  //
+  // Why this matters — this WAS a silent prod bug, not cosmetic: on a legacy store
+  // the fresh-only INSERT below violates the legacy NOT NULL columns and throws.
+  // captureUsageForTask catches it into {rowCount:0, error}, but runNext/invoke
+  // DISCARD that error and the orchestrator capture path swallows it — so a legacy-
+  // store insert failure lost usage with NO operator signal. Writing the legacy
+  // columns with 0/0/0 (the established pre-#295 compatibility placeholders — those
+  // columns are documented unread dead weight, so 0 is correct and harmless)
+  // eliminates the failure on both real shapes. We do NOT auto-drop or auto-converge.
+  const cols = new Set(
+    (db.prepare(`PRAGMA table_info(model_calls)`).all() as { name: string }[]).map((c) => c.name),
+  );
+  const legacy = LEGACY_MODEL_CALLS_COLUMNS;
+  const present = legacy.filter((c) => cols.has(c));
+
+  // Prepare the correct statement ONCE per call (not per row). Both the fresh and
+  // the legacy statements bind the same nine value params; the legacy one appends
+  // the three legacy columns filled with the 0/0/0 placeholders as SQL literals.
+  let insSql: string;
+  if (present.length === 0) {
+    insSql = `
+      INSERT INTO model_calls (task_id, request_id, model, alias, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `;
+  } else if (present.length === legacy.length) {
+    insSql = `
+      INSERT INTO model_calls (task_id, request_id, model, alias, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at, prompt_tokens, completion_tokens, cost)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0)
+    `;
+  } else {
+    // A SUBSET of the legacy columns exists — an inconsistent/corrupt schema no
+    // real migration produces. Refuse LOUDLY rather than silently lose usage.
+    const missing = legacy.filter((c) => !cols.has(c));
+    throw new Error(
+      `insertUsageRows: inconsistent model_calls schema — legacy columns present [${present.join(", ")}] ` +
+        `but missing [${missing.join(", ")}]. A valid store has all three legacy columns (unconverged 0.1.x) ` +
+        `or none (fresh/converged). Run \`forge store converge\` to converge this store to the fresh shape.`,
+    );
+  }
+  const ins = db.prepare(insSql);
+
   writeTransaction(() => {
     for (const r of rows) {
       del.run(r.taskId, r.requestId);

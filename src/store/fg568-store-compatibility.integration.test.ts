@@ -1,0 +1,760 @@
+// FG-568 (FG-553 Child 1 / BD-15) — store-compatibility policy, proven by
+// EXECUTION against real SQLite files (never ~/.forge/forge.db — every DB here
+// lives under the per-process temp FORGE_HOME the harness installs, src/test-setup.ts).
+//
+// Per the FG-551 rule: a property about the store's RUNTIME behavior is
+// demonstrated by RUNNING the real store code against a real DB, never by
+// asserting on source patterns. "Two Forge versions" is simulated by running the
+// real store code at two schema states against one temp DB (an "old" schema/insert
+// path vs the "new" migrated one) — real separate DB opens, not mocks.
+//
+// The seven load-bearing evidence items (operator-specified), each a real test:
+//   E1  two versions against one real SQLite file (F35 two-process shape)
+//   E2  BOTH directions: old-writer/new-reader AND new-writer/old-reader
+//   E3  a logically read-only command's first open reproduces migration-on-open,
+//       and the fix makes it additive/safe
+//   E4  an incompatible additive mutation goes RED (breaks an old writer)
+//   E5  destructive DDL is absent from EVERY ordinary open path (getDb / getDb ro)
+//   E6  the destructive migration is a recorded one-way rollback boundary
+//   E7  the forward schema-version gate refuses a newer-than-understood store —
+//       AND cannot constrain already-installed old binaries
+
+import { test, before } from "node:test";
+import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import Database from "better-sqlite3";
+import {
+  getDb,
+  closeDb,
+  applyMigrations,
+  assertSchemaVersionSupported,
+  runDestructiveConvergenceMigration,
+  SCHEMA_VERSION,
+  DESTRUCTIVE_BOUNDARY_VERSION,
+} from "./db.js";
+import { SCHEMA_SQL } from "./schema.js";
+import { DB_PATH, FORGE_HOME } from "../util/paths.js";
+
+// ---------------------------------------------------------------------------
+// Helpers — every one runs REAL store code (SCHEMA_SQL + the exported migration
+// functions) against a real file, the way an upgraded install actually opens.
+// ---------------------------------------------------------------------------
+
+function tempDb(name: string): string {
+  return join(FORGE_HOME, name);
+}
+
+function columnNames(db: Database.Database, table: string): Set<string> {
+  return new Set((db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name));
+}
+
+function countRows(db: Database.Database, table: string): number {
+  return (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+}
+
+// A "NEW binary" open: exactly getDb()'s writable path — forward gate, SCHEMA_SQL,
+// additive migrations. `understoodVersion` stands in for an older-schema binary.
+function openAsNewBinary(path: string, understoodVersion: number = SCHEMA_VERSION): Database.Database {
+  const db = new Database(path);
+  db.pragma("journal_mode = WAL");
+  db.pragma("foreign_keys = ON");
+  assertSchemaVersionSupported(db, understoodVersion);
+  db.exec(SCHEMA_SQL);
+  applyMigrations(db);
+  db.pragma("busy_timeout = 5000");
+  return db;
+}
+
+// An "OLD binary" that predates project_dir on runs — it creates the store, and
+// only ever references the pre-migration column set. This is the version-A code.
+const LEGACY_RUNS_DDL = `
+CREATE TABLE IF NOT EXISTS runs (
+  id           TEXT PRIMARY KEY,
+  workflow     TEXT NOT NULL,
+  title        TEXT NOT NULL,
+  status       TEXT NOT NULL,
+  created_at   TEXT NOT NULL,
+  completed_at TEXT,
+  metadata     TEXT
+);
+`;
+
+function oldWriterInsertRun(db: Database.Database, id: string, workflow = "feature"): void {
+  // Old code knows nothing of project_dir — it inserts only the columns it has.
+  db.prepare(`INSERT INTO runs (id, workflow, title, status, created_at) VALUES (?, ?, ?, ?, ?)`).run(
+    id,
+    workflow,
+    `title ${id}`,
+    "active",
+    "2026-01-01T00:00:00Z",
+  );
+}
+
+function oldReaderRuns(db: Database.Database): Array<{ id: string; workflow: string; status: string }> {
+  // Old code selects only the columns it knows — never project_dir.
+  return db.prepare(`SELECT id, workflow, status FROM runs ORDER BY created_at`).all() as Array<{
+    id: string;
+    workflow: string;
+    status: string;
+  }>;
+}
+
+// A real WAL store still carrying the 0.1.x legacy model_calls columns (the
+// destructive-DROP candidates) — the shape runDestructiveConvergenceMigration
+// converges. Seeds one row so a concurrent reader has a snapshot to hold.
+const LEGACY_MODEL_CALLS_DDL = `CREATE TABLE model_calls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT,
+  request_id TEXT NOT NULL,
+  model TEXT NOT NULL,
+  alias TEXT,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  prompt_tokens INTEGER NOT NULL,
+  completion_tokens INTEGER NOT NULL,
+  cost REAL NOT NULL
+)`;
+
+function buildLegacyModelCallsStore(path: string): void {
+  const setup = new Database(path);
+  setup.pragma("journal_mode = WAL");
+  setup.exec(SCHEMA_SQL);
+  setup.exec(`DROP TABLE model_calls`);
+  setup.exec(LEGACY_MODEL_CALLS_DDL);
+  setup
+    .prepare(
+      `INSERT INTO model_calls (request_id, model, input_tokens, output_tokens, created_at, prompt_tokens, completion_tokens, cost)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run("req_legacy", "claude-opus-4-7", 10, 5, "2026-01-01T00:00:00Z", 10, 5, 0.0);
+  setup.close();
+}
+
+// A reader that holds an OPEN WAL read snapshot until released — the hazard HIGH 1
+// is about. `BEGIN` + a real read acquires and pins the snapshot in WAL mode.
+function openHeldReader(path: string): Database.Database {
+  const reader = new Database(path);
+  reader.pragma("journal_mode = WAL");
+  reader.exec("BEGIN");
+  reader.prepare(`SELECT COUNT(*) AS n FROM model_calls`).get();
+  return reader;
+}
+
+// ===========================================================================
+// E1 + E2 — two versions on ONE real store, BOTH compatibility directions.
+// ===========================================================================
+test("E1/E2: old-writer/new-reader AND new-writer/old-reader both hold across one real store", () => {
+  const path = tempDb("e1-two-version.db");
+
+  // --- Version A (old binary) creates the store and writes an old-shape row. ---
+  const a = new Database(path);
+  a.pragma("journal_mode = WAL");
+  a.exec(LEGACY_RUNS_DDL);
+  assert.equal(columnNames(a, "runs").has("project_dir"), false, "precondition: version-A store has no project_dir");
+  oldWriterInsertRun(a, "run-A-old");
+  a.close();
+
+  // --- Version B (new binary) opens the SAME file — additive migration adds project_dir. ---
+  const b = openAsNewBinary(path);
+  assert.ok(columnNames(b, "runs").has("project_dir"), "B's additive migration added project_dir to the shared store");
+
+  // Direction 1 — OLD-WRITER / NEW-READER: B reads the row A wrote in the old shape.
+  const seenByB = b.prepare(`SELECT id, project_dir FROM runs WHERE id = ?`).get("run-A-old") as {
+    id: string;
+    project_dir: string | null;
+  };
+  assert.equal(seenByB.id, "run-A-old", "new reader tolerates the old-written row");
+  assert.equal(seenByB.project_dir, null, "the migrated column reads back null for A's pre-migration row — no data invented");
+
+  // B (new writer) writes a row USING the new additive column.
+  b.prepare(`INSERT INTO runs (id, workflow, title, status, created_at, project_dir) VALUES (?, ?, ?, ?, ?, ?)`).run(
+    "run-B-new",
+    "feature",
+    "written by B",
+    "active",
+    "2026-02-02T00:00:00Z",
+    "/proj/b",
+  );
+  b.close();
+
+  // --- Version A is STILL RUNNING (old code) against the now-migrated store. ---
+  const a2 = new Database(path);
+  a2.pragma("journal_mode = WAL");
+
+  // Direction 2 — NEW-WRITER / OLD-READER: A keeps writing old-shape rows AND
+  // reads B's new-shape row through its old column set — both must tolerate.
+  assert.doesNotThrow(
+    () => oldWriterInsertRun(a2, "run-A-old-2"),
+    "an in-flight old writer is NOT broken by B's additive migration (new column is nullable)",
+  );
+  const rowsByA = oldReaderRuns(a2);
+  assert.deepEqual(
+    rowsByA.map((r) => r.id).sort(),
+    ["run-A-old", "run-A-old-2", "run-B-new"].sort(),
+    "the old reader sees every row, including B's new-shape one, via its old column set",
+  );
+  a2.close();
+});
+
+// ===========================================================================
+// E4 — an incompatible additive mutation goes RED (breaks an old writer).
+// This is the mutation-test proving additive-only is load-bearing, not decorative:
+// a change that is additive-in-form but incompatible (a UNIQUE/CHECK an in-flight
+// version-A writer can't satisfy — BD-15 correction #5) breaks A WITHOUT any DROP.
+// ===========================================================================
+test("E4: an incompatible additive change (a new UNIQUE a version-A writer can't satisfy) reddens an old writer", () => {
+  const path = tempDb("e4-incompatible-additive.db");
+  const db = openAsNewBinary(path);
+
+  // Version A's real behavior: it writes multiple runs with the same workflow.
+  oldWriterInsertRun(db, "r1", "feature");
+  oldWriterInsertRun(db, "r2", "feature");
+
+  // MUTANT — a would-be "new binary" adds a UNIQUE constraint the old writer's
+  // stream of inserts cannot satisfy. Additive in form; breaking in effect.
+  db.exec(`DELETE FROM runs`);
+  db.exec(`CREATE UNIQUE INDEX mutant_unique_workflow ON runs(workflow)`);
+
+  oldWriterInsertRun(db, "r3", "feature");
+  assert.throws(
+    () => oldWriterInsertRun(db, "r4", "feature"),
+    /UNIQUE/i,
+    "the incompatible additive change breaks the in-flight old writer — exactly the red additive-only forbids",
+  );
+  db.close();
+});
+
+// ===========================================================================
+// E6 — the destructive convergence migration is a recorded ONE-WAY boundary,
+// and it is QUIESCE-gated.
+// ===========================================================================
+test("E6: the destructive migration is quiesce-gated, converges the legacy shape, and stamps a one-way boundary", () => {
+  const path = tempDb("e6-boundary.db");
+
+  // Build a real store that still carries the 0.1.x legacy model_calls columns.
+  const setup = new Database(path);
+  setup.pragma("journal_mode = WAL");
+  setup.exec(SCHEMA_SQL);
+  setup.exec(`DROP TABLE model_calls`);
+  setup.exec(`CREATE TABLE model_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT,
+    request_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    alias TEXT,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    prompt_tokens INTEGER NOT NULL,
+    completion_tokens INTEGER NOT NULL,
+    cost REAL NOT NULL
+  )`);
+  setup.close();
+
+  const db = new Database(path);
+  db.pragma("journal_mode = WAL");
+  assert.equal(db.pragma("user_version", { simple: true }), 0, "precondition: pre-boundary store is user_version 0");
+
+  // --- QUIESCE: a peer actively holding the store's write lock blocks the migration. ---
+  const peer = new Database(path);
+  peer.pragma("busy_timeout = 0");
+  peer.exec("BEGIN IMMEDIATE"); // a version-A peer is using the store
+  assert.throws(
+    () => runDestructiveConvergenceMigration(db),
+    /quiesce/i,
+    "the destructive migration refuses while another process holds the store",
+  );
+  // The refusal is total — nothing was dropped or stamped.
+  assert.ok(columnNames(db, "model_calls").has("prompt_tokens"), "a refused migration drops nothing");
+  assert.equal(db.pragma("user_version", { simple: true }), 0, "a refused migration stamps no boundary");
+  peer.exec("ROLLBACK");
+  peer.close();
+
+  // --- Quiescent: the migration converges the shape and stamps the boundary. ---
+  const { dropped, boundaryVersion } = runDestructiveConvergenceMigration(db);
+  assert.deepEqual(dropped.sort(), ["completion_tokens", "cost", "prompt_tokens"], "the legacy columns are dropped");
+  assert.equal(boundaryVersion, DESTRUCTIVE_BOUNDARY_VERSION);
+  const cols = columnNames(db, "model_calls");
+  assert.ok(!cols.has("prompt_tokens") && !cols.has("completion_tokens") && !cols.has("cost"), "converged to the fresh shape");
+  assert.equal(db.pragma("user_version", { simple: true }), DESTRUCTIVE_BOUNDARY_VERSION, "the one-way boundary is recorded");
+  db.close();
+
+  // --- ONE-WAY: an older-schema-version process now refuses the store. ---
+  const postBoundary = new Database(path);
+  assert.throws(
+    () => assertSchemaVersionSupported(postBoundary, DESTRUCTIVE_BOUNDARY_VERSION - 1),
+    /newer than this binary understands/i,
+    "after the boundary, an older-schema-version process refuses the store — rollback cannot cross it silently",
+  );
+  // The binary that ran the migration still opens it (it understands the boundary).
+  assert.doesNotThrow(() => assertSchemaVersionSupported(postBoundary, DESTRUCTIVE_BOUNDARY_VERSION));
+  postBoundary.close();
+});
+
+// ===========================================================================
+// E7 — the forward schema-version gate refuses a newer-than-understood store,
+// AND (honest limit) cannot constrain an already-installed old binary.
+// ===========================================================================
+test("E7: the forward gate refuses a future store — but is powerless over an already-installed old binary", () => {
+  const path = tempDb("e7-forward-gate.db");
+  const db = new Database(path);
+  db.exec(SCHEMA_SQL);
+
+  // A same-or-older-version store opens fine.
+  assert.doesNotThrow(() => assertSchemaVersionSupported(db), "a current store (user_version 0) opens");
+
+  // A NEWER forge migrated this store past a boundary THIS binary doesn't know.
+  db.pragma(`user_version = ${SCHEMA_VERSION + 5}`);
+  assert.throws(
+    () => assertSchemaVersionSupported(db),
+    /newer than this binary understands/i,
+    "the forward gate refuses a store newer than we understand",
+  );
+  // Through the full production open path the same refusal holds (openAsNewBinary
+  // is getDb()'s writable path) — the gate runs BEFORE any schema is touched.
+  db.close();
+  assert.throws(() => openAsNewBinary(path), /newer than this binary understands/i, "getDb()'s open path refuses the future store");
+
+  // HONEST LIMIT — this gate constrains only FUTURE binaries. An already-installed
+  // OLD binary predates the gate and never performs the check, so it still opens
+  // (and could still corrupt) the future store. Demonstrated: a gate-LESS open —
+  // the deployed old binary's behavior — succeeds against the very store the gate
+  // refuses. This is exactly why the ordinary open path must ALSO be additive-only.
+  const oldBinary = new Database(path); // no assertSchemaVersionSupported call at all
+  assert.doesNotThrow(
+    () => oldBinary.exec(SCHEMA_SQL),
+    "a pre-gate old binary opens the future store regardless — the gate cannot reach back to constrain it",
+  );
+  oldBinary.close();
+});
+
+// ===========================================================================
+// E3 + E5 — the REAL getDb() path: a logically read-only command's first open
+// reproduces migration-on-open (the db.ts:169 defect), and that open runs NO
+// destructive DDL (additive-only, on EVERY ordinary open path).
+//
+// This is the one test that drives the production getDb() singleton, so it owns
+// DB_PATH for this file's process. It builds the store at DB_PATH first, then the
+// FIRST getDb() call is a READ-ONLY one — reproducing today's behavior where a
+// read-only caller bootstraps a writable handle and migrates.
+// ===========================================================================
+before(() => {
+  assert.equal(existsSync(DB_PATH), false, "the harness must hand us a fresh FORGE_HOME with no DB yet");
+
+  const legacy = new Database(DB_PATH);
+  legacy.pragma("journal_mode = WAL");
+  // runs WITHOUT project_dir — so applyMigrations must ADD it (migration-on-open).
+  legacy.exec(LEGACY_RUNS_DDL);
+  // model_calls WITH the 0.1.x legacy NOT NULL columns — the destructive-DROP
+  // candidates. If the ordinary open path drops them, E5 fails.
+  legacy.exec(`CREATE TABLE model_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT,
+    request_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    alias TEXT,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    prompt_tokens INTEGER NOT NULL,
+    completion_tokens INTEGER NOT NULL,
+    cost REAL NOT NULL
+  )`);
+  oldWriterInsertRun(legacy, "run-legacy-1");
+  legacy
+    .prepare(
+      `INSERT INTO model_calls (request_id, model, input_tokens, output_tokens, created_at, prompt_tokens, completion_tokens, cost)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run("req_legacy", "claude-opus-4-7", 10, 5, "2026-01-01T00:00:00Z", 10, 5, 0.0);
+  legacy.close();
+});
+
+// ===========================================================================
+// E7 (production getDb path) — the forward gate is WIRED INTO the real getDb()
+// open sequence, not merely available as a standalone function. The E7 test
+// above drives the test file's OWN copy of that sequence (openAsNewBinary),
+// which would keep passing even if getDb() itself never called the gate. This
+// test drives the REAL getDb() singleton against a store a newer forge stamped
+// past a boundary this binary doesn't understand, and proves getDb() refuses —
+// and refuses BEFORE it touches the schema.
+//
+// Mutation-adequacy: kills the "delete assertSchemaVersionSupported() from
+// getDb" mutant. That mutant leaves the whole E1/E2/E3/E4/E5/E6/E7 suite green
+// (verified) because nothing else exercises the production open path's gate —
+// this case is what makes the gate's wiring load-bearing rather than decorative.
+//
+// Ordering: this runs BEFORE the E3/E5 test so getDb()'s singleton is still
+// cold and getDb() actually opens DB_PATH here (a cached handle would bypass the
+// gate entirely). The store at DB_PATH is the legacy fixture the before() hook
+// built; we bump its user_version to a future boundary, assert the refusal, then
+// restore it to 0 (in finally) so the E3/E5 test still sees an untouched legacy
+// store at user_version 0. Isolation is preserved: DB_PATH lives under the
+// per-process temp FORGE_HOME (src/test-setup.ts), never ~/.forge/forge.db.
+// ===========================================================================
+test("E7(getDb): the production getDb() open path itself refuses a future-boundary store, before migrating", () => {
+  // getDb()'s singleton is still cold here: this test is defined before the E3/E5
+  // test and no earlier test in the file calls getDb(), so getDb() below opens
+  // DB_PATH for real and runs the forward gate (a cached handle would bypass it).
+  assert.equal(existsSync(DB_PATH), true, "precondition: the before() hook already built the legacy store at DB_PATH");
+
+  // A newer forge stamped this shared store past a one-way boundary we don't know.
+  const stamp = new Database(DB_PATH);
+  stamp.pragma(`user_version = ${SCHEMA_VERSION + 7}`);
+  stamp.close();
+
+  try {
+    // The REAL getDb() (not the test's openAsNewBinary) must refuse the future store.
+    assert.throws(
+      () => getDb(),
+      /newer than this binary understands/i,
+      "the production getDb() open path refuses a store newer than this binary understands",
+    );
+    // And it refused BEFORE migrating: the gate runs ahead of SCHEMA_SQL/applyMigrations,
+    // so the legacy `runs` table still has no project_dir — no additive ALTER touched the
+    // store getDb declined to open.
+    const inspect = new Database(DB_PATH);
+    assert.equal(
+      columnNames(inspect, "runs").has("project_dir"),
+      false,
+      "the gate short-circuited getDb ahead of applyMigrations — the refused store was never migrated",
+    );
+    inspect.close();
+  } finally {
+    // Restore the boundary and drop any handle so the E3/E5 test opens the legacy
+    // store fresh at user_version 0. (Under the mutant getDb() would have opened and
+    // cached the future store; closeDb() clears it either way.)
+    const restore = new Database(DB_PATH);
+    restore.pragma("user_version = 0");
+    restore.close();
+    closeDb();
+  }
+});
+
+test("E3/E5: a read-only FIRST open still migrates (defect reproduced) — additively, running NO destructive DDL", () => {
+  // The FIRST production open in this process is logically read-only. getDb bootstraps
+  // a writable handle (db.ts:169) and runs SCHEMA_SQL + applyMigrations — the defect.
+  const ro = getDb({ readOnly: true });
+
+  // E3 — migration-on-open reproduced: the additive ALTER that adds project_dir ran
+  // even though the caller only wanted to read.
+  assert.ok(columnNames(ro, "runs").has("project_dir"), "migration-on-open reproduced: the read-only first open added project_dir");
+
+  // E5 — but it was ADDITIVE-ONLY: the destructive-DROP candidates SURVIVE. No
+  // DROP/RENAME ran on the ordinary open path (proven by their continued presence,
+  // not by grepping the source — FG-551).
+  const mcCols = columnNames(ro, "model_calls");
+  assert.ok(mcCols.has("prompt_tokens"), "no destructive DDL on open: prompt_tokens survives");
+  assert.ok(mcCols.has("completion_tokens"), "no destructive DDL on open: completion_tokens survives");
+  assert.ok(mcCols.has("cost"), "no destructive DDL on open: cost survives");
+
+  // Data and boundary untouched by an ordinary open.
+  assert.equal(countRows(ro, "runs"), 1, "no row churn on open");
+  assert.equal(countRows(ro, "model_calls"), 1, "no row churn on open");
+  assert.equal(ro.pragma("user_version", { simple: true }), 0, "an ordinary open never stamps the one-way boundary");
+
+  // The writable handle getDb bootstrapped points at the same file — assert the
+  // SAME survival there, covering the writable ordinary open path too.
+  const rw = getDb();
+  const rwCols = columnNames(rw, "model_calls");
+  assert.ok(
+    rwCols.has("prompt_tokens") && rwCols.has("completion_tokens") && rwCols.has("cost"),
+    "the writable getDb() open path is likewise additive-only — legacy columns survive",
+  );
+});
+
+// ===========================================================================
+// HIGH 1 — the quiesce gate EXCLUDES READERS, not just writers.
+//
+// In WAL mode a plain BEGIN EXCLUSIVE takes only the writer slot; a reader on an
+// existing snapshot is NOT excluded and could observe a half-dropped schema. The
+// fix quiesces by leaving WAL, which cannot succeed while any peer holds the
+// store. Mutation intent: with the old BEGIN-EXCLUSIVE quiesce this test FAILS —
+// BEGIN EXCLUSIVE succeeds despite the reader, so the migration proceeds and drops
+// instead of refusing.
+// ===========================================================================
+test("HIGH1: a concurrent reader blocks the destructive migration — no half-dropped schema is observable", () => {
+  const path = tempDb("high1-reader-exclusion.db");
+  buildLegacyModelCallsStore(path);
+
+  const migrator = new Database(path);
+  migrator.pragma("journal_mode = WAL");
+
+  // A concurrent reader pins a WAL snapshot for the whole migration attempt.
+  const reader = openHeldReader(path);
+
+  assert.throws(
+    () => runDestructiveConvergenceMigration(migrator),
+    /quiesce/i,
+    "the migration refuses while a reader holds a snapshot — a reader cannot observe a half-dropped schema",
+  );
+  // The refusal is total — nothing dropped, no boundary stamped.
+  assert.ok(columnNames(migrator, "model_calls").has("prompt_tokens"), "a reader-blocked migration drops nothing");
+  assert.equal(migrator.pragma("user_version", { simple: true }), 0, "a reader-blocked migration stamps no boundary");
+
+  // Release the reader — the store is now quiescent and the migration converges.
+  reader.exec("ROLLBACK");
+  reader.close();
+
+  const { dropped } = runDestructiveConvergenceMigration(migrator);
+  assert.deepEqual(dropped.sort(), ["completion_tokens", "cost", "prompt_tokens"], "the quiescent migration converges the shape");
+  assert.equal(migrator.pragma("user_version", { simple: true }), DESTRUCTIVE_BOUNDARY_VERSION, "the boundary is stamped once quiescent");
+  // WAL is restored for the caller after the migration returns.
+  assert.equal(migrator.pragma("journal_mode", { simple: true }), "wal", "the migration restores WAL for the caller");
+  migrator.close();
+});
+
+// ===========================================================================
+// HIGH 1 (handoff race) — a reader that attaches AFTER the journal-mode quiesce
+// but BEFORE the DDL is still fenced out.
+//
+// Leaving WAL (journal_mode=DELETE) proves the store quiescent only for the
+// instant of the switch; it then RELEASES its exclusive lock, so a peer can
+// BEGIN a rollback-journal read before the migration takes its own lock. The old
+// BEGIN IMMEDIATE took only a RESERVED lock and PERMITTED that reader to hold a
+// schema snapshot while DROP COLUMN ran. BEGIN EXCLUSIVE fences it. This test
+// drives a reader into that exact window via the onQuiescedBeforeDdl seam.
+//
+// Mutation intent: revert BEGIN EXCLUSIVE → BEGIN IMMEDIATE and this test FAILS.
+// BEGIN IMMEDIATE takes only a RESERVED lock, which coexists with the handoff
+// reader's SHARED lock — so the reader-excluding refusal never happens. The
+// migration instead limps to the DROP and dies there with a raw SQLITE_BUSY (no
+// "quiesce" message), so the /quiesce/ assertion below no longer matches: the
+// clean fail-closed refusal is what BEGIN EXCLUSIVE buys, and the mutant loses it.
+// ===========================================================================
+test("HIGH1(handoff): a reader attaching after the journal-mode gate but before the DDL fences the migration", () => {
+  const path = tempDb("high1-handoff-reader.db");
+  buildLegacyModelCallsStore(path);
+
+  const migrator = new Database(path);
+  migrator.pragma("journal_mode = WAL");
+
+  let raceReader: Database.Database | null = null;
+  assert.throws(
+    () =>
+      runDestructiveConvergenceMigration(migrator, {
+        // The store is now in rollback (delete) journal mode and momentarily
+        // unlocked. A peer that opens and BEGINs a read HERE holds a SHARED lock
+        // and a schema snapshot — exactly the reader BEGIN IMMEDIATE used to let
+        // slip past. Open it WITHOUT forcing WAL: the file is in delete mode now.
+        onQuiescedBeforeDdl: () => {
+          raceReader = new Database(path);
+          raceReader.pragma("busy_timeout = 0");
+          raceReader.exec("BEGIN");
+          raceReader.prepare(`SELECT COUNT(*) AS n FROM model_calls`).get();
+        },
+      }),
+    /quiesce/i,
+    "a reader attaching in the journal-mode→DDL handoff window fences the migration (BEGIN EXCLUSIVE cannot lock)",
+  );
+
+  // Release the racing reader.
+  assert.ok(raceReader, "the race reader was opened in the handoff window");
+  (raceReader as Database.Database).exec("ROLLBACK");
+  (raceReader as Database.Database).close();
+
+  // The refusal was total — nothing dropped, no boundary stamped.
+  assert.ok(columnNames(migrator, "model_calls").has("prompt_tokens"), "the handoff-fenced migration drops nothing");
+  assert.equal(migrator.pragma("user_version", { simple: true }), 0, "the handoff-fenced migration stamps no boundary");
+
+  // With the racer gone the store is quiescent again — the migration converges.
+  const { dropped } = runDestructiveConvergenceMigration(migrator);
+  assert.deepEqual(dropped.sort(), ["completion_tokens", "cost", "prompt_tokens"], "the now-quiescent migration converges");
+  assert.equal(migrator.pragma("user_version", { simple: true }), DESTRUCTIVE_BOUNDARY_VERSION, "the boundary is stamped once quiescent");
+  assert.equal(migrator.pragma("journal_mode", { simple: true }), "wal", "WAL is restored for the caller");
+  migrator.close();
+});
+
+// ===========================================================================
+// HIGH 2 — the migration REFUSES a store whose user_version is past the boundary
+// it would set; it never downgrades user_version and never drops columns there.
+//
+// Mutation intent: without the assertSchemaVersionSupported guard, the migration
+// writes user_version back to 1 and drops the legacy columns — both asserts below
+// fail. (Reproduces the executed defect: a user_version=5 store rewritten to 1.)
+// ===========================================================================
+test("HIGH2: the destructive migration refuses a newer-user_version store — never downgrades it, never drops", () => {
+  const path = tempDb("high2-no-downgrade.db");
+  buildLegacyModelCallsStore(path);
+
+  // A FUTURE binary already owns this store past a one-way boundary we don't know.
+  const stamp = new Database(path);
+  stamp.pragma(`user_version = 5`);
+  stamp.close();
+
+  const db = new Database(path);
+  db.pragma("journal_mode = WAL");
+  assert.throws(
+    () => runDestructiveConvergenceMigration(db),
+    /newer than this binary understands/i,
+    "the migration refuses a store past its boundary — a future binary's store is not ours to converge",
+  );
+  assert.equal(db.pragma("user_version", { simple: true }), 5, "user_version is NOT moved backwards");
+  assert.ok(columnNames(db, "model_calls").has("prompt_tokens"), "no column is dropped on a refused store");
+  db.close();
+});
+
+// ===========================================================================
+// LOW 3 — the caller's busy_timeout is restored after the migration returns AND
+// after it throws (from inside the quiesce path, after busy_timeout was set to 0).
+//
+// Mutation intent: the old code unconditionally set busy_timeout=5000 rather than
+// restoring the caller's value — both asserts below (1234 / 4321) fail under it.
+// ===========================================================================
+// ===========================================================================
+// C3 — a simulated pre-FG-568 legacy insert AFTER convergence fails ATOMICALLY:
+// the whole write transaction rolls back, pre-existing rows and store integrity
+// are unchanged (no partial write, no corruption). This is the executable proof
+// of operational-contract point 4.
+//
+// The "pre-FG-568 process" is simulated by issuing the exact INSERT an old binary
+// runs — one that names the now-dropped legacy columns (prompt_tokens/…/cost) —
+// against the converged store, wrapped in the same immediate write transaction the
+// real writer uses. SQLite rejects the unknown columns and rolls the txn back whole.
+// ===========================================================================
+test("C3: a pre-FG-568 legacy insert AFTER convergence fails atomically — no partial write, existing rows intact", () => {
+  const path = tempDb("c3-post-converge-legacy-insert.db");
+  buildLegacyModelCallsStore(path); // seeds one legacy row (req_legacy)
+
+  const db = new Database(path);
+  db.pragma("journal_mode = WAL");
+  db.pragma("foreign_keys = ON");
+
+  // Converge to the fresh shape and stamp the boundary — the overlap window closes.
+  const { dropped } = runDestructiveConvergenceMigration(db);
+  assert.deepEqual(dropped.sort(), ["completion_tokens", "cost", "prompt_tokens"], "precondition: converged the shape");
+  const before = countRows(db, "model_calls");
+  assert.equal(before, 1, "precondition: the pre-existing legacy row survived convergence");
+
+  // A pre-FG-568 process resumes and runs ITS insert — naming the dropped legacy
+  // columns — inside an immediate write transaction, exactly as the old writer does.
+  const legacyInsert = db.transaction(() => {
+    db.prepare(
+      `INSERT INTO model_calls (task_id, request_id, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at, prompt_tokens, completion_tokens, cost)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(null, "req_post_converge_old", "claude-opus-4-7", 9, 4, 1, 0, "2026-03-03T00:00:00Z", 9, 4, 0.0);
+  });
+
+  assert.throws(
+    () => legacyInsert.immediate(),
+    /no column named|has no column|cannot|prompt_tokens/i,
+    "the old-binary insert against the converged shape fails — it names columns convergence dropped",
+  );
+
+  // ATOMIC: the failed transaction wrote NOTHING. The pre-existing row count is
+  // unchanged, the surviving row is byte-for-byte what it was, and the store is
+  // still openable/queryable (no corruption).
+  assert.equal(countRows(db, "model_calls"), before, "the failed legacy insert added no row — the write was atomic");
+  const survivor = db.prepare(`SELECT request_id, input_tokens FROM model_calls`).get() as {
+    request_id: string;
+    input_tokens: number;
+  };
+  assert.equal(survivor.request_id, "req_legacy", "the pre-existing row is untouched by the failed insert");
+  assert.equal(survivor.input_tokens, 10, "the pre-existing row's data is unchanged");
+  assert.equal(db.pragma("integrity_check", { simple: true }), "ok", "the store passes integrity_check — no corruption");
+  assert.equal(db.pragma("user_version", { simple: true }), DESTRUCTIVE_BOUNDARY_VERSION, "the boundary stamp is intact");
+
+  // A FG-568+ dual-shape writer (fresh shape) STILL succeeds against the converged
+  // store — the failed old insert did not wedge the store (contract evidence item 4).
+  assert.doesNotThrow(
+    () =>
+      db.prepare(
+        `INSERT INTO model_calls (task_id, request_id, model, alias, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(null, "req_post_converge_new", "claude-sonnet-4-6", "default", 12, 6, 2, 1, "2026-03-03T00:01:00Z"),
+    "a fresh-shape FG-568+ writer still succeeds after convergence",
+  );
+  assert.equal(countRows(db, "model_calls"), before + 1, "the fresh-shape insert landed one row");
+  db.close();
+});
+
+// ===========================================================================
+// C5 — ABSENCE guard: no opener registry, PID probe, or maintenance lease remains
+// on the ordinary store path. The cross-process opener-registry / maintenance-lease
+// approach was REVERTED (operator decision): it cannot observe an already-deployed
+// old binary that never participates, broadens every open path, and adds
+// stale-marker/PID-reuse failure modes. This asserts the machinery's ABSENCE.
+//
+// A grep-style source guard is the RIGHT tool here (FG-551 allows it for asserting
+// absence of machinery, not runtime behavior): the property is "this code does NOT
+// import or call X", which a runtime test cannot positively demonstrate.
+// ===========================================================================
+test("C5: getDb/applyMigrations carry NO opener-registry, PID-probe, or maintenance-lease machinery", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const dbSource = readFileSync(join(here, "db.ts"), "utf8");
+
+  // db.ts is the sole ordinary-open-path module (getDb, applyMigrations,
+  // assertSchemaVersionSupported, insertUsageRows' host). None of the reverted
+  // machinery may appear as an import or a call anywhere in it. Comments here
+  // DO discuss the reverted approach (point 6 documents its absence), so we scan
+  // only NON-comment lines for the forbidden tokens.
+  const codeLines = dbSource
+    .split("\n")
+    .filter((line) => {
+      const t = line.trim();
+      return t.length > 0 && !t.startsWith("//") && !t.startsWith("*") && !t.startsWith("/*");
+    });
+  const code = codeLines.join("\n");
+
+  const forbidden = [
+    /opener[_-]?registry/i,
+    /maintenance[_-]?lease/i,
+    /\bregisterOpener\b/i,
+    /\bopenerPid\b/i,
+    /process\.kill\s*\(/, // a liveness/PID probe signals pid 0 to test existence
+    /\bkill\s*\(\s*[a-z0-9_]+\s*,\s*0\s*\)/i,
+    /\/proc\//, // reading /proc/<pid> for liveness
+  ];
+  for (const pat of forbidden) {
+    assert.ok(
+      !pat.test(code),
+      `the ordinary open path (db.ts) must not contain reverted store-maintenance machinery: matched ${pat}`,
+    );
+  }
+
+  // And db.ts imports nothing but the store's own modules + node/better-sqlite3 —
+  // in particular, no run-lock / reconcile / liveness module leaks onto the open path.
+  const importLines = codeLines.filter((l) => l.startsWith("import"));
+  for (const imp of importLines) {
+    assert.ok(
+      !/run-lock|reconcile|liveness|opener|lease|heartbeat/i.test(imp),
+      `db.ts open path must not import cross-process liveness/lease machinery: ${imp}`,
+    );
+  }
+});
+
+test("LOW3: the caller's busy_timeout is restored after the migration returns AND after it throws", () => {
+  // --- success path: caller's busy_timeout survives a converging migration. ---
+  const successPath = tempDb("low3-timeout-success.db");
+  buildLegacyModelCallsStore(successPath);
+  const ok = new Database(successPath);
+  ok.pragma("journal_mode = WAL");
+  ok.pragma("busy_timeout = 1234");
+  runDestructiveConvergenceMigration(ok);
+  assert.equal(ok.pragma("busy_timeout", { simple: true }), 1234, "busy_timeout restored to the caller's value after success");
+  ok.close();
+
+  // --- throw path: a held reader forces a quiesce refusal AFTER busy_timeout=0
+  // was set internally; the finally must still restore the caller's value. ---
+  const throwPath = tempDb("low3-timeout-throw.db");
+  buildLegacyModelCallsStore(throwPath);
+  const failing = new Database(throwPath);
+  failing.pragma("journal_mode = WAL");
+  failing.pragma("busy_timeout = 4321");
+
+  const reader = openHeldReader(throwPath);
+  assert.throws(() => runDestructiveConvergenceMigration(failing), /quiesce/i, "a held reader forces a quiesce refusal");
+  assert.equal(failing.pragma("busy_timeout", { simple: true }), 4321, "busy_timeout restored to the caller's value after a throw");
+  reader.exec("ROLLBACK");
+  reader.close();
+  failing.close();
+});
