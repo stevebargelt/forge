@@ -30,7 +30,9 @@ sh: can't create /Users/stevebargelt/code/p5tmp/fg559-p5/proj/.git/hooks/pre-com
     (only run this to confirm the danger; the plan REJECTS this shape)
       *** container REWROTE the host repo main ref ***
       *** container PLANTED a hook in the shared .git/hooks ***
-    now the HOST runs forge's merge-back auto-commit (worktree-lifecycle.ts:274-279):
+    now EMULATE forge's LIVE host-side auto-commit (integration-publisher.ts autoCommitSource,
+    cwd = agent worktree) with a manual host git add/commit — the merge-back path
+    (mergeWorktreeBranch) is DEAD, zero prod call sites (D8); this is NOT it:
       *** HOST EXECUTED THE CONTAINER'S HOOK: PWNED ***
       => confirms P3 in a real container. RW .git is a container->host escape.
 

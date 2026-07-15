@@ -270,8 +270,12 @@ publisher superseded them**, and there is an enforcement test asserting it (`fg4
 
 The FG-530 crash lane kills at `finalizePrimary:between-complete-status-and-event`
 (`src/v2/fg530-crash-worktree.worktree.test.ts:350`) — **after** the terminal status is written, **before**
-cleanup runs. On restart the task is `complete`, so **reconcile's loop `continue`s past it forever, and its
-worktree and branch are never revisited by anything.**
+cleanup runs. On restart the task is `complete`. That **reconcile's loop `continue`s past every non-`running`
+task is VERIFIED code structure** (`reconcile.ts:452`, readable in the source excerpt above). That the crashed
+task's **on-disk worktree and branch therefore leak — never revisited by anything — is INFERENCE from that
+structure, and is NOT YET OBSERVED.** The observed-red that this leak actually occurs is a **HARD GATE at
+AC-5** (§7.1): it must be reproduced on the host **before a line of the reaper is written**. If it does not
+reproduce, D9's premise is wrong and this spec must be re-derived, not implemented.
 
 Separately, both existing `removeWorktreeIfSafe` calls in reconcile (`reconcile.ts:569-571`, `:681-683`) omit
 `provenMerged`, so it defaults false, so the guard at `worktree-lifecycle.ts:187`
@@ -279,7 +283,7 @@ Separately, both existing `removeWorktreeIfSafe` calls in reconcile (`reconcile.
 has no filesystem side-effect at all.**
 
 > **Therefore a reaper bolted into the running-task loop would fix only the orphan case, would look correct, and
-> would leave the demonstrated leak wide open** — the exact adjacent-thing-satisfying-the-assertion failure this
+> would leave the predicted leak wide open** — the exact adjacent-thing-satisfying-the-assertion failure this
 > campaign forbids.
 
 **BINDING: the reaper is a SEPARATE pass over every task of the run whose `worktree_path` is NOT NULL and whose

@@ -86,7 +86,9 @@ docker run --rm -v "$WT:/project" -v "$COMMON:$COMMON" -w /project --entrypoint 
   if printf "#!/bin/sh\necho PWNED > '"$R"'/LOOT\n" > '"$COMMON"'/hooks/pre-commit 2>/dev/null; then
     chmod +x '"$COMMON"'/hooks/pre-commit
     echo "      *** container PLANTED a hook in the shared .git/hooks ***"; fi'
-echo "    now the HOST runs forge's merge-back auto-commit (worktree-lifecycle.ts:274-279):"
+echo "    now EMULATE forge's LIVE host-side auto-commit (integration-publisher.ts autoCommitSource,"
+echo "    cwd = agent worktree) with a manual host git add/commit — the merge-back path"
+echo "    (mergeWorktreeBranch) is DEAD, zero prod call sites (D8); this is NOT it:"
 printf 'more\n' >> "$WT/a.txt"
 git -C "$WT" add . >/dev/null 2>&1
 git -C "$WT" -c user.name=forge -c user.email=forge@local commit -qm "forge: auto-commit" >/dev/null 2>&1
