@@ -261,13 +261,17 @@ The header comment at `validation-contract.ts:12-21` must end up naming the invo
   probe must be **written for the operator to run on the host** and its claim stays INFERENCE until
   executed. The held-invoke honest-return contract is NORMATIVE-UNMET.
 
-### D5 — The failure-class backstop ships even if everything else is cut
+### D5 — The failure-class backstop is the highest-leverage item and lands first
 
 INV-1's declared-finalize-site guard is the highest-leverage item in the cluster. It is a test, not an
-abstraction — no base class, three similar landings beat one premature hierarchy (plan §4). **If only one
-thing ships from this cluster, it is this guard.** It makes D3 and D4 reviewable (a reviewer cannot
-otherwise tell whether a finalize gate is complete) and encodes the seven-site census as executable truth
-that fails loudly rather than rotting.
+abstraction — no base class, three similar landings beat one premature hierarchy (plan §4). **This is a
+sequencing/leverage claim, not an acceptance claim: the guard is the single most valuable item and the one
+to land first — it does not, on its own, satisfy the cluster's acceptance.** Acceptance remains the full set
+of §7 normative conditions, each unconditional in its own right (e.g. N-8's FG-566 provisioning ceiling is
+required regardless of what else ships); nothing in this cluster's acceptance is discharged by the guard
+alone. Its leverage is that it makes D3 and D4 reviewable (a reviewer cannot otherwise tell whether a
+finalize gate is complete) and encodes the seven-site census as executable truth that fails loudly rather
+than rotting — which is why it is prioritized first, not why it stands in for the rest.
 
 ---
 
