@@ -33,7 +33,7 @@ export const DESTRUCTIVE_BOUNDARY_VERSION = 1;
 // the current insertUsageRows (which omits them) throw. Converging the two shapes
 // is a real problem, but a CONVERGENCE one, not an every-open one — so the drop
 // lives here, off the ordinary open path, behind an explicit quiesce gate.
-const LEGACY_MODEL_CALLS_COLUMNS = ["prompt_tokens", "completion_tokens", "cost"] as const;
+export const LEGACY_MODEL_CALLS_COLUMNS = ["prompt_tokens", "completion_tokens", "cost"] as const;
 
 // Idempotent ALTERs for existing DBs whose `runs` table predates a column added
 // in schema.ts. New DBs get the column from CREATE TABLE; existing DBs get it

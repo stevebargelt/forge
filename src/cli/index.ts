@@ -46,6 +46,7 @@ import { registerCampaign } from "./commands/campaign.js";
 import { registerReadiness } from "./commands/readiness.js";
 import { registerRecordHostVerification } from "./commands/record-host-verification.js";
 import { registerPublish } from "./commands/publish.js";
+import { registerStore } from "./commands/store.js";
 import { loadNotifyEnv } from "../notify/load-env.js";
 
 // Populate process.env from ~/.forge/notify.env before any command runs. Shell
@@ -109,6 +110,7 @@ registerCampaign(program);
 registerReadiness(program);
 registerRecordHostVerification(program);
 registerPublish(program);
+registerStore(program);
 
 program.parseAsync(process.argv).catch((err) => {
   console.error(`forge: ${(err as Error).message}`);
