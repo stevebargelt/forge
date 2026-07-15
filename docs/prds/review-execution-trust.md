@@ -151,12 +151,12 @@ environment fault.
 There are **two independent questions**; conflating them is what produced the stale comment (plan §1.2).
 
 **(a) Is the verification outcome HONEST? — ships unconditionally, first, and alone.**
-- Consult `classifyRemoteTrust` **before** probing CI, not after (VERIFIED — the function exists and
-  computes `local_only` at `review-loop.ts:465`, but is consulted only at `:1078` for the closeability
+- Consult `resolveReviewedTipTrust` **before** probing CI, not after (VERIFIED — the function exists and
+  computes `local_only` at `src/cli/commands/review-loop.ts:465`, but is consulted only at `:1040` for the closeability
   verdict). If HEAD is `local_only`, **skip the CI probe entirely** — do not poll, do not wait out
   `CI_WAIT_TIMEOUT` for a check-run that cannot exist.
 - Emit a **distinct `local_only` verification outcome**, separate from generic "CI unavailable"
-  (`review-loop.ts:620`), naming the unpushed SHA(s) and the one recovery instruction.
+  (`src/cli/commands/review-loop.ts:620`), naming the unpushed SHA(s) and the one recovery instruction.
 - **`extendedDelegatedToCi` must be FALSE when the tip is local-only** (VERIFIED — unconditionally
   `!ctx.localExtended` at `:621`). Extended coverage on a local-only fixer commit is **absent, not
   delegated.** Say so.
@@ -385,7 +385,7 @@ fabricated red**. Where the plan asserted a red for an unimplemented norm, this 
   output, structured/`--json` output, run notes, and dashboard — with, at each, NO statement or implication
   that a reviewer reviewed anything (verification blocked reviewer dispatch: zero rounds, reviewer never
   invoked).** *Verification:* exercise the readiness gate and the preserved exit code at all three local-run
-  sites (`review-loop.ts:544`/`:622`/`:853`); then, on the same env-unavailable run, assert the distinction
+  sites (`src/cli/commands/review-loop.ts:544`/`:622`/`:853`); then, on the same env-unavailable run, assert the distinction
   **per surface** — (i) **CLI human output** names `verification_environment_unavailable` (not "verification
   failed"), carries the one recovery instruction, and contains no "reviewed"/round-consumed language; (ii)
   **structured `--json`** emits the env-unavailable outcome as a machine value distinct from
@@ -402,7 +402,7 @@ fabricated red**. Where the plan asserted a red for an unimplemented norm, this 
   control arm (plan §2.1) stays green; a genuine code failure is never reclassified as environment-unavailable.
 - **N-5 (D2, `local_only` honesty).** *Acceptance:* after a round-1 fixer commit, round 2 does **not**
   probe/poll CI for the local-only SHA, reports `local_only` (not generic "CI unavailable"), and does not
-  claim extended was delegated. *Verification:* drive the loop; assert the pre-CI `classifyRemoteTrust`
+  claim extended was delegated. *Verification:* drive the loop; assert the pre-CI `resolveReviewedTipTrust`
   consult and `extendedDelegatedToCi === false`.
 - **N-6 (INV-5, `--push-fixes`) — CONDITIONAL; NOT part of this cluster's shipping acceptance.**
   *Acceptance:* **IF/when `--push-fixes` is implemented** (the deferred opt-in of D2(b), gated on OQ-2),
@@ -467,12 +467,12 @@ graph TD
   RL["review-loop verification<br/>HOST execFileSync, cwd = ctx.projectDir"]
   RL -->|"exit 127 = env fault, DISCARDED"| VF["verification_failed<br/>(reviewer never dispatched, round burned) — FG-566"]
   RL -->|"fixer commits, NEVER pushes"| LO["local-only SHA → CI can never exist — FG-541"]
-  LO -.->|"classifyRemoteTrust already knows — asked too late"| RL
+  LO -.->|"resolveReviewedTipTrust already knows — asked too late"| RL
   RL -.->|"INV-4: must run in ctx.projectDir<br/>or covering-evidence identity breaks"| HV[("host_verifications<br/>keyed on project_dir — READ-ONLY")]
 ```
 
 The dashed `invoke → reconcile` edge is the load-bearing claim: it is the path that walks around the D4
-fix (INV-1 sweeper-declines closes it). The dashed `classifyRemoteTrust` edge is D2's: the answer is
+fix (INV-1 sweeper-declines closes it). The dashed `resolveReviewedTipTrust` edge is D2's: the answer is
 already computed, just not in time. The dashed `host_verifications` edge is INV-4: verifying anywhere other
 than `ctx.projectDir` manufactures false gate evidence.
 
