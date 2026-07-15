@@ -359,9 +359,14 @@ outcome this child decides (the row is OWNED even while that outcome is open).
   option (i) the held child is first moved to a **terminal** status (so A-FG356's `{complete, failed}` predicate
   matches) AND its worktree must satisfy **A-FG356's retain predicate** before reap (dirty / retain-set kind ⇒
   retained, never silently discarded — I-6); under option (ii) the direct path honors the same retain predicate.
-- **FILES / SCHEMAS (all VERIFIED existing; no new file):** the run-end / abandon finalize path =
+- **FILES / SCHEMAS (all VERIFIED existing; no new file):** the run-END finalize path =
   `src/v2/run-finalize.ts:31` `finalizeRunIfSettled` (called on the settled-no-dispatch run-end at
-  `src/v2/runNext.ts:220`, imported `runNext.ts:38`); the A-FG356 terminal-reaper hook (option (i)) = the tail of
+  `src/v2/runNext.ts:220`, imported `runNext.ts:38`); the ABANDON transition (the other acceptance arm) =
+  `forge cancel --abandon-run` at `src/cli/commands/cancel.ts:115` and `:166`
+  (`updateRunStatus(task.runId/run.id, "abandoned")`), which writes the terminal `abandoned` status via
+  `updateRunStatus` in `src/store/runs.ts:181-193` — guarded against resurrection by the FG-484
+  `abandoned → complete` refusal at `runs.ts:177` (`RunStatus = "active" | "complete" | "abandoned"`, terminal /
+  non-resumable); the A-FG356 terminal-reaper hook (option (i)) = the tail of
   `src/v2/reconcile.ts:393` `reconcileRun` (`finalizeOrphanedPrimaries` `:1361`); reclaim =
   `src/v2/worktree-lifecycle.ts:179` `removeWorktreeIfSafe` (already invoked from reconcile at
   `reconcile.ts:570/682/1003`). Reuses the **existing**
