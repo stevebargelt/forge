@@ -1,5 +1,16 @@
 # Foundations Lane B — REVIEW TRUST. Architecture + plan (FG-566 · FG-541 · FG-524 · FG-525)
 
+> **STATUS — SUPERSEDED DISCOVERY INPUT.** Binding contract is `docs/prds/review-execution-trust.md`; where
+> they differ, **the PRD GOVERNS.** This document is evidence/architecture/probes, not a normative surface.
+> **Known supersessions:**
+> - **(a) Red-baseline method.** The PRD's **four-label method** replaces this plan's blanket "every story has
+>   a baseline red." An unbuilt contract (e.g. B0's absent finalize-site guard) is **NORMATIVE-UNMET** — it
+>   gets an acceptance condition + verification method, **NOT** a "red today by construction" fabricated red.
+> - **(b) Finalize-site enumeration unit.** The unit is the PRD's **lineage-classified finalize EVENT**
+>   (INV-1), **not** a primitive-call-site allowlist. Because `finalizePrimary` collapses the gated primary
+>   and the exempt aggregate onto one `markTaskComplete` write (`runNext.ts:1010`), a call-site allowlist
+>   cannot express the gate's classification; the PRD enumerates finalize EVENTS keyed on lineage/role.
+
 **STOP FOR REVIEW. No children filed. No implementation. No source touched.**
 
 **Baseline:** `185afc3` (origin/main). **Runtime of every probe:** node **v24.18.0**, ABI (`NODE_MODULE_VERSION`)
@@ -24,8 +35,12 @@ The root cause is one line of architecture, and it is not any of the four ticket
 > **VERIFIED FACT — enforcement lives at the CALLER, not at the PRIMITIVE.** `evaluateValidationContract`
 > (`src/v2/validation-contract.ts:49`) is invoked by exactly one function, `holdIfValidationContractFails`
 > (`runNext.ts:967`), which is itself called from exactly **one** site: `runNext.ts:681`, inside
-> `dispatchSingleStep`. `markTaskComplete` (`src/store/tasks.ts:126`) has **ten** callers. Nine of them are
-> ungated by construction.
+> `dispatchSingleStep`. `markTaskComplete` (`src/store/tasks.ts:126`) has **fourteen** production callers
+> (declaration and tests excluded): `runNext.ts:936`, `:1010`, `:1381`, `:1661`, `:2541`; `invoke.ts:768`,
+> `:813`; `reconcile.ts:779`, `:880`; `gate.ts:209`; `design.ts:138`, `:146`, `:150`; `claude.ts:404`. Only
+> the primary finalize (reached through `:1010` from `dispatchSingleStep`) is behind the validation gate; the
+> rest are ungated by construction. *(Count corrected from an earlier "ten"; the primitive-call-site framing
+> here is superseded by the PRD's lineage-classified finalize-EVENT unit — INV-1. See the header.)*
 
 So a new finalize path is **ungated by default**. The system fails **open**. FG-524 and FG-525 are not two bugs;
 they are two *instances* of a defaulting rule, and the instances will keep coming until the default is inverted.
@@ -579,13 +594,21 @@ So the answer to "one primitive?" is: **one decision, N landings** — which is 
 the part that matters.
 
 **The actual fix for the failure class — and it is small, which is why it is the right one.** The defect is that
-`markTaskComplete` (`tasks.ts:126`) is a **fail-OPEN** primitive: ten callers, one gate. Inverting that default is
+`markTaskComplete` (`tasks.ts:126`) is a **fail-OPEN** primitive: fourteen callers, one gate. Inverting that default is
 worth more than all four tickets:
 
 > **Make the finalize sites DECLARED, and make an ungated one an explicit, greppable, reviewable act.**
 > The cheapest mechanism that actually holds: **a guard test that enumerates every `markTaskComplete` /
 > `markTaskRecovered` call site in `src/` and FAILS on any site not on an annotated allowlist** — each entry
 > stating *gated* or *why exempt* (human override, non-implementer role, sweeper-declines).
+
+> **[SUPERSEDED → PRD INV-1.]** The enumeration unit above (a `markTaskComplete`/`markTaskRecovered`
+> **call-site** allowlist) is replaced by the PRD's **lineage-classified finalize EVENT**. `finalizePrimary`
+> funnels the gated primary (`:838`), the exempt fanout aggregate (`:1955`), and reconcile (`:2180`) through
+> one terminal write (`runNext.ts:1010`), so a guard placed at the call site is **blind to which class it is
+> finalizing** and cannot express the gate. Classify each finalize event by the lineage/role the FG-523
+> evaluator already keys on (`isInvokeLikeRun`/`taskHasPipelineFinalize`, `IMPLEMENTER_ROLES`), not by the
+> store function called.
 
 This is a **machine backstop for the failure class**, not a fifth patch. It is what stops FG-524/FG-525 recurring
 as FG-6xx when someone adds finalize site #11 next quarter — the *same* way they were added as sites #2 and #4:
@@ -604,7 +627,7 @@ graph TD
     EV["evaluateValidationContract<br/>validation-contract.ts:49"]
   end
 
-  subgraph Gated["GATED (1 of 10)"]
+  subgraph Gated["GATED (1 of 14)"]
     P["primary finalize<br/>runNext.ts:681 → :838"]
   end
 
@@ -647,13 +670,20 @@ time to be useful.
 Ordered. Each is independently implementable and reviewable. Each names a falsification **observable RED against
 `185afc3`**. FG-566's five required falsifications are carried as **F1–F5**, verbatim in intent.
 
+> **[SUPERSEDED → PRD four-label method.]** The blanket claim that **every** story has a baseline red is
+> replaced by the PRD's acceptance method: a **factual defect / reachable gap** requires an observed-red; a
+> contract this cluster *establishes but the system does not yet implement* is **NORMATIVE-UNMET** — it gets
+> an acceptance condition + verification method and **no fabricated red.** In particular B0's absent
+> finalize-site guard and B4's re-aggregation are NORMATIVE-UNMET, not "red today by construction" (the guard
+> can only "go red" because it has not been written yet, which is not evidence of a defect). See PRD §7 / §2.
+
 | # | Story | Scope | Depends on | Falsification (must be RED at baseline) |
 |---|---|---|---|---|
-| **B0** | **Finalize-site census guard** *(§4 — the failure-class backstop)* | The allowlist guard test over every `markTaskComplete`/`markTaskRecovered` call site. **No behaviour change.** Ships the census of §1.1 as executable truth. | — | **F0:** add an 11th, unannotated `markTaskComplete` call site → the guard **must** go red. **Red today by construction:** no such guard exists, so sites 2–7 are invisible. *Mutant: allowlist-by-wildcard → F0 must still redden.* |
+| **B0** | **Finalize-site census guard** *(§4 — the failure-class backstop)* | ~~The allowlist guard test over every `markTaskComplete`/`markTaskRecovered` call site.~~ **[SUPERSEDED → PRD INV-1:** the unit is the **lineage-classified finalize EVENT**, not a call-site allowlist — `finalizePrimary` collapses the gated primary and the exempt aggregate onto one `markTaskComplete` write (`:1010`), so a call-site allowlist cannot express the gate.**]** **No behaviour change.** Ships the census of §1.1 as executable truth. | — | **F0:** add an unannotated finalize path → the guard **must** go red. ~~**Red today by construction:** no such guard exists.~~ **[SUPERSEDED → PRD: NORMATIVE-UNMET, not a baseline red** — an unbuilt guard "goes red" only because it has not been written, which is not defect evidence; it gets an acceptance condition (PRD §7 N-1), not a fabricated red.**]** *Mutant: allowlist-by-wildcard → F0 must still redden.* |
 | **B1** | **FG-541 honesty** *(no push; unconditional)* | Consult `classifyRemoteTrust` **before** the CI probe; distinct `local_only` verification outcome; `extendedDelegatedToCi=false` when local-only; fix the comment at `:848-851`. **No push authority.** | — | **F6:** fixer commits in round 1 → round 2 **must not** probe/poll CI for the local-only SHA, **must** report `local_only` (not generic "CI unavailable"), and **must not** claim extended was delegated. **Red today** (§2.2). *Mutant: restore the unconditional `extendedDelegatedToCi` → F6 reddens.* |
 | **B2** | **FG-566 detect + classify** *(no provisioning yet)* | Readiness pre-check at **all three** local-run sites (`:544`, `:622`, `:853`); **stop discarding the exit code** in `makeDefaultRunner`; `verification_environment_unavailable` as a **zero-round** loop outcome; distinguish it on CLI / `--json` / run note / events / dashboard. Reuse `failure-kind.ts:151` + forge-test's reason vocabulary. | — | **F2:** forced install failure → stops **before round 1** as `verification_environment_unavailable`, **no** reviewer/fixer dispatch. **F3:** deps absent **or built for an incompatible ABI** → not accepted as ready; no wall of false product-test failures. **F4:** trusted covering CI evidence → **no** provisioning, reuse semantics unchanged (*guards the ordering constraint*). **F5:** a **real** typecheck/test regression in a **prepared** env → ordinary verification/fixer policy, **unchanged** (*the anti-laundering test*). **All red today** (§2.1). |
 | **B3** | **FG-525 — gate `invoke`, AND its crash-recovery bypasses** | The evaluator at `invoke.ts:813`; held invoke returns `awaiting_gate` + non-zero exit; **and** `reconcile.ts:779`/`:880` + `recover.ts:457` decline to complete contraband (FG-479's `failPipelineUnfinalized` shape). Correct `validation-contract.ts:15-21`. | B0 | **F7:** implementer invoke, `status:complete`, no `tests_run`, no waiver → **held**, not complete. **Red today (EXECUTED, §2.3 ARM 3).** **F9 — THE ONE THAT MATTERS:** the same invoke, container orphaned → reconciled / `recover --continue` → **must NOT complete**. **This is the bypass of the fix.** *Currently INFERENCE only (§2.4) — B3 must EXECUTE it.* *Mutant: gate only `invoke.ts:813` → F9 reddens.* |
-| **B4** | **FG-524 — gate the fanout child AND make re-entry re-aggregate** | Evaluator at the child finalize (`runNext.ts:2541`); `held` variant on `ChildOutcome` (`:2353`); aggregation learns it (`:1762`/`:1791`/`:1807`); **parent holds, publication withheld, reds do not run**; `failure_mode:"continue"` must not swallow a hold; **fanout re-entry RE-AGGREGATES** (`:1668-1671`); held child's worktree retained **intentionally**. | B0; **coordinate with FG-527** (§7) | **F8:** fanout implementer child, no `tests_run` → child **held**, **parent held**, **nothing published**. **Red today (EXECUTED, §2.3 ARM 2 — child *and* parent completed).** **F10 — THE WEDGE:** advance the held child → `forge run next` → parent **re-aggregates, publishes, completes**. **Red today:** `:1671` makes the re-drive a no-op, so *the gate alone wedges the fanout permanently.* **F11:** `failure_mode:"continue"` must **not** step over a held child. |
+| **B4** | **FG-524 — gate the fanout child AND make re-entry re-aggregate** | Evaluator at the child finalize (`runNext.ts:2541`); `held` variant on `ChildOutcome` (`:2353`); aggregation learns it (`:1762`/`:1791`/`:1807`); **parent holds, publication withheld, reds do not run**; `failure_mode:"continue"` must not swallow a hold; **fanout re-entry RE-AGGREGATES** (`:1668-1671`); held child's worktree retained **intentionally**. | B0; **coordinate with FG-527** (§7) | **F8:** fanout implementer child, no `tests_run` → child **held**, **parent held**, **nothing published**. **Red today (EXECUTED, §2.3 ARM 2 — child *and* parent completed).** **F10 — THE WEDGE:** advance the held child → `forge run next` → parent **re-aggregates, publishes, completes**. **[SUPERSEDED → PRD: NORMATIVE-UNMET, not a baseline red** — there is no held-child state at baseline, so the wedge cannot be observed red without first building the gate; the `:1671` no-op is a VERIFIED FACT feeding the design, not a falsification (PRD §2, D3, §7 N-7).**]** `:1671` makes the re-drive a no-op, so *the gate alone wedges the fanout permanently.* **F11:** `failure_mode:"continue"` must **not** step over a held child. |
 | **B5** | **FG-566 provision** *(the ceiling)* | Install `node_modules` **into `ctx.projectDir`** (preserving the `project_dir`-keyed evidence model — §3), lockfile-keyed, **host-side, docker-free**, bounded + crash-safe (a failed/interrupted install can **never** be marked ready). Runtime **declared and recorded**, never searched. **Provision only into a Forge-owned workspace; otherwise detect + refuse.** | **B2**; **re-validate against FG-555** (§8) | **F1:** fresh standalone clone, no `node_modules`, forced onto local fallback → prepares deps, runs **real** verification, dispatches the reviewer **as round 1**. **Red today (EXECUTED, §2.1: reviewer dispatched 0×, both rounds burned).** *Mutant: mark ready before the install exits 0 → crash-safety test reddens.* |
 
 **Ordering and parallelism.**
