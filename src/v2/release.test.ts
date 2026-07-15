@@ -28,11 +28,15 @@ test("FG-569 entry: canonicalizes $0 through symlinks (a promoted release is rea
   // MUST-FIX 1: $0 is the SYMLINK path when forge is on PATH as a current/PATH
   // shim; resolve the chain to the real release file before deriving $here.
   assert.ok(entry.includes("while [ -L \"$p\" ]"), "follows a symlink chain to the real path");
-  assert.ok(entry.includes("readlink -- \"$p\""), "uses readlink to canonicalize each hop");
+  assert.ok(entry.includes("readlink \"$p\""), "uses portable one-arg readlink to canonicalize each hop");
+  // Portability: `readlink -f` and `readlink --` are GNU extensions absent on
+  // BSD/macOS, so the entry must use neither — a leading-dash path is disarmed
+  // with a ./ prefix, not --.
+  assert.ok(!entry.includes("readlink -"), "uses no GNU-only readlink flag (-f / --)");
   // readlink must be reached ONLY inside the symlink loop, so a DIRECT invocation
   // under a node-free PATH never runs an external before the pinned interpreter.
   const beforeExec = entry.slice(0, entry.indexOf("exec '"));
-  assert.equal(beforeExec.match(/readlink -- /g)?.length, 1, "the readlink invocation appears once, guarded by the [ -L ] loop");
+  assert.equal(beforeExec.match(/readlink "/g)?.length, 2, "readlink is invoked only inside the [ -L ] loop (the dash-guarded case, two forms)");
 });
 
 test("FG-569 entry: a space in the interpreter path cannot split the exec argv", () => {

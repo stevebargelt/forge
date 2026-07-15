@@ -22,10 +22,12 @@
 # — not the repo — and node dies with ERR_MODULE_NOT_FOUND. Canonicalize the chain
 # to the real file (a POSIX readlink loop) before deriving the source root. readlink
 # runs ONLY when $0 is actually a symlink, so a direct invocation stays PATH-free.
+# Plain one-arg readlink (no -f, no --, both GNU-only) is the portable form; a
+# leading-dash path is disarmed with a ./ prefix instead of the GNU-only --.
 p=$0
 case "$p" in */*) ;; *) p=$(command -v "$p") ;; esac
 while [ -L "$p" ]; do
-  t=$(readlink -- "$p")
+  case "$p" in -*) t=$(readlink "./$p") ;; *) t=$(readlink "$p") ;; esac
   case "$t" in /*) p=$t ;; *) p=${p%/*}/$t ;; esac
 done
 case "$p" in */*) d=${p%/*} ;; *) d=. ;; esac
