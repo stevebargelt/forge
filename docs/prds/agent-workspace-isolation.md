@@ -318,8 +318,11 @@ reaper that removes the directory and leaves the ref has **half-fixed FG-356**: 
 
 > **For any agent whose `/project` is writable (blue, provisioner, any future rw class), forge MUST treat the
 > worktree-local `.git` pointer file, its resolved `gitdir`, and every git config/attribute it can name as
-> ATTACKER-CONTROLLED — and the host MUST execute NO worktree-supplied git hook, filter, or attribute-driven
-> command when it operates in that worktree.**
+> ATTACKER-CONTROLLED — and the host MUST execute NO exec driver DEFINED in that agent-writable git config
+> (worktree-supplied hook, filter, textconv, fsmonitor, or merge driver) when it operates in that worktree. The
+> one exec path this does NOT forbid: a LEGIT driver defined in the trusted `:ro` common config, triggered on
+> agent-chosen tracked paths via an agent-written `.gitattributes` — attacker-influenced input to operator-trusted
+> code — which stays OPEN/accepted as the OQ-7 residual (§D10 residual table, OQ-7), not closed here.**
 
 **Why D2 does not already cover this — the defect in the prior decision.** D2 mounts the parent **common** `.git`
 `:ro`, and D2/AC-2 proved that closes the *common-dir* hook-plant escape. But a **linked worktree's root `.git`
