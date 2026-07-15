@@ -29,7 +29,9 @@ import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, chmodSync } from "node:fs";
 import { dirname, join, isAbsolute, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
+import { findGitRoot } from "../util/git-root.js";
 
 export const RELEASE_MANIFEST_NAME = "forge-release.json";
 export const RELEASE_ENTRY_NAME = "forge";
@@ -40,7 +42,16 @@ export const RELEASE_ENTRY_SOURCE = "src/cli/index.ts";
 export type ReleaseManifest = {
   schema: 1;
   id: string;
+  // The commit of the --source checkout, BOUND to the shipped src/+package.json+
+  // lockfile bytes: buildRelease refuses a dirty source, so this commit always
+  // describes what was copied. (FG-569 GAP 2 — a dirty source made this lie.)
   commit: string;
+  // The RUNNING builder's own commit — the checkout that produced the generated
+  // entry (renderEntry) and loader (LOADER_SHIM) bytes. Distinct from `commit` so a
+  // release built by builder A from a different --source checkout B never presents
+  // B's commit as if it also produced the entry/loader. Equal to `commit` on the
+  // normal self-build (builder and source are the same checkout).
+  builderCommit: string;
   // The ABSOLUTE interpreter the entry execs — the whole point of the closure is
   // to depend on NO PATH lookup. Recorded from the building interpreter's
   // process.execPath; a release may only ever name the interpreter that built it.
@@ -114,6 +125,32 @@ function gitCommit(sourceRoot: string): string {
     return execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceRoot, encoding: "utf8" }).trim();
   } catch (e) {
     throw new Error(`forge release: cannot read the commit SHA at ${sourceRoot} (not a git repo?) — ${(e as Error).message}`);
+  }
+}
+
+/** The git root of the RUNNING builder — this module's OWN checkout, derived from
+ *  its file location, not from --source. The entry/loader bytes are generated here,
+ *  so the builder's identity (commit, dirty-state) is recorded independently of the
+ *  --source checkout. (FG-569 GAP 2.) */
+function builderRoot(): string {
+  return findGitRoot(dirname(fileURLToPath(import.meta.url)));
+}
+
+/** Refuse to build when the SHIPPED source paths of `root` are dirty relative to
+ *  HEAD, so the recorded commit can never lie about the copied bytes (FG-569 GAP 2).
+ *  Only what actually goes into the release is checked — src/, package.json, and the
+ *  selected lockfile; node_modules is install OUTPUT, bound separately to the lockfile
+ *  (assertShippedClosureMatchesLockfile), not part of the commit's source identity.
+ *  `label` names which checkout (source / builder) so the refusal is actionable. */
+function assertCommitDescribesTree(root: string, lockfileName: string, label: string): void {
+  let porcelain: string;
+  try {
+    porcelain = execFileSync("git", ["status", "--porcelain", "--", "src", "package.json", lockfileName], { cwd: root, encoding: "utf8" });
+  } catch (e) {
+    throw new Error(`forge release: cannot check the ${label} tree at ${root} for uncommitted changes (not a git repo?) — ${(e as Error).message}`);
+  }
+  if (porcelain.trim() !== "") {
+    throw new Error(`forge release: refusing to build a release from a dirty ${label} at ${root} — src/, package.json, or ${lockfileName} has uncommitted changes relative to HEAD, so the manifest commit would not describe the shipped bytes. Commit or stash these changes, then rebuild:\n${porcelain.trimEnd()}`);
   }
 }
 
@@ -265,15 +302,31 @@ function readTarFiles(tarball: Buffer): Map<string, Buffer> {
  *  npm content cache (keyed by integrity — the authentic bytes), so this ties the
  *  SHIPPED content to the lockfile, not merely the lockfile file to itself.
  *
+ *  An install-script package (better-sqlite3, esbuild, sharp) is NOT skipped: the
+ *  loop iterates the TARBALL's files and binds each, and a package's genuinely
+ *  install-generated artifacts (the compiled better_sqlite3.node, a downloaded
+ *  platform binary) are naturally unbound because they are not tarball entries —
+ *  so an install-script package's tarball-owned SOURCE (lib/index.js, package.json)
+ *  is still byte-bound, which is where a supply-chain tamper would hide. Verified
+ *  against this closure: better-sqlite3's 49 and sharp's 33 tarball files are all
+ *  byte-identical on disk; esbuild rewrites exactly one tarball-owned file (see
+ *  INSTALL_REWRITTEN_ALLOWANCE below).
+ *
  *  Carve-outs, each principled — NOT a weakening to "just tsx + better-sqlite3":
  *   - Packages absent from node_modules (optional / other-platform deps like
  *     @esbuild/darwin-*) are not shipped, so nothing to bind.
- *   - `hasInstallScript` packages (better-sqlite3, esbuild, fsevents, sharp) mutate
- *     their OWN files at install time (a built .node, a downloaded platform binary),
- *     so their on-disk bytes are post-install artifacts, not the tarball's — tarball
- *     equality does not hold for them BY DESIGN. better-sqlite3 is separately proven
- *     to load under the pinned interpreter (assertReleaseCloses); the rest are the
- *     only closure members not content-bound, a handful out of ~60+ verified. */
+ *   - `link` (workspace/local link — no tarball) and `!integrity` (nothing to
+ *     verify against) are the ONLY package-level skips. */
+
+// esbuild's postinstall (install.js → maybeOptimizePackage) renames the platform-
+// native binary over this one tarball-owned placeholder, so its on-disk bytes
+// legitimately differ from the tarball BY DESIGN — like a generated artifact, except
+// it happens to share a path the tarball also ships. It is the ONLY tarball-owned
+// file any install-script package in this closure rewrites. The allowance is EXACTLY
+// this package + path — never a directory or glob — so every other file in esbuild
+// (and everywhere else) stays byte-bound.
+const INSTALL_REWRITTEN_ALLOWANCE = new Set<string>(["node_modules/esbuild/bin/esbuild"]);
+
 export function assertShippedClosureMatchesLockfile(root: string, lockfileName: string): void {
   const lockPath = join(root, lockfileName);
   if (!existsSync(lockPath)) {
@@ -285,7 +338,7 @@ export function assertShippedClosureMatchesLockfile(root: string, lockfileName: 
 
   for (const [key, meta] of Object.entries(packages)) {
     if (!key.startsWith("node_modules/")) continue; // the "" root + workspace entries
-    if (meta.link || !meta.integrity || meta.hasInstallScript) continue;
+    if (meta.link || !meta.integrity) continue;
     const pkgDir = join(root, key);
     if (!existsSync(pkgDir)) continue; // not shipped (optional / other-platform)
 
@@ -302,6 +355,7 @@ export function assertShippedClosureMatchesLockfile(root: string, lockfileName: 
       // e.g. `node v22.19/` for @types/node) on extract — strip the first segment.
       const rel = entryName.replace(/^[^/]*\//, "");
       if (!rel || rel.endsWith("/")) continue;
+      if (INSTALL_REWRITTEN_ALLOWANCE.has(`${key}/${rel}`)) continue;
       const shipped = join(pkgDir, rel);
       if (!existsSync(shipped)) {
         throw new Error(`forge release: shipped closure does not match the lockfile — ${key}/${rel} is pinned by package-lock.json but MISSING from the shipped node_modules. The installed tree is incomplete or was tampered; refusing to ship.`);
@@ -412,8 +466,23 @@ export function buildRelease(opts: BuildReleaseOptions): BuildReleaseResult {
   // release survives the refusal.
   assertClosureLoads(sourceRoot);
 
+  // FG-569 (GAP 2): bind the recorded commit(s) to the shipped bytes. Refuse a dirty
+  // SOURCE (its src/+package.json+lockfile are what gets copied) so `commit` cannot
+  // lie, and record the BUILDER's own identity separately — the entry/loader bytes are
+  // generated by THIS forge, not by --source. On a self-build the builder IS the source
+  // checkout, so one dirty-check covers both and the two commits are equal.
   const now = opts.now ?? new Date();
+  assertCommitDescribesTree(sourceRoot, lockfileName, "source");
   const commit = gitCommit(sourceRoot);
+  const bRoot = builderRoot();
+  let builderCommit: string;
+  if (bRoot === sourceRoot) {
+    builderCommit = commit;
+  } else {
+    const builderLockfile = selectLockfile(bRoot);
+    assertCommitDescribesTree(bRoot, builderLockfile, "builder");
+    builderCommit = gitCommit(bRoot);
+  }
   const rand = opts.rand ?? Math.random().toString(36).slice(2, 8);
   const id = `release-${commit.slice(0, 7)}-${rand}`;
   const interpreter = process.execPath;
@@ -445,6 +514,7 @@ export function buildRelease(opts: BuildReleaseOptions): BuildReleaseResult {
       schema: 1,
       id,
       commit,
+      builderCommit,
       interpreter,
       abi: process.versions.modules,
       nodeVersion: process.version,

@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, cpSync, writeFileSync, existsSync, lstatSync, readdirSync, rmSync, symlinkSync, appendFileSync, readFileSync, chmodSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildRelease, assertReleaseCloses, thawReleaseTree, renderEntry, RELEASE_BINDING_REL, RELEASE_LOADER_NAME, RELEASE_MANIFEST_NAME, type BuildReleaseResult } from "./release.js";
@@ -24,8 +25,29 @@ const sourceRoot = findGitRoot(process.cwd());
 let workspace: string;
 let built: BuildReleaseResult;
 
+/** Commit a buildable tree's SHIPPED source paths (src/, package.json, and any
+ *  lockfile) so HEAD describes them — buildRelease now refuses a dirty source
+ *  (FG-569 GAP 2). node_modules stays untracked: it is install output bound to the
+ *  lockfile separately, not part of the commit's source identity (and it is huge).
+ *  A no-op when the tree is already clean (CI runs on a committed checkout). */
+function commitSource(root: string): void {
+  const paths = ["src", "package.json"].filter((p) => existsSync(join(root, p)));
+  for (const lf of ["package-lock.json", "npm-shrinkwrap.json"]) {
+    if (existsSync(join(root, lf))) paths.push(lf);
+  }
+  execFileSync("git", ["add", "--", ...paths], { cwd: root });
+  if (spawnSync("git", ["diff", "--cached", "--quiet"], { cwd: root }).status !== 0) {
+    execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "source snapshot"], { cwd: root });
+  }
+}
+
 before(() => {
   workspace = mkdtempSync(join(tmpdir(), "fg569-rel-"));
+  // FG-569 GAP 2: a release binds its commit to the shipped source, so the tree must
+  // be committed before it can build. CI runs on a committed checkout (no-op here);
+  // under forge-test the scratch carries this run's synced-but-uncommitted edits, so
+  // snapshot them first — mirroring the clean committed state CI builds against.
+  commitSource(sourceRoot);
   // The one full build the whole file shares (copying node_modules is the slow
   // part). outDir is OUTSIDE sourceRoot so the copy never recurses into itself.
   built = buildRelease({ sourceRoot, outDir: join(workspace, "release") });
@@ -182,6 +204,7 @@ test("FG-569 closure: a symlinked node_modules dependency is DEREFERENCED into t
   writeFileSync(join(external, "index.js"), `module.exports = "from the external host location";\n`);
   writeFileSync(join(external, "package.json"), `{"name":"linked-dep","main":"index.js"}`);
   symlinkSync(external, join(src, "node_modules", "linked-dep"));
+  commitSource(src);
 
   const out = join(workspace, "symlink-release");
   buildRelease({ sourceRoot: src, outDir: out });
@@ -227,6 +250,7 @@ test("FG-569 lockfile binding (RED pre-fix, GREEN after): a content-mutated inst
   // authentic tarball to compare each shipped dependency against.
   for (const f of ["package.json", "package-lock.json"]) cpSync(join(sourceRoot, f), join(src, f));
   cpSync(join(sourceRoot, "node_modules"), join(src, "node_modules"), { recursive: true, dereference: true });
+  commitSource(src);
 
   // Untampered: the SAME tree builds cleanly — the binding never false-refuses a
   // node_modules that genuinely matches its lockfile.
@@ -323,6 +347,7 @@ function makeLockSource(label: string): string {
 test("FG-569 Finding 4 (lockfile selection): a package-lock-only source builds and binds+manifests against package-lock.json", () => {
   const src = makeLockSource("lock-pl-only-");
   cpSync(join(sourceRoot, "package-lock.json"), join(src, "package-lock.json"));
+  commitSource(src);
 
   const rel = buildRelease({ sourceRoot: src, outDir: join(workspace, "lock-pl-only-rel") });
   assert.equal(rel.manifest.lockfile.name, "package-lock.json", "the manifest names the only lockfile present");
@@ -335,6 +360,7 @@ test("FG-569 Finding 4 (lockfile selection): a shrinkwrap-only source builds —
   const src = makeLockSource("lock-sw-only-");
   // npm-shrinkwrap.json has the same shape as package-lock.json, so reuse the real one.
   cpSync(join(sourceRoot, "package-lock.json"), join(src, "npm-shrinkwrap.json"));
+  commitSource(src);
 
   const rel = buildRelease({ sourceRoot: src, outDir: join(workspace, "lock-sw-only-rel") });
   assert.equal(rel.manifest.lockfile.name, "npm-shrinkwrap.json", "the manifest names the shrinkwrap it bound against");
@@ -354,6 +380,7 @@ test("FG-569 Finding 4 (lockfile selection): both present ⇒ shrinkwrap WINS fo
     join(src, "package-lock.json"),
     JSON.stringify({ name: "decoy", lockfileVersion: 3, packages: { "node_modules/not-installed": { integrity: "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", resolved: "https://example.invalid/x.tgz" } } }, null, 2),
   );
+  commitSource(src);
 
   const rel = buildRelease({ sourceRoot: src, outDir: join(workspace, "lock-both-rel") });
   assert.equal(rel.manifest.lockfile.name, "npm-shrinkwrap.json", "shrinkwrap wins the manifest identity");
@@ -361,4 +388,84 @@ test("FG-569 Finding 4 (lockfile selection): both present ⇒ shrinkwrap WINS fo
   assert.ok(!existsSync(join(rel.releaseDir, "package-lock.json")), "the decoy package-lock.json was NOT copied — shrinkwrap won the copy");
   const shipped = readFileSync(join(rel.releaseDir, "npm-shrinkwrap.json"));
   assert.equal(rel.manifest.lockfile.sha256, createHash("sha256").update(shipped).digest("hex"), "the manifest sha is of the shrinkwrap, not the decoy");
+});
+
+test("FG-569 GAP 1 (install-script pkg, RED pre-fix / GREEN after): a TARBALL-OWNED source file of an install-script package, mutated in place with the lockfile byte-identical, is REFUSED", () => {
+  // The old gate skipped every hasInstallScript package (better-sqlite3, esbuild,
+  // sharp) — dropping their tarball-owned SOURCE from the binding, the highest-risk
+  // files. This proves the skip is gone: a benign in-place mutation of a tarball-owned
+  // better-sqlite3 source file, with package-lock.json left byte-identical, is refused.
+  const src = makeLockSource("gap1-installscript-");
+  cpSync(join(sourceRoot, "package-lock.json"), join(src, "package-lock.json"));
+  commitSource(src);
+
+  // Untampered: the SAME real tree — which INCLUDES the install-script packages —
+  // builds cleanly. No false refusal from a generated artifact (the compiled
+  // better_sqlite3.node / downloaded platform binaries are not tarball entries) nor
+  // from esbuild's install-rewritten bin/esbuild (the one narrow per-file allowance).
+  buildRelease({ sourceRoot: src, outDir: join(workspace, "gap1-clean") });
+
+  // Mutate a TARBALL-OWNED source file of an install-script package. A trailing no-op
+  // comment keeps better-sqlite3 loadable and leaves package-lock.json BYTE-IDENTICAL
+  // — exactly the tamper the hasInstallScript skip waved straight through.
+  const victim = join(src, "node_modules", "better-sqlite3", "lib", "index.js");
+  assert.ok(existsSync(victim), "the install-script package's tarball-owned source file is present");
+  const lockBefore = readFileSync(join(src, "package-lock.json"));
+  appendFileSync(victim, "\n// FG-569 tamper: valid no-op JS, still loads, lockfile untouched\n");
+  assert.deepEqual(readFileSync(join(src, "package-lock.json")), lockBefore, "the tamper left package-lock.json byte-identical");
+  // The mutated package still opens a DB — the tamper is benign, so ONLY the shipped-
+  // closure binding stands between it and a release.
+  const req = createRequire(join(src, "package.json"));
+  const Database = req("better-sqlite3") as new (p: string) => { close(): void };
+  const db = new Database(":memory:");
+  db.close();
+
+  assert.throws(
+    () => buildRelease({ sourceRoot: src, outDir: join(workspace, "gap1-tampered") }),
+    /shipped closure does not match the lockfile/i,
+    "a tampered TARBALL-OWNED file of an install-script package must be REFUSED — hasInstallScript no longer exempts it",
+  );
+  assert.ok(!existsSync(join(workspace, "gap1-tampered")), "a refused build leaves no release directory behind");
+});
+
+test("FG-569 GAP 2 (dirty source, RED pre-fix / GREEN after): an uncommitted change under src/ is REFUSED so the manifest commit can never lie about the shipped bytes", () => {
+  const src = makeLockSource("gap2-dirty-src-");
+  cpSync(join(sourceRoot, "package-lock.json"), join(src, "package-lock.json"));
+  commitSource(src);
+  // Baseline: the committed tree builds — refuse-dirty does not false-refuse a clean source.
+  buildRelease({ sourceRoot: src, outDir: join(workspace, "gap2-clean") });
+  const cleanHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: src, encoding: "utf8" }).trim();
+
+  // A VALID uncommitted change under src/ — copied into the release, but HEAD still
+  // names the clean commit. Pre-fix this SUCCEEDED and the manifest claimed cleanHead,
+  // a commit that does NOT describe the shipped bytes. Post-fix it is refused.
+  writeFileSync(join(src, "src", "uncommitted-feature.ts"), "export const x = 1;\n");
+  assert.notEqual(
+    execFileSync("git", ["status", "--porcelain", "--", "src"], { cwd: src, encoding: "utf8" }).trim(),
+    "",
+    "src/ is genuinely dirty relative to HEAD",
+  );
+  assert.equal(
+    execFileSync("git", ["rev-parse", "HEAD"], { cwd: src, encoding: "utf8" }).trim(),
+    cleanHead,
+    "HEAD still points at the clean commit while the working tree carries an uncommitted src/ change",
+  );
+
+  assert.throws(
+    () => buildRelease({ sourceRoot: src, outDir: join(workspace, "gap2-dirty") }),
+    /refusing to build a release from a dirty source/i,
+    "buildRelease must REFUSE a dirty source — else the recorded commit describes bytes it did not produce",
+  );
+  assert.ok(!existsSync(join(workspace, "gap2-dirty")), "a refused build leaves no release directory behind");
+});
+
+test("FG-569 GAP 2 (builder identity): builderCommit is recorded and EQUALS commit on a normal self-build (builder and source are one checkout)", () => {
+  const m = built.manifest;
+  assert.match(m.builderCommit, /^[0-9a-f]{40}$/, "the builder's own commit is recorded in the manifest");
+  assert.equal(m.builderCommit, m.commit, "on a self-build the builder IS the source checkout, so the two commits are equal");
+  assert.equal(
+    m.commit,
+    execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceRoot, encoding: "utf8" }).trim(),
+    "and both name the committed source HEAD the release was built from",
+  );
 });
