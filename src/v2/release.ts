@@ -27,7 +27,7 @@
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, chmodSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, chmodSync } from "node:fs";
 import { dirname, join, isAbsolute, resolve } from "node:path";
 
 export const RELEASE_MANIFEST_NAME = "forge-release.json";
@@ -181,6 +181,27 @@ export type BuildReleaseResult = {
   entryPath: string;
 };
 
+/** Replace every symlink under `dir`, in place, with a real copy of its target so
+ *  the release carries actual bytes and no link escapes the closure. Needed because
+ *  cpSync's `dereference` follows only the top-level path, leaving nested links
+ *  (an npm-linked dependency, a `.bin` entry) pointing outside the tree. A broken
+ *  link resolves nowhere and throws here — the correct torn-closure refusal rather
+ *  than a dangling link shipped into a "self-contained" release. */
+function dereferenceSymlinks(dir: string): void {
+  for (const ent of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, ent.name);
+    if (ent.isSymbolicLink()) {
+      const target = realpathSync(p);
+      rmSync(p, { recursive: true, force: true });
+      cpSync(target, p, { recursive: true, dereference: true });
+      // The copied target may itself hold nested links — dereference those too.
+      if (statSync(p).isDirectory()) dereferenceSymlinks(p);
+    } else if (ent.isDirectory()) {
+      dereferenceSymlinks(p);
+    }
+  }
+}
+
 /** Build an immutable release closure from `sourceRoot` into `outDir`. Refuses a
  *  torn closure before writing anything. Builds into a sibling temp dir and
  *  renames into place, so an interrupted build never leaves a partial release. */
@@ -213,7 +234,15 @@ export function buildRelease(opts: BuildReleaseOptions): BuildReleaseResult {
   try {
     for (const rel of ["src", "node_modules", "package.json", "package-lock.json", "npm-shrinkwrap.json"]) {
       const from = join(sourceRoot, rel);
-      if (existsSync(from)) cpSync(from, join(tmpDir, rel), { recursive: true, verbatimSymlinks: true });
+      if (!existsSync(from)) continue;
+      const dest = join(tmpDir, rel);
+      cpSync(from, dest, { recursive: true, dereference: true });
+      // cpSync's `dereference` follows ONLY the top-level path — a NESTED symlink
+      // (an npm-linked dependency, a .bin entry) survives the recursive copy as a
+      // link pointing OUT of the release. Shipped, it would silently load mutable
+      // host code once the source tree moved or changed — not the self-contained
+      // closure this release must be. Dereference every nested link into real bytes.
+      if (statSync(dest).isDirectory()) dereferenceSymlinks(dest);
     }
     writeFileSync(join(tmpDir, RELEASE_LOADER_NAME), LOADER_SHIM);
     const entryPath = join(tmpDir, RELEASE_ENTRY_NAME);

@@ -13,7 +13,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, cpSync, writeFileSync, existsSync, lstatSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, cpSync, writeFileSync, existsSync, lstatSync, readdirSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildRelease, assertReleaseCloses, RELEASE_BINDING_REL, RELEASE_LOADER_NAME, type BuildReleaseResult } from "./release.js";
@@ -105,6 +105,54 @@ test("FG-569 MUST-FIX 1 (EXECUTED THROUGH A SYMLINK): the release entry resolves
   assert.equal(prov.release.id, built.manifest.id, "the symlinked entry located its OWN release manifest through the symlink");
   assert.equal(prov.bindingLoads, true, "and loaded the closure's native binding");
 });
+
+test("FG-569 closure: a symlinked node_modules dependency is DEREFERENCED into the release, not left pointing outside it", () => {
+  // An npm-linked (or otherwise absolute-target) dependency is a symlink in
+  // node_modules pointing OUTSIDE the source tree. Preserving it verbatim would
+  // ship a link that loads mutable host code after the source moves/changes —
+  // not a self-contained closure. The build must copy the real bytes instead.
+  const src = mkdtempSync(join(workspace, "symlink-src-"));
+  execFileSync("git", ["init", "-q"], { cwd: src });
+  execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"], { cwd: src });
+  mkdirSync(join(src, "src"));
+  writeFileSync(join(src, "package.json"), `{"name":"symlink-src"}`);
+  writeFileSync(join(src, "package-lock.json"), `{"name":"symlink-src","lockfileVersion":3}`);
+  // The real, complete node_modules so the closure gate (better-sqlite3 loads +
+  // the full tsx dep tree) passes — the external link below is what's under test.
+  cpSync(join(sourceRoot, "node_modules"), join(src, "node_modules"), { recursive: true, dereference: true });
+  // The linked dependency lives OUTSIDE the source tree; node_modules only links to it.
+  const external = mkdtempSync(join(workspace, "external-linked-"));
+  writeFileSync(join(external, "index.js"), `module.exports = "from the external host location";\n`);
+  writeFileSync(join(external, "package.json"), `{"name":"linked-dep","main":"index.js"}`);
+  symlinkSync(external, join(src, "node_modules", "linked-dep"));
+
+  const out = join(workspace, "symlink-release");
+  buildRelease({ sourceRoot: src, outDir: out });
+
+  const copied = join(out, "node_modules", "linked-dep");
+  assert.ok(!lstatSync(copied).isSymbolicLink(), "the linked dependency is a real directory in the release, not a symlink");
+  assert.ok(existsSync(join(copied, "index.js")), "the linked dependency's actual bytes are inside the closure");
+  // The whole closure is link-free: no .bin / hoisted / linked dependency survives
+  // as a symlink that could point out of the release.
+  assert.equal(firstSymlink(join(out, "node_modules")), null, "the release node_modules contains NO symlinks");
+  // Prove self-containment: destroy the external source, the release still has it.
+  rmSync(external, { recursive: true, force: true });
+  assert.ok(existsSync(join(copied, "index.js")), "the release no longer depends on the external host location");
+});
+
+/** The first symlink found under `dir` (depth-first), or null if the tree is
+ *  link-free — a release that closes over its own bytes. */
+function firstSymlink(dir: string): string | null {
+  for (const ent of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, ent.name);
+    if (ent.isSymbolicLink()) return p;
+    if (ent.isDirectory()) {
+      const found = firstSymlink(p);
+      if (found) return found;
+    }
+  }
+  return null;
+}
 
 test("FG-569 torn closure: a MISSING native binding is REFUSED at build, and no release directory is produced", () => {
   const torn = mkdtempSync(join(workspace, "torn-missing-"));
