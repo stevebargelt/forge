@@ -390,7 +390,7 @@ program.*
   > lineage.** That keeps the worktree cluster independent of this one entirely. If it instead adds a **fourth**
   > structural lineage probe to reconcile, this cluster inherits it as debt and INV-1 regresses.
 - **Second-order policy coupling, and it should be in the *worktree* ticket, not discovered in a campaign:**
-  `merge_conflict` maps to a **SHARED** blocker (`policy.ts` + `:139-141`), so a retained-worktree conflict
+  `merge_conflict` maps to a **SHARED** blocker (`policy.ts:144`), so a retained-worktree conflict
   **holds the whole campaign.** **Broadening what fails as `merge_conflict` broadens campaign holds.**
 
 **(c) The gate-blocking predicate × Review Execution Trust.** `verdictBlocksGate` (`gate.ts:59-65`) is **already**
