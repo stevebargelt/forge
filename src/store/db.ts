@@ -233,6 +233,36 @@ function convergeLegacyModelCalls(db: DatabaseInstance): { dropped: string[]; bo
 // via user_version. This is deliberately NOT on the ordinary open path — a DROP
 // there would destroy schema an in-flight old peer still writes to.
 //
+// THE OPERATIONAL CONTRACT — the six points the `forge store converge` CLI surfaces
+// to the operator (preview + confirmation) and that this function embodies. State
+// them precisely; do NOT overclaim beyond them:
+//
+//   1. Running this ENDS the supported old/new overlap window for the store.
+//   2. Before invoking it, the operator must STOP ALL forge processes using that
+//      FORGE_HOME — launches, campaigns, dashboards, and interactive sessions. The
+//      CLI's `--confirm-quiesced` flag is the operator ASSERTING they have done so.
+//   3. The journal-mode quiesce gate (guarantee 2 below) detects active database
+//      locks/snapshots and refuses convergence — but it is a BACKSTOP, not proof
+//      that every forge process is dead. A perfectly idle old binary that holds no
+//      lock cannot be observed here; the operator's quiescence (point 2) is what
+//      actually makes the window safe to close.
+//   4. A pre-FG-568 process that STARTS or RESUMES after convergence is OUTSIDE the
+//      supported window. Its legacy usage inserts (which name the now-dropped legacy
+//      columns) may fail ATOMICALLY — the write transaction rolls back whole, so one
+//      or more telemetry captures are LOST until that process exits, but the store
+//      is NEVER partially written or corrupted. Existing rows and integrity are
+//      untouched by such a failed insert.
+//   5. The forward schema-version gate (assertSchemaVersionSupported) CANNOT
+//      constrain an ALREADY-INSTALLED ungated binary — a release predating the gate
+//      never performs the check. This HONEST LIMIT (already stated on the gate)
+//      applies here too and is preserved, not papered over.
+//   6. This function/CLI asserts NO PID/process-liveness proof and NO automatic
+//      exclusion of idle old binaries. There is no opener registry, maintenance
+//      lease, or process-liveness probe on any store path (reverted by operator
+//      decision — it cannot observe an already-deployed old binary, broadens every
+//      open path, and adds stale-marker/PID-reuse failure modes). The tool
+//      quiesce-gates and stamps a boundary; it claims nothing more.
+//
 // TWO integrity guarantees this function must hold, both proven by execution
 // against real temp DBs in the integration test:
 //

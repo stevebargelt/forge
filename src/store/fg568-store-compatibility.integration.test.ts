@@ -21,8 +21,9 @@
 
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import {
   getDb,
@@ -548,6 +549,128 @@ test("HIGH2: the destructive migration refuses a newer-user_version store — ne
 // Mutation intent: the old code unconditionally set busy_timeout=5000 rather than
 // restoring the caller's value — both asserts below (1234 / 4321) fail under it.
 // ===========================================================================
+// ===========================================================================
+// C3 — a simulated pre-FG-568 legacy insert AFTER convergence fails ATOMICALLY:
+// the whole write transaction rolls back, pre-existing rows and store integrity
+// are unchanged (no partial write, no corruption). This is the executable proof
+// of operational-contract point 4.
+//
+// The "pre-FG-568 process" is simulated by issuing the exact INSERT an old binary
+// runs — one that names the now-dropped legacy columns (prompt_tokens/…/cost) —
+// against the converged store, wrapped in the same immediate write transaction the
+// real writer uses. SQLite rejects the unknown columns and rolls the txn back whole.
+// ===========================================================================
+test("C3: a pre-FG-568 legacy insert AFTER convergence fails atomically — no partial write, existing rows intact", () => {
+  const path = tempDb("c3-post-converge-legacy-insert.db");
+  buildLegacyModelCallsStore(path); // seeds one legacy row (req_legacy)
+
+  const db = new Database(path);
+  db.pragma("journal_mode = WAL");
+  db.pragma("foreign_keys = ON");
+
+  // Converge to the fresh shape and stamp the boundary — the overlap window closes.
+  const { dropped } = runDestructiveConvergenceMigration(db);
+  assert.deepEqual(dropped.sort(), ["completion_tokens", "cost", "prompt_tokens"], "precondition: converged the shape");
+  const before = countRows(db, "model_calls");
+  assert.equal(before, 1, "precondition: the pre-existing legacy row survived convergence");
+
+  // A pre-FG-568 process resumes and runs ITS insert — naming the dropped legacy
+  // columns — inside an immediate write transaction, exactly as the old writer does.
+  const legacyInsert = db.transaction(() => {
+    db.prepare(
+      `INSERT INTO model_calls (task_id, request_id, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at, prompt_tokens, completion_tokens, cost)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(null, "req_post_converge_old", "claude-opus-4-7", 9, 4, 1, 0, "2026-03-03T00:00:00Z", 9, 4, 0.0);
+  });
+
+  assert.throws(
+    () => legacyInsert.immediate(),
+    /no column named|has no column|cannot|prompt_tokens/i,
+    "the old-binary insert against the converged shape fails — it names columns convergence dropped",
+  );
+
+  // ATOMIC: the failed transaction wrote NOTHING. The pre-existing row count is
+  // unchanged, the surviving row is byte-for-byte what it was, and the store is
+  // still openable/queryable (no corruption).
+  assert.equal(countRows(db, "model_calls"), before, "the failed legacy insert added no row — the write was atomic");
+  const survivor = db.prepare(`SELECT request_id, input_tokens FROM model_calls`).get() as {
+    request_id: string;
+    input_tokens: number;
+  };
+  assert.equal(survivor.request_id, "req_legacy", "the pre-existing row is untouched by the failed insert");
+  assert.equal(survivor.input_tokens, 10, "the pre-existing row's data is unchanged");
+  assert.equal(db.pragma("integrity_check", { simple: true }), "ok", "the store passes integrity_check — no corruption");
+  assert.equal(db.pragma("user_version", { simple: true }), DESTRUCTIVE_BOUNDARY_VERSION, "the boundary stamp is intact");
+
+  // A FG-568+ dual-shape writer (fresh shape) STILL succeeds against the converged
+  // store — the failed old insert did not wedge the store (contract evidence item 4).
+  assert.doesNotThrow(
+    () =>
+      db.prepare(
+        `INSERT INTO model_calls (task_id, request_id, model, alias, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(null, "req_post_converge_new", "claude-sonnet-4-6", "default", 12, 6, 2, 1, "2026-03-03T00:01:00Z"),
+    "a fresh-shape FG-568+ writer still succeeds after convergence",
+  );
+  assert.equal(countRows(db, "model_calls"), before + 1, "the fresh-shape insert landed one row");
+  db.close();
+});
+
+// ===========================================================================
+// C5 — ABSENCE guard: no opener registry, PID probe, or maintenance lease remains
+// on the ordinary store path. The cross-process opener-registry / maintenance-lease
+// approach was REVERTED (operator decision): it cannot observe an already-deployed
+// old binary that never participates, broadens every open path, and adds
+// stale-marker/PID-reuse failure modes. This asserts the machinery's ABSENCE.
+//
+// A grep-style source guard is the RIGHT tool here (FG-551 allows it for asserting
+// absence of machinery, not runtime behavior): the property is "this code does NOT
+// import or call X", which a runtime test cannot positively demonstrate.
+// ===========================================================================
+test("C5: getDb/applyMigrations carry NO opener-registry, PID-probe, or maintenance-lease machinery", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const dbSource = readFileSync(join(here, "db.ts"), "utf8");
+
+  // db.ts is the sole ordinary-open-path module (getDb, applyMigrations,
+  // assertSchemaVersionSupported, insertUsageRows' host). None of the reverted
+  // machinery may appear as an import or a call anywhere in it. Comments here
+  // DO discuss the reverted approach (point 6 documents its absence), so we scan
+  // only NON-comment lines for the forbidden tokens.
+  const codeLines = dbSource
+    .split("\n")
+    .filter((line) => {
+      const t = line.trim();
+      return t.length > 0 && !t.startsWith("//") && !t.startsWith("*") && !t.startsWith("/*");
+    });
+  const code = codeLines.join("\n");
+
+  const forbidden = [
+    /opener[_-]?registry/i,
+    /maintenance[_-]?lease/i,
+    /\bregisterOpener\b/i,
+    /\bopenerPid\b/i,
+    /process\.kill\s*\(/, // a liveness/PID probe signals pid 0 to test existence
+    /\bkill\s*\(\s*[a-z0-9_]+\s*,\s*0\s*\)/i,
+    /\/proc\//, // reading /proc/<pid> for liveness
+  ];
+  for (const pat of forbidden) {
+    assert.ok(
+      !pat.test(code),
+      `the ordinary open path (db.ts) must not contain reverted store-maintenance machinery: matched ${pat}`,
+    );
+  }
+
+  // And db.ts imports nothing but the store's own modules + node/better-sqlite3 —
+  // in particular, no run-lock / reconcile / liveness module leaks onto the open path.
+  const importLines = codeLines.filter((l) => l.startsWith("import"));
+  for (const imp of importLines) {
+    assert.ok(
+      !/run-lock|reconcile|liveness|opener|lease|heartbeat/i.test(imp),
+      `db.ts open path must not import cross-process liveness/lease machinery: ${imp}`,
+    );
+  }
+});
+
 test("LOW3: the caller's busy_timeout is restored after the migration returns AND after it throws", () => {
   // --- success path: caller's busy_timeout survives a converging migration. ---
   const successPath = tempDb("low3-timeout-success.db");

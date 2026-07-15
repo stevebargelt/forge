@@ -76,7 +76,7 @@ function userVersion(dbPath: string): number {
   return v;
 }
 
-test("integ store converge: preview (no --confirm) reports legacy columns and drops nothing", () => {
+test("integ store converge: preview (no --confirm-quiesced) reports legacy columns, the contract, and drops nothing", () => {
   const dbPath = seedLegacyStore();
 
   const result = runForge(["store", "converge"]);
@@ -84,16 +84,26 @@ test("integ store converge: preview (no --confirm) reports legacy columns and dr
   assert.match(result.stdout, /preview/i, `stdout must mark itself a preview, got: ${result.stdout}`);
   assert.match(result.stdout, /prompt_tokens/, `preview must name the legacy columns, got: ${result.stdout}`);
 
+  // The operational contract must be surfaced PROMINENTLY in the preview — the
+  // quiescence requirement (point 2) and the one-way + old-binary consequence
+  // (points 1, 4), not buried.
+  assert.match(result.stdout, /ENDS the supported old\/new overlap window/i, "preview states the one-way window-end (point 1)");
+  assert.match(result.stdout, /STOP ALL forge processes/i, "preview states the quiescence requirement (point 2)");
+  assert.match(result.stdout, /BACKSTOP/i, "preview states the gate is a backstop, not liveness proof (point 3)");
+  assert.match(result.stdout, /pre-FG-568 process that starts or resumes/i, "preview states the post-convergence old-binary consequence (point 4)");
+  assert.match(result.stdout, /ATOMICALLY/i, "preview states the atomic-fail / no-corruption property (point 4)");
+  assert.match(result.stdout, /--confirm-quiesced/i, "preview names the assertion flag");
+
   const cols = columnNames(dbPath);
   assert.ok(cols.has("prompt_tokens"), "preview must NOT drop the legacy columns");
   assert.equal(userVersion(dbPath), 0, "preview must NOT stamp the boundary");
 });
 
-test("integ store converge --json --confirm: drops legacy columns and stamps the one-way boundary", () => {
+test("integ store converge --json --confirm-quiesced: drops legacy columns and stamps the one-way boundary", () => {
   const dbPath = seedLegacyStore();
   assert.ok(columnNames(dbPath).has("prompt_tokens"), "precondition: legacy column present");
 
-  const result = runForge(["store", "converge", "--confirm", "--json"]);
+  const result = runForge(["store", "converge", "--confirm-quiesced", "--json"]);
   assert.equal(result.status, 0, `expected exit 0\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
 
   const parsed = JSON.parse(result.stdout) as { ok: boolean; dropped: string[]; boundaryVersion: number };
@@ -107,19 +117,45 @@ test("integ store converge --json --confirm: drops legacy columns and stamps the
   assert.equal(userVersion(dbPath), 1, "the one-way boundary is stamped");
 });
 
-test("integ store converge --confirm: idempotent second run drops nothing, boundary stays stamped", () => {
+test("integ store converge --confirm-quiesced (non-JSON): the confirmation output states the contract prominently", () => {
   const dbPath = seedLegacyStore();
-  runForge(["store", "converge", "--confirm"]);
 
-  const result = runForge(["store", "converge", "--confirm"]);
+  const result = runForge(["store", "converge", "--confirm-quiesced"]);
+  assert.equal(result.status, 0, `expected exit 0\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  assert.match(result.stdout, /dropped/i, "the confirmation reports what it dropped");
+  // The one-way + quiescence + old-binary contract must appear on the confirm path too.
+  assert.match(result.stdout, /overlap window is now CLOSED/i, "confirm output states the window is closed (point 1)");
+  assert.match(result.stdout, /STOP ALL forge processes/i, "confirm output restates the quiescence requirement (point 2)");
+  assert.match(result.stdout, /pre-FG-568 process that (starts or resumes|resumes)/i, "confirm output states the old-binary consequence (point 4)");
+
+  assert.ok(!columnNames(dbPath).has("prompt_tokens"), "the confirm path actually converged");
+  assert.equal(userVersion(dbPath), 1, "the confirm path stamped the boundary");
+});
+
+test("integ store converge --confirm-quiesced: idempotent second run drops nothing, boundary stays stamped", () => {
+  const dbPath = seedLegacyStore();
+  runForge(["store", "converge", "--confirm-quiesced"]);
+
+  const result = runForge(["store", "converge", "--confirm-quiesced"]);
   assert.equal(result.status, 0, `expected exit 0\nstderr: ${result.stderr}`);
   assert.equal(userVersion(dbPath), 1, "boundary remains stamped, never downgraded");
 });
 
-test("integ store converge --confirm: on a fresh store (no legacy columns) drops nothing and still stamps", () => {
+test("integ store converge: the OLD --confirm flag no longer converges (rename carries the assertion)", () => {
+  // `--confirm-quiesced` replaced `--confirm` on this UNSHIPPED branch so the flag
+  // name carries the quiescence assertion. A stale `--confirm` must NOT silently
+  // converge — commander rejects the unknown option and nothing is dropped/stamped.
+  const dbPath = seedLegacyStore();
+  const result = runForge(["store", "converge", "--confirm"]);
+  assert.notEqual(result.status, 0, `stale --confirm must not succeed\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  assert.ok(columnNames(dbPath).has("prompt_tokens"), "the stale flag dropped nothing");
+  assert.equal(userVersion(dbPath), 0, "the stale flag stamped no boundary");
+});
+
+test("integ store converge --confirm-quiesced: on a fresh store (no legacy columns) drops nothing and still stamps", () => {
   // A fresh SCHEMA_SQL store never creates the legacy columns — converge is a
   // no-op drop but still records the boundary.
-  const result = runForge(["store", "converge", "--confirm", "--json"]);
+  const result = runForge(["store", "converge", "--confirm-quiesced", "--json"]);
   assert.equal(result.status, 0, `expected exit 0\nstderr: ${result.stderr}`);
   const parsed = JSON.parse(result.stdout) as { ok: boolean; dropped: string[]; boundaryVersion: number };
   assert.equal(parsed.ok, true);
