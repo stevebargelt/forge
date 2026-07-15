@@ -63,13 +63,22 @@ store. The load-bearing move is EXEC, NOT SPAWN.**
 PATH resolution for the child, and **the process that actually loaded `better-sqlite3` was a PATH-resolved
 CHILD.** Pinning only the outer shebang would have looked like a fix, passed `forge --version`, and **still
 failed F29**. That is the FG-551 failure shape exactly — an adjacent thing satisfying the assertion. Exec once,
-load tsx in-process, one process, and it is the pinned one — **which FG-569 has since shipped**: the live
-`bin/forge` is now `#!/bin/sh` and `exec`s node once with tsx in-process, so no spawned child exists.
+load tsx in-process, one process — **which FG-569 has since shipped in two distinct entries, and only one of
+them satisfies F29.** The live dev `bin/forge` is now `#!/bin/sh` and `exec`s node once with tsx in-process, so
+no spawned child exists — but it still `exec`s a **PATH-resolved** `node` (and only `readlink`s `$0` when it is a
+symlink). That is fine for a dev checkout, where node is on PATH, but it does **NOT** fix F29: with no node on
+PATH it cannot start. The **built RELEASE entry** (emitted by `forge release`'s `renderEntry`) goes further: it
+`exec`s an **absolute, manifest-pinned interpreter** and resolves its own release root with shell builtins plus
+that same absolute interpreter's `realpathSync` — canonicalizing `$0` through promotion symlinks WITHOUT a
+PATH-resolved `readlink`. That entry — not the live `bin/forge` — is the one that runs under a hostile /
+node-free / even readlink-free PATH, including when invoked THROUGH a promotion-style symlink (verified by
+execution: `--version` and `status --json` through such a symlink both succeed there).
 
-It fixes three things at once: **F29** (availability under a hostile/node-free PATH); **R1 becomes
+So the benefits split by entry. Two come from exec-not-spawn itself and hold in **both** entries: **R1 becomes
 self-evidencing** (`process.execPath` of the CLI process *is* the control runtime — under the old spawn entry it
-merely named an accidentally-resolved child); and it removes the `bin/forge` exit-laundering defect below.
-FG-569 has since shipped all three via the exec-not-spawn entry.
+merely named an accidentally-resolved child), and the `bin/forge` exit-laundering defect below is removed. The
+third — **F29** (availability under a hostile/node-free PATH) — comes **only** from the release entry's
+absolute-interpreter pin, and does NOT hold for the live dev `bin/forge`.
 
 **Rejected:** dedicated git worktree (`git checkout` is non-atomic → fails F27; git versions neither
 `node_modules` nor the native binding, so it cannot carry the closure); pinned snapshot with no pointer
