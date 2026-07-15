@@ -23,6 +23,18 @@ test("FG-569 entry: execs the PINNED absolute interpreter with tsx loaded in-pro
   assert.ok(entry.includes("d=${p%/*}"), "dir is derived with parameter expansion, not an external");
 });
 
+test("FG-569 entry: derives $here with a POSIX-portable cd — no `cd --` (unspecified for the cd builtin)", () => {
+  const entry = renderEntry("/opt/node-24/bin/node");
+  // POSIX does not define a `--` operand separator for the `cd` builtin, so a strict
+  // /bin/sh reads `cd -- "$d"` as a cd into a directory literally named `--` and every
+  // direct invocation fails before the pinned interpreter is reached. A leading-dash dir
+  // name is instead disarmed with a `./` prefix — portable across dash/ash/bash.
+  const code = entry.split("\n").filter((l) => !l.trimStart().startsWith("#")).join("\n");
+  assert.ok(!code.includes("cd -- "), "does not use `cd --` — unspecified for the cd builtin on a conforming /bin/sh");
+  assert.ok(code.includes("case $d in -*) d=./$d ;; esac"), "disarms a leading-dash dir name with a `./` prefix before cd");
+  assert.ok(code.includes(`here=$(CDPATH= cd "$d" && pwd)`), "resolves $here with a plain, portable cd");
+});
+
 test("FG-569 entry: canonicalizes $0 through symlinks with the pinned interpreter (a promoted release is reached via a symlink)", () => {
   const entry = renderEntry("/opt/node-24/bin/node");
   // MUST-FIX 1: $0 is the SYMLINK path when forge is on PATH as a current/PATH

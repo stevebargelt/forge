@@ -130,7 +130,12 @@ export function renderEntry(interpreter: string): string {
     `  p=$(${q} -e 'process.stdout.write(require("fs").realpathSync(process.argv[1]))' -- "$p")`,
     `fi`,
     `case "$p" in */*) d=\${p%/*} ;; *) d=. ;; esac`,
-    `here=$(CDPATH= cd -- "$d" && pwd)`,
+    // POSIX gives the `cd` builtin no `--` operand separator (unlike node's -e -- above),
+    // so a strict /bin/sh reads `cd -- "$d"` as a cd to the directory named `--` and every
+    // direct invocation fails before the pinned interpreter is reached. Guard a leading-dash
+    // dir name with a `./` prefix instead — portable across dash/ash/bash.
+    `case $d in -*) d=./$d ;; esac`,
+    `here=$(CDPATH= cd "$d" && pwd)`,
     "",
     "# FG-569 (R2): export this release's OWN id, read from its manifest with shell",
     "# builtins only (no sed/grep/node), so a node-free PATH still touches no external.",

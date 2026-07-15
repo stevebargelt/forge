@@ -201,6 +201,24 @@ test("FG-569 R2 entry (EXECUTED): the FORGE_RELEASE_ID block parses the id strai
   assert.equal(run.stdout, "release-feedb0d-9xk2z", "the entry's shell parses the id straight out of its manifest");
 });
 
+test("FG-569 entry (EXECUTED under /bin/sh): the $here derivation resolves a leading-dash release dir without `cd --`", () => {
+  // A conforming /bin/sh gives the `cd` builtin no `--` operand separator, so the old
+  // `cd -- "$d"` cd'd into a directory named `--`. Rip out just the dir-derivation block
+  // (from the `case ... d=${p%/*}` line through the `here=` cd) and run it under the real
+  // /bin/sh with $0 pointing at an entry inside a directory whose name starts with `-`.
+  const entry = renderEntry("/opt/node-24/bin/node");
+  const start = entry.indexOf(`case "$p" in */*) d=`);
+  const hereLine = `here=$(CDPATH= cd "$d" && pwd)`;
+  const block = entry.slice(start, entry.indexOf(hereLine) + hereLine.length);
+  const dashDir = join(workspace, "-dashy-release");
+  mkdirSync(dashDir, { recursive: true });
+  // p is RELATIVE (cwd=workspace) so $d = `-dashy-release` literally starts with `-`,
+  // the exact operand that `cd --` was meant to disarm and a conforming cd would reject.
+  const run = spawnSync("/bin/sh", ["-c", `p='-dashy-release/entry'\n${block}\nprintf '%s' "$here"`], { encoding: "utf8", cwd: workspace });
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.stdout, dashDir, "the entry's shell cd'd into the real leading-dash release dir, not a dir named `--`");
+});
+
 test("FG-569 MUST-FIX 1 (EXECUTED THROUGH A SYMLINK, NO node on PATH): the release entry resolves its release root through a promotion symlink under a hostile PATH", () => {
   // A promoted release is reached via a `current`/PATH symlink, so $0 is the
   // symlink, not the release file. The entry must canonicalize $0 first, else
