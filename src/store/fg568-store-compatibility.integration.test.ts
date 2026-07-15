@@ -100,6 +100,50 @@ function oldReaderRuns(db: Database.Database): Array<{ id: string; workflow: str
   }>;
 }
 
+// A real WAL store still carrying the 0.1.x legacy model_calls columns (the
+// destructive-DROP candidates) — the shape runDestructiveConvergenceMigration
+// converges. Seeds one row so a concurrent reader has a snapshot to hold.
+const LEGACY_MODEL_CALLS_DDL = `CREATE TABLE model_calls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT,
+  request_id TEXT NOT NULL,
+  model TEXT NOT NULL,
+  alias TEXT,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  prompt_tokens INTEGER NOT NULL,
+  completion_tokens INTEGER NOT NULL,
+  cost REAL NOT NULL
+)`;
+
+function buildLegacyModelCallsStore(path: string): void {
+  const setup = new Database(path);
+  setup.pragma("journal_mode = WAL");
+  setup.exec(SCHEMA_SQL);
+  setup.exec(`DROP TABLE model_calls`);
+  setup.exec(LEGACY_MODEL_CALLS_DDL);
+  setup
+    .prepare(
+      `INSERT INTO model_calls (request_id, model, input_tokens, output_tokens, created_at, prompt_tokens, completion_tokens, cost)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run("req_legacy", "claude-opus-4-7", 10, 5, "2026-01-01T00:00:00Z", 10, 5, 0.0);
+  setup.close();
+}
+
+// A reader that holds an OPEN WAL read snapshot until released — the hazard HIGH 1
+// is about. `BEGIN` + a real read acquires and pins the snapshot in WAL mode.
+function openHeldReader(path: string): Database.Database {
+  const reader = new Database(path);
+  reader.pragma("journal_mode = WAL");
+  reader.exec("BEGIN");
+  reader.prepare(`SELECT COUNT(*) AS n FROM model_calls`).get();
+  return reader;
+}
+
 // ===========================================================================
 // E1 + E2 — two versions on ONE real store, BOTH compatibility directions.
 // ===========================================================================
@@ -425,4 +469,108 @@ test("E3/E5: a read-only FIRST open still migrates (defect reproduced) — addit
     rwCols.has("prompt_tokens") && rwCols.has("completion_tokens") && rwCols.has("cost"),
     "the writable getDb() open path is likewise additive-only — legacy columns survive",
   );
+});
+
+// ===========================================================================
+// HIGH 1 — the quiesce gate EXCLUDES READERS, not just writers.
+//
+// In WAL mode a plain BEGIN EXCLUSIVE takes only the writer slot; a reader on an
+// existing snapshot is NOT excluded and could observe a half-dropped schema. The
+// fix quiesces by leaving WAL, which cannot succeed while any peer holds the
+// store. Mutation intent: with the old BEGIN-EXCLUSIVE quiesce this test FAILS —
+// BEGIN EXCLUSIVE succeeds despite the reader, so the migration proceeds and drops
+// instead of refusing.
+// ===========================================================================
+test("HIGH1: a concurrent reader blocks the destructive migration — no half-dropped schema is observable", () => {
+  const path = tempDb("high1-reader-exclusion.db");
+  buildLegacyModelCallsStore(path);
+
+  const migrator = new Database(path);
+  migrator.pragma("journal_mode = WAL");
+
+  // A concurrent reader pins a WAL snapshot for the whole migration attempt.
+  const reader = openHeldReader(path);
+
+  assert.throws(
+    () => runDestructiveConvergenceMigration(migrator),
+    /quiesce/i,
+    "the migration refuses while a reader holds a snapshot — a reader cannot observe a half-dropped schema",
+  );
+  // The refusal is total — nothing dropped, no boundary stamped.
+  assert.ok(columnNames(migrator, "model_calls").has("prompt_tokens"), "a reader-blocked migration drops nothing");
+  assert.equal(migrator.pragma("user_version", { simple: true }), 0, "a reader-blocked migration stamps no boundary");
+
+  // Release the reader — the store is now quiescent and the migration converges.
+  reader.exec("ROLLBACK");
+  reader.close();
+
+  const { dropped } = runDestructiveConvergenceMigration(migrator);
+  assert.deepEqual(dropped.sort(), ["completion_tokens", "cost", "prompt_tokens"], "the quiescent migration converges the shape");
+  assert.equal(migrator.pragma("user_version", { simple: true }), DESTRUCTIVE_BOUNDARY_VERSION, "the boundary is stamped once quiescent");
+  // WAL is restored for the caller after the migration returns.
+  assert.equal(migrator.pragma("journal_mode", { simple: true }), "wal", "the migration restores WAL for the caller");
+  migrator.close();
+});
+
+// ===========================================================================
+// HIGH 2 — the migration REFUSES a store whose user_version is past the boundary
+// it would set; it never downgrades user_version and never drops columns there.
+//
+// Mutation intent: without the assertSchemaVersionSupported guard, the migration
+// writes user_version back to 1 and drops the legacy columns — both asserts below
+// fail. (Reproduces the executed defect: a user_version=5 store rewritten to 1.)
+// ===========================================================================
+test("HIGH2: the destructive migration refuses a newer-user_version store — never downgrades it, never drops", () => {
+  const path = tempDb("high2-no-downgrade.db");
+  buildLegacyModelCallsStore(path);
+
+  // A FUTURE binary already owns this store past a one-way boundary we don't know.
+  const stamp = new Database(path);
+  stamp.pragma(`user_version = 5`);
+  stamp.close();
+
+  const db = new Database(path);
+  db.pragma("journal_mode = WAL");
+  assert.throws(
+    () => runDestructiveConvergenceMigration(db),
+    /newer than this binary understands/i,
+    "the migration refuses a store past its boundary — a future binary's store is not ours to converge",
+  );
+  assert.equal(db.pragma("user_version", { simple: true }), 5, "user_version is NOT moved backwards");
+  assert.ok(columnNames(db, "model_calls").has("prompt_tokens"), "no column is dropped on a refused store");
+  db.close();
+});
+
+// ===========================================================================
+// LOW 3 — the caller's busy_timeout is restored after the migration returns AND
+// after it throws (from inside the quiesce path, after busy_timeout was set to 0).
+//
+// Mutation intent: the old code unconditionally set busy_timeout=5000 rather than
+// restoring the caller's value — both asserts below (1234 / 4321) fail under it.
+// ===========================================================================
+test("LOW3: the caller's busy_timeout is restored after the migration returns AND after it throws", () => {
+  // --- success path: caller's busy_timeout survives a converging migration. ---
+  const successPath = tempDb("low3-timeout-success.db");
+  buildLegacyModelCallsStore(successPath);
+  const ok = new Database(successPath);
+  ok.pragma("journal_mode = WAL");
+  ok.pragma("busy_timeout = 1234");
+  runDestructiveConvergenceMigration(ok);
+  assert.equal(ok.pragma("busy_timeout", { simple: true }), 1234, "busy_timeout restored to the caller's value after success");
+  ok.close();
+
+  // --- throw path: a held reader forces a quiesce refusal AFTER busy_timeout=0
+  // was set internally; the finally must still restore the caller's value. ---
+  const throwPath = tempDb("low3-timeout-throw.db");
+  buildLegacyModelCallsStore(throwPath);
+  const failing = new Database(throwPath);
+  failing.pragma("journal_mode = WAL");
+  failing.pragma("busy_timeout = 4321");
+
+  const reader = openHeldReader(throwPath);
+  assert.throws(() => runDestructiveConvergenceMigration(failing), /quiesce/i, "a held reader forces a quiesce refusal");
+  assert.equal(failing.pragma("busy_timeout", { simple: true }), 4321, "busy_timeout restored to the caller's value after a throw");
+  reader.exec("ROLLBACK");
+  reader.close();
+  failing.close();
 });

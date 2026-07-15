@@ -204,60 +204,116 @@ export function assertSchemaVersionSupported(
   }
 }
 
+// Drops the legacy columns (idempotent) and stamps the one-way boundary WITHOUT
+// ever moving user_version backwards. Runs inside the caller's open transaction.
+function convergeLegacyModelCalls(db: DatabaseInstance): { dropped: string[]; boundaryVersion: number } {
+  const cols = new Set(
+    (db.prepare(`PRAGMA table_info(model_calls)`).all() as { name: string }[]).map((c) => c.name),
+  );
+  const dropped: string[] = [];
+  for (const col of LEGACY_MODEL_CALLS_COLUMNS) {
+    if (cols.has(col)) {
+      db.exec(`ALTER TABLE model_calls DROP COLUMN ${col}`);
+      dropped.push(col);
+    }
+  }
+  // Record that the one-way boundary was crossed — but only ADVANCE it. A store
+  // already at or past the boundary is never stamped backwards (HIGH 2); the
+  // forward gate below refuses an older binary from here on.
+  const current = db.pragma("user_version", { simple: true }) as number;
+  if (current < DESTRUCTIVE_BOUNDARY_VERSION) {
+    db.pragma(`user_version = ${DESTRUCTIVE_BOUNDARY_VERSION}`);
+  }
+  return { dropped, boundaryVersion: DESTRUCTIVE_BOUNDARY_VERSION };
+}
+
 // FG-568 (BD-15 §2/§4): the explicit, operator-invoked, quiesce-gated destructive
 // migration. It converges a 0.1.x-migrated model_calls table to the fresh shape by
 // dropping the legacy NOT NULL columns, and stamps the one-way rollback boundary
 // via user_version. This is deliberately NOT on the ordinary open path — a DROP
 // there would destroy schema an in-flight old peer still writes to.
 //
-// QUIESCE: it acquires the store's EXCLUSIVE write lock with a zero busy-timeout
-// and refuses (throws) the instant another forge process holds the lock. Once the
-// boundary is stamped, an older-schema-version process refuses the store via the
-// forward gate above — the drop is a one-way boundary rollback tooling must not
-// cross silently. (Quiesce detection is a WRITE-LOCK probe: it catches a peer
-// actively holding the store, which is the hazard a destructive DROP must avoid;
-// the host-level two-version stress test is the orchestrator's, not this
-// container's.)
+// TWO integrity guarantees this function must hold, both proven by execution
+// against real temp DBs in the integration test:
+//
+//  1. NO DOWNGRADE / ONE-WAY BOUNDARY (HIGH 2). Before touching any schema or
+//     lock, it refuses a store whose stamped user_version is NEWER than the
+//     boundary this binary would set (assertSchemaVersionSupported) — a store a
+//     future binary already owns is not ours to converge, and we must never write
+//     user_version backwards. Guard FIRST, fail fast, drop nothing.
+//
+//  2. READER-EXCLUDING QUIESCE (HIGH 1). BEGIN EXCLUSIVE in WAL mode takes only
+//     the WRITER slot — in WAL a reader on an existing snapshot is NOT excluded,
+//     so a plain BEGIN EXCLUSIVE could DROP COLUMN out from under an old reader
+//     mid-query (SQLITE_SCHEMA / stale reads). SQLite semantics we rely on
+//     instead: switching the journal OUT of WAL (PRAGMA journal_mode=DELETE)
+//     requires SQLite to acquire an exclusive lock and fully checkpoint the WAL,
+//     which it CANNOT do while ANY other connection — reader OR writer — holds the
+//     database; the switch then leaves the mode as "wal" (or raises SQLITE_BUSY).
+//     A successful switch to "delete" is therefore proof the store is quiescent.
+//     The DROPs then run in a rollback-journal write transaction whose RESERVED→
+//     EXCLUSIVE lock blocks any reader that attaches afterward (busy_timeout=0, so
+//     a contending reader reddens the migration rather than seeing a half-drop).
+//     WAL is restored before returning.
+//
+// The host-level two-version stress test (two real processes) is the
+// orchestrator's; this function guarantees the single-process-provable half.
 export function runDestructiveConvergenceMigration(
   db: DatabaseInstance,
 ): { dropped: string[]; boundaryVersion: number } {
+  // HIGH 2 — refuse a store past this boundary BEFORE any schema or lock work.
+  assertSchemaVersionSupported(db);
+
   const inMemory = db.name === ":memory:" || db.name === "";
-  // Quiesce gate. On a real file, grab the exclusive lock with no wait so a peer's
-  // held write lock reddens immediately. On :memory: there is no cross-process
-  // peer, and SQLite treats EXCLUSIVE as an ordinary transaction, so this is a
-  // plain BEGIN.
-  db.pragma("busy_timeout = 0");
-  try {
+  if (inMemory) {
+    // No cross-process peer and no WAL journal on a single-connection :memory:
+    // DB — a plain transaction is a sufficient quiesce.
+    db.exec("BEGIN");
     try {
-      db.exec("BEGIN EXCLUSIVE");
+      const result = convergeLegacyModelCalls(db);
+      db.exec("COMMIT");
+      return result;
+    } catch (e) {
+      db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
+  // LOW 3 — save the caller's busy_timeout and restore it on EVERY exit.
+  const priorBusyTimeout = db.pragma("busy_timeout", { simple: true }) as number;
+  db.pragma("busy_timeout = 0");
+  let leftWal = false;
+  try {
+    let journalMode: unknown;
+    try {
+      journalMode = db.pragma("journal_mode = DELETE", { simple: true });
     } catch (e) {
       throw new Error(
         `forge: refusing the destructive convergence migration — the store is in use by ` +
           `another forge process (quiesce required). Underlying: ${(e as Error).message}`,
       );
     }
-    try {
-      const cols = new Set(
-        (db.prepare(`PRAGMA table_info(model_calls)`).all() as { name: string }[]).map((c) => c.name),
+    if (journalMode !== "delete") {
+      // Could not leave WAL — a peer (reader or writer) still holds the store.
+      throw new Error(
+        `forge: refusing the destructive convergence migration — the store is in use by ` +
+          `another forge process (quiesce required): could not acquire exclusive access ` +
+          `to leave WAL mode.`,
       );
-      const dropped: string[] = [];
-      for (const col of LEGACY_MODEL_CALLS_COLUMNS) {
-        if (cols.has(col)) {
-          db.exec(`ALTER TABLE model_calls DROP COLUMN ${col}`);
-          dropped.push(col);
-        }
-      }
-      // Record that the one-way boundary was crossed. Rollback tooling reads this
-      // and the forward gate refuses an older binary from here on.
-      db.pragma(`user_version = ${DESTRUCTIVE_BOUNDARY_VERSION}`);
+    }
+    leftWal = true;
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = convergeLegacyModelCalls(db);
       db.exec("COMMIT");
-      return { dropped, boundaryVersion: DESTRUCTIVE_BOUNDARY_VERSION };
+      return result;
     } catch (e) {
       db.exec("ROLLBACK");
       throw e;
     }
   } finally {
-    if (!inMemory) db.pragma("busy_timeout = 5000");
+    if (leftWal) db.pragma("journal_mode = WAL");
+    db.pragma(`busy_timeout = ${priorBusyTimeout}`);
   }
 }
 
