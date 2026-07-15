@@ -3,7 +3,10 @@
 **Status:** proposed — **corrected after adversarial SECURITY review** (HIGH: blue worktree-local `.git` pointer
 seam → D10/I-10/AC-7/N-9, **observed-red probe P6b** — with **P6 retained as a NEGATIVE CONTROL**; MEDIUM: plan
 §2.3 normative drift → §8.7 supersession clause).
-**Baseline:** `f001552` (branch `planning/foundations-lane-a`). **Epic:** FG-561 foundations campaign.
+**Baseline:** `185afc3` (origin/main at program start; branch `planning/foundations-lane-a`).
+**Program:** post-FG-561 foundations program — these children are **gated until after FG-561 lands** and are **NOT
+attached to FG-561** (FG-561 is the durable-continuation campaign they are gated behind, not their epic).
+**Epic:** to be allocated **after** the post-FG-561 delta-audit — deliberately unset here (do not attach to FG-561).
 **Cluster:** FG-559 (container git blindness) · FG-345 (worktree isolation remaining scope) · FG-356 (worktree reaper).
 
 ---

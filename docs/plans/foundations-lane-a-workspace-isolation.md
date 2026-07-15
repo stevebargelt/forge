@@ -19,7 +19,7 @@
 
 # Foundations — Lane A: workspace isolation (FG-559 + FG-345 + FG-356). **PLAN ONLY. No implementation. No tickets filed.**
 
-**Baseline:** standalone clone at `185afc3` (`origin/main`). · **Epic:** FG-561 foundations campaign.
+**Baseline:** standalone clone at `185afc3` (`origin/main`). · **Program:** post-FG-561 foundations program (children gated behind FG-561, NOT attached to it; epic allocated after the post-FG-561 delta-audit).
 **Status:** architecture + planning complete; awaiting operator review before any implementation.
 
 **The rule this plan is written under (inherited from FG-551 via `docs/plans/fg553-slice1-architecture.md`):**
