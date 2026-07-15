@@ -50,10 +50,15 @@ evidence.* Every claim below is labelled **VERIFIED FACT** (file:line or capture
   SHA" is **NOT a verified fact in this plan** — it is an **OPEN QUESTION** with a named falsification test
   (§5, Child 4). *(Independently, those tests are `*.worktree.test.ts` and `preflightWorktreeGate` hard-fails
   on Linux — `worktree-lifecycle.ts:63-68` — so this Linux container could not run them even with deps.)*
-- **I could not run docker**, so the ticket's demand — *"prove a REAL `git diff <shaA>..<shaB>` succeeds inside
-  a container under that shape, and prove it FAILS today"* — is **not discharged in a real container**. What I
-  did instead is stated exactly in §2.1, and the real-docker probe is written and ready for the host
-  (`p5-docker-container-git.sh`); **its `.out` records the honest failure `no docker on PATH`.**
+- **I could not run docker IN THIS PLANNING CONTAINER.** The ticket's demand — *"prove a REAL
+  `git diff <shaA>..<shaB>` succeeds inside a container under that shape, and prove it FAILS today"* — **has since
+  been discharged in a REAL container ON THE HOST.** `p5-docker-container-git.sh` was executed on the macOS host
+  and its `.out` now records the real run: **DIRECTION 1 (today's shape) fails** with
+  `fatal: not a git repository: (null)`; **DIRECTION 2 (the chosen `:ro` parent-`.git` mount) succeeds**;
+  DIRECTION 3 (`:ro` project + `:ro` `.git`) refuses every write; DIRECTION 4 (the rejected rw shape) is a
+  **confirmed container→host escape**. A companion run under macOS's default symlinked `$TMPDIR`
+  (`p5b-symlinked-tmpdir-hazard.out`) found the **path-identity symlink hazard** — the fix silently no-ops on a
+  symlinked checkout — now a **binding invariant (PRD D3: canonicalize with `realpath`).**
 
 **What I COULD execute, and did:** real `git` (2.34.1) against real repos and real linked worktrees. FG-559 is
 in its entirety a question about **git's path resolution**, and that is exactly what was executed. Four probes,
@@ -65,7 +70,8 @@ all rerunnable, all with literal captured output committed alongside this plan:
 | P2 | `p2-rewrite-vs-mount.sh` | `.out` | the object store is **unavoidable**; `GIT_DIR`/pointer **rewriting works** at a clean container path |
 | P3 | `p3-write-exposure.sh` | `.out` | **THE SECURITY BOUNDARY** — a rw `.git` is a **container→host code-execution escape** |
 | P4 | `p4-fail-loud-detector.sh` | `.out` | the fail-loud detector classifies every case correctly, both directions |
-| P5 | `p5-docker-container-git.sh` | `.out` = **`no docker on PATH`** | **UNEXECUTED.** Written for the host. |
+| P5 | `p5-docker-container-git.sh` | `.out` | **EXECUTED ON THE HOST.** Dir 1 (today) FAILS; **Dir 2 (chosen `:ro` parent-`.git` mount) WORKS**; Dir 3 refuses all writes; Dir 4 confirms the container→host escape. |
+| P5b | *(host run, annotated)* | `p5b-symlinked-tmpdir-hazard.out` | **EXECUTED ON THE HOST.** Under macOS's default symlinked `$TMPDIR` the chosen fix **silently no-ops** with the identical error → **canonicalize (`realpath`) is a binding invariant (PRD D3).** |
 
 ---
 
@@ -116,6 +122,15 @@ builds a **candidate** worktree, merges the task/child branches into it, **valid
 > single biggest stale-ticket trap in this lane, and it would have produced a plausible, well-formed, wrong plan.
 
 ### 1.4 **FG-559 hits REDs directly** — and reds are the population that most needs git
+
+> **⚠ SUPERSEDED → PRD §8.1 + §8.2.** This section's INFERENCE that *"every red/reviewer today runs in a
+> container where git is 100% broken — including git diff"* is **corrected by the PRD as FALSE as stated**: reds
+> have `tools: ["read"]` and **no Bash**, and their seeds say they cannot run `git diff` — reds never invoke git,
+> so nothing is broken for them today and the mount grants them nothing (whether reds ever get a git-read
+> capability is the review-trust lane's call, PRD OQ-4). The **real present-tense victim is `test-engineer`**,
+> whose seed instructs `git diff HEAD~1` (`seeds/agents/test-engineer/CLAUDE.md:13`). The `spawn.ts:462` citation
+> below is also a **miscitation** (that line is in `buildProvisionerDockerArgs`; the project mount mode comes from
+> `SpawnContext.PROJECT_MODE`) — **PRD §8.2. THE PRD GOVERNS.**
 
 **VERIFIED FACT.** Reds run against the **candidate worktree**, not the main checkout:
 `runRedsAgainst(dir)` (`runNext.ts:711-732`) passes `dir` as `projectDir` into `dispatchReds`
@@ -226,8 +241,12 @@ is why it has to be justified rather than assumed.)*
 what a bind mount *is* for the purposes of git's resolution: `-v H:C` makes host path `H` readable at `C` and
 leaves every other host path absent. They are **not a container**: they do not test Docker's boundary, uid
 mapping, macOS gRPC-FUSE/VirtioFS behavior, or Docker's auto-creation of nested parent dirs for a
-path-identity mount. **Those remain INFERENCE until `p5-docker-container-git.sh` is run on the host.** That
-script is written, and proving both directions in a real container is **Child 1's acceptance gate**.
+path-identity mount. **P5 has since closed that gap: `p5-docker-container-git.sh` was executed in a REAL Docker
+container on the macOS host** — DIRECTION 1 (today) fails, DIRECTION 2 (the chosen `:ro` parent-`.git` mount)
+works, DIRECTION 3 refuses all writes, DIRECTION 4 confirms the container→host escape. **The symlinked-`$TMPDIR`
+run (`p5b-symlinked-tmpdir-hazard.out`) additionally exposed the path-identity symlink hazard — now a binding
+invariant (PRD D3).** The P1–P4 path-visibility results and the P5/P5b container runs agree; proving both
+directions in a real container is **Child 1's acceptance gate (AC-1/AC-2), now already captured.**
 
 ### 2.2 THE SECURITY CONSEQUENCE — this is what decides it (P3, executed)
 
@@ -258,6 +277,15 @@ write **refused**; B3 hook plant **refused (`Permission denied`)**; B4 `git log`
 work**; B5 **in-container `git commit` FAILS** — the one real cost, addressed below.
 
 ### 2.3 DECISION
+
+> **⚠ SUPERSEDED / INCOMPLETE → PRD D1–D4, D10, §8.7.** This is the **original, incomplete** mount shape. The PRD
+> governs and adds three things §2.3 lacks: **(1) canonicalization (D3)** — the mount host+target paths MUST be
+> `realpath`-resolved, else the fix **silently no-ops on a symlinked checkout** (observed in P5b / PRD AC-3);
+> **(2) the blue worktree-local `.git` pointer seam (D10b)** — for a rw `/project` the pointer file is
+> attacker-controlled and MUST be frozen `:ro` over itself (observed-red P6b / AC-7), which §2.3's "host absolute
+> path, `:ro`" does not contemplate; **(3) mandatory host hook-disabling (D10a)** — `-c core.hooksPath=/dev/null`
+> on host git in an agent worktree is **part of the boundary**, not the deferred aside §2.6 frames. **Do NOT
+> implement the §2.3 mount as written — implement PRD D1–D4 + D10. THE PRD GOVERNS.**
 
 > **Bind-mount the parent repo's common `.git` at its HOST ABSOLUTE PATH, READ-ONLY (`:ro`), for EVERY agent
 > class — blue and red alike. The container's git becomes a READ-ONLY HISTORY LENS. It is never a writable VCS.
@@ -311,11 +339,22 @@ Two things follow, and they are **implementation-visible, not optional**:
    you."* An agent that discovers this by hitting a permission error will burn turns and may report failure.
 2. **The entrypoint refusal message (§2.5) must say the same thing**, so the failure mode is self-explaining.
 
+> **RESOLVED → PRD D5 / §8.5 (OQ-1).** The PRD grepped the in-repo seed corpus: **no containerized agent seed
+> instructs `git commit`** (`seeds/agents/**`). D5a is purely additive; the only residual is drift in the
+> operator's installed `~/.forge` copy, tracked as **PRD OQ-1**. The open question below is answered for the
+> shipped seeds. **THE PRD GOVERNS.**
+
 **OPEN QUESTION (operator):** do any installed seeds instruct agents to `git commit`? I could not grep `~/.forge`
 seeds from here (they are host-installed; `seeds/` in-repo is the source, not the installed copy). If some do,
 they need the one-line contract change above. **Default if unanswered: ship read-only and fix the seeds.**
 
 ### 2.5 The fail-loud detector — where it lives, what it inspects, what it does
+
+> **⚠ SUPERSEDED / INCOMPLETE → PRD D6, D3, D10 (§8.7).** The detector below is correct in shape but incomplete:
+> **Layer 1 MUST compare CANONICAL (`realpath`) paths (D3)** — the plain "assert both are in the mount set" check
+> misses the symlink no-op (P5b / AC-3); and **Layer 2's executed `git log -1` PASSES against a hijacked
+> standalone-gitdir pointer** (observed-red P6b / AC-7), so it does NOT by itself close the blue pointer seam —
+> that is D10b's job. The two layers are necessary, not sufficient. **THE PRD GOVERNS.**
 
 FG-559 requires that **silent degradation be impossible regardless of which fix is chosen.** Two layers, because
 each catches what the other cannot. **Both are exercised in P4.**
@@ -374,6 +413,11 @@ mount fix.
 ---
 
 ## 3. Architecture
+
+> **⚠ INCOMPLETE → PRD §6 (§8.7).** This diagram shows the original mount fix but **predates two binding
+> additions**: the **D10b** worktree-local `.git`-pointer `:ro` freeze (the blue seam) and **D3**
+> canonicalization of every mount path. Implement the governing trust boundary from the PRD §6 diagram, not this
+> one. **THE PRD GOVERNS.**
 
 ```mermaid
 graph TD
@@ -488,7 +532,7 @@ can be observed RED against this baseline**.
 | # | child | scope | depends on | acceptance (EXECUTED) + named RED test |
 |---|---|---|---|---|
 | **0** | **Preflight the path that is actually mounted** | `preflightProjectMount` is handed the **effective mount root** (`worktreePath ?? projectDir`) at all four call sites (`runNext.ts:572`, `:2467`, `:2957`; `invoke.ts:548`). Pure plumbing; **no new policy.** | — | **RED today:** a test asserting the preflight receives the worktree path fails at every call site (P4 case 1 shows the predicate is handed the main checkout and reports `OK`). **Why first:** every later check keys off this argument; done later, Children 1–2 would be written against the wrong path and would *look* correct. |
-| **1** | **FG-559 mount: parent `.git` at its host absolute path, `:ro`** | When the effective mount root's `.git` is a FILE, add `-v <commonDir>:<commonDir>:ro` for **every** agent class. `spawn.ts` mount construction. | 0 | **EXECUTE `p5-docker-container-git.sh` ON THE HOST — both directions, in a REAL container.** Direction 1 (today): `git diff A..B` in the container **MUST FAIL**. Direction 2 (fixed): the same `git diff A..B` **MUST SUCCEED**. **RED baseline is captured now** (P1/SET 0: all six commands fail). **Reject the hollow version:** asserting the docker argv contains the `-v` string. *That is a source-pattern match, and FG-551 forbids it* — the assertion must be **git succeeding inside the container**. |
+| **1** | **FG-559 mount: parent `.git` at its host absolute path, `:ro`** | When the effective mount root's `.git` is a FILE, add `-v <commonDir>:<commonDir>:ro` for **every** agent class. `spawn.ts` mount construction. *(Shape governed by PRD D1–D4 + D10: build from `realpath`'d paths and add the D10b worktree-local-`.git` `:ro` freeze — §8.7.)* | 0 | **`p5-docker-container-git.sh` HAS NOW BEEN EXECUTED ON THE HOST — both directions, in a REAL container.** Direction 1 (today): `git diff A..B` in the container **FAILED** (captured, `p5…out`). Direction 2 (fixed): the same `git diff A..B` **SUCCEEDED** (captured). **RED baseline captured** (P1/SET 0 + P5 DIRECTION 1). **Reject the hollow version:** asserting the docker argv contains the `-v` string. *That is a source-pattern match, and FG-551 forbids it* — the assertion must be **git succeeding inside the container**. |
 | **2** | **FG-559 fail-loud: two-layer detector** | Layer 1 host predicate (`spawn.ts`); Layer 2 **executed** assertion in `docker/agent-entrypoint.sh`. REFUSE for all classes; `FORGE_ALLOW_DANGLING_GITDIR=1` downgrades Layer 2 to a warning. Refusal text states the read-only-history contract (§2.4). | 0 | **RED today:** dispatch a red against a worktree with no `.git` mount → today the agent **starts and runs**; after this child it **refuses before the agent process starts**. Executed in a real container. **Mutant that must redden:** make Layer 2 check only that `/project/.git` *exists* (rather than executing `git log -1`) → must go red, because today's broken shape has a `.git` file that exists and is useless. |
 | **3** | **Agent-facing read-only-git contract** | Task package / seed text: */project's git history is READ-ONLY; read with log/diff/show/blame; do not commit — forge commits and publishes for you.* Resolves the §2.4 cost. | 1 | A blue agent that attempts `git commit` gets a **self-explaining** refusal, not a bare permission error. **Blocked on the §2.4 OPEN QUESTION** (do installed seeds tell agents to commit?). |
 | **4** | **FG-356 reaper** | The terminal-task pass of §4.2: Task-row-only input, the three-clause retain predicate, the **new explicit `provenEmpty` condition** on `removeWorktreeIfSafe`, branch pruning, idempotency. | — (parallel with 0–3) | **RED baseline — MUST BE OBSERVED FIRST, and I could NOT observe it (§0):** run `src/v2/fg530-crash-worktree.worktree.test.ts` **on the macOS host** and confirm that killing at `finalizePrimary:between-complete-status-and-event` leaks a worktree + branch that **no reconcile pass ever removes** (predicted by `reconcile.ts:452`, but **predicted, not executed**). **If that RED does not reproduce, this child's premise is wrong and the spec must be re-derived before any code is written.** Then: (i) the leak is reaped; (ii) a `merge_conflict` worktree is **RETAINED**; (iii) a worktree with changed files is **RETAINED** even under a reapable kind; (iv) running the reaper twice ≡ once; (v) a **concurrent live run's** worktrees are untouched. **Mutant:** pass `provenMerged:true` instead of the new condition → the retain tests must redden. |
@@ -524,6 +568,11 @@ This campaign also runs a **review-trust lane** (FG-566/FG-541/FG-524/FG-525) an
 | **`review-loop.ts` / the lineage classifier** | **Not touched by this plan.** | Review-trust lane. Flagged only so the integration artifact can record "Lane A asserts no change here." |
 | **Agent seeds / task-package text** | Child 3 adds the read-only-git contract line. | **Review-trust lane, moderate** — it also edits reviewer-facing seed text. Textual collision likely; semantic conflict unlikely. |
 
+> **⚠ SUPERSEDED → PRD §8.1.** The `spawn.ts` row's claim that *"after Child 1, reds get working `git diff` for
+> the first time"* is **false as stated** — reds have no Bash and never invoke git; the mount is a **precondition**
+> for a future review-trust decision (PRD OQ-4), not a delivered capability. The cross-lane coordination point
+> still stands, but as a precondition, not a granted benefit. **THE PRD GOVERNS.**
+
 ---
 
 ## 7. Post-FG-561 revalidation triggers (FG-553 / FG-555 are in flight on another lane)
@@ -558,13 +607,16 @@ conclusions must be RE-VERIFIED if that promotion mechanism lands.**
 
 ## 8. Risks / open
 
-- **HIGH — the real-container proof is NOT YET DONE (§0).** The chosen mount shape rests on P1–P4
-  (path-visibility equivalents, executed) plus **inference** about Docker bind-mount semantics — specifically
-  that Docker auto-creates the nested parent directories for a path-identity mount, and that macOS
-  gRPC-FUSE/VirtioFS serves `.git` correctly and enforces `:ro`. **`p5-docker-container-git.sh` must be run on
-  the host before Child 1 is considered accepted.** If path-identity turns out to misbehave under Docker
-  Desktop, **P2 already proves the fallback works** (clean container path + pointer rewrite for rw / env for
-  ro) — the decision changes, the analysis does not.
+- **RESOLVED BY EXECUTION — the real-container proof IS DONE (§0).** `p5-docker-container-git.sh` was executed
+  in a REAL Docker container on the macOS host: DIRECTION 1 (today's shape) fails, **DIRECTION 2 (the chosen
+  `:ro` parent-`.git` mount) works**, DIRECTION 3 refuses every write, DIRECTION 4 confirms the container→host
+  escape. The mount shape no longer rests on inference about Docker bind-mount semantics.
+- **HIGH — path-identity mounting is NOT symlink-safe (`p5b-symlinked-tmpdir-hazard.out`).** Under macOS's
+  default symlinked `$TMPDIR`, the chosen fix's DIRECTION 2 **silently no-ops with the identical
+  `fatal: not a git repository: (null)`** the unfixed system produces. **The mount MUST be built from `realpath`'d
+  paths and the detector MUST compare canonical paths — now a binding invariant (PRD D3 / I-2 / AC-3).** If
+  path-identity is otherwise rejected, **P2 already proves the fallback works** (clean container path + pointer
+  rewrite for rw / env for ro) — the decision changes, the analysis does not.
 - **HIGH — FG-356's red baseline is PREDICTED, NOT OBSERVED (§0, Child 4).** `reconcile.ts:452` makes the leak
   a near-certainty, but I could not execute `fg530-crash-worktree.worktree.test.ts` (empty `node_modules`;
   Linux). **Observe the RED on the host before writing the reaper.**
@@ -585,7 +637,8 @@ conclusions must be RE-VERIFIED if that promotion mechanism lands.**
 ## 9. Gate
 
 **STOP. Operator review required before any implementation.** No child tickets filed; §5 is plan content only.
-On approval, the first two actions are **evidence, not code**: (1) run `p5-docker-container-git.sh` on the
-macOS host to convert Child 1's acceptance from inference into a container-executed fact; (2) run
-`fg530-crash-worktree.worktree.test.ts` on the host to **observe** FG-356's red baseline. Only then file
-Children 0–6 and dispatch **Child 0**.
+On approval, the remaining evidence action is: run `fg530-crash-worktree.worktree.test.ts` on the host to
+**observe** FG-356's red baseline (still NOT observed — §8, PRD AC-5). **`p5-docker-container-git.sh` has
+already been run on the host** — Child 1's acceptance is now a container-executed fact, and `p5b` established
+the canonicalization invariant — so that gate is discharged. Only then file Children 0–6 and dispatch
+**Child 0**.
