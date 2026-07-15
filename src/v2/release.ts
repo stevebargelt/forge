@@ -433,10 +433,12 @@ export type BuildReleaseOptions = {
   outDir: string;
   now?: Date;
   rand?: string;
-  // Test seam: fires AFTER the commit-bound copy has read the source tree but BEFORE the
-  // post-copy revalidation, so a test can simulate a concurrent edit landing inside the
-  // copy window and prove the TOCTOU gate refuses it. Never set in production.
-  onCopied?: () => void;
+  // Test seam: fires AFTER the up-front dirty-check + commit capture but BEFORE the committed
+  // snapshot is materialized, so a test can dirty the LIVE working tree inside the build window
+  // and prove the snapshot copy still ships the COMMITTED bytes regardless. Never set in
+  // production. (The build copies git-tracked bytes from the recorded commit, not the live
+  // tree, so a concurrent live edit cannot leak in — there is nothing here to refuse.)
+  onBeforeSnapshot?: () => void;
 };
 
 export type BuildReleaseResult = {
@@ -564,10 +566,12 @@ export function buildRelease(opts: BuildReleaseOptions): BuildReleaseResult {
   // RELEASE, its trusted identity is its OWN manifest's commit (a release has no .git);
   // on a dev self-build the builder IS the source checkout, so the two commits are equal.
   const now = opts.now ?? new Date();
-  // The commit-bound source paths: src/, package.json, the selected lockfile, AND every
-  // bundled asset dir. A dirty seed/hook/docker file refuses the build (Resolution B).
-  const sourceBoundPaths = ["src", "package.json", lockfileName, ...REQUIRED_ASSET_DIRS];
-  assertCommitDescribesTree(sourceRoot, sourceBoundPaths, "source");
+  // The commit-bound, GIT-TRACKED source paths: src/, package.json, the selected lockfile,
+  // AND every bundled asset dir. These ship from a COMMITTED SNAPSHOT of `commit` (below),
+  // not the live tree. A dirty one still refuses the build up front — a fast, clear fail —
+  // even though the snapshot copy no longer depends on the tree staying clean during the build.
+  const gitTrackedPaths = ["src", "package.json", lockfileName, ...REQUIRED_ASSET_DIRS];
+  assertCommitDescribesTree(sourceRoot, gitTrackedPaths, "source");
   const commit = gitCommit(sourceRoot);
   const builderCommit = resolveBuilderCommit(sourceRoot, commit);
   const rand = opts.rand ?? Math.random().toString(36).slice(2, 8);
@@ -578,38 +582,36 @@ export function buildRelease(opts: BuildReleaseOptions): BuildReleaseResult {
   rmSync(tmpDir, { recursive: true, force: true });
   mkdirSync(tmpDir, { recursive: true });
   try {
-    // FG-569 (Resolution B): `src` + `node_modules` is not the whole runtime. Shipped
-    // commands resolve bundled assets MODULE-RELATIVE to the release root — `forge init`
-    // reads `seeds/` (also seed-drift/raci) and copies hooks out of `scripts/` (git-hooks,
-    // claude-hooks, claude-commands); doctor reads seeds/ via seed-drift; docker/ carries
-    // the build inputs upgrade/doctor consult. All three are REQUIRED (their presence was
-    // asserted above), so no optional-skip here. (`dashboard/` is a SEPARATE npm workspace
-    // with its own dependency tree — deliberately NOT bundled; `forge dashboard` refuses in
-    // release mode, deferred to FG-572 / Child 5.)
-    for (const rel of ["src", "node_modules", "package.json", lockfileName, ...REQUIRED_ASSET_DIRS]) {
-      const from = join(sourceRoot, rel);
-      const dest = join(tmpDir, rel);
-      cpSync(from, dest, { recursive: true, dereference: true });
-      // cpSync's `dereference` follows ONLY the top-level path — a NESTED symlink
-      // (an npm-linked dependency, a .bin entry) survives the recursive copy as a
-      // link pointing OUT of the release. Shipped, it would silently load mutable
-      // host code once the source tree moved or changed — not the self-contained
-      // closure this release must be. Dereference every nested link into real bytes.
-      if (statSync(dest).isDirectory()) dereferenceSymlinks(dest);
+    // FG-569 (TOCTOU, closed): materialize the GIT-TRACKED commit-bound paths from a
+    // COMMITTED SNAPSHOT of `commit` — `git archive` reads the commit's objects, never the
+    // working tree — and extract them straight into staging. The shipped git-tracked bytes are
+    // therefore EXACTLY the commit's bytes BY CONSTRUCTION: a concurrent edit to the live
+    // working tree during the build cannot leak into the closure (post-copy LIVE rechecks could
+    // not close this — the bytes would already have been captured mid-edit). `src` + the bundled
+    // asset dirs (seeds/, scripts/, docker/) resolve module-relative to the release root — all
+    // REQUIRED (asserted above). `dashboard/` is a SEPARATE npm workspace, deliberately NOT
+    // bundled; `forge dashboard` refuses in release mode (FG-572 / Child 5). All six paths have
+    // tracked content in a real source, so a single archive covers the whole commit-bound set.
+    opts.onBeforeSnapshot?.();
+    let archive: Buffer;
+    try {
+      archive = execFileSync("git", ["archive", "--format=tar", commit, "--", ...gitTrackedPaths], { cwd: sourceRoot, maxBuffer: 512 * 1024 * 1024 });
+    } catch (e) {
+      throw new Error(`forge release: cannot materialize the committed snapshot (${gitTrackedPaths.join(", ")}) at ${commit.slice(0, 7)} from ${sourceRoot} — ${(e as Error).message}`);
     }
+    execFileSync("tar", ["-x", "-f", "-", "-C", tmpDir], { input: archive });
 
-    // FG-569 (TOCTOU): the pre-copy gate (assertCommitDescribesTree above) proved the
-    // source clean and at `commit`, but cpSync reads the tree LATER — a concurrent edit
-    // in that window would be copied into the release under a manifest commit that does
-    // not describe the copied bytes. RE-ASSERT, now that the copy has read every
-    // commit-bound path, that the source is STILL clean AND HEAD is STILL `commit`: a
-    // persistent concurrent edit leaves the tree dirty, and a concurrent commit moves
-    // HEAD — either refuses the build rather than shipping mis-attributed bytes.
-    opts.onCopied?.();
-    assertCommitDescribesTree(sourceRoot, sourceBoundPaths, "source");
-    const commitAfterCopy = gitCommit(sourceRoot);
-    if (commitAfterCopy !== commit) {
-      throw new Error(`forge release: the source HEAD at ${sourceRoot} moved during the build (recorded ${commit.slice(0, 7)}, now ${commitAfterCopy.slice(0, 7)}) — the copied bytes may not describe the recorded commit. Rebuild from a quiescent source.`);
+    // node_modules is NOT git-tracked — copy it from the LIVE source. Its integrity is bound to
+    // the lockfile by assertShippedClosureMatchesLockfile (and the lockfile itself now comes from
+    // the snapshot), so a live node_modules cannot smuggle in bytes the lockfile does not pin.
+    // cpSync's `dereference` follows ONLY the top-level path — a NESTED symlink (an npm-linked
+    // dependency, a .bin entry) survives the recursive copy as a link pointing OUT of the
+    // release. Shipped, it would silently load mutable host code once the source tree moved or
+    // changed. Dereference every nested link into real bytes; the archived git-tracked dirs get
+    // the same treatment for any tracked symlink so the whole closure stays link-free.
+    cpSync(join(sourceRoot, "node_modules"), join(tmpDir, "node_modules"), { recursive: true, dereference: true });
+    for (const rel of ["node_modules", "src", ...REQUIRED_ASSET_DIRS]) {
+      dereferenceSymlinks(join(tmpDir, rel));
     }
 
     writeFileSync(join(tmpDir, RELEASE_LOADER_NAME), LOADER_SHIM);

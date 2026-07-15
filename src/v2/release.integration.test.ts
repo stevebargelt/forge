@@ -259,6 +259,9 @@ test("FG-569 closure: a symlinked node_modules dependency is DEREFERENCED into t
   execFileSync("git", ["init", "-q"], { cwd: src });
   execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"], { cwd: src });
   mkdirSync(join(src, "src"));
+  // A tracked src/ file so the committed-snapshot archive has content to materialize (git
+  // does not track an empty dir; archive errors on a pathspec matching nothing tracked).
+  writeFileSync(join(src, "src", "index.ts"), "export {};\n");
   writeFileSync(join(src, "package.json"), `{"name":"symlink-src"}`);
   writeFileSync(join(src, "package-lock.json"), `{"name":"symlink-src","lockfileVersion":3}`);
   // The real, complete node_modules so the closure gate (better-sqlite3 loads +
@@ -311,6 +314,9 @@ test("FG-569 lockfile binding (RED pre-fix, GREEN after): a content-mutated inst
   execFileSync("git", ["init", "-q"], { cwd: src });
   execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"], { cwd: src });
   mkdirSync(join(src, "src"));
+  // A tracked src/ file so the committed-snapshot archive has content to materialize
+  // (git does not track an empty dir; archive errors on a pathspec matching nothing).
+  writeFileSync(join(src, "src", "index.ts"), "export {};\n");
   // Build from THIS project's real lockfile + node_modules, so the npm cache holds
   // every pinned tarball (the scratch install populated it) and the binding has an
   // authentic tarball to compare each shipped dependency against.
@@ -406,6 +412,10 @@ function makeLockSource(label: string): string {
   execFileSync("git", ["init", "-q"], { cwd: src });
   execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"], { cwd: src });
   mkdirSync(join(src, "src"));
+  // A tracked file under src/ so the committed snapshot (git archive <commit> -- src …) has
+  // content to materialize — git does not track an empty directory, and archive fatally
+  // errors on a pathspec that matches no tracked files. Real sources always carry src/*.
+  writeFileSync(join(src, "src", "index.ts"), "export {};\n");
   cpSync(join(sourceRoot, "package.json"), join(src, "package.json"));
   cpSync(join(sourceRoot, "node_modules"), join(src, "node_modules"), { recursive: true, dereference: true });
   copyBundledAssets(src);
@@ -527,48 +537,64 @@ test("FG-569 GAP 2 (dirty source, RED pre-fix / GREEN after): an uncommitted cha
   assert.ok(!existsSync(join(workspace, "gap2-dirty")), "a refused build leaves no release directory behind");
 });
 
-test("FG-569 TOCTOU (concurrent edit during copy): a source mutation landing AFTER the pre-copy gate but during the copy window is REFUSED, not shipped under a stale commit", () => {
-  const src = makeLockSource("toctou-edit-");
+test("FG-569 TOCTOU (snapshot from commit, RED pre-fix / GREEN after): a LIVE-tree mutation landing after the commit is captured does NOT change the shipped bytes — the release ships the COMMITTED bytes", () => {
+  // The TOCTOU the live-cpSync builder could not close: a concurrent editor modifies a
+  // commit-bound file DURING the copy (even restoring the committed bytes before any
+  // post-copy recheck), so the release shipped transient bytes under a manifest `commit`
+  // that did not describe them. The fix materializes git-tracked paths from the COMMITTED
+  // SNAPSHOT (git archive <commit>), never the live tree, so a live edit inside the build
+  // window cannot leak in. Against the old live-cpSync builder this is RED (it ships the live
+  // bytes); against the snapshot builder it is GREEN (it ships the committed bytes).
+  const src = makeLockSource("toctou-snapshot-");
   cpSync(join(sourceRoot, "package-lock.json"), join(src, "package-lock.json"));
+  // A representative commit-bound file with KNOWN committed content.
+  const relPosix = "src/toctou-marker.ts";
+  const marker = join(src, "src", "toctou-marker.ts");
+  const committedText = "export const committed = true;\n";
+  writeFileSync(marker, committedText);
   commitSource(src);
-  // Baseline: the committed tree builds — the post-copy revalidation does not false-refuse
-  // a source that stays quiescent through the copy.
-  buildRelease({ sourceRoot: src, outDir: join(workspace, "toctou-clean") });
+  const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: src, encoding: "utf8" }).trim();
+  const committedBytes = execFileSync("git", ["show", `${commit}:${relPosix}`], { cwd: src, encoding: "buffer" });
+  assert.equal(committedBytes.toString(), committedText, "the committed blob is the content we committed");
 
-  // (a) A concurrent editor dirties src/ AFTER the pre-copy gate passed but while the copy
-  // is reading the tree. Without the post-copy revalidation this shipped bytes the recorded
-  // commit never produced; with it, the now-dirty tree refuses the build.
-  assert.throws(
-    () =>
-      buildRelease({
-        sourceRoot: src,
-        outDir: join(workspace, "toctou-dirty"),
-        onCopied: () => writeFileSync(join(src, "src", "raced-in.ts"), "export const raced = 1;\n"),
-      }),
-    /refusing to build a release from a dirty source/i,
-    "a concurrent edit inside the copy window must refuse the build",
-  );
-  assert.ok(!existsSync(join(workspace, "toctou-dirty")), "a refused build leaves no release directory behind");
+  // Baseline: a quiescent build ships the committed bytes.
+  const clean = buildRelease({ sourceRoot: src, outDir: join(workspace, "toctou-snapshot-clean") });
+  assert.deepEqual(readFileSync(join(clean.releaseDir, relPosix)), committedBytes, "a quiescent build ships the committed bytes");
+  assert.equal(clean.manifest.commit, commit, "and records the commit those bytes come from");
 
-  // (b) A concurrent COMMIT moves HEAD during the copy window: the tree is clean again, so
-  // the dirty-check alone would pass, but the recorded commit no longer names the built
-  // bytes. The HEAD-moved check refuses it.
-  rmSync(join(src, "src", "raced-in.ts"));
-  assert.throws(
-    () =>
-      buildRelease({
-        sourceRoot: src,
-        outDir: join(workspace, "toctou-moved"),
-        onCopied: () => {
-          writeFileSync(join(src, "src", "post-gate-feature.ts"), "export const y = 2;\n");
-          execFileSync("git", ["add", "--", "src"], { cwd: src });
-          execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "concurrent commit"], { cwd: src });
-        },
-      }),
-    /source HEAD .* moved during the build/i,
-    "a concurrent commit moving HEAD during the copy window must refuse the build",
-  );
-  assert.ok(!existsSync(join(workspace, "toctou-moved")), "a refused build leaves no release directory behind");
+  // The race: dirty the LIVE file AFTER the commit is captured (inside the build window). The
+  // up-front dirty-check already passed on the clean tree; the seam fires before the snapshot
+  // is materialized. The snapshot copy reads the commit's objects, so the live mutation is a
+  // no-op on the shipped bytes.
+  const liveMutation = "export const committed = false; // LIVE MUTATION — not in the commit\n";
+  const raced = buildRelease({
+    sourceRoot: src,
+    outDir: join(workspace, "toctou-snapshot-raced"),
+    onBeforeSnapshot: () => writeFileSync(marker, liveMutation),
+  });
+  const shipped = readFileSync(join(raced.releaseDir, relPosix));
+  assert.deepEqual(shipped, committedBytes, "the SHIPPED git-tracked bytes equal the COMMITTED bytes (git show <commit>:<path>)");
+  assert.notDeepEqual(shipped, Buffer.from(liveMutation), "the live mutation did NOT leak into the release — RED against a live-cpSync builder");
+  assert.equal(readFileSync(marker, "utf8"), liveMutation, "the live working tree really was mutated to differ from the commit at copy time");
+  assert.equal(raced.manifest.commit, commit, "the manifest commit still describes the shipped (committed) bytes");
+
+  // Restore the working tree (HEAD is unchanged, so this returns the committed bytes) before
+  // the next build, whose up-front dirty-check requires a clean tree.
+  execFileSync("git", ["checkout", "--", relPosix], { cwd: src });
+
+  // A concurrent COMMIT moving HEAD during the window is likewise ignored: the snapshot is of
+  // the ORIGINALLY captured commit, so the release ships THAT commit's bytes, not the new one.
+  const moved = buildRelease({
+    sourceRoot: src,
+    outDir: join(workspace, "toctou-snapshot-moved"),
+    onBeforeSnapshot: () => {
+      writeFileSync(marker, liveMutation);
+      execFileSync("git", ["add", "--", "src"], { cwd: src });
+      execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "concurrent commit"], { cwd: src });
+    },
+  });
+  assert.deepEqual(readFileSync(join(moved.releaseDir, relPosix)), committedBytes, "a concurrent commit during the window does not change the shipped snapshot bytes");
+  assert.equal(moved.manifest.commit, commit, "the manifest still records the commit the snapshot was taken from");
 });
 
 test("FG-569 GAP 2 (builder identity): builderCommit is recorded and EQUALS commit on a normal self-build (builder and source are one checkout)", () => {
