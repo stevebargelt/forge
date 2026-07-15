@@ -433,6 +433,10 @@ export type BuildReleaseOptions = {
   outDir: string;
   now?: Date;
   rand?: string;
+  // Test seam: fires AFTER the commit-bound copy has read the source tree but BEFORE the
+  // post-copy revalidation, so a test can simulate a concurrent edit landing inside the
+  // copy window and prove the TOCTOU gate refuses it. Never set in production.
+  onCopied?: () => void;
 };
 
 export type BuildReleaseResult = {
@@ -593,6 +597,21 @@ export function buildRelease(opts: BuildReleaseOptions): BuildReleaseResult {
       // closure this release must be. Dereference every nested link into real bytes.
       if (statSync(dest).isDirectory()) dereferenceSymlinks(dest);
     }
+
+    // FG-569 (TOCTOU): the pre-copy gate (assertCommitDescribesTree above) proved the
+    // source clean and at `commit`, but cpSync reads the tree LATER — a concurrent edit
+    // in that window would be copied into the release under a manifest commit that does
+    // not describe the copied bytes. RE-ASSERT, now that the copy has read every
+    // commit-bound path, that the source is STILL clean AND HEAD is STILL `commit`: a
+    // persistent concurrent edit leaves the tree dirty, and a concurrent commit moves
+    // HEAD — either refuses the build rather than shipping mis-attributed bytes.
+    opts.onCopied?.();
+    assertCommitDescribesTree(sourceRoot, sourceBoundPaths, "source");
+    const commitAfterCopy = gitCommit(sourceRoot);
+    if (commitAfterCopy !== commit) {
+      throw new Error(`forge release: the source HEAD at ${sourceRoot} moved during the build (recorded ${commit.slice(0, 7)}, now ${commitAfterCopy.slice(0, 7)}) — the copied bytes may not describe the recorded commit. Rebuild from a quiescent source.`);
+    }
+
     writeFileSync(join(tmpDir, RELEASE_LOADER_NAME), LOADER_SHIM);
     const entryPath = join(tmpDir, RELEASE_ENTRY_NAME);
     writeFileSync(entryPath, renderEntry(interpreter));

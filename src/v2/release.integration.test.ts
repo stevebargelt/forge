@@ -527,6 +527,50 @@ test("FG-569 GAP 2 (dirty source, RED pre-fix / GREEN after): an uncommitted cha
   assert.ok(!existsSync(join(workspace, "gap2-dirty")), "a refused build leaves no release directory behind");
 });
 
+test("FG-569 TOCTOU (concurrent edit during copy): a source mutation landing AFTER the pre-copy gate but during the copy window is REFUSED, not shipped under a stale commit", () => {
+  const src = makeLockSource("toctou-edit-");
+  cpSync(join(sourceRoot, "package-lock.json"), join(src, "package-lock.json"));
+  commitSource(src);
+  // Baseline: the committed tree builds — the post-copy revalidation does not false-refuse
+  // a source that stays quiescent through the copy.
+  buildRelease({ sourceRoot: src, outDir: join(workspace, "toctou-clean") });
+
+  // (a) A concurrent editor dirties src/ AFTER the pre-copy gate passed but while the copy
+  // is reading the tree. Without the post-copy revalidation this shipped bytes the recorded
+  // commit never produced; with it, the now-dirty tree refuses the build.
+  assert.throws(
+    () =>
+      buildRelease({
+        sourceRoot: src,
+        outDir: join(workspace, "toctou-dirty"),
+        onCopied: () => writeFileSync(join(src, "src", "raced-in.ts"), "export const raced = 1;\n"),
+      }),
+    /refusing to build a release from a dirty source/i,
+    "a concurrent edit inside the copy window must refuse the build",
+  );
+  assert.ok(!existsSync(join(workspace, "toctou-dirty")), "a refused build leaves no release directory behind");
+
+  // (b) A concurrent COMMIT moves HEAD during the copy window: the tree is clean again, so
+  // the dirty-check alone would pass, but the recorded commit no longer names the built
+  // bytes. The HEAD-moved check refuses it.
+  rmSync(join(src, "src", "raced-in.ts"));
+  assert.throws(
+    () =>
+      buildRelease({
+        sourceRoot: src,
+        outDir: join(workspace, "toctou-moved"),
+        onCopied: () => {
+          writeFileSync(join(src, "src", "post-gate-feature.ts"), "export const y = 2;\n");
+          execFileSync("git", ["add", "--", "src"], { cwd: src });
+          execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "concurrent commit"], { cwd: src });
+        },
+      }),
+    /source HEAD .* moved during the build/i,
+    "a concurrent commit moving HEAD during the copy window must refuse the build",
+  );
+  assert.ok(!existsSync(join(workspace, "toctou-moved")), "a refused build leaves no release directory behind");
+});
+
 test("FG-569 GAP 2 (builder identity): builderCommit is recorded and EQUALS commit on a normal self-build (builder and source are one checkout)", () => {
   const m = built.manifest;
   assert.match(m.builderCommit, /^[0-9a-f]{40}$/, "the builder's own commit is recorded in the manifest");
