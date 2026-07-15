@@ -215,7 +215,7 @@ primary-only ready-work surface silently drops. Ready work names **the attempt t
 
 **S5 — Terminal blockers.** The *lineage-correct* failed-primary set, with **SHARED-wins** aggregation over
 **all** failed primaries. The aggregation itself already exists and is correct (`executor.ts:496-503`;
-`isSharedBlocker → "hold_campaign"` at `policy.ts:139-141`). **What is wrong is the row set it aggregates over**
+`isSharedBlocker → "hold_campaign"` at `policy.ts:144`). **What is wrong is the row set it aggregates over**
 (`executor.ts:494`, `:2183` — raw `parentId === undefined && status === "failed"`, which admits a failed
 **ad-hoc invoke** row into a *workflow's* terminal-blocker set).
 
