@@ -31,5 +31,10 @@ while [ -L "$p" ]; do
   case "$t" in /*) p=$t ;; *) p=${p%/*}/$t ;; esac
 done
 case "$p" in */*) d=${p%/*} ;; *) d=. ;; esac
-here=$(CDPATH= cd -- "$d" && pwd)
+# POSIX gives the `cd` builtin no `--` operand separator, so a strict /bin/sh (dash)
+# reads `cd -- "$d"` as a cd to a directory literally named `--` and every direct
+# invocation fails before node is exec'd. Disarm a leading-dash dir with a ./ prefix
+# instead — the SAME POSIX-safe idiom the generated release entry uses (renderEntry).
+case $d in -*) d=./$d ;; esac
+here=$(CDPATH= cd "$d" && pwd)
 exec node --import "$here/forge-loader.mjs" "$here/../src/cli/index.ts" "$@"

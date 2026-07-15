@@ -237,6 +237,11 @@ export function parseRecorderRuntime(raw: string): RecorderRuntime | undefined {
   try {
     const p = JSON.parse(raw) as Partial<RecorderRuntime>;
     if (typeof p.execPath !== "string" || typeof p.abi !== "string" || typeof p.nodeVersion !== "string") return undefined;
+    // FG-569 (R2): releaseId must be string | null. A present-but-wrong-typed value
+    // (e.g. the number 42) is a MALFORMED record — OMIT the whole record rather than
+    // coercing it to a null-release recorder, which would GUESS a provenance the bytes
+    // never stated. Absent is the dev shape (no id) and still defaults to null.
+    if (p.releaseId != null && typeof p.releaseId !== "string") return undefined;
     return { execPath: p.execPath, abi: p.abi, nodeVersion: p.nodeVersion, releaseId: typeof p.releaseId === "string" ? p.releaseId : null };
   } catch {
     return undefined;
