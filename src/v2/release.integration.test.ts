@@ -16,7 +16,7 @@ import { spawnSync, execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, cpSync, writeFileSync, existsSync, lstatSync, readdirSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildRelease, assertReleaseCloses, RELEASE_BINDING_REL, RELEASE_LOADER_NAME, type BuildReleaseResult } from "./release.js";
+import { buildRelease, assertReleaseCloses, renderEntry, RELEASE_BINDING_REL, RELEASE_LOADER_NAME, RELEASE_MANIFEST_NAME, type BuildReleaseResult } from "./release.js";
 import { findGitRoot } from "../util/git-root.js";
 
 const sourceRoot = findGitRoot(process.cwd());
@@ -91,6 +91,19 @@ test("FG-569 exec-not-spawn (EXECUTED): the release entry runs in ONE process �
   // If the entry had spawned a child to load the binding, the CLI would report a
   // different pid than the process we launched.
   assert.equal(prov.pid, r.pid, "the process that loaded the binding IS the one we launched — exec, not spawn");
+});
+
+test("FG-569 R2 entry (EXECUTED): the FORGE_RELEASE_ID block parses the id straight out of a real manifest", () => {
+  // Relocated from release.test.ts (a spawn is a fast-tier violation). An sh that
+  // reads a real manifest must set the id (the release's own id). Rip out just the
+  // FORGE_RELEASE_ID block and run it — no interpreter/loader needed.
+  const entry = renderEntry("/opt/node-24/bin/node");
+  const block = entry.slice(entry.indexOf("while IFS="), entry.indexOf("\n\nexec"));
+  const dir = mkdtempSync(join(workspace, "r2entry-"));
+  writeFileSync(join(dir, RELEASE_MANIFEST_NAME), JSON.stringify({ schema: 1, id: "release-feedb0d-9xk2z", commit: "feedb0d" }, null, 2) + "\n");
+  const run = spawnSync("/bin/sh", ["-c", `here=${dir}\n${block}\nprintf '%s' "$FORGE_RELEASE_ID"`], { encoding: "utf8" });
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.stdout, "release-feedb0d-9xk2z", "the entry's shell parses the id straight out of its manifest");
 });
 
 test("FG-569 MUST-FIX 1 (EXECUTED THROUGH A SYMLINK): the release entry resolves its release root through a promotion symlink", () => {

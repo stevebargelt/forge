@@ -5,7 +5,6 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -58,20 +57,9 @@ test("FG-569 R2 entry: exports FORGE_RELEASE_ID sourced from the release's OWN m
   for (const ext of ["$(sed", "$(grep", "$(awk", "$(jq", "$(dirname", "$(node"]) {
     assert.ok(!codeBeforeExec.includes(ext), `the manifest is parsed with shell builtins, not ${ext}`);
   }
-
-  // EXECUTE it: an sh that reads a real manifest must set the id (the release's
-  // own id), and no-manifest sh (bin/forge shape) must leave it unset. Rip out
-  // just the FORGE_RELEASE_ID block and run it — no interpreter/loader needed.
-  const block = entry.slice(entry.indexOf("while IFS="), entry.indexOf("\n\nexec"));
-  const dir = mkdtempSync(join(tmpdir(), "fg569-r2entry-"));
-  try {
-    writeFileSync(join(dir, RELEASE_MANIFEST_NAME), JSON.stringify({ schema: 1, id: "release-feedb0d-9xk2z", commit: "feedb0d" }, null, 2) + "\n");
-    const run = spawnSync("/bin/sh", ["-c", `here=${dir}\n${block}\nprintf '%s' "$FORGE_RELEASE_ID"`], { encoding: "utf8" });
-    assert.equal(run.status, 0, run.stderr);
-    assert.equal(run.stdout, "release-feedb0d-9xk2z", "the entry's shell parses the id straight out of its manifest");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  // The EXECUTED half — running the FORGE_RELEASE_ID block under /bin/sh to prove
+  // it parses the id straight out of a real manifest — lives in the integration
+  // tier (release.integration.test.ts); a spawn is a fast-tier violation here.
 });
 
 test("FG-569 manifest discovery: walks up from a nested module dir to the release root", () => {
