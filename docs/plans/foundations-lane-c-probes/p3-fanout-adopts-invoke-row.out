@@ -1,0 +1,16 @@
+### classifier
+  kind(task-invoke-1) = adhoc_invoke | isWorkflowPrimaryRow = false
+  => dispatchSingleStep's MIGRATED lookup (runNext.ts:443-448) would NOT reuse this row.
+
+### legacy predicate actually in dispatchFanoutStep (runNext.ts:1572-1574)
+  existingParent = task-invoke-1
+
+### ready queue admits the fanout step (the invoke row is invisible to it): task
+
+### EXECUTING runNext (real dispatch path; no docker is reached)
+  runNext -> {"dispatchedSteps":["task"],"completedSteps":[],"awaitingGate":[],"failedSteps":["task"],"awaitingRecovery":[],"runStatus":"active"}
+
+### the operator's INVOKE row, after `forge next`:
+  status = failed
+  error  = fanout: upstream 'plan' has no array at 'steps'
+  rows in run: plan-1[complete]  task-invoke-1[failed]

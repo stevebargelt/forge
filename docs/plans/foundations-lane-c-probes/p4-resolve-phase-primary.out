@@ -1,0 +1,14 @@
+### A. complete ad-hoc invoke row only
+  kinds: task-invoke-1=adhoc_invoke
+  resolvePhasePrimary TODAY      -> task-invoke-1
+  resolvePhasePrimary IF ABSORBED-> (undefined)
+  deriveUpstream(review) TODAY   -> [{"phase":"task","agentRole":"engineer","taskId":"task-invoke-1"}]
+  NARROWED? true
+
+### B. complete marker-less legacy row only
+  kinds: task-legacy-1=legacy_ambiguous_invoke
+  resolvePhasePrimary TODAY      -> task-legacy-1
+  resolvePhasePrimary IF ABSORBED-> task-legacy-1
+  deriveUpstream(review) TODAY   -> [{"phase":"task","agentRole":"engineer","taskId":"task-legacy-1"}]
+  NARROWED? false
+
