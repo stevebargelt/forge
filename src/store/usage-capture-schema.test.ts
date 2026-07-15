@@ -80,14 +80,21 @@ test("#295/FG-568: applyMigrations LEAVES the legacy columns (additive-only); th
   assert.ok(afterMigrate.has("completion_tokens"), "additive-only: completion_tokens NOT dropped on the open path");
   assert.ok(afterMigrate.has("cost"), "additive-only: cost NOT dropped on the open path");
 
-  // Because the legacy NOT NULL columns survive, a current insert omitting them
-  // still throws — which is exactly why an EXPLICIT convergence migration exists.
+  // FG-568 corrective: the legacy NOT NULL columns survive, but the DUAL-SHAPE
+  // writer now detects them and fills the 0/0/0 compatibility placeholders — so
+  // the current insert SUCCEEDS on the unconverged shape instead of throwing.
+  // (The pre-corrective behavior was a silent usage-loss bug; see model-calls.ts.)
   const prev = setDbForTest(db);
   try {
     seedTask("t-migrated");
-    assert.throws(() => insertUsageRows([usageRow("t-migrated")]), /NOT NULL|constraint/i, "unconverged legacy shape rejects the current insert");
+    assert.equal(insertUsageRows([usageRow("t-migrated")]), 1, "dual-shape writer succeeds on the unconverged legacy shape");
+    const legacyRow = db.prepare("SELECT prompt_tokens, completion_tokens, cost, input_tokens FROM model_calls WHERE task_id = ?").get("t-migrated") as { prompt_tokens: number; completion_tokens: number; cost: number; input_tokens: number };
+    assert.equal(legacyRow.prompt_tokens, 0, "legacy prompt_tokens filled with the 0 placeholder");
+    assert.equal(legacyRow.completion_tokens, 0, "legacy completion_tokens filled with the 0 placeholder");
+    assert.equal(legacyRow.cost, 0, "legacy cost filled with the 0 placeholder");
+    assert.equal(legacyRow.input_tokens, 100, "the real token counts still land in the current columns");
 
-    // Now converge explicitly (quiesce is a no-op on :memory:), then it works.
+    // Now converge explicitly (quiesce is a no-op on :memory:), then it still works.
     const { dropped } = runDestructiveConvergenceMigration(db);
     assert.deepEqual(dropped.sort(), ["completion_tokens", "cost", "prompt_tokens"], "the explicit migration drops the legacy columns");
     const afterConverge = new Set((db.prepare("PRAGMA table_info(model_calls)").all() as { name: string }[]).map((r) => r.name));
