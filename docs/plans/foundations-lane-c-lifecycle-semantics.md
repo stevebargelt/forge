@@ -1,5 +1,11 @@
 # Lane C — lifecycle semantics (FG-477 + FG-527). Architecture + plan. **PLANNING ARTIFACT ONLY. No implementation. No tickets filed.**
 
+> **STATUS — SUPERSEDED DISCOVERY INPUT.** Binding contract is `docs/prds/workflow-lifecycle-semantics.md`;
+> where they differ, the PRD GOVERNS. Known supersessions: **(a)** the red-baseline method here is replaced by
+> the PRD's four-label method — absent evaluator surfaces are **NORMATIVE-UNMET**, NOT "RED by construction";
+> **(b)** cross-cluster landing ORDER is owned by the integration artifact, not decided here; **(c)** run-finalize
+> is **NOT** the sole completion writer.
+
 **Baseline:** `185afc3` (standalone clone). **Probes:** `docs/plans/foundations-lane-c-probes/` (4, all rerunnable, output captured).
 **Evidence rule (inherited from FG-551/FG-553):** every claim below is labelled **VERIFIED FACT** (file:line at
 this SHA, or captured probe output), **INFERENCE**, or **OPEN QUESTION**. A source-pattern match is not evidence
@@ -207,8 +213,9 @@ graph TD
   EVAL -->|"ready work + lineage"| RN["runNext (dispatch)"]
   EVAL -->|"settled? + reason"| GATE["gate"]
   EVAL -->|"failure kinds + failed primaries"| CAMP["campaign/policy (translation layer:<br/>BlockerKind vocabulary stays HERE)"]
-  RN --> RF["run-finalize<br/>(SOLE writer of run completion)"]
+  RN --> RF["run-finalize<br/>(sole completeRun caller — NOT sole completion writer)"]
   GATE --> RF
+  DESIGN["forge design / forge claude<br/>(telemetry runs, out of boundary)"] -->|"updateRunStatus(_, 'complete')"| DB
   REC["reconcile (never-throw, NO workflow)"] -.->|"workflow-free primitives only"| EVAL
   RF --> DB[("SQLite — task/run rows")]
   RN --> DB
@@ -264,15 +271,24 @@ fanout wave.* Mitigations, in order of strength:
 Each is independently shippable **and** independently revertable (one predicate group, one commit). "RED today"
 = a falsification test that is observably failing against `185afc3`.
 
+> **SUPERSEDED BY PRD — the "RED against baseline" method in this column is replaced by the PRD's four-label
+> method.** Only C1/C2/C3/C8 (fixes to *existing* wrong behavior) carry a genuine observed baseline red. The
+> evaluator-proper rows below (**C4 step state, C5 run state, C6 terminal blockers, C7 operator reason**) target
+> surfaces that **DO NOT EXIST**; an absent module cannot be falsified against a baseline, so the PRD reclassifies
+> them as **NORMATIVE-UNMET** (N-1…N-5) with parity acceptance conditions, and **prohibits fabricated reds**.
+> `docs/prds/workflow-lifecycle-semantics.md` §7.2 governs. (C5/C6 additionally cite a concrete ad-hoc-row defect,
+> tracked separately as PRD A-6 — **INFERENCE, not yet observed**; its red is a pending precondition, not a claim
+> already met.)
+
 | # | Story | Falsification test (RED against baseline) | FG-477 AC line |
 |---|---|---|---|
 | **C1** | `retry.ts` asks the classifier, and **refuses a red with an accurate message** (not "fanout child"). `FanoutChildRetryError` keeps firing for real `fanout_child` rows. `--force` on a red row is *also* refused (it mints the corrupting primary — see OQ-1). | `p2` part A: today the message says "fanout child (parent build-primary)" about a `red_review` row. New test: retrying a failed `shipping-reviewer` refuses **as a red**, and no `retry_replacement` row exists in the phase afterwards. Delete the legacy fixture at `lifecycle-evaluator.test.ts:596-601`; flip `:603` to an agreement assertion. | (lineage/attempt kind) |
 | **C2** | FG-507 exclusion completed at the three remaining sites (`runNext.ts:1573`, `gate.ts:385`, `runNext.ts:3181`) via `isWorkflowPrimaryRow`. | `p3`, promoted: a pending invoke row on a `task`-named fanout step is **failed by `forge next`** today (`error = fanout: upstream 'plan' has no array at 'steps'`). After: the invoke row is untouched and a fresh fanout parent row is minted. Flip `lifecycle-evaluator.test.ts:623` to agreement. | *"runNext uses the evaluator for dispatch decisions"* |
 | **C3** | `red-` prefix dead in `dispatchFanoutStep`'s three child filters. | New: a **complete** `shipping-reviewer` red on a fanout parent is today admitted to `childTasksForCleanup` (`:1620-1626`) and counted by `activeWithChildren`/`pendingHasChildren`. Assert it is excluded; plus a guard test that fails if a red row ever carries `worktreePath`. | same |
-| **C4** | **Evaluator layer 2: step state.** One derivation; `computeReadyQueue` and the settle states become projections of it. No consumer-visible behavior change. | Property test over the seeded corpus (the slice-1 harness): the projection equals today's `computeReadyQueue` / `isRunSettled` on every generated shape. RED by construction (the surface doesn't exist). | *"computeReadyQueue becomes a thin wrapper … or made impossible to drift"* |
+| **C4** | **Evaluator layer 2: step state.** One derivation; `computeReadyQueue` and the settle states become projections of it. No consumer-visible behavior change. | Property test over the seeded corpus (the slice-1 harness): the projection equals today's `computeReadyQueue` / `isRunSettled` on every generated shape. ~~RED by construction (the surface doesn't exist).~~ **SUPERSEDED BY PRD → the step-state surface does not exist and cannot be falsified against a baseline; the PRD reclassifies it as NORMATIVE-UNMET (N-1) with a parity acceptance condition, NOT a fabricated red. `docs/prds/workflow-lifecycle-semantics.md` §7.2 governs.** | *"computeReadyQueue becomes a thin wrapper … or made impossible to drift"* |
 | **C5** | **Run state + run completion** through the evaluator: `runNext.ts:298-303`'s `topLevelByPhase` / `anyFailed` superseded-primary logic is a **fourth** lineage heuristic — it must become evaluator-derived. `gate.ts:457-461` (advance/reject) and `run-finalize.ts` keep the single-writer boundary. | Today `runNext.ts:299` counts an ad-hoc invoke failed row in `anyFailed`; assert a failed `forge invoke` row no longer marks a workflow run's completion as `anyFailed`. | *"runNext uses the evaluator for run-completion"*, *"gate uses it after advance/reject/request-changes"* |
 | **C6** | **Terminal blockers**: `executor.ts:494` and `:2183` consume the evaluator's failed-primary set instead of `parentId === undefined`. SHARED-wins stays in `policy.ts`. | A failed ad-hoc invoke row attached to a campaign workflow run is today classified as a workflow terminal blocker (`executor.ts:494` → `classifyFailureKind`). Assert it is excluded. Plus the mixed local/shared case (`policy.ts:139-149`) as a regression pin. | *"campaign resume uses evaluator-derived terminal blocker state"*, *"mixed failed-primary runs classify conservatively"* |
-| **C7** | **Operator reason** — one explanation, consumed by `show`/`report`/dashboard/campaign hold reasons. Must render the validation-contract hold distinctly (`runNext.ts:977-981` logs `kind: "validation_contract"`), not as "awaiting human gate". | Today the three surfaces phrase "why nothing can run" independently; assert one source. (Weakest RED in the set — scope it against the actual surfaces before filing.) | *"operator surfaces consume the same lifecycle explanation"* |
+| **C7** | **Operator reason** — one explanation, consumed by `show`/`report`/dashboard/campaign hold reasons. Must render the validation-contract hold distinctly (`runNext.ts:977-981` logs `kind: "validation_contract"`), not as "awaiting human gate". | Today the three surfaces phrase "why nothing can run" independently; assert one source. ~~(Weakest RED in the set — scope it against the actual surfaces before filing.)~~ **SUPERSEDED BY PRD → the operator-reason surface does not exist; NORMATIVE-UNMET (N-5), NOT a red. `docs/prds/workflow-lifecycle-semantics.md` §7.2 governs; scope against the real surfaces (dashboard transport unaudited, OQ-4) before decomposing.** | *"operator surfaces consume the same lifecycle explanation"* |
 | **C8** | **Absorb `resolvePhasePrimary`** (deliberate, bounded narrowing). | `p4` case A: today `deriveUpstream` folds a complete **ad-hoc invoke** row's result into a downstream workflow step's inputs. After: it does not. Case B (legacy rows) must stay unchanged — that bound is the test. | *(prerequisite for "impossible to drift")* |
 
 **Dependencies / parallelism.**
