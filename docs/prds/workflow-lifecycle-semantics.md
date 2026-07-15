@@ -512,9 +512,12 @@ Defaults are stated; **work proceeds on the default**. Each names what would set
   **Default taken (binding as D-4 until overridden): refuse reds outright, including under `--force`**, and
   point at `forge recover <parent> --re-drive`. If the operator wants red re-runs, that is the **parented red
   re-dispatch** path (D-4) — a new dispatch path, not a `retry.ts` classification change. **Owner: operator.**
-- **OQ-2 — `retry.ts:263`'s mount-mode prefix fallback.** Out of scope here (a security question, not a lineage
-  one) — but it fails **OPEN**: a non-prefixed red gets a **writable** mount. **That is plausibly a security
-  finding for another cluster. Flagged, not fixed. It needs an owner, and it does not have one.**
+- **OQ-2 — `retry.ts:263`'s mount-mode prefix fallback.** Out of scope for THIS cluster's lineage work (a security
+  question, not a lineage one) — but it fails **OPEN**: a non-prefixed red gets a **writable** mount. **This is
+  now OWNED: the integration map assigns it to Cluster A as OQ-INT-1** (`foundations-integration.md`, ownership
+  row 12). It is no longer unowned. Its accept-vs-fix outcome is an **open architectural decision that must be
+  closed in the decision-closure gate** (after the post-FG-561 delta-audit, before A's implementing ticket runs) —
+  selected, recorded in PRD-a/an ADR, and reviewed. Flagged here, decided by A there.
 - **OQ-3 — Persist the attempt kind on the task row?** Default: **not now** (§6). Biggest available lever;
   blocked behind FG-553's store-version decision. **Owner: operator + FG-553.**
 - **OQ-4 — What is the dashboard's actual transport for run/step state?** **Not audited.** N-5's "don't ship the
