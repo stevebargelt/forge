@@ -221,7 +221,7 @@ decision.** (plan §3 FG-524, §9 HIGH.)
 - **Held-child worktree retention is INTENTIONAL and its reclaim path is named.** A held child is
   non-terminal and unmerged, so its worktree must be retained; today `childTasksForCleanup` filters
   `status === "complete"` (VERIFIED — `runNext.ts:1620-1626`), so retention is *accidental* and no reaper
-  collects it (INV-3 / §9.2).
+  collects it (plan INV-3 / §9.2). **Acceptance: N-9.**
 
 - **Classification.** The gap is a **FACTUAL DEFECT with observed-red evidence** (plan §2.3 ARM 2,
   EXECUTED via the real `dispatchFanoutStep` against real SQLite — contraband child *and* parent both
@@ -373,9 +373,20 @@ fabricated red**. Where the plan asserted a red for an unimplemented norm, this 
   baseline red.)*
 - **N-2 (INV-3 + D1, zero-round env-unavailable).** *Acceptance:* a forced install failure stops **before
   round 1** as `verification_environment_unavailable` with no reviewer/fixer dispatch; deps absent **or
-  built for an incompatible ABI** are not accepted as ready. *Verification:* exercise the readiness gate
-  and the preserved exit code at all three local-run sites; assert the surface distinction from
-  `verification_failed`.
+  built for an incompatible ABI** are not accepted as ready. **And the outcome is DISTINGUISHED from
+  `verification_failed` at every named operator/machine surface FG-566 requires (D1.2, INV-3) — human CLI
+  output, structured/`--json` output, run notes, and dashboard — with, at each, NO statement or implication
+  that a reviewer reviewed anything (verification blocked reviewer dispatch: zero rounds, reviewer never
+  invoked).** *Verification:* exercise the readiness gate and the preserved exit code at all three local-run
+  sites (`review-loop.ts:544`/`:622`/`:853`); then, on the same env-unavailable run, assert the distinction
+  **per surface** — (i) **CLI human output** names `verification_environment_unavailable` (not "verification
+  failed"), carries the one recovery instruction, and contains no "reviewed"/round-consumed language; (ii)
+  **structured `--json`** emits the env-unavailable outcome as a machine value distinct from
+  `verification_failed`, with rounds-consumed = 0 and no reviewer-dispatched record; (iii) **run notes**
+  record the env-unavailable disposition, not a code failure and not a reviewer verdict; (iv) **dashboard**
+  renders the env-unavailable state distinctly from a `verification_failed`/code-failure state. Each surface
+  assertion additionally proves the negative: no reviewer-reviewed claim appears on that surface when
+  verification prevented reviewer dispatch.
 - **N-3 (D1 ordering constraint).** *Acceptance:* trusted covering CI evidence → **no** provisioning, reuse
   semantics unchanged. *Verification:* the readiness gate sits after the covering-evidence / CI-status
   branches resolve; CI reuse never pays for provisioning.
@@ -401,6 +412,19 @@ fabricated red**. Where the plan asserted a red for an unimplemented norm, this 
   `node_modules`, forced onto local fallback, provisions and dispatches the reviewer **as round 1**; a
   failed/interrupted install can **never** be marked ready; the operator's live checkout is never mutated.
   *Verification:* crash-safety test around the install; ownership-predicate test.
+- **N-9 (INV-2 coupling + §9.2, held-child worktree retention → reclaim).** Distinct from N-7 (which accepts
+  re-aggregation + hold *semantics*); this accepts the worktree *lifecycle* D3's reclaim decision names.
+  *Acceptance:* **(a) retained while held** — while a fanout child is held (`awaiting_gate`, non-terminal,
+  unmerged), its worktree is **RETAINED** and is **not swept** by any cleanup/reaper pass; retention is
+  **intentional**, not the accidental side effect of `childTasksForCleanup` filtering `status === "complete"`
+  (`runNext.ts:1620-1626`), and the FG-356 reaper treats `awaiting_gate` as a live child state, not an
+  orphan (§9.2). **(b) reclaimed on resolve/run-end** — once the held child **resolves** (`forge gate
+  advance|reject <childTaskId>`) and the parent **finalizes**, **or the run ends** with the child still
+  held, the worktree is **RECLAIMED**, never leaked. *Verification:* a test driving the full arc — hold a
+  child → assert its worktree **survives** a cleanup/reaper pass while held → resolve the child and drive
+  parent finalize → assert the worktree is **reclaimed**; plus a run-end arm (child still held at run
+  termination) asserting reclaim, not leak. *(NORMATIVE-UNMET: today's retention is accidental and no reaper
+  collects a held child — plan §9.2 / D3; this establishes the contract, not a fabricated red.)*
 
 ### 7.3 FG-566's five required falsifications, mapped
 
