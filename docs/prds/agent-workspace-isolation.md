@@ -554,24 +554,52 @@ clone" direction is rejected **for that reason** — a clone is a **different ob
 have to be pushed back, re-introducing exactly the merge semantics FG-425 deleted. **Any proposal in this cluster
 that separates the object graph breaks FG-425's CAS model and is out of contract** (I-8).
 
-### 4.2 — The mount does NOT give reds git. Nobody may claim that benefit.
+### 4.2 — Reds ALREADY have effective Bash + git-read. The `:ro` mount enforces filesystem read-only — a DISTINCT property, not the git capability.
 
-**VERIFIED FACT, and it CORRECTS the plan (§8.1).** Red agents are declared read-only with **no Bash**:
-`seeds/agents/red-wide/settings.json` is `{"tools": ["read"], "notes": "Red-wide is read-only. The host enforces
-this with -v <project>:/project:ro."}`, and every red seed says so in prose — *"You have read-only access, no
-Bash; you cannot run `git diff`"* (`seeds/agents/red-wide/CLAUDE.md:15`, `red-narrow/CLAUDE.md:15`,
-`red-backend/CLAUDE.md:13`, `red-frontend/CLAUDE.md:13`, `red-security/CLAUDE.md:13`).
+**VERIFIED FACT — executed on the FINAL runtime, per supported runtime**
+(`docs/plans/foundations-lane-a-probes/p7-red-runtime-capability.out`). A read-only red-wide dispatched under
+EACH supported runtime — `codex-subscription`, `claude-oauth`, `pi-oauth` — found `/usr/bin/bash`, `/usr/bin/git`,
+`/usr/bin/node` present in the agent image, and a read-only red **EXECUTED** `git rev-parse HEAD` → `a0064d5…` and
+`git log` successfully in all three. **Reds HAVE effective Bash + git-read capability on every supported runtime
+today.** (Corroborated incidentally by the closeout reviews themselves: red-wide ran `/bin/bash -lc "git rev-parse
+HEAD …"`; red-narrow confirmed `git rev-parse HEAD`.)
 
-**Reds do not invoke git today, so the mount changes nothing for them.** It is a **precondition** for reds ever
-getting git reads — and D2 is what makes that safe when it happens (`p5` DIRECTION 3 proves reads work and writes
-are refused under `/project:ro` + `.git:ro`) — but **whether reds get a git-read capability is the review-trust
-lane's decision, not this cluster's** (OQ-4).
+**FALSIFIED, and corrected here — keeping the campaign's evidence-honesty norm.** The prior §4.2 asserted as
+VERIFIED FACT that reds have "**no Bash**" and "**do not invoke git today**," citing
+`seeds/agents/red-wide/settings.json` `{"tools": ["read"], …}` and the CLAUDE.md prose *"you have read-only access,
+no Bash; you cannot run `git diff`"* (`red-wide/CLAUDE.md:15`, `red-narrow/CLAUDE.md:15`, `red-backend/CLAUDE.md:13`,
+`red-frontend/CLAUDE.md:13`, `red-security/CLAUDE.md:13`). **That was a SOURCE-PATTERN INFERENCE mislabeled VERIFIED
+FACT** — it read tool availability off seed files instead of executing them. P7 executes it and disproves it. Per
+§0's evidence labels, *a source-pattern match is never evidence of a runtime property*; this correction restores
+that discipline.
 
-**The demonstrated live victim is `test-engineer`**, whose seed **instructs** it to run git reads:
-*"Read the recent diff in `/project` (check `git diff HEAD~1` or `git log --oneline -3`)"*
-(`seeds/agents/test-engineer/CLAUDE.md:13`). In worktree mode that instruction fails with
-`fatal: not a git repository: (null)` — **a seed-instructed path that is silently broken today.** That, not the
-reds, is FG-559's present-tense harm.
+**INTENT is not ENFORCEMENT.** The seed `settings.json` `tools: ["read"]` field and the CLAUDE.md prose are
+**intent, NOT enforcement**:
+- **The `tools` array is never read by forge compose.** Compose reads CLAUDE.md, not the settings `tools` array —
+  no code path consumes it (cross-cluster **OQ-INT-5**). It documents intent; it gates nothing.
+- **Every supported runtime exposes command execution regardless.** `bash`/`git`/`node` ship in the agent image
+  (P7), so CLAUDE.md prose telling a red "you have no Bash" is a request the runtime does not honor.
+
+**What the `:ro` mount actually enforces is FILESYSTEM READ-ONLY (mutation authority) — a property DISTINCT from
+capability availability.** P7's bounded writes were all REFUSED by the `:ro` mount (`touch … Read-only file
+system`, `touch_exit=1`; redirect `… Read-only file system`, `redir_exit=1`; no file created). The two properties
+are orthogonal: **CAPABILITY AVAILABILITY** (can run commands / read git = YES for reds) is governed by the runtime
+image; **FILESYSTEM MUTATION AUTHORITY** (can write = NO for reds) is governed by `PROJECT_MODE=ro`. Changing the
+mount does not grant or remove git-read.
+
+**This RETRACTS the prior §4.2 framing "the mount does NOT give reds git; nobody may claim that benefit."** That
+framing is wrong on the corrected facts: **reds already HAVE git** (bash + git in the image, executed per P7).
+FG-559 repairs repository VISIBILITY for linked worktrees — so the git a red already runs resolves the repo instead
+of failing `fatal: not a git repository: (null)` — and the `:ro` mount blocks WRITES. **Neither grants nor removes
+the git-read CAPABILITY**, which is already present. The open decision is therefore not "grant it?" but
+**accept-vs-enforce** (OQ-4 below).
+
+**The `test-engineer` case is unchanged and still real — but it is no longer the ONLY victim.** `test-engineer`'s
+seed instructs git reads — *"Read the recent diff in `/project` (check `git diff HEAD~1` or `git log --oneline -3`)"*
+(`seeds/agents/test-engineer/CLAUDE.md:13`) — which in worktree mode fail with `fatal: not a git repository: (null)`
+because the linked worktree conveys no repository (§1). That is FG-559's present-tense harm, and per P7 it applies
+to **every** agent that runs git in a worktree, **reds included** — not, as the prior draft claimed, to a
+git-abstaining reviewer class alone.
 
 ### 4.3 — Escalated to other lanes, deliberately not decided here
 
@@ -590,7 +618,10 @@ reds, is FG-559's present-tense harm.
    FG-358 owns it.
 2. **Making worktree mode the default.** It stays opt-in (`FORGE_WORKTREES=1`). This cluster is a precondition
    for that, not the change itself.
-3. **Giving reds Bash or a git-read capability** (§4.2, OQ-4).
+3. **Deciding accept-vs-enforce on reds' already-effective Bash + git-read capability** (§4.2, OQ-4). Reds
+   ALREADY possess it — executed under every supported runtime (P7); this cluster neither formalizes nor removes
+   it. *(Correction: the prior draft framed this non-goal as "giving reds Bash or a git-read capability" — reds
+   are not given it; they already have it, and `PROJECT_MODE=ro` is not what would grant or remove it.)*
 4. **Hooks hardening BEYOND the agent-worktree commit paths.** Disabling hooks on host git that runs **inside an
    agent worktree** is now IN scope — it is part of D10a's security boundary, not optional hygiene. What stays a
    non-goal is broadening `-c core.hooksPath=/dev/null` to forge's git commands that run against the **main
@@ -698,14 +729,19 @@ which is exactly why `p5` remains the acceptance probe for AC-1/AC-2 across that
 
 Stated explicitly, because the plan is discovery input and this PRD supersedes it where they differ.
 
-**8.1 — The plan overstates FG-559's impact on reds; this PRD corrects it.** Plan §1.4 says *"every red/reviewer
-today runs in a container where `git` is 100% broken — including `git diff`, which is the reviewer's primary
-instrument"*, and §6 claims *"after Child 1, reds get working `git diff` for the first time."* **Both are false as
-stated.** Reds have `tools: ["read"]` and **no Bash**, and their seeds explicitly tell them they cannot run
-`git diff` (§4.2). Reds never invoke git, so nothing is broken for them today and nothing is granted to them by
-the mount. **The real present-tense victim is `test-engineer`, whose seed instructs `git diff HEAD~1` /
-`git log --oneline -3` (`seeds/agents/test-engineer/CLAUDE.md:13`).** The cross-lane note that review-trust must
-re-derive its assumptions **still stands** — but as a *precondition*, not a delivered capability.
+**8.1 — CORRECTED after P7: the prior §8.1 rejected the plan on a FALSIFIED premise.** Plan §1.4 says *"every
+red/reviewer today runs in a container where `git` is 100% broken — including `git diff`, which is the reviewer's
+primary instrument"*, and §6 claims *"after Child 1, reds get working `git diff` for the first time."* The prior
+§8.1 called both "false as stated" on the ground that reds have `tools: ["read"]` and "no Bash" and "never invoke
+git." **That ground is itself FALSIFIED (P7, executed under codex/claude/pi): reds HAVE effective Bash + git-read
+on every supported runtime and DO invoke git** (§4.2). So the plan's direction is substantially CORRECT — reds run
+git, that git is broken in worktree mode (`fatal: not a git repository: (null)`, §1), and the mount fix restores
+its VISIBILITY for reds along with every other class. The plan's only imprecision is "for the first time" (git
+already works in NON-worktree mode; the mount fix restores it specifically under worktree mode). `test-engineer`
+remains a concretely seed-INSTRUCTED victim (`git diff HEAD~1` / `git log --oneline -3`,
+`seeds/agents/test-engineer/CLAUDE.md:13`), but it is **not the only one — reds are affected too.** The open
+decision about reds is **accept-vs-enforce** on a capability they ALREADY have (OQ-4), not grant-vs-withhold; the
+mount fix delivers repository visibility, not the capability.
 
 **8.2 — The plan miscites the red mount path.** Plan §1.4 cites `spawn.ts:462` as "the red/reviewer path". That
 line is inside **`buildProvisionerDockerArgs`** — the dependency provisioner. The project mount's mode actually
@@ -765,7 +801,7 @@ clause makes the PRD unambiguously authoritative over that specific plan section
 | **OQ-1** | Does the operator's **installed** `~/.forge` seed copy drift from in-repo `seeds/` (custom or edited seeds that instruct `git commit`)? In-repo seeds are clean (D5); `scripts/install-seeds.sh` installs from `seeds/`, but a hand-edited installed copy is invisible from here. | **Ship the read-only mount; reinstall seeds from `seeds/`.** The D6 refusal message makes any surviving stale instruction self-diagnosing rather than silent. | Operator |
 | **OQ-2** | **Does the FG-530 leak actually reproduce at this SHA?** (AC-5.) | **None — this is a GATE, not a default.** The reaper is not written until the red is observed. If it does not reproduce, D9's premise is wrong and the spec is re-derived. | Implementer (on the macOS host) |
 | **OQ-3** | The integration gate is a **silent no-op** for any project with no `test:unit` script (`integration-gate.ts:63-65`) — semantic cross-file breakage merges clean and ships. Keep skipping / record a durable "gate not enforced" marker / refuse to publish without a gate? | **Record a durable, visible "gate not enforced" marker on the publication attempt** — makes the trust gap auditable without breaking every non-JS project. | **Review-trust lane** — not this cluster's to decide (§4.3) |
-| **OQ-4** | Now that D1/D2 make it **safe** (reads work, writes refused — `p5` DIRECTION 3), **should reds get a git-read capability** (Bash, or a narrower git-read tool)? | **No change in this cluster.** Reds keep `tools: ["read"]`. The mount is a precondition; the capability is a separate, reviewable decision. | **Review-trust lane** (§4.2) |
+| **OQ-4** | Reds ALREADY POSSESS effective git-read — Bash + git ship in the image and a read-only red EXECUTES `git rev-parse`/`git log` under codex, claude, AND pi (`p7-red-runtime-capability.out`). `PROJECT_MODE=ro` prevents WRITES; changing the mount neither grants nor removes git-read (a distinct property, §4.2). So the question is NOT "grant it?" — it is **accept-vs-enforce**, exactly two honest options: **(a) ACCEPT and formally support** the already-effective capability (document it as a real capability, not a forbidden one; update the reviewer contract accordingly); OR **(b) DEFINE A REAL ENFORCEMENT mechanism** that removes command execution across ALL supported runtimes. Prompt prose (CLAUDE.md) and the unused `settings.json` `tools` field are **NOT enforcement** and must not be cited as such; if (b), the mechanism MUST be a runtime/OS-level control, not a seed edit. | **None — B-owned; the architectural outcome MAY stay open, but it is accept-vs-enforce, NOT grant-vs-withhold.** The unenforced status quo (reds run git; prose says they cannot) is itself a decision B must ratify (a) or replace (b). | **Review-trust lane / cluster B** (§4.2, cross-cluster **OQ-INT-5**) |
 | **OQ-5** | Should hook-disabling extend BEYOND the agent-worktree commit paths — i.e. to forge's git that runs against the **main checkout** / fresh candidate worktrees, where no agent has written? (The agent-worktree case is no longer optional — it is D10a.) Trade-off: a repo's legitimate `pre-commit` formatter would stop running on those bookkeeping commits too. | **Do NOT broaden by default.** D10a already covers the security-relevant sites (git run in an agent worktree). Broadening to non-agent sites is a behavior change with no security gain and belongs in its own story (non-goal 4). | Operator |
 | **OQ-7** | **Residual after D10 (§D10 residual table):** a LEGIT operator-installed common-config driver (e.g. `git-lfs` smudge, a repo `diff.*.textconv`) can still be triggered on **agent-chosen tracked paths** via a `.gitattributes` the agent writes in the worktree tree. The driver is trusted code; the agent controls only which paths route through it. Neutralize (e.g. `-c filter.<name>.process=`/`GIT_LFS_SKIP_SMUDGE` on host bookkeeping git) or accept? | **Accept for this cluster.** The driver is operator-trusted; the exposure is attacker-influenced input to trusted code, not arbitrary agent code. Flagged so a project that ships sensitive filters can revisit. | **Review-trust lane** — out of this cluster's scope |
 | **OQ-6** | On macOS, Docker Desktop only mounts host paths inside its **configured file-sharing roots**. A parent repo outside those roots will make the `.git` mount **fail at `docker run`**. | **Accept**: a Docker mount refusal is a **loud** failure (the dispatch dies), which satisfies I-4. Flagged so it is not mistaken for the FG-559 defect when it appears. | Implementer — surface Docker's error verbatim in the refusal path |
