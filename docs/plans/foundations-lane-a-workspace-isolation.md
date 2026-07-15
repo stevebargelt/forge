@@ -123,11 +123,20 @@ builds a **candidate** worktree, merges the task/child branches into it, **valid
 
 ### 1.4 **FG-559 hits REDs directly** — and reds are the population that most needs git
 
-> **⚠ SUPERSEDED → PRD §8.1 + §8.2.** This section's INFERENCE that *"every red/reviewer today runs in a
-> container where git is 100% broken — including git diff"* is **corrected by the PRD as FALSE as stated**: reds
-> have `tools: ["read"]` and **no Bash**, and their seeds say they cannot run `git diff` — reds never invoke git,
-> so nothing is broken for them today and the mount grants them nothing (whether reds ever get a git-read
-> capability is the review-trust lane's call, PRD OQ-4). The **real present-tense victim is `test-engineer`**,
+> ⚠ SUPERSEDED by executed evidence — P7 (`docs/plans/foundations-lane-a-probes/p7-red-runtime-capability.out`)
+> and PRD-a §4.2/OQ-4 (SHA c1a77e3): reds ALREADY have effective Bash + git-read on every supported runtime
+> (codex/claude/pi — a read-only red EXECUTES `git rev-parse`/`git log`); the `:ro` mount denies filesystem
+> WRITES only (a distinct property). The 'no Bash / never invoke git' claim below is FALSIFIED. The mount is NOT
+> what grants git-read; FG-559 repairs repository VISIBILITY, not tool availability.
+>
+> **⚠ SUPERSEDED → PRD §8.1 + §8.2 — and note the pre-P7 discovery claim in THIS marker is itself falsified (see
+> P7 marker above).** This section's INFERENCE that *"every red/reviewer today runs in a container where git is
+> 100% broken — including git diff"* is **corrected by the PRD as FALSE as stated**: ~~reds have
+> `tools: ["read"]` and **no Bash**, and their seeds say they cannot run `git diff` — reds never invoke git, so
+> nothing is broken for them today and the mount grants them nothing~~ *(← superseded pre-P7 discovery claim —
+> FALSIFIED by P7: reds DO have Bash + git-read; the mount governs repository visibility/writes, not tool
+> availability)* (whether reds ever get a git-read capability is the review-trust lane's call, PRD OQ-4). The
+> **real present-tense victim is `test-engineer`**,
 > whose seed instructs `git diff HEAD~1` (`seeds/agents/test-engineer/CLAUDE.md:13`). The `spawn.ts:462` citation
 > below is also a **miscitation** (that line is in `buildProvisionerDockerArgs`; the project mount mode comes from
 > `SpawnContext.PROJECT_MODE`) — **PRD §8.2. THE PRD GOVERNS.**
@@ -141,6 +150,13 @@ the publisher. Reds get `-v <dir>:/project:ro` (`spawn.ts:462` for the red/revie
 **INFERENCE:** so in worktree mode, **every red/reviewer today runs in a container where `git` is 100%
 broken** — including `git diff`, which is the reviewer's primary instrument. FG-559's "silently degraded"
 framing is exactly right, and it lands hardest precisely where trust is being established.
+
+> ⚠ SUPERSEDED by executed evidence — P7 (`docs/plans/foundations-lane-a-probes/p7-red-runtime-capability.out`)
+> and PRD-a §4.2/OQ-4 (SHA c1a77e3): the INFERENCE above is FALSIFIED as to *tool availability*. Reds ALREADY
+> have effective Bash + git-read on every supported runtime (codex/claude/pi — a read-only red EXECUTES
+> `git rev-parse`/`git log`); `git` is NOT "100% broken" for reds. The `:ro` mount denies filesystem WRITES only
+> (a distinct property). What FG-559 actually repairs is repository **VISIBILITY** in the worktree case, not tool
+> availability — the mount is NOT what grants git-read.
 
 ### 1.5 The current mount preflight **cannot see this bug, even in principle**
 
@@ -568,10 +584,19 @@ This campaign also runs a **review-trust lane** (FG-566/FG-541/FG-524/FG-525) an
 | **`review-loop.ts` / the lineage classifier** | **Not touched by this plan.** | Review-trust lane. Flagged only so the integration artifact can record "Lane A asserts no change here." |
 | **Agent seeds / task-package text** | Child 3 adds the read-only-git contract line. | **Review-trust lane, moderate** — it also edits reviewer-facing seed text. Textual collision likely; semantic conflict unlikely. |
 
-> **⚠ SUPERSEDED → PRD §8.1.** The `spawn.ts` row's claim that *"after Child 1, reds get working `git diff` for
-> the first time"* is **false as stated** — reds have no Bash and never invoke git; the mount is a **precondition**
-> for a future review-trust decision (PRD OQ-4), not a delivered capability. The cross-lane coordination point
-> still stands, but as a precondition, not a granted benefit. **THE PRD GOVERNS.**
+> ⚠ SUPERSEDED by executed evidence — P7 (`docs/plans/foundations-lane-a-probes/p7-red-runtime-capability.out`)
+> and PRD-a §4.2/OQ-4 (SHA c1a77e3): reds ALREADY have effective Bash + git-read on every supported runtime
+> (codex/claude/pi — a read-only red EXECUTES `git rev-parse`/`git log`); the `:ro` mount denies filesystem
+> WRITES only (a distinct property). BOTH the `spawn.ts` row's *"reds get working `git diff` for the first time"*
+> AND the pre-P7 correction below (*"reds have no Bash and never invoke git"*) are FALSIFIED. The mount is NOT
+> what grants git-read; FG-559 repairs repository VISIBILITY, not tool availability. (The mount-as-precondition
+> framing survives, but only for repository *visibility* in the worktree case — not for tool/Bash availability.)
+>
+> **⚠ SUPERSEDED → PRD §8.1 (pre-P7 discovery claim, retained as evidence — note its "no Bash" premise is itself
+> falsified by P7 above).** The `spawn.ts` row's claim that *"after Child 1, reds get working `git diff` for the
+> first time"* is **false as stated** — ~~reds have no Bash and never invoke git~~ *(← FALSIFIED by P7)*; the
+> mount is a **precondition** for a future review-trust decision (PRD OQ-4), not a delivered capability. The
+> cross-lane coordination point still stands, but as a precondition, not a granted benefit. **THE PRD GOVERNS.**
 
 ---
 
