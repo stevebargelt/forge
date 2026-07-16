@@ -20,9 +20,19 @@ subvert the pinned interpreter (proven: `NODE_OPTIONS=--import <evil>` injects b
 
 - **`current` pointer + atomic promote/rollback** — a release-dir + atomic `current` symlink swap; rollback
   is a pointer swap. An interrupted promotion leaves the previous stable runtime selected and usable.
-- **The near-frozen `/bin/sh` PATH shim** (the machine-wide `forge`): resolve `current` → read manifest →
-  `exec` the manifest interpreter. Installed atomically (temp + rename); its contract change is an
-  install-level breaking change, gated behind an explicit re-install.
+- **The near-frozen `/bin/sh` PATH shim** (the machine-wide `forge`): resolve `current` → read the
+  **Forge-authored canonical execution descriptor inside the immutable release `current` selects** → `exec`
+  the interpreter it names. **The shim never parses the release manifest**; trusted Node validates that
+  manifest as the authority on what the release is. Installed atomically (temp + rename); its contract change
+  is an install-level breaking change, gated behind an explicit re-install.
+  *(Mechanism corrected 2026-07-16 — see the revision log. The original "read manifest → exec the manifest
+  interpreter" shape was proven exploitable by a read-only red-security audit.)*
+- **Promotion is a staged-unit pipeline (2026-07-16):** candidate input → **trusted materialization into a
+  new staging dir** (a caller-controlled candidate directory is NEVER promoted in place) → parse + validate
+  the **staged bytes** → generate the canonical descriptor inside that unit → validate the complete unit →
+  **freeze** → atomic publication → **ONE `current` swap**. The descriptor ships INSIDE the unit, never as a
+  separately swapped sibling of `current` — a record swap plus a pointer swap is not atomic as a pair and
+  would open a fresh mismatch window.
 - **External-artifact contract:** the interpreter store is immutable/versioned, validated before a release
   references it, retained while referenced, never replaced in place.
 - **Env-sanitization contract:** the launcher neutralizes caller Node/runtime-injection vars
@@ -88,9 +98,38 @@ subvert the pinned interpreter (proven: `NODE_OPTIONS=--import <evil>` injects b
   Rationale: unset-before-read alone would prevent spoofing while quietly degrading real release provenance
   to "unknown" — both halves must be proven.
 
+- **F33 (NEW 2026-07-16 — manifest→exec trust boundary; closes 6 confirmed HIGH audit findings).**
+  The required invariant, executed end-to-end:
+
+      candidate input → trusted materialization → parse + validate STAGED bytes →
+      generate canonical descriptor → validate complete unit → freeze →
+      atomic publication → ONE `current` swap
+
+  Executed adversarial regressions, each **mutation-sensitive** (prove the vulnerable version is
+  EXPLOITABLE — attacker code actually runs, evidenced by a filesystem marker — not merely that the fixed
+  version refuses):
+  - **duplicate JSON keys** — proven divergence: `JSON.parse` (promotion) takes the LAST value, the old sh
+    reader took the FIRST, so a candidate that PASSED validation exec'd `/tmp/attacker-node`;
+  - **invalid JSON carrying forged key-shaped lines** — drove exec without passing validation at all;
+  - **absolute** and **traversal** entries;
+  - **entry symlink** pointing outside the release;
+  - **interpreter-store path that is a symlink** to outside bytes (lexical `isStoredInterpreter` accepted it);
+  - **mutation of the SOURCE candidate DURING promotion**;
+  - **mutation AFTER validation but BEFORE pointer publication** (validate-to-swap TOCTOU);
+  - **mismatched descriptor and manifest**;
+  - **partial/torn staging** and **interrupted pointer swap**.
+
+  Descriptor schema is strict and fail-closed: **exact field count**, restricted character set, no
+  duplicate/extra/missing fields, values consumed through **quoted shell variables and never evaluated as
+  shell syntax**. Entry and loader remain **FIXED schema constants** baked into the shim — not dynamic
+  record values; only what must vary (interpreter, release id) is in the descriptor. Release identity is
+  **re-validated by trusted Node after startup** against the immutable authoritative manifest.
+
 ## Not in scope
 - Automatic release GC (deferred — needs a proven anchored-process lifetime mechanism).
 - Installed-surface (seeds/hooks/dashboard) compatibility — FG-572.
+- A POSIX-sh JSON parser; a separately published record/`current` pair; process supervision; reopening
+  OQ-6 / BD-14 / BD-15 / T9.
 
 ## Revision log
 - **2026-07-16** — Scope + AC expanded before implementation, on operator direction, from two findings in the
@@ -100,3 +139,23 @@ subvert the pinned interpreter (proven: `NODE_OPTIONS=--import <evil>` injects b
   caller-supplied `FORGE_RELEASE_ID` survive a failed manifest read — closed here as **F32**, fail-closed,
   because promotion has not landed yet and this is the bounded place to fix it before vulnerable releases
   become machine-wide. No change to OQ-6 / BD-14 / BD-15 / T9 or the accepted promotion architecture.
+- **2026-07-16 (mechanism correction, operator-directed).** The bounded review-loop stopped at
+  `needs_fix_max_rounds` with an open HIGH (`manifest.entry` traversal), having found one real hole per
+  round. The operator STOPPED the iterative loop and commissioned one bounded read-only red-security audit
+  of the manifest→exec trust boundary. It returned **6 confirmed HIGH findings**. Three shared one root
+  cause: **the shim parsed the CANDIDATE's raw manifest with a hand-rolled POSIX-sh line reader whose
+  semantics differ from `JSON.parse` and which enforced fewer checks than promotion.** Verified by execution
+  on the host —
+  `{"id":"safe","interpreter":"/tmp/attacker-node","entry":"src/cli/index.ts","interpreter":"/store/node/bin/node"}`
+  → `JSON.parse` validates `/store/node/bin/node`, the sh reader execs `/tmp/attacker-node`. A candidate that
+  PASSED `validateCandidate` executed a different interpreter.
+  Rather than teach an sh line-matcher to replicate `JSON.parse` (unbounded machinery, and the shim has no
+  interpreter yet — finding one is its job), the invariant MOVED: all parsing/validation happen once in
+  trusted Node, and the shim consumes only forge-authored data. The orchestrator's first proposal — a
+  descriptor swapped as a SIBLING of `current` — was **rejected by the operator**: a record swap plus a
+  pointer swap is not atomic AS A PAIR and merely relocates the mismatch window. The descriptor therefore
+  ships INSIDE the immutable staged unit, so the single `current` swap selects both.
+  **Bounded correction to the MECHANISM, not the architecture:** OQ-6's substance (release directory +
+  atomic `current` symlink + POSIX-shell PATH shim + shared versioned interpreter store; exec-not-spawn) is
+  unchanged, as are BD-14/BD-15/T9 — anchoring is still the shim's single `cd -P` on `current`.
+  Recorded as **F33**; plan §1 (OQ-6 + the PATH shim contract) updated to match.

@@ -49,13 +49,25 @@ demonstrated by EXECUTING or MUTATION-TESTING the final artifact. A source-patte
 **Release directory + atomic `current` symlink + a POSIX-shell PATH shim + a shared versioned interpreter
 store. The load-bearing move is EXEC, NOT SPAWN.**
 
-- The machine-wide `forge` becomes a near-frozen `#!/bin/sh` shim that resolves `current`, reads the release
-  manifest, and **`exec`s the pinned absolute interpreter** against the release entry point. `/bin/sh` is the
-  only interpreter whose absolute path is guaranteed **without consulting PATH** — which is exactly what lets
-  F29 pass in its sharpest form: *a shell with no `node` on PATH at all.*
+- The machine-wide `forge` becomes a near-frozen `#!/bin/sh` shim that resolves `current`, reads the
+  **Forge-authored canonical execution descriptor belonging to the immutable release `current` selects**, and
+  **`exec`s the pinned absolute interpreter** that descriptor names, against the release entry point.
+  **Trusted Node validates the authoritative release manifest**; the shim never parses it. (Corrected
+  2026-07-16 by FG-571 — the original "reads the release manifest" mechanism was proven exploitable; see the
+  PATH shim contract in the external-artifact section for the evidence and reasoning. Bounded correction to
+  the mechanism; OQ-6's substance is unchanged.) `/bin/sh` is the only interpreter whose absolute path is
+  guaranteed **without consulting PATH** — which is exactly what lets F29 pass in its sharpest form: *a shell
+  with no `node` on PATH at all.*
+- **The promotion pipeline is the trust boundary** (FG-571): candidate input → **trusted materialization
+  into a new staging dir** (a caller-controlled candidate directory is NEVER promoted in place) → parse and
+  validate the **staged bytes** → generate the canonical descriptor inside that unit → validate the complete
+  unit → **freeze** → atomic publication → **ONE `current` swap**. Validating one directory and then
+  selecting mutable bytes from another is the validate-to-swap TOCTOU this shape closes.
 - **The shim sits OUTSIDE the release closure**, deliberately. If it were inside, a bad promotion would brick
   `forge` itself and rollback-via-forge would be impossible. **Honest cost: shim changes are therefore NOT
-  atomic with a release.** Mitigation: keep its contract minimal (resolve → read manifest → exec) and treat
+  atomic with a release.** Mitigation: keep its contract minimal (resolve → read the forge-authored
+  canonical execution descriptor inside the selected release → exec — see the PATH shim contract below,
+  corrected 2026-07-16 by FG-571; the shim never parses the release manifest) and treat
   any change to it as an install-level breaking change.
 
 **Why exec-not-spawn is the whole ballgame.** The pre-FG-569 `bin/forge` was `#!/usr/bin/env node` and
@@ -109,7 +121,32 @@ and the **PATH shim**. Each needs its own contract, because "atomic `current` sw
   under a live reference.
 
 *PATH shim* (`/bin/sh`, machine-wide `forge`, outside the closure — the acknowledged atomicity crack):
-- **Frozen contract:** resolve `current` → read manifest → `exec` the manifest interpreter. Nothing more.
+- **Frozen contract:** resolve `current` → read the **Forge-authored canonical execution descriptor
+  belonging to the immutable release selected by `current`** → `exec` the interpreter that descriptor names.
+  Nothing more. **Trusted Node validates the authoritative release manifest** (`forge-release.json` remains
+  the authority on what a release IS); the shim never parses it.
+  **(Bounded mechanism correction, 2026-07-16 — FG-571.)** This row previously read "resolve `current` →
+  read manifest → `exec` the manifest interpreter". A read-only red-security audit of the manifest→exec
+  trust boundary proved that shape exploitable in three distinct ways, because the shim parsed the
+  CANDIDATE's raw manifest with a hand-rolled POSIX-sh line reader whose semantics differ from `JSON.parse`
+  and which enforced fewer checks than promotion. Verified by execution:
+  `{"id":"safe","interpreter":"/tmp/attacker-node","entry":"src/cli/index.ts","interpreter":"/store/node/bin/node"}`
+  — `JSON.parse` (promotion) validates the LAST value, the sh reader execs the FIRST. A candidate that
+  PASSED `validateCandidate` executed a different interpreter; invalid JSON carrying forged key-shaped lines
+  drove exec without passing validation at all. Making an sh line-matcher replicate `JSON.parse` (duplicate
+  keys, grammar, escapes, embedded newlines) with no interpreter yet available — the shim's job being to
+  FIND the interpreter — is unbounded machinery for zero capability, so the invariant MOVED instead: all
+  parsing and validation happen once in trusted Node, and the shim consumes only forge-authored data.
+  **The descriptor ships INSIDE the immutable release unit, never as a separately swapped sibling of
+  `current`:** a record swap plus a pointer swap is not atomic AS A PAIR and would create a fresh mismatch
+  window, so the single `current` swap selects the release and its descriptor together. Entry and loader
+  stay FIXED schema constants baked into the shim, not dynamic record values — only what must vary
+  (interpreter, release id) is in the descriptor, under a strict schema (exact field count, restricted
+  character set, no duplicate/extra/missing fields, consumed through quoted shell variables and never
+  evaluated as shell syntax). **This is a bounded correction to the MECHANISM, not a change to the accepted
+  architecture:** OQ-6's substance (release directory + atomic `current` symlink + POSIX-shell PATH shim +
+  shared versioned interpreter store; exec-not-spawn) is unchanged, as are BD-14/BD-15/T9 — anchoring is
+  still the shim's single `cd -P` on `current`.
 - **Atomic install/replace:** the shim is written to a temp path and **atomically renamed** into place; a torn
   shim is never on PATH. Any change to its *contract* is an install-level breaking change (not atomic with a
   release), and is gated behind an explicit re-install, not a promotion.
