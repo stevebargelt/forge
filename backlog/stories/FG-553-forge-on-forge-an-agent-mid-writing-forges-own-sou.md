@@ -124,8 +124,11 @@ decision, not an input to it.
     evidence of R3 (the launched top-level executable) or R4 (nested-shell resolution). Recording R2 and
     calling the launch "provenanced" is precisely the substitution BD-14 forbids.
   - `forge launch` records enough runtime identity to diagnose which control version owns an in-flight
-    command. **Today `LaunchMeta` is 8 fields with no interpreter, Node version, ABI, PATH, or source SHA —
-    no runtime provenance is recoverable post-launch at all** (`src/v2/launch.ts:44-58`).
+    command. **R1/R2 landed (FG-569):** `meta.json` now carries a `control` R1 record (the submitting CLI's
+    execPath/abi/nodeVersion/releaseId) and `runtime.json` the independent R2 exit-recorder record, both
+    surfaced in `forge launch show`. (Pre-FG-569 `LaunchMeta` was 8 fields with no interpreter, Node version,
+    ABI, PATH, or source SHA — no runtime provenance was recoverable post-launch, `src/v2/launch.ts:44-58`.)
+    R3/R4 remain unrecorded (FG-555).
   - **R3/R4 are FG-555's** (Slice 1b). Together the two slices must account for all four; neither may
     assume the other covered its half.
 - **Bounded ABI enforcement.** Assert `NODE_MODULE_VERSION` against the ABI the native bindings were built
