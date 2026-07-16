@@ -10,7 +10,11 @@ created: 2026-07-16
 
 ## Problem
 
-FG-570 replaced the CLI's minimum-major Node floor with an **exact ABI equality** preflight: forge refuses to start on any Node whose ABI ≠ the binding's (137 / Node 24), older **or** newer, with a named message. But `package.json:38` still declares `engines: { "node": ">=22" }` — a minimum-major floor that advertises Node 22 (ABI 127) and Node 25/26 (ABI 141/147) as supported, all of which the runtime now refuses at startup. `npm install` under one of those Nodes emits no engines warning, then forge refuses to run — a confusing split between the declared and enforced Node support.
+**RESOLVED WITHIN FG-570 — this ticket closes with it; no separate work remains.**
+
+FG-570 replaced the CLI's minimum-major Node floor with an **exact ABI equality** preflight: forge refuses to start on any Node whose ABI ≠ the binding's (137 / Node 24), older **or** newer, with a named message. When this ticket was filed, `package.json:38` still declared `engines: { "node": ">=22" }` — a minimum-major floor advertising Node 22 (ABI 127) and Node 25/26 (ABI 141/147) as supported, all of which the runtime refuses at startup, so `npm install` under one of them warned about nothing and forge then refused to run.
+
+FG-570's review took the engines contradiction in-scope rather than deferring it: `package.json` now ships **`engines: { "node": "^24" }`** — the ABI-137 range (all Node 24.x share ABI 137; Node 25 is ABI 141), matching the runtime guard and `.nvmrc`. The "keep it loose" alternative below was not taken; `engines` now gives the earlier, consistent install-time signal. It must be bumped together with `.nvmrc` when the repo moves LTS.
 
 Also: README (`Node 20+`, before FG-570) and `docs/work-laptop-setup.md` (`Node 22+`) were reconciled to the exact-ABI requirement by FG-570; `engines` is the remaining un-reconciled Node-support surface (project config, not prose — deliberately deferred out of the docs pass).
 
