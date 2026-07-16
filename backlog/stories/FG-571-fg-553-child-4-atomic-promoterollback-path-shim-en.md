@@ -27,11 +27,31 @@ subvert the pinned interpreter (proven: `NODE_OPTIONS=--import <evil>` injects b
   references it, retained while referenced, never replaced in place.
 - **Env-sanitization contract:** the launcher neutralizes caller Node/runtime-injection vars
   (`NODE_OPTIONS`, `NODE_PATH`, and peers) so ambient env cannot redirect or block the pinned interpreter.
+  **Bounded, not broad:** an explicit per-variable list with a recorded rationale — never a wholesale env
+  wipe. Unrelated operator environment (`PATH`, `HOME`, `FORGE_HOME`, `AWS_*`, `NTFY_*`, `TERM`, locale)
+  survives untouched.
+- **Release-identity provenance is FAIL-CLOSED (added 2026-07-16 — HIGH correctness hole found in the
+  FG-571 propagation census).** FG-569's shipped `renderEntry` exports `FORGE_RELEASE_ID` only when its
+  shell-builtin manifest-read loop finds an `"id"` line; when that read yields nothing, a
+  **caller-supplied `FORGE_RELEASE_ID` survives and is recorded as provenance** — contradicting FG-569's
+  own rule that release identity is derived from the manifest and NEVER read from ambient env. Unsetting
+  before the read stops the spoof but is **not sufficient**: it silently degrades a real release's
+  provenance to unknown. The contract is therefore:
+  - **`forge-dev` (live source):** unset ambient `FORGE_RELEASE_ID`; dev provenance stays **null** (a dev
+    entry has no manifest — null is the honest answer, per FG-569's "not recorded, never manufactured").
+  - **Stable shim / release entry:** unset ambient `FORGE_RELEASE_ID`, derive identity **solely** from the
+    selected release's manifest, and **fail closed with a named error** when that identity is absent,
+    malformed, or unreadable. **Never continue a supposed release with a missing/null identity.**
+  This lands in FG-571 because promotion has not shipped yet: closing it here prevents vulnerable releases
+  from ever becoming machine-wide.
 - **Swap-and-RETAIN; NO automatic GC.** T9 (host-verified): a process anchors to a release at start and a
   pointer swap does not tear it, but **deleting a release with anchored live processes is fatal** (ESM,
   CJS, and native dlopen all uniform). So a release is never GC'd while anchored; automatic GC waits for a
   proven anchored-process lifetime mechanism in a later ticket.
-- **`forge-dev` / `npm run forge`** live-source path preserved.
+- **The stable/dev SPLIT is created here, not merely preserved (clarified 2026-07-16).** `bin/forge-dev`
+  does **not exist today**: `package.json` `bin` declares only `forge`, and the machine-wide `forge` is
+  currently an npm-link symlink into the live checkout — so the live-source path and the machine-wide path
+  are **the same artifact**. FG-571 splits them, and F25 is what proves the split is real.
 
 ## Acceptance (EXECUTED)
 
@@ -43,8 +63,40 @@ subvert the pinned interpreter (proven: `NODE_OPTIONS=--import <evil>` injects b
 - **F29 (env):** bare `forge` from a shell the operator did NOT pre-sanitize runs — including a node-free
   PATH; `NODE_OPTIONS=--import <evil>` does NOT inject (proven red today); a blocking `NODE_OPTIONS` does not
   prevent startup. A caller-applied PATH pin is containment, not isolation — it does not satisfy F29.
-- **F25:** `forge-dev` against broken source fails LOCALLY; stable `forge` still succeeds.
+- **F25 (BEHAVIORAL — proves the stable/dev split, not filenames; sharpened 2026-07-16):** with the live
+  checkout genuinely broken:
+  - `forge-dev` **must FAIL** from that checkout;
+  - stable `forge` **must still EXECUTE the promoted release**;
+  - the two **must report DIFFERENT provenance** (asserted from the running processes — dev identity null,
+    stable identity the selected release's manifest id — not from file paths or symlink targets);
+  - **mutant:** a `forge-dev` that delegates to / execs the stable release **must go RED** (it would destroy
+    the live-source loop the PRD forbids removing);
+  - installation happens **only in a disposable prefix** — never `npm link`, never touching the real
+    machine-wide shim or `current` pointer.
+- **F32 (NEW — fail-closed release identity; the census HIGH):** release identity is derived solely from the
+  selected release manifest and never from ambient env. Executed regression matrix, every cell:
+  - **poisoned env** (`FORGE_RELEASE_ID=<forged>`) against a **valid** manifest → the forged value is
+    ignored; the reported identity is the manifest's;
+  - manifest identity **missing** → **named error, fail closed** (not null, not the ambient value, not a
+    silent run);
+  - manifest identity **malformed** → named error, fail closed;
+  - manifest **unreadable** → named error, fail closed;
+  - `forge-dev` with poisoned ambient `FORGE_RELEASE_ID` → identity **null** (dev has no manifest);
+  - **mutant:** restore the FG-569 read-loop behavior (no unset before read) → the poisoned-env case must
+    go RED. **Mutant:** degrade a missing/malformed identity to null-and-continue instead of failing closed
+    → those cases must go RED.
+  Rationale: unset-before-read alone would prevent spoofing while quietly degrading real release provenance
+  to "unknown" — both halves must be proven.
 
 ## Not in scope
 - Automatic release GC (deferred — needs a proven anchored-process lifetime mechanism).
 - Installed-surface (seeds/hooks/dashboard) compatibility — FG-572.
+
+## Revision log
+- **2026-07-16** — Scope + AC expanded before implementation, on operator direction, from two findings in the
+  FG-571 pre-implementation propagation census: (1) `forge-dev` does not exist, so this ticket **creates**
+  the stable/dev split rather than preserving an existing command — F25 restated behaviorally (provenance
+  divergence + delegation mutant + disposable-prefix-only installation); (2) the FG-569 entry lets a
+  caller-supplied `FORGE_RELEASE_ID` survive a failed manifest read — closed here as **F32**, fail-closed,
+  because promotion has not landed yet and this is the bounded place to fix it before vulnerable releases
+  become machine-wide. No change to OQ-6 / BD-14 / BD-15 / T9 or the accepted promotion architecture.
