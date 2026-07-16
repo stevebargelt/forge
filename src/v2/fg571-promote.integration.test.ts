@@ -27,7 +27,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RELEASE_MANIFEST_NAME, SHIM_NAME, assertReleaseCloses, renderShim, thawReleaseTree, type BuildReleaseResult } from "./release.js";
-import { atomicSymlinkSwap, installShim, promote, readSelection, rollback, validateCandidate } from "./promote.js";
+import { atomicSymlinkSwap, installShim, promote, readPrevious, readSelection, rollback, validateCandidate } from "./promote.js";
 import { installInterpreter, interpreterPath, isStoredInterpreter, probeInterpreter, validatedInterpreter } from "./runtime-store.js";
 import { currentLinkIn, interpretersDirIn, previousLinkIn, releasesDirIn } from "../util/paths.js";
 import { findGitRoot } from "../util/git-root.js";
@@ -383,6 +383,47 @@ promote({
   assert.equal(r.prov.releaseId, relA.manifest.id, "the running process is A — the interrupted promotion selected nothing");
   // No stray temp symlink was left ON the pointer path itself.
   assert.ok(lstatSync(currentLinkIn(home)).isSymbolicLink(), "`current` is still a single, intact symlink");
+});
+
+test("FG-571 F27d (EXECUTED, SIGKILL mid current-swap): the interrupted promotion also leaves the ROLLBACK TARGET intact — the pair moves or nothing does", () => {
+  // The pointer is the PAIR (current, previous), so an interrupted promotion must leave the
+  // WHOLE pair untouched — not just `current`. The mutant this reddens: recording `previous`
+  // in a swap of its own before the `current` swap. With current=A, previous=B, a kill in
+  // that window leaves current=A, previous=A — B, the release rollback exists to return to,
+  // is gone as a target even though the promotion never happened.
+  promote({ home, candidate: relB.releaseDir });
+  promote({ home, candidate: relA.releaseDir });
+  const shim = installShim({ prefix: workspace, shimText: renderShim(), shimName: SHIM_NAME });
+  assert.equal(readSelection(home)?.manifest?.id, relA.manifest.id, "A is selected");
+  assert.equal(readPrevious(home)?.manifest?.id, relB.manifest.id, "and B is what a rollback would return to");
+
+  const marker = join(workspace, "f27d-pair.marker");
+  const script = childScript(
+    "f27d-pair-swap.mts",
+    `import { promote } from ${moduleUnderTest("promote.js")};
+import { writeFileSync } from "node:fs";
+promote({
+  home: ${JSON.stringify(home)},
+  candidate: ${JSON.stringify(relB.releaseDir)},
+  onBeforeSwap: () => {
+    writeFileSync(${JSON.stringify(marker)}, "validated");
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 600000);
+  },
+});
+`,
+  );
+  killAtSeam(script, marker);
+
+  assert.equal(readSelection(home)?.manifest?.id, relA.manifest.id, "A is still selected — the interrupted promotion selected nothing");
+  assert.equal(readPrevious(home)?.manifest?.id, relB.manifest.id, "and B is STILL the rollback target — the interrupted promotion recorded nothing either");
+
+  // EXECUTED: the preserved target is not just a link that reads right — rolling back to it
+  // RUNS B, from B's own closure.
+  const back = rollback({ home });
+  assert.equal(back.id, relB.manifest.id, "rollback returns to the target the interrupted promotion preserved");
+  const r = runProvenance(shim, shimEnv());
+  assert.equal(r.status, 0, `B must run after rolling back to the preserved target: ${r.stderr}`);
+  assert.equal(r.prov.releaseId, relB.manifest.id, "the running process is B");
 });
 
 test("FG-571 F28/T9 (EXECUTED): a process anchored to A completes on A — lazy ESM import AND lazy CJS require AND lazy NATIVE dlopen — across a mid-flight promotion to B", () => {

@@ -1,9 +1,19 @@
 // FG-571 (FG-553 Child 4) — THE `current` POINTER: atomic promote + rollback.
 //
-// `current` is a SYMLINK at $FORGE_HOME/current -> $FORGE_HOME/releases/<id>. The
-// machine-wide shim resolves it (once, physically) and execs the release's pinned
-// interpreter; promotion is therefore a POINTER SWAP, and its atomicity is the whole
-// safety property.
+// `current` resolves to $FORGE_HOME/releases/<id>. The machine-wide shim resolves it (once,
+// physically) and execs the release's pinned interpreter; promotion is therefore a POINTER
+// SWAP, and its atomicity is the whole safety property.
+//
+// THE POINTER IS THE PAIR (current, previous), NOT `current` ALONE — so it gets ONE commit
+// point. `current` and `previous` are static links THROUGH $FORGE_HOME/selection, which
+// names a directory holding the two release pointers; a promotion builds a fresh selection
+// directory and renames it over `selection`. Swapping the two pointers independently is not
+// atomic AS A PAIR whichever order it is done in: recording `previous` first and dying
+// before the `current` swap leaves current=A, previous=A — a promotion that never happened,
+// having destroyed the rollback target P it was recording; swapping `current` first and
+// dying leaves previous naming P, two promotions back. Selection directories are retained,
+// never recycled, for the same T9 reason releases are (below): a process resolves the chain
+// physically at exec and stays anchored to what it found.
 //
 // ATOMIC means rename(2) of a temp symlink OVER `current` — NEVER unlink-then-symlink.
 // The unlink form is not atomic and, worse, exposes a window in which there is NO current
@@ -31,9 +41,9 @@
 // mkdtemp dir cannot reach the operator's real ~/.forge/current or their live control plane.
 
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync, type Stats } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync, type Stats } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
-import { FORGE_HOME, currentLinkIn, previousLinkIn, releasesDirIn } from "../util/paths.js";
+import { FORGE_HOME, currentLinkIn, previousLinkIn, releasesDirIn, selectionLinkIn, selectionsDirIn } from "../util/paths.js";
 import {
   RELEASE_ENTRY_NAME,
   RELEASE_ENTRY_SOURCE,
@@ -505,6 +515,45 @@ export function atomicSymlinkSwap(target: string, link: string): void {
   }
 }
 
+/** Where `current` and `previous` point once a home is linked through `selection`. Relative,
+ *  so the chain resolves from the home itself and a home that is moved or bind-mounted at a
+ *  different path still resolves. */
+const CURRENT_VIA_SELECTION = join("selection", "current");
+const PREVIOUS_VIA_SELECTION = join("selection", "previous");
+
+/** Publish a (current, previous) PAIR: build a fresh selection directory holding both
+ *  pointers and rename(2) `selection` over — ONE swap, both pointers. */
+function writeSelection(home: string, current: string | null, previous: string | null): void {
+  const dir = join(selectionsDirIn(home), `sel-${Math.random().toString(36).slice(2, 10)}`);
+  mkdirSync(dir, { recursive: true });
+  if (current) symlinkSync(current, join(dir, "current"));
+  if (previous) symlinkSync(previous, join(dir, "previous"));
+  atomicSymlinkSwap(dir, selectionLinkIn(home));
+}
+
+function isLinkedThroughSelection(home: string): boolean {
+  const reads = (link: string, expected: string) => {
+    try {
+      return lstatSync(link).isSymbolicLink() && readlinkSync(link) === expected;
+    } catch {
+      return false;
+    }
+  };
+  return reads(currentLinkIn(home), CURRENT_VIA_SELECTION) && reads(previousLinkIn(home), PREVIOUS_VIA_SELECTION);
+}
+
+/** Bring a home onto the selection layout WITHOUT changing what it selects. Every swap here
+ *  replaces a pointer with one that resolves to the SAME release (or to nothing, where there
+ *  was nothing), so an interrupt at any point inside this migration leaves the home selecting
+ *  exactly what it selected before — which is what lets the caller treat the single
+ *  writeSelection that follows as the whole transition. */
+function ensureSelectionLayout(home: string): void {
+  if (isLinkedThroughSelection(home)) return;
+  writeSelection(home, readSelection(home)?.releaseDir ?? null, readPrevious(home)?.releaseDir ?? null);
+  atomicSymlinkSwap(CURRENT_VIA_SELECTION, currentLinkIn(home));
+  atomicSymlinkSwap(PREVIOUS_VIA_SELECTION, previousLinkIn(home));
+}
+
 export type InstallReleaseOptions = {
   home?: string;
   dir: string;
@@ -717,8 +766,8 @@ function resolveCandidateDir(home: string, candidate: string): string {
 }
 
 /** PROMOTE: materialize → validate the staged unit → author its descriptor → validate the
- *  complete unit → freeze → publish atomically → record previous → ONE atomic `current` swap.
- *  In that order.
+ *  complete unit → freeze → publish atomically → ONE atomic swap that selects the release
+ *  AND records what it superseded. In that order.
  *
  *  ONE SWAP, and the descriptor rides INSIDE the unit it describes. A separately-published
  *  sibling record next to `current` is forbidden: a record swap plus a pointer swap is not
@@ -751,12 +800,14 @@ export function promote(opts: PromoteOptions): PromoteResult {
   const before = readSelection(home);
 
   mkdirSync(home, { recursive: true });
-  // Record `previous` BEFORE the swap: after it, `current` no longer names the release
-  // being superseded, and rollback would have nothing to return to.
-  if (before) atomicSymlinkSwap(before.releaseDir, previousLinkIn(home));
+  ensureSelectionLayout(home);
 
   opts.onBeforeSwap?.();
-  atomicSymlinkSwap(selected.releaseDir, currentLinkIn(home));
+  // ONE swap publishes `current` AND the `previous` it supersedes. Recording `previous`
+  // in a swap of its own — in either order — is not atomic AS A PAIR: a kill between the
+  // two leaves `current=A, previous=A`, a promotion that never happened having destroyed
+  // the rollback target it was in the middle of recording.
+  writeSelection(home, selected.releaseDir, before?.releaseDir ?? null);
 
   return {
     id: selected.manifest.id,
@@ -818,9 +869,9 @@ export function rollback(opts: RollbackOptions = {}): PromoteResult {
   const target = validateUnit(previous.releaseDir);
   const before = readSelection(home);
 
-  if (before) atomicSymlinkSwap(before.releaseDir, previousLinkIn(home));
+  ensureSelectionLayout(home);
   opts.onBeforeSwap?.();
-  atomicSymlinkSwap(target.releaseDir, currentLinkIn(home));
+  writeSelection(home, target.releaseDir, before?.releaseDir ?? null);
 
   return {
     id: target.manifest.id,

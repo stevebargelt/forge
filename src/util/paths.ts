@@ -51,6 +51,16 @@ export function currentLinkIn(home: string): string {
 export function previousLinkIn(home: string): string {
   return join(home, "previous");
 }
+// The selection PAIR (`current` + `previous`) is one state, so it gets one commit point:
+// $FORGE_HOME/current and $FORGE_HOME/previous are static links THROUGH $FORGE_HOME/selection,
+// which names a directory holding the two release pointers. Swapping that one link publishes
+// both at once — two independent renames could never be atomic as a pair.
+export function selectionLinkIn(home: string): string {
+  return join(home, "selection");
+}
+export function selectionsDirIn(home: string): string {
+  return join(home, "selections");
+}
 
 export const RELEASES_DIR = releasesDirIn(FORGE_HOME);
 export const INTERPRETERS_DIR = interpretersDirIn(FORGE_HOME);
