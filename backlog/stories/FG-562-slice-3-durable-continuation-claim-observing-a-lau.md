@@ -135,8 +135,11 @@ the control path, and it inherits the concurrent-version problem — it does not
 - **Old/new-process coverage is required**, not optional: a process running the *old* Forge must not be
   broken by the new table or its migration, and a *new* process must behave correctly against a store an old
   process is still reading. Test both directions.
-- A destructive migration (cf. the existing unguarded `DROP COLUMN`, `src/store/db.ts:91`) is **not**
-  acceptable for this table without the BD-15 policy explicitly permitting it.
+- A destructive migration is **not** acceptable for this table on the ordinary open path without the BD-15
+  policy explicitly permitting it. (Pre-FG-568 the store ran an unguarded `DROP COLUMN` on every open,
+  `src/store/db.ts:91`; FG-568 made the open path additive-only and confined all destructive DDL to the
+  operator's quiesce-gated `forge store converge`. This table's migrations must stay additive on the open
+  path the same way.)
 
 ## Not in scope
 
