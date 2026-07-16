@@ -38,3 +38,52 @@ actionable message (not an opaque dlopen crash).
 
 ## Not in scope
 - Promotion / release building (FG-569, FG-571). This slice only replaces the ABI gate.
+
+## Closure evidence — 5044c5d
+
+*Recorded 2026-07-16. The Problem, Scope, and Acceptance sections above are the original contract
+as written and are deliberately left unedited; the environmental correction below is confined to
+this section.*
+
+Merged as `5044c5d` (squash of PR #123). Reviewed tip `ef35877`.
+
+### AC → evidence
+
+- **F31 (too-new) — met.** Mandatory CI execution under a real **Node v26.3.1 / ABI 147** at the
+  exact PR head `ef35877` (`test-extended`): named refusal **before native load**, no
+  `ERR_DLOPEN_FAILED`, and **no skip** — the arm reddens rather than skipping when the mismatched
+  interpreter is absent, so the gate cannot silently pass. CI provisioned the interpreter and
+  asserted its ABI differs from the active one before running the arm.
+- **Additional host too-new evidence.** **Node v25 / ABI 141** produced the named refusal
+  (exit 1, no `ERR_DLOPEN_FAILED`).
+- **too-old — met.** Host **Node v23 / ABI 131** produced the named refusal.
+- **compatible — met.** Host **Node v24 / ABI 137** ran without false refusal, including the
+  **numeric-manifest-ABI** case (an unquoted `"abi": 137` is coerced and runs rather than
+  crashing on its own manifest's type).
+- **Red baseline / mutation — met.** Restoring the old `>=` comparison admits the too-new ABI and
+  makes the regression test fail, so the test is genuinely RED against the minimum-major floor
+  rather than merely green against the fix.
+
+### Supporting properties
+
+- The preflight remains the **first CLI import**, and its **import graph is proven native-free**
+  by an executed probe — the refusal cannot lose the race to `better-sqlite3`.
+- **Both required CI checks** (`test`, `test-extended`) were **green at `ef35877`**.
+- **Final review outcome: `closeout_guidance_only`** — the reviewed tip **equaled the fetched
+  remote head** and **no substantive finding** remained (the only residual guidance was backlog
+  closeout, performed post-merge).
+
+### Correction to the original environmental assumption
+
+The Acceptance section above states that **v26.3.1 / ABI 147 is on this host**. **It was not.**
+No Node 26 was installed on the host (nvm topped out at **v25 / ABI 141**), so the too-new arm
+could not be executed locally as the ticket assumed. Instead:
+
+- **CI provisions v26.3.1 / ABI 147** and runs the F31 arm there, mandatorily.
+- The **host's too-new arm used Node v25 / ABI 141**.
+
+This **changes no acceptance semantics**: both v26.3.1/ABI 147 and v25/ABI 141 are genuinely
+incompatible **newer** ABIs relative to the binding's ABI 137, which is exactly the condition F31
+exists to prove — a too-new interpreter must be refused by name rather than waved through to an
+opaque native failure. The AC's intent is met; only the assumed location of the interpreter was
+wrong.
