@@ -186,6 +186,27 @@ test("FG-570 (EXECUTED): a manifest with NO abi field is REFUSED by name — not
   assert.doesNotMatch(r.stderr, OPAQUE, "the native binding loaded before the guard — the preflight lost the race");
 });
 
+test("FG-570 (EXECUTED): a MALFORMED manifest is REFUSED at the entry — a release forge cannot parse is not a dev checkout", () => {
+  // A truncated/corrupted manifest is PRESENT, so this IS a release — but discovery used
+  // to swallow the parse error and report "no manifest", which took the REQUIRED_ABI dev
+  // fallback. On an interpreter matching the dev pin the guard then passed and the process
+  // reached the native loader, where a release whose shipped binding needs a different ABI
+  // dies opaquely. Staged with the running ABI's dev pin exactly so the fallback would have
+  // PASSED: this reddens if the malformed case ever collapses back into "no release".
+  const dir = mkdtempSync(join(workspace, "malformed-"));
+  cpSync(join(sourceRoot, "src"), join(dir, "src"), { recursive: true });
+  cpSync(join(sourceRoot, "package.json"), join(dir, "package.json"));
+  symlinkSync(join(sourceRoot, "node_modules"), join(dir, "node_modules"));
+  writeFileSync(join(dir, RELEASE_MANIFEST_NAME), `{ "schema": 1, "abi": "${process.versions.modules}"`); // truncated
+  const r = runEntry(dir);
+
+  assert.equal(r.status, 1, `a malformed release manifest must refuse, got ${r.status}\n${r.stderr}`);
+  assert.match(r.stderr, /refusing to run/i);
+  assert.match(r.stderr, /manifest is unreadable/);
+  assert.match(r.stderr, new RegExp(RELEASE_MANIFEST_NAME.replace(/\./g, "\\."))); // the manifest, named
+  assert.doesNotMatch(r.stderr, OPAQUE, "the native binding loaded before the guard — the preflight lost the race");
+});
+
 // A hand-written or third-party-generated manifest can carry `abi` as an unquoted JSON
 // number. readReleaseManifest casts without validating, so whatever JSON.parse produced
 // reaches the preflight verbatim. The boundary must coerce rather than trust the type:

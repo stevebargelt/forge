@@ -675,24 +675,40 @@ export function buildRelease(opts: BuildReleaseOptions): BuildReleaseResult {
   }
 }
 
+export type ReleaseManifestLocation =
+  | { kind: "none" }
+  | { kind: "release"; manifest: ReleaseManifest; releaseDir: string }
+  | { kind: "malformed"; releaseDir: string; error: string };
+
 /** Walk up from `startDir` to the nearest release root (a dir holding
- *  forge-release.json) and return the parsed manifest, or null if the caller is
- *  not running inside a release (e.g. the dev bin/forge). */
-export function readReleaseManifest(startDir: string): { manifest: ReleaseManifest; releaseDir: string } | null {
+ *  forge-release.json) and report what is there. A manifest that is PRESENT but
+ *  unreadable is `malformed`, NOT `none`: the caller is demonstrably inside a
+ *  release, and collapsing that into "no release" lets a gate fall back to dev
+ *  defaults for a release it could not verify. */
+export function locateReleaseManifest(startDir: string): ReleaseManifestLocation {
   let dir = isAbsolute(startDir) ? startDir : resolve(startDir);
   for (;;) {
     const p = join(dir, RELEASE_MANIFEST_NAME);
     if (existsSync(p)) {
       try {
-        return { manifest: JSON.parse(readFileSync(p, "utf8")) as ReleaseManifest, releaseDir: dir };
-      } catch {
-        return null;
+        return { kind: "release", manifest: JSON.parse(readFileSync(p, "utf8")) as ReleaseManifest, releaseDir: dir };
+      } catch (e) {
+        return { kind: "malformed", releaseDir: dir, error: (e as Error).message };
       }
     }
     const parent = dirname(dir);
-    if (parent === dir) return null;
+    if (parent === dir) return { kind: "none" };
     dir = parent;
   }
+}
+
+/** Walk up from `startDir` to the nearest release root and return the parsed
+ *  manifest, or null if the caller is not running inside a usable release (e.g.
+ *  the dev bin/forge). Callers that must distinguish a malformed manifest from
+ *  the absence of one — the ABI preflight — use locateReleaseManifest instead. */
+export function readReleaseManifest(startDir: string): { manifest: ReleaseManifest; releaseDir: string } | null {
+  const found = locateReleaseManifest(startDir);
+  return found.kind === "release" ? { manifest: found.manifest, releaseDir: found.releaseDir } : null;
 }
 
 export type RuntimeProvenance = {

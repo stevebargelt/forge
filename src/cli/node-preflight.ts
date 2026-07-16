@@ -17,7 +17,7 @@
 
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { RELEASE_MANIFEST_NAME, readReleaseManifest } from "../v2/release.js";
+import { RELEASE_MANIFEST_NAME, locateReleaseManifest } from "../v2/release.js";
 
 // The ABI of the interpreter a dev checkout's node_modules is built for. Tracks
 // .nvmrc / package.json engines — bump together when the repo moves LTS. A RELEASE
@@ -72,11 +72,28 @@ export function checkAbi(actualAbi: string, expectedAbi: string): { ok: true } |
  *  its own manifest (the release ships the binding, so its manifest is authoritative);
  *  a dev checkout has no manifest and falls back to the pinned constant. A release whose
  *  manifest ABI is missing or unusable is REFUSED by name — it ships a binding whose ABI
- *  we cannot verify, and the pinned dev constant is not evidence about it. */
+ *  we cannot verify, and the pinned dev constant is not evidence about it. A manifest that
+ *  is present but UNPARSEABLE is the same refusal: it is a release, so the dev fallback is
+ *  no more applicable to it than to one whose `abi` field is garbage. */
 export function resolveExpectedAbi(
-  found: { manifest: { abi?: unknown }; releaseDir: string } | null,
+  found: { kind: "none" } | { kind: "release"; manifest: { abi?: unknown }; releaseDir: string } | { kind: "malformed"; releaseDir: string; error: string },
 ): { ok: true; abi: string } | { ok: false; message: string } {
-  if (!found) return { ok: true, abi: REQUIRED_ABI };
+  if (found.kind === "none") return { ok: true, abi: REQUIRED_ABI };
+  if (found.kind === "malformed") {
+    return {
+      ok: false,
+      message:
+        `forge: refusing to run — this release's manifest is unreadable.\n` +
+        `  release:  ${join(found.releaseDir, RELEASE_MANIFEST_NAME)}\n` +
+        `  parse error: ${found.error}\n` +
+        `  running:  Node ${process.versions.node}, ABI ${process.versions.modules}\n` +
+        `This release ships its own better-sqlite3 binding, and its manifest is the only ` +
+        `authority on the ABI that binding needs. A manifest forge cannot parse states nothing, ` +
+        `so starting anyway would fail inside the native loader with an opaque ABI-mismatch ` +
+        `crash instead of failing clean here.\n` +
+        `Fix: reinstall from a release built by \`forge release\`, or run forge from a source checkout.`,
+    };
+  }
 
   // `abi` is typed string but nothing enforces it: readReleaseManifest JSON.parses with
   // a bare cast, so a hand-written manifest's unquoted `"abi": 137` arrives as a number.
@@ -106,7 +123,7 @@ export function resolveExpectedAbi(
 /** Run the check against the live runtime; print + exit(1) on a mismatch. Invoked
  *  at import time so the CLI fails clean BEFORE better-sqlite3 is required. */
 export function applyNodePreflight(): void {
-  const expected = resolveExpectedAbi(readReleaseManifest(dirname(fileURLToPath(import.meta.url))));
+  const expected = resolveExpectedAbi(locateReleaseManifest(dirname(fileURLToPath(import.meta.url))));
   const r = expected.ok ? checkAbi(process.versions.modules, expected.abi) : expected;
   if (!r.ok) {
     process.stderr.write(`${r.message}\n`);

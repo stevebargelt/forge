@@ -65,13 +65,13 @@ test("checkAbi: an unreadable ACTUAL ABI against a known expected is a block", (
 });
 
 test("resolveExpectedAbi: no manifest (a dev checkout) uses the pinned constant", () => {
-  const r = resolveExpectedAbi(null);
+  const r = resolveExpectedAbi({ kind: "none" });
   assert.equal(r.ok, true);
   if (r.ok) assert.equal(r.abi, REQUIRED_ABI);
 });
 
 test("resolveExpectedAbi: a release's stated ABI wins over the pinned constant", () => {
-  const r = resolveExpectedAbi({ manifest: { abi: "147" }, releaseDir: "/opt/forge" });
+  const r = resolveExpectedAbi({ kind: "release", manifest: { abi: "147" }, releaseDir: "/opt/forge" });
   assert.equal(r.ok, true);
   if (r.ok) assert.equal(r.abi, "147");
 });
@@ -79,9 +79,23 @@ test("resolveExpectedAbi: a release's stated ABI wins over the pinned constant",
 test("resolveExpectedAbi: a numeric (unquoted) manifest abi is coerced, not refused", () => {
   // A hand-written manifest's `"abi": 137` arrives as a number — genuinely compatible
   // on an ABI-137 interpreter, so it must RUN.
-  const r = resolveExpectedAbi({ manifest: { abi: 137 }, releaseDir: "/opt/forge" });
+  const r = resolveExpectedAbi({ kind: "release", manifest: { abi: 137 }, releaseDir: "/opt/forge" });
   assert.equal(r.ok, true);
   if (r.ok) assert.equal(r.abi, "137");
+});
+
+test("resolveExpectedAbi: a MALFORMED manifest is refused BY NAME — never the dev fallback", () => {
+  // A present-but-unparseable manifest used to collapse into "no manifest" and take the
+  // REQUIRED_ABI path, so a release whose shipped binding needs a different ABI than the
+  // dev pin was waved through to the native loader on a matching dev interpreter.
+  const r = resolveExpectedAbi({ kind: "malformed", releaseDir: "/opt/forge", error: "Unexpected token }" });
+  assert.equal(r.ok, false);
+  if (!r.ok) {
+    assert.match(r.message, /manifest is unreadable/);
+    assert.match(r.message, /\/opt\/forge\/forge-release\.json/); // named, so it's actionable
+    assert.match(r.message, /Unexpected token \}/); // the parse error, quoted back
+    assert.doesNotMatch(r.message, OPAQUE);
+  }
 });
 
 test("resolveExpectedAbi: a release with an unusable ABI is refused BY NAME, never fallen back", () => {
@@ -89,7 +103,7 @@ test("resolveExpectedAbi: a release with an unusable ABI is refused BY NAME, nev
   // (or passed), so a mismatched interpreter started and died in the native loader.
   // The pinned dev constant is not evidence about a release's own shipped binding.
   for (const abi of [undefined, null, "", "   ", "not-an-abi", {}]) {
-    const r = resolveExpectedAbi({ manifest: { abi }, releaseDir: "/opt/forge" });
+    const r = resolveExpectedAbi({ kind: "release", manifest: { abi }, releaseDir: "/opt/forge" });
     assert.equal(r.ok, false, `manifest abi ${JSON.stringify(abi) ?? "undefined"} must refuse`);
     if (!r.ok) {
       assert.match(r.message, /does not state a usable ABI/);
