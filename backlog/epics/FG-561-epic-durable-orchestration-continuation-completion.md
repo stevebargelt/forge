@@ -81,7 +81,7 @@ Execute sequentially unless the approved campaign plan proves independence.
 | 0 | **FG-567** | Landed (`97363ca`) — `bin/forge` signal/exit fidelity; later **superseded by FG-569's exec-not-spawn** (no child process left to re-raise). |
 | 1 | **FG-568** | Landed (`275ac63`) — additive-only store on the ordinary open path; destructive DDL moved to the operator's quiesce-gated `forge store converge`. |
 | 2 | **FG-569** | Landed (`1b11f25`) — exec-not-spawn entry + inert immutable release closure + manifest + R1/R2 provenance. |
-| 3 | **FG-570** | Landed — exact bounded ABI assertion (equality; upper AND lower bound) replacing the minimum-major floor; refuses a mismatched ABI (older OR newer) with a named message before native load. F31 gate-enforced: CI `test-extended` provisions a real Node 26/ABI 147 and the arm reddens rather than skips. |
+| 3 | **FG-570** | Landed (`5044c5d`) — exact bounded ABI assertion (equality; upper AND lower bound) replacing the minimum-major floor; refuses a mismatched ABI (older OR newer) with a named message before native load. F31 gate-enforced: CI `test-extended` provisions a real Node 26/ABI 147 and the arm reddens rather than skips. |
 | 4 | **FG-571** | Open — atomic promote/rollback + `/bin/sh` PATH shim + env-sanitization (swap-and-retain, no GC). |
 | 5 | **FG-572** | Open — installed-surface compatibility (seeds/hooks/scripts/dashboard) across a promotion; owns lifting `forge dashboard` from its FG-569 release-mode refusal. |
 
@@ -133,7 +133,7 @@ done:
   window sees a **running** launch as "no such launch." **(Open — owned by FG-552 / BD-4.)**
 - Node preflight was a **minimum-major** check (`src/cli/node-preflight.ts:26`) — it admitted Node 26, whose
   ABI cannot load the repo's `better-sqlite3` binding, producing an opaque native crash instead of the
-  guard's clear message. **RESOLVED (FG-570):** replaced with an exact ABI equality assertion (upper AND
+  guard's clear message. **RESOLVED (FG-570 — `5044c5d`):** replaced with an exact ABI equality assertion (upper AND
   lower bound) that refuses a mismatched ABI with a named message before native load; F31 executes under a
   real Node 26/ABI 147 in CI `test-extended`.
 - The CLI eagerly imports all command modules before argv is parsed (`src/cli/index.ts`), transitively

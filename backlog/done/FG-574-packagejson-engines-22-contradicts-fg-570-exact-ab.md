@@ -1,9 +1,11 @@
 ---
 id: FG-574
 type: story
-status: active
+status: done
 title: package.json engines >=22 contradicts FG-570 exact-ABI preflight — reconcile the declared Node support
 created: 2026-07-16
+closed: 2026-07-16
+closed_commit: 5044c5d
 ---
 
 **Parent:** FG-553 (Slice 1) · **Surfaced by:** FG-573/FG-570 docs-impact pass
@@ -16,15 +18,13 @@ FG-570 replaced the CLI's minimum-major Node floor with an **exact ABI equality*
 
 FG-570's review took the engines contradiction in-scope rather than deferring it: `package.json` now ships **`engines: { "node": "^24" }`** — the ABI-137 range (all Node 24.x share ABI 137; Node 25 is ABI 141), matching the runtime guard and `.nvmrc`. The "keep it loose" alternative below was not taken; `engines` now gives the earlier, consistent install-time signal. It must be bumped together with `.nvmrc` when the repo moves LTS.
 
-Also: README (`Node 20+`, before FG-570) and `docs/work-laptop-setup.md` (`Node 22+`) were reconciled to the exact-ABI requirement by FG-570; `engines` is the remaining un-reconciled Node-support surface (project config, not prose — deliberately deferred out of the docs pass).
+Also: README and `docs/work-laptop-setup.md` were reconciled to the exact-ABI requirement by FG-570 (`5044c5d`) — both now state that a matching ABI is the requirement and the `.nvmrc` pin is the tested way to obtain it, rather than naming an exact Node version. With `engines: "^24"` shipped, **no Node-support surface remains un-reconciled.**
 
-## Decision to make (config policy — operator owns)
+## Decision made (config policy)
 
-What should `engines.node` express?
-- **Hard-pin to the ABI-137 range** — `"24.x"` (equivalently `">=24 <25"`): all Node 24.x minors share ABI 137; Node 25 = ABI 141. This matches the runtime guard exactly and gives an install-time warning on a mismatched Node.
-- **Keep it loose** and rely solely on the runtime preflight for enforcement (engines stays advisory, avoids churn each time the pinned Node bumps).
+`engines.node` expresses the **ABI-137 range** — `"^24"`: all Node 24.x minors share ABI 137; Node 25 = ABI 141. This matches the runtime guard and gives an install-time warning on a mismatched Node. The alternative (keep it loose, rely solely on the runtime preflight) was **not** taken.
 
-The runtime guard (FG-570) is authoritative either way; this is about whether `engines` gives an earlier, consistent signal. Tracks `.nvmrc` — whatever is chosen must bump with it.
+The runtime guard (FG-570) is authoritative regardless; `engines` is the earlier, consistent signal. It tracks `.nvmrc` and must bump with it.
 
 ## Acceptance
 

@@ -1,9 +1,11 @@
 ---
 id: FG-570
 type: story
-status: active
+status: done
 title: "FG-553 Child 3: bounded ABI assertion replacing the minimum-major floor"
 created: 2026-07-14
+closed: 2026-07-16
+closed_commit: 5044c5d
 ---
 
 **Parent:** FG-553 · **Epic:** FG-561 · **Plan:** `docs/plans/fg553-slice1-architecture.md` (Child 3)

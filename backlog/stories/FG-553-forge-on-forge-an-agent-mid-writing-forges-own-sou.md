@@ -131,7 +131,7 @@ decision, not an input to it.
     R3/R4 remain unrecorded (FG-555).
   - **R3/R4 are FG-555's** (Slice 1b). Together the two slices must account for all four; neither may
     assume the other covered its half.
-- **Bounded ABI enforcement — LANDED (FG-570).** Assert `NODE_MODULE_VERSION` against the ABI the native
+- **Bounded ABI enforcement — LANDED (FG-570 — `5044c5d`).** Assert `NODE_MODULE_VERSION` against the ABI the native
   bindings were built for — an **upper AND lower** bound, not a version floor. *Pre-FG-570
   `src/cli/node-preflight.ts:26` admitted any major ≥ 24, so it passed Node 26, whose ABI cannot load the
   binding — the operator got an opaque native crash; the floor caught downgrades and waved upgrades through.*
@@ -207,7 +207,7 @@ Each is a separate acceptance case with a separate pass condition:
 
   > **FG-553 does NOT wait on FG-555 to close.** This slice closes on **R1 + R2 + the R3/R4 contract above**.
   > FG-555 depends on FG-553; FG-553 must therefore never depend back on FG-555, or the two deadlock.
-- **F31 — REFUSAL. LANDED (FG-570).** Forcing an **incompatible interpreter** is **REFUSED by the bounded ABI
+- **F31 — REFUSAL. LANDED (FG-570 — `5044c5d`).** Forcing an **incompatible interpreter** is **REFUSED by the bounded ABI
   assertion BEFORE any native module is loaded**, with a named, actionable mismatch. Test **ENV-C**:
   v26.3.1 / ABI 147. *Pre-FG-570 this was never tested and failed badly — the minimum-major preflight passed
   (26 ≥ 24) and `better-sqlite3` then threw an opaque native error.* FG-570 now EXECUTES this: the host triad
