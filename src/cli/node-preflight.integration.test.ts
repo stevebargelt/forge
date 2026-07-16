@@ -117,6 +117,63 @@ test("FG-570 (EXECUTED): the preflight's import graph is NATIVE-FREE — importi
   assert.deepEqual(JSON.parse(r.stdout.trim()), [], "importing node-preflight must not load better-sqlite3");
 });
 
+test("FG-570 (EXECUTED): a manifest ABI OLDER than this interpreter's is refused as a NEWER-actual — the exact case the old >= floor admitted", () => {
+  // The 999 case above is a too-OLD actual (999 > running), which the pre-FG-570
+  // minimum-major floor ALSO caught. The regression FG-570 actually exists for is the
+  // opposite direction: an interpreter NEWER than the binding, which `major >= 24`
+  // waved through into the native loader's opaque crash. ABI 1 is below every real
+  // interpreter, so the running ABI is always the newer one here — executed, not
+  // asserted in prose. If the equality is ever relaxed back to a floor, this reddens.
+  const dir = stageRelease("1");
+  const r = runEntry(dir);
+
+  assert.equal(r.status, 1, `expected a clean exit 1 refusal, got ${r.status}\n${r.stderr}`);
+  assert.match(r.stderr, /refusing to run/i);
+  assert.match(r.stderr, new RegExp(`NEWER ABI \\(${process.versions.modules}\\)`));
+  assert.match(r.stderr, /ABI 1\b/); // the required ABI, from the manifest
+  assert.doesNotMatch(r.stderr, OPAQUE, "the native binding loaded before the guard — the preflight lost the race");
+});
+
+test("FG-570 (EXECUTED): an EMPTY manifest ABI fails OPEN at the entry — no refusal manufactured from an unreadable value", () => {
+  // checkAbi's fail-open is unit-tested; this proves it survives the whole expectedAbi()
+  // → applyNodePreflight() → real-entry path. An empty string is NOT nullish, so it does
+  // NOT hit the `?? REQUIRED_ABI` fallback — it reaches checkAbi as the expected value and
+  // must fail open there. A future "empty means block" tightening reddens here.
+  const dir = stageRelease("");
+  const r = runEntry(dir);
+
+  assert.equal(r.status, 0, `an unreadable expected ABI must not block the entry, got ${r.status}\n${r.stderr}`);
+  assert.doesNotMatch(r.stderr, /refusing to run/i);
+});
+
+test("FG-570 (EXECUTED): an UNPARSEABLE manifest ABI fails OPEN at the entry", () => {
+  const dir = stageRelease("not-an-abi");
+  const r = runEntry(dir);
+
+  assert.equal(r.status, 0, `an unparseable expected ABI must not block the entry, got ${r.status}\n${r.stderr}`);
+  assert.doesNotMatch(r.stderr, /refusing to run/i);
+});
+
+test("FG-570 (EXECUTED): a manifest with NO abi field falls back to the pinned REQUIRED_ABI rather than crashing", () => {
+  // readReleaseManifest JSON.parses with a bare `as ReleaseManifest` cast — nothing
+  // validates the shape — so a manifest missing `abi` yields undefined. expectedAbi()'s
+  // `?? REQUIRED_ABI` is the only thing standing between that and a TypeError inside
+  // checkAbi at import time. This pins that branch on the real entry.
+  const dir = mkdtempSync(join(workspace, "no-abi-"));
+  cpSync(join(sourceRoot, "src"), join(dir, "src"), { recursive: true });
+  cpSync(join(sourceRoot, "package.json"), join(dir, "package.json"));
+  symlinkSync(join(sourceRoot, "node_modules"), join(dir, "node_modules"));
+  writeFileSync(
+    join(dir, RELEASE_MANIFEST_NAME),
+    JSON.stringify({ schema: 1, id: "release-no-abi", nodeVersion: process.version, interpreter: process.execPath }, null, 2),
+  );
+  const r = runEntry(dir);
+
+  assert.equal(REQUIRED_ABI, process.versions.modules, "REQUIRED_ABI has drifted from the interpreter this checkout's binding is built for");
+  assert.equal(r.status, 0, `expected the fallback to REQUIRED_ABI to run, got ${r.status}\n${r.stderr}`);
+  assert.doesNotMatch(r.stderr, /TypeError/, "a manifest without abi must not crash the preflight");
+});
+
 // F31's real-interpreter arm. The plan calls for executing under a genuinely
 // ABI-incompatible Node (v26 / ABI 147). This test RESOLVES one if the host has it and
 // executes the real entry under it; where none exists it records that concretely rather
