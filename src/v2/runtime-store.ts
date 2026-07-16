@@ -37,7 +37,7 @@
 
 import { execFileSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { FORGE_HOME, interpretersDirIn } from "../util/paths.js";
 
 export type InterpreterIdentity = { version: string; abi: string };
@@ -51,6 +51,23 @@ export function interpreterKey(id: InterpreterIdentity): string {
  *  version or ABI is a different path, never an overwrite of this one. */
 export function interpreterPath(home: string, id: InterpreterIdentity): string {
   return join(interpretersDirIn(home), interpreterKey(id), "bin", "node");
+}
+
+/** Is `bin` a path THIS store owns for `id` — i.e. the keyed path an interpreter with that
+ *  identity occupies? Pure path arithmetic on the store's own layout
+ *  ($home/interpreters/node-<version>-<abi>/bin/node), so it answers the REFERENCE question
+ *  ("may a release name this?") without asserting anything about what is on disk; callers
+ *  pair it with probeInterpreter, which answers the EXECUTION question.
+ *
+ *  Deliberately not scoped to ONE home: it recognizes a store path under whatever home owns
+ *  it, because a release built against home A's store is still naming an immutable,
+ *  version+ABI-keyed artifact when it is promoted under home B. What the check buys is the
+ *  property that matters — the release names an interpreter the store OWNS and therefore
+ *  never replaces in place, rather than an arbitrary external path (/usr/local/bin/node)
+ *  that a system package upgrade can change under an anchored release. */
+export function isStoredInterpreter(bin: string, id: InterpreterIdentity): boolean {
+  // $home/interpreters/node-<version>-<abi>/bin/node — four segments up is the home.
+  return bin === interpreterPath(resolve(bin, "..", "..", "..", ".."), id);
 }
 
 /** EXECUTE `bin` and ask it what it is. This is the only honest way to learn an

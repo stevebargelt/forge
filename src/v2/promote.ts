@@ -41,7 +41,7 @@ import {
   assertReleaseCloses,
   type ReleaseManifest,
 } from "./release.js";
-import { probeInterpreter } from "./runtime-store.js";
+import { interpreterKey, isStoredInterpreter, probeInterpreter } from "./runtime-store.js";
 
 /** A release identity is a plain token. The SAME rule the shim's fail-closed identity
  *  guard applies in shell (renderIdentityGuard) — an id that the shim would refuse at exec
@@ -104,6 +104,9 @@ export type Candidate = {
  *     reference only an already-validated interpreter);
  *   - the manifest is ABI-COHERENT with that interpreter (FG-570: the shipped binding
  *     loads under one ABI only);
+ *   - that interpreter is IN THE STORE (FG-571's external-artifact contract): an external
+ *     path validates identically today and is mutable tomorrow, so what a promotion proves
+ *     about an unowned interpreter does not survive the next `brew upgrade node`;
  *   - the entry and loader are PRESENT;
  *   - the CLOSURE RUNS — assertReleaseCloses executes the release's tsx loader AND loads
  *     its own better-sqlite3 binding under the pinned interpreter. This is what makes the
@@ -195,6 +198,34 @@ export function validateCandidate(dir: string): Candidate {
         `own ABI only — so promoting this would hand the operator an opaque native-loader crash on the next ` +
         `command instead of a refusal now.\n` +
         `Fix: rebuild the release against the interpreter now at that path, or restore the interpreter it pins.`,
+    );
+  }
+
+  // THE EXTERNAL-ARTIFACT CONTRACT, enforced at the gate that creates the reference's
+  // consequences. Running and agreeing with the manifest proves what the interpreter IS
+  // right now; neither proves it will STAY that. An interpreter outside the store is a
+  // mutable external artifact — /usr/local/bin/node is rewritten in place by the next
+  // `brew upgrade node`, and the release that pins it keeps exec'ing that path — so a
+  // promotion that accepted one would hand back a release whose validation expires
+  // silently, and retention (which is the whole T9 answer for anchored processes) would
+  // protect the release directory while the thing that RUNS it moved underneath.
+  // A store path cannot do that: the store is keyed by version+ABI and never replaces a
+  // key in place, so what validated here is what runs later.
+  const identity = { version: manifest.nodeVersion, abi: manifest.abi };
+  if (!isStoredInterpreter(interpreter, identity)) {
+    throw new Error(
+      `forge release: refusing to promote — this release's interpreter is not in the interpreter store.\n` +
+        `  release:      ${releaseDir}\n` +
+        `  interpreter:  ${interpreter}\n` +
+        `  expected form: <forge-home>/interpreters/${interpreterKey(identity)}/bin/node\n` +
+        `It runs and it reports the version+ABI the manifest names, but it is an external path forge does ` +
+        `not own: whatever installed it (a system package, homebrew, nvm) can rewrite those bytes in place, ` +
+        `and this release would keep exec'ing that path — so promoting it would select a release whose ` +
+        `validation expires the moment something else upgrades node, including under processes already ` +
+        `anchored to it. The store exists to make that impossible: it is keyed by version+ABI, validated by ` +
+        `execution before anything may reference it, and never replaced in place.\n` +
+        `Fix: rebuild with \`forge release build\` — it installs its interpreter into the store and pins the ` +
+        `store's copy.`,
     );
   }
 

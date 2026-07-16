@@ -26,9 +26,9 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { RELEASE_MANIFEST_NAME, SHIM_NAME, renderShim, thawReleaseTree, type BuildReleaseResult } from "./release.js";
+import { RELEASE_MANIFEST_NAME, SHIM_NAME, assertReleaseCloses, renderShim, thawReleaseTree, type BuildReleaseResult } from "./release.js";
 import { atomicSymlinkSwap, installShim, promote, readSelection, rollback, validateCandidate } from "./promote.js";
-import { installInterpreter, interpreterPath, probeInterpreter, validatedInterpreter } from "./runtime-store.js";
+import { installInterpreter, interpreterPath, isStoredInterpreter, probeInterpreter, validatedInterpreter } from "./runtime-store.js";
 import { currentLinkIn, interpretersDirIn, previousLinkIn, releasesDirIn } from "../util/paths.js";
 import { findGitRoot } from "../util/git-root.js";
 import { makeDisposableSourceRoot, removeDisposableSourceRoot, type DisposableSource } from "./fg571-harness.js";
@@ -660,6 +660,75 @@ test("FG-571 install-shim is EXPLICIT: promoting does not install, rewrite, or t
   const r = runProvenance(shim, shimEnv());
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.prov.releaseId, relB.manifest.id, "an unchanged shim selects the newly promoted release");
+});
+
+test("FG-571 external-artifact contract (EXECUTED): a built release pins its interpreter IN THE STORE, and the promoted release RUNS under that store copy", () => {
+  // The contract is only real if it is on the PRODUCTION path: an interpreter store that
+  // nothing builds into and nothing requires is an unreferenced module with tests. So the
+  // evidence here is the same shape as everything else in this file — what the RUNNING
+  // process execs, not what a module returns.
+  const identity = { version: relA.manifest.nodeVersion, abi: relA.manifest.abi };
+  assert.ok(
+    isStoredInterpreter(relA.manifest.interpreter, identity),
+    `the built release pins a STORE path keyed by its own version+ABI, not the building process.execPath (${relA.manifest.interpreter})`,
+  );
+  assert.ok(relA.manifest.interpreter.startsWith(interpretersDirIn(source.home)), "and it is the store of the home the release was built against");
+  // VALIDATE BEFORE SELECT: the store's answer comes from EXECUTING what is at that key.
+  assert.equal(validatedInterpreter(source.home, identity), relA.manifest.interpreter, "the pinned interpreter validates by execution at its keyed path");
+
+  // THE EXECUTED ASSERTION: a promoted release's process really does exec the store copy —
+  // the pin is what runs, not merely what the manifest says.
+  promote({ home, candidate: relA.releaseDir });
+  const shim = installShim({ prefix: workspace, shimText: renderShim(), shimName: SHIM_NAME });
+  const r = runProvenance(shim, shimEnv());
+  assert.equal(r.status, 0, `the release must run under its store interpreter: ${r.stderr}`);
+  assert.equal(r.prov.execPath, relA.manifest.interpreter, "process.execPath IS the store's copy — the running process is on the immutable artifact");
+  assert.ok(isStoredInterpreter(r.prov.execPath, identity), "and that execPath is store-owned, keyed by the ABI the process reports");
+  assert.equal(r.prov.bindingLoads, true, "the native binding loads under the store interpreter");
+
+  // RETAINED while referenced: promotion added no GC, so the key a selected release names
+  // is still there and still validates afterwards.
+  assert.equal(validatedInterpreter(source.home, identity), relA.manifest.interpreter, "the referenced interpreter is retained after promotion");
+});
+
+test("FG-571 external-artifact MUTANT (EXECUTED): a release pinning a MUTABLE EXTERNAL interpreter is REFUSED — it passes every other gate", () => {
+  // THE MUTANT for the store rule, and the pre-fix behavior exactly: a release whose
+  // manifest pins process.execPath — the node running this very test. It is absolute, it
+  // exists, it RUNS, and it reports precisely the version+ABI the manifest names, so it
+  // sails through every other promotion gate (isAbsolute, probeInterpreter, ABI coherence,
+  // and the closure actually CLOSES under it — asserted below). Only the store rule catches
+  // it. That is the point: `/usr/local/bin/node` validates identically today and is rewritten
+  // in place by the next `brew upgrade node`, taking the release's proven runtime with it —
+  // under processes already anchored to that release, which retention cannot protect.
+  const external = join(workspace, "external-interp-release");
+  execFileSync("/bin/sh", ["-c", 'mkdir -p "$1" && tar -C "$2" -cf - . | tar -C "$1" -xf -', "sh", external, relA.releaseDir]);
+  execFileSync("/bin/sh", ["-c", 'chmod -R u+w "$1"', "sh", external]);
+  const m = JSON.parse(readFileSync(join(external, RELEASE_MANIFEST_NAME), "utf8"));
+  m.interpreter = process.execPath;
+  writeFileSync(join(external, RELEASE_MANIFEST_NAME), JSON.stringify(m, null, 2));
+
+  // The premise, proven rather than asserted: this interpreter is genuinely good — it is
+  // NOT refused for running badly, disagreeing about its ABI, or failing to close.
+  assert.ok(!isStoredInterpreter(process.execPath, { version: m.nodeVersion, abi: m.abi }), "the external interpreter is outside the store");
+  assert.deepEqual(probeInterpreter(process.execPath), { version: m.nodeVersion, abi: m.abi }, "it runs and reports exactly the version+ABI the manifest names");
+  assert.doesNotThrow(() => assertReleaseCloses(external, process.execPath), "and the release's closure genuinely CLOSES under it — every non-store gate is green");
+
+  assert.throws(
+    () => validateCandidate(external),
+    /not in the interpreter store/i,
+    "a release referencing an interpreter forge does not own is refused BY NAME — the external-artifact contract",
+  );
+
+  // ...and the refusal holds at the promotion surface, leaving the selection untouched.
+  promote({ home, candidate: relA.releaseDir });
+  assert.throws(() => promote({ home, candidate: external }), /not in the interpreter store/i, "promote refuses it too");
+  assert.equal(readSelection(home)?.manifest?.id, relA.manifest.id, "and the previously selected release is still selected");
+
+  // The same release, pinned back to the STORE path, promotes — so the refusal is the store
+  // rule doing its job, not the fixture being broken in some other way.
+  m.interpreter = relA.manifest.interpreter;
+  writeFileSync(join(external, RELEASE_MANIFEST_NAME), JSON.stringify(m, null, 2));
+  assert.equal(validateCandidate(external).interpreter, relA.manifest.interpreter, "the identical release with a STORE-pinned interpreter validates");
 });
 
 test("FG-571 validateCandidate: a release whose pinned interpreter is gone is REFUSED by name, not promoted into a broken state", () => {

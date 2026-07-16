@@ -267,7 +267,7 @@ test("FG-569 R2 (END-TO-END through a BUILT release): forge launch show surfaces
   const releaseDir = join(relParent, "release");
   let built: BuildReleaseResult;
   try {
-    built = buildRelease({ sourceRoot: findGitRoot(process.cwd()), outDir: releaseDir });
+    built = buildRelease({ sourceRoot: findGitRoot(process.cwd()), home: join(relParent, "build-home"), outDir: releaseDir });
   } catch (e) {
     // A dirty/non-git source can't be built into a release (assertCommitDescribesTree);
     // that is an environment precondition, not a launch-surface regression.
@@ -318,7 +318,7 @@ test("FG-569 R1 (release A submits, DISTINGUISHABLE recorder): forge launch show
   const releaseDir = join(relParent, "release");
   let built: BuildReleaseResult;
   try {
-    built = buildRelease({ sourceRoot: findGitRoot(process.cwd()), outDir: releaseDir });
+    built = buildRelease({ sourceRoot: findGitRoot(process.cwd()), home: join(relParent, "build-home"), outDir: releaseDir });
   } catch (e) {
     thawReleaseTree(relParent);
     rmSync(relParent, { recursive: true, force: true });

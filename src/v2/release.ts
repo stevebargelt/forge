@@ -47,6 +47,7 @@ import { dirname, join, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { findGitRoot } from "../util/git-root.js";
+import { installInterpreter } from "./runtime-store.js";
 
 export const RELEASE_MANIFEST_NAME = "forge-release.json";
 export const RELEASE_ENTRY_NAME = "forge";
@@ -68,8 +69,10 @@ export type ReleaseManifest = {
   // normal self-build (builder and source are the same checkout).
   builderCommit: string;
   // The ABSOLUTE interpreter the entry execs — the whole point of the closure is
-  // to depend on NO PATH lookup. Recorded from the building interpreter's
-  // process.execPath; a release may only ever name the interpreter that built it.
+  // to depend on NO PATH lookup. FG-571: this is the INTERPRETER STORE's keyed path
+  // ($FORGE_HOME/interpreters/node-<version>-<abi>/bin/node), never the building
+  // process.execPath directly: the store is what makes the reference immutable. See
+  // buildRelease, and isStoredInterpreter for the rule promotion enforces on it.
   interpreter: string;
   abi: string; // process.versions.modules — the exact ABI the native binding needs
   nodeVersion: string;
@@ -690,6 +693,11 @@ export function assertShippedClosureMatchesLockfile(root: string, lockfileName: 
 export type BuildReleaseOptions = {
   sourceRoot: string;
   outDir: string;
+  /** The forge home whose INTERPRETER STORE this release's interpreter is installed into
+   *  and pinned from (default FORGE_HOME). Threaded rather than hardcoded for the same
+   *  reason every promotion path is: it is what keeps a test that builds a release off the
+   *  operator's real ~/.forge/interpreters. */
+  home?: string;
   now?: Date;
   rand?: string;
   // Test seam: fires AFTER the up-front dirty-check + commit capture but BEFORE the committed
@@ -835,7 +843,27 @@ export function buildRelease(opts: BuildReleaseOptions): BuildReleaseResult {
   const builderCommit = resolveBuilderCommit(sourceRoot, commit);
   const rand = opts.rand ?? Math.random().toString(36).slice(2, 8);
   const id = `release-${commit.slice(0, 7)}-${rand}`;
-  const interpreter = process.execPath;
+
+  // FG-571 — BIND THE INTERPRETER TO THE STORE, at the only moment a release's interpreter
+  // reference is created. A release names an ABSOLUTE interpreter and execs it forever; if
+  // that path is the building process.execPath (/usr/local/bin/node — a system/homebrew/nvm
+  // node), it is a MUTABLE EXTERNAL artifact: a package upgrade rewrites it in place, and a
+  // release that was validated at promotion then breaks — or silently changes — under the
+  // processes already anchored to it. The store's contract is exactly the fix: immutable,
+  // keyed by version+ABI, validated BY EXECUTION before it is committed, retained while
+  // referenced, never replaced in place. So a release pins the STORE's copy of its building
+  // interpreter, never the location that copy came from, and promotion REQUIRES that
+  // (validateCandidate / isStoredInterpreter) rather than trusting any absolute path.
+  //
+  // Runs BEFORE any copy, like the closure gate: an interpreter that cannot be committed to
+  // the store is a refusal, not a half-built release. Re-installing an already-valid key is
+  // a no-op, so a rebuild copies nothing — and a builder that is ITSELF a release already
+  // runs from the store, so its execPath resolves to that same key.
+  const interpreter = installInterpreter({
+    home: opts.home,
+    source: process.execPath,
+    expected: { version: process.version, abi: process.versions.modules },
+  }).path;
 
   const tmpDir = `${outDir}.building-${rand}`;
   rmSync(tmpDir, { recursive: true, force: true });

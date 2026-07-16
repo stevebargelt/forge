@@ -48,6 +48,12 @@ const LOCKFILES = ["npm-shrinkwrap.json", "package-lock.json"] as const;
 export type DisposableSource = {
   /** The throwaway checkout releases are built from. Never the real repo. */
   root: string;
+  /** The throwaway forge home whose INTERPRETER STORE the built releases pin (FG-571:
+   *  buildRelease installs its interpreter into the store and pins the store's copy, so a
+   *  build with no `home` would land a node in the operator's real ~/.forge/interpreters).
+   *  Deliberately NOT the home a suite promotes into: an install here must not make that
+   *  suite's own `installInterpreter` assertions read as a re-install. */
+  home: string;
   build: (opts: { outDir: string; rand: string }) => BuildReleaseResult;
 };
 
@@ -55,6 +61,7 @@ export type DisposableSource = {
  *  releases can be built from without touching the real repository. */
 export async function makeDisposableSourceRoot(repoRoot: string): Promise<DisposableSource> {
   const root = mkdtempSync(join(tmpdir(), "fg571-src-"));
+  const home = mkdtempSync(join(tmpdir(), "fg571-buildhome-"));
 
   for (const p of COMMIT_BOUND_PATHS) {
     if (existsSync(join(repoRoot, p))) execFileSync("cp", ["-R", join(repoRoot, p), join(root, p)]);
@@ -75,14 +82,17 @@ export async function makeDisposableSourceRoot(repoRoot: string): Promise<Dispos
   const { buildRelease } = (await import(join(root, "src", "v2", "release.ts"))) as { buildRelease: (o: unknown) => BuildReleaseResult };
   return {
     root,
-    build: ({ outDir, rand }) => buildRelease({ sourceRoot: root, outDir, rand }),
+    home,
+    build: ({ outDir, rand }) => buildRelease({ sourceRoot: root, outDir, rand, home }),
   };
 }
 
-/** Remove a disposable source root. Plain rmSync, deliberately: the tree holds only copied
- *  source and the node_modules SYMLINK, which rmSync unlinks rather than follows. Nothing
- *  here is frozen, so it must NOT be handed to thawReleaseTree — that walks the tree and
- *  would chmod straight through the link into the real node_modules. */
+/** Remove a disposable source root and its build home. Plain rmSync, deliberately: the tree
+ *  holds only copied source and the node_modules SYMLINK, which rmSync unlinks rather than
+ *  follows. Nothing here is frozen, so it must NOT be handed to thawReleaseTree — that walks
+ *  the tree and would chmod straight through the link into the real node_modules. The build
+ *  home holds only the interpreter store's copied node binary — a plain file. */
 export function removeDisposableSourceRoot(src: DisposableSource): void {
   rmSync(src.root, { recursive: true, force: true });
+  rmSync(src.home, { recursive: true, force: true });
 }

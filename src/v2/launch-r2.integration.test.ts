@@ -123,7 +123,9 @@ const hasTmux = spawnSync("tmux", ["-V"], { encoding: "utf8" }).status === 0;
 test("FG-569 R2 (END-TO-END, through a BUILT release entry): the recorder records the release's manifest id — not null, not injected", { skip: hasTmux ? false : "tmux not available" }, async () => {
   const sourceRoot = findGitRoot(process.cwd());
   const releaseDir = join(scratch, "e2e-release");
-  const built: BuildReleaseResult = buildRelease({ sourceRoot, outDir: releaseDir });
+  // FG-571: the build installs its interpreter into `home`'s store and pins that copy — a
+  // disposable one, so the suite adds nothing to the operator's real ~/.forge/interpreters.
+  const built: BuildReleaseResult = buildRelease({ sourceRoot, home: join(scratch, "build-home"), outDir: releaseDir });
 
   // An ISOLATED tmux server, started WITHOUT FORGE_RELEASE_ID in its environment —
   // this is what makes the test meaningful: on an already-running server tmux does
