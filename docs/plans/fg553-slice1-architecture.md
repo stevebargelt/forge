@@ -107,7 +107,14 @@ release identity visible in command output.
 The closure (§3) is atomic; the two things it depends on but does not contain are the **interpreter store**
 and the **PATH shim**. Each needs its own contract, because "atomic `current` swap" says nothing about them.
 
-*Interpreter store* (`~/.forge/runtimes/node-<version>-<abi>/`, shared across releases):
+*Interpreter store* (`~/.forge/interpreters/node-<version>-<abi>/`, shared across releases):
+> **Path corrected 2026-07-16 (FG-571).** This row originally said `~/.forge/runtimes/…`. That directory
+> was already taken: it is the **provider runtime registry** (`claude-oauth.yml`, `claude-bedrock.yml`,
+> `codex-subscription.yml`, `pi-*.yml`), created 2026-05-23 and enumerated by `doctor.ts` via
+> `readdirSync(join(FORGE_HOME,"runtimes")).filter(f => f.endsWith(".yml"))`. The plan was written without
+> knowledge of that collision. Renamed to `interpreters/` — faithful to this section's own prose, which calls
+> it the **interpreter store** throughout; the directory name is incidental to OQ-6's requirement of "a shared
+> versioned interpreter store". The shipped implementation and the operator README both use `interpreters/`.
 - **Immutable + versioned install.** Each interpreter lands at a version+ABI-keyed path and is **never
   modified in place.** A new interpreter is a new path, not an overwrite.
 - **Validated BEFORE any release selects it.** Installation verifies the interpreter runs and reports the
