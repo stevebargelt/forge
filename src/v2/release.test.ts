@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { renderEntry, readReleaseManifest, RELEASE_LOADER_NAME, RELEASE_ENTRY_SOURCE, RELEASE_MANIFEST_NAME } from "./release.js";
+import { renderEntry, readReleaseManifest, locateReleaseManifest, RELEASE_LOADER_NAME, RELEASE_ENTRY_SOURCE, RELEASE_MANIFEST_NAME } from "./release.js";
 
 test("FG-569 entry: execs the PINNED absolute interpreter with tsx loaded in-process", () => {
   const entry = renderEntry("/opt/node-24/bin/node");
@@ -105,6 +105,26 @@ test("FG-569 manifest discovery: a dir that is NOT inside a release returns null
   const base = mkdtempSync(join(tmpdir(), "fg569-norelease-"));
   try {
     assert.equal(readReleaseManifest(base), null);
+    assert.deepEqual(locateReleaseManifest(base), { kind: "none" });
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("FG-570 manifest discovery: a PRESENT but unparseable manifest reports malformed, not absent", () => {
+  // The distinction the ABI preflight depends on: a release it cannot parse must not be
+  // indistinguishable from a dev checkout, or the gate falls back to the dev ABI pin for a
+  // release whose shipped binding it never verified.
+  const base = mkdtempSync(join(tmpdir(), "fg570-malformed-"));
+  try {
+    writeFileSync(join(base, RELEASE_MANIFEST_NAME), '{ "schema": 1, "abi": "137"');
+    const found = locateReleaseManifest(join(base, "src", "cli"));
+    assert.equal(found.kind, "malformed");
+    if (found.kind === "malformed") {
+      assert.equal(found.releaseDir, base);
+      assert.ok(found.error.length > 0, "the parse error is carried so the refusal can name it");
+    }
+    assert.equal(readReleaseManifest(base), null, "the null-returning wrapper is unchanged for its existing callers");
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

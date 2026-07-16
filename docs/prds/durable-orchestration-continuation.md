@@ -237,7 +237,7 @@ Four distinct runtimes are in play. These are separate facts; recording one is *
 
 **Required evidence.** The design must state, for each of R1–R4, whether it is durably captured at launch, derived, or explicitly declared **unknowable**. Argv recording is not runtime identity. `process.execPath` of the exit recorder is not the runtime of the launched workload.
 
-**Required enforcement.** Compatibility must be asserted against the ABI the native bindings were actually built for — a bounded check, not a version floor. The current preflight admits any major at or above its floor and therefore admits an ABI that cannot load.
+**Required enforcement.** Compatibility must be asserted against the ABI the native bindings were actually built for — a bounded check, not a version floor. **Landed (FG-570):** the preflight is now an exact ABI equality assertion (`checkAbi`, upper AND lower bound) against the release manifest's abi (else the pinned `REQUIRED_ABI`); a mismatched ABI — older OR newer — is refused with a named message before native load, and F31 executes under a real Node 26/ABI 147 in CI. (Pre-FG-570 the preflight was a minimum-major floor that admitted any major at or above it, and therefore admitted an ABI that cannot load.)
 
 Subordinate acceptance: **F29**, **F30**, **F31**.
 
