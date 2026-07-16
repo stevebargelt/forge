@@ -84,3 +84,45 @@ the machine-wide PATH — that is FG-571 (Child 4).
 - Promotion, `current` symlink, rollback, the PATH shim, env-sanitization — FG-571 (Child 4).
 - R3/R4 (launched-workload provenance) — FG-555.
 - PRD current-state-map reconciliation — FG-573 (post-merge docs follow-up).
+
+## Closure evidence (EXECUTED — merged as `1b11f25`, CI `test` + `test-extended` green at reviewed tip `4213ca6`)
+
+Each acceptance line, with the test and the orchestrator's host execution against the real `forge`/release:
+
+- **exec-not-spawn:** `bin/forge` is a `#!/bin/sh` shim that `exec`s node once with tsx in-process.
+  `src/v2/bin-forge-signal-fidelity.integration.test.ts`; host: a built release entry ran `--version` (→ `0.1.0`)
+  and `status --json` in ONE process.
+- **Symlink survival:** host-verified — a promotion-style symlink to the release entry ran `--version` and
+  `status --json` under a PATH containing NEITHER `node` NOR `readlink` ($0 canonicalized via the pinned
+  absolute interpreter's `realpathSync`, no PATH lookup). `bin/forge` + the entry both run under strict POSIX
+  `dash` (no `cd --`).
+- **R1:** host — the release entry ran under a node-free PATH; `forge release provenance` reports
+  execPath/ABI == manifest; R1 is ALSO durably captured per launch (`control:` in `forge launch show` human+JSON).
+  `src/v2/launch-cli.integration.test.ts` R1 cases.
+- **R2 independence:** `src/v2/launch-r2.integration.test.ts` (two recorders / two interpreters → different
+  execPaths). Host: a release launch records its true manifest id; a poisoned `FORGE_RELEASE_ID` on a DEV launch
+  records `null`, on a RELEASE launch records the true manifest id — releaseId derived from the manifest, never
+  the ambient env.
+- **Signal fidelity under exec:** `src/v2/bin-forge-signal-fidelity.integration.test.ts` (FG-567 guard rewritten
+  for the exec form, mutation-sensitive); green in CI `test-extended`.
+- **Immutable at rest:** host — a built release is `dr-xr-xr-x` dirs / `-r--r--r--` files / `-r-xr-xr-x` entry;
+  direct write, `rm`+recreate via parent dir, new-file injection, and root-manifest tamper ALL refused; the frozen
+  release still runs. `src/v2/release.integration.test.ts` immutability + dir-tamper cases.
+- **Closure binding (ALL packages incl. install-script):** host — mutating `node_modules/better-sqlite3/lib/index.js`
+  (DB still opens, `package-lock.json` byte-identical) is REFUSED; an untampered build succeeds; one narrow
+  exact-path allowance (`node_modules/esbuild/bin/esbuild`), never a package-level skip.
+  `src/v2/release.integration.test.ts` lockfile-binding + install-script cases.
+- **Lockfile selection:** `src/v2/release.integration.test.ts` — package-lock-only, shrinkwrap-only, and
+  both-present (shrinkwrap wins) all build and bind/manifest against the one selected lockfile.
+- **Source-commit binding:** host — a dirty `src/`/`package.json`/lockfile/`seeds`/`scripts`/`docker` is REFUSED;
+  `builderCommit` is recorded distinctly from the source `commit`; a RELEASE builds its SUCCESSOR (A→B, distinct
+  commits) recording A's manifest commit as B's `builderCommit`, separate from B's source commit; the build-window
+  TOCTOU is closed — commit-bound content is materialized from `git archive <commit>`, so a live-tree mutation
+  MID-build does not leak (shipped bytes == committed bytes, executed via the `onBeforeSnapshot` seam).
+  `src/v2/release.integration.test.ts` dirty-source + successor-build + TOCTOU cases.
+- **Tests correctly tiered:** subprocess/spawn/git-archive tests live in `*.integration.test.ts`; tier-purity guard
+  (FG-406/408) green. Both required CI checks — `test` (`npm run test:all`) and `test-extended`
+  (`npm run test:extended`) — green at the reviewed tip.
+
+Reviewed via the bounded review-loop to a clean code verdict (zero code findings; reviewed tip == remote head).
+The only withheld review finding was the PRD current-state map (out of this ticket's range) — deferred to FG-573.
