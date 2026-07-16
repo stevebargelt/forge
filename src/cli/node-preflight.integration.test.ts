@@ -14,7 +14,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, cpSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
+import { mkdtempSync, cpSync, writeFileSync, symlinkSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { findGitRoot } from "../util/git-root.js";
@@ -223,12 +223,22 @@ test("FG-570 (EXECUTED): a structurally GARBAGE manifest ABI fails OPEN — no b
 // than passing silently — the manifest-path tests above already prove the ordering
 // portably, under the interpreter that is always present.
 test("FG-570 (EXECUTED, F31): a real ABI-incompatible interpreter gets a named refusal, not ERR_DLOPEN_FAILED", (t) => {
+  // Version managers install under the FULL version (nvm: ~/.nvm/versions/node/v26.3.1,
+  // n: /usr/local/n/versions/node/26.3.1), so a major-only path like `v26` matches
+  // nothing on a normal install and the real-Node arm silently skips. Enumerate what is
+  // actually installed instead of guessing directory names.
+  const installRoots = [join(process.env.HOME ?? "", ".nvm/versions/node"), "/usr/local/n/versions/node"];
   const candidates = [
     ...(process.env.FORGE_TEST_MISMATCHED_NODE ? [process.env.FORGE_TEST_MISMATCHED_NODE] : []),
-    ...["26", "25", "23", "22", "20"].flatMap((v) => [
-      join(process.env.HOME ?? "", `.nvm/versions/node/v${v}`, "bin", "node"),
-      `/usr/local/n/versions/node/${v}/bin/node`,
-    ]),
+    ...installRoots.flatMap((root) => {
+      let entries: string[];
+      try {
+        entries = readdirSync(root);
+      } catch {
+        return [];
+      }
+      return entries.sort().reverse().map((v) => join(root, v, "bin", "node"));
+    }),
   ];
   const mismatched = candidates.find((p) => {
     const probe = spawnSync(p, ["-p", "process.versions.modules"], { encoding: "utf8" });
@@ -238,7 +248,7 @@ test("FG-570 (EXECUTED, F31): a real ABI-incompatible interpreter gets a named r
   if (!mismatched) {
     // Concrete, not a shrug: name what was searched so the gap is auditable.
     t.skip(
-      `no ABI-incompatible interpreter on this host (running ABI ${process.versions.modules}; searched $FORGE_TEST_MISMATCHED_NODE and nvm/n paths for v26/25/23/22/20). ` +
+      `no ABI-incompatible interpreter on this host (running ABI ${process.versions.modules}; searched $FORGE_TEST_MISMATCHED_NODE and every version installed under ${installRoots.join(", ")} — probed ${candidates.length} interpreter path(s)). ` +
         `The manifest-path tests above prove the pre-native-load ordering under this interpreter.`,
     );
     return;
