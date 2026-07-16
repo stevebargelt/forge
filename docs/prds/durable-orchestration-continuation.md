@@ -2,9 +2,10 @@
 
 **Status:** ACCEPTED — audit corrections applied (C1–C8); binding decisions BD-14 and BD-15 are accepted; pending campaign decomposition, not yet an implementation contract  
 **Captured:** 2026-07-13  
-**Last revised:** 2026-07-14  
+**Last revised:** 2026-07-15  
 **Primary backlog:** FG-551, FG-552, FG-553, FG-555
 **Landed foundation:** FG-535, FG-536, FG-542  
+**Landed Slice 1 (partial):** FG-551 (test parity), FG-567 (signal fidelity), FG-568 (additive-only store), FG-569 (exec entry + inert release closure + R1/R2 provenance). FG-553 children 3–5 (FG-570 ABI assertion, FG-571 promotion, FG-572 installed-surface) remain open; R3/R4 (FG-555) remain open.  
 **Upstream context:** [anthropics/claude-code#76249](https://github.com/anthropics/claude-code/issues/76249), [#25188](https://github.com/anthropics/claude-code/issues/25188), [#72851](https://github.com/anthropics/claude-code/issues/72851), [#68625](https://github.com/anthropics/claude-code/issues/68625)
 
 ## How to use this document
@@ -94,7 +95,7 @@ Forge must not make correct ownership depend on a particular upstream diagnosis 
 | Agent result | Bind-mounted task directory and Forge store | Existing + FG-536 recovery | Landed |
 | Unsafe harness background dispatch | Disabled for `forge claude` children | FG-542 | Landed |
 | tmux availability in agent test image | `agent-dev-worker` image | FG-551 | Landed (`7f6091b`) |
-| Control-plane executable (Forge's own runtime, R1) | npm-linked mutable Forge working tree | FG-553 | Active gap |
+| Control-plane executable + provenance (R1, R2) | npm-linked mutable Forge working tree; single-process `/bin/sh` exec entry so R1 (`process.execPath`) is self-evidencing; exit-recorder captures R2 independently | FG-553 / FG-569 | Partial — R1/R2 recorded and exec entry shipped (FG-569, `1b11f25`); source isolation + atomic promotion still open (FG-571) |
 | Launched-workload environment (R3/R4) | Caller's ambient environment; `forge launch` preserves argv and owns no environment contract | FG-555 | Active gap |
 | Launch completion notification | Hand-built Monitor polling | FG-552 | Active gap |
 | Notification delivery evidence | None | New slice | Missing |
@@ -229,8 +230,8 @@ Four distinct runtimes are in play. These are separate facts; recording one is *
 
 | | Runtime identity | What it is | Currently recorded? |
 |---|---|---|---|
-| **R1** | Control runtime | the interpreter + native-binding ABI + dependency set actually executing the `forge` CLI, its launch observer, and every routine state-reader | **No** |
-| **R2** | Exit-recorder runtime | the interpreter executing the launch wrapper's exit recorder (`process.execPath` of that process) | **No** — and it is not evidence of R3 or R4 |
+| **R1** | Control runtime | the interpreter + native-binding ABI + dependency set actually executing the `forge` CLI, its launch observer, and every routine state-reader | **Yes (FG-569)** — the single-process exec entry makes `process.execPath` self-evidencing; captured at submission in the CLI as `meta.json`'s `control` record and rendered as `launch show`'s `control:` line (old pre-FG-569 launches read "not recorded", never manufactured) |
+| **R2** | Exit-recorder runtime | the interpreter executing the launch wrapper's exit recorder (`process.execPath` of that process) | **Yes (FG-569)** — captured inside the recorder as `runtime.json`, independent of R1; still not evidence of R3 or R4 |
 | **R3** | Launched top-level executable | the executable named as argv[0] of the submitted launch command, as resolved at spawn time | **No** — argv is recorded, but argv is a *string*, not a resolution |
 | **R4** | Nested-shell resolution | how a caller-supplied shell (e.g. `bash -lc …`) later resolves `node`, `npm`, `forge`, or any other command *inside* the launched command | **No — and may be inherently unknowable.** The design must say so rather than imply argv covers it |
 
@@ -346,6 +347,8 @@ Required decisions/tests:
 ### Slice 1 — FG-553: isolate the Forge control runtime
 
 Goal: an agent editing Forge cannot break machine-wide commands, observation, or unrelated projects — **and** the control plane resolves to a known runtime regardless of the caller's ambient environment (BD-14).
+
+**Landed so far (2026-07-15):** children 0–2 — FG-567 (signal fidelity), FG-568 (additive-only store), FG-569 (exec-not-spawn entry + inert immutable release closure + manifest + R1/R2 provenance). These ship the runtime-provenance and store-compatibility halves and are deliberately **inert**: no promotion, no `current` symlink, no PATH change. Children 3–5 — **FG-570** (bounded ABI assertion), **FG-571** (atomic promote/rollback + PATH shim + env-sanitization), **FG-572** (installed-surface compatibility) — remain open, so the source-isolation and control-plane-availability axis (F29) is **not yet closed on the live path**. R3/R4 launched-workload provenance is FG-555, also open.
 
 **FG-553 is not closable on the source axis alone.** Stable source and stable runtime are separate properties. A slice that isolates the source tree and leaves the interpreter to the caller's PATH has not closed this ticket: the observed control-plane outage reproduces with source fully valid. Both axes must close.
 
@@ -622,6 +625,13 @@ The initiative is complete only when all of the following are true:
 - A final reviewer maps evidence to every binding decision and matrix row rather than approving from green CI alone.
 
 ## Revision log
+
+### 2026-07-15 — current-state map reconciled to landed R1/R2 + exec entry (FG-569, `1b11f25`; FG-573)
+
+- **BD-14's R1/R2 "Currently recorded?" flipped from No to Yes.** FG-569 shipped the single-process `/bin/sh` exec-not-spawn entry (R1 = `process.execPath` is self-evidencing; captured at submission as `meta.json`'s `control` record and surfaced as `launch show`'s `control:` line) and the independent exit-recorder capture of R2 (`runtime.json`). Old, pre-FG-569 launches render "not recorded", never manufactured. **R3/R4 stay No/unknowable** (FG-555, open).
+- **Current system map:** the R1 executable row now distinguishes the shipped exec entry + R1/R2 recording from the still-open source-isolation/promotion axis (FG-571). The header records the landed Slice-1 children (FG-551/567/568/569) and the open ones (FG-570/571/572, FG-555).
+- **Slice 1 section** carries a landed-so-far note: children 0–2 are inert (no promotion/`current`/PATH change); children 3–5 remain open, so F29 (control-plane availability under a hostile/node-free environment) is not yet closed on the live path.
+- **No normative change.** BD-13/BD-14/BD-15 decisions, the candidate policies, the slices, and the F-row matrix (acceptance criteria, tense-neutral) are untouched. Only the current-state/provenance evidence is updated to what has landed.
 
 ### 2026-07-15 — BD-15 premise reconciled to shipped behavior (FG-568, `275ac63`)
 
