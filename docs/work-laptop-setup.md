@@ -2,7 +2,9 @@
 
 Use this when getting forge running on a new or fresh work machine. The goal is a host where `forge setup` reports no blocking failures for the profiles you actually use.
 
-**Prerequisites:** Docker running, Node 22+ (Node 24 LTS recommended — see `.nvmrc`), Git.
+**Prerequisites:** Docker running, the exact Node this checkout pins in `.nvmrc` (currently 24), Git.
+
+> Node is an exact match, not a floor. Forge's better-sqlite3 binding is compiled for one ABI (137, Node 24) and loads under that ABI only, so a mismatched Node — **older or newer** — is refused at startup with a named message naming the ABI it found and the one it needs. Run `nvm use` in the repo root before the steps below; if forge refuses later, that's the fix.
 
 ---
 

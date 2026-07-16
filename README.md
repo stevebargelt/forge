@@ -10,7 +10,7 @@ The web view ships as a workspace package (`dashboard/`) — boot with `forge da
 
 ## Prerequisites
 
-Node 20+, Docker, and one of three auth modes (FORGE-DEC-007). Forge auto-selects: `CLAUDE_CODE_USE_BEDROCK=1` → bedrock (work); else `ANTHROPIC_API_KEY` set → apikey; else oauth (`forge auth login` once on personal Macs).
+The exact Node pinned in `.nvmrc` (currently 24 — `nvm use` in the repo root), Docker, and one of three auth modes (FORGE-DEC-007). Node is an exact match rather than a minimum: forge's better-sqlite3 binding loads only under the ABI it was compiled for, so a newer Node is as incompatible as an older one and forge refuses to start on either. Forge auto-selects: `CLAUDE_CODE_USE_BEDROCK=1` → bedrock (work); else `ANTHROPIC_API_KEY` set → apikey; else oauth (`forge auth login` once on personal Macs).
 
 ## Install once
 
