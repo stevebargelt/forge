@@ -30,7 +30,7 @@ let workspace: string;
  *  OUR manifest. node_modules is symlinked rather than copied — the point is the
  *  preflight's decision, not a byte-exact closure (that is FG-569's test), and the
  *  guard must fire before anything in there is loaded anyway. */
-function stageRelease(abi: string): string {
+function stageRelease(abi: unknown): string {
   const dir = mkdtempSync(join(workspace, "release-"));
   cpSync(join(sourceRoot, "src"), join(dir, "src"), { recursive: true });
   cpSync(join(sourceRoot, "package.json"), join(dir, "package.json"));
@@ -172,6 +172,49 @@ test("FG-570 (EXECUTED): a manifest with NO abi field falls back to the pinned R
   assert.equal(REQUIRED_ABI, process.versions.modules, "REQUIRED_ABI has drifted from the interpreter this checkout's binding is built for");
   assert.equal(r.status, 0, `expected the fallback to REQUIRED_ABI to run, got ${r.status}\n${r.stderr}`);
   assert.doesNotMatch(r.stderr, /TypeError/, "a manifest without abi must not crash the preflight");
+});
+
+// A hand-written or third-party-generated manifest can carry `abi` as an unquoted JSON
+// number. readReleaseManifest casts without validating, so whatever JSON.parse produced
+// reaches the preflight verbatim. A non-string that is NOT nullish slips past
+// expectedAbi()'s `?? REQUIRED_ABI`, so the boundary must coerce: the contract is
+// numeric-compatible RUNS, numeric-mismatched refuses BY NAME, unusable fails OPEN.
+
+test("FG-570 (EXECUTED): a NUMERIC manifest ABI equal to this interpreter's runs the entry — a compatible release must not crash on its own manifest's type", () => {
+  const dir = stageRelease(Number(process.versions.modules));
+  const r = runEntry(dir);
+
+  assert.equal(r.status, 0, `a numeric abi equal to the running ABI is COMPATIBLE and must run, got ${r.status}\n${r.stderr}`);
+  assert.doesNotMatch(r.stderr, /TypeError/, "a numeric abi must not crash the preflight");
+  assert.doesNotMatch(r.stderr, /refusing to run/i);
+  assert.match(r.stdout.trim(), /^\d+\.\d+\.\d+$/);
+});
+
+test("FG-570 (EXECUTED): a NUMERIC manifest ABI unequal to this interpreter's is refused BY NAME — not a stack trace", () => {
+  const dir = stageRelease(999);
+  const r = runEntry(dir);
+
+  assert.equal(r.status, 1, `expected a clean exit 1 refusal, got ${r.status}\n${r.stderr}`);
+  assert.match(r.stderr, /refusing to run/i);
+  assert.match(r.stderr, /ABI 999/);
+  assert.match(r.stderr, new RegExp(`ABI ${process.versions.modules}`));
+  assert.doesNotMatch(r.stderr, /TypeError/, "the refusal must be the named message, not a crash");
+  assert.doesNotMatch(r.stderr, OPAQUE, "the native binding loaded before the guard — the preflight lost the race");
+});
+
+test("FG-570 (EXECUTED): a structurally GARBAGE manifest ABI fails OPEN — no block manufactured from a value we could not read", () => {
+  // Each of these stringifies to something Number.parseInt cannot read, so the coercion
+  // hands checkAbi an unreadable expected and its fail-open governs. (A single-element
+  // numeric array like [137] is deliberately NOT here: it stringifies to "137" and is
+  // therefore a readable, compatible ABI — it runs on its own merits, not by failing open.)
+  for (const garbage of [{ major: 24 }, ["not-an-abi"], true]) {
+    const dir = stageRelease(garbage);
+    const r = runEntry(dir);
+
+    assert.equal(r.status, 0, `abi=${JSON.stringify(garbage)} is unreadable and must fail open, got ${r.status}\n${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /TypeError/, `abi=${JSON.stringify(garbage)} crashed the preflight`);
+    assert.doesNotMatch(r.stderr, /refusing to run/i);
+  }
 });
 
 // F31's real-interpreter arm. The plan calls for executing under a genuinely

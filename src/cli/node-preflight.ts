@@ -60,7 +60,13 @@ export function checkAbi(actualAbi: string, expectedAbi: string): { ok: true } |
  *  a dev checkout has no manifest and falls back to the pinned constant. */
 function expectedAbi(): string {
   const found = readReleaseManifest(dirname(fileURLToPath(import.meta.url)));
-  return found?.manifest.abi ?? REQUIRED_ABI;
+  // `abi` is typed string but nothing enforces it: readReleaseManifest JSON.parses with
+  // a bare cast, so a hand-written manifest's unquoted `"abi": 137` arrives as a number.
+  // Coerce rather than trust the type — a numeric 137 is genuinely compatible on an
+  // ABI-137 interpreter and must RUN, and anything that stringifies to a non-number
+  // reaches checkAbi's fail-open path instead of throwing out of `.trim()`.
+  const abi: unknown = found?.manifest.abi;
+  return abi != null ? String(abi) : REQUIRED_ABI;
 }
 
 /** Run the check against the live runtime; print + exit(1) on a mismatch. Invoked
