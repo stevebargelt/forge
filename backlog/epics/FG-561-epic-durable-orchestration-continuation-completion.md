@@ -140,7 +140,7 @@ done:
   **(Open — owned by FG-552.)**
 - `readLaunch` shells out to the `tmux` binary — it is not a pure durable-record read. **(Open — owned by
   FG-552.)**
-- Migrations run unconditionally on every writable DB open, including a destructive `DROP COLUMN`
+- Migrations *previously* ran unconditionally on every writable DB open, including a destructive `DROP COLUMN`
   (`src/store/db.ts:91`), while version skew between concurrent Forge processes is the default state.
   **RESOLVED (FG-568, `275ac63`):** the ordinary open path is now additive-only on every open (read-only
   callers' first opens included); the destructive `DROP COLUMN` moved off it into
