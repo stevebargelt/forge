@@ -168,6 +168,28 @@ test("FG-535 forge ids: extracted from the log when present", () => {
   });
 });
 
+test("FG-569 R2: a malformed releaseId (non-string, non-null) OMITS the recorder from launch show — never a guessed null-release; valid string and valid null still surface", () => {
+  const { tmux } = tmuxStub();
+  const base = { execPath: "/opt/n/bin/node", abi: "137", nodeVersion: "v24.0.0" };
+  const rt = (id: string) => join(LAUNCHES_DIR, id, "runtime.json");
+
+  // The exact documented-promise case: releaseId is the number 42. It is treated as an
+  // absent/unparseable record — omitted from BOTH surfaces (readLaunch is the single
+  // source the human `not recorded` line and the `--json` view derive from). It is NOT
+  // presented as a null-release recorder, and readLaunch does not crash.
+  const bad = startLaunch(["forge", "next"], { name: "badrel", tmux });
+  writeFileSync(rt(bad.id), JSON.stringify({ ...base, releaseId: 42 }));
+  assert.equal(readLaunch(bad.id, tmux)!.recorder, undefined, "a number releaseId is malformed R2 — omitted, not surfaced as a null-release");
+
+  const good = startLaunch(["forge", "next"], { name: "goodrel", tmux });
+  writeFileSync(rt(good.id), JSON.stringify({ ...base, releaseId: "release-xyz-1" }));
+  assert.deepEqual(readLaunch(good.id, tmux)!.recorder, { ...base, releaseId: "release-xyz-1" }, "a valid string releaseId still surfaces");
+
+  const dev = startLaunch(["forge", "next"], { name: "devrel", tmux });
+  writeFileSync(rt(dev.id), JSON.stringify({ ...base, releaseId: null }));
+  assert.deepEqual(readLaunch(dev.id, tmux)!.recorder, { ...base, releaseId: null }, "a valid null release (dev) still surfaces correctly");
+});
+
 test("FG-535 list: returns every persisted launch, oldest first", () => {
   const { tmux } = tmuxStub();
   startLaunch(["a"], { name: "one", tmux, now: new Date("2026-07-11T01:00:00Z") });

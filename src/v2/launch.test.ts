@@ -4,7 +4,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildWrapperCommand, classifyExit, extractForgeIds, parseExitRecord, shellQuote } from "./launch.js";
+import { buildWrapperCommand, classifyExit, extractForgeIds, parseExitRecord, parseRecorderRuntime, shellQuote } from "./launch.js";
 
 test("FG-535 classify: 0 is exited_ok", () => {
   assert.deepEqual(classifyExit({ code: 0, signal: null }), { state: "exited_ok", code: 0 });
@@ -48,16 +48,32 @@ test("FG-535 exit record: JSON is authoritative; a bare number (older wrapper) c
   assert.equal(parseExitRecord(""), undefined);
 });
 
+test("FG-569 R2: the recorder runtime record is parsed; a missing required field is rejected, never guessed", () => {
+  assert.deepEqual(
+    parseRecorderRuntime(`{"execPath":"/opt/n/bin/node","abi":"137","nodeVersion":"v24.0.0","releaseId":"release-abc-1"}`),
+    { execPath: "/opt/n/bin/node", abi: "137", nodeVersion: "v24.0.0", releaseId: "release-abc-1" },
+  );
+  // releaseId is optional (dev has none) and defaults to null, never fabricated.
+  assert.deepEqual(
+    parseRecorderRuntime(`{"execPath":"/usr/bin/node","abi":"137","nodeVersion":"v24.0.0"}`),
+    { execPath: "/usr/bin/node", abi: "137", nodeVersion: "v24.0.0", releaseId: null },
+  );
+  assert.equal(parseRecorderRuntime(`{"abi":"137"}`), undefined, "no execPath ⇒ not a usable R2 record");
+  assert.equal(parseRecorderRuntime("garbage"), undefined);
+});
+
 test("FG-535 quote: single quotes inside arguments survive", () => {
   assert.equal(shellQuote("it's"), `'it'\\''s'`);
   assert.equal(shellQuote("plain"), "'plain'");
 });
 
 test("FG-535 wrapper: runs the target under a node runner that records signal separately from code", () => {
-  const w = buildWrapperCommand(["forge", "review-loop", "FG-1"], "/l/out.log", "/l/exit", "/usr/bin/node");
+  const w = buildWrapperCommand(["forge", "review-loop", "FG-1"], "/l/out.log", "/l/exit", "/l/runtime.json", "/usr/bin/node");
   assert.ok(w.startsWith("'/usr/bin/node' '-e'"), w);
   assert.ok(w.includes("spawnSync"), "the OS reports WIFSIGNALED — the shell's $? cannot");
-  assert.ok(w.endsWith(`'/l/exit' '/l/out.log' 'forge' 'review-loop' 'FG-1'`), w);
+  // FG-569: the runtime.json path is threaded before the target argv so the
+  // recorder writes its OWN R2 runtime as its first act.
+  assert.ok(w.endsWith(`'/l/exit' '/l/out.log' '/l/runtime.json' 'forge' 'review-loop' 'FG-1'`), w);
 });
 
 test("FG-535 ids: run/task ids are extracted uniquely from log text; absence is empty, not an error", () => {
