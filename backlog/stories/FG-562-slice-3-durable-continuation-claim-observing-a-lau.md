@@ -123,9 +123,13 @@ regression exists to reject.
 **OQ-1 permits a new continuation/receipt table. If one is introduced, it is correctness-bearing state on
 the control path, and it inherits the concurrent-version problem — it does not get a pass because it is new.**
 
-- **The schema and its migration MUST obey the concurrent-version policy selected by FG-553 (BD-15).**
-  Migrations run unconditionally on every writable DB open, and concurrent Forge processes of *different
-  versions* against one store is the **default** state, not an edge case.
+- **The schema and its migration MUST obey the concurrent-version policy selected by FG-553 (BD-15) — now
+  shipped as additive-only (FG-568, `275ac63`).** The ordinary open path runs only backward-compatible
+  migrations on **every** open (read-only callers' first opens included) and no destructive DDL; destructive
+  convergence is explicit and quiesce-gated (`forge store converge`). Concurrent Forge processes of
+  *different versions* against one store is the **default** state, not an edge case — so any new
+  continuation/receipt table's migration must be additive-only across the overlap window (nullable/defaulted
+  columns, no constraint an in-flight old writer cannot satisfy), never a destructive change on the open path.
 - **Any new state must be propagated to `docs/SCHEMA-CONTRACT.md`.** A correctness-bearing table that is not
   in the schema contract is invisible to every future change.
 - **Old/new-process coverage is required**, not optional: a process running the *old* Forge must not be

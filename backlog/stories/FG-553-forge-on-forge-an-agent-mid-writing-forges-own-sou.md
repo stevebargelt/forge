@@ -137,11 +137,15 @@ decision, not an input to it.
   command assets, and dashboard assets. For each, state whether promotion **re-installs**, **version-pins**,
   or leaves it **explicitly outside** the control path — and what happens when an installed copy is older
   than the promoted runtime.
-- **Store-version policy (BD-15).** Concurrent Forge processes of different versions share one SQLite by
-  default: a long tmux-owned launch starts under version A, a promotion happens, a new command runs under
-  version B against the same store. Migrations run **unconditionally on every writable open** and include a
-  **destructive `DROP COLUMN`** (`src/store/db.ts:91`). Decide the policy — schema-version gate, refusal,
-  backward-compatible-migration-only, or promotion-quiesce — **before the promotion mechanism closes.**
+- **Store-version policy (BD-15) — RESOLVED (FG-568, `275ac63`).** Concurrent Forge processes of different
+  versions share one SQLite by default: a long tmux-owned launch starts under version A, a promotion happens,
+  a new command runs under version B against the same store. The chosen policy is
+  **backward-compatible-migration-only**: the ordinary open path (`applyMigrations`) is now additive-only on
+  **every** open — logically read-only callers' first opens included — and runs no destructive DDL; the
+  destructive `DROP COLUMN` that once ran here moved off it into `runDestructiveConvergenceMigration`, invoked
+  only via the operator's quiesce-gated, one-way `forge store converge`. (Pre-FG-568 this bullet read
+  "migrations run unconditionally on every writable open and include a destructive `DROP COLUMN`,
+  `src/store/db.ts:91`" — superseded.)
 - **T9 — the in-flight / lazy-import question is settled HERE, empirically, not at closeout.** Determine
   whether a process already running under runtime A is affected by a mid-flight promotion to runtime B
   (dynamic `import()`, lazy requires, open file handles). **The PRD deliberately asserts NEITHER immunity
