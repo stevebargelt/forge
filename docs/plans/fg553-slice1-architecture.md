@@ -235,7 +235,7 @@ from a running one.
 
 ## 2. Conflicts surfaced against the accepted PRD — **NOT amended**
 
-- **C1 — BD-15's premise is understated. STATUS: PENDING PRD reconciliation (not yet reconciled).** Precise
+- **C1 — BD-15's premise is understated. STATUS: RECONCILED into the PRD (FG-568, `275ac63`; FG-573).** Precise
   statement: **each process's FIRST store open — INCLUDING a logically read-only caller — can bootstrap a
   WRITABLE handle and run migrations.** `getDb({readOnly:true})` (`db.ts:156`) computes `wantReadOnly`
   (`db.ts:161`) and, when no writable handle exists in-process, falls through to the writable `getDb()`
@@ -243,8 +243,10 @@ from a running one.
   Confirmed read-only callers that therefore migrate on first open: `show.ts:57`, `status.ts:26`, `runs.ts:38`,
   `export.ts:20`, `metrics.ts:36`, `ops.ts:157`, `report.ts:17`, `sweep.ts:85`. **Strengthens BD-15; kills
   promotion-quiesce as a sufficient policy** — even a logically read-only command mutates the schema under an
-  in-flight launch. *(Verified by orchestrator.)* **This correction is queued for the documentation-maintainer
-  (see §6); it has NOT been applied to the PRD yet.**
+  in-flight launch. *(Verified by orchestrator.)* **This correction has since been applied:** BD-15's premise
+  now reads "every open, including a logically read-only caller" (PRD BD-15 + the 2026-07-15 revision-log
+  entry, FG-568). The additive-only fix means those first opens now run only backward-compatible migrations —
+  the destructive `DROP COLUMN` is confined to the operator's quiesce-gated `forge store converge`.
 - **C2 — CORRECTED per review #3. tmux changes the ENVIRONMENT in which R3 is resolved; it does NOT make R4
   exist for every launch.** The distinction, stated precisely:
   - **R3** is the resolution of the launched command's **`argv[0]`, performed by the recorder** (the exit
@@ -361,12 +363,12 @@ Every case **executes**; each names the mutant that must redden it and the **hol
 
 ## 6. PRD reconciliation (correction #7)
 
-- **C1 is PENDING PRD reconciliation — NOT yet reconciled.** It is a factual correction to BD-15's own
+- **C1 has been RECONCILED into the PRD (FG-568, `275ac63`).** It was a factual correction to BD-15's own
   evidence (each process's first store open, including a logically read-only caller, can bootstrap a writable
-  handle and migrate), strengthening not contradicting it. On approval it will be **routed to the
-  documentation-maintainer** (durable design record; not orchestrator-hand-edited) to update BD-15's premise
-  and the system map's store rows from "every writable open" to "every open, including read-only callers'
-  first open". **This has not happened yet and must not until the gate below clears.**
+  handle and migrate), strengthening not contradicting it. BD-15's premise and the store rows now read "every
+  open, including read-only callers' first open" (PRD BD-15 + the 2026-07-15 revision-log entry), and the
+  destructive `DROP COLUMN` is confined to the operator's quiesce-gated `forge store converge`. FG-573 then
+  reconciled the R1/R2 current-state (FG-569 exec entry + provenance); R3/R4 (FG-555) remain open.
 - **C2 does NOT go into the PRD** (corrections #3 + #7) — in any wording. It is an implementation-informing
   note for FG-553/FG-555, recorded in §2 only. Its earlier "R4 exists on every launch" phrasing was wrong and
   has been corrected here; nothing about it reaches the accepted contract.
@@ -380,7 +382,8 @@ only** (the signal/exit-fidelity prerequisite) — because every later child's e
 `forge` not reporting success on a kill. **UPDATE: Child 0 has since LANDED as `97363ca` (PR #119)**; the
 prerequisite is satisfied. **Child 1 has LANDED (`275ac63`, PR #120), and Child 2 has LANDED as FG-569**
 (exec-not-spawn entry + inert release closure + manifest + R1/R2 provenance — still INERT: no promotion, no
-`current` symlink, no PATH change). Children **3–5 remain planned** and unchanged.
+`current` symlink, no PATH change). Children **3–5 remain planned** and unchanged. **C1 has since been
+reconciled into the PRD (FG-568), and the R1/R2 current-state reconciled (FG-569/FG-573)** — see §2/§6.
 
 ---
 
