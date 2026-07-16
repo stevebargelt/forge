@@ -18,15 +18,15 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { RELEASE_MANIFEST_NAME, SHIM_NAME, renderShim, thawReleaseTree, type BuildReleaseResult } from "./release.js";
+import { RELEASE_EXEC_NAME, RELEASE_MANIFEST_NAME, SHIM_NAME, renderShim, thawReleaseTree, type BuildReleaseResult } from "./release.js";
 import { atomicSymlinkSwap, installShim, promote } from "./promote.js";
 import { currentLinkIn } from "../util/paths.js";
 import { findGitRoot } from "../util/git-root.js";
-import { makeDisposableSourceRoot, removeDisposableSourceRoot, type DisposableSource } from "./fg571-harness.js";
+import { canonicalMkdtemp, makeDisposableSourceRoot, removeDisposableSourceRoot, type DisposableSource } from "./fg571-harness.js";
 
 /** The REAL checkout: READ for the dev entry and the live-source fixtures below, never
  *  written to and never committed to. */
@@ -69,8 +69,8 @@ before(async () => {
   repoHeadBefore = gitIn(repoRoot, ["rev-parse", "HEAD"]).trim();
   repoStatusBefore = gitIn(repoRoot, ["status", "--porcelain"]);
 
-  workspace = mkdtempSync(join(tmpdir(), "fg571-env-"));
-  home = mkdtempSync(join(tmpdir(), "fg571-env-home-"));
+  workspace = canonicalMkdtemp("fg571-env-");
+  home = canonicalMkdtemp("fg571-env-home-");
   source = await makeDisposableSourceRoot(repoRoot);
   rel = source.build({ outDir: join(workspace, "release"), rand: "e29e29" });
   promote({ home, candidate: rel.releaseDir });
@@ -295,31 +295,44 @@ test("FG-571 F29 BOUNDED (EXECUTED against the generated sanitizer): every injec
 // F32 — fail-closed release identity
 // ---------------------------------------------------------------------------
 
-/** A writable copy of the real release whose manifest a test can corrupt, selected by
- *  pointing `current` at it DIRECTLY. Promotion itself refuses every one of these (asserted
- *  separately) — the shim must fail closed anyway, because "nothing else could have
- *  selected this" is not a property a launcher gets to assume. */
-function selectReleaseWithManifest(name: string, mutate: (manifestPath: string) => void): void {
-  const dir = join(workspace, name);
-  if (!existsSync(dir)) {
-    execFileSync("/bin/sh", ["-c", 'mkdir -p "$1" && tar -C "$2" -cf - . | tar -C "$1" -xf -', "sh", dir, rel.releaseDir]);
-    execFileSync("/bin/sh", ["-c", 'chmod -R u+w "$1"', "sh", dir]);
-  }
-  mutate(join(dir, RELEASE_MANIFEST_NAME));
-  // PRODUCTION's own pointer primitive (symlinkSync + renameSync). Not `mv -T`: that flag is
-  // GNU-only — BSD/macOS mv rejects it with `illegal option -- T` (status 64), which would
-  // make this suite green on Linux CI and red on the operator's host, i.e. unable to run the
-  // acceptance evidence for a security-boundary ticket locally. rename(2) replaces a symlink
-  // in place and is portable.
-  atomicSymlinkSwap(dir, currentLinkIn(home));
+// F32 UNDER THE CORRECTIVE PASS — the contract is now TWO layers, and each is tested against
+// the surface that actually owns it:
+//
+//   - THE SHIM owns the exported carrier. It reads the forge-authored canonical descriptor,
+//     never the manifest, and refuses BY NAME on a missing or malformed one. So "a release that
+//     cannot state who it is does not run" is enforced against the DESCRIPTOR.
+//   - TRUSTED NODE owns authority. `forge-release.json` remains the only authority on what a
+//     release IS, and it is parsed by exactly one parser. After startup, node-preflight
+//     re-validates the id the shim carried in against the id the manifest states, and refuses
+//     by name on a mismatch.
+//
+// So a poisoned MANIFEST is now a Node-layer refusal rather than a shim-layer one — the shim
+// genuinely does not read the file, and pretending otherwise would be testing a fiction. The
+// property the operator cares about is unchanged and still proven end-to-end from a RUNNING
+// process: a release that cannot agree with itself about who it is does not run, and a caller's
+// forged FORGE_RELEASE_ID never becomes provenance.
+
+/** A PROPERLY PROMOTED unit in its own disposable home, whose published bytes a test then
+ *  corrupts. Promoted for real — materialized, validated, descriptor authored, frozen — so the
+ *  corruption below is a POST-promotion tamper of a legitimate release, which is the case that
+ *  matters: "nothing else could have selected this" is not a property a launcher gets to assume,
+ *  and neither is "nothing touched it after I validated it". */
+function promotedHomeWith(name: string, mutate: (unitDir: string) => void): string {
+  const h = canonicalMkdtemp(`fg571-f32-${name}-`);
+  promote({ home: h, candidate: rel.releaseDir });
+  const unit = realpathSync(currentLinkIn(h));
+  thawReleaseTree(unit);
+  mutate(unit);
+  return h;
 }
 
-const poisonedEnv = () => ({
+const poisonedEnvFor = (h: string) => ({
   PATH: nodeFreePath(),
   HOME: process.env.HOME ?? "/tmp",
-  FORGE_HOME: home,
+  FORGE_HOME: h,
   FORGE_RELEASE_ID: "release-forged-by-the-caller",
 });
+const poisonedEnv = () => poisonedEnvFor(home);
 
 test("FG-571 F32 (EXECUTED): poisoned FORGE_RELEASE_ID + a VALID manifest -> the forged value is IGNORED; the reported identity is the manifest's", () => {
   promote({ home, candidate: rel.releaseDir });
@@ -330,44 +343,109 @@ test("FG-571 F32 (EXECUTED): poisoned FORGE_RELEASE_ID + a VALID manifest -> the
   assert.notEqual(r.json.releaseId, "release-forged-by-the-caller", "the caller's forged value did not survive");
 });
 
-test("FG-571 F32 (EXECUTED): manifest identity MISSING -> named error, FAIL CLOSED — not null, not the ambient value, not a silent run", () => {
-  selectReleaseWithManifest("rel-id-missing", (p) => {
-    const m = JSON.parse(readFileSync(p, "utf8"));
-    delete m.id;
-    writeFileSync(p, JSON.stringify(m, null, 2) + "\n");
-  });
-  const r = run(shim, ["release", "provenance", "--json"], poisonedEnv());
-  assert.notEqual(r.status, 0, "a release with no identity does not run");
-  assert.match(r.stderr, /refusing to run — this release's manifest states no identity/i, "the refusal is NAMED");
-  assert.match(r.stderr, /release manifest: .*forge-release\.json/, "and says WHERE");
+// ── the SHIM's half: the descriptor is what it reads, so the descriptor is what it fails on ──
+
+test("FG-571 F32 (EXECUTED): descriptor MISSING -> named error, FAIL CLOSED — not null, not the ambient value, not a silent run", () => {
+  const h = promotedHomeWith("desc-missing", (unit) => rmSync(join(unit, RELEASE_EXEC_NAME), { force: true }));
+  const r = run(shim, ["release", "provenance", "--json"], poisonedEnvFor(h));
+  assert.notEqual(r.status, 0, "a release that cannot state who it is does not run");
+  assert.match(r.stderr, /refusing to run — this release carries no canonical execution descriptor/i, "the refusal is NAMED");
+  assert.match(r.stderr, /expected descriptor: .*forge-exec/, "and says WHERE");
   assert.match(r.stderr, /running:\s+the machine-wide forge shim/, "and says what was running");
   assert.match(r.stderr, /Fix:/, "and how to fix it");
   assert.doesNotMatch(r.stdout, /release-forged-by-the-caller/, "the ambient value was not used");
 });
 
-test("FG-571 F32 (EXECUTED): manifest identity MALFORMED -> named error, fail closed", () => {
-  selectReleaseWithManifest("rel-id-malformed", (p) => {
+/** The descriptor's schema is EXACT — not "at least". Each of these is a distinct way to be
+ *  wrong, and every one must be refused by name rather than tolerated or guessed at. */
+const BAD_DESCRIPTORS: ReadonlyArray<{ name: string; bytes: (good: string) => string }> = [
+  { name: "empty", bytes: () => "" },
+  { name: "missing field (interpreter only)", bytes: (g) => `${g.split("\n")[0]}\n` },
+  { name: "extra field", bytes: (g) => `${g}extra /tmp/attacker-node\n` },
+  { name: "duplicate field", bytes: (g) => `${g.split("\n")[0]}\n${g.split("\n")[0]}\n` },
+  { name: "wrong order", bytes: (g) => `${g.split("\n")[1]}\n${g.split("\n")[0]}\n` },
+  { name: "wrong prefix", bytes: (g) => g.replace("interpreter ", "interpreterr "), },
+  { name: "empty value", bytes: (g) => `interpreter \n${g.split("\n")[1]}\n` },
+  { name: "unterminated final line (torn)", bytes: (g) => g.trimEnd() },
+  // The character-set half: each of these is a shell metacharacter that must never reach the
+  // exec, and each is refused as DATA rather than surviving to be evaluated as syntax.
+  { name: "command substitution in the interpreter", bytes: (g) => `interpreter /tmp/$(touch /tmp/pwned)node\n${g.split("\n")[1]}\n` },
+  { name: "backtick in the interpreter", bytes: (g) => `interpreter /tmp/\`id\`/node\n${g.split("\n")[1]}\n` },
+  { name: "quote in the interpreter", bytes: (g) => `interpreter /tmp/"evil"/node\n${g.split("\n")[1]}\n` },
+  { name: "whitespace in the interpreter", bytes: (g) => `interpreter /tmp/evil node\n${g.split("\n")[1]}\n` },
+  { name: "non-absolute interpreter", bytes: (g) => `interpreter attacker-node\n${g.split("\n")[1]}\n` },
+  { name: "metacharacter in the release id", bytes: (g) => `${g.split("\n")[0]}\nrelease $(touch /tmp/pwned)\n` },
+];
+
+for (const { name, bytes } of BAD_DESCRIPTORS) {
+  test(`FG-571 F32 (EXECUTED): descriptor MALFORMED -> named error, fail closed — ${name}`, () => {
+    const h = promotedHomeWith(`desc-${name.replace(/[^a-z]/gi, "")}`, (unit) => {
+      const p = join(unit, RELEASE_EXEC_NAME);
+      writeFileSync(p, bytes(readFileSync(p, "utf8")));
+    });
+    const r = run(shim, ["release", "provenance", "--json"], poisonedEnvFor(h));
+    assert.notEqual(r.status, 0, `a ${name} descriptor does not run`);
+    assert.match(r.stderr, /refusing to run — this release'?s? (execution descriptor|pinned interpreter)/i, "the refusal is NAMED");
+    assert.match(r.stderr, /running:\s+the machine-wide forge shim/, "and says what was running");
+    assert.doesNotMatch(r.stdout, /release-forged-by-the-caller/, "the ambient value was not used");
+  });
+}
+
+// ── trusted NODE's half: the manifest is the authority, re-validated after startup ──
+
+test("FG-571 F32 (EXECUTED): manifest identity MISSING -> trusted Node refuses by name after startup, fail closed", () => {
+  const h = promotedHomeWith("man-missing", (unit) => {
+    const p = join(unit, RELEASE_MANIFEST_NAME);
     const m = JSON.parse(readFileSync(p, "utf8"));
-    // An unquoted/numeric id: the read yields junk rather than a token. Guessing at it is
-    // exactly what fail-closed forbids.
+    delete m.id;
+    writeFileSync(p, JSON.stringify(m, null, 2) + "\n");
+  });
+  const r = run(shim, ["release", "provenance", "--json"], poisonedEnvFor(h));
+  assert.notEqual(r.status, 0, "a release whose manifest states no identity does not run");
+  assert.match(r.stderr, /refusing to run — this release's execution descriptor and its manifest disagree about its identity/i, "the refusal is NAMED");
+  assert.match(r.stderr, /release manifest: .*forge-release\.json/, "and says WHERE");
+  assert.match(r.stderr, /manifest id:\s+\(missing\)/, "and what the authority actually said");
+  assert.match(r.stderr, /Fix:/, "and how to fix it");
+  assert.doesNotMatch(r.stdout, /release-forged-by-the-caller/, "the ambient value was not used");
+});
+
+test("FG-571 F32 (EXECUTED): manifest identity MALFORMED -> trusted Node refuses by name, fail closed", () => {
+  const h = promotedHomeWith("man-malformed", (unit) => {
+    const p = join(unit, RELEASE_MANIFEST_NAME);
+    const m = JSON.parse(readFileSync(p, "utf8"));
+    // An unquoted/numeric id. Guessing at it — or coercing it to a string and carrying on — is
+    // exactly what fail-closed forbids: the manifest is the authority and it is not stating a
+    // release identity.
     writeFileSync(p, JSON.stringify({ ...m, id: 12345 }, null, 2) + "\n");
   });
-  const r = run(shim, ["release", "provenance", "--json"], poisonedEnv());
+  const r = run(shim, ["release", "provenance", "--json"], poisonedEnvFor(h));
   assert.notEqual(r.status, 0, "a malformed identity does not run");
-  assert.match(r.stderr, /refusing to run — this release's manifest states a malformed identity/i, "the refusal is NAMED");
+  assert.match(r.stderr, /refusing to run — this release's execution descriptor and its manifest disagree about its identity/i, "the refusal is NAMED");
+  assert.match(r.stderr, /manifest id:\s+12345/, "and names what the manifest said");
   assert.doesNotMatch(r.stdout, /release-forged-by-the-caller/, "the ambient value was not used");
 });
 
 test("FG-571 F32 (EXECUTED): manifest UNREADABLE -> named error, fail closed", () => {
-  selectReleaseWithManifest("rel-id-unreadable", (p) => {
-    writeFileSync(p, readFileSync(p));
-    chmodSync(p, 0o000);
-  });
-  const r = run(shim, ["release", "provenance", "--json"], poisonedEnv());
+  const h = promotedHomeWith("man-unreadable", (unit) => chmodSync(join(unit, RELEASE_MANIFEST_NAME), 0o000));
+  const r = run(shim, ["release", "provenance", "--json"], poisonedEnvFor(h));
   assert.notEqual(r.status, 0, "an unreadable manifest does not run");
   assert.match(r.stderr, /refusing to run — this release's manifest is unreadable/i, "the refusal is NAMED");
   assert.doesNotMatch(r.stdout, /release-forged-by-the-caller/, "the ambient value was not used");
-  chmodSync(join(workspace, "rel-id-unreadable", RELEASE_MANIFEST_NAME), 0o644);
+});
+
+test("FG-571 F32 (EXECUTED): a descriptor id that DISAGREES with the manifest is refused — the manifest is the authority", () => {
+  // Neither half is malformed. Both are well-formed and they simply disagree, which is precisely
+  // the shape a divergence attack produces: the launcher carries in one identity while the
+  // authority states another. There is no reconciling this — it is a refusal.
+  const h = promotedHomeWith("desc-disagrees", (unit) => {
+    const p = join(unit, RELEASE_EXEC_NAME);
+    writeFileSync(p, readFileSync(p, "utf8").replace(/^release .*$/m, "release release-a-different-identity"));
+  });
+  const r = run(shim, ["release", "provenance", "--json"], poisonedEnvFor(h));
+  assert.notEqual(r.status, 0, "a release that cannot agree with itself about who it is does not run");
+  assert.match(r.stderr, /refusing to run — this release's execution descriptor and its manifest disagree about its identity/i);
+  assert.match(r.stderr, /launched as:\s+"release-a-different-identity"/, "it names the identity the launcher carried in");
+  assert.match(r.stderr, new RegExp(`manifest id:\\s+"${rel.manifest.id}"`), "and the identity the authority states");
 });
 
 test("FG-571 F32 (EXECUTED): forge-dev + poisoned ambient FORGE_RELEASE_ID -> identity NULL (dev has no manifest — the honest answer)", () => {
@@ -382,87 +460,88 @@ test("FG-571 F32 (EXECUTED): forge-dev + poisoned ambient FORGE_RELEASE_ID -> id
   assert.equal(r.json.release, null, "and the dev entry is not inside a release");
 });
 
-test("FG-571 F32 MANDATORY MUTANT (EXECUTED): restore FG-569's read-loop (no unset before read) -> the poisoned-env case goes RED — the forged id is recorded as provenance", () => {
-  // FG-569's shipped entry exported FORGE_RELEASE_ID only when its read loop FOUND an id.
-  // When the read yields nothing — the missing/malformed/unreadable cells above — a
-  // CALLER-SUPPLIED value SURVIVES and is recorded as this release's provenance. This
-  // mutant restores exactly that behavior on the real shim: the unset is dropped from the
-  // sanitize list and the fail-closed guard is replaced by FG-569's loop.
-  const real = renderShim();
-  const guardStart = real.indexOf("# FG-571 (F32): identity is FAIL-CLOSED");
-  const guardEnd = real.indexOf("export FORGE_RELEASE_ID") + "export FORGE_RELEASE_ID".length;
-  assert.ok(guardStart > 0 && guardEnd > guardStart, "located the fail-closed guard in the real shim");
-  const fg569Loop = [
-    `while IFS= read -r ln; do`,
-    `  case "$ln" in`,
-    `  *\\"id\\":*)`,
-    `    ln=\${ln#*\\"id\\": \\"}`,
-    `    FORGE_RELEASE_ID=\${ln%%\\"*}`,
-    `    export FORGE_RELEASE_ID`,
-    `    break ;;`,
-    `  esac`,
-    `done < "$__forge_m"`,
-  ].join("\n");
-  const mutantText = real.slice(0, guardStart) + fg569Loop + real.slice(guardEnd);
-  const withAmbientLive = mutantText.replace(" FORGE_RELEASE_ID\n", "\n");
+/** Install a shim text into its own disposable prefix and return the path. */
+function mutantShim(label: string, text: string): string {
+  const p = join(mkdtempSync(join(workspace, `f32-${label}-`)), "forge");
+  writeFileSync(p, text);
+  chmodSync(p, 0o755);
+  return p;
+}
+
+test("FG-571 F32 MANDATORY MUTANT (EXECUTED): drop the unset AND the Node re-validation -> the forged id IS recorded as provenance", () => {
+  // FG-569's shipped entry exported FORGE_RELEASE_ID only when its read FOUND an id; when it
+  // yielded nothing, a CALLER-SUPPLIED value SURVIVED and became this release's provenance.
+  //
+  // Reopening that spoof now takes removing BOTH halves of the contract, and that is the
+  // finding — not a weakness of the mutant. The shim half (unset the ambient carrier, export
+  // the descriptor's id) and the Node half (re-validate the carried id against the manifest)
+  // each independently stop it, so the mutant disables both to show what they are jointly
+  // holding closed. The single-half mutants below prove neither is decorative.
+  const withAmbientLive = renderShim()
+    .replace(" FORGE_RELEASE_ID\n", "\n") // drop it from the sanitize list
+    .replace("FORGE_RELEASE_ID=$__forge_release\nexport FORGE_RELEASE_ID", ":"); // ...and never set it from the descriptor
   assert.ok(!/unset .*FORGE_RELEASE_ID/.test(withAmbientLive), "the mutant genuinely no longer unsets the ambient carrier");
+  assert.ok(!/FORGE_RELEASE_ID=\$__forge_release/.test(withAmbientLive), "and genuinely no longer exports the descriptor's id");
 
-  const mutant = join(mkdtempSync(join(workspace, "f32-mutant-")), "forge");
-  writeFileSync(mutant, withAmbientLive);
-  chmodSync(mutant, 0o755);
-
-  // The exact cell FG-569 got wrong: a manifest whose read yields no id.
-  selectReleaseWithManifest("rel-id-missing", (p) => {
-    const m = JSON.parse(readFileSync(p, "utf8"));
-    delete m.id;
-    writeFileSync(p, JSON.stringify(m, null, 2) + "\n");
+  // The Node half, disabled inside the release's OWN source — the release ships src/, so this
+  // is the shipped preflight the promoted unit actually runs.
+  const h = promotedHomeWith("mutant-both", (unit) => {
+    const p = join(unit, "src", "cli", "node-preflight.ts");
+    const src = readFileSync(p, "utf8");
+    const call = "  const identity = checkReleaseIdentity(found, process.env.FORGE_RELEASE_ID);";
+    assert.ok(src.includes(call), "the shipped preflight no longer re-validates identity — this mutant is stale");
+    writeFileSync(p, src.replace(call, "  const identity = { ok: true } as const;"));
   });
 
-  const r = run(mutant, ["release", "provenance", "--json"], poisonedEnv());
+  const r = run(mutantShim("mutant-both", withAmbientLive), ["release", "provenance", "--json"], poisonedEnvFor(h));
   // RED: it RUNS, and it records the caller's forged identity as this release's provenance.
-  assert.equal(r.status, 0, "MUTANT: the FG-569 read-loop runs the release instead of refusing");
+  assert.equal(r.status, 0, `MUTANT: the release runs instead of refusing: ${r.stderr}`);
   assert.equal(
     r.json.releaseId,
     "release-forged-by-the-caller",
     "MUTANT: the caller's forged FORGE_RELEASE_ID SURVIVED and is now this process's provenance — the spoof FG-571 closes",
   );
+
+  // ...and the REAL shim, on the very same release, ignores the forged value entirely.
+  const real = run(shim, ["release", "provenance", "--json"], poisonedEnvFor(h));
+  assert.equal(real.status, 0, real.stderr);
+  assert.equal(real.json.releaseId, rel.manifest.id, "the fixed shim reports the release's OWN identity");
 });
 
-test("FG-571 F32 MANDATORY MUTANT (EXECUTED): degrade a missing identity to null-and-continue -> the fail-closed cases go RED", () => {
-  // The other half. Unsetting the ambient carrier alone stops the spoof but silently
-  // degrades a real release's provenance to "unknown" — trading a spoofing bug for a
-  // correctness bug. This mutant keeps the unset and drops ONLY the refusal, so a release
-  // that cannot state who it is runs anyway with null provenance. Both cells above must
-  // redden against it, which is what proves the refusal (not just the unset) is doing work.
-  const real = renderShim();
-  const guardStart = real.indexOf("# FG-571 (F32): identity is FAIL-CLOSED");
-  const guardEnd = real.indexOf("export FORGE_RELEASE_ID") + "export FORGE_RELEASE_ID".length;
-  const nullAndContinue = [
-    `while IFS= read -r __forge_ln; do`,
-    `  case "$__forge_ln" in`,
-    `  *\\"id\\":*)`,
-    `    __forge_v=\${__forge_ln#*\\"id\\": \\"}`,
-    `    FORGE_RELEASE_ID=\${__forge_v%%\\"*}`,
-    `    export FORGE_RELEASE_ID`,
-    `    break ;;`,
-    `  esac`,
-    `done < "$__forge_m"`,
-  ].join("\n");
-  const mutantText = real.slice(0, guardStart) + nullAndContinue + real.slice(guardEnd);
-  const mutant = join(mkdtempSync(join(workspace, "f32-mutant2-")), "forge");
-  writeFileSync(mutant, mutantText);
-  chmodSync(mutant, 0o755);
+test("FG-571 F32 MANDATORY MUTANT (EXECUTED): drop ONLY the shim's unset -> trusted Node alone still refuses the spoof", () => {
+  // Half the mutant above. The ambient carrier survives the sanitizer, but the shim still
+  // overwrites it from the descriptor AND Node still re-validates — so the spoof dies anyway.
+  // This is what proves the Node-side re-validation is load-bearing rather than ceremony: it
+  // catches a carrier the shell layer let through.
+  const noUnset = renderShim()
+    .replace(" FORGE_RELEASE_ID\n", "\n")
+    .replace("FORGE_RELEASE_ID=$__forge_release\nexport FORGE_RELEASE_ID", ":");
+  const h = promotedHomeWith("mutant-shim-only", () => {});
+  const r = run(mutantShim("shim-only", noUnset), ["release", "provenance", "--json"], poisonedEnvFor(h));
+  assert.notEqual(r.status, 0, "the forged carrier is refused by the Node layer even with the shim's guard gone");
+  assert.match(r.stderr, /execution descriptor and its manifest disagree about its identity/i);
+  assert.match(r.stderr, /launched as:\s+"release-forged-by-the-caller"/, "and it names the caller's forged value as what came in");
+});
 
-  selectReleaseWithManifest("rel-id-missing", (p) => {
-    const m = JSON.parse(readFileSync(p, "utf8"));
-    delete m.id;
-    writeFileSync(p, JSON.stringify(m, null, 2) + "\n");
-  });
-  const r = run(mutant, ["release", "provenance", "--json"], poisonedEnv());
-  // RED: no refusal. The release runs as a supposed release with NO identity — every
-  // process it starts records "unknown" provenance and nothing tells the operator.
-  assert.equal(r.status, 0, "MUTANT: null-and-continue runs a release that cannot state who it is");
-  assert.equal(r.json.releaseId, null, "MUTANT: its provenance silently degraded to unknown instead of refusing");
+test("FG-571 F32 MANDATORY MUTANT (EXECUTED): degrade a missing descriptor to null-and-continue -> the fail-closed cases go RED", () => {
+  // The other half of the ORIGINAL contract. Unsetting the ambient carrier alone stops the
+  // spoof but silently degrades a real release's provenance to "unknown" — trading a spoofing
+  // bug for a correctness bug. This mutant keeps the unset and drops ONLY the shim's
+  // descriptor-missing refusal, so a release that cannot state who it is runs anyway with null
+  // provenance. The descriptor-missing cell above must redden against it, which is what proves
+  // the refusal (not just the unset) is doing work.
+  const real = renderShim();
+  const refusal = real.indexOf('if [ ! -r "$__forge_d" ]; then');
+  const refusalEnd = real.indexOf("\nfi\n", refusal) + "\nfi".length;
+  assert.ok(refusal > 0 && refusalEnd > refusal, "located the descriptor-missing refusal in the real shim");
+  const nullAndContinue = real.slice(0, refusal) + 'if [ ! -r "$__forge_d" ]; then\n  exec "$0-never" "$@"' + real.slice(refusalEnd);
+
+  const h = promotedHomeWith("mutant-null", (unit) => rmSync(join(unit, RELEASE_EXEC_NAME), { force: true }));
+  const r = run(mutantShim("null-continue", nullAndContinue), ["release", "provenance", "--json"], poisonedEnvFor(h));
+  // RED: no NAMED refusal. Instead of telling the operator what is wrong and how to fix it, the
+  // mutant dies in whatever way the missing file happens to produce — which is exactly the
+  // "degrades instead of refusing" failure the named guard exists to prevent.
+  assert.doesNotMatch(r.stderr, /refusing to run — this release carries no canonical execution descriptor/, "MUTANT: no named refusal");
 });
 
 test("FG-571 F32: promotion ALSO refuses a release with no usable identity — the operator learns at promote, with the previous release still selected", () => {

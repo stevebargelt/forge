@@ -7,14 +7,25 @@ End-to-end: install once, then run forge against your project. The walkthrough u
 ```bash
 cd ~/code/forge
 npm install
-npm link                    # puts `forge` on $PATH
 ./scripts/install-seeds.sh
 ./docker/build.sh           # one-time, ~5–10 min
 ```
 
-`install-seeds.sh` copies the default agent role directories, constraints, runtimes, and workflow YAML into `~/.forge/`, and installs the `forge-*` workflow skills into the user-global Claude skills dir (`~/.claude/skills` by default), so they're available to any Claude Code session on the machine. `docker/build.sh` builds the `agent-dev-worker` image (Ubuntu 22.04 + Node 20 + Claude Code CLI + git/jq/playwright + agent UID 1000). `npm link` symlinks `./bin/forge` into a directory on your `$PATH` (typically `/usr/local/bin`), so `forge <cmd>` works from any cwd.
+`install-seeds.sh` copies the default agent role directories, constraints, runtimes, and workflow YAML into `~/.forge/`, and installs the `forge-*` workflow skills into the user-global Claude skills dir (`~/.claude/skills` by default), so they're available to any Claude Code session on the machine. `docker/build.sh` builds the `agent-dev-worker` image (Ubuntu 22.04 + Node 20 + Claude Code CLI + git/jq/playwright + agent UID 1000).
 
-Verify: `which forge` should print a path; `forge --help` should list the commands.
+Now build a release and select it as the machine-wide `forge`. There's no stable `forge` yet on a fresh machine, so this bootstrap runs through `forge-dev`, the live-source entry:
+
+```bash
+./bin/forge-dev release build --out ~/forge-releases/r1   # --out must not exist, and must be outside the checkout
+./bin/forge-dev release promote ~/forge-releases/r1       # atomic pointer swap; reversible with `forge release rollback`
+./bin/forge-dev release install-shim --prefix /usr/local/bin   # once; any directory on your $PATH
+```
+
+The three steps are separate on purpose: a build selects nothing, a promotion is an atomic swap of `~/.forge/current` that leaves the previous release selected if the candidate fails validation, and the shim is installed explicitly — a promotion never rewrites it. To upgrade later, build and promote again; the shim resolves `current` at run time and is not reinstalled.
+
+Don't use `npm link` for this. It puts a `forge` on `$PATH` symlinked into your live checkout, which bypasses the release split, the `current` pointer, the pinned interpreter, and the environment sanitization the stable `forge` gives you. Use `./bin/forge-dev` (or `npm run forge -- <cmd>`) when you want to run the live checkout — that entry exists for exactly that, and fails when the checkout is broken by design. Note that stable `forge` also unsets ambient `NODE_OPTIONS`, `NODE_PATH`, `NODE_EXTRA_CA_CERTS` and peers; see the README if you depend on any of those reaching forge.
+
+Verify: `which forge` should print a path; `forge release current` should name the release you promoted; `forge --help` should list the commands.
 
 After installing, run `forge setup` to create the active model policy from the seed and get a full readiness report before dispatching any agents. Full new-machine checklist: `docs/work-laptop-setup.md`.
 

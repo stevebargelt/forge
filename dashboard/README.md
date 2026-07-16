@@ -39,6 +39,6 @@ All metrics endpoints accept `?since=30d&projectDir=/path` query params. Full pa
 
 ## Relationship to forge
 
-This package reads forge's SQLite + filesystem layout but does not write to either. Mutating actions (gate decisions, run-next, retry) shell out to the `forge` CLI binary — it must be on `$PATH` (`npm link` from the root sets this up).
+This package reads forge's SQLite + filesystem layout but does not write to either. Mutating actions (gate decisions, run-next, retry) shell out to the `forge` CLI binary — it must be on `$PATH`. Install it the supported way: build a release, promote it, and install the shim once (`forge release build` / `promote` / `install-shim` — see the root README). Not `npm link`, which would put the live checkout on `$PATH` as `forge` and bypass the promoted release entirely.
 
 Schema coupling is now enforced at the TypeScript level: `src/queries.ts` imports its row types from `@forge/types` (aliased to `../src/types/index.ts`). Any forge schema change that breaks the dashboard surfaces as a `npm --workspace=dashboard typecheck` failure.

@@ -55,6 +55,103 @@ export const RELEASE_LOADER_NAME = "forge-loader.mjs";
 export const RELEASE_BINDING_REL = "node_modules/better-sqlite3/build/Release/better_sqlite3.node";
 export const RELEASE_ENTRY_SOURCE = "src/cli/index.ts";
 
+// FG-571 — THE CANONICAL EXECUTION DESCRIPTOR. Forge authors it, in trusted Node, INSIDE
+// the staged release unit, AFTER that unit's bytes have been parsed and validated. The shim
+// consumes ONLY this file; it never parses the candidate's raw JSON manifest again.
+//
+// WHY IT EXISTS. The shim's job is to FIND the interpreter, so it runs before any
+// interpreter is available and must read its instructions with POSIX sh alone. A
+// hand-rolled sh line-matcher over JSON does not have JSON.parse's semantics — duplicate
+// keys, grammar, escapes, and embedded newlines all resolve differently — so a manifest
+// could pass promotion's JSON.parse validation and still hand the sh reader a DIFFERENT
+// interpreter to exec. Chasing byte-for-byte agreement between two parsers forever is the
+// losing side of that battle. So the invariant moves instead: trusted Node does all
+// parsing and validation, and the shim consumes only forge-authored data. Divergence
+// becomes impossible BY CONSTRUCTION rather than by matching two parsers.
+//
+// WHY IT LIVES INSIDE THE UNIT. A separately-swapped sibling record next to `current` is
+// forbidden: a record swap plus a pointer swap is not atomic AS A PAIR, so it would create
+// exactly the mismatch window this exists to close. The descriptor ships INSIDE the
+// immutable unit, so the single `current` swap selects the release and its descriptor
+// together and there is nothing to desynchronize.
+export const RELEASE_EXEC_NAME = "forge-exec";
+
+// EXACTLY TWO FIELDS, in this order — the only two values that genuinely VARY between
+// releases. Everything else the shim needs is a FIXED schema constant (RELEASE_ENTRY_SOURCE,
+// RELEASE_LOADER_NAME) baked into the shim text at render time, so it is never dynamic input
+// and can never be redirected by anything on disk.
+const EXEC_FIELDS = ["interpreter", "release"] as const;
+
+// RESTRICTED CHARACTER SETS, enforced identically here and in the shim. Neither admits a
+// newline, quote, backslash, `$`, backtick, whitespace, glob metacharacter, or any shell
+// operator — so a value can never be read as shell syntax even if something later dropped a
+// quote. `+` and `_` are in the interpreter's set because real temp/home paths (notably
+// macOS's /var/folders/..) contain them.
+const EXEC_INTERPRETER_CHARSET = /^[A-Za-z0-9._/+-]+$/;
+const EXEC_ID_CHARSET = /^[A-Za-z0-9._-]+$/;
+// The same two sets, as POSIX sh bracket expressions. `!` negates; `-` is last, so it is a
+// literal rather than a range. Kept beside the regexes above so the two cannot drift apart.
+const SH_INTERPRETER_CHARSET = "A-Za-z0-9._/+-";
+const SH_ID_CHARSET = "A-Za-z0-9._-";
+
+export type ExecDescriptor = { interpreter: string; id: string };
+
+/** AUTHOR the canonical descriptor. Forge writes it, so it is exact by construction — but
+ *  it is validated on the way out anyway: a value that the shim would refuse must never be
+ *  written into a unit in the first place, or the refusal surfaces at the operator's next
+ *  `forge` invocation instead of at promotion. */
+export function renderExecDescriptor(d: ExecDescriptor): string {
+  if (!isAbsolute(d.interpreter) || !EXEC_INTERPRETER_CHARSET.test(d.interpreter)) {
+    throw new Error(
+      `forge release: refusing to author an execution descriptor for a non-canonical interpreter path.\n` +
+        `  interpreter: ${JSON.stringify(d.interpreter)}\n` +
+        `The descriptor is consumed by the machine-wide shim, which requires an absolute path drawn from ` +
+        `[${SH_INTERPRETER_CHARSET}] — so a path forge cannot express there is refused here rather than ` +
+        `written into a release the shim would then refuse to run.`,
+    );
+  }
+  if (!EXEC_ID_CHARSET.test(d.id)) {
+    throw new Error(
+      `forge release: refusing to author an execution descriptor for a malformed release identity.\n` +
+        `  release id: ${JSON.stringify(d.id)}\n` +
+        `A release identity is a plain token drawn from [${SH_ID_CHARSET}].`,
+    );
+  }
+  return `${EXEC_FIELDS[0]} ${d.interpreter}\n${EXEC_FIELDS[1]} ${d.id}\n`;
+}
+
+/** VALIDATE descriptor bytes with exactly the rules the shim enforces: exact field count,
+ *  fixed order, fixed prefix, restricted character set. Structural duplicates and extra
+ *  fields cannot survive a fixed-order fixed-count check, so they need no separate rule.
+ *  Returns a reason rather than throwing — both callers (the promotion gate and the tests)
+ *  want to name what was wrong. */
+export function parseExecDescriptor(text: string): { ok: true; value: ExecDescriptor } | { ok: false; reason: string } {
+  const lines = text.split("\n");
+  // Forge always terminates the last field. An unterminated final line is a TORN
+  // descriptor, and the shim's `read` loop drops it (yielding a short field count), so it
+  // must be refused here too rather than silently accepted.
+  if (lines.pop() !== "") return { ok: false, reason: "the descriptor does not end with a newline (torn or truncated)" };
+  if (lines.length !== EXEC_FIELDS.length) {
+    return { ok: false, reason: `the descriptor states ${lines.length} field(s); exactly ${EXEC_FIELDS.length} are required` };
+  }
+  const values: string[] = [];
+  for (const [i, field] of EXEC_FIELDS.entries()) {
+    const line = lines[i]!;
+    const prefix = `${field} `;
+    if (!line.startsWith(prefix) || line.length === prefix.length) {
+      return { ok: false, reason: `field ${i + 1} is not a non-empty \`${field}\` field: ${JSON.stringify(line)}` };
+    }
+    values.push(line.slice(prefix.length));
+  }
+  const [interpreter, id] = values as [string, string];
+  if (!isAbsolute(interpreter)) return { ok: false, reason: `the interpreter is not absolute: ${JSON.stringify(interpreter)}` };
+  if (!EXEC_INTERPRETER_CHARSET.test(interpreter)) {
+    return { ok: false, reason: `the interpreter holds a character outside [${SH_INTERPRETER_CHARSET}]: ${JSON.stringify(interpreter)}` };
+  }
+  if (!EXEC_ID_CHARSET.test(id)) return { ok: false, reason: `the release id holds a character outside [${SH_ID_CHARSET}]: ${JSON.stringify(id)}` };
+  return { ok: true, value: { interpreter, id } };
+}
+
 export type ReleaseManifest = {
   schema: 1;
   id: string;
@@ -183,8 +280,18 @@ function renderEnvSanitizer(): string {
 /** Read `keys` out of a release manifest with SHELL BUILTINS ONLY — no sed, no grep,
  *  no node — so a node-free PATH still touches no external. `manifestVar` names the sh
  *  variable holding the manifest path; each key lands in `__forge_<key>`. One pass over
- *  the file for all keys. Shared by the entry (id) and the shim (id + interpreter +
- *  entry), which is why the extraction can't drift between them. */
+ *  the file for all keys.
+ *
+ *  FG-571 — THE RELEASE ENTRY ONLY. The machine-wide shim no longer goes anywhere near this
+ *  (it reads the forge-authored canonical descriptor instead — see renderDescriptorRead),
+ *  because an sh line-matcher cannot replicate JSON.parse's semantics and a manifest that
+ *  passed promotion's parser could hand a different value to this one. The entry does not
+ *  have that exposure: it is GENERATED PER RELEASE by trusted Node, so its interpreter and
+ *  its entry path are BAKED INTO ITS OWN TEXT (renderEntry) and are never read from the
+ *  manifest at all. The single value it does read here is the release id — and trusted Node
+ *  re-validates that against the parsed manifest after startup (src/cli/node-preflight.ts),
+ *  so a divergent read is caught by the one parser that is authoritative rather than trusted
+ *  on the strength of this reader agreeing with it. */
 function renderManifestRead(manifestVar: string, keys: readonly string[]): string {
   const lines = [`while IFS= read -r __forge_ln; do`, `  case "$__forge_ln" in`];
   for (const key of keys) {
@@ -314,10 +421,103 @@ export function renderEntry(interpreter: string): string {
 
 export const SHIM_NAME = "forge";
 
+/** A fail-closed shim refusal, in the FG-570 style: what was wrong, WHERE, what was
+ *  running, and how to fix it. `indent` matches the block the refusal is emitted from so the
+ *  generated script stays readable. */
+function shRefuse(what: string, detail: readonly string[], body: readonly string[], indent = "  "): string {
+  return [
+    `${indent}printf '%s\\n' "forge: refusing to run — ${what}." >&2`,
+    ...detail.map((d) => `${indent}printf '%s\\n' "${d}" >&2`),
+    `${indent}printf '%s\\n' "  running:            the machine-wide forge shim" >&2`,
+    ...body.map((b) => `${indent}printf '%s\\n' "${b}" >&2`),
+    `${indent}exit 1`,
+  ].join("\n");
+}
+
+/** FG-571 — the shim's CANONICAL-DESCRIPTOR reader. NOT a parser: forge authors the
+ *  descriptor in trusted Node, so it is exact by construction and this VALIDATES it.
+ *
+ *  The format is trivially and unambiguously readable in POSIX sh — one field per line,
+ *  fixed order, fixed prefix — which is the whole reason it exists. Fixed order plus an
+ *  exact field count makes a duplicate, an extra, and a missing field all structurally
+ *  impossible to sneak past: line 1 must be `interpreter <v>` and line 2 must be
+ *  `release <v>`, and a third line is refused outright.
+ *
+ *  Values are consumed as DATA through QUOTED shell variables and never evaluated as shell
+ *  syntax: there is no `eval`, no unquoted expansion, and no command substitution reachable
+ *  from a value. The character-set checks below are belt-and-braces on top of that — a value
+ *  could not become syntax even without them.
+ *
+ *  `done < "$file"` redirects rather than pipes, so the loop runs in THIS shell: the field
+ *  variables survive it and an `exit` inside it actually exits. */
+function renderDescriptorRead(dirVar: string): string {
+  const missing = shRefuse(
+    "this release carries no canonical execution descriptor",
+    [`  release unit:       $${dirVar}`, `  expected descriptor: $__forge_d`],
+    [
+      "The shim execs only what forge itself authored into the release unit at promotion — it does",
+      "not parse the release's manifest, because an sh reader and forge's JSON parser can disagree",
+      "about what a manifest says, and the shim would then exec something promotion never validated.",
+      "A release promoted by an older forge carries no descriptor.",
+      "Fix: re-promote this release — \\`forge release promote <dir|id>\\` — or \\`forge release rollback\\`.",
+    ],
+  );
+  const malformed = (what: string) =>
+    shRefuse(
+      `this release's execution descriptor is malformed — ${what}`,
+      [`      descriptor: $__forge_d`],
+      [
+        "Forge authors this file itself, with exactly two fields in a fixed order, so a descriptor",
+        "that does not have that exact shape was not written by a forge promotion.",
+        "Fix: re-promote this release, or \\`forge release rollback\\` to the previous release.",
+      ],
+      "      ",
+    );
+  return [
+    `__forge_d=$${dirVar}/${RELEASE_EXEC_NAME}`,
+    `if [ ! -r "$__forge_d" ]; then`,
+    missing,
+    `fi`,
+    `__forge_n=0`,
+    `__forge_interpreter=`,
+    `__forge_release=`,
+    `while IFS= read -r __forge_ln; do`,
+    `  __forge_n=$((__forge_n + 1))`,
+    `  case $__forge_n in`,
+    `  1)`,
+    `    case $__forge_ln in`,
+    `      "${EXEC_FIELDS[0]} "?*) __forge_interpreter=\${__forge_ln#${EXEC_FIELDS[0]} } ;;`,
+    `      *)`,
+    malformed(`field 1 is not a non-empty \\\`${EXEC_FIELDS[0]}\\\` field`),
+    `        ;;`,
+    `    esac ;;`,
+    `  2)`,
+    `    case $__forge_ln in`,
+    `      "${EXEC_FIELDS[1]} "?*) __forge_release=\${__forge_ln#${EXEC_FIELDS[1]} } ;;`,
+    `      *)`,
+    malformed(`field 2 is not a non-empty \\\`${EXEC_FIELDS[1]}\\\` field`),
+    `        ;;`,
+    `    esac ;;`,
+    `  *)`,
+    malformed("it carries more than the two permitted fields"),
+    `    ;;`,
+    `  esac`,
+    `done < "$__forge_d"`,
+    `if [ "$__forge_n" -ne ${EXEC_FIELDS.length} ]; then`,
+    shRefuse(
+      `this release's execution descriptor states the wrong number of fields`,
+      [`  descriptor: $__forge_d`, `  fields:     $__forge_n (exactly ${EXEC_FIELDS.length} are required)`],
+      ["Fix: re-promote this release, or \\`forge release rollback\\` to the previous release."],
+    ),
+    `fi`,
+  ].join("\n");
+}
+
 /** FG-571 (OQ-6) — THE NEAR-FROZEN /bin/sh PATH SHIM: the machine-wide `forge`.
  *
  *  Its whole contract, and nothing more: **sanitize env → resolve `current` → read the
- *  manifest → exec the pinned absolute interpreter against the release entry.** It is
+ *  canonical descriptor → exec the pinned absolute interpreter against the release entry.**
+ *  It is
  *  deliberately OUTSIDE the release closure — inside, a bad promotion would brick `forge`
  *  itself and rollback-via-forge would be impossible. The honest cost is that shim changes
  *  are NOT atomic with a release, which is exactly why the contract is kept this small and
@@ -370,46 +570,92 @@ export function renderShim(): string {
     `  exit 1`,
     `fi`,
     "",
-    `__forge_m=$here/${RELEASE_MANIFEST_NAME}`,
-    renderIdentityGuard("__forge_m", "the machine-wide forge shim (FORGE_HOME=$__forge_home)"),
+    "# THE ONLY FILE THIS SHIM READS inside the selected unit. It is FORGE-AUTHORED, in trusted",
+    "# Node, at promotion, AFTER the unit's bytes were parsed and validated — so the shim",
+    "# VALIDATES a known-exact shape rather than parsing caller-controlled bytes. The shim never",
+    "# reads the release's JSON manifest: an sh line-reader and JSON.parse can disagree about what",
+    "# the same manifest says (duplicate keys, escapes, embedded newlines), and a candidate that",
+    "# PASSED promotion could then hand this shim a different interpreter to exec. One parser",
+    "# (Node), one author (forge): divergence is impossible by construction, not by upkeep.",
+    renderDescriptorRead("here"),
     "",
-    "# The interpreter is PINNED BY THE MANIFEST, not by this shim and not by PATH: the shim",
-    "# outlives the releases it selects, so baking an interpreter into it would re-introduce",
-    "# the drift the manifest exists to prevent.",
-    renderManifestRead("__forge_m", ["interpreter", "entry"]),
+    "# The interpreter is PINNED BY THE DESCRIPTOR — an identity promotion already validated by",
+    "# EXECUTION and proved to live in the immutable interpreter store. It is never an arbitrary",
+    "# absolute path a raw manifest named, and never resolved from PATH: the shim outlives the",
+    "# releases it selects, so baking an interpreter into it would reintroduce the very drift the",
+    "# per-release pin exists to prevent.",
     `case $__forge_interpreter in`,
     `  /*) ;;`,
     `  *)`,
-    `    printf '%s\\n' "forge: refusing to run — this release does not pin an absolute interpreter." >&2`,
-    `    printf '%s\\n' "  release manifest:  $__forge_m" >&2`,
-    `    printf '%s\\n' "  manifest interpreter: \${__forge_interpreter:-(missing)}" >&2`,
-    `    printf '%s\\n' "  running:           the machine-wide forge shim" >&2`,
-    `    printf '%s\\n' "The shim never resolves an interpreter from PATH — a release names the absolute" >&2`,
-    `    printf '%s\\n' "interpreter its own native binding was built against, or it does not run." >&2`,
-    `    printf '%s\\n' "Fix: promote a release built by \\\`forge release build\\\`, or \\\`forge release rollback\\\`." >&2`,
-    `    exit 1 ;;`,
+    shRefuse(
+      "this release's execution descriptor does not name an absolute interpreter",
+      [`  descriptor:  $__forge_d`, `  interpreter: $__forge_interpreter`],
+      [
+        "The shim never resolves an interpreter from PATH — a release names the absolute interpreter",
+        "its own native binding was built against, or it does not run.",
+        "Fix: re-promote this release, or \\`forge release rollback\\` to the previous release.",
+      ],
+      "    ",
+    ),
+    `    ;;`,
+    `esac`,
+    "# RESTRICTED CHARACTER SET, fail-closed. The values below are consumed as DATA through quoted",
+    "# variables and are never evaluated as shell syntax — there is no eval, no unquoted expansion,",
+    "# and no command substitution reachable from either one — so this is a second, independent",
+    "# barrier rather than the only one. Nothing outside the set is admitted: no quote, no",
+    "# backslash, no `$`, no backtick, no whitespace, no glob or redirection metacharacter.",
+    `case $__forge_interpreter in`,
+    `  *[!${SH_INTERPRETER_CHARSET}]*)`,
+    shRefuse(
+      "this release's execution descriptor names an interpreter holding a disallowed character",
+      [`  descriptor:  $__forge_d`, `  interpreter: $__forge_interpreter`, `  permitted:   [${SH_INTERPRETER_CHARSET}]`],
+      ["Fix: re-promote this release, or \\`forge release rollback\\` to the previous release."],
+      "    ",
+    ),
+    `    ;;`,
+    `esac`,
+    `case $__forge_release in`,
+    `  *[!${SH_ID_CHARSET}]*)`,
+    shRefuse(
+      "this release's execution descriptor states a malformed identity",
+      [`  descriptor: $__forge_d`, `  release id: $__forge_release`, `  permitted:  [${SH_ID_CHARSET}]`],
+      ["Fix: re-promote this release, or \\`forge release rollback\\` to the previous release."],
+      "    ",
+    ),
+    `    ;;`,
     `esac`,
     `if [ ! -x "$__forge_interpreter" ]; then`,
-    `  printf '%s\\n' "forge: refusing to run — this release's pinned interpreter is missing." >&2`,
-    `  printf '%s\\n' "  release manifest: $__forge_m" >&2`,
-    `  printf '%s\\n' "  interpreter:      $__forge_interpreter (not executable)" >&2`,
-    `  printf '%s\\n' "  running:          the machine-wide forge shim" >&2`,
-    `  printf '%s\\n' "This release's native binding loads under that interpreter only, so the shim will" >&2`,
-    `  printf '%s\\n' "not substitute another one." >&2`,
-    `  printf '%s\\n' "Fix: reinstall the interpreter, or \\\`forge release rollback\\\` to the previous release." >&2`,
-    `  exit 1`,
-    `fi`,
-    `if [ -z "$__forge_entry" ]; then`,
-    `  printf '%s\\n' "forge: refusing to run — this release's manifest names no entry point." >&2`,
-    `  printf '%s\\n' "  release manifest: $__forge_m" >&2`,
-    `  printf '%s\\n' "  running:          the machine-wide forge shim" >&2`,
-    `  printf '%s\\n' "Fix: promote a release built by \\\`forge release build\\\`, or \\\`forge release rollback\\\`." >&2`,
-    `  exit 1`,
+    shRefuse(
+      "this release's pinned interpreter is missing",
+      [`  descriptor:  $__forge_d`, `  interpreter: $__forge_interpreter (not executable)`],
+      [
+        "This release's native binding loads under that interpreter only, so the shim will not",
+        "substitute another one.",
+        "Fix: reinstall the interpreter, or \\`forge release rollback\\` to the previous release.",
+      ],
+    ),
     `fi`,
     "",
+    "# FG-571 (F32) — release identity, exported from the DESCRIPTOR. Fail-closed: the ambient",
+    "# FORGE_RELEASE_ID was unset above, and a descriptor that cannot state a well-formed identity",
+    "# refused before reaching here, so this is never a caller value and never 'unknown'. Trusted",
+    "# Node RE-VALIDATES it after startup against forge-release.json — which stays the authority on",
+    "# what the release IS — and refuses by name on a mismatch (see src/cli/node-preflight.ts).",
+    `FORGE_RELEASE_ID=$__forge_release`,
+    `export FORGE_RELEASE_ID`,
+    "",
+    "# The entry and the loader are FIXED SCHEMA CONSTANTS baked into this shim at render time —",
+    "# NOT descriptor fields, and never read from the selected unit. A release closes over exactly",
+    "# one entry point and one loader, so there is no supported case for either to vary; making",
+    "# them dynamic input would be strictly more machinery admitting strictly more inputs, and it",
+    "# is precisely how a manifest naming `../../outside.mjs` used to reach this exec. Baked in,",
+    "# nothing on disk can redirect what runs — the entry-containment question does not arise here",
+    "# at all, and promotion separately proves the fixed entry resolves to a regular file that is",
+    "# physically inside the unit.",
+    "#",
     "# exec, not spawn: ONE process, and it is the one that loads the native binding — its",
     "# process.execPath IS the control runtime (R1), self-evidencing.",
-    `exec "$__forge_interpreter" --import "$here/${RELEASE_LOADER_NAME}" "$here/$__forge_entry" "$@"`,
+    `exec "$__forge_interpreter" --import "$here/${RELEASE_LOADER_NAME}" "$here/${RELEASE_ENTRY_SOURCE}" "$@"`,
     "",
   ].join("\n");
 }
@@ -748,8 +994,12 @@ function dereferenceSymlinks(dir: string): void {
  *  the STAGING dir BEFORE the atomic rename, so the FINAL release path is never observed
  *  writable. (Symlinks are already dereferenced away, so every entry is a real file or
  *  directory.) A fully frozen tree cannot be rmSync'd without restoring write bits first
- *  — see thawReleaseTree, used on the build's own cleanup path. */
-function freezeReleaseFiles(dir: string): void {
+ *  — see thawReleaseTree, used on the build's own cleanup path.
+ *
+ *  Exported for FG-571's promotion path, which freezes the STAGED unit (bytes + generated
+ *  descriptor) before the atomic rename that publishes it — the same "never observed
+ *  writable at its final path" property this gives the builder. */
+export function freezeReleaseFiles(dir: string): void {
   for (const ent of readdirSync(dir, { withFileTypes: true })) {
     const p = join(dir, ent.name);
     if (ent.isDirectory()) freezeReleaseFiles(p);

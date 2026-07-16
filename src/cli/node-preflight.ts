@@ -120,13 +120,61 @@ export function resolveExpectedAbi(
   return { ok: true, abi };
 }
 
-/** Run the check against the live runtime; print + exit(1) on a mismatch. Invoked
+/** FG-571 — RELEASE IDENTITY, RE-VALIDATED AFTER STARTUP, IN TRUSTED NODE.
+ *
+ *  The machine-wide shim exports FORGE_RELEASE_ID from the release unit's canonical execution
+ *  descriptor, which it validates with POSIX sh. That is enough to exec safely — the shim
+ *  reads only forge-authored data — but it is not enough to make the exported id
+ *  AUTHORITATIVE: `forge-release.json` remains the authority on what a release IS, and it is
+ *  parsed by exactly one parser, JSON.parse, right here.
+ *
+ *  So the id the shim carried in is checked against the id the manifest actually states, by
+ *  the parser that owns that question, before any command runs. If the two disagree, then the
+ *  unit forge validated and the identity the machine is about to record as provenance are
+ *  different things — a named, fail-closed refusal, never a reconciliation and never a
+ *  silent preference for one side.
+ *
+ *  ABSENT is not a mismatch. A direct `node <release>/src/cli/index.ts` invocation and the
+ *  dev entry (bin/forge-dev, which has no manifest) both legitimately carry no id, and
+ *  FG-569's rule holds: not recorded, never manufactured. Only a PRESENT-and-DIFFERENT id is
+ *  a contradiction, and only that is refused. */
+export function checkReleaseIdentity(
+  found: { kind: "none" } | { kind: "release"; manifest: { id?: unknown }; releaseDir: string } | { kind: "malformed"; releaseDir: string; error: string },
+  carried: string | undefined,
+): { ok: true } | { ok: false; message: string } {
+  if (found.kind !== "release" || carried === undefined) return { ok: true };
+  const stated = found.manifest.id;
+  if (typeof stated === "string" && stated === carried) return { ok: true };
+  return {
+    ok: false,
+    message:
+      `forge: refusing to run — this release's execution descriptor and its manifest disagree about its identity.\n` +
+      `  release manifest: ${join(found.releaseDir, RELEASE_MANIFEST_NAME)}\n` +
+      `  manifest id:      ${stated === undefined ? "(missing)" : JSON.stringify(stated)}\n` +
+      `  launched as:      ${JSON.stringify(carried)}\n` +
+      `  running:          Node ${process.versions.node}, ABI ${process.versions.modules}\n` +
+      `The manifest is the only authority on what this release IS, and forge re-checks it here — with the ` +
+      `one parser that owns that question — against the identity the launcher carried in. A release that ` +
+      `cannot agree with itself about who it is would record false provenance for every process it starts, ` +
+      `so it does not run.\n` +
+      `Fix: re-promote this release — \`forge release promote <dir|id>\` — or roll back to the previous ` +
+      `release: \`forge release rollback\`.`,
+  };
+}
+
+/** Run the checks against the live runtime; print + exit(1) on a mismatch. Invoked
  *  at import time so the CLI fails clean BEFORE better-sqlite3 is required. */
 export function applyNodePreflight(): void {
-  const expected = resolveExpectedAbi(locateReleaseManifest(dirname(fileURLToPath(import.meta.url))));
+  const found = locateReleaseManifest(dirname(fileURLToPath(import.meta.url)));
+  const expected = resolveExpectedAbi(found);
   const r = expected.ok ? checkAbi(process.versions.modules, expected.abi) : expected;
   if (!r.ok) {
     process.stderr.write(`${r.message}\n`);
+    process.exit(1);
+  }
+  const identity = checkReleaseIdentity(found, process.env.FORGE_RELEASE_ID);
+  if (!identity.ok) {
+    process.stderr.write(`${identity.message}\n`);
     process.exit(1);
   }
 }

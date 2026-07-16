@@ -33,10 +33,27 @@
 // Test support only: nothing here is imported by production code.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BuildReleaseResult } from "./release.js";
+
+/** A CANONICAL disposable directory (FG-556 class; FG-575).
+ *
+ *  mkdtemp returns a path built from os.tmpdir(), which on macOS is `/var/folders/...` — and
+ *  `/var` is a symlink to `/private/var`. So the path handed back here and the path the OS
+ *  reports for the very same directory are different strings: a running process's
+ *  process.execPath, a realpath'd `current`, and forge's own canonical store checks all say
+ *  `/private/var/...` while the fixture still holds `/var/...`. An assertion comparing the two
+ *  is then red on macOS and green on Linux, for a reason that has nothing to do with the code
+ *  under test.
+ *
+ *  Canonicalizing AT THE SOURCE — here, once, where the disposable path is minted — is what
+ *  stops the class recurring. Patching the individual assertions treats the symptom and leaves
+ *  the next fixture free to reintroduce it. */
+export function canonicalMkdtemp(prefix: string): string {
+  return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+}
 
 /** The paths buildRelease binds to the commit (release.ts's gitTrackedPaths): src/,
  *  package.json, the selected lockfile, and the required asset dirs. Small — copying them
@@ -60,8 +77,8 @@ export type DisposableSource = {
 /** A throwaway git checkout of `repoRoot`'s shipped source, committed in place, that
  *  releases can be built from without touching the real repository. */
 export async function makeDisposableSourceRoot(repoRoot: string): Promise<DisposableSource> {
-  const root = mkdtempSync(join(tmpdir(), "fg571-src-"));
-  const home = mkdtempSync(join(tmpdir(), "fg571-buildhome-"));
+  const root = canonicalMkdtemp("fg571-src-");
+  const home = canonicalMkdtemp("fg571-buildhome-");
 
   for (const p of COMMIT_BOUND_PATHS) {
     if (existsSync(join(repoRoot, p))) execFileSync("cp", ["-R", join(repoRoot, p), join(root, p)]);

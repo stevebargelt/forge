@@ -36,8 +36,8 @@
 // interpreter under a mkdtemp FORGE_HOME cannot reach the operator's real store.
 
 import { execFileSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, realpathSync, renameSync, rmSync, type Stats } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { FORGE_HOME, interpretersDirIn } from "../util/paths.js";
 
 export type InterpreterIdentity = { version: string; abi: string };
@@ -54,20 +54,54 @@ export function interpreterPath(home: string, id: InterpreterIdentity): string {
 }
 
 /** Is `bin` a path THIS store owns for `id` — i.e. the keyed path an interpreter with that
- *  identity occupies? Pure path arithmetic on the store's own layout
- *  ($home/interpreters/node-<version>-<abi>/bin/node), so it answers the REFERENCE question
- *  ("may a release name this?") without asserting anything about what is on disk; callers
- *  pair it with probeInterpreter, which answers the EXECUTION question.
+ *  identity occupies?
  *
- *  Deliberately not scoped to ONE home: it recognizes a store path under whatever home owns
- *  it, because a release built against home A's store is still naming an immutable,
- *  version+ABI-keyed artifact when it is promoted under home B. What the check buys is the
- *  property that matters — the release names an interpreter the store OWNS and therefore
- *  never replaces in place, rather than an arbitrary external path (/usr/local/bin/node)
- *  that a system package upgrade can change under an anchored release. */
+ *  FG-571 — THIS IS A FILESYSTEM QUESTION, NOT A STRING ONE. It used to be lexical path
+ *  arithmetic: `bin === interpreterPath(resolve(bin, "../../../.."), id)`. That form is
+ *  trivially satisfied by a path that merely LOOKS like a store path while the bytes it
+ *  reaches live anywhere at all — `$home/interpreters/node-v24.0.0-137/bin/node` as a
+ *  SYMLINK to /tmp/attacker-node passes string equality perfectly, and the whole purpose of
+ *  the check is the opposite claim: that the interpreter a release pins is an artifact the
+ *  store OWNS and therefore never replaces in place. A symlink is exactly a thing whose
+ *  bytes something else can move.
+ *
+ *  So it validates CANONICAL REALPATHS:
+ *   - the final component is a REGULAR, NON-SYMLINK file (lstat, not stat — stat follows the
+ *     link and would report the attacker's node as a fine regular file);
+ *   - every directory component is resolved through symlinks (realpath on the dirname), so a
+ *     linked `bin/`, `node-<key>/`, or `interpreters/` cannot smuggle the resolved bytes out
+ *     of the store;
+ *   - the store's own home is derived FROM the canonical path, and the canonical path must
+ *     equal the keyed path that home implies.
+ *
+ *  Deriving the home from the CANONical path rather than canonicalizing a caller-supplied
+ *  home is what keeps this honest on real hosts: a legitimate forge home reached through a
+ *  symlinked component (macOS's /var -> /private/var, or a symlinked $HOME) canonicalizes on
+ *  both sides of the comparison and still matches, while an escape does not — the check
+ *  refuses link ESCAPES, not links per se.
+ *
+ *  It answers the REFERENCE question ("may a release name this?"); callers pair it with
+ *  probeInterpreter, which answers the EXECUTION question. Deliberately not scoped to ONE
+ *  home: a release built against home A's store still names an immutable, version+ABI-keyed
+ *  artifact when it is promoted under home B. */
 export function isStoredInterpreter(bin: string, id: InterpreterIdentity): boolean {
+  if (!isAbsolute(bin)) return false;
+  let st: Stats;
+  try {
+    st = lstatSync(bin);
+  } catch {
+    return false;
+  }
+  if (!st.isFile()) return false; // a symlink, directory, or device — never the store's own binary
+  let canonicalDir: string;
+  try {
+    canonicalDir = realpathSync(dirname(bin));
+  } catch {
+    return false;
+  }
+  const canonicalBin = join(canonicalDir, basename(bin));
   // $home/interpreters/node-<version>-<abi>/bin/node — four segments up is the home.
-  return bin === interpreterPath(resolve(bin, "..", "..", "..", ".."), id);
+  return canonicalBin === interpreterPath(resolve(canonicalBin, "..", "..", "..", ".."), id);
 }
 
 /** EXECUTE `bin` and ask it what it is. This is the only honest way to learn an

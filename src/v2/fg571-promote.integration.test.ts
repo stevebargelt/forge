@@ -31,7 +31,7 @@ import { atomicSymlinkSwap, installShim, promote, readSelection, rollback, valid
 import { installInterpreter, interpreterPath, isStoredInterpreter, probeInterpreter, validatedInterpreter } from "./runtime-store.js";
 import { currentLinkIn, interpretersDirIn, previousLinkIn, releasesDirIn } from "../util/paths.js";
 import { findGitRoot } from "../util/git-root.js";
-import { makeDisposableSourceRoot, removeDisposableSourceRoot, type DisposableSource } from "./fg571-harness.js";
+import { canonicalMkdtemp, makeDisposableSourceRoot, removeDisposableSourceRoot, type DisposableSource } from "./fg571-harness.js";
 
 /** The REAL checkout: where the code under test lives, and what the child processes below
  *  resolve tsx + the modules under test from. It is READ, never written and never committed
@@ -116,10 +116,10 @@ before(async () => {
   repoHeadBefore = gitIn(repoRoot, ["rev-parse", "HEAD"]).trim();
   repoStatusBefore = gitIn(repoRoot, ["status", "--porcelain"]);
 
-  workspace = mkdtempSync(join(tmpdir(), "fg571-"));
+  workspace = canonicalMkdtemp("fg571-");
   // THE isolation boundary: a disposable forge home. Every promotion, interpreter install,
   // shim install and rollback in this file lands here and nowhere else.
-  home = mkdtempSync(join(tmpdir(), "fg571-home-"));
+  home = canonicalMkdtemp("fg571-home-");
   // ...and a disposable CHECKOUT, so building the releases commits nothing in the real repo.
   source = await makeDisposableSourceRoot(repoRoot);
   // Two REAL releases from the same commit, distinguished by their ids — promotion is
@@ -242,7 +242,7 @@ test("FG-571 F26 MUTANT (swap-before-validate): a candidate that fails validatio
 test("FG-571 F27a (EXECUTED, SIGKILL mid release-install): nothing partial is selectable and the previous stable runtime still RUNS", () => {
   // Its OWN disposable forge home: B must genuinely not be installed here, or installRelease
   // would correctly no-op on an already-present immutable release and never reach the seam.
-  const home = mkdtempSync(join(tmpdir(), "fg571-f27a-home-"));
+  const home = canonicalMkdtemp("fg571-f27a-home-");
   promote({ home, candidate: relA.releaseDir });
   const shim = installShim({ prefix: mkdtempSync(join(workspace, "f27a-prefix-")), shimText: renderShim(), shimName: SHIM_NAME });
   const shimEnv = () => ({ PATH: "/usr/bin:/bin", HOME: process.env.HOME ?? "/tmp", FORGE_HOME: home });
@@ -282,7 +282,7 @@ installRelease({
 
 test("FG-571 F27b (EXECUTED, SIGKILL mid interpreter-install): no release can reference a half-installed interpreter; the store is unchanged", () => {
   // Its OWN disposable forge home + store, so the key under test is genuinely absent.
-  const home = mkdtempSync(join(tmpdir(), "fg571-f27b-home-"));
+  const home = canonicalMkdtemp("fg571-f27b-home-");
   promote({ home, candidate: relA.releaseDir });
   const shim = installShim({ prefix: mkdtempSync(join(workspace, "f27b-prefix-")), shimText: renderShim(), shimName: SHIM_NAME });
   const shimEnv = () => ({ PATH: "/usr/bin:/bin", HOME: process.env.HOME ?? "/tmp", FORGE_HOME: home });
@@ -533,7 +533,7 @@ test("FG-571 rollback (EXECUTED): an atomic swap back to the complete prior rele
 });
 
 test("FG-571 rollback: with no previous release recorded, it REFUSES by name rather than selecting something", () => {
-  const fresh = mkdtempSync(join(tmpdir(), "fg571-fresh-home-"));
+  const fresh = canonicalMkdtemp("fg571-fresh-home-");
   try {
     assert.throws(() => rollback({ home: fresh }), /refusing to roll back — no previous release is recorded/i);
     assert.ok(!existsSync(currentLinkIn(fresh)), "and it selected nothing");
@@ -630,7 +630,7 @@ test("FG-571 provenance (BOTH SURFACES): a refused promotion reports no success;
 });
 
 test("FG-571 provenance: `current` on a forge home with nothing selected reads as NOT RECORDED — never a manufactured value", () => {
-  const fresh = mkdtempSync(join(tmpdir(), "fg571-empty-home-"));
+  const fresh = canonicalMkdtemp("fg571-empty-home-");
   try {
     const forgeDev = join(repoRoot, "bin", "forge-dev");
     const env = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: process.env.HOME ?? "/tmp", FORGE_HOME: fresh };
