@@ -237,9 +237,11 @@ from a running one.
 
 - **C1 — BD-15's premise is understated. STATUS: RECONCILED into the PRD (FG-568, `275ac63`; FG-573).** Precise
   statement: **each process's FIRST store open — INCLUDING a logically read-only caller — can bootstrap a
-  WRITABLE handle and run migrations.** `getDb({readOnly:true})` (`db.ts:156`) computes `wantReadOnly`
-  (`db.ts:161`) and, when no writable handle exists in-process, falls through to the writable `getDb()`
-  (`db.ts:169`), which runs `db.exec(SCHEMA_SQL)` + `applyMigrations` incl. the `DROP COLUMN` (`db.ts:91`).
+  WRITABLE handle and run migrations.** `getDb({readOnly:true})` (`db.ts:399`) computes `wantReadOnly`
+  (`db.ts:404`) and, when no writable handle exists in-process, falls through to the writable `getDb()`
+  (`db.ts:412`), which runs `db.exec(SCHEMA_SQL)` + the now **additive-only** `applyMigrations`
+  (`db.ts:428-429`) — no `DROP COLUMN` on this path; the destructive drop is confined to
+  `runDestructiveConvergenceMigration` (`db.ts:221`, invoked by `forge store converge`).
   Confirmed read-only callers that therefore migrate on first open: `show.ts:57`, `status.ts:26`, `runs.ts:38`,
   `export.ts:20`, `metrics.ts:36`, `ops.ts:157`, `report.ts:17`, `sweep.ts:85`. **Strengthens BD-15; kills
   promotion-quiesce as a sufficient policy** — even a logically read-only command mutates the schema under an
