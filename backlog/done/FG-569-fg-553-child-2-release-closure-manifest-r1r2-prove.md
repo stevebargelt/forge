@@ -38,10 +38,13 @@ the machine-wide PATH — that is FG-571 (Child 4).
    symlinks** (the machine-wide `forge` is installed by npm-link as a symlink), then `exec`s node ONCE with
    tsx loaded in-process. Exactly one process; its `process.execPath` **is** the control runtime.
 3. **R1** (`forge release provenance`): the running process's execPath/ABI, compared to the manifest.
-4. **R2** (`src/v2/launch.ts` exit recorder): the recorder captures its **own** execPath/ABI/release-id from
-   INSIDE the recorder — never copied from R1. The **built release entry exports `FORGE_RELEASE_ID`** from its
-   manifest so a real release's launches carry a non-null release id; dev-mode `bin/forge` (no manifest)
-   leaves it null.
+4. **R2** (`src/v2/launch.ts` exit recorder): the recorder captures its **own** execPath/ABI from INSIDE the
+   recorder — never copied from R1. The **release id is NOT captured inside the recorder**: the submitting
+   forge CLI derives a trusted id from its OWN release manifest (`trustedReleaseId` → `readReleaseManifest`)
+   and **bakes it into the recorder wrapper as a JSON literal** — it is **never read from the ambient
+   `FORGE_RELEASE_ID`** (which a caller could forge). So a real release's launches carry a non-null,
+   manifest-true release id even under a poisoned ambient env; dev-mode `bin/forge` (no manifest) bakes
+   `null` regardless of any `FORGE_RELEASE_ID` in the environment.
 5. **Honest provenance binding** (`src/v2/release.ts`): the lockfile binding covers **install-script packages**
    (better-sqlite3, esbuild, sharp) — their tarball-owned files are byte-bound; only genuinely generated
    artifacts (the compiled `.node`, downloaded platform binaries) are unbound, via narrow explicit allowances,
