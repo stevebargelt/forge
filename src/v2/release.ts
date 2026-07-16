@@ -42,7 +42,7 @@
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, chmodSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, chmodSync } from "node:fs";
 import { dirname, join, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
@@ -258,6 +258,11 @@ const SANITIZED_ENV_VARS = [
   // a caller-supplied value must never survive to be recorded as provenance. Unsetting
   // here is only half the contract; see renderIdentityGuard for the fail-closed half.
   "FORGE_RELEASE_ID",
+  // FG-571 — NOT a Node var: the descriptor's interpreter, carried to trusted Node so it can
+  // be cross-checked against the manifest (src/cli/node-preflight.ts). Same rule as the id —
+  // it is a value the SHIM sets from forge-authored bytes, so an ambient one must never
+  // survive to be mistaken for the descriptor's answer and let a divergent interpreter pass.
+  "FORGE_RELEASE_INTERPRETER",
 ] as const;
 
 /** THE ONE env-sanitization snippet, shared verbatim by the release entry
@@ -543,8 +548,9 @@ export function renderShim(): string {
   return [
     "#!/bin/sh",
     "# forge — the machine-wide PATH shim (FG-571 / FG-553 Child 4). NEAR-FROZEN:",
-    "# sanitize env -> resolve `current` -> read the manifest -> exec the pinned absolute",
-    "# interpreter against the release entry. Nothing more. Installed ONLY by an explicit",
+    "# sanitize env -> resolve `current` -> read the canonical execution descriptor -> exec",
+    "# the pinned absolute interpreter against the release entry. It never reads the release's",
+    "# JSON manifest. Nothing more. Installed ONLY by an explicit",
     "# `forge release install-shim --prefix <dir>`; a promotion never rewrites it.",
     "#",
     "# Shell builtins only — no node, no readlink, no sed/grep on PATH. This runs correctly",
@@ -643,6 +649,15 @@ export function renderShim(): string {
     "# what the release IS — and refuses by name on a mismatch (see src/cli/node-preflight.ts).",
     `FORGE_RELEASE_ID=$__forge_release`,
     `export FORGE_RELEASE_ID`,
+    "",
+    "# FG-571 — the descriptor's INTERPRETER, carried to trusted Node for the same reason the id",
+    "# is: the descriptor is what the shim EXECS, and forge-release.json is the authority on what",
+    "# this release IS. Carrying only the id let a descriptor name interpreter A while the manifest",
+    "# named B with nothing to catch it — a matching id was enough to pass. Node re-checks BOTH",
+    "# against the parsed manifest after startup and refuses by name on either mismatch. The",
+    "# ambient value was unset above, so this is never a caller's.",
+    `FORGE_RELEASE_INTERPRETER=$__forge_interpreter`,
+    `export FORGE_RELEASE_INTERPRETER`,
     "",
     "# The entry and the loader are FIXED SCHEMA CONSTANTS baked into this shim at render time —",
     "# NOT descriptor fields, and never read from the selected unit. A release closes over exactly",
@@ -998,14 +1013,38 @@ function dereferenceSymlinks(dir: string): void {
  *
  *  Exported for FG-571's promotion path, which freezes the STAGED unit (bytes + generated
  *  descriptor) before the atomic rename that publishes it — the same "never observed
- *  writable at its final path" property this gives the builder. */
+ *  writable at its final path" property this gives the builder.
+ *
+ *  IT NEVER FOLLOWS A SYMLINK, and refuses one by name instead. A freeze cannot protect a
+ *  link's target: chmod through the link would clear the write bits on a file OUTSIDE the
+ *  tree — which the attacker who planted the link still owns and can chmod straight back —
+ *  while the link itself survives, still pointing out. The tree would then read as frozen
+ *  and be trivially mutable. `ent.isDirectory()` is FALSE for a symlink-to-directory, so
+ *  the link check must come first or a linked directory takes the file branch and chmods
+ *  its target. Both callers hand this a tree that provably holds no links (buildRelease
+ *  dereferences every one; promotion refuses a candidate carrying any), so reaching this
+ *  refusal means an invariant upstream broke — fail closed rather than freeze a lie. */
 export function freezeReleaseFiles(dir: string): void {
   for (const ent of readdirSync(dir, { withFileTypes: true })) {
     const p = join(dir, ent.name);
+    if (ent.isSymbolicLink()) {
+      throw new Error(
+        `forge release: refusing to freeze — this release tree holds a symbolic link.\n` +
+          `  release tree: ${dir}\n` +
+          `  link:         ${p}\n` +
+          `  expected:     a real file or directory (a release carries bytes, never links)\n` +
+          `  found:        a symbolic link\n` +
+          `Freezing clears the write bits so the released closure is immutable at rest, and a link's ` +
+          `target lives outside the tree the freeze covers: chmod'ing THROUGH the link would leave the ` +
+          `link in place, still pointing out, at a file whose owner can restore the write bits at will. ` +
+          `A tree that cannot be frozen is not published.\n` +
+          `Fix: rebuild with \`forge release build\` (it dereferences every link into real bytes).`,
+      );
+    }
     if (ent.isDirectory()) freezeReleaseFiles(p);
-    else chmodSync(p, statSync(p).mode & ~0o222);
+    else chmodSync(p, lstatSync(p).mode & ~0o222);
   }
-  chmodSync(dir, statSync(dir).mode & ~0o222);
+  chmodSync(dir, lstatSync(dir).mode & ~0o222);
 }
 
 /** Restore write bits across a (possibly) frozen release tree so it can be removed:

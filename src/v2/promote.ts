@@ -31,7 +31,7 @@
 // mkdtemp dir cannot reach the operator's real ~/.forge/current or their live control plane.
 
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync, type Stats } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync, type Stats } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { FORGE_HOME, currentLinkIn, previousLinkIn, releasesDirIn } from "../util/paths.js";
 import {
@@ -149,6 +149,83 @@ function assertContainedRegularFile(releaseDir: string, rel: string, what: strin
         `Fix: rebuild with \`forge release build\` (it dereferences every link into real bytes).`,
     );
   }
+}
+
+/** THE STAGED UNIT CONTAINS NO SYMLINKS, ANYWHERE — checked over the materialized bytes
+ *  BEFORE anything else reads them, and before forge authors a descriptor into them.
+ *
+ *  WHY A LINK IS FATAL HERE. `tar -cf - . | tar -xf -` faithfully PRESERVES a symlink, so a
+ *  candidate's link arrives intact in the staging tree. Every subsequent operation then
+ *  follows it OUT of the unit: writeFileSync of the canonical descriptor writes forge's own
+ *  trusted bytes to the attacker's file, parseExecDescriptor validates that same external
+ *  file and passes, and the freeze chmods a file its planter still owns and can chmod back.
+ *  The link survives publication, still pointing out — and after publication the attacker
+ *  rewrites the target to name their own interpreter, which the shim then execs. The
+ *  descriptor is only the sharpest instance: `forge-loader.mjs` is the identical attack via
+ *  `--import`, as is anything the entry lazily loads out of `node_modules/`.
+ *
+ *  WHY REFUSE RATHER THAN DEREFERENCE. buildRelease already dereferences every link into
+ *  real bytes, so a legitimate forge-built release contains ZERO symlinks and this costs it
+ *  nothing. A candidate that holds one is therefore not forge-built or has been tampered
+ *  with. Dereferencing here would "fix" it by pulling the attacker's bytes INTO the unit and
+ *  publishing them as forge's own — laundering the payload rather than rejecting it. Refusing
+ *  is fail-closed and compatible with every real release.
+ *
+ *  `ent.isSymbolicLink()` is checked BEFORE `ent.isDirectory()` — the latter is FALSE for a
+ *  symlink-to-directory, so an ordering that tested for a directory first would descend into
+ *  (or silently skip) a linked directory instead of refusing it. */
+function assertNoSymlinks(root: string, dir: string = root): void {
+  for (const ent of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, ent.name);
+    if (ent.isSymbolicLink()) {
+      let target: string;
+      try {
+        target = realpathSync(p);
+      } catch {
+        target = "(broken link — resolves nowhere)";
+      }
+      throw new Error(
+        `forge release: refusing to promote — this release candidate holds a symbolic link.\n` +
+          `  candidate: ${root}\n` +
+          `  link:      ${p}\n` +
+          `  points to: ${target}\n` +
+          `  expected:  a real file or directory — a release carries bytes, never links\n` +
+          `  found:     a symbolic link\n` +
+          `A release unit is an IMMUTABLE, SELF-CONTAINED closure, and a link is neither: forge would ` +
+          `follow it out of the unit when it authors the execution descriptor, when it validates the ` +
+          `bytes, and when it freezes them — proving and freezing a file outside the release that its ` +
+          `owner stays free to rewrite afterwards. \`forge release build\` dereferences every link into ` +
+          `real bytes, so a candidate carrying one was not built by forge or was modified after it was.\n` +
+          `Fix: rebuild with \`forge release build --out <dir>\` and promote that.`,
+      );
+    }
+    if (ent.isDirectory()) assertNoSymlinks(root, p);
+  }
+}
+
+/** BELT AND BRACES on the descriptor forge just authored: it must be a REGULAR, non-symlink
+ *  file physically inside the staged unit. assertNoSymlinks already proves no link could have
+ *  been there for the authoring write to follow, so this asserts that the write landed where
+ *  forge meant it to land — checked before the bytes are validated and before they are frozen.
+ *  The descriptor is the one file the shim treats as authority, so it gets the redundant
+ *  check rather than the benefit of the doubt. */
+function assertDescriptorIsContained(staging: string): void {
+  const path = join(staging, RELEASE_EXEC_NAME);
+  const st = lstatSync(path);
+  const real = realpathSync(path);
+  if (!st.isSymbolicLink() && st.isFile() && real === join(realpathSync(staging), RELEASE_EXEC_NAME)) return;
+  throw new Error(
+    `forge release: refusing to promote — this release's execution descriptor is not a real file inside the release.\n` +
+      `  release:    ${staging}\n` +
+      `  descriptor: ${path}\n` +
+      `  resolves to: ${real}\n` +
+      `  expected:   a regular file at ${join(staging, RELEASE_EXEC_NAME)}\n` +
+      `  found:      ${st.isSymbolicLink() ? "a symbolic link" : st.isFile() ? "a regular file outside the release" : "not a regular file"}\n` +
+      `The descriptor is the ONLY file the machine-wide shim reads, and forge authors it into the unit ` +
+      `itself so that what the shim execs is what promotion validated. One that resolves anywhere else ` +
+      `is a file forge does not own and cannot freeze.\n` +
+      `Fix: rebuild with \`forge release build --out <dir>\` and promote that.`,
+  );
 }
 
 /** VALIDATE a published/staged unit's CANONICAL EXECUTION DESCRIPTOR — the file the
@@ -539,6 +616,12 @@ export function installRelease(opts: InstallReleaseOptions): Candidate {
     if (copy.status !== 0) {
       throw new Error(`forge release: cannot install the release at ${source} into ${target} — ${copy.stderr?.trim() || `tar exited ${copy.status}`}`);
     }
+    // NO LINKS, BEFORE ANYTHING FOLLOWS ONE. tar preserves symlinks, so this runs on the
+    // materialized bytes FIRST — before the thaw, before the bytes are read, and above all
+    // before forge authors the descriptor, because the authoring write would follow a link
+    // out of the unit and hand its trusted output to whoever owns the target.
+    assertNoSymlinks(staging);
+
     // The candidate was frozen, so the copy arrives frozen and the descriptor could not be
     // written into it. Thaw the STAGING tree only — it is forge's own scratch, not yet a
     // release, and it is re-frozen below before anything can address it.
@@ -580,6 +663,7 @@ export function installRelease(opts: InstallReleaseOptions): Candidate {
     // AFTER validation — so it can only ever carry an interpreter that was proven to run, to
     // agree with the manifest's ABI, and to live in the immutable store.
     writeFileSync(join(staging, RELEASE_EXEC_NAME), renderExecDescriptor({ interpreter: staged.interpreter, id: staged.manifest.id }));
+    assertDescriptorIsContained(staging);
 
     // VALIDATE THE COMPLETE UNIT: the staged bytes plus the descriptor that now ships with
     // them, under exactly the rules the shim will apply.

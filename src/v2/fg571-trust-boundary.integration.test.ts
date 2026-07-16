@@ -33,7 +33,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -43,13 +43,16 @@ import {
   RELEASE_LOADER_NAME,
   RELEASE_MANIFEST_NAME,
   SHIM_NAME,
+  freezeReleaseFiles,
+  renderExecDescriptor,
   renderShim,
   thawReleaseTree,
   type BuildReleaseResult,
 } from "./release.js";
 import { installShim, promote, readSelection, validateCandidate } from "./promote.js";
+import { checkReleaseIdentity } from "../cli/node-preflight.js";
 import { interpreterKey, isStoredInterpreter, probeInterpreter } from "./runtime-store.js";
-import { currentLinkIn } from "../util/paths.js";
+import { currentLinkIn, releasesDirIn } from "../util/paths.js";
 import { findGitRoot } from "../util/git-root.js";
 import { canonicalMkdtemp, makeDisposableSourceRoot, removeDisposableSourceRoot, type DisposableSource } from "./fg571-harness.js";
 
@@ -332,18 +335,28 @@ test("FINDING 4 (EXECUTED EXPLOIT): the canonical entry as a SYMLINK to outside 
   // string is wrong — the round-1 equality check would wave this straight through.
   assert.equal((JSON.parse(readFileSync(p, "utf8")) as { entry: string }).entry, RELEASE_ENTRY_SOURCE);
 
+  // THE INNER GATE, unchanged and still load-bearing: validateCandidate refuses this entry
+  // because a string check cannot see a link and a realpath comparison can. Asserted directly
+  // because FINDING 6 later added an OUTER gate that refuses this candidate EARLIER — at
+  // materialization, for holding a symlink at all — so `promote` no longer reaches this
+  // refusal. Both gates are real; this is the one this finding is about.
+  assert.throws(
+    () => validateCandidate(dir),
+    (e: Error) => {
+      assert.match(e.message, /refusing to promote — this release's entry is not a regular file/);
+      assert.match(e.message, /a symlink/);
+      assert.match(e.message, /Fix: rebuild with `forge release build`/);
+      return true;
+    },
+    "a symlinked entry must be refused",
+  );
+
   const h = canonicalMkdtemp("fg571-tb-entrysym-");
   try {
-    assert.throws(
-      () => promote({ home: h, candidate: dir }),
-      (e: Error) => {
-        assert.match(e.message, /refusing to promote — this release's entry is not a regular file/);
-        assert.match(e.message, /a symlink/);
-        assert.match(e.message, /Fix: rebuild with `forge release build`/);
-        return true;
-      },
-      "a symlinked entry must be refused",
-    );
+    // And end to end, the candidate is refused — now by the outer no-symlinks gate, which fires
+    // first. Which of the two names it does not matter here; that it never promotes does.
+    assert.throws(() => promote({ home: h, candidate: dir }), /refusing to promote/, "a symlinked entry is never promotable");
+    assert.equal(readSelection(h), null, "nothing was selected — it fails closed");
     assert.equal(existsSync(marker), false, "the outside entry never executed");
   } finally {
     rmTree(h);
@@ -368,9 +381,15 @@ test("FINDING 4 (EXECUTED): a symlinked path COMPONENT escaping the release is r
   const m = JSON.parse(readFileSync(p, "utf8")) as Record<string, unknown>;
   writeFileSync(p, JSON.stringify({ ...m, id: "release-component-symlink" }, null, 2) + "\n");
 
+  // The inner gate, asserted directly for the same reason as above: the outer no-symlinks gate
+  // now refuses this candidate at materialization, before validateCandidate's containment check
+  // is reached through `promote`.
+  assert.throws(() => validateCandidate(dir), /refusing to promote — this release's entry escapes the release/, "a symlinked component must be refused");
+
   const h = canonicalMkdtemp("fg571-tb-compsym-");
   try {
-    assert.throws(() => promote({ home: h, candidate: dir }), /refusing to promote — this release's entry escapes the release/, "a symlinked component must be refused");
+    assert.throws(() => promote({ home: h, candidate: dir }), /refusing to promote/, "and it is never promotable");
+    assert.equal(readSelection(h), null, "nothing was selected");
   } finally {
     rmTree(h);
   }
@@ -639,6 +658,340 @@ test("FINDING 6 (EXECUTED): a candidate whose identity changes mid-copy is refus
   } finally {
     rmTree(h);
   }
+});
+
+// ══════════════ FINDING 6 — A CANDIDATE-SUPPLIED SYMLINK DEFEATS THE FREEZE ══════════════
+//
+// The descriptor made the shim's job safe, and in doing so made the DESCRIPTOR the thing worth
+// attacking. It is a file in the unit, and a file in the unit can be a link out of it:
+//
+//   1. the candidate ships `forge-exec` as a symlink -> an attacker-owned file outside;
+//   2. `tar -cf - . | tar -xf -` PRESERVES it, so it arrives in the staging tree intact;
+//   3. writeFileSync of the canonical descriptor FOLLOWS it — forge's own trusted bytes are
+//      written onto the attacker's file;
+//   4. parseExecDescriptor reads that same external file back, and validation PASSES;
+//   5. the freeze (statSync + chmodSync, both following links) chmods the ATTACKER'S file,
+//      which they own and chmod straight back. The link survives, still pointing out;
+//   6. after publication the attacker rewrites their file: a valid descriptor naming their own
+//      interpreter and the release's real id — both pass every charset and field check;
+//   7. the shim follows the in-unit link and execs the attacker's interpreter.
+//
+// IT GENERALIZES, so the fix does not name the descriptor. `dereferenceSymlinks` exists but is
+// called only from buildRelease — never from promote's staging — so ANY file in a candidate can
+// be a link out. The shim execs `interpreter --import $here/forge-loader.mjs $here/src/cli/...`,
+// which makes forge-loader.mjs the identical attack via `--import`, and anything the entry
+// lazily loads (node_modules/**) the same again. So: a staged unit contains NO symlinks,
+// anywhere, and a candidate carrying one is refused at materialization.
+
+/** THE PRE-FIX FREEZE: statSync + chmodSync, both of which FOLLOW symlinks. Kept here to
+ *  execute the vulnerable behavior rather than describe it. `ent.isDirectory()` is FALSE for a
+ *  symlink-to-directory, so a linked directory takes the `else` branch and gets its TARGET
+ *  chmod'd — the blind spot the real freeze now refuses on. */
+function vulnerableFreeze(dir: string): void {
+  for (const ent of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, ent.name);
+    if (ent.isDirectory()) vulnerableFreeze(p);
+    else chmodSync(p, statSync(p).mode & ~0o222);
+  }
+  chmodSync(dir, statSync(dir).mode & ~0o222);
+}
+
+/** THE VULNERABLE PROMOTION: installRelease's exact published sequence — materialize, thaw,
+ *  author the descriptor, freeze, rename into the keyed path, point `current` — with the
+ *  symlink refusal absent and the pre-fix freeze in place. This is the implementation as it
+ *  stood, run for real, so the exploit below is EXECUTED rather than reasoned about. Every
+ *  path derives from the caller's disposable `home`. */
+function vulnerableInstall(home: string, candidate: string): string {
+  const manifest = JSON.parse(readFileSync(join(candidate, RELEASE_MANIFEST_NAME), "utf8")) as { id: string; interpreter: string };
+  const releases = releasesDirIn(home);
+  mkdirSync(releases, { recursive: true });
+  const staging = join(releases, `.installing-${manifest.id}`);
+  tarCopy(candidate, staging); // step 2: tar preserves the symlink
+  thawReleaseTree(staging);
+  // step 3: forge's trusted descriptor, authored THROUGH whatever link is sitting at that name.
+  writeFileSync(join(staging, RELEASE_EXEC_NAME), renderExecDescriptor({ interpreter: manifest.interpreter, id: manifest.id }));
+  vulnerableFreeze(staging); // step 5
+  const target = join(releases, manifest.id);
+  renameSync(staging, target);
+  const tmp = join(home, `.current-${manifest.id}`);
+  symlinkSync(target, tmp);
+  renameSync(tmp, currentLinkIn(home));
+  return target;
+}
+
+/** A candidate copied from the good release, with `link` planted at `at` and a distinct id. */
+function candidateWithLink(label: string, at: string, link: string): string {
+  const dir = join(workspace, `cand-${label}`);
+  rmTree(dir);
+  tarCopy(good.releaseDir, dir);
+  thawReleaseTree(dir);
+  const p = join(dir, at);
+  rmSync(p, { recursive: true, force: true });
+  mkdirSync(dirname(p), { recursive: true });
+  symlinkSync(link, p);
+  const mp = join(dir, RELEASE_MANIFEST_NAME);
+  const m = JSON.parse(readFileSync(mp, "utf8")) as Record<string, unknown>;
+  writeFileSync(mp, JSON.stringify({ ...m, id: `release-${label}` }, null, 2) + "\n");
+  return dir;
+}
+
+test("FINDING 6 (EXECUTED EXPLOIT): `forge-exec` as a symlink out of the unit — the vulnerable promotion writes forge's OWN descriptor onto the attacker's file, and the attacker owns what the shim then execs", () => {
+  const marker = join(workspace, "DESC-SYMLINK-ATTACKER-RAN");
+  rmSync(marker, { force: true });
+  const attacker = attackerNode(join(workspace, "descsym-bin"), marker);
+
+  // The attacker's file, OUTSIDE the release, at a path they own. Its contents do not matter
+  // yet — forge is about to write the real descriptor onto it for them.
+  const outside = join(workspace, "outside-forge-exec");
+  writeFileSync(outside, "placeholder\n");
+  chmodSync(outside, 0o644);
+
+  // step 1. A built release carries no descriptor (promotion authors it), so this plants the
+  // link at the exact name promotion is about to write.
+  const dir = candidateWithLink("desc-symlink", RELEASE_EXEC_NAME, outside);
+
+  const hv = canonicalMkdtemp("fg571-tb-descsym-vuln-");
+  try {
+    // ── RED: the vulnerable promotion, run for real ──
+    const unit = vulnerableInstall(hv, dir);
+
+    // steps 2-3, PROVEN rather than assumed: the link survived materialization, and forge's
+    // own trusted descriptor bytes were written through it onto the attacker's outside file.
+    assert.equal(lstatSync(join(unit, RELEASE_EXEC_NAME)).isSymbolicLink(), true, "tar preserved the link into the published unit");
+    assert.equal(realpathSync(join(unit, RELEASE_EXEC_NAME)), outside, "and it still points outside the release");
+    assert.match(readFileSync(outside, "utf8"), /^interpreter \/.*\nrelease release-desc-symlink\n$/, "forge authored its trusted descriptor ONTO the attacker's file");
+
+    // step 5: the freeze chmod'd the ATTACKER'S file rather than anything in the unit — and it
+    // is their file, so they simply put the write bit back.
+    assert.equal(statSync(outside).mode & 0o222, 0, "the freeze followed the link and cleared the write bits on a file outside the release");
+    chmodSync(outside, 0o644);
+
+    // step 6: the descriptor is rewritten AFTER publication, naming the attacker's interpreter
+    // and the release's genuine id. Both pass every charset and field check the shim applies.
+    writeFileSync(outside, `interpreter ${attacker}\nrelease release-desc-symlink\n`);
+
+    // step 7: the REAL shim — not a mutant — follows the in-unit link and execs it. The shim is
+    // not at fault: it reads exactly the file forge told it was authoritative. The marker is the
+    // proof that the attacker's interpreter ran as the machine-wide forge.
+    const shim = installShimIn("descsym", renderShim());
+    const r = runShim(shim, hv);
+    assert.equal(existsSync(marker), true, `MUTANT: the vulnerable promotion must leave the attacker's interpreter exec'd as forge — it did not (exit ${r.status}): ${r.stderr}`);
+    assert.match(readFileSync(marker, "utf8"), /ATTACKER INTERPRETER EXECUTED/);
+  } finally {
+    rmTree(hv);
+  }
+
+  // ── GREEN: the real promotion refuses the same candidate at materialization ──
+  rmSync(marker, { force: true });
+  const hg = canonicalMkdtemp("fg571-tb-descsym-fixed-");
+  try {
+    assert.throws(
+      () => promote({ home: hg, candidate: dir }),
+      (e: Error) => {
+        assert.match(e.message, /refusing to promote — this release candidate holds a symbolic link/);
+        assert.match(e.message, new RegExp(`link:\\s+.*${RELEASE_EXEC_NAME}`));
+        assert.match(e.message, /Fix: rebuild with `forge release build --out <dir>`/);
+        return true;
+      },
+      "a candidate whose descriptor is a link out of the unit must be refused by name",
+    );
+    assert.equal(readSelection(hg), null, "nothing was selected — it fails closed");
+    assert.equal(existsSync(currentLinkIn(hg)), false, "and it never became the machine-wide forge");
+    assert.equal(existsSync(marker), false, "the attacker's interpreter never ran");
+    // The refusal lands BEFORE the descriptor is authored, so forge never wrote its trusted
+    // bytes onto the attacker's file at all — the write is not merely harmless, it never happens.
+    assert.equal(readFileSync(outside, "utf8"), `interpreter ${attacker}\nrelease release-desc-symlink\n`, "the outside file is untouched — forge never followed the link");
+  } finally {
+    rmTree(hg);
+  }
+});
+
+test("FINDING 6 (EXECUTED EXPLOIT): `forge-loader.mjs` as a symlink out — the identical attack through the shim's `--import`, which a descriptor-only fix would leave wide open", () => {
+  // THE REASON THE FIX IS NOT ABOUT THE DESCRIPTOR. The shim execs
+  // `interpreter --import $here/forge-loader.mjs $here/src/cli/index.ts`, so the loader is
+  // attacker code loaded by the REAL pinned interpreter, before the entry runs. No descriptor
+  // is involved and nothing about it is malformed.
+  const marker = join(workspace, "LOADER-SYMLINK-ATTACKER-RAN");
+  rmSync(marker, { force: true });
+  const outside = join(workspace, "outside-loader.mjs");
+  writeFileSync(outside, `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(marker)}, "LOADER SYMLINK ATTACKER RAN\\n");\nprocess.exit(0);\n`);
+
+  const dir = candidateWithLink("loader-symlink", RELEASE_LOADER_NAME, outside);
+
+  const hv = canonicalMkdtemp("fg571-tb-loadersym-vuln-");
+  try {
+    // RED: the vulnerable promotion publishes a unit whose loader is a link to attacker bytes.
+    const unit = vulnerableInstall(hv, dir);
+    assert.equal(lstatSync(join(unit, RELEASE_LOADER_NAME)).isSymbolicLink(), true, "the link survived into the published unit");
+
+    const shim = installShimIn("loadersym", renderShim());
+    const r = runShim(shim, hv);
+    assert.equal(existsSync(marker), true, `MUTANT: the vulnerable promotion must let attacker code run via --import — it did not (exit ${r.status}): ${r.stderr}`);
+    assert.match(readFileSync(marker, "utf8"), /LOADER SYMLINK ATTACKER RAN/);
+  } finally {
+    rmTree(hv);
+  }
+
+  // GREEN: refused at materialization, by the same check, for the same reason — the fix is
+  // "no symlinks in the unit", not "not that one file".
+  rmSync(marker, { force: true });
+  const hg = canonicalMkdtemp("fg571-tb-loadersym-fixed-");
+  try {
+    assert.throws(() => promote({ home: hg, candidate: dir }), new RegExp(`refusing to promote — this release candidate holds a symbolic link[\\s\\S]*${RELEASE_LOADER_NAME}`));
+    assert.equal(existsSync(marker), false, "the attacker's loader never ran");
+    assert.equal(readSelection(hg), null, "nothing was selected");
+  } finally {
+    rmTree(hg);
+  }
+});
+
+test("FINDING 6: a symlink ANYWHERE ELSE in the candidate is refused — the unit is what is protected, not a list of interesting filenames", () => {
+  // Under node_modules/, which the entry loads lazily and no per-file gate names. A fix that
+  // enumerated the descriptor, the loader, and the entry would accept this.
+  const outside = join(workspace, "outside-dep.js");
+  writeFileSync(outside, `module.exports = {};\n`);
+  const dir = candidateWithLink("nm-symlink", join("node_modules", "tsx", "planted.js"), outside);
+
+  const h = canonicalMkdtemp("fg571-tb-nmsym-");
+  try {
+    assert.throws(
+      () => promote({ home: h, candidate: dir }),
+      new RegExp(`refusing to promote — this release candidate holds a symbolic link[\\s\\S]*planted\\.js`),
+      "a link buried anywhere under the candidate is refused",
+    );
+    assert.equal(readSelection(h), null, "nothing was selected");
+  } finally {
+    rmTree(h);
+  }
+});
+
+test("FINDING 6: a symlinked DIRECTORY is refused — `ent.isDirectory()` is FALSE for one, which is exactly how it used to slip through", () => {
+  const outsideDir = join(workspace, "outside-tree");
+  mkdirSync(outsideDir, { recursive: true });
+  writeFileSync(join(outsideDir, "planted.js"), `module.exports = {};\n`);
+  const dir = candidateWithLink("dir-symlink", join("node_modules", "planted-dir"), outsideDir);
+
+  // THE BLIND SPOT, asserted rather than asserted-about: a Dirent for a symlink-to-directory
+  // reports isDirectory() === false. Any walk that branches on isDirectory() first therefore
+  // takes the FILE branch for this entry — which is why the link check must come first.
+  const ent = readdirSync(join(dir, "node_modules"), { withFileTypes: true }).find((e) => e.name === "planted-dir")!;
+  assert.equal(ent.isSymbolicLink(), true);
+  assert.equal(ent.isDirectory(), false, "the premise: a symlink-to-directory does not report as a directory");
+
+  const h = canonicalMkdtemp("fg571-tb-dirsym-");
+  try {
+    assert.throws(
+      () => promote({ home: h, candidate: dir }),
+      new RegExp(`refusing to promote — this release candidate holds a symbolic link[\\s\\S]*planted-dir`),
+      "a symlinked directory is refused, not descended into and not silently skipped",
+    );
+    assert.equal(readSelection(h), null, "nothing was selected");
+  } finally {
+    rmTree(h);
+  }
+});
+
+test("FINDING 6 (EXECUTED MUTANT): the freeze must never chmod a symlink's TARGET — the vulnerable one does, and the link outlives the freeze", () => {
+  const tree = join(workspace, "freeze-tree");
+  const outside = join(workspace, "freeze-outside-file");
+  rmTree(tree);
+  mkdirSync(join(tree, "sub"), { recursive: true });
+  writeFileSync(join(tree, "sub", "real.txt"), "real\n");
+  writeFileSync(outside, "attacker owns this\n");
+  chmodSync(outside, 0o644);
+  symlinkSync(outside, join(tree, "linked"));
+
+  // RED: the pre-fix freeze follows the link and clears the write bits on a file OUTSIDE the
+  // tree it was asked to freeze. It "succeeds" — and protects nothing: the link is still there,
+  // still pointing out, at a file whose owner restores the bit at will.
+  vulnerableFreeze(tree);
+  assert.equal(statSync(outside).mode & 0o222, 0, "MUTANT: the vulnerable freeze chmod'd a file outside the tree");
+  assert.equal(lstatSync(join(tree, "linked")).isSymbolicLink(), true, "and the link survived the freeze it was supposed to be frozen by");
+
+  // GREEN: the real freeze refuses by name and does not touch the target.
+  chmodSync(outside, 0o644);
+  spawnSync("/bin/sh", ["-c", 'chmod -R u+w "$1" 2>/dev/null; exit 0', "sh", tree]);
+  assert.throws(
+    () => freezeReleaseFiles(tree),
+    (e: Error) => {
+      assert.match(e.message, /refusing to freeze — this release tree holds a symbolic link/);
+      assert.match(e.message, /link:\s+.*linked/);
+      return true;
+    },
+    "the freeze refuses a link rather than chmod'ing its target",
+  );
+  assert.equal(statSync(outside).mode & 0o222, 0o200, "the outside file's mode is untouched — the freeze never followed the link");
+  rmTree(tree);
+});
+
+// ══════════ BATCHED — THE DESCRIPTOR'S INTERPRETER IS RE-VALIDATED AT RUNTIME ══════════
+
+test("BATCHED: descriptor interpreter != manifest interpreter — a MATCHING id used to be enough, so the divergent interpreter ran", () => {
+  // The evasion at the end of the chain above. The id check passes (the id genuinely matches),
+  // and round 1 checked nothing else — so a descriptor could name interpreter A under a manifest
+  // naming B and nothing caught it.
+  //
+  // The divergent interpreter here is a COPY of the release's own real node. That is what makes
+  // this test about the cross-check and nothing else: it runs the CLI correctly, reports the
+  // exact version and ABI the manifest names, and passes every other gate. The only thing wrong
+  // with it is that the manifest does not name it.
+  const h = promotedHomeWith("interpdiverge", (unit) => {
+    const m = JSON.parse(readFileSync(join(unit, RELEASE_MANIFEST_NAME), "utf8")) as { id: string; interpreter: string };
+    const other = join(workspace, "diverging-node", "node");
+    mkdirSync(dirname(other), { recursive: true });
+    copyFileSync(realpathSync(m.interpreter), other);
+    chmodSync(other, 0o755);
+    writeFileSync(join(unit, RELEASE_EXEC_NAME), renderExecDescriptor({ interpreter: other, id: m.id }));
+  });
+
+  try {
+    // RED — the mutant is the SHIM WITHOUT THE INTERPRETER CARRIER, i.e. round 1's shim. Node
+    // then re-checks only the id, the id matches, and the divergent interpreter runs to
+    // completion as the machine-wide forge.
+    const real = renderShim();
+    const carrier = `FORGE_RELEASE_INTERPRETER=$__forge_interpreter\nexport FORGE_RELEASE_INTERPRETER`;
+    assert.ok(real.includes(carrier), "the real shim carries the descriptor's interpreter to Node — this mutant is stale if not");
+    const mutant = installShimIn("interpdiverge-vuln", real.replace(carrier, ""));
+    const r = runShim(mutant, h);
+    assert.equal(r.status, 0, `MUTANT: without the cross-check the divergent interpreter runs with a matching id — it did not (${r.stderr})`);
+
+    // GREEN — the real shim carries the interpreter too, and trusted Node refuses by name.
+    const fixed = installShimIn("interpdiverge-fixed", real);
+    const r2 = runShim(fixed, h);
+    assert.notEqual(r2.status, 0, "a descriptor that disagrees with the manifest about what runs it does not run");
+    assert.match(r2.stderr, /refusing to run — this release's execution descriptor and its manifest disagree about its interpreter/);
+    assert.match(r2.stderr, /Fix: re-promote this release/);
+  } finally {
+    rmTree(h);
+  }
+});
+
+test("BATCHED: the interpreter cross-check is fail-closed, and ABSENT is still not a mismatch", () => {
+  const found = { kind: "release" as const, releaseDir: "/store/releases/r1", manifest: { id: "r1", interpreter: "/store/interpreters/node-24/bin/node" } };
+
+  // PRESENT-and-DIFFERENT is the only contradiction — and now both halves are checked.
+  assert.equal(checkReleaseIdentity(found, "r1", "/store/interpreters/node-24/bin/node").ok, true);
+  assert.equal(checkReleaseIdentity(found, "r1", "/tmp/attacker-node").ok, false, "a matching id no longer excuses a divergent interpreter");
+  assert.equal(checkReleaseIdentity(found, "nope", "/store/interpreters/node-24/bin/node").ok, false);
+
+  // ABSENT is not a mismatch: the dev entry and a direct `node <release>/src/cli/index.ts`
+  // legitimately carry neither value. FG-569's rule holds — not recorded, never manufactured.
+  assert.equal(checkReleaseIdentity(found, undefined, undefined).ok, true);
+  assert.equal(checkReleaseIdentity(found, "r1", undefined).ok, true, "an id alone is still a valid carry");
+  assert.equal(checkReleaseIdentity({ kind: "none" }, undefined, undefined).ok, true);
+
+  // Fail-closed on a manifest that cannot state an interpreter at all: a carried value with
+  // nothing to check it against is not a pass.
+  assert.equal(checkReleaseIdentity({ kind: "release", releaseDir: "/r", manifest: { id: "r1" } }, "r1", "/some/node").ok, false, "a manifest stating no interpreter cannot vouch for a carried one");
+});
+
+test("BATCHED: the shim's header comment describes what the shim actually does", () => {
+  // It ships INSIDE every installed shim, so an operator reading their own near-frozen forge
+  // reads this. It said "read the manifest" long after the shim stopped doing that — a false
+  // description of the one file the trust boundary turns on.
+  const header = renderShim().split("\n").slice(0, 8).join("\n");
+  assert.match(header, /read the canonical execution descriptor/, "the header names what the shim reads");
+  assert.ok(!/resolve `current` -> read the manifest/.test(header), "and no longer claims it reads the manifest");
 });
 
 test("this suite never touched the real checkout", () => {

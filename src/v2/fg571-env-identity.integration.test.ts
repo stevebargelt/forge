@@ -478,7 +478,7 @@ test("FG-571 F32 MANDATORY MUTANT (EXECUTED): drop the unset AND the Node re-val
   // each independently stop it, so the mutant disables both to show what they are jointly
   // holding closed. The single-half mutants below prove neither is decorative.
   const withAmbientLive = renderShim()
-    .replace(" FORGE_RELEASE_ID\n", "\n") // drop it from the sanitize list
+    .replace(/ FORGE_RELEASE_ID\b/, "") // drop it from the sanitize list (which holds other carriers after it)
     .replace("FORGE_RELEASE_ID=$__forge_release\nexport FORGE_RELEASE_ID", ":"); // ...and never set it from the descriptor
   assert.ok(!/unset .*FORGE_RELEASE_ID/.test(withAmbientLive), "the mutant genuinely no longer unsets the ambient carrier");
   assert.ok(!/FORGE_RELEASE_ID=\$__forge_release/.test(withAmbientLive), "and genuinely no longer exports the descriptor's id");
@@ -488,7 +488,7 @@ test("FG-571 F32 MANDATORY MUTANT (EXECUTED): drop the unset AND the Node re-val
   const h = promotedHomeWith("mutant-both", (unit) => {
     const p = join(unit, "src", "cli", "node-preflight.ts");
     const src = readFileSync(p, "utf8");
-    const call = "  const identity = checkReleaseIdentity(found, process.env.FORGE_RELEASE_ID);";
+    const call = "  const identity = checkReleaseIdentity(found, process.env.FORGE_RELEASE_ID, process.env.FORGE_RELEASE_INTERPRETER);";
     assert.ok(src.includes(call), "the shipped preflight no longer re-validates identity — this mutant is stale");
     writeFileSync(p, src.replace(call, "  const identity = { ok: true } as const;"));
   });
@@ -514,7 +514,7 @@ test("FG-571 F32 MANDATORY MUTANT (EXECUTED): drop ONLY the shim's unset -> trus
   // This is what proves the Node-side re-validation is load-bearing rather than ceremony: it
   // catches a carrier the shell layer let through.
   const noUnset = renderShim()
-    .replace(" FORGE_RELEASE_ID\n", "\n")
+    .replace(/ FORGE_RELEASE_ID\b/, "")
     .replace("FORGE_RELEASE_ID=$__forge_release\nexport FORGE_RELEASE_ID", ":");
   const h = promotedHomeWith("mutant-shim-only", () => {});
   const r = run(mutantShim("shim-only", noUnset), ["release", "provenance", "--json"], poisonedEnvFor(h));
