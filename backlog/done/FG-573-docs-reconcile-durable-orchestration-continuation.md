@@ -1,9 +1,11 @@
 ---
 id: FG-573
 type: story
-status: active
+status: done
 title: "docs: reconcile durable-orchestration-continuation PRD current-state map against landed Slice-1 children (R1/R2, store policy, exec entry)"
 created: 2026-07-15
+closed: 2026-07-16
+closed_commit: 73f7f56
 ---
 
 **Parent:** FG-552 (PRD) · **Epic:** FG-561 · **Type:** docs follow-up
