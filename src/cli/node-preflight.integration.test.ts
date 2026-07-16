@@ -134,31 +134,41 @@ test("FG-570 (EXECUTED): a manifest ABI OLDER than this interpreter's is refused
   assert.doesNotMatch(r.stderr, OPAQUE, "the native binding loaded before the guard — the preflight lost the race");
 });
 
-test("FG-570 (EXECUTED): an EMPTY manifest ABI fails OPEN at the entry — no refusal manufactured from an unreadable value", () => {
-  // checkAbi's fail-open is unit-tested; this proves it survives the whole expectedAbi()
-  // → applyNodePreflight() → real-entry path. An empty string is NOT nullish, so it does
-  // NOT hit the `?? REQUIRED_ABI` fallback — it reaches checkAbi as the expected value and
-  // must fail open there. A future "empty means block" tightening reddens here.
+// A release whose manifest ABI is unreadable is the case the gate USED to fail open on:
+// the value we could not read silently became "no opinion", the entry started, and the
+// operator got the native loader's opaque crash — exactly what F31 requires the preflight
+// to prevent. A release ships its OWN binding, so its manifest is the only authority on
+// the ABI that binding needs; the pinned dev constant is not evidence about it. The
+// contract is therefore: unreadable release ABI → refuse BY NAME, naming the manifest.
+
+test("FG-570 (EXECUTED): an EMPTY manifest ABI is REFUSED at the entry — an unverified ABI is not a pass", () => {
+  // An empty string is NOT nullish, so it never hit the REQUIRED_ABI fallback — it
+  // reached the gate as the expected value and used to fail open there. It must block.
   const dir = stageRelease("");
   const r = runEntry(dir);
 
-  assert.equal(r.status, 0, `an unreadable expected ABI must not block the entry, got ${r.status}\n${r.stderr}`);
-  assert.doesNotMatch(r.stderr, /refusing to run/i);
+  assert.equal(r.status, 1, `an unreadable release ABI must refuse, got ${r.status}\n${r.stderr}`);
+  assert.match(r.stderr, /refusing to run/i);
+  assert.match(r.stderr, /does not state a usable ABI/);
+  assert.match(r.stderr, new RegExp(RELEASE_MANIFEST_NAME.replace(/\./g, "\\."))); // the manifest, named
+  assert.doesNotMatch(r.stderr, OPAQUE, "the native binding loaded before the guard — the preflight lost the race");
 });
 
-test("FG-570 (EXECUTED): an UNPARSEABLE manifest ABI fails OPEN at the entry", () => {
+test("FG-570 (EXECUTED): an UNPARSEABLE manifest ABI is REFUSED at the entry", () => {
   const dir = stageRelease("not-an-abi");
   const r = runEntry(dir);
 
-  assert.equal(r.status, 0, `an unparseable expected ABI must not block the entry, got ${r.status}\n${r.stderr}`);
-  assert.doesNotMatch(r.stderr, /refusing to run/i);
+  assert.equal(r.status, 1, `an unparseable release ABI must refuse, got ${r.status}\n${r.stderr}`);
+  assert.match(r.stderr, /does not state a usable ABI/);
+  assert.match(r.stderr, /not-an-abi/); // the offending value, quoted back
+  assert.doesNotMatch(r.stderr, OPAQUE, "the native binding loaded before the guard — the preflight lost the race");
 });
 
-test("FG-570 (EXECUTED): a manifest with NO abi field falls back to the pinned REQUIRED_ABI rather than crashing", () => {
+test("FG-570 (EXECUTED): a manifest with NO abi field is REFUSED by name — not fallen back to the pinned constant, not a crash", () => {
   // readReleaseManifest JSON.parses with a bare `as ReleaseManifest` cast — nothing
-  // validates the shape — so a manifest missing `abi` yields undefined. expectedAbi()'s
-  // `?? REQUIRED_ABI` is the only thing standing between that and a TypeError inside
-  // checkAbi at import time. This pins that branch on the real entry.
+  // validates the shape — so a manifest missing `abi` yields undefined. That must be a
+  // named refusal (a release that cannot state its ABI is unverifiable), and above all
+  // must not TypeError out of the gate at import time.
   const dir = mkdtempSync(join(workspace, "no-abi-"));
   cpSync(join(sourceRoot, "src"), join(dir, "src"), { recursive: true });
   cpSync(join(sourceRoot, "package.json"), join(dir, "package.json"));
@@ -169,16 +179,18 @@ test("FG-570 (EXECUTED): a manifest with NO abi field falls back to the pinned R
   );
   const r = runEntry(dir);
 
-  assert.equal(REQUIRED_ABI, process.versions.modules, "REQUIRED_ABI has drifted from the interpreter this checkout's binding is built for");
-  assert.equal(r.status, 0, `expected the fallback to REQUIRED_ABI to run, got ${r.status}\n${r.stderr}`);
+  assert.equal(r.status, 1, `a release with no stated ABI must refuse, got ${r.status}\n${r.stderr}`);
+  assert.match(r.stderr, /does not state a usable ABI/);
+  assert.match(r.stderr, /\(missing\)/);
   assert.doesNotMatch(r.stderr, /TypeError/, "a manifest without abi must not crash the preflight");
+  assert.doesNotMatch(r.stderr, OPAQUE, "the native binding loaded before the guard — the preflight lost the race");
 });
 
 // A hand-written or third-party-generated manifest can carry `abi` as an unquoted JSON
 // number. readReleaseManifest casts without validating, so whatever JSON.parse produced
-// reaches the preflight verbatim. A non-string that is NOT nullish slips past
-// expectedAbi()'s `?? REQUIRED_ABI`, so the boundary must coerce: the contract is
-// numeric-compatible RUNS, numeric-mismatched refuses BY NAME, unusable fails OPEN.
+// reaches the preflight verbatim. The boundary must coerce rather than trust the type:
+// the contract is numeric-compatible RUNS, numeric-mismatched refuses BY NAME, and
+// unusable refuses BY NAME too (never a fall-back, never a pass).
 
 test("FG-570 (EXECUTED): a NUMERIC manifest ABI equal to this interpreter's runs the entry — a compatible release must not crash on its own manifest's type", () => {
   const dir = stageRelease(Number(process.versions.modules));
@@ -202,18 +214,19 @@ test("FG-570 (EXECUTED): a NUMERIC manifest ABI unequal to this interpreter's is
   assert.doesNotMatch(r.stderr, OPAQUE, "the native binding loaded before the guard — the preflight lost the race");
 });
 
-test("FG-570 (EXECUTED): a structurally GARBAGE manifest ABI fails OPEN — no block manufactured from a value we could not read", () => {
+test("FG-570 (EXECUTED): a structurally GARBAGE manifest ABI is REFUSED by name — cleanly, not as a stack trace", () => {
   // Each of these stringifies to something Number.parseInt cannot read, so the coercion
-  // hands checkAbi an unreadable expected and its fail-open governs. (A single-element
-  // numeric array like [137] is deliberately NOT here: it stringifies to "137" and is
-  // therefore a readable, compatible ABI — it runs on its own merits, not by failing open.)
+  // hands the gate an unreadable release ABI: refuse. (A single-element numeric array
+  // like [137] is deliberately NOT here: it stringifies to "137" and is therefore a
+  // readable, compatible ABI — it runs on its own merits.)
   for (const garbage of [{ major: 24 }, ["not-an-abi"], true]) {
     const dir = stageRelease(garbage);
     const r = runEntry(dir);
 
-    assert.equal(r.status, 0, `abi=${JSON.stringify(garbage)} is unreadable and must fail open, got ${r.status}\n${r.stderr}`);
+    assert.equal(r.status, 1, `abi=${JSON.stringify(garbage)} is unreadable and must refuse, got ${r.status}\n${r.stderr}`);
+    assert.match(r.stderr, /does not state a usable ABI/);
     assert.doesNotMatch(r.stderr, /TypeError/, `abi=${JSON.stringify(garbage)} crashed the preflight`);
-    assert.doesNotMatch(r.stderr, /refusing to run/i);
+    assert.doesNotMatch(r.stderr, OPAQUE, "the native binding loaded before the guard — the preflight lost the race");
   }
 });
 

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 // Importing this module runs applyNodePreflight() once at load. The test runner is
 // on the repo's pinned Node, so the live check passes and does not exit — the cases
 // below exercise the pure function across ABIs.
-import { checkAbi, REQUIRED_ABI } from "./node-preflight.js";
+import { checkAbi, resolveExpectedAbi, REQUIRED_ABI } from "./node-preflight.js";
 
 // The opaque native-loader text the whole preflight exists to PREEMPT. If any of
 // this reaches the operator, better-sqlite3 loaded first and the guard lost.
@@ -39,20 +39,63 @@ test("checkAbi: a too-OLD ABI is refused by name", () => {
   }
 });
 
-test("checkAbi: an undeterminable expected ABI fails OPEN (ok)", () => {
-  assert.equal(checkAbi("137", "").ok, true);
-  assert.equal(checkAbi("137", "   ").ok, true);
-  assert.equal(checkAbi("137", "not-an-abi").ok, true);
+test("checkAbi: an undeterminable expected ABI is a BLOCK, not fail-open", () => {
+  // An ABI we never determined is not evidence that this interpreter can load the
+  // binding. Passing here would start the CLI and hand the operator the opaque
+  // native-loader crash the preflight exists to preempt.
+  for (const expected of ["", "   ", "not-an-abi"]) {
+    const r = checkAbi("137", expected);
+    assert.equal(r.ok, false, `expected ABI ${JSON.stringify(expected)} must refuse`);
+    if (!r.ok) {
+      assert.match(r.message, /cannot determine the ABI/);
+      assert.doesNotMatch(r.message, OPAQUE);
+    }
+  }
 });
 
-test("checkAbi: an unreadable ACTUAL ABI against a known expected is still a block, not fail-open", () => {
-  // Fail-open is scoped to an expected ABI we could not read. A known expected vs a
-  // value that is not that ABI is a real mismatch — refuse, without claiming a direction.
+test("checkAbi: an unreadable ACTUAL ABI against a known expected is a block", () => {
+  // A known expected vs a value that is not that ABI is a real mismatch — refuse,
+  // without claiming a direction.
   const r = checkAbi("", "137");
   assert.equal(r.ok, false);
   if (!r.ok) {
     assert.match(r.message, /different ABI/);
     assert.doesNotMatch(r.message, OPAQUE);
+  }
+});
+
+test("resolveExpectedAbi: no manifest (a dev checkout) uses the pinned constant", () => {
+  const r = resolveExpectedAbi(null);
+  assert.equal(r.ok, true);
+  if (r.ok) assert.equal(r.abi, REQUIRED_ABI);
+});
+
+test("resolveExpectedAbi: a release's stated ABI wins over the pinned constant", () => {
+  const r = resolveExpectedAbi({ manifest: { abi: "147" }, releaseDir: "/opt/forge" });
+  assert.equal(r.ok, true);
+  if (r.ok) assert.equal(r.abi, "147");
+});
+
+test("resolveExpectedAbi: a numeric (unquoted) manifest abi is coerced, not refused", () => {
+  // A hand-written manifest's `"abi": 137` arrives as a number — genuinely compatible
+  // on an ABI-137 interpreter, so it must RUN.
+  const r = resolveExpectedAbi({ manifest: { abi: 137 }, releaseDir: "/opt/forge" });
+  assert.equal(r.ok, true);
+  if (r.ok) assert.equal(r.abi, "137");
+});
+
+test("resolveExpectedAbi: a release with an unusable ABI is refused BY NAME, never fallen back", () => {
+  // The fail-open this replaced: an unreadable release ABI silently became REQUIRED_ABI
+  // (or passed), so a mismatched interpreter started and died in the native loader.
+  // The pinned dev constant is not evidence about a release's own shipped binding.
+  for (const abi of [undefined, null, "", "   ", "not-an-abi", {}]) {
+    const r = resolveExpectedAbi({ manifest: { abi }, releaseDir: "/opt/forge" });
+    assert.equal(r.ok, false, `manifest abi ${JSON.stringify(abi) ?? "undefined"} must refuse`);
+    if (!r.ok) {
+      assert.match(r.message, /does not state a usable ABI/);
+      assert.match(r.message, /\/opt\/forge\/forge-release\.json/); // named, so it's actionable
+      assert.doesNotMatch(r.message, OPAQUE);
+    }
   }
 });
 
