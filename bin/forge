@@ -24,6 +24,15 @@
 # runs ONLY when $0 is actually a symlink, so a direct invocation stays PATH-free.
 # Plain one-arg readlink (no -f, no --, both GNU-only) is the portable form; a
 # leading-dash path is disarmed with a ./ prefix instead of the GNU-only --.
+
+# FG-571 (F32): this is a LIVE-SOURCE entry — it has no release manifest, so its release
+# identity is NULL, the honest answer under FG-569's "not recorded, never manufactured"
+# rule. Unset the ambient carrier so a caller-supplied FORGE_RELEASE_ID cannot survive to
+# be recorded as this process's provenance: identity comes from a release manifest or it
+# is null, never from the environment. (bin/forge-dev is the named live-source entry the
+# FG-571 stable/dev split introduces; this file keeps the same rule.)
+unset FORGE_RELEASE_ID
+
 p=$0
 case "$p" in */*) ;; *) p=$(command -v "$p") ;; esac
 while [ -L "$p" ]; do

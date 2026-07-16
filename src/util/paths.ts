@@ -28,6 +28,35 @@ export const RACI_AUDIT_LOG_PATH = join(FORGE_HOME, "raci-audit.log");
 // FORGE_DB_PATH overrides the default; pass `:memory:` in tests for an in-memory SQLite.
 export const DB_PATH = process.env.FORGE_DB_PATH ?? join(FORGE_HOME, "forge.db");
 
+// FG-571 (FG-553 Child 4): the promotion surface. EVERY path here is derived from a
+// `home` argument (defaulting to FORGE_HOME) rather than homedir() — setting FORGE_HOME
+// therefore isolates a promotion, an interpreter install, and a shim install COMPLETELY.
+// That is not an ergonomic nicety: it is the mechanism that keeps a test that promotes,
+// rolls back, or installs an interpreter away from the operator's REAL ~/.forge/current
+// and their live control plane. A hardcoded homedir() on any of these paths would break it.
+export function releasesDirIn(home: string): string {
+  return join(home, "releases");
+}
+// NOT `runtimes/`: that name is already taken on a real forge home by the PROVIDER RUNTIME
+// REGISTRY (~/.forge/runtimes/*.yml — claude-oauth.yml, pi-apikey.yml, ...), which
+// `forge doctor` enumerates. The interpreter store is an unrelated meaning of "runtime";
+// nesting it inside the provider config dir would conflate the two and break any future
+// enumeration that does not filter on `.yml`.
+export function interpretersDirIn(home: string): string {
+  return join(home, "interpreters");
+}
+export function currentLinkIn(home: string): string {
+  return join(home, "current");
+}
+export function previousLinkIn(home: string): string {
+  return join(home, "previous");
+}
+
+export const RELEASES_DIR = releasesDirIn(FORGE_HOME);
+export const INTERPRETERS_DIR = interpretersDirIn(FORGE_HOME);
+export const CURRENT_LINK = currentLinkIn(FORGE_HOME);
+export const PREVIOUS_LINK = previousLinkIn(FORGE_HOME);
+
 export function ensureForgeDirs(): void {
   for (const dir of [FORGE_HOME, RUNS_DIR, AGENTS_DIR, CONSTRAINTS_DIR, WORKTREES_DIR]) {
     mkdirSync(dir, { recursive: true });

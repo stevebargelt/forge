@@ -1,0 +1,54 @@
+#!/bin/sh
+# forge-dev — FG-571 (FG-553 Child 4): THE LIVE-SOURCE ENTRY.
+#
+# THIS COMMAND CREATES THE STABLE/DEV SPLIT. Before FG-571 there was none: package.json
+# declared only `forge`, and the machine-wide `forge` was an npm-link SYMLINK into this
+# checkout — the live-source path and the machine-wide path were THE SAME ARTIFACT. So
+# "commit and it is live" applied to the control plane, and a broken checkout broke the
+# operator's forge. FG-571 splits them:
+#
+#   forge-dev  -> THIS file -> a PATH-resolved node against the LIVE CHECKOUT (mutable,
+#                 breaks when the source breaks — that is the point: it is the dev loop)
+#   forge      -> the machine-wide shim (renderShim) -> $FORGE_HOME/current -> a promoted,
+#                 IMMUTABLE release run by its own manifest-pinned absolute interpreter
+#
+# forge-dev MUST NOT delegate to, exec, or otherwise reach the stable release. A forge-dev
+# that ran the promoted release would "pass" a naive "stable still works" test while
+# DESTROYING the live-source loop the PRD forbids removing — you could no longer run the
+# code you just edited. That is the F25 mutant, and it must go red.
+#
+# Like the release entry, this execs node ONCE with tsx loaded in-process via
+# forge-loader.mjs — exactly one process exists and it is the one that loads
+# better-sqlite3, so its process.execPath IS the control runtime (R1), self-evidencing.
+# Unlike the release entry, the node here is PATH-resolved and the source is the live
+# checkout: this entry is NOT the one that survives a node-free PATH (F29 belongs to the
+# release entry and the shim, which pin an absolute interpreter). That is the correct
+# division — a dev checkout has node on PATH by construction.
+#
+# MUST resolve $0 through symlinks first: an npm-link install puts a SYMLINK on PATH (e.g.
+# ~/.nvm/.../bin/forge-dev -> this file). $0 is then the symlink's path, so $here/../src
+# would resolve NEXT TO THE SYMLINK — not the repo — and node dies with
+# ERR_MODULE_NOT_FOUND. Canonicalize the chain to the real file (a POSIX readlink loop)
+# before deriving the source root; it runs ONLY when $0 is actually a symlink.
+
+# FG-571 (F32): the dev entry has NO manifest, so its release identity is NULL — the
+# honest answer under FG-569's "not recorded, never manufactured" rule. Unset the ambient
+# carrier so a caller-supplied FORGE_RELEASE_ID cannot survive into this process and be
+# recorded as provenance by everything forge starts (notably the `forge launch`
+# exit-recorder). Identity comes from a release manifest or it is null; it never comes
+# from the environment. Nothing manufactures one here to fill the gap.
+unset FORGE_RELEASE_ID
+
+p=$0
+case "$p" in */*) ;; *) p=$(command -v "$p") ;; esac
+while [ -L "$p" ]; do
+  case "$p" in -*) t=$(readlink "./$p") ;; *) t=$(readlink "$p") ;; esac
+  case "$t" in /*) p=$t ;; *) p=${p%/*}/$t ;; esac
+done
+case "$p" in */*) d=${p%/*} ;; *) d=. ;; esac
+# POSIX gives the `cd` builtin no `--` operand separator, so a strict /bin/sh (dash) reads
+# `cd -- "$d"` as a cd to a directory literally named `--`. Disarm a leading-dash dir with
+# a ./ prefix instead — the same POSIX-safe idiom the generated release entry uses.
+case $d in -*) d=./$d ;; esac
+here=$(CDPATH= cd -P "$d" && pwd)
+exec node --import "$here/forge-loader.mjs" "$here/../src/cli/index.ts" "$@"

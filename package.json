@@ -5,7 +5,8 @@
   "description": "TypeScript CLI for orchestrating multi-agent AI workflows on a personal machine",
   "type": "module",
   "bin": {
-    "forge": "./bin/forge"
+    "forge": "./bin/forge",
+    "forge-dev": "./bin/forge-dev"
   },
   "scripts": {
     "forge": "tsx src/cli/index.ts",

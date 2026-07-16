@@ -193,7 +193,10 @@ test("FG-569 R2 entry (EXECUTED): the FORGE_RELEASE_ID block parses the id strai
   // reads a real manifest must set the id (the release's own id). Rip out just the
   // FORGE_RELEASE_ID block and run it — no interpreter/loader needed.
   const entry = renderEntry("/opt/node-24/bin/node");
-  const block = entry.slice(entry.indexOf("while IFS="), entry.indexOf("\n\nexec"));
+  // FG-571 wrapped this block in the fail-closed identity guard, which derives the
+  // manifest path into $__forge_m first — so the slice starts there rather than at the
+  // read loop. The property under test is unchanged: a real manifest yields its own id.
+  const block = entry.slice(entry.indexOf("__forge_m=$here/"), entry.indexOf("\n\nexec"));
   const dir = mkdtempSync(join(workspace, "r2entry-"));
   writeFileSync(join(dir, RELEASE_MANIFEST_NAME), JSON.stringify({ schema: 1, id: "release-feedb0d-9xk2z", commit: "feedb0d" }, null, 2) + "\n");
   const run = spawnSync("/bin/sh", ["-c", `here=${dir}\n${block}\nprintf '%s' "$FORGE_RELEASE_ID"`], { encoding: "utf8" });
@@ -208,7 +211,10 @@ test("FG-569 entry (EXECUTED under /bin/sh): the $here derivation resolves a lea
   // /bin/sh with $0 pointing at an entry inside a directory whose name starts with `-`.
   const entry = renderEntry("/opt/node-24/bin/node");
   const start = entry.indexOf(`case "$p" in */*) d=`);
-  const hereLine = `here=$(CDPATH= cd "$d" && pwd)`;
+  // FG-571 made this cd PHYSICAL (-P) so a release reached as `$FORGE_HOME/current/forge`
+  // resolves $here to the release itself rather than to the pointer — the leading-dash
+  // property this test owns is unchanged by that.
+  const hereLine = `here=$(CDPATH= cd -P "$d" && pwd)`;
   const block = entry.slice(start, entry.indexOf(hereLine) + hereLine.length);
   const dashDir = join(workspace, "-dashy-release");
   mkdirSync(dashDir, { recursive: true });

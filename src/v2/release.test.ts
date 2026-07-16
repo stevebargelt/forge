@@ -32,7 +32,12 @@ test("FG-569 entry: derives $here with a POSIX-portable cd — no `cd --` (unspe
   const code = entry.split("\n").filter((l) => !l.trimStart().startsWith("#")).join("\n");
   assert.ok(!code.includes("cd -- "), "does not use `cd --` — unspecified for the cd builtin on a conforming /bin/sh");
   assert.ok(code.includes("case $d in -*) d=./$d ;; esac"), "disarms a leading-dash dir name with a `./` prefix before cd");
-  assert.ok(code.includes(`here=$(CDPATH= cd "$d" && pwd)`), "resolves $here with a plain, portable cd");
+  // FG-571 made this cd PHYSICAL: a release reached as `$FORGE_HOME/current/forge` has a
+  // symlink COMPONENT in $0's path (so the `-L $0` branch does not fire), and a logical cd
+  // would leave $here on the pointer — re-resolving it per read, which is how a mixed
+  // closure gets observed (F26). `-P` is POSIX for the cd builtin (unlike the `--` operand
+  // separator this test exists to keep out), so it stays portable across dash/ash/bash.
+  assert.ok(code.includes(`here=$(CDPATH= cd -P "$d" && pwd)`), "resolves $here with a portable PHYSICAL cd (-P), so a symlinked path component canonicalizes");
 });
 
 test("FG-569 entry: canonicalizes $0 through symlinks with the pinned interpreter (a promoted release is reached via a symlink)", () => {
@@ -68,13 +73,23 @@ test("FG-569 R2 entry: exports FORGE_RELEASE_ID sourced from the release's OWN m
   // the pinned interpreter — and every process it starts — inherits it, and
   // (3) use no external command (a node-free PATH must still reach the export).
   assert.ok(entry.includes(`export FORGE_RELEASE_ID`), "the entry exports FORGE_RELEASE_ID");
-  assert.ok(entry.includes(`done < "$here/${RELEASE_MANIFEST_NAME}"`), "sourced by reading the release's own manifest, not a baked-in literal");
+  // FG-571 derives the manifest path into $__forge_m first (the fail-closed guard checks
+  // its readability before reading it), so the read is `done < "$__forge_m"`. The property
+  // is unchanged: the id is READ from the release's own manifest, never baked in.
+  assert.ok(entry.includes(`__forge_m=$here/${RELEASE_MANIFEST_NAME}`), "the manifest path is derived from the release's OWN root");
+  assert.ok(entry.includes(`done < "$__forge_m"`), "sourced by reading that manifest, not a baked-in literal");
   const exportAt = entry.indexOf("export FORGE_RELEASE_ID");
   assert.ok(exportAt < entry.indexOf("exec '"), "the export happens before exec, so the interpreter inherits it");
+  // FG-571 (F32): the ambient carrier is unset BEFORE the read, and it is unset in the
+  // sanitizer at the very top — so a caller-supplied value can never survive to be read
+  // back as this release's provenance, whatever the manifest read yields.
+  const unsetAt = entry.indexOf("unset ");
+  assert.ok(unsetAt >= 0 && entry.slice(unsetAt).split("\n")[0]!.includes("FORGE_RELEASE_ID"), "the ambient FORGE_RELEASE_ID is unset");
+  assert.ok(unsetAt < entry.indexOf(`done < "$__forge_m"`), "and it is unset BEFORE the manifest read, not after");
   // Parsed with parameter expansion (a builtin), not an external tool. The scan
   // for externals is over CODE lines only, since the comments legitimately name
   // sed/grep to explain their own absence.
-  assert.ok(entry.includes("${ln#") && entry.includes("${ln%%"), "parses the id via parameter expansion");
+  assert.ok(entry.includes("${__forge_ln#") && entry.includes("${__forge_v%%"), "parses the id via parameter expansion");
   const codeBeforeExec = entry.split("\n").filter((l) => !l.trimStart().startsWith("#")).join("\n").split("exec '")[0]!;
   for (const ext of ["$(sed", "$(grep", "$(awk", "$(jq", "$(dirname", "$(node"]) {
     assert.ok(!codeBeforeExec.includes(ext), `the manifest is parsed with shell builtins, not ${ext}`);
