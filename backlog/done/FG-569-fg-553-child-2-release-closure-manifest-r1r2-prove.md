@@ -1,9 +1,11 @@
 ---
 id: FG-569
 type: story
-status: active
+status: done
 title: "FG-553 Child 2: release closure + manifest + R1/R2 provenance (inert, exec-not-spawn, no promotion yet)"
 created: 2026-07-14
+closed: 2026-07-16
+closed_commit: 1b11f25
 ---
 
 **Parent:** FG-553 · **Epic:** FG-561 · **Plan:** `docs/plans/fg553-slice1-architecture.md` (Child 2)
