@@ -78,5 +78,25 @@ jobs:
       - name: Rebuild better-sqlite3 native module
         run: npm rebuild better-sqlite3
 
+      # FG-570 F31: the manifest-mismatch tests fake the expected ABI under one
+      # interpreter — they prove the ordering, not that the guard prevents a
+      # genuinely-doomed native load. Only a real second Node proves that, so
+      # provision one (v26.3.1 = ABI 147, vs .nvmrc's 24 = ABI 137) and name it
+      # in the env. The test treats FORGE_TEST_MISMATCHED_NODE as a HARD
+      # requirement, so this step is what makes the F31 arm gate rather than
+      # skip. The job's active Node stays at 24; only the variable points here.
+      - name: Provision an ABI-incompatible Node for the F31 preflight test
+        run: |
+          set -euo pipefail
+          ver=v26.3.1
+          dest="$RUNNER_TEMP/node-mismatch"
+          mkdir -p "$dest"
+          curl -fsSL "https://nodejs.org/dist/$ver/node-$ver-linux-x64.tar.xz" | tar -xJ -C "$dest" --strip-components=1
+          abi=$("$dest/bin/node" -p process.versions.modules)
+          active=$(node -p process.versions.modules)
+          echo "provisioned $ver -> ABI $abi (active Node $(node -v) -> ABI $active)"
+          test "$abi" != "$active"
+          echo "FORGE_TEST_MISMATCHED_NODE=$dest/bin/node" >> "$GITHUB_ENV"
+
       - name: Test extended (integration + worktree tiers)
         run: npm run test:extended

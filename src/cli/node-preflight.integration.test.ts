@@ -217,50 +217,87 @@ test("FG-570 (EXECUTED): a structurally GARBAGE manifest ABI fails OPEN — no b
   }
 });
 
-// F31's real-interpreter arm. The plan calls for executing under a genuinely
-// ABI-incompatible Node (v26 / ABI 147). This test RESOLVES one if the host has it and
-// executes the real entry under it; where none exists it records that concretely rather
-// than passing silently — the manifest-path tests above already prove the ordering
-// portably, under the interpreter that is always present.
+// F31's real-interpreter arm. The manifest-path tests above manufacture the mismatch in
+// the MANIFEST and run under this one interpreter — they prove the ORDERING, but not that
+// the guard prevents a genuinely-doomed native load. Only executing under a Node whose ABI
+// really differs proves that, so on CI this arm is MANDATORY: `test-extended` provisions
+// Node 26 (ABI 147) and exports $FORGE_TEST_MISMATCHED_NODE, and when that variable is set
+// every failure mode here reddens rather than skips. Locally, with no variable set, it
+// still executes against an installed mismatched Node if one exists, else skips concretely.
+
+const installRoots = [join(process.env.HOME ?? "", ".nvm/versions/node"), "/usr/local/n/versions/node"];
+
+/** The running ABI if `p` is a usable interpreter; otherwise why it isn't. */
+function probeAbi(p: string): { abi: string } | { error: string } {
+  const r = spawnSync(p, ["-p", "process.versions.modules"], { encoding: "utf8" });
+  if (r.error) return { error: `${r.error.message}` };
+  if (r.status !== 0) return { error: `exited ${r.status}: ${r.stderr.trim()}` };
+  return { abi: r.stdout.trim() };
+}
+
+/** Stage a release carrying THIS Node's ABI, execute the real entry under `node`, and
+ *  assert the operator gets the named refusal rather than the native loader's crash. */
+function assertNamedRefusalUnder(node: string): void {
+  const dir = stageRelease(process.versions.modules); // the ABI of THIS Node...
+  const r = spawnSync(node, ["--import", "tsx", join(dir, "src", "cli", "index.ts"), "--version"], {
+    cwd: dir,
+    encoding: "utf8",
+  }); // ...executed under a Node that has a DIFFERENT one.
+
+  assert.equal(r.status, 1, `expected a clean refusal under ${node}, got ${r.status}\n${r.stderr}`);
+  assert.match(r.stderr, /refusing to run/i);
+  assert.doesNotMatch(r.stderr, OPAQUE, `${node} reached the native loader — the preflight did not beat it`);
+}
+
 test("FG-570 (EXECUTED, F31): a real ABI-incompatible interpreter gets a named refusal, not ERR_DLOPEN_FAILED", (t) => {
-  // Version managers install under the FULL version (nvm: ~/.nvm/versions/node/v26.3.1,
-  // n: /usr/local/n/versions/node/26.3.1), so a major-only path like `v26` matches
-  // nothing on a normal install and the real-Node arm silently skips. Enumerate what is
-  // actually installed instead of guessing directory names.
-  const installRoots = [join(process.env.HOME ?? "", ".nvm/versions/node"), "/usr/local/n/versions/node"];
-  const candidates = [
-    ...(process.env.FORGE_TEST_MISMATCHED_NODE ? [process.env.FORGE_TEST_MISMATCHED_NODE] : []),
-    ...installRoots.flatMap((root) => {
-      let entries: string[];
-      try {
-        entries = readdirSync(root);
-      } catch {
-        return [];
-      }
-      return entries.sort().reverse().map((v) => join(root, v, "bin", "node"));
-    }),
-  ];
+  const named = process.env.FORGE_TEST_MISMATCHED_NODE;
+
+  if (named) {
+    // The CI gate path. Anything wrong with the provisioning — a missing binary, an
+    // interpreter that won't run, an ABI that turns out to match — is a BROKEN GATE, and a
+    // broken gate must redden. Skipping here is what let a green suite mean nothing.
+    const probed = probeAbi(named);
+    if (!("abi" in probed)) {
+      assert.fail(`FORGE_TEST_MISMATCHED_NODE=${named} is not a usable interpreter: ${probed.error}`);
+    }
+    assert.notEqual(
+      probed.abi,
+      process.versions.modules,
+      `FORGE_TEST_MISMATCHED_NODE=${named} reports ABI ${probed.abi}, the same as the running interpreter — it is not actually mismatched, so this arm would prove nothing`,
+    );
+    assertNamedRefusalUnder(named);
+    return;
+  }
+
+  // Local dev, no opt-in. Version managers install under the FULL version (nvm:
+  // ~/.nvm/versions/node/v26.3.1, n: /usr/local/n/versions/node/26.3.1), so a major-only
+  // path like `v26` matches nothing on a normal install. Enumerate what is actually
+  // installed instead of guessing directory names.
+  const candidates = installRoots.flatMap((root) => {
+    let entries: string[];
+    try {
+      entries = readdirSync(root);
+    } catch {
+      return [];
+    }
+    return entries
+      .sort()
+      .reverse()
+      .map((v) => join(root, v, "bin", "node"));
+  });
   const mismatched = candidates.find((p) => {
-    const probe = spawnSync(p, ["-p", "process.versions.modules"], { encoding: "utf8" });
-    return probe.status === 0 && probe.stdout.trim() !== process.versions.modules;
+    const probed = probeAbi(p);
+    return "abi" in probed && probed.abi !== process.versions.modules;
   });
 
   if (!mismatched) {
     // Concrete, not a shrug: name what was searched so the gap is auditable.
     t.skip(
-      `no ABI-incompatible interpreter on this host (running ABI ${process.versions.modules}; searched $FORGE_TEST_MISMATCHED_NODE and every version installed under ${installRoots.join(", ")} — probed ${candidates.length} interpreter path(s)). ` +
-        `The manifest-path tests above prove the pre-native-load ordering under this interpreter.`,
+      `no ABI-incompatible interpreter on this host (running ABI ${process.versions.modules}; $FORGE_TEST_MISMATCHED_NODE unset, and searched every version installed under ${installRoots.join(", ")} — probed ${candidates.length} interpreter path(s)). ` +
+        `Set FORGE_TEST_MISMATCHED_NODE to a mismatched interpreter to make this arm mandatory, as CI's test-extended job does.`,
     );
     return;
   }
 
-  const dir = stageRelease(process.versions.modules); // the ABI of THIS Node...
-  const r = spawnSync(mismatched, ["--import", "tsx", join(dir, "src", "cli", "index.ts"), "--version"], {
-    cwd: dir,
-    encoding: "utf8",
-  }); // ...executed under a Node that has a DIFFERENT one.
-
-  assert.equal(r.status, 1, `expected a clean refusal under ${mismatched}, got ${r.status}\n${r.stderr}`);
-  assert.match(r.stderr, /refusing to run/i);
-  assert.doesNotMatch(r.stderr, OPAQUE, `${mismatched} reached the native loader — the preflight did not beat it`);
+  assertNamedRefusalUnder(mismatched);
 });
