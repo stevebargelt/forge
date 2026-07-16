@@ -631,6 +631,7 @@ The initiative is complete only when all of the following are true:
 - **BD-14's R1/R2 "Currently recorded?" flipped from No to Yes.** FG-569 shipped the single-process `/bin/sh` exec-not-spawn entry (R1 = `process.execPath` is self-evidencing; captured at submission as `meta.json`'s `control` record and surfaced as `launch show`'s `control:` line) and the independent exit-recorder capture of R2 (`runtime.json`). Old, pre-FG-569 launches render "not recorded", never manufactured. **R3/R4 stay No/unknowable** (FG-555, open).
 - **Current system map:** the R1 executable row now distinguishes the shipped exec entry + R1/R2 recording from the still-open source-isolation/promotion axis (FG-571). The header records the landed Slice-1 children (FG-551/567/568/569) and the open ones (FG-570/571/572, FG-555).
 - **Slice 1 section** carries a landed-so-far note: children 0–2 are inert (no promotion/`current`/PATH change); children 3–5 remain open, so F29 (control-plane availability under a hostile/node-free environment) is not yet closed on the live path.
+- **Superseded phrasing.** The "no runtime identity is recorded today" claim in the 2026-07-14 audit-closure entry below described the pre-FG-569 state and is superseded by this reconciliation (that entry now carries an inline superseded marker pointing here). R1/R2 are recorded; R3/R4 are not.
 - **No normative change.** BD-13/BD-14/BD-15 decisions, the candidate policies, the slices, and the F-row matrix (acceptance criteria, tense-neutral) are untouched. Only the current-state/provenance evidence is updated to what has landed.
 
 ### 2026-07-15 — BD-15 premise reconciled to shipped behavior (FG-568, `275ac63`)
@@ -666,7 +667,7 @@ The initiative is complete only when all of the following are true:
 - Extended the acceptance matrix with **F29–F35** and the open **T9** in-flight/lazy-import case; strengthened F4, F21, F26–F28.
 - Restored ascending physical order of the binding decisions (BD-12 → BD-13 → BD-14 → BD-15) after BD-14 was initially placed before BD-13. Decision IDs and bodies are unchanged; an explicit dependency statement before BD-13 now carries the prerequisite relationship that the ordering previously implied.
 - Host evidence cited in this pass (P1–P5, `~/.forge` copies) is operator-supplied and was not reproduced in the authoring environment.
-- Closure fixes from the review of this pass: the executive-outcome diagram is now explicitly target-state and its runtime annotation reflects BD-14's R1–R4 table (no runtime identity is recorded today); **BD-5, BD-6, BD-7, BD-10, and BD-11** now carry an explicit `Status: UNMET` declaration in BD-4's form. Status labels only — no normative content changed.
+- Closure fixes from the review of this pass: the executive-outcome diagram is now explicitly target-state and its runtime annotation reflects BD-14's R1–R4 table (no runtime identity was recorded as of this 2026-07-14 pass — **superseded: R1 and R2 are now recorded per FG-569; see the 2026-07-15 "current-state map reconciled to landed R1/R2 + exec entry" entry above**); **BD-5, BD-6, BD-7, BD-10, and BD-11** now carry an explicit `Status: UNMET` declaration in BD-4's form. Status labels only — no normative content changed.
 
 ### 2026-07-13 — FG-553 control-plane isolation added
 
