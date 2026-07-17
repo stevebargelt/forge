@@ -31,9 +31,13 @@ export function registerDashboard(program: Command): void {
     .command("dashboard")
     .description("Web view of forge runs across every project on the host");
 
-  // Bare `forge dashboard` (no subcommand): show help, as before. No release refusal —
-  // the dashboard is bundled now (FG-580).
+  // Bare `forge dashboard` (no subcommand): show help. But this is still a SUPPORTED
+  // release command path, so a torn/incomplete release must fail NAMED and NONZERO here
+  // too (FG-580) — never exit 0 with help while the bundled dashboard is actually broken.
+  // assertDashboardClosure passes cleanly from a dev checkout and from a complete release,
+  // so the only path this refuses is a genuinely torn one.
   dashboard.action(() => {
+    assertDashboardClosure(assetRoot());
     dashboard.help();
   });
 

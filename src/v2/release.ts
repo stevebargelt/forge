@@ -215,16 +215,47 @@ const DASHBOARD_TRACKED_PATHS = [
 
 // FG-580: the dashboard runtime files a promoted release MUST carry. Absence of ANY is
 // a torn closure — the build refuses BY NAME, and `forge dashboard` from a torn release
-// fails named+nonzero rather than silently reaching for a dev checkout. Includes the
-// server entry, the tsconfig that resolves @forge/* at runtime, a representative static
-// client asset, and every VENDORED client lib (FG-580 offline boot: no esm.sh/CDN fetch
-// of executable JS — these bytes serve first-party from the closure). Kept in sync with
-// dashboard/src/shell.ts's import map and scripts/vendor-dashboard-libs.mjs.
+// fails named+nonzero rather than silently reaching for a dev checkout. This is the
+// COMPLETE runtime source/static closure, not a representative sample: a release missing
+// any one of these boots into broken runtime behavior or a blank page (a dropped server
+// module aborts startup; a dropped client module breaks the ES-module graph the browser
+// loads; a dropped favicon/logo 404s), so each is required by name rather than trusting
+// that shipping `server.ts` + `main.js` implies the rest arrived. Kept in sync with
+// server.ts's import graph, main.js's ES-module graph, dashboard/src/shell.ts's referenced
+// assets + import map, and scripts/vendor-dashboard-libs.mjs.
 export const REQUIRED_DASHBOARD_FILES = [
+  // Server runtime source — server.ts's own local import graph (./queries, ./shell,
+  // ./plan-usage, ./http-error). A missing one aborts `forge dashboard start` at import.
   "dashboard/src/server.ts",
+  "dashboard/src/queries.ts",
+  "dashboard/src/shell.ts",
+  "dashboard/src/plan-usage.ts",
+  "dashboard/src/http-error.ts",
   "dashboard/package.json",
   "dashboard/tsconfig.json",
+  // Client ES-module graph — main.js and everything it (transitively) imports. A missing
+  // module makes the browser's module loader fail and the app never mounts.
   "dashboard/client/main.js",
+  "dashboard/client/renderers.js",
+  "dashboard/client/usage.js",
+  "dashboard/client/usage-limits.js",
+  "dashboard/client/governance.js",
+  "dashboard/client/backlog.js",
+  "dashboard/client/verification-render.js",
+  "dashboard/client/verification-label.js",
+  // Static assets the shell + client reference by URL (favicons, apple-touch icon, brand
+  // marks). A missing one 404s rather than serving the intended asset.
+  "dashboard/client/favicon-16.png",
+  "dashboard/client/favicon-32.png",
+  "dashboard/client/favicon-48.png",
+  "dashboard/client/apple-touch-icon.png",
+  "dashboard/client/icon-192.png",
+  "dashboard/client/icon-512.png",
+  "dashboard/client/logo-mark.svg",
+  "dashboard/client/claude-logo.png",
+  "dashboard/client/openai-logo.png",
+  // VENDORED client libs (FG-580 offline boot: no esm.sh/CDN fetch of executable JS —
+  // these bytes serve first-party from the closure).
   "dashboard/client/vendor/preact/preact.js",
   "dashboard/client/vendor/preact/hooks.js",
   "dashboard/client/vendor/htm/htm.js",
