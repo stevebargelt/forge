@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Copy seed agent, constraint, runtime, and workflow files into ~/.forge/.
-# Idempotent — skips files that already exist by default. FORCE=1 to overwrite.
+# Idempotent — skips files that already exist by default. FORCE=1 overwrites
+# forge-owned files, but NEVER operator-authored ones (agents, constraints,
+# raci): those are created once and then left alone, FORCE or not — see below.
 #
 # FG-578: FORCE=1 does NOT mean "overwrite everything". It means "overwrite every
 # file FORGE owns". The categories in AUTHORED_EXEMPT below are the operator's;
