@@ -121,6 +121,7 @@ This spec adds zero new CLI flags, subcommands, or arguments. Behavior change is
       # ... (red-narrow, red-frontend, red-backend, red-security as today)
   ```
   Reinstall via `./scripts/install-seeds.sh` after editing.
+  - _FG-578: `seeds/agents/tech-lead/` is an authored-exempt category — the installer seeds it once and thereafter retains an existing `~/.forge/agents/tech-lead/` (`FORCE=1` included), so an edit only lands on a fresh copy; remove that dir first to re-test. `seeds/workflows/feature.yml` is forge-owned and still overwrites under `FORCE=1`._
 
 ### Tests
 

@@ -42,7 +42,7 @@ Check the exit code here rather than the scrollback: if the image build fails, o
 
 > **Why `forge-dev` here.** Building the agent image is dev-checkout work — it runs `docker/build.sh` from the checkout — so the stable `forge` **refuses `--rebuild-image`** under a release and points you back at the checkout (FG-577). The stable `forge` would also exit nonzero on `forge upgrade --skip-git` — your skip stands on the pull, but the `npm install` you did not skip is still refused under a release — so it closes `Upgrade INCOMPLETE` even though it refreshed your seeds. `forge-dev` executes from the checkout, so both halves simply run. The release you promoted in step 1 was built from this same commit, so the seeds are identical either way.
 >
-> Seed installation itself is *not* dev-only: `forge upgrade` from the release installs the **release's own** bundled seeds and works on a host with no checkout at all. That's the repair path when `~/.forge/` is broken or drifted — see `docs/how-to-upgrade.md`.
+> Seed installation itself is *not* dev-only: `forge upgrade` from the release installs the **release's own** bundled seeds and works on a host with no checkout at all. That's the repair path when `~/.forge/`'s forge-owned seeds are broken or drifted — your authored agent, constraint, and RACI seeds are retained rather than repaired, as above (FG-578) — see `docs/how-to-upgrade.md`.
 
 > `--skip-git` avoids a "no remote" skip message if you haven't configured an upstream yet. Drop it once you have.
 
@@ -100,7 +100,7 @@ Use `forge doctor` any time you want to recheck readiness without touching files
 
 | Command | What it does |
 |---|---|
-| `forge upgrade` | Refresh `~/.forge/` from the running forge, recompile routing, re-init project, run release check. Exits nonzero whenever a requested step didn't happen — under a release that always includes refusing to pull/`npm install` the checkout |
+| `forge upgrade` | Refresh `~/.forge/`'s forge-owned seeds from the running forge (authored agent/constraint/RACI seeds are retained, not overwritten — FG-578), recompile routing, re-init project, run release check. Exits nonzero whenever a requested step didn't happen — under a release that always includes refusing to pull/`npm install` the checkout |
 | `forge-dev upgrade [--rebuild-image]` | The same, driven from the checkout: also pulls forge commits, `npm install`s, and builds the agent image (`--rebuild-image` is dev-checkout only) |
 | `forge setup [--dry-run]` | Create active model/routing policy from seed if absent, run release check |
 | `forge doctor` | Read-only release check (image, CLIs, auth, policies) — no writes |
