@@ -380,7 +380,11 @@ test("FG-577 (criterion 10): a clean dev --json reports no refusal", () => {
     const parsed = JSON.parse(stdout) as { ok: boolean; mode: string; unresolved: string[]; devAdvancement: { kind: string } };
     assert.equal(parsed.ok, true);
     assert.equal(parsed.mode, "dev");
-    assert.equal(parsed.devAdvancement.kind, "proceed");
+    // `not-requested`, not `proceed`: this run skips BOTH advancement steps, and
+    // once the skip is ordered ahead of the mode check in dev too (FG-577
+    // ordering), the payload says so. The old `proceed` described a decision this
+    // run never acted on — neither step ran.
+    assert.equal(parsed.devAdvancement.kind, "not-requested");
     assert.deepEqual(parsed.unresolved, []);
     assert.equal(exitCode, undefined);
   } finally {
@@ -622,6 +626,43 @@ test("FG-577: a project-local slash-command override reaches --json, not only th
   }
 });
 
+test("FG-577: the override ⚠ is a RENDER of the payload — suppressed by --json, and printed on a dry run", () => {
+  // The OTHER escape hatch in this model (the shape fixed in 70908d0): a direct
+  // console.warn that reaches a consumer surface without passing through the step
+  // outcome. This one is now backed by a discriminant (`slashCommands` +
+  // `slashCommandOverrides`), so it is not a classification escape — but it was
+  // still ordered like a side-channel: written straight to the console even under
+  // --json, and only from the executed branch, so a dry run predicted the state in
+  // its payload while telling the human nothing.
+  const assets = assetTree("fg577-override-render-", "CLEAN", { manifest: false });
+  const claudeMd = "# p\n\n<!-- forge:orchestrator-start -->\nSTALE\n<!-- forge:orchestrator-end -->\n";
+  try {
+    inProject(claudeMd, (project) => {
+      const commandsDir = join(project, ".claude", "commands");
+      mkdirSync(commandsDir, { recursive: true });
+      writeFileSync(join(commandsDir, "orient.md"), "# my project's own /orient\n");
+
+      const j = drive({ skipGit: true, skipNpm: true, json: true }, { mode: "dev", assetsDir: assets, devDir: assets });
+      assert.equal(j.warnings, "", "--json is the whole answer, not a document with a warning shouted beside it");
+      assert.ok(j.result.slashCommandOverrides.length > 0, "…and the state is still IN that answer, not lost with the ⚠");
+      assert.equal(j.result.slashCommands, "user-override");
+    });
+
+    inProject(claudeMd, (project) => {
+      const commandsDir = join(project, ".claude", "commands");
+      mkdirSync(commandsDir, { recursive: true });
+      writeFileSync(join(commandsDir, "orient.md"), "# my project's own /orient\n");
+
+      const d = drive({ skipGit: true, skipNpm: true, dryRun: true }, { mode: "dev", assetsDir: assets, devDir: assets });
+      assert.match(d.warnings, /\/orient was NOT installed/, "the dry run reports the decision the real run would make");
+      assert.equal(d.result.slashCommands, "user-override");
+      assert.equal(readFileSync(join(project, ".claude", "commands", "orient.md"), "utf8"), "# my project's own /orient\n", "and still mutates nothing");
+    });
+  } finally {
+    rmSync(assets, { recursive: true, force: true });
+  }
+});
+
 test("FG-577: with no override, the same project reports the commands INSTALLED and an empty override list", () => {
   // The guard: `user-override` must fire on the override, not on every project.
   const assets = assetTree("fg577-nooverride-", "CLEAN", { manifest: false });
@@ -816,6 +857,86 @@ test("FG-577: --skip-git alone on a release classifies the two steps INDEPENDENT
     assert.match(r.warnings, /refusing to advance the dev checkout/, "the refusal register still prints — something really was refused");
     assertUnresolved(r, /npm install refused \(release\)/);
     assert.deepEqual(r.result.unresolved, ["npm install refused (release)"], "and ONLY npm — the skip is not on the list");
+  } finally {
+    for (const d of [release, devCheckout]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("FG-577 (ordering): a release dry run with --rebuild-image reports the REFUSAL on all three surfaces", () => {
+  // The reported cell: `maybeRebuildImage` returned for `dryRun` before its mode
+  // check, so the real command forecast `would-rebuild` — classified resolved —
+  // for an action a release refuses. Human output, --json and the exit status
+  // were all falsely clean for a requested dev-checkout action.
+  const release = assetTree("fg577-rel-dryrebuild-", "RELEASE");
+  const devCheckout = assetTree("fg577-dev-dryrebuild-", "DEV", { manifest: false });
+  // FORGE_HOME is disposable but shared by every test in this process, so a
+  // sibling's install would make a bare existsSync() assertion lie in both
+  // directions. Compare this run's own before/after instead — that is the claim.
+  const hostSeed = (): string | null => {
+    const p = join(process.env.FORGE_HOME!, "runtimes", "pi-apikey.yml");
+    return existsSync(p) ? readFileSync(p, "utf8") : null;
+  };
+  const before = hostSeed();
+  try {
+    const r = drive(
+      { skipProject: true, skipGit: true, skipNpm: true, dryRun: true, rebuildImage: true },
+      { mode: "release", assetsDir: release, devDir: devCheckout },
+    );
+
+    // The skips take git/npm off the table, so the rebuild is the ONLY thing this
+    // run can be unresolved ABOUT — no other refusal can carry these assertions.
+    assert.equal(r.result.imageRebuild, "refused", "not `would-rebuild`: a dry run reports the decision, it does not bypass it");
+    // The three surfaces, asserted here rather than through `assertUnresolved`:
+    // that helper pins the EXECUTED closing line, and a dry run has a closing line
+    // of its own. The claim is the same — all three agree, and none reads clean.
+    assert.equal(r.exitCode, 1, "exit code: a requested action the mode refuses is a failed request, dry run or not");
+    assert.equal(r.result.ok, false, "--json: ok agrees with the exit code");
+    assert.deepEqual(r.result.unresolved, ["image rebuild refused (release)"], "--json: named truthfully, and the ONLY thing unresolved here");
+    assert.match(r.warnings, /refusing to rebuild the agent image/, "the named refusal reaches the operator on the dry run too");
+    assert.match(r.stdout, /Dry run: this upgrade would NOT complete — image rebuild refused \(release\)/, "the closing line agrees with the other two");
+    assert.ok(!r.stdout.includes("would-rebuild"), "and never forecasts the action it just refused");
+
+    // …and it is still a dry run: nothing was executed and nothing was written.
+    assert.equal(readFileSync(join(devCheckout, "seeds", "runtimes", "pi-apikey.yml"), "utf8"), "# DEV\nprovider: DEV\n", "the checkout is untouched");
+    assert.equal(r.result.assetInstall, "would-install", "the asset half is still only forecast");
+    assert.equal(hostSeed(), before, "a dry run installs nothing into FORGE_HOME either");
+  } finally {
+    for (const d of [release, devCheckout] ) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("FG-577 (ordering): a dev dry run with --rebuild-image still forecasts, and runs no docker", () => {
+  // The guard against fixing the above by refusing dry-run rebuilds generally:
+  // dev is the mode that CAN rebuild, so its forecast must survive untouched.
+  const assets = assetTree("fg577-dev-dryrebuild-ok-", "CLEAN", { manifest: false });
+  try {
+    const r = drive(
+      { skipProject: true, skipGit: true, skipNpm: true, dryRun: true, rebuildImage: true },
+      { mode: "dev", assetsDir: assets, devDir: assets },
+    );
+    assert.equal(r.result.imageRebuild, "would-rebuild");
+    assert.equal(r.result.ok, true);
+    assert.equal(r.exitCode, undefined);
+    assert.equal(r.warnings, "", "nothing was refused");
+    assert.equal(existsSync(join(assets, "docker")), false, "no build.sh was ever reached — there is no docker dir to reach");
+  } finally {
+    rmSync(assets, { recursive: true, force: true });
+  }
+});
+
+test("FG-577 (ordering): --dry-run without --rebuild-image on a release refuses NOTHING about the image", () => {
+  // The request check outranks the mode check: a flag nobody passed cannot be
+  // refused. Without this, every release dry run would report a rebuild refusal.
+  const release = assetTree("fg577-rel-norebuild-", "RELEASE");
+  const devCheckout = assetTree("fg577-dev-norebuild-", "DEV", { manifest: false });
+  try {
+    const r = drive(
+      { skipProject: true, skipGit: true, skipNpm: true, dryRun: true },
+      { mode: "release", assetsDir: release, devDir: devCheckout },
+    );
+    assert.equal(r.result.imageRebuild, "skipped");
+    assert.deepEqual(r.result.unresolved, []);
+    assert.equal(r.exitCode, undefined);
   } finally {
     for (const d of [release, devCheckout]) rmSync(d, { recursive: true, force: true });
   }

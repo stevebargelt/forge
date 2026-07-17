@@ -95,12 +95,15 @@ export function decideDevAdvancement(
   skips: { skipGit?: boolean; skipNpm?: boolean } = {},
   exists: (p: string) => boolean = existsSync,
 ): DevAdvanceDecision {
+  // FG-577 — skip → mode → filesystem, the same ordering `maybeRebuildImage`
+  // obeys. An operator skip outranks BOTH: you cannot refuse, nor go looking for,
+  // advancement that was never requested. This check sat INSIDE the release
+  // branch, which got the refusal right and left dev reporting a missing checkout
+  // for steps the operator had explicitly declined.
+  if (skips.skipGit && skips.skipNpm) return { kind: "not-requested" };
   if (mode === "release") {
-    // An operator skip outranks the mode refusal: you cannot refuse what was
-    // never requested. Ordered ahead of the refusal, and still ahead of every
-    // filesystem access — a release that IS asked to advance keeps the named
-    // contract error rather than an EACCES.
-    if (skips.skipGit && skips.skipNpm) return { kind: "not-requested" };
+    // Still ahead of every filesystem access — a release that IS asked to advance
+    // keeps the named contract error rather than an EACCES.
     return { kind: "refused", lines: refuseDevAdvance("advance the dev checkout (git pull / npm install)", assetsDir, devDir) };
   }
   if (!exists(devDir)) {
@@ -617,9 +620,14 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
           say(`        commit-msg hook: ${executeHookPlan(commitMsg)}`);
           say(`        claude hooks:    ${executeClaudeHooksPlan(claudeHooks)}`);
           say(`        slash commands:  ${executeClaudeCommandsPlan(slashCmds)}`);
-          warnSkippedClaudeCommands(slashCmds);
           say(`        .gitignore:      ${executeGitignoreEntriesPlan(gitignore)}`);
         }
+        // The ⚠ is a RENDER of the `slashCommands` / `slashCommandOverrides` state
+        // above, so it is ordered like one: suppressed under --json rather than
+        // written straight to the console beside a document that claims to be the
+        // whole answer, and printed on a dry run too — the override is decided by
+        // what is already on disk, which a dry run predicts exactly.
+        if (!json) warnSkippedClaudeCommands(slashCmds);
       }
 
       // #229: rebuild the agent image only when explicitly asked (the one
@@ -627,12 +635,7 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
       const rebuild = maybeRebuildImage(options, devDir, mode, assetsDir);
       for (const line of rebuild.lines) say(line);
       if (rebuild.error) warn(rebuild.error);
-      const imageRebuild: ImageRebuildOutcome = rebuild.refused
-        ? "refused"
-        : rebuild.error ? "failed"
-        : rebuild.ran ? "ran"
-        : (options.rebuildImage && dryRun) ? "would-rebuild"
-        : "skipped";
+      const imageRebuild: ImageRebuildOutcome = rebuild.outcome;
 
       // #229: read-only release check so a stale image / missing runtime CLI /
       // missing credential is surfaced NOW, not at the next dispatch. Never
@@ -738,27 +741,41 @@ export type ImageRebuildExec = (cmd: string, opts: { cwd: string; stdio: "inheri
 /** `mode` is deliberately REQUIRED and un-defaulted: it is the whole refusal
  *  predicate below, and the value a forgetful caller would have inherited from a
  *  default ("dev") is the permissive one. An explicit parameter cannot silently
- *  drift into letting a release rebuild. */
+ *  drift into letting a release rebuild.
+ *
+ *  Returns the step's OUTCOME, not the raw ingredients for the caller to
+ *  re-derive one from: the caller re-testing `rebuildImage && dryRun` to reach
+ *  `would-rebuild` was a second copy of the ordering below, free to disagree with
+ *  it. One decision, decided once, here. */
 export function maybeRebuildImage(
   options: { rebuildImage?: boolean; dryRun?: boolean },
   devDir: string,
   mode: ExecutionMode,
   assetsDir: string = assetRoot(),
   exec: ImageRebuildExec = (cmd, opts) => { execSync(cmd, opts); },
-): { ran: boolean; lines: string[]; error?: string; refused?: boolean } {
-  if (!options.rebuildImage || options.dryRun) return { ran: false, lines: [] };
-  // FG-577: rebuilding is dev-advancement — it runs a script from, and writes an
-  // image built out of, the dev checkout. The read-only staleness PROBE follows
-  // the release (doctor.ts); only this ACTION refuses.
+): { outcome: ImageRebuildOutcome; lines: string[]; error?: string } {
+  // FG-577 — skip → mode → dryRun, the ordering rule this whole file obeys.
+  //
+  // A skip is a fact about what was REQUESTED, and outranks the refusal: no flag,
+  // nothing to refuse.
+  if (!options.rebuildImage) return { outcome: "skipped", lines: [] };
+  // The mode is a fact about what CAN happen, and it outranks the forecast.
+  // Rebuilding is dev-advancement — it runs a script from, and writes an image
+  // built out of, the dev checkout. (The read-only staleness PROBE follows the
+  // release, in doctor.ts; only this ACTION refuses.) `dryRun` used to be tested
+  // ahead of this, so a release forecast a rebuild it would in fact refuse.
   if (mode === "release") {
-    return { ran: false, lines: [], refused: true, error: refuseDevAdvance("rebuild the agent image (--rebuild-image)", assetsDir, devDir).join("\n") };
+    return { outcome: "refused", lines: [], error: refuseDevAdvance("rebuild the agent image (--rebuild-image)", assetsDir, devDir).join("\n") };
   }
+  // Last: a dry run PREDICTS the decision the real run would make. Every fact
+  // that decides that answer has now been consulted, so this cannot bypass one.
+  if (options.dryRun) return { outcome: "would-rebuild", lines: [] };
   const lines = ["", "[image] rebuilding agent image (docker/build.sh)…"];
   try {
     exec("bash ./build.sh", { cwd: join(devDir, "docker"), stdio: "inherit" });
-    return { ran: true, lines };
+    return { outcome: "ran", lines };
   } catch {
-    return { ran: true, lines, error: "forge upgrade: image rebuild failed — see output above." };
+    return { outcome: "failed", lines, error: "forge upgrade: image rebuild failed — see output above." };
   }
 }
 

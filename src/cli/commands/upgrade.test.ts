@@ -54,7 +54,7 @@ function greenInputs() {
 test("#229 maybeRebuildImage: --rebuild-image (not dry-run) runs docker/build.sh in the docker dir", () => {
   const calls: { cmd: string; cwd: string }[] = [];
   const r = maybeRebuildImage({ rebuildImage: true }, "/repo", "dev", "/repo", (cmd, opts) => { calls.push({ cmd, cwd: opts.cwd }); });
-  assert.equal(r.ran, true);
+  assert.equal(r.outcome, "ran");
   assert.equal(calls.length, 1);
   assert.match(calls[0]!.cmd, /build\.sh/);
   assert.match(calls[0]!.cwd, /\/repo\/docker$/);
@@ -64,20 +64,20 @@ test("#229 maybeRebuildImage: --rebuild-image (not dry-run) runs docker/build.sh
 test("#229 maybeRebuildImage: dry-run does NOT rebuild", () => {
   let called = false;
   const r = maybeRebuildImage({ rebuildImage: true, dryRun: true }, "/repo", "dev", "/repo", () => { called = true; });
-  assert.equal(r.ran, false);
+  assert.equal(r.outcome, "would-rebuild");
   assert.equal(called, false);
 });
 
 test("#229 maybeRebuildImage: without the flag, no rebuild", () => {
   let called = false;
   const r = maybeRebuildImage({}, "/repo", "dev", "/repo", () => { called = true; });
-  assert.equal(r.ran, false);
+  assert.equal(r.outcome, "skipped");
   assert.equal(called, false);
 });
 
 test("#229 maybeRebuildImage: a failing build surfaces an error, doesn't throw", () => {
   const r = maybeRebuildImage({ rebuildImage: true }, "/repo", "dev", "/repo", () => { throw new Error("docker boom"); });
-  assert.equal(r.ran, true);
+  assert.equal(r.outcome, "failed");
   assert.match(r.error ?? "", /rebuild failed/);
 });
 
@@ -183,10 +183,72 @@ test("FG-577 (criterion 9): the rebuild ACTION refuses in release mode and runs 
   let called = false;
   const r = maybeRebuildImage({ rebuildImage: true }, "/home/u/code/forge", "release", "/rel/forge-r1", () => { called = true; });
   assert.equal(called, false, "no build is attempted");
-  assert.equal(r.ran, false);
-  assert.equal(r.refused, true, "an explicitly-requested action that refuses is a failed request → exit code 1");
+  assert.equal(r.outcome, "refused", "an explicitly-requested action that refuses is a failed request → exit code 1");
   assert.match(r.error ?? "", /rebuild the agent image/);
   assert.match(r.error ?? "", /cd \/home\/u\/code\/forge && git pull && npm install/);
+});
+
+// ─────────── FG-577: the ORDERING generator — skip → mode → dryRun ───────────
+//
+// Two instances of ONE bug shape have now been found here: a predicate evaluated
+// in the wrong order relative to the mode decision. `decideDevAdvancement` read
+// the mode BEFORE the skips and refused what was never requested; then
+// `maybeRebuildImage` read `dryRun` BEFORE the mode and forecast an action the
+// mode would refuse. These tests pin the ORDER itself, in both decision
+// functions, so a third instance cannot open quietly.
+//
+// The rule: a skip is a fact about what was REQUESTED and outranks everything —
+// you cannot refuse what nobody asked for. The mode is a fact about what CAN
+// happen. A dry run PREDICTS the decision the real run would make; it never gets
+// an answer of its own.
+
+test("FG-577 (ordering): a release dry run REPORTS the rebuild refusal — it does not forecast past it", () => {
+  // The reported second instance. `dryRun` was fused into the not-requested
+  // check (`!rebuildImage || dryRun`) and returned BEFORE the mode check, so a
+  // release forecast `would-rebuild` — resolved, exit 0 — for a dev-checkout
+  // action it would in fact refuse.
+  let called = false;
+  const r = maybeRebuildImage({ rebuildImage: true, dryRun: true }, "/home/u/code/forge", "release", "/rel/forge-r1", () => { called = true; });
+  assert.equal(r.outcome, "refused", "the dry run reports the decision the real run would make");
+  assert.equal(called, false, "and a dry run still executes nothing");
+  assert.match(r.error ?? "", /rebuild the agent image/, "with the same named refusal the real run prints");
+});
+
+test("FG-577 (ordering): a rebuild nobody requested is not refused, even on a release", () => {
+  // The guard in the other direction: hoisting the mode check above the REQUEST
+  // check is the first instance's bug (5925e71) reintroduced one step down —
+  // every release upgrade would report a refusal for a flag nobody passed.
+  for (const options of [{}, { dryRun: true }]) {
+    const r = maybeRebuildImage(options, "/home/u/code/forge", "release", "/rel/forge-r1", () => {
+      throw new Error("nothing to execute — nothing was asked for");
+    });
+    assert.equal(r.outcome, "skipped", `no --rebuild-image → nothing to refuse (${JSON.stringify(options)})`);
+    assert.equal(r.error, undefined);
+  }
+});
+
+test("FG-577 (ordering): in dev, the dry run forecasts the rebuild the mode permits", () => {
+  const r = maybeRebuildImage({ rebuildImage: true, dryRun: true }, "/repo", "dev", "/repo", () => {
+    throw new Error("a dry run mutates nothing");
+  });
+  assert.equal(r.outcome, "would-rebuild");
+  assert.equal(r.error, undefined);
+});
+
+test("FG-577 (ordering): the skip outranks the checkout lookup in DEV too, not just the release refusal", () => {
+  // The first instance was fixed only inside the release branch, leaving the
+  // same order wrong one branch over: in dev, both skips still fell through to a
+  // `missing` verdict, so a host with no checkout was told to set FORGE_REPO_DIR
+  // for advancement it had explicitly declined. Same generator, same rule.
+  const decision = decideDevAdvancement("dev", "/assets", "/definitely/absent", { skipGit: true, skipNpm: true }, () => {
+    throw new Error("a skip is decided without going looking for what was not requested");
+  });
+  assert.equal(decision.kind, "not-requested");
+
+  // …and the guard: one skip is not both. The other half is still genuinely
+  // requested, so the checkout is still looked for and still reported missing.
+  const half = decideDevAdvancement("dev", "/assets", "/definitely/absent", { skipGit: true });
+  assert.equal(half.kind, "missing");
 });
 
 test("FG-577 (criterion 1/3): upgradeAssetPaths resolves BOTH assets from one root, never from the environment", () => {
