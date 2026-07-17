@@ -92,3 +92,55 @@ Rejected. It leaves the operator dependent on a source checkout forever and requ
 - Activating promotion on the real host as part of implementation or testing.
 - Independently deploying or versioning the dashboard.
 - Accepting source-checkout fallback as release availability.
+
+## AC #1 — current-main dashboard closure census RECORDED (2026-07-17, `0802a77`)
+
+Read-only architecture pass: run `run-fg-580-read-only-current-main-dashboard-closure-census-24a4b4`
+(`task-architecture-advisor-16b9ac`). **Option-A premise HOLDS** (no build step; no dashboard-only heavy dep),
+with three contract refinements — none reopens the product decision:
+
+**Runtime entrypoint + assets:** `dashboard/src/server.ts` (`tsx src/server.ts`) loads `queries.ts`, `shell.ts`,
+`plan-usage.ts`, `http-error.ts`. Static `dashboard/client/**` served under `GET /client/*` via
+`CLIENT_DIR = resolve(HERE, '..', 'client')` — **module-relative (survives bundling if client/ sits beside src/
+in the release).** No build step (confirmed negative — no vite/esbuild; hand-authored ESM served verbatim).
+
+**REFINEMENT 1 (HIGH) — the dashboard is NOT self-contained.** `dashboard/tsconfig.json` maps `@forge/*` →
+`../src/*.ts`; `queries.ts:14-23` and `server.ts:26` import them; there is no `node_modules/@forge`, so
+tsconfig-paths is the ONLY resolver. So `dashboard/tsconfig.json` is a **RUNTIME input**, and the release must
+preserve the **`dashboard/`↔`src/` sibling layout** (a positional constraint, not just a file set) and launch
+tsx with `cwd=<release>/dashboard`. A mutation test must rename/remove a control-plane module reached via
+`@forge/*` and assert the dashboard fails loudly — the coupling is invisible from inside `dashboard/`.
+
+**CORRECTION to "why A":** `marked` is NOT a server runtime dep — no `import ... from "marked"` in
+`dashboard/src`. It's loaded **client-side from esm.sh** (`renderers.js:7`). So there is NO dashboard-only
+server npm dep to ship; the server's only npm deps (`better-sqlite3`) are already root deps in the closure.
+
+**REFINEMENT 2 (MEDIUM) — esm.sh CDN runtime dependency.** Client JS imports preact/htm/marked from
+`https://esm.sh` (`main.js:3-4`, `renderers.js:7`, `backlog.js`, `governance.js`, `usage-limits.js`). So a
+release-served dashboard is NOT fully offline. The AC-6 browser smoke must either run with network, or scope
+its assertion to first-party `/client/*` assets. → **OPEN QUESTION (product, has a default):** must a
+release dashboard render fully OFFLINE? If yes, preact/htm/marked must be vendored into `dashboard/client` and
+the CDN imports rewritten — a larger change. **Default (recommended): assume network at smoke time, assert
+first-party assets only.** This is NOT a versioning-independence need, so per this ticket it does not reopen
+the Option-A operator question — flagged for awareness.
+
+**Exact closure delta (must enter the release):** `dashboard/src/**`, `dashboard/client/**`,
+`dashboard/package.json`, `dashboard/tsconfig.json`. **Already in closure (no new copy):** control-plane
+`src/**` (via `@forge/*`), `node_modules/{tsx,better-sqlite3,marked}`. **Excluded:** `browser-tests/`,
+`design/`, README/CLAUDE.md, `node_modules/` (0B). **Layout invariant:** dashboard/ lands as a sibling of the
+release's `src/`.
+
+**Resolution sites to change (cited):** `dashboard.ts:28-42` `resolveForgeRoot()` → `assetRoot()`-based;
+`dashboard.ts:64-67` server-entry derivation → `assetRoot()`; `dashboard.ts:15-22`
+`refuseDashboardInRelease()` retired LAST (AC7 keeps named-nonzero for torn releases); `release.ts:1081,:1193`
+copy sets → add `dashboard`; `release.ts:1129` `gitTrackedPaths` → commit-bind dashboard; `release.ts` closure
+validation (`:1112,:1172`) → assert dashboard presence + refuse mutation; `release.ts:184/:1217`
+`selfContainedFor` + capability wording → widen truthfully.
+
+**Implementation is ONE dispatchable step (FG-584):** copy+commit-bind+closure-validate+repoint-to-assetRoot
+only pass the AC set TOGETHER — retiring the refusal before the copy lands yields a broken `forge dashboard`;
+adding the copy without commit-binding fails AC3. The build fanout cannot sequence these.
+
+**OPEN QUESTION 2 (low, has a default):** launch from a release — keep the current child-tsx spawn
+(`cwd=dashboardDir`, preserves tsconfig-paths) vs in-process via the release forge-loader. **Default: child-tsx
+spawn.**
