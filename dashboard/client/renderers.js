@@ -2,9 +2,9 @@
 // preact + htm + marked are imported there. Exposes renderResultByAgent
 // + helpers on the module's exports.
 
-import { h } from "https://esm.sh/preact@10.24.0";
-import htm from "https://esm.sh/htm@3.1.1";
-import { marked } from "https://esm.sh/marked@14.1.4";
+import { h } from "preact";
+import htm from "htm";
+import { marked } from "marked";
 
 const html = htm.bind(h);
 

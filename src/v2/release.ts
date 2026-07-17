@@ -1,13 +1,13 @@
 // FG-569 (FG-553 Child 2) — the release-closure BUILDER + R1 provenance.
 //
 // A release is a self-contained, IMMUTABLE directory that carries everything the
-// declared CONTROL-PLANE command set needs to run without consulting PATH or the
-// ambient environment. "Self-contained" is scoped HONESTLY to that set (recorded on
-// the manifest as `selfContainedFor: "control-plane"`): the dashboard is a SEPARATE
-// application workspace with its OWN dependency tree and is deliberately NOT bundled
-// (deferred to FG-572 / Child 5), so `forge dashboard` refuses in release mode rather
-// than pretending to run. Every SUPPORTED control command's module-relative assets ARE
-// bundled, so none of them silently falls back to a source checkout:
+// declared control-plane command set AND the dashboard application need to run without
+// consulting PATH or the ambient environment. "Self-contained" is recorded on the
+// manifest as `selfContainedFor: "control-plane+dashboard"` (FG-580, Option A): the
+// dashboard runtime source, its static client assets, its VENDORED client libs (offline
+// boot — no CDN-executed JS), and dashboard-relevant deps are all bundled and commit-bound,
+// so `forge dashboard` runs from a release. Every SUPPORTED command's module-relative
+// assets ARE bundled, so none of them silently falls back to a source checkout:
 //
 //   <release>/
 //     forge-release.json   the manifest (commit, absolute interpreter, ABI, lockfile identity)
@@ -177,22 +177,88 @@ export type ReleaseManifest = {
   builtAt: string;
   entry: string; // RELEASE_ENTRY_SOURCE, relative to the release root
   binding: string; // RELEASE_BINDING_REL, relative to the release root
-  // FG-569 (Resolution B): the "self-contained" claim, scoped honestly. This release
-  // closes over the CONTROL-PLANE command set — not the dashboard application (its own
-  // workspace/deps, deferred to FG-572). Recorded so nothing downstream reads the
-  // release as if it could run `forge dashboard`.
-  selfContainedFor: "control-plane";
+  // FG-580: the "self-contained" claim, widened TRUTHFULLY now that the dashboard is
+  // bundled (operator decision, Option A). This release closes over the control-plane
+  // command set AND the dashboard application: the dashboard runtime source, its static
+  // client assets, its VENDORED client libs (offline boot — no CDN-executed JS), and the
+  // dashboard-relevant runtime deps all ship in-closure and are commit-bound. The value
+  // is recorded so a reader can trust `forge dashboard` runs from this release, not that
+  // it is control-plane-only.
+  selfContainedFor: "control-plane+dashboard";
 };
 
 // FG-569 (Resolution B): asset directories a SUPPORTED control command resolves
 // module-relative to the release root (seeds via init/upgrade/doctor-seed-drift,
 // scripts via init hooks + upgrade install-seeds, docker via doctor image probe +
 // upgrade --rebuild-image). REQUIRED — absence is a torn-closure refusal, and each is
-// commit-bound so a dirty asset refuses the build. `dashboard/` is deliberately absent:
-// a separate workspace, not a control-plane asset (forge dashboard refuses in release
-// mode). Bound paths for the commit check add package.json + the selected lockfile;
+// commit-bound so a dirty asset refuses the build. `dashboard/` is deliberately absent
+// from THIS list: it is a separate npm workspace tracked via DASHBOARD_TRACKED_PATHS (a
+// distinct path set), not a control-plane asset dir — but it is bundled and commit-bound
+// all the same (FG-580, Option A). Bound paths for the commit check add package.json + the
+// selected lockfile;
 // node_modules is lockfile-bound separately, not part of the commit's source identity.
 const REQUIRED_ASSET_DIRS = ["seeds", "scripts", "docker"] as const;
+
+// FG-580: the dashboard is now BUNDLED into the release (operator decision, Option A).
+// These git-tracked dashboard paths ship in the same committed snapshot as src/ + the
+// bundled asset dirs, preserving the `dashboard/`↔`src/` SIBLING layout so the
+// dashboard's tsconfig-paths `@forge/*` → `../src/*.ts` still resolves at runtime
+// (cwd=<release>/dashboard). browser-tests/ and design/ are deliberately excluded —
+// they are not runtime inputs. Kept as an explicit path list (not a bare `dashboard`)
+// so a stray untracked dir never enters the closure and the census's exclusions hold.
+const DASHBOARD_TRACKED_PATHS = [
+  "dashboard/src",
+  "dashboard/client",
+  "dashboard/package.json",
+  "dashboard/tsconfig.json",
+] as const;
+
+// FG-580: the dashboard runtime files a promoted release MUST carry. Absence of ANY is
+// a torn closure — the build refuses BY NAME, and `forge dashboard` from a torn release
+// fails named+nonzero rather than silently reaching for a dev checkout. Includes the
+// server entry, the tsconfig that resolves @forge/* at runtime, a representative static
+// client asset, and every VENDORED client lib (FG-580 offline boot: no esm.sh/CDN fetch
+// of executable JS — these bytes serve first-party from the closure). Kept in sync with
+// dashboard/src/shell.ts's import map and scripts/vendor-dashboard-libs.mjs.
+export const REQUIRED_DASHBOARD_FILES = [
+  "dashboard/src/server.ts",
+  "dashboard/package.json",
+  "dashboard/tsconfig.json",
+  "dashboard/client/main.js",
+  "dashboard/client/vendor/preact/preact.js",
+  "dashboard/client/vendor/preact/hooks.js",
+  "dashboard/client/vendor/htm/htm.js",
+  "dashboard/client/vendor/marked/marked.js",
+] as const;
+
+// FG-580: dashboard-relevant runtime deps that must resolve from the shipped
+// node_modules for `forge dashboard` to serve — better-sqlite3 (the dashboard's queries
+// open the forge DB via @forge/*) and marked (a declared dashboard dependency). A
+// release missing one cannot run the dashboard, so closure validation refuses it.
+export const REQUIRED_DASHBOARD_DEPS = ["better-sqlite3", "marked"] as const;
+
+/** FG-580: assert `root` carries the complete dashboard runtime closure — every required
+ *  dashboard file (entry, tsconfig, representative static asset, vendored client libs) and
+ *  every dashboard-relevant runtime dependency. Throws a NAMED error on the first missing
+ *  input. Used both post-copy in buildRelease (a torn build is refused) and at
+ *  `forge dashboard` time (a torn/incomplete release fails named+nonzero, never falls back
+ *  to a dev checkout). Read-only, so it is safe against a frozen release tree. */
+export function assertDashboardClosure(root: string): void {
+  for (const rel of REQUIRED_DASHBOARD_FILES) {
+    if (!existsSync(join(root, rel))) {
+      throw new Error(
+        `forge dashboard: torn closure — required dashboard file '${rel}' is missing at ${join(root, rel)}. The release does not carry a complete dashboard runtime (source/static asset/vendored client lib); it was built without the dashboard bundle or is corrupt. Rebuild the release from a source that includes dashboard/ and its vendored client libs (run scripts/vendor-dashboard-libs.mjs).`,
+      );
+    }
+  }
+  for (const dep of REQUIRED_DASHBOARD_DEPS) {
+    if (!existsSync(join(root, "node_modules", dep, "package.json"))) {
+      throw new Error(
+        `forge dashboard: torn closure — required dashboard runtime dependency '${dep}' is missing from node_modules at ${join(root, "node_modules", dep)}. The dashboard cannot serve without it. Reinstall dependencies and rebuild the release.`,
+      );
+    }
+  }
+}
 
 const LOADER_SHIM = `// FG-569: in-process tsx loader for this release's entry. import "tsx" resolves
 // tsx from THIS release's node_modules (relative to this file), not the caller's
@@ -1115,6 +1181,28 @@ export function buildRelease(opts: BuildReleaseOptions): BuildReleaseResult {
     }
   }
 
+  // FG-580 (Option A): a promoted release MUST provide a working `forge dashboard`, so the
+  // dashboard bundle is MANDATORY — not presence-conditional. Every release closes over the
+  // dashboard runtime (source, static client assets, VENDORED client libs, dashboard-relevant
+  // deps), which is exactly why the manifest can always claim `selfContainedFor:
+  // "control-plane+dashboard"` truthfully. A source WITHOUT a dashboard/ dir cannot produce
+  // that closure, so the build REFUSES BY NAME here rather than emitting a control-plane-only
+  // release whose manifest would falsely advertise a dashboard it does not carry. (The
+  // alternative — making selfContainedFor conditional — was rejected: it permits a
+  // dashboard-less promoted release, which contradicts the operator decision.) A source WITH
+  // a dashboard/ that is INCOMPLETE — missing the runtime entry, tsconfig, a representative
+  // static asset, a vendored client lib, or a dashboard-relevant dep — is a TORN closure,
+  // refused BY NAME by assertDashboardClosure (before the git-archive of dashboard/ paths, so
+  // a partial dashboard/ fails with an actionable message rather than a cryptic archive
+  // pathspec error). The vendored-lib entries specifically red if a maintainer forgot to run
+  // scripts/vendor-dashboard-libs.mjs — the offline-boot guarantee at build time.
+  if (!existsSync(join(sourceRoot, "dashboard"))) {
+    throw new Error(
+      `forge release: refusing to build — the source at ${sourceRoot} has no dashboard/ workspace, but a promoted release MUST bundle a working \`forge dashboard\` (FG-580, Option A). The manifest's selfContainedFor is always "control-plane+dashboard"; a dashboard-less source cannot produce that closure, so the build is refused rather than shipping a manifest that claims a dashboard the release does not carry. Build from a source that includes dashboard/ and its vendored client libs (run scripts/vendor-dashboard-libs.mjs).`,
+    );
+  }
+  assertDashboardClosure(sourceRoot);
+
   // FG-569 (GAP 2): bind the recorded commit(s) to the shipped bytes. Refuse a dirty
   // SOURCE (its src/+package.json+lockfile are what gets copied) so `commit` cannot
   // lie, and record the BUILDER's own identity separately — the entry/loader bytes are
@@ -1126,7 +1214,13 @@ export function buildRelease(opts: BuildReleaseOptions): BuildReleaseResult {
   // AND every bundled asset dir. These ship from a COMMITTED SNAPSHOT of `commit` (below),
   // not the live tree. A dirty one still refuses the build up front — a fast, clear fail —
   // even though the snapshot copy no longer depends on the tree staying clean during the build.
-  const gitTrackedPaths = ["src", "package.json", lockfileName, ...REQUIRED_ASSET_DIRS];
+  // FG-580: the dashboard is bundled unconditionally, so its tracked paths are always
+  // commit-bound too — a dirty or absent tracked dashboard source/static/vendored asset
+  // refuses the build BY NAME (assertCommitDescribesTree), so the manifest commit can never
+  // describe dashboard bytes it did not produce. The mandatory dashboard/ gate above already
+  // refused a dashboard-less source, so these pathspecs always match tracked files (git
+  // archive fatals on a pathspec matching no tracked files).
+  const gitTrackedPaths = ["src", "package.json", lockfileName, ...REQUIRED_ASSET_DIRS, ...DASHBOARD_TRACKED_PATHS];
   assertCommitDescribesTree(sourceRoot, gitTrackedPaths, "source");
   const commit = gitCommit(sourceRoot);
   const builderCommit = resolveBuilderCommit(sourceRoot, commit);
@@ -1169,9 +1263,10 @@ export function buildRelease(opts: BuildReleaseOptions): BuildReleaseResult {
     // working tree during the build cannot leak into the closure (post-copy LIVE rechecks could
     // not close this — the bytes would already have been captured mid-edit). `src` + the bundled
     // asset dirs (seeds/, scripts/, docker/) resolve module-relative to the release root — all
-    // REQUIRED (asserted above). `dashboard/` is a SEPARATE npm workspace, deliberately NOT
-    // bundled; `forge dashboard` refuses in release mode (FG-572 / Child 5). All six paths have
-    // tracked content in a real source, so a single archive covers the whole commit-bound set.
+    // REQUIRED (asserted above). `dashboard/` is a SEPARATE npm workspace but is now bundled
+    // and commit-bound too (FG-580, Option A — DASHBOARD_TRACKED_PATHS), so `forge dashboard`
+    // runs from the release. All these paths have tracked content in a real source, so a single
+    // archive covers the whole commit-bound set.
     opts.onBeforeSnapshot?.();
     let archive: Buffer;
     try {
@@ -1190,7 +1285,7 @@ export function buildRelease(opts: BuildReleaseOptions): BuildReleaseResult {
     // changed. Dereference every nested link into real bytes; the archived git-tracked dirs get
     // the same treatment for any tracked symlink so the whole closure stays link-free.
     cpSync(join(sourceRoot, "node_modules"), join(tmpDir, "node_modules"), { recursive: true, dereference: true });
-    for (const rel of ["node_modules", "src", ...REQUIRED_ASSET_DIRS]) {
+    for (const rel of ["node_modules", "src", ...REQUIRED_ASSET_DIRS, "dashboard"]) {
       dereferenceSymlinks(join(tmpDir, rel));
     }
 
@@ -1214,7 +1309,7 @@ export function buildRelease(opts: BuildReleaseOptions): BuildReleaseResult {
       builtAt: now.toISOString(),
       entry: RELEASE_ENTRY_SOURCE,
       binding: RELEASE_BINDING_REL,
-      selfContainedFor: "control-plane",
+      selfContainedFor: "control-plane+dashboard",
     };
     writeFileSync(join(tmpDir, RELEASE_MANIFEST_NAME), JSON.stringify(manifest, null, 2) + "\n");
 
@@ -1233,6 +1328,12 @@ export function buildRelease(opts: BuildReleaseOptions): BuildReleaseResult {
     // Proven AFTER the freeze, so the thing that ships is exactly what was verified.
     assertReleaseCloses(tmpDir, interpreter);
     assertShippedClosureMatchesLockfile(tmpDir, lockfileName);
+    // FG-580: the SHIPPED closure carries a complete dashboard runtime — entry, tsconfig,
+    // representative static asset, vendored client libs, and dashboard-relevant deps. A
+    // copy that dropped any of them is refused here, before publish, so a promoted release
+    // never ships a dashboard that cannot boot offline. Unconditional: the mandatory gate
+    // above guarantees every release bundles the dashboard.
+    assertDashboardClosure(tmpDir);
 
     mkdirSync(dirname(outDir), { recursive: true });
     // Atomic publish of the already-frozen closure into its final, immutable path.

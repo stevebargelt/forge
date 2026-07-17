@@ -3,9 +3,9 @@
 // READ-ONLY view of the project backlog (backlog/ markdown files). Mirrors
 // `forge backlog list` via /api/backlog. No mutation paths.
 
-import { h } from "https://esm.sh/preact@10.24.0";
-import { useState, useMemo } from "https://esm.sh/preact@10.24.0/hooks";
-import htm from "https://esm.sh/htm@3.1.1";
+import { h } from "preact";
+import { useState, useMemo } from "preact/hooks";
+import htm from "htm";
 import { md } from "./renderers.js";
 
 const html = htm.bind(h);

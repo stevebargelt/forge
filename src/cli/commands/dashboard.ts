@@ -1,44 +1,29 @@
 import type { Command } from "commander";
 import { spawn } from "node:child_process";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { existsSync } from "node:fs";
-import { readReleaseManifest } from "../../v2/release.js";
+import { join } from "node:path";
+import { assetRoot } from "../../v2/asset-root.js";
+import { assertDashboardClosure } from "../../v2/release.js";
 
-// FG-569 (Resolution B): the dashboard is a SEPARATE application workspace with its own
-// dependency tree — deliberately NOT bundled into a control-plane release (deferred to
-// FG-572 / Child 5). When forge runs FROM a release (this module resolves a release
-// manifest by walking up from its own location), refuse IMMEDIATELY with a named, nonzero
-// error BEFORE any attempt to resolve dashboard/src/server.ts — else the command would die
-// with a confusing "could not locate the dashboard workspace" from resolveForgeRoot. In dev
-// mode (no manifest above this file) this is a no-op and behavior is unchanged.
-function refuseDashboardInRelease(): void {
-  const here = dirname(fileURLToPath(import.meta.url));
-  if (readReleaseManifest(here)) {
-    throw new Error(
-      "forge dashboard is not available from a control-plane release build (deferred to FG-572 / Child 5) — the dashboard is a separate application workspace and is not bundled. Run it from a source checkout of the forge repo instead."
-    );
-  }
-}
-
-// Locate forge's root by walking up from this source file. Mirrors the pattern
-// in init.ts — works under both `tsx` (src/cli/commands/dashboard.ts) and `tsc`
-// build output (dist/cli/commands/dashboard.js). The dashboard workspace is at
-// <forge-root>/dashboard; tsx lives at <forge-root>/node_modules/.bin/tsx.
-function resolveForgeRoot(): string {
-  const here = dirname(fileURLToPath(import.meta.url));
-  const candidates = [
-    resolve(here, "..", "..", ".."),       // src/cli/commands/ → root
-    resolve(here, "..", "..", "..", ".."), // dist/cli/commands/ → root
-  ];
-  for (const c of candidates) {
-    if (existsSync(resolve(c, "dashboard", "src", "server.ts"))) return c;
-  }
-  throw new Error(
-    `forge dashboard: could not locate the dashboard workspace. Looked at:\n  ${candidates
-      .map((c) => resolve(c, "dashboard"))
-      .join("\n  ")}`
-  );
+// FG-580 (Option A): the dashboard is BUNDLED into the promoted release, so
+// `forge dashboard` works from a release, not only from a dev checkout. Resolution is
+// RELEASE-OWNED — it flows from assetRoot() (module-relative to the executing release, or
+// the dev checkout when running from source), never from the invocation cwd, an ambient
+// FORGE_REPO_DIR, or ~/code/forge. Under a release, assetRoot() IS the release root, so
+// the dashboard's `dashboard/`↔`src/` sibling layout and tsconfig-paths `@forge/*` resolve
+// from the closure's own bytes.
+//
+// FG-569's named release-mode refusal is RETIRED — but its intent is preserved: a
+// torn/incomplete release (missing dashboard entry, static asset, vendored client lib, or
+// a dashboard-relevant dep) fails NAMED and NONZERO via assertDashboardClosure, and NEVER
+// silently falls back to a dev checkout (assetRoot() cannot reach one from a release).
+function resolveDashboard(): { dashboardDir: string; serverEntry: string } {
+  const root = assetRoot();
+  // Refuse a torn/incomplete release up front, by name — never proceed to a half-present
+  // dashboard, and never reach outside the executing release for missing bytes.
+  assertDashboardClosure(root);
+  const dashboardDir = join(root, "dashboard");
+  const serverEntry = join(dashboardDir, "src", "server.ts");
+  return { dashboardDir, serverEntry };
 }
 
 export function registerDashboard(program: Command): void {
@@ -46,11 +31,9 @@ export function registerDashboard(program: Command): void {
     .command("dashboard")
     .description("Web view of forge runs across every project on the host");
 
-  // Bare `forge dashboard` (no subcommand): refuse in release mode, else show help as
-  // before. Registered as an action so the release refusal fires on the bare invocation
-  // too, not only on `dashboard start`.
+  // Bare `forge dashboard` (no subcommand): show help, as before. No release refusal —
+  // the dashboard is bundled now (FG-580).
   dashboard.action(() => {
-    refuseDashboardInRelease();
     dashboard.help();
   });
 
@@ -60,23 +43,21 @@ export function registerDashboard(program: Command): void {
     .option("--port <n>", "TCP port (default: 8024)")
     .option("--host <h>", "bind host (default: 127.0.0.1)")
     .action((opts: { port?: string; host?: string }) => {
-      refuseDashboardInRelease();
-      const root = resolveForgeRoot();
-      const dashboardDir = resolve(root, "dashboard");
-      const tsx = resolve(root, "node_modules", ".bin", "tsx");
-      const serverEntry = resolve(dashboardDir, "src", "server.ts");
-
-      if (!existsSync(tsx)) {
-        throw new Error(
-          `forge dashboard: tsx not found at ${tsx}. Run 'npm install' in the forge repo root.`
-        );
-      }
+      const { dashboardDir, serverEntry } = resolveDashboard();
 
       const env = { ...process.env };
       if (opts.port) env["PORT"] = opts.port;
       if (opts.host) env["HOST"] = opts.host;
 
-      const child = spawn(tsx, [serverEntry], {
+      // FG-580: run the server under THIS process's interpreter (process.execPath) — under
+      // a release that IS the release's pinned interpreter, so the dashboard boots with NO
+      // PATH lookup and NO node required on the caller's PATH. `--import tsx` resolves tsx
+      // from the release's own node_modules (walked up from cwd=<release>/dashboard), and
+      // cwd=<release>/dashboard is what lets tsx discover dashboard/tsconfig.json so the
+      // `@forge/*` → `../src/*.ts` paths resolve at runtime. Spawning the tsx bin directly
+      // would depend on `#!/usr/bin/env node` finding node on PATH — which a node-free
+      // caller PATH does not — so we exec the interpreter ourselves.
+      const child = spawn(process.execPath, ["--import", "tsx", serverEntry], {
         stdio: "inherit",
         cwd: dashboardDir,
         env,
