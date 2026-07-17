@@ -51,6 +51,9 @@ title: Dashboard compression stats UI panels (FG-313 Phase 2)
 - Empty state renders when no compression events exist
 - Project filter works (respects `?projectDir` query param)
 - No build errors; dashboard still starts with `forge dashboard start`
+  > *(SUPERSEDED IN PART by FG-571, 2026-07-16: stable `forge` refuses `dashboard` in release mode — the
+  > dashboard is a separate workspace, not bundled into a release, deferred to FG-572. The equivalent check
+  > today is `./bin/forge-dev dashboard start`. This ticket's compression-stats work is unaffected.)*
 
 **Dependencies:** FG-321 (API endpoints must exist first)
 

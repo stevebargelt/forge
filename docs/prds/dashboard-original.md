@@ -1,5 +1,13 @@
 # PRD: forge dashboard
 
+> ⚠️ **STATUS (2026-07-16): the `forge dashboard` invocations below are SUPERSEDED by FG-571.**
+> This original PRD predates both the workspace re-merge (#140) and the FG-571 stable/dev split. The dashboard
+> is a separate workspace with its own dependency tree, not bundled into a release, so stable `forge`
+> **refuses** `dashboard` in release mode; run it as `./bin/forge-dev dashboard start` from a source checkout.
+> **Whether a stable release should ship the dashboard at all is an OPEN product decision reserved to the
+> operator under FG-572; nothing here decides it.** This PRD's dashboard design intent is otherwise unaffected.
+
+
 ## What this is
 
 A read-only web dashboard for inspecting forge runs. Replaces the current pattern of running `forge status <run-id>` repeatedly and `jq -r '.report'` to read agent output.
