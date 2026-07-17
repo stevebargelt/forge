@@ -38,27 +38,29 @@ launched-workload provenance stays out of scope (FG-555). Children **3–5 remai
 decisions (OQ-6/BD-15/T9), Appendix A probes, and mutation reasoning below are unchanged, except where a
 Child-0/Child-2 closeout line is annotated for the shipped exec entry.
 
-> **SUPERSEDED IN PART by the 2026-07-16 status update below.** The two claims above that have since moved:
-> **"this slice stays INERT"** (Child 3 has landed and Child 4 is in review — see below), and **"the
-> machine-wide `forge` is an npm-link SYMLINK on PATH"** (Child 4 replaces that with a promoted immutable
-> release reached through an explicitly installed shim; `npm link` is no longer the supported install path).
+> **SUPERSEDED IN PART by the status updates below.** The two claims above that have since moved:
+> **"this slice stays INERT"** — Child 3 landed as FG-570 (`5044c5d`) and **Child 4 landed as FG-571
+> (`2f80496`), so the slice ships promotion**; and **"the machine-wide `forge` is an npm-link SYMLINK on
+> PATH"** — Child 4 replaced that with a promoted immutable release reached through an explicitly installed
+> shim, and `npm link` is no longer the supported install path.
 > The rest of this 2026-07-15 entry stands as the record of what Child 2 shipped.
 
 **Status update (2026-07-16):** **Child 3 (bounded ABI assertion) has LANDED as FG-570 (`5044c5d`, PR #123)** —
 exact ABI equality replacing the minimum-major floor, refusing older OR newer by name before any native load,
 fail-closed on an unverifiable release manifest. FG-574 (`engines: "^24"`) closed with it.
 
-**Child 4 (FG-571) is IMPLEMENTATION-COMPLETE and IN REVIEW (PR #124) — NOT yet landed.** It is recorded here
-because this plan is the governing architecture record and the slice is no longer inert in the branch under
-review; the "landed" claim and its merge SHA are deliberately withheld until the merge exists. What it carries:
-the `current` pointer and atomic promote/rollback, the near-frozen `/bin/sh` PATH shim, the immutable
-version+ABI+**content-digest**-keyed interpreter store, the bounded env-sanitization contract, fail-closed
-release identity, and the **stable/dev split** (`bin/forge-dev` is NEW — before it, the machine-wide `forge`
-and the live-source entry were the SAME npm-link'd artifact). Three read-only red-security audits of the
-manifest→exec and interpreter-store trust boundaries produced **eleven confirmed findings, all closed with
-executed exploit-proving mutants**; the two that reshaped the mechanism are recorded in §1 (the forge-authored
-canonical execution descriptor, and content-addressed interpreter identity — `process.version` + ABI never
-pinned content, so distinct bytes collided at one path).
+**Child 4 (FG-571) has LANDED as `2f80496` (PR #124).** **The slice is no longer inert: promotion ships.**
+What it carries: the `current` pointer and atomic promote/rollback, the near-frozen `/bin/sh` PATH shim, the
+immutable version+ABI+**content-digest**-keyed interpreter store, the bounded env-sanitization contract,
+fail-closed release identity, and the **stable/dev split** (`bin/forge-dev` is NEW — before it, the
+machine-wide `forge` and the live-source entry were the SAME npm-link'd artifact). **Four** read-only
+red-security audits of the manifest→exec, interpreter-store and promotion-entry-point trust boundaries
+produced **fourteen confirmed HIGH findings; eleven were closed with executed exploit-proving mutants, and the
+final three were dispositioned as out-of-scope same-principal tampering — see §4b, THE THREAT BOUNDARY.** The
+three that reshaped the mechanism are recorded in §1 and §4b: the forge-authored canonical execution
+descriptor; content-addressed interpreter identity (`process.version` + ABI never pinned content, so distinct
+bytes collided at one path); and selection evidence being the **bytes, never the pathname** (a path-equality
+shortcut was being treated as provenance).
 
 **Child 5 (FG-572 — installed-surface compatibility) remains PLANNED**, and `forge dashboard` still refuses in
 release mode until it is decided. R3/R4 launched-workload provenance stays out of scope (FG-555).
@@ -365,7 +367,7 @@ its **red baseline** and the **hollow version to reject**.
 | **1** | **Store-compatibility policy** (**LANDED as FG-568, `275ac63`**) | Destructive DDL off the open path; schema-version stamp + forward refusal gate; legacy-column convergence → explicit quiesce-gated migration; **backward-compatible overlap-window evolution** (correction #5: nullable/defaulted-only additions, no new constraint rejecting an in-flight old writer, old-writer/new-reader tolerated, destructive migration as a one-way rollback boundary). Fixed read-only-open-still-migrates (was `db.ts:169`; open path now additive-only). | BD-15 | Two-process **F35** on one real DB, **incl. the read-only-command variant AND both directions** (old-writer/new-reader; new-writer/old-reader). Red baseline (pre-FG-568): `DROP COLUMN` killing A's insert. Mutants: re-add destructive DDL to the open path; add a `NOT NULL`-no-default column and show an old writer breaks; guard only the writable entry. |
 | **2** | **Release closure + manifest + R1/R2 provenance** (**LANDED as FG-569** — inert: no promotion, no `current` symlink) | Builder producing a self-contained, **immutable (read-only-at-rest)** release: entry + source + **entire `node_modules`** + **compiled native binding** + manifest (commit SHA, absolute interpreter path, ABI, lockfile identity). **exec-not-spawn landed here**; the two-process `spawn(tsx)` structure is gone — the live `bin/forge` is a `#!/bin/sh` shim that `exec`s node once with tsx in-process. **R1** provenance (`process.execPath` of the CLI process). **R2 provenance (correction #1): the exit RECORDER captures its OWN interpreter path and ABI from inside the recorder process — NEVER inferred from R1. The release identity is NOT captured inside the recorder: it is derived from the submitting CLI's OWN release manifest and BAKED into the wrapper as a trusted JSON literal — never read from the ambient `FORGE_RELEASE_ID` (which a caller could forge), never inferred from R1.** | **R1, R2** | **EXECUTE the release entry under a hostile PATH — incl. NO NODE AT ALL** — real output. Assert **from the running process** `process.execPath`==manifest interpreter and `process.versions.modules`==manifest ABI (**R1**). **R2: EXECUTE the recorder and assert IT records its own `process.execPath`/ABI from inside itself, plus the manifest-derived `releaseId` baked into the wrapper (dev launch → null, poisoned ambient `FORGE_RELEASE_ID` ignored); mutant — infer R2's execPath/ABI from R1 (copy the CLI's value) → must go red because the recorder can run under a different interpreter than the CLI.** Torn-closure: release with mismatched `node_modules` **refused at build**. |
 | **3** | **Bounded ABI assertion** (**LANDED as FG-570 — `5044c5d`**) | Replace `node-preflight`'s minimum-major floor with an exact ABI equality assertion against the manifest's abi (else pinned `REQUIRED_ABI`), before any native load. | — | **EXECUTED** under real ABI-incompatible Nodes → named refusal, **not** opaque `ERR_DLOPEN_FAILED`: host triad (too-new v25/ABI 141, compatible v24/ABI 137, too-old v23/ABI 131) + a **mandatory** CI arm (`test-extended` provisions real Node 26/ABI 147, the arm reddens not skips). Red baseline was `node-preflight.ts:26` admitting Node 26; mutant — revert `===` to `>=` → the too-new case reddens. |
-| **4** | **Atomic promote/rollback + PATH shim + env-sanitization contract** | The `current` pointer, atomic rename swap, rollback, near-frozen `/bin/sh` shim, `forge-dev` preserved; the **external-artifact contract** (immutable/versioned interpreter install, validate-before-select, retain-while-referenced, no in-place replace, atomic/frozen shim — see §1). **Env-sanitization contract (correction #2): the launcher neutralizes caller Node/runtime-injection vars (`NODE_OPTIONS`, `NODE_PATH`, and peers) so ambient env cannot redirect or block the pinned interpreter.** Swap **retains**; **NO release GC** (correction #6). | promotion, F29-env | **F26/F27/F28** by execution; **F27 also covers interrupted interpreter-install and interrupted shim-install** (correction #4). **T9 test includes a lazy NATIVE binding load AND a CJS require** (both proven runtime-uniform). **Env mutation (correction #2): with an absolute pinned interpreter, set `NODE_OPTIONS=--import <evil>` → assert the injected module does NOT run and forge behaves identically to clean env; set a `NODE_OPTIONS` that would prevent start → assert forge still runs. Red baseline PROVEN today: injection runs before forge.** F25: dev broken → `forge-dev` **must FAIL**, stable `forge` **must SUCCEED**; mutant — `forge-dev` execs the stable release → red. |
+| **4** | **Atomic promote/rollback + PATH shim + env-sanitization contract** (**LANDED as FG-571 — `2f80496`, PR #124**; see §4b for the threat boundary) | The `current` pointer, atomic rename swap, rollback, near-frozen `/bin/sh` shim, `forge-dev` preserved; the **external-artifact contract** (immutable/versioned interpreter install, validate-before-select, retain-while-referenced, no in-place replace, atomic/frozen shim — see §1). **Env-sanitization contract (correction #2): the launcher neutralizes caller Node/runtime-injection vars (`NODE_OPTIONS`, `NODE_PATH`, and peers) so ambient env cannot redirect or block the pinned interpreter.** Swap **retains**; **NO release GC** (correction #6). | promotion, F29-env | **F26/F27/F28** by execution; **F27 also covers interrupted interpreter-install and interrupted shim-install** (correction #4). **T9 test includes a lazy NATIVE binding load AND a CJS require** (both proven runtime-uniform). **Env mutation (correction #2): with an absolute pinned interpreter, set `NODE_OPTIONS=--import <evil>` → assert the injected module does NOT run and forge behaves identically to clean env; set a `NODE_OPTIONS` that would prevent start → assert forge still runs. Red baseline PROVEN today: injection runs before forge.** F25: dev broken → `forge-dev` **must FAIL**, stable `forge` **must SUCCEED**; mutant — `forge-dev` execs the stable release → red. |
 | **5** | **Installed-surface compatibility** | `~/.forge` seeds/workflows/routing-policy (**copies, not symlinks** — verified), hooks, scripts, project `.forge` assets, dashboard: for each — promotion re-installs / version-pins / explicitly out of the control path. | — | Executed: an installed copy **older** than the promoted runtime → named, actionable failure, not a silent mis-run. |
 
 **Ordering:** **0 first (prerequisite), then 1.** Child 0 is a prerequisite because a killed child reading exit
@@ -494,9 +496,9 @@ prerequisite is satisfied. **Child 1 has LANDED (`275ac63`, PR #120), and Child 
 (exec-not-spawn entry + inert release closure + manifest + R1/R2 provenance — still INERT: no promotion, no
 `current` symlink, no PATH change). **C1 has since been
 reconciled into the PRD (FG-568), and the R1/R2 current-state reconciled (FG-569/FG-573)** — see §2/§6.
-**UPDATE (2026-07-16):** **Child 3 has LANDED as FG-570 (`5044c5d`, PR #123).** **Child 4 (FG-571) is
-implementation-complete and IN REVIEW (PR #124) — not yet landed**, so the slice is no longer inert in the
-branch under review; its merge SHA is withheld until the merge exists. **Child 5 (FG-572) remains planned.**
+**UPDATE (2026-07-17):** **Child 3 has LANDED as FG-570 (`5044c5d`, PR #123).** **Child 4 (FG-571) has
+LANDED as `2f80496` (PR #124)** — the slice is no longer inert: promotion, the `current` pointer and the PATH
+shim ship. **Child 5 (FG-572) remains planned.**
 See the 2026-07-16 status update at the top of this document for what Child 4 carries and for the audit
 findings that reshaped the mechanism (§1: the forge-authored canonical execution descriptor; content-addressed
 interpreter identity).

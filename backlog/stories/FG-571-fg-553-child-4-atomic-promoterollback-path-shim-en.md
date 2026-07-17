@@ -218,3 +218,66 @@ Confirmed from that audit's own evidence at tip `3dd566f`:
 Each recommended fix relocates the trust root to another directory inside the same home directory the
 adversary owns, which is an infinite regress, not a fix. The findings stand on the record unaltered; only
 their disposition is recorded here.
+
+## CLOSURE — AC-to-evidence walk (merged `2f80496`, PR #124)
+
+Every line walked against **executed** evidence at the exact merged tip. `147/147` across all six FG-571
+integration suites run together **on a macOS host**; `test:all` 2420 + 79; typecheck clean; both required CI
+checks (`test`, `test-extended`) green at `ac6c83b`, the tip that merged as `2f80496`. Governing rule
+throughout (FG-551): *a property about the FINAL RUNTIME must be demonstrated by EXECUTING or
+MUTATION-TESTING the final artifact — a source-pattern match is not evidence.*
+
+- **F25 — behavioral stable/dev split (4 tests).** With the live checkout genuinely broken: `forge-dev`
+  FAILS, stable `forge` still EXECUTES the promoted release, and the two report **different provenance
+  asserted from the RUNNING PROCESSES** (dev id null, stable id the selected release's) — not from paths or
+  symlink targets. **Mutant:** a `forge-dev` that delegates to the stable release goes RED. Installation only
+  ever in a disposable prefix. *(`fg571-env-identity.integration.test.ts`)*
+- **F26 — atomic promotion (2).** Promote A then B; release id, `process.execPath` and ABI all read **from
+  the running process** are B's. A failed candidate validation leaves A selected and cannot report success.
+  **Mutant:** swap-before-validate. *(`fg571-promote.integration.test.ts`)*
+- **F27 — interruption, all four artifacts (5).** SIGKILL mid release-install, mid interpreter-install, mid
+  shim-install, and mid `current`-swap. In every case nothing partial is selectable and the previous stable
+  runtime still RUNS. *(`fg571-promote.integration.test.ts`)*
+- **F28 / T9 — in-flight anchoring (2).** A process anchored to A completes on A across a mid-flight
+  promotion to B — lazy ESM import AND lazy CJS require AND lazy NATIVE dlopen (the real hot path). New
+  invocations get B. No release deleted. **Mutant:** delete the anchored release → its lazy native load goes
+  RED, which is *why* promotion retains. *(`fg571-promote.integration.test.ts`)*
+- **F29 — hostile ambient environment (7).** Stable `forge` runs with NO node on PATH; runs when PATH
+  resolves an INCOMPATIBLE node first; `NODE_OPTIONS=--import <evil>` does NOT inject; a startup-blocking
+  `NODE_OPTIONS` does not block it; `NODE_PATH` cannot redirect resolution; unrelated operator vars SURVIVE
+  (sanitization is bounded, not a wipe). **MANDATORY MUTANT:** pin PATH but leave `NODE_OPTIONS` live → the
+  injection RUNS *and forge still exits 0* — proving an absolute pinned interpreter is necessary but NOT
+  sufficient, and that the failure is invisible. *(`fg571-env-identity.integration.test.ts`)*
+- **F32 — fail-closed release identity (25).** Poisoned `FORGE_RELEASE_ID` + a valid manifest → forged value
+  IGNORED. Missing / malformed / unreadable identity → **named error, fail closed** — never null, never the
+  ambient value, never a silent run. `forge-dev` + poisoned env → identity null (the honest answer for an
+  entry with no manifest). **Both mandatory mutants:** restoring FG-569's read-loop reddens the poisoned-env
+  case; degrading a missing identity to null-and-continue reddens the fail-closed cases.
+- **F33 — manifest→exec trust boundary (54, across `fg571-trust-boundary` + `fg571-entry-containment` +
+  `fg571-interpreter-store` + `fg571-unit-provenance`).** The full invariant executes end-to-end: candidate →
+  trusted materialization → parse+validate STAGED bytes → forge-authored canonical descriptor → validate
+  complete unit → freeze → atomic publication → ONE `current` swap. Adversarial matrix, each **mutation-
+  sensitive** (the vulnerable version is proven EXPLOITABLE by a filesystem marker, not merely refused):
+  duplicate JSON keys (`JSON.parse` took the LAST, the sh reader the FIRST → a candidate that PASSED
+  `validateCandidate` exec'd `/tmp/attacker-node`); forged non-JSON key-shaped lines; absolute + traversal +
+  near-match entries; entry symlink out; symlinked path COMPONENT; interpreter-store symlink escape; source
+  mutated DURING promotion; mutation after validation before publication; descriptor↔manifest mismatch;
+  torn staging; interrupted swap; `forge-exec` and `forge-loader.mjs` as symlinks out; two different
+  interpreters with the SAME version+ABI getting DISTINCT paths; N real processes racing one identity.
+
+**Also landed beyond the original AC**, each from a red finding: the `(current, previous)` pointer **pair
+commits in ONE swap** (an interrupted promotion previously lost the rollback target); the interpreter store
+is **content-addressed with the FULL SHA-256** (a 64-bit truncation made the "immutable" key collidable); and
+**selection evidence is the bytes, never the pathname** (a path-equality shortcut was being treated as
+provenance, and the occupied-id branch validated one directory then selected another after deleting the
+validated unit).
+
+**Threat boundary:** see the section above — protected surfaces are proven; same-principal `$FORGE_HOME`
+tampering is an honest limit, dispositioned, not a defect against this ticket.
+
+**Not in scope, unchanged and verified:** no release GC, no PID registry, no supervision; `forge dashboard`
+still refuses in release mode (FG-572). **Containment held for the entire campaign:** the real
+`~/.forge/current`, `~/.forge/releases` and `~/.forge/interpreters` were never created, the machine-wide
+`forge` still resolves to the operator's live checkout, the provider registry at `~/.forge/runtimes` is
+untouched, and `npm link` was never run. Post-merge smoke: `forge --version` → `0.1.0` and `forge backlog
+list` OK through the existing real symlink.
