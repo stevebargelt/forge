@@ -1,9 +1,11 @@
 ---
 id: FG-578
 type: story
-status: active
+status: done
 title: "FG-572 Child 5b: forge upgrade FORCE=1 clobbers the operator-authored forge-raci.md and recompiles routing-policy.yml from the clobbered source"
 created: 2026-07-17
+closed: 2026-07-17
+closed_commit: d9dacbb
 ---
 
 **Parent:** FG-572 · **Epic:** FG-561 · **Sequence:** land AFTER FG-577 (same files: `upgrade.ts`, `install-seeds.sh` — sequential avoids a merge conflict).
