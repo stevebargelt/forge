@@ -404,6 +404,45 @@ Every case **executes**; each names the mutant that must redden it and the **hol
 
 ---
 
+## 4b. THE THREAT BOUNDARY (settled 2026-07-17, FG-571 — operator decision)
+
+**Read this before adding any further hardening to the promotion path.** Four read-only red-security audits
+ran against Child 4. The first three found **eleven confirmed HIGH findings, all closed with executed
+exploit-proving mutants.** The fourth returned three HIGH whose schedules *all* require the same local
+principal that owns `$FORGE_HOME`. That is where the boundary is, and it is stated here so the next reader
+does not re-litigate it.
+
+**PROTECTED — real, defended, proven by execution:**
+- **Untrusted candidate content.** A release built elsewhere / downloaded / handed over and then promoted.
+  The decisive proof: a manifest with duplicate `interpreter` keys made `JSON.parse` (what promotion
+  validates with) resolve to the LAST value while the shim's hand-rolled POSIX-sh reader took the FIRST — a
+  candidate that PASSED `validateCandidate` exec'd `/tmp/attacker-node`. Closed by moving the invariant:
+  trusted Node parses once, the shim consumes only forge-authored data (see §1's PATH-shim contract).
+- **Malformed manifests** — fail-closed, by name.
+- **Hostile ambient caller environment (F29)** — a caller who can invoke `forge` but does NOT own
+  `$FORGE_HOME`. An absolute pinned interpreter is necessary but NOT sufficient; the env-sanitization
+  contract is what closes it (Appendix A2 is the red baseline).
+- **Crashes / interrupted publication** — nothing partial is selectable.
+- **Concurrent supported Forge operations** — one selection swap for the `(current, previous)` pair;
+  content-addressed interpreter identity makes same-identity races benign by construction.
+
+**HONEST LIMIT — same-principal tampering is OUT OF SCOPE.**
+A principal able to arbitrarily rewrite `$FORGE_HOME` can subvert Forge **and the surrounding user account**.
+That principal is the operator's own UID: it already owns `~/.zshrc`, the Forge checkout, the installed shim,
+and the validator itself. **Before FG-571 the machine-wide `forge` was an npm-link symlink into that same
+writable checkout**, so this axis is strictly *improved* by promotion and was never closed by the status quo.
+
+> **`chmod` / read-only-at-rest is an operational ACCIDENT BARRIER, not a security boundary against its
+> owner.** Do not read the freeze as authorization.
+
+Why this is a boundary and not a backlog item: every proposed fix for the fourth audit's findings relocates
+the trust root to **another directory inside the same home directory the adversary owns** — the auditor's own
+words on the evidence ledger were *"location is again the sole trust root, one directory level higher."* That
+is an infinite regress. Closing it genuinely requires a **separate trust domain** (another OS principal,
+root-owned storage, or hardware-backed signing) — **not FG-571 scope, and deliberately not filed as a
+follow-up**: it is an optional product/security direction, not missing closure. Its per-finding disposition
+lives on the FG-571 ticket; the red findings themselves stand unaltered.
+
 ## 5. Risks / open
 
 - **RESOLVED — CJS `require()`** is settled by execution (§1, T9): CJS anchors identically to ESM and native

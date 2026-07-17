@@ -159,3 +159,62 @@ subvert the pinned interpreter (proven: `NODE_OPTIONS=--import <evil>` injects b
   atomic `current` symlink + POSIX-shell PATH shim + shared versioned interpreter store; exec-not-spawn) is
   unchanged, as are BD-14/BD-15/T9 — anchoring is still the shim's single `cd -P` on `current`.
   Recorded as **F33**; plan §1 (OQ-6 + the PATH shim contract) updated to match.
+
+## Threat boundary (operator decision, 2026-07-17) — what FG-571 defends, and what it does not
+
+Four read-only red-security audits ran against this work. The first three found **eleven confirmed HIGH
+findings, every one closed with an executed exploit-proving mutant.** The fourth returned three HIGH whose
+schedules all require the *same local principal that owns `$FORGE_HOME`*. That is the boundary, and it is
+recorded here rather than chased.
+
+### Protected (real, defended, proven by execution)
+- **Untrusted candidate content** — a release built elsewhere, downloaded, or handed over, which the operator
+  promotes. Closed: duplicate-key parser divergence (`JSON.parse` took the last value, the shim's POSIX-sh
+  reader took the first, so a candidate that PASSED `validateCandidate` exec'd `/tmp/attacker-node`), forged
+  non-JSON key-shaped lines, `manifest.entry` traversal/absolute/near-match, candidate symlinks anywhere in
+  the unit (incl. `forge-exec` and `forge-loader.mjs`), symlinked path components, and validate-one-directory-
+  select-another.
+- **Malformed manifests** — fail-closed by name; a release that cannot state who it is does not run.
+- **Hostile ambient caller environment (F29)** — a caller who can invoke `forge` but does NOT own
+  `$FORGE_HOME`: `NODE_OPTIONS=--import <evil>`, startup-blocking `NODE_OPTIONS`, `NODE_PATH` redirection,
+  node-free PATH, incompatible node first. Proven: an absolute pinned interpreter is necessary but NOT
+  sufficient — the mandatory mutant shows PATH-pinning alone still executes injected code, invisibly.
+- **Crashes and interrupted publication** — SIGKILL mid release-install, interpreter-install, shim-install and
+  mid `current`-swap; nothing partial is ever selectable, the previous stable runtime stays usable.
+- **Concurrent supported Forge operations** — the `(current, previous)` pair publishes as ONE swap;
+  content-addressed interpreter identity makes a race for the same identity benign (identical identity ⇒
+  identical bytes), proven with N real racing processes.
+
+### HONEST LIMIT — same-principal tampering is OUT OF SCOPE
+**A principal able to arbitrarily rewrite `$FORGE_HOME` can subvert Forge and the surrounding user account.**
+That principal is the operator's own UID: it already owns `~/.zshrc`, the Forge checkout, the installed shim,
+and the validator itself. Before FG-571 the machine-wide `forge` was an npm-link symlink into that same
+writable checkout, so this axis is strictly *improved* by FG-571 and was never closed by the status quo.
+
+**`chmod`/read-only-at-rest is an operational ACCIDENT BARRIER, not a security boundary against its owner.**
+
+Stronger hostile-host protection would require a **separate trust domain** — another OS principal, root-owned
+storage, or hardware-backed signing. That is **not FG-571 scope**, and is deliberately **not filed as a
+follow-up**: it is an optional product/security direction, not missing closure for this ticket.
+
+### Disposition of the fourth audit's F1–F3 (findings preserved, not altered)
+Confirmed from that audit's own evidence at tip `3dd566f`:
+1. *"No in-place rename, repair, thaw, or deletion of an existing published unit was found on the reviewed
+   promotion and rollback paths."* ✓
+2. Selection publishes as one selection-symlink swap; the shim resolves `current` once. The
+   `.unit-<id>-<rand>` name is not created exclusively — the auditor recorded this as a **residual
+   availability/race concern** and explicitly *"did not establish a direct content-substitution schedule"*. No
+   legitimate concurrent schedule changes selected bytes between validation and selection. ✓
+3. Each of F1–F3 requires arbitrary `$FORGE_HOME` write, in the auditor's own words:
+   - **F1** (`paths.ts:74`, evidence ledger) — *"write access to `$FORGE_HOME` (which necessarily permits
+     planting `releases/`)"*. The ledger would be trusted by location — the same mistake one directory up.
+     Fixing it needs *"a key unavailable to those principals"*, which does not exist for a same-UID owner.
+   - **F2** (`promote.ts:1106`, validate-to-select window) — *"the same local account that owns the forge
+     home"*.
+   - **F3** (`release.ts:673`, shim execs without re-verifying) — *"the release owner or another principal
+     able to restore write bits"*.
+
+**Disposition: OUT OF SCOPE — same-principal tampering.** Not defects against this ticket's threat model.
+Each recommended fix relocates the trust root to another directory inside the same home directory the
+adversary owns, which is an infinite regress, not a fix. The findings stand on the record unaltered; only
+their disposition is recorded here.
