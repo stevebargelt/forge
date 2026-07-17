@@ -8,11 +8,15 @@
     "start": "tsx src/server.ts",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test $(find src -name '*.test.ts' -not -name '*.integration.test.ts' -type f)",
-    "test:integration": "tsx --test $(find src -name '*.integration.test.ts' -type f)"
+    "test:integration": "tsx --test $(find src -name '*.integration.test.ts' -type f)",
+    "test:browser": "tsx --test browser-tests/*.test.ts"
   },
   "dependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "better-sqlite3": "^12.11.1",
     "marked": "^14.1.4"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.61.1"
   }
 }

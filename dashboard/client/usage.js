@@ -29,7 +29,7 @@ function shortDay(iso) {
   return p.length === 3 ? `${+p[1]}/${+p[2]}` : String(iso);
 }
 
-export function UsageView({ rollup, timeSeries, modelMix, groupBy, onGroupByChange, since, onSinceChange, planUsage, planUsageLoading, planUsageRefreshing, onRefreshPlanUsage }) {
+export function UsageView({ rollup, timeSeries, modelMix, groupBy, onGroupByChange, since, onSinceChange, planUsage, planUsageLoading, planUsageRefreshing, planUsageRefreshError, onRefreshPlanUsage }) {
   const [showFormula, setShowFormula] = useState(false);
   const now = Date.now();
   const days = parseInt(since);
@@ -80,6 +80,7 @@ export function UsageView({ rollup, timeSeries, modelMix, groupBy, onGroupByChan
         data=${planUsage}
         loading=${planUsageLoading}
         refreshing=${planUsageRefreshing}
+        refreshError=${planUsageRefreshError}
         onRefresh=${onRefreshPlanUsage}
       />
       <div class="usage-analytics-heading">

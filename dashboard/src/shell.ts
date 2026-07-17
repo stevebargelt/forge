@@ -66,7 +66,8 @@ header.topbar {
   display: flex; justify-content: space-between; align-items: center;
   padding-bottom: 16px; border-bottom: 1px solid var(--border);
 }
-header.topbar h1 { display: flex; align-items: center; gap: 10px; }
+header.topbar h1 { display: flex; align-items: center; flex: 1 1 auto; gap: 10px; min-width: 0; }
+header.topbar > .muted { flex: 0 0 auto; margin-left: 12px; }
 header.topbar .brand-mark {
   width: 32px; height: 32px;
   flex: 0 0 auto;
@@ -243,7 +244,15 @@ section.feed { margin-top: 24px; }
 .md strong { color: var(--fg); }
 
 /* #154: top-level view tabs (activity / projects). */
-nav.view-tabs { display: flex; gap: 4px; }
+nav.view-tabs {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+nav.view-tabs::-webkit-scrollbar { display: none; }
 nav.view-tabs .tab {
   background: transparent;
   border: none;
@@ -434,6 +443,15 @@ section.usage-section { margin-top: 20px; }
 .plan-refresh-icon { display: inline-block; font-size: 14px; line-height: 10px; }
 .plan-refresh-icon.spinning { animation: plan-spin 0.8s linear infinite; }
 @keyframes plan-spin { to { transform: rotate(360deg); } }
+.plan-refresh-error {
+  background: rgba(250, 204, 21, 0.07);
+  border: 1px solid rgba(250, 204, 21, 0.22);
+  border-radius: 6px;
+  color: var(--warn);
+  font-size: 11px;
+  margin-bottom: 10px;
+  padding: 8px 10px;
+}
 
 .plan-services {
   background: var(--bg-elev);
@@ -496,6 +514,8 @@ section.usage-section { margin-top: 20px; }
   font-variant-numeric: tabular-nums;
   line-height: 14px;
 }
+.plan-dial-unknown .plan-dial-gauge,
+.plan-dial-unknown .plan-dial-value { color: var(--fg-faint); }
 .plan-service-copy { min-width: 0; }
 .plan-service-name-row { align-items: center; display: flex; gap: 8px; }
 .plan-service-name-row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -678,6 +698,10 @@ section.usage-section { margin-top: 20px; }
   color: var(--fg-dim);
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
   white-space: nowrap;
+}
+@media (max-width: 720px) {
+  .usage-row { grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; }
+  .usage-row > .usage-bar-wrap { display: none; }
 }
 
 .usage-timeseries {

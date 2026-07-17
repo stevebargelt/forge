@@ -25,6 +25,7 @@ import type { GroupBy } from "./queries.js";
 import { renderShell } from "./shell.js";
 import { listTickets } from "@forge/backlog";
 import { getPlanUsage } from "./plan-usage.js";
+import { finishUnhandledRequest } from "./http-error.js";
 
 const PORT = Number(process.env.PORT ?? 8024);
 const HOST = process.env.HOST ?? "127.0.0.1";
@@ -33,13 +34,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const CLIENT_DIR = resolve(HERE, "..", "client");
 
 export const server = createServer((req: IncomingMessage, res: ServerResponse) => {
-  void handle(req, res).catch((e) => {
-    const msg = e instanceof Error ? e.message : String(e);
-    if (!res.headersSent) {
-      res.writeHead(500, { "Content-Type": "application/json" });
-    }
-    res.end(JSON.stringify({ error: msg }));
-  });
+  void handle(req, res).catch(() => finishUnhandledRequest(res));
 });
 
 async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {

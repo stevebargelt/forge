@@ -4,8 +4,10 @@ import htm from "https://esm.sh/htm@3.1.1";
 const html = htm.bind(h);
 
 const SERVICE_META = {
-  claude: { mark: "C", color: "#ff8a4c", logo: "/client/claude-logo.png" },
-  codex: { mark: "O", color: "#10d49c", logo: "/client/openai-logo.png", invertLogo: true },
+  "claude-subscription": { mark: "C", color: "#ff8a4c", logo: "/client/claude-logo.png" },
+  "anthropic-api": { mark: "C", color: "#ff8a4c", logo: "/client/claude-logo.png" },
+  "codex-subscription": { mark: "O", color: "#10d49c", logo: "/client/openai-logo.png", invertLogo: true },
+  "openai-api": { mark: "O", color: "#10d49c", logo: "/client/openai-logo.png", invertLogo: true },
   bedrock: { mark: "A", color: "#ffb454" },
 };
 
@@ -18,7 +20,7 @@ const STATUS_LABEL = {
   error: "error",
 };
 
-export function UsageLimits({ data, loading, refreshing, onRefresh }) {
+export function UsageLimits({ data, loading, refreshing, refreshError, onRefresh }) {
   const services = data?.services ?? [];
   return html`
     <section class="plan-usage" aria-labelledby="plan-usage-title">
@@ -36,14 +38,18 @@ export function UsageLimits({ data, loading, refreshing, onRefresh }) {
         </div>
       </div>
 
+      ${refreshError ? html`<div class="plan-refresh-error">${refreshError}</div>` : null}
+
       <div class="plan-services">
         ${loading && services.length === 0
           ? html`<div class="plan-empty">Loading host plan limits…</div>`
-          : services.map(service => html`<${ServiceRow} key=${service.id} service=${service} />`)}
+          : services.length === 0
+            ? html`<div class="plan-empty">No host plan-limit services were reported.</div>`
+            : services.map(service => html`<${ServiceRow} key=${service.id} service=${service} />`)}
       </div>
 
       <div class="plan-usage-footnote">
-        Provider limits come from the host account: Anthropic's usage endpoint and the latest local Codex rollout. Credentials stay server-side and are never returned to the browser.
+        Subscription windows come from Anthropic's observed usage integration and Codex's local App Server. A recent Codex rollout is used only as a stale fallback. Configured API and Bedrock channels are shown separately without subscription quotas. Credentials stay server-side and are never returned to the browser.
       </div>
     </section>
   `;
@@ -89,7 +95,11 @@ function ServiceRow({ service }) {
 }
 
 function UsageDial({ windows, color }) {
-  const used = windows.reduce((max, window) => Math.max(max, window.usedPct ?? 0), 0);
+  const values = windows
+    .map(window => window.usedPct)
+    .filter(value => typeof value === "number" && Number.isFinite(value));
+  const hasUsage = values.length > 0;
+  const used = hasUsage ? Math.max(...values) : 0;
   const clamped = Math.max(0, Math.min(100, used));
   const size = 76;
   const stroke = 7;
@@ -97,7 +107,7 @@ function UsageDial({ windows, color }) {
   const circumference = 2 * Math.PI * radius;
   const offset = circumference * (1 - clamped / 100);
   return html`
-    <div class="plan-dial">
+    <div class=${hasUsage ? "plan-dial" : "plan-dial plan-dial-unknown"}>
       <svg class="plan-dial-ring" width=${size} height=${size} viewBox=${`0 0 ${size} ${size}`} aria-hidden="true">
         <circle
           class="plan-dial-track"
@@ -106,23 +116,25 @@ function UsageDial({ windows, color }) {
           r=${radius}
           stroke-width=${stroke}
         ></circle>
-        <circle
-          class="plan-dial-progress"
-          cx=${size / 2}
-          cy=${size / 2}
-          r=${radius}
-          stroke=${color}
-          stroke-width=${stroke}
-          stroke-dasharray=${circumference}
-          stroke-dashoffset=${offset}
-        ></circle>
+        ${hasUsage ? html`
+          <circle
+            class="plan-dial-progress"
+            cx=${size / 2}
+            cy=${size / 2}
+            r=${radius}
+            stroke=${color}
+            stroke-width=${stroke}
+            stroke-dasharray=${circumference}
+            stroke-dashoffset=${offset}
+          ></circle>
+        ` : null}
       </svg>
       <div class="plan-dial-inner">
         <svg class="plan-dial-gauge" viewBox="0 0 24 24" aria-hidden="true">
           <path d="M3.34 19a10 10 0 1 1 17.32 0"></path>
           <path d="m12 14 4-4"></path>
         </svg>
-        <div class="plan-dial-value">${Math.round(clamped)}%</div>
+        <div class="plan-dial-value">${hasUsage ? `${Math.round(clamped)}%` : "—"}</div>
       </div>
     </div>
   `;
