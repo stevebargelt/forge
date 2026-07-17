@@ -28,10 +28,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RELEASE_MANIFEST_NAME, SHIM_NAME, assertReleaseCloses, renderShim, thawReleaseTree, type BuildReleaseResult } from "./release.js";
 import { atomicSymlinkSwap, installShim, promote, readPrevious, readSelection, rollback, validateCandidate } from "./promote.js";
-import { installInterpreter, interpreterPath, isStoredInterpreter, probeInterpreter, validatedInterpreter } from "./runtime-store.js";
+import { installInterpreter, interpreterPath, isStoredInterpreter, probeInterpreter, storedIdentityOf, validatedInterpreter } from "./runtime-store.js";
 import { currentLinkIn, interpretersDirIn, previousLinkIn, releasesDirIn } from "../util/paths.js";
 import { findGitRoot } from "../util/git-root.js";
-import { canonicalMkdtemp, makeDisposableSourceRoot, removeDisposableSourceRoot, type DisposableSource } from "./fg571-harness.js";
+import { canonicalMkdtemp, fileDigestOf, makeDisposableSourceRoot, removeDisposableSourceRoot, variantInterpreter, type DisposableSource } from "./fg571-harness.js";
 
 /** The REAL checkout: where the code under test lives, and what the child processes below
  *  resolve tsx + the modules under test from. It is READ, never written and never committed
@@ -121,7 +121,11 @@ before(async () => {
   // shim install and rollback in this file lands here and nowhere else.
   home = canonicalMkdtemp("fg571-home-");
   // ...and a disposable CHECKOUT, so building the releases commits nothing in the real repo.
-  source = await makeDisposableSourceRoot(repoRoot);
+  // Built against THIS suite's home: promotion binds the interpreter-store rule to the
+  // configured home (FG-571 F4), so a release is promotable only into the home whose store
+  // holds the interpreter it pins. The store tests below mint their own fresh homes instead
+  // of borrowing this one, so a build here cannot make their first install read as a reuse.
+  source = await makeDisposableSourceRoot(repoRoot, home);
   // Two REAL releases from the same commit, distinguished by their ids — promotion is
   // about which one a process actually runs, so both must genuinely run.
   relA = source.build({ outDir: join(workspace, "rel-a"), rand: "aaaaaa" });
@@ -242,8 +246,12 @@ test("FG-571 F26 MUTANT (swap-before-validate): a candidate that fails validatio
 test("FG-571 F27a (EXECUTED, SIGKILL mid release-install): nothing partial is selectable and the previous stable runtime still RUNS", () => {
   // Its OWN disposable forge home: B must genuinely not be installed here, or installRelease
   // would correctly no-op on an already-present immutable release and never reach the seam.
+  // The releases are BUILT against it, because the store rule binds to the configured home
+  // (FG-571 F4) — a release pinning another home's store is not promotable here, by design.
   const home = canonicalMkdtemp("fg571-f27a-home-");
-  promote({ home, candidate: relA.releaseDir });
+  const a = source.build({ outDir: join(workspace, "f27a-rel-a"), rand: "f27aaa", home });
+  const b = source.build({ outDir: join(workspace, "f27a-rel-b"), rand: "f27abb", home });
+  promote({ home, candidate: a.releaseDir });
   const shim = installShim({ prefix: mkdtempSync(join(workspace, "f27a-prefix-")), shimText: renderShim(), shimName: SHIM_NAME });
   const shimEnv = () => ({ PATH: "/usr/bin:/bin", HOME: process.env.HOME ?? "/tmp", FORGE_HOME: home });
 
@@ -254,7 +262,7 @@ test("FG-571 F27a (EXECUTED, SIGKILL mid release-install): nothing partial is se
 import { writeFileSync } from "node:fs";
 installRelease({
   home: ${JSON.stringify(home)},
-  dir: ${JSON.stringify(relB.releaseDir)},
+  dir: ${JSON.stringify(b.releaseDir)},
   onBeforeCommit: () => {
     writeFileSync(${JSON.stringify(marker)}, "staged");
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 600000);
@@ -265,33 +273,43 @@ installRelease({
   killAtSeam(script, marker);
 
   // The install was killed with the copy fully staged and the rename NOT done.
-  assert.ok(!existsSync(join(releasesDirIn(home), relB.manifest.id)), "no release is addressable at B's id — nothing partial became selectable");
+  assert.ok(!existsSync(join(releasesDirIn(home), b.manifest.id)), "no release is addressable at B's id — nothing partial became selectable");
   const staging = readdirSync(releasesDirIn(home)).filter((n) => n.startsWith(".installing-"));
   assert.ok(staging.length > 0, "the interrupted install left only a `.installing-*` staging dir — a name no pointer can select");
 
   // A promotion cannot reach the half-installed release by id.
-  assert.throws(() => promote({ home, candidate: relB.manifest.id }), /refusing to promote/i, "the half-installed release is not promotable by id");
+  assert.throws(() => promote({ home, candidate: b.manifest.id }), /refusing to promote/i, "the half-installed release is not promotable by id");
 
   // THE F27 ASSERTION: the previously selected stable runtime is still USABLE — executed.
-  assert.equal(readSelection(home)?.manifest?.id, relA.manifest.id, "A is still selected");
+  assert.equal(readSelection(home)?.manifest?.id, a.manifest.id, "A is still selected");
   const r = runProvenance(shim, shimEnv());
   assert.equal(r.status, 0, `A must remain usable after an interrupted release install: ${r.stderr}`);
-  assert.equal(r.prov.releaseId, relA.manifest.id);
+  assert.equal(r.prov.releaseId, a.manifest.id);
   assert.equal(r.prov.bindingLoads, true, "A's native binding still loads");
 });
 
 test("FG-571 F27b (EXECUTED, SIGKILL mid interpreter-install): no release can reference a half-installed interpreter; the store is unchanged", () => {
-  // Its OWN disposable forge home + store, so the key under test is genuinely absent.
+  // Its OWN disposable forge home + store, with its own release built against it: the store
+  // rule binds to the configured home (FG-571 F4), so the release that must stay usable here
+  // has to pin THIS home's store.
   const home = canonicalMkdtemp("fg571-f27b-home-");
-  promote({ home, candidate: relA.releaseDir });
+  const a = source.build({ outDir: join(workspace, "f27b-rel-a"), rand: "f27baa", home });
+  promote({ home, candidate: a.releaseDir });
   const shim = installShim({ prefix: mkdtempSync(join(workspace, "f27b-prefix-")), shimText: renderShim(), shimName: SHIM_NAME });
   const shimEnv = () => ({ PATH: "/usr/bin:/bin", HOME: process.env.HOME ?? "/tmp", FORGE_HOME: home });
 
-  // The REAL identity of a REAL interpreter: the install must get all the way PAST
-  // validation to its commit seam, because F27b is about what is on disk when a process
-  // dies there — an install that fails validation never had anything to commit.
-  const identity = probeInterpreter(process.execPath);
+  // A REAL interpreter with an identity this store does NOT hold. It must be a distinct
+  // identity from the one the build just installed, or the install would correctly no-op on
+  // an already-published entry and never reach the seam — and it must be genuinely valid, or
+  // it would fail validation and never have anything to commit. A byte variant of the running
+  // node is both: it runs and reports the same version+ABI, and its bytes differ, so it is a
+  // different content-addressed identity (F3).
+  const variant = variantInterpreter(workspace, "f27b");
+  const identity = storedIdentityOf(variant);
   assert.ok(identity, "the interpreter to install reports its own identity");
+  const before = readdirSync(interpretersDirIn(home));
+  assert.ok(!existsSync(interpreterPath(home, identity)), "the premise: this identity is genuinely absent from the store");
+
   const marker = join(workspace, "f27b.marker");
   const script = childScript(
     "f27b-interp.mts",
@@ -299,9 +317,10 @@ test("FG-571 F27b (EXECUTED, SIGKILL mid interpreter-install): no release can re
 import { writeFileSync } from "node:fs";
 installInterpreter({
   home: ${JSON.stringify(home)},
-  source: ${JSON.stringify(process.execPath)},
-  expected: ${JSON.stringify(identity)},
-  onBeforeCommit: () => {
+  source: ${JSON.stringify(variant)},
+  expected: ${JSON.stringify({ version: identity.version, abi: identity.abi })},
+  onPhase: (p) => {
+    if (p !== "beforeCommit") return;
     writeFileSync(${JSON.stringify(marker)}, "staged");
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 600000);
   },
@@ -312,13 +331,13 @@ installInterpreter({
 
   assert.ok(!existsSync(interpreterPath(home, identity)), "the keyed interpreter path does not exist — nothing partial is selectable");
   assert.equal(validatedInterpreter(home, identity), null, "and nothing validates at that key, so no manifest may reference it");
-  const staged = existsSync(interpretersDirIn(home)) ? readdirSync(interpretersDirIn(home)).filter((n) => !n.startsWith(".installing-")) : [];
-  assert.deepEqual(staged, [], "the STORE is unchanged — the interrupted install added no key");
+  const published = readdirSync(interpretersDirIn(home)).filter((n) => !n.startsWith(".installing-"));
+  assert.deepEqual(published, before, "the STORE's published entries are exactly what they were — the interrupted install added no key");
 
   // The previously selected stable runtime still runs.
   const r = runProvenance(shim, shimEnv());
   assert.equal(r.status, 0, `A must remain usable after an interrupted interpreter install: ${r.stderr}`);
-  assert.equal(r.prov.releaseId, relA.manifest.id);
+  assert.equal(r.prov.releaseId, a.manifest.id);
 });
 
 test("FG-571 F27c (EXECUTED, SIGKILL mid shim-install): the previous shim is intact and still RUNS — a torn shim is never on PATH", () => {
@@ -584,23 +603,33 @@ test("FG-571 rollback: with no previous release recorded, it REFUSES by name rat
 });
 
 test("FG-571 interpreter store: immutable, keyed, validated BY EXECUTION before it is selectable; a re-install is a no-op", () => {
-  const identity = probeInterpreter(process.execPath);
-  assert.ok(identity, "the running interpreter reports its own version+ABI when EXECUTED");
+  // Its OWN home: this suite's `home` is the build home too, so it already holds this very
+  // interpreter and a first install there would honestly read as a reuse.
+  const home = canonicalMkdtemp("fg571-store-noop-home-");
+  const identity = storedIdentityOf(process.execPath);
+  assert.ok(identity, "the running interpreter reports its own version+ABI when EXECUTED, and its bytes digest");
 
   const first = installInterpreter({ home, source: process.execPath, expected: identity });
   assert.equal(first.reused, false, "the first install committed the interpreter");
   assert.ok(first.path.startsWith(interpretersDirIn(home)), "it landed in the keyed store under the disposable forge home");
-  assert.equal(first.key, `node-${identity.version}-${identity.abi}`, "keyed by version+ABI");
+  assert.equal(
+    first.key,
+    `node-${identity.version}-${identity.abi}-${process.platform}-${process.arch}-${identity.digest.slice(0, 16)}`,
+    "keyed by version+ABI+platform+arch+CONTENT DIGEST — the key commits to the bytes (F3)",
+  );
 
   // VALIDATE BEFORE SELECT: the store's answer comes from EXECUTING the installed binary.
   assert.equal(validatedInterpreter(home, identity), first.path, "the installed interpreter validates by execution");
   const reported = probeInterpreter(first.path);
-  assert.deepEqual(reported, identity, "the stored binary IS the interpreter its key names");
+  assert.deepEqual(reported, { version: identity.version, abi: identity.abi }, "the stored binary IS the interpreter its key names");
+  assert.deepEqual(storedIdentityOf(first.path), identity, "and it holds the exact bytes the key commits to");
 
-  // IMMUTABLE: re-installing an already-valid key is a NO-OP, not a rewrite.
+  // IMMUTABLE: re-installing an already-valid key is a NO-OP, not a rewrite. Same identity
+  // means same bytes, which is the only reason reuse is safe.
   const again = installInterpreter({ home, source: process.execPath, expected: identity });
   assert.equal(again.reused, true, "a re-install of a valid key is a no-op");
   assert.equal(again.path, first.path, "at the same keyed path");
+  rmSync(home, { recursive: true, force: true });
 });
 
 test("FG-571 interpreter store: its path does NOT collide with the PROVIDER RUNTIME REGISTRY — two unrelated meanings of 'runtime', two directories", () => {
@@ -630,7 +659,13 @@ test("FG-571 interpreter store: its path does NOT collide with the PROVIDER RUNT
 });
 
 test("FG-571 interpreter store: a binary that is not what it claims is REFUSED — validate BEFORE select, so no manifest can reference it", () => {
-  const lying = { version: "v0.0.1-not-really", abi: process.versions.modules };
+  const lying = {
+    version: "v0.0.1-not-really",
+    abi: process.versions.modules,
+    platform: process.platform,
+    arch: process.arch,
+    digest: fileDigestOf(process.execPath),
+  };
   assert.throws(
     () => installInterpreter({ home, source: process.execPath, expected: lying }),
     /not what it claims/i,
@@ -710,12 +745,15 @@ test("FG-571 external-artifact contract (EXECUTED): a built release pins its int
   // process execs, not what a module returns.
   const identity = { version: relA.manifest.nodeVersion, abi: relA.manifest.abi };
   assert.ok(
-    isStoredInterpreter(relA.manifest.interpreter, identity),
-    `the built release pins a STORE path keyed by its own version+ABI, not the building process.execPath (${relA.manifest.interpreter})`,
+    isStoredInterpreter(relA.manifest.interpreter, identity, home),
+    `the built release pins a STORE path keyed by its own content, not the building process.execPath (${relA.manifest.interpreter})`,
   );
   assert.ok(relA.manifest.interpreter.startsWith(interpretersDirIn(source.home)), "and it is the store of the home the release was built against");
   // VALIDATE BEFORE SELECT: the store's answer comes from EXECUTING what is at that key.
-  assert.equal(validatedInterpreter(source.home, identity), relA.manifest.interpreter, "the pinned interpreter validates by execution at its keyed path");
+  // The FULL identity is read off the pinned file itself — the manifest needs no digest
+  // field, because the path it pins IS the content commitment (F3).
+  const full = storedIdentityOf(relA.manifest.interpreter)!;
+  assert.equal(validatedInterpreter(source.home, full), relA.manifest.interpreter, "the pinned interpreter validates by execution at its keyed path");
 
   // THE EXECUTED ASSERTION: a promoted release's process really does exec the store copy —
   // the pin is what runs, not merely what the manifest says.
@@ -724,12 +762,12 @@ test("FG-571 external-artifact contract (EXECUTED): a built release pins its int
   const r = runProvenance(shim, shimEnv());
   assert.equal(r.status, 0, `the release must run under its store interpreter: ${r.stderr}`);
   assert.equal(r.prov.execPath, relA.manifest.interpreter, "process.execPath IS the store's copy — the running process is on the immutable artifact");
-  assert.ok(isStoredInterpreter(r.prov.execPath, identity), "and that execPath is store-owned, keyed by the ABI the process reports");
+  assert.ok(isStoredInterpreter(r.prov.execPath, identity, home), "and that execPath is store-owned, keyed by the ABI the process reports");
   assert.equal(r.prov.bindingLoads, true, "the native binding loads under the store interpreter");
 
   // RETAINED while referenced: promotion added no GC, so the key a selected release names
   // is still there and still validates afterwards.
-  assert.equal(validatedInterpreter(source.home, identity), relA.manifest.interpreter, "the referenced interpreter is retained after promotion");
+  assert.equal(validatedInterpreter(source.home, full), relA.manifest.interpreter, "the referenced interpreter is retained after promotion");
 });
 
 test("FG-571 external-artifact MUTANT (EXECUTED): a release pinning a MUTABLE EXTERNAL interpreter is REFUSED — it passes every other gate", () => {
@@ -750,12 +788,12 @@ test("FG-571 external-artifact MUTANT (EXECUTED): a release pinning a MUTABLE EX
 
   // The premise, proven rather than asserted: this interpreter is genuinely good — it is
   // NOT refused for running badly, disagreeing about its ABI, or failing to close.
-  assert.ok(!isStoredInterpreter(process.execPath, { version: m.nodeVersion, abi: m.abi }), "the external interpreter is outside the store");
+  assert.ok(!isStoredInterpreter(process.execPath, { version: m.nodeVersion, abi: m.abi }, home), "the external interpreter is outside the store");
   assert.deepEqual(probeInterpreter(process.execPath), { version: m.nodeVersion, abi: m.abi }, "it runs and reports exactly the version+ABI the manifest names");
   assert.doesNotThrow(() => assertReleaseCloses(external, process.execPath), "and the release's closure genuinely CLOSES under it — every non-store gate is green");
 
   assert.throws(
-    () => validateCandidate(external),
+    () => validateCandidate(external, home),
     /not in the interpreter store/i,
     "a release referencing an interpreter forge does not own is refused BY NAME — the external-artifact contract",
   );
@@ -769,7 +807,7 @@ test("FG-571 external-artifact MUTANT (EXECUTED): a release pinning a MUTABLE EX
   // rule doing its job, not the fixture being broken in some other way.
   m.interpreter = relA.manifest.interpreter;
   writeFileSync(join(external, RELEASE_MANIFEST_NAME), JSON.stringify(m, null, 2));
-  assert.equal(validateCandidate(external).interpreter, relA.manifest.interpreter, "the identical release with a STORE-pinned interpreter validates");
+  assert.equal(validateCandidate(external, home).interpreter, relA.manifest.interpreter, "the identical release with a STORE-pinned interpreter validates");
 });
 
 test("FG-571 validateCandidate: a release whose pinned interpreter is gone is REFUSED by name, not promoted into a broken state", () => {
@@ -779,5 +817,5 @@ test("FG-571 validateCandidate: a release whose pinned interpreter is gone is RE
   const m = JSON.parse(readFileSync(join(fake, RELEASE_MANIFEST_NAME), "utf8"));
   m.interpreter = "/nonexistent/node-that-was-uninstalled";
   writeFileSync(join(fake, RELEASE_MANIFEST_NAME), JSON.stringify(m, null, 2));
-  assert.throws(() => validateCandidate(fake), /pinned interpreter does not run/i, "validate-before-select: an absent interpreter is refused by name");
+  assert.throws(() => validateCandidate(fake, home), /pinned interpreter does not run/i, "validate-before-select: an absent interpreter is refused by name");
 });

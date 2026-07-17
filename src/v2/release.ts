@@ -1139,10 +1139,14 @@ export function buildRelease(opts: BuildReleaseOptions): BuildReleaseResult {
   // node), it is a MUTABLE EXTERNAL artifact: a package upgrade rewrites it in place, and a
   // release that was validated at promotion then breaks — or silently changes — under the
   // processes already anchored to it. The store's contract is exactly the fix: immutable,
-  // keyed by version+ABI, validated BY EXECUTION before it is committed, retained while
-  // referenced, never replaced in place. So a release pins the STORE's copy of its building
-  // interpreter, never the location that copy came from, and promotion REQUIRES that
-  // (validateCandidate / isStoredInterpreter) rather than trusting any absolute path.
+  // CONTENT-ADDRESSED (the key commits to the interpreter's own bytes), validated BY EXECUTION
+  // before it is committed, retained while referenced, never replaced in place. So a release
+  // pins the STORE's copy of its building interpreter, never the location that copy came from,
+  // and promotion REQUIRES that (validateCandidate / isStoredInterpreter) rather than trusting
+  // any absolute path.
+  //
+  // The pinned PATH is therefore also the release's content commitment to its interpreter — the
+  // manifest needs no digest field of its own, and the manifest→exec boundary is unchanged.
   //
   // Runs BEFORE any copy, like the closure gate: an interpreter that cannot be committed to
   // the store is a refusal, not a half-built release. Re-installing an already-valid key is

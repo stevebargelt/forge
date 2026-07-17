@@ -51,7 +51,7 @@ import {
 } from "./release.js";
 import { installShim, promote, readSelection, validateCandidate } from "./promote.js";
 import { checkReleaseIdentity } from "../cli/node-preflight.js";
-import { interpreterKey, isStoredInterpreter, probeInterpreter } from "./runtime-store.js";
+import { interpreterKey, isStoredInterpreter, probeInterpreter, storedIdentityOf } from "./runtime-store.js";
 import { currentLinkIn, releasesDirIn } from "../util/paths.js";
 import { findGitRoot } from "../util/git-root.js";
 import { canonicalMkdtemp, makeDisposableSourceRoot, removeDisposableSourceRoot, type DisposableSource } from "./fg571-harness.js";
@@ -108,13 +108,31 @@ function installShimIn(label: string, shimText: string): string {
   return installShim({ prefix: dir, shimText, shimName: SHIM_NAME });
 }
 
+/** A disposable forge home together with a release BUILT AGAINST IT.
+ *
+ *  FG-571 F4: the interpreter-store rule binds to the CONFIGURED home. A release pins an
+ *  absolute interpreter inside the store of the home it was built against, and promotion
+ *  refuses one whose interpreter a DIFFERENT home's store owns — deliberately, because
+ *  "the interpreter I pin lives in a store this forge home owns and never replaces" is the
+ *  whole external-artifact contract, and a check that accepted any store-shaped path would
+ *  let a candidate supply both the claim and the authority vouching for it.
+ *
+ *  So a test that promotes into its own fresh home builds its own release for it. A build is
+ *  ~650ms against the disposable source root, which buys each test a home nothing else can
+ *  have tampered with. The returned release deliberately shadows the file-level `good`. */
+function tbHome(label: string): { h: string; good: BuildReleaseResult } {
+  const slug = label.replace(/[^a-z0-9]/gi, "");
+  const h = canonicalMkdtemp(`fg571-tb-${slug}-`);
+  return { h, good: source.build({ outDir: join(workspace, `rel-${slug}`), rand: `tb${slug}`.slice(0, 6).padEnd(6, "0"), home: h }) };
+}
+
 /** A properly promoted unit in its own disposable home — materialized, validated, descriptor
  *  authored, frozen, atomically published — whose PUBLISHED bytes the caller then tampers with.
  *  A post-promotion tamper of a legitimate release is the sharp case: this release passed every
  *  gate, so anything that still redirects its exec is a hole promotion cannot close. */
 function promotedHomeWith(label: string, mutate: (unit: string, home: string) => void): string {
-  const h = canonicalMkdtemp(`fg571-tb-${label.replace(/[^a-z0-9]/gi, "")}-`);
-  promote({ home: h, candidate: good.releaseDir });
+  const { h, good: rel } = tbHome(label);
+  promote({ home: h, candidate: rel.releaseDir });
   const unit = realpathSync(currentLinkIn(h));
   thawReleaseTree(unit);
   mutate(unit, h);
@@ -341,7 +359,7 @@ test("FINDING 4 (EXECUTED EXPLOIT): the canonical entry as a SYMLINK to outside 
   // materialization, for holding a symlink at all — so `promote` no longer reaches this
   // refusal. Both gates are real; this is the one this finding is about.
   assert.throws(
-    () => validateCandidate(dir),
+    () => validateCandidate(dir, source.home),
     (e: Error) => {
       assert.match(e.message, /refusing to promote — this release's entry is not a regular file/);
       assert.match(e.message, /a symlink/);
@@ -384,7 +402,7 @@ test("FINDING 4 (EXECUTED): a symlinked path COMPONENT escaping the release is r
   // The inner gate, asserted directly for the same reason as above: the outer no-symlinks gate
   // now refuses this candidate at materialization, before validateCandidate's containment check
   // is reached through `promote`.
-  assert.throws(() => validateCandidate(dir), /refusing to promote — this release's entry escapes the release/, "a symlinked component must be refused");
+  assert.throws(() => validateCandidate(dir, source.home), /refusing to promote — this release's entry escapes the release/, "a symlinked component must be refused");
 
   const h = canonicalMkdtemp("fg571-tb-compsym-");
   try {
@@ -418,11 +436,11 @@ test("FINDING 4 MUTANT: with the filesystem check dropped, validateCandidate ACC
   symlinkSync(outside, entry);
 
   try {
-    const { validateCandidate: vulnerable } = (await import(mutantPath)) as { validateCandidate: (d: string) => unknown };
+    const { validateCandidate: vulnerable } = (await import(mutantPath)) as { validateCandidate: (d: string, home?: string) => unknown };
     // RED: the vulnerable validator accepts a release whose entry is not in the release.
-    assert.doesNotThrow(() => vulnerable(dir), "MUTANT: without the filesystem check, a symlinked entry is accepted");
+    assert.doesNotThrow(() => vulnerable(dir, source.home), "MUTANT: without the filesystem check, a symlinked entry is accepted");
     // ...and the real one refuses the very same directory.
-    assert.throws(() => validateCandidate(dir), /is not a regular file/);
+    assert.throws(() => validateCandidate(dir, source.home), /is not a regular file/);
   } finally {
     rmSync(mutantPath, { force: true });
   }
@@ -437,7 +455,11 @@ test("FINDING 4 MUTANT: with the filesystem check dropped, validateCandidate ACC
  *  does can rewrite them under an anchored release. */
 function fakeStoreWithSymlinkedKey(label: string, realInterpreter: string): { home: string; keyed: string; outside: string } {
   const home = canonicalMkdtemp(`fg571-tb-fakestore-${label}-`);
-  const id = probeInterpreter(realInterpreter)!;
+  // The FULL content-addressed identity of the real interpreter — so the fake store's key is
+  // a perfect match for the real one's, digest included. `outside` is a byte copy, so the
+  // link's target genuinely hashes to the key the path names: the ONLY thing wrong with this
+  // path is that the store does not own the bytes.
+  const id = storedIdentityOf(realInterpreter)!;
   const outsideDir = join(home, "outside-bytes");
   mkdirSync(outsideDir, { recursive: true });
   const outside = join(outsideDir, "node");
@@ -455,26 +477,30 @@ test("FINDING 5 (EXECUTED): a store path that is a SYMLINK to outside bytes is r
   const { home: fake, keyed } = fakeStoreWithSymlinkedKey("unit", good.manifest.interpreter);
   try {
     const id = { version: good.manifest.nodeVersion, abi: good.manifest.abi };
+    const full = storedIdentityOf(good.manifest.interpreter)!;
 
     // THE PREMISE, proven rather than assumed: this path is a perfect string match for the
-    // store's keyed layout, and it RUNS and reports exactly the identity the manifest names.
-    // Every check except physical containment passes.
-    assert.equal(keyed, join(fake, "interpreters", interpreterKey(id), "bin", "node"), "it is lexically the store's keyed path");
+    // store's keyed layout — digest included, so content-addressing alone does not refuse it —
+    // and it RUNS and reports exactly the identity the manifest names. Every check except
+    // physical containment passes.
+    assert.equal(keyed, join(fake, "interpreters", interpreterKey(full), "bin", "node"), "it is lexically the store's keyed path");
     const probed = probeInterpreter(keyed);
     assert.deepEqual(probed, id, "and it genuinely runs and reports the right version+ABI");
 
     // THE OLD CHECK — pure string arithmetic on the store's layout. Reproduced verbatim to show
     // what the fix actually changed: it ACCEPTS the symlink, because a string cannot tell you
     // where bytes live.
-    const lexical = (bin: string) => bin === join(fake, "interpreters", interpreterKey(id), "bin", "node");
+    const lexical = (bin: string) => bin === join(fake, "interpreters", interpreterKey(full), "bin", "node");
     assert.equal(lexical(keyed), true, "the old lexical check ACCEPTS the symlinked escape — the finding");
 
-    // THE FIX: canonical realpaths. The link resolves out of the store, so it is not the
-    // store's artifact and a release may not name it.
-    assert.equal(isStoredInterpreter(keyed, id), false, "the canonical check REFUSES it");
+    // THE FIX: canonical realpaths, under the TRUSTED root. The link resolves out of the
+    // store, so it is not the store's artifact and a release may not name it — asserted even
+    // when the fake home is handed in as the trusted root, so the refusal is the containment
+    // check and not merely the home binding.
+    assert.equal(isStoredInterpreter(keyed, id, fake), false, "the canonical check REFUSES it");
 
     // ...and it is not a blanket refusal: the genuine store path still validates.
-    assert.equal(isStoredInterpreter(good.manifest.interpreter, id), true, "the real store's own interpreter is still accepted");
+    assert.equal(isStoredInterpreter(good.manifest.interpreter, id, source.home), true, "the real store's own interpreter is still accepted");
   } finally {
     rmTree(fake);
   }
@@ -513,19 +539,20 @@ test("FINDING 5 (EXECUTED): a store path whose BIN DIRECTORY is a symlink is ref
   // canonicalizing the directory chain catches it.
   const fake = canonicalMkdtemp("fg571-tb-fakestore-bindir-");
   try {
-    const id = probeInterpreter(good.manifest.interpreter)!;
+    const full = storedIdentityOf(good.manifest.interpreter)!;
+    const id = { version: full.version, abi: full.abi };
     const outsideBin = join(fake, "outside-bin");
     mkdirSync(outsideBin, { recursive: true });
     copyFileSync(good.manifest.interpreter, join(outsideBin, "node"));
     chmodSync(join(outsideBin, "node"), 0o755);
 
-    const keyDir = join(fake, "interpreters", interpreterKey(id));
+    const keyDir = join(fake, "interpreters", interpreterKey(full));
     mkdirSync(keyDir, { recursive: true });
     symlinkSync(outsideBin, join(keyDir, "bin"));
     const keyed = join(keyDir, "bin", "node");
 
     assert.equal(probeInterpreter(keyed)?.abi, id.abi, "the premise: it runs and reports the right ABI");
-    assert.equal(isStoredInterpreter(keyed, id), false, "a symlinked bin/ directory is an escape and is refused");
+    assert.equal(isStoredInterpreter(keyed, id, fake), false, "a symlinked bin/ directory is an escape and is refused");
   } finally {
     rmTree(fake);
   }
@@ -538,6 +565,7 @@ test("FINDING 6 (EXECUTED): the SOURCE candidate mutated DURING promotion cannot
   // the bytes that were proven and the bytes that shipped were read at two different instants.
   // The new ordering materializes FIRST and validates the materialization, so this seam — which
   // fires after staging and before publication — is provably too late to matter.
+  const { h, good } = tbHome("mutduring");
   const marker = join(workspace, "SOURCE-MUTATION-REACHED-THE-UNIT");
   rmSync(marker, { force: true });
 
@@ -549,7 +577,6 @@ test("FINDING 6 (EXECUTED): the SOURCE candidate mutated DURING promotion cannot
   const id = "release-mutated-during";
   writeFileSync(p, JSON.stringify({ ...m, id }, null, 2) + "\n");
 
-  const h = canonicalMkdtemp("fg571-tb-mutduring-");
   try {
     let fired = false;
     const attacker = attackerNode(join(workspace, "during-bin"), marker);
@@ -592,7 +619,7 @@ test("FINDING 6 (EXECUTED): the published unit is FROZEN before publication — 
   // Freeze-then-publish is what closes the window on the STAGED side. The unit is frozen while
   // it is still at its staging path, so its final path is never observed writable: there is no
   // instant between "validated" and "selected" in which the unit could be rewritten.
-  const h = canonicalMkdtemp("fg571-tb-frozen-");
+  const { h, good } = tbHome("frozen");
   try {
     promote({ home: h, candidate: good.releaseDir });
     const unit = realpathSync(currentLinkIn(h));
@@ -612,7 +639,7 @@ test("FINDING 6 (EXECUTED): re-promoting an installed id validates and selects T
   // entirely, leaving a clean validate-to-swap window. Re-promotion is still a pointer
   // operation — a published unit is forge's own immutable artifact — but it now runs the full
   // unit gate on the exact directory it then selects.
-  const h = canonicalMkdtemp("fg571-tb-repromote-");
+  const { h, good } = tbHome("repromote");
   try {
     const first = promote({ home: h, candidate: good.releaseDir });
     const unit = first.releaseDir;
@@ -636,6 +663,7 @@ test("FINDING 6 (EXECUTED): a candidate whose identity changes mid-copy is refus
   // The store is keyed by identity and the destination is chosen from the first read, so a
   // candidate whose manifest id moves underneath the copy would land at a path that does not
   // describe it. The staged manifest is authoritative and the disagreement is a refusal.
+  const { h, good } = tbHome("idshift");
   const dir = join(workspace, "cand-id-shift");
   tarCopy(good.releaseDir, dir);
   thawReleaseTree(dir);
@@ -646,7 +674,6 @@ test("FINDING 6 (EXECUTED): a candidate whose identity changes mid-copy is refus
   // Stage the shift so it lands between the id read and the staged parse: the descriptor for
   // this case is a manifest that reads one way now and another way a moment later. Simulated
   // deterministically by mutating the source through the promotion's own materialization seam.
-  const h = canonicalMkdtemp("fg571-tb-idshift-");
   try {
     // A directory that is not a release at all cannot be promoted, and neither can one whose
     // staged identity disagrees with what it claimed — both are refusals, never a silent

@@ -19,7 +19,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildRelease, assertReleaseCloses, thawReleaseTree, renderEntry, RELEASE_BINDING_REL, RELEASE_LOADER_NAME, RELEASE_MANIFEST_NAME, type BuildReleaseResult } from "./release.js";
-import { interpreterPath, validatedInterpreter } from "./runtime-store.js";
+import { interpreterPath, storedIdentityOf, validatedInterpreter } from "./runtime-store.js";
 import { findGitRoot } from "../util/git-root.js";
 
 const sourceRoot = findGitRoot(process.cwd());
@@ -103,8 +103,11 @@ test("FG-569 build: the manifest pins the building interpreter, its ABI, the com
   // execution below — but an artifact forge owns and never replaces in place, where
   // /usr/bin/node is rewritten by the next system node upgrade, under a release that has
   // already been promoted and validated against it.
-  assert.equal(m.interpreter, interpreterPath(buildHome, { version: process.version, abi: process.versions.modules }), "the absolute interpreter is the store's keyed copy of the building interpreter");
-  assert.equal(validatedInterpreter(buildHome, { version: process.version, abi: process.versions.modules }), m.interpreter, "and it validates BY EXECUTION at that key — a release may reference nothing less");
+  // The store key COMMITS TO THE BYTES (FG-571 F3), so the expected path is derived from the
+  // building interpreter's own content — version+ABI alone does not name a store path.
+  const storeId = storedIdentityOf(process.execPath)!;
+  assert.equal(m.interpreter, interpreterPath(buildHome, storeId), "the absolute interpreter is the store's keyed copy of the building interpreter");
+  assert.equal(validatedInterpreter(buildHome, storeId), m.interpreter, "and it validates BY EXECUTION at that key — a release may reference nothing less");
   assert.notEqual(m.interpreter, process.execPath, "the mutable external path the build ran from is NOT what the release pins");
   assert.equal(m.abi, process.versions.modules, "the ABI the native binding needs");
   assert.equal(m.commit, execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceRoot, encoding: "utf8" }).trim());

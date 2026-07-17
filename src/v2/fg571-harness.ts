@@ -33,7 +33,8 @@
 // Test support only: nothing here is imported by production code.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BuildReleaseResult } from "./release.js";
@@ -55,6 +56,36 @@ export function canonicalMkdtemp(prefix: string): string {
   return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
 }
 
+/** sha256 of a file's bytes, hex — the store's own content-addressing, recomputed
+ *  independently here so a test asserts against the digest rather than against the store's
+ *  opinion of it. */
+export function fileDigestOf(bin: string): string {
+  return createHash("sha256").update(readFileSync(bin)).digest("hex");
+}
+
+/** A SECOND, GENUINELY DIFFERENT interpreter binary that honestly reports the SAME
+ *  version+ABI as the running one — the fixture FG-571 F3 turns on.
+ *
+ *  This is not a contrivance; it is the ordinary case the old version+ABI key could not
+ *  express. A node rebuilt from the same tag, a vendor's patched build, a distro build with
+ *  different configure flags: each reports an identical process.version and
+ *  process.versions.modules and is a different binary. Under a version+ABI key all of them
+ *  collide on one path, so the store either silently hands a later install the earlier one's
+ *  bytes or is asked to replace a pinned path. Neither is allowed, which is why the identity
+ *  has to commit to the bytes.
+ *
+ *  Made by APPENDING to a copy of the running node: the loader ignores trailing bytes (it is
+ *  how single-executable applications embed their payload), so the variant genuinely executes
+ *  and genuinely reports the same identity, while hashing differently. Verified by execution
+ *  at every call site rather than assumed. */
+export function variantInterpreter(dir: string, label: string): string {
+  const p = join(dir, `node-variant-${label}`);
+  copyFileSync(realpathSync(process.execPath), p);
+  appendFileSync(p, `\n// fg571 variant padding: ${label}\n`);
+  chmodSync(p, 0o755);
+  return p;
+}
+
 /** The paths buildRelease binds to the commit (release.ts's gitTrackedPaths): src/,
  *  package.json, the selected lockfile, and the required asset dirs. Small — copying them
  *  is cheap. node_modules is install OUTPUT, bound to the lockfile separately, and is
@@ -68,17 +99,25 @@ export type DisposableSource = {
   /** The throwaway forge home whose INTERPRETER STORE the built releases pin (FG-571:
    *  buildRelease installs its interpreter into the store and pins the store's copy, so a
    *  build with no `home` would land a node in the operator's real ~/.forge/interpreters).
-   *  Deliberately NOT the home a suite promotes into: an install here must not make that
-   *  suite's own `installInterpreter` assertions read as a re-install. */
+   *
+   *  A suite that PROMOTES what it builds must pass its own promotion home here (see
+   *  makeDisposableSourceRoot's `home`): promotion binds the store rule to the CONFIGURED
+   *  home (FG-571 F4), so a release built against store A is not promotable into home B —
+   *  deliberately, because "the interpreter I pin lives in a store this forge home owns" is
+   *  the whole external-artifact contract. A suite that only BUILDS can let this default to
+   *  its own scratch home. */
   home: string;
-  build: (opts: { outDir: string; rand: string }) => BuildReleaseResult;
+  /** `home` overrides the store the built release pins, for a test that promotes into a home
+   *  of its own: the store rule binds to the CONFIGURED home (FG-571 F4), so a release is
+   *  promotable only into the home whose store holds the interpreter it pins. Defaults to
+   *  this source's own `home`. */
+  build: (opts: { outDir: string; rand: string; home?: string }) => BuildReleaseResult;
 };
 
 /** A throwaway git checkout of `repoRoot`'s shipped source, committed in place, that
  *  releases can be built from without touching the real repository. */
-export async function makeDisposableSourceRoot(repoRoot: string): Promise<DisposableSource> {
+export async function makeDisposableSourceRoot(repoRoot: string, home = canonicalMkdtemp("fg571-buildhome-")): Promise<DisposableSource> {
   const root = canonicalMkdtemp("fg571-src-");
-  const home = canonicalMkdtemp("fg571-buildhome-");
 
   for (const p of COMMIT_BOUND_PATHS) {
     if (existsSync(join(repoRoot, p))) execFileSync("cp", ["-R", join(repoRoot, p), join(root, p)]);
@@ -100,7 +139,7 @@ export async function makeDisposableSourceRoot(repoRoot: string): Promise<Dispos
   return {
     root,
     home,
-    build: ({ outDir, rand }) => buildRelease({ sourceRoot: root, outDir, rand, home }),
+    build: ({ outDir, rand, home: buildHome }) => buildRelease({ sourceRoot: root, outDir, rand, home: buildHome ?? home }),
   };
 }
 

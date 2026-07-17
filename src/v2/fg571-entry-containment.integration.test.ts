@@ -128,6 +128,19 @@ function makeTamperedRelease(label: string, entry: unknown): { dir: string; id: 
   return { dir, id };
 }
 
+/** A disposable forge home together with a release BUILT AGAINST IT.
+ *
+ *  FG-571 F4: the interpreter-store rule binds to the CONFIGURED home, so a release is
+ *  promotable only into the home whose store owns the interpreter it pins. A test that
+ *  promotes into a home of its own therefore builds a release for that home (~650ms against
+ *  the disposable source root). handPlace below needs none of this — it bypasses promotion
+ *  entirely, which is exactly what layer 2a is about. */
+function entryHomeWithRelease(label: string): { h: string; rel: BuildReleaseResult } {
+  const slug = label.replace(/[^A-Za-z0-9]/g, "");
+  const h = canonicalMkdtemp(`fg571-entry-${slug}-`);
+  return { h, rel: source.build({ outDir: join(workspace, `rel-${slug}`), rand: `e${slug}`.slice(0, 6).padEnd(6, "0"), home: h }) };
+}
+
 /** A forge home whose `current` points DIRECTLY at `releaseDir`, with promote never called.
  *  This is the whole point of layer 2: the shim must refuse on its own authority, so staging
  *  the release through the promoter it is supposed to be independent of would prove nothing.
@@ -158,7 +171,10 @@ before(async () => {
   workspace = canonicalMkdtemp("fg571-entry-ws-");
   home = canonicalMkdtemp("fg571-entry-home-");
   prefix = canonicalMkdtemp("fg571-entry-prefix-");
-  source = await makeDisposableSourceRoot(repoRoot);
+  // Built against THIS suite's home: the interpreter-store rule binds to the CONFIGURED
+  // home (FG-571 F4), so a release is promotable only into the home whose store owns the
+  // interpreter it pins.
+  source = await makeDisposableSourceRoot(repoRoot, home);
 
   // ONE real build. Every hostile case is a tampered COPY of it, so each differs from a
   // promotable release by exactly the entry string and nothing else.
@@ -206,7 +222,7 @@ for (const { name, entry } of HOSTILE) {
 }
 
 test("layer 1 (promote): the canonical entry still promotes — the guard is not a blanket refusal", () => {
-  const h = canonicalMkdtemp("fg571-entry-ok-");
+  const { h, rel: good } = entryHomeWithRelease("ok");
   try {
     const r = promote({ home: h, candidate: good.releaseDir });
     assert.equal(r.id, good.manifest.id);
@@ -266,8 +282,8 @@ for (const { name, entry } of HOSTILE) {
 /** A properly promoted unit whose manifest is poisoned AFTERWARDS — the post-promotion tamper
  *  the old shim would have obeyed. Returns the home, so the shim can be pointed at it. */
 function promoteThenPoisonManifest(label: string, entry: unknown): { home: string; marker: string } {
-  const h = canonicalMkdtemp(`fg571-entry-poisoned-${label.replace(/[^a-z]/gi, "")}-`);
-  promote({ home: h, candidate: good.releaseDir });
+  const { h, rel } = entryHomeWithRelease(`poisoned${label}`);
+  promote({ home: h, candidate: rel.releaseDir });
   const unit = readSelection(h)!.releaseDir;
 
   thawReleaseTree(unit);
@@ -382,12 +398,12 @@ test("MUTANT (promote): with the equality check dropped, validateCandidate ACCEP
   writeFileSync(mutantPath, mutantSrc);
 
   try {
-    const { validateCandidate: vulnerable } = (await import(mutantPath)) as { validateCandidate: (d: string) => { manifest: ReleaseManifest } };
+    const { validateCandidate: vulnerable } = (await import(mutantPath)) as { validateCandidate: (d: string, home?: string) => { manifest: ReleaseManifest } };
     const { dir } = makeTamperedRelease("mutant-promote", "../../outside.mjs");
 
     // The vulnerable promoter waves the traversal candidate straight through — proof that the
     // equality check, and not some other gate, is what refuses it in the fixed version.
-    const accepted = vulnerable(dir);
+    const accepted = vulnerable(dir, home);
     assert.equal(accepted.manifest.entry as unknown, "../../outside.mjs");
 
     // Same candidate, same directory, fixed promoter: refused.

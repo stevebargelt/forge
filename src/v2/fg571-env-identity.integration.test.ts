@@ -71,7 +71,10 @@ before(async () => {
 
   workspace = canonicalMkdtemp("fg571-env-");
   home = canonicalMkdtemp("fg571-env-home-");
-  source = await makeDisposableSourceRoot(repoRoot);
+  // Built against THIS suite's home: the interpreter-store rule binds to the CONFIGURED
+  // home (FG-571 F4), so a release is promotable only into the home whose store owns the
+  // interpreter it pins.
+  source = await makeDisposableSourceRoot(repoRoot, home);
   rel = source.build({ outDir: join(workspace, "release"), rand: "e29e29" });
   promote({ home, candidate: rel.releaseDir });
   shim = installShim({ prefix: workspace, shimText: renderShim(), shimName: SHIM_NAME });
@@ -317,13 +320,18 @@ test("FG-571 F29 BOUNDED (EXECUTED against the generated sanitizer): every injec
  *  corruption below is a POST-promotion tamper of a legitimate release, which is the case that
  *  matters: "nothing else could have selected this" is not a property a launcher gets to assume,
  *  and neither is "nothing touched it after I validated it". */
-function promotedHomeWith(name: string, mutate: (unitDir: string) => void): string {
+function promotedHomeWith(name: string, mutate: (unitDir: string) => void): { h: string; rel: BuildReleaseResult } {
+  // Its own home, and its own release BUILT against it: the interpreter-store rule binds to
+  // the CONFIGURED home (FG-571 F4), so a release pinning another home's store is not
+  // promotable here. The release is returned because it — not the file-level `rel` — is the
+  // one this home actually selected, so it is the authority a test asserts identity against.
   const h = canonicalMkdtemp(`fg571-f32-${name}-`);
+  const rel = source.build({ outDir: join(workspace, `rel-f32-${name}`), rand: `f32${name}`.slice(0, 6).padEnd(6, "0"), home: h });
   promote({ home: h, candidate: rel.releaseDir });
   const unit = realpathSync(currentLinkIn(h));
   thawReleaseTree(unit);
   mutate(unit);
-  return h;
+  return { h, rel };
 }
 
 const poisonedEnvFor = (h: string) => ({
@@ -346,7 +354,7 @@ test("FG-571 F32 (EXECUTED): poisoned FORGE_RELEASE_ID + a VALID manifest -> the
 // ── the SHIM's half: the descriptor is what it reads, so the descriptor is what it fails on ──
 
 test("FG-571 F32 (EXECUTED): descriptor MISSING -> named error, FAIL CLOSED — not null, not the ambient value, not a silent run", () => {
-  const h = promotedHomeWith("desc-missing", (unit) => rmSync(join(unit, RELEASE_EXEC_NAME), { force: true }));
+  const { h } = promotedHomeWith("desc-missing", (unit) => rmSync(join(unit, RELEASE_EXEC_NAME), { force: true }));
   const r = run(shim, ["release", "provenance", "--json"], poisonedEnvFor(h));
   assert.notEqual(r.status, 0, "a release that cannot state who it is does not run");
   assert.match(r.stderr, /refusing to run — this release carries no canonical execution descriptor/i, "the refusal is NAMED");
@@ -379,7 +387,7 @@ const BAD_DESCRIPTORS: ReadonlyArray<{ name: string; bytes: (good: string) => st
 
 for (const { name, bytes } of BAD_DESCRIPTORS) {
   test(`FG-571 F32 (EXECUTED): descriptor MALFORMED -> named error, fail closed — ${name}`, () => {
-    const h = promotedHomeWith(`desc-${name.replace(/[^a-z]/gi, "")}`, (unit) => {
+    const { h } = promotedHomeWith(`desc-${name.replace(/[^a-z]/gi, "")}`, (unit) => {
       const p = join(unit, RELEASE_EXEC_NAME);
       writeFileSync(p, bytes(readFileSync(p, "utf8")));
     });
@@ -394,7 +402,7 @@ for (const { name, bytes } of BAD_DESCRIPTORS) {
 // ── trusted NODE's half: the manifest is the authority, re-validated after startup ──
 
 test("FG-571 F32 (EXECUTED): manifest identity MISSING -> trusted Node refuses by name after startup, fail closed", () => {
-  const h = promotedHomeWith("man-missing", (unit) => {
+  const { h } = promotedHomeWith("man-missing", (unit) => {
     const p = join(unit, RELEASE_MANIFEST_NAME);
     const m = JSON.parse(readFileSync(p, "utf8"));
     delete m.id;
@@ -410,7 +418,7 @@ test("FG-571 F32 (EXECUTED): manifest identity MISSING -> trusted Node refuses b
 });
 
 test("FG-571 F32 (EXECUTED): manifest identity MALFORMED -> trusted Node refuses by name, fail closed", () => {
-  const h = promotedHomeWith("man-malformed", (unit) => {
+  const { h } = promotedHomeWith("man-malformed", (unit) => {
     const p = join(unit, RELEASE_MANIFEST_NAME);
     const m = JSON.parse(readFileSync(p, "utf8"));
     // An unquoted/numeric id. Guessing at it — or coercing it to a string and carrying on — is
@@ -426,7 +434,7 @@ test("FG-571 F32 (EXECUTED): manifest identity MALFORMED -> trusted Node refuses
 });
 
 test("FG-571 F32 (EXECUTED): manifest UNREADABLE -> named error, fail closed", () => {
-  const h = promotedHomeWith("man-unreadable", (unit) => chmodSync(join(unit, RELEASE_MANIFEST_NAME), 0o000));
+  const { h } = promotedHomeWith("man-unreadable", (unit) => chmodSync(join(unit, RELEASE_MANIFEST_NAME), 0o000));
   const r = run(shim, ["release", "provenance", "--json"], poisonedEnvFor(h));
   assert.notEqual(r.status, 0, "an unreadable manifest does not run");
   assert.match(r.stderr, /refusing to run — this release's manifest is unreadable/i, "the refusal is NAMED");
@@ -437,7 +445,7 @@ test("FG-571 F32 (EXECUTED): a descriptor id that DISAGREES with the manifest is
   // Neither half is malformed. Both are well-formed and they simply disagree, which is precisely
   // the shape a divergence attack produces: the launcher carries in one identity while the
   // authority states another. There is no reconciling this — it is a refusal.
-  const h = promotedHomeWith("desc-disagrees", (unit) => {
+  const { h, rel } = promotedHomeWith("desc-disagrees", (unit) => {
     const p = join(unit, RELEASE_EXEC_NAME);
     writeFileSync(p, readFileSync(p, "utf8").replace(/^release .*$/m, "release release-a-different-identity"));
   });
@@ -485,7 +493,7 @@ test("FG-571 F32 MANDATORY MUTANT (EXECUTED): drop the unset AND the Node re-val
 
   // The Node half, disabled inside the release's OWN source — the release ships src/, so this
   // is the shipped preflight the promoted unit actually runs.
-  const h = promotedHomeWith("mutant-both", (unit) => {
+  const { h, rel } = promotedHomeWith("mutant-both", (unit) => {
     const p = join(unit, "src", "cli", "node-preflight.ts");
     const src = readFileSync(p, "utf8");
     const call = "  const identity = checkReleaseIdentity(found, process.env.FORGE_RELEASE_ID, process.env.FORGE_RELEASE_INTERPRETER);";
@@ -516,7 +524,7 @@ test("FG-571 F32 MANDATORY MUTANT (EXECUTED): drop ONLY the shim's unset -> trus
   const noUnset = renderShim()
     .replace(/ FORGE_RELEASE_ID\b/, "")
     .replace("FORGE_RELEASE_ID=$__forge_release\nexport FORGE_RELEASE_ID", ":");
-  const h = promotedHomeWith("mutant-shim-only", () => {});
+  const { h } = promotedHomeWith("mutant-shim-only", () => {});
   const r = run(mutantShim("shim-only", noUnset), ["release", "provenance", "--json"], poisonedEnvFor(h));
   assert.notEqual(r.status, 0, "the forged carrier is refused by the Node layer even with the shim's guard gone");
   assert.match(r.stderr, /execution descriptor and its manifest disagree about its identity/i);
@@ -536,7 +544,7 @@ test("FG-571 F32 MANDATORY MUTANT (EXECUTED): degrade a missing descriptor to nu
   assert.ok(refusal > 0 && refusalEnd > refusal, "located the descriptor-missing refusal in the real shim");
   const nullAndContinue = real.slice(0, refusal) + 'if [ ! -r "$__forge_d" ]; then\n  exec "$0-never" "$@"' + real.slice(refusalEnd);
 
-  const h = promotedHomeWith("mutant-null", (unit) => rmSync(join(unit, RELEASE_EXEC_NAME), { force: true }));
+  const { h } = promotedHomeWith("mutant-null", (unit) => rmSync(join(unit, RELEASE_EXEC_NAME), { force: true }));
   const r = run(mutantShim("null-continue", nullAndContinue), ["release", "provenance", "--json"], poisonedEnvFor(h));
   // RED: no NAMED refusal. Instead of telling the operator what is wrong and how to fix it, the
   // mutant dies in whatever way the missing file happens to produce — which is exactly the

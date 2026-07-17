@@ -43,7 +43,7 @@
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync, type Stats } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
-import { FORGE_HOME, currentLinkIn, previousLinkIn, releasesDirIn, selectionLinkIn, selectionsDirIn } from "../util/paths.js";
+import { FORGE_HOME, currentLinkIn, interpretersDirIn, previousLinkIn, releasesDirIn, selectionLinkIn, selectionsDirIn } from "../util/paths.js";
 import {
   RELEASE_ENTRY_NAME,
   RELEASE_ENTRY_SOURCE,
@@ -57,7 +57,7 @@ import {
   thawReleaseTree,
   type ReleaseManifest,
 } from "./release.js";
-import { interpreterKey, isStoredInterpreter, probeInterpreter } from "./runtime-store.js";
+import { isStoredInterpreter, probeInterpreter } from "./runtime-store.js";
 
 /** A release identity is a plain token. The SAME rule the shim's fail-closed identity
  *  guard applies in shell (renderIdentityGuard) — an id that the shim would refuse at exec
@@ -298,8 +298,8 @@ function assertUnitDescriptor(unit: Candidate): void {
  *  canonical descriptor. Applied to the STAGED unit before it is frozen and published, and
  *  applied again to an already-published unit before `current` is pointed at it — so the
  *  thing that gets selected is always the exact thing that was just validated. */
-function validateUnit(dir: string): Candidate {
-  const unit = validateCandidate(dir);
+function validateUnit(dir: string, home: string): Candidate {
+  const unit = validateCandidate(dir, home);
   assertUnitDescriptor(unit);
   return unit;
 }
@@ -316,14 +316,16 @@ function validateUnit(dir: string): Candidate {
  *     reference only an already-validated interpreter);
  *   - the manifest is ABI-COHERENT with that interpreter (FG-570: the shipped binding
  *     loads under one ABI only);
- *   - that interpreter is IN THE STORE (FG-571's external-artifact contract): an external
- *     path validates identically today and is mutable tomorrow, so what a promotion proves
- *     about an unowned interpreter does not survive the next `brew upgrade node`;
+ *   - that interpreter is IN THIS HOME'S STORE (FG-571's external-artifact contract): an
+ *     external path validates identically today and is mutable tomorrow, so what a promotion
+ *     proves about an unowned interpreter does not survive the next `brew upgrade node`. The
+ *     store root is derived from `home` — the CONFIGURED forge home — and never from the
+ *     candidate's own path, which would let a release vouch for its own interpreter (F4);
  *   - the entry and loader are PRESENT;
  *   - the CLOSURE RUNS — assertReleaseCloses executes the release's tsx loader AND loads
  *     its own better-sqlite3 binding under the pinned interpreter. This is what makes the
  *     "no mixed tree, no broken promotion" claim evidence rather than a file listing. */
-export function validateCandidate(dir: string): Candidate {
+export function validateCandidate(dir: string, home: string = FORGE_HOME): Candidate {
   const releaseDir = resolve(dir);
   if (!existsSync(releaseDir)) {
     throw new Error(
@@ -448,21 +450,29 @@ export function validateCandidate(dir: string): Candidate {
   // promotion that accepted one would hand back a release whose validation expires
   // silently, and retention (which is the whole T9 answer for anchored processes) would
   // protect the release directory while the thing that RUNS it moved underneath.
-  // A store path cannot do that: the store is keyed by version+ABI and never replaces a
-  // key in place, so what validated here is what runs later.
+  // A store path cannot do that: the store is CONTENT-ADDRESSED and create-only, so a store
+  // path names specific BYTES and those bytes never change under it — what validated here is
+  // what runs later, or the path stops matching its own key and this gate refuses it.
+  //
+  // The trusted store root comes from the CONFIGURED home, never from the candidate's own
+  // resolved path (FG-571 F4): a manifest that pins `/tmp/attacker/interpreters/node-.../bin/node`
+  // would otherwise supply both the claim and the authority that vouches for it.
   const identity = { version: manifest.nodeVersion, abi: manifest.abi };
-  if (!isStoredInterpreter(interpreter, identity)) {
+  if (!isStoredInterpreter(interpreter, identity, home)) {
     throw new Error(
       `forge release: refusing to promote — this release's interpreter is not in the interpreter store.\n` +
         `  release:      ${releaseDir}\n` +
         `  interpreter:  ${interpreter}\n` +
-        `  expected form: <forge-home>/interpreters/${interpreterKey(identity)}/bin/node\n` +
-        `It runs and it reports the version+ABI the manifest names, but it is an external path forge does ` +
-        `not own: whatever installed it (a system package, homebrew, nvm) can rewrite those bytes in place, ` +
-        `and this release would keep exec'ing that path — so promoting it would select a release whose ` +
-        `validation expires the moment something else upgrades node, including under processes already ` +
-        `anchored to it. The store exists to make that impossible: it is keyed by version+ABI, validated by ` +
-        `execution before anything may reference it, and never replaced in place.\n` +
+        `  store root:   ${interpretersDirIn(home)}\n` +
+        `  expected form: <store-root>/node-${manifest.nodeVersion}-${manifest.abi}-<platform>-<arch>-<digest>/bin/node\n` +
+        `It runs and it reports the version+ABI the manifest names, but it is not an entry this forge home's ` +
+        `store owns and vouches for. Either it is an external path forge does not own — whatever installed it ` +
+        `(a system package, homebrew, nvm) can rewrite those bytes in place while this release keeps exec'ing ` +
+        `that path — or it sits at a store-shaped path whose name no longer matches the bytes actually there.\n` +
+        `Promoting either would select a release whose validation expires silently, including under processes ` +
+        `already anchored to it. The store exists to make that impossible: entries are named by their own ` +
+        `content, published create-only, validated by execution before anything may reference them, and never ` +
+        `replaced in place.\n` +
         `Fix: rebuild with \`forge release build\` — it installs its interpreter into the store and pins the ` +
         `store's copy.`,
     );
@@ -655,7 +665,7 @@ export function installRelease(opts: InstallReleaseOptions): Candidate {
   // byte-identical twin. Validate THAT EXACT DIRECTORY, in full, and select the thing that was
   // validated — the same shape rollback uses, and the same invariant: one directory validated,
   // that same directory selected.
-  if (existsSync(target) && realpathSync(target) === realpathSync(source)) return validateUnit(target);
+  if (existsSync(target) && realpathSync(target) === realpathSync(source)) return validateUnit(target, home);
 
   mkdirSync(releases, { recursive: true });
   const staging = join(releases, `.installing-${claimedId}-${Math.random().toString(36).slice(2, 8)}`);
@@ -679,7 +689,7 @@ export function installRelease(opts: InstallReleaseOptions): Candidate {
     // PARSE AND VALIDATE THE STAGED BYTES — never the mutable source. Everything downstream
     // reads from this one materialization: the identity, the interpreter binding, the entry,
     // the loader, and the closure that actually runs.
-    const staged = validateCandidate(staging);
+    const staged = validateCandidate(staging, home);
     if (staged.manifest.id !== claimedId) {
       throw new Error(
         `forge release: refusing to install — this release's identity changed while it was being copied.\n` +
@@ -705,7 +715,7 @@ export function installRelease(opts: InstallReleaseOptions): Candidate {
     if (existsSync(target)) {
       spawnSync("/bin/sh", ["-c", 'chmod -R u+w "$1" 2>/dev/null; exit 0', "sh", staging]);
       rmSync(staging, { recursive: true, force: true });
-      return validateUnit(target);
+      return validateUnit(target, home);
     }
 
     // GENERATE the canonical, forge-authored execution descriptor INSIDE the staged unit,
@@ -716,7 +726,7 @@ export function installRelease(opts: InstallReleaseOptions): Candidate {
 
     // VALIDATE THE COMPLETE UNIT: the staged bytes plus the descriptor that now ships with
     // them, under exactly the rules the shim will apply.
-    const unit = validateUnit(staging);
+    const unit = validateUnit(staging, home);
 
     // FREEZE the complete unit, THEN publish it atomically. The bytes that were validated are
     // the bytes that are frozen are the bytes that are renamed into place — there is no
@@ -866,7 +876,7 @@ export function rollback(opts: RollbackOptions = {}): PromoteResult {
   // about right now, not about when it was promoted. The full unit gate, descriptor included
   // — a rollback selects an already-published unit, so it validates and selects THE SAME
   // directory and nothing is materialized.
-  const target = validateUnit(previous.releaseDir);
+  const target = validateUnit(previous.releaseDir, home);
   const before = readSelection(home);
 
   ensureSelectionLayout(home);
