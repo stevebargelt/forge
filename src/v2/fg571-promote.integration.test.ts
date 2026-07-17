@@ -17,7 +17,7 @@
 // DISPOSABLE source root (see fg571-harness.ts), never by committing in the real repository.
 // No git command in this file runs against the real checkout — asserted below, not assumed —
 // so the suite is non-destructive on a dirty dev tree and safe to run concurrently with the
-// F29/F32 suite.
+// F29/FG571-RI suite.
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -154,7 +154,7 @@ after(() => {
 test("FG-571 SAFETY: this suite never runs git against the REAL checkout — a dirty dev tree is not a test fixture", () => {
   // The destructive shape this replaced: `git add` + `git commit` in findGitRoot(cwd), which
   // silently committed a developer's in-progress work under a junk message, behaved
-  // differently on a clean CI checkout than on a dirty dev one, and raced the F29/F32 suite
+  // differently on a clean CI checkout than on a dirty dev one, and raced the F29/FG571-RI suite
   // on .git/index.lock when both ran under one `npm run test:integration`.
   assert.notEqual(source.root, repoRoot, "releases are built from a disposable checkout, not the real repository");
   assert.ok(!source.root.startsWith(repoRoot), "and that checkout is not inside the real repository");

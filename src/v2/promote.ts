@@ -317,7 +317,7 @@ function validateUnit(dir: string, home: string): Candidate {
  *  how to fix) — never a bare false, because the caller's next move is to tell an operator.
  *
  *  The checks, and why each is a promotion gate rather than a runtime surprise:
- *   - the manifest PARSES and states a usable IDENTITY (F32: fail closed — a release that
+ *   - the manifest PARSES and states a usable IDENTITY (FG571-RI: fail closed — a release that
  *     cannot state who it is does not run, so it does not get promoted either);
  *   - the interpreter is ABSOLUTE, present, and VALIDATED BY EXECUTION to report exactly
  *     the version+ABI the manifest names (validate-before-select: the manifest may
@@ -366,7 +366,7 @@ export function validateCandidate(dir: string, home: string = FORGE_HOME): Candi
     );
   }
 
-  // F32 at the promotion gate: the shim fails closed on a missing/malformed identity at
+  // FG571-RI at the promotion gate: the shim fails closed on a missing/malformed identity at
   // exec time. Refusing here means the operator learns at `promote`, with the previous
   // release still selected, instead of at the next `forge` invocation with nothing usable.
   const id: unknown = manifest.id;

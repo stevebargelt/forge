@@ -253,7 +253,7 @@ const SANITIZED_ENV_VARS = [
   // and leaking internals.
   "NODE_DEBUG",
   "NODE_DEBUG_NATIVE",
-  // FG-571 (F32) — NOT a Node var: the release-identity carrier. Release identity is
+  // FG-571 (FG571-RI) — NOT a Node var: the release-identity carrier. Release identity is
   // derived SOLELY from the selected release's manifest and NEVER from ambient env, so
   // a caller-supplied value must never survive to be recorded as provenance. Unsetting
   // here is only half the contract; see renderIdentityGuard for the fail-closed half.
@@ -310,7 +310,7 @@ function renderManifestRead(manifestVar: string, keys: readonly string[]): strin
   return lines.join("\n");
 }
 
-/** FG-571 (F32) — FAIL-CLOSED release identity, the second half of the contract.
+/** FG-571 (FG571-RI) — FAIL-CLOSED release identity, the second half of the contract.
  *
  *  Unsetting ambient FORGE_RELEASE_ID (renderEnvSanitizer) stops the spoof, but on its
  *  own it silently degrades a real release's provenance to "unknown" whenever the
@@ -340,7 +340,7 @@ function renderIdentityGuard(manifestVar: string, context: string): string {
       `    exit 1`,
     ].join("\n");
   return [
-    "# FG-571 (F32): identity is FAIL-CLOSED — unreadable, absent, or malformed all refuse.",
+    "# FG-571 (FG571-RI): identity is FAIL-CLOSED — unreadable, absent, or malformed all refuse.",
     `if [ ! -r "$${manifestVar}" ]; then`,
     fail("this release's manifest is unreadable", "(the manifest could not be read)"),
     `fi`,
@@ -409,7 +409,7 @@ export function renderEntry(interpreter: string): string {
     // PHYSICAL path and every later read comes from that ONE resolution. Builtin: no PATH.
     `here=$(CDPATH= cd -P "$d" && pwd)`,
     "",
-    "# FG-569 (R2) / FG-571 (F32): export this release's OWN id, read from its manifest",
+    "# FG-569 (R2) / FG-571 (FG571-RI): export this release's OWN id, read from its manifest",
     "# with shell builtins only (no sed/grep/node), so a node-free PATH still touches no",
     "# external. Every process the release starts — notably the `forge launch` exit-recorder",
     "# — then records this release's provenance. FG-571 makes it FAIL-CLOSED: the ambient",
@@ -642,7 +642,7 @@ export function renderShim(): string {
     ),
     `fi`,
     "",
-    "# FG-571 (F32) — release identity, exported from the DESCRIPTOR. Fail-closed: the ambient",
+    "# FG-571 (FG571-RI) — release identity, exported from the DESCRIPTOR. Fail-closed: the ambient",
     "# FORGE_RELEASE_ID was unset above, and a descriptor that cannot state a well-formed identity",
     "# refused before reaching here, so this is never a caller value and never 'unknown'. Trusted",
     "# Node RE-VALIDATES it after startup against forge-release.json — which stays the authority on",
@@ -1294,7 +1294,7 @@ export type RuntimeProvenance = {
   bindingLoads: boolean;
   release: ReleaseManifest | null;
   match: { interpreter: boolean; abi: boolean } | null;
-  // FG-571 (F32): the release identity AS CARRIED IN THIS PROCESS'S ENVIRONMENT — what
+  // FG-571 (FG571-RI): the release identity AS CARRIED IN THIS PROCESS'S ENVIRONMENT — what
   // every process forge starts (notably the `forge launch` exit-recorder) records as
   // provenance. Distinct from `release` above, which is read from the manifest on disk:
   // this is the value the launcher actually put here, so it is the thing that must be

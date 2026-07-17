@@ -95,7 +95,7 @@ export function registerRelease(program: Command): void {
       } else {
         console.log(`release:     (not running inside a release — dev entry)`);
       }
-      // FG-571 (F32): the identity as carried in THIS process's environment — what
+      // FG-571 (FG571-RI): the identity as carried in THIS process's environment — what
       // everything forge starts records as provenance. null on the dev entry is the
       // honest answer, not a gap to fill.
       console.log(`releaseId:   ${prov.releaseId ?? "(not recorded — dev entry has no manifest)"}`);

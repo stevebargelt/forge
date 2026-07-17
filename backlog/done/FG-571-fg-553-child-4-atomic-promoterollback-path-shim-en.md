@@ -85,7 +85,7 @@ subvert the pinned interpreter (proven: `NODE_OPTIONS=--import <evil>` injects b
     the live-source loop the PRD forbids removing);
   - installation happens **only in a disposable prefix** — never `npm link`, never touching the real
     machine-wide shim or `current` pointer.
-- **F32 (NEW — fail-closed release identity; the census HIGH):** release identity is derived solely from the
+- **FG571-RI (NEW — fail-closed release identity; the census HIGH):** release identity is derived solely from the
   selected release manifest and never from ambient env. Executed regression matrix, every cell:
   - **poisoned env** (`FORGE_RELEASE_ID=<forged>`) against a **valid** manifest → the forged value is
     ignored; the reported identity is the manifest's;
@@ -138,7 +138,7 @@ subvert the pinned interpreter (proven: `NODE_OPTIONS=--import <evil>` injects b
   FG-571 pre-implementation propagation census: (1) `forge-dev` does not exist, so this ticket **creates**
   the stable/dev split rather than preserving an existing command — F25 restated behaviorally (provenance
   divergence + delegation mutant + disposable-prefix-only installation); (2) the FG-569 entry lets a
-  caller-supplied `FORGE_RELEASE_ID` survive a failed manifest read — closed here as **F32**, fail-closed,
+  caller-supplied `FORGE_RELEASE_ID` survive a failed manifest read — closed here as **FG571-RI**, fail-closed,
   because promotion has not landed yet and this is the bounded place to fix it before vulnerable releases
   become machine-wide. No change to OQ-6 / BD-14 / BD-15 / T9 or the accepted promotion architecture.
 - **2026-07-16 (mechanism correction, operator-directed).** The bounded review-loop stopped at
@@ -250,7 +250,7 @@ MUTATION-TESTING the final artifact — a source-pattern match is not evidence.*
   (sanitization is bounded, not a wipe). **MANDATORY MUTANT:** pin PATH but leave `NODE_OPTIONS` live → the
   injection RUNS *and forge still exits 0* — proving an absolute pinned interpreter is necessary but NOT
   sufficient, and that the failure is invisible. *(`fg571-env-identity.integration.test.ts`)*
-- **F32 — fail-closed release identity (25).** Poisoned `FORGE_RELEASE_ID` + a valid manifest → forged value
+- **FG571-RI — fail-closed release identity (25).** Poisoned `FORGE_RELEASE_ID` + a valid manifest → forged value
   IGNORED. Missing / malformed / unreadable identity → **named error, fail closed** — never null, never the
   ambient value, never a silent run. `forge-dev` + poisoned env → identity null (the honest answer for an
   entry with no manifest). **Both mandatory mutants:** restoring FG-569's read-loop reddens the poisoned-env
@@ -283,3 +283,20 @@ still refuses in release mode (FG-572). **Containment held for the entire campai
 `forge` still resolves to the operator's live checkout, the provider registry at `~/.forge/runtimes` is
 untouched, and `npm link` was never run. Post-merge smoke: `forge --version` → `0.1.0` and `forge backlog
 list` OK through the existing real symlink.
+
+
+## Label correction (2026-07-17) — F32 → FG571-RI
+
+FG-571 minted **F32** as its local label for *fail-closed release identity*. That collided with an existing
+canonical id: the PRD's F-row matrix
+(`docs/prds/durable-orchestration-continuation.md:543`) already defines **F32** as *"A reader arrives during
+meta-record publication → a running launch never reads as absent or as 'no such launch'"*, which belongs to
+**FG-552** and is referenced from FG-552's own ticket.
+
+Leaving both would corrupt the campaign coverage map before FG-552 begins. **Not a behavioral defect** — merge
+`2f80496` stands unchanged — so this is a mechanical relabel only: FG-571's local `F32` → **`FG571-RI`**
+across this ticket, the production comments, and the test titles (27 occurrences in six source files).
+`147/147` unchanged, typecheck clean, diff verified label-only.
+
+**Canonical F32 is untouched and must stay that way** — neither renumbered nor altered, in the PRD or in
+FG-552's ticket.

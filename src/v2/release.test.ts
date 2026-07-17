@@ -80,7 +80,7 @@ test("FG-569 R2 entry: exports FORGE_RELEASE_ID sourced from the release's OWN m
   assert.ok(entry.includes(`done < "$__forge_m"`), "sourced by reading that manifest, not a baked-in literal");
   const exportAt = entry.indexOf("export FORGE_RELEASE_ID");
   assert.ok(exportAt < entry.indexOf("exec '"), "the export happens before exec, so the interpreter inherits it");
-  // FG-571 (F32): the ambient carrier is unset BEFORE the read, and it is unset in the
+  // FG-571 (FG571-RI): the ambient carrier is unset BEFORE the read, and it is unset in the
   // sanitizer at the very top — so a caller-supplied value can never survive to be read
   // back as this release's provenance, whatever the manifest read yields.
   const unsetAt = entry.indexOf("unset ");
