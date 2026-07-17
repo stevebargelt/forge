@@ -1,9 +1,11 @@
 ---
 id: FG-580
 type: story
-status: active
+status: done
 title: "FG-572 Child 5g: bundle dashboard into the promoted Forge release"
 created: 2026-07-17
+closed: 2026-07-17
+closed_commit: b6c654201d842544265532289ee392366a66d806
 ---
 
 **Parent:** FG-572 · **Epic:** FG-561
