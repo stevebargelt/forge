@@ -39,11 +39,21 @@ must be decided against this corrected cost model, not the original one. `releas
 and must be corrected by whichever child resolves 5g.
 
 **2. "No version marker in `~/.forge` ⇒ staleness is undetectable" — FALSE, and the inverse of the real
-defect.** `src/v2/seed-drift.ts:55-59` resolves its baseline **module-relative** from `import.meta.url`, so
-under a promotion it **already** compares `~/.forge` against the promoted release's own commit-bound `seeds/`.
-Detection is already release-correct and **no version marker is needed or wanted** — a stamp is strictly weaker
-than the byte comparison forge can already make, because it cannot detect an operator hand-edit (the stamp can
-lie; the bytes cannot — FG-571's "selection evidence is the BYTES, never the pathname", one boundary outward).
+defect.** `src/v2/seed-drift.ts:57-58` resolves its baseline **module-relative** from `import.meta.url`, so
+under a promotion it compares `~/.forge` against the promoted release's own commit-bound `seeds/`. **No version
+marker is needed or wanted** — a stamp is strictly weaker than the byte comparison forge can already make,
+because it cannot detect an operator hand-edit (the stamp can lie; the bytes cannot — FG-571's "selection
+evidence is the BYTES, never the pathname", one boundary outward).
+
+> **CORRECTION (FG-577 architect phase, `task-architect-17823b`).** An earlier revision of this section said
+> "detection is already release-correct" **without qualification. That was wrong**, and the unqualified claim
+> is dangerous: `seed-drift.ts:56` — `if (process.env.FORGE_REPO_DIR) return join(process.env.FORGE_REPO_DIR,
+> "seeds")` — **short-circuits BEFORE** the module-relative resolution at `:57-58`. Detection is release-correct
+> **only in the fallback branch**. A divergent or hostile ambient `FORGE_REPO_DIR` re-points the **detector's
+> own baseline**, so drift reports "current" against caller-chosen bytes. That failure is **silent**, and
+> therefore strictly worse than the noisy wrong-remedy defect this child is named for. The baseline is a
+> release-owned asset and is covered by FG-577's contract item 2 — but an implementer reading the unqualified
+> narrative would re-point `upgrade.ts` and never open `seed-drift.ts`. Verified on host at `9e38ce5`.
 
 **The real defect is the REMEDY.** `forge upgrade` installs from `~/code/forge`
 (`src/cli/commands/upgrade.ts:41,303`) — the dev checkout — and is the exact command `seed-drift.ts:119` names

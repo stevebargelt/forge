@@ -15,11 +15,37 @@ do not re-derive.
 
 ## The defect (verified on host at 12b13c2)
 
-Detection is already release-correct; the **remedy is not**. `src/v2/seed-drift.ts:55-59` resolves
-`defaultRepoSeedsDir` **module-relative** from `import.meta.url`, so under a promotion it already compares
-`~/.forge` against the promoted release's own commit-bound `seeds/`. **No version marker is needed or wanted**
-(a stamp cannot detect a hand-edit — it can lie; the bytes cannot. FG-571: "selection evidence is the BYTES,
-never the pathname").
+`src/v2/seed-drift.ts:57-58` resolves `defaultRepoSeedsDir` **module-relative** from `import.meta.url`, so
+under a promotion it compares `~/.forge` against the promoted release's own commit-bound `seeds/`. **No version
+marker is needed or wanted** (a stamp cannot detect a hand-edit — it can lie; the bytes cannot. FG-571:
+"selection evidence is the BYTES, never the pathname").
+
+### The DETECTOR is env-subvertible too — do not fix only the remedy (architect HIGH, verified at 9e38ce5)
+
+**`seed-drift.ts:56` short-circuits BEFORE that module-relative resolution:**
+
+    if (process.env.FORGE_REPO_DIR) return join(process.env.FORGE_REPO_DIR, "seeds");
+
+So detection is release-correct **only in the fallback branch**. A divergent or hostile ambient
+`FORGE_REPO_DIR` re-points the **detector's own baseline** — drift then reports "current" against
+caller-chosen bytes. That failure is **SILENT**, and therefore strictly **worse** than the noisy wrong-remedy
+defect this ticket is named for. The comment at `:54` states the override as an intended feature.
+
+The baseline is a **release-owned asset**, so contract item 2 below already covers it — but this is called out
+explicitly because the ticket's defect narrative previously framed detection as sound and the remedy as the
+whole bug, and an implementer working from that narrative would re-point `upgrade.ts` and **never open
+`seed-drift.ts`**. Fixing the remedy while leaving the detector env-subvertible is a **partial fix**.
+
+### There is no single "asset root" resolver — three call sites re-derive it (architect HIGH)
+
+`src/cli/commands/upgrade.ts:305`, `src/cli/commands/doctor.ts:31-32`, and `src/v2/seed-drift.ts:56` each
+**independently** re-derive `$FORGE_REPO_DIR ?? ~/code/forge`. They are **not one helper with three callers**.
+`upgrade.ts:262` then feeds its own resolution back into `buildReleaseReport` via `gatherReleaseInputs`, so
+upgrade's release-check tail reports through doctor's model while doctor's standalone path re-derives its own.
+Repairing `upgrade` alone makes **doctor and upgrade disagree about what is installed** — which this ticket's
+own acceptance criteria forbid.
+
+### The remedy is the **remedy**, not the whole bug
 
 But `src/cli/commands/upgrade.ts:41,303` resolves `forgeRepoDir` = the **dev checkout** (`~/code/forge`), and
 `:133` joins it for `install-seeds.sh`, `:209` for the orchestrator template. So a promoted stable runtime
@@ -73,6 +99,12 @@ rebuild / dev-template operations may refuse.
   place.
 - With `FORGE_REPO_DIR` / `--forge-repo` set to a hostile/divergent tree, release mode does **not** install
   those bytes. Observed RED.
+- **With `FORGE_REPO_DIR` set to a divergent tree, release mode does not redirect the DETECTOR's baseline**
+  (`seed-drift.ts:56`): drift must NOT report "current" against caller-chosen bytes. Observed RED — this test
+  must fail against a fix that only re-points `upgrade.ts`. This is the silent half of the defect.
+- **`doctor` and `upgrade` agree about the asset root.** A test must pin that the three call sites
+  (`upgrade.ts:305`, `doctor.ts:31-32`, `seed-drift.ts:56`) cannot disagree — e.g. by collapsing them to one
+  authoritative resolver. Observed RED against the current three-way re-derivation.
 - From a promoted release, the dev-checkout-advancing half **refuses** with a named, actionable error and does
   not mutate `~/code/forge`.
 - From a live dev checkout, current behavior is preserved.
