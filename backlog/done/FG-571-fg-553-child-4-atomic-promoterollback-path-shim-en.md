@@ -1,9 +1,11 @@
 ---
 id: FG-571
 type: story
-status: active
+status: done
 title: "FG-553 Child 4: atomic promote/rollback + PATH shim + env-sanitization contract (swap-and-retain, no GC)"
 created: 2026-07-14
+closed: 2026-07-17
+closed_commit: 2f80496
 ---
 
 **Parent:** FG-553 · **Epic:** FG-561 · **Plan:** `docs/plans/fg553-slice1-architecture.md` (Child 4)
