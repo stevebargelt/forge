@@ -69,3 +69,20 @@ Two independent hardening options; do both if cheap:
 - A genuinely unparseable authoritative red result blocks the gate (fail-closed) rather than mapping to an
   advanceable inconclusive. Negative test.
 - Tests exercise the real ingestion path (runNext dispatchReds), not a hand-called parser.
+
+## Second occurrence — a DIFFERENT corruption mode (2026-07-17, FG-580 architect phase)
+
+`task-red-architect-8e0a82` (FG-580 architecture pass) recorded `status: failed / result.json malformed`.
+This time the file starts CLEAN (`{`, not `+{`) but is malformed INTERNALLY — `json.loads` fails at
+"Expecting ',' delimiter" mid-document (char ~930, inside a finding string value; likely an unescaped quote or
+control char in the agent's prose). The recovered verdict was `fail (0.84)` with a real MEDIUM
+(vendor-authenticity: the offline guard doesn't prove vendored modules are authentic vs local shims).
+
+**Implication for the fix:** the FG-586(1) leading-envelope-strip direction would NOT catch this — a stray
+byte in the MIDDLE isn't a leading/trailing envelope. This reinforces the SECOND fix direction as the
+load-bearing one: **a malformed AUTHORITATIVE red result must fail-closed (block + surface "unreadable
+reviewer output — inspect"), never map to an advanceable inconclusive/failed.** Whatever the corruption mode
+(leading char, internal bad byte, truncation), the guarantee must be "an unreadable authoritative verdict
+blocks", not "we successfully parsed a recovery." Recovery-by-stripping is a nice-to-have; fail-closed is the
+invariant. Two occurrences in one session (build reds + architect reds) — the agent JSON serialization is
+unreliable enough that this is not rare.
