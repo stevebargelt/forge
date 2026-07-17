@@ -6,6 +6,10 @@
 > **refuses** `dashboard` in release mode; run it as `./bin/forge-dev dashboard start` from a source checkout.
 > **Whether a stable release should ship the dashboard at all is an OPEN product decision reserved to the
 > operator under FG-572; nothing here decides it.** This PRD's dashboard design intent is otherwise unaffected.
+>
+> **UPDATE (FG-580, `bc9286f`):** RESOLVED as operator Option A — the dashboard is now bundled into the
+> promoted release and `forge dashboard` runs from a release (boots offline via vendored client libs); the
+> release-mode refusal is retired. `forge-dev dashboard start` remains the checkout path.
 
 
 ## What this is

@@ -237,9 +237,13 @@ Full doc: `docs/how-to-upgrade.md` (flags, multi-project loop, manual recipe).
 
 ## 12. Dashboard (optional)
 
-The web view ships as an npm workspace in the forge repo (`dashboard/`). Run it **from a source checkout**, not from the stable `forge`: the dashboard is a separate workspace with its own dependency tree and is not bundled into a release, so `forge dashboard` refuses in release mode rather than pretending to run (bundling it is deferred to FG-572).
+The web view ships as an npm workspace in the forge repo (`dashboard/`). Run it either way (FG-580). `forge dashboard` works from a **promoted release** — the dashboard is bundled into the release as a mandatory asset and resolved from the executing release. Its client libraries are vendored as first-party files and the server sends `Content-Security-Policy: script-src 'self'`, so the UI **boots offline** with no CDN-executed JS (its provider/data APIs may still need network). When working from a checkout, use `forge-dev dashboard start` instead:
 
 ```bash
+# from the stable release
+forge dashboard start                        # boots http://127.0.0.1:8024
+
+# from a source checkout
 cd ~/code/forge
 ./bin/forge-dev dashboard start              # boots http://127.0.0.1:8024
 ./bin/forge-dev dashboard start --port 8025  # custom port

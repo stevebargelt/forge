@@ -62,8 +62,11 @@ descriptor; content-addressed interpreter identity (`process.version` + ABI neve
 bytes collided at one path); and selection evidence being the **bytes, never the pathname** (a path-equality
 shortcut was being treated as provenance).
 
-**Child 5 (FG-572 — installed-surface compatibility) remains PLANNED**, and `forge dashboard` still refuses in
-release mode until it is decided. R3/R4 launched-workload provenance stays out of scope (FG-555).
+**Child 5 (FG-572 — installed-surface compatibility) remains PLANNED**; its dashboard deferral, however, has
+**LANDED as FG-580 (operator Option A)**: the dashboard is now bundled into the promoted release as a mandatory
+asset, `forge dashboard` runs from a release (resolved from `assetRoot()`, never the dev checkout), and the
+release-mode refusal is retired — so the "`forge dashboard` still refuses in release mode" condition below no
+longer holds. R3/R4 launched-workload provenance stays out of scope (FG-555).
 
 **The rule this slice is planned under (from FG-551):** *a property concerning the FINAL RUNTIME must be
 demonstrated by EXECUTING or MUTATION-TESTING the final artifact. A source-pattern match is not evidence.*
@@ -498,7 +501,8 @@ prerequisite is satisfied. **Child 1 has LANDED (`275ac63`, PR #120), and Child 
 reconciled into the PRD (FG-568), and the R1/R2 current-state reconciled (FG-569/FG-573)** — see §2/§6.
 **UPDATE (2026-07-17):** **Child 3 has LANDED as FG-570 (`5044c5d`, PR #123).** **Child 4 (FG-571) has
 LANDED as `2f80496` (PR #124)** — the slice is no longer inert: promotion, the `current` pointer and the PATH
-shim ship. **Child 5 (FG-572) remains planned.**
+shim ship. **Child 5 (FG-572) remains planned**, though its dashboard piece has **LANDED as FG-580** (`bc9286f`):
+the dashboard is bundled into the release and `forge dashboard` now runs from a promoted release.
 See the 2026-07-16 status update at the top of this document for what Child 4 carries and for the audit
 findings that reshaped the mechanism (§1: the forge-authored canonical execution descriptor; content-addressed
 interpreter identity).

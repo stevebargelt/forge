@@ -14,6 +14,8 @@
 > dev; the dashboard is a separate workspace, not bundled into a release, so stable `forge` **refuses**
 > `dashboard` in release mode. The equivalent check today is `./bin/forge-dev dashboard start` from a source
 > checkout. **The build-fanout discipline this PRD specifies is unaffected and stands.**
+> **UPDATE (FG-580, `bc9286f`):** the dashboard is now bundled into the release and `forge dashboard` runs
+> from a promoted release (operator Option A); the release-mode refusal above is retired.
 
 
 **Status:** draft, awaiting confirmation
