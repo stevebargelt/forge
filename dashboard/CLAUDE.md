@@ -20,7 +20,7 @@ From the forge repo root:
 npm --workspace=dashboard typecheck
 ```
 
-The live-source entry, not the stable `forge`: this workspace has its own dependency tree and is not bundled into a release, so `forge dashboard` refuses in release mode (bundling is deferred to FG-572).
+`./bin/forge-dev dashboard start` is the source-checkout entry. But the dashboard is now bundled into the promoted release as a mandatory asset (FG-580), so `forge dashboard` also runs from a promoted release — resolution is release-owned (it flows from `assetRoot()`, the executing release or the dev checkout, never the invocation cwd), and the FG-569 release-mode refusal is retired. The bundled UI boots offline: its client libs are vendored in-closure and served under a `script-src 'self'` CSP, so no CDN-executed JS is fetched (provider/data APIs may still need network). A torn/incomplete release — a missing dashboard file, vendored client lib, or dashboard-relevant dep — still fails named and nonzero (`assertDashboardClosure`) rather than falling back to a source checkout.
 
 ## Conventions specific to the dashboard
 

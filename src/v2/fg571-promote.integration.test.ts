@@ -819,3 +819,45 @@ test("FG-571 validateCandidate: a release whose pinned interpreter is gone is RE
   writeFileSync(join(fake, RELEASE_MANIFEST_NAME), JSON.stringify(m, null, 2));
   assert.throws(() => validateCandidate(fake, home), /pinned interpreter does not run/i, "validate-before-select: an absent interpreter is refused by name");
 });
+
+test("FG-580 validateCandidate MUTANT: a release TORN of its dashboard (or not CLAIMING it) is REFUSED at promotion — it passes every other gate", () => {
+  // THE MUTANT for the mandatory-dashboard rule (FG-580): a release that is byte-for-byte a
+  // real, promotable release EXCEPT that its dashboard closure has been torn out after build
+  // (a dropped dashboard/src/server.ts is the canonical control-plane-only regression), or
+  // whose manifest never claimed the dashboard capability at all (an older control-plane-only
+  // forge's release). Both sail through interpreter, ABI, entry, loader and closure gates —
+  // assertReleaseCloses runs the entry + native binding, never the dashboard — so only this
+  // gate catches them. Without it `forge release promote` would select a stable forge with no
+  // working `forge dashboard`, violating the mandatory promoted-release boundary (FG-580).
+  const torn = join(workspace, "torn-dashboard-release");
+  execFileSync("/bin/sh", ["-c", 'mkdir -p "$1" && tar -C "$2" -cf - . | tar -C "$1" -xf -', "sh", torn, relB.releaseDir]);
+  execFileSync("/bin/sh", ["-c", 'chmod -R u+w "$1"', "sh", torn]);
+
+  // The premise, proven not assumed: as copied the candidate is genuinely promotable — the
+  // dashboard closure is what makes it so, and removing it is the ONLY mutation.
+  assert.doesNotThrow(() => validateCandidate(torn, home), "the untouched copy is a fully valid, dashboard-bearing release");
+
+  // MUTANT 1 — torn closure: drop a required dashboard runtime source file after build.
+  const server = join(torn, "dashboard", "src", "server.ts");
+  assert.ok(existsSync(server), "the valid release carries the dashboard server source");
+  rmSync(server);
+  assert.throws(() => validateCandidate(torn, home), /torn closure/i, "a release missing a required dashboard file is refused BY NAME");
+
+  // The refusal holds at the promotion surface and leaves the selection untouched.
+  promote({ home, candidate: relA.releaseDir });
+  assert.throws(() => promote({ home, candidate: torn }), /torn closure/i, "promote refuses the torn release too");
+  assert.equal(readSelection(home)?.manifest?.id, relA.manifest.id, "and the previously selected release is still selected");
+
+  // MUTANT 2 — no capability claim: an older control-plane-only manifest that never states
+  // the dashboard capability. Restore the file so the closure is intact, and mutate only the
+  // manifest — so the claim, not the bytes, is what this half refuses.
+  const restored = join(workspace, "no-claim-release");
+  execFileSync("/bin/sh", ["-c", 'mkdir -p "$1" && tar -C "$2" -cf - . | tar -C "$1" -xf -', "sh", restored, relB.releaseDir]);
+  execFileSync("/bin/sh", ["-c", 'chmod -R u+w "$1"', "sh", restored]);
+  const m = JSON.parse(readFileSync(join(restored, RELEASE_MANIFEST_NAME), "utf8"));
+  delete m.selfContainedFor;
+  writeFileSync(join(restored, RELEASE_MANIFEST_NAME), JSON.stringify(m, null, 2));
+  assert.throws(() => validateCandidate(restored, home), /dashboard capability/i, "a release not claiming the dashboard capability is refused BY NAME");
+  assert.throws(() => promote({ home, candidate: restored }), /dashboard capability/i, "promote refuses the unclaimed release too");
+  assert.equal(readSelection(home)?.manifest?.id, relA.manifest.id, "the selection is still untouched");
+});

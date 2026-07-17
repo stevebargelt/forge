@@ -8,6 +8,12 @@
 > dashboard at all — bundled, separately versioned, or intentionally unavailable — is an OPEN product decision
 > reserved to the operator under FG-572; nothing here decides it.** The workspace/hoisting outcome this PRD
 > specifies is unaffected and stands.
+>
+> **UPDATE (FG-580, `bc9286f`):** that open decision is now RESOLVED (operator Option A). The dashboard IS
+> bundled into the promoted release as a mandatory asset and `forge dashboard` runs from a release (resolved
+> from the executing release, boots offline via vendored client libs); the release-mode refusal is retired.
+> So read `forge dashboard start` under a stable release as working, not refused; `forge-dev dashboard start`
+> remains the checkout path.
 
 
 **Status:** draft, awaiting confirmation
@@ -34,7 +40,9 @@ After this spec lands:
 > `./bin/forge-dev dashboard start`. **Whether a stable release should ship the dashboard at all — bundled,
 > separately versioned, or intentionally unavailable — is an open product decision reserved to the operator
 > under FG-572; this note does not decide it.** The workspace/hoisting outcome this PRD specifies is
-> otherwise unaffected and stands.
+> otherwise unaffected and stands. **UPDATE (FG-580, `bc9286f`):** that decision landed as Option A — the
+> dashboard is now bundled into the release and `forge dashboard` runs from a promoted release, so the
+> refusal above is retired.
 - Dashboard's `queries.ts` imports row types from forge's `src/types/index.ts` — drift = build error.
 - README + quick-start describe a single install flow with the web view as an optional `forge dashboard` subcommand call, not a second-repo setup.
 - The standalone `~/code/forge-dashboard/` directory and GitHub repo are retired (deleted locally; archived on GitHub).

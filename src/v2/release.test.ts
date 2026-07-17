@@ -8,7 +8,69 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { renderEntry, readReleaseManifest, locateReleaseManifest, parseExecDescriptor, renderExecDescriptor, RELEASE_LOADER_NAME, RELEASE_ENTRY_SOURCE, RELEASE_MANIFEST_NAME } from "./release.js";
+import { renderEntry, readReleaseManifest, locateReleaseManifest, parseExecDescriptor, renderExecDescriptor, assertDashboardClosure, REQUIRED_DASHBOARD_FILES, REQUIRED_DASHBOARD_DEPS, RELEASE_LOADER_NAME, RELEASE_ENTRY_SOURCE, RELEASE_MANIFEST_NAME } from "./release.js";
+
+// FG-580: assertDashboardClosure is the pure predicate both buildRelease (refuse a torn
+// build) and `forge dashboard` (a torn/incomplete release fails named+nonzero, no dev
+// fallback) rely on. Build a complete dashboard closure as stubs, prove it passes, then
+// prove each required file / dep omission throws a message naming that input.
+function makeDashboardClosure(): string {
+  const root = mkdtempSync(join(tmpdir(), "fg580-dashclose-"));
+  for (const rel of REQUIRED_DASHBOARD_FILES) {
+    const p = join(root, rel);
+    mkdirSync(join(p, ".."), { recursive: true });
+    writeFileSync(p, "// stub\n");
+  }
+  for (const dep of REQUIRED_DASHBOARD_DEPS) {
+    mkdirSync(join(root, "node_modules", dep), { recursive: true });
+    writeFileSync(join(root, "node_modules", dep, "package.json"), "{}\n");
+  }
+  return root;
+}
+
+test("FG-580 assertDashboardClosure: a complete dashboard closure passes", () => {
+  const root = makeDashboardClosure();
+  try {
+    assert.doesNotThrow(() => assertDashboardClosure(root));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("FG-580 assertDashboardClosure: a MISSING required dashboard file throws BY NAME (mutation-sensitive per file)", () => {
+  // Proven red against the precise defect: without the per-file existence check, removing
+  // any one of these would NOT throw — every assert.throws below would fail. Each omission
+  // names the exact missing path, so the message is specific, not a generic "torn".
+  for (const rel of REQUIRED_DASHBOARD_FILES) {
+    const root = makeDashboardClosure();
+    try {
+      rmSync(join(root, rel), { force: true });
+      assert.throws(
+        () => assertDashboardClosure(root),
+        new RegExp(`required dashboard file '${rel.replace(/[/.]/g, (m) => "\\" + m)}'`, "i"),
+        `omitting ${rel} must throw naming it`,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("FG-580 assertDashboardClosure: a MISSING dashboard-relevant runtime dep throws BY NAME", () => {
+  for (const dep of REQUIRED_DASHBOARD_DEPS) {
+    const root = makeDashboardClosure();
+    try {
+      rmSync(join(root, "node_modules", dep), { recursive: true, force: true });
+      assert.throws(
+        () => assertDashboardClosure(root),
+        new RegExp(`required dashboard runtime dependency '${dep}'`, "i"),
+        `omitting the ${dep} dep must throw naming it`,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
 
 test("FG-569 entry: execs the PINNED absolute interpreter with tsx loaded in-process", () => {
   const entry = renderEntry("/opt/node-24/bin/node");

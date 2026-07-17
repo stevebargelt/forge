@@ -22,7 +22,7 @@ import {
   inProgressVerifications, reviewLoopRunPhases, hostVerificationsForTicket, hostVerificationsForCampaignItem, recentHostVerifications,
 } from "./queries.js";
 import type { GroupBy } from "./queries.js";
-import { renderShell } from "./shell.js";
+import { renderShell, contentSecurityPolicy, cspNonce } from "./shell.js";
 import { listTickets } from "@forge/backlog";
 import { getPlanUsage } from "./plan-usage.js";
 import { finishUnhandledRequest } from "./http-error.js";
@@ -47,7 +47,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   }
 
   if (path === "/") {
-    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(renderShell());
+    serveShell(res);
     return;
   }
 
@@ -221,11 +221,22 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   }
 
   if (!path.startsWith("/api/")) {
-    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(renderShell());
+    serveShell(res);
     return;
   }
 
   res.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "not found" }));
+}
+
+// FG-580: every HTML response carries `Content-Security-Policy: script-src 'self'
+// 'nonce-…'` so the browser enforces first-party-only script execution (no CDN JS) at
+// runtime. The same nonce is emitted into the shell's inline importmap so it is admitted.
+function serveShell(res: ServerResponse): void {
+  const nonce = cspNonce();
+  res.writeHead(200, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Content-Security-Policy": contentSecurityPolicy(nonce),
+  }).end(renderShell(nonce));
 }
 
 function clamp(n: number, lo: number, hi: number): number {

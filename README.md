@@ -6,7 +6,7 @@ A TypeScript CLI for orchestrating multi-agent AI workflows on a personal machin
 
 Forge is host-global: one install, one `~/.forge/forge.db`, used against any project on the machine. Each project gets a per-project setup (`forge init`) that wires the orchestrator block into its `CLAUDE.md`, creates a `.forge/` directory for project-level workflow overrides, and scaffolds a `backlog/` directory so `forge backlog` commands work immediately.
 
-The web view ships as a workspace package (`dashboard/`) — boot with `forge-dev dashboard start` from a checkout of this repo (it isn't bundled into a release; see [Dashboard](#dashboard)). It reads `~/.forge/forge.db` directly and renders agent outputs across all projects on the host.
+The web view ships as a workspace package (`dashboard/`) and is bundled into every promoted release, so `forge dashboard` runs from the stable `forge`; use `forge-dev dashboard start` when working from a checkout (see [Dashboard](#dashboard)). It reads `~/.forge/forge.db` directly and renders agent outputs across all projects on the host.
 
 ## Prerequisites
 
@@ -84,9 +84,13 @@ Full walkthrough: `docs/quick-start.md`. Multi-project specifics: `docs/how-to-u
 
 The web view ships as an npm workspace inside this repo (`dashboard/`).
 
-Run it **from a source checkout**, not from the stable `forge`: the dashboard is a separate workspace with its own dependency tree and is not bundled into a release, so `forge dashboard` refuses in release mode rather than pretending to run (bundling it is deferred to FG-572).
+Run it either way (FG-580). `forge dashboard` works from a **promoted release**: the dashboard is bundled into the release as a mandatory asset (a build from a source without `dashboard/`, or with a dirty dashboard/vendored asset, refuses by name), resolved from the executing release rather than your checkout. Its client libraries (preact/htm/marked) are vendored as first-party files and the server sends `Content-Security-Policy: script-src 'self'`, so the UI **boots offline** with no CDN-executed JS — the dashboard's provider/data APIs may still need network. When working from a checkout, use `forge-dev dashboard start` instead:
 
 ```bash
+# from the stable release
+forge dashboard start                        # boots http://127.0.0.1:8024
+
+# from a source checkout
 cd ~/code/forge
 ./bin/forge-dev dashboard start              # boots http://127.0.0.1:8024
 ./bin/forge-dev dashboard start --port 8025  # custom port

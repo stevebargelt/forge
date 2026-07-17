@@ -51,6 +51,7 @@ import {
   RELEASE_EXEC_NAME,
   RELEASE_LOADER_NAME,
   RELEASE_MANIFEST_NAME,
+  assertDashboardClosure,
   assertReleaseCloses,
   freezeReleaseFiles,
   parseExecDescriptor,
@@ -332,7 +333,11 @@ function validateUnit(dir: string, home: string): Candidate {
  *   - the entry and loader are PRESENT;
  *   - the CLOSURE RUNS — assertReleaseCloses executes the release's tsx loader AND loads
  *     its own better-sqlite3 binding under the pinned interpreter. This is what makes the
- *     "no mixed tree, no broken promotion" claim evidence rather than a file listing. */
+ *     "no mixed tree, no broken promotion" claim evidence rather than a file listing;
+ *   - the DASHBOARD CLOSURE is present and CLAIMED (FG-580): the manifest states the
+ *     `control-plane+dashboard` capability AND the release carries every required dashboard
+ *     runtime file + dep. A promoted release must run `forge dashboard`, so a control-plane-only
+ *     release (older forge) or one torn after build is refused before it can be selected. */
 export function validateCandidate(dir: string, home: string = FORGE_HOME): Candidate {
   const releaseDir = resolve(dir);
   if (!existsSync(releaseDir)) {
@@ -506,6 +511,30 @@ export function validateCandidate(dir: string, home: string = FORGE_HOME): Candi
   // The closure RUNS: executes the release's own tsx loader and loads its own native
   // binding under the pinned interpreter. Throws a named torn-closure error (FG-569) if not.
   assertReleaseCloses(releaseDir, interpreter);
+
+  // FG-580: the dashboard is a MANDATORY part of a promoted release. A candidate must both
+  // CLAIM the dashboard capability in its manifest and actually CARRY the closure that backs
+  // the claim — otherwise `forge release promote` could select a control-plane-only release
+  // (built by an older forge) or a release torn after build (dashboard/src/server.ts, a
+  // vendored client lib, or a dashboard dep removed), leaving the stable forge with no
+  // working `forge dashboard`. Both halves are checked, for the same reason the entry check
+  // has a string half and a bytes half: the manifest claim is what a reader trusts, and the
+  // closure is what actually runs — a release where they disagree is exactly the mixed state
+  // this gate exists to refuse.
+  if (manifest.selfContainedFor !== "control-plane+dashboard") {
+    throw new Error(
+      `forge release: refusing to promote — this release does not claim the mandatory dashboard capability.\n` +
+        `  release manifest:      ${manifestPath}\n` +
+        `  manifest selfContainedFor: ${manifest.selfContainedFor === undefined ? "(missing)" : JSON.stringify(manifest.selfContainedFor)}\n` +
+        `  expected:              "control-plane+dashboard"\n` +
+        `A promoted release MUST bundle a working \`forge dashboard\` (FG-580, Option A). A release that ` +
+        `does not state that capability was built by a forge that predates the dashboard bundle, so ` +
+        `selecting it would leave the stable forge with no dashboard.\n` +
+        `Fix: rebuild with \`forge release build\` from a source that includes dashboard/ and its vendored ` +
+        `client libs (run scripts/vendor-dashboard-libs.mjs).`,
+    );
+  }
+  assertDashboardClosure(releaseDir);
 
   return { releaseDir, manifest, interpreter };
 }

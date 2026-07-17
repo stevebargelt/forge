@@ -1,8 +1,8 @@
 // Usage view — token/cache analytics from model_calls.
 
-import { h } from "https://esm.sh/preact@10.24.0";
-import { useState } from "https://esm.sh/preact@10.24.0/hooks";
-import htm from "https://esm.sh/htm@3.1.1";
+import { h } from "preact";
+import { useState } from "preact/hooks";
+import htm from "htm";
 import { UsageLimits } from "./usage-limits.js";
 
 const html = htm.bind(h);

@@ -12,7 +12,7 @@
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync, execFileSync } from "node:child_process";
+import { spawnSync, spawn, execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, cpSync, writeFileSync, existsSync, lstatSync, readdirSync, rmSync, renameSync, symlinkSync, appendFileSync, readFileSync, chmodSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
@@ -40,7 +40,9 @@ function commitSource(root: string): void {
   // scripts/, docker/), so a build refuses a dirty seed/hook/docker file. Stage them
   // here alongside src/+package.json+lockfile, else buildRelease would refuse the
   // scratch's synced-but-uncommitted assets.
-  const paths = ["src", "package.json", "seeds", "scripts", "docker"].filter((p) => existsSync(join(root, p)));
+  // FG-580: the bundled dashboard is commit-bound too — stage it so buildRelease does not
+  // refuse the scratch's synced-but-uncommitted dashboard bytes.
+  const paths = ["src", "package.json", "seeds", "scripts", "docker", "dashboard"].filter((p) => existsSync(join(root, p)));
   for (const lf of ["package-lock.json", "npm-shrinkwrap.json"]) {
     if (existsSync(join(root, lf))) paths.push(lf);
   }
@@ -55,7 +57,11 @@ function commitSource(root: string): void {
  *  lacking one is refused as a torn closure — so every buildable fixture must carry them.
  *  Real bytes (not stubs) so the dirty-seed/hook rejection test can mutate a genuine file. */
 function copyBundledAssets(root: string): void {
-  for (const asset of ["seeds", "scripts", "docker"]) {
+  // FG-580: the dashboard is a bundled release input now — buildRelease REQUIRES it
+  // (assertDashboardClosure), so every buildable fixture must carry the real dashboard/
+  // (real bytes, incl. the vendored client libs, so the missing-vendored-lib mutation
+  // proof can remove a genuine file).
+  for (const asset of ["seeds", "scripts", "docker", "dashboard"]) {
     cpSync(join(sourceRoot, asset), join(root, asset), { recursive: true, dereference: true });
   }
 }
@@ -269,8 +275,8 @@ test("FG-569 bundled assets (EXECUTED, NO node on PATH): `forge init` runs FROM 
   assert.ok(existsSync(join(built.releaseDir, "seeds")), "seeds/ is bundled into the closure");
   assert.ok(existsSync(join(built.releaseDir, "scripts")), "scripts/ is bundled into the closure");
   assert.ok(existsSync(join(built.releaseDir, "docker")), "docker/ is bundled into the closure");
-  // The claim is scoped honestly to the control plane — the release does NOT run the dashboard.
-  assert.equal(built.manifest.selfContainedFor, "control-plane", "the manifest scopes self-containment to the control-plane command set");
+  // FG-580: the claim now truthfully covers the dashboard too — it is bundled and runs from the release.
+  assert.equal(built.manifest.selfContainedFor, "control-plane+dashboard", "the manifest states self-containment over the control-plane set AND the dashboard");
 
   const project = mkdtempSync(join(workspace, "init-proj-"));
   execFileSync("git", ["init", "-q"], { cwd: project });
@@ -650,18 +656,140 @@ test("FG-569 GAP 2 (builder identity): builderCommit is recorded and EQUALS comm
   );
 });
 
-test("FG-569 Resolution B (dashboard refusal, EXECUTED, NO node on PATH): `forge dashboard` refuses in release mode — named, nonzero — before resolving dashboard/", () => {
-  // The dashboard is a SEPARATE workspace, deliberately not bundled. Run from the built
-  // release under a node-free PATH: both the bare command and `dashboard start` must exit
-  // nonzero with the named refusal, never the confusing "could not locate the dashboard
-  // workspace" from resolveForgeRoot (which would mean it tried to resolve dashboard/ first).
-  for (const args of [["dashboard"], ["dashboard", "start"]]) {
-    const { r } = runEntryUnderHostilePath(args);
-    assert.notEqual(r.status, 0, `forge ${args.join(" ")} must exit nonzero in release mode: ${r.stdout}`);
-    assert.match(r.stderr, /not available from a control-plane release build/i, `named refusal for: ${args.join(" ")}`);
-    assert.match(r.stderr, /FG-572|Child 5/, "the refusal points at the later owner");
-    assert.doesNotMatch(r.stderr, /could not locate the dashboard workspace/i, "it refused BEFORE resolving dashboard/src/server.ts");
+/** Poll a URL until it answers or the deadline passes — the dashboard boots asynchronously
+ *  (a spawned tsx child), so a request may race the listen(). */
+async function pollGet(url: string, timeoutMs: number): Promise<{ status: number; body: string; contentType: string | null }> {
+  const deadline = Date.now() + timeoutMs;
+  let lastErr: unknown;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(url);
+      const body = await res.text();
+      return { status: res.status, body, contentType: res.headers.get("content-type") };
+    } catch (e) {
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 150));
+    }
   }
+  throw new Error(`pollGet timed out for ${url}: ${String(lastErr)}`);
+}
+
+test("FG-580 (dashboard bundled, EXECUTED, NO node on PATH): the release ships the complete dashboard closure and `forge dashboard start` boots under the release's pinned runtime, offline", async () => {
+  // (1) The release carries the whole dashboard runtime — entry, tsconfig (the runtime
+  // @forge/* resolver), a representative static asset, and every VENDORED client lib
+  // (offline boot) — beside src/ so the sibling layout / tsconfig-paths hold.
+  for (const rel of [
+    "dashboard/src/server.ts",
+    "dashboard/tsconfig.json",
+    "dashboard/package.json",
+    "dashboard/client/main.js",
+    "dashboard/client/vendor/preact/preact.js",
+    "dashboard/client/vendor/preact/hooks.js",
+    "dashboard/client/vendor/htm/htm.js",
+    "dashboard/client/vendor/marked/marked.js",
+  ]) {
+    assert.ok(existsSync(join(built.releaseDir, rel)), `${rel} is bundled into the release closure`);
+  }
+  assert.ok(existsSync(join(built.releaseDir, "src")), "src/ sits beside dashboard/ in the release (sibling layout preserved for @forge/* resolution)");
+
+  // (2) Bare `forge dashboard` from the release under a node-free PATH: help, exit 0, NO refusal.
+  const { r: bare } = runEntryUnderHostilePath(["dashboard"]);
+  assert.equal(bare.status, 0, `bare forge dashboard must exit 0 from the release: ${bare.stderr}`);
+  assert.doesNotMatch(bare.stderr, /not available from a control-plane release build/i, "the FG-569 release-mode refusal is retired");
+
+  // (3) BOOT the server from the release under a node-free PATH on a disposable port and a
+  // disposable FORGE_HOME. Prove it serves its shell + vendored-lib import map + a VENDORED
+  // lib first-party (offline boot — no esm.sh), then kill the whole process group so no
+  // orphaned server keeps the port. process.execPath under the release IS the pinned
+  // interpreter, so a node-free caller PATH cannot stop it.
+  const port = 8100 + Math.floor(Math.random() * 800);
+  const nopath = mkdtempSync(join(workspace, "dash-nopath-"));
+  const dashHome = mkdtempSync(join(workspace, "dash-fh-"));
+  const env = { PATH: nopath, HOME: process.env.HOME ?? "/tmp", FORGE_HOME: dashHome };
+  const child = spawn(built.entryPath, ["dashboard", "start", "--port", String(port)], { env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+  let stderr = "";
+  child.stderr?.on("data", (d) => { stderr += String(d); });
+  try {
+    const base = `http://127.0.0.1:${port}`;
+    const shell = await pollGet(`${base}/`, 12000);
+    assert.equal(shell.status, 200, `the release-served dashboard shell responds 200 (stderr: ${stderr})`);
+    assert.match(shell.body, /<script type="importmap"/, "the shell carries the vendored-lib import map");
+    assert.match(shell.body, /\/client\/vendor\/preact\/preact\.js/, "the import map points preact at the first-party vendored path");
+    assert.doesNotMatch(shell.body, /esm\.sh/, "the release-served shell references NO esm.sh/CDN origin");
+    const lib = await pollGet(`${base}/client/vendor/preact/preact.js`, 4000);
+    assert.equal(lib.status, 200, "the vendored preact serves first-party from the release closure");
+    assert.match(lib.contentType ?? "", /javascript/, "the vendored lib serves as executable JS (module MIME)");
+  } finally {
+    try { process.kill(-child.pid!, "SIGKILL"); } catch { /* group already gone */ }
+  }
+});
+
+test("FG-580 (closure validation, mutation proofs): a source missing a required dashboard entry / static asset / vendored lib / dashboard-relevant dep is REFUSED by name, no release produced", () => {
+  // Each removal targets a DISTINCT required input and asserts the build refuses with a
+  // message naming that input. Proven red against the precise defect: with the
+  // assertDashboardClosure(sourceRoot) gate removed, each build would proceed (git-archive
+  // simply omits the absent tracked file; a missing dep is not otherwise checked pre-copy),
+  // so every assert.throws below flips to a passing build — the test goes RED. See notes.
+  const cases: Array<{ label: string; remove: string; underNodeModules?: boolean; pattern: RegExp }> = [
+    { label: "entry", remove: "dashboard/src/server.ts", pattern: /required dashboard file 'dashboard\/src\/server\.ts'/i },
+    { label: "static", remove: "dashboard/client/main.js", pattern: /required dashboard file 'dashboard\/client\/main\.js'/i },
+    { label: "vendored", remove: "dashboard/client/vendor/preact/preact.js", pattern: /required dashboard file 'dashboard\/client\/vendor\/preact\/preact\.js'/i },
+    { label: "dep", remove: "marked", underNodeModules: true, pattern: /required dashboard runtime dependency 'marked'/i },
+  ];
+  for (const c of cases) {
+    const src = makeLockSource(`dash-omit-${c.label}-`);
+    cpSync(join(sourceRoot, "package-lock.json"), join(src, "package-lock.json"));
+    const target = c.underNodeModules ? join(src, "node_modules", c.remove) : join(src, c.remove);
+    rmSync(target, { recursive: true, force: true });
+    commitSource(src); // node_modules is untracked; tracked-file removals commit cleanly
+    assert.throws(
+      () => buildRelease({ sourceRoot: src, home: buildHome, outDir: join(workspace, `dash-omit-${c.label}-rel`) }),
+      c.pattern,
+      `omitting the dashboard ${c.label} must refuse the build by name`,
+    );
+    assert.ok(!existsSync(join(workspace, `dash-omit-${c.label}-rel`)), `a refused build (${c.label}) leaves no release behind`);
+  }
+});
+
+test("FG-580 (Option A, mutation proof): a source WITHOUT a dashboard/ dir REFUSES the build BY NAME — no control-plane-only release with a +dashboard manifest", () => {
+  // The capability-claim invariant: selfContainedFor is ALWAYS "control-plane+dashboard",
+  // so a source that cannot furnish a dashboard closure must NOT produce a release at all.
+  // Pre-fix, the dashboard gate was presence-conditional (`if (hasDashboard) …`) and
+  // dashboardTracked was `[]` for a dashboard-less source — so this build SUCCEEDED and
+  // emitted a manifest claiming a dashboard the release did not carry. This test observed
+  // RED against exactly that defect (the build completed instead of throwing). With the
+  // mandatory gate it refuses by name.
+  const src = makeLockSource("no-dashboard-");
+  cpSync(join(sourceRoot, "package-lock.json"), join(src, "package-lock.json"));
+  // Remove the dashboard/ workspace that copyBundledAssets staged — everything ELSE the
+  // build needs is present, so this isolates the mandatory-dashboard refusal.
+  rmSync(join(src, "dashboard"), { recursive: true, force: true });
+  commitSource(src);
+  assert.throws(
+    () => buildRelease({ sourceRoot: src, home: buildHome, outDir: join(workspace, "no-dashboard-rel") }),
+    /has no dashboard\/ workspace, but a promoted release MUST bundle a working `forge dashboard`/i,
+    "a dashboard-less source must REFUSE the build by name, not emit a control-plane-only +dashboard release",
+  );
+  assert.ok(!existsSync(join(workspace, "no-dashboard-rel")), "a refused build leaves no release behind");
+});
+
+test("FG-580 (commit-binding): a dirty (uncommitted) VENDORED client lib refuses the build BY NAME — the manifest commit cannot describe dashboard bytes it did not produce", () => {
+  const src = makeLockSource("dash-dirty-vendor-");
+  cpSync(join(sourceRoot, "package-lock.json"), join(src, "package-lock.json"));
+  commitSource(src);
+  // Baseline: the committed tree (with vendored libs) builds cleanly.
+  buildRelease({ sourceRoot: src, home: buildHome, outDir: join(workspace, "dash-dirty-vendor-clean") });
+  // Dirty a VENDORED client lib — appending a comment leaves valid JS but makes
+  // dashboard/client dirty relative to HEAD, so the commit no longer describes the shipped bytes.
+  const vendored = join(src, "dashboard", "client", "vendor", "htm", "htm.js");
+  assert.ok(existsSync(vendored), "the vendored client lib is present in the fixture");
+  appendFileSync(vendored, "\n// FG-580 uncommitted vendored edit\n");
+  assert.throws(
+    () => buildRelease({ sourceRoot: src, home: buildHome, outDir: join(workspace, "dash-dirty-vendor-rel") }),
+    /refusing to build a release from a dirty source/i,
+    "a dirty VENDORED client lib must refuse the build",
+  );
+  assert.ok(!existsSync(join(workspace, "dash-dirty-vendor-rel")), "a refused build leaves no release behind");
 });
 
 test("FG-569 Resolution B (dirty seed/hook REFUSED at build): an uncommitted edit to a bundled seed OR script refuses the build — the manifest commit would not describe the shipped bytes", () => {
@@ -717,7 +845,7 @@ test("FG-569 Resolution B (required asset missing): a source lacking a bundled a
 function makeFullSource(label: string): string {
   const src = mkdtempSync(join(workspace, label));
   execFileSync("git", ["init", "-q"], { cwd: src });
-  for (const rel of ["src", "package.json", "package-lock.json", "seeds", "scripts", "docker"]) {
+  for (const rel of ["src", "package.json", "package-lock.json", "seeds", "scripts", "docker", "dashboard"]) {
     const from = join(sourceRoot, rel);
     if (existsSync(from)) cpSync(from, join(src, rel), { recursive: true, dereference: true });
   }
@@ -766,7 +894,7 @@ test("FG-569 successor build (EXECUTED, RED pre-fix / GREEN after): release A bu
   assert.notEqual(bResult.manifest.builderCommit, bResult.manifest.commit, "builderCommit is A's identity, NOT B's source commit — substituting the source commit must go RED");
 });
 
-test("FG-569 Resolution B (EXECUTED, SOURCE RENAMED AWAY): supported commands run FROM THE RELEASE with the source checkout inaccessible — no fallback", () => {
+test("FG-569 Resolution B (EXECUTED, SOURCE RENAMED AWAY): supported commands — INCLUDING the dashboard SERVER — run FROM THE RELEASE with the source checkout inaccessible — no fallback", async () => {
   // The sharpest proof of self-containment for the control-plane set: build a release
   // from an isolated source, then RENAME the source away so it cannot be resolved, and
   // exercise the release's own entry. Every supported command must run from the release's
@@ -787,10 +915,13 @@ test("FG-569 Resolution B (EXECUTED, SOURCE RENAMED AWAY): supported commands ru
   assert.match(readFileSync(join(project, "CLAUDE.md"), "utf8"), /<!-- forge:orchestrator-start -->/, "init rendered CLAUDE.md from the release's bundled seed");
   assert.ok(existsSync(join(project, ".git", "hooks", "commit-msg")), "init installed the git hook from the release's bundled scripts/");
 
-  // 2) forge dashboard REFUSES in release mode — nonzero + named — without consulting the source.
+  // 2) FG-580: forge dashboard is BUNDLED — the bare command shows help and exits 0 from
+  // the release's OWN bytes (source gone), no release-mode refusal, no reach to the source.
   const dashR = spawnSync(built2.entryPath, ["dashboard"], { encoding: "utf8", env: baseEnv });
-  assert.notEqual(dashR.status, 0, "forge dashboard must refuse in release mode");
-  assert.match(dashR.stderr, /not available from a control-plane release build/i, "named release-mode refusal");
+  assert.equal(dashR.status, 0, `forge dashboard (bundled) must succeed from the release: ${dashR.stderr}`);
+  assert.doesNotMatch(dashR.stderr, /not available from a control-plane release build/i, "the FG-569 release-mode refusal is retired");
+  assert.doesNotMatch(dashR.stdout + dashR.stderr, /\.GONE/, "dashboard did not reach the renamed-away source checkout");
+  assert.match(dashR.stdout + dashR.stderr, /Boot the dashboard HTTP server|Web view of forge runs/i, "the bundled dashboard command help renders from the release");
 
   // 3) A representative set of OTHER supported commands START without the source checkout.
   const verR = spawnSync(built2.entryPath, ["--version"], { encoding: "utf8", env: baseEnv });
@@ -807,4 +938,35 @@ test("FG-569 Resolution B (EXECUTED, SOURCE RENAMED AWAY): supported commands ru
   const provR = spawnSync(built2.entryPath, ["release", "provenance", "--json"], { encoding: "utf8", env: baseEnv });
   assert.equal(provR.status, 0, `release provenance failed: ${provR.stderr}`);
   assert.equal(JSON.parse(provR.stdout).bindingLoads, true, "the closure's binding loaded from the release, source gone");
+
+  // 5) FG-580 (MEDIUM 4): the dashboard SERVER actually BOOTS from the release WITH the
+  // source checkout renamed away — the production scenario (checkout unavailable AND the
+  // server serving) proven in ONE scenario, not just `forge dashboard` help. Bare help (step
+  // 2) does not exercise the server; a self-contained release must serve the dashboard from
+  // its OWN bytes when the source is gone. Boots under the same node-free PATH on a disposable
+  // port + FORGE_HOME, serves its shell + vendored-lib import map + a VENDORED lib first-party
+  // (offline boot — no esm.sh), then kills the whole process group so no orphan holds the port.
+  const dashPort = 8100 + Math.floor(Math.random() * 800);
+  const dashHome = mkdtempSync(join(workspace, "srcgone-dash-fh-"));
+  const dashChild = spawn(built2.entryPath, ["dashboard", "start", "--port", String(dashPort)], {
+    env: { ...baseEnv, FORGE_HOME: dashHome },
+    detached: true,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let dashStderr = "";
+  dashChild.stderr?.on("data", (d) => { dashStderr += String(d); });
+  try {
+    const base = `http://127.0.0.1:${dashPort}`;
+    const shell = await pollGet(`${base}/`, 12000);
+    assert.equal(shell.status, 200, `the dashboard server booted from the release (source gone) responds 200 (stderr: ${dashStderr})`);
+    assert.match(shell.body, /<script type="importmap"/, "the release-served shell carries the vendored-lib import map, source gone");
+    assert.match(shell.body, /\/client\/vendor\/preact\/preact\.js/, "the import map points preact at the first-party vendored path");
+    assert.doesNotMatch(shell.body, /esm\.sh/, "the release-served shell references NO esm.sh/CDN origin");
+    assert.doesNotMatch(dashStderr, /\.GONE/, "the dashboard server did not reach the renamed-away source checkout");
+    const lib = await pollGet(`${base}/client/vendor/preact/preact.js`, 4000);
+    assert.equal(lib.status, 200, "the vendored preact serves first-party from the release closure, source gone");
+    assert.match(lib.contentType ?? "", /javascript/, "the vendored lib serves as executable JS (module MIME)");
+  } finally {
+    try { process.kill(-dashChild.pid!, "SIGKILL"); } catch { /* group already gone */ }
+  }
 });

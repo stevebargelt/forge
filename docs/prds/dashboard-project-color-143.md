@@ -4,6 +4,8 @@
 > They predate the stable/dev split. Stable `forge` refuses `dashboard` in release mode (separate workspace,
 > not bundled into a release; deferred to FG-572). Read them as `./bin/forge-dev dashboard start` from a
 > source checkout. **The colour-resolution design this PRD specifies is unaffected and stands.**
+> **UPDATE (FG-580, `bc9286f`):** that deferral is RESOLVED — the dashboard is now bundled into the release
+> and `forge dashboard` runs from a promoted release, so the release-mode refusal above is retired.
 
 
 **Status:** draft, awaiting confirmation
@@ -26,6 +28,8 @@ After this spec lands:
 > stable/dev split. Stable `forge` refuses `dashboard` in release mode (the dashboard is a separate workspace,
 > not bundled into a release; deferred to FG-572). Read them as `./bin/forge-dev dashboard start` from a
 > source checkout. The color-resolution design this PRD specifies is unaffected and stands.
+> **UPDATE (FG-580, `bc9286f`):** deferral RESOLVED — the dashboard is now bundled and `forge dashboard`
+> runs from a promoted release; the release-mode refusal is retired.
 
 
 - **Project filter UI** (chip row / dropdown to "show only this project"). Worth doing later if label+color alone isn't enough; for now the scan affordance is the win.
