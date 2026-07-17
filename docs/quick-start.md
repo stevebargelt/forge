@@ -213,8 +213,11 @@ When new forge commits arrive (new agents, workflows, CLI behavior), `forge upgr
 ```bash
 cd ~/code/my-app
 forge upgrade                  # refreshes ~/.forge/ from the running release, re-inits project; runs release check
-forge upgrade --dry-run        # see what would change without doing it
+forge upgrade --dry-run        # see what would change without doing it (can exit 1)
+forge upgrade --json           # the structured result, for scripts
 ```
+
+**`forge upgrade` exits nonzero whenever something you asked for didn't happen** — not just the release refusal below, but a dirty checkout, a failed `npm install` or `install-seeds.sh`, a RACI that won't compile, a project with no forge block, a failed `--rebuild-image`, or a crashed release check. It prints `Upgrade INCOMPLETE — <reasons>` instead of `Upgrade complete.` and `--json` reports the same states as `ok:false` plus an `unresolved` list. Operator skips (`--skip-git`, `--skip-npm`, `--skip-project`) are *not* failures and exit 0. `--dry-run` follows the same rule, so a dry run can exit 1 too — and a clean one only means nothing decidable *without executing* is wrong. Full contract: `docs/how-to-upgrade.md`.
 
 Upgrade installs the seeds of **whichever forge you ran**: the promoted release under `forge`, your working tree under `forge-dev`. Advancing the checkout is separate — `git pull`, `npm install`, and `--rebuild-image` are dev-checkout work, refused under a release (which exits nonzero and says so). Do those from the checkout:
 
@@ -226,7 +229,7 @@ cd ~/code/forge
 
 Moving the machine-wide `forge` onto new commits is still `release build` → `release promote` from an updated checkout (step 1). This step refreshes `~/.forge/` and project state — not the stable `forge` itself.
 
-After the upgrade steps complete, `forge upgrade` automatically runs a read-only release check — image, runtime CLIs, auth credentials, policies, and seed drift — and surfaces any problems before the next dispatch. Run `forge doctor` for the full report, or `forge setup` on a new machine to create the active model policy from the seed at the same time.
+After the upgrade steps complete, `forge upgrade` automatically runs a read-only release check — image, runtime CLIs, auth credentials, policies, and seed drift — and surfaces any problems before the next dispatch. It is skipped on a `--dry-run`, and skipped (saying so) when the seed install didn't run, since its verdict would describe a `~/.forge` the upgrade never touched. Run `forge doctor` for the full report, or `forge setup` on a new machine to create the active model policy from the seed at the same time.
 
 New machine? See `docs/work-laptop-setup.md` for the full setup checklist.
 

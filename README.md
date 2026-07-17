@@ -125,7 +125,9 @@ forge upgrade --skip-project     # refresh ~/.forge/ from the running release (n
 forge-dev upgrade                # from ~/code/forge: also pull, npm install, re-init this project
 ```
 
-Because seed installation is release-owned, `forge upgrade` repairs a drifted `~/.forge/` on a machine that has never cloned forge. See `docs/how-to-upgrade.md` for all flags, the execution-mode split, and the multi-project flow.
+Because seed installation is release-owned, `forge upgrade` repairs a drifted `~/.forge/` on a machine that has never cloned forge.
+
+`forge upgrade` exits nonzero whenever any requested step did not happen — a refusal, a dirty checkout, a failed install, a stale routing policy, a project with no forge block, a crashed release check — and closes `Upgrade INCOMPLETE — <reasons>` instead of `Upgrade complete.` Operator skips are not failures. `--json` reports the same states as `ok` plus an `unresolved` list, so scripts and humans cannot disagree about whether an upgrade did what was asked. See `docs/how-to-upgrade.md` for all flags, the exit-code and `--json` contract, the execution-mode split, and the multi-project flow.
 
 Note that `forge upgrade` refreshes `~/.forge/` seeds — it does not build or promote a release, so the stable machine-wide `forge` keeps running the release you last promoted until you `forge release build` and `forge release promote` again.
 
