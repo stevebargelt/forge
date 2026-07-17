@@ -144,3 +144,23 @@ adding the copy without commit-binding fails AC3. The build fanout cannot sequen
 **OPEN QUESTION 2 (low, has a default):** launch from a release — keep the current child-tsx spawn
 (`cwd=dashboardDir`, preserves tsconfig-paths) vs in-process via the release forge-loader. **Default: child-tsx
 spawn.**
+
+## Operator decision — 2026-07-17 (offline / CDN vendoring)
+
+**A promoted release dashboard MUST boot without fetching executable JavaScript from the internet.** Today
+Preact, HTM, and browser-side Marked load from `https://esm.sh`; only Marked is installed locally (and only
+server-side, unused). A supposedly immutable, self-contained release must not execute CDN-delivered code that
+is **outside its content binding**. Therefore:
+
+- **Vendor/pin Preact, HTM, and the browser-side Marked build into the release** as first-party
+  `dashboard/client` assets, and rewrite the `esm.sh` imports (`main.js:3-4`, `renderers.js:7`, `backlog.js:6-8`,
+  `governance.js:7-8`, `usage-limits.js:1-2`) to those local paths.
+- The vendored files are **closure inputs and commit-bound** like the rest of the dashboard (a dirty/absent
+  vendored lib refuses the build; closure validation covers them).
+- **"Offline" scope:** it means the local UI **boots and renders** with no network fetch of executable JS.
+  Provider/data APIs the dashboard calls may still require network — that is not in scope here.
+
+This supersedes the census's "assume network at smoke time" default. **Updated AC-6:** the browser smoke must
+prove the primary page boots and renders representative UI with **network to executable-JS origins blocked**
+(no `esm.sh`/CDN fetch); first-party `/client/*` assets serve from the release closure. Add a mutation proof:
+omitting a vendored client lib makes the offline-boot test go red.
