@@ -1,9 +1,11 @@
 ---
 id: FG-586
 type: story
-status: active
+status: done
 title: an authoritative red result.json that is valid JSON behind one stray leading character is silently downgraded to failed/inconclusive — a real fail:0.98 + shipping-reviewer needs_fix were erased by a leading '+'
 created: 2026-07-17
+closed: 2026-07-17
+closed_commit: 251fa6d2e5ceac681f339ad0393d75baca78b57e
 ---
 
 > **Recovery disposition (operator, 2026-07-17):** KEEP ACTIVE — an orchestration-integrity defect, not
