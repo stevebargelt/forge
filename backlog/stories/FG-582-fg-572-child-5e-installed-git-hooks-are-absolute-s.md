@@ -1,0 +1,53 @@
+---
+id: FG-582
+type: story
+status: active
+title: "FG-572 Child 5e: installed git hooks are absolute symlinks into the dev checkout and do not follow a promotion (carries an unresolved T9 anchoring tension)"
+created: 2026-07-17
+---
+
+**Parent:** FG-572 · **Epic:** FG-561 · **BLOCKED — carries an unresolved T9/anchoring tension (see below).**
+**Source:** FG-572 read-only architecture pass, run `run-fg-572-installed-surface-compatibility-read-only-architecture-pass-75b811`, at `12b13c2`.
+
+## Current state (VERIFIED on host at 12b13c2 — the arch pass could not see this from its mount)
+
+`forge init` installs git hooks as **absolute symlinks** (`src/cli/commands/init.ts:196`, `executeHookPlan` →
+`symlinkSync(plan.source, plan.target)`). Confirmed live in this repo:
+
+    .git/hooks/commit-msg -> /Users/stevebargelt/code/forge/scripts/git-hooks/commit-msg-no-ai-attribution
+
+That is an absolute path into the **dev checkout**. Under a promotion the hook keeps executing dev bytes
+regardless of which release is current — the installed hook does not follow the promotion at all.
+
+## The T9 tension — genuinely an operator call, do not resolve unilaterally
+
+Two defensible directions pull opposite ways:
+
+- **Symlink through `$FORGE_HOME/current`** — promotion re-points every hook atomically, for free.
+- **Pin to the install-time release** — matches T9's "a process anchors at start" anchoring discipline.
+
+The campaign has settled anchoring for **processes** but NOT for **installed pointers**, which is a distinct
+case. A hook is not a running process; it is re-resolved at every invocation.
+
+Architect's default if unanswered: **pin to `current`**, since a hook executing a superseded release's bytes
+indefinitely is the worse failure. But this is explicitly flagged as the operator's call, and T9 itself
+("whether an already-running process is affected by a mid-flight promotion") is an **open acceptance case, not
+an established fact** (PRD ~line 379) — the design must test it, not assert it.
+
+## Also in scope
+
+Disambiguate `init.ts:185`'s `exists-other` between a **stale forge hook** (safe to re-point) and a **foreign
+hook** (must never be clobbered — same operator-owned-surface principle as FG-578).
+
+## Blocked on
+
+1. The T9 anchoring decision for installed pointers (operator).
+2. FG-577 (5a) landing, so the install path resolves from the running runtime.
+
+## Acceptance (EXECUTED) — draft, finalize after the T9 call
+
+- A promotion re-points (or deliberately does not re-point) hooks per the chosen policy, with a test observed
+  RED against current absolute-dev-path behavior.
+- A foreign hook is never clobbered; a stale forge hook is distinguished from it by evidence, not by name.
+- Tests use **disposable FORGE_HOME + disposable install prefixes**; no test rewrites this repo's real
+  `.git/hooks`.
