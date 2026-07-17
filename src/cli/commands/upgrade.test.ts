@@ -11,7 +11,8 @@ import {
   tryNpmInstall, maybeRebuildImage, renderReleaseCheckLines, decideDevAdvancement, upgradeAssetPaths, refuseDevAdvance,
   classifyStep, unresolvedReasons,
   type GitPullOutcome, type NpmInstallOutcome, type AssetInstallOutcome, type RoutingPolicyOutcome,
-  type ProjectInitOutcome, type ImageRebuildOutcome, type ReleaseCheckOutcome, type UpgradeStepOutcomes,
+  type ProjectInitOutcome, type SlashCommandsOutcome, type ImageRebuildOutcome, type ReleaseCheckOutcome,
+  type UpgradeStepOutcomes,
 } from "./upgrade.js";
 import { assetRoot } from "../../v2/asset-root.js";
 import { buildReleaseReport } from "../../v2/release-doctor.js";
@@ -266,6 +267,16 @@ const PROJECT_INIT: Record<ProjectInitOutcome, Verdict> = {
   "needs-markers": "unresolved",
 };
 
+const SLASH_COMMANDS: Record<SlashCommandsOutcome, Verdict> = {
+  installed: "resolved",
+  "already-current": "resolved",
+  "would-install": "resolved",
+  // The project owns the file; forge not clobbering it is the command working.
+  // Visible in --json (`slashCommands` + `slashCommandOverrides`), not exit 1.
+  "user-override": "resolved",
+  "not-run": "resolved",
+};
+
 const IMAGE_REBUILD: Record<ImageRebuildOutcome, Verdict> = {
   ran: "resolved",
   "would-rebuild": "resolved",
@@ -287,6 +298,7 @@ const EXPECTED: { [K in keyof UpgradeStepOutcomes]: Record<UpgradeStepOutcomes[K
   assetInstall: ASSET_INSTALL,
   routingPolicy: ROUTING_POLICY,
   projectInit: PROJECT_INIT,
+  slashCommands: SLASH_COMMANDS,
   imageRebuild: IMAGE_REBUILD,
   releaseCheck: RELEASE_CHECK,
 };
@@ -307,7 +319,7 @@ test("FG-577 (criterion 10): EVERY variant of EVERY step is classified — no va
     }
   }
   // Guards against the tables silently emptying and the loop vacuously passing.
-  assert.equal(checked, 8 + 7 + 4 + 4 + 8 + 5 + 4);
+  assert.equal(checked, 8 + 7 + 4 + 4 + 8 + 5 + 5 + 4);
 });
 
 test("FG-577 (criterion 10): unresolvedReasons enumerates the outcomes object's own keys", () => {
@@ -315,7 +327,8 @@ test("FG-577 (criterion 10): unresolvedReasons enumerates the outcomes object's 
   // newly added step is classified by construction rather than by memory.
   const allClean: UpgradeStepOutcomes = {
     gitPull: "pulled", npmInstall: "installed", assetInstall: "installed",
-    routingPolicy: "recompiled", projectInit: "refreshed", imageRebuild: "ran", releaseCheck: "ran",
+    routingPolicy: "recompiled", projectInit: "refreshed", slashCommands: "installed",
+    imageRebuild: "ran", releaseCheck: "ran",
   };
   assert.deepEqual(unresolvedReasons(allClean), []);
 
@@ -326,7 +339,8 @@ test("FG-577 (criterion 10): unresolvedReasons enumerates the outcomes object's 
   // Every unresolved step contributes — none masks another.
   const allBroken: UpgradeStepOutcomes = {
     gitPull: "failed", npmInstall: "failed", assetInstall: "failed",
-    routingPolicy: "failed", projectInit: "needs-markers", imageRebuild: "failed", releaseCheck: "failed",
+    routingPolicy: "failed", projectInit: "needs-markers", slashCommands: "user-override",
+    imageRebuild: "failed", releaseCheck: "failed",
   };
   assert.equal(unresolvedReasons(allBroken).length, 7);
 });

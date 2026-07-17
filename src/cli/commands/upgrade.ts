@@ -10,6 +10,7 @@ import {
   executeGitignoreEntriesPlan,
   executeHookPlan,
   planClaudeCommands,
+  skippedClaudeCommands,
   planClaudeHooks,
   planCommitMsgHook,
   planGitignoreEntries,
@@ -157,6 +158,13 @@ export type ProjectInitOutcome =
 
 export type ImageRebuildOutcome = "ran" | "would-rebuild" | "skipped" | "refused" | "failed";
 
+export type SlashCommandsOutcome =
+  | "installed"
+  | "already-current"
+  | "would-install"
+  | "user-override"
+  | "not-run";
+
 export type ReleaseCheckOutcome = "ran" | "skipped-dry-run" | "skipped-asset-install" | "failed";
 
 export type UpgradeStepOutcomes = {
@@ -165,6 +173,7 @@ export type UpgradeStepOutcomes = {
   assetInstall: AssetInstallOutcome;
   routingPolicy: RoutingPolicyOutcome;
   projectInit: ProjectInitOutcome;
+  slashCommands: SlashCommandsOutcome;
   imageRebuild: ImageRebuildOutcome;
   releaseCheck: ReleaseCheckOutcome;
 };
@@ -234,6 +243,20 @@ const PROJECT_INIT: Record<ProjectInitOutcome, Resolution> = {
   "needs-markers": unresolvedBecause("orchestrator block NOT refreshed — needs manual markers"),
 };
 
+// A project-local override is the PROJECT's standing answer, not a failed
+// request: forge declining to clobber a file it does not own is the command
+// working. So it is resolved — an exit code that fires forever on every project
+// that deliberately owns its own /orient is not a signal. It is still a state a
+// script must be able to SEE, which is what `slashCommands` + the named
+// `slashCommandOverrides` list are for; the human ⚠ says the same thing.
+const SLASH_COMMANDS: Record<SlashCommandsOutcome, Resolution> = {
+  installed: resolved,
+  "already-current": resolved,
+  "would-install": resolved,
+  "user-override": resolved,
+  "not-run": resolved,
+};
+
 const IMAGE_REBUILD: Record<ImageRebuildOutcome, Resolution> = {
   ran: resolved,
   "would-rebuild": resolved,
@@ -261,6 +284,7 @@ export function classifyStep(step: UpgradeStep): Resolution {
     case "assetInstall": return ASSET_INSTALL[step.outcome];
     case "routingPolicy": return ROUTING_POLICY[step.outcome];
     case "projectInit": return PROJECT_INIT[step.outcome];
+    case "slashCommands": return SLASH_COMMANDS[step.outcome];
     case "imageRebuild": return IMAGE_REBUILD[step.outcome];
     case "releaseCheck": return RELEASE_CHECK[step.outcome];
     default: {
@@ -311,6 +335,10 @@ export type UpgradeResult = {
   assetInstall: AssetInstallOutcome;
   routingPolicy: RoutingPolicyOutcome;
   projectInit: ProjectInitOutcome;
+  slashCommands: SlashCommandsOutcome;
+  /** The commands forge did NOT install because the project already owns that
+   *  path — the same set the human ⚠ names, so a script sees it too. */
+  slashCommandOverrides: string[];
   imageRebuild: ImageRebuildOutcome;
   releaseCheck: ReleaseCheckOutcome;
   releaseProblems: string[] | null;
@@ -517,6 +545,8 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
       // Re-running the install plans is idempotent: already-current entries
       // no-op; updates apply when the template/source has moved.
       let projectInit: ProjectInitOutcome;
+      let slashCommands: SlashCommandsOutcome = "not-run";
+      let slashCommandOverrides: string[] = [];
       if (!isForgeProject) {
         // #231 follow-up: flag the never-initialized case loudly + actionably,
         // instead of a terse "skipped". upgrade is for EXISTING projects; a
@@ -572,6 +602,12 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         const claudeHooks = planClaudeHooks(cwd);
         const slashCmds = planClaudeCommands(cwd);
         const gitignore = planGitignoreEntries(cwd);
+        const overrides = skippedClaudeCommands(slashCmds);
+        slashCommandOverrides = overrides.map((e) => `${"/" + e.name.replace(/\.md$/, "")} NOT installed — ${e.target} already exists (${e.details ?? "unknown reason"})`);
+        slashCommands = overrides.length > 0 ? "user-override"
+          : slashCmds.action === "already-current" ? "already-current"
+          : dryRun ? "would-install"
+          : "installed";
         if (dryRun) {
           say(`        commit-msg hook: ${commitMsg.action}`);
           say(`        claude hooks:    ${claudeHooks.action}`);
@@ -642,6 +678,7 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         assetInstall,
         routingPolicy,
         projectInit,
+        slashCommands,
         imageRebuild,
         releaseCheck,
       };
@@ -681,6 +718,8 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         assetInstall,
         routingPolicy,
         projectInit,
+        slashCommands,
+        slashCommandOverrides,
         imageRebuild,
         releaseCheck,
         releaseProblems,

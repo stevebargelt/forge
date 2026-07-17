@@ -64,6 +64,8 @@ Each of these previously exited 0 and printed `Upgrade complete.` while the requ
 
 What does **not** exit 1: anything nobody asked for. An operator skip (`--skip-git`, `--skip-npm`, `--skip-project`), a checkout that simply isn't on this host, no remote configured, no `package.json`, no host RACI, and a block that was already current are all **resolved** — they exit 0. An operator saying no is not a failed request.
 
+A **project-local slash-command override** is on that list too, and deliberately so: if your project ships its own `.claude/commands/orient.md`, forge will not clobber a file it doesn't own, prints a ⚠ saying `/orient` was not installed, and exits 0. Your project owning that path is an answer, not a defect, and an exit code that fired forever on every project that gave one would be noise. It is still a *state* rather than a silence — `--json` reports it as `slashCommands: "user-override"` with the affected commands named in `slashCommandOverrides`, so a script sees exactly what the ⚠ said. To take forge's version, remove the file and re-run.
+
 Two consequences worth internalizing, because they change how you script this:
 
 - **A release-mode `forge upgrade` exits 1 only for the advancement you actually asked for.** The rule above is the whole rule — an operator skip outranks the mode refusal, because you cannot refuse what was never requested. So the release-host recipes come out like this:
@@ -132,6 +134,8 @@ forge upgrade --json            # emit the structured result instead of the huma
   "assetInstall": "installed",
   "routingPolicy": "recompiled",
   "projectInit": "refreshed",
+  "slashCommands": "installed",
+  "slashCommandOverrides": [],
   "imageRebuild": "skipped",
   "releaseCheck": "ran",
   "releaseProblems": [],
@@ -153,6 +157,8 @@ forge upgrade --json            # emit the structured result instead of the huma
 | `assetInstall` | `"installed" \| "would-install" \| "not-found" \| "failed"` | Unresolved on `not-found`, `failed` |
 | `routingPolicy` | `"recompiled" \| "would-recompile" \| "no-raci" \| "failed"` | Unresolved on `failed`. `no-raci` is fine — no derived artifact to keep in lockstep |
 | `projectInit` | `"refreshed" \| "already-current" \| "would-refresh" \| "skipped" \| "no-claude-md" \| "no-forge-block" \| "template-not-found" \| "needs-markers"` | Unresolved on the last four |
+| `slashCommands` | `"installed" \| "already-current" \| "would-install" \| "user-override" \| "not-run"` | Never unresolved. `user-override` = this project already owns at least one of the command paths, so forge left it alone; `not-run` = project provisioning didn't reach this step (`--skip-project`, or no forge block) |
+| `slashCommandOverrides` | string[] | Which commands were not installed and why — the same set the human ⚠ names. Empty unless `slashCommands` is `user-override` |
 | `imageRebuild` | `"ran" \| "would-rebuild" \| "skipped" \| "refused" \| "failed"` | Unresolved on `refused`, `failed`. `skipped` when `--rebuild-image` wasn't passed |
 | `releaseCheck` | `"ran" \| "skipped-dry-run" \| "skipped-asset-install" \| "failed"` | Unresolved only on `failed` |
 | `releaseProblems` | `string[] \| null` | The release check's findings; `null` unless `releaseCheck` is `ran`. `[]` means it ran and found nothing |

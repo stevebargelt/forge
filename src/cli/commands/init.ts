@@ -760,10 +760,15 @@ export function executeClaudeCommandsPlan(plan: ClaudeCommandsPlan): string {
   return parts.join("; ") || "no-op";
 }
 
+/** The commands a project already owns, so forge leaves them alone. Shared by the
+ *  human warning below and `forge upgrade --json`, which must name the same set. */
+export function skippedClaudeCommands(plan: ClaudeCommandsPlan): ClaudeCommandEntry[] {
+  if (plan.action !== "install") return [];
+  return plan.entries.filter((e) => e.status === "exists-other");
+}
+
 export function warnSkippedClaudeCommands(plan: ClaudeCommandsPlan): void {
-  if (plan.action !== "install") return;
-  const skipped = plan.entries.filter((e) => e.status === "exists-other");
-  if (skipped.length === 0) return;
+  const skipped = skippedClaudeCommands(plan);
   for (const e of skipped) {
     const cmd = "/" + e.name.replace(/\.md$/, "");
     console.warn(`  ⚠  ${cmd} was NOT installed — ${e.target} already exists (${e.details ?? "unknown reason"}).`);

@@ -583,6 +583,73 @@ test("FG-577 (cell 1): an orchestrator block needing manual markers is unresolve
   }
 });
 
+// ─────────── FG-577: a project-local slash-command override ───────────
+//
+// The state the ⚠ warned about but --json had no field for: a script parsing the
+// result saw `projectInit: refreshed`, `ok: true`, and no trace that /orient was
+// never installed. It is not unresolved — the project owns that file and forge
+// declining to clobber it is the command working — but "not a failure" is not
+// "not a state", and the machine surface has to carry it.
+
+test("FG-577: a project-local slash-command override reaches --json, not only the human ⚠", () => {
+  const assets = assetTree("fg577-override-", "CLEAN", { manifest: false });
+  try {
+    inProject("# p\n\n<!-- forge:orchestrator-start -->\nSTALE\n<!-- forge:orchestrator-end -->\n", (project) => {
+      // The project's OWN /orient — a regular file where forge would symlink.
+      const commandsDir = join(project, ".claude", "commands");
+      mkdirSync(commandsDir, { recursive: true });
+      writeFileSync(join(commandsDir, "orient.md"), "# my project's own /orient\n");
+
+      const r = drive({ skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets });
+
+      assert.equal(r.result.slashCommands, "user-override");
+      assert.ok(
+        r.result.slashCommandOverrides.some((o) => /^\/orient NOT installed/.test(o)),
+        `--json names WHICH command and why — got ${JSON.stringify(r.result.slashCommandOverrides)}`,
+      );
+      assert.match(r.warnings, /\/orient was NOT installed/, "the human surface still says it too");
+      // The project's file is untouched — the whole reason this state exists.
+      assert.equal(readFileSync(join(commandsDir, "orient.md"), "utf8"), "# my project's own /orient\n");
+
+      // Resolved: a signal that fires forever on every project that deliberately
+      // owns its own /orient is not a signal.
+      assert.equal(r.result.ok, true);
+      assert.equal(r.exitCode, undefined);
+      assert.equal(r.result.projectInit, "refreshed", "the rest of the project init still ran");
+    });
+  } finally {
+    rmSync(assets, { recursive: true, force: true });
+  }
+});
+
+test("FG-577: with no override, the same project reports the commands INSTALLED and an empty override list", () => {
+  // The guard: `user-override` must fire on the override, not on every project.
+  const assets = assetTree("fg577-nooverride-", "CLEAN", { manifest: false });
+  try {
+    inProject("# p\n\n<!-- forge:orchestrator-start -->\nSTALE\n<!-- forge:orchestrator-end -->\n", () => {
+      const r = drive({ skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets });
+      assert.equal(r.result.slashCommands, "installed");
+      assert.deepEqual(r.result.slashCommandOverrides, []);
+      assert.equal(r.result.ok, true);
+    });
+  } finally {
+    rmSync(assets, { recursive: true, force: true });
+  }
+});
+
+test("FG-577: a project upgrade nobody asked for reports slashCommands `not-run`, not a false `installed`", () => {
+  const assets = assetTree("fg577-slash-skipped-", "CLEAN", { manifest: false });
+  try {
+    inProject("# p\n\n<!-- forge:orchestrator-start -->\nSTALE\n<!-- forge:orchestrator-end -->\n", () => {
+      const r = drive({ skipGit: true, skipNpm: true, skipProject: true }, { mode: "dev", assetsDir: assets, devDir: assets });
+      assert.equal(r.result.slashCommands, "not-run");
+      assert.deepEqual(r.result.slashCommandOverrides, []);
+    });
+  } finally {
+    rmSync(assets, { recursive: true, force: true });
+  }
+});
+
 test("FG-577 (cell 4): a FAILED --rebuild-image is unresolved and visible in --json, not a warning beside ok:true", () => {
   const assets = assetTree("fg577-rebuildfail-", "CLEAN", { manifest: false });
   try {
