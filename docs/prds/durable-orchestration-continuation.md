@@ -465,7 +465,7 @@ Scope:
 Propagation surfaces:
 
 - `seeds/orchestrator-template.md` — canonical policy source.
-- Marker-managed orchestrator block in `CLAUDE.md`, deterministically regenerated through `forge upgrade`.
+- Marker-managed orchestrator block in `CLAUDE.md`, deterministically regenerated through `forge-dev upgrade` — the block is rendered from the **executing** forge's template, so a checkout edit to the seed above propagates only through the checkout's own entry point; stable `forge upgrade` would re-render it from the promoted release's bytes (FG-577).
 - `docs/quick-start.md`.
 - `docs/concepts.md`.
 - `docs/autonomous-run-prompt.md`.
@@ -625,6 +625,22 @@ The initiative is complete only when all of the following are true:
 - A final reviewer maps evidence to every binding decision and matrix row rather than approving from green CI alone.
 
 ## Revision log
+
+### 2026-07-17 — Slice 4 propagation-path mechanics reconciled to the execution-mode split (FG-577)
+
+- **The Slice 4 propagation surface "Marker-managed orchestrator block in `CLAUDE.md`, deterministically
+  regenerated through `forge upgrade`" is corrected to `forge-dev upgrade`.** FG-577 resolves every
+  release-owned asset — the seed installer's source and the orchestrator template alike — from the tree the
+  running forge executes from (`assetRoot()`, `src/v2/asset-root.ts`). The stable `forge` therefore re-renders
+  the block from the **promoted release's** bundled template, not from a `seeds/orchestrator-template.md` edit
+  sitting in the checkout. Propagating that edit is `forge-dev upgrade`, which executes from the checkout.
+  Nothing ambient (`FORGE_REPO_DIR`, `--forge-repo`) redirects the install source; those name only the
+  checkout that dev-advancement targets.
+- **No normative change.** This is a current-state/mechanics reconciliation of the same class as the FG-568 and
+  FG-573 entries below: no binding decision, story order, consumer contract, or failure semantics moves, and no
+  new plan hash is required. Slice 4's scope, the propagation requirement itself ("update the actual policy
+  source and propagation path, not only prose in the current checkout"), the slices, and the F-row matrix are
+  untouched — only the named command that performs the propagation is corrected to the shipped behavior.
 
 ### 2026-07-17 — promotion landed; F29 closed on the live path; threat boundary recorded (FG-571, `2f80496`)
 

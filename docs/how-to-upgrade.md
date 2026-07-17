@@ -174,9 +174,11 @@ forge upgrade --json            # emit the structured result instead of the huma
 
 ```bash
 # Approach A: upgrade once globally, then re-init each project's CLAUDE.md.
-forge upgrade --skip-project                      # global refresh, leave project blocks alone
-                                                  # (from a release this refreshes ~/.forge/ from the
-                                                  #  release and refuses the pull — see Execution mode)
+forge upgrade --skip-git --skip-npm --skip-project   # global refresh, leave project blocks alone.
+                                                     # Name both skips: from a release the pull AND the
+                                                     # npm install are refused, so without them this
+                                                     # exits 1 having still refreshed ~/.forge/.
+                                                     # From a dev checkout, drop them to also advance it.
 for p in ~/code/my-app ~/code/audit-workspace; do
   cd "$p" && forge init
 done
@@ -186,7 +188,10 @@ done
 for p in ~/code/my-app ~/code/audit-workspace; do
   cd "$p" && forge upgrade --skip-git --skip-npm
 done
-# (run forge upgrade once without --skip flags first to do the actual pull + install)
+# Advancing the checkout is separate work, and the stable `forge` refuses it. Do it
+# once from the checkout BEFORE either loop, then build/promote to move `forge` onto
+# the new commits:
+#   cd ~/code/forge && ./bin/forge-dev upgrade --skip-project   # pull + npm install
 ```
 
 Most users only have one or two projects that need the block refreshed; manual `forge init` per project is fine.
