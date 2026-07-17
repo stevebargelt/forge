@@ -33,6 +33,10 @@ function App() {
   const [usageRollup, setUsageRollup] = useState([]);
   const [usageTimeSeries, setUsageTimeSeries] = useState([]);
   const [usageModelMix, setUsageModelMix] = useState([]);
+  const [planUsage, setPlanUsage] = useState(null);
+  const [planUsageLoading, setPlanUsageLoading] = useState(false);
+  const [planUsageRefreshing, setPlanUsageRefreshing] = useState(false);
+  const [planUsageRefreshError, setPlanUsageRefreshError] = useState(null);
   const [usageGroupBy, setUsageGroupBy] = useState("project");
   const [usageSince, setUsageSince] = useState("30d");
   const [ops, setOps] = useState(null);
@@ -75,21 +79,55 @@ function App() {
   }, [view, projectFilter, projects.length]);
 
   const pollUsage = useCallback(async () => {
+    setPlanUsageLoading(true);
     try {
       const tsDays = parseInt(usageSince) * 2;
-      const [rollupRes, tsRes, mixRes] = await Promise.all([
+      const [rollupRes, tsRes, mixRes, limitsResult] = await Promise.all([
         fetch(`/api/usage?groupBy=${usageGroupBy}&since=${usageSince}`),
         fetch(`/api/usage/timeseries?since=${tsDays}d`),
         fetch(`/api/usage/model-mix?groupBy=${usageGroupBy}&since=${usageSince}`),
+        fetch("/api/usage/limits")
+          .then((response) => ({ response }))
+          .catch(() => ({ response: null })),
       ]);
       if (rollupRes.ok) setUsageRollup(await rollupRes.json());
       if (tsRes.ok) setUsageTimeSeries(await tsRes.json());
       if (mixRes.ok) setUsageModelMix(await mixRes.json());
+      if (limitsResult.response?.ok) {
+        try {
+          setPlanUsage(await limitsResult.response.json());
+          setPlanUsageRefreshError(null);
+        } catch {
+          setPlanUsageRefreshError("Plan-limit sync returned an unreadable response. Showing the last successful sync, if available.");
+        }
+      } else {
+        const status = limitsResult.response ? ` (${limitsResult.response.status})` : "";
+        setPlanUsageRefreshError(`Plan-limit sync failed${status}. Showing the last successful sync, if available.`);
+      }
       setNow(Date.now());
     } catch (e) {
       setError(String(e));
+    } finally {
+      setPlanUsageLoading(false);
     }
   }, [usageGroupBy, usageSince]);
+
+  const refreshPlanUsage = useCallback(async () => {
+    setPlanUsageRefreshing(true);
+    try {
+      const res = await fetch("/api/usage/limits?refresh=1");
+      if (res.ok) {
+        setPlanUsage(await res.json());
+        setPlanUsageRefreshError(null);
+      } else {
+        setPlanUsageRefreshError(`Plan-limit refresh failed (${res.status}). Showing the last successful sync, if available.`);
+      }
+    } catch {
+      setPlanUsageRefreshError("Plan-limit refresh failed. Showing the last successful sync, if available.");
+    } finally {
+      setPlanUsageRefreshing(false);
+    }
+  }, []);
 
   useEffect(() => {
     if (view === "usage") return;
@@ -104,6 +142,15 @@ function App() {
     const id = setInterval(pollUsage, USAGE_POLL_MS);
     return () => clearInterval(id);
   }, [pollUsage, view]);
+
+  useEffect(() => {
+    const revealActiveTab = () => {
+      document.querySelector(".view-tabs .tab-active")?.scrollIntoView({ block: "nearest", inline: "center" });
+    };
+    revealActiveTab();
+    window.addEventListener("resize", revealActiveTab);
+    return () => window.removeEventListener("resize", revealActiveTab);
+  }, [view]);
 
   const pollOps = useCallback(async () => {
     try {
@@ -246,6 +293,11 @@ function App() {
             onGroupByChange=${setUsageGroupBy}
             since=${usageSince}
             onSinceChange=${setUsageSince}
+            planUsage=${planUsage}
+            planUsageLoading=${planUsageLoading}
+            planUsageRefreshing=${planUsageRefreshing}
+            planUsageRefreshError=${planUsageRefreshError}
+            onRefreshPlanUsage=${refreshPlanUsage}
           />`
         : html`
           ${projectFilter ? html`

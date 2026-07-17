@@ -20,7 +20,7 @@ Navigation tabs:
 
 - **activity** — chronological agent outputs across every project on the host, rendered as markdown cards (not raw JSON). In-flight runs appear at the top via live poll.
 - **projects** — per-project summary; click a project to filter the activity feed to that project.
-- **usage** — token usage rollup and time-series, grouped by role / workflow / project / model.
+- **usage** — host Claude/Codex plan-limit windows plus token usage rollup and time-series, grouped by role / workflow / project / model. Claude OAuth limits come from an observed Anthropic usage integration; it is not treated as a stable public API contract. Current Codex limits come from the documented local Codex App Server `account/rateLimits/read` method, not a public provider HTTPS endpoint. A bounded scan of recent local rollout files is retained only as a compatibility fallback, and fallback data is labeled stale with its observation time. Coexisting Claude, Anthropic API, Bedrock, Codex subscription, and OpenAI API channels render independently when configuration or an observation proves they exist. Bedrock and API-key channels use explicit non-subscription states rather than invented quota numbers.
 - **ops** — operational metrics rollup.
 - **workbench** — read-only RACI Workbench. Four sections: SOURCE (active RACI file and kind), DERIVED (compiled routing-policy path and health), EFFECTIVE (routes in force and host→project diff, or null if the policy is broken), RECORDED (recent RACI audit log entries). Tab label is "workbench"; URL hash stays `#governance` for compatibility. No mutations — propose/apply is FG-361.
 - **backlog** — read-only view of the selected project's backlog: session-handoff notes and ticket list (grouped by type: epic / story / idea), filterable by type and status, searchable by title and body. Requires a project to be selected. Mutations (create, close, move tickets) remain on the `forge backlog` CLI.
@@ -33,9 +33,21 @@ The server exposes read-only JSON endpoints at `http://127.0.0.1:8024/api/…`. 
 
 - **`/api/feed`**, **`/api/in-flight`**, **`/api/projects`**, **`/api/task/:id`** — core activity data
 - **`/api/usage`**, **`/api/usage/timeseries`**, **`/api/usage/model-mix`** — token usage metrics
+- **`/api/usage/limits`** — normalized host provider channels and plan windows; add `?refresh=1` to bypass the 30-second provider cache. Credentials and raw provider/App Server records remain server-side.
 - **`/api/backlog`** — returns `{ notes, tickets }` for `?projectDir=<dir>`; reads `<projectDir>/backlog/notes.md` and the structured ticket files. Returns `{ notes: "", tickets: [] }` when `projectDir` is absent or the backlog directory does not exist. Read-only.
 
 All metrics endpoints accept `?since=30d&projectDir=/path` query params. Full parameter and response-shape reference: `docs/SCHEMA-CONTRACT.md`.
+
+## Validation
+
+```bash
+npm --workspace=dashboard run typecheck
+npm --workspace=dashboard test
+npm --workspace=dashboard run test:integration
+npm --workspace=dashboard run test:browser
+```
+
+The browser suite uses `playwright-core` with an installed Chrome/Chromium executable. It runs against isolated provider fixtures and never reads host credentials or raw provider records.
 
 ## Design
 

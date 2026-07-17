@@ -24,6 +24,8 @@ import {
 import type { GroupBy } from "./queries.js";
 import { renderShell } from "./shell.js";
 import { listTickets } from "@forge/backlog";
+import { getPlanUsage } from "./plan-usage.js";
+import { finishUnhandledRequest } from "./http-error.js";
 
 const PORT = Number(process.env.PORT ?? 8024);
 const HOST = process.env.HOST ?? "127.0.0.1";
@@ -32,15 +34,10 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const CLIENT_DIR = resolve(HERE, "..", "client");
 
 export const server = createServer((req: IncomingMessage, res: ServerResponse) => {
-  try {
-    handle(req, res);
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    res.writeHead(500, { "Content-Type": "application/json" }).end(JSON.stringify({ error: msg }));
-  }
+  void handle(req, res).catch(() => finishUnhandledRequest(res));
 });
 
-function handle(req: IncomingMessage, res: ServerResponse): void {
+async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? "/", `http://${HOST}:${PORT}`);
   const path = url.pathname;
 
@@ -141,6 +138,13 @@ function handle(req: IncomingMessage, res: ServerResponse): void {
     const limit = clamp(Number(url.searchParams.get("limit") ?? 50), 1, 200);
     const data = usageRollup(raw as GroupBy, since, projectDir, limit);
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
+    return;
+  }
+
+  if (path === "/api/usage/limits") {
+    const refresh = url.searchParams.get("refresh") === "1";
+    const data = await getPlanUsage(refresh);
+    res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" }).end(JSON.stringify(data));
     return;
   }
 
