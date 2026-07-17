@@ -3,8 +3,12 @@ import assert from "node:assert/strict";
 import { buildReleaseReport, summarizeProblems, type ReleaseInputs } from "./release-doctor.js";
 
 // A fully-green baseline; each test overrides one surface to exercise a scenario.
+// The baseline is `dev` — the mtime heuristic and the `forge upgrade
+// --rebuild-image` advice are both dev-only, and the release variants of each are
+// pinned by the FG-577 tests at the bottom of this file.
 function green(over: Partial<ReleaseInputs> = {}): ReleaseInputs {
   return {
+    mode: "dev",
     image: { name: "agent-dev-worker:latest", present: true, createdMs: 2000, buildInputMtimeMs: 1000 },
     clis: [
       { command: "claude", present: true, neededBy: ["claude-oauth"] },
@@ -144,6 +148,59 @@ test("#229 routing-policy absent → warn; present+invalid → fail", () => {
   const bad = buildReleaseReport(green({ routing: { present: true, ok: false, detail: "2 findings" } }));
   assert.equal(status(bad, "routing-policy"), "fail");
   assert.equal(bad.ok, false);
+});
+
+// ─────────── FG-577: the mtime heuristic and the advice are mode-scoped ───────────
+//
+// A release tree is materialized with cpSync (release.ts), which does NOT preserve
+// timestamps: every build input carries the moment the release was BUILT, not an
+// edit time. Judged by the dev heuristic, that is unconditionally "newer than the
+// image" — so every release host reported a permanently STALE image, and the only
+// remedy the advice named (`forge upgrade --rebuild-image`) refuses on a release.
+// STALE → run the named command → it refuses → still STALE, forever.
+
+test("FG-577: a release does NOT report STALE from cpSync-stamped build inputs (the dev heuristic still does)", () => {
+  // The identical inputs, differing only in mode: build inputs stamped long after
+  // the image, exactly as a fresh release materialization stamps them.
+  const image = { name: "agent-dev-worker:latest", present: true, createdMs: 1000, buildInputMtimeMs: 5000 };
+
+  const dev = buildReleaseReport(green({ mode: "dev", image }));
+  assert.equal(status(dev, "image"), "warn", "dev keeps the heuristic — this fix must not disarm it (FG-543 owns that)");
+
+  const release = buildReleaseReport(green({ mode: "release", image }));
+  assert.equal(status(release, "image"), "ok", "a release's build-input mtimes cannot prove staleness");
+  assert.doesNotMatch(release.checks.find((c) => c.name.includes("image"))!.detail, /STALE/);
+});
+
+test("FG-577: no advice reachable in release mode names a command that refuses in release mode", () => {
+  // Every check driven to a state that carries a `next`, so the sweep covers the
+  // whole advice surface rather than the one string that started this.
+  const report = buildReleaseReport(green({
+    mode: "release",
+    image: { name: "agent-dev-worker:latest", present: false },
+    clis: [
+      { command: "codex", present: false, neededBy: ["codex-subscription"] },
+      { command: "claude", present: null, neededBy: ["claude-oauth"] },
+    ],
+    policy: { present: true, valid: false, error: "boom" },
+    profileAuth: [{ profile: "p", provider: "openai", auth: "api", status: "unavailable", detail: "no cred" }],
+    routing: { present: false, ok: false, detail: "" },
+  }));
+  const advice = report.checks.map((c) => c.next).filter((n): n is string => n !== undefined);
+  assert.ok(advice.length >= 4, "the sweep must actually reach the advice surface");
+  for (const next of advice) {
+    assert.ok(
+      !next.includes("forge upgrade --rebuild-image"),
+      `release-mode advice names a command that refuses under a release: ${next}`,
+    );
+  }
+  // …and the rebuild advice still says how to actually do it, from the checkout.
+  assert.match(advice.join("\n"), /forge-dev upgrade --rebuild-image/);
+});
+
+test("FG-577: dev mode keeps naming the command that WORKS there", () => {
+  const report = buildReleaseReport(green({ mode: "dev", image: { name: "agent-dev-worker:latest", present: false } }));
+  assert.match(report.checks.find((c) => c.name.includes("image"))!.next ?? "", /forge upgrade --rebuild-image/);
 });
 
 test("#229 summarizeProblems lists only non-ok rows with their next-commands", () => {

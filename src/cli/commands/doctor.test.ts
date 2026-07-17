@@ -7,11 +7,12 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from "node:fs";
+import { cpSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gatherPolicy, gatherProfileAuth, gatherReleaseInputs, newestBuildInputMtime, type DoctorProbes } from "./doctor.js";
 import { buildReleaseReport, type ImageInputs } from "../../v2/release-doctor.js";
+import { assetRoot } from "../../v2/asset-root.js";
 
 // proj-default is the reachable default; proj-optin is defined but only
 // selectable via --profile (not in defaults/overrides).
@@ -229,4 +230,86 @@ test("FG-520 newestBuildInputMtime: a COPY source that doesn't exist is skipped,
   } finally {
     rmSync(repoDir, { recursive: true, force: true });
   }
+});
+
+// ─────────── FG-577 (criterion 9): the image probe judges against the EXECUTING tree ───────────
+//
+// doctor.ts:31-32 was the third independent re-derivation of
+// `$FORGE_REPO_DIR ?? ~/code/forge`. Under a release that made the staleness
+// probe compare the running image against the DEV checkout's Dockerfile mtime —
+// false drift or false-clean on any host whose dev tree diverges. docker/ is a
+// REQUIRED release asset dir (release.ts:195), so the release carries the
+// Dockerfile the image should be judged against. The probe is a READ and follows
+// the release; the rebuild ACTION refuses (upgrade.ts).
+
+test("FG-577: the build-input probe defaults to the executing asset root, not FORGE_REPO_DIR", () => {
+  const hostile = mkdtempSync(join(tmpdir(), "fg577-doctor-hostile-"));
+  const before = process.env.FORGE_REPO_DIR;
+  process.env.FORGE_REPO_DIR = hostile;
+  try {
+    let probed: string | undefined;
+    gatherReleaseInputs("nonexistent-image-for-fg577", { projectDir }, {
+      probeClisInImage: () => ({}),
+      buildInputMtime: (dir) => { probed = dir; return 42; },
+    });
+    assert.equal(probed, assetRoot());
+    assert.ok(!probed!.startsWith(hostile), "the ambient env must not choose which Dockerfile the image is judged against");
+  } finally {
+    if (before === undefined) delete process.env.FORGE_REPO_DIR;
+    else process.env.FORGE_REPO_DIR = before;
+    rmSync(hostile, { recursive: true, force: true });
+  }
+});
+
+// FG-577: pointing the probe at the release fixed WHICH Dockerfile is judged, but
+// under a release the judgement itself is a category error. release.ts materializes
+// the tree with cpSync, which does not preserve timestamps — so this drives the
+// REAL cpSync, not a hand-stamped mtime, and pins that a release host cannot be
+// told its image is stale by bytes it just copied.
+test("FG-577: a cpSync-materialized release reports no STALE — the mechanism, driven for real", () => {
+  const source = mkdtempSync(join(tmpdir(), "fg577-src-"));
+  const release = mkdtempSync(join(tmpdir(), "fg577-rel-mtime-"));
+  try {
+    // A dev checkout whose build inputs were last edited long ago…
+    const edited = Date.now() - 10 * 60_000;
+    writeBuildContext(source, { "forge-test.sh": edited, "agent-entrypoint.sh": edited });
+    utimesSync(join(source, "docker", "agent-dev-worker.Dockerfile"), edited / 1000, edited / 1000);
+
+    // …materialized into a release exactly as release.ts does it.
+    cpSync(join(source, "docker"), join(release, "docker"), { recursive: true });
+
+    // The image was built AFTER every real edit — genuinely current. It is only
+    // "stale" against the copy's own timestamps.
+    const createdMs = Date.now() - 5 * 60_000;
+    const copiedMtime = newestBuildInputMtime(release);
+    assert.ok(copiedMtime !== undefined && copiedMtime > createdMs, "the fixture must reproduce the trap: cpSync restamps the inputs newer than the image");
+
+    const probes: DoctorProbes = {
+      inspectImage: () => ({ name: "agent-dev-worker:latest", present: true, createdMs, buildInputMtimeMs: newestBuildInputMtime(release) }),
+      probeClisInImage: () => ({}),
+    };
+
+    const asRelease = buildReleaseReport(gatherReleaseInputs("agent-dev-worker:latest", { projectDir, forgeRepoDir: release }, probes, "release"));
+    const relCheck = asRelease.checks.find((c) => c.name.includes("image"))!;
+    assert.equal(relCheck.status, "ok", "a permanently-STALE release host is the dead end this fixes");
+    assert.doesNotMatch(relCheck.detail, /STALE/);
+    // The dead end was STALE advising a command that refuses here — neither half survives.
+    assert.ok(!(relCheck.next ?? "").includes("forge upgrade --rebuild-image"));
+
+    // Same bytes, same probe, dev mode: still STALE. The suppression is scoped to
+    // the mode where the timestamps are meaningless, not switched off.
+    const asDev = buildReleaseReport(gatherReleaseInputs("agent-dev-worker:latest", { projectDir, forgeRepoDir: release }, probes, "dev"));
+    assert.equal(asDev.checks.find((c) => c.name.includes("image"))!.status, "warn");
+  } finally {
+    for (const d of [source, release]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("FG-577: an explicit ctx.forgeRepoDir still overrides the probe root (upgrade's tail passes its asset root)", () => {
+  let probed: string | undefined;
+  gatherReleaseInputs("nonexistent-image-for-fg577", { projectDir, forgeRepoDir: "/some/release" }, {
+    probeClisInImage: () => ({}),
+    buildInputMtime: (dir) => { probed = dir; return 42; },
+  });
+  assert.equal(probed, "/some/release");
 });

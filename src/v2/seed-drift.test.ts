@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { detectSeedDrift, renderSeedDrift } from "./seed-drift.js";
+import { defaultRepoSeedsDir, detectSeedDrift, renderSeedDrift } from "./seed-drift.js";
+import { assetRoot } from "./asset-root.js";
 
 // Build a (repoSeeds, forgeHome) pair under a temp root and run the detector
 // against them — never touches the real ~/.forge or the package seeds.
@@ -87,5 +88,47 @@ test("renderSeedDrift: empty when nothing is stale; FAIL marker on runtime drift
     assert.match(section, /forge upgrade/);
   } finally {
     cleanup();
+  }
+});
+
+// ─────────── FG-577 (criterion 4): the DETECTOR's baseline is release-owned ───────────
+//
+// seed-drift.ts:56 used to short-circuit on FORGE_REPO_DIR BEFORE the
+// module-relative resolution, so a divergent or hostile ambient environment
+// re-pointed the detector's own evidence and drift reported "current" against
+// caller-chosen bytes — silently. The bytes are the evidence (FG-571), so the
+// bytes compared AGAINST must be the executing release's own.
+
+test("FG-577: a divergent FORGE_REPO_DIR does not redirect the detector's baseline", () => {
+  const hostile = mkdtempSync(join(tmpdir(), "fg577-hostile-seeds-"));
+  const home = mkdtempSync(join(tmpdir(), "fg577-forge-home-"));
+  const before = process.env.FORGE_REPO_DIR;
+  try {
+    // A tree the caller controls, and an installed ~/.forge that matches it
+    // exactly. Under the old short-circuit this pair is self-consistent, so the
+    // detector declares the install "current" while never having compared it
+    // against a single byte the running code actually ships.
+    mkdirSync(join(hostile, "seeds", "runtimes"), { recursive: true });
+    writeFileSync(join(hostile, "seeds", "runtimes", "planted.yml"), "provider: attacker\n");
+    mkdirSync(join(home, "runtimes"), { recursive: true });
+    writeFileSync(join(home, "runtimes", "planted.yml"), "provider: attacker\n");
+
+    process.env.FORGE_REPO_DIR = hostile;
+    assert.notEqual(defaultRepoSeedsDir(), join(hostile, "seeds"), "the baseline must not follow the ambient env");
+    assert.equal(defaultRepoSeedsDir(), join(assetRoot(), "seeds"), "the baseline is the executing tree's own seeds");
+
+    const report = detectSeedDrift(defaultRepoSeedsDir(), home);
+    const planted = report.entries.find((e) => e.path === join("runtimes", "planted.yml"));
+    assert.equal(planted, undefined, "the caller-chosen tree contributes no entries at all");
+    assert.equal(
+      report.ok,
+      false,
+      "a ~/.forge holding only planted bytes is stale against the real seeds — reporting it clean is the silent failure",
+    );
+  } finally {
+    if (before === undefined) delete process.env.FORGE_REPO_DIR;
+    else process.env.FORGE_REPO_DIR = before;
+    rmSync(hostile, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
   }
 });

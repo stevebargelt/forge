@@ -11,6 +11,8 @@
 // plain fixtures and no docker/DB. Read-only by construction: it computes a
 // report, never mutates.
 
+import type { ExecutionMode } from "./asset-root.js";
+
 export type CheckStatus = "ok" | "warn" | "fail" | "skip";
 
 export type ReleaseCheck = {
@@ -82,35 +84,61 @@ export type ReleaseInputs = {
   policy: PolicyInputs;
   profileAuth: AuthInputs[];
   routing: RoutingInputs;
+  /** FG-577: how this forge is executing. Required rather than defaulted — it
+   *  selects both the staleness heuristic and the rebuild command the advice may
+   *  name, and "dev" is exactly the answer that misfires on a release host. */
+  mode: ExecutionMode;
 };
 
-const REBUILD = "rebuild the agent image: docker/build.sh (or `forge upgrade --rebuild-image`)";
+const REBUILD_DEV = "rebuild the agent image: docker/build.sh (or `forge upgrade --rebuild-image`)";
+// FG-577: `forge upgrade --rebuild-image` REFUSES under a release (upgrade.ts) —
+// rebuilding is dev-advancement. Advice that names a command which refuses in the
+// very mode it is offered in is a dead end, not a next step, so a release host is
+// pointed at the checkout-side command instead.
+const REBUILD_RELEASE = "rebuild the agent image from a dev checkout: `forge-dev upgrade --rebuild-image` (a release cannot rebuild its own image)";
 
-function imageCheck(img: ImageInputs): ReleaseCheck {
+function rebuildAdvice(mode: ExecutionMode): string {
+  return mode === "release" ? REBUILD_RELEASE : REBUILD_DEV;
+}
+
+function imageCheck(img: ImageInputs, mode: ExecutionMode): ReleaseCheck {
   if (img.dockerError) {
     return { name: `image ${img.name}`, status: "skip", detail: `could not probe docker (${img.dockerError})`, next: "ensure docker is running, then re-run `forge doctor`" };
   }
   if (!img.present) {
-    return { name: `image ${img.name}`, status: "fail", detail: "not built on this host", next: REBUILD };
+    return { name: `image ${img.name}`, status: "fail", detail: "not built on this host", next: rebuildAdvice(mode) };
   }
-  if (img.buildInputMtimeMs !== undefined && img.createdMs !== undefined && img.buildInputMtimeMs > img.createdMs) {
+  // FG-577: under a release the mtime comparison is a category error, not a
+  // conservative guess. Release trees are materialized with cpSync (release.ts),
+  // which does not preserve timestamps — so every build input is stamped at
+  // release-build time and reads as newer than any image built before it. That
+  // makes STALE permanent on a release host, and the only remedy it could name
+  // refuses there. Presence is the honest check; the heuristic's wider
+  // false-positive class is FG-543, not this ticket.
+  if (mode === "dev" && img.buildInputMtimeMs !== undefined && img.createdMs !== undefined && img.buildInputMtimeMs > img.createdMs) {
     return {
       name: `image ${img.name}`,
       status: "warn",
       detail: "STALE — a build input (Dockerfile or a COPYed script, e.g. forge-test.sh) is newer than the built image; runtime CLIs/deps/wrappers may be out of date",
-      next: REBUILD,
+      next: rebuildAdvice(mode),
     };
   }
-  return { name: `image ${img.name}`, status: "ok", detail: "present and not older than its build inputs (Dockerfile + COPYed scripts)" };
+  return {
+    name: `image ${img.name}`,
+    status: "ok",
+    detail: mode === "release"
+      ? "present (a release's build-input mtimes are stamped at release time, so staleness is not judged from them — FG-543)"
+      : "present and not older than its build inputs (Dockerfile + COPYed scripts)",
+  };
 }
 
-function cliCheck(c: CliInputs): ReleaseCheck {
+function cliCheck(c: CliInputs, mode: ExecutionMode): ReleaseCheck {
   const who = c.neededBy.length > 0 ? ` (needed by ${c.neededBy.join(", ")})` : "";
   if (c.present === null) {
-    return { name: `cli ${c.command}`, status: "skip", detail: `not probed${who} — image unavailable`, next: REBUILD };
+    return { name: `cli ${c.command}`, status: "skip", detail: `not probed${who} — image unavailable`, next: rebuildAdvice(mode) };
   }
   if (c.present === false) {
-    return { name: `cli ${c.command}`, status: "fail", detail: `missing from the image${who} — a dispatch will die at exec`, next: REBUILD };
+    return { name: `cli ${c.command}`, status: "fail", detail: `missing from the image${who} — a dispatch will die at exec`, next: rebuildAdvice(mode) };
   }
   return { name: `cli ${c.command}`, status: "ok", detail: `present in the image${who}` };
 }
@@ -154,8 +182,8 @@ function routingCheck(r: RoutingInputs): ReleaseCheck {
 
 export function buildReleaseReport(inp: ReleaseInputs): ReleaseReport {
   const checks: ReleaseCheck[] = [
-    imageCheck(inp.image),
-    ...inp.clis.map(cliCheck),
+    imageCheck(inp.image, inp.mode),
+    ...inp.clis.map((c) => cliCheck(c, inp.mode)),
     policyCheck(inp.policy),
     ...inp.profileAuth.map(authCheck),
     routingCheck(inp.routing),
