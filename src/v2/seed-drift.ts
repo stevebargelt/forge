@@ -2,11 +2,18 @@
 // ship with the running forge code.
 //
 // forge runs from npm-linked source, so a `git pull` makes the CODE live
-// immediately, but ~/.forge seeds can stay stale — a plain install-seeds.sh run
-// uses `cp -n` (no-clobber), so without FORCE a seed updated upstream is not
-// re-copied over an existing install (see FG-578 note below for how FORCE now
-// refreshes the auto-refreshable categories). A stale RUNTIME yaml silently
-// changes agent execution: an old
+// immediately, but ~/.forge seeds can stay stale — install-seeds.sh's
+// `seed_install_file` installs a seed only when it is absent; for an existing
+// file it applies an ownership-aware predicate, not `cp -n`. It deliberately
+// avoids `cp -n` (see install-seeds.sh:102: BSD cp exits 1 when it skips an
+// existing file, which aborts every re-run under `set -e`) and instead does an
+// explicit existence/ownership check: forge-owned categories (runtimes) are
+// overwritten only under FORCE and otherwise left as-is, while authored-exempt
+// categories (agents, constraints, raci) are create-only and retained whether
+// or not FORCE is set (see FG-578 note below for how FORCE now refreshes the
+// forge-owned categories). So without FORCE a forge-owned seed updated upstream
+// that already exists is not re-copied over the install. A stale RUNTIME yaml
+// silently changes agent execution: an old
 // pi-apikey.yml that hardcoded `--provider anthropic` defeated the #265 provider
 // binding with no signal at all. This module is the missing signal.
 //
