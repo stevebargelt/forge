@@ -91,6 +91,7 @@ test("Usage UI renders provider channels, analytics, refresh failures, and succe
   assert.equal(await page.locator(".plan-dial-progress").count(), 2, "unknown API/Bedrock usage must not draw progress rings");
   await page.getByRole("heading", { name: "Token & cache analytics" }).waitFor();
   assert.equal(await page.locator(".usage-headline-card").count(), 3);
+  assert.equal(await page.locator(".usage-headline-value").first().innerText(), "1.3357B");
 
   refreshFails = true;
   await page.getByRole("button", { name: "refresh" }).click();
@@ -194,14 +195,14 @@ function createFixtureServer(): Server {
     }
     if (url.pathname === "/api/usage") {
       res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify([
-        { bucket: "forge-dashboard-with-a-long-project-name", inputTokens: 1200, outputTokens: 300, cacheReadTokens: 800, cacheCreationTokens: 100, requests: 55_100 },
+        { bucket: "forge-dashboard-with-a-long-project-name", inputTokens: 1_335_700_000, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, requests: 55_100 },
       ]));
       return;
     }
     if (url.pathname === "/api/usage/timeseries") {
       const date = new Date().toISOString().slice(0, 10);
       res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify([
-        { date, inputTokens: 1200, outputTokens: 300, cacheReadTokens: 800, cacheCreationTokens: 100, requests: 55_100 },
+        { date, inputTokens: 1_335_700_000, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, requests: 55_100 },
       ]));
       return;
     }
