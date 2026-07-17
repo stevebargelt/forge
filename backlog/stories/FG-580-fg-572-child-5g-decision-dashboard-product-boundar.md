@@ -2,58 +2,93 @@
 id: FG-580
 type: story
 status: active
-title: "FG-572 Child 5g: DECISION — dashboard product boundary across a promotion (bundle / separately version / intentionally unavailable)"
+title: "FG-572 Child 5g: bundle dashboard into the promoted Forge release"
 created: 2026-07-17
 ---
 
-**Parent:** FG-572 · **Epic:** FG-561 · **OPERATOR-OWNED — this is a product decision, not an engineering task.**
+**Parent:** FG-572 · **Epic:** FG-561
 **Source:** FG-572 read-only architecture pass, run `run-fg-572-installed-surface-compatibility-read-only-architecture-pass-75b811`, at `12b13c2`.
 
-FG-572's third acceptance line requires EITHER a stable `forge dashboard` from a promoted release OR its
-unavailability named as an accepted product boundary. **FG-561's closeout gate explicitly holds the campaign
-open while stable `forge dashboard` is unavailable from a promoted release.** So this is on the campaign's
-critical path and needs **no engineering to decide** — only a decision. It should be sequenced FIRST among
-Child 5's work: options A and C imply completely different amounts of work.
+## Operator decision — 2026-07-17
 
-## The cost model behind the current deferral is FACTUALLY WRONG (independently verified at 12b13c2)
+**Selected: Option A — bundle the dashboard into the promoted Forge release.**
 
-`src/v2/release.ts:8-9` justifies excluding the dashboard as "a SEPARATE application workspace with its OWN
-dependency tree." Verified on host:
+A promoted stable Forge must provide a working `forge dashboard`. Permanent release-mode unavailability is not an accepted product boundary, and the dashboard will not acquire a second version identity or independent installation lifecycle without a separate future product decision.
 
-- root `package.json` declares `workspaces: ["dashboard"]`
-- `dashboard/node_modules` measures **0B** — npm **hoists** its runtime deps to the ROOT
-- `marked` (the dashboard's only non-shared runtime dep) is present at `node_modules/marked` (936K)
-- `better-sqlite3` is already a **root** dependency
-- the release closure copies the **entire root node_modules wholesale** (`release.ts:20`)
+This decision closes the product question only. The ticket remains active until the bundled release path is implemented, tested through a real promoted-release fixture, documented, and reconciled into FG-572/FG-561.
 
-**The release ALREADY SHIPS the dashboard's dependency tree. There is no separate tree to bundle.**
+## Why A
 
-Actual unbundled delta: `dashboard/src` + `dashboard/client` (static js/png/svg). `dashboard/package.json` has
-**no build step** (`start: tsx src/server.ts` — no vite/esbuild). So: source + static files, likely a few MB,
-no build, no new deps, no new interpreter. `playwright-core` is a devDependency (browser-tests) and is not in
-the runtime surface either way.
+FG-572 originally deferred the dashboard because `src/v2/release.ts` described it as a separate workspace with its own dependency tree. The architecture pass verified that premise was wrong at `12b13c2`:
 
-## Options
+- root `package.json` declares `workspaces: ["dashboard"]`;
+- `dashboard/node_modules` was 0B because npm hoisted runtime dependencies to the root;
+- `marked`, the dashboard's only non-shared runtime dependency at that revision, was already in root `node_modules`;
+- `better-sqlite3` was already a root dependency;
+- the release closure already copied root `node_modules` wholesale;
+- the unbundled delta was `dashboard/src`, `dashboard/client`, and relevant package metadata, with no dashboard build step at that revision.
 
-**A — bundle `dashboard/` as a fourth REQUIRED_ASSET_DIR.**
-Release grows by `dashboard/src` + `client` only (deps already shipped). `dashboard/` becomes commit-bound like
-`seeds/`, so a **dirty dashboard file refuses the build** (`release.ts:24-26`) — a real, ongoing tax on
-dashboard iteration, and the strongest argument against. Requires retiring the `dashboard.ts:15` refusal and
-revisiting `selfContainedFor:"control-plane"` (`release.ts:184`), since the honesty scope widens.
-**UNBLOCKS FG-561. Cheapest option by a wide margin once the dependency premise is corrected.**
+Therefore the release was already paying nearly all of the dependency cost while refusing to expose the product. Bundling reuses FG-571's single immutable, content-addressed release identity and is materially simpler than creating a second dashboard installer, compatibility policy, drift detector, and rollback lifecycle.
 
-**B — separately versioned dashboard.**
-Introduces a SECOND version identity into a campaign that spent FG-571 establishing exactly one
-(content-addressing). Needs its own install location, compat policy, and drift detection — re-opens every
-question FG-572 just answered, for one surface. Only justified if the dashboard must upgrade independently of
-the control plane, which nothing in current evidence suggests. Highest complexity.
+The strongest cost is intentional: dashboard source/static assets become commit-bound release inputs. A dirty dashboard tree must refuse a release build rather than allowing the manifest's source commit to lie about shipped bytes.
 
-**C — intentionally unavailable from a release (status quo).**
-Zero engineering: the refusal at `dashboard.ts:15-19` is already correct, named, nonzero, and machine-readable
-via the manifest (`release.ts:184`). Honest. BUT the operator runs the dashboard from a source checkout
-forever, and **FG-561 CANNOT CLOSE** — choosing C means consciously **amending the PRD closeout gate**, not
-silently missing it at closeout.
+## Pre-implementation evidence refresh
 
-## Decision needed
+The measurements above describe the dashboard at `12b13c2`; they are historical evidence, not permission to assume the dashboard remained unchanged.
 
-Pick A, B, or C. If C, the PRD's closeout gate must be amended in the same change.
+Before implementation, establish ground truth from the dashboard as landed on the current `origin/main` and record:
+
+- runtime entrypoint and every source/static/generated asset required to serve it;
+- whether a build/generation step now exists;
+- runtime dependencies and whether each is present in the release closure;
+- workspace/package metadata required at runtime;
+- module-relative and filesystem-relative asset resolution;
+- browser/static-asset behavior when the source checkout is unavailable.
+
+A new build step or dependency changes the implementation contract, not this product decision. Surface a new operator question only if evidence establishes a genuine need for independently versioning the dashboard.
+
+## Implementation contract
+
+- Bundle the complete dashboard runtime closure into the same immutable release unit selected by Forge's existing promotion mechanism.
+- Keep one release identity. Do not add a dashboard-specific current pointer, version stamp, installer, compatibility store, or rollback path.
+- Make `forge dashboard` work from a promoted release when the development checkout is renamed or unavailable.
+- Resolve dashboard code and assets from the executing release, never from the live checkout, invocation CWD, or a caller-provided ambient path.
+- Include every bundled dashboard input in the same source-commit/dirty-tree binding and closure validation as the rest of the release.
+- If generated assets exist, generate them before immutable materialization and bind the generated bytes into the release evidence. Never build lazily after promotion.
+- Retire the current named release-mode refusal only after the release path is proven operational.
+- Reconcile the release manifest's `selfContainedFor`/capability claims so they describe the widened boundary truthfully.
+- Preserve `forge-dev` as the development surface; this ticket changes stable release availability, not the stable/dev split.
+- Use disposable release stores, `FORGE_HOME`, install prefixes, and ports. Do not promote or install the real host during tests.
+
+## Acceptance criteria
+
+- [ ] A current-main dashboard closure census is recorded before implementation; it supersedes the `12b13c2` no-build-step/dependency measurements where the dashboard has changed.
+- [ ] A release build includes all dashboard runtime source, static/generated assets, required package metadata, and runtime dependencies.
+- [ ] Dashboard inputs are commit-bound: a dirty tracked dashboard source or asset refuses the build by name rather than shipping under a false source commit.
+- [ ] Closure validation refuses a release missing or mutating a required dashboard entry, static/generated asset, or dashboard-only runtime dependency.
+- [ ] From a built release, with the development checkout renamed/unavailable and a hostile or node-free caller PATH, `forge dashboard` starts successfully under the release's pinned runtime.
+- [ ] A real browser smoke against that release-served dashboard loads the primary page and verifies representative JS plus image/static assets; server success alone is insufficient.
+- [ ] `forge dashboard` human and machine-facing failure behavior remains named and nonzero for a genuinely incomplete/torn release; it never silently falls back to the development checkout.
+- [ ] The release manifest/capability surface truthfully states dashboard availability and no longer claims a control-plane-only closure if that wording has become false.
+- [ ] Mutation proof: omitting the dashboard directory/entrypoint, one representative static asset, and one dashboard-specific runtime dependency each makes the relevant acceptance test go red.
+- [ ] No second dashboard version identity, pointer, installer, compatibility policy, or rollback mechanism is introduced.
+- [ ] Tests do not touch real `~/.forge/current`, releases, interpreters, the machine-wide shim, or the operator's running dashboard.
+- [ ] Durable operator and architecture documentation is reconciled in the same delivery, including FG-572 and FG-561 closure evidence.
+
+## Alternatives considered and rejected
+
+### B — separately versioned dashboard
+
+Rejected. It introduces a second version identity and reopens installation, compatibility, drift, promotion, and rollback questions for a surface that currently has no evidenced need to upgrade independently.
+
+### C — intentionally unavailable from a release
+
+Rejected. It leaves the operator dependent on a source checkout forever and requires weakening FG-561's accepted closeout gate. The existing refusal is honest as a temporary state, but it is not the intended product boundary.
+
+## Non-goals
+
+- Redesigning dashboard UI or product behavior.
+- Changing FG-571's promotion/rollback architecture.
+- Activating promotion on the real host as part of implementation or testing.
+- Independently deploying or versioning the dashboard.
+- Accepting source-checkout fallback as release availability.
