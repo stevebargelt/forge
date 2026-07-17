@@ -614,8 +614,8 @@ test("FG-571 interpreter store: immutable, keyed, validated BY EXECUTION before 
   assert.ok(first.path.startsWith(interpretersDirIn(home)), "it landed in the keyed store under the disposable forge home");
   assert.equal(
     first.key,
-    `node-${identity.version}-${identity.abi}-${process.platform}-${process.arch}-${identity.digest.slice(0, 16)}`,
-    "keyed by version+ABI+platform+arch+CONTENT DIGEST — the key commits to the bytes (F3)",
+    `node-${identity.version}-${identity.abi}-${process.platform}-${process.arch}-${identity.digest}`,
+    "keyed by version+ABI+platform+arch+the FULL CONTENT DIGEST — the key commits to the bytes (F3)",
   );
 
   // VALIDATE BEFORE SELECT: the store's answer comes from EXECUTING the installed binary.

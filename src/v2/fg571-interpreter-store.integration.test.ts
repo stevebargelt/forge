@@ -231,6 +231,47 @@ test("FG-571 F3 (EXECUTED): two DIFFERENT interpreters reporting the SAME versio
   rmTree(home);
 });
 
+test("FG-571 F3: the key carries the FULL digest — two identities that differ only PAST 64 bits get distinct paths", () => {
+  // WHY THIS IS NOT A CONTRIVANCE. The key is the store's entire content commitment: a release
+  // manifest pins an absolute path and nothing else, so "these are the bytes I was validated
+  // against" is a claim the PATHNAME alone has to carry. A 64-bit commitment does not carry it.
+  // Same version+ABI+platform+arch is the ORDINARY case (the test above: a rebuild, a vendor
+  // patch), and against that fixed prefix a second binary only has to match 64 bits of digest to
+  // land on an existing entry's supposedly immutable path — birthday work an attacker chooses
+  // rather than a coincidence forge may wait out.
+  //
+  // The collision is exhibited where it can be: `interpreterKey` is a pure function of the
+  // identity, so a digest that agrees for 16 hex chars and diverges after is the exact input a
+  // 2^32 grind produces. Full-digest keying is what makes these two inputs two paths.
+  const home = freshHome("full-digest");
+  const a = variantInterpreter(workspace, "digest-a");
+  const idA = storedIdentityOf(a)!;
+
+  const idB: StoredInterpreterIdentity = { ...idA, digest: idA.digest.slice(0, 16) + idA.digest.slice(16).split("").reverse().join("") };
+  assert.equal(idB.digest.length, 64, "the premise: B's digest is a well-formed sha256");
+  assert.notEqual(idA.digest, idB.digest, "the premise: they are DIFFERENT bytes");
+  assert.equal(idA.digest.slice(0, 16), idB.digest.slice(0, 16), "the premise: and they agree on the first 64 bits — the collision");
+
+  // THE OLD KEY, reproduced verbatim: it truncated to 16 hex chars, so it collapses them onto
+  // ONE name — the finding.
+  const truncKey = (id: StoredInterpreterIdentity) => `node-${id.version}-${id.abi}-${id.platform}-${id.arch}-${id.digest.slice(0, 16)}`;
+  assert.equal(truncKey(idA), truncKey(idB), "the OLD truncated key gives both the SAME name — the finding");
+
+  // THE FIX: the key commits to every bit of the digest.
+  assert.notEqual(interpreterKey(idA), interpreterKey(idB), "the full-digest key tells them apart");
+  assert.ok(interpreterKey(idA).endsWith(idA.digest), "the key carries the digest untruncated — the commitment IS the pathname");
+  assert.notEqual(interpreterPath(home, idA), interpreterPath(home, idB), "so they name different final paths");
+
+  // AND THE CONSEQUENCE, on the real filesystem: with A actually published, B's identity does not
+  // resolve to A's entry. Under the truncated key it would have — B named A's very pathname.
+  const ra = installInterpreter({ home, source: a, expected: { version: idA.version, abi: idA.abi } });
+  assert.ok(ra.key.endsWith(idA.digest), "A is published under its FULL digest");
+  assert.notEqual(interpreterPath(home, idB), ra.path, "B names a path that is not A's published entry");
+  assert.equal(validatedInterpreter(home, idB), null, "B's identity selects NOTHING — it is not answered with A's bytes");
+  assert.deepEqual(publishedEntries(home), [interpreterKey(idA)], "and A's entry is the only one, untouched");
+  rmTree(home);
+});
+
 test("FG-571 F3: reuse means SAME IDENTITY == SAME BYTES — which is the only reason reuse is safe at all", () => {
   const home = freshHome("reuse");
   const v = variantInterpreter(workspace, "reuse");

@@ -79,11 +79,16 @@ function fileDigest(bin: string): string {
  *  substitution or a demand to replace a pinned path. Neither is allowed, so the identity is
  *  made fine-grained enough that the collision cannot arise: different bytes, different key.
  *
- *  The digest is truncated to 16 hex chars (64 bits) purely for a legible pathname. This is a
- *  key, not a signature: the store never trusts a name to tell it what bytes are present —
- *  validatedInterpreter re-digests the file and re-executes it. */
+ *  The digest is carried IN FULL — never truncated for a legible pathname. The store validates
+ *  bytes only THROUGH this key (validatedInterpreter re-digests, but compares by resolving the
+ *  keyed pathname), so a truncated digest is not merely a shorter label: it is the entire
+ *  strength of the commitment. At 64 bits a second binary that honestly reports the same
+ *  version+ABI+platform+arch can be ground out to land on an existing entry's path, and the
+ *  store would then reuse — and a release would exec — bytes it never validated, at a path
+ *  another release pins. The full 256-bit digest is what makes "different bytes, different key"
+ *  a fact rather than a probability. */
 export function interpreterKey(id: StoredInterpreterIdentity): string {
-  return `node-${id.version}-${id.abi}-${id.platform}-${id.arch}-${id.digest.slice(0, 16)}`;
+  return `node-${id.version}-${id.abi}-${id.platform}-${id.arch}-${id.digest}`;
 }
 
 /** The identity of THIS host's platform, which the store copy will run on. */
