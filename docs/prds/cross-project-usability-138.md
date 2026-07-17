@@ -1,5 +1,15 @@
 # SPEC — cross-project usability
 
+> ⚠️ **STATUS (2026-07-16): this accepted PRD's `npm link` install path is SUPERSEDED by FG-571.**
+> Every `npm link` reference below records what was true when #138 was written. It no longer installs the
+> supported machine-wide `forge`: FG-571 splits stable (a promoted, immutable release run by its own pinned
+> interpreter, selected by an atomic `~/.forge/current` pointer, reached via an explicitly installed shim)
+> from live-source (`bin/forge-dev`, new in FG-571). `npm link` now puts a live-checkout `forge` on `$PATH`,
+> defeating the stable/dev split, the `current` pointer, and the pinned-interpreter and env-sanitization
+> guarantees. **The cross-project workspace-scoping outcome this PRD specifies is unaffected and stands.**
+> Current source of truth: `README.md`, `src/cli/commands/release.ts`.
+
+
 **Status:** historical. This spec captured a partial-fix plan; the actual #138 ship in commit `14d4637` (a parallel implementation from another machine) covered the full three-part fix including piece b. Some details below diverge from what landed — particularly the flag name (`--workspace` shipped, not `--project`) and the store helper name (`listRunsForWorkspace`, not `listRunsForProject`). Read this as design context for the docs in this same commit; read commit `14d4637` for the actual code as shipped.
 
 **Backlog linkage:** #138 closed by `14d4637`. The #139 follow-up this spec proposed for the deferred piece b is moot — that work also shipped in `14d4637`. Close #139 as duplicate.
@@ -24,6 +34,15 @@ But the install path, default UX, and docs all assume "cd into the forge repo an
 After this spec lands:
 
 - `forge` is on `$PATH` (via `npm link`); `cd ~/code/anywhere && forge <cmd>` works.
+
+> **SUPERSEDED IN PART by FG-571 (2026-07-16).** This accepted PRD records the state at the time #138 was
+> written, when `npm link` WAS the supported way to put `forge` on `$PATH`. It no longer is: FG-571 splits the
+> machine-wide `forge` (a promoted, immutable release run by its own pinned interpreter, selected by an atomic
+> `~/.forge/current` pointer and reached through an explicitly installed shim) from the live-source entry
+> (`bin/forge-dev`, new in FG-571). `npm link` now symlinks a live-checkout `forge` onto `$PATH`, which
+> defeats the stable/dev split, the `current` pointer, and the pinned-interpreter and env-sanitization
+> guarantees. **Everything else in this PRD stands** — the cross-project workspace-scoping outcome it
+> specifies is unaffected. Current source of truth: `README.md` and `src/cli/commands/release.ts`.
 - `forge status` defaults to runs where `project_dir == cwd`; `--all` shows the cross-project view; `--project <dir>` filters explicitly.
 - The orchestrator template explicitly documents that `forge status` is workspace-scoped and tells the orchestrator not to use `--all` when picking up in-flight runs.
 - README and `quick-start.md` lead with "from your project," with forge-on-forge as a named appendix.

@@ -2,8 +2,12 @@
 
 Activity feed + agent-output inbox for forge runs across all projects on the host. Lives as a workspace package inside the forge monorepo.
 
+Run it **from a source checkout**, not from the stable `forge`: the dashboard is a separate workspace with its own dependency tree and is not bundled into a release, so `forge dashboard` refuses in release mode rather than pretending to run (bundling it is deferred to FG-572).
+
 ```bash
-forge dashboard start              # boots http://127.0.0.1:8024
+cd ~/code/forge
+./bin/forge-dev dashboard start              # boots http://127.0.0.1:8024
+./bin/forge-dev dashboard start --port 8025  # custom port
 ```
 
 Reads `~/.forge/forge.db` directly (read-only) and shells out to `forge` for mutating actions.

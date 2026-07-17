@@ -38,6 +38,31 @@ launched-workload provenance stays out of scope (FG-555). Children **3–5 remai
 decisions (OQ-6/BD-15/T9), Appendix A probes, and mutation reasoning below are unchanged, except where a
 Child-0/Child-2 closeout line is annotated for the shipped exec entry.
 
+> **SUPERSEDED IN PART by the 2026-07-16 status update below.** The two claims above that have since moved:
+> **"this slice stays INERT"** (Child 3 has landed and Child 4 is in review — see below), and **"the
+> machine-wide `forge` is an npm-link SYMLINK on PATH"** (Child 4 replaces that with a promoted immutable
+> release reached through an explicitly installed shim; `npm link` is no longer the supported install path).
+> The rest of this 2026-07-15 entry stands as the record of what Child 2 shipped.
+
+**Status update (2026-07-16):** **Child 3 (bounded ABI assertion) has LANDED as FG-570 (`5044c5d`, PR #123)** —
+exact ABI equality replacing the minimum-major floor, refusing older OR newer by name before any native load,
+fail-closed on an unverifiable release manifest. FG-574 (`engines: "^24"`) closed with it.
+
+**Child 4 (FG-571) is IMPLEMENTATION-COMPLETE and IN REVIEW (PR #124) — NOT yet landed.** It is recorded here
+because this plan is the governing architecture record and the slice is no longer inert in the branch under
+review; the "landed" claim and its merge SHA are deliberately withheld until the merge exists. What it carries:
+the `current` pointer and atomic promote/rollback, the near-frozen `/bin/sh` PATH shim, the immutable
+version+ABI+**content-digest**-keyed interpreter store, the bounded env-sanitization contract, fail-closed
+release identity, and the **stable/dev split** (`bin/forge-dev` is NEW — before it, the machine-wide `forge`
+and the live-source entry were the SAME npm-link'd artifact). Three read-only red-security audits of the
+manifest→exec and interpreter-store trust boundaries produced **eleven confirmed findings, all closed with
+executed exploit-proving mutants**; the two that reshaped the mechanism are recorded in §1 (the forge-authored
+canonical execution descriptor, and content-addressed interpreter identity — `process.version` + ABI never
+pinned content, so distinct bytes collided at one path).
+
+**Child 5 (FG-572 — installed-surface compatibility) remains PLANNED**, and `forge dashboard` still refuses in
+release mode until it is decided. R3/R4 launched-workload provenance stays out of scope (FG-555).
+
 **The rule this slice is planned under (from FG-551):** *a property concerning the FINAL RUNTIME must be
 demonstrated by EXECUTING or MUTATION-TESTING the final artifact. A source-pattern match is not evidence.*
 
@@ -428,8 +453,14 @@ only** (the signal/exit-fidelity prerequisite) — because every later child's e
 `forge` not reporting success on a kill. **UPDATE: Child 0 has since LANDED as `97363ca` (PR #119)**; the
 prerequisite is satisfied. **Child 1 has LANDED (`275ac63`, PR #120), and Child 2 has LANDED as FG-569**
 (exec-not-spawn entry + inert release closure + manifest + R1/R2 provenance — still INERT: no promotion, no
-`current` symlink, no PATH change). Children **3–5 remain planned** and unchanged. **C1 has since been
+`current` symlink, no PATH change). **C1 has since been
 reconciled into the PRD (FG-568), and the R1/R2 current-state reconciled (FG-569/FG-573)** — see §2/§6.
+**UPDATE (2026-07-16):** **Child 3 has LANDED as FG-570 (`5044c5d`, PR #123).** **Child 4 (FG-571) is
+implementation-complete and IN REVIEW (PR #124) — not yet landed**, so the slice is no longer inert in the
+branch under review; its merge SHA is withheld until the merge exists. **Child 5 (FG-572) remains planned.**
+See the 2026-07-16 status update at the top of this document for what Child 4 carries and for the audit
+findings that reshaped the mechanism (§1: the forge-authored canonical execution descriptor; content-addressed
+interpreter identity).
 
 ---
 
