@@ -38,6 +38,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as yamlParse } from "yaml";
 import { runUpgrade } from "./upgrade.js";
+import { compilePolicyFile } from "../../raci/host-policy.js";
 import { assetRoot, executionModeFrom } from "../../v2/asset-root.js";
 
 /** A route block the compiler accepts, with `responsible` as the ATTRIBUTABLE
@@ -221,6 +222,39 @@ test("FG-578 (CORE): forge upgrade retains the operator RACI AND recompiles rout
   );
   assert.notEqual(responsibleInCompiledPolicy(home), SEED_RESPONSIBLE, "compiling the seed's routing into the live policy IS the defect");
   assert.match(out, /routing-policy\.yml: recompiled/, "the derived artifact is still kept in lockstep — the exemption is scoped to the SOURCE, not to $FORGE_HOME");
+});
+
+test("FG-578 (direct-path): recreating forge-raci.md via the installer does NOT recompile routing-policy.yml — it stays stale until `forge route compile`", () => {
+  // The gap docs/how-to-upgrade.md warns about, pinned. The documented recipe for
+  // re-testing an edit to an authored seed is "remove its ~/.forge/ copy so the
+  // installer recreates it". For forge-raci.md that recreates the SOURCE but the
+  // DERIVED routing-policy.yml is install-seeds.sh's explicit non-responsibility
+  // (see AUTHORED_EXEMPT's comment) — so the live routing rules keep reflecting the
+  // RACI that was just replaced. Compiling the policy is init/upgrade's job, or the
+  // operator's via `forge route compile`; the installer never does it.
+  const home = assertDisposableHome();
+
+  // A host as `forge upgrade` leaves it: an authored RACI and a policy COMPILED
+  // FROM IT (both responsible=OPERATOR).
+  installDirectly();
+  writeFileSync(join(home, "forge-raci.md"), raciDoc(OPERATOR_RESPONSIBLE));
+  compilePolicyFile(join(home, "forge-raci.md"), join(home, "routing-policy.yml"));
+  assert.equal(responsibleInCompiledPolicy(home), OPERATOR_RESPONSIBLE, "premise: the policy is derived from the operator RACI");
+
+  // The recipe: drop the host RACI so the installer recreates it from the seed.
+  rmSync(join(home, "forge-raci.md"));
+  installDirectly({ FORCE: "1" });
+
+  // The source is recreated from the seed...
+  assert.equal(readFileSync(join(home, "forge-raci.md"), "utf8"), raciDoc(SEED_RESPONSIBLE), "the RACI is recreated from the seed");
+  // ...but the installer left routing-policy.yml untouched, so it still routes by
+  // the RACI that no longer exists. This is the trap the doc note now forbids.
+  assert.equal(responsibleInCompiledPolicy(home), OPERATOR_RESPONSIBLE, "the derived policy is STALE — the installer does not recompile it");
+
+  // The documented remedy closes the gap: compile brings the policy back in
+  // lockstep with the recreated RACI.
+  compilePolicyFile(join(home, "forge-raci.md"), join(home, "routing-policy.yml"));
+  assert.equal(responsibleInCompiledPolicy(home), SEED_RESPONSIBLE, "`forge route compile` recompiles the policy from the recreated RACI");
 });
 
 // ──────────────────── 2. THE EXEMPTION LIMITS, NOT DISABLES ────────────────────
