@@ -1387,16 +1387,21 @@ async function runOneRed(args: {
     // failed. FG-420 EXCEPTION: an authoritative shipping-reviewer that crashed
     // still triggers authoritativeFail (fail-safe) — dispatchReds detects the
     // inconclusive and blocks. Other reds' broken-container inconclusive is non-blocking.
-    // FG-586: an UNREADABLE result (malformed after the Part A bounded strip) is a
-    // distinct case — surfaced to dispatchReds so an authoritative gate_on_verdict
-    // red fails CLOSED rather than advancing as a bare inconclusive. Scoped to
-    // result_malformed only: a container crash / OOM / idle-timeout stays a
-    // non-blocking inconclusive for non-authoritative reds, exactly as before.
+    // FG-586: an UNREADABLE result is a distinct case — surfaced to dispatchReds
+    // so an authoritative gate_on_verdict red fails CLOSED rather than advancing as
+    // a bare inconclusive. Two shapes count as unreadable: result_malformed (a bad
+    // byte the Part A bounded strip could not recover) AND result_missing (empty /
+    // whitespace-only / zero-length-truncated output — resultRaw is .trim()ed at
+    // read, so whitespace-only reviewer output classifies missing, not malformed).
+    // Scoped to those two: a container crash / OOM / idle-timeout / model_error
+    // stays a non-blocking inconclusive for non-authoritative reds, exactly as before.
     return {
       red: args.red,
       redTaskId,
       verdict: { verdict: "inconclusive", confidence: 0, findings: [] },
-      ...(result.failureKind === "result_malformed" ? { resultUnreadable: true } : {}),
+      ...(result.failureKind === "result_malformed" || result.failureKind === "result_missing"
+        ? { resultUnreadable: true }
+        : {}),
     };
   }
 
@@ -2647,6 +2652,12 @@ function stripJsonCodeFence(s: string): string | null {
   const afterOpen = s.slice(firstNewline + 1);
   const closeIdx = afterOpen.lastIndexOf("```");
   if (closeIdx === -1) return null;
+  // FG-586: the closing fence must TERMINATE the document — only whitespace may
+  // follow it. Otherwise arbitrary text after the fence (`\`\`\`...\`\`\`\nGARBAGE`)
+  // would be silently discarded and the inner JSON accepted. Refuse to strip a
+  // fence with a non-whitespace suffix so the payload stays unreadable and (for an
+  // authoritative red) fails closed rather than being salvaged.
+  if (afterOpen.slice(closeIdx + 3).trim().length > 0) return null;
   return afterOpen.slice(0, closeIdx).trim();
 }
 
@@ -3224,7 +3235,7 @@ async function runContainer(args: {
         const err = `${msg} (stream-recovered result could not be persisted: ${e instanceof Error ? e.message : String(e)})`;
         failTask(args.taskId, { runId: args.runId, kind, error: err, evidence: recoveryEvidenceFor(kind) });
         finalizeContainerRetention(containerName, false);
-        return { kind: "failed", error: err };
+        return { kind: "failed", error: err, failureKind: kind };
       }
       logEvent("task.result_recovered_from_stream", {
         runId: args.runId, taskId: args.taskId,
@@ -3248,7 +3259,12 @@ async function runContainer(args: {
     // targets — a clean exit that produced no result.json is retained, not
     // reaped.
     finalizeContainerRetention(containerName, false);
-    return { kind: "failed", error: msg };
+    // FG-586: thread failureKind so runOneRed can fail an authoritative reviewer
+    // CLOSED on a missing/empty/whitespace-truncated result (resultRaw is
+    // .trim()ed at read, so whitespace-only reviewer output lands here as
+    // result_missing) — not just on result_malformed. A model_error kind here
+    // stays a non-blocking inconclusive (it won't match runOneRed's unreadable set).
+    return { kind: "failed", error: msg, failureKind: kind };
   }
 
   // FG-492 review: a valid result here does NOT mean reap now — the caller

@@ -519,6 +519,146 @@ test(
   },
 );
 
+// ─── (fg586-B3) empty / whitespace-only authoritative result FAILS CLOSED ─────
+
+test(
+  "(fg586-B3) empty authoritative reviewer output (zero-length) BLOCKS — missing result fails closed, never advances",
+  async () => {
+    // The gap FG-586 finding 1 targets: an authoritative gate_on_verdict red whose
+    // container exits 0 but produced an EMPTY result.json. resultRaw is .trim()ed at
+    // read, so this classifies result_missing (not result_malformed). Before the fix
+    // only result_malformed set resultUnreadable, so an empty reviewer result slid
+    // through as a bare inconclusive and the build advanced. It must fail closed.
+    const { runId, wave } = await runWithRedResult("", "FG-T586-B3");
+
+    assert.ok(
+      !wave.completedSteps.includes("build"),
+      "build must NOT complete — empty authoritative output is missing/unreadable and must fail closed",
+    );
+
+    const primaryTask = tasksForRun(runId).find((t) => t.agentRole === "engineer" && t.parentId === undefined);
+    assert.ok(primaryTask !== undefined, "primary engineer task must exist");
+    assert.equal(
+      primaryTask!.status,
+      "blocked_by_red",
+      "primary must be blocked_by_red — an empty authoritative result is a fail-closed block",
+    );
+
+    const reviewerVerdict = verdictsForRun(runId).find((v) => v.redRole === "red-wide");
+    assert.ok(reviewerVerdict !== undefined, "red-wide verdict must be recorded even when the result was empty");
+    assert.ok(
+      reviewerVerdict!.findings.some((f) => f.summary.includes("UNREADABLE")),
+      "the fail-closed UNREADABLE finding must be present for empty authoritative output",
+    );
+  },
+);
+
+test(
+  "(fg586-B3b) whitespace-only authoritative reviewer output BLOCKS — trimmed to empty, still fails closed",
+  async () => {
+    // Companion to B3: whitespace-only output. .trim() at read collapses it to
+    // zero-length → result_missing, the same fail-closed path.
+    const { runId, wave } = await runWithRedResult("   \n\t  \n", "FG-T586-B3b");
+
+    assert.ok(!wave.completedSteps.includes("build"), "build must NOT complete — whitespace-only output is missing");
+    const primaryTask = tasksForRun(runId).find((t) => t.agentRole === "engineer" && t.parentId === undefined);
+    assert.equal(
+      primaryTask!.status,
+      "blocked_by_red",
+      "primary must be blocked_by_red — whitespace-only authoritative output fails closed",
+    );
+    const reviewerVerdict = verdictsForRun(runId).find((v) => v.redRole === "red-wide");
+    assert.ok(
+      reviewerVerdict!.findings.some((f) => f.summary.includes("UNREADABLE")),
+      "the fail-closed UNREADABLE finding must be present for whitespace-only output",
+    );
+  },
+);
+
+// ─── (fg586-C6) empty result behind a SPECIALIST red stays non-blocking ───────
+
+test(
+  "(fg586-C6) empty result behind a NON-authoritative (specialist) red stays a non-blocking inconclusive — gate not blocked",
+  async () => {
+    // Preserved behavior: fail-closed on missing output applies only to an
+    // *authoritative* gate. The same empty payload behind a specialist red must NOT
+    // block — it stays inconclusive and the build advances.
+    const { runId, wave } = await runWithRedResult("", "FG-T586-C6", WORKFLOW_SPECIALIST_RED_WIDE);
+
+    assert.ok(
+      wave.completedSteps.includes("build"),
+      "build MUST complete — an empty non-authoritative result must NOT block the gate (preserved behavior)",
+    );
+    const primaryTask = tasksForRun(runId).find((t) => t.agentRole === "engineer" && t.parentId === undefined);
+    assert.equal(primaryTask!.status, "complete", "primary must complete on a non-authoritative empty result");
+    const reviewerVerdict = verdictsForRun(runId).find((v) => v.redRole === "red-wide");
+    assert.equal(reviewerVerdict!.verdict, "inconclusive", "an empty specialist result is recorded inconclusive");
+    assert.ok(
+      !reviewerVerdict!.findings.some((f) => f.summary.includes("UNREADABLE")),
+      "no fail-closed UNREADABLE finding may be injected for a non-authoritative red",
+    );
+  },
+);
+
+// ─── (fg586-B4) trailing junk after the closing fence FAILS CLOSED ────────────
+
+test(
+  "(fg586-B4) valid fenced JSON with trailing junk AFTER the closing fence is NOT stripped — authoritative fails closed",
+  async () => {
+    // FG-586 finding 2: stripJsonCodeFence used lastIndexOf to locate the closing
+    // fence and discarded everything after it — so a fenced envelope followed by
+    // arbitrary text (`\`\`\`json\n{...}\n\`\`\`\nGARBAGE`) was silently accepted, the
+    // inner JSON parsed, and the reviewer's verdict honored from a payload that was
+    // NOT a clean envelope. The closing fence must terminate the document (apart
+    // from whitespace); trailing junk keeps the payload unreadable and fails closed.
+    const fencedThenJunk = "```json\n" + INCIDENT_FAIL_JSON + "\n```\nEXTRA TEXT AFTER THE FENCE";
+    const { runId, wave } = await runWithRedResult(fencedThenJunk, "FG-T586-B4");
+
+    assert.ok(
+      !wave.completedSteps.includes("build"),
+      "build must NOT complete — a fence with trailing junk must not be salvaged",
+    );
+
+    const primaryTask = tasksForRun(runId).find((t) => t.agentRole === "engineer" && t.parentId === undefined);
+    assert.equal(
+      primaryTask!.status,
+      "blocked_by_red",
+      "primary must be blocked_by_red — trailing-junk fenced payload stays unreadable and fails closed",
+    );
+
+    const reviewerVerdict = verdictsForRun(runId).find((v) => v.redRole === "red-wide");
+    assert.ok(reviewerVerdict !== undefined, "red-wide verdict must be recorded");
+    assert.ok(
+      reviewerVerdict!.findings.some((f) => f.summary.includes("UNREADABLE")),
+      "the fail-closed UNREADABLE finding must be present — the trailing-junk payload stayed unreadable",
+    );
+  },
+);
+
+test(
+  "(fg586-B4b) valid fenced JSON with only trailing WHITESPACE after the closing fence still parses — clean envelope preserved",
+  async () => {
+    // Regression fence for B4: the terminate-check must allow trailing whitespace
+    // (a common shape: a newline after the closing fence). This is a real fail
+    // verdict, so it must survive the strip and BLOCK on its own merits — proving
+    // the fix rejects junk without breaking a whitespace-terminated clean envelope.
+    const fencedThenWhitespace = "```json\n" + INCIDENT_FAIL_JSON + "\n```\n  \n";
+    const { runId, wave } = await runWithRedResult(fencedThenWhitespace, "FG-T586-B4b");
+
+    assert.ok(!wave.completedSteps.includes("build"), "build must NOT complete — the recovered fail must block");
+    const reviewerVerdict = verdictsForRun(runId).find((v) => v.redRole === "red-wide");
+    assert.equal(
+      reviewerVerdict!.verdict,
+      "fail",
+      "a whitespace-terminated fenced verdict must survive the strip (not be treated as junk)",
+    );
+    assert.ok(
+      !reviewerVerdict!.findings.some((f) => f.summary.includes("UNREADABLE")),
+      "a clean whitespace-terminated envelope must NOT gain a synthetic UNREADABLE finding",
+    );
+  },
+);
+
 // ─── (fg586-G7b) bounded-strip negative guard: leading prose then JSON ────────
 
 test(
