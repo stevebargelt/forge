@@ -324,7 +324,9 @@ via `forge backlog`, session handoff notes, task briefs, scratch drafts. Durable
 operator-/engineer-facing prose → `documentation-maintainer`
 (`documentation_durable`): `docs/**`, `learnings/decisions/**` +
 `learnings/patterns/**`, `README*`, seed prose/templates, how-tos, ADRs, example
-configs. Mechanical exception: re-rendering `CLAUDE.md` via `forge upgrade` and
+configs. Mechanical exception: re-rendering `CLAUDE.md` via `forge-dev upgrade`
+(NOT `forge upgrade` — since FG-577 the template resolves from the executing
+forge, so a release would render its OWN template, not your seed edit) and
 marker-repair are orchestrator-direct. If the maintainer isn't installed, note
 the gap and fall back to a direct edit.
 

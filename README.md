@@ -116,9 +116,20 @@ Shows agent outputs across every project on the host, live-polling every 2s. Rea
 
 ## Upgrading
 
-When forge has new commits, run `forge upgrade` from any project. It pulls the forge repo, runs `npm install`, refreshes `~/.forge/` seeds, and re-inits the current project's orchestrator block — then a read-only release check runs automatically (image, runtime CLIs, auth, policies, seed drift). To also rebuild the agent Docker image in the same command, add `--rebuild-image`. See `docs/how-to-upgrade.md` for all flags and the multi-project flow.
+`forge upgrade` refreshes `~/.forge/` seeds and re-inits the current project's orchestrator block, then runs a read-only release check automatically (image, runtime CLIs, auth, policies, seed drift). It installs the bytes of **whichever forge you ran** — the promoted release under `forge`, your working tree under `forge-dev` — never `~/code/forge` behind your back.
 
-Note that `forge upgrade` refreshes the **checkout** and `~/.forge/` seeds — it does not build or promote a release, so the stable machine-wide `forge` keeps running the release you last promoted until you `forge release build` and `forge release promote` again.
+Advancing the checkout is the other half, and it follows the same stable/dev split as the entry points themselves: `git pull`, `npm install`, and `--rebuild-image` are dev-checkout work, so run them through `forge-dev upgrade` from the checkout. Under the stable `forge` they are **refused** by name and the command exits nonzero rather than reporting success.
+
+```bash
+forge upgrade --skip-project     # refresh ~/.forge/ from the running release (needs no checkout)
+forge-dev upgrade                # from ~/code/forge: also pull, npm install, re-init this project
+```
+
+Because seed installation is release-owned, `forge upgrade` repairs a drifted `~/.forge/` on a machine that has never cloned forge.
+
+`forge upgrade` exits nonzero whenever any requested step did not happen — a refusal, a dirty checkout, a failed install, a stale routing policy, a project with no forge block, a crashed release check — and closes `Upgrade INCOMPLETE — <reasons>` instead of `Upgrade complete.` Operator skips are not failures. `--json` reports the same states as `ok` plus an `unresolved` list, so scripts and humans cannot disagree about whether an upgrade did what was asked. See `docs/how-to-upgrade.md` for all flags, the exit-code and `--json` contract, the execution-mode split, and the multi-project flow.
+
+Note that `forge upgrade` refreshes `~/.forge/` seeds — it does not build or promote a release, so the stable machine-wide `forge` keeps running the release you last promoted until you `forge release build` and `forge release promote` again.
 
 ## Docs
 

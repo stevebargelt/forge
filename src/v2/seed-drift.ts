@@ -15,9 +15,9 @@
 // they are reported as a warning rather than treated as a hard readiness fail.
 
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, relative } from "node:path";
 import { FORGE_HOME } from "../util/paths.js";
+import { assetRoot } from "./asset-root.js";
 
 export type SeedStatus = "current" | "drifted" | "missing";
 
@@ -50,12 +50,14 @@ const SEED_SPECS: SeedSpec[] = [
   { category: "raci", rel: "forge-raci.md", autoRefreshable: false },
 ];
 
-/** The seeds/ dir of the running forge package, resolved module-relative so it
- *  tracks the live code even when npm-linked. FORGE_REPO_DIR overrides it. */
+/** The seeds/ dir of the running forge package. FG-577: the baseline is itself a
+ *  release-owned asset, so it resolves from assetRoot() and NOTHING ambient may
+ *  redirect it — a FORGE_REPO_DIR short-circuit here re-pointed the detector's
+ *  own evidence, and drift then reported "current" against caller-chosen bytes,
+ *  silently. FORGE_REPO_DIR keeps its meaning only for dev-checkout advancement
+ *  (asset-root.ts devCheckoutDir); do not restore an override here. */
 export function defaultRepoSeedsDir(): string {
-  if (process.env.FORGE_REPO_DIR) return join(process.env.FORGE_REPO_DIR, "seeds");
-  // this module: <pkg>/src/v2/seed-drift.ts → <pkg>/seeds
-  return join(dirname(fileURLToPath(import.meta.url)), "..", "..", "seeds");
+  return join(assetRoot(), "seeds");
 }
 
 /** Absolute paths of every file under `base` (recursive). [] if base is absent.

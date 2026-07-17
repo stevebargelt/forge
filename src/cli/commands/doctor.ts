@@ -8,9 +8,9 @@
 import type { Command } from "commander";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync, readdirSync } from "node:fs";
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { FORGE_HOME, ROUTING_POLICY_PATH } from "../../util/paths.js";
+import { assetRoot, executionMode, type ExecutionMode } from "../../v2/asset-root.js";
 import { loadRuntime, loadModelPolicy, type LoadContext } from "../../v2/loader.js";
 import { probeAuth } from "../../v2/provider-doctor.js";
 import { detectAuthMode, type EffectiveAuth } from "../../v2/model-resolution.js";
@@ -27,10 +27,6 @@ import {
 
 const DEFAULT_IMAGE = "agent-dev-worker:latest";
 const MODEL_POLICY_PATH = join(FORGE_HOME, "model-policy.yml");
-
-function forgeRepoDir(): string {
-  return process.env.FORGE_REPO_DIR ? resolve(process.env.FORGE_REPO_DIR) : join(homedir(), "code", "forge");
-}
 
 // The image bakes in more than the Dockerfile: it COPYs forge-test.sh and
 // agent-entrypoint.sh from the build context, so editing one leaves the built
@@ -112,7 +108,12 @@ function inspectImage(name: string, repoDirOverride?: string, mtimeProbe?: (dir:
     }
   }
 
-  const repoDir = repoDirOverride ?? forgeRepoDir();
+  // FG-577: the staleness PROBE is a read, so it judges the running image against
+  // the EXECUTING release's bundled docker/ (a REQUIRED asset dir). The rebuild
+  // ACTION is dev-advancement and refuses in release mode (upgrade.ts). Whether
+  // the mtime is MEANINGFUL is the pure layer's call (release-doctor.ts): a
+  // release's inputs are cpSync-stamped, so it ignores them.
+  const repoDir = repoDirOverride ?? assetRoot();
   const buildInputMtimeMs = mtimeProbe ? mtimeProbe(repoDir) : newestBuildInputMtime(repoDir);
   return { name, present, createdMs, buildInputMtimeMs, ...(dockerError ? { dockerError } : {}) };
 }
@@ -260,6 +261,7 @@ export function gatherReleaseInputs(
   imageName = DEFAULT_IMAGE,
   ctx: LoadContext = {},
   probes: DoctorProbes = {},
+  mode: ExecutionMode = executionMode(),
 ): ReleaseInputs {
   const image = probes.inspectImage
     ? probes.inspectImage(imageName)
@@ -270,6 +272,7 @@ export function gatherReleaseInputs(
     policy: gatherPolicy(ctx),
     profileAuth: gatherProfileAuth(ctx),
     routing: gatherRouting(),
+    mode,
   };
 }
 
