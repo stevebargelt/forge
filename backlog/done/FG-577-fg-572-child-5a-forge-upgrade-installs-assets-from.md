@@ -1,9 +1,11 @@
 ---
 id: FG-577
 type: story
-status: active
+status: done
 title: "FG-572 Child 5a: forge upgrade installs assets from the DEV checkout, so a promoted release repairs ~/.forge with dev bytes"
 created: 2026-07-17
+closed: 2026-07-17
+closed_commit: b5add06
 ---
 
 **Parent:** FG-572 · **Epic:** FG-561 · **PRD:** `docs/prds/durable-orchestration-continuation.md` @ `e6fd56b` (§"Externally installed surfaces")
