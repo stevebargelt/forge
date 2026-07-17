@@ -2,7 +2,7 @@
 id: FG-565
 type: story
 status: active
-title: "Slice 6 — cross-layer recovery, observability, and campaign closeout for durable continuation"
+title: Slice 6 — cross-layer recovery, observability, and campaign closeout for durable continuation
 created: 2026-07-14
 ---
 
@@ -110,7 +110,9 @@ owning slice**, not a decision to be improvised here.
   failures and no skips. Slice 0's fix must not have rotted across the campaign — if the image regressed,
   every agent's suite is untrustworthy again and the campaign's own test evidence is in doubt.
 - **Canonical seed → generated project block → docs → installed surfaces all AGREE.**
-  `seeds/orchestrator-template.md`, the marker-managed `CLAUDE.md` block (re-rendered via `forge upgrade`),
+  `seeds/orchestrator-template.md`, the marker-managed `CLAUDE.md` block (re-rendered via `forge-dev upgrade` —
+  NOT stable `forge upgrade`, which since FG-577 renders the executing release's template; validating the wrong
+  propagation path would make this gate pass on a block the seed edit never reached),
   `docs/quick-start.md`, `docs/concepts.md`, `docs/autonomous-run-prompt.md`, and any installed host skill
   that independently prescribes launch waiting must all say the same thing. **Parity is TESTED, not assumed.**
   *(Ownership note, FG-347: the seed and the marker block are orchestrator-policy surfaces — the

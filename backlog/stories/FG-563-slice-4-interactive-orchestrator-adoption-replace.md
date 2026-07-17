@@ -53,14 +53,17 @@ running."**
 ## Propagation surfaces — update the SOURCE, not just the current checkout
 
 - `seeds/orchestrator-template.md` — **the canonical policy source.**
-- The marker-managed orchestrator block in `CLAUDE.md`, regenerated deterministically via `forge upgrade`.
+- The marker-managed orchestrator block in `CLAUDE.md`, regenerated deterministically via `forge-dev upgrade`
+  (**not** stable `forge upgrade` — since FG-577 the installer renders the EXECUTING forge's template, so from a
+  promoted release `forge upgrade` renders the RELEASE's block and a checkout seed edit silently does not land).
 - `docs/quick-start.md`, `docs/concepts.md`, `docs/autonomous-run-prompt.md`.
 - Init/upgrade/template regression tests.
 - Any installed host skill that independently prescribes launch waiting.
 
 **Ownership note (FG-347):** `seeds/orchestrator-template.md` and the `CLAUDE.md` marker block are
 **orchestrator-policy surfaces**. The documentation-maintainer must **not** hand-edit them — the
-orchestrator authors the seed and re-renders via `forge upgrade`.
+orchestrator authors the seed and re-renders via `forge-dev upgrade` (FG-577: stable `forge upgrade` renders the
+executing release's template, not your checkout edit).
 
 ## Acceptance Criteria
 
