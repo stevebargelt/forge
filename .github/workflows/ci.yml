@@ -21,6 +21,7 @@ name: CI
 # "CI vs review-loop verification" section.
 on:
   push:
+    branches: [main]
   pull_request:
     branches: [main]
 
