@@ -633,7 +633,9 @@ The initiative is complete only when all of the following are true:
   `forge dashboard`: the command now runs from a promoted release (resolved from `assetRoot()`, never the dev
   checkout; a torn release still fails named + nonzero), and the release manifest's `selfContainedFor` is
   always `control-plane+dashboard`. The dashboard also boots offline — its client libs (preact/htm/marked) are
-  vendored as first-party files and the server sends `Content-Security-Policy: script-src 'self'` — though its
+  vendored as first-party files and the server sends `Content-Security-Policy: script-src 'self'` (this offline/
+  CDN-vendoring behavior was advisor-generated hardening, NOT an operator requirement — the operator approved
+  release *bundling* only; described here only because the code landed in `b6c6542`) — though its
   provider/data APIs may still need network. This satisfies the "`forge dashboard` unavailable from a promoted
   release" gap the closeout tracked under FG-572; the broader FG-572 installed-surface work is unaffected.
 - **No normative change.** This is a current-state reconciliation of the same class as the FG-568/FG-573

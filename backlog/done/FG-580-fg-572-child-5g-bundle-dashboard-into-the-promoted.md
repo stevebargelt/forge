@@ -147,9 +147,18 @@ adding the copy without commit-binding fails AC3. The build fanout cannot sequen
 (`cwd=dashboardDir`, preserves tsconfig-paths) vs in-process via the release forge-loader. **Default: child-tsx
 spawn.**
 
-## Operator decision — 2026-07-17 (offline / CDN vendoring)
+## ~~Operator decision~~ — CORRECTION (offline / CDN vendoring was NOT operator-approved)
 
-**A promoted release dashboard MUST boot without fetching executable JavaScript from the internet.** Today
+> **CORRECTION (2026-07-17, recovery mode):** Offline/CDN vendoring was introduced as an advisor-generated
+> hardening proposal and was incorrectly recorded here as an operator decision. **The operator approved release
+> bundling only** (Option A above). **Offline operation was not a product requirement.** The vendoring / CSP /
+> import-map / offline-browser-test work below DID land in the merged implementation (`b6c6542`) and is described
+> truthfully for the record, but its acceptance-criteria expansion (the "Updated AC-6" offline requirement) was
+> not an approved AC. Keep-or-remove of the offline code is an open operator decision (see the recovery inventory).
+
+The proposal, as recorded and implemented, was:
+
+**A promoted release dashboard would boot without fetching executable JavaScript from the internet.** Today
 Preact, HTM, and browser-side Marked load from `https://esm.sh`; only Marked is installed locally (and only
 server-side, unused). A supposedly immutable, self-contained release must not execute CDN-delivered code that
 is **outside its content binding**. Therefore:
@@ -162,7 +171,7 @@ is **outside its content binding**. Therefore:
 - **"Offline" scope:** it means the local UI **boots and renders** with no network fetch of executable JS.
   Provider/data APIs the dashboard calls may still require network — that is not in scope here.
 
-This supersedes the census's "assume network at smoke time" default. **Updated AC-6:** the browser smoke must
+This proposal superseded the census's "assume network at smoke time" default. ~~**Updated AC-6:**~~ (advisor-proposed AC expansion, NOT an approved AC — see the CORRECTION above) the browser smoke was made to
 prove the primary page boots and renders representative UI with **network to executable-JS origins blocked**
 (no `esm.sh`/CDN fetch); first-party `/client/*` assets serve from the release closure. Add a mutation proof:
 omitting a vendored client lib makes the offline-boot test go red.

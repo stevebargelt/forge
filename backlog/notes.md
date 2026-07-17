@@ -1,3 +1,18 @@
+**RECOVERY MODE (operator, 2026-07-17) — campaign governor. FG-561 automatic advancement is PAUSED.**
+No new ticket or AC may be created from a finding unless it directly falsifies an existing accepted acceptance
+criterion or demonstrates credible in-scope data-loss/security harm. Optional hardening is deferred by default.
+Product properties, new test environments, dependency policies, and required CI gates require explicit operator
+authorization. Campaign health is measured by net open-backlog reduction. Do NOT start FG-579/581/582/583, any
+implementation child, or another autonomous campaign without explicit operator go.
+
+**Correction on record (do not relitigate):** FG-580 offline/CDN vendoring (Preact/HTM/Marked, CSP, offline
+browser AC, the FG-589 CI gate) was ADVISOR-GENERATED HARDENING that I incorrectly recorded as an operator
+decision. The operator approved dashboard release BUNDLING only. Offline was not a product requirement. FG-580
+merged WITH the offline code (`b6c6542`); keep-or-revert of that offline code is an OPEN operator decision (see
+the recovery inventory in the session log). FG-589 is WITHDRAWN, not implemented.
+
+---
+
 **Last session: FG-561 overnight autonomous run — 2026-07-17. TWO FG-572 children shipped; FG-580 decided (by another session).**
 
 **Shipped + closed this session:**

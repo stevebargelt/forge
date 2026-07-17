@@ -1,9 +1,21 @@
 ---
 id: FG-589
 type: story
-status: active
-title: wire FG-580's AC-6 offline browser smoke into a required Chrome-capable CI gate (today it runs in neither required check, so an offline-boot regression can merge green)
+status: done
+title: "WITHDRAWN (not implemented): wire FG-580 AC-6 offline smoke into a required CI gate — originated from an unapproved offline requirement"
 created: 2026-07-17
+closed: 2026-07-17
+---
+
+> **WITHDRAWN (2026-07-17, recovery mode) — NOT IMPLEMENTED.**
+> - This ticket originated from an **unapproved offline requirement**: the operator approved dashboard release
+>   *bundling* only. Offline/CDN vendoring was advisor-generated hardening, not an operator decision.
+> - It is **not required** by FG-580, FG-572, or FG-561 — none of their accepted acceptance criteria demand a
+>   required offline-browser CI gate.
+> - **No Chrome CI or branch-protection work is authorized.** No such work was done.
+> - It was **not implemented** and its acceptance criteria were **not met**.
+> - Historical text preserved below for the record.
+
 ---
 
 **Surfaced by:** FG-580's review-loop, 2026-07-17 (round 2, run `run-review-loop-fg-580-fbe34f`).
