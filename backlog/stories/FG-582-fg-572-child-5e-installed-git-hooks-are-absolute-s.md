@@ -51,3 +51,22 @@ hook** (must never be clobbered — same operator-owned-surface principle as FG-
 - A foreign hook is never clobbered; a stale forge hook is distinguished from it by evidence, not by name.
 - Tests use **disposable FORGE_HOME + disposable install prefixes**; no test rewrites this repo's real
   `.git/hooks`.
+
+## Stale docs this ticket owns (found 2026-07-17 during FG-577; NOT fixable until this ships)
+
+FG-577's premise grep across `docs/**` surfaced two durable docs asserting the pre-split symlink mechanic.
+Both were **deliberately left alone** — correcting them means documenting installed-symlink behavior that THIS
+ticket owns and has not shipped, so fixing them now would document a protection that does not exist:
+
+- **`docs/concepts.md:40`** — "Installed by `forge init` as symlinks into the local forge clone (so
+  `forge upgrade` propagates template edits to all projects without per-project re-copy)."
+- **`docs/quick-start.md:80`** — "slash commands are symlinks so template edits in the forge repo flow to
+  every project on next session."
+
+Under a promoted release these resolve into the **release tree**, not the clone, so template edits in the
+checkout do not flow. Neither is caused by FG-577: `init.ts` already resolved module-relative
+(`init.ts:222,283-311,650,786`) and FG-577 does not touch `init.ts` — the drift predates it and was simply
+never visible before the stable/dev split made it matter.
+
+**Whichever way the T9 anchoring decision goes, both lines must be reconciled in the same change.** They are
+the operator-facing statement of exactly the behavior this ticket decides.
