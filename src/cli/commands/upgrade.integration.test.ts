@@ -682,6 +682,78 @@ test("FG-577 (cell 2): operator-requested skips are RESOLVED but still VISIBLE i
   }
 });
 
+// ─────────── FG-577: an operator skip outranks the mode refusal ───────────
+//
+// Before this fix there was NO flag combination that yielded a clean `forge
+// upgrade` on a release host — the normal state of every promoted machine exited
+// 1. An exit code that is always 1 in the common path is noise, and it discredits
+// the `unresolved` model the rest of this ticket built. The classification was
+// right; the ORDERING was wrong.
+
+test("FG-577: --skip-git --skip-npm on a release COMPLETES — the operator skipped exactly what the release cannot do", () => {
+  const release = assetTree("fg577-rel-skips-", "RELEASE");
+  const devCheckout = assetTree("fg577-dev-skips-", "DEV", { manifest: false });
+  try {
+    const r = drive(
+      { skipProject: true, skipGit: true, skipNpm: true },
+      { mode: "release", assetsDir: release, devDir: devCheckout },
+    );
+
+    assert.equal(r.exitCode, undefined, "nothing was refused — an operator skip is the operator's own call, not a failed request");
+    assert.match(r.stdout, /Upgrade complete\./);
+    assert.deepEqual(r.result.unresolved, []);
+
+    // Visible as skips, not laundered into silence: a script can still answer
+    // "did the pull happen?".
+    assert.equal(r.result.devAdvancement.gitPull, "skipped");
+    assert.equal(r.result.devAdvancement.npmInstall, "skipped");
+    assert.equal(r.result.devAdvancement.kind, "not-requested");
+    assert.deepEqual(r.result.devAdvancement.lines, [], "no refusal register for a refusal that never happened");
+    assert.equal(r.warnings, "", "and no refusal warning on the console either");
+
+    // The asset half — the whole point of running upgrade on a release — still ran.
+    assert.equal(r.result.assetInstall, "installed");
+    // The checkout is still not advanced under the operator.
+    assert.equal(readFileSync(join(devCheckout, "seeds", "runtimes", "pi-apikey.yml"), "utf8"), "# DEV\nprovider: DEV\n");
+
+    // The scripted consumer of the same run agrees — `--json` is a surface of its
+    // own, and an exit 0 beside ok:false is two answers to one question.
+    const j = drive(
+      { skipProject: true, skipGit: true, skipNpm: true, json: true },
+      { mode: "release", assetsDir: release, devDir: devCheckout },
+    );
+    const parsed = JSON.parse(j.stdout) as { ok: boolean; unresolved: string[] };
+    assert.equal(parsed.ok, true);
+    assert.deepEqual(parsed.unresolved, []);
+    assert.equal(j.exitCode, undefined);
+  } finally {
+    for (const d of [release, devCheckout]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("FG-577: --skip-git alone on a release classifies the two steps INDEPENDENTLY", () => {
+  // The guard against fixing the above by weakening the refusal generally: npm
+  // advancement WAS requested here, and a release still cannot do it.
+  const release = assetTree("fg577-rel-halfskip-", "RELEASE");
+  const devCheckout = assetTree("fg577-dev-halfskip-", "DEV", { manifest: false });
+  try {
+    const r = drive(
+      { skipProject: true, skipGit: true },
+      { mode: "release", assetsDir: release, devDir: devCheckout },
+    );
+
+    assert.equal(r.result.devAdvancement.gitPull, "skipped", "the operator's skip stands");
+    assert.equal(r.result.devAdvancement.npmInstall, "refused", "the unrequested-by-nobody half is still genuinely refused");
+    assert.match(r.stdout, /\[1\/4\] git pull: skipped \(--skip-git\)/);
+    assert.match(r.stdout, /\[2\/4\] npm install: REFUSED/);
+    assert.match(r.warnings, /refusing to advance the dev checkout/, "the refusal register still prints — something really was refused");
+    assertUnresolved(r, /npm install refused \(release\)/);
+    assert.deepEqual(r.result.unresolved, ["npm install refused (release)"], "and ONLY npm — the skip is not on the list");
+  } finally {
+    for (const d of [release, devCheckout]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
 // ─────────── FG-577 (criterion 10): the exhaustiveness proof ───────────
 
 import { fileURLToPath } from "node:url";

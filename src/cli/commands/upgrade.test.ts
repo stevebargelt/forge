@@ -105,10 +105,27 @@ test("#229 renderReleaseCheckLines: problems → action header + each problem + 
 // split at the right place, not merely a reordered gate.
 
 test("FG-577 (criterion 7): release mode refuses dev-advancement BEFORE any filesystem attempt", () => {
-  const decision = decideDevAdvancement("release", "/rel", "/home/u/code/forge", () => {
+  const decision = decideDevAdvancement("release", "/rel", "/home/u/code/forge", {}, () => {
     throw new Error("the refusal must not stat the checkout — a named contract error, never an EACCES or a stat of a tree that isn't there");
   });
   assert.equal(decision.kind, "refused");
+});
+
+test("FG-577: an operator skip outranks the mode refusal — you cannot refuse what was never requested", () => {
+  const skipped = decideDevAdvancement("release", "/rel", "/home/u/code/forge", { skipGit: true, skipNpm: true }, () => {
+    throw new Error("a skip must be decided without touching the filesystem either");
+  });
+  assert.equal(skipped.kind, "not-requested", "both steps skipped: there is no advancement left to refuse");
+
+  // The mutant this guards against: weakening the refusal generally. A skip of
+  // ONE step leaves the OTHER genuinely refused — the two are independent.
+  for (const skips of [{}, { skipGit: true }, { skipNpm: true }]) {
+    assert.equal(
+      decideDevAdvancement("release", "/rel", "/home/u/code/forge", skips).kind,
+      "refused",
+      `still refused with ${JSON.stringify(skips)} — the release cannot do what was actually asked`,
+    );
+  }
 });
 
 test("FG-577 (criterion 7): the refusal names both sides, says why, and carries runnable manual steps", () => {

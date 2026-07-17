@@ -79,6 +79,7 @@ export function refuseDevAdvance(action: string, assetsDir: string, devDir: stri
 
 export type DevAdvanceDecision =
   | { kind: "proceed" }
+  | { kind: "not-requested" }
   | { kind: "refused"; lines: string[] }
   | { kind: "missing"; lines: string[] };
 
@@ -90,9 +91,15 @@ export function decideDevAdvancement(
   mode: ExecutionMode,
   assetsDir: string,
   devDir: string,
+  skips: { skipGit?: boolean; skipNpm?: boolean } = {},
   exists: (p: string) => boolean = existsSync,
 ): DevAdvanceDecision {
   if (mode === "release") {
+    // An operator skip outranks the mode refusal: you cannot refuse what was
+    // never requested. Ordered ahead of the refusal, and still ahead of every
+    // filesystem access — a release that IS asked to advance keeps the named
+    // contract error rather than an EACCES.
+    if (skips.skipGit && skips.skipNpm) return { kind: "not-requested" };
     return { kind: "refused", lines: refuseDevAdvance("advance the dev checkout (git pull / npm install)", assetsDir, devDir) };
   }
   if (!exists(devDir)) {
@@ -341,7 +348,7 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
   {
     {
       const { mode, assetsDir, devDir } = env;
-      const advance = decideDevAdvancement(mode, assetsDir, devDir);
+      const advance = decideDevAdvancement(mode, assetsDir, devDir, options);
 
       // --json makes stdout a single parseable document, so the human rendering
       // is suppressed rather than interleaved. Every line it would have printed
@@ -375,12 +382,17 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
       let gitPull: GitPullOutcome;
       let npmInstall: NpmInstallOutcome;
       if (advance.kind !== "proceed") {
+        // Per step, not per decision: `--skip-git` on a release leaves git as the
+        // operator's own resolved skip while npm is still genuinely refused.
         const label = advance.kind === "refused" ? "REFUSED" : "SKIPPED";
-        gitPull = advance.kind === "refused" ? "refused" : "unavailable";
-        npmInstall = advance.kind === "refused" ? "refused" : "unavailable";
-        say(`[1/4] git pull:    ${label}`);
-        say(`[2/4] npm install: ${label}`);
-        for (const line of advance.lines) warn(`        ${line}`);
+        const blocked = advance.kind === "refused" ? "refused" as const : "unavailable" as const;
+        gitPull = options.skipGit ? "skipped" : blocked;
+        npmInstall = options.skipNpm ? "skipped" : blocked;
+        say(`[1/4] git pull: ${options.skipGit ? "skipped (--skip-git)" : label}`);
+        say(`[2/4] npm install: ${options.skipNpm ? "skipped (--skip-npm)" : label}`);
+        if (advance.kind === "refused" || advance.kind === "missing") {
+          for (const line of advance.lines) warn(`        ${line}`);
+        }
         say("");
       } else {
         if (options.skipGit) {
@@ -660,7 +672,12 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         // The refusal REGISTER itself, not a boolean an operator would have to
         // re-derive the reason for: a --json consumer gets the same named,
         // actionable lines the human surface prints.
-        devAdvancement: { kind: advance.kind, lines: advance.kind === "proceed" ? [] : advance.lines, gitPull, npmInstall },
+        devAdvancement: {
+          kind: advance.kind,
+          lines: advance.kind === "refused" || advance.kind === "missing" ? advance.lines : [],
+          gitPull,
+          npmInstall,
+        },
         assetInstall,
         routingPolicy,
         projectInit,
