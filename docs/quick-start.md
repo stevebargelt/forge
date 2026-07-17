@@ -208,14 +208,23 @@ If you're standing in `~/code/my-app` and have runs going in other projects too,
 
 ## 11. Upgrading later
 
-When new forge commits arrive (new agents, workflows, CLI behavior), run `forge upgrade` from any project to refresh everything in one step:
+When new forge commits arrive (new agents, workflows, CLI behavior), `forge upgrade` refreshes `~/.forge/` and re-inits the current project in one step:
 
 ```bash
 cd ~/code/my-app
-forge upgrade                  # pulls forge, npm install, refreshes ~/.forge/, re-inits project; runs release check
-forge upgrade --rebuild-image  # also rebuilds the agent Docker image (run when the Dockerfile changed)
+forge upgrade                  # refreshes ~/.forge/ from the running release, re-inits project; runs release check
 forge upgrade --dry-run        # see what would change without doing it
 ```
+
+Upgrade installs the seeds of **whichever forge you ran**: the promoted release under `forge`, your working tree under `forge-dev`. Advancing the checkout is separate — `git pull`, `npm install`, and `--rebuild-image` are dev-checkout work, refused under a release (which exits nonzero and says so). Do those from the checkout:
+
+```bash
+cd ~/code/forge
+./bin/forge-dev upgrade                  # pull + npm install + refresh ~/.forge/ from your working tree
+./bin/forge-dev upgrade --rebuild-image  # also rebuild the agent Docker image (when a build input changed)
+```
+
+Moving the machine-wide `forge` onto new commits is still `release build` → `release promote` from an updated checkout (step 1). This step refreshes `~/.forge/` and project state — not the stable `forge` itself.
 
 After the upgrade steps complete, `forge upgrade` automatically runs a read-only release check — image, runtime CLIs, auth credentials, policies, and seed drift — and surfaces any problems before the next dispatch. Run `forge doctor` for the full report, or `forge setup` on a new machine to create the active model policy from the seed at the same time.
 
