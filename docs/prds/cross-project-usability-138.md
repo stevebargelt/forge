@@ -1,5 +1,15 @@
 # SPEC — cross-project usability
 
+> ⚠️ **STATUS (2026-07-17): the "reinstall seeds" steps below are SUPERSEDED IN PART by FG-578.**
+> Since FG-578, `./scripts/install-seeds.sh` — with or without `FORCE=1` — no longer overwrites an
+> already-installed operator-authored seed (`agents/`, `constraints/`, `forge-raci.md`): it seeds each once,
+> then retains your copy. To re-test an authored-seed edit, remove its `~/.forge/…` copy first. This does **not**
+> affect the "refresh the orchestrator block" half of these steps: `forge init` / `forge upgrade` re-renders the
+> project `CLAUDE.md` orchestrator block from the template — a render, not a seed copy — so that still works
+> exactly as written. Forge-owned seeds (`workflows/`, `runtimes/`, skills) also still refresh normally under
+> `FORCE=1`. **The cross-project workspace-scoping outcome this PRD specifies is unaffected.**
+
+
 > ⚠️ **STATUS (2026-07-16): this accepted PRD's `npm link` install path is SUPERSEDED by FG-571.**
 > Every `npm link` reference below records what was true when #138 was written. It no longer installs the
 > supported machine-wide `forge`: FG-571 splits stable (a promoted, immutable release run by its own pinned
@@ -90,6 +100,7 @@ When `forge status` resolves to a specific run-id (with arg), no filtering appli
 
 - `seeds/orchestrator-template.md` lines 186-188 ("In-flight runs" section) — rewrite to state that `forge status` is workspace-scoped by default and to NOT use `--all` when scanning for in-flight work at session start. One short paragraph.
 - After updating, reinstall via `./scripts/install-seeds.sh` and refresh the orchestrator block in the forge repo itself (`forge init --project ~/code/forge`) and in `~/code/audit-workspace`, `~/code/forge-dashboard` (whichever the user has).
+  - _FG-578: the `install-seeds.sh` reinstall now retains already-installed authored seeds (`agents/`, `constraints/`, `forge-raci.md`) rather than overwriting them, `FORCE=1` included. The `forge init` orchestrator-block refresh is unaffected — it re-renders `CLAUDE.md` from the template, not a seed copy — so this template change still propagates that way._
 
 ### Docs (the bulk of the visible change)
 
@@ -160,6 +171,7 @@ After the rewrite, the docs verify by reading top-to-bottom — there should be 
 - Keep `forge status --all` as the escape hatch that reproduces today's behavior — no surprise to existing muscle memory.
 - Run `npm run typecheck` and `npm test` before any commit.
 - Reinstall seeds and refresh orchestrator blocks in active workspaces after the template change.
+  - _FG-578: "reinstall seeds" no longer overwrites already-installed authored seeds (`agents/`, `constraints/`, `forge-raci.md`); "refresh orchestrator blocks" via `forge init`/`upgrade` is a `CLAUDE.md` re-render, not a seed copy, and still works._
 
 ### Ask first about
 - Any change to existing CLI flag names or default behaviors beyond what's listed above.
@@ -179,7 +191,7 @@ After the rewrite, the docs verify by reading top-to-bottom — there should be 
 ## Implementation order (dependency chain)
 
 1. **Store + CLI code.** `listRunsForProject` + `countRunsForeignTo` in `src/store/runs.ts`; wire `--all`, `--project`, default filter, empty-list hint into `src/cli/commands/status.ts`. Tests pass.
-2. **Orchestrator template edit.** `seeds/orchestrator-template.md` "In-flight runs" rewrite. Reinstall seeds. Refresh active orchestrator blocks.
+2. **Orchestrator template edit.** `seeds/orchestrator-template.md` "In-flight runs" rewrite. Reinstall seeds. Refresh active orchestrator blocks. _(FG-578: the reinstall now retains already-installed authored seeds — `agents/`, `constraints/`, `forge-raci.md` — even under `FORCE=1`; the orchestrator-block refresh is a `forge init`/`upgrade` re-render of `CLAUDE.md`, not a seed copy, so it still propagates this template change.)_
 3. **Docs.** README → quick-start → concepts → new cross-projects doc → delete the pi-skills doc. Manual verification commands run successfully.
 4. **Backlog hygiene.** Close #138 partially (cite this commit; note piece b is deferred). File a new ticket for piece b (`metadata.workspace` stamping for workspace-≠-projectDir cases).
 

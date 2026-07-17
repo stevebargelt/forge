@@ -12,7 +12,8 @@ import {
   classifyStep, unresolvedReasons,
   type GitPullOutcome, type NpmInstallOutcome, type AssetInstallOutcome, type RoutingPolicyOutcome,
   type ProjectInitOutcome, type SlashCommandsOutcome, type ImageRebuildOutcome, type ReleaseCheckOutcome,
-  type UpgradeStepOutcomes,
+  type AuthoredRetentionOutcome, type UpgradeStepOutcomes,
+  parseRetainedLine,
 } from "./upgrade.js";
 import { assetRoot } from "../../v2/asset-root.js";
 import { buildReleaseReport } from "../../v2/release-doctor.js";
@@ -339,6 +340,19 @@ const SLASH_COMMANDS: Record<SlashCommandsOutcome, Verdict> = {
   "not-run": "resolved",
 };
 
+// FG-578: forge declining to overwrite a file the OPERATOR authors is the command
+// working — same shape as `user-override` above. Visible in --json
+// (`authoredRetention` + `authoredRetentions`) and in the human ⚠, never exit 1:
+// `retained` fires on every host whose operator has ever run `forge raci apply`,
+// so classing it unresolved would make exit 1 permanent for the supported,
+// audited workflow. `not-run` is honest ignorance (the installer never ran), not
+// a second failure — the assetInstall step already carries that one.
+const AUTHORED_RETENTION: Record<AuthoredRetentionOutcome, Verdict> = {
+  none: "resolved",
+  retained: "resolved",
+  "not-run": "resolved",
+};
+
 const IMAGE_REBUILD: Record<ImageRebuildOutcome, Verdict> = {
   ran: "resolved",
   "would-rebuild": "resolved",
@@ -358,6 +372,7 @@ const EXPECTED: { [K in keyof UpgradeStepOutcomes]: Record<UpgradeStepOutcomes[K
   gitPull: GIT_PULL,
   npmInstall: NPM_INSTALL,
   assetInstall: ASSET_INSTALL,
+  authoredRetention: AUTHORED_RETENTION,
   routingPolicy: ROUTING_POLICY,
   projectInit: PROJECT_INIT,
   slashCommands: SLASH_COMMANDS,
@@ -381,7 +396,7 @@ test("FG-577 (criterion 10): EVERY variant of EVERY step is classified — no va
     }
   }
   // Guards against the tables silently emptying and the loop vacuously passing.
-  assert.equal(checked, 8 + 7 + 4 + 4 + 8 + 5 + 5 + 4);
+  assert.equal(checked, 8 + 7 + 4 + 3 + 4 + 8 + 5 + 5 + 4);
 });
 
 test("FG-577 (criterion 10): unresolvedReasons enumerates the outcomes object's own keys", () => {
@@ -389,8 +404,8 @@ test("FG-577 (criterion 10): unresolvedReasons enumerates the outcomes object's 
   // newly added step is classified by construction rather than by memory.
   const allClean: UpgradeStepOutcomes = {
     gitPull: "pulled", npmInstall: "installed", assetInstall: "installed",
-    routingPolicy: "recompiled", projectInit: "refreshed", slashCommands: "installed",
-    imageRebuild: "ran", releaseCheck: "ran",
+    authoredRetention: "none", routingPolicy: "recompiled", projectInit: "refreshed",
+    slashCommands: "installed", imageRebuild: "ran", releaseCheck: "ran",
   };
   assert.deepEqual(unresolvedReasons(allClean), []);
 
@@ -401,8 +416,10 @@ test("FG-577 (criterion 10): unresolvedReasons enumerates the outcomes object's 
   // Every unresolved step contributes — none masks another.
   const allBroken: UpgradeStepOutcomes = {
     gitPull: "failed", npmInstall: "failed", assetInstall: "failed",
-    routingPolicy: "failed", projectInit: "needs-markers", slashCommands: "user-override",
-    imageRebuild: "failed", releaseCheck: "failed",
+    // FG-578: `retained` sits in the all-broken row deliberately — even here it
+    // must not contribute a reason. The count below is the assertion.
+    authoredRetention: "retained", routingPolicy: "failed", projectInit: "needs-markers",
+    slashCommands: "user-override", imageRebuild: "failed", releaseCheck: "failed",
   };
   assert.equal(unresolvedReasons(allBroken).length, 7);
 });
@@ -428,4 +445,39 @@ test("FG-577 (cell 4): a FAILED image rebuild is unresolved, not a warning besid
   assert.equal(classifyStep({ step: "imageRebuild", outcome: "failed" }).kind, "unresolved");
   assert.equal(classifyStep({ step: "imageRebuild", outcome: "refused" }).kind, "unresolved");
   assert.equal(classifyStep({ step: "imageRebuild", outcome: "skipped" }).kind, "resolved");
+});
+
+// ─────────── FG-578: the retention parse seam ───────────
+//
+// upgrade counts installer stdout lines starting with "Installing" to report what
+// it refreshed. That string seam is where a FALSE REFRESH CLAIM gets manufactured
+// with nobody deciding to make one: leave the installer echoing "Installing
+// forge-raci.md" while it skips the copy, and upgrade reports a refresh that did
+// not happen. The two halves of the contract are pinned here — a retained file is
+// announced on its OWN line, and that line is not an "Installing" line.
+
+test("FG-578: a retained file is parsed off its own line, keyed by $FORGE_HOME-relative path", () => {
+  assert.equal(
+    parseRetainedLine("Retained: forge-raci.md (differs from this release's seed at /rel/seeds/forge-raci.md)"),
+    "forge-raci.md",
+  );
+  assert.equal(
+    parseRetainedLine("Retained: agents/engineer/CLAUDE.md (differs from this release's seed at /rel/seeds/agents/engineer/CLAUDE.md)"),
+    "agents/engineer/CLAUDE.md",
+    "the key is relative to $FORGE_HOME — the same key seed-drift reports drift under",
+  );
+});
+
+test("FG-578: a retained line is NOT an 'Installing' line, and vice versa — the false-refresh seam", () => {
+  const retained = "Retained: forge-raci.md (differs from this release's seed at /rel/seeds/forge-raci.md)";
+  const installing = "Installing runtimes into /home/u/.forge/runtimes/";
+  // The exact predicate upgrade.ts counts refreshes with. If the retention line
+  // ever started with "Installing", the retained file would be counted as
+  // refreshed — the precise defect FG-578 forbids.
+  assert.equal(retained.startsWith("Installing"), false, "a retained file must never be counted as refreshed");
+  assert.equal(parseRetainedLine(installing), null, "an actual install is not a retention");
+  // The human header of the retention block carries no path, so it must not parse
+  // as a retained entry and inflate the machine-readable list.
+  assert.equal(parseRetainedLine("Retained (operator-authored — forge did not overwrite these, and did not refresh them):"), null);
+  assert.equal(parseRetainedLine("Done."), null);
 });

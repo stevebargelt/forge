@@ -208,11 +208,11 @@ If you're standing in `~/code/my-app` and have runs going in other projects too,
 
 ## 11. Upgrading later
 
-When new forge commits arrive (new agents, workflows, CLI behavior), `forge upgrade` refreshes `~/.forge/` and re-inits the current project in one step:
+When new forge commits arrive (new agents, workflows, CLI behavior), `forge upgrade` refreshes `~/.forge/`'s forge-owned seeds (workflows, runtimes) and re-inits the current project in one step. Your operator-authored seeds — agent prompts, constraints, and `forge-raci.md` — are retained, not overwritten (`FORCE=1` included, FG-578); remove the `~/.forge/` copy to re-take a release's version, or merge by hand:
 
 ```bash
 cd ~/code/my-app
-forge upgrade                  # refreshes ~/.forge/ from the running release, re-inits project; runs release check
+forge upgrade                  # refreshes forge-owned ~/.forge/ seeds from the running release (authored seeds retained), re-inits project; runs release check
 forge upgrade --dry-run        # see what would change without doing it (can exit 1)
 forge upgrade --json           # the structured result, for scripts
 ```
