@@ -225,11 +225,12 @@ Full doc: `docs/how-to-upgrade.md` (flags, multi-project loop, manual recipe).
 
 ## 12. Dashboard (optional)
 
-The web view ships as an npm workspace in the forge repo (`dashboard/`). One install from step 1 covered both forge and the dashboard; no separate setup.
+The web view ships as an npm workspace in the forge repo (`dashboard/`). Run it **from a source checkout**, not from the stable `forge`: the dashboard is a separate workspace with its own dependency tree and is not bundled into a release, so `forge dashboard` refuses in release mode rather than pretending to run (bundling it is deferred to FG-572).
 
 ```bash
-forge dashboard start              # boots http://127.0.0.1:8024
-forge dashboard start --port 8025  # custom port
+cd ~/code/forge
+./bin/forge-dev dashboard start              # boots http://127.0.0.1:8024
+./bin/forge-dev dashboard start --port 8025  # custom port
 ```
 
 Reads `~/.forge/forge.db` directly (read-only — won't contend with `forge next`). Renders agent results as markdown cards by agent type (architect risks, tech-lead plans, engineer diffs, red verdicts). Always cross-project: the dashboard intentionally shows runs across every project on the host (the cross-project survey surface), independent of `forge status`'s workspace filter. Schema contract: `docs/SCHEMA-CONTRACT.md`.
