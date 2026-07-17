@@ -166,12 +166,13 @@ Example: `atlas-stack-rn.md` is a force-level constraint that locks the frontend
 
 ## Blocked by red
 
-A task status signaling that a phase cannot advance without explicit human override. Two conditions set it:
+A task status signaling that a phase cannot advance without explicit human override. Three conditions set it:
 
 1. **Authoritative-fail**: an authoritative red returned `fail` and the phase had `gate_on_verdict: true`.
 2. **Shipping-reviewer inconclusive (FG-420)**: the authoritative shipping-reviewer returned `inconclusive` — from a `needs_human` verdict, an unrecognized verdict field, or a reviewer that failed to produce a verdict (pre-fail on required missing context). Forge persists a synthetic high-severity human-decision finding so the block reason is durable in the verdict record.
+3. **Unreadable authoritative result (FG-586)**: an authoritative `gate_on_verdict` red whose result payload could not be read — malformed after the bounded envelope strip, internally malformed, truncated, or empty/whitespace-only (`result_malformed` / `result_missing`) — fails closed rather than advancing as a bare inconclusive, because its real verdict is unknown. Forge prepends a synthetic high-severity "authoritative reviewer output was UNREADABLE — inspect" finding so the block reason is durable in the verdict record. A `model_error` (a provider rejection) or an ordinary broken-container failure for a non-shipping-reviewer red stays a non-blocking inconclusive, unchanged — this block is scoped to unreadable reviewer *output*, not infra failure.
 
-The CLI surfaces a `BLOCKED` state with the red's findings; the human cannot advance through the normal gate. Override requires `forge gate <task-id> advance --force --rationale "..."`. The shipping-reviewer inconclusive block is applied during red ingestion (not by the gate.ts aggregation, which is unchanged) and can only be resolved via explicit operator override.
+The CLI surfaces a `BLOCKED` state with the red's findings; the human cannot advance through the normal gate. Override requires `forge gate <task-id> advance --force --rationale "..."`. Both the shipping-reviewer inconclusive block (FG-420) and the unreadable-result block (FG-586) are applied during red ingestion (not by the gate.ts aggregation, which is unchanged) and can only be resolved via explicit operator override.
 
 Example: a build phase whose red detected a stack violation would set the build task to `blocked_by_red` automatically.
 
