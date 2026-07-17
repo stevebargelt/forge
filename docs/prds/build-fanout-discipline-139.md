@@ -1,5 +1,12 @@
 # SPEC — build-step fanout + discipline-based agent routing (#139)
 
+> ⚠️ **STATUS (2026-07-16): the `forge dashboard start` regression check below is SUPERSEDED by FG-571.**
+> It recorded a point-in-time check when there was one `forge` — the live checkout. FG-571 splits stable from
+> dev; the dashboard is a separate workspace, not bundled into a release, so stable `forge` **refuses**
+> `dashboard` in release mode. The equivalent check today is `./bin/forge-dev dashboard start` from a source
+> checkout. **The build-fanout discipline this PRD specifies is unaffected and stands.**
+
+
 **Status:** draft, awaiting confirmation
 **Backlog linkage:** closes #139. Composite with #116 (v2 cutover — this is the unfinished tail of the build-phase decomposition that originated as #96).
 

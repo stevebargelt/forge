@@ -28,6 +28,58 @@ export const RACI_AUDIT_LOG_PATH = join(FORGE_HOME, "raci-audit.log");
 // FORGE_DB_PATH overrides the default; pass `:memory:` in tests for an in-memory SQLite.
 export const DB_PATH = process.env.FORGE_DB_PATH ?? join(FORGE_HOME, "forge.db");
 
+// FG-571 (FG-553 Child 4): the promotion surface. EVERY path here is derived from a
+// `home` argument (defaulting to FORGE_HOME) rather than homedir() — setting FORGE_HOME
+// therefore isolates a promotion, an interpreter install, and a shim install COMPLETELY.
+// That is not an ergonomic nicety: it is the mechanism that keeps a test that promotes,
+// rolls back, or installs an interpreter away from the operator's REAL ~/.forge/current
+// and their live control plane. A hardcoded homedir() on any of these paths would break it.
+export function releasesDirIn(home: string): string {
+  return join(home, "releases");
+}
+// NOT `runtimes/`: that name is already taken on a real forge home by the PROVIDER RUNTIME
+// REGISTRY (~/.forge/runtimes/*.yml — claude-oauth.yml, pi-apikey.yml, ...), which
+// `forge doctor` enumerates. The interpreter store is an unrelated meaning of "runtime";
+// nesting it inside the provider config dir would conflate the two and break any future
+// enumeration that does not filter on `.yml`.
+export function interpretersDirIn(home: string): string {
+  return join(home, "interpreters");
+}
+export function currentLinkIn(home: string): string {
+  return join(home, "current");
+}
+export function previousLinkIn(home: string): string {
+  return join(home, "previous");
+}
+// The selection PAIR (`current` + `previous`) is one state, so it gets one commit point:
+// $FORGE_HOME/current and $FORGE_HOME/previous are static links THROUGH $FORGE_HOME/selection,
+// which names a directory holding the two release pointers. Swapping that one link publishes
+// both at once — two independent renames could never be atomic as a pair.
+export function selectionLinkIn(home: string): string {
+  return join(home, "selection");
+}
+export function selectionsDirIn(home: string): string {
+  return join(home, "selections");
+}
+// FG-571 — THE UNIT EVIDENCE LEDGER. Forge-authored, create-only provenance for every unit
+// forge itself materialized, validated, froze, and published: what directory it published,
+// and the full-SHA-256 digest of the bytes it froze there.
+//
+// It lives OUTSIDE `releases/` because `releases/<id>` is the ATTACKER-ADDRESSABLE namespace:
+// the id comes from a candidate's own manifest, so anyone who can write the store can place a
+// directory at a name a later `forge release promote <id>` will look up. Nothing INSIDE that
+// namespace can vouch for its own contents — a hand-placed unit would carry a hand-placed
+// record. This ledger is the counterpart forge owns: a unit with no entry here is one forge
+// never published, whatever its location, id, or permissions say.
+export function unitsDirIn(home: string): string {
+  return join(home, "units");
+}
+
+export const RELEASES_DIR = releasesDirIn(FORGE_HOME);
+export const INTERPRETERS_DIR = interpretersDirIn(FORGE_HOME);
+export const CURRENT_LINK = currentLinkIn(FORGE_HOME);
+export const PREVIOUS_LINK = previousLinkIn(FORGE_HOME);
+
 export function ensureForgeDirs(): void {
   for (const dir of [FORGE_HOME, RUNS_DIR, AGENTS_DIR, CONSTRAINTS_DIR, WORKTREES_DIR]) {
     mkdirSync(dir, { recursive: true });

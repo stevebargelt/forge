@@ -120,13 +120,107 @@ export function resolveExpectedAbi(
   return { ok: true, abi };
 }
 
-/** Run the check against the live runtime; print + exit(1) on a mismatch. Invoked
+/** FG-571 — THE DESCRIPTOR, RE-VALIDATED AFTER STARTUP, IN TRUSTED NODE.
+ *
+ *  The machine-wide shim exports FORGE_RELEASE_ID and FORGE_RELEASE_INTERPRETER from the
+ *  release unit's canonical execution descriptor, which it validates with POSIX sh. That is
+ *  enough to exec safely — the shim reads only forge-authored data — but it is not enough to
+ *  make the exported values AUTHORITATIVE: `forge-release.json` remains the authority on what
+ *  a release IS, and it is parsed by exactly one parser, JSON.parse, right here.
+ *
+ *  So BOTH values the shim carried in are checked against what the manifest actually states,
+ *  by the parser that owns that question, before any command runs. If either disagrees, then
+ *  the unit forge validated and what the machine actually ran are different things — a named,
+ *  fail-closed refusal, never a reconciliation and never a silent preference for one side.
+ *
+ *  THE INTERPRETER IS CHECKED, NOT JUST THE ID. Carrying only the id left the sharper half of
+ *  the same divergence open: a descriptor naming interpreter A under a manifest naming B
+ *  passed, because a matching id was the whole test. The id says WHO the release is; the
+ *  interpreter is WHAT ACTUALLY RAN. A descriptor that agrees about the former and not the
+ *  latter is the more dangerous contradiction of the two, so it gets the same refusal.
+ *
+ *  DEFENCE IN DEPTH, NOT THE PERIMETER. A descriptor that names an attacker's interpreter
+ *  execs that interpreter, and attacker-controlled bytes need not run this check at all. What
+ *  keeps a hostile descriptor out of a unit in the first place is promotion: it authors the
+ *  descriptor itself, refuses any candidate carrying a symlink, and freezes the unit before
+ *  publishing it (src/v2/promote.ts). This closes the case where those bytes DO reach here.
+ *
+ *  ABSENT is not a mismatch. A direct `node <release>/src/cli/index.ts` invocation and the
+ *  dev entry (bin/forge-dev, which has no manifest) both legitimately carry neither value,
+ *  and FG-569's rule holds: not recorded, never manufactured. The release entry carries
+ *  neither either — it bakes its interpreter into its own generated text rather than reading
+ *  a descriptor. Only a PRESENT-and-DIFFERENT value is a contradiction, and only that is
+ *  refused. */
+export function checkReleaseIdentity(
+  found:
+    | { kind: "none" }
+    | { kind: "release"; manifest: { id?: unknown; interpreter?: unknown }; releaseDir: string }
+    | { kind: "malformed"; releaseDir: string; error: string },
+  carried: string | undefined,
+  carriedInterpreter?: string | undefined,
+): { ok: true } | { ok: false; message: string } {
+  if (found.kind !== "release") return { ok: true };
+
+  if (carried !== undefined) {
+    const stated = found.manifest.id;
+    if (typeof stated !== "string" || stated !== carried) {
+      return {
+        ok: false,
+        message:
+          `forge: refusing to run — this release's execution descriptor and its manifest disagree about its identity.\n` +
+          `  release manifest: ${join(found.releaseDir, RELEASE_MANIFEST_NAME)}\n` +
+          `  manifest id:      ${stated === undefined ? "(missing)" : JSON.stringify(stated)}\n` +
+          `  launched as:      ${JSON.stringify(carried)}\n` +
+          `  running:          Node ${process.versions.node}, ABI ${process.versions.modules}\n` +
+          `The manifest is the only authority on what this release IS, and forge re-checks it here — with the ` +
+          `one parser that owns that question — against the identity the launcher carried in. A release that ` +
+          `cannot agree with itself about who it is would record false provenance for every process it starts, ` +
+          `so it does not run.\n` +
+          `Fix: re-promote this release — \`forge release promote <dir|id>\` — or roll back to the previous ` +
+          `release: \`forge release rollback\`.`,
+      };
+    }
+  }
+
+  if (carriedInterpreter !== undefined) {
+    const stated = found.manifest.interpreter;
+    if (typeof stated !== "string" || stated !== carriedInterpreter) {
+      return {
+        ok: false,
+        message:
+          `forge: refusing to run — this release's execution descriptor and its manifest disagree about its interpreter.\n` +
+          `  release manifest:     ${join(found.releaseDir, RELEASE_MANIFEST_NAME)}\n` +
+          `  manifest interpreter: ${stated === undefined ? "(missing)" : JSON.stringify(stated)}\n` +
+          `  launched with:        ${JSON.stringify(carriedInterpreter)}\n` +
+          `  running:              Node ${process.versions.node}, ABI ${process.versions.modules}\n` +
+          `The manifest is the only authority on what this release IS — including which interpreter its native ` +
+          `binding was built against — and forge re-checks it here, with the one parser that owns that question, ` +
+          `against the interpreter the launcher actually exec'd. A matching identity does not excuse this: the id ` +
+          `says who the release is, and this says what ran it. A release whose two halves name different ` +
+          `interpreters is one where what forge validated and what the machine actually ran are different things, ` +
+          `so it does not run.\n` +
+          `Fix: re-promote this release — \`forge release promote <dir|id>\` — or roll back to the previous ` +
+          `release: \`forge release rollback\`.`,
+      };
+    }
+  }
+
+  return { ok: true };
+}
+
+/** Run the checks against the live runtime; print + exit(1) on a mismatch. Invoked
  *  at import time so the CLI fails clean BEFORE better-sqlite3 is required. */
 export function applyNodePreflight(): void {
-  const expected = resolveExpectedAbi(locateReleaseManifest(dirname(fileURLToPath(import.meta.url))));
+  const found = locateReleaseManifest(dirname(fileURLToPath(import.meta.url)));
+  const expected = resolveExpectedAbi(found);
   const r = expected.ok ? checkAbi(process.versions.modules, expected.abi) : expected;
   if (!r.ok) {
     process.stderr.write(`${r.message}\n`);
+    process.exit(1);
+  }
+  const identity = checkReleaseIdentity(found, process.env.FORGE_RELEASE_ID, process.env.FORGE_RELEASE_INTERPRETER);
+  if (!identity.ok) {
+    process.stderr.write(`${identity.message}\n`);
     process.exit(1);
   }
 }

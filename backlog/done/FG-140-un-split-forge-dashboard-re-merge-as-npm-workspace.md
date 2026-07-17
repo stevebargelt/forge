@@ -9,6 +9,14 @@ title: "Un-split forge-dashboard: re-merge as npm workspace"
 
 Reverses #137 (the dashboard split). Filed and closed in the same session (2026-05-24).
 
+> ⚠️ **SUPERSEDED IN PART by FG-571 (2026-07-16).** This closed ticket records the `forge dashboard start`
+> subcommand it shipped, when there was one `forge` — the live checkout. FG-571 splits stable from dev: the
+> dashboard is a separate workspace with its own dependency tree and is **not bundled into a release**, so
+> stable `forge` **refuses** `dashboard` in release mode. Run it as `./bin/forge-dev dashboard start` from a
+> source checkout. **What this ticket actually did — un-splitting the dashboard back into an npm workspace —
+> stands and is unaffected**; only the invocation moved.
+
+
 **Why reverse.** Two costs surfaced after #137 shipped:
 1. **Setup friction.** Multi-project use (the "install once" ergonomic established by #138) required two separate installs — one for forge, one for forge-dashboard. Contradicts the install-once shape.
 2. **Schema drift risk.** Dashboard reads forge's SQLite directly. The schema contract was prose, not code. Cross-repo meant any forge schema change could silently break the dashboard at runtime instead of build time.

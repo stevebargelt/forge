@@ -8,16 +8,23 @@ Use this when getting forge running on a new or fresh work machine. The goal is 
 
 ---
 
-## 1. Clone and link
+## 1. Clone, then build and promote a release
 
 ```bash
 git clone <your-forge-repo-url> ~/code/forge
 cd ~/code/forge
 npm install
-npm link                    # puts `forge` on $PATH
+
+./bin/forge-dev release build --out ~/forge-releases/r1        # --out must not exist, outside the checkout
+./bin/forge-dev release promote ~/forge-releases/r1            # atomic; `forge release rollback` reverses it
+./bin/forge-dev release install-shim --prefix /usr/local/bin   # once; any directory on your $PATH
 ```
 
-Verify: `forge --help` lists the commands.
+The machine-wide `forge` is a promoted, immutable release run by its own pinned interpreter — not the checkout. `./bin/forge-dev` is the live-source entry, used here to bootstrap because no stable `forge` exists yet on a fresh machine; keep using it when you're iterating on forge itself. `npm link` is not the install path: it would put a live-checkout `forge` on `$PATH` and bypass the release split entirely.
+
+The build refuses a dirty checkout — it binds the release to a commit, so commit or stash first.
+
+Verify: `forge --help` lists the commands; `forge release current` names the release you promoted.
 
 ## 2. Install seeds and (optionally) build the agent image
 

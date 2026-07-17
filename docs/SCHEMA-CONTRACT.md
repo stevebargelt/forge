@@ -298,7 +298,7 @@ JSON pretty-print for this shape — there is no per-role renderer for it.
 
 ## HTTP API surface (read-only)
 
-The dashboard server exposes read-only JSON endpoints. All `GET` — no writes. Default base URL: `http://127.0.0.1:8024` (port overridable via `PORT` env var or `forge dashboard start --port <n>`).
+The dashboard server exposes read-only JSON endpoints. All `GET` — no writes. Default base URL: `http://127.0.0.1:8024` (port overridable via `PORT` env var or `./bin/forge-dev dashboard start --port <n>`, run from a source checkout — the dashboard is not bundled into a release).
 
 ### Core endpoints
 

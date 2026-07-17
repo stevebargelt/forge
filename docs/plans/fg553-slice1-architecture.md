@@ -38,6 +38,31 @@ launched-workload provenance stays out of scope (FG-555). Children **3–5 remai
 decisions (OQ-6/BD-15/T9), Appendix A probes, and mutation reasoning below are unchanged, except where a
 Child-0/Child-2 closeout line is annotated for the shipped exec entry.
 
+> **SUPERSEDED IN PART by the 2026-07-16 status update below.** The two claims above that have since moved:
+> **"this slice stays INERT"** (Child 3 has landed and Child 4 is in review — see below), and **"the
+> machine-wide `forge` is an npm-link SYMLINK on PATH"** (Child 4 replaces that with a promoted immutable
+> release reached through an explicitly installed shim; `npm link` is no longer the supported install path).
+> The rest of this 2026-07-15 entry stands as the record of what Child 2 shipped.
+
+**Status update (2026-07-16):** **Child 3 (bounded ABI assertion) has LANDED as FG-570 (`5044c5d`, PR #123)** —
+exact ABI equality replacing the minimum-major floor, refusing older OR newer by name before any native load,
+fail-closed on an unverifiable release manifest. FG-574 (`engines: "^24"`) closed with it.
+
+**Child 4 (FG-571) is IMPLEMENTATION-COMPLETE and IN REVIEW (PR #124) — NOT yet landed.** It is recorded here
+because this plan is the governing architecture record and the slice is no longer inert in the branch under
+review; the "landed" claim and its merge SHA are deliberately withheld until the merge exists. What it carries:
+the `current` pointer and atomic promote/rollback, the near-frozen `/bin/sh` PATH shim, the immutable
+version+ABI+**content-digest**-keyed interpreter store, the bounded env-sanitization contract, fail-closed
+release identity, and the **stable/dev split** (`bin/forge-dev` is NEW — before it, the machine-wide `forge`
+and the live-source entry were the SAME npm-link'd artifact). Three read-only red-security audits of the
+manifest→exec and interpreter-store trust boundaries produced **eleven confirmed findings, all closed with
+executed exploit-proving mutants**; the two that reshaped the mechanism are recorded in §1 (the forge-authored
+canonical execution descriptor, and content-addressed interpreter identity — `process.version` + ABI never
+pinned content, so distinct bytes collided at one path).
+
+**Child 5 (FG-572 — installed-surface compatibility) remains PLANNED**, and `forge dashboard` still refuses in
+release mode until it is decided. R3/R4 launched-workload provenance stays out of scope (FG-555).
+
 **The rule this slice is planned under (from FG-551):** *a property concerning the FINAL RUNTIME must be
 demonstrated by EXECUTING or MUTATION-TESTING the final artifact. A source-pattern match is not evidence.*
 
@@ -379,6 +404,45 @@ Every case **executes**; each names the mutant that must redden it and the **hol
 
 ---
 
+## 4b. THE THREAT BOUNDARY (settled 2026-07-17, FG-571 — operator decision)
+
+**Read this before adding any further hardening to the promotion path.** Four read-only red-security audits
+ran against Child 4. The first three found **eleven confirmed HIGH findings, all closed with executed
+exploit-proving mutants.** The fourth returned three HIGH whose schedules *all* require the same local
+principal that owns `$FORGE_HOME`. That is where the boundary is, and it is stated here so the next reader
+does not re-litigate it.
+
+**PROTECTED — real, defended, proven by execution:**
+- **Untrusted candidate content.** A release built elsewhere / downloaded / handed over and then promoted.
+  The decisive proof: a manifest with duplicate `interpreter` keys made `JSON.parse` (what promotion
+  validates with) resolve to the LAST value while the shim's hand-rolled POSIX-sh reader took the FIRST — a
+  candidate that PASSED `validateCandidate` exec'd `/tmp/attacker-node`. Closed by moving the invariant:
+  trusted Node parses once, the shim consumes only forge-authored data (see §1's PATH-shim contract).
+- **Malformed manifests** — fail-closed, by name.
+- **Hostile ambient caller environment (F29)** — a caller who can invoke `forge` but does NOT own
+  `$FORGE_HOME`. An absolute pinned interpreter is necessary but NOT sufficient; the env-sanitization
+  contract is what closes it (Appendix A2 is the red baseline).
+- **Crashes / interrupted publication** — nothing partial is selectable.
+- **Concurrent supported Forge operations** — one selection swap for the `(current, previous)` pair;
+  content-addressed interpreter identity makes same-identity races benign by construction.
+
+**HONEST LIMIT — same-principal tampering is OUT OF SCOPE.**
+A principal able to arbitrarily rewrite `$FORGE_HOME` can subvert Forge **and the surrounding user account**.
+That principal is the operator's own UID: it already owns `~/.zshrc`, the Forge checkout, the installed shim,
+and the validator itself. **Before FG-571 the machine-wide `forge` was an npm-link symlink into that same
+writable checkout**, so this axis is strictly *improved* by promotion and was never closed by the status quo.
+
+> **`chmod` / read-only-at-rest is an operational ACCIDENT BARRIER, not a security boundary against its
+> owner.** Do not read the freeze as authorization.
+
+Why this is a boundary and not a backlog item: every proposed fix for the fourth audit's findings relocates
+the trust root to **another directory inside the same home directory the adversary owns** — the auditor's own
+words on the evidence ledger were *"location is again the sole trust root, one directory level higher."* That
+is an infinite regress. Closing it genuinely requires a **separate trust domain** (another OS principal,
+root-owned storage, or hardware-backed signing) — **not FG-571 scope, and deliberately not filed as a
+follow-up**: it is an optional product/security direction, not missing closure. Its per-finding disposition
+lives on the FG-571 ticket; the red findings themselves stand unaltered.
+
 ## 5. Risks / open
 
 - **RESOLVED — CJS `require()`** is settled by execution (§1, T9): CJS anchors identically to ESM and native
@@ -428,8 +492,14 @@ only** (the signal/exit-fidelity prerequisite) — because every later child's e
 `forge` not reporting success on a kill. **UPDATE: Child 0 has since LANDED as `97363ca` (PR #119)**; the
 prerequisite is satisfied. **Child 1 has LANDED (`275ac63`, PR #120), and Child 2 has LANDED as FG-569**
 (exec-not-spawn entry + inert release closure + manifest + R1/R2 provenance — still INERT: no promotion, no
-`current` symlink, no PATH change). Children **3–5 remain planned** and unchanged. **C1 has since been
+`current` symlink, no PATH change). **C1 has since been
 reconciled into the PRD (FG-568), and the R1/R2 current-state reconciled (FG-569/FG-573)** — see §2/§6.
+**UPDATE (2026-07-16):** **Child 3 has LANDED as FG-570 (`5044c5d`, PR #123).** **Child 4 (FG-571) is
+implementation-complete and IN REVIEW (PR #124) — not yet landed**, so the slice is no longer inert in the
+branch under review; its merge SHA is withheld until the merge exists. **Child 5 (FG-572) remains planned.**
+See the 2026-07-16 status update at the top of this document for what Child 4 carries and for the audit
+findings that reshaped the mechanism (§1: the forge-authored canonical execution descriptor; content-addressed
+interpreter identity).
 
 ---
 

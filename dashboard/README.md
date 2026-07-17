@@ -2,8 +2,12 @@
 
 Activity feed + agent-output inbox for forge runs across all projects on the host. Lives as a workspace package inside the forge monorepo.
 
+Run it **from a source checkout**, not from the stable `forge`: the dashboard is a separate workspace with its own dependency tree and is not bundled into a release, so `forge dashboard` refuses in release mode rather than pretending to run (bundling it is deferred to FG-572).
+
 ```bash
-forge dashboard start              # boots http://127.0.0.1:8024
+cd ~/code/forge
+./bin/forge-dev dashboard start              # boots http://127.0.0.1:8024
+./bin/forge-dev dashboard start --port 8025  # custom port
 ```
 
 Reads `~/.forge/forge.db` directly (read-only) and shells out to `forge` for mutating actions.
@@ -39,6 +43,6 @@ All metrics endpoints accept `?since=30d&projectDir=/path` query params. Full pa
 
 ## Relationship to forge
 
-This package reads forge's SQLite + filesystem layout but does not write to either. Mutating actions (gate decisions, run-next, retry) shell out to the `forge` CLI binary — it must be on `$PATH` (`npm link` from the root sets this up).
+This package reads forge's SQLite + filesystem layout but does not write to either. Mutating actions (gate decisions, run-next, retry) shell out to the `forge` CLI binary — it must be on `$PATH`. Install it the supported way: build a release, promote it, and install the shim once (`forge release build` / `promote` / `install-shim` — see the root README). Not `npm link`, which would put the live checkout on `$PATH` as `forge` and bypass the promoted release entirely.
 
 Schema coupling is now enforced at the TypeScript level: `src/queries.ts` imports its row types from `@forge/types` (aliased to `../src/types/index.ts`). Any forge schema change that breaks the dashboard surfaces as a `npm --workspace=dashboard typecheck` failure.

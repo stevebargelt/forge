@@ -1,5 +1,15 @@
 # SPEC — dashboard as npm workspace (#140)
 
+> ⚠️ **STATUS (2026-07-16): every `forge dashboard start` invocation below is SUPERSEDED by FG-571.**
+> They assumed one `forge` — the live checkout. FG-571 splits stable from dev, and the dashboard is a separate
+> workspace with its own dependency tree that is **not bundled into a release**, so stable `forge` **refuses**
+> `dashboard` in release mode rather than pretending to run. Read every such line as
+> `./bin/forge-dev dashboard start` from a source checkout. **Whether a stable release should ship the
+> dashboard at all — bundled, separately versioned, or intentionally unavailable — is an OPEN product decision
+> reserved to the operator under FG-572; nothing here decides it.** The workspace/hoisting outcome this PRD
+> specifies is unaffected and stands.
+
+
 **Status:** draft, awaiting confirmation
 **Backlog linkage:** closes #140. Reverses #137 (the dashboard split).
 
@@ -16,6 +26,15 @@ After this spec lands:
 
 - `cd ~/code/forge && npm install` installs forge + dashboard with hoisted shared devDeps.
 - `forge dashboard start` boots the web view on port 8024 (wraps the underlying tsx invocation).
+
+> **SUPERSEDED IN PART by FG-571/FG-572 (2026-07-16).** Every `forge dashboard start` invocation in this
+> accepted PRD assumed one `forge` — the live checkout. FG-571 splits stable from dev, and the dashboard is a
+> separate workspace with its own dependency tree that is **not bundled into a release**, so stable `forge`
+> **refuses** `dashboard` in release mode rather than pretending to run. Run it from a source checkout:
+> `./bin/forge-dev dashboard start`. **Whether a stable release should ship the dashboard at all — bundled,
+> separately versioned, or intentionally unavailable — is an open product decision reserved to the operator
+> under FG-572; this note does not decide it.** The workspace/hoisting outcome this PRD specifies is
+> otherwise unaffected and stands.
 - Dashboard's `queries.ts` imports row types from forge's `src/types/index.ts` — drift = build error.
 - README + quick-start describe a single install flow with the web view as an optional `forge dashboard` subcommand call, not a second-repo setup.
 - The standalone `~/code/forge-dashboard/` directory and GitHub repo are retired (deleted locally; archived on GitHub).

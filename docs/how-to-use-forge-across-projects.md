@@ -7,17 +7,24 @@ Forge is host-global: one install, one `~/.forge/forge.db`, used against any pro
 ```bash
 cd ~/code/forge
 npm install
-npm link                         # puts `forge` on $PATH
 ./scripts/install-seeds.sh
 ./docker/build.sh                # one-time agent image build
+
+./bin/forge-dev release build --out ~/forge-releases/r1        # --out must not exist, outside the checkout
+./bin/forge-dev release promote ~/forge-releases/r1            # selects it machine-wide, atomically
+./bin/forge-dev release install-shim --prefix /usr/local/bin   # once; any directory on your $PATH
 forge auth login                 # personal Mac only
 ```
 
-After `npm link`, `which forge` resolves and `forge --help` runs from any directory. Source files in `~/code/forge/src/` are live (no rebuild needed) since the bin entry runs through `tsx`.
+`which forge` now resolves and `forge --help` runs from any directory. That machine-wide `forge` is a **promoted release** — an immutable closure run by its own pinned interpreter — not your checkout: editing `~/code/forge/src/` does not change it. Build and promote again to move it; `forge release rollback` returns to the previously selected release, and `forge release current` says which one is live.
+
+For live source, `~/code/forge/src/` is still no-rebuild-needed through `tsx` — reach it with `./bin/forge-dev <cmd>` or `npm run forge -- <cmd>`. Stable `forge` and `forge-dev` are different artifacts with different provenance, so a bug that reproduces under only one is possible; `forge release provenance` reports what a running process actually is.
+
+Do not use `npm link` here. It symlinks a live-checkout `forge` onto `$PATH`, which defeats the stable/dev split, the `current` pointer, and the pinned-interpreter and env-sanitization guarantees, and can shadow or overwrite the shim.
 
 `install-seeds.sh` also installs the `forge-*` workflow skills (`forge-campaign`, `forge-review-loop`, `forge-backlog`, `forge-research-synthesis`) into the user-global Claude skills dir (`~/.claude/skills` by default; override with `CLAUDE_SKILLS_DEST` or `CLAUDE_CONFIG_DIR`). Because that's a Claude Code user setting rather than a forge project setting, the skills become available in **every** project on the machine after a single install — no per-project step needed. These are host/orchestrator skills; container agents don't see them (they use the separate container-only skill mount in `src/v2/spawn.ts`).
 
-To remove: `cd ~/code/forge && npm unlink`.
+To remove the machine-wide `forge`: delete the shim you installed (e.g. `rm /usr/local/bin/forge`). The releases under `~/.forge/releases/` and the `current` pointer stay until you remove them yourself — forge never deletes a release, because live processes may still be anchored to one.
 
 ## Per-project setup
 

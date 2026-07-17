@@ -19,10 +19,15 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildRelease, assertReleaseCloses, thawReleaseTree, renderEntry, RELEASE_BINDING_REL, RELEASE_LOADER_NAME, RELEASE_MANIFEST_NAME, type BuildReleaseResult } from "./release.js";
+import { interpreterPath, storedIdentityOf, validatedInterpreter } from "./runtime-store.js";
 import { findGitRoot } from "../util/git-root.js";
 
 const sourceRoot = findGitRoot(process.cwd());
 let workspace: string;
+/** The disposable forge home whose interpreter store these builds install into and pin
+ *  (FG-571). Not the ambient FORGE_HOME: a build with no `home` would land a copy of node
+ *  in the operator's real ~/.forge/interpreters just for running the suite. */
+let buildHome: string;
 let built: BuildReleaseResult;
 
 /** Commit a buildable tree's SHIPPED source paths (src/, package.json, and any
@@ -57,6 +62,7 @@ function copyBundledAssets(root: string): void {
 
 before(() => {
   workspace = mkdtempSync(join(tmpdir(), "fg569-rel-"));
+  buildHome = join(workspace, "forge-home");
   // FG-569 GAP 2: a release binds its commit to the shipped source, so the tree must
   // be committed before it can build. CI runs on a committed checkout (no-op here);
   // under forge-test the scratch carries this run's synced-but-uncommitted edits, so
@@ -64,7 +70,7 @@ before(() => {
   commitSource(sourceRoot);
   // The one full build the whole file shares (copying node_modules is the slow
   // part). outDir is OUTSIDE sourceRoot so the copy never recurses into itself.
-  built = buildRelease({ sourceRoot, outDir: join(workspace, "release") });
+  built = buildRelease({ sourceRoot, home: buildHome, outDir:join(workspace, "release") });
 });
 
 after(() => {
@@ -81,7 +87,7 @@ test("FG-569 (finding): an --out path INSIDE the source tree is REFUSED before a
   // itself. The build must refuse the path before creating anything.
   const badOut = join(sourceRoot, "src", "release-would-recurse");
   assert.throws(
-    () => buildRelease({ sourceRoot, outDir: badOut }),
+    () => buildRelease({ sourceRoot, home: buildHome, outDir:badOut }),
     /inside the source root/i,
     "an out dir contained by sourceRoot must be refused",
   );
@@ -92,7 +98,17 @@ test("FG-569 (finding): an --out path INSIDE the source tree is REFUSED before a
 
 test("FG-569 build: the manifest pins the building interpreter, its ABI, the commit, and a lockfile identity", () => {
   const m = built.manifest;
-  assert.equal(m.interpreter, process.execPath, "the absolute interpreter is the building process's execPath");
+  // FG-571 (external-artifact contract): the pin is the INTERPRETER STORE's copy of the
+  // building interpreter, NOT process.execPath itself. Same interpreter — proven by
+  // execution below — but an artifact forge owns and never replaces in place, where
+  // /usr/bin/node is rewritten by the next system node upgrade, under a release that has
+  // already been promoted and validated against it.
+  // The store key COMMITS TO THE BYTES (FG-571 F3), so the expected path is derived from the
+  // building interpreter's own content — version+ABI alone does not name a store path.
+  const storeId = storedIdentityOf(process.execPath)!;
+  assert.equal(m.interpreter, interpreterPath(buildHome, storeId), "the absolute interpreter is the store's keyed copy of the building interpreter");
+  assert.equal(validatedInterpreter(buildHome, storeId), m.interpreter, "and it validates BY EXECUTION at that key — a release may reference nothing less");
+  assert.notEqual(m.interpreter, process.execPath, "the mutable external path the build ran from is NOT what the release pins");
   assert.equal(m.abi, process.versions.modules, "the ABI the native binding needs");
   assert.equal(m.commit, execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceRoot, encoding: "utf8" }).trim());
   assert.match(m.lockfile.sha256, /^[0-9a-f]{64}$/, "lockfile identity is recorded");
@@ -193,7 +209,10 @@ test("FG-569 R2 entry (EXECUTED): the FORGE_RELEASE_ID block parses the id strai
   // reads a real manifest must set the id (the release's own id). Rip out just the
   // FORGE_RELEASE_ID block and run it — no interpreter/loader needed.
   const entry = renderEntry("/opt/node-24/bin/node");
-  const block = entry.slice(entry.indexOf("while IFS="), entry.indexOf("\n\nexec"));
+  // FG-571 wrapped this block in the fail-closed identity guard, which derives the
+  // manifest path into $__forge_m first — so the slice starts there rather than at the
+  // read loop. The property under test is unchanged: a real manifest yields its own id.
+  const block = entry.slice(entry.indexOf("__forge_m=$here/"), entry.indexOf("\n\nexec"));
   const dir = mkdtempSync(join(workspace, "r2entry-"));
   writeFileSync(join(dir, RELEASE_MANIFEST_NAME), JSON.stringify({ schema: 1, id: "release-feedb0d-9xk2z", commit: "feedb0d" }, null, 2) + "\n");
   const run = spawnSync("/bin/sh", ["-c", `here=${dir}\n${block}\nprintf '%s' "$FORGE_RELEASE_ID"`], { encoding: "utf8" });
@@ -208,7 +227,10 @@ test("FG-569 entry (EXECUTED under /bin/sh): the $here derivation resolves a lea
   // /bin/sh with $0 pointing at an entry inside a directory whose name starts with `-`.
   const entry = renderEntry("/opt/node-24/bin/node");
   const start = entry.indexOf(`case "$p" in */*) d=`);
-  const hereLine = `here=$(CDPATH= cd "$d" && pwd)`;
+  // FG-571 made this cd PHYSICAL (-P) so a release reached as `$FORGE_HOME/current/forge`
+  // resolves $here to the release itself rather than to the pointer — the leading-dash
+  // property this test owns is unchanged by that.
+  const hereLine = `here=$(CDPATH= cd -P "$d" && pwd)`;
   const block = entry.slice(start, entry.indexOf(hereLine) + hereLine.length);
   const dashDir = join(workspace, "-dashy-release");
   mkdirSync(dashDir, { recursive: true });
@@ -294,7 +316,7 @@ test("FG-569 closure: a symlinked node_modules dependency is DEREFERENCED into t
   commitSource(src);
 
   const out = join(workspace, "symlink-release");
-  buildRelease({ sourceRoot: src, outDir: out });
+  buildRelease({ sourceRoot: src, home: buildHome, outDir:out });
 
   const copied = join(out, "node_modules", "linked-dep");
   assert.ok(!lstatSync(copied).isSymbolicLink(), "the linked dependency is a real directory in the release, not a symlink");
@@ -345,7 +367,7 @@ test("FG-569 lockfile binding (RED pre-fix, GREEN after): a content-mutated inst
 
   // Untampered: the SAME tree builds cleanly — the binding never false-refuses a
   // node_modules that genuinely matches its lockfile.
-  buildRelease({ sourceRoot: src, outDir: join(workspace, "lockbind-clean") });
+  buildRelease({ sourceRoot: src, home: buildHome, outDir:join(workspace, "lockbind-clean") });
 
   // The mutant: a pure (no install-script), types-only leaf dependency. Appending a
   // valid comment keeps it loadable (it is never required at runtime) but changes
@@ -358,7 +380,7 @@ test("FG-569 lockfile binding (RED pre-fix, GREEN after): a content-mutated inst
   assert.deepEqual(readFileSync(join(src, "package-lock.json")), lockBefore, "the tamper left package-lock.json byte-identical");
 
   assert.throws(
-    () => buildRelease({ sourceRoot: src, outDir: join(workspace, "lockbind-tampered") }),
+    () => buildRelease({ sourceRoot: src, home: buildHome, outDir:join(workspace, "lockbind-tampered") }),
     /shipped closure does not match the lockfile/i,
     "the builder must REFUSE a content-mutated dependency whose lockfile is unchanged",
   );
@@ -374,7 +396,7 @@ test("FG-569 torn closure: a MISSING native binding is REFUSED at build, and no 
   mkdirSync(join(torn, "node_modules", "better-sqlite3", "build", "Release"), { recursive: true });
 
   const out = join(workspace, "torn-missing-release");
-  assert.throws(() => buildRelease({ sourceRoot: torn, outDir: out }), /torn closure/i);
+  assert.throws(() => buildRelease({ sourceRoot: torn, home: buildHome, outDir: out }), /torn closure/i);
   assert.ok(!existsSync(out), "a refused build leaves no release directory behind");
 });
 
@@ -391,7 +413,7 @@ test("FG-569 FIX 4: the COPIED-closure gate REJECTS a release whose OWN binding 
   // Build a valid release, then corrupt its OWN copied binding. The source gate ran
   // BEFORE the copy, so only a gate over the COPY catches this. assertReleaseCloses
   // loads the release's own binding under the pinned interpreter and must throw.
-  const rel = buildRelease({ sourceRoot, outDir: join(workspace, "corrupt-copy-release") });
+  const rel = buildRelease({ sourceRoot, home: buildHome, outDir:join(workspace, "corrupt-copy-release") });
   // The build freezes the closure (files read-only), so make this one file writable
   // before corrupting it — the tamper we then prove assertReleaseCloses catches.
   const binding = join(rel.releaseDir, RELEASE_BINDING_REL);
@@ -417,7 +439,7 @@ test("FG-569 torn closure: a CORRUPT / ABI-mismatched native binding is REFUSED 
   writeFileSync(join(torn, RELEASE_BINDING_REL), "not a real .node\n");
 
   const out = join(workspace, "torn-corrupt-release");
-  assert.throws(() => buildRelease({ sourceRoot: torn, outDir: out }), /torn closure/i);
+  assert.throws(() => buildRelease({ sourceRoot: torn, home: buildHome, outDir: out }), /torn closure/i);
   assert.ok(!existsSync(out), "a refused build leaves no release directory behind");
 });
 
@@ -445,7 +467,7 @@ test("FG-569 Finding 4 (lockfile selection): a package-lock-only source builds a
   cpSync(join(sourceRoot, "package-lock.json"), join(src, "package-lock.json"));
   commitSource(src);
 
-  const rel = buildRelease({ sourceRoot: src, outDir: join(workspace, "lock-pl-only-rel") });
+  const rel = buildRelease({ sourceRoot: src, home: buildHome, outDir:join(workspace, "lock-pl-only-rel") });
   assert.equal(rel.manifest.lockfile.name, "package-lock.json", "the manifest names the only lockfile present");
   assert.ok(existsSync(join(rel.releaseDir, "package-lock.json")), "the selected lockfile is copied into the release");
 });
@@ -458,7 +480,7 @@ test("FG-569 Finding 4 (lockfile selection): a shrinkwrap-only source builds —
   cpSync(join(sourceRoot, "package-lock.json"), join(src, "npm-shrinkwrap.json"));
   commitSource(src);
 
-  const rel = buildRelease({ sourceRoot: src, outDir: join(workspace, "lock-sw-only-rel") });
+  const rel = buildRelease({ sourceRoot: src, home: buildHome, outDir:join(workspace, "lock-sw-only-rel") });
   assert.equal(rel.manifest.lockfile.name, "npm-shrinkwrap.json", "the manifest names the shrinkwrap it bound against");
   assert.ok(existsSync(join(rel.releaseDir, "npm-shrinkwrap.json")), "the shrinkwrap is copied into the release");
   assert.ok(!existsSync(join(rel.releaseDir, "package-lock.json")), "no package-lock.json was invented");
@@ -478,7 +500,7 @@ test("FG-569 Finding 4 (lockfile selection): both present ⇒ shrinkwrap WINS fo
   );
   commitSource(src);
 
-  const rel = buildRelease({ sourceRoot: src, outDir: join(workspace, "lock-both-rel") });
+  const rel = buildRelease({ sourceRoot: src, home: buildHome, outDir:join(workspace, "lock-both-rel") });
   assert.equal(rel.manifest.lockfile.name, "npm-shrinkwrap.json", "shrinkwrap wins the manifest identity");
   assert.ok(existsSync(join(rel.releaseDir, "npm-shrinkwrap.json")), "shrinkwrap is the lockfile copied into the release");
   assert.ok(!existsSync(join(rel.releaseDir, "package-lock.json")), "the decoy package-lock.json was NOT copied — shrinkwrap won the copy");
@@ -499,7 +521,7 @@ test("FG-569 GAP 1 (install-script pkg, RED pre-fix / GREEN after): a TARBALL-OW
   // builds cleanly. No false refusal from a generated artifact (the compiled
   // better_sqlite3.node / downloaded platform binaries are not tarball entries) nor
   // from esbuild's install-rewritten bin/esbuild (the one narrow per-file allowance).
-  buildRelease({ sourceRoot: src, outDir: join(workspace, "gap1-clean") });
+  buildRelease({ sourceRoot: src, home: buildHome, outDir:join(workspace, "gap1-clean") });
 
   // Mutate a TARBALL-OWNED source file of an install-script package. A trailing no-op
   // comment keeps better-sqlite3 loadable and leaves package-lock.json BYTE-IDENTICAL
@@ -517,7 +539,7 @@ test("FG-569 GAP 1 (install-script pkg, RED pre-fix / GREEN after): a TARBALL-OW
   db.close();
 
   assert.throws(
-    () => buildRelease({ sourceRoot: src, outDir: join(workspace, "gap1-tampered") }),
+    () => buildRelease({ sourceRoot: src, home: buildHome, outDir:join(workspace, "gap1-tampered") }),
     /shipped closure does not match the lockfile/i,
     "a tampered TARBALL-OWNED file of an install-script package must be REFUSED — hasInstallScript no longer exempts it",
   );
@@ -529,7 +551,7 @@ test("FG-569 GAP 2 (dirty source, RED pre-fix / GREEN after): an uncommitted cha
   cpSync(join(sourceRoot, "package-lock.json"), join(src, "package-lock.json"));
   commitSource(src);
   // Baseline: the committed tree builds — refuse-dirty does not false-refuse a clean source.
-  buildRelease({ sourceRoot: src, outDir: join(workspace, "gap2-clean") });
+  buildRelease({ sourceRoot: src, home: buildHome, outDir:join(workspace, "gap2-clean") });
   const cleanHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: src, encoding: "utf8" }).trim();
 
   // A VALID uncommitted change under src/ — copied into the release, but HEAD still
@@ -548,7 +570,7 @@ test("FG-569 GAP 2 (dirty source, RED pre-fix / GREEN after): an uncommitted cha
   );
 
   assert.throws(
-    () => buildRelease({ sourceRoot: src, outDir: join(workspace, "gap2-dirty") }),
+    () => buildRelease({ sourceRoot: src, home: buildHome, outDir:join(workspace, "gap2-dirty") }),
     /refusing to build a release from a dirty source/i,
     "buildRelease must REFUSE a dirty source — else the recorded commit describes bytes it did not produce",
   );
@@ -576,7 +598,7 @@ test("FG-569 TOCTOU (snapshot from commit, RED pre-fix / GREEN after): a LIVE-tr
   assert.equal(committedBytes.toString(), committedText, "the committed blob is the content we committed");
 
   // Baseline: a quiescent build ships the committed bytes.
-  const clean = buildRelease({ sourceRoot: src, outDir: join(workspace, "toctou-snapshot-clean") });
+  const clean = buildRelease({ sourceRoot: src, home: buildHome, outDir:join(workspace, "toctou-snapshot-clean") });
   assert.deepEqual(readFileSync(join(clean.releaseDir, relPosix)), committedBytes, "a quiescent build ships the committed bytes");
   assert.equal(clean.manifest.commit, commit, "and records the commit those bytes come from");
 
@@ -587,6 +609,7 @@ test("FG-569 TOCTOU (snapshot from commit, RED pre-fix / GREEN after): a LIVE-tr
   const liveMutation = "export const committed = false; // LIVE MUTATION — not in the commit\n";
   const raced = buildRelease({
     sourceRoot: src,
+    home: buildHome,
     outDir: join(workspace, "toctou-snapshot-raced"),
     onBeforeSnapshot: () => writeFileSync(marker, liveMutation),
   });
@@ -604,6 +627,7 @@ test("FG-569 TOCTOU (snapshot from commit, RED pre-fix / GREEN after): a LIVE-tr
   // the ORIGINALLY captured commit, so the release ships THAT commit's bytes, not the new one.
   const moved = buildRelease({
     sourceRoot: src,
+    home: buildHome,
     outDir: join(workspace, "toctou-snapshot-moved"),
     onBeforeSnapshot: () => {
       writeFileSync(marker, liveMutation);
@@ -645,7 +669,7 @@ test("FG-569 Resolution B (dirty seed/hook REFUSED at build): an uncommitted edi
   cpSync(join(sourceRoot, "package-lock.json"), join(src, "package-lock.json"));
   commitSource(src);
   // Baseline: the committed tree (with real seeds/scripts/docker) builds cleanly.
-  buildRelease({ sourceRoot: src, outDir: join(workspace, "dirty-asset-clean") });
+  buildRelease({ sourceRoot: src, home: buildHome, outDir:join(workspace, "dirty-asset-clean") });
 
   // (a) Dirty a bundled SEED — appending a comment keeps it valid but makes seeds/ dirty
   // relative to HEAD, so the commit binding no longer describes the shipped seed bytes.
@@ -653,7 +677,7 @@ test("FG-569 Resolution B (dirty seed/hook REFUSED at build): an uncommitted edi
   assert.ok(existsSync(seed), "the bundled seed is present in the fixture");
   appendFileSync(seed, "\n<!-- FG-569 uncommitted seed edit -->\n");
   assert.throws(
-    () => buildRelease({ sourceRoot: src, outDir: join(workspace, "dirty-seed-rel") }),
+    () => buildRelease({ sourceRoot: src, home: buildHome, outDir:join(workspace, "dirty-seed-rel") }),
     /refusing to build a release from a dirty source/i,
     "a dirty bundled SEED must refuse the build",
   );
@@ -665,7 +689,7 @@ test("FG-569 Resolution B (dirty seed/hook REFUSED at build): an uncommitted edi
   assert.ok(existsSync(script), "the bundled script is present in the fixture");
   appendFileSync(script, "\n# FG-569 uncommitted script edit\n");
   assert.throws(
-    () => buildRelease({ sourceRoot: src, outDir: join(workspace, "dirty-script-rel") }),
+    () => buildRelease({ sourceRoot: src, home: buildHome, outDir:join(workspace, "dirty-script-rel") }),
     /refusing to build a release from a dirty source/i,
     "a dirty bundled SCRIPT must refuse the build",
   );
@@ -680,7 +704,7 @@ test("FG-569 Resolution B (required asset missing): a source lacking a bundled a
   rmSync(join(src, "docker"), { recursive: true, force: true });
   commitSource(src);
   assert.throws(
-    () => buildRelease({ sourceRoot: src, outDir: join(workspace, "missing-asset-rel") }),
+    () => buildRelease({ sourceRoot: src, home: buildHome, outDir:join(workspace, "missing-asset-rel") }),
     /torn closure — required asset directory 'docker'/i,
     "a missing required asset dir must REFUSE the build, not silently skip it",
   );
@@ -748,7 +772,7 @@ test("FG-569 Resolution B (EXECUTED, SOURCE RENAMED AWAY): supported commands ru
   // exercise the release's own entry. Every supported command must run from the release's
   // OWN bundled bytes; forge dashboard must refuse (release mode) rather than reach out.
   const fullSrc = makeFullSource("srcgone-");
-  const built2 = buildRelease({ sourceRoot: fullSrc, outDir: join(workspace, "srcgone-release") });
+  const built2 = buildRelease({ sourceRoot: fullSrc, home: buildHome, outDir: join(workspace, "srcgone-release") });
   renameSync(fullSrc, `${fullSrc}.GONE`);
   assert.ok(!existsSync(fullSrc), "the source checkout is now inaccessible");
 
