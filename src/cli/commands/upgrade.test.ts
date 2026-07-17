@@ -7,7 +7,12 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { tryNpmInstall, maybeRebuildImage, renderReleaseCheckLines, decideDevAdvancement, upgradeAssetPaths, refuseDevAdvance } from "./upgrade.js";
+import {
+  tryNpmInstall, maybeRebuildImage, renderReleaseCheckLines, decideDevAdvancement, upgradeAssetPaths, refuseDevAdvance,
+  classifyStep, unresolvedReasons,
+  type GitPullOutcome, type NpmInstallOutcome, type AssetInstallOutcome, type RoutingPolicyOutcome,
+  type ProjectInitOutcome, type ImageRebuildOutcome, type ReleaseCheckOutcome, type UpgradeStepOutcomes,
+} from "./upgrade.js";
 import { assetRoot } from "../../v2/asset-root.js";
 import { buildReleaseReport } from "../../v2/release-doctor.js";
 
@@ -179,4 +184,155 @@ test("FG-577 (criterion 1/3): upgradeAssetPaths resolves BOTH assets from one ro
     if (before === undefined) delete process.env.FORGE_REPO_DIR;
     else process.env.FORGE_REPO_DIR = before;
   }
+});
+
+// ───────── FG-577 (criterion 10): the inverted default — one TOTAL classifier ─────────
+//
+// `unresolved` was a fail-OPEN allowlist: three pushes testing specific literals,
+// so every state nobody named defaulted to resolved = silent success. Two review
+// rounds each closed one more literal, which is the signature of a default that
+// was never inverted. These tables are the assertion that it now is.
+//
+// Each is `Record<Outcome, ...>` — TOTAL over its union. That is the type-level
+// half of the proof and it is checked in BOTH directions: adding a variant to any
+// outcome union breaks upgrade.ts (its classification table is no longer total)
+// AND breaks this file (this expectation table is no longer total). A reviewer can
+// verify the guarantee by deleting one key from either and running `npm run
+// typecheck`. The mechanised version of that mutation — a real `tsc` run over a
+// really-mutated source — is in upgrade.integration.test.ts.
+
+type Verdict = "resolved" | "unresolved";
+
+const GIT_PULL: Record<GitPullOutcome, Verdict> = {
+  pulled: "resolved",
+  "would-pull": "resolved",
+  "no-remote": "resolved",
+  skipped: "resolved",
+  unavailable: "resolved",
+  refused: "unresolved",
+  dirty: "unresolved",
+  failed: "unresolved",
+};
+
+const NPM_INSTALL: Record<NpmInstallOutcome, Verdict> = {
+  installed: "resolved",
+  "would-install": "resolved",
+  "no-package-json": "resolved",
+  skipped: "resolved",
+  unavailable: "resolved",
+  refused: "unresolved",
+  failed: "unresolved",
+};
+
+const ASSET_INSTALL: Record<AssetInstallOutcome, Verdict> = {
+  installed: "resolved",
+  "would-install": "resolved",
+  "not-found": "unresolved",
+  failed: "unresolved",
+};
+
+const ROUTING_POLICY: Record<RoutingPolicyOutcome, Verdict> = {
+  recompiled: "resolved",
+  "would-recompile": "resolved",
+  "no-raci": "resolved",
+  failed: "unresolved",
+};
+
+const PROJECT_INIT: Record<ProjectInitOutcome, Verdict> = {
+  refreshed: "resolved",
+  "already-current": "resolved",
+  "would-refresh": "resolved",
+  skipped: "resolved",
+  "no-claude-md": "unresolved",
+  "no-forge-block": "unresolved",
+  "template-not-found": "unresolved",
+  "needs-markers": "unresolved",
+};
+
+const IMAGE_REBUILD: Record<ImageRebuildOutcome, Verdict> = {
+  ran: "resolved",
+  "would-rebuild": "resolved",
+  skipped: "resolved",
+  refused: "unresolved",
+  failed: "unresolved",
+};
+
+const RELEASE_CHECK: Record<ReleaseCheckOutcome, Verdict> = {
+  ran: "resolved",
+  "skipped-dry-run": "resolved",
+  "skipped-asset-install": "resolved",
+  failed: "unresolved",
+};
+
+const EXPECTED: { [K in keyof UpgradeStepOutcomes]: Record<UpgradeStepOutcomes[K], Verdict> } = {
+  gitPull: GIT_PULL,
+  npmInstall: NPM_INSTALL,
+  assetInstall: ASSET_INSTALL,
+  routingPolicy: ROUTING_POLICY,
+  projectInit: PROJECT_INIT,
+  imageRebuild: IMAGE_REBUILD,
+  releaseCheck: RELEASE_CHECK,
+};
+
+test("FG-577 (criterion 10): EVERY variant of EVERY step is classified — no variant defaults to success", () => {
+  let checked = 0;
+  for (const [step, table] of Object.entries(EXPECTED)) {
+    for (const [outcome, want] of Object.entries(table)) {
+      const got = classifyStep({ step, outcome } as never);
+      assert.equal(got.kind, want, `${step}/${outcome} must be ${want}`);
+      if (got.kind === "unresolved") {
+        // A reason a script can act on, not a bare boolean: the reason IS the
+        // operator-facing text on the closing line and in --json.
+        assert.ok(got.reason.length > 0, `${step}/${outcome} must name WHY`);
+        assert.ok(!/undefined|\[object/.test(got.reason), `${step}/${outcome} reason is real text`);
+      }
+      checked++;
+    }
+  }
+  // Guards against the tables silently emptying and the loop vacuously passing.
+  assert.equal(checked, 8 + 7 + 4 + 4 + 8 + 5 + 4);
+});
+
+test("FG-577 (criterion 10): unresolvedReasons enumerates the outcomes object's own keys", () => {
+  // The step LIST is derived from the object, not hand-maintained beside it, so a
+  // newly added step is classified by construction rather than by memory.
+  const allClean: UpgradeStepOutcomes = {
+    gitPull: "pulled", npmInstall: "installed", assetInstall: "installed",
+    routingPolicy: "recompiled", projectInit: "refreshed", imageRebuild: "ran", releaseCheck: "ran",
+  };
+  assert.deepEqual(unresolvedReasons(allClean), []);
+
+  assert.deepEqual(
+    unresolvedReasons({ ...allClean, gitPull: "dirty" }),
+    ["git pull did not run — the dev checkout has uncommitted changes"],
+  );
+  // Every unresolved step contributes — none masks another.
+  const allBroken: UpgradeStepOutcomes = {
+    gitPull: "failed", npmInstall: "failed", assetInstall: "failed",
+    routingPolicy: "failed", projectInit: "needs-markers", imageRebuild: "failed", releaseCheck: "failed",
+  };
+  assert.equal(unresolvedReasons(allBroken).length, 7);
+});
+
+test("FG-577 (cell 3): a dirty dev checkout is NOT an operator-requested skip", () => {
+  // The operator asked for advancement and did not get it. Classing this beside
+  // --skip-git is what made it read as a success on every surface.
+  assert.equal(classifyStep({ step: "gitPull", outcome: "dirty" }).kind, "unresolved");
+  assert.equal(classifyStep({ step: "gitPull", outcome: "skipped" }).kind, "resolved");
+});
+
+test("FG-577 (cell 2): operator-requested skips stay RESOLVED — a skip is not a failure", () => {
+  for (const step of [
+    { step: "gitPull", outcome: "skipped" },
+    { step: "npmInstall", outcome: "skipped" },
+    { step: "projectInit", outcome: "skipped" },
+  ] as const) {
+    assert.equal(classifyStep(step).kind, "resolved", `${step.step} --skip-* is the operator's call, not a defect`);
+  }
+});
+
+test("FG-577 (cell 4): a FAILED image rebuild is unresolved, not a warning beside ok:true", () => {
+  assert.equal(classifyStep({ step: "imageRebuild", outcome: "failed" }).kind, "unresolved");
+  assert.equal(classifyStep({ step: "imageRebuild", outcome: "refused" }).kind, "unresolved");
+  assert.equal(classifyStep({ step: "imageRebuild", outcome: "skipped" }).kind, "resolved");
 });

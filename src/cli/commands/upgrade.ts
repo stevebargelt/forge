@@ -107,6 +107,173 @@ export function decideDevAdvancement(
   return { kind: "proceed" };
 }
 
+// FG-577 (criterion 10): the default is INVERTED here. `unresolved` used to be
+// built by three hand-enumerated pushes testing specific literals, so every state
+// nobody thought to name defaulted to resolved = silent success — a fail-OPEN
+// allowlist that two successive review rounds each patched by adding one more
+// literal. Instead: every step reports a typed outcome, and ONE total function
+// classifies EVERY variant. A new variant with no classification is a `tsc`
+// error, not a silent exit 0.
+
+export type GitPullOutcome =
+  | "pulled"
+  | "would-pull"
+  | "no-remote"
+  | "skipped"
+  | "unavailable"
+  | "refused"
+  | "dirty"
+  | "failed";
+
+export type NpmInstallOutcome =
+  | "installed"
+  | "would-install"
+  | "no-package-json"
+  | "skipped"
+  | "unavailable"
+  | "refused"
+  | "failed";
+
+export type AssetInstallOutcome = "installed" | "would-install" | "not-found" | "failed";
+
+export type RoutingPolicyOutcome = "recompiled" | "would-recompile" | "no-raci" | "failed";
+
+export type ProjectInitOutcome =
+  | "refreshed"
+  | "already-current"
+  | "would-refresh"
+  | "skipped"
+  | "no-claude-md"
+  | "no-forge-block"
+  | "template-not-found"
+  | "needs-markers";
+
+export type ImageRebuildOutcome = "ran" | "would-rebuild" | "skipped" | "refused" | "failed";
+
+export type ReleaseCheckOutcome = "ran" | "skipped-dry-run" | "skipped-asset-install" | "failed";
+
+export type UpgradeStepOutcomes = {
+  gitPull: GitPullOutcome;
+  npmInstall: NpmInstallOutcome;
+  assetInstall: AssetInstallOutcome;
+  routingPolicy: RoutingPolicyOutcome;
+  projectInit: ProjectInitOutcome;
+  imageRebuild: ImageRebuildOutcome;
+  releaseCheck: ReleaseCheckOutcome;
+};
+
+/** One `{ step, outcome }` variant per field above, derived rather than
+ *  hand-written: a new step field widens this union, which breaks the `never`
+ *  check in `classifyStep`. */
+export type UpgradeStep = {
+  [K in keyof UpgradeStepOutcomes]: { step: K; outcome: UpgradeStepOutcomes[K] };
+}[keyof UpgradeStepOutcomes];
+
+export type Resolution = { kind: "resolved" } | { kind: "unresolved"; reason: string };
+
+const resolved: Resolution = { kind: "resolved" };
+const unresolvedBecause = (reason: string): Resolution => ({ kind: "unresolved", reason });
+
+// `Record<Union, Resolution>` is what inverts the default: an object literal must
+// name EVERY variant, so adding one to an outcome union above stops this file
+// compiling until it is classified. Omitting a key, or classifying a variant that
+// does not exist, is equally a type error.
+
+const GIT_PULL: Record<GitPullOutcome, Resolution> = {
+  pulled: resolved,
+  "would-pull": resolved,
+  "no-remote": resolved,
+  skipped: resolved,
+  unavailable: resolved,
+  refused: unresolvedBecause("git pull refused (release)"),
+  // The operator asked for advancement and did not get it. A dirty tree is not
+  // an operator-requested skip, and calling it one is how this read as success.
+  dirty: unresolvedBecause("git pull did not run — the dev checkout has uncommitted changes"),
+  failed: unresolvedBecause("git pull FAILED"),
+};
+
+const NPM_INSTALL: Record<NpmInstallOutcome, Resolution> = {
+  installed: resolved,
+  "would-install": resolved,
+  "no-package-json": resolved,
+  skipped: resolved,
+  unavailable: resolved,
+  refused: unresolvedBecause("npm install refused (release)"),
+  failed: unresolvedBecause("npm install FAILED"),
+};
+
+const ASSET_INSTALL: Record<AssetInstallOutcome, Resolution> = {
+  installed: resolved,
+  "would-install": resolved,
+  "not-found": unresolvedBecause("install-seeds.sh NOT FOUND — host seeds were not refreshed"),
+  failed: unresolvedBecause("install-seeds.sh FAILED"),
+};
+
+const ROUTING_POLICY: Record<RoutingPolicyOutcome, Resolution> = {
+  recompiled: resolved,
+  "would-recompile": resolved,
+  "no-raci": resolved,
+  failed: unresolvedBecause("routing-policy.yml NOT recompiled — it is now stale against the host RACI"),
+};
+
+const PROJECT_INIT: Record<ProjectInitOutcome, Resolution> = {
+  refreshed: resolved,
+  "already-current": resolved,
+  "would-refresh": resolved,
+  skipped: resolved,
+  "no-claude-md": unresolvedBecause("project init did not run — no CLAUDE.md here"),
+  "no-forge-block": unresolvedBecause("project init did not run — CLAUDE.md has no forge orchestrator block"),
+  "template-not-found": unresolvedBecause("orchestrator block NOT refreshed — template missing from the executing tree"),
+  "needs-markers": unresolvedBecause("orchestrator block NOT refreshed — needs manual markers"),
+};
+
+const IMAGE_REBUILD: Record<ImageRebuildOutcome, Resolution> = {
+  ran: resolved,
+  "would-rebuild": resolved,
+  skipped: resolved,
+  refused: unresolvedBecause("image rebuild refused (release)"),
+  failed: unresolvedBecause("image rebuild FAILED"),
+};
+
+const RELEASE_CHECK: Record<ReleaseCheckOutcome, Resolution> = {
+  ran: resolved,
+  "skipped-dry-run": resolved,
+  // The asset install is already unresolved on this path; the tail not running is
+  // the honest consequence, not a second failure.
+  "skipped-asset-install": resolved,
+  failed: unresolvedBecause("release check FAILED — this host's readiness is unverified"),
+};
+
+/** The ONE total function every consumer surface derives from. Total in both
+ *  dimensions: over the steps (the `never` check) and over each step's variants
+ *  (the `Record` tables). */
+export function classifyStep(step: UpgradeStep): Resolution {
+  switch (step.step) {
+    case "gitPull": return GIT_PULL[step.outcome];
+    case "npmInstall": return NPM_INSTALL[step.outcome];
+    case "assetInstall": return ASSET_INSTALL[step.outcome];
+    case "routingPolicy": return ROUTING_POLICY[step.outcome];
+    case "projectInit": return PROJECT_INIT[step.outcome];
+    case "imageRebuild": return IMAGE_REBUILD[step.outcome];
+    case "releaseCheck": return RELEASE_CHECK[step.outcome];
+    default: {
+      const unhandled: never = step;
+      return unhandled;
+    }
+  }
+}
+
+/** Enumerated from the object's own keys, so a newly added step is classified by
+ *  construction rather than by remembering to list it here. */
+export function unresolvedReasons(outcomes: UpgradeStepOutcomes): string[] {
+  const reasons: string[] = [];
+  for (const step of Object.keys(outcomes) as (keyof UpgradeStepOutcomes)[]) {
+    const res = classifyStep({ step, outcome: outcomes[step] } as UpgradeStep);
+    if (res.kind === "unresolved") reasons.push(res.reason);
+  }
+  return reasons;
+}
+
 export type UpgradeOptions = {
   dryRun?: boolean;
   skipGit?: boolean;
@@ -128,11 +295,19 @@ export type UpgradeResult = {
   mode: ExecutionMode;
   assetsDir: string;
   devDir: string;
-  devAdvancement: { kind: DevAdvanceDecision["kind"]; lines: string[] };
-  assetInstall: "installed" | "failed" | "not-found" | "would-install";
-  imageRebuild: "ran" | "refused" | "failed" | "skipped";
+  devAdvancement: {
+    kind: DevAdvanceDecision["kind"];
+    lines: string[];
+    gitPull: GitPullOutcome;
+    npmInstall: NpmInstallOutcome;
+  };
+  assetInstall: AssetInstallOutcome;
+  routingPolicy: RoutingPolicyOutcome;
+  projectInit: ProjectInitOutcome;
+  imageRebuild: ImageRebuildOutcome;
+  releaseCheck: ReleaseCheckOutcome;
+  releaseProblems: string[] | null;
   unresolved: string[];
-  releaseCheck: string[] | null;
 };
 
 /** FG-577: the two roots this command works against, resolved SEPARATELY.
@@ -197,53 +372,67 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
 
       // Steps 1 & 2 are the ADVANCEMENT half: they may refuse or be unavailable
       // without ever blocking the asset repair in step 3.
+      let gitPull: GitPullOutcome;
+      let npmInstall: NpmInstallOutcome;
       if (advance.kind !== "proceed") {
         const label = advance.kind === "refused" ? "REFUSED" : "SKIPPED";
+        gitPull = advance.kind === "refused" ? "refused" : "unavailable";
+        npmInstall = advance.kind === "refused" ? "refused" : "unavailable";
         say(`[1/4] git pull:    ${label}`);
         say(`[2/4] npm install: ${label}`);
         for (const line of advance.lines) warn(`        ${line}`);
         say("");
-      } else if (options.skipGit) {
-        say(`[1/4] git pull: skipped (--skip-git)`);
       } else {
-        const pullResult = tryGitPull(devDir, dryRun);
-        switch (pullResult.kind) {
-          case "ok":
-            say(`[1/4] git pull: ${pullResult.message}`);
-            break;
-          case "no-remote":
-            say(`[1/4] git pull: skipped (no remote configured — set up upstream when ready)`);
-            break;
-          case "dirty":
-            say(`[1/4] git pull: SKIPPED (working tree has uncommitted changes in forge repo)`);
-            say(`        Commit or stash in ${devDir}, then re-run.`);
-            // Don't return — let the user still refresh seeds + project if they want.
-            break;
-          case "error":
-            say(`[1/4] git pull: FAILED — ${pullResult.message}`);
-            // Don't return — seeds + project may still work.
-            break;
+        if (options.skipGit) {
+          gitPull = "skipped";
+          say(`[1/4] git pull: skipped (--skip-git)`);
+        } else {
+          const pullResult = tryGitPull(devDir, dryRun);
+          switch (pullResult.kind) {
+            case "ok":
+              gitPull = dryRun ? "would-pull" : "pulled";
+              say(`[1/4] git pull: ${pullResult.message}`);
+              break;
+            case "no-remote":
+              gitPull = "no-remote";
+              say(`[1/4] git pull: skipped (no remote configured — set up upstream when ready)`);
+              break;
+            case "dirty":
+              // NOT an operator skip: advancement was asked for and did not happen.
+              gitPull = "dirty";
+              say(`[1/4] git pull: DID NOT RUN (working tree has uncommitted changes in forge repo)`);
+              say(`        Commit or stash in ${devDir}, then re-run.`);
+              // Don't return — let the user still refresh seeds + project if they want.
+              break;
+            case "error":
+              gitPull = "failed";
+              say(`[1/4] git pull: FAILED — ${pullResult.message}`);
+              // Don't return — seeds + project may still work.
+              break;
+          }
         }
-      }
 
-      // Step 2: npm install (picks up new deps + workspace symlinks)
-      if (advance.kind !== "proceed") {
-        // already reported alongside step 1
-      } else if (options.skipNpm) {
-        say(`[2/4] npm install: skipped (--skip-npm)`);
-      } else {
-        const npmResult = tryNpmInstall(devDir, dryRun);
-        switch (npmResult.kind) {
-          case "ok":
-            say(`[2/4] npm install: ${npmResult.message}`);
-            break;
-          case "no-package-json":
-            say(`[2/4] npm install: SKIPPED (no package.json at ${devDir})`);
-            break;
-          case "error":
-            say(`[2/4] npm install: FAILED — ${npmResult.message}`);
-            // Don't return — seeds + project may still work; user can re-run npm install manually.
-            break;
+        // Step 2: npm install (picks up new deps + workspace symlinks)
+        if (options.skipNpm) {
+          npmInstall = "skipped";
+          say(`[2/4] npm install: skipped (--skip-npm)`);
+        } else {
+          const npmResult = tryNpmInstall(devDir, dryRun);
+          switch (npmResult.kind) {
+            case "ok":
+              npmInstall = dryRun ? "would-install" : "installed";
+              say(`[2/4] npm install: ${npmResult.message}`);
+              break;
+            case "no-package-json":
+              npmInstall = "no-package-json";
+              say(`[2/4] npm install: SKIPPED (no package.json at ${devDir})`);
+              break;
+            case "error":
+              npmInstall = "failed";
+              say(`[2/4] npm install: FAILED — ${npmResult.message}`);
+              // Don't return — seeds + project may still work; user can re-run npm install manually.
+              break;
+          }
         }
       }
 
@@ -251,7 +440,7 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
       // executing tree, writes only to $FORGE_HOME. Reached whether or not a dev
       // checkout exists (FG-577 / audit MEDIUM-5).
       const { installScript, templatePath } = upgradeAssetPaths(assetsDir);
-      let assetInstall: UpgradeResult["assetInstall"] = "installed";
+      let assetInstall: AssetInstallOutcome = "installed";
       if (!existsSync(installScript)) {
         assetInstall = "not-found";
         say(`[3/4] install-seeds.sh: NOT FOUND at ${installScript}`);
@@ -293,11 +482,19 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
       // and the dashboard governance panel would flag drift the instant upgrade
       // succeeds. Runs whenever a host RACI exists (independent of whether
       // install-seeds ran), and surfaces a compile failure loudly.
-      {
+      let routingPolicy: RoutingPolicyOutcome;
+      if (!existsSync(RACI_PATH)) {
+        // No host RACI is not a compile failure: there is no derived artifact to
+        // keep in lockstep. A RACI that exists and won't compile IS one.
+        routingPolicy = "no-raci";
+        say(`        → routing-policy.yml: nothing to recompile (no host RACI at ${RACI_PATH})`);
+      } else {
         const res = compilePolicyFile(RACI_PATH, ROUTING_POLICY_PATH, { write: !dryRun });
         if (res.ok) {
+          routingPolicy = dryRun ? "would-recompile" : "recompiled";
           say(`        → routing-policy.yml: ${dryRun ? "would recompile" : "recompiled"} (${res.routes} routes)`);
         } else {
+          routingPolicy = "failed";
           warn(`        ⚠ routing-policy.yml NOT recompiled — ${res.error}`);
           warn(`          fix ~/.forge/forge-raci.md, then run: forge route compile`);
         }
@@ -307,17 +504,21 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
       // hook installs (commit-msg, claude session hooks, slash commands).
       // Re-running the install plans is idempotent: already-current entries
       // no-op; updates apply when the template/source has moved.
+      let projectInit: ProjectInitOutcome;
       if (!isForgeProject) {
         // #231 follow-up: flag the never-initialized case loudly + actionably,
         // instead of a terse "skipped". upgrade is for EXISTING projects; a
         // project with no forge block has never been `forge init`'d.
         if (options.skipProject) {
+          projectInit = "skipped";
           say(`[4/4] project init: skipped (--skip-project)`);
         } else if (!existsSync(projectClaudeMd)) {
-          say(`[4/4] project init: SKIPPED — no CLAUDE.md in ${cwd}`);
+          projectInit = "no-claude-md";
+          say(`[4/4] project init: DID NOT RUN — no CLAUDE.md in ${cwd}`);
           warn(`        ⚠ this directory has never been initialized for forge. Run \`forge init\` here first (upgrade is for existing projects).`);
         } else {
-          say(`[4/4] project init: SKIPPED — CLAUDE.md has no forge orchestrator block`);
+          projectInit = "no-forge-block";
+          say(`[4/4] project init: DID NOT RUN — CLAUDE.md has no forge orchestrator block`);
           warn(`        ⚠ this project was never \`forge init\`'d (or you're not in the project root). Run \`forge init\` here to set it up.`);
         }
       } else {
@@ -331,19 +532,24 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         // Block refresh (best-effort): replace / repair / append / or ask for
         // manual markers — never silently skip, never duplicate.
         if (!existsSync(templatePath)) {
-          say(`[4/4] project init: block SKIPPED — template not found at ${templatePath}`);
+          projectInit = "template-not-found";
+          say(`[4/4] project init: block NOT refreshed — template not found at ${templatePath}`);
         } else {
           const template = readFileSync(templatePath, "utf8");
           const existing = readFileSync(projectClaudeMd, "utf8");
           const result = applyOrchestratorBlock(existing, template);
           if (result.action === "needs-markers") {
+            projectInit = "needs-markers";
             say(`[4/4] project init: orchestrator block needs manual markers`);
             warn(`        ⚠ ${result.message}`);
           } else if (result.content === existing) {
+            projectInit = "already-current";
             say(`[4/4] project init: orchestrator block already current`);
           } else if (dryRun) {
+            projectInit = "would-refresh";
             say(`[4/4] project init: would ${result.action} orchestrator block in ${projectClaudeMd}`);
           } else {
+            projectInit = "refreshed";
             writeFileSync(projectClaudeMd, result.content);
             say(`[4/4] project init: ${result.action} orchestrator block`);
           }
@@ -373,42 +579,77 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
       const rebuild = maybeRebuildImage(options, devDir, mode, assetsDir);
       for (const line of rebuild.lines) say(line);
       if (rebuild.error) warn(rebuild.error);
-
-      // A requested action that did not happen is a failed request, not a skipped
-      // nicety. All THREE consumer surfaces — the exit code, the closing line, and
-      // --json — are derived from ONE list, so they cannot disagree about whether
-      // this upgrade did what was asked. A `missing` dev checkout is not on it:
-      // nothing refused and nothing failed, the host simply has no checkout to
-      // advance.
-      const unresolved: string[] = [];
-      if (advance.kind === "refused") unresolved.push("dev advancement refused (release)");
-      if (assetInstall === "failed") unresolved.push("install-seeds.sh FAILED");
-      if (rebuild.refused) unresolved.push("image rebuild refused (release)");
-      // A dry run mutates nothing and is a report, not a request — it stays exit 0.
-      if (!dryRun && unresolved.length > 0) process.exitCode = 1;
-
-      say("");
-      if (dryRun) say("Dry run complete. Re-run without --dry-run to apply.");
-      else if (unresolved.length === 0) say("Upgrade complete.");
-      else say(`Upgrade INCOMPLETE — ${unresolved.join("; ")}.`);
+      const imageRebuild: ImageRebuildOutcome = rebuild.refused
+        ? "refused"
+        : rebuild.error ? "failed"
+        : rebuild.ran ? "ran"
+        : (options.rebuildImage && dryRun) ? "would-rebuild"
+        : "skipped";
 
       // #229: read-only release check so a stale image / missing runtime CLI /
       // missing credential is surfaced NOW, not at the next dispatch. Never
-      // mutates; skipped on a dry run.
-      let releaseCheck: string[] | null = null;
-      if (!dryRun) {
+      // mutates.
+      //
+      // Gated on the asset install, not merely on !dryRun: when install-seeds
+      // never ran, the tail reports on a ~/.forge this upgrade did not touch, and
+      // a stale state presented as a fresh verdict is worse than no verdict.
+      let releaseCheck: ReleaseCheckOutcome;
+      let releaseProblems: string[] | null = null;
+      let releaseCheckLines: string[] = [];
+      if (dryRun) {
+        releaseCheck = "skipped-dry-run";
+      } else if (assetInstall !== "installed") {
+        releaseCheck = "skipped-asset-install";
+        releaseCheckLines = ["", `Release check: not run — host seeds were not refreshed (install-seeds.sh: ${assetInstall}), so any verdict would describe a host this upgrade never touched.`];
+      } else {
         try {
           // FG-577: the tail's image probe judges against the EXECUTING tree's
           // docker/, the same root doctor's standalone path now reads — so the
           // two cannot report different staleness for the same host.
           const report = buildReleaseReport(gatherReleaseInputs(undefined, { projectDir: cwd, forgeRepoDir: assetsDir }, {}, mode));
-          releaseCheck = summarizeProblems(report);
-          say("");
-          for (const line of renderReleaseCheckLines(report)) say(line);
+          releaseCheck = "ran";
+          releaseProblems = summarizeProblems(report);
+          releaseCheckLines = ["", ...renderReleaseCheckLines(report)];
         } catch (e) {
-          warn(`Release check skipped: ${(e as Error).message}`);
+          // The check is the only thing that would have told the operator whether
+          // this host can actually run agents. It crashing is a state nobody
+          // verified, not a nicety that was skipped.
+          releaseCheck = "failed";
+          releaseCheckLines = ["", `Release check FAILED — ${(e as Error).message}`];
         }
       }
+
+      // A requested action that did not happen is a failed request, not a skipped
+      // nicety. All THREE consumer surfaces — the exit code, the closing line, and
+      // --json — derive from ONE list, built by a total classification over EVERY
+      // step outcome. A `missing` dev checkout is not on it: nothing refused and
+      // nothing failed, the host simply has no checkout to advance.
+      const outcomes: UpgradeStepOutcomes = {
+        gitPull,
+        npmInstall,
+        assetInstall,
+        routingPolicy,
+        projectInit,
+        imageRebuild,
+        releaseCheck,
+      };
+      const unresolved = unresolvedReasons(outcomes);
+      // A dry run is a report, but it is a report an operator acts on: --json's
+      // `ok` and the exit code must agree, or the two disagree about the same run.
+      if (unresolved.length > 0) process.exitCode = 1;
+
+      say("");
+      if (dryRun) {
+        if (unresolved.length === 0) say("Dry run: nothing refused, and nothing decidable without executing is missing.");
+        else say(`Dry run: this upgrade would NOT complete — ${unresolved.join("; ")}.`);
+        // Structural blindness, stated rather than implied by a clean-looking
+        // forecast: nothing ran, so no execution-dependent state was observed.
+        say("  NOT predicted: nothing was executed, so whether git pull, npm install, install-seeds.sh or an image rebuild would SUCCEED is unknown, and this host's release check was not run.");
+        say("Re-run without --dry-run to apply.");
+      } else if (unresolved.length === 0) say("Upgrade complete.");
+      else say(`Upgrade INCOMPLETE — ${unresolved.join("; ")}.`);
+
+      for (const line of releaseCheckLines) say(line);
 
       const result: UpgradeResult = {
         ok: unresolved.length === 0,
@@ -419,11 +660,14 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         // The refusal REGISTER itself, not a boolean an operator would have to
         // re-derive the reason for: a --json consumer gets the same named,
         // actionable lines the human surface prints.
-        devAdvancement: { kind: advance.kind, lines: advance.kind === "proceed" ? [] : advance.lines },
+        devAdvancement: { kind: advance.kind, lines: advance.kind === "proceed" ? [] : advance.lines, gitPull, npmInstall },
         assetInstall,
-        imageRebuild: rebuild.refused ? "refused" : rebuild.error ? "failed" : rebuild.ran ? "ran" : "skipped",
-        unresolved,
+        routingPolicy,
+        projectInit,
+        imageRebuild,
         releaseCheck,
+        releaseProblems,
+        unresolved,
       };
       if (json) console.log(JSON.stringify(result, null, 2));
       return result;
