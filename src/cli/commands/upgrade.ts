@@ -114,6 +114,25 @@ export type UpgradeOptions = {
   skipProject?: boolean;
   forgeRepo?: string;
   rebuildImage?: boolean;
+  json?: boolean;
+};
+
+/** FG-577: the machine-readable face of the SAME states the human output and the
+ *  exit code are rendered from. A refusal an operator can read but a script
+ *  cannot is a refusal half the consumers miss — `unresolved` is the one list all
+ *  three surfaces derive from, so they cannot disagree about whether this upgrade
+ *  did what was asked. */
+export type UpgradeResult = {
+  ok: boolean;
+  dryRun: boolean;
+  mode: ExecutionMode;
+  assetsDir: string;
+  devDir: string;
+  devAdvancement: { kind: DevAdvanceDecision["kind"]; lines: string[] };
+  assetInstall: "installed" | "failed" | "not-found" | "would-install";
+  imageRebuild: "ran" | "refused" | "failed" | "skipped";
+  unresolved: string[];
+  releaseCheck: string[] | null;
 };
 
 /** FG-577: the two roots this command works against, resolved SEPARATELY.
@@ -133,6 +152,7 @@ export function registerUpgrade(program: Command): void {
     .option("--skip-project", "skip re-initing the current project's CLAUDE.md")
     .option("--forge-repo <dir>", "path to the forge source repo (default: $FORGE_REPO_DIR or ~/code/forge)")
     .option("--rebuild-image", "rebuild the agent image (runs docker/build.sh) — the one mutating extra step (#229)")
+    .option("--json", "emit the structured result (including any refusal) instead of the human summary")
     .action((options: UpgradeOptions) => {
       runUpgrade(options, {
         mode: executionMode(),
@@ -142,11 +162,18 @@ export function registerUpgrade(program: Command): void {
     });
 }
 
-export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): void {
+export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeResult {
   {
     {
       const { mode, assetsDir, devDir } = env;
       const advance = decideDevAdvancement(mode, assetsDir, devDir);
+
+      // --json makes stdout a single parseable document, so the human rendering
+      // is suppressed rather than interleaved. Every line it would have printed
+      // is reachable in the returned result.
+      const json = options.json ?? false;
+      const say = (line: string): void => { if (!json) console.log(line); };
+      const warn = (line: string): void => { if (!json) console.warn(line); };
 
       const cwd = process.cwd();
       const projectClaudeMd = join(cwd, "CLAUDE.md");
@@ -162,38 +189,38 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): void {
       const dryRun = options.dryRun ?? false;
       const prefix = dryRun ? "(dry-run) " : "";
 
-      console.log(`${prefix}forge upgrade`);
-      console.log(`  Assets:        ${assetsDir} (${mode === "release" ? "executing release" : "dev checkout, npm-linked"})`);
-      console.log(`  Dev checkout:  ${devDir}${advance.kind === "proceed" ? "" : " (not advanced — see below)"}`);
-      console.log(`  Project (cwd): ${isForgeProject ? cwd : (options.skipProject ? "(skipped)" : "(not a forge project here — no orchestrator block/heading; run `forge init` to set one up)")}`);
-      console.log("");
+      say(`${prefix}forge upgrade`);
+      say(`  Assets:        ${assetsDir} (${mode === "release" ? "executing release" : "dev checkout, npm-linked"})`);
+      say(`  Dev checkout:  ${devDir}${advance.kind === "proceed" ? "" : " (not advanced — see below)"}`);
+      say(`  Project (cwd): ${isForgeProject ? cwd : (options.skipProject ? "(skipped)" : "(not a forge project here — no orchestrator block/heading; run `forge init` to set one up)")}`);
+      say("");
 
       // Steps 1 & 2 are the ADVANCEMENT half: they may refuse or be unavailable
       // without ever blocking the asset repair in step 3.
       if (advance.kind !== "proceed") {
         const label = advance.kind === "refused" ? "REFUSED" : "SKIPPED";
-        console.log(`[1/4] git pull:    ${label}`);
-        console.log(`[2/4] npm install: ${label}`);
-        for (const line of advance.lines) console.warn(`        ${line}`);
-        console.log("");
+        say(`[1/4] git pull:    ${label}`);
+        say(`[2/4] npm install: ${label}`);
+        for (const line of advance.lines) warn(`        ${line}`);
+        say("");
       } else if (options.skipGit) {
-        console.log(`[1/4] git pull: skipped (--skip-git)`);
+        say(`[1/4] git pull: skipped (--skip-git)`);
       } else {
         const pullResult = tryGitPull(devDir, dryRun);
         switch (pullResult.kind) {
           case "ok":
-            console.log(`[1/4] git pull: ${pullResult.message}`);
+            say(`[1/4] git pull: ${pullResult.message}`);
             break;
           case "no-remote":
-            console.log(`[1/4] git pull: skipped (no remote configured — set up upstream when ready)`);
+            say(`[1/4] git pull: skipped (no remote configured — set up upstream when ready)`);
             break;
           case "dirty":
-            console.log(`[1/4] git pull: SKIPPED (working tree has uncommitted changes in forge repo)`);
-            console.log(`        Commit or stash in ${devDir}, then re-run.`);
+            say(`[1/4] git pull: SKIPPED (working tree has uncommitted changes in forge repo)`);
+            say(`        Commit or stash in ${devDir}, then re-run.`);
             // Don't return — let the user still refresh seeds + project if they want.
             break;
           case "error":
-            console.log(`[1/4] git pull: FAILED — ${pullResult.message}`);
+            say(`[1/4] git pull: FAILED — ${pullResult.message}`);
             // Don't return — seeds + project may still work.
             break;
         }
@@ -203,18 +230,18 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): void {
       if (advance.kind !== "proceed") {
         // already reported alongside step 1
       } else if (options.skipNpm) {
-        console.log(`[2/4] npm install: skipped (--skip-npm)`);
+        say(`[2/4] npm install: skipped (--skip-npm)`);
       } else {
         const npmResult = tryNpmInstall(devDir, dryRun);
         switch (npmResult.kind) {
           case "ok":
-            console.log(`[2/4] npm install: ${npmResult.message}`);
+            say(`[2/4] npm install: ${npmResult.message}`);
             break;
           case "no-package-json":
-            console.log(`[2/4] npm install: SKIPPED (no package.json at ${devDir})`);
+            say(`[2/4] npm install: SKIPPED (no package.json at ${devDir})`);
             break;
           case "error":
-            console.log(`[2/4] npm install: FAILED — ${npmResult.message}`);
+            say(`[2/4] npm install: FAILED — ${npmResult.message}`);
             // Don't return — seeds + project may still work; user can re-run npm install manually.
             break;
         }
@@ -224,11 +251,13 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): void {
       // executing tree, writes only to $FORGE_HOME. Reached whether or not a dev
       // checkout exists (FG-577 / audit MEDIUM-5).
       const { installScript, templatePath } = upgradeAssetPaths(assetsDir);
-      let assetInstallFailed = false;
+      let assetInstall: UpgradeResult["assetInstall"] = "installed";
       if (!existsSync(installScript)) {
-        console.log(`[3/4] install-seeds.sh: NOT FOUND at ${installScript}`);
+        assetInstall = "not-found";
+        say(`[3/4] install-seeds.sh: NOT FOUND at ${installScript}`);
       } else if (dryRun) {
-        console.log(`[3/4] install-seeds.sh: would run with FORCE=1`);
+        assetInstall = "would-install";
+        say(`[3/4] install-seeds.sh: would run with FORCE=1`);
       } else {
         try {
           const out = execFileSync("bash", [installScript], {
@@ -238,23 +267,23 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): void {
           // Emit a compact summary, not the full output
           const lines = out.trim().split("\n");
           const installedLines = lines.filter((l) => l.startsWith("Installing"));
-          console.log(`[3/4] install-seeds.sh: ${installedLines.length} component(s) refreshed`);
+          say(`[3/4] install-seeds.sh: ${installedLines.length} component(s) refreshed`);
           for (const line of installedLines) {
-            console.log(`        ${line.replace("Installing ", "")}`);
+            say(`        ${line.replace("Installing ", "")}`);
           }
           // Surface orphan-warning if present (the existing install-seeds.sh
           // emits a "Note: pre-rename agent dirs detected" block).
           const noteIdx = lines.findIndex((l) => l.startsWith("Note:"));
           if (noteIdx >= 0) {
-            console.log("");
+            say("");
             for (const line of lines.slice(noteIdx)) {
               if (line.startsWith("Done.")) break;
-              console.log(`        ${line}`);
+              say(`        ${line}`);
             }
           }
         } catch (e) {
-          assetInstallFailed = true;
-          console.log(`[3/4] install-seeds.sh: FAILED — ${(e as Error).message}`);
+          assetInstall = "failed";
+          say(`[3/4] install-seeds.sh: FAILED — ${(e as Error).message}`);
         }
       }
 
@@ -267,10 +296,10 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): void {
       {
         const res = compilePolicyFile(RACI_PATH, ROUTING_POLICY_PATH, { write: !dryRun });
         if (res.ok) {
-          console.log(`        → routing-policy.yml: ${dryRun ? "would recompile" : "recompiled"} (${res.routes} routes)`);
+          say(`        → routing-policy.yml: ${dryRun ? "would recompile" : "recompiled"} (${res.routes} routes)`);
         } else {
-          console.warn(`        ⚠ routing-policy.yml NOT recompiled — ${res.error}`);
-          console.warn(`          fix ~/.forge/forge-raci.md, then run: forge route compile`);
+          warn(`        ⚠ routing-policy.yml NOT recompiled — ${res.error}`);
+          warn(`          fix ~/.forge/forge-raci.md, then run: forge route compile`);
         }
       }
 
@@ -283,13 +312,13 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): void {
         // instead of a terse "skipped". upgrade is for EXISTING projects; a
         // project with no forge block has never been `forge init`'d.
         if (options.skipProject) {
-          console.log(`[4/4] project init: skipped (--skip-project)`);
+          say(`[4/4] project init: skipped (--skip-project)`);
         } else if (!existsSync(projectClaudeMd)) {
-          console.log(`[4/4] project init: SKIPPED — no CLAUDE.md in ${cwd}`);
-          console.warn(`        ⚠ this directory has never been initialized for forge. Run \`forge init\` here first (upgrade is for existing projects).`);
+          say(`[4/4] project init: SKIPPED — no CLAUDE.md in ${cwd}`);
+          warn(`        ⚠ this directory has never been initialized for forge. Run \`forge init\` here first (upgrade is for existing projects).`);
         } else {
-          console.log(`[4/4] project init: SKIPPED — CLAUDE.md has no forge orchestrator block`);
-          console.warn(`        ⚠ this project was never \`forge init\`'d (or you're not in the project root). Run \`forge init\` here to set it up.`);
+          say(`[4/4] project init: SKIPPED — CLAUDE.md has no forge orchestrator block`);
+          warn(`        ⚠ this project was never \`forge init\`'d (or you're not in the project root). Run \`forge init\` here to set it up.`);
         }
       } else {
         // #231: provisioning (commands/hooks/gitignore) runs UNCONDITIONALLY —
@@ -302,21 +331,21 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): void {
         // Block refresh (best-effort): replace / repair / append / or ask for
         // manual markers — never silently skip, never duplicate.
         if (!existsSync(templatePath)) {
-          console.log(`[4/4] project init: block SKIPPED — template not found at ${templatePath}`);
+          say(`[4/4] project init: block SKIPPED — template not found at ${templatePath}`);
         } else {
           const template = readFileSync(templatePath, "utf8");
           const existing = readFileSync(projectClaudeMd, "utf8");
           const result = applyOrchestratorBlock(existing, template);
           if (result.action === "needs-markers") {
-            console.log(`[4/4] project init: orchestrator block needs manual markers`);
-            console.warn(`        ⚠ ${result.message}`);
+            say(`[4/4] project init: orchestrator block needs manual markers`);
+            warn(`        ⚠ ${result.message}`);
           } else if (result.content === existing) {
-            console.log(`[4/4] project init: orchestrator block already current`);
+            say(`[4/4] project init: orchestrator block already current`);
           } else if (dryRun) {
-            console.log(`[4/4] project init: would ${result.action} orchestrator block in ${projectClaudeMd}`);
+            say(`[4/4] project init: would ${result.action} orchestrator block in ${projectClaudeMd}`);
           } else {
             writeFileSync(projectClaudeMd, result.content);
-            console.log(`[4/4] project init: ${result.action} orchestrator block`);
+            say(`[4/4] project init: ${result.action} orchestrator block`);
           }
         }
 
@@ -326,57 +355,78 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): void {
         const slashCmds = planClaudeCommands(cwd);
         const gitignore = planGitignoreEntries(cwd);
         if (dryRun) {
-          console.log(`        commit-msg hook: ${commitMsg.action}`);
-          console.log(`        claude hooks:    ${claudeHooks.action}`);
-          console.log(`        slash commands:  ${slashCmds.action}`);
-          console.log(`        .gitignore:      ${gitignore.action}`);
+          say(`        commit-msg hook: ${commitMsg.action}`);
+          say(`        claude hooks:    ${claudeHooks.action}`);
+          say(`        slash commands:  ${slashCmds.action}`);
+          say(`        .gitignore:      ${gitignore.action}`);
         } else {
-          console.log(`        commit-msg hook: ${executeHookPlan(commitMsg)}`);
-          console.log(`        claude hooks:    ${executeClaudeHooksPlan(claudeHooks)}`);
-          console.log(`        slash commands:  ${executeClaudeCommandsPlan(slashCmds)}`);
+          say(`        commit-msg hook: ${executeHookPlan(commitMsg)}`);
+          say(`        claude hooks:    ${executeClaudeHooksPlan(claudeHooks)}`);
+          say(`        slash commands:  ${executeClaudeCommandsPlan(slashCmds)}`);
           warnSkippedClaudeCommands(slashCmds);
-          console.log(`        .gitignore:      ${executeGitignoreEntriesPlan(gitignore)}`);
+          say(`        .gitignore:      ${executeGitignoreEntriesPlan(gitignore)}`);
         }
       }
 
       // #229: rebuild the agent image only when explicitly asked (the one
       // mutating extra step), so a stale image can be fixed in the same command.
       const rebuild = maybeRebuildImage(options, devDir, mode, assetsDir);
-      for (const line of rebuild.lines) console.log(line);
-      if (rebuild.error) console.error(rebuild.error);
+      for (const line of rebuild.lines) say(line);
+      if (rebuild.error) warn(rebuild.error);
 
       // A requested action that did not happen is a failed request, not a skipped
-      // nicety. Both consumer surfaces — the exit code and the closing line — are
-      // derived from ONE list, so they cannot disagree about whether this upgrade
-      // did what was asked. A `missing` dev checkout is not on it: nothing refused
-      // and nothing failed, the host simply has no checkout to advance.
+      // nicety. All THREE consumer surfaces — the exit code, the closing line, and
+      // --json — are derived from ONE list, so they cannot disagree about whether
+      // this upgrade did what was asked. A `missing` dev checkout is not on it:
+      // nothing refused and nothing failed, the host simply has no checkout to
+      // advance.
       const unresolved: string[] = [];
       if (advance.kind === "refused") unresolved.push("dev advancement refused (release)");
-      if (assetInstallFailed) unresolved.push("install-seeds.sh FAILED");
+      if (assetInstall === "failed") unresolved.push("install-seeds.sh FAILED");
       if (rebuild.refused) unresolved.push("image rebuild refused (release)");
       // A dry run mutates nothing and is a report, not a request — it stays exit 0.
       if (!dryRun && unresolved.length > 0) process.exitCode = 1;
 
-      console.log("");
-      if (dryRun) console.log("Dry run complete. Re-run without --dry-run to apply.");
-      else if (unresolved.length === 0) console.log("Upgrade complete.");
-      else console.log(`Upgrade INCOMPLETE — ${unresolved.join("; ")}.`);
+      say("");
+      if (dryRun) say("Dry run complete. Re-run without --dry-run to apply.");
+      else if (unresolved.length === 0) say("Upgrade complete.");
+      else say(`Upgrade INCOMPLETE — ${unresolved.join("; ")}.`);
 
       // #229: read-only release check so a stale image / missing runtime CLI /
       // missing credential is surfaced NOW, not at the next dispatch. Never
       // mutates; skipped on a dry run.
+      let releaseCheck: string[] | null = null;
       if (!dryRun) {
         try {
           // FG-577: the tail's image probe judges against the EXECUTING tree's
           // docker/, the same root doctor's standalone path now reads — so the
           // two cannot report different staleness for the same host.
           const report = buildReleaseReport(gatherReleaseInputs(undefined, { projectDir: cwd, forgeRepoDir: assetsDir }, {}, mode));
-          console.log("");
-          for (const line of renderReleaseCheckLines(report)) console.log(line);
+          releaseCheck = summarizeProblems(report);
+          say("");
+          for (const line of renderReleaseCheckLines(report)) say(line);
         } catch (e) {
-          console.error(`Release check skipped: ${(e as Error).message}`);
+          warn(`Release check skipped: ${(e as Error).message}`);
         }
       }
+
+      const result: UpgradeResult = {
+        ok: unresolved.length === 0,
+        dryRun,
+        mode,
+        assetsDir,
+        devDir,
+        // The refusal REGISTER itself, not a boolean an operator would have to
+        // re-derive the reason for: a --json consumer gets the same named,
+        // actionable lines the human surface prints.
+        devAdvancement: { kind: advance.kind, lines: advance.kind === "proceed" ? [] : advance.lines },
+        assetInstall,
+        imageRebuild: rebuild.refused ? "refused" : rebuild.error ? "failed" : rebuild.ran ? "ran" : "skipped",
+        unresolved,
+        releaseCheck,
+      };
+      if (json) console.log(JSON.stringify(result, null, 2));
+      return result;
     }
   }
 }

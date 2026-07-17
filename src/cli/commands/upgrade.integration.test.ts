@@ -303,3 +303,83 @@ test("FG-577: a clean dev upgrade still exits 0 and still says complete", () => 
     rmSync(assets, { recursive: true, force: true });
   }
 });
+
+// ─────────── FG-577 (criterion 10): the refusal on the --json consumer ───────────
+//
+// The acceptance names EVERY consumer, and a refusal that exists only as console
+// prose is unreadable to the scripted half of them. These drive the same real
+// action as the tests above, so a JSON surface that drifted from the human one
+// (or from the exit code) fails here rather than in a caller's parser.
+
+test("FG-577 (criterion 10): the release-mode refusal reaches the --json consumer, not just the console", () => {
+  const release = assetTree("fg577-rel-json-", "RELEASE");
+  const devCheckout = assetTree("fg577-dev-json-", "DEV", { manifest: false });
+  const warnings: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (...a: unknown[]) => { warnings.push(a.join(" ")); };
+  let stdout = "";
+  try {
+    const exitCode = captureExit(() => {
+      stdout = captureLog(() => runUpgrade(
+        { skipProject: true, json: true },
+        { mode: "release", assetsDir: release, devDir: devCheckout },
+      ));
+    });
+
+    // Parsing IS the assertion that stdout is exactly one document: a single
+    // interleaved human progress line breaks every scripted consumer, so a
+    // --json that merely appends JSON after the prose fails right here.
+    const parsed = JSON.parse(stdout) as {
+      ok: boolean; mode: string; unresolved: string[];
+      assetInstall: string; imageRebuild: string;
+      devAdvancement: { kind: string; lines: string[] };
+    };
+
+    assert.equal(parsed.mode, "release");
+    assert.equal(parsed.devAdvancement.kind, "refused", "the refusal is a named state, not a boolean the caller must re-derive");
+    assert.ok(
+      parsed.devAdvancement.lines.some((l) => /refusing to advance the dev checkout/.test(l)),
+      "the refusal REGISTER itself is machine-readable — the same named lines the human surface prints",
+    );
+    assert.ok(
+      parsed.devAdvancement.lines.some((l) => /forge-dev upgrade/.test(l)),
+      "and carries the actionable remedy, not just a verdict",
+    );
+
+    // The three surfaces derive from ONE list, so they cannot disagree.
+    assert.equal(parsed.ok, false);
+    assert.deepEqual(parsed.unresolved, ["dev advancement refused (release)"]);
+    assert.equal(exitCode, 1, "--json must agree with the exit code a script also reads");
+
+    // MEDIUM-5 again, on this surface: the refusal does not gate asset repair,
+    // and the JSON says so.
+    assert.equal(parsed.assetInstall, "installed");
+    assert.equal(parsed.imageRebuild, "skipped");
+    assert.equal(warnings.length, 0, "--json is the summary, not a second copy of it");
+  } finally {
+    console.warn = realWarn;
+    for (const d of [release, devCheckout]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("FG-577 (criterion 10): a clean dev --json reports no refusal", () => {
+  // The guard: the test above must fire on the refusal, not on --json itself.
+  const assets = assetTree("fg577-clean-json-", "CLEAN", { manifest: false });
+  try {
+    let stdout = "";
+    const exitCode = captureExit(() => {
+      stdout = captureLog(() => runUpgrade(
+        { skipProject: true, skipGit: true, skipNpm: true, json: true },
+        { mode: "dev", assetsDir: assets, devDir: assets },
+      ));
+    });
+    const parsed = JSON.parse(stdout) as { ok: boolean; mode: string; unresolved: string[]; devAdvancement: { kind: string } };
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.mode, "dev");
+    assert.equal(parsed.devAdvancement.kind, "proceed");
+    assert.deepEqual(parsed.unresolved, []);
+    assert.equal(exitCode, undefined);
+  } finally {
+    rmSync(assets, { recursive: true, force: true });
+  }
+});
