@@ -8,11 +8,22 @@
 // pi-apikey.yml that hardcoded `--provider anthropic` defeated the #265 provider
 // binding with no signal at all. This module is the missing signal.
 //
-// Read-only detector, surfaced by `forge doctor`. The fix is `forge upgrade`
-// (FORCE refresh of all seeds) or `FORCE=1 scripts/install-seeds.sh` for a
-// seed-only refresh. Runtimes are forge-owned execution artifacts (safe to
-// overwrite); agents/constraints/raci are prose that may carry local edits, so
-// they are reported as a warning rather than treated as a hard readiness fail.
+// Read-only detector, surfaced by `forge doctor`. Runtimes are forge-owned
+// execution artifacts (safe to overwrite); agents/constraints/raci are prose that
+// may carry local edits, so they are reported as a warning rather than treated as
+// a hard readiness fail.
+//
+// FG-578: that split is no longer only this module's opinion — it is the
+// installer's WRITE policy. `FORCE=1 scripts/install-seeds.sh` (and so
+// `forge upgrade`) refreshes the auto-refreshable categories and RETAINS the
+// authored ones, which changes what this detector may honestly name as a remedy:
+// pointing an operator at `forge upgrade` for prose drift would name a remedy
+// that converges nothing — run it forever, stay drifted. That is the same defect
+// class as a false refresh claim, so renderSeedDrift() now states a remedy only
+// for the categories it actually converges, and says plainly that the rest are
+// the operator's to merge. `authoredCategories()` below is the shared face of
+// this taxonomy; fg578-ownership-agreement.test.ts fails if the installer's
+// AUTHORED_EXEMPT ever disagrees with it.
 
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -49,6 +60,24 @@ const SEED_SPECS: SeedSpec[] = [
   { category: "constraints", rel: "constraints", autoRefreshable: false },
   { category: "raci", rel: "forge-raci.md", autoRefreshable: false },
 ];
+
+/** FG-578: the categories the OPERATOR authors — forge seeds them, then never
+ *  writes over them. Derived from SEED_SPECS rather than restated, so this cannot
+ *  drift from the taxonomy the detector itself uses. install-seeds.sh's
+ *  AUTHORED_EXEMPT must name exactly this set; the shell/TS boundary makes
+ *  literal sharing impractical, so fg578-ownership-agreement.test.ts gates the
+ *  agreement instead of a comment asking someone to remember. (FG-579 is live
+ *  proof that hand-maintained parallel lists drift: SEED_SPECS already misses the
+ *  `workflows` category the installer installs.) */
+export function authoredCategories(): string[] {
+  return SEED_SPECS.filter((s) => !s.autoRefreshable).map((s) => s.category).sort();
+}
+
+/** The complement: forge-owned execution artifacts a refresh may overwrite, and
+ *  therefore the only categories `forge upgrade` can honestly claim to converge. */
+export function autoRefreshableCategories(): string[] {
+  return SEED_SPECS.filter((s) => s.autoRefreshable).map((s) => s.category).sort();
+}
 
 /** The seeds/ dir of the running forge package. FG-577: the baseline is itself a
  *  release-owned asset, so it resolves from assetRoot() and NOTHING ambient may
@@ -115,11 +144,21 @@ export function renderSeedDrift(report: SeedDriftReport): string {
     const mark = e.autoRefreshable ? "FAIL" : "warn";
     lines.push(`  [${mark}] ${e.status.padEnd(7)} ${e.path}`);
   }
-  const hardFails = report.stale.some((e) => e.autoRefreshable);
-  lines.push(
-    hardFails
-      ? "  Runtime seeds are stale — agent execution may not match the code. Fix: forge upgrade (or FORCE=1 scripts/install-seeds.sh)."
-      : "  Prose seeds differ from defaults (may be local edits). Refresh with forge upgrade if unintended.",
-  );
+  // FG-578: each half of the report names ONLY the remedy that converges IT, and
+  // both are printed when both are stale. The old text was an either/or that, on
+  // a mixed report, named the runtime remedy and let it stand for the prose too —
+  // and on a prose-only report promised `forge upgrade` would refresh files the
+  // installer is now required to retain. A remedy that cannot converge the
+  // detector that names it is the defect FG-577 fixed for assets; the same
+  // promise made about prose is the same defect wearing prose.
+  if (report.stale.some((e) => e.autoRefreshable)) {
+    lines.push("  Runtime seeds are stale — agent execution may not match the code. Fix: forge upgrade (or FORCE=1 scripts/install-seeds.sh).");
+  }
+  if (report.stale.some((e) => !e.autoRefreshable)) {
+    lines.push(`  Prose seeds (${authoredCategories().join(", ")}) differ from this release's defaults — these are YOURS.`);
+    lines.push("  forge seeds them once and never overwrites them, FORCE=1 included, so forge upgrade will NOT");
+    lines.push("  refresh them and this warning will persist while your edits stand. If the drift is unintended,");
+    lines.push(`  diff against ${defaultRepoSeedsDir()} and merge by hand.`);
+  }
   return lines.join("\n");
 }

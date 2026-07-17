@@ -57,6 +57,17 @@ export function upgradeAssetPaths(assetsDir: string = assetRoot()): { installScr
   };
 }
 
+/** FG-578: install-seeds.sh's machine-readable retention record — one
+ *  `Retained: <path> (…)` line per file it declined to write because the operator
+ *  owns it, with the path relative to $FORGE_HOME (the same key seed-drift.ts
+ *  reports drift under). Returns null for every other line. The installer is the
+ *  authority on what it retained; upgrade REPORTS that answer and never
+ *  re-derives one, which is the whole reason the policy lives in the writer. */
+export function parseRetainedLine(line: string): string | null {
+  const m = /^Retained: (\S+) /.exec(line);
+  return m ? m[1]! : null;
+}
+
 /** The refusal register: name what disagreed, name both sides, say why
  *  reconciliation is not offered, end actionable. The manual steps are spelled
  *  out because `forge-dev` may not exist as a runnable command on this host —
@@ -147,6 +158,12 @@ export type NpmInstallOutcome =
 
 export type AssetInstallOutcome = "installed" | "would-install" | "not-found" | "failed";
 
+/** FG-578: what install-seeds.sh declined to write because the operator owns it.
+ *  `not-run` is not "nothing was retained" — it is "the installer never ran, so
+ *  nobody looked". Collapsing the two would report a clean ownership picture for
+ *  a host this upgrade never touched. */
+export type AuthoredRetentionOutcome = "none" | "retained" | "not-run";
+
 export type RoutingPolicyOutcome = "recompiled" | "would-recompile" | "no-raci" | "failed";
 
 export type ProjectInitOutcome =
@@ -174,6 +191,7 @@ export type UpgradeStepOutcomes = {
   gitPull: GitPullOutcome;
   npmInstall: NpmInstallOutcome;
   assetInstall: AssetInstallOutcome;
+  authoredRetention: AuthoredRetentionOutcome;
   routingPolicy: RoutingPolicyOutcome;
   projectInit: ProjectInitOutcome;
   slashCommands: SlashCommandsOutcome;
@@ -226,6 +244,22 @@ const ASSET_INSTALL: Record<AssetInstallOutcome, Resolution> = {
   "would-install": resolved,
   "not-found": unresolvedBecause("install-seeds.sh NOT FOUND — host seeds were not refreshed"),
   failed: unresolvedBecause("install-seeds.sh FAILED"),
+};
+
+// FG-578: forge declining to overwrite a file the operator AUTHORS is the
+// command working — the identical reasoning SLASH_COMMANDS states below, applied
+// to the same shape of fact. Classifying retention `unresolved` would fire exit 1
+// forever on every host whose operator has ever run `forge raci apply`, i.e.
+// punish the supported, audited workflow with a permanent red light — which is
+// not a signal, it is noise that trains operators to ignore the exit code.
+//
+// It is still a state a script must be able to SEE. That is what this step plus
+// the named `authoredRetentions` list are for; the human ⚠ says the same thing.
+// Resolved means "forge did what it should", never "nothing to know".
+const AUTHORED_RETENTION: Record<AuthoredRetentionOutcome, Resolution> = {
+  none: resolved,
+  retained: resolved,
+  "not-run": resolved,
 };
 
 const ROUTING_POLICY: Record<RoutingPolicyOutcome, Resolution> = {
@@ -285,6 +319,7 @@ export function classifyStep(step: UpgradeStep): Resolution {
     case "gitPull": return GIT_PULL[step.outcome];
     case "npmInstall": return NPM_INSTALL[step.outcome];
     case "assetInstall": return ASSET_INSTALL[step.outcome];
+    case "authoredRetention": return AUTHORED_RETENTION[step.outcome];
     case "routingPolicy": return ROUTING_POLICY[step.outcome];
     case "projectInit": return PROJECT_INIT[step.outcome];
     case "slashCommands": return SLASH_COMMANDS[step.outcome];
@@ -336,6 +371,14 @@ export type UpgradeResult = {
     npmInstall: NpmInstallOutcome;
   };
   assetInstall: AssetInstallOutcome;
+  authoredRetention: AuthoredRetentionOutcome;
+  /** FG-578: the seed files forge did NOT overwrite because the OPERATOR authors
+   *  them (forge-raci.md, agents/, constraints/) and their copy diverges from
+   *  this release's seed — paths relative to $FORGE_HOME. Machine-readable for
+   *  exactly the reason `slashCommandOverrides` is: a state only a human can read
+   *  is a state half the consumers miss. Informational, never a failure — but it
+   *  is the ONLY place this upgrade admits those files are running unrefreshed. */
+  authoredRetentions: string[];
   routingPolicy: RoutingPolicyOutcome;
   projectInit: ProjectInitOutcome;
   slashCommands: SlashCommandsOutcome;
@@ -484,6 +527,8 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
       // checkout exists (FG-577 / audit MEDIUM-5).
       const { installScript, templatePath } = upgradeAssetPaths(assetsDir);
       let assetInstall: AssetInstallOutcome = "installed";
+      let authoredRetention: AuthoredRetentionOutcome = "not-run";
+      let authoredRetentions: string[] = [];
       if (!existsSync(installScript)) {
         assetInstall = "not-found";
         say(`[3/4] install-seeds.sh: NOT FOUND at ${installScript}`);
@@ -502,6 +547,22 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
           say(`[3/4] install-seeds.sh: ${installedLines.length} component(s) refreshed`);
           for (const line of installedLines) {
             say(`        ${line.replace("Installing ", "")}`);
+          }
+          // FG-578: the count above is a COUNT OF "Installing" LINES. That string
+          // seam is exactly where a false refresh claim gets manufactured without
+          // anyone deciding to make one — so the installer only echoes
+          // "Installing" for bytes it actually wrote, and reports what it
+          // retained on its own, separate line. Parse that, and render it as what
+          // forge did NOT do. Never re-derive it from the refresh count.
+          authoredRetentions = lines.flatMap((l) => parseRetainedLine(l) ?? []);
+          authoredRetention = authoredRetentions.length > 0 ? "retained" : "none";
+          if (authoredRetentions.length > 0) {
+            warn(`        ⚠ NOT refreshed — these are operator-authored and out of forge's control path:`);
+            for (const p of authoredRetentions) warn(`            ${p} (your copy differs from this release's seed)`);
+            warn(`          forge seeds these once and never writes over them, FORCE=1 included — your`);
+            warn(`          \`forge raci apply\` changes and local edits survive every upgrade. The other`);
+            warn(`          side of that: they are running against newer forge code than they were`);
+            warn(`          written for. To take this release's defaults, diff ${join(assetsDir, "seeds")} and merge by hand.`);
           }
           // Surface orphan-warning if present (the existing install-seeds.sh
           // emits a "Note: pre-rename agent dirs detected" block).
@@ -679,6 +740,7 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         gitPull,
         npmInstall,
         assetInstall,
+        authoredRetention,
         routingPolicy,
         projectInit,
         slashCommands,
@@ -719,6 +781,8 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
           npmInstall,
         },
         assetInstall,
+        authoredRetention,
+        authoredRetentions,
         routingPolicy,
         projectInit,
         slashCommands,
