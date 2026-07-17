@@ -14,8 +14,7 @@ Reverses #137 (the dashboard split). Filed and closed in the same session (2026-
 > dashboard is a separate workspace with its own dependency tree and is **not bundled into a release**, so
 > stable `forge` **refuses** `dashboard` in release mode. Run it as `./bin/forge-dev dashboard start` from a
 > source checkout. **What this ticket actually did — un-splitting the dashboard back into an npm workspace —
-> stands and is unaffected**; only the invocation moved. Whether a release should bundle the dashboard is an
-> open product decision under FG-572.
+> stands and is unaffected**; only the invocation moved.
 
 
 **Why reverse.** Two costs surfaced after #137 shipped:
