@@ -6,6 +6,10 @@ title: an authoritative red result.json that is valid JSON behind one stray lead
 created: 2026-07-17
 ---
 
+> **Recovery disposition (operator, 2026-07-17):** KEEP ACTIVE — an orchestration-integrity defect, not
+> optional hardening (malformed authoritative reviewer output can erase a blocking verdict). Do NOT start it now; ACs unchanged (not expanded) in this record pass.
+
+
 **Observed live:** FG-578 build phase, run
 `run-fg-578-forge-upgrade-must-not-clobber-the-operator-authored-raci-e51e00`, 2026-07-17. Two of six build
 reds.

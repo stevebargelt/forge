@@ -6,6 +6,10 @@ title: "a feature run whose verify phase FAILS reports status: complete while it
 created: 2026-07-17
 ---
 
+> **Recovery disposition (operator, 2026-07-17):** KEEP ACTIVE — an orchestration-integrity defect, not
+> optional hardening (false completion can skip required phases while reporting success). Do NOT start it now; ACs unchanged (not expanded) in this record pass.
+
+
 **Observed live:** FG-577's feature run
 `run-fg-577-install-path-resolves-release-owned-assets-from-the-executing-release-aa4226`, 2026-07-17.
 **Related:** FG-477 (workflow run lifecycle evaluator) — this is a concrete instance of the drift FG-477 exists

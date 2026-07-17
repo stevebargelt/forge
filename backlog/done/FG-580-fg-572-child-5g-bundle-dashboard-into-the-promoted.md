@@ -175,3 +175,10 @@ This proposal superseded the census's "assume network at smoke time" default. ~~
 prove the primary page boots and renders representative UI with **network to executable-JS origins blocked**
 (no `esm.sh`/CDN fetch); first-party `/client/*` assets serve from the release closure. Add a mutation proof:
 omitting a vendored client lib makes the offline-boot test go red.
+
+## Recovery disposition (operator, 2026-07-17) — KEEP the offline code
+- The landed offline-dashboard implementation (`b6c6542`) is **kept**: removing already-merged, working code
+  would create additional churn and regression risk.
+- **Offline operation was not an original product requirement** (the operator approved release bundling only).
+- Keeping it does **NOT** authorize additional offline hardening, dedicated Chrome CI, branch-protection
+  changes, or any follow-up. **FG-589 remains withdrawn.** FG-580 code must not be modified or reverted.

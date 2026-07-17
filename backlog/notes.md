@@ -13,6 +13,22 @@ the recovery inventory in the session log). FG-589 is WITHDRAWN, not implemented
 
 ---
 
+**RECOVERY DISPOSITIONS (operator, 2026-07-17 #2) — record-only, no implementation authorized.**
+- **FG-561 remains PAUSED.**
+- **FG-579 is the next functional campaign blocker** — it represents a CURRENT silent workflow-misrun path. It
+  **must not start without a separate explicit operator go.**
+- **FG-581 / FG-582 / FG-583** remain valid planned FG-572 children but are **deferred promotion-path completion
+  work** (not current failures).
+- **Completion of FG-579 must NOT automatically dispatch FG-581, FG-582, FG-583, FG-585, or FG-586.**
+- **FG-585 and FG-586 remain ACTIVE** — orchestration-integrity defects (false completion skipping required
+  phases; malformed authoritative reviewer output erasing a blocking verdict). Do not start now; ACs unchanged.
+- **FG-584 WITHDRAWN** (fanout friction real but does not falsify an accepted AC / no data loss). **FG-589
+  WITHDRAWN** (unapproved offline requirement). Both not implemented.
+- **FG-580 offline code KEPT** as landed (`b6c6542`); offline was not a requirement; keeping it authorizes no
+  further offline/Chrome-CI/branch-protection work.
+
+---
+
 **Last session: FG-561 overnight autonomous run — 2026-07-17. TWO FG-572 children shipped; FG-580 decided (by another session).**
 
 **Shipped + closed this session:**
