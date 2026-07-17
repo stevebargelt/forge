@@ -91,7 +91,7 @@ test("Usage UI renders provider channels, analytics, refresh failures, and succe
   assert.equal(await page.locator(".plan-dial-progress").count(), 2, "unknown API/Bedrock usage must not draw progress rings");
   await page.getByRole("heading", { name: "Token & cache analytics" }).waitFor();
   assert.equal(await page.locator(".usage-headline-card").count(), 3);
-  assert.equal(await page.locator(".usage-headline-value").first().innerText(), "1.3357B");
+  assert.equal(await page.locator(".usage-headline-value").first().innerText(), "1.34B");
 
   refreshFails = true;
   await page.getByRole("button", { name: "refresh" }).click();

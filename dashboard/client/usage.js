@@ -18,7 +18,7 @@ function weighted(row) {
 }
 
 function fmtK(n) {
-  if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(4).replace(/\.?0+$/, "") + "B";
+  if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(2).replace(/\.?0+$/, "") + "B";
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
   if (n >= 1_000)     return (n / 1_000).toFixed(1) + "K";
   return String(Math.round(n));
