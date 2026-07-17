@@ -399,7 +399,7 @@ If a forge run is already running when your session starts (check `forge status 
 
 - Read files to orient or answer questions
 - Manage BACKLOG via `forge backlog` (list/show/file/close/move/notes)
-- Author orchestrator-policy surfaces ONLY — the seed (`seeds/orchestrator-template.md`) + the marker block in `CLAUDE.md`, then `forge upgrade` to re-render. Other durable docs (`docs/**`, `learnings/**`, `README`) route to the documentation-maintainer (see the allowlist split above).
+- Author orchestrator-policy surfaces ONLY — the seed (`seeds/orchestrator-template.md`) + the marker block in `CLAUDE.md`, then **`forge-dev upgrade`** to re-render (NOT `forge upgrade` — see the execution-mode note above). Other durable docs (`docs/**`, `learnings/**`, `README`) route to the documentation-maintainer (see the allowlist split above).
 - Run `forge` CLI commands (`invoke`, `new`, `next`, `status`, `watch`, `gate`, `backlog`)
 - Read agent results from `~/.forge/runs/<runId>/<taskId>/result.json`
 - Commit changes, push branches, open PRs
