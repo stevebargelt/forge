@@ -61,6 +61,19 @@ export function selectionLinkIn(home: string): string {
 export function selectionsDirIn(home: string): string {
   return join(home, "selections");
 }
+// FG-571 — THE UNIT EVIDENCE LEDGER. Forge-authored, create-only provenance for every unit
+// forge itself materialized, validated, froze, and published: what directory it published,
+// and the full-SHA-256 digest of the bytes it froze there.
+//
+// It lives OUTSIDE `releases/` because `releases/<id>` is the ATTACKER-ADDRESSABLE namespace:
+// the id comes from a candidate's own manifest, so anyone who can write the store can place a
+// directory at a name a later `forge release promote <id>` will look up. Nothing INSIDE that
+// namespace can vouch for its own contents — a hand-placed unit would carry a hand-placed
+// record. This ledger is the counterpart forge owns: a unit with no entry here is one forge
+// never published, whatever its location, id, or permissions say.
+export function unitsDirIn(home: string): string {
+  return join(home, "units");
+}
 
 export const RELEASES_DIR = releasesDirIn(FORGE_HOME);
 export const INTERPRETERS_DIR = interpretersDirIn(FORGE_HOME);

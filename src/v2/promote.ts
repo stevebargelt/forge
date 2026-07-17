@@ -41,9 +41,10 @@
 // mkdtemp dir cannot reach the operator's real ~/.forge/current or their live control plane.
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync, type Stats } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
-import { FORGE_HOME, currentLinkIn, interpretersDirIn, previousLinkIn, releasesDirIn, selectionLinkIn, selectionsDirIn } from "../util/paths.js";
+import { basename, isAbsolute, join, resolve, sep } from "node:path";
+import { FORGE_HOME, currentLinkIn, interpretersDirIn, previousLinkIn, releasesDirIn, selectionLinkIn, selectionsDirIn, unitsDirIn } from "../util/paths.js";
 import {
   RELEASE_ENTRY_NAME,
   RELEASE_ENTRY_SOURCE,
@@ -63,6 +64,13 @@ import { isStoredInterpreter, probeInterpreter } from "./runtime-store.js";
  *  guard applies in shell (renderIdentityGuard) — an id that the shim would refuse at exec
  *  time must not be promotable in the first place. */
 const ID_PATTERN = /^[A-Za-z0-9._-]+$/;
+
+/** The id is ALSO a path component — it addresses `releases/<id>` and its ledger entry — so
+ *  the two names every filesystem reserves are refused on top of the shim's charset. `..`
+ *  matches ID_PATTERN perfectly and would address the forge home ITSELF as a release unit. */
+function isPromotableId(id: unknown): id is string {
+  return typeof id === "string" && ID_PATTERN.test(id) && id !== "." && id !== "..";
+}
 
 export type Selection = {
   releaseDir: string;
@@ -362,7 +370,7 @@ export function validateCandidate(dir: string, home: string = FORGE_HOME): Candi
   // exec time. Refusing here means the operator learns at `promote`, with the previous
   // release still selected, instead of at the next `forge` invocation with nothing usable.
   const id: unknown = manifest.id;
-  if (typeof id !== "string" || !ID_PATTERN.test(id)) {
+  if (!isPromotableId(id)) {
     throw new Error(
       `forge release: refusing to promote — this release does not state a usable identity.\n` +
         `  release manifest: ${manifestPath}\n` +
@@ -607,7 +615,7 @@ function readCandidateId(source: string): string {
         `Fix: rebuild with \`forge release build\`, or promote a different release.`,
     );
   }
-  if (typeof id !== "string" || !ID_PATTERN.test(id)) {
+  if (!isPromotableId(id)) {
     throw new Error(
       `forge release: refusing to promote — this release does not state a usable identity.\n` +
         `  release manifest: ${manifestPath}\n` +
@@ -617,6 +625,131 @@ function readCandidateId(source: string): string {
     );
   }
   return id;
+}
+
+/** THE CONTENT BINDING: a full SHA-256 over the unit's ENTIRE tree — every path, every
+ *  regular file's complete bytes, and its executable bit — in one stable order.
+ *
+ *  FULL DIGEST, never truncated, for the same reason the interpreter store's key commits to
+ *  the whole hash: this value is the ONLY thing standing between "these are the bytes forge
+ *  froze" and "these are bytes something else put here", so shortening it trades that claim
+ *  for nothing. The interior file digests are full too — a truncated leaf would let a
+ *  substituted file collide under a full-width root.
+ *
+ *  EVERY file, not a security-critical subset. F3's window is not about `forge-exec` alone:
+ *  `forge-loader.mjs`, `src/cli/index.ts`, and anything the entry lazily loads out of
+ *  `node_modules/` are all exec'd as the machine-wide forge, so a binding that covered only
+ *  the descriptor would prove the one file an attacker has least need to touch.
+ *
+ *  Names AND shape are hashed, not just contents: a bare concatenation of file digests would
+ *  be identical for two trees that renamed a file across each other, and a `D` record for
+ *  every directory means an added or removed empty directory changes the digest too.
+ *
+ *  Symlinks and non-regular entries THROW rather than hash: assertNoSymlinks has already run
+ *  over anything this digests, so reaching one means the tree changed underneath — and a
+ *  digest that silently skipped it would certify a unit around the file that was hiding. */
+function treeDigest(root: string): string {
+  const h = createHash("sha256");
+  const walk = (dir: string, rel: string): void => {
+    for (const ent of readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+      const p = join(dir, ent.name);
+      const r = rel === "" ? ent.name : `${rel}/${ent.name}`;
+      if (ent.isSymbolicLink() || !(ent.isDirectory() || ent.isFile())) {
+        throw new Error(
+          `forge release: refusing to bind this release unit to its contents — it holds an entry that is not a file or a directory.\n` +
+            `  unit:  ${root}\n` +
+            `  entry: ${p}\n` +
+            `A unit carries bytes, never links or devices, and the content binding must cover everything the ` +
+            `unit contains or it would vouch for a tree around the entry it could not describe.`,
+        );
+      }
+      if (ent.isDirectory()) {
+        h.update(`D ${r}\n`);
+        walk(p, r);
+        continue;
+      }
+      h.update(`F ${r} ${lstatSync(p).mode & 0o111 ? "x" : "-"} ${createHash("sha256").update(readFileSync(p)).digest("hex")}\n`);
+    }
+  };
+  walk(root, "");
+  return h.digest("hex");
+}
+
+/** FORGE'S OWN RECORD that it published a unit: which directory, and the digest of the bytes
+ *  it froze there. This is the PROVENANCE the audit says a location cannot supply — store
+ *  residency, pathname equality, release id, existence and permissions are all things a
+ *  hand-placed directory has too, and none of them is evidence that forge made it. */
+type UnitEvidence = { schema: 1; dir: string; tree: string };
+
+/** The ledger entry for a published unit, keyed by its DIRECTORY NAME rather than by the
+ *  manifest's id: the id is a claim the unit makes about itself, and a lookup keyed on it
+ *  would let a unit choose which record vouches for it. Every unit directory forge publishes
+ *  sits directly in `releases/`, so its basename is already unique there. */
+function unitEvidencePath(home: string, unitDirName: string): string {
+  return join(unitsDirIn(home), `${unitDirName}.json`);
+}
+
+/** RECORD a publication — CREATE-ONLY (`wx`) and atomic (write beside, rename over).
+ *
+ *  Create-only is the point: a ledger forge would overwrite is one an attacker can make forge
+ *  overwrite, and re-pointing an existing id's evidence at fresh bytes is precisely how a
+ *  retained release would lose the record of what it actually is. An occupied entry is never
+ *  rewritten — the caller publishes at a fresh name instead. */
+function writeUnitEvidence(home: string, unitDirName: string, ev: UnitEvidence): void {
+  const dir = unitsDirIn(home);
+  mkdirSync(dir, { recursive: true });
+  const tmp = join(dir, `.${unitDirName}.json.writing-${Math.random().toString(36).slice(2, 8)}`);
+  try {
+    writeFileSync(tmp, `${JSON.stringify(ev, null, 2)}\n`, { flag: "wx" });
+    renameSync(tmp, unitEvidencePath(home, unitDirName));
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw e;
+  }
+}
+
+/** Read forge's record for a unit directory, or null when forge has none — which is the
+ *  ordinary answer for a hand-placed directory AND for a unit published by a forge that
+ *  predates the ledger. Both are "cannot vouch", and every caller treats them as such. */
+function readUnitEvidence(home: string, unitDirName: string): UnitEvidence | null {
+  const p = unitEvidencePath(home, unitDirName);
+  if (!existsSync(p)) return null;
+  try {
+    const ev = JSON.parse(readFileSync(p, "utf8")) as UnitEvidence;
+    if (ev?.schema !== 1 || typeof ev.dir !== "string" || typeof ev.tree !== "string") return null;
+    return ev;
+  } catch {
+    return null;
+  }
+}
+
+/** IS the directory at `dir` the exact unit forge published and froze there?
+ *
+ *  THE THREE CLAIMS, and none of them is about location:
+ *   - forge HAS a record for this directory name (a hand-placed unit has none);
+ *   - the record names THIS PHYSICAL directory — realpath, so `releases/<id>` turned into a
+ *     symlink at an attacker's unit resolves somewhere the record does not name and fails
+ *     here rather than being followed; and
+ *   - the bytes ACTUALLY THERE hash to what forge recorded when it froze them.
+ *
+ *  The third is what makes this content-bound rather than another assumption from location:
+ *  the freeze is a chmod, so a unit's owner can thaw and rewrite it, and this is the check
+ *  that notices. */
+function isFrozenPublishedUnit(home: string, dir: string): boolean {
+  const ev = readUnitEvidence(home, basename(dir));
+  if (!ev) return false;
+  let real: string;
+  try {
+    real = realpathSync(dir);
+  } catch {
+    return false;
+  }
+  if (ev.dir !== real) return false;
+  try {
+    return treeDigest(real) === ev.tree;
+  } catch {
+    return false;
+  }
 }
 
 /** MATERIALIZE a release into $FORGE_HOME/releases/<id> as a COMPLETE, VALIDATED, FROZEN
@@ -637,12 +770,27 @@ function readCandidateId(source: string): string {
  *  validating the materialized bytes closes it structurally — what is validated, frozen, and
  *  renamed is one directory, and nothing else is ever a candidate for selection.
  *
- *  A release ALREADY published at its store path is re-validated as the complete unit it is
- *  and returned. That is not the old shortcut: the old one skipped validation; this one
- *  performs the full gate — and it validates and selects THE SAME directory, which is the
- *  property that matters. Nothing is copied because a published unit is forge's own immutable
- *  artifact, materialized and frozen by the promotion that created it; re-promoting it is a
- *  pointer operation, and re-copying it could only produce a byte-identical twin.
+ *  AN OCCUPIED ID IS NOT A REASON TO TRUST WHAT OCCUPIES IT, AND NOT A REASON TO TOUCH IT.
+ *  Two shortcuts used to live here, and both were the same defect wearing different clothes:
+ *  `realpath(target) === realpath(source)` skipped materialization entirely (so nothing ever
+ *  ran the no-symlink gate over the bytes about to be selected), and `existsSync(target)`
+ *  DELETED the freshly validated staged unit and selected whatever already sat at the id
+ *  instead. Store residency, pathname equality, the id, existence, and permissions are not
+ *  provenance — a directory hand-placed under `releases/` has every one of them. So this
+ *  materializes, ALWAYS, and selects only bytes it can vouch for:
+ *
+ *   - the id is FREE → publish the fresh frozen unit there and record it (end-state 1);
+ *   - the id is occupied by a unit forge's OWN LEDGER proves it published and froze, whose
+ *     bytes still hash to what was recorded, and which is byte-for-byte the unit just
+ *     materialized → select that unit, discard the twin (end-state 2). Not a shortcut: the
+ *     candidate was still fully materialized and validated, and the reuse rests on durable
+ *     content-bound evidence rather than on the id being taken;
+ *   - anything else — no record, a record naming somewhere else, or bytes that no longer
+ *     hash to it → publish the fresh frozen unit at a FRESH immutable path and select THAT.
+ *
+ *  The incumbent is NEVER overwritten, repaired, renamed, thawed, or deleted in any of the
+ *  three: a retained release that loses its bytes is fatal to every process anchored to it
+ *  (T9), and an occupied id is not permission to do that to whatever is there.
  *
  *  Staging → validate → freeze → rename(2) into the keyed path: an interrupted install leaves
  *  only an `.installing-*` dir, which is not an id any pointer names and which promotion never
@@ -651,21 +799,55 @@ function readCandidateId(source: string): string {
  *  The copy goes through `tar`, not cpSync: a built release is FROZEN (write bits cleared on
  *  every file AND directory, FG-569 Finding 3), and a recursive copy that recreated those
  *  directories mode-first would be unable to write their contents. */
+/** Does the operator's candidate name a path in THIS home's store namespace? Lexical, on the
+ *  path as given — the question is whether forge's own store is what was named, and a realpath
+ *  would answer a different one (a `releases/<id>` symlink pointing at /tmp/attacker resolves
+ *  outside the store while being addressed squarely inside it). */
+function isInsideStore(home: string, dir: string): boolean {
+  const releases = resolve(releasesDirIn(home));
+  return dir === releases || dir.startsWith(`${releases}${sep}`);
+}
+
 export function installRelease(opts: InstallReleaseOptions): Candidate {
   const home = opts.home ?? FORGE_HOME;
   const source = resolve(opts.dir);
-  const claimedId = readCandidateId(source);
 
+  // THE CANDIDATE IS ADDRESSED INSIDE FORGE'S OWN STORE — `forge release promote <id>`, or a
+  // path written straight at `releases/`. There is nothing to materialize FROM: the store is
+  // not a place operators build releases, it is the place forge publishes them, so the only
+  // honest reading of this request is "select the unit you published there". Forge answers it
+  // from its own durable record or not at all (end-state 2).
+  //
+  // MATERIALIZING IT INSTEAD WOULD BE THE LAUNDERING VERSION of the same bug: the id namespace
+  // is addressed by a value out of a candidate's own manifest, so anyone who can write the
+  // store can plant `releases/<id>` — or point it at their own unit — and wait for the
+  // operator to type that id. Copying those bytes into a unit forge freezes and vouches for
+  // would publish the attacker's release as forge's own. A store path is not provenance, and
+  // neither is the fact that the bytes there validate.
+  if (isInsideStore(home, source)) {
+    if (!isFrozenPublishedUnit(home, source)) {
+      throw new Error(
+        `forge release: refusing to promote — forge has no record of publishing a release here.\n` +
+          `  candidate:      ${source}\n` +
+          `  forge's record: ${unitEvidencePath(home, basename(source))}\n` +
+          `  store root:     ${releasesDirIn(home)}\n` +
+          `This path is inside forge's own release store, so promoting it can only mean "select the unit ` +
+          `forge published there" — the store is where forge publishes releases, not somewhere releases are ` +
+          `built. Forge holds no record that it materialized, validated, froze, and published a unit at this ` +
+          `exact directory, the record names a different one, or the bytes no longer match what it froze. So ` +
+          `this is a directory something else placed in the store, a unit published by a forge too old to ` +
+          `record one, or one that has been modified since. Being in the store, carrying a release id, and ` +
+          `validating are not evidence that forge made it.\n` +
+          `Fix: promote the release directory itself — \`forge release promote <dir>\` — and forge will ` +
+          `materialize, validate, freeze, and record it.`,
+      );
+    }
+    return validateUnit(source, home);
+  }
+
+  const claimedId = readCandidateId(source);
   const releases = releasesDirIn(home);
   const target = join(releases, claimedId);
-
-  // THE CANDIDATE IS ITSELF A PUBLISHED UNIT in this store (promoting by id, or re-promoting
-  // the store path). There is nothing to materialize: forge already materialized, validated,
-  // froze, and atomically published these exact bytes, and copying them could only produce a
-  // byte-identical twin. Validate THAT EXACT DIRECTORY, in full, and select the thing that was
-  // validated — the same shape rollback uses, and the same invariant: one directory validated,
-  // that same directory selected.
-  if (existsSync(target) && realpathSync(target) === realpathSync(source)) return validateUnit(target, home);
 
   mkdirSync(releases, { recursive: true });
   const staging = join(releases, `.installing-${claimedId}-${Math.random().toString(36).slice(2, 8)}`);
@@ -702,22 +884,6 @@ export function installRelease(opts: InstallReleaseOptions): Candidate {
       );
     }
 
-    // The store already holds this identity, and a release unit is IMMUTABLE — so the unit for
-    // identity X is the one already published, and the staged copy is discarded rather than
-    // overwriting it.
-    //
-    // The candidate was still MATERIALIZED AND FULLY VALIDATED first, which is the point: an
-    // invalid candidate is refused rather than waved through on the strength of some other
-    // directory happening to be valid. Forge does not accept bytes it cannot vouch for and then
-    // quietly select something else — the operator asked to promote a release, and an
-    // unpromotable one is an error, not a no-op. What gets SELECTED is the published unit,
-    // validated as the exact directory it is.
-    if (existsSync(target)) {
-      spawnSync("/bin/sh", ["-c", 'chmod -R u+w "$1" 2>/dev/null; exit 0', "sh", staging]);
-      rmSync(staging, { recursive: true, force: true });
-      return validateUnit(target, home);
-    }
-
     // GENERATE the canonical, forge-authored execution descriptor INSIDE the staged unit,
     // AFTER validation — so it can only ever carry an interpreter that was proven to run, to
     // agree with the manifest's ABI, and to live in the immutable store.
@@ -728,14 +894,42 @@ export function installRelease(opts: InstallReleaseOptions): Candidate {
     // them, under exactly the rules the shim will apply.
     const unit = validateUnit(staging, home);
 
-    // FREEZE the complete unit, THEN publish it atomically. The bytes that were validated are
-    // the bytes that are frozen are the bytes that are renamed into place — there is no
-    // instant at which the published path holds anything that was not proven, and no window
-    // between validation and publication for the unit to change.
+    // FREEZE the complete unit, THEN bind it to its contents. The digest is taken over the
+    // bytes that were just validated and frozen — the same directory, in the same call — so
+    // what the ledger records below is what this promotion actually proved.
     freezeReleaseFiles(staging);
+    const tree = treeDigest(staging);
+
+    // REUSE, on durable content-bound evidence and nothing else (end-state 2). All three
+    // claims must hold: forge's own ledger says it published and froze a unit at this exact
+    // physical directory, the bytes there STILL hash to what it recorded (the freeze is a
+    // chmod, so this is what notices a thawed-and-rewritten unit), and that digest is the one
+    // this promotion just materialized and validated. Then the incumbent IS this unit, and
+    // selecting it selects the bytes that were validated. The staged twin is forge's own
+    // scratch and is byte-identical by the digest above, so discarding it discards nothing.
+    if (isFrozenPublishedUnit(home, target) && readUnitEvidence(home, claimedId)?.tree === tree) {
+      spawnSync("/bin/sh", ["-c", 'chmod -R u+w "$1" 2>/dev/null; exit 0', "sh", staging]);
+      rmSync(staging, { recursive: true, force: true });
+      return validateUnit(target, home);
+    }
+
+    // PUBLISH the freshly frozen unit and select THAT (end-state 1). It goes to the id when
+    // the id is free and forge holds no record there; otherwise to a FRESH immutable path,
+    // because the incumbent is a unit forge cannot vouch for and MUST NOT touch — it may be
+    // retained bytes some live process is anchored to (T9), and it is never this promotion's
+    // to overwrite, repair, or delete. `.unit-` is the same unaddressable-by-a-pointer shape
+    // `.installing-` uses.
+    const free = !existsSync(target) && !readUnitEvidence(home, claimedId);
+    const dir = free ? target : join(releases, `.unit-${claimedId}-${Math.random().toString(36).slice(2, 8)}`);
+
     opts.onBeforeCommit?.();
-    renameSync(staging, target);
-    return { ...unit, releaseDir: target };
+    renameSync(staging, dir);
+    // AFTER the rename, never before: evidence that named a directory the interrupted rename
+    // never created would vouch for a path forge did not publish. An interrupt in the other
+    // order leaves a unit with no record — which every reader treats as "cannot vouch", so
+    // the next promotion publishes fresh rather than trusting it.
+    writeUnitEvidence(home, basename(dir), { schema: 1, dir: realpathSync(dir), tree });
+    return { ...unit, releaseDir: dir };
   } catch (e) {
     // A frozen tree's read-only directories defeat a recursive unlink; force the write bit
     // back on the staging tree (never on a published release) so a failed install leaves
@@ -872,10 +1066,43 @@ export function rollback(opts: RollbackOptions = {}): PromoteResult {
     );
   }
 
+  // ROLLBACK IS THE HARD CASE, AND THIS IS THE HONEST ANSWER TO IT. There is no source to
+  // materialize from: rollback selects a unit some earlier promotion published, so end-state
+  // (1) is not available to it and it runs on end-state (2) — durable content-bound evidence,
+  // then the complete unit gate.
+  //
+  // WHY EVIDENCE AND NOT A CHECK. `previous` is a pointer, and a pointer is not provenance:
+  // it can be made to resolve to a hand-placed, writable directory that validates perfectly.
+  // Validating that directory and then swapping to it is the F3 defect — the bytes are free to
+  // change between the two, so what gets exec'd never passed anything. Re-validating harder,
+  // or later, does not close that: it is the same point-in-time claim about mutable bytes.
+  // What closes it is refusing to select bytes forge cannot prove are its own: the ledger says
+  // forge published and froze THIS physical directory with THESE contents, and the contents
+  // still hash to it. A hand-placed unit has no such record and cannot acquire one — the
+  // ledger lives outside the id namespace it would have to write to — so it is refused BY NAME
+  // here rather than validated and selected.
+  if (!isFrozenPublishedUnit(home, previous.releaseDir)) {
+    throw new Error(
+      `forge release: refusing to roll back — forge cannot vouch for the bytes the previous release points at.\n` +
+        `  previous pointer: ${previousLinkIn(home)}\n` +
+        `  it resolves to:   ${previous.releaseDir}\n` +
+        `  forge's record:   ${unitEvidencePath(home, basename(previous.releaseDir))}\n` +
+        `Rollback has no candidate to materialize from — it selects a unit an earlier promotion published — ` +
+        `so it selects one ONLY on forge's own durable record that it materialized, validated, froze, and ` +
+        `published those exact bytes there. There is no such record for this directory, it names a different ` +
+        `one, or the bytes no longer match it: the unit was published by a forge too old to record one, it was ` +
+        `hand-placed rather than promoted, or it has been modified since it was frozen. A release's location, ` +
+        `its id, and the fact that it validates are not evidence that forge made it, and rolling back onto ` +
+        `bytes forge cannot vouch for would exec them as the machine-wide forge.\n` +
+        `Fix: promote the release you want explicitly — \`forge release promote <dir|id>\` — which materializes ` +
+        `it, validates it, freezes it, and records what it published.`,
+    );
+  }
+
   // Validate the target to the point of RUNNING it: "the COMPLETE prior release" is a claim
   // about right now, not about when it was promoted. The full unit gate, descriptor included
   // — a rollback selects an already-published unit, so it validates and selects THE SAME
-  // directory and nothing is materialized.
+  // directory, the one the evidence above just bound to its contents.
   const target = validateUnit(previous.releaseDir, home);
   const before = readSelection(home);
 

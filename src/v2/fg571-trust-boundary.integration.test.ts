@@ -637,8 +637,10 @@ test("FINDING 6 (EXECUTED): the published unit is FROZEN before publication — 
 test("FINDING 6 (EXECUTED): re-promoting an installed id validates and selects THE SAME directory — never one directory validated and another selected", () => {
   // The old `source === target` shortcut returned the store path and skipped re-validation
   // entirely, leaving a clean validate-to-swap window. Re-promotion is still a pointer
-  // operation — a published unit is forge's own immutable artifact — but it now runs the full
-  // unit gate on the exact directory it then selects.
+  // operation, but what makes it one is no longer the pathnames matching: forge selects an
+  // already-published unit only on its OWN durable record that it materialized, validated,
+  // froze, and published those exact bytes there, and then runs the full unit gate on that
+  // same directory. Store residency and pathname equality are not provenance.
   const { h, good } = tbHome("repromote");
   try {
     const first = promote({ home: h, candidate: good.releaseDir });
@@ -650,10 +652,15 @@ test("FINDING 6 (EXECUTED): re-promoting an installed id validates and selects T
     assert.equal(realpathSync(currentLinkIn(h)), realpathSync(unit), "and `current` points at it");
 
     // The gate genuinely runs on it: corrupt the unit's descriptor and re-promotion refuses
-    // rather than selecting bytes it never proved.
+    // rather than selecting bytes it never proved. The CONTENT BINDING is what names the
+    // refusal — thawing and rewriting a published unit makes it stop hashing to what forge
+    // froze, which is caught before the descriptor is ever parsed. That is the stronger
+    // reading of the same property: the unit is refused for no longer being forge's own, not
+    // merely for the rewritten bytes happening to be malformed. A rewrite that produced a
+    // perfectly well-formed descriptor would be refused here too.
     thawReleaseTree(unit);
     writeFileSync(join(unit, RELEASE_EXEC_NAME), "interpreter /tmp/attacker-node\n");
-    assert.throws(() => promote({ home: h, candidate: good.manifest.id }), /execution descriptor is malformed/i, "a corrupt published unit is refused, not selected");
+    assert.throws(() => promote({ home: h, candidate: good.manifest.id }), /no record of publishing a release here/i, "a corrupt published unit is refused, not selected");
   } finally {
     rmTree(h);
   }
