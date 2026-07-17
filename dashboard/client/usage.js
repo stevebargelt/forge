@@ -3,6 +3,7 @@
 import { h } from "https://esm.sh/preact@10.24.0";
 import { useState } from "https://esm.sh/preact@10.24.0/hooks";
 import htm from "https://esm.sh/htm@3.1.1";
+import { UsageLimits } from "./usage-limits.js";
 
 const html = htm.bind(h);
 
@@ -28,7 +29,7 @@ function shortDay(iso) {
   return p.length === 3 ? `${+p[1]}/${+p[2]}` : String(iso);
 }
 
-export function UsageView({ rollup, timeSeries, modelMix, groupBy, onGroupByChange, since, onSinceChange }) {
+export function UsageView({ rollup, timeSeries, modelMix, groupBy, onGroupByChange, since, onSinceChange, planUsage, planUsageLoading, planUsageRefreshing, onRefreshPlanUsage }) {
   const [showFormula, setShowFormula] = useState(false);
   const now = Date.now();
   const days = parseInt(since);
@@ -75,6 +76,16 @@ export function UsageView({ rollup, timeSeries, modelMix, groupBy, onGroupByChan
 
   return html`
     <section class="usage-section">
+      <${UsageLimits}
+        data=${planUsage}
+        loading=${planUsageLoading}
+        refreshing=${planUsageRefreshing}
+        onRefresh=${onRefreshPlanUsage}
+      />
+      <div class="usage-analytics-heading">
+        <div class="plan-usage-kicker">forge activity</div>
+        <h2>Token & cache analytics</h2>
+      </div>
       <div class="usage-headline">
         <div class="usage-headline-card">
           <div class="usage-headline-label">weighted tokens (${since})</div>

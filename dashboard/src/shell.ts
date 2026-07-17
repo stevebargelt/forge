@@ -382,6 +382,187 @@ section.projects-grid {
 /* Usage view */
 section.usage-section { margin-top: 20px; }
 
+.plan-usage { margin-bottom: 34px; }
+.plan-usage-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+.plan-usage-heading h2,
+.usage-analytics-heading h2 {
+  margin: 0;
+  color: var(--fg);
+  font-size: 18px;
+  line-height: 1.25;
+  letter-spacing: -0.015em;
+}
+.plan-usage-kicker {
+  color: var(--fg-faint);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+}
+.plan-usage-actions { display: flex; align-items: center; gap: 12px; }
+.plan-usage-sync {
+  color: var(--fg-faint);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.plan-refresh {
+  align-items: center;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg-dim);
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  font-size: 10px;
+  gap: 5px;
+  letter-spacing: 0.06em;
+  padding: 6px 9px;
+  text-transform: uppercase;
+}
+.plan-refresh:hover { background: var(--bg-elev-2); color: var(--fg); }
+.plan-refresh:disabled { cursor: default; opacity: 0.55; }
+.plan-refresh-icon { display: inline-block; font-size: 14px; line-height: 10px; }
+.plan-refresh-icon.spinning { animation: plan-spin 0.8s linear infinite; }
+@keyframes plan-spin { to { transform: rotate(360deg); } }
+
+.plan-services {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.plan-service {
+  background-image: radial-gradient(70% 150% at 0 50%, color-mix(in srgb, var(--service-color) 8%, transparent), transparent 65%);
+  display: grid;
+  gap: 28px;
+  grid-template-columns: minmax(230px, 0.8fr) minmax(300px, 1.7fr);
+  padding: 20px 22px;
+}
+.plan-service + .plan-service { border-top: 1px solid var(--border); }
+.plan-service-identity { align-items: center; display: flex; gap: 15px; min-width: 0; }
+.plan-dial {
+  flex: 0 0 76px;
+  height: 76px;
+  position: relative;
+  width: 76px;
+}
+.plan-dial-ring { display: block; transform: rotate(-90deg); }
+.plan-dial-track,
+.plan-dial-progress { fill: none; }
+.plan-dial-track { stroke: rgba(255, 255, 255, 0.06); }
+.plan-dial-progress {
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--service-color) 53%, transparent));
+  stroke-linecap: round;
+  transition: stroke-dashoffset 600ms;
+}
+.plan-dial-inner {
+  bottom: 0;
+  align-items: center;
+  color: var(--fg);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  left: 0;
+  position: absolute;
+  right: 0;
+  top: 0;
+}
+.plan-dial-gauge {
+  color: var(--service-color);
+  fill: none;
+  height: 12px;
+  margin-bottom: 2px;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+  width: 12px;
+}
+.plan-dial-value {
+  color: var(--service-color);
+  font-family: ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 14px;
+}
+.plan-service-copy { min-width: 0; }
+.plan-service-name-row { align-items: center; display: flex; gap: 8px; }
+.plan-service-name-row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plan-service-mark {
+  align-items: center;
+  background: color-mix(in srgb, var(--service-color) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--service-color) 45%, transparent);
+  border-radius: 5px;
+  color: var(--service-color);
+  display: inline-flex;
+  flex: 0 0 25px;
+  font-size: 11px;
+  font-weight: 700;
+  height: 25px;
+  justify-content: center;
+  overflow: hidden;
+}
+.plan-service-logo { display: block; height: 17px; object-fit: contain; width: 17px; }
+.plan-service-logo-invert { filter: invert(1); }
+.plan-service-plan { color: var(--fg-dim); font-size: 11px; margin: 7px 0 8px 33px; }
+.plan-service-meta { align-items: center; color: var(--fg-faint); display: flex; font-size: 9px; gap: 8px; margin-left: 33px; text-transform: uppercase; }
+.plan-status { border: 1px solid var(--border); border-radius: 3px; padding: 1px 5px; }
+.plan-status-live { background: rgba(74, 222, 128, 0.1); border-color: rgba(74, 222, 128, 0.3); color: var(--ok); }
+.plan-status-stale,
+.plan-status-not_configured { background: rgba(250, 204, 21, 0.1); border-color: rgba(250, 204, 21, 0.3); color: var(--warn); }
+.plan-status-error { background: rgba(248, 113, 113, 0.1); border-color: rgba(248, 113, 113, 0.3); color: var(--err); }
+.plan-status-not_applicable,
+.plan-status-unavailable { color: var(--fg-faint); }
+.plan-window-list { display: flex; flex-direction: column; gap: 13px; justify-content: center; min-width: 0; }
+.plan-window-top { align-items: baseline; display: flex; gap: 12px; justify-content: space-between; margin-bottom: 6px; }
+.plan-window-label { align-items: baseline; display: flex; gap: 9px; min-width: 0; }
+.plan-window-label span { color: var(--fg-dim); font-size: 10px; letter-spacing: 0.08em; overflow: hidden; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
+.plan-window-label strong { color: var(--fg); font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
+.plan-window-detail { color: var(--fg-faint); font-size: 10px; white-space: nowrap; }
+.plan-pace { color: var(--service-color); margin-left: 8px; }
+.plan-window-track { background: var(--bg-elev-2); border-radius: 4px; height: 8px; overflow: hidden; position: relative; }
+.plan-window-fill {
+  background: linear-gradient(90deg, color-mix(in srgb, var(--service-color) 65%, transparent), var(--service-color));
+  border-radius: 4px;
+  box-shadow: 0 0 12px color-mix(in srgb, var(--service-color) 45%, transparent);
+  height: 100%;
+  min-width: 2px;
+  position: absolute;
+}
+.plan-window-track i { border-left: 1px solid rgba(255,255,255,0.055); bottom: 0; position: absolute; top: 0; }
+.plan-window-track i:nth-of-type(1) { left: 25%; }
+.plan-window-track i:nth-of-type(2) { left: 50%; }
+.plan-window-track i:nth-of-type(3) { left: 75%; }
+.plan-service-note { color: var(--fg-dim); font-size: 12px; line-height: 1.5; }
+.plan-service-note-inline { color: var(--warn); font-size: 10px; }
+.plan-observed { color: var(--fg-faint); font-size: 9px; letter-spacing: 0.04em; text-align: right; text-transform: uppercase; }
+.plan-empty { color: var(--fg-faint); padding: 24px; }
+.plan-usage-footnote { color: var(--fg-faint); font-size: 10px; line-height: 1.5; margin: 8px 2px 0; }
+.usage-analytics-heading { border-top: 1px solid var(--border); margin-bottom: 14px; padding-top: 24px; }
+
+@media (max-width: 720px) {
+  .plan-service { grid-template-columns: 1fr; gap: 18px; }
+  .plan-window-detail { white-space: normal; text-align: right; }
+}
+@media (max-width: 520px) {
+  .plan-usage-heading { align-items: flex-start; flex-direction: column; }
+  .plan-usage-actions { justify-content: space-between; width: 100%; }
+  .plan-service { padding: 17px; }
+  .plan-window-top { align-items: flex-start; flex-direction: column; gap: 3px; }
+  .plan-window-detail { text-align: left; }
+}
+
 .usage-headline {
   display: grid;
   grid-template-columns: repeat(2, 1fr);

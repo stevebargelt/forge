@@ -33,6 +33,9 @@ function App() {
   const [usageRollup, setUsageRollup] = useState([]);
   const [usageTimeSeries, setUsageTimeSeries] = useState([]);
   const [usageModelMix, setUsageModelMix] = useState([]);
+  const [planUsage, setPlanUsage] = useState(null);
+  const [planUsageLoading, setPlanUsageLoading] = useState(false);
+  const [planUsageRefreshing, setPlanUsageRefreshing] = useState(false);
   const [usageGroupBy, setUsageGroupBy] = useState("project");
   const [usageSince, setUsageSince] = useState("30d");
   const [ops, setOps] = useState(null);
@@ -75,21 +78,39 @@ function App() {
   }, [view, projectFilter, projects.length]);
 
   const pollUsage = useCallback(async () => {
+    setPlanUsageLoading(true);
     try {
       const tsDays = parseInt(usageSince) * 2;
-      const [rollupRes, tsRes, mixRes] = await Promise.all([
+      const [rollupRes, tsRes, mixRes, limitsRes] = await Promise.all([
         fetch(`/api/usage?groupBy=${usageGroupBy}&since=${usageSince}`),
         fetch(`/api/usage/timeseries?since=${tsDays}d`),
         fetch(`/api/usage/model-mix?groupBy=${usageGroupBy}&since=${usageSince}`),
+        fetch("/api/usage/limits"),
       ]);
       if (rollupRes.ok) setUsageRollup(await rollupRes.json());
       if (tsRes.ok) setUsageTimeSeries(await tsRes.json());
       if (mixRes.ok) setUsageModelMix(await mixRes.json());
+      if (limitsRes.ok) setPlanUsage(await limitsRes.json());
       setNow(Date.now());
     } catch (e) {
       setError(String(e));
+    } finally {
+      setPlanUsageLoading(false);
     }
   }, [usageGroupBy, usageSince]);
+
+  const refreshPlanUsage = useCallback(async () => {
+    setPlanUsageRefreshing(true);
+    try {
+      const res = await fetch("/api/usage/limits?refresh=1");
+      if (res.ok) setPlanUsage(await res.json());
+      else setError(`Plan usage refresh failed (${res.status})`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setPlanUsageRefreshing(false);
+    }
+  }, []);
 
   useEffect(() => {
     if (view === "usage") return;
@@ -246,6 +267,10 @@ function App() {
             onGroupByChange=${setUsageGroupBy}
             since=${usageSince}
             onSinceChange=${setUsageSince}
+            planUsage=${planUsage}
+            planUsageLoading=${planUsageLoading}
+            planUsageRefreshing=${planUsageRefreshing}
+            onRefreshPlanUsage=${refreshPlanUsage}
           />`
         : html`
           ${projectFilter ? html`
