@@ -10,6 +10,13 @@ closed_commit: 97363ca
 
 **Parent:** FG-553 (Slice 1) · **Epic:** FG-561 · **Plan:** `docs/plans/fg553-slice1-architecture.md` @ `4d986ec` (Child 0)
 
+> **Superseded implementation note (FG-569):** this record describes the FG-567-era `bin/forge`, a Node
+> shebang wrapper that spawned tsx and re-raised the child's signal (`bin/forge:11`). FG-569 (Child 2) later
+> replaced `bin/forge` with a `#!/bin/sh` entry that `exec`s node ONCE with tsx in-process — a single process,
+> no spawned child, so there is no child signal to re-raise; a signal reaches that one process directly. The
+> signal-fidelity **guarantee** below still holds (the FG-567 guard was rewritten for the exec form and stays
+> mutation-sensitive); only the spawn/re-raise **mechanism** described here is historical.
+
 **PREREQUISITE for every other FG-553 child.** A killed child that reads as success (or a signal laundered to
 a number) silently corrupts the executed acceptance evidence of every later child — a promotion/ABI/F35 test
 that kills a process and trusts `forge`'s disposition would misread it. This lands first; the others stay

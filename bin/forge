@@ -1,20 +1,49 @@
-#!/usr/bin/env node
-import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+#!/bin/sh
+# FG-569 — exec-not-spawn. The load-bearing move of the release architecture.
+#
+# The OLD bin/forge was `#!/usr/bin/env node` and `spawn`ed node_modules/.bin/tsx
+# (itself `#!/usr/bin/env node`). So the kernel re-entered PATH resolution for the
+# child, and the process that actually loaded better-sqlite3 was a PATH-resolved
+# GRANDCHILD — not the process forge started. That made R1 name the wrong runtime
+# and left forge broken under a node-free PATH (F29). Pinning only the outer
+# shebang would have looked like a fix and still failed: the child re-resolves.
+#
+# Now: this /bin/sh `exec`s node ONCE, with tsx loaded IN-PROCESS via --import.
+# Exactly one process exists, and it is the one that loads the native binding —
+# its `process.execPath` IS the control runtime (R1), self-evidencing.
+#
+# forge-loader.mjs resolves tsx relative to its own location, so this works from
+# any cwd. bin/forge stays on PATH node (this is the live dev/control entry); the
+# absolute-interpreter pin lives in the built RELEASE entry (see forge release).
+#
+# MUST resolve $0 through symlinks first: the machine-wide `forge` is installed by
+# npm-link as a SYMLINK on PATH (e.g. ~/.nvm/.../bin/forge → this file). $0 is then
+# the SYMLINK's path, so $here/../src/cli/index.ts would resolve NEXT TO THE SYMLINK
+# — not the repo — and node dies with ERR_MODULE_NOT_FOUND. Canonicalize the chain
+# to the real file (a POSIX readlink loop) before deriving the source root. readlink
+# runs ONLY when $0 is actually a symlink, so a direct invocation stays PATH-free.
+# Plain one-arg readlink (no -f, no --, both GNU-only) is the portable form; a
+# leading-dash path is disarmed with a ./ prefix instead of the GNU-only --.
 
-const here = dirname(fileURLToPath(import.meta.url));
-const entry = resolve(here, "..", "src", "cli", "index.ts");
-const tsx = resolve(here, "..", "node_modules", ".bin", "tsx");
+# FG-571 (F32): this is a LIVE-SOURCE entry — it has no release manifest, so its release
+# identity is NULL, the honest answer under FG-569's "not recorded, never manufactured"
+# rule. Unset the ambient carrier so a caller-supplied FORGE_RELEASE_ID cannot survive to
+# be recorded as this process's provenance: identity comes from a release manifest or it
+# is null, never from the environment. (bin/forge-dev is the named live-source entry the
+# FG-571 stable/dev split introduces; this file keeps the same rule.)
+unset FORGE_RELEASE_ID
 
-const child = spawn(tsx, [entry, ...process.argv.slice(2)], { stdio: "inherit" });
-child.on("exit", (code, signal) => {
-  // Re-raise the child's OWN signal so a direct observer still sees `signal`, not a
-  // numeric stand-in. `process.exit(128)` would erase the OS-signal evidence, and
-  // `code ?? 0` reported a SIGKILLed control plane as success.
-  if (signal) {
-    process.kill(process.pid, signal);
-    return;
-  }
-  process.exit(code ?? 0);
-});
+p=$0
+case "$p" in */*) ;; *) p=$(command -v "$p") ;; esac
+while [ -L "$p" ]; do
+  case "$p" in -*) t=$(readlink "./$p") ;; *) t=$(readlink "$p") ;; esac
+  case "$t" in /*) p=$t ;; *) p=${p%/*}/$t ;; esac
+done
+case "$p" in */*) d=${p%/*} ;; *) d=. ;; esac
+# POSIX gives the `cd` builtin no `--` operand separator, so a strict /bin/sh (dash)
+# reads `cd -- "$d"` as a cd to a directory literally named `--` and every direct
+# invocation fails before node is exec'd. Disarm a leading-dash dir with a ./ prefix
+# instead — the SAME POSIX-safe idiom the generated release entry uses (renderEntry).
+case $d in -*) d=./$d ;; esac
+here=$(CDPATH= cd "$d" && pwd)
+exec node --import "$here/forge-loader.mjs" "$here/../src/cli/index.ts" "$@"

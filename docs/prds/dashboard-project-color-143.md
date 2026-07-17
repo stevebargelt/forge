@@ -1,5 +1,11 @@
 # SPEC — Dashboard per-project label + color (#143)
 
+> ⚠️ **STATUS (2026-07-16): every `forge dashboard start` invocation below is SUPERSEDED by FG-571.**
+> They predate the stable/dev split. Stable `forge` refuses `dashboard` in release mode (separate workspace,
+> not bundled into a release; deferred to FG-572). Read them as `./bin/forge-dev dashboard start` from a
+> source checkout. **The colour-resolution design this PRD specifies is unaffected and stands.**
+
+
 **Status:** draft, awaiting confirmation
 **Backlog linkage:** closes #143. Composite with #144 (iTerm2 background tint — same color source, deferred research).
 
@@ -15,6 +21,12 @@ After this spec lands:
 - Server-side cache by `projectDir` so the `.vscode` lookup runs at most once per project per dashboard process.
 
 ## Out of scope (deferred)
+
+> **SUPERSEDED IN PART by FG-571 (2026-07-16).** The `forge dashboard start` invocations below predate the
+> stable/dev split. Stable `forge` refuses `dashboard` in release mode (the dashboard is a separate workspace,
+> not bundled into a release; deferred to FG-572). Read them as `./bin/forge-dev dashboard start` from a
+> source checkout. The color-resolution design this PRD specifies is unaffected and stands.
+
 
 - **Project filter UI** (chip row / dropdown to "show only this project"). Worth doing later if label+color alone isn't enough; for now the scan affordance is the win.
 - **Reading other `.vscode` values** (e.g. `titleBar.activeForeground` for chip text color). The dashboard chooses its own text color for legibility against the project color. Just background source.

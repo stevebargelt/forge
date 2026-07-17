@@ -2,20 +2,29 @@
 
 Use this when getting forge running on a new or fresh work machine. The goal is a host where `forge setup` reports no blocking failures for the profiles you actually use.
 
-**Prerequisites:** Docker running, Node 22+ (Node 24 LTS recommended — see `.nvmrc`), Git.
+**Prerequisites:** Docker running, a Node on ABI 137 — `nvm use` in the repo root installs the pin from `.nvmrc` (currently 24), Git.
+
+> The requirement is a matching ABI, not a floor and not one exact Node version. Forge's better-sqlite3 binding is compiled for one ABI (137) and loads under that ABI only, so a mismatched Node — **older or newer** — is refused at startup with a named message naming the ABI it found and the one it needs. The preflight checks the ABI, not the version string, so any Node on ABI 137 starts; the `.nvmrc` pin is the tested and supported way to get one. (`package.json` engines `^24` tracks `.nvmrc` and flags this earlier, at install time.) Run `nvm use` before the steps below; if forge refuses later, that's the fix.
 
 ---
 
-## 1. Clone and link
+## 1. Clone, then build and promote a release
 
 ```bash
 git clone <your-forge-repo-url> ~/code/forge
 cd ~/code/forge
 npm install
-npm link                    # puts `forge` on $PATH
+
+./bin/forge-dev release build --out ~/forge-releases/r1        # --out must not exist, outside the checkout
+./bin/forge-dev release promote ~/forge-releases/r1            # atomic; `forge release rollback` reverses it
+./bin/forge-dev release install-shim --prefix /usr/local/bin   # once; any directory on your $PATH
 ```
 
-Verify: `forge --help` lists the commands.
+The machine-wide `forge` is a promoted, immutable release run by its own pinned interpreter — not the checkout. `./bin/forge-dev` is the live-source entry, used here to bootstrap because no stable `forge` exists yet on a fresh machine; keep using it when you're iterating on forge itself. `npm link` is not the install path: it would put a live-checkout `forge` on `$PATH` and bypass the release split entirely.
+
+The build refuses a dirty checkout — it binds the release to a commit, so commit or stash first.
+
+Verify: `forge --help` lists the commands; `forge release current` names the release you promoted.
 
 ## 2. Install seeds and (optionally) build the agent image
 

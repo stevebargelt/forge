@@ -24,8 +24,46 @@ emerged during implementation and are now part of Child 1, beyond the original p
   a pre-FG-568 process resuming after convergence fails its legacy inserts ATOMICALLY (lost captures, no
   partial write, no corruption — host-verified); the forward gate cannot constrain already-installed ungated
   binaries (HONEST LIMIT preserved).
-Children **2–5 remain planned**; the analysis, decisions (OQ-6/BD-15/T9), Appendix A probes, and mutation
-reasoning below are unchanged.
+**Status update (2026-07-15):** **Child 2 (release closure + manifest + R1/R2 provenance) has LANDED as FG-569.**
+It shipped the load-bearing **exec-not-spawn** entry: `bin/forge` is now a `#!/bin/sh` shim that resolves `$0`
+**through symlinks** (the machine-wide `forge` is an npm-link SYMLINK on PATH) and `exec`s node ONCE with tsx
+loaded in-process via `bin/forge-loader.mjs` (`exec node --import …/forge-loader.mjs …/src/cli/index.ts "$@"`).
+**Exactly one process exists, and its `process.execPath` IS the control runtime (R1), self-evidencing** — there
+is no spawned `tsx` grandchild. This **supersedes Child 0's spawn-based signal re-raise** (§2 C3): with no child
+there is nothing to mirror — a signal to `forge` reaches the single process directly, and the FG-567
+signal-fidelity guard was rewritten for this exec form. A built release additionally ships a self-contained,
+**immutable (read-only-at-rest)** closure with a `forge-release.json` manifest and R1/R2 runtime provenance.
+**This slice stays INERT: no promotion, no `current` symlink, no PATH change — that is Child 4 (FG-571).** R3/R4
+launched-workload provenance stays out of scope (FG-555). Children **3–5 remain planned**; the analysis,
+decisions (OQ-6/BD-15/T9), Appendix A probes, and mutation reasoning below are unchanged, except where a
+Child-0/Child-2 closeout line is annotated for the shipped exec entry.
+
+> **SUPERSEDED IN PART by the status updates below.** The two claims above that have since moved:
+> **"this slice stays INERT"** — Child 3 landed as FG-570 (`5044c5d`) and **Child 4 landed as FG-571
+> (`2f80496`), so the slice ships promotion**; and **"the machine-wide `forge` is an npm-link SYMLINK on
+> PATH"** — Child 4 replaced that with a promoted immutable release reached through an explicitly installed
+> shim, and `npm link` is no longer the supported install path.
+> The rest of this 2026-07-15 entry stands as the record of what Child 2 shipped.
+
+**Status update (2026-07-16):** **Child 3 (bounded ABI assertion) has LANDED as FG-570 (`5044c5d`, PR #123)** —
+exact ABI equality replacing the minimum-major floor, refusing older OR newer by name before any native load,
+fail-closed on an unverifiable release manifest. FG-574 (`engines: "^24"`) closed with it.
+
+**Child 4 (FG-571) has LANDED as `2f80496` (PR #124).** **The slice is no longer inert: promotion ships.**
+What it carries: the `current` pointer and atomic promote/rollback, the near-frozen `/bin/sh` PATH shim, the
+immutable version+ABI+**content-digest**-keyed interpreter store, the bounded env-sanitization contract,
+fail-closed release identity, and the **stable/dev split** (`bin/forge-dev` is NEW — before it, the
+machine-wide `forge` and the live-source entry were the SAME npm-link'd artifact). **Four** read-only
+red-security audits of the manifest→exec, interpreter-store and promotion-entry-point trust boundaries
+produced **fourteen confirmed HIGH findings; eleven were closed with executed exploit-proving mutants, and the
+final three were dispositioned as out-of-scope same-principal tampering — see §4b, THE THREAT BOUNDARY.** The
+three that reshaped the mechanism are recorded in §1 and §4b: the forge-authored canonical execution
+descriptor; content-addressed interpreter identity (`process.version` + ABI never pinned content, so distinct
+bytes collided at one path); and selection evidence being the **bytes, never the pathname** (a path-equality
+shortcut was being treated as provenance).
+
+**Child 5 (FG-572 — installed-surface compatibility) remains PLANNED**, and `forge dashboard` still refuses in
+release mode until it is decided. R3/R4 launched-workload provenance stays out of scope (FG-555).
 
 **The rule this slice is planned under (from FG-551):** *a property concerning the FINAL RUNTIME must be
 demonstrated by EXECUTING or MUTATION-TESTING the final artifact. A source-pattern match is not evidence.*
@@ -38,25 +76,48 @@ demonstrated by EXECUTING or MUTATION-TESTING the final artifact. A source-patte
 **Release directory + atomic `current` symlink + a POSIX-shell PATH shim + a shared versioned interpreter
 store. The load-bearing move is EXEC, NOT SPAWN.**
 
-- The machine-wide `forge` becomes a near-frozen `#!/bin/sh` shim that resolves `current`, reads the release
-  manifest, and **`exec`s the pinned absolute interpreter** against the release entry point. `/bin/sh` is the
-  only interpreter whose absolute path is guaranteed **without consulting PATH** — which is exactly what lets
-  F29 pass in its sharpest form: *a shell with no `node` on PATH at all.*
+- The machine-wide `forge` becomes a near-frozen `#!/bin/sh` shim that resolves `current`, reads the
+  **Forge-authored canonical execution descriptor belonging to the immutable release `current` selects**, and
+  **`exec`s the pinned absolute interpreter** that descriptor names, against the release entry point.
+  **Trusted Node validates the authoritative release manifest**; the shim never parses it. (Corrected
+  2026-07-16 by FG-571 — the original "reads the release manifest" mechanism was proven exploitable; see the
+  PATH shim contract in the external-artifact section for the evidence and reasoning. Bounded correction to
+  the mechanism; OQ-6's substance is unchanged.) `/bin/sh` is the only interpreter whose absolute path is
+  guaranteed **without consulting PATH** — which is exactly what lets F29 pass in its sharpest form: *a shell
+  with no `node` on PATH at all.*
+- **The promotion pipeline is the trust boundary** (FG-571): candidate input → **trusted materialization
+  into a new staging dir** (a caller-controlled candidate directory is NEVER promoted in place) → parse and
+  validate the **staged bytes** → generate the canonical descriptor inside that unit → validate the complete
+  unit → **freeze** → atomic publication → **ONE `current` swap**. Validating one directory and then
+  selecting mutable bytes from another is the validate-to-swap TOCTOU this shape closes.
 - **The shim sits OUTSIDE the release closure**, deliberately. If it were inside, a bad promotion would brick
   `forge` itself and rollback-via-forge would be impossible. **Honest cost: shim changes are therefore NOT
-  atomic with a release.** Mitigation: keep its contract minimal (resolve → read manifest → exec) and treat
+  atomic with a release.** Mitigation: keep its contract minimal (resolve → read the forge-authored
+  canonical execution descriptor inside the selected release → exec — see the PATH shim contract below,
+  corrected 2026-07-16 by FG-571; the shim never parses the release manifest) and treat
   any change to it as an install-level breaking change.
 
-**Why exec-not-spawn is the whole ballgame.** `bin/forge:1` is `#!/usr/bin/env node`; it `spawn`s
-`node_modules/.bin/tsx` (`bin/forge:10`) — **which is ALSO `#!/usr/bin/env node`.** So the kernel re-enters
-PATH resolution for the child, and **the process that actually loads `better-sqlite3` is a PATH-resolved
-CHILD.** Pinning only the outer shebang would look like a fix, pass `forge --version`, and **still fail F29**.
-That is the FG-551 failure shape exactly — an adjacent thing satisfying the assertion. Exec once, load tsx
-in-process, one process, and it is the pinned one.
+**Why exec-not-spawn is the whole ballgame.** The pre-FG-569 `bin/forge` was `#!/usr/bin/env node` and
+`spawn`ed `node_modules/.bin/tsx` — **which was ALSO `#!/usr/bin/env node`.** So the kernel re-entered
+PATH resolution for the child, and **the process that actually loaded `better-sqlite3` was a PATH-resolved
+CHILD.** Pinning only the outer shebang would have looked like a fix, passed `forge --version`, and **still
+failed F29**. That is the FG-551 failure shape exactly — an adjacent thing satisfying the assertion. Exec once,
+load tsx in-process, one process — **which FG-569 has since shipped in two distinct entries, and only one of
+them satisfies F29.** The live dev `bin/forge` is now `#!/bin/sh` and `exec`s node once with tsx in-process, so
+no spawned child exists — but it still `exec`s a **PATH-resolved** `node` (and only `readlink`s `$0` when it is a
+symlink). That is fine for a dev checkout, where node is on PATH, but it does **NOT** fix F29: with no node on
+PATH it cannot start. The **built RELEASE entry** (emitted by `forge release`'s `renderEntry`) goes further: it
+`exec`s an **absolute, manifest-pinned interpreter** and resolves its own release root with shell builtins plus
+that same absolute interpreter's `realpathSync` — canonicalizing `$0` through promotion symlinks WITHOUT a
+PATH-resolved `readlink`. That entry — not the live `bin/forge` — is the one that runs under a hostile /
+node-free / even readlink-free PATH, including when invoked THROUGH a promotion-style symlink (verified by
+execution: `--version` and `status --json` through such a symlink both succeed there).
 
-It fixes three things at once: **F29** (availability under a hostile/node-free PATH); **R1 becomes
-self-evidencing** (`process.execPath` of the CLI process *is* the control runtime — today it merely names an
-accidentally-resolved child); and it removes the `bin/forge` exit-laundering defect below.
+So the benefits split by entry. Two come from exec-not-spawn itself and hold in **both** entries: **R1 becomes
+self-evidencing** (`process.execPath` of the CLI process *is* the control runtime — under the old spawn entry it
+merely named an accidentally-resolved child), and the `bin/forge` exit-laundering defect below is removed. The
+third — **F29** (availability under a hostile/node-free PATH) — comes **only** from the release entry's
+absolute-interpreter pin, and does NOT hold for the live dev `bin/forge`.
 
 **Rejected:** dedicated git worktree (`git checkout` is non-atomic → fails F27; git versions neither
 `node_modules` nor the native binding, so it cannot carry the closure); pinned snapshot with no pointer
@@ -73,7 +134,14 @@ release identity visible in command output.
 The closure (§3) is atomic; the two things it depends on but does not contain are the **interpreter store**
 and the **PATH shim**. Each needs its own contract, because "atomic `current` swap" says nothing about them.
 
-*Interpreter store* (`~/.forge/runtimes/node-<version>-<abi>/`, shared across releases):
+*Interpreter store* (`~/.forge/interpreters/node-<version>-<abi>/`, shared across releases):
+> **Path corrected 2026-07-16 (FG-571).** This row originally said `~/.forge/runtimes/…`. That directory
+> was already taken: it is the **provider runtime registry** (`claude-oauth.yml`, `claude-bedrock.yml`,
+> `codex-subscription.yml`, `pi-*.yml`), created 2026-05-23 and enumerated by `doctor.ts` via
+> `readdirSync(join(FORGE_HOME,"runtimes")).filter(f => f.endsWith(".yml"))`. The plan was written without
+> knowledge of that collision. Renamed to `interpreters/` — faithful to this section's own prose, which calls
+> it the **interpreter store** throughout; the directory name is incidental to OQ-6's requirement of "a shared
+> versioned interpreter store". The shipped implementation and the operator README both use `interpreters/`.
 - **Immutable + versioned install.** Each interpreter lands at a version+ABI-keyed path and is **never
   modified in place.** A new interpreter is a new path, not an overwrite.
 - **Validated BEFORE any release selects it.** Installation verifies the interpreter runs and reports the
@@ -87,7 +155,32 @@ and the **PATH shim**. Each needs its own contract, because "atomic `current` sw
   under a live reference.
 
 *PATH shim* (`/bin/sh`, machine-wide `forge`, outside the closure — the acknowledged atomicity crack):
-- **Frozen contract:** resolve `current` → read manifest → `exec` the manifest interpreter. Nothing more.
+- **Frozen contract:** resolve `current` → read the **Forge-authored canonical execution descriptor
+  belonging to the immutable release selected by `current`** → `exec` the interpreter that descriptor names.
+  Nothing more. **Trusted Node validates the authoritative release manifest** (`forge-release.json` remains
+  the authority on what a release IS); the shim never parses it.
+  **(Bounded mechanism correction, 2026-07-16 — FG-571.)** This row previously read "resolve `current` →
+  read manifest → `exec` the manifest interpreter". A read-only red-security audit of the manifest→exec
+  trust boundary proved that shape exploitable in three distinct ways, because the shim parsed the
+  CANDIDATE's raw manifest with a hand-rolled POSIX-sh line reader whose semantics differ from `JSON.parse`
+  and which enforced fewer checks than promotion. Verified by execution:
+  `{"id":"safe","interpreter":"/tmp/attacker-node","entry":"src/cli/index.ts","interpreter":"/store/node/bin/node"}`
+  — `JSON.parse` (promotion) validates the LAST value, the sh reader execs the FIRST. A candidate that
+  PASSED `validateCandidate` executed a different interpreter; invalid JSON carrying forged key-shaped lines
+  drove exec without passing validation at all. Making an sh line-matcher replicate `JSON.parse` (duplicate
+  keys, grammar, escapes, embedded newlines) with no interpreter yet available — the shim's job being to
+  FIND the interpreter — is unbounded machinery for zero capability, so the invariant MOVED instead: all
+  parsing and validation happen once in trusted Node, and the shim consumes only forge-authored data.
+  **The descriptor ships INSIDE the immutable release unit, never as a separately swapped sibling of
+  `current`:** a record swap plus a pointer swap is not atomic AS A PAIR and would create a fresh mismatch
+  window, so the single `current` swap selects the release and its descriptor together. Entry and loader
+  stay FIXED schema constants baked into the shim, not dynamic record values — only what must vary
+  (interpreter, release id) is in the descriptor, under a strict schema (exact field count, restricted
+  character set, no duplicate/extra/missing fields, consumed through quoted shell variables and never
+  evaluated as shell syntax). **This is a bounded correction to the MECHANISM, not a change to the accepted
+  architecture:** OQ-6's substance (release directory + atomic `current` symlink + POSIX-shell PATH shim +
+  shared versioned interpreter store; exec-not-spawn) is unchanged, as are BD-14/BD-15/T9 — anchoring is
+  still the shim's single `cd -P` on `current`.
 - **Atomic install/replace:** the shim is written to a temp path and **atomically renamed** into place; a torn
   shim is never on PATH. Any change to its *contract* is an install-level breaking change (not atomic with a
   release), and is gated behind an explicit re-install, not a promotion.
@@ -213,16 +306,20 @@ from a running one.
 
 ## 2. Conflicts surfaced against the accepted PRD — **NOT amended**
 
-- **C1 — BD-15's premise is understated. STATUS: PENDING PRD reconciliation (not yet reconciled).** Precise
+- **C1 — BD-15's premise is understated. STATUS: RECONCILED into the PRD (FG-568, `275ac63`; FG-573).** Precise
   statement: **each process's FIRST store open — INCLUDING a logically read-only caller — can bootstrap a
-  WRITABLE handle and run migrations.** `getDb({readOnly:true})` (`db.ts:156`) computes `wantReadOnly`
-  (`db.ts:161`) and, when no writable handle exists in-process, falls through to the writable `getDb()`
-  (`db.ts:169`), which runs `db.exec(SCHEMA_SQL)` + `applyMigrations` incl. the `DROP COLUMN` (`db.ts:91`).
+  WRITABLE handle and run migrations.** `getDb({readOnly:true})` (`db.ts:399`) computes `wantReadOnly`
+  (`db.ts:404`) and, when no writable handle exists in-process, falls through to the writable `getDb()`
+  (`db.ts:412`), which runs `db.exec(SCHEMA_SQL)` + the now **additive-only** `applyMigrations`
+  (`db.ts:428-429`) — no `DROP COLUMN` on this path; the destructive drop is confined to
+  `runDestructiveConvergenceMigration` (`db.ts:221`, invoked by `forge store converge`).
   Confirmed read-only callers that therefore migrate on first open: `show.ts:57`, `status.ts:26`, `runs.ts:38`,
   `export.ts:20`, `metrics.ts:36`, `ops.ts:157`, `report.ts:17`, `sweep.ts:85`. **Strengthens BD-15; kills
   promotion-quiesce as a sufficient policy** — even a logically read-only command mutates the schema under an
-  in-flight launch. *(Verified by orchestrator.)* **This correction is queued for the documentation-maintainer
-  (see §6); it has NOT been applied to the PRD yet.**
+  in-flight launch. *(Verified by orchestrator.)* **This correction has since been applied:** BD-15's premise
+  now reads "every open, including a logically read-only caller" (PRD BD-15 + the 2026-07-15 revision-log
+  entry, FG-568). The additive-only fix means those first opens now run only backward-compatible migrations —
+  the destructive `DROP COLUMN` is confined to the operator's quiesce-gated `forge store converge`.
 - **C2 — CORRECTED per review #3. tmux changes the ENVIRONMENT in which R3 is resolved; it does NOT make R4
   exist for every launch.** The distinction, stated precisely:
   - **R3** is the resolution of the launched command's **`argv[0]`, performed by the recorder** (the exit
@@ -241,18 +338,21 @@ from a running one.
     for FG-553/FG-555, recorded here only.
   *(Verified by orchestrator: `launch.ts:253` interposes the shell; `launch.ts:128` is the recorder's
   resolution.)*
-- **C3 — `bin/forge` launders a killed child into success.** `bin/forge:11` is
-  `child.on("exit", (code) => process.exit(code ?? 0))`. **Verified by execution:** a SIGKILL'd child gives
-  `code=null` → **`forge` exits 0.** Anything checking `forge`'s exit code — CI, scripts, the review-loop's own
+- **C3 — the pre-Child-0 `bin/forge` laundered a killed child into success.** `bin/forge:11` was
+  `child.on("exit", (code) => process.exit(code ?? 0))`. **Verified by execution:** a SIGKILL'd child gave
+  `code=null` → **`forge` exited 0.** Anything checking `forge`'s exit code — CI, scripts, the review-loop's own
   verification — reads **success** when forge was killed. This violates BD-3 in the live artifact.
   **`claude.ts:241` (`if (signal) process.exit(128)`) is NOT the pattern to copy** (correction #1): it
   *prevents the false exit 0*, but it is **insufficient for signal fidelity** — it converts OS-signal evidence
   into an ordinary numeric 128, which is the same F7/F8 attribution loss Child 0 must avoid. **Child 0 must
   RE-RAISE the child's actual signal** (`process.kill(process.pid, signal)`), so a direct observer of `forge`
   still sees `signal=SIGTERM/SIGKILL`, not a number. **exec-not-spawn deletes this defect by construction**
-  (no child to mis-mirror at all). **STATUS: LANDED as `97363ca` (PR #119)** — Child 0 shipped the re-raise
-  fix; `bin/forge:11` now re-raises the child's own signal, verified by execution across all four cases with
-  all three mutants killed.
+  (no child to mis-mirror at all). **STATUS: LANDED as `97363ca` (PR #119), then SUPERSEDED by FG-569's
+  exec-not-spawn.** Child 0 shipped the re-raise fix against the spawn structure (`bin/forge:11` re-raised the
+  spawned child's own signal, verified by execution across all four cases with all three mutants killed).
+  **FG-569 then deleted that spawn structure by construction:** the live `#!/bin/sh` `bin/forge` `exec`s node
+  once, so there is no child to mirror and a signal reaches the single process directly (the FG-567
+  signal-fidelity guard was rewritten for the exec form).
 
 ---
 
@@ -263,11 +363,11 @@ its **red baseline** and the **hollow version to reject**.
 
 | # | Child | Scope | Owns | Acceptance (executed) |
 |---|---|---|---|---|
-| **0** | **`bin/forge` signal/exit fidelity** (**LANDED as `97363ca`, PR #119** — correction #8; prerequisite satisfied. **Four-case signal fidelity verified by execution:** child exits 0 → `code=0, signal=null`; child numerically exits 143 → `code=143, signal=null` (stays numeric — the F8 case); child killed by SIGTERM → `code=null, signal=SIGTERM`; child killed by SIGKILL → `code=null, signal=SIGKILL`. **All three mutants killed:** revert to `code ?? 0` → SIGKILL laundered to 0; `process.exit(128)` → signal erased to a numeric 128; numeric-143-as-signal → the F8 case reddens — proving `process.exit(128)` is insufficient because it erases the signal.) | Fix the entry point that launders a killed child into exit 0 (`bin/forge:11`, `code ?? 0`). **Correct fix is SIGNAL FIDELITY, not `process.exit(128)`** (correction #1): re-raise the child's OWN signal on the wrapper (`child.on("exit",(code,signal)=>{ if(signal){process.kill(process.pid,signal);return;} process.exit(code??0); })`). **`process.exit(128)` is insufficient — it converts OS signal evidence into an ordinary numeric exit**, exactly the F7/F8 attribution loss this campaign forbids. (`claude.ts:241`'s `exit(128)` is *better than laundering to 0* but still collapses signal→numeric; do NOT copy it here.) Small, isolated, no dependency on any other child. | — | **EXECUTE, three cases, all mutation-tested:** (1) child exits **0** → wrapper exits **0**; (2) child **numerically** returns **143** → wrapper stays **numeric 143, no signal** (`signal===null`, decision=EXIT 143) — the F8 case, must NOT become a signal; (3) child **terminated by SIGTERM** → **wrapper itself terminates by SIGTERM** (re-raised), not a numeric code. **Red baseline proven today** (SIGKILL child → forge exits 0). **Mutants, each must redden a distinct case:** restore `code ?? 0` → case 3 goes green-wrong (kill→0); use `process.exit(128)` → case 3 fails (wrapper exits numeric 128, no signal) AND risks conflating case 2; treat numeric 143 as a signal → case 2 reddens. **Why first:** a killed child reading exit 0 (or a signal laundered to a number) can silently corrupt the evidence of *every later child's* executed acceptance test — a promotion/ABI/F35 test that KILLS a process and trusts `forge`'s exit code/signal would misread it. This must be true before any later test is trustworthy. |
-| **1** | **Store-compatibility policy** | Destructive DDL off the open path; schema-version stamp + forward refusal gate; legacy-column convergence → explicit quiesce-gated migration; **backward-compatible overlap-window evolution** (correction #5: nullable/defaulted-only additions, no new constraint rejecting an in-flight old writer, old-writer/new-reader tolerated, destructive migration as a one-way rollback boundary). Fixes read-only-open-still-migrates (`db.ts:169`). | BD-15 | Two-process **F35** on one real DB, **incl. the read-only-command variant AND both directions** (old-writer/new-reader; new-writer/old-reader). Red today: `DROP COLUMN` killing A's insert. Mutants: re-add destructive DDL to the open path; add a `NOT NULL`-no-default column and show an old writer breaks; guard only the writable entry. |
-| **2** | **Release closure + manifest + R1/R2 provenance** (inert — no promotion yet) | Builder producing a self-contained release: entry + source + **entire `node_modules`** + **compiled native binding** + manifest (commit SHA, absolute interpreter path, ABI, lockfile identity). **exec-not-spawn lands here**; the two-process `spawn(tsx)` structure dies. **R1** provenance (`process.execPath` of the CLI process). **R2 provenance (correction #1): the exit RECORDER captures its OWN interpreter path, ABI, and release identity, from inside the recorder process — NEVER inferred from R1.** | **R1, R2** | **EXECUTE the release entry under a hostile PATH — incl. NO NODE AT ALL** — real output. Assert **from the running process** `process.execPath`==manifest interpreter and `process.versions.modules`==manifest ABI (**R1**). **R2: EXECUTE the recorder and assert IT records its own `process.execPath`/ABI/release id from inside itself; mutant — infer R2 from R1 (copy the CLI's value) → must go red because the recorder can run under a different interpreter than the CLI.** Torn-closure: release with mismatched `node_modules` **refused at build**. |
-| **3** | **Bounded ABI assertion** | Replace `node-preflight`'s minimum-major floor with an exact ABI assertion against the manifest, before any native load. | — | **EXECUTE under a real too-NEW ABI-incompatible Node** (v26/ABI 147, on this host) → named refusal, **not** opaque `ERR_DLOPEN_FAILED`; likewise too-old. **Red baseline today** (`node-preflight.ts:26` admits Node 26). Mutant: revert to `>=` → too-new red. |
-| **4** | **Atomic promote/rollback + PATH shim + env-sanitization contract** | The `current` pointer, atomic rename swap, rollback, near-frozen `/bin/sh` shim, `forge-dev` preserved; the **external-artifact contract** (immutable/versioned interpreter install, validate-before-select, retain-while-referenced, no in-place replace, atomic/frozen shim — see §1). **Env-sanitization contract (correction #2): the launcher neutralizes caller Node/runtime-injection vars (`NODE_OPTIONS`, `NODE_PATH`, and peers) so ambient env cannot redirect or block the pinned interpreter.** Swap **retains**; **NO release GC** (correction #6). | promotion, F29-env | **F26/F27/F28** by execution; **F27 also covers interrupted interpreter-install and interrupted shim-install** (correction #4). **T9 test includes a lazy NATIVE binding load AND a CJS require** (both proven runtime-uniform). **Env mutation (correction #2): with an absolute pinned interpreter, set `NODE_OPTIONS=--import <evil>` → assert the injected module does NOT run and forge behaves identically to clean env; set a `NODE_OPTIONS` that would prevent start → assert forge still runs. Red baseline PROVEN today: injection runs before forge.** F25: dev broken → `forge-dev` **must FAIL**, stable `forge` **must SUCCEED**; mutant — `forge-dev` execs the stable release → red. |
+| **0** | **`bin/forge` signal/exit fidelity** (**LANDED as `97363ca`, PR #119**; later **SUPERSEDED by FG-569's exec-not-spawn** — the spawn structure this fix guarded no longer exists, so the live `#!/bin/sh` entry has no child to re-raise and a signal reaches the single process directly. — correction #8; prerequisite satisfied. **Four-case signal fidelity verified by execution:** child exits 0 → `code=0, signal=null`; child numerically exits 143 → `code=143, signal=null` (stays numeric — the F8 case); child killed by SIGTERM → `code=null, signal=SIGTERM`; child killed by SIGKILL → `code=null, signal=SIGKILL`. **All three mutants killed:** revert to `code ?? 0` → SIGKILL laundered to 0; `process.exit(128)` → signal erased to a numeric 128; numeric-143-as-signal → the F8 case reddens — proving `process.exit(128)` is insufficient because it erases the signal.) | Fix the entry point that launders a killed child into exit 0 (`bin/forge:11`, `code ?? 0`). **Correct fix is SIGNAL FIDELITY, not `process.exit(128)`** (correction #1): re-raise the child's OWN signal on the wrapper (`child.on("exit",(code,signal)=>{ if(signal){process.kill(process.pid,signal);return;} process.exit(code??0); })`). **`process.exit(128)` is insufficient — it converts OS signal evidence into an ordinary numeric exit**, exactly the F7/F8 attribution loss this campaign forbids. (`claude.ts:241`'s `exit(128)` is *better than laundering to 0* but still collapses signal→numeric; do NOT copy it here.) Small, isolated, no dependency on any other child. | — | **EXECUTE, three cases, all mutation-tested:** (1) child exits **0** → wrapper exits **0**; (2) child **numerically** returns **143** → wrapper stays **numeric 143, no signal** (`signal===null`, decision=EXIT 143) — the F8 case, must NOT become a signal; (3) child **terminated by SIGTERM** → **wrapper itself terminates by SIGTERM** (re-raised), not a numeric code. **Red baseline proven today** (SIGKILL child → forge exits 0). **Mutants, each must redden a distinct case:** restore `code ?? 0` → case 3 goes green-wrong (kill→0); use `process.exit(128)` → case 3 fails (wrapper exits numeric 128, no signal) AND risks conflating case 2; treat numeric 143 as a signal → case 2 reddens. **Why first:** a killed child reading exit 0 (or a signal laundered to a number) can silently corrupt the evidence of *every later child's* executed acceptance test — a promotion/ABI/F35 test that KILLS a process and trusts `forge`'s exit code/signal would misread it. This must be true before any later test is trustworthy. |
+| **1** | **Store-compatibility policy** (**LANDED as FG-568, `275ac63`**) | Destructive DDL off the open path; schema-version stamp + forward refusal gate; legacy-column convergence → explicit quiesce-gated migration; **backward-compatible overlap-window evolution** (correction #5: nullable/defaulted-only additions, no new constraint rejecting an in-flight old writer, old-writer/new-reader tolerated, destructive migration as a one-way rollback boundary). Fixed read-only-open-still-migrates (was `db.ts:169`; open path now additive-only). | BD-15 | Two-process **F35** on one real DB, **incl. the read-only-command variant AND both directions** (old-writer/new-reader; new-writer/old-reader). Red baseline (pre-FG-568): `DROP COLUMN` killing A's insert. Mutants: re-add destructive DDL to the open path; add a `NOT NULL`-no-default column and show an old writer breaks; guard only the writable entry. |
+| **2** | **Release closure + manifest + R1/R2 provenance** (**LANDED as FG-569** — inert: no promotion, no `current` symlink) | Builder producing a self-contained, **immutable (read-only-at-rest)** release: entry + source + **entire `node_modules`** + **compiled native binding** + manifest (commit SHA, absolute interpreter path, ABI, lockfile identity). **exec-not-spawn landed here**; the two-process `spawn(tsx)` structure is gone — the live `bin/forge` is a `#!/bin/sh` shim that `exec`s node once with tsx in-process. **R1** provenance (`process.execPath` of the CLI process). **R2 provenance (correction #1): the exit RECORDER captures its OWN interpreter path and ABI from inside the recorder process — NEVER inferred from R1. The release identity is NOT captured inside the recorder: it is derived from the submitting CLI's OWN release manifest and BAKED into the wrapper as a trusted JSON literal — never read from the ambient `FORGE_RELEASE_ID` (which a caller could forge), never inferred from R1.** | **R1, R2** | **EXECUTE the release entry under a hostile PATH — incl. NO NODE AT ALL** — real output. Assert **from the running process** `process.execPath`==manifest interpreter and `process.versions.modules`==manifest ABI (**R1**). **R2: EXECUTE the recorder and assert IT records its own `process.execPath`/ABI from inside itself, plus the manifest-derived `releaseId` baked into the wrapper (dev launch → null, poisoned ambient `FORGE_RELEASE_ID` ignored); mutant — infer R2's execPath/ABI from R1 (copy the CLI's value) → must go red because the recorder can run under a different interpreter than the CLI.** Torn-closure: release with mismatched `node_modules` **refused at build**. |
+| **3** | **Bounded ABI assertion** (**LANDED as FG-570 — `5044c5d`**) | Replace `node-preflight`'s minimum-major floor with an exact ABI equality assertion against the manifest's abi (else pinned `REQUIRED_ABI`), before any native load. | — | **EXECUTED** under real ABI-incompatible Nodes → named refusal, **not** opaque `ERR_DLOPEN_FAILED`: host triad (too-new v25/ABI 141, compatible v24/ABI 137, too-old v23/ABI 131) + a **mandatory** CI arm (`test-extended` provisions real Node 26/ABI 147, the arm reddens not skips). Red baseline was `node-preflight.ts:26` admitting Node 26; mutant — revert `===` to `>=` → the too-new case reddens. |
+| **4** | **Atomic promote/rollback + PATH shim + env-sanitization contract** (**LANDED as FG-571 — `2f80496`, PR #124**; see §4b for the threat boundary) | The `current` pointer, atomic rename swap, rollback, near-frozen `/bin/sh` shim, `forge-dev` preserved; the **external-artifact contract** (immutable/versioned interpreter install, validate-before-select, retain-while-referenced, no in-place replace, atomic/frozen shim — see §1). **Env-sanitization contract (correction #2): the launcher neutralizes caller Node/runtime-injection vars (`NODE_OPTIONS`, `NODE_PATH`, and peers) so ambient env cannot redirect or block the pinned interpreter.** Swap **retains**; **NO release GC** (correction #6). | promotion, F29-env | **F26/F27/F28** by execution; **F27 also covers interrupted interpreter-install and interrupted shim-install** (correction #4). **T9 test includes a lazy NATIVE binding load AND a CJS require** (both proven runtime-uniform). **Env mutation (correction #2): with an absolute pinned interpreter, set `NODE_OPTIONS=--import <evil>` → assert the injected module does NOT run and forge behaves identically to clean env; set a `NODE_OPTIONS` that would prevent start → assert forge still runs. Red baseline PROVEN today: injection runs before forge.** F25: dev broken → `forge-dev` **must FAIL**, stable `forge` **must SUCCEED**; mutant — `forge-dev` execs the stable release → red. |
 | **5** | **Installed-surface compatibility** | `~/.forge` seeds/workflows/routing-policy (**copies, not symlinks** — verified), hooks, scripts, project `.forge` assets, dashboard: for each — promotion re-installs / version-pins / explicitly out of the control path. | — | Executed: an installed copy **older** than the promoted runtime → named, actionable failure, not a silent mis-run. |
 
 **Ordering:** **0 first (prerequisite), then 1.** Child 0 is a prerequisite because a killed child reading exit
@@ -306,6 +406,45 @@ Every case **executes**; each names the mutant that must redden it and the **hol
 
 ---
 
+## 4b. THE THREAT BOUNDARY (settled 2026-07-17, FG-571 — operator decision)
+
+**Read this before adding any further hardening to the promotion path.** Four read-only red-security audits
+ran against Child 4. The first three found **eleven confirmed HIGH findings, all closed with executed
+exploit-proving mutants.** The fourth returned three HIGH whose schedules *all* require the same local
+principal that owns `$FORGE_HOME`. That is where the boundary is, and it is stated here so the next reader
+does not re-litigate it.
+
+**PROTECTED — real, defended, proven by execution:**
+- **Untrusted candidate content.** A release built elsewhere / downloaded / handed over and then promoted.
+  The decisive proof: a manifest with duplicate `interpreter` keys made `JSON.parse` (what promotion
+  validates with) resolve to the LAST value while the shim's hand-rolled POSIX-sh reader took the FIRST — a
+  candidate that PASSED `validateCandidate` exec'd `/tmp/attacker-node`. Closed by moving the invariant:
+  trusted Node parses once, the shim consumes only forge-authored data (see §1's PATH-shim contract).
+- **Malformed manifests** — fail-closed, by name.
+- **Hostile ambient caller environment (F29)** — a caller who can invoke `forge` but does NOT own
+  `$FORGE_HOME`. An absolute pinned interpreter is necessary but NOT sufficient; the env-sanitization
+  contract is what closes it (Appendix A2 is the red baseline).
+- **Crashes / interrupted publication** — nothing partial is selectable.
+- **Concurrent supported Forge operations** — one selection swap for the `(current, previous)` pair;
+  content-addressed interpreter identity makes same-identity races benign by construction.
+
+**HONEST LIMIT — same-principal tampering is OUT OF SCOPE.**
+A principal able to arbitrarily rewrite `$FORGE_HOME` can subvert Forge **and the surrounding user account**.
+That principal is the operator's own UID: it already owns `~/.zshrc`, the Forge checkout, the installed shim,
+and the validator itself. **Before FG-571 the machine-wide `forge` was an npm-link symlink into that same
+writable checkout**, so this axis is strictly *improved* by promotion and was never closed by the status quo.
+
+> **`chmod` / read-only-at-rest is an operational ACCIDENT BARRIER, not a security boundary against its
+> owner.** Do not read the freeze as authorization.
+
+Why this is a boundary and not a backlog item: every proposed fix for the fourth audit's findings relocates
+the trust root to **another directory inside the same home directory the adversary owns** — the auditor's own
+words on the evidence ledger were *"location is again the sole trust root, one directory level higher."* That
+is an infinite regress. Closing it genuinely requires a **separate trust domain** (another OS principal,
+root-owned storage, or hardware-backed signing) — **not FG-571 scope, and deliberately not filed as a
+follow-up**: it is an optional product/security direction, not missing closure. Its per-finding disposition
+lives on the FG-571 ticket; the red findings themselves stand unaltered.
+
 ## 5. Risks / open
 
 - **RESOLVED — CJS `require()`** is settled by execution (§1, T9): CJS anchors identically to ESM and native
@@ -326,19 +465,22 @@ Every case **executes**; each names the mutant that must redden it and the **hol
 - **RESOLVED — `bin/forge` exit laundering was scoped as CHILD 0 and has LANDED (`97363ca`, PR #119)**
   (correction #8). Before it landed, **every executed acceptance test in this slice that kills a process and
   trusts `forge`'s exit code/signal would have misread it** (a kill read as success), which is exactly why it
-  went first. The shipped fix is signal fidelity (re-raise the child's signal), not `process.exit(128)` —
-  verified by execution across all four cases, all three mutants killed. See the Child 0 row.
+  went first. Child 0's fix was signal fidelity (re-raise the spawned child's signal), not `process.exit(128)` —
+  verified by execution across all four cases, all three mutants killed. **FG-569's exec-not-spawn has since
+  superseded it: the live `#!/bin/sh` `bin/forge` `exec`s node once, so there is no child to re-raise and a
+  signal reaches the single process directly (the FG-567 signal-fidelity guard was rewritten for the exec
+  form).** See the Child 0 row.
 
 ---
 
 ## 6. PRD reconciliation (correction #7)
 
-- **C1 is PENDING PRD reconciliation — NOT yet reconciled.** It is a factual correction to BD-15's own
+- **C1 has been RECONCILED into the PRD (FG-568, `275ac63`).** It was a factual correction to BD-15's own
   evidence (each process's first store open, including a logically read-only caller, can bootstrap a writable
-  handle and migrate), strengthening not contradicting it. On approval it will be **routed to the
-  documentation-maintainer** (durable design record; not orchestrator-hand-edited) to update BD-15's premise
-  and the system map's store rows from "every writable open" to "every open, including read-only callers'
-  first open". **This has not happened yet and must not until the gate below clears.**
+  handle and migrate), strengthening not contradicting it. BD-15's premise and the store rows now read "every
+  open, including read-only callers' first open" (PRD BD-15 + the 2026-07-15 revision-log entry), and the
+  destructive `DROP COLUMN` is confined to the operator's quiesce-gated `forge store converge`. FG-573 then
+  reconciled the R1/R2 current-state (FG-569 exec entry + provenance); R3/R4 (FG-555) remain open.
 - **C2 does NOT go into the PRD** (corrections #3 + #7) — in any wording. It is an implementation-informing
   note for FG-553/FG-555, recorded in §2 only. Its earlier "R4 exists on every launch" phrasing was wrong and
   has been corrected here; nothing about it reaches the accepted contract.
@@ -350,7 +492,16 @@ Every case **executes**; each names the mutant that must redden it and the **hol
 reconcile C1 into the PRD (maintainer), file children **0–5** against this plan, then dispatch **Child 0
 only** (the signal/exit-fidelity prerequisite) — because every later child's executed evidence depends on
 `forge` not reporting success on a kill. **UPDATE: Child 0 has since LANDED as `97363ca` (PR #119)**; the
-prerequisite is satisfied. Children **1–5 remain planned** and unchanged.
+prerequisite is satisfied. **Child 1 has LANDED (`275ac63`, PR #120), and Child 2 has LANDED as FG-569**
+(exec-not-spawn entry + inert release closure + manifest + R1/R2 provenance — still INERT: no promotion, no
+`current` symlink, no PATH change). **C1 has since been
+reconciled into the PRD (FG-568), and the R1/R2 current-state reconciled (FG-569/FG-573)** — see §2/§6.
+**UPDATE (2026-07-17):** **Child 3 has LANDED as FG-570 (`5044c5d`, PR #123).** **Child 4 (FG-571) has
+LANDED as `2f80496` (PR #124)** — the slice is no longer inert: promotion, the `current` pointer and the PATH
+shim ship. **Child 5 (FG-572) remains planned.**
+See the 2026-07-16 status update at the top of this document for what Child 4 carries and for the audit
+findings that reshaped the mechanism (§1: the forge-authored canonical execution descriptor; content-addressed
+interpreter identity).
 
 ---
 
@@ -394,7 +545,12 @@ the mutant "pin PATH but leave `NODE_OPTIONS` live" is proven red.
 
 ### A3 — bin/forge signal fidelity (literal output, `signal-fidelity.out`) — proves the Child 0 fix
 
-The wrapper re-raises the child's own signal (`if(signal) process.kill(process.pid,signal); else
+> **Superseded by FG-569 (exec-not-spawn).** This probe records the *spawn-era* Child 0 fix. The live
+> `bin/forge` is now `#!/bin/sh` and `exec`s node once — there is no spawned child, so the re-raise below no
+> longer applies; a signal reaches the single `forge` process directly (the FG-567 signal-fidelity guard was
+> rewritten for the exec form). The captured output is retained as the historical Child 0 record.
+
+Child 0's spawn-era wrapper re-raised the child's own signal (`if(signal) process.kill(process.pid,signal); else
 process.exit(code??0)`). The script uses a **direct process observer** of the wrapper, so the two layers are
 kept explicit (correction #3):
 ```
@@ -411,5 +567,7 @@ program can also deliberately `exit(143)` (the F8 case above, where the direct o
 `process.exit(128)` would erase it and leave only an ambiguous number.
 
 **The pre-fix `bin/forge`** (`process.exit(code ?? 0)`, before `97363ca`): a SIGKILL'd child gave `code=null` → forge
-exited **0** — the red baseline Child 0 **removed**. `bin/forge` now re-raises the child's own signal, so a SIGKILL'd
-child gives `code=null, signal=SIGKILL` and the direct observer sees the signal.
+exited **0** — the red baseline Child 0 **removed**. Child 0's spawn-era `bin/forge` then re-raised the child's own
+signal (a SIGKILL'd child gave `code=null, signal=SIGKILL` to the direct observer). **FG-569 has since replaced the
+spawn structure with the `#!/bin/sh` exec entry: there is no child, so a signal reaches the single `forge` process
+directly** — the FG-567 signal-fidelity guard was rewritten for that exec form.

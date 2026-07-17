@@ -2,9 +2,10 @@
 
 **Status:** ACCEPTED — audit corrections applied (C1–C8); binding decisions BD-14 and BD-15 are accepted; pending campaign decomposition, not yet an implementation contract  
 **Captured:** 2026-07-13  
-**Last revised:** 2026-07-14  
+**Last revised:** 2026-07-15  
 **Primary backlog:** FG-551, FG-552, FG-553, FG-555
 **Landed foundation:** FG-535, FG-536, FG-542  
+**Landed Slice 1 (partial):** FG-551 (test parity), FG-567 (signal fidelity), FG-568 (additive-only store), FG-569 (exec entry + inert release closure + R1/R2 provenance), FG-570 (bounded ABI assertion — `5044c5d`). **FG-571 (promotion) LANDED `2f80496`.** FG-553 child 5 (FG-572 installed-surface) remains open; R3/R4 (FG-555) remain open.  
 **Upstream context:** [anthropics/claude-code#76249](https://github.com/anthropics/claude-code/issues/76249), [#25188](https://github.com/anthropics/claude-code/issues/25188), [#72851](https://github.com/anthropics/claude-code/issues/72851), [#68625](https://github.com/anthropics/claude-code/issues/68625)
 
 ## How to use this document
@@ -94,7 +95,7 @@ Forge must not make correct ownership depend on a particular upstream diagnosis 
 | Agent result | Bind-mounted task directory and Forge store | Existing + FG-536 recovery | Landed |
 | Unsafe harness background dispatch | Disabled for `forge claude` children | FG-542 | Landed |
 | tmux availability in agent test image | `agent-dev-worker` image | FG-551 | Landed (`7f6091b`) |
-| Control-plane executable (Forge's own runtime, R1) | npm-linked mutable Forge working tree | FG-553 | Active gap |
+| Control-plane executable + provenance (R1, R2) | npm-linked mutable Forge working tree; single-process `/bin/sh` exec entry so R1 (`process.execPath`) is self-evidencing; exit-recorder captures R2 independently | FG-553 / FG-569 | **Closed on the live path** — R1/R2 recorded + exec entry (FG-569, `1b11f25`); source isolation + atomic promotion shipped (FG-571, `2f80496`). Honest limit: same-principal `$FORGE_HOME` tampering is out of scope (FG-571 threat boundary) |
 | Launched-workload environment (R3/R4) | Caller's ambient environment; `forge launch` preserves argv and owns no environment contract | FG-555 | Active gap |
 | Launch completion notification | Hand-built Monitor polling | FG-552 | Active gap |
 | Notification delivery evidence | None | New slice | Missing |
@@ -229,14 +230,14 @@ Four distinct runtimes are in play. These are separate facts; recording one is *
 
 | | Runtime identity | What it is | Currently recorded? |
 |---|---|---|---|
-| **R1** | Control runtime | the interpreter + native-binding ABI + dependency set actually executing the `forge` CLI, its launch observer, and every routine state-reader | **No** |
-| **R2** | Exit-recorder runtime | the interpreter executing the launch wrapper's exit recorder (`process.execPath` of that process) | **No** — and it is not evidence of R3 or R4 |
+| **R1** | Control runtime | the interpreter + native-binding ABI + dependency set actually executing the `forge` CLI, its launch observer, and every routine state-reader | **Yes (FG-569)** — the single-process exec entry makes `process.execPath` self-evidencing; captured at submission in the CLI as `meta.json`'s `control` record and rendered as `launch show`'s `control:` line (old pre-FG-569 launches read "not recorded", never manufactured) |
+| **R2** | Exit-recorder runtime | the interpreter executing the launch wrapper's exit recorder (`process.execPath` of that process) | **Yes (FG-569)** — captured inside the recorder as `runtime.json`, independent of R1; still not evidence of R3 or R4 |
 | **R3** | Launched top-level executable | the executable named as argv[0] of the submitted launch command, as resolved at spawn time | **No** — argv is recorded, but argv is a *string*, not a resolution |
 | **R4** | Nested-shell resolution | how a caller-supplied shell (e.g. `bash -lc …`) later resolves `node`, `npm`, `forge`, or any other command *inside* the launched command | **No — and may be inherently unknowable.** The design must say so rather than imply argv covers it |
 
 **Required evidence.** The design must state, for each of R1–R4, whether it is durably captured at launch, derived, or explicitly declared **unknowable**. Argv recording is not runtime identity. `process.execPath` of the exit recorder is not the runtime of the launched workload.
 
-**Required enforcement.** Compatibility must be asserted against the ABI the native bindings were actually built for — a bounded check, not a version floor. The current preflight admits any major at or above its floor and therefore admits an ABI that cannot load.
+**Required enforcement.** Compatibility must be asserted against the ABI the native bindings were actually built for — a bounded check, not a version floor. **Landed (FG-570 — `5044c5d`):** the preflight is now an exact ABI equality assertion (`checkAbi`, upper AND lower bound) against the release manifest's abi (else the pinned `REQUIRED_ABI`); a mismatched ABI — older OR newer — is refused with a named message before native load, and F31 executes under a real Node 26/ABI 147 in CI. (Pre-FG-570 the preflight was a minimum-major floor that admitted any major at or above it, and therefore admitted an ABI that cannot load.)
 
 Subordinate acceptance: **F29**, **F30**, **F31**.
 
@@ -244,7 +245,7 @@ Subordinate acceptance: **F29**, **F30**, **F31**.
 
 Concurrent Forge processes of **different versions** share one SQLite database by default. This is the ordinary case, not an edge case: a long tmux-owned launch starts under version A, the operator promotes, and a new command runs under version B against the same store while the launch is still in flight.
 
-Two facts once made this unsafe. Migrations ran **unconditionally on every open** — not merely every writable one — and they included a **destructive `DROP COLUMN`**. Every process migrates the store on its first open, including a logically read-only caller: `getDb({ readOnly: true })` finds no writable handle in-process, falls through to the writable `getDb()`, and that path runs `SCHEMA_SQL` plus the migrations (`applyMigrations`, `src/store/db.ts`). The read-only callers that therefore migrate on their first open are `show`, `status`, `runs`, `export`, `metrics`, `ops`, `report`, and `sweep` (`src/cli/commands/`). An older process opening the store after a newer one has migrated it, or a newer process migrating a store an older in-flight process is still reading, is not a hypothetical — and no command is exempt by virtue of only reading.
+**Historical premise (pre-FG-568 — no longer current).** Two facts once made this unsafe. Migrations ran **unconditionally on every open** — not merely every writable one — and they included a **destructive `DROP COLUMN`**. Every process migrated the store on its first open, including a logically read-only caller: `getDb({ readOnly: true })` finds no writable handle in-process, falls through to the writable `getDb()`, and that path runs `SCHEMA_SQL` plus the migrations (`applyMigrations`, `src/store/db.ts`). The read-only callers that therefore migrate on their first open are `show`, `status`, `runs`, `export`, `metrics`, `ops`, `report`, and `sweep` (`src/cli/commands/`) — that fan-out is still current, and it is why the ordinary open path had to become additive-only rather than merely be avoided by convention. What is NOT current is the destructive half: an older process opening the store after a newer one had migrated it, or a newer process destructively migrating a store an older in-flight process was still reading, was not a hypothetical before FG-568. The residual destructive risk is now confined to the explicitly invoked `forge store converge` (below); no ordinary open — read-only or writable — can reach it.
 
 **As shipped in FG-568 (`275ac63`), the ordinary open path is now additive-only.** `applyMigrations` runs ONLY additive, backward-compatible migrations — on every open, logically read-only callers' first opens included — and executes no `DROP` and no destructive DDL; old readers and writers of an in-flight peer keep working by construction. The destructive `DROP COLUMN` that once ran here now lives ONLY in `runDestructiveConvergenceMigration`, invoked explicitly via `forge store converge`: an operator-invoked, quiesce-gated, one-way boundary — never the ordinary open path. This does not change BD-15's decision (additive-only was always the decision); it records that the premise's destructive-open hazard has been removed from the shared path and confined to an explicit operator step.
 
@@ -346,6 +347,8 @@ Required decisions/tests:
 ### Slice 1 — FG-553: isolate the Forge control runtime
 
 Goal: an agent editing Forge cannot break machine-wide commands, observation, or unrelated projects — **and** the control plane resolves to a known runtime regardless of the caller's ambient environment (BD-14).
+
+**Landed so far (2026-07-16):** children 0–3 — FG-567 (signal fidelity), FG-568 (additive-only store), FG-569 (exec-not-spawn entry + inert immutable release closure + manifest + R1/R2 provenance), FG-570 (bounded ABI assertion — `5044c5d`). These shipped the runtime-provenance, store-compatibility and interpreter-compatibility halves, deliberately inert. **UPDATE 2026-07-17: Child 4 — FG-571 (atomic promote/rollback + PATH shim + env-sanitization + fail-closed identity) — LANDED as `2f80496`, so the slice is no longer inert and F29 is closed on the live path.** Child 5 — **FG-572** (installed-surface compatibility) — remains open. R3/R4 launched-workload provenance is FG-555, also open.
 
 **FG-553 is not closable on the source axis alone.** Stable source and stable runtime are separate properties. A slice that isolates the source tree and leaves the interpreter to the caller's PATH has not closed this ticket: the observed control-plane outage reproduces with source fully valid. Both axes must close.
 
@@ -623,6 +626,45 @@ The initiative is complete only when all of the following are true:
 
 ## Revision log
 
+### 2026-07-17 — promotion landed; F29 closed on the live path; threat boundary recorded (FG-571, `2f80496`)
+
+- **FG-571 (FG-553 Child 4) LANDED as `2f80496` (PR #124).** The slice is no longer inert: the `current`
+  pointer, atomic promote/rollback, the near-frozen `/bin/sh` PATH shim, a content-addressed immutable
+  interpreter store, the bounded env-sanitization contract, fail-closed release identity, and the stable/dev
+  split (`bin/forge-dev` is new — before it the machine-wide `forge` and the live-source entry were the SAME
+  npm-link'd artifact).
+- **F29 is CLOSED on the live path.** A promoted release runs under its own pinned absolute interpreter with
+  ambient Node injection neutralized, proven by execution — including the mandatory mutant showing that
+  pinning PATH while leaving `NODE_OPTIONS` live still executes injected code, invisibly (forge still exits 0).
+  An absolute pinned interpreter is necessary but NOT sufficient.
+- **Mechanism corrections forced by four read-only red-security audits** (fourteen confirmed HIGH; eleven
+  closed with executed exploit-proving mutants): the shim now reads a **forge-authored canonical execution
+  descriptor** inside the immutable unit and never parses the release manifest (a hand-rolled POSIX-sh reader
+  diverged from `JSON.parse` on duplicate keys — a candidate that PASSED validation exec'd an attacker's
+  interpreter); the interpreter store is **content-addressed on the full SHA-256** (`process.version` + ABI
+  never pinned content); and **selection evidence is the bytes, never the pathname** (a path-equality
+  shortcut was being treated as provenance).
+- **THREAT BOUNDARY recorded (operator decision).** Protected: untrusted candidates, candidate
+  symlinks/traversal/parser ambiguity, malformed manifests, hostile ambient caller environment, crashes and
+  interrupted publication, concurrent supported Forge operations. **Honest limit:** a principal able to
+  arbitrarily rewrite `$FORGE_HOME` can subvert Forge and the surrounding user account — that principal is
+  the operator's own UID, which already owns the shell startup files, the checkout, the shim and the
+  validator. `chmod`/read-only-at-rest is an operational **accident barrier, not a security boundary against
+  its owner**. Stronger hostile-host protection would need a separate trust domain (another OS principal,
+  root-owned storage, hardware-backed signing) and is **not FG-571 scope**. Full statement: the FG-571 ticket
+  and the plan's §4b.
+- **Still open:** FG-572 (installed-surface compatibility — `forge dashboard` refuses in release mode until
+  it is decided) and FG-555 (R3/R4). **No normative change:** BD-13/BD-14/BD-15, the candidate policies, the
+  slices and the F-row matrix are untouched; only current-state evidence moves.
+
+### 2026-07-15 — current-state map reconciled to landed R1/R2 + exec entry (FG-569, `1b11f25`; FG-573)
+
+- **BD-14's R1/R2 "Currently recorded?" flipped from No to Yes.** FG-569 shipped the single-process `/bin/sh` exec-not-spawn entry (R1 = `process.execPath` is self-evidencing; captured at submission as `meta.json`'s `control` record and surfaced as `launch show`'s `control:` line) and the independent exit-recorder capture of R2 (`runtime.json`). Old, pre-FG-569 launches render "not recorded", never manufactured. **R3/R4 stay No/unknowable** (FG-555, open).
+- **Current system map:** the R1 executable row now distinguishes the shipped exec entry + R1/R2 recording from the still-open source-isolation/promotion axis (FG-571). The header records the landed Slice-1 children (FG-551/567/568/569) and the open ones (FG-570/571/572, FG-555). *(Superseded 2026-07-16: FG-570 landed as `5044c5d`; the open children are now FG-571/572 + FG-555.)*
+- **Slice 1 section** carries a landed-so-far note: children 0–2 are inert (no promotion/`current`/PATH change); children 3–5 remain open, so F29 (control-plane availability under a hostile/node-free environment) is not yet closed on the live path. *(Superseded 2026-07-17: FG-570 landed as `5044c5d` and **FG-571 landed as `2f80496`**, so the slice is no longer inert and **F29 IS closed on the live path**; only FG-572 + FG-555 remain open. See the 2026-07-17 entry.)*
+- **Superseded phrasing.** The "no runtime identity is recorded today" claim in the 2026-07-14 audit-closure entry below described the pre-FG-569 state and is superseded by this reconciliation (that entry now carries an inline superseded marker pointing here). R1/R2 are recorded; R3/R4 are not.
+- **No normative change.** BD-13/BD-14/BD-15 decisions, the candidate policies, the slices, and the F-row matrix (acceptance criteria, tense-neutral) are untouched. Only the current-state/provenance evidence is updated to what has landed.
+
 ### 2026-07-15 — BD-15 premise reconciled to shipped behavior (FG-568, `275ac63`)
 
 - **BD-15's premise is now reconciled to the shipped store evolution.** FG-568 (FG-553 Child 1, `275ac63`) made the ordinary open path (`applyMigrations`) **additive-only**: every open — logically read-only callers' first opens included — runs only additive, backward-compatible migrations and no destructive DDL. The destructive `DROP COLUMN` that previously ran on every open was moved OFF that path into `runDestructiveConvergenceMigration`, invoked explicitly via `forge store converge` (operator-invoked, quiesce-gated, one-way boundary).
@@ -656,7 +698,7 @@ The initiative is complete only when all of the following are true:
 - Extended the acceptance matrix with **F29–F35** and the open **T9** in-flight/lazy-import case; strengthened F4, F21, F26–F28.
 - Restored ascending physical order of the binding decisions (BD-12 → BD-13 → BD-14 → BD-15) after BD-14 was initially placed before BD-13. Decision IDs and bodies are unchanged; an explicit dependency statement before BD-13 now carries the prerequisite relationship that the ordering previously implied.
 - Host evidence cited in this pass (P1–P5, `~/.forge` copies) is operator-supplied and was not reproduced in the authoring environment.
-- Closure fixes from the review of this pass: the executive-outcome diagram is now explicitly target-state and its runtime annotation reflects BD-14's R1–R4 table (no runtime identity is recorded today); **BD-5, BD-6, BD-7, BD-10, and BD-11** now carry an explicit `Status: UNMET` declaration in BD-4's form. Status labels only — no normative content changed.
+- Closure fixes from the review of this pass: the executive-outcome diagram is now explicitly target-state and its runtime annotation reflects BD-14's R1–R4 table (no runtime identity was recorded as of this 2026-07-14 pass — **superseded: R1 and R2 are now recorded per FG-569; see the 2026-07-15 "current-state map reconciled to landed R1/R2 + exec entry" entry above**); **BD-5, BD-6, BD-7, BD-10, and BD-11** now carry an explicit `Status: UNMET` declaration in BD-4's form. Status labels only — no normative content changed.
 
 ### 2026-07-13 — FG-553 control-plane isolation added
 

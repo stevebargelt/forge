@@ -16,9 +16,11 @@ The forge dashboard workspace. Read-only view of `~/.forge/forge.db` plus an HTT
 From the forge repo root:
 
 ```bash
-forge dashboard start              # boots tsx src/server.ts in this dir on port 8024
+./bin/forge-dev dashboard start    # boots tsx src/server.ts in this dir on port 8024
 npm --workspace=dashboard typecheck
 ```
+
+The live-source entry, not the stable `forge`: this workspace has its own dependency tree and is not bundled into a release, so `forge dashboard` refuses in release mode (bundling is deferred to FG-572).
 
 ## Conventions specific to the dashboard
 

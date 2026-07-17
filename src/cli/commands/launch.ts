@@ -1,7 +1,7 @@
 import type { Command } from "commander";
 import { basename } from "node:path";
 import { readFileSync } from "node:fs";
-import { listLaunches, readLaunch, removeLaunch, startLaunch, type LaunchStatus, type LaunchView } from "../../v2/launch.js";
+import { listLaunches, readLaunch, removeLaunch, startLaunch, type ControlRuntime, type LaunchStatus, type LaunchView } from "../../v2/launch.js";
 
 // FG-535: `forge launch` — the supported durable launch path for long-running
 // forge commands (`forge invoke`, `forge next`, `forge review-loop`, …) when
@@ -25,6 +25,16 @@ function statusLine(s: LaunchStatus): string {
   }
 }
 
+// FG-569 (R1): the submitting forge CLI's own runtime + release identity. A
+// release CLI names its manifest id + commit; a dev CLI is the explicit
+// "dev (unversioned)" marker — never a manufactured or inferred release.
+function controlLine(c: ControlRuntime): string {
+  const rel = c.release.kind === "release"
+    ? `release ${c.release.releaseId} (commit ${c.release.commit.slice(0, 7)}, ${c.release.path})`
+    : "dev (unversioned)";
+  return `${c.execPath}  abi ${c.abi} (node ${c.nodeVersion})  ${rel}`;
+}
+
 function renderView(v: LaunchView, logTailLines = 15): string {
   const lines = [
     `launch:   ${v.id}`,
@@ -36,6 +46,18 @@ function renderView(v: LaunchView, logTailLines = 15): string {
     `log:      ${v.logPath}`,
     `status:   ${statusLine(v.status)}`,
   ];
+  // FG-569: R1 and R2 are surfaced as SEPARATE lines. R1 (control) = the CLI that
+  // SUBMITTED the launch; R2 (recorder) = the exit recorder. They are distinct
+  // runtimes and never merged. R1 is ALWAYS rendered: an old record with no R1
+  // says "not recorded" rather than being silently dropped or inferred from R2.
+  lines.push(`control:  ${v.control ? controlLine(v.control) : "not recorded (launch predates R1 capture)"}`);
+  if (v.recorder) {
+    // FG-569 (R2): the recorder's OWN runtime, captured inside the recorder — not
+    // the forge CLI (R1) that submitted the launch.
+    lines.push(`recorder: ${v.recorder.execPath}  abi ${v.recorder.abi} (node ${v.recorder.nodeVersion})${v.recorder.releaseId ? `  release ${v.recorder.releaseId}` : ""}`);
+  } else {
+    lines.push(`recorder: not recorded (exit recorder has not written its runtime yet)`);
+  }
   if (v.forgeIds.runIds.length > 0) lines.push(`runs:     ${v.forgeIds.runIds.join(", ")}`);
   if (v.forgeIds.taskIds.length > 0) lines.push(`tasks:    ${v.forgeIds.taskIds.join(", ")}`);
   if (logTailLines > 0) {

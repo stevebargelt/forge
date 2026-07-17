@@ -124,24 +124,33 @@ decision, not an input to it.
     evidence of R3 (the launched top-level executable) or R4 (nested-shell resolution). Recording R2 and
     calling the launch "provenanced" is precisely the substitution BD-14 forbids.
   - `forge launch` records enough runtime identity to diagnose which control version owns an in-flight
-    command. **Today `LaunchMeta` is 8 fields with no interpreter, Node version, ABI, PATH, or source SHA —
-    no runtime provenance is recoverable post-launch at all** (`src/v2/launch.ts:44-58`).
+    command. **R1/R2 landed (FG-569):** `meta.json` now carries a `control` R1 record (the submitting CLI's
+    execPath/abi/nodeVersion/releaseId) and `runtime.json` the independent R2 exit-recorder record, both
+    surfaced in `forge launch show`. (Pre-FG-569 `LaunchMeta` was 8 fields with no interpreter, Node version,
+    ABI, PATH, or source SHA — no runtime provenance was recoverable post-launch, `src/v2/launch.ts:44-58`.)
+    R3/R4 remain unrecorded (FG-555).
   - **R3/R4 are FG-555's** (Slice 1b). Together the two slices must account for all four; neither may
     assume the other covered its half.
-- **Bounded ABI enforcement.** Assert `NODE_MODULE_VERSION` against the ABI the native bindings were built
-  for — an **upper AND lower** bound, not a version floor. *Today `src/cli/node-preflight.ts:26` admits any
-  major ≥ 24, so it passes Node 26, whose ABI cannot load the binding — the operator gets an opaque native
-  crash instead of the guard's clear message. The guard catches downgrades and waves upgrades through.*
+- **Bounded ABI enforcement — LANDED (FG-570 — `5044c5d`).** Assert `NODE_MODULE_VERSION` against the ABI the native
+  bindings were built for — an **upper AND lower** bound, not a version floor. *Pre-FG-570
+  `src/cli/node-preflight.ts:26` admitted any major ≥ 24, so it passed Node 26, whose ABI cannot load the
+  binding — the operator got an opaque native crash; the floor caught downgrades and waved upgrades through.*
+  FG-570 replaced it with `checkAbi` (exact equality against the release manifest's abi, else the pinned
+  `REQUIRED_ABI`): a mismatched ABI (older OR newer) is refused with a named message before native load.
 - **Installed-surface compatibility** (separate from the atomic closure): `~/.forge` seeds / workflows /
   routing-policy (**verified: copies, not symlinks**), installed hooks and scripts, project-local `.forge`
   command assets, and dashboard assets. For each, state whether promotion **re-installs**, **version-pins**,
   or leaves it **explicitly outside** the control path — and what happens when an installed copy is older
   than the promoted runtime.
-- **Store-version policy (BD-15).** Concurrent Forge processes of different versions share one SQLite by
-  default: a long tmux-owned launch starts under version A, a promotion happens, a new command runs under
-  version B against the same store. Migrations run **unconditionally on every writable open** and include a
-  **destructive `DROP COLUMN`** (`src/store/db.ts:91`). Decide the policy — schema-version gate, refusal,
-  backward-compatible-migration-only, or promotion-quiesce — **before the promotion mechanism closes.**
+- **Store-version policy (BD-15) — RESOLVED (FG-568, `275ac63`).** Concurrent Forge processes of different
+  versions share one SQLite by default: a long tmux-owned launch starts under version A, a promotion happens,
+  a new command runs under version B against the same store. The chosen policy is
+  **backward-compatible-migration-only**: the ordinary open path (`applyMigrations`) is now additive-only on
+  **every** open — logically read-only callers' first opens included — and runs no destructive DDL; the
+  destructive `DROP COLUMN` that once ran here moved off it into `runDestructiveConvergenceMigration`, invoked
+  only via the operator's quiesce-gated, one-way `forge store converge`. (Pre-FG-568 this bullet read
+  "migrations run unconditionally on every writable open and include a destructive `DROP COLUMN`,
+  `src/store/db.ts:91`" — superseded.)
 - **T9 — the in-flight / lazy-import question is settled HERE, empirically, not at closeout.** Determine
   whether a process already running under runtime A is affected by a mid-flight promotion to runtime B
   (dynamic `import()`, lazy requires, open file handles). **The PRD deliberately asserts NEITHER immunity
@@ -198,13 +207,14 @@ Each is a separate acceptance case with a separate pass condition:
 
   > **FG-553 does NOT wait on FG-555 to close.** This slice closes on **R1 + R2 + the R3/R4 contract above**.
   > FG-555 depends on FG-553; FG-553 must therefore never depend back on FG-555, or the two deadlock.
-- **F31 — REFUSAL.** Forcing an **incompatible interpreter** is **REFUSED by the bounded ABI assertion
-  BEFORE any native module is loaded**, with a named, actionable mismatch. Test **ENV-C**: Homebrew-first
-  PATH → v26.3.1 / ABI 147. **Never tested today, and expected to fail badly** — the minimum-major preflight
-  *passes* (26 ≥ 24) and `better-sqlite3` then throws an opaque native error. **F31's pass condition is a
-  clean, pre-load refusal — NOT an opaque `ERR_DLOPEN_FAILED`, and NOT a successful run.** This is the
-  disproof of the claim that the existing guard is adequate closure; without ENV-C the fix is validated only
-  against the downgrade direction it already handles.
+- **F31 — REFUSAL. LANDED (FG-570 — `5044c5d`).** Forcing an **incompatible interpreter** is **REFUSED by the bounded ABI
+  assertion BEFORE any native module is loaded**, with a named, actionable mismatch. Test **ENV-C**:
+  v26.3.1 / ABI 147. *Pre-FG-570 this was never tested and failed badly — the minimum-major preflight passed
+  (26 ≥ 24) and `better-sqlite3` then threw an opaque native error.* FG-570 now EXECUTES this: the host triad
+  (too-new v25/ABI 141, compatible v24/ABI 137, too-old v23/ABI 131) plus a **mandatory** CI arm — `test-extended`
+  provisions a real Node 26/ABI 147 and the F31 test reddens rather than skips. **F31's pass condition is a
+  clean, pre-load refusal — NOT an opaque `ERR_DLOPEN_FAILED`, and NOT a successful run.** The upgrade
+  direction the old floor waved through is now the mutation-proven red baseline.
 - **F35** — version-skew store compatibility: old and new Forge processes against one SQLite, under the
   BD-15 policy decided in this slice.
 - `forge upgrade` and the "commit and it's live" workflow are reconciled, and the docs say which is in force.

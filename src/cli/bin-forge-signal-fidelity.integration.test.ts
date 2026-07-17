@@ -1,83 +1,105 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
+import { findGitRoot } from "../util/git-root.js";
 
-// FG-567 — bin/forge must report the child's fate faithfully.
+// FG-567 / FG-569 — the LIVE control entry (bin/forge) must report its own fate
+// faithfully: a signalled death is a signal, a numeric exit stays that number,
+// and neither is ever laundered to 0.
 //
-// TIER: integration. These cases spawn real processes and kill them, so per FG-408 they are excluded
-// from the fast unit tier — `npm test` does NOT execute them, and a green `npm test` is NOT evidence
-// for this ticket. Verify with `npm run test:integration` (or `test:extended`); merges are gated on
-// them by CI's required `test-extended` job (FG-495).
+// TIER: integration. These cases spawn the real bin/forge and kill it, so per
+// FG-408 they are excluded from the fast unit tier — `npm test` does NOT run them.
+// Verify with `npm run test:integration` (or `test:extended`); CI's required
+// `test-extended` job gates merges on them (FG-495).
 //
-// The harness below is bin/forge's REAL source with ONLY the spawn TARGET swapped (so the
-// child is a script this test controls instead of the tsx CLI). The exit handler under test
-// is bin/forge's own, verbatim — so the mutations this file exists to catch are mutations of
-// bin/forge itself:
+// FG-569 rewrote this file for EXEC-not-spawn. bin/forge is now `#!/bin/sh` that
+// `exec`s node with tsx in-process — the sh process is REPLACED by node, so there
+// is no wrapper between the OS signal and the process the CLI runs in. That means
+// the fidelity property is a property of the REAL artifact, not a grafted harness:
+// we run the ACTUAL bin/forge and read `(code, signal)` from a DIRECT child
+// observer (this test process is bin/forge's parent).
 //
-//   - `child.on("exit", (code) => process.exit(code ?? 0))`  → the SIGKILL/SIGTERM cases fail
-//     (a killed child reports code=null, so the wrapper would exit 0: a killed control plane
-//     claiming success).
-//   - `if (signal) process.exit(128)`                        → the SIGKILL/SIGTERM cases fail
-//     (128 is a number, not OS-signal evidence; a direct observer must still see `signal`).
-//
-// Every assertion reads the DIRECT observer's `(code, signal)` — this test process is the
-// wrapper's parent. It deliberately does NOT read a shell's `$?`: a shell encodes a signalled
-// exit as 128+signum, which is not itself signal evidence (a program can deliberately exit 143
-// — the "numeric 143" case below pins exactly that distinction).
+// A regression that RE-INTRODUCED a swallowing wrapper — bin/forge spawning a node
+// child and exiting `code ?? 0`, or translating a signal into a numeric 0 — would
+// make the SIGKILL/SIGTERM cases below observe `{code:0}` (or a lost signal) and
+// fail. The exec form is what keeps them green.
 
-const BIN_FORGE = resolve(import.meta.dirname, "..", "..", "bin", "forge");
-const REAL_SPAWN = `spawn(tsx, [entry, ...process.argv.slice(2)], { stdio: "inherit" })`;
-const TEST_SPAWN = `spawn(process.execPath, process.argv.slice(2), { stdio: "inherit" })`;
-
-let harness: string;
+const BIN_FORGE = join(findGitRoot(process.cwd()), "bin", "forge");
 let dir: string;
 
 before(() => {
-  const source = readFileSync(BIN_FORGE, "utf8");
-  assert.ok(
-    source.includes(REAL_SPAWN),
-    `bin/forge's spawn call changed shape — this test can no longer graft its exit handler onto a controllable child. Expected to find:\n  ${REAL_SPAWN}`,
-  );
   dir = mkdtempSync(join(tmpdir(), "fg567-"));
-  harness = join(dir, "wrapper.mjs");
-  writeFileSync(harness, source.replace(REAL_SPAWN, TEST_SPAWN));
 });
-
 after(() => rmSync(dir, { recursive: true, force: true }));
 
-/** Spawns the wrapper as a DIRECT child of this test process and reports what we observe of it. */
-function observeWrapper(childScript: string): Promise<{ code: number | null; signal: string | null }> {
+// A killed wrapper that somehow stayed alive would otherwise stall `node --test`
+// (no default per-test timeout). Cap each case so a regression fails loud.
+const CASE = { timeout: 20_000 };
+
+/** Run the REAL bin/forge and report what a DIRECT child observer sees of it. */
+function runForge(
+  args: string[],
+  opts: { onSpawn?: (child: import("node:child_process").ChildProcess) => void } = {},
+): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
   return new Promise((res, rej) => {
-    const wrapper = spawn(process.execPath, [harness, "-e", childScript], { stdio: "ignore" });
-    wrapper.on("exit", (code, signal) => res({ code, signal }));
-    wrapper.on("error", rej);
+    // stdin is a pipe we hold OPEN so a stdin-reading command blocks instead of
+    // seeing EOF; stdout/stderr ignored — we only care about the exit fate.
+    const child = spawn(BIN_FORGE, args, { stdio: ["pipe", "ignore", "ignore"], env: process.env });
+    child.on("exit", (code, signal) => res({ code, signal }));
+    child.on("error", rej);
+    opts.onSpawn?.(child);
   });
 }
 
-// A wrapper that never exits (e.g. a future bin/forge that swallows the re-raised signal while
-// holding the event loop open) would otherwise stall `node --test` indefinitely — it has no
-// default per-test timeout. Cap each case so a regression fails loudly instead of hanging CI.
-const CASE = { timeout: 10_000 };
+/** Spawn the REAL bin/forge on a command that BLOCKS reading stdin (so the process
+ *  is genuinely long-running), let it come up, then deliver `sig` and observe. */
+async function killLongRunningForge(sig: NodeJS.Signals) {
+  // `backlog file --body -` reads the body from stdin (readFileSync(0)) before it
+  // touches anything else, so with an open stdin pipe forge blocks there. A real
+  // exec'd node process, alive until we signal it.
+  return runForge(["backlog", "file", "sig-fidelity", "--body", "-", "--project", dir], {
+    onSpawn: (child) => {
+      // Give the exec + tsx startup a moment so the signal lands on the running
+      // node process (post-exec), not the microsecond of /bin/sh before exec.
+      setTimeout(() => child.kill(sig), 800);
+    },
+  });
+}
 
-test("bin/forge: child exits 0 → observer sees code=0, signal=null", CASE, async () => {
-  assert.deepEqual(await observeWrapper("process.exit(0)"), { code: 0, signal: null });
+test("bin/forge: a clean exit 0 → observer sees code=0, signal=null", CASE, async () => {
+  assert.deepEqual(await runForge(["--version"]), { code: 0, signal: null });
 });
 
-test("bin/forge: child NUMERICALLY exits 143 → observer sees code=143, signal=null (stays numeric)", CASE, async () => {
-  // A deliberate exit(143) is NOT a signalled death. The wrapper must pass the number through
-  // rather than translating it into SIGTERM — otherwise "exited 143" and "killed by SIGTERM"
-  // become indistinguishable to anything reading forge's exit.
-  assert.deepEqual(await observeWrapper("process.exit(143)"), { code: 143, signal: null });
+test("bin/forge: a NUMERIC non-zero exit is preserved → observer sees code>0, signal=null (never a signal, never 0)", CASE, async () => {
+  // An unknown subcommand makes commander exit non-zero. The point: a numeric
+  // failure exit stays a NUMBER — it is neither laundered to 0 nor turned into a
+  // signalled death (which is how a killed control plane must look, and only that).
+  const { code, signal } = await runForge(["definitely-not-a-real-subcommand"]);
+  assert.equal(signal, null, "a numeric exit is not a signalled death");
+  assert.ok(typeof code === "number" && code > 0, `numeric non-zero exit preserved, got code=${code}`);
 });
 
-test("bin/forge: child killed by SIGTERM → observer sees code=null, signal=SIGTERM", CASE, async () => {
-  assert.deepEqual(await observeWrapper("process.kill(process.pid, 'SIGTERM')"), { code: null, signal: "SIGTERM" });
+test("bin/forge killed by SIGTERM → observer sees code=null, signal=SIGTERM (never exit 0)", CASE, async () => {
+  assert.deepEqual(await killLongRunningForge("SIGTERM"), { code: null, signal: "SIGTERM" });
 });
 
-test("bin/forge: child killed by SIGKILL → observer sees code=null, signal=SIGKILL (never exit 0)", CASE, async () => {
-  // The reported bug: SIGKILL gives code=null, and `code ?? 0` turned that into a success exit.
-  assert.deepEqual(await observeWrapper("process.kill(process.pid, 'SIGKILL')"), { code: null, signal: "SIGKILL" });
+test("bin/forge killed by SIGKILL → observer sees code=null, signal=SIGKILL (never exit 0)", CASE, async () => {
+  // The reported bug shape: SIGKILL gives code=null, and a `code ?? 0` wrapper
+  // turned that into a success exit — a killed control plane claiming it shipped.
+  assert.deepEqual(await killLongRunningForge("SIGKILL"), { code: null, signal: "SIGKILL" });
+});
+
+test("bin/forge: the process the signal hits IS the CLI (exec, one process) — a re-introduced wrapper would launder from a grandchild", CASE, () => {
+  // Signal fidelity above is only structurally guaranteed because exec leaves ONE
+  // process: the process we spawn IS the one running the CLI (and loading the
+  // binding). A swallowing wrapper (bin/forge spawning a tsx child and exiting
+  // `code ?? 0`) would run the CLI in a grandchild — so the CLI's pid would differ
+  // from the launched pid, and the `code ?? 0` launder this file guards would be
+  // reachable again. Pin the single-process property so that regression fails here.
+  const r = spawnSync(BIN_FORGE, ["release", "provenance", "--json"], { encoding: "utf8", env: process.env });
+  assert.equal(r.status, 0, `provenance failed: ${r.stderr}`);
+  assert.equal(JSON.parse(r.stdout).pid, r.pid, "the CLI's pid IS the launched pid — exec, not a spawned wrapper");
 });

@@ -45,6 +45,8 @@ A TypeScript Node CLI can either be (a) compiled to JavaScript at build time and
 - One source of truth (the .ts files)
 - `package.json` still declares the bin so `npm link` works for symlinking
 
+  > **SUPERSEDED by FG-571 (2026-07):** `package.json` now declares **two** bins — `forge` and `forge-dev`. `bin/forge-dev` is the live-source entry this ADR describes; machine-wide `forge` is a promoted, immutable release run by its own pinned interpreter and reached via an explicitly installed shim, not an `npm link` symlink. The tsx/no-build decision below still stands for the live-source entry; only this `npm link` claim is superseded. Current source of truth: `README.md` (bootstrap) and `src/cli/commands/release.ts`.
+
 **Cons**:
 - ~200ms tsx startup overhead (negligible for an interactive CLI)
 - Requires `tsx` as a dev dependency
@@ -76,6 +78,8 @@ A TypeScript Node CLI can either be (a) compiled to JavaScript at build time and
 - `bin/forge` is a Node script (not a shell script) so it works the same on macOS and Linux
 - It resolves `tsx` from the local `node_modules/.bin/tsx` to avoid PATH issues
 - `package.json` declares `"bin": { "forge": "./bin/forge" }` so `npm link` (or `npm install -g`) wires up a global `forge` command
+
+  > **SUPERSEDED by FG-571 (2026-07):** `package.json` now declares `"bin": { "forge": "./bin/forge", "forge-dev": "./bin/forge-dev" }`, and neither `npm link` nor `npm install -g` is the supported way to get a machine-wide `forge`. That is now: `release build` → `release promote` (an atomic `~/.forge/current` pointer swap) → `release install-shim` once, run through `./bin/forge-dev`. See `README.md` and `src/cli/commands/release.ts`.
 - A `npm run build` target (`tsc -p .`) is wired up but unused day-to-day; it's there for future packaging
 
 ---

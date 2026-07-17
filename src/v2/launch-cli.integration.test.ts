@@ -11,11 +11,13 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { LAUNCHES_DIR, startLaunch, type LaunchView, type TmuxRunner } from "./launch.js";
+import { buildWrapperCommand, LAUNCHES_DIR, startLaunch, type LaunchView, type TmuxRunner } from "./launch.js";
+import { buildRelease, thawReleaseTree, type BuildReleaseResult } from "./release.js";
+import { findGitRoot } from "../util/git-root.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const entry = resolve(here, "..", "cli", "index.ts");
@@ -252,6 +254,171 @@ test("FG-535 CLI: list and show render the operator surface, and rm cleans up", 
   assert.equal(rm.status, 0, rm.stderr);
   assert.ok(!existsSync(join(LAUNCHES_DIR, meta.id)), "the record is gone");
   assert.ok(!tmuxSessionAlive(meta.tmuxSession), "the remain-on-exit pane is cleaned up");
+});
+
+test("FG-569 R2 (END-TO-END through a BUILT release): forge launch show surfaces the recorder's provenance in BOTH --json and human output", async () => {
+  // The R1 operator-surface test above checks only pre-FG-569 fields; the R2
+  // end-to-end test (launch-r2.integration.test.ts) reads runtime.json DIRECTLY,
+  // never through the CLI. This closes the gap: BUILD a real release, launch through
+  // its generated entry (which exports FORGE_RELEASE_ID from its own manifest — no
+  // hand-injected env), and assert the recorder provenance the whole way through the
+  // OPERATOR SURFACE — `forge launch show --json` and the human `recorder:` line.
+  const relParent = mkdtempSync(join(tmpdir(), "fg569-show-release-"));
+  const releaseDir = join(relParent, "release");
+  let built: BuildReleaseResult;
+  try {
+    built = buildRelease({ sourceRoot: findGitRoot(process.cwd()), home: join(relParent, "build-home"), outDir: releaseDir });
+  } catch (e) {
+    // A dirty/non-git source can't be built into a release (assertCommitDescribesTree);
+    // that is an environment precondition, not a launch-surface regression.
+    thawReleaseTree(relParent);
+    rmSync(relParent, { recursive: true, force: true });
+    assert.fail(`could not build a release to drive the operator surface: ${(e as Error).message}`);
+  }
+
+  try {
+    // Launch THROUGH the built entry so FORGE_RELEASE_ID is exported by the entry
+    // from its manifest, into the SAME FORGE_HOME the forge() CLI reads back.
+    const run = spawnSync(built.entryPath, ["launch", "run", "--name", "r2show", "--json", "--", "true"], { encoding: "utf8", env: process.env });
+    assert.equal(run.status, 0, `forge launch run through the release entry failed: ${run.stderr}`);
+    const meta = JSON.parse(run.stdout) as LaunchView;
+    started.push(meta.id);
+
+    // Poll the OPERATOR SURFACE (not runtime.json) for the recorder record.
+    await waitFor("recorder provenance to appear in show --json", () => show(meta.id).recorder !== undefined);
+    const v = show(meta.id);
+    assert.ok(v.recorder, "forge launch show --json surfaces the recorder's runtime");
+    // execPath: the recorder ran under the release's PINNED interpreter. realpath both
+    // sides — the recorder canonicalizes process.execPath (macOS /var → /private/var).
+    assert.equal(realpathSync(v.recorder!.execPath), realpathSync(built.manifest.interpreter), "recorder.execPath is the release's pinned interpreter");
+    assert.equal(v.recorder!.abi, process.versions.modules, "recorder.abi is the running ABI");
+    assert.equal(v.recorder!.releaseId, built.manifest.id, "recorder.releaseId is the release's manifest id — reached via the CLI, sourced from the entry's manifest");
+    assert.notEqual(v.recorder!.releaseId, null, "R2 release-id is live for a real release, not the null the bug shipped");
+
+    // The HUMAN surface renders the recorder line with the same provenance.
+    const human = forge(["launch", "show", meta.id]);
+    assert.equal(human.status, 0, human.stderr);
+    assert.match(human.stdout, new RegExp(`recorder:\\s+\\S+\\s+abi ${v.recorder!.abi} \\(node ${process.version.replace(/\./g, "\\.")}\\)`), "human output carries the recorder execPath + abi line");
+    assert.match(human.stdout, new RegExp(`release ${built.manifest.id}`), "human recorder line names the release id");
+  } finally {
+    thawReleaseTree(relParent);
+    rmSync(relParent, { recursive: true, force: true });
+  }
+});
+
+test("FG-569 R1 (release A submits, DISTINGUISHABLE recorder): forge launch show surfaces R1 (A) and R2 (distinct) SEPARATELY — in --json AND human, never merged, R1 never inferred from R2", async () => {
+  // The mutant this kills is the R1 mirror of the R2 one: "infer R1 from R2 (read
+  // the submitter's identity off the recorder)". A launch is submitted by a BUILT
+  // release A — so R1 = release A's CLI identity (its pinned interpreter, id, commit),
+  // captured inside release A's process at submission. The recorder is then made a
+  // GENUINELY DIFFERENT runtime (a copied interpreter, a distinct baked release id) —
+  // the same two-interpreter setup the R2 tests use. If the surface derived R1 from R2,
+  // R1 would show the recorder's execPath/id; it must show release A's instead.
+  const relParent = mkdtempSync(join(tmpdir(), "fg569-r1-release-"));
+  const releaseDir = join(relParent, "release");
+  let built: BuildReleaseResult;
+  try {
+    built = buildRelease({ sourceRoot: findGitRoot(process.cwd()), home: join(relParent, "build-home"), outDir: releaseDir });
+  } catch (e) {
+    thawReleaseTree(relParent);
+    rmSync(relParent, { recursive: true, force: true });
+    assert.fail(`could not build release A to submit the launch: ${(e as Error).message}`);
+  }
+
+  const altNode = join(relParent, "alt-node");
+  try {
+    // Submit the launch THROUGH release A's entry, into the test-scoped FORGE_HOME the
+    // forge() CLI reads back. meta.json.control (R1) is captured inside release A's
+    // process from release A's OWN manifest — authentic, not hand-written.
+    const run = spawnSync(built.entryPath, ["launch", "run", "--name", "r1a", "--json", "--", "true"], { encoding: "utf8", env: process.env });
+    assert.equal(run.status, 0, `forge launch run through release A failed: ${run.stderr}`);
+    const meta = JSON.parse(run.stdout) as LaunchView;
+    started.push(meta.id);
+
+    // Wait for release A's own recorder to finish (its exit record), THEN replace
+    // runtime.json (R2) with a recorder run under a genuinely DIFFERENT interpreter and
+    // a DISTINCT baked release id — a copy of node, exactly the R2 two-interpreter setup.
+    await waitFor("release A's recorder to finish", () => existsSync(join(LAUNCHES_DIR, meta.id, "exit")));
+    copyFileSync(process.execPath, altNode);
+    chmodSync(altNode, 0o755);
+    assert.notEqual(realpathSync(altNode), realpathSync(process.execPath), "alt interpreter is a genuinely different path");
+    const throwDir = mkdtempSync(join(relParent, "recorder-"));
+    const rtPath = join(LAUNCHES_DIR, meta.id, "runtime.json");
+    const wrapper = buildWrapperCommand(["true"], join(throwDir, "log"), join(throwDir, "exit"), rtPath, altNode, "release-B-recorder-distinct");
+    const rec = spawnSync("/bin/sh", ["-c", wrapper], { encoding: "utf8", env: process.env });
+    assert.equal(rec.status, 0, `distinct recorder failed: ${rec.stderr}`);
+
+    // The OPERATOR SURFACE (--json): R1 and R2 are separate fields, each correct.
+    const v = show(meta.id);
+    assert.ok(v.control, "R1 (control) is surfaced");
+    assert.ok(v.recorder, "R2 (recorder) is surfaced");
+    assert.equal(v.control!.release.kind, "release", "R1 is release A's identity, kind release");
+    assert.equal(v.control!.release.releaseId, built.manifest.id, "R1 releaseId is release A's manifest id");
+    assert.equal(v.control!.release.kind === "release" && v.control!.release.commit, built.manifest.commit, "R1 commit is release A's commit");
+    assert.equal(realpathSync(v.control!.execPath), realpathSync(built.manifest.interpreter), "R1 execPath is release A's pinned interpreter");
+    assert.equal(realpathSync(v.recorder!.execPath), realpathSync(altNode), "R2 execPath is the DISTINCT recorder interpreter");
+    assert.equal(v.recorder!.releaseId, "release-B-recorder-distinct", "R2 releaseId is the recorder's own baked id");
+    // The kill: the two identities are DISTINCT. A surface inferring R1 from R2 cannot do this.
+    assert.notEqual(realpathSync(v.control!.execPath), realpathSync(v.recorder!.execPath), "R1 and R2 execPaths differ");
+    assert.notEqual(v.control!.release.releaseId, v.recorder!.releaseId, "R1 and R2 release ids differ");
+
+    // The HUMAN surface: two distinct lines, control (R1) then recorder (R2).
+    const human = forge(["launch", "show", meta.id]);
+    assert.equal(human.status, 0, human.stderr);
+    assert.match(human.stdout, new RegExp(`control:.*release ${built.manifest.id} \\(commit ${built.manifest.commit.slice(0, 7)}`), "human R1 line names release A's id + commit");
+    assert.match(human.stdout, new RegExp(`recorder:.*release release-B-recorder-distinct`), "human R2 line names the distinct recorder id");
+  } finally {
+    thawReleaseTree(relParent);
+    rmSync(relParent, { recursive: true, force: true });
+  }
+});
+
+test("FG-569 R1 (DEV launch): forge launch show records R1 as the explicit dev/unversioned identity (kind dev, releaseId null); R2 is null-release", async () => {
+  // A dev CLI (bin/forge via the tsx entry — no release manifest) must record an
+  // EXPLICIT dev marker, never a manufactured id and never omitted-as-if-release.
+  const meta = launchRun("devr1", ["true"]);
+
+  const v = show(meta.id);
+  assert.ok(v.control, "R1 is recorded for a dev launch too — never dropped");
+  assert.equal(v.control!.release.kind, "dev", "a dev CLI records kind dev");
+  assert.equal(v.control!.release.releaseId, null, "dev R1 releaseId is explicitly null, not a manufactured id");
+  assert.ok(typeof v.control!.execPath === "string" && v.control!.execPath.length > 0, "R1 still captures the dev CLI's own execPath");
+
+  // R2: a dev launch's recorder records a null release too.
+  await waitFor("the dev recorder to write its runtime", () => show(meta.id).recorder !== undefined);
+  assert.equal(show(meta.id).recorder!.releaseId, null, "R2 release is null for a dev launch");
+
+  const human = forge(["launch", "show", meta.id]);
+  assert.equal(human.status, 0, human.stderr);
+  assert.match(human.stdout, /control:.*dev \(unversioned\)/, "human R1 line marks a dev launch explicitly");
+});
+
+test("FG-569 R1 (OLD record, no R1 field): forge launch show displays R1 as not-recorded — never crashes, never manufactures an identity", () => {
+  // A launch record written BEFORE FG-569 has no `control` field. The surface must
+  // load it, say "not recorded", and never invent an execPath/release for it.
+  const oldId = "launch-oldrec-legacy1";
+  const oldDir = join(LAUNCHES_DIR, oldId);
+  mkdirSync(oldDir, { recursive: true });
+  writeFileSync(join(oldDir, "meta.json"), JSON.stringify({
+    id: oldId,
+    command: ["forge", "review-loop", "FG-OLD"],
+    tmuxSession: `forge-${oldId}`,
+    launcherPid: 4242,
+    ownerPid: 4243,
+    startedAt: "2026-01-01T00:00:00.000Z",
+    logPath: join(oldDir, "out.log"),
+    cwd: "/project",
+  }, null, 2));
+  // A terminal exit record so the surface never needs a (nonexistent) tmux session.
+  writeFileSync(join(oldDir, "exit"), `{"code":0,"signal":null}`);
+
+  const human = forge(["launch", "show", oldId]);
+  assert.equal(human.status, 0, `show of a pre-R1 record must not crash: ${human.stderr}`);
+  assert.match(human.stdout, /control:\s+not recorded/, "R1 is shown as not-recorded for an old record");
+  assert.doesNotMatch(human.stdout, /control:.*abi /, "no manufactured execPath/abi for an old record");
+
+  const json = show(oldId);
+  assert.equal(json.control, undefined, "no R1 field is manufactured in --json for a pre-R1 record");
 });
 
 test("FG-535 CLI: rm refuses a RUNNING launch without --force — removal must never be what kills the work", () => {

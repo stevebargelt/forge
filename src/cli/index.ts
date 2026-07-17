@@ -1,4 +1,4 @@
-import "./node-preflight.js"; // FG-336: must be FIRST — fail clean on too-old Node before better-sqlite3 loads
+import "./node-preflight.js"; // FG-336/FG-570: must be FIRST — fail clean on an ABI-incompatible Node before better-sqlite3 loads
 import { Command } from "commander";
 import { version } from "../../package.json" with { type: "json" };
 import { registerNew } from "./commands/new.js";
@@ -47,6 +47,7 @@ import { registerReadiness } from "./commands/readiness.js";
 import { registerRecordHostVerification } from "./commands/record-host-verification.js";
 import { registerPublish } from "./commands/publish.js";
 import { registerStore } from "./commands/store.js";
+import { registerRelease } from "./commands/release.js";
 import { loadNotifyEnv } from "../notify/load-env.js";
 
 // Populate process.env from ~/.forge/notify.env before any command runs. Shell
@@ -111,6 +112,7 @@ registerReadiness(program);
 registerRecordHostVerification(program);
 registerPublish(program);
 registerStore(program);
+registerRelease(program);
 
 program.parseAsync(process.argv).catch((err) => {
   console.error(`forge: ${(err as Error).message}`);
