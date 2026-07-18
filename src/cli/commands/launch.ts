@@ -1,7 +1,7 @@
 import type { Command } from "commander";
 import { basename } from "node:path";
 import { readFileSync } from "node:fs";
-import { listLaunches, readLaunch, removeLaunch, startLaunch, type ControlRuntime, type LaunchStatus, type LaunchView } from "../../v2/launch.js";
+import { controlRuntimeProfile, listLaunches, readLaunch, removeLaunch, startLaunch, type ControlRuntime, type LaunchStatus, type LaunchView, type WorkloadNestedShell, type WorkloadTopLevel } from "../../v2/launch.js";
 
 // FG-535: `forge launch` — the supported durable launch path for long-running
 // forge commands (`forge invoke`, `forge next`, `forge review-loop`, …) when
@@ -35,6 +35,26 @@ function controlLine(c: ControlRuntime): string {
   return `${c.execPath}  abi ${c.abi} (node ${c.nodeVersion})  ${rel}`;
 }
 
+// FG-555 (R3): the launched top-level executable, resolved at spawn time. A
+// distinct fact from R1/R2 (forge's own runtimes) — argv is a string, this is
+// its resolution.
+function workloadR3Line(r3: WorkloadTopLevel): string {
+  switch (r3.kind) {
+    case "captured": return `R3 captured — argv[0] '${r3.argv0}' is a path: ${r3.execPath}`;
+    case "derived": return `R3 derived — argv[0] '${r3.argv0}' resolved on PATH → ${r3.execPath}`;
+    case "unresolved": return `R3 unresolved — argv[0] '${r3.argv0}' not found on PATH (recorded as fact, never guessed)`;
+  }
+}
+
+// FG-555 (R4): whether a caller-supplied nested shell will resolve node/npm/forge
+// later, inside the workload. UNKNOWABLE is stated explicitly — argv never implies
+// R4 is covered.
+function workloadR4Line(r4: WorkloadNestedShell): string {
+  return r4.kind === "unknowable"
+    ? `R4 UNKNOWABLE — nested shell '${r4.shell}' resolves node/npm/forge at runtime; not knowable at launch (argv does not cover it)`
+    : `R4 not applicable — argv executed directly, no nested shell resolves anything later`;
+}
+
 function renderView(v: LaunchView, logTailLines = 15): string {
   const lines = [
     `launch:   ${v.id}`,
@@ -57,6 +77,14 @@ function renderView(v: LaunchView, logTailLines = 15): string {
     lines.push(`recorder: ${v.recorder.execPath}  abi ${v.recorder.abi} (node ${v.recorder.nodeVersion})${v.recorder.releaseId ? `  release ${v.recorder.releaseId}` : ""}`);
   } else {
     lines.push(`recorder: not recorded (exit recorder has not written its runtime yet)`);
+  }
+  // FG-555: R3/R4 — the launched workload's execution environment, distinct from
+  // R1/R2. Always rendered; a pre-FG-555 launch says "not recorded", never inferred.
+  if (v.workload) {
+    lines.push(`workload: ${workloadR3Line(v.workload.r3)}`);
+    lines.push(`nested:   ${workloadR4Line(v.workload.r4)}`);
+  } else {
+    lines.push(`workload: not recorded (launch predates R3/R4 capture, or the recorder has not run yet)`);
   }
   if (v.forgeIds.runIds.length > 0) lines.push(`runs:     ${v.forgeIds.runIds.join(", ")}`);
   if (v.forgeIds.taskIds.length > 0) lines.push(`tasks:    ${v.forgeIds.taskIds.join(", ")}`);
@@ -81,9 +109,14 @@ export function registerLaunch(program: Command): void {
     .description("Start a command in a detached, uniquely named tmux session; returns immediately")
     .option("--name <name>", "short name used in the launch id and tmux session")
     .option("--json", "machine-readable output")
+    .option(
+      "--require-control-toolchain",
+      "FG-555: declare the launch-environment contract — pin the workload's PATH to forge's own control-runtime node and REFUSE before executing if the resolved toolchain's ABI does not match (for Forge-owned unattended verification callers; do not depend on ambient login-shell PATH)",
+    )
     .argument("<command...>", "the command to run (prefix with -- to stop option parsing)")
-    .action((command: string[], opts: { name?: string; json?: boolean }) => {
-      const meta = startLaunch(command, { name: opts.name });
+    .action((command: string[], opts: { name?: string; json?: boolean; requireControlToolchain?: boolean }) => {
+      const profile = opts.requireControlToolchain ? controlRuntimeProfile({ label: "control-runtime" }) : undefined;
+      const meta = startLaunch(command, { name: opts.name, profile });
       if (opts.json) {
         console.log(JSON.stringify(meta, null, 2));
         return;

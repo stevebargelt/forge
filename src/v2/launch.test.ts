@@ -4,7 +4,19 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildWrapperCommand, classifyExit, extractForgeIds, parseExitRecord, parseRecorderRuntime, shellQuote } from "./launch.js";
+import { dirname } from "node:path";
+import {
+  assertProfileToolchain,
+  buildWrapperCommand,
+  classifyExit,
+  controlRuntimeProfile,
+  deriveWorkloadProvenance,
+  extractForgeIds,
+  parseExitRecord,
+  parseRecorderRuntime,
+  parseWorkloadProvenance,
+  shellQuote,
+} from "./launch.js";
 
 test("FG-535 classify: 0 is exited_ok", () => {
   assert.deepEqual(classifyExit({ code: 0, signal: null }), { state: "exited_ok", code: 0 });
@@ -74,6 +86,72 @@ test("FG-535 wrapper: runs the target under a node runner that records signal se
   // FG-569: the runtime.json path is threaded before the target argv so the
   // recorder writes its OWN R2 runtime as its first act.
   assert.ok(w.endsWith(`'/l/exit' '/l/out.log' '/l/runtime.json' 'forge' 'review-loop' 'FG-1'`), w);
+});
+
+test("FG-555 argv preservation: buildWrapperCommand spawns argv[0] DIRECTLY — no synthesized bash / login shell around the caller argv", () => {
+  const w = buildWrapperCommand(["npm", "run", "test:all"], "/l/out.log", "/l/exit", "/l/runtime.json", "/usr/bin/node");
+  // The ONLY shell is the /bin/sh tmux uses to run the `node -e` wrapper. The
+  // CALLER argv is never wrapped: the wrapper's trailing tokens are EXACTLY the
+  // shell-quoted submitted argv, in order.
+  assert.ok(w.endsWith(`'/l/exit' '/l/out.log' '/l/runtime.json' 'npm' 'run' 'test:all'`), w);
+  // No login shell was synthesized around the caller argv (these single-quoted
+  // forms are how a synthesized argv[0]='bash' / '-lc' would appear).
+  assert.ok(!w.includes(`'bash'`), "forge must not synthesize a bash argv[0]");
+  assert.ok(!w.includes(`'-lc'`) && !w.includes(`'--login'`), "forge must not synthesize a login shell");
+  // And the recorder's own spawn is spawnSync(a0, …) — argv[0] directly.
+  assert.ok(w.includes("spawnSync(a0,a.slice(1)"), "the recorder spawns argv[0] directly, not through a shell");
+});
+
+test("FG-555 R3/R4 derivation: captured path, derived-on-PATH, unresolved, and a nested-shell R4 unknowable", () => {
+  // R3 captured — argv[0] is itself a path, so the string IS the resolution.
+  assert.deepEqual(deriveWorkloadProvenance(["/opt/node", "x"]).r3, { kind: "captured", argv0: "/opt/node", execPath: "/opt/node" });
+
+  // R3 derived — a bare name resolved against PATH (resolver injected).
+  const d = deriveWorkloadProvenance(["node", "-v"], { path: "/b", resolve: (n) => (n === "node" ? "/b/node" : undefined) });
+  assert.deepEqual(d.r3, { kind: "derived", argv0: "node", execPath: "/b/node" });
+  assert.equal(d.r4.kind, "not_applicable", "a direct executable has no later nested-shell resolution");
+
+  // R3 unresolved — recorded as fact, never guessed.
+  assert.deepEqual(deriveWorkloadProvenance(["ghost"], { resolve: () => undefined }).r3, { kind: "unresolved", argv0: "ghost" });
+
+  // R4 unknowable — a caller-supplied nested login shell; argv NEVER implies it is covered.
+  const s = deriveWorkloadProvenance(["bash", "-lc", "npm test"], { resolve: () => "/bin/bash" });
+  assert.equal(s.r4.kind, "unknowable");
+  assert.equal(s.r4.kind === "unknowable" ? s.r4.shell : "", "bash");
+  assert.equal(s.r3.kind, "derived", "R3 still honestly names the shell binary as the top-level executable");
+});
+
+test("FG-555 workload record: valid R3/R4 parses; a missing required field is omitted, never guessed", () => {
+  const good = { r3: { kind: "captured", argv0: "/n", execPath: "/n" }, r4: { kind: "unknowable", shell: "bash", reason: "r" } };
+  assert.deepEqual(parseWorkloadProvenance(JSON.stringify(good)), good);
+  assert.equal(parseWorkloadProvenance(JSON.stringify({ r3: { kind: "captured", argv0: "/n" }, r4: { kind: "not_applicable", reason: "r" } })), undefined, "captured without execPath is malformed — omitted");
+  assert.equal(parseWorkloadProvenance(JSON.stringify({ r3: { kind: "derived", argv0: "n", execPath: "/n" } })), undefined, "missing r4 is malformed");
+  assert.equal(parseWorkloadProvenance("garbage"), undefined);
+});
+
+test("FG-555 control-runtime profile: pins forge's OWN node dir at the FRONT of PATH and requires the control ABI", () => {
+  const p = controlRuntimeProfile({ label: "control-runtime" });
+  assert.equal(p.requireAbi, process.versions.modules, "the contract requires the control runtime's own ABI");
+  assert.equal(p.path.split(":")[0], dirname(process.execPath), "the control node dir is FIRST on the pinned PATH");
+  assert.equal(p.label, "control-runtime");
+});
+
+test("FG-555 toolchain guard: a mismatched ABI is a NAMED refusal; a match passes; an unresolvable node has nothing to assert", () => {
+  const profile = { path: "/p", requireAbi: "137", label: "control-runtime" };
+  const resolve = () => "/p/node";
+
+  const bad = assertProfileToolchain(profile, { resolve, probeAbi: () => "131" });
+  assert.equal(bad.ok, false);
+  assert.match(bad.ok === false ? bad.message : "", /refusing to run/);
+  assert.match(bad.ok === false ? bad.message : "", /ABI 137/);
+  assert.match(bad.ok === false ? bad.message : "", /131/);
+
+  assert.deepEqual(assertProfileToolchain(profile, { resolve, probeAbi: () => "137" }), { ok: true }, "a matching ABI passes");
+
+  const unreadable = assertProfileToolchain(profile, { resolve, probeAbi: () => undefined });
+  assert.equal(unreadable.ok, false, "an unreadable ABI is not waved through (reuses checkAbi's unverifiable-ABI refusal)");
+
+  assert.deepEqual(assertProfileToolchain(profile, { resolve: () => undefined, probeAbi: () => "999" }), { ok: true }, "no node resolvable on the pinned PATH ⇒ nothing to assert");
 });
 
 test("FG-535 ids: run/task ids are extracted uniquely from log text; absence is empty, not an error", () => {

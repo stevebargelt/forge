@@ -35,10 +35,11 @@
 // available") — the command may not be a forge command at all.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FORGE_HOME } from "../util/paths.js";
+import { checkAbi } from "../cli/node-abi.js";
 import { readReleaseManifest } from "./release.js";
 
 export const LAUNCHES_DIR = join(FORGE_HOME, "launches");
@@ -124,11 +125,45 @@ export type RecorderRuntime = {
   releaseId: string | null;
 };
 
+// FG-555 (R3/R4): the LAUNCHED WORKLOAD's execution environment — the OTHER side
+// of the launch boundary from R1/R2 (forge's own two runtimes). `forge launch run`
+// is an argv launcher: the recorder wraps the submitted argv and spawns argv[0]
+// DIRECTLY (see exitRecorderScript's spawnSync(a0, …)); it NEVER synthesizes a
+// shell. A caller may still intentionally supply one. So argv is a *string* and
+// these two records are its honest resolution:
+//
+//   R3 — the launched top-level executable (argv[0]) resolved to a real path,
+//        AS RESOLVED AT SPAWN TIME. captured = argv[0] was already a path;
+//        derived = a bare name resolved on PATH; unresolved = not found (recorded
+//        as fact, never guessed). Resolved INSIDE the recorder, in the environment
+//        the command actually ran under — tmux interposes its own shell env, so
+//        resolving argv[0] in the submitting CLI would give a plausible-but-wrong
+//        answer (fg553-slice1-architecture.md C2).
+//   R4 — how a caller-supplied NESTED shell (bash -lc <chain>) later resolves
+//        node/npm/forge INSIDE the launched command. That happens at runtime,
+//        inside that shell, against whatever PATH it builds — Forge cannot know it,
+//        so it is declared UNKNOWABLE explicitly. When argv[0] is not a nested
+//        shell the argv IS the resolution (R3 covers it) and R4 is not_applicable.
+//        R4 is NEVER implied to be covered by argv.
+export type WorkloadTopLevel =
+  | { kind: "captured"; argv0: string; execPath: string }
+  | { kind: "derived"; argv0: string; execPath: string }
+  | { kind: "unresolved"; argv0: string };
+
+export type WorkloadNestedShell =
+  | { kind: "not_applicable"; reason: string }
+  | { kind: "unknowable"; shell: string; reason: string };
+
+export type WorkloadProvenance = { r3: WorkloadTopLevel; r4: WorkloadNestedShell };
+
 export type LaunchView = LaunchMeta & {
   status: LaunchStatus;
   forgeIds: { runIds: string[]; taskIds: string[] };
   // R2 provenance, present once the recorder has written it (its first act).
   recorder?: RecorderRuntime;
+  // FG-555: R3/R4 provenance, written by the recorder at spawn time. Absent for a
+  // launch that predates FG-555 — surfaced as "not recorded", never inferred.
+  workload?: WorkloadProvenance;
 };
 
 export function classifyExit(rec: ExitRecord): LaunchStatus {
@@ -207,11 +242,21 @@ function collectControlRuntime(): ControlRuntime {
 // therefore has ZERO effect on the recorded provenance.
 function exitRecorderScript(releaseIdLiteral: string): string {
   return [
-    `const{spawnSync}=require("child_process"),fs=require("fs");`,
+    `const{spawnSync}=require("child_process"),fs=require("fs"),pth=require("path");`,
     `const[e,l,rt,...a]=process.argv.slice(1);`,
     `fs.writeFileSync(rt,JSON.stringify({execPath:process.execPath,abi:process.versions.modules,nodeVersion:process.version,releaseId:${releaseIdLiteral}}));`,
+    // FG-555 (R3/R4): resolve argv[0] and classify a nested shell HERE, in the
+    // recorder — the environment the command actually runs under (mirrors the pure
+    // deriveWorkloadProvenance; kept in lockstep with it). Written BEFORE spawn so
+    // R3 is recorded even if the spawn itself fails.
+    `const a0=a[0]||"";let r3;`,
+    `if(a0.indexOf("/")>=0){r3={kind:"captured",argv0:a0,execPath:a0};}`,
+    `else{let f;for(const d of (process.env.PATH||"").split(":")){if(!d)continue;const c=pth.join(d,a0);try{fs.accessSync(c,fs.constants.X_OK);f=c;break;}catch(_){}}r3=f?{kind:"derived",argv0:a0,execPath:f}:{kind:"unresolved",argv0:a0};}`,
+    `const sh=pth.basename(a0),nst=["sh","bash","dash","zsh","ksh","ash"].indexOf(sh)>=0&&a.slice(1).some(function(x){return /^-[a-z]*c$/.test(x);});`,
+    `const r4=nst?{kind:"unknowable",shell:sh,reason:"a nested shell resolves node/npm/forge at runtime against whatever PATH it builds — not knowable at launch time (BD-14 R4)"}:{kind:"not_applicable",reason:"argv[0] is executed directly; the submitted argv is the full resolution (R3), no nested shell resolves anything later"};`,
+    `fs.writeFileSync(pth.join(pth.dirname(rt),"workload.json"),JSON.stringify({r3:r3,r4:r4}));`,
     `const fd=fs.openSync(l,"a");`,
-    `const r=spawnSync(a[0],a.slice(1),{stdio:["ignore",fd,fd]});`,
+    `const r=spawnSync(a0,a.slice(1),{stdio:["ignore",fd,fd]});`,
     `if(r.error)fs.writeSync(fd,String(r.error.message)+"\\n");`,
     `fs.writeFileSync(e,JSON.stringify({code:r.error?127:r.status,signal:r.signal??null}));`,
   ].join("");
@@ -246,6 +291,154 @@ export function parseRecorderRuntime(raw: string): RecorderRuntime | undefined {
   } catch {
     return undefined;
   }
+}
+
+// ── FG-555: launched-workload provenance (R3/R4) + the environment contract ──
+
+const NESTED_SHELLS = new Set(["sh", "bash", "dash", "zsh", "ksh", "ash"]);
+
+export type PathResolver = (name: string, path: string | undefined) => string | undefined;
+
+/** which(1)-style resolution: the first executable named `name` on `path`. A name
+ *  already containing a separator is not a PATH lookup — it IS the path. */
+function resolveOnPath(name: string, path: string | undefined): string | undefined {
+  if (name === "") return undefined;
+  if (name.includes("/")) return name;
+  for (const dir of (path ?? "").split(":")) {
+    if (dir === "") continue;
+    const candidate = join(dir, name);
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      /* keep looking */
+    }
+  }
+  return undefined;
+}
+
+/** The pure reference for the recorder's R3/R4 derivation (exitRecorderScript
+ *  mirrors this inline, in-process, at spawn time). R3 resolves argv[0] against
+ *  `path`; R4 classifies whether argv[0] is a nested shell whose later command
+ *  resolution is unknowable. */
+export function deriveWorkloadProvenance(argv: string[], opts: { path?: string; resolve?: PathResolver } = {}): WorkloadProvenance {
+  const resolve = opts.resolve ?? resolveOnPath;
+  const argv0 = argv[0] ?? "";
+
+  let r3: WorkloadTopLevel;
+  if (argv0.includes("/")) {
+    r3 = { kind: "captured", argv0, execPath: argv0 };
+  } else {
+    const found = resolve(argv0, opts.path);
+    r3 = found ? { kind: "derived", argv0, execPath: found } : { kind: "unresolved", argv0 };
+  }
+
+  const shell = basename(argv0);
+  const nested = NESTED_SHELLS.has(shell) && argv.slice(1).some((a) => /^-[a-z]*c$/.test(a));
+  const r4: WorkloadNestedShell = nested
+    ? { kind: "unknowable", shell, reason: "a nested shell resolves node/npm/forge at runtime against whatever PATH it builds — not knowable at launch time (BD-14 R4)" }
+    : { kind: "not_applicable", reason: "argv[0] is executed directly; the submitted argv is the full resolution (R3), no nested shell resolves anything later" };
+
+  return { r3, r4 };
+}
+
+function validR3(v: unknown): WorkloadTopLevel | undefined {
+  if (typeof v !== "object" || v === null) return undefined;
+  const r = v as Record<string, unknown>;
+  if (typeof r.argv0 !== "string") return undefined;
+  if (r.kind === "unresolved") return { kind: "unresolved", argv0: r.argv0 };
+  if ((r.kind === "captured" || r.kind === "derived") && typeof r.execPath === "string") {
+    return { kind: r.kind, argv0: r.argv0, execPath: r.execPath };
+  }
+  return undefined;
+}
+
+function validR4(v: unknown): WorkloadNestedShell | undefined {
+  if (typeof v !== "object" || v === null) return undefined;
+  const r = v as Record<string, unknown>;
+  if (typeof r.reason !== "string") return undefined;
+  if (r.kind === "not_applicable") return { kind: "not_applicable", reason: r.reason };
+  if (r.kind === "unknowable" && typeof r.shell === "string") return { kind: "unknowable", shell: r.shell, reason: r.reason };
+  return undefined;
+}
+
+/** Parse the R3/R4 record the recorder wrote. Returns undefined if absent or
+ *  malformed — provenance is never guessed (mirrors parseRecorderRuntime). */
+export function parseWorkloadProvenance(raw: string): WorkloadProvenance | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null) return undefined;
+  const { r3, r4 } = parsed as { r3?: unknown; r4?: unknown };
+  const okR3 = validR3(r3);
+  const okR4 = validR4(r4);
+  if (!okR3 || !okR4) return undefined;
+  return { r3: okR3, r4: okR4 };
+}
+
+// FG-555: the execution-environment CONTRACT a Forge-owned unattended caller
+// declares INSTEAD of inheriting an ambient login-shell PATH. It pins the
+// workload's PATH to forge's OWN control-runtime node dir (front of PATH) and
+// names the ABI the workload must run under. This is the SMALLEST mechanism that
+// satisfies BD-14's "a workload that requires a shell declares it and gets a
+// contract; it does not inherit one accidentally" — a direct argv plus a pinned
+// PATH, NEVER a silent rewrite of arbitrary operator argv.
+export type LaunchProfile = { path: string; requireAbi: string; label?: string };
+
+/** The control-runtime launch environment: the SAME node the forge CLI itself
+ *  runs under, pinned at the FRONT of PATH, and the control ABI as the required
+ *  toolchain. A Forge-owned unattended verification submits with this so it
+ *  resolves the control toolchain by contract, never an ambient login shell's. */
+export function controlRuntimeProfile(opts: { label?: string } = {}): LaunchProfile {
+  // Prepend UNCONDITIONALLY: the control node dir must resolve FIRST even when it
+  // already appears later in PATH behind an incompatible node — that shadowing is
+  // exactly the reproduction. A duplicate dir entry is harmless (first wins).
+  const nodeDir = dirname(process.execPath);
+  const existing = process.env.PATH ?? "";
+  return {
+    path: [nodeDir, existing].filter((p) => p !== "").join(":"),
+    requireAbi: process.versions.modules,
+    ...(opts.label ? { label: opts.label } : {}),
+  };
+}
+
+export type AbiProber = (nodeExec: string) => string | undefined;
+
+/** Probe an interpreter's ABI by asking it to PRINT its own — it exits after one
+ *  expression. This NEVER rebuilds or replaces any native dependency (FG-555: no
+ *  shared-native-dep remediation); it only reads the toolchain's identity. */
+function defaultAbiProbe(nodeExec: string): string | undefined {
+  try {
+    return execFileSync(nodeExec, ["-p", "process.versions.modules"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {
+    return undefined;
+  }
+}
+
+/** Refuse-before-execute (FG-555): under the contract's pinned PATH, resolve the
+ *  `node` the workload's toolchain will use and assert its ABI equals the
+ *  contract's required ABI — REUSING FG-570's checkAbi, not a second checker. A
+ *  mismatch (or an unreadable ABI) is a NAMED refusal the caller raises BEFORE any
+ *  tmux session exists. `ok` when no node is resolvable on the pinned PATH: the
+ *  contract verifies the toolchain it can see, it does not invent one. */
+export function assertProfileToolchain(profile: LaunchProfile, opts: { resolve?: PathResolver; probeAbi?: AbiProber } = {}): { ok: true } | { ok: false; message: string } {
+  const resolve = opts.resolve ?? resolveOnPath;
+  const probe = opts.probeAbi ?? defaultAbiProbe;
+  const node = resolve("node", profile.path);
+  if (!node) return { ok: true };
+  const r = checkAbi(probe(node) ?? "", profile.requireAbi);
+  if (r.ok) return { ok: true };
+  return {
+    ok: false,
+    message:
+      `forge launch: refusing to run — the launch-environment contract's toolchain does not match, ` +
+      `so the workload would fail deep inside the suite (opaque ERR_DLOPEN_FAILED) instead of here.\n` +
+      `  contract: ${profile.label ? `${profile.label} — ` : ""}node resolved on the pinned PATH = ${node}\n` +
+      r.message,
+  };
 }
 
 /** Forge run/task ids, opportunistically, from whatever the command logged. */
@@ -315,8 +508,17 @@ function paneDead(session: string, tmux: TmuxRunner): boolean | null {
 
 /** Start a command under a durable tmux owner. Returns the persisted record.
  *  Throws (before anything is written) if tmux is unavailable. */
-export function startLaunch(argv: string[], opts: { name?: string; cwd?: string; tmux?: TmuxRunner; now?: Date } = {}): LaunchMeta {
+export function startLaunch(argv: string[], opts: { name?: string; cwd?: string; tmux?: TmuxRunner; now?: Date; profile?: LaunchProfile } = {}): LaunchMeta {
   if (argv.length === 0) throw new Error("forge launch run: no command given");
+  // FG-555: refuse-before-execute. When a Forge-owned caller declares the
+  // execution-environment contract, assert the toolchain BEFORE anything is
+  // written or any tmux session is created — a named, actionable mismatch here
+  // instead of hundreds of downstream ERR_DLOPEN_FAILED the controller must
+  // reverse-engineer (the Node 23/ABI 131 vs Node 24/ABI 137 reproduction).
+  if (opts.profile) {
+    const gate = assertProfileToolchain(opts.profile);
+    if (!gate.ok) throw new Error(gate.message);
+  }
   const tmux = opts.tmux ?? defaultTmux;
   try {
     tmux(["-V"]);
@@ -366,7 +568,13 @@ export function startLaunch(argv: string[], opts: { name?: string; cwd?: string;
     // baked into the recorder wrapper as a JSON literal, so the recorded id cannot
     // be forged by a caller-supplied FORGE_RELEASE_ID and does not depend on tmux
     // propagating any client env var into the session.
-    tmux(["new-session", "-d", "-s", session, "-c", meta.cwd, "cat"]);
+    // FG-555: when the caller declared the contract, pin the session PATH to the
+    // contract's (control-node-first) PATH via `new-session -e`, so the recorder
+    // and workload resolve the contracted toolchain — never an ambient login
+    // shell's PATH. Absent a profile, the session inherits the launcher env as
+    // before.
+    const sessionEnv = opts.profile ? ["-e", `PATH=${opts.profile.path}`] : [];
+    tmux(["new-session", "-d", "-s", session, "-c", meta.cwd, ...sessionEnv, "cat"]);
     tmux(["set-option", "-w", "-t", `${session}:`, "remain-on-exit", "on"]);
     tmux(["respawn-pane", "-k", "-t", `${session}:`, wrapped]);
   } catch (e) {
@@ -430,7 +638,15 @@ export function readLaunch(id: string, tmux: TmuxRunner = defaultTmux): LaunchVi
     try { recorder = parseRecorderRuntime(readFileSync(rtPath, "utf8")); } catch { /* not readable yet */ }
   }
 
-  return { ...meta, status, forgeIds: extractForgeIds(log), ...(recorder ? { recorder } : {}) };
+  // FG-555: R3/R4, written by the recorder at spawn time. Absent for a pre-FG-555
+  // launch or before the recorder ran — surfaced as "not recorded", never guessed.
+  let workload: WorkloadProvenance | undefined;
+  const wlPath = join(dir, "workload.json");
+  if (existsSync(wlPath)) {
+    try { workload = parseWorkloadProvenance(readFileSync(wlPath, "utf8")); } catch { /* not readable yet */ }
+  }
+
+  return { ...meta, status, forgeIds: extractForgeIds(log), ...(recorder ? { recorder } : {}), ...(workload ? { workload } : {}) };
 }
 
 export function listLaunches(tmux: TmuxRunner = defaultTmux): LaunchView[] {
