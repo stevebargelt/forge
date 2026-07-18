@@ -34,40 +34,62 @@
 // this taxonomy; fg578-ownership-agreement.test.ts fails if the installer's
 // AUTHORED_EXEMPT ever disagrees with it.
 
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { FORGE_HOME } from "../util/paths.js";
 import { assetRoot } from "./asset-root.js";
+import { sha256OfBytes } from "../util/content-digest.js";
 
 export type SeedStatus = "current" | "drifted" | "missing";
+
+/** WHO may edit a seed. FG-579 splits this from COUPLING: they are orthogonal.
+ *  `forge-owned`   — the installer overwrites it under FORCE; a stale one is
+ *                    forge's to converge (runtimes, workflows).
+ *  `operator-authored` — forge seeds it once and never writes over it; a stale
+ *                    one is the operator's to merge (agents, constraints, raci). */
+export type SeedOwnership = "forge-owned" | "operator-authored";
+
+/** WHAT breaks when a seed is stale. FG-579 splits this from OWNERSHIP.
+ *  `executable` — bytes an agent EXECUTES against, so a stale copy silently
+ *                 mis-runs (runtimes rebind the provider, workflows mis-dispatch)
+ *                 → readiness FAIL.
+ *  `prose`      — documentation/routing text; a stale copy is a warning, not a
+ *                 mis-run, so readiness stays ok. */
+export type SeedCoupling = "executable" | "prose";
 
 export type SeedDriftEntry = {
   category: string;
   /** path relative to the seeds root, e.g. "runtimes/pi-apikey.yml" */
   path: string;
   status: SeedStatus;
-  /** true = forge-owned execution artifact, safe to overwrite (runtimes).
-   *  false = prose that may carry local edits → warn, never auto-overwrite. */
-  autoRefreshable: boolean;
+  /** who may edit this seed — drives the remedy text (refresh vs merge-by-hand). */
+  ownership: SeedOwnership;
+  /** what a stale copy breaks — drives readiness (executable drift → ok=false). */
+  coupling: SeedCoupling;
 };
 
 export type SeedDriftReport = {
   entries: SeedDriftEntry[];
   /** the actionable subset: every entry whose status is not "current". */
   stale: SeedDriftEntry[];
-  /** false when a forge-owned (auto-refreshable) seed is stale — a real
-   *  readiness problem. Prose drift alone keeps this true (warning only). */
+  /** false when a stale seed is EXECUTABLE (runtimes/workflows) — a real
+   *  readiness problem, because it silently mis-runs. Prose drift alone keeps this
+   *  true (warning only). Readiness is a function of COUPLING, not ownership. */
   ok: boolean;
 };
 
-type SeedSpec = { category: string; rel: string; autoRefreshable: boolean };
+type SeedSpec = { category: string; rel: string; ownership: SeedOwnership; coupling: SeedCoupling };
 
-// Order is the report's display order. Runtimes first — the dangerous category.
+// Order is the report's display order. Executable categories first — the
+// dangerous ones. FG-579 adds `workflows`: forge-owned (the installer force-writes
+// it) AND executable (a stale workflow silently mis-dispatches), so a drifted one
+// is a hard readiness FAIL in the same class as runtimes.
 const SEED_SPECS: SeedSpec[] = [
-  { category: "runtimes", rel: "runtimes", autoRefreshable: true },
-  { category: "agents", rel: "agents", autoRefreshable: false },
-  { category: "constraints", rel: "constraints", autoRefreshable: false },
-  { category: "raci", rel: "forge-raci.md", autoRefreshable: false },
+  { category: "runtimes", rel: "runtimes", ownership: "forge-owned", coupling: "executable" },
+  { category: "workflows", rel: "workflows", ownership: "forge-owned", coupling: "executable" },
+  { category: "agents", rel: "agents", ownership: "operator-authored", coupling: "prose" },
+  { category: "constraints", rel: "constraints", ownership: "operator-authored", coupling: "prose" },
+  { category: "raci", rel: "forge-raci.md", ownership: "operator-authored", coupling: "prose" },
 ];
 
 /** FG-578: the categories the OPERATOR authors — forge seeds them, then never
@@ -75,17 +97,16 @@ const SEED_SPECS: SeedSpec[] = [
  *  drift from the taxonomy the detector itself uses. install-seeds.sh's
  *  AUTHORED_EXEMPT must name exactly this set; the shell/TS boundary makes
  *  literal sharing impractical, so fg578-ownership-agreement.test.ts gates the
- *  agreement instead of a comment asking someone to remember. (FG-579 is live
- *  proof that hand-maintained parallel lists drift: SEED_SPECS already misses the
- *  `workflows` category the installer installs.) */
+ *  agreement instead of a comment asking someone to remember. */
 export function authoredCategories(): string[] {
-  return SEED_SPECS.filter((s) => !s.autoRefreshable).map((s) => s.category).sort();
+  return SEED_SPECS.filter((s) => s.ownership === "operator-authored").map((s) => s.category).sort();
 }
 
-/** The complement: forge-owned execution artifacts a refresh may overwrite, and
- *  therefore the only categories `forge upgrade` can honestly claim to converge. */
+/** The complement: forge-owned artifacts a refresh may overwrite, and therefore
+ *  the only categories `forge upgrade` can honestly claim to converge. FG-579:
+ *  now includes `workflows`, which the installer force-writes alongside runtimes. */
 export function autoRefreshableCategories(): string[] {
-  return SEED_SPECS.filter((s) => s.autoRefreshable).map((s) => s.category).sort();
+  return SEED_SPECS.filter((s) => s.ownership === "forge-owned").map((s) => s.category).sort();
 }
 
 /** The seeds/ dir of the running forge package. FG-577: the baseline is itself a
@@ -112,9 +133,14 @@ function walkFiles(base: string): string[] {
   return out;
 }
 
+/** FG-579: restated as a SHA-256-of-bytes compare (was a utf8-string ===).
+ *  Behaviour is identical — same bytes hash equal, different bytes (a trailing
+ *  newline, a multibyte codepoint) hash differently — but the vocabulary is now
+ *  the one shared byte-identity mechanism the interpreter store and the
+ *  workflow-dispatch refusal also use. */
 function sameContent(a: string, b: string): boolean {
   try {
-    return readFileSync(a, "utf8") === readFileSync(b, "utf8");
+    return sha256OfBytes(a) === sha256OfBytes(b);
   } catch {
     return false;
   }
@@ -136,11 +162,13 @@ export function detectSeedDrift(
         : sameContent(repoFile, installed)
           ? "current"
           : "drifted";
-      entries.push({ category: spec.category, path: rel, status, autoRefreshable: spec.autoRefreshable });
+      entries.push({ category: spec.category, path: rel, status, ownership: spec.ownership, coupling: spec.coupling });
     }
   }
   const stale = entries.filter((e) => e.status !== "current");
-  const ok = !stale.some((e) => e.autoRefreshable);
+  // Readiness is a function of COUPLING, not ownership: any stale EXECUTABLE seed
+  // (runtimes or workflows) silently mis-runs → not ok. Prose drift stays a warning.
+  const ok = !stale.some((e) => e.coupling === "executable");
   return { entries, stale, ok };
 }
 
@@ -150,7 +178,9 @@ export function renderSeedDrift(report: SeedDriftReport): string {
   if (report.stale.length === 0) return "";
   const lines: string[] = ["Seed drift (installed ~/.forge vs running code):"];
   for (const e of report.stale) {
-    const mark = e.autoRefreshable ? "FAIL" : "warn";
+    // FG-579: the mark derives from COUPLING — an executable seed's drift is a
+    // FAIL (it mis-runs), a prose seed's drift is a warn (the operator's to merge).
+    const mark = e.coupling === "executable" ? "FAIL" : "warn";
     lines.push(`  [${mark}] ${e.status.padEnd(7)} ${e.path}`);
   }
   // FG-578: each half of the report names ONLY the remedy that converges IT, and
@@ -160,10 +190,10 @@ export function renderSeedDrift(report: SeedDriftReport): string {
   // installer is now required to retain. A remedy that cannot converge the
   // detector that names it is the defect FG-577 fixed for assets; the same
   // promise made about prose is the same defect wearing prose.
-  if (report.stale.some((e) => e.autoRefreshable)) {
-    lines.push("  Runtime seeds are stale — agent execution may not match the code. Fix: forge upgrade (or FORCE=1 scripts/install-seeds.sh).");
+  if (report.stale.some((e) => e.coupling === "executable")) {
+    lines.push("  Forge-owned seeds (runtimes, workflows) are stale — agent execution may not match the code. Fix: forge upgrade (or FORCE=1 scripts/install-seeds.sh).");
   }
-  if (report.stale.some((e) => !e.autoRefreshable)) {
+  if (report.stale.some((e) => e.ownership === "operator-authored")) {
     lines.push(`  Prose seeds (${authoredCategories().join(", ")}) differ from this release's defaults — these are YOURS.`);
     lines.push("  forge seeds them once and never overwrites them, FORCE=1 included, so forge upgrade will NOT");
     lines.push("  refresh them and this warning will persist while your edits stand. If the drift is unintended,");

@@ -21,6 +21,7 @@ import { writeTicket, closeTicket } from "../backlog/structured.js";
 import { planCampaign as _planCampaign, computePlanHash, resolvePlan } from "./planner.js";
 import type { PlannerInput, PlanMode, ItemModeOverride } from "./planner.js";
 import { startCampaign, resumeCampaign, escalateCampaignItemLane, retryCampaignItem } from "./executor.js";
+import { loadWorkflow } from "../v2/loader.js";
 import type { InvokeArgs, InvokeResult } from "../v2/invoke.js";
 import { logEvent, eventsForRun } from "../store/events.js";
 import { listCampaignItems } from "../store/campaigns.js";
@@ -3944,4 +3945,51 @@ test("FG-490: if the park-transition itself fails (DB error), the original drive
     "running",
     "when the park write fails, the campaign is left as it was — never falsely marked paused"
   );
+});
+
+// ── FG-579: a drifted host workflow refuses on the full_feature dispatch path ────
+//
+// The library-level refusal (fg579-workflow-drift-refusal.test.ts) proves
+// loadWorkflow throws; this proves the CAMPAIGN CONSUMER surfaces that throw as a
+// clean failed item rather than crashing, and — critically — refuses BEFORE any
+// container is dispatched. full_feature is the planner's DEFAULT lane, so the
+// unwrapped _planCampaign takes the doLoadWorkflow dispatch path. The loadWorkflowFn
+// seam is the REAL loader with the release baseline pointed at a disposable fixture,
+// so no host is promoted and the real ~/.forge is never touched.
+test("FG-579: a drifted host workflow refuses on the campaign full_feature dispatch (loadWorkflowFn seam)", async () => {
+  const { campaign } = _planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  const home = mkdtempSync(join(tmpdir(), "fg579-camp-home-"));
+  const baseline = mkdtempSync(join(tmpdir(), "fg579-camp-baseline-"));
+  const savedHome = process.env.FORGE_HOME;
+  const wfBody = (marker: string) =>
+    `name: feature\ndescription: ${marker}\ninputs: []\nsteps:\n  - { id: build, agent: engineer, gate: auto }\n`;
+  try {
+    process.env.FORGE_HOME = home;
+    mkdirSync(join(home, "workflows"), { recursive: true });
+    mkdirSync(join(baseline, "workflows"), { recursive: true });
+    writeFileSync(join(baseline, "workflows", "feature.yml"), wfBody("release bytes"));
+    writeFileSync(join(home, "workflows", "feature.yml"), wfBody("STALE HAND-EDIT — not this release"));
+
+    let dispatched = 0;
+    await startCampaign(campaign.id, {
+      dispatch: async (a: InvokeArgs): Promise<InvokeResult> => {
+        dispatched++;
+        return { runId: a.runId ?? "run-x", taskId: "task-x", status: "complete" };
+      },
+      loadWorkflowFn: (name, ctx) => loadWorkflow(name, ctx, baseline),
+    });
+
+    assert.equal(dispatched, 0, "the drifted workflow must be refused BEFORE any container is dispatched");
+    const item = db
+      .prepare("SELECT lifecycle_status, requested_human_action FROM campaign_items WHERE ticket_id = 'FG-101'")
+      .get() as { lifecycle_status: string; requested_human_action: string };
+    assert.equal(item.lifecycle_status, "failed", "the refusal surfaces as a failed item, not a crash");
+    assert.match(item.requested_human_action, /drift/i, "the operator-facing action carries the named drift refusal");
+  } finally {
+    if (savedHome === undefined) delete process.env.FORGE_HOME;
+    else process.env.FORGE_HOME = savedHome;
+    for (const d of [home, baseline]) rmSync(d, { recursive: true, force: true });
+  }
 });

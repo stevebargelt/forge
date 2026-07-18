@@ -13,8 +13,10 @@ function fixture(): { repo: string; home: string; cleanup: () => void } {
   const repo = join(root, "seeds");
   const home = join(root, "forge-home");
   mkdirSync(join(repo, "runtimes"), { recursive: true });
+  mkdirSync(join(repo, "workflows"), { recursive: true });
   mkdirSync(join(repo, "constraints"), { recursive: true });
   mkdirSync(join(home, "runtimes"), { recursive: true });
+  mkdirSync(join(home, "workflows"), { recursive: true });
   mkdirSync(join(home, "constraints"), { recursive: true });
   return { repo, home, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
@@ -33,7 +35,7 @@ test("detectSeedDrift: identical seeds report current and ok", () => {
   }
 });
 
-test("detectSeedDrift: a drifted RUNTIME seed fails readiness (autoRefreshable)", () => {
+test("detectSeedDrift: a drifted RUNTIME seed fails readiness (forge-owned + executable)", () => {
   const { repo, home, cleanup } = fixture();
   try {
     writeFileSync(join(repo, "runtimes", "pi-apikey.yml"), "provider: ${UPSTREAM_PROVIDER}\n");
@@ -42,7 +44,29 @@ test("detectSeedDrift: a drifted RUNTIME seed fails readiness (autoRefreshable)"
     assert.equal(r.ok, false);
     const e = r.stale.find((x) => x.path.endsWith("pi-apikey.yml"));
     assert.equal(e?.status, "drifted");
-    assert.equal(e?.autoRefreshable, true);
+    assert.equal(e?.ownership, "forge-owned");
+    assert.equal(e?.coupling, "executable");
+  } finally {
+    cleanup();
+  }
+});
+
+// FG-579: workflows are forge-owned AND executable, so a stale workflow is a hard
+// readiness FAIL in the same class as runtimes — the silent mis-run this ticket
+// exists to stop. Before FG-579 SEED_SPECS omitted the category entirely, so this
+// drift produced NO entry and readiness stayed (wrongly) ok.
+test("detectSeedDrift: a drifted WORKFLOW seed fails readiness (forge-owned + executable)", () => {
+  const { repo, home, cleanup } = fixture();
+  try {
+    writeFileSync(join(repo, "workflows", "feature.yml"), "name: feature\nsteps: []\n");
+    writeFileSync(join(home, "workflows", "feature.yml"), "name: feature\nsteps: [stale]\n"); // stale
+    const r = detectSeedDrift(repo, home);
+    assert.equal(r.ok, false, "a stale workflow silently mis-runs → not ok");
+    const e = r.stale.find((x) => x.path.endsWith("feature.yml"));
+    assert.equal(e?.category, "workflows");
+    assert.equal(e?.status, "drifted");
+    assert.equal(e?.ownership, "forge-owned");
+    assert.equal(e?.coupling, "executable");
   } finally {
     cleanup();
   }
@@ -68,7 +92,8 @@ test("detectSeedDrift: drifted PROSE seed warns but keeps ok=true", () => {
     const r = detectSeedDrift(repo, home);
     assert.equal(r.ok, true); // prose drift alone is a warning, not a fail
     assert.equal(r.stale.length, 1);
-    assert.equal(r.stale[0]?.autoRefreshable, false);
+    assert.equal(r.stale[0]?.ownership, "operator-authored");
+    assert.equal(r.stale[0]?.coupling, "prose");
   } finally {
     cleanup();
   }

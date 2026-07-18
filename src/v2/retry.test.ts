@@ -13,7 +13,11 @@ import type { Run, Task } from "../types/index.js";
 
 let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
-const RUN: Run = { id: "run-retry", workflow: "feature", title: "retry", status: "active", createdAt: "2026-05-30T00:00:00Z" };
+// A non-shipped workflow name on purpose: FG-579 makes loadWorkflow refuse a HOST
+// workflow whose bytes drift from a shipped seed of the same name, and these
+// fixtures install a bespoke workflow body. A name the release does not ship has
+// no baseline to drift from, so the loader admits the fixture as-is.
+const RUN: Run = { id: "run-retry", workflow: "retry-fixture", title: "retry", status: "active", createdAt: "2026-05-30T00:00:00Z" };
 
 function failedTask(id: string, failureKind: string | undefined, error = "boom"): Task {
   const t: Task = {
@@ -26,19 +30,19 @@ function failedTask(id: string, failureKind: string | undefined, error = "boom")
   return t;
 }
 
-// RUN declares workflow 'feature', so the YAML it names must exist: retry refuses
-// outright when a real run's workflow won't load (FG-507 — an unloadable workflow
-// can't prove a task is a workflow step rather than an ad-hoc invoke row). Both
-// phases these fixtures use are declared as steps, so every task below is a
+// RUN declares workflow 'retry-fixture', so the YAML it names must exist: retry
+// refuses outright when a real run's workflow won't load (FG-507 — an unloadable
+// workflow can't prove a task is a workflow step rather than an ad-hoc invoke row).
+// Both phases these fixtures use are declared as steps, so every task below is a
 // genuine workflow step.
 function installFeatureWorkflow(): void {
-  const path = join(process.env["FORGE_HOME"]!, "workflows", "feature.yml");
+  const path = join(process.env["FORGE_HOME"]!, "workflows", "retry-fixture.yml");
   if (existsSync(path)) return;
   mkdirSync(join(process.env["FORGE_HOME"]!, "workflows"), { recursive: true });
   writeFileSync(
     path,
     `
-name: feature
+name: retry-fixture
 description: retry-test fixture
 inputs: []
 steps:

@@ -26,6 +26,8 @@ import {
   type Runtime,
   type ModelPolicy,
 } from "./schema.js";
+import { defaultRepoSeedsDir } from "./seed-drift.js";
+import { sha256OfBytes } from "../util/content-digest.js";
 
 // Resolved lazily so tests can swap FORGE_HOME between cases. Cheap.
 function forgeHome(): string {
@@ -39,13 +41,55 @@ export type LoadContext = {
   forgeRepoDir?: string;
 };
 
-export function loadWorkflow(name: string, ctx: LoadContext = {}): Workflow {
+// FG-579: a HOST workflow (~/.forge/workflows/<name>.yml) that has drifted from
+// the release's shipped seed silently mis-runs — it is schema-valid, so nothing
+// upstream catches it, and dispatch then executes a stale definition against
+// current code. This is the enforcement half of the FG-335 detector: doctor is the
+// advisory, this refusal is what actually stops the mis-run at the consume path.
+//
+// `repoSeedsDir` mirrors detectSeedDrift's parameter: it defaults to the
+// assetRoot-derived, NON-redirectable release baseline (FG-577 — ambient
+// FORGE_REPO_DIR cannot steer it), and is injectable ONLY so a test can point it
+// at a disposable fixture WITHOUT promoting the host.
+//
+// Refuse ONLY when the resolved source is HOST and the release ships a baseline to
+// measure against. A PROJECT override is intentional operator specialization and
+// is never refused; a workflow the release does not ship has no drift to measure.
+function assertWorkflowNotDrifted(
+  name: string,
+  installedPath: string,
+  isProject: boolean,
+  repoSeedsDir: string,
+): void {
+  if (isProject) return;
+  const baseline = join(repoSeedsDir, "workflows", `${name}.yml`);
+  if (!existsSync(baseline)) return;
+  if (sha256OfBytes(baseline) === sha256OfBytes(installedPath)) return;
+  throw new Error(
+    `workflow '${name}' has drifted from this release's shipped workflow — refusing to dispatch it.\n` +
+      `  installed:        ${installedPath}\n` +
+      `  release baseline: ${baseline}\n` +
+      `The installed workflow is schema-valid but its bytes differ from the workflow this forge release ` +
+      `ships, so running it would silently execute a stale definition against current code. Forge refuses ` +
+      `rather than mis-run it.\n` +
+      `Fix: forge upgrade (or FORCE=1 scripts/install-seeds.sh) to reinstall this release's workflows. ` +
+      `To intentionally specialize a workflow for this project, place it at ` +
+      `<project>/.forge/workflows/${name}.yml — a project override is never refused.`,
+  );
+}
+
+export function loadWorkflow(
+  name: string,
+  ctx: LoadContext = {},
+  repoSeedsDir: string = defaultRepoSeedsDir(),
+): Workflow {
   const projectPath = ctx.projectDir
     ? join(ctx.projectDir, ".forge", "workflows", `${name}.yml`)
     : undefined;
   const workspacePath = join(forgeHome(), "workflows", `${name}.yml`);
 
-  const path = projectPath && existsSync(projectPath) ? projectPath : workspacePath;
+  const isProject = !!(projectPath && existsSync(projectPath));
+  const path = isProject ? projectPath! : workspacePath;
   if (!existsSync(path)) {
     throw new Error(
       `workflow '${name}' not found at ${projectPath ?? workspacePath} (or workspace default)`
@@ -67,6 +111,7 @@ export function loadWorkflow(name: string, ctx: LoadContext = {}): Workflow {
       `workflow at ${path} declares name='${result.data.name}' but was loaded by name='${name}' — they must match`
     );
   }
+  assertWorkflowNotDrifted(name, path, isProject, repoSeedsDir);
   return result.data;
 }
 
@@ -196,7 +241,8 @@ export type LoadedWithSource<T> = T & { source: "host" | "project"; path: string
 
 export function loadWorkflowWithSource(
   name: string,
-  ctx: LoadContext = {}
+  ctx: LoadContext = {},
+  repoSeedsDir: string = defaultRepoSeedsDir(),
 ): LoadedWithSource<Workflow> {
   const projectPath = ctx.projectDir
     ? join(ctx.projectDir, ".forge", "workflows", `${name}.yml`)
@@ -226,6 +272,7 @@ export function loadWorkflowWithSource(
       `workflow at ${path} declares name='${result.data.name}' but was loaded by name='${name}' — they must match`
     );
   }
+  assertWorkflowNotDrifted(name, path, isProject, repoSeedsDir);
   return { ...result.data, source: isProject ? "project" : "host", path };
 }
 
