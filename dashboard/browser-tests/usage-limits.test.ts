@@ -96,6 +96,23 @@ const opsFixture = {
   durations: [{ phase: "implementation", medianMs: 120_000, count: 25 }],
 };
 
+const backlogFixture = {
+  notes: "",
+  notesByCheckout: [
+    {
+      checkoutDir: "/workspace/forge",
+      checkoutBranch: "main",
+      notes: "# Main handoff\n\nMain checkout context with enough detail to belong in the detail view rather than expanding the list.",
+    },
+    {
+      checkoutDir: "/workspace/forge-dashboard",
+      checkoutBranch: "dashboard-home",
+      notes: "# Dashboard handoff\n\nDashboard checkout context with implementation notes for the next session.",
+    },
+  ],
+  tickets: [],
+};
+
 let limitsMode: "full" | "empty" | "error" = "full";
 let delayLimitsMs = 0;
 let refreshFails = false;
@@ -245,6 +262,43 @@ test("Projects renders one canonical card with subordinate checkouts and preserv
   await page.close();
 });
 
+test("Backlog renders multi-checkout handoffs as compact list cards with one detail view", { skip: !CHROME_PATH }, async () => {
+  const page = await newPage({ width: 1200, height: 900 });
+  await page.goto(`${baseUrl}/#projects`);
+  await page.getByRole("button", { name: "Open all Forge checkouts" }).click();
+  await page.getByRole("button", { name: "backlog" }).click();
+
+  const cards = page.locator(".backlog-note-card");
+  await cards.first().waitFor();
+  assert.equal(await cards.count(), 2);
+  assert.equal(await page.locator(".backlog-notes-body").count(), 0, "multi-checkout notes must not render expanded markdown cards");
+  assert.match(await cards.first().innerText(), /main/);
+  assert.match(await cards.nth(1).innerText(), /dashboard-home/);
+  assert.ok((await page.locator(".backlog-notes").evaluate((element) => element.getBoundingClientRect().height)) < 400);
+
+  await cards.nth(1).click();
+  const detail = page.getByRole("dialog", { name: "Session handoff for dashboard-home" });
+  await detail.waitFor();
+  assert.match(await detail.innerText(), /Dashboard checkout context/);
+  assert.match(await detail.innerText(), /\/workspace\/forge-dashboard/);
+  assert.equal(await page.locator(".detail-overlay").count(), 1);
+  await detail.getByRole("button", { name: "Close session handoff detail" }).click();
+  assert.equal(await page.locator(".detail-overlay").count(), 0);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const narrow = await page.evaluate(() => ({
+    viewport: window.innerWidth,
+    documentWidth: document.documentElement.scrollWidth,
+    cardsContained: Array.from(document.querySelectorAll(".backlog-note-card")).every((element) => {
+      const box = element.getBoundingClientRect();
+      return box.left >= 0 && box.right <= window.innerWidth;
+    }),
+  }));
+  assert.ok(narrow.documentWidth <= narrow.viewport, JSON.stringify(narrow));
+  assert.equal(narrow.cardsContained, true, JSON.stringify(narrow));
+  await page.close();
+});
+
 test("Usage UI renders provider channels, analytics, refresh failures, and successful refreshes", { skip: !CHROME_PATH }, async () => {
   limitsMode = "full";
   delayLimitsMs = 0;
@@ -375,6 +429,10 @@ function createFixtureServer(): Server {
     }
     if (url.pathname === "/api/feed") {
       res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(feedFixture));
+      return;
+    }
+    if (url.pathname === "/api/backlog") {
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(backlogFixture));
       return;
     }
     if (url.pathname === "/api/ops") {

@@ -27,6 +27,7 @@ export function BacklogView({ data, projectFilter }) {
   const [statusFilter, setStatusFilter] = useState(null);
   const [search, setSearch] = useState("");
   const [selectedTicket, setSelectedTicket] = useState(null);
+  const [selectedNote, setSelectedNote] = useState(null);
 
   if (!projectFilter) {
     return html`<div class="muted" style="margin-top: 20px;">Select a project to view its backlog.</div>`;
@@ -73,10 +74,11 @@ export function BacklogView({ data, projectFilter }) {
         <section class="backlog-notes">
           <h2>Notes / Session handoff</h2>
           ${data.notesByCheckout.map((entry) => html`
-            <div class="card backlog-notes-body" key=${entry.checkoutDir} style="margin-bottom: 8px;">
-              <div class="checkout-context" title=${entry.checkoutDir}>${entry.checkoutBranch || entry.checkoutDir.split("/").pop()}</div>
-              <div class="md" dangerouslySetInnerHTML=${{ __html: md(entry.notes) }}></div>
-            </div>
+            <${NoteCard}
+              key=${entry.checkoutDir}
+              entry=${entry}
+              onClick=${() => setSelectedNote(entry)}
+            />
           `)}
         </section>
       ` : null}
@@ -148,6 +150,66 @@ export function BacklogView({ data, projectFilter }) {
           onClose=${() => setSelectedTicket(null)}
         />
       ` : null}
+      ${selectedNote ? html`
+        <${NoteDetail} entry=${selectedNote} onClose=${() => setSelectedNote(null)} />
+      ` : null}
+    </div>
+  `;
+}
+
+function noteLabel(entry) {
+  return entry.checkoutBranch || entry.checkoutDir.split("/").pop();
+}
+
+function NoteCard({ entry, onClick }) {
+  const onKey = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } };
+  const checkoutName = entry.checkoutDir.split("/").pop();
+  const preview = entry.notes.trim().replace(/\s+/g, " ").slice(0, 200);
+  return html`
+    <div
+      class="card backlog-note-card"
+      onClick=${onClick}
+      role="button"
+      tabIndex="0"
+      onKeyDown=${onKey}
+      aria-label=${`Open session handoff for ${noteLabel(entry)}`}
+    >
+      <div class="head">
+        <div>
+          <span class="badge backlog-note-badge">handoff</span>
+          <strong>${noteLabel(entry)}</strong>
+          <span class="checkout-chip" title=${entry.checkoutDir}>${checkoutName}</span>
+        </div>
+        <span class="faint mono backlog-note-action">view notes →</span>
+      </div>
+      ${preview ? html`<div class="preview muted">${preview}</div>` : null}
+    </div>
+  `;
+}
+
+function NoteDetail({ entry, onClose }) {
+  const onKey = (e) => { if (e.key === "Escape") onClose(); };
+  const onCloseKey = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClose(); } };
+  return html`
+    <div class="detail-overlay" onClick=${onClose} onKeyDown=${onKey} role="dialog" aria-modal="true" aria-label=${`Session handoff for ${noteLabel(entry)}`}>
+      <div class="detail" onClick=${(e) => e.stopPropagation()}>
+        <span
+          class="close"
+          onClick=${onClose}
+          role="button"
+          tabIndex="0"
+          aria-label="Close session handoff detail"
+          onKeyDown=${onCloseKey}
+        >×</span>
+
+        <div class="row" style="gap: 8px; flex-wrap: wrap; margin-bottom: 12px; align-items: baseline;">
+          <span class="badge backlog-note-badge">handoff</span>
+          <span class="checkout-chip" title=${entry.checkoutDir}>${noteLabel(entry)}</span>
+        </div>
+        <h1 style="margin-bottom: 12px;">Session handoff</h1>
+        <div class="subcard backlog-note-path mono faint" title=${entry.checkoutDir}>${entry.checkoutDir}</div>
+        <div class="md" dangerouslySetInnerHTML=${{ __html: md(entry.notes) }}></div>
+      </div>
     </div>
   `;
 }
