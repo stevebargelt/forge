@@ -178,6 +178,21 @@ test(
   },
 );
 
+test("FG-555 bare assignment (recorder): a leading `VAR=VAL node …` records R3 unresolved / R4 unknowable AND the direct spawn ENOENTs — the assignment is NOT applied without a shell", () => {
+  // `-- FOO=bar node -e 0` at the real recorder boundary. The recorder spawns
+  // argv[0]=`FOO=bar` DIRECTLY (no shell to apply it), so it ENOENTs. Pre-fix the R4
+  // classifier skipped the bare assignment and recorded not_applicable (as it does for
+  // a direct `node`), falsely implying the `node` behind it was the runtime. The record
+  // must honestly name the assignment as the (unresolved) effective argv[0] and stay
+  // unknowable — and the spawn must NOT silently succeed as if `node` had run.
+  const { workload, log } = runRecorder(["FOO=bar", process.execPath, "-e", "process.stdout.write('SHOULD-NOT-RUN\\n')"]);
+  assert.ok(workload, "the recorder wrote workload.json");
+  assert.deepEqual(workload!.r3, { kind: "unresolved", argv0: "FOO=bar" }, "R3 records the bare assignment as the unresolved effective argv[0] a direct spawn ran");
+  assert.equal(workload!.r4.kind, "unknowable", "R4 stays unknowable — a bare assignment is not a terminal node interpreter");
+  assert.equal(workload!.interpreter, undefined, "no interpreter is probed — argv[0] did not resolve to node");
+  assert.ok(!log.includes("SHOULD-NOT-RUN"), "the direct spawn of `FOO=bar` ENOENTs — the node behind the un-applied assignment never ran");
+});
+
 test("FG-555 R4 UNKNOWABLE: the RECORDER records a bare `npm`-style launcher as unknowable — its shebang resolves Node AFTER argv[0] is spawned, so not_applicable would be a false 'no later resolution'", () => {
   // A real npm-style launcher on PATH: a Node-shebang script (`#!/usr/bin/env node`).
   // The recorder spawns argv[0] (`npm`) directly and resolves it to this path (R3
@@ -314,6 +329,35 @@ test("FG-555 refuse-before-execute (fail-closed): an env-wrapped login shell (en
 
   assert.ok(!stub.calls.some((c) => c[0] === "new-session"), "the env-wrapper refusal precedes any tmux session");
   assert.equal(listLaunches(stub.tmux).length, 0, "and no launch record was written");
+});
+
+test("FG-555 refuse-before-execute (fail-closed): a bare `VAR=VAL node …` is REFUSED — a direct spawn runs argv[0] literally (ENOENT), so the assignment is never applied; the broken spawn never reaches a tmux session", () => {
+  // `forge launch run --require-control-toolchain -- FOO=bar node -e 0`. The node behind
+  // the assignment resolves on the pinned PATH (probe would be green), but the recorder
+  // spawns argv[0]=`FOO=bar` DIRECTLY — a literal executable name that ENOENTs. Pre-fix
+  // the guard skipped the bare assignment, proved the `node` behind it, and let this
+  // through to a broken spawn. The contract refuses it BEFORE any tmux session exists.
+  const stub = tmuxStub();
+  const profile = controlRuntimeProfile({ label: "control-runtime" });
+
+  assert.throws(
+    () => startLaunch(["FOO=bar", process.execPath, "-e", "0"], { name: "bareassign", tmux: stub.tmux, profile }),
+    (e: Error) => {
+      assert.match(e.message, /refusing to run/);
+      assert.match(e.message, /assignment/, "the refusal names the bare assignment, not the node behind it");
+      return true;
+    },
+  );
+
+  assert.ok(!stub.calls.some((c) => c[0] === "new-session"), "the bare-assignment refusal precedes any tmux session — the broken spawn never runs");
+  assert.equal(listLaunches(stub.tmux).length, 0, "and no launch record was written");
+
+  // No regression: `env FOO=bar <control-node> …` is a real exec-prefix — `env` applies
+  // the assignment and execs the pinned control node, so it is NOT refused and proceeds.
+  const okStub = tmuxStub();
+  const meta = startLaunch(["env", "FOO=bar", process.execPath, "-e", "0"], { name: "envassign", tmux: okStub.tmux, profile });
+  assert.match(meta.id, /^launch-envassign-/, "env FOO=bar <control node> … proceeds — the effective argv[0] is the control node");
+  assert.ok(okStub.calls.some((c) => c[0] === "new-session"), "the env-prefixed control node proceeds to create the session");
 });
 
 test("FG-555 contract satisfied: the matching control toolchain is NOT refused — the launch proceeds", () => {

@@ -140,6 +140,23 @@ test("FG-555 R4 honesty: a nested shell HIDDEN behind env + a PATH-mutating assi
   assert.equal(d.r4.kind, "not_applicable", "env FOO=bar node … has no nested shell — honestly not_applicable");
 });
 
+test("FG-555 R3/R4 honesty: a BARE leading `VAR=VAL` is NOT skipped — a direct spawn runs it literally, so the effective argv[0] IS the assignment (R3 unresolved, R4 unknowable)", () => {
+  // `forge launch run -- FOO=bar node x.js` spawns argv[0]=`FOO=bar` DIRECTLY (no
+  // shell to apply it) → ENOENT. Pre-fix, effectiveCommand skipped the bare
+  // assignment and reasoned about the `node` behind it — a resolution the direct
+  // spawn never reaches. The effective argv[0] is the assignment itself; R3 records
+  // it as unresolved fact and R4 stays unknowable (the default), never a false
+  // not_applicable that would imply the `node` behind it is the runtime.
+  const w = deriveWorkloadProvenance(["FOO=bar", "node", "x.js"], { resolve: () => undefined });
+  assert.deepEqual(w.r3, { kind: "unresolved", argv0: "FOO=bar" }, "R3 honestly names the bare assignment as the top-level executable a direct spawn runs");
+  assert.equal(w.r4.kind, "unknowable", "R4 stays unknowable — a bare assignment is not a terminal node interpreter");
+
+  // Contrast: `env FOO=bar node …` is valid — `env` IS a real exec-prefix that
+  // applies the assignment and execs node, so the effective argv[0] resolves to node.
+  const via = deriveWorkloadProvenance(["env", "FOO=bar", "node", "x.js"], { resolve: () => "/b/env" });
+  assert.equal(via.r4.kind, "not_applicable", "the effective argv[0] behind env IS node — not_applicable, unchanged");
+});
+
 test("FG-555 R4 honesty: a bare npm/npx/forge launcher is UNKNOWABLE — its shebang resolves Node later, so not_applicable would be a false 'no later resolution'", () => {
   // npm/npx/forge are themselves Node scripts (`#!/usr/bin/env node`): the recorder
   // spawns argv[0], and only THEN does the shebang resolve a Node interpreter against
@@ -341,6 +358,34 @@ test("FG-555 toolchain guard (fail-closed): an env-wrapped login shell is REFUSE
   assert.equal(r.ok, false, "env PATH=… bash -lc … must be refused (pre-fix this returned ok:true)");
   assert.match(r.ok === false ? r.message : "", /refusing to run/);
   assert.match(r.ok === false ? r.message : "", /PATH/);
+});
+
+test("FG-555 bare-assignment bypass (fail-closed): a leading `VAR=VAL node …` is REFUSED — a direct spawn runs argv[0] literally, so the assignment is never applied; `env VAR=VAL node …` stays allowed", () => {
+  // The bypass this closes: `forge launch run --require-control-toolchain -- FOO=bar node x.js`.
+  // Pre-fix, effectiveCommand skipped the bare `FOO=bar`, saw `node`, probed the pinned
+  // PATH, and ALLOWED it (ok:true) — but the recorder spawns argv[0]=`FOO=bar` DIRECTLY
+  // (ENOENT), so the "effective node" the guard proved never ran. The guard must refuse:
+  // a bare assignment is not a name-resolved control tool, and a direct spawn does not
+  // apply it without a shell / `env`.
+  const profile = { path: "/control/bin", requireAbi: "137", label: "control-runtime" };
+  const resolve = (name: string) => (name === "node" ? "/control/bin/node" : name.includes("/") ? name : undefined);
+  const probeAbi = () => "137"; // the node behind it WOULD match — the refusal is about the bare assignment itself
+
+  const bare = assertProfileToolchain(profile, ["FOO=bar", "node", "x.js"], { resolve, probeAbi });
+  assert.equal(bare.ok, false, "a bare `FOO=bar node …` is refused (pre-fix this returned ok:true by skipping the assignment)");
+  const msg = bare.ok === false ? bare.message : "";
+  assert.match(msg, /refusing to run/);
+  assert.match(msg, /assignment/, "the refusal names the bare assignment, not the node behind it");
+  assert.match(msg, /FOO=bar/, "the effective argv[0] is the assignment itself, not the skipped-past node");
+
+  // No regression: `env FOO=bar node …` is a real exec-prefix that applies the
+  // assignment and execs node — the effective argv[0] resolves to node and is allowed
+  // iff its ABI matches.
+  assert.deepEqual(
+    assertProfileToolchain(profile, ["env", "FOO=bar", "node", "x.js"], { resolve, probeAbi }),
+    { ok: true },
+    "env FOO=bar node … still resolves the effective node and is allowed on a matching ABI (unchanged)",
+  );
 });
 
 test("FG-555 argv[0] bypass regression: an explicitly-named ABI-mismatched node as argv[0] is REFUSED before execution, even when the pinned-PATH probe is green", () => {

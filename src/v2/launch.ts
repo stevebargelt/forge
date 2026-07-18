@@ -275,12 +275,13 @@ function exitRecorderScript(releaseIdLiteral: string, profileLiteral: string): s
     // An EMPTY PATH component denotes the launch cwd (execvp semantics); spawnSync
     // honors it, so the recorded effective executable must too — never skip it.
     `else{let f;for(const d of (process.env.PATH||"").split(":")){const c=pth.join(d||process.cwd(),a0);try{fs.accessSync(c,fs.constants.X_OK);f=c;break;}catch(_){}}r3=f?{kind:"derived",argv0:a0,execPath:f}:{kind:"unresolved",argv0:a0};}`,
-    // R4 on the EFFECTIVE command: skip leading VAR=VAL assignments + recognized
-    // exec-prefixes (env/nice/…), then detect a nested shell — kept in lockstep with
-    // effectiveCommand/deriveWorkloadProvenance so `env … bash -lc …` records
+    // R4 on the EFFECTIVE command: skip recognized exec-prefixes (env/nice/…) and the
+    // NAME=VALUE assignments an `env` prefix applies — but NOT a bare leading VAR=VAL
+    // (argv[0] itself), which a direct spawn runs literally (ENOENT). Kept in lockstep
+    // with effectiveCommand/deriveWorkloadProvenance so `env … bash -lc …` records
     // unknowable, never a false not_applicable.
     `const PFX={env:1,nice:1,nohup:1,time:1,stdbuf:1,setsid:1,timeout:1},ASG=/^[A-Za-z_][A-Za-z0-9_]*=/;`,
-    `let ci=0,up=false;while(ci<a.length&&ASG.test(a[ci])){ci++;}`,
+    `let ci=0,up=false;`,
     `while(ci<a.length){var pn=pth.basename(a[ci]);if(!PFX[pn])break;ci++;if(pn==="env"){while(ci<a.length){var tk=a[ci];if(tk==="--"){ci++;break;}if(ASG.test(tk)){ci++;continue;}if(tk[0]==="-"){up=true;break;}break;}}else{while(ci<a.length&&a[ci][0]==="-"){var op=a[ci];ci++;if((pn==="nice"&&op==="-n")||(pn==="stdbuf"&&/^-[ioe]$/.test(op))||(pn==="timeout"&&(op==="-s"||op==="-k"))||(pn==="time"&&(op==="-o"||op==="-f"))){if(ci<a.length)ci++;}}if(pn==="timeout"&&ci<a.length)ci++;}}`,
     // R4 INVERTED (mirrors deriveWorkloadProvenance): default unknowable; not_applicable
     // ONLY when the effective argv[0] is a terminal Node interpreter (node/nodejs).
@@ -351,19 +352,21 @@ const EXEC_PREFIXES = new Set(["env", "nice", "nohup", "time", "stdbuf", "setsid
 
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
-/** Skip leading `VAR=VAL` assignments and recognized non-PATH-mutating
- *  exec-prefixes (`env`/`nice`/…) to reach the EFFECTIVE command. `pathMutated`
- *  flags a skipped assignment that set PATH (it defeats the pin). `unprovable`
- *  flags an exec-prefix form we cannot safely skip (an `env` option like `-i`
- *  that clears the environment) — the caller then fails closed: refuse (guard)
- *  or prefer `unknowable` (R4), never wave through a form we could not parse. */
+/** Skip recognized non-PATH-mutating exec-prefixes (`env`/`nice`/…), and the
+ *  `NAME=VALUE` assignments an `env` prefix applies, to reach the EFFECTIVE
+ *  command. A BARE leading `VAR=VAL` (argv[0] itself) is NOT skipped: the recorder
+ *  spawns argv[0] DIRECTLY (no shell), so a bare assignment is never applied — it
+ *  becomes a literal executable name (ENOENT). Skipping it would let the guard
+ *  reason about a "real" command a direct spawn never reaches; the effective
+ *  argv[0] IS the assignment, and the caller judges it as such (refuse). A
+ *  `VAR=VAL` is only an applied assignment when it FOLLOWS `env`. `pathMutated`
+ *  flags an `env PATH=…` assignment that defeats the pin. `unprovable` flags an
+ *  exec-prefix form we cannot safely skip (an `env` option like `-i` that clears
+ *  the environment) — the caller then fails closed: refuse (guard) or prefer
+ *  `unknowable` (R4), never wave through a form we could not parse. */
 function effectiveCommand(argv: string[]): { argv: string[]; pathMutated: boolean; unprovable: boolean } {
   let i = 0;
   let pathMutated = false;
-  while (i < argv.length && ASSIGNMENT.test(argv[i]!)) {
-    if (argv[i]!.startsWith("PATH=")) pathMutated = true;
-    i++;
-  }
   while (i < argv.length) {
     const name = basename(argv[i]!);
     if (!EXEC_PREFIXES.has(name)) break;
@@ -648,6 +651,14 @@ export function assertProfileToolchain(profile: LaunchProfile, argv: string[], o
   }
   if (eff.unprovable || a0 === "") {
     return toolchainRefusal(profile, a0, "an env/wrapper form the contract cannot parse — it could resolve an arbitrary runtime");
+  }
+  // A bare `VAR=VAL` as the effective argv[0]: the recorder spawns argv[0] DIRECTLY, so
+  // a bare assignment is never applied (no shell) — it is a literal executable name that
+  // ENOENTs. It is not a name-resolved control tool, so the contract cannot prove what
+  // (if anything) runs — refuse. `env FOO=bar node …` stays valid: `env` IS the effective
+  // prefix and applies the assignment (handled above), so this never fires for it.
+  if (ASSIGNMENT.test(a0)) {
+    return toolchainRefusal(profile, a0, "argv[0] is a bare `VAR=VAL` assignment — a direct spawn runs it literally as the executable name (ENOENT); an environment assignment is only applied by a shell or an `env` prefix, neither of which is present here");
   }
   if (NESTED_SHELLS.has(name)) {
     return toolchainRefusal(profile, a0, "argv[0] is a shell (login or not), which can rebuild PATH and resolve an arbitrary runtime — not a name-resolved control tool the pin can be trusted for");
