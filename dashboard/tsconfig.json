@@ -17,6 +17,7 @@
       "@forge/types": ["../src/types/index.ts"],
       "@forge/project-meta": ["../src/util/project-meta.ts"],
       "@forge/projects": ["../src/util/projects.ts"],
+      "@forge/repository-identity": ["../src/util/repository-identity.ts"],
       "@forge/heartbeats": ["../src/util/orchestrator-heartbeats.ts"],
       "@forge/governance": ["../src/raci/governance.ts"],
       "@forge/reconcile-candidate": ["../src/ops/reconcile-candidate.ts"],

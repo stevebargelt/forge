@@ -48,6 +48,54 @@ const fullLimits = {
   ],
 };
 
+const inFlightFixture = [{
+  taskId: "task-home-live",
+  runId: "run-home-live",
+  runTitle: "Dashboard home",
+  agentRole: "engineer",
+  agentModel: "gpt-5",
+  phase: "implementation",
+  status: "running",
+  startedAt: new Date().toISOString(),
+  projectDir: "/workspace/forge",
+  projectLabel: "Forge",
+  projectColor: "#7a9fff",
+  checkoutBranch: "main",
+}];
+
+const projectsFixture = [{
+  key: "repo-forge",
+  projectDir: "/workspace/forge",
+  primaryCheckout: "/workspace/forge",
+  projectDirs: ["/workspace/forge", "/workspace/forge-dashboard", "/workspace/forge-fg571"],
+  label: "Forge",
+  color: "#7a9fff",
+  runCount: 9,
+  inFlightCount: 1,
+  liveSessions: 1,
+  lastRunAt: new Date().toISOString(),
+  checkouts: [
+    { projectDir: "/workspace/forge", projectDirs: ["/workspace/forge"], branch: "main", exists: true, runCount: 3, inFlightCount: 0, liveSessions: 0 },
+    { projectDir: "/workspace/forge-dashboard", projectDirs: ["/workspace/forge-dashboard"], branch: "dashboard-home", exists: true, runCount: 4, inFlightCount: 1, liveSessions: 0 },
+    { projectDir: "/workspace/forge-fg571", projectDirs: ["/workspace/forge-fg571"], branch: "fg578-raci-clobber", exists: true, runCount: 2, inFlightCount: 0, liveSessions: 1 },
+  ],
+}];
+
+const feedFixture = [{
+  taskId: "task-feed", runId: "run-feed", runTitle: "Canonical project identity", workflow: "feature",
+  projectDir: "/workspace/forge-dashboard", projectLabel: "Forge", projectColor: "#7a9fff", checkoutBranch: null, checkoutName: "forge-dashboard",
+  agentRole: "engineer", agentModel: "gpt-5", phase: "implementation", status: "complete",
+  completedAt: new Date().toISOString(), durationMs: 1000, result: { summary: "Grouped correctly" }, parentId: null,
+}];
+
+const opsFixture = {
+  runs: { total: 1157, active: 13, terminal: 1144, clean: 971, withFailures: 173, successRate: 0.85 },
+  taskCount: 2269,
+  counts: { idleKills: 3, cancels: 67, retries: 13, redBlocks: 41 },
+  failureKinds: [{ kind: "gate_rejected", count: 58 }],
+  durations: [{ phase: "implementation", medianMs: 120_000, count: 25 }],
+};
+
 let limitsMode: "full" | "empty" | "error" = "full";
 let delayLimitsMs = 0;
 let refreshFails = false;
@@ -71,6 +119,130 @@ after(async () => {
   await browser?.close();
   server?.closeAllConnections?.();
   await new Promise<void>((resolveClosed) => server?.close(() => resolveClosed()));
+});
+
+test("Home is the hashless default and combines plan limits with in-flight work", { skip: !CHROME_PATH }, async () => {
+  limitsMode = "full";
+  delayLimitsMs = 0;
+  refreshFails = false;
+  const page = await newPage({ width: 1440, height: 1000 });
+  const requestedApiPaths: string[] = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.origin === baseUrl && url.pathname.startsWith("/api/")) requestedApiPaths.push(url.pathname);
+  });
+
+  await page.goto(baseUrl);
+  await page.locator(".plan-service").first().waitFor();
+  await page.locator("section.in-flight .item").first().waitFor();
+
+  assert.equal(await page.locator(".view-tabs .tab-active").innerText(), "home");
+  assert.equal(new URL(page.url()).hash, "");
+  assert.equal(await page.getByRole("heading", { name: "Plan limits & windows" }).count(), 1);
+  assert.equal(await page.getByRole("heading", { name: "In flight" }).count(), 1);
+  assert.equal(await page.getByRole("heading", { name: "Operations" }).count(), 1);
+  assert.deepEqual(await page.locator(".home-section-kicker").allTextContents(), ["Tasks", "Forge activity"]);
+  assert.equal(await page.locator(".home-in-flight-group > .in-flight > h2").count(), 0, "Home heading belongs above the panel");
+  assert.deepEqual(await page.locator(".home-ops-summary .stat-num").allTextContents(), ["85%", "1157", "2269", "3", "67", "13", "41"]);
+  assert.match(await page.locator(".home-ops-summary").innerText(), /30d/);
+  assert.equal(await page.getByRole("heading", { name: "Failure kinds" }).count(), 0);
+  assert.match(await page.locator("section.in-flight .item").innerText(), /Dashboard home/);
+  assert.equal(await page.getByRole("heading", { name: "Token & cache analytics" }).count(), 0);
+  assert.equal(await page.getByRole("heading", { name: "Recent agent outputs" }).count(), 0);
+  assert.equal(requestedApiPaths.includes("/api/usage"), false, "Home must not fetch token analytics");
+  assert.equal(requestedApiPaths.includes("/api/usage/timeseries"), false, "Home must not fetch usage history");
+  assert.equal(requestedApiPaths.includes("/api/usage/model-mix"), false, "Home must not fetch model mix");
+
+  await page.getByRole("button", { name: "activity" }).click();
+  await page.getByRole("heading", { name: "Recent agent outputs" }).waitFor();
+  assert.equal(new URL(page.url()).hash, "#activity");
+  assert.equal(await page.getByRole("heading", { name: "Plan limits & windows" }).count(), 0);
+
+  await page.getByRole("button", { name: "home", exact: true }).click();
+  await page.getByRole("heading", { name: "Plan limits & windows" }).waitFor();
+  assert.equal(new URL(page.url()).hash, "");
+  await page.close();
+});
+
+test("Home stays contained and reflows in-flight work at a narrow width", { skip: !CHROME_PATH }, async () => {
+  limitsMode = "full";
+  delayLimitsMs = 0;
+  const page = await newPage({ width: 390, height: 844 });
+  await page.goto(baseUrl);
+  await page.locator(".plan-service").first().waitFor();
+  const item = page.locator("section.in-flight .item").first();
+  await item.waitFor();
+  await page.getByRole("heading", { name: "Operations" }).waitFor();
+
+  const layout = await page.evaluate(() => {
+    const activeTab = document.querySelector(".view-tabs .tab-active")?.getBoundingClientRect();
+    const inFlightItem = document.querySelector("section.in-flight .item");
+    const badge = inFlightItem?.querySelector(".badge")?.getBoundingClientRect();
+    const main = inFlightItem?.children[1]?.getBoundingClientRect();
+    const statCards = Array.from(document.querySelectorAll(".home-ops-summary .stat"), (element) => element.getBoundingClientRect());
+    return {
+      innerWidth: window.innerWidth,
+      documentWidth: document.documentElement.scrollWidth,
+      bodyWidth: document.body.scrollWidth,
+      activeTabVisible: Boolean(activeTab && activeTab.left >= 0 && activeTab.right <= window.innerWidth),
+      badgeAboveMain: Boolean(badge && main && badge.bottom <= main.top),
+      mainWidth: main?.width ?? 0,
+      statCount: statCards.length,
+      minStatLeft: Math.min(...statCards.map((card) => card.left)),
+      maxStatRight: Math.max(...statCards.map((card) => card.right)),
+    };
+  });
+  assert.ok(layout.documentWidth <= layout.innerWidth, JSON.stringify(layout));
+  assert.ok(layout.bodyWidth <= layout.innerWidth, JSON.stringify(layout));
+  assert.equal(layout.activeTabVisible, true);
+  assert.equal(layout.badgeAboveMain, true);
+  assert.ok(layout.mainWidth >= 180, JSON.stringify(layout));
+  assert.equal(layout.statCount, 7);
+  assert.ok(layout.minStatLeft >= 0, JSON.stringify(layout));
+  assert.ok(layout.maxStatRight <= layout.innerWidth, JSON.stringify(layout));
+  await page.close();
+});
+
+test("In-flight rows copy their task id without opening task detail", { skip: !CHROME_PATH }, async () => {
+  const page = await newPage({ width: 1200, height: 800 });
+  await page.goto(baseUrl);
+  const copy = page.getByRole("button", { name: "Copy task id task-home-live" });
+  await copy.waitFor();
+  await copy.click();
+  await assertEventually(async () => (await copy.innerText()) === "copied!");
+  assert.equal(await page.locator(".detail-overlay").count(), 0);
+  await page.close();
+});
+
+test("Projects renders one canonical card with subordinate checkouts and preserves exact checkout selection", { skip: !CHROME_PATH }, async () => {
+  const page = await newPage({ width: 1200, height: 900 });
+  const activityRequests: URL[] = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.pathname === "/api/feed") activityRequests.push(url);
+  });
+  await page.goto(`${baseUrl}/#projects`);
+  const card = page.locator(".project-card");
+  await card.waitFor();
+  assert.equal(await card.count(), 1);
+  assert.equal(await card.locator(".project-card-head .project-chip").innerText(), "Forge");
+  assert.deepEqual(await card.locator(".checkout-branch").allTextContents(), ["main", "dashboard-home", "fg578-raci-clobber"]);
+  assert.match(await card.innerText(), /\/workspace\/forge-dashboard/);
+
+  await card.locator(".project-checkout-row").filter({ hasText: "dashboard-home" }).click();
+  await page.getByRole("heading", { name: "Recent agent outputs" }).waitFor();
+  await assertEventually(async () => activityRequests.some((url) => url.searchParams.get("projectDir") === "/workspace/forge-dashboard"));
+  const projectChip = page.locator(".feed .project-chip").first();
+  assert.equal(await projectChip.innerText(), "Forge");
+  assert.equal(await page.locator(".feed .checkout-chip").first().innerText(), "forge-dashboard");
+  assert.equal(await projectChip.evaluate((element) => getComputedStyle(element).backgroundColor), "rgb(122, 159, 255)");
+  assert.equal(await page.locator(".feed .checkout-chip").first().evaluate((element) => getComputedStyle(element).backgroundColor), "rgba(0, 0, 0, 0)");
+  assert.match(await page.locator(".feed .project-identity").first().getAttribute("title") ?? "", /forge-dashboard$/);
+  const copy = page.getByRole("button", { name: "Copy task id task-feed" });
+  await copy.click();
+  await assertEventually(async () => (await copy.innerText()) === "copied!");
+  assert.equal(await page.locator(".detail-overlay").count(), 0);
+  await page.close();
 });
 
 test("Usage UI renders provider channels, analytics, refresh failures, and successful refreshes", { skip: !CHROME_PATH }, async () => {
@@ -191,6 +363,22 @@ function createFixtureServer(): Server {
       }
       const payload = limitsFixture(url.searchParams.get("refresh") === "1");
       res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(payload));
+      return;
+    }
+    if (url.pathname === "/api/in-flight") {
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(inFlightFixture));
+      return;
+    }
+    if (url.pathname === "/api/projects") {
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(projectsFixture));
+      return;
+    }
+    if (url.pathname === "/api/feed") {
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(feedFixture));
+      return;
+    }
+    if (url.pathname === "/api/ops") {
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(opsFixture));
       return;
     }
     if (url.pathname === "/api/usage") {

@@ -97,6 +97,12 @@ test("usageRollup respects projectDir filter", () => {
   assert.equal(rows[0]!.bucket, "/proj/alpha");
 });
 
+test("usageRollup canonical scope includes every member checkout and excludes others", () => {
+  const rows = usageRollup("project", "30d", ["/proj/alpha", "/proj/beta"]);
+  assert.deepEqual(rows.map((row) => row.bucket).sort(), ["/proj/alpha", "/proj/beta"]);
+  assert.deepEqual(usageRollup("project", "30d", []), []);
+});
+
 test("usageTimeSeries returns one row per day", () => {
   const rows = usageTimeSeries("30d");
   assert.ok(rows.length >= 1, "expected at least one day");

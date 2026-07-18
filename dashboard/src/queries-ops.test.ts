@@ -77,3 +77,10 @@ test("opsMetrics: project filter scopes to one run", () => {
   assert.equal(m.runs.total, 1);
   assert.equal(m.runs.clean, 1);
 });
+
+test("opsMetrics: canonical scope aggregates member checkout runs", () => {
+  const m = opsMetrics("30d", ["/proj/a", "/proj/b"]);
+  assert.equal(m.runs.total, 2);
+  assert.equal(m.runs.clean, 1);
+  assert.equal(m.runs.withFailures, 1);
+});

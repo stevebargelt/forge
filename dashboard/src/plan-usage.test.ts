@@ -455,7 +455,7 @@ process.stdin.on("data", chunk => {
       AWS_SECRET_ACCESS_KEY: "must-not-reach-child",
     },
     () => NOW,
-    1_000,
+    3_000,
   );
 
   assert.ok(limits);

@@ -54,7 +54,7 @@ export function BacklogView({ data, projectFilter }) {
   const epicsById = useMemo(() => {
     const m = {};
     for (const tk of (data.tickets || [])) {
-      if (tk.type === "epic") m[tk.id] = tk;
+      if (tk.type === "epic") m[`${tk.checkoutDir || ""}:${tk.id}`] = tk;
     }
     return m;
   }, [data.tickets]);
@@ -67,6 +67,17 @@ export function BacklogView({ data, projectFilter }) {
         <section class="backlog-notes">
           <h2>Notes / Session handoff</h2>
           <div class="card backlog-notes-body md" dangerouslySetInnerHTML=${{ __html: md(data.notes) }}></div>
+        </section>
+      ` : null}
+      ${!data.notes && (data.notesByCheckout || []).length > 0 ? html`
+        <section class="backlog-notes">
+          <h2>Notes / Session handoff</h2>
+          ${data.notesByCheckout.map((entry) => html`
+            <div class="card backlog-notes-body" key=${entry.checkoutDir} style="margin-bottom: 8px;">
+              <div class="checkout-context" title=${entry.checkoutDir}>${entry.checkoutBranch || entry.checkoutDir.split("/").pop()}</div>
+              <div class="md" dangerouslySetInnerHTML=${{ __html: md(entry.notes) }}></div>
+            </div>
+          `)}
         </section>
       ` : null}
 
@@ -119,9 +130,9 @@ export function BacklogView({ data, projectFilter }) {
                 <h2>${TYPE_LABELS[type]}s <span class="muted" style="font-weight: normal;">(${group.length})</span></h2>
                 ${group.map((tk) => html`
                   <${TicketCard}
-                    key=${tk.id}
+                    key=${`${tk.checkoutDir || ""}:${tk.id}`}
                     ticket=${tk}
-                    epic=${tk.epic ? epicsById[tk.epic] : null}
+                    epic=${tk.epic ? epicsById[`${tk.checkoutDir || ""}:${tk.epic}`] : null}
                     onClick=${() => setSelectedTicket(tk)}
                   />
                 `)}
@@ -133,7 +144,7 @@ export function BacklogView({ data, projectFilter }) {
       ${selectedTicket ? html`
         <${TicketDetail}
           ticket=${selectedTicket}
-          epic=${selectedTicket.epic ? epicsById[selectedTicket.epic] : null}
+          epic=${selectedTicket.epic ? epicsById[`${selectedTicket.checkoutDir || ""}:${selectedTicket.epic}`] : null}
           onClose=${() => setSelectedTicket(null)}
         />
       ` : null}
@@ -157,6 +168,7 @@ function TicketCard({ ticket, epic, onClick }) {
           <span class="badge ${statusBadgeClass(ticket.status)}" aria-label=${"Status: " + ticket.status}>${ticket.status}</span>
           <span class="backlog-id mono faint" style="font-size: 11px; margin: 0 6px;">${ticket.id}</span>
           <strong>${ticket.title}</strong>
+          ${ticket.checkoutDir ? html`<span class="checkout-chip" title=${ticket.checkoutDir}>${ticket.checkoutBranch || ticket.checkoutDir.split("/").pop()}</span>` : null}
         </div>
         ${epic ? html`<span class="muted" style="font-size: 11px;">Epic: ${epic.title || ticket.epic}</span>` : null}
       </div>
@@ -186,6 +198,7 @@ function TicketDetail({ ticket, epic, onClose }) {
           <span class="badge ${statusBadgeClass(ticket.status)}" aria-label=${"Status: " + ticket.status}>${ticket.status}</span>
           <span class="badge backlog-type-badge">${ticket.type}</span>
           <span class="mono faint" style="font-size: 12px;">${ticket.id}</span>
+          ${ticket.checkoutDir ? html`<span class="checkout-chip" title=${ticket.checkoutDir}>${ticket.checkoutBranch || ticket.checkoutDir.split("/").pop()}</span>` : null}
         </div>
 
         <h1 style="margin-bottom: 12px;">${ticket.title}</h1>

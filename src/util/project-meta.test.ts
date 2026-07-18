@@ -56,6 +56,31 @@ test("resolveProjectMeta: falls back to hash color when .vscode/settings.json is
   assert.match(meta.color, /^hsl\(\d+, 65%, 50%\)$/);
 });
 
+test("resolveProjectMeta: canonical fallback label and color key are checkout-independent", () => {
+  const cloneA = join(dir, "clone-a");
+  const cloneB = join(dir, "clone-b");
+  mkdirSync(cloneA);
+  mkdirSync(cloneB);
+  const a = resolveProjectMeta(cloneA, { fallbackLabel: "forge", colorKey: "repo-forge" });
+  const b = resolveProjectMeta(cloneB, { fallbackLabel: "forge", colorKey: "repo-forge" });
+  assert.equal(a?.label, "forge");
+  assert.equal(b?.label, "forge");
+  assert.equal(a?.color, b?.color);
+});
+
+test("resolveProjectMeta: canonical color ignores conflicting checkout-local VS Code colors", () => {
+  const a = join(dir, "checkout-a");
+  const b = join(dir, "checkout-b");
+  mkdirSync(join(a, ".vscode"), { recursive: true });
+  mkdirSync(join(b, ".vscode"), { recursive: true });
+  writeFileSync(join(a, ".vscode", "settings.json"), JSON.stringify({ "workbench.colorCustomizations": { "titleBar.activeBackground": "#ff0000" } }));
+  writeFileSync(join(b, ".vscode", "settings.json"), JSON.stringify({ "workbench.colorCustomizations": { "titleBar.activeBackground": "#00ff00" } }));
+  const first = resolveProjectMeta(a, { colorKey: "repo-shared" });
+  const second = resolveProjectMeta(b, { colorKey: "repo-shared" });
+  assert.equal(first?.color, second?.color);
+  assert.notEqual(first?.color, "#ff0000");
+});
+
 test("resolveProjectMeta: falls back to hash color when .vscode/settings.json is malformed JSON", () => {
   mkdirSync(join(dir, ".vscode"), { recursive: true });
   writeFileSync(join(dir, ".vscode", "settings.json"), "{ not valid json ");
