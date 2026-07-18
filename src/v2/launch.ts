@@ -272,7 +272,9 @@ function exitRecorderScript(releaseIdLiteral: string, profileLiteral: string): s
     // R3 is recorded even if the spawn itself fails.
     `const a0=a[0]||"";let r3;`,
     `if(a0.indexOf("/")>=0){r3={kind:"captured",argv0:a0,execPath:a0};}`,
-    `else{let f;for(const d of (process.env.PATH||"").split(":")){if(!d)continue;const c=pth.join(d,a0);try{fs.accessSync(c,fs.constants.X_OK);f=c;break;}catch(_){}}r3=f?{kind:"derived",argv0:a0,execPath:f}:{kind:"unresolved",argv0:a0};}`,
+    // An EMPTY PATH component denotes the launch cwd (execvp semantics); spawnSync
+    // honors it, so the recorded effective executable must too — never skip it.
+    `else{let f;for(const d of (process.env.PATH||"").split(":")){const c=pth.join(d||process.cwd(),a0);try{fs.accessSync(c,fs.constants.X_OK);f=c;break;}catch(_){}}r3=f?{kind:"derived",argv0:a0,execPath:f}:{kind:"unresolved",argv0:a0};}`,
     // R4 on the EFFECTIVE command: skip leading VAR=VAL assignments + recognized
     // exec-prefixes (env/nice/…), then detect a nested shell — kept in lockstep with
     // effectiveCommand/deriveWorkloadProvenance so `env … bash -lc …` records
@@ -406,8 +408,9 @@ function resolveOnPath(name: string, path: string | undefined): string | undefin
   if (name === "") return undefined;
   if (name.includes("/")) return name;
   for (const dir of (path ?? "").split(":")) {
-    if (dir === "") continue;
-    const candidate = join(dir, name);
+    // An empty PATH component denotes the launch cwd (execvp semantics) — kept in
+    // lockstep with the recorder, which resolves the same effective executable.
+    const candidate = join(dir === "" ? process.cwd() : dir, name);
     try {
       accessSync(candidate, constants.X_OK);
       return candidate;

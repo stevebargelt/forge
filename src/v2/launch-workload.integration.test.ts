@@ -14,9 +14,9 @@
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, chmodSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, chmodSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   LAUNCHES_DIR,
   buildWrapperCommand,
@@ -110,6 +110,34 @@ test("FG-555 R3 derived: a bare argv[0] resolves on PATH at spawn time (recorded
   assert.ok(workload);
   assert.equal(workload!.r3.kind, "derived");
   assert.match(workload!.r3.kind === "derived" ? workload!.r3.execPath : "", /\/true$/);
+});
+
+test("FG-555 R3 empty PATH component = cwd: the recorder resolves argv[0] against the launch cwd exactly as spawnSync does — not skipped as if unresolved", () => {
+  // A leading `:` in PATH is an empty component, which execvp (and thus spawnSync)
+  // treats as the launch cwd. Pre-fix the recorder skipped empty components, so a
+  // bare argv[0] living ONLY in cwd recorded `unresolved` (or a wrong /usr/bin path)
+  // while spawnSync actually ran `./argv0` — the exact spawn-time/record divergence
+  // the effective-executable evidence forbids. Now cwd is resolved like any dir.
+  const workdir = realpathSync(mkdtempSync(join(scratch, "cwd-")));
+  const binName = "fg555cwdbin";
+  const bin = join(workdir, binName);
+  writeFileSync(bin, "#!/bin/sh\necho CWD-RAN\n");
+  chmodSync(bin, 0o755);
+
+  const dir = mkdtempSync(join(scratch, "rec-cwd-"));
+  const wrapper = buildWrapperCommand([binName], join(dir, "out.log"), join(dir, "exit"), join(dir, "runtime.json"), process.execPath, null, null);
+  // Empty leading component (cwd), then a dir that does NOT contain the binary: the
+  // ONLY way argv[0] resolves is via the empty=cwd rule.
+  const r = spawnSync("/bin/sh", ["-c", wrapper], { encoding: "utf8", cwd: workdir, env: { ...process.env, PATH: ":/nonexistent-fg555" } });
+  assert.equal(r.status, 0, `recorder wrapper failed: ${r.stderr}`);
+
+  const workload = parseWorkloadProvenance(readFileSync(join(dir, "workload.json"), "utf8"));
+  assert.ok(workload);
+  assert.equal(workload!.r3.kind, "derived", "argv[0] in cwd resolves via the empty PATH component, not skipped as unresolved");
+  const execPath = workload!.r3.kind === "derived" ? workload!.r3.execPath : "";
+  assert.equal(basename(execPath), binName);
+  assert.equal(execPath, bin, "R3 records the exact cwd executable spawnSync ran, not a wrong PATH entry");
+  assert.match(readFileSync(join(dir, "out.log"), "utf8"), /CWD-RAN/, "the cwd binary really executed — the record matches the spawn");
 });
 
 test("FG-555 R3 unresolved: an argv[0] not on PATH is recorded as fact, never guessed", () => {
