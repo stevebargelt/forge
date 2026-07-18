@@ -189,21 +189,33 @@ export function failRun(id: string, opts?: { onApplied?: () => void }): boolean 
   return true;
 }
 
+const TERMINAL_RUN_STATES: ReadonlySet<RunStatus> = new Set(["complete", "failed", "abandoned"]);
+
 export function updateRunStatus(id: string, status: RunStatus): void {
-  // Read the previous status and (for a "complete" write) apply the FG-484
-  // universal backstop in the SAME transaction as the write, so no concurrent
-  // writer can interleave between the read and the UPDATE. This is the store
-  // layer's own guard — it holds regardless of which caller reaches it,
-  // unlike relying on every call site to route through completeRun.
+  // Read the previous status and apply the FG-484/FG-585 universal backstop in
+  // the SAME transaction as the write, so no concurrent writer can interleave
+  // between the read and the UPDATE. This is the store layer's own guard — it
+  // holds regardless of which caller reaches it, unlike relying on every call
+  // site to route through completeRun/failRun.
   const { applied, prevStatus } = writeTransaction(() => {
     const prev = getDb()
       .prepare(`SELECT status FROM runs WHERE id = ?`)
       .get(id) as { status: string } | undefined;
 
-    // FG-484/FG-585: abandoned is authoritatively terminal. No caller —
-    // including ones that bypass completeRun/failRun/finalizeRunIfSettled
-    // entirely — may resurrect an abandoned run to a success/failure terminal.
-    if (prev?.status === "abandoned" && (status === "complete" || status === "failed")) {
+    // FG-585: a settled run's terminal truth is immutable except an explicit
+    // reactivation to active (retry/attach via reactivateTerminalRun). No
+    // caller — including ones that bypass completeRun/failRun/
+    // finalizeRunIfSettled entirely — may cross a terminal run to a DIFFERENT
+    // terminal state: this refuses failed<->complete (false green light /
+    // wrong-ship), terminal->abandoned, and abandoned->{complete,failed}
+    // alike, while still allowing terminal->active (reactivation),
+    // active->terminal (normal finalize), and idempotent same->same.
+    if (
+      prev &&
+      TERMINAL_RUN_STATES.has(prev.status as RunStatus) &&
+      TERMINAL_RUN_STATES.has(status) &&
+      status !== prev.status
+    ) {
       return { applied: false, prevStatus: prev?.status };
     }
 
