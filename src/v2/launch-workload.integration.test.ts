@@ -150,6 +150,31 @@ test(
   },
 );
 
+test("FG-555 R4 UNKNOWABLE: the RECORDER records a bare `npm`-style launcher as unknowable — its shebang resolves Node AFTER argv[0] is spawned, so not_applicable would be a false 'no later resolution'", () => {
+  // A real npm-style launcher on PATH: a Node-shebang script (`#!/usr/bin/env node`).
+  // The recorder spawns argv[0] (`npm`) directly and resolves it to this path (R3
+  // derived), but the Node interpreter that actually runs the launcher's JS is
+  // resolved LATER, by the shebang, against whatever PATH exec builds — unknowable at
+  // launch time. Pre-fix the recorder wrote r4 not_applicable (as it does for a direct
+  // `node`), falsely implying the argv was the full resolution while an ABI-incompatible
+  // node could still run. It must record R4 unknowable and probe no interpreter.
+  const bindir = mkdtempSync(join(scratch, "npmbin-"));
+  const fakeNpm = join(bindir, "npm");
+  writeFileSync(fakeNpm, "#!/usr/bin/env node\nprocess.stdout.write('NPM-RAN\\n')\n");
+  chmodSync(fakeNpm, 0o755);
+
+  const { workload, log } = runRecorder(["npm", "run", "test:all"], { ...process.env, PATH: `${bindir}:${process.env.PATH ?? ""}` });
+  assert.ok(workload, "the recorder wrote workload.json");
+  assert.equal(workload!.r3.kind, "derived", "R3 resolves the launcher on PATH");
+  assert.equal(workload!.r3.kind === "derived" ? workload!.r3.execPath : "", fakeNpm, "R3 is the exact npm the recorder spawned");
+  assert.equal(workload!.r4.kind, "unknowable", "a Node-shebang launcher has a later, unknowable interpreter resolution");
+  assert.equal(workload!.r4.kind === "unknowable" ? workload!.r4.shell : "", "npm");
+  assert.equal(workload!.interpreter, undefined, "the launcher's own Node interpreter is never guessed at launch time");
+  // The launcher really executed through its shebang — proof there WAS a later Node
+  // resolution the recorder could not have named.
+  assert.match(log, /NPM-RAN/, "npm ran via its shebang-resolved node");
+});
+
 test("FG-555 refuse-before-execute: Node 23/ABI 131 vs required ABI 137 is refused BEFORE the workload runs, with a NAMED mismatch", () => {
   // A fake `node` on the pinned PATH that reports ABI 131 — the incompatible Node
   // of the reproduction. The control contract requires ABI 137. This is the exact

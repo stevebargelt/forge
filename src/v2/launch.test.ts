@@ -140,6 +140,30 @@ test("FG-555 R4 honesty: a nested shell HIDDEN behind env + a PATH-mutating assi
   assert.equal(d.r4.kind, "not_applicable", "env FOO=bar node … has no nested shell — honestly not_applicable");
 });
 
+test("FG-555 R4 honesty: a bare npm/npx/forge launcher is UNKNOWABLE — its shebang resolves Node later, so not_applicable would be a false 'no later resolution'", () => {
+  // npm/npx/forge are themselves Node scripts (`#!/usr/bin/env node`): the recorder
+  // spawns argv[0], and only THEN does the shebang resolve a Node interpreter against
+  // PATH. So a direct `npm …` still has a later, unknowable interpreter resolution —
+  // recording not_applicable (as a plain `node …` correctly does) would falsely imply
+  // the argv is the full resolution. R3 still honestly names the launcher itself.
+  for (const tool of ["npm", "npx", "forge", "yarn", "pnpm"]) {
+    const w = deriveWorkloadProvenance([tool, "run", "test:all"], { resolve: () => `/usr/local/bin/${tool}` });
+    assert.equal(w.r4.kind, "unknowable", `${tool} resolves Node via its shebang at runtime — unknowable`);
+    assert.equal(w.r4.kind === "unknowable" ? w.r4.shell : "", tool);
+    assert.equal(w.r3.kind, "derived", `R3 still honestly names ${tool} as the top-level executable`);
+    assert.equal(w.interpreter, undefined, "the launcher's own Node interpreter is never guessed");
+  }
+
+  // The same launcher hidden behind an exec-prefix is seen through, exactly like a shell.
+  const behindEnv = deriveWorkloadProvenance(["env", "FOO=bar", "npm", "test"], { resolve: () => "/x" });
+  assert.equal(behindEnv.r4.kind, "unknowable", "npm behind env is still unknowable");
+  assert.equal(behindEnv.r4.kind === "unknowable" ? behindEnv.r4.shell : "", "npm");
+
+  // A direct `node …` remains not_applicable — its argv IS the full resolution.
+  const directNode = deriveWorkloadProvenance(["node", "-e", "0"], { resolve: () => "/b/node" });
+  assert.equal(directNode.r4.kind, "not_applicable", "a direct node interpreter has no later launcher resolution");
+});
+
 test("FG-555 workload record: valid R3/R4 parses; a missing required field is omitted, never guessed", () => {
   const good = { r3: { kind: "captured", argv0: "/n", execPath: "/n" }, r4: { kind: "unknowable", shell: "bash", reason: "r" } };
   assert.deepEqual(parseWorkloadProvenance(JSON.stringify(good)), good);

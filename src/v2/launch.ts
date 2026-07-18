@@ -277,8 +277,8 @@ function exitRecorderScript(releaseIdLiteral: string, profileLiteral: string): s
     `const PFX={env:1,nice:1,nohup:1,time:1,stdbuf:1,setsid:1,timeout:1},ASG=/^[A-Za-z_][A-Za-z0-9_]*=/;`,
     `let ci=0,up=false;while(ci<a.length&&ASG.test(a[ci])){ci++;}`,
     `while(ci<a.length){var pn=pth.basename(a[ci]);if(!PFX[pn])break;ci++;if(pn==="env"){while(ci<a.length){var tk=a[ci];if(tk==="--"){ci++;break;}if(ASG.test(tk)){ci++;continue;}if(tk[0]==="-"){up=true;break;}break;}}else{while(ci<a.length&&a[ci][0]==="-"){var op=a[ci];ci++;if((pn==="nice"&&op==="-n")||(pn==="stdbuf"&&/^-[ioe]$/.test(op))||(pn==="timeout"&&(op==="-s"||op==="-k"))||(pn==="time"&&(op==="-o"||op==="-f"))){if(ci<a.length)ci++;}}if(pn==="timeout"&&ci<a.length)ci++;}}`,
-    `const eff=a.slice(ci),sh=pth.basename(eff[0]||""),nst=["sh","bash","dash","zsh","ksh","ash"].indexOf(sh)>=0&&eff.slice(1).some(function(x){return /^-[a-z]*c$/.test(x);});`,
-    `const r4=nst?{kind:"unknowable",shell:sh,reason:"a nested shell resolves node/npm/forge at runtime against whatever PATH it builds — not knowable at launch time (BD-14 R4)"}:up?{kind:"unknowable",shell:sh||"(wrapper)",reason:"an env/wrapper form the launcher cannot fully parse could still resolve an arbitrary runtime — a hidden shell cannot be ruled out (BD-14 R4)"}:{kind:"not_applicable",reason:"argv[0] is executed directly; the submitted argv is the full resolution (R3), no nested shell resolves anything later"};`,
+    `const eff=a.slice(ci),sh=pth.basename(eff[0]||""),nst=["sh","bash","dash","zsh","ksh","ash"].indexOf(sh)>=0&&eff.slice(1).some(function(x){return /^-[a-z]*c$/.test(x);}),lnch=["npm","npx","forge","yarn","pnpm"].indexOf(sh)>=0;`,
+    `const r4=nst?{kind:"unknowable",shell:sh,reason:"a nested shell resolves node/npm/forge at runtime against whatever PATH it builds — not knowable at launch time (BD-14 R4)"}:up?{kind:"unknowable",shell:sh||"(wrapper)",reason:"an env/wrapper form the launcher cannot fully parse could still resolve an arbitrary runtime — a hidden shell cannot be ruled out (BD-14 R4)"}:lnch?{kind:"unknowable",shell:sh,reason:"a Node-shebang launcher (npm/npx/forge/…) resolves its own Node interpreter at runtime via its shebang, against whatever PATH exec builds AFTER argv[0] is spawned — the executing runtime is not knowable at launch time (BD-14 R4)"}:{kind:"not_applicable",reason:"argv[0] is executed directly; the submitted argv is the full resolution (R3), no nested shell resolves anything later"};`,
     // FG-555 (workload runtime): probe the effective interpreter — R3's resolved
     // executable, when it IS a Node interpreter (basename node/nodejs) — for its
     // ABI/version, so `forge launch show` can diagnose whether a direct `node`
@@ -331,6 +331,16 @@ export function parseRecorderRuntime(raw: string): RecorderRuntime | undefined {
 // ── FG-555: launched-workload provenance (R3/R4) + the environment contract ──
 
 const NESTED_SHELLS = new Set(["sh", "bash", "dash", "zsh", "ksh", "ash"]);
+
+// FG-555: bare-name launchers that are THEMSELVES Node scripts — their shebang
+// (`#!/usr/bin/env node`) resolves a Node interpreter at RUNTIME, against whatever
+// PATH `exec` builds, AFTER the recorder has already spawned argv[0]. So a direct
+// `npm …` / `npx …` / `forge …` is NOT the full resolution the way a direct
+// `node …` is: which Node actually executes the launcher's JS is unknowable at
+// launch time (BD-14 R4), exactly like a nested shell. Recording `not_applicable`
+// for these would falsely imply "no later resolution occurs" while an
+// ABI-incompatible node still runs behind the shebang.
+const NODE_SHEBANG_LAUNCHERS = new Set(["npm", "npx", "forge", "yarn", "pnpm"]);
 
 // FG-555: the bounded, well-known set of exec-prefixes that run a following
 // command WITHOUT choosing its runtime — as long as they do not mutate PATH. We
@@ -448,7 +458,9 @@ export function deriveWorkloadProvenance(
     ? { kind: "unknowable", shell: effShell, reason: "a nested shell resolves node/npm/forge at runtime against whatever PATH it builds — not knowable at launch time (BD-14 R4)" }
     : eff.unprovable
       ? { kind: "unknowable", shell: effShell || "(wrapper)", reason: "an env/wrapper form the launcher cannot fully parse could still resolve an arbitrary runtime — a hidden shell cannot be ruled out (BD-14 R4)" }
-      : { kind: "not_applicable", reason: "argv[0] is executed directly; the submitted argv is the full resolution (R3), no nested shell resolves anything later" };
+      : NODE_SHEBANG_LAUNCHERS.has(effShell)
+        ? { kind: "unknowable", shell: effShell, reason: "a Node-shebang launcher (npm/npx/forge/…) resolves its own Node interpreter at runtime via its shebang, against whatever PATH exec builds AFTER argv[0] is spawned — the executing runtime is not knowable at launch time (BD-14 R4)" }
+        : { kind: "not_applicable", reason: "argv[0] is executed directly; the submitted argv is the full resolution (R3), no nested shell resolves anything later" };
 
   const result: WorkloadProvenance = { r3, r4 };
   if (opts.profile) result.profile = opts.profile;
