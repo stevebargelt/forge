@@ -1,9 +1,11 @@
 ---
 id: FG-579
 type: story
-status: active
+status: done
 title: "FG-572 Child 5c+5d: seed-drift omits workflows and conflates ownership with coupling severity — stale workflow mis-runs silently, needs a named refusal on the consuming path"
 created: 2026-07-17
+closed: 2026-07-18
+closed_commit: 1aa25a05a7bd5d2796e3331a45daab7209a9b158
 ---
 
 **Parent:** FG-572 · **Epic:** FG-561 · **Depends on:** FG-577 (5a — the remedy must install from the right tree first)
