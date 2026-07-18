@@ -4,7 +4,7 @@ Glossary of forge terms. One paragraph each, with a concrete example from `run-l
 
 ## Run
 
-A single workflow invocation. Created by `forge new`, given a unique id like `run-litellm-eval-96a1da`. Recorded in the `runs` table with status `active` | `complete` | `abandoned`, plus the `projectDir` of the directory it was created from. SQLite is the resume state — a run that's parked at a gate survives reboots.
+A single workflow invocation. Created by `forge new`, given a unique id like `run-litellm-eval-96a1da`. Recorded in the `runs` table with status `active` | `complete` | `failed` | `abandoned` (`complete` = settled successfully; `failed` = settled with a required phase that failed or became unreachable; `abandoned` = operator-cancelled), plus the `projectDir` of the directory it was created from. SQLite is the resume state — a run that's parked at a gate survives reboots.
 
 Example: `forge new research-synthesis "litellm-eval" --question "Does LiteLLM solve provider routing?"` creates one run.
 
