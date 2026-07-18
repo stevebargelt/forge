@@ -25,8 +25,9 @@ export type Metrics = {
   // successRate is terminal-only: an in-flight (active) run has no outcome yet,
   // so counting it as "clean" would inflate the KPI whenever long work is running.
   // clean = completed with no failed top-level task; withFailures = terminal but
-  // not clean (a completed-with-failure or an abandoned run); successRate =
-  // clean / terminal.
+  // not clean (a `failed` run, a completed-with-failure, or an abandoned run);
+  // successRate = clean / terminal. (FG-585: `failed` is now its own terminal
+  // status, counted with the other non-clean terminals.)
   runs: { total: number; active: number; terminal: number; clean: number; withFailures: number; successRate: number };
   taskCount: number;
   failureKinds: Array<{ kind: string; count: number }>;

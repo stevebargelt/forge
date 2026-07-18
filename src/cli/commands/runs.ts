@@ -27,7 +27,7 @@ export function registerRuns(program: Command): void {
   runs
     .command("query")
     .description("Search runs by status, failure-kind, project, or age")
-    .option("--status <s>", "filter by run status (active | complete | abandoned)")
+    .option("--status <s>", "filter by run status (active | complete | failed | abandoned)")
     .option("--failure-kind <k>", "keep runs with a top-level task that failed with this kind")
     .option("--project <dir>", "filter by project dir (exact path or basename)")
     .option("--workflow <w>", "filter by workflow name")
