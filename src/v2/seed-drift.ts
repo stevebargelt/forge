@@ -36,7 +36,7 @@
 
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
-import { FORGE_HOME } from "../util/paths.js";
+import { CLAUDE_SKILLS_DIR, FORGE_HOME } from "../util/paths.js";
 import { assetRoot } from "./asset-root.js";
 import { sha256OfBytes } from "../util/content-digest.js";
 
@@ -44,7 +44,7 @@ export type SeedStatus = "current" | "drifted" | "missing";
 
 /** WHO may edit a seed. FG-579 splits this from COUPLING: they are orthogonal.
  *  `forge-owned`   — the installer overwrites it under FORCE; a stale one is
- *                    forge's to converge (runtimes, workflows).
+ *                    forge's to converge (runtimes, workflows, skills).
  *  `operator-authored` — forge seeds it once and never writes over it; a stale
  *                    one is the operator's to merge (agents, constraints, raci). */
 export type SeedOwnership = "forge-owned" | "operator-authored";
@@ -78,18 +78,27 @@ export type SeedDriftReport = {
   ok: boolean;
 };
 
-type SeedSpec = { category: string; rel: string; ownership: SeedOwnership; coupling: SeedCoupling };
+// `root` says which install prefix the seed lands in: most seeds install under
+// $FORGE_HOME, but `skills` install into the user-global Claude Code skills dir
+// (CLAUDE_SKILLS_DIR) — a DIFFERENT tree, so it needs its own baseline root.
+type SeedRoot = "forge-home" | "claude-skills";
+type SeedSpec = { category: string; rel: string; root: SeedRoot; ownership: SeedOwnership; coupling: SeedCoupling };
 
 // Order is the report's display order. Executable categories first — the
 // dangerous ones. FG-579 adds `workflows`: forge-owned (the installer force-writes
 // it) AND executable (a stale workflow silently mis-dispatches), so a drifted one
-// is a hard readiness FAIL in the same class as runtimes.
+// is a hard readiness FAIL in the same class as runtimes. FG-579 also adds
+// `skills`: forge-owned (the installer force-writes them, bare skips — NOT in
+// AUTHORED_EXEMPT) but PROSE — orchestrator behavioral guidance Claude reads, so a
+// stale one is a reported warning (forge upgrade converges it) rather than a hard
+// readiness fail. They install into CLAUDE_SKILLS_DIR, not $FORGE_HOME.
 const SEED_SPECS: SeedSpec[] = [
-  { category: "runtimes", rel: "runtimes", ownership: "forge-owned", coupling: "executable" },
-  { category: "workflows", rel: "workflows", ownership: "forge-owned", coupling: "executable" },
-  { category: "agents", rel: "agents", ownership: "operator-authored", coupling: "prose" },
-  { category: "constraints", rel: "constraints", ownership: "operator-authored", coupling: "prose" },
-  { category: "raci", rel: "forge-raci.md", ownership: "operator-authored", coupling: "prose" },
+  { category: "runtimes", rel: "runtimes", root: "forge-home", ownership: "forge-owned", coupling: "executable" },
+  { category: "workflows", rel: "workflows", root: "forge-home", ownership: "forge-owned", coupling: "executable" },
+  { category: "skills", rel: "skills", root: "claude-skills", ownership: "forge-owned", coupling: "prose" },
+  { category: "agents", rel: "agents", root: "forge-home", ownership: "operator-authored", coupling: "prose" },
+  { category: "constraints", rel: "constraints", root: "forge-home", ownership: "operator-authored", coupling: "prose" },
+  { category: "raci", rel: "forge-raci.md", root: "forge-home", ownership: "operator-authored", coupling: "prose" },
 ];
 
 /** FG-578: the categories the OPERATOR authors — forge seeds them, then never
@@ -151,12 +160,20 @@ function sameContent(a: string, b: string): boolean {
 export function detectSeedDrift(
   repoSeedsDir: string = defaultRepoSeedsDir(),
   forgeHome: string = FORGE_HOME,
+  claudeSkillsDir: string = CLAUDE_SKILLS_DIR,
 ): SeedDriftReport {
   const entries: SeedDriftEntry[] = [];
   for (const spec of SEED_SPECS) {
-    for (const repoFile of walkFiles(join(repoSeedsDir, spec.rel))) {
+    const srcBase = join(repoSeedsDir, spec.rel);
+    for (const repoFile of walkFiles(srcBase)) {
       const rel = relative(repoSeedsDir, repoFile);
-      const installed = join(forgeHome, rel);
+      // skills install into CLAUDE_SKILLS_DIR with the `skills/` prefix stripped
+      // (seeds/skills/<name>/… → <claudeSkillsDir>/<name>/…); every other category
+      // installs under $FORGE_HOME at the same relative path.
+      const installed =
+        spec.root === "claude-skills"
+          ? join(claudeSkillsDir, relative(srcBase, repoFile))
+          : join(forgeHome, rel);
       const status: SeedStatus = !existsSync(installed)
         ? "missing"
         : sameContent(repoFile, installed)
@@ -190,8 +207,14 @@ export function renderSeedDrift(report: SeedDriftReport): string {
   // installer is now required to retain. A remedy that cannot converge the
   // detector that names it is the defect FG-577 fixed for assets; the same
   // promise made about prose is the same defect wearing prose.
-  if (report.stale.some((e) => e.coupling === "executable")) {
-    lines.push("  Forge-owned seeds (runtimes, workflows) are stale — agent execution may not match the code. Fix: forge upgrade (or FORCE=1 scripts/install-seeds.sh).");
+  // The remedy branch keys on OWNERSHIP, not coupling: `forge upgrade` converges
+  // exactly the forge-owned categories (the installer force-writes them), whatever
+  // their coupling — runtimes/workflows (executable) AND skills (prose) alike. The
+  // [FAIL]/[warn] mark above still derives from coupling, so a stale skill reads as
+  // a warning that upgrade nonetheless fixes.
+  const staleForgeOwned = [...new Set(report.stale.filter((e) => e.ownership === "forge-owned").map((e) => e.category))].sort();
+  if (staleForgeOwned.length > 0) {
+    lines.push(`  Forge-owned seeds (${staleForgeOwned.join(", ")}) are stale — agent execution or orchestration may not match the code. Fix: forge upgrade (or FORCE=1 scripts/install-seeds.sh).`);
   }
   if (report.stale.some((e) => e.ownership === "operator-authored")) {
     lines.push(`  Prose seeds (${authoredCategories().join(", ")}) differ from this release's defaults — these are YOURS.`);

@@ -22,6 +22,13 @@ export const RACI_PATH = join(FORGE_HOME, "forge-raci.md");
 // by default.
 export const WORKFLOWS_DIR = join(FORGE_HOME, "workflows");
 export const ROUTING_POLICY_PATH = join(FORGE_HOME, "routing-policy.yml");
+// FG-579: host/orchestrator workflow skills install OUTSIDE $FORGE_HOME, into the
+// user-global Claude Code skills dir. Resolution mirrors install-seeds.sh's
+// CLAUDE_SKILLS_DEST byte-for-byte (CLAUDE_SKILLS_DEST → CLAUDE_CONFIG_DIR/skills
+// → ~/.claude/skills), so the seed-drift detector compares against exactly the
+// tree the installer wrote.
+export const CLAUDE_SKILLS_DIR =
+  process.env.CLAUDE_SKILLS_DEST ?? join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), "skills");
 // Append-only JSONL audit trail of orchestrator-mediated RACI changes (#279).
 // One line per `forge raci apply --confirm`; host-global, outside any repo.
 export const RACI_AUDIT_LOG_PATH = join(FORGE_HOME, "raci-audit.log");

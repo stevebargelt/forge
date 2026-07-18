@@ -72,6 +72,41 @@ test("detectSeedDrift: a drifted WORKFLOW seed fails readiness (forge-owned + ex
   }
 });
 
+// FG-579: forge-* skills install OUTSIDE $FORGE_HOME (into the Claude Code skills
+// dir), so before this ticket SEED_SPECS could not see them and a drifted skill
+// produced NO entry — the exact coverage gap the finding names. They are
+// forge-owned (upgrade converges them) but PROSE, so drift is a reported warning,
+// not a hard readiness fail.
+test("detectSeedDrift: a drifted forge-* SKILL is reported (forge-owned + prose), keeps ok=true", () => {
+  const root = mkdtempSync(join(tmpdir(), "seed-drift-skills-"));
+  const repo = join(root, "seeds");
+  const home = join(root, "forge-home");
+  const skills = join(root, "claude-skills");
+  try {
+    mkdirSync(join(repo, "skills", "forge-review-loop"), { recursive: true });
+    mkdirSync(join(skills, "forge-review-loop"), { recursive: true });
+    writeFileSync(join(repo, "skills", "forge-review-loop", "SKILL.md"), "v2 guidance\n");
+    writeFileSync(join(skills, "forge-review-loop", "SKILL.md"), "v1 guidance\n"); // stale
+
+    const r = detectSeedDrift(repo, home, skills);
+    assert.equal(r.ok, true, "prose skill drift is a warning, not a readiness fail");
+    const e = r.stale.find((x) => x.path.endsWith("forge-review-loop/SKILL.md"));
+    assert.equal(e?.category, "skills");
+    assert.equal(e?.status, "drifted");
+    assert.equal(e?.ownership, "forge-owned");
+    assert.equal(e?.coupling, "prose");
+
+    // forge-owned drift names forge upgrade as the converging remedy even though
+    // it is prose — the [warn]/[FAIL] mark is coupling, the remedy is ownership.
+    const section = renderSeedDrift(r);
+    assert.match(section, /\[warn\]/);
+    assert.match(section, /Forge-owned seeds \(skills\)/);
+    assert.match(section, /forge upgrade/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("detectSeedDrift: a missing installed runtime is reported missing", () => {
   const { repo, home, cleanup } = fixture();
   try {
