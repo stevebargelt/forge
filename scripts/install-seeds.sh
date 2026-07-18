@@ -36,9 +36,9 @@ mkdir -p "$DEST/agents" "$DEST/constraints" "$DEST/runs" "$DEST/runtimes" "$DEST
 #                 authored surfaces by construction, not by convention.
 #
 # This is not a new policy: seed-drift.ts already classifies exactly these three
-# autoRefreshable:false — "prose that may carry local edits → warn, never
-# auto-overwrite" — and runtimes autoRefreshable:true, "forge-owned execution
-# artifact, safe to overwrite". FG-335 decided it and shipped only the detector.
+# as operator-authored + prose — "may carry local edits → warn, never
+# auto-overwrite" — and runtimes as forge-owned + executable, "safe to overwrite".
+# FG-335 decided it and shipped only the detector.
 # This is its unbuilt half. The two sets MUST stay identical;
 # src/v2/fg578-ownership-agreement.test.ts fails if they ever disagree.
 #

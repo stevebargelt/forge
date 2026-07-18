@@ -47,7 +47,7 @@ function assetTree(prefix: string, marker: string, opts: { manifest?: boolean } 
   mkdirSync(join(base, "scripts"), { recursive: true });
   // The runtime seed is the dangerous category and the #265 failure by name: a
   // stale pi-apikey.yml silently rebinds the provider. It is also the only
-  // category the detector treats as a hard readiness fail (autoRefreshable).
+  // category the detector treats as a hard readiness fail (coupling: executable).
   writeFileSync(join(base, "seeds", "runtimes", "pi-apikey.yml"), `# ${marker}\nprovider: ${marker}\n`);
   writeFileSync(join(base, "seeds", "agents", "note.md"), `${marker} agent\n`);
   writeFileSync(join(base, "seeds", "constraints", "note.md"), `${marker} constraint\n`);
