@@ -930,6 +930,12 @@ section.home-view section.in-flight { margin-top: 0; }
 .backlog-view { margin-top: 16px; }
 .backlog-notes { margin-bottom: 20px; }
 .backlog-notes-body { cursor: default; }
+.backlog-note-card { cursor: pointer; }
+.backlog-note-card:focus,
+.backlog-note-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.backlog-note-badge { background: rgba(192, 132, 252, 0.14); color: var(--magenta); margin-right: 8px; }
+.backlog-note-action { font-size: 10px; white-space: nowrap; }
+.backlog-note-path { font-size: 11px; margin-bottom: 16px; overflow-wrap: anywhere; }
 .backlog-controls { margin-bottom: 4px; }
 .backlog-search {
   background: var(--bg-elev);
