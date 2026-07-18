@@ -66,6 +66,18 @@ test("detectRetryOrphan: also flags abandoned runs; ignores active runs and non-
   assert.equal(incidents[0]!.runId, "run-abandoned");
 });
 
+test("detectRetryOrphan: flags a pending task under a FAILED run; the run's own expected failed task is NOT an orphan (FG-585)", () => {
+  insertRun(mkRun("run-failed", "failed"));
+  insertTask(mkTask("task-orphan", "run-failed", "pending"));
+  // the run's OWN expected failure — the phase that made the run `failed`. It is
+  // NOT an orphan/incident; a failed run is expected to contain a failed task.
+  insertTask(mkTask("task-expected-fail", "run-failed", "failed"));
+
+  const incidents = detectRetryOrphan(db);
+  assert.equal(incidents.length, 1, "only the stranded pending task, not the expected failure");
+  assert.equal(incidents[0]!.taskId, "task-orphan");
+});
+
 // ── detectInconsistentRunState ──────────────────────────────────────────────
 
 test("detectInconsistentRunState: flags a running task under a terminal run", () => {
@@ -85,6 +97,27 @@ test("detectInconsistentRunState: running under an active run is normal", () => 
   insertRun(mkRun("run-c", "active"));
   insertTask(mkTask("task-c", "run-c", "running"));
   assert.equal(detectInconsistentRunState(db).length, 0);
+});
+
+test("detectInconsistentRunState: flags a stuck `running` task under a FAILED run, but NOT the run's own expected failed task (FG-585)", () => {
+  insertRun(mkRun("run-failed-inc", "failed"));
+  insertTask(mkTask("task-stuck", "run-failed-inc", "running"));
+  // expected failure of the failed run — a `failed` task, not `running`.
+  insertTask(mkTask("task-expected-fail", "run-failed-inc", "failed"));
+
+  const incidents = detectInconsistentRunState(db);
+  assert.equal(incidents.length, 1, "only the genuinely-stuck running task is inconsistent");
+  assert.equal(incidents[0]!.taskId, "task-stuck");
+  assert.equal(incidents[0]!.kind, "inconsistent_run_state");
+});
+
+test("detectInconsistentRunState: a FAILED run whose only failure is its own expected failed phase is NOT flagged (FG-585)", () => {
+  insertRun(mkRun("run-failed-clean", "failed"));
+  insertTask(mkTask("task-expected-only", "run-failed-clean", "failed"));
+  insertTask(mkTask("task-completed", "run-failed-clean", "complete"));
+
+  assert.equal(detectInconsistentRunState(db).length, 0, "no running task → no inconsistency incident");
+  assert.equal(detectRetryOrphan(db).length, 0, "no pending task → no orphan incident");
 });
 
 // ── detectOrphanedWorkMayPersist (FG-455) ───────────────────────────────────

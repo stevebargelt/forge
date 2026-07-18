@@ -23,7 +23,7 @@ import { logEvent } from "../store/events.js";
 import { probeContainerLiveness, type LivenessProbe } from "./reconcile-candidate.js";
 import type { Run } from "../types/index.js";
 
-const TERMINAL_RUN = new Set(["complete", "abandoned"]);
+const TERMINAL_RUN = new Set(["complete", "failed", "abandoned"]);
 const TERMINAL_TASK = new Set(["complete", "failed"]);
 const ORPHAN_ERROR = "orphaned: pending task under a terminal run, reconciled via forge ops repair";
 const STUCK_RUN_REASON = "stuck_run_repaired";

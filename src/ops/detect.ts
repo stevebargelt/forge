@@ -52,7 +52,13 @@ export type OpsCheckOptions = {
 };
 
 // Terminal run states — a run here will never dispatch further work on its own.
-const TERMINAL_RUN_STATES = ["complete", "abandoned"];
+// FG-585 added `failed`: a run settled with a permanently-blocked/failed required
+// phase is terminal too, so a pending task under it is just as stranded (orphan)
+// and a `running` task under it just as inconsistent as under `complete`. The
+// task-level guards below (`t.status = 'pending'` / `t.status = 'running'`) never
+// match a failed run's OWN expected `failed` task, so adding `failed` here does
+// not mistake that expected failure for an orphan or inconsistency.
+const TERMINAL_RUN_STATES = ["complete", "failed", "abandoned"];
 
 type OrphanRow = { taskId: string; runId: string; phase: string; runStatus: string };
 
