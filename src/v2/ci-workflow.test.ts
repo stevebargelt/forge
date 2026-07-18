@@ -19,6 +19,7 @@ type Step = { name?: string; uses?: string; run?: string; with?: Record<string, 
 type Job = {
   "runs-on"?: string;
   "continue-on-error"?: boolean;
+  "timeout-minutes"?: number;
   needs?: string[];
   if?: string;
   steps?: Step[];
@@ -250,6 +251,48 @@ test("FG-495: the test-extended job is a required merge check — no continue-on
     job!["continue-on-error"],
     undefined,
     "test-extended must NOT have a continue-on-error key — it is a required merge check alongside `test`, not informational; a red run must block merge"
+  );
+});
+
+// Extended-gate wall-clock ceiling: each of the six concurrent extended-gate
+// jobs carries `timeout-minutes: 6`, so a suite that runs long is cancelled →
+// its result is not `success` → the fail-closed aggregate goes red → merge is
+// blocked. Because the six jobs run concurrently, bounding each to 6 min bounds
+// the whole extended gate to ~6 min. The fast `test` gate (separate) and the
+// `test-extended` aggregate (a 3s step) must NOT carry this ceiling.
+const EXTENDED_GATE_JOBS = [
+  "integration_1",
+  "integration_2",
+  "integration_3",
+  "integration_4",
+  "worktree",
+  "dashboard_integration",
+] as const;
+
+test("extended-gate ceiling: each of the six extended-gate jobs has timeout-minutes: 6", () => {
+  const wf = loadWorkflow();
+  for (const name of EXTENDED_GATE_JOBS) {
+    const job = wf.jobs?.[name];
+    assert.ok(job, `ci.yml must define the ${name} extended-gate job`);
+    assert.equal(
+      job!["timeout-minutes"],
+      6,
+      `${name} must carry timeout-minutes: 6 — over-6min ⇒ job cancelled ⇒ aggregate fails ⇒ merge blocked`
+    );
+  }
+});
+
+test("extended-gate ceiling: the fast `test` job and the `test-extended` aggregate do NOT carry the 6-minute job timeout", () => {
+  const wf = loadWorkflow();
+  assert.equal(
+    wf.jobs?.test?.["timeout-minutes"],
+    undefined,
+    "the fast `test` gate is a separate gate — it must not carry the extended gate's 6-minute ceiling"
+  );
+  assert.equal(
+    wf.jobs?.["test-extended"]?.["timeout-minutes"],
+    undefined,
+    "the test-extended aggregate only runs a ~3s step — timing it is pointless and could mask a dependency timeout"
   );
 });
 
