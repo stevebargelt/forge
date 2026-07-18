@@ -243,31 +243,54 @@ test("FG-555 control-runtime profile: pins forge's OWN node dir at the FRONT of 
   assert.equal(p.label, "control-runtime");
 });
 
-test("FG-555 toolchain guard (fail-closed): a control tool inside the pinned dir passes; an unprovable command is REFUSED — the invariant is 'prove it, or refuse'", () => {
+test("FG-555 toolchain guard (pinned-PATH trust): a name-resolved control tool passes wherever it resolves on the pinned PATH; an unresolvable/unknown command is REFUSED", () => {
   const profile = { path: "/p", requireAbi: "137", label: "control-runtime" };
-  // `forge`/`npm`/`npx` resolving to a binary INSIDE the pinned dir (/p) run under the
-  // pinned control node by construction — allowed, no ABI probe needed.
+  // `forge`/`npm`/`npx` resolving BY NAME on the pinned PATH run under the pinned
+  // control node by construction (the pin puts control node first) — allowed, no ABI
+  // probe needed.
   const insidePinned = (name: string) => (name.includes("/") ? name : `/p/${name}`);
-  assert.deepEqual(assertProfileToolchain(profile, ["forge", "next"], { resolve: insidePinned }), { ok: true }, "forge inside the pinned dir is provable");
-  assert.deepEqual(assertProfileToolchain(profile, ["npm", "run", "test:all"], { resolve: insidePinned }), { ok: true }, "npm inside the pinned dir is provable");
+  assert.deepEqual(assertProfileToolchain(profile, ["forge", "next"], { resolve: insidePinned }), { ok: true }, "forge resolved by name on the pinned PATH is trusted");
+  assert.deepEqual(assertProfileToolchain(profile, ["npm", "run", "test:all"], { resolve: insidePinned }), { ok: true }, "npm resolved by name on the pinned PATH is trusted");
 
   // DELIBERATE CHANGE vs the pre-fix guard: the old code returned ok:true when node
   // was UNRESOLVABLE ("nothing to assert"). Fail-closed inverts that — a control tool
-  // that does NOT resolve inside the pinned dir is REFUSED, because the contract
-  // cannot prove it runs the pinned node.
+  // that does NOT resolve on the pinned PATH is REFUSED, because the pin cannot place
+  // the control node before something that is not there.
   const gone = assertProfileToolchain(profile, ["forge", "next"], { resolve: () => undefined });
-  assert.equal(gone.ok, false, "a forge that does not resolve on the pinned PATH is now refused, not waved through");
+  assert.equal(gone.ok, false, "a forge that does not resolve on the pinned PATH is refused, not waved through");
   assert.match(gone.ok === false ? gone.message : "", /refusing to run/);
 
-  // A control tool resolving OUTSIDE the pinned dir is also refused (it might be a
-  // different, incompatible install).
+  // DELIBERATE CHANGE (FG-555 pinned-PATH-trust decision, Option A): a control tool
+  // resolved BY NAME is now ALLOWED wherever it resolves on the pinned PATH — even a
+  // shim OUTSIDE the node bin dir — because the pin places the control node first, so
+  // the shim's `#!/usr/bin/env node` resolves the control node. The pre-fix strict
+  // allow-list (dirname(execPath) only) wrongly refused this and broke the primary caller.
   const outside = assertProfileToolchain(profile, ["forge", "next"], { resolve: () => "/usr/local/bin/forge" });
-  assert.equal(outside.ok, false, "forge outside the pinned dir is not provable");
+  assert.equal(outside.ok, true, "forge resolved by name on the pinned PATH is trusted, even outside the node bin dir");
 
   // An unrecognized wrapper/binary is refused (fail closed), not passed through.
   const unknown = assertProfileToolchain(profile, ["make", "test"], { resolve: () => "/usr/bin/make" });
   assert.equal(unknown.ok, false, "an unknown binary the contract cannot prove is refused");
   assert.match(unknown.ok === false ? unknown.message : "", /cannot prove/);
+});
+
+test("FG-555 pinned-PATH trust (primary caller): a NAME-resolved forge/npm/npx resolving OUTSIDE the node bin dir is ALLOWED — the pin puts the control node first", () => {
+  // The documented primary caller, un-broken: `forge launch run --require-control-toolchain -- forge review-loop …`.
+  // forge is a shim elsewhere on PATH (NOT in dirname(process.execPath)); the pinned control
+  // PATH still places the control node first, so the shim's Node-shebang resolves the control
+  // node. The operator-blessed contract TRUSTS a name-resolved control tool for exactly this.
+  const profile = { path: "/control/bin:/usr/local/bin:/usr/bin", requireAbi: "137", label: "control-runtime" };
+  const resolveShim = (name: string) => (name.includes("/") ? name : `/usr/local/bin/${name}`);
+
+  assert.deepEqual(assertProfileToolchain(profile, ["forge", "review-loop", "FG-555"], { resolve: resolveShim }), { ok: true }, "a name-resolved forge outside the node bin dir is trusted");
+  assert.deepEqual(assertProfileToolchain(profile, ["npm", "run", "test:all"], { resolve: resolveShim }), { ok: true }, "a name-resolved npm outside the node bin dir is trusted");
+  assert.deepEqual(assertProfileToolchain(profile, ["npx", "vitest", "run"], { resolve: resolveShim }), { ok: true }, "a name-resolved npx outside the node bin dir is trusted");
+
+  // An EXPLICIT-PATH forge is NOT a name-resolved control tool — PATH order does not
+  // govern it, so the pinned-PATH trust cannot apply and it fails closed.
+  const explicit = assertProfileToolchain(profile, ["/usr/local/bin/forge", "review-loop"], { resolve: resolveShim });
+  assert.equal(explicit.ok, false, "an explicit-path forge is not name-resolved — refused (the pin does not govern it)");
+  assert.match(explicit.ok === false ? explicit.message : "", /name-resolved/);
 });
 
 test("FG-555 toolchain guard: a node argv[0] is ALLOWED only when its probed ABI matches; a mismatch/unreadable ABI is a NAMED refusal", () => {

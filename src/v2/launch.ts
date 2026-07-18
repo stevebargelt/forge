@@ -596,35 +596,41 @@ function toolchainRefusal(profile: LaunchProfile, effectiveArgv0: string, catego
   };
 }
 
-/** Refuse-before-execute (FG-555), FAIL CLOSED: under `--require-control-toolchain`
- *  the contract REFUSES a command BEFORE any tmux session exists UNLESS it can
- *  affirmatively PROVE the workload runs the pinned control toolchain. This inverts
- *  the earlier "enumerate every forbidden wrapper" approach — the space of shells
- *  and wrappers that hide a runtime is unbounded and a caller-supplied command's
- *  runtime resolution is inherently unknowable (BD-14 R4), so enumerating forbidden
- *  forms is unwinnable. Instead we allow only a small, PROVABLE set and refuse the
- *  rest.
- *
- *  `ok: true` ONLY when, after skipping leading `VAR=VAL` assignments that do NOT
+/** Refuse-before-execute (FG-555). The OPERATOR-DECIDED contract (the FG-555
+ *  pinned-PATH-trust decision, Option A — this is the intended shape, not a gap):
+ *  the pinned control PATH (`new-session -e PATH=<control-node-dir>:<orig>`) IS the
+ *  protection. Under `--require-control-toolchain` the contract runs a command BEFORE
+ *  any tmux session exists ONLY for an ALLOWED effective argv[0], and refuses the rest
+ *  with ONE named message. After skipping leading `VAR=VAL` assignments that do NOT
  *  mutate PATH and a bounded set of non-PATH-mutating exec-prefixes (see
- *  effectiveCommand), the EFFECTIVE argv[0] is provably the control toolchain:
- *    - `node`/`nodejs` whose probed ABI (reusing FG-570's checkAbi) equals the
- *      required ABI — that is the executable the recorder spawns; an explicit path
- *      (`/usr/local/bin/node`) is probed the same way, so a wrong-ABI interpreter
- *      cannot slip through; or
- *    - `forge`/`npm`/`npx` resolved to a binary INSIDE the pinned profile dir (the
- *      first PATH entry) — those execute under the pinned control node by construction.
+ *  effectiveCommand), the EFFECTIVE argv[0] is judged:
  *
- *  Everything else is REFUSED with ONE named message (never enumerated individually):
+ *  ALLOW (`ok: true`) — a control tool resolved BY NAME on the pinned PATH, or a
+ *  matching-ABI Node interpreter:
+ *    - `node`/`nodejs` (by name OR an explicit path) — probed for its ABI (reusing
+ *      FG-570's checkAbi) and allowed IFF it equals the required ABI. That is the
+ *      executable the recorder spawns DIRECTLY, so a wrong-ABI interpreter cannot slip
+ *      through.
+ *    - `forge`/`npm`/`npx` resolved BY NAME on the pinned PATH — allowed WHEREVER they
+ *      resolve on the pinned PATH (NOT restricted to dirname(process.execPath)). This is
+ *      the operator-blessed pinned-PATH trust: a name-resolved control tool runs under
+ *      the control node because the pin places the control node FIRST, so the tool's
+ *      `#!/usr/bin/env node` shebang resolves the control node. This un-breaks the
+ *      documented primary caller `forge launch run --require-control-toolchain -- forge
+ *      review-loop …`, where forge is a shim outside the node bin dir.
+ *
+ *  REFUSE (`ok: false`, ONE named message) — the clearly-unsafe explicit cases:
  *    - a leading assignment that mutates PATH (`env PATH=…`) — it defeats the pin;
- *    - a shell (`sh`/`bash`/… , login or not) — it can rebuild PATH and resolve an
- *      arbitrary runtime, so the contract cannot prove what it runs;
+ *    - a login shell (`bash -lc`, `zsh --login`, any shell with `-l`/`--login`) — it
+ *      re-sources profile scripts that reset PATH AFTER the pin;
  *    - a wrong-ABI directly-named interpreter (the FG-560545e case);
- *    - any other wrapper / unknown binary the contract cannot prove runs the toolchain.
+ *    - any OTHER shell (even non-login: `bash -c`, `sh -c`), script, explicit-path
+ *      control tool, or wrapper/unknown binary that is NOT a name-resolved control
+ *      tool — the contract cannot place it in the trusted set, so it fails closed.
  *
- *  This SUBSUMES the earlier standalone login-shell and direct-node-interpreter
- *  branches: a shell is refused because it is not in the provable set; a matching-ABI
- *  node is allowed because it is. Probe-only — NEVER rebuilds a native dep. */
+ *  R4 recording is INDEPENDENT of this ALLOW decision: a name-resolved forge/npm STILL
+ *  records R4=unknowable (its shebang resolves node later) — being ALLOWED under the flag
+ *  and being RECORDED unknowable are both correct. Probe-only — NEVER rebuilds a native dep. */
 export function assertProfileToolchain(profile: LaunchProfile, argv: string[], opts: { resolve?: PathResolver; probeAbi?: AbiProber } = {}): { ok: true } | { ok: false; message: string } {
   const resolve = opts.resolve ?? resolveOnPath;
   const probe = opts.probeAbi ?? defaultAbiProbe;
@@ -632,6 +638,7 @@ export function assertProfileToolchain(profile: LaunchProfile, argv: string[], o
   const eff = effectiveCommand(argv);
   const a0 = eff.argv[0] ?? "";
   const name = basename(a0);
+  const byName = a0 !== "" && !a0.includes("/");
 
   if (eff.pathMutated) {
     return toolchainRefusal(profile, a0, "a leading assignment mutates PATH (e.g. `env PATH=…`), which defeats the pinned toolchain");
@@ -640,7 +647,7 @@ export function assertProfileToolchain(profile: LaunchProfile, argv: string[], o
     return toolchainRefusal(profile, a0, "an env/wrapper form the contract cannot parse — it could resolve an arbitrary runtime");
   }
   if (NESTED_SHELLS.has(name)) {
-    return toolchainRefusal(profile, a0, "argv[0] is a shell (login or not), which can rebuild PATH and resolve an arbitrary runtime the contract cannot prove");
+    return toolchainRefusal(profile, a0, "argv[0] is a shell (login or not), which can rebuild PATH and resolve an arbitrary runtime — not a name-resolved control tool the pin can be trusted for");
   }
 
   if (name === "node" || name === "nodejs") {
@@ -656,19 +663,23 @@ export function assertProfileToolchain(profile: LaunchProfile, argv: string[], o
     return toolchainRefusal(profile, a0, "argv[0] is a Node interpreter whose ABI does not match the required ABI", r.message);
   }
 
-  if (name === "forge" || name === "npm" || name === "npx") {
+  // Pinned-PATH trust: a control tool resolved BY NAME on the pinned PATH runs under
+  // the control node because the pin puts the control node first. Allowed wherever it
+  // resolves on the pinned PATH — NOT restricted to the node bin dir. An explicit-path
+  // forge/npm/npx is NOT name-resolved (PATH order does not govern it), so it falls
+  // through to the fail-closed refusal below.
+  if (byName && (name === "forge" || name === "npm" || name === "npx")) {
     const resolved = resolve(a0, profile.path);
-    const pinnedDir = profile.path.split(":")[0] ?? "";
-    if (resolved && dirname(resolved) === pinnedDir) return { ok: true };
+    if (resolved) return { ok: true };
     return toolchainRefusal(
       profile,
       a0,
-      "argv[0] is a control tool that does not resolve to a binary inside the pinned profile dir — the contract cannot prove it runs the pinned control node",
-      resolved ? `resolved to ${resolved}, outside the pinned dir ${pinnedDir}` : `did not resolve on the pinned PATH`,
+      "argv[0] is a control tool that does not resolve on the pinned PATH — the pin cannot place the control node before something that is not there",
+      "did not resolve on the pinned PATH",
     );
   }
 
-  return toolchainRefusal(profile, a0, "argv[0] is a wrapper/binary the contract cannot prove runs the control toolchain");
+  return toolchainRefusal(profile, a0, "argv[0] is not a name-resolved control tool (forge/npm/npx/node) — a shell, script, explicit-path wrapper, or unknown binary the contract cannot prove runs the control toolchain");
 }
 
 /** Forge run/task ids, opportunistically, from whatever the command logged. */
