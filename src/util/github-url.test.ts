@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { githubBrowserUrl, deriveGithubUrl, type GitRunner } from "./github-url.js";
+import {
+  githubBrowserUrl,
+  deriveGithubUrl,
+  derivePreferredRemoteIdentity,
+  normalizeGitRemoteUrl,
+  type GitRunner,
+} from "./github-url.js";
 
 // ── githubBrowserUrl (pure URL parsing) ──────────────────────────────────────
 
@@ -37,6 +43,25 @@ test("FG-438 githubBrowserUrl: non-GitHub / malformed → undefined", () => {
   assert.equal(githubBrowserUrl(""), undefined);
   assert.equal(githubBrowserUrl("not a url"), undefined);
   assert.equal(githubBrowserUrl("https://github.com/owner"), undefined); // no repo segment
+});
+
+test("normalizeGitRemoteUrl: equivalent GitHub SSH and HTTPS forms share one key", () => {
+  const ssh = normalizeGitRemoteUrl("git@github.com:SteveBargelt/Forge.git");
+  const https = normalizeGitRemoteUrl("https://github.com/stevebargelt/forge/");
+  assert.equal(ssh?.key, "github.com/stevebargelt/forge");
+  assert.equal(https?.key, ssh?.key);
+  assert.equal(ssh?.githubUrl, "https://github.com/SteveBargelt/Forge");
+});
+
+test("normalizeGitRemoteUrl: credentials are discarded and different repositories remain distinct", () => {
+  assert.equal(
+    normalizeGitRemoteUrl("https://token@example.com/team/repo.git")?.key,
+    "example.com/team/repo",
+  );
+  assert.notEqual(
+    normalizeGitRemoteUrl("git@example.com:team/one.git")?.key,
+    normalizeGitRemoteUrl("git@example.com:team/two.git")?.key,
+  );
 });
 
 // ── deriveGithubUrl (git remotes → canonical URL) ────────────────────────────
@@ -82,4 +107,12 @@ test("FG-438 deriveGithubUrl: origin is non-GitHub but another remote is → fir
     "gh\thttps://github.com/gh-owner/repo.git (fetch)\n",
   );
   assert.equal(deriveGithubUrl("/proj", git), "https://github.com/gh-owner/repo");
+});
+
+test("derivePreferredRemoteIdentity: origin is the identity even when another remote is GitHub", () => {
+  const git = fakeGit(
+    "origin\tgit@gitlab.example:team/repo.git (fetch)\n" +
+    "upstream\thttps://github.com/upstream/repo.git (fetch)\n",
+  );
+  assert.equal(derivePreferredRemoteIdentity("/proj", git)?.key, "gitlab.example/team/repo");
 });

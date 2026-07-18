@@ -190,6 +190,23 @@ section.feed { margin-top: 24px; }
   text-shadow: 0 0 2px rgba(0, 0, 0, 0.35);
   cursor: default;
 }
+.project-identity { display: inline-flex; align-items: center; vertical-align: middle; }
+.project-identity .project-chip { margin-right: 4px; }
+.checkout-chip,
+.checkout-context {
+  display: inline-block;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--fg-dim);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.4;
+  margin-right: 8px;
+  padding: 1px 6px;
+  vertical-align: middle;
+}
+.checkout-context { margin-bottom: 8px; }
 .badge.status-complete, .badge.status-pass { background: rgba(74, 222, 128, 0.15); color: var(--ok); }
 .badge.status-failed, .badge.status-fail { background: rgba(248, 113, 113, 0.15); color: var(--err); }
 .badge.status-awaiting_gate { background: rgba(250, 204, 21, 0.15); color: var(--warn); }
@@ -278,6 +295,19 @@ nav.view-tabs .tab-active { color: var(--fg); }
   font-size: 13px;
 }
 .filter-banner strong { color: var(--accent); }
+.project-scope-banner { gap: 10px; flex-wrap: wrap; }
+.project-scope-options { display: flex; gap: 4px; flex: 1; flex-wrap: wrap; }
+.checkout-scope-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg-dim);
+  cursor: pointer;
+  font: 10px ui-monospace, "SF Mono", Menlo, monospace;
+  padding: 3px 7px;
+}
+.checkout-scope-btn:hover { color: var(--fg); border-color: var(--fg-dim); }
+.checkout-scope-btn-active { background: rgba(122, 159, 255, 0.16); border-color: var(--accent); color: var(--accent); }
 .clear-filter {
   background: transparent; border: 1px solid var(--border); color: var(--fg-dim);
   font: inherit; font-size: 12px; padding: 2px 8px; border-radius: 4px; cursor: pointer;
@@ -379,6 +409,34 @@ section.projects-grid {
 }
 .project-stat-val.stat-warn { color: var(--warn); }
 
+.project-checkouts {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 190px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+.project-checkout-row {
+  align-items: baseline;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  color: inherit;
+  cursor: pointer;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(90px, auto) minmax(0, 1fr);
+  padding: 4px 5px;
+  text-align: left;
+  width: 100%;
+}
+.project-checkout-row:hover,
+.project-checkout-row:focus-visible { background: var(--bg); outline: none; }
+.checkout-branch { color: var(--fg-dim); font-size: 11px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-checkout-row .project-path { direction: ltr; text-align: right; }
+
 .project-path {
   font-size: 10px;
   white-space: nowrap;
@@ -390,6 +448,33 @@ section.projects-grid {
 
 /* Usage view */
 section.usage-section { margin-top: 20px; }
+section.home-view { margin-top: 20px; }
+section.home-view .plan-usage { margin-bottom: 0; }
+.home-in-flight-group { margin-top: 28px; }
+section.home-view section.in-flight { margin-top: 0; }
+.home-ops-summary { margin-top: 28px; }
+.home-section-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+.home-section-heading h2 {
+  margin: 0;
+  color: var(--fg);
+  font-size: 18px;
+  line-height: 1.25;
+  letter-spacing: -0.015em;
+}
+.home-section-kicker {
+  color: var(--fg-faint);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+}
 
 .plan-usage { margin-bottom: 34px; }
 .plan-usage-heading {
@@ -576,6 +661,14 @@ section.usage-section { margin-top: 20px; }
   .plan-window-detail { white-space: normal; text-align: right; }
 }
 @media (max-width: 520px) {
+  section.in-flight .item {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 6px 10px;
+  }
+  section.in-flight .item > .badge {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
   .plan-usage-heading { align-items: flex-start; flex-direction: column; }
   .plan-usage-actions { justify-content: space-between; width: 100%; }
   .plan-service { padding: 17px; }

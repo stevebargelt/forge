@@ -135,6 +135,12 @@ test("inFlight: projectDir filter narrows without changing the status partition"
   assert.deepEqual(inFlight("/proj/nonexistent", probe), []);
 });
 
+test("inFlight: canonical project scope accepts multiple exact checkout paths", () => {
+  const rows = inFlight(["/proj/a", "/proj/nonexistent"], probe);
+  assert.deepEqual([...new Set(rows.map((r) => r.status))].sort(), ["awaiting_gate", "awaiting_recovery", "awaiting_red", "blocked_by_red", "running"]);
+  assert.deepEqual(inFlight([], probe), []);
+});
+
 test("shell: every status inFlight can return still has a badge rule", () => {
   const shell = renderShell();
 

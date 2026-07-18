@@ -30,6 +30,13 @@ export type ProjectMeta = {
   description?: string;
 };
 
+export type ProjectMetaOptions = {
+  /** Repository-derived fallback label, used only when project.json has no name. */
+  fallbackLabel?: string;
+  /** Canonical repository key for a checkout-independent fallback color. */
+  colorKey?: string;
+};
+
 // Auth configuration from .forge/project.json (FG-158).
 // auth: bedrock → arms CLAUDE_CODE_USE_BEDROCK=1 + AWS_PROFILE for the child.
 // auth: oauth   → no-op default; claude uses OAuth credentials as normal.
@@ -42,20 +49,24 @@ export type ProjectAuthConfig = {
 
 const cache = new Map<string, ProjectMeta>();
 
-export function resolveProjectMeta(projectDir: string | null): ProjectMeta | null {
+export function resolveProjectMeta(projectDir: string | null, opts: ProjectMetaOptions = {}): ProjectMeta | null {
   if (!projectDir) return null;
-  const cached = cache.get(projectDir);
+  const cacheKey = `${projectDir}\0${opts.fallbackLabel ?? ""}\0${opts.colorKey ?? ""}`;
+  const cached = cache.get(cacheKey);
   if (cached) return cached;
   // Project identity is the git repo root: a monorepo subdir takes the repo's
   // name, and the .forge/project.json name override + color live at the root.
   const root = findGitRoot(projectDir);
   const overrides = readProjectJson(root);
   const meta: ProjectMeta = {
-    label: overrides?.name ?? basename(root),
-    color: readVscodeColor(root) ?? hashColor(root),
+    label: overrides?.name ?? opts.fallbackLabel ?? basename(root),
+    // Once a canonical repository key is available it owns the color. A
+    // per-checkout VS Code title color cannot be allowed to make two clones of
+    // the same repository render as different projects.
+    color: opts.colorKey ? hashColor(opts.colorKey) : readVscodeColor(root) ?? hashColor(root),
     ...(overrides?.description ? { description: overrides.description } : {}),
   };
-  cache.set(projectDir, meta);
+  cache.set(cacheKey, meta);
   return meta;
 }
 

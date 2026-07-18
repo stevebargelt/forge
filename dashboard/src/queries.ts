@@ -10,10 +10,11 @@
 import Database from "better-sqlite3";
 import { existsSync, readFileSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type { Run, Task } from "@forge/types";
 import { resolveProjectMeta } from "@forge/project-meta";
-import { listProjects, sortProjects, deriveGithubUrl, type ProjectRecord } from "@forge/projects";
+import { listProjects, sortProjects, type ProjectRecord } from "@forge/projects";
+import { repositoryCheckoutIdentity } from "@forge/repository-identity";
 import { governanceView, type GovernanceView } from "@forge/governance";
 import {
   findReconcileCandidates,
@@ -23,6 +24,23 @@ import {
 } from "@forge/reconcile-candidate";
 
 export { type ProjectRecord };
+
+/** Undefined means all projects, a string is an exact operational checkout,
+ * and an array is the complete set of observed paths for one repository. */
+export type ProjectScope = string | readonly string[] | undefined;
+
+function scopeSql(column: string, scope: ProjectScope): { clause: string; params: string[] } {
+  if (scope === undefined) return { clause: "", params: [] };
+  if (typeof scope === "string") return { clause: `AND ${column} = ?`, params: [scope] };
+  if (scope.length === 0) return { clause: "AND 0 = 1", params: [] };
+  return { clause: `AND ${column} IN (${scope.map(() => "?").join(",")})`, params: [...scope] };
+}
+
+function scopeIncludes(scope: ProjectScope, projectDir: string | null): boolean {
+  if (scope === undefined) return true;
+  if (projectDir === null) return false;
+  return typeof scope === "string" ? projectDir === scope : scope.includes(projectDir);
+}
 
 const FORGE_HOME = process.env.FORGE_HOME ?? join(homedir(), ".forge");
 const DB_PATH = join(FORGE_HOME, "forge.db");
@@ -52,6 +70,8 @@ export type ActivityEntry = {
   // when projectDir is null. See project-meta.ts.
   projectLabel: string | null;
   projectColor: string | null;
+  checkoutBranch: string | null;
+  checkoutName: string | null;
   agentRole: string;
   agentModel: string | null;
   phase: string;
@@ -65,7 +85,7 @@ export type ActivityEntry = {
 
 /** Recent completed/failed agent outputs across all projects.
  *  Used for the activity feed. */
-export function recentActivity(limit = 100, sinceIso?: string, projectDir?: string): ActivityEntry[] {
+export function recentActivity(limit = 100, sinceIso?: string, scope?: ProjectScope): ActivityEntry[] {
   let sql = `
     SELECT t.id, t.run_id, t.parent_id, t.phase, t.agent_role, t.agent_model, t.status, t.result, t.started_at, t.completed_at,
            r.title, r.workflow, r.project_dir
@@ -79,10 +99,9 @@ export function recentActivity(limit = 100, sinceIso?: string, projectDir?: stri
     sql += ` AND t.completed_at > ?`;
     params.push(sinceIso);
   }
-  if (projectDir) {
-    sql += ` AND r.project_dir = ?`;
-    params.push(projectDir);
-  }
+  const project = scopeSql("r.project_dir", scope);
+  sql += ` ${project.clause}`;
+  params.push(...project.params);
   sql += ` ORDER BY t.completed_at DESC LIMIT ?`;
   params.push(limit);
 
@@ -103,7 +122,7 @@ export function recentActivity(limit = 100, sinceIso?: string, projectDir?: stri
   }>;
 
   return rows.map((r) => {
-    const meta = resolveProjectMeta(r.project_dir);
+    const meta = projectPresentation(r.project_dir);
     const durationMs = r.started_at
       ? Math.max(0, new Date(r.completed_at).getTime() - new Date(r.started_at).getTime())
       : null;
@@ -115,6 +134,10 @@ export function recentActivity(limit = 100, sinceIso?: string, projectDir?: stri
       projectDir: r.project_dir,
       projectLabel: meta?.label ?? null,
       projectColor: meta?.color ?? null,
+      // Historical run rows do not capture branch. Never relabel an old run
+      // with whichever branch this path happens to contain today.
+      checkoutBranch: null,
+      checkoutName: r.project_dir ? basename(r.project_dir) : null,
       agentRole: r.agent_role,
       agentModel: r.agent_model,
       phase: r.phase,
@@ -134,6 +157,8 @@ export type InFlightEntry = {
   projectDir: string | null;
   projectLabel: string | null;
   projectColor: string | null;
+  checkoutBranch: string | null;
+  checkoutName: string | null;
   taskId: string;
   agentRole: string;
   agentModel: string | null;
@@ -155,9 +180,8 @@ export type InFlightEntry = {
  *  so the dashboard stops faithfully showing stale `running`. The probe is
  *  injectable for tests; the classifier only docker-probes running+containerized
  *  tasks. Detection is read-only — the dashboard never calls reconcileRun. */
-export function inFlight(projectDir?: string, probe?: LivenessProbe): InFlightEntry[] {
-  const where = projectDir ? `AND r.project_dir = ?` : ``;
-  const params = projectDir ? [projectDir] : [];
+export function inFlight(scope?: ProjectScope, probe?: LivenessProbe): InFlightEntry[] {
+  const project = scopeSql("r.project_dir", scope);
   const rows = db().prepare(`
     SELECT t.id, t.run_id, t.phase, t.agent_role, t.agent_model, t.status, t.started_at,
            r.title, r.workflow, r.project_dir
@@ -165,9 +189,9 @@ export function inFlight(projectDir?: string, probe?: LivenessProbe): InFlightEn
     JOIN runs r ON r.id = t.run_id
     WHERE t.status IN ('running', 'awaiting_gate', 'awaiting_red', 'blocked_by_red', 'awaiting_recovery')
       AND r.status = 'active'
-      ${where}
+      ${project.clause}
     ORDER BY t.started_at DESC NULLS LAST, t.created_at DESC
-  `).all(...params) as Array<{
+  `).all(...project.params) as Array<{
     id: string;
     run_id: string;
     phase: string;
@@ -183,14 +207,18 @@ export function inFlight(projectDir?: string, probe?: LivenessProbe): InFlightEn
   // #290: classify running+containerized tasks by liveness once, map by taskId.
   // Only `reconcile_candidate` (container gone) becomes an annotation; alive,
   // liveness_unknown, and anomalous tasks render as ordinary running.
+  const reconcileRows = scope === undefined
+    ? findReconcileCandidates(db(), {}, probe)
+    : (typeof scope === "string" ? [scope] : scope).flatMap((projectDir) =>
+      findReconcileCandidates(db(), { projectDir }, probe));
   const candidates = new Map(
-    findReconcileCandidates(db(), { projectDir }, probe)
+    reconcileRows
       .filter((c) => c.classification === "reconcile_candidate")
       .map((c) => [c.taskId, { classification: c.classification, reason: c.reason }])
   );
 
   return rows.map((r) => {
-    const meta = resolveProjectMeta(r.project_dir);
+    const meta = projectPresentation(r.project_dir);
     return {
       runId: r.run_id,
       runTitle: r.title,
@@ -198,6 +226,8 @@ export function inFlight(projectDir?: string, probe?: LivenessProbe): InFlightEn
       projectDir: r.project_dir,
       projectLabel: meta?.label ?? null,
       projectColor: meta?.color ?? null,
+      checkoutBranch: meta?.branch ?? null,
+      checkoutName: r.project_dir ? basename(r.project_dir) : null,
       taskId: r.id,
       agentRole: r.agent_role,
       agentModel: r.agent_model,
@@ -345,7 +375,7 @@ export function taskDetail(taskId: string): TaskDetail | null {
     | undefined;
   if (!taskRow) return null;
 
-  const taskMeta = resolveProjectMeta(taskRow.project_dir);
+  const taskMeta = projectPresentation(taskRow.project_dir);
   const task: ActivityEntry = {
     taskId: taskRow.id,
     runId: taskRow.run_id,
@@ -354,6 +384,8 @@ export function taskDetail(taskId: string): TaskDetail | null {
     projectDir: taskRow.project_dir,
     projectLabel: taskMeta?.label ?? null,
     projectColor: taskMeta?.color ?? null,
+    checkoutBranch: null,
+    checkoutName: taskRow.project_dir ? basename(taskRow.project_dir) : null,
     agentRole: taskRow.agent_role,
     agentModel: taskRow.agent_model,
     phase: taskRow.phase,
@@ -503,14 +535,16 @@ function opsMedian(values: number[]): number {
   return s.length % 2 === 0 ? Math.round((s[mid - 1]! + s[mid]!) / 2) : s[mid]!;
 }
 
-export function opsMetrics(since: string, projectDir?: string): OpsMetrics {
+export function opsMetrics(since: string, scope?: ProjectScope): OpsMetrics {
   const cutoff = opsCutoff(since);
   // Window clause + params, applied to a `runs r` alias in each query.
   const win = (): { clause: string; params: unknown[] } => {
     const params: unknown[] = [];
     let clause = "";
     if (cutoff) { clause += " AND r.created_at >= ?"; params.push(cutoff); }
-    if (projectDir) { clause += " AND r.project_dir = ?"; params.push(projectDir); }
+    const project = scopeSql("r.project_dir", scope);
+    clause += ` ${project.clause}`;
+    params.push(...project.params);
     return { clause, params };
   };
 
@@ -595,7 +629,7 @@ export function opsMetrics(since: string, projectDir?: string): OpsMetrics {
   };
 }
 
-export function usageRollup(groupBy: GroupBy, since: string, projectDir?: string, limit = 50): UsageRollupRow[] {
+export function usageRollup(groupBy: GroupBy, since: string, scope?: ProjectScope, limit = 50): UsageRollupRow[] {
   const groupExpr: Record<GroupBy, string> = {
     role:     "COALESCE(t.agent_role, '(unknown role)')",
     workflow: "COALESCE(r.workflow,   '(unknown workflow)')",
@@ -613,11 +647,9 @@ export function usageRollup(groupBy: GroupBy, since: string, projectDir?: string
       params.push(cutoff);
     }
   }
-  let projectClause = "";
-  if (projectDir) {
-    projectClause = "AND r.project_dir = ?";
-    params.push(projectDir);
-  }
+  const project = scopeSql("r.project_dir", scope);
+  const projectClause = project.clause;
+  params.push(...project.params);
   params.push(limit);
 
   const sql = `
@@ -658,7 +690,7 @@ export function usageRollup(groupBy: GroupBy, since: string, projectDir?: string
   }));
 }
 
-export function usageTimeSeries(since = "30d", projectDir?: string): UsageTimeSeriesRow[] {
+export function usageTimeSeries(since = "30d", scope?: ProjectScope): UsageTimeSeriesRow[] {
   const params: unknown[] = [];
   let sinceClause = "";
   if (since !== "all") {
@@ -669,11 +701,9 @@ export function usageTimeSeries(since = "30d", projectDir?: string): UsageTimeSe
       params.push(cutoff);
     }
   }
-  let projectClause = "";
-  if (projectDir) {
-    projectClause = "AND r.project_dir = ?";
-    params.push(projectDir);
-  }
+  const project = scopeSql("r.project_dir", scope);
+  const projectClause = project.clause;
+  params.push(...project.params);
 
   const sql = `
     SELECT
@@ -717,7 +747,7 @@ export type ModelMixBucket = {
   models: Array<{ model: string; weightedTokens: number; requests: number }>;
 };
 
-export function usageModelMix(groupBy: GroupBy, since: string, projectDir?: string): ModelMixBucket[] {
+export function usageModelMix(groupBy: GroupBy, since: string, scope?: ProjectScope): ModelMixBucket[] {
   const groupExpr: Record<GroupBy, string> = {
     role:     "COALESCE(t.agent_role, '(unknown role)')",
     workflow: "COALESCE(r.workflow,   '(unknown workflow)')",
@@ -735,11 +765,9 @@ export function usageModelMix(groupBy: GroupBy, since: string, projectDir?: stri
       params.push(cutoff);
     }
   }
-  let projectClause = "";
-  if (projectDir) {
-    projectClause = "AND r.project_dir = ?";
-    params.push(projectDir);
-  }
+  const project = scopeSql("r.project_dir", scope);
+  const projectClause = project.clause;
+  params.push(...project.params);
 
   const sql = `
     SELECT
@@ -786,13 +814,61 @@ export function usageModelMix(groupBy: GroupBy, since: string, projectDir?: stri
 // readonly handle above). On a fresh install with no DB, getDb() will create
 // the schema; on a real install it's a no-op. Acceptable cost.
 export function projectsForDashboard(): ProjectRecord[] {
-  // FG-438: attach each project's canonical GitHub URL (derived from its repo
-  // remotes) so the Projects view can link out. Confined to the dashboard so the
-  // `forge projects` CLI and other listProjects() callers don't pay the git cost.
-  return sortProjects(listProjects(), "activity").map((p) => {
-    const githubUrl = deriveGithubUrl(p.projectDir);
-    return githubUrl ? { ...p, githubUrl } : p;
-  });
+  const now = Date.now();
+  if (projectCache && now - projectCache.at < PROJECT_CACHE_MS) return projectCache.projects;
+  const projects = sortProjects(listProjects(), "activity");
+  projectCache = { at: now, projects };
+  return projects;
+}
+
+// Registry discovery executes bounded Git commands for every observed checkout.
+// Keep it aligned with the dashboard's slow-poll cadence so one canonical
+// selection fans out to feed/in-flight/usage/etc. without re-scanning between
+// simultaneous requests. DB rows themselves are still queried on every call.
+const PROJECT_CACHE_MS = 30_000;
+let projectCache: { at: number; projects: ProjectRecord[] } | null = null;
+
+/** Resolve HTTP selection into either one exact checkout or every observed
+ * member path of a canonical repository. Unknown keys intentionally match
+ * nothing instead of falling back to an unscoped cross-project query. */
+export function resolveProjectScope(projectKey?: string, projectDir?: string): ProjectScope {
+  if (projectDir) return projectDir;
+  if (!projectKey) return undefined;
+  return projectsForDashboard().find((project) => project.key === projectKey)?.projectDirs ?? [];
+}
+
+type ProjectPresentation = { label: string; color: string; branch?: string };
+
+const PROJECT_PRESENTATION_CACHE_MS = 5_000;
+const projectPresentationCache = new Map<string, { at: number; value: ProjectPresentation | null }>();
+
+function projectPresentation(projectDir: string | null): ProjectPresentation | null {
+  if (!projectDir) return null;
+  const now = Date.now();
+  const cached = projectPresentationCache.get(projectDir);
+  if (cached && now - cached.at < PROJECT_PRESENTATION_CACHE_MS) return cached.value;
+  const identity = repositoryCheckoutIdentity(projectDir);
+  if (!identity.exists) {
+    const canonical = projectsForDashboard().find((project) => project.projectDirs.includes(projectDir));
+    if (canonical) {
+      const value = { label: canonical.label, color: canonical.color };
+      projectPresentationCache.set(projectDir, { at: now, value });
+      return value;
+    }
+  }
+  const fallbackLabel = !identity.exists
+    ? "Unknown repository"
+    : identity.remoteName
+    ? identity.remoteName.charAt(0).toUpperCase() + identity.remoteName.slice(1)
+    : undefined;
+  const meta = resolveProjectMeta(projectDir, { fallbackLabel, colorKey: identity.key });
+  const value = meta ? {
+    label: meta.label,
+    color: meta.color,
+    ...(identity.branch ? { branch: identity.branch } : {}),
+  } : null;
+  projectPresentationCache.set(projectDir, { at: now, value });
+  return value;
 }
 
 // #285: read-only routing/governance read model for the dashboard panel. Backed
@@ -1028,7 +1104,7 @@ export type InProgressVerification =
  *  at the same round/ticketId/sha with different attemptIds, only one
  *  finished) reports exactly the one attempt that's actually still open, not
  *  zero or two. */
-export function inProgressVerifications(nowMs: number = Date.now(), projectDir?: string): InProgressVerification[] {
+export function inProgressVerifications(nowMs: number = Date.now(), scope?: ProjectScope): InProgressVerification[] {
   // A finish event for an attempt whose start survives the lookback cutoff is
   // itself always created at/after that start (finish can't precede its own
   // start), so bounding both reads by the same cutoff is safe — it can't drop
@@ -1049,10 +1125,11 @@ export function inProgressVerifications(nowMs: number = Date.now(), projectDir?:
     const ageMs = nowMs - new Date(row.created_at).getTime();
     if (ageMs > STALE_LOOKBACK_MS) continue;
     if (row.event_type === "review_loop.verification_started") {
-      // Project filter matches inFlight()'s strict-equality semantics: the
+      // Repository scopes include every observed member checkout; exact-path
+      // scopes retain the previous operational filtering semantics. The
       // loop's eager run row carries project_dir; campaign gates resolve via
       // their campaign row (item.runId is frequently null).
-      if (projectDir && runProjectDir(row.run_id) !== projectDir) continue;
+      if (!scopeIncludes(scope, runProjectDir(row.run_id))) continue;
       out.push({
         kind: "review_loop_verification",
         attemptId,
@@ -1066,7 +1143,7 @@ export function inProgressVerifications(nowMs: number = Date.now(), projectDir?:
       });
     } else {
       const campaignId = typeof payload.campaignId === "string" ? payload.campaignId : null;
-      if (projectDir && campaignProjectDir(campaignId) !== projectDir) continue;
+      if (!scopeIncludes(scope, campaignProjectDir(campaignId))) continue;
       out.push({
         kind: "campaign_reconcile_gate",
         attemptId,
@@ -1094,6 +1171,8 @@ export type ReviewLoopRunPhaseEntry = {
   projectDir: string | null;
   projectLabel: string | null;
   projectColor: string | null;
+  checkoutBranch: string | null;
+  checkoutName: string | null;
   phase: ReviewLoopPhase;
   phaseStartedAt: string;
   ticketId: string | null;
@@ -1110,7 +1189,7 @@ export type ReviewLoopRunPhaseEntry = {
  *  "invoke" sentinel. Phase per run is whichever is more recent: the latest
  *  running reviewer/fixer task, or the latest still-open verification start
  *  (same attemptId pairing as inProgressVerifications). */
-export function reviewLoopRunPhases(nowMs: number = Date.now(), projectDir?: string): ReviewLoopRunPhaseEntry[] {
+export function reviewLoopRunPhases(nowMs: number = Date.now(), scope?: ProjectScope): ReviewLoopRunPhaseEntry[] {
   // Track the LATEST verification_started per run for its ticketId/round/mode
   // context (kept even once finished — a "reviewing"/"fixing" phase driven by
   // a task row still wants to display which ticket/round it belongs to), plus
@@ -1146,11 +1225,10 @@ export function reviewLoopRunPhases(nowMs: number = Date.now(), projectDir?: str
   }
   if (latestStartByRun.size === 0) return [];
 
-  const where = projectDir ? `AND r.project_dir = ?` : ``;
-  const params = projectDir ? [projectDir] : [];
+  const project = scopeSql("r.project_dir", scope);
   const runRows = db()
-    .prepare(`SELECT id, title, workflow, project_dir FROM runs r WHERE r.status = 'active' ${where}`)
-    .all(...params) as Array<{ id: string; title: string; workflow: string; project_dir: string | null }>;
+    .prepare(`SELECT id, title, workflow, project_dir FROM runs r WHERE r.status = 'active' ${project.clause}`)
+    .all(...project.params) as Array<{ id: string; title: string; workflow: string; project_dir: string | null }>;
   const candidateRuns = runRows.filter((r) => latestStartByRun.has(r.id));
   if (candidateRuns.length === 0) return [];
 
@@ -1189,7 +1267,7 @@ export function reviewLoopRunPhases(nowMs: number = Date.now(), projectDir?: str
     }
     if (!phase || !phaseStartedAt) continue;
 
-    const meta = resolveProjectMeta(run.project_dir);
+    const meta = projectPresentation(run.project_dir);
     out.push({
       runId: run.id,
       runTitle: run.title,
@@ -1197,6 +1275,8 @@ export function reviewLoopRunPhases(nowMs: number = Date.now(), projectDir?: str
       projectDir: run.project_dir,
       projectLabel: meta?.label ?? null,
       projectColor: meta?.color ?? null,
+      checkoutBranch: meta?.branch ?? null,
+      checkoutName: run.project_dir ? basename(run.project_dir) : null,
       phase,
       phaseStartedAt,
       ticketId: start.ticketId,
@@ -1264,13 +1344,13 @@ function rowToHostVerification(row: HostVerificationDbRow): HostVerificationEvid
 /** All host_verifications rows recorded for a ticket (optionally narrowed to
  *  one project_dir), most-recent-first. Unscoped by gate/sha — an evidence
  *  view shows everything recorded, not one gate lookup at a time. */
-export function hostVerificationsForTicket(ticketId: string, projectDir?: string, limit = 100): HostVerificationEvidenceRow[] {
-  const where = projectDir ? `AND project_dir = ?` : ``;
+export function hostVerificationsForTicket(ticketId: string, scope?: ProjectScope, limit = 100): HostVerificationEvidenceRow[] {
+  const project = scopeSql("project_dir", scope);
   const params: unknown[] = [ticketId];
-  if (projectDir) params.push(projectDir);
+  params.push(...project.params);
   params.push(limit);
   const rows = db()
-    .prepare(`SELECT * FROM host_verifications WHERE ticket_id = ? ${where} ORDER BY recorded_at DESC LIMIT ?`)
+    .prepare(`SELECT * FROM host_verifications WHERE ticket_id = ? ${project.clause} ORDER BY recorded_at DESC LIMIT ?`)
     .all(...params) as HostVerificationDbRow[];
   return rows.map(rowToHostVerification);
 }
@@ -1280,7 +1360,7 @@ export function hostVerificationsForTicket(ticketId: string, projectDir?: string
  *  item's ticketId and its campaign's project_dir via campaign_items →
  *  campaigns, then delegates to the ticket-scoped lookup. Returns [] for an
  *  unknown item id rather than throwing. */
-export function hostVerificationsForCampaignItem(itemId: string): HostVerificationEvidenceRow[] {
+export function hostVerificationsForCampaignItem(itemId: string, scope?: ProjectScope): HostVerificationEvidenceRow[] {
   const item = db()
     .prepare(
       `SELECT ci.ticket_id AS ticket_id, c.project_dir AS project_dir
@@ -1289,6 +1369,7 @@ export function hostVerificationsForCampaignItem(itemId: string): HostVerificati
     )
     .get(itemId) as { ticket_id: string; project_dir: string | null } | undefined;
   if (!item) return [];
+  if (!scopeIncludes(scope, item.project_dir)) return [];
   return hostVerificationsForTicket(item.ticket_id, item.project_dir ?? undefined);
 }
 
@@ -1296,7 +1377,9 @@ export function hostVerificationsForCampaignItem(itemId: string): HostVerificati
  *  orchestrator-run bare gate (e.g. `npm run test:all` invoked directly, no
  *  review-loop/reconcile wrapper) has no in-flight window to catch, but its
  *  recorded row is still discoverable here after the fact. */
-export function recentHostVerifications(limit = 50): HostVerificationEvidenceRow[] {
-  const rows = db().prepare(`SELECT * FROM host_verifications ORDER BY recorded_at DESC LIMIT ?`).all(limit) as HostVerificationDbRow[];
+export function recentHostVerifications(limit = 50, scope?: ProjectScope): HostVerificationEvidenceRow[] {
+  const project = scopeSql("project_dir", scope);
+  const rows = db().prepare(`SELECT * FROM host_verifications WHERE 1 = 1 ${project.clause} ORDER BY recorded_at DESC LIMIT ?`)
+    .all(...project.params, limit) as HostVerificationDbRow[];
   return rows.map(rowToHostVerification);
 }

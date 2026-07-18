@@ -20,8 +20,9 @@ import { fileURLToPath } from "node:url";
 import {
   recentActivity, inFlight, taskDetail, projectsForDashboard, usageRollup, usageTimeSeries, usageModelMix, opsMetrics, routingGovernance,
   inProgressVerifications, reviewLoopRunPhases, hostVerificationsForTicket, hostVerificationsForCampaignItem, recentHostVerifications,
+  resolveProjectScope,
 } from "./queries.js";
-import type { GroupBy } from "./queries.js";
+import type { GroupBy, ProjectScope } from "./queries.js";
 import { renderShell } from "./shell.js";
 import { listTickets } from "@forge/backlog";
 import { getPlanUsage } from "./plan-usage.js";
@@ -79,15 +80,13 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   if (path === "/api/feed") {
     const since = url.searchParams.get("since") ?? undefined;
     const limit = clamp(Number(url.searchParams.get("limit") ?? 100), 1, 500);
-    const projectDir = url.searchParams.get("projectDir") ?? undefined;
-    const data = recentActivity(limit, since, projectDir);
+    const data = recentActivity(limit, since, scopeFromUrl(url));
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
     return;
   }
 
   if (path === "/api/in-flight") {
-    const projectDir = url.searchParams.get("projectDir") ?? undefined;
-    const data = inFlight(projectDir);
+    const data = inFlight(scopeFromUrl(url));
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
     return;
   }
@@ -102,27 +101,49 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     // Read-only: the effective routing policy for the (optional) project, the
     // host-vs-project diff, drift/uncompiled/invalid warnings, and recent audit.
     const projectDir = url.searchParams.get("projectDir") ?? undefined;
+    if (url.searchParams.has("projectKey") && !projectDir) {
+      res.writeHead(409, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Select an exact checkout for project routing governance." }));
+      return;
+    }
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(routingGovernance(projectDir)));
     return;
   }
 
   if (path === "/api/backlog") {
     const projectDir = url.searchParams.get("projectDir") ?? undefined;
-    if (!projectDir) {
+    const projectKey = url.searchParams.get("projectKey") ?? undefined;
+    const project = !projectDir && projectKey ? projectsForDashboard().find((entry) => entry.key === projectKey) : undefined;
+    const checkouts = project
+      ? project.checkouts.filter((checkout) => checkout.exists)
+      : projectDir
+        ? [{ projectDir, branch: undefined }]
+        : [];
+    if (checkouts.length === 0) {
       res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ notes: "", tickets: [] }));
       return;
     }
-    const notesPath = join(projectDir, "backlog", "notes.md");
-    const notes = existsSync(notesPath) ? readFileSync(notesPath, "utf8") : "";
-    const tickets = listTickets(projectDir);
-    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ notes, tickets }));
+    const notesByCheckout: Array<{ checkoutDir: string; checkoutBranch: string | null; notes: string }> = [];
+    const tickets: Array<Record<string, unknown>> = [];
+    for (const checkout of checkouts) {
+      const notesPath = join(checkout.projectDir, "backlog", "notes.md");
+      const notes = existsSync(notesPath) ? readFileSync(notesPath, "utf8") : "";
+      if (notes.trim()) notesByCheckout.push({ checkoutDir: checkout.projectDir, checkoutBranch: checkout.branch ?? null, notes });
+      try {
+        for (const ticket of listTickets(checkout.projectDir)) {
+          tickets.push({ ...ticket, checkoutDir: checkout.projectDir, checkoutBranch: checkout.branch ?? null });
+        }
+      } catch {
+        // A checkout may disappear between registry resolution and reading.
+      }
+    }
+    const notes = checkouts.length === 1 ? notesByCheckout[0]?.notes ?? "" : "";
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ notes, notesByCheckout, tickets }));
     return;
   }
 
   if (path === "/api/ops") {
     const since = url.searchParams.get("since") ?? "30d";
-    const projectDir = url.searchParams.get("projectDir") ?? undefined;
-    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(opsMetrics(since, projectDir)));
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(opsMetrics(since, scopeFromUrl(url))));
     return;
   }
 
@@ -134,9 +155,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       return;
     }
     const since = url.searchParams.get("since") ?? "30d";
-    const projectDir = url.searchParams.get("projectDir") ?? undefined;
     const limit = clamp(Number(url.searchParams.get("limit") ?? 50), 1, 200);
-    const data = usageRollup(raw as GroupBy, since, projectDir, limit);
+    const data = usageRollup(raw as GroupBy, since, scopeFromUrl(url), limit);
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
     return;
   }
@@ -150,8 +170,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
   if (path === "/api/usage/timeseries") {
     const since = url.searchParams.get("since") ?? "30d";
-    const projectDir = url.searchParams.get("projectDir") ?? undefined;
-    const data = usageTimeSeries(since, projectDir);
+    const data = usageTimeSeries(since, scopeFromUrl(url));
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
     return;
   }
@@ -164,8 +183,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       return;
     }
     const since = url.searchParams.get("since") ?? "30d";
-    const projectDir = url.searchParams.get("projectDir") ?? undefined;
-    const data = usageModelMix(raw as GroupBy, since, projectDir);
+    const data = usageModelMix(raw as GroupBy, since, scopeFromUrl(url));
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
     return;
   }
@@ -176,20 +194,18 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   // the host_verifications evidence they record. See queries.ts's FG-487
   // section for the events-spine contract these read.
   if (path === "/api/verifications/in-progress") {
-    const projectDir = url.searchParams.get("projectDir") ?? undefined;
-    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(inProgressVerifications(Date.now(), projectDir)));
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(inProgressVerifications(Date.now(), scopeFromUrl(url))));
     return;
   }
 
   if (path === "/api/review-loop/phases") {
-    const projectDir = url.searchParams.get("projectDir") ?? undefined;
-    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(reviewLoopRunPhases(Date.now(), projectDir)));
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(reviewLoopRunPhases(Date.now(), scopeFromUrl(url))));
     return;
   }
 
   if (path === "/api/host-verifications/recent") {
     const limit = clamp(Number(url.searchParams.get("limit") ?? 50), 1, 500);
-    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(recentHostVerifications(limit)));
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(recentHostVerifications(limit, scopeFromUrl(url))));
     return;
   }
 
@@ -197,12 +213,11 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     const itemId = url.searchParams.get("itemId");
     const ticketId = url.searchParams.get("ticketId");
     if (itemId) {
-      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(hostVerificationsForCampaignItem(itemId)));
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(hostVerificationsForCampaignItem(itemId, scopeFromUrl(url))));
       return;
     }
     if (ticketId) {
-      const projectDir = url.searchParams.get("projectDir") ?? undefined;
-      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(hostVerificationsForTicket(ticketId, projectDir)));
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(hostVerificationsForTicket(ticketId, scopeFromUrl(url))));
       return;
     }
     res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "ticketId or itemId required" }));
@@ -230,6 +245,13 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
 function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
+}
+
+function scopeFromUrl(url: URL): ProjectScope {
+  return resolveProjectScope(
+    url.searchParams.get("projectKey") ?? undefined,
+    url.searchParams.get("projectDir") ?? undefined,
+  );
 }
 
 server.listen(PORT, HOST, () => {

@@ -5,8 +5,10 @@ import { useState, useEffect, useCallback } from "https://esm.sh/preact@10.24.0/
 import htm from "https://esm.sh/htm@3.1.1";
 import { renderResultByAgent, md } from "./renderers.js";
 import { UsageView } from "./usage.js";
+import { UsageLimits } from "./usage-limits.js";
 import { GovernanceView } from "./governance.js";
 import { BacklogView } from "./backlog.js";
+import { initialView, hashForView } from "./view-routing.js";
 import {
   eventBadgeClass, reviewLoopVerificationDetail, hostGateDetail,
   groupVerificationRows, verificationRowBadge, evidenceState,
@@ -16,13 +18,28 @@ const html = htm.bind(h);
 const POLL_MS = 2000;
 const USAGE_POLL_MS = 30000;
 
+function projectScopeQuery(project, checkoutDir = null) {
+  if (!project) return "";
+  const params = new URLSearchParams();
+  if (checkoutDir) params.set("projectDir", checkoutDir);
+  else params.set("projectKey", project.key);
+  return `?${params.toString()}`;
+}
+
+function appendScope(url, project, checkoutDir = null) {
+  const q = projectScopeQuery(project, checkoutDir);
+  if (!q) return url;
+  return `${url}${url.includes("?") ? "&" + q.slice(1) : q}`;
+}
+
 function App() {
-  // #154: top-level view toggle. activity = recent runs/in-flight (the original
-  // view); projects = registry cards.
-  const [view, setView] = useState(() => initialView());
+  // Top-level view toggle. Home is the default landing view; Activity retains
+  // the full recent-output feed and its project filtering behavior.
+  const [view, setView] = useState(() => initialView(window.location.hash));
   // When set, both /api/feed and /api/in-flight are filtered to this project.
   // Clicking a project card sets this AND switches to activity view.
   const [projectFilter, setProjectFilter] = useState(null);
+  const [checkoutFilter, setCheckoutFilter] = useState(null);
   const [feed, setFeed] = useState([]);
   const [inFlight, setInFlight] = useState([]);
   const [projects, setProjects] = useState([]);
@@ -55,18 +72,18 @@ function App() {
 
   const poll = useCallback(async () => {
     try {
-      const q = projectFilter ? `?projectDir=${encodeURIComponent(projectFilter.projectDir)}` : "";
+      const q = projectScopeQuery(projectFilter, checkoutFilter);
       const reqs = [
-        fetch(`/api/feed${q ? q + "&limit=100" : "?limit=100"}`),
+        view === "activity" ? fetch(`/api/feed${q ? q + "&limit=100" : "?limit=100"}`) : Promise.resolve(null),
         fetch(`/api/in-flight${q}`),
         fetch(`/api/verifications/in-progress${q}`),
         fetch(`/api/review-loop/phases${q}`),
       ];
       // Only poll /api/projects on the projects view (or first load) — saves a
-      // filesystem scan every 2s on the activity view.
+      // filesystem scan every 2s once the registry is populated.
       if (view === "projects" || projects.length === 0) reqs.push(fetch("/api/projects"));
       const [feedRes, ifRes, ivRes, phasesRes, projRes] = await Promise.all(reqs);
-      if (feedRes.ok) setFeed(await feedRes.json());
+      if (feedRes?.ok) setFeed(await feedRes.json());
       if (ifRes.ok) setInFlight(await ifRes.json());
       if (ivRes && ivRes.ok) setInProgressVerifications(await ivRes.json());
       if (phasesRes && phasesRes.ok) setReviewLoopPhases(await phasesRes.json());
@@ -76,41 +93,45 @@ function App() {
     } catch (e) {
       setError(String(e));
     }
-  }, [view, projectFilter, projects.length]);
+  }, [view, projectFilter, checkoutFilter, projects.length]);
 
-  const pollUsage = useCallback(async () => {
+  const pollPlanUsage = useCallback(async () => {
     setPlanUsageLoading(true);
     try {
-      const tsDays = parseInt(usageSince) * 2;
-      const [rollupRes, tsRes, mixRes, limitsResult] = await Promise.all([
-        fetch(`/api/usage?groupBy=${usageGroupBy}&since=${usageSince}`),
-        fetch(`/api/usage/timeseries?since=${tsDays}d`),
-        fetch(`/api/usage/model-mix?groupBy=${usageGroupBy}&since=${usageSince}`),
-        fetch("/api/usage/limits")
-          .then((response) => ({ response }))
-          .catch(() => ({ response: null })),
-      ]);
-      if (rollupRes.ok) setUsageRollup(await rollupRes.json());
-      if (tsRes.ok) setUsageTimeSeries(await tsRes.json());
-      if (mixRes.ok) setUsageModelMix(await mixRes.json());
-      if (limitsResult.response?.ok) {
+      const response = await fetch("/api/usage/limits").catch(() => null);
+      if (response?.ok) {
         try {
-          setPlanUsage(await limitsResult.response.json());
+          setPlanUsage(await response.json());
           setPlanUsageRefreshError(null);
         } catch {
           setPlanUsageRefreshError("Plan-limit sync returned an unreadable response. Showing the last successful sync, if available.");
         }
       } else {
-        const status = limitsResult.response ? ` (${limitsResult.response.status})` : "";
+        const status = response ? ` (${response.status})` : "";
         setPlanUsageRefreshError(`Plan-limit sync failed${status}. Showing the last successful sync, if available.`);
       }
       setNow(Date.now());
-    } catch (e) {
-      setError(String(e));
     } finally {
       setPlanUsageLoading(false);
     }
-  }, [usageGroupBy, usageSince]);
+  }, []);
+
+  const pollUsage = useCallback(async () => {
+    try {
+      const tsDays = parseInt(usageSince) * 2;
+      const [rollupRes, tsRes, mixRes] = await Promise.all([
+        fetch(appendScope(`/api/usage?groupBy=${usageGroupBy}&since=${usageSince}`, projectFilter, checkoutFilter)),
+        fetch(appendScope(`/api/usage/timeseries?since=${tsDays}d`, projectFilter, checkoutFilter)),
+        fetch(appendScope(`/api/usage/model-mix?groupBy=${usageGroupBy}&since=${usageSince}`, projectFilter, checkoutFilter)),
+      ]);
+      if (rollupRes.ok) setUsageRollup(await rollupRes.json());
+      if (tsRes.ok) setUsageTimeSeries(await tsRes.json());
+      if (mixRes.ok) setUsageModelMix(await mixRes.json());
+      setNow(Date.now());
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [usageGroupBy, usageSince, projectFilter, checkoutFilter]);
 
   const refreshPlanUsage = useCallback(async () => {
     setPlanUsageRefreshing(true);
@@ -137,6 +158,13 @@ function App() {
   }, [poll, view]);
 
   useEffect(() => {
+    if (view !== "home" && view !== "usage") return;
+    pollPlanUsage();
+    const id = setInterval(pollPlanUsage, USAGE_POLL_MS);
+    return () => clearInterval(id);
+  }, [pollPlanUsage, view]);
+
+  useEffect(() => {
     if (view !== "usage") return;
     pollUsage();
     const id = setInterval(pollUsage, USAGE_POLL_MS);
@@ -154,27 +182,28 @@ function App() {
 
   const pollOps = useCallback(async () => {
     try {
-      const res = await fetch(`/api/ops?since=${opsSince}`);
+      const res = await fetch(appendScope(`/api/ops?since=${opsSince}`, projectFilter, checkoutFilter));
       if (res.ok) setOps(await res.json());
       setNow(Date.now());
     } catch (e) { setError(String(e)); }
-  }, [opsSince]);
+  }, [opsSince, projectFilter, checkoutFilter]);
 
   useEffect(() => {
-    if (view !== "ops") return;
+    if (view !== "home" && view !== "ops") return;
     pollOps();
     const id = setInterval(pollOps, USAGE_POLL_MS);
     return () => clearInterval(id);
   }, [pollOps, view]);
 
   const pollGovernance = useCallback(async () => {
+    if (projectFilter && !checkoutFilter) { setGovernance(null); return; }
     try {
-      const q = projectFilter ? `?projectDir=${encodeURIComponent(projectFilter.projectDir)}` : "";
+      const q = projectScopeQuery(projectFilter, checkoutFilter);
       const res = await fetch(`/api/governance${q}`);
       if (res.ok) setGovernance(await res.json());
       setNow(Date.now());
     } catch (e) { setError(String(e)); }
-  }, [projectFilter]);
+  }, [projectFilter, checkoutFilter]);
 
   useEffect(() => {
     if (view !== "governance") return;
@@ -186,12 +215,12 @@ function App() {
   const pollBacklog = useCallback(async () => {
     if (!projectFilter) { setBacklog(null); return; }
     try {
-      const q = `?projectDir=${encodeURIComponent(projectFilter.projectDir)}`;
+      const q = projectScopeQuery(projectFilter, checkoutFilter);
       const res = await fetch(`/api/backlog${q}`);
       if (res.ok) setBacklog(await res.json());
       setNow(Date.now());
     } catch (e) { setError(String(e)); }
-  }, [projectFilter]);
+  }, [projectFilter, checkoutFilter]);
 
   useEffect(() => {
     if (view !== "backlog") return;
@@ -202,11 +231,11 @@ function App() {
 
   const pollVerifyRecent = useCallback(async () => {
     try {
-      const res = await fetch(`/api/host-verifications/recent?limit=50`);
+      const res = await fetch(appendScope(`/api/host-verifications/recent?limit=50`, projectFilter, checkoutFilter));
       if (res.ok) setVerifyRecent(await res.json());
       setNow(Date.now());
     } catch (e) { setError(String(e)); }
-  }, []);
+  }, [projectFilter, checkoutFilter]);
 
   useEffect(() => {
     if (view !== "verify") return;
@@ -221,27 +250,37 @@ function App() {
     const params = new URLSearchParams();
     if (verifyTicketId.trim()) params.set("ticketId", verifyTicketId.trim());
     if (verifyItemId.trim()) params.set("itemId", verifyItemId.trim());
+    if (projectFilter) {
+      if (checkoutFilter) params.set("projectDir", checkoutFilter);
+      else params.set("projectKey", projectFilter.key);
+    }
     if (!params.toString()) { setVerifyEvidence(null); return; }
     try {
       const res = await fetch(`/api/host-verifications?${params.toString()}`);
       setVerifyEvidence(res.ok ? await res.json() : []);
     } catch (e) { setError(String(e)); }
-  }, [verifyTicketId, verifyItemId]);
+  }, [verifyTicketId, verifyItemId, projectFilter, checkoutFilter]);
 
   useEffect(() => {
-    const onHash = () => setView(initialView());
+    const onHash = () => setView(initialView(window.location.hash));
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
   const switchView = (next) => {
     setView(next);
-    window.location.hash = next === "activity" ? "" : `#${next}`;
+    window.location.hash = hashForView(next);
   };
 
-  const filterByProject = (project) => {
+  const filterByProject = (project, checkoutDir = null) => {
     setProjectFilter(project);
+    setCheckoutFilter(checkoutDir);
     switchView("activity");
+  };
+
+  const clearProjectFilter = () => {
+    setProjectFilter(null);
+    setCheckoutFilter(null);
   };
 
   return html`
@@ -250,6 +289,7 @@ function App() {
         <h1>
           <img src="/client/logo-mark.svg" width="32" height="32" class="brand-mark" alt="forge" />
           <nav class="view-tabs">
+            <button class=${"tab " + (view === "home" ? "tab-active" : "")} onClick=${() => switchView("home")}>home</button>
             <button class=${"tab " + (view === "activity" ? "tab-active" : "")} onClick=${() => switchView("activity")}>activity</button>
             <button class=${"tab " + (view === "projects" ? "tab-active" : "")} onClick=${() => switchView("projects")}>projects</button>
             <button class=${"tab " + (view === "verify" ? "tab-active" : "")} onClick=${() => switchView("verify")}>verification</button>
@@ -264,10 +304,52 @@ function App() {
 
       ${error ? html`<div class="card" style="color: var(--err);">Error: ${error}</div>` : null}
 
-      ${view === "projects"
+      ${projectFilter && view !== "projects" ? html`
+        <div class="filter-banner project-scope-banner">
+          <span>Filtered to <strong>${projectFilter.label}</strong></span>
+          <div class="project-scope-options" aria-label="Project checkout scope">
+            <button
+              class=${"checkout-scope-btn" + (!checkoutFilter ? " checkout-scope-btn-active" : "")}
+              onClick=${() => setCheckoutFilter(null)}
+              aria-pressed=${!checkoutFilter}
+            >all checkouts</button>
+            ${(projectFilter.checkouts || []).map((checkout) => html`
+              <button
+                key=${checkout.projectDir}
+                class=${"checkout-scope-btn" + (checkoutFilter === checkout.projectDir ? " checkout-scope-btn-active" : "")}
+                onClick=${() => setCheckoutFilter(checkout.projectDir)}
+                aria-pressed=${checkoutFilter === checkout.projectDir}
+                title=${checkout.projectDir}
+              >${checkout.branch || checkout.projectDir.split("/").pop()}</button>
+            `)}
+          </div>
+          <button class="clear-filter" onClick=${clearProjectFilter}>clear ×</button>
+        </div>
+      ` : null}
+
+      ${view === "home"
+        ? html`<${HomeView}
+            planUsage=${planUsage}
+            planUsageLoading=${planUsageLoading}
+            planUsageRefreshing=${planUsageRefreshing}
+            planUsageRefreshError=${planUsageRefreshError}
+            onRefreshPlanUsage=${refreshPlanUsage}
+            inFlight=${inFlight}
+            verifications=${inProgressVerifications}
+            phases=${reviewLoopPhases}
+            now=${now}
+            orchCollapsed=${orchCollapsed}
+            onToggleOrch=${() => setOrchCollapsed((c) => !c)}
+            onTaskClick=${(id) => setSelectedTaskId(id)}
+            ops=${ops}
+            opsSince=${opsSince}
+          />`
+        : view === "projects"
         ? html`<${ProjectsView} projects=${projects} onPick=${filterByProject} />`
         : view === "governance"
-        ? html`<${GovernanceView} data=${governance} />`
+        ? projectFilter && !checkoutFilter
+          ? html`<div class="card muted" style="margin-top: 20px;">Routing governance is checkout-specific. Select a checkout above; Forge will not substitute an arbitrary clone.</div>`
+          : html`<${GovernanceView} data=${governance} />`
         : view === "backlog"
         ? html`<${BacklogView} data=${backlog} projectFilter=${projectFilter} />`
         : view === "verify"
@@ -300,12 +382,6 @@ function App() {
             onRefreshPlanUsage=${refreshPlanUsage}
           />`
         : html`
-          ${projectFilter ? html`
-            <div class="filter-banner">
-              <span>Filtered to <strong>${projectFilter.label}</strong></span>
-              <button class="clear-filter" onClick=${() => setProjectFilter(null)}>clear ×</button>
-            </div>
-          ` : null}
           <${InFlightSection}
             inFlight=${inFlight}
             verifications=${inProgressVerifications}
@@ -331,44 +407,89 @@ function App() {
   `;
 }
 
-function initialView() {
-  const h = (window.location.hash || "").replace(/^#/, "");
-  if (h === "projects") return "projects";
-  if (h === "usage") return "usage";
-  if (h === "ops") return "ops";
-  if (h === "governance") return "governance";
-  if (h === "backlog") return "backlog";
-  if (h === "verify") return "verify";
-  return "activity";
+function HomeView({ planUsage, planUsageLoading, planUsageRefreshing, planUsageRefreshError, onRefreshPlanUsage, inFlight, verifications, phases, now, orchCollapsed, onToggleOrch, onTaskClick, ops, opsSince }) {
+  return html`
+    <section class="home-view" aria-label="Dashboard home">
+      <${UsageLimits}
+        data=${planUsage}
+        loading=${planUsageLoading}
+        refreshing=${planUsageRefreshing}
+        refreshError=${planUsageRefreshError}
+        onRefresh=${onRefreshPlanUsage}
+      />
+      <div class="home-in-flight-group">
+        <div class="home-section-heading">
+          <div>
+            <div class="home-section-kicker">Tasks</div>
+            <h2 id="home-in-flight-heading">In flight</h2>
+          </div>
+        </div>
+        <${InFlightSection}
+          inFlight=${inFlight}
+          verifications=${verifications}
+          phases=${phases}
+          now=${now}
+          orchCollapsed=${orchCollapsed}
+          onToggleOrch=${onToggleOrch}
+          onTaskClick=${onTaskClick}
+          showHeading=${false}
+          labelledBy="home-in-flight-heading"
+        />
+      </div>
+      <section class="home-ops-summary" aria-labelledby="home-ops-heading">
+        <div class="home-section-heading">
+          <div>
+            <div class="home-section-kicker">Forge activity</div>
+            <h2 id="home-ops-heading">Operations</h2>
+          </div>
+          <span class="muted mono">${opsSince}</span>
+        </div>
+        <${OpsSummary} data=${ops} />
+      </section>
+    </section>
+  `;
+}
+
+function OpsSummary({ data }) {
+  if (!data) return html`<div class="muted">loading metrics…</div>`;
+  const pct = (data.runs.successRate * 100).toFixed(0);
+  return html`
+    <div class="row" style="gap: 16px; flex-wrap: wrap; margin-bottom: 20px;">
+      <div class="card stat"><div class="stat-num">${pct}%</div><div class="muted">success rate (of ${data.runs.terminal} terminal)</div></div>
+      <div class="card stat"><div class="stat-num">${data.runs.total}</div><div class="muted">runs (${data.runs.clean} clean · ${data.runs.withFailures} w/ failures${data.runs.active ? ` · ${data.runs.active} active` : ""})</div></div>
+      <div class="card stat"><div class="stat-num">${data.taskCount}</div><div class="muted">tasks</div></div>
+    </div>
+
+    <div class="row" style="gap: 16px; flex-wrap: wrap; margin-bottom: 20px;">
+      <div class="card stat"><div class="stat-num">${data.counts.idleKills}</div><div class="muted">idle kills</div></div>
+      <div class="card stat"><div class="stat-num">${data.counts.cancels}</div><div class="muted">cancels</div></div>
+      <div class="card stat"><div class="stat-num">${data.counts.retries}</div><div class="muted">retries</div></div>
+      <div class="card stat"><div class="stat-num">${data.counts.redBlocks}</div><div class="muted">red blocks</div></div>
+    </div>
+  `;
 }
 
 // RUN-3: operations summary — success rate, failure-kind mix, median durations,
 // operational counts. Reads /api/ops.
 function OpsView({ data, since, onSinceChange }) {
   if (!data) return html`<div class="muted">loading metrics…</div>`;
-  const pct = (data.runs.successRate * 100).toFixed(0);
   const maxKind = Math.max(1, ...data.failureKinds.map((k) => k.count));
   return html`
     <section class="ops-view">
       <div class="row" style="gap: 8px; margin-bottom: 16px;">
         <span class="muted">window:</span>
         ${["7d", "30d", "all"].map((w) => html`
-          <button class=${"tab " + (since === w ? "tab-active" : "")} onClick=${() => onSinceChange(w)}>${w}</button>
+          <button
+            key=${w}
+            type="button"
+            class=${"usage-dim-btn " + (since === w ? "usage-dim-btn-active" : "")}
+            aria-pressed=${since === w}
+            onClick=${() => onSinceChange(w)}
+          >${w}</button>
         `)}
       </div>
 
-      <div class="row" style="gap: 16px; flex-wrap: wrap; margin-bottom: 20px;">
-        <div class="card stat"><div class="stat-num">${pct}%</div><div class="muted">success rate (of ${data.runs.terminal} terminal)</div></div>
-        <div class="card stat"><div class="stat-num">${data.runs.total}</div><div class="muted">runs (${data.runs.clean} clean · ${data.runs.withFailures} w/ failures${data.runs.active ? ` · ${data.runs.active} active` : ""})</div></div>
-        <div class="card stat"><div class="stat-num">${data.taskCount}</div><div class="muted">tasks</div></div>
-      </div>
-
-      <div class="row" style="gap: 16px; flex-wrap: wrap; margin-bottom: 20px;">
-        <div class="card stat"><div class="stat-num">${data.counts.idleKills}</div><div class="muted">idle kills</div></div>
-        <div class="card stat"><div class="stat-num">${data.counts.cancels}</div><div class="muted">cancels</div></div>
-        <div class="card stat"><div class="stat-num">${data.counts.retries}</div><div class="muted">retries</div></div>
-        <div class="card stat"><div class="stat-num">${data.counts.redBlocks}</div><div class="muted">red blocks</div></div>
-      </div>
+      <${OpsSummary} data=${data} />
 
       ${data.failureKinds.length > 0 ? html`
         <h2>Failure kinds</h2>
@@ -421,15 +542,22 @@ function ProjectsView({ projects, onPick }) {
   }
   return html`
     <section class="projects-grid">
-      ${projects.map((p) => html`<${ProjectCard} key=${p.projectDir} project=${p} onClick=${() => onPick(p)} />`)}
+      ${projects.map((p) => html`<${ProjectCard} key=${p.key} project=${p} onPick=${onPick} />`)}
     </section>
   `;
 }
 
-function ProjectCard({ project, onClick }) {
+function ProjectCard({ project, onPick }) {
   const ageState = projectAgeState(project);
+  const onClick = () => onPick(project, null);
+  const onKey = (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      onClick();
+    }
+  };
   return html`
-    <div class=${"project-card state-" + ageState} onClick=${onClick} title=${project.projectDir}>
+    <div class=${"project-card state-" + ageState} onClick=${onClick} onKeyDown=${onKey} role="button" tabIndex="0" aria-label=${`Open all ${project.label} checkouts`}>
       <div class="project-card-head">
         <span class="project-chip" style=${{ background: project.color }}>${project.label}</span>
         ${project.liveSessions > 0
@@ -462,7 +590,20 @@ function ProjectCard({ project, onClick }) {
           <div class="project-stat-val ${project.inFlightCount > 0 ? "stat-warn" : ""}">${project.inFlightCount}</div>
         </div>
       </div>
-      <div class="project-path mono faint" title=${project.projectDir}>${project.projectDir}</div>
+      <div class="project-checkouts" aria-label=${`${project.label} checkouts`}>
+        ${(project.checkouts || []).map((checkout) => html`
+          <button
+            key=${checkout.projectDir}
+            class="project-checkout-row"
+            onClick=${(event) => { event.stopPropagation(); onPick(project, checkout.projectDir); }}
+            title=${checkout.projectDir}
+            aria-label=${`Open ${project.label} checkout ${checkout.branch || checkout.projectDir}`}
+          >
+            <span class="checkout-branch">${checkout.branch || "unknown branch"}</span>
+            <span class="project-path mono faint">${checkout.projectDir}</span>
+          </button>
+        `)}
+      </div>
     </div>
   `;
 }
@@ -482,13 +623,14 @@ function projectAgeState(p) {
 function ProjectChip({ entry }) {
   if (!entry.projectLabel || !entry.projectColor) return null;
   return html`
-    <span class="project-chip" style=${{ background: entry.projectColor }} title=${entry.projectDir ?? ""}>
-      ${entry.projectLabel}
+    <span class="project-identity" title=${entry.projectDir ?? ""}>
+      <span class="project-chip" style=${{ background: entry.projectColor }}>${entry.projectLabel}</span>
+      ${entry.checkoutBranch || entry.checkoutName ? html`<span class="checkout-chip">${entry.checkoutBranch || entry.checkoutName}</span>` : null}
     </span>
   `;
 }
 
-function InFlightSection({ inFlight, verifications, phases, now, orchCollapsed, onToggleOrch, onTaskClick }) {
+function InFlightSection({ inFlight, verifications, phases, now, orchCollapsed, onToggleOrch, onTaskClick, showHeading = true, labelledBy = null }) {
   const orchestrators = inFlight.filter((t) => t.agentRole === "orchestrator");
   const work = inFlight.filter((t) => t.agentRole !== "orchestrator");
 
@@ -509,8 +651,8 @@ function InFlightSection({ inFlight, verifications, phases, now, orchCollapsed, 
   const nothingLive = work.length === 0 && orchestrators.length === 0 && standalone.length === 0;
 
   return html`
-    <section class="in-flight">
-      <h2><span class="status-dot"></span>In flight</h2>
+    <section class="in-flight" aria-labelledby=${labelledBy || undefined}>
+      ${showHeading ? html`<h2>In flight</h2>` : null}
       ${orchestrators.length > 0 ? html`
         <div class="orch-group">
           <div class="orch-header" onClick=${onToggleOrch}>
@@ -587,7 +729,10 @@ function InFlightItem({ task, reviewLoopPhase, onClick, muted }) {
           ${task.agentModel ? html`<span class="model-badge">${task.agentModel}</span>` : null}
           <span class="faint"> ·</span> <span class="muted">${task.runTitle}</span>
         </div>
-        <div class="faint mono" style="font-size: 11px;">${task.phase} · ${task.taskId}</div>
+        <div class="faint mono" style="font-size: 11px;">
+          ${task.phase} · ${task.taskId}
+          <${CopyIdButton} value=${task.taskId} />
+        </div>
       </div>
       <div class="muted mono" style="font-size: 11px;" title="run-time so far">${task.startedAt ? html`⏱ ${formatDuration(Date.now() - new Date(task.startedAt).getTime())}` : formatRelativeTime(task.startedAt)}</div>
     </div>
@@ -612,7 +757,8 @@ function FeedCard({ entry, onClick }) {
         </div>
       </div>
       <div class="context faint mono" style="font-size: 11px; margin-bottom: 8px;">
-        ${entry.workflow} · ${entry.phase}
+        ${entry.workflow} · ${entry.phase} · ${entry.taskId}
+        <${CopyIdButton} value=${entry.taskId} />
       </div>
       ${renderPreview(entry)}
     </div>
@@ -673,6 +819,7 @@ function CopyIdButton({ value }) {
   return html`<button
     class="copy-id ${copied ? "copied" : ""}"
     title="Copy task id"
+    aria-label=${`Copy task id ${value}`}
     onClick=${onCopy}
   >${copied ? "copied!" : "copy id"}</button>`;
 }
