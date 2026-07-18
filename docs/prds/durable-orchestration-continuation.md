@@ -5,7 +5,7 @@
 **Last revised:** 2026-07-15  
 **Primary backlog:** FG-551, FG-552, FG-553, FG-555
 **Landed foundation:** FG-535, FG-536, FG-542  
-**Landed Slice 1 (partial):** FG-551 (test parity), FG-567 (signal fidelity), FG-568 (additive-only store), FG-569 (exec entry + inert release closure + R1/R2 provenance), FG-570 (bounded ABI assertion — `5044c5d`). **FG-571 (promotion) LANDED `2f80496`.** FG-553 child 5 (FG-572 installed-surface) remains open; R3/R4 (FG-555) remain open.  
+**Landed Slice 1 (partial):** FG-551 (test parity), FG-567 (signal fidelity), FG-568 (additive-only store), FG-569 (exec entry + inert release closure + R1/R2 provenance), FG-570 (bounded ABI assertion — `5044c5d`). **FG-571 (promotion) LANDED `2f80496`.** FG-553 child 5 (FG-572 installed-surface) remains open. **R3/R4 launched-workload provenance LANDED (FG-555, `cd8a036`) — R3/R4 now recorded; workload provenance + the `--require-control-toolchain` contract delivered [SHIPPED 2026-07-18].**  
 **Upstream context:** [anthropics/claude-code#76249](https://github.com/anthropics/claude-code/issues/76249), [#25188](https://github.com/anthropics/claude-code/issues/25188), [#72851](https://github.com/anthropics/claude-code/issues/72851), [#68625](https://github.com/anthropics/claude-code/issues/68625)
 
 ## How to use this document
@@ -96,7 +96,7 @@ Forge must not make correct ownership depend on a particular upstream diagnosis 
 | Unsafe harness background dispatch | Disabled for `forge claude` children | FG-542 | Landed |
 | tmux availability in agent test image | `agent-dev-worker` image | FG-551 | Landed (`7f6091b`) |
 | Control-plane executable + provenance (R1, R2) | npm-linked mutable Forge working tree; single-process `/bin/sh` exec entry so R1 (`process.execPath`) is self-evidencing; exit-recorder captures R2 independently | FG-553 / FG-569 | **Closed on the live path** — R1/R2 recorded + exec entry (FG-569, `1b11f25`); source isolation + atomic promotion shipped (FG-571, `2f80496`). Honest limit: same-principal `$FORGE_HOME` tampering is out of scope (FG-571 threat boundary) |
-| Launched-workload environment (R3/R4) | Caller's ambient environment; `forge launch` preserves argv and owns no environment contract | FG-555 | Active gap |
+| Launched-workload environment (R3/R4) | `forge launch` preserves argv, records R3/R4 workload provenance at spawn time, and offers the `--require-control-toolchain` pinned-PATH-trust contract for Forge-owned unattended callers | FG-555 | **Shipped (`cd8a036`, 2026-07-18) — R3/R4 recorded; `--require-control-toolchain` contract delivered** |
 | Launch completion notification | Hand-built Monitor polling | FG-552 | Active gap |
 | Notification delivery evidence | None | New slice | Missing |
 | Idempotent continuation claim | Consumer-specific/implicit | New slice | Missing |
@@ -348,7 +348,7 @@ Required decisions/tests:
 
 Goal: an agent editing Forge cannot break machine-wide commands, observation, or unrelated projects — **and** the control plane resolves to a known runtime regardless of the caller's ambient environment (BD-14).
 
-**Landed so far (2026-07-16):** children 0–3 — FG-567 (signal fidelity), FG-568 (additive-only store), FG-569 (exec-not-spawn entry + inert immutable release closure + manifest + R1/R2 provenance), FG-570 (bounded ABI assertion — `5044c5d`). These shipped the runtime-provenance, store-compatibility and interpreter-compatibility halves, deliberately inert. **UPDATE 2026-07-17: Child 4 — FG-571 (atomic promote/rollback + PATH shim + env-sanitization + fail-closed identity) — LANDED as `2f80496`, so the slice is no longer inert and F29 is closed on the live path.** Child 5 — **FG-572** (installed-surface compatibility) — remains open. R3/R4 launched-workload provenance is FG-555, also open.
+**Landed so far (2026-07-16):** children 0–3 — FG-567 (signal fidelity), FG-568 (additive-only store), FG-569 (exec-not-spawn entry + inert immutable release closure + manifest + R1/R2 provenance), FG-570 (bounded ABI assertion — `5044c5d`). These shipped the runtime-provenance, store-compatibility and interpreter-compatibility halves, deliberately inert. **UPDATE 2026-07-17: Child 4 — FG-571 (atomic promote/rollback + PATH shim + env-sanitization + fail-closed identity) — LANDED as `2f80496`, so the slice is no longer inert and F29 is closed on the live path.** Child 5 — **FG-572** (installed-surface compatibility) — remains open. **UPDATE 2026-07-18: R3/R4 launched-workload provenance (FG-555) SHIPPED as `cd8a036` — R3/R4 are now recorded at spawn time and the `--require-control-toolchain` launch-environment contract is delivered.**
 
 **FG-553 is not closable on the source axis alone.** Stable source and stable runtime are separate properties. A slice that isolates the source tree and leaves the interpreter to the caller's PATH has not closed this ticket: the observed control-plane outage reproduces with source fully valid. Both axes must close.
 
@@ -392,6 +392,8 @@ For each surface, the design must state whether promotion **re-installs** it, **
 The direct tmux-pane watcher remains only an emergency advisory signal until this slice lands. It never interprets pane death as the launch result.
 
 ### Slice 1b — FG-555: the launched workload's execution environment
+
+> **[SHIPPED 2026-07-18 (FG-555, `cd8a036`) — R3/R4 now recorded; workload provenance + the `--require-control-toolchain` contract delivered.]** The binding outcomes below are DELIVERED: `forge launch run` records R3 (resolved `argv[0]`) and R4 (whether a later runtime resolution is knowable — `unknowable` otherwise) at spawn time, and `--require-control-toolchain` supplies the refuse-before-execute environment contract (pinned-PATH trust) for Forge-owned unattended callers. See `docs/concepts.md` "Durable launch" and `docs/quick-start.md` §13 for the operator surface. The design narrative is preserved below as the accepted record.
 
 **Coordinated with Slice 1/BD-14, but a distinct boundary with a distinct owner. Do not fold this into FG-553.**
 
@@ -626,6 +628,34 @@ The initiative is complete only when all of the following are true:
 
 ## Revision log
 
+### 2026-07-18 — FG-555 launched-workload provenance + launch-environment contract SHIPPED (`cd8a036`)
+
+- **BD-14's R3/R4 "Currently recorded?" flipped from No to Yes.** FG-555 shipped the recorder's R3/R4
+  provenance for the launched workload: R3 is the resolved top-level executable (`argv[0]`), recorded at spawn
+  time *before* the spawn (so it survives a failed spawn); R4 is whether a later runtime resolution is even
+  knowable at launch time, recorded `unknowable` for anything that resolves Node only *after* `argv[0]` is
+  spawned (a shell, a script, or a launcher such as `npm`/`npx`/a `#!/usr/bin/env node` binary) and `not
+  applicable` only when `argv[0]` is itself a terminal `node`/`nodejs`. Old, pre-FG-555 launches render "not
+  recorded", never manufactured. The operator surfaces (`forge launch show`'s `workload:`/`nested:` lines and
+  `--json`'s `workload` object) render them; see `docs/concepts.md` "Durable launch" and `docs/quick-start.md`
+  §13.
+- **The explicit environment contract for Forge-owned unattended callers shipped as `--require-control-toolchain`
+  (pinned-PATH trust).** It pins the workload's `PATH` to forge's control-runtime node dir (control node first)
+  and decides *before executing* whether to run or refuse: a name-resolved `forge`/`npm`/`npx` (trusted under
+  the pin) or a `node`/`nodejs` whose probed ABI matches is allowed; a PATH-mutating assignment, a login or
+  non-login shell, a wrong-ABI interpreter, an explicit-path control tool, a script, or an unknown wrapper is
+  refused with one named, actionable message. The gate only probes the ABI; it never rebuilds a native
+  dependency. **Honest residual (operator-decided Option A):** a name-resolved `npm`/`npx` is trusted to START
+  under the pinned control node, but the contract does **not** deep-verify `npm run` lifecycle-script node
+  resolution — `npm` prepends the project's `node_modules/.bin` to the lifecycle PATH, so a project-provided
+  `node` there could resolve a different ABI *after* the gate. That later resolution is recorded R4
+  `unknowable`, not guaranteed; a strict guarantee requires launching `node`/`forge` directly rather than via
+  an `npm run` lifecycle script.
+- **No normative change.** This is a current-state reconciliation of the same class as the FG-569/FG-573 entry
+  below: the accepted binding decisions (BD-14 and the rest), the Slice 1b design narrative, the candidate
+  policies, the slices, and the F-row matrix are untouched. FG-552/FG-562/FG-563 and the remaining FG-572
+  installed-surface work stay open. Only current-state evidence moves.
+
 ### 2026-07-17 — dashboard availability from a promoted release satisfied (FG-580, `bc9286f`)
 
 - **The open dashboard-availability condition is now MET.** FG-580 (FG-553 Child 5, operator Option A) bundles
@@ -686,14 +716,16 @@ The initiative is complete only when all of the following are true:
   root-owned storage, hardware-backed signing) and is **not FG-571 scope**. Full statement: the FG-571 ticket
   and the plan's §4b.
 - **Still open:** FG-572 (installed-surface compatibility — `forge dashboard` refuses in release mode until
-  it is decided) and FG-555 (R3/R4). *(Superseded 2026-07-17: the `forge dashboard` release-mode refusal is
+  it is decided) and FG-555 (R3/R4). *(Superseded 2026-07-18: FG-555's R3/R4 launched-workload provenance +
+  the `--require-control-toolchain` contract SHIPPED as `cd8a036`; see the 2026-07-18 entry above. FG-572
+  remains open.)* *(Superseded 2026-07-17: the `forge dashboard` release-mode refusal is
   retired and the dashboard is bundled into the release as of FG-580, `bc9286f`; see the 2026-07-17 dashboard
   entry above. The rest of FG-572 remains open.)* **No normative change:** BD-13/BD-14/BD-15, the candidate
   policies, the slices and the F-row matrix are untouched; only current-state evidence moves.
 
 ### 2026-07-15 — current-state map reconciled to landed R1/R2 + exec entry (FG-569, `1b11f25`; FG-573)
 
-- **BD-14's R1/R2 "Currently recorded?" flipped from No to Yes.** FG-569 shipped the single-process `/bin/sh` exec-not-spawn entry (R1 = `process.execPath` is self-evidencing; captured at submission as `meta.json`'s `control` record and surfaced as `launch show`'s `control:` line) and the independent exit-recorder capture of R2 (`runtime.json`). Old, pre-FG-569 launches render "not recorded", never manufactured. **R3/R4 stay No/unknowable** (FG-555, open).
+- **BD-14's R1/R2 "Currently recorded?" flipped from No to Yes.** FG-569 shipped the single-process `/bin/sh` exec-not-spawn entry (R1 = `process.execPath` is self-evidencing; captured at submission as `meta.json`'s `control` record and surfaced as `launch show`'s `control:` line) and the independent exit-recorder capture of R2 (`runtime.json`). Old, pre-FG-569 launches render "not recorded", never manufactured. **R3/R4 stay No/unknowable** (FG-555, open). *(Superseded 2026-07-18: FG-555 shipped as `cd8a036` — R3/R4 are now recorded at spawn time; see the 2026-07-18 entry above.)*
 - **Current system map:** the R1 executable row now distinguishes the shipped exec entry + R1/R2 recording from the still-open source-isolation/promotion axis (FG-571). The header records the landed Slice-1 children (FG-551/567/568/569) and the open ones (FG-570/571/572, FG-555). *(Superseded 2026-07-16: FG-570 landed as `5044c5d`; the open children are now FG-571/572 + FG-555.)*
 - **Slice 1 section** carries a landed-so-far note: children 0–2 are inert (no promotion/`current`/PATH change); children 3–5 remain open, so F29 (control-plane availability under a hostile/node-free environment) is not yet closed on the live path. *(Superseded 2026-07-17: FG-570 landed as `5044c5d` and **FG-571 landed as `2f80496`**, so the slice is no longer inert and **F29 IS closed on the live path**; only FG-572 + FG-555 remain open. See the 2026-07-17 entry.)*
 - **Superseded phrasing.** The "no runtime identity is recorded today" claim in the 2026-07-14 audit-closure entry below described the pre-FG-569 state and is superseded by this reconciliation (that entry now carries an inline superseded marker pointing here). R1/R2 are recorded; R3/R4 are not.

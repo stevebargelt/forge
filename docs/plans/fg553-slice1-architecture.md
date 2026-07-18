@@ -66,7 +66,8 @@ shortcut was being treated as provenance).
 **LANDED as FG-580 (operator Option A)**: the dashboard is now bundled into the promoted release as a mandatory
 asset, `forge dashboard` runs from a release (resolved from `assetRoot()`, never the dev checkout), and the
 release-mode refusal is retired — so the "`forge dashboard` still refuses in release mode" condition below no
-longer holds. R3/R4 launched-workload provenance stays out of scope (FG-555).
+longer holds. R3/R4 launched-workload provenance stays out of scope of this slice (its own owner, FG-555, has
+since SHIPPED it as `cd8a036`, 2026-07-18 — R3/R4 recorded + the `--require-control-toolchain` contract).
 
 **The rule this slice is planned under (from FG-551):** *a property concerning the FINAL RUNTIME must be
 demonstrated by EXECUTING or MUTATION-TESTING the final artifact. A source-pattern match is not evidence.*
@@ -483,7 +484,10 @@ lives on the FG-571 ticket; the red findings themselves stand unaltered.
   handle and migrate), strengthening not contradicting it. BD-15's premise and the store rows now read "every
   open, including read-only callers' first open" (PRD BD-15 + the 2026-07-15 revision-log entry), and the
   destructive `DROP COLUMN` is confined to the operator's quiesce-gated `forge store converge`. FG-573 then
-  reconciled the R1/R2 current-state (FG-569 exec entry + provenance); R3/R4 (FG-555) remain open.
+  reconciled the R1/R2 current-state (FG-569 exec entry + provenance); R3/R4 (FG-555) remain open. *(Superseded
+  2026-07-18: FG-555 SHIPPED as `cd8a036` — R3/R4 launched-workload provenance is now recorded and the
+  `--require-control-toolchain` launch-environment contract is delivered; see the PRD's 2026-07-18 revision-log
+  entry.)*
 - **C2 does NOT go into the PRD** (corrections #3 + #7) — in any wording. It is an implementation-informing
   note for FG-553/FG-555, recorded in §2 only. Its earlier "R4 exists on every launch" phrasing was wrong and
   has been corrected here; nothing about it reaches the accepted contract.
