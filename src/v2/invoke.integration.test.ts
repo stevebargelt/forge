@@ -261,9 +261,10 @@ test("invoke: creates a new run when --run-id is absent, with synthetic 'invoke'
   assert.equal(run!.workflow, "invoke");
   // #157: invoke now closes the run it owns. Pre-#157 this was 'active' and
   // leaked into phantom-active counts; the bug was caught after 34 phantoms
-  // accumulated on the dev's machine. RunStatus has no 'failed' state — the
-  // task-level status carries success/failure; the run flips to 'complete'
-  // simply to mark "no longer in flight". Mirrors runNext.ts:138 semantics.
+  // accumulated on the dev's machine. A successful invoke task yields a
+  // 'complete' run (this test); since FG-585 a FAILED invoke task instead
+  // yields a 'failed' run (see "closes the owned run as 'failed' when the task
+  // fails (FG-585)"). Mirrors runNext.ts semantics.
   assert.equal(run!.status, "complete");
   assert.ok(run!.completedAt, "completed_at should be set when run closes");
   assert.match(run!.title, /research-specialist/);
