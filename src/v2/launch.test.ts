@@ -129,6 +129,34 @@ test("FG-555 workload record: valid R3/R4 parses; a missing required field is om
   assert.equal(parseWorkloadProvenance("garbage"), undefined);
 });
 
+test("FG-555 workload runtime provenance: deriveWorkloadProvenance carries the pinned profile and probes the effective Node interpreter (bounded to node/nodejs); parse round-trips both", () => {
+  const profile = { path: "/control/bin:/usr/bin", requireAbi: "137", label: "control-runtime" };
+  const probeInterpreter = (ep: string) => ({ execPath: ep, abi: "137", nodeVersion: "v24.1.0" });
+
+  // A direct node interpreter → probed; profile carried through.
+  const d = deriveWorkloadProvenance(["/control/bin/node", "-e", "0"], { profile, probeInterpreter });
+  assert.deepEqual(d.profile, profile, "the pinned profile is carried on the provenance");
+  assert.deepEqual(d.interpreter, { execPath: "/control/bin/node", abi: "137", nodeVersion: "v24.1.0" }, "a Node interpreter is probed for its ABI/version");
+
+  // A non-node workload → not probed (its runtime is unknowable, never guessed).
+  const nn = deriveWorkloadProvenance(["/usr/bin/make", "test"], { profile, probeInterpreter });
+  assert.equal(nn.interpreter, undefined, "a non-node argv[0] is not probed for a Node ABI");
+
+  // No profile / no prober → neither field appears.
+  const bare = deriveWorkloadProvenance(["/control/bin/node"]);
+  assert.equal(bare.profile, undefined);
+  assert.equal(bare.interpreter, undefined);
+
+  // Serialization round-trips profile + interpreter; a malformed optional is dropped
+  // without invalidating the core R3/R4.
+  assert.deepEqual(parseWorkloadProvenance(JSON.stringify(d)), d, "profile + interpreter round-trip through the recorder's JSON");
+  const partialBadItp = { ...d, interpreter: { execPath: "/n" } };
+  const parsed = parseWorkloadProvenance(JSON.stringify(partialBadItp));
+  assert.ok(parsed, "a malformed interpreter does not invalidate the core record");
+  assert.equal(parsed!.interpreter, undefined, "the malformed interpreter is omitted, never guessed");
+  assert.deepEqual(parsed!.profile, profile, "the still-valid profile survives");
+});
+
 test("FG-555 control-runtime profile: pins forge's OWN node dir at the FRONT of PATH and requires the control ABI", () => {
   const p = controlRuntimeProfile({ label: "control-runtime" });
   assert.equal(p.requireAbi, process.versions.modules, "the contract requires the control runtime's own ABI");

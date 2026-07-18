@@ -44,9 +44,9 @@ beforeEach(() => {
 
 /** EXECUTE the real recorder through /bin/sh, exactly as the tmux pane does, and
  *  return the R3/R4 record it wrote from inside itself, plus the workload log. */
-function runRecorder(argv: string[], env?: NodeJS.ProcessEnv): { workload: WorkloadProvenance | undefined; log: string } {
+function runRecorder(argv: string[], env?: NodeJS.ProcessEnv, profile?: LaunchProfile): { workload: WorkloadProvenance | undefined; log: string } {
   const dir = mkdtempSync(join(scratch, "rec-"));
-  const wrapper = buildWrapperCommand(argv, join(dir, "out.log"), join(dir, "exit"), join(dir, "runtime.json"), process.execPath);
+  const wrapper = buildWrapperCommand(argv, join(dir, "out.log"), join(dir, "exit"), join(dir, "runtime.json"), process.execPath, null, profile ?? null);
   const r = spawnSync("/bin/sh", ["-c", wrapper], { encoding: "utf8", env: env ?? process.env });
   assert.equal(r.status, 0, `recorder wrapper failed: ${r.stderr}`);
   const wlPath = join(dir, "workload.json");
@@ -81,6 +81,28 @@ test("FG-555 R3 + argv preservation: the recorder resolves argv[0] AND spawns it
   // its output landed in the log. A synthesized `bash -lc '<node …>'` would make
   // bash the top-level executable, not this node.
   assert.match(log, /DIRECT-EXEC/, "argv[0] executed directly");
+});
+
+test("FG-555 workload runtime: the recorder PROBES the effective Node interpreter (R3) for its real ABI/version, and PERSISTS the pinned profile — the runtime provenance a reader diagnoses a toolchain mismatch from", () => {
+  // argv[0] is THIS node (a real Node interpreter), launched under a pinned profile.
+  // The recorder must probe the interpreter it actually spawns and record its ABI +
+  // version — the exact fact `forge launch show` needs to tell whether a direct node
+  // workload ran the compatible toolchain — plus the contract that was pinned.
+  const profile: LaunchProfile = { path: `${dirname(process.execPath)}:${process.env.PATH ?? ""}`, requireAbi: process.versions.modules, label: "control-runtime" };
+  const { workload } = runRecorder([process.execPath, "-e", "0"], undefined, profile);
+  assert.ok(workload, "the recorder wrote workload.json");
+  assert.ok(workload!.interpreter, "the effective Node interpreter was probed and persisted");
+  assert.equal(workload!.interpreter!.execPath, process.execPath, "the probed interpreter is the exact executable the recorder spawned");
+  assert.equal(workload!.interpreter!.abi, process.versions.modules, "the probed ABI is the interpreter's REAL ABI, not the recorder's copied value");
+  assert.equal(workload!.interpreter!.nodeVersion, process.version, "the probed node version is the interpreter's own");
+  assert.deepEqual(workload!.profile, profile, "the pinned launch profile (PATH + required ABI + label) is persisted verbatim");
+});
+
+test("FG-555 workload runtime: a NON-node workload records no interpreter (its runtime is the same unknowable class as R4 — never guessed), and no profile without a contract", () => {
+  const { workload } = runRecorder(["true"]);
+  assert.ok(workload);
+  assert.equal(workload!.interpreter, undefined, "a non-node argv[0] is not probed for a Node ABI it does not have");
+  assert.equal(workload!.profile, undefined, "no profile was declared, so none is recorded — never fabricated");
 });
 
 test("FG-555 R3 derived: a bare argv[0] resolves on PATH at spawn time (recorded, not guessed)", () => {

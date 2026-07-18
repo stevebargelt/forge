@@ -231,6 +231,54 @@ test("FG-555 CLI positive wiring: `forge launch run --require-control-toolchain`
   }
 });
 
+test("FG-555 CLI runtime provenance: `forge launch run --require-control-toolchain -- node …` serializes the effective interpreter's ABI/version AND the pinned profile in --json, and renders both in the human view", () => {
+  const home = freshHome();
+  try {
+    // A direct `node` workload under the control contract. The end-to-end proof: the
+    // CLI must serialize the PROBED interpreter runtime (real ABI/version of the node
+    // that ran) and the pinned profile — the facts a reader diagnoses a toolchain
+    // mismatch from, which the pre-fix record (argv0 + path only) could not express.
+    const meta = launch(home, ["--require-control-toolchain", "--name", "runtime", "--", process.execPath, "-e", "process.stdout.write('RUNTIME-OK\\n')"]);
+    const v = showJsonWhenDone(home, meta.id);
+    assert.equal(v.status.state, "exited_ok");
+    assert.ok(v.workload.interpreter, "the serialized workload exposes the effective interpreter runtime");
+    assert.equal(v.workload.interpreter.execPath, process.execPath, "the interpreter is the exact node the recorder spawned");
+    assert.equal(v.workload.interpreter.abi, process.versions.modules, "the serialized ABI is the interpreter's REAL probed ABI");
+    assert.equal(v.workload.interpreter.nodeVersion, process.version, "the serialized node version is the interpreter's own");
+    assert.ok(v.workload.profile, "the pinned launch profile is serialized");
+    assert.equal(v.workload.profile.requireAbi, process.versions.modules, "the profile names the required control ABI");
+    assert.equal(v.workload.profile.label, "control-runtime");
+    assert.equal(v.workload.profile.path.split(":")[0], dirname(process.execPath), "the profile records the control-node-first pinned PATH");
+
+    const human = showHuman(home, meta.id);
+    const runtimeLine = human.split("\n").find((l) => l.startsWith("runtime:"));
+    assert.ok(runtimeLine, "the human view has a runtime: line");
+    assert.ok(runtimeLine!.includes(process.execPath), "the runtime line names the interpreter execPath");
+    assert.ok(runtimeLine!.includes(`abi ${process.versions.modules} (node ${process.version})`), "the runtime line shows the probed ABI + node version");
+    assert.match(human, /^profile: +control-runtime — requires abi \d+; pinned PATH = /m);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("FG-555 CLI runtime provenance: a workload WITHOUT the contract renders 'not recorded' interpreter and 'none declared' profile — never fabricated", () => {
+  const home = freshHome();
+  try {
+    // A non-node workload, no contract: the human view must state both absences as
+    // fact, not guess a runtime or a profile that was never declared.
+    const meta = launch(home, ["--name", "ambient", "--", "true"]);
+    const v = showJsonWhenDone(home, meta.id);
+    assert.equal(v.status.state, "exited_ok");
+    assert.ok(!("interpreter" in v.workload), "no Node interpreter probed → the field is omitted, not fabricated");
+    assert.ok(!("profile" in v.workload), "no contract declared → no profile is recorded");
+    const human = showHuman(home, meta.id);
+    assert.match(human, /^runtime: +not recorded \(argv\[0\] is not a probed Node interpreter/m);
+    assert.match(human, /^profile: +none declared \(launch inherited the ambient env\)/m);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("FG-555 refuse-before-execute (REAL tmux, REAL fs): an incompatible ABI on the pinned PATH is refused with a NAMED mismatch BEFORE any launch record or tmux session exists — and nothing is rebuilt", () => {
   // Unlike the engineer's stub-tmux unit, this drives the PRODUCTION startLaunch
   // with the REAL default tmux runner and the REAL launches dir, so it proves the

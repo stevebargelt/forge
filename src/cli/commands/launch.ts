@@ -83,6 +83,16 @@ function renderView(v: LaunchView, logTailLines = 15): string {
   if (v.workload) {
     lines.push(`workload: ${workloadR3Line(v.workload.r3)}`);
     lines.push(`nested:   ${workloadR4Line(v.workload.r4)}`);
+    // FG-555: the effective Node interpreter the workload actually ran under, and
+    // the launch-environment contract that was pinned — the runtime provenance that
+    // lets a reader diagnose whether a direct node/npm workload used the compatible
+    // toolchain. Both always rendered; absent reads as "not recorded", never guessed.
+    lines.push(`runtime:  ${v.workload.interpreter
+      ? `${v.workload.interpreter.execPath}  abi ${v.workload.interpreter.abi} (node ${v.workload.interpreter.nodeVersion})`
+      : "not recorded (argv[0] is not a probed Node interpreter, or the probe did not run)"}`);
+    lines.push(`profile:  ${v.workload.profile
+      ? `${v.workload.profile.label ? `${v.workload.profile.label} — ` : ""}requires abi ${v.workload.profile.requireAbi}; pinned PATH = ${v.workload.profile.path}`
+      : "none declared (launch inherited the ambient env)"}`);
   } else {
     lines.push(`workload: not recorded (launch predates R3/R4 capture, or the recorder has not run yet)`);
   }

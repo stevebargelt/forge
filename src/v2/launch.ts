@@ -154,7 +154,25 @@ export type WorkloadNestedShell =
   | { kind: "not_applicable"; reason: string }
   | { kind: "unknowable"; shell: string; reason: string };
 
-export type WorkloadProvenance = { r3: WorkloadTopLevel; r4: WorkloadNestedShell };
+// FG-555: the EFFECTIVE Node interpreter the workload actually ran under —
+// R3's resolved executable, PROBED for its ABI/version at spawn time. Present
+// only when R3 resolved to a Node interpreter (basename node/nodejs) that could
+// be probed; absent otherwise (a non-node workload's runtime is the same
+// unknowable class as R4 — never guessed). This is what lets `forge launch show`
+// diagnose whether a direct `node` workload actually used the compatible toolchain.
+export type WorkloadInterpreter = { execPath: string; abi: string; nodeVersion: string };
+
+// FG-555: R3/R4 plus the launched workload's RUNTIME provenance:
+//   profile     — the launch-environment contract that was pinned for this
+//                 workload (pinned PATH + required ABI). Absent when the launch
+//                 inherited the ambient env (no --require-control-toolchain).
+//   interpreter — the effective Node interpreter runtime (see WorkloadInterpreter).
+export type WorkloadProvenance = {
+  r3: WorkloadTopLevel;
+  r4: WorkloadNestedShell;
+  profile?: LaunchProfile;
+  interpreter?: WorkloadInterpreter;
+};
 
 export type LaunchView = LaunchMeta & {
   status: LaunchStatus;
@@ -240,7 +258,7 @@ function collectControlRuntime(): ControlRuntime {
 // releaseId is BAKED IN by buildWrapperCommand as a JSON literal (below), NOT
 // read from process.env — a poisoned FORGE_RELEASE_ID in the ambient environment
 // therefore has ZERO effect on the recorded provenance.
-function exitRecorderScript(releaseIdLiteral: string): string {
+function exitRecorderScript(releaseIdLiteral: string, profileLiteral: string): string {
   return [
     `const{spawnSync}=require("child_process"),fs=require("fs"),pth=require("path");`,
     `const[e,l,rt,...a]=process.argv.slice(1);`,
@@ -254,7 +272,17 @@ function exitRecorderScript(releaseIdLiteral: string): string {
     `else{let f;for(const d of (process.env.PATH||"").split(":")){if(!d)continue;const c=pth.join(d,a0);try{fs.accessSync(c,fs.constants.X_OK);f=c;break;}catch(_){}}r3=f?{kind:"derived",argv0:a0,execPath:f}:{kind:"unresolved",argv0:a0};}`,
     `const sh=pth.basename(a0),nst=["sh","bash","dash","zsh","ksh","ash"].indexOf(sh)>=0&&a.slice(1).some(function(x){return /^-[a-z]*c$/.test(x);});`,
     `const r4=nst?{kind:"unknowable",shell:sh,reason:"a nested shell resolves node/npm/forge at runtime against whatever PATH it builds — not knowable at launch time (BD-14 R4)"}:{kind:"not_applicable",reason:"argv[0] is executed directly; the submitted argv is the full resolution (R3), no nested shell resolves anything later"};`,
-    `fs.writeFileSync(pth.join(pth.dirname(rt),"workload.json"),JSON.stringify({r3:r3,r4:r4}));`,
+    // FG-555 (workload runtime): probe the effective interpreter — R3's resolved
+    // executable, when it IS a Node interpreter (basename node/nodejs) — for its
+    // ABI/version, so `forge launch show` can diagnose whether a direct `node`
+    // workload actually ran the compatible toolchain. Bounded to node/nodejs on
+    // purpose: a non-node workload's runtime is the same unknowable class as R4.
+    `let itp;const ep=(r3.kind==="captured"||r3.kind==="derived")?r3.execPath:"";const ebn=ep?pth.basename(ep):"";`,
+    `if(ebn==="node"||ebn==="nodejs"){try{const pr=spawnSync(ep,["-p","process.versions.modules+' '+process.version"],{encoding:"utf8"});if(pr.status===0&&pr.stdout){const pp=pr.stdout.trim().split(" ");if(pp.length===2)itp={execPath:ep,abi:pp[0],nodeVersion:pp[1]};}}catch(_){}}`,
+    // The pinned launch profile (or null) is baked in as a JSON literal — the SAME
+    // trusted, ambient-env-independent channel as releaseId (R2) — so the recorded
+    // contract is exactly what startLaunch declared, never re-derived here.
+    `fs.writeFileSync(pth.join(pth.dirname(rt),"workload.json"),JSON.stringify({r3:r3,r4:r4,profile:${profileLiteral},interpreter:itp}));`,
     `const fd=fs.openSync(l,"a");`,
     `const r=spawnSync(a0,a.slice(1),{stdio:["ignore",fd,fd]});`,
     `if(r.error)fs.writeSync(fd,String(r.error.message)+"\\n");`,
@@ -270,8 +298,8 @@ function exitRecorderScript(releaseIdLiteral: string): string {
  *  FG-569 (R2): `releaseId` is the TRUSTED, manifest-derived id (or null). It is
  *  string-interpolated into the recorder script as a JSON literal, so the recorded
  *  release identity has NO ambient-env dependency. */
-export function buildWrapperCommand(argv: string[], logPath: string, exitPath: string, runtimePath: string, node = process.execPath, releaseId: string | null = null): string {
-  const script = exitRecorderScript(JSON.stringify(releaseId));
+export function buildWrapperCommand(argv: string[], logPath: string, exitPath: string, runtimePath: string, node = process.execPath, releaseId: string | null = null, profile: LaunchProfile | null = null): string {
+  const script = exitRecorderScript(JSON.stringify(releaseId), JSON.stringify(profile));
   const parts = [node, "-e", script, exitPath, logPath, runtimePath, ...argv];
   return parts.map(shellQuote).join(" ");
 }
@@ -321,7 +349,12 @@ function resolveOnPath(name: string, path: string | undefined): string | undefin
  *  mirrors this inline, in-process, at spawn time). R3 resolves argv[0] against
  *  `path`; R4 classifies whether argv[0] is a nested shell whose later command
  *  resolution is unknowable. */
-export function deriveWorkloadProvenance(argv: string[], opts: { path?: string; resolve?: PathResolver } = {}): WorkloadProvenance {
+export type InterpreterProber = (execPath: string) => WorkloadInterpreter | undefined;
+
+export function deriveWorkloadProvenance(
+  argv: string[],
+  opts: { path?: string; resolve?: PathResolver; profile?: LaunchProfile; probeInterpreter?: InterpreterProber } = {},
+): WorkloadProvenance {
   const resolve = opts.resolve ?? resolveOnPath;
   const argv0 = argv[0] ?? "";
 
@@ -339,7 +372,19 @@ export function deriveWorkloadProvenance(argv: string[], opts: { path?: string; 
     ? { kind: "unknowable", shell, reason: "a nested shell resolves node/npm/forge at runtime against whatever PATH it builds — not knowable at launch time (BD-14 R4)" }
     : { kind: "not_applicable", reason: "argv[0] is executed directly; the submitted argv is the full resolution (R3), no nested shell resolves anything later" };
 
-  return { r3, r4 };
+  const result: WorkloadProvenance = { r3, r4 };
+  if (opts.profile) result.profile = opts.profile;
+  // Probe the effective interpreter only when R3 resolved to a Node interpreter —
+  // the same bounded criterion the recorder applies (basename node/nodejs).
+  const ep = r3.kind === "captured" || r3.kind === "derived" ? r3.execPath : undefined;
+  if (ep && opts.probeInterpreter) {
+    const name = basename(ep);
+    if (name === "node" || name === "nodejs") {
+      const itp = opts.probeInterpreter(ep);
+      if (itp) result.interpreter = itp;
+    }
+  }
+  return result;
 }
 
 function validR3(v: unknown): WorkloadTopLevel | undefined {
@@ -362,8 +407,24 @@ function validR4(v: unknown): WorkloadNestedShell | undefined {
   return undefined;
 }
 
-/** Parse the R3/R4 record the recorder wrote. Returns undefined if absent or
- *  malformed — provenance is never guessed (mirrors parseRecorderRuntime). */
+function validProfile(v: unknown): LaunchProfile | undefined {
+  if (typeof v !== "object" || v === null) return undefined;
+  const r = v as Record<string, unknown>;
+  if (typeof r.path !== "string" || typeof r.requireAbi !== "string") return undefined;
+  return { path: r.path, requireAbi: r.requireAbi, ...(typeof r.label === "string" ? { label: r.label } : {}) };
+}
+
+function validInterpreter(v: unknown): WorkloadInterpreter | undefined {
+  if (typeof v !== "object" || v === null) return undefined;
+  const r = v as Record<string, unknown>;
+  if (typeof r.execPath !== "string" || typeof r.abi !== "string" || typeof r.nodeVersion !== "string") return undefined;
+  return { execPath: r.execPath, abi: r.abi, nodeVersion: r.nodeVersion };
+}
+
+/** Parse the R3/R4 record the recorder wrote. Returns undefined if the CORE R3/R4
+ *  is absent or malformed — provenance is never guessed (mirrors parseRecorderRuntime).
+ *  The optional profile/interpreter are supplementary: a malformed one is omitted
+ *  (never guessed), but does not invalidate the core record. */
 export function parseWorkloadProvenance(raw: string): WorkloadProvenance | undefined {
   let parsed: unknown;
   try {
@@ -372,11 +433,16 @@ export function parseWorkloadProvenance(raw: string): WorkloadProvenance | undef
     return undefined;
   }
   if (typeof parsed !== "object" || parsed === null) return undefined;
-  const { r3, r4 } = parsed as { r3?: unknown; r4?: unknown };
+  const { r3, r4, profile, interpreter } = parsed as { r3?: unknown; r4?: unknown; profile?: unknown; interpreter?: unknown };
   const okR3 = validR3(r3);
   const okR4 = validR4(r4);
   if (!okR3 || !okR4) return undefined;
-  return { r3: okR3, r4: okR4 };
+  const result: WorkloadProvenance = { r3: okR3, r4: okR4 };
+  const okProfile = validProfile(profile);
+  if (okProfile) result.profile = okProfile;
+  const okItp = validInterpreter(interpreter);
+  if (okItp) result.interpreter = okItp;
+  return result;
 }
 
 // FG-555: the execution-environment CONTRACT a Forge-owned unattended caller
@@ -645,7 +711,7 @@ export function startLaunch(argv: string[], opts: { name?: string; cwd?: string;
   const metaPath = join(dir, "meta.json");
   writeFileSync(metaPath, JSON.stringify(meta, null, 2));
 
-  const wrapped = buildWrapperCommand(argv, meta.logPath, join(dir, "exit"), join(dir, "runtime.json"), process.execPath, trustedReleaseId());
+  const wrapped = buildWrapperCommand(argv, meta.logPath, join(dir, "exit"), join(dir, "runtime.json"), process.execPath, trustedReleaseId(), opts.profile ?? null);
   try {
     // Order matters. Starting the target command AS the session command races
     // it against `set-option`: a command that finishes first destroys the
