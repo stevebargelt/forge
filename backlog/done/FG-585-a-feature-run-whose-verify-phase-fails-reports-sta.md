@@ -1,9 +1,11 @@
 ---
 id: FG-585
 type: story
-status: active
+status: done
 title: "a feature run whose verify phase FAILS reports status: complete while its gate:auto docs phase silently never runs — false completion"
 created: 2026-07-17
+closed: 2026-07-18
+closed_commit: f0661fa9626a1fceddf3b30a673a197a624d57fe
 ---
 
 > **Recovery disposition (operator, 2026-07-17):** KEEP ACTIVE — an orchestration-integrity defect, not
