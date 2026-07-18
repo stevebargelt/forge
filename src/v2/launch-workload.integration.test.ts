@@ -175,6 +175,41 @@ test("FG-555 R4 UNKNOWABLE: the RECORDER records a bare `npm`-style launcher as 
   assert.match(log, /NPM-RAN/, "npm ran via its shebang-resolved node");
 });
 
+test("FG-555 R4 INVERSION (recorder): default unknowable — a bare script and an arbitrary node-shebang launcher (NOT in any allowlist) both record unknowable; a terminal node stays not_applicable", () => {
+  // The inversion: the recorder no longer enumerates launcher basenames. A bare
+  // script (its own shebang selects an interpreter later) and an unrecognized
+  // node-shebang launcher (`vitest`, not npm/npx/forge/yarn/pnpm) both fall to the
+  // unknowable default — pre-fix each recorded a false not_applicable.
+  const bindir = mkdtempSync(join(scratch, "inv-"));
+
+  const script = join(bindir, "verify.sh");
+  writeFileSync(script, "#!/bin/sh\necho SCRIPT-RAN\n");
+  chmodSync(script, 0o755);
+  const s = runRecorder([script]);
+  assert.ok(s.workload, "the recorder wrote workload.json");
+  assert.equal(s.workload!.r3.kind, "captured", "R3 captures the script path the recorder spawned");
+  assert.equal(s.workload!.r4.kind, "unknowable", "a bare script's shebang resolves its interpreter later — unknowable");
+  assert.equal(s.workload!.r4.kind === "unknowable" ? s.workload!.r4.shell : "", "verify.sh");
+  assert.equal(s.workload!.interpreter, undefined, "a non-node argv[0] is never probed for a Node ABI");
+  assert.match(s.log, /SCRIPT-RAN/, "the script really ran via its own shebang");
+
+  const vitest = join(bindir, "vitest");
+  writeFileSync(vitest, `#!${process.execPath}\nprocess.stdout.write('VITEST-RAN\\n')\n`);
+  chmodSync(vitest, 0o755);
+  const v = runRecorder(["vitest", "run"], { ...process.env, PATH: `${bindir}:${process.env.PATH ?? ""}` });
+  assert.ok(v.workload, "the recorder wrote workload.json");
+  assert.equal(v.workload!.r3.kind, "derived", "R3 resolves the launcher on PATH");
+  assert.equal(v.workload!.r4.kind, "unknowable", "vitest resolves node via its shebang — unknowable even though it is not an enumerated launcher");
+  assert.equal(v.workload!.r4.kind === "unknowable" ? v.workload!.r4.shell : "", "vitest");
+  assert.equal(v.workload!.interpreter, undefined, "the launcher's own Node interpreter is never guessed at launch time");
+  assert.match(v.log, /VITEST-RAN/, "vitest ran via its shebang-resolved node");
+
+  // The one provable case survives the inversion: a terminal node interpreter.
+  const n = runRecorder([process.execPath, "-e", "0"]);
+  assert.ok(n.workload);
+  assert.equal(n.workload!.r4.kind, "not_applicable", "a terminal node interpreter IS the runtime — not_applicable");
+});
+
 test("FG-555 refuse-before-execute: Node 23/ABI 131 vs required ABI 137 is refused BEFORE the workload runs, with a NAMED mismatch", () => {
   // A fake `node` on the pinned PATH that reports ABI 131 — the incompatible Node
   // of the reproduction. The control contract requires ABI 137. This is the exact

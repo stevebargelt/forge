@@ -102,12 +102,16 @@ test("FG-555 CLI: a bare argv[0] serializes as R3 derived, and `forge launch sho
     assert.equal(v.workload.r3.kind, "derived", "a bare name is resolved on PATH, recorded as derived");
     assert.equal(v.workload.r3.argv0, "true");
     assert.match(v.workload.r3.execPath, /\/true$/, "R3 execPath is the real resolution, not a guess");
-    assert.equal(v.workload.r4.kind, "not_applicable");
+    // R4 INVERSION: `true` is NOT a terminal node/nodejs interpreter, so its runtime
+    // defaults to UNKNOWABLE (deliberate change from the pre-inversion not_applicable) —
+    // Forge does not claim argv is the full resolution for a non-Node command.
+    assert.equal(v.workload.r4.kind, "unknowable");
+    assert.equal(v.workload.r4.shell, "true", "the effective command that triggered unknowable is recorded, not a fabricated shell name");
 
     // The human render must SHOW R3/R4 as their own lines (forge launch show).
     const human = showHuman(home, meta.id);
     assert.match(human, /^workload: R3 derived — argv\[0\] 'true' resolved on PATH → .*\/true$/m);
-    assert.match(human, /^nested: +R4 not applicable/m);
+    assert.match(human, /^nested: +R4 UNKNOWABLE/m);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

@@ -164,6 +164,42 @@ test("FG-555 R4 honesty: a bare npm/npx/forge launcher is UNKNOWABLE — its she
   assert.equal(directNode.r4.kind, "not_applicable", "a direct node interpreter has no later launcher resolution");
 });
 
+test("FG-555 R4 INVERSION: default is unknowable — not_applicable ONLY for a terminal node/nodejs interpreter (stop enumerating launchers)", () => {
+  // The enumerate approach could not name every launcher whose shebang/PATH lookup
+  // selects Node AFTER argv[0] is spawned. The inversion defaults to unknowable and
+  // reserves not_applicable for the one provable case: a terminal Node interpreter.
+
+  // A shell running a SCRIPT (no `-c` chain) — previously a false not_applicable.
+  const bs = deriveWorkloadProvenance(["bash", "./verify.sh"], { resolve: () => "/bin/bash" });
+  assert.equal(bs.r4.kind, "unknowable", "bash running a script resolves node later — unknowable");
+  assert.equal(bs.r4.kind === "unknowable" ? bs.r4.shell : "", "bash");
+
+  // A bare script — its own shebang selects an interpreter at runtime.
+  const script = deriveWorkloadProvenance(["./verify.sh"], { resolve: () => "/repo/verify.sh" });
+  assert.equal(script.r4.kind, "unknowable", "a bare script's shebang resolves its interpreter later — unknowable");
+  assert.equal(script.r4.kind === "unknowable" ? script.r4.shell : "", "verify.sh");
+
+  // A `#!/usr/bin/env node` launcher NOT in any allowlist (vitest, tsx, …).
+  for (const tool of ["vitest", "tsx"]) {
+    const w = deriveWorkloadProvenance([tool, "run"], { resolve: () => `/repo/node_modules/.bin/${tool}` });
+    assert.equal(w.r4.kind, "unknowable", `${tool} resolves node via its shebang — unknowable even though it is not an enumerated launcher`);
+    assert.equal(w.r4.kind === "unknowable" ? w.r4.shell : "", tool);
+    assert.equal(w.interpreter, undefined, "the launcher's own Node interpreter is never guessed at launch time");
+  }
+
+  // npm is now unknowable via the SAME default path (not an allowlist entry).
+  const npm = deriveWorkloadProvenance(["npm", "run", "test:all"], { resolve: () => "/usr/local/bin/npm" });
+  assert.equal(npm.r4.kind, "unknowable", "npm run test:all is unknowable");
+
+  // The one provable case, asserted NOT unknowable: a terminal node/nodejs argv[0].
+  const n1 = deriveWorkloadProvenance(["node", "script.js"], { resolve: () => "/b/node" });
+  assert.equal(n1.r4.kind, "not_applicable", "[node, script.js] — the interpreter IS argv[0]");
+  const n2 = deriveWorkloadProvenance(["/abs/path/node", "-e", "0"]);
+  assert.equal(n2.r4.kind, "not_applicable", "[/abs/path/node, -e, 0] — an explicit terminal node path");
+  const nj = deriveWorkloadProvenance(["nodejs", "x"], { resolve: () => "/b/nodejs" });
+  assert.equal(nj.r4.kind, "not_applicable", "nodejs is also a terminal Node interpreter");
+});
+
 test("FG-555 workload record: valid R3/R4 parses; a missing required field is omitted, never guessed", () => {
   const good = { r3: { kind: "captured", argv0: "/n", execPath: "/n" }, r4: { kind: "unknowable", shell: "bash", reason: "r" } };
   assert.deepEqual(parseWorkloadProvenance(JSON.stringify(good)), good);
