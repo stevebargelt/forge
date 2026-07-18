@@ -111,7 +111,15 @@ test("FG-555 CLI: a bare argv[0] serializes as R3 derived, and `forge launch sho
     // The human render must SHOW R3/R4 as their own lines (forge launch show).
     const human = showHuman(home, meta.id);
     assert.match(human, /^workload: R3 derived — argv\[0\] 'true' resolved on PATH → .*\/true$/m);
-    assert.match(human, /^nested: +R4 UNKNOWABLE/m);
+    // R4 INVERSION render: a non-shell effective command ('true') is UNKNOWABLE, and
+    // the render must NAME the command and say UNKNOWABLE/resolved-at-runtime WITHOUT
+    // calling a non-shell launcher a "nested shell" (misleading operator output).
+    const r4Line = human.split("\n").find((l) => l.startsWith("nested:"));
+    assert.ok(r4Line, "R4 line is rendered");
+    assert.doesNotMatch(r4Line, /nested shell/, "a non-shell command must not be rendered as a 'nested shell'");
+    assert.match(r4Line, /R4 UNKNOWABLE/, "R4 UNKNOWABLE is stated explicitly");
+    assert.match(r4Line, /'true'/, "the effective command is named in the render");
+    assert.match(r4Line, /resolves node\/npm\/forge at runtime/, "states the command resolves the toolchain at runtime");
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -138,7 +146,10 @@ test(
       assert.equal(v.workload.r3.argv0, "bash");
 
       const human = showHuman(home, meta.id);
-      assert.match(human, /^nested: +R4 UNKNOWABLE — nested shell 'bash'/m);
+      // Even for a real shell ('bash'), the neutral render names the launched command
+      // without the old "nested shell" template (which now also covers non-shells).
+      assert.match(human, /^nested: +R4 UNKNOWABLE — the launched command 'bash' resolves node\/npm\/forge at runtime/m);
+      assert.doesNotMatch(human, /nested shell/, "the R4 render no longer hardcodes 'nested shell'");
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

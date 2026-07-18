@@ -46,12 +46,14 @@ function workloadR3Line(r3: WorkloadTopLevel): string {
   }
 }
 
-// FG-555 (R4): whether a caller-supplied nested shell will resolve node/npm/forge
-// later, inside the workload. UNKNOWABLE is stated explicitly — argv never implies
+// FG-555 (R4): whether the launched command — a nested shell, a script, or a
+// launcher/wrapper (npm, vitest, a `#!/usr/bin/env node` script) — will resolve
+// node/npm/forge later, inside the workload. UNKNOWABLE is stated explicitly, and
+// the render never calls a non-shell launcher a "nested shell": argv never implies
 // R4 is covered.
 function workloadR4Line(r4: WorkloadNestedShell): string {
   return r4.kind === "unknowable"
-    ? `R4 UNKNOWABLE — nested shell '${r4.shell}' resolves node/npm/forge at runtime; not knowable at launch (argv does not cover it)`
+    ? `R4 UNKNOWABLE — the launched command '${r4.shell}' resolves node/npm/forge at runtime (shebang/PATH); not knowable at launch (argv does not cover it)`
     : `R4 not applicable — argv executed directly, no nested shell resolves anything later`;
 }
 
