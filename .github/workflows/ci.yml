@@ -74,6 +74,7 @@ jobs:
   # four shards must have it available.
   integration_1:
     runs-on: ubuntu-latest
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
 
@@ -113,6 +114,7 @@ jobs:
 
   integration_2:
     runs-on: ubuntu-latest
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
 
@@ -145,6 +147,7 @@ jobs:
 
   integration_3:
     runs-on: ubuntu-latest
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
 
@@ -177,6 +180,7 @@ jobs:
 
   integration_4:
     runs-on: ubuntu-latest
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
 
@@ -211,6 +215,7 @@ jobs:
   # test, not a worktree test.
   worktree:
     runs-on: ubuntu-latest
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
 
@@ -231,6 +236,7 @@ jobs:
   # Dashboard workspace's own integration tier (~1.6s).
   dashboard_integration:
     runs-on: ubuntu-latest
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
 
