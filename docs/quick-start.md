@@ -208,7 +208,7 @@ If you're standing in `~/code/my-app` and have runs going in other projects too,
 
 ## 11. Upgrading later
 
-When new forge commits arrive (new agents, workflows, CLI behavior), `forge upgrade` refreshes `~/.forge/`'s forge-owned seeds (workflows, runtimes) and re-inits the current project in one step. Your operator-authored seeds — agent prompts, constraints, and `forge-raci.md` — are retained, not overwritten (`FORCE=1` included, FG-578); remove the `~/.forge/` copy to re-take a release's version, or merge by hand:
+When new forge commits arrive (new agents, workflows, CLI behavior), `forge upgrade` refreshes its forge-owned seeds — `~/.forge/`'s workflows and runtimes, plus the `forge-*` skills in the user-global Claude Code skills dir (`~/.claude/skills`, not `~/.forge/`) — and re-inits the current project in one step. Your operator-authored seeds — agent prompts, constraints, and `forge-raci.md` — are retained, not overwritten (`FORCE=1` included, FG-578); remove the `~/.forge/` copy to re-take a release's version, or merge by hand:
 
 ```bash
 cd ~/code/my-app

@@ -36,7 +36,7 @@ cd ~/code/forge
 ./bin/forge-dev upgrade --skip-git --rebuild-image   # also builds the agent Docker image (~5–10 min first time)
 ```
 
-`forge upgrade` refreshes `~/.forge/` — on this first run `~/.forge/` is empty, so it installs everything (agent seeds, constraints, workflow and runtime YAML, the RACI) and compiles the derived routing policy. On later upgrades the forge-owned seeds (workflows, runtimes) refresh, but your agent, constraint, and RACI edits are seeded once and then retained — forge never overwrites them, `FORCE=1` included (FG-578). Add `--rebuild-image` when the agent image hasn't been built on this machine yet.
+`forge upgrade` refreshes `~/.forge/` — on this first run `~/.forge/` is empty, so it installs everything (agent seeds, constraints, workflow and runtime YAML, the RACI) and compiles the derived routing policy. On later upgrades the forge-owned seeds — `~/.forge/`'s workflows and runtimes, plus the `forge-*` skills in the user-global Claude Code skills dir (`~/.claude/skills`, not `~/.forge/`) — refresh, but your agent, constraint, and RACI edits are seeded once and then retained — forge never overwrites them, `FORCE=1` included (FG-578). Add `--rebuild-image` when the agent image hasn't been built on this machine yet.
 
 Check the exit code here rather than the scrollback: if the image build fails, or the seed install or routing-policy recompile doesn't land, upgrade closes `Upgrade INCOMPLETE — <reasons>` and exits 1 instead of `Upgrade complete.` On a fresh machine that is the signal worth trusting — a long image build's failure is easy to miss in the output.
 
