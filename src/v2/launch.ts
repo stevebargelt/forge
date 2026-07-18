@@ -418,13 +418,45 @@ function defaultAbiProbe(nodeExec: string): string | undefined {
   }
 }
 
+/** A caller-supplied LOGIN shell (`bash -lc`, `zsh --login -c`, `sh -il`, …).
+ *  This is the case the pinned-PATH contract fundamentally cannot protect: the
+ *  session PATH is pinned via `new-session -e`, but a login shell re-sources
+ *  profile scripts (/etc/profile, ~/.bash_profile, nvm's shell hook) that reset
+ *  PATH AFTER the pin — so whatever node the ABI probe verified is not the node
+ *  the shell resolves at runtime. `--login`, or a short-flag cluster containing
+ *  `l` (`-l`, `-lc`, `-il`), makes it a login shell. */
+function isLoginShell(argv: string[]): boolean {
+  const shell = basename(argv[0] ?? "");
+  if (!NESTED_SHELLS.has(shell)) return false;
+  return argv.slice(1).some((a) => a === "--login" || /^-[a-z]*l[a-z]*$/.test(a));
+}
+
 /** Refuse-before-execute (FG-555): under the contract's pinned PATH, resolve the
  *  `node` the workload's toolchain will use and assert its ABI equals the
  *  contract's required ABI — REUSING FG-570's checkAbi, not a second checker. A
  *  mismatch (or an unreadable ABI) is a NAMED refusal the caller raises BEFORE any
  *  tmux session exists. `ok` when no node is resolvable on the pinned PATH: the
- *  contract verifies the toolchain it can see, it does not invent one. */
-export function assertProfileToolchain(profile: LaunchProfile, opts: { resolve?: PathResolver; probeAbi?: AbiProber } = {}): { ok: true } | { ok: false; message: string } {
+ *  contract verifies the toolchain it can see, it does not invent one.
+ *
+ *  A caller-supplied login shell is refused FIRST, unconditionally: the ABI probe
+ *  reads the pre-shell PATH, but a login shell resets PATH from its profile scripts
+ *  afterwards, so a passing probe would be false assurance — the contract cannot
+ *  keep its toolchain promise through a login shell, so it declines rather than
+ *  pretend it can. */
+export function assertProfileToolchain(profile: LaunchProfile, argv: string[], opts: { resolve?: PathResolver; probeAbi?: AbiProber } = {}): { ok: true } | { ok: false; message: string } {
+  if (isLoginShell(argv)) {
+    const shell = basename(argv[0] ?? "");
+    return {
+      ok: false,
+      message:
+        `forge launch: refusing to run — the launch-environment contract pins the workload's PATH, but the ` +
+        `command is a login shell (\`${shell}\` with -l/--login), which re-sources profile scripts that can reset ` +
+        `PATH after the pin and resolve a different, wrong-ABI node during the run. The contract cannot protect a ` +
+        `login shell.\n` +
+        `  contract: ${profile.label ? `${profile.label} — ` : ""}pinned PATH = ${profile.path}\n` +
+        `  fix: drop -l/--login (a non-login shell keeps the pinned PATH), or run the command directly without a shell wrapper.`,
+    };
+  }
   const resolve = opts.resolve ?? resolveOnPath;
   const probe = opts.probeAbi ?? defaultAbiProbe;
   const node = resolve("node", profile.path);
@@ -516,7 +548,7 @@ export function startLaunch(argv: string[], opts: { name?: string; cwd?: string;
   // instead of hundreds of downstream ERR_DLOPEN_FAILED the controller must
   // reverse-engineer (the Node 23/ABI 131 vs Node 24/ABI 137 reproduction).
   if (opts.profile) {
-    const gate = assertProfileToolchain(opts.profile);
+    const gate = assertProfileToolchain(opts.profile, argv);
     if (!gate.ok) throw new Error(gate.message);
   }
   const tmux = opts.tmux ?? defaultTmux;

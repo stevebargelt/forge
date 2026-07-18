@@ -113,9 +113,11 @@ test(
 
 test("FG-555 refuse-before-execute: Node 23/ABI 131 vs required ABI 137 is refused BEFORE the workload runs, with a NAMED mismatch", () => {
   // A fake `node` on the pinned PATH that reports ABI 131 — the incompatible Node
-  // the reproduction's caller-supplied login shell resolved. The control contract
-  // requires ABI 137. This is the exact false-red trigger: opening better-sqlite3
-  // under ABI 131 dies with ERR_DLOPEN_FAILED across hundreds of unrelated tests.
+  // of the reproduction. The control contract requires ABI 137. This is the exact
+  // false-red trigger: opening better-sqlite3 under ABI 131 dies with
+  // ERR_DLOPEN_FAILED across hundreds of unrelated tests. A DIRECT command (not a
+  // shell) so the ABI probe governs — a login shell is refused earlier, on its own
+  // grounds (covered below).
   const fakebin = mkdtempSync(join(scratch, "fakebin-"));
   const fakeNode = join(fakebin, "node");
   writeFileSync(fakeNode, "#!/bin/sh\necho 131\n");
@@ -125,7 +127,7 @@ test("FG-555 refuse-before-execute: Node 23/ABI 131 vs required ABI 137 is refus
   const profile: LaunchProfile = { path: `${fakebin}:${process.env.PATH ?? ""}`, requireAbi: "137", label: "control-runtime" };
 
   assert.throws(
-    () => startLaunch(["bash", "-lc", "npm run test:all"], { name: "repro", tmux: stub.tmux, profile }),
+    () => startLaunch(["node", "-e", "1"], { name: "repro", tmux: stub.tmux, profile }),
     (e: Error) => {
       assert.match(e.message, /refusing to run/);
       assert.match(e.message, /ABI 137/);
@@ -139,6 +141,28 @@ test("FG-555 refuse-before-execute: Node 23/ABI 131 vs required ABI 137 is refus
   // was written. The guard only READ the toolchain's ABI (`echo 131`); it never
   // rebuilt or replaced a shared native dependency to match (FG-555 non-goal).
   assert.ok(!stub.calls.some((c) => c[0] === "new-session"), "the guard refused BEFORE any tmux session existed");
+  assert.equal(listLaunches(stub.tmux).length, 0, "and no launch record was written");
+});
+
+test("FG-555 refuse-before-execute: a caller-supplied login shell is refused under the contract even when the pinned toolchain's ABI matches — the pin cannot survive the shell's profile scripts", () => {
+  // controlRuntimeProfile pins forge's OWN node first, so the ABI probe would PASS.
+  // But the workload is `bash -lc`: a login shell re-sources profile scripts that
+  // reset PATH after the pin, so it can still resolve a wrong-ABI node at runtime.
+  // The contract cannot protect that, so it refuses BEFORE any session exists —
+  // the exact hole a passing ABI probe would otherwise mask.
+  const stub = tmuxStub();
+  const profile = controlRuntimeProfile({ label: "control-runtime" });
+
+  assert.throws(
+    () => startLaunch(["bash", "-lc", "npm run test:all"], { name: "loginrepro", tmux: stub.tmux, profile }),
+    (e: Error) => {
+      assert.match(e.message, /refusing to run/);
+      assert.match(e.message, /login shell/);
+      return true;
+    },
+  );
+
+  assert.ok(!stub.calls.some((c) => c[0] === "new-session"), "the login-shell refusal precedes any tmux session");
   assert.equal(listLaunches(stub.tmux).length, 0, "and no launch record was written");
 });
 

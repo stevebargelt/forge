@@ -140,18 +140,38 @@ test("FG-555 toolchain guard: a mismatched ABI is a NAMED refusal; a match passe
   const profile = { path: "/p", requireAbi: "137", label: "control-runtime" };
   const resolve = () => "/p/node";
 
-  const bad = assertProfileToolchain(profile, { resolve, probeAbi: () => "131" });
+  const bad = assertProfileToolchain(profile, ["forge", "next"], { resolve, probeAbi: () => "131" });
   assert.equal(bad.ok, false);
   assert.match(bad.ok === false ? bad.message : "", /refusing to run/);
   assert.match(bad.ok === false ? bad.message : "", /ABI 137/);
   assert.match(bad.ok === false ? bad.message : "", /131/);
 
-  assert.deepEqual(assertProfileToolchain(profile, { resolve, probeAbi: () => "137" }), { ok: true }, "a matching ABI passes");
+  assert.deepEqual(assertProfileToolchain(profile, ["forge", "next"], { resolve, probeAbi: () => "137" }), { ok: true }, "a matching ABI passes");
 
-  const unreadable = assertProfileToolchain(profile, { resolve, probeAbi: () => undefined });
+  const unreadable = assertProfileToolchain(profile, ["forge", "next"], { resolve, probeAbi: () => undefined });
   assert.equal(unreadable.ok, false, "an unreadable ABI is not waved through (reuses checkAbi's unverifiable-ABI refusal)");
 
-  assert.deepEqual(assertProfileToolchain(profile, { resolve: () => undefined, probeAbi: () => "999" }), { ok: true }, "no node resolvable on the pinned PATH ⇒ nothing to assert");
+  assert.deepEqual(assertProfileToolchain(profile, ["forge", "next"], { resolve: () => undefined, probeAbi: () => "999" }), { ok: true }, "no node resolvable on the pinned PATH ⇒ nothing to assert");
+});
+
+test("FG-555 toolchain guard: a caller-supplied login shell is refused under the contract — the pinned PATH cannot survive its profile scripts", () => {
+  // ABI would MATCH (resolve → a control node, probe → the required ABI), so the
+  // refusal is about the login shell itself, NOT the probe: the probe reads the
+  // pre-shell PATH, but a login shell resets PATH afterwards and can still resolve
+  // a wrong-ABI node during the run.
+  const profile = { path: "/p", requireAbi: "137", label: "control-runtime" };
+  const resolve = () => "/p/node";
+  const probeAbi = () => "137";
+
+  for (const argv of [["bash", "-lc", "npm run test:all"], ["zsh", "--login", "-c", "x"], ["sh", "-il"]]) {
+    const r = assertProfileToolchain(profile, argv, { resolve, probeAbi });
+    assert.equal(r.ok, false, `${argv.join(" ")} is refused`);
+    assert.match(r.ok === false ? r.message : "", /login shell/);
+  }
+
+  // A NON-login shell keeps the pinned session PATH, so the ABI probe governs it
+  // (here it matches) — it is not refused outright.
+  assert.deepEqual(assertProfileToolchain(profile, ["bash", "-c", "npm run test:all"], { resolve, probeAbi }), { ok: true }, "a non-login shell is governed by the ABI probe, not refused as a login shell");
 });
 
 test("FG-535 ids: run/task ids are extracted uniquely from log text; absence is empty, not an error", () => {

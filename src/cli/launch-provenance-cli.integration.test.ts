@@ -239,9 +239,11 @@ test("FG-555 refuse-before-execute (REAL tmux, REAL fs): an incompatible ABI on 
   const fakebin = mkdtempSync(join(tmpdir(), "fg555-fakebin-"));
   const argsLog = join(fakebin, "node-args.log");
   const fakeNode = join(fakebin, "node");
-  // The fake `node` reports ABI 131 (the incompatible Node the reproduction's
-  // login shell resolved) and LOGS how it was invoked — so we can prove the guard
-  // only PROBED the ABI and never tried to rebuild/replace a native dependency.
+  // The fake `node` reports ABI 131 (the incompatible Node of the reproduction)
+  // and LOGS how it was invoked — so we can prove the guard only PROBED the ABI and
+  // never tried to rebuild/replace a native dependency. A DIRECT command (not a
+  // shell) so the ABI probe governs — a login shell is refused earlier, on its own
+  // grounds.
   writeFileSync(fakeNode, `#!/bin/sh\necho "$@" >> "${argsLog}"\necho 131\n`);
   chmodSync(fakeNode, 0o755);
 
@@ -249,7 +251,7 @@ test("FG-555 refuse-before-execute (REAL tmux, REAL fs): an incompatible ABI on 
   const profile: LaunchProfile = { path: `${fakebin}:${process.env.PATH ?? ""}`, requireAbi: "137", label: "control-runtime" };
 
   assert.throws(
-    () => startLaunch(["bash", "-lc", "npm run test:all"], { name: "reprocli", profile }),
+    () => startLaunch(["node", "-e", "1"], { name: "reprocli", profile }),
     (e: Error) => {
       assert.match(e.message, /refusing to run/);
       assert.match(e.message, /ABI 137/, "the refusal NAMES the required ABI");
