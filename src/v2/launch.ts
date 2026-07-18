@@ -431,11 +431,31 @@ function isLoginShell(argv: string[]): boolean {
   return argv.slice(1).some((a) => a === "--login" || /^-[a-z]*l[a-z]*$/.test(a));
 }
 
-/** Refuse-before-execute (FG-555): under the contract's pinned PATH, resolve the
- *  `node` the workload's toolchain will use and assert its ABI equals the
- *  contract's required ABI — REUSING FG-570's checkAbi, not a second checker. A
- *  mismatch (or an unreadable ABI) is a NAMED refusal the caller raises BEFORE any
- *  tmux session exists. `ok` when no node is resolvable on the pinned PATH: the
+/** Refuse-before-execute (FG-555): assert that the Node the workload will actually
+ *  run under matches the contract's required ABI, BEFORE any tmux session exists —
+ *  REUSING FG-570's checkAbi, not a second checker. A mismatch (or an unreadable
+ *  ABI) is a NAMED refusal the caller raises here rather than hundreds of opaque
+ *  ERR_DLOPEN_FAILED deep in the suite.
+ *
+ *  WHAT THE CONTRACT GUARANTEES:
+ *    - a workload that resolves `node`/`npm`/`forge` BY NAME on PATH runs the pinned
+ *      control toolchain (the pinned-PATH `node` probe), and
+ *    - a Node interpreter named DIRECTLY as argv[0] (e.g. `-- /usr/local/bin/node …`,
+ *      or a bare `node` on the pinned PATH) is probed against the required ABI too —
+ *      that is the executable the recorder spawns, so a green pinned-PATH probe alone
+ *      is NOT sufficient assurance (it would let an explicitly-named wrong-ABI node
+ *      bypass the gate). Both probes must pass.
+ *    - a caller-supplied LOGIN shell is refused outright.
+ *
+ *  WHAT IT DOES NOT AND CANNOT GUARANTEE (a stated boundary, not an accidental gap):
+ *    - the runtime of a node reached INDIRECTLY through a caller-authored NON-node
+ *      argv[0] — an arbitrary wrapper/script that itself execs some other interpreter.
+ *      That is the caller selecting its own runtime; forge cannot know it, the same
+ *      inherently-unknowable class as a nested shell's runtime resolution (R4). The
+ *      argv[0] probe is bounded to a Node interpreter (basename `node`/`nodejs`) for
+ *      exactly this reason.
+ *
+ *  `ok` when no node is resolvable on the pinned PATH and argv[0] is not a node: the
  *  contract verifies the toolchain it can see, it does not invent one.
  *
  *  A caller-supplied login shell is refused FIRST, unconditionally: the ABI probe
@@ -459,6 +479,32 @@ export function assertProfileToolchain(profile: LaunchProfile, argv: string[], o
   }
   const resolve = opts.resolve ?? resolveOnPath;
   const probe = opts.probeAbi ?? defaultAbiProbe;
+
+  // FG-555 (argv[0] interpreter bypass): the pinned-PATH probe below only checks the
+  // node resolved BY NAME on PATH. But the recorder spawns argv[0] DIRECTLY (see
+  // exitRecorderScript), so a caller can name an ABI-incompatible node explicitly
+  // (`-- /usr/local/bin/node …`) — the pinned PATH still resolves the control node,
+  // the probe is green, and then the named node runs and hits the ABI false-red
+  // anyway. So when argv[0] IS a Node interpreter, probe ITS ABI too: that is the
+  // executable that actually runs. Bounded to a node basename ON PURPOSE — a non-node
+  // wrapper's chosen runtime is the documented, unknowable boundary (see doc comment).
+  const argvNode = directNodeInterpreter(argv, profile.path, resolve);
+  if (argvNode) {
+    const r = checkAbi(probe(argvNode) ?? "", profile.requireAbi);
+    if (!r.ok) {
+      return {
+        ok: false,
+        message:
+          `forge launch: refusing to run — the command names a Node interpreter directly as argv[0] ` +
+          `(\`${argv[0]}\`), and THAT interpreter — not the pinned PATH — is what will execute the workload, ` +
+          `so a green pinned-PATH probe is no assurance. Its ABI does not match the contract, so the workload ` +
+          `would fail deep inside the suite (opaque ERR_DLOPEN_FAILED) instead of here.\n` +
+          `  contract: ${profile.label ? `${profile.label} — ` : ""}argv[0] interpreter = ${argvNode}\n` +
+          r.message,
+      };
+    }
+  }
+
   const node = resolve("node", profile.path);
   if (!node) return { ok: true };
   const r = checkAbi(probe(node) ?? "", profile.requireAbi);
@@ -471,6 +517,20 @@ export function assertProfileToolchain(profile: LaunchProfile, argv: string[], o
       `  contract: ${profile.label ? `${profile.label} — ` : ""}node resolved on the pinned PATH = ${node}\n` +
       r.message,
   };
+}
+
+/** The Node interpreter a caller named DIRECTLY as argv[0], resolved to a real path
+ *  — or undefined when argv[0] is not a node. This is the executable the recorder
+ *  spawns; the pinned-PATH `node` probe does NOT cover an explicitly-named path.
+ *  basename `node`/`nodejs` is the bounded criterion ON PURPOSE: a caller-authored
+ *  NON-node wrapper that itself execs some other interpreter is the documented
+ *  contract boundary, not something this can probe. */
+function directNodeInterpreter(argv: string[], path: string, resolve: PathResolver): string | undefined {
+  const argv0 = argv[0] ?? "";
+  if (argv0 === "") return undefined;
+  const name = basename(argv0);
+  if (name !== "node" && name !== "nodejs") return undefined;
+  return resolve(argv0, path);
 }
 
 /** Forge run/task ids, opportunistically, from whatever the command logged. */

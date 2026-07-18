@@ -174,6 +174,44 @@ test("FG-555 toolchain guard: a caller-supplied login shell is refused under the
   assert.deepEqual(assertProfileToolchain(profile, ["bash", "-c", "npm run test:all"], { resolve, probeAbi }), { ok: true }, "a non-login shell is governed by the ABI probe, not refused as a login shell");
 });
 
+test("FG-555 argv[0] bypass regression: an explicitly-named ABI-mismatched node as argv[0] is REFUSED before execution, even when the pinned-PATH probe is green", () => {
+  // The bypass this closes: `forge launch run --require-control-toolchain -- /usr/local/bin/node test.js`.
+  // The pinned PATH resolves the CONTROL node (ABI 137), so the pinned-PATH probe is green — but the
+  // recorder spawns argv[0] DIRECTLY, so the ABI-131 node the caller named is what actually runs. Pre-fix,
+  // the guard only probed the pinned-PATH node NAME and let this through; it must refuse the named interpreter.
+  const profile = { path: "/control/bin:/usr/local/bin", requireAbi: "137", label: "control-runtime" };
+  // Resolve "node" (bare, on PATH) to the CONTROL node; an explicit path resolves to itself.
+  const resolve = (name: string) => (name === "node" ? "/control/bin/node" : name.includes("/") ? name : undefined);
+  // The control node is ABI 137 (pinned probe passes); the caller-named node is ABI 131.
+  const probeAbi = (nodeExec: string) => (nodeExec === "/control/bin/node" ? "137" : "131");
+
+  const r = assertProfileToolchain(profile, ["/usr/local/bin/node", "test.js"], { resolve, probeAbi });
+  assert.equal(r.ok, false, "the explicitly-named ABI-131 node must be refused before execution");
+  const msg = r.ok === false ? r.message : "";
+  assert.match(msg, /ABI 137/, "names the expected ABI");
+  assert.match(msg, /131/, "names the found ABI");
+  assert.match(msg, /argv\[0\]/, "attributes the refusal to the directly-named interpreter, not the pinned PATH");
+});
+
+test("FG-555 boundary: a directly-named node with the REQUIRED ABI is allowed; a non-node argv[0] wrapper is the documented contract boundary", () => {
+  const profile = { path: "/control/bin", requireAbi: "137", label: "control-runtime" };
+  const resolve = (name: string) => (name === "node" ? "/control/bin/node" : name.includes("/") ? name : undefined);
+
+  // argv[0] IS a node whose ABI MATCHES the contract → not refused.
+  const okNode = assertProfileToolchain(profile, ["/opt/n24/bin/node", "test.js"], { resolve, probeAbi: () => "137" });
+  assert.deepEqual(okNode, { ok: true }, "a directly-named node with the required ABI is not refused");
+
+  // A caller-authored NON-node wrapper (a script that itself execs some other interpreter) is the DOCUMENTED
+  // boundary: forge cannot know the runtime such a wrapper selects — the same inherently-unknowable class as R4.
+  // The guard does not probe a non-node argv[0]; only the pinned-PATH node (green here) governs, so it is NOT
+  // refused. This is a stated contract boundary, not an accidental gap (see assertProfileToolchain's doc comment).
+  const wrapper = assertProfileToolchain(profile, ["/usr/local/bin/run-tests.sh", "test.js"], {
+    resolve,
+    probeAbi: (n: string) => (n === "/control/bin/node" ? "137" : "131"),
+  });
+  assert.deepEqual(wrapper, { ok: true }, "a non-node wrapper argv[0] is outside the contract's guarantee — not probed, not refused");
+});
+
 test("FG-535 ids: run/task ids are extracted uniquely from log text; absence is empty, not an error", () => {
   const log = "run: run-review-loop-fg-533-84f4a2\ntask task-red-wide-6e37ed done; task-red-wide-6e37ed again";
   assert.deepEqual(extractForgeIds(log), {
