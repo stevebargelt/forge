@@ -20,7 +20,7 @@ A timestamped record of each subscription, including the destination number and 
 
 forge sends an SMS only when a workflow's run state transitions to one of:
 - `complete` — workflow finished successfully
-- `failed` — workflow was abandoned
+- `failed` — the run did not succeed: it settled with a required phase that failed or a downstream phase that became permanently unreachable (FG-585). (An operator-`abandoned` run also surfaces under this same notification state.)
 - `blocked_by_red` — a task was blocked by an adversarial review verdict; the user's input is needed
 
 Default behavior is one message per terminal transition. There are no marketing messages, no recurring digests, no scheduled sends.

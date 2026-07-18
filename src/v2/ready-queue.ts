@@ -305,3 +305,87 @@ function computeStepSettleStates(workflow: Workflow, tasks: Task[]): Map<string,
   for (const step of workflow.steps) resolve(step.id);
   return states;
 }
+
+// FG-585: the ONE shared terminal-state classifier (the FG-477 anti-drift slice).
+// Every finalize site routes through this instead of re-deriving "did the run
+// fail" with its own heuristic. Returns:
+//   - null       => NOT settled (live work or a human decision outstanding)
+//   - "complete" => settled and every declared step reached a complete primary
+//   - "failed"   => settled and at least one step is permanently BLOCKED (its own
+//                   primaries terminally failed with no pending replacement, OR a
+//                   dependency is permanently blocked → a downstream phase can
+//                   never dispatch).
+// A SUPERSEDED failed phase (request-changes: a complete replacement exists in
+// the same phase) resolves to "complete" via hasCompletePrimary — it does NOT
+// make the run failed. Reuses computeStepSettleStates/isRunSettled as the single
+// source of truth; the failed/unreachable split below only labels an already
+// computed "blocked" state and never re-derives settle logic.
+export type RunTerminalClassification = {
+  status: "complete" | "failed";
+  failedPhases: string[]; // steps whose own primaries terminally failed
+  unreachablePhases: string[]; // steps that can never dispatch (a dep is blocked)
+};
+
+export function classifyRunTerminalState(
+  workflow: Workflow | undefined,
+  tasks: Task[],
+): RunTerminalClassification | null {
+  // Ad-hoc invoke run shape: no workflow steps describe the work, so the
+  // top-level ad-hoc task(s) carry the outcome. Kept here so invoke's
+  // closeRunIfIdle and reconcile's invoke-only finalize route through the same
+  // authority as workflow runs.
+  if (!workflow || workflow.steps.length === 0) {
+    return classifyInvokeTerminalState(tasks);
+  }
+  if (!isRunSettled(workflow, tasks)) return null;
+  const states = computeStepSettleStates(workflow, tasks);
+  const failedPhases: string[] = [];
+  const unreachablePhases: string[] = [];
+  for (const step of workflow.steps) {
+    if (states.get(step.id) !== "blocked") continue;
+    // Mirror resolve()'s precedence: a blocked dependency is the reason a step
+    // is unreachable; only when every dep is complete does the block mean this
+    // step's OWN primaries failed.
+    if (step.depends_on.some((depId) => states.get(depId) === "blocked")) {
+      unreachablePhases.push(step.id);
+    } else {
+      failedPhases.push(step.id);
+    }
+  }
+  const failed = failedPhases.length > 0 || unreachablePhases.length > 0;
+  return { status: failed ? "failed" : "complete", failedPhases, unreachablePhases };
+}
+
+// Invoke / no-step run: settled iff no top-level task is still non-terminal.
+// A failed top-level task is SUPERSEDED (and does not fail the run) when another
+// top-level task in the same phase is not failed — the retry-replacement shape,
+// matching the heuristic runNext used before this classifier existed.
+function classifyInvokeTerminalState(tasks: Task[]): RunTerminalClassification | null {
+  const topLevel = tasks.filter((t) => t.parentId === undefined);
+  // No top-level work at all ⇒ settled with nothing failed (the review-loop
+  // eager-run shape: a run row created before any dispatch that stops with zero
+  // tasks). Callers that must NOT complete an empty run — reconcile, which may
+  // be racing a not-yet-inserted task — guard on task count before classifying.
+  if (topLevel.length === 0) return { status: "complete", failedPhases: [], unreachablePhases: [] };
+  if (topLevel.some((t) => t.status !== "complete" && t.status !== "failed")) return null;
+  const failedPhases = topLevel
+    .filter(
+      (t) =>
+        t.status === "failed" &&
+        !topLevel.some((other) => other.phase === t.phase && other.status !== "failed"),
+    )
+    .map((t) => t.phase);
+  return failedPhases.length > 0
+    ? { status: "failed", failedPhases, unreachablePhases: [] }
+    : { status: "complete", failedPhases: [], unreachablePhases: [] };
+}
+
+// FG-585: one-line human summary for the failed terminal state, e.g.
+// "verify failed; docs never ran". Callers (forge next / gate / show) use it so
+// the phrasing stays consistent across every operator surface.
+export function formatRunFailure(c: RunTerminalClassification): string {
+  const parts: string[] = [];
+  if (c.failedPhases.length > 0) parts.push(`${c.failedPhases.join(", ")} failed`);
+  if (c.unreachablePhases.length > 0) parts.push(`${c.unreachablePhases.join(", ")} never ran`);
+  return parts.join("; ") || "a required phase failed";
+}

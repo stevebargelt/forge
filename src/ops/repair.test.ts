@@ -57,6 +57,18 @@ test("performOpsRepair: marks a genuine orphan failed (orphaned) with audit even
   assert.equal(runStatus.status, "complete");
 });
 
+test("performOpsRepair: treats a FAILED run as terminal — a pending task under it is a genuine orphan (FG-585)", () => {
+  insertRun(mkRun("run-failed", "failed"));
+  insertTask(mkTask("t-orphan-failed", "run-failed", "pending"));
+
+  const outcome = performOpsRepair("t-orphan-failed");
+  assert.equal(outcome.kind, "repaired", "a failed run is terminal, same as complete — the pending task is orphaned");
+  assert.equal(getTask("t-orphan-failed")!.status, "failed");
+  // run status deliberately untouched — the fix is the task, not the already-terminal run
+  const runStatus = db.prepare("SELECT status FROM runs WHERE id = ?").get("run-failed") as { status: string };
+  assert.equal(runStatus.status, "failed", "failed run is not reconciled/repaired as if it were live");
+});
+
 // ── dry-run writes nothing ───────────────────────────────────────────────────
 
 test("performOpsRepair: --dry-run reports the repair but writes nothing", () => {

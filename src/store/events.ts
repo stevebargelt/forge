@@ -4,6 +4,7 @@ import { nowIso } from "../util/ids.js";
 export type EventType =
   | "run.created"
   | "run.completed"
+  | "run.failed"
   | "run.reactivated"
   | "run.reconciled"
   | "run.cancelled"

@@ -160,25 +160,67 @@ export function completeRun(id: string, opts?: { onApplied?: () => void }): bool
   return true;
 }
 
+// FG-585: compare-and-set that fails a run ONLY out of 'active' — mirrors
+// completeRun exactly (same transaction shape, onApplied-inside-transaction,
+// post-commit notification). CAS from 'active' means it equally refuses
+// abandoned->failed (a concurrent `forge cancel` won, AWN-2), complete->failed
+// (a run that already succeeded never flips), and failed->failed (redundant
+// re-finalization). Returns true iff this call failed it.
+export function failRun(id: string, opts?: { onApplied?: () => void }): boolean {
+  const completedAt = nowIso();
+  const { applied, prevStatus } = writeTransaction(() => {
+    const prev = getDb()
+      .prepare(`SELECT status FROM runs WHERE id = ?`)
+      .get(id) as { status: string } | undefined;
+    const info = getDb()
+      .prepare(`UPDATE runs SET status = 'failed', completed_at = ? WHERE id = ? AND status = 'active'`)
+      .run(completedAt, id);
+    const applied = info.changes === 1;
+    if (applied) opts?.onApplied?.();
+    return { applied, prevStatus: prev?.status };
+  });
+
+  if (!applied) return false;
+
+  const updated = getRun(id);
+  if (updated) {
+    void notifyOnRunTransition(updated, "failed", prevStatus);
+  }
+  return true;
+}
+
+const TERMINAL_RUN_STATES: ReadonlySet<RunStatus> = new Set(["complete", "failed", "abandoned"]);
+
 export function updateRunStatus(id: string, status: RunStatus): void {
-  // Read the previous status and (for a "complete" write) apply the FG-484
-  // universal backstop in the SAME transaction as the write, so no concurrent
-  // writer can interleave between the read and the UPDATE. This is the store
-  // layer's own guard — it holds regardless of which caller reaches it,
-  // unlike relying on every call site to route through completeRun.
+  // Read the previous status and apply the FG-484/FG-585 universal backstop in
+  // the SAME transaction as the write, so no concurrent writer can interleave
+  // between the read and the UPDATE. This is the store layer's own guard — it
+  // holds regardless of which caller reaches it, unlike relying on every call
+  // site to route through completeRun/failRun.
   const { applied, prevStatus } = writeTransaction(() => {
     const prev = getDb()
       .prepare(`SELECT status FROM runs WHERE id = ?`)
       .get(id) as { status: string } | undefined;
 
-    // FG-484: abandoned is authoritatively terminal. No caller — including
-    // ones that bypass completeRun/finalizeRunIfSettled entirely — may
-    // resurrect an abandoned run to "complete".
-    if (prev?.status === "abandoned" && status === "complete") {
+    // FG-585: a settled run's terminal truth is immutable except an explicit
+    // reactivation to active (retry/attach via reactivateTerminalRun). No
+    // caller — including ones that bypass completeRun/failRun/
+    // finalizeRunIfSettled entirely — may cross a terminal run to a DIFFERENT
+    // terminal state: this refuses failed<->complete (false green light /
+    // wrong-ship), terminal->abandoned, and abandoned->{complete,failed}
+    // alike, while still allowing terminal->active (reactivation),
+    // active->terminal (normal finalize), and idempotent same->same.
+    if (
+      prev &&
+      TERMINAL_RUN_STATES.has(prev.status as RunStatus) &&
+      TERMINAL_RUN_STATES.has(status) &&
+      status !== prev.status
+    ) {
       return { applied: false, prevStatus: prev?.status };
     }
 
-    const completedAt = status === "complete" || status === "abandoned" ? nowIso() : null;
+    const completedAt =
+      status === "complete" || status === "failed" || status === "abandoned" ? nowIso() : null;
     getDb()
       .prepare(`UPDATE runs SET status = ?, completed_at = ? WHERE id = ?`)
       .run(status, completedAt, id);
@@ -187,10 +229,10 @@ export function updateRunStatus(id: string, status: RunStatus): void {
 
   if (!applied) return;
 
-  // Notification: fires on terminal transitions only (complete/abandoned).
+  // Notification: fires on terminal transitions only (complete/failed/abandoned).
   // Reads the just-updated row so durationMs reflects the completed_at write.
   // Async fire-and-forget — never throws, never blocks the caller.
-  if (status === "complete" || status === "abandoned") {
+  if (status === "complete" || status === "failed" || status === "abandoned") {
     const updated = getRun(id);
     if (updated) {
       void notifyOnRunTransition(updated, status, prevStatus);

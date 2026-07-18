@@ -415,7 +415,16 @@ async function finalizeInvokeDispatch(
 // one task to have an actual authoritative verdict on record (a force-advance
 // alone can never substitute for authoritative review).
 function reconcileTerminalOutcome(run: Run, itemId: string, projectDir?: string): void {
-  if (run.status !== "complete") {
+  // FG-585: `failed` is a real, evidence-bearing terminal (a required phase
+  // failed / a downstream phase became unreachable). Route it through the SAME
+  // authoritative attribution as `complete` — gate_rejected → scope/LOCAL,
+  // verdict-fail → scope, shared infra/auth → campaign_system (SHARED-WINS) —
+  // NOT the campaign_system short-circuit that would pause the whole campaign
+  // for a per-item local failure. Before FG-585 this path relied on the run
+  // falsely reaching `complete`; now the run tells the truth and the attribution
+  // logic below handles both terminals. Only a run that is neither complete nor
+  // failed (abandoned, or somehow still active) is a genuine campaign anomaly.
+  if (run.status !== "complete" && run.status !== "failed") {
     updateCampaignItem(itemId, {
       lifecycleStatus: "failed",
       outcome: "blocked",
@@ -425,7 +434,10 @@ function reconcileTerminalOutcome(run: Run, itemId: string, projectDir?: string)
     return;
   }
   const { outcome } = evaluateAuthoritativeOutcome(collectAuthoritativeEvents(run.id));
-  if (outcome === "pass") {
+  // Only a genuinely `complete` run may ship — a `failed` run never routes to the
+  // shipped/done-audit branch even if an authoritative pass verdict exists (some
+  // later required phase still failed).
+  if (run.status === "complete" && outcome === "pass") {
     const item = getCampaignItem(itemId);
     const ticketId = item?.ticketId;
     let auditResult: DoneAuditResult | undefined;

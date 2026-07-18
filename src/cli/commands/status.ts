@@ -10,6 +10,8 @@ import { reconcileRun, reconcileRuns } from "../../v2/reconcile.js";
 import { eventsForTask } from "../../store/events.js";
 import { failureKindFromEvents, getOrphanEvidenceFromEvents, getContainerCausalEvidenceFromEvents, getFanoutWaveEvidenceFromEvents } from "../../v2/failure-kind.js";
 import { taskHasPipelineFinalize } from "../../v2/run-kind.js";
+import { loadWorkflow } from "../../v2/loader.js";
+import { classifyRunTerminalState, formatRunFailure, type RunTerminalClassification } from "../../v2/ready-queue.js";
 
 export function registerStatus(program: Command): void {
   program
@@ -76,6 +78,20 @@ export function registerStatus(program: Command): void {
       // FG-486: invoke_chain tasks have no finalize either — shared predicate.
       const runIsInvokeRun = !taskHasPipelineFinalize(run);
 
+      // FG-585: when the run settled to `failed`, name the phase(s) that failed
+      // and the phase(s) that could never dispatch — same classifier `forge show`
+      // uses. This is the ONLY surface here that names an undispatched phase (e.g.
+      // a docs phase blocked behind a failed verify), which has no task row of its
+      // own, so neither the run row nor the task rows would otherwise reveal it.
+      // Best-effort — never let a missing/unloadable workflow abort `forge status`.
+      let runFailure: RunTerminalClassification | undefined;
+      if (run.status === "failed") {
+        try {
+          const c = classifyRunTerminalState(loadWorkflow(run.workflow, { projectDir: run.projectDir }), tasks);
+          if (c && c.status === "failed") runFailure = c;
+        } catch { /* leave undefined */ }
+      }
+
       if (opts.json) {
         // Structured output for the orchestrator. One JSON object per call.
         // Stable schema: run + tasks (with verdicts inlined per task).
@@ -135,6 +151,9 @@ export function registerStatus(program: Command): void {
             createdAt: run.createdAt,
             completedAt: run.completedAt ?? null,
           },
+          // FG-585: failed + unreachable phases when the run settled to failed —
+          // the only place `status --json` names a phase that never dispatched.
+          runFailure: runFailure ?? null,
           tasks: tasksJson,
         }, null, 2));
         return;
@@ -143,6 +162,7 @@ export function registerStatus(program: Command): void {
       console.log(`Run: ${run.title}  (${run.id})`);
       console.log(`Workflow: ${run.workflow}`);
       console.log(`Status: ${run.status}`);
+      if (runFailure) console.log(`Failure: ${formatRunFailure(runFailure)}`);
       console.log(`Created: ${run.createdAt}`);
       if (run.completedAt) console.log(`Completed: ${run.completedAt}`);
       console.log("");

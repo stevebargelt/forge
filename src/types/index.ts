@@ -75,7 +75,7 @@ export type AgentResult = {
   error?: string;
 };
 
-export type RunStatus = "active" | "complete" | "abandoned";
+export type RunStatus = "active" | "complete" | "failed" | "abandoned";
 export type TaskStatus =
   | "pending"
   | "running"

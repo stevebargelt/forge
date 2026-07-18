@@ -116,18 +116,39 @@ aggregates child results once they all settle.
 - Children's results are aggregated into the parent's result as
   `{ status, children: [{ index, status, childTaskId, result }] }`.
 
-### Decision 7 — Run terminal status: only `complete`, never `failed`
+### Decision 7 — Run terminal status ~~only `complete`, never `failed`~~ (SUPERSEDED by FG-585)
 
-When all steps have task rows and no pending work remains, runner marks the
-run `complete`. Even if some tasks failed. The human/orchestrator reads task
-statuses to know whether the run succeeded.
+**Original decision (v2 cutover):** when all steps had task rows and no pending
+work remained, runner marked the run `complete` even if some tasks failed; the
+`RunStatus` union was `"active" | "complete" | "abandoned"` with no `"failed"`
+state, and the human/orchestrator read task statuses to know whether the run
+actually succeeded. Rationale at the time: match v1 spine behavior and avoid a
+schema migration.
 
-**Why:** v1's `RunStatus` union is `"active" | "complete" | "abandoned"` —
-there's no `"failed"` state. Matches v1 spine's behavior. Adding a `"failed"`
-run status would be a schema migration.
+**Superseded by FG-585 — `failed` is now a 4th terminal run status.**
+`RunStatus` is `"active" | "complete" | "failed" | "abandoned"`. A run that
+settles no longer blanket-reports `complete`:
+- `complete` = terminal, SUCCESSFUL — every declared step settled successfully
+  (a phase that failed but has a successful replacement/recovery does not count
+  against this).
+- `failed` = terminal, UNSUCCESSFUL — the run settled but a required phase
+  failed, OR a downstream phase became permanently unreachable because a
+  dependency is terminally blocked (e.g. `verify` fails ⇒ a `docs` phase with
+  `depends_on: [verify]` can never dispatch). A `run.failed` lifecycle event is
+  emitted (naming the failed + unreachable phases).
+- `abandoned` = operator cancel (unchanged).
 
-**If you want a `failed` run status:** add to the RunStatus union in types,
-migrate the DB, update reconcile.ts. Not in scope for v2 cutover.
+**Why it fit without a migration:** `runs.status` is an unconstrained `TEXT`
+column, so the new value needed no DB migration. The classification reuses the
+existing evaluator rather than a new code path — the one shared
+`classifyRunTerminalState` (`src/v2/ready-queue.ts`) runs over the step
+settle-states already computed by `computeStepSettleStates` / `isRunSettled`,
+splits the blocked steps into failed-primary vs unreachable-dependency, and
+returns `failed` iff either set is non-empty. Every finalize site (gate,
+runNext's wave-complete check, reconcile's active→terminal site, invoke's
+closeRunIfIdle) routes through that one classifier and the shared
+`finalizeRunIfSettled` helper, which does the guarded CAS and logs
+`run.completed` / `run.failed`.
 
 ### Decision 8 — Direct depends_on for inputs.upstream[*]
 

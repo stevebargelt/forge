@@ -558,7 +558,9 @@ export function opsMetrics(since: string, scope?: ProjectScope): OpsMetrics {
     FROM runs r WHERE 1 = 1 ${rw.clause}
   `).all(...rw.params) as Array<{ id: string; status: string; failed: number }>;
   const total = runRows.length;
-  const terminalRows = runRows.filter((r) => r.status === "complete" || r.status === "abandoned");
+  const terminalRows = runRows.filter(
+    (r) => r.status === "complete" || r.status === "failed" || r.status === "abandoned",
+  );
   const terminal = terminalRows.length;
   const active = total - terminal;
   const clean = terminalRows.filter((r) => r.status === "complete" && r.failed === 0).length;

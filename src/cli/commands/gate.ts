@@ -3,8 +3,26 @@ import { gate, batchGate } from "../../v2/gate.js";
 import { ensureForgeDirs } from "../../util/paths.js";
 import { getTask } from "../../store/tasks.js";
 import { getRun } from "../../store/runs.js";
+import { tasksForRun } from "../../store/tasks.js";
+import { loadWorkflow } from "../../v2/loader.js";
+import { classifyRunTerminalState, formatRunFailure } from "../../v2/ready-queue.js";
+import type { Run } from "../../types/index.js";
 import { withRunLock, RunBusyError } from "../../util/run-lock.js";
 import { renderResearchReport } from "../../v2/report.js";
+
+// FG-585: a truthful one-line failure detail for a run that gating settled to
+// `failed` — names the failed + unreachable phases. Falls back to a generic
+// line if the workflow can't be loaded (never let reporting throw).
+function runFailureDetail(run: Run): string {
+  try {
+    const workflow = loadWorkflow(run.workflow, { projectDir: run.projectDir });
+    const c = classifyRunTerminalState(workflow, tasksForRun(run.id));
+    if (c && c.status === "failed") return formatRunFailure(c);
+  } catch {
+    /* fall through to the generic line */
+  }
+  return "a required phase failed and downstream phase(s) never ran";
+}
 
 export function registerGate(program: Command): void {
   program
@@ -75,6 +93,8 @@ export function registerGate(program: Command): void {
               console.error(`forge gate: report render failed — ${(err as Error).message}`);
             }
           }
+        } else if (runAfter?.status === "failed") {
+          console.log(`\nRun failed — ${runFailureDetail(runAfter)}`);
         } else {
           console.log(`\nNext:\n  forge next ${id}`);
         }
@@ -109,6 +129,8 @@ export function registerGate(program: Command): void {
             console.error(`forge gate: report render failed — ${(err as Error).message}`);
           }
         }
+      } else if (runAfter?.status === "failed") {
+        console.log(`\nRun failed — ${runFailureDetail(runAfter)}`);
       } else {
         console.log(`\nNext:\n  forge next ${result.task.runId}`);
       }

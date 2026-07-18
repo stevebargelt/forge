@@ -1002,17 +1002,35 @@ for (const kp of KILL_POINTS) {
     ensureRuntime();
     const { sc, runId, exec, persistedPreKill } = await crashInFirstReachingScenario(kp);
 
-    updateRunStatus(runId, "abandoned"); // the operator cancels before recovery runs
+    // The operator's `forge cancel --abandon-run` lands while the runner is crashed.
+    // A run the crash left in-flight (active) is abandoned; a run the crash already
+    // SETTLED to a terminal state is a no-op for cancel — `forge cancel` refuses a
+    // terminal run (cancel.ts) and the store's terminal-crossing guard equally
+    // refuses complete/failed -> abandoned (FG-585). Some (scenario, kill point)
+    // cells reach their probe only after the run has genuinely finalized (a gate
+    // advance that completed the run, a reconcile backfill on an already-complete
+    // run), so the abandon there is correctly refused. Attempt it, then read back
+    // what actually settled.
+    updateRunStatus(runId, "abandoned"); // active -> abandoned; a no-op if already terminal
+    const settled = getRun(runId)!.status;
 
     await recoverToFixpoint(runId, sc.workflow, exec);
 
-    assert.equal(getRun(runId)!.status, "abandoned", "recovery must leave the abandoned run abandoned");
+    // The invariant across BOTH outcomes: recovery must never resurrect or flip the
+    // settled run. An abandoned (cancelled) run stays abandoned — the AWN-2 rule that
+    // recovery never resurrects a cancelled run; a run the crash already completed
+    // stays complete — recovery never re-opens or re-terminalizes a settled run.
+    assert.equal(
+      getRun(runId)!.status,
+      settled,
+      `recovery changed the settled run's status away from '${settled}' — it must never resurrect or flip a settled run`,
+    );
     const violations = await checkAllInvariants({
       runId,
       workflow: sc.workflow,
       exec,
       persistedPreKill,
-      wasAbandoned: true,
+      wasAbandoned: settled === "abandoned",
     });
     const { unexpected } = partitionKnown(violations);
     assert.deepEqual(
@@ -1022,6 +1040,66 @@ for (const kp of KILL_POINTS) {
     );
   });
 }
+
+// ── FG-585 regression: the cancel/complete race resolves ONE way per run ───────
+//
+// The AWN-2 cancel race has two faithful outcomes, and FG-585's terminal-crossing
+// guard is what keeps them apart. This pins BOTH arms in isolation so the invariant
+// reads without the crash-matrix machinery, and so a revert of either guard fails
+// loudly:
+//   • a run the crash already SETTLED to complete cannot be re-terminalized to
+//     abandoned by a racing operator cancel (store crossing guard, FG-585), and
+//     recovery leaves it complete; and
+//   • a run the crash left in-flight (active) IS abandoned by the cancel, and
+//     recovery never resurrects it (the finalizeRunIfSettled abandoned re-read).
+test("FG-585 cancel race: a genuinely-completed run refuses a racing abandon and recovery leaves it complete; an in-flight run abandons and stays abandoned", async () => {
+  ensureRuntime();
+  writeWorkflowYaml(PLAIN_WF.name, PLAIN_YAML);
+
+  // Arm A — the crash finalized the run to complete before the cancel landed.
+  {
+    const projectDir = makeTmpDir();
+    const exec = makeExec({ redVerdict: "pass" });
+    const { runId } = startRun({ workflow: PLAIN_WF, title: "fg585 cancel-race complete arm", inputs: {}, projectDir });
+    await runNext({ runId, workflow: PLAIN_WF, dockerExec: exec }); // build → complete → run complete
+    assert.equal(getRun(runId)!.status, "complete", "precondition: the run finalized to complete");
+
+    updateRunStatus(runId, "abandoned"); // operator cancel racing the settled run
+    assert.equal(
+      getRun(runId)!.status,
+      "complete",
+      "the terminal-crossing guard must refuse complete → abandoned (FG-585)",
+    );
+
+    await recoverToFixpoint(runId, PLAIN_WF, exec);
+    assert.equal(getRun(runId)!.status, "complete", "recovery must leave the settled complete run complete");
+  }
+
+  // Arm B — the crash left the run in-flight (active), so the cancel abandons it.
+  {
+    const projectDir = makeTmpDir();
+    const exec = makeExec({ redVerdict: "pass" });
+    const { runId } = startRun({ workflow: PLAIN_WF, title: "fg585 cancel-race abandon arm", inputs: {}, projectDir });
+    await runNext({ runId, workflow: PLAIN_WF, dockerExec: exec }); // build → complete (to mint the task graph)
+    // Reconstruct a crash mid-finalize: the primary is back in flight and the run's
+    // own completion write never became durable — a runner crashed here leaves the
+    // RUN active, not complete (the run-complete finalize runs strictly after).
+    const primary = primaryOf(runId, "build");
+    assert.ok(primary, "the primary must exist to reopen");
+    setTaskStatus(primary.id, "running");
+    updateRunStatus(runId, "active");
+
+    updateRunStatus(runId, "abandoned"); // operator cancel on the in-flight run
+    assert.equal(getRun(runId)!.status, "abandoned", "an active run is abandonable");
+
+    await recoverToFixpoint(runId, PLAIN_WF, exec);
+    assert.equal(
+      getRun(runId)!.status,
+      "abandoned",
+      "recovery must never resurrect a cancelled in-flight run (AWN-2)",
+    );
+  }
+});
 
 // ── inertness at FLOW level (the other half of the scope guard) ────────────────
 

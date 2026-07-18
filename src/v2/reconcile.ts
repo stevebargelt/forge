@@ -25,6 +25,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getRun } from "../store/runs.js";
 import { finalizeRunIfSettled } from "./run-finalize.js";
+import { classifyRunTerminalState } from "./ready-queue.js";
 import { tasksForRun, markTaskComplete, markTaskFailed, backfillTaskResult } from "../store/tasks.js";
 import { logEvent, eventsForTask } from "../store/events.js";
 import { crashPoint } from "./crash-points.js";
@@ -1326,24 +1327,30 @@ export function reconcileRun(
     // must never complete it early.
     if (run.status === "active" && run.workflow === "invoke") {
       const after = tasksForRun(runId);
-      const anyNonTerminal = after.some((t) => !TERMINAL_TASK.has(t.status));
-      if (after.length > 0 && !anyNonTerminal) {
+      // FG-585: the shared classifier decides complete-vs-failed for the invoke
+      // run shape too (no workflow steps → it reads the top-level tasks). A
+      // settled invoke run whose task(s) ended `failed` reconciles to `failed`,
+      // not a false `complete`. Returns null while any top-level task is still
+      // non-terminal. The `after.length > 0` guard preserves the pre-FG-585
+      // rule: reconcile must not complete a zero-task run it may be racing a
+      // not-yet-inserted task against (the classifier treats empty as complete).
+      const classification = after.length > 0 ? classifyRunTerminalState(undefined, after) : null;
+      if (classification) {
+        const target = classification.status;
         // FG-484: finalizeRunIfSettled re-reads the run and refuses the
         // write (no events, no notification) if a concurrent `forge cancel`
         // already abandoned it — the `run.status === "active"` check above
         // is only this function's local snapshot from earlier in the call
-        // and can be stale by the time we get here. The completion write and
-        // BOTH its run.completed and run.reconciled events commit atomically
-        // inside the helper's transaction (FG-463: restores the guarantee the
-        // old getDb().transaction()-wrapped call here used to provide before
-        // the FG-484 refactor split them into separate statements) — passed
-        // as onCompleted so it only fires when the write actually applied.
+        // and can be stale by the time we get here. The status write and
+        // BOTH its run.completed/run.failed and run.reconciled events commit
+        // atomically inside the helper's transaction (FG-463) — passed as
+        // onApplied so it only fires when the write actually applied.
         if (
-          finalizeRunIfSettled(runId, "reconcile", { source: "reconcile" }, () =>
-            logEvent("run.reconciled", { runId, payload: { from: "active", to: "complete", reason: "no_live_work" } }),
+          finalizeRunIfSettled(runId, target, "reconcile", { source: "reconcile" }, () =>
+            logEvent("run.reconciled", { runId, payload: { from: "active", to: target, reason: "no_live_work" } }),
           )
         ) {
-          runChange = { from: "active", to: "complete", reason: "no_live_work" };
+          runChange = { from: "active", to: target, reason: "no_live_work" };
         }
       }
     }

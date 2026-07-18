@@ -14,7 +14,7 @@ Columns the dashboard reads:
 - `id` — string, primary key
 - `workflow` — string, the YAML workflow name (e.g. `feature`, `invoke` sentinel for single-invoke runs)
 - `title` — string, human-readable run title
-- `status` — string, one of `active | complete | abandoned`
+- `status` — string, one of `active | complete | failed | abandoned` (unconstrained TEXT; `failed` added in FG-585 with no migration)
 - `created_at` — ISO 8601 timestamp string
 - `completed_at` — nullable ISO 8601 timestamp string
 - `project_dir` — nullable string, the host path mounted at `/project` for this run's containers

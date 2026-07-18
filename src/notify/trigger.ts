@@ -21,6 +21,7 @@ const DEFAULT_NOTIFY_ON = new Set<NotifyState>([
 // SMS body. Returns null for transitions we don't notify on (e.g. "active").
 function statusToNotifyState(status: string): NotifyState | null {
   if (status === "complete") return "complete";
+  if (status === "failed") return "failed";
   if (status === "abandoned") return "failed";
   if (status === "blocked_by_red") return "blocked_by_red";
   if (status === "awaiting_gate") return "awaiting_gate";
@@ -125,10 +126,11 @@ export async function notifyOnRunTransition(
   await dispatch(body, `forge: ${run.workflow} [${state}]`);
 }
 
-// WALK-4: a run flips to "complete" even when a task inside it failed (RunStatus
-// has no "failed"). Surface the failure so the notification names the kind and a
-// forge show. Picks the first failed top-level task; returns undefined for a
-// clean run.
+// WALK-4: since FG-585 a run with an un-superseded failed/unreachable required
+// phase settles to "failed" (finalizers emit run.failed; statusToNotifyState
+// maps it). Surface the failing task so the notification names the kind and a
+// forge show. Picks the first failed top-level task; returns undefined when none
+// failed.
 export function failureDetailForRun(run: Run): FailureDetail | undefined {
   const failed = tasksForRun(run.id).find(
     (t) => t.parentId === undefined && t.status === "failed",

@@ -143,7 +143,7 @@ export function performCancel(
 
   const run = getRun(id);
   if (run) {
-    if (run.status === "complete" || run.status === "abandoned") {
+    if (run.status === "complete" || run.status === "failed" || run.status === "abandoned") {
       return { kind: "run-terminal", runId: run.id, status: run.status };
     }
     const tasks = tasksForRun(run.id);

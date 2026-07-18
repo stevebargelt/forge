@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { runNext, resolveChildAgent, type DockerExecFn } from "./runNext.js";
+import { retry } from "./retry.js";
 import { loadModelPolicyWithSource } from "./loader.js";
 import { startRun } from "./startRun.js";
 import { tasksForRun, getTask, markTaskComplete } from "../store/tasks.js";
@@ -2550,14 +2551,19 @@ test("runNext: FG-475 a step already terminally failed with no pending replaceme
   const wave = await runNext({ runId, workflow: LINEAR_WORKFLOW, dockerExec: throwingExec });
 
   assert.deepEqual(wave.dispatchedSteps, [], "ready queue is empty on entry — this exercises the early-return path, not a dispatch wave");
+  // FG-585: settling now tells the truth — 'first' failed with no replacement and
+  // 'second' can never dispatch, so the run settles to `failed` (not a false
+  // `complete`). The FG-475 guarantee — a SINGLE call settles it, no hang — holds.
   assert.equal(
     wave.runStatus,
-    "complete",
+    "failed",
     "a SINGLE runNext() call must settle the run — no hang, no manual process kill, no follow-up call required",
   );
+  assert.deepEqual(wave.terminal!.failedPhases, ["first"]);
+  assert.deepEqual(wave.terminal!.unreachablePhases, ["second"]);
 
   const run = getRun(runId);
-  assert.equal(run!.status, "complete");
+  assert.equal(run!.status, "failed");
 });
 
 test("runNext: FG-475 empty-ready-queue-but-awaiting-gate is still NOT settled (regression guard — human/verdict gates must not be swept up by the new settled check)", async () => {
@@ -2916,11 +2922,13 @@ steps:
 
   // A rejected gate with no on_reject leaves this (only) step terminally
   // failed with no replacement task — parity with the advance branch's
-  // finalizeRunIfDone call. The run must reconcile to "complete" within the
+  // finalizeRunIfDone call. The run must reconcile synchronously within the
   // gate() call itself; it must NOT require a follow-up forge next/runNext
   // call (that follow-up call is exactly what hung in campaign-e89beee993ec).
+  // FG-585: the only step failed, so the synchronous finalize settles it to
+  // `failed`, not a false `complete`.
   const run = getRun(runId);
-  assert.equal(run!.status, "complete", "gate(reject) with no on_reject must finalize the run synchronously");
+  assert.equal(run!.status, "failed", "gate(reject) with no on_reject must finalize the run synchronously");
 
   const rejectedTask = getTask(task.id)!;
   assert.equal(rejectedTask.status, "failed");
@@ -3028,14 +3036,20 @@ steps:
   };
   const finalWave = await runNext({ runId, workflow: wf, dockerExec: throwingExec });
   assert.deepEqual(finalWave.dispatchedSteps, []);
+  // FG-585: the run finalizes once the recovery task completes — not before.
+  // Its terminal state is `failed`: the 'audit' step's only primary was rejected
+  // (terminally failed) and never re-dispatches (throwingExec proves it), so the
+  // declared 'audit' phase never reached a complete primary. The old evaluator
+  // mislabeled this `complete`; that false green is exactly the FG-585 bug.
   assert.equal(
     finalWave.runStatus,
-    "complete",
+    "failed",
     "run finalizes once the recovery task actually completes — not before",
   );
+  assert.deepEqual(finalWave.terminal!.failedPhases, ["audit"]);
 
   const runAfterRecoveryCompletes = getRun(runId);
-  assert.equal(runAfterRecoveryCompletes!.status, "complete");
+  assert.equal(runAfterRecoveryCompletes!.status, "failed");
 });
 
 // ----- FG-476: the live on_reject recovery task must actually be dispatchable -----
@@ -3156,4 +3170,114 @@ test("runNext: FG-476 a fanout/red child (parentId-tagged, no rejectedTaskId mar
 
   const child = getTask("t-build-1-red1")!;
   assert.equal(child.status, "pending", "the red/fanout child is untouched — never reused or dispatched as a primary by this fix");
+});
+
+// FG-585: a required phase failing must settle the run to the `failed` terminal
+// state — NOT a false `complete` — and the downstream phase that can never
+// dispatch must be named as unreachable. A crashing exec (exit 1, empty
+// result.json) drives `verify` to a terminal `failed` with no replacement.
+const FEATURE_FAIL_WORKFLOW: Workflow = {
+  name: "feature-fail-test",
+  description: "verify then docs; docs depends on verify",
+  inputs: [{ name: "brief", required: true, type: "text" }],
+  steps: [
+    { id: "verify", agent: "test-agent", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
+    { id: "docs", agent: "test-agent", gate: "auto", manual: false, depends_on: ["verify"], runtime: "claude", reds: [] },
+  ],
+};
+
+const crashingExecStub: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+  const dir = dirname(stdoutPath);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "result.json"), ""); // empty ⇒ container-crash ⇒ task failed
+  writeFileSync(stdoutPath, "");
+  writeFileSync(stderrPath, "verify crashed");
+  return 1;
+};
+
+test("FG-585: verify fails → run settles to `failed`, naming verify (failed) + docs (unreachable)", async () => {
+  ensureRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const { runId } = startRun({
+    workflow: FEATURE_FAIL_WORKFLOW,
+    title: "feature fail test",
+    inputs: { brief: "x" },
+    projectDir: "/tmp/test-project",
+  });
+
+  const wave = await runNext({ runId, workflow: FEATURE_FAIL_WORKFLOW, dockerExec: crashingExecStub });
+
+  assert.deepEqual(wave.dispatchedSteps, ["verify"]);
+  assert.deepEqual(wave.failedSteps, ["verify"]);
+  // The bug: this used to be "complete". It must now be "failed".
+  assert.equal(wave.runStatus, "failed", "a run whose required phase failed must NOT report complete");
+  assert.ok(wave.terminal, "the wave must carry the terminal classification");
+  assert.deepEqual(wave.terminal!.failedPhases, ["verify"], "verify is the failed phase");
+  assert.deepEqual(wave.terminal!.unreachablePhases, ["docs"], "docs can never dispatch — its dep failed");
+
+  const run = getRun(runId);
+  assert.equal(run!.status, "failed", "the persisted run row must be failed");
+  assert.ok(run!.completedAt, "a failed run is terminal — completed_at is stamped");
+
+  // The distinguishing lifecycle event: run.failed, NOT run.completed.
+  const types = eventsForRun(runId).map((e) => e.eventType);
+  assert.ok(types.includes("run.failed"), "run.failed must be logged");
+  assert.ok(!types.includes("run.completed"), "run.completed must NOT be logged for a failed run");
+});
+
+test("FG-585: the distinction — verify passes then docs runs and passes → run is `complete`", async () => {
+  ensureRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const { runId } = startRun({
+    workflow: FEATURE_FAIL_WORKFLOW,
+    title: "feature pass test",
+    inputs: { brief: "x" },
+    projectDir: "/tmp/test-project",
+  });
+
+  const okStub = makeStubExec({ status: "complete" });
+  const wave1 = await runNext({ runId, workflow: FEATURE_FAIL_WORKFLOW, dockerExec: okStub });
+  assert.deepEqual(wave1.completedSteps, ["verify"]);
+  assert.equal(wave1.runStatus, "active", "docs still has to run");
+
+  const wave2 = await runNext({ runId, workflow: FEATURE_FAIL_WORKFLOW, dockerExec: okStub });
+  assert.deepEqual(wave2.completedSteps, ["docs"]);
+  assert.equal(wave2.runStatus, "complete", "docs ran and passed ⇒ complete, not failed");
+
+  const run = getRun(runId);
+  assert.equal(run!.status, "complete");
+  const types = eventsForRun(runId).map((e) => e.eventType);
+  assert.ok(types.includes("run.completed"));
+  assert.ok(!types.includes("run.failed"), "a clean run must never log run.failed");
+});
+
+test("FG-585 re-entry: retrying the failed verify reactivates the run, and on success it finalizes `complete`", async () => {
+  ensureRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const { runId } = startRun({
+    workflow: FEATURE_FAIL_WORKFLOW,
+    title: "feature retry test",
+    inputs: { brief: "x" },
+    projectDir: "/tmp/test-project",
+  });
+
+  // Fail verify → run failed.
+  await runNext({ runId, workflow: FEATURE_FAIL_WORKFLOW, dockerExec: crashingExecStub });
+  assert.equal(getRun(runId)!.status, "failed");
+
+  const failedVerify = tasksForRun(runId).find((t) => t.phase === "verify" && t.status === "failed");
+  assert.ok(failedVerify, "the failed verify primary must exist");
+
+  // Retry it. Recovery must NOT wedge: the run has to return to active.
+  await retry(failedVerify!.id);
+  assert.equal(getRun(runId)!.status, "active", "retrying a failed task must reactivate the failed run");
+
+  // Now drive it green: verify passes, then docs.
+  const okStub = makeStubExec({ status: "complete" });
+  const w1 = await runNext({ runId, workflow: FEATURE_FAIL_WORKFLOW, dockerExec: okStub });
+  assert.deepEqual(w1.completedSteps, ["verify"], "the retried verify dispatches and completes");
+  const w2 = await runNext({ runId, workflow: FEATURE_FAIL_WORKFLOW, dockerExec: okStub });
+  assert.deepEqual(w2.completedSteps, ["docs"]);
+  assert.equal(w2.runStatus, "complete", "after recovery the run finalizes complete");
+  assert.equal(getRun(runId)!.status, "complete");
 });

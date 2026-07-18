@@ -348,9 +348,11 @@ test(
 
     // ── The run reaches a REAL terminal state — not stuck "active" forever.
     // audit has no pending replacement and on_reject only re-runs investigate,
-    // never audit itself, so audit is permanently unreachable ("blocked") while
-    // investigate is fully "complete" — isRunSettled correctly calls this settled.
-    assert.equal(getRun(runId)!.status, "complete", "FG-476: the run must reach a real terminal state once recovery resolves — never a permanent active hang");
+    // never audit itself, so audit's own primary is terminally failed ("blocked")
+    // while investigate is fully "complete". FG-585: that settles the run to
+    // `failed` (audit's declared phase never reached a complete primary) — not a
+    // false `complete`. The FG-476 anti-hang guarantee holds.
+    assert.equal(getRun(runId)!.status, "failed", "FG-476/FG-585: the run must reach a real terminal state once recovery resolves — never a permanent active hang");
 
     // ── audit's reject decision remains the durable audit trail: never
     // auto-resubmitted or re-run by this fix. Recovery re-runs investigate,

@@ -11,6 +11,7 @@ import { resolve, join } from "node:path";
 import { ensureForgeDirs, runDir } from "../../util/paths.js";
 import { invoke, createInvokeRun, type InvokeArgs, type InvokeResult } from "../../v2/invoke.js";
 import { finalizeRunIfSettled } from "../../v2/run-finalize.js";
+import { classifyRunTerminalState } from "../../v2/ready-queue.js";
 import { tasksForRun } from "../../store/tasks.js";
 import { readTicket } from "../../backlog/structured.js";
 import { applyRoutePreflight, preflightEnforceFromEnv } from "../route-preflight.js";
@@ -916,11 +917,12 @@ export function assertCleanWorkingTree(projectDir: string): boolean {
 // between markTaskRunning and that task's terminal write) would finalize the
 // run as complete while the task is genuinely in flight.
 function finalizeRunIfIdle(runId: string, logSource: string, extraPayload?: Record<string, unknown>): void {
-  const inFlight = tasksForRun(runId).some(
-    (t) => t.parentId === undefined && t.status !== "complete" && t.status !== "failed",
-  );
-  if (inFlight) return;
-  finalizeRunIfSettled(runId, logSource, extraPayload);
+  // FG-585: the shared classifier decides complete-vs-failed for the review-loop
+  // (invoke-shaped) run too — returns null while any top-level task is still
+  // non-terminal. A settled loop whose task(s) ended `failed` closes as `failed`.
+  const classification = classifyRunTerminalState(undefined, tasksForRun(runId));
+  if (!classification) return;
+  finalizeRunIfSettled(runId, classification.status, logSource, extraPayload);
 }
 
 function readScripts(projectDir: string): Record<string, unknown> {

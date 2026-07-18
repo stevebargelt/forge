@@ -32,6 +32,7 @@ import { checkResultPersistence, persistenceErrorMessage } from "./persistence-c
 import { captureUsageForTask } from "../store/model-calls.js";
 import { insertRun, getRun, updateRunStatus } from "../store/runs.js";
 import { finalizeRunIfSettled } from "./run-finalize.js";
+import { classifyRunTerminalState } from "./ready-queue.js";
 import { logEvent } from "../store/events.js";
 import { taskDir } from "../util/paths.js";
 import { resolvePolicyPath } from "../raci/project.js";
@@ -210,7 +211,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
 // FG-507: `forge retry` on an ad-hoc task attaches to the failed task's run the
 // same way, and hits the same trap.
 export function reactivateTerminalRun(runId: string, status: Run["status"], source: string): void {
-  if (status !== "complete" && status !== "abandoned") return;
+  if (status !== "complete" && status !== "abandoned" && status !== "failed") return;
   updateRunStatus(runId, "active");
   logEvent("run.reactivated", { runId, payload: { source, from: status } });
 }
@@ -295,21 +296,24 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
   // that left attached runs leaked-active with nothing to close them. Applies
   // to owned AND attached runs; the owns-run case still closes its lone task.
   //
-  // RunStatus is "active" | "complete" | "abandoned" — no "failed". Mirrors
-  // runNext.ts — task-level status carries success/failure; the run flips to
-  // "complete" simply to mark "no longer in flight". The logged event payload
-  // carries the success-vs-failure signal for downstream consumers.
+  // FG-585: the shared classifier decides the terminal state for the invoke run
+  // shape (no workflow steps → it reads the top-level tasks). A settled invoke
+  // run whose task(s) ended `failed` closes as `failed`, not a false `complete`.
+  // Returns null while any top-level task is still non-terminal (a parallel
+  // sibling invoke under the same run keeps it active until the last finishes).
   const closeRunIfIdle = (succeeded: boolean): void => {
-    const inFlight = tasksForRun(runId).some(
-      (t) => t.parentId === undefined && t.status !== "complete" && t.status !== "failed"
-    );
-    if (inFlight) return;
+    const classification = classifyRunTerminalState(undefined, tasksForRun(runId));
+    if (!classification) return;
     // finalizeRunIfSettled re-reads the run and only writes when it's still
     // "active" — a no-op (false, no write, no event) when it's already
-    // complete (idempotent close) or abandoned (a concurrent `forge cancel`
+    // terminal (idempotent close) or abandoned (a concurrent `forge cancel`
     // won the race; its cancellation is authoritative and must not be
-    // flipped back to complete, AWN-2/FG-484).
-    finalizeRunIfSettled(runId, "invoke", { source: "invoke", succeeded, owned: args.ownsRun });
+    // flipped back, AWN-2/FG-484).
+    finalizeRunIfSettled(runId, classification.status, "invoke", {
+      source: "invoke",
+      succeeded,
+      owned: args.ownsRun,
+    });
   };
 
   // Materialize the task dir.

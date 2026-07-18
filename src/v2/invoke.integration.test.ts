@@ -261,9 +261,10 @@ test("invoke: creates a new run when --run-id is absent, with synthetic 'invoke'
   assert.equal(run!.workflow, "invoke");
   // #157: invoke now closes the run it owns. Pre-#157 this was 'active' and
   // leaked into phantom-active counts; the bug was caught after 34 phantoms
-  // accumulated on the dev's machine. RunStatus has no 'failed' state — the
-  // task-level status carries success/failure; the run flips to 'complete'
-  // simply to mark "no longer in flight". Mirrors runNext.ts:138 semantics.
+  // accumulated on the dev's machine. A successful invoke task yields a
+  // 'complete' run (this test); since FG-585 a FAILED invoke task instead
+  // yields a 'failed' run (see "closes the owned run as 'failed' when the task
+  // fails (FG-585)"). Mirrors runNext.ts semantics.
   assert.equal(run!.status, "complete");
   assert.ok(run!.completedAt, "completed_at should be set when run closes");
   assert.match(run!.title, /research-specialist/);
@@ -912,7 +913,7 @@ test("invoke: reactivates a terminally-closed run on attach, then closes it agai
   assert.equal(run!.status, "complete", "run closes again once the attached task is terminal");
 });
 
-test("invoke: closes the owned run as 'complete' even when the task fails (RunStatus has no 'failed')", async () => {
+test("invoke: closes the owned run as 'failed' when the task fails (FG-585)", async () => {
   setupRuntimeStub();
   process.env.ANTHROPIC_API_KEY = "sk-stub";
 
@@ -933,10 +934,11 @@ test("invoke: closes the owned run as 'complete' even when the task fails (RunSt
   });
   assert.equal(r.status, "failed");
 
-  // Even on failure, the OWNED run flips to 'complete' (not 'failed' — that's
-  // not a valid RunStatus). The failure signal lives at the task level.
+  // FG-585: an owned invoke run whose only task failed closes as 'failed' — the
+  // run status now tells the truth instead of a false 'complete' with the
+  // failure buried at the task level.
   const run = getRun(r.runId);
-  assert.equal(run!.status, "complete", "owned run closes even on task failure");
+  assert.equal(run!.status, "failed", "owned run closes as failed on task failure");
   assert.ok(run!.completedAt, "completed_at should be set on the closed run");
   const task = getTask(r.taskId);
   assert.equal(task!.status, "failed", "task-level status still says failed");

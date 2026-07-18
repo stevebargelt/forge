@@ -11,6 +11,7 @@ import {
   uniqueProjectDirs,
   updateRunStatus,
   completeRun,
+  failRun,
 } from "./runs.js";
 import { insertTask } from "./tasks.js";
 import type { Run, Task } from "../types/index.js";
@@ -317,6 +318,65 @@ test(
   }),
 );
 
+// ── failRun (FG-585) ─────────────────────────────────────────────────────────
+test(
+  "failRun: fails an active run, sets a fresh completedAt, and fires exactly one notification",
+  withNtfyEnabledAndFetchMocked(async (fetchMock) => {
+    insertRun({ ...RUN, id: "run-fail-active", status: "active" });
+
+    const ok = failRun("run-fail-active");
+    assert.equal(ok, true);
+
+    const run = getRun("run-fail-active");
+    assert.equal(run?.status, "failed");
+    assert.ok(run?.completedAt, "completedAt must be set");
+
+    await new Promise((r) => setImmediate(r));
+    assert.equal(fetchMock.mock.calls.length, 1, "expected exactly one notification dispatch");
+  }),
+);
+
+test(
+  "failRun: refuses the abandoned->failed transition — an abandoned run is never overwritten (AWN-2)",
+  withNtfyEnabledAndFetchMocked(async (fetchMock) => {
+    insertRun({ ...RUN, id: "run-fail-abandoned", status: "active" });
+    updateRunStatus("run-fail-abandoned", "abandoned");
+    const abandonedAt = getRun("run-fail-abandoned")?.completedAt;
+
+    await new Promise((r) => setImmediate(r));
+    fetchMock.mock.resetCalls();
+
+    const ok = failRun("run-fail-abandoned");
+    assert.equal(ok, false, "failRun must refuse an abandoned run");
+
+    const run = getRun("run-fail-abandoned");
+    assert.equal(run?.status, "abandoned", "status must stay abandoned, never flipped to failed");
+    assert.equal(run?.completedAt, abandonedAt, "completedAt must be unchanged");
+
+    await new Promise((r) => setImmediate(r));
+    assert.equal(fetchMock.mock.calls.length, 0, "a refused write must never fire a notification");
+  }),
+);
+
+test("failRun: refuses a complete->failed flip — a run that already succeeded never fails", () => {
+  insertRun({ ...RUN, id: "run-fail-after-complete", status: "active" });
+  assert.equal(completeRun("run-fail-after-complete"), true);
+  assert.equal(failRun("run-fail-after-complete"), false, "CAS is from active only");
+  assert.equal(getRun("run-fail-after-complete")?.status, "complete");
+});
+
+test("updateRunStatus: refuses the abandoned->failed transition at the store layer (FG-585 backstop)", () => {
+  insertRun({ ...RUN, id: "run-update-abandoned-fail", status: "active" });
+  updateRunStatus("run-update-abandoned-fail", "abandoned");
+  const abandonedAt = getRun("run-update-abandoned-fail")?.completedAt;
+
+  updateRunStatus("run-update-abandoned-fail", "failed");
+
+  const run = getRun("run-update-abandoned-fail");
+  assert.equal(run?.status, "abandoned", "status must stay abandoned, never flipped to failed");
+  assert.equal(run?.completedAt, abandonedAt, "completedAt must be unchanged");
+});
+
 test("updateRunStatus: 'active' still flips an abandoned run back to active (the #201 reactivation path)", () => {
   insertRun({ ...RUN, id: "run-reactivate", status: "active" });
   updateRunStatus("run-reactivate", "abandoned");
@@ -327,6 +387,88 @@ test("updateRunStatus: 'active' still flips an abandoned run back to active (the
   const run = getRun("run-reactivate");
   assert.equal(run?.status, "active", "updateRunStatus must still allow abandoned->active reactivation");
   assert.equal(run?.completedAt, undefined, "reactivating to a non-terminal status clears completedAt");
+});
+
+// ── updateRunStatus terminal-crossing backstop (FG-585) ──────────────────────
+// A settled run's terminal truth is immutable except an explicit reactivation
+// to active. These guard the generic writer against a false green light
+// (failed->complete) or a lost failure (complete->failed) reaching it from a
+// caller that bypasses the completeRun/failRun active-only CAS.
+
+test("updateRunStatus: refuses a failed->complete flip — a failed run never turns green at the store layer", () => {
+  insertRun({ ...RUN, id: "run-failed-to-complete", status: "active" });
+  failRun("run-failed-to-complete");
+  const failedAt = getRun("run-failed-to-complete")?.completedAt;
+  assert.equal(getRun("run-failed-to-complete")?.status, "failed");
+
+  updateRunStatus("run-failed-to-complete", "complete");
+
+  const run = getRun("run-failed-to-complete");
+  assert.equal(run?.status, "failed", "status must stay failed, never flipped to complete");
+  assert.equal(run?.completedAt, failedAt, "completedAt must be unchanged from the fail-time value");
+});
+
+test("updateRunStatus: refuses a complete->failed flip — a completed run never turns red at the store layer", () => {
+  insertRun({ ...RUN, id: "run-complete-to-failed", status: "active" });
+  completeRun("run-complete-to-failed");
+  const completedAt = getRun("run-complete-to-failed")?.completedAt;
+  assert.equal(getRun("run-complete-to-failed")?.status, "complete");
+
+  updateRunStatus("run-complete-to-failed", "failed");
+
+  const run = getRun("run-complete-to-failed");
+  assert.equal(run?.status, "complete", "status must stay complete, never flipped to failed");
+  assert.equal(run?.completedAt, completedAt, "completedAt must be unchanged from the complete-time value");
+});
+
+test("updateRunStatus: refuses complete->abandoned and failed->abandoned — a terminal run is never re-terminalized", () => {
+  insertRun({ ...RUN, id: "run-complete-to-abandoned", status: "active" });
+  completeRun("run-complete-to-abandoned");
+  const completedAt = getRun("run-complete-to-abandoned")?.completedAt;
+  updateRunStatus("run-complete-to-abandoned", "abandoned");
+  const doneRun = getRun("run-complete-to-abandoned");
+  assert.equal(doneRun?.status, "complete", "status must stay complete, never re-terminalized to abandoned");
+  assert.equal(doneRun?.completedAt, completedAt, "completedAt must be unchanged");
+
+  insertRun({ ...RUN, id: "run-failed-to-abandoned", status: "active" });
+  failRun("run-failed-to-abandoned");
+  const failedAt = getRun("run-failed-to-abandoned")?.completedAt;
+  updateRunStatus("run-failed-to-abandoned", "abandoned");
+  const failRun2 = getRun("run-failed-to-abandoned");
+  assert.equal(failRun2?.status, "failed", "status must stay failed, never re-terminalized to abandoned");
+  assert.equal(failRun2?.completedAt, failedAt, "completedAt must be unchanged");
+});
+
+test("updateRunStatus: ALLOWS complete->active and failed->active — the reactivateTerminalRun retry/attach path must keep working", () => {
+  insertRun({ ...RUN, id: "run-complete-reactivate", status: "active" });
+  completeRun("run-complete-reactivate");
+  assert.equal(getRun("run-complete-reactivate")?.status, "complete");
+  updateRunStatus("run-complete-reactivate", "active");
+  const fromComplete = getRun("run-complete-reactivate");
+  assert.equal(fromComplete?.status, "active", "complete->active reactivation must be allowed");
+  assert.equal(fromComplete?.completedAt, undefined, "reactivating clears completedAt");
+
+  insertRun({ ...RUN, id: "run-failed-reactivate", status: "active" });
+  failRun("run-failed-reactivate");
+  assert.equal(getRun("run-failed-reactivate")?.status, "failed");
+  updateRunStatus("run-failed-reactivate", "active");
+  const fromFailed = getRun("run-failed-reactivate");
+  assert.equal(fromFailed?.status, "active", "failed->active reactivation must be allowed");
+  assert.equal(fromFailed?.completedAt, undefined, "reactivating clears completedAt");
+});
+
+test("updateRunStatus: ALLOWS active->failed and active->complete — the normal finalize path is untouched", () => {
+  insertRun({ ...RUN, id: "run-active-to-failed", status: "active" });
+  updateRunStatus("run-active-to-failed", "failed");
+  const failed = getRun("run-active-to-failed");
+  assert.equal(failed?.status, "failed", "active->failed must be allowed");
+  assert.ok(failed?.completedAt, "active->failed sets completedAt");
+
+  insertRun({ ...RUN, id: "run-active-to-complete", status: "active" });
+  updateRunStatus("run-active-to-complete", "complete");
+  const complete = getRun("run-active-to-complete");
+  assert.equal(complete?.status, "complete", "active->complete must be allowed");
+  assert.ok(complete?.completedAt, "active->complete sets completedAt");
 });
 
 test("schema migration: re-running the migration is a noop", () => {

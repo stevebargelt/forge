@@ -49,7 +49,7 @@ import { validateVerdict } from "./validate-findings.js";
 import { gradeFindings } from "./review-quality.js";
 import { logEvent, eventsForTask } from "../store/events.js";
 import { taskDir, integrationWorktreeDir } from "../util/paths.js";
-import { computeReadyQueue, isRunSettled, resolvePhasePrimary } from "./ready-queue.js";
+import { computeReadyQueue, isRunSettled, resolvePhasePrimary, classifyRunTerminalState, type RunTerminalClassification } from "./ready-queue.js";
 import { classifyTaskLineage, isWorkflowPrimaryRow } from "./lifecycle-evaluator.js";
 import { finalizeOrphanedPrimaries, attachedExitEvidence } from "./reconcile.js";
 import { checkResultPersistence, persistenceErrorMessage } from "./persistence-check.js";
@@ -130,6 +130,9 @@ export type RunNextResult = {
   // downstream can read them as "this step failed, retry it".
   awaitingRecovery: string[];
   runStatus: string;              // post-call run status
+  // FG-585: present iff this wave settled the run to a terminal state. Lets the
+  // CLI name the failed + unreachable phases without re-deriving the verdict.
+  terminal?: RunTerminalClassification;
 };
 
 // FG-365: runContainer previously called loadModelPolicyWithSource once per
@@ -211,14 +214,24 @@ export async function runNext(args: {
     // runNext would spin forever without this check ever moving run.status off
     // "active". isRunSettled distinguishes that terminal case from a legitimate
     // "waiting on a human gate / another runNext in flight" pause.
-    if (isRunSettled(args.workflow, tasks)) {
+    const classification = classifyRunTerminalState(args.workflow, tasks);
+    if (classification) {
       // AWN-2 cancel-vs-completion race: a concurrent `forge cancel` may have
       // abandoned the run between the getRun at the top of runNext and this
-      // write. finalizeRunIfSettled re-reads the run before flipping it to
-      // complete — an abandoned run is authoritatively terminal and must
-      // never be resurrected.
-      const finalized = finalizeRunIfSettled(args.runId, "runNext-settled-no-dispatch");
-      const currentStatus = finalized ? "complete" : (getRun(args.runId)?.status ?? run.status);
+      // write. finalizeRunIfSettled re-reads the run before flipping it — an
+      // abandoned run is authoritatively terminal and must never be resurrected.
+      // FG-585: classify to complete-vs-failed; a step that failed terminally
+      // with no downstream reachable settles the run to `failed`, not complete.
+      const finalized = finalizeRunIfSettled(
+        args.runId,
+        classification.status,
+        "runNext-settled-no-dispatch",
+        {
+          failedPhases: classification.failedPhases.join(",") || undefined,
+          unreachablePhases: classification.unreachablePhases.join(",") || undefined,
+        },
+      );
+      const currentStatus = finalized ? classification.status : (getRun(args.runId)?.status ?? run.status);
       return {
         dispatchedSteps: [],
         completedSteps: [],
@@ -226,6 +239,7 @@ export async function runNext(args: {
         failedSteps: [],
         awaitingRecovery: [],
         runStatus: currentStatus,
+        ...(finalized ? { terminal: classification } : {}),
       };
     }
     return {
@@ -287,26 +301,28 @@ export async function runNext(args: {
   const readyAfter = computeReadyQueue(args.workflow, tasksAfter);
 
   let runStatus: string = run.status;
-  if (readyAfter.length === 0 && isRunSettled(args.workflow, tasksAfter)) {
-    // RunStatus union is "active" | "complete" | "abandoned" — there's no
-    // "failed" state for runs. Mark complete regardless; the human / orchestrator
-    // reads task statuses to know whether the run failed. Aligns with how the
-    // v1 spine treats run completion.
-    // A superseded failed task (request-changes audit record) must not count:
-    // it is superseded when another top-level task in the same phase is NOT
-    // failed (i.e. a successful replacement exists).
-    const topLevelByPhase = tasksAfter.filter((t) => t.parentId === undefined);
-    const anyFailed = topLevelByPhase.some(
-      (t) =>
-        t.status === "failed" &&
-        !topLevelByPhase.some((other) => other.phase === t.phase && other.status !== "failed"),
-    );
+  // FG-585: the shared classifier is the SINGLE authority on the terminal state.
+  // It returns null when not settled, "complete" when every step reached a
+  // complete primary, and "failed" when a step is permanently blocked (its own
+  // primaries failed, or a dependency is blocked so a declared downstream phase
+  // can never dispatch). A superseded failed task (request-changes audit record)
+  // resolves to "complete" inside the classifier, not here.
+  const classification =
+    readyAfter.length === 0 ? classifyRunTerminalState(args.workflow, tasksAfter) : null;
+  if (classification) {
     // finalizeRunIfSettled re-reads the run before writing: a concurrent
     // `forge cancel` may have abandoned it while this wave ran, and an
-    // abandoned run must never be resurrected to complete (AWN-2).
-    if (finalizeRunIfSettled(args.runId, "runNext-wave-complete", { anyFailed })) {
-      runStatus = "complete";
-    }
+    // abandoned run must never be resurrected (AWN-2).
+    const applied = finalizeRunIfSettled(
+      args.runId,
+      classification.status,
+      "runNext-wave-complete",
+      {
+        failedPhases: classification.failedPhases.join(",") || undefined,
+        unreachablePhases: classification.unreachablePhases.join(",") || undefined,
+      },
+    );
+    if (applied) runStatus = classification.status;
   }
   // Re-read once more for reporting: a concurrent `forge cancel` may have
   // abandoned the run either before or during the block above (including
@@ -323,6 +339,7 @@ export async function runNext(args: {
     failedSteps: failed,
     awaitingRecovery,
     runStatus,
+    ...(classification && runStatus === classification.status ? { terminal: classification } : {}),
   };
 }
 
@@ -2314,8 +2331,14 @@ export function recoverPublicationByHand(attemptId: string): HandRecovery {
   }
 
   reconcilePublicationRecoveries(attempt.runId, workflow, run.projectDir);
-  if (isRunSettled(workflow, tasksForRun(attempt.runId))) {
-    finalizeRunIfSettled(attempt.runId, "publish-recover-reconciled");
+  {
+    const classification = classifyRunTerminalState(workflow, tasksForRun(attempt.runId));
+    if (classification) {
+      finalizeRunIfSettled(attempt.runId, classification.status, "publish-recover-reconciled", {
+        failedPhases: classification.failedPhases.join(",") || undefined,
+        unreachablePhases: classification.unreachablePhases.join(",") || undefined,
+      });
+    }
   }
 
   const task = getTask(attempt.taskId);

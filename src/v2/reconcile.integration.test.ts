@@ -692,12 +692,15 @@ test("reconcile: active invoke run with no live work → run completed + run.rec
   assert.ok(eventsForRun(RUN.id).some((e) => e.eventType === "run.reconciled"));
 });
 
-test("reconcile: orphaned last task ALSO completes the invoke run (chained)", () => {
+test("reconcile: orphaned last task ALSO settles the invoke run (chained) — as failed (FG-585)", () => {
   insertContainerized(mkTask("t-only", { status: "running" }));
   const r = reconcileRun(RUN.id, GONE);
   assert.equal(getTask("t-only")!.status, "failed");
-  assert.equal(getRun(RUN.id)!.status, "complete", "run with all-terminal tasks completes");
+  // FG-585: the run's only task ended failed, so the invoke run settles to
+  // `failed`, not a false `complete`.
+  assert.equal(getRun(RUN.id)!.status, "failed", "run with an all-failed task settles failed");
   assert.ok(r.runChange);
+  assert.equal(r.runChange!.to, "failed");
 });
 
 test("reconcile: does NOT complete a multi-step pipeline run (only invoke runs)", () => {
