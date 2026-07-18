@@ -36,7 +36,7 @@ import { loadWorkflow } from "./loader.js";
 import type { Workflow, Step } from "./schema.js";
 import { tasksForRun } from "../store/tasks.js";
 import { failTask, classify } from "./failure-kind.js";
-import { isRunSettled, isOnRejectRecoveryTask } from "./ready-queue.js";
+import { isRunSettled, isOnRejectRecoveryTask, classifyRunTerminalState } from "./ready-queue.js";
 import { finalizeRunIfSettled } from "./run-finalize.js";
 
 export type GateOptions = {
@@ -456,8 +456,15 @@ export function findStep(workflow: Workflow, stepId: string): Step | undefined {
 // to complete.
 function finalizeRunIfDone(runId: string, workflow: Workflow): void {
   const tasks = tasksForRun(runId);
-  if (!isRunSettled(workflow, tasks)) return;
-  finalizeRunIfSettled(runId, "gate");
+  // FG-585: classify to the CORRECT terminal state (null = not settled). A gate
+  // reject that leaves a required phase permanently blocked settles the run to
+  // "failed", not "complete".
+  const classification = classifyRunTerminalState(workflow, tasks);
+  if (!classification) return;
+  finalizeRunIfSettled(runId, classification.status, "gate", {
+    failedPhases: classification.failedPhases.join(",") || undefined,
+    unreachablePhases: classification.unreachablePhases.join(",") || undefined,
+  });
 }
 
 export type BatchGateResult = {

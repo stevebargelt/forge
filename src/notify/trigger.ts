@@ -21,6 +21,7 @@ const DEFAULT_NOTIFY_ON = new Set<NotifyState>([
 // SMS body. Returns null for transitions we don't notify on (e.g. "active").
 function statusToNotifyState(status: string): NotifyState | null {
   if (status === "complete") return "complete";
+  if (status === "failed") return "failed";
   if (status === "abandoned") return "failed";
   if (status === "blocked_by_red") return "blocked_by_red";
   if (status === "awaiting_gate") return "awaiting_gate";

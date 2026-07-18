@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeReadyQueue, isRunSettled, isOnRejectRecoveryTask, resolvePhasePrimary } from "./ready-queue.js";
+import { computeReadyQueue, isRunSettled, isOnRejectRecoveryTask, resolvePhasePrimary, classifyRunTerminalState, formatRunFailure } from "./ready-queue.js";
 import type { Workflow } from "./schema.js";
 import type { Task, TaskPackage } from "../types/index.js";
 
@@ -668,5 +668,70 @@ test("computeReadyQueue: a live ad-hoc row stays out of the projection, even on 
     isRunSettled(wf, [adHoc, dispatchedStep]),
     false,
     "the step is complete but the ad-hoc row is still live ⇒ the run is not settled",
+  );
+});
+
+// FG-585: the shared terminal-state classifier (the FG-477 anti-drift slice).
+const FEATURE_WF = mkWorkflow([
+  { id: "verify", agent: "a", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
+  { id: "docs", agent: "a", gate: "auto", manual: false, depends_on: ["verify"], runtime: "claude", reds: [] },
+]);
+
+test("classifyRunTerminalState: not settled while a step is still active ⇒ null", () => {
+  const tasks = [mkTask({ id: "v1", phase: "verify", status: "running" })];
+  assert.equal(classifyRunTerminalState(FEATURE_WF, tasks), null);
+});
+
+test("classifyRunTerminalState: verify failed, docs unreachable ⇒ failed, naming both phases", () => {
+  const tasks = [mkTask({ id: "v1", phase: "verify", status: "failed" })];
+  const c = classifyRunTerminalState(FEATURE_WF, tasks);
+  assert.ok(c);
+  assert.equal(c!.status, "failed");
+  assert.deepEqual(c!.failedPhases, ["verify"]);
+  assert.deepEqual(c!.unreachablePhases, ["docs"]);
+});
+
+test("classifyRunTerminalState: both phases complete ⇒ complete, no failed/unreachable", () => {
+  const tasks = [
+    mkTask({ id: "v1", phase: "verify", status: "complete" }),
+    mkTask({ id: "d1", phase: "docs", status: "complete" }),
+  ];
+  const c = classifyRunTerminalState(FEATURE_WF, tasks);
+  assert.ok(c);
+  assert.equal(c!.status, "complete");
+  assert.deepEqual(c!.failedPhases, []);
+  assert.deepEqual(c!.unreachablePhases, []);
+});
+
+test("classifyRunTerminalState: a SUPERSEDED failed verify (a complete replacement exists) ⇒ complete", () => {
+  const tasks = [
+    mkTask({ id: "v1", phase: "verify", status: "failed" }),
+    mkTask({ id: "v2", phase: "verify", status: "complete" }),
+    mkTask({ id: "d1", phase: "docs", status: "complete" }),
+  ];
+  const c = classifyRunTerminalState(FEATURE_WF, tasks);
+  assert.equal(c!.status, "complete", "a request-changes/retry replacement must not fail the run");
+});
+
+test("classifyRunTerminalState: invoke shape (no workflow) — a failed top-level task ⇒ failed", () => {
+  const failed = mkAdHocTask("i1", "failed");
+  const c = classifyRunTerminalState(undefined, [failed]);
+  assert.equal(c!.status, "failed");
+  assert.deepEqual(c!.failedPhases, ["task"]);
+});
+
+test("classifyRunTerminalState: invoke shape — a live top-level task ⇒ null (not settled)", () => {
+  assert.equal(classifyRunTerminalState(undefined, [mkAdHocTask("i1", "running")]), null);
+});
+
+test("classifyRunTerminalState: invoke shape — all complete ⇒ complete", () => {
+  const c = classifyRunTerminalState(undefined, [mkAdHocTask("i1", "complete")]);
+  assert.equal(c!.status, "complete");
+});
+
+test("formatRunFailure: names failed then unreachable phases", () => {
+  assert.equal(
+    formatRunFailure({ status: "failed", failedPhases: ["verify"], unreachablePhases: ["docs"] }),
+    "verify failed; docs never ran",
   );
 });

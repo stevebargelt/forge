@@ -5,7 +5,16 @@ import { reconcileRun } from "../../v2/reconcile.js";
 import { withRunLock, RunBusyError } from "../../util/run-lock.js";
 import { validateCredsForNewRun } from "../../util/creds.js";
 import { loadWorkflow } from "../../v2/loader.js";
-import { runNext } from "../../v2/runNext.js";
+import { runNext, type RunNextResult } from "../../v2/runNext.js";
+import { formatRunFailure } from "../../v2/ready-queue.js";
+
+// FG-585: a truthful one-line failure detail for `forge next` — names the
+// phase(s) that failed and the phase(s) that could never dispatch as a result.
+function runFailureDetail(result: RunNextResult): string {
+  return result.terminal
+    ? formatRunFailure(result.terminal)
+    : "a required phase failed and downstream phase(s) never ran";
+}
 
 export function registerNext(program: Command): void {
   program
@@ -29,7 +38,7 @@ export function registerNext(program: Command): void {
           const run = getRun(runId);
           if (!run) throw new Error(`Run not found: ${runId}`);
 
-          if (run.status === "abandoned" || run.status === "complete") {
+          if (run.status === "abandoned" || run.status === "complete" || run.status === "failed") {
             console.log(`Run ${runId} is ${run.status} — cannot dispatch.`);
             return;
           }
@@ -43,6 +52,8 @@ export function registerNext(program: Command): void {
             console.log(`Run ${runId}: nothing ready to dispatch.`);
             if (result.runStatus === "complete") {
               console.log(`Run is complete.`);
+            } else if (result.runStatus === "failed") {
+              console.log(`Run failed — ${runFailureDetail(result)}`);
             } else {
               console.log(`Status: ${result.runStatus}.`);
               console.log(`Use 'forge status ${runId}' to see what's blocked.`);
@@ -72,6 +83,8 @@ export function registerNext(program: Command): void {
           }
           if (result.runStatus === "complete") {
             console.log(`\nRun complete.`);
+          } else if (result.runStatus === "failed") {
+            console.log(`\nRun failed — ${runFailureDetail(result)}`);
           } else {
             console.log(`\nStatus: ${result.runStatus}.`);
             console.log(`Next:\n  forge next ${runId}`);

@@ -11,6 +11,7 @@ import {
   uniqueProjectDirs,
   updateRunStatus,
   completeRun,
+  failRun,
 } from "./runs.js";
 import { insertTask } from "./tasks.js";
 import type { Run, Task } from "../types/index.js";
@@ -316,6 +317,65 @@ test(
     assert.equal(fetchMock.mock.calls.length, 0, "a refused abandoned->complete write must never fire a completion notification");
   }),
 );
+
+// ── failRun (FG-585) ─────────────────────────────────────────────────────────
+test(
+  "failRun: fails an active run, sets a fresh completedAt, and fires exactly one notification",
+  withNtfyEnabledAndFetchMocked(async (fetchMock) => {
+    insertRun({ ...RUN, id: "run-fail-active", status: "active" });
+
+    const ok = failRun("run-fail-active");
+    assert.equal(ok, true);
+
+    const run = getRun("run-fail-active");
+    assert.equal(run?.status, "failed");
+    assert.ok(run?.completedAt, "completedAt must be set");
+
+    await new Promise((r) => setImmediate(r));
+    assert.equal(fetchMock.mock.calls.length, 1, "expected exactly one notification dispatch");
+  }),
+);
+
+test(
+  "failRun: refuses the abandoned->failed transition — an abandoned run is never overwritten (AWN-2)",
+  withNtfyEnabledAndFetchMocked(async (fetchMock) => {
+    insertRun({ ...RUN, id: "run-fail-abandoned", status: "active" });
+    updateRunStatus("run-fail-abandoned", "abandoned");
+    const abandonedAt = getRun("run-fail-abandoned")?.completedAt;
+
+    await new Promise((r) => setImmediate(r));
+    fetchMock.mock.resetCalls();
+
+    const ok = failRun("run-fail-abandoned");
+    assert.equal(ok, false, "failRun must refuse an abandoned run");
+
+    const run = getRun("run-fail-abandoned");
+    assert.equal(run?.status, "abandoned", "status must stay abandoned, never flipped to failed");
+    assert.equal(run?.completedAt, abandonedAt, "completedAt must be unchanged");
+
+    await new Promise((r) => setImmediate(r));
+    assert.equal(fetchMock.mock.calls.length, 0, "a refused write must never fire a notification");
+  }),
+);
+
+test("failRun: refuses a complete->failed flip — a run that already succeeded never fails", () => {
+  insertRun({ ...RUN, id: "run-fail-after-complete", status: "active" });
+  assert.equal(completeRun("run-fail-after-complete"), true);
+  assert.equal(failRun("run-fail-after-complete"), false, "CAS is from active only");
+  assert.equal(getRun("run-fail-after-complete")?.status, "complete");
+});
+
+test("updateRunStatus: refuses the abandoned->failed transition at the store layer (FG-585 backstop)", () => {
+  insertRun({ ...RUN, id: "run-update-abandoned-fail", status: "active" });
+  updateRunStatus("run-update-abandoned-fail", "abandoned");
+  const abandonedAt = getRun("run-update-abandoned-fail")?.completedAt;
+
+  updateRunStatus("run-update-abandoned-fail", "failed");
+
+  const run = getRun("run-update-abandoned-fail");
+  assert.equal(run?.status, "abandoned", "status must stay abandoned, never flipped to failed");
+  assert.equal(run?.completedAt, abandonedAt, "completedAt must be unchanged");
+});
 
 test("updateRunStatus: 'active' still flips an abandoned run back to active (the #201 reactivation path)", () => {
   insertRun({ ...RUN, id: "run-reactivate", status: "active" });

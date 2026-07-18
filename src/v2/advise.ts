@@ -9,6 +9,7 @@ import type { Run, Task } from "../types/index.js";
 
 export type AdviceKind =
   | "complete"
+  | "failed"
   | "abandoned"
   | "running"
   | "awaiting_gate"
@@ -60,6 +61,14 @@ export function adviseRun(run: Run, tasks: Task[]): Advice {
       kind: "complete",
       summary: `Run ${run.id} is complete.`,
       command: "",
+      counts,
+    };
+  }
+  if (run.status === "failed") {
+    return {
+      kind: "failed",
+      summary: `Run ${run.id} failed — a required phase failed and downstream phase(s) never ran. 'forge show ${run.id}' names them; 'forge retry <taskId>' re-drives the failed phase.`,
+      command: `forge show ${run.id}`,
       counts,
     };
   }

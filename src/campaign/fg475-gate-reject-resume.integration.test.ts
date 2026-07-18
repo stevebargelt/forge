@@ -282,7 +282,12 @@ test(
     // (2) FG-925's run reached a terminal status and the item is reconciled to
     // a scoped LOCAL blocker — not left at awaiting_gate, not campaign_system.
     const runAfter = getRun(runId)!;
-    assert.equal(runAfter.status, "complete", "FG-475: the gate-rejected run must reach a terminal status, not stay active forever");
+    // FG-585: a gate-rejected run reaches the `failed` terminal (its required
+    // phase failed) — not a false `complete`. The FG-475 guarantee (reaches a
+    // terminal, never stays active forever) holds; the item is still attributed
+    // to a scoped LOCAL blocker below, since a failed run routes through the same
+    // authoritative attribution as complete.
+    assert.equal(runAfter.status, "failed", "FG-475/FG-585: the gate-rejected run must reach a terminal status, not stay active forever");
 
     const item925After = getCampaignItem(item925Before.id)!;
     assert.equal(item925After.lifecycleStatus, "failed", "FG-475: item must be reconciled off awaiting_gate");

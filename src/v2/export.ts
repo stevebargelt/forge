@@ -93,7 +93,7 @@ export function exportRunOtlp(runId: string, nowMs = Date.now()): unknown {
     startTimeUnixNano: runStart, endTimeUnixNano: runEnd,
     attributes: [attr("forge.run_id", runId), attr("forge.workflow", run.workflow), attr("forge.run_status", run.status), attr("span.kind", "run")],
     events: events.filter((e) => e.taskId === null).map(spanEvent),
-    status: { code: run.status === "abandoned" ? 2 : 1 },
+    status: { code: run.status === "abandoned" || run.status === "failed" ? 2 : 1 },
   };
 
   // Child spans = tasks. Task lifecycle events attach to their task span.

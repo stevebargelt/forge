@@ -465,6 +465,13 @@ export async function retry(taskId: string, opts?: { force?: boolean }): Promise
     createdAt: nowIso(),
   };
   insertTask(newTask);
+  // FG-585: recovery must not WEDGE. A run that already settled terminal
+  // (complete or, post-FG-585, failed) has to return to active so `forge next`
+  // will dispatch this fresh primary — `forge next` refuses a terminal run.
+  // No-op when the run is still active; the ad-hoc path reactivates again at
+  // dispatch (harmless). Abandoned reactivation matches the pre-existing ad-hoc
+  // retry behavior (explicit operator retry is authoritative over a cancel).
+  if (run) reactivateTerminalRun(task.runId, run.status, "retry");
   reapRetainedContainer(task.id);
 
   logEvent("task.retried", {

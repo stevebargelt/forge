@@ -18,6 +18,8 @@ import { getManifestRuntime } from "../../v2/task-manifest.js";
 import { findReconcileCandidates, type ReconcileReason, type LivenessProbe, type ResultProbe } from "../../ops/reconcile-candidate.js";
 import { docsImpactSuggestion, loadOperatorSurfaces } from "../../v2/contract.js";
 import { summarizeFindings, gatherRunReviews } from "../../v2/review-quality.js";
+import { loadWorkflow } from "../../v2/loader.js";
+import { classifyRunTerminalState, formatRunFailure, type RunTerminalClassification } from "../../v2/ready-queue.js";
 
 export type ShowResult =
   | { kind: "task"; task: Task; verdicts: VerdictRow[]; events: Event[] }
@@ -1100,6 +1102,16 @@ export function registerShow(program: Command, deps: ShowDeps = {}): void {
       const nextCommand = deriveNextCommandForRun(run.id, tasks);
       // AWN-5: convergent (≥2 reds agree) vs unique review findings across the run.
       const reviewSummary = summarizeFindings(gatherRunReviews(tasks.map((t) => t.id), verdictsForTask));
+      // FG-585: when the run settled to `failed`, name the phase(s) that failed
+      // and the phase(s) that could never dispatch as a result. Best-effort —
+      // never let a missing/unloadable workflow abort `forge show`.
+      let runFailure: RunTerminalClassification | undefined;
+      if (run.status === "failed") {
+        try {
+          const c = classifyRunTerminalState(loadWorkflow(run.workflow, { projectDir: run.projectDir }), tasks);
+          if (c && c.status === "failed") runFailure = c;
+        } catch { /* leave undefined */ }
+      }
 
       if (opts.json) {
         const now = Date.now();
@@ -1130,6 +1142,7 @@ export function registerShow(program: Command, deps: ShowDeps = {}): void {
                 reconcileCandidates: runCandidates, // #298: running tasks whose container is gone
                 nextCommand,
                 reviewSummary,
+                runFailure: runFailure ?? null, // FG-585: failed + unreachable phases when status is failed
               },
             },
             null,
@@ -1145,6 +1158,7 @@ export function registerShow(program: Command, deps: ShowDeps = {}): void {
       console.log(`  project:  ${run.projectDir ?? "(none)"}`);
       console.log(`  created:  ${run.createdAt}`);
       if (run.completedAt) console.log(`  completed: ${run.completedAt}`);
+      if (runFailure) console.log(`  failure:  ${formatRunFailure(runFailure)}`);
 
       if (blockers.length > 0) {
         console.log("");

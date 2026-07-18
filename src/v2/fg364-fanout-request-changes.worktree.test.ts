@@ -303,14 +303,12 @@ test("FG-364: fanout request-changes — new pending primary is the live parent 
   );
   assert.equal(wave4.runStatus, "complete", "AC-5: run must reach complete after docs");
 
-  // FG-368: superseded audit-record task must NOT inflate anyFailed.
-  const completedEvent = eventsForRun(runId).find((e) => e.eventType === "run.completed");
-  assert.ok(completedEvent, "FG-368: run.completed event must be emitted");
-  assert.equal(
-    (completedEvent!.payload as Record<string, unknown>)["anyFailed"],
-    false,
-    "FG-368: anyFailed must be false — superseded failed task must not count",
-  );
+  // FG-368/FG-585: a superseded audit-record task (a failed primary with a
+  // complete replacement in the same phase) must NOT fail the run. The run
+  // settles `complete` with a run.completed event and no run.failed.
+  const types = eventsForRun(runId).map((e) => e.eventType);
+  assert.ok(types.includes("run.completed"), "run.completed event must be emitted");
+  assert.ok(!types.includes("run.failed"), "FG-585: a superseded failed task must not fail the run");
 });
 
 test("FG-364: idempotency — repeated runNext after retry completes does not create duplicate build children", async () => {
@@ -663,10 +661,11 @@ test("FG-364: multi-batch fan-out — all children dispatch under new parent acr
 // FG-368: anyFailed rollup correctness — negative case and child-exclusion
 // ---------------------------------------------------------------------------
 
-test("FG-368: anyFailed — genuinely failed phase with no replacement → anyFailed: true", async () => {
+test("FG-368/FG-585: a genuinely failed phase with no replacement → run settles to `failed`", async () => {
   // A 2-step workflow where the second step fails permanently (no request-changes,
-  // no retry). The run must complete with anyFailed: true in run.completed.
-  // This is the negative case that proves the FG-368 fix didn't blanket-suppress failures.
+  // no retry). Post-FG-585 the run settles to `failed` (naming the failed phase)
+  // instead of the old false `complete` + anyFailed:true on run.completed. This is
+  // the negative case proving failures are still surfaced — now via the status.
 
   ensureClaudeRuntime();
   process.env.ANTHROPIC_API_KEY = "sk-stub";
@@ -726,23 +725,26 @@ test("FG-368: anyFailed — genuinely failed phase with no replacement → anyFa
   const wave1 = await runNext({ runId, workflow: GENUINE_FAILURE_WF, dockerExec: exec });
   assert.deepEqual(wave1.completedSteps, ["setup"], "setup must complete in wave 1");
 
-  // Wave 2: work dispatches and fails → run reaches complete with anyFailed: true.
+  // Wave 2: work dispatches and fails → run settles to `failed`.
   const wave2 = await runNext({ runId, workflow: GENUINE_FAILURE_WF, dockerExec: exec });
   assert.deepEqual(wave2.failedSteps, ["work"], "work must fail in wave 2");
-  assert.equal(wave2.runStatus, "complete", "run must reach complete even when a step fails");
+  assert.equal(wave2.runStatus, "failed", "FG-585: a genuinely failed phase settles the run to failed");
+  assert.deepEqual(wave2.terminal!.failedPhases, ["work"], "the failed phase is named");
 
   // Verify the work task is truly failed in the DB.
   const workTask = tasksForRun(runId).find((t) => t.phase === "work" && t.parentId === undefined);
   assert.ok(workTask, "work task must exist");
   assert.equal(workTask!.status, "failed", "work task must be failed");
 
-  // The run.completed event must carry anyFailed: true.
-  const completedEvent = eventsForRun(runId).find((e) => e.eventType === "run.completed");
-  assert.ok(completedEvent, "FG-368: run.completed event must be emitted");
+  // The lifecycle event is run.failed (naming the phase), NOT run.completed.
+  const types = eventsForRun(runId).map((e) => e.eventType);
+  assert.ok(!types.includes("run.completed"), "FG-585: a failed run must NOT log run.completed");
+  const failedEvent = eventsForRun(runId).find((e) => e.eventType === "run.failed");
+  assert.ok(failedEvent, "FG-585: run.failed event must be emitted");
   assert.equal(
-    (completedEvent!.payload as Record<string, unknown>)["anyFailed"],
-    true,
-    "FG-368: anyFailed must be true — genuinely failed phase with no replacement must count",
+    (failedEvent!.payload as Record<string, unknown>)["failedPhases"],
+    "work",
+    "FG-585: run.failed payload names the failed phase",
   );
 });
 
@@ -832,21 +834,19 @@ test("FG-368: anyFailed — fanout child failure with parent completing doesn't 
   assert.ok(wave3.dispatchedSteps.includes("docs"), "docs must dispatch in wave 3");
   assert.equal(wave3.runStatus, "complete", "run must reach complete");
 
-  // The run.completed event must carry anyFailed: false.
-  // Even though a child failed, children (parentId !== undefined) are excluded
-  // from the rollup. Only top-level tasks count, and the build parent is complete.
-  const completedEvent = eventsForRun(runId).find((e) => e.eventType === "run.completed");
-  assert.ok(completedEvent, "FG-368: run.completed event must be emitted");
-  assert.equal(
-    (completedEvent!.payload as Record<string, unknown>)["anyFailed"],
-    false,
-    "FG-368: anyFailed must be false — fanout children (parentId !== undefined) are excluded from the rollup",
-  );
+  // FG-585: the run settles `complete`, NOT `failed` — even though a fanout child
+  // failed. Children (parentId !== undefined) are not workflow-step primaries, so
+  // the classifier never treats a child failure as a failed phase. The lifecycle
+  // event is run.completed and there is no run.failed.
+  const types = eventsForRun(runId).map((e) => e.eventType);
+  assert.ok(types.includes("run.completed"), "run.completed event must be emitted");
+  assert.ok(!types.includes("run.failed"), "FG-585: a child failure with a complete parent must NOT fail the run");
 
-  // Confirm: if we walked all tasks naively (including children), anyFailed would be
-  // non-zero — this verifies the fix is what makes it false, not the absence of failures.
+  // Confirm: if we walked all tasks naively (including children), we'd see a
+  // failure — this verifies the classifier's primary-only scoping is what keeps
+  // the run complete, not the absence of failures.
   const naiveAnyFailed = tasksAfterWave2.some((t) => t.status === "failed");
-  assert.ok(naiveAnyFailed, "sanity: at least one task (a child) is failed, naive check confirms the fix matters");
+  assert.ok(naiveAnyFailed, "sanity: at least one task (a child) is failed, naive check confirms the scoping matters");
 });
 
 // ---------------------------------------------------------------------------

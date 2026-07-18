@@ -59,7 +59,8 @@ export function computeMetrics(filters: MetricsFilters): Metrics {
   for (const run of listRuns()) {
     if (!runMatchesFilters(run, filters)) continue;
     total++;
-    const isTerminal = run.status === "complete" || run.status === "abandoned";
+    const isTerminal =
+      run.status === "complete" || run.status === "failed" || run.status === "abandoned";
 
     const tasks = tasksForRun(run.id).filter((t) => t.parentId === undefined);
     taskCount += tasks.length;
