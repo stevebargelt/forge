@@ -121,6 +121,25 @@ test("FG-555 R3/R4 derivation: captured path, derived-on-PATH, unresolved, and a
   assert.equal(s.r3.kind, "derived", "R3 still honestly names the shell binary as the top-level executable");
 });
 
+test("FG-555 R4 honesty: a nested shell HIDDEN behind env + a PATH-mutating assignment is still UNKNOWABLE, never a false not_applicable", () => {
+  // Pre-fix R4 only looked at argv[0]; `env … bash -lc …` made argv[0]==="env" and
+  // recorded not_applicable — a FALSE "no later shell resolution occurs". The fix skips
+  // the leading assignments and the `env` prefix, sees the nested `bash -lc`, and records
+  // unknowable. R3 still honestly names `env` as the top-level executable.
+  const w = deriveWorkloadProvenance(["env", "PATH=/evil", "bash", "-lc", "npm test"], { resolve: () => "/usr/bin/env" });
+  assert.equal(w.r4.kind, "unknowable", "the nested shell behind env is not hidden from R4");
+  assert.equal(w.r4.kind === "unknowable" ? w.r4.shell : "", "bash");
+  assert.equal(w.r3.argv0, "env", "R3 honestly names the top-level executable that actually ran");
+
+  // A non-PATH exec-prefix in front of a nested shell is also seen through.
+  const t = deriveWorkloadProvenance(["nohup", "bash", "-c", "x"], { resolve: () => "/x" });
+  assert.equal(t.r4.kind, "unknowable", "a shell behind nohup is still unknowable");
+
+  // A direct, non-shell effective command behind a prefix stays not_applicable.
+  const d = deriveWorkloadProvenance(["env", "FOO=bar", "node", "-e", "0"], { resolve: () => "/x" });
+  assert.equal(d.r4.kind, "not_applicable", "env FOO=bar node … has no nested shell — honestly not_applicable");
+});
+
 test("FG-555 workload record: valid R3/R4 parses; a missing required field is omitted, never guessed", () => {
   const good = { r3: { kind: "captured", argv0: "/n", execPath: "/n" }, r4: { kind: "unknowable", shell: "bash", reason: "r" } };
   assert.deepEqual(parseWorkloadProvenance(JSON.stringify(good)), good);
@@ -164,42 +183,81 @@ test("FG-555 control-runtime profile: pins forge's OWN node dir at the FRONT of 
   assert.equal(p.label, "control-runtime");
 });
 
-test("FG-555 toolchain guard: a mismatched ABI is a NAMED refusal; a match passes; an unresolvable node has nothing to assert", () => {
+test("FG-555 toolchain guard (fail-closed): a control tool inside the pinned dir passes; an unprovable command is REFUSED — the invariant is 'prove it, or refuse'", () => {
   const profile = { path: "/p", requireAbi: "137", label: "control-runtime" };
-  const resolve = () => "/p/node";
+  // `forge`/`npm`/`npx` resolving to a binary INSIDE the pinned dir (/p) run under the
+  // pinned control node by construction — allowed, no ABI probe needed.
+  const insidePinned = (name: string) => (name.includes("/") ? name : `/p/${name}`);
+  assert.deepEqual(assertProfileToolchain(profile, ["forge", "next"], { resolve: insidePinned }), { ok: true }, "forge inside the pinned dir is provable");
+  assert.deepEqual(assertProfileToolchain(profile, ["npm", "run", "test:all"], { resolve: insidePinned }), { ok: true }, "npm inside the pinned dir is provable");
 
-  const bad = assertProfileToolchain(profile, ["forge", "next"], { resolve, probeAbi: () => "131" });
+  // DELIBERATE CHANGE vs the pre-fix guard: the old code returned ok:true when node
+  // was UNRESOLVABLE ("nothing to assert"). Fail-closed inverts that — a control tool
+  // that does NOT resolve inside the pinned dir is REFUSED, because the contract
+  // cannot prove it runs the pinned node.
+  const gone = assertProfileToolchain(profile, ["forge", "next"], { resolve: () => undefined });
+  assert.equal(gone.ok, false, "a forge that does not resolve on the pinned PATH is now refused, not waved through");
+  assert.match(gone.ok === false ? gone.message : "", /refusing to run/);
+
+  // A control tool resolving OUTSIDE the pinned dir is also refused (it might be a
+  // different, incompatible install).
+  const outside = assertProfileToolchain(profile, ["forge", "next"], { resolve: () => "/usr/local/bin/forge" });
+  assert.equal(outside.ok, false, "forge outside the pinned dir is not provable");
+
+  // An unrecognized wrapper/binary is refused (fail closed), not passed through.
+  const unknown = assertProfileToolchain(profile, ["make", "test"], { resolve: () => "/usr/bin/make" });
+  assert.equal(unknown.ok, false, "an unknown binary the contract cannot prove is refused");
+  assert.match(unknown.ok === false ? unknown.message : "", /cannot prove/);
+});
+
+test("FG-555 toolchain guard: a node argv[0] is ALLOWED only when its probed ABI matches; a mismatch/unreadable ABI is a NAMED refusal", () => {
+  const profile = { path: "/p", requireAbi: "137", label: "control-runtime" };
+  const resolve = (name: string) => (name === "node" ? "/p/node" : name.includes("/") ? name : undefined);
+
+  const bad = assertProfileToolchain(profile, ["node", "x.js"], { resolve, probeAbi: () => "131" });
   assert.equal(bad.ok, false);
   assert.match(bad.ok === false ? bad.message : "", /refusing to run/);
   assert.match(bad.ok === false ? bad.message : "", /ABI 137/);
   assert.match(bad.ok === false ? bad.message : "", /131/);
 
-  assert.deepEqual(assertProfileToolchain(profile, ["forge", "next"], { resolve, probeAbi: () => "137" }), { ok: true }, "a matching ABI passes");
+  assert.deepEqual(assertProfileToolchain(profile, ["node", "x.js"], { resolve, probeAbi: () => "137" }), { ok: true }, "a matching ABI passes");
 
-  const unreadable = assertProfileToolchain(profile, ["forge", "next"], { resolve, probeAbi: () => undefined });
+  const unreadable = assertProfileToolchain(profile, ["node", "x.js"], { resolve, probeAbi: () => undefined });
   assert.equal(unreadable.ok, false, "an unreadable ABI is not waved through (reuses checkAbi's unverifiable-ABI refusal)");
-
-  assert.deepEqual(assertProfileToolchain(profile, ["forge", "next"], { resolve: () => undefined, probeAbi: () => "999" }), { ok: true }, "no node resolvable on the pinned PATH ⇒ nothing to assert");
 });
 
-test("FG-555 toolchain guard: a caller-supplied login shell is refused under the contract — the pinned PATH cannot survive its profile scripts", () => {
+test("FG-555 toolchain guard (fail-closed): a shell is refused whether or not it is a login shell — a shell can rebuild PATH and resolve an arbitrary runtime", () => {
   // ABI would MATCH (resolve → a control node, probe → the required ABI), so the
-  // refusal is about the login shell itself, NOT the probe: the probe reads the
-  // pre-shell PATH, but a login shell resets PATH afterwards and can still resolve
-  // a wrong-ABI node during the run.
+  // refusal is about the shell itself, NOT the probe: a shell can rebuild PATH and
+  // resolve any node it likes at runtime, so the contract can never prove what it runs.
   const profile = { path: "/p", requireAbi: "137", label: "control-runtime" };
   const resolve = () => "/p/node";
   const probeAbi = () => "137";
 
-  for (const argv of [["bash", "-lc", "npm run test:all"], ["zsh", "--login", "-c", "x"], ["sh", "-il"]]) {
+  // DELIBERATE CHANGE vs the pre-fix guard: a NON-login shell (`bash -c …`) used to be
+  // waved through ("governed by the ABI probe"). Under the fail-closed invariant EVERY
+  // shell is refused — login or not — because none is provable.
+  for (const argv of [["bash", "-lc", "npm run test:all"], ["zsh", "--login", "-c", "x"], ["sh", "-il"], ["bash", "-c", "npm run test:all"]]) {
     const r = assertProfileToolchain(profile, argv, { resolve, probeAbi });
     assert.equal(r.ok, false, `${argv.join(" ")} is refused`);
-    assert.match(r.ok === false ? r.message : "", /login shell/);
+    assert.match(r.ok === false ? r.message : "", /shell/);
   }
+});
 
-  // A NON-login shell keeps the pinned session PATH, so the ABI probe governs it
-  // (here it matches) — it is not refused outright.
-  assert.deepEqual(assertProfileToolchain(profile, ["bash", "-c", "npm run test:all"], { resolve, probeAbi }), { ok: true }, "a non-login shell is governed by the ABI probe, not refused as a login shell");
+test("FG-555 toolchain guard (fail-closed): an env-wrapped login shell is REFUSED — the PATH-mutating assignment defeats the pin (env PATH=… bash -lc …)", () => {
+  // Round 3's bypass: `env PATH=/evil bash -lc '…'`. Pre-fix this reached ok:true —
+  // the guard only probed the node on the pinned PATH and never saw the `env PATH=`
+  // that resets it, nor the nested login shell behind `env`. Fail-closed refuses it:
+  // the effective argv[0] after skipping `env` is a shell, AND the assignment mutates
+  // PATH. Either is fatal; the message is the single named refusal.
+  const profile = { path: "/p", requireAbi: "137", label: "control-runtime" };
+  const resolve = () => "/p/node";
+  const probeAbi = () => "137";
+
+  const r = assertProfileToolchain(profile, ["env", "PATH=/evil", "bash", "-lc", "npm run test:all"], { resolve, probeAbi });
+  assert.equal(r.ok, false, "env PATH=… bash -lc … must be refused (pre-fix this returned ok:true)");
+  assert.match(r.ok === false ? r.message : "", /refusing to run/);
+  assert.match(r.ok === false ? r.message : "", /PATH/);
 });
 
 test("FG-555 argv[0] bypass regression: an explicitly-named ABI-mismatched node as argv[0] is REFUSED before execution, even when the pinned-PATH probe is green", () => {
@@ -221,23 +279,26 @@ test("FG-555 argv[0] bypass regression: an explicitly-named ABI-mismatched node 
   assert.match(msg, /argv\[0\]/, "attributes the refusal to the directly-named interpreter, not the pinned PATH");
 });
 
-test("FG-555 boundary: a directly-named node with the REQUIRED ABI is allowed; a non-node argv[0] wrapper is the documented contract boundary", () => {
+test("FG-555 boundary (fail-closed): a directly-named node with the REQUIRED ABI is allowed; a non-node wrapper is now REFUSED, not passed through", () => {
   const profile = { path: "/control/bin", requireAbi: "137", label: "control-runtime" };
   const resolve = (name: string) => (name === "node" ? "/control/bin/node" : name.includes("/") ? name : undefined);
 
-  // argv[0] IS a node whose ABI MATCHES the contract → not refused.
+  // argv[0] IS a node whose ABI MATCHES the contract → not refused (an explicit path is
+  // probed the same as a bare `node`: the recorder spawns exactly this executable).
   const okNode = assertProfileToolchain(profile, ["/opt/n24/bin/node", "test.js"], { resolve, probeAbi: () => "137" });
   assert.deepEqual(okNode, { ok: true }, "a directly-named node with the required ABI is not refused");
 
-  // A caller-authored NON-node wrapper (a script that itself execs some other interpreter) is the DOCUMENTED
-  // boundary: forge cannot know the runtime such a wrapper selects — the same inherently-unknowable class as R4.
-  // The guard does not probe a non-node argv[0]; only the pinned-PATH node (green here) governs, so it is NOT
-  // refused. This is a stated contract boundary, not an accidental gap (see assertProfileToolchain's doc comment).
+  // DELIBERATE CHANGE vs the pre-fix guard: a caller-authored NON-node wrapper used to be
+  // the documented "unknowable boundary" that was passed through unprobed. The whole point
+  // of this fix is to INVERT that: forge cannot prove what runtime such a wrapper selects,
+  // so under the fail-closed contract it is REFUSED rather than waved through. Enumerating
+  // wrappers is unwinnable; proving the toolchain is the only durable invariant.
   const wrapper = assertProfileToolchain(profile, ["/usr/local/bin/run-tests.sh", "test.js"], {
     resolve,
     probeAbi: (n: string) => (n === "/control/bin/node" ? "137" : "131"),
   });
-  assert.deepEqual(wrapper, { ok: true }, "a non-node wrapper argv[0] is outside the contract's guarantee — not probed, not refused");
+  assert.equal(wrapper.ok, false, "a non-node wrapper argv[0] is not provable — now refused (fail closed)");
+  assert.match(wrapper.ok === false ? wrapper.message : "", /cannot prove/);
 });
 
 test("FG-535 ids: run/task ids are extracted uniquely from log text; absence is empty, not an error", () => {

@@ -133,6 +133,23 @@ test(
   },
 );
 
+test(
+  "FG-555 R4 honesty: the RECORDER records `env … bash -lc …` as UNKNOWABLE, not a false not_applicable — the nested shell behind env is not hidden",
+  { skip: hasBash ? false : "bash not available" },
+  () => {
+    // The exact round-3 shape run through the REAL recorder: a nested shell hidden
+    // behind `env` (with a benign assignment). Pre-fix the recorder classified argv[0]
+    // ("env") and wrote r4 not_applicable — a false "no later shell resolution occurs".
+    // The recorder now skips the `env` prefix + assignment, sees `bash -lc`, and records
+    // unknowable. This holds regardless of the flag: an honest record is unconditional.
+    const { workload } = runRecorder(["env", "FOO=bar", "bash", "-lc", "true"]);
+    assert.ok(workload);
+    assert.equal(workload!.r4.kind, "unknowable", "env … bash -lc … must record R4 unknowable");
+    assert.equal(workload!.r4.kind === "unknowable" ? workload!.r4.shell : "", "bash");
+    assert.equal(workload!.r3.argv0, "env", "R3 honestly names env as the top-level executable that actually ran");
+  },
+);
+
 test("FG-555 refuse-before-execute: Node 23/ABI 131 vs required ABI 137 is refused BEFORE the workload runs, with a NAMED mismatch", () => {
   // A fake `node` on the pinned PATH that reports ABI 131 — the incompatible Node
   // of the reproduction. The control contract requires ABI 137. This is the exact
@@ -179,21 +196,45 @@ test("FG-555 refuse-before-execute: a caller-supplied login shell is refused und
     () => startLaunch(["bash", "-lc", "npm run test:all"], { name: "loginrepro", tmux: stub.tmux, profile }),
     (e: Error) => {
       assert.match(e.message, /refusing to run/);
-      assert.match(e.message, /login shell/);
+      // Fail-closed: the refusal is because a shell is not PROVABLE (login or not),
+      // not a special-cased login-shell message.
+      assert.match(e.message, /shell/);
       return true;
     },
   );
 
-  assert.ok(!stub.calls.some((c) => c[0] === "new-session"), "the login-shell refusal precedes any tmux session");
+  assert.ok(!stub.calls.some((c) => c[0] === "new-session"), "the shell refusal precedes any tmux session");
+  assert.equal(listLaunches(stub.tmux).length, 0, "and no launch record was written");
+});
+
+test("FG-555 refuse-before-execute (fail-closed): an env-wrapped login shell (env PATH=… bash -lc …) is refused — the PATH-mutating assignment behind env defeats the pin", () => {
+  // Round 3's bypass, at the production boundary: `env PATH=/evil bash -lc …`. The
+  // pinned PATH still resolves the control node (probe green), but the effective
+  // command behind `env` is a shell AND the assignment mutates PATH — both fatal
+  // under the fail-closed contract. Refused BEFORE any tmux session exists.
+  const stub = tmuxStub();
+  const profile = controlRuntimeProfile({ label: "control-runtime" });
+
+  assert.throws(
+    () => startLaunch(["env", "PATH=/evil", "bash", "-lc", "npm run test:all"], { name: "envrepro", tmux: stub.tmux, profile }),
+    (e: Error) => {
+      assert.match(e.message, /refusing to run/);
+      assert.match(e.message, /PATH/);
+      return true;
+    },
+  );
+
+  assert.ok(!stub.calls.some((c) => c[0] === "new-session"), "the env-wrapper refusal precedes any tmux session");
   assert.equal(listLaunches(stub.tmux).length, 0, "and no launch record was written");
 });
 
 test("FG-555 contract satisfied: the matching control toolchain is NOT refused — the launch proceeds", () => {
   // controlRuntimeProfile pins forge's OWN node (dir first on PATH); its ABI is by
-  // construction the required ABI, so a real control launch runs unhindered.
+  // construction the required ABI. A direct node interpreter (this very node, ABI ==
+  // required) is a PROVABLE command under the fail-closed contract, so it runs unhindered.
   const stub = tmuxStub();
   const profile = controlRuntimeProfile({ label: "control-runtime" });
-  const meta = startLaunch(["true"], { name: "okabi", tmux: stub.tmux, profile });
+  const meta = startLaunch([process.execPath, "-e", "0"], { name: "okabi", tmux: stub.tmux, profile });
   assert.match(meta.id, /^launch-okabi-/);
   assert.ok(stub.calls.some((c) => c[0] === "new-session"), "a matching toolchain proceeds to create the session");
 });
@@ -204,7 +245,9 @@ test("FG-555 contract pins the session PATH via `new-session -e` — the workloa
   // point under test is the pinned PATH reaching the tmux session.
   const pinned = `${dirname(process.execPath)}:/fg555-pinned-marker`;
   const profile: LaunchProfile = { path: pinned, requireAbi: process.versions.modules, label: "control-runtime" };
-  startLaunch(["true"], { name: "pinpath", tmux: stub.tmux, profile });
+  // A direct node interpreter (provable under the fail-closed contract) so the guard
+  // passes; the point under test is the pinned PATH reaching the tmux session.
+  startLaunch([process.execPath, "-e", "0"], { name: "pinpath", tmux: stub.tmux, profile });
 
   const newSession = stub.calls.find((c) => c[0] === "new-session")!;
   const eIdx = newSession.indexOf("-e");

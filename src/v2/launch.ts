@@ -270,8 +270,15 @@ function exitRecorderScript(releaseIdLiteral: string, profileLiteral: string): s
     `const a0=a[0]||"";let r3;`,
     `if(a0.indexOf("/")>=0){r3={kind:"captured",argv0:a0,execPath:a0};}`,
     `else{let f;for(const d of (process.env.PATH||"").split(":")){if(!d)continue;const c=pth.join(d,a0);try{fs.accessSync(c,fs.constants.X_OK);f=c;break;}catch(_){}}r3=f?{kind:"derived",argv0:a0,execPath:f}:{kind:"unresolved",argv0:a0};}`,
-    `const sh=pth.basename(a0),nst=["sh","bash","dash","zsh","ksh","ash"].indexOf(sh)>=0&&a.slice(1).some(function(x){return /^-[a-z]*c$/.test(x);});`,
-    `const r4=nst?{kind:"unknowable",shell:sh,reason:"a nested shell resolves node/npm/forge at runtime against whatever PATH it builds — not knowable at launch time (BD-14 R4)"}:{kind:"not_applicable",reason:"argv[0] is executed directly; the submitted argv is the full resolution (R3), no nested shell resolves anything later"};`,
+    // R4 on the EFFECTIVE command: skip leading VAR=VAL assignments + recognized
+    // exec-prefixes (env/nice/…), then detect a nested shell — kept in lockstep with
+    // effectiveCommand/deriveWorkloadProvenance so `env … bash -lc …` records
+    // unknowable, never a false not_applicable.
+    `const PFX={env:1,nice:1,nohup:1,time:1,stdbuf:1,setsid:1,timeout:1},ASG=/^[A-Za-z_][A-Za-z0-9_]*=/;`,
+    `let ci=0,up=false;while(ci<a.length&&ASG.test(a[ci])){ci++;}`,
+    `while(ci<a.length){var pn=pth.basename(a[ci]);if(!PFX[pn])break;ci++;if(pn==="env"){while(ci<a.length){var tk=a[ci];if(tk==="--"){ci++;break;}if(ASG.test(tk)){ci++;continue;}if(tk[0]==="-"){up=true;break;}break;}}else{while(ci<a.length&&a[ci][0]==="-"){var op=a[ci];ci++;if((pn==="nice"&&op==="-n")||(pn==="stdbuf"&&/^-[ioe]$/.test(op))||(pn==="timeout"&&(op==="-s"||op==="-k"))||(pn==="time"&&(op==="-o"||op==="-f"))){if(ci<a.length)ci++;}}if(pn==="timeout"&&ci<a.length)ci++;}}`,
+    `const eff=a.slice(ci),sh=pth.basename(eff[0]||""),nst=["sh","bash","dash","zsh","ksh","ash"].indexOf(sh)>=0&&eff.slice(1).some(function(x){return /^-[a-z]*c$/.test(x);});`,
+    `const r4=nst?{kind:"unknowable",shell:sh,reason:"a nested shell resolves node/npm/forge at runtime against whatever PATH it builds — not knowable at launch time (BD-14 R4)"}:up?{kind:"unknowable",shell:sh||"(wrapper)",reason:"an env/wrapper form the launcher cannot fully parse could still resolve an arbitrary runtime — a hidden shell cannot be ruled out (BD-14 R4)"}:{kind:"not_applicable",reason:"argv[0] is executed directly; the submitted argv is the full resolution (R3), no nested shell resolves anything later"};`,
     // FG-555 (workload runtime): probe the effective interpreter — R3's resolved
     // executable, when it IS a Node interpreter (basename node/nodejs) — for its
     // ABI/version, so `forge launch show` can diagnose whether a direct `node`
@@ -325,6 +332,67 @@ export function parseRecorderRuntime(raw: string): RecorderRuntime | undefined {
 
 const NESTED_SHELLS = new Set(["sh", "bash", "dash", "zsh", "ksh", "ash"]);
 
+// FG-555: the bounded, well-known set of exec-prefixes that run a following
+// command WITHOUT choosing its runtime — as long as they do not mutate PATH. We
+// skip them (and any leading `VAR=VAL` assignments) to find the EFFECTIVE argv[0]
+// both the fail-closed toolchain guard and the R4 nested-shell classifier reason
+// about. `env` is the one that can mutate PATH (via its own `NAME=VALUE` args), so
+// it is parsed specifically; the rest only carry options. Anything NOT in this set
+// is treated as the effective command and judged on its own — we never pass an
+// unrecognized wrapper through (fail closed).
+const EXEC_PREFIXES = new Set(["env", "nice", "nohup", "time", "stdbuf", "setsid", "timeout"]);
+
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/** Skip leading `VAR=VAL` assignments and recognized non-PATH-mutating
+ *  exec-prefixes (`env`/`nice`/…) to reach the EFFECTIVE command. `pathMutated`
+ *  flags a skipped assignment that set PATH (it defeats the pin). `unprovable`
+ *  flags an exec-prefix form we cannot safely skip (an `env` option like `-i`
+ *  that clears the environment) — the caller then fails closed: refuse (guard)
+ *  or prefer `unknowable` (R4), never wave through a form we could not parse. */
+function effectiveCommand(argv: string[]): { argv: string[]; pathMutated: boolean; unprovable: boolean } {
+  let i = 0;
+  let pathMutated = false;
+  while (i < argv.length && ASSIGNMENT.test(argv[i]!)) {
+    if (argv[i]!.startsWith("PATH=")) pathMutated = true;
+    i++;
+  }
+  while (i < argv.length) {
+    const name = basename(argv[i]!);
+    if (!EXEC_PREFIXES.has(name)) break;
+    i++;
+    if (name === "env") {
+      // env [OPTION]... [NAME=VALUE]... [COMMAND...]
+      while (i < argv.length) {
+        const tok = argv[i]!;
+        if (tok === "--") { i++; break; }
+        if (ASSIGNMENT.test(tok)) {
+          if (tok.startsWith("PATH=")) pathMutated = true;
+          i++;
+          continue;
+        }
+        // An env OPTION (-i clears the env, -u unsets, -S splits): we will not
+        // reason about what it does to the environment — fail closed.
+        if (tok.startsWith("-")) return { argv: argv.slice(i), pathMutated, unprovable: true };
+        break;
+      }
+    } else {
+      while (i < argv.length && argv[i]!.startsWith("-")) {
+        const op = argv[i]!;
+        i++;
+        const consumesArg =
+          (name === "nice" && op === "-n") ||
+          (name === "stdbuf" && /^-[ioe]$/.test(op)) ||
+          (name === "timeout" && (op === "-s" || op === "-k")) ||
+          (name === "time" && (op === "-o" || op === "-f"));
+        if (consumesArg && i < argv.length) i++;
+      }
+      if (name === "timeout" && i < argv.length) i++; // the DURATION operand
+    }
+  }
+  return { argv: argv.slice(i), pathMutated, unprovable: false };
+}
+
 export type PathResolver = (name: string, path: string | undefined) => string | undefined;
 
 /** which(1)-style resolution: the first executable named `name` on `path`. A name
@@ -366,11 +434,21 @@ export function deriveWorkloadProvenance(
     r3 = found ? { kind: "derived", argv0, execPath: found } : { kind: "unresolved", argv0 };
   }
 
-  const shell = basename(argv0);
-  const nested = NESTED_SHELLS.has(shell) && argv.slice(1).some((a) => /^-[a-z]*c$/.test(a));
+  // R4: detect a nested shell on the EFFECTIVE command — after skipping leading
+  // `VAR=VAL` assignments and recognized exec-prefixes (`env … bash -lc …` hides a
+  // shell behind `env`, so classifying argv[0] alone would falsely record
+  // not_applicable). When a shell is present, or the wrapper form is one we could
+  // not fully parse (unprovable), we cannot rule out a runtime shell resolution —
+  // prefer `unknowable` over a false certainty. `not_applicable` is ONLY a genuinely
+  // direct, non-shell effective argv[0].
+  const eff = effectiveCommand(argv);
+  const effShell = basename(eff.argv[0] ?? "");
+  const nested = NESTED_SHELLS.has(effShell) && eff.argv.slice(1).some((a) => /^-[a-z]*c$/.test(a));
   const r4: WorkloadNestedShell = nested
-    ? { kind: "unknowable", shell, reason: "a nested shell resolves node/npm/forge at runtime against whatever PATH it builds — not knowable at launch time (BD-14 R4)" }
-    : { kind: "not_applicable", reason: "argv[0] is executed directly; the submitted argv is the full resolution (R3), no nested shell resolves anything later" };
+    ? { kind: "unknowable", shell: effShell, reason: "a nested shell resolves node/npm/forge at runtime against whatever PATH it builds — not knowable at launch time (BD-14 R4)" }
+    : eff.unprovable
+      ? { kind: "unknowable", shell: effShell || "(wrapper)", reason: "an env/wrapper form the launcher cannot fully parse could still resolve an arbitrary runtime — a hidden shell cannot be ruled out (BD-14 R4)" }
+      : { kind: "not_applicable", reason: "argv[0] is executed directly; the submitted argv is the full resolution (R3), no nested shell resolves anything later" };
 
   const result: WorkloadProvenance = { r3, r4 };
   if (opts.profile) result.profile = opts.profile;
@@ -484,119 +562,98 @@ function defaultAbiProbe(nodeExec: string): string | undefined {
   }
 }
 
-/** A caller-supplied LOGIN shell (`bash -lc`, `zsh --login -c`, `sh -il`, …).
- *  This is the case the pinned-PATH contract fundamentally cannot protect: the
- *  session PATH is pinned via `new-session -e`, but a login shell re-sources
- *  profile scripts (/etc/profile, ~/.bash_profile, nvm's shell hook) that reset
- *  PATH AFTER the pin — so whatever node the ABI probe verified is not the node
- *  the shell resolves at runtime. `--login`, or a short-flag cluster containing
- *  `l` (`-l`, `-lc`, `-il`), makes it a login shell. */
-function isLoginShell(argv: string[]): boolean {
-  const shell = basename(argv[0] ?? "");
-  if (!NESTED_SHELLS.has(shell)) return false;
-  return argv.slice(1).some((a) => a === "--login" || /^-[a-z]*l[a-z]*$/.test(a));
-}
-
-/** Refuse-before-execute (FG-555): assert that the Node the workload will actually
- *  run under matches the contract's required ABI, BEFORE any tmux session exists —
- *  REUSING FG-570's checkAbi, not a second checker. A mismatch (or an unreadable
- *  ABI) is a NAMED refusal the caller raises here rather than hundreds of opaque
- *  ERR_DLOPEN_FAILED deep in the suite.
- *
- *  WHAT THE CONTRACT GUARANTEES:
- *    - a workload that resolves `node`/`npm`/`forge` BY NAME on PATH runs the pinned
- *      control toolchain (the pinned-PATH `node` probe), and
- *    - a Node interpreter named DIRECTLY as argv[0] (e.g. `-- /usr/local/bin/node …`,
- *      or a bare `node` on the pinned PATH) is probed against the required ABI too —
- *      that is the executable the recorder spawns, so a green pinned-PATH probe alone
- *      is NOT sufficient assurance (it would let an explicitly-named wrong-ABI node
- *      bypass the gate). Both probes must pass.
- *    - a caller-supplied LOGIN shell is refused outright.
- *
- *  WHAT IT DOES NOT AND CANNOT GUARANTEE (a stated boundary, not an accidental gap):
- *    - the runtime of a node reached INDIRECTLY through a caller-authored NON-node
- *      argv[0] — an arbitrary wrapper/script that itself execs some other interpreter.
- *      That is the caller selecting its own runtime; forge cannot know it, the same
- *      inherently-unknowable class as a nested shell's runtime resolution (R4). The
- *      argv[0] probe is bounded to a Node interpreter (basename `node`/`nodejs`) for
- *      exactly this reason.
- *
- *  `ok` when no node is resolvable on the pinned PATH and argv[0] is not a node: the
- *  contract verifies the toolchain it can see, it does not invent one.
- *
- *  A caller-supplied login shell is refused FIRST, unconditionally: the ABI probe
- *  reads the pre-shell PATH, but a login shell resets PATH from its profile scripts
- *  afterwards, so a passing probe would be false assurance — the contract cannot
- *  keep its toolchain promise through a login shell, so it declines rather than
- *  pretend it can. */
-export function assertProfileToolchain(profile: LaunchProfile, argv: string[], opts: { resolve?: PathResolver; probeAbi?: AbiProber } = {}): { ok: true } | { ok: false; message: string } {
-  if (isLoginShell(argv)) {
-    const shell = basename(argv[0] ?? "");
-    return {
-      ok: false,
-      message:
-        `forge launch: refusing to run — the launch-environment contract pins the workload's PATH, but the ` +
-        `command is a login shell (\`${shell}\` with -l/--login), which re-sources profile scripts that can reset ` +
-        `PATH after the pin and resolve a different, wrong-ABI node during the run. The contract cannot protect a ` +
-        `login shell.\n` +
-        `  contract: ${profile.label ? `${profile.label} — ` : ""}pinned PATH = ${profile.path}\n` +
-        `  fix: drop -l/--login (a non-login shell keeps the pinned PATH), or run the command directly without a shell wrapper.`,
-    };
-  }
-  const resolve = opts.resolve ?? resolveOnPath;
-  const probe = opts.probeAbi ?? defaultAbiProbe;
-
-  // FG-555 (argv[0] interpreter bypass): the pinned-PATH probe below only checks the
-  // node resolved BY NAME on PATH. But the recorder spawns argv[0] DIRECTLY (see
-  // exitRecorderScript), so a caller can name an ABI-incompatible node explicitly
-  // (`-- /usr/local/bin/node …`) — the pinned PATH still resolves the control node,
-  // the probe is green, and then the named node runs and hits the ABI false-red
-  // anyway. So when argv[0] IS a Node interpreter, probe ITS ABI too: that is the
-  // executable that actually runs. Bounded to a node basename ON PURPOSE — a non-node
-  // wrapper's chosen runtime is the documented, unknowable boundary (see doc comment).
-  const argvNode = directNodeInterpreter(argv, profile.path, resolve);
-  if (argvNode) {
-    const r = checkAbi(probe(argvNode) ?? "", profile.requireAbi);
-    if (!r.ok) {
-      return {
-        ok: false,
-        message:
-          `forge launch: refusing to run — the command names a Node interpreter directly as argv[0] ` +
-          `(\`${argv[0]}\`), and THAT interpreter — not the pinned PATH — is what will execute the workload, ` +
-          `so a green pinned-PATH probe is no assurance. Its ABI does not match the contract, so the workload ` +
-          `would fail deep inside the suite (opaque ERR_DLOPEN_FAILED) instead of here.\n` +
-          `  contract: ${profile.label ? `${profile.label} — ` : ""}argv[0] interpreter = ${argvNode}\n` +
-          r.message,
-      };
-    }
-  }
-
-  const node = resolve("node", profile.path);
-  if (!node) return { ok: true };
-  const r = checkAbi(probe(node) ?? "", profile.requireAbi);
-  if (r.ok) return { ok: true };
+/** Build the ONE named, actionable refusal (FG-555). Every refusal path uses this
+ *  single shape: it names WHY compatibility cannot be proven (the effective argv[0]
+ *  and the category), states the pinned PATH, and gives the fix. `detail` carries a
+ *  category-specific line (e.g. checkAbi's ABI diagnosis) when there is one. */
+function toolchainRefusal(profile: LaunchProfile, effectiveArgv0: string, category: string, detail?: string): { ok: false; message: string } {
   return {
     ok: false,
     message:
-      `forge launch: refusing to run — the launch-environment contract's toolchain does not match, ` +
-      `so the workload would fail deep inside the suite (opaque ERR_DLOPEN_FAILED) instead of here.\n` +
-      `  contract: ${profile.label ? `${profile.label} — ` : ""}node resolved on the pinned PATH = ${node}\n` +
-      r.message,
+      `forge launch: refusing to run — the --require-control-toolchain contract runs a command ONLY when it can ` +
+      `PROVE the command executes forge's pinned control toolchain, and this one is not provable.\n` +
+      `  reason: ${category}\n` +
+      `  effective argv[0]: ${effectiveArgv0 || "(none)"}\n` +
+      (detail ? `  detail: ${detail}\n` : "") +
+      `  contract: ${profile.label ? `${profile.label} — ` : ""}pinned PATH = ${profile.path}\n` +
+      `  fix: submit the verification as a direct \`forge …\` / \`npm …\` / \`node …\` command on the pinned ` +
+      `toolchain, without a shell or env/PATH wrapper.`,
   };
 }
 
-/** The Node interpreter a caller named DIRECTLY as argv[0], resolved to a real path
- *  — or undefined when argv[0] is not a node. This is the executable the recorder
- *  spawns; the pinned-PATH `node` probe does NOT cover an explicitly-named path.
- *  basename `node`/`nodejs` is the bounded criterion ON PURPOSE: a caller-authored
- *  NON-node wrapper that itself execs some other interpreter is the documented
- *  contract boundary, not something this can probe. */
-function directNodeInterpreter(argv: string[], path: string, resolve: PathResolver): string | undefined {
-  const argv0 = argv[0] ?? "";
-  if (argv0 === "") return undefined;
-  const name = basename(argv0);
-  if (name !== "node" && name !== "nodejs") return undefined;
-  return resolve(argv0, path);
+/** Refuse-before-execute (FG-555), FAIL CLOSED: under `--require-control-toolchain`
+ *  the contract REFUSES a command BEFORE any tmux session exists UNLESS it can
+ *  affirmatively PROVE the workload runs the pinned control toolchain. This inverts
+ *  the earlier "enumerate every forbidden wrapper" approach — the space of shells
+ *  and wrappers that hide a runtime is unbounded and a caller-supplied command's
+ *  runtime resolution is inherently unknowable (BD-14 R4), so enumerating forbidden
+ *  forms is unwinnable. Instead we allow only a small, PROVABLE set and refuse the
+ *  rest.
+ *
+ *  `ok: true` ONLY when, after skipping leading `VAR=VAL` assignments that do NOT
+ *  mutate PATH and a bounded set of non-PATH-mutating exec-prefixes (see
+ *  effectiveCommand), the EFFECTIVE argv[0] is provably the control toolchain:
+ *    - `node`/`nodejs` whose probed ABI (reusing FG-570's checkAbi) equals the
+ *      required ABI — that is the executable the recorder spawns; an explicit path
+ *      (`/usr/local/bin/node`) is probed the same way, so a wrong-ABI interpreter
+ *      cannot slip through; or
+ *    - `forge`/`npm`/`npx` resolved to a binary INSIDE the pinned profile dir (the
+ *      first PATH entry) — those execute under the pinned control node by construction.
+ *
+ *  Everything else is REFUSED with ONE named message (never enumerated individually):
+ *    - a leading assignment that mutates PATH (`env PATH=…`) — it defeats the pin;
+ *    - a shell (`sh`/`bash`/… , login or not) — it can rebuild PATH and resolve an
+ *      arbitrary runtime, so the contract cannot prove what it runs;
+ *    - a wrong-ABI directly-named interpreter (the FG-560545e case);
+ *    - any other wrapper / unknown binary the contract cannot prove runs the toolchain.
+ *
+ *  This SUBSUMES the earlier standalone login-shell and direct-node-interpreter
+ *  branches: a shell is refused because it is not in the provable set; a matching-ABI
+ *  node is allowed because it is. Probe-only — NEVER rebuilds a native dep. */
+export function assertProfileToolchain(profile: LaunchProfile, argv: string[], opts: { resolve?: PathResolver; probeAbi?: AbiProber } = {}): { ok: true } | { ok: false; message: string } {
+  const resolve = opts.resolve ?? resolveOnPath;
+  const probe = opts.probeAbi ?? defaultAbiProbe;
+
+  const eff = effectiveCommand(argv);
+  const a0 = eff.argv[0] ?? "";
+  const name = basename(a0);
+
+  if (eff.pathMutated) {
+    return toolchainRefusal(profile, a0, "a leading assignment mutates PATH (e.g. `env PATH=…`), which defeats the pinned toolchain");
+  }
+  if (eff.unprovable || a0 === "") {
+    return toolchainRefusal(profile, a0, "an env/wrapper form the contract cannot parse — it could resolve an arbitrary runtime");
+  }
+  if (NESTED_SHELLS.has(name)) {
+    return toolchainRefusal(profile, a0, "argv[0] is a shell (login or not), which can rebuild PATH and resolve an arbitrary runtime the contract cannot prove");
+  }
+
+  if (name === "node" || name === "nodejs") {
+    const resolved = resolve(a0, profile.path);
+    if (!resolved) {
+      return toolchainRefusal(profile, a0, "argv[0] is a Node interpreter that does not resolve on the pinned PATH — its runtime cannot be proven");
+    }
+    const r = checkAbi(probe(resolved) ?? "", profile.requireAbi);
+    if (r.ok) return { ok: true };
+    // The recorder spawns argv[0] DIRECTLY, so THIS interpreter — not the pinned
+    // PATH — is what runs; its ABI does not match, so the workload would fail deep
+    // inside the suite (opaque ERR_DLOPEN_FAILED) instead of here.
+    return toolchainRefusal(profile, a0, "argv[0] is a Node interpreter whose ABI does not match the required ABI", r.message);
+  }
+
+  if (name === "forge" || name === "npm" || name === "npx") {
+    const resolved = resolve(a0, profile.path);
+    const pinnedDir = profile.path.split(":")[0] ?? "";
+    if (resolved && dirname(resolved) === pinnedDir) return { ok: true };
+    return toolchainRefusal(
+      profile,
+      a0,
+      "argv[0] is a control tool that does not resolve to a binary inside the pinned profile dir — the contract cannot prove it runs the pinned control node",
+      resolved ? `resolved to ${resolved}, outside the pinned dir ${pinnedDir}` : `did not resolve on the pinned PATH`,
+    );
+  }
+
+  return toolchainRefusal(profile, a0, "argv[0] is a wrapper/binary the contract cannot prove runs the control toolchain");
 }
 
 /** Forge run/task ids, opportunistically, from whatever the command logged. */
