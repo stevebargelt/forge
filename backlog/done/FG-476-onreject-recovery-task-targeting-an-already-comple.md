@@ -27,7 +27,7 @@ Make a live (pending) `on_reject` recovery task dispatchable even when its targe
 ## Acceptance Criteria
 
 - A gate reject with `on_reject` targeting an already-complete step results in the recovery task being DISPATCHED (the target step re-runs), not left pending forever.
-- The run reaches a real terminal state (complete/abandoned) or continues per the recovered step's outcome — no indefinite `active` hang.
+- The run reaches a real terminal state (complete/abandoned) or continues per the recovered step's outcome — no indefinite `active` hang. _(Superseded by FG-585: the run terminal vocabulary is now complete/**failed**/abandoned — a run left with a failed or permanently-unreachable required phase now settles to `failed` rather than `complete`.)_
 - A test covers the `security-audit.yml` `audit -> investigate` shape end-to-end: reject `audit`, assert the `investigate` recovery task actually dispatches and the run progresses.
 - Preserves FG-475's guarantee: no premature/wrong finalization to `complete` while the recovery is outstanding.
 
