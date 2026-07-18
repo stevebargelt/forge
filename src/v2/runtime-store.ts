@@ -50,10 +50,10 @@
 // interpreter under a mkdtemp FORGE_HOME cannot reach the operator's real store.
 
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, type Stats } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, realpathSync, renameSync, rmSync, type Stats } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { FORGE_HOME, interpretersDirIn } from "../util/paths.js";
+import { sha256OfBytes } from "../util/content-digest.js";
 
 /** What an interpreter SAYS it is when executed. A claim about behaviour, not an identity:
  *  two entirely different binaries can report exactly this and both be telling the truth. */
@@ -68,10 +68,10 @@ export type StoredInterpreterIdentity = InterpreterIdentity & {
   digest: string;
 };
 
-/** sha256 of a file's bytes, hex. */
-function fileDigest(bin: string): string {
-  return createHash("sha256").update(readFileSync(bin)).digest("hex");
-}
+/** sha256 of a file's bytes, hex. FG-579: the byte-identity mechanism this module
+ *  introduced (FG-571) now lives in ../util/content-digest so the seed-drift
+ *  detector and the workflow-dispatch refusal commit to the same definition. */
+const fileDigest = sha256OfBytes;
 
 /** The store key. It COMMITS TO THE BYTES — that is the whole point (see the header): a key
  *  that named only version+ABI would let a rebuilt-but-identically-reporting node collide

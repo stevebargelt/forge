@@ -308,7 +308,7 @@ test("FG-578: a BARE (non-FORCE) reinstall leaves every existing file byte-ident
 
 test("FG-578 (audit HIGH-2): divergent agents/ and constraints/ files survive FORCE=1", () => {
   // Decided, not defaulted. seed-drift.ts has classified these two
-  // autoRefreshable:false — "prose that may carry local edits → warn, never
+  // operator-authored + prose — "may carry local edits → warn, never
   // auto-overwrite" — since FG-335, which shipped only the detector and named the
   // deferred half in as many words. util/paths.ts gives neither a project-level
   // override, so ~/.forge IS the only place an operator can edit them: authored

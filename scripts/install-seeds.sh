@@ -36,9 +36,9 @@ mkdir -p "$DEST/agents" "$DEST/constraints" "$DEST/runs" "$DEST/runtimes" "$DEST
 #                 authored surfaces by construction, not by convention.
 #
 # This is not a new policy: seed-drift.ts already classifies exactly these three
-# autoRefreshable:false — "prose that may carry local edits → warn, never
-# auto-overwrite" — and runtimes autoRefreshable:true, "forge-owned execution
-# artifact, safe to overwrite". FG-335 decided it and shipped only the detector.
+# as operator-authored + prose — "may carry local edits → warn, never
+# auto-overwrite" — and runtimes as forge-owned + executable, "safe to overwrite".
+# FG-335 decided it and shipped only the detector.
 # This is its unbuilt half. The two sets MUST stay identical;
 # src/v2/fg578-ownership-agreement.test.ts fails if they ever disagree.
 #
@@ -154,11 +154,15 @@ fi
 # up, not just the forge repo. Container-agent skills (browser-tools) are a
 # separate, container-only mount (src/v2/spawn.ts) and are not touched here.
 #
-# FG-578: knowingly UNCHANGED, said out loud rather than left to silence. The
-# skills dir is outside $FORGE_HOME, so seed-drift.ts cannot see it and there is
-# no detector for forge to agree with — giving it an ownership policy here would
-# invent one surface's taxonomy in isolation. Its remedy story is FG-582's shape.
-# So skills keep the historical contract exactly: FORCE overwrites, bare skips.
+# Skills are forge-owned: FORCE overwrites, bare skips — the same write policy as
+# runtimes and workflows, and NOT in AUTHORED_EXEMPT above.
+#
+# FG-579: seed-drift.ts now covers this dir too. Its `skills` spec compares the
+# installed CLAUDE_SKILLS_DEST tree against seeds/skills (root: "claude-skills"),
+# classified forge-owned + prose — so a drifted forge-* skill is REPORTED by
+# `forge doctor` and `forge upgrade` (FORCE=1) is named as the converging remedy,
+# exactly as for runtimes/workflows. The historical contract is unchanged; it is
+# now detected rather than trusted to operator discipline.
 if [[ -d "$HERE/seeds/skills" ]]; then
   mkdir -p "$CLAUDE_SKILLS_DEST"
   skills_wrote=0

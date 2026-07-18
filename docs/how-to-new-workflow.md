@@ -2,6 +2,8 @@
 
 Workflows are YAML files loaded from `~/.forge/workflows/<name>.yml` (global) or `<project>/.forge/workflows/<name>.yml` (per-project override). Seeds live at `seeds/workflows/` and are installed by `install-seeds.sh`. Schema validation is handled by Zod in `src/v2/schema.ts`.
 
+> **Don't hand-edit the installed global copy of a workflow the release ships.** For any workflow forge ships a seed for (every file under `seeds/workflows/`, including the `security-audit` example built below), dispatch **refuses** a `~/.forge/workflows/<name>.yml` whose bytes have drifted from that shipped baseline: the copy is schema-valid but would silently run a stale definition against current code, so the loader stops with a named error rather than mis-running it. Iterate the **seed** instead — edit `seeds/workflows/<name>.yml` and rerun `install-seeds.sh`, which force-overwrites the forge-owned global copy and keeps `~/.forge/` in lockstep with the seed — or reinstall the release's version with `forge upgrade`. To specialize a workflow for a single project, place your variant at `<project>/.forge/workflows/<name>.yml`; a project override is intentional operator specialization and is **never** refused. (The baseline is the running release's own shipped seed; only a global — host — copy is checked.)
+
 ## Example: add a `security-audit` workflow
 
 This example exercises three primitives that don't appear in the feature workflows in isolation and aren't shown in any existing seed:

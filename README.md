@@ -104,7 +104,7 @@ Shows agent outputs across every project on the host, live-polling every 2s. Rea
 |---|---|
 | `src/` | TypeScript source: cli, notify, ops, raci, store, types, util, v2 (runner primitives) |
 | `dashboard/` | Web dashboard workspace (server + client + design corpus) |
-| `seeds/` | Default agent dirs, constraints, runtimes, workflows (copied into `~/.forge/`) |
+| `seeds/` | Default agent dirs, constraints, runtimes, workflows (copied into `~/.forge/`), and `forge-*` skills (installed into the user-global Claude Code skills dir) |
 | `docker/agent-dev-worker.Dockerfile` | Agent container image |
 | `docs/` | How-tos and concepts |
 | `learnings/` | ADRs and patterns for forge itself |
@@ -120,7 +120,7 @@ Shows agent outputs across every project on the host, live-polling every 2s. Rea
 
 ## Upgrading
 
-`forge upgrade` refreshes `~/.forge/`'s forge-owned seeds (workflows, runtimes) and re-inits the current project's orchestrator block, then runs a read-only release check automatically (image, runtime CLIs, auth, policies, seed drift). Your operator-authored seeds — agent prompts, constraints, and `forge-raci.md` — are seeded once and then **retained, never overwritten** (`FORCE=1` included, FG-578); to take a new release's version, remove the `~/.forge/` copy so the installer recreates it, or merge by hand. It installs the bytes of **whichever forge you ran** — the promoted release under `forge`, your working tree under `forge-dev` — never `~/code/forge` behind your back.
+`forge upgrade` refreshes its forge-owned seeds — `~/.forge/`'s workflows and runtimes, plus the `forge-*` skills installed into the user-global Claude Code skills dir (`~/.claude/skills`, not `~/.forge/`) — and re-inits the current project's orchestrator block, then runs a read-only release check automatically (image, runtime CLIs, auth, policies, seed drift). Your operator-authored seeds — agent prompts, constraints, and `forge-raci.md` — are seeded once and then **retained, never overwritten** (`FORCE=1` included, FG-578); to take a new release's version, remove the `~/.forge/` copy so the installer recreates it, or merge by hand. It installs the bytes of **whichever forge you ran** — the promoted release under `forge`, your working tree under `forge-dev` — never `~/code/forge` behind your back.
 
 Advancing the checkout is the other half, and it follows the same stable/dev split as the entry points themselves: `git pull`, `npm install`, and `--rebuild-image` are dev-checkout work, so run them through `forge-dev upgrade` from the checkout. Under the stable `forge` they are **refused** by name and the command exits nonzero rather than reporting success.
 

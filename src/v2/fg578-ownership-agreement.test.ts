@@ -5,19 +5,19 @@
 // published operator-facing contract that four documented entry points invoke
 // directly, so a guard in the `forge upgrade` caller would protect one of them).
 // The read policy lives in seed-drift.ts's SEED_SPECS, which has classified
-// agents/constraints/raci `autoRefreshable: false` — "prose that may carry local
+// agents/constraints/raci as operator-authored + prose — "may carry local
 // edits → warn, never auto-overwrite" — since FG-335. Those are the same fact
 // stated in two languages, and the shell/TS boundary makes literal sharing
 // impractical. So the agreement is a GATE, not a comment asking someone to
 // remember.
 //
-// This is not hypothetical bookkeeping. FG-579 is the live proof that
-// hand-maintained parallel lists drift: SEED_SPECS already misses the `workflows`
-// category the installer installs. If the two ever diverge, the failure is
-// silent and exactly inverted — the detector warns "we would never overwrite
-// this" about a file the installer just clobbered, or forge retains a file it
-// tells the operator `forge upgrade` will refresh. Either way the operator is
-// told a true-sounding thing about a host that is in the other state.
+// This is not hypothetical bookkeeping. Hand-maintained parallel lists drift,
+// and the two ownership sets MUST stay identical; this gate catches any
+// divergence. If they ever diverge, the failure is silent and exactly inverted
+// — the detector warns "we would never overwrite this" about a file the
+// installer just clobbered, or forge retains a file it tells the operator
+// `forge upgrade` will refresh. Either way the operator is told a true-sounding
+// thing about a host that is in the other state.
 //
 // asset-root-agreement.test.ts is the prior art: read the REAL artifact, don't
 // re-declare it here — a test that restates both sides agrees with itself.
@@ -48,7 +48,7 @@ test("FG-578: the installer's AUTHORED_EXEMPT is exactly seed-drift's non-auto-r
   const exempt = parseAuthoredExempt(readFileSync(INSTALL_SCRIPT, "utf8"));
 
   // The whole gate, in one line. Perturb EITHER side — drop `constraints` from
-  // AUTHORED_EXEMPT in the shell, or flip `agents` to autoRefreshable:true in
+  // AUTHORED_EXEMPT in the shell, or reclassify `agents` as forge-owned in
   // SEED_SPECS — and this fails naming both sets.
   assert.deepEqual(
     exempt,

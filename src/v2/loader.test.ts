@@ -14,6 +14,15 @@ import {
   loadModelPolicyWithSource,
 } from "./loader.js";
 
+// FG-579: loadWorkflow now refuses a HOST workflow whose bytes drift from a shipped
+// seed of the same name, comparing against defaultRepoSeedsDir() (the real repo
+// seeds). These resolution tests install a bespoke `feature.yml` under a temp
+// FORGE_HOME, which WOULD read as drift against the real seed. They are testing
+// path resolution, not drift, so they point the injectable baseline at a dir that
+// ships no workflow — "release doesn't ship this → nothing to measure → allow".
+// FG-579's own regression file exercises the refusal against a real baseline.
+const NO_SHIPPED_BASELINE = join(tmpdir(), "fg579-loader-absent-baseline-never-created");
+
 const VALID_WORKFLOW = `
 name: feature
 description: test
@@ -64,7 +73,7 @@ test("loadWorkflow: reads from workspace FORGE_HOME by default", () => {
   mkdirSync(join(homeDir, "workflows"), { recursive: true });
   writeFileSync(join(homeDir, "workflows", "feature.yml"), VALID_WORKFLOW);
 
-  const wf = loadWorkflow("feature");
+  const wf = loadWorkflow("feature", {}, NO_SHIPPED_BASELINE);
   assert.equal(wf.name, "feature");
   assert.equal(wf.steps[0]?.id, "architect");
 });
@@ -95,7 +104,7 @@ test("loadWorkflow: falls back to workspace if project override doesn't exist", 
   writeFileSync(join(homeDir, "workflows", "feature.yml"), VALID_WORKFLOW);
   // No project file written.
 
-  const wf = loadWorkflow("feature", { projectDir });
+  const wf = loadWorkflow("feature", { projectDir }, NO_SHIPPED_BASELINE);
   assert.equal(wf.steps.length, 1);
 });
 
@@ -258,7 +267,7 @@ test("loadWorkflowWithSource: returns source='host' when only workspace copy pre
   writeFileSync(join(homeDir, "workflows", "feature.yml"), VALID_WORKFLOW);
   // No project override written.
 
-  const result = loadWorkflowWithSource("feature", { projectDir });
+  const result = loadWorkflowWithSource("feature", { projectDir }, NO_SHIPPED_BASELINE);
   assert.equal(result.source, "host");
   assert.ok(result.path.includes(homeDir), "path must be inside workspace FORGE_HOME");
   assert.equal(result.name, "feature");

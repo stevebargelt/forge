@@ -47,7 +47,7 @@ function assetTree(prefix: string, marker: string, opts: { manifest?: boolean } 
   mkdirSync(join(base, "scripts"), { recursive: true });
   // The runtime seed is the dangerous category and the #265 failure by name: a
   // stale pi-apikey.yml silently rebinds the provider. It is also the only
-  // category the detector treats as a hard readiness fail (autoRefreshable).
+  // category the detector treats as a hard readiness fail (coupling: executable).
   writeFileSync(join(base, "seeds", "runtimes", "pi-apikey.yml"), `# ${marker}\nprovider: ${marker}\n`);
   writeFileSync(join(base, "seeds", "agents", "note.md"), `${marker} agent\n`);
   writeFileSync(join(base, "seeds", "constraints", "note.md"), `${marker} constraint\n`);
@@ -151,7 +151,7 @@ test("FG-577: on a release host, the remedy the detector NAMES actually converge
         "the detector must see the planted drift before we try to repair it",
       );
       assert.ok(
-        before.stale.some((e) => e.path === join("agents", "note.md") && e.status === "drifted" && !e.autoRefreshable),
+        before.stale.some((e) => e.path === join("agents", "note.md") && e.status === "drifted" && e.ownership === "operator-authored"),
         "…and must see the PROSE drift too, or the convergence claim below is untested",
       );
 
@@ -187,7 +187,7 @@ test("FG-577: on a release host, the remedy the detector NAMES actually converge
       // retains stay stale, which is the honest outcome and is why the renderer no
       // longer promises otherwise.
       assert.deepEqual(
-        after.stale.filter((e) => e.autoRefreshable),
+        after.stale.filter((e) => e.ownership === "forge-owned"),
         [],
         "no forge-OWNED seed may remain stale against the executing release's own seeds",
       );

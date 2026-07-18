@@ -13,8 +13,10 @@ function fixture(): { repo: string; home: string; cleanup: () => void } {
   const repo = join(root, "seeds");
   const home = join(root, "forge-home");
   mkdirSync(join(repo, "runtimes"), { recursive: true });
+  mkdirSync(join(repo, "workflows"), { recursive: true });
   mkdirSync(join(repo, "constraints"), { recursive: true });
   mkdirSync(join(home, "runtimes"), { recursive: true });
+  mkdirSync(join(home, "workflows"), { recursive: true });
   mkdirSync(join(home, "constraints"), { recursive: true });
   return { repo, home, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
@@ -33,7 +35,7 @@ test("detectSeedDrift: identical seeds report current and ok", () => {
   }
 });
 
-test("detectSeedDrift: a drifted RUNTIME seed fails readiness (autoRefreshable)", () => {
+test("detectSeedDrift: a drifted RUNTIME seed fails readiness (forge-owned + executable)", () => {
   const { repo, home, cleanup } = fixture();
   try {
     writeFileSync(join(repo, "runtimes", "pi-apikey.yml"), "provider: ${UPSTREAM_PROVIDER}\n");
@@ -42,9 +44,66 @@ test("detectSeedDrift: a drifted RUNTIME seed fails readiness (autoRefreshable)"
     assert.equal(r.ok, false);
     const e = r.stale.find((x) => x.path.endsWith("pi-apikey.yml"));
     assert.equal(e?.status, "drifted");
-    assert.equal(e?.autoRefreshable, true);
+    assert.equal(e?.ownership, "forge-owned");
+    assert.equal(e?.coupling, "executable");
   } finally {
     cleanup();
+  }
+});
+
+// FG-579: workflows are forge-owned AND executable, so a stale workflow is a hard
+// readiness FAIL in the same class as runtimes — the silent mis-run this ticket
+// exists to stop. Before FG-579 SEED_SPECS omitted the category entirely, so this
+// drift produced NO entry and readiness stayed (wrongly) ok.
+test("detectSeedDrift: a drifted WORKFLOW seed fails readiness (forge-owned + executable)", () => {
+  const { repo, home, cleanup } = fixture();
+  try {
+    writeFileSync(join(repo, "workflows", "feature.yml"), "name: feature\nsteps: []\n");
+    writeFileSync(join(home, "workflows", "feature.yml"), "name: feature\nsteps: [stale]\n"); // stale
+    const r = detectSeedDrift(repo, home);
+    assert.equal(r.ok, false, "a stale workflow silently mis-runs → not ok");
+    const e = r.stale.find((x) => x.path.endsWith("feature.yml"));
+    assert.equal(e?.category, "workflows");
+    assert.equal(e?.status, "drifted");
+    assert.equal(e?.ownership, "forge-owned");
+    assert.equal(e?.coupling, "executable");
+  } finally {
+    cleanup();
+  }
+});
+
+// FG-579: forge-* skills install OUTSIDE $FORGE_HOME (into the Claude Code skills
+// dir), so before this ticket SEED_SPECS could not see them and a drifted skill
+// produced NO entry — the exact coverage gap the finding names. They are
+// forge-owned (upgrade converges them) but PROSE, so drift is a reported warning,
+// not a hard readiness fail.
+test("detectSeedDrift: a drifted forge-* SKILL is reported (forge-owned + prose), keeps ok=true", () => {
+  const root = mkdtempSync(join(tmpdir(), "seed-drift-skills-"));
+  const repo = join(root, "seeds");
+  const home = join(root, "forge-home");
+  const skills = join(root, "claude-skills");
+  try {
+    mkdirSync(join(repo, "skills", "forge-review-loop"), { recursive: true });
+    mkdirSync(join(skills, "forge-review-loop"), { recursive: true });
+    writeFileSync(join(repo, "skills", "forge-review-loop", "SKILL.md"), "v2 guidance\n");
+    writeFileSync(join(skills, "forge-review-loop", "SKILL.md"), "v1 guidance\n"); // stale
+
+    const r = detectSeedDrift(repo, home, skills);
+    assert.equal(r.ok, true, "prose skill drift is a warning, not a readiness fail");
+    const e = r.stale.find((x) => x.path.endsWith("forge-review-loop/SKILL.md"));
+    assert.equal(e?.category, "skills");
+    assert.equal(e?.status, "drifted");
+    assert.equal(e?.ownership, "forge-owned");
+    assert.equal(e?.coupling, "prose");
+
+    // forge-owned drift names forge upgrade as the converging remedy even though
+    // it is prose — the [warn]/[FAIL] mark is coupling, the remedy is ownership.
+    const section = renderSeedDrift(r);
+    assert.match(section, /\[warn\]/);
+    assert.match(section, /Forge-owned seeds \(skills\)/);
+    assert.match(section, /forge upgrade/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -68,7 +127,8 @@ test("detectSeedDrift: drifted PROSE seed warns but keeps ok=true", () => {
     const r = detectSeedDrift(repo, home);
     assert.equal(r.ok, true); // prose drift alone is a warning, not a fail
     assert.equal(r.stale.length, 1);
-    assert.equal(r.stale[0]?.autoRefreshable, false);
+    assert.equal(r.stale[0]?.ownership, "operator-authored");
+    assert.equal(r.stale[0]?.coupling, "prose");
   } finally {
     cleanup();
   }
