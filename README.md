@@ -6,7 +6,7 @@ A TypeScript CLI for orchestrating multi-agent AI workflows on a personal machin
 
 Forge is host-global: one install, one `~/.forge/forge.db`, used against any project on the machine. Each project gets a per-project setup (`forge init`) that wires the orchestrator block into its `CLAUDE.md`, creates a `.forge/` directory for project-level workflow overrides, and scaffolds a `backlog/` directory so `forge backlog` commands work immediately.
 
-The web view ships as a workspace package (`dashboard/`) — boot with `forge-dev dashboard start` from a checkout of this repo (it isn't bundled into a release; see [Dashboard](#dashboard)). It reads `~/.forge/forge.db` directly and renders agent outputs across all projects on the host.
+The web view ships as a workspace package (`dashboard/`) and is bundled into every promoted release, so `forge dashboard` runs from the stable `forge`; use `forge-dev dashboard start` when working from a checkout (see [Dashboard](#dashboard)). It reads `~/.forge/forge.db` directly and renders agent outputs across all projects on the host.
 
 ## Prerequisites
 
@@ -84,9 +84,13 @@ Full walkthrough: `docs/quick-start.md`. Multi-project specifics: `docs/how-to-u
 
 The web view ships as an npm workspace inside this repo (`dashboard/`).
 
-Run it **from a source checkout**, not from the stable `forge`: the dashboard is a separate workspace with its own dependency tree and is not bundled into a release, so `forge dashboard` refuses in release mode rather than pretending to run (bundling it is deferred to FG-572).
+Run it either way (FG-580). `forge dashboard` works from a **promoted release**: the dashboard is bundled into the release as a mandatory asset (a build from a source without `dashboard/`, or with a dirty dashboard/vendored asset, refuses by name), resolved from the executing release rather than your checkout. Its client libraries (preact/htm/marked) are vendored as first-party files and the server sends `Content-Security-Policy: script-src 'self'`, so the UI **boots offline** with no CDN-executed JS — the dashboard's provider/data APIs may still need network. When working from a checkout, use `forge-dev dashboard start` instead:
 
 ```bash
+# from the stable release
+forge dashboard start                        # boots http://127.0.0.1:8024
+
+# from a source checkout
 cd ~/code/forge
 ./bin/forge-dev dashboard start              # boots http://127.0.0.1:8024
 ./bin/forge-dev dashboard start --port 8025  # custom port
@@ -116,20 +120,20 @@ Shows agent outputs across every project on the host, live-polling every 2s. Rea
 
 ## Upgrading
 
-`forge upgrade` refreshes `~/.forge/` seeds and re-inits the current project's orchestrator block, then runs a read-only release check automatically (image, runtime CLIs, auth, policies, seed drift). It installs the bytes of **whichever forge you ran** — the promoted release under `forge`, your working tree under `forge-dev` — never `~/code/forge` behind your back.
+`forge upgrade` refreshes `~/.forge/`'s forge-owned seeds (workflows, runtimes) and re-inits the current project's orchestrator block, then runs a read-only release check automatically (image, runtime CLIs, auth, policies, seed drift). Your operator-authored seeds — agent prompts, constraints, and `forge-raci.md` — are seeded once and then **retained, never overwritten** (`FORCE=1` included, FG-578); to take a new release's version, remove the `~/.forge/` copy so the installer recreates it, or merge by hand. It installs the bytes of **whichever forge you ran** — the promoted release under `forge`, your working tree under `forge-dev` — never `~/code/forge` behind your back.
 
 Advancing the checkout is the other half, and it follows the same stable/dev split as the entry points themselves: `git pull`, `npm install`, and `--rebuild-image` are dev-checkout work, so run them through `forge-dev upgrade` from the checkout. Under the stable `forge` they are **refused** by name and the command exits nonzero rather than reporting success.
 
 ```bash
-forge upgrade --skip-project     # refresh ~/.forge/ from the running release (needs no checkout)
+forge upgrade --skip-project     # refresh forge-owned ~/.forge/ seeds from the running release (authored seeds retained; needs no checkout)
 forge-dev upgrade                # from ~/code/forge: also pull, npm install, re-init this project
 ```
 
-Because seed installation is release-owned, `forge upgrade` repairs a drifted `~/.forge/` on a machine that has never cloned forge.
+Because seed installation is release-owned, `forge upgrade` repairs a drifted `~/.forge/` — its forge-owned seeds, at least — on a machine that has never cloned forge. Operator-authored seeds (agents, constraints, `forge-raci.md`) that have diverged are **retained, not repaired**: forge reports them and leaves the merge to you.
 
 `forge upgrade` exits nonzero whenever any requested step did not happen — a refusal, a dirty checkout, a failed install, a stale routing policy, a project with no forge block, a crashed release check — and closes `Upgrade INCOMPLETE — <reasons>` instead of `Upgrade complete.` Operator skips are not failures. `--json` reports the same states as `ok` plus an `unresolved` list, so scripts and humans cannot disagree about whether an upgrade did what was asked. See `docs/how-to-upgrade.md` for all flags, the exit-code and `--json` contract, the execution-mode split, and the multi-project flow.
 
-Note that `forge upgrade` refreshes `~/.forge/` seeds — it does not build or promote a release, so the stable machine-wide `forge` keeps running the release you last promoted until you `forge release build` and `forge release promote` again.
+Note that `forge upgrade` refreshes `~/.forge/`'s forge-owned seeds — it does not build or promote a release, so the stable machine-wide `forge` keeps running the release you last promoted until you `forge release build` and `forge release promote` again.
 
 ## Docs
 

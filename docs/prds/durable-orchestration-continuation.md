@@ -626,6 +626,22 @@ The initiative is complete only when all of the following are true:
 
 ## Revision log
 
+### 2026-07-17 — dashboard availability from a promoted release satisfied (FG-580, `bc9286f`)
+
+- **The open dashboard-availability condition is now MET.** FG-580 (FG-553 Child 5, operator Option A) bundles
+  the dashboard into the promoted release as a mandatory asset and retires the FG-569 release-mode refusal of
+  `forge dashboard`: the command now runs from a promoted release (resolved from `assetRoot()`, never the dev
+  checkout; a torn release still fails named + nonzero), and the release manifest's `selfContainedFor` is
+  always `control-plane+dashboard`. The dashboard also boots offline — its client libs (preact/htm/marked) are
+  vendored as first-party files and the server sends `Content-Security-Policy: script-src 'self'` (this offline/
+  CDN-vendoring behavior was advisor-generated hardening, NOT an operator requirement — the operator approved
+  release *bundling* only; described here only because the code landed in `b6c6542`) — though its
+  provider/data APIs may still need network. This satisfies the "`forge dashboard` unavailable from a promoted
+  release" gap the closeout tracked under FG-572; the broader FG-572 installed-surface work is unaffected.
+- **No normative change.** This is a current-state reconciliation of the same class as the FG-568/FG-573
+  entries below: no binding decision, story order, consumer contract, or failure semantics moves, and the
+  accepted contract SHA stands. Only current-state evidence is updated.
+
 ### 2026-07-17 — Slice 4 propagation-path mechanics reconciled to the execution-mode split (FG-577)
 
 - **The Slice 4 propagation surface "Marker-managed orchestrator block in `CLAUDE.md`, deterministically
@@ -670,8 +686,10 @@ The initiative is complete only when all of the following are true:
   root-owned storage, hardware-backed signing) and is **not FG-571 scope**. Full statement: the FG-571 ticket
   and the plan's §4b.
 - **Still open:** FG-572 (installed-surface compatibility — `forge dashboard` refuses in release mode until
-  it is decided) and FG-555 (R3/R4). **No normative change:** BD-13/BD-14/BD-15, the candidate policies, the
-  slices and the F-row matrix are untouched; only current-state evidence moves.
+  it is decided) and FG-555 (R3/R4). *(Superseded 2026-07-17: the `forge dashboard` release-mode refusal is
+  retired and the dashboard is bundled into the release as of FG-580, `bc9286f`; see the 2026-07-17 dashboard
+  entry above. The rest of FG-572 remains open.)* **No normative change:** BD-13/BD-14/BD-15, the candidate
+  policies, the slices and the F-row matrix are untouched; only current-state evidence moves.
 
 ### 2026-07-15 — current-state map reconciled to landed R1/R2 + exec entry (FG-569, `1b11f25`; FG-573)
 

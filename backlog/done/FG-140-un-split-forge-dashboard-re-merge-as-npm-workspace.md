@@ -12,8 +12,9 @@ Reverses #137 (the dashboard split). Filed and closed in the same session (2026-
 > ⚠️ **SUPERSEDED IN PART by FG-571 (2026-07-16).** This closed ticket records the `forge dashboard start`
 > subcommand it shipped, when there was one `forge` — the live checkout. FG-571 splits stable from dev: the
 > dashboard is a separate workspace with its own dependency tree and is **not bundled into a release**, so
-> stable `forge` **refuses** `dashboard` in release mode. Run it as `./bin/forge-dev dashboard start` from a
-> source checkout. **What this ticket actually did — un-splitting the dashboard back into an npm workspace —
+> stable `forge` refused `dashboard` in release mode. **SUPERSEDED AGAIN by FG-580 (2026-07-17, `bc9286f`):** the
+> dashboard is now BUNDLED into the release and `forge dashboard` runs from a promoted release (offline-booting);
+> `./bin/forge-dev dashboard start` from a source checkout still works too. **What this ticket actually did — un-splitting the dashboard back into an npm workspace —
 > stands and is unaffected**; only the invocation moved.
 
 

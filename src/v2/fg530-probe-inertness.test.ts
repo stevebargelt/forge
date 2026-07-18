@@ -349,10 +349,21 @@ test("FG-530 tier placement: the crash matrix is an INTEGRATION-tier file and is
     `test:unit must exclude *.integration.test.ts, or the whole crash matrix would run in the fast tier, got: ${unit}`,
   );
 
+  // The root integration selection contract moved into the single-source-of-
+  // truth shard script (scripts/run-integration-tests.sh) so CI can shard it
+  // by Node's --test-shard without duplicating the glob. test:integration now
+  // delegates to that script, and the script is what selects the matrix — so
+  // follow the contract to its new home rather than asserting the glob still
+  // sits inline in package.json.
   const integration = pkg.scripts["test:integration"] ?? "";
   assert.ok(
-    integration.includes("'*.integration.test.ts'"),
-    `test:integration must select *.integration.test.ts, got: ${integration}`,
+    integration.includes("run-integration-tests.sh"),
+    `test:integration must delegate to the shard script that selects *.integration.test.ts, got: ${integration}`,
+  );
+  const shardScript = readFileSync(join(REPO_ROOT, "scripts", "run-integration-tests.sh"), "utf8");
+  assert.ok(
+    shardScript.includes("'*.integration.test.ts'"),
+    `scripts/run-integration-tests.sh must select *.integration.test.ts (the matrix's tier home), got: ${shardScript}`,
   );
 
   const extended = pkg.scripts["test:extended"] ?? "";

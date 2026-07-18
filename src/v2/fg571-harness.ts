@@ -87,10 +87,11 @@ export function variantInterpreter(dir: string, label: string): string {
 }
 
 /** The paths buildRelease binds to the commit (release.ts's gitTrackedPaths): src/,
- *  package.json, the selected lockfile, and the required asset dirs. Small — copying them
- *  is cheap. node_modules is install OUTPUT, bound to the lockfile separately, and is
- *  linked rather than copied. */
-const COMMIT_BOUND_PATHS = ["src", "package.json", "seeds", "scripts", "docker"] as const;
+ *  package.json, the selected lockfile, the required asset dirs, and — FG-580 (Option A) —
+ *  the now-mandatory bundled dashboard/ (a dashboard-less source is refused by name). Small
+ *  — copying them is cheap. node_modules is install OUTPUT, bound to the lockfile separately,
+ *  and is linked rather than copied. */
+const COMMIT_BOUND_PATHS = ["src", "package.json", "seeds", "scripts", "docker", "dashboard"] as const;
 const LOCKFILES = ["npm-shrinkwrap.json", "package-lock.json"] as const;
 
 export type DisposableSource = {

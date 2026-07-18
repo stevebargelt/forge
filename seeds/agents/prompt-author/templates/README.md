@@ -34,4 +34,4 @@ Variables are `{{name}}`. The agent does literal string replacement; don't put c
 
 ## Versioning
 
-Templates are checked-in alongside the agent seed; they install to `~/.forge/agents/prompt-author/templates/` via the standard `install-seeds.sh`. When a template changes, re-run `FORCE=1 ./scripts/install-seeds.sh` to overwrite the installed copy.
+Templates are checked-in alongside the agent seed; they install to `~/.forge/agents/prompt-author/templates/` via the standard `install-seeds.sh`. These live under `agents/`, which is operator-authored and **create-only** — installed when absent, **retained** when present, even under `FORCE=1` (FG-578). So `FORCE=1 ./scripts/install-seeds.sh` will **not** push a template edit over an already-installed copy; reinstalling over it is a no-op. To re-test a template change, remove its `~/.forge/agents/prompt-author/templates/…` copy first so the installer recreates it, or copy the file in by hand.

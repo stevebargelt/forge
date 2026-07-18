@@ -1,10 +1,21 @@
 # SPEC — build-step fanout + discipline-based agent routing (#139)
 
+> ⚠️ **STATUS (2026-07-17): the `./scripts/install-seeds.sh` reinstall steps for the tech-lead agent seed below are SUPERSEDED by FG-578.**
+> Since FG-578, `install-seeds.sh` — with or without `FORCE=1` — no longer overwrites an already-installed
+> operator-authored seed (`agents/`, `constraints/`, `forge-raci.md`): it seeds each once, then retains your
+> copy. So re-running the installer to propagate an edit to `seeds/agents/tech-lead/CLAUDE.md` is a **silent
+> no-op** if `~/.forge/agents/tech-lead/` already exists — remove that copy first to re-test the edit.
+> Forge-owned seeds (`workflows/`, `runtimes/`, skills) still refresh normally under `FORCE=1`, so the
+> `feature.yml` reinstall steps below are unaffected. **The build-fanout discipline this PRD specifies is unchanged.**
+
+
 > ⚠️ **STATUS (2026-07-16): the `forge dashboard start` regression check below is SUPERSEDED by FG-571.**
 > It recorded a point-in-time check when there was one `forge` — the live checkout. FG-571 splits stable from
 > dev; the dashboard is a separate workspace, not bundled into a release, so stable `forge` **refuses**
 > `dashboard` in release mode. The equivalent check today is `./bin/forge-dev dashboard start` from a source
 > checkout. **The build-fanout discipline this PRD specifies is unaffected and stands.**
+> **UPDATE (FG-580, `bc9286f`):** the dashboard is now bundled into the release and `forge dashboard` runs
+> from a promoted release (operator Option A); the release-mode refusal above is retired.
 
 
 **Status:** draft, awaiting confirmation
@@ -78,6 +89,8 @@ This spec adds zero new CLI flags, subcommands, or arguments. Behavior change is
 
   After updating, `./scripts/install-seeds.sh` to copy into `~/.forge/agents/tech-lead/`.
 
+  > _FG-578: `agents/` is authored-exempt, so this only copies when `~/.forge/agents/tech-lead/` is absent. If it already exists, the installer retains it and the copy is a no-op (with or without `FORCE=1`) — remove the dir first to re-test an edit._
+
 ### Workflow YAML (small)
 
 - `seeds/workflows/feature.yml` — convert the build step to fanout:
@@ -110,6 +123,7 @@ This spec adds zero new CLI flags, subcommands, or arguments. Behavior change is
       # ... (red-narrow, red-frontend, red-backend, red-security as today)
   ```
   Reinstall via `./scripts/install-seeds.sh` after editing.
+  - _FG-578: `seeds/agents/tech-lead/` is an authored-exempt category — the installer seeds it once and thereafter retains an existing `~/.forge/agents/tech-lead/` (`FORCE=1` included), so an edit only lands on a fresh copy; remove that dir first to re-test. `seeds/workflows/feature.yml` is forge-owned and still overwrites under `FORCE=1`._
 
 ### Tests
 
@@ -170,6 +184,7 @@ After implementation:
 - Keep reds on the parent. Per-parent red dispatch is the spec; per-child is explicitly out of scope.
 - Run `npm run typecheck` + `npm test` + `npm --workspace=dashboard run typecheck` before commit.
 - Reinstall seeds (`./scripts/install-seeds.sh`) after editing `seeds/agents/tech-lead/CLAUDE.md` or `seeds/workflows/feature.yml`.
+  - _FG-578: the `tech-lead` edit only lands on a fresh `~/.forge/agents/tech-lead/`; on an existing one the installer retains it (no-op, `FORCE=1` included) — remove that dir first to re-test. `feature.yml` is a forge-owned `workflows/` seed and still overwrites under `FORCE=1`, so that half is unaffected._
 
 ### Ask first about
 - Any change to `dispatchFanoutStep` beyond inserting the agent-resolution helper.
@@ -191,7 +206,7 @@ After implementation:
 
 1. **Schema extension.** Add `agent_map` and `discipline_key` to `FanoutDefSchema` in `src/v2/schema.ts`. Add the two schema tests. `npm run typecheck` clean.
 2. **Runner helper.** Add `resolveChildAgent` in `src/v2/runNext.ts`. Wire it into the existing `runFanoutChild` call sites so the inserted child task's `agentRole` reflects the resolved agent. Add the six unit tests. `npm test` passes.
-3. **Tech-lead seed.** Update `seeds/agents/tech-lead/CLAUDE.md` with the new output schema, the file-independence section, and the discipline-classification guidance. Reinstall seeds.
+3. **Tech-lead seed.** Update `seeds/agents/tech-lead/CLAUDE.md` with the new output schema, the file-independence section, and the discipline-classification guidance. Reinstall seeds. _(FG-578: `agents/` is authored-exempt — the reinstall no-ops if `~/.forge/agents/tech-lead/` already exists, even with `FORCE=1`; remove that dir first to re-test.)_
 4. **feature.yml.** Add the `fanout:` block to the build step with the four discipline mappings. Reinstall.
 5. **Manual verification.** Run the five steps under "Manual verification" above. Capture results.
 6. **Docs.** Update `docs/concepts.md` (Fanout entry) and `docs/how-to-new-workflow.md` (agent_map example). Light touch.

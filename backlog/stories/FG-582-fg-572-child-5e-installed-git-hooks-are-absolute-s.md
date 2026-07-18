@@ -70,3 +70,24 @@ never visible before the stable/dev split made it matter.
 
 **Whichever way the T9 anchoring decision goes, both lines must be reconciled in the same change.** They are
 the operator-facing statement of exactly the behavior this ticket decides.
+
+## Operator decision — 2026-07-17 (T9 anchoring: symlink-through-current)
+
+**Installed git hooks symlink THROUGH `$FORGE_HOME/current`, not through a resolved release path.** Each hook
+invocation therefore uses the **currently promoted release**; an already-running invocation remains anchored to
+whatever it started under. Pin-at-install is rejected — it would leave hooks indefinitely stale after a
+promotion. This resolves the T9 tension for INSTALLED POINTERS (distinct from the process-anchoring the
+campaign settled earlier): a hook is re-resolved at every invocation, so pointing it at `current` is correct.
+
+**Unblocked:** FG-577 (5a) has landed (`b5add06`), and the T9 decision is now made — both blockers cleared.
+
+**Implementation (per this decision):**
+- `forge init`'s hook install (`init.ts:196`, `executeHookPlan` → `symlinkSync`) targets
+  `$FORGE_HOME/current/<hook>` instead of an absolute dev-checkout / resolved-release path, so promotion
+  re-points every hook atomically.
+- Disambiguate `init.ts:185`'s `exists-other`: a stale forge hook (safe to re-point) vs a foreign hook (never
+  clobber) — same operator-owned-surface principle as FG-578.
+- In a live dev checkout with no `current` pointer, preserve today's behavior (point at the checkout) — do not
+  break the dev loop.
+- Reconcile the two stale slash-command-symlink docs this ticket owns (`docs/concepts.md:40`,
+  `docs/quick-start.md:80`) in the same change.

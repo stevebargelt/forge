@@ -49,8 +49,18 @@ export type EnsureHostPolicyResult = { ok: boolean; status: string; routes?: num
  *   - no RACI but policy present     -> standalone escape hatch; leave it ALONE.
  *   - neither, but a seed exists     -> install the seed RACI (create-only), compile.
  *   - neither, and no seed           -> nothing to do; report.
- *  Never overwrites an existing host RACI (that's install-seeds FORCE=1's call,
- *  not ours) and never clobbers a hand-authored standalone policy. */
+ *  Never overwrites an existing host RACI and never clobbers a hand-authored
+ *  standalone policy.
+ *
+ *  FG-578: create-only is no longer deference to a caller who would overwrite it
+ *  anyway — install-seeds.sh does NOT hold that authority now, and neither does
+ *  the init/upgrade seed path here. ~/.forge/forge-raci.md is the operator's
+ *  authored source; the ONE writer is the audited `forge raci apply --confirm`
+ *  channel, which rewrites it and recompiles the derived policy in lockstep. So
+ *  forge seeds it create-only and thereafter only READS it on this path. The
+ *  derived routing-policy.yml is the opposite and is recompiled here on every
+ *  pass: ownership follows the artifact, not the directory the two happen to
+ *  share. */
 export function ensureHostRoutingPolicy(opts: {
   raciPath: string;
   policyPath: string;

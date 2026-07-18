@@ -1,9 +1,11 @@
 ---
 id: FG-587
 type: story
-status: active
+status: done
 title: closed-ticket PRD checklists still say reinstall via install-seeds.sh overwrites authored seeds — a silent no-op since FG-578
 created: 2026-07-17
+closed: 2026-07-17
+closed_commit: d9dacbb
 ---
 
 **Surfaced by:** FG-578's docs reconciliation, 2026-07-17 (run

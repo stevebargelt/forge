@@ -1,8 +1,8 @@
 // forge-dashboard client. Preact + htm; no build step. Polls every 2s.
 
-import { h, render } from "https://esm.sh/preact@10.24.0";
-import { useState, useEffect, useCallback } from "https://esm.sh/preact@10.24.0/hooks";
-import htm from "https://esm.sh/htm@3.1.1";
+import { h, render } from "preact";
+import { useState, useEffect, useCallback } from "preact/hooks";
+import htm from "htm";
 import { renderResultByAgent, md } from "./renderers.js";
 import { UsageView } from "./usage.js";
 import { UsageLimits } from "./usage-limits.js";

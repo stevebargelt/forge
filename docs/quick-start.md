@@ -208,11 +208,11 @@ If you're standing in `~/code/my-app` and have runs going in other projects too,
 
 ## 11. Upgrading later
 
-When new forge commits arrive (new agents, workflows, CLI behavior), `forge upgrade` refreshes `~/.forge/` and re-inits the current project in one step:
+When new forge commits arrive (new agents, workflows, CLI behavior), `forge upgrade` refreshes `~/.forge/`'s forge-owned seeds (workflows, runtimes) and re-inits the current project in one step. Your operator-authored seeds — agent prompts, constraints, and `forge-raci.md` — are retained, not overwritten (`FORCE=1` included, FG-578); remove the `~/.forge/` copy to re-take a release's version, or merge by hand:
 
 ```bash
 cd ~/code/my-app
-forge upgrade                  # refreshes ~/.forge/ from the running release, re-inits project; runs release check
+forge upgrade                  # refreshes forge-owned ~/.forge/ seeds from the running release (authored seeds retained), re-inits project; runs release check
 forge upgrade --dry-run        # see what would change without doing it (can exit 1)
 forge upgrade --json           # the structured result, for scripts
 ```
@@ -237,9 +237,13 @@ Full doc: `docs/how-to-upgrade.md` (flags, multi-project loop, manual recipe).
 
 ## 12. Dashboard (optional)
 
-The web view ships as an npm workspace in the forge repo (`dashboard/`). Run it **from a source checkout**, not from the stable `forge`: the dashboard is a separate workspace with its own dependency tree and is not bundled into a release, so `forge dashboard` refuses in release mode rather than pretending to run (bundling it is deferred to FG-572).
+The web view ships as an npm workspace in the forge repo (`dashboard/`). Run it either way (FG-580). `forge dashboard` works from a **promoted release** — the dashboard is bundled into the release as a mandatory asset and resolved from the executing release. Its client libraries are vendored as first-party files and the server sends `Content-Security-Policy: script-src 'self'`, so the UI **boots offline** with no CDN-executed JS (its provider/data APIs may still need network). When working from a checkout, use `forge-dev dashboard start` instead:
 
 ```bash
+# from the stable release
+forge dashboard start                        # boots http://127.0.0.1:8024
+
+# from a source checkout
 cd ~/code/forge
 ./bin/forge-dev dashboard start              # boots http://127.0.0.1:8024
 ./bin/forge-dev dashboard start --port 8025  # custom port

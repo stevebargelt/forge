@@ -278,7 +278,7 @@ validated unit).
 tampering is an honest limit, dispositioned, not a defect against this ticket.
 
 **Not in scope, unchanged and verified:** no release GC, no PID registry, no supervision; `forge dashboard`
-still refuses in release mode (FG-572). **Containment held for the entire campaign:** the real
+refused in release mode at FG-571 time; **now available from a promoted release as of FG-580 (`bc9286f`)** — bundled + offline-booting. **Containment held for the entire campaign:** the real
 `~/.forge/current`, `~/.forge/releases` and `~/.forge/interpreters` were never created, the machine-wide
 `forge` still resolves to the operator's live checkout, the provider registry at `~/.forge/runtimes` is
 untouched, and `npm link` was never run. Post-merge smoke: `forge --version` → `0.1.0` and `forge backlog

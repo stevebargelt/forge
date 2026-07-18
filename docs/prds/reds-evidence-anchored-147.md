@@ -1,5 +1,13 @@
 # SPEC — Reds: evidence-anchored output schema + post-validation (#147)
 
+> ⚠️ **STATUS (2026-07-17): the `FORCE=1 ./scripts/install-seeds.sh` reinstall steps for the red seeds below are SUPERSEDED by FG-578.**
+> Since FG-578, `install-seeds.sh` — with or without `FORCE=1` — no longer overwrites an already-installed
+> operator-authored seed (`agents/`, `constraints/`, `forge-raci.md`): it seeds each once, then retains your
+> copy. The red seeds live under `seeds/agents/` (an authored-exempt category), so re-running the installer to
+> propagate an edit to `seeds/agents/red-*/CLAUDE.md` is a **silent no-op** if `~/.forge/agents/red-*/` already
+> exists — remove those copies first to re-test the edit. Forge-owned seeds (`workflows/`, `runtimes/`, skills)
+> still refresh normally under `FORCE=1`. **The evidence-anchoring validator this PRD specifies is unchanged.**
+
 **Status:** draft, awaiting confirmation
 **Backlog linkage:** closes #147. Composite with #148 (red-narrow investigation) — #147 lands first; if red-narrow's signal-to-noise still looks bad after, #148 revives as actual investigation work.
 
@@ -85,6 +93,8 @@ Each gets a new "**Evidence anchoring (required)**" section with:
 
 Reinstall via `FORCE=1 ./scripts/install-seeds.sh` after editing.
 
+> _FG-578: the red seeds are under `seeds/agents/`, an authored-exempt category — `FORCE=1` no longer overwrites an already-installed `~/.forge/agents/red-*/`; the installer retains it and reports it as retained. Remove those dirs first to re-test an edit._
+
 ### Tests
 
 - `src/v2/validate-findings.test.ts` — NEW. Pure unit tests. ~10 tests:
@@ -166,7 +176,7 @@ After landing, write a small one-off script that runs `validateVerdict` against 
 2. **`validate-findings.ts` + tests.** Pure module. All 10 tests pass.
 3. **Wire into `runNext.ts`.** Call validator before `insertVerdict`; use validated verdict for the authoritativeFail check too. Existing tests still pass.
 4. **`events.ts` extension** — add `verdict.findings_dropped` to the EventType union.
-5. **Seed updates** — all 5 red seeds get the new evidence-anchoring section. Reinstall seeds.
+5. **Seed updates** — all 5 red seeds get the new evidence-anchoring section. Reinstall seeds. _(FG-578: these are `agents/` seeds — authored-exempt, so the reinstall no-ops on an existing `~/.forge/agents/red-*/`, `FORCE=1` included; remove those dirs first to re-test.)_
 6. **Manual smoke run** — one short workflow against a real local project. Verify validator behavior in real data.
 7. **Retroactive sanity-check script** — run against historical DB verdicts. Confirm 2+ would have been downgraded; investigate if dramatically more.
 8. **Backlog hygiene + commit.** Close #147 with the commit sha.

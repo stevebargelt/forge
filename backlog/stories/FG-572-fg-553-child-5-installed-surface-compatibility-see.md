@@ -78,7 +78,7 @@ from these **externally-installed, version-compatible surfaces** (a compatibilit
 | `routing-policy.yml` | **RE-DERIVE** — pure derivative (`host-policy.ts:4-5`); never install or version-compare; its version is a function of the operator's RACI, not the release's | FG-581 |
 | `model-policy.yml` | **OUT OF THE CONTROL PATH** — forge never writes it | — |
 | hooks | **UNDECIDED** — T9 anchoring tension | FG-582 |
-| dashboard | **OPERATOR DECISION** | FG-580 |
+| dashboard | **RESOLVED — Option A, shipped by FG-580 (`bc9286f`): bundled into the release as a mandatory asset, runs from a promoted release, boots offline** | FG-580 |
 
 ## Acceptance (EXECUTED)
 

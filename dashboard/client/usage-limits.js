@@ -1,5 +1,5 @@
-import { h } from "https://esm.sh/preact@10.24.0";
-import htm from "https://esm.sh/htm@3.1.1";
+import { h } from "preact";
+import htm from "htm";
 
 const html = htm.bind(h);
 

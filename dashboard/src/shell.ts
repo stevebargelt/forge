@@ -3,7 +3,49 @@
 // (no nested-template-literal escape gymnastics) and lets the browser
 // cache it independently.
 
-export function renderShell(): string {
+import { randomBytes } from "node:crypto";
+
+// FG-580 — the ONE wiring point that resolves the vendored client-lib module
+// graph. The client imports the bare specifiers `preact`, `preact/hooks`, `htm`
+// and `marked`; this import map points them at the first-party vendored ESM under
+// /client/vendor/** (produced by scripts/vendor-dashboard-libs.mjs). Because the
+// vendored bytes are byte-identical to the upstream dist, `preact/hooks`'s own
+// internal `import ... from "preact"` also resolves through this map — so a
+// promoted release boots and renders with NO network fetch of executable JS.
+// Keep these paths in sync with scripts/vendor-dashboard-libs.mjs.
+const IMPORT_MAP = JSON.stringify({
+  imports: {
+    preact: "/client/vendor/preact/preact.js",
+    "preact/hooks": "/client/vendor/preact/hooks.js",
+    htm: "/client/vendor/htm/htm.js",
+    marked: "/client/vendor/marked/marked.js",
+  },
+});
+
+// FG-580: the served Content-Security-Policy makes "no CDN-executed JS" a RUNTIME
+// invariant, not just a test property — the browser itself refuses any script whose
+// origin is not first-party. `script-src 'self'` allows the same-origin module graph
+// (/client/*.js + the vendored /client/vendor/**), and the per-response nonce below
+// permits the ONE inline script the shell carries: the `<script type="importmap">`.
+// An import map MUST be inline (browsers do not honour `src=` on it), so it cannot move
+// to a same-origin file — a nonce is the correct way to admit it under strict CSP. Only
+// script-src is constrained; inline <style> and images stay unrestricted (no default-src),
+// so tightening scripts does not break the existing stylesheet or favicons.
+export function contentSecurityPolicy(nonce: string): string {
+  return `script-src 'self' 'nonce-${nonce}'`;
+}
+
+/** A fresh per-response CSP nonce. base64 of 16 random bytes — matched verbatim between
+ *  the CSP header (contentSecurityPolicy) and the inline importmap's nonce attribute. */
+export function cspNonce(): string {
+  return randomBytes(16).toString("base64");
+}
+
+export function renderShell(nonce?: string): string {
+  // With a nonce the inline importmap is admitted under `script-src 'self' 'nonce-…'`;
+  // without one (a fixture/test that serves the shell with no CSP) it is a plain inline
+  // script, exactly as before.
+  const importmapNonce = nonce ? ` nonce="${nonce}"` : "";
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -20,6 +62,9 @@ export function renderShell(): string {
 </head>
 <body>
 <div id="app"></div>
+<script type="importmap"${importmapNonce}>
+${IMPORT_MAP}
+</script>
 <script type="module" src="/client/main.js"></script>
 </body>
 </html>`;

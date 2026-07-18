@@ -16,7 +16,14 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const WORKFLOW_PATH = join(root, ".github", "workflows", "ci.yml");
 
 type Step = { name?: string; uses?: string; run?: string; with?: Record<string, unknown> };
-type Job = { "runs-on"?: string; "continue-on-error"?: boolean; steps?: Step[] };
+type Job = {
+  "runs-on"?: string;
+  "continue-on-error"?: boolean;
+  "timeout-minutes"?: number;
+  needs?: string[];
+  if?: string;
+  steps?: Step[];
+};
 type Workflow = {
   on?: { push?: unknown; pull_request?: { branches?: string[] } };
   jobs?: Record<string, Job>;
@@ -39,11 +46,10 @@ test("FG-474: ci.yml triggers on push and on pull_request into main", () => {
   );
 });
 
-test("FG-474: ci.yml has a job whose steps run the full deterministic gate", () => {
+test("FG-474: ci.yml's `test` job runs the full deterministic gate", () => {
   const wf = loadWorkflow();
-  const jobs = wf.jobs ?? {};
-  const job = Object.values(jobs)[0];
-  assert.ok(job, "workflow must define at least one job");
+  const job = wf.jobs?.test;
+  assert.ok(job, "workflow must define the required `test` job");
   const steps = job!.steps ?? [];
   const runCommands = steps.map((s) => s.run).filter((r): r is string => typeof r === "string");
   const usesRefs = steps.map((s) => s.uses).filter((u): u is string => typeof u === "string");
@@ -79,7 +85,7 @@ test("FG-474: ci.yml has a job whose steps run the full deterministic gate", () 
 // merely proves forge's own ci.yml passes that same per-project check.
 test("FG-474: ci.yml's test job actually runs REQUIRED_CI_GATE_COMMAND — proves forge's OWN ci.yml passes the general per-project pairing check (see projectCiRunsCommand), not a general guarantee about other projects", () => {
   const wf = loadWorkflow();
-  const steps = Object.values(wf.jobs ?? {})[0]?.steps ?? [];
+  const steps = wf.jobs?.test?.steps ?? [];
   const runCommands = steps.map((s) => s.run).filter((r): r is string => typeof r === "string");
   assert.ok(
     runCommands.some((r) => r.includes(REQUIRED_CI_GATE_COMMAND)),
@@ -97,7 +103,7 @@ test("FG-474 (task-red-wide-16933b): forge's own ci.yml passes the general-purpo
 
 test("FG-474: ci.yml pins Node via the repo's .nvmrc rather than a hardcoded/latest version", () => {
   const wf = loadWorkflow();
-  const steps = Object.values(wf.jobs ?? {})[0]?.steps ?? [];
+  const steps = wf.jobs?.test?.steps ?? [];
   const setupNode = steps.find((s) => s.uses?.startsWith("actions/setup-node"));
   assert.ok(setupNode, "must have an actions/setup-node step");
   assert.equal(
@@ -112,21 +118,120 @@ test("FG-474: .nvmrc pins the Node major version the better-sqlite3 ABI note ref
   assert.equal(nvmrc, "24", ".nvmrc must stay pinned to 24 — the ABI mismatch this workflow guards against was observed against this exact version");
 });
 
-// FG-495 regression guard: the slow integration/worktree coverage moved out of
-// the fast `test` gate must still run somewhere routine and visible — the
-// `test-extended` job. If a future edit drops this job, mistargets its run
-// command, or silently reintroduces continue-on-error, the trust-sensitive
-// coverage it carries (FG-419/FG-440/FG-474 gate-enforcement tests, among
-// others) would stop gating merges without anyone deciding that on purpose.
-test("FG-495: ci.yml has a test-extended job that runs npm run test:extended", () => {
+// FG-495 regression guard (updated: sharded extended gate): the slow
+// integration/worktree coverage moved out of the fast `test` gate must still
+// run somewhere routine and visible. It now runs as SIX concurrent jobs —
+// four root integration shards (`integration_1`..`integration_4`, partitioned
+// by Node's --test-shard), a `worktree` job, and a `dashboard_integration`
+// job — with the required `test-extended` job reduced to a fail-closed
+// aggregate over all six. If a future edit drops a shard, mistargets a shard
+// selector, drops the F31 provision step, or lets the aggregate go green on a
+// failed dependency, the trust-sensitive coverage (FG-419/FG-440/FG-474
+// gate-enforcement tests, among others) would stop gating merges without
+// anyone deciding that on purpose.
+
+const INTEGRATION_SHARD_JOBS = ["integration_1", "integration_2", "integration_3", "integration_4"] as const;
+
+test("FG-495 (sharded): ci.yml has four integration shard jobs each running the shard script with its own k/4 selector", () => {
+  const wf = loadWorkflow();
+  const selectors: string[] = [];
+  for (const name of INTEGRATION_SHARD_JOBS) {
+    const job = wf.jobs?.[name];
+    assert.ok(job, `ci.yml must define the ${name} integration shard job`);
+    const runCommands = (job!.steps ?? []).map((s) => s.run).filter((r): r is string => typeof r === "string");
+    const shardRun = runCommands.find((r) => r.includes("run-integration-tests.sh"));
+    assert.ok(
+      shardRun,
+      `${name} must run scripts/run-integration-tests.sh (the single-source-of-truth shard script)`
+    );
+    const m = shardRun!.match(/run-integration-tests\.sh\s+([0-9]+\/[0-9]+)/);
+    assert.ok(m, `${name} must pass a k/N shard selector to run-integration-tests.sh`);
+    selectors.push(m![1]!);
+  }
+  assert.deepEqual(
+    [...selectors].sort(),
+    ["1/4", "2/4", "3/4", "4/4"],
+    "the four shard jobs must cover exactly 1/4,2/4,3/4,4/4 — each appearing exactly once (a clean disjoint cover)"
+  );
+});
+
+test("FG-495 (sharded): each integration shard job provisions the F31 ABI-incompatible Node (FORGE_TEST_MISMATCHED_NODE)", () => {
+  const wf = loadWorkflow();
+  for (const name of INTEGRATION_SHARD_JOBS) {
+    const job = wf.jobs?.[name];
+    assert.ok(job, `ci.yml must define the ${name} integration shard job`);
+    const runCommands = (job!.steps ?? []).map((s) => s.run).filter((r): r is string => typeof r === "string");
+    assert.ok(
+      runCommands.some((r) => r.includes("FORGE_TEST_MISMATCHED_NODE")),
+      `${name} must include the F31 provision step — --test-shard can route node-preflight.integration.test.ts to ANY shard, and that test treats FORGE_TEST_MISMATCHED_NODE as a HARD requirement, so every shard needs it`
+    );
+  }
+});
+
+test("FG-495 (sharded): ci.yml has a worktree job that runs npm run test:worktree", () => {
+  const wf = loadWorkflow();
+  const job = wf.jobs?.worktree;
+  assert.ok(job, "ci.yml must define a worktree job for the root worktree tier");
+  const runCommands = (job!.steps ?? []).map((s) => s.run).filter((r): r is string => typeof r === "string");
+  assert.ok(
+    runCommands.some((r) => r.includes("npm run test:worktree")),
+    "worktree job must run npm run test:worktree"
+  );
+});
+
+test("FG-495 (sharded): ci.yml has a dashboard_integration job that runs test:integration -w dashboard", () => {
+  const wf = loadWorkflow();
+  const job = wf.jobs?.dashboard_integration;
+  assert.ok(job, "ci.yml must define a dashboard_integration job for the dashboard workspace's integration tier");
+  const runCommands = (job!.steps ?? []).map((s) => s.run).filter((r): r is string => typeof r === "string");
+  assert.ok(
+    runCommands.some((r) => r.includes("test:integration") && r.includes("-w dashboard")),
+    "dashboard_integration job must run npm run test:integration -w dashboard"
+  );
+});
+
+test("FG-495 (sharded): the test-extended aggregate needs all six extended-gate jobs, uses if: always(), and fails closed on any non-success", () => {
   const wf = loadWorkflow();
   const job = wf.jobs?.["test-extended"];
-  assert.ok(job, "ci.yml must define a test-extended job for the slow integration+worktree tiers");
-  const steps = job!.steps ?? [];
-  const runCommands = steps.map((s) => s.run).filter((r): r is string => typeof r === "string");
+  assert.ok(job, "ci.yml must define the test-extended aggregate job (the required branch-protection context)");
+
+  const needs = job!.needs ?? [];
+  const expectedNeeds = [
+    "integration_1",
+    "integration_2",
+    "integration_3",
+    "integration_4",
+    "worktree",
+    "dashboard_integration",
+  ];
+  assert.deepEqual(
+    [...needs].sort(),
+    [...expectedNeeds].sort(),
+    "test-extended must `needs` exactly the six sharded/tiered extended-gate jobs"
+  );
+
+  assert.equal(
+    job!.if,
+    "always()",
+    "test-extended must use `if: always()` so it still evaluates (fail-closed) when a dependency failed rather than being skipped"
+  );
+
+  // The aggregate step must inspect every dependency's result and fail on any
+  // non-success — this is the fail-closed proof (operator proof #5/#6): a
+  // failed/cancelled/skipped dep cannot yield green.
+  const aggregateBody = (job!.steps ?? [])
+    .map((s) => s.run)
+    .filter((r): r is string => typeof r === "string")
+    .join("\n");
+  for (const dep of expectedNeeds) {
+    assert.ok(
+      aggregateBody.includes(`needs.${dep}.result`),
+      `aggregate step must inspect needs.${dep}.result`
+    );
+  }
   assert.ok(
-    runCommands.some((r) => r.includes("npm run test:extended")),
-    "test-extended job must run npm run test:extended (the integration+worktree tiers moved out of the canonical gate)"
+    /!=\s*"?success"?/.test(aggregateBody) && /exit\s+1/.test(aggregateBody),
+    "aggregate step must exit non-zero when any dependency result is not 'success'"
   );
 });
 
@@ -146,6 +251,48 @@ test("FG-495: the test-extended job is a required merge check — no continue-on
     job!["continue-on-error"],
     undefined,
     "test-extended must NOT have a continue-on-error key — it is a required merge check alongside `test`, not informational; a red run must block merge"
+  );
+});
+
+// Extended-gate wall-clock ceiling: each of the six concurrent extended-gate
+// jobs carries `timeout-minutes: 6`, so a suite that runs long is cancelled →
+// its result is not `success` → the fail-closed aggregate goes red → merge is
+// blocked. Because the six jobs run concurrently, bounding each to 6 min bounds
+// the whole extended gate to ~6 min. The fast `test` gate (separate) and the
+// `test-extended` aggregate (a 3s step) must NOT carry this ceiling.
+const EXTENDED_GATE_JOBS = [
+  "integration_1",
+  "integration_2",
+  "integration_3",
+  "integration_4",
+  "worktree",
+  "dashboard_integration",
+] as const;
+
+test("extended-gate ceiling: each of the six extended-gate jobs has timeout-minutes: 6", () => {
+  const wf = loadWorkflow();
+  for (const name of EXTENDED_GATE_JOBS) {
+    const job = wf.jobs?.[name];
+    assert.ok(job, `ci.yml must define the ${name} extended-gate job`);
+    assert.equal(
+      job!["timeout-minutes"],
+      6,
+      `${name} must carry timeout-minutes: 6 — over-6min ⇒ job cancelled ⇒ aggregate fails ⇒ merge blocked`
+    );
+  }
+});
+
+test("extended-gate ceiling: the fast `test` job and the `test-extended` aggregate do NOT carry the 6-minute job timeout", () => {
+  const wf = loadWorkflow();
+  assert.equal(
+    wf.jobs?.test?.["timeout-minutes"],
+    undefined,
+    "the fast `test` gate is a separate gate — it must not carry the extended gate's 6-minute ceiling"
+  );
+  assert.equal(
+    wf.jobs?.["test-extended"]?.["timeout-minutes"],
+    undefined,
+    "the test-extended aggregate only runs a ~3s step — timing it is pointless and could mask a dependency timeout"
   );
 });
 

@@ -1,9 +1,19 @@
 ---
 id: FG-584
 type: story
-status: active
-title: feature build fanout cannot express semantic dependencies between plan steps — file-disjoint is not the same as independently typecheckable
+status: done
+title: "WITHDRAWN (not implemented): feature build fanout cannot express semantic step dependencies"
 created: 2026-07-17
+closed: 2026-07-17
+---
+
+> **WITHDRAWN (2026-07-17, recovery mode) — NOT IMPLEMENTED.**
+> - Fanout sequencing friction is **real** but does NOT directly falsify an accepted acceptance criterion,
+>   demonstrate data loss, or show in-scope security harm — so under the recovery governor it does not justify
+>   an active ticket.
+> - Not implemented; no replacement ticket created; no implementation commit recorded.
+> - Historical text preserved below for the record.
+
 ---
 
 **Surfaced by:** FG-577's plan gate, 2026-07-17 (run
