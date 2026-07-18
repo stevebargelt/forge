@@ -27,6 +27,29 @@ first line, wrote to stderr — which the Monitor tool does not surface as an ev
 correct the whole time. **A watcher whose failure mode is silence is indistinguishable from "still
 running."**
 
+### Live F22 reproduction — meatgeekv2 synchronous invoke stalls autonomous continuation (2026-07-18)
+
+An orchestrator in the `meatgeekv2` project dispatched an engineer for MG-19 with direct,
+synchronous `forge invoke`. The caller's Bash tool hit its two-minute limit and exited 143 while the
+invocation was still running. FG-536's detached-container work held: run
+`run-mg-19-fix-ci-pipeline-b154ec` remained `active`, task `task-engineer-a97d77` remained `running`,
+the Docker container was still `Up`, and the task's `result.json` was correctly still zero bytes because
+the engineer had not finished. No work was lost and re-invoking would have duplicated it.
+
+The control chain nevertheless stopped. The orchestrator had no completion wake or durable continuation
+claim, ended its turn, and told the operator to "give me a nudge (or just say check) in a few minutes."
+With the operator silent, the completed engineer could not advance to verification, CI, or the next genuine
+decision. This is a live pre-fix reproduction of **F22**, not another FG-535 container-kill incident:
+execution durability survived, but autonomous kickoff-to-continuation did not.
+
+The reproduction also shows why prose that distinguishes "short" from "long" invokes is not a reliable
+control boundary. The installed policy says direct `forge invoke` is synchronous and that the Bash call
+returns when the agent completes (`seeds/orchestrator-template.md:240`), and its ordinary examples dispatch
+agents directly (`:149`, `:167-171`). Only later does it require `forge launch run` for "long-running work,"
+including `forge invoke` (`:415`). Agent duration is not knowable at dispatch time, so the orchestrator is
+asked to choose between contradictory happy paths. FG-563 must remove that duration guess from the adopted
+orchestrator path; this evidence does not add a new acceptance criterion or a second transport.
+
 ## Scope
 
 - The orchestrator launches long work **only** through `forge launch`.
