@@ -21,8 +21,15 @@ export const REQUIRED_ABI = "137";
  *  Only if they are the same ABI. Both an expected ABI we could not read and a known
  *  mismatch are real blocks: passing on an ABI we never determined would start the CLI
  *  under an unverified interpreter and hand the operator the opaque native-loader crash
- *  this preflight exists to preempt. */
-export function checkAbi(actualAbi: string, expectedAbi: string): { ok: true } | { ok: false; message: string } {
+ *  this preflight exists to preempt.
+ *
+ *  `actualNodeVersion` names the interpreter `actualAbi` belongs to. It defaults to
+ *  THIS process's node version — correct for the import-time preflight, which checks
+ *  the running interpreter. FG-555's launch-toolchain guard checks a DIFFERENT
+ *  interpreter (a probed node on the pinned PATH), so it MUST pass that interpreter's
+ *  version; otherwise the refusal would pair the control process's Node version with
+ *  the launched interpreter's ABI and misdiagnose the mismatch. */
+export function checkAbi(actualAbi: string, expectedAbi: string, actualNodeVersion: string = process.versions.node): { ok: true } | { ok: false; message: string } {
   const expected = expectedAbi.trim();
   const actual = actualAbi.trim();
   if (expected === "" || !Number.isFinite(Number.parseInt(expected, 10))) {
@@ -30,7 +37,7 @@ export function checkAbi(actualAbi: string, expectedAbi: string): { ok: true } |
       ok: false,
       message:
         `forge: refusing to run — cannot determine the ABI forge's native modules need.\n` +
-        `  running:  Node ${process.versions.node}, ABI ${actual || "(unreadable)"}\n` +
+        `  running:  Node ${actualNodeVersion}, ABI ${actual || "(unreadable)"}\n` +
         `  required: ${expectedAbi.trim() === "" ? "(missing)" : `(unreadable: ${expectedAbi})`}\n` +
         `An unverified ABI cannot be waved through: forge's better-sqlite3 binding loads under ` +
         `its own ABI only, so starting anyway would fail inside the native loader instead of here.\n` +
@@ -51,7 +58,7 @@ export function checkAbi(actualAbi: string, expectedAbi: string): { ok: true } |
     ok: false,
     message:
       `forge: refusing to run — this Node cannot load forge's native modules.\n` +
-      `  running:  Node ${process.versions.node}, ABI ${actual || "(unreadable)"}\n` +
+      `  running:  Node ${actualNodeVersion}, ABI ${actual || "(unreadable)"}\n` +
       `  required: ABI ${expected}\n` +
       `forge's better-sqlite3 binding is compiled for ABI ${expected}; you are on ${direction}. ` +
       `A binding loads under its own ABI only — newer is as incompatible as older.\n` +

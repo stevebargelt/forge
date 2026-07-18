@@ -157,10 +157,12 @@ export type WorkloadNestedShell =
   | { kind: "not_applicable"; reason: string }
   | { kind: "unknowable"; shell: string; reason: string };
 
-// FG-555: the EFFECTIVE Node interpreter the workload actually ran under —
-// R3's resolved executable, PROBED for its ABI/version at spawn time. Present
-// only when R3 resolved to a Node interpreter (basename node/nodejs) that could
-// be probed; absent otherwise (a non-node workload's runtime is the same
+// FG-555: the EFFECTIVE Node interpreter the workload actually ran under — the
+// effective argv[0] (after skipping env/exec-prefixes), PROBED for its ABI/version
+// at spawn time. Present only when that effective argv[0] is a Node interpreter
+// (basename node/nodejs) that could be probed — including behind an `env` prefix
+// (`env FOO=bar node …`), where the top-level executable is `env` but the runtime is
+// the node behind it; absent otherwise (a non-node workload's runtime is the same
 // unknowable class as R4 — never guessed). This is what lets `forge launch show`
 // diagnose whether a direct `node` workload actually used the compatible toolchain.
 export type WorkloadInterpreter = { execPath: string; abi: string; nodeVersion: string };
@@ -287,13 +289,15 @@ function exitRecorderScript(releaseIdLiteral: string, profileLiteral: string): s
     // ONLY when the effective argv[0] is a terminal Node interpreter (node/nodejs).
     `const eff=a.slice(ci),sh=pth.basename(eff[0]||"");`,
     `let r4;if(sh==="node"||sh==="nodejs"){r4={kind:"not_applicable",reason:"the effective argv[0] is a terminal Node interpreter (node/nodejs) — it IS the runtime (R3 captures it); nothing resolves a different Node later"};}else{var nst=["sh","bash","dash","zsh","ksh","ash"].indexOf(sh)>=0&&eff.slice(1).some(function(x){return /^-[a-z]*c$/.test(x);});var rsn=nst?"a nested shell resolves node/npm/forge at runtime against whatever PATH it builds — not knowable at launch time (BD-14 R4)":up?"an env/wrapper form the launcher cannot fully parse could still resolve an arbitrary runtime — a hidden shell cannot be ruled out (BD-14 R4)":"the effective argv[0] is not a terminal Node interpreter — a later shebang/PATH resolution (a shell, a script, or a Node-shebang launcher) may select a different Node that is not knowable at launch time (BD-14 R4)";r4={kind:"unknowable",shell:sh||"(none)",reason:rsn};}`,
-    // FG-555 (workload runtime): probe the effective interpreter — R3's resolved
-    // executable, when it IS a Node interpreter (basename node/nodejs) — for its
-    // ABI/version, so `forge launch show` can diagnose whether a direct `node`
-    // workload actually ran the compatible toolchain. Bounded to node/nodejs on
-    // purpose: a non-node workload's runtime is the same unknowable class as R4.
-    `let itp;const ep=(r3.kind==="captured"||r3.kind==="derived")?r3.execPath:"";const ebn=ep?pth.basename(ep):"";`,
-    `if(ebn==="node"||ebn==="nodejs"){try{const pr=spawnSync(ep,["-p","process.versions.modules+' '+process.version"],{encoding:"utf8"});if(pr.status===0&&pr.stdout){const pp=pr.stdout.trim().split(" ");if(pp.length===2)itp={execPath:ep,abi:pp[0],nodeVersion:pp[1]};}}catch(_){}}`,
+    // FG-555 (workload runtime): probe the EFFECTIVE interpreter — the effective
+    // argv[0] (eff[0], after skipping env/exec-prefixes), when it IS a Node interpreter
+    // (basename node/nodejs) — for its ABI/version, so `forge launch show` can diagnose
+    // whether the workload actually ran the compatible toolchain. Resolved the SAME way
+    // as R3, so a `node` behind `env FOO=bar node …` is probed even though R3 is `env`.
+    // Bounded to node/nodejs (a non-node runtime is the same unknowable class as R4);
+    // kept in lockstep with deriveWorkloadProvenance's effective-interpreter probe.
+    `let itp,eip="";if(sh==="node"||sh==="nodejs"){const e0=eff[0];if(e0.indexOf("/")>=0){eip=e0;}else{for(const d of (process.env.PATH||"").split(":")){const c=pth.join(d||process.cwd(),e0);try{fs.accessSync(c,fs.constants.X_OK);eip=c;break;}catch(_){}}}}`,
+    `if(eip){try{const pr=spawnSync(eip,["-p","process.versions.modules+' '+process.version"],{encoding:"utf8"});if(pr.status===0&&pr.stdout){const pp=pr.stdout.trim().split(" ");if(pp.length===2)itp={execPath:eip,abi:pp[0],nodeVersion:pp[1]};}}catch(_){}}`,
     // The pinned launch profile (or null) is baked in as a JSON literal — the SAME
     // trusted, ambient-env-independent channel as releaseId (R2) — so the recorded
     // contract is exactly what startLaunch declared, never re-derived here.
@@ -473,13 +477,18 @@ export function deriveWorkloadProvenance(
 
   const result: WorkloadProvenance = { r3, r4 };
   if (opts.profile) result.profile = opts.profile;
-  // Probe the effective interpreter only when R3 resolved to a Node interpreter —
-  // the same bounded criterion the recorder applies (basename node/nodejs).
-  const ep = r3.kind === "captured" || r3.kind === "derived" ? r3.execPath : undefined;
-  if (ep && opts.probeInterpreter) {
-    const name = basename(ep);
-    if (name === "node" || name === "nodejs") {
-      const itp = opts.probeInterpreter(ep);
+  // Probe the EFFECTIVE interpreter — the one that actually executes — when it is a
+  // terminal Node interpreter (R4 not_applicable). This is the effective argv[0]
+  // AFTER skipping env/exec-prefixes, resolved the SAME way R3 resolves argv0. For a
+  // top-level `env FOO=bar node …` R3 is `env`, but the runtime that runs is the node
+  // behind it; probing R3 would leave a supported, allowed launch with no interpreter
+  // ABI/version recorded. Bounded to node/nodejs on purpose (a non-node runtime is the
+  // same unknowable class as R4).
+  if (opts.probeInterpreter && (effName === "node" || effName === "nodejs")) {
+    const effArgv0 = eff.argv[0]!;
+    const effPath = effArgv0.includes("/") ? effArgv0 : resolve(effArgv0, opts.path);
+    if (effPath) {
+      const itp = opts.probeInterpreter(effPath);
       if (itp) result.interpreter = itp;
     }
   }
@@ -583,6 +592,21 @@ function defaultAbiProbe(nodeExec: string): string | undefined {
   }
 }
 
+export type NodeVersionProber = (nodeExec: string) => string | undefined;
+
+/** Probe a launched interpreter's Node VERSION (e.g. `v23.1.0`) the same read-only
+ *  way as its ABI. Feeds checkAbi so a refusal names the version of the interpreter
+ *  that would actually run, not the control process's — the two can differ under the
+ *  pinned-PATH contract. Undefined when unreadable; the caller renders "(unknown)"
+ *  rather than falling back to the control version. */
+function defaultNodeVersionProbe(nodeExec: string): string | undefined {
+  try {
+    return execFileSync(nodeExec, ["-p", "process.version"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {
+    return undefined;
+  }
+}
+
 /** Build the ONE named, actionable refusal (FG-555). Every refusal path uses this
  *  single shape: it names WHY compatibility cannot be proven (the effective argv[0]
  *  and the category), states the pinned PATH, and gives the fix. `detail` carries a
@@ -637,9 +661,10 @@ function toolchainRefusal(profile: LaunchProfile, effectiveArgv0: string, catego
  *  R4 recording is INDEPENDENT of this ALLOW decision: a name-resolved forge/npm STILL
  *  records R4=unknowable (its shebang resolves node later) — being ALLOWED under the flag
  *  and being RECORDED unknowable are both correct. Probe-only — NEVER rebuilds a native dep. */
-export function assertProfileToolchain(profile: LaunchProfile, argv: string[], opts: { resolve?: PathResolver; probeAbi?: AbiProber } = {}): { ok: true } | { ok: false; message: string } {
+export function assertProfileToolchain(profile: LaunchProfile, argv: string[], opts: { resolve?: PathResolver; probeAbi?: AbiProber; probeNodeVersion?: NodeVersionProber } = {}): { ok: true } | { ok: false; message: string } {
   const resolve = opts.resolve ?? resolveOnPath;
   const probe = opts.probeAbi ?? defaultAbiProbe;
+  const probeVersion = opts.probeNodeVersion ?? defaultNodeVersionProbe;
 
   const eff = effectiveCommand(argv);
   const a0 = eff.argv[0] ?? "";
@@ -669,7 +694,11 @@ export function assertProfileToolchain(profile: LaunchProfile, argv: string[], o
     if (!resolved) {
       return toolchainRefusal(profile, a0, "argv[0] is a Node interpreter that does not resolve on the pinned PATH — its runtime cannot be proven");
     }
-    const r = checkAbi(probe(resolved) ?? "", profile.requireAbi);
+    // Name the probed interpreter's OWN version in the refusal — it is a different
+    // interpreter than this control process, so its Node version must be read from it,
+    // never assumed to be process.versions.node (which would pair the control version
+    // with the launched ABI and misdiagnose the mismatch).
+    const r = checkAbi(probe(resolved) ?? "", profile.requireAbi, probeVersion(resolved) ?? "(unknown)");
     if (r.ok) return { ok: true };
     // The recorder spawns argv[0] DIRECTLY, so THIS interpreter — not the pinned
     // PATH — is what runs; its ABI does not match, so the workload would fail deep

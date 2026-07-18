@@ -234,6 +234,20 @@ test("FG-555 workload runtime provenance: deriveWorkloadProvenance carries the p
   assert.deepEqual(d.profile, profile, "the pinned profile is carried on the provenance");
   assert.deepEqual(d.interpreter, { execPath: "/control/bin/node", abi: "137", nodeVersion: "v24.1.0" }, "a Node interpreter is probed for its ABI/version");
 
+  // The EFFECTIVE node behind `env FOO=bar node …` is probed even though R3 is `env` —
+  // the runtime that actually executes is the node, resolved the same way R3 resolves.
+  const viaEnv = deriveWorkloadProvenance(["env", "FOO=bar", "node", "-e", "0"], {
+    profile,
+    probeInterpreter,
+    resolve: (n) => (n === "node" ? "/control/bin/node" : n.includes("/") ? n : "/usr/bin/env"),
+  });
+  assert.equal(viaEnv.r3.kind, "derived", "R3 still honestly names the top-level env");
+  assert.deepEqual(
+    viaEnv.interpreter,
+    { execPath: "/control/bin/node", abi: "137", nodeVersion: "v24.1.0" },
+    "the effective node behind env IS probed — provenance is not defeated by an allowed env prefix",
+  );
+
   // A non-node workload → not probed (its runtime is unknowable, never guessed).
   const nn = deriveWorkloadProvenance(["/usr/bin/make", "test"], { profile, probeInterpreter });
   assert.equal(nn.interpreter, undefined, "a non-node argv[0] is not probed for a Node ABI");
@@ -324,6 +338,25 @@ test("FG-555 toolchain guard: a node argv[0] is ALLOWED only when its probed ABI
 
   const unreadable = assertProfileToolchain(profile, ["node", "x.js"], { resolve, probeAbi: () => undefined });
   assert.equal(unreadable.ok, false, "an unreadable ABI is not waved through (reuses checkAbi's unverifiable-ABI refusal)");
+});
+
+test("FG-555 toolchain guard: an ABI-mismatch refusal names the LAUNCHED interpreter's version, not the control process's", () => {
+  // The launched node is a DIFFERENT interpreter than the forge control process. The
+  // refusal must pair the launched interpreter's own Node version with its own ABI —
+  // reporting process.versions.node (the control) beside the probed ABI would say e.g.
+  // "Node 24, ABI 131", a contradiction the operator cannot act on.
+  const profile = { path: "/p", requireAbi: "137", label: "control-runtime" };
+  const resolve = (name: string) => (name === "node" ? "/p/node" : name.includes("/") ? name : undefined);
+
+  const r = assertProfileToolchain(profile, ["node", "x.js"], { resolve, probeAbi: () => "131", probeNodeVersion: () => "v23.6.0" });
+  assert.equal(r.ok, false);
+  const msg = r.ok === false ? r.message : "";
+  assert.match(msg, /Node v23\.6\.0, ABI 131/, "names the launched interpreter's OWN version beside its own ABI");
+  assert.doesNotMatch(msg, new RegExp(`Node ${process.versions.node.replace(/\./g, "\\.")}`), "does not report the control process's Node version");
+
+  // An unreadable launched version renders "(unknown)" — never a fall-back to the control version.
+  const unknown = assertProfileToolchain(profile, ["node", "x.js"], { resolve, probeAbi: () => "131", probeNodeVersion: () => undefined });
+  assert.match(unknown.ok === false ? unknown.message : "", /Node \(unknown\), ABI 131/, "an unreadable version is honest, not the control's");
 });
 
 test("FG-555 toolchain guard (fail-closed): a shell is refused whether or not it is a login shell — a shell can rebuild PATH and resolve an arbitrary runtime", () => {

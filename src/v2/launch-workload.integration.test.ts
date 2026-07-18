@@ -98,6 +98,21 @@ test("FG-555 workload runtime: the recorder PROBES the effective Node interprete
   assert.deepEqual(workload!.profile, profile, "the pinned launch profile (PATH + required ABI + label) is persisted verbatim");
 });
 
+test("FG-555 workload runtime: an `env FOO=bar <node> …` launch PROBES the effective node behind env — provenance is not defeated by a supported, allowed env prefix", () => {
+  // The allowed contract form `env FOO=bar node …`: the top-level executable (R3) is
+  // `env`, but the runtime that actually executes is the node behind it. The recorder
+  // must probe that EFFECTIVE interpreter and record its ABI/version — otherwise a
+  // supported launch shows R4 not_applicable with no interpreter, defeating provenance.
+  const { workload } = runRecorder(["env", "FOO=bar", process.execPath, "-e", "0"]);
+  assert.ok(workload, "the recorder wrote workload.json");
+  assert.equal(workload!.r3.argv0, "env", "R3 honestly names the top-level env that ran");
+  assert.equal(workload!.r4.kind, "not_applicable", "the effective argv[0] behind env IS a terminal node — R4 not_applicable");
+  assert.ok(workload!.interpreter, "the EFFECTIVE node behind env was probed and persisted");
+  assert.equal(workload!.interpreter!.execPath, process.execPath, "the probed interpreter is the effective node, not env");
+  assert.equal(workload!.interpreter!.abi, process.versions.modules, "the probed ABI is the effective node's own");
+  assert.equal(workload!.interpreter!.nodeVersion, process.version, "the probed version is the effective node's own");
+});
+
 test("FG-555 workload runtime: a NON-node workload records no interpreter (its runtime is the same unknowable class as R4 — never guessed), and no profile without a contract", () => {
   const { workload } = runRecorder(["true"]);
   assert.ok(workload);
