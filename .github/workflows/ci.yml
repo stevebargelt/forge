@@ -6,10 +6,17 @@ name: CI
 # minutes re-running it on the host as their merge gate — see CLAUDE.md's
 # "Merge authorization" section and docs/how-to-testing.md.
 #
-# job `test-extended` (FG-495) runs the integration + worktree tiers moved
-# out of the fast gate — real subprocess/git/DB coverage that's still
-# trust-sensitive and IS a required merge check, same as `test`. Branch
-# protection carries both contexts ("test" and "test-extended"; the
+# job `test-extended` (FG-495) is the required merge check carrying the
+# integration + worktree tiers moved out of the fast gate — real
+# subprocess/git/DB coverage that's still trust-sensitive. It is now a
+# lightweight FINAL AGGREGATE: the slow work is sharded across six
+# concurrent jobs — `integration_1`..`integration_4` (root integration tier
+# partitioned by Node's --test-shard, ~4x speedup), `worktree` (root
+# worktree tier), and `dashboard_integration` (dashboard workspace's own
+# integration tier). `test-extended` `needs` all six and, with
+# `if: always()`, FAILS CLOSED unless every one reports success — so a
+# failed/cancelled/skipped shard cannot yield a green required check. Branch
+# protection still carries both contexts ("test" and "test-extended"; the
 # orchestrator applies that host-side, see CLAUDE.md's branch-protection
 # note). It runs on the same triggers as `test`. Since FG-501, review-loop
 # verification no longer re-pays either tier per round in the common case:
@@ -58,13 +65,15 @@ jobs:
       - name: Test (root + dashboard workspace)
         run: npm run test:all
 
-  test-extended:
+  # Root integration tier, sharded 4 ways by Node's --test-shard. All four
+  # run concurrently (no `needs` between them). Each is identical to the old
+  # test-extended setup, and each provisions the ABI-incompatible Node for the
+  # F31 preflight test — --test-shard distributes files deterministically but
+  # you cannot predict WHICH shard receives node-preflight.integration.test.ts
+  # (which treats FORGE_TEST_MISMATCHED_NODE as a HARD requirement), so ALL
+  # four shards must have it available.
+  integration_1:
     runs-on: ubuntu-latest
-    # Required merge check (FG-495), same as `test`: a red run here blocks
-    # merge exactly like a red `test` run. This job exists to move the slow
-    # integration/worktree coverage off the per-round path, not to make it
-    # optional — trust-sensitive coverage (FG-419/FG-440/FG-474 gate-
-    # enforcement tests) must keep gating merges.
     steps:
       - uses: actions/checkout@v4
 
@@ -99,5 +108,166 @@ jobs:
           test "$abi" != "$active"
           echo "FORGE_TEST_MISMATCHED_NODE=$dest/bin/node" >> "$GITHUB_ENV"
 
-      - name: Test extended (integration + worktree tiers)
-        run: npm run test:extended
+      - name: Test integration (shard 1/4)
+        run: bash scripts/run-integration-tests.sh 1/4
+
+  integration_2:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Rebuild better-sqlite3 native module
+        run: npm rebuild better-sqlite3
+
+      - name: Provision an ABI-incompatible Node for the F31 preflight test
+        run: |
+          set -euo pipefail
+          ver=v26.3.1
+          dest="$RUNNER_TEMP/node-mismatch"
+          mkdir -p "$dest"
+          curl -fsSL "https://nodejs.org/dist/$ver/node-$ver-linux-x64.tar.xz" | tar -xJ -C "$dest" --strip-components=1
+          abi=$("$dest/bin/node" -p process.versions.modules)
+          active=$(node -p process.versions.modules)
+          echo "provisioned $ver -> ABI $abi (active Node $(node -v) -> ABI $active)"
+          test "$abi" != "$active"
+          echo "FORGE_TEST_MISMATCHED_NODE=$dest/bin/node" >> "$GITHUB_ENV"
+
+      - name: Test integration (shard 2/4)
+        run: bash scripts/run-integration-tests.sh 2/4
+
+  integration_3:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Rebuild better-sqlite3 native module
+        run: npm rebuild better-sqlite3
+
+      - name: Provision an ABI-incompatible Node for the F31 preflight test
+        run: |
+          set -euo pipefail
+          ver=v26.3.1
+          dest="$RUNNER_TEMP/node-mismatch"
+          mkdir -p "$dest"
+          curl -fsSL "https://nodejs.org/dist/$ver/node-$ver-linux-x64.tar.xz" | tar -xJ -C "$dest" --strip-components=1
+          abi=$("$dest/bin/node" -p process.versions.modules)
+          active=$(node -p process.versions.modules)
+          echo "provisioned $ver -> ABI $abi (active Node $(node -v) -> ABI $active)"
+          test "$abi" != "$active"
+          echo "FORGE_TEST_MISMATCHED_NODE=$dest/bin/node" >> "$GITHUB_ENV"
+
+      - name: Test integration (shard 3/4)
+        run: bash scripts/run-integration-tests.sh 3/4
+
+  integration_4:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Rebuild better-sqlite3 native module
+        run: npm rebuild better-sqlite3
+
+      - name: Provision an ABI-incompatible Node for the F31 preflight test
+        run: |
+          set -euo pipefail
+          ver=v26.3.1
+          dest="$RUNNER_TEMP/node-mismatch"
+          mkdir -p "$dest"
+          curl -fsSL "https://nodejs.org/dist/$ver/node-$ver-linux-x64.tar.xz" | tar -xJ -C "$dest" --strip-components=1
+          abi=$("$dest/bin/node" -p process.versions.modules)
+          active=$(node -p process.versions.modules)
+          echo "provisioned $ver -> ABI $abi (active Node $(node -v) -> ABI $active)"
+          test "$abi" != "$active"
+          echo "FORGE_TEST_MISMATCHED_NODE=$dest/bin/node" >> "$GITHUB_ENV"
+
+      - name: Test integration (shard 4/4)
+        run: bash scripts/run-integration-tests.sh 4/4
+
+  # Root worktree tier (~23s). No F31 step — the F31 test is an integration
+  # test, not a worktree test.
+  worktree:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Rebuild better-sqlite3 native module
+        run: npm rebuild better-sqlite3
+
+      - name: Test worktree tier
+        run: npm run test:worktree
+
+  # Dashboard workspace's own integration tier (~1.6s).
+  dashboard_integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Rebuild better-sqlite3 native module
+        run: npm rebuild better-sqlite3
+
+      - name: Test dashboard integration tier
+        run: npm run test:integration -w dashboard
+
+  # Lightweight FINAL AGGREGATE — the required branch-protection context
+  # `CI / test-extended`. It does no test work itself; it fails closed unless
+  # every one of the six sharded/tiered jobs above reports success, so a
+  # failed, cancelled, or skipped dependency cannot yield a green required
+  # check.
+  test-extended:
+    runs-on: ubuntu-latest
+    needs: [integration_1, integration_2, integration_3, integration_4, worktree, dashboard_integration]
+    if: always()
+    steps:
+      - name: Aggregate required extended gate
+        if: always()
+        run: |
+          set -euo pipefail
+          results="${{ needs.integration_1.result }} ${{ needs.integration_2.result }} ${{ needs.integration_3.result }} ${{ needs.integration_4.result }} ${{ needs.worktree.result }} ${{ needs.dashboard_integration.result }}"
+          echo "dependency results: $results"
+          for r in $results; do
+            if [ "$r" != "success" ]; then
+              echo "::error::extended gate dependency not successful: $r"
+              exit 1
+            fi
+          done
+          echo "all six extended-gate dependencies succeeded"
