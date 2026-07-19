@@ -101,6 +101,33 @@ test("FG-552 F32: a directory-discovering reader never sees a RUNNING launch as 
   assert.equal(readLaunch(meta.id, tmux)!.status.state, "running", "and it still reads running after startLaunch returns");
 });
 
+test("FG-552 concurrent start: a directory-discovering reader in the PRE-TMUX window reads running, never terminal unknown", () => {
+  // The narrower race the F32 test above does NOT cover: meta.json is published
+  // BEFORE any tmux session exists, so a concurrent listLaunches/readLaunch that
+  // lands after publication but before new-session would consult owner evidence,
+  // find no session, and classify the just-created launch terminal `unknown` — a
+  // waiter would then advance before respawn-pane ever starts the work. We
+  // reproduce it precisely: observe from INSIDE the new-session call, when
+  // meta.json is on disk (startLaunch writes it before any tmux call) but the
+  // session does not exist yet.
+  const stub = tmuxStub();
+  let observedCount = -1;
+  let observedStatus: { state: string } | undefined;
+  const tmux: TmuxRunner = (args) => {
+    if (args[0] === "new-session") {
+      const all = listLaunches(tmux);
+      observedCount = all.length;
+      observedStatus = all[0]?.status;
+    }
+    return stub.tmux(args);
+  };
+  const meta = startLaunch(["forge", "review-loop", "FG-1"], { name: "concurrentstart", tmux });
+
+  assert.equal(observedCount, 1, "the launch dir is discoverable before the session is created");
+  assert.deepEqual(observedStatus, { state: "running" }, "a launch whose session is not yet created reads running, never terminal unknown");
+  assert.equal(readLaunch(meta.id, tmux)!.status.state, "running", "and still running once ownership is established");
+});
+
 test("FG-535 start: persists launcher identity — the submitting pid and the tmux-owned pane pid", () => {
   const { tmux, calls } = tmuxStub();
   const meta = startLaunch(["sleep", "600"], { name: "pids", tmux });

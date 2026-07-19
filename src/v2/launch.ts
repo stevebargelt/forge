@@ -84,6 +84,11 @@ export type LaunchMeta = {
   // submission and persisted here. Optional so a launch record written before
   // FG-569 still loads — its absence surfaces as "not recorded", never inferred.
   control?: ControlRuntime;
+  // FG-552: set only on the FIRST (pre-tmux) publish and cleared on the republish
+  // once respawn-pane has established ownership. While true the tmux session does
+  // not exist yet, so its absence is startup-in-progress — NOT owner loss — and the
+  // classifier must read `running`, never a terminal `unknown`. See startLaunch.
+  starting?: boolean;
 };
 
 export type LaunchStatus =
@@ -899,8 +904,15 @@ export function startLaunch(argv: string[], opts: { name?: string; cwd?: string;
   // second write has NO truncate window — the concern that made the old code
   // single-write no longer applies now that publication is atomic (BD-4). The
   // tmux-failure path rmSyncs the whole dir, taking this record with it.
+  //
+  // The record is marked `starting` here and un-marked on the republish below. The
+  // tmux session does not exist until new-session runs, so between these two writes
+  // a directory-discovering reader that consulted owner evidence would see no
+  // session and classify this launch terminal `unknown` — a waiter would then
+  // advance BEFORE respawn-pane starts the work. `starting` tells the reader that
+  // an absent session is startup-in-progress, so it reads `running` instead.
   const metaPath = join(dir, "meta.json");
-  writeJsonAtomic(metaPath, meta);
+  writeJsonAtomic(metaPath, { ...meta, starting: true });
 
   const wrapped = buildWrapperCommand(argv, meta.logPath, join(dir, "exit"), join(dir, "runtime.json"), process.execPath, trustedReleaseId(), opts.profile ?? null);
   try {
@@ -942,7 +954,9 @@ export function startLaunch(argv: string[], opts: { name?: string; cwd?: string;
   // republished (atomically) with it — an owner pid queried before respawn-pane
   // would name the inert bootstrap pane instead. This is the second atomic write;
   // a concurrent reader sees the pre-run record or this one, never a torn/absent
-  // state (F32).
+  // state (F32). `meta` carries no `starting` flag (it was set only on the spread
+  // written above), so this republish clears it: ownership is now established, and
+  // an absent session hereafter IS terminal owner loss, classified normally.
   meta.ownerPid = ownerPidOf(session, tmux);
   writeJsonAtomic(metaPath, meta);
   return meta;
@@ -1000,6 +1014,14 @@ export function readLaunch(id: string, tmux: TmuxRunner = defaultTmux): LaunchVi
   let ex = readExit();
   if (ex.kind === "record") {
     status = classifyExit(ex.rec);
+  } else if (meta.starting) {
+    // FG-552: the launch is in its startup window — meta.json was published before
+    // the tmux session exists and has not yet been republished with ownership. An
+    // absent session here is startup-in-progress, NOT owner loss, so consulting
+    // owner evidence would wrongly classify a just-created launch terminal
+    // `unknown` and let a concurrent waiter advance before respawn-pane runs the
+    // work. It is `running` until ownership is established (the flag is cleared).
+    status = { state: "running" };
   } else {
     // No authoritative record on the first read — consult owner evidence. BUT a
     // launch that COMPLETES mid-read writes its atomic exit record IMMEDIATELY
