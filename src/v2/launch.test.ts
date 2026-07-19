@@ -60,6 +60,92 @@ test("FG-535 exit record: JSON is authoritative; a bare number (older wrapper) c
   assert.equal(parseExitRecord(""), undefined);
 });
 
+test("FG-552: a bare number that overflows precision is corrupt — not promoted to exited_error", () => {
+  // A digit string too large for a safe integer parses to Infinity (or a
+  // precision-lost value). Accepting it would advance a controller on corrupt
+  // terminal evidence, and Infinity JSON-renders as null. It must fall through to
+  // bounded owner-evidence retry (F11) exactly like the schema-invalid JSON shapes.
+  assert.equal(parseExitRecord("9".repeat(400)), undefined,
+    "an enormous digit string parses to Infinity — invalid, never terminal");
+  assert.equal(parseExitRecord("99999999999999999999"), undefined,
+    "a digit string beyond MAX_SAFE_INTEGER loses precision — invalid, never terminal");
+  assert.equal(parseExitRecord(`-${"9".repeat(400)}`), undefined,
+    "a negative overflow (-Infinity) is invalid too");
+
+  // Safe-integer bare numbers (including the boundary) remain valid.
+  assert.deepEqual(parseExitRecord(String(Number.MAX_SAFE_INTEGER)), { code: Number.MAX_SAFE_INTEGER, signal: null });
+});
+
+test("FG-552 (regression e2da08d): a SIGNAL-ONLY exit record is a VALID terminal record — the schema-invalid guard must reject only records with NEITHER a numeric code NOR a string signal", () => {
+  // The e2da08d guard `if (code === null) return undefined` rejected every valid
+  // OS-signal exit ({code:null, signal:"SIGTERM"} sets exactly the signal), so a
+  // signal-exited launch never classified terminal and `forge launch wait` hung.
+  const rec = parseExitRecord(`{"signal":"SIGTERM"}`);
+  assert.deepEqual(rec, { code: null, signal: "SIGTERM" },
+    "a signal-only record is valid — one of code|signal is set, never both");
+  assert.deepEqual(classifyExit(rec!), { state: "signaled", signal: "SIGTERM", sender: "unrecorded" },
+    "it classifies as terminal `signaled` with an unrecorded sender — never undefined / never-terminating");
+  // The schema-invalid records stay undefined → bounded retry, NOT terminal.
+  assert.equal(parseExitRecord(`{}`), undefined);
+  assert.equal(parseExitRecord(`{"code":"bad"}`), undefined);
+  assert.equal(parseExitRecord(`{"code":null,"signal":null}`), undefined);
+});
+
+test("FG-552: parseExitRecord requires EXACTLY ONE valid field — a finite code XOR a non-empty signal; both-set / empty-signal are schema-invalid", () => {
+  // The ExitRecord contract is "exactly one of code|signal is set". A record that
+  // sets BOTH is contradictory/corrupt; an empty-string signal is not evidence.
+  // Neither may be accepted as authoritative terminal evidence — each must fall
+  // through to bounded owner-evidence retry (F11), never advance a controller.
+  assert.equal(parseExitRecord(`{"code":0,"signal":"SIGTERM"}`), undefined,
+    "BOTH set is contradictory — never terminal `signaled`");
+  assert.equal(parseExitRecord(`{"code":143,"signal":"SIGTERM"}`), undefined,
+    "BOTH set is contradictory regardless of the code value");
+  assert.equal(parseExitRecord(`{"code":null,"signal":""}`), undefined,
+    "an empty-string signal is not evidence, even though it is a string");
+  assert.equal(parseExitRecord(`{"signal":""}`), undefined,
+    "an empty-string signal alone is schema-invalid");
+
+  // The VALID exactly-one shapes still classify as their terminal dispositions.
+  assert.deepEqual(parseExitRecord(`{"code":0,"signal":null}`), { code: 0, signal: null });
+  assert.deepEqual(classifyExit(parseExitRecord(`{"code":0,"signal":null}`)!), { state: "exited_ok", code: 0 });
+  assert.deepEqual(parseExitRecord(`{"code":7}`), { code: 7, signal: null });
+  assert.deepEqual(classifyExit(parseExitRecord(`{"code":7}`)!), { state: "exited_error", code: 7 });
+  assert.deepEqual(parseExitRecord(`{"signal":"SIGTERM"}`), { code: null, signal: "SIGTERM" });
+  assert.deepEqual(classifyExit(parseExitRecord(`{"signal":"SIGTERM"}`)!),
+    { state: "signaled", signal: "SIGTERM", sender: "unrecorded" });
+});
+
+test("FG-552: a numeric code counts as valid evidence ONLY when it is an INTEGER — a non-integer finite code is schema-invalid, never terminal", () => {
+  // OS exit statuses are integral. A fractional/non-integer code is corrupt bytes,
+  // not authoritative exit evidence: it must fall through to bounded owner-evidence
+  // retry (F11), never advance a waiter with an `exited_error` classification.
+  assert.equal(parseExitRecord(`{"code":0.5}`), undefined,
+    "a non-integer finite code is not valid exit evidence — never terminal");
+  assert.equal(parseExitRecord(`{"code":1e309}`), undefined,
+    "1e309 parses to Infinity (non-finite, non-integer) — still invalid");
+  assert.equal(parseExitRecord(`{"code":-0.0001}`), undefined,
+    "a negative non-integer code is invalid too");
+
+  // Integer codes (including negative) remain valid and classify unchanged.
+  assert.deepEqual(parseExitRecord(`{"code":-1}`), { code: -1, signal: null });
+  assert.deepEqual(classifyExit(parseExitRecord(`{"code":-1}`)!), { state: "exited_error", code: -1 });
+  assert.deepEqual(parseExitRecord(`{"code":0}`), { code: 0, signal: null });
+  assert.deepEqual(classifyExit(parseExitRecord(`{"code":0}`)!), { state: "exited_ok", code: 0 });
+});
+
+test("FG-552: a JSON code that overflows precision is corrupt — the JSON path matches the bare-number path (Number.isSafeInteger, not Number.isInteger)", () => {
+  // {"code":99999999999999999999} rounds to a large float that Number.isInteger
+  // accepts but Number.isSafeInteger rejects. Promoting it to exited_error would
+  // advance a waiter on non-authoritative evidence (and JSON-render the rounded
+  // value). It must be schema-invalid → undefined → bounded owner-evidence retry
+  // (F11), exactly like the bare-number-overflow path already does.
+  assert.equal(parseExitRecord(`{"code":99999999999999999999}`), undefined,
+    "an unsafe-magnitude JSON code is not valid exit evidence — never terminal");
+
+  // The safe-integer boundary (Number.MAX_SAFE_INTEGER) is still valid evidence.
+  assert.deepEqual(parseExitRecord(`{"code":9007199254740991}`), { code: Number.MAX_SAFE_INTEGER, signal: null });
+});
+
 test("FG-569 R2: the recorder runtime record is parsed; a missing required field is rejected, never guessed", () => {
   assert.deepEqual(
     parseRecorderRuntime(`{"execPath":"/opt/n/bin/node","abi":"137","nodeVersion":"v24.0.0","releaseId":"release-abc-1"}`),

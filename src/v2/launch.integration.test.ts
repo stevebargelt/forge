@@ -72,6 +72,62 @@ test("FG-535 start: persists meta.json (command, session, start time, log path) 
   assert.ok(respawn.some((a) => a.includes("review-loop")), "the target command arrives via respawn-pane");
 });
 
+test("FG-552 F32: a directory-discovering reader never sees a RUNNING launch as absent during initial publication", () => {
+  // The window the finding names: startLaunch mkdir's a discoverable dir, then
+  // respawn-pane starts the command. A concurrent listLaunches/readLaunch that
+  // lands after the command runs but before meta.json is published would map the
+  // absent meta.json to undefined — a running launch seen as "no such launch".
+  // We reproduce it by observing FROM INSIDE respawn-pane (the command is now
+  // running) and again right after set-option, asserting the launch is
+  // discoverable and reads `running` at every point past mkdir.
+  const stub = tmuxStub();
+  const observed: Array<{ at: string; count: number; state: string | undefined }> = [];
+  const tmux: TmuxRunner = (args) => {
+    const out = stub.tmux(args);
+    if (args[0] === "set-option" || args[0] === "respawn-pane") {
+      const all = listLaunches(tmux);
+      const mine = all[0];
+      observed.push({ at: args[0]!, count: all.length, state: mine?.status.state });
+    }
+    return out;
+  };
+  const meta = startLaunch(["forge", "review-loop", "FG-1"], { name: "pubwindow", tmux });
+
+  assert.ok(observed.length >= 2, "observed the publication window from inside tmux calls");
+  for (const o of observed) {
+    assert.equal(o.count, 1, `${o.at}: the launch dir is discoverable (not absent) while the command is being started`);
+    assert.equal(o.state, "running", `${o.at}: a discoverable in-flight launch reads running, never undefined`);
+  }
+  assert.equal(readLaunch(meta.id, tmux)!.status.state, "running", "and it still reads running after startLaunch returns");
+});
+
+test("FG-552 concurrent start: a directory-discovering reader in the PRE-TMUX window reads running, never terminal unknown", () => {
+  // The narrower race the F32 test above does NOT cover: meta.json is published
+  // BEFORE any tmux session exists, so a concurrent listLaunches/readLaunch that
+  // lands after publication but before new-session would consult owner evidence,
+  // find no session, and classify the just-created launch terminal `unknown` — a
+  // waiter would then advance before respawn-pane ever starts the work. We
+  // reproduce it precisely: observe from INSIDE the new-session call, when
+  // meta.json is on disk (startLaunch writes it before any tmux call) but the
+  // session does not exist yet.
+  const stub = tmuxStub();
+  let observedCount = -1;
+  let observedStatus: { state: string } | undefined;
+  const tmux: TmuxRunner = (args) => {
+    if (args[0] === "new-session") {
+      const all = listLaunches(tmux);
+      observedCount = all.length;
+      observedStatus = all[0]?.status;
+    }
+    return stub.tmux(args);
+  };
+  const meta = startLaunch(["forge", "review-loop", "FG-1"], { name: "concurrentstart", tmux });
+
+  assert.equal(observedCount, 1, "the launch dir is discoverable before the session is created");
+  assert.deepEqual(observedStatus, { state: "running" }, "a launch whose session is not yet created reads running, never terminal unknown");
+  assert.equal(readLaunch(meta.id, tmux)!.status.state, "running", "and still running once ownership is established");
+});
+
 test("FG-535 start: persists launcher identity — the submitting pid and the tmux-owned pane pid", () => {
   const { tmux, calls } = tmuxStub();
   const meta = startLaunch(["sleep", "600"], { name: "pids", tmux });

@@ -97,7 +97,7 @@ Forge must not make correct ownership depend on a particular upstream diagnosis 
 | tmux availability in agent test image | `agent-dev-worker` image | FG-551 | Landed (`7f6091b`) |
 | Control-plane executable + provenance (R1, R2) | npm-linked mutable Forge working tree; single-process `/bin/sh` exec entry so R1 (`process.execPath`) is self-evidencing; exit-recorder captures R2 independently | FG-553 / FG-569 | **Closed on the live path** — R1/R2 recorded + exec entry (FG-569, `1b11f25`); source isolation + atomic promotion shipped (FG-571, `2f80496`). Honest limit: same-principal `$FORGE_HOME` tampering is out of scope (FG-571 threat boundary) |
 | Launched-workload environment (R3/R4) | `forge launch` preserves argv, records R3/R4 workload provenance at spawn time, and offers the `--require-control-toolchain` pinned-PATH-trust contract for Forge-owned unattended callers | FG-555 | **Shipped (`cd8a036`, 2026-07-18) — R3/R4 recorded; `--require-control-toolchain` contract delivered** |
-| Launch completion notification | Hand-built Monitor polling | FG-552 | Active gap |
+| Launch completion notification | Canonical `forge launch wait` / `waitForLaunchTerminal` blocking subscription over atomic records | FG-552 | **Shipped (`fg552-launch-wait-primitive`, `017352a`, 2026-07-18) — race-free subscription to every terminal disposition (BD-4/BD-6/BD-7 MET); push-notification delivery evidence + idempotent continuation remain open below** |
 | Notification delivery evidence | None | New slice | Missing |
 | Idempotent continuation claim | Consumer-specific/implicit | New slice | Missing |
 | Orchestrator adoption | Session prose and live workaround | New slice | Missing |
@@ -129,7 +129,7 @@ A notification is never proof of success, failure, signal, or publication. On ev
 
 ### BD-4 — Record before notify
 
-**Status: UNMET, owned by Slice 2.** This is a required property, not an accomplished one. Neither record below is atomic today.
+**Status: MET (Slice 2, FG-552). [SHIPPED 2026-07-18 (FG-552) — atomic records / bounded-retry completion disposition delivered].** Both records are now committed atomically in `src/v2/launch.ts`: the exit record is written to a sibling temp file and `renameSync`d into place inside the exit-recorder script, and `meta.json` is published *twice* during startup — each write atomic (temp + rename via `writeJsonAtomic`): first before the tmux session exists, marked as a startup record (`starting`) so a directory-discovering reader classifies an as-yet-owner-less launch `running` rather than a terminal `unknown` — a classification `readLaunch` bounds to launcher-pid (`launcherPid`) liveness, so a launcher that crashes mid-startup falls through to owner-evidence reconciliation and settles to a terminal disposition (`unknown`/`owner_gone`) instead of reading `running` forever — then republished once the owner pid is knowable (which clears the flag). Because each publish is atomic, a consumer never observes partially-written JSON as a terminal result, nor a running launch as "no such launch"; completion is observed through the blocking `forge launch wait` / `waitForLaunchTerminal` subscription over these atomic records, not a push notification. The reader (`readLaunch`) no longer treats an empty or unparseable exit record as terminal: only a parseable record is authoritative, and an unreadable one falls through to owner evidence under bounded retry. The design narrative below is preserved as the accepted record.
 
 The terminal record must become complete and readable before any happy-path completion signal is observable. Two records are in scope:
 
@@ -154,7 +154,7 @@ Duplicate events are expected. Delivery may be delayed or lost. The consumer mus
 
 ### BD-6 — Close the subscribe race
 
-**Status: UNMET, owned by Slice 2.** This is a required property, not an accomplished one. No canonical subscription primitive exists today; each controller hand-builds its watcher.
+**Status: MET (Slice 2, FG-552).** The canonical subscription primitive `waitForLaunchTerminal` (`src/v2/launch.ts`) now closes the subscribe race: it reads the authoritative record, installs the observation mechanism, and rereads immediately, so either read observes an already-terminal launch — no check-then-subscribe gap can strand a completed launch. Controllers no longer hand-build a watcher.
 
 A launch may finish before a subscriber attaches or while subscription is being installed. The subscription algorithm must:
 
@@ -167,7 +167,7 @@ No check-then-subscribe gap may strand a completed launch.
 
 ### BD-7 — Success and every failure shape wake the controller
 
-**Status: UNMET, owned by Slice 2.** This is a required property, not an accomplished one. No terminal disposition wakes a controller today, and the current reader still maps an empty or unparseable record to a terminal `unknown` (see BD-4).
+**Status: MET (Slice 2, FG-552). [SHIPPED 2026-07-18 (FG-552) — atomic records / bounded-retry completion disposition delivered].** Failure is now a completion disposition, not silence: `waitForLaunchTerminal` (`src/v2/launch.ts`) wakes for every terminal disposition — exit 0, ordinary non-zero, OS signal, signal-range code, `owner_gone`, and `unknown`. An empty, unreadable, or invalid exit record is bounded-retry, never prematurely terminal (F11); a *persistently* unreadable/invalid record wakes to a terminal disposition (`owner_gone`/`unknown`) only after a bounded (60s, `DEFAULT_INVALID_BOUND_MS`) retry plus independent owner evidence — it neither blocks forever nor is mapped straight from an empty file to terminal `unknown` (see BD-4). The requirement below is preserved as the accepted record.
 
 The controller must wake for:
 
@@ -415,6 +415,8 @@ Coordination fence: FG-555 consumes BD-14's R1–R4 vocabulary and must not grow
 
 ### Slice 2 — FG-552: atomic terminal record plus launch wait primitive
 
+> **[SHIPPED 2026-07-18 (FG-552) — atomic records / bounded-retry completion disposition delivered.]** The scope below is DELIVERED on branch `fg552-launch-wait-primitive` (tip `017352a`): atomic exit-record and `meta.json` commits (temp + rename), a reader that never maps an empty/unparseable record to a terminal state, the canonical `waitForLaunchTerminal` primitive with mandatory reconciliation, `forge launch wait <id> [--json]`, and a native-free minimal observer (F33). BD-4, BD-6, and BD-7 are MET. The scope and design narrative below are preserved as the accepted record.
+
 Goal: one canonical, race-free subscription to every launch terminal disposition.
 
 Scope:
@@ -627,6 +629,26 @@ The initiative is complete only when all of the following are true:
 - A final reviewer maps evidence to every binding decision and matrix row rather than approving from green CI alone.
 
 ## Revision log
+
+### 2026-07-18 — FG-552 Slice-2 atomic records + launch wait primitive SHIPPED (BD-4/BD-7 MET)
+
+- **BD-4 (record before notify) and BD-7 (failure is a completion disposition) flipped from UNMET to MET.**
+  FG-552 (branch `fg552-launch-wait-primitive`, tip `017352a`) shipped atomic exit-record and `meta.json`
+  commits (sibling temp + `renameSync`) in `src/v2/launch.ts`, so a consumer never observes partially-written
+  JSON as a terminal result nor a running launch as "no such launch."
+- **The reader no longer maps an empty exit file straight to terminal `unknown`.** `readLaunch` treats only a
+  parseable exit record as authoritative; an empty, unreadable, or invalid record is not terminal on a single
+  read (F11) and falls through to owner evidence under bounded retry. A *persistently* unreadable/invalid
+  record wakes to a terminal disposition (`owner_gone`/`unknown`) after a bounded 60s retry
+  (`DEFAULT_INVALID_BOUND_MS`) plus independent owner evidence, rather than blocking forever.
+- **The canonical `waitForLaunchTerminal` primitive wakes for every terminal disposition** (six dispositions +
+  the waiter's own timeout/cancel outcomes). BD-6 (subscribe race) was reconciled earlier in this slice; see
+  BD-6 above.
+- **No normative change.** This is a current-state reconciliation of the same class as the FG-555 entry below:
+  the accepted binding decisions (BD-4/BD-6/BD-7 and the rest), the Slice 2 design narrative, and the F-row
+  matrix are untouched. Only the MET/UNMET status labels and the stale "current behavior is X" descriptions
+  move. FG-562/FG-563/FG-564/FG-565 and the remaining open slices stay open; the "FG-552 … stay open" phrasing
+  in the 2026-07-18 FG-555 entry below described the pre-FG-552 state and is superseded by this entry.
 
 ### 2026-07-18 — FG-555 launched-workload provenance + launch-environment contract SHIPPED (`cd8a036`)
 

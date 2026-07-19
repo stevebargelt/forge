@@ -35,7 +35,7 @@
 // available") — the command may not be a forge command at all.
 
 import { execFileSync } from "node:child_process";
-import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, watch, writeFileSync, type FSWatcher } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FORGE_HOME } from "../util/paths.js";
@@ -84,6 +84,15 @@ export type LaunchMeta = {
   // submission and persisted here. Optional so a launch record written before
   // FG-569 still loads — its absence surfaces as "not recorded", never inferred.
   control?: ControlRuntime;
+  // FG-552: set only on the FIRST (pre-tmux) publish and cleared on the republish
+  // once respawn-pane has established ownership. While true the tmux session may not
+  // exist yet, so its absence is startup-in-progress — NOT owner loss — AS LONG AS the
+  // SUBMITTING launcher (launcherPid) is still alive: then the classifier reads
+  // `running`, never a terminal `unknown`. But `starting` is BOUNDED to that
+  // independently-observable launcher liveness — if the launcher DIED mid-startup and
+  // no live session / exit record exists, the record is reconciled to a terminal
+  // disposition rather than reported `running` forever. See startLaunch / readLaunch.
+  starting?: boolean;
 };
 
 export type LaunchStatus =
@@ -187,6 +196,20 @@ export type LaunchView = LaunchMeta & {
   // FG-555: R3/R4 provenance, written by the recorder at spawn time. Absent for a
   // launch that predates FG-555 — surfaced as "not recorded", never inferred.
   workload?: WorkloadProvenance;
+  // FG-552 (BD-7): set ONLY when `status` is `running` BECAUSE a PRESENT exit
+  // record is unreadable/invalid THIS read (not because the command genuinely
+  // runs — a genuinely-running launch has NO exit file yet). `status` still reads
+  // `running` so every SINGLE read remains an invitation to bounded retry (F11);
+  // this field surfaces the reconciled disposition a BOUNDED waiter wakes on if the
+  // record never becomes readable. A present-but-unreadable record is bounded-retry,
+  // never terminal on a single read: this field is set ONLY when there is INDEPENDENT
+  // TERMINAL OWNER evidence — no session -> unknown, dead pane -> owner_gone (PRD:
+  // "only terminal after independent terminal owner evidence"). A CONFIRMED-LIVE owner
+  // is NOT terminal evidence, so it leaves this UNSET: the launch stays `running`,
+  // bounded ONLY by the waiter's own --timeout (-> wait_timeout, never a fabricated
+  // launch terminal). If the owner LATER dies, reconcile arms the bound then. Never a
+  // second status vocabulary: `terminal` is drawn from the existing LaunchStatus set (BD-10).
+  pendingUnreadableExit?: { terminal: LaunchStatus };
 };
 
 export function classifyExit(rec: ExitRecord): LaunchStatus {
@@ -202,12 +225,32 @@ export function classifyExit(rec: ExitRecord): LaunchStatus {
 export function parseExitRecord(raw: string): ExitRecord | undefined {
   const text = raw.trim();
   if (text === "") return undefined;
-  if (/^-?\d+$/.test(text)) return { code: Number(text), signal: null };
+  if (/^-?\d+$/.test(text)) {
+    // FG-552: a digit string that overflows precision (Number(text) is Infinity or
+    // a rounded-away-from-integer value) is corrupt, not authoritative terminal
+    // evidence — treat it as unreadable and fall through to bounded owner-evidence
+    // retry, exactly like the schema-invalid JSON shapes below, rather than
+    // promoting Infinity/precision-lost bytes to exited_error.
+    const code = Number(text);
+    if (!Number.isSafeInteger(code)) return undefined;
+    return { code, signal: null };
+  }
   try {
     const parsed = JSON.parse(text) as Partial<ExitRecord>;
-    const code = typeof parsed.code === "number" ? parsed.code : null;
-    const signal = typeof parsed.signal === "string" ? parsed.signal : null;
-    return { code, signal };
+    const hasCode = typeof parsed.code === "number" && Number.isSafeInteger(parsed.code);
+    const hasSignal = typeof parsed.signal === "string" && parsed.signal !== "";
+    // FG-552 (BD-7/F11): the ExitRecord contract is "exactly one of code|signal is
+    // set" — an INTEGER numeric code XOR a non-empty string signal. The wrapper
+    // ALWAYS writes exactly one. Any other shape is SCHEMA-INVALID, not authoritative
+    // terminal evidence: BOTH set (`{"code":0,"signal":"SIGTERM"}`) is contradictory;
+    // NEITHER (`{}`, `{"code":"bad"}`, `{"code":null,"signal":null}`) is empty/torn;
+    // an empty-string signal (`{"signal":""}`) or a non-integer code is not evidence.
+    // Accepting any of these would classify a controller-advancing terminal on corrupt
+    // bytes. Instead return undefined so it is treated as an unreadable/not-yet-terminal
+    // record and falls through to bounded owner-evidence retry, exactly like an
+    // empty/half-written file. `hasCode === hasSignal` is true iff NOT exactly one holds.
+    if (hasCode === hasSignal) return undefined;
+    return { code: hasCode ? (parsed.code as number) : null, signal: hasSignal ? (parsed.signal as string) : null };
   } catch {
     return undefined;
   }
@@ -305,7 +348,11 @@ function exitRecorderScript(releaseIdLiteral: string, profileLiteral: string): s
     `const fd=fs.openSync(l,"a");`,
     `const r=spawnSync(a0,a.slice(1),{stdio:["ignore",fd,fd]});`,
     `if(r.error)fs.writeSync(fd,String(r.error.message)+"\\n");`,
-    `fs.writeFileSync(e,JSON.stringify({code:r.error?127:r.status,signal:r.signal??null}));`,
+    // FG-552 (BD-4/F4): commit the terminal exit record ATOMICALLY — write a
+    // sibling temp, then rename it into place. rename(2) is atomic on one
+    // filesystem, so a consumer never observes partially-written JSON as a
+    // terminal result; the file appears complete or not at all.
+    `const et=e+".tmp."+process.pid;fs.writeFileSync(et,JSON.stringify({code:r.error?127:r.status,signal:r.signal??null}));fs.renameSync(et,e);`,
   ].join("");
 }
 
@@ -734,6 +781,34 @@ export function extractForgeIds(log: string): { runIds: string[]; taskIds: strin
   };
 }
 
+/** Publish a record atomically: write a sibling temp file, then rename it into
+ *  place. rename(2) is atomic on a single filesystem, so a concurrent reader sees
+ *  either the previous bytes or the complete new bytes — never a truncated record.
+ *  FG-552 (BD-4): closes both non-atomic defects — a consumer must never observe
+ *  partially-written JSON as a terminal result, and a reader arriving during meta
+ *  publication must never see a running launch as "no such launch". */
+function writeJsonAtomic(path: string, value: unknown): void {
+  const tmp = `${path}.tmp.${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(value, null, 2));
+  renameSync(tmp, path);
+}
+
+// FG-535 AC / FG-552: the ONE human rendering of the canonical status vocabulary.
+// Lives here beside classifyExit so `forge launch show/list` and `forge launch
+// wait` render from a SINGLE source — no second status vocabulary (BD-10). Never
+// infers a signal sender from a 143-shaped code.
+export function statusLine(s: LaunchStatus): string {
+  switch (s.state) {
+    case "running": return "running";
+    case "exited_ok": return "exited 0";
+    case "exited_error": return `exited ${s.code}`;
+    case "signaled": return `terminated by ${s.signal} (signal sender not recorded — origin unknown)`;
+    case "terminated_unattributed": return `exited ${s.code} (signal-range code, no signal evidence — origin unknown)`;
+    case "owner_gone": return "owner gone without an exit record (wrapper killed, or failed before recording — cause and sender not recorded)";
+    case "unknown": return "unknown (no exit record, owner gone — e.g. host reboot)";
+  }
+}
+
 function launchDir(id: string): string {
   // Every path under LAUNCHES_DIR is derived here; ids come from operator
   // input (show/rm) as well as startLaunch, so the traversal guard lives at
@@ -790,6 +865,24 @@ function paneDead(session: string, tmux: TmuxRunner): boolean | null {
   }
 }
 
+/** Whether the SUBMITTING forge CLI (meta.launcherPid) is still alive. The launcher
+ *  pid is the independently-observable transition that BOUNDS the `starting` startup
+ *  window (FG-552): a `starting` record whose launcher is alive is genuinely
+ *  mid-startup; one whose launcher is gone is a launcher-crash orphan to reconcile.
+ *  Mirrors the codebase's pidAlive idiom (run-lock): kill(pid,0) proves existence.
+ *  ONLY a definitive ESRCH (no such process) counts as dead — any other error (EPERM:
+ *  exists but not ours; anything unqueryable) is treated as ALIVE, so an uncertain
+ *  liveness never fabricates a terminal disposition. */
+function launcherAlive(pid: number): boolean {
+  if (pid === process.pid) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
 /** Start a command under a durable tmux owner. Returns the persisted record.
  *  Throws (before anything is written) if tmux is unavailable. */
 export function startLaunch(argv: string[], opts: { name?: string; cwd?: string; tmux?: TmuxRunner; now?: Date; profile?: LaunchProfile } = {}): LaunchMeta {
@@ -834,8 +927,28 @@ export function startLaunch(argv: string[], opts: { name?: string; cwd?: string;
     // recorder (R2) — the CLI is gone by the time anyone inspects this launch.
     control: collectControlRuntime(),
   };
+  // FG-552 (BD-4/F32): meta must be DISCOVERABLE before the command can run, or a
+  // directory-discovering reader (listLaunches walks LAUNCHES_DIR, readLaunch maps
+  // an absent meta.json to undefined) sees a RUNNING launch as "no such launch"
+  // during initial publication. The publish window is real: mkdirSync already made
+  // this dir discoverable, and respawn-pane below starts the command. So publish
+  // the meta record atomically HERE, before any tmux session exists — the only
+  // window a reader can then see is dir-created-but-command-not-yet-running, which
+  // is honestly absent (the id has not been returned and nothing runs). The
+  // ownerPid is not knowable until respawn-pane, so the record is republished once
+  // more below with it. Both writes are temp+rename (writeJsonAtomic), so the
+  // second write has NO truncate window — the concern that made the old code
+  // single-write no longer applies now that publication is atomic (BD-4). The
+  // tmux-failure path rmSyncs the whole dir, taking this record with it.
+  //
+  // The record is marked `starting` here and un-marked on the republish below. The
+  // tmux session does not exist until new-session runs, so between these two writes
+  // a directory-discovering reader that consulted owner evidence would see no
+  // session and classify this launch terminal `unknown` — a waiter would then
+  // advance BEFORE respawn-pane starts the work. `starting` tells the reader that
+  // an absent session is startup-in-progress, so it reads `running` instead.
   const metaPath = join(dir, "meta.json");
-  writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+  writeJsonAtomic(metaPath, { ...meta, starting: true });
 
   const wrapped = buildWrapperCommand(argv, meta.logPath, join(dir, "exit"), join(dir, "runtime.json"), process.execPath, trustedReleaseId(), opts.profile ?? null);
   try {
@@ -874,14 +987,18 @@ export function startLaunch(argv: string[], opts: { name?: string; cwd?: string;
   }
 
   // Only knowable once the pane holds the real command, so the record is
-  // rewritten rather than written once — an owner pid queried before
-  // respawn-pane would name the inert bootstrap pane instead.
+  // republished (atomically) with it — an owner pid queried before respawn-pane
+  // would name the inert bootstrap pane instead. This is the second atomic write;
+  // a concurrent reader sees the pre-run record or this one, never a torn/absent
+  // state (F32). `meta` carries no `starting` flag (it was set only on the spread
+  // written above), so this republish clears it: ownership is now established, and
+  // an absent session hereafter IS terminal owner loss, classified normally.
   meta.ownerPid = ownerPidOf(session, tmux);
-  writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+  writeJsonAtomic(metaPath, meta);
   return meta;
 }
 
-export function readLaunch(id: string, tmux: TmuxRunner = defaultTmux): LaunchView | undefined {
+export function readLaunch(id: string, tmux: TmuxRunner = defaultTmux, isLauncherAlive: (pid: number) => boolean = launcherAlive): LaunchView | undefined {
   const dir = launchDir(id);
   const metaPath = join(dir, "meta.json");
   if (!existsSync(metaPath)) return undefined;
@@ -892,23 +1009,125 @@ export function readLaunch(id: string, tmux: TmuxRunner = defaultTmux): LaunchVi
     return undefined;
   }
 
+  // FG-552 (BD-4/BD-7/F11): an empty, unparseable, or otherwise unreadable exit
+  // record is NEVER terminal on its own — it is the write window BD-4 closes, so
+  // it is an invitation to bounded retry, not a disposition. The read is honest
+  // about THREE distinct outcomes, because they must NOT be conflated:
+  //   record     — a PARSEABLE exit record: authoritative (classifyExit).
+  //   absent      — no exit file at all (ENOENT): no record was written, so it is
+  //                the ONLY outcome that may fall through to a terminal OWNER
+  //                verdict (owner_gone / unknown) when owner evidence is terminal.
+  //   unreadable  — a file EXISTS but its bytes cannot be consumed this read
+  //                (empty/half-written, schema-invalid, or an EIO/EACCES/torn read).
+  //                A record IS being committed; a transient read/parse failure that
+  //                straddles the owner/session ending must not advance a controller
+  //                on indeterminate terminal evidence. This ALWAYS reads `running`
+  //                (bounded retry) — even when owner evidence is terminal — so the
+  //                wait's reconcile re-reads (a transient failure clears next tick)
+  //                and only its own timeout bounds a persistently-corrupt record.
+  // The old reader collapsed absent/unreadable/invalid into one `undefined` and,
+  // once owner evidence went terminal, published unknown/owner_gone after a single
+  // reread — stranding a launch whose valid record a retry would have read (F11).
+  type ExitRead =
+    | { kind: "record"; rec: ExitRecord }
+    | { kind: "absent" }
+    | { kind: "unreadable" };
   let status: LaunchStatus;
+  let pendingUnreadableExit: { terminal: LaunchStatus } | undefined;
   const exitPath = join(dir, "exit");
-  if (existsSync(exitPath)) {
-    const rec = parseExitRecord(readFileSync(exitPath, "utf8"));
-    status = rec ? classifyExit(rec) : { state: "unknown" };
-  } else if (!tmuxSessionAlive(meta.tmuxSession, tmux)) {
-    status = { state: "unknown" };
+  const readExit = (): ExitRead => {
+    let raw: string;
+    try {
+      raw = readFileSync(exitPath, "utf8");
+    } catch (e) {
+      // ENOENT is genuinely absent (no record yet); ANY other read error means a
+      // file is there we transiently could not consume — unreadable, not absent.
+      return (e as NodeJS.ErrnoException).code === "ENOENT" ? { kind: "absent" } : { kind: "unreadable" };
+    }
+    const rec = parseExitRecord(raw);
+    return rec ? { kind: "record", rec } : { kind: "unreadable" };
+  };
+  let ex = readExit();
+  if (ex.kind === "record") {
+    status = classifyExit(ex.rec);
+  } else if (meta.starting && isLauncherAlive(meta.launcherPid)) {
+    // FG-552: the launch is in its startup window — meta.json was published before
+    // the tmux session exists (F32) and has not yet been republished with ownership,
+    // AND the SUBMITTING launcher is still alive, so it is genuinely mid-startup. An
+    // absent session here is startup-in-progress, NOT owner loss, so consulting owner
+    // evidence would wrongly classify a just-created launch terminal `unknown` and let
+    // a concurrent waiter advance before respawn-pane runs the work. It is `running`
+    // until ownership is established (the flag is cleared) — this preserves the round-1
+    // F32 fix.
+    //
+    // The guard is BOUNDED to launcher liveness (launcherPid — the independently
+    // observable transition the finding asked for): a `starting` record whose launcher
+    // has DIED (crashed after respawn-pane succeeded but before the second publish
+    // cleared the flag, then a pane/wrapper that died before writing `exit`) is NOT
+    // mid-startup — it is a launcher-crash orphan. It falls through to the owner-evidence
+    // reconciliation below, so with no live session / no exit record it terminals
+    // (unknown / owner_gone) instead of reporting `running` forever, and a bounded waiter
+    // WAKES on it. A valid exit record (handled above) and a live session (handled below)
+    // are real owner/exit evidence that always win over the stale `starting` marker.
+    status = { state: "running" };
   } else {
-    // The session is alive, but with remain-on-exit that is not proof the
-    // wrapper is: a wrapper killed before its last-act exit write leaves a
-    // live session holding a DEAD pane and no exit record. That combination
-    // is the durable evidence for "the owner was terminated" (the wrapper
-    // writes the exit record even for a signaled child — only the wrapper
-    // itself dying can produce a dead pane with no record). A pane tmux can't
-    // classify stays running (fail-safe: rm keeps refusing without --force).
-    const dead = paneDead(meta.tmuxSession, tmux);
-    status = dead === true ? { state: "owner_gone", cause: "unrecorded", sender: "unrecorded" } : { state: "running" };
+    // No authoritative record on the first read — consult owner evidence. BUT a
+    // launch that COMPLETES mid-read writes its atomic exit record IMMEDIATELY
+    // before its pane dies / its session ends, so a terminal owner verdict
+    // derived here can STRADDLE that completion: the exit read above ran before
+    // the write, the owner probe after the pane went dead. Both terminal owner
+    // verdicts (no session -> unknown, dead pane -> owner_gone) are the
+    // INDETERMINATE "the wrapper never completed" dispositions, so before
+    // concluding either we RE-READ the exit record once — a wrapper that just
+    // died wrote it moments ago. We conclude indeterminate ONLY if the record
+    // is STILL absent; otherwise the now-present record is authoritative
+    // (classifyExit). This closes the read-atomicity race that mis-terminaled a
+    // launch which in fact exited 0 as owner_gone (FG-552 CORE invariant).
+    const sessionAlive = tmuxSessionAlive(meta.tmuxSession, tmux);
+    // With remain-on-exit, a live session is not proof the wrapper is: a wrapper
+    // killed before its last-act exit write leaves a live session holding a DEAD
+    // pane and no exit record — the durable evidence for "the owner was
+    // terminated". A pane tmux can't classify stays running (fail-safe: rm keeps
+    // refusing without --force).
+    const dead = sessionAlive ? paneDead(meta.tmuxSession, tmux) : null;
+    const ownerTerminal = !sessionAlive || dead === true;
+    if (ownerTerminal) ex = readExit(); // recheck AFTER the owner probe closed the straddle window
+    if (ex.kind === "record") {
+      status = classifyExit(ex.rec);
+    } else if (ex.kind === "unreadable") {
+      // F11: a PRESENT but unreadable/invalid record is bounded retry, NEVER a
+      // terminal disposition on a SINGLE read — even when owner evidence is
+      // terminal. status stays `running` so this read is an invitation to retry.
+      // BD-7 / PRD ("only terminal after independent terminal owner evidence"): that
+      // retry is BOUNDED only when there is INDEPENDENT TERMINAL OWNER evidence — no
+      // session -> unknown (owner gone via reboot, 1a), dead pane -> owner_gone (owner
+      // terminated, 1a). In those cases pendingUnreadableExit names the reconciled
+      // disposition a bounded waiter wakes on if the record stays unreadable past its
+      // bound, so a straddled completion never blocks forever.
+      // A CONFIRMED-LIVE owner is NOT terminal evidence: with temp+rename a present
+      // exit record is never torn, so a corrupt record next to a LIVE pane is spurious
+      // and the tmux-owned command is demonstrably still running. Fabricating a
+      // terminal `unknown` here would advance a controller over a still-running
+      // command — the exact FALSE COMPLETION FG-552 exists to prevent. So a live owner
+      // + unreadable record leaves pendingUnreadableExit UNSET: the launch stays
+      // `running`, bounded ONLY by the waiter's own --timeout (which yields
+      // `wait_timeout` — an explicit disposition, never a fabricated launch terminal;
+      // --timeout 0 waiting indefinitely on a genuinely-running command is correct by
+      // design). If the owner LATER dies, reconcile re-reads, owner evidence goes
+      // terminal, and the bound arms then.
+      status = { state: "running" };
+      if (!sessionAlive) {
+        pendingUnreadableExit = { terminal: { state: "unknown" } };
+      } else if (dead === true) {
+        pendingUnreadableExit = { terminal: { state: "owner_gone", cause: "unrecorded", sender: "unrecorded" } };
+      }
+    } else if (!sessionAlive) {
+      status = { state: "unknown" };
+    } else if (dead === true) {
+      status = { state: "owner_gone", cause: "unrecorded", sender: "unrecorded" };
+    } else {
+      status = { state: "running" };
+    }
   }
 
   let log = "";
@@ -930,7 +1149,7 @@ export function readLaunch(id: string, tmux: TmuxRunner = defaultTmux): LaunchVi
     try { workload = parseWorkloadProvenance(readFileSync(wlPath, "utf8")); } catch { /* not readable yet */ }
   }
 
-  return { ...meta, status, forgeIds: extractForgeIds(log), ...(recorder ? { recorder } : {}), ...(workload ? { workload } : {}) };
+  return { ...meta, status, forgeIds: extractForgeIds(log), ...(recorder ? { recorder } : {}), ...(workload ? { workload } : {}), ...(pendingUnreadableExit ? { pendingUnreadableExit } : {}) };
 }
 
 export function listLaunches(tmux: TmuxRunner = defaultTmux): LaunchView[] {
@@ -958,4 +1177,221 @@ export function removeLaunch(id: string, opts: { force?: boolean; tmux?: TmuxRun
     try { tmux(["kill-session", "-t", view.tmuxSession]); } catch { /* already gone */ }
   }
   rmSync(launchDir(id), { recursive: true, force: true });
+}
+
+// ── FG-552: the blocking completion primitive (`forge launch wait`) ──
+
+/** A generous default waiter timeout. A timeout is an explicit `wait_timeout`
+ *  result (never a fabricated launch terminal state), so the default is bounded
+ *  but long enough not to fire on any real long-running forge command. */
+export const DEFAULT_WAIT_TIMEOUT_MS = 12 * 60 * 60 * 1000;
+
+/** FG-552 (BD-7): the bound on a PERSISTENTLY unreadable/invalid exit record whose
+ *  OWNER has already gone terminal. It is DISTINCT from the waiter `--timeout` (which
+ *  yields `wait_timeout`, not a launch disposition): a record that stays unreadable
+ *  this long AFTER independent terminal owner evidence becomes a terminal launch
+ *  COMPLETION (owner_gone/unknown) the waiter wakes on, so a straddled completion
+ *  never blocks forever even with `--timeout 0`. Generous — far longer than any
+ *  transient torn/EIO read needs to clear across reconcile ticks — but FINITE. A
+ *  persistently-corrupt record with a CONFIRMED-LIVE owner is NOT bounded here: the
+ *  command is still running, so only the waiter's `--timeout` bounds it (a
+ *  wait_timeout, never a fabricated launch terminal). Failure is a disposition, not
+ *  silence. */
+export const DEFAULT_INVALID_BOUND_MS = 60 * 1000;
+
+/** A launch is terminal in EVERY state except `running`. The six terminal
+ *  dispositions (exit 0, ordinary non-zero, OS signal, signal-range code, owner
+ *  gone, unknown) all wake a waiter; only a still-running launch keeps it blocked.
+ *  Reuses the one canonical status vocabulary — there is no second one (BD-10). */
+export function isTerminalStatus(s: LaunchStatus): boolean {
+  return s.state !== "running";
+}
+
+export type WaitOutcome =
+  | { kind: "terminal"; view: LaunchView }
+  | { kind: "unknown_launch"; id: string }
+  | { kind: "wait_timeout"; id: string; lastObserved: LaunchStatus }
+  | { kind: "wait_cancelled"; id: string; lastObserved: LaunchStatus };
+
+/** The observation surface the blocking wait needs, injected so the loop is
+ *  testable without real timers, fs.watch, or process signals. `read` is the one
+ *  canonical reader (readLaunch); the rest are plumbing. Each installer returns
+ *  its own teardown. */
+export interface WaitHarness {
+  read(): LaunchView | undefined;
+  installWatcher(onEvent: () => void): () => void;
+  startReconcile(onTick: () => void): () => void;
+  startTimeout(onFire: () => void): () => void;
+  onCancel(onCancel: () => void): () => void;
+  // BD-7: a bounded timer ARMED by the waiter the first read it observes a
+  // `pendingUnreadableExit`, and DISARMED the moment the record clears (becomes a
+  // real record or genuinely-running). If it fires while the record is STILL
+  // unreadable, the waiter wakes on the reconciled terminal disposition rather than
+  // retrying forever. Returns its own teardown (idempotent).
+  startInvalidBound(onFire: () => void): () => void;
+}
+
+/** Canonical blocking wait: return exactly one observation once the launch is
+ *  terminal (or the waiter times out / is cancelled).
+ *
+ *  BD-6 (subscribe race): read the authoritative record, install the watcher,
+ *  reread IMMEDIATELY — either read observes an already-terminal launch, so no
+ *  check-then-subscribe gap can strand a completed launch (F1/F2).
+ *
+ *  F34 (mandatory reconciliation): `owner_gone` and `unknown` produce NO
+ *  filesystem artifact, so fs.watch alone structurally cannot observe them — the
+ *  reconcile tick re-reads owner evidence (tmux liveness / dead pane) on a bounded
+ *  interval. A watch-only harness (startReconcile a no-op) is OBSERVED FAILING to
+ *  see those two dispositions. This bounded internal re-read is NOT a fixed-estimate
+ *  model wake; the waiter owns none of the work (BD-8). */
+export async function waitForLaunchTerminal(id: string, harness: WaitHarness): Promise<WaitOutcome> {
+  const first = harness.read();
+  if (!first) return { kind: "unknown_launch", id };
+  if (isTerminalStatus(first.status)) return { kind: "terminal", view: first };
+
+  return await new Promise<WaitOutcome>((resolve) => {
+    let settled = false;
+    let last: LaunchStatus = first.status;
+    const cleanups: Array<() => void> = [];
+    // BD-7: teardown for the currently-armed invalid-record bound (undefined when
+    // no unreadable record is pending). Armed on the first pending observation,
+    // disarmed when the record clears, so a transient unreadable read never trips a
+    // terminal wake (F11) — only a PERSISTENTLY unreadable one, past the bound.
+    let disarmInvalidBound: (() => void) | undefined;
+    const settle = (o: WaitOutcome): void => {
+      if (settled) return; // emit EXACTLY ONE observation even if events race
+      settled = true;
+      for (const c of cleanups) { try { c(); } catch { /* best-effort teardown */ } }
+      resolve(o);
+    };
+    // BD-7: the bound expired while the exit record was still unreadable. Re-read
+    // once: a record that became readable in the meantime is authoritative; a
+    // launch that reached a terminal owner disposition wakes on that; otherwise the
+    // record is persistently unreadable AND owner evidence went terminal, so we wake
+    // on its reconciled disposition (owner_gone/unknown) — a completion, not silence.
+    // A live owner never arms this bound (readLaunch leaves pendingUnreadableExit
+    // unset), so we never fabricate a terminal over a still-running command.
+    const wakeOnPersistentInvalid = (): void => {
+      if (settled) return;
+      const v = harness.read();
+      if (!v) return;
+      if (isTerminalStatus(v.status)) { settle({ kind: "terminal", view: v }); return; }
+      if (v.pendingUnreadableExit) {
+        const { pendingUnreadableExit, ...rest } = v;
+        settle({ kind: "terminal", view: { ...rest, status: pendingUnreadableExit.terminal } });
+      }
+      // else the record cleared to genuinely-running between disarm and fire — leave
+      // blocked; only a real terminal disposition wakes a genuinely-running launch.
+    };
+    const check = (): void => {
+      if (settled) return;
+      const v = harness.read();
+      if (!v) return; // record transiently gone — not terminal on its own (BD-7)
+      last = v.status;
+      if (isTerminalStatus(v.status)) { settle({ kind: "terminal", view: v }); return; }
+      if (v.pendingUnreadableExit) {
+        // A PRESENT-but-unreadable record: arm the bound once so persistence wakes.
+        if (!disarmInvalidBound) disarmInvalidBound = harness.startInvalidBound(wakeOnPersistentInvalid);
+      } else if (disarmInvalidBound) {
+        // The record cleared (readable, or genuinely-running) — cancel the bound so
+        // a transient never trips a terminal wake (F11 transient).
+        disarmInvalidBound();
+        disarmInvalidBound = undefined;
+      }
+    };
+    cleanups.push(harness.installWatcher(check));
+    cleanups.push(harness.startReconcile(check));
+    cleanups.push(harness.startTimeout(() => settle({ kind: "wait_timeout", id, lastObserved: last })));
+    cleanups.push(harness.onCancel(() => settle({ kind: "wait_cancelled", id, lastObserved: last })));
+    cleanups.push(() => { if (disarmInvalidBound) { disarmInvalidBound(); disarmInvalidBound = undefined; } });
+    check(); // reread immediately after installing the watcher (BD-6)
+  });
+}
+
+/** FG-552 (finding-1): the wait observer's view of a launch whose meta.json is
+ *  PRESENT but unreadable/unparseable this read. It is a KNOWN launch (the record
+ *  file exists), so the waiter must block-and-retry rather than refuse it as an
+ *  unknown id. `status` stays `running` — an invitation to retry (F11) — and
+ *  pendingUnreadableExit bounds it to a terminal `unknown` ("outcome could not be
+ *  determined") if the meta never becomes readable. The meta fields live in the file
+ *  we could not read, so they are left EMPTY, never invented — only `id` and `status`
+ *  drive the observation the waiter renders. */
+function unreadableMetaWaitView(id: string): LaunchView {
+  return {
+    id,
+    command: [],
+    tmuxSession: "",
+    launcherPid: 0,
+    ownerPid: null,
+    startedAt: "",
+    logPath: "",
+    cwd: "",
+    status: { state: "running" },
+    forgeIds: { runIds: [], taskIds: [] },
+    pendingUnreadableExit: { terminal: { state: "unknown" } },
+  };
+}
+
+/** The real harness: node:fs.watch for the ordinary atomic-exit-record rename, a
+ *  bounded interval for the reconciled-only dispositions (owner_gone / unknown),
+ *  and SIGINT/SIGTERM as waiter cancellation. OQ-4: cancelling the WAITER only
+ *  interrupts THIS process — it emits `wait_cancelled` and NEVER touches the
+ *  tmux-owned work. This is a plain blocking wait (watch + reread), never a
+ *  fixed-estimate model poll. */
+export function realWaitHarness(
+  id: string,
+  opts: { tmux?: TmuxRunner; reconcileMs?: number; timeoutMs?: number; invalidBoundMs?: number; isLauncherAlive?: (pid: number) => boolean } = {},
+): WaitHarness {
+  const tmux = opts.tmux ?? defaultTmux;
+  const dir = launchDir(id); // validates the id shape at the chokepoint
+  const metaPath = join(dir, "meta.json");
+  const reconcileMs = opts.reconcileMs ?? 2000;
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
+  const invalidBoundMs = opts.invalidBoundMs ?? DEFAULT_INVALID_BOUND_MS;
+  return {
+    read: () => {
+      const v = readLaunch(id, tmux, opts.isLauncherAlive ?? launcherAlive);
+      if (v) return v;
+      // FG-552 (finding-1): readLaunch returns undefined for BOTH a genuinely-absent
+      // record (ENOENT — an unknown launch id) AND a meta.json that is PRESENT but
+      // unparseable/unreadable THIS read. The record-reader rule forbids collapsing
+      // the two: an unparseable record is retryable, never terminal, so a KNOWN launch
+      // whose meta is transiently unreadable must NOT be refused as "no such launch"
+      // (exit 1) — that is the required unknown-id vs status-unknown distinction. When
+      // the record file is present, surface it as running + a pending `unknown`
+      // disposition, reusing the exact bounded-retry machinery the exit record uses: a
+      // transient clears and reclassifies (F11), a persistently-corrupt meta wakes as
+      // terminal `unknown` past the bound. Genuinely absent stays undefined ->
+      // unknown_launch.
+      return existsSync(metaPath) ? unreadableMetaWaitView(id) : undefined;
+    },
+    installWatcher: (onEvent) => {
+      let w: FSWatcher | undefined;
+      try { w = watch(dir, () => onEvent()); } catch { /* dir unwatchable; reconcile still covers it */ }
+      return () => { try { w?.close(); } catch { /* already closed */ } };
+    },
+    startReconcile: (onTick) => {
+      const t = setInterval(onTick, reconcileMs);
+      return () => clearInterval(t);
+    },
+    startTimeout: (onFire) => {
+      if (!(timeoutMs > 0) || !Number.isFinite(timeoutMs)) return () => { /* no timeout */ };
+      const t = setTimeout(onFire, timeoutMs);
+      return () => clearTimeout(t);
+    },
+    startInvalidBound: (onFire) => {
+      // BD-7: the bound is finite by construction (production default is finite), so
+      // a persistently-invalid record ALWAYS wakes — independent of `--timeout`. A
+      // non-finite override degrades to a no-op rather than arming a bad timer.
+      if (!(invalidBoundMs > 0) || !Number.isFinite(invalidBoundMs)) return () => { /* no bound */ };
+      const t = setTimeout(onFire, invalidBoundMs);
+      return () => clearTimeout(t);
+    },
+    onCancel: (cb) => {
+      const h = (): void => cb();
+      process.once("SIGINT", h);
+      process.once("SIGTERM", h);
+      return () => { process.off("SIGINT", h); process.off("SIGTERM", h); };
+    },
+  };
 }
