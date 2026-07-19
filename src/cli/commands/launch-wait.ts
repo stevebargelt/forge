@@ -100,8 +100,8 @@ export async function waitAndRender(
  *  Best-effort: never fail the observation on an audit write. */
 function recordWaitAudit(id: string, o: WaitOutcome): void {
   if (o.kind === "unknown_launch") return; // no launch dir to record against
-  const event =
-    o.kind === "terminal" ? "wait_observed_terminal" : `wait_${o.kind}`;
+  // o.kind is already "wait_timeout" / "wait_cancelled" for those cases.
+  const event = o.kind === "terminal" ? "wait_observed_terminal" : o.kind;
   const detail = o.kind === "terminal" ? { status: o.view.status } : { lastObserved: o.lastObserved };
   const line = JSON.stringify({ ts: new Date().toISOString(), event, ...detail });
   try {
