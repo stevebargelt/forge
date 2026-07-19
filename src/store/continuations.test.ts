@@ -314,6 +314,15 @@ function claimUniquenessOnly(continuationId: string, owner: string): boolean {
 }
 
 describe("stale-completion / phase-binding (STAGED red→green)", () => {
+  // FG-562 staged-RED evidence (item 4): the load-bearing GREEN test below was
+  // observed FAILING against a temporarily WEAKENED production CAS (uniqueness-only:
+  // only `continuation_id` + the unclaimed-or-expired predicate, with source_launch_id
+  // / consumer_kind / current_phase / next_action / expected-prior-state removed). A
+  // delayed launch-A completion WRONGLY advanced phase B — assertion
+  // "the stale completion is NOT granted a claim" failed (actual true !== expected
+  // false), 3 failing. Restoring the full phase-bound CAS returned the suite to 33/33.
+  // The RED and GREEN command output are recorded verbatim in this commit's message.
+  //
   // Drive the slot to phase B, then present a DELAYED completion from the phase-A
   // launch. Return the continuation id, freshly re-armed for phase B.
   function driveToPhaseB(): string {

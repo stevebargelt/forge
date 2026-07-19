@@ -4,12 +4,21 @@
 // advance the workflow's next action EXACTLY ONCE, even though completion events
 // are delivered at-least-once (duplicated, delayed, or lost). This module is the
 // durable claim that makes advancement idempotent: the controller reads the
-// authoritative launch record (readLaunch/classifyExit — the canonical terminal
+// canonical launch record (readLaunch/classifyExit — the canonical terminal
 // vocabulary, BD-10), records the observed disposition here, then claims the
 // single `ready -> dispatching` transition through a PHASE-BOUND compare-and-set.
 // A fresh claim can ONLY proceed from `ready` — i.e. AFTER a terminal disposition
-// has been durably observed (BD-3) — so a claim never precedes terminal evidence.
-// The grant is `changes === 1`; a lost/stale/racing claim writes NO state.
+// has been durably observed (BD-3) — so a claim never precedes a recorded terminal
+// observation. The grant is `changes === 1`; a lost/stale/racing claim writes NO state.
+//
+// SCOPE BOUNDARY — FG-562 is the PRIMITIVE only. This module records the
+// caller-supplied observation, VALIDATES the canonical vocabulary, and DERIVES
+// terminality via the one classifier — but it does NOT establish that the recorded
+// disposition matches the REAL launch. The end-to-end BD-3 guarantee (reading the
+// canonical source readLaunch/classifyExit IMMEDIATELY before observing/claiming and
+// passing that exact observation in) is the production CONSUMER's responsibility
+// (orchestrator FG-563 / campaign FG-564) and is OPEN there — NOT delivered
+// end-to-end by this primitive. The primitive trusts the observation it is given.
 //
 // TWO SOURCES OF TRUTH, NEVER JOINED IN ONE QUERY. The filesystem launch record
 // (readLaunch/classifyExit) is authoritative for the terminal DISPOSITION; this
@@ -42,8 +51,8 @@ export type ContinuationState =
   | "blocked"; // the claim-to-dispatch window could not be completed; visibly stuck
 
 // The canonical LaunchStatus.state (BD-10 — no second terminal vocabulary). Recorded
-// as BD-3 evidence when the controller wakes; owner_gone/unknown are legitimate
-// dispositions with NO exit record and must remain recordable/claimable.
+// as the caller-supplied observation when the controller wakes; owner_gone/unknown are
+// legitimate dispositions with NO exit record and must remain recordable/claimable.
 export type ObservedStatus = LaunchStatus["state"];
 
 // The canonical LaunchStatus.state vocabulary as a validation whitelist. Typed as
@@ -256,25 +265,27 @@ export type StaleObservation = {
 };
 
 /**
- * Record the canonical disposition the controller observed on wake (BD-3
- * evidence), and move `awaiting_completion -> ready` when that disposition is
- * terminal. This NEVER reads or fabricates an exit file — the controller passes
- * the state readLaunch/classifyExit already returned, INCLUDING owner_gone/unknown
- * (legitimate terminal dispositions with NO exit record). Recording evidence is
- * NOT the claim: a stale/duplicate observation is recorded and then IGNORED by the
- * phase-bound CAS below.
+ * Record the caller-supplied disposition the controller observed on wake, and move
+ * `awaiting_completion -> ready` when that disposition is terminal. This NEVER reads
+ * or fabricates an exit file — the controller passes the state readLaunch/classifyExit
+ * already returned, INCLUDING owner_gone/unknown (legitimate terminal dispositions
+ * with NO exit record). Recording an observation is NOT the claim: a stale/duplicate
+ * observation is recorded and then IGNORED by the phase-bound CAS below.
  *
- * EVIDENCE AUTHORITY (BD-3, FG-562 review round 3). Terminality is DERIVED from the
- * status itself via the ONE canonical classifier (isTerminalStatus) — it is NEVER
- * taken from the caller. A promotion to `ready` can therefore happen ONLY for a
- * status that IS a terminal LaunchStatus.state; a non-terminal (`running`) or an
- * invalid status can NEVER promote the slot, no matter what the caller asserts. An
- * arbitrary/fabricated status string is REJECTED outright. The controller still
- * passes the state readLaunch/classifyExit returned (two sources of truth, never
- * joined — the primitive does not itself read the fs launch record); the primitive
- * now GUARANTEES a non-terminal or invalid status cannot advance to `ready`. A
- * non-terminal observation still records `last_observed_status` (evidence) without
- * promoting.
+ * WHAT THE PRIMITIVE GUARANTEES — AND WHAT IT DOES NOT (BD-3, FG-562 review round 3).
+ * Terminality is DERIVED from the status itself via the ONE canonical classifier
+ * (isTerminalStatus) — it is NEVER taken as a caller assertion of terminality. A
+ * promotion to `ready` can therefore happen ONLY for a status that IS a terminal
+ * LaunchStatus.state; a non-terminal (`running`) or an invalid status can NEVER
+ * promote the slot, no matter what the caller asserts. An arbitrary/fabricated status
+ * string is REJECTED outright. What the primitive does NOT do: it does not establish
+ * that the recorded disposition matches the REAL launch — it TRUSTS the observation it
+ * is given. Establishing that authority (reading readLaunch/classifyExit immediately
+ * before observing and passing that exact state in) is the production CONSUMER's job
+ * (orchestrator FG-563 / campaign FG-564), where end-to-end BD-3 enforcement is OPEN.
+ * The controller passes the state readLaunch/classifyExit returned (two sources of
+ * truth, never joined — the primitive does not itself read the fs launch record). A
+ * non-terminal observation still records `last_observed_status` without promoting.
  *
  * THE OBSERVATION IS LAUNCH-BOUND (FG-562 review round 2). The disposition belongs
  * to a SPECIFIC launch, so the write matches `source_launch_id = ?` — the launch
@@ -412,8 +423,8 @@ export type ClaimRequest = {
   nextAction: NextAction;
   // The prior state the caller expects. A FRESH claim expects 'ready' ONLY — the
   // awaited launch's terminal disposition MUST already be durably observed (BD-3),
-  // so a claim can never precede authoritative terminal evidence (claim_owner IS
-  // NULL). 'awaiting_completion' is deliberately NOT claimable: a controller must
+  // so a claim can never precede a durably-recorded terminal observation (claim_owner
+  // IS NULL). 'awaiting_completion' is deliberately NOT claimable: a controller must
   // observe a terminal status (observeLaunchStatus moves the slot to 'ready')
   // before any dispatch. An expired-lease RECOVERY (F16) expects 'dispatching' and
   // grants only when the lease is strictly in the past.
