@@ -201,9 +201,14 @@ export type LaunchView = LaunchMeta & {
   // runs — a genuinely-running launch has NO exit file yet). `status` still reads
   // `running` so every SINGLE read remains an invitation to bounded retry (F11);
   // this field surfaces the reconciled disposition a BOUNDED waiter wakes on if the
-  // record never becomes readable — owner_gone/unknown when owner evidence is
-  // terminal (1a), unknown when the owner still lives (1b). Never a second status
-  // vocabulary: `terminal` is drawn from the existing LaunchStatus set (BD-10).
+  // record never becomes readable. A present-but-unreadable record is bounded-retry,
+  // never terminal on a single read: this field is set ONLY when there is INDEPENDENT
+  // TERMINAL OWNER evidence — no session -> unknown, dead pane -> owner_gone (PRD:
+  // "only terminal after independent terminal owner evidence"). A CONFIRMED-LIVE owner
+  // is NOT terminal evidence, so it leaves this UNSET: the launch stays `running`,
+  // bounded ONLY by the waiter's own --timeout (-> wait_timeout, never a fabricated
+  // launch terminal). If the owner LATER dies, reconcile arms the bound then. Never a
+  // second status vocabulary: `terminal` is drawn from the existing LaunchStatus set (BD-10).
   pendingUnreadableExit?: { terminal: LaunchStatus };
 };
 
