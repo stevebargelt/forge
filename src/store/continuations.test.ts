@@ -493,6 +493,133 @@ describe("adoptOrClaimDispatch (F17 adoption entry-point)", () => {
 });
 
 // ===========================================================================
+// Defect 1 — dispatch identity is IMMUTABLE. Once a run/task id is recorded, a
+// DIFFERENT value can never overwrite it (in recordDispatchResult OR markAdvanced);
+// a conflicting id is rejected and writes nothing (id/state/timestamp unchanged).
+// ===========================================================================
+describe("dispatch identity is IMMUTABLE (Defect 1)", () => {
+  function claimed(id: string, owner = "ctl-1"): void {
+    seedReady({ id });
+    assert.ok(
+      claimContinuationDispatch({
+        continuationId: id, sourceLaunchId: "launch-A", consumerKind: "orchestrator", currentPhase: "phase-A",
+        nextAction: ACTION_A, expectedState: "ready", owner, leaseTtlMs: 30_000,
+      }).granted,
+    );
+  }
+
+  test("recordDispatchResult: a CONFLICTING run id is rejected; the first is retained; nothing is written", () => {
+    claimed("imm-run");
+    assert.ok(recordDispatchResult("imm-run", "ctl-1", { runId: "run-1" }), "first run id recorded");
+    const before = getContinuation("imm-run")!;
+    assert.equal(recordDispatchResult("imm-run", "ctl-1", { runId: "run-2" }), false, "a DIFFERENT run id is rejected");
+    const after = getContinuation("imm-run")!;
+    assert.equal(after.dispatchedRunId, "run-1", "the original run id is retained");
+    assert.equal(after.dispatchedTaskId, undefined, "the task slot is untouched");
+    assert.equal(after.state, "dispatching", "state unchanged");
+    assert.equal(after.updatedAt, before.updatedAt, "no timestamp churn on a rejected conflict");
+  });
+
+  test("recordDispatchResult: a CONFLICTING task id is rejected; the original task id is retained", () => {
+    claimed("imm-task");
+    assert.ok(recordDispatchResult("imm-task", "ctl-1", { taskId: "task-1" }));
+    const before = getContinuation("imm-task")!;
+    assert.equal(recordDispatchResult("imm-task", "ctl-1", { taskId: "task-2" }), false, "a DIFFERENT task id is rejected");
+    const after = getContinuation("imm-task")!;
+    assert.equal(after.dispatchedTaskId, "task-1", "the original task id is retained");
+    assert.equal(after.updatedAt, before.updatedAt, "nothing written on a rejected conflict");
+  });
+
+  test("recordDispatchResult: repeating the SAME ids succeeds idempotently", () => {
+    claimed("imm-idem");
+    assert.ok(recordDispatchResult("imm-idem", "ctl-1", { runId: "run-1", taskId: "task-1" }));
+    assert.ok(recordDispatchResult("imm-idem", "ctl-1", { runId: "run-1", taskId: "task-1" }), "identical ids re-record without error");
+    const c = getContinuation("imm-idem")!;
+    assert.equal(c.dispatchedRunId, "run-1");
+    assert.equal(c.dispatchedTaskId, "task-1");
+  });
+
+  test("recordDispatchResult: a previously-ABSENT id (the other slot null) is allowed", () => {
+    claimed("imm-add");
+    assert.ok(recordDispatchResult("imm-add", "ctl-1", { runId: "run-1" }), "run id first");
+    assert.ok(recordDispatchResult("imm-add", "ctl-1", { taskId: "task-1" }), "adding a previously-absent task id is allowed");
+    const c = getContinuation("imm-add")!;
+    assert.equal(c.dispatchedRunId, "run-1");
+    assert.equal(c.dispatchedTaskId, "task-1");
+  });
+
+  test("markAdvanced: conflicting ids are rejected WITHOUT advancing (state + ids + timestamp unchanged)", () => {
+    claimed("imm-adv");
+    assert.ok(recordDispatchResult("imm-adv", "ctl-1", { runId: "run-1" }));
+    const before = getContinuation("imm-adv")!;
+    assert.equal(markAdvanced("imm-adv", "ctl-1", { runId: "run-2" }), false, "markAdvanced with a conflicting run id is rejected");
+    const after = getContinuation("imm-adv")!;
+    assert.equal(after.state, "dispatching", "NOT advanced");
+    assert.equal(after.dispatchedRunId, "run-1", "the original id is retained");
+    assert.equal(after.updatedAt, before.updatedAt, "no write on a rejected conflict");
+    // A matching id still advances normally.
+    assert.ok(markAdvanced("imm-adv", "ctl-1", { runId: "run-1" }), "the matching id advances");
+    assert.equal(getContinuation("imm-adv")!.state, "advanced");
+  });
+});
+
+// ===========================================================================
+// Defect 2 — adoption preserves the COMPLETE phase-bound identity. A receipt keyed
+// on (continuationId + sourceLaunchId + nextAction) is NOT enough to adopt: the row
+// must ALSO match consumerKind + currentPhase (+ sourceLaunchId + canonical action).
+// A mismatch on ANY fails closed as unclaimable and writes nothing.
+// ===========================================================================
+describe("adoption preserves the COMPLETE phase-bound identity (Defect 2)", () => {
+  function claimedOrchestratorPhaseA(id: string): void {
+    seedReady({ id });
+    const out = adoptOrClaimDispatch({
+      continuationId: id, sourceLaunchId: "launch-A", consumerKind: "orchestrator", currentPhase: "phase-A",
+      nextAction: ACTION_A, owner: "ctl-1", leaseTtlMs: 30_000,
+    });
+    assert.equal(out.disposition, "claim", "fresh claim as orchestrator/phase-A");
+  }
+
+  test("a WRONG consumerKind fails closed (unclaimable) — never adopt; the continuation is unchanged", () => {
+    claimedOrchestratorPhaseA("id-ck");
+    const before = getContinuation("id-ck")!;
+    const out = adoptOrClaimDispatch({
+      continuationId: "id-ck", sourceLaunchId: "launch-A", consumerKind: "campaign", currentPhase: "phase-A",
+      nextAction: ACTION_A, owner: "ctl-wrong", leaseTtlMs: 30_000,
+    });
+    assert.equal(out.disposition, "unclaimable", "a mismatched consumerKind never adopts or dispatches");
+    const after = getContinuation("id-ck")!;
+    assert.equal(after.consumerKind, "orchestrator", "identity unchanged");
+    assert.equal(after.claimOwner, "ctl-1", "the original claim is untouched");
+    assert.equal(after.updatedAt, before.updatedAt, "nothing written");
+  });
+
+  test("a WRONG currentPhase fails closed (unclaimable) — never adopt; the continuation is unchanged", () => {
+    claimedOrchestratorPhaseA("id-ph");
+    const before = getContinuation("id-ph")!;
+    const out = adoptOrClaimDispatch({
+      continuationId: "id-ph", sourceLaunchId: "launch-A", consumerKind: "orchestrator", currentPhase: "phase-Z",
+      nextAction: ACTION_A, owner: "ctl-wrong", leaseTtlMs: 30_000,
+    });
+    assert.equal(out.disposition, "unclaimable", "a mismatched currentPhase never adopts or dispatches");
+    const after = getContinuation("id-ph")!;
+    assert.equal(after.currentPhase, "phase-A", "identity unchanged");
+    assert.equal(after.claimOwner, "ctl-1", "the original claim is untouched");
+    assert.equal(after.updatedAt, before.updatedAt, "nothing written");
+  });
+
+  test("the CORRECT identity still adopts the original receipt/run (happy path stays green)", () => {
+    claimedOrchestratorPhaseA("id-ok");
+    assert.ok(recordDispatchResult("id-ok", "ctl-1", { runId: "run-x" }));
+    const out = adoptOrClaimDispatch({
+      continuationId: "id-ok", sourceLaunchId: "launch-A", consumerKind: "orchestrator", currentPhase: "phase-A",
+      nextAction: ACTION_A, owner: "ctl-recovery", leaseTtlMs: 30_000,
+    });
+    assert.equal(out.disposition, "adopt", "the exact identity adopts");
+    assert.equal(out.disposition === "adopt" ? out.continuation.dispatchedRunId : undefined, "run-x", "the adopted dispatch carries its recorded run id");
+  });
+});
+
+// ===========================================================================
 // Crash windows — each a named test.
 // ===========================================================================
 describe("crash windows F13–F18 + BD-3", () => {
