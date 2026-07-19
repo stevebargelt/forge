@@ -572,7 +572,22 @@ export function adoptOrClaimDispatch(req: AdoptOrClaimRequest): AdoptOrClaimOutc
     const dispatchKey = deriveDispatchKey(req.continuationId, req.sourceLaunchId, canonical);
     const existing = continuationByDispatchKey(dispatchKey);
     if (existing) {
-      return { disposition: "adopt", continuation: existing, dispatchKey };
+      // The receipt binds (continuationId + sourceLaunchId + canonical nextAction)
+      // but NOT consumerKind or currentPhase — so a receipt can collide across a
+      // wrong consumer/phase presenting the same three. Adopt ONLY when the row
+      // matches the COMPLETE phase-bound identity; any mismatch FAILS CLOSED as
+      // unclaimable and writes nothing — never signalling adopt/dispatch on a stale
+      // or wrong-identity request.
+      const identityMatches =
+        existing.continuationId === req.continuationId &&
+        existing.sourceLaunchId === req.sourceLaunchId &&
+        existing.consumerKind === req.consumerKind &&
+        existing.currentPhase === req.currentPhase &&
+        canonicalizeAction(existing.nextAction) === canonical;
+      if (identityMatches) {
+        return { disposition: "adopt", continuation: existing, dispatchKey };
+      }
+      return { disposition: "unclaimable", continuation: existing, dispatchKey };
     }
     const outcome = claimContinuationDispatch({ ...req, expectedState: "ready" });
     if (outcome.granted) {
@@ -603,6 +618,12 @@ export function renewClaim(continuationId: string, owner: string, leaseTtlMs: nu
  * is the terminal, exactly-once advancement for the step. Returns false when the
  * row is no longer ours (lease was taken over) — the caller must not treat the
  * dispatch as advanced.
+ *
+ * Dispatch identity is IMMUTABLE: the compare-and-set guard allows a run/task id to
+ * be written only when its column is NULL or already EQUALS the supplied value. A
+ * DIFFERENT id conflicting with a recorded one matches nothing (changes === 0) —
+ * the operation fails and writes NO column (id/state/updated_at), so a stale caller
+ * can never advance the step under a rewritten identity.
  */
 export function markAdvanced(
   continuationId: string,
@@ -617,9 +638,21 @@ export function markAdvanced(
                 dispatched_run_id = COALESCE(?, dispatched_run_id),
                 dispatched_task_id = COALESCE(?, dispatched_task_id),
                 updated_at = ?
-          WHERE continuation_id = ? AND claim_owner = ? AND state = 'dispatching'`,
+          WHERE continuation_id = ? AND claim_owner = ? AND state = 'dispatching'
+            AND (? IS NULL OR dispatched_run_id IS NULL OR dispatched_run_id = ?)
+            AND (? IS NULL OR dispatched_task_id IS NULL OR dispatched_task_id = ?)`,
       )
-      .run(ids.runId ?? null, ids.taskId ?? null, nowIso(storeNowMs()), continuationId, owner);
+      .run(
+        ids.runId ?? null,
+        ids.taskId ?? null,
+        nowIso(storeNowMs()),
+        continuationId,
+        owner,
+        ids.runId ?? null,
+        ids.runId ?? null,
+        ids.taskId ?? null,
+        ids.taskId ?? null,
+      );
     return res.changes > 0;
   });
 }
@@ -629,6 +662,11 @@ export function markAdvanced(
  * window F17 closes: the ids are written after dispatch, before the settling
  * advance, so a recovery that finds a dispatch_key but no ids knows a dispatch was
  * issued under that key and adopts it rather than duplicating. Scoped to the owner.
+ *
+ * Dispatch identity is IMMUTABLE (same compare-and-set guard as markAdvanced): a
+ * previously-recorded run/task id is never overwritten by a DIFFERENT value —
+ * re-recording the SAME id is idempotently successful, filling a NULL slot is
+ * allowed, but a conflicting id fails and writes nothing.
  */
 export function recordDispatchResult(
   continuationId: string,
@@ -642,9 +680,21 @@ export function recordDispatchResult(
             SET dispatched_run_id = COALESCE(?, dispatched_run_id),
                 dispatched_task_id = COALESCE(?, dispatched_task_id),
                 updated_at = ?
-          WHERE continuation_id = ? AND claim_owner = ? AND state = 'dispatching'`,
+          WHERE continuation_id = ? AND claim_owner = ? AND state = 'dispatching'
+            AND (? IS NULL OR dispatched_run_id IS NULL OR dispatched_run_id = ?)
+            AND (? IS NULL OR dispatched_task_id IS NULL OR dispatched_task_id = ?)`,
       )
-      .run(ids.runId ?? null, ids.taskId ?? null, nowIso(storeNowMs()), continuationId, owner);
+      .run(
+        ids.runId ?? null,
+        ids.taskId ?? null,
+        nowIso(storeNowMs()),
+        continuationId,
+        owner,
+        ids.runId ?? null,
+        ids.runId ?? null,
+        ids.taskId ?? null,
+        ids.taskId ?? null,
+      );
     return res.changes > 0;
   });
 }
