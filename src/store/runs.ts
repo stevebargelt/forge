@@ -62,6 +62,37 @@ export function getRun(id: string): Run | undefined {
   return row ? rowToRun(row) : undefined;
 }
 
+// FG-563 (CP2, F17 receipt bridge): find the ONE physical run created under a
+// deterministic continuation dispatch_key. The run-creation path (startRun /
+// createInvokeRun) stamps the receipt into run metadata BEFORE the container spawn
+// is externally observable, so a recovery — continuationsInDispatch supplies the
+// receipt, this resolves the physical run — always lands on the original in-flight
+// run rather than spawning a duplicate. This closes the crash-after-spawn-before-
+// recordDispatchResult window: even if the ids were never written back into the
+// continuation, the run itself carries the key and is discoverable.
+//
+// Correlation is by dispatch_key ALONE — NEVER by title, role, ticket, timestamp,
+// or any heuristic (F17). A dispatch_key is unique across runs by construction
+// (derived from the continuation identity), so at most one row matches; the oldest
+// match is returned defensively (created_at ASC) if a caller ever reused a key.
+//
+// FG-563 (FIX5): this is the check-before-spawn HOT path — fired on every
+// continuation wake/dispatch — so it queries with json_extract on the receipt
+// rather than scanning every run + JSON.parse-ing each metadata blob. SQLite uses
+// the additive idx_runs_dispatch_key expression index (schema.ts) for the equality
+// probe. Behavior is unchanged: the one matching run, or undefined.
+export function runByDispatchKey(dispatchKey: string): Run | undefined {
+  const row = getDb()
+    .prepare(
+      `SELECT * FROM runs
+        WHERE json_extract(metadata, '$.dispatchKey') = ?
+        ORDER BY created_at ASC
+        LIMIT 1`,
+    )
+    .get(dispatchKey) as RunRow | undefined;
+  return row ? rowToRun(row) : undefined;
+}
+
 export function listRuns(): Run[] {
   const rows = getDb().prepare(`SELECT * FROM runs ORDER BY created_at DESC`).all() as RunRow[];
   return rows.map(rowToRun);

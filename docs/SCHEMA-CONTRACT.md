@@ -20,6 +20,8 @@ Columns the dashboard reads:
 - `project_dir` — nullable string, the host path mounted at `/project` for this run's containers
 - `metadata` — nullable JSON string. Dashboard does not currently parse fields beyond looking at the full blob
 
+An expression index `idx_runs_dispatch_key` over `json_extract(metadata, '$.dispatchKey')` was added (FG-563) so the continuation consumer's check-before-spawn lookup (`runByDispatchKey`) resolves the one run created under a deterministic dispatch receipt with an indexed equality probe instead of a full-table scan + per-row JSON parse. Additive (index only — no column or data change, `IF NOT EXISTS` so re-open is idempotent); the dashboard does not read it.
+
 ### `tasks` table
 
 - `id` — string, primary key
@@ -157,6 +159,16 @@ A durable, append-only audit of STALE observations: a delayed launch-completion 
 Columns: `id` (PK, autoincrement), `continuation_id`, `source_launch_id` (the superseded/stale launch), `current_phase` (the slot's phase at observation time), `status` (the canonical `LaunchStatus.state` observed), `observed_at`. Index: `idx_continuation_stale_obs_cont` on `continuation_id`. Read audit-only via `staleObservationsFor(continuationId)`; the claim path never reads this table.
 
 Additive-only (`CREATE TABLE IF NOT EXISTS` on the ordinary open path), the same BD-15 contract as `continuations` — an old binary that predates it is never broken, and only new binaries ever write it.
+
+### `continuation_lost_signal_recoveries` table (FG-563 — durable lost-signal watchdog audit)
+
+The durable evidence that a **lost completion signal was recovered**: the low-frequency health watchdog (`ScheduleWakeup`, demoted to a fixed 30-minute health cadence — BD-9) found a launch that reached a terminal disposition but was never advanced (its normal completion wake was lost), and the watchdog itself recovered it. A row is written **only** on that watchdog recovery, committed *before* the advance is observable; never on the normal delivery path (which advances without a lost signal), never when the watchdog re-arms a still-running launch, and never when the slot was already advanced (F18 — no false lost-signal claim). **Like `continuations` / `continuation_stale_observations`, this is not part of the dashboard read contract** — it is the FG-563 orchestrator consumer's audit; documented here so a schema change is caught by this file's update-in-the-same-commit rule. Read by the `forge lost-signals` operator command (`listLostSignalRecoveries`, newest-first) and `lostSignalRecoveriesFor(continuationId)`.
+
+Columns: `id` (PK, autoincrement), `continuation_id`, `source_launch_id`, `current_phase`, `consumer_kind`, `controller` (WHICH controller recovered it), `observed_status` (the canonical terminal `LaunchStatus.state` the watchdog re-derived from the authoritative record, BD-3), `recovery_trigger`, `dispatch_key` (nullable), `dispatched_run_id` (nullable), `dispatched_task_id` (nullable), `recovered_at` (the store's own clock, `storeNowMs`). Indexes: `idx_continuation_lost_signal_cont` on `continuation_id`; `idx_continuation_lost_signal_launch` on `source_launch_id`. Enum values are **convention, not a DB constraint** (FG-585): `consumer_kind` (`orchestrator | campaign`) and `recovery_trigger` (`watchdog` today — a future recovery source can be added additively) are unconstrained TEXT, no CHECK.
+
+**Distinct from `continuation_stale_observations`** (above) and never to be conflated: that table records a completion event that arrived for a *superseded* launch (the slot already moved past it — observed-and-ignored); this one records a *lost* completion the watchdog recovered. Different questions, different tables.
+
+Additive-only (`CREATE TABLE IF NOT EXISTS` on the ordinary open path), the same BD-15 contract as its siblings — only a new binary ever writes it, so an old binary that predates it is never broken.
 
 ## Filesystem contract
 

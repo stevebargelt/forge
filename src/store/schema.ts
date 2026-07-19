@@ -11,6 +11,14 @@ CREATE TABLE IF NOT EXISTS runs (
   metadata        TEXT,
   project_dir     TEXT
 );
+-- FG-563 (CP1, FIX5): the check-before-spawn hot path (runByDispatchKey, fired on
+-- every continuation wake/dispatch) resolves the ONE physical run created under a
+-- deterministic dispatch receipt. An expression index over the JSON-extracted
+-- receipt lets that lookup use an indexed equality probe instead of a full-table
+-- scan + per-row JSON.parse. Additive-only (BD-15): pure index, no column/data
+-- change, and IF NOT EXISTS so re-open is idempotent on an existing store.
+CREATE INDEX IF NOT EXISTS idx_runs_dispatch_key
+  ON runs(json_extract(metadata, '$.dispatchKey'));
 
 CREATE TABLE IF NOT EXISTS tasks (
   id              TEXT PRIMARY KEY,
@@ -309,4 +317,51 @@ CREATE TABLE IF NOT EXISTS continuation_stale_observations (
 );
 CREATE INDEX IF NOT EXISTS idx_continuation_stale_obs_cont
   ON continuation_stale_observations(continuation_id);
+
+-- FG-563 (BD-9, Slice 4): the durable lost-signal watchdog audit — DISTINCT from
+-- continuation_stale_observations. The two answer DIFFERENT questions and must
+-- never be conflated:
+--   continuation_stale_observations  — "a launch-completion event arrived for a
+--                                       SUPERSEDED launch" (the slot already moved
+--                                       past that launch): observed-and-ignored.
+--   continuation_lost_signal_recoveries — "the low-frequency health WATCHDOG
+--                                       discovered a launch that reached a terminal
+--                                       disposition but was NEVER advanced (the
+--                                       normal completion event was lost), and the
+--                                       watchdog itself recovered it": a genuine
+--                                       lost-signal recovery.
+--
+-- A row is written ONLY when a WATCHDOG-triggered consume advances a
+-- terminal-but-unadvanced continuation (BD-9: the watchdog recorded that it
+-- recovered a lost signal BEFORE advancing). It is NEVER written when the normal
+-- delivery event already advanced the slot (F18: no false lost-signal claim), nor
+-- when the watchdog fires while the launch is STILL RUNNING (it re-arms, writing
+-- nothing). It answers, WITHOUT transcript archaeology: which controller recovered
+-- it (controller), which launch (source_launch_id), and that it was
+-- recovered-by-watchdog rather than by normal delivery (recovery_trigger).
+--
+-- Purely additive (CREATE TABLE IF NOT EXISTS on the ordinary open path) with NO
+-- ALTER to runs — the SAME BD-15 old/new-binary compatibility discipline as
+-- continuations / continuation_stale_observations: only a NEW binary ever writes
+-- it, so an OLD binary that predates it is never broken. consumer_kind /
+-- recovery_trigger are UNCONSTRAINED TEXT (enum-as-convention, FG-585) — no CHECK
+-- an old/new binary could fight.
+CREATE TABLE IF NOT EXISTS continuation_lost_signal_recoveries (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  continuation_id    TEXT NOT NULL,
+  source_launch_id   TEXT NOT NULL,
+  current_phase      TEXT NOT NULL,
+  consumer_kind      TEXT NOT NULL,
+  controller         TEXT NOT NULL,
+  observed_status    TEXT NOT NULL,
+  recovery_trigger   TEXT NOT NULL,
+  dispatch_key       TEXT,
+  dispatched_run_id  TEXT,
+  dispatched_task_id TEXT,
+  recovered_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_continuation_lost_signal_cont
+  ON continuation_lost_signal_recoveries(continuation_id);
+CREATE INDEX IF NOT EXISTS idx_continuation_lost_signal_launch
+  ON continuation_lost_signal_recoveries(source_launch_id);
 `;
