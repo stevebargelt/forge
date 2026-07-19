@@ -214,17 +214,20 @@ export function parseExitRecord(raw: string): ExitRecord | undefined {
   if (/^-?\d+$/.test(text)) return { code: Number(text), signal: null };
   try {
     const parsed = JSON.parse(text) as Partial<ExitRecord>;
-    const code = typeof parsed.code === "number" ? parsed.code : null;
-    const signal = typeof parsed.signal === "string" ? parsed.signal : null;
-    // FG-552 (BD-7/F11): a parseable object supplying NEITHER a numeric code nor a
-    // string signal (`{}`, `{"code":"bad"}`) is a SCHEMA-INVALID record, not a
-    // terminal `{code:null,signal:null}` result — the wrapper always sets exactly
-    // one. Returning it would classify as terminal `unknown` and advance a
-    // controller on corrupt evidence; instead return undefined so it is treated as
-    // an unreadable/not-yet-terminal record and falls through to bounded owner-
-    // evidence retry, exactly like an empty/half-written file.
-    if (code === null && signal === null) return undefined;
-    return { code, signal };
+    const hasCode = typeof parsed.code === "number" && Number.isFinite(parsed.code);
+    const hasSignal = typeof parsed.signal === "string" && parsed.signal !== "";
+    // FG-552 (BD-7/F11): the ExitRecord contract is "exactly one of code|signal is
+    // set" — a finite numeric code XOR a non-empty string signal. The wrapper
+    // ALWAYS writes exactly one. Any other shape is SCHEMA-INVALID, not authoritative
+    // terminal evidence: BOTH set (`{"code":0,"signal":"SIGTERM"}`) is contradictory;
+    // NEITHER (`{}`, `{"code":"bad"}`, `{"code":null,"signal":null}`) is empty/torn;
+    // an empty-string signal (`{"signal":""}`) or a non-finite code is not evidence.
+    // Accepting any of these would classify a controller-advancing terminal on corrupt
+    // bytes. Instead return undefined so it is treated as an unreadable/not-yet-terminal
+    // record and falls through to bounded owner-evidence retry, exactly like an
+    // empty/half-written file. `hasCode === hasSignal` is true iff NOT exactly one holds.
+    if (hasCode === hasSignal) return undefined;
+    return { code: hasCode ? (parsed.code as number) : null, signal: hasSignal ? (parsed.signal as string) : null };
   } catch {
     return undefined;
   }

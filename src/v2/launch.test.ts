@@ -75,6 +75,30 @@ test("FG-552 (regression e2da08d): a SIGNAL-ONLY exit record is a VALID terminal
   assert.equal(parseExitRecord(`{"code":null,"signal":null}`), undefined);
 });
 
+test("FG-552: parseExitRecord requires EXACTLY ONE valid field — a finite code XOR a non-empty signal; both-set / empty-signal are schema-invalid", () => {
+  // The ExitRecord contract is "exactly one of code|signal is set". A record that
+  // sets BOTH is contradictory/corrupt; an empty-string signal is not evidence.
+  // Neither may be accepted as authoritative terminal evidence — each must fall
+  // through to bounded owner-evidence retry (F11), never advance a controller.
+  assert.equal(parseExitRecord(`{"code":0,"signal":"SIGTERM"}`), undefined,
+    "BOTH set is contradictory — never terminal `signaled`");
+  assert.equal(parseExitRecord(`{"code":143,"signal":"SIGTERM"}`), undefined,
+    "BOTH set is contradictory regardless of the code value");
+  assert.equal(parseExitRecord(`{"code":null,"signal":""}`), undefined,
+    "an empty-string signal is not evidence, even though it is a string");
+  assert.equal(parseExitRecord(`{"signal":""}`), undefined,
+    "an empty-string signal alone is schema-invalid");
+
+  // The VALID exactly-one shapes still classify as their terminal dispositions.
+  assert.deepEqual(parseExitRecord(`{"code":0,"signal":null}`), { code: 0, signal: null });
+  assert.deepEqual(classifyExit(parseExitRecord(`{"code":0,"signal":null}`)!), { state: "exited_ok", code: 0 });
+  assert.deepEqual(parseExitRecord(`{"code":7}`), { code: 7, signal: null });
+  assert.deepEqual(classifyExit(parseExitRecord(`{"code":7}`)!), { state: "exited_error", code: 7 });
+  assert.deepEqual(parseExitRecord(`{"signal":"SIGTERM"}`), { code: null, signal: "SIGTERM" });
+  assert.deepEqual(classifyExit(parseExitRecord(`{"signal":"SIGTERM"}`)!),
+    { state: "signaled", signal: "SIGTERM", sender: "unrecorded" });
+});
+
 test("FG-569 R2: the recorder runtime record is parsed; a missing required field is rejected, never guessed", () => {
   assert.deepEqual(
     parseRecorderRuntime(`{"execPath":"/opt/n/bin/node","abi":"137","nodeVersion":"v24.0.0","releaseId":"release-abc-1"}`),
