@@ -157,12 +157,15 @@ test("FG-552 wait (F3): a committed exit-record fs event that is LOST is still r
     "an ordinary exit record whose watcher event was missed is recovered from the durable record");
 });
 
-test("FG-552 wait (F7): an OS-recorded signal exit record wakes `forge launch wait` with signal evidence and an UNRECORDED sender", async () => {
-  // The per-row controller observation of an OS signal, driven through the real
-  // wait primitive + reader (not just the FG-535 classifyExit reader test). The
-  // wrapper's atomic exit record carries the kernel's WIFSIGNALED verdict
-  // (code null, signal SIGKILL); readLaunch classifies it `signaled`, and the
-  // already-terminal fast path returns it immediately through waitForLaunchTerminal.
+test("FG-552 wait (F7, classifier fast-path): GIVEN a committed WIFSIGNALED exit record, readLaunch classifies `signaled` and the already-terminal wait returns it with an UNRECORDED sender", async () => {
+  // This is the CLASSIFIER/fast-path level of F7: given a record that already
+  // carries the kernel's WIFSIGNALED verdict (code null, signal SIGKILL), readLaunch
+  // classifies it `signaled` and the already-terminal fast path returns it through
+  // waitForLaunchTerminal. It does NOT exercise the production signal-recording path
+  // — no process is OS-signalled and the recorder never runs here. The OS-signalled
+  // END-TO-END path (real kill of the tmux-owned workload → recorder atomically
+  // commits the kernel result → wait unblocks) is covered by the F7 real test in
+  // launch-wait.integration.test.ts.
   const { tmux } = tmuxStub();
   const meta = startLaunch(["sleep", "600"], { name: "signalled", tmux });
   writeFileSync(join(LAUNCHES_DIR, meta.id, "exit"), `{"code":null,"signal":"SIGKILL"}`);
@@ -266,12 +269,38 @@ test("FG-552 reader (BD-7/F11): a SCHEMA-INVALID exit record (parseable JSON, no
   }
 });
 
-test("FG-552 reader: an empty exit record with NO live session is unknown — reached via INDEPENDENT terminal evidence, not the empty file", () => {
+test("FG-552 reader: an ABSENT exit record with NO live session is unknown — reached via INDEPENDENT terminal evidence (no session), never fabricated from a present record", () => {
   const stub = tmuxStub();
-  const meta = startLaunch(["sleep", "600"], { name: "emptygone", tmux: stub.tmux });
-  writeFileSync(join(LAUNCHES_DIR, meta.id, "exit"), "");
+  const meta = startLaunch(["sleep", "600"], { name: "absentgone", tmux: stub.tmux });
+  // No exit file at all — a host reboot took the tmux server before any record.
+  // Only a GENUINELY ABSENT record may fall through to the owner-terminal verdict.
   stub.alive.clear(); // owner gone (reboot) — the independent evidence
   assert.deepEqual(readLaunch(meta.id, stub.tmux)!.status, { state: "unknown" });
+});
+
+test("FG-552 reader (F11): a PRESENT but unreadable exit record with NO live session stays RUNNING — bounded retry, NEVER a fabricated owner-terminal verdict", () => {
+  // The finding's race: a valid exit record is being committed just as the owner/
+  // session ends, and this read transiently fails (empty/half-written/schema-invalid).
+  // A file IS there, so the reader must NOT collapse it to unknown/owner_gone after a
+  // single reread — it is an invitation to bounded retry. Only a genuinely ABSENT
+  // record is terminal here.
+  for (const bad of ["", "{not json", "{}", `{"code":null,"signal":null}`]) {
+    const stub = tmuxStub();
+    const meta = startLaunch(["sleep", "600"], { name: "unreadablegone", tmux: stub.tmux });
+    writeFileSync(join(LAUNCHES_DIR, meta.id, "exit"), bad);
+    stub.alive.clear(); // owner gone — terminal owner evidence, but a record is present
+    assert.deepEqual(readLaunch(meta.id, stub.tmux)!.status, { state: "running" },
+      `${JSON.stringify(bad)} is present-but-unreadable — bounded retry even as the owner ends, never terminal`);
+  }
+});
+
+test("FG-552 reader (F11): a PRESENT but unreadable exit record with a DEAD pane stays RUNNING — never a premature owner_gone", () => {
+  const stub = tmuxStub();
+  const meta = startLaunch(["sleep", "600"], { name: "unreadabledead", tmux: stub.tmux });
+  writeFileSync(join(LAUNCHES_DIR, meta.id, "exit"), "{half-written");
+  stub.deadPanes.add(meta.tmuxSession); // owner terminal via a dead pane, record present
+  assert.deepEqual(readLaunch(meta.id, stub.tmux)!.status, { state: "running" },
+    "a present-but-unreadable record blocks the owner_gone verdict — bounded retry, not terminal");
 });
 
 test("FG-552 reader: a PARSEABLE exit record is still authoritative — reader honesty does not weaken the happy path", () => {

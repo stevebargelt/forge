@@ -13,7 +13,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { LAUNCHES_DIR, startLaunch } from "./launch.js";
+import { LAUNCHES_DIR, shellQuote, startLaunch } from "./launch.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const entry = resolve(here, "..", "cli", "index.ts");
@@ -88,6 +88,50 @@ test("FG-552 F6 (real): an ordinary non-zero exit reads exited_error — failure
   assert.equal(res.status, 0, "the WAITER succeeds — the launch's exit code is data");
   const obs = JSON.parse(res.stdout) as { kind: string; status: { state: string; code?: number } };
   assert.deepEqual(obs.status, { state: "exited_error", code: 7 });
+});
+
+test("FG-552 F7 (real): an OS-signalled tmux-owned workload is recorded WIFSIGNALED (signal, no code) ATOMICALLY, and forge launch wait unblocks with the signal and an UNRECORDED sender", async () => {
+  if (!hasTmux) return;
+  const pidDir = mkdtempSync(join(tmpdir(), "fg552-f7-"));
+  const pidFile = join(pidDir, "workload.pid");
+  try {
+    // The workload publishes its OWN pid, then becomes `sleep` at that SAME pid via
+    // exec — so the pid we signal IS the process the recorder's spawnSync is waiting
+    // on. No process-tree walking and no argv matching (FG-492): a deterministic
+    // handle on the real, OS-owned child the recorder observes.
+    const meta = startLaunch(["sh", "-c", `echo $$ > ${shellQuote(pidFile)}; exec sleep 600`], { name: "signalled" });
+    started.push(meta.id);
+
+    await waitFor("the workload to publish its pid", () => {
+      try { return readFileSync(pidFile, "utf8").trim().length > 0; } catch { return false; }
+    });
+    const workloadPid = Number(readFileSync(pidFile, "utf8").trim());
+    assert.ok(Number.isInteger(workloadPid) && workloadPid > 0, "the workload published a real pid");
+
+    // OS-signal the REAL workload. The recorder's spawnSync returns the kernel's
+    // WIFSIGNALED verdict (signal SIGKILL, status null) — NOT a 143-shaped code — and
+    // commits {code:null, signal:"SIGKILL"} atomically (temp file + rename) as its
+    // last act. This is the production signal-recording path the stubbed F7 unit test
+    // cannot exercise.
+    process.kill(workloadPid, "SIGKILL");
+
+    await waitFor("the atomic signal exit record", () => existsSync(join(LAUNCHES_DIR, meta.id, "exit")));
+    const dir = join(LAUNCHES_DIR, meta.id);
+    assert.deepEqual(readdirSync(dir).filter((e) => e.startsWith("exit.tmp")), [], "atomic rename left no temp remnant");
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, "exit"), "utf8")), { code: null, signal: "SIGKILL" },
+      "the recorder committed the OS WIFSIGNALED verdict — signal, no numeric code");
+
+    // The wait primitive unblocks from the REAL completion with signal evidence and
+    // NO sender attribution — the sender is never inferred (a signal proves a signal
+    // landed, not who sent it).
+    const res = forge(["launch", "wait", meta.id, "--json"]);
+    assert.equal(res.status, 0, `wait observes the signaled terminal disposition: ${res.stderr}`);
+    const obs = JSON.parse(res.stdout) as { kind: string; status: { state: string; signal?: string; sender?: string } };
+    assert.equal(obs.kind, "terminal");
+    assert.deepEqual(obs.status, { state: "signaled", signal: "SIGKILL", sender: "unrecorded" });
+  } finally {
+    rmSync(pidDir, { recursive: true, force: true });
+  }
 });
 
 test("FG-552 F4 (real): the exit record is committed ATOMICALLY — complete JSON, no .tmp remnant ever left behind", async () => {

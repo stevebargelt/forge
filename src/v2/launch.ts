@@ -938,25 +938,48 @@ export function readLaunch(id: string, tmux: TmuxRunner = defaultTmux): LaunchVi
     return undefined;
   }
 
-  // FG-552 (BD-4/BD-7/F11): an empty or unparseable exit record is NEVER terminal
-  // on its own — it is the write window BD-4 closes, so it is an invitation to
-  // bounded retry, not a disposition. Only a PARSEABLE exit record is authoritative
-  // (classifyExit). An unreadable record falls through to owner evidence exactly
-  // like an absent one: a live session reads `running` (keep retrying), and only
-  // INDEPENDENT terminal evidence (dead pane / no session) yields owner_gone /
-  // unknown. The old reader mapped an empty exit file straight to terminal
-  // `unknown`, which could strand a launch that in fact exited 0.
+  // FG-552 (BD-4/BD-7/F11): an empty, unparseable, or otherwise unreadable exit
+  // record is NEVER terminal on its own — it is the write window BD-4 closes, so
+  // it is an invitation to bounded retry, not a disposition. The read is honest
+  // about THREE distinct outcomes, because they must NOT be conflated:
+  //   record     — a PARSEABLE exit record: authoritative (classifyExit).
+  //   absent      — no exit file at all (ENOENT): no record was written, so it is
+  //                the ONLY outcome that may fall through to a terminal OWNER
+  //                verdict (owner_gone / unknown) when owner evidence is terminal.
+  //   unreadable  — a file EXISTS but its bytes cannot be consumed this read
+  //                (empty/half-written, schema-invalid, or an EIO/EACCES/torn read).
+  //                A record IS being committed; a transient read/parse failure that
+  //                straddles the owner/session ending must not advance a controller
+  //                on indeterminate terminal evidence. This ALWAYS reads `running`
+  //                (bounded retry) — even when owner evidence is terminal — so the
+  //                wait's reconcile re-reads (a transient failure clears next tick)
+  //                and only its own timeout bounds a persistently-corrupt record.
+  // The old reader collapsed absent/unreadable/invalid into one `undefined` and,
+  // once owner evidence went terminal, published unknown/owner_gone after a single
+  // reread — stranding a launch whose valid record a retry would have read (F11).
+  type ExitRead =
+    | { kind: "record"; rec: ExitRecord }
+    | { kind: "absent" }
+    | { kind: "unreadable" };
   let status: LaunchStatus;
   const exitPath = join(dir, "exit");
-  const readExit = (): ExitRecord | undefined => {
-    if (!existsSync(exitPath)) return undefined;
-    try { return parseExitRecord(readFileSync(exitPath, "utf8")); } catch { return undefined; }
+  const readExit = (): ExitRead => {
+    let raw: string;
+    try {
+      raw = readFileSync(exitPath, "utf8");
+    } catch (e) {
+      // ENOENT is genuinely absent (no record yet); ANY other read error means a
+      // file is there we transiently could not consume — unreadable, not absent.
+      return (e as NodeJS.ErrnoException).code === "ENOENT" ? { kind: "absent" } : { kind: "unreadable" };
+    }
+    const rec = parseExitRecord(raw);
+    return rec ? { kind: "record", rec } : { kind: "unreadable" };
   };
-  let rec = readExit();
-  if (rec) {
-    status = classifyExit(rec);
+  let ex = readExit();
+  if (ex.kind === "record") {
+    status = classifyExit(ex.rec);
   } else {
-    // No exit record on the first read — fall through to owner evidence. BUT a
+    // No authoritative record on the first read — consult owner evidence. BUT a
     // launch that COMPLETES mid-read writes its atomic exit record IMMEDIATELY
     // before its pane dies / its session ends, so a terminal owner verdict
     // derived here can STRADDLE that completion: the exit read above ran before
@@ -976,9 +999,14 @@ export function readLaunch(id: string, tmux: TmuxRunner = defaultTmux): LaunchVi
     // refusing without --force).
     const dead = sessionAlive ? paneDead(meta.tmuxSession, tmux) : null;
     const ownerTerminal = !sessionAlive || dead === true;
-    if (ownerTerminal) rec = readExit(); // recheck AFTER the owner probe closed the straddle window
-    if (rec) {
-      status = classifyExit(rec);
+    if (ownerTerminal) ex = readExit(); // recheck AFTER the owner probe closed the straddle window
+    if (ex.kind === "record") {
+      status = classifyExit(ex.rec);
+    } else if (ex.kind === "unreadable") {
+      // F11: a PRESENT but unreadable/invalid record is bounded retry, NEVER a
+      // terminal disposition — even when owner evidence is terminal. Only a
+      // genuinely ABSENT record yields the owner-terminal verdicts below.
+      status = { state: "running" };
     } else if (!sessionAlive) {
       status = { state: "unknown" };
     } else if (dead === true) {
