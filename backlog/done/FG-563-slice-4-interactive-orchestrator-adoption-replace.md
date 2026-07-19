@@ -1,9 +1,11 @@
 ---
 id: FG-563
 type: story
-status: active
+status: done
 title: "Slice 4 — interactive orchestrator adoption: replace Monitor-polling and fixed-estimate wakeups with the launch-wait primitive"
 created: 2026-07-14
+closed: 2026-07-19
+closed_commit: 9a3235d
 ---
 
 **Epic:** FG-561 · **PRD:** `docs/prds/durable-orchestration-continuation.md` @ `e6fd56b` (Slice 4)
