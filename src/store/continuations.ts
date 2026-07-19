@@ -27,7 +27,7 @@
 import { createHash } from "node:crypto";
 import { getDb, writeTransaction } from "./db.js";
 import { storeNowMs } from "./publications.js";
-import type { LaunchStatus } from "../v2/launch.js";
+import { isTerminalStatus, type LaunchStatus } from "../v2/launch.js";
 
 // Enum-as-CONVENTION (FG-585): TEXT columns with no DB CHECK, so an old/new binary
 // never fights a constraint the other doesn't share. These types document the
@@ -45,6 +45,25 @@ export type ContinuationState =
 // as BD-3 evidence when the controller wakes; owner_gone/unknown are legitimate
 // dispositions with NO exit record and must remain recordable/claimable.
 export type ObservedStatus = LaunchStatus["state"];
+
+// The canonical LaunchStatus.state vocabulary as a validation whitelist. Typed as
+// Record<ObservedStatus, true> so a state ADDED to LaunchStatus upstream forces this
+// to be updated (compile error) rather than silently rejecting a real disposition.
+// This is a VALIDATION whitelist, NOT a second TERMINAL vocabulary — terminality is
+// still derived through the one canonical isTerminalStatus classifier (BD-10).
+const LAUNCH_STATUS_STATES: Record<ObservedStatus, true> = {
+  running: true,
+  exited_ok: true,
+  exited_error: true,
+  signaled: true,
+  terminated_unattributed: true,
+  owner_gone: true,
+  unknown: true,
+};
+
+function isObservedStatus(s: string): s is ObservedStatus {
+  return Object.prototype.hasOwnProperty.call(LAUNCH_STATUS_STATES, s);
+}
 
 // A typed, structured next action — NEVER an opaque shell string. Serialized
 // canonically (stable key order) so the CAS `next_action = ?` compare and the
@@ -228,6 +247,14 @@ export function continuationsInDispatch(opts: { consumerKind?: ConsumerKind } = 
   return rows.map(toContinuation);
 }
 
+export type StaleObservation = {
+  continuationId: string;
+  sourceLaunchId: string;
+  currentPhase: string;
+  status: ObservedStatus;
+  observedAt: string;
+};
+
 /**
  * Record the canonical disposition the controller observed on wake (BD-3
  * evidence), and move `awaiting_completion -> ready` when that disposition is
@@ -236,6 +263,18 @@ export function continuationsInDispatch(opts: { consumerKind?: ConsumerKind } = 
  * (legitimate terminal dispositions with NO exit record). Recording evidence is
  * NOT the claim: a stale/duplicate observation is recorded and then IGNORED by the
  * phase-bound CAS below.
+ *
+ * EVIDENCE AUTHORITY (BD-3, FG-562 review round 3). Terminality is DERIVED from the
+ * status itself via the ONE canonical classifier (isTerminalStatus) — it is NEVER
+ * taken from the caller. A promotion to `ready` can therefore happen ONLY for a
+ * status that IS a terminal LaunchStatus.state; a non-terminal (`running`) or an
+ * invalid status can NEVER promote the slot, no matter what the caller asserts. An
+ * arbitrary/fabricated status string is REJECTED outright. The controller still
+ * passes the state readLaunch/classifyExit returned (two sources of truth, never
+ * joined — the primitive does not itself read the fs launch record); the primitive
+ * now GUARANTEES a non-terminal or invalid status cannot advance to `ready`. A
+ * non-terminal observation still records `last_observed_status` (evidence) without
+ * promoting.
  *
  * THE OBSERVATION IS LAUNCH-BOUND (FG-562 review round 2). The disposition belongs
  * to a SPECIFIC launch, so the write matches `source_launch_id = ?` — the launch
@@ -246,8 +285,9 @@ export function continuationsInDispatch(opts: { consumerKind?: ConsumerKind } = 
  * ran in phase B and making B wrongly claimable before its OWN launch finished. The
  * phase-bound CAS cannot undo that fabricated `ready`; the promotion itself must be
  * launch-bound. A stale launch-A event now matches nothing (source_launch_id is
- * launch-B) and writes NO state — recorded-and-ignored at the observe boundary too,
- * not just at the claim.
+ * launch-B) and writes NO state to the slot — but it is NOT silently discarded: the
+ * evidence is appended to `continuation_stale_observations` (durable audit,
+ * observed-RECORDED-and-ignored), so the audit is not lost when the slot advanced.
  *
  * A pure record: it advances state to `ready` only from `awaiting_completion`, so
  * observing the CURRENT launch again after a claim/advance updates the evidence
@@ -257,27 +297,73 @@ export function observeLaunchStatus(
   continuationId: string,
   sourceLaunchId: string,
   status: ObservedStatus,
-  opts: { terminal: boolean },
 ): Continuation | undefined {
+  if (!isObservedStatus(status)) {
+    throw new Error(`observeLaunchStatus: '${status}' is not a canonical LaunchStatus.state`);
+  }
+  // Terminal via the ONE canonical classifier (never a caller assertion, never a
+  // second inline vocabulary): only a terminal LaunchStatus.state may promote to ready.
+  const terminal = isTerminalStatus({ state: status } as LaunchStatus);
   return writeTransaction((): Continuation | undefined => {
     const db = getDb();
     const iso = nowIso(storeNowMs());
-    if (opts.terminal) {
-      db.prepare(
-        `UPDATE continuations
-            SET last_observed_status = ?,
-                state = CASE WHEN state = 'awaiting_completion' THEN 'ready' ELSE state END,
-                updated_at = ?
-          WHERE continuation_id = ? AND source_launch_id = ?`,
-      ).run(status, iso, continuationId, sourceLaunchId);
-    } else {
-      db.prepare(
-        `UPDATE continuations SET last_observed_status = ?, updated_at = ?
-          WHERE continuation_id = ? AND source_launch_id = ?`,
-      ).run(status, iso, continuationId, sourceLaunchId);
+    const res = terminal
+      ? db
+          .prepare(
+            `UPDATE continuations
+                SET last_observed_status = ?,
+                    state = CASE WHEN state = 'awaiting_completion' THEN 'ready' ELSE state END,
+                    updated_at = ?
+              WHERE continuation_id = ? AND source_launch_id = ?`,
+          )
+          .run(status, iso, continuationId, sourceLaunchId)
+      : db
+          .prepare(
+            `UPDATE continuations SET last_observed_status = ?, updated_at = ?
+              WHERE continuation_id = ? AND source_launch_id = ?`,
+          )
+          .run(status, iso, continuationId, sourceLaunchId);
+
+    // A stale observation — the continuation EXISTS but is now bound to a DIFFERENT
+    // launch (a delayed event from a superseded phase) — matched 0 rows above. It
+    // MUST leave durable evidence (observed-recorded-and-ignored, BD-3 audit) rather
+    // than being silently discarded, and it MUST NOT touch the slot or advance any
+    // phase. Append it to the audit table. A missing continuation (never recorded)
+    // has nothing to audit against and is left alone.
+    if (res.changes === 0) {
+      const current = getContinuation(continuationId);
+      if (current && current.sourceLaunchId !== sourceLaunchId) {
+        db.prepare(
+          `INSERT INTO continuation_stale_observations
+             (continuation_id, source_launch_id, current_phase, status, observed_at)
+           VALUES (?, ?, ?, ?, ?)`,
+        ).run(continuationId, sourceLaunchId, current.currentPhase, status, iso);
+      }
     }
     return getContinuation(continuationId);
   });
+}
+
+/** The durable append-only audit of stale observations for a continuation (a
+ *  delayed launch-completion event that arrived after the slot advanced past that
+ *  launch). Oldest-first. Audit-only: the claim path never reads this. */
+export function staleObservationsFor(continuationId: string): StaleObservation[] {
+  const rows = getDb()
+    .prepare(`SELECT * FROM continuation_stale_observations WHERE continuation_id = ? ORDER BY id ASC`)
+    .all(continuationId) as {
+    continuation_id: string;
+    source_launch_id: string;
+    current_phase: string;
+    status: string;
+    observed_at: string;
+  }[];
+  return rows.map((r) => ({
+    continuationId: r.continuation_id,
+    sourceLaunchId: r.source_launch_id,
+    currentPhase: r.current_phase,
+    status: r.status as ObservedStatus,
+    observedAt: r.observed_at,
+  }));
 }
 
 /**

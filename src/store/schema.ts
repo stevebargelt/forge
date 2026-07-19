@@ -289,4 +289,24 @@ CREATE INDEX IF NOT EXISTS idx_continuations_launch
 -- because only new binaries ever write this column.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_continuations_dispatch_key
   ON continuations(dispatch_key) WHERE dispatch_key IS NOT NULL;
+
+-- FG-562 (Finding 2): a durable, append-only audit of STALE observations — a
+-- delayed launch-completion event whose source_launch_id no longer matches the
+-- slot's current launch (the phase already advanced past it). The launch-bound
+-- observe matches 0 rows in continuations; rather than SILENTLY discarding that
+-- evidence (the audit-loss the AC forbids), it appends a row here. Audit-only: the
+-- claim path never reads this table, and a stale observation NEVER advances a phase.
+-- Purely additive (CREATE TABLE IF NOT EXISTS on the ordinary open path), so an old
+-- binary that predates it is never broken (BD-15) — the same additive contract as
+-- continuations itself.
+CREATE TABLE IF NOT EXISTS continuation_stale_observations (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  continuation_id  TEXT NOT NULL,
+  source_launch_id TEXT NOT NULL,
+  current_phase    TEXT NOT NULL,
+  status           TEXT NOT NULL,
+  observed_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_continuation_stale_obs_cont
+  ON continuation_stale_observations(continuation_id);
 `;

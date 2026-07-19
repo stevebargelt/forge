@@ -148,6 +148,16 @@ Enum values are **convention, not a DB constraint** (FG-585 precedent — an old
 
 The primitive exposes the adoption + restart-replay MECHANISM the consumers call: `adoptOrClaimDispatch(req)` derives the receipt and returns `disposition:'adopt'` on an existing dispatch (else grants a fresh `ready -> dispatching` claim), and `continuationsInDispatch({consumerKind?})` returns the durable set of crash-window (`dispatching`, un-advanced) slots to replay after a controller restart. The CONSUMER (orchestrator FG-563 / campaign FG-564) drives the replay loop and performs the physical check-before-spawn (keying run-creation on `dispatch_key`, looking up an already-created run before re-dispatching) — that dispatcher is explicitly out of FG-562 scope; this table + `src/store/continuations.ts` provide only the primitive it consumes.
 
+**Evidence authority on observe (BD-3).** `observeLaunchStatus(continuationId, sourceLaunchId, status)` does NOT accept a caller-asserted terminality. It VALIDATES that `status` is a real `LaunchStatus.state` (rejecting arbitrary text) and DERIVES terminality through the one canonical `isTerminalStatus` classifier (BD-10). A promotion `awaiting_completion -> ready` can therefore happen only for a status that IS a terminal `LaunchStatus.state`; a non-terminal (`running`) or invalid status can never promote, no matter what the caller claims. A non-terminal observation still records `last_observed_status` (evidence) without promoting. The controller still passes the state `readLaunch`/`classifyExit` returned — two sources of truth, never joined; the primitive never reads the fs launch record itself.
+
+### `continuation_stale_observations` table (FG-562 Finding 2 — durable stale-observation audit)
+
+A durable, append-only audit of STALE observations: a delayed launch-completion event whose `source_launch_id` no longer matches the slot's current launch (the phase already advanced past it). The launch-bound `observeLaunchStatus` matches 0 rows in `continuations`; rather than SILENTLY discarding that evidence, it appends a row here — observed-RECORDED-and-ignored. A stale observation NEVER advances any phase and never touches the `continuations` slot.
+
+Columns: `id` (PK, autoincrement), `continuation_id`, `source_launch_id` (the superseded/stale launch), `current_phase` (the slot's phase at observation time), `status` (the canonical `LaunchStatus.state` observed), `observed_at`. Index: `idx_continuation_stale_obs_cont` on `continuation_id`. Read audit-only via `staleObservationsFor(continuationId)`; the claim path never reads this table.
+
+Additive-only (`CREATE TABLE IF NOT EXISTS` on the ordinary open path), the same BD-15 contract as `continuations` — an old binary that predates it is never broken, and only new binaries ever write it.
+
 ## Filesystem contract
 
 Per-task workspace at `~/.forge/runs/<runId>/<taskId>/`:

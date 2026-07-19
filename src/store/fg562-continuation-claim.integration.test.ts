@@ -53,6 +53,7 @@ import {
   rearmForNextPhase,
   canonicalizeAction,
   deriveDispatchKey,
+  staleObservationsFor,
   type NextAction,
 } from "./continuations.js";
 
@@ -104,7 +105,7 @@ function seedReadyRows(db: Database.Database, n: number): void {
         currentPhase: "phase-A",
         nextAction: ACTION_A,
       });
-      observeLaunchStatus(`stress-${i}`, `L-${i}`, "exited_ok", { terminal: true });
+      observeLaunchStatus(`stress-${i}`, `L-${i}`, "exited_ok");
     }
   } finally {
     setDbForTest(prev as Database.Database);
@@ -275,7 +276,7 @@ describe("F17 dispatch adoption at the real boundary", () => {
 
     onFileDb(dbFile, () => {
       recordContinuation({ continuationId: "f17", consumerKind: "orchestrator", sourceLaunchId: "launch-A", currentPhase: "phase-A", nextAction: ACTION_A });
-      observeLaunchStatus("f17", "launch-A", "exited_ok", { terminal: true });
+      observeLaunchStatus("f17", "launch-A", "exited_ok");
       const claim = claimContinuationDispatch({
         continuationId: "f17", sourceLaunchId: "launch-A", consumerKind: "orchestrator", currentPhase: "phase-A",
         nextAction: ACTION_A, expectedState: "ready", owner: "ctl-dead", leaseTtlMs: 30_000,
@@ -360,7 +361,7 @@ describe("F16 lease recovery (file-backed)", () => {
     const dbFile = join(freshDir("f16"), "f16.db");
     onFileDb(dbFile, (db) => {
       recordContinuation({ continuationId: "f16", consumerKind: "orchestrator", sourceLaunchId: "launch-A", currentPhase: "phase-A", nextAction: ACTION_A });
-      observeLaunchStatus("f16", "launch-A", "exited_ok", { terminal: true });
+      observeLaunchStatus("f16", "launch-A", "exited_ok");
       const claim = claimContinuationDispatch({
         continuationId: "f16", sourceLaunchId: "launch-A", consumerKind: "orchestrator", currentPhase: "phase-A",
         nextAction: ACTION_A, expectedState: "ready", owner: "ctl-dead", leaseTtlMs: 30_000,
@@ -405,7 +406,7 @@ describe("F16 lease recovery (file-backed)", () => {
     const dbFile = join(freshDir("f16b"), "f16b.db");
     onFileDb(dbFile, () => {
       recordContinuation({ continuationId: "b", consumerKind: "orchestrator", sourceLaunchId: "launch-A", currentPhase: "phase-A", nextAction: ACTION_A });
-      observeLaunchStatus("b", "launch-A", "exited_ok", { terminal: true });
+      observeLaunchStatus("b", "launch-A", "exited_ok");
       const claim = claimContinuationDispatch({
         continuationId: "b", sourceLaunchId: "launch-A", consumerKind: "orchestrator", currentPhase: "phase-A",
         nextAction: ACTION_A, expectedState: "ready", owner: "ctl-x", leaseTtlMs: 30_000,
@@ -430,7 +431,7 @@ describe("phase-binding at the boundary", () => {
     onFileDb(dbFile, (db) => {
       // Drive the slot through phase A, then re-arm it for phase B.
       recordContinuation({ continuationId: "pb", consumerKind: "orchestrator", sourceLaunchId: "launch-A", currentPhase: "phase-A", nextAction: ACTION_A });
-      observeLaunchStatus("pb", "launch-A", "exited_ok", { terminal: true });
+      observeLaunchStatus("pb", "launch-A", "exited_ok");
       const a = claimContinuationDispatch({
         continuationId: "pb", sourceLaunchId: "launch-A", consumerKind: "orchestrator", currentPhase: "phase-A",
         nextAction: ACTION_A, expectedState: "ready", owner: "ctl-1", leaseTtlMs: 30_000,
@@ -439,7 +440,7 @@ describe("phase-binding at the boundary", () => {
       assert.ok(markAdvanced("pb", "ctl-1"));
       const rearmed = rearmForNextPhase("pb", { sourceLaunchId: "launch-B", currentPhase: "phase-B", nextAction: ACTION_B });
       assert.equal(rearmed?.currentPhase, "phase-B");
-      observeLaunchStatus("pb", "launch-B", "exited_ok", { terminal: true }); // phase-B's own launch is ready
+      observeLaunchStatus("pb", "launch-B", "exited_ok"); // phase-B's own launch is ready
 
       // RED baseline: a uniqueness-only claim (no phase binding) would advance B.
       const before = getContinuation("pb")!;
@@ -474,11 +475,18 @@ describe("phase-binding at the boundary", () => {
       // stamps launch A's disposition into phase B's evidence (ignored at the observe
       // boundary, not just at the claim).
       const evidenceBefore = getContinuation("pb")!;
-      observeLaunchStatus("pb", "launch-A", "exited_error", { terminal: true });
+      observeLaunchStatus("pb", "launch-A", "exited_error");
       const evidenced = getContinuation("pb")!;
       assert.equal(evidenced.lastObservedStatus, "exited_ok", "phase B's evidence is its OWN launch-B disposition, not the stale launch-A one");
       assert.equal(evidenced.currentPhase, "phase-B", "still phase B — the stale observation did not advance anything");
-      assert.equal(evidenced.updatedAt, evidenceBefore.updatedAt, "the stale launch-A observe wrote nothing");
+      assert.equal(evidenced.updatedAt, evidenceBefore.updatedAt, "the stale launch-A observe wrote nothing to the slot");
+      // Finding 2: the stale event is not SILENTLY discarded — it left a DURABLE
+      // append-only audit record at the file boundary (observed-recorded-and-ignored).
+      const audit = staleObservationsFor("pb");
+      assert.equal(audit.length, 1, "the stale launch-A event left exactly one durable audit row");
+      assert.equal(audit[0]?.sourceLaunchId, "launch-A", "the superseded launch id is captured");
+      assert.equal(audit[0]?.status, "exited_error", "the observed disposition is captured");
+      assert.equal(audit[0]?.currentPhase, "phase-B", "the slot's phase at observation time is captured");
 
       // Phase B's OWN, correctly-bound completion still advances normally.
       const legit = claimContinuationDispatch({
@@ -529,6 +537,7 @@ describe("BD-15 migration on a real store file (both directions, real data)", ()
     // Version B (new binary) opens the SAME file: additive create.
     const b = openFileDb(dbFile);
     assert.ok(tableSet(b).has("continuations"), "the new open added the continuations table");
+    assert.ok(tableSet(b).has("continuation_stale_observations"), "the new open added the additive stale-observation audit table (Finding 2)");
     assert.ok(indexSet(b).has("idx_continuations_dispatch_key"), "the UNIQUE(dispatch_key) index is present");
     assert.ok(indexSet(b).has("idx_continuations_launch"), "the launch index is present");
     // Every old row is byte-for-byte intact.
@@ -565,7 +574,7 @@ describe("BD-15 migration on a real store file (both directions, real data)", ()
     onFileDb(dbFile, () => {
       for (const id of ["cc-1", "cc-2"]) {
         recordContinuation({ continuationId: id, consumerKind: "orchestrator", sourceLaunchId: `L-${id}`, currentPhase: "p", nextAction: ACTION_A });
-        observeLaunchStatus(id, `L-${id}`, "exited_ok", { terminal: true });
+        observeLaunchStatus(id, `L-${id}`, "exited_ok");
         const out = claimContinuationDispatch({ continuationId: id, sourceLaunchId: `L-${id}`, consumerKind: "orchestrator", currentPhase: "p", nextAction: ACTION_A, expectedState: "ready", owner: "ctl", leaseTtlMs: 30_000 });
         assert.ok(out.granted, "the primitive works against a real file-backed store");
       }
@@ -604,7 +613,7 @@ describe("BD-3 evidence claimability (file-backed)", () => {
       for (const status of ["owner_gone", "unknown"] as const) {
         const id = `bd3-${status}`;
         recordContinuation({ continuationId: id, consumerKind: "orchestrator", sourceLaunchId: "L", currentPhase: "p", nextAction: ACTION_A });
-        const observed = observeLaunchStatus(id, "L", status, { terminal: true });
+        const observed = observeLaunchStatus(id, "L", status);
         assert.equal(observed?.state, "ready", `${status} is a legitimate terminal disposition`);
         assert.equal(observed?.lastObservedStatus, status, `${status} recorded as BD-3 evidence, not an exit code`);
         const out = claimContinuationDispatch({
@@ -646,7 +655,7 @@ describe("BD-3 evidence claimability (file-backed)", () => {
       assert.equal(after.updatedAt, before.updatedAt, "the failed claim wrote nothing");
 
       // A non-terminal observation (still running) also does not make it claimable.
-      observeLaunchStatus("unobserved", "L", "running", { terminal: false });
+      observeLaunchStatus("unobserved", "L", "running");
       const running = claimContinuationDispatch({
         continuationId: "unobserved", sourceLaunchId: "L", consumerKind: "orchestrator", currentPhase: "p",
         nextAction: ACTION_A, expectedState: "ready", owner: "ctl", leaseTtlMs: 30_000,
@@ -675,7 +684,7 @@ describe("F17 adoption entry-point across a crash+restart (production mechanism)
     // ---- Session 1: a controller claims, dispatches (records ids), then CRASHES.
     onFileDb(dbFile, () => {
       recordContinuation({ continuationId: "ad", consumerKind: "orchestrator", sourceLaunchId: "launch-A", currentPhase: "phase-A", nextAction: ACTION_A });
-      observeLaunchStatus("ad", "launch-A", "exited_ok", { terminal: true });
+      observeLaunchStatus("ad", "launch-A", "exited_ok");
       const claim = claimContinuationDispatch({
         continuationId: "ad", sourceLaunchId: "launch-A", consumerKind: "orchestrator", currentPhase: "phase-A",
         nextAction: ACTION_A, expectedState: "ready", owner: "ctl-dead", leaseTtlMs: 30_000,
@@ -742,7 +751,7 @@ describe("F17 adoption entry-point across a crash+restart (production mechanism)
     const dbFile = join(freshDir("adoptfresh"), "adoptfresh.db");
     onFileDb(dbFile, () => {
       recordContinuation({ continuationId: "fresh", consumerKind: "orchestrator", sourceLaunchId: "launch-A", currentPhase: "phase-A", nextAction: ACTION_A });
-      observeLaunchStatus("fresh", "launch-A", "exited_ok", { terminal: true });
+      observeLaunchStatus("fresh", "launch-A", "exited_ok");
       const outcome = adoptOrClaimDispatch({
         continuationId: "fresh", sourceLaunchId: "launch-A", consumerKind: "orchestrator", currentPhase: "phase-A",
         nextAction: ACTION_A, owner: "ctl-1", leaseTtlMs: 30_000,
@@ -797,7 +806,7 @@ describe("F17 no duplicate physical dispatch (real run recipient keyed by receip
       // ---- Session 1: claim → dispatch a REAL run keyed by the receipt → CRASH
       // before the settling advance (run id recorded, state still 'dispatching').
       recordContinuation({ continuationId: "r1", consumerKind: "orchestrator", sourceLaunchId: "launch-A", currentPhase: "phase-A", nextAction: ACTION_A });
-      observeLaunchStatus("r1", "launch-A", "exited_ok", { terminal: true });
+      observeLaunchStatus("r1", "launch-A", "exited_ok");
       const claim = claimContinuationDispatch({
         continuationId: "r1", sourceLaunchId: "launch-A", consumerKind: "orchestrator", currentPhase: "phase-A",
         nextAction: ACTION_A, expectedState: "ready", owner: "ctl-dead", leaseTtlMs: 30_000,
@@ -848,20 +857,20 @@ describe("restart replay set (production mechanism)", () => {
       // Two are mid-dispatch (claimed, un-advanced) — the crash window.
       for (const [id, launch, owner] of [["disp-1", "L1", "o1"], ["disp-2", "L2", "o2"]] as const) {
         recordContinuation({ continuationId: id, consumerKind: "orchestrator", sourceLaunchId: launch, currentPhase: "phase-A", nextAction: ACTION_A });
-        observeLaunchStatus(id, launch, "exited_ok", { terminal: true });
+        observeLaunchStatus(id, launch, "exited_ok");
         assert.ok(claimContinuationDispatch({ continuationId: id, sourceLaunchId: launch, consumerKind: "orchestrator", currentPhase: "phase-A", nextAction: ACTION_A, expectedState: "ready", owner, leaseTtlMs: 30_000 }).granted);
       }
       // One fully advanced — settled, not a replay candidate.
       recordContinuation({ continuationId: "done-1", consumerKind: "orchestrator", sourceLaunchId: "L3", currentPhase: "phase-A", nextAction: ACTION_A });
-      observeLaunchStatus("done-1", "L3", "exited_ok", { terminal: true });
+      observeLaunchStatus("done-1", "L3", "exited_ok");
       assert.ok(claimContinuationDispatch({ continuationId: "done-1", sourceLaunchId: "L3", consumerKind: "orchestrator", currentPhase: "phase-A", nextAction: ACTION_A, expectedState: "ready", owner: "o3", leaseTtlMs: 30_000 }).granted);
       assert.ok(markAdvanced("done-1", "o3", { runId: "run-done" }));
       // One ready-but-never-claimed — never dispatched, not a replay candidate.
       recordContinuation({ continuationId: "ready-1", consumerKind: "orchestrator", sourceLaunchId: "L4", currentPhase: "phase-A", nextAction: ACTION_A });
-      observeLaunchStatus("ready-1", "L4", "exited_ok", { terminal: true });
+      observeLaunchStatus("ready-1", "L4", "exited_ok");
       // One campaign slot mid-dispatch — proves consumer scoping across the restart.
       recordContinuation({ continuationId: "camp-1", consumerKind: "campaign", sourceLaunchId: "L5", currentPhase: "phase-A", nextAction: ACTION_A });
-      observeLaunchStatus("camp-1", "L5", "exited_ok", { terminal: true });
+      observeLaunchStatus("camp-1", "L5", "exited_ok");
       assert.ok(claimContinuationDispatch({ continuationId: "camp-1", sourceLaunchId: "L5", consumerKind: "campaign", currentPhase: "phase-A", nextAction: ACTION_A, expectedState: "ready", owner: "oc", leaseTtlMs: 30_000 }).granted);
     });
 
