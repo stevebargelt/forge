@@ -1,9 +1,10 @@
 ---
 id: FG-430
 type: story
-status: active
+status: done
 title: "Research: campaign autonomy model for independent overnight work"
 created: 2026-07-01
+closed: 2026-07-19
 ---
 
 ## Problem
@@ -69,3 +70,7 @@ The research should compare Forge's current campaign behavior with external agen
 - Related to FG-429 (orchestrator resolves route from policy).
 - Related to FG-422 (Forge workflow skills).
 - Reference: Gas City / Gas Town — https://github.com/gastownhall/gascity
+
+## Disposition — 2026-07-19
+
+Closed as superseded during the operator backlog review. The product direction moved from an autonomous ordered campaign as the ordinary work scheduler to Operator Work Management (FG-593) and its capacity-limited queue dispatcher, with autonomous authority governed separately by FG-456. Campaigns remain explicit coordinated programs under FG-370.

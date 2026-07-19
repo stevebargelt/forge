@@ -1,7 +1,7 @@
 ---
 id: FG-517
 type: story
-status: active
+status: deferred
 title: "notify: campaign-scoped milestone channel — a zero-runs campaign pause (anyHeld with no runs anywhere) cannot push via run-scoped emitMilestone"
 created: 2026-07-10
 ---
@@ -21,3 +21,7 @@ Acceptance:
 - [ ] a campaign pausing via the anyHeld final park with ZERO runs across all items pushes exactly one deduped notification per held item (or one campaign-level notification — design call, justify), carrying campaign id + ticket + requestedHumanAction
 - [ ] no schema change without an ADR; if one proves necessary, stop and surface it
 - [ ] regression test through the real executor path for the zero-runs campaign park
+
+## Disposition — 2026-07-19
+
+Deferred pending evidence that a zero-run `anyHeld` campaign pause is reachable in shipped workflows or has caused a live operator-visible incident. Do not build new campaign-scoped notification machinery solely for the hypothetical corner.

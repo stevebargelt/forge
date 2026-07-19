@@ -1,9 +1,10 @@
 ---
 id: FG-450
 type: story
-status: active
+status: done
 title: "Dashboard: Forge Fleet in Motion marquee stats band"
 created: 2026-07-03
+closed: 2026-07-19
 ---
 
 ## Problem
@@ -85,3 +86,7 @@ GitHub/PR-derived cards when repository remotes and GitHub data are available:
 - Related to FG-369 usage/cost visibility.
 - Related to FG-438 project cards linking to GitHub repos.
 - Builds on existing `forge metrics`, dashboard ops metrics, usage metrics, project registry, campaigns, and host_verifications data.
+
+## Disposition — 2026-07-19
+
+Closed as subsumed by the shipped Dashboard Home/Operations surface. The current 30-day band exposes the core operator-facing fleet proof—success rate, runs, tasks, retries, cancels, idle kills, and red blocks—without retaining a second overlapping dashboard story.

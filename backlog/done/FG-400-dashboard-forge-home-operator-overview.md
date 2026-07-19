@@ -1,10 +1,11 @@
 ---
 id: FG-400
 type: story
-status: active
+status: done
 title: Dashboard Forge Home / Operator Overview
 epic: FG-291
 created: 2026-06-24
+closed: 2026-07-19
 ---
 
 ## Problem
@@ -40,3 +41,7 @@ Add a dashboard Forge Home / Operator Overview that summarizes current Forge hea
 
 - Origin: Claude Deck competitive research visibility section.
 - Related: FG-291, FG-348, FG-349, FG-363, FG-370, FG-395.
+
+## Disposition — 2026-07-19
+
+Closed as delivered at the useful v1 boundary. Dashboard Home shipped in `523e9fd`; residual human-attention and campaign-detail work remains independently represented by FG-402 and FG-395.

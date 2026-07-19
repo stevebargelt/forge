@@ -1,7 +1,7 @@
 ---
 id: FG-378
 type: story
-status: active
+status: deferred
 title: "test-setup.ts: replace hardcoded /tmp placeholder project dirs with per-test mkdtemp"
 created: 2026-06-23
 ---
@@ -33,3 +33,7 @@ Make the integration tests that need a project dir create a REAL temp dir with `
 ## Notes
 
 - Surfaced during the FG-374 follow-up (2026-06-23). Functional and green today — purely a brittleness/maintainability cleanup. Relates to FG-374 (preflightProjectMount) and FG-354 (persistence/temp-dir conventions).
+
+## Disposition — 2026-07-19
+
+Deferred. The brittleness remains, but converting the large set of existing fixtures provides no current product benefit and should not compete with operator-facing or correctness work.

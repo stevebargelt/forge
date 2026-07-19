@@ -1,9 +1,10 @@
 ---
 id: FG-506
 type: story
-status: active
+status: done
 title: "review-loop/campaign polish: bespoke stop message for scope_guard_revert_failed + reconcile --help names only the scope-blocked shape"
 created: 2026-07-09
+closed: 2026-07-19
 ---
 
 Batched fail-safe lows from the FG-502 run (PR #87). Neither can cause a wrong-ship or trust bypass.
@@ -16,3 +17,7 @@ Acceptance:
 - [ ] scope_guard_revert_failed prints a bespoke message naming failedRevertPaths, the failing stage (fixError), and next action
 - [x] reconcile --help text names all three recoverable shapes — shipped in PR #87 (c0aa07a)
 - [ ] both surfaces covered by existing test patterns (CLI human-output assertions)
+
+## Disposition — 2026-07-19
+
+Closed as intentionally not pursued. The shipped reconcile-help correction remains; a bespoke message for the rare `scope_guard_revert_failed` path is not valuable enough to retain as standalone roadmap work.
