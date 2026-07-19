@@ -20,6 +20,7 @@ import {
   getContinuation,
   continuationByDispatchKey,
   continuationsForLaunch,
+  continuationsInDispatch,
   observeLaunchStatus,
   claimContinuationDispatch,
   renewClaim,
@@ -344,6 +345,65 @@ describe("crash windows F13–F18 + BD-3", () => {
     assert.equal(recovery.granted ? recovery.dispatchKey : "", originalKey, "recovery derives the IDENTICAL receipt — the original dispatch is adopted, not duplicated");
     // The idempotency receipt uniquely identifies the ONE dispatch across both owners.
     assert.equal(continuationByDispatchKey(originalKey)?.continuationId, id);
+  });
+
+  test("BD-3: a FRESH claim is refused while the awaited launch is only awaiting_completion — no terminal evidence, no claim", () => {
+    // The type forbids expectedState:'awaiting_completion', so the ONLY fresh claim a
+    // caller can even express is expectedState:'ready'. Recorded but not-yet-observed,
+    // the slot is still 'awaiting_completion' and that fresh claim matches nothing:
+    // a dispatch can never precede a durably-observed terminal disposition.
+    recordContinuation({ continuationId: "pre", consumerKind: "orchestrator", sourceLaunchId: "L", currentPhase: "p", nextAction: ACTION_A });
+    assert.equal(getContinuation("pre")!.state, "awaiting_completion");
+    const early = claimContinuationDispatch({
+      continuationId: "pre", sourceLaunchId: "L", consumerKind: "orchestrator", currentPhase: "p",
+      nextAction: ACTION_A, expectedState: "ready", owner: "ctl", leaseTtlMs: 30_000,
+    });
+    assert.equal(early.granted, false, "no terminal evidence observed → nothing to claim");
+    assert.equal(getContinuation("pre")!.state, "awaiting_completion", "state untouched — no fabricated readiness");
+    // A non-terminal observation is recorded but does NOT make the slot claimable.
+    observeLaunchStatus("pre", "running", { terminal: false });
+    const stillEarly = claimContinuationDispatch({
+      continuationId: "pre", sourceLaunchId: "L", consumerKind: "orchestrator", currentPhase: "p",
+      nextAction: ACTION_A, expectedState: "ready", owner: "ctl", leaseTtlMs: 30_000,
+    });
+    assert.equal(stillEarly.granted, false, "a non-terminal observation is not terminal evidence");
+    // Only after a terminal disposition is observed does the fresh claim succeed.
+    observeLaunchStatus("pre", "exited_ok", { terminal: true });
+    const now = claimContinuationDispatch({
+      continuationId: "pre", sourceLaunchId: "L", consumerKind: "orchestrator", currentPhase: "p",
+      nextAction: ACTION_A, expectedState: "ready", owner: "ctl", leaseTtlMs: 30_000,
+    });
+    assert.ok(now.granted, "terminal disposition observed → the fresh claim is granted");
+  });
+
+  test("F17: continuationsInDispatch collects the crash-window claims a recovery adopts by receipt", () => {
+    // Two slots are claimed (state='dispatching', receipt written) then their
+    // controllers crash before advancing. A third is fully advanced. The recovery
+    // collector returns ONLY the in-flight two, each carrying the receipt a recovery
+    // path uses to find/adopt an already-created run instead of dispatching a duplicate.
+    seedReady({ id: "d1", launch: "L1" });
+    seedReady({ id: "d2", launch: "L2" });
+    seedReady({ id: "done", launch: "L3" });
+    for (const [id, launch, owner] of [["d1", "L1", "o1"], ["d2", "L2", "o2"], ["done", "L3", "o3"]] as const) {
+      const c = claimContinuationDispatch({
+        continuationId: id, sourceLaunchId: launch, consumerKind: "orchestrator", currentPhase: "phase-A",
+        nextAction: ACTION_A, expectedState: "ready", owner, leaseTtlMs: 30_000,
+      });
+      assert.ok(c.granted);
+    }
+    markAdvanced("done", "o3", { runId: "run-done" });
+
+    const inFlight = continuationsInDispatch();
+    assert.deepEqual(inFlight.map((c) => c.continuationId), ["d1", "d2"], "only the un-advanced dispatching slots are collected");
+    for (const c of inFlight) {
+      assert.equal(c.state, "dispatching");
+      assert.ok(c.dispatchKey, "each collected slot carries its receipt for adoption");
+      assert.equal(c.dispatchedRunId, undefined, "the crash window: no run id recorded yet");
+      assert.equal(continuationByDispatchKey(c.dispatchKey!)?.continuationId, c.continuationId, "the receipt resolves back to the slot");
+    }
+    // A campaign reconciler collects only its own in-flight claims.
+    assert.equal(continuationsInDispatch({ consumerKind: "campaign" }).length, 0);
+    assert.equal(continuationsInDispatch({ consumerKind: "orchestrator" }).length, 2);
   });
 
   test("F18: watchdog fires after a normal event already advanced — no duplicate action, no false lost-signal", () => {

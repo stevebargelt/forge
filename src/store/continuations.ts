@@ -6,9 +6,10 @@
 // durable claim that makes advancement idempotent: the controller reads the
 // authoritative launch record (readLaunch/classifyExit — the canonical terminal
 // vocabulary, BD-10), records the observed disposition here, then claims the
-// single `awaiting_completion|ready -> dispatching` transition through a
-// PHASE-BOUND compare-and-set. The grant is `changes === 1`; a lost/stale/racing
-// claim writes NO state.
+// single `ready -> dispatching` transition through a PHASE-BOUND compare-and-set.
+// A fresh claim can ONLY proceed from `ready` — i.e. AFTER a terminal disposition
+// has been durably observed (BD-3) — so a claim never precedes terminal evidence.
+// The grant is `changes === 1`; a lost/stale/racing claim writes NO state.
 //
 // TWO SOURCES OF TRUTH, NEVER JOINED IN ONE QUERY. The filesystem launch record
 // (readLaunch/classifyExit) is authoritative for the terminal DISPOSITION; this
@@ -195,6 +196,26 @@ export function continuationsForLaunch(sourceLaunchId: string): Continuation[] {
   return rows.map(toContinuation);
 }
 
+/** The recovery-collection query F17 needs: every continuation currently in the
+ *  claim-to-dispatch crash window — CLAIMED (state='dispatching', so dispatch_key is
+ *  set) but not yet settled to `advanced`. A recovery collector enumerates these on
+ *  restart and, for each, uses the deterministic dispatch_key (the receipt) to look
+ *  up whether the physical run was already created: found → ADOPT it via
+ *  recordDispatchResult rather than dispatching a duplicate (F17); not found → the
+ *  dispatch never happened, so complete it. Ordered oldest-first (updated_at) so the
+ *  longest-stuck claim is reconciled first. Optionally scoped to one consumer so an
+ *  orchestrator and a campaign reconciler collect only their own in-flight claims. */
+export function continuationsInDispatch(opts: { consumerKind?: ConsumerKind } = {}): Continuation[] {
+  const rows = opts.consumerKind
+    ? (getDb()
+        .prepare(`SELECT * FROM continuations WHERE state = 'dispatching' AND consumer_kind = ? ORDER BY updated_at ASC`)
+        .all(opts.consumerKind) as ContinuationRow[])
+    : (getDb()
+        .prepare(`SELECT * FROM continuations WHERE state = 'dispatching' ORDER BY updated_at ASC`)
+        .all() as ContinuationRow[]);
+  return rows.map(toContinuation);
+}
+
 /**
  * Record the canonical disposition the controller observed on wake (BD-3
  * evidence), and move `awaiting_completion -> ready` when that disposition is
@@ -277,10 +298,14 @@ export type ClaimRequest = {
   consumerKind: ConsumerKind;
   currentPhase: string;
   nextAction: NextAction;
-  // The prior state the caller expects. A FRESH claim expects 'awaiting_completion'
-  // or 'ready' (claim_owner IS NULL). An expired-lease RECOVERY (F16) expects
-  // 'dispatching' and grants only when the lease is strictly in the past.
-  expectedState: Extract<ContinuationState, "awaiting_completion" | "ready" | "dispatching">;
+  // The prior state the caller expects. A FRESH claim expects 'ready' ONLY — the
+  // awaited launch's terminal disposition MUST already be durably observed (BD-3),
+  // so a claim can never precede authoritative terminal evidence (claim_owner IS
+  // NULL). 'awaiting_completion' is deliberately NOT claimable: a controller must
+  // observe a terminal status (observeLaunchStatus moves the slot to 'ready')
+  // before any dispatch. An expired-lease RECOVERY (F16) expects 'dispatching' and
+  // grants only when the lease is strictly in the past.
+  expectedState: Extract<ContinuationState, "ready" | "dispatching">;
   owner: string;
   leaseTtlMs: number;
 };
@@ -303,9 +328,13 @@ export type ClaimOutcome =
  * that: a claim keyed only on continuation_id would wrongly advance the newer phase.
  *
  * dispatch_key is derived deterministically and written HERE, at claim time, BEFORE
- * any dispatch — so a recovery after the claim-to-dispatch crash adopts the same
- * receipt (F17). The takeover path (expectedState='dispatching', lease expired)
- * recomputes the IDENTICAL key, so a taken-over dispatch is idempotent too.
+ * any dispatch — it is the idempotency receipt the primitive supplies for F17. The
+ * takeover path (expectedState='dispatching', lease expired) recomputes the IDENTICAL
+ * key, so recovery lands on the same receipt rather than a new one. This primitive
+ * owns the receipt, the crash-window collector (continuationsInDispatch), and late
+ * adoption (recordDispatchResult); the PHYSICAL dispatcher that keys run-creation on
+ * this receipt and looks up an already-created run before re-dispatching lives in the
+ * consumers (orchestrator FG-563 / campaign FG-564) that adopt this primitive.
  *
  * BD-3: this grants on whatever disposition the controller observed — it neither
  * requires nor fabricates an exit record. owner_gone/unknown claims are legitimate.
