@@ -235,4 +235,78 @@ CREATE TABLE IF NOT EXISTS publication_locks (
   acquired_at_ms INTEGER NOT NULL,
   expires_at_ms  INTEGER NOT NULL
 );
+
+-- FG-562 (BD-5): the durable continuation-claim primitive. A controller that
+-- observes a launch terminal state claims exactly ONE next action through a
+-- phase-bound compare-and-set here; delivery is at-least-once, advancement is
+-- exactly-once-claimed. Same additive-only shape as the FG-425 publication trio:
+-- a brand-new table via CREATE TABLE IF NOT EXISTS on the ordinary open path, so
+-- an old binary that knows nothing of it is never broken (BD-15). EVERY
+-- idempotency constraint stays INSIDE this table — the UNIQUE INDEX on
+-- dispatch_key is SAFE precisely because only NEW binaries ever insert here.
+--
+-- consumer_kind and state are UNCONSTRAINED TEXT with NO CHECK (FG-585 precedent:
+-- enum-as-convention). An old/new binary must never fight an enum constraint the
+-- other side doesn't share.
+--
+-- next_action is a CANONICALLY-serialized structured action (stable key order),
+-- NEVER an opaque shell string: the CAS compares next_action = ? and derives
+-- dispatch_key from it, so its serialization must be identical across processes
+-- and versions.
+--
+-- claim_expires_at is a renewable lease (epoch ms); a takeover is permitted ONLY
+-- when it is strictly in the past, mirroring publication_lane.lease_expires_at_ms.
+--
+-- dispatch_key is the deterministic idempotency receipt derived from
+-- (continuation_id, source_launch_id, canonical next_action) and written at CLAIM
+-- time, BEFORE dispatch — so a recovery after a claim-to-dispatch crash adopts the
+-- ORIGINAL dispatch by key instead of issuing a duplicate (F17).
+--
+-- last_observed_status is the canonical LaunchStatus.state recorded on wake (BD-3
+-- evidence). It is NEVER derived by reading an exit file directly — the controller
+-- goes through readLaunch/classifyExit and records the classifier's verdict here.
+CREATE TABLE IF NOT EXISTS continuations (
+  continuation_id      TEXT PRIMARY KEY,
+  consumer_kind        TEXT NOT NULL,
+  source_launch_id     TEXT NOT NULL,
+  current_phase        TEXT NOT NULL,
+  next_action          TEXT NOT NULL,
+  state                TEXT NOT NULL,
+  claim_owner          TEXT,
+  claim_expires_at     INTEGER,
+  dispatch_key         TEXT,
+  dispatched_run_id    TEXT,
+  dispatched_task_id   TEXT,
+  last_observed_status TEXT,
+  created_at           TEXT NOT NULL,
+  updated_at           TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_continuations_launch
+  ON continuations(source_launch_id);
+-- The idempotency receipt is unique across the table. Partial so the many rows
+-- with no dispatch_key yet (never claimed) do not collide — SQLite treats each
+-- NULL as distinct anyway, but the partial index states the intent and is safe
+-- because only new binaries ever write this column.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_continuations_dispatch_key
+  ON continuations(dispatch_key) WHERE dispatch_key IS NOT NULL;
+
+-- FG-562 (Finding 2): a durable, append-only audit of STALE observations — a
+-- delayed launch-completion event whose source_launch_id no longer matches the
+-- slot's current launch (the phase already advanced past it). The launch-bound
+-- observe matches 0 rows in continuations; rather than SILENTLY discarding that
+-- evidence (the audit-loss the AC forbids), it appends a row here. Audit-only: the
+-- claim path never reads this table, and a stale observation NEVER advances a phase.
+-- Purely additive (CREATE TABLE IF NOT EXISTS on the ordinary open path), so an old
+-- binary that predates it is never broken (BD-15) — the same additive contract as
+-- continuations itself.
+CREATE TABLE IF NOT EXISTS continuation_stale_observations (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  continuation_id  TEXT NOT NULL,
+  source_launch_id TEXT NOT NULL,
+  current_phase    TEXT NOT NULL,
+  status           TEXT NOT NULL,
+  observed_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_continuation_stale_obs_cont
+  ON continuation_stale_observations(continuation_id);
 `;
