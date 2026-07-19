@@ -23,6 +23,7 @@ import {
   continuationsInDispatch,
   observeLaunchStatus,
   claimContinuationDispatch,
+  adoptOrClaimDispatch,
   renewClaim,
   markAdvanced,
   recordDispatchResult,
@@ -233,6 +234,57 @@ describe("stale-completion / phase-binding (STAGED red→green)", () => {
       nextAction: ACTION_B, expectedState: "ready", owner: "ctl-2", leaseTtlMs: 30_000,
     });
     assert.ok(legit.granted, "phase B's correctly-bound completion DOES advance");
+  });
+});
+
+// ===========================================================================
+// The F17 adoption entry-point (adopt-not-duplicate as a real function).
+// ===========================================================================
+describe("adoptOrClaimDispatch (F17 adoption entry-point)", () => {
+  test("no prior dispatch → grants a fresh claim; once claimed → adopts the same dispatch", () => {
+    const { id } = seedReady({ id: "ad" });
+    const first = adoptOrClaimDispatch({
+      continuationId: id, sourceLaunchId: "launch-A", consumerKind: "orchestrator", currentPhase: "phase-A",
+      nextAction: ACTION_A, owner: "ctl-1", leaseTtlMs: 30_000,
+    });
+    assert.equal(first.disposition, "claim", "no receipt yet → a fresh claim");
+    const key = first.disposition === "claim" ? first.dispatchKey : "";
+    assert.equal(getContinuation(id)!.claimOwner, "ctl-1");
+
+    // A dispatch was recorded; the crash+recovery recomputes the same identity.
+    assert.ok(recordDispatchResult(id, "ctl-1", { runId: "run-x" }));
+    const adopted = adoptOrClaimDispatch({
+      continuationId: id, sourceLaunchId: "launch-A", consumerKind: "orchestrator", currentPhase: "phase-A",
+      nextAction: ACTION_A, owner: "ctl-recovery", leaseTtlMs: 30_000,
+    });
+    assert.equal(adopted.disposition, "adopt", "an existing dispatch is adopted, not re-claimed");
+    assert.equal(adopted.disposition === "adopt" ? adopted.dispatchKey : "", key, "the adopted receipt is identical");
+    assert.equal(adopted.disposition === "adopt" ? adopted.continuation.dispatchedRunId : undefined, "run-x", "the adopted dispatch carries its recorded run id");
+    assert.equal(getContinuation(id)!.claimOwner, "ctl-1", "adoption never steals the lease");
+  });
+
+  test("no prior dispatch AND not claimable (no terminal evidence) → unclaimable, nothing written", () => {
+    recordContinuation({ continuationId: "early", consumerKind: "orchestrator", sourceLaunchId: "L", currentPhase: "p", nextAction: ACTION_A });
+    const before = getContinuation("early")!;
+    const out = adoptOrClaimDispatch({
+      continuationId: "early", sourceLaunchId: "L", consumerKind: "orchestrator", currentPhase: "p",
+      nextAction: ACTION_A, owner: "ctl", leaseTtlMs: 30_000,
+    });
+    assert.equal(out.disposition, "unclaimable", "no receipt and no terminal evidence → nothing to adopt or claim");
+    assert.equal(getContinuation("early")!.state, "awaiting_completion", "no fabricated readiness");
+    assert.equal(getContinuation("early")!.updatedAt, before.updatedAt, "the failed adopt-or-claim wrote nothing");
+  });
+
+  test("a blocked slot is still ADOPTED by receipt — a recovery does not re-dispatch a blocked step", () => {
+    const { id } = seedReady({ id: "adb" });
+    assert.ok(claimContinuationDispatch({ continuationId: id, sourceLaunchId: "launch-A", consumerKind: "orchestrator", currentPhase: "phase-A", nextAction: ACTION_A, expectedState: "ready", owner: "ctl-x", leaseTtlMs: 30_000 }).granted);
+    assert.ok(markBlocked(id, "ctl-x"));
+    const out = adoptOrClaimDispatch({
+      continuationId: id, sourceLaunchId: "launch-A", consumerKind: "orchestrator", currentPhase: "phase-A",
+      nextAction: ACTION_A, owner: "ctl-recovery", leaseTtlMs: 30_000,
+    });
+    assert.equal(out.disposition, "adopt", "the receipt survives a block, so recovery adopts rather than re-dispatching");
+    assert.equal(out.disposition === "adopt" ? out.continuation.state : undefined, "blocked", "the adopted slot is still visibly blocked");
   });
 });
 

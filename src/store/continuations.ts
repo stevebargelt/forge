@@ -196,15 +196,27 @@ export function continuationsForLaunch(sourceLaunchId: string): Continuation[] {
   return rows.map(toContinuation);
 }
 
-/** The recovery-collection query F17 needs: every continuation currently in the
- *  claim-to-dispatch crash window — CLAIMED (state='dispatching', so dispatch_key is
- *  set) but not yet settled to `advanced`. A recovery collector enumerates these on
- *  restart and, for each, uses the deterministic dispatch_key (the receipt) to look
- *  up whether the physical run was already created: found → ADOPT it via
- *  recordDispatchResult rather than dispatching a duplicate (F17); not found → the
- *  dispatch never happened, so complete it. Ordered oldest-first (updated_at) so the
- *  longest-stuck claim is reconciled first. Optionally scoped to one consumer so an
- *  orchestrator and a campaign reconciler collect only their own in-flight claims. */
+/**
+ * THE RESTART-REPLAY ENTRY-POINT — the durable set a consumer resumes after a
+ * controller restart. It returns every continuation currently in the
+ * claim-to-dispatch crash window: CLAIMED (state='dispatching', so dispatch_key is
+ * set) but NOT yet settled to `advanced` (and NOT the `awaiting_completion`/`ready`
+ * slots that never dispatched, nor the `blocked` ones an operator owns). Ordered
+ * oldest-first (updated_at) so the longest-stuck claim is reconciled first.
+ * Optionally scoped to one consumer so an orchestrator and a campaign reconciler each
+ * collect only their own in-flight claims.
+ *
+ * THE CONTRACT with the consumer: this primitive supplies the SET; the consumer
+ * (orchestrator FG-563 / campaign FG-564) drives the replay LOOP. For each returned
+ * continuation the consumer calls adoptOrClaimDispatch (or continuationByDispatchKey
+ * directly) with the slot's identity — which returns `disposition:'adopt'` because the
+ * receipt is already present — then looks up whether the physical run was created
+ * (found → adopt it, recording ids via recordDispatchResult; not found → the dispatch
+ * never happened, so it completes it) and, to become the owner that settles it, takes
+ * over the lease via claimContinuationDispatch(expectedState:'dispatching'). The
+ * physical check-before-spawn is the CONSUMER's job (ticket non-scope); this function
+ * only makes the replay set durable and enumerable.
+ */
 export function continuationsInDispatch(opts: { consumerKind?: ConsumerKind } = {}): Continuation[] {
   const rows = opts.consumerKind
     ? (getDb()
@@ -382,6 +394,80 @@ export function claimContinuationDispatch(req: ClaimRequest): ClaimOutcome {
       return { granted: true, continuation, dispatchKey };
     }
     return { granted: false, reason: "lost", continuation };
+  });
+}
+
+// ── the F17 adoption entry-point (adopt-not-duplicate, made a real function) ───
+
+export type AdoptOrClaimRequest = {
+  continuationId: string;
+  sourceLaunchId: string;
+  consumerKind: ConsumerKind;
+  currentPhase: string;
+  nextAction: NextAction;
+  owner: string;
+  leaseTtlMs: number;
+};
+
+export type AdoptOrClaimOutcome =
+  /** A prior dispatch already exists under the deterministic receipt (the slot was
+   *  claimed — dispatch_key is set — regardless of whether the run/task ids were
+   *  recorded yet). The caller ADOPTS it: looks up the already-created run keyed on
+   *  `dispatchKey` and continues from there, NEVER dispatching a duplicate. This is
+   *  the F17 no-duplicate guarantee made concrete — the adopted `continuation`
+   *  carries `dispatchedRunId`/`dispatchedTaskId` when the crashed owner got as far
+   *  as recordDispatchResult, and neither when it crashed before. */
+  | { disposition: "adopt"; continuation: Continuation; dispatchKey: string }
+  /** No prior dispatch existed; a FRESH claim was granted from `ready`. The caller
+   *  performs the physical dispatch, then recordDispatchResult + markAdvanced. */
+  | { disposition: "claim"; continuation: Continuation; dispatchKey: string }
+  /** No prior dispatch AND the fresh claim was NOT granted (the slot was not `ready`,
+   *  or a concurrent controller won the CAS). Nothing was dispatched and no state was
+   *  written; the caller re-observes/retries per F14. `continuation` is the row as it
+   *  stands (or undefined if it never existed). */
+  | { disposition: "unclaimable"; continuation: Continuation | undefined; dispatchKey: string };
+
+/**
+ * THE F17 ADOPTION ENTRY-POINT — the single call a consumer makes on recovery to
+ * ADOPT an existing dispatch rather than re-dispatch it. It is the F17 contract as a
+ * real function, not a comment: derive the deterministic `dispatch_key` from the
+ * identity, and —
+ *
+ *   • if a continuation already carries that receipt (it was claimed — dispatch_key
+ *     is written at claim time, BEFORE any physical dispatch, so `dispatching`,
+ *     `advanced`, and `blocked` all carry it) → return `disposition:'adopt'` with the
+ *     existing row. The caller looks up the already-created run keyed on the receipt
+ *     and continues; it does NOT dispatch again. A re-derived key COLLIDES with the
+ *     existing dispatch instead of duplicating it.
+ *   • else (no prior dispatch, dispatch_key is null) → grant a FRESH claim from
+ *     `ready` via the phase-bound CAS. `disposition:'claim'` on grant,
+ *     `disposition:'unclaimable'` when the slot is not claimable / the CAS was lost.
+ *
+ * The lookup and the conditional claim run in ONE immediate transaction so a fresh
+ * claim is granted ONLY when the read still shows no prior dispatch (write rule,
+ * FG-548). Lease TAKEOVER of an already-adopted dispatch (F16 — becoming the owner to
+ * finish/advance a crashed claim) is a SEPARATE, explicit call the consumer makes
+ * after deciding to adopt: claimContinuationDispatch with expectedState:'dispatching'.
+ *
+ * MECHANISM vs CONSUMER (auditable boundary — ticket non-scope). This primitive
+ * supplies the adoption MECHANISM (the deterministic receipt + this lookup); the
+ * CONSUMER (orchestrator FG-563 / campaign FG-564) performs the physical
+ * check-before-spawn — keying run-creation on `dispatchKey` and looking up an
+ * already-created run before it re-dispatches. No production dispatcher lives here.
+ */
+export function adoptOrClaimDispatch(req: AdoptOrClaimRequest): AdoptOrClaimOutcome {
+  return writeTransaction((): AdoptOrClaimOutcome => {
+    const canonical = canonicalizeAction(req.nextAction);
+    const dispatchKey = deriveDispatchKey(req.continuationId, req.sourceLaunchId, canonical);
+    const existing = continuationByDispatchKey(dispatchKey);
+    if (existing) {
+      return { disposition: "adopt", continuation: existing, dispatchKey };
+    }
+    const outcome = claimContinuationDispatch({ ...req, expectedState: "ready" });
+    if (outcome.granted) {
+      return { disposition: "claim", continuation: outcome.continuation, dispatchKey: outcome.dispatchKey };
+    }
+    return { disposition: "unclaimable", continuation: outcome.continuation, dispatchKey };
   });
 }
 

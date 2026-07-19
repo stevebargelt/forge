@@ -41,6 +41,9 @@ import {
   recordContinuation,
   observeLaunchStatus,
   claimContinuationDispatch,
+  adoptOrClaimDispatch,
+  recordDispatchResult,
+  continuationsInDispatch,
   getContinuation,
   continuationByDispatchKey,
   markBlocked,
@@ -643,6 +646,177 @@ describe("BD-3 evidence claimability (file-backed)", () => {
         nextAction: ACTION_A, expectedState: "ready", owner: "ctl", leaseTtlMs: 30_000,
       });
       assert.equal(running.granted, false, "a still-running launch is not claimable");
+    });
+  });
+});
+
+// ===========================================================================
+// 7) F17 ADOPTION END-TO-END through the production entry-point across a REAL
+//    controller CRASH+RESTART (a fresh accessor against the same store file).
+//
+//    claim → recordDispatchResult(ids) → CRASH → RESTART → adoptOrClaimDispatch
+//    returns the EXISTING dispatch (disposition 'adopt', ids intact) and creates
+//    NO second claim/dispatch row; the identical receipt collides (UNIQUE) rather
+//    than duplicating. RED: a recovery whose key is NON-DETERMINISTIC misses the
+//    lookup and a duplicate dispatch slips past the index — the exact defect the
+//    deterministic receipt + adopt entry-point prevent.
+// ===========================================================================
+describe("F17 adoption entry-point across a crash+restart (production mechanism)", () => {
+  test("adoptOrClaimDispatch adopts the original dispatch on restart; a non-deterministic recovery would duplicate (RED)", () => {
+    const dbFile = join(freshDir("adopt"), "adopt.db");
+    let originalKey = "";
+
+    // ---- Session 1: a controller claims, dispatches (records ids), then CRASHES.
+    onFileDb(dbFile, () => {
+      recordContinuation({ continuationId: "ad", consumerKind: "orchestrator", sourceLaunchId: "launch-A", currentPhase: "phase-A", nextAction: ACTION_A });
+      observeLaunchStatus("ad", "exited_ok", { terminal: true });
+      const claim = claimContinuationDispatch({
+        continuationId: "ad", sourceLaunchId: "launch-A", consumerKind: "orchestrator", currentPhase: "phase-A",
+        nextAction: ACTION_A, expectedState: "ready", owner: "ctl-dead", leaseTtlMs: 30_000,
+      });
+      assert.ok(claim.granted, "the claim wrote the receipt before dispatch");
+      originalKey = claim.granted ? claim.dispatchKey : "";
+      assert.ok(recordDispatchResult("ad", "ctl-dead", { runId: "run-orig", taskId: "task-orig" }), "the physical dispatch's ids are recorded, still state='dispatching'");
+      assert.equal(getContinuation("ad")!.state, "dispatching", "crash BEFORE the settling advance — the F17 crash window");
+      assert.equal(getContinuation("ad")!.dispatchedRunId, "run-orig");
+    });
+
+    // ---- Session 2 = RESTART (a brand-new accessor against the same file).
+    onFileDb(dbFile, (db) => {
+      // RED baseline: a recovery that recomputes the receipt with a NON-DETERMINISTIC
+      // (owner-tagged) component looks up the WRONG key, finds NO existing dispatch,
+      // and would re-dispatch — a duplicate INSERT is NOT caught by UNIQUE(dispatch_key).
+      const canonical = canonicalizeAction(ACTION_A);
+      const mutantKey = deriveDispatchKey("ad", "launch-A", canonical) + ":ctl-recovery";
+      assert.notEqual(mutantKey, originalKey, "a non-deterministic key differs on recovery");
+      assert.equal(continuationByDispatchKey(mutantKey), undefined, "the mutant key misses the real dispatch — the defect");
+      const before = (db.prepare(`SELECT COUNT(*) AS n FROM continuations`).get() as { n: number }).n;
+      db.prepare(
+        `INSERT INTO continuations (continuation_id, consumer_kind, source_launch_id, current_phase, next_action, state, dispatch_key, created_at, updated_at)
+         VALUES ('ad-dup','orchestrator','launch-A','phase-A',?,'dispatching',?, '2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
+      ).run(canonical, mutantKey);
+      assert.equal((db.prepare(`SELECT COUNT(*) AS n FROM continuations`).get() as { n: number }).n, before + 1, "FALSIFICATION: a non-deterministic recovery created a DUPLICATE dispatch row");
+      db.prepare(`DELETE FROM continuations WHERE continuation_id='ad-dup'`).run(); // reset for the green path
+
+      // A recovery that SKIPS the receipt lookup and issues a bare fresh claim gets
+      // no grant (the slot is 'dispatching', not 'ready') — so it never learns a prior
+      // dispatch exists and would wrongly re-dispatch. The lookup is load-bearing.
+      const skipsLookup = claimContinuationDispatch({
+        continuationId: "ad", sourceLaunchId: "launch-A", consumerKind: "orchestrator", currentPhase: "phase-A",
+        nextAction: ACTION_A, expectedState: "ready", owner: "ctl-recovery", leaseTtlMs: 30_000,
+      });
+      assert.equal(skipsLookup.granted, false, "a bare fresh claim gives no adopt signal — it only fails, it does not adopt");
+
+      // ---- GREEN: the REAL entry-point recomputes the IDENTICAL receipt, ADOPTS the
+      // existing dispatch (ids intact), and creates NO second row.
+      const outcome = adoptOrClaimDispatch({
+        continuationId: "ad", sourceLaunchId: "launch-A", consumerKind: "orchestrator", currentPhase: "phase-A",
+        nextAction: ACTION_A, owner: "ctl-recovery", leaseTtlMs: 30_000,
+      });
+      assert.equal(outcome.disposition, "adopt", "the restart ADOPTS the existing dispatch, it does not re-dispatch");
+      assert.equal(outcome.dispatchKey, originalKey, "recovery derived the IDENTICAL receipt");
+      assert.equal(outcome.disposition === "adopt" ? outcome.continuation.dispatchedRunId : undefined, "run-orig", "the adopted dispatch carries the original run id");
+      assert.equal(outcome.disposition === "adopt" ? outcome.continuation.dispatchedTaskId : undefined, "task-orig", "and the original task id");
+      assert.equal((db.prepare(`SELECT COUNT(*) AS n FROM continuations`).get() as { n: number }).n, 1, "no duplicate row — one continuation, one dispatch");
+      assert.equal(getContinuation("ad")!.claimOwner, "ctl-dead", "adoption does NOT steal the lease — that is a separate, explicit takeover");
+
+      // A second attempt under the SAME deterministic key collides with the index.
+      assert.throws(
+        () => db.prepare(
+          `INSERT INTO continuations (continuation_id, consumer_kind, source_launch_id, current_phase, next_action, state, dispatch_key, created_at, updated_at)
+           VALUES ('ad-clone','orchestrator','launch-A','phase-A','{}','dispatching', ?, '2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
+        ).run(originalKey),
+        /UNIQUE/i,
+        "the identical receipt cannot appear twice — exactly one dispatch",
+      );
+    });
+  });
+
+  test("adoptOrClaimDispatch grants a FRESH claim when NO prior dispatch exists (adopt path is not always-adopt)", () => {
+    const dbFile = join(freshDir("adoptfresh"), "adoptfresh.db");
+    onFileDb(dbFile, () => {
+      recordContinuation({ continuationId: "fresh", consumerKind: "orchestrator", sourceLaunchId: "launch-A", currentPhase: "phase-A", nextAction: ACTION_A });
+      observeLaunchStatus("fresh", "exited_ok", { terminal: true });
+      const outcome = adoptOrClaimDispatch({
+        continuationId: "fresh", sourceLaunchId: "launch-A", consumerKind: "orchestrator", currentPhase: "phase-A",
+        nextAction: ACTION_A, owner: "ctl-1", leaseTtlMs: 30_000,
+      });
+      assert.equal(outcome.disposition, "claim", "with no prior dispatch a fresh claim is granted");
+      assert.equal(getContinuation("fresh")!.state, "dispatching");
+      assert.equal(getContinuation("fresh")!.claimOwner, "ctl-1");
+
+      // Immediately after, the SAME identity now ADOPTS (the receipt is present).
+      const again = adoptOrClaimDispatch({
+        continuationId: "fresh", sourceLaunchId: "launch-A", consumerKind: "orchestrator", currentPhase: "phase-A",
+        nextAction: ACTION_A, owner: "ctl-2", leaseTtlMs: 30_000,
+      });
+      assert.equal(again.disposition, "adopt", "once claimed, the same identity adopts — never a second claim");
+      assert.equal(getContinuation("fresh")!.claimOwner, "ctl-1", "no re-claim: the first owner is intact");
+    });
+  });
+});
+
+// ===========================================================================
+// 8) RESTART REPLAY END-TO-END: after a crash, continuationsInDispatch() returns
+//    EXACTLY the mid-dispatch slots (not advanced/ready/awaiting/blocked), and each
+//    is adoptable via the entry-point. RED: a collector that returns the WRONG set
+//    (every row, ignoring state) would replay settled/never-dispatched slots.
+// ===========================================================================
+describe("restart replay set (production mechanism)", () => {
+  test("continuationsInDispatch returns exactly the crash-window slots on restart; each adopts; a mutant collector over-collects (RED)", () => {
+    const dbFile = join(freshDir("replay"), "replay.db");
+
+    // ---- Session 1: drive four slots to distinct states, then CRASH.
+    onFileDb(dbFile, () => {
+      // Two are mid-dispatch (claimed, un-advanced) — the crash window.
+      for (const [id, launch, owner] of [["disp-1", "L1", "o1"], ["disp-2", "L2", "o2"]] as const) {
+        recordContinuation({ continuationId: id, consumerKind: "orchestrator", sourceLaunchId: launch, currentPhase: "phase-A", nextAction: ACTION_A });
+        observeLaunchStatus(id, "exited_ok", { terminal: true });
+        assert.ok(claimContinuationDispatch({ continuationId: id, sourceLaunchId: launch, consumerKind: "orchestrator", currentPhase: "phase-A", nextAction: ACTION_A, expectedState: "ready", owner, leaseTtlMs: 30_000 }).granted);
+      }
+      // One fully advanced — settled, not a replay candidate.
+      recordContinuation({ continuationId: "done-1", consumerKind: "orchestrator", sourceLaunchId: "L3", currentPhase: "phase-A", nextAction: ACTION_A });
+      observeLaunchStatus("done-1", "exited_ok", { terminal: true });
+      assert.ok(claimContinuationDispatch({ continuationId: "done-1", sourceLaunchId: "L3", consumerKind: "orchestrator", currentPhase: "phase-A", nextAction: ACTION_A, expectedState: "ready", owner: "o3", leaseTtlMs: 30_000 }).granted);
+      assert.ok(markAdvanced("done-1", "o3", { runId: "run-done" }));
+      // One ready-but-never-claimed — never dispatched, not a replay candidate.
+      recordContinuation({ continuationId: "ready-1", consumerKind: "orchestrator", sourceLaunchId: "L4", currentPhase: "phase-A", nextAction: ACTION_A });
+      observeLaunchStatus("ready-1", "exited_ok", { terminal: true });
+      // One campaign slot mid-dispatch — proves consumer scoping across the restart.
+      recordContinuation({ continuationId: "camp-1", consumerKind: "campaign", sourceLaunchId: "L5", currentPhase: "phase-A", nextAction: ACTION_A });
+      observeLaunchStatus("camp-1", "exited_ok", { terminal: true });
+      assert.ok(claimContinuationDispatch({ continuationId: "camp-1", sourceLaunchId: "L5", consumerKind: "campaign", currentPhase: "phase-A", nextAction: ACTION_A, expectedState: "ready", owner: "oc", leaseTtlMs: 30_000 }).granted);
+    });
+
+    // ---- Session 2 = RESTART: the replay set is exactly the mid-dispatch slots.
+    onFileDb(dbFile, (db) => {
+      // RED baseline: a mutant collector that returns EVERY row (ignoring state) would
+      // replay the advanced + never-dispatched slots too — re-dispatching settled work.
+      const mutantIds = (db.prepare(`SELECT continuation_id FROM continuations ORDER BY updated_at ASC`).all() as { continuation_id: string }[]).map((r) => r.continuation_id);
+      assert.ok(mutantIds.includes("done-1") && mutantIds.includes("ready-1"), "FALSIFICATION: a state-blind collector includes advanced + never-dispatched slots");
+      assert.ok(mutantIds.length > 2, "the mutant over-collects");
+
+      // GREEN: the real collector returns ONLY the orchestrator crash-window slots.
+      const replay = continuationsInDispatch({ consumerKind: "orchestrator" });
+      assert.deepEqual(replay.map((c) => c.continuationId), ["disp-1", "disp-2"], "exactly the un-advanced orchestrator dispatching slots, oldest-first");
+      for (const c of replay) {
+        assert.equal(c.state, "dispatching");
+        assert.ok(c.dispatchKey, "each replay slot carries its receipt");
+        assert.equal(c.dispatchedRunId, undefined, "the crash window: no run id yet");
+      }
+      // Consumer scoping survives the restart: the campaign reconciler sees only its own.
+      assert.deepEqual(continuationsInDispatch({ consumerKind: "campaign" }).map((c) => c.continuationId), ["camp-1"]);
+      // Unscoped: every mid-dispatch slot across consumers, still excluding settled ones.
+      assert.deepEqual(continuationsInDispatch().map((c) => c.continuationId).sort(), ["camp-1", "disp-1", "disp-2"]);
+
+      // Each replay slot is consumable via the adopt entry-point — 'adopt', not a re-claim.
+      for (const [id, launch] of [["disp-1", "L1"], ["disp-2", "L2"]] as const) {
+        const outcome = adoptOrClaimDispatch({
+          continuationId: id, sourceLaunchId: launch, consumerKind: "orchestrator", currentPhase: "phase-A",
+          nextAction: ACTION_A, owner: "ctl-recovery", leaseTtlMs: 30_000,
+        });
+        assert.equal(outcome.disposition, "adopt", `${id} is adopted from the replay set, not re-dispatched`);
+      }
     });
   });
 });

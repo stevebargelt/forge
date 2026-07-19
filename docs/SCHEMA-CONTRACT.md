@@ -146,6 +146,8 @@ Enum values are **convention, not a DB constraint** (FG-585 precedent — an old
 
 `next_action` is a canonically-serialized (stable key order) structured `{kind, …}` object, never an opaque shell string, so the CAS `next_action = ?` compare and the derived `dispatch_key` are stable across processes/versions. `dispatch_key` is the deterministic idempotency receipt derived from `(continuation_id, source_launch_id, canonical next_action)`, written at claim time before dispatch so a recovery adopts the original dispatch rather than duplicating it (F17). The table is additive-only (`CREATE TABLE IF NOT EXISTS` on the ordinary open path); the `dispatch_key` UNIQUE index is safe because only new binaries ever insert here (BD-15).
 
+The primitive exposes the adoption + restart-replay MECHANISM the consumers call: `adoptOrClaimDispatch(req)` derives the receipt and returns `disposition:'adopt'` on an existing dispatch (else grants a fresh `ready -> dispatching` claim), and `continuationsInDispatch({consumerKind?})` returns the durable set of crash-window (`dispatching`, un-advanced) slots to replay after a controller restart. The CONSUMER (orchestrator FG-563 / campaign FG-564) drives the replay loop and performs the physical check-before-spawn (keying run-creation on `dispatch_key`, looking up an already-created run before re-dispatching) — that dispatcher is explicitly out of FG-562 scope; this table + `src/store/continuations.ts` provide only the primitive it consumes.
+
 ## Filesystem contract
 
 Per-task workspace at `~/.forge/runs/<runId>/<taskId>/`:
