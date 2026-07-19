@@ -1091,26 +1091,32 @@ export function readLaunch(id: string, tmux: TmuxRunner = defaultTmux, isLaunche
       status = classifyExit(ex.rec);
     } else if (ex.kind === "unreadable") {
       // F11: a PRESENT but unreadable/invalid record is bounded retry, NEVER a
-      // terminal disposition on a SINGLE read — even when owner evidence is
-      // terminal. status stays `running` so this read is an invitation to retry.
-      // BD-7: that retry is BOUNDED only when there is INDEPENDENT TERMINAL OWNER
-      // evidence — no session -> unknown, dead pane -> owner_gone. In that case we
-      // surface the reconciled disposition a bounded waiter wakes on if the record
-      // stays unreadable past its bound, so a straddled completion never blocks
-      // forever. A CONFIRMED-LIVE owner is NOT terminal evidence: the tmux-owned
-      // command is still running, so there is nothing to promote. `unknown` means
-      // "the owner ended without a record" and requires the owner-gone evidence a
-      // live owner lacks — fabricating it here would advance a controller over a
-      // still-running command. So a live owner + unreadable record leaves
-      // pendingUnreadableExit UNSET: the launch stays running and only the waiter's
-      // own --timeout (a wait_timeout, never a launch terminal) bounds it. If the
-      // owner later dies, reconcile re-reads, owner evidence goes terminal, and the
-      // bound arms then.
+      // terminal disposition on a SINGLE read — status stays `running` so this read
+      // is an invitation to retry. What the SINGLE read cannot do is bound that
+      // retry; pendingUnreadableExit names the disposition a bounded waiter wakes on
+      // if the record is STILL unreadable past its bound. The AC requires EVERY
+      // persistently unreadable/invalid record to reach a completion disposition
+      // after bounded retry — "Failure is a completion disposition, not silence"
+      // (BD-7) — so the bound is armed regardless of owner liveness, else a
+      // `--timeout 0` wait on a live-owned launch whose record is permanently corrupt
+      // would block forever (the finding's defect).
+      //   no session -> unknown       (1a: owner gone via reboot)
+      //   dead pane   -> owner_gone    (1a: owner terminated)
+      //   live owner  -> unknown       (1b: the outcome could not be determined — a
+      //                                 live owner holding a PRESENT-but-corrupt exit
+      //                                 record is already anomalous, since the wrapper
+      //                                 writes exit as its last act; after the bound
+      //                                 we honestly report "undetermined" rather than
+      //                                 hang. This fabricates NO exit code/signal —
+      //                                 BD-3 — and a TRANSIENT record becomes readable
+      //                                 within the bound and disarms it first, F11.)
       status = { state: "running" };
       if (!sessionAlive) {
         pendingUnreadableExit = { terminal: { state: "unknown" } };
       } else if (dead === true) {
         pendingUnreadableExit = { terminal: { state: "owner_gone", cause: "unrecorded", sender: "unrecorded" } };
+      } else {
+        pendingUnreadableExit = { terminal: { state: "unknown" } };
       }
     } else if (!sessionAlive) {
       status = { state: "unknown" };
@@ -1299,6 +1305,30 @@ export async function waitForLaunchTerminal(id: string, harness: WaitHarness): P
   });
 }
 
+/** FG-552 (finding-1): the wait observer's view of a launch whose meta.json is
+ *  PRESENT but unreadable/unparseable this read. It is a KNOWN launch (the record
+ *  file exists), so the waiter must block-and-retry rather than refuse it as an
+ *  unknown id. `status` stays `running` — an invitation to retry (F11) — and
+ *  pendingUnreadableExit bounds it to a terminal `unknown` ("outcome could not be
+ *  determined") if the meta never becomes readable. The meta fields live in the file
+ *  we could not read, so they are left EMPTY, never invented — only `id` and `status`
+ *  drive the observation the waiter renders. */
+function unreadableMetaWaitView(id: string): LaunchView {
+  return {
+    id,
+    command: [],
+    tmuxSession: "",
+    launcherPid: 0,
+    ownerPid: null,
+    startedAt: "",
+    logPath: "",
+    cwd: "",
+    status: { state: "running" },
+    forgeIds: { runIds: [], taskIds: [] },
+    pendingUnreadableExit: { terminal: { state: "unknown" } },
+  };
+}
+
 /** The real harness: node:fs.watch for the ordinary atomic-exit-record rename, a
  *  bounded interval for the reconciled-only dispositions (owner_gone / unknown),
  *  and SIGINT/SIGTERM as waiter cancellation. OQ-4: cancelling the WAITER only
@@ -1311,11 +1341,27 @@ export function realWaitHarness(
 ): WaitHarness {
   const tmux = opts.tmux ?? defaultTmux;
   const dir = launchDir(id); // validates the id shape at the chokepoint
+  const metaPath = join(dir, "meta.json");
   const reconcileMs = opts.reconcileMs ?? 2000;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
   const invalidBoundMs = opts.invalidBoundMs ?? DEFAULT_INVALID_BOUND_MS;
   return {
-    read: () => readLaunch(id, tmux, opts.isLauncherAlive ?? launcherAlive),
+    read: () => {
+      const v = readLaunch(id, tmux, opts.isLauncherAlive ?? launcherAlive);
+      if (v) return v;
+      // FG-552 (finding-1): readLaunch returns undefined for BOTH a genuinely-absent
+      // record (ENOENT — an unknown launch id) AND a meta.json that is PRESENT but
+      // unparseable/unreadable THIS read. The record-reader rule forbids collapsing
+      // the two: an unparseable record is retryable, never terminal, so a KNOWN launch
+      // whose meta is transiently unreadable must NOT be refused as "no such launch"
+      // (exit 1) — that is the required unknown-id vs status-unknown distinction. When
+      // the record file is present, surface it as running + a pending `unknown`
+      // disposition, reusing the exact bounded-retry machinery the exit record uses: a
+      // transient clears and reclassifies (F11), a persistently-corrupt meta wakes as
+      // terminal `unknown` past the bound. Genuinely absent stays undefined ->
+      // unknown_launch.
+      return existsSync(metaPath) ? unreadableMetaWaitView(id) : undefined;
+    },
     installWatcher: (onEvent) => {
       let w: FSWatcher | undefined;
       try { w = watch(dir, () => onEvent()); } catch { /* dir unwatchable; reconcile still covers it */ }
