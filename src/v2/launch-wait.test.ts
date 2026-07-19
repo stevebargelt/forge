@@ -12,6 +12,7 @@ import {
   LAUNCHES_DIR,
   isTerminalStatus,
   readLaunch,
+  realWaitHarness,
   startLaunch,
   waitForLaunchTerminal,
   type LaunchStatus,
@@ -139,6 +140,39 @@ test("FG-552 wait (F6): an fs event on the atomic exit rename unblocks with exit
   assert.deepEqual((o as { view: LaunchView }).view.status, { state: "exited_error", code: 2 });
 });
 
+test("FG-552 wait (F3): a committed exit-record fs event that is LOST is still recovered from the durable record by the reconcile tick", async () => {
+  const h = fakeHarness(runningView());
+  const p = waitForLaunchTerminal("launch-x-abc123", h.harness);
+  // The wrapper committed its atomic exit record (exited_error 2), but the
+  // fs.watch event for the rename is LOST — dropped or coalesced by the OS, so the
+  // watcher callback is NEVER invoked. F3's recovery contract: reconciliation
+  // re-reads the durable record and unblocks anyway. We prove it by firing ONLY
+  // the reconcile tick, never the watcher.
+  h.state.view = runningView({ status: { state: "exited_error", code: 2 } });
+  assert.ok(h.state.reconcile, "reconcile installed");
+  h.state.reconcile!();
+  const o = await p;
+  assert.equal(o.kind, "terminal");
+  assert.deepEqual((o as { view: LaunchView }).view.status, { state: "exited_error", code: 2 },
+    "an ordinary exit record whose watcher event was missed is recovered from the durable record");
+});
+
+test("FG-552 wait (F7): an OS-recorded signal exit record wakes `forge launch wait` with signal evidence and an UNRECORDED sender", async () => {
+  // The per-row controller observation of an OS signal, driven through the real
+  // wait primitive + reader (not just the FG-535 classifyExit reader test). The
+  // wrapper's atomic exit record carries the kernel's WIFSIGNALED verdict
+  // (code null, signal SIGKILL); readLaunch classifies it `signaled`, and the
+  // already-terminal fast path returns it immediately through waitForLaunchTerminal.
+  const { tmux } = tmuxStub();
+  const meta = startLaunch(["sleep", "600"], { name: "signalled", tmux });
+  writeFileSync(join(LAUNCHES_DIR, meta.id, "exit"), `{"code":null,"signal":"SIGKILL"}`);
+  const o = await waitForLaunchTerminal(meta.id, realWaitHarness(meta.id, { tmux }));
+  assert.equal(o.kind, "terminal");
+  assert.deepEqual((o as { view: LaunchView }).view.status,
+    { state: "signaled", signal: "SIGKILL", sender: "unrecorded" },
+    "the controller wakes with the signal and the sender explicitly unrecorded — never inferred");
+});
+
 test("FG-552 wait (F34): owner_gone is discovered ONLY by the reconcile tick — a watch-only design is OBSERVED FAILING it", async () => {
   // Reconcile-enabled: the tick (no fs event) discovers owner_gone.
   const withReconcile = fakeHarness(runningView());
@@ -220,6 +254,16 @@ test("FG-552 reader (F11): an UNPARSEABLE exit record with a live session reads 
   const meta = startLaunch(["sleep", "600"], { name: "garbage", tmux });
   writeFileSync(join(LAUNCHES_DIR, meta.id, "exit"), "{not json"); // half-written JSON
   assert.deepEqual(readLaunch(meta.id, tmux)!.status, { state: "running" });
+});
+
+test("FG-552 reader (BD-7/F11): a SCHEMA-INVALID exit record (parseable JSON, no numeric code and no string signal) with a live session reads RUNNING, not terminal unknown", () => {
+  const { tmux } = tmuxStub();
+  for (const bad of ["{}", `{"code":"bad"}`, `{"code":null,"signal":null}`, `{"signal":42}`]) {
+    const meta = startLaunch(["sleep", "600"], { name: "schemabad", tmux });
+    writeFileSync(join(LAUNCHES_DIR, meta.id, "exit"), bad);
+    assert.deepEqual(readLaunch(meta.id, tmux)!.status, { state: "running" },
+      `${bad} is an invalid record — bounded retry while the owner lives, never terminal unknown on corrupt evidence`);
+  }
 });
 
 test("FG-552 reader: an empty exit record with NO live session is unknown — reached via INDEPENDENT terminal evidence, not the empty file", () => {

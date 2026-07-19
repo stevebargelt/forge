@@ -207,6 +207,14 @@ export function parseExitRecord(raw: string): ExitRecord | undefined {
     const parsed = JSON.parse(text) as Partial<ExitRecord>;
     const code = typeof parsed.code === "number" ? parsed.code : null;
     const signal = typeof parsed.signal === "string" ? parsed.signal : null;
+    // FG-552 (BD-7/F11): a parseable object supplying NEITHER a numeric code nor a
+    // string signal (`{}`, `{"code":"bad"}`) is a SCHEMA-INVALID record, not a
+    // terminal `{code:null,signal:null}` result — the wrapper always sets exactly
+    // one. Returning it would classify as terminal `unknown` and advance a
+    // controller on corrupt evidence; instead return undefined so it is treated as
+    // an unreadable/not-yet-terminal record and falls through to bounded owner-
+    // evidence retry, exactly like an empty/half-written file.
+    if (code === null) return undefined;
     return { code, signal };
   } catch {
     return undefined;

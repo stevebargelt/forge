@@ -154,7 +154,7 @@ Duplicate events are expected. Delivery may be delayed or lost. The consumer mus
 
 ### BD-6 — Close the subscribe race
 
-**Status: UNMET, owned by Slice 2.** This is a required property, not an accomplished one. No canonical subscription primitive exists today; each controller hand-builds its watcher.
+**Status: MET (Slice 2, FG-552).** The canonical subscription primitive `waitForLaunchTerminal` (`src/v2/launch.ts`) now closes the subscribe race: it reads the authoritative record, installs the observation mechanism, and rereads immediately, so either read observes an already-terminal launch — no check-then-subscribe gap can strand a completed launch. Controllers no longer hand-build a watcher.
 
 A launch may finish before a subscriber attaches or while subscription is being installed. The subscription algorithm must:
 
