@@ -8,12 +8,12 @@
 
 import { test, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { LAUNCHES_DIR, shellQuote, startLaunch } from "./launch.js";
+import { LAUNCHES_DIR, realWaitHarness, shellQuote, startLaunch, waitForLaunchTerminal, type LaunchView, type WaitOutcome } from "./launch.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const entry = resolve(here, "..", "cli", "index.ts");
@@ -31,6 +31,26 @@ function forge(args: string[]) {
   // bound is far above every legitimate blocking wait in this file (<= --timeout
   // 10s) and does NOT touch the production wait default.
   return spawnSync(tsx, [entry, ...args], { encoding: "utf8", env: process.env, timeout: 60_000, killSignal: "SIGKILL" });
+}
+
+const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** Drive the REAL blocking wait over the REAL tmux/fs boundary with NO waiter
+ *  timeout (timeoutMs: Infinity) — so the ONLY thing that can wake it is the launch
+ *  reaching a terminal disposition, or the BD-7 invalid-record bound. `invalidBoundMs`
+ *  is shortened so the blocking waits stay fast; a test-level safety timer FAILS the
+ *  test (never hangs the suite) if the wait ever blocks past it — the observable proof
+ *  that a broken bound would block forever. */
+async function waitNoTimeout(id: string, invalidBoundMs: number, safetyMs = 25_000): Promise<WaitOutcome> {
+  let timer: ReturnType<typeof setTimeout>;
+  const safety = new Promise<never>((_, rej) => {
+    timer = setTimeout(() => rej(new Error(`BD-7 FAIL: waitForLaunchTerminal (no --timeout) did not settle within ${safetyMs}ms — a persistently-invalid record blocked forever`)), safetyMs);
+  });
+  try {
+    return await Promise.race([waitForLaunchTerminal(id, realWaitHarness(id, { invalidBoundMs, timeoutMs: Infinity })), safety]);
+  } finally {
+    clearTimeout(timer!);
+  }
 }
 
 /** Run forge with an EXTRA ESM loader hook chained after tsx, used to make
@@ -134,17 +154,128 @@ test("FG-552 F7 (real): an OS-signalled tmux-owned workload is recorded WIFSIGNA
   }
 });
 
-test("FG-552 F4 (real): the exit record is committed ATOMICALLY — complete JSON, no .tmp remnant ever left behind", async () => {
+test("FG-552 F4 (real): the exit record is PUBLISHED ATOMICALLY — a reader CONCURRENT with the write never observes a partial `exit`, only absent-or-complete; a bare non-atomic write IS observably torn (the RED baseline the atomic temp+rename fixes)", async () => {
   if (!hasTmux) return;
+
+  // First: the real production launch's exit write leaves no remnant and a complete
+  // record (the property the observer depends on end-to-end).
   const meta = startLaunch(["true"], { name: "atomicexit" });
   started.push(meta.id);
   await waitFor("the exit record", () => existsSync(join(LAUNCHES_DIR, meta.id, "exit")));
-
   const dir = join(LAUNCHES_DIR, meta.id);
-  const remnants = readdirSync(dir).filter((e) => e.startsWith("exit.tmp"));
-  assert.deepEqual(remnants, [], "the temp file was renamed into place, never left behind");
-  // A complete, parseable record — never a truncated fragment.
+  assert.deepEqual(readdirSync(dir).filter((e) => e.startsWith("exit.tmp")), [], "atomic rename left no temp remnant");
   assert.deepEqual(JSON.parse(readFileSync(join(dir, "exit"), "utf8")), { code: 0, signal: null });
+
+  // Now the interleave the OLD F4 test never exercised. The pre-atomic writer was a
+  // bare `writeFileSync(exit, json)`; the shipped one writes a sibling temp then
+  // renames it into place (launch.ts exitRecorderScript). We drive BOTH strategies
+  // in a CHILD process (writeFileSync blocks the event loop, so a same-process reader
+  // could never land mid-write) while the parent polls the `exit` path, and assert:
+  //   atomic  → `exit` is NEVER seen at a partial size — absent, then complete-via-rename;
+  //   bare    → `exit` IS seen partial (torn) — the RED baseline. If this ever stops
+  //             holding the payload is too small; it is what makes the atomic assert non-trivial.
+  const workDir = mkdtempSync(join(tmpdir(), "fg552-f4-"));
+  try {
+    const padBytes = 24 * 1024 * 1024; // large enough that a bare write is multi-syscall / torn-observable
+
+    // Poll the `exit` path for every distinct disposition a reader could observe while
+    // the child writes: absent / partial (present but short) / complete (full size).
+    async function observeWrite(strategy: "atomic" | "bare"): Promise<{ sawPartial: boolean; final: unknown }> {
+      const exitPath = join(workDir, `exit-${strategy}`);
+      const tmpPath = `${exitPath}.tmp`;
+      rmSync(exitPath, { force: true });
+      rmSync(tmpPath, { force: true });
+      // `node -e <script> A B` exposes A as process.argv[1], B as process.argv[2].
+      const script =
+        strategy === "atomic"
+          ? `const fs=require("fs");const b=JSON.stringify({code:0,signal:null,pad:"x".repeat(${padBytes})});fs.writeFileSync(process.argv[1],b);fs.renameSync(process.argv[1],process.argv[2]);`
+          : `const fs=require("fs");const b=JSON.stringify({code:0,signal:null,pad:"x".repeat(${padBytes})});fs.writeFileSync(process.argv[2],b);`;
+      const full = Buffer.byteLength(JSON.stringify({ code: 0, signal: null, pad: "x".repeat(padBytes) }));
+      const child = spawn(process.execPath, ["-e", script, tmpPath, exitPath], { stdio: "ignore" });
+      let sawPartial = false;
+      let done = false;
+      child.on("exit", () => { done = true; });
+      while (!done) {
+        try {
+          const size = statSync(exitPath).size;
+          if (size > 0 && size < full) sawPartial = true; // `exit` present but not yet whole
+        } catch { /* ENOENT — absent, the atomic pre-rename state */ }
+        await new Promise((r) => setImmediate(r));
+      }
+      // A couple of final reads to catch the completed state deterministically.
+      try { const size = statSync(exitPath).size; if (size > 0 && size < full) sawPartial = true; } catch { /* absent */ }
+      const final = existsSync(exitPath) ? (JSON.parse(readFileSync(exitPath, "utf8")) as unknown) : undefined;
+      return { sawPartial, final };
+    }
+
+    const atomic = await observeWrite("atomic");
+    assert.equal(atomic.sawPartial, false, "ATOMIC: a concurrent reader NEVER observes `exit` partially written — the temp+rename publishes it whole");
+    const atomicFinal = atomic.final as { code: number; signal: null; pad: string };
+    assert.equal(atomicFinal.code, 0, "ATOMIC: the finally-observed `exit` is the complete, parseable record");
+    assert.equal(atomicFinal.signal, null);
+    assert.equal(atomicFinal.pad.length, padBytes, "ATOMIC: the complete record — never a truncated fragment");
+
+    const bare = await observeWrite("bare");
+    assert.equal(bare.sawPartial, true, "RED baseline: a bare non-atomic writeFileSync IS observably torn — `exit` is seen present-but-partial mid-write (this is what the atomic write fixes)");
+  } finally {
+    rmSync(workDir, { recursive: true, force: true });
+  }
+});
+
+test("FG-552 BD-7 (real / 1a): a PRESENT-but-invalid exit record with a GONE owner wakes waitForLaunchTerminal to a TERMINAL disposition (unknown) — NOT `running` forever, WITHOUT any waiter --timeout", async () => {
+  if (!hasTmux) return;
+  // A live launch, an invalid exit record present, then the owner GONE (session
+  // killed). Pre-BD-7 the reader collapsed this to `running` forever (an unreadable
+  // record blocked EVERY owner-terminal verdict), so a no-timeout wait hung. BD-7:
+  // after a bounded retry the gone owner decides — terminal `unknown` — a wake, not
+  // silence. Driven over the REAL boundary (real tmux + real fs + real readLaunch).
+  const meta = startLaunch(["sh", "-c", "sleep 600"], { name: "bd7-gone" });
+  started.push(meta.id);
+  writeFileSync(join(LAUNCHES_DIR, meta.id, "exit"), "{}"); // schema-invalid, unreadable
+  execFileSync("tmux", ["kill-session", "-t", meta.tmuxSession], { stdio: "ignore" }); // owner gone: no session
+
+  const o = await waitNoTimeout(meta.id, 800);
+  assert.equal(o.kind, "terminal", "BD-7 1a: an unreadable record + gone owner reaches a terminal disposition, never a hang");
+  assert.deepEqual((o as { view: LaunchView }).view.status, { state: "unknown" }, "the gone owner (no session) decides: terminal unknown");
+});
+
+test("FG-552 BD-7 (real / 1b): a PERSISTENTLY-invalid exit record with a LIVE owner wakes on the BOUND — proves waitForLaunchTerminal with NO --timeout does not block forever", async () => {
+  if (!hasTmux) return;
+  // The core BD-7 gap: a live owner + a permanently-corrupt exit record. With no
+  // waiter timeout, pre-BD-7 this blocked forever (the only bound WAS --timeout,
+  // absent here). BD-7: a bounded retry turns a persistently-unreadable record into a
+  // terminal completion (unknown) the waiter wakes on — failure is a disposition. The
+  // waiter runs with timeoutMs Infinity, so ONLY the invalid-record bound can wake it.
+  const meta = startLaunch(["sh", "-c", "sleep 600"], { name: "bd7-live" });
+  started.push(meta.id);
+  writeFileSync(join(LAUNCHES_DIR, meta.id, "exit"), `{"code":null,"signal":null}`); // invalid; owner stays alive
+
+  const o = await waitNoTimeout(meta.id, 800);
+  assert.equal(o.kind, "terminal", "BD-7 1b: the bound turns a persistently-invalid record into a terminal completion — NOT a wait_timeout, NOT a hang");
+  assert.deepEqual((o as { view: LaunchView }).view.status, { state: "unknown" }, "a live owner + persistently-invalid record wakes as terminal unknown");
+});
+
+test("FG-552 BD-7 (real / F11 transient — regression): an invalid record that becomes READABLE within the bound classifies NORMALLY (exited_ok), never a premature terminal", async () => {
+  if (!hasTmux) return;
+  // The reconciliation with F11: a TRANSIENT unreadable record must NOT be prematurely
+  // terminaled. Start the wait with a LONG bound (60s, so it cannot fire during the
+  // test) on a launch whose exit record is momentarily invalid, then replace it with a
+  // valid record — the waiter must wake on the TRUE classification, never the pending
+  // reconciled disposition.
+  const meta = startLaunch(["sh", "-c", "sleep 600"], { name: "bd7-transient" });
+  started.push(meta.id);
+  writeFileSync(join(LAUNCHES_DIR, meta.id, "exit"), "{}"); // transiently unreadable
+
+  const harness = realWaitHarness(meta.id, { invalidBoundMs: 60_000, timeoutMs: Infinity });
+  const p = waitForLaunchTerminal(meta.id, harness);
+  await delay(500); // WELL within the 60s bound
+  writeFileSync(join(LAUNCHES_DIR, meta.id, "exit"), `{"code":0,"signal":null}`); // becomes readable
+
+  const safety = delay(20_000).then(() => { throw new Error("F11 transient FAIL: the readable record was never classified"); });
+  const o = await Promise.race([p, safety]);
+  assert.equal(o.kind, "terminal");
+  assert.deepEqual((o as { view: LaunchView }).view.status, { state: "exited_ok", code: 0 },
+    "the record became readable within the bound → classified normally, NEVER the pending unknown (F11 preserved)");
 });
 
 test("FG-552: an already-terminal launch returns immediately (no blocking)", async () => {

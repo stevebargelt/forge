@@ -187,6 +187,15 @@ export type LaunchView = LaunchMeta & {
   // FG-555: R3/R4 provenance, written by the recorder at spawn time. Absent for a
   // launch that predates FG-555 — surfaced as "not recorded", never inferred.
   workload?: WorkloadProvenance;
+  // FG-552 (BD-7): set ONLY when `status` is `running` BECAUSE a PRESENT exit
+  // record is unreadable/invalid THIS read (not because the command genuinely
+  // runs — a genuinely-running launch has NO exit file yet). `status` still reads
+  // `running` so every SINGLE read remains an invitation to bounded retry (F11);
+  // this field surfaces the reconciled disposition a BOUNDED waiter wakes on if the
+  // record never becomes readable — owner_gone/unknown when owner evidence is
+  // terminal (1a), unknown when the owner still lives (1b). Never a second status
+  // vocabulary: `terminal` is drawn from the existing LaunchStatus set (BD-10).
+  pendingUnreadableExit?: { terminal: LaunchStatus };
 };
 
 export function classifyExit(rec: ExitRecord): LaunchStatus {
@@ -962,6 +971,7 @@ export function readLaunch(id: string, tmux: TmuxRunner = defaultTmux): LaunchVi
     | { kind: "absent" }
     | { kind: "unreadable" };
   let status: LaunchStatus;
+  let pendingUnreadableExit: { terminal: LaunchStatus } | undefined;
   const exitPath = join(dir, "exit");
   const readExit = (): ExitRead => {
     let raw: string;
@@ -1004,9 +1014,20 @@ export function readLaunch(id: string, tmux: TmuxRunner = defaultTmux): LaunchVi
       status = classifyExit(ex.rec);
     } else if (ex.kind === "unreadable") {
       // F11: a PRESENT but unreadable/invalid record is bounded retry, NEVER a
-      // terminal disposition — even when owner evidence is terminal. Only a
-      // genuinely ABSENT record yields the owner-terminal verdicts below.
+      // terminal disposition on a SINGLE read — even when owner evidence is
+      // terminal. status stays `running` so this read is an invitation to retry.
+      // BD-7: but that retry must be BOUNDED, so we ALSO surface the reconciled
+      // disposition a bounded waiter wakes on if the record stays unreadable past
+      // its bound — never blocking forever. owner terminal (no session -> unknown,
+      // dead pane -> owner_gone) is 1a; a live owner is 1b (unknown). Only a
+      // genuinely ABSENT record yields the owner-terminal verdicts below directly.
       status = { state: "running" };
+      const terminal: LaunchStatus = !sessionAlive
+        ? { state: "unknown" }
+        : dead === true
+          ? { state: "owner_gone", cause: "unrecorded", sender: "unrecorded" }
+          : { state: "unknown" };
+      pendingUnreadableExit = { terminal };
     } else if (!sessionAlive) {
       status = { state: "unknown" };
     } else if (dead === true) {
@@ -1035,7 +1056,7 @@ export function readLaunch(id: string, tmux: TmuxRunner = defaultTmux): LaunchVi
     try { workload = parseWorkloadProvenance(readFileSync(wlPath, "utf8")); } catch { /* not readable yet */ }
   }
 
-  return { ...meta, status, forgeIds: extractForgeIds(log), ...(recorder ? { recorder } : {}), ...(workload ? { workload } : {}) };
+  return { ...meta, status, forgeIds: extractForgeIds(log), ...(recorder ? { recorder } : {}), ...(workload ? { workload } : {}), ...(pendingUnreadableExit ? { pendingUnreadableExit } : {}) };
 }
 
 export function listLaunches(tmux: TmuxRunner = defaultTmux): LaunchView[] {
@@ -1072,6 +1093,15 @@ export function removeLaunch(id: string, opts: { force?: boolean; tmux?: TmuxRun
  *  but long enough not to fire on any real long-running forge command. */
 export const DEFAULT_WAIT_TIMEOUT_MS = 12 * 60 * 60 * 1000;
 
+/** FG-552 (BD-7): the bound on a PERSISTENTLY unreadable/invalid exit record. It is
+ *  DISTINCT from the waiter `--timeout` (which yields `wait_timeout`, not a launch
+ *  disposition): a record that stays unreadable this long becomes a terminal launch
+ *  COMPLETION (owner_gone/unknown) the waiter wakes on. Generous — far longer than
+ *  any transient torn/EIO read needs to clear across reconcile ticks — but FINITE,
+ *  so a persistently-corrupt record with a live owner never blocks forever even with
+ *  `--timeout 0`. Failure is a disposition, not silence. */
+export const DEFAULT_INVALID_BOUND_MS = 60 * 1000;
+
 /** A launch is terminal in EVERY state except `running`. The six terminal
  *  dispositions (exit 0, ordinary non-zero, OS signal, signal-range code, owner
  *  gone, unknown) all wake a waiter; only a still-running launch keeps it blocked.
@@ -1096,6 +1126,12 @@ export interface WaitHarness {
   startReconcile(onTick: () => void): () => void;
   startTimeout(onFire: () => void): () => void;
   onCancel(onCancel: () => void): () => void;
+  // BD-7: a bounded timer ARMED by the waiter the first read it observes a
+  // `pendingUnreadableExit`, and DISARMED the moment the record clears (becomes a
+  // real record or genuinely-running). If it fires while the record is STILL
+  // unreadable, the waiter wakes on the reconciled terminal disposition rather than
+  // retrying forever. Returns its own teardown (idempotent).
+  startInvalidBound(onFire: () => void): () => void;
 }
 
 /** Canonical blocking wait: return exactly one observation once the launch is
@@ -1120,23 +1156,55 @@ export async function waitForLaunchTerminal(id: string, harness: WaitHarness): P
     let settled = false;
     let last: LaunchStatus = first.status;
     const cleanups: Array<() => void> = [];
+    // BD-7: teardown for the currently-armed invalid-record bound (undefined when
+    // no unreadable record is pending). Armed on the first pending observation,
+    // disarmed when the record clears, so a transient unreadable read never trips a
+    // terminal wake (F11) — only a PERSISTENTLY unreadable one, past the bound.
+    let disarmInvalidBound: (() => void) | undefined;
     const settle = (o: WaitOutcome): void => {
       if (settled) return; // emit EXACTLY ONE observation even if events race
       settled = true;
       for (const c of cleanups) { try { c(); } catch { /* best-effort teardown */ } }
       resolve(o);
     };
+    // BD-7: the bound expired while the exit record was still unreadable. Re-read
+    // once: a record that became readable in the meantime is authoritative; a
+    // launch that reached a terminal owner disposition wakes on that; otherwise the
+    // record is persistently unreadable and we wake on its reconciled disposition
+    // (owner_gone/unknown or, for a live owner, unknown) — a completion, not silence.
+    const wakeOnPersistentInvalid = (): void => {
+      if (settled) return;
+      const v = harness.read();
+      if (!v) return;
+      if (isTerminalStatus(v.status)) { settle({ kind: "terminal", view: v }); return; }
+      if (v.pendingUnreadableExit) {
+        const { pendingUnreadableExit, ...rest } = v;
+        settle({ kind: "terminal", view: { ...rest, status: pendingUnreadableExit.terminal } });
+      }
+      // else the record cleared to genuinely-running between disarm and fire — leave
+      // blocked; only a real terminal disposition wakes a genuinely-running launch.
+    };
     const check = (): void => {
       if (settled) return;
       const v = harness.read();
       if (!v) return; // record transiently gone — not terminal on its own (BD-7)
       last = v.status;
-      if (isTerminalStatus(v.status)) settle({ kind: "terminal", view: v });
+      if (isTerminalStatus(v.status)) { settle({ kind: "terminal", view: v }); return; }
+      if (v.pendingUnreadableExit) {
+        // A PRESENT-but-unreadable record: arm the bound once so persistence wakes.
+        if (!disarmInvalidBound) disarmInvalidBound = harness.startInvalidBound(wakeOnPersistentInvalid);
+      } else if (disarmInvalidBound) {
+        // The record cleared (readable, or genuinely-running) — cancel the bound so
+        // a transient never trips a terminal wake (F11 transient).
+        disarmInvalidBound();
+        disarmInvalidBound = undefined;
+      }
     };
     cleanups.push(harness.installWatcher(check));
     cleanups.push(harness.startReconcile(check));
     cleanups.push(harness.startTimeout(() => settle({ kind: "wait_timeout", id, lastObserved: last })));
     cleanups.push(harness.onCancel(() => settle({ kind: "wait_cancelled", id, lastObserved: last })));
+    cleanups.push(() => { if (disarmInvalidBound) { disarmInvalidBound(); disarmInvalidBound = undefined; } });
     check(); // reread immediately after installing the watcher (BD-6)
   });
 }
@@ -1149,12 +1217,13 @@ export async function waitForLaunchTerminal(id: string, harness: WaitHarness): P
  *  fixed-estimate model poll. */
 export function realWaitHarness(
   id: string,
-  opts: { tmux?: TmuxRunner; reconcileMs?: number; timeoutMs?: number } = {},
+  opts: { tmux?: TmuxRunner; reconcileMs?: number; timeoutMs?: number; invalidBoundMs?: number } = {},
 ): WaitHarness {
   const tmux = opts.tmux ?? defaultTmux;
   const dir = launchDir(id); // validates the id shape at the chokepoint
   const reconcileMs = opts.reconcileMs ?? 2000;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
+  const invalidBoundMs = opts.invalidBoundMs ?? DEFAULT_INVALID_BOUND_MS;
   return {
     read: () => readLaunch(id, tmux),
     installWatcher: (onEvent) => {
@@ -1169,6 +1238,14 @@ export function realWaitHarness(
     startTimeout: (onFire) => {
       if (!(timeoutMs > 0) || !Number.isFinite(timeoutMs)) return () => { /* no timeout */ };
       const t = setTimeout(onFire, timeoutMs);
+      return () => clearTimeout(t);
+    },
+    startInvalidBound: (onFire) => {
+      // BD-7: the bound is finite by construction (production default is finite), so
+      // a persistently-invalid record ALWAYS wakes — independent of `--timeout`. A
+      // non-finite override degrades to a no-op rather than arming a bad timer.
+      if (!(invalidBoundMs > 0) || !Number.isFinite(invalidBoundMs)) return () => { /* no bound */ };
+      const t = setTimeout(onFire, invalidBoundMs);
       return () => clearTimeout(t);
     },
     onCancel: (cb) => {

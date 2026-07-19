@@ -84,6 +84,7 @@ test("FG-552 observer (BD-6, real reader): a launch that becomes terminal in the
     startReconcile: () => () => {}, // DEAD: no tick will explain the observation
     startTimeout: base.startTimeout, // real safety timeout (proves a hang would surface as wait_timeout)
     onCancel: () => () => {},
+    startInvalidBound: base.startInvalidBound, // never armed here (the record is valid), but the interface requires it
   };
 
   const o = await waitForLaunchTerminal(meta.id, harness);
@@ -110,6 +111,7 @@ test("FG-552 observer (F34, real reader + real interval): owner_gone has NO fs a
     startReconcile: () => () => {}, // the structural gap F34 pins
     startTimeout: woBase.startTimeout,
     onCancel: woBase.onCancel,
+    startInvalidBound: woBase.startInvalidBound, // never armed here (owner_gone, not an unreadable record)
   };
   setTimeout(() => wo.deadPanes.add(woMeta.tmuxSession), 80); // owner gone mid-wait, no fs event
   const missed = await waitForLaunchTerminal(woMeta.id, watchOnly);
