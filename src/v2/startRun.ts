@@ -53,6 +53,13 @@ export type StartRunArgs = {
   resolvedFromSubdir?: boolean;
   /** FG-374: true when --allow-subproject was passed. */
   explicitSubproject?: boolean;
+  /** FG-563 (CP2, F17 receipt bridge): the deterministic continuation dispatch_key
+   *  this run is the physical dispatch OF. Stamped into run metadata at creation —
+   *  BEFORE the first wave spawns — so runByDispatchKey can adopt this exact run on
+   *  a recovery instead of duplicating it. Control-plane metadata (never poured into
+   *  task inputs — see CONTROL_PLANE_METADATA_KEYS). Absent for an ordinary run not
+   *  driven by a durable continuation. */
+  dispatchKey?: string;
 };
 
 export type StartRunResult = {
@@ -79,6 +86,7 @@ export const CONTROL_PLANE_METADATA_KEYS = [
   "invocationCwd",       // FG-374
   "resolvedFromSubdir",  // FG-374
   "explicitSubproject",  // FG-374
+  "dispatchKey",         // FG-563 (CP2): F17 dispatch receipt, never task input
 ] as const;
 
 export function startRun(args: StartRunArgs): StartRunResult {
@@ -101,6 +109,10 @@ export function startRun(args: StartRunArgs): StartRunResult {
   if (args.invocationCwd) metadata["invocationCwd"] = args.invocationCwd;
   if (args.resolvedFromSubdir) metadata["resolvedFromSubdir"] = args.resolvedFromSubdir;
   if (args.explicitSubproject) metadata["explicitSubproject"] = args.explicitSubproject;
+  // FG-563 (CP2): stamp the F17 dispatch receipt into metadata BEFORE insertRun, so
+  // the run is discoverable by runByDispatchKey the instant it exists — before the
+  // first wave (runNext) can spawn anything observable.
+  if (args.dispatchKey) metadata["dispatchKey"] = args.dispatchKey;
 
   if (args.routeKey !== undefined) {
     const resolved = resolvePolicyPath(args.projectDir);

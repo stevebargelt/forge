@@ -298,7 +298,11 @@ describe("guard, adversarial", () => {
   test("FG-548 (guard, adversarial): the stripper does not swallow real code — the transaction sites in src/ are still SEEN", () => {
     // A stripping bug that ate part of a file would make offenders vanish and turn
     // the repo-wide test green for the wrong reason. Pin the floor.
-    assert.equal(transactionSites(readFileSync(join(SRC, "store", "db.ts"), "utf8")), 1, "db.ts's writeTransaction is one site");
+    assert.equal(
+      transactionSites(readFileSync(join(SRC, "store", "db.ts"), "utf8")),
+      2,
+      "db.ts has two sites: the writeTransaction helper and the FG-563 dispatch-key convergence (both .immediate())",
+    );
     assert.ok(
       transactionSites(readFileSync(join(SRC, "store", "publications.ts"), "utf8")) >= 8,
       "publications.ts's FG-425 immediate transactions must still be visible to the guard",

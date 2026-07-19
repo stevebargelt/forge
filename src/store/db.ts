@@ -51,6 +51,81 @@ export function applyMigrations(db: DatabaseInstance): void {
   if (!haveRuns.has("project_dir")) {
     db.exec(`ALTER TABLE runs ADD COLUMN project_dir TEXT`);
   }
+  // FG-563 (FIX A/FIX B, round 3): the dispatch-key discoverability index. It lives on
+  // this guarded migration path (not the always-exec SCHEMA_SQL) for two reasons:
+  //
+  //   FIX A — RESILIENCE. The index is an expression index over
+  //   json_extract(metadata, '$.dispatchKey'); on a `runs` table that has NO
+  //   `metadata` column the CREATE INDEX throws SQLITE_ERROR. Because migrations run
+  //   on EVERY open (read opens included, FG-568), a foreign/minimal runs fixture
+  //   without that column would make every open fail. Guarding on the column's
+  //   presence via PRAGMA table_info(runs) means a metadata-less open no longer
+  //   throws; production `runs` always has `metadata`, so it is unaffected.
+  //
+  //   FIX B — EXACTLY-ONE-RUN-PER-RECEIPT. The index is UNIQUE (partial, over the
+  //   non-null receipt), so a second physical run can never be inserted under a
+  //   dispatch_key that already has one. The DB-level backstop behind the code-enforced
+  //   unique controller owners (see resolveControllerOwner in continue.ts). NULL
+  //   dispatchKeys (ordinary runs with no receipt) stay non-unique — SQLite's partial
+  //   WHERE excludes them.
+  //
+  // Round 4 — SAFE CONVERGENCE. A bare `CREATE UNIQUE INDEX IF NOT EXISTS` keys on the
+  // index NAME, so a DB that ALREADY carries a NON-unique index of this name (a stale dev
+  // DB from an earlier build) silently keeps it — receipt uniqueness UNENFORCED. main is
+  // born-unique (no shipped DB ever had the non-unique index), so this is dev-only, but we
+  // close it properly with an atomic, duplicate-guarded convergence (NOT the round-2
+  // machinery that bricked opens): in ONE BEGIN IMMEDIATE transaction — so concurrent opens
+  // serialize on the write lock and never observe a window where the index is absent —
+  //   (a) inspect index_list for idx_runs_dispatch_key;
+  //   (b) if it exists and is NON-unique: if any duplicate non-null dispatchKey exists,
+  //       SKIP (leave the non-unique index, do not brick the open); else DROP it and CREATE
+  //       the UNIQUE version;
+  //   (c) if it does not exist, CREATE UNIQUE INDEX IF NOT EXISTS.
+  // Idempotent: a fresh DB is born unique in one step (case c); a stale non-unique dev DB
+  // converges atomically (case b, no dups); a (dev-only) duplicate DB is left usable, never
+  // bricked (case b/c, dups → skip). Behind the PRAGMA table_info(runs) metadata-column
+  // guard so a metadata-less runs table (dashboard fixtures) never throws.
+  if (haveRuns.has("metadata")) {
+    const hasDuplicateReceipt = (): boolean =>
+      db
+        .prepare(
+          `SELECT 1 FROM runs
+             WHERE json_extract(metadata, '$.dispatchKey') IS NOT NULL
+             GROUP BY json_extract(metadata, '$.dispatchKey')
+            HAVING COUNT(*) > 1
+             LIMIT 1`,
+        )
+        .get() !== undefined;
+
+    const createUnique = (): void => {
+      db.exec(
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_dispatch_key
+           ON runs(json_extract(metadata, '$.dispatchKey'))
+           WHERE json_extract(metadata, '$.dispatchKey') IS NOT NULL`,
+      );
+    };
+
+    db.transaction(() => {
+      const existing = (
+        db.prepare(`PRAGMA index_list(runs)`).all() as { name: string; unique: number }[]
+      ).find((i) => i.name === "idx_runs_dispatch_key");
+
+      if (existing) {
+        if (existing.unique === 1) return; // already unique — nothing to converge
+        // A NON-unique index of this name is present (stale dev DB). Converge only if it
+        // is SAFE: a live duplicate would make the DROP+CREATE UNIQUE throw and, since
+        // migrations run on EVERY open, brick every subsequent open. Leave it usable.
+        if (hasDuplicateReceipt()) return;
+        db.exec(`DROP INDEX idx_runs_dispatch_key`);
+        createUnique();
+        return;
+      }
+      // No index yet. Create born-unique — unless a raw duplicate already exists (a stale
+      // dev DB that inserted before any index), in which case skip to avoid a throw.
+      if (hasDuplicateReceipt()) return;
+      createUnique();
+    }).immediate();
+  }
   const tasksCols = db.prepare(`PRAGMA table_info(tasks)`).all() as { name: string }[];
   const haveTasks = new Set(tasksCols.map((r) => r.name));
   if (!haveTasks.has("agent_alias")) {

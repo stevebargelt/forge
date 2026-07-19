@@ -83,6 +83,12 @@ export type InvokeArgs = {
   resolvedFromSubdir?: boolean;
   /** FG-374: true when --allow-subproject was passed to intentionally mount a subdir. */
   explicitSubproject?: boolean;
+  /** FG-563 (CP2, F17 receipt bridge): the deterministic continuation dispatch_key
+   *  this invocation is the physical dispatch OF. Stamped into the created run's
+   *  metadata BEFORE the container spawns, so runByDispatchKey adopts this exact run
+   *  on a recovery instead of duplicating it. Only honored when invoke OWNS the run
+   *  (no --run attach) — an attached run already has its identity. */
+  dispatchKey?: string;
   // Injected for tests; real callers leave undefined → docker is used.
   dockerExec?: DockerExecFn;
 };
@@ -125,7 +131,7 @@ function reapContainerAndReportFailure(containerName: string, taskSucceeded: boo
 
 export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   // Resolve / create the run.
-  const runId = args.runId ?? createInvokeRun(args.agentRole, args.projectDir, args.designDir, args.runTitle, args.workspace);
+  const runId = args.runId ?? createInvokeRun(args.agentRole, args.projectDir, args.designDir, args.runTitle, args.workspace, args.dispatchKey);
   const run = getRun(runId);
   if (!run) throw new Error(`invoke: run not found: ${runId}`);
 
@@ -842,13 +848,18 @@ export function createInvokeRun(
   projectDir: string,
   designDir: string | undefined,
   titleOverride: string | undefined,
-  workspace: string | undefined
+  workspace: string | undefined,
+  // FG-563 (CP2, F17): stamped into metadata so this run is discoverable by
+  // runByDispatchKey the instant it exists — before the container spawn is
+  // observable. Trailing-optional so existing positional callers are unaffected.
+  dispatchKey?: string,
 ): string {
   const title = titleOverride ?? `invoke ${agentRole}`;
   const runId = newRunId(title);
   const metadata: Record<string, unknown> = { invokeAgent: agentRole };
   if (designDir) metadata["designDir"] = designDir;
   if (workspace) metadata["workspace"] = workspace;
+  if (dispatchKey) metadata["dispatchKey"] = dispatchKey;
 
   const run: Run = {
     id: runId,
