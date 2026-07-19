@@ -15,10 +15,19 @@ CREATE TABLE IF NOT EXISTS runs (
 -- every continuation wake/dispatch) resolves the ONE physical run created under a
 -- deterministic dispatch receipt. An expression index over the JSON-extracted
 -- receipt lets that lookup use an indexed equality probe instead of a full-table
--- scan + per-row JSON.parse. Additive-only (BD-15): pure index, no column/data
--- change, and IF NOT EXISTS so re-open is idempotent on an existing store.
-CREATE INDEX IF NOT EXISTS idx_runs_dispatch_key
-  ON runs(json_extract(metadata, '$.dispatchKey'));
+-- scan + per-row JSON.parse.
+--
+-- FG-563 (FIX A/FIX B, round 2): this index is NOT created here. An expression
+-- index over json_extract(metadata, ...) is INVALID against a runs table that
+-- has no metadata column, and SCHEMA_SQL is exec'd on EVERY DB open (FG-568,
+-- read opens included). A foreign/minimal runs fixture without a metadata column
+-- (e.g. the dashboard read tests) would make CREATE INDEX throw SQLITE_ERROR and
+-- fail every open. So the index moved to applyMigrations (db.ts), guarded on the
+-- presence of the metadata column via PRAGMA table_info -- and it is UNIQUE there
+-- (FIX B) so two concurrent same-host controllers cannot both insert a physical run
+-- under the same continuation dispatch receipt. Production runs always has
+-- metadata, so it is created exactly as before; a metadata-less open no longer
+-- throws.
 
 CREATE TABLE IF NOT EXISTS tasks (
   id              TEXT PRIMARY KEY,

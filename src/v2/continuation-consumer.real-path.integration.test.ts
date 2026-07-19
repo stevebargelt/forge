@@ -58,6 +58,7 @@ import {
   consumeContinuation,
   recoverInFlightDispatches,
   LOST_SIGNAL_WATCHDOG_INTERVAL_MS,
+  DEFAULT_CLAIM_LEASE_MS,
   type ContinuationIdentity,
   type PhysicalDispatch,
 } from "./continuation-consumer.js";
@@ -445,6 +446,126 @@ test("F18 (real path): a watchdog firing AFTER a normal delivery advanced writes
     assert.equal(d.runIds.length, 1, "no duplicate real run");
     assert.equal(lostSignalRecoveriesFor(s.cid).length, 0, "NO false lost-signal claim (F18)");
     assert.equal(listLostSignalRecoveries().length, 0, "the operator surface shows no phantom recovery");
+  } finally {
+    done();
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX B (round 2): two same-host controllers share the default owner
+// (orchestrator@HOSTNAME) and both pass the same-owner re-adoption check, so a
+// DB-level guard is the only thing that stops both from spawning a physical run
+// under the SAME continuation dispatch_key. The runs UNIQUE(dispatch_key) index
+// makes the second insert COLLIDE; the consumer catches that and ADOPTS the
+// existing run instead of duplicating (F14/F17). Exercised on the REAL run-creation
+// path + the REAL unique index — the collision below is a genuine SQLITE_CONSTRAINT.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("FIX B (real path): a same-receipt insert COLLISION makes the loser ADOPT the winner's run — exactly one physical run", () => {
+  const done = freshDb("fg563-rp-fixb.db");
+  const s = scope("fixb");
+  try {
+    seedContinuation(s);
+    writeTerminalLaunch(s.lid, `{"code":0,"signal":null}`);
+    // Model the two-controller race INSIDE the dispatch seam: the concurrent WINNER
+    // has already inserted its physical run under this receipt (committed, discoverable
+    // by the key); OUR insert under the SAME receipt then hits the REAL runs
+    // UNIQUE(dispatch_key) index and throws — proving the exactly-one guarantee.
+    const winnerRunIds: string[] = [];
+    let ourInsertAttempts = 0;
+    const dispatch: PhysicalDispatch = (args) => {
+      const winner = startRun({
+        workflow: TEST_WORKFLOW,
+        title: "next phase",
+        inputs: {},
+        projectDir: "/tmp/p",
+        dispatchKey: args.dispatchKey,
+      });
+      winnerRunIds.push(winner.runId);
+      ourInsertAttempts++;
+      // Our duplicate insert under the SAME receipt collides on the real UNIQUE index.
+      startRun({
+        workflow: TEST_WORKFLOW,
+        title: "next phase",
+        inputs: {},
+        projectDir: "/tmp/p",
+        dispatchKey: args.dispatchKey,
+      });
+      return { runId: "unreachable" };
+    };
+
+    const out = consumeContinuation(s.identity(), { owner: "orchestrator@host", dispatch });
+
+    // Post-fix: the collision is caught, the winner's run adopted, the slot advances.
+    assert.equal(out.kind, "advanced", "the collision loser ADOPTS the winner's run rather than blocking");
+    assert.equal(winnerRunIds.length, 1, "exactly one physical run was created under the receipt");
+    assert.equal(ourInsertAttempts, 1, "our duplicate insert was attempted and rejected by the UNIQUE index");
+    const c = getContinuation(s.cid);
+    assert.equal(c?.state, "advanced");
+    assert.equal(c?.dispatchedRunId, winnerRunIds[0], "the WINNER's run was adopted — no duplicate spawned");
+    if (out.kind === "advanced") {
+      assert.equal(runByDispatchKey(out.dispatchKey)?.id, winnerRunIds[0], "exactly one run resolves by the receipt");
+    }
+  } finally {
+    done();
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX C (round 2, F18): a watchdog that has LOST its claim lease must write NO
+// lost-signal recovery row and take NO action. The pre-fix path renewed its lease
+// WITHOUT checking the result, then fired the audit hook (a separate transaction)
+// before the owner-scoped markAdvanced failed — leaving a FALSE recovery record for
+// an advance that never happened. Exercised with a GENUINE lease takeover on the
+// real primitive: a concurrent controller steals the lease mid-dispatch.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("FIX C (real path): a watchdog that LOST its lease mid-dispatch writes NO lost-signal row and does not advance", () => {
+  const done = freshDb("fg563-rp-fixc.db");
+  const s = scope("fixc");
+  try {
+    seedContinuation(s);
+    writeTerminalLaunch(s.lid, `{"code":0,"signal":null}`);
+    // The watchdog (wd-A) wins the fresh claim, then — in the window between winning
+    // the claim and the settling renew — a CONCURRENT controller (wd-B) GENUINELY
+    // takes the lease over on the real primitive (wd-A's lease is aged out). So when
+    // control returns, wd-A's owner-scoped renewClaim genuinely returns false.
+    let mineRunId = "";
+    const dispatch: PhysicalDispatch = (args) => {
+      const mine = startRun({
+        workflow: TEST_WORKFLOW,
+        title: "next phase",
+        inputs: {},
+        projectDir: "/tmp/p",
+        dispatchKey: args.dispatchKey,
+      });
+      mineRunId = mine.runId;
+      // Age past wd-A's lease and let wd-B take the in-flight claim over for real.
+      setPublicationClockOffsetForTest(DEFAULT_CLAIM_LEASE_MS + 5000);
+      const takeover = claimContinuationDispatch({
+        continuationId: s.cid,
+        sourceLaunchId: s.lid,
+        consumerKind: "orchestrator",
+        currentPhase: "build",
+        nextAction: NEXT,
+        expectedState: "dispatching",
+        owner: "wd-B",
+        leaseTtlMs: 60_000,
+      });
+      assert.ok(takeover.granted, "a concurrent controller genuinely took the lease over");
+      return { runId: mine.runId };
+    };
+
+    const out = consumeContinuation(s.identity(), { owner: "wd-A", trigger: "watchdog", dispatch });
+
+    assert.equal(out.kind, "lost_claim", "the lease-losing watchdog takes no advance action");
+    // THE fix: no false lost-signal recovery row is written under a lost lease.
+    assert.equal(lostSignalRecoveriesFor(s.cid).length, 0, "NO false lost-signal recovery row (F18)");
+    assert.equal(listLostSignalRecoveries().length, 0, "the operator surface shows no phantom recovery");
+    const c = getContinuation(s.cid);
+    assert.notEqual(c?.state, "advanced", "wd-A did NOT advance the slot under a lost lease");
+    assert.equal(c?.claimOwner, "wd-B", "the genuine winner (wd-B) owns the slot");
+    assert.ok(mineRunId, "the dispatch itself did run");
   } finally {
     done();
   }

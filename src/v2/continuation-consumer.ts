@@ -398,16 +398,30 @@ function dispatchAndAdvance(
         currentPhase: identity.currentPhase,
       });
     } catch (e) {
-      // FIX4(a): a dispatch exception is RECOVERABLE, not a permanent wedge. We do
-      // NOT sink the slot into a non-recoverable `blocked` state — that left it
-      // unreachable to both the watchdog and recoverInFlightDispatches. Instead we
-      // leave the claim IN-FLIGHT (state stays `dispatching`, receipt stays set): a
-      // watchdog re-fire re-reads terminal + re-adopts (this same path), and
-      // recoverInFlightDispatches enumerates it via continuationsInDispatch — so a
-      // TRANSIENT dispatch failure recovers. The lease still expires naturally, so a
-      // different controller can also take it over. We surface a `blocked` OUTCOME
-      // (operator-visible) for the failed attempt; the durable slot is never gone.
-      return { kind: "blocked", continuation: d.getContinuation(identity.continuationId), error: (e as Error).message };
+      // FIX B (round 2): the dispatch may have failed because a concurrent same-host
+      // controller — two orchestrators sharing the default owner orchestrator@HOSTNAME
+      // both pass the same-owner re-adoption check — already inserted the physical run
+      // under this receipt, and the runs UNIQUE(dispatch_key) index REJECTED our
+      // duplicate insert (SQLITE_CONSTRAINT). That is not a failure to recover from: it
+      // is the exactly-one-run-per-receipt guarantee firing. Re-resolve by the receipt;
+      // if the winner's run now exists, ADOPT it and settle normally — the loser NEVER
+      // spawns a second physical run (F14/F17).
+      const raced = d.runByDispatchKey(dispatchKey);
+      if (raced) {
+        ids = { runId: raced.id };
+      } else {
+        // FIX4(a): a genuine (non-collision) dispatch exception is RECOVERABLE, not a
+        // permanent wedge. We do NOT sink the slot into a non-recoverable `blocked`
+        // state — that left it unreachable to both the watchdog and
+        // recoverInFlightDispatches. Instead we leave the claim IN-FLIGHT (state stays
+        // `dispatching`, receipt stays set): a watchdog re-fire re-reads terminal +
+        // re-adopts (this same path), and recoverInFlightDispatches enumerates it via
+        // continuationsInDispatch — so a TRANSIENT dispatch failure recovers. The lease
+        // still expires naturally, so a different controller can also take it over. We
+        // surface a `blocked` OUTCOME (operator-visible) for the failed attempt; the
+        // durable slot is never gone.
+        return { kind: "blocked", continuation: d.getContinuation(identity.continuationId), error: (e as Error).message };
+      }
     }
   }
 
@@ -416,7 +430,20 @@ function dispatchAndAdvance(
   // watchdog/controller could take the claim over between our claim and our settle,
   // and our owner-scoped writes below would then no-op. Renewing (owner-scoped) keeps
   // the claim ours through recordDispatchResult + markAdvanced.
-  d.renewClaim(identity.continuationId, d.owner, d.leaseTtlMs);
+  //
+  // FIX C (round 2, F18): CHECK the renewal result. renewClaim is owner-scoped and
+  // returns false when the lease is no longer ours — a concurrent controller/watchdog
+  // took it over between our claim and here. Previously this return was IGNORED, so a
+  // watchdog that had LOST its lease still ran onBeforeAdvance (committing a
+  // continuation_lost_signal_recoveries row in its OWN transaction) and only THEN
+  // failed the owner-scoped markAdvanced — producing a FALSE lost-signal recovery
+  // audit record for an advance that never happened. A lease-losing watchdog must
+  // write NO recovery row and take NO action. Bail here, BEFORE the audit-write and
+  // the advance; the FIX1 record-before-advance ordering is preserved for the
+  // lease-held path below (nothing moved between onBeforeAdvance and markAdvanced).
+  if (!d.renewClaim(identity.continuationId, d.owner, d.leaseTtlMs)) {
+    return { kind: "lost_claim", continuation: d.getContinuation(identity.continuationId) };
+  }
 
   // Record the dispatched ids (immutable identity). Owner-scoped: a taken-over claim
   // can never overwrite the winner.

@@ -51,6 +51,46 @@ export function applyMigrations(db: DatabaseInstance): void {
   if (!haveRuns.has("project_dir")) {
     db.exec(`ALTER TABLE runs ADD COLUMN project_dir TEXT`);
   }
+  // FG-563 (FIX A/FIX B, round 2): the dispatch-key discoverability index. It moved
+  // OFF the always-exec SCHEMA_SQL and onto this guarded migration path for two
+  // reasons the CI + red review surfaced:
+  //
+  //   FIX A — RESILIENCE. The index is an expression index over
+  //   json_extract(metadata, '$.dispatchKey'); on a `runs` table that has NO
+  //   `metadata` column the CREATE INDEX throws SQLITE_ERROR. Because SCHEMA_SQL
+  //   runs on EVERY open (FG-568, read opens included), a foreign/minimal runs
+  //   fixture without that column would make every open fail. Guarding on the
+  //   column's presence via PRAGMA table_info(runs) means a metadata-less open no
+  //   longer throws; production `runs` always has `metadata`, so it is unaffected.
+  //
+  //   FIX B — EXACTLY-ONE-RUN-PER-RECEIPT. The index is UNIQUE (partial, over the
+  //   non-null receipt). Two controllers on ONE host share the same default owner
+  //   (orchestrator@HOSTNAME) and can both pass the same-owner re-adoption check, so
+  //   without a DB-level guard both could spawn a physical run under the SAME
+  //   continuation dispatch_key (defeating F14/F17 exactly-once). The UNIQUE index
+  //   makes the second insert COLLIDE; the consumer's dispatch path catches that and
+  //   ADOPTS the winner's run instead of duplicating. NULL dispatchKeys (ordinary
+  //   runs with no receipt) stay non-unique — the partial WHERE excludes them.
+  //
+  // Additive-only (BD-15): the index is NEW to the unreleased FG-563 branch, so no
+  // older binary depends on it. An intermediate FG-563 build created it NON-unique
+  // in SCHEMA_SQL; `CREATE UNIQUE INDEX IF NOT EXISTS` would no-op against that same-
+  // named non-unique index and silently leave uniqueness unenforced, so converge it:
+  // drop the stale non-unique index first (dropping THIS never-released index breaks
+  // no older binary — it is not the destructive removal BD-15 forbids), then create
+  // the unique one.
+  if (haveRuns.has("metadata")) {
+    const runsIdx = db.prepare(`PRAGMA index_list(runs)`).all() as { name: string; unique: number }[];
+    const dispatchIdx = runsIdx.find((i) => i.name === "idx_runs_dispatch_key");
+    if (dispatchIdx && dispatchIdx.unique === 0) {
+      db.exec(`DROP INDEX idx_runs_dispatch_key`);
+    }
+    db.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_dispatch_key
+         ON runs(json_extract(metadata, '$.dispatchKey'))
+         WHERE json_extract(metadata, '$.dispatchKey') IS NOT NULL`,
+    );
+  }
   const tasksCols = db.prepare(`PRAGMA table_info(tasks)`).all() as { name: string }[];
   const haveTasks = new Set(tasksCols.map((r) => r.name));
   if (!haveTasks.has("agent_alias")) {
