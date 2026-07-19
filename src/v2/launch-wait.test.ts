@@ -237,6 +237,58 @@ test("FG-552 reader: a PARSEABLE exit record is still authoritative — reader h
   assert.deepEqual(readLaunch(meta.id, tmux)!.status, { state: "exited_ok", code: 0 });
 });
 
+test("FG-552 reader (read-atomicity race): a launch that COMPLETES between the exit-existence check and the pane-liveness probe reads its TRUE disposition (exited_ok), NEVER owner_gone", () => {
+  // The straddle: at the top of readLaunch the exit record is still absent, so
+  // it falls through to owner evidence. The wrapper then completes — writes its
+  // atomic exit record and its pane dies — in the window before the pane probe.
+  // We land that interleave deterministically by writing the exit record as the
+  // SIDE EFFECT of the pane_dead query, and returning "dead". Pre-fix the reader
+  // saw "no record + live session + dead pane" and mis-terminaled a launch that
+  // exited 0 as owner_gone; post-fix it re-reads the record and classifies it.
+  const stub = tmuxStub();
+  const meta = startLaunch(["true"], { name: "straddle-gone", tmux: stub.tmux });
+  const exitPath = join(LAUNCHES_DIR, meta.id, "exit");
+  const tmux: TmuxRunner = (args) => {
+    if (args.includes("#{pane_dead}")) {
+      writeFileSync(exitPath, `{"code":0,"signal":null}`); // wrapper's last act, mid-read
+      return "1\n"; // pane now dead
+    }
+    return stub.tmux(args);
+  };
+  assert.deepEqual(readLaunch(meta.id, tmux)!.status, { state: "exited_ok", code: 0 },
+    "a completion landing in the read window must yield the true terminal disposition, not owner_gone");
+});
+
+test("FG-552 reader (read-atomicity race): a completion landing during the no-session probe reads exited_ok, NEVER unknown", () => {
+  // The unknown-path straddle: exit record absent at the top, then the session
+  // ends (reboot/kill) while the wrapper's exit record lands just before. We
+  // write the record as the side effect of the has-session probe (which reports
+  // the session gone). Pre-fix: no record + no session -> unknown; post-fix the
+  // re-read finds the record and classifies exited_ok.
+  const stub = tmuxStub();
+  const meta = startLaunch(["true"], { name: "straddle-unknown", tmux: stub.tmux });
+  const exitPath = join(LAUNCHES_DIR, meta.id, "exit");
+  const tmux: TmuxRunner = (args) => {
+    if (args[0] === "has-session") {
+      writeFileSync(exitPath, `{"code":0,"signal":null}`); // completion lands as the session dies
+      throw new Error("no such session"); // session gone
+    }
+    return stub.tmux(args);
+  };
+  assert.deepEqual(readLaunch(meta.id, tmux)!.status, { state: "exited_ok", code: 0 },
+    "a completion landing in the no-session probe window must not read unknown");
+});
+
+test("FG-552 reader: a genuinely dead pane with NO exit record still reads owner_gone — the race fix does not weaken terminal owner evidence", () => {
+  // Guard the fix's negative: when the recheck ALSO finds no record, the honest
+  // owner_gone verdict must survive (a wrapper truly killed before writing).
+  const stub = tmuxStub();
+  const meta = startLaunch(["sleep", "600"], { name: "trulygone", tmux: stub.tmux });
+  stub.deadPanes.add(meta.tmuxSession);
+  assert.deepEqual(readLaunch(meta.id, stub.tmux)!.status,
+    { state: "owner_gone", cause: "unrecorded", sender: "unrecorded" });
+});
+
 test("FG-552 (tmux): degraded/absent tmux is a NAMED observation input, not a crash — a launch with no exit record classifies as unknown when liveness cannot be confirmed", () => {
   // A tmux that cannot answer ANY query (absent/wedged binary): every call throws.
   const absentTmux: TmuxRunner = () => { throw new Error("tmux: command not found"); };

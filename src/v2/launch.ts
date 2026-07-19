@@ -940,24 +940,44 @@ export function readLaunch(id: string, tmux: TmuxRunner = defaultTmux): LaunchVi
   // `unknown`, which could strand a launch that in fact exited 0.
   let status: LaunchStatus;
   const exitPath = join(dir, "exit");
-  let rec: ExitRecord | undefined;
-  if (existsSync(exitPath)) {
-    try { rec = parseExitRecord(readFileSync(exitPath, "utf8")); } catch { rec = undefined; }
-  }
+  const readExit = (): ExitRecord | undefined => {
+    if (!existsSync(exitPath)) return undefined;
+    try { return parseExitRecord(readFileSync(exitPath, "utf8")); } catch { return undefined; }
+  };
+  let rec = readExit();
   if (rec) {
     status = classifyExit(rec);
-  } else if (!tmuxSessionAlive(meta.tmuxSession, tmux)) {
-    status = { state: "unknown" };
   } else {
-    // The session is alive, but with remain-on-exit that is not proof the
-    // wrapper is: a wrapper killed before its last-act exit write leaves a
-    // live session holding a DEAD pane and no exit record. That combination
-    // is the durable evidence for "the owner was terminated" (the wrapper
-    // writes the exit record even for a signaled child — only the wrapper
-    // itself dying can produce a dead pane with no record). A pane tmux can't
-    // classify stays running (fail-safe: rm keeps refusing without --force).
-    const dead = paneDead(meta.tmuxSession, tmux);
-    status = dead === true ? { state: "owner_gone", cause: "unrecorded", sender: "unrecorded" } : { state: "running" };
+    // No exit record on the first read — fall through to owner evidence. BUT a
+    // launch that COMPLETES mid-read writes its atomic exit record IMMEDIATELY
+    // before its pane dies / its session ends, so a terminal owner verdict
+    // derived here can STRADDLE that completion: the exit read above ran before
+    // the write, the owner probe after the pane went dead. Both terminal owner
+    // verdicts (no session -> unknown, dead pane -> owner_gone) are the
+    // INDETERMINATE "the wrapper never completed" dispositions, so before
+    // concluding either we RE-READ the exit record once — a wrapper that just
+    // died wrote it moments ago. We conclude indeterminate ONLY if the record
+    // is STILL absent; otherwise the now-present record is authoritative
+    // (classifyExit). This closes the read-atomicity race that mis-terminaled a
+    // launch which in fact exited 0 as owner_gone (FG-552 CORE invariant).
+    const sessionAlive = tmuxSessionAlive(meta.tmuxSession, tmux);
+    // With remain-on-exit, a live session is not proof the wrapper is: a wrapper
+    // killed before its last-act exit write leaves a live session holding a DEAD
+    // pane and no exit record — the durable evidence for "the owner was
+    // terminated". A pane tmux can't classify stays running (fail-safe: rm keeps
+    // refusing without --force).
+    const dead = sessionAlive ? paneDead(meta.tmuxSession, tmux) : null;
+    const ownerTerminal = !sessionAlive || dead === true;
+    if (ownerTerminal) rec = readExit(); // recheck AFTER the owner probe closed the straddle window
+    if (rec) {
+      status = classifyExit(rec);
+    } else if (!sessionAlive) {
+      status = { state: "unknown" };
+    } else if (dead === true) {
+      status = { state: "owner_gone", cause: "unrecorded", sender: "unrecorded" };
+    } else {
+      status = { state: "running" };
+    }
   }
 
   let log = "";
