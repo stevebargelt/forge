@@ -133,6 +133,19 @@ The trust evidence FG-440/FG-483/FG-474 ship decisions rest on — a real host c
 
 Columns the dashboard reads: `id`, `ticket_id`, `project_dir`, `commit_sha`, `gate_name`, `command`, `exit_code`, `run_id` (nullable), `recorded_at`, `source` (`host | ci`), `ci_url` (nullable, `ci`-sourced rows only). Read via direct SQL against the dashboard's own handle (this file's established drift-surface caveat applies here too), not by importing `src/store/host-verifications.ts` — that module's exported lookups are single-gate/single-sha reuse-check helpers, not "everything recorded for this ticket," which is what an evidence view needs.
 
+### `continuations` table (FG-562 durable continuation-claim primitive)
+
+The durable claim that makes workflow advancement exactly-once over at-least-once completion delivery (BD-5). A controller that observes a launch reaching a terminal disposition records the observed disposition here and claims the single `awaiting_completion|ready -> dispatching` transition through a phase-bound compare-and-set. **Like the FG-425 `publication_attempts`/`publication_lane`/`publication_locks` trio, this is not part of the dashboard read contract** — it is the primitive FG-563 (orchestrator) and FG-564 (campaign) consume; documented here so a schema change is caught by this file's update-in-the-same-commit rule.
+
+Columns: `continuation_id` (PK), `consumer_kind`, `source_launch_id`, `current_phase`, `next_action`, `state`, `claim_owner` (nullable), `claim_expires_at` (nullable epoch ms), `dispatch_key` (nullable), `dispatched_run_id` (nullable), `dispatched_task_id` (nullable), `last_observed_status` (nullable), `created_at`, `updated_at`. Indexes: `idx_continuations_launch` on `source_launch_id`; a partial `UNIQUE(dispatch_key) WHERE dispatch_key IS NOT NULL`.
+
+Enum values are **convention, not a DB constraint** (FG-585 precedent — an old/new binary must never fight an enum constraint the other doesn't share):
+- `consumer_kind`: `orchestrator | campaign` — unconstrained TEXT, no CHECK.
+- `state`: `awaiting_completion | ready | dispatching | advanced | blocked` — unconstrained TEXT, no CHECK.
+- `last_observed_status`: the canonical `LaunchStatus.state` from `readLaunch`/`classifyExit` (`running | exited_ok | exited_error | signaled | terminated_unattributed | owner_gone | unknown`) — no second terminal vocabulary (BD-10). `owner_gone`/`unknown` have no exit record and are recorded/claimable without one (BD-3 — a reconciled disposition never fabricates an exit record).
+
+`next_action` is a canonically-serialized (stable key order) structured `{kind, …}` object, never an opaque shell string, so the CAS `next_action = ?` compare and the derived `dispatch_key` are stable across processes/versions. `dispatch_key` is the deterministic idempotency receipt derived from `(continuation_id, source_launch_id, canonical next_action)`, written at claim time before dispatch so a recovery adopts the original dispatch rather than duplicating it (F17). The table is additive-only (`CREATE TABLE IF NOT EXISTS` on the ordinary open path); the `dispatch_key` UNIQUE index is safe because only new binaries ever insert here (BD-15).
+
 ## Filesystem contract
 
 Per-task workspace at `~/.forge/runs/<runId>/<taskId>/`:
