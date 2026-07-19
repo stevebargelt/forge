@@ -220,7 +220,16 @@ export function classifyExit(rec: ExitRecord): LaunchStatus {
 export function parseExitRecord(raw: string): ExitRecord | undefined {
   const text = raw.trim();
   if (text === "") return undefined;
-  if (/^-?\d+$/.test(text)) return { code: Number(text), signal: null };
+  if (/^-?\d+$/.test(text)) {
+    // FG-552: a digit string that overflows precision (Number(text) is Infinity or
+    // a rounded-away-from-integer value) is corrupt, not authoritative terminal
+    // evidence — treat it as unreadable and fall through to bounded owner-evidence
+    // retry, exactly like the schema-invalid JSON shapes below, rather than
+    // promoting Infinity/precision-lost bytes to exited_error.
+    const code = Number(text);
+    if (!Number.isSafeInteger(code)) return undefined;
+    return { code, signal: null };
+  }
   try {
     const parsed = JSON.parse(text) as Partial<ExitRecord>;
     const hasCode = typeof parsed.code === "number" && Number.isInteger(parsed.code);

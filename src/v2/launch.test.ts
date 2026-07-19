@@ -60,6 +60,22 @@ test("FG-535 exit record: JSON is authoritative; a bare number (older wrapper) c
   assert.equal(parseExitRecord(""), undefined);
 });
 
+test("FG-552: a bare number that overflows precision is corrupt — not promoted to exited_error", () => {
+  // A digit string too large for a safe integer parses to Infinity (or a
+  // precision-lost value). Accepting it would advance a controller on corrupt
+  // terminal evidence, and Infinity JSON-renders as null. It must fall through to
+  // bounded owner-evidence retry (F11) exactly like the schema-invalid JSON shapes.
+  assert.equal(parseExitRecord("9".repeat(400)), undefined,
+    "an enormous digit string parses to Infinity — invalid, never terminal");
+  assert.equal(parseExitRecord("99999999999999999999"), undefined,
+    "a digit string beyond MAX_SAFE_INTEGER loses precision — invalid, never terminal");
+  assert.equal(parseExitRecord(`-${"9".repeat(400)}`), undefined,
+    "a negative overflow (-Infinity) is invalid too");
+
+  // Safe-integer bare numbers (including the boundary) remain valid.
+  assert.deepEqual(parseExitRecord(String(Number.MAX_SAFE_INTEGER)), { code: Number.MAX_SAFE_INTEGER, signal: null });
+});
+
 test("FG-552 (regression e2da08d): a SIGNAL-ONLY exit record is a VALID terminal record — the schema-invalid guard must reject only records with NEITHER a numeric code NOR a string signal", () => {
   // The e2da08d guard `if (code === null) return undefined` rejected every valid
   // OS-signal exit ({code:null, signal:"SIGTERM"} sets exactly the signal), so a
