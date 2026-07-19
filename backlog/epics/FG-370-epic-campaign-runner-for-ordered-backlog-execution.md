@@ -28,11 +28,16 @@ Working product name: **Campaign Runner**.
 
 Acceptable aliases in CLI/docs while naming settles:
 
-- Work Queue
 - Backlog Campaign
-- Orchestrator Queue
+- Ordered Program
 
-The human-facing concept should stay simple: an ordered set of backlog items Forge is responsible for advancing.
+The human-facing concept should stay simple: an explicitly selected, planned, and approved set of backlog items Forge is responsible for advancing.
+
+## Boundary With The Operator Queue
+
+Campaign Runner is not the persistent operator work queue or its default dispatcher. The operator queue is mutable stack-ranked intent: when run capacity is available, its dispatcher selects the highest-ranked ready ticket compatible with the active run set and launches an ordinary single-ticket Forge run. It may temporarily bypass an incompatible item without changing rank.
+
+A campaign is explicit coordinated execution. It freezes resolved inputs and order behind a plan hash, requires campaign approval, applies campaign-specific dependency/continue policy, and produces a campaign report. Queue changes do not silently alter a planned or running campaign. If a future operator action deliberately creates a campaign from selected queue entries, that is an explicit conversion/snapshot, not the queue's normal execution mechanism.
 
 ## Core Behavior
 

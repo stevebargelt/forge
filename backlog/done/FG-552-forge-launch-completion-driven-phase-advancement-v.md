@@ -1,9 +1,11 @@
 ---
 id: FG-552
 type: story
-status: active
+status: done
 title: "forge launch: completion-driven phase advancement via a blocking launch-wait primitive (atomic records + mandatory reconciliation, no fixed-estimate model polling)"
 created: 2026-07-14
+closed: 2026-07-19
+closed_commit: 2e95b0c
 ---
 
 ## Problem
