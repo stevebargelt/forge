@@ -85,9 +85,13 @@ export type LaunchMeta = {
   // FG-569 still loads — its absence surfaces as "not recorded", never inferred.
   control?: ControlRuntime;
   // FG-552: set only on the FIRST (pre-tmux) publish and cleared on the republish
-  // once respawn-pane has established ownership. While true the tmux session does
-  // not exist yet, so its absence is startup-in-progress — NOT owner loss — and the
-  // classifier must read `running`, never a terminal `unknown`. See startLaunch.
+  // once respawn-pane has established ownership. While true the tmux session may not
+  // exist yet, so its absence is startup-in-progress — NOT owner loss — AS LONG AS the
+  // SUBMITTING launcher (launcherPid) is still alive: then the classifier reads
+  // `running`, never a terminal `unknown`. But `starting` is BOUNDED to that
+  // independently-observable launcher liveness — if the launcher DIED mid-startup and
+  // no live session / exit record exists, the record is reconciled to a terminal
+  // disposition rather than reported `running` forever. See startLaunch / readLaunch.
   starting?: boolean;
 };
 
@@ -847,6 +851,24 @@ function paneDead(session: string, tmux: TmuxRunner): boolean | null {
   }
 }
 
+/** Whether the SUBMITTING forge CLI (meta.launcherPid) is still alive. The launcher
+ *  pid is the independently-observable transition that BOUNDS the `starting` startup
+ *  window (FG-552): a `starting` record whose launcher is alive is genuinely
+ *  mid-startup; one whose launcher is gone is a launcher-crash orphan to reconcile.
+ *  Mirrors the codebase's pidAlive idiom (run-lock): kill(pid,0) proves existence.
+ *  ONLY a definitive ESRCH (no such process) counts as dead — any other error (EPERM:
+ *  exists but not ours; anything unqueryable) is treated as ALIVE, so an uncertain
+ *  liveness never fabricates a terminal disposition. */
+function launcherAlive(pid: number): boolean {
+  if (pid === process.pid) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
 /** Start a command under a durable tmux owner. Returns the persisted record.
  *  Throws (before anything is written) if tmux is unavailable. */
 export function startLaunch(argv: string[], opts: { name?: string; cwd?: string; tmux?: TmuxRunner; now?: Date; profile?: LaunchProfile } = {}): LaunchMeta {
@@ -962,7 +984,7 @@ export function startLaunch(argv: string[], opts: { name?: string; cwd?: string;
   return meta;
 }
 
-export function readLaunch(id: string, tmux: TmuxRunner = defaultTmux): LaunchView | undefined {
+export function readLaunch(id: string, tmux: TmuxRunner = defaultTmux, isLauncherAlive: (pid: number) => boolean = launcherAlive): LaunchView | undefined {
   const dir = launchDir(id);
   const metaPath = join(dir, "meta.json");
   if (!existsSync(metaPath)) return undefined;
@@ -1014,13 +1036,25 @@ export function readLaunch(id: string, tmux: TmuxRunner = defaultTmux): LaunchVi
   let ex = readExit();
   if (ex.kind === "record") {
     status = classifyExit(ex.rec);
-  } else if (meta.starting) {
+  } else if (meta.starting && isLauncherAlive(meta.launcherPid)) {
     // FG-552: the launch is in its startup window — meta.json was published before
-    // the tmux session exists and has not yet been republished with ownership. An
-    // absent session here is startup-in-progress, NOT owner loss, so consulting
-    // owner evidence would wrongly classify a just-created launch terminal
-    // `unknown` and let a concurrent waiter advance before respawn-pane runs the
-    // work. It is `running` until ownership is established (the flag is cleared).
+    // the tmux session exists (F32) and has not yet been republished with ownership,
+    // AND the SUBMITTING launcher is still alive, so it is genuinely mid-startup. An
+    // absent session here is startup-in-progress, NOT owner loss, so consulting owner
+    // evidence would wrongly classify a just-created launch terminal `unknown` and let
+    // a concurrent waiter advance before respawn-pane runs the work. It is `running`
+    // until ownership is established (the flag is cleared) — this preserves the round-1
+    // F32 fix.
+    //
+    // The guard is BOUNDED to launcher liveness (launcherPid — the independently
+    // observable transition the finding asked for): a `starting` record whose launcher
+    // has DIED (crashed after respawn-pane succeeded but before the second publish
+    // cleared the flag, then a pane/wrapper that died before writing `exit`) is NOT
+    // mid-startup — it is a launcher-crash orphan. It falls through to the owner-evidence
+    // reconciliation below, so with no live session / no exit record it terminals
+    // (unknown / owner_gone) instead of reporting `running` forever, and a bounded waiter
+    // WAKES on it. A valid exit record (handled above) and a live session (handled below)
+    // are real owner/exit evidence that always win over the stale `starting` marker.
     status = { state: "running" };
   } else {
     // No authoritative record on the first read — consult owner evidence. BUT a
@@ -1264,7 +1298,7 @@ export async function waitForLaunchTerminal(id: string, harness: WaitHarness): P
  *  fixed-estimate model poll. */
 export function realWaitHarness(
   id: string,
-  opts: { tmux?: TmuxRunner; reconcileMs?: number; timeoutMs?: number; invalidBoundMs?: number } = {},
+  opts: { tmux?: TmuxRunner; reconcileMs?: number; timeoutMs?: number; invalidBoundMs?: number; isLauncherAlive?: (pid: number) => boolean } = {},
 ): WaitHarness {
   const tmux = opts.tmux ?? defaultTmux;
   const dir = launchDir(id); // validates the id shape at the chokepoint
@@ -1272,7 +1306,7 @@ export function realWaitHarness(
   const timeoutMs = opts.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
   const invalidBoundMs = opts.invalidBoundMs ?? DEFAULT_INVALID_BOUND_MS;
   return {
-    read: () => readLaunch(id, tmux),
+    read: () => readLaunch(id, tmux, opts.isLauncherAlive ?? launcherAlive),
     installWatcher: (onEvent) => {
       let w: FSWatcher | undefined;
       try { w = watch(dir, () => onEvent()); } catch { /* dir unwatchable; reconcile still covers it */ }
