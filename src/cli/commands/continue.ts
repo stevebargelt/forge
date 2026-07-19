@@ -137,15 +137,16 @@ export function registerContinue(program: Command): void {
 //     previous LIVE lease (no impersonation) and may only take over after that lease
 //     EXPIRES via the normal claim path (claimContinuationDispatch refuses a live lease).
 
-/** Ordered candidate env vars carrying a durable Claude Code session id. Probed only
- *  after --owner and FORGE_CONTROLLER_ID; if none is set, this precedence level simply
- *  does not apply and the resolver falls through to fail-closed. */
-const CLAUDE_SESSION_ENV_VARS = [
-  "CLAUDE_SESSION_ID",
-  "CLAUDE_CODE_SESSION_ID",
-  "CLAUDE_CODE_SESSION",
-  "ANTHROPIC_SESSION_ID",
-] as const;
+// FG-563 fixer round 4 (HIGH — fencing soundness): the session precedence level trusts
+// exactly ONE env var — CLAUDE_CODE_SESSION_ID — the only variable VERIFIED to be
+// per-Claude-Code-session. The round-3 resolver also probed speculative aliases
+// (CLAUDE_SESSION_ID, CLAUDE_CODE_SESSION, ANTHROPIC_SESSION_ID); those are NOT confirmed
+// per-session — e.g. an API/session var could be SHARED across processes — so two distinct
+// controllers could alias to the SAME owner and defeat the fence. Only a variable known to
+// be unique per session can be trusted as the fencing identity, so the aliases are removed;
+// with none set, this precedence level does not apply and the resolver falls through to
+// fail-closed.
+const CLAUDE_SESSION_ENV_VAR = "CLAUDE_CODE_SESSION_ID" as const;
 
 export type OwnerResolution =
   | { ok: true; owner: string; source: "explicit" | "controller-env" | "session" }
@@ -155,7 +156,7 @@ export type OwnerResolution =
  * Resolve the controller owner for a continuation MUTATION, in strict precedence:
  *   1. explicit --owner
  *   2. FORGE_CONTROLLER_ID (the orchestrator establishes this from its durable session)
- *   3. a Claude Code session id from the environment, if one is present
+ *   3. CLAUDE_CODE_SESSION_ID — the one VERIFIED per-Claude-Code-session id — if present
  *   4. FAIL CLOSED — never fall back to hostname or any host-stable value, because a
  *      host-stable owner cannot fence a same-host peer.
  * This is the ONLY source of the owner for claim/renew/advance/audit-write.
@@ -170,10 +171,8 @@ export function resolveControllerOwner(
   const controllerId = env["FORGE_CONTROLLER_ID"]?.trim();
   if (controllerId) return { ok: true, owner: controllerId, source: "controller-env" };
 
-  for (const key of CLAUDE_SESSION_ENV_VARS) {
-    const sessionId = env[key]?.trim();
-    if (sessionId) return { ok: true, owner: `claude-session@${sessionId}`, source: "session" };
-  }
+  const sessionId = env[CLAUDE_SESSION_ENV_VAR]?.trim();
+  if (sessionId) return { ok: true, owner: `claude-session@${sessionId}`, source: "session" };
 
   return {
     ok: false,
@@ -181,7 +180,7 @@ export function resolveControllerOwner(
       "no stable controller identity resolved — refusing to mutate a continuation. " +
       "A host-stable owner (e.g. orchestrator@HOSTNAME) cannot fence a same-host peer, so " +
       "`forge continue` will not claim/adopt/advance under one. Provide a controller identity " +
-      "(precedence): --owner <id>, or FORGE_CONTROLLER_ID, or a Claude Code session id in the environment.",
+      "(precedence): --owner <id>, or FORGE_CONTROLLER_ID, or CLAUDE_CODE_SESSION_ID in the environment.",
   };
 }
 

@@ -22,6 +22,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import Database from "better-sqlite3";
 import { applyMigrations, makeInMemoryDb, setDbForTest, closeDb } from "./db.js";
 import { SCHEMA_SQL } from "./schema.js";
@@ -119,6 +122,120 @@ test("FIX 1 (round 3): repeated applyMigrations on a fresh runs table are idempo
   assert.ok(dispatchIdx, "the index persists across repeated opens");
   assert.equal(dispatchIdx!.unique, 1, "and stays UNIQUE");
   db.close();
+});
+
+// ── FIX 2 (round 4): SAFE CONVERGENCE of a stale NON-unique index to UNIQUE ──
+//
+// A bare `CREATE UNIQUE INDEX IF NOT EXISTS` keys on the index NAME, so a DB that already
+// carries a NON-unique index of this name (a stale dev DB from an earlier build) silently
+// keeps it — receipt uniqueness UNENFORCED. Round 4 converges it: in one BEGIN IMMEDIATE
+// tx, drop the non-unique index and create the UNIQUE one (unless a live duplicate makes
+// that unsafe, in which case leave it usable).
+
+function createNonUnique(db: Database.Database): void {
+  db.exec(`DROP INDEX IF EXISTS idx_runs_dispatch_key`);
+  db.exec(
+    `CREATE INDEX idx_runs_dispatch_key
+       ON runs(json_extract(metadata, '$.dispatchKey'))
+       WHERE json_extract(metadata, '$.dispatchKey') IS NOT NULL`,
+  );
+}
+
+test("FIX 2 (round 4): a pre-existing NON-unique idx_runs_dispatch_key CONVERGES to UNIQUE on open (was silently retained)", () => {
+  const db = new Database(":memory:");
+  db.pragma("foreign_keys = ON");
+  db.exec(SCHEMA_SQL);
+  createNonUnique(db); // simulate a stale dev DB carrying the non-unique index
+  const before = (db.prepare(`PRAGMA index_list(runs)`).all() as { name: string; unique: number }[]).find(
+    (i) => i.name === "idx_runs_dispatch_key",
+  );
+  assert.equal(before!.unique, 0, "precondition: the pre-existing index is NON-unique");
+  // Red before green: the round-3 `CREATE UNIQUE INDEX IF NOT EXISTS` keyed on the name and
+  // left this non-unique index in place (unique stayed 0). Round 4 drops + recreates it.
+  applyMigrations(db);
+  const after = (db.prepare(`PRAGMA index_list(runs)`).all() as { name: string; unique: number }[]).find(
+    (i) => i.name === "idx_runs_dispatch_key",
+  );
+  assert.ok(after, "the index still exists after convergence");
+  assert.equal(after!.unique, 1, "and is now UNIQUE — receipt uniqueness is enforced");
+  db.close();
+});
+
+test("FIX 2 (round 4): duplicate dispatch_keys under a NON-unique index do NOT brick the open; the DB stays usable", () => {
+  const db = new Database(":memory:");
+  db.pragma("foreign_keys = ON");
+  db.exec(SCHEMA_SQL);
+  createNonUnique(db);
+  const ins = db.prepare(
+    `INSERT INTO runs (id, workflow, title, status, created_at, metadata, project_dir) VALUES (?,?,?,?,?,?,?)`,
+  );
+  ins.run("run-dupA", "feature", "A", "active", "2026-07-19T00:00:00Z", JSON.stringify({ dispatchKey: "DUP" }), "/tmp/p");
+  ins.run("run-dupB", "feature", "B", "active", "2026-07-19T00:00:00Z", JSON.stringify({ dispatchKey: "DUP" }), "/tmp/p");
+  // Converging to UNIQUE while a live duplicate exists would throw SQLITE_CONSTRAINT — and
+  // since migrations run on EVERY open, that would brick every subsequent open. The
+  // migration must SKIP: leave the non-unique index, keep the DB usable.
+  assert.doesNotThrow(() => applyMigrations(db), "a duplicate receipt must NOT wedge the open");
+  const idx = (db.prepare(`PRAGMA index_list(runs)`).all() as { name: string; unique: number }[]).find(
+    (i) => i.name === "idx_runs_dispatch_key",
+  );
+  assert.ok(idx, "the (non-unique) index is retained — the DB stays usable");
+  assert.equal(idx!.unique, 0, "still NON-unique — never converted while a duplicate exists");
+  assert.doesNotThrow(() => applyMigrations(db), "a repeat open stays usable (idempotent skip)");
+  db.close();
+});
+
+test("FIX 2 (round 4): a fresh DB is BORN UNIQUE in one step", () => {
+  const db = new Database(":memory:");
+  db.pragma("foreign_keys = ON");
+  db.exec(SCHEMA_SQL); // no index yet — it lives in applyMigrations
+  applyMigrations(db);
+  const idx = (db.prepare(`PRAGMA index_list(runs)`).all() as { name: string; unique: number }[]).find(
+    (i) => i.name === "idx_runs_dispatch_key",
+  );
+  assert.ok(idx, "the index is created on a fresh DB");
+  assert.equal(idx!.unique, 1, "born UNIQUE — no non-unique intermediate");
+  db.close();
+});
+
+test("FIX 2 (round 4): convergence is ATOMIC — a concurrent reader never observes the index absent", () => {
+  const dir = mkdtempSync(join(tmpdir(), "fg563-idx-"));
+  try {
+    const file = join(dir, "forge.db");
+    const a = new Database(file);
+    a.pragma("journal_mode = WAL");
+    a.pragma("foreign_keys = ON");
+    a.exec(SCHEMA_SQL);
+    createNonUnique(a); // stale non-unique index committed to the file
+
+    const b = new Database(file, { readonly: true });
+    const present = (): boolean =>
+      (b.prepare(`PRAGMA index_list(runs)`).all() as { name: string }[]).some((i) => i.name === "idx_runs_dispatch_key");
+    assert.ok(present(), "reader sees the (non-unique) index before convergence");
+
+    // The real migration wraps DROP+CREATE in ONE BEGIN IMMEDIATE tx. Simulate that tx
+    // mid-flight: under WAL a concurrent reader sees the last COMMITTED snapshot, so the
+    // index is NEVER absent — a peer open either sees the old index or blocks on the write
+    // lock and then sees the new one.
+    a.exec(`BEGIN IMMEDIATE`);
+    a.exec(`DROP INDEX idx_runs_dispatch_key`);
+    assert.ok(present(), "mid-convergence, the reader STILL sees the index (snapshot isolation)");
+    a.exec(
+      `CREATE UNIQUE INDEX idx_runs_dispatch_key
+         ON runs(json_extract(metadata, '$.dispatchKey'))
+         WHERE json_extract(metadata, '$.dispatchKey') IS NOT NULL`,
+    );
+    a.exec(`COMMIT`);
+
+    assert.ok(present(), "after commit the reader sees the converged index");
+    const idx = (b.prepare(`PRAGMA index_list(runs)`).all() as { name: string; unique: number }[]).find(
+      (i) => i.name === "idx_runs_dispatch_key",
+    );
+    assert.equal(idx!.unique, 1, "and it is now UNIQUE");
+    a.close();
+    b.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ── FIX B (DB-level) + runByDispatchKey semantics against a real runs table ──
