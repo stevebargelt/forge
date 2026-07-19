@@ -1,29 +1,13 @@
 import type { Command } from "commander";
 import { basename } from "node:path";
 import { readFileSync } from "node:fs";
-import { controlRuntimeProfile, listLaunches, readLaunch, removeLaunch, startLaunch, type ControlRuntime, type LaunchStatus, type LaunchView, type WorkloadNestedShell, type WorkloadTopLevel } from "../../v2/launch.js";
+import { controlRuntimeProfile, listLaunches, readLaunch, removeLaunch, startLaunch, statusLine, type ControlRuntime, type LaunchView, type WorkloadNestedShell, type WorkloadTopLevel } from "../../v2/launch.js";
+import { waitAndRender } from "./launch-wait.js";
 
 // FG-535: `forge launch` — the supported durable launch path for long-running
 // forge commands (`forge invoke`, `forge next`, `forge review-loop`, …) when
 // the submitting shell is owned by an interactive orchestrator harness that
 // may SIGTERM its children. See src/v2/launch.ts for the ownership model.
-
-// FG-535 AC: never infer the sender from exit 143 alone. `signaled` carries the
-// kernel's WIFSIGNALED verdict — real evidence a signal landed — but nothing
-// records WHO sent it, so the line says so instead of claiming "externally
-// terminated". `terminated_unattributed` has even less: a signal-shaped code
-// that a deliberate exit(143) would produce identically.
-function statusLine(s: LaunchStatus): string {
-  switch (s.state) {
-    case "running": return "running";
-    case "exited_ok": return "exited 0";
-    case "exited_error": return `exited ${s.code}`;
-    case "signaled": return `terminated by ${s.signal} (signal sender not recorded — origin unknown)`;
-    case "terminated_unattributed": return `exited ${s.code} (signal-range code, no signal evidence — origin unknown)`;
-    case "owner_gone": return "owner gone without an exit record (wrapper killed, or failed before recording — cause and sender not recorded)";
-    case "unknown": return "unknown (no exit record, owner gone — e.g. host reboot)";
-  }
-}
 
 // FG-569 (R1): the submitting forge CLI's own runtime + release identity. A
 // release CLI names its manifest id + commit; a dev CLI is the explicit
@@ -168,6 +152,22 @@ export function registerLaunch(program: Command): void {
       const v = readLaunch(id);
       if (!v) throw new Error(`forge launch: no such launch '${id}'`);
       console.log(opts.json ? JSON.stringify(v, null, 2) : renderView(v));
+    });
+
+  launch
+    .command("wait")
+    .description(
+      "Block until a launch reaches a terminal disposition, then emit EXACTLY ONE structured observation (FG-552). Watches the atomic exit record + reconciles owner evidence; never wakes a model. SIGINT cancels the WAITER only, never the tmux-owned work (OQ-4). The launch's own exit code is DATA in the observation, not this command's exit status.",
+    )
+    .option("--json", "machine-readable observation")
+    .option(
+      "--timeout <seconds>",
+      "waiter timeout (0 = no timeout); an elapsed timeout is an explicit wait_timeout result, NEVER a fabricated launch terminal state",
+    )
+    .argument("<id>", "launch id")
+    .action(async (id: string, opts: { json?: boolean; timeout?: string }) => {
+      const timeoutMs = opts.timeout !== undefined ? Number(opts.timeout) * 1000 : undefined;
+      process.exitCode = await waitAndRender(id, { json: opts.json, timeoutMs });
     });
 
   launch
