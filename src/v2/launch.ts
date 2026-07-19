@@ -886,14 +886,21 @@ export function startLaunch(argv: string[], opts: { name?: string; cwd?: string;
     // recorder (R2) — the CLI is gone by the time anyone inspects this launch.
     control: collectControlRuntime(),
   };
-  // FG-552 (BD-4/F32): meta is published EXACTLY ONCE, atomically, AFTER the
-  // owner pid is knowable — the full record is computed, then placed in a single
-  // temp+rename below. The old code wrote meta.json twice (once here with a null
-  // owner pid, once after respawn-pane), and a reader landing in the second
-  // write's truncate window saw a running launch as "no such launch". Nothing
-  // reads meta.json before startLaunch returns the id, so the pre-publish window
-  // is unobservable; the tmux-failure path deletes the whole dir either way.
+  // FG-552 (BD-4/F32): meta must be DISCOVERABLE before the command can run, or a
+  // directory-discovering reader (listLaunches walks LAUNCHES_DIR, readLaunch maps
+  // an absent meta.json to undefined) sees a RUNNING launch as "no such launch"
+  // during initial publication. The publish window is real: mkdirSync already made
+  // this dir discoverable, and respawn-pane below starts the command. So publish
+  // the meta record atomically HERE, before any tmux session exists — the only
+  // window a reader can then see is dir-created-but-command-not-yet-running, which
+  // is honestly absent (the id has not been returned and nothing runs). The
+  // ownerPid is not knowable until respawn-pane, so the record is republished once
+  // more below with it. Both writes are temp+rename (writeJsonAtomic), so the
+  // second write has NO truncate window — the concern that made the old code
+  // single-write no longer applies now that publication is atomic (BD-4). The
+  // tmux-failure path rmSyncs the whole dir, taking this record with it.
   const metaPath = join(dir, "meta.json");
+  writeJsonAtomic(metaPath, meta);
 
   const wrapped = buildWrapperCommand(argv, meta.logPath, join(dir, "exit"), join(dir, "runtime.json"), process.execPath, trustedReleaseId(), opts.profile ?? null);
   try {
@@ -932,8 +939,10 @@ export function startLaunch(argv: string[], opts: { name?: string; cwd?: string;
   }
 
   // Only knowable once the pane holds the real command, so the record is
-  // rewritten rather than written once — an owner pid queried before
-  // respawn-pane would name the inert bootstrap pane instead.
+  // republished (atomically) with it — an owner pid queried before respawn-pane
+  // would name the inert bootstrap pane instead. This is the second atomic write;
+  // a concurrent reader sees the pre-run record or this one, never a torn/absent
+  // state (F32).
   meta.ownerPid = ownerPidOf(session, tmux);
   writeJsonAtomic(metaPath, meta);
   return meta;
