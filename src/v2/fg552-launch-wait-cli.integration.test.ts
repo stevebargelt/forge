@@ -30,7 +30,11 @@ const started: string[] = [];
 /** Exec the REAL forge CLI exactly as bin/forge does: one node process, tsx
  *  loaded in-process via --import forge-loader.mjs, then src/cli/index.ts. */
 function forge(args: string[], env: NodeJS.ProcessEnv = process.env) {
-  return spawnSync("node", ["--import", loader, entry, ...args], { encoding: "utf8", env });
+  // FG-552 defensive bound: a blocking `forge launch wait` whose disposition never
+  // arrives (the e2da08d signal-record regression hung CI 40+ min) is killed here
+  // so the test FAILS FAST instead of wedging the suite. Far above every
+  // legitimate blocking wait here; does NOT change the production wait default.
+  return spawnSync("node", ["--import", loader, entry, ...args], { encoding: "utf8", env, timeout: 60_000, killSignal: "SIGKILL" });
 }
 
 /** Chain an extra ESM loader hook after tsx — used to make better-sqlite3
@@ -181,9 +185,14 @@ test("FG-552 CLI (OQ-4): SIGINT cancels the WAITER only — it exits wait_cancel
   await new Promise((r) => setTimeout(r, 3000));
   child.kill("SIGINT");
 
+  // FG-552 defensive bound: if the SIGINT handler ever fails to arm/settle, do not
+  // wait on child exit forever — SIGKILL it after a bound so the assertion below
+  // fails fast (exit.code !== 130) instead of hanging the suite.
+  const guard = setTimeout(() => child.kill("SIGKILL"), 15_000);
   const exit = await new Promise<{ code: number | null; signal: string | null }>((res) =>
     child.on("exit", (code, signal) => res({ code, signal })),
   );
+  clearTimeout(guard);
 
   assert.equal(exit.code, 130, `the waiter exits 130 via its own handler (stdout=${stdout} stderr=${stderr})`);
   const obs = JSON.parse(stdout) as { kind: string; lastObserved: { state: string } };

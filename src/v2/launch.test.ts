@@ -60,6 +60,21 @@ test("FG-535 exit record: JSON is authoritative; a bare number (older wrapper) c
   assert.equal(parseExitRecord(""), undefined);
 });
 
+test("FG-552 (regression e2da08d): a SIGNAL-ONLY exit record is a VALID terminal record — the schema-invalid guard must reject only records with NEITHER a numeric code NOR a string signal", () => {
+  // The e2da08d guard `if (code === null) return undefined` rejected every valid
+  // OS-signal exit ({code:null, signal:"SIGTERM"} sets exactly the signal), so a
+  // signal-exited launch never classified terminal and `forge launch wait` hung.
+  const rec = parseExitRecord(`{"signal":"SIGTERM"}`);
+  assert.deepEqual(rec, { code: null, signal: "SIGTERM" },
+    "a signal-only record is valid — one of code|signal is set, never both");
+  assert.deepEqual(classifyExit(rec!), { state: "signaled", signal: "SIGTERM", sender: "unrecorded" },
+    "it classifies as terminal `signaled` with an unrecorded sender — never undefined / never-terminating");
+  // The schema-invalid records stay undefined → bounded retry, NOT terminal.
+  assert.equal(parseExitRecord(`{}`), undefined);
+  assert.equal(parseExitRecord(`{"code":"bad"}`), undefined);
+  assert.equal(parseExitRecord(`{"code":null,"signal":null}`), undefined);
+});
+
 test("FG-569 R2: the recorder runtime record is parsed; a missing required field is rejected, never guessed", () => {
   assert.deepEqual(
     parseRecorderRuntime(`{"execPath":"/opt/n/bin/node","abi":"137","nodeVersion":"v24.0.0","releaseId":"release-abc-1"}`),

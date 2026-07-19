@@ -214,7 +214,7 @@ export function parseExitRecord(raw: string): ExitRecord | undefined {
     // controller on corrupt evidence; instead return undefined so it is treated as
     // an unreadable/not-yet-terminal record and falls through to bounded owner-
     // evidence retry, exactly like an empty/half-written file.
-    if (code === null) return undefined;
+    if (code === null && signal === null) return undefined;
     return { code, signal };
   } catch {
     return undefined;

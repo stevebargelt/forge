@@ -25,7 +25,12 @@ const started: string[] = [];
 
 /** Run the real forge CLI via tsx, exactly as bin/forge does in-process. */
 function forge(args: string[]) {
-  return spawnSync(tsx, [entry, ...args], { encoding: "utf8", env: process.env });
+  // FG-552 defensive bound: a blocking `forge launch wait` on a launch whose
+  // disposition never arrives (the e2da08d signal-record regression hung CI 40+
+  // min) is killed here so the test FAILS FAST instead of wedging the suite. The
+  // bound is far above every legitimate blocking wait in this file (<= --timeout
+  // 10s) and does NOT touch the production wait default.
+  return spawnSync(tsx, [entry, ...args], { encoding: "utf8", env: process.env, timeout: 60_000, killSignal: "SIGKILL" });
 }
 
 /** Run forge with an EXTRA ESM loader hook chained after tsx, used to make
