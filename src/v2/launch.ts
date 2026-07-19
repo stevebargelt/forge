@@ -35,10 +35,11 @@
 // available") — the command may not be a forge command at all.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FORGE_HOME } from "../util/paths.js";
+import { checkAbi } from "../cli/node-abi.js";
 import { readReleaseManifest } from "./release.js";
 
 export const LAUNCHES_DIR = join(FORGE_HOME, "launches");
@@ -124,11 +125,68 @@ export type RecorderRuntime = {
   releaseId: string | null;
 };
 
+// FG-555 (R3/R4): the LAUNCHED WORKLOAD's execution environment — the OTHER side
+// of the launch boundary from R1/R2 (forge's own two runtimes). `forge launch run`
+// is an argv launcher: the recorder wraps the submitted argv and spawns argv[0]
+// DIRECTLY (see exitRecorderScript's spawnSync(a0, …)); it NEVER synthesizes a
+// shell. A caller may still intentionally supply one. So argv is a *string* and
+// these two records are its honest resolution:
+//
+//   R3 — the launched top-level executable (argv[0]) resolved to a real path,
+//        AS RESOLVED AT SPAWN TIME. captured = argv[0] was already a path;
+//        derived = a bare name resolved on PATH; unresolved = not found (recorded
+//        as fact, never guessed). Resolved INSIDE the recorder, in the environment
+//        the command actually ran under — tmux interposes its own shell env, so
+//        resolving argv[0] in the submitting CLI would give a plausible-but-wrong
+//        answer (fg553-slice1-architecture.md C2).
+//   R4 — whether a DIFFERENT Node than R3's argv[0] gets resolved at runtime, by a
+//        shell (bash -lc <chain>), a script's shebang (`./x.sh`, `bash ./x.sh`), or a
+//        Node-shebang launcher (`npm`, `npx`, `forge`, `vitest`, `tsx`, …). That
+//        resolution happens at runtime, against whatever PATH `exec` builds AFTER the
+//        recorder spawned argv[0] — Forge cannot know it, so R4 DEFAULTS to UNKNOWABLE.
+//        It is `not_applicable` ONLY when the effective argv[0] is a TERMINAL Node
+//        interpreter (basename node/nodejs): then the interpreter IS argv[0] and R3
+//        fully captures the runtime. We do NOT enumerate launchers (that space is
+//        unbounded); R4 is NEVER implied to be covered by argv.
+export type WorkloadTopLevel =
+  | { kind: "captured"; argv0: string; execPath: string }
+  | { kind: "derived"; argv0: string; execPath: string }
+  | { kind: "unresolved"; argv0: string };
+
+export type WorkloadNestedShell =
+  | { kind: "not_applicable"; reason: string }
+  | { kind: "unknowable"; shell: string; reason: string };
+
+// FG-555: the EFFECTIVE Node interpreter the workload actually ran under — the
+// effective argv[0] (after skipping env/exec-prefixes), PROBED for its ABI/version
+// at spawn time. Present only when that effective argv[0] is a Node interpreter
+// (basename node/nodejs) that could be probed — including behind an `env` prefix
+// (`env FOO=bar node …`), where the top-level executable is `env` but the runtime is
+// the node behind it; absent otherwise (a non-node workload's runtime is the same
+// unknowable class as R4 — never guessed). This is what lets `forge launch show`
+// diagnose whether a direct `node` workload actually used the compatible toolchain.
+export type WorkloadInterpreter = { execPath: string; abi: string; nodeVersion: string };
+
+// FG-555: R3/R4 plus the launched workload's RUNTIME provenance:
+//   profile     — the launch-environment contract that was pinned for this
+//                 workload (pinned PATH + required ABI). Absent when the launch
+//                 inherited the ambient env (no --require-control-toolchain).
+//   interpreter — the effective Node interpreter runtime (see WorkloadInterpreter).
+export type WorkloadProvenance = {
+  r3: WorkloadTopLevel;
+  r4: WorkloadNestedShell;
+  profile?: LaunchProfile;
+  interpreter?: WorkloadInterpreter;
+};
+
 export type LaunchView = LaunchMeta & {
   status: LaunchStatus;
   forgeIds: { runIds: string[]; taskIds: string[] };
   // R2 provenance, present once the recorder has written it (its first act).
   recorder?: RecorderRuntime;
+  // FG-555: R3/R4 provenance, written by the recorder at spawn time. Absent for a
+  // launch that predates FG-555 — surfaced as "not recorded", never inferred.
+  workload?: WorkloadProvenance;
 };
 
 export function classifyExit(rec: ExitRecord): LaunchStatus {
@@ -205,13 +263,47 @@ function collectControlRuntime(): ControlRuntime {
 // releaseId is BAKED IN by buildWrapperCommand as a JSON literal (below), NOT
 // read from process.env — a poisoned FORGE_RELEASE_ID in the ambient environment
 // therefore has ZERO effect on the recorded provenance.
-function exitRecorderScript(releaseIdLiteral: string): string {
+function exitRecorderScript(releaseIdLiteral: string, profileLiteral: string): string {
   return [
-    `const{spawnSync}=require("child_process"),fs=require("fs");`,
+    `const{spawnSync}=require("child_process"),fs=require("fs"),pth=require("path");`,
     `const[e,l,rt,...a]=process.argv.slice(1);`,
     `fs.writeFileSync(rt,JSON.stringify({execPath:process.execPath,abi:process.versions.modules,nodeVersion:process.version,releaseId:${releaseIdLiteral}}));`,
+    // FG-555 (R3/R4): resolve argv[0] and classify a nested shell HERE, in the
+    // recorder — the environment the command actually runs under (mirrors the pure
+    // deriveWorkloadProvenance; kept in lockstep with it). Written BEFORE spawn so
+    // R3 is recorded even if the spawn itself fails.
+    `const a0=a[0]||"";let r3;`,
+    `if(a0.indexOf("/")>=0){r3={kind:"captured",argv0:a0,execPath:a0};}`,
+    // An EMPTY PATH component denotes the launch cwd (execvp semantics); spawnSync
+    // honors it, so the recorded effective executable must too — never skip it.
+    `else{let f;for(const d of (process.env.PATH||"").split(":")){const c=pth.join(d||process.cwd(),a0);try{fs.accessSync(c,fs.constants.X_OK);f=c;break;}catch(_){}}r3=f?{kind:"derived",argv0:a0,execPath:f}:{kind:"unresolved",argv0:a0};}`,
+    // R4 on the EFFECTIVE command: skip recognized exec-prefixes (env/nice/…) and the
+    // NAME=VALUE assignments an `env` prefix applies — but NOT a bare leading VAR=VAL
+    // (argv[0] itself), which a direct spawn runs literally (ENOENT). Kept in lockstep
+    // with effectiveCommand/deriveWorkloadProvenance so `env … bash -lc …` records
+    // unknowable, never a false not_applicable.
+    `const PFX={env:1,nice:1,nohup:1,time:1,stdbuf:1,setsid:1,timeout:1},ASG=/^[A-Za-z_][A-Za-z0-9_]*=/;`,
+    `let ci=0,up=false;`,
+    `while(ci<a.length){var pn=pth.basename(a[ci]);if(!PFX[pn])break;ci++;if(pn==="env"){while(ci<a.length){var tk=a[ci];if(tk==="--"){ci++;break;}if(ASG.test(tk)){ci++;continue;}if(tk[0]==="-"){up=true;break;}break;}}else{while(ci<a.length&&a[ci][0]==="-"){var op=a[ci];ci++;if((pn==="nice"&&op==="-n")||(pn==="stdbuf"&&/^-[ioe]$/.test(op))||(pn==="timeout"&&(op==="-s"||op==="-k"))||(pn==="time"&&(op==="-o"||op==="-f"))){if(ci<a.length)ci++;}}if(pn==="timeout"&&ci<a.length)ci++;}}`,
+    // R4 INVERTED (mirrors deriveWorkloadProvenance): default unknowable; not_applicable
+    // ONLY when the effective argv[0] is a terminal Node interpreter (node/nodejs).
+    `const eff=a.slice(ci),sh=pth.basename(eff[0]||"");`,
+    `let r4;if(sh==="node"||sh==="nodejs"){r4={kind:"not_applicable",reason:"the effective argv[0] is a terminal Node interpreter (node/nodejs) — it IS the runtime (R3 captures it); nothing resolves a different Node later"};}else{var nst=["sh","bash","dash","zsh","ksh","ash"].indexOf(sh)>=0&&eff.slice(1).some(function(x){return /^-[a-z]*c$/.test(x);});var rsn=nst?"a nested shell resolves node/npm/forge at runtime against whatever PATH it builds — not knowable at launch time (BD-14 R4)":up?"an env/wrapper form the launcher cannot fully parse could still resolve an arbitrary runtime — a hidden shell cannot be ruled out (BD-14 R4)":"the effective argv[0] is not a terminal Node interpreter — a later shebang/PATH resolution (a shell, a script, or a Node-shebang launcher) may select a different Node that is not knowable at launch time (BD-14 R4)";r4={kind:"unknowable",shell:sh||"(none)",reason:rsn};}`,
+    // FG-555 (workload runtime): probe the EFFECTIVE interpreter — the effective
+    // argv[0] (eff[0], after skipping env/exec-prefixes), when it IS a Node interpreter
+    // (basename node/nodejs) — for its ABI/version, so `forge launch show` can diagnose
+    // whether the workload actually ran the compatible toolchain. Resolved the SAME way
+    // as R3, so a `node` behind `env FOO=bar node …` is probed even though R3 is `env`.
+    // Bounded to node/nodejs (a non-node runtime is the same unknowable class as R4);
+    // kept in lockstep with deriveWorkloadProvenance's effective-interpreter probe.
+    `let itp,eip="";if(sh==="node"||sh==="nodejs"){const e0=eff[0];if(e0.indexOf("/")>=0){eip=e0;}else{for(const d of (process.env.PATH||"").split(":")){const c=pth.join(d||process.cwd(),e0);try{fs.accessSync(c,fs.constants.X_OK);eip=c;break;}catch(_){}}}}`,
+    `if(eip){try{const pr=spawnSync(eip,["-p","process.versions.modules+' '+process.version"],{encoding:"utf8"});if(pr.status===0&&pr.stdout){const pp=pr.stdout.trim().split(" ");if(pp.length===2)itp={execPath:eip,abi:pp[0],nodeVersion:pp[1]};}}catch(_){}}`,
+    // The pinned launch profile (or null) is baked in as a JSON literal — the SAME
+    // trusted, ambient-env-independent channel as releaseId (R2) — so the recorded
+    // contract is exactly what startLaunch declared, never re-derived here.
+    `fs.writeFileSync(pth.join(pth.dirname(rt),"workload.json"),JSON.stringify({r3:r3,r4:r4,profile:${profileLiteral},interpreter:itp}));`,
     `const fd=fs.openSync(l,"a");`,
-    `const r=spawnSync(a[0],a.slice(1),{stdio:["ignore",fd,fd]});`,
+    `const r=spawnSync(a0,a.slice(1),{stdio:["ignore",fd,fd]});`,
     `if(r.error)fs.writeSync(fd,String(r.error.message)+"\\n");`,
     `fs.writeFileSync(e,JSON.stringify({code:r.error?127:r.status,signal:r.signal??null}));`,
   ].join("");
@@ -225,8 +317,8 @@ function exitRecorderScript(releaseIdLiteral: string): string {
  *  FG-569 (R2): `releaseId` is the TRUSTED, manifest-derived id (or null). It is
  *  string-interpolated into the recorder script as a JSON literal, so the recorded
  *  release identity has NO ambient-env dependency. */
-export function buildWrapperCommand(argv: string[], logPath: string, exitPath: string, runtimePath: string, node = process.execPath, releaseId: string | null = null): string {
-  const script = exitRecorderScript(JSON.stringify(releaseId));
+export function buildWrapperCommand(argv: string[], logPath: string, exitPath: string, runtimePath: string, node = process.execPath, releaseId: string | null = null, profile: LaunchProfile | null = null): string {
+  const script = exitRecorderScript(JSON.stringify(releaseId), JSON.stringify(profile));
   const parts = [node, "-e", script, exitPath, logPath, runtimePath, ...argv];
   return parts.map(shellQuote).join(" ");
 }
@@ -246,6 +338,391 @@ export function parseRecorderRuntime(raw: string): RecorderRuntime | undefined {
   } catch {
     return undefined;
   }
+}
+
+// ── FG-555: launched-workload provenance (R3/R4) + the environment contract ──
+
+const NESTED_SHELLS = new Set(["sh", "bash", "dash", "zsh", "ksh", "ash"]);
+
+// FG-555: the bounded, well-known set of exec-prefixes that run a following
+// command WITHOUT choosing its runtime — as long as they do not mutate PATH. We
+// skip them (and any leading `VAR=VAL` assignments) to find the EFFECTIVE argv[0]
+// both the fail-closed toolchain guard and the R4 nested-shell classifier reason
+// about. `env` is the one that can mutate PATH (via its own `NAME=VALUE` args), so
+// it is parsed specifically; the rest only carry options. Anything NOT in this set
+// is treated as the effective command and judged on its own — we never pass an
+// unrecognized wrapper through (fail closed).
+const EXEC_PREFIXES = new Set(["env", "nice", "nohup", "time", "stdbuf", "setsid", "timeout"]);
+
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/** Skip recognized non-PATH-mutating exec-prefixes (`env`/`nice`/…), and the
+ *  `NAME=VALUE` assignments an `env` prefix applies, to reach the EFFECTIVE
+ *  command. A BARE leading `VAR=VAL` (argv[0] itself) is NOT skipped: the recorder
+ *  spawns argv[0] DIRECTLY (no shell), so a bare assignment is never applied — it
+ *  becomes a literal executable name (ENOENT). Skipping it would let the guard
+ *  reason about a "real" command a direct spawn never reaches; the effective
+ *  argv[0] IS the assignment, and the caller judges it as such (refuse). A
+ *  `VAR=VAL` is only an applied assignment when it FOLLOWS `env`. `pathMutated`
+ *  flags an `env PATH=…` assignment that defeats the pin. `unprovable` flags an
+ *  exec-prefix form we cannot safely skip (an `env` option like `-i` that clears
+ *  the environment) — the caller then fails closed: refuse (guard) or prefer
+ *  `unknowable` (R4), never wave through a form we could not parse. */
+function effectiveCommand(argv: string[]): { argv: string[]; pathMutated: boolean; unprovable: boolean } {
+  let i = 0;
+  let pathMutated = false;
+  while (i < argv.length) {
+    const name = basename(argv[i]!);
+    if (!EXEC_PREFIXES.has(name)) break;
+    i++;
+    if (name === "env") {
+      // env [OPTION]... [NAME=VALUE]... [COMMAND...]
+      while (i < argv.length) {
+        const tok = argv[i]!;
+        if (tok === "--") { i++; break; }
+        if (ASSIGNMENT.test(tok)) {
+          if (tok.startsWith("PATH=")) pathMutated = true;
+          i++;
+          continue;
+        }
+        // An env OPTION (-i clears the env, -u unsets, -S splits): we will not
+        // reason about what it does to the environment — fail closed.
+        if (tok.startsWith("-")) return { argv: argv.slice(i), pathMutated, unprovable: true };
+        break;
+      }
+    } else {
+      while (i < argv.length && argv[i]!.startsWith("-")) {
+        const op = argv[i]!;
+        i++;
+        const consumesArg =
+          (name === "nice" && op === "-n") ||
+          (name === "stdbuf" && /^-[ioe]$/.test(op)) ||
+          (name === "timeout" && (op === "-s" || op === "-k")) ||
+          (name === "time" && (op === "-o" || op === "-f"));
+        if (consumesArg && i < argv.length) i++;
+      }
+      if (name === "timeout" && i < argv.length) i++; // the DURATION operand
+    }
+  }
+  return { argv: argv.slice(i), pathMutated, unprovable: false };
+}
+
+export type PathResolver = (name: string, path: string | undefined) => string | undefined;
+
+/** which(1)-style resolution: the first executable named `name` on `path`. A name
+ *  already containing a separator is not a PATH lookup — it IS the path. */
+function resolveOnPath(name: string, path: string | undefined): string | undefined {
+  if (name === "") return undefined;
+  if (name.includes("/")) return name;
+  for (const dir of (path ?? "").split(":")) {
+    // An empty PATH component denotes the launch cwd (execvp semantics) — kept in
+    // lockstep with the recorder, which resolves the same effective executable.
+    const candidate = join(dir === "" ? process.cwd() : dir, name);
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      /* keep looking */
+    }
+  }
+  return undefined;
+}
+
+/** The pure reference for the recorder's R3/R4 derivation (exitRecorderScript
+ *  mirrors this inline, in-process, at spawn time). R3 resolves argv[0] against
+ *  `path`; R4 classifies whether argv[0] is a nested shell whose later command
+ *  resolution is unknowable. */
+export type InterpreterProber = (execPath: string) => WorkloadInterpreter | undefined;
+
+export function deriveWorkloadProvenance(
+  argv: string[],
+  opts: { path?: string; resolve?: PathResolver; profile?: LaunchProfile; probeInterpreter?: InterpreterProber } = {},
+): WorkloadProvenance {
+  const resolve = opts.resolve ?? resolveOnPath;
+  const argv0 = argv[0] ?? "";
+
+  let r3: WorkloadTopLevel;
+  if (argv0.includes("/")) {
+    r3 = { kind: "captured", argv0, execPath: argv0 };
+  } else {
+    const found = resolve(argv0, opts.path);
+    r3 = found ? { kind: "derived", argv0, execPath: found } : { kind: "unresolved", argv0 };
+  }
+
+  // R4 (INVERTED, mirroring the fail-closed refusal side): the DEFAULT is
+  // `unknowable`. We reserve `not_applicable` for the ONE provable case — the
+  // effective argv[0] is a TERMINAL Node interpreter (basename node/nodejs), so the
+  // interpreter IS argv[0] and R3 fully captures the runtime; nothing resolves a
+  // different Node later. EVERYTHING else is unknowable: any shell (with or without
+  // `-c`), any script (`bash ./x.sh`, `./x.sh`), any launcher whose shebang/PATH
+  // lookup selects Node AFTER argv[0] is spawned (`npm`, `npx`, `forge`, `vitest`,
+  // `tsx`, or any unrecognized command), and any wrapper form we could not fully
+  // parse (unprovable). Enumerating launchers is unwinnable — a false `not_applicable`
+  // implies "argv is the full resolution" when a later shebang/PATH resolution may
+  // select an ABI-incompatible Node. When in any doubt: unknowable, never not_applicable.
+  const eff = effectiveCommand(argv);
+  const effName = basename(eff.argv[0] ?? "");
+  let r4: WorkloadNestedShell;
+  if (effName === "node" || effName === "nodejs") {
+    r4 = { kind: "not_applicable", reason: "the effective argv[0] is a terminal Node interpreter (node/nodejs) — it IS the runtime (R3 captures it); nothing resolves a different Node later" };
+  } else {
+    const nested = NESTED_SHELLS.has(effName) && eff.argv.slice(1).some((a) => /^-[a-z]*c$/.test(a));
+    const reason = nested
+      ? "a nested shell resolves node/npm/forge at runtime against whatever PATH it builds — not knowable at launch time (BD-14 R4)"
+      : eff.unprovable
+        ? "an env/wrapper form the launcher cannot fully parse could still resolve an arbitrary runtime — a hidden shell cannot be ruled out (BD-14 R4)"
+        : "the effective argv[0] is not a terminal Node interpreter — a later shebang/PATH resolution (a shell, a script, or a Node-shebang launcher) may select a different Node that is not knowable at launch time (BD-14 R4)";
+    r4 = { kind: "unknowable", shell: effName || "(none)", reason };
+  }
+
+  const result: WorkloadProvenance = { r3, r4 };
+  if (opts.profile) result.profile = opts.profile;
+  // Probe the EFFECTIVE interpreter — the one that actually executes — when it is a
+  // terminal Node interpreter (R4 not_applicable). This is the effective argv[0]
+  // AFTER skipping env/exec-prefixes, resolved the SAME way R3 resolves argv0. For a
+  // top-level `env FOO=bar node …` R3 is `env`, but the runtime that runs is the node
+  // behind it; probing R3 would leave a supported, allowed launch with no interpreter
+  // ABI/version recorded. Bounded to node/nodejs on purpose (a non-node runtime is the
+  // same unknowable class as R4).
+  if (opts.probeInterpreter && (effName === "node" || effName === "nodejs")) {
+    const effArgv0 = eff.argv[0]!;
+    const effPath = effArgv0.includes("/") ? effArgv0 : resolve(effArgv0, opts.path);
+    if (effPath) {
+      const itp = opts.probeInterpreter(effPath);
+      if (itp) result.interpreter = itp;
+    }
+  }
+  return result;
+}
+
+function validR3(v: unknown): WorkloadTopLevel | undefined {
+  if (typeof v !== "object" || v === null) return undefined;
+  const r = v as Record<string, unknown>;
+  if (typeof r.argv0 !== "string") return undefined;
+  if (r.kind === "unresolved") return { kind: "unresolved", argv0: r.argv0 };
+  if ((r.kind === "captured" || r.kind === "derived") && typeof r.execPath === "string") {
+    return { kind: r.kind, argv0: r.argv0, execPath: r.execPath };
+  }
+  return undefined;
+}
+
+function validR4(v: unknown): WorkloadNestedShell | undefined {
+  if (typeof v !== "object" || v === null) return undefined;
+  const r = v as Record<string, unknown>;
+  if (typeof r.reason !== "string") return undefined;
+  if (r.kind === "not_applicable") return { kind: "not_applicable", reason: r.reason };
+  if (r.kind === "unknowable" && typeof r.shell === "string") return { kind: "unknowable", shell: r.shell, reason: r.reason };
+  return undefined;
+}
+
+function validProfile(v: unknown): LaunchProfile | undefined {
+  if (typeof v !== "object" || v === null) return undefined;
+  const r = v as Record<string, unknown>;
+  if (typeof r.path !== "string" || typeof r.requireAbi !== "string") return undefined;
+  return { path: r.path, requireAbi: r.requireAbi, ...(typeof r.label === "string" ? { label: r.label } : {}) };
+}
+
+function validInterpreter(v: unknown): WorkloadInterpreter | undefined {
+  if (typeof v !== "object" || v === null) return undefined;
+  const r = v as Record<string, unknown>;
+  if (typeof r.execPath !== "string" || typeof r.abi !== "string" || typeof r.nodeVersion !== "string") return undefined;
+  return { execPath: r.execPath, abi: r.abi, nodeVersion: r.nodeVersion };
+}
+
+/** Parse the R3/R4 record the recorder wrote. Returns undefined if the CORE R3/R4
+ *  is absent or malformed — provenance is never guessed (mirrors parseRecorderRuntime).
+ *  The optional profile/interpreter are supplementary: a malformed one is omitted
+ *  (never guessed), but does not invalidate the core record. */
+export function parseWorkloadProvenance(raw: string): WorkloadProvenance | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null) return undefined;
+  const { r3, r4, profile, interpreter } = parsed as { r3?: unknown; r4?: unknown; profile?: unknown; interpreter?: unknown };
+  const okR3 = validR3(r3);
+  const okR4 = validR4(r4);
+  if (!okR3 || !okR4) return undefined;
+  const result: WorkloadProvenance = { r3: okR3, r4: okR4 };
+  const okProfile = validProfile(profile);
+  if (okProfile) result.profile = okProfile;
+  const okItp = validInterpreter(interpreter);
+  if (okItp) result.interpreter = okItp;
+  return result;
+}
+
+// FG-555: the execution-environment CONTRACT a Forge-owned unattended caller
+// declares INSTEAD of inheriting an ambient login-shell PATH. It pins the
+// workload's PATH to forge's OWN control-runtime node dir (front of PATH) and
+// names the ABI the workload must run under. This is the SMALLEST mechanism that
+// satisfies BD-14's "a workload that requires a shell declares it and gets a
+// contract; it does not inherit one accidentally" — a direct argv plus a pinned
+// PATH, NEVER a silent rewrite of arbitrary operator argv.
+export type LaunchProfile = { path: string; requireAbi: string; label?: string };
+
+/** The control-runtime launch environment: the SAME node the forge CLI itself
+ *  runs under, pinned at the FRONT of PATH, and the control ABI as the required
+ *  toolchain. A Forge-owned unattended verification submits with this so it
+ *  resolves the control toolchain by contract, never an ambient login shell's. */
+export function controlRuntimeProfile(opts: { label?: string } = {}): LaunchProfile {
+  // Prepend UNCONDITIONALLY: the control node dir must resolve FIRST even when it
+  // already appears later in PATH behind an incompatible node — that shadowing is
+  // exactly the reproduction. A duplicate dir entry is harmless (first wins).
+  const nodeDir = dirname(process.execPath);
+  const existing = process.env.PATH ?? "";
+  return {
+    path: [nodeDir, existing].filter((p) => p !== "").join(":"),
+    requireAbi: process.versions.modules,
+    ...(opts.label ? { label: opts.label } : {}),
+  };
+}
+
+export type AbiProber = (nodeExec: string) => string | undefined;
+
+/** Probe an interpreter's ABI by asking it to PRINT its own — it exits after one
+ *  expression. This NEVER rebuilds or replaces any native dependency (FG-555: no
+ *  shared-native-dep remediation); it only reads the toolchain's identity. */
+function defaultAbiProbe(nodeExec: string): string | undefined {
+  try {
+    return execFileSync(nodeExec, ["-p", "process.versions.modules"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {
+    return undefined;
+  }
+}
+
+export type NodeVersionProber = (nodeExec: string) => string | undefined;
+
+/** Probe a launched interpreter's Node VERSION (e.g. `v23.1.0`) the same read-only
+ *  way as its ABI. Feeds checkAbi so a refusal names the version of the interpreter
+ *  that would actually run, not the control process's — the two can differ under the
+ *  pinned-PATH contract. Undefined when unreadable; the caller renders "(unknown)"
+ *  rather than falling back to the control version. */
+function defaultNodeVersionProbe(nodeExec: string): string | undefined {
+  try {
+    return execFileSync(nodeExec, ["-p", "process.version"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {
+    return undefined;
+  }
+}
+
+/** Build the ONE named, actionable refusal (FG-555). Every refusal path uses this
+ *  single shape: it names WHY compatibility cannot be proven (the effective argv[0]
+ *  and the category), states the pinned PATH, and gives the fix. `detail` carries a
+ *  category-specific line (e.g. checkAbi's ABI diagnosis) when there is one. */
+function toolchainRefusal(profile: LaunchProfile, effectiveArgv0: string, category: string, detail?: string): { ok: false; message: string } {
+  return {
+    ok: false,
+    message:
+      `forge launch: refusing to run — the --require-control-toolchain contract runs a command ONLY when it can ` +
+      `PROVE the command executes forge's pinned control toolchain, and this one is not provable.\n` +
+      `  reason: ${category}\n` +
+      `  effective argv[0]: ${effectiveArgv0 || "(none)"}\n` +
+      (detail ? `  detail: ${detail}\n` : "") +
+      `  contract: ${profile.label ? `${profile.label} — ` : ""}pinned PATH = ${profile.path}\n` +
+      `  fix: submit the verification as a direct \`forge …\` / \`npm …\` / \`node …\` command on the pinned ` +
+      `toolchain, without a shell or env/PATH wrapper.`,
+  };
+}
+
+/** Refuse-before-execute (FG-555). The OPERATOR-DECIDED contract (the FG-555
+ *  pinned-PATH-trust decision, Option A — this is the intended shape, not a gap):
+ *  the pinned control PATH (`new-session -e PATH=<control-node-dir>:<orig>`) IS the
+ *  protection. Under `--require-control-toolchain` the contract runs a command BEFORE
+ *  any tmux session exists ONLY for an ALLOWED effective argv[0], and refuses the rest
+ *  with ONE named message. After skipping leading `VAR=VAL` assignments that do NOT
+ *  mutate PATH and a bounded set of non-PATH-mutating exec-prefixes (see
+ *  effectiveCommand), the EFFECTIVE argv[0] is judged:
+ *
+ *  ALLOW (`ok: true`) — a control tool resolved BY NAME on the pinned PATH, or a
+ *  matching-ABI Node interpreter:
+ *    - `node`/`nodejs` (by name OR an explicit path) — probed for its ABI (reusing
+ *      FG-570's checkAbi) and allowed IFF it equals the required ABI. That is the
+ *      executable the recorder spawns DIRECTLY, so a wrong-ABI interpreter cannot slip
+ *      through.
+ *    - `forge`/`npm`/`npx` resolved BY NAME on the pinned PATH — allowed WHEREVER they
+ *      resolve on the pinned PATH (NOT restricted to dirname(process.execPath)). This is
+ *      the operator-blessed pinned-PATH trust: a name-resolved control tool runs under
+ *      the control node because the pin places the control node FIRST, so the tool's
+ *      `#!/usr/bin/env node` shebang resolves the control node. This un-breaks the
+ *      documented primary caller `forge launch run --require-control-toolchain -- forge
+ *      review-loop …`, where forge is a shim outside the node bin dir.
+ *
+ *  REFUSE (`ok: false`, ONE named message) — the clearly-unsafe explicit cases:
+ *    - a leading assignment that mutates PATH (`env PATH=…`) — it defeats the pin;
+ *    - a login shell (`bash -lc`, `zsh --login`, any shell with `-l`/`--login`) — it
+ *      re-sources profile scripts that reset PATH AFTER the pin;
+ *    - a wrong-ABI directly-named interpreter (the FG-560545e case);
+ *    - any OTHER shell (even non-login: `bash -c`, `sh -c`), script, explicit-path
+ *      control tool, or wrapper/unknown binary that is NOT a name-resolved control
+ *      tool — the contract cannot place it in the trusted set, so it fails closed.
+ *
+ *  R4 recording is INDEPENDENT of this ALLOW decision: a name-resolved forge/npm STILL
+ *  records R4=unknowable (its shebang resolves node later) — being ALLOWED under the flag
+ *  and being RECORDED unknowable are both correct. Probe-only — NEVER rebuilds a native dep. */
+export function assertProfileToolchain(profile: LaunchProfile, argv: string[], opts: { resolve?: PathResolver; probeAbi?: AbiProber; probeNodeVersion?: NodeVersionProber } = {}): { ok: true } | { ok: false; message: string } {
+  const resolve = opts.resolve ?? resolveOnPath;
+  const probe = opts.probeAbi ?? defaultAbiProbe;
+  const probeVersion = opts.probeNodeVersion ?? defaultNodeVersionProbe;
+
+  const eff = effectiveCommand(argv);
+  const a0 = eff.argv[0] ?? "";
+  const name = basename(a0);
+  const byName = a0 !== "" && !a0.includes("/");
+
+  if (eff.pathMutated) {
+    return toolchainRefusal(profile, a0, "a leading assignment mutates PATH (e.g. `env PATH=…`), which defeats the pinned toolchain");
+  }
+  if (eff.unprovable || a0 === "") {
+    return toolchainRefusal(profile, a0, "an env/wrapper form the contract cannot parse — it could resolve an arbitrary runtime");
+  }
+  // A bare `VAR=VAL` as the effective argv[0]: the recorder spawns argv[0] DIRECTLY, so
+  // a bare assignment is never applied (no shell) — it is a literal executable name that
+  // ENOENTs. It is not a name-resolved control tool, so the contract cannot prove what
+  // (if anything) runs — refuse. `env FOO=bar node …` stays valid: `env` IS the effective
+  // prefix and applies the assignment (handled above), so this never fires for it.
+  if (ASSIGNMENT.test(a0)) {
+    return toolchainRefusal(profile, a0, "argv[0] is a bare `VAR=VAL` assignment — a direct spawn runs it literally as the executable name (ENOENT); an environment assignment is only applied by a shell or an `env` prefix, neither of which is present here");
+  }
+  if (NESTED_SHELLS.has(name)) {
+    return toolchainRefusal(profile, a0, "argv[0] is a shell (login or not), which can rebuild PATH and resolve an arbitrary runtime — not a name-resolved control tool the pin can be trusted for");
+  }
+
+  if (name === "node" || name === "nodejs") {
+    const resolved = resolve(a0, profile.path);
+    if (!resolved) {
+      return toolchainRefusal(profile, a0, "argv[0] is a Node interpreter that does not resolve on the pinned PATH — its runtime cannot be proven");
+    }
+    // Name the probed interpreter's OWN version in the refusal — it is a different
+    // interpreter than this control process, so its Node version must be read from it,
+    // never assumed to be process.versions.node (which would pair the control version
+    // with the launched ABI and misdiagnose the mismatch).
+    const r = checkAbi(probe(resolved) ?? "", profile.requireAbi, probeVersion(resolved) ?? "(unknown)");
+    if (r.ok) return { ok: true };
+    // The recorder spawns argv[0] DIRECTLY, so THIS interpreter — not the pinned
+    // PATH — is what runs; its ABI does not match, so the workload would fail deep
+    // inside the suite (opaque ERR_DLOPEN_FAILED) instead of here.
+    return toolchainRefusal(profile, a0, "argv[0] is a Node interpreter whose ABI does not match the required ABI", r.message);
+  }
+
+  // Pinned-PATH trust: a control tool resolved BY NAME on the pinned PATH runs under
+  // the control node because the pin puts the control node first. Allowed wherever it
+  // resolves on the pinned PATH — NOT restricted to the node bin dir. An explicit-path
+  // forge/npm/npx is NOT name-resolved (PATH order does not govern it), so it falls
+  // through to the fail-closed refusal below.
+  if (byName && (name === "forge" || name === "npm" || name === "npx")) {
+    const resolved = resolve(a0, profile.path);
+    if (resolved) return { ok: true };
+    return toolchainRefusal(
+      profile,
+      a0,
+      "argv[0] is a control tool that does not resolve on the pinned PATH — the pin cannot place the control node before something that is not there",
+      "did not resolve on the pinned PATH",
+    );
+  }
+
+  return toolchainRefusal(profile, a0, "argv[0] is not a name-resolved control tool (forge/npm/npx/node) — a shell, script, explicit-path wrapper, or unknown binary the contract cannot prove runs the control toolchain");
 }
 
 /** Forge run/task ids, opportunistically, from whatever the command logged. */
@@ -315,8 +792,17 @@ function paneDead(session: string, tmux: TmuxRunner): boolean | null {
 
 /** Start a command under a durable tmux owner. Returns the persisted record.
  *  Throws (before anything is written) if tmux is unavailable. */
-export function startLaunch(argv: string[], opts: { name?: string; cwd?: string; tmux?: TmuxRunner; now?: Date } = {}): LaunchMeta {
+export function startLaunch(argv: string[], opts: { name?: string; cwd?: string; tmux?: TmuxRunner; now?: Date; profile?: LaunchProfile } = {}): LaunchMeta {
   if (argv.length === 0) throw new Error("forge launch run: no command given");
+  // FG-555: refuse-before-execute. When a Forge-owned caller declares the
+  // execution-environment contract, assert the toolchain BEFORE anything is
+  // written or any tmux session is created — a named, actionable mismatch here
+  // instead of hundreds of downstream ERR_DLOPEN_FAILED the controller must
+  // reverse-engineer (the Node 23/ABI 131 vs Node 24/ABI 137 reproduction).
+  if (opts.profile) {
+    const gate = assertProfileToolchain(opts.profile, argv);
+    if (!gate.ok) throw new Error(gate.message);
+  }
   const tmux = opts.tmux ?? defaultTmux;
   try {
     tmux(["-V"]);
@@ -351,7 +837,7 @@ export function startLaunch(argv: string[], opts: { name?: string; cwd?: string;
   const metaPath = join(dir, "meta.json");
   writeFileSync(metaPath, JSON.stringify(meta, null, 2));
 
-  const wrapped = buildWrapperCommand(argv, meta.logPath, join(dir, "exit"), join(dir, "runtime.json"), process.execPath, trustedReleaseId());
+  const wrapped = buildWrapperCommand(argv, meta.logPath, join(dir, "exit"), join(dir, "runtime.json"), process.execPath, trustedReleaseId(), opts.profile ?? null);
   try {
     // Order matters. Starting the target command AS the session command races
     // it against `set-option`: a command that finishes first destroys the
@@ -366,7 +852,13 @@ export function startLaunch(argv: string[], opts: { name?: string; cwd?: string;
     // baked into the recorder wrapper as a JSON literal, so the recorded id cannot
     // be forged by a caller-supplied FORGE_RELEASE_ID and does not depend on tmux
     // propagating any client env var into the session.
-    tmux(["new-session", "-d", "-s", session, "-c", meta.cwd, "cat"]);
+    // FG-555: when the caller declared the contract, pin the session PATH to the
+    // contract's (control-node-first) PATH via `new-session -e`, so the recorder
+    // and workload resolve the contracted toolchain — never an ambient login
+    // shell's PATH. Absent a profile, the session inherits the launcher env as
+    // before.
+    const sessionEnv = opts.profile ? ["-e", `PATH=${opts.profile.path}`] : [];
+    tmux(["new-session", "-d", "-s", session, "-c", meta.cwd, ...sessionEnv, "cat"]);
     tmux(["set-option", "-w", "-t", `${session}:`, "remain-on-exit", "on"]);
     tmux(["respawn-pane", "-k", "-t", `${session}:`, wrapped]);
   } catch (e) {
@@ -430,7 +922,15 @@ export function readLaunch(id: string, tmux: TmuxRunner = defaultTmux): LaunchVi
     try { recorder = parseRecorderRuntime(readFileSync(rtPath, "utf8")); } catch { /* not readable yet */ }
   }
 
-  return { ...meta, status, forgeIds: extractForgeIds(log), ...(recorder ? { recorder } : {}) };
+  // FG-555: R3/R4, written by the recorder at spawn time. Absent for a pre-FG-555
+  // launch or before the recorder ran — surfaced as "not recorded", never guessed.
+  let workload: WorkloadProvenance | undefined;
+  const wlPath = join(dir, "workload.json");
+  if (existsSync(wlPath)) {
+    try { workload = parseWorkloadProvenance(readFileSync(wlPath, "utf8")); } catch { /* not readable yet */ }
+  }
+
+  return { ...meta, status, forgeIds: extractForgeIds(log), ...(recorder ? { recorder } : {}), ...(workload ? { workload } : {}) };
 }
 
 export function listLaunches(tmux: TmuxRunner = defaultTmux): LaunchView[] {

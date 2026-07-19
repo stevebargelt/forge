@@ -4,7 +4,19 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildWrapperCommand, classifyExit, extractForgeIds, parseExitRecord, parseRecorderRuntime, shellQuote } from "./launch.js";
+import { dirname } from "node:path";
+import {
+  assertProfileToolchain,
+  buildWrapperCommand,
+  classifyExit,
+  controlRuntimeProfile,
+  deriveWorkloadProvenance,
+  extractForgeIds,
+  parseExitRecord,
+  parseRecorderRuntime,
+  parseWorkloadProvenance,
+  shellQuote,
+} from "./launch.js";
 
 test("FG-535 classify: 0 is exited_ok", () => {
   assert.deepEqual(classifyExit({ code: 0, signal: null }), { state: "exited_ok", code: 0 });
@@ -74,6 +86,380 @@ test("FG-535 wrapper: runs the target under a node runner that records signal se
   // FG-569: the runtime.json path is threaded before the target argv so the
   // recorder writes its OWN R2 runtime as its first act.
   assert.ok(w.endsWith(`'/l/exit' '/l/out.log' '/l/runtime.json' 'forge' 'review-loop' 'FG-1'`), w);
+});
+
+test("FG-555 argv preservation: buildWrapperCommand spawns argv[0] DIRECTLY — no synthesized bash / login shell around the caller argv", () => {
+  const w = buildWrapperCommand(["npm", "run", "test:all"], "/l/out.log", "/l/exit", "/l/runtime.json", "/usr/bin/node");
+  // The ONLY shell is the /bin/sh tmux uses to run the `node -e` wrapper. The
+  // CALLER argv is never wrapped: the wrapper's trailing tokens are EXACTLY the
+  // shell-quoted submitted argv, in order.
+  assert.ok(w.endsWith(`'/l/exit' '/l/out.log' '/l/runtime.json' 'npm' 'run' 'test:all'`), w);
+  // No login shell was synthesized around the caller argv (these single-quoted
+  // forms are how a synthesized argv[0]='bash' / '-lc' would appear).
+  assert.ok(!w.includes(`'bash'`), "forge must not synthesize a bash argv[0]");
+  assert.ok(!w.includes(`'-lc'`) && !w.includes(`'--login'`), "forge must not synthesize a login shell");
+  // And the recorder's own spawn is spawnSync(a0, …) — argv[0] directly.
+  assert.ok(w.includes("spawnSync(a0,a.slice(1)"), "the recorder spawns argv[0] directly, not through a shell");
+});
+
+test("FG-555 R3/R4 derivation: captured path, derived-on-PATH, unresolved, and a nested-shell R4 unknowable", () => {
+  // R3 captured — argv[0] is itself a path, so the string IS the resolution.
+  assert.deepEqual(deriveWorkloadProvenance(["/opt/node", "x"]).r3, { kind: "captured", argv0: "/opt/node", execPath: "/opt/node" });
+
+  // R3 derived — a bare name resolved against PATH (resolver injected).
+  const d = deriveWorkloadProvenance(["node", "-v"], { path: "/b", resolve: (n) => (n === "node" ? "/b/node" : undefined) });
+  assert.deepEqual(d.r3, { kind: "derived", argv0: "node", execPath: "/b/node" });
+  assert.equal(d.r4.kind, "not_applicable", "a direct executable has no later nested-shell resolution");
+
+  // R3 unresolved — recorded as fact, never guessed.
+  assert.deepEqual(deriveWorkloadProvenance(["ghost"], { resolve: () => undefined }).r3, { kind: "unresolved", argv0: "ghost" });
+
+  // R4 unknowable — a caller-supplied nested login shell; argv NEVER implies it is covered.
+  const s = deriveWorkloadProvenance(["bash", "-lc", "npm test"], { resolve: () => "/bin/bash" });
+  assert.equal(s.r4.kind, "unknowable");
+  assert.equal(s.r4.kind === "unknowable" ? s.r4.shell : "", "bash");
+  assert.equal(s.r3.kind, "derived", "R3 still honestly names the shell binary as the top-level executable");
+});
+
+test("FG-555 R4 honesty: a nested shell HIDDEN behind env + a PATH-mutating assignment is still UNKNOWABLE, never a false not_applicable", () => {
+  // Pre-fix R4 only looked at argv[0]; `env … bash -lc …` made argv[0]==="env" and
+  // recorded not_applicable — a FALSE "no later shell resolution occurs". The fix skips
+  // the leading assignments and the `env` prefix, sees the nested `bash -lc`, and records
+  // unknowable. R3 still honestly names `env` as the top-level executable.
+  const w = deriveWorkloadProvenance(["env", "PATH=/evil", "bash", "-lc", "npm test"], { resolve: () => "/usr/bin/env" });
+  assert.equal(w.r4.kind, "unknowable", "the nested shell behind env is not hidden from R4");
+  assert.equal(w.r4.kind === "unknowable" ? w.r4.shell : "", "bash");
+  assert.equal(w.r3.argv0, "env", "R3 honestly names the top-level executable that actually ran");
+
+  // A non-PATH exec-prefix in front of a nested shell is also seen through.
+  const t = deriveWorkloadProvenance(["nohup", "bash", "-c", "x"], { resolve: () => "/x" });
+  assert.equal(t.r4.kind, "unknowable", "a shell behind nohup is still unknowable");
+
+  // A direct, non-shell effective command behind a prefix stays not_applicable.
+  const d = deriveWorkloadProvenance(["env", "FOO=bar", "node", "-e", "0"], { resolve: () => "/x" });
+  assert.equal(d.r4.kind, "not_applicable", "env FOO=bar node … has no nested shell — honestly not_applicable");
+});
+
+test("FG-555 R3/R4 honesty: a BARE leading `VAR=VAL` is NOT skipped — a direct spawn runs it literally, so the effective argv[0] IS the assignment (R3 unresolved, R4 unknowable)", () => {
+  // `forge launch run -- FOO=bar node x.js` spawns argv[0]=`FOO=bar` DIRECTLY (no
+  // shell to apply it) → ENOENT. Pre-fix, effectiveCommand skipped the bare
+  // assignment and reasoned about the `node` behind it — a resolution the direct
+  // spawn never reaches. The effective argv[0] is the assignment itself; R3 records
+  // it as unresolved fact and R4 stays unknowable (the default), never a false
+  // not_applicable that would imply the `node` behind it is the runtime.
+  const w = deriveWorkloadProvenance(["FOO=bar", "node", "x.js"], { resolve: () => undefined });
+  assert.deepEqual(w.r3, { kind: "unresolved", argv0: "FOO=bar" }, "R3 honestly names the bare assignment as the top-level executable a direct spawn runs");
+  assert.equal(w.r4.kind, "unknowable", "R4 stays unknowable — a bare assignment is not a terminal node interpreter");
+
+  // Contrast: `env FOO=bar node …` is valid — `env` IS a real exec-prefix that
+  // applies the assignment and execs node, so the effective argv[0] resolves to node.
+  const via = deriveWorkloadProvenance(["env", "FOO=bar", "node", "x.js"], { resolve: () => "/b/env" });
+  assert.equal(via.r4.kind, "not_applicable", "the effective argv[0] behind env IS node — not_applicable, unchanged");
+});
+
+test("FG-555 R4 honesty: a bare npm/npx/forge launcher is UNKNOWABLE — its shebang resolves Node later, so not_applicable would be a false 'no later resolution'", () => {
+  // npm/npx/forge are themselves Node scripts (`#!/usr/bin/env node`): the recorder
+  // spawns argv[0], and only THEN does the shebang resolve a Node interpreter against
+  // PATH. So a direct `npm …` still has a later, unknowable interpreter resolution —
+  // recording not_applicable (as a plain `node …` correctly does) would falsely imply
+  // the argv is the full resolution. R3 still honestly names the launcher itself.
+  for (const tool of ["npm", "npx", "forge", "yarn", "pnpm"]) {
+    const w = deriveWorkloadProvenance([tool, "run", "test:all"], { resolve: () => `/usr/local/bin/${tool}` });
+    assert.equal(w.r4.kind, "unknowable", `${tool} resolves Node via its shebang at runtime — unknowable`);
+    assert.equal(w.r4.kind === "unknowable" ? w.r4.shell : "", tool);
+    assert.equal(w.r3.kind, "derived", `R3 still honestly names ${tool} as the top-level executable`);
+    assert.equal(w.interpreter, undefined, "the launcher's own Node interpreter is never guessed");
+  }
+
+  // The same launcher hidden behind an exec-prefix is seen through, exactly like a shell.
+  const behindEnv = deriveWorkloadProvenance(["env", "FOO=bar", "npm", "test"], { resolve: () => "/x" });
+  assert.equal(behindEnv.r4.kind, "unknowable", "npm behind env is still unknowable");
+  assert.equal(behindEnv.r4.kind === "unknowable" ? behindEnv.r4.shell : "", "npm");
+
+  // A direct `node …` remains not_applicable — its argv IS the full resolution.
+  const directNode = deriveWorkloadProvenance(["node", "-e", "0"], { resolve: () => "/b/node" });
+  assert.equal(directNode.r4.kind, "not_applicable", "a direct node interpreter has no later launcher resolution");
+});
+
+test("FG-555 R4 INVERSION: default is unknowable — not_applicable ONLY for a terminal node/nodejs interpreter (stop enumerating launchers)", () => {
+  // The enumerate approach could not name every launcher whose shebang/PATH lookup
+  // selects Node AFTER argv[0] is spawned. The inversion defaults to unknowable and
+  // reserves not_applicable for the one provable case: a terminal Node interpreter.
+
+  // A shell running a SCRIPT (no `-c` chain) — previously a false not_applicable.
+  const bs = deriveWorkloadProvenance(["bash", "./verify.sh"], { resolve: () => "/bin/bash" });
+  assert.equal(bs.r4.kind, "unknowable", "bash running a script resolves node later — unknowable");
+  assert.equal(bs.r4.kind === "unknowable" ? bs.r4.shell : "", "bash");
+
+  // A bare script — its own shebang selects an interpreter at runtime.
+  const script = deriveWorkloadProvenance(["./verify.sh"], { resolve: () => "/repo/verify.sh" });
+  assert.equal(script.r4.kind, "unknowable", "a bare script's shebang resolves its interpreter later — unknowable");
+  assert.equal(script.r4.kind === "unknowable" ? script.r4.shell : "", "verify.sh");
+
+  // A `#!/usr/bin/env node` launcher NOT in any allowlist (vitest, tsx, …).
+  for (const tool of ["vitest", "tsx"]) {
+    const w = deriveWorkloadProvenance([tool, "run"], { resolve: () => `/repo/node_modules/.bin/${tool}` });
+    assert.equal(w.r4.kind, "unknowable", `${tool} resolves node via its shebang — unknowable even though it is not an enumerated launcher`);
+    assert.equal(w.r4.kind === "unknowable" ? w.r4.shell : "", tool);
+    assert.equal(w.interpreter, undefined, "the launcher's own Node interpreter is never guessed at launch time");
+  }
+
+  // npm is now unknowable via the SAME default path (not an allowlist entry).
+  const npm = deriveWorkloadProvenance(["npm", "run", "test:all"], { resolve: () => "/usr/local/bin/npm" });
+  assert.equal(npm.r4.kind, "unknowable", "npm run test:all is unknowable");
+
+  // The one provable case, asserted NOT unknowable: a terminal node/nodejs argv[0].
+  const n1 = deriveWorkloadProvenance(["node", "script.js"], { resolve: () => "/b/node" });
+  assert.equal(n1.r4.kind, "not_applicable", "[node, script.js] — the interpreter IS argv[0]");
+  const n2 = deriveWorkloadProvenance(["/abs/path/node", "-e", "0"]);
+  assert.equal(n2.r4.kind, "not_applicable", "[/abs/path/node, -e, 0] — an explicit terminal node path");
+  const nj = deriveWorkloadProvenance(["nodejs", "x"], { resolve: () => "/b/nodejs" });
+  assert.equal(nj.r4.kind, "not_applicable", "nodejs is also a terminal Node interpreter");
+});
+
+test("FG-555 workload record: valid R3/R4 parses; a missing required field is omitted, never guessed", () => {
+  const good = { r3: { kind: "captured", argv0: "/n", execPath: "/n" }, r4: { kind: "unknowable", shell: "bash", reason: "r" } };
+  assert.deepEqual(parseWorkloadProvenance(JSON.stringify(good)), good);
+  assert.equal(parseWorkloadProvenance(JSON.stringify({ r3: { kind: "captured", argv0: "/n" }, r4: { kind: "not_applicable", reason: "r" } })), undefined, "captured without execPath is malformed — omitted");
+  assert.equal(parseWorkloadProvenance(JSON.stringify({ r3: { kind: "derived", argv0: "n", execPath: "/n" } })), undefined, "missing r4 is malformed");
+  assert.equal(parseWorkloadProvenance("garbage"), undefined);
+});
+
+test("FG-555 workload runtime provenance: deriveWorkloadProvenance carries the pinned profile and probes the effective Node interpreter (bounded to node/nodejs); parse round-trips both", () => {
+  const profile = { path: "/control/bin:/usr/bin", requireAbi: "137", label: "control-runtime" };
+  const probeInterpreter = (ep: string) => ({ execPath: ep, abi: "137", nodeVersion: "v24.1.0" });
+
+  // A direct node interpreter → probed; profile carried through.
+  const d = deriveWorkloadProvenance(["/control/bin/node", "-e", "0"], { profile, probeInterpreter });
+  assert.deepEqual(d.profile, profile, "the pinned profile is carried on the provenance");
+  assert.deepEqual(d.interpreter, { execPath: "/control/bin/node", abi: "137", nodeVersion: "v24.1.0" }, "a Node interpreter is probed for its ABI/version");
+
+  // The EFFECTIVE node behind `env FOO=bar node …` is probed even though R3 is `env` —
+  // the runtime that actually executes is the node, resolved the same way R3 resolves.
+  const viaEnv = deriveWorkloadProvenance(["env", "FOO=bar", "node", "-e", "0"], {
+    profile,
+    probeInterpreter,
+    resolve: (n) => (n === "node" ? "/control/bin/node" : n.includes("/") ? n : "/usr/bin/env"),
+  });
+  assert.equal(viaEnv.r3.kind, "derived", "R3 still honestly names the top-level env");
+  assert.deepEqual(
+    viaEnv.interpreter,
+    { execPath: "/control/bin/node", abi: "137", nodeVersion: "v24.1.0" },
+    "the effective node behind env IS probed — provenance is not defeated by an allowed env prefix",
+  );
+
+  // A non-node workload → not probed (its runtime is unknowable, never guessed).
+  const nn = deriveWorkloadProvenance(["/usr/bin/make", "test"], { profile, probeInterpreter });
+  assert.equal(nn.interpreter, undefined, "a non-node argv[0] is not probed for a Node ABI");
+
+  // No profile / no prober → neither field appears.
+  const bare = deriveWorkloadProvenance(["/control/bin/node"]);
+  assert.equal(bare.profile, undefined);
+  assert.equal(bare.interpreter, undefined);
+
+  // Serialization round-trips profile + interpreter; a malformed optional is dropped
+  // without invalidating the core R3/R4.
+  assert.deepEqual(parseWorkloadProvenance(JSON.stringify(d)), d, "profile + interpreter round-trip through the recorder's JSON");
+  const partialBadItp = { ...d, interpreter: { execPath: "/n" } };
+  const parsed = parseWorkloadProvenance(JSON.stringify(partialBadItp));
+  assert.ok(parsed, "a malformed interpreter does not invalidate the core record");
+  assert.equal(parsed!.interpreter, undefined, "the malformed interpreter is omitted, never guessed");
+  assert.deepEqual(parsed!.profile, profile, "the still-valid profile survives");
+});
+
+test("FG-555 control-runtime profile: pins forge's OWN node dir at the FRONT of PATH and requires the control ABI", () => {
+  const p = controlRuntimeProfile({ label: "control-runtime" });
+  assert.equal(p.requireAbi, process.versions.modules, "the contract requires the control runtime's own ABI");
+  assert.equal(p.path.split(":")[0], dirname(process.execPath), "the control node dir is FIRST on the pinned PATH");
+  assert.equal(p.label, "control-runtime");
+});
+
+test("FG-555 toolchain guard (pinned-PATH trust): a name-resolved control tool passes wherever it resolves on the pinned PATH; an unresolvable/unknown command is REFUSED", () => {
+  const profile = { path: "/p", requireAbi: "137", label: "control-runtime" };
+  // `forge`/`npm`/`npx` resolving BY NAME on the pinned PATH run under the pinned
+  // control node by construction (the pin puts control node first) — allowed, no ABI
+  // probe needed.
+  const insidePinned = (name: string) => (name.includes("/") ? name : `/p/${name}`);
+  assert.deepEqual(assertProfileToolchain(profile, ["forge", "next"], { resolve: insidePinned }), { ok: true }, "forge resolved by name on the pinned PATH is trusted");
+  assert.deepEqual(assertProfileToolchain(profile, ["npm", "run", "test:all"], { resolve: insidePinned }), { ok: true }, "npm resolved by name on the pinned PATH is trusted");
+
+  // DELIBERATE CHANGE vs the pre-fix guard: the old code returned ok:true when node
+  // was UNRESOLVABLE ("nothing to assert"). Fail-closed inverts that — a control tool
+  // that does NOT resolve on the pinned PATH is REFUSED, because the pin cannot place
+  // the control node before something that is not there.
+  const gone = assertProfileToolchain(profile, ["forge", "next"], { resolve: () => undefined });
+  assert.equal(gone.ok, false, "a forge that does not resolve on the pinned PATH is refused, not waved through");
+  assert.match(gone.ok === false ? gone.message : "", /refusing to run/);
+
+  // DELIBERATE CHANGE (FG-555 pinned-PATH-trust decision, Option A): a control tool
+  // resolved BY NAME is now ALLOWED wherever it resolves on the pinned PATH — even a
+  // shim OUTSIDE the node bin dir — because the pin places the control node first, so
+  // the shim's `#!/usr/bin/env node` resolves the control node. The pre-fix strict
+  // allow-list (dirname(execPath) only) wrongly refused this and broke the primary caller.
+  const outside = assertProfileToolchain(profile, ["forge", "next"], { resolve: () => "/usr/local/bin/forge" });
+  assert.equal(outside.ok, true, "forge resolved by name on the pinned PATH is trusted, even outside the node bin dir");
+
+  // An unrecognized wrapper/binary is refused (fail closed), not passed through.
+  const unknown = assertProfileToolchain(profile, ["make", "test"], { resolve: () => "/usr/bin/make" });
+  assert.equal(unknown.ok, false, "an unknown binary the contract cannot prove is refused");
+  assert.match(unknown.ok === false ? unknown.message : "", /cannot prove/);
+});
+
+test("FG-555 pinned-PATH trust (primary caller): a NAME-resolved forge/npm/npx resolving OUTSIDE the node bin dir is ALLOWED — the pin puts the control node first", () => {
+  // The documented primary caller, un-broken: `forge launch run --require-control-toolchain -- forge review-loop …`.
+  // forge is a shim elsewhere on PATH (NOT in dirname(process.execPath)); the pinned control
+  // PATH still places the control node first, so the shim's Node-shebang resolves the control
+  // node. The operator-blessed contract TRUSTS a name-resolved control tool for exactly this.
+  const profile = { path: "/control/bin:/usr/local/bin:/usr/bin", requireAbi: "137", label: "control-runtime" };
+  const resolveShim = (name: string) => (name.includes("/") ? name : `/usr/local/bin/${name}`);
+
+  assert.deepEqual(assertProfileToolchain(profile, ["forge", "review-loop", "FG-555"], { resolve: resolveShim }), { ok: true }, "a name-resolved forge outside the node bin dir is trusted");
+  assert.deepEqual(assertProfileToolchain(profile, ["npm", "run", "test:all"], { resolve: resolveShim }), { ok: true }, "a name-resolved npm outside the node bin dir is trusted");
+  assert.deepEqual(assertProfileToolchain(profile, ["npx", "vitest", "run"], { resolve: resolveShim }), { ok: true }, "a name-resolved npx outside the node bin dir is trusted");
+
+  // An EXPLICIT-PATH forge is NOT a name-resolved control tool — PATH order does not
+  // govern it, so the pinned-PATH trust cannot apply and it fails closed.
+  const explicit = assertProfileToolchain(profile, ["/usr/local/bin/forge", "review-loop"], { resolve: resolveShim });
+  assert.equal(explicit.ok, false, "an explicit-path forge is not name-resolved — refused (the pin does not govern it)");
+  assert.match(explicit.ok === false ? explicit.message : "", /name-resolved/);
+});
+
+test("FG-555 toolchain guard: a node argv[0] is ALLOWED only when its probed ABI matches; a mismatch/unreadable ABI is a NAMED refusal", () => {
+  const profile = { path: "/p", requireAbi: "137", label: "control-runtime" };
+  const resolve = (name: string) => (name === "node" ? "/p/node" : name.includes("/") ? name : undefined);
+
+  const bad = assertProfileToolchain(profile, ["node", "x.js"], { resolve, probeAbi: () => "131" });
+  assert.equal(bad.ok, false);
+  assert.match(bad.ok === false ? bad.message : "", /refusing to run/);
+  assert.match(bad.ok === false ? bad.message : "", /ABI 137/);
+  assert.match(bad.ok === false ? bad.message : "", /131/);
+
+  assert.deepEqual(assertProfileToolchain(profile, ["node", "x.js"], { resolve, probeAbi: () => "137" }), { ok: true }, "a matching ABI passes");
+
+  const unreadable = assertProfileToolchain(profile, ["node", "x.js"], { resolve, probeAbi: () => undefined });
+  assert.equal(unreadable.ok, false, "an unreadable ABI is not waved through (reuses checkAbi's unverifiable-ABI refusal)");
+});
+
+test("FG-555 toolchain guard: an ABI-mismatch refusal names the LAUNCHED interpreter's version, not the control process's", () => {
+  // The launched node is a DIFFERENT interpreter than the forge control process. The
+  // refusal must pair the launched interpreter's own Node version with its own ABI —
+  // reporting process.versions.node (the control) beside the probed ABI would say e.g.
+  // "Node 24, ABI 131", a contradiction the operator cannot act on.
+  const profile = { path: "/p", requireAbi: "137", label: "control-runtime" };
+  const resolve = (name: string) => (name === "node" ? "/p/node" : name.includes("/") ? name : undefined);
+
+  const r = assertProfileToolchain(profile, ["node", "x.js"], { resolve, probeAbi: () => "131", probeNodeVersion: () => "v23.6.0" });
+  assert.equal(r.ok, false);
+  const msg = r.ok === false ? r.message : "";
+  assert.match(msg, /Node v23\.6\.0, ABI 131/, "names the launched interpreter's OWN version beside its own ABI");
+  assert.doesNotMatch(msg, new RegExp(`Node ${process.versions.node.replace(/\./g, "\\.")}`), "does not report the control process's Node version");
+
+  // An unreadable launched version renders "(unknown)" — never a fall-back to the control version.
+  const unknown = assertProfileToolchain(profile, ["node", "x.js"], { resolve, probeAbi: () => "131", probeNodeVersion: () => undefined });
+  assert.match(unknown.ok === false ? unknown.message : "", /Node \(unknown\), ABI 131/, "an unreadable version is honest, not the control's");
+});
+
+test("FG-555 toolchain guard (fail-closed): a shell is refused whether or not it is a login shell — a shell can rebuild PATH and resolve an arbitrary runtime", () => {
+  // ABI would MATCH (resolve → a control node, probe → the required ABI), so the
+  // refusal is about the shell itself, NOT the probe: a shell can rebuild PATH and
+  // resolve any node it likes at runtime, so the contract can never prove what it runs.
+  const profile = { path: "/p", requireAbi: "137", label: "control-runtime" };
+  const resolve = () => "/p/node";
+  const probeAbi = () => "137";
+
+  // DELIBERATE CHANGE vs the pre-fix guard: a NON-login shell (`bash -c …`) used to be
+  // waved through ("governed by the ABI probe"). Under the fail-closed invariant EVERY
+  // shell is refused — login or not — because none is provable.
+  for (const argv of [["bash", "-lc", "npm run test:all"], ["zsh", "--login", "-c", "x"], ["sh", "-il"], ["bash", "-c", "npm run test:all"]]) {
+    const r = assertProfileToolchain(profile, argv, { resolve, probeAbi });
+    assert.equal(r.ok, false, `${argv.join(" ")} is refused`);
+    assert.match(r.ok === false ? r.message : "", /shell/);
+  }
+});
+
+test("FG-555 toolchain guard (fail-closed): an env-wrapped login shell is REFUSED — the PATH-mutating assignment defeats the pin (env PATH=… bash -lc …)", () => {
+  // Round 3's bypass: `env PATH=/evil bash -lc '…'`. Pre-fix this reached ok:true —
+  // the guard only probed the node on the pinned PATH and never saw the `env PATH=`
+  // that resets it, nor the nested login shell behind `env`. Fail-closed refuses it:
+  // the effective argv[0] after skipping `env` is a shell, AND the assignment mutates
+  // PATH. Either is fatal; the message is the single named refusal.
+  const profile = { path: "/p", requireAbi: "137", label: "control-runtime" };
+  const resolve = () => "/p/node";
+  const probeAbi = () => "137";
+
+  const r = assertProfileToolchain(profile, ["env", "PATH=/evil", "bash", "-lc", "npm run test:all"], { resolve, probeAbi });
+  assert.equal(r.ok, false, "env PATH=… bash -lc … must be refused (pre-fix this returned ok:true)");
+  assert.match(r.ok === false ? r.message : "", /refusing to run/);
+  assert.match(r.ok === false ? r.message : "", /PATH/);
+});
+
+test("FG-555 bare-assignment bypass (fail-closed): a leading `VAR=VAL node …` is REFUSED — a direct spawn runs argv[0] literally, so the assignment is never applied; `env VAR=VAL node …` stays allowed", () => {
+  // The bypass this closes: `forge launch run --require-control-toolchain -- FOO=bar node x.js`.
+  // Pre-fix, effectiveCommand skipped the bare `FOO=bar`, saw `node`, probed the pinned
+  // PATH, and ALLOWED it (ok:true) — but the recorder spawns argv[0]=`FOO=bar` DIRECTLY
+  // (ENOENT), so the "effective node" the guard proved never ran. The guard must refuse:
+  // a bare assignment is not a name-resolved control tool, and a direct spawn does not
+  // apply it without a shell / `env`.
+  const profile = { path: "/control/bin", requireAbi: "137", label: "control-runtime" };
+  const resolve = (name: string) => (name === "node" ? "/control/bin/node" : name.includes("/") ? name : undefined);
+  const probeAbi = () => "137"; // the node behind it WOULD match — the refusal is about the bare assignment itself
+
+  const bare = assertProfileToolchain(profile, ["FOO=bar", "node", "x.js"], { resolve, probeAbi });
+  assert.equal(bare.ok, false, "a bare `FOO=bar node …` is refused (pre-fix this returned ok:true by skipping the assignment)");
+  const msg = bare.ok === false ? bare.message : "";
+  assert.match(msg, /refusing to run/);
+  assert.match(msg, /assignment/, "the refusal names the bare assignment, not the node behind it");
+  assert.match(msg, /FOO=bar/, "the effective argv[0] is the assignment itself, not the skipped-past node");
+
+  // No regression: `env FOO=bar node …` is a real exec-prefix that applies the
+  // assignment and execs node — the effective argv[0] resolves to node and is allowed
+  // iff its ABI matches.
+  assert.deepEqual(
+    assertProfileToolchain(profile, ["env", "FOO=bar", "node", "x.js"], { resolve, probeAbi }),
+    { ok: true },
+    "env FOO=bar node … still resolves the effective node and is allowed on a matching ABI (unchanged)",
+  );
+});
+
+test("FG-555 argv[0] bypass regression: an explicitly-named ABI-mismatched node as argv[0] is REFUSED before execution, even when the pinned-PATH probe is green", () => {
+  // The bypass this closes: `forge launch run --require-control-toolchain -- /usr/local/bin/node test.js`.
+  // The pinned PATH resolves the CONTROL node (ABI 137), so the pinned-PATH probe is green — but the
+  // recorder spawns argv[0] DIRECTLY, so the ABI-131 node the caller named is what actually runs. Pre-fix,
+  // the guard only probed the pinned-PATH node NAME and let this through; it must refuse the named interpreter.
+  const profile = { path: "/control/bin:/usr/local/bin", requireAbi: "137", label: "control-runtime" };
+  // Resolve "node" (bare, on PATH) to the CONTROL node; an explicit path resolves to itself.
+  const resolve = (name: string) => (name === "node" ? "/control/bin/node" : name.includes("/") ? name : undefined);
+  // The control node is ABI 137 (pinned probe passes); the caller-named node is ABI 131.
+  const probeAbi = (nodeExec: string) => (nodeExec === "/control/bin/node" ? "137" : "131");
+
+  const r = assertProfileToolchain(profile, ["/usr/local/bin/node", "test.js"], { resolve, probeAbi });
+  assert.equal(r.ok, false, "the explicitly-named ABI-131 node must be refused before execution");
+  const msg = r.ok === false ? r.message : "";
+  assert.match(msg, /ABI 137/, "names the expected ABI");
+  assert.match(msg, /131/, "names the found ABI");
+  assert.match(msg, /argv\[0\]/, "attributes the refusal to the directly-named interpreter, not the pinned PATH");
+});
+
+test("FG-555 boundary (fail-closed): a directly-named node with the REQUIRED ABI is allowed; a non-node wrapper is now REFUSED, not passed through", () => {
+  const profile = { path: "/control/bin", requireAbi: "137", label: "control-runtime" };
+  const resolve = (name: string) => (name === "node" ? "/control/bin/node" : name.includes("/") ? name : undefined);
+
+  // argv[0] IS a node whose ABI MATCHES the contract → not refused (an explicit path is
+  // probed the same as a bare `node`: the recorder spawns exactly this executable).
+  const okNode = assertProfileToolchain(profile, ["/opt/n24/bin/node", "test.js"], { resolve, probeAbi: () => "137" });
+  assert.deepEqual(okNode, { ok: true }, "a directly-named node with the required ABI is not refused");
+
+  // DELIBERATE CHANGE vs the pre-fix guard: a caller-authored NON-node wrapper used to be
+  // the documented "unknowable boundary" that was passed through unprobed. The whole point
+  // of this fix is to INVERT that: forge cannot prove what runtime such a wrapper selects,
+  // so under the fail-closed contract it is REFUSED rather than waved through. Enumerating
+  // wrappers is unwinnable; proving the toolchain is the only durable invariant.
+  const wrapper = assertProfileToolchain(profile, ["/usr/local/bin/run-tests.sh", "test.js"], {
+    resolve,
+    probeAbi: (n: string) => (n === "/control/bin/node" ? "137" : "131"),
+  });
+  assert.equal(wrapper.ok, false, "a non-node wrapper argv[0] is not provable — now refused (fail closed)");
+  assert.match(wrapper.ok === false ? wrapper.message : "", /cannot prove/);
 });
 
 test("FG-535 ids: run/task ids are extracted uniquely from log text; absence is empty, not an error", () => {
