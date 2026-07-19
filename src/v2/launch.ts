@@ -214,14 +214,14 @@ export function parseExitRecord(raw: string): ExitRecord | undefined {
   if (/^-?\d+$/.test(text)) return { code: Number(text), signal: null };
   try {
     const parsed = JSON.parse(text) as Partial<ExitRecord>;
-    const hasCode = typeof parsed.code === "number" && Number.isFinite(parsed.code);
+    const hasCode = typeof parsed.code === "number" && Number.isInteger(parsed.code);
     const hasSignal = typeof parsed.signal === "string" && parsed.signal !== "";
     // FG-552 (BD-7/F11): the ExitRecord contract is "exactly one of code|signal is
-    // set" — a finite numeric code XOR a non-empty string signal. The wrapper
+    // set" — an INTEGER numeric code XOR a non-empty string signal. The wrapper
     // ALWAYS writes exactly one. Any other shape is SCHEMA-INVALID, not authoritative
     // terminal evidence: BOTH set (`{"code":0,"signal":"SIGTERM"}`) is contradictory;
     // NEITHER (`{}`, `{"code":"bad"}`, `{"code":null,"signal":null}`) is empty/torn;
-    // an empty-string signal (`{"signal":""}`) or a non-finite code is not evidence.
+    // an empty-string signal (`{"signal":""}`) or a non-integer code is not evidence.
     // Accepting any of these would classify a controller-advancing terminal on corrupt
     // bytes. Instead return undefined so it is treated as an unreadable/not-yet-terminal
     // record and falls through to bounded owner-evidence retry, exactly like an

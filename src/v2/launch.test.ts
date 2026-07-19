@@ -99,6 +99,24 @@ test("FG-552: parseExitRecord requires EXACTLY ONE valid field — a finite code
     { state: "signaled", signal: "SIGTERM", sender: "unrecorded" });
 });
 
+test("FG-552: a numeric code counts as valid evidence ONLY when it is an INTEGER — a non-integer finite code is schema-invalid, never terminal", () => {
+  // OS exit statuses are integral. A fractional/non-integer code is corrupt bytes,
+  // not authoritative exit evidence: it must fall through to bounded owner-evidence
+  // retry (F11), never advance a waiter with an `exited_error` classification.
+  assert.equal(parseExitRecord(`{"code":0.5}`), undefined,
+    "a non-integer finite code is not valid exit evidence — never terminal");
+  assert.equal(parseExitRecord(`{"code":1e309}`), undefined,
+    "1e309 parses to Infinity (non-finite, non-integer) — still invalid");
+  assert.equal(parseExitRecord(`{"code":-0.0001}`), undefined,
+    "a negative non-integer code is invalid too");
+
+  // Integer codes (including negative) remain valid and classify unchanged.
+  assert.deepEqual(parseExitRecord(`{"code":-1}`), { code: -1, signal: null });
+  assert.deepEqual(classifyExit(parseExitRecord(`{"code":-1}`)!), { state: "exited_error", code: -1 });
+  assert.deepEqual(parseExitRecord(`{"code":0}`), { code: 0, signal: null });
+  assert.deepEqual(classifyExit(parseExitRecord(`{"code":0}`)!), { state: "exited_ok", code: 0 });
+});
+
 test("FG-569 R2: the recorder runtime record is parsed; a missing required field is rejected, never guessed", () => {
   assert.deepEqual(
     parseRecorderRuntime(`{"execPath":"/opt/n/bin/node","abi":"137","nodeVersion":"v24.0.0","releaseId":"release-abc-1"}`),
