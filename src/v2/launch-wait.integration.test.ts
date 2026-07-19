@@ -239,24 +239,28 @@ test("FG-552 BD-7 (real / 1a): a PRESENT-but-invalid exit record with a GONE own
   assert.deepEqual((o as { view: LaunchView }).view.status, { state: "unknown" }, "the gone owner (no session) decides: terminal unknown");
 });
 
-test("FG-552 BD-7 (real / 1b): a PERSISTENTLY-invalid exit record with a LIVE owner wakes on the invalid BOUND to a terminal `unknown` — a completion, not a --timeout-0 hang", async () => {
+test("FG-552 BD-7 (real / 1b): a PERSISTENTLY-invalid exit record with a LIVE owner is NEVER promoted to a terminal — the invalid bound never arms, only --timeout bounds it", async () => {
   if (!hasTmux) return;
-  // The AC requires EVERY persistently unreadable/invalid record to reach a
-  // completion disposition after bounded retry — "Failure is a completion
-  // disposition, not silence" (BD-7). A live owner holding a PRESENT-but-corrupt exit
-  // record is already anomalous (the wrapper writes exit as its last act), so leaving
-  // it unbounded means a `--timeout 0` wait hangs forever. Instead the invalid-record
-  // bound arms regardless of owner liveness and wakes as terminal `unknown` ("outcome
-  // could not be determined" — fabricating no exit code/signal, BD-3). Driven over the
-  // REAL boundary (real tmux + real fs + real readLaunch), with NO waiter --timeout
-  // (Infinity) so ONLY the invalid bound can settle it.
+  // The BD-7 policy (PRD: "only terminal after independent terminal owner evidence"):
+  // a confirmed-live owner is NOT terminal evidence. With temp+rename a present exit
+  // record is never torn, so a corrupt record next to a LIVE pane is spurious and the
+  // tmux-owned command is demonstrably still running. It must NOT be fabricated into a
+  // terminal `unknown` — that is the exact FALSE COMPLETION FG-552 prevents. So
+  // readLaunch surfaces no pending disposition, the invalid-record bound never arms,
+  // and ONLY the waiter's own --timeout bounds the wait (a wait_timeout, never a launch
+  // terminal). Driven over the REAL boundary (real tmux + real fs + real readLaunch).
+  // The invalid bound is set SHORTER than --timeout: were the live-owner path to wrongly
+  // arm it, it would fire first as a terminal — so a wait_timeout here also proves it
+  // never armed. A bounded safety timer guarantees the test never hangs.
   const meta = startLaunch(["sh", "-c", "sleep 600"], { name: "bd7-live" });
   started.push(meta.id);
   writeFileSync(join(LAUNCHES_DIR, meta.id, "exit"), `{"code":null,"signal":null}`); // invalid; owner stays alive
 
-  const o = await waitNoTimeout(meta.id, 800);
-  assert.equal(o.kind, "terminal", "BD-7 1b: a live owner + persistently-invalid record wakes on the bound — a completion, never a --timeout-0 hang");
-  assert.deepEqual((o as { view: LaunchView }).view.status, { state: "unknown" }, "the undetermined outcome is terminal unknown — no exit code/signal fabricated");
+  const harness = realWaitHarness(meta.id, { timeoutMs: 2000, invalidBoundMs: 400, reconcileMs: 200 });
+  const safety = delay(20_000).then(() => { throw new Error("BD-7 1b FAIL: the live-owner wait never settled on its --timeout"); });
+  const o = await Promise.race([waitForLaunchTerminal(meta.id, harness), safety]);
+  assert.equal(o.kind, "wait_timeout", "BD-7 1b: a live owner + persistently-invalid record bounds on --timeout, NEVER a fabricated terminal from the invalid bound");
+  assert.deepEqual((o as { lastObserved: LaunchStatus }).lastObserved, { state: "running" }, "the launch was observed still running the whole time — the live-owned command is not terminaled");
 });
 
 test("FG-552 BD-7 (real / F11 transient — regression): an invalid record that becomes READABLE within the bound classifies NORMALLY (exited_ok), never a premature terminal", async () => {

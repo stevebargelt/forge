@@ -1091,32 +1091,30 @@ export function readLaunch(id: string, tmux: TmuxRunner = defaultTmux, isLaunche
       status = classifyExit(ex.rec);
     } else if (ex.kind === "unreadable") {
       // F11: a PRESENT but unreadable/invalid record is bounded retry, NEVER a
-      // terminal disposition on a SINGLE read — status stays `running` so this read
-      // is an invitation to retry. What the SINGLE read cannot do is bound that
-      // retry; pendingUnreadableExit names the disposition a bounded waiter wakes on
-      // if the record is STILL unreadable past its bound. The AC requires EVERY
-      // persistently unreadable/invalid record to reach a completion disposition
-      // after bounded retry — "Failure is a completion disposition, not silence"
-      // (BD-7) — so the bound is armed regardless of owner liveness, else a
-      // `--timeout 0` wait on a live-owned launch whose record is permanently corrupt
-      // would block forever (the finding's defect).
-      //   no session -> unknown       (1a: owner gone via reboot)
-      //   dead pane   -> owner_gone    (1a: owner terminated)
-      //   live owner  -> unknown       (1b: the outcome could not be determined — a
-      //                                 live owner holding a PRESENT-but-corrupt exit
-      //                                 record is already anomalous, since the wrapper
-      //                                 writes exit as its last act; after the bound
-      //                                 we honestly report "undetermined" rather than
-      //                                 hang. This fabricates NO exit code/signal —
-      //                                 BD-3 — and a TRANSIENT record becomes readable
-      //                                 within the bound and disarms it first, F11.)
+      // terminal disposition on a SINGLE read — even when owner evidence is
+      // terminal. status stays `running` so this read is an invitation to retry.
+      // BD-7 / PRD ("only terminal after independent terminal owner evidence"): that
+      // retry is BOUNDED only when there is INDEPENDENT TERMINAL OWNER evidence — no
+      // session -> unknown (owner gone via reboot, 1a), dead pane -> owner_gone (owner
+      // terminated, 1a). In those cases pendingUnreadableExit names the reconciled
+      // disposition a bounded waiter wakes on if the record stays unreadable past its
+      // bound, so a straddled completion never blocks forever.
+      // A CONFIRMED-LIVE owner is NOT terminal evidence: with temp+rename a present
+      // exit record is never torn, so a corrupt record next to a LIVE pane is spurious
+      // and the tmux-owned command is demonstrably still running. Fabricating a
+      // terminal `unknown` here would advance a controller over a still-running
+      // command — the exact FALSE COMPLETION FG-552 exists to prevent. So a live owner
+      // + unreadable record leaves pendingUnreadableExit UNSET: the launch stays
+      // `running`, bounded ONLY by the waiter's own --timeout (which yields
+      // `wait_timeout` — an explicit disposition, never a fabricated launch terminal;
+      // --timeout 0 waiting indefinitely on a genuinely-running command is correct by
+      // design). If the owner LATER dies, reconcile re-reads, owner evidence goes
+      // terminal, and the bound arms then.
       status = { state: "running" };
       if (!sessionAlive) {
         pendingUnreadableExit = { terminal: { state: "unknown" } };
       } else if (dead === true) {
         pendingUnreadableExit = { terminal: { state: "owner_gone", cause: "unrecorded", sender: "unrecorded" } };
-      } else {
-        pendingUnreadableExit = { terminal: { state: "unknown" } };
       }
     } else if (!sessionAlive) {
       status = { state: "unknown" };
