@@ -130,7 +130,7 @@ test("BD-15 dir2: a NEW store's continuations table + UNIQUE(dispatch_key) never
   const restore = setDbForTest(b);
   try {
     recordContinuation({ continuationId: "cc", consumerKind: "orchestrator", sourceLaunchId: "LB", currentPhase: "p", nextAction: { kind: "dispatch", role: "engineer" } });
-    observeLaunchStatus("cc", "exited_ok", { terminal: true });
+    observeLaunchStatus("cc", "LB", "exited_ok", { terminal: true });
     const out = claimContinuationDispatch({ continuationId: "cc", sourceLaunchId: "LB", consumerKind: "orchestrator", currentPhase: "p", nextAction: { kind: "dispatch", role: "engineer" }, expectedState: "ready", owner: "ctl", leaseTtlMs: 30_000 });
     assert.ok(out.granted, "the primitive works against a real file-backed store");
     assert.ok(getContinuation("cc")?.dispatchKey, "a dispatch_key (UNIQUE-indexed) was written");

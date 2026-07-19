@@ -237,12 +237,25 @@ export function continuationsInDispatch(opts: { consumerKind?: ConsumerKind } = 
  * NOT the claim: a stale/duplicate observation is recorded and then IGNORED by the
  * phase-bound CAS below.
  *
+ * THE OBSERVATION IS LAUNCH-BOUND (FG-562 review round 2). The disposition belongs
+ * to a SPECIFIC launch, so the write matches `source_launch_id = ?` — the launch
+ * the event is about. Without this binding, a DELAYED terminal event from launch A,
+ * arriving after rearmForNextPhase has rebound the slot to launch B, would promote
+ * phase B's `awaiting_completion` row to `ready` (and stamp launch A's disposition
+ * into phase B's evidence) — fabricating terminal evidence for a launch that never
+ * ran in phase B and making B wrongly claimable before its OWN launch finished. The
+ * phase-bound CAS cannot undo that fabricated `ready`; the promotion itself must be
+ * launch-bound. A stale launch-A event now matches nothing (source_launch_id is
+ * launch-B) and writes NO state — recorded-and-ignored at the observe boundary too,
+ * not just at the claim.
+ *
  * A pure record: it advances state to `ready` only from `awaiting_completion`, so
- * observing a launch again after a claim/advance updates the evidence without
- * disturbing the claim.
+ * observing the CURRENT launch again after a claim/advance updates the evidence
+ * without disturbing the claim.
  */
 export function observeLaunchStatus(
   continuationId: string,
+  sourceLaunchId: string,
   status: ObservedStatus,
   opts: { terminal: boolean },
 ): Continuation | undefined {
@@ -255,12 +268,13 @@ export function observeLaunchStatus(
             SET last_observed_status = ?,
                 state = CASE WHEN state = 'awaiting_completion' THEN 'ready' ELSE state END,
                 updated_at = ?
-          WHERE continuation_id = ?`,
-      ).run(status, iso, continuationId);
+          WHERE continuation_id = ? AND source_launch_id = ?`,
+      ).run(status, iso, continuationId, sourceLaunchId);
     } else {
       db.prepare(
-        `UPDATE continuations SET last_observed_status = ?, updated_at = ? WHERE continuation_id = ?`,
-      ).run(status, iso, continuationId);
+        `UPDATE continuations SET last_observed_status = ?, updated_at = ?
+          WHERE continuation_id = ? AND source_launch_id = ?`,
+      ).run(status, iso, continuationId, sourceLaunchId);
     }
     return getContinuation(continuationId);
   });

@@ -63,7 +63,7 @@ function seedReady(over: Partial<{ id: string; launch: string; phase: string; ac
   const phase = over.phase ?? "phase-A";
   const action = over.action ?? ACTION_A;
   recordContinuation({ continuationId: id, consumerKind: "orchestrator", sourceLaunchId: launch, currentPhase: phase, nextAction: action });
-  observeLaunchStatus(id, "exited_ok", { terminal: true });
+  observeLaunchStatus(id, launch, "exited_ok", { terminal: true });
   return { id, launch, phase, action };
 }
 
@@ -100,14 +100,14 @@ describe("record + observe", () => {
 
   test("observing a terminal disposition records evidence and moves awaiting_completion -> ready", () => {
     recordContinuation({ continuationId: "c", consumerKind: "orchestrator", sourceLaunchId: "L", currentPhase: "p", nextAction: ACTION_A });
-    const c = observeLaunchStatus("c", "exited_error", { terminal: true });
+    const c = observeLaunchStatus("c", "L", "exited_error", { terminal: true });
     assert.equal(c?.state, "ready");
     assert.equal(c?.lastObservedStatus, "exited_error");
   });
 
   test("a non-terminal observation records evidence WITHOUT moving to ready", () => {
     recordContinuation({ continuationId: "c", consumerKind: "orchestrator", sourceLaunchId: "L", currentPhase: "p", nextAction: ACTION_A });
-    const c = observeLaunchStatus("c", "running", { terminal: false });
+    const c = observeLaunchStatus("c", "L", "running", { terminal: false });
     assert.equal(c?.state, "awaiting_completion");
     assert.equal(c?.lastObservedStatus, "running");
   });
@@ -191,7 +191,7 @@ describe("stale-completion / phase-binding (STAGED red→green)", () => {
     const rearmed = rearmForNextPhase(id, { sourceLaunchId: "launch-B", currentPhase: "phase-B", nextAction: ACTION_B });
     assert.equal(rearmed?.currentPhase, "phase-B");
     assert.equal(rearmed?.state, "awaiting_completion");
-    observeLaunchStatus(id, "exited_ok", { terminal: true }); // phase-B's own launch is now ready
+    observeLaunchStatus(id, "launch-B", "exited_ok", { terminal: true }); // phase-B's own launch is now ready
     return id;
   }
 
@@ -234,6 +234,64 @@ describe("stale-completion / phase-binding (STAGED red→green)", () => {
       nextAction: ACTION_B, expectedState: "ready", owner: "ctl-2", leaseTtlMs: 30_000,
     });
     assert.ok(legit.granted, "phase B's correctly-bound completion DOES advance");
+  });
+
+  // Drive the slot to phase B but LEAVE it awaiting_completion — phase B's own launch
+  // has NOT been observed terminal yet. This is the crash/late-event window the prior
+  // phase-binding tests skipped (they pre-marked B terminal before the stale event).
+  function driveToPhaseBUnobserved(id: string): void {
+    seedReady({ id, launch: "launch-A", phase: "phase-A", action: ACTION_A });
+    assert.ok(
+      claimContinuationDispatch({
+        continuationId: id, sourceLaunchId: "launch-A", consumerKind: "orchestrator", currentPhase: "phase-A",
+        nextAction: ACTION_A, expectedState: "ready", owner: "ctl-1", leaseTtlMs: 30_000,
+      }).granted,
+    );
+    assert.ok(markAdvanced(id, "ctl-1"));
+    const rearmed = rearmForNextPhase(id, { sourceLaunchId: "launch-B", currentPhase: "phase-B", nextAction: ACTION_B });
+    assert.equal(rearmed?.state, "awaiting_completion", "phase B awaits its OWN launch — not yet observed terminal");
+  }
+
+  test("RED baseline: an UNBOUND observe promotes phase B to ready on a stale launch-A completion", () => {
+    driveToPhaseBUnobserved("cont-late-red");
+    // The pre-fix observe matched on continuation_id ALONE. A delayed launch-A terminal
+    // event therefore stamps launch A's disposition into phase B and flips its
+    // awaiting_completion → ready — fabricating terminal evidence for a launch that
+    // never ran in phase B, before phase B's OWN launch finished.
+    const now = storeNowMs();
+    getDb()
+      .transaction(() =>
+        getDb()
+          .prepare(
+            `UPDATE continuations
+                SET last_observed_status = 'exited_ok',
+                    state = CASE WHEN state = 'awaiting_completion' THEN 'ready' ELSE state END,
+                    updated_at = ?
+              WHERE continuation_id = ?`,
+          )
+          .run(new Date(now).toISOString(), "cont-late-red"),
+      )
+      .immediate();
+    const c = getContinuation("cont-late-red")!;
+    assert.equal(c.state, "ready", "FALSIFICATION: the unbound observe fabricated phase B readiness from a launch-A event");
+    assert.equal(c.lastObservedStatus, "exited_ok", "and stamped launch A's disposition into phase B's evidence");
+  });
+
+  test("GREEN: a delayed launch-A terminal event does NOT promote phase B (observe is launch-bound)", () => {
+    driveToPhaseBUnobserved("cont-late");
+    const before = getContinuation("cont-late")!;
+
+    // The SAME delayed launch-A completion, through the real (launch-bound) observe:
+    // it is about launch A, the slot awaits launch B, so it matches nothing.
+    const observed = observeLaunchStatus("cont-late", "launch-A", "exited_ok", { terminal: true });
+    assert.equal(observed?.state, "awaiting_completion", "phase B is NOT promoted by a stale launch-A event");
+    assert.equal(observed?.lastObservedStatus, undefined, "no launch-A disposition stamped into phase B's evidence");
+    assert.equal(observed?.updatedAt, before.updatedAt, "the stale observe wrote nothing (updated_at unchanged)");
+
+    // Phase B's OWN launch, correctly bound, DOES promote it to ready.
+    const ready = observeLaunchStatus("cont-late", "launch-B", "exited_ok", { terminal: true });
+    assert.equal(ready?.state, "ready", "phase B's own launch completing makes it claimable");
+    assert.equal(ready?.lastObservedStatus, "exited_ok");
   });
 });
 
@@ -413,14 +471,14 @@ describe("crash windows F13–F18 + BD-3", () => {
     assert.equal(early.granted, false, "no terminal evidence observed → nothing to claim");
     assert.equal(getContinuation("pre")!.state, "awaiting_completion", "state untouched — no fabricated readiness");
     // A non-terminal observation is recorded but does NOT make the slot claimable.
-    observeLaunchStatus("pre", "running", { terminal: false });
+    observeLaunchStatus("pre", "L", "running", { terminal: false });
     const stillEarly = claimContinuationDispatch({
       continuationId: "pre", sourceLaunchId: "L", consumerKind: "orchestrator", currentPhase: "p",
       nextAction: ACTION_A, expectedState: "ready", owner: "ctl", leaseTtlMs: 30_000,
     });
     assert.equal(stillEarly.granted, false, "a non-terminal observation is not terminal evidence");
     // Only after a terminal disposition is observed does the fresh claim succeed.
-    observeLaunchStatus("pre", "exited_ok", { terminal: true });
+    observeLaunchStatus("pre", "L", "exited_ok", { terminal: true });
     const now = claimContinuationDispatch({
       continuationId: "pre", sourceLaunchId: "L", consumerKind: "orchestrator", currentPhase: "p",
       nextAction: ACTION_A, expectedState: "ready", owner: "ctl", leaseTtlMs: 30_000,
@@ -483,7 +541,7 @@ describe("crash windows F13–F18 + BD-3", () => {
       recordContinuation({ continuationId: id, consumerKind: "orchestrator", sourceLaunchId: "L", currentPhase: "p", nextAction: ACTION_A });
       // The controller observed a reconciled disposition that has NO filesystem exit
       // record. Recording it is legitimate and moves the slot to ready.
-      const observed = observeLaunchStatus(id, status, { terminal: true });
+      const observed = observeLaunchStatus(id, "L", status, { terminal: true });
       assert.equal(observed?.state, "ready", `${status} is a legitimate terminal disposition`);
       assert.equal(observed?.lastObservedStatus, status, `${status} recorded as BD-3 evidence — not an exit code`);
       const out = claimContinuationDispatch({
