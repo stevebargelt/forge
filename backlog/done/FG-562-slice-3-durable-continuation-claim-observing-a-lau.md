@@ -1,9 +1,11 @@
 ---
 id: FG-562
 type: story
-status: active
+status: done
 title: "Slice 3 — durable continuation claim: observing a launch terminal state cannot duplicate or lose the next action"
 created: 2026-07-14
+closed: 2026-07-19
+closed_commit: fbb1fc8
 ---
 
 **Epic:** FG-561 · **PRD:** `docs/prds/durable-orchestration-continuation.md` @ `e6fd56b` (Slice 3)
