@@ -232,7 +232,7 @@ export function parseExitRecord(raw: string): ExitRecord | undefined {
   }
   try {
     const parsed = JSON.parse(text) as Partial<ExitRecord>;
-    const hasCode = typeof parsed.code === "number" && Number.isInteger(parsed.code);
+    const hasCode = typeof parsed.code === "number" && Number.isSafeInteger(parsed.code);
     const hasSignal = typeof parsed.signal === "string" && parsed.signal !== "";
     // FG-552 (BD-7/F11): the ExitRecord contract is "exactly one of code|signal is
     // set" — an INTEGER numeric code XOR a non-empty string signal. The wrapper

@@ -133,6 +133,19 @@ test("FG-552: a numeric code counts as valid evidence ONLY when it is an INTEGER
   assert.deepEqual(classifyExit(parseExitRecord(`{"code":0}`)!), { state: "exited_ok", code: 0 });
 });
 
+test("FG-552: a JSON code that overflows precision is corrupt — the JSON path matches the bare-number path (Number.isSafeInteger, not Number.isInteger)", () => {
+  // {"code":99999999999999999999} rounds to a large float that Number.isInteger
+  // accepts but Number.isSafeInteger rejects. Promoting it to exited_error would
+  // advance a waiter on non-authoritative evidence (and JSON-render the rounded
+  // value). It must be schema-invalid → undefined → bounded owner-evidence retry
+  // (F11), exactly like the bare-number-overflow path already does.
+  assert.equal(parseExitRecord(`{"code":99999999999999999999}`), undefined,
+    "an unsafe-magnitude JSON code is not valid exit evidence — never terminal");
+
+  // The safe-integer boundary (Number.MAX_SAFE_INTEGER) is still valid evidence.
+  assert.deepEqual(parseExitRecord(`{"code":9007199254740991}`), { code: Number.MAX_SAFE_INTEGER, signal: null });
+});
+
 test("FG-569 R2: the recorder runtime record is parsed; a missing required field is rejected, never guessed", () => {
   assert.deepEqual(
     parseRecorderRuntime(`{"execPath":"/opt/n/bin/node","abi":"137","nodeVersion":"v24.0.0","releaseId":"release-abc-1"}`),
