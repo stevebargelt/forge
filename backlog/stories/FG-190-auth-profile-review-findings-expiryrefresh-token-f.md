@@ -1,9 +1,11 @@
 ---
 id: FG-190
 type: story
-status: active
+status: deferred
 title: Auth-profile review findings + expiry/refresh-token fix (consolidated)
 ---
+
+**Disposition (2026-07-19):** Deferred. The primary expiry/refresh-token defect shipped; the remaining items are explicitly low-priority pre-launch correctness and cleanup work.
 
 > **Item 1 (expiry/refresh-token) SHIPPED 2026-06-20 in 4904433.** profileExpiry now derives from the auth token only (1b), and profileStatus is three-way refreshable-aware (1a); the `forge auth-profile` status display surfaces the refreshable state. Full coverage added; host suite green (bar the unrelated FG-338 failures). **Remaining open scope: items 2–9 below** — correctness/cleanup (TOCTOU chmod, CDP timeout, wrong-tab capture, IPv6 `[::1]`, cookie domain/origin scoping, staged-file cleanup) + item 9 doc-honesty. All low-priority pre-launch per the zero-users stance; track, fix when convenient.
 

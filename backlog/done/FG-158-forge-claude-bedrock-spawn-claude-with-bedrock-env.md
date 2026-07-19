@@ -1,9 +1,13 @@
 ---
 id: FG-158
 type: story
-status: active
+status: done
 title: "forge claude --bedrock: spawn claude with bedrock env vars without sourcing scripts/use-bedrock.sh"
+closed: 2026-07-19
+closed_commit: c93498b
 ---
+
+**Disposition (2026-07-19):** Close as delivered. The launcher implementation shipped in `c93498b`; operator documentation followed in `80510de`.
 
 **Caught:** 2026-05-26 conversation while shipping \`forge claude\` (#158).
 
