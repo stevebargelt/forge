@@ -1,10 +1,12 @@
 ---
 id: FG-537
 type: story
-status: active
+status: deferred
 title: "Research: DSPy prompt optimization and evaluation fit for Forge"
 created: 2026-07-12
 ---
+
+**Disposition (2026-07-19):** Deferred until Forge has a representative evaluation corpus with independently adjudicated labels. Prompt optimization before that substrate exists would optimize an unreliable target.
 
 ## Problem
 
@@ -67,4 +69,3 @@ Determine whether DSPy can measurably improve a bounded Forge agent role using F
 - DSPy paper: https://arxiv.org/abs/2310.03714
 - GEPA paper: https://arxiv.org/abs/2507.19457
 - Promptfoo evaluation documentation: https://www.promptfoo.dev/docs/intro/
-

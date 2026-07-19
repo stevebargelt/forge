@@ -1,10 +1,13 @@
 ---
 id: FG-544
 type: story
-status: active
+status: done
 title: Orchestrator-owned concurrent research lane using dedicated task branches and worktrees
 created: 2026-07-12
+closed: 2026-07-19
 ---
+
+**Disposition (2026-07-19):** Close as superseded by the general operator queue and capacity-limited dispatcher model (FG-591/FG-593), with shared workspace-isolation and publication machinery. Research should not require a special parallel-lane architecture.
 
 ## Problem
 

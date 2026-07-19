@@ -1,10 +1,12 @@
 ---
 id: FG-538
 type: story
-status: active
+status: deferred
 title: "Research: Crawl4AI acquisition and personal knowledge hub fit for Forge"
 created: 2026-07-12
 ---
+
+**Disposition (2026-07-19):** Deferred until durable external-source acquisition becomes an explicit Forge product priority. It is outside the current orchestration program.
 
 ## Problem
 
@@ -90,4 +92,3 @@ Determine whether Crawl4AI provides enough measurable value over Forge's existin
 - Crawlee: https://crawlee.dev/js/
 - Firecrawl: https://docs.firecrawl.dev/introduction
 - Karakeep: https://docs.karakeep.app/
-
