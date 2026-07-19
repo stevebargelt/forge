@@ -118,6 +118,12 @@ export function BacklogView({ data, projectFilter }) {
             >${s ? STATUS_LABELS[s] : "all"}</button>
           `)}
         </div>
+        ${totalTickets > 0 ? html`
+          <div class="backlog-result-count muted" style="font-size: 12px; margin-bottom: 12px;" aria-live="polite">
+            ${filtered.length} ${filtered.length === 1 ? "result" : "results"}${
+              (typeFilter || statusFilter || search.trim()) ? ` of ${totalTickets}` : ""}
+          </div>
+        ` : null}
       </section>
 
       ${totalTickets === 0

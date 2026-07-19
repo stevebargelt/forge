@@ -15,9 +15,12 @@ import {
   statSync,
   readdirSync,
 } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import Database from "better-sqlite3";
 import { listTickets } from "@forge/backlog";
+import { SCHEMA_SQL } from "../../src/store/schema.js";
 
 const TEST_PORT = 18764;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
@@ -25,11 +28,18 @@ const BASE = `http://127.0.0.1:${TEST_PORT}`;
 // --- env must be set before server.ts is evaluated (module-level reads) ---
 const tmpHome = mkdtempSync(join(tmpdir(), "forge-backlog-rt-"));
 process.env.FORGE_HOME = tmpHome;
+process.env.FORGE_PROJECT_SCAN_ROOTS = mkdtempSync(join(tmpdir(), "forge-backlog-scan-"));
 process.env.PORT = String(TEST_PORT);
 process.env.HOST = "127.0.0.1";
 
-// --- fixture project: real backlog/ with notes + epic/story/idea tickets ---
+// --- fixture project: a real canonical main checkout with backlog/ notes +
+// epic/story/idea tickets. Tickets are backlog truth only on the canonical
+// repository's primary main checkout, so the fixture must be a git checkout on
+// main and registered (via a DB run row) so projectsForDashboard() resolves an
+// exact projectDir request to it. ---
 const fixtureDir = mkdtempSync(join(tmpdir(), "forge-backlog-fx-"));
+execFileSync("git", ["init", "-b", "main"], { cwd: fixtureDir, stdio: "ignore" });
+execFileSync("git", ["remote", "add", "origin", "git@github.com:stevebargelt/forge.git"], { cwd: fixtureDir, stdio: "ignore" });
 mkdirSync(join(fixtureDir, "backlog", "epics"), { recursive: true });
 mkdirSync(join(fixtureDir, "backlog", "stories"), { recursive: true });
 mkdirSync(join(fixtureDir, "backlog", "ideas"), { recursive: true });
@@ -50,6 +60,22 @@ writeFileSync(
   join(fixtureDir, "backlog", "ideas", "FG-102-test-idea.md"),
   "---\nid: FG-102\ntype: idea\nstatus: active\ntitle: Test Idea\n---\nIdea body.\n",
 );
+
+// Register the fixture as a known project so projectsForDashboard() resolves
+// an exact projectDir request to this canonical main checkout.
+{
+  const database = new Database(join(tmpHome, "forge.db"));
+  database.exec(SCHEMA_SQL);
+  database
+    .prepare("INSERT INTO runs (id,workflow,title,status,created_at,project_dir) VALUES (?,?,?,?,?,?)")
+    .run("run-backlog-fx", "feature", "Backlog fixture", "complete", "2026-07-15T10:00:00Z", fixtureDir);
+  database
+    .prepare(
+      "INSERT INTO tasks (id,run_id,phase,agent_role,status,task_package,result,created_at,started_at,completed_at) VALUES (?,?,?,?,?,'{}','{}',?,?,?)",
+    )
+    .run("done-backlog-fx", "run-backlog-fx", "engineer", "engineer", "complete", "2026-07-15T10:00:00Z", "2026-07-15T10:00:00Z", "2026-07-15T10:00:00Z");
+  database.close();
+}
 
 // --- start the real server (side-effect import; reads PORT from env) ---
 const { server } = await import("./server.js");

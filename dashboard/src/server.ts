@@ -112,7 +112,11 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   if (path === "/api/backlog") {
     const projectDir = url.searchParams.get("projectDir") ?? undefined;
     const projectKey = url.searchParams.get("projectKey") ?? undefined;
-    const project = !projectDir && projectKey ? projectsForDashboard().find((entry) => entry.key === projectKey) : undefined;
+    const projects = projectsForDashboard();
+    const project = !projectDir && projectKey ? projects.find((entry) => entry.key === projectKey) : undefined;
+    // Notes are operational context and remain per-selection: a projectKey
+    // request keeps every checkout's session handoff (multi-checkout); an exact
+    // projectDir request keeps that one checkout's session-specific notes.
     const checkouts = project
       ? project.checkouts.filter((checkout) => checkout.exists)
       : projectDir
@@ -123,14 +127,29 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       return;
     }
     const notesByCheckout: Array<{ checkoutDir: string; checkoutBranch: string | null; notes: string }> = [];
-    const tickets: Array<Record<string, unknown>> = [];
     for (const checkout of checkouts) {
       const notesPath = join(checkout.projectDir, "backlog", "notes.md");
       const notes = existsSync(notesPath) ? readFileSync(notesPath, "utf8") : "";
       if (notes.trim()) notesByCheckout.push({ checkoutDir: checkout.projectDir, checkoutBranch: checkout.branch ?? null, notes });
+    }
+
+    // A ticket is backlog truth ONLY on the canonical repository's primary
+    // existing main/master checkout. Feature branches, linked worktrees, clones,
+    // and scratch checkouts are not backlog truth until merged. Resolve that
+    // canonical repository for BOTH request shapes — a projectKey request maps
+    // directly; an exact projectDir request (which may be a worktree/clone/
+    // feature checkout) resolves to the canonical repo whose observed paths
+    // include it — so selecting a feature checkout never exposes its
+    // branch-local ticket files. No main/master checkout means no ticket truth.
+    const canonical = project ?? (projectDir ? projects.find((entry) => entry.projectDirs.includes(projectDir)) : undefined);
+    const ticketSource = canonical?.checkouts.find(
+      (checkout) => checkout.exists && (checkout.branch === "main" || checkout.branch === "master"),
+    );
+    const tickets: Array<Record<string, unknown>> = [];
+    if (ticketSource) {
       try {
-        for (const ticket of listTickets(checkout.projectDir)) {
-          tickets.push({ ...ticket, checkoutDir: checkout.projectDir, checkoutBranch: checkout.branch ?? null });
+        for (const ticket of listTickets(ticketSource.projectDir)) {
+          tickets.push({ ...ticket, checkoutDir: ticketSource.projectDir, checkoutBranch: ticketSource.branch ?? null });
         }
       } catch {
         // A checkout may disappear between registry resolution and reading.
