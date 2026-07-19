@@ -140,3 +140,30 @@ property the old code already accidentally satisfies on a lucky timing, and prov
 
 - The wait primitive (FG-552) or the claim primitive (FG-562).
 - Campaign adoption (FG-564).
+
+## Consumer enforcement of FG-562's BD-3 / F17 (binding — added 2026-07-19, operator decision A)
+
+FG-562 ships the durable continuation-claim PRIMITIVE only: it validates canonical terminal vocabulary, phase
+binding, CAS state, deterministic dispatch identity (`dispatch_key`), adoption lookup (`adoptOrClaimDispatch`),
+leases, and durable receipts. It deliberately does NOT establish that a passed-in disposition matches the real
+launch, and it does NOT prevent a second *physical* run. **This slice, as the consumer, MUST enforce the
+end-to-end guarantees the primitive cannot** — these are binding acceptance criteria here (the primitive's
+mechanism is delivered; consumer enforcement was left OPEN by FG-562 by design):
+
+- **Authoritative evidence before observe/claim (BD-3):** immediately before calling
+  `observeLaunchStatus` / claiming, this consumer MUST obtain the launch disposition from the canonical launch
+  reader (`readLaunch` / `classifyExit`) and pass that exact observation in. It MUST NOT synthesize, cache
+  stale, or otherwise fabricate a terminal disposition — a claim may only rest on a canonical classification
+  the authoritative durable launch record supports (incl. the reconciled `owner_gone`/`unknown` dispositions
+  with no exit record).
+- **No caller-fabricated terminal disposition:** a regression must prove this consumer cannot advance a phase
+  on a disposition the authoritative record does not support (observed RED against a fabricated/stale status).
+- **Receipt-keyed production check-before-spawn / adopt (F17):** before dispatching physical work, this
+  consumer MUST perform the deterministic `dispatch_key`-keyed lookup (`adoptOrClaimDispatch`) and ADOPT an
+  existing dispatch rather than spawning a duplicate agent/run.
+- **Crash recovery adopts the original physical run:** on controller restart, this consumer MUST use the
+  restart-replay collector (`continuationsInDispatch`) + the receipt to adopt the original in-flight physical
+  run, never spawn a second one (observed RED against a recovery path that re-dispatches).
+
+A test that exercises the primitive in isolation does NOT satisfy these — the enforcement must be demonstrated
+on this consumer's real production path.
