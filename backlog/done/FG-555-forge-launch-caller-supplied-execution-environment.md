@@ -1,9 +1,11 @@
 ---
 id: FG-555
 type: story
-status: active
+status: done
 title: "forge launch: caller-supplied execution environment can select a Node ABI incompatible with the repo, while launch records cannot explain the mismatch"
 created: 2026-07-14
+closed: 2026-07-19
+closed_commit: 21af80c
 ---
 
 **Epic:** FG-561 · **PRD:** `docs/prds/durable-orchestration-continuation.md` @ `e6fd56b` (**Slice 1b**)
