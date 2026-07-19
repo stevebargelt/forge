@@ -1,5 +1,8 @@
-// FG-563 fixer round 2 — FALSIFICATION for FIX A (schema robustness) and the
+// FG-563 fixer rounds 2/3 — FALSIFICATION for FIX A (schema robustness) and the
 // DB-level half of FIX B (exactly-one-run-per-receipt), on the REAL store path.
+// Round 3 SIMPLIFIED the migration: the convergence machinery (drop legacy + create
+// unique across autocommit statements) is gone; on main the index is born unique from a
+// single idempotent CREATE, and a stale-dev duplicate receipt SKIPS rather than bricks.
 //
 // FIX A: the dispatch-key discoverability index is an expression index over
 // json_extract(metadata, '$.dispatchKey'). It USED to live in SCHEMA_SQL, which
@@ -74,22 +77,47 @@ test("FIX A/B: a real runs table (with metadata) gets the guarded index, and it 
   db.close();
 });
 
-// ── FIX A/B: converge an intermediate build's NON-unique same-named index ──
+// ── FIX 1 (round 3, HIGH-1): a pre-existing DUPLICATE dispatch_key must NOT brick ──
+//
+// Round 2 dropped the legacy index and ran CREATE UNIQUE unconditionally. On a stale
+// dev DB that already holds two runs under the SAME receipt, that CREATE UNIQUE throws
+// SQLITE_CONSTRAINT — and because migrations run on EVERY open, the throw wedges every
+// subsequent open PERMANENTLY. Round 3 duplicate-checks first and SKIPS creation, so the
+// open never wedges. Observed RED against the round-2 baseline (applyMigrations threw).
 
-test("FIX A/B: a pre-existing NON-unique idx_runs_dispatch_key is converged to UNIQUE (IF-NOT-EXISTS would have no-op'd)", () => {
+test("FIX 1 (HIGH-1): a pre-existing DUPLICATE dispatch_key does NOT brick the open — applyMigrations skips the index instead of throwing", () => {
   const db = new Database(":memory:");
   db.pragma("foreign_keys = ON");
   db.exec(SCHEMA_SQL);
-  // Simulate an intermediate FG-563 build that created the index NON-unique in
-  // SCHEMA_SQL. A bare CREATE UNIQUE INDEX IF NOT EXISTS would see this same-named
-  // index and silently leave uniqueness unenforced.
+  // A stale dev DB shape: two runs already carry the SAME dispatch_key. No UNIQUE index
+  // exists yet (they were inserted before it), so the raw duplicate is present.
   db.exec(`DROP INDEX IF EXISTS idx_runs_dispatch_key`);
-  db.exec(`CREATE INDEX idx_runs_dispatch_key ON runs(json_extract(metadata, '$.dispatchKey'))`);
+  const ins = db.prepare(
+    `INSERT INTO runs (id, workflow, title, status, created_at, metadata, project_dir) VALUES (?,?,?,?,?,?,?)`,
+  );
+  ins.run("run-dupA", "feature", "A", "active", "2026-07-19T00:00:00Z", JSON.stringify({ dispatchKey: "DUP" }), "/tmp/p");
+  ins.run("run-dupB", "feature", "B", "active", "2026-07-19T00:00:00Z", JSON.stringify({ dispatchKey: "DUP" }), "/tmp/p");
+  assert.doesNotThrow(() => applyMigrations(db), "a duplicate receipt must NOT wedge the open");
+  const idx = db.prepare(`PRAGMA index_list(runs)`).all() as { name: string }[];
+  assert.ok(
+    !idx.some((i) => i.name === "idx_runs_dispatch_key"),
+    "the unique index is SKIPPED (not created) while a duplicate exists — never a throw",
+  );
+  db.close();
+});
+
+// ── FIX 1 (round 3): the simplified create is idempotent across repeated opens ──
+
+test("FIX 1 (round 3): repeated applyMigrations on a fresh runs table are idempotent and keep the index UNIQUE", () => {
+  const db = new Database(":memory:");
+  db.pragma("foreign_keys = ON");
+  db.exec(SCHEMA_SQL);
   applyMigrations(db);
+  assert.doesNotThrow(() => applyMigrations(db), "second open is a noop (CREATE ... IF NOT EXISTS)");
   const idx = db.prepare(`PRAGMA index_list(runs)`).all() as { name: string; unique: number }[];
   const dispatchIdx = idx.find((i) => i.name === "idx_runs_dispatch_key");
-  assert.ok(dispatchIdx, "the index still exists");
-  assert.equal(dispatchIdx!.unique, 1, "the stale non-unique index was converged to UNIQUE");
+  assert.ok(dispatchIdx, "the index persists across repeated opens");
+  assert.equal(dispatchIdx!.unique, 1, "and stays UNIQUE");
   db.close();
 });
 

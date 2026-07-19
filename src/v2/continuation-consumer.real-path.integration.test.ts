@@ -49,6 +49,8 @@ import {
   observeLaunchStatus,
   claimContinuationDispatch,
   continuationsInDispatch,
+  recordDispatchResult,
+  renewClaim,
   type NextAction,
 } from "../store/continuations.js";
 import { runByDispatchKey, getRun } from "../store/runs.js";
@@ -566,6 +568,169 @@ test("FIX C (real path): a watchdog that LOST its lease mid-dispatch writes NO l
     assert.notEqual(c?.state, "advanced", "wd-A did NOT advance the slot under a lost lease");
     assert.equal(c?.claimOwner, "wd-B", "the genuine winner (wd-B) owns the slot");
     assert.ok(mineRunId, "the dispatch itself did run");
+  } finally {
+    done();
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FG-563 fixer round 3 — HIGH-3: CODE-ENFORCED controller identity + REAL fencing.
+//
+// The round-2 default owner was orchestrator@HOSTNAME — STABLE PER HOST. Two same-host
+// orchestrator sessions therefore resolved to the SAME owner, so the owner-scoped
+// primitives (claim/renew) could not fence them: a losing watchdog could still write a
+// false continuation_lost_signal_recoveries row (F18 violation). The fix makes the owner
+// identify the CONTROLLER, never the host (resolveControllerOwner in continue.ts), and
+// FAILS CLOSED rather than falling back to a host-stable value. With DISTINCT unique
+// owners, the round-2 lease/fencing logic below ACTUALLY fences.
+//
+// "Restart" semantics being proven:
+//   • Repeated `forge continue` PROCESSES in ONE session share that session's owner and
+//     re-adopt their own in-flight dispatch.
+//   • A NEW session after a crash is a DIFFERENT owner: it may not impersonate the old
+//     one — only TAKE OVER after the previous lease EXPIRES.
+// All exercised on the REAL primitives (claim/renew/adopt/advance) + REAL run-creation.
+
+/** Build a genuine mid-dispatch (claimed, real run recorded, un-advanced) slot owned
+ *  by `owner` with a `leaseTtlMs` lease — the crash/in-flight window on real primitives.
+ *  Returns the original run id created under the receipt. */
+function midDispatch(s: Scope, owner: string, leaseTtlMs = 60_000): string {
+  seedContinuation(s);
+  writeTerminalLaunch(s.lid, `{"code":0,"signal":null}`);
+  observeLaunchStatus(s.cid, s.lid, "exited_ok");
+  const claim = claimContinuationDispatch({
+    continuationId: s.cid,
+    sourceLaunchId: s.lid,
+    consumerKind: "orchestrator",
+    currentPhase: "build",
+    nextAction: NEXT,
+    expectedState: "ready",
+    owner,
+    leaseTtlMs,
+  });
+  assert.ok(claim.granted, "the mid-dispatch claim was granted");
+  const receipt = getContinuation(s.cid)!.dispatchKey!;
+  const { runId } = startRun({
+    workflow: TEST_WORKFLOW,
+    title: "next phase",
+    inputs: {},
+    projectDir: "/tmp/p",
+    dispatchKey: receipt,
+  });
+  assert.ok(recordDispatchResult(s.cid, owner, { runId }), "the physical run id is recorded under the owner");
+  assert.equal(getContinuation(s.cid)!.state, "dispatching", "slot is mid-dispatch (claimed, un-advanced)");
+  return runId;
+}
+
+test("HIGH-3 (real path): two invocations from ONE session (same owner) RE-ADOPT the same in-flight dispatch; a mutant ephemeral owner is fenced from its own work (RED)", () => {
+  const done = freshDb("fg563-rp-h3-readopt.db");
+  const s = scope("h3readopt");
+  try {
+    const runId = midDispatch(s, "session-X@host");
+    const d = realDispatcher();
+
+    // RED baseline: if each `forge continue` invocation resolved to a DIFFERENT
+    // (ephemeral/random) owner instead of the STABLE session id, the second invocation
+    // could not re-adopt its OWN in-flight dispatch — a live lease it does not own is
+    // unclaimable, so it would be wrongly fenced from its own work and dispatch nothing.
+    const mutant = consumeContinuation(s.identity(), { owner: "ephemeral-92af", dispatch: d.fn });
+    assert.equal(mutant.kind, "lost_claim", "FALSIFICATION: a non-stable owner is fenced from its OWN in-flight dispatch");
+    assert.equal(d.runIds.length, 0, "and dispatches nothing");
+    assert.equal(getContinuation(s.cid)?.claimOwner, "session-X@host", "the mutant did not steal the live lease");
+
+    // GREEN: the SAME session owner (repeated `forge continue` PROCESS, one logical
+    // controller) re-adopts the in-flight dispatch and settles it — no duplicate run.
+    const out = consumeContinuation(s.identity(), { owner: "session-X@host", dispatch: d.fn });
+    assert.equal(out.kind, "advanced");
+    assert.equal(out.kind === "advanced" ? out.adopted : false, true, "re-adopted, not re-dispatched");
+    assert.equal(d.runIds.length, 0, "startRun not called again — the original run is adopted");
+    assert.equal(getContinuation(s.cid)?.dispatchedRunId, runId, "the ORIGINAL run is the one advanced");
+  } finally {
+    done();
+  }
+});
+
+test("HIGH-3 (real path): two same-host sessions with DISTINCT owners FENCE each other — neither claims the other's LIVE dispatch", () => {
+  const done = freshDb("fg563-rp-h3-fence.db");
+  const s = scope("h3fence");
+  try {
+    midDispatch(s, "session-A@host"); // A holds a LIVE lease mid-dispatch
+    const d = realDispatcher();
+    const out = consumeContinuation(s.identity(), { owner: "session-B@host", dispatch: d.fn });
+    assert.equal(out.kind, "lost_claim", "session-B cannot take A's LIVE dispatch");
+    assert.equal(d.runIds.length, 0, "B dispatches nothing");
+    const c = getContinuation(s.cid);
+    assert.equal(c?.claimOwner, "session-A@host", "A still owns the live lease — B did not impersonate it");
+    assert.equal(c?.state, "dispatching", "the slot is unchanged");
+  } finally {
+    done();
+  }
+});
+
+test("HIGH-3 (primitive): a replacement session CANNOT renew the previous session's LIVE lease (owner-scoped renewClaim fails — no impersonation)", () => {
+  const done = freshDb("fg563-rp-h3-renew-live.db");
+  const s = scope("h3renewlive");
+  try {
+    midDispatch(s, "session-A@host", 60_000);
+    const before = getContinuation(s.cid)!;
+    // A replacement session (different owner) tries to renew A's LIVE lease.
+    assert.equal(renewClaim(s.cid, "session-B@host", 60_000), false, "a different owner cannot renew a lease it does not hold");
+    const after = getContinuation(s.cid)!;
+    assert.equal(after.claimOwner, "session-A@host", "ownership is unchanged — no impersonation");
+    assert.equal(after.claimExpiresAt, before.claimExpiresAt, "the impostor did not extend the lease");
+    // The TRUE owner (same session) renews its OWN lease — the re-adoption path.
+    assert.equal(renewClaim(s.cid, "session-A@host", 60_000), true, "the true owner renews its own lease");
+  } finally {
+    done();
+  }
+});
+
+test("HIGH-3 (real path): a replacement session CAN take over ONLY after the previous lease EXPIRES — then adopts the original run, no duplicate", () => {
+  const done = freshDb("fg563-rp-h3-expiry.db");
+  const s = scope("h3expiry");
+  try {
+    const runId = midDispatch(s, "session-A@host", 1000); // short lease
+    const d = realDispatcher();
+    // Before expiry: a LIVE lease blocks the replacement.
+    const early = consumeContinuation(s.identity(), { owner: "session-B@host", dispatch: d.fn });
+    assert.equal(early.kind, "lost_claim", "a LIVE lease blocks the replacement session");
+    assert.equal(getContinuation(s.cid)?.claimOwner, "session-A@host", "A still owns it pre-expiry");
+
+    // After the lease expires, the replacement legitimately takes over.
+    setPublicationClockOffsetForTest(5000);
+    const out = consumeContinuation(s.identity(), { owner: "session-B@host", dispatch: d.fn });
+    assert.equal(out.kind, "advanced", "after expiry the replacement takes over via the normal claim path");
+    assert.equal(out.kind === "advanced" ? out.adopted : false, true, "and ADOPTS the original run");
+    assert.equal(d.runIds.length, 0, "no second run dispatched");
+    assert.equal(getContinuation(s.cid)?.dispatchedRunId, runId, "the original run is the one advanced");
+    assert.equal(getContinuation(s.cid)?.claimOwner, "session-B@host", "B legitimately owns it post-expiry");
+  } finally {
+    done();
+  }
+});
+
+test("HIGH-3 (real path): the LOSING watchdog (distinct owner vs the live holder) writes NO lost-signal row; a host-stable owner collision WOULD (RED)", () => {
+  const done = freshDb("fg563-rp-h3-losing-wd.db");
+  try {
+    // RED baseline: under the round-2 host-stable owner the watchdog resolves to the
+    // SAME owner as the live holder, so it is NOT fenced — it re-adopts and (being a
+    // watchdog) writes a lost-signal recovery row it never legitimately won.
+    const red = scope("h3wdred");
+    midDispatch(red, "orchestrator@HOSTNAME", 60_000);
+    const dr = realDispatcher();
+    const collided = consumeContinuation(red.identity(), { owner: "orchestrator@HOSTNAME", trigger: "watchdog", dispatch: dr.fn });
+    assert.equal(collided.kind, "advanced", "a same-owner watchdog is NOT fenced (the host-stable defect)");
+    assert.equal(lostSignalRecoveriesFor(red.cid).length, 1, "FALSIFICATION: the host-stable collision let a watchdog write a lost-signal row");
+
+    // GREEN: with DISTINCT session owners the watchdog is fenced by the live lease and
+    // writes NOTHING — the F18 promise the code-enforced identity restores.
+    const green = scope("h3wdgreen");
+    midDispatch(green, "session-A@host", 60_000);
+    const dg = realDispatcher();
+    const out = consumeContinuation(green.identity(), { owner: "session-B@host", trigger: "watchdog", dispatch: dg.fn });
+    assert.equal(out.kind, "lost_claim", "the distinct-owner watchdog loses the live lease");
+    assert.equal(lostSignalRecoveriesFor(green.cid).length, 0, "NO false lost-signal recovery row (F18)");
+    assert.equal(dg.runIds.length, 0, "and it dispatches nothing");
   } finally {
     done();
   }

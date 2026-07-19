@@ -51,45 +51,61 @@ export function applyMigrations(db: DatabaseInstance): void {
   if (!haveRuns.has("project_dir")) {
     db.exec(`ALTER TABLE runs ADD COLUMN project_dir TEXT`);
   }
-  // FG-563 (FIX A/FIX B, round 2): the dispatch-key discoverability index. It moved
-  // OFF the always-exec SCHEMA_SQL and onto this guarded migration path for two
-  // reasons the CI + red review surfaced:
+  // FG-563 (FIX A/FIX B, round 3): the dispatch-key discoverability index. It lives on
+  // this guarded migration path (not the always-exec SCHEMA_SQL) for two reasons:
   //
   //   FIX A — RESILIENCE. The index is an expression index over
   //   json_extract(metadata, '$.dispatchKey'); on a `runs` table that has NO
-  //   `metadata` column the CREATE INDEX throws SQLITE_ERROR. Because SCHEMA_SQL
-  //   runs on EVERY open (FG-568, read opens included), a foreign/minimal runs
-  //   fixture without that column would make every open fail. Guarding on the
-  //   column's presence via PRAGMA table_info(runs) means a metadata-less open no
-  //   longer throws; production `runs` always has `metadata`, so it is unaffected.
+  //   `metadata` column the CREATE INDEX throws SQLITE_ERROR. Because migrations run
+  //   on EVERY open (read opens included, FG-568), a foreign/minimal runs fixture
+  //   without that column would make every open fail. Guarding on the column's
+  //   presence via PRAGMA table_info(runs) means a metadata-less open no longer
+  //   throws; production `runs` always has `metadata`, so it is unaffected.
   //
   //   FIX B — EXACTLY-ONE-RUN-PER-RECEIPT. The index is UNIQUE (partial, over the
-  //   non-null receipt). Two controllers on ONE host share the same default owner
-  //   (orchestrator@HOSTNAME) and can both pass the same-owner re-adoption check, so
-  //   without a DB-level guard both could spawn a physical run under the SAME
-  //   continuation dispatch_key (defeating F14/F17 exactly-once). The UNIQUE index
-  //   makes the second insert COLLIDE; the consumer's dispatch path catches that and
-  //   ADOPTS the winner's run instead of duplicating. NULL dispatchKeys (ordinary
-  //   runs with no receipt) stay non-unique — the partial WHERE excludes them.
+  //   non-null receipt), so a second physical run can never be inserted under a
+  //   dispatch_key that already has one. The DB-level backstop behind the code-enforced
+  //   unique controller owners (see resolveControllerOwner in continue.ts). NULL
+  //   dispatchKeys (ordinary runs with no receipt) stay non-unique — SQLite's partial
+  //   WHERE excludes them.
   //
-  // Additive-only (BD-15): the index is NEW to the unreleased FG-563 branch, so no
-  // older binary depends on it. An intermediate FG-563 build created it NON-unique
-  // in SCHEMA_SQL; `CREATE UNIQUE INDEX IF NOT EXISTS` would no-op against that same-
-  // named non-unique index and silently leave uniqueness unenforced, so converge it:
-  // drop the stale non-unique index first (dropping THIS never-released index breaks
-  // no older binary — it is not the destructive removal BD-15 forbids), then create
-  // the unique one.
+  // Round 3 — SIMPLIFICATION. The non-unique form of this index only ever existed in an
+  // UNMERGED branch commit; no real/shipped DB carries it, and this branch squash-merges,
+  // so on main the index is BORN unique from a single idempotent statement. The round-2
+  // "convergence" (read index_list, DROP the legacy non-unique index, then CREATE UNIQUE
+  // across separate autocommit statements) was dev-only machinery that added two real
+  // hazards, both removed here:
+  //   HIGH-1: on a stale dev DB carrying a pre-existing DUPLICATE dispatch_key, CREATE
+  //           UNIQUE throws — and since migrations run on EVERY open, that bricks every
+  //           subsequent open PERMANENTLY. We now duplicate-check FIRST (a read-only
+  //           query) and SKIP creation when a duplicate exists, so the open never wedges.
+  //   HIGH-2: the DROP/CREATE were separate autocommit statements with no transaction, so
+  //           a concurrent open could observe the index dropped and slip a duplicate insert
+  //           through. There is no DROP at all now — just one idempotent CREATE UNIQUE INDEX
+  //           IF NOT EXISTS — so no window ever exists where the index is absent after
+  //           having been present.
   if (haveRuns.has("metadata")) {
-    const runsIdx = db.prepare(`PRAGMA index_list(runs)`).all() as { name: string; unique: number }[];
-    const dispatchIdx = runsIdx.find((i) => i.name === "idx_runs_dispatch_key");
-    if (dispatchIdx && dispatchIdx.unique === 0) {
-      db.exec(`DROP INDEX idx_runs_dispatch_key`);
+    // Duplicate-check before create: a stale dev DB that already holds two runs under
+    // the same receipt must NOT brick the open. Read-only, so concurrency-safe. On a
+    // fresh/real DB there are no duplicates and the index is created born-unique.
+    const dup = db
+      .prepare(
+        `SELECT 1 FROM runs
+           WHERE json_extract(metadata, '$.dispatchKey') IS NOT NULL
+           GROUP BY json_extract(metadata, '$.dispatchKey')
+          HAVING COUNT(*) > 1
+           LIMIT 1`,
+      )
+      .get();
+    if (!dup) {
+      db.exec(
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_dispatch_key
+           ON runs(json_extract(metadata, '$.dispatchKey'))
+           WHERE json_extract(metadata, '$.dispatchKey') IS NOT NULL`,
+      );
     }
-    db.exec(
-      `CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_dispatch_key
-         ON runs(json_extract(metadata, '$.dispatchKey'))
-         WHERE json_extract(metadata, '$.dispatchKey') IS NOT NULL`,
-    );
+    // else: leave the index absent rather than throw — a stale dev-only condition; a
+    // fresh main DB never hits it.
   }
   const tasksCols = db.prepare(`PRAGMA table_info(tasks)`).all() as { name: string }[];
   const haveTasks = new Set(tasksCols.map((r) => r.name));
