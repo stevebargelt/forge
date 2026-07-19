@@ -1,9 +1,12 @@
 ---
 id: FG-291
 type: epic
-status: active
+status: done
 title: "[EPIC] Stable, feature-rich Forge baseline"
+closed: 2026-07-19
 ---
+
+**Disposition (2026-07-19):** Close as superseded. Most original baseline commitments shipped; remaining gaps now have focused owners including FG-253, FG-346, FG-546, FG-561, and FG-593. This broad umbrella no longer provides a useful execution or closeout boundary.
 
 **Captured:** 2026-06-05. This is the commitment set for getting Forge from "powerful internal tool" to a stable, feature-rich baseline worth relying on across real projects and machines.
 

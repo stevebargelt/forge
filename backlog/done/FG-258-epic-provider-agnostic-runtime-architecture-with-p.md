@@ -1,9 +1,12 @@
 ---
 id: FG-258
 type: epic
-status: active
+status: done
 title: "[EPIC] Provider-agnostic runtime architecture, with Pi as the pilot/default candidate"
+closed: 2026-07-19
 ---
+
+**Disposition (2026-07-19):** Close as delivered. The provider-neutral runtime architecture and Pi pilot shipped across FG-259–267, FG-292, FG-296, FG-303, and related runtime work. Optional local-model support remains independently deferred as FG-268.
 
 **PRD:** `docs/prds/provider-agnostic-runtime-pi.md`.
 
