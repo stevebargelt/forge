@@ -1016,18 +1016,25 @@ export function readLaunch(id: string, tmux: TmuxRunner = defaultTmux): LaunchVi
       // F11: a PRESENT but unreadable/invalid record is bounded retry, NEVER a
       // terminal disposition on a SINGLE read — even when owner evidence is
       // terminal. status stays `running` so this read is an invitation to retry.
-      // BD-7: but that retry must be BOUNDED, so we ALSO surface the reconciled
-      // disposition a bounded waiter wakes on if the record stays unreadable past
-      // its bound — never blocking forever. owner terminal (no session -> unknown,
-      // dead pane -> owner_gone) is 1a; a live owner is 1b (unknown). Only a
-      // genuinely ABSENT record yields the owner-terminal verdicts below directly.
+      // BD-7: that retry is BOUNDED only when there is INDEPENDENT TERMINAL OWNER
+      // evidence — no session -> unknown, dead pane -> owner_gone. In that case we
+      // surface the reconciled disposition a bounded waiter wakes on if the record
+      // stays unreadable past its bound, so a straddled completion never blocks
+      // forever. A CONFIRMED-LIVE owner is NOT terminal evidence: the tmux-owned
+      // command is still running, so there is nothing to promote. `unknown` means
+      // "the owner ended without a record" and requires the owner-gone evidence a
+      // live owner lacks — fabricating it here would advance a controller over a
+      // still-running command. So a live owner + unreadable record leaves
+      // pendingUnreadableExit UNSET: the launch stays running and only the waiter's
+      // own --timeout (a wait_timeout, never a launch terminal) bounds it. If the
+      // owner later dies, reconcile re-reads, owner evidence goes terminal, and the
+      // bound arms then.
       status = { state: "running" };
-      const terminal: LaunchStatus = !sessionAlive
-        ? { state: "unknown" }
-        : dead === true
-          ? { state: "owner_gone", cause: "unrecorded", sender: "unrecorded" }
-          : { state: "unknown" };
-      pendingUnreadableExit = { terminal };
+      if (!sessionAlive) {
+        pendingUnreadableExit = { terminal: { state: "unknown" } };
+      } else if (dead === true) {
+        pendingUnreadableExit = { terminal: { state: "owner_gone", cause: "unrecorded", sender: "unrecorded" } };
+      }
     } else if (!sessionAlive) {
       status = { state: "unknown" };
     } else if (dead === true) {
@@ -1093,13 +1100,17 @@ export function removeLaunch(id: string, opts: { force?: boolean; tmux?: TmuxRun
  *  but long enough not to fire on any real long-running forge command. */
 export const DEFAULT_WAIT_TIMEOUT_MS = 12 * 60 * 60 * 1000;
 
-/** FG-552 (BD-7): the bound on a PERSISTENTLY unreadable/invalid exit record. It is
- *  DISTINCT from the waiter `--timeout` (which yields `wait_timeout`, not a launch
- *  disposition): a record that stays unreadable this long becomes a terminal launch
- *  COMPLETION (owner_gone/unknown) the waiter wakes on. Generous — far longer than
- *  any transient torn/EIO read needs to clear across reconcile ticks — but FINITE,
- *  so a persistently-corrupt record with a live owner never blocks forever even with
- *  `--timeout 0`. Failure is a disposition, not silence. */
+/** FG-552 (BD-7): the bound on a PERSISTENTLY unreadable/invalid exit record whose
+ *  OWNER has already gone terminal. It is DISTINCT from the waiter `--timeout` (which
+ *  yields `wait_timeout`, not a launch disposition): a record that stays unreadable
+ *  this long AFTER independent terminal owner evidence becomes a terminal launch
+ *  COMPLETION (owner_gone/unknown) the waiter wakes on, so a straddled completion
+ *  never blocks forever even with `--timeout 0`. Generous — far longer than any
+ *  transient torn/EIO read needs to clear across reconcile ticks — but FINITE. A
+ *  persistently-corrupt record with a CONFIRMED-LIVE owner is NOT bounded here: the
+ *  command is still running, so only the waiter's `--timeout` bounds it (a
+ *  wait_timeout, never a fabricated launch terminal). Failure is a disposition, not
+ *  silence. */
 export const DEFAULT_INVALID_BOUND_MS = 60 * 1000;
 
 /** A launch is terminal in EVERY state except `running`. The six terminal
@@ -1170,8 +1181,10 @@ export async function waitForLaunchTerminal(id: string, harness: WaitHarness): P
     // BD-7: the bound expired while the exit record was still unreadable. Re-read
     // once: a record that became readable in the meantime is authoritative; a
     // launch that reached a terminal owner disposition wakes on that; otherwise the
-    // record is persistently unreadable and we wake on its reconciled disposition
-    // (owner_gone/unknown or, for a live owner, unknown) — a completion, not silence.
+    // record is persistently unreadable AND owner evidence went terminal, so we wake
+    // on its reconciled disposition (owner_gone/unknown) — a completion, not silence.
+    // A live owner never arms this bound (readLaunch leaves pendingUnreadableExit
+    // unset), so we never fabricate a terminal over a still-running command.
     const wakeOnPersistentInvalid = (): void => {
       if (settled) return;
       const v = harness.read();

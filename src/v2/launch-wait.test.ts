@@ -257,23 +257,24 @@ function unreadableRunningView(terminal: LaunchStatus): LaunchView {
   return runningView({ status: { state: "running" }, pendingUnreadableExit: { terminal } });
 }
 
-test("FG-552 wait (BD-7 / 1b): a persistently-invalid record with a LIVE owner wakes on the BOUND as a terminal completion — NOT blocked forever, and independent of --timeout", async () => {
+test("FG-552 wait (BD-7 / 1b): a persistently-invalid record with a LIVE owner is NEVER promoted to a terminal — it stays running and only --timeout bounds it", async () => {
   // A live owner + present-but-unreadable exit record: readLaunch reads `running`
-  // (F11 single-read) but surfaces the reconciled disposition (unknown, 1b). The
-  // ordinary reconcile tick keeps seeing `running` — pre-BD-7 that blocked forever
-  // with no --timeout. The bound is what wakes it.
-  const h = fakeHarness(unreadableRunningView({ state: "unknown" }));
+  // (F11 single-read) and surfaces NO pendingUnreadableExit — a confirmed-live owner
+  // is not terminal evidence, so there is nothing to promote. The waiter must never
+  // arm the bound, must never fabricate a terminal `unknown` over a still-running
+  // command, and must instead block until its own --timeout (a wait_timeout).
+  const h = fakeHarness(runningView({ status: { state: "running" } }));
   const p = waitForLaunchTerminal("launch-x-abc123", h.harness);
-  assert.equal(h.state.invalidBoundArms, 1, "the persistently-unreadable record armed the bound");
+  assert.equal(h.state.invalidBoundArms, 0, "a live owner surfaces no pending disposition — the bound never arms");
 
-  // The reconcile tick alone never terminals it — the record is still unreadable.
+  // The reconcile tick keeps seeing `running` — it never terminals a live-owned command.
   h.state.reconcile!();
-  // Only the bound firing wakes the waiter, on the reconciled terminal disposition.
-  h.state.invalidBound!();
+  // The waiter's own --timeout is the only bound: a wait_timeout, never a launch terminal.
+  h.state.timeout!();
   const o = await p;
-  assert.equal(o.kind, "terminal");
-  assert.deepEqual((o as { view: LaunchView }).view.status, { state: "unknown" },
-    "a persistently-invalid record with a live owner wakes as terminal unknown (BD-7)");
+  assert.equal(o.kind, "wait_timeout",
+    "a live owner + persistently-invalid record bounds on --timeout, never a fabricated terminal");
+  assert.deepEqual((o as { lastObserved: LaunchStatus }).lastObserved, { state: "running" });
 });
 
 test("FG-552 wait (BD-7 / 1a): a persistently-invalid record whose OWNER is GONE wakes on the reconciled owner disposition (owner_gone), never running forever", async () => {
@@ -378,10 +379,12 @@ test("FG-552 reader (F11): a PRESENT but unreadable exit record with a DEAD pane
     "a present-but-unreadable record blocks the owner_gone verdict — bounded retry, not terminal");
 });
 
-test("FG-552 reader (BD-7): a present-but-unreadable record surfaces the RECONCILED disposition a bounded waiter wakes on — unknown (no session), owner_gone (dead pane), unknown (live owner)", () => {
-  // status stays `running` (F11 single-read), but pendingUnreadableExit names the
-  // terminal disposition the waiter adopts once its bound is exhausted, so a
-  // persistently-invalid record can never block a --timeout 0 wait forever (BD-7).
+test("FG-552 reader (BD-7): a present-but-unreadable record surfaces a RECONCILED disposition ONLY under terminal owner evidence — unknown (no session), owner_gone (dead pane); a LIVE owner surfaces none", () => {
+  // status stays `running` (F11 single-read). pendingUnreadableExit names the
+  // terminal disposition the waiter adopts once its bound is exhausted, but ONLY
+  // when there is independent terminal owner evidence — so a straddled completion
+  // can never block a --timeout 0 wait forever (BD-7), while a live-owned command
+  // is never fabricated into a terminal.
   // No session (owner gone via reboot) -> unknown (1a).
   {
     const stub = tmuxStub();
@@ -402,15 +405,18 @@ test("FG-552 reader (BD-7): a present-but-unreadable record surfaces the RECONCI
     assert.deepEqual(v.status, { state: "running" });
     assert.deepEqual(v.pendingUnreadableExit, { terminal: { state: "owner_gone", cause: "unrecorded", sender: "unrecorded" } });
   }
-  // A live, healthy owner -> unknown (1b): a persistently-invalid record with a
-  // live owner is still a terminal completion the waiter wakes on after the bound.
+  // A live, healthy owner (1b): a persistently-invalid record with a CONFIRMED-LIVE
+  // owner surfaces NO pending disposition — the command is still running, so there is
+  // no terminal owner evidence and `unknown` must not be fabricated over it. Only the
+  // waiter's own --timeout bounds such a wait.
   {
     const stub = tmuxStub();
     const meta = startLaunch(["sleep", "600"], { name: "bd7-live", tmux: stub.tmux });
     writeFileSync(join(LAUNCHES_DIR, meta.id, "exit"), `{"code":null,"signal":null}`);
     const v = readLaunch(meta.id, stub.tmux)!;
     assert.deepEqual(v.status, { state: "running" });
-    assert.deepEqual(v.pendingUnreadableExit, { terminal: { state: "unknown" } });
+    assert.equal(v.pendingUnreadableExit, undefined,
+      "a live owner is not terminal evidence — no pending disposition is surfaced");
   }
 });
 
