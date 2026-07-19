@@ -128,9 +128,13 @@ done:
 
 - Exit record written with a bare `writeFileSync` — no temp+rename (`src/v2/launch.ts:130`), and the
   reader maps an empty/unparseable exit file to a terminal `unknown` (`launch.ts:102,287,289`), so a
-  launch that **exited 0** can read as unrecoverable. **(Open — owned by FG-552 / BD-4.)**
+  launch that **exited 0** can read as unrecoverable. **RESOLVED (FG-552, Slice 2):** the exit record is
+  committed via temp+rename; the reader treats an empty/unparseable/schema-invalid record as bounded-retry
+  (never terminal on a single read), and a persistently-invalid record wakes to a terminal disposition only
+  on independent terminal owner evidence.
 - `meta.json` written twice during `startLaunch` (`launch.ts:240,269-270`) — a reader in the truncate
-  window sees a **running** launch as "no such launch." **(Open — owned by FG-552 / BD-4.)**
+  window sees a **running** launch as "no such launch." **RESOLVED (FG-552, Slice 2):** `meta.json` is now
+  published once atomically (temp+rename), so a reader in the window never sees a running launch as absent.
 - Node preflight was a **minimum-major** check (`src/cli/node-preflight.ts:26`) — it admitted Node 26, whose
   ABI cannot load the repo's `better-sqlite3` binding, producing an opaque native crash instead of the
   guard's clear message. **RESOLVED (FG-570 — `5044c5d`):** replaced with an exact ABI equality assertion (upper AND
@@ -139,9 +143,12 @@ done:
 - The CLI eagerly imports all command modules before argv is parsed (`src/cli/index.ts`), transitively
   loading `better-sqlite3` — so `forge launch wait` would be coupled to the entire import graph even
   though `readLaunch` needs only `node:fs` and the tmux binary. **Source isolation alone never fixes this.**
-  **(Open — owned by FG-552.)**
-- `readLaunch` shells out to the `tmux` binary — it is not a pure durable-record read. **(Open — owned by
-  FG-552.)**
+  **RESOLVED (FG-552, Slice 2):** `src/cli/index.ts` is a thin dispatcher that routes `launch wait` to a
+  native-free path (`node:fs` + tmux only) before the eager command registry (extracted to `program.ts`,
+  dynamically imported), so the observer resolves without `better-sqlite3`.
+- `readLaunch` shells out to the `tmux` binary — it is not a pure durable-record read. **ADDRESSED (FG-552,
+  Slice 2):** degraded/absent tmux is handled as a named observation input (classifies, never crashes),
+  covered by a required test.
 - Migrations *previously* ran unconditionally on every writable DB open, including a destructive `DROP COLUMN`
   (`src/store/db.ts:91`), while version skew between concurrent Forge processes is the default state.
   **RESOLVED (FG-568, `275ac63`):** the ordinary open path is now additive-only on every open (read-only
@@ -151,7 +158,9 @@ done:
   so no runtime provenance was recoverable post-launch. **RESOLVED (FG-569, `1b11f25`):** `meta.json` now
   carries a `control` R1 record (the submitting CLI's `execPath`/`abi`/`nodeVersion`/trusted `releaseId`)
   and `runtime.json` carries the independent R2 exit-recorder record; both surface in `forge launch show`.
-  R3/R4 provenance remains open (FG-555).
+  R3/R4 provenance is **RESOLVED (FG-555, merged `21af80c`):** `workload.json` records R3 (launched
+  top-level executable, resolved at spawn time) and R4 (nested-shell resolution, default `unknowable`),
+  surfaced in `forge launch show` / `--json`.
 
 ## Acceptance (the campaign closeout gate)
 
