@@ -6,6 +6,8 @@
 **Primary backlog:** FG-551, FG-552, FG-553, FG-555
 **Landed foundation:** FG-535, FG-536, FG-542  
 **Landed Slice 1 (partial):** FG-551 (test parity), FG-567 (signal fidelity), FG-568 (additive-only store), FG-569 (exec entry + inert release closure + R1/R2 provenance), FG-570 (bounded ABI assertion — `5044c5d`). **FG-571 (promotion) LANDED `2f80496`.** FG-553 child 5 (FG-572 installed-surface) remains open. **R3/R4 launched-workload provenance LANDED (FG-555, `cd8a036`) — R3/R4 now recorded; workload provenance + the `--require-control-toolchain` contract delivered [SHIPPED 2026-07-18].**  
+**Landed Slice 2:** FG-552 (atomic records + `forge launch wait`/`waitForLaunchTerminal` — `017352a`) — BD-4/BD-6/BD-7 MET [SHIPPED 2026-07-18].  
+**Landed Slice 3 (primitive):** FG-562 (durable continuation-claim primitive — `727e05f`) — the durable `continuations` table + phase-bound CAS claim; BD-5 MET **at the primitive** [SHIPPED 2026-07-19]. Consumer adoption (FG-563 orchestrator / FG-564 campaign) remains open — this is the primitive, not end-to-end adoption.  
 **Upstream context:** [anthropics/claude-code#76249](https://github.com/anthropics/claude-code/issues/76249), [#25188](https://github.com/anthropics/claude-code/issues/25188), [#72851](https://github.com/anthropics/claude-code/issues/72851), [#68625](https://github.com/anthropics/claude-code/issues/68625)
 
 ## How to use this document
@@ -97,9 +99,9 @@ Forge must not make correct ownership depend on a particular upstream diagnosis 
 | tmux availability in agent test image | `agent-dev-worker` image | FG-551 | Landed (`7f6091b`) |
 | Control-plane executable + provenance (R1, R2) | npm-linked mutable Forge working tree; single-process `/bin/sh` exec entry so R1 (`process.execPath`) is self-evidencing; exit-recorder captures R2 independently | FG-553 / FG-569 | **Closed on the live path** — R1/R2 recorded + exec entry (FG-569, `1b11f25`); source isolation + atomic promotion shipped (FG-571, `2f80496`). Honest limit: same-principal `$FORGE_HOME` tampering is out of scope (FG-571 threat boundary) |
 | Launched-workload environment (R3/R4) | `forge launch` preserves argv, records R3/R4 workload provenance at spawn time, and offers the `--require-control-toolchain` pinned-PATH-trust contract for Forge-owned unattended callers | FG-555 | **Shipped (`cd8a036`, 2026-07-18) — R3/R4 recorded; `--require-control-toolchain` contract delivered** |
-| Launch completion notification | Canonical `forge launch wait` / `waitForLaunchTerminal` blocking subscription over atomic records | FG-552 | **Shipped (`fg552-launch-wait-primitive`, `017352a`, 2026-07-18) — race-free subscription to every terminal disposition (BD-4/BD-6/BD-7 MET); push-notification delivery evidence + idempotent continuation remain open below** |
+| Launch completion notification | Canonical `forge launch wait` / `waitForLaunchTerminal` blocking subscription over atomic records | FG-552 | **Shipped (`fg552-launch-wait-primitive`, `017352a`, 2026-07-18) — race-free subscription to every terminal disposition (BD-4/BD-6/BD-7 MET); push-notification delivery evidence remains open below. The idempotent-continuation-claim primitive has since shipped (FG-562, `727e05f`, 2026-07-19); its consumer adoption remains open below** |
 | Notification delivery evidence | None | New slice | Missing |
-| Idempotent continuation claim | Consumer-specific/implicit | New slice | Missing |
+| Idempotent continuation claim | Durable `continuations` table + phase-bound CAS claim (`claimContinuationDispatch`, `src/store/continuations.ts`) | FG-562 | **[SHIPPED 2026-07-19 (FG-562) — durable continuations table + phase-bound CAS claim; consumer adoption in FG-563/FG-564] — the PRIMITIVE is shipped: exactly-once-CLAIMED advancement over at-least-once delivery, `adoptOrClaimDispatch`/deterministic `dispatch_key` receipt (F17) + `continuationsInDispatch` restart-replay collector + durable stale-observation audit. Physical-dispatch adoption (check the receipt before spawning) is the consumer's job (FG-563 orchestrator / FG-564 campaign) — still open, NOT end-to-end adopted** |
 | Orchestrator adoption | Session prose and live workaround | New slice | Missing |
 | Campaign adoption | Campaign runner | New slice | Missing |
 | Full cross-layer failure proof | Split across FG-535/536 tests | New slice | Missing |
@@ -146,7 +148,7 @@ This requirement does **not** extend to the reconciled dispositions. `owner_gone
 
 ### BD-5 — Delivery is at least once; advancement is exactly once claimed
 
-**Status: UNMET, owned by Slice 3.** This is a required property, not an accomplished one. No idempotent continuation claim exists today.
+**Status: MET at the primitive (Slice 3, FG-562). [SHIPPED 2026-07-19 (FG-562) — durable `continuations` table + phase-bound CAS claim (`claimContinuationDispatch`); consumer adoption in FG-563/FG-564].** The durable claim now exists (`src/store/continuations.ts`): on wake a controller records the observed terminal disposition (via the canonical `classifyExit`/`isTerminalStatus` classifier, BD-3) and claims the single `awaiting_completion|ready -> dispatching` transition through a phase-bound compare-and-set whose predicate binds `source_launch_id + consumer_kind + current_phase + next_action + expected prior state + lease`, so a delayed completion from launch A can never advance a newer phase B. `adoptOrClaimDispatch` + the deterministic `dispatch_key` receipt (written at claim time, before dispatch) give F17 adopt-not-duplicate; `continuationsInDispatch` is the restart-replay collector; a stale observation is recorded durably (`continuation_stale_observations`) and ignored. This ships the PRIMITIVE only — the physical-dispatch adoption (checking the receipt before spawning an agent/run) is the CONSUMER's job in FG-563 (orchestrator) / FG-564 (campaign) and remains open; this is not yet end-to-end adoption. The decision below is preserved as the accepted record.
 
 Duplicate events are expected. Delivery may be delayed or lost. The consumer must make advancement idempotent through a durable claim or an already-existing durable state transition with equivalent semantics.
 
@@ -441,6 +443,8 @@ Non-scope:
 
 ### Slice 3 — Durable continuation claim
 
+> **[SHIPPED 2026-07-19 (FG-562, `727e05f`) — the durable continuation-claim PRIMITIVE.]** The scope below is DELIVERED as a primitive on branch `fg562-durable-continuation-claim`: the additive-only `continuations` table (`src/store/schema.ts`), the phase-bound CAS `claimContinuationDispatch`, the `adoptOrClaimDispatch` + deterministic `dispatch_key` receipt for the claim-to-dispatch crash window (F17), `continuationsInDispatch` as the restart-replay collector, and the append-only `continuation_stale_observations` audit. BD-5 is MET **at the primitive** and the F13/F14/F15/F16/F17 crash-window cases are covered at the primitive level. **This slice ships the primitive only** — the physical-dispatch adoption (checking the receipt before spawning) is the consumer's job in Slice 4 (FG-563, orchestrator) / Slice 5 (FG-564, campaign) and remains open. The design narrative below is preserved as the accepted record. See `docs/SCHEMA-CONTRACT.md` for the schema/consumer contract.
+
 Goal: observing a launch terminal state cannot duplicate or lose the next action.
 
 Scope:
@@ -629,6 +633,34 @@ The initiative is complete only when all of the following are true:
 - A final reviewer maps evidence to every binding decision and matrix row rather than approving from green CI alone.
 
 ## Revision log
+
+### 2026-07-19 — FG-562 Slice-3 durable continuation-claim PRIMITIVE SHIPPED (BD-5 MET at the primitive)
+
+- **BD-5 (delivery at-least-once; advancement exactly-once-claimed) flipped from UNMET to MET at the primitive.**
+  FG-562 (branch `fg562-durable-continuation-claim`, tip `727e05f`) shipped the durable continuation-claim
+  primitive: the additive-only `continuations` table (`CREATE TABLE IF NOT EXISTS`, BD-15) plus the phase-bound
+  CAS `claimContinuationDispatch` in `src/store/continuations.ts`. The claim grants the single
+  `awaiting_completion|ready -> dispatching` transition in one `BEGIN IMMEDIATE` UPDATE whose WHERE binds
+  `source_launch_id + consumer_kind + current_phase + next_action + expected prior state + lease`, so a delayed
+  completion from launch A can never advance a newer phase B (uniqueness alone would not stop that).
+- **F17 adopt-not-duplicate is a real function, not a comment.** `adoptOrClaimDispatch(req)` derives the
+  deterministic `dispatch_key` (written at claim time, before dispatch) and returns `disposition:'adopt'` on an
+  existing dispatch (the consumer adopts the already-created run), `'claim'` on a fresh `ready -> dispatching`
+  grant, or `'unclaimable'` otherwise. `continuationsInDispatch({consumerKind?})` is the restart-replay collector
+  returning the crash-window (`dispatching`, un-advanced) slots to resume.
+- **BD-3 evidence authority + durable stale-observation audit.** `observeLaunchStatus` derives terminality
+  through the one canonical `isTerminalStatus` classifier (never a caller assertion), so only a real terminal
+  `LaunchStatus.state` — including the reconciled `owner_gone`/`unknown` with no exit record — can promote a slot
+  to `ready`. A delayed, launch-mismatched observation is appended to the additive `continuation_stale_observations`
+  audit table (observed-recorded-and-ignored) rather than silently discarded.
+- **PRIMITIVE only, not end-to-end adoption.** This slice ships the mechanism; the physical-dispatch adoption
+  (checking the receipt before spawning an agent/run) is the CONSUMER's job — FG-563 (orchestrator, Slice 4) and
+  FG-564 (campaign, Slice 5) — and remains open. BD-5 is MET at the primitive, NOT fully end-to-end adopted.
+- **No normative change.** This is a current-state reconciliation of the same class as the FG-552 entry below:
+  the accepted binding decisions (BD-5's decision body and the rest), the Slice 3 design narrative, and the
+  F-row matrix are untouched. FG-563/FG-564/FG-565 and the remaining open slices stay open. Only the MET/UNMET
+  status labels and the stale "no idempotent continuation claim exists today" current-state descriptions move.
+  The schema/consumer contract is recorded in `docs/SCHEMA-CONTRACT.md`.
 
 ### 2026-07-18 — FG-552 Slice-2 atomic records + launch wait primitive SHIPPED (BD-4/BD-7 MET)
 
