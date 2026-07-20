@@ -23,7 +23,12 @@ import {
   updateCampaignItem,
   deriveCampaignItemDispatchKey,
   allocateItemGeneration,
+  createCampaign,
+  addCampaignItem,
+  claimCampaignItemForDrive,
+  updateCampaignItemIfPending,
 } from "../store/campaigns.js";
+import { parkCampaign } from "./park.js";
 import { getRun, insertRun, runByDispatchKey, listRuns } from "../store/runs.js";
 import { writeTicket, closeTicket } from "../backlog/structured.js";
 import { planCampaign as _planCampaign, resolvePlan } from "./planner.js";
@@ -572,4 +577,191 @@ test("FG-596 A6: a wait failure AFTER the child dispatched a run leaves the runn
 
   // No second run was minted — exactly one run exists for the item.
   assert.equal(listRuns().filter((r) => r.title === "FG-101").length, 1, "no duplicate run was created");
+});
+
+// ── FG-596 (A6) — close the containment/child race BY CONSTRUCTION ──────────────────
+//
+// The launch-boundary containment (containLaunchBoundaryFailure) and the still-running
+// drive-item CHILD both race for the SAME pending item: the parent may park the item +
+// pause the campaign at the exact moment the child creates/links its run. The pre-fix
+// containment ASSUMED "a pending durable item ⇒ no child can dispatch" — false, because
+// the child is already running. The fix removes the assumption: BOTH sides now gate their
+// mutation on the item still being `pending`, in ONE atomic statement each —
+//   * child : claimCampaignItemForDrive  (pending→running, gated ALSO on campaign=running)
+//   * parent: updateCampaignItemIfPending (pending→failed), then pause only if it landed.
+// Because both CAS on `pending`, whichever commits first flips the item off `pending` and
+// the OTHER becomes a no-op — so exactly one wins and the end state is ALWAYS consistent:
+// either the child's run is legitimately linked and the campaign stays running, OR the
+// campaign is paused and NO run was ever created behind it. This test drives the exact
+// interleaving through the REAL primitives across EVERY ordering, MANY times over.
+
+// The child's run-drive sequence, split into its two durable sub-steps exactly as the
+// executor's insert lanes perform them: C1 = the atomic claim; C2 = create + link the run
+// (only reached when the claim won).
+function makeChildSteps(campaignId: string, itemId: string, runId: string, dispatchKey: string, gen: number, projectDir: string) {
+  let claimed = false;
+  return {
+    C1: () => { claimed = claimCampaignItemForDrive(itemId, campaignId, undefined); },
+    C2: () => {
+      if (!claimed) return; // refused: campaign paused/abandoned or item already parked — create NO run
+      insertRun({
+        id: runId,
+        workflow: "invoke",
+        title: "FG-101",
+        status: "active",
+        createdAt: nowIso(),
+        metadata: { invokeAgent: "engineer", campaignId, ticketId: "FG-101", itemId, dispatchKey, attemptGeneration: gen },
+        projectDir,
+      });
+      updateCampaignItem(itemId, { runId, lifecycleStatus: "running" });
+    },
+    didClaim: () => claimed,
+  };
+}
+
+// The launch-boundary containment's park sequence, split exactly as
+// containLaunchBoundaryFailure performs it: P1 = the pending-gated item park; P2 = the
+// running→paused CAS (only reached when the park landed).
+function makeContainmentSteps(campaignId: string, itemId: string) {
+  let parked = false;
+  return {
+    P1: () => {
+      parked = updateCampaignItemIfPending(itemId, campaignId, {
+        lifecycleStatus: "failed",
+        outcome: "blocked",
+        blockerKind: "infrastructure",
+        reason: "launch boundary failed",
+        requestedHumanAction: "retry then resume",
+      });
+    },
+    P2: async () => {
+      if (!parked) return; // the child claimed it first — do NOT pause behind a live drive
+      await parkCampaign(campaignId, itemId, "blocked", { exemption: "item-carries-context" });
+    },
+    didPark: () => parked,
+  };
+}
+
+test("FG-596 A6 stress: the containment/child race is consistent across EVERY interleaving, looped 100x+ — never a paused campaign with an orphan/duplicate run", async () => {
+  // Every intra-order-preserving interleaving of the child's [C1,C2] and the parent's
+  // [P1,P2]. Each is a genuine schedule the two racing processes could realize.
+  const schedules: ("C1" | "C2" | "P1" | "P2")[][] = [
+    ["C1", "C2", "P1", "P2"], // child fully commits, THEN the parent contains
+    ["C1", "P1", "C2", "P2"], // claim wins; parent's park no-ops between the child's steps
+    ["C1", "P1", "P2", "C2"], // claim wins; parent runs fully (park no-ops) before the child links
+    ["P1", "P2", "C1", "C2"], // parent fully parks+pauses, THEN the child attempts its drive
+    ["P1", "C1", "P2", "C2"], // park wins; child's claim no-ops between the parent's steps
+    ["P1", "C1", "C2", "P2"], // park wins; child runs fully (claim no-ops) before the parent pauses
+  ];
+
+  const ITERATIONS_PER_SCHEDULE = 40; // 6 schedules × 40 = 240 iterations (well over the 100x floor)
+  let stateChildWon = 0;
+  let stateParentWon = 0;
+
+  for (let i = 0; i < ITERATIONS_PER_SCHEDULE; i++) {
+    for (const schedule of schedules) {
+      // A FRESH running campaign + pending item per iteration — no cross-iteration state.
+      const c = createCampaign({ sourceKind: "list", sourceInput: { ticketIds: ["FG-101"] }, mode: "sequential", projectDir });
+      const it = addCampaignItem({ campaignId: c.id, itemOrder: 0, ticketId: "FG-101" });
+      assert.ok(tryTransitionCampaignToRunning(c.id), "precondition: campaign is running");
+      const gen = allocateItemGeneration(it.id);
+      const dispatchKey = deriveCampaignItemDispatchKey(c.id, it.id, gen);
+      const runId = `run-stress-${i}-${schedule.join("")}`;
+
+      const child = makeChildSteps(c.id, it.id, runId, dispatchKey, gen, projectDir);
+      const parent = makeContainmentSteps(c.id, it.id);
+      const step: Record<string, () => void | Promise<void>> = { C1: child.C1, C2: child.C2, P1: parent.P1, P2: parent.P2 };
+      for (const token of schedule) await step[token]!();
+
+      // ── The invariant, asserted EVERY iteration ──────────────────────────────────
+      const campaign = getCampaign(c.id)!;
+      const item = getCampaignItem(it.id)!;
+      const runForKey = runByDispatchKey(dispatchKey);
+
+      // THE core wrong-state the fix forbids: a paused campaign with a run created behind it.
+      assert.ok(
+        !(campaign.status === "paused" && runForKey),
+        `[${schedule.join(">")}] paused campaign must carry NO run — got status=${campaign.status}, run=${runForKey?.id}`,
+      );
+      // Exactly one side won, and the whole tuple (campaign, item, run) is consistent with it.
+      assert.ok(child.didClaim() !== parent.didPark(), `[${schedule.join(">")}] exactly one of {claim, park} may win`);
+
+      if (child.didClaim()) {
+        stateChildWon++;
+        assert.equal(campaign.status, "running", `[${schedule.join(">")}] child won → campaign stays running`);
+        assert.equal(item.lifecycleStatus, "running", `[${schedule.join(">")}] child won → item is running (live/adoptable)`);
+        assert.equal(item.runId, runId, `[${schedule.join(">")}] child won → item links its own run`);
+        assert.equal(runForKey?.id, runId, `[${schedule.join(">")}] child won → the run is adoptable by its dispatch key`);
+        assert.equal(listRuns().filter((r) => r.id === runId).length, 1, `[${schedule.join(">")}] exactly one run`);
+      } else {
+        stateParentWon++;
+        assert.equal(campaign.status, "paused", `[${schedule.join(">")}] parent won → campaign is paused (recoverable)`);
+        assert.equal(item.lifecycleStatus, "failed", `[${schedule.join(">")}] parent won → item parked failed`);
+        assert.equal(item.outcome, "blocked", `[${schedule.join(">")}] parent won → item parked blocked`);
+        assert.equal(item.runId, undefined, `[${schedule.join(">")}] parent won → NO run linked`);
+        assert.equal(runForKey, undefined, `[${schedule.join(">")}] parent won → NO run created behind the pause`);
+      }
+    }
+  }
+
+  // Both end states were actually exercised — the loop proved BOTH race outcomes, not one.
+  assert.ok(stateChildWon > 0, "the child-won branch was exercised");
+  assert.ok(stateParentWon > 0, "the parent-won branch was exercised");
+  assert.equal(stateChildWon + stateParentWon, ITERATIONS_PER_SCHEDULE * schedules.length, "every iteration landed in a consistent state");
+});
+
+test("FG-596 A6 wiring: driveOneCampaignItem (the CHILD) creates/links NO run behind a PAUSED campaign", async () => {
+  // A child drive that reaches a still-pending item under a campaign the parent has already
+  // paused must create NO run and link nothing — the run-drive is gated on the campaign
+  // being running (the claim CAS's campaign-running precondition, and the cooperative
+  // pre-check that precedes it). Either way, the invariant the fix guarantees holds: no run
+  // is ever minted behind a paused campaign.
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "ok" });
+  const itemId = listCampaignItems(campaign.id)[0]!.id;
+  assert.ok(tryTransitionCampaignToRunning(campaign.id));
+  // The operator (or the containment's running→paused CAS) paused the campaign while the
+  // item is still pending — the exact state a losing child observes.
+  assert.ok(tryTransitionCampaign(campaign.id, "running", "paused"), "precondition: campaign paused, item pending");
+
+  const runsBefore = listRuns().length;
+  const result = await driveOneCampaignItem(campaign.id, itemId, { dispatch: fakeDispatch("complete"), projectDir, mode: "sequential" });
+
+  assert.equal(result.stopReason, "paused", "the child halts cooperatively on the paused campaign");
+  assert.equal(listRuns().length, runsBefore, "the child created NO run behind the paused campaign");
+  const item = getCampaignItem(itemId)!;
+  assert.equal(item.lifecycleStatus, "pending", "the pending item was not driven (no claim behind the pause)");
+  assert.equal(item.runId, undefined, "no run linkage was written behind the pause");
+
+  // And the claim CAS itself refuses directly against the paused campaign — the
+  // by-construction gate the executor wires in.
+  assert.equal(claimCampaignItemForDrive(itemId, campaign.id, undefined), false, "the run-drive claim refuses a paused campaign");
+});
+
+test("FG-596 A6 wiring: the launch-boundary containment does NOT clobber (or pause behind) a child that already CLAIMED the item", async () => {
+  // The mirror case: the child won the claim (item running) before the containment runs.
+  // The containment's pending-gated park must no-op — leaving the live drive intact and the
+  // campaign RUNNING — never overwriting the running item as failed nor pausing behind it.
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "ok" });
+  const itemId = listCampaignItems(campaign.id)[0]!.id;
+  assert.ok(tryTransitionCampaignToRunning(campaign.id));
+  const gen = allocateItemGeneration(itemId);
+  const dispatchKey = deriveCampaignItemDispatchKey(campaign.id, itemId, gen);
+  const runId = "run-claimed-inflight";
+
+  // Child CLAIMS + creates its run (the winning drive).
+  assert.ok(claimCampaignItemForDrive(itemId, campaign.id, undefined), "the child claims the pending item");
+  insertRun({ id: runId, workflow: "feature", title: "FG-101", status: "active", createdAt: nowIso(), metadata: { dispatchKey, attemptGeneration: gen, campaignId: campaign.id, itemId, ticketId: "FG-101" }, projectDir });
+  updateCampaignItem(itemId, { runId, lifecycleStatus: "running" });
+
+  // Now the containment attempts its pending-gated park — must be a no-op.
+  const parked = updateCampaignItemIfPending(itemId, campaign.id, { lifecycleStatus: "failed", outcome: "blocked", blockerKind: "infrastructure", reason: "launch boundary failed" });
+  assert.equal(parked, false, "the pending-gated park no-ops against the already-claimed (running) item");
+
+  const item = getCampaignItem(itemId)!;
+  assert.equal(item.lifecycleStatus, "running", "the live drive is NOT overwritten as failed");
+  assert.equal(item.runId, runId, "the child's run linkage is preserved");
+  assert.equal(getCampaign(campaign.id)!.status, "running", "the campaign stays running — the containment did not pause behind the live child");
+  assert.equal(runByDispatchKey(dispatchKey)?.id, runId, "the run stays adoptable by its dispatch key");
 });

@@ -21,6 +21,8 @@ import {
   updateCampaignItem,
   updateCampaignItemIfCampaignPaused,
   updateCampaignItemIfCampaignRunning,
+  updateCampaignItemIfPending,
+  claimCampaignItemForDrive,
   updateCampaignPlanForReapproval,
   tryTransitionCampaignToRunning,
   allocateItemGeneration,
@@ -1581,9 +1583,48 @@ export async function driveOneCampaignItem(
     // this only fires for the unlinked-run crash window — never over a run the item already
     // points at. A retry mints a NEW generation → a distinct key → no false adoption.
     const adoptedRun = runByDispatchKey(stampDispatchKey);
-    if (adoptedRun) {
-      updateCampaignItem(item.id, { runId: adoptedRun.id, lifecycleStatus: "running" });
-      item.runId = adoptedRun.id;
+
+    // FG-596 (A6): close the launch-boundary containment/child race BY CONSTRUCTION.
+    // Before creating or linking ANY run, CLAIM the item atomically — flip pending→running
+    // gated on the campaign still being 'running'. This is the SAME atomic 'pending'
+    // precondition the launch-boundary containment now parks under
+    // (updateCampaignItemIfPending), so the two can never both win: whichever CAS commits
+    // first flips the item off 'pending' and the other becomes a no-op. If the containment
+    // (or a concurrent operator pause/abandon) already parked the item / paused the
+    // campaign, the claim REFUSES here and the child creates no run, links nothing, and
+    // resurrects nothing — "paused campaign ⇒ no child-created run" holds by construction,
+    // so the containment no longer has to assume anything about the child. The
+    // ticketing_only/manual lanes dispatch no run at all, so they never claim (their
+    // terminal complete/skipped write is not a run-creating transition). Adoption of a
+    // crash-window run (FG-564) flows through the claim too: a re-drive of the SAME attempt
+    // reaches here with the item still 'pending' (runId unlinked) and passes the gate.
+    const laneDispatchesRun =
+      itemConfig.lane !== "ticketing_only" && itemConfig.lane !== "manual";
+    if (laneDispatchesRun) {
+      const claimed = claimCampaignItemForDrive(
+        item.id,
+        campaignId,
+        adoptedRun ? adoptedRun.id : undefined,
+      );
+      if (!claimed) {
+        // The launch-boundary containment (or a concurrent operator pause/abandon) won the
+        // race and already parked this item / paused the campaign. Do NOT create a run
+        // behind it — reconcile from durable state exactly as the cooperative-pause checks
+        // below would, and halt the controller cleanly.
+        const durable = getCampaignItem(item.id);
+        itemRecords.push({
+          itemId: item.id,
+          ticketId: item.ticketId,
+          runId: durable?.runId,
+          lifecycleStatus: durable?.lifecycleStatus ?? "failed",
+          outcome: durable?.outcome,
+          blockerKind: durable?.blockerKind,
+          reason: durable?.reason,
+        });
+        const c = getCampaign(campaignId);
+        return { stopReason: c?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
+      }
+      if (adoptedRun) item.runId = adoptedRun.id;
       item.lifecycleStatus = "running";
     }
 
@@ -2309,16 +2350,26 @@ async function containLaunchBoundaryFailure(
     durableItem?.blockerKind && isSharedBlocker(durableItem.blockerKind) ? durableItem.blockerKind : undefined;
   const blockerKind: BlockerKind = existingShared ?? "infrastructure";
   try {
-    logEvent("campaign_item.drive_error", {
-      ...(durableItem?.runId ? { runId: durableItem.runId } : {}),
-      payload: { campaignId, itemId, ticketId, error: message, boundary: "launch", decidedAt: nowIso() },
-    });
-    updateCampaignItem(itemId, {
+    // FG-596 (A6, by construction): park the item ONLY while it is still 'pending' — its
+    // pre-drive state. The pending-gated CAS is the parent-side half of the claim/park
+    // race: if the drive-item child already CLAIMED the item (pending→running via
+    // claimCampaignItemForDrive) between this containment's durableItem read above and this
+    // write, the park is a no-op and we must NOT clobber the live drive nor pause the
+    // campaign behind it. In that case the item is a live/adoptable mid-flight drive —
+    // reconcile from durable state (→ recovery_needed) exactly as the 'running' early
+    // return above does. Only when the park actually lands (the item was genuinely still
+    // pending — no child ever dispatched) do we CAS the campaign running→paused.
+    const didPark = updateCampaignItemIfPending(itemId, campaignId, {
       lifecycleStatus: "failed",
       outcome: "blocked",
       blockerKind,
       reason: message,
       requestedHumanAction: `the per-item launch boundary failed before ${ticketId} could be driven (${message}) — no run was dispatched. Run \`forge campaign retry ${campaignId} ${ticketId}\`, then \`forge campaign resume ${campaignId}\`.`,
+    });
+    if (!didPark) return deriveDurable();
+    logEvent("campaign_item.drive_error", {
+      ...(durableItem?.runId ? { runId: durableItem.runId } : {}),
+      payload: { campaignId, itemId, ticketId, error: message, boundary: "launch", decidedAt: nowIso() },
     });
     await parkCampaign(campaignId, itemId, "blocked", { exemption: "item-carries-context" }, { fallbackRunId: pickCampaignFallbackRunId(campaignId) });
   } catch {

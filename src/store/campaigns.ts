@@ -427,6 +427,70 @@ export function updateCampaignItem(id: string, update: CampaignItemUpdate): void
     .run(...params, id);
 }
 
+// FG-596 (A6): the drive-item child's atomic run-drive CLAIM. Flips a campaign item
+// pending→running (optionally linking runId) in ONE statement, gated on BOTH the campaign
+// still being 'running' AND the item still being 'pending'. This is the by-construction
+// half of the launch-boundary containment/child race: the launch-boundary containment
+// parks the item under updateCampaignItemIfPending (the SAME 'pending' precondition), so
+// the claim and the park can never both land — whichever CAS commits first flips the item
+// off 'pending' and the other becomes a no-op. A false return means the campaign was
+// paused/abandoned or the item was already parked (the containment won the race): the child
+// must then create/link NO run and resurrect nothing. Adoption of a crash-window run
+// (FG-564) still flows through here — a re-drive of the SAME attempt reaches this with the
+// item still 'pending' (runId not yet linked) and passes the gate.
+export function claimCampaignItemForDrive(
+  id: string,
+  campaignId: string,
+  runId?: string,
+): boolean {
+  const now = nowIso();
+  const result =
+    runId !== undefined
+      ? getDb()
+          .prepare(
+            `UPDATE campaign_items SET lifecycle_status = 'running', run_id = ?, updated_at = ?
+             WHERE id = ?
+               AND campaign_id = ?
+               AND lifecycle_status = 'pending'
+               AND (SELECT status FROM campaigns WHERE id = ?) = 'running'`
+          )
+          .run(runId, now, id, campaignId, campaignId)
+      : getDb()
+          .prepare(
+            `UPDATE campaign_items SET lifecycle_status = 'running', updated_at = ?
+             WHERE id = ?
+               AND campaign_id = ?
+               AND lifecycle_status = 'pending'
+               AND (SELECT status FROM campaigns WHERE id = ?) = 'running'`
+          )
+          .run(now, id, campaignId, campaignId);
+  return (result.changes ?? 0) > 0;
+}
+
+// FG-596 (A6): guarded item park for the launch-boundary containment. Applies the update
+// ONLY while the item is still 'pending' — its pre-drive state. If the drive-item child
+// already CLAIMED the item (pending→running via claimCampaignItemForDrive) in the launch
+// race, this is a no-op (returns false) and the containment must NOT clobber the live drive
+// nor pause the campaign behind it. Same single-statement CAS shape as the campaign-status
+// guards above; the 'pending' precondition is shared with the claim so the two can never
+// both win.
+export function updateCampaignItemIfPending(
+  id: string,
+  campaignId: string,
+  update: CampaignItemUpdate,
+): boolean {
+  const { setClause, params } = buildItemUpdateSet(update);
+  const result = getDb()
+    .prepare(
+      `UPDATE campaign_items SET ${setClause}
+       WHERE id = ?
+         AND campaign_id = ?
+         AND lifecycle_status = 'pending'`
+    )
+    .run(...params, id, campaignId);
+  return (result.changes ?? 0) > 0;
+}
+
 // FG-596: atomically allocate the NEXT logical attempt generation for an item and
 // persist it, returning the new value. Called ONLY on a genuinely new attempt (an
 // initial dispatch, or an explicit retry) — a re-drive / reattach / recovery of the
