@@ -117,6 +117,34 @@ test("FG-596 CLI: `campaign drive-item` on an unknown campaign exits 1 with a no
   assert.match(r.stderr, /not found/, "the error names the missing campaign");
 });
 
+test("FG-596 CLI: `campaign drive-item` on a RUNNING campaign but an UNKNOWN item-id FAILS cleanly (human) — exit 1, error, no drive", () => {
+  const { campaignId } = seedTicketingOnlyCampaign();
+  tryTransitionCampaignToRunning(campaignId);
+
+  const r = runForge(["campaign", "drive-item", campaignId, "item-does-not-exist"]);
+  assert.equal(r.status, 1, "an unknown item is a clean drive-process failure, not a settled drive");
+  assert.match(r.stderr, /item item-does-not-exist is not a drivable item/, "the error names the undrivable item");
+  assert.doesNotMatch(r.stdout, /settled \(campaign continues\)/, "an unknown item must NOT render as a settled drive");
+
+  // No run/durable state was created for the non-existent item, and the real item is untouched.
+  const show = runForge(["campaign", "show", campaignId, "--json"]);
+  assert.equal(show.status, 0, `campaign show failed: ${show.stderr}`);
+  const item = JSON.parse(show.stdout).items.find((i: { ticketId: string }) => i.ticketId === "FG-101");
+  assert.equal(item.lifecycleStatus, "pending", "the real item stays pending — the unknown-item refusal drove nothing");
+});
+
+test("FG-596 CLI: `campaign drive-item --json` on an UNKNOWN item-id emits a machine-readable error, exit 1", () => {
+  const { campaignId } = seedTicketingOnlyCampaign();
+  tryTransitionCampaignToRunning(campaignId);
+
+  const r = runForge(["campaign", "drive-item", campaignId, "item-does-not-exist", "--json"]);
+  assert.equal(r.status, 1, "unknown item fails under --json too");
+  const parsed = JSON.parse(r.stdout);
+  assert.match(parsed.error, /is not a drivable item/, "--json carries the error, not an itemRecords settle");
+  assert.equal(parsed.itemId, "item-does-not-exist", "--json echoes the offending itemId");
+  assert.ok(!Array.isArray(parsed.itemRecords), "--json must NOT report a settled DriveOneItemResult for a non-existent item");
+});
+
 // ── Campaign-status guard (A1) ──────────────────────────────────────────────────
 
 test("FG-596 CLI: the campaign-status guard REFUSES drive-item on a PAUSED campaign and mutates nothing", () => {

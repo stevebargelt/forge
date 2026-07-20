@@ -678,6 +678,20 @@ export function registerCampaign(program: Command): void {
         );
         process.exit(1);
       }
+      // FG-596: an itemId that is not a real item of this campaign is a drive-PROCESS
+      // failure — the process could not drive the named item — NOT a settled drive.
+      // driveOneCampaignItem returns an empty settled result for an item it cannot find,
+      // which the renderers below would misreport as "settled (campaign continues)" at
+      // exit 0. Reject it here at the operator boundary: exit non-zero with a clear
+      // error in BOTH output modes, creating/mutating no run or durable state. (The
+      // "disposition describes the process, never the item fate" contract is intact —
+      // there is no item to have a fate.)
+      if (!listCampaignItems(campaignId).some((i) => i.id === itemId)) {
+        const message = `Error: item ${itemId} is not a drivable item of campaign ${campaignId}`;
+        if (opts.json) console.log(JSON.stringify({ error: message, campaignId, itemId }, null, 2));
+        process.stderr.write(`${message}\n`);
+        process.exit(1);
+      }
       try {
         const result = await driveOneCampaignItem(campaignId, itemId, {
           dispatch: invoke,
