@@ -1042,12 +1042,13 @@ function readEventsByType(types: readonly string[], sinceMs?: number): Verificat
     .all(...params) as VerificationEventRow[];
 }
 
-function runProjectDir(runId: string | null): string | null {
+function runScopeInfo(runId: string | null): { projectDir: string | null; status: string | null } | null {
   if (!runId) return null;
-  const row = db().prepare(`SELECT project_dir FROM runs WHERE id = ?`).get(runId) as
-    | { project_dir: string | null }
+  const row = db().prepare(`SELECT project_dir, status FROM runs WHERE id = ?`).get(runId) as
+    | { project_dir: string | null; status: string | null }
     | undefined;
-  return row?.project_dir ?? null;
+  if (!row) return null;
+  return { projectDir: row.project_dir ?? null, status: row.status ?? null };
 }
 
 function campaignProjectDir(campaignId: string | null): string | null {
@@ -1127,11 +1128,18 @@ export function inProgressVerifications(nowMs: number = Date.now(), scope?: Proj
     const ageMs = nowMs - new Date(row.created_at).getTime();
     if (ageMs > STALE_LOOKBACK_MS) continue;
     if (row.event_type === "review_loop.verification_started") {
+      // FG-594: an unmatched start only counts as in-progress while its owning
+      // run is still active. A terminal run (complete/failed/abandoned) or a
+      // missing run means the verification is over — a finish event may have
+      // been lost, but the run outcome is authoritative. Fail closed: no run
+      // row, or any non-active status, drops the start.
+      const runInfo = runScopeInfo(row.run_id);
+      if (!runInfo || runInfo.status !== "active") continue;
       // Repository scopes include every observed member checkout; exact-path
       // scopes retain the previous operational filtering semantics. The
       // loop's eager run row carries project_dir; campaign gates resolve via
       // their campaign row (item.runId is frequently null).
-      if (!scopeIncludes(scope, runProjectDir(row.run_id))) continue;
+      if (!scopeIncludes(scope, runInfo.projectDir)) continue;
       out.push({
         kind: "review_loop_verification",
         attemptId,
