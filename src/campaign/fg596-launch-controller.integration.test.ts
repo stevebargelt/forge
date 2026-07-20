@@ -34,8 +34,11 @@ import {
   driveOneCampaignItem,
   retryCampaignItem,
   deriveDriveItemResultFromDurableState,
+  launchDriveItemUnderForge,
+  campaignBlocker,
   type DriveItemLaunchFn,
 } from "./executor.js";
+import { type TmuxRunner, type WaitHarness } from "../v2/launch.js";
 import { approveCampaign, tryTransitionCampaignToRunning, tryTransitionCampaign } from "../store/campaigns.js";
 import type { InvokeArgs, InvokeResult } from "../v2/invoke.js";
 import { nowIso } from "../util/ids.js";
@@ -389,4 +392,126 @@ test("FG-596 fix3: an abandoned campaign derives 'abandoned' from durable status
 
   const derived = deriveDriveItemResultFromDurableState(campaign.id, item.id, { state: "exited_ok", code: 0 });
   assert.equal(derived.stopReason, "abandoned", "durable campaign status is authoritative");
+});
+
+// ── FG-596 (A6): the PRODUCTION launch boundary must be recoverable, not wedge-prone ──
+// startCampaign has already CAS'd the campaign to `running` by the time the controller
+// launches an item. If the real launcher's startLaunch throws (broken/missing tmux — it
+// explicitly throws) or waitForLaunchTerminal fails, an uncaught throw would strand the
+// campaign `running` with no non-manual recovery (`forge campaign start` refuses — no
+// longer planned; `forge campaign resume` refuses — not paused). These prove the boundary
+// is failure-contained into a durable RECOVERABLE park (paused campaign + retryable item)
+// that the existing resume/recover path picks up with no manual SQL. They go RED against
+// the uncontained code (the throw propagates out of startCampaign uncaught).
+
+// A tmux stub that satisfies startLaunch's handshake so the launch record is written and
+// only the WAIT then fails — the second, distinct launch-boundary failure mode.
+function benignTmux(): TmuxRunner {
+  return (args) => {
+    switch (args[0]) {
+      case "-V":
+        return "tmux 3.4\n";
+      case "display-message":
+        return args.includes("#{pane_dead}") ? "0\n" : "4242\n";
+      default:
+        return; // new-session / set-option / respawn-pane / has-session / kill-session
+    }
+  };
+}
+
+test("FG-596 A6: a THROWING startLaunch (broken tmux) leaves the campaign PAUSED and the item recoverably parked — never a running wedge", async () => {
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "ok" });
+
+  // The production launcher with a tmux seam that throws at the very first probe — the
+  // exact shape a missing tmux takes (startLaunch turns it into an explicit throw).
+  const throwingTmux: TmuxRunner = () => {
+    throw new Error("tmux: command not found");
+  };
+  const launcher = launchDriveItemUnderForge(["forge"], { tmux: throwingTmux });
+
+  // Must NOT throw out of startCampaign — the boundary contains it.
+  const result = await startCampaign(campaign.id, { launchDriveItem: launcher });
+  assert.equal(result.stopReason, "paused", "the launch-setup failure halts the controller with a recoverable park, not an uncaught throw");
+
+  // The campaign landed in a status the resume path accepts — NOT wedged `running`.
+  const parkedCampaign = getCampaign(campaign.id)!;
+  assert.equal(parkedCampaign.status, "paused", "the campaign is durably PAUSED — the running wedge A6 forbids never happens");
+
+  // The item carries an actionable, retryable blocker (never left non-terminal-unparked).
+  const item = listCampaignItems(campaign.id)[0]!;
+  assert.equal(item.lifecycleStatus, "failed");
+  assert.equal(item.outcome, "blocked");
+  assert.equal(item.blockerKind, "infrastructure", "a launch-setup failure dispatched no run — a directly-retryable infrastructure blocker");
+  assert.ok(item.requestedHumanAction && /resume/.test(item.requestedHumanAction), "the operator is told how to recover");
+  assert.equal(item.runId, undefined, "FG-425: no replacement run was minted");
+
+  // The EXISTING recovery path proceeds with no manual SQL: resume is not refused, and a
+  // retry + resume drives the item to completion.
+  assert.equal(
+    campaignBlocker(getCampaign(campaign.id)!, listCampaignItems(campaign.id), "resume"),
+    null,
+    "resume is not refused — the parked shape is recoverable, not a wedge",
+  );
+  const retried = retryCampaignItem(campaign.id, "FG-101");
+  assert.ok(retried.ok, `retry should succeed on the infrastructure-parked item: ${retried.ok ? "" : retried.reason}`);
+  shipTicket("FG-101");
+  const resumed = await resumeCampaign(campaign.id, { dispatch: fakeDispatch("complete") });
+  assert.equal(resumed.stopReason, "complete", "resume drove the recovered item to completion — full non-manual recovery");
+});
+
+test("FG-596 A6: a FAILING waitForLaunchTerminal leaves the campaign PAUSED and the item recoverably parked — never a running wedge", async () => {
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "ok" });
+
+  // startLaunch succeeds (benign tmux), but the wait harness fails — waitForLaunchTerminal
+  // reads the harness first, so a throwing read() surfaces as a WAIT-boundary throw.
+  const failingHarness: WaitHarness = {
+    read() {
+      throw new Error("wait harness: exit record read failed (EIO)");
+    },
+    installWatcher() {
+      return () => {};
+    },
+    startReconcile() {
+      return () => {};
+    },
+    startTimeout() {
+      return () => {};
+    },
+    onCancel() {
+      return () => {};
+    },
+    startInvalidBound() {
+      return () => {};
+    },
+  };
+  const launcher = launchDriveItemUnderForge(["forge"], {
+    tmux: benignTmux(),
+    makeWaitHarness: () => failingHarness,
+  });
+
+  const result = await startCampaign(campaign.id, { launchDriveItem: launcher });
+  assert.equal(result.stopReason, "paused", "the wait failure halts the controller with a recoverable park, not an uncaught throw");
+
+  const parkedCampaign = getCampaign(campaign.id)!;
+  assert.equal(parkedCampaign.status, "paused", "the campaign is durably PAUSED after a wait-boundary failure");
+
+  const item = listCampaignItems(campaign.id)[0]!;
+  assert.equal(item.lifecycleStatus, "failed");
+  assert.equal(item.outcome, "blocked");
+  assert.equal(item.blockerKind, "infrastructure");
+  assert.ok(item.requestedHumanAction && /resume/.test(item.requestedHumanAction), "the operator is told how to recover");
+
+  // Resume is accepted (recoverable), and retry + resume completes the item.
+  assert.equal(
+    campaignBlocker(getCampaign(campaign.id)!, listCampaignItems(campaign.id), "resume"),
+    null,
+    "resume is not refused after a wait-boundary park",
+  );
+  const retried = retryCampaignItem(campaign.id, "FG-101");
+  assert.ok(retried.ok, `retry should succeed: ${retried.ok ? "" : retried.reason}`);
+  shipTicket("FG-101");
+  const resumed = await resumeCampaign(campaign.id, { dispatch: fakeDispatch("complete") });
+  assert.equal(resumed.stopReason, "complete", "resume drove the recovered item to completion");
 });

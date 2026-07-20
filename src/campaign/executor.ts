@@ -2247,6 +2247,85 @@ export function deriveDriveItemResultFromDurableState(
   return { itemRecords };
 }
 
+// FG-596 (A6): contain a PRODUCTION launch-boundary failure. startLaunch (tmux setup)
+// and waitForLaunchTerminal (the wait harness) can THROW before the drive-item child
+// ever commits a durable outcome — a missing/broken tmux makes startLaunch explicitly
+// throw, and the wait harness can fail. By this point startCampaign has already CAS'd
+// the campaign to `running`, so an UNCAUGHT throw wedges it there: `forge campaign
+// start` refuses (no longer planned) and `forge campaign resume` refuses (not paused),
+// leaving no non-manual recovery — the exact wedge A6 forbids. Contain it into a
+// durable RECOVERABLE park instead:
+//   1. Durable state is authoritative. If the child already settled or parked the item
+//      before the boundary threw (e.g. a wait-harness cleanup throw after a committed
+//      park), reconcile from durable state exactly as the clean path would — the throw
+//      was incidental to an already-committed, already-recoverable outcome.
+//   2. If the campaign is no longer running (abandoned, or a concurrent operator
+//      `forge campaign pause` won the CAS), honor that durable state — never force a
+//      park over it.
+//   3. Otherwise the item is still mid-flight and the campaign is still running — the
+//      wedge shape. PARK the item at its true terminal shape (failed/blocked/
+//      infrastructure, directly retryable — the same shape parkCampaignOnStartRunThrow
+//      leaves for a setup failure that dispatched no run) and CAS the campaign
+//      running→paused via parkCampaign, so `forge campaign retry <cid> <ticket>` then
+//      `forge campaign resume` recover it with NO manual SQL. Preserves the FG-425
+//      invariants: never resets the item to pending, never mints a replacement run,
+//      never overwrites an existing shared blocker (e.g. git_state).
+async function containLaunchBoundaryFailure(
+  campaignId: string,
+  itemId: string,
+  err: unknown,
+): Promise<DriveOneItemResult> {
+  const deriveDurable = (): DriveOneItemResult => {
+    const d = deriveDriveItemResultFromDurableState(campaignId, itemId, undefined);
+    return { itemRecords: d.itemRecords, ...(d.stopReason ? { stopReason: d.stopReason } : {}) };
+  };
+
+  const durableItem = getCampaignItem(itemId);
+  if (isItemSettledOrParked(durableItem)) return deriveDurable();
+
+  const campaign = getCampaign(campaignId);
+  if (!campaign || campaign.status !== "running") return deriveDurable();
+
+  const message = err instanceof Error ? err.message : String(err);
+  const ticketId = durableItem?.ticketId ?? itemId;
+  // FG-425: preserve an existing SHARED blocker (git_state) rather than clearing it.
+  // A launched item should not carry one (the controller skips failed items), but stay
+  // defensive so the containment never masks a shared blocker.
+  const existingShared =
+    durableItem?.blockerKind && isSharedBlocker(durableItem.blockerKind) ? durableItem.blockerKind : undefined;
+  const blockerKind: BlockerKind = existingShared ?? "infrastructure";
+  try {
+    logEvent("campaign_item.drive_error", {
+      ...(durableItem?.runId ? { runId: durableItem.runId } : {}),
+      payload: { campaignId, itemId, ticketId, error: message, boundary: "launch", decidedAt: nowIso() },
+    });
+    updateCampaignItem(itemId, {
+      lifecycleStatus: "failed",
+      outcome: "blocked",
+      blockerKind,
+      reason: message,
+      requestedHumanAction: `the per-item launch boundary failed before ${ticketId} could be driven (${message}) — no run was dispatched. Run \`forge campaign retry ${campaignId} ${ticketId}\`, then \`forge campaign resume ${campaignId}\`.`,
+    });
+    await parkCampaign(campaignId, itemId, "blocked", { exemption: "item-carries-context" }, { fallbackRunId: pickCampaignFallbackRunId(campaignId) });
+  } catch {
+    // park failed — the returned stopReason still halts the controller cooperatively
+    // and the item transition above is best-effort; nothing here may re-throw.
+  }
+  const parked = getCampaignItem(itemId);
+  const record: CampaignItemRecord = parked
+    ? {
+        itemId: parked.id,
+        ticketId: parked.ticketId,
+        runId: parked.runId,
+        lifecycleStatus: parked.lifecycleStatus,
+        outcome: parked.outcome,
+        blockerKind: parked.blockerKind,
+        reason: parked.reason,
+      }
+    : { itemId, ticketId, lifecycleStatus: "failed", outcome: "blocked", blockerKind, reason: message };
+  return { itemRecords: [record], stopReason: "paused" };
+}
+
 // FG-596: the production launcher — start `forge campaign drive-item <cid> <itemId>`
 // under a durable `forge launch` tmux owner, block until it reaches a terminal
 // DRIVE-PROCESS disposition, then reconstruct the DriveOneItemResult ENTIRELY from
@@ -2279,9 +2358,22 @@ export function launchDriveItemUnderForge(
     // belongs there, and it keeps the drive from ever touching an unrelated checkout
     // the launcher was standing in.
     const cwd = getCampaign(campaignId)?.projectDir;
-    const meta = startLaunch(argv, { name: `campaign-drive-${itemId}`, ...(cwd ? { cwd } : {}), ...(seams.tmux ? { tmux: seams.tmux } : {}) });
-    const harness = seams.makeWaitHarness ? seams.makeWaitHarness(meta.id) : realWaitHarness(meta.id);
-    const outcome = await waitForLaunchTerminal(meta.id, harness);
+
+    // FG-596 (A6): the launch boundary is failure-contained. startLaunch throwing
+    // (broken tmux) or waitForLaunchTerminal failing must NOT propagate uncaught to the
+    // CLI — that would strand the already-running campaign in an unrecoverable wedge.
+    // containLaunchBoundaryFailure turns any such throw into a durable recoverable park.
+    let meta;
+    let outcome;
+    try {
+      meta = startLaunch(argv, { name: `campaign-drive-${itemId}`, ...(cwd ? { cwd } : {}), ...(seams.tmux ? { tmux: seams.tmux } : {}) });
+      const harness = seams.makeWaitHarness ? seams.makeWaitHarness(meta.id) : realWaitHarness(meta.id);
+      outcome = await waitForLaunchTerminal(meta.id, harness);
+    } catch (err) {
+      // Best-effort cleanup of any launch record the setup left behind before parking.
+      if (meta) { try { removeLaunch(meta.id, seams.tmux ? { tmux: seams.tmux } : {}); } catch { /* best-effort */ } }
+      return containLaunchBoundaryFailure(campaignId, itemId, err);
+    }
 
     // The disposition of the drive-item PROCESS (never the item outcome).
     const disposition: LaunchStatus | undefined =
