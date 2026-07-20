@@ -182,8 +182,12 @@ export function registerStatus(program: Command): void {
           if (countdown) line += `  — ${formatIdleCountdown(countdown)}`;
           const verdicts = verdictsForTask(t.id);
           if (verdicts.length > 0) {
+            // FG-522: carry the redTaskId, mirroring FG-521(b)'s convention in
+            // show.ts — the same id the blocked_by_red next-command tells the
+            // operator to `forge show`. Omitting it here made the human summary
+            // name a verdict the operator couldn't then open.
             const summary = verdicts
-              .map((v) => `${v.redRole}: ${v.verdict} (${v.confidence.toFixed(2)})`)
+              .map((v) => `${v.redRole}: ${v.verdict} (${v.confidence.toFixed(2)}) — ${v.redTaskId}`)
               .join("  ");
             line += `  — ${summary}`;
           }

@@ -80,7 +80,7 @@ Watch `~/.forge/runs/<run-id>/<task-id>/CLAUDE.md` to confirm the composed promp
 
 ## Notes
 
-- The agent's `model` (e.g. `"spec-writer"`, `"fast-orchestrator"`) is a logical alias resolved by LiteLLM. You don't pin a real model name in the workflow file — change the alias mapping in your LiteLLM config, the workflow re-routes automatically.
+- The step/red `activity` field (e.g. `"spec-writer"`, `"fast-orchestrator"`) is a logical capability alias resolved by LiteLLM. You don't pin a real model name in the workflow file — change the alias mapping in your LiteLLM config, the workflow re-routes automatically. (The old name for this field was `model:`. It still parses — the schema aliases it to `activity:` — but emits a one-time deprecation warning nudging you to rename it, so write `activity:` on new workflows.)
 - For an authoritative red role, add an entry under the step's `reds:` list in the workflow YAML with `authority: authoritative` and `gate_on_verdict: true`. A `fail` verdict from that red will set the blue task to `blocked_by_red`.
 
   ```yaml
