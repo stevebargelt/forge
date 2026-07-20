@@ -6,7 +6,8 @@ import type { PlannerInput, PlanMode, ItemModeOverride, ExecutionLane } from "..
 import { classifyItemsForPlan } from "../../campaign/lane-classifier.js";
 import type { ClassifyTicketFn } from "../../campaign/lane-classifier.js";
 import { listCampaignItems, getCampaign, approveCampaign, tryTransitionCampaign } from "../../store/campaigns.js";
-import { startCampaign, resumeCampaign, escalateCampaignItemLane, hasUnresolvedLaneEscalation, retryCampaignItem, driveOneCampaignItem, launchDriveItemUnderForge } from "../../campaign/executor.js";
+import { startCampaign, resumeCampaign, escalateCampaignItemLane, hasUnresolvedLaneEscalation, retryCampaignItem, driveOneCampaignItem, launchDriveItemUnderForge, driveRemainingItems, prepareCampaignItemDispatch, DEFAULT_CONTROLLER_LEASE_MS } from "../../campaign/executor.js";
+import { recoverCampaign, type CampaignDispatchDeps } from "../../campaign/continuation-adapter.js";
 import { invoke } from "../../v2/invoke.js";
 import { assembleCampaignShow, assembleCampaignReport, renderCampaignReportHuman, formatOutOfBandEligibleHint, formatCampaignSystemRetryHint } from "../../campaign/report.js";
 import { reconcileCampaign } from "../../campaign/reconcile.js";
@@ -125,8 +126,144 @@ function renderDriveErrorAndExit(campaignId: string, err: unknown, json: boolean
 // carries the interpreter flags (e.g. `--import tsx` in dev) and argv[1] the entry
 // script, so a dev tsx invocation and a built release both re-run correctly. The
 // recorder spawns argv[0] directly, so this must name the real interpreter + entry.
+// FG-564 (D1): the campaign-controller lease TTL (DEFAULT_CONTROLLER_LEASE_MS) is defined in
+// the executor and imported — it fences a longer-lived physical driver than the FG-562
+// per-phase continuation lease, so it is deliberately longer.
+
+// FG-564 (P1-D / provider-neutral identity): the instance-stable campaign-controller owner
+// campaign@<campaignId>@<controllerInstanceId>. Identity is bound to the instance-stable id
+// the PROCESS actually owns — resolved ONLY from the environment (FORGE_CONTROLLER_ID, the
+// provider-neutral controller-instance id the orchestrator establishes from its durable
+// session) — and FAILS CLOSED when none resolves. A caller-supplied owner string is NEVER
+// accepted as proof of identity on any mutation/renew path: that would let any caller pass a
+// live controller's owner and renew/impersonate a lease it does not own. Takeover of a live
+// lease is only ever by real expiry (generation bump), never by matching a supplied owner
+// string. A host-stable value (hostname) is likewise refused — it cannot fence a same-host
+// peer.
+function resolveCampaignControllerOwner(
+  campaignId: string,
+  env: NodeJS.ProcessEnv = process.env,
+): { ok: true; owner: string } | { ok: false; error: string } {
+  const instanceId = env["FORGE_CONTROLLER_ID"]?.trim();
+  if (!instanceId) {
+    return {
+      ok: false,
+      error:
+        "no stable controller identity resolved — refusing to acquire/renew a campaign-controller lease. " +
+        "A host-stable owner cannot fence a same-host peer, and a caller-supplied owner string cannot prove " +
+        "identity, so recovery will not mutate under either. Set FORGE_CONTROLLER_ID to the controller's " +
+        "instance-stable identity (the orchestrator establishes this from its durable session).",
+    };
+  }
+  return { ok: true, owner: `campaign@${campaignId}@${instanceId}` };
+}
+
+// FG-564 (AC8): the shared recovery driver for `campaign recover` / `campaign continue`.
+// Acquires the campaign-controller lease (fail closed if a different owner holds a live one),
+// then adopts every in-flight campaign continuation through the lease-gated reservation
+// authority — the SAME shared consumer core, no fork. The physical re-drive kicks the
+// existing, tested per-item launch path (launchDriveItemUnderForge); the run row it reserves
+// is stamped with the FG-596 dispatch key so the launched child adopts it by key (no duplicate).
+async function runCampaignRecovery(
+  campaignId: string,
+  opts: { json?: boolean },
+  verb: "recover" | "continue",
+): Promise<void> {
+  const campaign = getCampaign(campaignId);
+  if (!campaign) {
+    if (opts.json) console.log(JSON.stringify({ ok: false, error: "not_found" }));
+    else process.stderr.write(`Error: campaign ${campaignId} not found\n`);
+    process.exit(1);
+  }
+  const ownerRes = resolveCampaignControllerOwner(campaignId);
+  if (!ownerRes.ok) {
+    if (opts.json) console.log(JSON.stringify({ ok: false, error: ownerRes.error }));
+    else process.stderr.write(`forge campaign ${verb}: ${ownerRes.error}\n`);
+    process.exit(1);
+  }
+
+  // FG-564 (FIX round 5): the continuation/recover advance resolves N+1's lane + filesystem
+  // inputs and materializes its run through the SAME ONE lane-aware authority the normal drive
+  // path uses — a real, correctly-shaped run (full_feature pipeline OR invoke/invoke_chain, keyed
+  // by the item's actual lane) the launched drive-item child reattaches to and drives through the
+  // matching real physical path. prepareItemDispatch runs BEFORE the reservation (fs reads outside
+  // the tx) and FAILS CLOSED on a missing ticket / projectDir / unresolved workflow / non-dispatch
+  // lane, so the reservation rolls back / is never entered and the continuation stays recoverable.
+  const projectDir = campaign.projectDir;
+  const prepareItemDispatch: CampaignDispatchDeps["prepareItemDispatch"] = ({ campaignId: cid, itemId }) => {
+    if (!projectDir) {
+      throw new Error(`campaign ${cid} has no stored project directory — cannot materialize a drivable run for ${itemId}`);
+    }
+    return prepareCampaignItemDispatch({ campaignId: cid, itemId }, { projectDir });
+  };
+  const driveItem: CampaignDispatchDeps["driveItem"] = ({ campaignId: cid, itemId }) => {
+    // Fire-and-forget: the run row is durable (reserved), so the launched child adopts by key and
+    // re-enters the physical driver for the run's RECORDED lane (runNext or the real invoke path).
+    void launchDriveItemUnderForge(forgeSelfArgv())(cid, itemId);
+  };
+
+  const result = recoverCampaign({
+    campaignId,
+    owner: ownerRes.owner,
+    ttlMs: DEFAULT_CONTROLLER_LEASE_MS,
+    campaign: { prepareItemDispatch, driveItem },
+  });
+
+  if (result.status === "lease_held_live") {
+    const msg =
+      `forge campaign ${verb}: refusing — the prior controller's lease is still LIVE ` +
+      `(owner ${result.lease.owner}, generation ${result.lease.generation}, expires ` +
+      `${new Date(result.lease.leaseExpiresAtMs).toISOString()}). Takeover is only possible after expiry.`;
+    if (opts.json) console.log(JSON.stringify({ ok: false, status: "lease_held_live", lease: result.lease }));
+    else process.stderr.write(`${msg}\n`);
+    process.exit(1);
+  }
+
+  const advanced = result.adopted.filter((o) => o.kind === "advanced").length;
+
+  // FG-564 (P1-G): after adopting in-flight continuations/runs (only reached AFTER the prior
+  // lease expired and we hold the lease), CONTINUE the item loop to completion — driving any
+  // item whose launch is linked but whose continuation was never recorded, and every remaining
+  // pending item — WITHOUT manual SQL, without resetting the item, and without minting a
+  // replacement run (driveRemainingItems skips terminal items, reattaches to parked runs, and
+  // the FG-596 pending-guard refuses to replace an item that already carries a run). This runs
+  // under the SAME lease we just acquired, so the whole continuation is fenced.
+  let loopStop: string | undefined;
+  if (campaign.status === "running" && campaign.projectDir) {
+    const loopResult = await driveRemainingItems(campaignId, {
+      dispatch: invoke,
+      projectDir: campaign.projectDir,
+      mode: campaign.mode,
+      launchDriveItem: launchDriveItemUnderForge(forgeSelfArgv()),
+      controllerOwner: ownerRes.owner,
+      controllerLeaseTtlMs: DEFAULT_CONTROLLER_LEASE_MS,
+    });
+    loopStop = loopResult.stopReason;
+  }
+
+  if (opts.json) {
+    console.log(JSON.stringify({ ok: true, status: "recovered", mode: result.mode, adopted: result.adopted.length, advanced, loopStop, lease: result.lease }, null, 2));
+  } else {
+    console.log(`campaign ${verb}: lease ${result.mode} (owner ${result.lease.owner}#${result.lease.generation})`);
+    console.log(`  adopted ${result.adopted.length} in-flight continuation(s); ${advanced} advanced`);
+    if (loopStop) console.log(`  continued the item loop → ${loopStop}`);
+  }
+}
+
 function forgeSelfArgv(): string[] {
   return [process.execPath, ...process.execArgv, process.argv[1] ?? ""];
+}
+
+// FG-564 (P0-A): the instance-stable campaign-controller owner for a normal `forge campaign
+// start/resume`. Prefers the provider-neutral FORGE_CONTROLLER_ID the orchestrator establishes
+// from its durable session; absent one, falls back to a process-unique id so a lease is ALWAYS
+// acquired (the machinery is exercised on every normal start) and two concurrent controllers
+// still get DIFFERENT owners — the second FAILS CLOSED against the first's live lease (AC8 is
+// non-vacuous against a live NORMAL-start controller). Unlike `recover` (P1-D), start does not
+// fail closed on a missing id: it is establishing, not taking over, a lease.
+function resolveStartControllerOwner(campaignId: string): string {
+  const instanceId = process.env["FORGE_CONTROLLER_ID"]?.trim() || `cli-${process.pid}`;
+  return `campaign@${campaignId}@${instanceId}`;
 }
 
 export function registerCampaign(program: Command): void {
@@ -455,7 +592,10 @@ export function registerCampaign(program: Command): void {
       try {
         // FG-596: production drives one launch per item (forge campaign drive-item)
         // under forge launch — the controller no longer blocks in-process on containers.
-        result = await startCampaign(campaignId, { launchDriveItem: launchDriveItemUnderForge(forgeSelfArgv()) });
+        result = await startCampaign(campaignId, {
+          launchDriveItem: launchDriveItemUnderForge(forgeSelfArgv()),
+          controllerOwner: resolveStartControllerOwner(campaignId),
+        });
       } catch (err) {
         renderDriveErrorAndExit(campaignId, err, opts.json);
       }
@@ -574,7 +714,10 @@ export function registerCampaign(program: Command): void {
 
       let result;
       try {
-        result = await resumeCampaign(campaignId, { launchDriveItem: launchDriveItemUnderForge(forgeSelfArgv()) });
+        result = await resumeCampaign(campaignId, {
+          launchDriveItem: launchDriveItemUnderForge(forgeSelfArgv()),
+          controllerOwner: resolveStartControllerOwner(campaignId),
+        });
       } catch (err) {
         renderDriveErrorAndExit(campaignId, err, opts.json);
       }
@@ -640,6 +783,28 @@ export function registerCampaign(program: Command): void {
       }
     });
 
+  // FG-564 (Slice 5b, AC8/D2/D4): `forge campaign recover` — the running-campaign takeover
+  // entry point. Fails closed while the prior controller's lease is live; after expiry adopts
+  // in-flight continuations/runs through the SAME lease-gated reservation authority and
+  // continues the item loop WITHOUT manual SQL, without resetting the item or minting a
+  // replacement run. `forge campaign continue` is the per-wake sibling — both reuse the shared
+  // campaign consumer core internally (never a fork of continue.ts).
+  campaign
+    .command("recover <campaign-id>")
+    .description("Recover a campaign whose controller died — fails closed while the prior lease is live, then after expiry adopts in-flight continuations/runs and continues (no manual SQL)")
+    .option("--json", "machine-readable JSON output")
+    .action(async (campaignId: string, opts: { json?: boolean }) => {
+      await runCampaignRecovery(campaignId, opts, "recover");
+    });
+
+  campaign
+    .command("continue <campaign-id>")
+    .description("Advance a campaign's in-flight continuations on a launch-completion or watchdog wake (lease-gated; shares the campaign consumer core)")
+    .option("--json", "machine-readable JSON output")
+    .action(async (campaignId: string, opts: { json?: boolean }) => {
+      await runCampaignRecovery(campaignId, opts, "continue");
+    });
+
   // FG-596: the launchable single-item drive. This is what `forge campaign start/resume`
   // launches (once per item) under `forge launch`, and waits on. It drives EXACTLY ONE
   // item to a terminal drive-process outcome or a legal park — synchronously, in this
@@ -700,11 +865,17 @@ export function registerCampaign(program: Command): void {
         process.stderr.write(`${message}\n`);
         process.exit(1);
       }
+      // FG-564 (item 3, C7 fence): this is a LAUNCHED drive-item child. Its authorization to do
+      // physical work is resolved by driveOneCampaignItem from the DURABLE launch linkage row
+      // (campaign_item_launches) — NEVER from a caller/env token — and fails closed when the
+      // linkage is missing or its immutable born-under owner/generation no longer holds the live
+      // campaign-controller lease. A raw/forged `campaign drive-item` invocation cannot drive.
       try {
         const result = await driveOneCampaignItem(campaignId, itemId, {
           dispatch: invoke,
           projectDir: campaign.projectDir,
           mode: campaign.mode,
+          enforceFence: true,
         });
         if (opts.json) console.log(JSON.stringify(result, null, 2));
         else {

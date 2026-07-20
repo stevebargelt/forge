@@ -817,77 +817,51 @@ const throwingLoad = () => {
   throw new Error("workflow YAML missing or invalid: feature");
 };
 
-test("FG-596 load-fail stamp: a workflow-load failure creates ONE synthetic abandoned run stamped with the deterministic key + generation, then classifies the item terminal WITHOUT a second run", async () => {
-  const { campaignId, itemId } = seedRunningPendingFullFeatureItem();
-
-  const result = await driveOneCampaignItem(campaignId, itemId, {
-    dispatch: fakeDispatch("complete"),
-    projectDir,
-    mode: "sequential",
-    loadWorkflowFn: throwingLoad,
-  });
-  assert.equal(result.stopReason, "paused", "the load-fail lane parks the campaign");
-
-  const item = getCampaignItem(itemId)!;
-  assert.equal(item.lifecycleStatus, "failed", "terminal classification applied after the reservation committed");
-  assert.equal(item.outcome, "blocked");
-  assert.equal(item.blockerKind, "campaign_system");
-  assert.equal(item.attemptGeneration, 1, "the reservation allocated (and persisted) generation 1 — same as every other lane");
-
-  const runsForItem = listRuns().filter((r) => r.metadata?.["itemId"] === itemId);
-  assert.equal(runsForItem.length, 1, "exactly ONE synthetic run exists — the terminal classification created no second run");
-  const run = runsForItem[0]!;
-  assert.equal(item.runId, run.id, "the synthetic run is linked onto the item");
-  assert.equal(run.status, "abandoned", "the traceability row is abandoned");
-
-  const expectedKey = deriveCampaignItemDispatchKey(campaignId, itemId, 1);
-  assert.equal(run.metadata?.["dispatchKey"], expectedKey, "the synthetic run stamps the SAME deterministic dispatch key as the live lanes");
-  assert.equal(run.metadata?.["attemptGeneration"], 1, "the synthetic run carries the item-attempt identity");
-  assert.equal(runByDispatchKey(expectedKey)?.id, run.id, "the synthetic run is adoptable by its dispatch key");
-});
-
-test("FG-596 load-fail adoption: a re-drive in the crash window ADOPTS the stamped synthetic run by key — exactly one run, LINKED but NOT re-classified (recovery_needed for FG-564)", async () => {
-  const { campaignId, itemId } = seedRunningPendingFullFeatureItem();
-
-  // Reproduce the crash window: the reservation committed a stamped synthetic run + persisted
-  // generation, but a crash struck before the run_id was linked (item still pending).
-  updateCampaignItem(itemId, { attemptGeneration: 1 });
-  const key = deriveCampaignItemDispatchKey(campaignId, itemId, 1);
-  insertSyntheticAbandonedRun("run-syn-orphan", campaignId, itemId, key, 1);
-  const runBefore = getRun("run-syn-orphan")!;
-  assert.equal(getCampaignItem(itemId)!.runId, undefined, "precondition: the crash left runId unlinked");
-  assert.equal(runByDispatchKey(key)?.id, "run-syn-orphan", "precondition: the synthetic run is resolvable by key");
-
-  // Re-drive the SAME failing load — the reservation must ADOPT the orphan by key, not mint a
-  // duplicate. FG-596 must NOT apply the terminal classification over another drive's run: it
-  // keeps the link and surfaces recovery_needed, leaving the keyed run for FG-564.
-  const result = await driveOneCampaignItem(campaignId, itemId, {
-    dispatch: fakeDispatch("complete"),
-    projectDir,
-    mode: "sequential",
-    loadWorkflowFn: throwingLoad,
-  });
-  assert.equal(result.stopReason, "recovery_needed", "the adopted run is NOT re-classified — FG-596 surfaces recovery_needed for FG-564");
-
-  const item = getCampaignItem(itemId)!;
-  assert.equal(item.runId, "run-syn-orphan", "ADOPTED the orphan synthetic run by key — the SAME run, not a replacement");
-  assert.equal(item.lifecycleStatus, "awaiting_gate", "the recovery shape — NOT the terminal failed/blocked classification over an adopted run");
-  assert.equal(item.blockerKind, "campaign_system", "the recovery shape carries campaign_system for FG-564/reconcile");
-  assert.notEqual(item.outcome, "blocked", "FG-596 did NOT apply the terminal outcome over the adopted run");
-  assert.ok(item.requestedHumanAction?.includes("run-syn-orphan"), "the recovery-needed action IDENTIFIES the adopted run");
-  assert.equal(item.attemptGeneration, 1, "generation reused unchanged on the re-drive");
-  const runAfter = getRun("run-syn-orphan")!;
-  assert.equal(runAfter.status, runBefore.status, "the adopted synthetic run's state was NOT mutated");
-  const runsForItem = listRuns().filter((r) => r.metadata?.["itemId"] === itemId);
-  assert.equal(runsForItem.length, 1, "exactly ONE synthetic run exists for the item — no duplicate traceability row");
-});
-
-test("FG-596 load-fail crash-before-commit: a synthetic-run insert that throws mid-reservation rolls back WHOLE — item pending, generation unallocated, NO synthetic run", () => {
+test("FG-564 (FIX round 6) full_feature load-fail FAILS CLOSED: an unresolvable workflow THROWS before any reservation — NO run minted, item stays pending, campaign recoverable", async () => {
   const { campaignId, itemId } = seedRunningPendingFullFeatureItem();
   const runsBefore = listRuns().length;
 
-  // The load-fail lane routes its synthetic-run insert through the same reservation; if that
-  // insert throws before the tx commits, the claim + insert + link roll back together.
+  // The NORMAL full_feature drive now resolves its workflow + ticket through the SAME shared
+  // prepareCampaignItemDispatch authority the recover advance uses. An unresolved/failed
+  // workflow FAILS CLOSED — it THROWS before reserveCampaignDriveDispatch is ever entered, so
+  // no run (not even a synthetic traceability row) is minted, the item stays pending, and the
+  // campaign stays recoverable — byte-identical to the recover advance's fail-closed behavior.
+  // (Pre-round-6 this path minted a synthetic abandoned run and classified the item terminal —
+  // an asymmetry with the recover path that this change removes.)
+  await assert.rejects(
+    () =>
+      driveOneCampaignItem(campaignId, itemId, {
+        dispatch: fakeDispatch("complete"),
+        projectDir,
+        mode: "sequential",
+        loadWorkflowFn: throwingLoad,
+      }),
+    /workflow YAML missing or invalid/,
+    "the workflow-resolution failure propagates from the shared authority BEFORE any reservation",
+  );
+
+  const item = getCampaignItem(itemId)!;
+  assert.equal(item.lifecycleStatus, "pending", "the item stays pending — the reservation was never entered");
+  assert.equal(item.outcome, undefined, "no terminal outcome was applied");
+  assert.equal(item.runId, undefined, "no run was linked onto the item");
+  assert.equal(item.attemptGeneration, 0, "no generation was allocated — the reservation was never entered");
+
+  assert.equal(listRuns().length, runsBefore, "NO run was minted — identical fail-closed behavior to the recover advance");
+  assert.equal(
+    runByDispatchKey(deriveCampaignItemDispatchKey(campaignId, itemId, 1)),
+    undefined,
+    "nothing adoptable at the item-attempt key — no synthetic run exists",
+  );
+  assert.equal(getCampaign(campaignId)!.status, "running", "the campaign stays running/recoverable — the drive can be safely re-attempted");
+});
+
+test("reserveCampaignDriveDispatch crash-before-commit: a createRun that throws mid-reservation rolls back WHOLE — item pending, generation unallocated, NO run (the mechanism the startRun-throw catch relies on)", () => {
+  const { campaignId, itemId } = seedRunningPendingFullFeatureItem();
+  const runsBefore = listRuns().length;
+
+  // reserveCampaignDriveDispatch is one atomic tx: if createRun throws before the tx commits,
+  // the claim + insert + link roll back together. This is the mechanism the startRun-throw
+  // catch depends on to roll the failed attempt back before recording its traceability row.
   assert.throws(
     () =>
       reserveCampaignDriveDispatch({

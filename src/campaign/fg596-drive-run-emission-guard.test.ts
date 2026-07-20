@@ -8,9 +8,16 @@
 // re-drive defect this ticket closed (the startRun-throw catch was the last such site).
 //
 // This guard scans src/campaign/executor.ts and FAILS if any insertRun/startRun call
-// appears OUTSIDE a reserveCampaignDriveDispatch(...) call expression. It is a source
-// content guard (like dashboard-offline-guard.test.ts): it matches CODE, not comments or
-// strings — a comment that merely names insertRun is fine; an executable call is not.
+// appears OUTSIDE a reserved region. It is a source content guard (like
+// dashboard-offline-guard.test.ts): it matches CODE, not comments or strings — a comment
+// that merely names insertRun is fine; an executable call is not.
+//
+// A reserved region is EITHER a reserveCampaignDriveDispatch(...) call expression, OR the body
+// of prepareCampaignItemDispatch — the ONE lane-aware materialization authority (FG-564 FIX
+// round 5). Its per-lane `createRun` closures are the sole run-shape emitters and are invoked
+// ONLY inside reserveCampaignDriveDispatch (by BOTH the normal drive and the recover adapter),
+// so their emissions stay keyed + atomic exactly as an inline createRun does. Any insertRun/
+// startRun OUTSIDE both regions is still a bare emission and fails.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -85,6 +92,32 @@ function reservationRanges(code: string): Array<[number, number]> {
   return ranges;
 }
 
+// The [open, close] brace range of a named function's BODY, matched on code-only text. From
+// the declaration, skip the parameter list `( ... )` (paren-matched), then brace-match the
+// body `{ ... }`. Empty array if the function is not present.
+function functionBodyRange(code: string, name: string): Array<[number, number]> {
+  const marker = `function ${name}`;
+  const at = code.indexOf(marker);
+  if (at < 0) return [];
+  // Skip the parameter list.
+  let j = at + marker.length;
+  while (j < code.length && code[j] !== "(") j++;
+  let depth = 0;
+  for (; j < code.length; j++) {
+    if (code[j] === "(") depth++;
+    else if (code[j] === ")") { depth--; if (depth === 0) { j++; break; } }
+  }
+  // Find the body's opening brace and brace-match it.
+  while (j < code.length && code[j] !== "{") j++;
+  const open = j;
+  depth = 0;
+  for (; j < code.length; j++) {
+    if (code[j] === "{") depth++;
+    else if (code[j] === "}") { depth--; if (depth === 0) break; }
+  }
+  return [[open, j]];
+}
+
 function lineAt(src: string, offset: number): number {
   let line = 1;
   for (let i = 0; i < offset && i < src.length; i++) if (src[i] === "\n") line++;
@@ -95,7 +128,10 @@ test("FG-596 guard: every insertRun/startRun in the campaign drive path is insid
   const src = readFileSync(EXECUTOR, "utf8");
   const code = blankStringsAndComments(src);
 
-  const ranges = reservationRanges(code);
+  const ranges = [
+    ...reservationRanges(code),
+    ...functionBodyRange(code, "prepareCampaignItemDispatch"),
+  ];
   assert.ok(ranges.length > 0, "found no reserveCampaignDriveDispatch call — executor.ts layout changed; re-scope this guard");
 
   // Run-CREATION calls only: insertRun(, startRun( / doStartRun( — NOT updateRunStatus (a

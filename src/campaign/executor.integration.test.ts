@@ -3973,20 +3973,30 @@ test("FG-579: a drifted host workflow refuses on the campaign full_feature dispa
     writeFileSync(join(home, "workflows", "feature.yml"), wfBody("STALE HAND-EDIT — not this release"));
 
     let dispatched = 0;
-    await startCampaign(campaign.id, {
-      dispatch: async (a: InvokeArgs): Promise<InvokeResult> => {
-        dispatched++;
-        return { runId: a.runId ?? "run-x", taskId: "task-x", status: "complete" };
-      },
-      loadWorkflowFn: (name, ctx) => loadWorkflow(name, ctx, baseline),
-    });
+    // FG-564 (FIX round 6): a full_feature workflow-resolution failure — here a drift refusal —
+    // FAILS CLOSED through the shared prepareCampaignItemDispatch authority: it THROWS before any
+    // reservation, so no container is dispatched and no run is minted. The FG-579 invariant (a
+    // drifted workflow is refused BEFORE any dispatch) is preserved and strengthened — the drive
+    // never even reserves a run, and the named drift refusal propagates for the CLI to render.
+    await assert.rejects(
+      () =>
+        startCampaign(campaign.id, {
+          dispatch: async (a: InvokeArgs): Promise<InvokeResult> => {
+            dispatched++;
+            return { runId: a.runId ?? "run-x", taskId: "task-x", status: "complete" };
+          },
+          loadWorkflowFn: (name, ctx) => loadWorkflow(name, ctx, baseline),
+        }),
+      /drift/i,
+      "the drifted workflow FAILS CLOSED — the named drift refusal propagates before any reservation",
+    );
 
     assert.equal(dispatched, 0, "the drifted workflow must be refused BEFORE any container is dispatched");
     const item = db
-      .prepare("SELECT lifecycle_status, requested_human_action FROM campaign_items WHERE ticket_id = 'FG-101'")
-      .get() as { lifecycle_status: string; requested_human_action: string };
-    assert.equal(item.lifecycle_status, "failed", "the refusal surfaces as a failed item, not a crash");
-    assert.match(item.requested_human_action, /drift/i, "the operator-facing action carries the named drift refusal");
+      .prepare("SELECT lifecycle_status, run_id FROM campaign_items WHERE ticket_id = 'FG-101'")
+      .get() as { lifecycle_status: string; run_id: string | null };
+    assert.equal(item.lifecycle_status, "pending", "the fail-closed refusal leaves the item pending — no run minted, recoverable");
+    assert.equal(item.run_id, null, "no run was minted for the drifted-workflow refusal");
   } finally {
     if (savedHome === undefined) delete process.env.FORGE_HOME;
     else process.env.FORGE_HOME = savedHome;

@@ -377,4 +377,65 @@ CREATE INDEX IF NOT EXISTS idx_continuation_lost_signal_cont
   ON continuation_lost_signal_recoveries(continuation_id);
 CREATE INDEX IF NOT EXISTS idx_continuation_lost_signal_launch
   ON continuation_lost_signal_recoveries(source_launch_id);
+
+-- FG-564 (Slice 5b, D1/AC7): the durable campaign-controller LEASE. A campaign's
+-- physical controller/drive is a longer-lived owner than the FG-562 per-phase
+-- continuation claim; the campaign 'running' status is NOT a singleton fence (it
+-- cannot distinguish two controller instances). This table fences the ONE live
+-- physical driver: an instance-stable owner (campaign@<campaignId>@<controllerInstanceId>),
+-- a generation/epoch bumped on every takeover, and a renewable expiry lease.
+--
+-- Same additive-only BD-15 contract as the FG-425/FG-562 tables: a brand-new table
+-- via CREATE TABLE IF NOT EXISTS on the ordinary open path, so an old binary that
+-- knows nothing of it is never broken. EVERY idempotency constraint stays INSIDE the
+-- table (campaign_id is the PRIMARY KEY — one lease per campaign) and is SAFE because
+-- only new binaries ever write here. owner is UNCONSTRAINED TEXT (no CHECK).
+--
+-- lease_expires_at_ms is a renewable lease (epoch ms, the store's own clock via
+-- storeNowMs); a takeover is permitted ONLY when it is STRICTLY in the past, mirroring
+-- publication_lane.lease_expires_at_ms and continuations.claim_expires_at. generation
+-- is the fencing token: a takeover bumps it, so an EXPIRED original owner's stale
+-- generation can never write/advance/audit/re-drive after a newer controller took over.
+CREATE TABLE IF NOT EXISTS campaign_controller_leases (
+  campaign_id         TEXT PRIMARY KEY REFERENCES campaigns(id),
+  owner               TEXT NOT NULL,
+  generation          INTEGER NOT NULL,
+  lease_expires_at_ms INTEGER NOT NULL,
+  created_at          TEXT NOT NULL,
+  updated_at          TEXT NOT NULL
+);
+
+-- FG-564 (Slice 5b, AC10): the durable item-attempt LAUNCH LINKAGE. FG-596's
+-- launchDriveItemUnderForge receives a random source_launch_id locally and then waits;
+-- this table makes the relationship between (campaign_id, item_id, attempt_generation)
+-- and that launch DURABLE before a continuation waiter is relied on. Recovery discovers
+-- it DIRECTLY — never by parsing launch names, argv, timestamps, or other heuristics.
+--
+-- The row carries an IMMUTABLE born-under fencing token (controller_owner +
+-- controller_generation) stamped once at launch time: the campaign-controller lease
+-- owner/generation the launch was born under. AC-ADOPT-DRIVE compares this original
+-- born-under token against the currently-held lease immediately before physical work.
+--
+-- The composite (campaign_id, item_id, attempt_generation) is the PRIMARY KEY: exactly
+-- one launch linkage per item-attempt, so a rearmed retry (a NEW attempt_generation)
+-- gets its OWN row and a stale prior-attempt completion can never satisfy the new one.
+-- Additive-only BD-15: only new binaries write it; source_launch_id is separately
+-- indexed so recovery can resolve a linkage from a launch id.
+CREATE TABLE IF NOT EXISTS campaign_item_launches (
+  campaign_id           TEXT NOT NULL REFERENCES campaigns(id),
+  item_id               TEXT NOT NULL,
+  attempt_generation    INTEGER NOT NULL,
+  source_launch_id      TEXT NOT NULL,
+  controller_owner      TEXT NOT NULL,
+  controller_generation INTEGER NOT NULL,
+  run_id                TEXT,
+  state                 TEXT NOT NULL,
+  created_at            TEXT NOT NULL,
+  updated_at            TEXT NOT NULL,
+  PRIMARY KEY (campaign_id, item_id, attempt_generation)
+);
+CREATE INDEX IF NOT EXISTS idx_campaign_item_launches_campaign
+  ON campaign_item_launches(campaign_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_item_launches_source_launch
+  ON campaign_item_launches(source_launch_id);
 `;
