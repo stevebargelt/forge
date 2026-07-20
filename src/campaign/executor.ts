@@ -1591,6 +1591,43 @@ export async function driveOneCampaignItem(
       return { stopReason: c?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
     };
 
+    // FG-596 boundary: shared handling for an ADOPTED reservation. `adopted` means the run
+    // at this key ALREADY existed — a concurrent drive (or a crash-window predecessor)
+    // created and owns it. The reservation kept the link (item → the keyed run); THIS drive
+    // must NOT physically drive that run: it dispatches no runNext / no invoke, mutates no
+    // run / task / publication state, and infers NO owner liveness — physical-drive fencing
+    // (controller identity + lease) is FG-564. Only reservation.status === "created" (this
+    // caller created the run, so it owns the physical drive) enters the drive seam below.
+    // Leave the DURABLE recovery shape (awaiting_gate + campaign_system) that IDENTIFIES the
+    // adopted run, park the campaign, and return recovery_needed — so the controller /
+    // operator and FG-564 can act on the already-owned run without a re-drive here. This is
+    // the same recovery shape the legacy fail-closed guard above leaves (see isRecoveryShape
+    // / deriveDriveItemResultFromDurableState).
+    const handleAdoptedReservation = async (
+      adopted: { runId: string; attemptGeneration: number },
+    ): Promise<DriveOneItemResult> => {
+      const requestedHumanAction =
+        `${item.ticketId} already has run ${adopted.runId} (attempt_generation ` +
+        `${adopted.attemptGeneration}) created and owned by another drive — this drive adopted ` +
+        `and kept the keyed run but will NOT physically drive it (FG-564 owns physical-drive ` +
+        `fencing). Inspect it (forge show ${adopted.runId}), resolve or abandon, then ` +
+        `\`forge campaign resume ${campaignId}\`.`;
+      updateCampaignItem(item.id, {
+        lifecycleStatus: "awaiting_gate",
+        blockerKind: "campaign_system",
+        requestedHumanAction,
+      });
+      itemRecords.push({
+        itemId: item.id,
+        ticketId: item.ticketId,
+        runId: adopted.runId,
+        lifecycleStatus: "awaiting_gate",
+        blockerKind: "campaign_system",
+      });
+      await parkCampaign(campaignId, item.id, "blocked", { exemption: "item-carries-context" }, { fallbackRunId: pickCampaignFallbackRunId(campaignId) });
+      return { stopReason: "recovery_needed", itemRecords };
+    };
+
     if (itemConfig.lane === "full_feature") {
       // ── FULL_FEATURE: loadWorkflow → atomic reserve (startRun inside the tx) → runNext ─
       const workflowName = itemConfig.workflowName ?? "feature";
@@ -1635,6 +1672,11 @@ export async function driveOneCampaignItem(
         // Reservation LOST: the campaign was paused/abandoned or the item parked out from
         // under this drive. Nothing was created — reconcile from durable state and halt.
         if (reservation.status === "lost") return reconcileLostReservation();
+        // Reservation ADOPTED: the keyed synthetic (or live) run already existed — a
+        // concurrent / crash-window drive owns it. Do NOT apply the terminal classification
+        // over another drive's run (that would mutate its state); surface recovery_needed
+        // identifying the adopted run and leave it for FG-564.
+        if (reservation.status === "adopted") return await handleAdoptedReservation(reservation);
 
         // Terminal/infrastructure classification, AFTER the reservation commits. The item
         // is 'running' linked to the synthetic run; mark it failed/blocked, creating no run.
@@ -1738,6 +1780,11 @@ export async function driveOneCampaignItem(
           // under this drive. Nothing was created — reconcile from durable state and halt,
           // exactly as the load-fail lane does.
           if (synthetic.status === "lost") return reconcileLostReservation();
+          // Reservation ADOPTED: a racing crash-window re-drive already committed and owns
+          // the keyed synthetic run. Do NOT run parkCampaignOnStartRunThrow over it (that
+          // mutates run/campaign state for a run this drive does not own) — surface
+          // recovery_needed identifying the adopted run and leave it for FG-564.
+          if (synthetic.status === "adopted") return await handleAdoptedReservation(synthetic);
           parkRunId = synthetic.runId;
         } catch {
           // The synthetic-run reservation itself failed to persist (a DB-level fault — the
@@ -1750,6 +1797,10 @@ export async function driveOneCampaignItem(
         throw await parkCampaignOnStartRunThrow(campaignId, item.id, item.ticketId, parkRunId, err);
       }
       if (reservation.status === "lost") return reconcileLostReservation();
+      // Only a CREATED reservation (this caller minted the run) enters the physical drive
+      // seam. An ADOPTED reservation means the keyed run is owned by another drive — keep
+      // the link, drive nothing, and surface recovery_needed for FG-564 (no runNext here).
+      if (reservation.status === "adopted") return await handleAdoptedReservation(reservation);
       const runId = reservation.runId;
       item.runId = runId;
       item.lifecycleStatus = "running";
@@ -1863,6 +1914,9 @@ export async function driveOneCampaignItem(
         },
       });
       if (reservation.status === "lost") return reconcileLostReservation();
+      // Only CREATED drives the invoke lane; ADOPTED means another drive owns the keyed
+      // run — dispatch no invoke, surface recovery_needed for FG-564.
+      if (reservation.status === "adopted") return await handleAdoptedReservation(reservation);
       const runId = reservation.runId;
       item.runId = runId;
       item.lifecycleStatus = "running";
@@ -2007,6 +2061,9 @@ export async function driveOneCampaignItem(
         },
       });
       if (reservation.status === "lost") return reconcileLostReservation();
+      // Only CREATED drives the escape-hatch invoke; ADOPTED means another drive owns the
+      // keyed run — dispatch no invoke, surface recovery_needed for FG-564.
+      if (reservation.status === "adopted") return await handleAdoptedReservation(reservation);
       const runId = reservation.runId;
       item.runId = runId;
       item.lifecycleStatus = "running";

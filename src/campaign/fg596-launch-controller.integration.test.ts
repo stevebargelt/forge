@@ -351,7 +351,7 @@ test("FG-596 stamp: the drive-item run carries metadata.dispatchKey = H(cid,item
 
 // ── A6, C4: adoption of a crash-window run through the real drive path ───────────
 
-test("FG-596 adoption: a re-drive in the C4 window (run created + generation persisted, runId not yet linked) adopts by key — exactly one run", async () => {
+test("FG-596 adoption: a re-drive in the C4 window (run created + generation persisted, runId not yet linked) adopts by key — exactly one run, LINKED but NOT re-driven (recovery_needed for FG-564)", async () => {
   const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
   approveCampaign(campaign.id, { rationale: "ok" });
   tryTransitionCampaignToRunning(campaign.id);
@@ -364,19 +364,127 @@ test("FG-596 adoption: a re-drive in the C4 window (run created + generation per
   updateCampaignItem(item.id, { attemptGeneration: 1 });
   const key = deriveCampaignItemDispatchKey(campaign.id, item.id, 1);
   insertInvokeRun("run-orphan-fg101", campaign.id, item.id, key, 1);
+  const runBefore = getRun("run-orphan-fg101")!;
   assert.equal(getCampaignItem(item.id)!.runId, undefined, "precondition: the C4 window left runId unlinked");
   assert.equal(runByDispatchKey(key)?.id, "run-orphan-fg101", "precondition: the orphan run is resolvable by its key");
 
-  // Re-drive the SAME logical attempt (generation reused → same key → adoption).
+  // Re-drive the SAME logical attempt (generation reused → same key → adoption). FG-596
+  // must NOT physically re-drive an adopted run — it ADOPTS (links) it and returns
+  // recovery_needed, leaving the keyed run available for FG-564.
   shipTicket("FG-101");
   const result = await driveOneCampaignItem(campaign.id, item.id, { dispatch: fakeDispatch("complete"), projectDir, mode: "sequential" });
-  assert.equal(result.stopReason, undefined, "the adopted item settled and the campaign continues");
+  assert.equal(result.stopReason, "recovery_needed", "the adopted run is NOT re-driven — FG-596 surfaces recovery_needed for FG-564");
 
   const after = getCampaignItem(item.id)!;
   assert.equal(after.runId, "run-orphan-fg101", "ADOPTED the orphan run by key — the item links the SAME run, not a replacement");
   assert.equal(after.attemptGeneration, 1, "generation reused unchanged (no re-allocation on the re-drive)");
+  assert.equal(after.lifecycleStatus, "awaiting_gate", "the recovery shape — awaiting_gate, not driven to a terminal outcome");
+  assert.equal(after.blockerKind, "campaign_system", "the recovery shape carries campaign_system so FG-564/reconcile keys off it");
+  assert.notEqual(after.outcome, "shipped", "FG-596 did NOT drive the adopted run to shipped");
+  assert.ok(after.requestedHumanAction?.includes("run-orphan-fg101"), "the recovery-needed action IDENTIFIES the adopted run for FG-564/operator");
+  const runAfter = getRun("run-orphan-fg101")!;
+  assert.equal(runAfter.status, runBefore.status, "the adopted run's state was NOT mutated — no physical drive touched it");
   const runsForItem = listRuns().filter((r) => r.metadata?.["itemId"] === item.id);
   assert.equal(runsForItem.length, 1, "exactly ONE run exists for the item — no duplicate was created");
+});
+
+// ── FG-596 boundary regressions: created drives, adopted does NOT (FG-564 owns it) ──
+//
+// THE RULE: only reservation.status === "created" (this caller minted the run, so it owns
+// the physical drive) may enter the physical drive seam. An `adopted` reservation means the
+// keyed run is owned by another drive — FG-596 keeps the link, drives NOTHING, mutates no
+// run/task/publication state, infers no owner liveness, and returns recovery_needed
+// identifying the run for FG-564. These two regressions prove exactly that.
+
+test("FG-596 regression (concurrent raw drive-item): two concurrent drives on the SAME item produce EXACTLY ONE run — only the creator calls the physical drive seam; the adopter dispatches nothing and returns recovery_needed", async () => {
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "ok" });
+  tryTransitionCampaignToRunning(campaign.id);
+  const item = listCampaignItems(campaign.id)[0]!;
+  shipTicket("FG-101");
+
+  // Spy physical drive seam: record every runId the invoke lane was called with, and HOLD
+  // the creator inside the seam (item created + linked + 'running') so the second drive's
+  // reservation runs against the live run — the exact concurrent-adoption window. The
+  // adopter must never reach this seam.
+  const dispatchedRunIds: string[] = [];
+  let creatorReached!: () => void;
+  const creatorAtSeam = new Promise<void>((res) => { creatorReached = res; });
+  let releaseCreator!: () => void;
+  const creatorGate = new Promise<void>((res) => { releaseCreator = res; });
+  let held = false;
+  const spyDispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    dispatchedRunIds.push(args.runId!);
+    if (!held) {
+      held = true;
+      creatorReached();
+      await creatorGate;
+    }
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  const drive1 = driveOneCampaignItem(campaign.id, item.id, { dispatch: spyDispatch, projectDir, mode: "sequential" });
+  // Deterministic: the creator has reserved (created), linked the run, and is now holding
+  // inside the physical seam before the second drive starts.
+  await creatorAtSeam;
+
+  const drive2 = driveOneCampaignItem(campaign.id, item.id, { dispatch: spyDispatch, projectDir, mode: "sequential" });
+  const r2 = await drive2;
+
+  // The adopter drove NOTHING — recovery_needed identifying the already-owned run.
+  assert.equal(r2.stopReason, "recovery_needed", "the second (adopter) drive did NOT physically drive — recovery_needed");
+  assert.equal(dispatchedRunIds.length, 1, "the physical drive seam was called EXACTLY once — only the creator reached it");
+  const runsForItem = listRuns().filter((r) => r.metadata?.["itemId"] === item.id);
+  assert.equal(runsForItem.length, 1, "EXACTLY ONE run — the adopter created no second run");
+  const ownedRunId = runsForItem[0]!.id;
+  assert.equal(dispatchedRunIds[0], ownedRunId, "the one physical drive was on the creator's run");
+  const adopterItem = getCampaignItem(item.id)!;
+  assert.equal(adopterItem.blockerKind, "campaign_system", "the adopter left the recovery shape for FG-564/reconcile");
+  assert.ok(adopterItem.requestedHumanAction?.includes(ownedRunId), "the adopter's recovery-needed action IDENTIFIES the owned run for FG-564");
+  const adopterRecord = r2.itemRecords.find((rec) => rec.itemId === item.id)!;
+  assert.equal(adopterRecord.runId, ownedRunId, "the adopter's returned record identifies the already-owned run");
+
+  releaseCreator();
+  await drive1;
+
+  // Still exactly one run after the creator's drive settled — no duplicate was ever minted.
+  assert.equal(listRuns().filter((r) => r.metadata?.["itemId"] === item.id).length, 1, "still EXACTLY ONE run after both drives settled");
+  assert.equal(dispatchedRunIds.length, 1, "the physical drive seam was never called a second time");
+});
+
+test("FG-596 regression (crash-recovery boundary): a re-drive after a driver crash ADOPTS the keyed run and returns recovery_needed WITHOUT re-driving — the physical drive seam is NEVER called and the run stays available for FG-564", async () => {
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "ok" });
+  tryTransitionCampaignToRunning(campaign.id);
+  const item = listCampaignItems(campaign.id)[0]!;
+
+  // A crashed driver left the keyed run created + generation persisted, item still pending
+  // and unlinked (the C4 crash window). The run remains adoptable by its dispatch key.
+  updateCampaignItem(item.id, { attemptGeneration: 1 });
+  const key = deriveCampaignItemDispatchKey(campaign.id, item.id, 1);
+  insertInvokeRun("run-crashed-driver", campaign.id, item.id, key, 1);
+  const runBefore = getRun("run-crashed-driver")!;
+
+  // Spy physical drive seam: it must NEVER be called on a crash re-drive of an adopted run.
+  let dispatchCalls = 0;
+  const spyDispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    dispatchCalls++;
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  shipTicket("FG-101");
+  const result = await driveOneCampaignItem(campaign.id, item.id, { dispatch: spyDispatch, projectDir, mode: "sequential" });
+
+  assert.equal(result.stopReason, "recovery_needed", "the crash re-drive ADOPTS and surfaces recovery_needed — never re-drives");
+  assert.equal(dispatchCalls, 0, "FG-596 NEVER physically re-drives an adopted run — the drive seam was not called");
+
+  const after = getCampaignItem(item.id)!;
+  assert.equal(after.runId, "run-crashed-driver", "the keyed run stays LINKED — available for FG-564 to drive");
+  assert.equal(runByDispatchKey(key)?.id, "run-crashed-driver", "the run remains adoptable by its dispatch key for FG-564");
+  assert.equal(getRun("run-crashed-driver")!.status, runBefore.status, "the adopted run's state was NOT mutated by FG-596");
+  assert.ok(after.requestedHumanAction?.includes("run-crashed-driver"), "recovery_needed IDENTIFIES the run for FG-564/operator");
+  const runsForItem = listRuns().filter((r) => r.metadata?.["itemId"] === item.id);
+  assert.equal(runsForItem.length, 1, "exactly ONE run — no duplicate minted on the re-drive");
 });
 
 // ── A2: driveRemainingItems is a launch-per-item controller ─────────────────────
@@ -738,7 +846,7 @@ test("FG-596 load-fail stamp: a workflow-load failure creates ONE synthetic aban
   assert.equal(runByDispatchKey(expectedKey)?.id, run.id, "the synthetic run is adoptable by its dispatch key");
 });
 
-test("FG-596 load-fail adoption: a re-drive in the crash window ADOPTS the stamped synthetic run by key — exactly one run, never a duplicate", async () => {
+test("FG-596 load-fail adoption: a re-drive in the crash window ADOPTS the stamped synthetic run by key — exactly one run, LINKED but NOT re-classified (recovery_needed for FG-564)", async () => {
   const { campaignId, itemId } = seedRunningPendingFullFeatureItem();
 
   // Reproduce the crash window: the reservation committed a stamped synthetic run + persisted
@@ -746,23 +854,30 @@ test("FG-596 load-fail adoption: a re-drive in the crash window ADOPTS the stamp
   updateCampaignItem(itemId, { attemptGeneration: 1 });
   const key = deriveCampaignItemDispatchKey(campaignId, itemId, 1);
   insertSyntheticAbandonedRun("run-syn-orphan", campaignId, itemId, key, 1);
+  const runBefore = getRun("run-syn-orphan")!;
   assert.equal(getCampaignItem(itemId)!.runId, undefined, "precondition: the crash left runId unlinked");
   assert.equal(runByDispatchKey(key)?.id, "run-syn-orphan", "precondition: the synthetic run is resolvable by key");
 
-  // Re-drive the SAME failing load — the reservation must ADOPT the orphan by key, not mint a duplicate.
+  // Re-drive the SAME failing load — the reservation must ADOPT the orphan by key, not mint a
+  // duplicate. FG-596 must NOT apply the terminal classification over another drive's run: it
+  // keeps the link and surfaces recovery_needed, leaving the keyed run for FG-564.
   const result = await driveOneCampaignItem(campaignId, itemId, {
     dispatch: fakeDispatch("complete"),
     projectDir,
     mode: "sequential",
     loadWorkflowFn: throwingLoad,
   });
-  assert.equal(result.stopReason, "paused", "the re-driven load-fail lane still parks the campaign");
+  assert.equal(result.stopReason, "recovery_needed", "the adopted run is NOT re-classified — FG-596 surfaces recovery_needed for FG-564");
 
   const item = getCampaignItem(itemId)!;
   assert.equal(item.runId, "run-syn-orphan", "ADOPTED the orphan synthetic run by key — the SAME run, not a replacement");
-  assert.equal(item.lifecycleStatus, "failed", "terminal classification applied over the adopted run");
-  assert.equal(item.outcome, "blocked");
+  assert.equal(item.lifecycleStatus, "awaiting_gate", "the recovery shape — NOT the terminal failed/blocked classification over an adopted run");
+  assert.equal(item.blockerKind, "campaign_system", "the recovery shape carries campaign_system for FG-564/reconcile");
+  assert.notEqual(item.outcome, "blocked", "FG-596 did NOT apply the terminal outcome over the adopted run");
+  assert.ok(item.requestedHumanAction?.includes("run-syn-orphan"), "the recovery-needed action IDENTIFIES the adopted run");
   assert.equal(item.attemptGeneration, 1, "generation reused unchanged on the re-drive");
+  const runAfter = getRun("run-syn-orphan")!;
+  assert.equal(runAfter.status, runBefore.status, "the adopted synthetic run's state was NOT mutated");
   const runsForItem = listRuns().filter((r) => r.metadata?.["itemId"] === itemId);
   assert.equal(runsForItem.length, 1, "exactly ONE synthetic run exists for the item — no duplicate traceability row");
 });
