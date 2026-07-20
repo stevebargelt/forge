@@ -1,9 +1,11 @@
 ---
 id: FG-596
 type: story
-status: active
+status: done
 title: Slice 5a (prerequisite) — extract launchable single-item campaign drive + convert item loop to a launch-per-item controller
 created: 2026-07-20
+closed: 2026-07-20
+closed_commit: 02e3b70
 ---
 
 **Epic:** FG-561 · **Prerequisite for:** FG-564 (Slice 5b — continuation adoption).
