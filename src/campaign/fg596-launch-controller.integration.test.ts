@@ -515,3 +515,61 @@ test("FG-596 A6: a FAILING waitForLaunchTerminal leaves the campaign PAUSED and 
   const resumed = await resumeCampaign(campaign.id, { dispatch: fakeDispatch("complete") });
   assert.equal(resumed.stopReason, "complete", "resume drove the recovered item to completion");
 });
+
+test("FG-596 A6: a wait failure AFTER the child dispatched a run leaves the running item ADOPTABLE (recovery_needed), never overwritten as retryable — no duplicate run", async () => {
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "ok" });
+  const itemId = listCampaignItems(campaign.id)[0]!.id;
+
+  // startLaunch succeeds and the drive-item child dispatches a real run — stamping the
+  // item to `running` with its adoptable dispatch_key — BEFORE the wait harness fails.
+  // Reproduce that durable side effect on the first harness read(), then throw the WAIT.
+  const gen = allocateItemGeneration(itemId);
+  const dispatchKey = deriveCampaignItemDispatchKey(campaign.id, itemId, gen);
+  const runId = "run-inflight";
+  const failingHarness: WaitHarness = {
+    read() {
+      insertRun({
+        id: runId,
+        workflow: "feature",
+        title: "FG-101",
+        status: "active",
+        createdAt: nowIso(),
+        metadata: { dispatchKey, attemptGeneration: gen },
+        projectDir,
+      });
+      updateCampaignItem(itemId, { lifecycleStatus: "running", runId });
+      throw new Error("wait harness: exit record read failed (EIO) after the child dispatched a run");
+    },
+    installWatcher() {
+      return () => {};
+    },
+    startReconcile() {
+      return () => {};
+    },
+    startTimeout() {
+      return () => {};
+    },
+    onCancel() {
+      return () => {};
+    },
+    startInvalidBound() {
+      return () => {};
+    },
+  };
+  const launcher = launchDriveItemUnderForge(["forge"], { tmux: benignTmux(), makeWaitHarness: () => failingHarness });
+
+  const result = await startCampaign(campaign.id, { launchDriveItem: launcher });
+  assert.equal(result.stopReason, "recovery_needed", "a live mid-flight drive surfaces for recovery, not a retryable no-run park");
+
+  // The item is NOT rewritten to a retryable failed/blocked shape — it stays running and
+  // adoptable, so an operator retry cannot mint a duplicate run alongside the live drive.
+  const item = getCampaignItem(itemId)!;
+  assert.equal(item.lifecycleStatus, "running", "the dispatched item stays running (adoptable), never overwritten as failed");
+  assert.equal(item.outcome, undefined, "no blocked outcome forced over the live drive");
+  assert.equal(item.runId, runId, "the item keeps its dispatched run linkage");
+  assert.equal(runByDispatchKey(dispatchKey)?.id, runId, "the run remains adoptable by its stamped dispatch key (FG-564)");
+
+  // No second run was minted — exactly one run exists for the item.
+  assert.equal(listRuns().filter((r) => r.title === "FG-101").length, 1, "no duplicate run was created");
+});

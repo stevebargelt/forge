@@ -2262,14 +2262,22 @@ export function deriveDriveItemResultFromDurableState(
 //   2. If the campaign is no longer running (abandoned, or a concurrent operator
 //      `forge campaign pause` won the CAS), honor that durable state — never force a
 //      park over it.
-//   3. Otherwise the item is still mid-flight and the campaign is still running — the
-//      wedge shape. PARK the item at its true terminal shape (failed/blocked/
-//      infrastructure, directly retryable — the same shape parkCampaignOnStartRunThrow
-//      leaves for a setup failure that dispatched no run) and CAS the campaign
-//      running→paused via parkCampaign, so `forge campaign retry <cid> <ticket>` then
-//      `forge campaign resume` recover it with NO manual SQL. Preserves the FG-425
-//      invariants: never resets the item to pending, never mints a replacement run,
-//      never overwrites an existing shared blocker (e.g. git_state).
+//   3. If startLaunch SUCCEEDED and the drive-item child already dispatched a run —
+//      stamping the item to `running` with its adoptable dispatch_key — before the WAIT
+//      harness threw, the child is live (removeLaunch above, no --force, refuses to kill
+//      a running launch, so the drive keeps going). That item is the ADOPTABLE recovery
+//      shape, NOT a no-run park: overwriting it as failed/retryable would tell the
+//      operator to `retry` and mint a DUPLICATE run while the original drive is still
+//      running. Reconcile from durable state (→ recovery_needed) exactly as a
+//      crashed-child drive does, leaving the run adoptable for FG-564.
+//   4. Otherwise the item is still `pending` (no run was ever dispatched — a startLaunch
+//      throw) and the campaign is still running — the wedge shape. PARK the item at its
+//      true terminal shape (failed/blocked/infrastructure, directly retryable — the same
+//      shape parkCampaignOnStartRunThrow leaves for a setup failure that dispatched no
+//      run) and CAS the campaign running→paused via parkCampaign, so `forge campaign
+//      retry <cid> <ticket>` then `forge campaign resume` recover it with NO manual SQL.
+//      Preserves the FG-425 invariants: never resets the item to pending, never mints a
+//      replacement run, never overwrites an existing shared blocker (e.g. git_state).
 async function containLaunchBoundaryFailure(
   campaignId: string,
   itemId: string,
@@ -2282,6 +2290,12 @@ async function containLaunchBoundaryFailure(
 
   const durableItem = getCampaignItem(itemId);
   if (isItemSettledOrParked(durableItem)) return deriveDurable();
+
+  // A `running` item means the child dispatched a run (dispatch_key stamped) and is still
+  // live — a wait-harness failure never makes that a no-run park. Reconcile from durable
+  // state (→ recovery_needed, adoptable) instead of overwriting it as retryable, which
+  // would allow a duplicate run alongside the original drive.
+  if (durableItem?.lifecycleStatus === "running") return deriveDurable();
 
   const campaign = getCampaign(campaignId);
   if (!campaign || campaign.status !== "running") return deriveDurable();
