@@ -1595,33 +1595,50 @@ export async function driveOneCampaignItem(
       // ── FULL_FEATURE: loadWorkflow → atomic reserve (startRun inside the tx) → runNext ─
       const workflowName = itemConfig.workflowName ?? "feature";
 
-      // Load the workflow FIRST — a load failure dispatches no run, so it never enters the
-      // atomic reservation (the ONLY run-creating path now). The item is still 'pending'
-      // (nothing was claimed), so park it at its terminal failure shape. Link a synthetic
-      // abandoned run for traceability (the same shape parkCampaignOnStartRunThrow leaves —
-      // so the pause milestone has a run to scope to), reusing an existing linkage if the
-      // item already carries one.
+      // Load the workflow FIRST. A load failure still PRODUCES a run — a synthetic
+      // 'abandoned' row for traceability (the same shape parkCampaignOnStartRunThrow
+      // leaves, so the pause milestone has a run to scope to) — so it obeys the SAME
+      // pre-dispatch invariant as every other run-producing lane: route the synthetic
+      // run through reserveCampaignDriveDispatch, which allocates/reuses the attempt
+      // generation, derives the deterministic dispatch key, and inserts the stamped row
+      // + links it + CAS's the item pending→running in ONE atomic transaction (gated on
+      // the campaign running and the item pending). A concurrent / crash-window re-drive
+      // of the SAME load failure ADOPTS this row by key (runByDispatchKey) instead of
+      // inserting a duplicate marker. Only AFTER the reservation commits is the
+      // terminal/infrastructure classification applied — the item is marked
+      // failed/blocked WITHOUT creating a second run.
       let loadedWorkflow: Workflow;
       try {
         loadedWorkflow = doLoadWorkflow(workflowName, { projectDir: opts.projectDir });
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
-        const existingRunId = item.runId && getRun(item.runId) ? item.runId : undefined;
-        const runId = existingRunId ?? newRunId(item.ticketId);
-        if (!existingRunId) {
-          // Unstamped (no dispatchKey) — the load failed before any dispatch, so nothing is
-          // adoptable at this item's key; this row is a traceability marker, inert to
-          // runByDispatchKey.
-          insertRun({
-            id: runId,
-            workflow: workflowName,
-            title: item.ticketId,
-            status: "abandoned",
-            createdAt: nowIso(),
-            metadata: { campaignId, ticketId: item.ticketId, itemId: item.id },
-            projectDir: opts.projectDir,
-          });
-        }
+        const reservation = reserveCampaignDriveDispatch({
+          campaignId,
+          itemId: item.id,
+          createRun: ({ dispatchKey, attemptGeneration }) => {
+            const newId = newRunId(item.ticketId);
+            insertRun({
+              id: newId,
+              workflow: workflowName,
+              title: item.ticketId,
+              status: "abandoned",
+              createdAt: nowIso(),
+              // Stamped with the SAME metadata.dispatchKey + item-attempt identity as the
+              // live lanes so this traceability row is adoptable by key — a re-drive in the
+              // crash window resolves the ONE synthetic run instead of duplicating it.
+              metadata: { campaignId, ticketId: item.ticketId, itemId: item.id, dispatchKey, attemptGeneration },
+              projectDir: opts.projectDir,
+            });
+            return newId;
+          },
+        });
+        // Reservation LOST: the campaign was paused/abandoned or the item parked out from
+        // under this drive. Nothing was created — reconcile from durable state and halt.
+        if (reservation.status === "lost") return reconcileLostReservation();
+
+        // Terminal/infrastructure classification, AFTER the reservation commits. The item
+        // is 'running' linked to the synthetic run; mark it failed/blocked, creating no run.
+        const runId = reservation.runId;
         updateCampaignItem(item.id, {
           runId,
           lifecycleStatus: "failed",
