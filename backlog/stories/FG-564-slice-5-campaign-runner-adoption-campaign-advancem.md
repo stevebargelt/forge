@@ -79,3 +79,9 @@ A claim must PRESERVE these, not merely reuse the classifier (**F21**):
 - Redesigning FG-425's publisher/lane/mutex/recovery/worktrees; no PID probing, signalling, identity nonces, zombie classification, reaping.
 - Extending the FG-562 primitive (unnecessary at per-item granularity — but a campaign-controller generation/ownership record MAY be added campaign-side per D1).
 - Parallel campaign lanes (FG-396).
+
+## Binding AC — lease-gated adopt→physical-drive conversion (from FG-596, 2026-07-20)
+
+FG-596 ships the atomic reservation such that a drive-item reservation returns `created | adopted | lost`, and FG-596 **physically drives ONLY a `created` reservation** — an `adopted` reservation is linked but never re-driven by FG-596 (it returns a recovery-needed/already-owned outcome identifying the keyed run, dispatches no physical work, mutates no run/task/publication state, and infers no owner liveness). Converting an `adopted` reservation into a physical re-drive is **this ticket's job and is gated on the campaign continuation lease:**
+
+- **AC-ADOPT-DRIVE (binding):** ONLY the controller holding the campaign continuation lease (AC7 instance-stable identity) may convert an `adopted` reservation into a physical re-drive (runNext / invoke). A controller without the live lease MUST NOT re-drive an adopted run — takeover occurs only AFTER lease expiry (AC8). Proven RED against a non-lease-holder (or a second concurrent controller) converting an adopted reservation into physical drive while the lease is live; GREEN only after expiry. This is what fences "two live processes physically driving the same keyed run" — FG-596 guarantees one run + adoptability; FG-564's lease guarantees one live driver.
