@@ -54,6 +54,7 @@ import { setPublisherSeamsForTest } from "../v2/integration-publisher.js";
 import { runNext, type DockerExecFn, type RunNextResult } from "../v2/runNext.js";
 import type { Workflow } from "../v2/schema.js";
 import { realWaitHarness, LAUNCHES_DIR, type LaunchStatus, type TmuxRunner } from "../v2/launch.js";
+import { DB_PATH } from "../util/paths.js";
 import type { InvokeArgs, InvokeResult } from "../v2/invoke.js";
 import { planCampaign, type ItemModeOverride } from "./planner.js";
 import {
@@ -592,11 +593,13 @@ test(
       "startLaunch drove the real tmux handshake in order",
     );
     assert.equal(driveTmux.state.newSessionCwd, projectDir, "the drive runs in the CAMPAIGN's project dir (cwd propagation)");
-    // The exact subprocess argv reached tmux: env pins the RESOLVED FORGE_HOME so the
-    // child shares the controller's store, then `forge campaign drive-item <cid> <itemId>`.
+    // The exact subprocess argv reached tmux: env pins the RESOLVED FORGE_HOME *and*
+    // FORGE_DB_PATH so the child shares the controller's store (even under a DB
+    // override), then `forge campaign drive-item <cid> <itemId>`.
     const expectedArgvTail = [
       "env",
       `FORGE_HOME=${process.env.FORGE_HOME}`,
+      `FORGE_DB_PATH=${DB_PATH}`,
       "forge",
       "campaign",
       "drive-item",
@@ -607,7 +610,7 @@ test(
       .join(" ");
     assert.ok(
       driveTmux.state.respawnCmd.includes(expectedArgvTail),
-      `the drive-item subprocess argv (env FORGE_HOME + forge campaign drive-item <cid> <itemId>) reached tmux: ${driveTmux.state.respawnCmd}`,
+      `the drive-item subprocess argv (env FORGE_HOME + FORGE_DB_PATH + forge campaign drive-item <cid> <itemId>) reached tmux: ${driveTmux.state.respawnCmd}`,
     );
 
     assert.equal(result.stopReason, "complete", "the controller derives completion from durable campaign status after the REAL wait");

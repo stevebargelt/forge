@@ -10,7 +10,7 @@ import {
   type TmuxRunner,
   type WaitHarness,
 } from "../v2/launch.js";
-import { FORGE_HOME } from "../util/paths.js";
+import { FORGE_HOME, DB_PATH } from "../util/paths.js";
 import { invoke } from "../v2/invoke.js";
 import type { InvokeArgs, InvokeResult } from "../v2/invoke.js";
 import { evaluateReadiness } from "../readiness/readiness.js";
@@ -2413,11 +2413,16 @@ export function launchDriveItemUnderForge(
     // The launch runs under a tmux server whose environment can be STALE (a
     // long-lived server does not pick up the launcher's FORGE_HOME), so the child
     // could otherwise open a DIFFERENT store than the controller and never find the
-    // campaign. Pin the RESOLVED FORGE_HOME through an `env` prefix so the drive-item
-    // child provably shares the controller's durable store, independent of tmux env
-    // inheritance. (`env` is a recognized launch exec-prefix — it applies the
-    // assignment and execs the real command; provenance records it correctly.)
-    const argv = ["env", `FORGE_HOME=${FORGE_HOME}`, ...forgeBin, "campaign", "drive-item", campaignId, itemId];
+    // campaign. Pin the RESOLVED FORGE_HOME *and* the RESOLVED DB_PATH through an
+    // `env` prefix so the drive-item child provably shares the controller's durable
+    // store, independent of tmux env inheritance. FORGE_HOME alone is not enough: a
+    // campaign started with a FORGE_DB_PATH override resolves DB_PATH away from
+    // FORGE_HOME/forge.db, and a stale tmux env would leave the child falling back to
+    // the default store — splitting controller and child across stores. Pinning the
+    // already-resolved DB_PATH forwards that override verbatim. (`env` is a recognized
+    // launch exec-prefix — it applies the assignments and execs the real command;
+    // provenance records it correctly.)
+    const argv = ["env", `FORGE_HOME=${FORGE_HOME}`, `FORGE_DB_PATH=${DB_PATH}`, ...forgeBin, "campaign", "drive-item", campaignId, itemId];
     // Run the drive in the CAMPAIGN's project directory, not whatever cwd `forge
     // campaign start` happened to be invoked from — the item's git/worktree work
     // belongs there, and it keeps the drive from ever touching an unrelated checkout
