@@ -1,9 +1,11 @@
 ---
 id: FG-564
 type: story
-status: active
+status: done
 title: Slice 5b — campaign-runner adoption of the durable continuation primitive (per-item, depends on FG-596)
 created: 2026-07-14
+closed: 2026-07-20
+closed_commit: 1a43bd0
 ---
 
 ### Slice 5b — campaign-runner adoption of the durable continuation primitive (per-item)
@@ -120,3 +122,23 @@ A claim must PRESERVE these, not merely reuse the classifier (**F21**):
 FG-596 ships the atomic reservation such that a drive-item reservation returns `created | adopted | lost`, and FG-596 **physically drives ONLY a `created` reservation** — an `adopted` reservation is linked but never re-driven by FG-596 (it returns a recovery-needed/already-owned outcome identifying the keyed run, dispatches no physical work, mutates no run/task/publication state, and infers no owner liveness). Converting an `adopted` reservation into a physical re-drive is **this ticket's job and is gated on both the continuation claim and the campaign-controller lease:**
 
 - **AC-ADOPT-DRIVE (binding):** ONLY the controller holding BOTH the applicable continuation claim and the persisted campaign-controller owner/generation lease (AC7) may convert an `adopted` FG-596 reservation into a physical re-drive (`runNext` / invoke). Authorization is checked immediately before physical work and remains fenced for the whole drive. A controller without the live lease MUST NOT re-drive an adopted run — takeover occurs only AFTER lease expiry (AC8). Proven RED against a non-lease-holder (or a second concurrent controller) converting an adopted reservation into physical drive while the lease is live; GREEN only after expiry; the expired former owner remains fenced. This is what separates the guarantees: FG-596 provides one item-run + adoptability; the FG-562 claim provides one boundary advancement; FG-564's campaign lease provides one live physical driver.
+
+## AC evidence grid — SHIPPED (merge `1a43bd0`, PR #150; CI `test` + `test-extended` green)
+
+Every acceptance criterion walked against concrete evidence in the merged diff. Reviewed across 5 independent red-review waves (red-wide / red-backend / red-security); build advanced after 6 finding-indexed fix-rounds; CI `test` (fast canonical) and `test-extended` (integration shards + worktree + dashboard) both green at the merge commit — the worktree tier runs the AC9 real-runNext/real-publisher capstone.
+
+| AC | Evidence |
+|----|----------|
+| **AC3** record+claim, attempt-scoped | `continuation-adapter.ts` + `executor.ts` recorder — `continuationId=(campaignId,itemId)`, phase `drive:<itemId>#<attempt>`, `nextAction` names the next item; BD-3 re-read + phase-bound CAS; retry rearm binds new launch+phase. Tests: `fg564-launch-linkage-recorder.integration.test.ts`, crash-matrix C2/C3/C5. |
+| **AC4** BD-3 + outcome-from-durable-state | `consumer-core.ts` (BD-3 re-read, `deriveTerminalDisposition`); item outcome derived from durable campaign/run/task/publication rows post-wake. A fabricated/stale disposition has zero effect — crash-matrix C4/C5 (RED-before-fix). |
+| **AC5** F17 adopt-not-duplicate, two receipts | `continuation-adapter.ts` — `continuationsInDispatch({consumerKind:'campaign'})` recovers the claim; `reserveCampaignDriveDispatch` is the sole create/adopt authority (created/adopted/lost); continuation receipt and item-attempt key stay distinct. `continuation-adapter.integration.test.ts`. |
+| **AC6** shared core, not a copy | `consumer-core.ts` extracted, consumed by both orchestrator and campaign; `consumerKind` branches only at injected PhysicalDispatch + recover filter; orchestrator guard generalized. `consumer-core.test.ts`; orchestrator tests stay green. |
+| **AC7** controller identity + physical-drive lease | `store/campaign-controller.ts` (owner/generation/expiry, owner/generation-scoped CAS); `schema.ts` `campaign_controller_leases`; `executor.ts` renewal heartbeat covering a >TTL drive. Host-stress: `fg564-lease-stress.integration.test.ts` (fresh-controller RED against a live lease; GREEN only after expiry; expired owner cannot write/advance/audit/re-drive). `campaign-controller.test.ts`. |
+| **AC8** running-campaign takeover | `cli/commands/campaign.ts` `runCampaignRecovery` — `forge campaign recover`/`continue` fail closed while the prior lease is live, take over only after expiry, continue the item loop with no manual SQL / no item reset / no replacement run. `fg564-campaign-recover-cli.integration.test.ts`; `concepts.md` manual-SQL recovery retired. |
+| **AC9** falsification + five-level capstone, production path | `fg564-crash-matrix.integration.test.ts` C1–C5,C7,C8 RED-before-fix through the production consumer + real durable store + real launch/reservation seams; `fg564-capstone.worktree.test.ts` — C6 and a complete N→N+1 advance through **real runNext + real publisher + real durable rows**, five-level convergence (task/run/campaign-item/campaign/publication) read back from durable rows. Green in CI `test-extended` (worktree tier). |
+| **AC10** durable launch publication/recovery | `store/campaign-controller.ts` linkage read/write (`campaign_item_launches`, unique `source_launch_id`, immutable born-under token); `executor.ts` links before arming the waiter; recovery discovers the linkage without heuristic matching. `fg564-launch-linkage-recorder.integration.test.ts`, `fg564-controller-lease-migration.integration.test.ts`; crash-matrix C7/C8. |
+| **AC-ADOPT-DRIVE** | `continuation-adapter.ts` + `executor.ts` — physical re-drive authorized only with BOTH the continuation claim AND the live lease; the durable born-under token is compared to the live lease immediately before work and re-checked at every wave; fenced for the whole drive. Crash-matrix C4/C7; RED against a non-lease-holder / second concurrent controller. |
+| **AC-DEAD-DRIVE** | `executor.ts` — on `owner_gone`/`unknown` while the item is nonterminal, reattach-and-converge within `CONVERGE_LIMIT`, preserving all four FG-425 invariants; never resets the item or mints a second run. Crash-matrix C6 + capstone. |
+| **Lane parity** (operator close-the-class directive) | `executor.ts` `prepareCampaignItemDispatch` — one shared lane-aware dispatch authority used by BOTH the normal drive and continuation recovery: `full_feature`→real `startRun`/runNext, invoke lanes→`driveInvokeLaneItem` real invoke path; fail-closed before reservation on missing ticket/projectDir/unresolved-workflow/unknown-lane; adopted runs re-enter their recorded lane driver. `fg564-lane-parity.integration.test.ts`, `fg564-materialize-run.integration.test.ts`. |
+
+**Follow-ups (new scope, not unmet AC):** FG-597 (harden `FORGE_CONTROLLER_ID` bearer identity — accepted for FG-564 under the trusted single-operator-host model); FG-598 (mixed-lane recovery parity test should drive natural loop continuation rather than re-arm between dispatches).
