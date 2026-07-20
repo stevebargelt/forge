@@ -1,9 +1,11 @@
 ---
 id: FG-594
 type: story
-status: active
+status: done
 title: "Dashboard: killed/abandoned review-loop shows 'stale · waiting-on-ci' forever — verification-event badge ignores run terminal status"
 created: 2026-07-19
+closed: 2026-07-20
+closed_commit: b8e20b7792177cd4d6839e72fdb58df948a6b4f4
 ---
 
 ## Problem
