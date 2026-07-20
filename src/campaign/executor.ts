@@ -2391,6 +2391,80 @@ async function containLaunchBoundaryFailure(
   return { itemRecords: [record], stopReason: "paused" };
 }
 
+// FG-596 (A6): does this item have a run a re-drive (or FG-564 adoption) could reach? True
+// when its linked runId resolves to a real run, OR the deterministic dispatch key for its
+// PERSISTED attempt generation resolves one. A `running` item with NEITHER is the
+// crash-mid-claim shape: claimCampaignItemForDrive flipped it pending→running before the
+// child created any run, and the child then died — so there is nothing in flight and
+// nothing to adopt.
+function itemHasAdoptableRun(campaignId: string, item: CampaignItem): boolean {
+  if (item.runId && getRun(item.runId)) return true;
+  const key = deriveCampaignItemDispatchKey(campaignId, item.id, item.attemptGeneration ?? 0);
+  return runByDispatchKey(key) !== undefined;
+}
+
+// FG-596 (A6): contain a crash between the pending→running CLAIM and the run's creation.
+// claimCampaignItemForDrive commits pending→running BEFORE any lane creates its run (the
+// by-construction half of the containment/child race). If the drive-item child DIES in
+// that window — a TERMINAL disposition, so the child is provably dead — it leaves a
+// `running` item with NO adoptable run: no linked run and its dispatch key resolves
+// nothing. That is the unrecoverable wedge A6 forbids — start refuses (not planned), resume
+// refuses (a running item reads as in-flight → recovery_needed), reconcile refuses (the
+// campaign is still running), and FG-564 has no run to adopt. No run was ever dispatched,
+// so contain it into the SAME directly-retryable park a no-run launch-boundary failure
+// produces (item failed/blocked/infrastructure, campaign running→paused): `forge campaign
+// retry <cid> <ticket>` then `forge campaign resume` recover it with no manual SQL. The
+// running→failed reset is gated on the campaign still being `running`, so a concurrent
+// operator pause/abandon that already moved the item/campaign makes it a no-op and we
+// reconcile from durable state instead — never forcing a park over an operator's decision.
+async function containCrashMidClaimItem(
+  campaignId: string,
+  itemId: string,
+  disposition: LaunchStatus | undefined,
+): Promise<DriveOneItemResult> {
+  const deriveDurable = (): DriveOneItemResult => {
+    const d = deriveDriveItemResultFromDurableState(campaignId, itemId, disposition);
+    return { itemRecords: d.itemRecords, ...(d.stopReason ? { stopReason: d.stopReason } : {}) };
+  };
+
+  const durableItem = getCampaignItem(itemId);
+  const ticketId = durableItem?.ticketId ?? itemId;
+  const dispositionNote = disposition ? statusLine(disposition) : "the drive-item process ended without settling the item";
+  const message = `the per-item drive crashed after claiming ${ticketId} but before dispatching a run (${dispositionNote}) — no run was created`;
+  try {
+    const reset = updateCampaignItemIfCampaignRunning(itemId, campaignId, {
+      lifecycleStatus: "failed",
+      outcome: "blocked",
+      blockerKind: "infrastructure",
+      // No run exists to preserve — clear the (never-linked) run slot so the retry starts clean.
+      runId: undefined,
+      reason: message,
+      requestedHumanAction: `${message}. Run \`forge campaign retry ${campaignId} ${ticketId}\`, then \`forge campaign resume ${campaignId}\`.`,
+    });
+    if (!reset) return deriveDurable();
+    logEvent("campaign_item.drive_error", {
+      payload: { campaignId, itemId, ticketId, error: message, boundary: "drive-crash-mid-claim", decidedAt: nowIso() },
+    });
+    await parkCampaign(campaignId, itemId, "blocked", { exemption: "item-carries-context" }, { fallbackRunId: pickCampaignFallbackRunId(campaignId) });
+  } catch {
+    // park failed — the returned stopReason still halts the controller cooperatively
+    // and the item transition above is best-effort; nothing here may re-throw.
+  }
+  const parked = getCampaignItem(itemId);
+  const record: CampaignItemRecord = parked
+    ? {
+        itemId: parked.id,
+        ticketId: parked.ticketId,
+        runId: parked.runId,
+        lifecycleStatus: parked.lifecycleStatus,
+        outcome: parked.outcome,
+        blockerKind: parked.blockerKind,
+        reason: parked.reason,
+      }
+    : { itemId, ticketId, lifecycleStatus: "failed", outcome: "blocked", blockerKind: "infrastructure", reason: message };
+  return { itemRecords: [record], stopReason: "paused" };
+}
+
 // FG-596: the production launcher — start `forge campaign drive-item <cid> <itemId>`
 // under a durable `forge launch` tmux owner, block until it reaches a terminal
 // DRIVE-PROCESS disposition, then reconstruct the DriveOneItemResult ENTIRELY from
@@ -2462,6 +2536,18 @@ export function launchDriveItemUnderForge(
     // other settle is disposable (its durable effects are committed). Annotate the crash
     // record with the process disposition so the operator sees HOW the drive ended.
     if (derived.stopReason === "recovery_needed" && !isItemSettledOrParked(getCampaignItem(itemId))) {
+      // FG-596 (A6): distinguish the crash-mid-claim wedge from the genuine adoptable
+      // mid-flight shape. A `running` item with NO adoptable run means the child claimed it
+      // (pending→running) then died before creating any run — nothing is in flight and
+      // FG-564 has nothing to adopt. Leaving it running is unrecoverable (start/resume both
+      // refuse a running item), so contain it into a directly-retryable park + pause instead
+      // of surfacing a recovery_needed the operator cannot act on. A running item that DOES
+      // have an adoptable run is the real mid-flight shape and falls through unchanged.
+      const midFlight = getCampaignItem(itemId);
+      if (midFlight && midFlight.lifecycleStatus === "running" && !itemHasAdoptableRun(campaignId, midFlight)) {
+        try { removeLaunch(meta.id, seams.tmux ? { tmux: seams.tmux } : {}); } catch { /* best-effort cleanup */ }
+        return containCrashMidClaimItem(campaignId, itemId, disposition);
+      }
       const dispositionNote = disposition ? statusLine(disposition) : `waiter: ${outcome.kind}`;
       const [rec] = derived.itemRecords;
       const annotated: CampaignItemRecord = rec

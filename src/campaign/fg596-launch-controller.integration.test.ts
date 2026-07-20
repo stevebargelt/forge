@@ -579,6 +579,73 @@ test("FG-596 A6: a wait failure AFTER the child dispatched a run leaves the runn
   assert.equal(listRuns().filter((r) => r.title === "FG-101").length, 1, "no duplicate run was created");
 });
 
+test("FG-596 A6: a child that CRASHES after claiming (running) but before dispatching a run is contained recoverably — never an unrecoverable running wedge", async () => {
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "ok" });
+  const itemId = listCampaignItems(campaign.id)[0]!.id;
+
+  // The drive-item child CLAIMS the item (pending→running) — the by-construction A6 claim
+  // that now precedes run creation — and then DIES before creating any run. Reproduce that
+  // durable side effect on the first harness read(), then report a TERMINAL crash
+  // disposition (exited 1). The item is left `running` with NO run of any kind: no linked
+  // run and no run resolvable by its dispatch key.
+  let claimObserved = false;
+  const crashingHarness: WaitHarness = {
+    read() {
+      if (!claimObserved) {
+        claimObserved = true;
+        assert.ok(claimCampaignItemForDrive(itemId, campaign.id, undefined), "precondition: the child claims the pending item");
+      }
+      return {
+        id: "launch-crash-mid-claim",
+        command: ["forge", "campaign", "drive-item"],
+        tmuxSession: "s",
+        launcherPid: 1,
+        ownerPid: null,
+        startedAt: nowIso(),
+        logPath: "/dev/null",
+        cwd: projectDir,
+        status: { state: "exited_error", code: 1 },
+        forgeIds: { runIds: [], taskIds: [] },
+      };
+    },
+    installWatcher() { return () => {}; },
+    startReconcile() { return () => {}; },
+    startTimeout() { return () => {}; },
+    onCancel() { return () => {}; },
+    startInvalidBound() { return () => {}; },
+  };
+  const launcher = launchDriveItemUnderForge(["forge"], { tmux: benignTmux(), makeWaitHarness: () => crashingHarness });
+
+  const result = await startCampaign(campaign.id, { launchDriveItem: launcher });
+  assert.equal(result.stopReason, "paused", "the crash-mid-claim is contained into a recoverable pause, not surfaced as an unactionable recovery_needed");
+
+  // The campaign landed PAUSED — the status the resume path accepts, never wedged `running`.
+  assert.equal(getCampaign(campaign.id)!.status, "paused", "the campaign is durably PAUSED — the running wedge A6 forbids never happens");
+
+  // The item carries a directly-retryable infrastructure blocker with no phantom run.
+  const item = getCampaignItem(itemId)!;
+  assert.equal(item.lifecycleStatus, "failed");
+  assert.equal(item.outcome, "blocked");
+  assert.equal(item.blockerKind, "infrastructure", "no run was dispatched — a directly-retryable infrastructure blocker, not an adoptable mid-flight run");
+  assert.equal(item.runId, undefined, "no run was ever created — the never-linked run slot stays clear");
+  assert.ok(item.requestedHumanAction && /retry/.test(item.requestedHumanAction) && /resume/.test(item.requestedHumanAction), "the operator is told how to recover (retry then resume)");
+  assert.equal(listRuns().filter((r) => r.title === "FG-101").length, 0, "no run exists for the crashed-before-dispatch item");
+
+  // The EXISTING recovery path proceeds with no manual SQL: resume is not refused, and a
+  // retry + resume drives the item to completion.
+  assert.equal(
+    campaignBlocker(getCampaign(campaign.id)!, listCampaignItems(campaign.id), "resume"),
+    null,
+    "resume is not refused — the contained shape is recoverable, not a wedge",
+  );
+  const retried = retryCampaignItem(campaign.id, "FG-101");
+  assert.ok(retried.ok, `retry should succeed on the infrastructure-parked item: ${retried.ok ? "" : retried.reason}`);
+  shipTicket("FG-101");
+  const resumed = await resumeCampaign(campaign.id, { dispatch: fakeDispatch("complete") });
+  assert.equal(resumed.stopReason, "complete", "resume drove the recovered item to completion — full non-manual recovery");
+});
+
 // ── FG-596 (A6) — close the containment/child race BY CONSTRUCTION ──────────────────
 //
 // The launch-boundary containment (containLaunchBoundaryFailure) and the still-running
