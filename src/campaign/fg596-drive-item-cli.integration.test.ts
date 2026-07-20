@@ -27,6 +27,7 @@ import { applyMigrations, setDbForTest } from "../store/db.js";
 import { writeTicket } from "../backlog/structured.js";
 import { planCampaign, type ItemModeOverride } from "./planner.js";
 import { approveCampaign, tryTransitionCampaignToRunning, tryTransitionCampaign, listCampaignItems } from "../store/campaigns.js";
+import { acquireCampaignLease, recordItemLaunch } from "../store/campaign-controller.js";
 import { findGitRoot } from "../util/git-root.js";
 
 const forgeBin = join(findGitRoot(process.cwd()), "bin", "forge");
@@ -70,6 +71,26 @@ function seedTicketingOnlyCampaign(): { campaignId: string; itemId: string } {
   approveCampaign(campaign.id, { rationale: "ok" });
   const itemId = listCampaignItems(campaign.id)[0]!.id;
   return { campaignId: campaign.id, itemId };
+}
+
+// FG-564 (item 1): a CLI `campaign drive-item` invocation is now FAIL-CLOSED — it drives only
+// while a LIVE campaign-controller lease AND a matching durable born-under launch linkage
+// authorize it (the launch-per-item controller always establishes both before it launches a
+// child). Seed exactly that legitimate controller context so the CLI surface can be exercised
+// end-to-end; a raw lease-less invocation is denied (asserted separately below).
+function seedControllerContext(campaignId: string, itemId: string): void {
+  const owner = `campaign@${campaignId}@controller`;
+  const grant = acquireCampaignLease({ campaignId, owner, ttlMs: 60 * 60 * 1000 });
+  if (!grant.granted) throw new Error("precondition: could not acquire the controller lease");
+  recordItemLaunch({
+    campaignId,
+    itemId,
+    attemptGeneration: 1,
+    sourceLaunchId: `launch-${itemId}`,
+    controllerOwner: owner,
+    controllerGeneration: grant.lease.generation,
+    state: "launched",
+  });
 }
 
 function runForge(args: string[]) {
@@ -199,6 +220,7 @@ test("FG-596 CLI: the campaign-status guard REFUSES drive-item on an ABANDONED c
 test("FG-596 CLI: on a RUNNING campaign, human output surfaces the drive-item PROCESS outcome (settled, campaign continues)", () => {
   const { campaignId, itemId } = seedTicketingOnlyCampaign();
   tryTransitionCampaignToRunning(campaignId);
+  seedControllerContext(campaignId, itemId);
 
   const r = runForge(["campaign", "drive-item", campaignId, itemId]);
   assert.equal(r.status, 0, `drive-item should succeed on a running campaign: ${r.stderr}`);
@@ -211,6 +233,7 @@ test("FG-596 CLI: on a RUNNING campaign, human output surfaces the drive-item PR
 test("FG-596 CLI: on a RUNNING campaign, --json emits the machine-readable drive-item PROCESS result (itemRecords), not an exit-code inference", () => {
   const { campaignId, itemId } = seedTicketingOnlyCampaign();
   tryTransitionCampaignToRunning(campaignId);
+  seedControllerContext(campaignId, itemId);
 
   const r = runForge(["campaign", "drive-item", campaignId, itemId, "--json"]);
   assert.equal(r.status, 0, `drive-item --json should succeed: ${r.stderr}`);
@@ -224,4 +247,18 @@ test("FG-596 CLI: on a RUNNING campaign, --json emits the machine-readable drive
   assert.equal(rec.outcome, "skipped", "ticketing_only settles skipped — surfaced verbatim, not inferred");
   // The campaign continued (no stop) — a settled ticketing_only item leaves no stopReason.
   assert.ok(!parsed.stopReason, "a settled item that keeps the campaign running carries no stopReason");
+});
+
+test("FG-564 CLI (item 1, FAIL CLOSED): a raw `campaign drive-item` on a RUNNING campaign with NO controller lease is DENIED — it settles NOTHING and mutates NO durable state", () => {
+  const { campaignId, itemId } = seedTicketingOnlyCampaign();
+  tryTransitionCampaignToRunning(campaignId);
+  // NO seedControllerContext: no campaign-controller lease, no born-under launch linkage — the
+  // exact fail-open hole fix #1 closes. A raw/forged operator cannot drive an item a controller
+  // is (or should be) managing. Absence of the lease row must DENY (recovery_needed).
+
+  const r = runForge(["campaign", "drive-item", campaignId, itemId, "--json"]);
+  const parsed = JSON.parse(r.stdout);
+  assert.equal(parsed.stopReason, "recovery_needed", "no lease → the raw drive is fenced (recovery_needed)");
+  // Nothing was driven: the ticketing_only item never settled to complete/skipped.
+  assert.equal(listCampaignItems(campaignId)[0]!.lifecycleStatus, "pending", "a fenced raw drive mutates no durable item state");
 });

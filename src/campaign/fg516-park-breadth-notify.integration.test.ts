@@ -322,39 +322,42 @@ test("FG-516 (F1): a drive-error park does NOT push when a concurrent manual pau
   assert.equal(fetchCalls, 0, "no provider push for a pause this driver did not cause");
 });
 
-// ── Shape 2: the workflow-YAML-missing park (AWAITED, carries a blockerKind) ──
-test("FG-516: a workflow-YAML-missing park fires a `blocked` milestone whose body carries BOTH the blockerKind and the requestedHumanAction", { timeout: 20000 }, async () => {
+// ── Shape 2: the workflow-YAML-missing case now FAILS CLOSED (round 6) — no park, no notify ──
+// FG-564 (FIX round 6): a full_feature workflow-resolution failure is routed through the SAME
+// shared prepareCampaignItemDispatch fail-closed authority the recover advance uses. It THROWS
+// BEFORE any reservation — no run is minted, the item stays pending, and the campaign stays
+// recoverable — identical to the recover caller. The pre-round-6 synthetic-run park (which fired
+// a `blocked` milestone) is gone, so this case records NO pause milestone/push: the CLI's
+// top-level handler (renderDriveErrorAndExit) renders the propagated error instead. The
+// "blocker: <kind>" + requestedHumanAction body composition is still exercised by the surviving
+// park shapes (the no-progress/human-gate body-only labels below).
+test("FG-564 (FIX round 6): a workflow-YAML-missing full_feature drive FAILS CLOSED — throws before any reservation, mints no run, leaves the item pending, records NO pause milestone", { timeout: 20000 }, async () => {
   enableStubProvider();
   const campaignId = setupCampaign();
 
   const missing = "workflow YAML missing or invalid for FG-516 breadth test";
-  // doLoadWorkflow throws at drive time → the full_feature load-fail park:
-  // blockerKind `campaign_system`, awaited notifyCampaignPause(..., "blocked").
-  const result = await startCampaign(campaignId, {
-    dispatch: dispatchMustNotBeCalled,
-    runNextFn: makeCappedRunNext(10),
-    loadWorkflowFn: () => {
-      throw new Error(missing);
-    },
-  });
-  assert.equal(result.stopReason, "paused", "the load-fail park pauses the campaign");
+  await assert.rejects(
+    () =>
+      startCampaign(campaignId, {
+        dispatch: dispatchMustNotBeCalled,
+        runNextFn: makeCappedRunNext(10),
+        loadWorkflowFn: () => {
+          throw new Error(missing);
+        },
+      }),
+    new RegExp(missing.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    "the workflow-resolution failure propagates from the shared authority (fail closed, before any reservation)",
+  );
 
   const item = listCampaignItems(campaignId)[0]!;
-  assert.equal(item.lifecycleStatus, "failed");
-  assert.equal(item.outcome, "blocked");
-  assert.equal(item.blockerKind, "campaign_system", "the YAML-missing park carries a campaign_system blockerKind");
-  const runId = item.runId!;
+  assert.equal(item.lifecycleStatus, "pending", "the item stays pending — no reservation was entered");
+  assert.equal(item.outcome, undefined, "no terminal outcome was applied");
+  assert.equal(item.runId, undefined, "no run was minted or linked — identical fail-closed behavior to the recover advance");
 
-  const milestones = pauseMilestones(runId);
-  assert.equal(milestones.length, 1, "exactly one campaign-pause milestone recorded");
-  const m = milestones[0]!;
-  assert.equal(m["kind"], "blocked", "a YAML-missing wedge is a `blocked` milestone");
-  assert.equal(m["dispatched"], true, "the push went out (awaited path, fresh dedupe key)");
-  assert.equal(fetchCalls, 1, "exactly one provider push");
-  // The divergent body branch the gate:human test never reaches: a "blocker: <kind>"
-  // prefix joined with the requestedHumanAction.
-  assert.match(String(m["body"]), /blocker: campaign_system/, "body leads with the blockerKind detail");
-  assert.match(String(m["body"]), /workflow YAML missing or invalid/, "body carries the requestedHumanAction guidance");
+  await drainMicrotasks();
+  await drainMicrotasks();
+
+  assert.equal(fetchCalls, 0, "no provider push — the fail-closed case does not park, so it does not notify");
 });
 
 // ── Shape 3 (finding F1): the dangling-runId recovery park (running→paused) ──

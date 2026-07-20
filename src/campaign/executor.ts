@@ -28,6 +28,23 @@ import {
   type CampaignDriveReservation,
 } from "../store/campaigns.js";
 import { getDb, writeTransaction } from "../store/db.js";
+import {
+  recordItemLaunch,
+  updateItemLaunch,
+  getItemLaunch,
+  getCampaignLease,
+  campaignLeaseHeldBy,
+  acquireCampaignLease,
+  renewCampaignLease,
+  releaseCampaignLease,
+} from "../store/campaign-controller.js";
+import { recordContinuation } from "../store/continuations.js";
+import {
+  campaignContinuationId,
+  campaignItemPhase,
+  driveCampaignItemAction,
+  finalizeCampaignAction,
+} from "./continuation-adapter.js";
 import { logEvent } from "../store/events.js";
 import { tasksForRun } from "../store/tasks.js";
 import type { Campaign, CampaignItem, CampaignItemLifecycleStatus, CampaignItemOutcome, BlockerKind, Run } from "../types/index.js";
@@ -696,7 +713,11 @@ async function parkCampaignOnStartRunThrow(
 // this pattern) and any future lifecycle bug that produces the same "active but
 // nothing is dispatchable" mismatch. Without this bound the loop spins at 100% CPU
 // (the FG-475/FG-476 incident) instead of parking cooperatively.
-async function driveWorkflowItem(
+// FG-564 (AC9 capstone): exported so a worktree-tier test can drive a run the campaign adapter
+// already reserved (`created`) through the REAL runNext + real publisher — the drive seam a
+// continuation advance injects. Not part of the normal control surface; the executor's own lanes
+// call it internally.
+export async function driveWorkflowItem(
   campaignId: string,
   item: CampaignItem,
   runId: string,
@@ -705,6 +726,10 @@ async function driveWorkflowItem(
     runNextFn: RunNextFn;
     gateFn?: typeof gate;
     projectDir?: string;
+    // FG-564 (item 3, AC-ADOPT-DRIVE "stays fenced for the whole drive"): the born-under fence,
+    // re-verified against the LIVE campaign-controller lease at the top of every wave. Supplied by
+    // a launched drive-item child (enforceFence); absent for the in-process/programmatic drive.
+    fenceAuthorizes?: () => boolean;
   } = { runNextFn: runNext },
 ): Promise<{ outcome: "continue" | "paused" | "recovery_needed"; itemRecord: CampaignItemRecord }> {
   const itemId = item.id;
@@ -717,6 +742,26 @@ async function driveWorkflowItem(
   let lastSnapshot: string | null = null;
 
   while (true) {
+    // FG-564 (item 3): re-assert the born-under fence at the START of every wave — BEFORE any
+    // durable publish-commit / runNext / gate. A child orphaned by an owner that died mid-drive
+    // (a takeover bumped the generation, or the lease lapsed) STOPS here with NO further durable
+    // write, rather than continuing to commit across subsequent waves under a dead/superseded
+    // lease. The lane-entry fence checks only cover ENTRY; this closes the multi-wave gap so the
+    // fence holds across the WHOLE drive.
+    if (fns.fenceAuthorizes && !fns.fenceAuthorizes()) {
+      const cur = getCampaignItem(itemId);
+      return {
+        outcome: "recovery_needed",
+        itemRecord: {
+          itemId,
+          ticketId,
+          runId,
+          lifecycleStatus: cur?.lifecycleStatus ?? "running",
+          outcome: cur?.outcome,
+          blockerKind: cur?.blockerKind,
+        },
+      };
+    }
     // Step 1/2: Re-read run from DB; check for terminal status.
     const currentRun = getRun(runId);
     if (!currentRun || currentRun.status !== "active") {
@@ -1060,6 +1105,347 @@ function finalizeInvokeLaneOutcome(
 // Requires the campaign to already be in 'running' state.
 // Skips terminal items (complete/failed); dispatches only pending items.
 // Reattaches to workflow items in awaiting_gate or blocked_by_red on resume.
+// FG-564 (FIX round 5): the ONE lane-aware dispatch-preparation/materialization AUTHORITY.
+// BOTH the normal drive (driveOneCampaignItem's lane switch) AND continuation recovery (the
+// continuation-adapter, wired in runCampaignRecovery) converge on this — there is no second
+// lane switch and no recovery-only materialization. It:
+//   1. resolves the item's LANE + the required FILESYSTEM inputs (the workflow YAML via
+//      loadWorkflow, the ticket via listTickets) OUTSIDE the reservation write transaction —
+//      the returned createRun captures them and does NO filesystem read, so both callers'
+//      reservations run tx-clean;
+//   2. keyed by lane, returns a createRun that mints the CORRECT run shape INSIDE the caller's
+//      reservation tx (full_feature -> real startRun pipeline; quick_implementation ->
+//      invoke_chain; docs_only/test_only/review_only/research_only -> invoke) — byte-identical
+//      to what the normal drive produced inline before this unify;
+//   3. FAILS CLOSED (throws BEFORE the caller reserves, so the item stays pending, no run is
+//      minted, and a recover advance is left recoverable) on: a missing ticket, a missing
+//      projectDir, an unresolved workflow, or a non-dispatching / unknown lane
+//      (ticketing_only / manual never mint a run).
+// The `driver` in the result is the LANE IDENTITY both callers use to select the SAME physical
+// driver off this result — runNext for pipeline, the real invoke path for invoke/invoke_chain —
+// rather than re-deriving it. A launched drive-item child re-reads the same identity off the
+// created run's durable `workflow`/metadata, so the adopt path stays lane-correct too.
+export type CampaignItemDriver = "pipeline" | "invoke" | "invoke_chain";
+
+export type CampaignItemDispatchPlan = {
+  lane: ExecutionLane;
+  driver: CampaignItemDriver;
+  /** present iff driver === "pipeline" — the resolved workflow the drive runs via runNext. */
+  workflow?: Workflow;
+  /** present iff driver === "invoke" — the single agent role. */
+  agentRole?: string;
+  /** present iff driver === "invoke_chain" — the ordered chain. */
+  invokeChain?: string[];
+  /** Mints the correct run shape INSIDE the reservation tx (no filesystem read). */
+  createRun: (ctx: { dispatchKey: string; attemptGeneration: number }) => string;
+};
+
+export function prepareCampaignItemDispatch(
+  ctx: { campaignId: string; itemId: string },
+  deps: {
+    projectDir: string;
+    planContent?: unknown;
+    workflow?: Workflow;
+    ticket?: StructuredTicket;
+    loadWorkflowFn?: LoadWorkflowFn;
+    startRunFn?: StartRunFn;
+  },
+): CampaignItemDispatchPlan {
+  const item = getCampaignItem(ctx.itemId);
+  if (!item || item.campaignId !== ctx.campaignId) {
+    throw new Error(
+      `prepareCampaignItemDispatch: item ${ctx.itemId} is not an item of campaign ${ctx.campaignId}`,
+    );
+  }
+  if (!deps.projectDir) {
+    throw new Error(
+      `prepareCampaignItemDispatch: campaign ${ctx.campaignId} has no project directory — ` +
+        `cannot materialize a drivable run for ${ctx.itemId} (fail closed)`,
+    );
+  }
+  const planContent = deps.planContent ?? getCampaign(ctx.campaignId)?.metadata?.["planContent"];
+  const entry = getItemPlanEntry(planContent, item.ticketId);
+  const lane = entry.lane;
+  const campaignId = ctx.campaignId;
+  const itemId = item.id;
+  const ticketId = item.ticketId;
+
+  // FAIL CLOSED: the ticket is the item's brief/task source. A missing ticket is refused
+  // BEFORE the reservation — the item stays pending, no run minted, a recover advance stays
+  // recoverable rather than falsely advanced.
+  const ticket = deps.ticket ?? listTickets(deps.projectDir).find((t) => t.id === ticketId);
+  if (!ticket) {
+    throw new Error(
+      `prepareCampaignItemDispatch: ticket ${ticketId} not found for campaign ${campaignId} — ` +
+        `refusing to materialize a run (fail closed)`,
+    );
+  }
+  const ticketText = `${ticket.title}\n\n${ticket.body}`;
+  const projectDir = deps.projectDir;
+
+  if (lane === "full_feature") {
+    // Resolve the workflow YAML OUTSIDE the tx (fail closed if it cannot be resolved).
+    const workflow = deps.workflow ?? (deps.loadWorkflowFn ?? loadWorkflow)(entry.workflowName ?? "feature", { projectDir });
+    const inputs: Record<string, unknown> = {
+      ticketId,
+      campaignId,
+      itemId,
+      brief: ticketText,
+      projectContext: `${ticketId}: ${ticketText}`,
+    };
+    for (const key of CONTROL_PLANE_METADATA_KEYS) delete inputs[key];
+    return {
+      lane,
+      driver: "pipeline",
+      workflow,
+      createRun: ({ dispatchKey, attemptGeneration }) =>
+        (deps.startRunFn ?? startRun)({
+          workflow,
+          title: ticketId,
+          inputs,
+          projectDir,
+          dispatchKey,
+          attemptGeneration,
+        }).runId,
+    };
+  }
+
+  if (lane === "quick_implementation") {
+    const invokeChain = ["engineer", "test-engineer"];
+    return {
+      lane,
+      driver: "invoke_chain",
+      invokeChain,
+      createRun: ({ dispatchKey, attemptGeneration }) => {
+        const newId = newRunId(ticketId);
+        insertRun({
+          id: newId,
+          workflow: "invoke_chain",
+          title: ticketId,
+          status: "active",
+          createdAt: nowIso(),
+          metadata: { invokeChain, campaignId, ticketId, itemId, dispatchKey, attemptGeneration },
+          projectDir,
+        });
+        return newId;
+      },
+    };
+  }
+
+  if (lane === "docs_only" || lane === "test_only" || lane === "review_only" || lane === "research_only") {
+    const agentRole = entry.agentRole;
+    if (!agentRole) {
+      throw new Error(
+        `prepareCampaignItemDispatch: lane '${lane}' requires an agentRole for ${ticketId} (fail closed)`,
+      );
+    }
+    return {
+      lane,
+      driver: "invoke",
+      agentRole,
+      createRun: ({ dispatchKey, attemptGeneration }) => {
+        const newId = newRunId(ticketId);
+        insertRun({
+          id: newId,
+          workflow: "invoke",
+          title: ticketId,
+          status: "active",
+          createdAt: nowIso(),
+          metadata: { invokeAgent: agentRole, campaignId, ticketId, itemId, dispatchKey, attemptGeneration },
+          projectDir,
+        });
+        return newId;
+      },
+    };
+  }
+
+  // ticketing_only / manual (no-dispatch lanes) and any unrecognized lane never mint an
+  // item-run — FAIL CLOSED so a recover advance can never falsely materialize one.
+  throw new Error(
+    `prepareCampaignItemDispatch: lane '${lane}' for ${ticketId} does not materialize an item-run (fail closed)`,
+  );
+}
+
+// FG-564 (FIX round 5): the ONE real invoke-lane drive, shared by the normal-drive lane
+// switch (a freshly `created` reservation) AND the launched drive-item child's adopt/reattach
+// path (an `adopted` invoke run the recover advance's reservation minted). Both callers reserve
+// the run through prepareCampaignItemDispatch (the sole run shape authority), then drive it HERE
+// — so a recover-driven invoke-lane item runs the SAME real invoke/invoke-chain as the normal
+// drive, never a pipeline mis-materialization and never an approximation. Returns a
+// DriveOneItemResult when the caller must STOP-and-return (shared blocker / escalation / park /
+// cooperative pause), or null when the item settled without halting and the caller may advance
+// to the next item (the outer loop's `continue`). Mirrors the former inline lane bodies exactly.
+async function driveInvokeLaneItem(
+  campaignId: string,
+  item: CampaignItem,
+  runId: string,
+  spec: { driver: "invoke" | "invoke_chain"; agentRole?: string; invokeChain?: string[] },
+  ctx: {
+    dispatch: (args: InvokeArgs) => Promise<InvokeResult>;
+    projectDir: string;
+    taskText: string;
+    laterTicket: StructuredTicket | undefined;
+    itemRecords: CampaignItemRecord[];
+    blockedItems: BlockedItemEntry[];
+  },
+): Promise<DriveOneItemResult | null> {
+  const { dispatch, projectDir, taskText, laterTicket, itemRecords, blockedItems } = ctx;
+  const lane: ExecutionLane = spec.driver === "invoke_chain" ? "quick_implementation" : (getItemPlanEntry(getCampaign(campaignId)?.metadata?.["planContent"], item.ticketId).lane);
+  const finalizeCtx = { campaignId, item, runId, lane, laterTicket, itemRecords, blockedItems };
+
+  if (spec.driver === "invoke_chain") {
+    // The invoke_chain lane is the fixed engineer -> test-engineer chain (one run). Kept as
+    // the explicit two steps the normal drive always produced — same agent task prompts.
+    const engineerOutcome = await dispatchLaneInvoke(dispatch, {
+      agentRole: "engineer",
+      task: taskText,
+      projectDir,
+      runId,
+      runTitle: item.ticketId,
+    });
+    if (engineerOutcome.status !== "complete") {
+      const stop = await finalizeInvokeDispatch(finalizeCtx, engineerOutcome);
+      if (stop) return stop;
+      const postCheck = getCampaign(campaignId);
+      if (!postCheck || postCheck.status !== "running") {
+        return { stopReason: postCheck?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
+      }
+      return null;
+    }
+
+    const testEngineerTask = `${taskText}\n\n## Prior step\nengineer completed implementation for this item under run ${runId}; verify and add/adjust tests as needed.`;
+    const testEngineerOutcome = await dispatchLaneInvoke(dispatch, {
+      agentRole: "test-engineer",
+      task: testEngineerTask,
+      projectDir,
+      runId,
+      runTitle: item.ticketId,
+    });
+    if (testEngineerOutcome.status !== "complete") {
+      const stop = await finalizeInvokeDispatch(finalizeCtx, testEngineerOutcome);
+      if (stop) return stop;
+      const postCheck = getCampaign(campaignId);
+      if (!postCheck || postCheck.status !== "running") {
+        return { stopReason: postCheck?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
+      }
+      return null;
+    }
+
+    // Both invokes completed — finalize with the SAME evidence eligibility the resume/reattach
+    // path uses (FG-483: real commit reachability + covering host-verification, or the
+    // non_code_diff classification — never ticket frontmatter alone).
+    const itemWithRunId = { ...item, runId };
+    const eligibility = evaluateInvokeLaneEligibility(projectDir, itemWithRunId);
+    const docsWarning = eligibility.eligible ? formatDocsImpactWarning(assessRunDocsImpact(runId), runId) : null;
+    const finalized = finalizeInvokeLaneOutcome(campaignId, itemWithRunId, eligibility, {
+      shippedReason: docsWarning ?? undefined,
+    });
+    const outcome: CampaignItemOutcome | undefined = finalized.outcome === "shipped" ? "shipped" : undefined;
+
+    let laneParkContext: ParkContext = { exemption: "item-carries-context" };
+    if (finalized.outcome === "parked") {
+      const parkAction =
+        finalized.missing.length > 0
+          ? `agent finished but evidence is incomplete for ${item.ticketId} (${finalized.missing.join(", ")}) — resolve and run \`forge campaign reconcile\`, or resolve manually`
+          : `agent finished and ${item.ticketId} looks shipped, but the campaign state changed mid-evaluation — run \`forge campaign resume\` or \`forge campaign reconcile\` to finalize`;
+      updateCampaignItem(item.id, { lifecycleStatus: "awaiting_gate", requestedHumanAction: parkAction });
+      laneParkContext = { blockerKind: "human_decision", requestedHumanAction: parkAction };
+    }
+
+    const runTasks = tasksForRun(runId);
+    const worktreeTask = runTasks.find((t) => t.worktreePath != null);
+    if (worktreeTask) {
+      updateCampaignItem(item.id, { branch: `forge/${runId}/${worktreeTask.id}`, worktreePath: worktreeTask.worktreePath });
+    }
+
+    itemRecords.push({
+      itemId: item.id,
+      ticketId: item.ticketId,
+      runId,
+      lifecycleStatus: outcome === "shipped" ? "complete" : "awaiting_gate",
+      outcome,
+      ...(docsWarning ? { reason: docsWarning } : {}),
+    });
+
+    if (outcome !== "shipped") {
+      if (await parkCampaign(campaignId, item.id, "decision_needed", laneParkContext)) {
+        return { stopReason: "paused", itemRecords };
+      }
+      const post = getCampaign(campaignId);
+      return { stopReason: post?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
+    }
+
+    const postCheck = getCampaign(campaignId);
+    if (!postCheck || postCheck.status !== "running") {
+      return { stopReason: postCheck?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
+    }
+    return null;
+  }
+
+  // ── driver === "invoke": single-role escape-hatch lane ─────────────────────
+  const agentRole = spec.agentRole!;
+  const dispatchOutcome = await dispatchLaneInvoke(dispatch, {
+    agentRole,
+    task: taskText,
+    projectDir,
+    runId,
+    runTitle: item.ticketId,
+  });
+
+  if (dispatchOutcome.status !== "complete") {
+    const stop = await finalizeInvokeDispatch(finalizeCtx, dispatchOutcome);
+    if (stop) return stop;
+    const postCheck = getCampaign(campaignId);
+    if (!postCheck || postCheck.status !== "running") {
+      return { stopReason: postCheck?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
+    }
+    return null;
+  }
+
+  const itemWithRunId = { ...item, runId };
+  const eligibility = evaluateInvokeLaneEligibility(projectDir, itemWithRunId);
+  const finalized = finalizeInvokeLaneOutcome(campaignId, itemWithRunId, eligibility);
+  const outcome: CampaignItemOutcome | undefined = finalized.outcome === "shipped" ? "shipped" : undefined;
+
+  let laneParkContext: ParkContext = { exemption: "item-carries-context" };
+  if (finalized.outcome === "parked") {
+    const parkAction =
+      finalized.missing.length > 0
+        ? `agent finished but evidence is incomplete for ${item.ticketId} (${finalized.missing.join(", ")}) — resolve and run \`forge campaign reconcile\`, or resolve manually`
+        : `agent finished and ${item.ticketId} looks shipped, but the campaign state changed mid-evaluation — run \`forge campaign resume\` or \`forge campaign reconcile\` to finalize`;
+    updateCampaignItem(item.id, { lifecycleStatus: "awaiting_gate", requestedHumanAction: parkAction });
+    laneParkContext = { blockerKind: "human_decision", requestedHumanAction: parkAction };
+  }
+
+  const runTasks = tasksForRun(runId);
+  const worktreeTask = runTasks.find((t) => t.worktreePath != null);
+  if (worktreeTask) {
+    updateCampaignItem(item.id, { branch: `forge/${runId}/${worktreeTask.id}`, worktreePath: worktreeTask.worktreePath });
+  }
+
+  itemRecords.push({
+    itemId: item.id,
+    ticketId: item.ticketId,
+    runId,
+    lifecycleStatus: outcome === "shipped" ? "complete" : "awaiting_gate",
+    outcome,
+  });
+
+  if (outcome !== "shipped") {
+    if (await parkCampaign(campaignId, item.id, "decision_needed", laneParkContext)) {
+      return { stopReason: "paused", itemRecords };
+    }
+    const post = getCampaign(campaignId);
+    return { stopReason: post?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
+  }
+
+  const postCheck = getCampaign(campaignId);
+  if (!postCheck || postCheck.status !== "running") {
+    return { stopReason: postCheck?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
+  }
+  return null;
+}
+
 // Cooperative pause: re-reads campaign status before each dispatch and after
 // each item completes, stopping without transition if status != 'running'.
 // Exported (test-only) so a test can drive an item whose lifecycle status
@@ -1090,12 +1476,55 @@ export async function driveOneCampaignItem(
     startRunFn?: StartRunFn;
     loadWorkflowFn?: LoadWorkflowFn;
     gateFn?: typeof gate;
+    // FG-564 (item 3, C7 double-driver fence): when true, this is a LAUNCHED drive-item child.
+    // Its authorization to do physical work is resolved from the DURABLE launch linkage row
+    // (campaign_item_launches, keyed by the child's own (campaignId, itemId, attemptGeneration))
+    // and NOT from any caller-supplied/env token — a raw or forged `campaign drive-item`
+    // invocation cannot smuggle an authority in. Authorization holds ONLY while the linkage's
+    // IMMUTABLE born-under owner/generation still holds the LIVE campaign-controller lease. It
+    // FAILS CLOSED when the durable linkage is missing (absent = denied) or the born-under token
+    // no longer holds the live lease (a takeover bumped the generation / the lease lapsed). A
+    // fenced child STOPS with NO durable write attributable to the expired owner (item 4).
+    enforceFence?: boolean;
   }
 ): Promise<DriveOneItemResult> {
   const itemRecords: CampaignItemRecord[] = [];
+
   const items = listCampaignItems(campaignId);
   const targetItem = items.find((i) => i.id === itemId);
   if (!targetItem) return { itemRecords };
+
+  // FG-564 (item 1/3/4, C7 fence, FAIL CLOSED): resolve the born-under authority from the DURABLE
+  // linkage — never an env/caller token. A CLI/launched `campaign drive-item` invocation
+  // (enforceFence) is authorized ONLY while ALL of the following hold: a LIVE campaign-controller
+  // lease exists AND its own attempt has a matching durable launch linkage AND that linkage's
+  // IMMUTABLE born-under owner/generation still holds the live lease. It FAILS CLOSED — DENY —
+  // when ANY link is absent:
+  //   * NO lease row (item 1): a dead controller's expired/removed lease, or a legacy running
+  //     campaign with no lease. Absence must DENY, never authorize — otherwise ANY caller could
+  //     invoke a raw `campaign drive-item` and perform the normal durable drive with no linkage
+  //     and no born-under token (the fail-open hole two reviewers flagged).
+  //   * lease present but the linkage is missing (a raw/forged invocation — absent = denied);
+  //   * the born-under owner/generation no longer holds the live lease (an orphaned child from an
+  //     expired owner after a takeover bumped the generation / the lease lapsed).
+  // The legitimate lease-less flow — the INTERNAL in-process drive (driveRemainingItems' direct
+  // driveOneCampaignItem call, and the whole programmatic test suite) — never sets enforceFence,
+  // so it never reaches this predicate: a raw command cannot invoke it. Enforced BEFORE any
+  // durable write, so a fenced child performs NO write (item 4), re-checked immediately before
+  // physical work in each run-producing lane AND at each wave inside the multi-wave drive loop
+  // (item 3) so the fence holds ACROSS the whole drive.
+  const fenceAuthorizes = (): boolean => {
+    if (getCampaignLease(campaignId) === undefined) return false; // no live lease → raw/unmanaged drive is fenced
+    const gen = targetItem.attemptGeneration > 0 ? targetItem.attemptGeneration : 1;
+    const linkage = getItemLaunch(campaignId, itemId, gen);
+    if (!linkage) return false; // a lease is held but this attempt has no born-under authority
+    return campaignLeaseHeldBy(campaignId, linkage.controllerOwner, linkage.controllerGeneration);
+  };
+  if (opts.enforceFence && !fenceAuthorizes()) {
+    // FENCED: STOP with no durable write. Any fence-occurrence audit is the NEW lease-holding
+    // controller's job (the takeover/recover path), never this expired child's (item 4).
+    return { itemRecords, stopReason: "recovery_needed" };
+  }
   const ticketCache = listTickets(opts.projectDir);
   const ticketMap = new Map(ticketCache.map((t) => [t.id, t]));
 
@@ -1153,7 +1582,17 @@ export async function driveOneCampaignItem(
       item.lifecycleStatus === "blocked_by_red" ||
       // FG-425 (AC5): a parked-on-unsettled-publication item reattaches like any other
       // parked workflow item. Re-driving its run is what converges the publication.
-      item.lifecycleStatus === "awaiting_recovery"
+      item.lifecycleStatus === "awaiting_recovery" ||
+      // FG-564 (AC-ADOPT-DRIVE, item 2): a LAUNCHED drive-item child (enforceFence) can find its
+      // item already 'running' with a real backing run — the controller's continuation-advance
+      // reservation CREATED the run (the sole FG-596 item-run authority), then launched THIS child
+      // to physically drive it. ONLY a child whose durable born-under fence authorizes may convert
+      // that adopted reservation into the one live physical re-drive: reattach to the existing run
+      // and drive it to terminal (no duplicate run, no fresh reservation — the reattach path below
+      // never mints one). An unauthorized/expired child never reaches here (the entry fence already
+      // denied it above); an un-launched (non-enforceFence) drive keeps the FG-596 legacy-guard
+      // park below, so a raw concurrent drive still never re-drives another owner's run.
+      (opts.enforceFence && item.lifecycleStatus === "running" && !!item.runId && fenceAuthorizes())
     ) {
       // Populated by the FG-485 liveness probe below when it successfully loads
       // the active run's workflow, so the driveWorkflowItem call further down
@@ -1337,6 +1776,39 @@ export async function driveOneCampaignItem(
         await parkCampaign(campaignId, item.id, "blocked", { exemption: "item-carries-context" }, { fallbackRunId: pickCampaignFallbackRunId(campaignId) });
         return { stopReason: "recovery_needed", itemRecords };
       }
+
+      // FG-564 (FIX round 5, AC-ADOPT-DRIVE): an ADOPTED invoke-family run — the recover
+      // advance's reservation minted an "invoke"/"invoke_chain" run (via the shared authority),
+      // then launched THIS authorized child to physically drive it. Its RECORDED lane identity
+      // is the run's own durable `workflow` (+ metadata invokeAgent/invokeChain), so re-enter the
+      // SAME real invoke driver the normal drive uses — NOT driveWorkflowItem/runNext (an invoke
+      // run has no loadable YAML). Only the launched, fence-authorized child reaches this (the
+      // entry condition gates on enforceFence + running + fenceAuthorizes); a normal parked
+      // (awaiting_gate/blocked_by_red) invoke item keeps the existing evidence/reconcile path.
+      if (item.lifecycleStatus === "running" && (runForItem.workflow === "invoke" || runForItem.workflow === "invoke_chain")) {
+        const preReattachInvoke = getCampaign(campaignId);
+        if (!preReattachInvoke || preReattachInvoke.status !== "running") {
+          return { stopReason: preReattachInvoke?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
+        }
+        const meta = (runForItem.metadata ?? {}) as Record<string, unknown>;
+        const cachedTicket = ticketMap.get(item.ticketId);
+        const taskText = cachedTicket ? `${item.ticketId}: ${cachedTicket.title}\n\n${cachedTicket.body}` : item.ticketId;
+        const spec =
+          runForItem.workflow === "invoke_chain"
+            ? { driver: "invoke_chain" as const, ...(Array.isArray(meta["invokeChain"]) ? { invokeChain: (meta["invokeChain"] as unknown[]).filter((x): x is string => typeof x === "string") } : {}) }
+            : { driver: "invoke" as const, ...(typeof meta["invokeAgent"] === "string" ? { agentRole: meta["invokeAgent"] as string } : {}) };
+        const stop = await driveInvokeLaneItem(campaignId, item, item.runId, spec, {
+          dispatch: opts.dispatch,
+          projectDir: opts.projectDir,
+          taskText,
+          laterTicket: cachedTicket,
+          itemRecords,
+          blockedItems,
+        });
+        if (stop) return stop;
+        continue;
+      }
+
       let workflowForItem: Workflow;
       if (preloadedWorkflow) {
         workflowForItem = preloadedWorkflow;
@@ -1364,6 +1836,8 @@ export async function driveOneCampaignItem(
         runNextFn: doRunNext,
         gateFn: opts.gateFn,
         projectDir: opts.projectDir,
+        // FG-564 (item 3): keep the born-under fence live across the whole multi-wave drive.
+        ...(opts.enforceFence ? { fenceAuthorizes } : {}),
       });
       itemRecords.push(driveResult.itemRecord);
 
@@ -1530,6 +2004,13 @@ export async function driveOneCampaignItem(
     // ── DISPATCH BRANCH — strictly by the approved lane, no re-derivation ──────
     const itemConfig = getItemPlanEntry(canonicalContent, item.ticketId);
 
+    // FG-564 (item 3): re-assert the born-under fence IMMEDIATELY before any physical work /
+    // durable write (a takeover between entry and here — however narrow — must not let the
+    // expired owner mutate). Fenced → STOP with no durable write.
+    if (opts.enforceFence && !fenceAuthorizes()) {
+      return { itemRecords, stopReason: "recovery_needed" };
+    }
+
     // FG-596 LEGACY FAIL-CLOSED: a pending item whose runId resolves to a REAL run row
     // must NEVER be replaced with a fresh run — that would orphan/duplicate a genuine
     // attempt. This is the pre-FG-596 legacy shape (a run dispatched before the
@@ -1629,100 +2110,24 @@ export async function driveOneCampaignItem(
     };
 
     if (itemConfig.lane === "full_feature") {
-      // ── FULL_FEATURE: loadWorkflow → atomic reserve (startRun inside the tx) → runNext ─
+      // ── FULL_FEATURE: resolve (fail closed) → atomic reserve (startRun inside the tx) → runNext ─
       const workflowName = itemConfig.workflowName ?? "feature";
 
-      // Load the workflow FIRST. A load failure still PRODUCES a run — a synthetic
-      // 'abandoned' row for traceability (the same shape parkCampaignOnStartRunThrow
-      // leaves, so the pause milestone has a run to scope to) — so it obeys the SAME
-      // pre-dispatch invariant as every other run-producing lane: route the synthetic
-      // run through reserveCampaignDriveDispatch, which allocates/reuses the attempt
-      // generation, derives the deterministic dispatch key, and inserts the stamped row
-      // + links it + CAS's the item pending→running in ONE atomic transaction (gated on
-      // the campaign running and the item pending). A concurrent / crash-window re-drive
-      // of the SAME load failure ADOPTS this row by key (runByDispatchKey) instead of
-      // inserting a duplicate marker. Only AFTER the reservation commits is the
-      // terminal/infrastructure classification applied — the item is marked
-      // failed/blocked WITHOUT creating a second run.
-      let loadedWorkflow: Workflow;
-      try {
-        loadedWorkflow = doLoadWorkflow(workflowName, { projectDir: opts.projectDir });
-      } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
-        const reservation = reserveCampaignDriveDispatch({
-          campaignId,
-          itemId: item.id,
-          createRun: ({ dispatchKey, attemptGeneration }) => {
-            const newId = newRunId(item.ticketId);
-            insertRun({
-              id: newId,
-              workflow: workflowName,
-              title: item.ticketId,
-              status: "abandoned",
-              createdAt: nowIso(),
-              // Stamped with the SAME metadata.dispatchKey + item-attempt identity as the
-              // live lanes so this traceability row is adoptable by key — a re-drive in the
-              // crash window resolves the ONE synthetic run instead of duplicating it.
-              metadata: { campaignId, ticketId: item.ticketId, itemId: item.id, dispatchKey, attemptGeneration },
-              projectDir: opts.projectDir,
-            });
-            return newId;
-          },
-        });
-        // Reservation LOST: the campaign was paused/abandoned or the item parked out from
-        // under this drive. Nothing was created — reconcile from durable state and halt.
-        if (reservation.status === "lost") return reconcileLostReservation();
-        // Reservation ADOPTED: the keyed synthetic (or live) run already existed — a
-        // concurrent / crash-window drive owns it. Do NOT apply the terminal classification
-        // over another drive's run (that would mutate its state); surface recovery_needed
-        // identifying the adopted run and leave it for FG-564.
-        if (reservation.status === "adopted") return await handleAdoptedReservation(reservation);
-
-        // Terminal/infrastructure classification, AFTER the reservation commits. The item
-        // is 'running' linked to the synthetic run; mark it failed/blocked, creating no run.
-        const runId = reservation.runId;
-        updateCampaignItem(item.id, {
-          runId,
-          lifecycleStatus: "failed",
-          outcome: "blocked",
-          blockerKind: "campaign_system",
-          requestedHumanAction: `workflow YAML missing or invalid: ${workflowName} — ${reason}`,
-        });
-        itemRecords.push({
-          itemId: item.id,
-          ticketId: item.ticketId,
-          runId,
-          lifecycleStatus: "failed",
-          outcome: "blocked",
-        });
-        if (await parkCampaign(campaignId, item.id, "blocked", { exemption: "item-carries-context" })) {
-          return { stopReason: "paused", itemRecords };
-        }
-        const postLoadFail = getCampaign(campaignId);
-        return {
-          stopReason: postLoadFail?.status === "abandoned" ? "abandoned" : "paused",
-          itemRecords,
-        };
-      }
-
-      // Build inputs for startRun. Supply brief (ticket is the brief for a campaign item)
-      // plus ticket context. Exclude CONTROL_PLANE_METADATA_KEYS.
+      // FG-564 (FIX round 6): resolve the lane + filesystem inputs (workflow YAML + ticket)
+      // through the ONE shared authority, which FAILS CLOSED — THROWS BEFORE any reservation —
+      // on an unresolved/failed workflow, a missing ticket, or a missing projectDir, EXACTLY as
+      // the recover advance does (both callers converge on prepareCampaignItemDispatch off the
+      // same lane authority). On a resolution failure NO run is minted: the item stays pending
+      // and the campaign / continuation stays recoverable, so there is no path where the normal
+      // drive mints a run while the recover drive fails closed. The workflow YAML + ticket are
+      // read OUTSIDE the tx here; the returned createRun captures them and does no fs read inside
+      // the reservation. loadWorkflow is injected so a test can force the resolution failure.
       const cachedTicket = ticketMap.get(item.ticketId);
-      const ticketBrief = cachedTicket
-        ? `${cachedTicket.title}\n\n${cachedTicket.body}`
-        : item.ticketId;
-      const inputs: Record<string, unknown> = {
-        ticketId: item.ticketId,
-        campaignId,
-        itemId: item.id,
-        brief: ticketBrief,
-        projectContext: cachedTicket
-          ? `${item.ticketId}: ${cachedTicket.title}\n\n${cachedTicket.body}`
-          : item.ticketId,
-      };
-      for (const key of CONTROL_PLANE_METADATA_KEYS) {
-        delete inputs[key];
-      }
+      const fullFeaturePlan = prepareCampaignItemDispatch(
+        { campaignId, itemId: item.id },
+        { projectDir: opts.projectDir, planContent: canonicalContent, ticket: cachedTicket, startRunFn: doStartRun, loadWorkflowFn: doLoadWorkflow },
+      );
+      const loadedWorkflow = fullFeaturePlan.workflow!;
 
       // Atomic reserve: allocate/reuse the generation, derive the key, insert the stamped
       // run (via startRun, INSIDE the tx), link it, and CAS the item pending→running — all
@@ -1735,17 +2140,9 @@ export async function driveOneCampaignItem(
         reservation = reserveCampaignDriveDispatch({
           campaignId,
           itemId: item.id,
-          createRun: ({ dispatchKey, attemptGeneration }) =>
-            doStartRun({
-              workflow: loadedWorkflow,
-              title: item.ticketId,
-              inputs,
-              projectDir: opts.projectDir,
-              // FG-596: stamp the deterministic dispatch key + item-attempt identity into
-              // run metadata BEFORE the run is observable (startRun writes them pre-insert).
-              dispatchKey,
-              attemptGeneration,
-            }).runId,
+          // FG-596: startRun stamps the deterministic dispatch key + item-attempt identity
+          // into run metadata BEFORE the run is observable (pre-insert), INSIDE the tx.
+          createRun: fullFeaturePlan.createRun,
         });
       } catch (err) {
         // startRun threw → the reservation rolled back COMPLETELY (item stays pending, no
@@ -1810,6 +2207,8 @@ export async function driveOneCampaignItem(
         runNextFn: doRunNext,
         gateFn: opts.gateFn,
         projectDir: opts.projectDir,
+        // FG-564 (item 3): keep the born-under fence live across the whole multi-wave drive.
+        ...(opts.enforceFence ? { fenceAuthorizes } : {}),
       });
       itemRecords.push(driveResult.itemRecord);
 
@@ -1889,33 +2288,30 @@ export async function driveOneCampaignItem(
           itemRecords,
         };
       }
-    } else if (itemConfig.lane === "quick_implementation") {
-      // ── QUICK_IMPLEMENTATION: engineer invoke -> test-engineer invoke, one run ─
-      // Atomic reserve: create the invoke_chain run (stamped) + link + CAS pending→running
+    } else if (itemConfig.lane === "quick_implementation" || itemConfig.lane === "docs_only" || itemConfig.lane === "test_only" || itemConfig.lane === "review_only" || itemConfig.lane === "research_only") {
+      // ── INVOKE-FAMILY lanes: quick_implementation (engineer -> test-engineer chain) and
+      //    the single-role escape hatch (docs_only/test_only/review_only/research_only) ──
+      // FG-564 (FIX round 5): resolve the lane + fs inputs through the ONE shared authority
+      // OUTSIDE the tx (fail closed on a missing ticket / unknown lane), reserve the correct
+      // invoke/invoke_chain run shape INSIDE the tx via its createRun, then drive it through
+      // the SAME real invoke path the recover/adopt child reuses (driveInvokeLaneItem). This
+      // is the SOLE place these run shapes are minted — the recover adapter converges here too.
+      const invokePlan = prepareCampaignItemDispatch(
+        { campaignId, itemId: item.id },
+        { projectDir: opts.projectDir, planContent: canonicalContent, ticket: ticketMap.get(item.ticketId) },
+      );
+      // Atomic reserve: create the stamped invoke/invoke_chain run + link + CAS pending→running
       // in ONE tx, adopting a crash-window run by key inside the reservation.
       const reservation = reserveCampaignDriveDispatch({
         campaignId,
         itemId: item.id,
-        createRun: ({ dispatchKey, attemptGeneration }) => {
-          const newId = newRunId(item.ticketId);
-          insertRun({
-            id: newId,
-            workflow: "invoke_chain",
-            title: item.ticketId,
-            status: "active",
-            createdAt: nowIso(),
-            // Route this insertRun lane through the SAME metadata.dispatchKey stamp
-            // startRun uses (plus the item-attempt identity) so runByDispatchKey dedups it
-            // lane-agnostically — an unstamped run would silently duplicate on adoption.
-            metadata: { invokeChain: ["engineer", "test-engineer"], campaignId, ticketId: item.ticketId, itemId: item.id, dispatchKey, attemptGeneration },
-            projectDir: opts.projectDir,
-          });
-          return newId;
-        },
+        createRun: invokePlan.createRun,
       });
       if (reservation.status === "lost") return reconcileLostReservation();
-      // Only CREATED drives the invoke lane; ADOPTED means another drive owns the keyed
-      // run — dispatch no invoke, surface recovery_needed for FG-564.
+      // Only CREATED drives the invoke lane; ADOPTED means another (unlaunched) drive owns the
+      // keyed run — dispatch no invoke, surface recovery_needed for FG-564. A LAUNCHED
+      // authorized child never reaches here for an adopted run: it entered the reattach branch
+      // above and re-drove the recorded lane through driveInvokeLaneItem.
       if (reservation.status === "adopted") return await handleAdoptedReservation(reservation);
       const runId = reservation.runId;
       item.runId = runId;
@@ -1925,234 +2321,23 @@ export async function driveOneCampaignItem(
       const taskText = cachedTicket
         ? `${item.ticketId}: ${cachedTicket.title}\n\n${cachedTicket.body}`
         : item.ticketId;
-      const finalizeCtx = { campaignId, item, runId, lane: itemConfig.lane, laterTicket, itemRecords, blockedItems };
 
-      const engineerOutcome = await dispatchLaneInvoke(opts.dispatch, {
-        agentRole: "engineer",
-        task: taskText,
-        projectDir: opts.projectDir,
-        runId,
-        runTitle: item.ticketId,
-      });
-      if (engineerOutcome.status !== "complete") {
-        const stop = await finalizeInvokeDispatch(finalizeCtx, engineerOutcome);
-        if (stop) return stop;
-        const postCheck = getCampaign(campaignId);
-        if (!postCheck || postCheck.status !== "running") {
-          return { stopReason: postCheck?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
-        }
-        continue;
-      }
-
-      const testEngineerTask = `${taskText}\n\n## Prior step\nengineer completed implementation for this item under run ${runId}; verify and add/adjust tests as needed.`;
-      const testEngineerOutcome = await dispatchLaneInvoke(opts.dispatch, {
-        agentRole: "test-engineer",
-        task: testEngineerTask,
-        projectDir: opts.projectDir,
-        runId,
-        runTitle: item.ticketId,
-      });
-      if (testEngineerOutcome.status !== "complete") {
-        const stop = await finalizeInvokeDispatch(finalizeCtx, testEngineerOutcome);
-        if (stop) return stop;
-        const postCheck = getCampaign(campaignId);
-        if (!postCheck || postCheck.status !== "running") {
-          return { stopReason: postCheck?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
-        }
-        continue;
-      }
-
-      // Both invokes completed — finalize the item using the SAME evidence
-      // eligibility the FG-441 resume/reattach path uses (see
-      // evaluateInvokeLaneEligibility/finalizeInvokeLaneOutcome above): only a
-      // genuinely eligible item may complete; anything else parks at
-      // awaiting_gate for `forge campaign reconcile`/`forge campaign resume`
-      // (or manual resolution) instead of reporting complete (FG-442 review
-      // Finding 1; hardened by FG-483 to require real evidence — commit
-      // reachability + a covering host-verification row for code-touching
-      // commits, or the non_code_diff classification — never ticket
-      // frontmatter alone).
-      const itemWithRunId = { ...item, runId };
-      const eligibility = evaluateInvokeLaneEligibility(opts.projectDir, itemWithRunId);
-
-      // FG-442: docs-impact resolution — advisory only, mirrors milestone.ts's
-      // ship-time check. quick_implementation has no docs phase of its own
-      // (unlike full_feature's pipeline, which always runs documentation-maintainer).
-      const docsWarning = eligibility.eligible ? formatDocsImpactWarning(assessRunDocsImpact(runId), runId) : null;
-
-      const finalized = finalizeInvokeLaneOutcome(campaignId, itemWithRunId, eligibility, {
-        shippedReason: docsWarning ?? undefined,
-      });
-      const outcome: CampaignItemOutcome | undefined = finalized.outcome === "shipped" ? "shipped" : undefined;
-
-      // FG-516 (finding 1): the invoke-lane eligibility park below persists NO
-      // blockerKind (the item stays the out-of-band awaiting_gate reconcile shape
-      // reconcile.ts / report.ts / FG-483 all key off), so hand parkCampaign a
-      // composed context whose kind feeds the pushed BODY label only — without it the
-      // body carried no `blocker: <kind>` at all. human_decision is the honest kind:
-      // the automated evidence gate could not confirm the ship, a human must review
-      // and reconcile.
-      let laneParkContext: ParkContext = { exemption: "item-carries-context" };
-      if (finalized.outcome === "parked") {
-        const parkAction =
-          finalized.missing.length > 0
-            ? `agent finished but evidence is incomplete for ${item.ticketId} (${finalized.missing.join(", ")}) — resolve and run \`forge campaign reconcile\`, or resolve manually`
-            : `agent finished and ${item.ticketId} looks shipped, but the campaign state changed mid-evaluation — run \`forge campaign resume\` or \`forge campaign reconcile\` to finalize`;
-        updateCampaignItem(item.id, { lifecycleStatus: "awaiting_gate", requestedHumanAction: parkAction });
-        laneParkContext = { blockerKind: "human_decision", requestedHumanAction: parkAction };
-      }
-
-      const runTasks = tasksForRun(runId);
-      const worktreeTask = runTasks.find((t) => t.worktreePath != null);
-      if (worktreeTask) {
-        updateCampaignItem(item.id, {
-          branch: `forge/${runId}/${worktreeTask.id}`,
-          worktreePath: worktreeTask.worktreePath,
-        });
-      }
-
-      itemRecords.push({
-        itemId: item.id,
-        ticketId: item.ticketId,
-        runId,
-        lifecycleStatus: outcome === "shipped" ? "complete" : "awaiting_gate",
-        outcome,
-        ...(docsWarning ? { reason: docsWarning } : {}),
-      });
-
-      if (outcome !== "shipped") {
-        if (await parkCampaign(campaignId, item.id, "decision_needed", laneParkContext)) {
-          return { stopReason: "paused", itemRecords };
-        }
-        const post = getCampaign(campaignId);
-        return { stopReason: post?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
-      }
-
-      const postCheck = getCampaign(campaignId);
-      if (!postCheck || postCheck.status !== "running") {
-        return { stopReason: postCheck?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
-      }
-    } else {
-      // ── docs_only | test_only | review_only | research_only ─────────────────
-      // Single opts.dispatch invoke to the item's stored agentRole — the SAME
-      // mechanism the pre-FG-442 executionMode:'invoke' escape hatch always used
-      // (see planner.ts foldItemEntry), which is why report.ts still labels it
-      // "invoke (escape hatch)".
-      const agentRole = itemConfig.agentRole!; // guaranteed by planner validation
-      // Atomic reserve: create the invoke run (stamped) + link + CAS pending→running in ONE
-      // tx, adopting a crash-window run by key inside the reservation.
-      const reservation = reserveCampaignDriveDispatch({
+      const stop = await driveInvokeLaneItem(
         campaignId,
-        itemId: item.id,
-        createRun: ({ dispatchKey, attemptGeneration }) => {
-          const newId = newRunId(item.ticketId);
-          insertRun({
-            id: newId,
-            workflow: "invoke",
-            title: item.ticketId,
-            status: "active",
-            createdAt: nowIso(),
-            // Same shared metadata.dispatchKey stamp + item-attempt identity as the other
-            // lanes, so the escape-hatch run is adoptable by key too.
-            metadata: { invokeAgent: agentRole, campaignId, ticketId: item.ticketId, itemId: item.id, dispatchKey, attemptGeneration },
-            projectDir: opts.projectDir,
-          });
-          return newId;
-        },
-      });
-      if (reservation.status === "lost") return reconcileLostReservation();
-      // Only CREATED drives the escape-hatch invoke; ADOPTED means another drive owns the
-      // keyed run — dispatch no invoke, surface recovery_needed for FG-564.
-      if (reservation.status === "adopted") return await handleAdoptedReservation(reservation);
-      const runId = reservation.runId;
-      item.runId = runId;
-      item.lifecycleStatus = "running";
-
-      const cachedTicket = ticketMap.get(item.ticketId);
-      const taskText = cachedTicket
-        ? `${item.ticketId}: ${cachedTicket.title}\n\n${cachedTicket.body}`
-        : item.ticketId;
-
-      const dispatchOutcome = await dispatchLaneInvoke(opts.dispatch, {
-        agentRole,
-        task: taskText,
-        projectDir: opts.projectDir,
+        item,
         runId,
-        runTitle: item.ticketId,
-      });
-
-      if (dispatchOutcome.status !== "complete") {
-        const stop = await finalizeInvokeDispatch(
-          { campaignId, item, runId, lane: itemConfig.lane, laterTicket, itemRecords, blockedItems },
-          dispatchOutcome
-        );
-        if (stop) return stop;
-        const postCheck = getCampaign(campaignId);
-        if (!postCheck || postCheck.status !== "running") {
-          return { stopReason: postCheck?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
-        }
-        continue;
-      }
-
-      // Only a genuinely eligible item may complete — the SAME evidence
-      // eligibility the FG-441 resume/reattach path uses (see
-      // evaluateInvokeLaneEligibility/finalizeInvokeLaneOutcome above);
-      // anything else parks at awaiting_gate for `forge campaign
-      // reconcile`/`forge campaign resume` (or manual resolution) instead of
-      // reporting complete (FG-442 review; hardened by FG-483 to require real
-      // evidence — commit reachability + a covering host-verification row for
-      // code-touching commits, or the non_code_diff classification — never
-      // ticket frontmatter alone).
-      const itemWithRunId = { ...item, runId };
-      const eligibility = evaluateInvokeLaneEligibility(opts.projectDir, itemWithRunId);
-      const finalized = finalizeInvokeLaneOutcome(campaignId, itemWithRunId, eligibility);
-      const outcome: CampaignItemOutcome | undefined = finalized.outcome === "shipped" ? "shipped" : undefined;
-
-      // FG-516 (finding 2): same missing-blocker-label path as finding 1, on the
-      // docs_only/test_only/review_only/research_only invoke lanes — persist no
-      // blockerKind (out-of-band marker), feed the composed kind to the body label.
-      let laneParkContext: ParkContext = { exemption: "item-carries-context" };
-      if (finalized.outcome === "parked") {
-        const parkAction =
-          finalized.missing.length > 0
-            ? `agent finished but evidence is incomplete for ${item.ticketId} (${finalized.missing.join(", ")}) — resolve and run \`forge campaign reconcile\`, or resolve manually`
-            : `agent finished and ${item.ticketId} looks shipped, but the campaign state changed mid-evaluation — run \`forge campaign resume\` or \`forge campaign reconcile\` to finalize`;
-        updateCampaignItem(item.id, { lifecycleStatus: "awaiting_gate", requestedHumanAction: parkAction });
-        laneParkContext = { blockerKind: "human_decision", requestedHumanAction: parkAction };
-      }
-
-      const runTasks = tasksForRun(runId);
-      const worktreeTask = runTasks.find((t) => t.worktreePath != null);
-      if (worktreeTask) {
-        updateCampaignItem(item.id, {
-          branch: `forge/${runId}/${worktreeTask.id}`,
-          worktreePath: worktreeTask.worktreePath,
-        });
-      }
-
-      itemRecords.push({
-        itemId: item.id,
-        ticketId: item.ticketId,
-        runId,
-        lifecycleStatus: outcome === "shipped" ? "complete" : "awaiting_gate",
-        outcome,
-      });
-
-      if (outcome !== "shipped") {
-        if (await parkCampaign(campaignId, item.id, "decision_needed", laneParkContext)) {
-          return { stopReason: "paused", itemRecords };
-        }
-        const post = getCampaign(campaignId);
-        return { stopReason: post?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
-      }
-
-      const postCheck = getCampaign(campaignId);
-      if (!postCheck || postCheck.status !== "running") {
-        return {
-          stopReason: postCheck?.status === "abandoned" ? "abandoned" : "paused",
-          itemRecords,
-        };
-      }
+        invokePlan.driver === "invoke_chain"
+          ? { driver: "invoke_chain", ...(invokePlan.invokeChain ? { invokeChain: invokePlan.invokeChain } : {}) }
+          : { driver: "invoke", ...(invokePlan.agentRole ? { agentRole: invokePlan.agentRole } : {}) },
+        { dispatch: opts.dispatch, projectDir: opts.projectDir, taskText, laterTicket, itemRecords, blockedItems },
+      );
+      if (stop) return stop;
+      // Settled without halting — advance to the next item.
+      continue;
+    } else {
+      // Unrecognized run-producing lane (the no-dispatch ticketing_only/manual lanes are
+      // handled above). Fail closed rather than silently dispatching nothing.
+      throw new Error(`driveOneCampaignItem: unrecognized dispatch lane '${itemConfig.lane}' for ${item.ticketId}`);
     }
   }
 
@@ -2172,6 +2357,42 @@ export async function driveOneCampaignItem(
 // shipped/parked/failed. Cross-item state (held accounting, completion) is derived from
 // durable state after the items drain. Shared item-dispatch loop for startCampaign and
 // resumeCampaign; requires the campaign to already be 'running'.
+// FG-564 (D1): the campaign-controller lease TTL. It fences a longer-lived physical driver
+// than the FG-562 per-phase continuation lease, so it is deliberately longer.
+export const DEFAULT_CONTROLLER_LEASE_MS = 10 * 60 * 1000;
+
+// FG-564 (P0-A, AC3): the next drivable (non-terminal) item strictly after `afterItemId`, in
+// campaign order — the item whose id the boundary continuation's nextAction names (contract
+// correction 3). Undefined when `afterItemId` is the last drivable item (→ finalize).
+function nextDrivableItem(items: CampaignItem[], afterItemId: string): CampaignItem | undefined {
+  const idx = items.findIndex((i) => i.id === afterItemId);
+  if (idx < 0) return undefined;
+  return items
+    .slice(idx + 1)
+    .find((i) => i.lifecycleStatus !== "complete" && i.lifecycleStatus !== "failed");
+}
+
+// FG-564 (P0-A / AC3): the campaign continuation RECORDER on the production drive path. Records
+// ONE durable continuation per item boundary: continuationId = (campaignId, itemId);
+// currentPhase = attempt-scoped drive:<itemId>#<attempt>; sourceLaunchId = the item's durable
+// drive-item launch (from the item-attempt launch linkage — never re-derived heuristically);
+// nextAction names the NEXT item explicitly (or finalize). The row is recorded in
+// 'awaiting_completion' (never claimed here), so it is NOT in the recover in-dispatch set and a
+// completed item is never re-driven; it is the durable boundary receipt `forge campaign recover`
+// resolves against the linkage when it repairs an in-flight item's missing continuation (P1-G).
+// Idempotent-tolerant: a re-record for the same continuation is swallowed by the caller.
+function recordItemBoundaryContinuation(campaignId: string, item: CampaignItem, items: CampaignItem[]): void {
+  const gen = item.attemptGeneration > 0 ? item.attemptGeneration : 1;
+  const linkage = getItemLaunch(campaignId, item.id, gen);
+  const sourceLaunchId = linkage?.sourceLaunchId;
+  if (!sourceLaunchId) return; // in-process / legacy drive with no durable launch — nothing to bind
+  const continuationId = campaignContinuationId(campaignId, item.id);
+  const currentPhase = campaignItemPhase(item.id, gen);
+  const next = nextDrivableItem(items, item.id);
+  const nextAction = next ? driveCampaignItemAction(campaignId, next.id) : finalizeCampaignAction(campaignId);
+  recordContinuation({ continuationId, consumerKind: "campaign", sourceLaunchId, currentPhase, nextAction });
+}
+
 export async function driveRemainingItems(
   campaignId: string,
   opts: {
@@ -2189,9 +2410,57 @@ export async function driveRemainingItems(
     // The CLI supplies the real subprocess launcher (launchDriveItemUnderForge) so the
     // production `forge campaign start/resume` gets the cross-process per-item boundary.
     launchDriveItem?: DriveItemLaunchFn;
+    // FG-564 (P0-A / D1): the instance-stable controller identity that owns the
+    // campaign-controller lease across this drive. When present (the production CLI path),
+    // the drive acquires the lease (FAIL CLOSED against a live foreign owner — AC8 is
+    // non-vacuous against a live NORMAL-start controller), actively RENEWS it across every
+    // blocking per-item physical drive (D1 active-renewal model), records one durable
+    // continuation per item boundary (the recorder the recover path adopts through the shared
+    // adapter), and RELEASES it when the campaign becomes terminal or durably parks. Absent
+    // (the existing in-process test suite and direct programmatic callers) → no leasing, the
+    // legacy direct loop, byte-for-byte unchanged.
+    controllerOwner?: string;
+    controllerLeaseTtlMs?: number;
+    // FG-564 (D1, item 2): how often the lease-renewal HEARTBEAT fires WHILE the parent is
+    // parked on a blocking per-item drive. A single pre-launch renewal cannot fence a drive
+    // longer than the TTL — the lease would lapse mid-drive and a second controller could take
+    // over the item still being physically driven. The heartbeat fires during the `await`
+    // (the wait harness yields the event loop), renewing the owner/generation-scoped lease so
+    // the ORIGINAL owner holds it continuously for the WHOLE drive, however long it runs.
+    // Defaults to a third of the TTL. (Injectable so a host-stress test can drive it fast.)
+    controllerRenewIntervalMs?: number;
   }
 ): Promise<CampaignRunResult> {
   const itemRecords: CampaignItemRecord[] = [];
+  const owner = opts.controllerOwner;
+  const ttlMs = opts.controllerLeaseTtlMs ?? DEFAULT_CONTROLLER_LEASE_MS;
+  const renewIntervalMs = opts.controllerRenewIntervalMs ?? Math.max(1, Math.floor(ttlMs / 3));
+
+  // FG-564 (P0-A/AC7/AC8): acquire the campaign-controller lease before driving. A DIFFERENT
+  // owner holding a still-LIVE lease FAILS CLOSED — a normal start/resume must not drive under
+  // a live foreign controller (takeover is only after expiry, via `forge campaign recover`).
+  let leaseGeneration: number | undefined;
+  if (owner) {
+    const grant = acquireCampaignLease({ campaignId, owner, ttlMs });
+    if (!grant.granted) {
+      itemRecords.push(
+        ...listCampaignItems(campaignId)
+          .filter((i) => i.lifecycleStatus !== "pending" && i.lifecycleStatus !== "complete" && i.lifecycleStatus !== "failed")
+          .slice(0, 1)
+          .map((i) => ({ itemId: i.id, ticketId: i.ticketId, runId: i.runId, lifecycleStatus: i.lifecycleStatus })),
+      );
+      return { stopReason: "recovery_needed", itemRecords };
+    }
+    leaseGeneration = grant.lease.generation;
+  }
+
+  // Release our lease when the campaign durably parks/terminates (D1). Owner/generation-scoped,
+  // so it never clears a takeover winner's lease. Called on every owner-path return below.
+  const releaseIfOwned = (): void => {
+    if (owner && leaseGeneration !== undefined) {
+      try { releaseCampaignLease(campaignId, owner, leaseGeneration); } catch { /* best-effort settle */ }
+    }
+  };
 
   const launch: DriveItemLaunchFn =
     opts.launchDriveItem ??
@@ -2214,25 +2483,83 @@ export async function driveRemainingItems(
     // Cooperative pause: re-read campaign status before launching each item.
     const preCheck = getCampaign(campaignId);
     if (!preCheck || preCheck.status !== "running") {
+      releaseIfOwned();
       return { stopReason: preCheck?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
+    }
+
+    // FG-564 (D1 active-renewal): OWN the lease across the blocking per-item drive. Renew ONCE
+    // up front — a failure means a takeover already bumped the generation (or our lease lapsed):
+    // we are FENCED, so stop without driving, and do NOT release (we no longer own it).
+    if (owner && leaseGeneration !== undefined) {
+      if (!renewCampaignLease(campaignId, owner, leaseGeneration, ttlMs)) {
+        itemRecords.push({ itemId: item.id, ticketId: item.ticketId, runId: item.runId, lifecycleStatus: item.lifecycleStatus });
+        return { stopReason: "recovery_needed", itemRecords };
+      }
+    }
+
+    // FG-564 (D1, item 2): a single pre-launch renewal cannot fence a drive that OUTLIVES the
+    // TTL — the lease would lapse mid-drive and a second controller could take over the item
+    // still being physically driven. Run an owner/generation-scoped renewal HEARTBEAT that
+    // fires DURING the blocking wait below (the wait harness yields the event loop, so the
+    // timer renews while the parent is parked on the drive). The original owner therefore holds
+    // the lease CONTINUOUSLY for the whole drive, however long it runs.
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    let heartbeatLostLease = false;
+    if (owner && leaseGeneration !== undefined) {
+      const hbOwner = owner;
+      const hbGen = leaseGeneration;
+      heartbeat = setInterval(() => {
+        // A renewal that fails means a takeover already stepped past us (owner/generation
+        // changed) or our lease strictly lapsed despite the heartbeat — record it so we stop
+        // fencing ourselves after the drive rather than driving further under a dead lease.
+        if (!renewCampaignLease(campaignId, hbOwner, hbGen, ttlMs)) heartbeatLostLease = true;
+      }, renewIntervalMs);
+      // Never keep the process alive on the heartbeat alone.
+      if (typeof heartbeat.unref === "function") heartbeat.unref();
     }
 
     // Launch item N and wait in-process; the launcher reads the outcome from durable
     // state (never the disposition). A drive error inside the child is committed as a
     // durable park BEFORE the child exits, so it surfaces here as a stopReason, not an
     // in-process throw (the in-process launcher preserves the throw for existing tests).
-    const result = await launch(campaignId, item.id);
+    let result: DriveOneItemResult;
+    try {
+      result = await launch(campaignId, item.id);
+    } finally {
+      if (heartbeat) clearInterval(heartbeat);
+    }
+
+    // If the heartbeat ever failed to renew, our lease was taken over mid-drive — we are
+    // FENCED from advancing further: stop, and do NOT release (a takeover owner holds it now).
+    if (heartbeatLostLease) {
+      itemRecords.push(...result.itemRecords);
+      return { stopReason: "recovery_needed", itemRecords };
+    }
     itemRecords.push(...result.itemRecords);
     if (result.stopReason) {
+      releaseIfOwned();
       return { stopReason: result.stopReason, itemRecords };
+    }
+
+    // FG-564 (P0-A recorder + boundary advance): item N settled without halting the campaign.
+    // Durably record + advance the (campaignId, itemId) continuation for this boundary so a
+    // crash before the NEXT item is launched is recoverable by `forge campaign recover`
+    // (the shared adapter adopts it) — and a completed boundary is never re-driven.
+    if (owner && leaseGeneration !== undefined) {
+      const settled = getCampaignItem(item.id);
+      if (settled) {
+        try { recordItemBoundaryContinuation(campaignId, settled, items); } catch { /* best-effort: reservation stays authoritative */ }
+      }
     }
 
     // Cooperative pause after the item settles.
     const postCheck = getCampaign(campaignId);
     if (!postCheck || postCheck.status !== "running") {
+      releaseIfOwned();
       return { stopReason: postCheck?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
     }
   }
+  releaseIfOwned();
 
   // All items drained without halting. Held items (derived from durable state) keep the
   // campaign paused awaiting resume; otherwise it completes. This is the former
@@ -2482,6 +2809,45 @@ async function containLaunchBoundaryFailure(
 // the item outcome, and NO stdout marker is read. A crash with the item still mid-flight
 // leaves it ADOPTABLE (its dispatch_key is stamped) and surfaces recovery_needed WITHOUT
 // auto-recovering (FG-564's job).
+// FG-564 (Slice 5b, AC10 / step 5): persist the durable item-attempt launch linkage at
+// launch time so a replacement controller discovers the (campaignId, itemId,
+// attemptGeneration) -> sourceLaunchId binding DIRECTLY — never by parsing launch names,
+// argv, or timestamps. Recorded record-FIRST (right after startLaunch, before the waiter is
+// relied on) with the DETERMINISTIC generation the child's reserveCampaignDriveDispatch will
+// use (reuse a persisted non-zero generation; else the first attempt is 1 — the identical
+// formula the reservation applies), so the record-first row is stamped under the correct
+// key. The born-under fencing token is the live campaign-controller lease owner/generation
+// (AC7) when one is held; a stable launcher label otherwise.
+//
+// FG-564 (P1-F): this is a REQUIRED ordered step, NOT best-effort. It THROWS on failure so
+// the caller (launchDriveItemUnderForge) can durably contain/park the item and NOT proceed
+// with an unlinked launch. Recovery's sole direct-discovery authority is this linkage, so a
+// swallowed failure that still launched+waited would be unrecoverable-by-linkage.
+export function recordDriveItemLaunchLinkage(
+  campaignId: string,
+  itemId: string,
+  sourceLaunchId: string,
+  token?: { owner: string; generation: number },
+): void {
+  const item = getCampaignItem(itemId);
+  if (!item || item.campaignId !== campaignId) {
+    throw new Error(`recordDriveItemLaunchLinkage: item ${itemId} not found for campaign ${campaignId}`);
+  }
+  // The SAME formula reserveCampaignDriveDispatch uses: reuse a persisted attempt, else 1.
+  const attemptGeneration = item.attemptGeneration > 0 ? item.attemptGeneration : 1;
+  const lease = token ?? getCampaignLease(campaignId);
+  recordItemLaunch({
+    campaignId,
+    itemId,
+    attemptGeneration,
+    sourceLaunchId,
+    controllerOwner: lease?.owner ?? `campaign@${campaignId}@launcher`,
+    controllerGeneration: lease?.generation ?? 0,
+    ...(item.runId ? { runId: item.runId } : {}),
+    state: "launched",
+  });
+}
+
 export function launchDriveItemUnderForge(
   forgeBin: string[],
   // FG-596: the tmux/subprocess boundary is the ONE seam a test may substitute — the
@@ -2505,6 +2871,11 @@ export function launchDriveItemUnderForge(
     // already-resolved DB_PATH forwards that override verbatim. (`env` is a recognized
     // launch exec-prefix — it applies the assignments and execs the real command;
     // provenance records it correctly.)
+    // FG-564 (item 3): the born-under fencing token is NOT carried into the child via env — an
+    // env/caller token is forgeable and is never the authority. The child resolves its own
+    // born-under owner/generation from the DURABLE launch linkage (recordDriveItemLaunchLinkage
+    // below stamps it), so the argv carries only FORGE_HOME + FORGE_DB_PATH.
+    const heldLease = getCampaignLease(campaignId);
     const argv = ["env", `FORGE_HOME=${FORGE_HOME}`, `FORGE_DB_PATH=${DB_PATH}`, ...forgeBin, "campaign", "drive-item", campaignId, itemId];
     // Run the drive in the CAMPAIGN's project directory, not whatever cwd `forge
     // campaign start` happened to be invoked from — the item's git/worktree work
@@ -2520,6 +2891,17 @@ export function launchDriveItemUnderForge(
     let outcome;
     try {
       meta = startLaunch(argv, { name: `campaign-drive-${itemId}`, ...(cwd ? { cwd } : {}), ...(seams.tmux ? { tmux: seams.tmux } : {}) });
+      // FG-564 (AC10 / P1-F): make the item-attempt -> launch linkage durable as a REQUIRED
+      // ordered step BEFORE arming the waiter, so a crash between here and the child's
+      // continuation-record is recoverable by direct linkage discovery (C7). If it cannot
+      // commit we must NOT proceed with an unlinked launch: force-remove the launch and
+      // durably contain/park the item (throw → the outer catch runs containment).
+      try {
+        recordDriveItemLaunchLinkage(campaignId, itemId, meta.id, heldLease ? { owner: heldLease.owner, generation: heldLease.generation } : undefined);
+      } catch (linkErr) {
+        try { removeLaunch(meta.id, { force: true, ...(seams.tmux ? { tmux: seams.tmux } : {}) }); } catch { /* best-effort kill of the unlinked child */ }
+        return containLaunchBoundaryFailure(campaignId, itemId, linkErr);
+      }
       const harness = seams.makeWaitHarness ? seams.makeWaitHarness(meta.id) : realWaitHarness(meta.id);
       outcome = await waitForLaunchTerminal(meta.id, harness);
     } catch (err) {
@@ -2533,6 +2915,22 @@ export function launchDriveItemUnderForge(
       outcome.kind === "terminal" ? outcome.view.status : undefined;
 
     const derived = deriveDriveItemResultFromDurableState(campaignId, itemId, disposition);
+
+    // FG-564 (AC10): reconcile the durable launch linkage with the run the child actually
+    // reserved + drove (read from durable state, never from the launch disposition). Fills in
+    // the immutable run id and moves the linkage's lifecycle forward. Non-fatal.
+    try {
+      const settled = getCampaignItem(itemId);
+      if (settled) {
+        const gen = settled.attemptGeneration > 0 ? settled.attemptGeneration : 1;
+        updateItemLaunch(campaignId, itemId, gen, {
+          ...(settled.runId ? { runId: settled.runId } : {}),
+          state: derived.stopReason === "recovery_needed" ? "observed" : "settled",
+        });
+      }
+    } catch {
+      /* best-effort */
+    }
 
     // A drive error re-raises the in-process throw so the CLI renders drive_error. The
     // park is already durable, so the launch record is disposable.
@@ -2572,6 +2970,8 @@ export async function startCampaign(
     loadWorkflowFn?: LoadWorkflowFn;
     gateFn?: typeof gate;
     launchDriveItem?: DriveItemLaunchFn;
+    controllerOwner?: string;
+    controllerLeaseTtlMs?: number;
   } = {}
 ): Promise<CampaignRunResult> {
   const itemRecords: CampaignItemRecord[] = [];
@@ -2611,6 +3011,8 @@ export async function startCampaign(
     loadWorkflowFn: opts.loadWorkflowFn,
     gateFn: opts.gateFn,
     launchDriveItem: opts.launchDriveItem,
+    ...(opts.controllerOwner ? { controllerOwner: opts.controllerOwner } : {}),
+    ...(opts.controllerLeaseTtlMs ? { controllerLeaseTtlMs: opts.controllerLeaseTtlMs } : {}),
   });
 }
 
@@ -2623,6 +3025,8 @@ export async function resumeCampaign(
     loadWorkflowFn?: LoadWorkflowFn;
     gateFn?: typeof gate;
     launchDriveItem?: DriveItemLaunchFn;
+    controllerOwner?: string;
+    controllerLeaseTtlMs?: number;
   } = {}
 ): Promise<CampaignRunResult> {
   const itemRecords: CampaignItemRecord[] = [];
@@ -2666,6 +3070,8 @@ export async function resumeCampaign(
     loadWorkflowFn: opts.loadWorkflowFn,
     gateFn: opts.gateFn,
     launchDriveItem: opts.launchDriveItem,
+    ...(opts.controllerOwner ? { controllerOwner: opts.controllerOwner } : {}),
+    ...(opts.controllerLeaseTtlMs ? { controllerLeaseTtlMs: opts.controllerLeaseTtlMs } : {}),
   });
 }
 
