@@ -1,9 +1,11 @@
 ---
 id: FG-595
 type: story
-status: active
+status: done
 title: "Dashboard Projects: hide deleted inactive scratchpad checkouts instead of showing unknown branches"
 created: 2026-07-19
+closed: 2026-07-20
+closed_commit: 649cdb3b045960fd150c33b33bf007e15a55a50a
 ---
 
 ## Problem
