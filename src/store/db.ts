@@ -230,6 +230,18 @@ export function applyMigrations(db: DatabaseInstance): void {
     db.exec(`ALTER TABLE campaigns ADD COLUMN project_dir TEXT`);
   }
 
+  // FG-596: attempt_generation on campaign_items. Additive + NOT NULL with a safe
+  // DEFAULT 0 (SQLite ADD COLUMN permits NOT NULL only WITH a default), so every
+  // pre-existing row reads back 0 without a backfill and old binaries tolerate the
+  // extra column — the additive-only open-path discipline (BD-15). A real attempt is
+  // >= 1; 0 stays the "never allocated / legacy" marker the drive-item path fails
+  // closed on. PRAGMA table_info-guarded so a second open is a no-op.
+  const campaignItemsCols = db.prepare(`PRAGMA table_info(campaign_items)`).all() as { name: string }[];
+  const haveCampaignItems = new Set(campaignItemsCols.map((r) => r.name));
+  if (!haveCampaignItems.has("attempt_generation")) {
+    db.exec(`ALTER TABLE campaign_items ADD COLUMN attempt_generation INTEGER NOT NULL DEFAULT 0`);
+  }
+
   // FG-474: source/ci_url on host_verifications — distinguishes a row backed by a
   // real host command execution ('host') from one backed by a green required CI
   // check ('ci'). DEFAULT 'host' so every pre-existing row (all host-run, by

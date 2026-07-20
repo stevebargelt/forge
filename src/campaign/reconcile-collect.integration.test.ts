@@ -52,6 +52,7 @@ function item(overrides: Partial<CampaignItem> = {}): CampaignItem {
     itemOrder: 0,
     ticketId: "FG-200",
     lifecycleStatus: "failed",
+    attemptGeneration: 0,
     createdAt: "2026-01-01T00:00:00Z",
     updatedAt: "2026-01-01T00:00:00Z",
     ...overrides,

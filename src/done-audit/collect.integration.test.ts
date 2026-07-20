@@ -36,6 +36,7 @@ function makeItem(ticketId: string, runId?: string): CampaignItem {
     runId,
     lifecycleStatus: "complete",
     outcome: "shipped",
+    attemptGeneration: 0,
     createdAt: "2024-01-01T00:00:00Z",
     updatedAt: "2024-01-01T00:00:00Z",
   };

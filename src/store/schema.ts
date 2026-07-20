@@ -164,6 +164,10 @@ CREATE TABLE IF NOT EXISTS campaign_items (
   continue_policy        TEXT,
   reason                 TEXT,
   requested_human_action TEXT,
+  -- FG-596: the item's LOGICAL attempt generation. Additive, non-null with a safe
+  -- default so pre-FG-596 rows read back 0 (the "never allocated" marker; a real
+  -- attempt is >= 1). New DBs get it here; existing DBs via applyMigrations (db.ts).
+  attempt_generation     INTEGER NOT NULL DEFAULT 0,
   created_at             TEXT NOT NULL,
   updated_at             TEXT NOT NULL
 );

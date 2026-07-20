@@ -60,6 +60,13 @@ export type StartRunArgs = {
    *  task inputs — see CONTROL_PLANE_METADATA_KEYS). Absent for an ordinary run not
    *  driven by a durable continuation. */
   dispatchKey?: string;
+  /** FG-596: the item-attempt identity carried on a campaign drive-item run — the
+   *  LOGICAL attempt generation of the campaign item this run is dispatching. Stored
+   *  in run metadata (control-plane, never task input) alongside itemId/campaignId so
+   *  a later slice can bind an attempt-specific phase and a delayed completion from a
+   *  prior retry cannot advance a new attempt. Absent for an ordinary (non-campaign)
+   *  run. */
+  attemptGeneration?: number;
 };
 
 export type StartRunResult = {
@@ -87,6 +94,7 @@ export const CONTROL_PLANE_METADATA_KEYS = [
   "resolvedFromSubdir",  // FG-374
   "explicitSubproject",  // FG-374
   "dispatchKey",         // FG-563 (CP2): F17 dispatch receipt, never task input
+  "attemptGeneration",   // FG-596: campaign item-attempt identity, never task input
 ] as const;
 
 export function startRun(args: StartRunArgs): StartRunResult {
@@ -113,6 +121,9 @@ export function startRun(args: StartRunArgs): StartRunResult {
   // the run is discoverable by runByDispatchKey the instant it exists — before the
   // first wave (runNext) can spawn anything observable.
   if (args.dispatchKey) metadata["dispatchKey"] = args.dispatchKey;
+  // FG-596: stamp the campaign item-attempt identity BEFORE insertRun, in the same
+  // pre-observability window as the dispatch key. Control-plane metadata only.
+  if (args.attemptGeneration !== undefined) metadata["attemptGeneration"] = args.attemptGeneration;
 
   if (args.routeKey !== undefined) {
     const resolved = resolvePolicyPath(args.projectDir);
