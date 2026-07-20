@@ -320,7 +320,7 @@ function App() {
                 onClick=${() => setCheckoutFilter(checkout.projectDir)}
                 aria-pressed=${checkoutFilter === checkout.projectDir}
                 title=${checkout.projectDir}
-              >${checkout.branch || checkout.projectDir.split("/").pop()}</button>
+              >${checkoutScopeLabel(checkout)}</button>
             `)}
           </div>
           <button class="clear-filter" onClick=${clearProjectFilter}>clear ×</button>
@@ -597,15 +597,33 @@ function ProjectCard({ project, onPick }) {
             class="project-checkout-row"
             onClick=${(event) => { event.stopPropagation(); onPick(project, checkout.projectDir); }}
             title=${checkout.projectDir}
-            aria-label=${`Open ${project.label} checkout ${checkout.branch || checkout.projectDir}`}
+            aria-label=${`Open ${project.label} checkout ${checkoutLabel(checkout)}`}
           >
-            <span class="checkout-branch">${checkout.branch || "unknown branch"}</span>
+            <span class=${"checkout-branch" + (checkout.exists === false ? " checkout-missing" : "")}>${checkoutLabel(checkout)}</span>
             <span class="project-path mono faint">${checkout.projectDir}</span>
           </button>
         `)}
       </div>
     </div>
   `;
+}
+
+// FG-595: a checkout that survived suppression because it still has active work
+// or a live session but is gone from disk (exists===false) must read truthfully,
+// not as an "unknown branch". Present checkouts keep their branch (or the honest
+// "unknown branch" when git reported none).
+function checkoutLabel(checkout) {
+  if (checkout.exists === false) {
+    return checkout.branch ? `${checkout.branch} (missing)` : "missing / unavailable";
+  }
+  return checkout.branch || "unknown branch";
+}
+
+function checkoutScopeLabel(checkout) {
+  if (checkout.exists === false) {
+    return (checkout.branch || checkout.projectDir.split("/").pop()) + " (missing)";
+  }
+  return checkout.branch || checkout.projectDir.split("/").pop();
 }
 
 // Visual state for the card. Drives a CSS class for dimming/highlighting.
