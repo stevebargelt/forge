@@ -1,9 +1,11 @@
 ---
 id: FG-592
 type: story
-status: active
+status: done
 title: "forge launch show: R4 human output overstates unknowable runtime resolution as fact"
 created: 2026-07-19
+closed: 2026-07-20
+closed_commit: 2d54330
 ---
 
 ## Problem

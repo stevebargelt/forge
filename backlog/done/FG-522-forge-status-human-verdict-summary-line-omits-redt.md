@@ -1,9 +1,11 @@
 ---
 id: FG-522
 type: story
-status: active
+status: done
 title: forge status human verdict summary line omits redTaskId — same class as FG-521(b), --json already carries it
 created: 2026-07-11
+closed: 2026-07-20
+closed_commit: 2d54330
 ---
 
 ## Problem
