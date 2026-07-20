@@ -480,6 +480,7 @@ section.projects-grid {
 .project-checkout-row:hover,
 .project-checkout-row:focus-visible { background: var(--bg); outline: none; }
 .checkout-branch { color: var(--fg-dim); font-size: 11px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.checkout-branch.checkout-missing { color: var(--warn, var(--err)); font-style: italic; }
 .project-checkout-row .project-path { direction: ltr; text-align: right; }
 
 .project-path {

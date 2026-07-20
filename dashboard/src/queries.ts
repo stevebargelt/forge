@@ -818,9 +818,34 @@ export function usageModelMix(groupBy: GroupBy, since: string, scope?: ProjectSc
 export function projectsForDashboard(): ProjectRecord[] {
   const now = Date.now();
   if (projectCache && now - projectCache.at < PROJECT_CACHE_MS) return projectCache.projects;
-  const projects = sortProjects(listProjects(), "activity");
+  const projects = presentationRegistry(sortProjects(listProjects(), "activity"));
   projectCache = { at: now, projects };
   return projects;
+}
+
+// FG-595: presentation-only view over the canonical ProjectRecord aggregate.
+// A checkout is a stale artifact — a deleted scratchpad, a removed temp clone —
+// only when it is simultaneously gone from disk (exists===false), carries no
+// in-flight work (inFlightCount===0), and hosts no live session
+// (liveSessions===0); those are suppressed so the Projects view and checkout
+// scope controls stop surfacing dead paths. A present checkout (even if idle),
+// or a missing one that still has active work or a live session, stays visible
+// — the client labels a surviving missing checkout truthfully rather than as an
+// unknown branch. The record's aggregate runCount/inFlightCount/liveSessions/
+// lastRunAt and its full historical projectDirs array are passed through
+// untouched, so canonical projectKey scope still queries every historical
+// feed/usage/run record. A project is omitted only when no visible checkout
+// remains after suppression.
+export function presentationRegistry(projects: ProjectRecord[]): ProjectRecord[] {
+  const out: ProjectRecord[] = [];
+  for (const project of projects) {
+    const checkouts = project.checkouts.filter(
+      (checkout) => checkout.exists || checkout.inFlightCount > 0 || checkout.liveSessions > 0,
+    );
+    if (checkouts.length === 0) continue;
+    out.push({ ...project, checkouts });
+  }
+  return out;
 }
 
 // Registry discovery executes bounded Git commands for every observed checkout.
