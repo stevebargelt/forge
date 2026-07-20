@@ -25,6 +25,7 @@ import { insertRun } from "../../store/runs.js";
 import { insertTask } from "../../store/tasks.js";
 import { insertVerdict } from "../../store/verdicts.js";
 import { performShow, registerShow } from "./show.js";
+import { registerStatus } from "./status.js";
 import type { Run, Task } from "../../types/index.js";
 
 let db: DatabaseInstance;
@@ -114,6 +115,23 @@ async function renderShowCli(args: string[]): Promise<string> {
   try {
     const program = new Command();
     registerShow(program);
+    await program.parseAsync(args, { from: "user" });
+    return lines.join("\n");
+  } finally {
+    mock.restoreAll();
+  }
+}
+
+async function renderStatusCli(args: string[]): Promise<string> {
+  const lines: string[] = [];
+  mock.method(console, "log", (...a: unknown[]) => {
+    lines.push(a.map(String).join(" "));
+  });
+  try {
+    const program = new Command();
+    registerStatus(program);
+    // --read-only: skip AWN-1 reconcile so the human render is a pure read of
+    // the fixture (no docker/liveness side effects in the test).
     await program.parseAsync(args, { from: "user" });
     return lines.join("\n");
   } finally {
@@ -219,4 +237,26 @@ test("FG-521: --json verdict elements carry every field the human renderer reads
     parsed.verdicts.map((v) => String(v.redTaskId)),
     idsFromRenderedVerdictLines(humanOut),
   );
+});
+
+test("FG-522: `forge status` human verdict summary carries the redTaskId, matching FG-521(b) in show.ts", async () => {
+  const out = await renderStatusCli(["status", RUN.id, "--read-only"]);
+
+  // The human one-line verdict summary for the blocked task must name the red's
+  // id — the same copy-pasteable token show.ts's Verdicts section carries. Before
+  // FG-522 this line was `redRole: verdict (confidence)` with the id omitted.
+  const summaryLine = out
+    .split("\n")
+    .find((l) => l.includes(BLOCKED) && l.includes("red-wide: fail"));
+  assert.ok(summaryLine, `expected a status line summarizing the blocked task's verdicts, got:\n${out}`);
+  assert.match(summaryLine, /red-wide: fail \(0\.85\) — task-fg521-red-wide/, "the red-wide verdict summary carries its redTaskId");
+  assert.match(summaryLine, /red-security: pass \(0\.70\) — task-fg521-red-security/, "the red-security verdict summary carries its redTaskId");
+
+  // And the ids on the human status line resolve to the real red tasks — the
+  // same closed loop FG-521 proved for `forge show`.
+  for (const id of [RED_WIDE, RED_SECURITY]) {
+    assert.ok(summaryLine.includes(id), `status summary must name ${id}`);
+    const resolved = performShow(id);
+    assert.equal(resolved.kind, "task", `${id} must resolve to a task`);
+  }
 });
