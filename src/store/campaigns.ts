@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { getDb, writeTransaction } from "./db.js";
+import { runByDispatchKey } from "./runs.js";
 import { isCampaignTransitionAllowed } from "../types/index.js";
 import type {
   Campaign,
@@ -427,53 +428,106 @@ export function updateCampaignItem(id: string, update: CampaignItemUpdate): void
     .run(...params, id);
 }
 
-// FG-596 (A6): the drive-item child's atomic run-drive CLAIM. Flips a campaign item
-// pending→running (optionally linking runId) in ONE statement, gated on BOTH the campaign
-// still being 'running' AND the item still being 'pending'. This is the by-construction
-// half of the launch-boundary containment/child race: the launch-boundary containment
-// parks the item under updateCampaignItemIfPending (the SAME 'pending' precondition), so
-// the claim and the park can never both land — whichever CAS commits first flips the item
-// off 'pending' and the other becomes a no-op. A false return means the campaign was
-// paused/abandoned or the item was already parked (the containment won the race): the child
-// must then create/link NO run and resurrect nothing. Adoption of a crash-window run
-// (FG-564) still flows through here — a re-drive of the SAME attempt reaches this with the
-// item still 'pending' (runId not yet linked) and passes the gate.
-export function claimCampaignItemForDrive(
-  id: string,
-  campaignId: string,
-  runId?: string,
-): boolean {
-  const now = nowIso();
-  const result =
-    runId !== undefined
-      ? getDb()
-          .prepare(
-            `UPDATE campaign_items SET lifecycle_status = 'running', run_id = ?, updated_at = ?
-             WHERE id = ?
-               AND campaign_id = ?
-               AND lifecycle_status = 'pending'
-               AND (SELECT status FROM campaigns WHERE id = ?) = 'running'`
-          )
-          .run(runId, now, id, campaignId, campaignId)
-      : getDb()
-          .prepare(
-            `UPDATE campaign_items SET lifecycle_status = 'running', updated_at = ?
-             WHERE id = ?
-               AND campaign_id = ?
-               AND lifecycle_status = 'pending'
-               AND (SELECT status FROM campaigns WHERE id = ?) = 'running'`
-          )
-          .run(now, id, campaignId, campaignId);
-  return (result.changes ?? 0) > 0;
+// FG-596 (redesign): the ONE atomic pre-dispatch transaction for a run-producing lane.
+// Establishes the COMPLETE pre-dispatch invariant — generation, dispatch key, run row,
+// item linkage, and the pending→running CAS — in a SINGLE BEGIN IMMEDIATE transaction, so
+// no partial shape ("running item with no run", "run created but not linked") is ever
+// representable. Only after this commits may the physical dispatch (container work,
+// runNext) begin, OUTSIDE the transaction.
+//
+// The five steps, atomically:
+//   1. allocate OR reuse the logical attempt generation — allocate (0 → 1) only for a
+//      genuinely new attempt; REUSE a persisted non-zero generation on a re-drive of the
+//      SAME attempt (an explicit retry is the only thing that bumps it, out of band), so
+//      the derived key stays stable and the in-flight run stays adoptable;
+//   2. derive the deterministic dispatch_key = H(campaignId, itemId, generation);
+//   3. if a run ALREADY exists at that key (a crash-window re-drive, or a concurrent
+//      winner), ADOPT it — link it and mark the item running, creating NOTHING;
+//   4. otherwise CAS the item pending→running (gated on the campaign still running);
+//   5. only if that CAS won, create the run row (stamped with the key + generation, via
+//      the caller's createRun) and link its id onto the item.
+//
+// A concurrent LOSER — a second drive of the same item — is handled by construction: its
+// tx runs after the winner commits (BEGIN IMMEDIATE serializes writers), so it observes
+// the persisted generation and the winner's run at the derived key and ADOPTS it. It
+// allocates no new generation and creates no second run. If the item is no longer
+// drivable (campaign paused/abandoned, or the item parked out from under it) it returns
+// `lost` and creates nothing.
+//
+// createRun MUST insert exactly one run row (stamped with the passed dispatchKey +
+// attemptGeneration) and return its id; it runs INSIDE this transaction, so if it throws
+// the whole reservation rolls back and NO partial state survives (crash-before-commit →
+// item still pending, no run). It must not open its own transaction.
+export type CampaignDriveReservation =
+  | { status: "created"; runId: string; attemptGeneration: number; dispatchKey: string }
+  | { status: "adopted"; runId: string; attemptGeneration: number; dispatchKey: string }
+  | { status: "lost" };
+
+export function reserveCampaignDriveDispatch(opts: {
+  campaignId: string;
+  itemId: string;
+  createRun: (ctx: { dispatchKey: string; attemptGeneration: number }) => string;
+}): CampaignDriveReservation {
+  const { campaignId, itemId, createRun } = opts;
+  return writeTransaction(() => {
+    const item = getCampaignItem(itemId);
+    if (!item || item.campaignId !== campaignId) return { status: "lost" } as const;
+
+    // (1) reuse a persisted generation (>0); allocate the first one (0 → 1) otherwise.
+    const attemptGeneration = item.attemptGeneration > 0 ? item.attemptGeneration : 1;
+    // (2) derive the deterministic key from the resolved generation.
+    const dispatchKey = deriveCampaignItemDispatchKey(campaignId, itemId, attemptGeneration);
+    const now = nowIso();
+
+    // (3) ADOPT an already-created run at this key (crash-window re-drive, or the winner a
+    // concurrent loser now observes). Link + mark running, gated on the campaign still
+    // running and the item still drivable — never resurrect a terminal/parked item.
+    const existing = runByDispatchKey(dispatchKey);
+    if (existing) {
+      const adopted = getDb()
+        .prepare(
+          `UPDATE campaign_items SET run_id = ?, lifecycle_status = 'running', attempt_generation = ?, updated_at = ?
+           WHERE id = ?
+             AND campaign_id = ?
+             AND lifecycle_status IN ('pending', 'running')
+             AND (SELECT status FROM campaigns WHERE id = ?) = 'running'`
+        )
+        .run(existing.id, attemptGeneration, now, itemId, campaignId, campaignId);
+      if ((adopted.changes ?? 0) === 0) return { status: "lost" } as const;
+      return { status: "adopted", runId: existing.id, attemptGeneration, dispatchKey } as const;
+    }
+
+    // (4) CLAIM the item pending→running (persisting the generation), gated on the campaign
+    // still running. A losing tx (item already off 'pending', or a paused/abandoned
+    // campaign) changes nothing and creates no run.
+    const claimed = getDb()
+      .prepare(
+        `UPDATE campaign_items SET lifecycle_status = 'running', attempt_generation = ?, updated_at = ?
+         WHERE id = ?
+           AND campaign_id = ?
+           AND lifecycle_status = 'pending'
+           AND (SELECT status FROM campaigns WHERE id = ?) = 'running'`
+      )
+      .run(attemptGeneration, now, itemId, campaignId, campaignId);
+    if ((claimed.changes ?? 0) === 0) return { status: "lost" } as const;
+
+    // (5) create the stamped run row and link it — inside the same tx, so the row insert,
+    // the linkage, and the CAS above commit together or not at all.
+    const runId = createRun({ dispatchKey, attemptGeneration });
+    getDb()
+      .prepare(`UPDATE campaign_items SET run_id = ?, updated_at = ? WHERE id = ?`)
+      .run(runId, nowIso(), itemId);
+    return { status: "created", runId, attemptGeneration, dispatchKey } as const;
+  });
 }
 
 // FG-596 (A6): guarded item park for the launch-boundary containment. Applies the update
 // ONLY while the item is still 'pending' — its pre-drive state. If the drive-item child
-// already CLAIMED the item (pending→running via claimCampaignItemForDrive) in the launch
-// race, this is a no-op (returns false) and the containment must NOT clobber the live drive
-// nor pause the campaign behind it. Same single-statement CAS shape as the campaign-status
-// guards above; the 'pending' precondition is shared with the claim so the two can never
-// both win.
+// already reserved and dispatched the item (pending→running inside
+// reserveCampaignDriveDispatch) in the launch race, this is a no-op (returns false) and the
+// containment must NOT clobber the live drive nor pause the campaign behind it. Same
+// single-statement CAS shape as the campaign-status guards above; the 'pending' precondition
+// is shared with the reservation's claim so the two can never both win.
 export function updateCampaignItemIfPending(
   id: string,
   campaignId: string,
@@ -489,26 +543,6 @@ export function updateCampaignItemIfPending(
     )
     .run(...params, id, campaignId);
   return (result.changes ?? 0) > 0;
-}
-
-// FG-596: atomically allocate the NEXT logical attempt generation for an item and
-// persist it, returning the new value. Called ONLY on a genuinely new attempt (an
-// initial dispatch, or an explicit retry) — a re-drive / reattach / recovery of the
-// SAME attempt must instead REUSE the persisted item.attemptGeneration unchanged, so
-// the derived dispatch key stays stable and the in-flight run stays adoptable by key.
-// The read-modify-write runs under BEGIN IMMEDIATE (writeTransaction) so two
-// controllers racing an allocation for the same item never mint the same generation.
-export function allocateItemGeneration(id: string): number {
-  return writeTransaction(() => {
-    const row = getDb()
-      .prepare(`SELECT attempt_generation FROM campaign_items WHERE id = ?`)
-      .get(id) as { attempt_generation: number } | undefined;
-    const next = (row?.attempt_generation ?? 0) + 1;
-    getDb()
-      .prepare(`UPDATE campaign_items SET attempt_generation = ?, updated_at = ? WHERE id = ?`)
-      .run(next, nowIso(), id);
-    return next;
-  });
 }
 
 // FG-596: the DETERMINISTIC dispatch key for a campaign item's drive-item run. A pure

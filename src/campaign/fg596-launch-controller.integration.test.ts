@@ -1,12 +1,14 @@
-// FG-596 — the launch-per-item controller + deterministic dispatch-key stamping +
-// legacy fail-closed, against a real store and a real single-item drive.
+// FG-596 (redesign) — the atomic pre-dispatch reservation + the launch-per-item
+// controller, against a real store and a real single-item drive.
 //
-// These exercise the FG-596 boundary in-process (an injected launcher runs the same
-// driveOneCampaignItem the production subprocess runs, so the controller logic and the
-// durable-state derivation are proven without spawning tmux). The A4 five-level
-// real-publisher, real-runNext, real-subprocess convergence proof is the VERIFY
-// phase's — this file proves the extraction, the stamp, the controller's
-// derive-from-durable-state advancement, and the fail-closed invariant.
+// The dispatch of a run-producing lane is now ONE atomic transaction
+// (reserveCampaignDriveDispatch): allocate/reuse the generation, derive the dispatch key,
+// insert the stamped run, link it to the item, and CAS the item pending→running — all or
+// nothing. No partial shape ("running item with no run", "run created but not linked") is
+// representable, so the old split claim + crash-mid-claim detector are gone. These tests
+// prove the invariant directly (crash-before-commit, crash-after-commit, the concurrent
+// loser) plus the controller's derive-from-durable-state advancement and the EXTERNAL
+// launch-boundary containment that survives (a broken tmux / failing wait harness).
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -22,13 +24,11 @@ import {
   listCampaignItems,
   updateCampaignItem,
   deriveCampaignItemDispatchKey,
-  allocateItemGeneration,
+  reserveCampaignDriveDispatch,
   createCampaign,
   addCampaignItem,
-  claimCampaignItemForDrive,
   updateCampaignItemIfPending,
 } from "../store/campaigns.js";
-import { parkCampaign } from "./park.js";
 import { getRun, insertRun, runByDispatchKey, listRuns } from "../store/runs.js";
 import { writeTicket, closeTicket } from "../backlog/structured.js";
 import { planCampaign as _planCampaign, resolvePlan } from "./planner.js";
@@ -96,6 +96,28 @@ function fakeDispatch(status: "complete" | "failed", error?: string) {
   });
 }
 
+// Seed a fresh RUNNING campaign with one PENDING item and return its ids — the exact
+// pre-dispatch state a run-producing lane reserves from.
+function seedRunningPendingItem(ticketId = "FG-101"): { campaignId: string; itemId: string } {
+  const c = createCampaign({ sourceKind: "list", sourceInput: { ticketIds: [ticketId] }, mode: "sequential", projectDir });
+  const it = addCampaignItem({ campaignId: c.id, itemOrder: 0, ticketId });
+  assert.ok(tryTransitionCampaignToRunning(c.id), "precondition: campaign running");
+  return { campaignId: c.id, itemId: it.id };
+}
+
+// An invoke run insert exactly as the escape-hatch lane's createRun performs it.
+function insertInvokeRun(id: string, campaignId: string, itemId: string, dispatchKey: string, gen: number) {
+  insertRun({
+    id,
+    workflow: "invoke",
+    title: "FG-101",
+    status: "active",
+    createdAt: nowIso(),
+    metadata: { invokeAgent: "engineer", campaignId, ticketId: "FG-101", itemId, dispatchKey, attemptGeneration: gen },
+    projectDir,
+  });
+}
+
 beforeEach(() => {
   db = makeInMemoryDb();
   prev = setDbForTest(db);
@@ -115,6 +137,197 @@ afterEach(() => {
   rmSync(projectDir, { recursive: true, force: true });
 });
 
+// ── THE ATOMIC PRE-DISPATCH INVARIANT ──────────────────────────────────────────
+
+test("atomic (crash BEFORE commit): a createRun throw rolls the WHOLE reservation back — item stays pending, generation unallocated, NO run", () => {
+  const { campaignId, itemId } = seedRunningPendingItem();
+  const runsBefore = listRuns().length;
+
+  assert.throws(
+    () =>
+      reserveCampaignDriveDispatch({
+        campaignId,
+        itemId,
+        createRun: ({ dispatchKey, attemptGeneration }) => {
+          // Insert the run, then crash BEFORE the reservation commits — the whole tx
+          // (claim + this insert + the pending link) must roll back atomically.
+          insertInvokeRun("run-doomed", campaignId, itemId, dispatchKey, attemptGeneration);
+          throw new Error("crash before commit");
+        },
+      }),
+    /crash before commit/,
+  );
+
+  const item = getCampaignItem(itemId)!;
+  assert.equal(item.lifecycleStatus, "pending", "the item is still pending — nothing partial survived the crash");
+  assert.equal(item.attemptGeneration, 0, "the generation was NOT persisted — the tx rolled back");
+  assert.equal(item.runId, undefined, "no run linkage was written");
+  assert.equal(listRuns().length, runsBefore, "the inserted run did not survive the rollback — NO run row exists");
+  assert.equal(runByDispatchKey(deriveCampaignItemDispatchKey(campaignId, itemId, 1)), undefined, "nothing is adoptable by the derived key");
+});
+
+test("atomic (crash AFTER commit): once the reservation commits, the item is running + linked to EXACTLY ONE run adoptable by dispatch_key — before any physical work", () => {
+  const { campaignId, itemId } = seedRunningPendingItem();
+
+  let capturedKey = "";
+  const res = reserveCampaignDriveDispatch({
+    campaignId,
+    itemId,
+    createRun: ({ dispatchKey, attemptGeneration }) => {
+      capturedKey = dispatchKey;
+      insertInvokeRun("run-committed", campaignId, itemId, dispatchKey, attemptGeneration);
+      return "run-committed";
+    },
+  });
+
+  assert.equal(res.status, "created");
+  assert.equal(res.attemptGeneration, 1, "the first attempt allocated generation 1");
+  // Simulate the crash: NO physical work (no runNext/invoke) ran after the commit — the
+  // durable state alone must be a recoverable, adoptable shape.
+  const item = getCampaignItem(itemId)!;
+  assert.equal(item.lifecycleStatus, "running", "the item is running");
+  assert.equal(item.runId, "run-committed", "linked to exactly one run");
+  assert.equal(item.attemptGeneration, 1, "the generation is persisted on the item");
+  assert.equal(capturedKey, deriveCampaignItemDispatchKey(campaignId, itemId, 1));
+  assert.equal(runByDispatchKey(capturedKey)?.id, "run-committed", "the run is adoptable by its dispatch_key (recoverable/adoptable for FG-564)");
+  assert.equal(listRuns().filter((r) => r.metadata?.["itemId"] === itemId).length, 1, "EXACTLY one run linked to the item");
+});
+
+test("atomic (concurrent loser): a second drive of the SAME item ADOPTS the winner's run — never a second generation or run — looped 120x", () => {
+  let created = 0;
+  let adopted = 0;
+  for (let i = 0; i < 120; i++) {
+    const { campaignId, itemId } = seedRunningPendingItem();
+
+    // Winner: the first reservation creates + links the run.
+    const winnerRunId = `run-winner-${i}`;
+    const r1 = reserveCampaignDriveDispatch({
+      campaignId,
+      itemId,
+      createRun: ({ dispatchKey, attemptGeneration }) => {
+        insertInvokeRun(winnerRunId, campaignId, itemId, dispatchKey, attemptGeneration);
+        return winnerRunId;
+      },
+    });
+
+    // Loser: a second drive of the SAME item. Its createRun must NEVER be invoked — it
+    // observes the winner's run by key and adopts it, allocating nothing and creating
+    // nothing.
+    let loserCreateRunCalled = false;
+    const r2 = reserveCampaignDriveDispatch({
+      campaignId,
+      itemId,
+      createRun: ({ dispatchKey, attemptGeneration }) => {
+        loserCreateRunCalled = true;
+        insertInvokeRun(`run-loser-${i}`, campaignId, itemId, dispatchKey, attemptGeneration);
+        return `run-loser-${i}`;
+      },
+    });
+
+    assert.equal(r1.status, "created", `[iter ${i}] the first drive wins and creates`);
+    assert.equal(r2.status, "adopted", `[iter ${i}] the second drive adopts, never creates`);
+    assert.equal(loserCreateRunCalled, false, `[iter ${i}] the loser's createRun was NEVER invoked — it allocated/inserted nothing`);
+    assert.equal(r2.runId, winnerRunId, `[iter ${i}] the loser adopts the winner's run by key`);
+
+    const item = getCampaignItem(itemId)!;
+    assert.equal(item.attemptGeneration, 1, `[iter ${i}] exactly one generation was ever allocated`);
+    assert.equal(item.runId, winnerRunId, `[iter ${i}] the item links the one winning run`);
+    const runsForItem = listRuns().filter((r) => r.metadata?.["itemId"] === itemId);
+    assert.equal(runsForItem.length, 1, `[iter ${i}] EXACTLY one run exists for the item — no duplicate`);
+    if (r1.status === "created") created++;
+    if (r2.status === "adopted") adopted++;
+  }
+  assert.equal(created, 120, "every iteration exercised the create branch");
+  assert.equal(adopted, 120, "every iteration exercised the adopt branch");
+});
+
+test("atomic (loser STOPS): a reservation whose campaign was paused out from under it is LOST — allocates nothing, creates nothing", () => {
+  const { campaignId, itemId } = seedRunningPendingItem();
+  // The operator (or the launch-boundary containment) paused the campaign while the item
+  // is still pending — the exact state a losing drive observes.
+  assert.ok(tryTransitionCampaign(campaignId, "running", "paused"), "precondition: campaign paused, item pending");
+
+  let createRunCalled = false;
+  const res = reserveCampaignDriveDispatch({
+    campaignId,
+    itemId,
+    createRun: ({ dispatchKey, attemptGeneration }) => {
+      createRunCalled = true;
+      insertInvokeRun("run-should-not-exist", campaignId, itemId, dispatchKey, attemptGeneration);
+      return "run-should-not-exist";
+    },
+  });
+
+  assert.equal(res.status, "lost", "a paused campaign loses the reservation");
+  assert.equal(createRunCalled, false, "createRun was never invoked — no run allocated behind the pause");
+  const item = getCampaignItem(itemId)!;
+  assert.equal(item.lifecycleStatus, "pending", "the item is untouched — still pending");
+  assert.equal(item.attemptGeneration, 0, "no generation was allocated");
+  assert.equal(item.runId, undefined, "no run linkage");
+  assert.equal(listRuns().length, 0, "NO run was created behind the paused campaign");
+});
+
+test("atomic (same-attempt re-drive reuses generation; retry mints a NEW one): the derived key stays stable across a re-drive and shifts on retry", () => {
+  const { campaignId, itemId } = seedRunningPendingItem();
+
+  // First drive: allocate generation 1, create + link a run.
+  const r1 = reserveCampaignDriveDispatch({
+    campaignId,
+    itemId,
+    createRun: ({ dispatchKey, attemptGeneration }) => {
+      insertInvokeRun("run-gen1", campaignId, itemId, dispatchKey, attemptGeneration);
+      return "run-gen1";
+    },
+  });
+  assert.equal(r1.status, "created");
+  assert.equal(r1.attemptGeneration, 1);
+  const key1 = deriveCampaignItemDispatchKey(campaignId, itemId, 1);
+  assert.equal(r1.dispatchKey, key1);
+
+  // A re-drive of the SAME attempt (a recovery/reattach) REUSES generation 1 → same key →
+  // adopts the existing run. It must not re-allocate to 2 nor mint a second run.
+  let secondCreateRunCalled = false;
+  const r2 = reserveCampaignDriveDispatch({
+    campaignId,
+    itemId,
+    createRun: () => {
+      secondCreateRunCalled = true;
+      return "run-should-not-happen";
+    },
+  });
+  assert.equal(r2.status, "adopted", "the same-attempt re-drive adopts the existing run");
+  assert.equal(secondCreateRunCalled, false, "no second run was created on the re-drive");
+  assert.equal(r2.attemptGeneration, 1, "the generation is reused unchanged");
+  assert.equal(getCampaignItem(itemId)!.attemptGeneration, 1);
+
+  // Force the item into a retryable failed shape under a PAUSED campaign, then retry —
+  // the ONLY operation that mints a new logical generation.
+  assert.ok(tryTransitionCampaign(campaignId, "running", "paused"));
+  updateCampaignItem(itemId, { lifecycleStatus: "failed", outcome: "blocked", blockerKind: "infrastructure" });
+  const retried = retryCampaignItem(campaignId, "FG-101");
+  assert.ok(retried.ok, `retry should succeed: ${retried.ok ? "" : retried.reason}`);
+  assert.equal(getCampaignItem(itemId)!.attemptGeneration, 2, "retry bumped the generation to 2");
+
+  // The next drive (campaign back to running) REUSES the retry generation (2) → a DISTINCT
+  // key → no false adoption of the gen-1 run → a fresh run.
+  assert.ok(tryTransitionCampaign(campaignId, "paused", "running"));
+  const r3 = reserveCampaignDriveDispatch({
+    campaignId,
+    itemId,
+    createRun: ({ dispatchKey, attemptGeneration }) => {
+      insertInvokeRun("run-gen2", campaignId, itemId, dispatchKey, attemptGeneration);
+      return "run-gen2";
+    },
+  });
+  assert.equal(r3.status, "created", "the retried attempt derives a DISTINCT key and creates a fresh run");
+  assert.equal(r3.attemptGeneration, 2);
+  const key2 = deriveCampaignItemDispatchKey(campaignId, itemId, 2);
+  assert.notEqual(key1, key2, "the retry key differs from the first-attempt key — a delayed gen-1 completion cannot advance gen 2");
+  assert.equal(r3.dispatchKey, key2);
+  assert.equal(runByDispatchKey(key1)?.id, "run-gen1", "the gen-1 run is still resolvable by its own key");
+  assert.equal(runByDispatchKey(key2)?.id, "run-gen2", "the gen-2 run is resolvable by the new key");
+});
+
 // ── A3: deterministic dispatch-key + item-attempt identity stamped on the run ──
 
 test("FG-596 stamp: the drive-item run carries metadata.dispatchKey = H(cid,itemId,gen) and metadata.attemptGeneration, item generation persisted", async () => {
@@ -132,9 +345,37 @@ test("FG-596 stamp: the drive-item run carries metadata.dispatchKey = H(cid,item
   const run = getRun(item.runId!)!;
   assert.equal(run.metadata?.["dispatchKey"], expectedKey, "the run stamps the deterministic dispatch key BEFORE it is observable");
   assert.equal(run.metadata?.["attemptGeneration"], 1, "the run carries the item-attempt identity (generation)");
-
-  // A3: the run is adoptable by its stamped key (runByDispatchKey resolves it).
   assert.equal(runByDispatchKey(expectedKey)?.id, run.id, "runByDispatchKey resolves the stamped run — adoptable for FG-564");
+});
+
+// ── A6, C4: adoption of a crash-window run through the real drive path ───────────
+
+test("FG-596 adoption: a re-drive in the C4 window (run created + generation persisted, runId not yet linked) adopts by key — exactly one run", async () => {
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "ok" });
+  tryTransitionCampaignToRunning(campaign.id);
+  const item = listCampaignItems(campaign.id)[0]!;
+
+  // Reproduce the C4 crash window WITHOUT the atomic reservation (which would never leave
+  // this shape): persist generation 1 on the item and insert a run stamped with the derived
+  // key, but leave the item pending with runId unlinked — as if a crash struck between an
+  // older run creation and its linkage.
+  updateCampaignItem(item.id, { attemptGeneration: 1 });
+  const key = deriveCampaignItemDispatchKey(campaign.id, item.id, 1);
+  insertInvokeRun("run-orphan-fg101", campaign.id, item.id, key, 1);
+  assert.equal(getCampaignItem(item.id)!.runId, undefined, "precondition: the C4 window left runId unlinked");
+  assert.equal(runByDispatchKey(key)?.id, "run-orphan-fg101", "precondition: the orphan run is resolvable by its key");
+
+  // Re-drive the SAME logical attempt (generation reused → same key → adoption).
+  shipTicket("FG-101");
+  const result = await driveOneCampaignItem(campaign.id, item.id, { dispatch: fakeDispatch("complete"), projectDir, mode: "sequential" });
+  assert.equal(result.stopReason, undefined, "the adopted item settled and the campaign continues");
+
+  const after = getCampaignItem(item.id)!;
+  assert.equal(after.runId, "run-orphan-fg101", "ADOPTED the orphan run by key — the item links the SAME run, not a replacement");
+  assert.equal(after.attemptGeneration, 1, "generation reused unchanged (no re-allocation on the re-drive)");
+  const runsForItem = listRuns().filter((r) => r.metadata?.["itemId"] === item.id);
+  assert.equal(runsForItem.length, 1, "exactly ONE run exists for the item — no duplicate was created");
 });
 
 // ── A2: driveRemainingItems is a launch-per-item controller ─────────────────────
@@ -148,9 +389,6 @@ test("FG-596 controller: launches once per item, advances on durable state, comp
   const launched: string[] = [];
   const launcher: DriveItemLaunchFn = (cid, itemId) => {
     launched.push(itemId);
-    // The injected launcher runs the SAME single-item drive the production subprocess
-    // runs — the controller must observe the item outcome from durable state, not this
-    // return value.
     return driveOneCampaignItem(cid, itemId, { dispatch: fakeDispatch("complete"), projectDir, mode: "sequential" });
   };
 
@@ -165,18 +403,14 @@ test("FG-596 controller: launches once per item, advances on durable state, comp
 test("FG-596 controller: stops from DURABLE campaign status even when the launcher hides the park (never the disposition)", async () => {
   const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101", "FG-102"] }, { projectDir, mode: "sequential" });
   approveCampaign(campaign.id, { rationale: "ok" });
-  // FG-101 fails to ship (no ship evidence) → the drive parks the campaign durably.
   const launcher: DriveItemLaunchFn = async (cid, itemId) => {
     await driveOneCampaignItem(cid, itemId, { dispatch: fakeDispatch("complete"), projectDir, mode: "sequential" });
-    // Deliberately return an EMPTY result (no stopReason) — the controller must still
-    // stop, because it re-reads the durable campaign status after the launch.
     return { itemRecords: [] };
   };
 
   const result = await startCampaign(campaign.id, { launchDriveItem: launcher });
   assert.equal(result.stopReason, "paused", "controller derives the stop from durable campaign status, not the launcher return");
   assert.equal(getCampaign(campaign.id)!.status, "paused");
-  // FG-102 was never launched — the controller stopped at the parked item.
   const item102 = listCampaignItems(campaign.id).find((i) => i.ticketId === "FG-102")!;
   assert.equal(item102.lifecycleStatus, "pending", "the second item never dispatched once the campaign parked");
 });
@@ -186,14 +420,9 @@ test("FG-596 controller: stops from DURABLE campaign status even when the launch
 test("FG-596 fail-closed: a pending item whose runId resolves to a REAL run is parked, never replaced", async () => {
   const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
   approveCampaign(campaign.id, { rationale: "ok" });
-  // The controller transitions the campaign to running before launching a drive-item;
-  // reproduce that so driveOneCampaignItem reaches the dispatch branch (not the
-  // cooperative pre-check pause).
   tryTransitionCampaignToRunning(campaign.id);
   const item = listCampaignItems(campaign.id)[0]!;
 
-  // Seed the legacy shape: a REAL run row, linked to a PENDING item, with NO generation
-  // (attempt_generation 0) and no dispatch-key stamp — a pre-FG-596 dispatched run.
   const legacyRunId = "run-legacy-fg101";
   insertRun({ id: legacyRunId, workflow: "invoke", title: "FG-101", status: "active", createdAt: nowIso(), metadata: { campaignId: campaign.id, ticketId: "FG-101", itemId: item.id }, projectDir });
   updateCampaignItem(item.id, { runId: legacyRunId });
@@ -207,28 +436,22 @@ test("FG-596 fail-closed: a pending item whose runId resolves to a REAL run is p
   assert.equal(parked.runId, legacyRunId, "the item still points at the ORIGINAL run — never re-linked to a replacement");
   assert.equal(parked.blockerKind, "campaign_system");
   assert.equal(parked.lifecycleStatus, "awaiting_gate", "adopted-or-parked (adoptable), not driven");
-
-  // The run itself is untouched — no new invoke run was minted over it.
   const after = getRun(legacyRunId)!;
   assert.equal(after.status, before.status, "the legacy run is not replaced or abandoned");
-  const invokeRuns = [before].length; // exactly the one we seeded
-  assert.equal(invokeRuns, 1, "no duplicate run was created for this item");
 });
 
-// ── B: an explicit retry allocates a NEW generation (distinct dispatch key) ─────
+// ── B: an explicit retry allocates a NEW generation (end-to-end recovery) ───────
 
-test("FG-596 retry: allocates a new generation so the re-drive derives a DISTINCT dispatch key", async () => {
+test("FG-596 retry: allocates a new generation so the re-drive derives a DISTINCT dispatch key, and the re-drive reuses it", async () => {
   const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
   approveCampaign(campaign.id, { rationale: "ok" });
 
-  // First attempt fails to ship (returned complete but NO ship evidence) → parks.
   const first = await startCampaign(campaign.id, { dispatch: fakeDispatch("complete") });
   assert.equal(first.stopReason, "paused");
   const afterFirst = listCampaignItems(campaign.id)[0]!;
   assert.equal(afterFirst.attemptGeneration, 1, "the initial dispatch allocated generation 1");
   const key1 = deriveCampaignItemDispatchKey(campaign.id, afterFirst.id, 1);
 
-  // Force the item into a retryable failed shape, then retry.
   updateCampaignItem(afterFirst.id, { lifecycleStatus: "failed", outcome: "blocked", blockerKind: "infrastructure" });
   const retried = retryCampaignItem(campaign.id, "FG-101");
   assert.ok(retried.ok, `retry should succeed: ${retried.ok ? "" : retried.reason}`);
@@ -239,7 +462,6 @@ test("FG-596 retry: allocates a new generation so the re-drive derives a DISTINC
   const key2 = deriveCampaignItemDispatchKey(campaign.id, afterRetry.id, 2);
   assert.notEqual(key1, key2, "a new attempt derives a DISTINCT dispatch key — a prior-attempt completion cannot advance it");
 
-  // The re-drive REUSES the retry-allocated generation (does not re-allocate to 3).
   shipTicket("FG-101");
   const resumed = await resumeCampaign(campaign.id, { dispatch: fakeDispatch("complete") });
   assert.equal(resumed.stopReason, "complete");
@@ -248,137 +470,19 @@ test("FG-596 retry: allocates a new generation so the re-drive derives a DISTINC
   assert.equal(getRun(shipped.runId!)!.metadata?.["dispatchKey"], key2, "the re-drive run stamped the retry-generation key");
 });
 
-// ── FG-596 fix 1 (A6, C4): adoption lookup — a re-drive AFTER run creation but BEFORE
-// runId linkage ADOPTS the existing run by key instead of minting a duplicate ─────────
+// ── FG-596: item outcome/stopReason follow DURABLE state, never a stdout marker ──
 
-test("FG-596 fix1 adoption: a re-drive in the C4 window (run created, runId not yet linked) adopts by key — exactly one run", async () => {
+test("FG-596 derive: deriveDriveItemResultFromDurableState follows DURABLE item state even when a forged child log claims the opposite", async () => {
   const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
   approveCampaign(campaign.id, { rationale: "ok" });
-  tryTransitionCampaignToRunning(campaign.id);
-  const item = listCampaignItems(campaign.id)[0]!;
-
-  // Reproduce the C4 crash window: the generation was persisted and a run was created
-  // carrying the STAMPED dispatch key — but the crash struck before updateCampaignItem
-  // linked runId to the item, so the item is still pending with no runId.
-  const gen = allocateItemGeneration(item.id); // → 1, persisted (as the first drive would)
-  assert.equal(gen, 1);
-  const key = deriveCampaignItemDispatchKey(campaign.id, item.id, gen);
-  const orphanRunId = "run-orphan-fg101";
-  insertRun({
-    id: orphanRunId,
-    workflow: "invoke",
-    title: "FG-101",
-    status: "active",
-    createdAt: nowIso(),
-    metadata: { invokeAgent: "engineer", campaignId: campaign.id, ticketId: "FG-101", itemId: item.id, dispatchKey: key, attemptGeneration: gen },
-    projectDir,
-  });
-  assert.equal(getCampaignItem(item.id)!.runId, undefined, "precondition: the C4 window left runId unlinked");
-  assert.equal(runByDispatchKey(key)?.id, orphanRunId, "precondition: the orphan run is resolvable by its key");
-
-  // Re-drive the SAME logical attempt (generation reused → same key → adoption).
-  shipTicket("FG-101");
-  const result = await driveOneCampaignItem(campaign.id, item.id, { dispatch: fakeDispatch("complete"), projectDir, mode: "sequential" });
-  assert.equal(result.stopReason, undefined, "the adopted item settled and the campaign continues");
-
-  const after = getCampaignItem(item.id)!;
-  assert.equal(after.runId, orphanRunId, "ADOPTED the orphan run by key — the item links to the SAME run, not a replacement");
-  assert.equal(after.attemptGeneration, 1, "generation reused unchanged (no re-allocation on the re-drive)");
-  const runsForItem = listRuns().filter((r) => r.metadata?.["itemId"] === item.id);
-  assert.equal(runsForItem.length, 1, "exactly ONE run exists for the item — no duplicate was created");
-});
-
-// ── FG-596 fix 4 (A3): EVERY run-creating lane stamps the deterministic key, including
-// the failure-fallback (workflow-load-fail → abandoned run) ───────────────────────────
-
-test("FG-596 fix4 stamp: the workflow-load-fail fallback lane stamps the dispatch key on its abandoned run", async () => {
-  // Force a full_feature (workflow) lane with a workflow that cannot load, so the drive
-  // takes the failure-fallback insertRun path.
-  const { campaign } = _planCampaign(
-    { kind: "list", ticketIds: ["FG-101"], itemOverrides: { "FG-101": { executionMode: "workflow", workflowName: "fg596-nonexistent-workflow" } } },
-    { projectDir, mode: "sequential" },
-  );
-  approveCampaign(campaign.id, { rationale: "ok" });
-  tryTransitionCampaignToRunning(campaign.id);
-  const item = listCampaignItems(campaign.id)[0]!;
-
-  const result = await driveOneCampaignItem(campaign.id, item.id, { dispatch: fakeDispatch("complete"), projectDir, mode: "sequential" });
-  assert.ok(result.stopReason === "paused" || result.stopReason === "abandoned", `load-fail parks the campaign: ${result.stopReason}`);
-
-  const failed = getCampaignItem(item.id)!;
-  assert.equal(failed.lifecycleStatus, "failed", "the load-fail item is failed");
-  assert.ok(failed.runId, "the fallback lane created a (traceability) run");
-  const expectedKey = deriveCampaignItemDispatchKey(campaign.id, item.id, failed.attemptGeneration);
-  assert.equal(getRun(failed.runId!)!.metadata?.["dispatchKey"], expectedKey, "the abandoned fallback run is stamped with the deterministic key — adoptable, never a silent duplicate");
-});
-
-// ── FG-596: the workflow-load-fail fallback must PRESERVE an adopted crash-window run,
-// never mint a duplicate on the same dispatch key that orphans the genuine attempt ──────
-
-test("FG-596 load-fail preserves adoption: a re-drive that adopts a crash-window run then hits a missing workflow keeps the ADOPTED run — no duplicate, linkage preserved", async () => {
-  // A full_feature (workflow) lane whose workflow cannot load — the failure-fallback path.
-  const { campaign } = _planCampaign(
-    { kind: "list", ticketIds: ["FG-101"], itemOverrides: { "FG-101": { executionMode: "workflow", workflowName: "fg596-nonexistent-workflow" } } },
-    { projectDir, mode: "sequential" },
-  );
-  approveCampaign(campaign.id, { rationale: "ok" });
-  tryTransitionCampaignToRunning(campaign.id);
-  const item = listCampaignItems(campaign.id)[0]!;
-
-  // Reproduce the C4 crash window: a run was created carrying the STAMPED key, but the
-  // crash struck before runId was linked to the item, so a re-drive re-derives the same
-  // key and ADOPTS this run.
-  const gen = allocateItemGeneration(item.id);
-  assert.equal(gen, 1);
-  const key = deriveCampaignItemDispatchKey(campaign.id, item.id, gen);
-  const orphanRunId = "run-orphan-loadfail-fg101";
-  insertRun({
-    id: orphanRunId,
-    workflow: "fg596-nonexistent-workflow",
-    title: "FG-101",
-    status: "active",
-    createdAt: nowIso(),
-    metadata: { campaignId: campaign.id, ticketId: "FG-101", itemId: item.id, dispatchKey: key, attemptGeneration: gen },
-    projectDir,
-  });
-  assert.equal(getCampaignItem(item.id)!.runId, undefined, "precondition: the C4 window left runId unlinked");
-  assert.equal(runByDispatchKey(key)?.id, orphanRunId, "precondition: the orphan run is resolvable by its key");
-
-  // Re-drive the SAME logical attempt: generation reused → same key → the orphan run is
-  // adopted (linked, running) — and THEN the workflow fails to load.
-  const result = await driveOneCampaignItem(campaign.id, item.id, { dispatch: fakeDispatch("complete"), projectDir, mode: "sequential" });
-  assert.ok(result.stopReason === "paused" || result.stopReason === "abandoned", `load-fail parks the campaign: ${result.stopReason}`);
-
-  const after = getCampaignItem(item.id)!;
-  assert.equal(after.lifecycleStatus, "failed", "the item is failed (workflow could not load)");
-  assert.equal(after.runId, orphanRunId, "the ADOPTED crash-window run stays linked — the load-fail did NOT replace it with a fresh abandoned run");
-  assert.equal(after.attemptGeneration, 1, "generation reused unchanged");
-  const runsForItem = listRuns().filter((r) => r.metadata?.["itemId"] === item.id);
-  assert.equal(runsForItem.length, 1, "exactly ONE run exists for the item — the adopted attempt was preserved, never duplicated on the same key");
-  assert.match(after.requestedHumanAction ?? "", /preserved/i, "the operator is told the in-flight attempt was preserved for recovery");
-});
-
-// ── FG-596 fix 3 (binding correction): item outcome/stopReason follow DURABLE state,
-// NEVER a stdout marker anything in the child's output could forge ─────────────────────
-
-test("FG-596 fix3: deriveDriveItemResultFromDurableState follows DURABLE item state even when a forged child log claims the opposite", async () => {
-  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
-  approveCampaign(campaign.id, { rationale: "ok" });
-  // Drive with NO ship evidence → the invoke lane parks the item (awaiting_gate) and the
-  // campaign pauses. This is the DURABLE truth.
   const first = await startCampaign(campaign.id, { dispatch: fakeDispatch("complete") });
   assert.equal(first.stopReason, "paused");
   const item = listCampaignItems(campaign.id)[0]!;
   assert.equal(item.lifecycleStatus, "awaiting_gate", "durable truth: the item did NOT ship — it parked");
-  assert.equal(getCampaign(campaign.id)!.status, "paused");
 
-  // A forged child log claiming the item SHIPPED and the campaign should CONTINUE. The
-  // derivation never reads a log — it takes only (campaignId, itemId, disposition) — so
-  // this forged marker is structurally incapable of being the source of truth.
   const forgedLog = join(projectDir, "forged-child.log");
   writeFileSync(forgedLog, `##FORGE_DRIVE_ITEM_RESULT## ${JSON.stringify({ itemRecords: [{ itemId: item.id, ticketId: "FG-101", lifecycleStatus: "complete", outcome: "shipped" }] })}\n`);
 
-  // The child settled cleanly (exit 0). The derived result must reflect the DURABLE park.
   const derived = deriveDriveItemResultFromDurableState(campaign.id, item.id, { state: "exited_ok", code: 0 });
   assert.equal(derived.stopReason, "paused", "stopReason follows the DURABLE paused campaign, not the forged 'continue'");
   assert.equal(derived.driveError, undefined, "no drive error — the child exited cleanly");
@@ -387,30 +491,24 @@ test("FG-596 fix3: deriveDriveItemResultFromDurableState follows DURABLE item st
   assert.notEqual(rec.outcome, "shipped", "the forged 'shipped' is ignored — the item did not ship");
 });
 
-test("FG-596 fix3: an abandoned campaign derives 'abandoned' from durable status regardless of disposition", async () => {
+test("FG-596 derive: an abandoned campaign derives 'abandoned' from durable status regardless of disposition", async () => {
   const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
   approveCampaign(campaign.id, { rationale: "ok" });
   const item = listCampaignItems(campaign.id)[0]!;
   updateCampaignItem(item.id, { lifecycleStatus: "failed", outcome: "blocked", blockerKind: "infrastructure" });
-  // Abandon the campaign durably (planned → abandoned is a legal transition).
   assert.ok(tryTransitionCampaign(campaign.id, "planned", "abandoned"), "abandon transition committed");
 
   const derived = deriveDriveItemResultFromDurableState(campaign.id, item.id, { state: "exited_ok", code: 0 });
   assert.equal(derived.stopReason, "abandoned", "durable campaign status is authoritative");
 });
 
-// ── FG-596 (A6): the PRODUCTION launch boundary must be recoverable, not wedge-prone ──
+// ── FG-596 (A6): the EXTERNAL launch boundary must be recoverable, not wedge-prone ──
 // startCampaign has already CAS'd the campaign to `running` by the time the controller
-// launches an item. If the real launcher's startLaunch throws (broken/missing tmux — it
-// explicitly throws) or waitForLaunchTerminal fails, an uncaught throw would strand the
-// campaign `running` with no non-manual recovery (`forge campaign start` refuses — no
-// longer planned; `forge campaign resume` refuses — not paused). These prove the boundary
-// is failure-contained into a durable RECOVERABLE park (paused campaign + retryable item)
-// that the existing resume/recover path picks up with no manual SQL. They go RED against
-// the uncontained code (the throw propagates out of startCampaign uncaught).
+// launches an item. startLaunch (tmux setup) and waitForLaunchTerminal are EXTERNAL
+// process failures that cannot be folded into the atomic reservation — a throw there would
+// strand the campaign `running` with no non-manual recovery. containLaunchBoundaryFailure
+// (kept, deliberately) turns any such throw into a durable RECOVERABLE park.
 
-// A tmux stub that satisfies startLaunch's handshake so the launch record is written and
-// only the WAIT then fails — the second, distinct launch-boundary failure mode.
 function benignTmux(): TmuxRunner {
   return (args) => {
     switch (args[0]) {
@@ -419,7 +517,7 @@ function benignTmux(): TmuxRunner {
       case "display-message":
         return args.includes("#{pane_dead}") ? "0\n" : "4242\n";
       default:
-        return; // new-session / set-option / respawn-pane / has-session / kill-session
+        return;
     }
   };
 }
@@ -428,22 +526,17 @@ test("FG-596 A6: a THROWING startLaunch (broken tmux) leaves the campaign PAUSED
   const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
   approveCampaign(campaign.id, { rationale: "ok" });
 
-  // The production launcher with a tmux seam that throws at the very first probe — the
-  // exact shape a missing tmux takes (startLaunch turns it into an explicit throw).
   const throwingTmux: TmuxRunner = () => {
     throw new Error("tmux: command not found");
   };
   const launcher = launchDriveItemUnderForge(["forge"], { tmux: throwingTmux });
 
-  // Must NOT throw out of startCampaign — the boundary contains it.
   const result = await startCampaign(campaign.id, { launchDriveItem: launcher });
   assert.equal(result.stopReason, "paused", "the launch-setup failure halts the controller with a recoverable park, not an uncaught throw");
 
-  // The campaign landed in a status the resume path accepts — NOT wedged `running`.
   const parkedCampaign = getCampaign(campaign.id)!;
   assert.equal(parkedCampaign.status, "paused", "the campaign is durably PAUSED — the running wedge A6 forbids never happens");
 
-  // The item carries an actionable, retryable blocker (never left non-terminal-unparked).
   const item = listCampaignItems(campaign.id)[0]!;
   assert.equal(item.lifecycleStatus, "failed");
   assert.equal(item.outcome, "blocked");
@@ -451,13 +544,7 @@ test("FG-596 A6: a THROWING startLaunch (broken tmux) leaves the campaign PAUSED
   assert.ok(item.requestedHumanAction && /resume/.test(item.requestedHumanAction), "the operator is told how to recover");
   assert.equal(item.runId, undefined, "FG-425: no replacement run was minted");
 
-  // The EXISTING recovery path proceeds with no manual SQL: resume is not refused, and a
-  // retry + resume drives the item to completion.
-  assert.equal(
-    campaignBlocker(getCampaign(campaign.id)!, listCampaignItems(campaign.id), "resume"),
-    null,
-    "resume is not refused — the parked shape is recoverable, not a wedge",
-  );
+  assert.equal(campaignBlocker(getCampaign(campaign.id)!, listCampaignItems(campaign.id), "resume"), null, "resume is not refused — the parked shape is recoverable, not a wedge");
   const retried = retryCampaignItem(campaign.id, "FG-101");
   assert.ok(retried.ok, `retry should succeed on the infrastructure-parked item: ${retried.ok ? "" : retried.reason}`);
   shipTicket("FG-101");
@@ -469,38 +556,21 @@ test("FG-596 A6: a FAILING waitForLaunchTerminal leaves the campaign PAUSED and 
   const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
   approveCampaign(campaign.id, { rationale: "ok" });
 
-  // startLaunch succeeds (benign tmux), but the wait harness fails — waitForLaunchTerminal
-  // reads the harness first, so a throwing read() surfaces as a WAIT-boundary throw.
   const failingHarness: WaitHarness = {
     read() {
       throw new Error("wait harness: exit record read failed (EIO)");
     },
-    installWatcher() {
-      return () => {};
-    },
-    startReconcile() {
-      return () => {};
-    },
-    startTimeout() {
-      return () => {};
-    },
-    onCancel() {
-      return () => {};
-    },
-    startInvalidBound() {
-      return () => {};
-    },
+    installWatcher() { return () => {}; },
+    startReconcile() { return () => {}; },
+    startTimeout() { return () => {}; },
+    onCancel() { return () => {}; },
+    startInvalidBound() { return () => {}; },
   };
-  const launcher = launchDriveItemUnderForge(["forge"], {
-    tmux: benignTmux(),
-    makeWaitHarness: () => failingHarness,
-  });
+  const launcher = launchDriveItemUnderForge(["forge"], { tmux: benignTmux(), makeWaitHarness: () => failingHarness });
 
   const result = await startCampaign(campaign.id, { launchDriveItem: launcher });
   assert.equal(result.stopReason, "paused", "the wait failure halts the controller with a recoverable park, not an uncaught throw");
-
-  const parkedCampaign = getCampaign(campaign.id)!;
-  assert.equal(parkedCampaign.status, "paused", "the campaign is durably PAUSED after a wait-boundary failure");
+  assert.equal(getCampaign(campaign.id)!.status, "paused", "the campaign is durably PAUSED after a wait-boundary failure");
 
   const item = listCampaignItems(campaign.id)[0]!;
   assert.equal(item.lifecycleStatus, "failed");
@@ -508,12 +578,7 @@ test("FG-596 A6: a FAILING waitForLaunchTerminal leaves the campaign PAUSED and 
   assert.equal(item.blockerKind, "infrastructure");
   assert.ok(item.requestedHumanAction && /resume/.test(item.requestedHumanAction), "the operator is told how to recover");
 
-  // Resume is accepted (recoverable), and retry + resume completes the item.
-  assert.equal(
-    campaignBlocker(getCampaign(campaign.id)!, listCampaignItems(campaign.id), "resume"),
-    null,
-    "resume is not refused after a wait-boundary park",
-  );
+  assert.equal(campaignBlocker(getCampaign(campaign.id)!, listCampaignItems(campaign.id), "resume"), null, "resume is not refused after a wait-boundary park");
   const retried = retryCampaignItem(campaign.id, "FG-101");
   assert.ok(retried.ok, `retry should succeed: ${retried.ok ? "" : retried.reason}`);
   shipTicket("FG-101");
@@ -526,88 +591,21 @@ test("FG-596 A6: a wait failure AFTER the child dispatched a run leaves the runn
   approveCampaign(campaign.id, { rationale: "ok" });
   const itemId = listCampaignItems(campaign.id)[0]!.id;
 
-  // startLaunch succeeds and the drive-item child dispatches a real run — stamping the
-  // item to `running` with its adoptable dispatch_key — BEFORE the wait harness fails.
-  // Reproduce that durable side effect on the first harness read(), then throw the WAIT.
-  const gen = allocateItemGeneration(itemId);
-  const dispatchKey = deriveCampaignItemDispatchKey(campaign.id, itemId, gen);
-  const runId = "run-inflight";
+  // startLaunch succeeds and the drive-item child atomically reserves + dispatches a run —
+  // stamping the item to `running` with its adoptable dispatch_key — BEFORE the wait
+  // harness fails. Reproduce that durable side effect (via the real reservation) on the
+  // first harness read(), then throw the WAIT.
   const failingHarness: WaitHarness = {
     read() {
-      insertRun({
-        id: runId,
-        workflow: "feature",
-        title: "FG-101",
-        status: "active",
-        createdAt: nowIso(),
-        metadata: { dispatchKey, attemptGeneration: gen },
-        projectDir,
+      reserveCampaignDriveDispatch({
+        campaignId: campaign.id,
+        itemId,
+        createRun: ({ dispatchKey, attemptGeneration }) => {
+          insertRun({ id: "run-inflight", workflow: "feature", title: "FG-101", status: "active", createdAt: nowIso(), metadata: { dispatchKey, attemptGeneration, campaignId: campaign.id, itemId, ticketId: "FG-101" }, projectDir });
+          return "run-inflight";
+        },
       });
-      updateCampaignItem(itemId, { lifecycleStatus: "running", runId });
       throw new Error("wait harness: exit record read failed (EIO) after the child dispatched a run");
-    },
-    installWatcher() {
-      return () => {};
-    },
-    startReconcile() {
-      return () => {};
-    },
-    startTimeout() {
-      return () => {};
-    },
-    onCancel() {
-      return () => {};
-    },
-    startInvalidBound() {
-      return () => {};
-    },
-  };
-  const launcher = launchDriveItemUnderForge(["forge"], { tmux: benignTmux(), makeWaitHarness: () => failingHarness });
-
-  const result = await startCampaign(campaign.id, { launchDriveItem: launcher });
-  assert.equal(result.stopReason, "recovery_needed", "a live mid-flight drive surfaces for recovery, not a retryable no-run park");
-
-  // The item is NOT rewritten to a retryable failed/blocked shape — it stays running and
-  // adoptable, so an operator retry cannot mint a duplicate run alongside the live drive.
-  const item = getCampaignItem(itemId)!;
-  assert.equal(item.lifecycleStatus, "running", "the dispatched item stays running (adoptable), never overwritten as failed");
-  assert.equal(item.outcome, undefined, "no blocked outcome forced over the live drive");
-  assert.equal(item.runId, runId, "the item keeps its dispatched run linkage");
-  assert.equal(runByDispatchKey(dispatchKey)?.id, runId, "the run remains adoptable by its stamped dispatch key (FG-564)");
-
-  // No second run was minted — exactly one run exists for the item.
-  assert.equal(listRuns().filter((r) => r.title === "FG-101").length, 1, "no duplicate run was created");
-});
-
-test("FG-596 A6: a child that CRASHES after claiming (running) but before dispatching a run is contained recoverably — never an unrecoverable running wedge", async () => {
-  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
-  approveCampaign(campaign.id, { rationale: "ok" });
-  const itemId = listCampaignItems(campaign.id)[0]!.id;
-
-  // The drive-item child CLAIMS the item (pending→running) — the by-construction A6 claim
-  // that now precedes run creation — and then DIES before creating any run. Reproduce that
-  // durable side effect on the first harness read(), then report a TERMINAL crash
-  // disposition (exited 1). The item is left `running` with NO run of any kind: no linked
-  // run and no run resolvable by its dispatch key.
-  let claimObserved = false;
-  const crashingHarness: WaitHarness = {
-    read() {
-      if (!claimObserved) {
-        claimObserved = true;
-        assert.ok(claimCampaignItemForDrive(itemId, campaign.id, undefined), "precondition: the child claims the pending item");
-      }
-      return {
-        id: "launch-crash-mid-claim",
-        command: ["forge", "campaign", "drive-item"],
-        tmuxSession: "s",
-        launcherPid: 1,
-        ownerPid: null,
-        startedAt: nowIso(),
-        logPath: "/dev/null",
-        cwd: projectDir,
-        status: { state: "exited_error", code: 1 },
-        forgeIds: { runIds: [], taskIds: [] },
-      };
     },
     installWatcher() { return () => {}; },
     startReconcile() { return () => {}; },
@@ -615,180 +613,25 @@ test("FG-596 A6: a child that CRASHES after claiming (running) but before dispat
     onCancel() { return () => {}; },
     startInvalidBound() { return () => {}; },
   };
-  const launcher = launchDriveItemUnderForge(["forge"], { tmux: benignTmux(), makeWaitHarness: () => crashingHarness });
+  const launcher = launchDriveItemUnderForge(["forge"], { tmux: benignTmux(), makeWaitHarness: () => failingHarness });
 
   const result = await startCampaign(campaign.id, { launchDriveItem: launcher });
-  assert.equal(result.stopReason, "paused", "the crash-mid-claim is contained into a recoverable pause, not surfaced as an unactionable recovery_needed");
+  assert.equal(result.stopReason, "recovery_needed", "a live mid-flight drive surfaces for recovery, not a retryable no-run park");
 
-  // The campaign landed PAUSED — the status the resume path accepts, never wedged `running`.
-  assert.equal(getCampaign(campaign.id)!.status, "paused", "the campaign is durably PAUSED — the running wedge A6 forbids never happens");
-
-  // The item carries a directly-retryable infrastructure blocker with no phantom run.
   const item = getCampaignItem(itemId)!;
-  assert.equal(item.lifecycleStatus, "failed");
-  assert.equal(item.outcome, "blocked");
-  assert.equal(item.blockerKind, "infrastructure", "no run was dispatched — a directly-retryable infrastructure blocker, not an adoptable mid-flight run");
-  assert.equal(item.runId, undefined, "no run was ever created — the never-linked run slot stays clear");
-  assert.ok(item.requestedHumanAction && /retry/.test(item.requestedHumanAction) && /resume/.test(item.requestedHumanAction), "the operator is told how to recover (retry then resume)");
-  assert.equal(listRuns().filter((r) => r.title === "FG-101").length, 0, "no run exists for the crashed-before-dispatch item");
-
-  // The EXISTING recovery path proceeds with no manual SQL: resume is not refused, and a
-  // retry + resume drives the item to completion.
-  assert.equal(
-    campaignBlocker(getCampaign(campaign.id)!, listCampaignItems(campaign.id), "resume"),
-    null,
-    "resume is not refused — the contained shape is recoverable, not a wedge",
-  );
-  const retried = retryCampaignItem(campaign.id, "FG-101");
-  assert.ok(retried.ok, `retry should succeed on the infrastructure-parked item: ${retried.ok ? "" : retried.reason}`);
-  shipTicket("FG-101");
-  const resumed = await resumeCampaign(campaign.id, { dispatch: fakeDispatch("complete") });
-  assert.equal(resumed.stopReason, "complete", "resume drove the recovered item to completion — full non-manual recovery");
-});
-
-// ── FG-596 (A6) — close the containment/child race BY CONSTRUCTION ──────────────────
-//
-// The launch-boundary containment (containLaunchBoundaryFailure) and the still-running
-// drive-item CHILD both race for the SAME pending item: the parent may park the item +
-// pause the campaign at the exact moment the child creates/links its run. The pre-fix
-// containment ASSUMED "a pending durable item ⇒ no child can dispatch" — false, because
-// the child is already running. The fix removes the assumption: BOTH sides now gate their
-// mutation on the item still being `pending`, in ONE atomic statement each —
-//   * child : claimCampaignItemForDrive  (pending→running, gated ALSO on campaign=running)
-//   * parent: updateCampaignItemIfPending (pending→failed), then pause only if it landed.
-// Because both CAS on `pending`, whichever commits first flips the item off `pending` and
-// the OTHER becomes a no-op — so exactly one wins and the end state is ALWAYS consistent:
-// either the child's run is legitimately linked and the campaign stays running, OR the
-// campaign is paused and NO run was ever created behind it. This test drives the exact
-// interleaving through the REAL primitives across EVERY ordering, MANY times over.
-
-// The child's run-drive sequence, split into its two durable sub-steps exactly as the
-// executor's insert lanes perform them: C1 = the atomic claim; C2 = create + link the run
-// (only reached when the claim won).
-function makeChildSteps(campaignId: string, itemId: string, runId: string, dispatchKey: string, gen: number, projectDir: string) {
-  let claimed = false;
-  return {
-    C1: () => { claimed = claimCampaignItemForDrive(itemId, campaignId, undefined); },
-    C2: () => {
-      if (!claimed) return; // refused: campaign paused/abandoned or item already parked — create NO run
-      insertRun({
-        id: runId,
-        workflow: "invoke",
-        title: "FG-101",
-        status: "active",
-        createdAt: nowIso(),
-        metadata: { invokeAgent: "engineer", campaignId, ticketId: "FG-101", itemId, dispatchKey, attemptGeneration: gen },
-        projectDir,
-      });
-      updateCampaignItem(itemId, { runId, lifecycleStatus: "running" });
-    },
-    didClaim: () => claimed,
-  };
-}
-
-// The launch-boundary containment's park sequence, split exactly as
-// containLaunchBoundaryFailure performs it: P1 = the pending-gated item park; P2 = the
-// running→paused CAS (only reached when the park landed).
-function makeContainmentSteps(campaignId: string, itemId: string) {
-  let parked = false;
-  return {
-    P1: () => {
-      parked = updateCampaignItemIfPending(itemId, campaignId, {
-        lifecycleStatus: "failed",
-        outcome: "blocked",
-        blockerKind: "infrastructure",
-        reason: "launch boundary failed",
-        requestedHumanAction: "retry then resume",
-      });
-    },
-    P2: async () => {
-      if (!parked) return; // the child claimed it first — do NOT pause behind a live drive
-      await parkCampaign(campaignId, itemId, "blocked", { exemption: "item-carries-context" });
-    },
-    didPark: () => parked,
-  };
-}
-
-test("FG-596 A6 stress: the containment/child race is consistent across EVERY interleaving, looped 100x+ — never a paused campaign with an orphan/duplicate run", async () => {
-  // Every intra-order-preserving interleaving of the child's [C1,C2] and the parent's
-  // [P1,P2]. Each is a genuine schedule the two racing processes could realize.
-  const schedules: ("C1" | "C2" | "P1" | "P2")[][] = [
-    ["C1", "C2", "P1", "P2"], // child fully commits, THEN the parent contains
-    ["C1", "P1", "C2", "P2"], // claim wins; parent's park no-ops between the child's steps
-    ["C1", "P1", "P2", "C2"], // claim wins; parent runs fully (park no-ops) before the child links
-    ["P1", "P2", "C1", "C2"], // parent fully parks+pauses, THEN the child attempts its drive
-    ["P1", "C1", "P2", "C2"], // park wins; child's claim no-ops between the parent's steps
-    ["P1", "C1", "C2", "P2"], // park wins; child runs fully (claim no-ops) before the parent pauses
-  ];
-
-  const ITERATIONS_PER_SCHEDULE = 40; // 6 schedules × 40 = 240 iterations (well over the 100x floor)
-  let stateChildWon = 0;
-  let stateParentWon = 0;
-
-  for (let i = 0; i < ITERATIONS_PER_SCHEDULE; i++) {
-    for (const schedule of schedules) {
-      // A FRESH running campaign + pending item per iteration — no cross-iteration state.
-      const c = createCampaign({ sourceKind: "list", sourceInput: { ticketIds: ["FG-101"] }, mode: "sequential", projectDir });
-      const it = addCampaignItem({ campaignId: c.id, itemOrder: 0, ticketId: "FG-101" });
-      assert.ok(tryTransitionCampaignToRunning(c.id), "precondition: campaign is running");
-      const gen = allocateItemGeneration(it.id);
-      const dispatchKey = deriveCampaignItemDispatchKey(c.id, it.id, gen);
-      const runId = `run-stress-${i}-${schedule.join("")}`;
-
-      const child = makeChildSteps(c.id, it.id, runId, dispatchKey, gen, projectDir);
-      const parent = makeContainmentSteps(c.id, it.id);
-      const step: Record<string, () => void | Promise<void>> = { C1: child.C1, C2: child.C2, P1: parent.P1, P2: parent.P2 };
-      for (const token of schedule) await step[token]!();
-
-      // ── The invariant, asserted EVERY iteration ──────────────────────────────────
-      const campaign = getCampaign(c.id)!;
-      const item = getCampaignItem(it.id)!;
-      const runForKey = runByDispatchKey(dispatchKey);
-
-      // THE core wrong-state the fix forbids: a paused campaign with a run created behind it.
-      assert.ok(
-        !(campaign.status === "paused" && runForKey),
-        `[${schedule.join(">")}] paused campaign must carry NO run — got status=${campaign.status}, run=${runForKey?.id}`,
-      );
-      // Exactly one side won, and the whole tuple (campaign, item, run) is consistent with it.
-      assert.ok(child.didClaim() !== parent.didPark(), `[${schedule.join(">")}] exactly one of {claim, park} may win`);
-
-      if (child.didClaim()) {
-        stateChildWon++;
-        assert.equal(campaign.status, "running", `[${schedule.join(">")}] child won → campaign stays running`);
-        assert.equal(item.lifecycleStatus, "running", `[${schedule.join(">")}] child won → item is running (live/adoptable)`);
-        assert.equal(item.runId, runId, `[${schedule.join(">")}] child won → item links its own run`);
-        assert.equal(runForKey?.id, runId, `[${schedule.join(">")}] child won → the run is adoptable by its dispatch key`);
-        assert.equal(listRuns().filter((r) => r.id === runId).length, 1, `[${schedule.join(">")}] exactly one run`);
-      } else {
-        stateParentWon++;
-        assert.equal(campaign.status, "paused", `[${schedule.join(">")}] parent won → campaign is paused (recoverable)`);
-        assert.equal(item.lifecycleStatus, "failed", `[${schedule.join(">")}] parent won → item parked failed`);
-        assert.equal(item.outcome, "blocked", `[${schedule.join(">")}] parent won → item parked blocked`);
-        assert.equal(item.runId, undefined, `[${schedule.join(">")}] parent won → NO run linked`);
-        assert.equal(runForKey, undefined, `[${schedule.join(">")}] parent won → NO run created behind the pause`);
-      }
-    }
-  }
-
-  // Both end states were actually exercised — the loop proved BOTH race outcomes, not one.
-  assert.ok(stateChildWon > 0, "the child-won branch was exercised");
-  assert.ok(stateParentWon > 0, "the parent-won branch was exercised");
-  assert.equal(stateChildWon + stateParentWon, ITERATIONS_PER_SCHEDULE * schedules.length, "every iteration landed in a consistent state");
+  assert.equal(item.lifecycleStatus, "running", "the dispatched item stays running (adoptable), never overwritten as failed");
+  assert.equal(item.outcome, undefined, "no blocked outcome forced over the live drive");
+  assert.equal(item.runId, "run-inflight", "the item keeps its dispatched run linkage");
+  const dispatchKey = deriveCampaignItemDispatchKey(campaign.id, itemId, item.attemptGeneration);
+  assert.equal(runByDispatchKey(dispatchKey)?.id, "run-inflight", "the run remains adoptable by its stamped dispatch key (FG-564)");
+  assert.equal(listRuns().filter((r) => r.title === "FG-101").length, 1, "no duplicate run was created");
 });
 
 test("FG-596 A6 wiring: driveOneCampaignItem (the CHILD) creates/links NO run behind a PAUSED campaign", async () => {
-  // A child drive that reaches a still-pending item under a campaign the parent has already
-  // paused must create NO run and link nothing — the run-drive is gated on the campaign
-  // being running (the claim CAS's campaign-running precondition, and the cooperative
-  // pre-check that precedes it). Either way, the invariant the fix guarantees holds: no run
-  // is ever minted behind a paused campaign.
   const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
   approveCampaign(campaign.id, { rationale: "ok" });
   const itemId = listCampaignItems(campaign.id)[0]!.id;
   assert.ok(tryTransitionCampaignToRunning(campaign.id));
-  // The operator (or the containment's running→paused CAS) paused the campaign while the
-  // item is still pending — the exact state a losing child observes.
   assert.ok(tryTransitionCampaign(campaign.id, "running", "paused"), "precondition: campaign paused, item pending");
 
   const runsBefore = listRuns().length;
@@ -797,38 +640,33 @@ test("FG-596 A6 wiring: driveOneCampaignItem (the CHILD) creates/links NO run be
   assert.equal(result.stopReason, "paused", "the child halts cooperatively on the paused campaign");
   assert.equal(listRuns().length, runsBefore, "the child created NO run behind the paused campaign");
   const item = getCampaignItem(itemId)!;
-  assert.equal(item.lifecycleStatus, "pending", "the pending item was not driven (no claim behind the pause)");
+  assert.equal(item.lifecycleStatus, "pending", "the pending item was not driven (no reservation behind the pause)");
   assert.equal(item.runId, undefined, "no run linkage was written behind the pause");
-
-  // And the claim CAS itself refuses directly against the paused campaign — the
-  // by-construction gate the executor wires in.
-  assert.equal(claimCampaignItemForDrive(itemId, campaign.id, undefined), false, "the run-drive claim refuses a paused campaign");
 });
 
-test("FG-596 A6 wiring: the launch-boundary containment does NOT clobber (or pause behind) a child that already CLAIMED the item", async () => {
-  // The mirror case: the child won the claim (item running) before the containment runs.
-  // The containment's pending-gated park must no-op — leaving the live drive intact and the
-  // campaign RUNNING — never overwriting the running item as failed nor pausing behind it.
-  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
-  approveCampaign(campaign.id, { rationale: "ok" });
-  const itemId = listCampaignItems(campaign.id)[0]!.id;
-  assert.ok(tryTransitionCampaignToRunning(campaign.id));
-  const gen = allocateItemGeneration(itemId);
-  const dispatchKey = deriveCampaignItemDispatchKey(campaign.id, itemId, gen);
-  const runId = "run-claimed-inflight";
+test("FG-596 A6 wiring: the launch-boundary containment does NOT clobber (or pause behind) a child that already reserved+dispatched the item", async () => {
+  const { campaignId, itemId } = seedRunningPendingItem();
 
-  // Child CLAIMS + creates its run (the winning drive).
-  assert.ok(claimCampaignItemForDrive(itemId, campaign.id, undefined), "the child claims the pending item");
-  insertRun({ id: runId, workflow: "feature", title: "FG-101", status: "active", createdAt: nowIso(), metadata: { dispatchKey, attemptGeneration: gen, campaignId: campaign.id, itemId, ticketId: "FG-101" }, projectDir });
-  updateCampaignItem(itemId, { runId, lifecycleStatus: "running" });
+  // Child atomically reserves + dispatches its run (the winning drive → item running).
+  const res = reserveCampaignDriveDispatch({
+    campaignId,
+    itemId,
+    createRun: ({ dispatchKey, attemptGeneration }) => {
+      insertInvokeRun("run-claimed-inflight", campaignId, itemId, dispatchKey, attemptGeneration);
+      return "run-claimed-inflight";
+    },
+  });
+  assert.equal(res.status, "created");
 
-  // Now the containment attempts its pending-gated park — must be a no-op.
-  const parked = updateCampaignItemIfPending(itemId, campaign.id, { lifecycleStatus: "failed", outcome: "blocked", blockerKind: "infrastructure", reason: "launch boundary failed" });
-  assert.equal(parked, false, "the pending-gated park no-ops against the already-claimed (running) item");
+  // Now the containment attempts its pending-gated park — must be a no-op against the
+  // already-running item.
+  const parked = updateCampaignItemIfPending(itemId, campaignId, { lifecycleStatus: "failed", outcome: "blocked", blockerKind: "infrastructure", reason: "launch boundary failed" });
+  assert.equal(parked, false, "the pending-gated park no-ops against the already-reserved (running) item");
 
   const item = getCampaignItem(itemId)!;
   assert.equal(item.lifecycleStatus, "running", "the live drive is NOT overwritten as failed");
-  assert.equal(item.runId, runId, "the child's run linkage is preserved");
-  assert.equal(getCampaign(campaign.id)!.status, "running", "the campaign stays running — the containment did not pause behind the live child");
-  assert.equal(runByDispatchKey(dispatchKey)?.id, runId, "the run stays adoptable by its dispatch key");
+  assert.equal(item.runId, "run-claimed-inflight", "the child's run linkage is preserved");
+  assert.equal(getCampaign(campaignId)!.status, "running", "the campaign stays running — the containment did not pause behind the live child");
+  const dispatchKey = deriveCampaignItemDispatchKey(campaignId, itemId, item.attemptGeneration);
+  assert.equal(runByDispatchKey(dispatchKey)?.id, "run-claimed-inflight", "the run stays adoptable by its dispatch key");
 });

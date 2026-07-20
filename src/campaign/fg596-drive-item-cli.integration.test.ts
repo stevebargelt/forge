@@ -117,6 +117,28 @@ test("FG-596 CLI: `campaign drive-item` on an unknown campaign exits 1 with a no
   assert.match(r.stderr, /not found/, "the error names the missing campaign");
 });
 
+test("FG-596 CLI: the early refusals emit the SAME structured --json error envelope the unknown-item guard uses", () => {
+  // Unknown campaign under --json.
+  const unknown = runForge(["campaign", "drive-item", "campaign-does-not-exist", "item-x", "--json"]);
+  assert.equal(unknown.status, 1);
+  const unknownParsed = JSON.parse(unknown.stdout);
+  assert.match(unknownParsed.error, /not found/, "--json carries the not-found error");
+  assert.equal(unknownParsed.campaignId, "campaign-does-not-exist", "--json echoes the campaignId");
+  assert.equal(unknownParsed.itemId, "item-x", "--json echoes the itemId");
+  assert.ok(!Array.isArray(unknownParsed.itemRecords), "an early refusal must NOT report a settled DriveOneItemResult");
+
+  // Non-running (paused) campaign under --json.
+  const { campaignId, itemId } = seedTicketingOnlyCampaign();
+  tryTransitionCampaignToRunning(campaignId);
+  assert.ok(tryTransitionCampaign(campaignId, "running", "paused"), "precondition: campaign paused");
+  const paused = runForge(["campaign", "drive-item", campaignId, itemId, "--json"]);
+  assert.equal(paused.status, 1);
+  const pausedParsed = JSON.parse(paused.stdout);
+  assert.match(pausedParsed.error, /is paused; drive-item only drives a running campaign/, "--json carries the non-running refusal");
+  assert.equal(pausedParsed.campaignId, campaignId, "--json echoes the campaignId");
+  assert.equal(pausedParsed.itemId, itemId, "--json echoes the itemId");
+});
+
 test("FG-596 CLI: `campaign drive-item` on a RUNNING campaign but an UNKNOWN item-id FAILS cleanly (human) — exit 1, error, no drive", () => {
   const { campaignId } = seedTicketingOnlyCampaign();
   tryTransitionCampaignToRunning(campaignId);

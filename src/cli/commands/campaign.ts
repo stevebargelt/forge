@@ -657,13 +657,21 @@ export function registerCampaign(program: Command): void {
     .description("Drive ONE campaign item to a terminal drive-process outcome or a legal park (the launchable unit `campaign start/resume` runs under forge launch)")
     .option("--json", "machine-readable JSON output")
     .action(async (campaignId: string, itemId: string, opts: { json?: boolean }) => {
+      // FG-596: the early refusals emit the SAME structured `--json` error envelope the
+      // unknown-item guard below uses ({ error, campaignId, itemId }) so a launch controller
+      // (or any --json consumer) gets a machine-readable refusal in every mode, not a
+      // stderr-only message it cannot parse.
+      const emitRefusal = (message: string): void => {
+        if (opts.json) console.log(JSON.stringify({ error: message, campaignId, itemId }, null, 2));
+        process.stderr.write(`${message}\n`);
+      };
       const campaign = getCampaign(campaignId);
       if (!campaign) {
-        process.stderr.write(`Error: campaign ${campaignId} not found\n`);
+        emitRefusal(`Error: campaign ${campaignId} not found`);
         process.exit(1);
       }
       if (!campaign.projectDir) {
-        process.stderr.write(`Error: campaign ${campaignId} has no stored project directory\n`);
+        emitRefusal(`Error: campaign ${campaignId} has no stored project directory`);
         process.exit(1);
       }
       // FG-596 (fix 5): a raw drive-item invocation must NOT mutate a paused/abandoned
@@ -672,9 +680,9 @@ export function registerCampaign(program: Command): void {
       // (the controller transitions it to running before it ever launches a drive-item).
       // Refuse otherwise; nothing is mutated, so this is a clean no-op park guard.
       if (campaign.status !== "running") {
-        process.stderr.write(
+        emitRefusal(
           `Error: campaign ${campaignId} is ${campaign.status}; drive-item only drives a running campaign ` +
-            `(it is launched by \`forge campaign start/resume\`, which transitions the campaign to running first)\n`,
+            `(it is launched by \`forge campaign start/resume\`, which transitions the campaign to running first)`,
         );
         process.exit(1);
       }
