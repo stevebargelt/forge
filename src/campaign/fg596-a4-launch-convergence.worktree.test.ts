@@ -36,7 +36,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
@@ -53,13 +53,14 @@ import { localTargetFor, readTargetSha } from "../v2/publication-target.js";
 import { setPublisherSeamsForTest } from "../v2/integration-publisher.js";
 import { runNext, type DockerExecFn, type RunNextResult } from "../v2/runNext.js";
 import type { Workflow } from "../v2/schema.js";
-import type { LaunchStatus } from "../v2/launch.js";
+import { realWaitHarness, LAUNCHES_DIR, type LaunchStatus, type TmuxRunner } from "../v2/launch.js";
 import type { InvokeArgs, InvokeResult } from "../v2/invoke.js";
 import { planCampaign, type ItemModeOverride } from "./planner.js";
 import {
   startCampaign,
   driveOneCampaignItem,
   deriveDriveItemResultFromDurableState,
+  launchDriveItemUnderForge,
   setExecutorDoneAuditMapForTest,
   type DriveItemLaunchFn,
 } from "./executor.js";
@@ -472,5 +473,167 @@ test(
     const rec = derived.itemRecords[0]!;
     assert.equal(rec.lifecycleStatus, "complete", "the record follows the DURABLE shipped item, never the crash disposition");
     assert.equal(rec.outcome, "shipped");
+  },
+);
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+// A4 (PRODUCTION launch path) — the SAME convergence, but driven through the REAL
+// launchDriveItemUnderForge instead of an injected in-process launcher. This is what the
+// injected-launcher proof above structurally CANNOT prove: the real startLaunch builds
+// the drive-item subprocess argv and pins FORGE_HOME + the campaign's project cwd, hands
+// it to tmux, and the real waitForLaunchTerminal BLOCKS on a genuine on-disk exit record
+// before the DriveOneItemResult is derived from durable state.
+//
+// ONLY the tmux/subprocess boundary is injected — the SAME single seam the sibling suites
+// stub for docker. The fake tmux runs the item's REAL drive in-process (real startRun +
+// real runNext + real publisher) on respawn-pane and then records a genuine exit record,
+// so the wait wakes on honest evidence, never a fabricated disposition.
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+/** A tmux stub that CARRIES the drive-item launch: it records every call, keeps the
+ *  session alive, and on respawn-pane parses the drive-item ids out of the argv it was
+ *  handed, runs the item's REAL drive in-process, then writes a genuine exit record
+ *  (code 0) so the REAL wait harness observes an honest terminal disposition. */
+function makeDriveTmux(runDrive: (cid: string, itemId: string) => Promise<void>) {
+  const calls: string[][] = [];
+  const alive = new Set<string>();
+  const drives: Promise<void>[] = [];
+  const state = { respawnCmd: "", newSessionCwd: "" };
+  const tmux: TmuxRunner = (args) => {
+    calls.push(args);
+    switch (args[0]) {
+      case "-V":
+        return "tmux 3.4\n";
+      case "new-session": {
+        alive.add(args[args.indexOf("-s") + 1]!);
+        const ci = args.indexOf("-c");
+        if (ci >= 0) state.newSessionCwd = args[ci + 1]!;
+        return;
+      }
+      case "set-option":
+        return;
+      case "respawn-pane": {
+        const session = args[args.indexOf("-t") + 1]!.replace(/:$/, "");
+        const id = session.replace(/^forge-/, "");
+        state.respawnCmd = args[args.length - 1]!;
+        // The argv reaches tmux shell-quoted (one token per single-quoted word) — parse
+        // the drive-item ids the SAME way the real subprocess would consume its argv.
+        const m = /'drive-item' '([^']+)' '([^']+)'/.exec(state.respawnCmd);
+        assert.ok(m, `respawn-pane carries a drive-item argv: ${state.respawnCmd}`);
+        drives.push(
+          (async () => {
+            let code = 0;
+            try {
+              await runDrive(m![1]!, m![2]!);
+            } catch {
+              code = 1;
+            }
+            const exitPath = join(LAUNCHES_DIR, id, "exit");
+            writeFileSync(`${exitPath}.tmp`, JSON.stringify({ code, signal: null }));
+            renameSync(`${exitPath}.tmp`, exitPath);
+          })(),
+        );
+        return;
+      }
+      case "kill-session":
+        alive.delete(args[args.indexOf("-t") + 1]!);
+        return;
+      case "has-session":
+        if (!alive.has(args[2]!)) throw new Error("no such session");
+        return;
+      case "display-message":
+        return args.includes("#{pane_dead}") ? "0\n" : "4242\n";
+      default:
+        return;
+    }
+  };
+  return { tmux, calls, drives, state };
+}
+
+const shq = (s: string): string => `'${s.replaceAll("'", `'\\''`)}'`;
+
+test(
+  "FG-596 A4 (real launch path): a full_feature item ships through the REAL launchDriveItemUnderForge — startLaunch builds the drive-item argv with FORGE_HOME + project cwd, waitForLaunchTerminal blocks on a genuine exit record, and every surface converges from durable state",
+  { timeout: 120_000 },
+  async () => {
+    const target = localTargetFor(projectIdentity(projectDir).canonicalDir);
+    const campaign = planApprovedCampaign();
+    const plannedItem = listCampaignItems(campaign.id)[0]!;
+
+    const driveTmux = makeDriveTmux(async (cid, itemId) => {
+      await driveOneCampaignItem(cid, itemId, {
+        dispatch: dispatchMustNotBeCalled,
+        projectDir,
+        mode: "sequential",
+        runNextFn: makeCappedRunNext(10),
+      });
+    });
+
+    // The PRODUCTION launcher, with ONLY the tmux/subprocess boundary injected. Its wait
+    // harness is the REAL realWaitHarness (fast test timers) reading the launch record off
+    // disk — so startLaunch and waitForLaunchTerminal are the production article.
+    const launcher = launchDriveItemUnderForge(["forge"], {
+      tmux: driveTmux.tmux,
+      makeWaitHarness: (id) =>
+        realWaitHarness(id, { tmux: driveTmux.tmux, reconcileMs: 25, timeoutMs: 60_000, invalidBoundMs: 1_000 }),
+    });
+
+    const result = await startCampaign(campaign.id, {
+      dispatch: dispatchMustNotBeCalled,
+      launchDriveItem: launcher,
+    });
+
+    // ── THE REAL LAUNCH BOUNDARY WAS CROSSED ────────────────────────────────────────
+    // startLaunch drove the full tmux handshake in the remain-on-exit-safe order (these
+    // five run synchronously inside startLaunch, before the wait ever ticks).
+    assert.deepEqual(
+      driveTmux.calls.slice(0, 5).map((c) => c[0]),
+      ["-V", "new-session", "set-option", "respawn-pane", "display-message"],
+      "startLaunch drove the real tmux handshake in order",
+    );
+    assert.equal(driveTmux.state.newSessionCwd, projectDir, "the drive runs in the CAMPAIGN's project dir (cwd propagation)");
+    // The exact subprocess argv reached tmux: env pins the RESOLVED FORGE_HOME so the
+    // child shares the controller's store, then `forge campaign drive-item <cid> <itemId>`.
+    const expectedArgvTail = [
+      "env",
+      `FORGE_HOME=${process.env.FORGE_HOME}`,
+      "forge",
+      "campaign",
+      "drive-item",
+      campaign.id,
+      plannedItem.id,
+    ]
+      .map(shq)
+      .join(" ");
+    assert.ok(
+      driveTmux.state.respawnCmd.includes(expectedArgvTail),
+      `the drive-item subprocess argv (env FORGE_HOME + forge campaign drive-item <cid> <itemId>) reached tmux: ${driveTmux.state.respawnCmd}`,
+    );
+
+    assert.equal(result.stopReason, "complete", "the controller derives completion from durable campaign status after the REAL wait");
+
+    // ── the five surfaces converge, exactly as the injected-launcher proof asserts ──
+    const item = listCampaignItems(campaign.id)[0]!;
+    const runId = item.runId!;
+    const task = primaryOf(runId);
+
+    const attempts = publicationAttemptsForTask(task.id);
+    assert.equal(attempts.length, 1, "exactly one publication attempt — the candidate was never published twice");
+    assert.equal(attempts[0]!.state, "published", "the publisher ran to completion under the real launch/wait");
+    assert.equal(readTargetSha(target), attempts[0]!.publishedSha, "the REAL target ref carries the candidate");
+
+    assert.equal(getTask(task.id)!.status, "complete", "the owning task is complete");
+    assert.equal(getRun(runId)!.status, "complete", "the run reaches the matching truthful state");
+
+    const durableItem = getCampaignItem(item.id)!;
+    assert.equal(durableItem.lifecycleStatus, "complete", `the item converged onto the shipped truth — got ${durableItem.lifecycleStatus}`);
+    assert.equal(durableItem.outcome, "shipped", "the item shipped");
+    assert.equal(getCampaign(campaign.id)!.status, "complete", "the campaign's durable status is complete");
+
+    // NOTHING WAS DONE TWICE across the real launch boundary.
+    assert.equal(blueDispatches, 1, "the engineer ran exactly ONCE — the launch boundary did not re-execute the work");
+
+    // The drive's floating promise has fully settled (it wrote the exit record the wait woke on).
+    await Promise.all(driveTmux.drives);
   },
 );

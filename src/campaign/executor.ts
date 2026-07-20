@@ -7,6 +7,8 @@ import {
   removeLaunch,
   statusLine,
   type LaunchStatus,
+  type TmuxRunner,
+  type WaitHarness,
 } from "../v2/launch.js";
 import { FORGE_HOME } from "../util/paths.js";
 import { invoke } from "../v2/invoke.js";
@@ -1595,25 +1597,35 @@ export async function driveOneCampaignItem(
         loadedWorkflow = doLoadWorkflow(workflowName, { projectDir: opts.projectDir });
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
-        const runId = newRunId(item.ticketId);
-        insertRun({
-          id: runId,
-          workflow: workflowName,
-          title: item.ticketId,
-          status: "abandoned",
-          createdAt: nowIso(),
-          // FG-596 (fix 4): stamp the shared dispatch key + item-attempt identity on the
-          // failure-fallback lane too, so EVERY run-creating lane is adoptable by key and
-          // no lane silently duplicates on FG-564 adoption.
-          metadata: { campaignId, ticketId: item.ticketId, itemId: item.id, dispatchKey: stampDispatchKey, attemptGeneration: stampGeneration },
-          projectDir: opts.projectDir,
-        });
+        // FG-596: when a crash-window run was ADOPTED for this key (adoptedRun set, item
+        // already linked+running above), the load failure must PRESERVE it — minting a
+        // fresh abandoned run here would create a SECOND run on the same dispatch key and
+        // replace the item linkage, orphaning the genuine attempt a re-drive is meant to
+        // recover. So reuse the adopted run and keep it linked; only when there is nothing
+        // to adopt do we create the synthetic abandoned run for traceability.
+        const runId = adoptedRun ? adoptedRun.id : newRunId(item.ticketId);
+        if (!adoptedRun) {
+          insertRun({
+            id: runId,
+            workflow: workflowName,
+            title: item.ticketId,
+            status: "abandoned",
+            createdAt: nowIso(),
+            // FG-596 (fix 4): stamp the shared dispatch key + item-attempt identity on the
+            // failure-fallback lane too, so EVERY run-creating lane is adoptable by key and
+            // no lane silently duplicates on FG-564 adoption.
+            metadata: { campaignId, ticketId: item.ticketId, itemId: item.id, dispatchKey: stampDispatchKey, attemptGeneration: stampGeneration },
+            projectDir: opts.projectDir,
+          });
+        }
         updateCampaignItem(item.id, {
           runId,
           lifecycleStatus: "failed",
           outcome: "blocked",
           blockerKind: "campaign_system",
-          requestedHumanAction: `workflow YAML missing or invalid: ${workflowName} — ${reason}`,
+          requestedHumanAction: adoptedRun
+            ? `workflow YAML missing or invalid: ${workflowName} — ${reason}. The in-flight attempt (run ${runId}) from a prior crash was PRESERVED and remains adoptable by its dispatch key — inspect it (forge show ${runId}) and resolve, then resume.`
+            : `workflow YAML missing or invalid: ${workflowName} — ${reason}`,
         });
         itemRecords.push({
           itemId: item.id,
@@ -2243,7 +2255,16 @@ export function deriveDriveItemResultFromDurableState(
 // the item outcome, and NO stdout marker is read. A crash with the item still mid-flight
 // leaves it ADOPTABLE (its dispatch_key is stamped) and surfaces recovery_needed WITHOUT
 // auto-recovering (FG-564's job).
-export function launchDriveItemUnderForge(forgeBin: string[]): DriveItemLaunchFn {
+export function launchDriveItemUnderForge(
+  forgeBin: string[],
+  // FG-596: the tmux/subprocess boundary is the ONE seam a test may substitute — the
+  // same shape as the docker-exec injection elsewhere. Default (production) wires the
+  // real tmux and the real wait harness, so startLaunch/waitForLaunchTerminal, the argv,
+  // and FORGE_HOME/cwd propagation are the production article; a test injects a fake
+  // tmux that runs the drive in-process and records a genuine exit record, and a wait
+  // harness with test timers, to prove the launch/wait path without spawning tmux.
+  seams: { tmux?: TmuxRunner; makeWaitHarness?: (id: string) => WaitHarness } = {},
+): DriveItemLaunchFn {
   return async (campaignId, itemId) => {
     // The launch runs under a tmux server whose environment can be STALE (a
     // long-lived server does not pick up the launcher's FORGE_HOME), so the child
@@ -2258,8 +2279,9 @@ export function launchDriveItemUnderForge(forgeBin: string[]): DriveItemLaunchFn
     // belongs there, and it keeps the drive from ever touching an unrelated checkout
     // the launcher was standing in.
     const cwd = getCampaign(campaignId)?.projectDir;
-    const meta = startLaunch(argv, { name: `campaign-drive-${itemId}`, ...(cwd ? { cwd } : {}) });
-    const outcome = await waitForLaunchTerminal(meta.id, realWaitHarness(meta.id));
+    const meta = startLaunch(argv, { name: `campaign-drive-${itemId}`, ...(cwd ? { cwd } : {}), ...(seams.tmux ? { tmux: seams.tmux } : {}) });
+    const harness = seams.makeWaitHarness ? seams.makeWaitHarness(meta.id) : realWaitHarness(meta.id);
+    const outcome = await waitForLaunchTerminal(meta.id, harness);
 
     // The disposition of the drive-item PROCESS (never the item outcome).
     const disposition: LaunchStatus | undefined =
@@ -2270,7 +2292,7 @@ export function launchDriveItemUnderForge(forgeBin: string[]): DriveItemLaunchFn
     // A drive error re-raises the in-process throw so the CLI renders drive_error. The
     // park is already durable, so the launch record is disposable.
     if (derived.driveError) {
-      try { removeLaunch(meta.id); } catch { /* best-effort cleanup */ }
+      try { removeLaunch(meta.id, seams.tmux ? { tmux: seams.tmux } : {}); } catch { /* best-effort cleanup */ }
       throw derived.driveError;
     }
 
@@ -2286,7 +2308,7 @@ export function launchDriveItemUnderForge(forgeBin: string[]): DriveItemLaunchFn
       return { itemRecords: [annotated], stopReason: "recovery_needed" };
     }
 
-    try { removeLaunch(meta.id); } catch { /* best-effort cleanup */ }
+    try { removeLaunch(meta.id, seams.tmux ? { tmux: seams.tmux } : {}); } catch { /* best-effort cleanup */ }
     return { itemRecords: derived.itemRecords, ...(derived.stopReason ? { stopReason: derived.stopReason } : {}) };
   };
 }

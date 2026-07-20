@@ -304,6 +304,52 @@ test("FG-596 fix4 stamp: the workflow-load-fail fallback lane stamps the dispatc
   assert.equal(getRun(failed.runId!)!.metadata?.["dispatchKey"], expectedKey, "the abandoned fallback run is stamped with the deterministic key — adoptable, never a silent duplicate");
 });
 
+// ── FG-596: the workflow-load-fail fallback must PRESERVE an adopted crash-window run,
+// never mint a duplicate on the same dispatch key that orphans the genuine attempt ──────
+
+test("FG-596 load-fail preserves adoption: a re-drive that adopts a crash-window run then hits a missing workflow keeps the ADOPTED run — no duplicate, linkage preserved", async () => {
+  // A full_feature (workflow) lane whose workflow cannot load — the failure-fallback path.
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides: { "FG-101": { executionMode: "workflow", workflowName: "fg596-nonexistent-workflow" } } },
+    { projectDir, mode: "sequential" },
+  );
+  approveCampaign(campaign.id, { rationale: "ok" });
+  tryTransitionCampaignToRunning(campaign.id);
+  const item = listCampaignItems(campaign.id)[0]!;
+
+  // Reproduce the C4 crash window: a run was created carrying the STAMPED key, but the
+  // crash struck before runId was linked to the item, so a re-drive re-derives the same
+  // key and ADOPTS this run.
+  const gen = allocateItemGeneration(item.id);
+  assert.equal(gen, 1);
+  const key = deriveCampaignItemDispatchKey(campaign.id, item.id, gen);
+  const orphanRunId = "run-orphan-loadfail-fg101";
+  insertRun({
+    id: orphanRunId,
+    workflow: "fg596-nonexistent-workflow",
+    title: "FG-101",
+    status: "active",
+    createdAt: nowIso(),
+    metadata: { campaignId: campaign.id, ticketId: "FG-101", itemId: item.id, dispatchKey: key, attemptGeneration: gen },
+    projectDir,
+  });
+  assert.equal(getCampaignItem(item.id)!.runId, undefined, "precondition: the C4 window left runId unlinked");
+  assert.equal(runByDispatchKey(key)?.id, orphanRunId, "precondition: the orphan run is resolvable by its key");
+
+  // Re-drive the SAME logical attempt: generation reused → same key → the orphan run is
+  // adopted (linked, running) — and THEN the workflow fails to load.
+  const result = await driveOneCampaignItem(campaign.id, item.id, { dispatch: fakeDispatch("complete"), projectDir, mode: "sequential" });
+  assert.ok(result.stopReason === "paused" || result.stopReason === "abandoned", `load-fail parks the campaign: ${result.stopReason}`);
+
+  const after = getCampaignItem(item.id)!;
+  assert.equal(after.lifecycleStatus, "failed", "the item is failed (workflow could not load)");
+  assert.equal(after.runId, orphanRunId, "the ADOPTED crash-window run stays linked — the load-fail did NOT replace it with a fresh abandoned run");
+  assert.equal(after.attemptGeneration, 1, "generation reused unchanged");
+  const runsForItem = listRuns().filter((r) => r.metadata?.["itemId"] === item.id);
+  assert.equal(runsForItem.length, 1, "exactly ONE run exists for the item — the adopted attempt was preserved, never duplicated on the same key");
+  assert.match(after.requestedHumanAction ?? "", /preserved/i, "the operator is told the in-flight attempt was preserved for recovery");
+});
+
 // ── FG-596 fix 3 (binding correction): item outcome/stopReason follow DURABLE state,
 // NEVER a stdout marker anything in the child's output could forge ─────────────────────
 
