@@ -72,6 +72,33 @@ insertEvent("run-double", "review_loop.verification_started", { attemptId: "atte
 insertEvent("run-double", "review_loop.verification_finished", { attemptId: "attempt-double-1", ok: true }, iso(4 * 60_000));
 insertEvent("run-double", "review_loop.verification_started", { attemptId: "attempt-double-2", round: 1, ticketId: "FG-903", sha: "bbb1111", mode: "local" }, iso(4 * 60_000));
 
+// ── FG-594: unmatched starts whose owning run is terminal (complete/failed/
+// abandoned) or missing must be EXCLUDED — the run outcome is authoritative
+// even if the verification's finish event was lost. Each is fresh (well within
+// staleness) so only the run-status gate can be what drops it.
+db.prepare(`INSERT INTO runs VALUES ('run-complete','review-loop #FG-940','invoke','/proj/a','complete', ?)`).run(iso(60_000));
+insertEvent("run-complete", "review_loop.verification_started", { attemptId: "attempt-complete", round: 1, ticketId: "FG-940", sha: "c0c0c0c", mode: "local" }, iso(60_000));
+
+db.prepare(`INSERT INTO runs VALUES ('run-failed','review-loop #FG-941','invoke','/proj/a','failed', ?)`).run(iso(60_000));
+insertEvent("run-failed", "review_loop.verification_started", { attemptId: "attempt-failed", round: 1, ticketId: "FG-941", sha: "f0f0f0f", mode: "local" }, iso(60_000));
+
+db.prepare(`INSERT INTO runs VALUES ('run-abandoned','review-loop #FG-942','invoke','/proj/a','abandoned', ?)`).run(iso(60_000));
+insertEvent("run-abandoned", "review_loop.verification_started", { attemptId: "attempt-abandoned", round: 1, ticketId: "FG-942", sha: "a0a0a0a", mode: "local" }, iso(60_000));
+
+// A start whose run_id references no run row at all — fail closed, drop it.
+insertEvent("run-missing", "review_loop.verification_started", { attemptId: "attempt-missing", round: 1, ticketId: "FG-943", sha: "9999999", mode: "local" }, iso(60_000));
+
+// The gate is an ALLOWLIST ("active" only), NOT a terminal-status blocklist:
+// a run row that exists but is neither active nor a known terminal value — a
+// NULL status, or an unrecognized/future status — must ALSO fail closed. A
+// blocklist implementation (drop only complete/failed/abandoned) would wrongly
+// re-include these; these two fixtures are what distinguish the two designs.
+db.prepare(`INSERT INTO runs VALUES ('run-nullstatus','review-loop #FG-944','invoke','/proj/a',NULL, ?)`).run(iso(60_000));
+insertEvent("run-nullstatus", "review_loop.verification_started", { attemptId: "attempt-nullstatus", round: 1, ticketId: "FG-944", sha: "4444444", mode: "local" }, iso(60_000));
+
+db.prepare(`INSERT INTO runs VALUES ('run-unknownstatus','review-loop #FG-945','invoke','/proj/a','provisioning', ?)`).run(iso(60_000));
+insertEvent("run-unknownstatus", "review_loop.verification_started", { attemptId: "attempt-unknownstatus", round: 1, ticketId: "FG-945", sha: "5555555", mode: "local" }, iso(60_000));
+
 // ── Scenario 5: a campaign reconcile host-gate exec, unmatched + fresh ─────
 // camp-1 lives in /proj/a — the projectDir filter resolves gate rows via campaigns.project_dir.
 db.prepare(`INSERT INTO campaigns VALUES ('camp-1','running','tickets','[]','sequential', ?, ?, NULL, '/proj/a')`).run(iso(1000), iso(1000));
@@ -84,6 +111,14 @@ insertEvent(null, "campaign_item.host_gate_started", {
 insertEvent(null, "campaign_item.host_gate_started", {
   attemptId: "attempt-gate-stale", campaignId: "camp-1", itemId: "item-2", ticketId: "FG-911", command: "npm run test:all", testedSha: "ddd3333",
 }, iso(15 * 60_000));
+
+// ── FG-594 isolation guard: the run-status gate is scoped to review-loop
+// starts ONLY. A campaign host-gate start must NOT be subjected to it — even
+// one whose run_id happens to reference a terminal run stays visible, because
+// campaign gate liveness is governed by staleness, not the owning run's status.
+insertEvent("run-complete", "campaign_item.host_gate_started", {
+  attemptId: "attempt-gate-terminalrun", campaignId: "camp-1", itemId: "item-3", ticketId: "FG-946", command: "npm run test:all", testedSha: "6666666",
+}, iso(2 * 60_000));
 
 // ── reviewLoopRunPhases: a review-loop run currently mid-task (reviewing) ──
 db.prepare(`INSERT INTO runs VALUES ('run-reviewing','review-loop #FG-920','invoke','/proj/b','active', ?)`).run(iso(10 * 60_000));
@@ -141,6 +176,47 @@ test("inProgressVerifications: an ancient unmatched start (beyond the 24h lookba
   assert.equal(rows.find((r) => r.attemptId === "attempt-ancient"), undefined);
 });
 
+for (const { status, attemptId } of [
+  { status: "complete", attemptId: "attempt-complete" },
+  { status: "failed", attemptId: "attempt-failed" },
+  { status: "abandoned", attemptId: "attempt-abandoned" },
+]) {
+  test(`inProgressVerifications: FG-594 — a fresh unmatched start on a ${status} run is excluded`, () => {
+    const rows = inProgressVerifications(NOW);
+    assert.equal(
+      rows.find((r) => r.attemptId === attemptId),
+      undefined,
+      `a ${status} run's verification must not report as in-progress even if its finish event was lost`,
+    );
+  });
+}
+
+test("inProgressVerifications: FG-594 — a fresh unmatched start on a missing run fails closed (excluded)", () => {
+  const rows = inProgressVerifications(NOW);
+  assert.equal(rows.find((r) => r.attemptId === "attempt-missing"), undefined);
+});
+
+for (const { label, attemptId } of [
+  { label: "a NULL status", attemptId: "attempt-nullstatus" },
+  { label: "an unrecognized non-terminal status", attemptId: "attempt-unknownstatus" },
+]) {
+  test(`inProgressVerifications: FG-594 — a fresh unmatched start on a run with ${label} fails closed (allowlist, not terminal-blocklist)`, () => {
+    const rows = inProgressVerifications(NOW);
+    assert.equal(
+      rows.find((r) => r.attemptId === attemptId),
+      undefined,
+      "the run-status gate admits ONLY status='active'; any other value (NULL/unknown/future) must fail closed, or a blocklist regression would silently re-include it",
+    );
+  });
+}
+
+test("inProgressVerifications: FG-594 — an active run's unmatched STALE start is still included, flagged stale", () => {
+  const rows = inProgressVerifications(NOW);
+  const row = rows.find((r) => r.attemptId === "attempt-stale");
+  assert.ok(row, "an active run's stale unmatched start must remain visible — active-run stale behavior is preserved");
+  assert.equal(row!.stale, true);
+});
+
 test("inProgressVerifications: a fresh unmatched start is NOT flagged stale", () => {
   const rows = inProgressVerifications(NOW);
   const row = rows.find((r) => r.attemptId === "attempt-fresh");
@@ -173,6 +249,16 @@ test("inProgressVerifications: a past-cutoff campaign reconcile host-gate start 
   const row = rows.find((r) => r.attemptId === "attempt-gate-stale");
   assert.ok(row, "a past-cutoff gate start must still be reported, flagged stale — not silently vanish");
   assert.equal(row!.stale, true);
+});
+
+test("inProgressVerifications: FG-594 — the run-status gate does NOT apply to campaign host-gate starts (a gate on a terminal run stays visible)", () => {
+  const rows = inProgressVerifications(NOW);
+  const row = rows.find((r) => r.attemptId === "attempt-gate-terminalrun");
+  assert.ok(
+    row,
+    "a fresh campaign host-gate start must remain in-progress even when its run_id references a terminal (complete) run — campaign gate liveness is governed by staleness, not the owning run's status; if the FG-594 run-status filter leaked onto the campaign branch this would vanish",
+  );
+  assert.equal(row!.kind, "campaign_reconcile_gate");
 });
 
 test("inProgressVerifications: projectDir filter scopes review-loop rows via runs.project_dir", () => {
