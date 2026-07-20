@@ -667,11 +667,11 @@ async function parkCampaignOnStartRunThrow(
     });
     // FG-516 (finding F1/B): same concurrent-manual-pause guard as
     // parkCampaignOnDriveThrow — parkCampaign only notifies when THIS park
-    // committed the pause, and is awaited before the rethrow below. The synthetic
-    // abandoned run row is inserted best-effort (see the startRun-throw catch), so
-    // when that insert failed the item has no run of its OWN — pass a campaign
-    // fallback run so notifyCampaignPause still emits (scoped to another item's
-    // run) instead of going silent, exactly like the other no-own-run parks.
+    // committed the pause, and is awaited before the rethrow below. The caller
+    // reserves a keyed synthetic abandoned run and passes its id here (see the
+    // startRun-throw catch), so the item normally has a run of its OWN; the
+    // campaign fallback keeps notifyCampaignPause emitting (scoped to another
+    // item's run) rather than going silent in the other no-own-run parks.
     await parkCampaign(campaignId, itemId, "blocked", { exemption: "item-carries-context" }, { fallbackRunId: pickCampaignFallbackRunId(campaignId) });
   } catch {
     // park failed — original drive error below still propagates unmasked.
@@ -1706,25 +1706,48 @@ export async function driveOneCampaignItem(
             }).runId,
         });
       } catch (err) {
-        const failRunId = newRunId(item.ticketId);
+        // startRun threw → the reservation rolled back COMPLETELY (item stays pending, no
+        // run). The abandoned traceability run for this failed dispatch is created through
+        // a FRESH reserveCampaignDriveDispatch — so it is stamped with the SAME attempt
+        // generation + deterministic dispatch key as the rolled-back attempt, and its
+        // insert + item run_id linkage + pending→running CAS commit atomically. A re-drive
+        // in the crash window ADOPTS this one keyed synthetic run (runByDispatchKey) rather
+        // than inserting a second row. Only AFTER the reservation commits does
+        // parkCampaignOnStartRunThrow apply the failed/infrastructure classification —
+        // creating no additional run.
+        let parkRunId: string;
         try {
-          insertRun({
-            id: failRunId,
-            workflow: workflowName,
-            title: item.ticketId,
-            status: "abandoned",
-            createdAt: nowIso(),
-            // A best-effort synthetic abandoned row for traceability of the failed
-            // dispatch (no dispatchKey — the reservation rolled back, so nothing is
-            // adoptable at this item's key; this row is inert to runByDispatchKey).
-            metadata: { campaignId, ticketId: item.ticketId, itemId: item.id },
-            projectDir: opts.projectDir,
+          const synthetic = reserveCampaignDriveDispatch({
+            campaignId,
+            itemId: item.id,
+            createRun: ({ dispatchKey, attemptGeneration }) => {
+              const newId = newRunId(item.ticketId);
+              insertRun({
+                id: newId,
+                workflow: workflowName,
+                title: item.ticketId,
+                status: "abandoned",
+                createdAt: nowIso(),
+                metadata: { campaignId, ticketId: item.ticketId, itemId: item.id, dispatchKey, attemptGeneration },
+                projectDir: opts.projectDir,
+              });
+              return newId;
+            },
           });
+          // Reservation LOST: the campaign was paused/abandoned or the item parked out from
+          // under this drive. Nothing was created — reconcile from durable state and halt,
+          // exactly as the load-fail lane does.
+          if (synthetic.status === "lost") return reconcileLostReservation();
+          parkRunId = synthetic.runId;
         } catch {
-          // a failure here must not stop parkCampaignOnStartRunThrow below from recording
-          // and rethrowing the ORIGINAL startRun error.
+          // The synthetic-run reservation itself failed to persist (a DB-level fault — the
+          // insert or the CAS raised). The traceability row is best-effort: rather than let
+          // that fault mask the ORIGINAL startRun error, fall back to a dangling run id so
+          // parkCampaignOnStartRunThrow STILL records the drive error and notifies — scoped
+          // to a campaign fallback run — instead of the park going silent (FG-516 F1).
+          parkRunId = newRunId(item.ticketId);
         }
-        throw await parkCampaignOnStartRunThrow(campaignId, item.id, item.ticketId, failRunId, err);
+        throw await parkCampaignOnStartRunThrow(campaignId, item.id, item.ticketId, parkRunId, err);
       }
       if (reservation.status === "lost") return reconcileLostReservation();
       const runId = reservation.runId;

@@ -46,7 +46,8 @@ import {
 import { type TmuxRunner, type WaitHarness } from "../v2/launch.js";
 import { approveCampaign, tryTransitionCampaignToRunning, tryTransitionCampaign } from "../store/campaigns.js";
 import type { InvokeArgs, InvokeResult } from "../v2/invoke.js";
-import { nowIso } from "../util/ids.js";
+import type { Workflow } from "../v2/schema.js";
+import { nowIso, newRunId } from "../util/ids.js";
 
 // Every item drives through the invoke escape-hatch lane (executionMode:'invoke'),
 // which uses the injected `dispatch` fn — no real containers — so a fake dispatch +
@@ -791,4 +792,103 @@ test("FG-596 load-fail crash-before-commit: a synthetic-run insert that throws m
   assert.equal(item.runId, undefined, "no run linkage was written");
   assert.equal(listRuns().length, runsBefore, "the synthetic run did not survive the rollback");
   assert.equal(runByDispatchKey(deriveCampaignItemDispatchKey(campaignId, itemId, 1)), undefined, "nothing adoptable at the derived key");
+});
+
+// ── THE startRun-THROW CATCH — the last unkeyed run-emission site, now reserved ──
+//
+// When startRun throws INSIDE the reservation (createRun), the whole reservation rolls
+// back — item stays pending, no run. The catch then INTENTIONALLY records a synthetic
+// 'abandoned' traceability run so the failed dispatch is durable (it feeds
+// parkCampaignOnStartRunThrow). Post-fix that row is created through a FRESH
+// reserveCampaignDriveDispatch — so it is keyed with the SAME attempt generation +
+// deterministic dispatch key as the rolled-back attempt, its insert + item run_id linkage
+// + pending→running CAS commit atomically, and a crash-window re-drive ADOPTS the one
+// keyed synthetic run instead of duplicating it. The failed/infrastructure classification
+// is applied AFTER the reservation commits, creating no additional run.
+
+const throwingStartRun = () => {
+  throw new Error("startRun boom: db write failed mid-dispatch");
+};
+
+// A workflow load that SUCCEEDS (the "feature" YAML isn't installed in this env), so the
+// drive reaches the startRun reservation instead of the load-fail lane. startRun is
+// injected to throw, so the returned workflow is never actually run.
+const succeedingLoad = (): Workflow =>
+  ({
+    name: "feature",
+    description: "stub",
+    inputs: [],
+    steps: [{ id: "build", agent: "engineer", gate: "none" as const, depends_on: [], reds: [], runtime: "claude", manual: false }],
+  }) as Workflow;
+
+test("FG-596 startRun-throw stamp: a startRun throw records EXACTLY ONE abandoned run stamped with the deterministic key + generation, linked to the item, then parks it failed/infrastructure WITHOUT a second run", async () => {
+  const { campaignId, itemId } = seedRunningPendingFullFeatureItem();
+
+  await assert.rejects(
+    () =>
+      driveOneCampaignItem(campaignId, itemId, {
+        dispatch: fakeDispatch("complete"),
+        projectDir,
+        mode: "sequential",
+        loadWorkflowFn: succeedingLoad,
+        startRunFn: throwingStartRun,
+      }),
+    /startRun boom/,
+    "the ORIGINAL startRun error propagates after the park",
+  );
+
+  const item = getCampaignItem(itemId)!;
+  assert.equal(item.lifecycleStatus, "failed", "terminal classification applied after the reservation committed");
+  assert.equal(item.outcome, "blocked");
+  assert.equal(item.blockerKind, "infrastructure", "startRun-throw parks at the infrastructure classification");
+  assert.equal(item.attemptGeneration, 1, "the fresh reservation allocated (and persisted) generation 1 — same as every live lane");
+
+  const runsForItem = listRuns().filter((r) => r.metadata?.["itemId"] === itemId);
+  assert.equal(runsForItem.length, 1, "EXACTLY ONE abandoned run exists — the terminal classification created no second run");
+  const run = runsForItem[0]!;
+  assert.equal(item.runId, run.id, "the synthetic run is linked onto the item");
+  assert.equal(run.status, "abandoned", "the traceability row is abandoned");
+
+  const expectedKey = deriveCampaignItemDispatchKey(campaignId, itemId, 1);
+  assert.equal(run.metadata?.["dispatchKey"], expectedKey, "the synthetic run stamps the SAME deterministic dispatch key as the live lanes");
+  assert.equal(run.metadata?.["attemptGeneration"], 1, "the synthetic run carries the item-attempt identity");
+  assert.equal(runByDispatchKey(expectedKey)?.id, run.id, "the synthetic run is adoptable by its dispatch key");
+
+  assert.equal(getCampaign(campaignId)!.status, "paused", "the startRun-throw parks the campaign");
+});
+
+// Adoption in the startRun-throw catch is a CONCURRENT crash-window branch: the catch's
+// fresh reservation adopts a keyed synthetic run that a racing re-drive already committed
+// at the same key. It cannot be reproduced through a single-threaded drive (the drive's
+// FIRST reservation would itself adopt any pre-existing keyed run before startRun is even
+// called), so we exercise the catch's reservation shape directly — the same createRun the
+// catch runs — against a pre-committed orphan, exactly as the load-fail crash test does.
+test("FG-596 startRun-throw adoption: the catch's synthetic reservation ADOPTS a keyed run already at the dispatch key — never a duplicate row", () => {
+  const { campaignId, itemId } = seedRunningPendingFullFeatureItem();
+
+  // A racing re-drive committed a stamped synthetic run at the derived key (generation
+  // persisted, item still pending — the crash window) before this catch's reservation runs.
+  updateCampaignItem(itemId, { attemptGeneration: 1 });
+  const key = deriveCampaignItemDispatchKey(campaignId, itemId, 1);
+  insertSyntheticAbandonedRun("run-startrun-orphan", campaignId, itemId, key, 1);
+  const runsBefore = listRuns().length;
+
+  // The catch routes its synthetic insert through reserveCampaignDriveDispatch with the
+  // SAME createRun closure — a run already at the key is ADOPTED, createRun never runs.
+  const synthetic = reserveCampaignDriveDispatch({
+    campaignId,
+    itemId,
+    createRun: ({ dispatchKey, attemptGeneration }) => {
+      const newId = newRunId("FG-101");
+      insertSyntheticAbandonedRun(newId, campaignId, itemId, dispatchKey, attemptGeneration);
+      return newId;
+    },
+  });
+
+  assert.equal(synthetic.status, "adopted", "the reservation ADOPTED the racing synthetic run rather than creating one");
+  assert.equal(synthetic.runId, "run-startrun-orphan", "the adopted run id is the one already at the key");
+  assert.equal(listRuns().length, runsBefore, "no second traceability row was inserted");
+  assert.equal(getCampaignItem(itemId)!.runId, "run-startrun-orphan", "the adopted run is linked onto the item");
+  const runsForItem = listRuns().filter((r) => r.metadata?.["itemId"] === itemId);
+  assert.equal(runsForItem.length, 1, "exactly ONE synthetic run exists for the item — the catch never duplicates");
 });
