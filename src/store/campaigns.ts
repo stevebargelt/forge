@@ -1,4 +1,5 @@
-import { getDb } from "./db.js";
+import { createHash } from "node:crypto";
+import { getDb, writeTransaction } from "./db.js";
 import { isCampaignTransitionAllowed } from "../types/index.js";
 import type {
   Campaign,
@@ -44,6 +45,7 @@ type CampaignItemRow = {
   continue_policy: string | null;
   reason: string | null;
   requested_human_action: string | null;
+  attempt_generation: number;
   created_at: string;
   updated_at: string;
 };
@@ -83,6 +85,8 @@ function rowToCampaignItem(row: CampaignItemRow): CampaignItem {
     continuePolicy: (row.continue_policy as ContinuePolicy | null) ?? undefined,
     reason: row.reason ?? undefined,
     requestedHumanAction: row.requested_human_action ?? undefined,
+    // FG-596: pre-FG-596 rows / a NULL slip read back as 0 (never-allocated marker).
+    attemptGeneration: row.attempt_generation ?? 0,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -174,6 +178,9 @@ export function addCampaignItem(opts: {
     itemOrder: opts.itemOrder,
     ticketId: opts.ticketId,
     lifecycleStatus: "pending",
+    // FG-596: a fresh item has NOT been dispatched yet — 0 is the never-allocated
+    // marker (the DB column DEFAULT 0 supplies the same value for the INSERT below).
+    attemptGeneration: 0,
     createdAt: now,
     updatedAt: now,
   };
@@ -231,6 +238,7 @@ export type CampaignItemUpdate = {
   branch?: string;
   worktreePath?: string;
   prUrl?: string;
+  attemptGeneration?: number;
 };
 
 const ITEM_UPDATE_COLUMNS: Record<keyof CampaignItemUpdate, string> = {
@@ -244,6 +252,7 @@ const ITEM_UPDATE_COLUMNS: Record<keyof CampaignItemUpdate, string> = {
   branch: "branch",
   worktreePath: "worktree_path",
   prUrl: "pr_url",
+  attemptGeneration: "attempt_generation",
 };
 
 // FG-410: the three campaign-item writers below used to read the row, merge the
@@ -416,4 +425,44 @@ export function updateCampaignItem(id: string, update: CampaignItemUpdate): void
   getDb()
     .prepare(`UPDATE campaign_items SET ${setClause} WHERE id = ?`)
     .run(...params, id);
+}
+
+// FG-596: atomically allocate the NEXT logical attempt generation for an item and
+// persist it, returning the new value. Called ONLY on a genuinely new attempt (an
+// initial dispatch, or an explicit retry) — a re-drive / reattach / recovery of the
+// SAME attempt must instead REUSE the persisted item.attemptGeneration unchanged, so
+// the derived dispatch key stays stable and the in-flight run stays adoptable by key.
+// The read-modify-write runs under BEGIN IMMEDIATE (writeTransaction) so two
+// controllers racing an allocation for the same item never mint the same generation.
+export function allocateItemGeneration(id: string): number {
+  return writeTransaction(() => {
+    const row = getDb()
+      .prepare(`SELECT attempt_generation FROM campaign_items WHERE id = ?`)
+      .get(id) as { attempt_generation: number } | undefined;
+    const next = (row?.attempt_generation ?? 0) + 1;
+    getDb()
+      .prepare(`UPDATE campaign_items SET attempt_generation = ?, updated_at = ? WHERE id = ?`)
+      .run(next, nowIso(), id);
+    return next;
+  });
+}
+
+// FG-596: the DETERMINISTIC dispatch key for a campaign item's drive-item run. A pure
+// function of (campaignId, itemId, PERSISTED attemptGeneration) — NEVER of a run-row
+// count, a run id, or the random launch id — so a recovery re-derives the SAME key
+// from durable state and resolves the ONE in-flight run via runByDispatchKey instead
+// of duplicating it. Deliberately NOT the FG-562 continuations.deriveDispatchKey: the
+// two identity spaces are distinct and must not collide. Stamped into run
+// metadata.dispatchKey (the same slot startRun uses) on all three dispatch lanes.
+export function deriveCampaignItemDispatchKey(
+  campaignId: string,
+  itemId: string,
+  attemptGeneration: number,
+): string {
+  const h = createHash("sha256");
+  // JSON-encode the tuple so the fields are unambiguously delimited: JSON escapes any
+  // quote/backslash in an id, so ('a b','c') and ('a','b c') can never collide the
+  // way an un-escaped join would.
+  h.update(`campaign-item-drive ${JSON.stringify([campaignId, itemId, attemptGeneration])}`);
+  return `ci-${h.digest("hex").slice(0, 32)}`;
 }

@@ -338,6 +338,13 @@ export type CampaignItem = {
   continuePolicy?: ContinuePolicy;
   reason?: string;
   requestedHumanAction?: string;
+  // FG-596: the LOGICAL attempt generation for this item — a monotonic counter
+  // bumped only on a genuinely new attempt (initial dispatch or explicit retry) and
+  // reused unchanged on restart/reattach/recovery/re-drive. 0 is the "never
+  // allocated" default (fresh rows and legacy pre-FG-596 rows read back 0); a real
+  // attempt is >= 1. Feeds the deterministic drive-item dispatch key so a later
+  // slice (FG-564) can recover a dead drive-item by key without duplicating it.
+  attemptGeneration: number;
   createdAt: string;
   updatedAt: string;
 };

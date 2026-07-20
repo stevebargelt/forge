@@ -6,7 +6,8 @@ import type { PlannerInput, PlanMode, ItemModeOverride, ExecutionLane } from "..
 import { classifyItemsForPlan } from "../../campaign/lane-classifier.js";
 import type { ClassifyTicketFn } from "../../campaign/lane-classifier.js";
 import { listCampaignItems, getCampaign, approveCampaign, tryTransitionCampaign } from "../../store/campaigns.js";
-import { startCampaign, resumeCampaign, escalateCampaignItemLane, hasUnresolvedLaneEscalation, retryCampaignItem } from "../../campaign/executor.js";
+import { startCampaign, resumeCampaign, escalateCampaignItemLane, hasUnresolvedLaneEscalation, retryCampaignItem, driveOneCampaignItem, launchDriveItemUnderForge } from "../../campaign/executor.js";
+import { invoke } from "../../v2/invoke.js";
 import { assembleCampaignShow, assembleCampaignReport, renderCampaignReportHuman, formatOutOfBandEligibleHint, formatCampaignSystemRetryHint } from "../../campaign/report.js";
 import { reconcileCampaign } from "../../campaign/reconcile.js";
 import { describeMissingReason } from "../../campaign/reconcile-evidence.js";
@@ -117,6 +118,15 @@ function renderDriveErrorAndExit(campaignId: string, err: unknown, json: boolean
     console.error(message);
   }
   process.exit(1);
+}
+
+// FG-596: reconstruct the argv that re-invokes THIS forge CLI, so the launch-per-item
+// controller can start `forge campaign drive-item …` under `forge launch`. execArgv
+// carries the interpreter flags (e.g. `--import tsx` in dev) and argv[1] the entry
+// script, so a dev tsx invocation and a built release both re-run correctly. The
+// recorder spawns argv[0] directly, so this must name the real interpreter + entry.
+function forgeSelfArgv(): string[] {
+  return [process.execPath, ...process.execArgv, process.argv[1] ?? ""];
 }
 
 export function registerCampaign(program: Command): void {
@@ -443,7 +453,9 @@ export function registerCampaign(program: Command): void {
 
       let result;
       try {
-        result = await startCampaign(campaignId);
+        // FG-596: production drives one launch per item (forge campaign drive-item)
+        // under forge launch — the controller no longer blocks in-process on containers.
+        result = await startCampaign(campaignId, { launchDriveItem: launchDriveItemUnderForge(forgeSelfArgv()) });
       } catch (err) {
         renderDriveErrorAndExit(campaignId, err, opts.json);
       }
@@ -562,7 +574,7 @@ export function registerCampaign(program: Command): void {
 
       let result;
       try {
-        result = await resumeCampaign(campaignId);
+        result = await resumeCampaign(campaignId, { launchDriveItem: launchDriveItemUnderForge(forgeSelfArgv()) });
       } catch (err) {
         renderDriveErrorAndExit(campaignId, err, opts.json);
       }
@@ -624,6 +636,70 @@ export function registerCampaign(program: Command): void {
       }
 
       if (!resumeSuccessReasons.has(result.stopReason)) {
+        process.exit(1);
+      }
+    });
+
+  // FG-596: the launchable single-item drive. This is what `forge campaign start/resume`
+  // launches (once per item) under `forge launch`, and waits on. It drives EXACTLY ONE
+  // item to a terminal drive-process outcome or a legal park — synchronously, in this
+  // child process: startRun/insertRun + generation persist + dispatch-key stamp, runNext
+  // within-item waves, publication convergence, gates, item finalization, and every
+  // park-on-throw all commit to durable state BEFORE this process exits. Its own exit
+  // code describes the DRIVE-PROCESS lifecycle ONLY (exit 0 = clean settle, exit 1 = the
+  // drive threw); the item's shipped/parked/failed outcome and the controller-level
+  // stopReason are read by the controller from DURABLE state after the wake
+  // (deriveDriveItemResultFromDurableState) — this command prints NO machine-readable
+  // marker, because a stdout line anything in the child's output could forge must never
+  // be the controller's source of truth (FG-596 fix 3). Human stdout is advisory only.
+  campaign
+    .command("drive-item <campaign-id> <item-id>")
+    .description("Drive ONE campaign item to a terminal drive-process outcome or a legal park (the launchable unit `campaign start/resume` runs under forge launch)")
+    .option("--json", "machine-readable JSON output")
+    .action(async (campaignId: string, itemId: string, opts: { json?: boolean }) => {
+      const campaign = getCampaign(campaignId);
+      if (!campaign) {
+        process.stderr.write(`Error: campaign ${campaignId} not found\n`);
+        process.exit(1);
+      }
+      if (!campaign.projectDir) {
+        process.stderr.write(`Error: campaign ${campaignId} has no stored project directory\n`);
+        process.exit(1);
+      }
+      // FG-596 (fix 5): a raw drive-item invocation must NOT mutate a paused/abandoned
+      // campaign out-of-band — that bypasses the controller's cooperative pause and
+      // drives an item the operator has stopped. Only a running campaign is drivable
+      // (the controller transitions it to running before it ever launches a drive-item).
+      // Refuse otherwise; nothing is mutated, so this is a clean no-op park guard.
+      if (campaign.status !== "running") {
+        process.stderr.write(
+          `Error: campaign ${campaignId} is ${campaign.status}; drive-item only drives a running campaign ` +
+            `(it is launched by \`forge campaign start/resume\`, which transitions the campaign to running first)\n`,
+        );
+        process.exit(1);
+      }
+      try {
+        const result = await driveOneCampaignItem(campaignId, itemId, {
+          dispatch: invoke,
+          projectDir: campaign.projectDir,
+          mode: campaign.mode,
+        });
+        if (opts.json) console.log(JSON.stringify(result, null, 2));
+        else {
+          console.log(`drive-item ${itemId}: ${result.stopReason ? `stop=${result.stopReason}` : "settled (campaign continues)"}`);
+          for (const rec of result.itemRecords) {
+            const outcomeStr = rec.outcome ? ` (outcome: ${rec.outcome})` : "";
+            console.log(`  ${rec.ticketId}: ${rec.lifecycleStatus}${outcomeStr}${rec.runId ? ` [run: ${rec.runId}]` : ""}`);
+          }
+        }
+      } catch (err) {
+        // A drive error already committed a durable park (parkCampaignOnDriveThrow /
+        // parkCampaignOnStartRunThrow) before rethrowing. Exit 1 with the message on
+        // stderr; the controller reconstructs the drive-error from the DURABLE parked
+        // item (its reason) — NOT from any stdout marker — and re-raises so the CLI's
+        // renderDriveErrorAndExit renders drive_error (FG-490).
+        const message = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`${message}\n`);
         process.exit(1);
       }
     });
