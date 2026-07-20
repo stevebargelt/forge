@@ -35,9 +35,13 @@ function workloadR3Line(r3: WorkloadTopLevel): string {
 // node/npm/forge later, inside the workload. UNKNOWABLE is stated explicitly, and
 // the render never calls a non-shell launcher a "nested shell": argv never implies
 // R4 is covered.
+// FG-592: unknowable means Forge knows later resolution MAY occur — not that it
+// does. The render must stay modal ("may resolve"): stating that a non-Node command
+// (e.g. a native `true`) "resolves node/npm/forge at runtime" overstates a fact Forge
+// cannot prove at launch.
 function workloadR4Line(r4: WorkloadNestedShell): string {
   return r4.kind === "unknowable"
-    ? `R4 UNKNOWABLE — the launched command '${r4.shell}' resolves node/npm/forge at runtime (shebang/PATH); not knowable at launch (argv does not cover it)`
+    ? `R4 UNKNOWABLE — the launched command '${r4.shell}' may resolve another runtime (node/npm/forge) at launch time (shebang/PATH); not knowable at launch (argv does not cover it)`
     : `R4 not applicable — argv executed directly, no nested shell resolves anything later`;
 }
 

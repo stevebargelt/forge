@@ -119,7 +119,10 @@ test("FG-555 CLI: a bare argv[0] serializes as R3 derived, and `forge launch sho
     assert.doesNotMatch(r4Line, /nested shell/, "a non-shell command must not be rendered as a 'nested shell'");
     assert.match(r4Line, /R4 UNKNOWABLE/, "R4 UNKNOWABLE is stated explicitly");
     assert.match(r4Line, /'true'/, "the effective command is named in the render");
-    assert.match(r4Line, /resolves node\/npm\/forge at runtime/, "states the command resolves the toolchain at runtime");
+    // FG-592: honest modal wording — a native `true` MAY resolve another runtime;
+    // Forge does not know it does. The render must NOT state resolution as fact.
+    assert.match(r4Line, /may resolve another runtime/, "states resolution MAY occur, not that it does");
+    assert.doesNotMatch(r4Line, /'true' resolves node\/npm\/forge at runtime/, "must not claim the native command resolves the toolchain as fact");
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -148,7 +151,10 @@ test(
       const human = showHuman(home, meta.id);
       // Even for a real shell ('bash'), the neutral render names the launched command
       // without the old "nested shell" template (which now also covers non-shells).
-      assert.match(human, /^nested: +R4 UNKNOWABLE — the launched command 'bash' resolves node\/npm\/forge at runtime/m);
+      // FG-592: modal wording — the shell/launcher MAY resolve another runtime; the
+      // render must not state it as fact ("does resolve").
+      assert.match(human, /^nested: +R4 UNKNOWABLE — the launched command 'bash' may resolve another runtime/m);
+      assert.doesNotMatch(human, /'bash' resolves node\/npm\/forge at runtime/, "must not claim the launcher resolves the toolchain as fact");
       assert.doesNotMatch(human, /nested shell/, "the R4 render no longer hardcodes 'nested shell'");
     } finally {
       rmSync(home, { recursive: true, force: true });
