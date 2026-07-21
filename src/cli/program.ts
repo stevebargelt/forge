@@ -16,6 +16,7 @@ import { registerUpgrade } from "./commands/upgrade.js";
 import { registerInvoke } from "./commands/invoke.js";
 import { registerContinue } from "./commands/continue.js";
 import { registerLostSignals } from "./commands/lost-signals.js";
+import { registerContinuation } from "./commands/continuation.js";
 import { registerBacklog } from "./commands/backlog.js";
 import { registerBacklogMigrate } from "./commands/backlog-migrate.js";
 import { registerDashboard } from "./commands/dashboard.js";
@@ -88,6 +89,7 @@ export function buildProgram(): Command {
   registerInvoke(program);
   registerContinue(program);
   registerLostSignals(program);
+  registerContinuation(program);
   registerBacklog(program);
   registerBacklogMigrate(program);
   registerDashboard(program);
