@@ -165,11 +165,22 @@ new architecture, no new recovery path.
 | Monitor workaround | retired OR retained as named fallback (decided FG-563) | **RESOLVED** — `seeds/orchestrator-template.md:419` retains Monitor as named single-shot `forge launch wait` transport; polling variant retired; no stale poll prose in installed policy |
 | ScheduleWakeup / BD-9 | watchdog-only in INSTALLED policy | **RESOLVED** — `CLAUDE.md:505`, seed `:417-425`, `concepts.md:91`, `quick-start.md:272` all watchdog-only. Only PRD `:512` retains the FG-542-era action-item line (PRD self-tracking) |
 | Seed → CLAUDE.md block parity | TESTED | **TESTED** — `orchestrator-block-parity.test.ts:21` runs real installer, asserts `unchanged` |
-| Docs parity (quick-start/concepts/autonomous-run-prompt agree w/ seed) | "Parity is TESTED, not assumed" | **GAP (test coverage)** — docs AGREE by manual authoring; no test asserts docs↔seed launch-wait/ScheduleWakeup agreement |
-| FG-542-era prose update | update prose that says ScheduleWakeup owns ordinary delays | installed policy already correct; **PRD `:512`/`:64` + `autonomous-run-prompt.md:45` wording** are the residual reconciliation (documentation) |
+| Docs parity (concepts + quick-start agree w/ seed) | "Parity is TESTED, not assumed" | **GAP (test coverage)** — docs AGREE by manual authoring; no test asserts docs↔seed launch-wait/ScheduleWakeup agreement |
+| FG-542-era prose update | update prose that says ScheduleWakeup owns ordinary delays | installed policy already correct; **PRD `:512`/`:64`** is the residual reconciliation (documentation) |
 
 Out-of-scope-but-noted drift (owned by **FG-582**, not FG-565): `docs/concepts.md:40` and
 `docs/quick-start.md:80` still describe slash-commands-as-symlinks — unrelated to launch-wait policy.
+
+**CORRECTION (2026-07-21, from the architect wave + red-wide, run …-e1e030):** the original ledger cited
+`docs/autonomous-run-prompt.md` as a third parity surface and a G6 tightening target. That file is
+**gitignored** (`.git/info/exclude:19`) in the control checkout and is **absent from origin/main and the
+writer clone** — it is NOT part of the repo. The real, committed parity surfaces are **`docs/concepts.md`
+and `docs/quick-start.md`** (+ `seeds/orchestrator-template.md` as the canonical source). G5 covers only
+those; G6 drops the autonomous-run-prompt line-45 item. Separately, red-wide proved the **G4 behavior
+already EXISTS**: `forge show` renders a published candidate for a `cancelled`-kind task in both human
+output and JSON (contradicting the ledger's "possibly absent / investigate fg484 seam" framing). G4 is a
+pure test-coverage assertion against `forge show` (`src/cli/commands/show.ts`), not a behavior
+investigation and not the fg484 cancel-race seam.
 
 ## Consolidated gap list → what FG-565 implements
 
@@ -180,9 +191,9 @@ Classified per the operator's taxonomy. **Only proven gaps; each uses existing p
 | G1 | **Operator continuation-evidence read surface** — `forge continuation show/list [--state blocked]` (+ `--json`) over `continuations` + `continuation_stale_observations`, rendering claim_owner/consumer_kind (Q3), next_action (Q4), dispatched ids (Q5), stale/duplicate observations (Q6), blocked state + required action (Q7). Mirror `forge lost-signals`. | observability + behavior | new read-only CLI over existing tables; no schema/arch change | "Operator-visible evidence must be answerable without transcript archaeology" |
 | G2 | **F20 cross-layer seam test** — interactive session disappears → tmux command continues; detached container continues even if the Forge watcher also dies. Dedicated test with a red baseline. | test coverage | existing FG-535/536 substrate | "F12/F20 — the seams no single slice owns" |
 | G3 | **F23/F24 tests** — stable machine-wide readers **and the launch observer** still work under broken dev source, **including in an unrelated project** (F24 clause). Red baseline vs broken source. | test coverage | existing FG-571 isolation | "F23/F24 … in this and unrelated projects" |
-| G4 | **F21 cancelled-candidate-surfaced assertion** — verify a landed candidate for a cancelled task is surfaced to the operator (not silent); add the missing assertion, or flag if behavior absent. | test coverage / behavior | existing campaign publisher/cancel path | "F21 … a cancelled task whose work reached the target is an operator-visible fact" |
-| G5 | **Docs-parity test** — assert `quick-start.md` / `concepts.md` / `autonomous-run-prompt.md` agree with the seed on launch-wait + ScheduleWakeup-watchdog-only policy (mirror `orchestrator-block-parity.test.ts` shape). | test coverage | existing parity-test pattern | "Canonical seed → … docs → installed surfaces all AGREE. Parity is TESTED, not assumed" |
-| G6 | **Documentation reconciliation** (documentation-maintainer, docs phase) — reconcile the residual FG-542-era prose: PRD `:512`/`:64` action-item + revision-log closeout entry; tighten `autonomous-run-prompt.md:45` to name `forge launch run --require-control-toolchain`; confirm no FG-542-era "ScheduleWakeup owns ordinary delays" prose remains anywhere. Optional low-value F-row traceability tags (F9/F12/F15/F30) may be recorded here as evidence-classification. | documentation drift | docs only | "Update the FG-542-era prose"; "Final documentation-maintainer consistency pass" |
+| G4 | **F21 cancelled-candidate-surfaced assertion** — behavior EXISTS (red-verified): `forge show` (`src/cli/commands/show.ts`) renders a published candidate for a `cancelled`-kind task in human output AND `--json`. Add the missing test asserting that surfacing (human + JSON). NOT the fg484 cancel-race seam; NOT a behavior investigation. | test coverage | existing `forge show` surface | "F21 … a cancelled task whose work reached the target is an operator-visible fact" |
+| G5 | **Docs-parity test** — assert `docs/concepts.md` + `docs/quick-start.md` agree with `seeds/orchestrator-template.md` on the completion-driven launch-wait + ScheduleWakeup-watchdog-only (BD-9) policy. Assert the extracted NORMATIVE CLAIM, not byte-parity (no generator exists, unlike `orchestrator-block-parity.test.ts`). autonomous-run-prompt.md is NOT a surface (gitignored, not in repo). | test coverage | existing parity-test pattern | "Canonical seed → … docs → installed surfaces all AGREE. Parity is TESTED, not assumed" |
+| G6 | **Documentation reconciliation** (documentation-maintainer, docs phase) — reconcile the residual FG-542-era prose: PRD `:512`/`:64` action-item + add a closeout revision-log entry noting FG-565 shipped; confirm no FG-542-era "ScheduleWakeup owns ordinary delays" prose remains anywhere. (autonomous-run-prompt line-45 item dropped — file not in repo.) Optional low-value F-row traceability tags (F9/F12/F15/F30) may be recorded here as evidence-classification. Non-normative only; contract SHA `e6fd56b` stands. | documentation drift | docs only | "Update the FG-542-era prose"; "Final documentation-maintainer consistency pass" |
 | — | **Closeout verification** (not an edit) — `npm run test:all` + `npm run test:extended` green at closeout (CI `test` + `test-extended`); FG-551 agent-image launch tier still green (no skips); this ledger + the focused review map evidence to every BD + matrix row. | verification | — | closeout gate |
 
 **Explicitly NOT implemented** (verified already-satisfied or out of scope): all fifteen BDs;
