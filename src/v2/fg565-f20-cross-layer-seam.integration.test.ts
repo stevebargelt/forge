@@ -11,8 +11,17 @@
 //       watchdog dies with its watcher; the surviving reconcile bound finalizes
 //       the container's real result).
 //
-// This test composes the two boundaries so the whole cross-layer promise is
-// exercised end to end — GENUINELY, on the real substrate, not a fixture simulation:
+// This test composes the two boundaries. They are NOT proven at the same fidelity,
+// and the test does not pretend they are: boundary (a) runs on the REAL substrate (a
+// real tmux-owned launch through the real CLI, classified by the real readLaunch);
+// boundary (b) exercises the SURVIVING RECONCILE BOUND hermetically — the same
+// reap/exit-info seams FG-536 uses, over a container-gone-result-present evidence
+// row the test authors. Boundary (b) proves the reconcile-side recovery LOGIC (the
+// surviving bound finalizes a detached row the dead watcher never landed); it does
+// NOT run a Docker daemon and so does not, by itself, prove a live container
+// lifecycle survived — no test in the reconcile family runs a real container; the
+// tier is hermetic by design, and real container/daemon behavior is owned by the
+// production reconcile path. The two boundaries, honestly scoped:
 //
 //   Boundary (a) — tmux ownership survives session death — is driven through the
 //   REAL `forge launch run` CLI (the same real-launch substrate as
@@ -23,13 +32,15 @@
 //   classifies when the surviving watchdog's observing consume advances the next
 //   phase. No exit record is fixtured.
 //
-//   Boundary (b) — the detached container survives the Forge watcher's death — is
-//   driven through the REAL reconcileRun exactly as fg536-idle-bound's
-//   start-callback-window test does: a real result.json is left on disk by a
-//   detached container, the liveness probe reports the watcher/container gone
-//   (aliveProbe false), and the surviving reconcile bound finalizes the row from the
-//   ordinary container-gone-result-present evidence path. No Docker daemon is
-//   touched — the reap/exit-info seams are hermetic, exactly as fg536 uses them.
+//   Boundary (b) — the surviving reconcile bound finalizes a detached container's
+//   landed result after the Forge watcher's death — is driven through the REAL
+//   reconcileRun exactly as fg536-idle-bound's start-callback-window test does: the
+//   TEST authors a result.json on disk (modeling the detached container's landed
+//   output — no container runs), the liveness probe reports the watcher/container
+//   gone (aliveProbe false), and the surviving reconcile bound finalizes the row from
+//   the ordinary container-gone-result-present evidence path. No Docker daemon is
+//   touched — the reap/exit-info seams are hermetic, exactly as fg536 uses them, so
+//   this proves the reconcile-side recovery LOGIC, not a live container lifecycle.
 //
 // RED BASELINE — INJECTION-BASED, NOT A PROD REVERT.  F20 is a COVERAGE hole, not a
 // shippable defect: the production paths (the surviving watchdog consume + the
@@ -42,7 +53,7 @@
 // path runs. The mutant reddens the very assertion the real path greens — a shipping
 // reviewer should NOT expect a production-revert red here.
 
-import { test, beforeEach, afterEach, after } from "node:test";
+import { test, before, beforeEach, afterEach, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
@@ -108,6 +119,16 @@ const entry = resolve(here, "..", "cli", "index.ts");
 const loader = resolve(here, "..", "..", "bin", "forge-loader.mjs");
 const hasTmux = spawnSync("tmux", ["-V"], { encoding: "utf8" }).status === 0;
 const startedLaunches: string[] = [];
+
+// The F20 tmux/composite seam is a REQUIRED tier, not an optional one: a missing
+// tmux must FAIL it, never silently green it. A per-test `if (!hasTmux) return;`
+// records success on a tmux-less host — the exact false-pass this guards. So the
+// precondition lives in a file-wide `before` hook that hard-fails the whole tier
+// (same discipline as launch-cli.integration.test.ts / FG-551). tmux is present
+// wherever the integration tier runs (ubuntu-latest / the agent image).
+before(() => {
+  assert.ok(hasTmux, "the F20 tmux/composite seam requires tmux — install it (apt install tmux / brew install tmux); a tmux-less host must FAIL this tier, never skip to green");
+});
 
 function forge(args: string[]) {
   // Defensive bound: a launch subcommand that never returns is SIGKILLed so the test
@@ -181,8 +202,11 @@ function assertTmuxSeamRecovered(continuationId: string, runIds: string[]): void
   assert.equal(runIds.length, 1, "the next phase physically dispatched exactly once");
 }
 
-// ── detached-container substrate: an invoke run whose detached container ran on ──
-// after the watcher died, then completed and left a real result.json (FG-536).
+// ── detached-container reconcile fixture: an invoke run modeling a detached ──
+// container that ran on after the watcher died and left a result.json. The row and
+// its result.json are AUTHORED BY THE TEST (no Docker daemon), exactly as FG-536's
+// start-callback-window test does — this exercises the reconcile bound, not a live
+// container.
 const INVOKE_RUN: Run = { id: "run-f20-inv", workflow: "invoke", title: "f20 detached", status: "active", createdAt: "2026-07-21T00:00:00Z" };
 
 function insertDetachedContainerTask(id: string): void {
@@ -206,12 +230,12 @@ function writeContainerResult(taskId: string, result: unknown): void {
 }
 
 /** The detached-container seam assertion (arm B / composite): the surviving reconcile
- *  bound landed the container's REAL result. The MUTANT reddens THIS; the real
+ *  bound landed the detached row's on-disk result. The MUTANT reddens THIS; the real
  *  reconcileRun greens it. */
 function assertDetachedContainerFinalized(taskId: string, expected: unknown): void {
   const t = getTask(taskId)!;
-  assert.equal(t.status, "complete", "the detached container's completion is landed by the surviving reconcile bound");
-  assert.deepEqual(t.result, expected, "the REAL result the detached container wrote — not a synthesized one");
+  assert.equal(t.status, "complete", "the detached row's completion is landed by the surviving reconcile bound");
+  assert.deepEqual(t.result, expected, "the result reconcile read from the row's on-disk result.json — not one synthesized by reconcile");
 }
 
 // The Forge watcher is DEAD: the container liveness probe reports it gone (it has
@@ -226,8 +250,6 @@ const NO_EXIT_INFO = () => ({});
 // Driven through the REAL forge launch CLI + the REAL readLaunch.
 // ─────────────────────────────────────────────────────────────────────────────
 test("F20 (tmux boundary): a REAL tmux-owned launch completes after its launching session is gone; the SURVIVING watchdog observes its REAL exit record and advances — a no-op watchdog strands the SAME assertion (RED)", async () => {
-  if (!hasTmux) return;
-
   // A REAL tmux-owned command. `forge launch run` detaches into tmux and returns —
   // the launching CLI process (the interactive session that started the work) is
   // GONE the moment launchRun returns, yet the tmux-owned command runs to completion
@@ -260,13 +282,17 @@ test("F20 (tmux boundary): a REAL tmux-owned launch completes after its launchin
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// F20 arm B — the detached container survives the Forge watcher's death.
-// Driven through the REAL reconcileRun (fg536-idle-bound's start-callback window).
+// F20 arm B — the SURVIVING reconcile bound finalizes a detached container's landed
+// result after the Forge watcher's death. Driven through the REAL reconcileRun over
+// a test-authored container-gone-result-present row (fg536-idle-bound's start-callback
+// window) — HERMETIC, no Docker daemon; this proves the reconcile-side recovery, not a
+// live container lifecycle.
 // ─────────────────────────────────────────────────────────────────────────────
-test("F20 (detached container): the container completes and lands even though the Forge watcher ALSO died — the SURVIVING reconcile bound finalizes it; a no-op reconcile strands the SAME assertion (RED)", () => {
+test("F20 (detached-container reconcile seam, hermetic): a container-gone-result-present row a detached container left is finalized by the SURVIVING reconcile bound even though the Forge watcher ALSO died — a no-op reconcile strands the SAME assertion (RED). No Docker daemon, like fg536: proves the reconcile-side recovery, not a live container lifecycle", () => {
   insertRun(INVOKE_RUN);
   insertDetachedContainerTask("task-f20-detached");
-  // The detached container ran on past the watcher's death and wrote its REAL result.
+  // Model the detached container's landed output: the test writes the result.json the
+  // container would have left (no Docker daemon — hermetic, per fg536).
   writeContainerResult("task-f20-detached", { status: "complete", answer: 42 });
 
   try {
@@ -279,7 +305,7 @@ test("F20 (detached container): the container completes and lands even though th
     );
 
     // GREEN: the SURVIVING reconcile bound (FG-536) finalizes the detached
-    // container's REAL result even with the watcher reported dead (aliveProbe false).
+    // detached row's on-disk result even with the watcher reported dead (aliveProbe false).
     const r = reconcileRun(INVOKE_RUN.id, WATCHER_DEAD, NO_REAP, NO_EXIT_INFO);
     assertDetachedContainerFinalized("task-f20-detached", { status: "complete", answer: 42 }); // SAME assertion, now green
     assert.ok(
@@ -297,15 +323,14 @@ test("F20 (detached container): the container completes and lands even though th
 // reconcile + watchdog) strands BOTH boundaries through the SAME two assertions; the
 // real surviving paths recover BOTH. This is the seam no single slice owns.
 // ─────────────────────────────────────────────────────────────────────────────
-test("F20 composite: session gone AND watcher gone — a REAL tmux launch and a detached container BOTH survive; the no-op reconcile+watchdog mutant strands BOTH (RED)", async () => {
-  if (!hasTmux) return;
-
+test("F20 composite: session gone AND watcher gone — a REAL tmux launch is recovered AND the surviving reconcile bound finalizes a detached container's landed result (hermetic); the no-op reconcile+watchdog mutant strands BOTH (RED)", async () => {
   // Boundary 1: a REAL tmux-owned launch that reached its next-phase handoff.
   const meta = launchRun(["sh", "-c", "sleep 0.4; exit 0"], "f20comp");
   await waitFor("the REAL exit record", () => existsSync(exitFile(meta.id)));
   recordContinuation({ continuationId: "cont-f20", consumerKind: "orchestrator", sourceLaunchId: meta.id, currentPhase: "build", nextAction: NEXT });
 
-  // Boundary 2: the detached container that ran on and landed a real result.
+  // Boundary 2 (hermetic): a test-authored container-gone-result-present row — the
+  // detached container's landed result.json, written by the test, no Docker daemon.
   insertRun(INVOKE_RUN);
   insertDetachedContainerTask("task-f20-detached");
   writeContainerResult("task-f20-detached", { status: "complete", answer: 7 });
