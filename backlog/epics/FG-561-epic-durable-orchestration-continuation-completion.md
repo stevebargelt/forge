@@ -174,3 +174,12 @@ is a lost-signal watchdog only; the hand-built Monitor workaround is retired or 
 fallback; canonical seed, generated project block, docs and installed surfaces agree; **every
 falsification test was observed red against its baseline before it went green**; and a final reviewer maps
 evidence to every binding decision and matrix row rather than approving from green CI alone.
+## 2026-07-21 — Slice 6 (FG-565) SHIPPED; durable-continuation core COMPLETE
+
+**FG-565 (Slice 6 — cross-layer recovery, observability, closeout) shipped and closed** (merge `1b3989e`, PR #151). This was the last continuation slice: the launch / stable-runtime / continuation-claim / watchdog / campaign-recovery / promotion / version-skew guarantees are now proven to compose as one system (cross-layer matrix F1–F35+T9 verified; evidence ledger `docs/plans/fg565-closeout-evidence-ledger.md`), the closeout evidence is exposed through the new read-only `forge continuation show/list` operator surface, `ScheduleWakeup` is watchdog-only across installed policy (BD-9 contradiction gone, parity-tested), and the `Monitor` workaround is retained only as the named single-shot `forge launch wait` transport.
+
+**Two honest scope items surfaced at closeout, filed as follow-ups (NOT epic blockers):**
+- **FG-599** — `forge lost-signals` durably records only *watchdog* recoveries; normal delivery is answerable by absence-of-row and replay-recovery is not durably recorded. Docs/policy corrected to state this accurately (recovery-ledger framing). FG-599 owns making it a positive durable record (finding against FG-562/FG-563).
+- **FG-600** — `forge continuation` read-only parity (drop `ensureForgeDirs`) + F21 should drive the real `forge cancel` CLI; both fail-safe/fidelity, core invariants met.
+
+**Epic remains OPEN only on FG-572** (Slice 1 Child 5 — installed-surface compatibility across a promotion: FG-581 post-promotion RACI-compile, FG-582 git-hook symlink anchoring, FG-583 non-atomic seed cp). None of these is a continuation-model gap — they are release-promotion installed-surface robustness. All other slices (0–6) are done.
