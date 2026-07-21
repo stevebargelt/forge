@@ -61,7 +61,7 @@ FG-535, FG-536, and FG-542 fixed work survival but not work continuation:
 - Agent containers run detached, so the Docker daemon owns them and disposable `docker logs -f` / `docker wait` watchers may die without killing agent work.
 - `forge claude` disables Claude Code's harness-owned background-task facility, preventing accidental use of the channel FG-535 proved unsafe for valuable work.
 
-But a terminal `forge launch` tells no controller that it finished. The orchestrator currently has to guess a wakeup time, poll on another model turn, or create a disposable Monitor that polls the launch record and converts terminal state into a session event. The FG-425 corrective run uses the last shape: work under tmux, a 20-second Monitor, and a 30-minute `ScheduleWakeup` watchdog.
+But a terminal `forge launch` tells no controller that it finished. The orchestrator currently has to guess a wakeup time, poll on another model turn, or create a disposable Monitor that polls the launch record and converts terminal state into a session event. The FG-425 corrective run uses the last shape: work under tmux, a 20-second Monitor, and a 30-minute `ScheduleWakeup` watchdog. *(Superseded 2026-07-21, FG-565 closeout: the completion-driven happy path shipped — FG-563 (orchestrator) and FG-564 (campaign) adopted the durable continuation claim over `forge launch wait` + `forge continue`, and `ScheduleWakeup` is now a fixed health-bound lost-signal watchdog only in every installed policy surface (BD-9). This paragraph is preserved as the accepted record of the pre-continuation workaround that motivated the campaign, not a description of current behavior; see the 2026-07-21 FG-565 revision-log entry.)*
 
 That workaround is safe for the work because the Monitor owns nothing. It is still incomplete as a product contract:
 
@@ -477,7 +477,6 @@ Propagation surfaces:
 - Marker-managed orchestrator block in `CLAUDE.md`, deterministically regenerated through `forge-dev upgrade` — the block is rendered from the **executing** forge's template, so a checkout edit to the seed above propagates only through the checkout's own entry point; stable `forge upgrade` would re-render it from the promoted release's bytes (FG-577).
 - `docs/quick-start.md`.
 - `docs/concepts.md`.
-- `docs/autonomous-run-prompt.md`.
 - Init/upgrade/template regression tests.
 - Any installed host skill that independently prescribes launch waiting.
 
@@ -502,6 +501,8 @@ This is where a generic continuation primitive meets the real campaign, so the c
 
 ### Slice 6 — Cross-layer recovery, observability, and closeout
 
+> **[SHIPPED 2026-07-21 (FG-565) — cross-layer seams verified, operator continuation-evidence surface delivered, temporary guidance retired.]** FG-565 VERIFIES the ownership + continuation model composes as one system; it adds no binding decision, no new continuation feature, and no new recovery path. `forge continuation show/list [--state blocked] [--json]` renders the closeout evidence (Q3–Q7) from durable state alone; the F20 / F23–F24 / F21 seam gaps and docs↔seed parity now have dedicated tests; the FG-542-era prose is reconciled. See `docs/plans/fg565-closeout-evidence-ledger.md` and the 2026-07-21 revision-log entry. The scope below is preserved as the accepted record.
+
 Goal: prove the ownership and continuation model as one system, then retire temporary guidance.
 
 Scope:
@@ -509,7 +510,7 @@ Scope:
 - End-to-end fault matrix below.
 - Delivery/claim/watchdog recovery evidence exposed through an operator surface.
 - Clear retirement or fallback status for the hand-built Monitor workaround.
-- Update FG-542-era prose that currently says ScheduleWakeup owns ordinary delays.
+- Update FG-542-era prose that currently says ScheduleWakeup owns ordinary delays. *(Done 2026-07-21, FG-565: grep confirms no installed policy surface — `CLAUDE.md`, `seeds/orchestrator-template.md`, `docs/quick-start.md`, `docs/concepts.md`, `docs/SCHEMA-CONTRACT.md` — states ScheduleWakeup owns ordinary delays; every one describes it as a fixed health-bound lost-signal watchdog only (BD-9). No residual FG-542-era "owns ordinary delays" prose remains anywhere.)*
 - Final documentation-maintainer consistency pass.
 - Focused review against this document before campaign closeout.
 
@@ -636,6 +637,37 @@ The initiative is complete only when all of the following are true:
 - A final reviewer maps evidence to every binding decision and matrix row rather than approving from green CI alone.
 
 ## Revision log
+
+### 2026-07-21 — FG-565 Slice-6 closeout SHIPPED (cross-layer seams verified, operator evidence surface, temporary guidance retired)
+
+- **FG-565 (Slice 6 — the campaign CLOSEOUT slice) shipped.** It VERIFIES the durable-continuation model composes
+  as one system and reconciles the temporary guidance; it adds no binding decision, no new continuation feature, no
+  new recovery path, and reopens no upstream decision. All fifteen binding decisions (BD-1..BD-15) remain MET and the
+  falsification matrix (F1–F35 + T9) is proven with RED provenance per
+  `docs/plans/fg565-closeout-evidence-ledger.md`.
+- **Operator-visible evidence surface (G1).** `forge continuation show <id>` / `forge continuation list [--state
+  blocked]` (both `--json`) now render the continuation closeout evidence — `claim_owner` + `consumer_kind` (Q3),
+  `next_action` (Q4), dispatched run/task ids (Q5), stale/duplicate observations from
+  `continuation_stale_observations` (Q6), and blocked state + the required operator action (Q7) — from durable state
+  alone (single-store projection, BD-3), mirroring `forge lost-signals`. No schema change, no write path. This closes
+  the Operator-visible-evidence questions Q3–Q7 (previously answerable only for watchdog recoveries).
+- **Cross-layer seam coverage closed (G2/G3/G4).** The F20 interactive-session-disappears seam (tmux-owned command
+  and detached container survive even when the Forge watcher also dies), the F23/F24 broken-dev-source arms (stable
+  machine-wide readers AND the launch observer keep working under a broken/missing-export dev source, in this project
+  AND an unrelated project dir), and the F21 cancelled-candidate-surfaced assertion (a landed candidate for a
+  cancelled task is an operator-visible standing fact, distinct from the fg484 not-resurrected CAS assertion) now
+  each have a dedicated test, observed red against the appropriate injection/mutant baseline.
+- **Docs↔seed parity is now TESTED, not assumed (G5).** A parity test asserts `docs/quick-start.md` and
+  `docs/concepts.md` agree with `seeds/orchestrator-template.md` on the completion-driven launch-wait policy and the
+  `ScheduleWakeup`-watchdog-only rule (BD-9) — claim-agreement, not byte-parity.
+- **Temporary guidance retired (G6).** Grep confirms no installed policy surface (`CLAUDE.md`,
+  `seeds/orchestrator-template.md`, `docs/quick-start.md`, `docs/concepts.md`, `docs/SCHEMA-CONTRACT.md`) still says
+  `ScheduleWakeup` owns ordinary delays — every one describes it as a fixed health-bound lost-signal watchdog only.
+  The Slice 6 scope bullet and the Problem-section FG-425-workaround paragraph are annotated as the accepted
+  historical record, not current behavior.
+- **No normative change.** This is a current-state / non-normative reconciliation of the same class as the
+  FG-562/FG-552 entries below: no binding decision, story order, consumer contract, or failure semantic moves, and
+  the accepted contract SHA `e6fd56b` stands. Only current-state status labels and closeout evidence are updated.
 
 ### 2026-07-19 — FG-562 Slice-3 durable continuation-claim PRIMITIVE SHIPPED (BD-5 MET at the primitive)
 

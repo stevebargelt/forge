@@ -256,6 +256,44 @@ export function continuationsInDispatch(opts: { consumerKind?: ConsumerKind } = 
   return rows.map(toContinuation);
 }
 
+/**
+ * READ-ONLY operator/reporting reader over the continuations table (FG-565 G1).
+ *
+ * Unlike continuationsInDispatch — which is hard-scoped to state='dispatching' as
+ * the restart-replay set — this returns rows in ANY state (including `blocked`, the
+ * "stuck, human needed" slot an operator must see) so a read surface can render the
+ * durable continuation evidence. It is a pure SELECT: it takes no write lock, makes
+ * no claim, and never inherits the dispatching-only filter semantics. Optional
+ * filters narrow to one state and/or one consumer. Ordered newest-activity-first
+ * (updated_at DESC), mirroring the `forge lost-signals` newest-first listing.
+ */
+/** The default cap on a single listContinuations page — a read surface must never
+ *  issue an unbounded SELECT over an ever-growing table. Callers may raise/lower it,
+ *  but the default keeps the operator listing bounded. */
+export const LIST_CONTINUATIONS_DEFAULT_LIMIT = 200;
+
+export function listContinuations(
+  opts: { state?: ContinuationState; consumerKind?: ConsumerKind; limit?: number } = {},
+): Continuation[] {
+  const clauses: string[] = [];
+  const params: (string | number)[] = [];
+  if (opts.state) {
+    clauses.push("state = ?");
+    params.push(opts.state);
+  }
+  if (opts.consumerKind) {
+    clauses.push("consumer_kind = ?");
+    params.push(opts.consumerKind);
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const limit = opts.limit ?? LIST_CONTINUATIONS_DEFAULT_LIMIT;
+  params.push(limit);
+  const rows = getDb()
+    .prepare(`SELECT * FROM continuations ${where} ORDER BY updated_at DESC, continuation_id ASC LIMIT ?`)
+    .all(...params) as ContinuationRow[];
+  return rows.map(toContinuation);
+}
+
 export type StaleObservation = {
   continuationId: string;
   sourceLaunchId: string;
@@ -375,6 +413,43 @@ export function staleObservationsFor(continuationId: string): StaleObservation[]
     status: r.status as ObservedStatus,
     observedAt: r.observed_at,
   }));
+}
+
+/**
+ * Batched form of staleObservationsFor for a LIST render: fetch the stale-observation
+ * audit for MANY continuations in ONE query (a single IN, keyed by continuation id),
+ * so a list surface renders without an N+1. Returns a map keyed by continuation id;
+ * a continuation with no stale observations is simply absent (callers default to []).
+ * Same oldest-first (id ASC) order per continuation as staleObservationsFor.
+ */
+export function staleObservationsForMany(continuationIds: string[]): Map<string, StaleObservation[]> {
+  const out = new Map<string, StaleObservation[]>();
+  if (continuationIds.length === 0) return out;
+  const placeholders = continuationIds.map(() => "?").join(", ");
+  const rows = getDb()
+    .prepare(
+      `SELECT * FROM continuation_stale_observations WHERE continuation_id IN (${placeholders}) ORDER BY id ASC`,
+    )
+    .all(...continuationIds) as {
+    continuation_id: string;
+    source_launch_id: string;
+    current_phase: string;
+    status: string;
+    observed_at: string;
+  }[];
+  for (const r of rows) {
+    const obs: StaleObservation = {
+      continuationId: r.continuation_id,
+      sourceLaunchId: r.source_launch_id,
+      currentPhase: r.current_phase,
+      status: r.status as ObservedStatus,
+      observedAt: r.observed_at,
+    };
+    const list = out.get(r.continuation_id);
+    if (list) list.push(obs);
+    else out.set(r.continuation_id, [obs]);
+  }
+  return out;
 }
 
 /**
