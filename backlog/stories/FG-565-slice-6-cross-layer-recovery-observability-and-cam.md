@@ -9,6 +9,15 @@ created: 2026-07-14
 **Epic:** FG-561 · **PRD:** `docs/prds/durable-orchestration-continuation.md` @ `e6fd56b` (Slice 6)
 **Depends on:** every prior slice. This is the closeout slice.
 
+## Problem
+
+The prior slices prove their individual layers, but Forge does not yet have one durable campaign-level
+proof that the launch, stable-runtime, continuation, claim, watchdog, campaign-recovery, promotion, and
+version-skew guarantees compose without losing or duplicating work. The operator also cannot yet answer
+every closeout question from Forge-owned durable evidence alone, and temporary wait/recovery guidance may
+still disagree across installed surfaces. Without this final cross-layer audit and reconciliation, the
+epic could appear complete while failures remain at seams no individual slice owns.
+
 ## Goal
 
 Prove the ownership and continuation model **as one system**, then retire the temporary guidance. Each
