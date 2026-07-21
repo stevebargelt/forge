@@ -1,9 +1,11 @@
 ---
 id: FG-565
 type: story
-status: active
+status: done
 title: Slice 6 — cross-layer recovery, observability, and campaign closeout for durable continuation
 created: 2026-07-14
+closed: 2026-07-21
+closed_commit: 1b3989e
 ---
 
 **Epic:** FG-561 · **PRD:** `docs/prds/durable-orchestration-continuation.md` @ `e6fd56b` (Slice 6)
@@ -136,3 +138,24 @@ owning slice**, not a decision to be improvised here.
 ## Not in scope
 
 - New continuation features. This slice closes the campaign; it does not extend it.
+
+## Acceptance Evidence
+
+Shipped in merge `1b3989e` (PR #151). Full matrix/BD mapping: `docs/plans/fg565-closeout-evidence-ledger.md`. Final verification review: task-red-wide-584a5e (2 medium fail-safe findings dispositioned → FG-600; core invariants met).
+
+| AC | Evidence | Verdict |
+|---|---|---|
+| Every falsification test observed RED against its baseline, green after (campaign-level gate) | Ledger audits RED provenance across F1–F35+T9 (headers "OBSERVED RED", env toggle `FG552_STRESS_ATOMIC=0`, mandatory mutant arms in fg571/fg562). FG-565's own new tests redden via injected mutants: F20 no-op reconcile+watchdog; F23/F24 broken-export; F21 negative control — each documented in its header. | met |
+| F12/F20 — session disappears → tmux command continues + detached container continues if watcher dies | `src/v2/fg565-f20-cross-layer-seam.integration.test.ts` — real `forge launch run` tmux ownership + real tmux session kill (`assert.ok(hasTmux)`, fails never skips) + real `reconcileRun` surviving-bound recovery; mutant reddens the real assertion. F12 substrate: continuation-consumer recover + fg536-idle-bound. | met |
+| F23/F24 — broken dev source → stable readers + launch observer still work, in this AND unrelated projects | `src/v2/fg565-f23-f24-broken-source.integration.test.ts` — broken-export injection; stable readers + launch observer verified in-project and in a second unrelated project dir; hermetic per-test FORGE_HOME (never the real install). | met |
+| F25 — live-source command against broken source fails locally, stable runtime unchanged | Ledger F25: `src/v2/fg571-env-identity.integration.test.ts:586,633` (forge-dev FAILS, stable forge SUCCEEDS; mutant). Owned by FG-571; verified here. | met |
+| F26/F27/F28 (+T9) — atomic promotion / interrupted / in-flight + T9 process-anchoring | Ledger: `src/v2/fg571-promote.integration.test.ts:174,208(mutant),246–407(SIGKILL seams),448/548(T9+mutant)`; T9 settled-by-execution (FG-553 plan §1/§4). Owned by FG-571; verified here. | met |
+| F29/F30/F31 — three distinct assertions (RUNS / PROVENANCE / REFUSED) | Ledger: F29 `fg571-env-identity.integration.test.ts:116,145,168(mutant)` (RUNS under hostile PATH/env); F30 R1/R2 (FG-569) + R3/R4 (FG-555) `launch-provenance-cli.integration.test.ts`; F31 `node-preflight.integration.test.ts:286` + CI real Node 26/ABI 147 (`ci-workflow.test.ts:158`) — clean REFUSAL, not a run. | met |
+| F35 — version-skew store compatibility (BD-15 additive-only) | Ledger: `src/store/fg568-store-compatibility.integration.test.ts` (additive-only; no destructive migration under an in-flight peer). Owned by FG-568; verified here. | met |
+| Monitor workaround status explicit (decided FG-563, confirmed here) | `seeds/orchestrator-template.md:419` retains Monitor as the named single-shot `forge launch wait` wake transport; the 20s-polling variant is retired. No stale poll prose in installed policy. | met |
+| Operator-visible evidence — the 7 questions answerable from Forge-owned durable state | New `forge continuation show/list [--state blocked] [--json]` (`src/cli/commands/continuation.ts`) answers Q3 (claim_owner+consumer_kind), Q4 (next_action), Q5 (dispatched ids), Q6 (stale/duplicate via continuation_stale_observations), Q7 (blocked + ACTION-REQUIRED); Q1 `forge launch show`; Q2 recovered-by-watchdog via `forge lost-signals`. **Q2 honest scope:** normal-delivery is answerable by absence-of-row and replay-recovery is not durably recorded — the surfaces were corrected to state this (recovery-ledger framing, `3a30546` + merge); durable normal/replay recording is a finding against FG-562/FG-563 filed as **FG-599** (the ticket's verify-and-surface model). | met |
+| Canonical seed → generated block → docs → installed surfaces AGREE (parity TESTED) | seed↔CLAUDE.md: `orchestrator-block-parity.test.ts`. docs↔seed launch-wait + ScheduleWakeup-watchdog-only + lost-signals delivery-mode: new `src/cli/commands/fg565-docs-parity.test.ts` (claim-agreement + delivery-mode overclaim rejection, falsifiable by construction). | met |
+| ScheduleWakeup used/documented ONLY as a lost-signal watchdog (BD-9 contradiction gone from installed policy) | seed:417/420 + CLAUDE.md:505/508 + concepts.md:91 + quick-start.md:272 all watchdog-only; asserted by the G5 parity test. | met |
+| Full + extended suites green at closeout; FG-551 image parity | CI at merge head `c26350d` (run 29865733392): `test`, `test-extended` (integration_1–4 + worktree + dashboard_integration) all GREEN; FG-551 launch tier runs inside the agent image via test-extended. | met |
+| Every non-`none` docs-impact resolved | G1 operator_behavior_changed → docs phase documented `forge continuation` in concepts.md + quick-start.md (updated); G6 PRD reconciliation (non-normative, SHA e6fd56b stands). | met (updated) |
+| Final reviewer maps evidence to every binding decision + matrix row (green CI alone insufficient) | `docs/plans/fg565-closeout-evidence-ledger.md` maps BD-1..BD-15 + F1–F35+T9 to production code / test / RED provenance / operator surface; final red-wide verification (task-red-wide-584a5e) reviewed the closeout diff against AC. | met |
