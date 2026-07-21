@@ -156,3 +156,71 @@ test("no source reintroduces the FG-542-era claim that ScheduleWakeup owns ordin
     }
   }
 });
+
+// FG-565 closeout (delivery-mode semantic): `forge lost-signals` is a RECOVERY
+// ledger, not a DELIVERY ledger. G5 above checked the watchdog-only + completion-
+// driven claims but NOT the delivery-mode semantic — so a surface could still
+// reintroduce the overclaim that lost-signals durably records / distinguishes
+// "normal delivery". It does not: only watchdog recoveries get a durable row, and
+// normal delivery is inferred from the ABSENCE of a recovery row, never recorded
+// per launch. This asserts every surface that describes `forge lost-signals`
+// carries the honest framing AND none reintroduces the overclaim.
+//
+// Proof-by-construction (falsifiable): the pre-fix concepts.md clause — "renders
+// that audit — which controller recovered which launch, and whether by watchdog or
+// normal delivery" — matches DELIVERY_MODE_OVERCLAIMS and would redden this test.
+const DELIVERY_MODE_FRAMING: { label: string; anyOf: RegExp[] }[] = [
+  { label: "names forge lost-signals", anyOf: [/forge lost-signals/] },
+  {
+    label: "frames it as a recovery ledger, not a delivery ledger",
+    anyOf: [
+      /recovery ledger, not a delivery ledger/,
+      /records? only[^.]*watchdog recover/,
+    ],
+  },
+  {
+    label: "says normal delivery is inferred from the absence of a row, not recorded per launch",
+    anyOf: [/inferred from the absence of a[^.]{0,20}row/, /absence of a recovery row/],
+  },
+];
+
+// The overclaim: presenting "watchdog vs normal delivery" as something lost-signals
+// durably records/distinguishes per launch. Anchored to the specific phrasings so the
+// honest, negated statements ("normal delivery ... not itself durably recorded per
+// launch", "delivered normally from the absence of a row") can never trip it.
+const DELIVERY_MODE_OVERCLAIMS: { label: string; pattern: RegExp }[] = [
+  {
+    label: 'presenting "whether by watchdog or normal delivery" as a durable per-launch record',
+    pattern: /whether by (the )?watchdog or normal delivery/,
+  },
+  {
+    label: 'presenting "watchdog vs delivered normally" as durably recorded',
+    pattern: /(recovered )?by (the )?watchdog[^.]{0,30}vs\.?[^.]{0,30}delivered normally/,
+  },
+];
+
+test("all three surfaces describe `forge lost-signals` as a recovery ledger, not a delivery ledger, with no normal-delivery overclaim", () => {
+  const sources = loadNormalized();
+
+  for (const [sourceName, text] of Object.entries(sources)) {
+    for (const predicate of DELIVERY_MODE_FRAMING) {
+      const satisfied = predicate.anyOf.some((re) => re.test(text));
+      assert.ok(
+        satisfied,
+        `Lost-signals delivery-mode framing broke: ${sourceName} no longer expresses ` +
+          `the honest "recovery ledger, not a delivery ledger" claim — missing predicate: ` +
+          `${predicate.label}. Normal delivery is inferred from the ABSENCE of a recovery ` +
+          `row, never durably recorded per launch; every surface describing forge ` +
+          `lost-signals must say so (claim-agreement, not verbatim wording).`,
+      );
+    }
+    for (const overclaim of DELIVERY_MODE_OVERCLAIMS) {
+      assert.ok(
+        !overclaim.pattern.test(text),
+        `${sourceName} reintroduced the lost-signals delivery-mode overclaim: ` +
+          `${overclaim.label}. forge lost-signals records ONLY watchdog recoveries; it ` +
+          `does not durably distinguish or record normal delivery — remove the claim.`,
+      );
+    }
+  }
+});
