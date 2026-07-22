@@ -12,7 +12,7 @@ created: 2026-07-17
 (task-red-security-125943), read-only at `07f2c8d`. Findings 3 (medium) + 4 (medium). **NEW scope discovered
 by the audit — not part of FG-577's or FG-578's acceptance criteria.**
 
-## Defect
+## Problem
 
 Host seed installation is a **sequential `cp` loop with no staging, no publication point, no lock, and no
 rollback** (`scripts/install-seeds.sh:24-30`, driven by `src/cli/commands/upgrade.ts:140`). `forge next`
@@ -38,7 +38,12 @@ Related: an install that fails partway leaves a mixed host while `upgrade` repor
 block consumers (finding 4). The resulting state is detectable by `doctor`/`route validate` **when invoked**,
 but not on the ordinary dispatch path.
 
-## Scope
+## Goal
+
+Every consuming process observes one complete, release-owned host seed generation: either the generation that
+was current before an upgrade or the complete generation published by that upgrade, never a torn or mixed
+surface. The installed generation must be sourced through FG-577's established executing-release resolver, so
+a promoted runtime installs its own release-bundled assets even when a divergent development checkout exists.
 
 Either publish the complete consumed host surface **atomically** with a cross-process reader/writer protocol,
 or make every **consuming dispatch** refuse on a detected incomplete/mixed surface. Prefer whichever is the
@@ -50,7 +55,23 @@ a second.
 A failed/interrupted installation must have a **named, repairable state**, propagated to human output,
 `--json`, exit status, doctor, retry advice, and dispatch/campaign consumers.
 
-## Acceptance (EXECUTED)
+## Architecture and execution guardrails
+
+- Source release-owned assets through FG-577's canonical executing-release provenance. Do not fall back to a
+  caller-selected `FORGE_REPO_DIR`, the live development checkout, or a path trusted merely because it is under
+  `releases/*`.
+- Resolve and validate staging/publication destinations without following a replaceable destination symlink
+  outside the intended disposable `$FORGE_HOME`. A failed trust check must refuse before publishing; it must not
+  mutate an unrelated host path. This protects supported upgrade/crash concurrency without expanding the threat
+  model to arbitrary same-UID tampering.
+- Test the actual promoted release layout and installed command surface, not only direct library calls or a
+  development-mode fixture.
+- If an architect artifact is rejected or re-run, carry forward its complete risk register and dispositions;
+  correcting one finding must not discard unrelated HIGH risks from the earlier pass.
+- Container agents must run verification synchronously. They must not background a test and end their turn to
+  await a completion notification that cannot wake an agent container.
+
+## Acceptance Criteria
 
 - Kill/read interleavings — after agents copied, mid-`workflows`, and before/failed recompile — must **never**
   permit `forge next` to dispatch a **mixed but Zod-valid** workflow set. Observed RED against current code:
@@ -59,6 +80,13 @@ A failed/interrupted installation must have a **named, repairable state**, propa
 - An interrupted install leaves a named, repairable state — not a host that reports healthy.
 - Propagation consumers asserted: library, CLI human output, `--json`, exit code, doctor, retry advice,
   campaign/dispatch.
+- A promoted-layout acceptance test runs the installed `forge upgrade`/dispatch surfaces from release A, with a
+  deliberately divergent development checkout, and proves the published generation came exclusively from A.
+  After atomically promoting release B, a new invocation must consume one complete B generation; an invocation
+  already running remains anchored to the generation it opened.
+- Tests cover source and destination trust failures: caller-selected/dev bytes cannot become the promoted seed
+  source, a replaceable destination symlink cannot redirect publication outside the disposable `$FORGE_HOME`,
+  and refusal leaves the unrelated target byte-for-byte unchanged.
 - Tests use **disposable FORGE_HOME**; the real `~/.forge` is never touched.
 
 ## Not in scope
