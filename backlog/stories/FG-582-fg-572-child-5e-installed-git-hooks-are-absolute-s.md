@@ -2,92 +2,78 @@
 id: FG-582
 type: story
 status: active
-title: "FG-572 Child 5e: installed git hooks are absolute symlinks into the dev checkout and do not follow a promotion (carries an unresolved T9 anchoring tension)"
+title: "FG-572 Child 5e: installed git hooks are absolute symlinks into the dev checkout and do not follow a promotion"
 created: 2026-07-17
 ---
 
-**Parent:** FG-572 · **Epic:** FG-561 · **UNBLOCKED — T9 anchoring settled: symlink-through-`$FORGE_HOME/current` (operator decision 2026-07-17); both blockers cleared. Ready to implement — see the Operator decision section below.**
+**Parent:** FG-572 · **Epic:** FG-561 · **Status:** ready to implement — T9 anchoring settled (symlink-through-`$FORGE_HOME/current`, operator decision 2026-07-17); both blockers cleared (FG-577 landed `b5add06`).
 **Source:** FG-572 read-only architecture pass, run `run-fg-572-installed-surface-compatibility-read-only-architecture-pass-75b811`, at `12b13c2`.
 
-## Current state (VERIFIED on host at 12b13c2 — the arch pass could not see this from its mount)
+## Problem
 
-`forge init` installs git hooks as **absolute symlinks** (`src/cli/commands/init.ts:196`, `executeHookPlan` →
-`symlinkSync(plan.source, plan.target)`). Confirmed live in this repo:
+`forge init` installs Forge-owned git hooks as **absolute symlinks into the dev checkout**
+(`src/cli/commands/init.ts:196`, `executeHookPlan` → `symlinkSync(plan.source, plan.target)`). Verified live on
+host at `12b13c2`:
 
     .git/hooks/commit-msg -> /Users/stevebargelt/code/forge/scripts/git-hooks/commit-msg-no-ai-attribution
 
-That is an absolute path into the **dev checkout**. Under a promotion the hook keeps executing dev bytes
-regardless of which release is current — the installed hook does not follow the promotion at all.
+Because the target is an absolute path into the checkout, the installed hook does **not follow a promotion**: it
+keeps executing dev-checkout bytes regardless of which release is currently promoted. A promoted release and its
+installed hooks silently diverge.
 
-## The T9 tension — RESOLVED (operator chose symlink-through-`current`; see the Operator decision section below). Retained for history.
+Two secondary defects travel with this:
+- `init.ts:185`'s `exists-other` case does not distinguish a **stale Forge-owned hook** (safe to re-point) from a
+  **foreign hook** (must never be clobbered) — the same operator-owned-surface principle as FG-578.
+- Two durable docs assert the pre-split symlink mechanic and are now stale under a promoted release
+  (`docs/concepts.md:40`, `docs/quick-start.md:80`). They describe behavior this ticket owns and were deliberately
+  left untouched until it ships.
 
-Two defensible directions pull opposite ways:
+## Goal
 
-- **Symlink through `$FORGE_HOME/current`** — promotion re-points every hook atomically, for free.
-- **Pin to the install-time release** — matches T9's "a process anchors at start" anchoring discipline.
+Installed Forge-owned git hooks follow the promoted release: each new hook invocation resolves through
+`$FORGE_HOME/current` and therefore runs the currently promoted release's bytes, while an already-running
+invocation stays anchored to the bytes it started with. Installation is idempotent, never clobbers a
+non-Forge-owned surface, and preserves today's dev-checkout behavior when there is no `current` pointer. The two
+stale hook-path docs are reconciled in the same change.
 
-The campaign has settled anchoring for **processes** but NOT for **installed pointers**, which is a distinct
-case. A hook is not a running process; it is re-resolved at every invocation.
-
-Architect's default if unanswered: **pin to `current`**, since a hook executing a superseded release's bytes
-indefinitely is the worse failure. But this is explicitly flagged as the operator's call, and T9 itself
-("whether an already-running process is affected by a mid-flight promotion") is an **open acceptance case, not
-an established fact** (PRD ~line 379) — the design must test it, not assert it.
-
-## Also in scope
-
-Disambiguate `init.ts:185`'s `exists-other` between a **stale forge hook** (safe to re-point) and a **foreign
-hook** (must never be clobbered — same operator-owned-surface principle as FG-578).
-
-## Blocked on — CLEARED (both resolved; retained for history)
-
-1. ~~The T9 anchoring decision for installed pointers (operator).~~ **RESOLVED 2026-07-17: symlink-through-`$FORGE_HOME/current`** (see Operator decision).
-2. ~~FG-577 (5a) landing, so the install path resolves from the running runtime.~~ **LANDED (`b5add06`).**
-
-## Acceptance (EXECUTED) — draft, finalize after the T9 call
-
-- A promotion re-points (or deliberately does not re-point) hooks per the chosen policy, with a test observed
-  RED against current absolute-dev-path behavior.
-- A foreign hook is never clobbered; a stale forge hook is distinguished from it by evidence, not by name.
-- Tests use **disposable FORGE_HOME + disposable install prefixes**; no test rewrites this repo's real
-  `.git/hooks`.
-
-## Stale docs this ticket owns (found 2026-07-17 during FG-577; NOT fixable until this ships)
-
-FG-577's premise grep across `docs/**` surfaced two durable docs asserting the pre-split symlink mechanic.
-Both were **deliberately left alone** — correcting them means documenting installed-symlink behavior that THIS
-ticket owns and has not shipped, so fixing them now would document a protection that does not exist:
-
-- **`docs/concepts.md:40`** — "Installed by `forge init` as symlinks into the local forge clone (so
-  `forge upgrade` propagates template edits to all projects without per-project re-copy)."
-- **`docs/quick-start.md:80`** — "slash commands are symlinks so template edits in the forge repo flow to
-  every project on next session."
-
-Under a promoted release these resolve into the **release tree**, not the clone, so template edits in the
-checkout do not flow. Neither is caused by FG-577: `init.ts` already resolved module-relative
-(`init.ts:222,283-311,650,786`) and FG-577 does not touch `init.ts` — the drift predates it and was simply
-never visible before the stable/dev split made it matter.
-
-**Whichever way the T9 anchoring decision goes, both lines must be reconciled in the same change.** They are
-the operator-facing statement of exactly the behavior this ticket decides.
-
-## Operator decision — 2026-07-17 (T9 anchoring: symlink-through-current)
+## Settled design — symlink-through-`$FORGE_HOME/current` (operator decision 2026-07-17)
 
 **Installed git hooks symlink THROUGH `$FORGE_HOME/current`, not through a resolved release path.** Each hook
-invocation therefore uses the **currently promoted release**; an already-running invocation remains anchored to
-whatever it started under. Pin-at-install is rejected — it would leave hooks indefinitely stale after a
-promotion. This resolves the T9 tension for INSTALLED POINTERS (distinct from the process-anchoring the
-campaign settled earlier): a hook is re-resolved at every invocation, so pointing it at `current` is correct.
+invocation therefore uses the currently promoted release; an already-running invocation remains anchored to
+whatever it started under. Pin-at-install was rejected — it would leave hooks indefinitely stale after a
+promotion.
 
-**Unblocked:** FG-577 (5a) has landed (`b5add06`), and the T9 decision is now made — both blockers cleared.
+This resolves the T9 tension for **installed pointers**, which is a distinct case from the process-anchoring the
+campaign settled earlier: a hook is not a running process, it is re-resolved at every invocation, so pointing it
+at `current` is correct. (Historical rationale: the alternative, pinning to the install-time release, matched
+T9's "a process anchors at start" discipline but left a hook executing a superseded release's bytes
+indefinitely — the worse failure. The operator chose `current`.)
 
-**Implementation (per this decision):**
-- `forge init`'s hook install (`init.ts:196`, `executeHookPlan` → `symlinkSync`) targets
-  `$FORGE_HOME/current/<hook>` instead of an absolute dev-checkout / resolved-release path, so promotion
-  re-points every hook atomically.
-- Disambiguate `init.ts:185`'s `exists-other`: a stale forge hook (safe to re-point) vs a foreign hook (never
-  clobber) — same operator-owned-surface principle as FG-578.
-- In a live dev checkout with no `current` pointer, preserve today's behavior (point at the checkout) — do not
-  break the dev loop.
-- Reconcile the two stale slash-command-symlink docs this ticket owns (`docs/concepts.md:40`,
-  `docs/quick-start.md:80`) in the same change.
+## Acceptance Criteria
+
+1. **Promotion-following:** `forge init`'s hook install (`init.ts:196`, `executeHookPlan` → `symlinkSync`) targets
+   `$FORGE_HOME/current/<hook>` instead of an absolute dev-checkout / resolved-release path, so a new hook
+   invocation observes the currently promoted release. A test observes RED against the current
+   absolute-dev-path behavior, then GREEN, and a test proves a promotion changes the target a new invocation
+   resolves.
+2. **In-flight anchoring:** an invocation already running remains anchored to the bytes it started with (not
+   re-resolved mid-run).
+3. **Dev-checkout fallback:** in a live development checkout with **no `current` pointer**, the existing
+   development behavior is preserved (point at the checkout) — the dev loop is not broken.
+4. **Stale-hook repair:** `init.ts:185`'s `exists-other` is disambiguated so a **provably Forge-owned** stale hook
+   is re-pointed, distinguished from a foreign hook by **evidence, not by name**.
+5. **Foreign-surface refusal:** a regular file, a foreign symlink, or a foreign hook is **never** overwritten.
+6. **Idempotence:** installation is a no-op when the hook already points at the correct target.
+7. **Docs reconciliation:** `docs/concepts.md:40` and `docs/quick-start.md:80` are corrected to describe the
+   `$FORGE_HOME/current` mechanic in the same change.
+8. **Test isolation:** tests use **disposable FORGE_HOME + disposable repository/install directories** and never
+   touch this repo's real `.git/hooks` or any real user hooks. RED-before-GREEN coverage exists for: the current
+   absolute-development-path behavior; a promotion changing the target a new invocation observes; stale
+   Forge-owned hook repair; foreign-hook and foreign-symlink refusal; already-correct idempotence; and
+   development behavior when no `current` pointer exists.
+
+## Notes
+
+- Closing FG-582 + FG-583 closes FG-572 → closes epic FG-561.
+- The two stale docs are the operator-facing statement of exactly the behavior this ticket decides; they must be
+  reconciled here, not deferred (they were only deferred originally because the protection did not yet exist).
