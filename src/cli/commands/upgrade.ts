@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import { execFileSync, execSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import {
   applyOrchestratorBlock,
@@ -266,7 +266,12 @@ const ROUTING_POLICY: Record<RoutingPolicyOutcome, Resolution> = {
   recompiled: resolved,
   "would-recompile": resolved,
   "no-raci": resolved,
-  failed: unresolvedBecause("routing-policy.yml NOT recompiled — it is now stale against the host RACI"),
+  // FG-581: fail-closed. The previous runtime's compiled routing-policy.yml is
+  // NOT left silently authoritative when the promoted runtime rejects the host
+  // RACI it derives from — it is invalidated (quarantined) at the failure site, so
+  // routing falls back to fail-closed (lane 'manual' / `policy_not_found`) until
+  // the RACI compiles. The named refusal, not a stale policy that keeps routing.
+  failed: unresolvedBecause("routing-policy.yml INVALIDATED — the promoted runtime rejected the host RACI; the stale policy was quarantined and routing is fail-closed until the RACI compiles (fix ~/.forge/forge-raci.md, then run: forge route compile)"),
 };
 
 const PROJECT_INIT: Record<ProjectInitOutcome, Resolution> = {
@@ -380,6 +385,11 @@ export type UpgradeResult = {
    *  is the ONLY place this upgrade admits those files are running unrefreshed. */
   authoredRetentions: string[];
   routingPolicy: RoutingPolicyOutcome;
+  /** FG-581: on a post-promotion compile FAILURE, the compiler's verbatim reason
+   *  for the rejected RACI construct — the same string the human warning carries,
+   *  so a --json consumer reads the exact named refusal rather than the generic
+   *  classification reason. Null on every non-failure path. */
+  routingPolicyError: string | null;
   projectInit: ProjectInitOutcome;
   slashCommands: SlashCommandsOutcome;
   /** The commands forge did NOT install because the project already owns that
@@ -587,6 +597,10 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
       // succeeds. Runs whenever a host RACI exists (independent of whether
       // install-seeds ran), and surfaces a compile failure loudly.
       let routingPolicy: RoutingPolicyOutcome;
+      // FG-581: the compiler's own verbatim reason for the rejected RACI construct,
+      // threaded onto the --json surface so a script sees the exact same named
+      // refusal the human warning prints. Null on every non-failure path.
+      let routingPolicyError: string | null = null;
       if (!existsSync(RACI_PATH)) {
         // No host RACI is not a compile failure: there is no derived artifact to
         // keep in lockstep. A RACI that exists and won't compile IS one.
@@ -598,8 +612,53 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
           routingPolicy = dryRun ? "would-recompile" : "recompiled";
           say(`        → routing-policy.yml: ${dryRun ? "would recompile" : "recompiled"} (${res.routes} routes)`);
         } else {
+          // FG-581 — fail closed. The promoted runtime cannot compile the installed
+          // operator-authored RACI, so the routing-policy.yml the PREVIOUS runtime
+          // compiled must NOT stay silently authoritative: a stale policy the
+          // running runtime can no longer vouch for is exactly the invariant this
+          // ticket forbids. Quarantine it (rename to a sibling name no policy loader
+          // matches). Every consumer treats a missing host policy as fail-closed
+          // (lane 'manual' / named `policy_not_found`), so removing it is the
+          // smallest safe invalidation. `res.error` names the exact rejected
+          // construct — thread it verbatim into the warning, the --json surface, and
+          // the repair guidance; never re-derive a generic message.
           routingPolicy = "failed";
+          routingPolicyError = res.error;
           warn(`        ⚠ routing-policy.yml NOT recompiled — ${res.error}`);
+          if (existsSync(ROUTING_POLICY_PATH)) {
+            const quarantinePath = `${ROUTING_POLICY_PATH}.quarantined`;
+            if (dryRun) {
+              // Forecast only — mirror the would-* pattern, touch no disk state, so
+              // --json `ok` and the exit code still agree with a real run.
+              warn(`          would invalidate the stale routing-policy.yml (→ ${quarantinePath}) so it cannot stay authoritative under the promoted runtime`);
+            } else {
+              // FAIL-CLOSED is the binding invariant: the stale policy MUST NOT stay
+              // authoritative under the promoted runtime. Quarantine (rename) is the
+              // preferred neutralization, but if it throws — a directory or file
+              // already at the destination, cross-device, a permission wall — a bare
+              // rename would let that exception escape the refusal render AND, the
+              // real defect, leave the stale policy exactly where it was: fail-OPEN on
+              // the one invariant this ticket closes. So fall back to removing the
+              // stale policy outright; a missing host policy is itself fail-closed
+              // (lane 'manual' / policy_not_found), so removal is a safe neutralization.
+              // Only if BOTH rename and unlink fail is the policy genuinely stuck on
+              // disk — then say so LOUDLY (it is STILL authoritative, remove it by
+              // hand) and keep the refusal; never imply a quarantine that did not happen.
+              try {
+                renameSync(ROUTING_POLICY_PATH, quarantinePath);
+                warn(`          invalidated the stale routing-policy.yml — quarantined to ${quarantinePath}; routing is now fail-closed until the RACI compiles`);
+              } catch (quarantineErr) {
+                try {
+                  unlinkSync(ROUTING_POLICY_PATH);
+                  warn(`          could not quarantine the stale routing-policy.yml (${(quarantineErr as Error).message}) — REMOVED it instead; routing is now fail-closed until the RACI compiles`);
+                } catch (removeErr) {
+                  const stuck = `the stale routing-policy.yml could NOT be neutralized (quarantine: ${(quarantineErr as Error).message}; remove: ${(removeErr as Error).message}) — it is STILL on disk at ${ROUTING_POLICY_PATH} and authoritative under the promoted runtime; remove it by hand: rm ${ROUTING_POLICY_PATH}`;
+                  warn(`          ⚠ ${stuck}`);
+                  routingPolicyError = `${res.error} — ${stuck}`;
+                }
+              }
+            }
+          }
           warn(`          fix ~/.forge/forge-raci.md, then run: forge route compile`);
         }
       }
@@ -784,6 +843,7 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         authoredRetention,
         authoredRetentions,
         routingPolicy,
+        routingPolicyError,
         projectInit,
         slashCommands,
         slashCommandOverrides,

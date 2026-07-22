@@ -69,6 +69,7 @@ test("tryGitPull: returns 'error' when not a git repo", () => {
 import { cpSync, mkdirSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { runUpgrade, upgradeAssetPaths } from "./upgrade.js";
+import { compilePolicyFile } from "../../raci/host-policy.js";
 import { assetRoot, executionModeFrom } from "../../v2/asset-root.js";
 
 /** A tree shaped like a release: manifest + the REQUIRED asset dirs, carrying
@@ -437,7 +438,16 @@ function assertUnresolved(r: ReturnType<typeof drive>, reason: RegExp): void {
 }
 
 import type { UpgradeResult } from "./upgrade.js";
-import { RACI_PATH } from "../../util/paths.js";
+import { RACI_PATH, ROUTING_POLICY_PATH } from "../../util/paths.js";
+// FG-581 (verify): the REAL downstream routing consumer. A quarantined policy is
+// only fail-closed if a consumer that USED to route from it now refuses — proving
+// non-consumption through behavior, not just a renamed file.
+import { governanceView } from "../../raci/governance.js";
+
+// A real, valid host RACI: the shipped seed, which compiles clean. Used to prove
+// the SUCCESS path is untouched by the FG-581 fail-closed change. `dirname` /
+// `fileURLToPath` are imported later in this file (imports hoist).
+const SEED_RACI_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "seeds", "forge-raci.md");
 
 test("FG-577 (cell 3): git pull skipped by a DIRTY checkout is unresolved — the operator asked and did not get it", () => {
   const assets = assetTree("fg577-dirty-", "CLEAN", { manifest: false });
@@ -494,9 +504,247 @@ test("FG-577 (cell 1): a routing-policy recompile FAILURE is unresolved — the 
     const r = drive({ skipProject: true, skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets });
     assert.equal(r.result.routingPolicy, "failed");
     assert.match(r.warnings, /routing-policy\.yml NOT recompiled/);
-    assertUnresolved(r, /routing-policy\.yml NOT recompiled/);
+    assertUnresolved(r, /routing-policy\.yml INVALIDATED/);
   } finally {
     rmSync(RACI_PATH, { force: true });
+    rmSync(assets, { recursive: true, force: true });
+  }
+});
+
+// ─────────── FG-581: fail-closed post-promotion RACI compile refusal ───────────
+//
+// The binding invariant: after a promotion, if the promoted runtime cannot
+// compile the installed operator-authored RACI, the PREVIOUS runtime's compiled
+// routing-policy.yml must NOT stay silently authoritative. Every cell drives the
+// production `runUpgrade` path against the suite's disposable FORGE_HOME — never
+// ~/.forge — with a host RACI present that the (promoted) runtime rejects.
+
+test("FG-581 (RED): a failed post-promotion compile does NOT leave the previous routing-policy.yml authoritative — it is quarantined", () => {
+  const assets = assetTree("fg581-quarantine-", "CLEAN", { manifest: false });
+  try {
+    // The previous runtime's compiled policy is on disk and currently authoritative.
+    writeFileSync(ROUTING_POLICY_PATH, "routes: {}\n# previous runtime's compiled policy\n");
+    // The promoted runtime is handed a host RACI it cannot compile.
+    writeFileSync(RACI_PATH, "not a RACI document at all\n");
+    assert.equal(existsSync(ROUTING_POLICY_PATH), true, "precondition: the stale policy exists");
+
+    const r = drive({ skipProject: true, skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets });
+
+    // DISCRIMINATING assertion — this FAILS against the pre-fix warn-and-continue
+    // code (which left the file untouched) and PASSES after: stale-policy
+    // NON-consumption. The file is no longer at its authoritative path.
+    assert.equal(existsSync(ROUTING_POLICY_PATH), false, "the stale routing-policy.yml must NOT remain authoritative");
+    assert.equal(existsSync(`${ROUTING_POLICY_PATH}.quarantined`), true, "it is quarantined to a sibling name no policy loader matches");
+    assert.equal(r.result.routingPolicy, "failed");
+  } finally {
+    rmSync(RACI_PATH, { force: true });
+    rmSync(ROUTING_POLICY_PATH, { force: true });
+    rmSync(`${ROUTING_POLICY_PATH}.quarantined`, { force: true });
+    rmSync(assets, { recursive: true, force: true });
+  }
+});
+
+test("FG-581: the refusal NAMES the rejected RACI construct (compiler's verbatim error) on the human warning AND --json, and is signalled as a failure", () => {
+  const assets = assetTree("fg581-names-", "CLEAN", { manifest: false });
+  try {
+    // A RACI shaped enough to reach the compiler but rejected by it — the error
+    // string names the offending construct (a non-human accountable role).
+    writeFileSync(RACI_PATH, "### route: x\nresponsible: orchestrator\naccountable: not-human\npath: in_session\n");
+    const compileError = compilePolicyFile(RACI_PATH, join(assets, "probe.yml"), { write: false });
+    assert.equal(compileError.ok, false, "fixture precondition: this RACI really does not compile");
+    const errText = (compileError as { ok: false; error: string }).error;
+
+    const r = drive({ skipProject: true, skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets });
+
+    // Human warning carries the compiler's exact reason, verbatim.
+    assert.ok(r.warnings.includes(errText), `human warning names the rejected construct — got ${JSON.stringify(r.warnings)}`);
+    // --json surface carries the SAME verbatim reason (not the generic reason).
+    assert.equal(r.result.routingPolicyError, errText, "--json routingPolicyError is the compiler's verbatim error");
+    // Failure signalled on every surface (exit 1 / INCOMPLETE / ok:false).
+    assertUnresolved(r, /routing-policy\.yml INVALIDATED/);
+    // Repair guidance ends in the actionable recompile command.
+    assert.match(r.warnings, /forge route compile/, "operator is told how to fix");
+  } finally {
+    rmSync(RACI_PATH, { force: true });
+    rmSync(ROUTING_POLICY_PATH, { force: true });
+    rmSync(`${ROUTING_POLICY_PATH}.quarantined`, { force: true });
+    rmSync(assets, { recursive: true, force: true });
+  }
+});
+
+test("FG-581 (dry-run): a compile failure FORECASTS the quarantine and does NOT mutate disk — --json ok and exit code still agree", () => {
+  const assets = assetTree("fg581-dryrun-", "CLEAN", { manifest: false });
+  try {
+    writeFileSync(ROUTING_POLICY_PATH, "routes: {}\n# previous runtime's compiled policy\n");
+    writeFileSync(RACI_PATH, "not a RACI document at all\n");
+
+    const r = drive({ dryRun: true, skipProject: true, skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets });
+
+    // No disk mutation on a forecast: the stale policy is STILL where it was, and
+    // no quarantine sibling was created.
+    assert.equal(existsSync(ROUTING_POLICY_PATH), true, "dry run must not delete/rename routing-policy.yml");
+    assert.equal(existsSync(`${ROUTING_POLICY_PATH}.quarantined`), false, "dry run creates no quarantine file");
+    // But it forecasts the invalidation, and ok/exit still agree with a real run.
+    assert.match(r.warnings, /would invalidate the stale routing-policy\.yml/);
+    assert.equal(r.result.routingPolicy, "failed");
+    assert.equal(r.exitCode, 1, "dry-run exit code agrees: this upgrade would NOT complete");
+    assert.equal(r.result.ok, false);
+  } finally {
+    rmSync(RACI_PATH, { force: true });
+    rmSync(ROUTING_POLICY_PATH, { force: true });
+    rmSync(`${ROUTING_POLICY_PATH}.quarantined`, { force: true });
+    rmSync(assets, { recursive: true, force: true });
+  }
+});
+
+test("FG-581 (success preserved): a VALID host RACI still recompiles routing-policy.yml cleanly — exit 0, ok:true, no new friction", () => {
+  const assets = assetTree("fg581-success-", "CLEAN", { manifest: false });
+  try {
+    // The shipped seed RACI is valid and compiles clean.
+    cpSync(SEED_RACI_PATH, RACI_PATH);
+    const r = drive({ skipProject: true, skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets });
+
+    assert.equal(r.result.routingPolicy, "recompiled", "the success path is unchanged");
+    assert.equal(r.result.routingPolicyError, null, "no error surfaced on success");
+    assert.equal(existsSync(ROUTING_POLICY_PATH), true, "the derived policy is written, not quarantined");
+    assert.equal(existsSync(`${ROUTING_POLICY_PATH}.quarantined`), false, "nothing quarantined on success");
+    assert.equal(r.exitCode, undefined, "exit 0");
+    assert.equal(r.result.ok, true);
+  } finally {
+    rmSync(RACI_PATH, { force: true });
+    rmSync(ROUTING_POLICY_PATH, { force: true });
+    rmSync(assets, { recursive: true, force: true });
+  }
+});
+
+test("FG-581 (fail-closed): a quarantine rename FAILURE falls back to REMOVING the stale policy — it does not stay authoritative, and the command does not crash", () => {
+  const assets = assetTree("fg581-quarantine-fail-", "CLEAN", { manifest: false });
+  const quarantinePath = `${ROUTING_POLICY_PATH}.quarantined`;
+  try {
+    // The previous runtime's compiled policy is on disk and currently authoritative.
+    writeFileSync(ROUTING_POLICY_PATH, "routes: {}\n# previous runtime's compiled policy\n");
+    // The promoted runtime is handed a host RACI it cannot compile.
+    writeFileSync(RACI_PATH, "not a RACI document at all\n");
+    // Force renameSync to fail: a DIRECTORY sits at the quarantine destination, and a
+    // file cannot be renamed over a directory. Pre-fix, the bare renameSync throws —
+    // the exception escapes AND the stale policy stays where it is (fail-OPEN). The
+    // fix must catch that and fall back to unlinking the stale policy.
+    mkdirSync(quarantinePath, { recursive: true });
+
+    let threw: unknown = null;
+    let r!: ReturnType<typeof drive>;
+    try {
+      r = drive({ skipProject: true, skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets });
+    } catch (e) {
+      threw = e;
+    }
+
+    // (a) the command does not crash on the rename failure.
+    assert.equal(threw, null, "a quarantine rename failure must not escape and crash the command");
+    // (b) the stale routing-policy.yml is NOT left authoritative — the fallback unlink
+    // removed it. This is the fail-closed invariant; the pre-fix code fails it.
+    assert.equal(existsSync(ROUTING_POLICY_PATH), false, "fail-open would leave the stale policy here; the fallback unlink must remove it");
+    // (c) the refusal still renders on every surface.
+    assert.equal(r.result.routingPolicy, "failed");
+    assert.equal(r.result.ok, false);
+    assert.equal(r.exitCode, 1);
+  } finally {
+    rmSync(RACI_PATH, { force: true });
+    rmSync(ROUTING_POLICY_PATH, { force: true });
+    rmSync(quarantinePath, { recursive: true, force: true });
+    rmSync(assets, { recursive: true, force: true });
+  }
+});
+
+test("FG-581 (AC c): the REAL --json serialization path emits ok:false, the rejected construct in `unresolved`, and routingPolicyError verbatim", () => {
+  const assets = assetTree("fg581-json-", "CLEAN", { manifest: false });
+  try {
+    // A RACI shaped enough to reach the compiler but rejected by it — the error
+    // names the offending construct (a non-human accountable role).
+    writeFileSync(RACI_PATH, "### route: x\nresponsible: orchestrator\naccountable: not-human\npath: in_session\n");
+    const compileError = compilePolicyFile(RACI_PATH, join(assets, "probe.yml"), { write: false });
+    assert.equal(compileError.ok, false, "fixture precondition: this RACI really does not compile");
+    const errText = (compileError as { ok: false; error: string }).error;
+
+    // Drive the REAL --json production branch (json:true) so the
+    // `if (json) console.log(JSON.stringify(result))` path actually runs — the prior
+    // FG-581 tests inspect the returned object and never exercise serialization.
+    const r = drive({ json: true, skipProject: true, skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets });
+
+    // Parse the ACTUAL serialized payload a --json consumer reads off stdout.
+    const parsed = JSON.parse(r.stdout) as UpgradeResult;
+    assert.equal(parsed.ok, false, "--json ok:false on a post-promotion compile failure");
+    assert.ok(
+      parsed.unresolved.some((u) => /routing-policy\.yml INVALIDATED/.test(u)),
+      `--json unresolved names the refusal — got ${JSON.stringify(parsed.unresolved)}`,
+    );
+    assert.equal(parsed.routingPolicyError, errText, "--json routingPolicyError carries the compiler's verbatim error string");
+    assert.equal(r.exitCode, 1, "--json still sets the exit code a shell script reads");
+  } finally {
+    rmSync(RACI_PATH, { force: true });
+    rmSync(ROUTING_POLICY_PATH, { force: true });
+    rmSync(`${ROUTING_POLICY_PATH}.quarantined`, { force: true });
+    rmSync(assets, { recursive: true, force: true });
+  }
+});
+
+// The engineer's FG-581 (RED) cell proves the stale policy is renamed off its
+// authoritative PATH. This cell proves the CONSEQUENCE that path change exists
+// for: a real downstream consumer (governanceView, backing `forge route
+// governance` + the dashboard panel) that WOULD route from the stale policy now
+// fails closed instead. That is the binding invariant expressed as behavior — the
+// previous runtime's routing-policy.yml is genuinely no longer authoritative, not
+// merely moved. Drives the same production `runUpgrade` path against the suite's
+// disposable FORGE_HOME.
+test("FG-581 (downstream fail-closed): after a failed post-promotion compile, a consumer that USED to route from the stale policy now fails closed (policy_not_found)", () => {
+  const assets = assetTree("fg581-downstream-", "CLEAN", { manifest: false });
+  // A VALID compiled policy — governanceView loads it and routes from it. This is
+  // exactly the previous runtime's authoritative artifact, not a broken stub.
+  const VALID_STALE_POLICY = [
+    "version: 1",
+    "governance:",
+    "  accountable: human",
+    "routes:",
+    "  stale_route:",
+    "    responsible: orchestrator",
+    "    path: in_session",
+    "    consulted: []",
+    "    required_followups: []",
+    "    informed: []",
+    "    force_rules: []",
+    "",
+  ].join("\n");
+  try {
+    writeFileSync(ROUTING_POLICY_PATH, VALID_STALE_POLICY);
+
+    // PRE-condition: the stale policy is authoritative to the live consumer — it
+    // returns the stale routes. This is what makes the post-assertion a claim about
+    // NON-consumption rather than about an already-absent file.
+    const before = governanceView({});
+    assert.equal(before.ok, true, "precondition: the stale policy is loadable and authoritative to the routing consumer");
+    if (before.ok) assert.ok(before.routes.stale_route, "…and the consumer really is routing from the stale rules");
+
+    // The promoted runtime is handed a host RACI it cannot compile.
+    writeFileSync(RACI_PATH, "not a RACI document at all\n");
+
+    const r = drive({ skipProject: true, skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets });
+    assert.equal(r.result.routingPolicy, "failed");
+
+    // POST-condition — the binding invariant, proven through the REAL consumer: the
+    // stale policy is no longer consumed. governanceView now fails closed with
+    // `policy_not_found` rather than returning the stale routes it returned above.
+    const after = governanceView({});
+    assert.equal(after.ok, false, "the stale policy must NOT remain silently authoritative to the routing consumer");
+    if (!after.ok) {
+      assert.ok(
+        after.findings.some((f) => f.code === "policy_not_found"),
+        `the consumer fails closed (policy_not_found) — got ${JSON.stringify(after.findings)}`,
+      );
+    }
+  } finally {
+    rmSync(RACI_PATH, { force: true });
+    rmSync(ROUTING_POLICY_PATH, { force: true });
+    rmSync(`${ROUTING_POLICY_PATH}.quarantined`, { force: true });
     rmSync(assets, { recursive: true, force: true });
   }
 });
