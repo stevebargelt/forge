@@ -1,9 +1,11 @@
 ---
 id: FG-581
 type: story
-status: active
+status: done
 title: "FG-572 Child 5f: a post-promotion RACI compile failure only warns, leaving the previous runtime's routing-policy.yml silently authoritative"
 created: 2026-07-17
+closed: 2026-07-22
+closed_commit: dcc19ec
 ---
 
 **Parent:** FG-572 · **Epic:** FG-561
@@ -52,3 +54,17 @@ silently readable. Do not redesign RACI, routing, promotion, or installed-surfac
   applicable), exit status, and repair guidance.
 - Successful-upgrade behavior is preserved.
 - Tests use a **disposable FORGE_HOME**.
+
+## Acceptance Evidence
+
+Shipped in squash-merge `dcc19ec` (PR #152). Tests in `src/cli/commands/upgrade.integration.test.ts` drive the real `runUpgrade` path under the suite's disposable `FORGE_HOME`.
+
+| AC | Evidence | Verdict |
+|----|----------|---------|
+| Post-promotion compile failure produces a named, actionable refusal; the previous runtime's `routing-policy.yml` does not remain silently authoritative — observed RED before the fix | `upgrade.ts` compile-failure branch (the `{ok:false}` else at ~line 614) sets `routingPolicy='failed'` and neutralizes the stale policy (quarantine → unlink fallback → loud "still authoritative" if both fail); test `FG-581 (RED): a failed post-promotion compile does NOT leave the previous routing-policy.yml authoritative — it is quarantined` (:522) asserts on-disk non-consumption and fails against pre-fix code; `FG-581 (downstream fail-closed)` (:797) proves a consumer that used to route from the stale policy now fails closed (`policy_not_found`) | met |
+| The operator is told exactly which RACI construct the new compiler rejected | Compiler's verbatim `res.error` threaded into the human warning, the `--json` `UpgradeResult.routingPolicyError` field, and the repair guidance; test `FG-581: the refusal NAMES the rejected RACI construct … on the human warning AND --json` (:547) and `FG-581 (AC c): the REAL --json serialization path emits … routingPolicyError verbatim` (:757) | met |
+| Coverage spans production upgrade path, stale-policy non-consumption, human output, JSON, exit status, repair guidance | Real `runUpgrade` path throughout; non-consumption (:522, :797); human output + exit 1 + INCOMPLETE (:547); real `--json` serialization parse (:757); repair guidance (:575); fail-closed rename-failure fallback (:655) and double-failure (:694); promoted-**release**-mode acceptance (:862) | met |
+| Successful-upgrade behavior is preserved | `FG-581 (success preserved): a VALID host RACI still recompiles routing-policy.yml cleanly — exit 0, ok:true, no new friction` (:635); `FG-581 (dry-run)` (:610) proves a compile-failure forecast mutates no disk | met |
+| Tests use a disposable FORGE_HOME | Whole suite uses the disposable `FORGE_HOME` from `src/test-setup.ts`; the configurable-`FORGE_HOME` (:575) and release-mode (:862) tests additionally assert `FORGE_HOME` is not the default `~/.forge` and that closeout/repair paths resolve under it | met |
+
+Required CI green at merge (`test` + `test-extended`). Deferred (test-completeness / broader-scope, non-blocking): FG-603 (release-mode `--json`/construct assertions — mode-agnostic, already proven in dev mode), FG-601 (terminal-escape hardening), FG-602 (startRun route-receipt gap).

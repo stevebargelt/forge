@@ -10,8 +10,10 @@ created: 2026-07-14
 **Depends on:** FG-571 (promotion exists to be compatible with).
 
 **UMBRELLA — decomposed 2026-07-17 after the read-only architecture pass. Closes when its children close.**
-Children: **FG-577** (5a, prerequisite) · **FG-578** (5b) · **FG-579** (5c+5d) · **FG-581** (5f) ·
-**FG-582** (5e, blocked on T9) · **FG-580** (5g — OPERATOR DECISION, campaign critical path).
+Children: **FG-577** (5a, prerequisite) · **FG-578** (5b) · **FG-579** (5c+5d) · **FG-581** (5f — ✓ DONE, `dcc19ec`) ·
+**FG-582** (5e, blocked on T9) · **FG-583** (5h, non-atomic seed cp loop) · **FG-580** (5g — OPERATOR DECISION, campaign critical path).
+
+**Progress (2026-07-22):** FG-581 (5f — `routing-policy.yml` RE-DERIVE / post-promotion compile-failure refusal) shipped in `dcc19ec` (PR #152): the upgrade now neutralizes a stale compiled policy fail-closed instead of warn-and-continue, names the rejected RACI construct, and resolves paths from `FORGE_HOME`. Remaining open children: **FG-582** (5e hooks — T9 anchoring) and **FG-583** (5h non-atomic seed cp). FG-580 (5g dashboard) shipped `bc9286f`. This umbrella cannot close while any child remains open.
 
 Architecture pass: run `run-fg-572-installed-surface-compatibility-read-only-architecture-pass-75b811`
 (task-architecture-advisor-e950c5), read-only, at `12b13c2`. Its load-bearing claims were independently
