@@ -1,9 +1,11 @@
 ---
 id: FG-582
 type: story
-status: active
+status: done
 title: "FG-572 Child 5e: installed git hooks are absolute symlinks into the dev checkout and do not follow a promotion"
 created: 2026-07-17
+closed: 2026-07-22
+closed_commit: 44a305a
 ---
 
 **Parent:** FG-572 · **Epic:** FG-561 · **Status:** ready to implement — T9 anchoring settled (symlink-through-`$FORGE_HOME/current`, operator decision 2026-07-17); both blockers cleared (FG-577 landed `b5add06`).
@@ -77,3 +79,18 @@ indefinitely — the worse failure. The operator chose `current`.)
 - Closing FG-582 + FG-583 closes FG-572 → closes epic FG-561.
 - The two stale docs are the operator-facing statement of exactly the behavior this ticket decides; they must be
   reconciled here, not deferred (they were only deferred originally because the protection did not yet exist).
+
+## Acceptance Evidence
+
+Shipped in merge commit `44a305a` (PR #153). Verified against required CI green (`test` + `test-extended`) at head `226d954`.
+
+| AC | Evidence | Verdict |
+|----|----------|---------|
+| 1 — Promotion-following | `promotedHookTarget`/`hookInstallTarget` (`init.ts:233,241`) target `$FORGE_HOME/current/scripts/git-hooks/commit-msg-no-ai-attribution` **through** `current` — the review-loop corrected the AC's `<hook>` shorthand to the real release-tree-internal layout (a root-level `current/commit-msg` never exists in a release). Tests: `init.test.ts:236` (RED absolute-dev-path → GREEN current arm), `init.integration.test.ts:197,265,387` (a promotion changes the bytes a NEW invocation/commit runs). | met |
+| 2 — In-flight anchoring | OS path-resolution guarantee: git resolves the symlink at hook-exec, so a mid-flight `current` swap cannot affect an already-exec'd process. No code; documented in `init.ts` (arm comment). Architect-approved as needing no executable test. | met |
+| 3 — Dev-checkout fallback | `promotedArmResolves` keys on **resolvability** (`init.ts:251`); a dangling/absent `current` → dev source. Tests: `init.test.ts:253` (no current → fallback), `init.test.ts:360` (dangling current → fallback), `init.integration.test.ts:423` (no current, dev loop enforced). | met |
+| 4 — Stale-hook repair by evidence | `forgeOwnedHookTargets`/`pointsAt` (`init.ts:260,219`): owned iff the link resolves at the promoted-arm target or this checkout's own source (incl. legacy absolute-dev-path); bare `releases/*` containment rejected. Tests: `init.test.ts:268` (legacy repoint), `init.test.ts:323` (release-dir containment is NOT evidence), `init.integration.test.ts:447` (migrate legacy → current). | met |
+| 5 — Foreign-surface refusal | `readOwnedTargetState`/`ownedStateMatches` recheck before mutate (`init.ts:277,297,306`). Tests: `init.test.ts:294` (foreign regular file), `init.test.ts:307` (foreign symlink), `init.test.ts:379,405` (swapped-to-foreign between plan/execute left untouched), `init.integration.test.ts:302` (byte-for-byte intact). Residual sub-millisecond check-then-`renameSync` window tracked as follow-up **FG-604** (theoretical race, no realistic exploit; operator-dispositioned). | met |
+| 6 — Idempotence | `already-linked` no-op (`init.ts:219,283`). Tests: `init.test.ts:283` (already-correct link is a no-op), `init.test.ts:340` (repoint then idempotent). | met |
+| 7 — Docs reconciliation | `docs/concepts.md` + `docs/quick-start.md` reconciled to the `$FORGE_HOME/current` mechanic (docs phase `task-docs-f567d1`; both files in merge `44a305a`). | met |
+| 8 — Test isolation | All FG-582 tests use `mkdtempSync` disposable FORGE_HOME + repo/install dirs and never touch real `.git/hooks`. Full RED-before-GREEN matrix present (`init.test.ts:236–405`, `init.integration.test.ts:197–447`), green in CI `test` + `test-extended`. | met |
