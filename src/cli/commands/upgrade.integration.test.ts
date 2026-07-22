@@ -656,6 +656,59 @@ test("FG-581 (fail-closed): a quarantine rename FAILURE falls back to REMOVING t
   }
 });
 
+test("FG-581 (fail-closed, double failure): when BOTH quarantine and remove fail, routingPolicy is `failed-not-neutralized` and every surface says the stale policy is STILL authoritative — never that it was neutralized", () => {
+  const assets = assetTree("fg581-double-fail-", "CLEAN", { manifest: false });
+  const quarantinePath = `${ROUTING_POLICY_PATH}.quarantined`;
+  try {
+    // Force BOTH neutralization paths to fail deterministically, independent of uid:
+    // (a) the stale policy is a non-empty DIRECTORY, so unlinkSync throws EISDIR; and
+    // (b) a non-empty directory sits at the quarantine destination, so renameSync
+    //     cannot replace it (ENOTEMPTY/EEXIST). This is the genuinely-stuck case the
+    //     pre-fix reason string described as a fail-closed quarantine — the opposite
+    //     of what actually happened.
+    mkdirSync(ROUTING_POLICY_PATH, { recursive: true });
+    writeFileSync(join(ROUTING_POLICY_PATH, "keep"), "stale policy stand-in\n");
+    mkdirSync(quarantinePath, { recursive: true });
+    writeFileSync(join(quarantinePath, "occupied"), "destination is non-empty\n");
+    // The promoted runtime is handed a host RACI it cannot compile.
+    writeFileSync(RACI_PATH, "not a RACI document at all\n");
+
+    let threw: unknown = null;
+    let r!: ReturnType<typeof drive>;
+    try {
+      r = drive({ skipProject: true, skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets });
+    } catch (e) {
+      threw = e;
+    }
+
+    // (a) the double failure still does not escape and crash the command.
+    assert.equal(threw, null, "a double neutralization failure must not escape and crash the command");
+    // (b) the stale policy is STILL on disk — that is exactly why the closeout must
+    // not claim it was neutralized.
+    assert.equal(existsSync(ROUTING_POLICY_PATH), true, "the stale policy is genuinely stuck on disk in this path");
+    // (c) the outcome is distinct from the neutralized `failed`, so the derived reason differs.
+    assert.equal(r.result.routingPolicy, "failed-not-neutralized");
+    assert.equal(r.result.ok, false);
+    assert.equal(r.exitCode, 1);
+    // (d) `unresolved` tells automation the truth: still authoritative, NOT fail-closed.
+    assert.ok(
+      r.result.unresolved.some((u) => /STILL AUTHORITATIVE/.test(u) && /NOT fail-closed/.test(u)),
+      `unresolved must state the policy is still authoritative — got ${JSON.stringify(r.result.unresolved)}`,
+    );
+    assert.ok(
+      !r.result.unresolved.some((u) => /was neutralized|routing is fail-closed until/.test(u)),
+      "unresolved must NOT claim a neutralization that did not happen",
+    );
+    // (e) routingPolicyError carries the neutralization failure so an operator can act.
+    assert.match(r.result.routingPolicyError ?? "", /could NOT be neutralized/);
+  } finally {
+    rmSync(RACI_PATH, { force: true });
+    rmSync(ROUTING_POLICY_PATH, { recursive: true, force: true });
+    rmSync(quarantinePath, { recursive: true, force: true });
+    rmSync(assets, { recursive: true, force: true });
+  }
+});
+
 test("FG-581 (AC c): the REAL --json serialization path emits ok:false, the rejected construct in `unresolved`, and routingPolicyError verbatim", () => {
   const assets = assetTree("fg581-json-", "CLEAN", { manifest: false });
   try {

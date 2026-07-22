@@ -164,7 +164,18 @@ export type AssetInstallOutcome = "installed" | "would-install" | "not-found" | 
  *  a host this upgrade never touched. */
 export type AuthoredRetentionOutcome = "none" | "retained" | "not-run";
 
-export type RoutingPolicyOutcome = "recompiled" | "would-recompile" | "no-raci" | "failed";
+// FG-581: `failed` and `failed-not-neutralized` are BOTH compile failures, split
+// on whether the stale policy could be taken off disk. `failed` = neutralized
+// (quarantined or removed) → routing is genuinely fail-closed. `failed-not-neutralized`
+// = the double-failure path (rename AND unlink threw), so the stale policy is STILL
+// authoritative under the promoted runtime and routing is NOT fail-closed until an
+// operator removes it by hand. The two must not collapse to one reason string.
+export type RoutingPolicyOutcome =
+  | "recompiled"
+  | "would-recompile"
+  | "no-raci"
+  | "failed"
+  | "failed-not-neutralized";
 
 export type ProjectInitOutcome =
   | "refreshed"
@@ -271,7 +282,11 @@ const ROUTING_POLICY: Record<RoutingPolicyOutcome, Resolution> = {
   // RACI it derives from — it is invalidated (quarantined) at the failure site, so
   // routing falls back to fail-closed (lane 'manual' / `policy_not_found`) until
   // the RACI compiles. The named refusal, not a stale policy that keeps routing.
-  failed: unresolvedBecause("routing-policy.yml INVALIDATED — the promoted runtime rejected the host RACI; the stale policy was quarantined and routing is fail-closed until the RACI compiles (fix ~/.forge/forge-raci.md, then run: forge route compile)"),
+  failed: unresolvedBecause("routing-policy.yml INVALIDATED — the promoted runtime rejected the host RACI; the stale policy was neutralized (quarantined or removed) and routing is fail-closed until the RACI compiles (fix ~/.forge/forge-raci.md, then run: forge route compile)"),
+  // The double-failure path: the RACI was rejected AND neither rename nor unlink
+  // could take the stale policy off disk. It is STILL authoritative under the
+  // promoted runtime — routing is NOT fail-closed. Say that, not the opposite.
+  "failed-not-neutralized": unresolvedBecause("routing-policy.yml STILL AUTHORITATIVE — the promoted runtime rejected the host RACI but the stale policy could NOT be neutralized on disk; routing is NOT fail-closed. Remove it by hand (rm ~/.forge/routing-policy.yml), then fix ~/.forge/forge-raci.md and run: forge route compile"),
 };
 
 const PROJECT_INIT: Record<ProjectInitOutcome, Resolution> = {
@@ -652,6 +667,11 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
                   unlinkSync(ROUTING_POLICY_PATH);
                   warn(`          could not quarantine the stale routing-policy.yml (${(quarantineErr as Error).message}) — REMOVED it instead; routing is now fail-closed until the RACI compiles`);
                 } catch (removeErr) {
+                  // Neither rename nor unlink took it off disk: the stale policy is
+                  // genuinely stuck and STILL authoritative. Reclassify so the derived
+                  // `unresolved` reason stops claiming a fail-closed quarantine that
+                  // did not happen — the routing outcome is the opposite here.
+                  routingPolicy = "failed-not-neutralized";
                   const stuck = `the stale routing-policy.yml could NOT be neutralized (quarantine: ${(quarantineErr as Error).message}; remove: ${(removeErr as Error).message}) — it is STILL on disk at ${ROUTING_POLICY_PATH} and authoritative under the promoted runtime; remove it by hand: rm ${ROUTING_POLICY_PATH}`;
                   warn(`          ⚠ ${stuck}`);
                   routingPolicyError = `${res.error} — ${stuck}`;
