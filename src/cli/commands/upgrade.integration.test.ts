@@ -847,6 +847,123 @@ test("FG-581 (downstream fail-closed): after a failed post-promotion compile, a 
   }
 });
 
+// FG-581 (release-mode acceptance): the ticket's premise is POST-PROMOTION — a
+// promoted RELEASE runtime, not a dev checkout. The Step-3 routing-policy
+// recompile/quarantine logic is mode-agnostic (mode only gates the Steps 1-2
+// dev-advancement), so the sibling FG-581 cells drive it in `mode: "dev"`. But the
+// acceptance criterion is about the promoted-release path, so it must be exercised
+// in release mode DIRECTLY. This cell drives the REAL action with `mode: "release"`
+// — the promoted-release UpgradeEnv the ticket is actually about — and proves the
+// full refusal + neutralization contract there. Steps 1-2 are skipped so the
+// release-mode advancement refusal cannot contaminate the unresolved list; the
+// routing-policy compile failure is the SOLE driver, which is exactly the
+// post-promotion condition under test. Passes against the already-fixed production
+// code — it is proving the release-mode acceptance semantics, not a new change.
+test("FG-581 (release-mode acceptance): a promoted RELEASE that cannot compile the host RACI REFUSES and does NOT leave the previous runtime's routing-policy.yml authoritative", () => {
+  // Criterion 5 precondition: the suite's FORGE_HOME is a disposable temp dir
+  // (src/test-setup.ts), NEVER the default ~/.forge / the real host install —
+  // RACI_PATH and ROUTING_POLICY_PATH both derive from it, so the whole test
+  // operates inside disposable state.
+  assert.ok(!RACI_PATH.startsWith(join(homedir(), ".forge")), "precondition: this suite's FORGE_HOME is not the default ~/.forge");
+  assert.ok(!ROUTING_POLICY_PATH.startsWith(join(homedir(), ".forge")), "precondition: routing-policy.yml lives under the disposable FORGE_HOME, not ~/.forge");
+
+  const assets = assetTree("fg581-release-", "RELEASE");
+  // The previous runtime's compiled policy — a VALID, loadable routing-policy.yml
+  // that a live consumer routes from, so the post-assertion is a claim about
+  // stale-policy NON-consumption, not about an already-absent file.
+  const VALID_STALE_POLICY = [
+    "version: 1",
+    "governance:",
+    "  accountable: human",
+    "routes:",
+    "  stale_route:",
+    "    responsible: orchestrator",
+    "    path: in_session",
+    "    consulted: []",
+    "    required_followups: []",
+    "    informed: []",
+    "    force_rules: []",
+    "",
+  ].join("\n");
+  try {
+    writeFileSync(ROUTING_POLICY_PATH, VALID_STALE_POLICY);
+    // The promoted RELEASE runtime is handed a host RACI it cannot compile.
+    writeFileSync(RACI_PATH, "not a RACI document at all\n");
+
+    // Precondition: the stale policy is authoritative to the live routing consumer
+    // — it returns the stale routes. This is what makes the post-assertion a claim
+    // about non-consumption rather than about an already-absent file.
+    const before = governanceView({});
+    assert.equal(before.ok, true, "precondition: the previous runtime's policy is loadable and authoritative to the routing consumer");
+    if (before.ok) assert.ok(before.routes.stale_route, "…and the consumer really is routing from the stale rules");
+    assert.equal(existsSync(ROUTING_POLICY_PATH), true, "precondition: the stale routing-policy.yml exists at its authoritative path");
+
+    // Drive the REAL upgrade path as a PROMOTED RELEASE (mode: "release"). Steps
+    // 1-2 are skipped so the release-mode advancement refusal is NOT on the
+    // unresolved list — the routing-policy compile failure is the sole,
+    // post-promotion driver.
+    const r = drive({ skipProject: true, skipGit: true, skipNpm: true }, { mode: "release", assetsDir: assets, devDir: assets });
+
+    // (1) The upgrade REFUSES — on every consumer surface, in the release mode the
+    // ticket is actually about.
+    assert.equal(r.result.mode, "release", "the action ran in the promoted-release mode the acceptance criterion names");
+    assert.equal(r.result.routingPolicy, "failed", "the compile failure is a refusal (neutralized), not a warn-and-continue");
+    assert.equal(r.result.ok, false, "a promoted runtime that cannot vouch for the policy did not complete");
+    assert.equal(r.exitCode, 1, "the refusal is carried in the exit code a script reads");
+    assert.ok(!r.stdout.includes("Upgrade complete."), "the closing line must not claim completion — the run is INCOMPLETE");
+    assert.match(r.stdout, /Upgrade INCOMPLETE — /, "the run is INCOMPLETE, and says so");
+    assert.ok(
+      r.result.unresolved.some((u) => /routing-policy\.yml INVALIDATED/.test(u)),
+      `unresolved names the post-promotion refusal — got ${JSON.stringify(r.result.unresolved)}`,
+    );
+
+    // (2) The stale routing-policy.yml is NEUTRALIZED on disk — a DIRECT filesystem
+    // assertion, not a claim about the result object. In the normal case the
+    // quarantine rename succeeds, so it is off its authoritative path and sits at
+    // the sibling .quarantined name no policy loader matches (removal is the
+    // fallback only when the rename cannot happen).
+    assert.equal(existsSync(ROUTING_POLICY_PATH), false, "the stale routing-policy.yml must NOT remain readable-and-authoritative at ROUTING_POLICY_PATH");
+    assert.equal(existsSync(`${ROUTING_POLICY_PATH}.quarantined`), true, "it is quarantined to a sibling name no policy loader matches");
+
+    // (3) The failure reason AND the repair guidance name the RESOLVED non-default
+    // paths under this FORGE_HOME (RACI_PATH / ROUTING_POLICY_PATH), and never a
+    // hard-coded ~/.forge.
+    assert.ok(
+      r.result.unresolved.some((u) => u.includes(RACI_PATH)),
+      `the failure reason names the actual RACI path (${RACI_PATH}) — got ${JSON.stringify(r.result.unresolved)}`,
+    );
+    assert.ok(r.warnings.includes(RACI_PATH), `repair guidance names the actual RACI path — got ${JSON.stringify(r.warnings)}`);
+    assert.ok(r.warnings.includes(ROUTING_POLICY_PATH), `repair guidance names the actual routing-policy.yml path — got ${JSON.stringify(r.warnings)}`);
+    assert.ok(!r.warnings.includes("~/.forge"), `repair guidance must not hard-code ~/.forge — got ${JSON.stringify(r.warnings)}`);
+    assert.ok(
+      !r.result.unresolved.some((u) => u.includes("~/.forge")),
+      `unresolved must not hard-code ~/.forge — got ${JSON.stringify(r.result.unresolved)}`,
+    );
+
+    // (4) The previous routing policy cannot remain silently authoritative: the
+    // REAL downstream consumer (governanceView, backing `forge route governance` +
+    // the dashboard panel) that WOULD have routed from the stale policy now fails
+    // closed (policy_not_found) instead of returning the stale routes it returned
+    // above — so a subsequent consumer fails closed rather than route off the stale
+    // policy. The invariant expressed as behavior, not just a renamed file.
+    const after = governanceView({});
+    assert.equal(after.ok, false, "the stale policy must NOT remain silently authoritative to the routing consumer after the promoted-runtime refusal");
+    if (!after.ok) {
+      assert.ok(
+        after.findings.some((f) => f.code === "policy_not_found"),
+        `a subsequent consumer fails closed (policy_not_found) — got ${JSON.stringify(after.findings)}`,
+      );
+    }
+  } finally {
+    // (5) Cleanup — nothing here touched the real ~/.forge / host install; the
+    // disposable FORGE_HOME artifacts and the release assets tree are removed.
+    rmSync(RACI_PATH, { force: true });
+    rmSync(ROUTING_POLICY_PATH, { force: true });
+    rmSync(`${ROUTING_POLICY_PATH}.quarantined`, { force: true });
+    rmSync(assets, { recursive: true, force: true });
+  }
+});
+
 test("FG-577 (cell 1): a host with NO RACI is resolved — there is no derived artifact to keep in lockstep", () => {
   // The guard on the test above: it must fire on a compile failure, not on every
   // host that has never installed a RACI.
