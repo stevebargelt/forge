@@ -179,8 +179,9 @@ type HookPlan =
 // Exported for testing.
 //
 // FG-582: the install target follows the promoted release. When a `current`
-// pointer exists under `home`, install a symlink THROUGH $FORGE_HOME/current/
-// commit-msg — git re-resolves it at every invocation, so a NEW commit picks up
+// pointer exists under `home`, install a symlink THROUGH the bundled hook under
+// $FORGE_HOME/current/ (scripts/git-hooks/commit-msg-no-ai-attribution) — git
+// re-resolves it at every invocation, so a NEW commit picks up
 // the currently promoted release's bytes (an already-running invocation stays
 // anchored to whatever it started under; the OS resolves the interpreter path at
 // process start). With no `current` pointer (a live dev checkout), fall back to
@@ -189,7 +190,8 @@ type HookPlan =
 // Ownership decisions are made by lstat/readlink of the LINK ITSELF (never
 // existsSync, which follows a dangling link into a false positive). A hook is
 // provably Forge-owned — and therefore safe to re-point on a stale target — IFF
-// its link resolves at the promoted-arm target ($FORGE_HOME/current/commit-msg)
+// its link resolves at the promoted-arm target
+// ($FORGE_HOME/current/scripts/git-hooks/commit-msg-no-ai-attribution)
 // OR at this checkout's own hook source (the legacy absolute-dev-path form the
 // pre-FG-582 code installed). Anything else — a regular file, a foreign symlink,
 // a link we can't attribute — is left untouched. Bare containment in
@@ -219,22 +221,35 @@ export function planCommitMsgHook(projectDir: string, home: string = FORGE_HOME)
   return { action: "exists-other", target, details: `symlink → ${linkTarget}` };
 }
 
-// The arm-selected install target: promoted ($FORGE_HOME/current/commit-msg)
+// The bundled commit-msg hook's path RELATIVE to a release root. A release
+// copies the whole source tree (release.ts), so the hook a promotion ships lives
+// at $FORGE_HOME/current/scripts/git-hooks/commit-msg-no-ai-attribution — NOT a
+// root-level `current/commit-msg`, which no real release ever contains.
+const PROMOTED_HOOK_REL = join("scripts", "git-hooks", "commit-msg-no-ai-attribution");
+
+// The promoted-arm install target: the bundled hook reached THROUGH
+// $FORGE_HOME/current, so git re-resolves it to the currently promoted release
+// on every invocation.
+function promotedHookTarget(home: string): string {
+  return join(currentLinkIn(home), PROMOTED_HOOK_REL);
+}
+
+// The arm-selected install target: the promoted arm (through $FORGE_HOME/current)
 // when the current pointer RESOLVES to a usable hook target, else the
 // dev-checkout source.
 function hookInstallTarget(home: string): string {
   return promotedArmResolves(home)
-    ? join(currentLinkIn(home), "commit-msg")
+    ? promotedHookTarget(home)
     : resolveHookSource();
 }
 
 // FG-582 (AC-3): choose the promoted arm on RESOLVABILITY, not link existence.
 // existsSync follows the link, so a DANGLING `current` (its release dir absent,
-// or a release with no commit-msg) reads false and we fall back to the dev
-// checkout — never install an unresolvable $FORGE_HOME/current/commit-msg hook
-// that would make the commit-msg guard silently never run.
+// or a release with no bundled hook) reads false and we fall back to the dev
+// checkout — never install an unresolvable promoted-arm hook that would make the
+// commit-msg guard silently never run.
 function promotedArmResolves(home: string): boolean {
-  return existsSync(join(currentLinkIn(home), "commit-msg"));
+  return existsSync(promotedHookTarget(home));
 }
 
 // The set of link targets that prove a hook is Forge-owned: the promoted-arm
@@ -246,7 +261,7 @@ function forgeOwnedHookTargets(home: string): string[] {
   // FG-582 (FIX 4): the dev-checkout source is only an OPTIONAL ownership
   // signal here (migrating legacy dev-path links). Tolerate its absence rather
   // than throwing — a missing bundled hook must not abort the promoted arm.
-  const targets = [join(currentLinkIn(home), "commit-msg")];
+  const targets = [promotedHookTarget(home)];
   const devSource = tryResolveHookSource();
   if (devSource) targets.push(devSource);
   return targets;

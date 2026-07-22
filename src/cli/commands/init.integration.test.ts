@@ -197,15 +197,13 @@ test("planCommitMsgHook: returns exists-other when a symlink points somewhere el
 test("FG-582: installed hook symlinks through $FORGE_HOME/current and a promotion changes the bytes a NEW invocation runs", () => {
   const homeDir = mkdtempSync(join(tmpdir(), "forge-home-"));
   try {
-    // Two releases, each with its own commit-msg hook bytes.
-    const r1 = join(homeDir, "releases", "r-1", "scripts", "git-hooks");
-    const r2 = join(homeDir, "releases", "r-2", "scripts", "git-hooks");
-    mkdirSync(r1, { recursive: true });
-    mkdirSync(r2, { recursive: true });
-    // The current pointer resolves .../current/commit-msg; lay the byte-carrying
-    // files at that resolved location under each release.
-    writeFileSync(join(homeDir, "releases", "r-1", "commit-msg"), "#!/bin/sh\n# RELEASE ONE\n");
-    writeFileSync(join(homeDir, "releases", "r-2", "commit-msg"), "#!/bin/sh\n# RELEASE TWO\n");
+    // Two releases, each carrying the SHIPPED hook layout (release.ts copies the
+    // whole tree, so the hook lives at scripts/git-hooks/commit-msg-no-ai-attribution).
+    const hookRel = join("scripts", "git-hooks", "commit-msg-no-ai-attribution");
+    mkdirSync(join(homeDir, "releases", "r-1", "scripts", "git-hooks"), { recursive: true });
+    mkdirSync(join(homeDir, "releases", "r-2", "scripts", "git-hooks"), { recursive: true });
+    writeFileSync(join(homeDir, "releases", "r-1", hookRel), "#!/bin/sh\n# RELEASE ONE\n");
+    writeFileSync(join(homeDir, "releases", "r-2", hookRel), "#!/bin/sh\n# RELEASE TWO\n");
     symlinkSync(join(homeDir, "releases", "r-1"), join(homeDir, "current"));
 
     execSync("git init -q", { cwd: projectDir });
@@ -213,18 +211,18 @@ test("FG-582: installed hook symlinks through $FORGE_HOME/current and a promotio
     assert.equal(plan.action, "install");
     if (plan.action !== "install") throw new Error("setup failed");
     // The install target is the STATIC current path, not a resolved release path.
-    assert.equal(plan.source, join(homeDir, "current", "commit-msg"));
+    assert.equal(plan.source, join(homeDir, "current", hookRel));
     executeHookPlan(plan);
 
     const hookPath = join(projectDir, ".git", "hooks", "commit-msg");
-    assert.equal(readlinkSync(hookPath), join(homeDir, "current", "commit-msg"));
+    assert.equal(readlinkSync(hookPath), join(homeDir, "current", hookRel));
     // A NEW invocation reads through current → r-1.
     assert.match(readFileSync(hookPath, "utf8"), /RELEASE ONE/);
 
     // Promote r-2: swap the current pointer. The installed link is untouched.
     unlinkSync(join(homeDir, "current"));
     symlinkSync(join(homeDir, "releases", "r-2"), join(homeDir, "current"));
-    assert.equal(readlinkSync(hookPath), join(homeDir, "current", "commit-msg"));
+    assert.equal(readlinkSync(hookPath), join(homeDir, "current", hookRel));
     // The NEXT invocation now resolves the promoted release's bytes.
     assert.match(readFileSync(hookPath, "utf8"), /RELEASE TWO/);
 
@@ -242,14 +240,19 @@ test("FG-582: installed hook symlinks through $FORGE_HOME/current and a promotio
 //       uses a disposable FORGE_HOME + disposable repo and NEVER touches this
 //       repo's real .git/hooks. -----
 
+// The bundled commit-msg hook's path relative to a release root — the shipped
+// layout release.ts produces (it copies the whole source tree).
+const RELEASE_HOOK_REL = join("scripts", "git-hooks", "commit-msg-no-ai-attribution");
+
 // Build a disposable FORGE_HOME with `current` → releases/<release>, each release
-// carrying its own commit-msg bytes so a NEW hook read resolves that release.
+// carrying its own commit-msg bytes in the SHIPPED hook layout so a NEW hook read
+// resolves that release.
 function makeForgeHome(): { home: string; layRelease: (id: string, marker: string) => void; promote: (id: string) => void } {
   const home = mkdtempSync(join(tmpdir(), "forge-home-e2e-"));
   const layRelease = (id: string, marker: string) => {
     const releaseDir = join(home, "releases", id);
-    mkdirSync(releaseDir, { recursive: true });
-    writeFileSync(join(releaseDir, "commit-msg"), `#!/bin/sh\n# ${marker}\n`);
+    mkdirSync(join(releaseDir, "scripts", "git-hooks"), { recursive: true });
+    writeFileSync(join(releaseDir, RELEASE_HOOK_REL), `#!/bin/sh\n# ${marker}\n`);
   };
   const promote = (id: string) => {
     const link = join(home, "current");
@@ -276,20 +279,20 @@ test("integ FG-582: `forge init` installs commit-msg through $FORGE_HOME/current
     // The installed link is the STATIC $FORGE_HOME/current path, not a resolved
     // release path — that is what lets it follow a promotion.
     assert.ok(lstatSync(hookPath).isSymbolicLink(), "commit-msg must be a symlink");
-    assert.equal(readlinkSync(hookPath), join(home, "current", "commit-msg"));
+    assert.equal(readlinkSync(hookPath), join(home, "current", RELEASE_HOOK_REL));
     // A NEW read resolves through current → r-1.
     assert.match(readFileSync(hookPath, "utf8"), /RELEASE ONE/);
 
     // Promote r-2. The installed link is untouched; the NEXT read follows it.
     promote("r-2");
-    assert.equal(readlinkSync(hookPath), join(home, "current", "commit-msg"), "installed link must not change on promotion");
+    assert.equal(readlinkSync(hookPath), join(home, "current", RELEASE_HOOK_REL), "installed link must not change on promotion");
     assert.match(readFileSync(hookPath, "utf8"), /RELEASE TWO/, "a NEW invocation resolves the promoted release's bytes");
 
     // Re-running init over the promoted layout is idempotent (no-op).
     const reinit = runForge(["init", "--project", projectDir], projectDir, { ...process.env, FORGE_HOME: home });
     assert.equal(reinit.status, 0, `second forge init failed: ${reinit.stderr}`);
     assert.match(reinit.stdout, /commit-msg hook:\s+already current \(no change\)/, "re-init must be a no-op");
-    assert.equal(readlinkSync(hookPath), join(home, "current", "commit-msg"), "idempotent re-init must not repoint");
+    assert.equal(readlinkSync(hookPath), join(home, "current", RELEASE_HOOK_REL), "idempotent re-init must not repoint");
     assert.match(readFileSync(hookPath, "utf8"), /RELEASE TWO/);
   } finally {
     rmSync(home, { recursive: true, force: true });
@@ -360,8 +363,8 @@ test("forge init --dry-run: reports backlog scaffold, config, model-policy, docs
 // real git execution).
 function layPolicyRelease(home: string, id: string, forbidden: string): void {
   const releaseDir = join(home, "releases", id);
-  mkdirSync(releaseDir, { recursive: true });
-  const hook = join(releaseDir, "commit-msg");
+  mkdirSync(join(releaseDir, "scripts", "git-hooks"), { recursive: true });
+  const hook = join(releaseDir, RELEASE_HOOK_REL);
   writeFileSync(hook, `#!/bin/sh\ngrep -qi '${forbidden}' "$1" && exit 1\nexit 0\n`);
   chmodSync(hook, 0o755);
 }
@@ -392,7 +395,7 @@ test("integ FG-582: git executes the hook through $FORGE_HOME/current, and a pro
     const init = runForge(["init", "--project", projectDir], projectDir, { ...process.env, FORGE_HOME: home });
     assert.equal(init.status, 0, `forge init failed: ${init.stderr}`);
     const hookPath = join(projectDir, ".git", "hooks", "commit-msg");
-    assert.equal(readlinkSync(hookPath), join(home, "current", "commit-msg"), "hook must link through current");
+    assert.equal(readlinkSync(hookPath), join(home, "current", RELEASE_HOOK_REL), "hook must link through current");
 
     // r-1 promoted: git runs r-1's policy through the current symlink. A message
     // with FORBIDDEN-ONE is blocked; FORBIDDEN-TWO passes (proving it is r-1's
@@ -404,7 +407,7 @@ test("integ FG-582: git executes the hook through $FORGE_HOME/current, and a pro
 
     // Promote r-2 by swapping the current pointer — the installed link is untouched.
     promote("r-2");
-    assert.equal(readlinkSync(hookPath), join(home, "current", "commit-msg"), "installed link must not change on promotion");
+    assert.equal(readlinkSync(hookPath), join(home, "current", RELEASE_HOOK_REL), "installed link must not change on promotion");
 
     // A NEW `git commit` now resolves r-2's bytes: FORBIDDEN-TWO is now blocked,
     // FORBIDDEN-ONE now passes. This is the promotion being followed by git itself.
@@ -427,7 +430,7 @@ test("integ FG-582: with NO current pointer, `forge init` installs the dev-check
     const hookPath = join(projectDir, ".git", "hooks", "commit-msg");
     // Falls back to the absolute bundled dev hook, NOT through $FORGE_HOME/current.
     const linkTarget = readlinkSync(hookPath);
-    assert.notEqual(linkTarget, join(home, "current", "commit-msg"), "must not link through a non-existent current pointer");
+    assert.notEqual(linkTarget, join(home, "current", RELEASE_HOOK_REL), "must not link through a non-existent current pointer");
     assert.match(linkTarget, /commit-msg-no-ai-attribution$/, "must fall back to the dev-checkout hook source");
 
     // The REAL bundled hook actually runs: a prose Anthropic mention is blocked...
@@ -462,7 +465,7 @@ test("integ FG-582: `forge init` migrates a stale legacy dev-path hook onto $FOR
     const reinit = runForge(["init", "--project", projectDir], projectDir, { ...process.env, FORGE_HOME: home });
     assert.equal(reinit.status, 0, `re-init failed: ${reinit.stderr}`);
     assert.match(reinit.stdout, /commit-msg hook:\s+installed → /, "re-init should re-point the legacy link");
-    assert.equal(readlinkSync(hookPath), join(home, "current", "commit-msg"), "legacy link must migrate onto current");
+    assert.equal(readlinkSync(hookPath), join(home, "current", RELEASE_HOOK_REL), "legacy link must migrate onto current");
 
     // git now runs r-1's promoted policy through the migrated link.
     const blocked = commitAttempt(projectDir, "carries a FORBIDDEN-ONE token", "m1");

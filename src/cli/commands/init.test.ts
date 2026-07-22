@@ -209,12 +209,15 @@ function makeHooksDir(): string {
 // resolves at hook-exec time.
 function makeCurrentPointer(release = "r-1"): string {
   const releaseDir = join(homeDir, "releases", release);
-  mkdirSync(releaseDir, { recursive: true });
-  // The promoted arm is chosen on RESOLVABILITY (FG-582 AC-3): current/commit-msg
-  // must resolve to a real target, so lay the release's hook bytes down.
-  writeFileSync(join(releaseDir, "commit-msg"), "#!/bin/sh\n# release hook\n");
+  const hookRel = join("scripts", "git-hooks", "commit-msg-no-ai-attribution");
+  mkdirSync(join(releaseDir, "scripts", "git-hooks"), { recursive: true });
+  // The promoted arm is chosen on RESOLVABILITY (FG-582 AC-3): the bundled hook
+  // must resolve through current, so lay the release's SHIPPED hook layout down
+  // (release.ts copies the whole tree — the hook lives at
+  // scripts/git-hooks/commit-msg-no-ai-attribution, not a root-level commit-msg).
+  writeFileSync(join(releaseDir, hookRel), "#!/bin/sh\n# release hook\n");
   symlinkSync(releaseDir, join(homeDir, "current"));
-  return join(homeDir, "current", "commit-msg");
+  return join(homeDir, "current", hookRel);
 }
 
 // The dev-checkout absolute source the pre-FG-582 code installed — obtained by
@@ -241,9 +244,9 @@ test("planCommitMsgHook FG-582: RED against absolute-dev-path target, GREEN on $
   if (plan.action !== "install") throw new Error("unreachable");
   // RED: the install target is NOT the old absolute dev-checkout path.
   assert.notEqual(plan.source, devSource);
-  // GREEN: it symlinks through $FORGE_HOME/current/commit-msg.
+  // GREEN: it symlinks through the bundled hook under $FORGE_HOME/current.
   assert.equal(plan.source, currentArm);
-  assert.equal(plan.source, join(homeDir, "current", "commit-msg"));
+  assert.equal(plan.source, join(homeDir, "current", "scripts", "git-hooks", "commit-msg-no-ai-attribution"));
   rmSync(homeDir, { recursive: true, force: true });
 });
 
@@ -256,7 +259,8 @@ test("planCommitMsgHook FG-582: dev-checkout fallback when no current pointer ex
   if (plan.action !== "install") throw new Error("unreachable");
   // No current pointer → point at the checkout (absolute path to the bundled
   // hook script), NOT through $FORGE_HOME/current.
-  assert.notEqual(plan.source, join(homeDir, "current", "commit-msg"));
+  assert.notEqual(plan.source, join(homeDir, "current", "scripts", "git-hooks", "commit-msg-no-ai-attribution"));
+  assert.ok(!plan.source.startsWith(join(homeDir, "current")));
   assert.match(plan.source, /commit-msg-no-ai-attribution$/);
   rmSync(homeDir, { recursive: true, force: true });
 });
@@ -366,8 +370,8 @@ test("planCommitMsgHook FG-582 (AC-3): a DANGLING current pointer selects the de
   assert.equal(plan.action, "install");
   if (plan.action !== "install") throw new Error("unreachable");
   // Falls back to the dev checkout (absolute bundled-hook path), never through
-  // $FORGE_HOME/current/commit-msg.
-  assert.notEqual(plan.source, join(homeDir, "current", "commit-msg"));
+  // $FORGE_HOME/current.
+  assert.ok(!plan.source.startsWith(join(homeDir, "current")));
   assert.match(plan.source, /commit-msg-no-ai-attribution$/);
   rmSync(homeDir, { recursive: true, force: true });
 });
