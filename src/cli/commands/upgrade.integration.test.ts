@@ -1,7 +1,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { execSync } from "node:child_process";
 import { join } from "node:path";
 import { tryGitPull } from "./upgrade.js";
@@ -572,6 +572,41 @@ test("FG-581: the refusal NAMES the rejected RACI construct (compiler's verbatim
   }
 });
 
+test("FG-581 (configurable FORGE_HOME): the closeout reason AND the repair guidance name the ACTUAL files under this FORGE_HOME, never a hard-coded ~/.forge", () => {
+  // The suite's FORGE_HOME is a disposable temp dir (src/test-setup.ts) that is
+  // NOT ~/.forge, and RACI_PATH / ROUTING_POLICY_PATH derive from it. Against the
+  // pre-fix hard-coded strings this FAILS: the human warning, the --json
+  // `unresolved` reason, and the repair guidance would name ~/.forge/forge-raci.md
+  // on a host whose RACI actually lives elsewhere.
+  assert.ok(!RACI_PATH.startsWith(join(homedir(), ".forge")), "precondition: this suite's FORGE_HOME is not the default ~/.forge");
+  const assets = assetTree("fg581-forgehome-", "CLEAN", { manifest: false });
+  try {
+    writeFileSync(RACI_PATH, "not a RACI document at all\n");
+    const r = drive({ skipProject: true, skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets });
+    assert.equal(r.result.routingPolicy, "failed");
+
+    // --json `unresolved` names the real RACI path under this FORGE_HOME…
+    assert.ok(
+      r.result.unresolved.some((u) => u.includes(RACI_PATH)),
+      `unresolved must name the actual RACI path (${RACI_PATH}) — got ${JSON.stringify(r.result.unresolved)}`,
+    );
+    // …and the repair guidance the human sees does too.
+    assert.ok(r.warnings.includes(RACI_PATH), `repair guidance must name the actual RACI path — got ${JSON.stringify(r.warnings)}`);
+
+    // No surface may hard-code ~/.forge when FORGE_HOME points elsewhere.
+    assert.ok(!r.warnings.includes("~/.forge"), `repair guidance must not hard-code ~/.forge — got ${JSON.stringify(r.warnings)}`);
+    assert.ok(
+      !r.result.unresolved.some((u) => u.includes("~/.forge")),
+      `unresolved must not hard-code ~/.forge — got ${JSON.stringify(r.result.unresolved)}`,
+    );
+  } finally {
+    rmSync(RACI_PATH, { force: true });
+    rmSync(ROUTING_POLICY_PATH, { force: true });
+    rmSync(`${ROUTING_POLICY_PATH}.quarantined`, { force: true });
+    rmSync(assets, { recursive: true, force: true });
+  }
+});
+
 test("FG-581 (dry-run): a compile failure FORECASTS the quarantine and does NOT mutate disk — --json ok and exit code still agree", () => {
   const assets = assetTree("fg581-dryrun-", "CLEAN", { manifest: false });
   try {
@@ -698,6 +733,16 @@ test("FG-581 (fail-closed, double failure): when BOTH quarantine and remove fail
     assert.ok(
       !r.result.unresolved.some((u) => /was neutralized|routing is fail-closed until/.test(u)),
       "unresolved must NOT claim a neutralization that did not happen",
+    );
+    // The reason names the ACTUAL stale-policy path under this (non-default)
+    // FORGE_HOME, never a hard-coded ~/.forge.
+    assert.ok(
+      r.result.unresolved.some((u) => u.includes(ROUTING_POLICY_PATH)),
+      `unresolved must name the actual routing-policy.yml path (${ROUTING_POLICY_PATH}) — got ${JSON.stringify(r.result.unresolved)}`,
+    );
+    assert.ok(
+      !r.result.unresolved.some((u) => u.includes("~/.forge")),
+      `unresolved must not hard-code ~/.forge — got ${JSON.stringify(r.result.unresolved)}`,
     );
     // (e) routingPolicyError carries the neutralization failure so an operator can act.
     assert.match(r.result.routingPolicyError ?? "", /could NOT be neutralized/);

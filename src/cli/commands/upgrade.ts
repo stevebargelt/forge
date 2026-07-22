@@ -282,11 +282,11 @@ const ROUTING_POLICY: Record<RoutingPolicyOutcome, Resolution> = {
   // RACI it derives from — it is invalidated (quarantined) at the failure site, so
   // routing falls back to fail-closed (lane 'manual' / `policy_not_found`) until
   // the RACI compiles. The named refusal, not a stale policy that keeps routing.
-  failed: unresolvedBecause("routing-policy.yml INVALIDATED — the promoted runtime rejected the host RACI; the stale policy was neutralized (quarantined or removed) and routing is fail-closed until the RACI compiles (fix ~/.forge/forge-raci.md, then run: forge route compile)"),
+  failed: unresolvedBecause(`routing-policy.yml INVALIDATED — the promoted runtime rejected the host RACI; the stale policy was neutralized (quarantined or removed) and routing is fail-closed until the RACI compiles (fix ${RACI_PATH}, then run: forge route compile)`),
   // The double-failure path: the RACI was rejected AND neither rename nor unlink
   // could take the stale policy off disk. It is STILL authoritative under the
   // promoted runtime — routing is NOT fail-closed. Say that, not the opposite.
-  "failed-not-neutralized": unresolvedBecause("routing-policy.yml STILL AUTHORITATIVE — the promoted runtime rejected the host RACI but the stale policy could NOT be neutralized on disk; routing is NOT fail-closed. Remove it by hand (rm ~/.forge/routing-policy.yml), then fix ~/.forge/forge-raci.md and run: forge route compile"),
+  "failed-not-neutralized": unresolvedBecause(`routing-policy.yml STILL AUTHORITATIVE — the promoted runtime rejected the host RACI but the stale policy could NOT be neutralized on disk; routing is NOT fail-closed. Remove it by hand (rm ${ROUTING_POLICY_PATH}), then fix ${RACI_PATH} and run: forge route compile`),
 };
 
 const PROJECT_INIT: Record<ProjectInitOutcome, Resolution> = {
@@ -679,7 +679,7 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
               }
             }
           }
-          warn(`          fix ~/.forge/forge-raci.md, then run: forge route compile`);
+          warn(`          fix ${RACI_PATH}, then run: forge route compile`);
         }
       }
 
