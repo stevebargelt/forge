@@ -317,6 +317,7 @@ const ROUTING_POLICY: Record<RoutingPolicyOutcome, Verdict> = {
   "would-recompile": "resolved",
   "no-raci": "resolved",
   failed: "unresolved",
+  "failed-not-neutralized": "unresolved",
 };
 
 const PROJECT_INIT: Record<ProjectInitOutcome, Verdict> = {
@@ -396,7 +397,7 @@ test("FG-577 (criterion 10): EVERY variant of EVERY step is classified — no va
     }
   }
   // Guards against the tables silently emptying and the loop vacuously passing.
-  assert.equal(checked, 8 + 7 + 4 + 3 + 4 + 8 + 5 + 5 + 4);
+  assert.equal(checked, 8 + 7 + 4 + 3 + 5 + 8 + 5 + 5 + 4);
 });
 
 test("FG-577 (criterion 10): unresolvedReasons enumerates the outcomes object's own keys", () => {
