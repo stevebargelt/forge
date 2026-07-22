@@ -6,7 +6,7 @@ title: "FG-572 Child 5e: installed git hooks are absolute symlinks into the dev 
 created: 2026-07-17
 ---
 
-**Parent:** FG-572 · **Epic:** FG-561 · **BLOCKED — carries an unresolved T9/anchoring tension (see below).**
+**Parent:** FG-572 · **Epic:** FG-561 · **UNBLOCKED — T9 anchoring settled: symlink-through-`$FORGE_HOME/current` (operator decision 2026-07-17); both blockers cleared. Ready to implement — see the Operator decision section below.**
 **Source:** FG-572 read-only architecture pass, run `run-fg-572-installed-surface-compatibility-read-only-architecture-pass-75b811`, at `12b13c2`.
 
 ## Current state (VERIFIED on host at 12b13c2 — the arch pass could not see this from its mount)
@@ -19,7 +19,7 @@ created: 2026-07-17
 That is an absolute path into the **dev checkout**. Under a promotion the hook keeps executing dev bytes
 regardless of which release is current — the installed hook does not follow the promotion at all.
 
-## The T9 tension — genuinely an operator call, do not resolve unilaterally
+## The T9 tension — RESOLVED (operator chose symlink-through-`current`; see the Operator decision section below). Retained for history.
 
 Two defensible directions pull opposite ways:
 
@@ -39,10 +39,10 @@ an established fact** (PRD ~line 379) — the design must test it, not assert it
 Disambiguate `init.ts:185`'s `exists-other` between a **stale forge hook** (safe to re-point) and a **foreign
 hook** (must never be clobbered — same operator-owned-surface principle as FG-578).
 
-## Blocked on
+## Blocked on — CLEARED (both resolved; retained for history)
 
-1. The T9 anchoring decision for installed pointers (operator).
-2. FG-577 (5a) landing, so the install path resolves from the running runtime.
+1. ~~The T9 anchoring decision for installed pointers (operator).~~ **RESOLVED 2026-07-17: symlink-through-`$FORGE_HOME/current`** (see Operator decision).
+2. ~~FG-577 (5a) landing, so the install path resolves from the running runtime.~~ **LANDED (`b5add06`).**
 
 ## Acceptance (EXECUTED) — draft, finalize after the T9 call
 

@@ -7,14 +7,14 @@
 **How it went (for pattern-awareness):** full `implementation_full` pipeline (architect caught the key correction — the exit-1 refusal already existed; the real defect was the persistent on-disk artifact) + bounded review-loop. The red-wide reviewer surfaced ONE progressively-lower-stakes finding per round: fail-OPEN rename (fixed), stale-reason label accuracy (fixed), hard-coded `~/.forge` in code then docs (fixed), then release-mode acceptance coverage. Operator authorized ONE test-only exception to add a promoted-`mode:"release"` acceptance test; the final finding (release-mode `--json`/construct assertions) was dispositioned as duplicative of already-proven mode-agnostic dev-mode coverage → FG-603. Lesson: red-wide will keep finding "one more assertion"; a hard stop after the AC is genuinely proven is correct.
 
 **Picked up next:**
-1. **FG-572** now open on only **FG-582** (5e — installed git hooks anchoring, carries the T9 tension; decision leans symlink-through-current) and **FG-583** (5h — non-atomic seed cp loop; depends on FG-577, landed). Closing both closes FG-572 → closes epic **FG-561**.
+1. **FG-572** now open on only **FG-582** (5e — installed git hooks anchoring; **UNBLOCKED, ready to implement** — operator settled T9 as **symlink-through-`$FORGE_HOME/current`**, pin-at-install rejected; both blockers cleared, FG-577 landed `b5add06`) and **FG-583** (5h — non-atomic seed cp loop; depends on FG-577, landed). Closing both closes FG-572 → closes epic **FG-561**.
 2. **FG-599** — durably record normal-delivery + replay-recovery (positive Q2 delivery-mode record).
 3. **FG-600** — FG-565 follow-ups (`forge continuation` should not `ensureForgeDirs`; F21 should drive the real `forge cancel` CLI).
 
-**Follow-ups filed this session (all non-blocking, from FG-581 review):**
-- **FG-603** — release-mode `--json`/verbatim-construct assertions on the promoted-release acceptance test (test-only; duplicative of mode-agnostic dev-mode coverage).
+**Follow-ups filed this session (non-blocking, from FG-581 review):**
 - **FG-601** — sanitize RACI-controlled compiler error before terminal render (escape-sequence hardening; fail-safe).
 - **FG-602** — `startRun`/`invoke` accept a route-bearing run when the host policy is absent (pre-existing governance gap, broader than the upgrade site).
+- **FG-603 — WITHDRAWN (not implemented):** release-mode `--json`/construct assertions. Operator explicitly declined a follow-up for this duplicated, compositionally-complete evidence; do not re-file.
 
 **External state to remember:**
 - Writer clone `~/code/forge-agent-work`: on branch `feat/fg581-post-promotion-raci-refusal` (merged as `dcc19ec`, branch NOT deleted). `git reset --hard origin/main` before next use.

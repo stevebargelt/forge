@@ -11,9 +11,9 @@ created: 2026-07-14
 
 **UMBRELLA — decomposed 2026-07-17 after the read-only architecture pass. Closes when its children close.**
 Children: **FG-577** (5a, prerequisite) · **FG-578** (5b) · **FG-579** (5c+5d) · **FG-581** (5f — ✓ DONE, `dcc19ec`) ·
-**FG-582** (5e, blocked on T9) · **FG-583** (5h, non-atomic seed cp loop) · **FG-580** (5g — OPERATOR DECISION, campaign critical path).
+**FG-582** (5e, UNBLOCKED — T9 settled: symlink-through-current) · **FG-583** (5h, non-atomic seed cp loop) · **FG-580** (5g — OPERATOR DECISION, campaign critical path).
 
-**Progress (2026-07-22):** FG-581 (5f — `routing-policy.yml` RE-DERIVE / post-promotion compile-failure refusal) shipped in `dcc19ec` (PR #152): the upgrade now neutralizes a stale compiled policy fail-closed instead of warn-and-continue, names the rejected RACI construct, and resolves paths from `FORGE_HOME`. Remaining open children: **FG-582** (5e hooks — T9 anchoring) and **FG-583** (5h non-atomic seed cp). FG-580 (5g dashboard) shipped `bc9286f`. This umbrella cannot close while any child remains open.
+**Progress (2026-07-22):** FG-581 (5f — `routing-policy.yml` RE-DERIVE / post-promotion compile-failure refusal) shipped in `dcc19ec` (PR #152): the upgrade now neutralizes a stale compiled policy fail-closed instead of warn-and-continue, names the rejected RACI construct, and resolves paths from `FORGE_HOME`. Remaining open children: **FG-582** (5e hooks — UNBLOCKED, ready to implement: the operator settled the T9 anchoring decision as **symlink-through-`$FORGE_HOME/current`**, pin-at-install rejected; both blockers cleared — FG-577 landed `b5add06`) and **FG-583** (5h non-atomic seed cp). FG-580 (5g dashboard) shipped `bc9286f`. This umbrella cannot close while any child remains open.
 
 Architecture pass: run `run-fg-572-installed-surface-compatibility-read-only-architecture-pass-75b811`
 (task-architecture-advisor-e950c5), read-only, at `12b13c2`. Its load-bearing claims were independently
@@ -79,7 +79,7 @@ from these **externally-installed, version-compatible surfaces** (a compatibilit
 | `forge-raci.md` | **OUT OF THE CONTROL PATH** — operator-authored; report informationally, never re-install | FG-578 |
 | `routing-policy.yml` | **RE-DERIVE** — pure derivative (`host-policy.ts:4-5`); never install or version-compare; its version is a function of the operator's RACI, not the release's | FG-581 |
 | `model-policy.yml` | **OUT OF THE CONTROL PATH** — forge never writes it | — |
-| hooks | **UNDECIDED** — T9 anchoring tension | FG-582 |
+| hooks | **RESOLVED — symlink-through-`$FORGE_HOME/current`** (operator decision 2026-07-17; pin-at-install rejected). Promotion re-points every hook atomically; FG-582 UNBLOCKED, ready to implement | FG-582 |
 | dashboard | **RESOLVED — Option A, shipped by FG-580 (`bc9286f`): bundled into the release as a mandatory asset, runs from a promoted release, boots offline** | FG-580 |
 
 ## Acceptance (EXECUTED)
