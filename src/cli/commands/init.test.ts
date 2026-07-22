@@ -1,13 +1,14 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   applyOrchestratorBlock,
   executeClaudeCommandsPlan,
   executeClaudeHooksPlan,
   executeGitignoreEntriesPlan,
+  executeHookPlan,
   forgeSlashCommands,
   planClaudeCommands,
   planClaudeHooks,
@@ -187,6 +188,237 @@ afterEach(() => {
 test("planCommitMsgHook: returns not-a-git-repo when .git/hooks is missing", () => {
   const plan = planCommitMsgHook(projectDir);
   assert.equal(plan.action, "not-a-git-repo");
+});
+
+// ----- FG-582: installed hooks symlink THROUGH $FORGE_HOME/current so they
+//       follow a promotion. All cases use a disposable FORGE_HOME + disposable
+//       repo/install dirs and NEVER touch this repo's real .git/hooks. -----
+
+let homeDir: string;
+
+// A disposable git-hooks dir under projectDir; planCommitMsgHook only checks the
+// dir exists, so a real `git init` is unnecessary for the pure-plan cases.
+function makeHooksDir(): string {
+  const hooksDir = join(projectDir, ".git", "hooks");
+  mkdirSync(hooksDir, { recursive: true });
+  return hooksDir;
+}
+
+// Create a $FORGE_HOME/current pointer (current → releases/r-<id>) so the
+// promoted arm is selected. Returns the arm-selected install target that git
+// resolves at hook-exec time.
+function makeCurrentPointer(release = "r-1"): string {
+  const releaseDir = join(homeDir, "releases", release);
+  const hookRel = join("scripts", "git-hooks", "commit-msg-no-ai-attribution");
+  mkdirSync(join(releaseDir, "scripts", "git-hooks"), { recursive: true });
+  // The promoted arm is chosen on RESOLVABILITY (FG-582 AC-3): the bundled hook
+  // must resolve through current, so lay the release's SHIPPED hook layout down
+  // (release.ts copies the whole tree — the hook lives at
+  // scripts/git-hooks/commit-msg-no-ai-attribution, not a root-level commit-msg).
+  writeFileSync(join(releaseDir, hookRel), "#!/bin/sh\n# release hook\n");
+  symlinkSync(releaseDir, join(homeDir, "current"));
+  return join(homeDir, "current", hookRel);
+}
+
+// The dev-checkout absolute source the pre-FG-582 code installed — obtained by
+// asking for a plan with an EMPTY home (no current pointer → dev fallback arm)
+// without exporting the module-private resolveHookSource().
+function devCheckoutSource(): string {
+  const empty = mkdtempSync(join(tmpdir(), "forge-empty-home-"));
+  makeHooksDir();
+  const plan = planCommitMsgHook(projectDir, empty);
+  rmSync(empty, { recursive: true, force: true });
+  assert.equal(plan.action, "install");
+  if (plan.action !== "install") throw new Error("unreachable");
+  return plan.source;
+}
+
+test("planCommitMsgHook FG-582: RED against absolute-dev-path target, GREEN on $FORGE_HOME/current arm", () => {
+  homeDir = mkdtempSync(join(tmpdir(), "forge-home-"));
+  makeHooksDir();
+  const devSource = devCheckoutSource();
+  const currentArm = makeCurrentPointer();
+
+  const plan = planCommitMsgHook(projectDir, homeDir);
+  assert.equal(plan.action, "install");
+  if (plan.action !== "install") throw new Error("unreachable");
+  // RED: the install target is NOT the old absolute dev-checkout path.
+  assert.notEqual(plan.source, devSource);
+  // GREEN: it symlinks through the bundled hook under $FORGE_HOME/current.
+  assert.equal(plan.source, currentArm);
+  assert.equal(plan.source, join(homeDir, "current", "scripts", "git-hooks", "commit-msg-no-ai-attribution"));
+  rmSync(homeDir, { recursive: true, force: true });
+});
+
+test("planCommitMsgHook FG-582: dev-checkout fallback when no current pointer exists", () => {
+  homeDir = mkdtempSync(join(tmpdir(), "forge-home-"));
+  makeHooksDir();
+
+  const plan = planCommitMsgHook(projectDir, homeDir);
+  assert.equal(plan.action, "install");
+  if (plan.action !== "install") throw new Error("unreachable");
+  // No current pointer → point at the checkout (absolute path to the bundled
+  // hook script), NOT through $FORGE_HOME/current.
+  assert.notEqual(plan.source, join(homeDir, "current", "scripts", "git-hooks", "commit-msg-no-ai-attribution"));
+  assert.ok(!plan.source.startsWith(join(homeDir, "current")));
+  assert.match(plan.source, /commit-msg-no-ai-attribution$/);
+  rmSync(homeDir, { recursive: true, force: true });
+});
+
+test("planCommitMsgHook FG-582: stale Forge-owned link (legacy absolute-dev-path) is re-pointed to current arm", () => {
+  homeDir = mkdtempSync(join(tmpdir(), "forge-home-"));
+  const hooksDir = makeHooksDir();
+  const devSource = devCheckoutSource();
+  const currentArm = makeCurrentPointer();
+  // Simulate an already-onboarded repo: a link pinned at the dev-checkout path.
+  symlinkSync(devSource, join(hooksDir, "commit-msg"));
+
+  const plan = planCommitMsgHook(projectDir, homeDir);
+  assert.equal(plan.action, "install");
+  if (plan.action !== "install") throw new Error("unreachable");
+  assert.equal(plan.source, currentArm);
+  rmSync(homeDir, { recursive: true, force: true });
+});
+
+test("planCommitMsgHook FG-582: already-correct current-arm link is a no-op", () => {
+  homeDir = mkdtempSync(join(tmpdir(), "forge-home-"));
+  const hooksDir = makeHooksDir();
+  const currentArm = makeCurrentPointer();
+  symlinkSync(currentArm, join(hooksDir, "commit-msg"));
+
+  const plan = planCommitMsgHook(projectDir, homeDir);
+  assert.equal(plan.action, "already-linked");
+  rmSync(homeDir, { recursive: true, force: true });
+});
+
+test("planCommitMsgHook FG-582: foreign regular-file hook is refused (never overwritten)", () => {
+  homeDir = mkdtempSync(join(tmpdir(), "forge-home-"));
+  const hooksDir = makeHooksDir();
+  makeCurrentPointer();
+  writeFileSync(join(hooksDir, "commit-msg"), "#!/bin/sh\necho someone-elses-hook\n");
+
+  const plan = planCommitMsgHook(projectDir, homeDir);
+  assert.equal(plan.action, "exists-other");
+  if (plan.action !== "exists-other") throw new Error("unreachable");
+  assert.match(plan.details, /regular file/);
+  rmSync(homeDir, { recursive: true, force: true });
+});
+
+test("planCommitMsgHook FG-582: foreign symlink is refused (never overwritten)", () => {
+  homeDir = mkdtempSync(join(tmpdir(), "forge-home-"));
+  const hooksDir = makeHooksDir();
+  makeCurrentPointer();
+  const foreign = join(homeDir, "someone-elses-tool", "commit-msg");
+  mkdirSync(dirname(foreign), { recursive: true });
+  writeFileSync(foreign, "#!/bin/sh\n");
+  symlinkSync(foreign, join(hooksDir, "commit-msg"));
+
+  const plan = planCommitMsgHook(projectDir, homeDir);
+  assert.equal(plan.action, "exists-other");
+  if (plan.action !== "exists-other") throw new Error("unreachable");
+  assert.match(plan.details, /symlink →/);
+  rmSync(homeDir, { recursive: true, force: true });
+});
+
+test("planCommitMsgHook FG-582: a bare release-dir containment is NOT ownership evidence", () => {
+  homeDir = mkdtempSync(join(tmpdir(), "forge-home-"));
+  const hooksDir = makeHooksDir();
+  makeCurrentPointer();
+  // A hand-placed link into the attacker-addressable releases/<id> namespace is
+  // foreign — only the promoted arm ($FORGE_HOME/current) or the dev source
+  // count as ownership evidence.
+  const releaseHook = join(homeDir, "releases", "r-attacker", "commit-msg");
+  mkdirSync(dirname(releaseHook), { recursive: true });
+  writeFileSync(releaseHook, "#!/bin/sh\n");
+  symlinkSync(releaseHook, join(hooksDir, "commit-msg"));
+
+  const plan = planCommitMsgHook(projectDir, homeDir);
+  assert.equal(plan.action, "exists-other");
+  rmSync(homeDir, { recursive: true, force: true });
+});
+
+test("executeHookPlan FG-582: re-pointing a stale Forge-owned link succeeds (unlinks first) and is then idempotent", () => {
+  homeDir = mkdtempSync(join(tmpdir(), "forge-home-"));
+  const hooksDir = makeHooksDir();
+  const devSource = devCheckoutSource();
+  const currentArm = makeCurrentPointer();
+  const hookPath = join(hooksDir, "commit-msg");
+  symlinkSync(devSource, hookPath);
+
+  const plan = planCommitMsgHook(projectDir, homeDir);
+  assert.equal(plan.action, "install");
+  executeHookPlan(plan);
+  assert.ok(lstatSync(hookPath).isSymbolicLink());
+  assert.equal(readlinkSync(hookPath), currentArm);
+
+  // Second run over the now-correct link is a no-op.
+  const plan2 = planCommitMsgHook(projectDir, homeDir);
+  assert.equal(plan2.action, "already-linked");
+  rmSync(homeDir, { recursive: true, force: true });
+});
+
+test("planCommitMsgHook FG-582 (AC-3): a DANGLING current pointer selects the dev-checkout fallback, NOT the promoted arm", () => {
+  homeDir = mkdtempSync(join(tmpdir(), "forge-home-"));
+  makeHooksDir();
+  // current → releases/r-gone, but that release dir does NOT exist → the
+  // pointer dangles. Choosing the promoted arm here would install an
+  // unresolvable $FORGE_HOME/current/commit-msg hook (the guard never runs).
+  mkdirSync(join(homeDir, "releases"), { recursive: true });
+  symlinkSync(join(homeDir, "releases", "r-gone"), join(homeDir, "current"));
+
+  const plan = planCommitMsgHook(projectDir, homeDir);
+  assert.equal(plan.action, "install");
+  if (plan.action !== "install") throw new Error("unreachable");
+  // Falls back to the dev checkout (absolute bundled-hook path), never through
+  // $FORGE_HOME/current.
+  assert.ok(!plan.source.startsWith(join(homeDir, "current")));
+  assert.match(plan.source, /commit-msg-no-ai-attribution$/);
+  rmSync(homeDir, { recursive: true, force: true });
+});
+
+test("executeHookPlan FG-582 (AC-5): a stale owned link swapped to a FOREIGN symlink between plan and execute is left untouched", () => {
+  homeDir = mkdtempSync(join(tmpdir(), "forge-home-"));
+  const hooksDir = makeHooksDir();
+  const devSource = devCheckoutSource();
+  makeCurrentPointer();
+  const hookPath = join(hooksDir, "commit-msg");
+  // Planner classifies a stale dev-checkout link as re-pointable (owned).
+  symlinkSync(devSource, hookPath);
+  const plan = planCommitMsgHook(projectDir, homeDir);
+  assert.equal(plan.action, "install");
+
+  // Concurrent swap AFTER planning: someone replaces it with a foreign hook.
+  unlinkSync(hookPath);
+  const foreign = join(homeDir, "someone-elses", "commit-msg");
+  mkdirSync(dirname(foreign), { recursive: true });
+  writeFileSync(foreign, "#!/bin/sh\n# not ours\n");
+  symlinkSync(foreign, hookPath);
+
+  const msg = executeHookPlan(plan);
+  assert.match(msg, /changed since plan/);
+  // The foreign hook must be exactly as we left it — never unlinked.
+  assert.ok(lstatSync(hookPath).isSymbolicLink());
+  assert.equal(readlinkSync(hookPath), foreign);
+  rmSync(homeDir, { recursive: true, force: true });
+});
+
+test("executeHookPlan FG-582 (AC-5): a fresh-install target that gained a foreign hook between plan and execute is left untouched", () => {
+  homeDir = mkdtempSync(join(tmpdir(), "forge-home-"));
+  const hooksDir = makeHooksDir();
+  makeCurrentPointer();
+  const hookPath = join(hooksDir, "commit-msg");
+  // Nothing at the target when planned → a fresh install plan (expect: absent).
+  const plan = planCommitMsgHook(projectDir, homeDir);
+  assert.equal(plan.action, "install");
+
+  // A foreign hook appears before execute runs.
+  writeFileSync(hookPath, "#!/bin/sh\n# someone else got here first\n");
+
+  const msg = executeHookPlan(plan);
+  assert.match(msg, /changed since plan/);
+  assert.ok(!lstatSync(hookPath).isSymbolicLink(), "foreign regular-file hook untouched");
+  assert.match(readFileSync(hookPath, "utf8"), /got here first/);
+  rmSync(homeDir, { recursive: true, force: true });
 });
 
 // ----- planClaudeHooks / executeClaudeHooksPlan (#153, retargeted to

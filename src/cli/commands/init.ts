@@ -1,10 +1,10 @@
 import type { Command } from "commander";
-import { copyFileSync, existsSync, lstatSync, readFileSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, readFileSync, readlinkSync, renameSync, symlinkSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writeBacklogConfig } from "../../backlog/config.js";
 import { ensureHostRoutingPolicy } from "../../raci/host-policy.js";
-import { RACI_PATH, ROUTING_POLICY_PATH } from "../../util/paths.js";
+import { FORGE_HOME, RACI_PATH, ROUTING_POLICY_PATH, currentLinkIn } from "../../util/paths.js";
 
 // #153: Claude Code session lifecycle hooks (SessionStart / Stop / SessionEnd)
 // write heartbeat files into ~/.forge/orchestrators/<session-id>.json so forge
@@ -92,7 +92,7 @@ export function registerInit(program: Command): void {
 
       // Hook install plans (--no-install-hooks bypasses all of them).
       const installHooks = options.installHooks !== false;
-      const hookPlan = installHooks ? planCommitMsgHook(projectDir) : { action: "skipped" as const };
+      const hookPlan = installHooks ? planCommitMsgHook(projectDir, FORGE_HOME) : { action: "skipped" as const };
       const claudeHooksPlan = installHooks ? planClaudeHooks(projectDir) : { action: "skipped" as const };
       const slashCommandsPlan = installHooks ? planClaudeCommands(projectDir) : { action: "skipped" as const };
       const gitignorePlan = installHooks ? planGitignoreEntries(projectDir) : { action: "skipped" as const };
@@ -159,8 +159,17 @@ export function registerInit(program: Command): void {
     });
 }
 
+// FG-582 (AC-5): the identity the planner classified at `target`, carried into
+// executeHookPlan so it can re-verify nothing changed before it mutates —
+// either the target was absent (a fresh install) or it was a specific
+// Forge-owned symlink (safe to re-point only while it still points where the
+// planner saw it).
+type OwnedTargetState =
+  | { kind: "absent" }
+  | { kind: "owned-link"; linkTarget: string };
+
 type HookPlan =
-  | { action: "install"; target: string; source: string }
+  | { action: "install"; target: string; source: string; expect: OwnedTargetState }
   | { action: "already-linked"; target: string }
   | { action: "exists-other"; target: string; details: string }
   | { action: "not-a-git-repo" }
@@ -168,33 +177,109 @@ type HookPlan =
 
 // Decides what to do for the commit-msg hook without writing anything.
 // Exported for testing.
-export function planCommitMsgHook(projectDir: string): HookPlan {
+//
+// FG-582: the install target follows the promoted release. When a `current`
+// pointer exists under `home`, install a symlink THROUGH the bundled hook under
+// $FORGE_HOME/current/ (scripts/git-hooks/commit-msg-no-ai-attribution) — git
+// re-resolves it at every invocation, so a NEW commit picks up
+// the currently promoted release's bytes (an already-running invocation stays
+// anchored to whatever it started under; the OS resolves the interpreter path at
+// process start). With no `current` pointer (a live dev checkout), fall back to
+// today's absolute dev-checkout source so the dev loop is preserved.
+//
+// Ownership decisions are made by lstat/readlink of the LINK ITSELF (never
+// existsSync, which follows a dangling link into a false positive). A hook is
+// provably Forge-owned — and therefore safe to re-point on a stale target — IFF
+// its link resolves at the promoted-arm target
+// ($FORGE_HOME/current/scripts/git-hooks/commit-msg-no-ai-attribution)
+// OR at this checkout's own hook source (the legacy absolute-dev-path form the
+// pre-FG-582 code installed). Anything else — a regular file, a foreign symlink,
+// a link we can't attribute — is left untouched. Bare containment in
+// $FORGE_HOME/releases/* is NEVER ownership evidence (that namespace is
+// attacker-addressable, paths.ts:75).
+export function planCommitMsgHook(projectDir: string, home: string = FORGE_HOME): HookPlan {
   const hooksDir = join(projectDir, ".git", "hooks");
   if (!existsSync(hooksDir)) return { action: "not-a-git-repo" };
   const target = join(hooksDir, "commit-msg");
-  const source = resolveHookSource();
-  if (!existsSync(target)) return { action: "install", target, source };
-  // Existing entry. If it's a symlink to our source, no-op.
-  try {
-    const st = lstatSync(target);
-    if (st.isSymbolicLink()) {
-      const linkTarget = readlinkSync(target);
-      if (linkTarget === source || resolve(dirname(target), linkTarget) === source) {
-        return { action: "already-linked", target };
-      }
-      return { action: "exists-other", target, details: `symlink → ${linkTarget}` };
-    }
+  const source = hookInstallTarget(home);
+  const owned = forgeOwnedHookTargets(home);
+
+  let st;
+  try { st = lstatSync(target); }
+  catch { return { action: "install", target, source, expect: { kind: "absent" } }; }
+
+  if (!st.isSymbolicLink()) {
     return { action: "exists-other", target, details: "regular file (some other hook)" };
-  } catch {
-    return { action: "exists-other", target, details: "unreadable" };
   }
+  let linkTarget = "";
+  try { linkTarget = readlinkSync(target); }
+  catch { return { action: "exists-other", target, details: "unreadable" }; }
+  const resolved = resolve(dirname(target), linkTarget);
+  const pointsAt = (t: string) => linkTarget === t || resolved === t;
+  if (pointsAt(source)) return { action: "already-linked", target };
+  if (owned.some(pointsAt)) return { action: "install", target, source, expect: { kind: "owned-link", linkTarget } };
+  return { action: "exists-other", target, details: `symlink → ${linkTarget}` };
+}
+
+// The bundled commit-msg hook's path RELATIVE to a release root. A release
+// copies the whole source tree (release.ts), so the hook a promotion ships lives
+// at $FORGE_HOME/current/scripts/git-hooks/commit-msg-no-ai-attribution — NOT a
+// root-level `current/commit-msg`, which no real release ever contains.
+const PROMOTED_HOOK_REL = join("scripts", "git-hooks", "commit-msg-no-ai-attribution");
+
+// The promoted-arm install target: the bundled hook reached THROUGH
+// $FORGE_HOME/current, so git re-resolves it to the currently promoted release
+// on every invocation.
+function promotedHookTarget(home: string): string {
+  return join(currentLinkIn(home), PROMOTED_HOOK_REL);
+}
+
+// The arm-selected install target: the promoted arm (through $FORGE_HOME/current)
+// when the current pointer RESOLVES to a usable hook target, else the
+// dev-checkout source.
+function hookInstallTarget(home: string): string {
+  return promotedArmResolves(home)
+    ? promotedHookTarget(home)
+    : resolveHookSource();
+}
+
+// FG-582 (AC-3): choose the promoted arm on RESOLVABILITY, not link existence.
+// existsSync follows the link, so a DANGLING `current` (its release dir absent,
+// or a release with no bundled hook) reads false and we fall back to the dev
+// checkout — never install an unresolvable promoted-arm hook that would make the
+// commit-msg guard silently never run.
+function promotedArmResolves(home: string): boolean {
+  return existsSync(promotedHookTarget(home));
+}
+
+// The set of link targets that prove a hook is Forge-owned: the promoted-arm
+// target and this checkout's own hook source (the legacy absolute-dev-path). A
+// stale link pointing at either — but not at the currently selected arm — is
+// re-pointed (migrating already-onboarded repos onto `current`); a link at
+// neither is foreign and left alone.
+function forgeOwnedHookTargets(home: string): string[] {
+  // FG-582 (FIX 4): the dev-checkout source is only an OPTIONAL ownership
+  // signal here (migrating legacy dev-path links). Tolerate its absence rather
+  // than throwing — a missing bundled hook must not abort the promoted arm.
+  const targets = [promotedHookTarget(home)];
+  const devSource = tryResolveHookSource();
+  if (devSource) targets.push(devSource);
+  return targets;
 }
 
 export function executeHookPlan(plan: HookPlan): string {
   switch (plan.action) {
-    case "install":
-      symlinkSync(plan.source, plan.target);
+    case "install": {
+      // FG-582 (AC-5): between planning and here the target could have been
+      // swapped for a foreign hook. Re-read its identity and refuse to mutate
+      // unless it STILL matches what the planner classified (still absent, or
+      // still the same owned link) — never unlink something we no longer own.
+      if (!ownedStateMatches(readOwnedTargetState(plan.target), plan.expect)) {
+        return "skipped — changed since plan";
+      }
+      atomicRepoint(plan.source, plan.target);
       return `installed → ${plan.source}`;
+    }
     case "already-linked":
       return "already current (no change)";
     case "exists-other":
@@ -204,6 +289,34 @@ export function executeHookPlan(plan: HookPlan): string {
     case "skipped":
       return "skipped (--no-install-hooks)";
   }
+}
+
+// Re-read the current on-disk identity of a hook target for the AC-5
+// changed-since-plan check. Anything that isn't "absent" or a readable symlink
+// is "other" — which never matches an install plan's expectation, so we skip.
+function readOwnedTargetState(target: string): OwnedTargetState | { kind: "other" } {
+  let st;
+  try { st = lstatSync(target); }
+  catch { return { kind: "absent" }; }
+  if (!st.isSymbolicLink()) return { kind: "other" };
+  try { return { kind: "owned-link", linkTarget: readlinkSync(target) }; }
+  catch { return { kind: "other" }; }
+}
+
+function ownedStateMatches(now: OwnedTargetState | { kind: "other" }, expect: OwnedTargetState): boolean {
+  if (expect.kind === "absent") return now.kind === "absent";
+  return now.kind === "owned-link" && now.linkTarget === expect.linkTarget;
+}
+
+// FG-582 (FIX 3): repoint atomically. Create the new link at a temp name in the
+// same dir and rename() it over the target — an atomic replace on the same
+// filesystem — so .git/hooks/commit-msg is never momentarily absent (a
+// concurrent commit can't slip through an unguarded window).
+function atomicRepoint(source: string, target: string): void {
+  const tmp = join(dirname(target), `.commit-msg.forge-${process.pid}.tmp`);
+  try { unlinkSync(tmp); } catch { /* no stale temp to clear */ }
+  symlinkSync(source, tmp);
+  renameSync(tmp, target);
 }
 
 function describeHookPlan(plan: HookPlan): string {
@@ -216,19 +329,30 @@ function describeHookPlan(plan: HookPlan): string {
   }
 }
 
-// Resolve the bundled commit-msg hook script. Same fileURLToPath walk-up
-// pattern as readTemplate.
-function resolveHookSource(): string {
+// Candidate paths for the bundled commit-msg hook script. Same fileURLToPath
+// walk-up pattern as readTemplate (works under tsx and the built dist).
+function hookSourceCandidates(): string[] {
   const here = dirname(fileURLToPath(import.meta.url));
-  const candidates = [
+  return [
     join(here, "..", "..", "..", "scripts", "git-hooks", "commit-msg-no-ai-attribution"),
     join(here, "..", "..", "..", "..", "scripts", "git-hooks", "commit-msg-no-ai-attribution"),
   ];
-  for (const c of candidates) {
-    if (existsSync(c)) return c;
-  }
+}
+
+// Resolve the bundled commit-msg hook script, or undefined when it isn't found.
+// Non-throwing so callers that only need the dev source as an OPTIONAL
+// owned-target / dev-fallback can tolerate its absence (FG-582 FIX 4).
+function tryResolveHookSource(): string | undefined {
+  return hookSourceCandidates().find((c) => existsSync(c));
+}
+
+// The dev-checkout hook source, required. Only a genuine dev-arm install with no
+// resolvable source reaches this throw — the promoted arm never calls it.
+function resolveHookSource(): string {
+  const source = tryResolveHookSource();
+  if (source) return source;
   throw new Error(
-    `commit-msg hook source not found. Looked at:\n  ${candidates.join("\n  ")}`
+    `commit-msg hook source not found. Looked at:\n  ${hookSourceCandidates().join("\n  ")}`
   );
 }
 
