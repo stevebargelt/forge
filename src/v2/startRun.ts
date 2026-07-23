@@ -16,7 +16,7 @@ import { insertRun } from "../store/runs.js";
 import { logEvent } from "../store/events.js";
 import { newRunId } from "../util/ids.js";
 import { resolvePolicyPath } from "../raci/project.js";
-import { resolveSeedGeneration } from "./seed-generation.js";
+import { resolveSeedGeneration, type SeedGeneration } from "./seed-generation.js";
 import { explainRouteFile } from "../cli/commands/route.js";
 
 export type StartRunArgs = {
@@ -68,6 +68,12 @@ export type StartRunArgs = {
    *  prior retry cannot advance a new attempt. Absent for an ordinary (non-campaign)
    *  run. */
   attemptGeneration?: number;
+  /** FG-583: the seed generation anchored at dispatch entry. Threaded so the
+   *  routeReceipt records the route from the SAME complete generation this run's
+   *  workflows/runtimes resolve from (Risk#1 — one generation on the policy axis
+   *  too). `undefined` → resolve the live pointer once here. `null` → no generation
+   *  (the routeReceipt records the no-generation warning rather than reading flat). */
+  seedGeneration?: SeedGeneration | null;
 };
 
 export type StartRunResult = {
@@ -127,24 +133,34 @@ export function startRun(args: StartRunArgs): StartRunResult {
   if (args.attemptGeneration !== undefined) metadata["attemptGeneration"] = args.attemptGeneration;
 
   if (args.routeKey !== undefined) {
-    // FG-583: resolve the routeReceipt's policy from the live seed generation, so
-    // the recorded route comes from the SAME generation dispatch will consume.
-    const resolved = resolvePolicyPath(args.projectDir);
-    const explanation = explainRouteFile(resolved.path, args.routeKey);
-    if (explanation.ok) {
+    // FG-583: resolve the routeReceipt's policy from the ANCHORED seed generation,
+    // so the recorded route comes from the SAME complete generation this run's
+    // workflows/runtimes resolve from. A no-generation host records the named
+    // warning rather than reading the flat ~/.forge/routing-policy.yml.
+    const generation = args.seedGeneration !== undefined ? args.seedGeneration : resolveSeedGeneration();
+    const resolved = resolvePolicyPath(args.projectDir, generation);
+    if (resolved.source === "host" && resolved.noGeneration) {
       metadata["routeReceipt"] = {
         routeKey: args.routeKey,
-        source: resolved.source,
-        policyPath: resolved.path,
-        responsible: explanation.route.responsible,
-        pathType: explanation.route.path,
-        requiredFollowups: explanation.route.required_followups,
+        warnings: [`no seed generation is published — route not resolved; run: forge upgrade`],
       };
     } else {
-      metadata["routeReceipt"] = {
-        routeKey: args.routeKey,
-        warnings: explanation.findings.map((f) => f.message),
-      };
+      const explanation = explainRouteFile(resolved.path, args.routeKey);
+      if (explanation.ok) {
+        metadata["routeReceipt"] = {
+          routeKey: args.routeKey,
+          source: resolved.source,
+          policyPath: resolved.path,
+          responsible: explanation.route.responsible,
+          pathType: explanation.route.path,
+          requiredFollowups: explanation.route.required_followups,
+        };
+      } else {
+        metadata["routeReceipt"] = {
+          routeKey: args.routeKey,
+          warnings: explanation.findings.map((f) => f.message),
+        };
+      }
     }
   }
 

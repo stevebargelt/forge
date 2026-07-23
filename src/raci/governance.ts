@@ -9,12 +9,22 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
-import { RACI_PATH, ROUTING_POLICY_PATH } from "../util/paths.js";
+import { RACI_PATH } from "../util/paths.js";
+import { inspectSeedInstall } from "../v2/seed-generation.js";
 import { resolvePolicyPath, projectRaciPath, type RoutingSource } from "./project.js";
 import { summarizeRouteChanges, type RouteChangeSummary } from "./propose.js";
 import { computePolicyDrift, type RouteFinding } from "./route-validate.js";
 import { compileRaciDocument } from "./compile.js";
 import { RoutingPolicySchema, type PolicyRoute, type RoutingPolicy } from "./policy-schema.js";
+
+/** FG-583: the flat-file host diff baseline is retired — the effective host policy
+ *  is the one compiled INTO the live seed generation. Returns that path, or "" when
+ *  no generation is published (loadPolicy("") is a clean undefined, so a missing
+ *  generation simply yields no diff rather than reading the flat file). */
+function hostGenerationPolicyPath(): string {
+  const host = resolvePolicyPath(undefined);
+  return host.noGeneration ? "" : host.path;
+}
 
 /** Parse a policy file into a typed policy, or undefined if absent/invalid. */
 export function loadPolicy(path: string): RoutingPolicy | undefined {
@@ -57,12 +67,29 @@ export type GovernanceView =
  *  policy is stale vs its RACI source. Host policy path is injectable so the diff
  *  is testable without real ~/.forge. */
 export function governanceView(opts: { projectDir?: string; hostPolicyPath?: string }): GovernanceView {
-  const hostPolicyPath = opts.hostPolicyPath ?? ROUTING_POLICY_PATH;
   const resolved = resolvePolicyPath(opts.projectDir);
 
   if (resolved.source === "project" && resolved.uncompiledOverride && opts.projectDir !== undefined) {
     return { ok: false, source: "project", path: resolved.path, findings: [overrideNotCompiledFinding(opts.projectDir)] };
   }
+
+  // FG-583: a host resolution with no complete seed generation has NO effective
+  // routing policy — report the named install state (never an empty matrix from a
+  // missing flat path). The dashboard/CLI render this as a readiness finding.
+  if (resolved.source === "host" && resolved.noGeneration) {
+    const state = inspectSeedInstall();
+    const reason = state.kind === "incomplete" ? state.reason : `no seed generation is published for this host`;
+    return {
+      ok: false,
+      source: "host",
+      path: resolved.path,
+      findings: [{ code: "no_seed_generation", message: `${reason} — the effective host routing policy lives in the seed generation. Run: forge upgrade` }],
+    };
+  }
+
+  // FG-583: the host diff baseline is the generation's compiled policy too (never
+  // the flat file). Injectable for tests; when absent, resolve from the generation.
+  const hostPolicyPath = opts.hostPolicyPath ?? hostGenerationPolicyPath();
 
   const policy = loadPolicy(resolved.path);
   if (!policy) {

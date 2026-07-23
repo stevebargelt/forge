@@ -17,6 +17,7 @@
 
 import { loadPolicy } from "../raci/governance.js";
 import { resolvePolicyPath } from "../raci/project.js";
+import type { SeedGeneration } from "../v2/seed-generation.js";
 import type { RoutingPolicy } from "../raci/policy-schema.js";
 import type { StructuredTicket } from "../backlog/structured.js";
 import type { ExecutionLane, ItemModeOverride } from "./planner.js";
@@ -85,6 +86,10 @@ export function projectRouteToLane(
 export type ClassifyForPlanOpts = {
   projectDir: string;
   classifyTicket: ClassifyTicketFn;
+  /** FG-583: the anchored seed generation whose compiled routing policy is the
+   *  host taxonomy source. `undefined` → resolve the live pointer; a resolved
+   *  generation pins the read. Never the flat ~/.forge/routing-policy.yml. */
+  seedGeneration?: SeedGeneration | null;
 };
 
 export type ClassifyForPlanResult = {
@@ -102,16 +107,20 @@ export function classifyItemsForPlan(
   tickets: StructuredTicket[],
   opts: ClassifyForPlanOpts
 ): ClassifyForPlanResult {
-  const resolved = resolvePolicyPath(opts.projectDir);
+  const resolved = resolvePolicyPath(opts.projectDir, opts.seedGeneration);
   const policy = resolved.exists ? loadPolicy(resolved.path) : undefined;
 
   const itemOverrides: Record<string, ItemModeOverride> = {};
   const classifications: LaneClassification[] = [];
-  const policyProvenance = `routing policy source: ${resolved.source} (${resolved.path})`;
+  const policyProvenance = resolved.noGeneration
+    ? `routing policy source: host (no seed generation published — run: forge upgrade)`
+    : `routing policy source: ${resolved.source} (${resolved.path})`;
 
   for (const ticket of tickets) {
     if (!policy) {
-      const laneRationale = `routing policy not compiled or missing at ${resolved.path} -> lane 'manual'`;
+      const laneRationale = resolved.noGeneration
+        ? `no seed generation is published (the effective host routing policy lives in the generation) -> lane 'manual'`
+        : `routing policy not compiled or missing at ${resolved.path} -> lane 'manual'`;
       const materialLaneAssumptions = [policyProvenance];
       itemOverrides[ticket.id] = { lane: "manual", laneRationale, materialLaneAssumptions };
       classifications.push({ ticketId: ticket.id, routeKey: "(policy unavailable)", lane: "manual", laneRationale, materialLaneAssumptions });

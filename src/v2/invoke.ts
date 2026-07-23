@@ -486,7 +486,15 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
   const receiptWarnings: string[] = [];
   const routingReceipt = (() => {
     if (!args.routeKey) return undefined;
-    const policyResolved = resolvePolicyPath(args.projectDir);
+    // FG-583: resolve the route from the SAME anchored generation this dispatch
+    // consumes for workflows/runtimes (seedGeneration, resolved at invoke entry),
+    // never the flat ~/.forge/routing-policy.yml. A no-generation host records a
+    // named warning rather than reading flat.
+    const policyResolved = resolvePolicyPath(args.projectDir, seedGeneration);
+    if (policyResolved.source === "host" && policyResolved.noGeneration) {
+      receiptWarnings.push(`route lookup skipped for routeKey="${args.routeKey}": no seed generation is published — run: forge upgrade`);
+      return undefined;
+    }
     const explanation = explainRouteFile(policyResolved.path, args.routeKey);
     if (!explanation.ok) {
       const detail = explanation.findings.map((f) => f.message).join("; ");

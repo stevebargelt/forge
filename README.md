@@ -30,9 +30,13 @@ Now build a release, select it, and put the machine-wide `forge` on `$PATH`. On 
 ./bin/forge-dev release promote ~/forge-releases/r1       # atomically selects it as the machine-wide forge
 ./bin/forge-dev release install-shim --prefix /usr/local/bin   # once; pick any directory on your $PATH
 forge auth login                 # one-time, personal Mac only (skip if using Bedrock)
+forge upgrade --skip-project     # REQUIRED — publishes the seed generation dispatch reads (see below)
+forge setup                      # create the active model + routing policy from seeds, then run the readiness check
 ```
 
 `which forge` should now resolve, and `forge release current` should name the release you promoted. You won't need to be in `~/code/forge` to run forge from this point on.
+
+**`forge upgrade --skip-project` is not optional on a fresh host.** `install-seeds.sh` writes only the flat `~/.forge/` copies, and since FG-583 those are **not** a dispatch source — every dispatch reads exclusively the atomic *seed generation* that `forge upgrade` publishes. Until that first generation is published the host fails closed: `forge next`, gate advances, and campaign items refuse with a named, repairable no-generation state (`forge doctor` reports it as `Seed install: NOT INSTALLED`). So publish it here, before `forge setup`. (On a release host `forge upgrade` also refuses the `git pull` / `npm install` advancement half and closes `INCOMPLETE` — the asset half that publishes the generation still runs; add `--skip-git --skip-npm` for a clean exit.)
 
 Each step is separate because each is a distinct decision. **Building** produces an immutable release directory and selects nothing. **Promotion** is an atomic pointer swap (`~/.forge/current`) — a release that fails validation leaves the previous one selected and reports a refusal rather than a half-install, and `forge release rollback` swaps back to the previously selected release the same way. Promotion deletes nothing, so a rollback target is always still there. **Installing the shim** is explicit and one-time: the shim lives outside the release closure (otherwise a bad promotion would brick the `forge` you need in order to roll back), so a promotion never installs or rewrites it.
 

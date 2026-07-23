@@ -654,7 +654,12 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         const res = compilePolicyFile(RACI_PATH, ROUTING_POLICY_PATH, { write: !dryRun });
         if (res.ok) {
           routingPolicy = dryRun ? "would-recompile" : "recompiled";
-          say(`        → routing-policy.yml: ${dryRun ? "would recompile" : "recompiled"} (${res.routes} routes)`);
+          // FG-583: the FLAT routing-policy.yml is NON-AUTHORITATIVE for dispatch —
+          // kept only for the FG-579 drift detector / doctor registry (same status as
+          // the flat workflows/runtimes). The EFFECTIVE host policy is the one compiled
+          // INTO the seed generation below (publishSeedGeneration), which every dispatch
+          // consumer resolves through. Say so, so the flat copy is never mistaken for live.
+          say(`        → routing-policy.yml (flat, non-authoritative — drift/doctor only): ${dryRun ? "would recompile" : "recompiled"} (${res.routes} routes); effective policy is published in the seed generation`);
         } else {
           // FG-581 — fail closed. The promoted runtime cannot compile the installed
           // operator-authored RACI, so the routing-policy.yml the PREVIOUS runtime

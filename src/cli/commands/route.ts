@@ -164,11 +164,15 @@ export function validateRoutingResolved(opts: {
   hostPolicyPath?: string;
 }): ProjectRouteValidation {
   const host = opts.host ?? realHost;
-  const hostPolicyPath = opts.hostPolicyPath ?? ROUTING_POLICY_PATH;
 
-  const resolved: { source: ResolvedSource; path: string; uncompiledOverride?: boolean } = opts.explicitPolicy
+  const resolved: { source: ResolvedSource; path: string; uncompiledOverride?: boolean; noGeneration?: boolean } = opts.explicitPolicy
     ? { source: "explicit", path: resolve(opts.explicitPolicy) }
     : resolvePolicyPath(opts.projectDir);
+
+  // FG-583: the force-weakening baseline is the generation's host policy, never the
+  // flat file. Injectable for tests; when absent, resolve from the generation.
+  const hostResolved = resolvePolicyPath(undefined);
+  const hostPolicyPath = opts.hostPolicyPath ?? (hostResolved.noGeneration ? "" : hostResolved.path);
 
   // An uncompiled project override must fail here, not silently validate the host
   // policy (or a missing path) — tell the operator to compile the override.
@@ -178,6 +182,18 @@ export function validateRoutingResolved(opts: {
       mode: "with-raci",
       findings: [overrideNotCompiledFinding(opts.projectDir)],
       source: "project",
+      path: resolved.path,
+    };
+  }
+
+  // FG-583: a host resolution with no complete seed generation has NO effective
+  // routing policy to validate — report the named state, never read the flat file.
+  if (resolved.source === "host" && resolved.noGeneration) {
+    return {
+      ok: false,
+      mode: "with-raci",
+      findings: [{ code: "no_seed_generation", message: `no seed generation is published — the effective host routing policy lives in the generation. Run: forge upgrade` }],
+      source: "host",
       path: resolved.path,
     };
   }
@@ -287,6 +303,23 @@ export function registerRoute(program: Command): void {
         console.log(JSON.stringify(policy, null, 2));
         return;
       }
+      // FG-583: the HOST routing policy is NOT effective as a flat file — it lives
+      // COMPILED INSIDE the seed generation, published exclusively by `forge upgrade`
+      // (publishSeedGeneration is the single generation writer). A flat host rewrite
+      // here would silently change nothing a run reads — the exact defect to
+      // eliminate. So for the host source we VALIDATE-and-DIRECT: prove the RACI
+      // compiles, then refuse the misleading flat write and point at `forge upgrade`.
+      // A PROJECT compile (an authoritative project override) is UNCHANGED, and an
+      // explicit -o export path is honored (it is not the authoritative flat file).
+      if (resolved.source === "host" && !opts.out) {
+        console.log(
+          `Host RACI compiles cleanly (${Object.keys(policy.routes).length} routes), but the host routing policy is NOT written as a flat file.\n` +
+            `The effective host policy is compiled INTO the seed generation and published atomically by \`forge upgrade\`.\n` +
+            `To make this routing change effective for dispatch, run: forge upgrade`,
+        );
+        return;
+      }
+      // Past the host refuse-and-direct, resolved.source is "project" or "explicit".
       const out = opts.out
         ? resolve(opts.out)
         : resolved.source === "project"
@@ -316,6 +349,18 @@ export function registerRoute(program: Command): void {
         const finding = overrideNotCompiledFinding(projectDir);
         if (opts.json) {
           console.log(JSON.stringify({ source: "project", path: resolved.path, ok: false, findings: [finding] }, null, 2));
+        } else {
+          process.stderr.write(`[${finding.code}] ${finding.message}\n`);
+        }
+        process.exit(1);
+      }
+
+      // FG-583: host resolution with no published generation has no effective policy
+      // — report the named state, never read the flat ~/.forge/routing-policy.yml.
+      if (!policyArg && "noGeneration" in resolved && resolved.noGeneration) {
+        const finding = { code: "no_seed_generation", message: `no seed generation is published — the effective host routing policy lives in the generation. Run: forge upgrade` };
+        if (opts.json) {
+          console.log(JSON.stringify({ source: "host", path: resolved.path, ok: false, findings: [finding] }, null, 2));
         } else {
           process.stderr.write(`[${finding.code}] ${finding.message}\n`);
         }

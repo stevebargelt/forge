@@ -14,9 +14,13 @@ npm install
 ./bin/forge-dev release promote ~/forge-releases/r1            # selects it machine-wide, atomically
 ./bin/forge-dev release install-shim --prefix /usr/local/bin   # once; any directory on your $PATH
 forge auth login                 # personal Mac only
+forge upgrade --skip-project     # REQUIRED — publishes the seed generation dispatch reads (see below)
+forge setup                      # create the active model + routing policy from seeds; readiness check
 ```
 
-`which forge` now resolves and `forge --help` runs from any directory. That machine-wide `forge` is a **promoted release** — an immutable closure run by its own pinned interpreter — not your checkout: editing `~/code/forge/src/` does not change it. Build and promote again to move it; `forge release rollback` returns to the previously selected release, and `forge release current` says which one is live.
+`which forge` now resolves and `forge --help` runs from any directory.
+
+**`forge upgrade --skip-project` is required on a fresh host, not optional.** `install-seeds.sh` writes only the flat `~/.forge/` copies, and since FG-583 those are **not** a dispatch source — every dispatch reads exclusively the atomic *seed generation* `forge upgrade` publishes. Until that first generation is published the host fails closed: `forge next`, gate advances, and campaign items refuse with a named no-generation state (`forge doctor` reports `Seed install: NOT INSTALLED`), repairable only by `forge upgrade`. (Run from the promoted `forge` it also refuses the `git pull` / `npm install` advancement half and closes `INCOMPLETE`; the asset half that publishes the generation still runs — add `--skip-git --skip-npm` for a clean exit.) That machine-wide `forge` is a **promoted release** — an immutable closure run by its own pinned interpreter — not your checkout: editing `~/code/forge/src/` does not change it. Build and promote again to move it; `forge release rollback` returns to the previously selected release, and `forge release current` says which one is live.
 
 For live source, `~/code/forge/src/` is still no-rebuild-needed through `tsx` — reach it with `./bin/forge-dev <cmd>` or `npm run forge -- <cmd>`. Stable `forge` and `forge-dev` are different artifacts with different provenance, so a bug that reproduces under only one is possible; `forge release provenance` reports what a running process actually is.
 

@@ -6,6 +6,7 @@ import { resolveProjectMount } from "../../util/resolve-project-mount.js";
 import { validateCredsForNewRun } from "../../util/creds.js";
 import { profileStatus } from "../../util/auth-profiles.js";
 import { loadWorkflow } from "../../v2/loader.js";
+import { resolveSeedGeneration } from "../../v2/seed-generation.js";
 import type { Workflow } from "../../v2/schema.js";
 import { startRun, CONTROL_PLANE_METADATA_KEYS } from "../../v2/startRun.js";
 import { applyRoutePreflight, preflightEnforceFromEnv } from "../route-preflight.js";
@@ -63,8 +64,12 @@ export function registerNew(program: Command): void {
 
       validateCredsForNewRun();
 
-      // Load YAML (workspace default with project override).
-      const workflow = loadWorkflow(workflowName, { projectDir });
+      // FG-583: resolve the seed generation ONCE at dispatch entry and thread the
+      // same anchor through the workflow load AND the routeReceipt resolution, so
+      // this run is pinned to ONE complete generation across workflows/runtimes and
+      // the policy axis (Risk#1).
+      const seedGeneration = resolveSeedGeneration();
+      const workflow = loadWorkflow(workflowName, { projectDir, seedGeneration });
 
       // Build the inputs object from the workflow's declared inputs + CLI flags.
       // The runner validates required inputs in startRun.
@@ -137,6 +142,7 @@ export function registerNew(program: Command): void {
         invocationCwd,
         resolvedFromSubdir,
         explicitSubproject,
+        seedGeneration,
         ...(tags.length > 0 ? { tags } : {}),
       });
 

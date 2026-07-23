@@ -263,7 +263,14 @@ export function registerRaci(program: Command): void {
         console.log(renderProposal(result.proposal));
         console.log("");
         if (result.written) {
-          console.log(`Applied -> ${RACI_PATH} (policy recompiled, change audited to ${RACI_AUDIT_LOG_PATH}).`);
+          // FG-583: apply installs the operator-authored RACI source + audit log, and
+          // refreshes the flat (non-authoritative) routing-policy.yml — but the DERIVED
+          // policy is NOT yet effective for dispatch. The effective host policy is
+          // compiled INTO the seed generation, published exclusively by `forge upgrade`.
+          // apply does NOT publish a generation, so direct the operator explicitly and
+          // do not claim the routing change is live.
+          console.log(`Applied RACI source -> ${RACI_PATH} (change audited to ${RACI_AUDIT_LOG_PATH}).`);
+          console.log(`The routing change is NOT yet effective for dispatch — run \`forge upgrade\` to republish the seed generation with the recompiled policy.`);
         } else if (result.reason === "not_confirmed") {
           console.log("Not applied — gate passed. Re-run with --confirm to write.");
         } else {

@@ -813,21 +813,28 @@ test("FG-581 (downstream fail-closed): after a failed post-promotion compile, a 
     "",
   ].join("\n");
   try {
-    // FG-583: a seed generation published by an EARLIER test in this shared
-    // FORGE_HOME would shadow the flat routing-policy.yml this fail-closed contract
-    // operates on (resolvePolicyPath prefers the anchored generation). Clear it so
-    // the flat path is authoritative — the pre-generation host this cell models.
+    // FG-583: no seed generation is published in this FORGE_HOME, so this models a
+    // host whose only routing-policy.yml is the flat file. Clear any generation an
+    // earlier test left behind.
     for (const p of ["seed-current", "seed-previous", "seed-selection", "seed-generations", "seed-selections"]) {
       rmSync(join(process.env.FORGE_HOME!, p), { recursive: true, force: true });
     }
     writeFileSync(ROUTING_POLICY_PATH, VALID_STALE_POLICY);
 
-    // PRE-condition: the stale policy is authoritative to the live consumer — it
-    // returns the stale routes. This is what makes the post-assertion a claim about
-    // NON-consumption rather than about an already-absent file.
+    // PRE-condition (FG-583 authority model): even with a loadable, stale flat
+    // routing-policy.yml present on disk, the routing consumer NEVER routes from it —
+    // the effective host policy lives in the seed generation. With none published,
+    // governanceView fails closed on the NAMED no-generation state (it never returns
+    // the stale flat routes). This is stronger than the pre-FG-583 flat-consumption it
+    // replaces: the stale flat file was never authoritative to begin with.
     const before = governanceView({});
-    assert.equal(before.ok, true, "precondition: the stale policy is loadable and authoritative to the routing consumer");
-    if (before.ok) assert.ok(before.routes.stale_route, "…and the consumer really is routing from the stale rules");
+    assert.equal(before.ok, false, "the flat routing-policy.yml is never authoritative — the consumer fails closed on the named no-generation state");
+    if (!before.ok) {
+      assert.ok(
+        before.findings.some((f) => f.code === "no_seed_generation"),
+        `the consumer never routes from the flat file — got ${JSON.stringify(before.findings)}`,
+      );
+    }
 
     // The promoted runtime is handed a host RACI it cannot compile.
     writeFileSync(RACI_PATH, "not a RACI document at all\n");
@@ -835,15 +842,16 @@ test("FG-581 (downstream fail-closed): after a failed post-promotion compile, a 
     const r = drive({ skipProject: true, skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets });
     assert.equal(r.result.routingPolicy, "failed");
 
-    // POST-condition — the binding invariant, proven through the REAL consumer: the
-    // stale policy is no longer consumed. governanceView now fails closed with
-    // `policy_not_found` rather than returning the stale routes it returned above.
+    // POST-condition: the flat policy is ALSO neutralized on disk (FG-581 hygiene),
+    // and the consumer still fails closed on the named state — it never falls back to
+    // the stale flat file, on any surface.
+    assert.equal(existsSync(ROUTING_POLICY_PATH), false, "the stale flat routing-policy.yml is neutralized on disk");
     const after = governanceView({});
-    assert.equal(after.ok, false, "the stale policy must NOT remain silently authoritative to the routing consumer");
+    assert.equal(after.ok, false, "the consumer still fails closed after the promoted-runtime refusal");
     if (!after.ok) {
       assert.ok(
-        after.findings.some((f) => f.code === "policy_not_found"),
-        `the consumer fails closed (policy_not_found) — got ${JSON.stringify(after.findings)}`,
+        after.findings.some((f) => f.code === "no_seed_generation"),
+        `the consumer fails closed on the named no-generation state — got ${JSON.stringify(after.findings)}`,
       );
     }
   } finally {
@@ -893,10 +901,8 @@ test("FG-581 (release-mode acceptance): a promoted RELEASE that cannot compile t
     "",
   ].join("\n");
   try {
-    // FG-583: a seed generation published by an EARLIER test in this shared
-    // FORGE_HOME would shadow the flat routing-policy.yml this fail-closed contract
-    // operates on (resolvePolicyPath prefers the anchored generation). Clear it so
-    // the flat path is authoritative — the pre-generation host this cell models.
+    // FG-583: no seed generation is published in this FORGE_HOME, so the only
+    // routing-policy.yml is the flat file. Clear any generation an earlier test left.
     for (const p of ["seed-current", "seed-previous", "seed-selection", "seed-generations", "seed-selections"]) {
       rmSync(join(process.env.FORGE_HOME!, p), { recursive: true, force: true });
     }
@@ -904,13 +910,19 @@ test("FG-581 (release-mode acceptance): a promoted RELEASE that cannot compile t
     // The promoted RELEASE runtime is handed a host RACI it cannot compile.
     writeFileSync(RACI_PATH, "not a RACI document at all\n");
 
-    // Precondition: the stale policy is authoritative to the live routing consumer
-    // — it returns the stale routes. This is what makes the post-assertion a claim
-    // about non-consumption rather than about an already-absent file.
+    // Precondition (FG-583 authority model): the flat routing-policy.yml exists on
+    // disk but is NEVER authoritative — the effective host policy lives in the seed
+    // generation. With none published, governanceView fails closed on the NAMED
+    // no-generation state rather than returning the stale flat routes.
     const before = governanceView({});
-    assert.equal(before.ok, true, "precondition: the previous runtime's policy is loadable and authoritative to the routing consumer");
-    if (before.ok) assert.ok(before.routes.stale_route, "…and the consumer really is routing from the stale rules");
-    assert.equal(existsSync(ROUTING_POLICY_PATH), true, "precondition: the stale routing-policy.yml exists at its authoritative path");
+    assert.equal(before.ok, false, "the flat routing-policy.yml is never authoritative to the routing consumer (FG-583)");
+    if (!before.ok) {
+      assert.ok(
+        before.findings.some((f) => f.code === "no_seed_generation"),
+        `the consumer never routes from the flat file — got ${JSON.stringify(before.findings)}`,
+      );
+    }
+    assert.equal(existsSync(ROUTING_POLICY_PATH), true, "precondition: the stale routing-policy.yml exists on disk (non-authoritative)");
 
     // Drive the REAL upgrade path as a PROMOTED RELEASE (mode: "release"). Steps
     // 1-2 are skipped so the release-mode advancement refusal is NOT on the
@@ -954,18 +966,17 @@ test("FG-581 (release-mode acceptance): a promoted RELEASE that cannot compile t
       `unresolved must not hard-code ~/.forge — got ${JSON.stringify(r.result.unresolved)}`,
     );
 
-    // (4) The previous routing policy cannot remain silently authoritative: the
-    // REAL downstream consumer (governanceView, backing `forge route governance` +
-    // the dashboard panel) that WOULD have routed from the stale policy now fails
-    // closed (policy_not_found) instead of returning the stale routes it returned
-    // above — so a subsequent consumer fails closed rather than route off the stale
-    // policy. The invariant expressed as behavior, not just a renamed file.
+    // (4) The routing consumer cannot route off the stale policy: the REAL downstream
+    // consumer (governanceView, backing `forge route governance` + the dashboard
+    // panel) fails closed on the NAMED no-generation state — it never falls back to
+    // the flat file the refusal just neutralized. The FG-583 authority model expressed
+    // as behavior, not just a renamed file.
     const after = governanceView({});
-    assert.equal(after.ok, false, "the stale policy must NOT remain silently authoritative to the routing consumer after the promoted-runtime refusal");
+    assert.equal(after.ok, false, "the routing consumer fails closed after the promoted-runtime refusal — never routing off the flat file");
     if (!after.ok) {
       assert.ok(
-        after.findings.some((f) => f.code === "policy_not_found"),
-        `a subsequent consumer fails closed (policy_not_found) — got ${JSON.stringify(after.findings)}`,
+        after.findings.some((f) => f.code === "no_seed_generation"),
+        `a subsequent consumer fails closed on the named no-generation state — got ${JSON.stringify(after.findings)}`,
       );
     }
   } finally {

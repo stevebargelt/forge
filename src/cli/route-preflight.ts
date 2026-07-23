@@ -33,9 +33,17 @@ export type RoutePreflightResult =
 export type RouteKeyValidator = (routeKey: string, projectDir: string) => { ok: true } | { ok: false; message: string };
 
 export function defaultRouteKeyValidator(routeKey: string, projectDir: string): { ok: true } | { ok: false; message: string } {
+  // FG-583: resolve the effective policy — a host source resolves from the seed
+  // generation, never the flat ~/.forge/routing-policy.yml. A live resolve observes
+  // one complete generation (publication is a single atomic swap).
   const resolved = resolvePolicyPath(projectDir);
   if ("uncompiledOverride" in resolved && resolved.uncompiledOverride) {
     return { ok: false, message: `the project routing override under ${projectDir}/.forge is not compiled — run: forge route compile` };
+  }
+  // A no-generation host has no effective policy — refuse (this is a pre-dispatch
+  // gate), consistent with the loader's no-complete-generation refusal.
+  if (resolved.source === "host" && resolved.noGeneration) {
+    return { ok: false, message: `no seed generation is published — the effective host routing policy lives in the generation; run: forge upgrade` };
   }
   const res = explainRouteFile(resolved.path, routeKey);
   return res.ok ? { ok: true } : { ok: false, message: res.findings.map((f) => f.message).join("; ") };

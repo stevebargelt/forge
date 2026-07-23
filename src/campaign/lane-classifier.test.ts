@@ -176,7 +176,13 @@ test("classifyItemsForPlan: no compiled routing policy available -> every ticket
 
   assert.equal(result.itemOverrides["FG-1"]!.lane, "manual");
   assert.equal(result.itemOverrides["FG-2"]!.lane, "manual");
-  assert.match(result.itemOverrides["FG-1"]!.laneRationale!, /routing policy not compiled or missing/);
+  // FG-583: with no project override and no published seed generation, the effective
+  // host policy is unavailable — the classifier falls closed to 'manual' and names the
+  // no-generation state (the flat routing-policy.yml is never consulted).
+  assert.match(
+    result.itemOverrides["FG-1"]!.laneRationale!,
+    /no seed generation is published|routing policy not compiled or missing/,
+  );
 
   rmSync(dir, { recursive: true, force: true });
 });

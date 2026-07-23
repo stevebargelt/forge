@@ -221,7 +221,9 @@ test("FG-578 (CORE): forge upgrade retains the operator RACI AND recompiles rout
     "routing-policy.yml must be compiled from the RETAINED operator RACI — the derivative does not inherit the exemption, it inherits the retained SOURCE",
   );
   assert.notEqual(responsibleInCompiledPolicy(home), SEED_RESPONSIBLE, "compiling the seed's routing into the live policy IS the defect");
-  assert.match(out, /routing-policy\.yml: recompiled/, "the derived artifact is still kept in lockstep — the exemption is scoped to the SOURCE, not to $FORGE_HOME");
+  // FG-583: the flat routing-policy.yml is recompiled but marked non-authoritative
+  // (drift/doctor only); the effective policy is published in the seed generation.
+  assert.match(out, /routing-policy\.yml.*recompiled/, "the derived artifact is still kept in lockstep — the exemption is scoped to the SOURCE, not to $FORGE_HOME");
 });
 
 test("FG-578 (direct-path): recreating forge-raci.md via the installer does NOT recompile routing-policy.yml — it stays stale until `forge route compile`", () => {
