@@ -10,10 +10,11 @@
 //
 //   1. an INCOMPLETE seed install → `forge next` refuses, names the state, gives
 //      the `forge upgrade` retry advice, and exits non-zero (never dispatches);
-//   2. a NO-GENERATION home (fresh / flat layout — HEALTHY, not partial) does NOT
-//      trip the seed refusal — the wave gets PAST the seed gate (and fails later
-//      for an unrelated reason). This guards that the gate keys on `incomplete`
-//      ONLY, never on the ordinary pre-migration flat host.
+//   2. a NO-GENERATION home (fresh / flat pre-migration layout) ALSO refuses —
+//      since FG-583 moved the invariant, there is no flat dispatch fallback, so the
+//      loader refuses either a torn generation OR an absent one before ever looking
+//      up the workflow. This guards that a no-generation host is a dispatch refusal,
+//      not a healthy pass-through.
 //
 // Uses a DISPOSABLE FORGE_HOME + its own sqlite DB; the real ~/.forge is NEVER
 // touched. Auth env is stripped so oauth mode passes through without a hard
@@ -90,7 +91,7 @@ test("FG-583: forge next REFUSES to dispatch under an incomplete seed install, n
   const r = runNext(runId);
   const out = `${r.stdout}\n${r.stderr}`;
 
-  assert.match(out, /refusing to dispatch — the host seed install is incomplete/, "next must refuse under a partial install");
+  assert.match(out, /refusing to dispatch — no complete seed generation is published; the seed install is incomplete/, "next must refuse under a partial install");
   assert.match(out, /no valid provenance manifest|mid-publish|torn/, "and name the incomplete-generation reason");
   assert.match(out, /forge upgrade/, "and give the republish retry advice");
   assert.notEqual(r.status, 0, "a refused wave exits non-zero");
@@ -98,18 +99,24 @@ test("FG-583: forge next REFUSES to dispatch under an incomplete seed install, n
   assert.doesNotMatch(out, /wave dispatched/, "nothing was dispatched");
 });
 
-test("FG-583: a no-generation home (fresh / flat layout) does NOT trip the seed refusal — the wave gets past the seed gate", () => {
-  // No seed pointer planted → inspectSeedInstall() reports `no-generation`, which
-  // is HEALTHY. The run names a workflow that does not resolve on the flat layout,
-  // so the wave PASSES the seed gate and then fails at workflow load — proving the
-  // gate keys on `incomplete` only, never on the ordinary flat host.
+test("FG-583: a no-generation home (fresh / flat pre-migration layout) ALSO refuses to dispatch — no flat fallback — before the workflow is ever looked up", () => {
+  // No seed pointer planted → resolveSeedGeneration() returns null. Since FG-583
+  // moved the invariant, the loader has no flat dispatch fallback: it refuses at the
+  // single resolve point BEFORE looking up the workflow name. So even though this run
+  // names a workflow that does not exist, the failure is the seed-gate refusal, never
+  // the missing-workflow lookup.
   const runId = "run-fg583-next-nogen";
   insertActiveRun({ id: runId, workflow: "fg583-absent-workflow" });
 
   const r = runNext(runId);
   const out = `${r.stdout}\n${r.stderr}`;
 
-  assert.doesNotMatch(out, /the host seed install is incomplete/, "a no-generation host must NOT be refused as a partial install");
-  // Got past the seed gate: the failure is the unresolved workflow, not the gate.
-  assert.match(out, /fg583-absent-workflow|not found/, "the wave reached workflow resolution past the seed gate");
+  assert.match(out, /refusing to dispatch — no complete seed generation is published/, "a no-generation host must be refused at the seed gate");
+  assert.match(out, /no seed generation is published for this \$FORGE_HOME/, "and name the no-generation reason");
+  assert.match(out, /forge upgrade/, "and give the republish retry advice");
+  assert.notEqual(r.status, 0, "a refused wave exits non-zero");
+  // The refusal is a preflight gate: the workflow name is never resolved, so the
+  // missing-workflow error never appears.
+  assert.doesNotMatch(out, /fg583-absent-workflow.*not found|not found at/, "the workflow name was never looked up — the seed gate refused first");
+  assert.doesNotMatch(out, /wave dispatched/, "nothing was dispatched");
 });
