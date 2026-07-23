@@ -1,9 +1,11 @@
 ---
 id: FG-583
 type: story
-status: active
+status: done
 title: "FG-572 Child 5h: host seed install is a non-atomic cp loop — an interrupted upgrade can expose a mixed but Zod-valid workflow set to a concurrent forge next"
 created: 2026-07-17
+closed: 2026-07-23
+closed_commit: b0dd651
 ---
 
 **Parent:** FG-572 · **Epic:** FG-561 · **Depends on:** FG-577 (install from the correct tree first)
@@ -141,3 +143,22 @@ Finding 2 — fresh-install dispatchability via DOCUMENTATION (not install-seeds
 Finding 3 — promoted-layout acceptance test rewritten to spawn the ACTUAL promoted-release CLI (`forge upgrade --skip-project`, `forge next`) as a subprocess — NOT `runUpgrade()`/`loadWorkflow()` in-process — and to exercise the finding-2 documented bootstrap sequence.
 
 Re-close only after: fresh adversarial review (red-wide + red-security), corrected AC grid persisted, green CI (test + test-extended). Then FG-583 → FG-572 close.
+
+## Acceptance Evidence (CORRECTED — supersedes the premature grid above)
+
+Shipped across two merges: `8272e5b` (PR #154 — atomic generation + move-invariant) and `b0dd651` (PR #155 — routing authority model + documented bootstrap + real-CLI acceptance test). The earlier "all 7 AC met" grid was premature (operator review found the routing axis half-held, a non-dispatchable documented install, and a library-call acceptance test). This grid reflects the completed work; every criterion met with evidence.
+
+| AC | Evidence | Verdict |
+|----|----------|---------|
+| Kill/read interleavings never permit `forge next` to dispatch a mixed-but-Zod-valid set; RED reproducible before fix | `src/v2/fg583-mixed-generation-refusal.integration.test.ts`; the flat dispatch fallback removed in `src/v2/loader.ts` (`workspaceGeneration`/`noCompleteGenerationError`). `8272e5b` | met |
+| A reader interleaved between individual installed files never consumes a torn surface | `publishSeedGeneration` single `rename(2)` swap; test "a reader interleaved between individual installed files never sees a torn surface". `8272e5b` | met |
+| An interrupted install leaves a named, repairable state — not healthy | `inspectSeedInstall` (healthy/no-generation/incomplete); `doctor.ts` NOT INSTALLED + non-zero exit; `fg583-doctor-seed-install` / `fg583-next-refusal` integration tests. `8272e5b` | met |
+| Propagation consumers asserted: library, CLI human output, `--json`, exit code, doctor, retry advice, campaign/dispatch | Single loader refusal inherited by next/invoke/gate/campaign/continue; `fg583-next-refusal` (human + retry + exit), `fg583-doctor-seed-install` (human + `--json` + exit). `8272e5b` | met |
+| Promoted-layout acceptance test runs the INSTALLED forge upgrade/dispatch surfaces from release A (divergent dev checkout, generation exclusively A); after promoting B a new invocation consumes complete B, a running invocation stays anchored to A | `src/cli/commands/fg583-promoted-layout.integration.test.ts` — REWRITTEN to spawn the promoted release's actual `forge upgrade --skip-project` / `forge next` CLI as subprocesses (finding 3 fix). `b0dd651` | met |
+| Source/destination trust failures covered | Source: `fg583-mixed-generation-refusal` "divergent dev checkout's bytes never become the promoted source" + "dev/arbitrary bytes REFUSED" (`trustedAssetRoot`). Destination: realpath-contained via exported `promote.ts` `realpathContains`; installed-surface refusal in promoted-layout. `8272e5b` | met |
+| Tests use disposable FORGE_HOME; the real `~/.forge` is never touched | All fg583 tests `mkdtemp` their own FORGE_HOME (`seed-generation.testkit.ts`); subprocess tests pass FORGE_HOME + `sk-stub` apikey. `8272e5b`/`b0dd651` | met |
+| **Reopened R1 — routing authority: every host-policy consumer resolves from the anchored generation; refuse-and-direct; policy manifest-verified; preflight/dispatch anchored; routingGovernance passes; flat mutation can't affect dispatch** | `resolvePolicyPath` reads `GENERATION_ROUTING_POLICY` (flat only as no-generation sentinel); dispatch consumers threaded; `route compile`/`raci apply` (incl explicit-path) refuse-and-direct; generation policy manifest closed-set check; preflight route validated under the dispatch anchor. Tests: `src/raci/fg583-routing-authority.integration.test.ts` (flat-mutation can't affect anchored OR new dispatch; no-generation refuses), `raci.test.ts`/`route.test.ts` (refuse-and-direct), routingGovernance passes. `b0dd651` | met |
+| **Reopened R2 — fresh install is dispatchable via the documented bootstrap** | Documented `build → promote → install shim → forge upgrade --skip-project → forge setup` in README / quick-start / how-to-use-forge-across-projects / work-laptop-setup; the promoted-CLI test proves the sequence yields dispatch and that dispatch fails closed before the publish step. `b0dd651` | met |
+| **Reopened R3 — promoted-layout test exercises the installed CLI, not library calls** | `fg583-promoted-layout.integration.test.ts` now spawns the promoted release's `forge` CLI (subprocess), not `runUpgrade()`/`loadWorkflow()`. `b0dd651` | met |
+
+**Adversarial review:** red-wide + red-security ran on the routing diff and found 5 gaps (incomplete refuse-and-direct, unverified generation policy, preflight/dispatch cross-generation, incomplete-vs-absent naming, a stale setup doc) — all fixed in `24596da` (in `b0dd651`) with regression tests. CI green (test + test-extended). **FG-605 absorbed** — the whole routing authority model landed here, not just route preflight.
