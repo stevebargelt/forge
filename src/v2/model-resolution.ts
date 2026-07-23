@@ -29,6 +29,7 @@
 import { loadModelPolicy, resolveModelForTask, type LoadContext } from "./loader.js";
 import { detectCredsMode } from "../util/creds.js";
 import type { CostTier, OnUnavailable } from "./schema.js";
+import type { SeedGeneration } from "./seed-generation.js";
 
 // Effective auth is the AuthMode enum minus "auto" — "auto" is an INPUT that
 // resolves to one of these, and only the resolved value is ever recorded.
@@ -133,10 +134,20 @@ export type ResolveOpts = {
   /** The step's `runtime:` field — used only in legacy mode. Default "claude". */
   runtimeName?: string | undefined;
   ctx?: LoadContext;
+  /** FG-583: the held seed generation this dispatch is anchored to. Threaded into
+   *  the load context so task-create-time model stamping resolves the runtime (and
+   *  any generation-coupled load) from the SAME complete generation the dispatching
+   *  invocation will consume — never a live re-resolve that could read a newer one.
+   *  `undefined` → whatever `ctx.seedGeneration` carries (ordinary live resolution);
+   *  an explicit value (incl. `null`) pins it. */
+  seedGeneration?: SeedGeneration | null;
 };
 
 export function resolveModel(opts: ResolveOpts): ModelResolution {
-  const ctx = opts.ctx ?? {};
+  const ctx: LoadContext =
+    opts.seedGeneration !== undefined
+      ? { ...(opts.ctx ?? {}), seedGeneration: opts.seedGeneration }
+      : (opts.ctx ?? {});
   const policy = loadModelPolicy(ctx);
 
   // ---- Legacy mode: no policy file → today's behavior, unchanged. ----

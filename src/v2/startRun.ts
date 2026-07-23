@@ -16,6 +16,7 @@ import { insertRun } from "../store/runs.js";
 import { logEvent } from "../store/events.js";
 import { newRunId } from "../util/ids.js";
 import { resolvePolicyPath } from "../raci/project.js";
+import { resolveSeedGeneration } from "./seed-generation.js";
 import { explainRouteFile } from "../cli/commands/route.js";
 
 export type StartRunArgs = {
@@ -126,7 +127,9 @@ export function startRun(args: StartRunArgs): StartRunResult {
   if (args.attemptGeneration !== undefined) metadata["attemptGeneration"] = args.attemptGeneration;
 
   if (args.routeKey !== undefined) {
-    const resolved = resolvePolicyPath(args.projectDir);
+    // FG-583: resolve the routeReceipt's policy from the live seed generation, so
+    // the recorded route comes from the SAME generation dispatch will consume.
+    const resolved = resolvePolicyPath(args.projectDir, resolveSeedGeneration());
     const explanation = explainRouteFile(resolved.path, args.routeKey);
     if (explanation.ok) {
       metadata["routeReceipt"] = {

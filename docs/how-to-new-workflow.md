@@ -1,8 +1,8 @@
 # How-to: add a new workflow
 
-Workflows are YAML files loaded from `~/.forge/workflows/<name>.yml` (global) or `<project>/.forge/workflows/<name>.yml` (per-project override). Seeds live at `seeds/workflows/` and are installed by `install-seeds.sh`. Schema validation is handled by Zod in `src/v2/schema.ts`.
+Workflows are YAML files. A `<project>/.forge/workflows/<name>.yml` per-project override always wins; otherwise dispatch loads the global copy from the **atomic seed generation** `forge upgrade` publishes (FG-583) — on a host that has never published one, it falls back to the flat `~/.forge/workflows/<name>.yml` layout. Seeds live at `seeds/workflows/`; `install-seeds.sh` refreshes the flat copies, but only `forge upgrade` republishes the generation dispatch actually reads (see [how-to-upgrade.md](how-to-upgrade.md)). Schema validation is handled by Zod in `src/v2/schema.ts`.
 
-> **Don't hand-edit the installed global copy of a workflow the release ships.** For any workflow forge ships a seed for (every file under `seeds/workflows/`, including the `security-audit` example built below), dispatch **refuses** a `~/.forge/workflows/<name>.yml` whose bytes have drifted from that shipped baseline: the copy is schema-valid but would silently run a stale definition against current code, so the loader stops with a named error rather than mis-running it. Iterate the **seed** instead — edit `seeds/workflows/<name>.yml` and rerun `install-seeds.sh`, which force-overwrites the forge-owned global copy and keeps `~/.forge/` in lockstep with the seed — or reinstall the release's version with `forge upgrade`. To specialize a workflow for a single project, place your variant at `<project>/.forge/workflows/<name>.yml`; a project override is intentional operator specialization and is **never** refused. (The baseline is the running release's own shipped seed; only a global — host — copy is checked.)
+> **Don't hand-edit the installed global copy of a workflow the release ships.** For any workflow forge ships a seed for (every file under `seeds/workflows/`, including the `security-audit` example built below), dispatch **refuses** a drifted host copy rather than silently running a stale, schema-valid definition against current code — the loader stops with a named error. Since FG-583 the check is anchored to the published generation: a workflow whose bytes differ from the generation's own provenance manifest is named a torn/mid-publish generation and refused, and a hand-edit to the flat `~/.forge/workflows/<name>.yml` has *no effect on dispatch at all* once a generation is published (dispatch reads the generation, not the flat file). On a host with no generation yet, the flat copy is instead checked against the running release's shipped seed. Either way, iterate the **seed** and republish: edit `seeds/workflows/<name>.yml`, then run `forge upgrade` (dev: `forge-dev upgrade --skip-git --skip-npm`) to publish a fresh generation — `install-seeds.sh` alone only refreshes the flat copies. To specialize a workflow for a single project, place your variant at `<project>/.forge/workflows/<name>.yml`; a project override is intentional operator specialization and is **never** refused.
 
 ## Example: add a `security-audit` workflow
 
@@ -113,10 +113,13 @@ In `security-audit`, rejecting the `audit` gate returns to `investigate`. The re
 ### Step 5: install and test
 
 ```bash
-# Install seeds (copies to ~/.forge/workflows/)
-./install-seeds.sh
+# Publish the seed into the generation dispatch reads (FG-583). install-seeds.sh
+# alone only refreshes the flat ~/.forge/workflows copies; forge upgrade republishes
+# the atomic generation, so loadWorkflow/dispatch will actually find the new workflow.
+./bin/forge-dev upgrade --skip-git --skip-npm --skip-project
 
-# Validate the YAML parses correctly
+# Validate the YAML parses and resolves through the loader (reads the published
+# generation; on a host with no generation yet it falls back to the flat layout)
 npx tsx -e "import('./src/v2/loader.js').then(m => m.loadWorkflow('security-audit', { projectDir: process.cwd() })).then(w => console.log(JSON.stringify(w, null, 2)))"
 ```
 

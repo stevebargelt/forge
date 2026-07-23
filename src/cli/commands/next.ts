@@ -7,6 +7,7 @@ import { validateCredsForNewRun } from "../../util/creds.js";
 import { loadWorkflow } from "../../v2/loader.js";
 import { runNext, type RunNextResult } from "../../v2/runNext.js";
 import { formatRunFailure } from "../../v2/ready-queue.js";
+import { inspectSeedInstall, resolveSeedGeneration } from "../../v2/seed-generation.js";
 
 // FG-585: a truthful one-line failure detail for `forge next` — names the
 // phase(s) that failed and the phase(s) that could never dispatch as a result.
@@ -45,8 +46,24 @@ export function registerNext(program: Command): void {
 
           const projectDir = resolveProjectDir(runId, options.project as string | undefined);
 
-          const workflow = loadWorkflow(run.workflow, { projectDir });
-          const result = await runNext({ runId, workflow });
+          // FG-583: a partial/torn seed install must NOT dispatch as healthy. Refuse
+          // the wave with the named, repairable state rather than run under a
+          // mixed/incomplete generation no release shipped.
+          const seedState = inspectSeedInstall();
+          if (seedState.kind === "incomplete") {
+            console.log(`Run ${runId}: refusing to dispatch — the host seed install is incomplete.`);
+            console.log(`  ${seedState.reason}`);
+            console.log(`  Fix: forge upgrade (republishes a complete seed generation), then re-run.`);
+            process.exitCode = 1;
+            return;
+          }
+
+          // FG-583: anchor the seed generation ONCE at dispatch entry (physical
+          // realpath) and thread it through the wave, so every load reads the SAME
+          // complete generation even if a promotion swaps the pointer mid-wave.
+          const seedGeneration = resolveSeedGeneration();
+          const workflow = loadWorkflow(run.workflow, { projectDir, seedGeneration });
+          const result = await runNext({ runId, workflow, seedGeneration });
 
           if (result.dispatchedSteps.length === 0) {
             console.log(`Run ${runId}: nothing ready to dispatch.`);

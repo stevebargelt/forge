@@ -9,13 +9,15 @@ import type { Command } from "commander";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { FORGE_HOME, ROUTING_POLICY_PATH } from "../../util/paths.js";
+import { FORGE_HOME } from "../../util/paths.js";
+import { resolvePolicyPath } from "../../raci/project.js";
 import { assetRoot, executionMode, type ExecutionMode } from "../../v2/asset-root.js";
 import { loadRuntime, loadModelPolicy, type LoadContext } from "../../v2/loader.js";
 import { probeAuth } from "../../v2/provider-doctor.js";
 import { detectAuthMode, type EffectiveAuth } from "../../v2/model-resolution.js";
 import { validateRoutePolicyFile } from "./route.js";
 import { detectSeedDrift, renderSeedDrift } from "../../v2/seed-drift.js";
+import { inspectSeedInstall } from "../../v2/seed-generation.js";
 import {
   buildReleaseReport,
   renderReleaseReport,
@@ -239,8 +241,14 @@ export function gatherPolicy(ctx: LoadContext = {}): ReleaseInputs["policy"] {
 }
 
 function gatherRouting(): ReleaseInputs["routing"] {
-  if (!existsSync(ROUTING_POLICY_PATH)) return { present: false, ok: false, detail: "" };
-  const v = validateRoutePolicyFile(ROUTING_POLICY_PATH);
+  // FG-583: read the routing policy from the anchored seed generation (the same
+  // anchor that yields workflows/runtimes), falling back to the flat file only when
+  // no generation is selected. resolvePolicyPath() with no projectDir resolves the
+  // HOST policy, which is the generation's compiled routing-policy.yml when one is
+  // published.
+  const resolved = resolvePolicyPath();
+  if (!resolved.exists) return { present: false, ok: false, detail: "" };
+  const v = validateRoutePolicyFile(resolved.path);
   return {
     present: true,
     ok: v.ok,
@@ -284,13 +292,23 @@ export function registerDoctor(program: Command): void {
     .action((opts: { json?: boolean }) => {
       const report = buildReleaseReport(gatherReleaseInputs(DEFAULT_IMAGE, { projectDir: process.cwd() }));
       const drift = detectSeedDrift(); // FG-335: installed ~/.forge seeds vs running code
+      // FG-583: a partial/torn seed generation is a NAMED, repairable state — never
+      // reported healthy. `no-generation` (fresh host / flat layout) and `healthy`
+      // are both fine; only `incomplete` is a readiness problem.
+      const seedInstall = inspectSeedInstall();
+      const seedInstallOk = seedInstall.kind !== "incomplete";
       if (opts.json) {
-        console.log(JSON.stringify({ ...report, seedDrift: drift }, null, 2));
+        console.log(JSON.stringify({ ...report, seedDrift: drift, seedInstall }, null, 2));
       } else {
         console.log(renderReleaseReport(report));
         const driftSection = renderSeedDrift(drift);
         if (driftSection) console.log(`\n${driftSection}`);
+        if (seedInstall.kind === "incomplete") {
+          console.log(`\nSeed install: INCOMPLETE (repairable) — ${seedInstall.reason}`);
+          console.log(`  A partial host-seed install can expose a mixed/torn workflow set to dispatch.`);
+          console.log(`  Fix: forge upgrade (republishes a complete atomic seed generation).`);
+        }
       }
-      process.exitCode = report.ok && drift.ok ? 0 : 1;
+      process.exitCode = report.ok && drift.ok && seedInstallOk ? 0 : 1;
     });
 }

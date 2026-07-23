@@ -91,7 +91,7 @@ Per-project state is intentionally minimal: just the orchestrator block and an o
 
 ## Per-project workflow overrides
 
-If `<project>/.forge/workflows/<name>.yml` exists, `forge new <name>` uses it instead of `~/.forge/workflows/<name>.yml`. Useful when a project needs a non-default phase sequence, an extra red, or a different model alias for a step.
+If `<project>/.forge/workflows/<name>.yml` exists, `forge new <name>` uses it instead of the host-global default. (A project override is always read directly and takes precedence; the host default itself is loaded from the atomically published seed generation, not the flat `~/.forge/workflows/` copy — see FG-583 in [how-to-new-workflow.md](how-to-new-workflow.md).) Useful when a project needs a non-default phase sequence, an extra red, or a different model alias for a step.
 
 Most projects don't need this; the default workflows in `seeds/workflows/` cover the common cases. When you do need it, copy the seed into the project's `.forge/workflows/` and edit there:
 

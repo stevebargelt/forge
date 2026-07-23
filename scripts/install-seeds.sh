@@ -133,17 +133,34 @@ install_category "$HERE/seeds/agents" "$DEST/agents" agents
 
 install_category "$HERE/seeds/constraints" "$DEST/constraints" constraints
 
-# Runtime YAML seeds (v2). Required for the v2 YAML-driven runner to find
-# bedrock/oauth/apikey runtime definitions. Installs alongside agents. Forge-owned
-# execution artifacts: FORCE refreshes them, which is the whole point of the
-# drift detector's remedy.
+# FG-583 — DISPATCH NO LONGER CONSUMES THIS FLAT SURFACE. workflows and runtimes are
+# forge-owned, dispatch-coupled surfaces. A sequential per-file `cp` loop into the
+# SHARED flat $FORGE_HOME/{workflows,runtimes} could expose a torn or old/new MIXED
+# set to a concurrent `forge next` — every file Zod-valid, the SET one no release
+# shipped. That defect is CLOSED at the consume side: `forge upgrade` also publishes
+# workflows + runtimes + the derived routing-policy.yml as ONE atomic generation via
+# publishSeedGeneration (src/v2/seed-generation.ts), committed with a single
+# rename(2) over the seed pointer and sourced strictly from the executing release
+# (FG-577 assetRoot). Every DISPATCH entry (forge next / invoke / gate / campaign)
+# now resolves workflows, runtimes, and the derived policy EXCLUSIVELY from the
+# anchored generation and REFUSES a named incomplete/torn generation — it never
+# consumes this flat per-file surface. The flat copies below are retained ONLY for
+# the out-of-scope consumers that still read $FORGE_HOME directly: the FG-577/578/579
+# seed-drift detector + FORCE remedy (seed-drift.ts SEED_SPECS) and `forge doctor`'s
+# provider-runtime-registry enumeration. Migrating THOSE to the generation is the
+# deferred FG-579 SEED_SPECS coverage work, explicitly out of scope here.
+
+# Runtime YAML seeds (v2). Forge-owned execution artifacts: FORCE refreshes them —
+# the drift detector's #265 (stale pi-apikey.yml rebinds the provider) remedy — and
+# `forge doctor` enumerates this dir as the provider-runtime registry. DISPATCH reads
+# runtimes from the atomic generation (above), not from here.
 if [[ -d "$HERE/seeds/runtimes" ]]; then
   install_category "$HERE/seeds/runtimes" "$DEST/runtimes" runtimes
 fi
 
-# Workflow YAML seeds (v2). Installed lazily — the .yml.draft files in
-# docs/prds/yaml-orchestrator-116/ become seeds/workflows/*.yml when v2
-# cutover happens. Stub the install path so the dir exists in the meantime.
+# Workflow YAML seeds (v2). Retained flat ONLY for the seed-drift detector's
+# executable-coupling readiness check; DISPATCH reads workflows from the atomic
+# generation (above), never from this flat surface.
 if [[ -d "$HERE/seeds/workflows" ]]; then
   install_category "$HERE/seeds/workflows" "$DEST/workflows" workflows
 fi

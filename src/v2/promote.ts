@@ -43,7 +43,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync, type Stats } from "node:fs";
-import { basename, isAbsolute, join, resolve, sep } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { FORGE_HOME, currentLinkIn, interpretersDirIn, previousLinkIn, releasesDirIn, selectionLinkIn, selectionsDirIn, unitsDirIn } from "../util/paths.js";
 import {
   RELEASE_ENTRY_NAME,
@@ -560,6 +560,43 @@ export function atomicSymlinkSwap(target: string, link: string): void {
     rmSync(tmp, { force: true });
     throw e;
   }
+}
+
+/** Realpath containment: is `child` at, or physically inside, `parent`? BOTH are
+ *  canonicalized (realpath), so a home under a symlinked component (macOS
+ *  /var → /private/var) is not misread as an escape, and — the follow-safe part —
+ *  a destination that IS a symlink, or has any symlinked path COMPONENT, resolving
+ *  outside `parent` is caught: realpath follows every link, so the compared string
+ *  is the physical target, never the replaceable pointer. For a `child` that does
+ *  not exist yet, the nearest existing ancestor is canonicalized and the remainder
+ *  appended, so a symlinked ancestor still counts as an escape.
+ *
+ *  Exported so FG-583's seed publication reuses THIS containment vocabulary rather
+ *  than inventing a second one. (An irreducible sub-microsecond same-UID swap of a
+ *  path component AFTER this check and BEFORE the write — the FG-604 class — is not
+ *  closed here; closing the realistic pre-existing-symlink case is.) */
+export function realpathContains(parent: string, child: string): boolean {
+  let p: string;
+  let c: string;
+  try {
+    p = realpathSync(parent);
+  } catch {
+    p = resolve(parent);
+  }
+  try {
+    c = realpathSync(child);
+  } catch {
+    c = resolve(child);
+    let probe = c;
+    while (probe !== resolve(probe, "..")) {
+      if (existsSync(probe)) {
+        c = join(realpathSync(probe), relative(probe, c));
+        break;
+      }
+      probe = resolve(probe, "..");
+    }
+  }
+  return c === p || c.startsWith(`${p}${sep}`);
 }
 
 /** Where `current` and `previous` point once a home is linked through `selection`. Relative,

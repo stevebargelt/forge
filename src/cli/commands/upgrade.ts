@@ -21,6 +21,7 @@ import { RACI_PATH, ROUTING_POLICY_PATH } from "../../util/paths.js";
 import { buildReleaseReport, summarizeProblems, type ReleaseReport } from "../../v2/release-doctor.js";
 import { gatherReleaseInputs } from "./doctor.js";
 import { assetRoot, devCheckoutDir, executionMode, type ExecutionMode } from "../../v2/asset-root.js";
+import { publishSeedGeneration } from "../../v2/seed-generation.js";
 
 // Wraps the manual upgrade dance: git pull on forge's own repo, refresh
 // shared seeds at ~/.forge/, optionally re-init the current project's
@@ -158,6 +159,13 @@ export type NpmInstallOutcome =
 
 export type AssetInstallOutcome = "installed" | "would-install" | "not-found" | "failed";
 
+// FG-583: the atomic seed-generation publication — the forge-owned, dispatch-coupled
+// surface (workflows, runtimes, derived routing policy) committed as ONE generation
+// by a single rename(2) over the seed pointer. `failed` is a NAMED, repairable
+// partial-install state: the prior generation stays intact and selectable, but this
+// upgrade did not publish a new complete one.
+export type SeedGenerationOutcome = "published" | "would-publish" | "not-run" | "failed";
+
 /** FG-578: what install-seeds.sh declined to write because the operator owns it.
  *  `not-run` is not "nothing was retained" — it is "the installer never ran, so
  *  nobody looked". Collapsing the two would report a clean ownership picture for
@@ -202,6 +210,7 @@ export type UpgradeStepOutcomes = {
   gitPull: GitPullOutcome;
   npmInstall: NpmInstallOutcome;
   assetInstall: AssetInstallOutcome;
+  seedGeneration: SeedGenerationOutcome;
   authoredRetention: AuthoredRetentionOutcome;
   routingPolicy: RoutingPolicyOutcome;
   projectInit: ProjectInitOutcome;
@@ -255,6 +264,16 @@ const ASSET_INSTALL: Record<AssetInstallOutcome, Resolution> = {
   "would-install": resolved,
   "not-found": unresolvedBecause("install-seeds.sh NOT FOUND — host seeds were not refreshed"),
   failed: unresolvedBecause("install-seeds.sh FAILED"),
+};
+
+// FG-583: a failed atomic publication is a NAMED, repairable partial-install state —
+// unresolved, so the exit code / --json / closing line all report it and doctor +
+// dispatch preflight refuse to run under it, rather than reporting healthy.
+const SEED_GENERATION: Record<SeedGenerationOutcome, Resolution> = {
+  published: resolved,
+  "would-publish": resolved,
+  "not-run": resolved,
+  failed: unresolvedBecause("seed generation NOT PUBLISHED — the atomic host-seed publication failed; the prior generation is intact but this release's seeds are not the active generation (forge upgrade to retry)"),
 };
 
 // FG-578: forge declining to overwrite a file the operator AUTHORS is the
@@ -339,6 +358,7 @@ export function classifyStep(step: UpgradeStep): Resolution {
     case "gitPull": return GIT_PULL[step.outcome];
     case "npmInstall": return NPM_INSTALL[step.outcome];
     case "assetInstall": return ASSET_INSTALL[step.outcome];
+    case "seedGeneration": return SEED_GENERATION[step.outcome];
     case "authoredRetention": return AUTHORED_RETENTION[step.outcome];
     case "routingPolicy": return ROUTING_POLICY[step.outcome];
     case "projectInit": return PROJECT_INIT[step.outcome];
@@ -391,6 +411,15 @@ export type UpgradeResult = {
     npmInstall: NpmInstallOutcome;
   };
   assetInstall: AssetInstallOutcome;
+  /** FG-583: the atomic seed-generation publication outcome. On `failed` the
+   *  `seedGenerationError` names the exact reason; a partial install is never
+   *  reported healthy — this outcome flows into `unresolved`, the exit code, and
+   *  the doctor / dispatch preflight refusal. */
+  seedGeneration: SeedGenerationOutcome;
+  /** FG-583: the publication's verbatim failure reason, or null on any non-failure
+   *  path. Threaded onto --json so a script reads the same named refusal the human
+   *  warning prints. */
+  seedGenerationError: string | null;
   authoredRetention: AuthoredRetentionOutcome;
   /** FG-578: the seed files forge did NOT overwrite because the OPERATOR authors
    *  them (forge-raci.md, agents/, constraints/) and their copy diverges from
@@ -683,6 +712,45 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         }
       }
 
+      // Step 3 (cont.): FG-583 — publish the forge-owned, dispatch-coupled seed
+      // surface (workflows, runtimes, derived routing policy) as ONE atomic
+      // generation. Sourced strictly from the executing release (assetsDir), so a
+      // divergent dev checkout can never leak into the promoted seeds. A concurrent
+      // `forge next` therefore observes the prior complete generation until this
+      // single rename(2) swaps in the new complete one — never a torn/mixed surface.
+      // A failed publication is a NAMED, repairable state: the prior generation is
+      // left intact, and the outcome flows into `unresolved` / the exit code / doctor.
+      let seedGeneration: SeedGenerationOutcome = "not-run";
+      let seedGenerationError: string | null = null;
+      if (assetInstall === "not-found") {
+        // No release seeds to publish from — the not-found asset install already
+        // reports unresolved; the generation simply did not run.
+        seedGeneration = "not-run";
+      } else if (dryRun) {
+        seedGeneration = "would-publish";
+        say(`        → seed generation: would publish workflows + runtimes + derived routing policy atomically`);
+      } else {
+        try {
+          const pub = publishSeedGeneration({
+            assetsDir,
+            // FG-583 source trust: the executing-release provenance is `env.assetsDir`
+            // — the SAME root the whole command resolved its assets from (assetRoot()
+            // in production; the injected release in a test). publishSeedGeneration
+            // validates the source against this, so the divergent dev checkout (devDir)
+            // can never be the seed source.
+            trustedAssetRoot: () => assetsDir,
+            raciPath: existsSync(RACI_PATH) ? RACI_PATH : undefined,
+          });
+          seedGeneration = "published";
+          say(`        → seed generation: published ${pub.files} file(s) atomically${pub.routingPolicyCompiled ? " (with derived routing policy)" : ""}`);
+        } catch (e) {
+          seedGeneration = "failed";
+          seedGenerationError = (e as Error).message;
+          warn(`        ⚠ seed generation NOT published — ${seedGenerationError}`);
+          warn(`          the prior generation is intact; dispatch continues under it. Re-run: forge upgrade`);
+        }
+      }
+
       // Step 4: re-init current project — CLAUDE.md orchestrator block + all
       // hook installs (commit-msg, claude session hooks, slash commands).
       // Re-running the install plans is idempotent: already-current entries
@@ -819,6 +887,7 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         gitPull,
         npmInstall,
         assetInstall,
+        seedGeneration,
         authoredRetention,
         routingPolicy,
         projectInit,
@@ -860,6 +929,8 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
           npmInstall,
         },
         assetInstall,
+        seedGeneration,
+        seedGenerationError,
         authoredRetention,
         authoredRetentions,
         routingPolicy,

@@ -49,7 +49,7 @@ In v0 this file is metadata for the operator; the actual tool restrictions are e
 
 ### Step 3: wire into a workflow
 
-Open the workflow YAML (e.g. `~/.forge/workflows/feature-ui-design-needed.yml`; source at `seeds/workflows/`; see `docs/how-to-new-workflow.md`) and add the role to a step's `reds` list:
+Edit the workflow **seed** (`seeds/workflows/feature-ui-design-needed.yml`) and add the role to a step's `reds` list, then republish so dispatch picks it up — since FG-583 dispatch reads workflows from the atomic seed generation `forge upgrade` publishes, not from the flat `~/.forge/workflows/<name>.yml`, so a hand-edit to that flat copy has no effect (see `docs/how-to-new-workflow.md`):
 
 ```yaml
   - id: build

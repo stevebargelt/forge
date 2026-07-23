@@ -33,6 +33,7 @@ import { logEvent, eventsForTask } from "../store/events.js";
 import { finalizeContainerRetention } from "./docker-exec.js";
 import { newGateId, newTaskId, nowIso } from "../util/ids.js";
 import { loadWorkflow } from "./loader.js";
+import { resolveSeedGeneration, inspectSeedInstall } from "./seed-generation.js";
 import type { Workflow, Step } from "./schema.js";
 import { tasksForRun } from "../store/tasks.js";
 import { failTask, classify } from "./failure-kind.js";
@@ -126,7 +127,21 @@ export async function gate(
 
   const run = getRun(task.runId);
   if (!run) throw new Error(`Run not found for task ${taskId}`);
-  const workflow = loadWorkflow(run.workflow, { projectDir: run.projectDir });
+  // FG-583: refuse the NAMED incomplete/mixed seed-install state rather than
+  // resolving null and silently falling back to the mutable flat layout — a gate
+  // advance can re-enter dispatch, and the workflow read below must not run under a
+  // torn/mid-publish generation no release shipped.
+  const seedState = inspectSeedInstall();
+  if (seedState.kind === "incomplete") {
+    throw new Error(
+      `Cannot gate ${taskId} — the host seed install is incomplete: ${seedState.reason}. ` +
+        `Fix: forge upgrade (republishes a complete seed generation), then re-run.`,
+    );
+  }
+  // FG-583: anchor the seed generation once so gate's workflow read and any
+  // dispatch it triggers observe ONE complete generation.
+  const seedGeneration = resolveSeedGeneration();
+  const workflow = loadWorkflow(run.workflow, { projectDir: run.projectDir, seedGeneration });
   const step = findStep(workflow, task.phase);
   if (!step) throw new Error(`Step '${task.phase}' not in workflow '${workflow.name}'`);
 
