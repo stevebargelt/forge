@@ -33,6 +33,7 @@ import { logEvent, eventsForTask } from "../store/events.js";
 import { finalizeContainerRetention } from "./docker-exec.js";
 import { newGateId, newTaskId, nowIso } from "../util/ids.js";
 import { loadWorkflow } from "./loader.js";
+import { resolveSeedGeneration } from "./seed-generation.js";
 import type { Workflow, Step } from "./schema.js";
 import { tasksForRun } from "../store/tasks.js";
 import { failTask, classify } from "./failure-kind.js";
@@ -126,7 +127,13 @@ export async function gate(
 
   const run = getRun(task.runId);
   if (!run) throw new Error(`Run not found for task ${taskId}`);
-  const workflow = loadWorkflow(run.workflow, { projectDir: run.projectDir });
+  // FG-583: anchor the seed generation once so gate's workflow read and any dispatch
+  // it triggers observe ONE complete generation. No per-consumer seed-state gating —
+  // loadWorkflow below refuses (named, repairable) at the loader's single resolve
+  // point when no complete generation is published, so a gate advance can never
+  // re-enter dispatch under a torn/incomplete/flat surface.
+  const seedGeneration = resolveSeedGeneration();
+  const workflow = loadWorkflow(run.workflow, { projectDir: run.projectDir, seedGeneration });
   const step = findStep(workflow, task.phase);
   if (!step) throw new Error(`Step '${task.phase}' not in workflow '${workflow.name}'`);
 

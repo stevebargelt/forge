@@ -29,6 +29,7 @@ import { failureKindForTask } from "../../v2/failure-kind.js";
 import { invoke, createInvokeRun, type DockerExecFn } from "../../v2/invoke.js";
 import { loadWorkflow } from "../../v2/loader.js";
 import { isRunSettled } from "../../v2/ready-queue.js";
+import { publishFlatAsGeneration } from "../../v2/seed-generation.testkit.js";
 import { registerRecover } from "./recover.js";
 import { registerCancel } from "./cancel.js";
 import { registerRetry } from "./retry.js";
@@ -46,11 +47,11 @@ const REDISPATCH_RESULT = { status: "complete", note: "redispatched through the 
 
 function setupRuntimeStub(): void {
   const runtimePath = join(process.env["FORGE_HOME"]!, "runtimes", "claude.yml");
-  if (existsSync(runtimePath)) return;
-  mkdirSync(dirname(runtimePath), { recursive: true });
-  writeFileSync(
-    runtimePath,
-    `
+  if (!existsSync(runtimePath)) {
+    mkdirSync(dirname(runtimePath), { recursive: true });
+    writeFileSync(
+      runtimePath,
+      `
 name: claude
 description: test stub
 image: test-image:latest
@@ -68,7 +69,9 @@ container:
 result:
   file: /task/result.json
 `,
-  );
+    );
+  }
+  publishFlatAsGeneration(process.env["FORGE_HOME"]!);
 }
 
 /** A fake `docker` first on PATH — the one boundary this test stubs.

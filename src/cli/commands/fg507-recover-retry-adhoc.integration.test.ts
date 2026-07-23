@@ -29,6 +29,7 @@ import {
 } from "../../v2/retry.js";
 import { taskDispatchKind } from "../../v2/run-kind.js";
 import { loadWorkflow } from "../../v2/loader.js";
+import { publishFlatAsGeneration } from "../../v2/seed-generation.testkit.js";
 import { computeReadyQueue } from "../../v2/ready-queue.js";
 import { runNext } from "../../v2/runNext.js";
 import { performInspect } from "./recover.js";
@@ -48,11 +49,11 @@ const TASK_STEP_WORKFLOW = "fg507wftaskstep";
 
 function setupRuntimeStub(): void {
   const runtimePath = join(process.env["FORGE_HOME"]!, "runtimes", "claude.yml");
-  if (existsSync(runtimePath)) return;
-  mkdirSync(dirname(runtimePath), { recursive: true });
-  writeFileSync(
-    runtimePath,
-    `
+  if (!existsSync(runtimePath)) {
+    mkdirSync(dirname(runtimePath), { recursive: true });
+    writeFileSync(
+      runtimePath,
+      `
 name: claude
 description: test stub
 image: test-image:latest
@@ -70,7 +71,9 @@ container:
 result:
   file: /task/result.json
 `,
-  );
+    );
+  }
+  publishFlatAsGeneration(process.env["FORGE_HOME"]!);
 }
 
 /** A non-git project dir (so changedWorktreeFiles finds nothing) carrying a

@@ -1,6 +1,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { join } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
@@ -54,6 +55,8 @@ steps:
     gate: auto
 `,
   );
+  // FG-583: dispatch reads only a published generation — publish the flat fixture.
+  publishFlatAsGeneration(process.env["FORGE_HOME"]!);
 }
 
 beforeEach(() => { db = makeInMemoryDb(); prev = setDbForTest(db); installFeatureWorkflow(); insertRun(RUN); });

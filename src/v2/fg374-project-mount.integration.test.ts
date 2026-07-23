@@ -25,6 +25,7 @@ import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { invoke, type DockerExecFn } from "./invoke.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { taskDir } from "../util/paths.js";
 import type { TaskManifest } from "./task-manifest.js";
 import { preflightProjectMount } from "./spawn.js";
@@ -69,9 +70,9 @@ function makeStubExec(resultJson: unknown = { status: "complete" }, exitCode = 0
 function ensureClaudeRuntime(): void {
   const fhome = process.env.FORGE_HOME!;
   const runtimePath = join(fhome, "runtimes", "claude.yml");
-  if (existsSync(runtimePath)) return;
-  mkdirSync(dirname(runtimePath), { recursive: true });
-  writeFileSync(runtimePath, `name: claude
+  if (!existsSync(runtimePath)) {
+    mkdirSync(dirname(runtimePath), { recursive: true });
+    writeFileSync(runtimePath, `name: claude
 description: test stub runtime
 image: test-image:latest
 models:
@@ -88,6 +89,9 @@ container:
 result:
   file: /task/result.json
 `);
+  }
+  // FG-583: publish the flat runtime as a complete generation so dispatch resolves it.
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 // ─── 1. MANIFEST: FG-374 fields propagate into controlPlane block ────────────

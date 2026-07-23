@@ -87,6 +87,34 @@ export const INTERPRETERS_DIR = interpretersDirIn(FORGE_HOME);
 export const CURRENT_LINK = currentLinkIn(FORGE_HOME);
 export const PREVIOUS_LINK = previousLinkIn(FORGE_HOME);
 
+// FG-583 — THE SEED GENERATION POINTER. Forge-owned, dispatch-coupled host seeds
+// (workflows, runtimes, the derived compiled routing policy) are published as ONE
+// atomic generation, committed by a single rename(2) over a dedicated pointer that
+// resolves THROUGH a stable selection dir — the exact promote.ts vocabulary, but a
+// DISTINCT pointer pair from FG-571's interpreter `current`/`previous`. Seed refresh
+// therefore works WITHOUT interpreter promotion.
+//
+// The relative-link shape mirrors selectionLinkIn/currentLinkIn: `seed-current` and
+// `seed-previous` are static links THROUGH `seed-selection`, so a moved or
+// bind-mounted home still resolves the chain. Every path derives from `home`, so a
+// disposable FORGE_HOME isolates a publication completely from the operator's real
+// ~/.forge — the mechanism that keeps tests off the real host.
+export function seedGenerationsDirIn(home: string): string {
+  return join(home, "seed-generations");
+}
+export function seedSelectionsDirIn(home: string): string {
+  return join(home, "seed-selections");
+}
+export function seedSelectionLinkIn(home: string): string {
+  return join(home, "seed-selection");
+}
+export function seedCurrentLinkIn(home: string): string {
+  return join(home, "seed-current");
+}
+export function seedPreviousLinkIn(home: string): string {
+  return join(home, "seed-previous");
+}
+
 export function ensureForgeDirs(): void {
   for (const dir of [FORGE_HOME, RUNS_DIR, AGENTS_DIR, CONSTRAINTS_DIR, WORKTREES_DIR]) {
     mkdirSync(dir, { recursive: true });

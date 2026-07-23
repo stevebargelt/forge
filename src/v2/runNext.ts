@@ -65,6 +65,7 @@ import { writeTaskManifest, manifestControlPlaneBlock } from "./task-manifest.js
 import { resolveDocsSurfacesReceipt } from "./contract.js";
 import { emitAgentProgressEvents } from "./agent-progress.js";
 import { loadRuntimeWithSource, loadModelPolicyWithSource, loadWorkflow, loadWorkflowWithSource, type ModelPolicyWithSource } from "./loader.js";
+import { type SeedGeneration } from "./seed-generation.js";
 import {
   resolveModel,
   taskModelFields,
@@ -144,12 +145,15 @@ export type RunNextResult = {
 // so this keys by projectDir rather than collapsing to a single value.
 function createModelPolicyResolver(
   loader: typeof loadModelPolicyWithSource = loadModelPolicyWithSource,
+  // FG-583: the wave's held seed generation, threaded into every model-policy load
+  // so the whole wave resolves against ONE anchored generation.
+  seedGeneration?: SeedGeneration | null,
 ): (projectDir: string) => ModelPolicyWithSource {
   const cache = new Map<string, ModelPolicyWithSource>();
   return (projectDir: string) => {
     const cached = cache.get(projectDir);
     if (cached) return cached;
-    const resolved = loader({ projectDir });
+    const resolved = loader({ projectDir, seedGeneration });
     cache.set(projectDir, resolved);
     return resolved;
   };
@@ -164,6 +168,12 @@ export async function runNext(args: {
   // For testing: override/spy on the model-policy loader. Real callers leave
   // this undefined and the real loadModelPolicyWithSource is used.
   modelPolicyLoader?: typeof loadModelPolicyWithSource;
+  // FG-583: the seed generation anchored ONCE at dispatch entry (next.ts) and
+  // threaded through the wave so every dispatch-coupled load (workflow, runtime)
+  // reads the SAME complete generation even if a promotion swaps the pointer
+  // mid-wave. `undefined` (tests / older callers) → each load resolves the live
+  // pointer, which under atomic publication still observes one complete generation.
+  seedGeneration?: SeedGeneration | null;
 }): Promise<RunNextResult> {
   const run = getRun(args.runId);
   if (!run) throw new Error(`runNext: run not found: ${args.runId}`);
@@ -265,7 +275,7 @@ export async function runNext(args: {
   // Dispatch all ready steps in parallel (Promise.all → "parallel within wave").
   // Each dispatchStep returns the post-dispatch task status for its step.
   const dispatched: string[] = ready.map((s) => s.id);
-  const getModelPolicy = createModelPolicyResolver(args.modelPolicyLoader);
+  const getModelPolicy = createModelPolicyResolver(args.modelPolicyLoader, args.seedGeneration);
   const outcomes = await Promise.all(
     ready.map((step) => dispatchStep({
       runId: args.runId,
@@ -276,6 +286,7 @@ export async function runNext(args: {
       runMetadata: run.metadata ?? {},
       dockerExec: args.dockerExec,
       getModelPolicy,
+      seedGeneration: args.seedGeneration,
     }))
   );
 
@@ -354,6 +365,7 @@ async function dispatchStep(args: {
   runMetadata: Record<string, unknown>;
   dockerExec?: DockerExecFn;
   getModelPolicy: (projectDir: string) => ModelPolicyWithSource;
+  seedGeneration?: SeedGeneration | null;
 }): Promise<string> {
   const step = args.step;
 
@@ -376,6 +388,7 @@ async function dispatchStep(args: {
       runMetadata: args.runMetadata,
       dockerExec: args.dockerExec,
       getModelPolicy: args.getModelPolicy,
+      seedGeneration: args.seedGeneration,
     });
   }
 
@@ -388,6 +401,7 @@ async function dispatchStep(args: {
     runMetadata: args.runMetadata,
     dockerExec: args.dockerExec,
     getModelPolicy: args.getModelPolicy,
+    seedGeneration: args.seedGeneration,
   });
 }
 
@@ -423,6 +437,7 @@ async function dispatchSingleStep(args: {
   runMetadata: Record<string, unknown>;
   dockerExec?: DockerExecFn;
   getModelPolicy: (projectDir: string) => ModelPolicyWithSource;
+  seedGeneration?: SeedGeneration | null;
   parentId?: string;            // set when this dispatch is a fanout child
   fanoutInput?: { key: string; value: unknown };  // forwarded into task inputs
   syntheticPhase?: string;      // override phase id for fanout children (e.g. "build-0")
@@ -531,6 +546,7 @@ async function dispatchSingleStep(args: {
     cliProfile: runModelProfile(args.runMetadata),
     profileSource: "run.profile",
     ctx: { projectDir: args.projectDir },
+    seedGeneration: args.seedGeneration,
   });
 
   if (!existing) {
@@ -578,7 +594,7 @@ async function dispatchSingleStep(args: {
     level: "force",
     runTags: cpRunTags,
   }).length;
-  const cpWorkflowProv = resolveWorkflowSource(args.workflow.name, args.projectDir, workflowReceipt);
+  const cpWorkflowProv = resolveWorkflowSource(args.workflow.name, args.projectDir, workflowReceipt, args.seedGeneration);
 
   // FG-374/FG-351 gate ordering: preflightProjectMount must run BEFORE any state
   // mutation (worktree creation or DB write). A failed preflight must not leave a
@@ -640,6 +656,7 @@ async function dispatchSingleStep(args: {
     role: agentRole,
     dockerExec: args.dockerExec,
     getModelPolicy: args.getModelPolicy,
+    seedGeneration: args.seedGeneration,
     controlPlaneInputs: {
       workflowName: args.workflow.name,
       workflowSource: cpWorkflowProv.source,
@@ -744,6 +761,7 @@ async function dispatchSingleStep(args: {
       runMetadata: args.runMetadata,
       dockerExec: args.dockerExec,
       getModelPolicy: args.getModelPolicy,
+      seedGeneration: args.seedGeneration,
     });
     return redRejection(redAggregate);
   };
@@ -890,6 +908,7 @@ async function republishForcedPrimary(
     runMetadata: Record<string, unknown>;
     dockerExec?: DockerExecFn;
     getModelPolicy: (projectDir: string) => ModelPolicyWithSource;
+    seedGeneration?: SeedGeneration | null;
   },
   task: Task,
 ): Promise<string> {
@@ -1072,6 +1091,7 @@ async function dispatchReds(args: {
   runMetadata: Record<string, unknown>;
   dockerExec?: DockerExecFn;
   getModelPolicy: (projectDir: string) => ModelPolicyWithSource;
+  seedGeneration?: SeedGeneration | null;
 }): Promise<{ verdicts: Verdict[]; authoritativeFail: boolean }> {
   const artifact = JSON.stringify(args.primaryResult, null, 2);
   const allTasks = tasksForRun(args.runId);
@@ -1130,6 +1150,7 @@ async function dispatchReds(args: {
       runMetadata: args.runMetadata,
       dockerExec: args.dockerExec,
       getModelPolicy: args.getModelPolicy,
+      seedGeneration: args.seedGeneration,
       reviewerContextPacket: red.agent === "shipping-reviewer" ? reviewerContextPacket : undefined,
     }),
   );
@@ -1285,6 +1306,7 @@ async function runOneRed(args: {
   runMetadata: Record<string, unknown>;
   dockerExec?: DockerExecFn;
   getModelPolicy: (projectDir: string) => ModelPolicyWithSource;
+  seedGeneration?: SeedGeneration | null;
   reviewerContextPacket?: ReviewerContextPacket;
 }): Promise<{ red: RedDef; verdict: Verdict; redTaskId: string; resultUnreadable?: boolean }> {
   const redTaskId = newTaskId(`red-${args.step.id}`);
@@ -1362,7 +1384,7 @@ async function runOneRed(args: {
     runTags: redRunTags,
   }).length;
   const redForceCount = failureModes.length;
-  const redWorkflowProv = resolveWorkflowSource(args.workflow.name, args.projectDir, redWorkflowReceipt);
+  const redWorkflowProv = resolveWorkflowSource(args.workflow.name, args.projectDir, redWorkflowReceipt, args.seedGeneration);
 
   // FG-351: reds are read-only reviewers — no worktree isolation needed or created.
   // Worktree isolation for reds is deferred to a future story.
@@ -1378,6 +1400,7 @@ async function runOneRed(args: {
     role: args.red.agent,
     dockerExec: args.dockerExec,
     getModelPolicy: args.getModelPolicy,
+    seedGeneration: args.seedGeneration,
     controlPlaneInputs: {
       workflowName: args.workflow.name,
       workflowSource: redWorkflowProv.source,
@@ -1602,6 +1625,7 @@ async function dispatchFanoutStep(args: {
   runMetadata: Record<string, unknown>;
   dockerExec?: DockerExecFn;
   getModelPolicy: (projectDir: string) => ModelPolicyWithSource;
+  seedGeneration?: SeedGeneration | null;
 }): Promise<string> {
   const step = args.step;
   const fanout = args.fanout;
@@ -1794,6 +1818,7 @@ async function dispatchFanoutStep(args: {
         runMetadata: args.runMetadata,
         dockerExec: args.dockerExec,
         getModelPolicy: args.getModelPolicy,
+        seedGeneration: args.seedGeneration,
         requestedChanges,
       })),
     );
@@ -1821,6 +1846,7 @@ async function dispatchFanoutStep(args: {
           runMetadata: args.runMetadata,
           dockerExec: args.dockerExec,
           getModelPolicy: args.getModelPolicy,
+          seedGeneration: args.seedGeneration,
           requestedChanges,
         })),
       );
@@ -1956,6 +1982,7 @@ async function dispatchFanoutStep(args: {
       runMetadata: args.runMetadata,
       dockerExec: args.dockerExec,
       getModelPolicy: args.getModelPolicy,
+      seedGeneration: args.seedGeneration,
     });
     return redRejection(redAggregate);
   };
@@ -2425,6 +2452,7 @@ async function runFanoutChild(args: {
   runMetadata: Record<string, unknown>;
   dockerExec?: DockerExecFn;
   getModelPolicy: (projectDir: string) => ModelPolicyWithSource;
+  seedGeneration?: SeedGeneration | null;
   requestedChanges?: string;
 }): Promise<ChildOutcome> {
   const step = args.step;
@@ -2511,7 +2539,7 @@ async function runFanoutChild(args: {
     level: "force",
     runTags: fcRunTags,
   }).length;
-  const fcWorkflowProv = resolveWorkflowSource(args.workflow.name, args.projectDir, fcWorkflowReceipt);
+  const fcWorkflowProv = resolveWorkflowSource(args.workflow.name, args.projectDir, fcWorkflowReceipt, args.seedGeneration);
 
   // FG-374/FG-351 gate ordering: same as primary dispatch — preflight must run
   // BEFORE any state mutation so a bad mount cannot leak a worktree or DB row.
@@ -2564,6 +2592,7 @@ async function runFanoutChild(args: {
     role: agentRole,
     dockerExec: args.dockerExec,
     getModelPolicy: args.getModelPolicy,
+    seedGeneration: args.seedGeneration,
     controlPlaneInputs: {
       workflowName: args.workflow.name,
       workflowSource: fcWorkflowProv.source,
@@ -2711,6 +2740,7 @@ async function runContainer(args: {
   // direct loadModelPolicyWithSource call so a fan-out of N children + M reds
   // reads model-policy.yml once per projectDir instead of once per container.
   getModelPolicy: (projectDir: string) => ModelPolicyWithSource;
+  seedGeneration?: SeedGeneration | null;
   // FG-350: dispatch-time control-plane inputs for the manifest receipt. When
   // provided, runContainer assembles a ControlPlaneReceipt and writes it into
   // the manifest.json so explain views read RECORDED dispatch-time truth.
@@ -2750,7 +2780,7 @@ async function runContainer(args: {
   let runtimePath = "";
   let runtimeName = "";
   try {
-    const loaded = loadRuntimeWithSource(args.resolution.runtime, { projectDir: args.projectDir });
+    const loaded = loadRuntimeWithSource(args.resolution.runtime, { projectDir: args.projectDir, seedGeneration: args.seedGeneration });
     runtime = loaded;
     runtimeSource = loaded.source;
     runtimePath = loaded.path;
@@ -3365,11 +3395,12 @@ function homeForge(): string {
 function resolveWorkflowSource(
   workflowName: string,
   projectDir: string,
-  receipt: { source: "host" | "project"; path: string } | undefined
+  receipt: { source: "host" | "project"; path: string } | undefined,
+  seedGeneration?: SeedGeneration | null,
 ): { source: "host" | "project" | "unknown"; path?: string; warnings?: string[] } {
   if (receipt) return receipt;
   try {
-    const loaded = loadWorkflowWithSource(workflowName, { projectDir });
+    const loaded = loadWorkflowWithSource(workflowName, { projectDir, seedGeneration });
     return { source: loaded.source, path: loaded.path };
   } catch {
     return {

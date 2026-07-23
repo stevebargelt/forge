@@ -24,6 +24,7 @@ import { taskDir } from "../util/paths.js";
 import type { TaskManifest } from "./task-manifest.js";
 import type { DockerExecFn } from "./docker-exec.js";
 import type { Workflow } from "./schema.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -45,7 +46,7 @@ function makeStubExec(): DockerExecFn {
 /** Minimal claude runtime YAML written into FORGE_HOME/runtimes so loadRuntime succeeds. */
 function ensureClaudeRuntime(): void {
   const p = join(process.env.FORGE_HOME!, "runtimes", "claude.yml");
-  if (existsSync(p)) return;
+  if (!existsSync(p)) {
   mkdirSync(dirname(p), { recursive: true });
   writeFileSync(
     p,
@@ -67,6 +68,8 @@ result:
   file: /task/result.json
 `
   );
+  }
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 /** Build a minimal routing-policy.yml YAML string for a single route. */
@@ -462,6 +465,8 @@ antiPrompt: "do not skip tests"
 Do not skip tests.
 `);
 
+    publishFlatAsGeneration(process.env.FORGE_HOME!);
+
     const { runId } = startRun({
       workflow: WORKFLOW_WITH_REDS,
       title: "fg350 fix1 test",
@@ -525,6 +530,8 @@ container:
 result:
   file: /task/result.json
 `);
+
+    publishFlatAsGeneration(process.env.FORGE_HOME!);
 
     const r = await invoke({
       agentRole: "engineer",
@@ -598,6 +605,8 @@ container:
 result:
   file: /task/result.json
 `);
+
+    publishFlatAsGeneration(process.env.FORGE_HOME!);
 
     const { runId } = startRun({
       workflow: SINGLE_STEP_WORKFLOW,

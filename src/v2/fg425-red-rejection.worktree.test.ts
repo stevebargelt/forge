@@ -32,6 +32,7 @@ import { startRun } from "./startRun.js";
 import { runNext, type DockerExecFn } from "./runNext.js";
 import { gate } from "./gate.js";
 import type { Workflow } from "./schema.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
 // A step with an AUTHORITATIVE red: a fail from it blocks the gate, which is what
 // makes it a rejection of the candidate rather than an advisory note.
@@ -145,6 +146,7 @@ result:
   file: /task/result.json
 `,
   );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 /** gate.ts re-loads the workflow from disk (it does not take the in-memory one),
@@ -170,6 +172,7 @@ steps:
         gate_on_verdict: true
 `,
   );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 function findProjectMountHost(args: string[]): string | undefined {

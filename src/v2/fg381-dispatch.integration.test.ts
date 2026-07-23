@@ -30,6 +30,7 @@ import { runNext } from "./runNext.js";
 import type { DockerExecFn } from "./runNext.js";
 import type { Workflow } from "./schema.js";
 import type { MissingContextItem } from "../types/index.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
 // ─── Workflow fixtures ────────────────────────────────────────────────────────
 
@@ -192,6 +193,7 @@ result:
   file: /task/result.json
 `,
   );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 

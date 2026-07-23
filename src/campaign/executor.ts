@@ -68,6 +68,7 @@ import type { StartRunArgs } from "../v2/startRun.js";
 import { runNext } from "../v2/runNext.js";
 import type { RunNextResult } from "../v2/runNext.js";
 import { loadWorkflow } from "../v2/loader.js";
+import { resolveSeedGeneration } from "../v2/seed-generation.js";
 import type { LoadContext } from "../v2/loader.js";
 import { aggregateVerdicts, gate, findStep } from "../v2/gate.js";
 import type { Workflow } from "../v2/schema.js";
@@ -1532,9 +1533,21 @@ export async function driveOneCampaignItem(
   const campaignData = getCampaign(campaignId);
   const canonicalContent = campaignData?.metadata?.["planContent"];
 
-  const doRunNext: RunNextFn = opts.runNextFn ?? runNext;
+  // FG-583: resolve the seed generation ONCE at drive entry and inject it into every
+  // wave/gate/load below. No per-consumer seed-state gating — every workflow load here
+  // reaches the seed surface through the loader's single resolve point, which refuses
+  // (named, repairable) when no complete generation is published. That throw is caught
+  // by the drive-throw / start-run-throw park handlers below, so a torn/incomplete/
+  // absent generation parks the item instead of dispatching under a mixed/flat surface.
+  // Anchor: injected into every workflow load AND runNext wave below, so a long-lived
+  // item that outlives a promotion stays on the ONE complete generation it opened
+  // (retained-never-recycled) rather than reading a recycled/torn one mid-drive. A
+  // test-injected runNext/loader is honored as-is.
+  const anchoredSeedGeneration = resolveSeedGeneration();
+  const doRunNext: RunNextFn = opts.runNextFn ?? ((a) => runNext({ ...a, seedGeneration: anchoredSeedGeneration }));
   const doStartRun: StartRunFn = opts.startRunFn ?? startRun;
-  const doLoadWorkflow: LoadWorkflowFn = opts.loadWorkflowFn ?? loadWorkflow;
+  const doLoadWorkflow: LoadWorkflowFn = opts.loadWorkflowFn
+    ?? ((name, ctx) => loadWorkflow(name, { ...ctx, seedGeneration: anchoredSeedGeneration }));
 
   // Track LOCAL blocked items for dependency-based hold evaluation. Each item now
   // drives in isolation (its own process, under a launch), so rebuild blockedItems

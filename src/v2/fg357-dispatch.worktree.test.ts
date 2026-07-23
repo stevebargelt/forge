@@ -61,6 +61,7 @@ import { retryPolicy } from "./retry-policy.js";
 import { worktreeBranchName, integrationBranchName } from "./worktree-lifecycle.js";
 import { integrationWorktreeDir } from "../util/paths.js";
 import { gate } from "./gate.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
 // ─── Workflow fixture ──────────────────────────────────────────────────────────
 
@@ -287,6 +288,7 @@ result:
   file: /task/result.json
 `,
   );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 // Write the FANOUT_WITH_RED_WORKFLOW YAML so gate() can load it by name —
@@ -295,7 +297,7 @@ result:
 function ensureFanoutRedWorkflowYaml(): void {
   const forgeHome = process.env.FORGE_HOME!;
   const wfPath = join(forgeHome, "workflows", "fg357-fanout-red-test.yml");
-  if (existsSync(wfPath)) return;
+  if (!existsSync(wfPath)) {
   mkdirSync(dirname(wfPath), { recursive: true });
   writeFileSync(
     wfPath,
@@ -329,6 +331,8 @@ steps:
       failure_mode: continue
 `,
   );
+  }
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 /** Extract the task ID from the --name forge-<taskId> docker arg. */

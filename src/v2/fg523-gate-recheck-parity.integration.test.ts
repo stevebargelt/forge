@@ -30,6 +30,7 @@ import { getDb } from "../store/db.js";
 import { tasksForRun, getTask } from "../store/tasks.js";
 import { verdictsForTask } from "../store/verdicts.js";
 import type { Workflow, RedDef } from "./schema.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
 function ensureRuntime(): void {
   const runtimePath = join(process.env.FORGE_HOME!, "runtimes", "claude.yml");
@@ -107,6 +108,7 @@ function ensureWorkflowYaml(wf: Workflow): void {
     join(dir, `${wf.name}.yml`),
     `name: ${wf.name}\ndescription: ${wf.description}\ninputs: []\nsteps:\n  - id: ${step.id}\n    agent: ${step.agent}\n    gate: ${step.gate}\n    reds:\n${reds}\n`,
   );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 async function run(wf: Workflow, verdictByRole: Record<string, "pass" | "fail">) {

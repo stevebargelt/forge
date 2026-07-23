@@ -20,6 +20,7 @@ import { runNext, type DockerExecFn } from "../../v2/runNext.js";
 import { startRun } from "../../v2/startRun.js";
 import { IDLE_TIMEOUT_EXIT_CODE } from "../../v2/idle-watchdog.js";
 import { writeProfile } from "../../util/auth-profiles.js";
+import { publishFlatAsGeneration } from "../../v2/seed-generation.testkit.js";
 import type { Workflow } from "../../v2/schema.js";
 import type { Run, Task } from "../../types/index.js";
 
@@ -90,6 +91,7 @@ result:
 `,
     );
   }
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 // Write a browser-capable runtime stub (has browser-tools skill + auth-inject.js).
@@ -123,6 +125,7 @@ result:
   file: /task/result.json
 `,
   );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
   return "claude-bt";
 }
 

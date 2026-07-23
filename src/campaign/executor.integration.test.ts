@@ -3947,37 +3947,39 @@ test("FG-490: if the park-transition itself fails (DB error), the original drive
   );
 });
 
-// ── FG-579: a drifted host workflow refuses on the full_feature dispatch path ────
+// ── FG-583: a host with no complete seed generation refuses on the full_feature
+// dispatch path (the successor to FG-579's drifted-host-workflow refusal) ────────
 //
-// The library-level refusal (fg579-workflow-drift-refusal.test.ts) proves
-// loadWorkflow throws; this proves the CAMPAIGN CONSUMER surfaces that throw as a
-// clean failed item rather than crashing, and — critically — refuses BEFORE any
-// container is dispatched. full_feature is the planner's DEFAULT lane, so the
-// unwrapped _planCampaign takes the doLoadWorkflow dispatch path. The loadWorkflowFn
-// seam is the REAL loader with the release baseline pointed at a disposable fixture,
-// so no host is promoted and the real ~/.forge is never touched.
-test("FG-579: a drifted host workflow refuses on the campaign full_feature dispatch (loadWorkflowFn seam)", async () => {
+// Under FG-583 the flat $FORGE_HOME layout is no longer a dispatch source, so a
+// drifted/stale/absent host workflow surface is refused WHOLESALE at the loader's
+// single resolve point (no complete generation). This proves the CAMPAIGN CONSUMER
+// surfaces that refusal as a clean fail-closed item rather than crashing, and —
+// critically — refuses BEFORE any container is dispatched. full_feature is the
+// planner's DEFAULT lane, so the unwrapped _planCampaign takes the doLoadWorkflow
+// dispatch path. A disposable FORGE_HOME with a flat (never-published) workflow surface
+// exercises the exact production refusal; the real ~/.forge is never touched.
+test("FG-583: a host with no published generation refuses on the campaign full_feature dispatch", async () => {
   const { campaign } = _planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
   approveCampaign(campaign.id, { rationale: "Approved" });
 
-  const home = mkdtempSync(join(tmpdir(), "fg579-camp-home-"));
-  const baseline = mkdtempSync(join(tmpdir(), "fg579-camp-baseline-"));
+  const home = mkdtempSync(join(tmpdir(), "fg583-camp-home-"));
   const savedHome = process.env.FORGE_HOME;
   const wfBody = (marker: string) =>
     `name: feature\ndescription: ${marker}\ninputs: []\nsteps:\n  - { id: build, agent: engineer, gate: auto }\n`;
   try {
     process.env.FORGE_HOME = home;
+    // A flat, never-published workflow surface — exactly what an interrupted/pre-
+    // migration host carries. Dispatch must NOT read it.
     mkdirSync(join(home, "workflows"), { recursive: true });
-    mkdirSync(join(baseline, "workflows"), { recursive: true });
-    writeFileSync(join(baseline, "workflows", "feature.yml"), wfBody("release bytes"));
-    writeFileSync(join(home, "workflows", "feature.yml"), wfBody("STALE HAND-EDIT — not this release"));
+    writeFileSync(join(home, "workflows", "feature.yml"), wfBody("STALE HAND-EDIT — not a published generation"));
 
     let dispatched = 0;
-    // FG-564 (FIX round 6): a full_feature workflow-resolution failure — here a drift refusal —
-    // FAILS CLOSED through the shared prepareCampaignItemDispatch authority: it THROWS before any
-    // reservation, so no container is dispatched and no run is minted. The FG-579 invariant (a
-    // drifted workflow is refused BEFORE any dispatch) is preserved and strengthened — the drive
-    // never even reserves a run, and the named drift refusal propagates for the CLI to render.
+    // FG-564 (FIX round 6): a full_feature workflow-resolution failure — here the
+    // no-complete-generation refusal — FAILS CLOSED through the shared
+    // prepareCampaignItemDispatch authority: it THROWS before any reservation, so no
+    // container is dispatched and no run is minted. The refuse-before-dispatch
+    // invariant is preserved and strengthened — the drive never even reserves a run,
+    // and the named refusal propagates for the CLI to render.
     await assert.rejects(
       () =>
         startCampaign(campaign.id, {
@@ -3985,21 +3987,20 @@ test("FG-579: a drifted host workflow refuses on the campaign full_feature dispa
             dispatched++;
             return { runId: a.runId ?? "run-x", taskId: "task-x", status: "complete" };
           },
-          loadWorkflowFn: (name, ctx) => loadWorkflow(name, ctx, baseline),
         }),
-      /drift/i,
-      "the drifted workflow FAILS CLOSED — the named drift refusal propagates before any reservation",
+      /no complete seed generation|forge upgrade/,
+      "no published generation FAILS CLOSED — the named refusal propagates before any reservation",
     );
 
-    assert.equal(dispatched, 0, "the drifted workflow must be refused BEFORE any container is dispatched");
+    assert.equal(dispatched, 0, "the unresolvable workflow must be refused BEFORE any container is dispatched");
     const item = db
       .prepare("SELECT lifecycle_status, run_id FROM campaign_items WHERE ticket_id = 'FG-101'")
       .get() as { lifecycle_status: string; run_id: string | null };
     assert.equal(item.lifecycle_status, "pending", "the fail-closed refusal leaves the item pending — no run minted, recoverable");
-    assert.equal(item.run_id, null, "no run was minted for the drifted-workflow refusal");
+    assert.equal(item.run_id, null, "no run was minted for the refusal");
   } finally {
     if (savedHome === undefined) delete process.env.FORGE_HOME;
     else process.env.FORGE_HOME = savedHome;
-    for (const d of [home, baseline]) rmSync(d, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
   }
 });

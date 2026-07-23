@@ -143,8 +143,10 @@ host `~/.codex/auth.json` (`codex login` first — `forge providers doctor` show
 `model_calls` automatically. Today Codex is **subscription-only** (openai/api /
 `codex-apikey` is not wired yet).
 
-> The runtime seed `codex-subscription.yml` must be installed (`install-seeds.sh`)
-> into `~/.forge/runtimes/` for an openai profile to dispatch.
+> The runtime seed `codex-subscription.yml` must be published into the seed
+> generation dispatch reads for an openai profile to dispatch — since FG-583 that
+> means `forge upgrade` (which republishes the atomic generation), not
+> `install-seeds.sh` alone, which only refreshes the flat `~/.forge/runtimes/` copies.
 
 ## Pi and multi-provider runtimes — the `runtime:` profile field
 

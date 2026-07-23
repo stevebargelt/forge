@@ -22,6 +22,7 @@ import { writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Command } from "commander";
 import { runNext, type DockerExecFn } from "./runNext.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { startRun } from "./startRun.js";
 import { gate } from "./gate.js";
 import { retry } from "./retry.js";
@@ -34,9 +35,9 @@ import type { Workflow, RedDef } from "./schema.js";
 
 function ensureRuntime(): void {
   const runtimePath = join(process.env.FORGE_HOME!, "runtimes", "claude.yml");
-  if (existsSync(runtimePath)) return;
-  mkdirSync(dirname(runtimePath), { recursive: true });
-  writeFileSync(runtimePath, `name: claude
+  if (!existsSync(runtimePath)) {
+    mkdirSync(dirname(runtimePath), { recursive: true });
+    writeFileSync(runtimePath, `name: claude
 description: test stub runtime
 image: test-image:latest
 models:
@@ -53,6 +54,9 @@ container:
 result:
   file: /task/result.json
 `);
+  }
+  // FG-583: publish the flat runtime as a complete generation so dispatch resolves it.
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 function stubExec(result: unknown, exitCode = 0): DockerExecFn {
@@ -89,6 +93,8 @@ function ensureWorkflowYaml(wf: Workflow): void {
     .map((s) => `  - id: ${s.id}\n    agent: ${s.agent}\n    gate: ${s.gate}\n    depends_on: [${s.depends_on.join(", ")}]`)
     .join("\n");
   writeFileSync(join(dir, `${wf.name}.yml`), `name: ${wf.name}\ndescription: ${wf.description}\ninputs: []\nsteps:\n${steps}\n`);
+  // FG-583: publish the flat workflow as a complete generation so gate.ts resolves it.
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 function startAndRun(agent: string, result: unknown, exitCode = 0) {

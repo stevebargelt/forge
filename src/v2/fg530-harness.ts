@@ -39,6 +39,7 @@ import { evaluateValidationContract } from "./validation-contract.js";
 import { retryPolicy } from "./retry-policy.js";
 import type { Workflow, Step } from "./schema.js";
 import type { Task, TaskStatus } from "../types/index.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
 // ── kill-point registry ───────────────────────────────────────────────────────
 //
@@ -240,6 +241,7 @@ export function ensureRuntime(): void {
     runtimeYaml(PI_RUNTIME, "runtime_kind: pi\nlog_format: pi-jsonl\n"),
   );
   writeFileSync(join(dir, `${WORKTREE_RUNTIME}.yml`), runtimeYaml(WORKTREE_RUNTIME, "", true));
+  publishFlatAsGeneration(process.env["FORGE_HOME"]!);
 }
 
 /** gate.ts loads the workflow BY NAME off FORGE_HOME (runNext takes it as an
@@ -248,6 +250,7 @@ export function writeWorkflowYaml(name: string, yaml: string): void {
   const dir = join(process.env["FORGE_HOME"]!, "workflows");
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, `${name}.yml`), yaml);
+  publishFlatAsGeneration(process.env["FORGE_HOME"]!);
 }
 
 // ── the fake docker layer ─────────────────────────────────────────────────────

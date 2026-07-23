@@ -42,6 +42,7 @@ import { projectIdentity } from "./project-identity.js";
 import { startRun } from "./startRun.js";
 import { runNext, type DockerExecFn } from "./runNext.js";
 import type { Workflow } from "./schema.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
 // An authoritative red gives this file a hook INSIDE the publisher's validation span:
 // the red runs against the candidate, in the lane turn, before the publication window.
@@ -169,6 +170,7 @@ result:
   file: /task/result.json
 `,
   );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 function findProjectMountHost(args: string[]): string | undefined {

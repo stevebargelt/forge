@@ -24,6 +24,7 @@ import { tasksForRun, getTask, insertTask, setTaskStatus } from "../store/tasks.
 import { eventsForRun } from "../store/events.js";
 import { nowIso } from "../util/ids.js";
 import type { Workflow } from "./schema.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
 // ---------------------------------------------------------------------------
 // Workflow: plan → build (fanout, authoritative red) → docs
@@ -76,7 +77,7 @@ const FG364_WORKFLOW: Workflow = {
 function ensureFg364WorkflowYaml(): void {
   const fhome = process.env.FORGE_HOME!;
   const wfPath = join(fhome, "workflows", "fg364-fanout-request-changes.yml");
-  if (existsSync(wfPath)) return;
+  if (!existsSync(wfPath)) {
   mkdirSync(dirname(wfPath), { recursive: true });
   writeFileSync(
     wfPath,
@@ -117,12 +118,14 @@ steps:
     reds: []
 `,
   );
+  }
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 function ensureClaudeRuntime(): void {
   const fhome = process.env.FORGE_HOME!;
   const runtimePath = join(fhome, "runtimes", "claude.yml");
-  if (existsSync(runtimePath)) return;
+  if (!existsSync(runtimePath)) {
   mkdirSync(dirname(runtimePath), { recursive: true });
   writeFileSync(
     runtimePath,
@@ -144,6 +147,8 @@ result:
   file: /task/result.json
 `,
   );
+  }
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 // DockerExec that routes by task-id prefix. redRound controls whether the
@@ -380,6 +385,7 @@ steps:
 `,
     );
   }
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 
   const singleStepWf: Workflow = {
     name: wfName,
@@ -1018,6 +1024,7 @@ steps:
 `,
     );
   }
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 
   const RATIONALE = "fix null-pointer per red feedback (retry-once path)";
 

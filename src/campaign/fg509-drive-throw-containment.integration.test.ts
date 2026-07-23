@@ -43,6 +43,7 @@ import { startCampaign, resumeCampaign, setExecutorDoneAuditMapForTest } from ".
 import type { DoneAuditResult } from "../done-audit/done-audit.js";
 import { gate } from "../v2/gate.js";
 import { runNext } from "../v2/runNext.js";
+import { publishFlatAsGeneration } from "../v2/seed-generation.testkit.js";
 import type { DockerExecFn, RunNextResult } from "../v2/runNext.js";
 import type { Workflow } from "../v2/schema.js";
 import type { InvokeArgs, InvokeResult } from "../v2/invoke.js";
@@ -89,6 +90,14 @@ result:
   );
 }
 
+// FG-583: after (re)writing the flat workflow, republish it as a complete seed
+// generation so dispatch resolves it — there is no flat dispatch fallback. Each drive
+// (startCampaign / resumeCampaign) re-anchors the live pointer, so a republish between
+// drives is what makes a mid-test gate-type rewrite take effect on the next drive.
+function republishHost(): void {
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
+}
+
 function writeWorkflow(gateType: "human" | "auto" | "verdict"): void {
   const reds =
     gateType === "verdict"
@@ -112,6 +121,7 @@ steps:
     reds:${reds}
 `,
   );
+  republishHost();
 }
 
 const stubExec: DockerExecFn = async ({ stdoutPath, stderrPath }) => {

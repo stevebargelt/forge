@@ -30,6 +30,7 @@ import { gate } from "./gate.js";
 import type { DockerExecFn } from "./runNext.js";
 import type { Workflow } from "./schema.js";
 import { gatesForTask } from "../store/gates.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
 // ─── Workflow fixture ─────────────────────────────────────────────────────────
 
@@ -131,6 +132,7 @@ result:
   file: /task/result.json
 `,
   );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 function ensureWorkflow(name: string): void {
@@ -155,6 +157,7 @@ steps:
         gate_on_verdict: true
 `,
   );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 function taskIdFromDockerArgs(args: string[]): string {

@@ -21,6 +21,7 @@ import { dirname, join } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { invoke, type DockerExecFn } from "./invoke.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { runNext } from "./runNext.js";
 import { startRun } from "./startRun.js";
 import { tasksForRun } from "../store/tasks.js";
@@ -68,9 +69,9 @@ function makeStubExec(resultJson: unknown = { status: "complete", tests_run: 1 }
 function ensureClaudeRuntime(): void {
   const fhome = process.env.FORGE_HOME!;
   const runtimePath = join(fhome, "runtimes", "claude.yml");
-  if (existsSync(runtimePath)) return;
-  mkdirSync(dirname(runtimePath), { recursive: true });
-  writeFileSync(runtimePath, `name: claude
+  if (!existsSync(runtimePath)) {
+    mkdirSync(dirname(runtimePath), { recursive: true });
+    writeFileSync(runtimePath, `name: claude
 description: test stub runtime
 image: test-image:latest
 models:
@@ -87,6 +88,9 @@ container:
 result:
   file: /task/result.json
 `);
+  }
+  // FG-583: publish the flat runtime as a complete generation so dispatch resolves it.
+  publishFlatAsGeneration(fhome);
 }
 
 // Write a browser-tools-capable runtime for auth-profile tests (#176, #181, #183).
@@ -118,6 +122,8 @@ container:
 result:
   file: /task/result.json
 `);
+  // FG-583: publish the flat runtime as a complete generation so dispatch resolves it.
+  publishFlatAsGeneration(fhome);
   return btDir;
 }
 

@@ -28,6 +28,7 @@ import { isRunSettled } from "./ready-queue.js";
 import { tasksForRun, getTask } from "../store/tasks.js";
 import { registerShow } from "../cli/commands/show.js";
 import type { Workflow } from "./schema.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
 function ensureRuntime(): void {
   const runtimePath = join(process.env.FORGE_HOME!, "runtimes", "claude.yml");
@@ -108,6 +109,7 @@ function ensureWorkflowYaml(wf: Workflow): void {
     join(dir, `${wf.name}.yml`),
     `name: ${wf.name}\ndescription: ${wf.description}\ninputs: []\nsteps:\n${steps}\n`,
   );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 async function startHeld(

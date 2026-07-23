@@ -22,6 +22,7 @@ import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
 import { getTask, insertTask } from "../store/tasks.js";
 import { gate } from "./gate.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import type { Run, Task } from "../types/index.js";
 
 const WORKFLOW_NAME = "gate-reject-result-test";
@@ -64,6 +65,7 @@ steps:
     on_reject: investigate
 `,
   );
+  publishFlatAsGeneration(homeDir);
 }
 
 function awaitingGatePrimary(id: string, phase: "investigate" | "audit"): Task {

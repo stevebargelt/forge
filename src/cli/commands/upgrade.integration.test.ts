@@ -813,6 +813,13 @@ test("FG-581 (downstream fail-closed): after a failed post-promotion compile, a 
     "",
   ].join("\n");
   try {
+    // FG-583: a seed generation published by an EARLIER test in this shared
+    // FORGE_HOME would shadow the flat routing-policy.yml this fail-closed contract
+    // operates on (resolvePolicyPath prefers the anchored generation). Clear it so
+    // the flat path is authoritative — the pre-generation host this cell models.
+    for (const p of ["seed-current", "seed-previous", "seed-selection", "seed-generations", "seed-selections"]) {
+      rmSync(join(process.env.FORGE_HOME!, p), { recursive: true, force: true });
+    }
     writeFileSync(ROUTING_POLICY_PATH, VALID_STALE_POLICY);
 
     // PRE-condition: the stale policy is authoritative to the live consumer — it
@@ -886,6 +893,13 @@ test("FG-581 (release-mode acceptance): a promoted RELEASE that cannot compile t
     "",
   ].join("\n");
   try {
+    // FG-583: a seed generation published by an EARLIER test in this shared
+    // FORGE_HOME would shadow the flat routing-policy.yml this fail-closed contract
+    // operates on (resolvePolicyPath prefers the anchored generation). Clear it so
+    // the flat path is authoritative — the pre-generation host this cell models.
+    for (const p of ["seed-current", "seed-previous", "seed-selection", "seed-generations", "seed-selections"]) {
+      rmSync(join(process.env.FORGE_HOME!, p), { recursive: true, force: true });
+    }
     writeFileSync(ROUTING_POLICY_PATH, VALID_STALE_POLICY);
     // The promoted RELEASE runtime is handed a host RACI it cannot compile.
     writeFileSync(RACI_PATH, "not a RACI document at all\n");

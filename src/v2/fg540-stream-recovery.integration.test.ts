@@ -19,6 +19,7 @@ import { eventsForTask } from "../store/events.js";
 import { failureKindForTask } from "./failure-kind.js";
 import { taskDir } from "../util/paths.js";
 import type { Workflow } from "./schema.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
 // ---------------------------------------------------------------------------
 // Codex JSONL fixture builders (sanitized from the preserved incident stream:
@@ -56,9 +57,9 @@ function makeCodexNoResultExec(stdoutJsonl: string, exitCode = 0): DockerExecFn 
 
 function ensureCodexRuntime(): void {
   const p = join(process.env.FORGE_HOME!, "runtimes", "codex-stub.yml");
-  if (existsSync(p)) return;
-  mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, `name: codex-stub
+  if (!existsSync(p)) {
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, `name: codex-stub
 description: test stub codex runtime
 log_format: codex-jsonl
 image: test-image:latest
@@ -76,6 +77,8 @@ container:
 result:
   file: /task/result.json
 `);
+  }
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 let wfSeq = 0;

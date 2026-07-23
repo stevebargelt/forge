@@ -29,6 +29,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { invoke } from "./invoke.js";
 import { runNext } from "./runNext.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { startRun } from "./startRun.js";
 import { tasksForRun } from "../store/tasks.js";
 import type { Workflow } from "./schema.js";
@@ -39,9 +40,9 @@ import type { Workflow } from "./schema.js";
 
 function ensurePiStubRuntime(): void {
   const p = join(process.env.FORGE_HOME!, "runtimes", "pi-stub.yml");
-  if (existsSync(p)) return;
-  mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, `name: pi-stub
+  if (!existsSync(p)) {
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, `name: pi-stub
 description: test stub pi runtime for FG-339
 runtime_kind: pi
 log_format: pi-jsonl
@@ -62,13 +63,16 @@ container:
 result:
   file: /task/result.json
 `);
+  }
+  // FG-583: publish the flat runtime as a complete generation so dispatch resolves it.
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 function ensureClaudeApiKeyRuntime(): void {
   const p = join(process.env.FORGE_HOME!, "runtimes", "claude-apikey.yml");
-  if (existsSync(p)) return;
-  mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, `name: claude-apikey
+  if (!existsSync(p)) {
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, `name: claude-apikey
 description: test stub non-pi runtime for FG-339
 image: test-image:latest
 models:
@@ -85,6 +89,9 @@ container:
 result:
   file: /task/result.json
 `);
+  }
+  // FG-583: publish the flat runtime as a complete generation so dispatch resolves it.
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 // Policy YAML with:

@@ -26,6 +26,7 @@ import { startRun } from "./startRun.js";
 import { runNext } from "./runNext.js";
 import type { DockerExecFn } from "./runNext.js";
 import type { Workflow } from "./schema.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
 // A single non-shipping-reviewer red — no ticket/context-packet machinery needed.
 function workflowWithRed(runtimeName: string, redAgent: string): Workflow {
@@ -107,6 +108,7 @@ result:
   file: /task/result.json
 `,
   );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 function taskIdFromDockerArgs(args: string[]): string {

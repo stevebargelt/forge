@@ -26,6 +26,7 @@ import { gate } from "./gate.js";
 import { computeReadyQueue } from "./ready-queue.js";
 import type { Run, Task, TaskStatus } from "../types/index.js";
 import type { Workflow } from "./schema.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
 const WORKFLOW_NAME = "fg507settle";
 const RUN_ID = "run-fg507-settle";
@@ -66,6 +67,7 @@ steps:
     depends_on: [build]
 `,
   );
+  publishFlatAsGeneration(process.env["FORGE_HOME"]!);
 }
 
 function activeRun(): Run {

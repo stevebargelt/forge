@@ -27,6 +27,7 @@ import { insertRun } from "../store/runs.js";
 import { insertTask, getTask } from "../store/tasks.js";
 import { insertVerdict } from "../store/verdicts.js";
 import { gate } from "./gate.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import type { Run, Task } from "../types/index.js";
 
 const WORKFLOW_NAME = "gate-auth-recheck-test";
@@ -66,6 +67,7 @@ steps:
         authority: authoritative
 `,
   );
+  publishFlatAsGeneration(homeDir);
 }
 
 function primaryTask(id: string, phase: string, status: Task["status"]): Task {

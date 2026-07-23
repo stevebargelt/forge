@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { runNext, resolveChildAgent, type DockerExecFn } from "./runNext.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { retry } from "./retry.js";
 import { loadModelPolicyWithSource } from "./loader.js";
 import { startRun } from "./startRun.js";
@@ -48,10 +49,11 @@ function makeStubExec(resultJson: unknown, exitCode = 0): DockerExecFn {
 
 // Synthesize a minimal claude runtime YAML so loadRuntime() succeeds in tests.
 function ensureRuntime(): void {
-  const runtimePath = join(process.env.FORGE_HOME!, "runtimes", "claude.yml");
-  if (existsSync(runtimePath)) return;
-  mkdirSync(dirname(runtimePath), { recursive: true });
-  writeFileSync(runtimePath, `name: claude
+  const fhome = process.env.FORGE_HOME!;
+  const runtimePath = join(fhome, "runtimes", "claude.yml");
+  if (!existsSync(runtimePath)) {
+    mkdirSync(dirname(runtimePath), { recursive: true });
+    writeFileSync(runtimePath, `name: claude
 description: test stub runtime
 image: test-image:latest
 models:
@@ -68,6 +70,9 @@ container:
 result:
   file: /task/result.json
 `);
+  }
+  // FG-583: publish the flat runtime as a complete generation so dispatch resolves it.
+  publishFlatAsGeneration(fhome);
 }
 
 const LINEAR_WORKFLOW: Workflow = {
@@ -119,32 +124,9 @@ test("runNext: linear workflow dispatches first step → completes → next wave
   });
 
   // Need a runtime YAML accessible. We don't actually spawn containers (stub),
-  // but the runner does call loadRuntime() before invoking the exec stub.
-  // Skip the test if no runtime YAML exists in FORGE_HOME/runtimes/.
-  const fhome = process.env.FORGE_HOME!;
-  const runtimePath = join(fhome, "runtimes", "claude.yml");
-  if (!existsSync(runtimePath)) {
-    // Synthesize a minimal runtime YAML so loadRuntime succeeds.
-    mkdirSync(dirname(runtimePath), { recursive: true });
-    writeFileSync(runtimePath, `
-name: claude
-description: test stub runtime
-image: test-image:latest
-models:
-  default: test-model
-auth:
-  mode: apikey
-mounts:
-  - { host: "\${TASK_DIR}", container: /task }
-invocation:
-  command: echo
-  args: ["stub"]
-container:
-  name: "forge-\${TASK_ID}"
-result:
-  file: /task/result.json
-`);
-  }
+  // but the runner does call loadRuntime() before invoking the exec stub, which
+  // (FG-583) resolves ONLY from a published seed generation — so publish one.
+  ensureRuntime();
   // apikey auth needs ANTHROPIC_API_KEY; set a fake one for the stub.
   const prevKey = process.env.ANTHROPIC_API_KEY;
   process.env.ANTHROPIC_API_KEY = "sk-stub";
@@ -1052,6 +1034,8 @@ result:
   file: /task/result.json
 `);
   }
+  // FG-583: publish the flat runtimes as a complete generation so dispatch resolves them.
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 
   try {
     const { runId } = startRun({
@@ -1490,6 +1474,8 @@ result:
   file: /task/result.json
 `);
   }
+  // FG-583: publish the flat runtimes as a complete generation so dispatch resolves them.
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 
   const projectDir = mkdtempSync(join(tmpdir(), "forge-fg365-"));
   mkdirSync(join(projectDir, ".forge"), { recursive: true });
@@ -1806,6 +1792,8 @@ result:
   file: /task/result.json
 `);
   }
+  // FG-583: publish the flat runtime as a complete generation so dispatch resolves it.
+  publishFlatAsGeneration(fhome);
 }
 
 test("runNext: gate: human emits task.awaiting_gate with runId and taskId", async () => {
@@ -2039,6 +2027,8 @@ steps:
   - { id: second, agent: test-agent, gate: auto, depends_on: [first] }
 `,
   );
+  // FG-583: republish so the generation carries both the runtime and this workflow.
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
   const { runId } = startRun({ workflow: LINEAR_WORKFLOW, title: "retry e2e", inputs: { brief: "x" }, projectDir: "/tmp/test-project" });
 
   // A failed primary task for the "first" step (as if its first attempt failed).
@@ -2220,10 +2210,11 @@ const PI_ATTR_WORKFLOW: Workflow = {
 };
 
 function ensurePiRuntime(): void {
-  const p = join(process.env.FORGE_HOME!, "runtimes", "pi-stub.yml");
-  if (existsSync(p)) return;
-  mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, `name: pi-stub
+  const fhome = process.env.FORGE_HOME!;
+  const p = join(fhome, "runtimes", "pi-stub.yml");
+  if (!existsSync(p)) {
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, `name: pi-stub
 description: test stub pi runtime
 runtime_kind: pi
 log_format: pi-jsonl
@@ -2244,6 +2235,9 @@ container:
 result:
   file: /task/result.json
 `);
+  }
+  // FG-583: publish the flat runtime as a complete generation so dispatch resolves it.
+  publishFlatAsGeneration(fhome);
 }
 
 // Exec that writes pi JSONL to stdout but NO result.json (pi exits 0 on error).
@@ -2348,6 +2342,8 @@ container:
 result:
   file: /task/result.json
 `);
+  // FG-583: publish the flat runtimes as a complete generation so dispatch resolves them.
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 
   try {
     const { runId } = startRun({
@@ -2701,6 +2697,8 @@ steps:
     reds: []
 `,
   );
+  // FG-583: publish so gate()'s load-by-name resolves this workflow from the generation.
+  publishFlatAsGeneration(forgeHome);
   const wf: Workflow = {
     name: wfName,
     description: "FG-484 gate-path finalize vs. concurrent cancel regression test",
@@ -2806,6 +2804,8 @@ steps:
     reds: []
 `,
   );
+  // FG-583: publish so gate()'s load-by-name resolves this workflow from the generation.
+  publishFlatAsGeneration(forgeHome);
   const wf: Workflow = {
     name: wfName,
     description: "FG-484 realistic gate-path finalize vs. real forge-cancel regression test",
@@ -2896,6 +2896,8 @@ steps:
     reds: []
 `,
   );
+  // FG-583: publish so gate()'s load-by-name resolves this workflow from the generation.
+  publishFlatAsGeneration(forgeHome);
   const wf: Workflow = {
     name: wfName,
     description: "FG-475 gate-reject-with-no-on_reject regression test",
@@ -2968,6 +2970,8 @@ steps:
     reds: []
 `,
   );
+  // FG-583: publish so gate()'s load-by-name resolves this workflow from the generation.
+  publishFlatAsGeneration(forgeHome);
   const wf: Workflow = {
     name: wfName,
     description: "FG-475 gate-reject with on_reject targeting an earlier complete step",

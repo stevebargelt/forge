@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { dirname, join } from "node:path";
 import {
   classify,
@@ -246,6 +247,8 @@ container:
 result:
   file: /task/result.json
 `);
+  // FG-583: dispatch reads only a published generation — publish the flat runtime.
+  publishFlatAsGeneration(fhome);
 }
 
 function makeIdleKilledExec(): DockerExecFn {

@@ -20,6 +20,7 @@ import assert from "node:assert/strict";
 import { writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { runNext, type DockerExecFn } from "./runNext.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { startRun } from "./startRun.js";
 import { computeReadyQueue, isRunSettled } from "./ready-queue.js";
 import { tasksForRun, getTask } from "../store/tasks.js";
@@ -28,9 +29,9 @@ import type { Workflow, RedDef } from "./schema.js";
 
 function ensureRuntime(): void {
   const runtimePath = join(process.env.FORGE_HOME!, "runtimes", "claude.yml");
-  if (existsSync(runtimePath)) return;
-  mkdirSync(dirname(runtimePath), { recursive: true });
-  writeFileSync(runtimePath, `name: claude
+  if (!existsSync(runtimePath)) {
+    mkdirSync(dirname(runtimePath), { recursive: true });
+    writeFileSync(runtimePath, `name: claude
 description: test stub runtime
 image: test-image:latest
 models:
@@ -47,6 +48,9 @@ container:
 result:
   file: /task/result.json
 `);
+  }
+  // FG-583: publish the flat runtime as a complete generation so dispatch resolves it.
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 // Routes by container name so a red returns a verdict while the primary returns

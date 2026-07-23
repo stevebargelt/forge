@@ -56,6 +56,7 @@ import { localTargetFor, readTargetSha } from "./publication-target.js";
 import { deriveNextCommandForTask, deriveNextCommandForRun, publicationRecoveryMessage, publicationAfterCancelMessage } from "../cli/commands/show.js";
 import { performCancel } from "../cli/commands/cancel.js";
 import type { Workflow } from "./schema.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
 const WORKFLOW: Workflow = {
   name: "fg425-ac5-test",
@@ -166,6 +167,7 @@ result:
   file: /task/result.json
 `,
   );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 /** `forge publish recover` runs OUTSIDE a wave: it has an attempt id and nothing else,
@@ -186,6 +188,7 @@ steps:
     runtime: fg425-ac5-test
 `,
   );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 function findProjectMountHost(args: string[]): string | undefined {

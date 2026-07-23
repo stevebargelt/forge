@@ -7,6 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, mkdirSync, existsSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { runNext } from "./runNext.js";
@@ -72,6 +73,8 @@ container:
 result:
   file: /task/result.json
 `);
+    // FG-583: dispatch reads only a published generation — publish the flat runtime.
+    publishFlatAsGeneration(isolatedHome);
 
     const { runId } = startRun({
       workflow: SINGLE_STEP_WORKFLOW,

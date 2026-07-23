@@ -43,6 +43,7 @@ import { productionDockerExec, finalizeContainerRetention, type DockerExecArgs, 
 import { composeSystemPrompt } from "./compose.js";
 import { buildDockerArgs, preflightProjectMount, type SpawnContext } from "./spawn.js";
 import { loadRuntimeWithSource, loadModelPolicyWithSource } from "./loader.js";
+import { resolveSeedGeneration, type SeedGeneration } from "./seed-generation.js";
 import { resolveModel, taskModelFields, manifestModelBlock, type ModelResolution } from "./model-resolution.js";
 import { checkResolvedAvailability, checkToolCapability } from "./provider-doctor.js";
 import { newRunId, newTaskId } from "../util/ids.js";
@@ -139,6 +140,11 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
 
   if (!ownsRun) reactivateTerminalRun(runId, run.status, "invoke");
 
+  // FG-583: anchor the seed generation ONCE at invoke entry so task-create-time
+  // model stamping (resolveModel below) and the dispatching container
+  // (dispatchInvokeTask) resolve the SAME complete generation.
+  const seedGeneration = resolveSeedGeneration();
+
   const { step, workflow } = invokeWorkflowShape(args.agentRole, args.modelAlias, args.runtimeName);
 
   // Use the agent role for the id (e.g. task-test-engineer-ab12cd), not the
@@ -171,6 +177,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     cliProfile: args.modelProfile,
     runtimeName: args.runtimeName ?? "claude",
     ctx: { projectDir: args.projectDir },
+    seedGeneration,
   });
 
   // Insert task row first; the spawn writes files into the task dir and the
@@ -204,6 +211,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     invocationCwd: args.invocationCwd,
     resolvedFromSubdir: args.resolvedFromSubdir,
     explicitSubproject: args.explicitSubproject,
+    seedGeneration,
     dockerExec: args.dockerExec,
   });
 }
@@ -278,6 +286,11 @@ export type DispatchInvokeTaskArgs = {
   invocationCwd?: string;
   resolvedFromSubdir?: boolean;
   explicitSubproject?: boolean;
+  /** FG-583: the seed generation anchored at invoke entry. Threaded so the runtime
+   *  (and any generation-coupled load) reads ONE complete generation for the life of
+   *  this dispatch. `undefined` (e.g. the `forge retry` caller) → resolve the live
+   *  pointer once here. */
+  seedGeneration?: SeedGeneration | null;
   dockerExec?: DockerExecFn;
 };
 
@@ -289,6 +302,10 @@ export type DispatchInvokeTaskArgs = {
 // contract, the event sequence, or run finalization.
 export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<InvokeResult> {
   const { task, resolution } = args;
+  // FG-583: use the anchor resolved at invoke entry (or resolve once here for the
+  // `forge retry` caller). ONE complete generation for the life of this dispatch,
+  // even if a promotion swaps the seed pointer mid-run.
+  const seedGeneration = args.seedGeneration !== undefined ? args.seedGeneration : resolveSeedGeneration();
   const taskId = task.id;
   const runId = task.runId;
   const agentRole = task.agentRole;
@@ -322,6 +339,12 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     });
   };
 
+  // FG-583: no per-consumer seed-state gating. The runtime/workflow/policy loads
+  // below reach the seed surface through the loader's single resolve point, which
+  // refuses (named, repairable) when no complete generation is published — the
+  // loadRuntimeWithSource try/catch below turns that into a failed task with the
+  // loader's message. A torn/incomplete/absent generation never dispatches.
+
   // Materialize the task dir.
   const dir = taskDir(runId, taskId);
   mkdirSync(dir, { recursive: true });
@@ -340,7 +363,7 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
   let runtimePath: string;
   let runtimeName: string;
   try {
-    const runtimeLoaded = loadRuntimeWithSource(resolution.runtime, { projectDir: args.projectDir });
+    const runtimeLoaded = loadRuntimeWithSource(resolution.runtime, { projectDir: args.projectDir, seedGeneration });
     runtime = runtimeLoaded;
     runtimeSource = runtimeLoaded.source;
     runtimePath = runtimeLoaded.path;
@@ -436,7 +459,7 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
   // invoke (the workflow object is built in-memory, not loaded from a YAML file).
   let modelPolicyLoaded: ReturnType<typeof loadModelPolicyWithSource>;
   try {
-    modelPolicyLoaded = loadModelPolicyWithSource({ projectDir: args.projectDir });
+    modelPolicyLoaded = loadModelPolicyWithSource({ projectDir: args.projectDir, seedGeneration });
   } catch (e) {
     const error = `loadModelPolicy failed: ${(e as Error).message}`;
     cleanupStagedAuth(dir); // AWN-8

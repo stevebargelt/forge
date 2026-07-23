@@ -22,15 +22,16 @@ import { writeFileSync, mkdirSync, existsSync, mkdtempSync, rmSync } from "node:
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { invoke, type DockerExecFn } from "./invoke.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { getTask } from "../store/tasks.js";
 import { failureKindForTask } from "./failure-kind.js";
 
 function setupRuntimeStub(): void {
   const fhome = process.env.FORGE_HOME!;
   const runtimePath = join(fhome, "runtimes", "claude.yml");
-  if (existsSync(runtimePath)) return;
-  mkdirSync(dirname(runtimePath), { recursive: true });
-  writeFileSync(runtimePath, `
+  if (!existsSync(runtimePath)) {
+    mkdirSync(dirname(runtimePath), { recursive: true });
+    writeFileSync(runtimePath, `
 name: claude
 description: test stub
 image: test-image:latest
@@ -48,6 +49,9 @@ container:
 result:
   file: /task/result.json
 `);
+  }
+  // FG-583: publish the flat runtime as a complete generation so dispatch resolves it.
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 function touch(projectDir: string, rel: string): void {
