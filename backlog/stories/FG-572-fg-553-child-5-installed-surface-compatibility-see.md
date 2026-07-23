@@ -1,11 +1,9 @@
 ---
 id: FG-572
 type: story
-status: done
+status: active
 title: "FG-553 Child 5: installed-surface compatibility (seeds/hooks/scripts/dashboard) across a promotion"
 created: 2026-07-14
-closed: 2026-07-23
-closed_commit: 8272e5b
 ---
 
 **Parent:** FG-553 · **Epic:** FG-561 · **Plan:** `docs/plans/fg553-slice1-architecture.md` (Child 5)

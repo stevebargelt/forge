@@ -1,11 +1,9 @@
 ---
 id: FG-583
 type: story
-status: done
+status: active
 title: "FG-572 Child 5h: host seed install is a non-atomic cp loop — an interrupted upgrade can expose a mixed but Zod-valid workflow set to a concurrent forge next"
 created: 2026-07-17
-closed: 2026-07-23
-closed_commit: 8272e5b
 ---
 
 **Parent:** FG-572 · **Epic:** FG-561 · **Depends on:** FG-577 (install from the correct tree first)
@@ -112,3 +110,13 @@ Shipped in merge commit `8272e5b` (PR #154). All acceptance criteria met.
 **Additional hardening (red-security):** generation integrity is a CLOSED set — `loader.ts` refuses a Zod-valid file resolved from a generation but absent from its provenance manifest (torn/extra file), for both workflows and runtimes; regression test "integrity is a CLOSED set: a Zod-valid workflow ADDED to a generation but absent from its manifest is REFUSED".
 
 **Follow-up filed:** FG-605 (route preflight consuming routing policy from the generation — the dispatch-adjacent RACI change reverted to baseline to keep this ticket scoped).
+
+## REOPENED 2026-07-23 — closeout was premature (operator review at 8272e5b)
+
+The "all 7 AC met" grid above OVERCLAIMED. Operator review found:
+
+1. **HIGH — routing policy consumed flat, not from the generation.** `resolvePolicyPath` (src/raci/project.ts:48, reverted to baseline) returns `$FORGE_HOME/routing-policy.yml`, not the anchored generation's policy — affecting lane-classifier.ts:101, startRun.ts:129, invoke.ts:486, route-preflight.ts:35, doctor.ts:243. Reproduced: publish a generation, change the flat policy to a marker → resolvePolicyPath loads the flat marker while the generation holds a different policy. A process can consume old-generation workflows/runtimes with a newly-compiled flat routing policy. **This contradicts docs/invariants.md item 4**, which claims the derived routing policy moves with the generation and is "never the flat copies". Either the code must consume policy from the generation across ALL host-policy consumers (broadened FG-605), or the doc claim must be corrected to match the shipped (flat) reality. FG-605 as framed is too narrow (route preflight only).
+2. **MEDIUM — the documented fresh install is non-dispatchable.** Only `forge upgrade` publishes a generation; README:19 / quick-start:7 / how-to-use-forge-across-projects:7 install via `install-seeds.sh` (flat copies only) + build/promote, which FG-583 refuses to consume. A new operator reaches a non-dispatchable install until they independently discover `forge upgrade`. Needs the bootstrap to publish a generation, or the install docs to require the publishing step.
+3. **MEDIUM — the promoted-layout AC test does not exercise the installed command surface.** src/cli/commands/fg583-promoted-layout.integration.test.ts calls `runUpgrade()` (library, :91) and `resolveSeedGeneration()`/`loadWorkflow()` (library, :109/:116) in-process — NOT the promoted release's `forge upgrade` / `forge next` CLI. The AC requires the INSTALLED surface; this is an evidence gap, so that AC is NOT met as written.
+
+(Finding 4 — "closeout not on origin/main" — was a reviewed-older-commit artifact: the close landed at 1cd1bb9, two commits after the reviewed 8272e5b. Now reopened, so moot.)
