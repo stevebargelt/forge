@@ -27,6 +27,7 @@ import { insertRun } from "../store/runs.js";
 import { insertTask, getTask } from "../store/tasks.js";
 import { logEvent, eventsForTask } from "../store/events.js";
 import { gate } from "./gate.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import type { Run, Task } from "../types/index.js";
 
 const WORKFLOW_NAME = "fg492-gate-reap-test";
@@ -60,6 +61,7 @@ steps:
     gate: human
 `,
   );
+  publishFlatAsGeneration(homeDir);
 }
 
 // A containerized primary task (emits container.started — the signal both

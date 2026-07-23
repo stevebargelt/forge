@@ -68,7 +68,7 @@ import type { StartRunArgs } from "../v2/startRun.js";
 import { runNext } from "../v2/runNext.js";
 import type { RunNextResult } from "../v2/runNext.js";
 import { loadWorkflow } from "../v2/loader.js";
-import { resolveSeedGeneration, inspectSeedInstall } from "../v2/seed-generation.js";
+import { resolveSeedGeneration } from "../v2/seed-generation.js";
 import type { LoadContext } from "../v2/loader.js";
 import { aggregateVerdicts, gate, findStep } from "../v2/gate.js";
 import type { Workflow } from "../v2/schema.js";
@@ -1533,34 +1533,12 @@ export async function driveOneCampaignItem(
   const campaignData = getCampaign(campaignId);
   const canonicalContent = campaignData?.metadata?.["planContent"];
 
-  // FG-583: resolve the seed generation ONCE at drive entry, and refuse the NAMED
-  // incomplete/mixed install state rather than resolving null and silently falling
-  // back to the mutable flat layout for every wave/gate/load below. A torn or
-  // mid-publish generation is a state no release shipped — park the item as an
-  // infrastructure blocker and stop the campaign, with actionable guidance.
-  const seedState = inspectSeedInstall();
-  if (seedState.kind === "incomplete") {
-    updateCampaignItem(itemId, {
-      lifecycleStatus: "failed",
-      outcome: "blocked",
-      blockerKind: "infrastructure",
-      reason: `host seed install incomplete: ${seedState.reason}`,
-      requestedHumanAction:
-        `the host seed install is incomplete (${seedState.reason}) — run \`forge upgrade\` to republish a ` +
-        `complete seed generation, then \`forge campaign resume ${campaignId}\`.`,
-      continuePolicy: "hold_campaign",
-    });
-    itemRecords.push({
-      itemId,
-      ticketId: targetItem.ticketId,
-      runId: targetItem.runId,
-      lifecycleStatus: "failed",
-      outcome: "blocked",
-      blockerKind: "infrastructure",
-    });
-    await parkCampaign(campaignId, itemId, "blocked", { exemption: "item-carries-context" });
-    return { itemRecords, stopReason: "paused" };
-  }
+  // FG-583: resolve the seed generation ONCE at drive entry and inject it into every
+  // wave/gate/load below. No per-consumer seed-state gating — every workflow load here
+  // reaches the seed surface through the loader's single resolve point, which refuses
+  // (named, repairable) when no complete generation is published. That throw is caught
+  // by the drive-throw / start-run-throw park handlers below, so a torn/incomplete/
+  // absent generation parks the item instead of dispatching under a mixed/flat surface.
   // Anchor: injected into every workflow load AND runNext wave below, so a long-lived
   // item that outlives a promotion stays on the ONE complete generation it opened
   // (retained-never-recycled) rather than reading a recycled/torn one mid-drive. A

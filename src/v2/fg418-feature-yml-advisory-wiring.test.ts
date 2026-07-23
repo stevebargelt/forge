@@ -11,7 +11,10 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { loadWorkflow } from "./loader.js";
+import { publishSeedGeneration } from "./seed-generation.js";
 
 // Resolve the seeds directory relative to this test file:
 //   src/v2/fg418-feature-yml-advisory-wiring.test.ts
@@ -23,15 +26,23 @@ const projectRoot = join(fileURLToPath(import.meta.url), "..", "..", "..");
 const SEEDS_DIR = join(projectRoot, "seeds");
 
 let savedForgeHome: string | undefined;
+let homeDir: string;
 
 before(() => {
   savedForgeHome = process.env.FORGE_HOME;
-  process.env.FORGE_HOME = SEEDS_DIR;
+  // FG-583: dispatch reads only a published generation — the raw seeds/ tree is no
+  // longer a dispatch source. Publish the REAL release seeds (projectRoot/seeds) as a
+  // complete generation into a disposable home, so loadWorkflow("feature") validates
+  // the shipped feature.yml through the generation path.
+  homeDir = mkdtempSync(join(tmpdir(), "fg418-home-"));
+  process.env.FORGE_HOME = homeDir;
+  publishSeedGeneration({ home: homeDir, assetsDir: projectRoot, trustedAssetRoot: () => projectRoot });
 });
 
 after(() => {
   if (savedForgeHome === undefined) delete process.env.FORGE_HOME;
   else process.env.FORGE_HOME = savedForgeHome;
+  rmSync(homeDir, { recursive: true, force: true });
 });
 
 // ─── FG-418 advisory-wiring guard ─────────────────────────────────────────────

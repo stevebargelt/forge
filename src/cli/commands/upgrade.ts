@@ -21,7 +21,7 @@ import { RACI_PATH, ROUTING_POLICY_PATH } from "../../util/paths.js";
 import { buildReleaseReport, summarizeProblems, type ReleaseReport } from "../../v2/release-doctor.js";
 import { gatherReleaseInputs } from "./doctor.js";
 import { assetRoot, devCheckoutDir, executionMode, type ExecutionMode } from "../../v2/asset-root.js";
-import { publishSeedGeneration, beginSeedPublish, completeSeedPublish } from "../../v2/seed-generation.js";
+import { publishSeedGeneration } from "../../v2/seed-generation.js";
 
 // Wraps the manual upgrade dance: git pull on forge's own repo, refresh
 // shared seeds at ~/.forge/, optionally re-init the current project's
@@ -590,15 +590,6 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         assetInstall = "would-install";
         say(`[3/4] install-seeds.sh: would run with FORCE=1`);
       } else {
-        // FG-583 (fixer): mark that host-seed mutation has begun BEFORE
-        // install-seeds.sh touches the flat workflows/runtimes and BEFORE the atomic
-        // generation is published. The marker is cleared only after
-        // publishSeedGeneration commits a complete generation, so an interrupt
-        // anywhere in this window — or a thrown publish (the catch below) — leaves a
-        // NAMED incomplete-install state that doctor + every dispatch consumer honor,
-        // instead of the interrupted-first-install flat surface, or a valid-but-stale
-        // prior pointer, silently reading as healthy.
-        beginSeedPublish("forge upgrade did not finish publishing host seeds");
         try {
           const out = execFileSync("bash", [installScript], {
             env: { ...process.env, FORCE: "1" },
@@ -751,21 +742,17 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
             raciPath: existsSync(RACI_PATH) ? RACI_PATH : undefined,
           });
           seedGeneration = "published";
-          // A complete generation committed — clear the in-progress marker so the
-          // install reads healthy again.
-          completeSeedPublish();
           say(`        → seed generation: published ${pub.files} file(s) atomically${pub.routingPolicyCompiled ? " (with derived routing policy)" : ""}`);
         } catch (e) {
           seedGeneration = "failed";
           seedGenerationError = (e as Error).message;
           warn(`        ⚠ seed generation NOT published — ${seedGenerationError}`);
-          // FG-583 (fixer): LEAVE the publish marker in place — this failed
-          // publication is now the NAMED, repairable incomplete-install state.
-          // inspectSeedInstall reports it, so doctor and every dispatch consumer
-          // (next/gate/invoke/campaign) refuse and advise repair rather than silently
-          // dispatching under the prior generation (which may no longer match the code
-          // this upgrade was moving to).
-          warn(`          the prior generation's files remain on disk, but the seed install is now marked incomplete — doctor and dispatch will refuse until you re-run: forge upgrade`);
+          // The publish is atomic: a thrown publish leaves the PRIOR generation pointer
+          // intact and selectable (nothing partial is ever observable). Dispatch stays
+          // anchored to the prior complete generation. If NO prior generation exists
+          // (a failed FIRST install), the host has no complete generation and dispatch
+          // refuses at the loader's single resolve point until a re-run succeeds.
+          warn(`          the prior generation is intact; dispatch continues under it. Re-run: forge upgrade`);
         }
       }
 

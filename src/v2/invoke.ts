@@ -43,7 +43,7 @@ import { productionDockerExec, finalizeContainerRetention, type DockerExecArgs, 
 import { composeSystemPrompt } from "./compose.js";
 import { buildDockerArgs, preflightProjectMount, type SpawnContext } from "./spawn.js";
 import { loadRuntimeWithSource, loadModelPolicyWithSource } from "./loader.js";
-import { resolveSeedGeneration, inspectSeedInstall, type SeedGeneration } from "./seed-generation.js";
+import { resolveSeedGeneration, type SeedGeneration } from "./seed-generation.js";
 import { resolveModel, taskModelFields, manifestModelBlock, type ModelResolution } from "./model-resolution.js";
 import { checkResolvedAvailability, checkToolCapability } from "./provider-doctor.js";
 import { newRunId, newTaskId } from "../util/ids.js";
@@ -339,18 +339,11 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     });
   };
 
-  // FG-583: refuse the NAMED incomplete/mixed seed-install state rather than
-  // resolving null and silently falling back to the mutable flat layout. A torn or
-  // mid-publish generation is a state no release shipped — do not dispatch under it.
-  const seedState = inspectSeedInstall();
-  if (seedState.kind === "incomplete") {
-    const error =
-      `refusing to dispatch — the host seed install is incomplete: ${seedState.reason}. ` +
-      `Fix: forge upgrade (republishes a complete seed generation), then re-run.`;
-    failTask(taskId, { runId, kind: classify({}), error });
-    closeRunIfIdle(false);
-    return { runId, taskId, status: "failed", error };
-  }
+  // FG-583: no per-consumer seed-state gating. The runtime/workflow/policy loads
+  // below reach the seed surface through the loader's single resolve point, which
+  // refuses (named, repairable) when no complete generation is published — the
+  // loadRuntimeWithSource try/catch below turns that into a failed task with the
+  // loader's message. A torn/incomplete/absent generation never dispatches.
 
   // Materialize the task dir.
   const dir = taskDir(runId, taskId);

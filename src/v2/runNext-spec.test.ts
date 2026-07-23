@@ -14,6 +14,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { dirname, join } from "node:path";
 import { runNext, type DockerExecFn } from "./runNext.js";
 import { startRun } from "./startRun.js";
@@ -67,6 +68,8 @@ result:
   file: /task/result.json
 `,
   );
+  // FG-583: dispatch reads only a published generation — publish the flat runtime.
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 // ─── workflow fixtures ──────────────────────────────────────────────────────

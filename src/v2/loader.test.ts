@@ -13,15 +13,13 @@ import {
   loadRuntimeWithSource,
   loadModelPolicyWithSource,
 } from "./loader.js";
+import { publishTestGeneration } from "./seed-generation.testkit.js";
 
-// FG-579: loadWorkflow now refuses a HOST workflow whose bytes drift from a shipped
-// seed of the same name, comparing against defaultRepoSeedsDir() (the real repo
-// seeds). These resolution tests install a bespoke `feature.yml` under a temp
-// FORGE_HOME, which WOULD read as drift against the real seed. They are testing
-// path resolution, not drift, so they point the injectable baseline at a dir that
-// ships no workflow — "release doesn't ship this → nothing to measure → allow".
-// FG-579's own regression file exercises the refusal against a real baseline.
-const NO_SHIPPED_BASELINE = join(tmpdir(), "fg579-loader-absent-baseline-never-created");
+// FG-583: dispatch reads ONLY a published seed generation — the flat $FORGE_HOME
+// layout is no longer a dispatch source. These workspace-resolution tests therefore
+// publish their fixture bytes as a complete generation (the migration path) instead
+// of writing the flat dirs. A project override is honored WITHOUT a generation, so
+// project-override tests need no publish.
 
 const VALID_WORKFLOW = `
 name: feature
@@ -70,19 +68,16 @@ afterEach(() => {
 });
 
 test("loadWorkflow: reads from workspace FORGE_HOME by default", () => {
-  mkdirSync(join(homeDir, "workflows"), { recursive: true });
-  writeFileSync(join(homeDir, "workflows", "feature.yml"), VALID_WORKFLOW);
+  publishTestGeneration(homeDir, { workflows: { feature: VALID_WORKFLOW } });
 
-  const wf = loadWorkflow("feature", {}, NO_SHIPPED_BASELINE);
+  const wf = loadWorkflow("feature");
   assert.equal(wf.name, "feature");
   assert.equal(wf.steps[0]?.id, "architect");
 });
 
 test("loadWorkflow: project override replaces workspace YAML", () => {
-  // Workspace has 1 step, project has 2 steps. Project wins.
-  mkdirSync(join(homeDir, "workflows"), { recursive: true });
-  writeFileSync(join(homeDir, "workflows", "feature.yml"), VALID_WORKFLOW);
-
+  // Workspace has 1 step, project has 2 steps. Project wins — honored WITHOUT a
+  // published generation, since a project override is never refused.
   const projectYaml = `
 name: feature
 description: project override
@@ -100,48 +95,52 @@ steps:
 });
 
 test("loadWorkflow: falls back to workspace if project override doesn't exist", () => {
-  mkdirSync(join(homeDir, "workflows"), { recursive: true });
-  writeFileSync(join(homeDir, "workflows", "feature.yml"), VALID_WORKFLOW);
+  publishTestGeneration(homeDir, { workflows: { feature: VALID_WORKFLOW } });
   // No project file written.
 
-  const wf = loadWorkflow("feature", { projectDir }, NO_SHIPPED_BASELINE);
+  const wf = loadWorkflow("feature", { projectDir });
   assert.equal(wf.steps.length, 1);
 });
 
 test("loadWorkflow: missing file throws with the resolved path", () => {
-  // Don't write anything.
+  // A generation is published but does not carry 'not-real' → the not-found path
+  // (distinct from the no-generation refusal) names the workflow.
+  publishTestGeneration(homeDir, { workflows: { feature: VALID_WORKFLOW } });
   assert.throws(() => loadWorkflow("not-real"), /not-real/);
 });
 
+test("loadWorkflow: no published generation refuses with a repairable message", () => {
+  // Nothing published → the loader's single resolve point refuses rather than reading
+  // the flat pre-migration layout.
+  assert.throws(() => loadWorkflow("feature"), /no complete seed generation|forge upgrade/);
+});
+
 test("loadWorkflow: name mismatch between filename and YAML body is rejected", () => {
-  mkdirSync(join(homeDir, "workflows"), { recursive: true });
-  writeFileSync(
-    join(homeDir, "workflows", "feature.yml"),
-    VALID_WORKFLOW.replace("name: feature", "name: something-else")
-  );
+  publishTestGeneration(homeDir, {
+    workflows: { feature: VALID_WORKFLOW.replace("name: feature", "name: something-else") },
+  });
   assert.throws(() => loadWorkflow("feature"), /declares name='something-else'/);
 });
 
 test("loadWorkflow: invalid YAML throws with parse error", () => {
-  mkdirSync(join(homeDir, "workflows"), { recursive: true });
   // ': :' is a YAML syntax error
-  writeFileSync(join(homeDir, "workflows", "feature.yml"), "name: feature\nsteps: :\n");
+  publishTestGeneration(homeDir, { workflows: { feature: "name: feature\nsteps: :\n" } });
   assert.throws(() => loadWorkflow("feature"), /YAML parse error/);
 });
 
 test("loadWorkflow: schema violation throws with field path", () => {
-  mkdirSync(join(homeDir, "workflows"), { recursive: true });
   // gate: bogus is not in the enum
-  writeFileSync(
-    join(homeDir, "workflows", "feature.yml"),
-    `
+  publishTestGeneration(homeDir, {
+    workflows: {
+      feature: `
 name: feature
 description: test
 inputs: []
 steps:
   - { id: a, agent: a, gate: bogus }
-`
-  );
+`,
+    },
+  });
   let err: unknown;
   try {
     loadWorkflow("feature");
@@ -155,8 +154,7 @@ steps:
 });
 
 test("loadRuntime: reads from workspace FORGE_HOME by default", () => {
-  mkdirSync(join(homeDir, "runtimes"), { recursive: true });
-  writeFileSync(join(homeDir, "runtimes", "claude-bedrock.yml"), VALID_RUNTIME);
+  publishTestGeneration(homeDir, { runtimes: { "claude-bedrock": VALID_RUNTIME } });
 
   const rt = loadRuntime("claude-bedrock");
   assert.equal(rt.name, "claude-bedrock");
@@ -165,11 +163,11 @@ test("loadRuntime: reads from workspace FORGE_HOME by default", () => {
 });
 
 test("loadRuntime: rejects missing 'default' model alias with field-pathed error", () => {
-  mkdirSync(join(homeDir, "runtimes"), { recursive: true });
-  writeFileSync(
-    join(homeDir, "runtimes", "claude-bedrock.yml"),
-    VALID_RUNTIME.replace("default: claude-sonnet-4-6", "spec-writer: claude-sonnet-4-6")
-  );
+  publishTestGeneration(homeDir, {
+    runtimes: {
+      "claude-bedrock": VALID_RUNTIME.replace("default: claude-sonnet-4-6", "spec-writer: claude-sonnet-4-6"),
+    },
+  });
   let err: unknown;
   try {
     loadRuntime("claude-bedrock");
@@ -263,11 +261,10 @@ test("loadWorkflowWithSource: returns source='project' when project override exi
 });
 
 test("loadWorkflowWithSource: returns source='host' when only workspace copy present", () => {
-  mkdirSync(join(homeDir, "workflows"), { recursive: true });
-  writeFileSync(join(homeDir, "workflows", "feature.yml"), VALID_WORKFLOW);
+  publishTestGeneration(homeDir, { workflows: { feature: VALID_WORKFLOW } });
   // No project override written.
 
-  const result = loadWorkflowWithSource("feature", { projectDir }, NO_SHIPPED_BASELINE);
+  const result = loadWorkflowWithSource("feature", { projectDir });
   assert.equal(result.source, "host");
   assert.ok(result.path.includes(homeDir), "path must be inside workspace FORGE_HOME");
   assert.equal(result.name, "feature");
@@ -287,8 +284,7 @@ test("loadRuntimeWithSource: returns source='project' when project override exis
 });
 
 test("loadRuntimeWithSource: returns source='host' when only workspace copy present", () => {
-  mkdirSync(join(homeDir, "runtimes"), { recursive: true });
-  writeFileSync(join(homeDir, "runtimes", "claude-bedrock.yml"), VALID_RUNTIME);
+  publishTestGeneration(homeDir, { runtimes: { "claude-bedrock": VALID_RUNTIME } });
 
   const result = loadRuntimeWithSource("claude-bedrock", { projectDir });
   assert.equal(result.source, "host");

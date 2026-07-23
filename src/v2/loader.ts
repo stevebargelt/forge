@@ -26,11 +26,11 @@ import {
   type Runtime,
   type ModelPolicy,
 } from "./schema.js";
-import { defaultRepoSeedsDir } from "./seed-drift.js";
 import { sha256OfBytes } from "../util/content-digest.js";
 import {
   generationCategoryDir,
   resolveSeedGeneration,
+  inspectSeedInstall,
   type SeedGeneration,
 } from "./seed-generation.js";
 
@@ -52,24 +52,48 @@ export type LoadContext = {
    *
    *  `undefined` (the ordinary case) means "resolve the live seed pointer per call";
    *  because publication is a single atomic swap, a per-call resolve still observes
-   *  ONE complete generation, never a mix. `null` forces the flat $FORGE_HOME layout
-   *  (fresh host / pre-migration). A resolved generation pins this invocation. */
+   *  ONE complete generation, never a mix. `null` means "no generation anchored" — and
+   *  since there is no flat dispatch fallback (see workspaceGeneration), a dispatch
+   *  load then REFUSES rather than reading the pre-migration flat layout. A resolved
+   *  generation pins this invocation. */
   seedGeneration?: SeedGeneration | null;
 };
 
-/** Resolve the workspace directory for a forge-owned, dispatch-coupled seed category
- *  (workflows / runtimes), honoring an anchored generation. Returns the generation's
- *  category dir when a generation is anchored or live-resolvable, else the flat
- *  $FORGE_HOME/<category> layout (fresh host, or existing installs/tests that write
- *  the flat dirs directly). */
-function workspaceSeedContext(
-  category: "workflows" | "runtimes",
-  ctx: LoadContext,
-): { dir: string; generation: SeedGeneration | null } {
-  const generation =
-    ctx.seedGeneration !== undefined ? ctx.seedGeneration : resolveSeedGeneration(forgeHome());
-  if (generation) return { dir: generationCategoryDir(generation, category), generation };
-  return { dir: join(forgeHome(), category), generation: null };
+/** THE single dispatch-side resolve point for the forge-owned, dispatch-coupled seed
+ *  surface (workflows / runtimes). Returns the anchored-or-live-resolved generation,
+ *  or null when NONE is published.
+ *
+ *  FG-583 (invariant moved here): there is no flat-layout dispatch fallback. When this
+ *  returns null the host has no complete seed generation, and every dispatch consumer
+ *  (next / invoke / gate / campaign / continue / model-resolution / runNext) reaches
+ *  the seed surface THROUGH the loaders below — so they all inherit one named,
+ *  repairable refusal (noCompleteGenerationError) from this ONE place, rather than each
+ *  gating for the state itself. The flat $FORGE_HOME/<category> copies still exist for
+ *  the FG-579 drift detector and doctor's runtime registry, but neither dispatches, so
+ *  the flat surface is never a dispatch source. A project override is resolved by each
+ *  loader BEFORE consulting this, so it is honored and never refused. */
+function workspaceGeneration(ctx: LoadContext): SeedGeneration | null {
+  return ctx.seedGeneration !== undefined ? ctx.seedGeneration : resolveSeedGeneration(forgeHome());
+}
+
+/** The named, repairable refusal raised when a dispatch load needs the host seed
+ *  surface but no complete generation is published — distinct wording for an
+ *  incomplete (torn/mid-publish) generation vs an absent one, from inspectSeedInstall. */
+function noCompleteGenerationError(category: "workflows" | "runtimes"): Error {
+  const home = forgeHome();
+  const state = inspectSeedInstall(home);
+  const head =
+    state.kind === "incomplete"
+      ? `the seed install is incomplete: ${state.reason}`
+      : `no seed generation is published for this $FORGE_HOME (${home})`;
+  return new Error(
+    `refusing to dispatch — no complete seed generation is published; ${head}\n` +
+      `The forge-owned ${category} surface is published as ONE atomic seed generation; forge will not ` +
+      `dispatch under the flat pre-migration layout (kept only for drift detection / doctor, never for ` +
+      `dispatch).\n` +
+      `Fix: run \`forge upgrade\` to publish a complete seed generation. A project override at ` +
+      `<project>/.forge/${category}/<name>.yml is always honored and never refused.`,
+  );
 }
 
 // FG-583: a workflow resolved from within a published generation is measured
@@ -100,60 +124,33 @@ function assertGenerationWorkflowConsistent(
   );
 }
 
-// FG-579: a HOST workflow (~/.forge/workflows/<name>.yml) that has drifted from
-// the release's shipped seed silently mis-runs — it is schema-valid, so nothing
-// upstream catches it, and dispatch then executes a stale definition against
-// current code. This is the enforcement half of the FG-335 detector: doctor is the
-// advisory, this refusal is what actually stops the mis-run at the consume path.
-//
-// `repoSeedsDir` mirrors detectSeedDrift's parameter: it defaults to the
-// assetRoot-derived, NON-redirectable release baseline (FG-577 — ambient
-// FORGE_REPO_DIR cannot steer it), and is injectable ONLY so a test can point it
-// at a disposable fixture WITHOUT promoting the host.
-//
-// Refuse ONLY when the resolved source is HOST and the release ships a baseline to
-// measure against. A PROJECT override is intentional operator specialization and
-// is never refused; a workflow the release does not ship has no drift to measure.
-function assertWorkflowNotDrifted(
-  name: string,
-  installedPath: string,
-  isProject: boolean,
-  repoSeedsDir: string,
-): void {
-  if (isProject) return;
-  const baseline = join(repoSeedsDir, "workflows", `${name}.yml`);
-  if (!existsSync(baseline)) return;
-  if (sha256OfBytes(baseline) === sha256OfBytes(installedPath)) return;
-  throw new Error(
-    `workflow '${name}' has drifted from this release's shipped workflow — refusing to dispatch it.\n` +
-      `  installed:        ${installedPath}\n` +
-      `  release baseline: ${baseline}\n` +
-      `The installed workflow is schema-valid but its bytes differ from the workflow this forge release ` +
-      `ships, so running it would silently execute a stale definition against current code. Forge refuses ` +
-      `rather than mis-run it.\n` +
-      `Fix: forge upgrade (or FORCE=1 scripts/install-seeds.sh) to reinstall this release's workflows. ` +
-      `To intentionally specialize a workflow for this project, place it at ` +
-      `<project>/.forge/workflows/${name}.yml — a project override is never refused.`,
-  );
-}
+// FG-579 note: the drifted-HOST-workflow refusal that used to live here (a
+// byte-compare of the FLAT $FORGE_HOME/workflows against the release baseline) is
+// subsumed by FG-583's no-flat-dispatch contract. The flat layout is never a dispatch
+// source now, so a drifted flat workflow is refused wholesale (noCompleteGenerationError)
+// before any per-file drift measure would run. Drift WITHIN a published generation —
+// a hand-edited file inside the generation dir — is still caught, by
+// assertGenerationWorkflowConsistent against the generation's own manifest. The FG-335
+// advisory detector (detectSeedDrift) is unchanged.
 
-export function loadWorkflow(
-  name: string,
-  ctx: LoadContext = {},
-  repoSeedsDir: string = defaultRepoSeedsDir(),
-): Workflow {
+export function loadWorkflow(name: string, ctx: LoadContext = {}): Workflow {
   const projectPath = ctx.projectDir
     ? join(ctx.projectDir, ".forge", "workflows", `${name}.yml`)
     : undefined;
-  const { dir: workspaceDir, generation } = workspaceSeedContext("workflows", ctx);
-  const workspacePath = join(workspaceDir, `${name}.yml`);
-
   const isProject = !!(projectPath && existsSync(projectPath));
-  const path = isProject ? projectPath! : workspacePath;
-  if (!existsSync(path)) {
-    throw new Error(
-      `workflow '${name}' not found at ${projectPath ?? workspacePath} (or workspace default)`
-    );
+
+  let path: string;
+  let generation: SeedGeneration | null;
+  if (isProject) {
+    path = projectPath!;
+    generation = null;
+  } else {
+    generation = workspaceGeneration(ctx);
+    if (!generation) throw noCompleteGenerationError("workflows");
+    path = join(generationCategoryDir(generation, "workflows"), `${name}.yml`);
+    if (!existsSync(path)) {
+      throw new Error(`workflow '${name}' not found at ${path} (or project override)`);
+    }
   }
   const raw = readFileSync(path, "utf8");
   let parsed: unknown;
@@ -171,30 +168,30 @@ export function loadWorkflow(
       `workflow at ${path} declares name='${result.data.name}' but was loaded by name='${name}' — they must match`
     );
   }
-  if (isProject) {
-    // A project override is intentional operator specialization — never refused.
-  } else if (generation) {
+  // A project override is intentional operator specialization — never refused. A
+  // resolved generation is measured against its OWN provenance manifest.
+  if (!isProject && generation) {
     assertGenerationWorkflowConsistent(name, path, generation);
-  } else {
-    // Flat layout (no published generation): keep FG-579's assetRoot-baseline drift refusal.
-    assertWorkflowNotDrifted(name, path, isProject, repoSeedsDir);
   }
   return result.data;
 }
 
 export function loadRuntime(name: string, ctx: LoadContext = {}): Runtime {
+  const generation = workspaceGeneration(ctx);
   // Sentinel: `claude` means "auto-detect from env" — but only if no literal
-  // `claude.yml` exists at the workspace path. This keeps tests and ad-hoc
-  // installs working with a single `claude.yml` while production seeds ship
-  // claude-bedrock.yml / claude-oauth.yml / claude-apikey.yml for detection.
-  const { dir: runtimesDir } = workspaceSeedContext("runtimes", ctx);
+  // `claude.yml` exists at the project override or within the resolved generation.
+  // This keeps tests and ad-hoc installs working with a single `claude.yml` while
+  // production seeds ship claude-bedrock.yml / claude-oauth.yml / claude-apikey.yml
+  // for detection.
   let resolvedName = name;
   if (name === "claude") {
     const literalProject = ctx.projectDir
       ? join(ctx.projectDir, ".forge", "runtimes", "claude.yml")
       : undefined;
-    const literalWorkspace = join(runtimesDir, "claude.yml");
-    if (!(literalProject && existsSync(literalProject)) && !existsSync(literalWorkspace)) {
+    const literalWorkspace = generation
+      ? join(generationCategoryDir(generation, "runtimes"), "claude.yml")
+      : undefined;
+    if (!(literalProject && existsSync(literalProject)) && !(literalWorkspace && existsSync(literalWorkspace))) {
       resolvedName = detectRuntimeName(ctx);
     }
   }
@@ -202,13 +199,17 @@ export function loadRuntime(name: string, ctx: LoadContext = {}): Runtime {
   const projectPath = ctx.projectDir
     ? join(ctx.projectDir, ".forge", "runtimes", `${resolvedName}.yml`)
     : undefined;
-  const workspacePath = join(runtimesDir, `${resolvedName}.yml`);
+  const isProject = !!(projectPath && existsSync(projectPath));
 
-  const path = projectPath && existsSync(projectPath) ? projectPath : workspacePath;
-  if (!existsSync(path)) {
-    throw new Error(
-      `runtime '${resolvedName}' not found at ${projectPath ?? workspacePath} (or workspace default)`
-    );
+  let path: string;
+  if (isProject) {
+    path = projectPath!;
+  } else {
+    if (!generation) throw noCompleteGenerationError("runtimes");
+    path = join(generationCategoryDir(generation, "runtimes"), `${resolvedName}.yml`);
+    if (!existsSync(path)) {
+      throw new Error(`runtime '${resolvedName}' not found at ${path} (or project override)`);
+    }
   }
   const raw = readFileSync(path, "utf8");
   let parsed: unknown;
@@ -310,20 +311,24 @@ export type LoadedWithSource<T> = T & { source: "host" | "project"; path: string
 export function loadWorkflowWithSource(
   name: string,
   ctx: LoadContext = {},
-  repoSeedsDir: string = defaultRepoSeedsDir(),
 ): LoadedWithSource<Workflow> {
   const projectPath = ctx.projectDir
     ? join(ctx.projectDir, ".forge", "workflows", `${name}.yml`)
     : undefined;
-  const { dir: workspaceDir, generation } = workspaceSeedContext("workflows", ctx);
-  const workspacePath = join(workspaceDir, `${name}.yml`);
-
   const isProject = !!(projectPath && existsSync(projectPath));
-  const path = isProject ? projectPath! : workspacePath;
-  if (!existsSync(path)) {
-    throw new Error(
-      `workflow '${name}' not found at ${projectPath ?? workspacePath} (or workspace default)`
-    );
+
+  let path: string;
+  let generation: SeedGeneration | null;
+  if (isProject) {
+    path = projectPath!;
+    generation = null;
+  } else {
+    generation = workspaceGeneration(ctx);
+    if (!generation) throw noCompleteGenerationError("workflows");
+    path = join(generationCategoryDir(generation, "workflows"), `${name}.yml`);
+    if (!existsSync(path)) {
+      throw new Error(`workflow '${name}' not found at ${path} (or project override)`);
+    }
   }
   const raw = readFileSync(path, "utf8");
   let parsed: unknown;
@@ -341,12 +346,8 @@ export function loadWorkflowWithSource(
       `workflow at ${path} declares name='${result.data.name}' but was loaded by name='${name}' — they must match`
     );
   }
-  if (isProject) {
-    // A project override is intentional operator specialization — never refused.
-  } else if (generation) {
+  if (!isProject && generation) {
     assertGenerationWorkflowConsistent(name, path, generation);
-  } else {
-    assertWorkflowNotDrifted(name, path, isProject, repoSeedsDir);
   }
   return { ...result.data, source: isProject ? "project" : "host", path };
 }
@@ -355,14 +356,16 @@ export function loadRuntimeWithSource(
   name: string,
   ctx: LoadContext = {}
 ): LoadedWithSource<Runtime> {
-  const { dir: runtimesDir } = workspaceSeedContext("runtimes", ctx);
+  const generation = workspaceGeneration(ctx);
   let resolvedName = name;
   if (name === "claude") {
     const literalProject = ctx.projectDir
       ? join(ctx.projectDir, ".forge", "runtimes", "claude.yml")
       : undefined;
-    const literalWorkspace = join(runtimesDir, "claude.yml");
-    if (!(literalProject && existsSync(literalProject)) && !existsSync(literalWorkspace)) {
+    const literalWorkspace = generation
+      ? join(generationCategoryDir(generation, "runtimes"), "claude.yml")
+      : undefined;
+    if (!(literalProject && existsSync(literalProject)) && !(literalWorkspace && existsSync(literalWorkspace))) {
       resolvedName = detectRuntimeName(ctx);
     }
   }
@@ -370,14 +373,17 @@ export function loadRuntimeWithSource(
   const projectPath = ctx.projectDir
     ? join(ctx.projectDir, ".forge", "runtimes", `${resolvedName}.yml`)
     : undefined;
-  const workspacePath = join(runtimesDir, `${resolvedName}.yml`);
-
   const isProject = !!(projectPath && existsSync(projectPath));
-  const path = isProject ? projectPath! : workspacePath;
-  if (!existsSync(path)) {
-    throw new Error(
-      `runtime '${resolvedName}' not found at ${projectPath ?? workspacePath} (or workspace default)`
-    );
+
+  let path: string;
+  if (isProject) {
+    path = projectPath!;
+  } else {
+    if (!generation) throw noCompleteGenerationError("runtimes");
+    path = join(generationCategoryDir(generation, "runtimes"), `${resolvedName}.yml`);
+    if (!existsSync(path)) {
+      throw new Error(`runtime '${resolvedName}' not found at ${path} (or project override)`);
+    }
   }
   const raw = readFileSync(path, "utf8");
   let parsed: unknown;

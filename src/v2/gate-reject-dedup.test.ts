@@ -24,6 +24,7 @@ import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
 import { insertTask, tasksForRun } from "../store/tasks.js";
 import { gate } from "./gate.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { isOnRejectRecoveryTask } from "./ready-queue.js";
 import type { Run, Task } from "../types/index.js";
 
@@ -60,6 +61,7 @@ steps:
     on_reject: investigate
 `,
   );
+  publishFlatAsGeneration(homeDir);
 }
 
 function auditPrimary(id: string): Task {

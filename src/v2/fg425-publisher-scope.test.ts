@@ -17,6 +17,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
@@ -109,6 +110,8 @@ result:
   file: /task/result.json
 `,
   );
+  // FG-583: dispatch reads only a published generation — publish the flat runtime.
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 });
 
 afterEach(() => {

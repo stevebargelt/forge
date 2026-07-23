@@ -26,8 +26,6 @@ import {
   publishSeedGeneration,
   resolveSeedGeneration,
   inspectSeedInstall,
-  beginSeedPublish,
-  completeSeedPublish,
 } from "./seed-generation.js";
 import { loadWorkflow } from "./loader.js";
 
@@ -98,27 +96,21 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
-test("RED: a naive flat sequential install exposes a mixed but Zod-valid workflow set to a consumer", () => {
-  // Reproduce the pre-fix defect on the FLAT layout with NO generation published:
-  // install release A, then partially overwrite with B (some workflows replaced,
-  // others not) — the exact mid-`cp`-loop state. Every file is Zod-valid; the SET
-  // is a mixture no release shipped.
+test("the flat layout is never a dispatch source: a mixed flat set is REFUSED, not read", () => {
+  // The pre-fix defect: a mid-`cp`-loop flat layout (release A, alpha overwritten by
+  // B, beta not) is a Zod-valid mixture no release shipped. Under FG-583 there is no
+  // flat dispatch fallback, so this mixed flat surface is refused WHOLESALE (no
+  // generation published) rather than dispatched — the mix is never observable.
   const flatWf = join(home, "workflows");
   mkdirSync(flatWf, { recursive: true });
-  // Release A: two workflows.
   writeFileSync(join(flatWf, "alpha.yml"), workflowYaml("alpha", "A"));
   writeFileSync(join(flatWf, "beta.yml"), workflowYaml("beta", "A"));
-  // Interrupted upgrade to B: alpha got overwritten, beta did NOT yet.
-  writeFileSync(join(flatWf, "alpha.yml"), workflowYaml("alpha", "B"));
+  writeFileSync(join(flatWf, "alpha.yml"), workflowYaml("alpha", "B")); // interrupted upgrade
 
-  // No generation → loader falls back to the flat layout → it reads the MIX.
   assert.equal(resolveSeedGeneration(home), null, "precondition: no generation published");
-  const alpha = loadWorkflow("alpha");
-  const beta = loadWorkflow("beta");
-  // The defect, observed: alpha is B's, beta is A's — a cross-file set no release
-  // shipped, yet both parsed. This is the RED the atomic generation must eliminate.
-  assert.match(alpha.description, /release B/);
-  assert.match(beta.description, /release A/);
+  // No fall-through to the flat mix — dispatch refuses, naming the repair.
+  assert.throws(() => loadWorkflow("alpha"), /no complete seed generation|forge upgrade/);
+  assert.throws(() => loadWorkflow("beta"), /no complete seed generation|forge upgrade/);
 });
 
 test("GREEN: an interrupted publish never exposes a torn/mixed surface — the prior generation stays whole", () => {
@@ -272,71 +264,41 @@ test("DESTINATION trust: a replaceable destination symlink is refused BEFORE any
   assert.equal(resolveSeedGeneration(home), null);
 });
 
-test("df02eb: a fresh/interrupted INITIAL install exposes NO torn flat workflow surface", () => {
-  // With FG-583, install-seeds.sh no longer writes workflows/runtimes into the flat
-  // $FORGE_HOME layout — they ship ONLY via the atomic generation. So an install
-  // interrupted BEFORE the first publishSeedGeneration commits leaves the create-only
-  // authored surfaces (agents/constraints) but NO flat workflow surface: there is
-  // nothing torn or mixed for dispatch to fall back onto. Simulate that state.
+test("a fresh/interrupted INITIAL install (flat mutated, no generation) REFUSES dispatch — it never reads the flat set", () => {
+  // FG-583: an install interrupted BEFORE the first publishSeedGeneration commits may
+  // have left a half-written flat workflows surface (the removed `cp` loop). Since the
+  // flat layout is no longer a dispatch source, dispatch refuses wholesale instead of
+  // falling back to the torn flat set — the torn set is never observable to dispatch.
+  const flatWf = join(home, "workflows");
+  mkdirSync(flatWf, { recursive: true });
+  writeFileSync(join(flatWf, "alpha.yml"), workflowYaml("alpha", "B")); // half-written flat surface
   mkdirSync(join(home, "agents"), { recursive: true });
-  mkdirSync(join(home, "constraints"), { recursive: true });
-  // No seed pointer and (crucially) no populated flat workflows dir.
+
   assert.equal(resolveSeedGeneration(home), null);
-  // A workflow load cannot reach a mixed/torn set — it fails cleanly "not found"
-  // rather than dispatching a half-written flat surface, which is exactly what the
-  // removed flat `cp` loop could otherwise leave behind.
-  assert.throws(() => loadWorkflow("alpha"), /not found/);
+  assert.equal(inspectSeedInstall(home).kind, "no-generation");
+  // Refuses (named, repairable) — does NOT read the flat alpha.yml.
+  assert.throws(() => loadWorkflow("alpha"), /no complete seed generation|forge upgrade/);
 });
 
-test("finding 1: a failed/interrupted re-publish is a NAMED incomplete state even though the prior generation pointer still resolves healthy", () => {
-  // Publish a complete generation A — the install is healthy.
+test("the three dispatch cases: absent → refuse, incomplete → refuse, complete → dispatch", () => {
   const assetsA = buildAssetRoot(tmp, "A", ["alpha"]);
+
+  // ABSENT: nothing published → refuse.
+  assert.equal(inspectSeedInstall(home).kind, "no-generation");
+  assert.throws(() => loadWorkflow("alpha"), /no complete seed generation|forge upgrade/);
+
+  // COMPLETE: a published generation dispatches exactly as today.
   publish({ home, assetsDir: assetsA });
-  const genA = resolveSeedGeneration(home);
-  assert.ok(genA);
   assert.equal(inspectSeedInstall(home).kind, "healthy");
+  assert.match(loadWorkflow("alpha").description, /release A/);
 
-  // The upgrade command's marker lifecycle: a re-publish that BEGAN and then
-  // threw/was interrupted leaves the marker behind (the catch in upgrade.ts does
-  // NOT clear it). The prior pointer still resolves to complete A...
-  beginSeedPublish("forge upgrade did not finish publishing host seeds", home);
-  const stillA = resolveSeedGeneration(home);
-  assert.ok(stillA);
-  assert.equal(stillA.root, genA.root, "prior generation pointer is untouched");
-
-  // ...but inspectSeedInstall now NAMES the incomplete state, carrying the prior
-  // generation root, so doctor + dispatch consumers refuse and advise repair rather
-  // than reading the stale pointer as healthy.
-  const state = inspectSeedInstall(home);
-  assert.equal(state.kind, "incomplete");
-  if (state.kind === "incomplete") {
-    assert.equal(state.generation, genA.root);
-    assert.match(state.reason, /did not finish|interrupted or failed|forge upgrade/);
-  }
-
-  // A subsequent successful publish clears the marker → healthy again.
-  completeSeedPublish(home);
-  assert.equal(inspectSeedInstall(home).kind, "healthy");
-});
-
-test("finding 2: an interrupted FIRST install (marker set, no pointer) is incomplete — distinct from an untouched pre-migration home", () => {
-  // No generation published yet. An untouched pre-migration home carries no marker →
-  // no-generation (healthy); the loader's flat fallback is legitimate there.
-  assert.equal(resolveSeedGeneration(home), null);
-  assert.equal(inspectSeedInstall(home).kind, "no-generation");
-
-  // An interrupted first upgrade mutated the flat workflows/runtimes but crashed
-  // before the atomic generation committed. The marker written before install-seeds.sh
-  // distinguishes that from the untouched home: inspectSeedInstall reports incomplete
-  // (generation null), so dispatch refuses instead of falling back to the mixed flat
-  // surface.
-  beginSeedPublish("forge upgrade did not finish publishing host seeds", home);
-  const state = inspectSeedInstall(home);
-  assert.equal(state.kind, "incomplete");
-  if (state.kind === "incomplete") assert.equal(state.generation, null);
-
-  completeSeedPublish(home);
-  assert.equal(inspectSeedInstall(home).kind, "no-generation");
+  // INCOMPLETE: tear the pointer's target of its manifest → incomplete → refuse. The
+  // loader's refusal message carries the incomplete state's reason.
+  const gen = resolveSeedGeneration(home)!;
+  rmSync(join(gen.root, ".seed-generation.json"), { force: true });
+  assert.equal(resolveSeedGeneration(home), null, "a torn generation does not resolve as usable");
+  assert.equal(inspectSeedInstall(home).kind, "incomplete");
+  assert.throws(() => loadWorkflow("alpha"), /incomplete|no valid provenance manifest|forge upgrade/);
 });
 
 test("inspectSeedInstall NAMES a torn generation (pointer → dir with no manifest) as incomplete/repairable", () => {

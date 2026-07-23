@@ -292,11 +292,13 @@ export function registerDoctor(program: Command): void {
     .action((opts: { json?: boolean }) => {
       const report = buildReleaseReport(gatherReleaseInputs(DEFAULT_IMAGE, { projectDir: process.cwd() }));
       const drift = detectSeedDrift(); // FG-335: installed ~/.forge seeds vs running code
-      // FG-583: a partial/torn seed generation is a NAMED, repairable state — never
-      // reported healthy. `no-generation` (fresh host / flat layout) and `healthy`
-      // are both fine; only `incomplete` is a readiness problem.
+      // FG-583: dispatch reads ONLY a published seed generation — there is no flat
+      // dispatch fallback. So ONLY `healthy` (a complete generation is published) is
+      // ready. `incomplete` (torn/mid-publish) AND `no-generation` (nothing published
+      // — a fresh/pre-migration host) are both NAMED not-ready readiness findings with
+      // the `forge upgrade` remedy: on either, dispatch refuses at the loader.
       const seedInstall = inspectSeedInstall();
-      const seedInstallOk = seedInstall.kind !== "incomplete";
+      const seedInstallOk = seedInstall.kind === "healthy";
       if (opts.json) {
         console.log(JSON.stringify({ ...report, seedDrift: drift, seedInstall }, null, 2));
       } else {
@@ -305,8 +307,12 @@ export function registerDoctor(program: Command): void {
         if (driftSection) console.log(`\n${driftSection}`);
         if (seedInstall.kind === "incomplete") {
           console.log(`\nSeed install: INCOMPLETE (repairable) — ${seedInstall.reason}`);
-          console.log(`  A partial host-seed install can expose a mixed/torn workflow set to dispatch.`);
+          console.log(`  A partial host-seed install can expose a mixed/torn workflow set — dispatch refuses.`);
           console.log(`  Fix: forge upgrade (republishes a complete atomic seed generation).`);
+        } else if (seedInstall.kind === "no-generation") {
+          console.log(`\nSeed install: NOT INSTALLED — no complete seed generation is published for this $FORGE_HOME.`);
+          console.log(`  Dispatch refuses until a generation is published; the flat pre-migration layout is never dispatched.`);
+          console.log(`  Fix: forge upgrade (publishes a complete atomic seed generation).`);
         }
       }
       process.exitCode = report.ok && drift.ok && seedInstallOk ? 0 : 1;

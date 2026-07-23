@@ -50,9 +50,9 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import {
-  FORGE_HOME,
   seedCurrentLinkIn,
   seedGenerationsDirIn,
   seedPreviousLinkIn,
@@ -62,6 +62,15 @@ import {
 import { atomicSymlinkSwap, realpathContains } from "./promote.js";
 import { assetRoot as executingAssetRoot } from "./asset-root.js";
 import { sha256OfBytes } from "../util/content-digest.js";
+
+// Resolved LIVE from the environment, matching loader.ts's forgeHome() — the seed
+// pointer resolvers and the loaders that consume them MUST agree on which home they
+// read, or a process that swaps FORGE_HOME (every test uses a disposable home) would
+// resolve the pointer from one home and the workflows from another. The paths.ts
+// FORGE_HOME const captures the env at import time, so it is NOT usable as the default.
+function liveForgeHome(): string {
+  return process.env.FORGE_HOME ?? join(homedir(), ".forge");
+}
 
 /** The forge-owned, dispatch-coupled seed categories that ride inside the atomic
  *  generation. Each is a directory of files copied verbatim from the release's
@@ -100,56 +109,16 @@ export type SeedGeneration = {
   manifest: SeedGenerationManifest;
 };
 
-/** A NAMED, repairable install state — not a byte diff. Propagated to doctor, the
- *  upgrade result, dispatch/campaign preflight. `incomplete` names a mixed/torn
- *  generation the pointer resolves to; `no-generation` is the ordinary pre-migration
- *  flat-layout host (nothing published yet), which is healthy, not partial. */
+/** A NAMED, repairable install state — not a byte diff. Propagated to doctor and the
+ *  upgrade result. `incomplete` names a mixed/torn generation the pointer resolves to;
+ *  `no-generation` is a host with nothing published yet (fresh / pre-migration). Since
+ *  FG-583 both are NOT-ready for dispatch — the loader refuses either, and doctor
+ *  reports both as readiness findings with the `forge upgrade` remedy; only `healthy`
+ *  (a complete generation is published) dispatches. */
 export type SeedInstallState =
   | { kind: "healthy"; generation: string }
   | { kind: "no-generation" }
   | { kind: "incomplete"; reason: string; generation: string | null };
-
-/** A durable marker the UPGRADE command writes BEFORE it begins mutating the host
- *  seed surface — the flat install-seeds.sh write AND the atomic generation publish —
- *  and clears ONLY after a complete generation is committed. Its lingering presence is
- *  the NAMED, repairable "a seed publication began and did not finish" state:
- *   - finding 1: a re-publish that threw/was interrupted leaves it behind even though
- *     the prior generation pointer still resolves — so the old pointer no longer reads
- *     as healthy and doctor + every dispatch consumer refuse and advise `forge upgrade`.
- *   - finding 2: an interrupted FIRST install (install-seeds.sh mutated the flat
- *     workflows/runtimes but no pointer committed yet) is now distinguishable from a
- *     genuinely untouched pre-migration home — the former carries the marker (→
- *     incomplete, dispatch refuses instead of falling back to the mixed flat surface),
- *     the latter does not (→ no-generation, healthy). */
-export const SEED_PUBLISH_MARKER_NAME = ".seed-publish-incomplete";
-
-function publishMarkerPath(home: string): string {
-  return join(home, SEED_PUBLISH_MARKER_NAME);
-}
-
-function readPublishMarker(home: string): string | null {
-  const p = publishMarkerPath(home);
-  if (!existsSync(p)) return null;
-  try {
-    return readFileSync(p, "utf8");
-  } catch {
-    return "";
-  }
-}
-
-/** Record that a seed publication has begun, before any flat mutation / staging. The
- *  marker persists until completeSeedPublish clears it, so a crash or a thrown publish
- *  anywhere in between leaves the named incomplete state behind for inspectSeedInstall
- *  to report. `reason` is surfaced verbatim in the incomplete-state message. */
-export function beginSeedPublish(reason: string, home: string = FORGE_HOME): void {
-  mkdirSync(home, { recursive: true });
-  writeFileSync(publishMarkerPath(home), `${reason}\n`);
-}
-
-/** Clear the in-progress marker once a complete generation has been published. */
-export function completeSeedPublish(home: string = FORGE_HOME): void {
-  rmSync(publishMarkerPath(home), { force: true });
-}
 
 function manifestPath(genRoot: string): string {
   return join(genRoot, GENERATION_MANIFEST_NAME);
@@ -170,12 +139,14 @@ function readGenerationManifest(genRoot: string): SeedGenerationManifest | null 
 }
 
 /** Resolve the seed `current` pointer PHYSICALLY, ONCE. Returns the held generation,
- *  or null when nothing is published (fresh host / pre-migration flat layout — every
- *  loader falls back to the flat $FORGE_HOME/<category> layout in that case). A
- *  pointer resolving to a directory with no valid manifest reads as null here too:
- *  inspectSeedInstall names it `incomplete`, and callers that must not run under a
- *  partial install consult that. */
-export function resolveSeedGeneration(home: string = FORGE_HOME): SeedGeneration | null {
+ *  or null when nothing is published (fresh host / pre-migration flat layout). Since
+ *  FG-583 the loaders do NOT fall back to the flat layout on null — they refuse
+ *  dispatch (there is no flat dispatch source), so a null here means dispatch is
+ *  refused until `forge upgrade` publishes a generation. A pointer resolving to a
+ *  directory with no valid manifest reads as null here too: inspectSeedInstall names
+ *  it `incomplete`, and doctor / callers that must not run under a partial install
+ *  consult that. */
+export function resolveSeedGeneration(home: string = liveForgeHome()): SeedGeneration | null {
   const link = seedCurrentLinkIn(home);
   if (!existsSync(link)) return null;
   let root: string;
@@ -194,25 +165,7 @@ export function resolveSeedGeneration(home: string = FORGE_HOME): SeedGeneration
  *   - pointer → dir, valid manifest → healthy
  *   - pointer → nothing / dir with no|invalid manifest → incomplete (torn/mid-publish),
  *     repairable by re-running `forge upgrade`. */
-export function inspectSeedInstall(home: string = FORGE_HOME): SeedInstallState {
-  // A lingering publish marker is the NAMED failed/interrupted-install state: an
-  // upgrade began mutating host seeds and never confirmed a complete generation.
-  // Report it as incomplete even when the prior pointer still resolves to a valid
-  // generation (finding 1) or when nothing is published yet because a first install
-  // was interrupted mid-flat-write (finding 2) — the intended seed surface was never
-  // published, so doctor and dispatch must refuse and advise repair rather than
-  // silently continuing on the stale/mixed surface.
-  const marker = readPublishMarker(home);
-  if (marker !== null) {
-    return {
-      kind: "incomplete",
-      generation: currentPointerTarget(home),
-      reason:
-        `${marker.trim() || "a seed publication began and did not complete"} — the last ` +
-        `\`forge upgrade\` was interrupted or failed before publishing a complete generation. ` +
-        `Re-run \`forge upgrade\` to republish a complete generation.`,
-    };
-  }
+export function inspectSeedInstall(home: string = liveForgeHome()): SeedInstallState {
   const link = seedCurrentLinkIn(home);
   if (!existsSync(link)) return { kind: "no-generation" };
   let root: string;
@@ -386,7 +339,7 @@ export type PublishSeedGenerationResult = {
  *  The staged generation is retained-never-recycled once published, so a process
  *  anchored to a prior generation keeps reading it. */
 export function publishSeedGeneration(opts: PublishSeedGenerationOptions): PublishSeedGenerationResult {
-  const home = opts.home ?? FORGE_HOME;
+  const home = opts.home ?? liveForgeHome();
 
   // SOURCE TRUST (FG-577). DERIVE the seed source from the executing-release
   // provenance itself — never trust the caller-supplied assetsDir. `trustedRoot` is

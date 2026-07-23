@@ -4,6 +4,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, rmSync, writeFileSync, mkdtempSync } from "node:fs";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveModel, detectAuthMode } from "./model-resolution.js";
@@ -94,6 +95,8 @@ afterEach(() => {
 function writeRuntime() {
   mkdirSync(join(homeDir, "runtimes"), { recursive: true });
   writeFileSync(join(homeDir, "runtimes", "claude-oauth.yml"), RUNTIME_OAUTH);
+  // FG-583: dispatch reads only a published generation — publish the flat runtime.
+  publishFlatAsGeneration(homeDir);
 }
 function writePolicy() {
   writeFileSync(join(homeDir, "model-policy.yml"), POLICY);
