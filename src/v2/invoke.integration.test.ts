@@ -6,6 +6,7 @@ import { writeFileSync, mkdirSync, existsSync, readFileSync, statSync, mkdtempSy
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { invoke, type DockerExecFn } from "./invoke.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { containerNameFromArgs } from "./docker-exec.js";
 import { reconcileRun } from "./reconcile.js";
 import { IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
@@ -37,9 +38,9 @@ function setupRuntimeStub(): void {
   // Synthesize a minimal claude runtime YAML so loadRuntime succeeds inside tests.
   const fhome = process.env.FORGE_HOME!;
   const runtimePath = join(fhome, "runtimes", "claude.yml");
-  if (existsSync(runtimePath)) return;
-  mkdirSync(dirname(runtimePath), { recursive: true });
-  writeFileSync(runtimePath, `
+  if (!existsSync(runtimePath)) {
+    mkdirSync(dirname(runtimePath), { recursive: true });
+    writeFileSync(runtimePath, `
 name: claude
 description: test stub
 image: test-image:latest
@@ -57,6 +58,9 @@ container:
 result:
   file: /task/result.json
 `);
+  }
+  // FG-583: publish the flat runtime as a complete generation so dispatch resolves it.
+  publishFlatAsGeneration(fhome);
 }
 
 // AWN-7: a claude-apikey runtime stub the (anthropic, api) binding resolves to.
@@ -64,9 +68,9 @@ result:
 function setupApikeyRuntimeStub(): void {
   const fhome = process.env.FORGE_HOME!;
   const p = join(fhome, "runtimes", "claude-apikey.yml");
-  if (existsSync(p)) return;
-  mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, `
+  if (!existsSync(p)) {
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, `
 name: claude-apikey
 description: test stub
 image: test-image:latest
@@ -84,6 +88,9 @@ container:
 result:
   file: /task/result.json
 `);
+  }
+  // FG-583: publish the flat runtime as a complete generation so dispatch resolves it.
+  publishFlatAsGeneration(fhome);
 }
 
 test("invoke: policy mode stamps the resolution record on the task row + manifest", async () => {
@@ -306,6 +313,8 @@ container:
 result:
   file: /task/result.json
 `);
+  // Re-publish so the generation carries the extended runtime bytes, not the stub's.
+  publishFlatAsGeneration(fhome);
 
   const stub = makeStubExec({ status: "complete" });
   const r = await invoke({
@@ -1054,6 +1063,8 @@ container:
 result:
   file: /task/result.json
 `);
+  // FG-583: publish the flat runtime as a complete generation so dispatch resolves it.
+  publishFlatAsGeneration(fhome);
   const future = Math.floor(Date.now() / 1000) + 3600;
   writeProfile("local-admin", {
     cookies: [],
@@ -1236,6 +1247,8 @@ container:
 result:
   file: /task/result.json
 `);
+  // FG-583: publish the flat runtime as a complete generation so dispatch resolves it.
+  publishFlatAsGeneration(fhome);
   const future = Math.floor(Date.now() / 1000) + 3600;
   writeProfile("auth-applied-profile", {
     cookies: [],
@@ -1352,9 +1365,9 @@ test("invoke: manifest auth block is booleans-only — no token, no hostPath, no
 function setupPiRuntimeStub(): void {
   const fhome = process.env.FORGE_HOME!;
   const p = join(fhome, "runtimes", "pi-stub.yml");
-  if (existsSync(p)) return;
-  mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, `
+  if (!existsSync(p)) {
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, `
 name: pi-stub
 description: test stub
 runtime_kind: pi
@@ -1376,6 +1389,9 @@ container:
 result:
   file: /task/result.json
 `);
+  }
+  // FG-583: publish the flat runtime as a complete generation so dispatch resolves it.
+  publishFlatAsGeneration(fhome);
 }
 
 // Exec that writes pi-style JSONL to stdout but does NOT write result.json,
@@ -1646,9 +1662,9 @@ test("FG-461: a read-only-project crash records NO evidence (a red/audit can't p
 function setupArgvBoundedRuntimeStub(): void {
   const fhome = process.env.FORGE_HOME!;
   const p = join(fhome, "runtimes", "claude-argv-bounded.yml");
-  if (existsSync(p)) return;
-  mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, `
+  if (!existsSync(p)) {
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, `
 name: claude-argv-bounded
 description: test stub mirroring claude-oauth's argv+stdin prompt delivery
 image: test-image:latest
@@ -1667,6 +1683,9 @@ container:
 result:
   file: /task/result.json
 `);
+  }
+  // FG-583: publish the flat runtime as a complete generation so dispatch resolves it.
+  publishFlatAsGeneration(fhome);
 }
 
 test("FG-497: an oversized task (>131072 bytes) dispatches cleanly through the real invoke() path — argv/env stay bounded, full content rides stdin + package.md", async () => {

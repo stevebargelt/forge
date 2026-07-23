@@ -486,7 +486,7 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
   const receiptWarnings: string[] = [];
   const routingReceipt = (() => {
     if (!args.routeKey) return undefined;
-    const policyResolved = resolvePolicyPath(args.projectDir, seedGeneration);
+    const policyResolved = resolvePolicyPath(args.projectDir);
     const explanation = explainRouteFile(policyResolved.path, args.routeKey);
     if (!explanation.ok) {
       const detail = explanation.findings.map((f) => f.message).join("; ");

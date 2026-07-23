@@ -129,7 +129,7 @@ export function startRun(args: StartRunArgs): StartRunResult {
   if (args.routeKey !== undefined) {
     // FG-583: resolve the routeReceipt's policy from the live seed generation, so
     // the recorded route comes from the SAME generation dispatch will consume.
-    const resolved = resolvePolicyPath(args.projectDir, resolveSeedGeneration());
+    const resolved = resolvePolicyPath(args.projectDir);
     const explanation = explainRouteFile(resolved.path, args.routeKey);
     if (explanation.ok) {
       metadata["routeReceipt"] = {
