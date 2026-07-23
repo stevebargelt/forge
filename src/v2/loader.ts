@@ -111,7 +111,23 @@ function assertGenerationWorkflowConsistent(
 ): void {
   const rel = `workflows/${name}.yml`;
   const expected = generation.manifest.files[rel];
-  if (!expected) return; // not a generation-owned workflow (e.g. a project-only symbol)
+  // This runs ONLY for a workflow resolved FROM the generation (callers guard with
+  // !isProject && generation), so a missing manifest entry is not "project-only" —
+  // it is a file present inside the generation dir that the generation's provenance
+  // manifest never published (a torn/tampered generation with an EXTRA file). Refuse
+  // it, exactly as a byte-mismatch is refused: a generation-owned dispatch surface is
+  // a CLOSED set, not merely per-file digest-checked.
+  if (!expected) {
+    throw new Error(
+      `workflow '${name}' resolves inside the published seed generation but is not in its provenance manifest — ` +
+        `refusing to dispatch an unmanifested file.\n` +
+        `  installed:   ${installedPath}\n` +
+        `  generation:  ${generation.root}\n` +
+        `The seed generation is published atomically as one complete unit; a file present under the generation ` +
+        `but absent from its manifest means this generation is torn or was tampered with — a state no release shipped.\n` +
+        `Fix: forge upgrade to republish a complete generation.`,
+    );
+  }
   if (sha256OfBytes(installedPath) === expected) return;
   throw new Error(
     `workflow '${name}' does not match its published seed generation — refusing to dispatch a mixed/incomplete generation.\n` +
@@ -137,7 +153,21 @@ function assertGenerationRuntimeConsistent(
 ): void {
   const rel = `runtimes/${name}.yml`;
   const expected = generation.manifest.files[rel];
-  if (!expected) return; // not a generation-owned runtime (e.g. a project-only symbol)
+  // Runs ONLY for a runtime resolved FROM the generation (callers guard with
+  // !isProject && generation): a missing manifest entry is an unmanifested file
+  // present in the generation dir (torn/tampered EXTRA file), not a project symbol.
+  // Refuse it — the generation-owned runtime surface is a CLOSED set.
+  if (!expected) {
+    throw new Error(
+      `runtime '${name}' resolves inside the published seed generation but is not in its provenance manifest — ` +
+        `refusing to dispatch an unmanifested file.\n` +
+        `  installed:   ${installedPath}\n` +
+        `  generation:  ${generation.root}\n` +
+        `The seed generation is published atomically as one complete unit; a file present under the generation ` +
+        `but absent from its manifest means this generation is torn or was tampered with — a state no release shipped.\n` +
+        `Fix: forge upgrade to republish a complete generation.`,
+    );
+  }
   if (sha256OfBytes(installedPath) === expected) return;
   throw new Error(
     `runtime '${name}' does not match its published seed generation — refusing to dispatch a mixed/incomplete generation.\n` +

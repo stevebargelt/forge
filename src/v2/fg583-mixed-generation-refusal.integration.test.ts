@@ -208,6 +208,24 @@ test("the drift measure NAMES a mixed/incomplete generation rather than re-check
   );
 });
 
+test("integrity is a CLOSED set: a Zod-valid workflow ADDED to a generation but absent from its manifest is REFUSED", () => {
+  // Security regression guard: the per-file digest check must not fall through for a
+  // file that has NO manifest entry. A torn publish (or same-boundary tampering) that
+  // leaves an EXTRA, un-manifested but schema-valid workflow under the generation must
+  // not dispatch — the generation-owned surface is a closed set, not merely per-file
+  // digest-checked.
+  const assetsA = buildAssetRoot(tmp, "A", ["alpha"]);
+  publish({ home, assetsDir: assetsA });
+  const gen = resolveSeedGeneration(home)!;
+  // gamma was never published → not in gen.manifest.files, but the bytes are Zod-valid.
+  writeFileSync(join(gen.root, "workflows", "gamma.yml"), workflowYaml("gamma", "A"));
+  assert.throws(
+    () => loadWorkflow("gamma", { seedGeneration: gen }),
+    /not in its provenance manifest|unmanifested/,
+    "an unmanifested file resolved from the generation is refused, not dispatched",
+  );
+});
+
 test("SOURCE trust: a divergent dev checkout's bytes never become the promoted seed source", () => {
   // Release A is the executing release; a dev checkout with DIFFERENT bytes exists.
   const assetsA = buildAssetRoot(tmp, "A", ["alpha"]);
