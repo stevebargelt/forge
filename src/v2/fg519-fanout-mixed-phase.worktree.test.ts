@@ -23,14 +23,15 @@ import { finalizeOrphanedPrimaries } from "./reconcile.js";
 import { taskDir } from "../util/paths.js";
 import type { Workflow } from "./schema.js";
 import type { Task } from "../types/index.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
 function ensureRuntime(): void {
   const runtimePath = join(process.env.FORGE_HOME!, "runtimes", "claude.yml");
-  if (existsSync(runtimePath)) return;
-  mkdirSync(dirname(runtimePath), { recursive: true });
-  writeFileSync(
-    runtimePath,
-    `name: claude
+  if (!existsSync(runtimePath)) {
+    mkdirSync(dirname(runtimePath), { recursive: true });
+    writeFileSync(
+      runtimePath,
+      `name: claude
 description: test stub runtime
 image: test-image:latest
 models:
@@ -47,7 +48,9 @@ container:
 result:
   file: /task/result.json
 `,
-  );
+    );
+  }
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 type PrefixResult = { prefix: string; result: unknown };

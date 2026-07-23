@@ -52,6 +52,7 @@ import { projectIdentity } from "../v2/project-identity.js";
 import { localTargetFor, readTargetSha } from "../v2/publication-target.js";
 import { setPublisherSeamsForTest } from "../v2/integration-publisher.js";
 import { runNext, type DockerExecFn, type RunNextResult } from "../v2/runNext.js";
+import { publishFlatAsGeneration } from "../v2/seed-generation.testkit.js";
 import type { Workflow } from "../v2/schema.js";
 import { realWaitHarness, LAUNCHES_DIR, type LaunchStatus, type TmuxRunner } from "../v2/launch.js";
 import { DB_PATH } from "../util/paths.js";
@@ -150,6 +151,7 @@ result:
   file: /task/result.json
 `,
   );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 /** The executor loads the workflow from disk on every drive, so the installed YAML is
@@ -177,6 +179,7 @@ steps:
         gate_on_verdict: true
 `,
   );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 const WORKFLOW: Workflow = {

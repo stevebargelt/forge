@@ -72,6 +72,7 @@ import {
   type PersistedWork,
   type Scenario,
 } from "./fg530-harness.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
 // ── the world: worktree mode, a real repo, a container that writes real work ───
 
@@ -472,6 +473,7 @@ for (const cell of KILLS) {
   const sc = SCENARIOS[cell.scenario]!;
   test(`FG-530 worktree [${sc.name}] hook armed @ ${cell.point}`, async (t) => {
     writeWorkflowYaml(sc.workflow.name, sc.yaml);
+    publishFlatAsGeneration(process.env.FORGE_HOME!);
     const projectDir = makeRepo();
     const exec = makeExec(sc.exec);
     const { runId } = startRun({
@@ -527,6 +529,7 @@ for (const cell of KILLS) {
 
 test("FG-530 worktree [positive control]: a task that COMPLETES has its work merged into projectDir and its worktree + branch cleaned up — no-discard is not a licence to leak", async () => {
   writeWorkflowYaml(PLAIN_WF.name, PLAIN_YAML);
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
   const projectDir = makeRepo();
   const exec = makeExec(SCENARIOS["plain"]!.exec);
   const { runId } = startRun({
@@ -571,6 +574,7 @@ test("FG-530 worktree [positive control]: a task that COMPLETES has its work mer
 
 test("FG-530 worktree [harness integrity]: the fixture really does produce a git worktree holding BOTH shapes of agent work — a cell that silently ran without one would pass vacuously", async () => {
   writeWorkflowYaml(PLAIN_WF.name, PLAIN_YAML);
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
   const projectDir = makeRepo();
   const exec = makeExec(SCENARIOS["plain"]!.exec);
   const { runId } = startRun({ workflow: PLAIN_WF, title: "fg530 worktree integrity", inputs: {}, projectDir });
@@ -617,6 +621,7 @@ test("FG-530 worktree [harness integrity]: the fixture really does produce a git
 test("FG-530 worktree [strand integrity]: the orphan-dirty scenario really leaves reconcile a DIRTY dedicated worktree — the evidence its may-persist branch keys on", async () => {
   const sc = SCENARIOS["orphan-dirty-worktree"]!;
   writeWorkflowYaml(sc.workflow.name, sc.yaml);
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
   const projectDir = makeRepo();
   const exec = makeExec(sc.exec);
   const { runId } = startRun({ workflow: sc.workflow, title: "fg530 worktree strand", inputs: {}, projectDir });

@@ -24,6 +24,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { writeTicket } from "../../backlog/structured.js";
+import { publishFlatAsGeneration } from "../../v2/seed-generation.testkit.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const entry = resolve(here, "..", "index.ts");
@@ -60,6 +61,7 @@ beforeEach(() => {
   mkdirSync(join(forgeHome, "workflows"), { recursive: true });
   writeFileSync(join(forgeHome, "workflows", "fg472-feature-test.yml"), WORKFLOW_WITH_AUTHORITATIVE_SHIPPING_REVIEWER);
   writeFileSync(join(forgeHome, "workflows", "fg472-nonfeature-test.yml"), WORKFLOW_WITHOUT_AUTHORITATIVE_SHIPPING_REVIEWER);
+  publishFlatAsGeneration(forgeHome);
 
   writeTicket(projectDir, {
     id: "FG-123",

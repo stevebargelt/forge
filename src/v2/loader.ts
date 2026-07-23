@@ -124,6 +124,32 @@ function assertGenerationWorkflowConsistent(
   );
 }
 
+// FG-583: runtimes ride inside the atomic generation exactly as workflows do, so a
+// runtime resolved from within a published generation is held to the SAME provenance
+// check — its bytes must match the generation's OWN manifest. Without this a
+// changed/replaced/missing runtime inside a purported generation stays Zod-valid and
+// silently alters the dispatched runtime, defeating the complete release-owned
+// workflows+runtimes surface the generation is supposed to guarantee.
+function assertGenerationRuntimeConsistent(
+  name: string,
+  installedPath: string,
+  generation: SeedGeneration,
+): void {
+  const rel = `runtimes/${name}.yml`;
+  const expected = generation.manifest.files[rel];
+  if (!expected) return; // not a generation-owned runtime (e.g. a project-only symbol)
+  if (sha256OfBytes(installedPath) === expected) return;
+  throw new Error(
+    `runtime '${name}' does not match its published seed generation — refusing to dispatch a mixed/incomplete generation.\n` +
+      `  installed:   ${installedPath}\n` +
+      `  generation:  ${generation.root}\n` +
+      `The seed generation is published atomically as one complete unit, so a runtime whose bytes differ ` +
+      `from the generation's own manifest means this generation is torn or mid-publish — a state no release ` +
+      `shipped. Forge refuses rather than dispatch under it.\n` +
+      `Fix: forge upgrade to republish a complete generation.`,
+  );
+}
+
 // FG-579 note: the drifted-HOST-workflow refusal that used to live here (a
 // byte-compare of the FLAT $FORGE_HOME/workflows against the release baseline) is
 // subsumed by FG-583's no-flat-dispatch contract. The flat layout is never a dispatch
@@ -221,6 +247,11 @@ export function loadRuntime(name: string, ctx: LoadContext = {}): Runtime {
   const result = RuntimeSchema.safeParse(parsed);
   if (!result.success) {
     throw new Error(formatZodError(`runtime '${resolvedName}' (${path})`, result.error));
+  }
+  // A project override is intentional operator specialization — never refused. A
+  // resolved generation is measured against its OWN provenance manifest.
+  if (!isProject && generation) {
+    assertGenerationRuntimeConsistent(resolvedName, path, generation);
   }
   return result.data;
 }
@@ -397,6 +428,9 @@ export function loadRuntimeWithSource(
   const result = RuntimeSchema.safeParse(parsed);
   if (!result.success) {
     throw new Error(formatZodError(`runtime '${resolvedName}' (${path})`, result.error));
+  }
+  if (!isProject && generation) {
+    assertGenerationRuntimeConsistent(resolvedName, path, generation);
   }
   return { ...result.data, source: isProject ? "project" : "host", path };
 }

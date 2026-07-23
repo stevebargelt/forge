@@ -32,6 +32,7 @@ import { invoke } from "./invoke.js";
 import { writeProfile } from "../util/auth-profiles.js";
 import { nowIso, newTaskId, newRunId } from "../util/ids.js";
 import type { Task } from "../types/index.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
 let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
@@ -57,9 +58,9 @@ afterEach(() => {
 function ensureClaudeRuntime(): void {
   const fhome = process.env.FORGE_HOME!;
   const runtimePath = join(fhome, "runtimes", "claude.yml");
-  if (existsSync(runtimePath)) return;
-  mkdirSync(dirname(runtimePath), { recursive: true });
-  writeFileSync(runtimePath, `name: claude
+  if (!existsSync(runtimePath)) {
+    mkdirSync(dirname(runtimePath), { recursive: true });
+    writeFileSync(runtimePath, `name: claude
 description: test stub runtime
 image: test-image:latest
 models:
@@ -76,6 +77,8 @@ container:
 result:
   file: /task/result.json
 `);
+  }
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 // Write a minimal one-step human-gate workflow YAML for gate() tests.
@@ -83,9 +86,9 @@ result:
 function ensureGatedWorkflow(name: string): void {
   const fhome = process.env.FORGE_HOME!;
   const wfPath = join(fhome, "workflows", `${name}.yml`);
-  if (existsSync(wfPath)) return;
-  mkdirSync(dirname(wfPath), { recursive: true });
-  writeFileSync(wfPath, `name: ${name}
+  if (!existsSync(wfPath)) {
+    mkdirSync(dirname(wfPath), { recursive: true });
+    writeFileSync(wfPath, `name: ${name}
 description: gate integration test workflow
 inputs: []
 steps:
@@ -97,6 +100,8 @@ steps:
     runtime: claude
     reds: []
 `);
+  }
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 // Seed a run pointing to the given workflow name.

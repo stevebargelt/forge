@@ -31,6 +31,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { runNext, type DockerExecFn } from "./runNext.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { invoke } from "./invoke.js";
 import { startRun } from "./startRun.js";
 import { tasksForRun, getTask } from "../store/tasks.js";
@@ -115,9 +116,9 @@ function makeClaudeNoResultExec(): DockerExecFn {
 
 function ensurePiRuntime(): void {
   const p = join(process.env.FORGE_HOME!, "runtimes", "pi-stub.yml");
-  if (existsSync(p)) return;
-  mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, `name: pi-stub
+  if (!existsSync(p)) {
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, `name: pi-stub
 description: test stub pi runtime
 runtime_kind: pi
 log_format: pi-jsonl
@@ -138,13 +139,16 @@ container:
 result:
   file: /task/result.json
 `);
+  }
+  // FG-583: publish the flat runtime as a complete generation so dispatch resolves it.
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 function ensureClaudeRuntime(): void {
   const p = join(process.env.FORGE_HOME!, "runtimes", "claude.yml");
-  if (existsSync(p)) return;
-  mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, `name: claude
+  if (!existsSync(p)) {
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, `name: claude
 description: test stub claude runtime
 image: test-image:latest
 models:
@@ -161,6 +165,9 @@ container:
 result:
   file: /task/result.json
 `);
+  }
+  // FG-583: publish the flat runtime as a complete generation so dispatch resolves it.
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 // ---------------------------------------------------------------------------

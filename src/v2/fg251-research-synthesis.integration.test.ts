@@ -36,6 +36,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadWorkflow } from "./loader.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { requiresStructuredResult } from "./role-capabilities.js";
 import { runNext } from "./runNext.js";
 import { startRun } from "./startRun.js";
@@ -76,9 +77,9 @@ function makePiNoResultExec(jsonl: string, exitCode = 0) {
 
 function ensurePiStubRuntime(): void {
   const p = join(process.env.FORGE_HOME!, "runtimes", "pi-stub.yml");
-  if (existsSync(p)) return;
-  mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, `name: pi-stub
+  if (!existsSync(p)) {
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, `name: pi-stub
 description: test stub pi runtime for FG-251
 runtime_kind: pi
 log_format: pi-jsonl
@@ -99,6 +100,9 @@ container:
 result:
   file: /task/result.json
 `);
+  }
+  // FG-583: publish the flat runtime as a complete generation so dispatch resolves it.
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 const FG251_POLICY = `on_unavailable: fail
@@ -172,6 +176,7 @@ test("FG-251: research-synthesis seed workflow loads cleanly via loadWorkflow", 
   mkdirSync(wfDir, { recursive: true });
   const src = readFileSync(seedWorkflowPath, "utf8");
   writeFileSync(join(wfDir, "research-synthesis.yml"), src);
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 
   const wf = loadWorkflow("research-synthesis");
   assert.equal(wf.name, "research-synthesis");
@@ -186,6 +191,7 @@ test("FG-251: research-synthesis has exactly 4 steps in the expected order (docs
   const wfDir = join(process.env.FORGE_HOME!, "workflows");
   mkdirSync(wfDir, { recursive: true });
   writeFileSync(join(wfDir, "research-synthesis.yml"), readFileSync(seedWorkflowPath, "utf8"));
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 
   const wf = loadWorkflow("research-synthesis");
   const ids = wf.steps.map((s) => s.id);
@@ -197,6 +203,7 @@ test("FG-251: research-primary depends_on [frame] only — no cross-dependency w
   const wfDir = join(process.env.FORGE_HOME!, "workflows");
   mkdirSync(wfDir, { recursive: true });
   writeFileSync(join(wfDir, "research-synthesis.yml"), readFileSync(seedWorkflowPath, "utf8"));
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 
   const wf = loadWorkflow("research-synthesis");
   const primary = wf.steps.find((s) => s.id === "research-primary")!;
@@ -209,6 +216,7 @@ test("FG-251: research-skeptic depends_on [frame] only — no cross-dependency w
   const wfDir = join(process.env.FORGE_HOME!, "workflows");
   mkdirSync(wfDir, { recursive: true });
   writeFileSync(join(wfDir, "research-synthesis.yml"), readFileSync(seedWorkflowPath, "utf8"));
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 
   const wf = loadWorkflow("research-synthesis");
   const skeptic = wf.steps.find((s) => s.id === "research-skeptic")!;
@@ -221,6 +229,7 @@ test("FG-251: synthesize depends_on frame, research-primary, and research-skepti
   const wfDir = join(process.env.FORGE_HOME!, "workflows");
   mkdirSync(wfDir, { recursive: true });
   writeFileSync(join(wfDir, "research-synthesis.yml"), readFileSync(seedWorkflowPath, "utf8"));
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 
   const wf = loadWorkflow("research-synthesis");
   const synth = wf.steps.find((s) => s.id === "synthesize")!;
@@ -238,6 +247,7 @@ test("FG-251: research-primary has fanout from frame with array_key: lanes", () 
   const wfDir = join(process.env.FORGE_HOME!, "workflows");
   mkdirSync(wfDir, { recursive: true });
   writeFileSync(join(wfDir, "research-synthesis.yml"), readFileSync(seedWorkflowPath, "utf8"));
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 
   const wf = loadWorkflow("research-synthesis");
   const primary = wf.steps.find((s) => s.id === "research-primary")!;
@@ -250,6 +260,7 @@ test("FG-251: research-skeptic has fanout from frame with array_key: lanes", () 
   const wfDir = join(process.env.FORGE_HOME!, "workflows");
   mkdirSync(wfDir, { recursive: true });
   writeFileSync(join(wfDir, "research-synthesis.yml"), readFileSync(seedWorkflowPath, "utf8"));
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 
   const wf = loadWorkflow("research-synthesis");
   const skeptic = wf.steps.find((s) => s.id === "research-skeptic")!;
@@ -266,6 +277,7 @@ test("FG-251: gate assignments match design intent (human on frame + synthesize,
   const wfDir = join(process.env.FORGE_HOME!, "workflows");
   mkdirSync(wfDir, { recursive: true });
   writeFileSync(join(wfDir, "research-synthesis.yml"), readFileSync(seedWorkflowPath, "utf8"));
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 
   const wf = loadWorkflow("research-synthesis");
   const gateMap = Object.fromEntries(wf.steps.map((s) => [s.id, s.gate]));

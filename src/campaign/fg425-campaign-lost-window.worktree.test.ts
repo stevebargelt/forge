@@ -50,6 +50,7 @@ import { projectIdentity } from "../v2/project-identity.js";
 import { localTargetFor, readTargetSha } from "../v2/publication-target.js";
 import { MUTEX_TTL_MS, setPublisherSeamsForTest } from "../v2/integration-publisher.js";
 import { runNext, type DockerExecFn, type RunNextResult } from "../v2/runNext.js";
+import { publishFlatAsGeneration } from "../v2/seed-generation.testkit.js";
 import type { Workflow } from "../v2/schema.js";
 import type { InvokeArgs, InvokeResult } from "../v2/invoke.js";
 import { planCampaign, type ItemModeOverride } from "./planner.js";
@@ -139,6 +140,7 @@ result:
   file: /task/result.json
 `,
   );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 /** The executor loads the workflow from disk on every drive AND every resume, so the
@@ -167,6 +169,7 @@ steps:
         gate_on_verdict: true
 `,
   );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 const WORKFLOW: Workflow = {

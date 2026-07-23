@@ -822,12 +822,17 @@ test("FG-581 (downstream fail-closed): after a failed post-promotion compile, a 
     }
     writeFileSync(ROUTING_POLICY_PATH, VALID_STALE_POLICY);
 
-    // PRE-condition: the stale policy is authoritative to the live consumer — it
-    // returns the stale routes. This is what makes the post-assertion a claim about
-    // NON-consumption rather than about an already-absent file.
+    // FG-583 PRE-condition (no-flat-fallback): a VALID flat routing-policy.yml is on
+    // disk, but NO complete seed generation is published — so the routing consumer
+    // ALREADY fails closed. It must NOT read the mutable flat file (that policy set may
+    // belong to no published generation). This is the stronger contract that
+    // supersedes the old "flat is authoritative" premise: the stale policy is
+    // structurally non-consumable, and the upgrade below still neutralizes it on disk.
     const before = governanceView({});
-    assert.equal(before.ok, true, "precondition: the stale policy is loadable and authoritative to the routing consumer");
-    if (before.ok) assert.ok(before.routes.stale_route, "…and the consumer really is routing from the stale rules");
+    assert.equal(before.ok, false, "precondition: with no generation published, routing fails closed and does NOT read the flat host policy");
+    if (!before.ok) {
+      assert.ok(before.findings.some((f) => f.code === "policy_not_found"), "…fail-closed with policy_not_found, never routing from the flat rules");
+    }
 
     // The promoted runtime is handed a host RACI it cannot compile.
     writeFileSync(RACI_PATH, "not a RACI document at all\n");
@@ -904,13 +909,17 @@ test("FG-581 (release-mode acceptance): a promoted RELEASE that cannot compile t
     // The promoted RELEASE runtime is handed a host RACI it cannot compile.
     writeFileSync(RACI_PATH, "not a RACI document at all\n");
 
-    // Precondition: the stale policy is authoritative to the live routing consumer
-    // — it returns the stale routes. This is what makes the post-assertion a claim
-    // about non-consumption rather than about an already-absent file.
+    // FG-583 precondition (no-flat-fallback): the flat routing-policy.yml is a VALID,
+    // loadable file on disk, but NO complete seed generation is published — so the
+    // routing consumer ALREADY fails closed and does NOT route from the flat file. The
+    // post-assertion below is then about the upgrade NEUTRALIZING that stale file on
+    // disk (defense in depth), on top of routing being structurally fail-closed.
     const before = governanceView({});
-    assert.equal(before.ok, true, "precondition: the previous runtime's policy is loadable and authoritative to the routing consumer");
-    if (before.ok) assert.ok(before.routes.stale_route, "…and the consumer really is routing from the stale rules");
-    assert.equal(existsSync(ROUTING_POLICY_PATH), true, "precondition: the stale routing-policy.yml exists at its authoritative path");
+    assert.equal(before.ok, false, "precondition: with no generation published, routing fails closed and does NOT read the previous runtime's flat policy");
+    if (!before.ok) {
+      assert.ok(before.findings.some((f) => f.code === "policy_not_found"), "…fail-closed with policy_not_found, never routing from the stale flat rules");
+    }
+    assert.equal(existsSync(ROUTING_POLICY_PATH), true, "precondition: the stale routing-policy.yml exists on disk (for the upgrade to neutralize)");
 
     // Drive the REAL upgrade path as a PROMOTED RELEASE (mode: "release"). Steps
     // 1-2 are skipped so the release-mode advancement refusal is NOT on the

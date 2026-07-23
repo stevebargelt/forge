@@ -43,6 +43,7 @@ import { taskDispatchKind } from "./run-kind.js";
 import { isOnRejectRecoveryTask } from "./ready-queue.js";
 import type { Workflow } from "./schema.js";
 import type { Run, Task } from "../types/index.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
 let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
@@ -53,9 +54,9 @@ const WORKTREE_ENV = ["FORGE_WORKTREES", "FORGE_NO_WORKTREES"] as const;
 
 function ensureRuntime(): void {
   const runtimePath = join(process.env.FORGE_HOME!, "runtimes", "claude.yml");
-  if (existsSync(runtimePath)) return;
-  mkdirSync(dirname(runtimePath), { recursive: true });
-  writeFileSync(
+  if (!existsSync(runtimePath)) {
+    mkdirSync(dirname(runtimePath), { recursive: true });
+    writeFileSync(
     runtimePath,
     `name: claude
 description: fg512 gaps test stub
@@ -74,7 +75,9 @@ container:
 result:
   file: /task/result.json
 `,
-  );
+    );
+  }
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 function projectDir(): string {
@@ -335,6 +338,7 @@ steps:
     on_reject: investigate
 `,
   );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
   const run = activeRun("run-fg512g-onreject", wfName, dir);
   const audit: Task = {
     id: "task-audit-1",
@@ -378,6 +382,7 @@ steps:
     gate: human
 `,
   );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
   const run = activeRun("run-fg512g-reqchanges", wfName, dir);
   const primary: Task = {
     id: "task-build-1",
@@ -426,6 +431,7 @@ steps:
     gate: auto
 `,
   );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
   const wf: Workflow = {
     name: wfName,
     description: "single build step",
@@ -467,6 +473,7 @@ steps:
     gate: auto
 `,
   );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
   const wf: Workflow = {
     name: wfName,
     description: "owns a step id 'task'",

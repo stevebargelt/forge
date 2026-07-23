@@ -18,7 +18,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadWorkflow, loadWorkflowWithSource } from "./loader.js";
+import { loadWorkflow, loadWorkflowWithSource, loadRuntime } from "./loader.js";
 import { publishTestGeneration } from "./seed-generation.testkit.js";
 import { resolveSeedGeneration } from "./seed-generation.js";
 
@@ -26,6 +26,18 @@ import { resolveSeedGeneration } from "./seed-generation.js";
  *  cleanly can still be byte-distinct — the drift is invisible to the schema. */
 function validWorkflow(name: string, marker: string): string {
   return `name: ${name}\ndescription: ${marker}\ninputs: []\nsteps:\n  - { id: build, agent: engineer, gate: auto }\n`;
+}
+
+/** A schema-valid runtime body carrying `marker` in `description`, so two runtimes that
+ *  both load cleanly can still be byte-distinct — the drift is invisible to the schema. */
+function validRuntime(name: string, marker: string): string {
+  return (
+    `name: ${name}\ndescription: ${marker}\nimage: agent-dev-worker:latest\n` +
+    `models:\n  default: claude-sonnet-4-6\nauth:\n  mode: env-snapshot\n` +
+    `mounts:\n  - { host: "\${TASK_DIR}", container: /task }\n` +
+    `invocation:\n  command: claude\n  args: ["--model", "{{MODEL}}"]\n` +
+    `container:\n  name: forge-{{TASK_ID}}\nresult:\n  file: /task/result.json\n`
+  );
 }
 
 let originalForgeHome: string | undefined;
@@ -83,6 +95,36 @@ test("FG-579/FG-583: drift WITHIN a published generation is refused by the gener
   assert.ok(err instanceof Error, "a generation-internal drift must be refused");
   const msg = (err as Error).message;
   assert.match(msg, /does not match its published seed generation|mixed\/incomplete/, "the refusal names the generation mismatch");
+  assert.match(msg, /forge upgrade/, "the refusal names the remedy");
+});
+
+test("FG-583: a tampered RUNTIME within a published generation is refused by the generation's own manifest", () => {
+  // Runtimes ride inside the atomic generation exactly as workflows do. Publish a
+  // complete generation carrying a runtime, then hand-edit the file INSIDE the
+  // generation dir so its bytes no longer match the manifest — a changed/replaced but
+  // still-Zod-valid runtime that would otherwise silently alter the dispatched runtime.
+  // The consume path refuses it, mirroring the workflow drift/consistency check.
+  const gen = publishTestGeneration(homeDir, {
+    runtimes: { "claude-bedrock": validRuntime("claude-bedrock", "release bytes") },
+  });
+  writeFileSync(
+    join(gen.root, "runtimes", "claude-bedrock.yml"),
+    validRuntime("claude-bedrock", "TAMPERED runtime inside the generation"),
+  );
+
+  let err: unknown;
+  try {
+    loadRuntime("claude-bedrock", { seedGeneration: gen });
+  } catch (e) {
+    err = e;
+  }
+  assert.ok(err instanceof Error, "a generation-internal runtime drift must be refused");
+  const msg = (err as Error).message;
+  assert.match(
+    msg,
+    /does not match its published seed generation|mixed\/incomplete/,
+    "the refusal names the generation mismatch",
+  );
   assert.match(msg, /forge upgrade/, "the refusal names the remedy");
 });
 

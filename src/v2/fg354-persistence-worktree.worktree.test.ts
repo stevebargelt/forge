@@ -13,13 +13,14 @@ import { dirname, join, basename } from "node:path";
 import { invoke, type DockerExecFn } from "./invoke.js";
 import { setTaskWorktreePath } from "../store/tasks.js";
 import { failureKindForTask } from "./failure-kind.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
 function setupRuntimeStub(): void {
   const fhome = process.env.FORGE_HOME!;
   const runtimePath = join(fhome, "runtimes", "claude.yml");
-  if (existsSync(runtimePath)) return;
-  mkdirSync(dirname(runtimePath), { recursive: true });
-  writeFileSync(runtimePath, `name: claude
+  if (!existsSync(runtimePath)) {
+    mkdirSync(dirname(runtimePath), { recursive: true });
+    writeFileSync(runtimePath, `name: claude
 description: test stub runtime
 image: test-image:latest
 models:
@@ -36,6 +37,8 @@ container:
 result:
   file: /task/result.json
 `);
+  }
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 // Extract the task ID from a stdoutPath: RUNS_DIR/<runId>/<taskId>/container.stdout.log

@@ -22,6 +22,7 @@ import { makeInMemoryDb, setDbForTest } from "../../store/db.js";
 import { insertHostVerification, REQUIRED_CI_CHECK_CONTEXT } from "../../store/host-verifications.js";
 import { eventsForRun } from "../../store/events.js";
 import { listRuns } from "../../store/runs.js";
+import { publishFlatAsGeneration } from "../../v2/seed-generation.testkit.js";
 
 function gitExec(args: string[], cwd: string): string {
   return execFileSync("git", args, {
@@ -855,9 +856,9 @@ test("FG-487: an exception escaping the loop finalizes the eager run — no perm
 function setupArgvBoundedReviewRuntimeStub(): void {
   const fhome = process.env.FORGE_HOME!;
   const p = join(fhome, "runtimes", "claude-argv-bounded-rl.yml");
-  if (existsSync(p)) return;
-  mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, `
+  if (!existsSync(p)) {
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, `
 name: claude-argv-bounded-rl
 description: test stub mirroring claude-oauth's argv+stdin prompt delivery (review-loop FG-497 tests)
 image: test-image:latest
@@ -876,6 +877,8 @@ container:
 result:
   file: /task/result.json
 `);
+  }
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 // Wraps the REAL invoke() (not a fake) so buildReviewLoopDeps's `review` dep
@@ -2858,9 +2861,9 @@ test("FG-539 AC7: `forge review-loop FG-539 --dry-run` no longer emits 'no commi
 
 function ensureFg540CodexRuntime(): void {
   const p = join(process.env.FORGE_HOME!, "runtimes", "codex-e2e-stub.yml");
-  if (existsSync(p)) return;
-  mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, `name: codex-e2e-stub
+  if (!existsSync(p)) {
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, `name: codex-e2e-stub
 description: test stub codex runtime (FG-540 E2E)
 log_format: codex-jsonl
 image: test-image:latest
@@ -2878,6 +2881,8 @@ container:
 result:
   file: /task/result.json
 `);
+  }
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 // Sanitized incident shape: clean exit 0, turn envelope, terminal JSON

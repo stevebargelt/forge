@@ -39,6 +39,7 @@ import { integrationWorktreeDir, taskDir, PUBLICATIONS_DIR } from "../util/paths
 import { allPublicationAttempts } from "../store/publications.js";
 import { gate } from "./gate.js";
 import { integrationBranchName } from "./worktree-lifecycle.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
 // ─── Workflow fixtures ────────────────────────────────────────────────────────
 
@@ -301,13 +302,14 @@ result:
   file: /task/result.json
 `,
   );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 // Write the FANOUT_WITH_RED_WORKFLOW YAML so gate() can load it by name.
 function ensureFanoutRedWorkflowYaml(): void {
   const forgeHome = process.env.FORGE_HOME!;
   const wfPath = join(forgeHome, "workflows", "fg353-fanout-red-test.yml");
-  if (existsSync(wfPath)) return;
+  if (!existsSync(wfPath)) {
   mkdirSync(dirname(wfPath), { recursive: true });
   writeFileSync(
     wfPath,
@@ -341,13 +343,15 @@ steps:
       failure_mode: continue
 `,
   );
+  }
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 // Write the FANOUT_VERDICT_DOWNSTREAM_WORKFLOW YAML so gate() can load it by name.
 function ensureFanoutVerdictDownstreamWorkflowYaml(): void {
   const forgeHome = process.env.FORGE_HOME!;
   const wfPath = join(forgeHome, "workflows", "fg353-fanout-verdict-downstream-test.yml");
-  if (existsSync(wfPath)) return;
+  if (!existsSync(wfPath)) {
   mkdirSync(dirname(wfPath), { recursive: true });
   writeFileSync(
     wfPath,
@@ -388,13 +392,15 @@ steps:
     reds: []
 `,
   );
+  }
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 // Write the FANOUT_HUMAN_DOWNSTREAM_WORKFLOW YAML so gate() can load it by name.
 function ensureFanoutHumanDownstreamWorkflowYaml(): void {
   const forgeHome = process.env.FORGE_HOME!;
   const wfPath = join(forgeHome, "workflows", "fg353-fanout-human-downstream-test.yml");
-  if (existsSync(wfPath)) return;
+  if (!existsSync(wfPath)) {
   mkdirSync(dirname(wfPath), { recursive: true });
   writeFileSync(
     wfPath,
@@ -435,6 +441,8 @@ steps:
     reds: []
 `,
   );
+  }
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 /** Extract the host-side path from -v <host>:/project:<mode> docker args. */

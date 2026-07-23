@@ -42,6 +42,7 @@ import type { ItemModeOverride } from "./planner.js";
 import { startCampaign, resumeCampaign, driveRemainingItems, setCampaignNotifyEmitterForTest } from "./executor.js";
 import type { EmitMilestoneArgs, EmitMilestoneResult } from "../notify/milestone.js";
 import { runNext } from "../v2/runNext.js";
+import { publishFlatAsGeneration } from "../v2/seed-generation.testkit.js";
 import type { DockerExecFn, RunNextResult } from "../v2/runNext.js";
 import type { Workflow } from "../v2/schema.js";
 import type { InvokeArgs, InvokeResult } from "../v2/invoke.js";
@@ -106,6 +107,12 @@ steps:
     reds: []
 `,
   );
+  // FG-583: publish the flat workflow + runtime as one complete seed generation —
+  // there is no flat dispatch fallback, so the drive-error/gate park shapes refuse
+  // dispatch without a published generation. Called after ensureRuntime in
+  // beforeEach, so this captures both. (The workflow-YAML-missing test injects a
+  // throwing loadWorkflowFn and still fails closed as asserted.)
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 const stubExec: DockerExecFn = async ({ stdoutPath, stderrPath }) => {

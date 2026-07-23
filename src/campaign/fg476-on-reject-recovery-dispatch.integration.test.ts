@@ -46,6 +46,7 @@ import { getRun } from "../store/runs.js";
 import { startRun } from "../v2/startRun.js";
 import { gate } from "../v2/gate.js";
 import { runNext } from "../v2/runNext.js";
+import { publishFlatAsGeneration } from "../v2/seed-generation.testkit.js";
 import type { DockerExecFn } from "../v2/runNext.js";
 import type { Workflow } from "../v2/schema.js";
 
@@ -148,6 +149,10 @@ steps:
         gate_on_verdict: false
 `,
   );
+  // FG-583: publish the flat workflow + runtime as one complete seed generation —
+  // there is no flat dispatch fallback, so gate()/runNext() dispatch refuses without
+  // a published generation. Called after ensureRuntime in beforeEach, so this captures both.
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 // In-memory mirror of the YAML above — passed directly to startRun/runNext

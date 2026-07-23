@@ -35,6 +35,7 @@ import { startRun } from "./startRun.js";
 import { runNext, type DockerExecFn } from "./runNext.js";
 import type { Workflow } from "./schema.js";
 import { WORKTREES_DIR } from "../util/paths.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
 // ─── Workflow fixture ─────────────────────────────────────────────────────────
 //
@@ -160,6 +161,7 @@ result:
   file: /task/result.json
 `
   );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 type ExecCapture = { called: boolean; args: string[] };

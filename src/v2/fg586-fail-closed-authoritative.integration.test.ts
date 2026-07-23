@@ -31,6 +31,7 @@ import { startRun } from "./startRun.js";
 import { runNext } from "./runNext.js";
 import type { DockerExecFn } from "./runNext.js";
 import type { Workflow } from "./schema.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
 // ─── Workflow fixture: a NON-shipping-reviewer authoritative red ───────────────
 
@@ -147,6 +148,7 @@ result:
   file: /task/result.json
 `,
   );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 function ensureWorkflow(name: string, authority: "authoritative" | "specialist"): void {
@@ -171,6 +173,7 @@ steps:
         gate_on_verdict: true
 `,
   );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 function taskIdFromDockerArgs(args: string[]): string {

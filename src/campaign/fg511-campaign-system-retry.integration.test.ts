@@ -50,6 +50,7 @@ import { planCampaign } from "./planner.js";
 import type { ItemModeOverride } from "./planner.js";
 import { startCampaign, resumeCampaign, retryCampaignItem } from "./executor.js";
 import { runNext } from "../v2/runNext.js";
+import { publishFlatAsGeneration } from "../v2/seed-generation.testkit.js";
 import type { DockerExecFn, RunNextResult } from "../v2/runNext.js";
 import type { Workflow } from "../v2/schema.js";
 import type { InvokeArgs, InvokeResult } from "../v2/invoke.js";
@@ -115,6 +116,11 @@ steps:
     reds: []
 `,
   );
+  // FG-583: publish the flat workflow + runtime as one complete seed generation —
+  // there is no flat dispatch fallback, so the positive test's startCampaign/resume
+  // dispatch refuses without a published generation. Called after ensureRuntime in
+  // beforeEach, so this captures both.
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 const stubExec: DockerExecFn = async ({ stdoutPath, stderrPath }) => {

@@ -36,6 +36,7 @@ import { runNext, type DockerExecFn } from "./runNext.js";
 import { failureKindForTask } from "./failure-kind.js";
 import { DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE, lockfileHash } from "./dependency-provisioning.js";
 import type { Workflow } from "./schema.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
 const DISPATCH_TEST_WORKFLOW: Workflow = {
   name: "fg376-dispatch-test",
@@ -171,6 +172,7 @@ result:
   file: /task/result.json
 `
   );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 // The provisioner is a DISTINCT, identifiable container: buildProvisionerDockerArgs

@@ -34,6 +34,7 @@ import { startRun } from "./startRun.js";
 import { runNext, type DockerExecFn } from "./runNext.js";
 import type { Workflow } from "./schema.js";
 import { failureKindForTask } from "./failure-kind.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
 // ─── Workflow fixture ─────────────────────────────────────────────────────────
 
@@ -153,6 +154,7 @@ result:
   file: /task/result.json
 `
   );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 /** Extract the host-side path from a -v <host>:<container>:<mode> docker arg. */

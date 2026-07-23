@@ -27,6 +27,7 @@ import { makeInMemoryDb, setDbForTest, applyMigrations } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
 import { insertTask, getTask } from "../store/tasks.js";
 import { loadWorkflow } from "./loader.js";
+import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import type { Run, Task } from "../types/index.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -96,6 +97,8 @@ function installResearchSynthesisWorkflow(): void {
   const wfDir = join(process.env.FORGE_HOME!, "workflows");
   mkdirSync(wfDir, { recursive: true });
   writeFileSync(join(wfDir, "research-synthesis.yml"), readFileSync(seedWorkflowPath, "utf8"));
+  // FG-583: publish the flat workflow as a complete generation so loadWorkflow resolves it.
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 // ---------------------------------------------------------------------------

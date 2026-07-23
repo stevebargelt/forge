@@ -56,6 +56,7 @@ import type { ItemModeOverride } from "./planner.js";
 import { startCampaign, resumeCampaign } from "./executor.js";
 import { gate } from "../v2/gate.js";
 import { runNext } from "../v2/runNext.js";
+import { publishFlatAsGeneration } from "../v2/seed-generation.testkit.js";
 import type { DockerExecFn, RunNextResult } from "../v2/runNext.js";
 import type { Workflow } from "../v2/schema.js";
 import type { InvokeArgs, InvokeResult } from "../v2/invoke.js";
@@ -117,6 +118,11 @@ steps:
     reds: []
 `,
   );
+  // FG-583: republish the flat workflow + runtime as one complete seed generation
+  // after every (re)write — there is no flat dispatch fallback. driveWorkflowItem
+  // re-resolves the live seed pointer each drive, so the mid-test writeWorkflow("auto")
+  // rewrite takes effect on the next resume because this republish follows it.
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
 beforeEach(() => {

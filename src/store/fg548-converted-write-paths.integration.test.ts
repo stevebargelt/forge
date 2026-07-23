@@ -50,6 +50,7 @@ import { setCrashHookForTest } from "../v2/crash-points.js";
 import { DB_PATH } from "../util/paths.js";
 import { nowIso } from "../util/ids.js";
 import type { Task } from "../types/index.js";
+import { publishFlatAsGeneration } from "../v2/seed-generation.testkit.js";
 
 const STORE_DIR = dirname(fileURLToPath(import.meta.url));
 const SRC = join(STORE_DIR, "..");
@@ -116,6 +117,7 @@ function ensureGateWorkflow(): void {
     join(dir, `${WORKFLOW}.yml`),
     `name: ${WORKFLOW}\ndescription: FG-548 contention fixture\ninputs: []\nsteps:\n  - id: verify\n    agent: engineer\n    gate: human\n`,
   );
+  publishFlatAsGeneration(process.env["FORGE_HOME"]!);
 }
 
 function mkTask(id: string, runId: string, status: Task["status"]): Task {
