@@ -26,6 +26,8 @@ import {
   publishSeedGeneration,
   resolveSeedGeneration,
   inspectSeedInstall,
+  beginSeedPublish,
+  completeSeedPublish,
 } from "./seed-generation.js";
 import { loadWorkflow } from "./loader.js";
 
@@ -284,6 +286,57 @@ test("df02eb: a fresh/interrupted INITIAL install exposes NO torn flat workflow 
   // rather than dispatching a half-written flat surface, which is exactly what the
   // removed flat `cp` loop could otherwise leave behind.
   assert.throws(() => loadWorkflow("alpha"), /not found/);
+});
+
+test("finding 1: a failed/interrupted re-publish is a NAMED incomplete state even though the prior generation pointer still resolves healthy", () => {
+  // Publish a complete generation A — the install is healthy.
+  const assetsA = buildAssetRoot(tmp, "A", ["alpha"]);
+  publish({ home, assetsDir: assetsA });
+  const genA = resolveSeedGeneration(home);
+  assert.ok(genA);
+  assert.equal(inspectSeedInstall(home).kind, "healthy");
+
+  // The upgrade command's marker lifecycle: a re-publish that BEGAN and then
+  // threw/was interrupted leaves the marker behind (the catch in upgrade.ts does
+  // NOT clear it). The prior pointer still resolves to complete A...
+  beginSeedPublish("forge upgrade did not finish publishing host seeds", home);
+  const stillA = resolveSeedGeneration(home);
+  assert.ok(stillA);
+  assert.equal(stillA.root, genA.root, "prior generation pointer is untouched");
+
+  // ...but inspectSeedInstall now NAMES the incomplete state, carrying the prior
+  // generation root, so doctor + dispatch consumers refuse and advise repair rather
+  // than reading the stale pointer as healthy.
+  const state = inspectSeedInstall(home);
+  assert.equal(state.kind, "incomplete");
+  if (state.kind === "incomplete") {
+    assert.equal(state.generation, genA.root);
+    assert.match(state.reason, /did not finish|interrupted or failed|forge upgrade/);
+  }
+
+  // A subsequent successful publish clears the marker → healthy again.
+  completeSeedPublish(home);
+  assert.equal(inspectSeedInstall(home).kind, "healthy");
+});
+
+test("finding 2: an interrupted FIRST install (marker set, no pointer) is incomplete — distinct from an untouched pre-migration home", () => {
+  // No generation published yet. An untouched pre-migration home carries no marker →
+  // no-generation (healthy); the loader's flat fallback is legitimate there.
+  assert.equal(resolveSeedGeneration(home), null);
+  assert.equal(inspectSeedInstall(home).kind, "no-generation");
+
+  // An interrupted first upgrade mutated the flat workflows/runtimes but crashed
+  // before the atomic generation committed. The marker written before install-seeds.sh
+  // distinguishes that from the untouched home: inspectSeedInstall reports incomplete
+  // (generation null), so dispatch refuses instead of falling back to the mixed flat
+  // surface.
+  beginSeedPublish("forge upgrade did not finish publishing host seeds", home);
+  const state = inspectSeedInstall(home);
+  assert.equal(state.kind, "incomplete");
+  if (state.kind === "incomplete") assert.equal(state.generation, null);
+
+  completeSeedPublish(home);
+  assert.equal(inspectSeedInstall(home).kind, "no-generation");
 });
 
 test("inspectSeedInstall NAMES a torn generation (pointer → dir with no manifest) as incomplete/repairable", () => {

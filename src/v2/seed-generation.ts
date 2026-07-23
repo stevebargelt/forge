@@ -109,6 +109,48 @@ export type SeedInstallState =
   | { kind: "no-generation" }
   | { kind: "incomplete"; reason: string; generation: string | null };
 
+/** A durable marker the UPGRADE command writes BEFORE it begins mutating the host
+ *  seed surface — the flat install-seeds.sh write AND the atomic generation publish —
+ *  and clears ONLY after a complete generation is committed. Its lingering presence is
+ *  the NAMED, repairable "a seed publication began and did not finish" state:
+ *   - finding 1: a re-publish that threw/was interrupted leaves it behind even though
+ *     the prior generation pointer still resolves — so the old pointer no longer reads
+ *     as healthy and doctor + every dispatch consumer refuse and advise `forge upgrade`.
+ *   - finding 2: an interrupted FIRST install (install-seeds.sh mutated the flat
+ *     workflows/runtimes but no pointer committed yet) is now distinguishable from a
+ *     genuinely untouched pre-migration home — the former carries the marker (→
+ *     incomplete, dispatch refuses instead of falling back to the mixed flat surface),
+ *     the latter does not (→ no-generation, healthy). */
+export const SEED_PUBLISH_MARKER_NAME = ".seed-publish-incomplete";
+
+function publishMarkerPath(home: string): string {
+  return join(home, SEED_PUBLISH_MARKER_NAME);
+}
+
+function readPublishMarker(home: string): string | null {
+  const p = publishMarkerPath(home);
+  if (!existsSync(p)) return null;
+  try {
+    return readFileSync(p, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+/** Record that a seed publication has begun, before any flat mutation / staging. The
+ *  marker persists until completeSeedPublish clears it, so a crash or a thrown publish
+ *  anywhere in between leaves the named incomplete state behind for inspectSeedInstall
+ *  to report. `reason` is surfaced verbatim in the incomplete-state message. */
+export function beginSeedPublish(reason: string, home: string = FORGE_HOME): void {
+  mkdirSync(home, { recursive: true });
+  writeFileSync(publishMarkerPath(home), `${reason}\n`);
+}
+
+/** Clear the in-progress marker once a complete generation has been published. */
+export function completeSeedPublish(home: string = FORGE_HOME): void {
+  rmSync(publishMarkerPath(home), { force: true });
+}
+
 function manifestPath(genRoot: string): string {
   return join(genRoot, GENERATION_MANIFEST_NAME);
 }
@@ -153,6 +195,24 @@ export function resolveSeedGeneration(home: string = FORGE_HOME): SeedGeneration
  *   - pointer → nothing / dir with no|invalid manifest → incomplete (torn/mid-publish),
  *     repairable by re-running `forge upgrade`. */
 export function inspectSeedInstall(home: string = FORGE_HOME): SeedInstallState {
+  // A lingering publish marker is the NAMED failed/interrupted-install state: an
+  // upgrade began mutating host seeds and never confirmed a complete generation.
+  // Report it as incomplete even when the prior pointer still resolves to a valid
+  // generation (finding 1) or when nothing is published yet because a first install
+  // was interrupted mid-flat-write (finding 2) — the intended seed surface was never
+  // published, so doctor and dispatch must refuse and advise repair rather than
+  // silently continuing on the stale/mixed surface.
+  const marker = readPublishMarker(home);
+  if (marker !== null) {
+    return {
+      kind: "incomplete",
+      generation: currentPointerTarget(home),
+      reason:
+        `${marker.trim() || "a seed publication began and did not complete"} — the last ` +
+        `\`forge upgrade\` was interrupted or failed before publishing a complete generation. ` +
+        `Re-run \`forge upgrade\` to republish a complete generation.`,
+    };
+  }
   const link = seedCurrentLinkIn(home);
   if (!existsSync(link)) return { kind: "no-generation" };
   let root: string;
