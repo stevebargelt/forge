@@ -117,7 +117,7 @@ Example: the framer task `task-frame-f68eb8` produced 5 claims and 7 experiments
 
 ## Phase
 
-A fixed step in a workflow. Phases run in order; each phase has one or more agent roles, an optional set of red agents, and a gate. Phases are defined in YAML workflow files (seeds at `seeds/workflows/`); dispatch loads them from the atomic seed generation `forge upgrade` publishes under `~/.forge/` (FG-583), falling back to the flat `~/.forge/workflows/` layout on a host that has never published one.
+A fixed step in a workflow. Phases run in order; each phase has one or more agent roles, an optional set of red agents, and a gate. Phases are defined in YAML workflow files (seeds at `seeds/workflows/`); dispatch loads them exclusively from the atomic seed generation `forge upgrade` publishes under `~/.forge/` (FG-583). There is no flat-layout fallback: on a host that has never published a complete generation, dispatch **refuses** rather than reading the pre-migration flat `~/.forge/workflows/` layout, and directs the operator to run `forge upgrade`. (The flat copies are kept only for drift detection and doctor, never for dispatch. A per-project override at `<project>/.forge/workflows/<name>.yml` is always honored.)
 
 Example: the research-synthesis workflow has four steps — `frame`, `research-primary`, `research-skeptic`, `synthesize`.
 

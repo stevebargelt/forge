@@ -27,6 +27,7 @@ import type { NextAction } from "../../store/continuations.js";
 import { startRun } from "../../v2/startRun.js";
 import { runNext } from "../../v2/runNext.js";
 import { loadWorkflow } from "../../v2/loader.js";
+import { resolveSeedGeneration } from "../../v2/seed-generation.js";
 
 type ContinueOpts = {
   continuationId?: string;
@@ -194,25 +195,8 @@ export function resolveControllerOwner(
 const cliDispatch: PhysicalDispatch = (args) => {
   const action = args.nextAction;
   switch (action.kind) {
-    case "start_run": {
-      const a = action as StartRunAction;
-      if (!a.workflow || !a.title) {
-        throw new Error("continue: start_run nextAction requires { workflow, title }");
-      }
-      const projectDir = a.project ? resolve(a.project) : process.cwd();
-      const workflow = loadWorkflow(a.workflow, { projectDir });
-      const { runId } = startRun({
-        workflow,
-        title: a.title,
-        inputs: a.inputs ?? {},
-        projectDir,
-        dispatchKey: args.dispatchKey, // CP2: receipt into run metadata before the wave
-      });
-      // Kick the first wave. runNext is async; the run row (with the receipt) already
-      // exists and is discoverable, so a crash here still adopts on recovery.
-      void runNext({ runId, workflow });
-      return { runId };
-    }
+    case "start_run":
+      return dispatchStartRun(action as StartRunAction, args.dispatchKey);
     default:
       throw new Error(
         `continue: unsupported nextAction.kind='${action.kind}'. Supported: 'start_run'. ` +
@@ -220,6 +204,52 @@ const cliDispatch: PhysicalDispatch = (args) => {
       );
   }
 };
+
+// FG-583: seams for the start_run dispatch, so the anchor invariant is testable
+// without a real container wave. Real callers leave them undefined and the genuine
+// resolveSeedGeneration / loadWorkflow / startRun / runNext are used.
+export type StartRunSeams = {
+  resolveSeedGeneration?: typeof resolveSeedGeneration;
+  loadWorkflow?: typeof loadWorkflow;
+  startRun?: typeof startRun;
+  runNext?: typeof runNext;
+};
+
+/** Create the physical run for a start_run continuation, then kick its first wave.
+ *
+ *  FG-583: the seed generation is resolved ONCE here (physical realpath) and the SAME
+ *  anchor is threaded into BOTH loadWorkflow and the first runNext wave. Resolving it
+ *  once — rather than letting each load resolve the live pointer — is what stops a
+ *  promotion interleaved between the two reads from making this supported dispatch
+ *  consume an A/B surface: it stays on the one generation it opened. */
+export function dispatchStartRun(
+  a: StartRunAction,
+  dispatchKey: string,
+  seams: StartRunSeams = {},
+): { runId: string } {
+  if (!a.workflow || !a.title) {
+    throw new Error("continue: start_run nextAction requires { workflow, title }");
+  }
+  const resolveGeneration = seams.resolveSeedGeneration ?? resolveSeedGeneration;
+  const load = seams.loadWorkflow ?? loadWorkflow;
+  const start = seams.startRun ?? startRun;
+  const next = seams.runNext ?? runNext;
+
+  const projectDir = a.project ? resolve(a.project) : process.cwd();
+  const seedGeneration = resolveGeneration();
+  const workflow = load(a.workflow, { projectDir, seedGeneration });
+  const { runId } = start({
+    workflow,
+    title: a.title,
+    inputs: a.inputs ?? {},
+    projectDir,
+    dispatchKey, // CP2: receipt into run metadata before the wave
+  });
+  // Kick the first wave. runNext is async; the run row (with the receipt) already
+  // exists and is discoverable, so a crash here still adopts on recovery.
+  void next({ runId, workflow, seedGeneration });
+  return { runId };
+}
 
 type StartRunAction = NextAction & {
   kind: "start_run";

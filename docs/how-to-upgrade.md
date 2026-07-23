@@ -231,11 +231,13 @@ git pull --ff-only
 npm install
 FORCE=1 ./scripts/install-seeds.sh  # refreshes forge-owned FLAT seeds; RETAINS your agents/constraints/RACI edits (FG-578)
 # NOTE (FG-583): the flat cp above does NOT publish the atomic seed generation that
-# dispatch reads. On a fresh host with no generation yet, dispatch falls back to the
-# flat layout and this is enough; on a host that has already published a generation,
-# also run `./bin/forge-dev upgrade --skip-git --skip-npm --skip-project` to republish
-# the generation, or the running seeds stay on the prior one. There is no standalone
-# CLI that publishes a generation — only forge upgrade does.
+# dispatch reads, so it is never enough on its own. Dispatch reads only the published
+# generation: on a fresh host with none published it REFUSES (there is no flat-layout
+# fallback) and names `forge upgrade` as the fix; on a host that already published one
+# the running seeds stay on the prior generation until you republish. Either way, also
+# run `./bin/forge-dev upgrade --skip-git --skip-npm --skip-project` to publish/republish
+# the generation. There is no standalone CLI that publishes a generation — only forge
+# upgrade does.
 bash docker/build.sh                # rebuild the agent image (only if a build input changed:
                                     # the Dockerfile or a script it COPYs)
 cd ~/code/<your-project>
