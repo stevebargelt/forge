@@ -247,6 +247,13 @@ function gatherRouting(): ReleaseInputs["routing"] {
   // HOST policy, which is the generation's compiled routing-policy.yml when one is
   // published.
   const resolved = resolvePolicyPath();
+  // FG-583 (finding 2): a torn/tampered generation policy (bytes ≠ its own manifest,
+  // or an unmanifested extra file) is Zod-valid but must NOT read as "present and
+  // validates" — name the incomplete/tampered state so doctor surfaces it, mirroring
+  // the loader's workflow/runtime closed-set refusal.
+  if (resolved.incompletePolicy) {
+    return { present: true, ok: false, detail: `incomplete/tampered seed generation policy: ${resolved.incompletePolicy}` };
+  }
   if (!resolved.exists) return { present: false, ok: false, detail: "" };
   const v = validateRoutePolicyFile(resolved.path);
   return {

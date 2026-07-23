@@ -90,6 +90,28 @@ test("apply --confirm on a valid candidate writes RACI + policy + a JSONL audit 
   assert.deepEqual(entry.validation, { raci: true, route: true });
 });
 
+test("FG-583 finding 1a: a written apply does NOT claim an effective routing change and directs to forge upgrade", () => {
+  const targets = tmpTargets();
+  const candidate = seed().replace(IQ_ANCHOR, "responsible: frontend-specialist\naccountable: human\npath: invoke_chain");
+  const r = applyRaciChange(seed(), candidate, { confirm: true, candidateLabel: "cand.md", host: all, targets });
+
+  assert.equal(r.written, true, "the RACI SOURCE install still happens (apply's job)");
+  // The machine-readable signal a script/orchestrator reads: apply NEVER makes routing
+  // effective for dispatch — the effective host policy is published by forge upgrade.
+  assert.equal(r.effectiveForDispatch, false);
+  assert.ok(r.publishDirective, "a written apply carries the publish directive");
+  assert.match(r.publishDirective!, /forge upgrade/);
+  assert.match(r.publishDirective!, /NOT effective for dispatch/);
+});
+
+test("FG-583 finding 1a: even an unwritten (dry-run) apply never reports effectiveForDispatch true", () => {
+  const targets = tmpTargets();
+  const candidate = seed().replace(IQ_ANCHOR, "responsible: frontend-specialist\naccountable: human\npath: invoke_chain");
+  const r = applyRaciChange(seed(), candidate, { confirm: false, candidateLabel: "cand.md", host: all, targets });
+  assert.equal(r.written, false);
+  assert.equal(r.effectiveForDispatch, false);
+});
+
 test("apply --confirm on an INVALID candidate writes nothing and reports the failure", () => {
   const targets = tmpTargets();
   const candidate = seed().replace(

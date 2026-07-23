@@ -10,8 +10,9 @@
 // CLI-layer only: the programmatic invoke()/pipeline spawn paths are not gated —
 // this guards the orchestrator's dispatch ENTRY POINTS, where the miss happens.
 
-import { resolvePolicyPath } from "../raci/project.js";
+import { resolvePolicyPath, describeNoEffectiveHostPolicy } from "../raci/project.js";
 import { explainRouteFile } from "./commands/route.js";
+import type { SeedGeneration } from "../v2/seed-generation.js";
 
 export type PreflightEnforce = "warn" | "error";
 
@@ -32,21 +33,38 @@ export type RoutePreflightResult =
 /** Validate a route key against the effective (project-or-host) compiled policy. */
 export type RouteKeyValidator = (routeKey: string, projectDir: string) => { ok: true } | { ok: false; message: string };
 
-export function defaultRouteKeyValidator(routeKey: string, projectDir: string): { ok: true } | { ok: false; message: string } {
-  // FG-583: resolve the effective policy — a host source resolves from the seed
-  // generation, never the flat ~/.forge/routing-policy.yml. A live resolve observes
-  // one complete generation (publication is a single atomic swap).
-  const resolved = resolvePolicyPath(projectDir);
+/** FG-583: resolve+validate a route key against the effective policy for a given
+ *  anchor. `seedGeneration` mirrors resolvePolicyPath's anchor param: `undefined` →
+ *  resolve the LIVE seed pointer (the CLI advisory preflight); a resolved/held
+ *  generation → PIN validation to THAT generation, so the dispatch path (finding 3)
+ *  can validate the route under the SAME generation it will dispatch under, and a
+ *  promotion interleaved between the live preflight and the anchored dispatch cannot
+ *  slip an unvalidated route through. */
+export function validateRouteKeyUnder(
+  routeKey: string,
+  projectDir: string,
+  seedGeneration?: SeedGeneration | null,
+): { ok: true } | { ok: false; message: string } {
+  const resolved = resolvePolicyPath(projectDir, seedGeneration);
   if ("uncompiledOverride" in resolved && resolved.uncompiledOverride) {
     return { ok: false, message: `the project routing override under ${projectDir}/.forge is not compiled — run: forge route compile` };
   }
   // A no-generation host has no effective policy — refuse (this is a pre-dispatch
-  // gate), consistent with the loader's no-complete-generation refusal.
-  if (resolved.source === "host" && resolved.noGeneration) {
-    return { ok: false, message: `no seed generation is published — the effective host routing policy lives in the generation; run: forge upgrade` };
+  // gate), consistent with the loader's no-complete-generation refusal. A torn/
+  // tampered generation policy (finding 2) refuses with the same named state.
+  if (resolved.source === "host" && (resolved.noGeneration || resolved.incompletePolicy)) {
+    return { ok: false, message: describeNoEffectiveHostPolicy(resolved) };
   }
   const res = explainRouteFile(resolved.path, routeKey);
   return res.ok ? { ok: true } : { ok: false, message: res.findings.map((f) => f.message).join("; ") };
+}
+
+export function defaultRouteKeyValidator(routeKey: string, projectDir: string): { ok: true } | { ok: false; message: string } {
+  // FG-583: resolve the effective policy LIVE — a host source resolves from the seed
+  // generation, never the flat ~/.forge/routing-policy.yml. A live resolve observes
+  // one complete generation (publication is a single atomic swap). This is the CLI
+  // advisory entry gate (#297); the dispatch path re-validates under its held anchor.
+  return validateRouteKeyUnder(routeKey, projectDir);
 }
 
 function unroutedMessage(command: string): string {

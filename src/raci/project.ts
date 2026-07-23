@@ -13,6 +13,8 @@ import { existsSync } from "node:fs";
 import { RACI_PATH, ROUTING_POLICY_PATH } from "../util/paths.js";
 import {
   GENERATION_ROUTING_POLICY,
+  generationPolicyState,
+  inspectSeedInstall,
   resolveSeedGeneration,
   type SeedGeneration,
 } from "../v2/seed-generation.js";
@@ -33,6 +35,12 @@ export type ResolvedRouting = {
    *  a DISPATCH consumer refuses (like the loader's noCompleteGenerationError); an
    *  OPERATOR consumer reports inspectSeedInstall's named no-generation state. */
   noGeneration?: boolean;
+  /** FG-583 (finding 2): HOST source resolving from a generation whose compiled
+   *  routing-policy.yml FAILS its own provenance manifest — an unmanifested/torn/
+   *  tampered policy. `path`/`generationRoot` are set for message context; the reason
+   *  is here. Consumers MUST branch on this rather than read `path`: a DISPATCH
+   *  consumer refuses; an OPERATOR consumer reports this named tampered state. */
+  incompletePolicy?: string;
   /** FG-583: the seed generation root the HOST policy resolved from, when a
    *  generation is anchored/live. Absent for a project override or no-generation. */
   generationRoot?: string;
@@ -89,5 +97,27 @@ export function resolvePolicyPath(
     return { source: "host", path: ROUTING_POLICY_PATH, exists: false, noGeneration: true };
   }
   const path = join(generation.root, GENERATION_ROUTING_POLICY);
-  return { source: "host", path, exists: existsSync(path), generationRoot: generation.root };
+  // FG-583 (finding 2): the generation's own policy is a CLOSED-set / digest-checked
+  // member exactly like its workflows/runtimes. A torn/tampered/replaced policy is
+  // flagged here so no consumer routes from mis-routing bytes.
+  const policyState = generationPolicyState(generation);
+  if (policyState.kind === "tampered") {
+    return { source: "host", path, exists: existsSync(path), incompletePolicy: policyState.reason, generationRoot: generation.root };
+  }
+  return { source: "host", path, exists: policyState.kind === "present", generationRoot: generation.root };
+}
+
+/** FG-583 (finding 4): the NAMED reason a HOST routing resolution has no usable
+ *  effective policy, distinguishing an ABSENT generation from an INCOMPLETE/torn one
+ *  (via inspectSeedInstall, as the loader/doctor do) and a TAMPERED generation policy
+ *  (finding 2). Operator route consumers surface this instead of a flat "no seed
+ *  generation is published" that hides a repairable torn state. Always ends by
+ *  directing `forge upgrade`. */
+export function describeNoEffectiveHostPolicy(resolved: { incompletePolicy?: string }): string {
+  if (resolved.incompletePolicy) {
+    return `${resolved.incompletePolicy} — the effective host routing policy lives in the seed generation. Run: forge upgrade`;
+  }
+  const state = inspectSeedInstall();
+  const reason = state.kind === "incomplete" ? state.reason : `no seed generation is published`;
+  return `${reason} — the effective host routing policy lives in the seed generation. Run: forge upgrade`;
 }

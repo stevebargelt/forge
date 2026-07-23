@@ -10,8 +10,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { RACI_PATH } from "../util/paths.js";
-import { inspectSeedInstall } from "../v2/seed-generation.js";
-import { resolvePolicyPath, projectRaciPath, type RoutingSource } from "./project.js";
+import { resolvePolicyPath, projectRaciPath, describeNoEffectiveHostPolicy, type RoutingSource } from "./project.js";
 import { summarizeRouteChanges, type RouteChangeSummary } from "./propose.js";
 import { computePolicyDrift, type RouteFinding } from "./route-validate.js";
 import { compileRaciDocument } from "./compile.js";
@@ -73,17 +72,18 @@ export function governanceView(opts: { projectDir?: string; hostPolicyPath?: str
     return { ok: false, source: "project", path: resolved.path, findings: [overrideNotCompiledFinding(opts.projectDir)] };
   }
 
-  // FG-583: a host resolution with no complete seed generation has NO effective
-  // routing policy — report the named install state (never an empty matrix from a
-  // missing flat path). The dashboard/CLI render this as a readiness finding.
-  if (resolved.source === "host" && resolved.noGeneration) {
-    const state = inspectSeedInstall();
-    const reason = state.kind === "incomplete" ? state.reason : `no seed generation is published for this host`;
+  // FG-583: a host resolution with no complete seed generation — OR a torn/tampered
+  // generation policy (finding 2) — has NO usable effective routing policy. Report
+  // the NAMED install state (finding 4: absent vs incomplete/torn/tampered), never an
+  // empty matrix from a missing flat path. The dashboard/CLI render this as a
+  // readiness finding.
+  if (resolved.source === "host" && (resolved.noGeneration || resolved.incompletePolicy)) {
+    const code = resolved.incompletePolicy ? "incomplete_seed_generation" : "no_seed_generation";
     return {
       ok: false,
       source: "host",
       path: resolved.path,
-      findings: [{ code: "no_seed_generation", message: `${reason} — the effective host routing policy lives in the seed generation. Run: forge upgrade` }],
+      findings: [{ code, message: describeNoEffectiveHostPolicy(resolved) }],
     };
   }
 

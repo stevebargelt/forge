@@ -22,6 +22,7 @@ import {
   resolvePolicyPath,
   resolveRaciPath,
   projectPolicyPath,
+  describeNoEffectiveHostPolicy,
   type RoutingSource,
 } from "../../raci/project.js";
 
@@ -151,6 +152,27 @@ export function explainRouteFile(policyPath: string, routeKey: string): RouteExp
 export type ResolvedSource = RoutingSource | "explicit";
 export type ProjectRouteValidation = RouteValidation & { source: ResolvedSource; path: string };
 
+/** FG-583 (finding 1b): resolve where a `route compile` invocation would WRITE, and
+ *  whether that target is the authoritative flat host routing-policy.yml — which is
+ *  NEVER effective for dispatch (the effective host policy is compiled INTO the seed
+ *  generation, published only by `forge upgrade`). Host-targeting is recognized by the
+ *  RESOLVED TARGET, not the absence of --project: a default host compile AND an
+ *  explicit-path compile of the host RACI (e.g. `forge route compile ~/.forge/forge-raci.md`)
+ *  both resolve to the flat host file, so both must refuse-and-direct. A project
+ *  override policy and an explicit `-o` export path are honored (neither is the flat
+ *  host file). */
+export function resolveCompileTarget(opts: { source: ResolvedSource; projectDir: string; out?: string }): {
+  out: string;
+  hostFlatTarget: boolean;
+} {
+  const out = opts.out
+    ? resolve(opts.out)
+    : opts.source === "project"
+      ? projectPolicyPath(opts.projectDir)
+      : ROUTING_POLICY_PATH;
+  return { out, hostFlatTarget: out === ROUTING_POLICY_PATH };
+}
+
 /** Resolve the effective policy (project override or host), validate it, and —
  *  when it is a PROJECT override — additionally enforce that it does not weaken a
  *  force rule the host policy mandates (#280). The drift RACI is the effective
@@ -165,14 +187,17 @@ export function validateRoutingResolved(opts: {
 }): ProjectRouteValidation {
   const host = opts.host ?? realHost;
 
-  const resolved: { source: ResolvedSource; path: string; uncompiledOverride?: boolean; noGeneration?: boolean } = opts.explicitPolicy
+  const resolved: { source: ResolvedSource; path: string; uncompiledOverride?: boolean; noGeneration?: boolean; incompletePolicy?: string } = opts.explicitPolicy
     ? { source: "explicit", path: resolve(opts.explicitPolicy) }
     : resolvePolicyPath(opts.projectDir);
 
   // FG-583: the force-weakening baseline is the generation's host policy, never the
-  // flat file. Injectable for tests; when absent, resolve from the generation.
+  // flat file. Injectable for tests; when absent, resolve from the generation. A
+  // no-generation OR torn/tampered host policy (finding 2) yields no trustworthy
+  // baseline — "" so loadPolicy returns undefined and the weakening check is skipped
+  // rather than run against mis-routing bytes.
   const hostResolved = resolvePolicyPath(undefined);
-  const hostPolicyPath = opts.hostPolicyPath ?? (hostResolved.noGeneration ? "" : hostResolved.path);
+  const hostPolicyPath = opts.hostPolicyPath ?? (hostResolved.noGeneration || hostResolved.incompletePolicy ? "" : hostResolved.path);
 
   // An uncompiled project override must fail here, not silently validate the host
   // policy (or a missing path) — tell the operator to compile the override.
@@ -186,13 +211,16 @@ export function validateRoutingResolved(opts: {
     };
   }
 
-  // FG-583: a host resolution with no complete seed generation has NO effective
-  // routing policy to validate — report the named state, never read the flat file.
-  if (resolved.source === "host" && resolved.noGeneration) {
+  // FG-583: a host resolution with no complete seed generation — OR a torn/tampered
+  // generation policy (finding 2) — has NO usable effective routing policy to
+  // validate. Report the NAMED state (finding 4: absent vs incomplete/torn), never
+  // read the flat file.
+  if (resolved.source === "host" && (resolved.noGeneration || resolved.incompletePolicy)) {
+    const code = resolved.incompletePolicy ? "incomplete_seed_generation" : "no_seed_generation";
     return {
       ok: false,
       mode: "with-raci",
-      findings: [{ code: "no_seed_generation", message: `no seed generation is published — the effective host routing policy lives in the generation. Run: forge upgrade` }],
+      findings: [{ code, message: describeNoEffectiveHostPolicy(resolved) }],
       source: "host",
       path: resolved.path,
     };
@@ -303,28 +331,21 @@ export function registerRoute(program: Command): void {
         console.log(JSON.stringify(policy, null, 2));
         return;
       }
-      // FG-583: the HOST routing policy is NOT effective as a flat file — it lives
-      // COMPILED INSIDE the seed generation, published exclusively by `forge upgrade`
-      // (publishSeedGeneration is the single generation writer). A flat host rewrite
-      // here would silently change nothing a run reads — the exact defect to
-      // eliminate. So for the host source we VALIDATE-and-DIRECT: prove the RACI
-      // compiles, then refuse the misleading flat write and point at `forge upgrade`.
-      // A PROJECT compile (an authoritative project override) is UNCHANGED, and an
-      // explicit -o export path is honored (it is not the authoritative flat file).
-      if (resolved.source === "host" && !opts.out) {
+      // FG-583 (finding 1b): the HOST routing policy is NOT effective as a flat file
+      // — it lives COMPILED INSIDE the seed generation, published exclusively by
+      // `forge upgrade`. Any compile whose TARGET is the authoritative flat host policy
+      // would silently change nothing a run reads — the exact defect to eliminate.
+      // resolveCompileTarget recognizes host-targeting by the RESOLVED TARGET, so it
+      // catches the default host compile AND an explicit-path compile of the host RACI.
+      const { out, hostFlatTarget } = resolveCompileTarget({ source: resolved.source, projectDir, out: opts.out });
+      if (hostFlatTarget) {
         console.log(
-          `Host RACI compiles cleanly (${Object.keys(policy.routes).length} routes), but the host routing policy is NOT written as a flat file.\n` +
+          `RACI compiles cleanly (${Object.keys(policy.routes).length} routes), but the host routing policy is NOT written as a flat file.\n` +
             `The effective host policy is compiled INTO the seed generation and published atomically by \`forge upgrade\`.\n` +
             `To make this routing change effective for dispatch, run: forge upgrade`,
         );
         return;
       }
-      // Past the host refuse-and-direct, resolved.source is "project" or "explicit".
-      const out = opts.out
-        ? resolve(opts.out)
-        : resolved.source === "project"
-          ? projectPolicyPath(projectDir)
-          : ROUTING_POLICY_PATH;
       mkdirSync(dirname(out), { recursive: true });
       writeFileSync(out, yamlStringify(policy));
       console.log(`Compiled ${Object.keys(policy.routes).length} routes (${resolved.source}) -> ${out}`);
@@ -355,10 +376,12 @@ export function registerRoute(program: Command): void {
         process.exit(1);
       }
 
-      // FG-583: host resolution with no published generation has no effective policy
-      // — report the named state, never read the flat ~/.forge/routing-policy.yml.
-      if (!policyArg && "noGeneration" in resolved && resolved.noGeneration) {
-        const finding = { code: "no_seed_generation", message: `no seed generation is published — the effective host routing policy lives in the generation. Run: forge upgrade` };
+      // FG-583: host resolution with no published generation — OR a torn/tampered
+      // generation policy (finding 2) — has no effective policy. Report the NAMED
+      // state (finding 4: absent vs incomplete/torn), never read the flat file.
+      if (!policyArg && "source" in resolved && resolved.source === "host" && (resolved.noGeneration || resolved.incompletePolicy)) {
+        const code = resolved.incompletePolicy ? "incomplete_seed_generation" : "no_seed_generation";
+        const finding = { code, message: describeNoEffectiveHostPolicy(resolved) };
         if (opts.json) {
           console.log(JSON.stringify({ source: "host", path: resolved.path, ok: false, findings: [finding] }, null, 2));
         } else {

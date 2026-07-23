@@ -95,6 +95,10 @@ export function registerInvoke(program: Command): void {
         invocationCwd,
         resolvedFromSubdir,
         explicitSubproject,
+        // FG-583 (finding 3): carry the resolved route key so invoke() re-validates it
+        // under the SAME anchored generation it dispatches with — the authoritative
+        // check. The CLI preflight above is the fast LIVE advisory gate only.
+        routeKey: opts.route,
       });
 
       if (opts.json) {
