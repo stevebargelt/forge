@@ -6,9 +6,10 @@ import { resolveProjectMount } from "../../util/resolve-project-mount.js";
 import { validateCredsForNewRun } from "../../util/creds.js";
 import { profileStatus } from "../../util/auth-profiles.js";
 import { loadWorkflow } from "../../v2/loader.js";
+import { resolveSeedGeneration } from "../../v2/seed-generation.js";
 import type { Workflow } from "../../v2/schema.js";
 import { startRun, CONTROL_PLANE_METADATA_KEYS } from "../../v2/startRun.js";
-import { applyRoutePreflight, preflightEnforceFromEnv } from "../route-preflight.js";
+import { applyRoutePreflight, preflightEnforceFromEnv, validateRouteKeyUnder } from "../route-preflight.js";
 import { readTicket } from "../../backlog/structured.js";
 
 // v2: workflow names are arbitrary YAML files in ~/.forge/workflows/.
@@ -63,8 +64,33 @@ export function registerNew(program: Command): void {
 
       validateCredsForNewRun();
 
-      // Load YAML (workspace default with project override).
-      const workflow = loadWorkflow(workflowName, { projectDir });
+      // FG-583: resolve the seed generation ONCE at dispatch entry and thread the
+      // same anchor through the workflow load AND the routeReceipt resolution, so
+      // this run is pinned to ONE complete generation across workflows/runtimes and
+      // the policy axis (Risk#1).
+      const seedGeneration = resolveSeedGeneration();
+
+      // FG-583 (finding 3): the CLI preflight above validated --route LIVE (advisory,
+      // #297). But a concurrent `forge upgrade` promoting a new generation between
+      // that live check and THIS anchor would leave the route validated only against
+      // the OLD generation while the run dispatches under the anchored one. So re-
+      // validate the resolved route under the SAME anchored generation this run uses
+      // — the authoritative check. On a mismatch, refuse and direct re-resolution
+      // rather than dispatch a route no longer valid under the anchored policy.
+      const routeKey = (options as { route?: string }).route;
+      if (routeKey !== undefined) {
+        const anchored = validateRouteKeyUnder(routeKey, projectDir, seedGeneration);
+        if (!anchored.ok) {
+          process.stderr.write(
+            `forge new: --route "${routeKey}" is not valid under the seed generation this run anchored ` +
+              `(a promotion may have interleaved since route resolution) — ${anchored.message}\n` +
+              `Re-resolve the route and retry:  forge route explain <route-key> --json\n`,
+          );
+          process.exit(2);
+        }
+      }
+
+      const workflow = loadWorkflow(workflowName, { projectDir, seedGeneration });
 
       // Build the inputs object from the workflow's declared inputs + CLI flags.
       // The runner validates required inputs in startRun.
@@ -137,6 +163,7 @@ export function registerNew(program: Command): void {
         invocationCwd,
         resolvedFromSubdir,
         explicitSubproject,
+        seedGeneration,
         ...(tags.length > 0 ? { tags } : {}),
       });
 

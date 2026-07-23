@@ -55,8 +55,10 @@ forge setup
 Three things happen in one step:
 
 1. **Creates `~/.forge/model-policy.yml`** from `model-policy.example.yml` — only when the active policy is absent. An existing policy is never overwritten.
-2. **Compiles `~/.forge/routing-policy.yml`** from the RACI seed. This file is generated, not hand-maintained.
+2. **Refreshes the flat `~/.forge/routing-policy.yml`** from the RACI seed. This file is generated, not hand-maintained — but since FG-583 it is **not** a dispatch source. The routing policy dispatch actually reads is the one compiled **into the atomic seed generation**, which only `forge upgrade` publishes (step 2 above). `forge setup` does **not** publish a generation, so this step alone does not make routing effective for dispatch.
 3. **Runs a read-only release check** — agent image, in-image runtime CLIs (`claude`, `codex`, `pi`), per-profile provider auth, model and routing policy validity. No live agent run; everything is verified statically.
+
+> **`forge setup` alone does not make the host dispatch-ready.** Dispatch reads exclusively the seed generation that `forge upgrade --skip-project` publishes (step 2). Until that generation is published the host fails closed — `forge next` and every gate advance refuse with a named, repairable no-generation state (`forge doctor` reports it). If you followed step 2 the generation is already published; `forge setup` here only adds the active model policy and the readiness check. This matches `README.md` and `docs/quick-start.md`.
 
 The report also includes a "review-loop reviewer (codex-subscription)" readiness line so you know whether `forge review-loop` is usable before you need it.
 
@@ -90,7 +92,7 @@ forge setup        # re-runs provisioning + readiness check
 forge doctor       # read-only readiness check only (no file writes)
 ```
 
-Re-run after resolving each credential. When `forge setup` reports "Ready: no blocking failures", the host is ready to dispatch agents.
+Re-run after resolving each credential. "Ready: no blocking failures" from `forge setup` means creds, model policy, and the release check are green — but the host is dispatch-ready only once `forge upgrade --skip-project` has published the seed generation (step 2). Setup does not publish it; if you skipped step 2, run `forge upgrade --skip-project` (or `./bin/forge-dev upgrade --skip-git` on a checkout) before dispatching.
 
 Use `forge doctor` any time you want to recheck readiness without touching files.
 
@@ -110,7 +112,7 @@ Use `forge doctor` any time you want to recheck readiness without touching files
 
 - **Don't hand-edit `routing-policy.yml`** — it is generated from the RACI. Edit the RACI and let `forge setup` or `forge upgrade` recompile it.
 - **Don't commit `~/.forge/*`** — this directory is host-local. Each machine gets its own policy and credentials.
-- **Don't skip `forge setup` on a new machine** and jump straight to `forge new feature` — the model policy won't exist and dispatch will fail or run in legacy mode.
+- **Don't skip `forge upgrade --skip-project` on a new machine** — it publishes the seed generation dispatch reads. Without it, `forge new feature` / `forge next` fail closed with a named no-generation state, no matter that `forge setup` ran. `forge setup` adds the model policy and readiness check; it does not publish the generation.
 
 ---
 

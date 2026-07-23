@@ -466,3 +466,62 @@ function walkRelFiles(base: string, prefix = ""): string[] {
 export function generationCategoryDir(gen: SeedGeneration, category: (typeof SEED_GENERATION_DIRS)[number]): string {
   return join(gen.root, category);
 }
+
+/** FG-583 (finding 2): the integrity state of a generation's compiled routing
+ *  policy, measured against the generation's OWN provenance manifest — the SAME
+ *  closed-set / digest check assertGenerationWorkflowConsistent / assertGeneration-
+ *  RuntimeConsistent give workflows/runtimes. Without it a torn/tampered generation
+ *  could carry a schema-valid but REPLACED routing-policy.yml while workflows/runtimes
+ *  stay intact, so route preflight / receipts / dispatch would consume mis-routing
+ *  bytes no release shipped.
+ *
+ *  - `absent`   → the generation ships NO policy (published with no host RACI): not
+ *                 in the manifest AND not on disk. Fail-closed fallback, unchanged.
+ *  - `present`  → policy present and its bytes match the manifest. Authoritative.
+ *  - `tampered` → an unmanifested EXTRA file, a manifested-but-missing file, or a
+ *                 byte mismatch — a torn/tampered generation. Consumers refuse
+ *                 (dispatch) or report the named state (operator). */
+export type GenerationPolicyState =
+  | { kind: "absent" }
+  | { kind: "present"; path: string }
+  | { kind: "tampered"; path: string; reason: string };
+
+export function generationPolicyState(gen: SeedGeneration): GenerationPolicyState {
+  const rel = GENERATION_ROUTING_POLICY;
+  const expected = gen.manifest.files[rel];
+  const path = join(gen.root, rel);
+  const onDisk = existsSync(path);
+  // A generation with no policy in EITHER the manifest or on disk is the legitimate
+  // no-host-RACI case — routing falls back fail-closed, unchanged.
+  if (!expected && !onDisk) return { kind: "absent" };
+  // Present under the generation dir but absent from its provenance manifest — an
+  // unmanifested EXTRA file (the closed-set violation), exactly as the workflow /
+  // runtime checks refuse.
+  if (!expected) {
+    return {
+      kind: "tampered",
+      path,
+      reason:
+        `the routing policy at ${path} resolves inside the published seed generation but is not in its provenance manifest ` +
+        `(${gen.root}) — a file present under the generation but absent from its manifest means this generation is torn or was tampered with, a state no release shipped`,
+    };
+  }
+  // Manifested but missing on disk — a torn/mid-publish generation.
+  if (!onDisk) {
+    return {
+      kind: "tampered",
+      path,
+      reason: `the routing policy manifested in the seed generation is missing from ${path} — the generation is torn or mid-publish`,
+    };
+  }
+  if (sha256OfBytes(path) !== expected) {
+    return {
+      kind: "tampered",
+      path,
+      reason:
+        `the routing policy at ${path} does not match the seed generation's provenance manifest (${gen.root}) — ` +
+        `the generation is torn or was tampered with, a state no release shipped`,
+    };
+  }
+  return { kind: "present", path };
+}

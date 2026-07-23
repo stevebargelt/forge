@@ -14,6 +14,7 @@ process.env.FORGE_HOME = tmpHome;
 
 const { routingGovernance } = await import("./queries.js");
 const { compileRaciDocument } = await import("../../src/raci/compile.js");
+const { publishSeedGeneration } = await import("../../src/v2/seed-generation.js");
 const { stringify: yamlStringify } = await import("yaml");
 
 const SEED = readFileSync(
@@ -22,10 +23,17 @@ const SEED = readFileSync(
 );
 const compiledYaml = (raci: string) => yamlStringify(compileRaciDocument(raci));
 
-// Seed the host policy + RACI so host-source resolution and the host-vs-project
-// diff are deterministic (not dependent on the developer's real ~/.forge).
+// FG-583: the effective HOST routing policy (the primary matrix AND the
+// host-vs-project diff baseline) resolves from the published SEED GENERATION, never
+// the flat file. Publish a generation carrying the SEED-derived policy so host-source
+// resolution and the diff are deterministic (not dependent on the developer's real
+// ~/.forge). The flat routing-policy.yml below is a decoy that must never be read.
 writeFileSync(join(tmpHome, "forge-raci.md"), SEED);
 writeFileSync(join(tmpHome, "routing-policy.yml"), compiledYaml(SEED));
+const govAssets = mkdtempSync(join(tmpdir(), "forge-gov-assets-"));
+mkdirSync(join(govAssets, "seeds", "workflows"), { recursive: true });
+mkdirSync(join(govAssets, "seeds", "runtimes"), { recursive: true });
+publishSeedGeneration({ home: tmpHome, assetsDir: govAssets, trustedAssetRoot: () => govAssets, raciPath: join(tmpHome, "forge-raci.md") });
 
 const IQ = "responsible: engineer\naccountable: human\npath: invoke_chain";
 const mutated = SEED.replace(IQ, "responsible: backend-specialist\naccountable: human\npath: invoke_chain");

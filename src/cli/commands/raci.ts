@@ -81,7 +81,20 @@ export type ApplyResult = {
   written: boolean;
   reason?: "validation_failed" | "not_confirmed";
   audit?: RaciAuditEntry;
+  /** FG-583 (finding 1a): apply installs the operator-authored RACI SOURCE + audit
+   *  log and refreshes the flat (drift-registry) routing-policy.yml — but the DERIVED
+   *  policy is NEVER effective for dispatch from apply. The effective host policy is
+   *  compiled INTO the seed generation, published exclusively by `forge upgrade`.
+   *  Always false, so JSON/script consumers can never read a written apply as an
+   *  effective routing change. */
+  effectiveForDispatch: false;
+  /** FG-583 (finding 1a): the directive to make the routing change effective. Set on
+   *  a WRITTEN apply (the RACI source landed but the generation is unchanged). */
+  publishDirective?: string;
 };
+
+const PUBLISH_DIRECTIVE =
+  "run `forge upgrade` to republish the seed generation with the recompiled routing policy — until then this routing change is NOT effective for dispatch";
 
 function defaultTargets(): ApplyTargets {
   return { raciPath: RACI_PATH, policyPath: ROUTING_POLICY_PATH, auditLogPath: RACI_AUDIT_LOG_PATH };
@@ -117,8 +130,8 @@ export function applyRaciChange(
 
   // Always re-run the gate immediately before writing — never trust an earlier propose.
   const proposal = proposeRaciChange(current, candidate, host);
-  if (!proposal.ok) return { proposal, written: false, reason: "validation_failed" };
-  if (!opts.confirm) return { proposal, written: false, reason: "not_confirmed" };
+  if (!proposal.ok) return { proposal, written: false, reason: "validation_failed", effectiveForDispatch: false };
+  if (!opts.confirm) return { proposal, written: false, reason: "not_confirmed", effectiveForDispatch: false };
 
   // Gate passed + confirmed. Precompute everything that can fail BEFORE touching
   // any file, then journal the audit entry FIRST (write-ahead). The audit log is
@@ -143,7 +156,7 @@ export function applyRaciChange(
   writeFileSync(targets.raciPath, candidate);
   writeFileSync(targets.policyPath, policyYaml);
 
-  return { proposal, written: true, audit };
+  return { proposal, written: true, audit, effectiveForDispatch: false, publishDirective: PUBLISH_DIRECTIVE };
 }
 
 function renderFindings(label: string, findings: { code: string; message: string; route?: string }[]): string[] {
@@ -263,7 +276,14 @@ export function registerRaci(program: Command): void {
         console.log(renderProposal(result.proposal));
         console.log("");
         if (result.written) {
-          console.log(`Applied -> ${RACI_PATH} (policy recompiled, change audited to ${RACI_AUDIT_LOG_PATH}).`);
+          // FG-583: apply installs the operator-authored RACI source + audit log, and
+          // refreshes the flat (non-authoritative) routing-policy.yml — but the DERIVED
+          // policy is NOT yet effective for dispatch. The effective host policy is
+          // compiled INTO the seed generation, published exclusively by `forge upgrade`.
+          // apply does NOT publish a generation, so direct the operator explicitly and
+          // do not claim the routing change is live.
+          console.log(`Applied RACI source -> ${RACI_PATH} (change audited to ${RACI_AUDIT_LOG_PATH}).`);
+          console.log(`The routing change is NOT yet effective for dispatch — run \`forge upgrade\` to republish the seed generation with the recompiled policy.`);
         } else if (result.reason === "not_confirmed") {
           console.log("Not applied — gate passed. Re-run with --confirm to write.");
         } else {

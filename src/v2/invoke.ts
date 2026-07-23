@@ -35,7 +35,8 @@ import { finalizeRunIfSettled } from "./run-finalize.js";
 import { classifyRunTerminalState } from "./ready-queue.js";
 import { logEvent } from "../store/events.js";
 import { taskDir } from "../util/paths.js";
-import { resolvePolicyPath } from "../raci/project.js";
+import { resolvePolicyPath, describeNoEffectiveHostPolicy } from "../raci/project.js";
+import { validateRouteKeyUnder } from "../cli/route-preflight.js";
 import { explainRouteFile } from "../cli/commands/route.js";
 import { resolveIdleTimeoutMs, IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
 import { DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE } from "./dependency-provisioning.js";
@@ -144,6 +145,24 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   // model stamping (resolveModel below) and the dispatching container
   // (dispatchInvokeTask) resolve the SAME complete generation.
   const seedGeneration = resolveSeedGeneration();
+
+  // FG-583 (finding 3): when a route key was resolved for this dispatch, re-validate
+  // it under the SAME anchored generation the dispatch uses — not the LIVE policy the
+  // CLI preflight already checked. A concurrent `forge upgrade` promoting a new
+  // generation between the live preflight and this anchor would otherwise let a route
+  // validated only under the old generation dispatch under the new one. Refuse and
+  // direct re-resolution rather than route a receipt from a policy this dispatch was
+  // never validated against.
+  if (args.routeKey !== undefined) {
+    const anchored = validateRouteKeyUnder(args.routeKey, args.projectDir, seedGeneration);
+    if (!anchored.ok) {
+      throw new Error(
+        `forge invoke: route "${args.routeKey}" is not valid under the seed generation this dispatch anchored ` +
+          `(a promotion may have interleaved since route resolution) — ${anchored.message}. ` +
+          `Re-resolve the route and retry: forge route explain <route-key> --json`,
+      );
+    }
+  }
 
   const { step, workflow } = invokeWorkflowShape(args.agentRole, args.modelAlias, args.runtimeName);
 
@@ -486,7 +505,17 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
   const receiptWarnings: string[] = [];
   const routingReceipt = (() => {
     if (!args.routeKey) return undefined;
-    const policyResolved = resolvePolicyPath(args.projectDir);
+    // FG-583: resolve the route from the SAME anchored generation this dispatch
+    // consumes for workflows/runtimes (seedGeneration, resolved at invoke entry),
+    // never the flat ~/.forge/routing-policy.yml. A no-generation host records a
+    // named warning rather than reading flat.
+    const policyResolved = resolvePolicyPath(args.projectDir, seedGeneration);
+    if (policyResolved.source === "host" && (policyResolved.noGeneration || policyResolved.incompletePolicy)) {
+      // FG-583: no generation, or a torn/tampered generation policy (finding 2) — do
+      // not consume mis-routing bytes into a receipt; record the named state instead.
+      receiptWarnings.push(`route lookup skipped for routeKey="${args.routeKey}": ${describeNoEffectiveHostPolicy(policyResolved)}`);
+      return undefined;
+    }
     const explanation = explainRouteFile(policyResolved.path, args.routeKey);
     if (!explanation.ok) {
       const detail = explanation.findings.map((f) => f.message).join("; ");

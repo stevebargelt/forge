@@ -8,9 +8,10 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stringify as yamlStringify } from "yaml";
-import { validateRoutePolicyFile, renderHuman, explainRoute, explainRouteFile, validateRoutingResolved } from "./route.js";
+import { validateRoutePolicyFile, renderHuman, explainRoute, explainRouteFile, validateRoutingResolved, resolveCompileTarget } from "./route.js";
 import { governanceView } from "../../raci/governance.js";
 import { compileRaciDocument } from "../../raci/compile.js";
+import { ROUTING_POLICY_PATH } from "../../util/paths.js";
 import type { HostEnv } from "../../raci/route-validate.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -130,6 +131,33 @@ test("renderHuman shows mode + findings", () => {
     findings: [{ code: "policy_drift", route: "r", message: "differs" }],
   });
   assert.match(bad, /policy_drift/);
+});
+
+// ── FG-583 finding 1b: host-targeting compile refuse-and-direct ──────────────
+
+test("FG-583 finding 1b: a DEFAULT host compile targets the flat host policy (refuse-and-direct)", () => {
+  const t = resolveCompileTarget({ source: "host", projectDir: "/proj" });
+  assert.equal(t.out, ROUTING_POLICY_PATH);
+  assert.equal(t.hostFlatTarget, true, "the host default resolves to the flat host file — never effective, must direct to forge upgrade");
+});
+
+test("FG-583 finding 1b: an EXPLICIT-path host RACI compile (no --out) also targets the flat host file", () => {
+  // `forge route compile ~/.forge/forge-raci.md` → source=explicit, no --out. It must
+  // NOT bypass the host guard: its default output is the flat host policy.
+  const t = resolveCompileTarget({ source: "explicit", projectDir: "/proj" });
+  assert.equal(t.out, ROUTING_POLICY_PATH);
+  assert.equal(t.hostFlatTarget, true, "an explicit-path host compile must not silently write the ineffective flat policy");
+});
+
+test("FG-583 finding 1b: a PROJECT compile writes the authoritative override, not the flat host file", () => {
+  const t = resolveCompileTarget({ source: "project", projectDir: "/proj" });
+  assert.notEqual(t.out, ROUTING_POLICY_PATH);
+  assert.equal(t.hostFlatTarget, false, "a project override is authoritative and is honored");
+});
+
+test("FG-583 finding 1b: an explicit -o export path is honored (it is not the flat host file)", () => {
+  const t = resolveCompileTarget({ source: "explicit", projectDir: "/proj", out: "/tmp/exported-policy.yml" });
+  assert.equal(t.hostFlatTarget, false, "a -o export is not the authoritative flat host file");
 });
 
 // ── project override resolution + validation (#280) ──────────────────────────

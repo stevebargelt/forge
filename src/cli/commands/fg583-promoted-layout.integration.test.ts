@@ -1,51 +1,62 @@
-// FG-583 (FG-572 Child 5h) — PROMOTED-LAYOUT acceptance test (graded AC).
+// FG-583 (FG-572 Child 5h) — PROMOTED-LAYOUT acceptance test, driven through the
+// REAL INSTALLED CLI as SUBPROCESSES (graded AC, rewritten per the FG-583 reopen).
 //
-// Drives the REAL installed command surface (`runUpgrade` — the exact function the
-// CLI `.action()` calls, minus commander parsing → the real install-seeds.sh →
-// publishSeedGeneration) as a PROMOTED RELEASE, with a deliberately DIVERGENT dev
-// checkout present, and exercises the DISPATCH RESOLUTION PATH (the same
-// resolveSeedGeneration anchor + loader every dispatch entry — `forge next` /
-// invoke / gate — uses), NOT a direct one-off library call against a dev fixture.
+// The prior version drove runUpgrade()/resolveSeedGeneration()/loadWorkflow()
+// IN-PROCESS against dev fixtures — it never proved the INSTALLED surface. This
+// version builds two real releases (A and B) from a DISPOSABLE source checkout,
+// PROMOTES them, installs the machine-wide SHIM, and drives the shim as
+// SUBPROCESSES (`forge upgrade --skip-project`, `forge setup`, a `forge invoke`
+// dispatch entry, `forge doctor`). All assertions read the on-disk seed generation
+// the SUBPROCESS published — the driving is the installed CLI, never a library call.
 //
-// Two release fixtures A and B are built so that each INDIVIDUAL workflow file is
-// Zod-valid, but a cross-file A/B mixture is a set NO release shipped (each carries
-// its release marker in the workflow `description`, and the two ship DIFFERENT
-// workflow sets). The acceptance criteria proven here:
+// Releases A and B ship DIFFERENT marker workflow sets (A: {alpha, beta};
+// B: {alpha, gamma}), each file Zod-valid but any A/B mixture a set no release
+// shipped — the marker rides in each workflow `description`. The acceptance criteria:
 //
-//   1. Upgrade from release A publishes a generation whose bytes are EXCLUSIVELY
-//      A's — the divergent dev checkout never leaks in (FG-577 assetRoot provenance,
-//      enforced end-to-end through the installed command path).
-//   2. The dispatch-resolution path (resolveSeedGeneration anchor + loader) reads
-//      ONE COMPLETE A generation — never an A/B mix.
-//   3. Atomically promoting B (a second real upgrade) → a NEW invocation resolves
-//      ONE complete B generation, while an ALREADY-RUNNING invocation holding its
-//      open anchor stays on complete A and never observes an A/B mix.
-//   4. The destination-trust refusal fires at the INSTALLED surface too: a
-//      replaceable destination symlink escaping the home is refused, and the
+//   1. FAIL-CLOSED: BEFORE `forge upgrade --skip-project`, an installed dispatch
+//      entry REFUSES with the named no-generation state — so the documented step is
+//      genuinely required and the install fails closed until it succeeds (Finding 2).
+//   2. The documented bootstrap (promote -> shim -> `forge upgrade --skip-project`
+//      -> `forge setup`) makes dispatch resolve ONE complete generation whose bytes
+//      are EXCLUSIVELY release A's — a divergent FORGE_REPO_DIR never leaks in.
+//   3. Promoting B (a second real `forge upgrade`) → a NEW dispatch resolves ONE
+//      complete B generation, while the retained A generation still holds A's bytes
+//      and B's exclusive workflow (`gamma`) is absent from it — an already-open
+//      invocation anchored to A can never observe an A/B mix (Finding 3).
+//   4. The destination-trust refusal fires at the INSTALLED `forge upgrade` surface:
+//      a replaceable destination symlink escaping the home is refused and the
 //      unrelated target is left byte-for-byte unchanged.
 //
-// FORGE_HOME is the disposable temp home every test process runs under
-// (src/test-setup.ts) — the real ~/.forge is NEVER touched.
+// SAFETY: every release is built from a DISPOSABLE source root and promoted into a
+// mkdtemp FORGE_HOME with an explicit --prefix; the subprocess env pins FORGE_HOME
+// and a stub ANTHROPIC_API_KEY so dispatch reaches the seed/policy gate on any host.
+// The real ~/.forge is NEVER touched, and no git command runs against the real repo.
 
-import { test, afterEach } from "node:test";
+import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, cpSync, symlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { runUpgrade, type UpgradeResult } from "./upgrade.js";
-import { assetRoot } from "../../v2/asset-root.js";
-import { resolveSeedGeneration, inspectSeedInstall } from "../../v2/seed-generation.js";
-import { loadWorkflow } from "../../v2/loader.js";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { SHIM_NAME, renderShim, thawReleaseTree, type BuildReleaseResult } from "../../v2/release.js";
+import { installShim, promote } from "../../v2/promote.js";
+import { seedCurrentLinkIn, seedGenerationsDirIn } from "../../util/paths.js";
+import { findGitRoot } from "../../util/git-root.js";
+import { canonicalMkdtemp, makeDisposableSourceRoot, removeDisposableSourceRoot, type DisposableSource } from "../../v2/fg571-harness.js";
 
-const cleanups: string[] = [];
-afterEach(() => {
-  while (cleanups.length) rmSync(cleanups.pop()!, { recursive: true, force: true });
-});
+const moduleDir = dirname(fileURLToPath(import.meta.url));
+const repoRoot = findGitRoot(moduleDir);
 
-function workflowYaml(name: string, release: string): string {
+let source: DisposableSource;
+let workspace: string;
+let releaseA: BuildReleaseResult;
+let releaseB: BuildReleaseResult;
+let repoHeadBefore: string;
+
+function workflowYaml(name: string, marker: string): string {
   return [
     `name: ${name}`,
-    `description: "workflow ${name} shipped by release ${release}"`,
+    `description: "workflow ${name} shipped by release ${marker}"`,
     `steps:`,
     `  - id: only`,
     `    agent: architecture-advisor`,
@@ -53,131 +64,183 @@ function workflowYaml(name: string, release: string): string {
   ].join("\n");
 }
 
-/** A tree shaped like a promoted release: forge-release.json manifest + the
- *  required asset dirs, with a distinctive workflow set tagged by `marker`. The
- *  REAL install-seeds.sh is copied in unmodified (it resolves its own $HERE). */
-function releaseTree(prefix: string, marker: string, workflowNames: string[]): string {
-  const base = mkdtempSync(join(tmpdir(), prefix));
-  cleanups.push(base);
-  for (const d of ["agents", "constraints", "runtimes", "workflows"]) {
-    mkdirSync(join(base, "seeds", d), { recursive: true });
-  }
-  mkdirSync(join(base, "scripts"), { recursive: true });
-  writeFileSync(join(base, "seeds", "runtimes", "claude-apikey.yml"),
-    [`name: claude-apikey`, `description: "${marker} runtime"`, `runtime_kind: claude-code`,
-     `log_format: claude-stream-json`, `prompt_strategy: claude-stdin-package`,
-     `auth_strategy: env-provider-api-key`, `image: agent-dev-worker:latest`,
-     `models:`, `  default: test-model`, ``].join("\n"));
-  writeFileSync(join(base, "seeds", "agents", "note.md"), `${marker} agent\n`);
-  writeFileSync(join(base, "seeds", "constraints", "note.md"), `${marker} constraint\n`);
-  writeFileSync(join(base, "seeds", "orchestrator-template.md"), `${marker} TEMPLATE\n`);
-  for (const n of workflowNames) writeFileSync(join(base, "seeds", "workflows", `${n}.yml`), workflowYaml(n, marker));
-  cpSync(join(assetRoot(), "scripts", "install-seeds.sh"), join(base, "scripts", "install-seeds.sh"));
-  writeFileSync(join(base, "forge-release.json"), JSON.stringify({ schema: 1, abi: "137", id: `fg583-${marker}` }));
-  return base;
+/** Shape the disposable source's marker workflow set for a release, then commit
+ *  (buildRelease refuses a dirty source). Marker workflows are ADDITIVE to the real
+ *  seeds; `remove` drops a marker from the previous shape. */
+function shapeAndCommit(marker: string, present: string[], remove: string[]): void {
+  const wf = join(source.root, "seeds", "workflows");
+  for (const n of present) writeFileSync(join(wf, `${n}.yml`), workflowYaml(n, marker));
+  for (const n of remove) rmSync(join(wf, `${n}.yml`), { force: true });
+  execFileSync("git", ["add", "-A"], { cwd: source.root });
+  execFileSync("git", ["-c", "user.email=fg583@test.invalid", "-c", "user.name=fg583", "commit", "-q", "-m", `shape ${marker}`], { cwd: source.root });
 }
 
-/** Drive the real command action as a promoted release. exitCode is captured so a
- *  release-check failure (no docker in-container) doesn't leak to the runner, and
- *  the structured UpgradeResult is returned for assertions on the installed surface. */
-function upgradeAsRelease(assetsDir: string, devDir: string): UpgradeResult {
-  const before = process.exitCode;
-  process.exitCode = undefined;
-  const realLog = console.log;
-  const realWarn = console.warn;
-  console.log = () => {};
-  console.warn = () => {};
+/** Run the installed shim as a subprocess against an explicit FORGE_HOME, with a
+ *  stub API key so dispatch reaches the seed gate on any host. `repoDir` sets a
+ *  DIVERGENT FORGE_REPO_DIR to prove it never leaks into the promoted seed source. */
+function runForge(shimPath: string, args: string[], home: string, opts: { repoDir?: string; cwd?: string } = {}): { status: number | null; stderr: string; stdout: string } {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    FORGE_HOME: home,
+    ANTHROPIC_API_KEY: "sk-stub",
+    HOME: process.env.HOME ?? "/tmp",
+    NO_NOTIFY: "true",
+  };
+  if (opts.repoDir) env.FORGE_REPO_DIR = opts.repoDir;
+  else delete env.FORGE_REPO_DIR;
+  const r = spawnSync(shimPath, args, { encoding: "utf8", env, timeout: 120000, cwd: opts.cwd });
+  return { status: r.status, stderr: r.stderr ?? "", stdout: r.stdout ?? "" };
+}
+
+/** The generation dir the seed pointer currently resolves to (realpath), or null. */
+function currentGenDir(home: string): string | null {
+  const link = seedCurrentLinkIn(home);
   try {
-    return runUpgrade({ skipProject: true }, { mode: "release", assetsDir, devDir });
-  } finally {
-    console.log = realLog;
-    console.warn = realWarn;
-    process.exitCode = before;
+    return existsSync(link) ? realpathSync(link) : null;
+  } catch {
+    return null;
   }
 }
 
-test("FG-583: upgrade from release A publishes EXCLUSIVELY A's bytes, and the dispatch path reads ONE complete A generation — under a divergent dev checkout", () => {
-  const releaseA = releaseTree("fg583-relA-", "A", ["alpha", "beta"]);
-  const devCheckout = releaseTree("fg583-dev-", "DEVDIVERGENT", ["alpha", "beta"]);
-  // runUpgrade is told mode:"release" + assetsDir:releaseA explicitly, mirroring a
-  // promoted runtime installing its OWN release-bundled seeds. The installer runs
-  // for real; the generation is then published from the executing release.
-  const result = upgradeAsRelease(releaseA, devCheckout);
-  assert.equal(result.seedGeneration, "published", "the installed command published an atomic generation");
+function readWorkflow(genDir: string, name: string): string {
+  return readFileSync(join(genDir, "workflows", `${name}.yml`), "utf8");
+}
 
-  // DISPATCH RESOLUTION PATH: the anchor every dispatch entry captures.
-  const anchor = resolveSeedGeneration();
-  assert.ok(anchor, "the dispatch anchor resolves one published generation");
-  assert.equal(inspectSeedInstall().kind, "healthy", "the install is healthy, not partial/torn");
+/** A fresh disposable home built releases A and B are promotable into (both were
+ *  built against `source.home`, so they promote only into that home — FG-571 F4). */
+function freshHome(label: string): { home: string; shim: string } {
+  const home = source.home; // the store both releases pin
+  // Clear any prior generation state so each test starts from no-generation.
+  rmSync(seedGenerationsDirIn(home), { recursive: true, force: true });
+  rmSync(seedCurrentLinkIn(home), { force: true });
+  rmSync(join(home, "seed-selection"), { force: true });
+  rmSync(join(home, "seed-previous"), { force: true });
+  const prefix = canonicalMkdtemp(`fg583-prefix-${label}-`);
+  const shim = installShim({ prefix, shimText: renderShim(), shimName: SHIM_NAME });
+  return { home, shim };
+}
 
-  // Every workflow read THROUGH the anchor (the dispatch consume path) is release
-  // A's bytes — never the divergent dev checkout's, never a cross-file mix.
-  for (const n of ["alpha", "beta"]) {
-    assert.match(loadWorkflow(n, { seedGeneration: anchor }).description, /release A/, `${n} is A's`);
-    assert.doesNotMatch(loadWorkflow(n, { seedGeneration: anchor }).description, /DEVDIVERGENT/, `${n} is not dev bytes`);
-  }
-  assert.equal(anchor.manifest.sourceAssetRoot.includes(devCheckout), false, "dev checkout is never the recorded source");
+before(async () => {
+  repoHeadBefore = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8" }).trim();
+  workspace = canonicalMkdtemp("fg583-promoted-ws-");
+  source = await makeDisposableSourceRoot(repoRoot);
+  // Release A ships {alpha, beta}; release B ships {alpha, gamma}. Both built against
+  // source.home so both promote into it.
+  shapeAndCommit("A", ["alpha", "beta"], []);
+  releaseA = source.build({ outDir: join(workspace, "release-A"), rand: "fg583a", home: source.home });
+  shapeAndCommit("B", ["alpha", "gamma"], ["beta"]);
+  releaseB = source.build({ outDir: join(workspace, "release-B"), rand: "fg583b", home: source.home });
 });
 
-test("FG-583: promoting B — a NEW invocation consumes complete B; an ALREADY-RUNNING invocation stays on complete A, never an A/B mix", () => {
-  // A and B ship DIFFERENT workflow sets AND different marker bytes, so a mix is a
-  // set no release shipped: A has {alpha, beta}; B has {alpha, gamma}.
-  const releaseA = releaseTree("fg583-A2-", "A", ["alpha", "beta"]);
-  const releaseB = releaseTree("fg583-B2-", "B", ["alpha", "gamma"]);
-  const devCheckout = releaseTree("fg583-dev2-", "DEVDIVERGENT", ["alpha", "beta"]);
+after(() => {
+  if (existsSync(workspace)) {
+    thawReleaseTree(workspace);
+    rmSync(workspace, { recursive: true, force: true });
+  }
+  // Promotions into source.home froze the materialized release units there; thaw the
+  // build home (NOT source.root, whose node_modules is a symlink) so the plain rmSync
+  // in removeDisposableSourceRoot can traverse it.
+  if (source && existsSync(source.home)) thawReleaseTree(source.home);
+  if (source) removeDisposableSourceRoot(source);
+  assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8" }).trim(), repoHeadBefore, "the suite left the real checkout's HEAD unmoved");
+});
 
-  // Promote A, then an already-running invocation captures its anchor ONCE.
-  upgradeAsRelease(releaseA, devCheckout);
-  const anchorA = resolveSeedGeneration();
-  assert.ok(anchorA);
-  assert.match(loadWorkflow("alpha", { seedGeneration: anchorA }).description, /release A/);
-  assert.match(loadWorkflow("beta", { seedGeneration: anchorA }).description, /release A/);
+test("FG-583 SAFETY: releases are built from a DISPOSABLE checkout, never the real repository", () => {
+  assert.notEqual(source.root, repoRoot);
+  assert.ok(!source.root.startsWith(repoRoot), "the disposable checkout is not inside the real repository");
+});
 
-  // Atomically promote B via a second real upgrade.
-  const resultB = upgradeAsRelease(releaseB, devCheckout);
-  assert.equal(resultB.seedGeneration, "published");
+test("FG-583 (Finding 2): BEFORE `forge upgrade`, an installed dispatch entry FAILS CLOSED with the named no-generation state; the documented bootstrap then makes it dispatchable — exclusively A's bytes under a divergent FORGE_REPO_DIR", () => {
+  const { home, shim } = freshHome("bootstrap");
+  const proj = canonicalMkdtemp("fg583-proj-boot-");
+  execFileSync("git", ["init", "-q"], { cwd: proj });
+  promote({ home, candidate: releaseA.releaseDir });
+
+  // FAIL-CLOSED: no generation is published yet, so an installed dispatch entry
+  // REFUSES with the named no-generation state — the documented `forge upgrade`
+  // step is genuinely required.
+  assert.equal(currentGenDir(home), null, "no generation is published before upgrade");
+  const before = runForge(shim, ["invoke", "engineer", "--task", "probe", "--project", proj, "--unrouted"], home);
+  assert.notEqual(before.status, 0, "dispatch refuses before a generation exists");
+  assert.match(before.stderr, /no complete seed generation|refusing to dispatch/i, `the refusal names the no-generation state — got: ${before.stderr.slice(0, 400)}`);
+
+  // THE DOCUMENTED BOOTSTRAP, driven through the installed shim. A DIVERGENT
+  // FORGE_REPO_DIR (release B's tree) is present but must never become the source.
+  runForge(shim, ["upgrade", "--skip-project"], home, { repoDir: releaseB.releaseDir });
+  runForge(shim, ["setup"], home);
+
+  const gen = currentGenDir(home);
+  assert.ok(gen, "after the documented bootstrap a complete generation is published");
+  // EXCLUSIVELY A's bytes: alpha+beta are A's, and the divergent B checkout never leaked.
+  assert.match(readWorkflow(gen!, "alpha"), /release A/, "alpha is release A's bytes");
+  assert.match(readWorkflow(gen!, "beta"), /release A/, "beta is release A's bytes");
+  assert.ok(!existsSync(join(gen!, "workflows", "gamma.yml")), "B-only gamma never leaked from the divergent FORGE_REPO_DIR");
+
+  // CONSUMED: a dispatch entry now gets PAST the seed gate (no no-generation refusal).
+  const after = runForge(shim, ["invoke", "engineer", "--task", "probe", "--project", proj, "--unrouted"], home);
+  assert.doesNotMatch(after.stderr, /no complete seed generation/i, `dispatch consumes the published generation — got: ${after.stderr.slice(0, 400)}`);
+
+  // Finding 5: `forge route compile` for the HOST source REFUSES-and-DIRECTS at the
+  // installed surface — it does NOT silently rewrite a flat routing-policy.yml (which
+  // would change nothing a run reads); it points the operator at `forge upgrade`.
+  const neutralCwd = canonicalMkdtemp("fg583-neutral-cwd-");
+  const compile = runForge(shim, ["route", "compile"], home, { cwd: neutralCwd });
+  assert.match(compile.stdout + compile.stderr, /forge upgrade/i, `host route compile directs to forge upgrade — got: ${(compile.stdout + compile.stderr).slice(0, 400)}`);
+  assert.doesNotMatch(compile.stdout, /Compiled \d+ routes \(host\) ->/, "host route compile does NOT perform a flat write");
+
+  rmSync(neutralCwd, { recursive: true, force: true });
+  rmSync(proj, { recursive: true, force: true });
+});
+
+test("FG-583 (Finding 3): promoting B → a NEW dispatch resolves ONE complete B generation, while the retained A generation still holds A's bytes and B-only `gamma` is invisible to it — no A/B mix", () => {
+  const { home, shim } = freshHome("promoteB");
+  promote({ home, candidate: releaseA.releaseDir });
+  runForge(shim, ["upgrade", "--skip-project"], home);
+  const genA = currentGenDir(home);
+  assert.ok(genA, "release A generation is published");
+  assert.match(readWorkflow(genA!, "alpha"), /release A/);
+  assert.match(readWorkflow(genA!, "beta"), /release A/);
+
+  // Atomically promote B and republish via a second real `forge upgrade`.
+  promote({ home, candidate: releaseB.releaseDir });
+  runForge(shim, ["upgrade", "--skip-project"], home);
+  const genB = currentGenDir(home);
+  assert.ok(genB, "release B generation is published");
+  assert.notEqual(genA, genB, "distinct complete generations — no run spans both");
 
   // A NEW invocation resolves the live pointer → ONE complete B generation.
-  const fresh = resolveSeedGeneration();
-  assert.ok(fresh);
-  assert.match(loadWorkflow("alpha", { seedGeneration: fresh }).description, /release B/);
-  assert.match(loadWorkflow("gamma", { seedGeneration: fresh }).description, /release B/);
+  assert.match(readWorkflow(genB!, "alpha"), /release B/, "the new generation is release B's bytes");
+  assert.match(readWorkflow(genB!, "gamma"), /release B/, "B's exclusive workflow is present in the new generation");
 
-  // The ALREADY-RUNNING invocation, threading its open anchor, stays on COMPLETE A:
-  // every A workflow still resolves to A's bytes, and B's exclusive workflow
-  // (`gamma`) is NOT visible through A's anchor — so it can never observe an A/B mix.
-  assert.match(loadWorkflow("alpha", { seedGeneration: anchorA }).description, /release A/);
-  assert.match(loadWorkflow("beta", { seedGeneration: anchorA }).description, /release A/);
-  assert.throws(() => loadWorkflow("gamma", { seedGeneration: anchorA }), /not found/, "B-only workflow is invisible to A's anchor — no cross-generation mix");
-  assert.notEqual(anchorA.root, fresh.root, "distinct complete generations — no run spans both");
+  // The ALREADY-OPEN invocation anchored to genA stays on COMPLETE A: the A
+  // generation is retained (never recycled), still holds A's bytes, and B's
+  // exclusive workflow gamma is NOT visible through it — so it can never observe an
+  // A/B mix.
+  assert.ok(existsSync(genA!), "the A generation is retained after B is promoted");
+  assert.match(readWorkflow(genA!, "alpha"), /release A/, "A's anchor still reads A's bytes");
+  assert.match(readWorkflow(genA!, "beta"), /release A/);
+  assert.ok(!existsSync(join(genA!, "workflows", "gamma.yml")), "B-only gamma is invisible to A's anchor — no cross-generation mix");
 });
 
-test("FG-583: destination-trust refusal fires at the INSTALLED surface — a replaceable destination symlink is refused, the unrelated target unchanged", () => {
-  // runUpgrade operates on the disposable $FORGE_HOME constant (src/test-setup.ts),
-  // so the escaping symlink must stand in for THAT home's seed-generations store.
-  // Clear any prior generation state so the symlink can take its place, and remove
-  // the symlink in `finally` so later work re-publishes cleanly.
-  const home = process.env.FORGE_HOME!;
-  const genStore = join(home, "seed-generations");
-  rmSync(genStore, { recursive: true, force: true });
-  rmSync(join(home, "seed-current"), { force: true });
+test("FG-583 (Finding 3): the destination-trust refusal fires at the INSTALLED `forge upgrade` surface — a replaceable destination symlink is refused, the unrelated target unchanged", () => {
+  const { home, shim } = freshHome("desttrust");
+  promote({ home, candidate: releaseA.releaseDir });
 
-  const unrelated = mkdtempSync(join(tmpdir(), "fg583-dt-unrelated-"));
-  cleanups.push(unrelated);
+  const unrelated = canonicalMkdtemp("fg583-dt-unrelated-");
   const sentinel = join(unrelated, "keep.txt");
   writeFileSync(sentinel, "do-not-touch");
   // Replace the generations store with a symlink escaping the disposable home.
+  const genStore = seedGenerationsDirIn(home);
+  rmSync(genStore, { recursive: true, force: true });
   symlinkSync(unrelated, genStore);
-  try {
-    const releaseA = releaseTree("fg583-dt-", "A", ["alpha"]);
-    const result = upgradeAsRelease(releaseA, releaseA);
-    // The installed command surface reports the publication REFUSED (a named,
-    // repairable partial-install state) — not a healthy install.
-    assert.equal(result.seedGeneration, "failed", "the installed surface refuses the escaping destination");
-    assert.ok((result.seedGenerationError ?? "").length > 0, "and names the refusal reason");
-    // The unrelated target is byte-for-byte unchanged, and no generation slipped in.
-    assert.equal(readFileSync(sentinel, "utf8"), "do-not-touch");
-  } finally {
-    rmSync(genStore, { force: true });
-  }
+
+  const r = runForge(shim, ["upgrade", "--skip-project"], home);
+  // The installed surface refuses the escaping destination and the unrelated target
+  // is byte-for-byte unchanged; no generation slipped in.
+  assert.equal(readFileSync(sentinel, "utf8"), "do-not-touch", "the unrelated target is left byte-for-byte unchanged");
+  assert.match(r.stdout + r.stderr, /escapes the forge home|refusing to publish|destination/i, `the installed surface names the destination refusal — got: ${(r.stdout + r.stderr).slice(0, 400)}`);
+  assert.deepEqual(readdirSync(unrelated), ["keep.txt"], "nothing was written into the escaped target");
+
+  rmSync(genStore, { force: true });
+  rmSync(unrelated, { recursive: true, force: true });
 });

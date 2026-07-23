@@ -23,6 +23,14 @@ Now build a release and select it as the machine-wide `forge`. There's no stable
 
 The three steps are separate on purpose: a build selects nothing, a promotion is an atomic swap of `~/.forge/current` that leaves the previous release selected if the candidate fails validation, and the shim is installed explicitly — a promotion never rewrites it. To upgrade later, build and promote again; the shim resolves `current` at run time and is not reinstalled.
 
+Then publish the seed generation dispatch reads — this step is **required**, not optional:
+
+```bash
+forge upgrade --skip-project     # publishes the atomic seed generation dispatch reads
+```
+
+`install-seeds.sh` above only wrote the flat `~/.forge/` copies, and since FG-583 those are **not** a dispatch source: every dispatch reads exclusively the atomic *seed generation* that `forge upgrade` publishes. Until that first generation is published the host fails closed — `forge next` and every gate advance refuse with a named no-generation state (`forge doctor` reports `Seed install: NOT INSTALLED`), repairable only by `forge upgrade`. (Run from the promoted `forge`, this also refuses the `git pull` / `npm install` half and closes `INCOMPLETE`; the asset half that publishes the generation still runs. Add `--skip-git --skip-npm` for a clean exit.)
+
 Don't use `npm link` for this. It puts a `forge` on `$PATH` symlinked into your live checkout, which bypasses the release split, the `current` pointer, the pinned interpreter, and the environment sanitization the stable `forge` gives you. Use `./bin/forge-dev` (or `npm run forge -- <cmd>`) when you want to run the live checkout — that entry exists for exactly that, and fails when the checkout is broken by design. Note that stable `forge` also unsets ambient `NODE_OPTIONS`, `NODE_PATH`, `NODE_EXTRA_CA_CERTS` and peers; see the README if you depend on any of those reaching forge.
 
 Verify: `which forge` should print a path; `forge release current` should name the release you promoted; `forge --help` should list the commands.
