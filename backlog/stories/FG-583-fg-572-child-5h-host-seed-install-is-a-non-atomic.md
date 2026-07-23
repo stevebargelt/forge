@@ -120,3 +120,24 @@ The "all 7 AC met" grid above OVERCLAIMED. Operator review found:
 3. **MEDIUM — the promoted-layout AC test does not exercise the installed command surface.** src/cli/commands/fg583-promoted-layout.integration.test.ts calls `runUpgrade()` (library, :91) and `resolveSeedGeneration()`/`loadWorkflow()` (library, :109/:116) in-process — NOT the promoted release's `forge upgrade` / `forge next` CLI. The AC requires the INSTALLED surface; this is an evidence gap, so that AC is NOT met as written.
 
 (Finding 4 — "closeout not on origin/main" — was a reviewed-older-commit artifact: the close landed at 1cd1bb9, two commits after the reviewed 8272e5b. Now reopened, so moot.)
+
+## Re-close acceptance criteria (operator direction 2026-07-23)
+
+Finding 1 — routing authority model, fully in FG-583 (NOT deferred to FG-605):
+- Project-local policy still overrides normally.
+- Host policy comes from the invocation's anchored seed generation (the generation already carries the compiled routing-policy).
+- ALL host-policy consumers use that same anchor: `resolvePolicyPath` (raci/project.ts) + `lane-classifier.ts`, `startRun.ts`, `invoke.ts`, `cli/route-preflight.ts`, `cli/commands/doctor.ts`, `raci/governance.ts`, and the `route` commands.
+- `forge route compile` / `raci apply` either republish a seed generation safely (single atomic swap on the seed pointer — no two-pointer issue, distinct from interpreter selection) OR explicitly REFUSE and direct the operator to `forge upgrade`. A successful compile that only rewrites the flat file (changing nothing effective) is NOT acceptable.
+- `routingGovernance` / host-default route-matrix must PASS (the regression that caused the earlier revert must not recur).
+- Tests prove a flat-policy mutation cannot affect an anchored OR a new dispatch.
+- Docs state the resulting command semantics accurately (invariants.md already claims policy moves with the generation — the code must make that true).
+- FG-605 is withdrawn/reduced ONLY after this behavior is resolved — never left as a still-broken control path.
+
+Finding 2 — fresh-install dispatchability via DOCUMENTATION (not install-seeds.sh publication; that runs pre-promotion = dev bytes, and a promote-time publish is a two-pointer problem):
+- The bounded documented bootstrap is: `build release` → `promote release` → `install shim` → `forge upgrade --skip-project` → `forge setup`.
+- Make the `forge upgrade --skip-project` step prominent and REQUIRED in every installation guide (README, quick-start, how-to-use-forge-across-projects).
+- The promoted-CLI acceptance test PROVES this exact documented sequence yields a dispatchable install. Robust because dispatch fails closed until the step succeeds.
+
+Finding 3 — promoted-layout acceptance test rewritten to spawn the ACTUAL promoted-release CLI (`forge upgrade --skip-project`, `forge next`) as a subprocess — NOT `runUpgrade()`/`loadWorkflow()` in-process — and to exercise the finding-2 documented bootstrap sequence.
+
+Re-close only after: fresh adversarial review (red-wide + red-security), corrected AC grid persisted, green CI (test + test-extended). Then FG-583 → FG-572 close.
