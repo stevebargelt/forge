@@ -1,9 +1,11 @@
 ---
 id: FG-553
 type: story
-status: active
+status: done
 title: "forge-on-forge: an agent mid-writing forge's own source breaks the live CLI machine-wide, taking down the orchestrator's control plane"
 created: 2026-07-14
+closed: 2026-07-23
+closed_commit: b0dd651
 ---
 
 ## Problem
@@ -233,3 +235,27 @@ does not prove the defect was covered.
   decides whether it is retired or retained as a named fallback; **FG-565** confirms the decision was
   carried out. This slice makes the workaround *unnecessary* by fixing the control plane; it does not
   declare it retired.
+
+## Aggregate Acceptance Evidence (closure 2026-07-23)
+
+FG-553 closes on the AGGREGATE evidence of its six children (FG-567–572), all shipped and closed. Each AC below maps to an EXECUTED test or a landed mechanism. FG-555 (R3/R4 implementation) and FG-565 (campaign-level verification) are also closed, so the campaign-level half of F30 is satisfied too.
+
+| AC | Evidence | Verdict |
+|----|----------|---------|
+| Machine-wide blast radius ELIMINATED (not documented) | The machine-wide `forge` runs an immutable release closure (FG-569, `1b11f25`) selected through an atomic `current` symlink (FG-571); an agent editing a dev worktree cannot alter it. `forge-dev` retains live-source iteration. BD-13 (never execute source under active mutation) is met by construction. | met |
+| `forge` executes a stable runtime isolated from all active dev worktrees | FG-569 release closure (entry + src + node_modules + native binding + pinned interpreter as one indivisible unit); `release.integration.test.ts` immutability + closure tests. | met |
+| Explicit dev entry retains live-source iteration | `forge-dev` / live-source path preserved (FG-569/FG-571); "commit and it's live" relocated to the dev entry. | met |
+| F23 — invalid dev source → stable readers + launch observer still work | `src/v2/fg565-f23-f24-broken-source.integration.test.ts` (RED against pre-fix baseline). | met |
+| F24 — transient missing-export/cross-file inconsistency → stable commands work in this + unrelated projects | same `fg565-f23-f24-broken-source` suite. | met |
+| F25 — explicit live-source command against broken source fails LOCALLY without changing the stable runtime | `forge-dev` runs the working tree; the promoted `forge` is unaffected (release closure isolation). | met |
+| F26 — validated promotion: new commands atomically use the recorded version; no mixed tree visible | `src/v2/fg571-promote.integration.test.ts` (atomic `current` swap; FG-571). | met |
+| F27 — interrupted promotion: previous stable runtime remains selected + usable | `fg571-promote` swap-and-retain (one-swap `(current, previous)`, never a torn selection). | met |
+| F28 / T9 — in-flight promotion: runtime identity diagnosable; running process anchored; store/schema compat follows policy (T9 settled EMPIRICALLY) | `fg571-promote.integration.test.ts:448` "F28/T9 (EXECUTED): a process anchored to A completes on A — lazy ESM import AND lazy CJS require AND lazy NATIVE dlopen — across a mid-flight promotion to B", + `:548` MUTANT (delete anchored release → RED, proving retention). T9 settled by execution, not assertion. | met |
+| F29 — AVAILABILITY: bare stable `forge` RUNS CORRECTLY regardless of caller PATH (not "fails cleanly") | `release.integration.test.ts:187` "R1 (EXECUTED, NO node on PATH): execPath == manifest interpreter, ABI == manifest ABI"; `:250` executed through a promotion symlink under a hostile PATH; `:268` `forge init` runs FROM THE RELEASE with NO node on PATH. The entry execs an ABSOLUTE pinned interpreter via a `/bin/sh` shim, so it runs from an unsanitized shell. | met |
+| F30 (this slice's half) — R1 + R2 provenance + explicit R3/R4 CONTRACT | R1 executed (`release.integration.test.ts:187`), R2 entry executed (`:213`); `launch.ts` records `control` (R1) + exit-recorder (R2). R3/R4 contract explicit at `src/v2/launch.ts:137-159` (R3 = argv[0] resolved AT SPAWN; R4 DEFAULTS to UNKNOWABLE, never implied by argv). Campaign-level full F30: FG-555 implemented R3/R4, FG-565 verified — both closed. | met |
+| F31 — REFUSAL: incompatible interpreter refused by bounded ABI assertion BEFORE native load | FG-570 (`5044c5d`) `checkAbi` exact equality (upper+lower bound); host triad (v25/v24/v23) + a MANDATORY CI `test-extended` arm provisioning real Node 26/ABI 147 that reddens rather than skips. Clean pre-load refusal, not `ERR_DLOPEN_FAILED`. | met |
+| F35 / BD-15 — version-skew store compat under the decided policy | FG-568 (`275ac63`): backward-compatible-migration-only — the ordinary open path is additive-only on every open; destructive DDL moved to the quiesce-gated `forge store converge`. | met |
+| `forge upgrade` + "commit and it's live" reconciled; docs say which is in force | `forge` = promoted release; `forge-dev` = live source; README/quick-start/how-to reconciled (FG-577 + FG-583 install docs). | met |
+| BD-13 / BD-14 / BD-15 satisfied | BD-13 (no source under active mutation) — release closure; BD-14 (availability independent of caller env) — pinned interpreter + `/bin/sh` shim, F29 executed; BD-15 (concurrent-version store) — FG-568 additive-only. | met |
+
+Children: FG-567 (`97363ca`, superseded by FG-569's exec-not-spawn) · FG-568 (`275ac63`) · FG-569 (`1b11f25`) · FG-570 (`5044c5d`) · FG-571 (atomic promote/rollback + shim) · FG-572 (installed-surface, closed at `b0dd651`). Every falsification test was observed RED against its pre-fix baseline per the children's evidence.
