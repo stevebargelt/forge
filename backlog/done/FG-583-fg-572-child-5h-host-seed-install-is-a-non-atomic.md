@@ -1,9 +1,11 @@
 ---
 id: FG-583
 type: story
-status: active
+status: done
 title: "FG-572 Child 5h: host seed install is a non-atomic cp loop — an interrupted upgrade can expose a mixed but Zod-valid workflow set to a concurrent forge next"
 created: 2026-07-17
+closed: 2026-07-23
+closed_commit: 8272e5b
 ---
 
 **Parent:** FG-572 · **Epic:** FG-561 · **Depends on:** FG-577 (install from the correct tree first)
@@ -92,3 +94,21 @@ A failed/interrupted installation must have a **named, repairable state**, propa
 ## Not in scope
 - The workflows coverage gap in `SEED_SPECS` and the ownership/severity split (FG-579).
 - Source selection for the installer (FG-577).
+
+## Acceptance Evidence
+
+Shipped in merge commit `8272e5b` (PR #154). All acceptance criteria met.
+
+| AC | Evidence | Verdict |
+|----|----------|---------|
+| Kill/read interleavings never permit `forge next` to dispatch a mixed-but-Zod-valid set; RED reproducible before fix | `src/v2/fg583-mixed-generation-refusal.integration.test.ts` — "the flat layout is never a dispatch source: a mixed flat set is REFUSED, not read". The invariant moved to one place: `src/v2/loader.ts` `workspaceGeneration`/`noCompleteGenerationError` removed the flat dispatch fallback, so no dispatch consumer ever reads a torn flat set. RED-first reproduction landed then made green. | met |
+| A reader interleaved between individual installed files never consumes a torn surface | `src/v2/seed-generation.ts` `publishSeedGeneration` stages a complete generation under a private dir and commits with ONE `rename(2)` over the seed pointer (FG-571 one-swap vocabulary); test "a reader interleaved between individual installed files never sees a torn surface". | met |
+| An interrupted install leaves a named, repairable state — not a host that reports healthy | `src/v2/seed-generation.ts` `inspectSeedInstall` (healthy \| no-generation \| incomplete); `src/cli/commands/doctor.ts` reports NOT INSTALLED + non-zero exit; tests `src/cli/commands/fg583-doctor-seed-install.integration.test.ts`, `src/cli/commands/fg583-next-refusal.integration.test.ts` (refuses under a torn/no generation). | met |
+| Propagation consumers asserted: library, CLI human output, `--json`, exit code, doctor, retry advice, campaign/dispatch | Single refusal point in `loader.ts` inherited by every dispatch consumer (next/invoke/gate/campaign/continue — threaded anchor); `fg583-next-refusal.integration.test.ts` asserts human output + retry advice + non-zero exit; `fg583-doctor-seed-install.integration.test.ts` asserts doctor human line + `--json` block + exit. | met |
+| Promoted-layout acceptance test: installed surfaces from release A with a divergent dev checkout, generation exclusively from A; after promoting B a new invocation consumes complete B, a running invocation stays anchored to A | `src/cli/commands/fg583-promoted-layout.integration.test.ts` — "promoting B — a NEW invocation consumes complete B; an ALREADY-RUNNING invocation stays on complete A, never an A/B mix"; anchor via `resolveSeedGeneration` (resolved once) threaded through the dispatch chain. | met |
+| Source/destination trust failures covered: caller/dev bytes cannot become the promoted source; a replaceable destination symlink cannot redirect publication outside disposable `$FORGE_HOME`; refusal leaves the target byte-for-byte unchanged | Source: `fg583-mixed-generation-refusal.integration.test.ts` "SOURCE trust: a divergent dev checkout's bytes never become the promoted seed source" + "publishing dev/arbitrary bytes is REFUSED" (`publishSeedGeneration` derives source from `trustedAssetRoot`). Destination: "DESTINATION trust: a replaceable destination symlink is refused BEFORE any byte is written; the unrelated target is left unchanged" + the installed-surface variant in `fg583-promoted-layout`, via exported `promote.ts` `realpathContains`. | met |
+| Tests use disposable FORGE_HOME; the real `~/.forge` is never touched | All FG-583 tests `mkdtempSync` their own FORGE_HOME (`src/v2/seed-generation.testkit.ts`; each `fg583-*.test.ts` `beforeEach`); the `fg583-next-refusal` auth-mode fix (`sk-stub` apikey) ensured the seed gate is reached on a host with no oauth volume, keeping the isolated disposable-home behavior deterministic on CI. | met |
+
+**Additional hardening (red-security):** generation integrity is a CLOSED set — `loader.ts` refuses a Zod-valid file resolved from a generation but absent from its provenance manifest (torn/extra file), for both workflows and runtimes; regression test "integrity is a CLOSED set: a Zod-valid workflow ADDED to a generation but absent from its manifest is REFUSED".
+
+**Follow-up filed:** FG-605 (route preflight consuming routing policy from the generation — the dispatch-adjacent RACI change reverted to baseline to keep this ticket scoped).

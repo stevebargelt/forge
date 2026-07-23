@@ -1,9 +1,11 @@
 ---
 id: FG-572
 type: story
-status: active
+status: done
 title: "FG-553 Child 5: installed-surface compatibility (seeds/hooks/scripts/dashboard) across a promotion"
 created: 2026-07-14
+closed: 2026-07-23
+closed_commit: 8272e5b
 ---
 
 **Parent:** FG-553 · **Epic:** FG-561 · **Plan:** `docs/plans/fg553-slice1-architecture.md` (Child 5)
@@ -96,3 +98,19 @@ from these **externally-installed, version-compatible surfaces** (a compatibilit
 
 ## Not in scope
 - The release/promotion machinery itself (FG-569/FG-571).
+
+## Closure
+
+All seven children are closed — installed-surface compatibility across a promotion is complete:
+
+| Child | Surface | Shipped |
+|-------|---------|---------|
+| FG-577 (5a) | installer sources from the executing release (provenance) | done |
+| FG-578 (5b) | FORCE ownership: forge-owned re-install vs operator-authored retain | done |
+| FG-579 (5c+5d) | seed-drift coverage + workflow drift refusal | done |
+| FG-580 (5g) | dashboard bundled into the release, boots offline (`bc9286f`) | done |
+| FG-581 (5f) | routing-policy re-derive / post-promotion compile-failure refusal (`dcc19ec`) | done |
+| FG-582 (5e) | installed git hooks follow a promotion via `$FORGE_HOME/current` (`44a305a`) | done |
+| FG-583 (5h) | host seeds published as one atomic generation; no torn/mixed dispatch (`8272e5b`) | done |
+
+The umbrella closes with its last child (FG-583). Residual follow-ups filed and non-blocking: FG-604 (hook repoint TOCTOU), FG-605 (route preflight consuming policy from the generation).
