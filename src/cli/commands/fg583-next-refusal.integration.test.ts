@@ -73,11 +73,14 @@ function plantTornGeneration(): void {
 }
 
 function runNext(runId: string) {
-  // Strip auth env so the subprocess resolves to oauth mode and passes cred
-  // validation without a hard block (no volume probe result → falls through),
-  // letting the wave actually reach the FG-583 seed gate.
+  // Resolve auth to anthropic-apikey mode with a stub key (the codebase's
+  // standard integration-test pattern, e.g. sk-stub) so cred validation passes
+  // WITHOUT a real credential, letting the wave reach the FG-583 seed gate. An
+  // earlier form stripped all auth env to force oauth "fall-through", but on a
+  // host with no forge-claude-oauth volume credentials (CI) that hard-blocks with
+  // an auth error BEFORE the seed gate, so the refusal under test never fired.
   const env: NodeJS.ProcessEnv = { ...process.env, FORGE_HOME: forgeHome, NO_NOTIFY: "true" };
-  delete env.ANTHROPIC_API_KEY;
+  env.ANTHROPIC_API_KEY = "sk-stub";
   delete env.CLAUDE_CODE_USE_BEDROCK;
   delete env.AWS_PROFILE;
   return spawnSync(tsx, [entry, "next", runId, "--project", projectDir], { encoding: "utf8", env });
