@@ -483,7 +483,11 @@ CREATE TABLE IF NOT EXISTS tickets (
   project_key   TEXT NOT NULL,
   ticket_id     TEXT NOT NULL,
   type          TEXT NOT NULL,
-  status        TEXT NOT NULL,
+  -- The DB status vocabulary is exactly active/done/deferred (NO blocked — legacy
+  -- blocked maps to active + a blocker_evidence row). A CHECK enforces it at the
+  -- SQLite layer so a direct write (bypassing the DbTicketStatus TS type) cannot
+  -- introduce an out-of-vocabulary status.
+  status        TEXT NOT NULL CHECK (status IN ('active', 'done', 'deferred')),
   title         TEXT NOT NULL,
   body          TEXT NOT NULL DEFAULT '',
   created       TEXT,
@@ -498,26 +502,35 @@ CREATE TABLE IF NOT EXISTS tickets (
 
 -- Ticket events — append-shaped audit, keyed by (project_key, ticket_id). A
 -- deterministic natural id (event_key) makes re-import idempotent: the same
--- logical event UPSERTs rather than duplicating.
+-- logical event UPSERTs rather than duplicating. The composite FK to tickets
+-- forbids orphan/cross-project event rows; ON DELETE CASCADE prunes an event when
+-- its owning ticket is removed (the reconcile removal path relies on it).
 CREATE TABLE IF NOT EXISTS ticket_events (
   event_key   TEXT PRIMARY KEY,
   project_key TEXT NOT NULL,
   ticket_id   TEXT NOT NULL,
   event_type  TEXT NOT NULL,
   payload     TEXT,
-  created_at  TEXT NOT NULL
+  created_at  TEXT NOT NULL,
+  FOREIGN KEY (project_key, ticket_id)
+    REFERENCES tickets(project_key, ticket_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_ticket_events_ticket
   ON ticket_events(project_key, ticket_id);
 
 -- Ticket relations — keyed by (project_key, ticket_id). The composite PRIMARY
 -- KEY makes re-import idempotent (the same relation UPSERTs, never duplicates).
+-- The composite FK to tickets forbids orphan/cross-project relation rows (the
+-- OWNING side only — related_id is a free reference, possibly to a ticket not in
+-- this shadow); ON DELETE CASCADE prunes a relation when its ticket is removed.
 CREATE TABLE IF NOT EXISTS ticket_relations (
   project_key TEXT NOT NULL,
   ticket_id   TEXT NOT NULL,
   related_id  TEXT NOT NULL,
   rel_type    TEXT NOT NULL,
-  PRIMARY KEY (project_key, ticket_id, related_id, rel_type)
+  PRIMARY KEY (project_key, ticket_id, related_id, rel_type),
+  FOREIGN KEY (project_key, ticket_id)
+    REFERENCES tickets(project_key, ticket_id) ON DELETE CASCADE
 );
 
 -- Host-side storage mode, keyed by project_key (default 'markdown'). Stored in
@@ -550,7 +563,9 @@ CREATE TABLE IF NOT EXISTS blocker_evidence (
   reason      TEXT,
   source      TEXT NOT NULL,
   created_at  TEXT NOT NULL,
-  UNIQUE (project_key, ticket_id, source)
+  UNIQUE (project_key, ticket_id, source),
+  FOREIGN KEY (project_key, ticket_id)
+    REFERENCES tickets(project_key, ticket_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_blocker_evidence_ticket
   ON blocker_evidence(project_key, ticket_id);

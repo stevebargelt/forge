@@ -94,6 +94,7 @@ test("upsertTicket round-trips frontmatter JSON", () => {
 });
 
 test("ticket relations UPSERT idempotently on the composite key", () => {
+  upsertTicket(ticket({ projectKey: "pk-A", ticketId: "FG-1" }));
   upsertTicketRelation({ projectKey: "pk-A", ticketId: "FG-1", relatedId: "FG-2", relType: "related" });
   upsertTicketRelation({ projectKey: "pk-A", ticketId: "FG-1", relatedId: "FG-2", relType: "related" });
   const rels = relationsForTicket("pk-A", "FG-1");
@@ -102,6 +103,7 @@ test("ticket relations UPSERT idempotently on the composite key", () => {
 });
 
 test("ticket events UPSERT idempotently on event_key", () => {
+  upsertTicket(ticket({ projectKey: "pk-A", ticketId: "FG-1" }));
   upsertTicketEvent({
     eventKey: "import:pk-A:FG-1",
     projectKey: "pk-A",
@@ -124,6 +126,7 @@ test("ticket events UPSERT idempotently on event_key", () => {
 });
 
 test("blocker_evidence UPSERTs on the natural key (project_key, ticket_id, source)", () => {
+  upsertTicket(ticket({ projectKey: "pk-A", ticketId: "FG-9" }));
   const b = {
     projectKey: "pk-A",
     ticketId: "FG-9",
@@ -182,6 +185,9 @@ test("pruneRemovedTickets prunes this source's removed tickets + orphaned deps, 
 });
 
 test("reconcileRelations prunes relations of SURVIVING tickets not in the desired set", () => {
+  upsertTicket(ticket({ projectKey: "pk-A", ticketId: "FG-1" }));
+  upsertTicket(ticket({ projectKey: "pk-A", ticketId: "FG-8" }));
+  upsertTicket(ticket({ projectKey: "pk-B", ticketId: "FG-1" }));
   upsertTicketRelation({ projectKey: "pk-A", ticketId: "FG-1", relatedId: "FG-2", relType: "related" });
   upsertTicketRelation({ projectKey: "pk-A", ticketId: "FG-1", relatedId: "FG-3", relType: "related" });
   // A relation on a ticket NOT in keepIds (a sibling worktree's) must be untouched.
@@ -198,6 +204,8 @@ test("reconcileRelations prunes relations of SURVIVING tickets not in the desire
 });
 
 test("reconcileImportedBlockerEvidence prunes source-scoped evidence for unblocked surviving tickets", () => {
+  upsertTicket(ticket({ projectKey: "pk-A", ticketId: "FG-1" }));
+  upsertTicket(ticket({ projectKey: "pk-A", ticketId: "FG-2" }));
   upsertBlockerEvidence({ projectKey: "pk-A", ticketId: "FG-1", source: "import-legacy-blocked", createdAt: NOW });
   upsertBlockerEvidence({ projectKey: "pk-A", ticketId: "FG-2", source: "import-legacy-blocked", createdAt: NOW });
   upsertBlockerEvidence({ projectKey: "pk-A", ticketId: "FG-1", source: "slice-d-source", createdAt: NOW });
@@ -207,6 +215,62 @@ test("reconcileImportedBlockerEvidence prunes source-scoped evidence for unblock
 
   assert.equal(blockerEvidenceForTicket("pk-A", "FG-1").length, 2, "still-blocked + other-source rows kept");
   assert.equal(blockerEvidenceForTicket("pk-A", "FG-2").length, 0, "unblocked import evidence pruned");
+});
+
+// The composite FK invariant: dependent rows cannot orphan or cross projects, and
+// the status CHECK rejects an out-of-vocabulary value even on a direct write.
+test("dependent rows are refused when no matching (project_key, ticket_id) ticket exists", () => {
+  assert.throws(
+    () => upsertTicketEvent({ eventKey: "e:orphan", projectKey: "pk-A", ticketId: "FG-nope", eventType: "imported", createdAt: NOW }),
+    /FOREIGN KEY/,
+    "an event with no owning ticket is refused",
+  );
+  assert.throws(
+    () => upsertTicketRelation({ projectKey: "pk-A", ticketId: "FG-nope", relatedId: "FG-2", relType: "related" }),
+    /FOREIGN KEY/,
+    "a relation with no owning ticket is refused",
+  );
+  assert.throws(
+    () => upsertBlockerEvidence({ projectKey: "pk-A", ticketId: "FG-nope", source: "s", createdAt: NOW }),
+    /FOREIGN KEY/,
+    "blocker evidence with no owning ticket is refused",
+  );
+});
+
+test("a dependent row cannot cross projects to a ticket owned by a different project_key", () => {
+  upsertTicket(ticket({ projectKey: "pk-A", ticketId: "FG-1" }));
+  // The ticket exists under pk-A; referencing it under pk-B has no matching parent.
+  assert.throws(
+    () => upsertTicketEvent({ eventKey: "e:cross", projectKey: "pk-B", ticketId: "FG-1", eventType: "imported", createdAt: NOW }),
+    /FOREIGN KEY/,
+  );
+});
+
+test("deleting a ticket cascades its dependent event/relation/blocker rows", () => {
+  upsertTicket(ticket({ projectKey: "pk-A", ticketId: "FG-1" }));
+  upsertTicketEvent({ eventKey: "e:A:FG-1", projectKey: "pk-A", ticketId: "FG-1", eventType: "imported", createdAt: NOW });
+  upsertTicketRelation({ projectKey: "pk-A", ticketId: "FG-1", relatedId: "FG-2", relType: "related" });
+  upsertBlockerEvidence({ projectKey: "pk-A", ticketId: "FG-1", source: "import-legacy-blocked", createdAt: NOW });
+
+  db.prepare(`DELETE FROM tickets WHERE project_key = 'pk-A' AND ticket_id = 'FG-1'`).run();
+
+  assert.equal(eventsForTicket("pk-A", "FG-1").length, 0, "event cascaded");
+  assert.equal(relationsForTicket("pk-A", "FG-1").length, 0, "relation cascaded");
+  assert.equal(blockerEvidenceForTicket("pk-A", "FG-1").length, 0, "blocker evidence cascaded");
+});
+
+test("the status CHECK rejects an out-of-vocabulary value on a direct write", () => {
+  assert.throws(
+    () =>
+      db
+        .prepare(
+          `INSERT INTO tickets (project_key, ticket_id, type, status, title, body, imported_at)
+           VALUES ('pk-A', 'FG-5', 'story', 'blocked', 't', '', ?)`,
+        )
+        .run(NOW),
+    /CHECK constraint/,
+    "'blocked' (and any status outside active/done/deferred) is refused",
+  );
 });
 
 test("id sequence is monotonic per (project_key, prefix)", () => {
