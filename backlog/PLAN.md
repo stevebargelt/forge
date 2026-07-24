@@ -1,6 +1,6 @@
 # Forge Working Plan
 
-**Last revised:** 2026-07-22
+**Last revised:** 2026-07-24
 
 This is a mutable statement of current operator intent. It is not an approval boundary, ticket
 specification, execution record, or source of lifecycle truth.
@@ -13,23 +13,32 @@ session handoff. This file may be rewritten whenever priorities change; Git is s
 
 ## Current objective
 
-Finish the existing durable-continuation foundation at FG-583, close its parent chain, and shift Forge
-development toward operator work management. The foundation is sufficient after that closeout; additional
-hardening is not automatically prerequisite work.
+Land the FG-496 DB-backed backlog as the canonical same-host source of truth across worktrees. FG-496 is now
+decomposed into five sequential, independently-shippable, additive-migration children (FG-606…FG-610). The
+durable-continuation foundation (FG-561/FG-583 chain) is complete; this is the next big rock toward operator
+work management (FG-593).
 
 ## Now
 
-1. **FG-583** — complete atomic host-seed publication.
-2. After FG-583 closes, reconcile and close **FG-572**, **FG-553**, and **FG-561** when their recorded
-   closure criteria are met.
+FG-496 slice chain — each additive-only to `~/.forge/forge.db`, cutover gated on migrating the two
+seam-bypassing reader classes. Implementation of Slice A awaits operator go-ahead on the decomposition.
+
+1. **FG-606 — Slice A:** DB ticket schema + idempotent Markdown import (non-authoritative shadow). The ready,
+   safe first slice — zero authority change.
+2. **FG-607 — Slice B:** DB-backed CRUD behind the `structured.ts` seam + per-project storage mode (default
+   markdown). Delivers the FG-495 cross-worktree shape.
+3. **FG-608 — Slice C:** migrate seam-bypassing readers (dashboard, campaign dir-guards) + the authoritative
+   cutover flip.
+4. **FG-609 — Slice D:** queue primitives (nullable stack rank, membership, revision-bound readiness, blocker
+   evidence, events).
+5. **FG-610 — Slice E:** atomic claims/leases/recovery + canonical claim-next query (consumed by FG-591).
 
 ## Next
 
-1. **FG-496** — DB-backed backlog, canonical stack rank, revision-bound readiness, queue membership, and
-   recoverable claims.
-2. **FG-591** — Kanban, CLI/API controls, and capacity-limited compatible-work dispatch.
-3. Reconcile **FG-593** as those children land.
-4. **FG-498** — GitHub Issue ingestion, if it remains valuable after the core queue is operating.
+1. **FG-591** — Kanban, CLI/API controls, and capacity-limited compatible-work dispatch; consumes FG-609/FG-610
+   primitives, starts after they land.
+2. Reconcile **FG-496** (parent) closed once FG-606…FG-610 close with an aggregate AC walk; then **FG-593**.
+3. **FG-498** — GitHub Issue ingestion, if it remains valuable after the core queue is operating.
 
 `Next` is deliberately short. Ordering here expresses current intent; it does not override ticket
 dependencies or authorize execution.

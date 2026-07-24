@@ -97,3 +97,53 @@ FG-496 must establish the durable primitives for an operator-curated work queue.
 - Tests cover ranked and unranked backlog items, explicit queue membership, reorder, readiness invalidation after edit, a blocked queued item retaining rank, temporary compatibility bypass without rank mutation, concurrent claim/capacity races, expired-lease recovery, and done removal from the active queue.
 
 The interactive Kanban/dashboard and capacity-limited dispatcher are a dependent operator-surface story; FG-496 owns the source-of-truth primitives they consume. A campaign may read backlog tickets, but ordinary queue dispatch does not require a campaign snapshot.
+
+## Decomposition (2026-07-24) — FG-496 is a parent tracking story; work ships as five sequential children
+
+An architecture + decomposition pass established that **nearly every backlog reader funnels through the
+`src/backlog/structured.ts` seam.** Migrating behind that seam migrates almost all consumers at once; the real
+"consumer migration" work is the handful of stragglers that bypass it (the dashboard's canonical
+main/master-checkout resolution, and the `existsSync('backlog')` dir-presence guards in campaign code). The
+authoritative cutover is a single flip of a per-project storage mode, safe only after those stragglers are
+migrated. Every slice is **additive-only** to `~/.forge/forge.db` (`CREATE TABLE IF NOT EXISTS` +
+`PRAGMA table_info`-guarded `ALTER`, never a `user_version` bump) so it cannot brick concurrent host processes
+or trip the FG-568 forward gate.
+
+Children (each independently shippable + testable, in sequence):
+
+1. **FG-606 — Slice A:** DB ticket schema (`tickets` / `ticket_events` / `ticket_relations`, explicit `type`) +
+   idempotent Markdown import as a non-authoritative shadow. Zero authority change, zero reader coupling.
+2. **FG-607 — Slice B:** DB-backed CRUD behind the structured.ts seam + per-project storage mode
+   (`markdown` | `db`); default stays `markdown`. Delivers the FG-495 cross-worktree shape in db mode.
+3. **FG-608 — Slice C:** migrate the seam-bypassing readers (dashboard ticket source, campaign dir-guards) +
+   `forge backlog migrate` (import + atomic flip). **This slice is the authoritative-cutover point** — DB
+   becomes source of truth. Post-cutover import conflict rule: create-only, divergent ids write a conflict
+   event, Markdown never silently clobbers a newer DB edit (`--force` to override).
+4. **FG-609 — Slice D:** queue primitives — canonical nullable `priority_rank`, explicit queue membership,
+   revision-bound readiness (reuse FG-382), durable blocker evidence, append-only event history. Derived
+   `in_progress`/`blocked` are computed, never stored.
+5. **FG-610 — Slice E:** atomic queue claims / leases / recovery / capacity accounting + the canonical
+   atomic claim-next query that FG-591 consumes. Primitives only — no dispatcher, no UI.
+
+### Dependency chain
+
+`FG-606 → FG-607 → FG-608 (cutover) → FG-609 → FG-610`. FG-591 (Kanban/CLI/API + running dispatcher) consumes
+FG-610's claim-next query and FG-609's rank/queue/readiness fields; FG-591 does not start until FG-496's
+primitives it depends on have landed.
+
+### Closure rules for FG-496 (this parent story)
+
+- FG-496 closes only when **all five children (FG-606…FG-610) are closed** AND its combined Acceptance
+  Criteria + the binding Operator Queue Contract above are walked with per-line evidence (per the closing
+  gate). Children carry the concrete AC; FG-496's own close is the aggregate walk, not a "children passed" rubber stamp.
+- Do NOT close FG-496 on partial slices. Unmet AC keeps it open; newly discovered scope is a NEW child/follow-up, never a reason to close early.
+- The boundary with FG-591 is firm: FG-496 stops at the canonical claim-next query. Any UI, operator control,
+  or running dispatcher work belongs to FG-591 and must not be pulled into a FG-496 child.
+
+### Open architecture decisions (operator input) carried on the relevant child
+
+- Storage-mode granularity: per-project (proposed) vs host-global default. (FG-607)
+- Ticket-ID allocation once Markdown is no longer authoritative: per-prefix DB sequence (proposed). (FG-607)
+- `forge backlog migrate`: single import+flip with `--dry-run` (proposed) vs two explicit steps. (FG-608)
+- Dashboard after cutover: per-project ticket board (proposed) vs host-wide cross-project board (arguably FG-591). (FG-608)
+- Re-import conflict default: skip + conflict event, Markdown loses, `--force` to override (proposed). (FG-608)
