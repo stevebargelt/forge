@@ -4,7 +4,7 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stringify as stringifyYaml } from "yaml";
@@ -424,4 +424,105 @@ test("unrecognized source status aborts import naming the ticket + bad status an
   // Atomic: the good ticket is not written either.
   assert.equal(ticketsForProject(wouldBeKey).length, 0, "zero rows written on an unrecognized-status import");
   assert.equal(getTicket(wouldBeKey, "FG-97"), undefined);
+});
+
+// FG-496 cross-store atomicity — direction 1: the guarded config write is REFUSED
+// (a symlinked .forge). The import must fail leaving ZERO DB changes — no registry
+// mapping, no tickets — never an authoritative DB identity with no durable config.
+test("config refusal (symlinked .forge) leaves ZERO DB changes — both stores unchanged", () => {
+  const dir = newProject();
+  writeTicketFile(dir, "stories", { id: "FG-200", type: "story", status: "active", title: "t" }, "b");
+
+  // Redirect .forge at an external dir via a symlink — the guard must fail closed.
+  const external = mkdtempSync(join(tmpdir(), "fg606-ext-"));
+  symlinkSync(external, join(dir, ".forge"), "dir");
+
+  const git = fixedRemoteGit("git@github.com:acme/symlink-guard.git");
+  const ev = computeRepositoryEvidence(dir, git);
+  const wouldBeKey = deriveProjectKey(ev.key);
+
+  assert.throws(
+    () => importBacklog(dir, { git, now: NOW }),
+    (e: unknown) => e instanceof Error && /symlink/.test(e.message),
+    "config refusal surfaces the symlink guard",
+  );
+
+  // Both stores unchanged: no registry claim, no tickets.
+  assert.equal(registryByEvidence(ev.key), undefined, "no registry mapping claimed");
+  assert.equal(ticketsForProject(wouldBeKey).length, 0, "no tickets written");
+  assert.equal(getTicket(wouldBeKey, "FG-200"), undefined);
+});
+
+// FG-496 cross-store atomicity — direction 2 (deliberately preferred): a failure
+// AFTER the config heal persists but BEFORE the SQLite commit leaves a CONFIG-ONLY
+// key (no registry row, no tickets). A subsequent retry adopts that committed key
+// (rung 3: config present, registry absent -> claim) and produces exactly ONE backlog.
+test("failure after config persist / before commit leaves a config-only key; retry adopts it", () => {
+  const dir = newProject();
+  writeTicketFile(dir, "stories", { id: "FG-210", type: "story", status: "blocked", title: "t" }, "b");
+
+  const git = fixedRemoteGit("git@github.com:acme/config-only.git");
+  const ev = computeRepositoryEvidence(dir, git);
+  const wouldBeKey = deriveProjectKey(ev.key);
+
+  assert.throws(() =>
+    importBacklog(dir, {
+      git,
+      now: NOW,
+      __afterConfigBeforeCommit: () => {
+        throw new Error("boom after config, before commit");
+      },
+    }),
+  );
+
+  // Residual is CONFIG-ONLY: the key is durably committed, but the DB rolled back.
+  assert.equal(readBacklogConfig(dir).projectKey, wouldBeKey, "config-only key persisted");
+  assert.equal(registryByEvidence(ev.key), undefined, "no registry row (DB rolled back)");
+  assert.equal(ticketsForProject(wouldBeKey).length, 0, "no tickets (DB rolled back)");
+  assert.equal(blockerEvidenceForTicket(wouldBeKey, "FG-210").length, 0, "no partial evidence");
+
+  // Retry safely re-claims under the committed key and produces exactly one backlog.
+  const ok = importBacklog(dir, { git, now: NOW });
+  assert.equal(ok.projectKey, wouldBeKey);
+  assert.equal(ok.rung, 3, "config present, registry absent -> claim (rung 3)");
+  assert.equal(ok.persistedConfig, false, "config already committed — no re-heal");
+  assert.equal(registryByEvidence(ev.key)!.projectKey, wouldBeKey, "registry now claimed");
+  assert.equal(ticketsForProject(wouldBeKey).length, 1, "exactly one backlog");
+  assert.equal(blockerEvidenceForTicket(wouldBeKey, "FG-210").length, 1);
+});
+
+// FG-496 reporting invariant: the result never claims a no-op when EITHER store was
+// mutated. A config-refusal / mid-transaction failure THROWS (no success-with-no-op
+// summary is returned while a store was touched); and the successful retry after a
+// config-only residual reports the ACTUAL ticket count, not "nothing changed".
+test("result never reports no-op when a store was mutated", () => {
+  const dir = newProject();
+  writeTicketFile(dir, "stories", { id: "FG-220", type: "story", status: "active", title: "t" }, "b");
+
+  const git = fixedRemoteGit("git@github.com:acme/reporting.git");
+  const ev = computeRepositoryEvidence(dir, git);
+  const wouldBeKey = deriveProjectKey(ev.key);
+
+  // A failure after config persistence throws — the caller gets an error, never a
+  // summary that would misleadingly read as "imported, nothing to change".
+  assert.throws(() =>
+    importBacklog(dir, {
+      git,
+      now: NOW,
+      __afterConfigBeforeCommit: () => {
+        throw new Error("boom");
+      },
+    }),
+  );
+  // Config WAS mutated — so a returned success summary would have been a lie.
+  assert.equal(readBacklogConfig(dir).projectKey, wouldBeKey, "config was mutated");
+
+  // The successful retry reports the real partial-recovery state: one ticket
+  // imported, one backlog — not a no-op.
+  const result = importBacklog(dir, { git, now: NOW });
+  assert.equal(result.ticketCount, 1, "summary reflects the ticket actually written");
+  assert.equal(result.projectKey, wouldBeKey);
+  assert.equal(result.rung, 3, "a registry row was claimed this run (not a no-op)");
+  assert.equal(ticketsForProject(result.projectKey).length, 1, "exactly one backlog");
+  assert.equal(readBacklogConfig(dir).projectKey, result.projectKey, "config and DB agree");
 });

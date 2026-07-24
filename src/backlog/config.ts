@@ -1,4 +1,12 @@
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { z } from "zod";
@@ -59,6 +67,24 @@ function safeConfigPath(projectDir: string): string {
   return configPath;
 }
 
+// FG-606: the import runs the guarded config heal INSIDE its SQLite write
+// transaction, BEFORE the commit — a symlink/containment refusal there rolls the
+// whole transaction back (zero DB changes). Pre-flight that same guard BEFORE the
+// transaction opens so an import that WILL heal config fails closed before it
+// claims a registry identity. Kept redundantly at write time (below) for TOCTOU.
+export function assertConfigWritable(projectDir: string): void {
+  safeConfigPath(projectDir);
+}
+
+// A single short atomic replacement: write a sibling temp file, then rename onto
+// the target (atomic on the same filesystem). A crash mid-write leaves either the
+// old file or the temp — never a torn config.
+function atomicWriteConfig(configPath: string, contents: string): void {
+  const tmp = `${configPath}.tmp-${process.pid}`;
+  writeFileSync(tmp, contents);
+  renameSync(tmp, configPath);
+}
+
 export function writeBacklogConfig(
   projectDir: string,
   config: { prefix: string | null; projectKey?: string | null },
@@ -81,7 +107,7 @@ export function writeBacklogConfig(
   if (config.projectKey !== undefined) {
     existing["project_key"] = config.projectKey;
   }
-  writeFileSync(configPath, stringifyYaml(existing));
+  atomicWriteConfig(configPath, stringifyYaml(existing));
 }
 
 // FG-606: persist the durable project_key at the TOP LEVEL, preserving every
@@ -102,7 +128,7 @@ export function writeProjectKey(projectDir: string, projectKey: string): void {
     }
   }
   existing["project_key"] = projectKey;
-  writeFileSync(configPath, stringifyYaml(existing));
+  atomicWriteConfig(configPath, stringifyYaml(existing));
 }
 
 export function readBacklogConfig(projectDir: string): BacklogConfig {

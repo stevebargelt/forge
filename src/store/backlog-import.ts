@@ -3,19 +3,27 @@
 // as a NON-authoritative shadow — Markdown stays the sole source of truth; nothing
 // reads these rows for product behavior this slice.
 //
-// The registry CLAIM and the entire ticket/relation/blocker_evidence/event +
-// id-sequence import run inside ONE writeTransaction (BEGIN IMMEDIATE, FG-548) —
-// the only cross-process/cross-worktree serialization point (the project-dir FS
-// backlog lock cannot serialize two linked worktrees). A losing concurrent
-// claimant's INSERT hits the registry's two-directional uniqueness, the whole
-// transaction rolls back (zero partial tickets, zero partial evidence), and it
-// retries against the now-committed winner's mapping.
+// The registry CLAIM, the guarded config heal, and the entire
+// ticket/relation/blocker_evidence/event + id-sequence import run inside ONE
+// writeTransaction (BEGIN IMMEDIATE, FG-548) — the only cross-process/cross-worktree
+// serialization point (the project-dir FS backlog lock cannot serialize two linked
+// worktrees). A losing concurrent claimant's INSERT hits the registry's
+// two-directional uniqueness, the whole transaction rolls back (zero partial
+// tickets, zero partial evidence), and it retries against the now-committed winner's
+// mapping.
+//
+// Cross-store atomicity: the guarded config write (temp+rename) lands BEFORE the
+// SQLite COMMIT (holding the write lock across one short atomic replacement). A
+// config refusal rolls the transaction back → nothing persisted anywhere. The only
+// possible residual — process death after the rename but before COMMIT — is
+// CONFIG-ONLY (inert, portable, adopted on retry). We never leave an authoritative
+// DB identity with a missing config identity.
 
 import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { writeTransaction } from "./db.js";
-import { readBacklogConfig, writeProjectKey } from "../backlog/config.js";
+import { assertConfigWritable, readBacklogConfig, writeProjectKey } from "../backlog/config.js";
 import { listTickets, type StructuredTicket } from "../backlog/structured.js";
 import type { GitRunner } from "../util/github-url.js";
 import {
@@ -77,9 +85,15 @@ export type ImportOptions = {
   // Fixed clock for deterministic tests.
   now?: string;
   // Test seam ONLY: invoked inside the transaction AFTER the registry claim and
-  // BEFORE any ticket is written, so a test can throw here and prove the whole
-  // transaction rolls back atomically (zero partial tickets, zero partial evidence).
+  // BEFORE the config heal / any ticket is written, so a test can throw here and
+  // prove the whole transaction rolls back atomically — zero partial tickets, zero
+  // partial evidence, AND no config heal (config is written strictly after this).
   __afterClaimBeforeTickets?: () => void;
+  // Test seam ONLY: invoked inside the transaction AFTER the guarded config heal
+  // has persisted (temp+rename) but BEFORE the SQLite commit, so a test can throw
+  // here and prove the deliberately-preferred residual: a committed project_key in
+  // config with ZERO DB rows (inert, portable, adopted on retry).
+  __afterConfigBeforeCommit?: () => void;
 };
 
 // The full valid source-status vocabulary. An import refuses (at the pre-write
@@ -193,6 +207,16 @@ export function importBacklog(projectDir: string, opts: ImportOptions = {}): Imp
   const config = readBacklogConfig(projectDir);
   const now = opts.now ?? new Date().toISOString();
 
+  // When config lacks a key we WILL heal it (ladder rungs 2/4) with a guarded
+  // atomic write inside the transaction. Pre-flight that guarded path NOW, before
+  // any mutation: a symlink/containment refusal must abort BEFORE we claim a
+  // registry identity — so a config refusal can never strand an authoritative DB
+  // identity with no durable config identity. (The guard is re-checked at write
+  // time for TOCTOU; here it fails closed with zero side effects.)
+  if (config.projectKey == null) {
+    assertConfigWritable(projectDir);
+  }
+
   let resolvedKey = "";
   let resolvedRung: 1 | 2 | 3 | 4 = 4;
   let persistToConfig = false;
@@ -210,9 +234,23 @@ export function importBacklog(projectDir: string, opts: ImportOptions = {}): Imp
         resolvedRung = resolved.rung;
         persistToConfig = resolved.persistToConfig;
 
-        // Test seam: force a failure between the claim and the ticket writes to
-        // prove atomic rollback.
+        // Test seam: force a failure between the claim and the config heal to prove
+        // the whole transaction (registry + config + tickets) rolls back atomically.
         opts.__afterClaimBeforeTickets?.();
+
+        // Guarded, ATOMIC config heal BEFORE the ticket writes and BEFORE the commit
+        // (rungs 2/4 only). Its symlink/containment refusal THROWS here → the whole
+        // transaction rolls back → zero DB changes. If instead the process dies AFTER
+        // this rename but before COMMIT, the residual is CONFIG-ONLY (inert, portable,
+        // safely re-claimed on retry) — the deliberately-preferred direction. We never
+        // leave an authoritative DB identity with a missing config identity.
+        if (resolved.persistToConfig) {
+          writeProjectKey(projectDir, resolved.projectKey);
+        }
+
+        // Test seam: force a failure after the config heal but before the commit to
+        // prove the preferred config-only residual.
+        opts.__afterConfigBeforeCommit?.();
 
         ensureStorageMode(resolved.projectKey, now);
 
@@ -306,12 +344,6 @@ export function importBacklog(projectDir: string, opts: ImportOptions = {}): Imp
       }
       throw e;
     }
-  }
-
-  // Side effect AFTER the durable commit (never inside the transaction): heal the
-  // config with the minted/adopted key so the next worktree reads a committed key.
-  if (persistToConfig) {
-    writeProjectKey(projectDir, resolvedKey);
   }
 
   return {
