@@ -21,6 +21,7 @@ forge backlog close <id> [--commit <sha>]
 forge backlog edit  <id> [--body <text>|-]
 forge backlog retitle <id> "<new title>"
 forge backlog move  <id> <type>
+forge backlog import [--project <dir>] [--json]
 forge backlog config [--show]
 forge backlog notes show
 forge backlog notes add     [text|-]
@@ -34,6 +35,7 @@ forge backlog notes replace [text|-]
 - `retitle` changes a ticket's title (frontmatter + heading) in place without moving or renaming its file.
 - `move` relocates a ticket between the idea/epic/story type directories.
 - `notes` reads/writes the project's `backlog/notes.md` "notes for next session" block — `add` appends a paragraph, `replace` overwrites the whole file.
+- `import` populates a DB ticket shadow from the project's `backlog/*.md`. It is **non-authoritative** — Markdown remains the sole source of truth and nothing reads these rows for behavior yet; the shadow exists for a later migration. It is idempotent-additive (re-running upserts — inserts/updates — rather than duplicating; tickets or relations removed from Markdown are **not** pruned from the shadow in this slice, since it is non-authoritative — removal reconciliation arrives with the later authoritative migration), and on first run it records a durable `project_key` in `.forge/config.yml` so the DB backlog stays single across a project's clones and linked worktrees. If two configs/worktrees present conflicting project identities for one project it **refuses** (exit code 1, structured object under `--json`) rather than splitting the backlog.
 
 All subcommands accept `--project <dir>` (default: cwd) to target a backlog outside the current directory.
 
