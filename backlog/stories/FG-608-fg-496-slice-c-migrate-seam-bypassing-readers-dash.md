@@ -38,6 +38,14 @@ serving stale branch-local Markdown while the DB is truth.
   **per-project board**; cross-project aggregation is FG-591, not here.
 - **Campaign dir-guards:** convert `existsSync('backlog')` dir-presence guards to DB-existence checks.
 - **`forge backlog migrate`** as specified above (atomic import+validate+flip, `--dry-run`, fail-safe).
+- **Removal reconciliation (INHERITED FROM FG-606 — Slice A deferred it here).** Slice A's import is
+  deliberately append-only (a ticket/relation removed from Markdown is NOT pruned from the non-authoritative
+  shadow). FG-608 owns making the shadow exactly equal the current Markdown set — because the DB becomes
+  AUTHORITATIVE here, removals must propagate: a ticket/relation deleted from Markdown is deleted from the DB.
+  Design this carefully for the multi-worktree case (a shared `project_key` across linked worktrees): a ticket
+  is only removed when it is absent from ALL of the project's sources, never destructively deleted because one
+  worktree lacks it. This is the correctness gap that made a naive single-`imported_from` prune unsafe in Slice
+  A; solve it properly (e.g. per-source membership) when the DB is authoritative.
 - **Import conflict rule:** **skip and record a conflict by default** — a known id whose DB row was edited since
   its import basis (import-basis body-hash mismatch) is left as-is and a conflict event is written to
   `ticket_events`; Markdown never silently clobbers a newer DB edit. `--force` may overwrite **only when
@@ -54,6 +62,7 @@ after DB edits would lose them. Surface this in the cutover UX.
 - `dashboard/src/server.ts` (~lines 112–163) — rewrite ticket branch to DB query; keep `notesByCheckout` FS reads.
 - `dashboard/src/queries.ts` — add the ticket query (scoped by `project_key`).
 - `src/cli/commands/campaign.ts:504`, `src/campaign/report.ts:34`, `src/campaign/executor.ts:159` — dir-guards → DB.
+- `src/store/backlog-import.ts` — add the multi-source-safe removal reconciliation deferred from FG-606.
 - Regression anchor: `dashboard/.../routes-backlog-canonical-source.integration.test.ts` (encodes the current
   branch-local "canonical checkout is truth" contract that this slice replaces with host-wide DB truth).
 
@@ -63,6 +72,11 @@ after DB edits would lose them. Surface this in the cutover UX.
   no longer determine truth), scoped per project.
 - Campaign planning, review-loop, and shipping-reviewer read DB tickets (inherited from Slice B; verified here).
 - Cross-worktree consistency test passes with a project's mode = db.
+- **Removal reconciliation (deferred from FG-606):** after cutover, a ticket/relation removed from Markdown is
+  reflected as its absence in the DB — the shadow equals the current Markdown set INCLUDING removals — and, for
+  a `project_key` shared across linked worktrees, a ticket is pruned only when absent from ALL sources (never
+  destructively deleted because one worktree lacks it). Test both the single-source removal and the
+  multi-worktree "remove from one, keep in another" case.
 - `forge backlog migrate` is atomic: on success the mode flips to db; on any failure Markdown stays
   authoritative and the mode is unchanged. `--dry-run` reports the plan without writing.
 - Re-import after cutover does not duplicate or silently lose newer DB edits — a divergent id produces a skip +
@@ -74,7 +88,7 @@ after DB edits would lose them. Surface this in the cutover UX.
 
 - Parent: FG-496. Epic: FG-593.
 - Depends on: Slice A (FG-606), Slice B (FG-607).
-- This slice defines the authoritative-cutover point for FG-496.
+- This slice defines the authoritative-cutover point for FG-496, and owns the removal-reconciliation FG-606 deferred.
 
 ## Non-Goals
 
