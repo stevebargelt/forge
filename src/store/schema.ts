@@ -506,12 +506,13 @@ CREATE TABLE IF NOT EXISTS tickets (
 -- forbids orphan/cross-project event rows; ON DELETE CASCADE prunes an event when
 -- its owning ticket is removed (the reconcile removal path relies on it).
 CREATE TABLE IF NOT EXISTS ticket_events (
-  event_key   TEXT PRIMARY KEY,
+  event_key   TEXT NOT NULL,
   project_key TEXT NOT NULL,
   ticket_id   TEXT NOT NULL,
   event_type  TEXT NOT NULL,
   payload     TEXT,
   created_at  TEXT NOT NULL,
+  PRIMARY KEY (project_key, ticket_id, event_key),
   FOREIGN KEY (project_key, ticket_id)
     REFERENCES tickets(project_key, ticket_id) ON DELETE CASCADE
 );

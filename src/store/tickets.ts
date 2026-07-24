@@ -175,7 +175,7 @@ export function upsertTicketEvent(e: TicketEvent): void {
     .prepare(
       `INSERT INTO ticket_events (event_key, project_key, ticket_id, event_type, payload, created_at)
        VALUES (@eventKey, @projectKey, @ticketId, @eventType, @payload, @createdAt)
-       ON CONFLICT(event_key) DO UPDATE SET
+       ON CONFLICT(project_key, ticket_id, event_key) DO UPDATE SET
          event_type = excluded.event_type,
          payload = excluded.payload,
          created_at = excluded.created_at`,

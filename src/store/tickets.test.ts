@@ -125,6 +125,47 @@ test("ticket events UPSERT idempotently on event_key", () => {
   assert.deepEqual(events[0]!.payload, { fileStatus: "active" });
 });
 
+// The ticket_events PRIMARY KEY is composite (project_key, ticket_id, event_key),
+// NOT a global event_key. The SAME event_key coexists across different
+// (project_key, ticket_id) owners — both cross-project and cross-ticket — so a
+// future writer cannot collide idempotency keys between projects or tickets.
+// Insert directly against the schema: no composite-aware writer exists in Slice A.
+test("ticket_events with the same event_key coexist across project and ticket owners", () => {
+  upsertTicket(ticket({ projectKey: "pk-A", ticketId: "FG-1" }));
+  upsertTicket(ticket({ projectKey: "pk-A", ticketId: "FG-2" }));
+  upsertTicket(ticket({ projectKey: "pk-B", ticketId: "FG-1" }));
+
+  const insert = db.prepare(
+    `INSERT INTO ticket_events (event_key, project_key, ticket_id, event_type, payload, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  );
+  // Same event_key across three distinct owners: cross-project (pk-B vs pk-A) and
+  // cross-ticket (FG-2 vs FG-1). None must overwrite another.
+  insert.run("shared-key", "pk-A", "FG-1", "imported", '{"who":"A/FG-1"}', NOW);
+  insert.run("shared-key", "pk-B", "FG-1", "imported", '{"who":"B/FG-1"}', NOW);
+  insert.run("shared-key", "pk-A", "FG-2", "imported", '{"who":"A/FG-2"}', NOW);
+
+  const total = (db.prepare(`SELECT COUNT(*) AS n FROM ticket_events`).get() as { n: number }).n;
+  assert.equal(total, 3, "three independent rows persist — no cross-owner overwrite");
+
+  const a1 = eventsForTicket("pk-A", "FG-1");
+  const b1 = eventsForTicket("pk-B", "FG-1");
+  const a2 = eventsForTicket("pk-A", "FG-2");
+  assert.equal(a1.length, 1);
+  assert.equal(b1.length, 1);
+  assert.equal(a2.length, 1);
+  assert.deepEqual(a1[0]!.payload, { who: "A/FG-1" });
+  assert.deepEqual(b1[0]!.payload, { who: "B/FG-1" }, "cross-project row is distinct, not overwritten");
+  assert.deepEqual(a2[0]!.payload, { who: "A/FG-2" }, "cross-ticket row is distinct, not overwritten");
+
+  // The composite PK still forbids a true duplicate within one owner.
+  assert.throws(
+    () => insert.run("shared-key", "pk-A", "FG-1", "imported", "{}", NOW),
+    /(UNIQUE|PRIMARY KEY)/,
+    "same (project_key, ticket_id, event_key) is a genuine duplicate",
+  );
+});
+
 test("blocker_evidence UPSERTs on the natural key (project_key, ticket_id, source)", () => {
   upsertTicket(ticket({ projectKey: "pk-A", ticketId: "FG-9" }));
   const b = {
