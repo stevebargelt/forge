@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { readFileSync } from "node:fs";
@@ -127,6 +127,42 @@ test("writeProjectKey: refuses when .forge itself is a symlink", () => {
     (e: unknown) => e instanceof Error && /symlink/i.test((e as Error).message),
   );
   assert.equal(existsSync(join(outside, "config.yml")), false, "no write into the symlinked dir target");
+});
+
+// Must-fix (security): the reported bypass — a symlink pre-planted at the
+// PREDICTABLE sibling temp path (`config.yml.tmp-<pid>`) redirected the temp write
+// outside the project before rename. The hardened atomic write uses an unpredictable
+// temp name opened O_EXCL|O_NOFOLLOW, so a link at the old predictable path is inert:
+// nothing is written through it and the real config still round-trips.
+test("atomic write: a symlink at the OLD predictable temp path is NOT followed; write round-trips", () => {
+  const dir = tmp();
+  mkdirSync(join(dir, ".forge"));
+  writeFileSync(join(dir, ".forge", "config.yml"), "unrelated:\n  keep: me\nbacklog:\n  prefix: FG\n");
+  const victim = join(dir, "victim-temp-target.txt");
+  writeFileSync(victim, "outside data\n");
+  symlinkSync(victim, join(dir, ".forge", `config.yml.tmp-${process.pid}`));
+
+  writeProjectKey(dir, "pk-safe");
+
+  assert.equal(readFileSync(victim, "utf8"), "outside data\n", "planted temp symlink not followed");
+  const raw = parseYaml(readFileSync(join(dir, ".forge", "config.yml"), "utf8")) as Record<string, unknown>;
+  assert.equal(raw["project_key"], "pk-safe");
+  assert.deepEqual(raw["unrelated"], { keep: "me" });
+  assert.deepEqual(raw["backlog"], { prefix: "FG" });
+});
+
+// A successful atomic replacement must not leave a temp file behind in .forge.
+test("atomic write: leaves no leftover temp file in .forge after a successful write", () => {
+  const dir = tmp();
+  mkdirSync(join(dir, ".forge"));
+  writeProjectKey(dir, "pk-clean");
+  const entries = readdirSync(join(dir, ".forge"));
+  assert.deepEqual(
+    entries.filter((e) => e.includes(".tmp-")),
+    [],
+    "no leftover temp file",
+  );
+  assert.deepEqual(entries.sort(), ["config.yml"]);
 });
 
 test("writeBacklogConfig: setting prefix PRESERVES an already-committed project_key", () => {

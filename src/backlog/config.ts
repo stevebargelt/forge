@@ -1,12 +1,17 @@
 import {
+  closeSync,
+  constants as fsConstants,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   realpathSync,
   renameSync,
-  writeFileSync,
+  unlinkSync,
+  writeSync,
 } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { z } from "zod";
@@ -76,13 +81,45 @@ export function assertConfigWritable(projectDir: string): void {
   safeConfigPath(projectDir);
 }
 
-// A single short atomic replacement: write a sibling temp file, then rename onto
-// the target (atomic on the same filesystem). A crash mid-write leaves either the
-// old file or the temp — never a torn config.
-function atomicWriteConfig(configPath: string, contents: string): void {
-  const tmp = `${configPath}.tmp-${process.pid}`;
-  writeFileSync(tmp, contents);
-  renameSync(tmp, configPath);
+// A single short atomic replacement: write an UNPREDICTABLE temp file inside the
+// resolved .forge dir, then rename onto the target (atomic on the same
+// filesystem). A crash mid-write leaves either the old file or the temp — never a
+// torn config.
+//
+// FG-606 security: the temp path is opened with O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW
+// — a pre-planted file OR symlink at the temp path is a HARD failure, never a
+// follow-through write that would escape the project (the class the old predictable
+// `${configPath}.tmp-${pid}` + writeFileSync was vulnerable to). The final config is
+// safe by construction: rename(2) never follows a symlink at the destination — it
+// replaces the name itself — and safeConfigPath already refused a symlinked
+// config.yml. We re-run safeConfigPath and realpath the .forge dir HERE, immediately
+// before the open, so no unresolved path is re-derived between the guard and the
+// write (TOCTOU); the guarded open then happens on the resolved dir.
+function atomicWriteConfig(projectDir: string, contents: string): void {
+  safeConfigPath(projectDir);
+  const realForge = realpathSync(join(projectDir, ".forge"));
+  const configPath = join(realForge, "config.yml");
+  const tmp = join(realForge, `.config.yml.tmp-${randomBytes(12).toString("hex")}`);
+  const fd = openSync(
+    tmp,
+    fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
+    0o600,
+  );
+  try {
+    writeSync(fd, contents);
+  } finally {
+    closeSync(fd);
+  }
+  try {
+    renameSync(tmp, configPath);
+  } catch (err) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // best-effort cleanup of the temp on a failed rename
+    }
+    throw err;
+  }
 }
 
 export function writeBacklogConfig(
@@ -107,7 +144,7 @@ export function writeBacklogConfig(
   if (config.projectKey !== undefined) {
     existing["project_key"] = config.projectKey;
   }
-  atomicWriteConfig(configPath, stringifyYaml(existing));
+  atomicWriteConfig(projectDir, stringifyYaml(existing));
 }
 
 // FG-606: persist the durable project_key at the TOP LEVEL, preserving every
@@ -128,7 +165,7 @@ export function writeProjectKey(projectDir: string, projectKey: string): void {
     }
   }
   existing["project_key"] = projectKey;
-  atomicWriteConfig(configPath, stringifyYaml(existing));
+  atomicWriteConfig(projectDir, stringifyYaml(existing));
 }
 
 export function readBacklogConfig(projectDir: string): BacklogConfig {
