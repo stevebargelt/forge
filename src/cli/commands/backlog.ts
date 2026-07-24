@@ -15,6 +15,10 @@ import type { Command } from "commander";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { readBacklogConfig } from "../../backlog/config.js";
+import { importBacklog, BacklogImportError } from "../../store/backlog-import.js";
+import {
+  ProjectIdentityConflictError,
+} from "../../store/project-registry.js";
 import {
   closeTicket as closeStructuredTicket,
   generateSlug,
@@ -183,6 +187,81 @@ export function registerBacklog(program: Command): void {
       const dir = resolve(opts.project ?? process.cwd());
       moveStructuredTicket(dir, idArg, typeArg as TicketType);
       console.log(`Moved ${idArg} → ${typeArg}`);
+    });
+
+  // ----- import (FG-606) -----
+  backlog
+    .command("import")
+    .description(
+      "Populate the DB ticket shadow from backlog/*.md (non-authoritative; Markdown stays source of truth)",
+    )
+    .option("--project <dir>", "project directory (default: cwd)")
+    .option("--json", "emit JSON result")
+    .action((opts: { project?: string; json?: boolean }) => {
+      const dir = resolve(opts.project ?? process.cwd());
+      if (!existsSync(join(dir, "backlog"))) {
+        throw new Error(`No backlog found in ${dir}. Expected a backlog/ directory.`);
+      }
+      try {
+        const result = importBacklog(dir);
+        if (opts.json) {
+          console.log(JSON.stringify(result, null, 2));
+          return;
+        }
+        console.log(
+          `Imported ${result.ticketCount} ticket(s) into project_key ${result.projectKey}` +
+            (result.persistedConfig ? " (recorded project_key in .forge/config.yml)" : ""),
+        );
+      } catch (e) {
+        if (e instanceof ProjectIdentityConflictError) {
+          // Stop-and-surface: never silently maintain two DB backlogs. The refusal
+          // is load-bearing operator-visible safety output — on --json emit a
+          // structured, machine-readable conflict object (both conflicting
+          // identities + the reason) instead of a bare message, with the same
+          // non-zero exit.
+          if (opts.json) {
+            console.log(
+              JSON.stringify(
+                {
+                  status: "conflict",
+                  error: "ProjectIdentityConflict",
+                  reason: e.message,
+                  detail: e.detail,
+                },
+                null,
+                2,
+              ),
+            );
+          } else {
+            process.stderr.write(e.message + "\n");
+          }
+          process.exitCode = 1;
+          return;
+        }
+        if (e instanceof BacklogImportError) {
+          // A precise, file-identified refusal (malformed source file). All-or-
+          // nothing atomic — zero rows written. Same structured shape on --json.
+          if (opts.json) {
+            console.log(
+              JSON.stringify(
+                {
+                  status: "error",
+                  error: "BacklogImport",
+                  reason: e.message,
+                  detail: { file: e.file, field: e.field },
+                },
+                null,
+                2,
+              ),
+            );
+          } else {
+            process.stderr.write(e.message + "\n");
+          }
+          process.exitCode = 1;
+          return;
+        }
+        throw e;
+      }
     });
 
   // ----- config -----

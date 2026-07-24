@@ -1,0 +1,223 @@
+// FG-606 (FG-496 Slice A): store accessors for the DB ticket shadow. Tests run
+// REAL store code against a real in-memory SQLite DB (makeInMemoryDb), never
+// ~/.forge/forge.db.
+
+import { test, beforeEach, afterEach } from "node:test";
+import assert from "node:assert/strict";
+import type { Database as DatabaseInstance } from "better-sqlite3";
+import { makeInMemoryDb, setDbForTest } from "./db.js";
+import {
+  upsertTicket,
+  getTicket,
+  ticketsForProject,
+  upsertTicketRelation,
+  relationsForTicket,
+  upsertTicketEvent,
+  eventsForTicket,
+  upsertBlockerEvidence,
+  blockerEvidenceForTicket,
+  blockerEvidenceId,
+  setStorageMode,
+  getStorageMode,
+  ensureStorageMode,
+  bumpIdSequence,
+  getIdSequence,
+  pruneRemovedTickets,
+  reconcileRelations,
+  reconcileImportedBlockerEvidence,
+  type TicketRow,
+} from "./tickets.js";
+
+let db: DatabaseInstance;
+let prev: DatabaseInstance | null;
+
+beforeEach(() => {
+  db = makeInMemoryDb();
+  prev = setDbForTest(db);
+});
+
+afterEach(() => {
+  setDbForTest(prev as DatabaseInstance);
+  db.close();
+});
+
+const NOW = "2026-07-24T00:00:00Z";
+
+function ticket(over: Partial<TicketRow> = {}): TicketRow {
+  return {
+    projectKey: over.projectKey ?? "pk-A",
+    ticketId: over.ticketId ?? "FG-123",
+    type: over.type ?? "story",
+    status: over.status ?? "active",
+    title: over.title ?? "a title",
+    body: over.body ?? "body text",
+    created: over.created ?? "2026-01-01",
+    closed: over.closed ?? null,
+    closedCommit: over.closedCommit ?? null,
+    epic: over.epic ?? null,
+    frontmatter: over.frontmatter ?? null,
+    importedAt: over.importedAt ?? NOW,
+    importedFrom: over.importedFrom ?? null,
+  };
+}
+
+// AC (1): (project_key, ticket_id) coexistence — FG-123 under two DIFFERENT
+// project_keys coexist as distinct rows, no collision.
+test("FG-123 coexists under two different project_keys as distinct rows", () => {
+  upsertTicket(ticket({ projectKey: "pk-A", ticketId: "FG-123", title: "A's ticket" }));
+  upsertTicket(ticket({ projectKey: "pk-B", ticketId: "FG-123", title: "B's ticket" }));
+
+  const a = getTicket("pk-A", "FG-123");
+  const b = getTicket("pk-B", "FG-123");
+  assert.ok(a && b);
+  assert.equal(a!.title, "A's ticket");
+  assert.equal(b!.title, "B's ticket");
+  assert.equal(ticketsForProject("pk-A").length, 1);
+  assert.equal(ticketsForProject("pk-B").length, 1);
+});
+
+test("upsertTicket is idempotent and overwrites mutable fields on the same key", () => {
+  upsertTicket(ticket({ title: "v1", status: "active" }));
+  upsertTicket(ticket({ title: "v2", status: "done", closed: "2026-02-02" }));
+
+  const rows = ticketsForProject("pk-A");
+  assert.equal(rows.length, 1, "no duplicate row for the same (project_key, ticket_id)");
+  assert.equal(rows[0]!.title, "v2");
+  assert.equal(rows[0]!.status, "done");
+  assert.equal(rows[0]!.closed, "2026-02-02");
+});
+
+test("upsertTicket round-trips frontmatter JSON", () => {
+  upsertTicket(ticket({ frontmatter: { epic: "FG-593", related: ["FG-1", "FG-2"] } }));
+  const got = getTicket("pk-A", "FG-123");
+  assert.deepEqual(got!.frontmatter, { epic: "FG-593", related: ["FG-1", "FG-2"] });
+});
+
+test("ticket relations UPSERT idempotently on the composite key", () => {
+  upsertTicketRelation({ projectKey: "pk-A", ticketId: "FG-1", relatedId: "FG-2", relType: "related" });
+  upsertTicketRelation({ projectKey: "pk-A", ticketId: "FG-1", relatedId: "FG-2", relType: "related" });
+  const rels = relationsForTicket("pk-A", "FG-1");
+  assert.equal(rels.length, 1);
+  assert.equal(rels[0]!.relatedId, "FG-2");
+});
+
+test("ticket events UPSERT idempotently on event_key", () => {
+  upsertTicketEvent({
+    eventKey: "import:pk-A:FG-1",
+    projectKey: "pk-A",
+    ticketId: "FG-1",
+    eventType: "imported",
+    payload: { fileStatus: "blocked" },
+    createdAt: NOW,
+  });
+  upsertTicketEvent({
+    eventKey: "import:pk-A:FG-1",
+    projectKey: "pk-A",
+    ticketId: "FG-1",
+    eventType: "imported",
+    payload: { fileStatus: "active" },
+    createdAt: NOW,
+  });
+  const events = eventsForTicket("pk-A", "FG-1");
+  assert.equal(events.length, 1);
+  assert.deepEqual(events[0]!.payload, { fileStatus: "active" });
+});
+
+test("blocker_evidence UPSERTs on the natural key (project_key, ticket_id, source)", () => {
+  const b = {
+    projectKey: "pk-A",
+    ticketId: "FG-9",
+    reason: "legacy blocked",
+    source: "import-legacy-blocked",
+    createdAt: NOW,
+  };
+  upsertBlockerEvidence(b);
+  upsertBlockerEvidence({ ...b, reason: "legacy blocked (re-import)" });
+  const rows = blockerEvidenceForTicket("pk-A", "FG-9");
+  assert.equal(rows.length, 1, "re-import does not duplicate evidence");
+  assert.equal(rows[0]!.reason, "legacy blocked (re-import)");
+  assert.equal(
+    blockerEvidenceId("pk-A", "FG-9", "import-legacy-blocked"),
+    "blk:pk-A:FG-9:import-legacy-blocked",
+  );
+});
+
+test("storage mode defaults to markdown and is stored per project_key", () => {
+  assert.equal(getStorageMode("pk-unknown"), "markdown", "default when no record");
+  ensureStorageMode("pk-A", NOW);
+  assert.equal(getStorageMode("pk-A"), "markdown");
+  setStorageMode("pk-A", "db", NOW);
+  assert.equal(getStorageMode("pk-A"), "db");
+  // ensure never downgrades an existing record
+  ensureStorageMode("pk-A", NOW);
+  assert.equal(getStorageMode("pk-A"), "db");
+  // isolation across project_keys
+  assert.equal(getStorageMode("pk-B"), "markdown");
+});
+
+test("pruneRemovedTickets prunes this source's removed tickets + orphaned deps, provenance-scoped", () => {
+  // Two sources sharing project pk-A: a local worktree and a SIBLING worktree.
+  upsertTicket(ticket({ projectKey: "pk-A", ticketId: "FG-1", importedFrom: "/wt/local" }));
+  upsertTicket(ticket({ projectKey: "pk-A", ticketId: "FG-2", importedFrom: "/wt/local" }));
+  upsertTicket(ticket({ projectKey: "pk-A", ticketId: "FG-8", importedFrom: "/wt/sibling" }));
+  upsertTicket(ticket({ projectKey: "pk-B", ticketId: "FG-1", importedFrom: "/wt/local" }));
+  upsertTicketEvent({ eventKey: "e:A:FG-2", projectKey: "pk-A", ticketId: "FG-2", eventType: "imported", createdAt: NOW });
+  upsertBlockerEvidence({ projectKey: "pk-A", ticketId: "FG-2", source: "import-legacy-blocked", createdAt: NOW });
+
+  // Local source drops FG-2 (keeps FG-1). Sibling's FG-8 and pk-B untouched.
+  pruneRemovedTickets("pk-A", "/wt/local", ["FG-1"]);
+
+  assert.ok(getTicket("pk-A", "FG-1"), "kept ticket survives");
+  assert.equal(getTicket("pk-A", "FG-2"), undefined, "removed ticket pruned");
+  assert.equal(eventsForTicket("pk-A", "FG-2").length, 0, "orphaned event pruned");
+  assert.equal(blockerEvidenceForTicket("pk-A", "FG-2").length, 0, "orphaned evidence pruned");
+  assert.ok(getTicket("pk-A", "FG-8"), "sibling worktree's ticket untouched");
+  assert.ok(getTicket("pk-B", "FG-1"), "other project untouched");
+
+  // Empty keepIds clears only THIS source's tickets in the project.
+  pruneRemovedTickets("pk-A", "/wt/local", []);
+  assert.equal(getTicket("pk-A", "FG-1"), undefined, "local source emptied");
+  assert.ok(getTicket("pk-A", "FG-8"), "sibling still untouched");
+  assert.ok(getTicket("pk-B", "FG-1"), "other project still untouched");
+});
+
+test("reconcileRelations prunes relations of SURVIVING tickets not in the desired set", () => {
+  upsertTicketRelation({ projectKey: "pk-A", ticketId: "FG-1", relatedId: "FG-2", relType: "related" });
+  upsertTicketRelation({ projectKey: "pk-A", ticketId: "FG-1", relatedId: "FG-3", relType: "related" });
+  // A relation on a ticket NOT in keepIds (a sibling worktree's) must be untouched.
+  upsertTicketRelation({ projectKey: "pk-A", ticketId: "FG-8", relatedId: "FG-9", relType: "related" });
+  upsertTicketRelation({ projectKey: "pk-B", ticketId: "FG-1", relatedId: "FG-9", relType: "related" });
+
+  reconcileRelations("pk-A", ["FG-1"], [
+    { projectKey: "pk-A", ticketId: "FG-1", relatedId: "FG-2", relType: "related" },
+  ]);
+
+  assert.deepEqual(relationsForTicket("pk-A", "FG-1").map((r) => r.relatedId), ["FG-2"]);
+  assert.equal(relationsForTicket("pk-A", "FG-8").length, 1, "ticket outside keepIds untouched");
+  assert.equal(relationsForTicket("pk-B", "FG-1").length, 1, "other project untouched");
+});
+
+test("reconcileImportedBlockerEvidence prunes source-scoped evidence for unblocked surviving tickets", () => {
+  upsertBlockerEvidence({ projectKey: "pk-A", ticketId: "FG-1", source: "import-legacy-blocked", createdAt: NOW });
+  upsertBlockerEvidence({ projectKey: "pk-A", ticketId: "FG-2", source: "import-legacy-blocked", createdAt: NOW });
+  upsertBlockerEvidence({ projectKey: "pk-A", ticketId: "FG-1", source: "slice-d-source", createdAt: NOW });
+
+  // keepIds = both surviving tickets; only FG-1 is still blocked.
+  reconcileImportedBlockerEvidence("pk-A", ["FG-1", "FG-2"], ["FG-1"], "import-legacy-blocked");
+
+  assert.equal(blockerEvidenceForTicket("pk-A", "FG-1").length, 2, "still-blocked + other-source rows kept");
+  assert.equal(blockerEvidenceForTicket("pk-A", "FG-2").length, 0, "unblocked import evidence pruned");
+});
+
+test("id sequence is monotonic per (project_key, prefix)", () => {
+  bumpIdSequence("pk-A", "FG", 10);
+  bumpIdSequence("pk-A", "FG", 5); // lower — ignored
+  assert.equal(getIdSequence("pk-A", "FG"), 10);
+  bumpIdSequence("pk-A", "FG", 42);
+  assert.equal(getIdSequence("pk-A", "FG"), 42);
+  // per-prefix isolation
+  bumpIdSequence("pk-A", "MG", 3);
+  assert.equal(getIdSequence("pk-A", "MG"), 3);
+  assert.equal(getIdSequence("pk-A", "FG"), 42);
+  assert.equal(getIdSequence("pk-A", "ZZ"), undefined);
+});

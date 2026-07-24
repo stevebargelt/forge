@@ -438,4 +438,120 @@ CREATE INDEX IF NOT EXISTS idx_campaign_item_launches_campaign
   ON campaign_item_launches(campaign_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_item_launches_source_launch
   ON campaign_item_launches(source_launch_id);
+
+-- FG-606 (FG-496 Slice A): the DB ticket schema + project identity registry.
+-- ALL of the following are BRAND-NEW tables created via CREATE TABLE IF NOT
+-- EXISTS on the ordinary open path — the same additive-only BD-15 contract as
+-- the FG-425 / FG-562 tables above: an old binary that predates them is never
+-- broken, and user_version is NOT bumped (FG-568 forward-gate contract).
+--
+-- CRUCIAL distinction from the FG-563 index hazard: FG-563's index was invalid
+-- because it referenced a column on a PRE-EXISTING foreign table (runs) whose
+-- minimal fixtures might lack the column, and CREATE INDEX runs on EVERY open.
+-- The indexes below are over NEW tables that this very SCHEMA_SQL creates with a
+-- known, complete shape in the same exec — there is no foreign minimal shape to
+-- throw against — so plain column indexes here are safe. No expression/partial
+-- index is used; the identity uniqueness lives in inline table constraints.
+
+-- The project-identity REGISTRY: the single durable arbiter of which project_key
+-- a repository owns. Keyed on repositoryCheckoutIdentity's CONVERGING evidence
+-- key (remote > git-common-dir > path), which groups linked worktrees and
+-- independent clones. TWO-DIRECTIONAL DB-level uniqueness, both inline:
+--   project_key       PRIMARY KEY  -> one repository-evidence key per project_key
+--                                     (a copied key into an unrelated repo is refused)
+--   repo_evidence_key UNIQUE       -> one project_key per repository-evidence key
+--                                     (two worktrees can never split into two backlogs)
+CREATE TABLE IF NOT EXISTS project_identity (
+  project_key          TEXT PRIMARY KEY,
+  repo_evidence_key    TEXT NOT NULL UNIQUE,
+  repo_evidence_source TEXT NOT NULL,
+  created_at           TEXT NOT NULL
+);
+
+-- Tickets — the non-authoritative shadow. Keyed by (project_key, ticket_id) so
+-- FG-123 in two different projects (even sharing a prefix) coexist as distinct
+-- rows. status is limited to active/done/deferred (NO blocked — legacy blocked
+-- maps to active + a blocker_evidence row). frontmatter carries any extra
+-- YAML keys as JSON so nothing is lost on import.
+-- imported_from is the CANONICAL source directory (realpath) the ticket was last
+-- imported from. It is the reconcile PROVENANCE key: two linked worktrees of one
+-- project share a project_key but have different Markdown sets, so removal
+-- reconciliation must prune only the tickets THIS source directory previously
+-- imported and no longer has — never a sibling worktree's tickets. Nullable so a
+-- direct upsert (non-import caller) need not supply it.
+CREATE TABLE IF NOT EXISTS tickets (
+  project_key   TEXT NOT NULL,
+  ticket_id     TEXT NOT NULL,
+  type          TEXT NOT NULL,
+  status        TEXT NOT NULL,
+  title         TEXT NOT NULL,
+  body          TEXT NOT NULL DEFAULT '',
+  created       TEXT,
+  closed        TEXT,
+  closed_commit TEXT,
+  epic          TEXT,
+  frontmatter   TEXT,
+  imported_at   TEXT NOT NULL,
+  imported_from TEXT,
+  PRIMARY KEY (project_key, ticket_id)
+);
+
+-- Ticket events — append-shaped audit, keyed by (project_key, ticket_id). A
+-- deterministic natural id (event_key) makes re-import idempotent: the same
+-- logical event UPSERTs rather than duplicating.
+CREATE TABLE IF NOT EXISTS ticket_events (
+  event_key   TEXT PRIMARY KEY,
+  project_key TEXT NOT NULL,
+  ticket_id   TEXT NOT NULL,
+  event_type  TEXT NOT NULL,
+  payload     TEXT,
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ticket_events_ticket
+  ON ticket_events(project_key, ticket_id);
+
+-- Ticket relations — keyed by (project_key, ticket_id). The composite PRIMARY
+-- KEY makes re-import idempotent (the same relation UPSERTs, never duplicates).
+CREATE TABLE IF NOT EXISTS ticket_relations (
+  project_key TEXT NOT NULL,
+  ticket_id   TEXT NOT NULL,
+  related_id  TEXT NOT NULL,
+  rel_type    TEXT NOT NULL,
+  PRIMARY KEY (project_key, ticket_id, related_id, rel_type)
+);
+
+-- Host-side storage mode, keyed by project_key (default 'markdown'). Stored in
+-- the DB, NOT per-worktree config, so two worktrees can never disagree about
+-- which store is authoritative. Nothing reads this for behavior in Slice A.
+CREATE TABLE IF NOT EXISTS ticket_storage_mode (
+  project_key TEXT PRIMARY KEY,
+  mode        TEXT NOT NULL DEFAULT 'markdown',
+  updated_at  TEXT NOT NULL
+);
+
+-- Id-allocation sequence per (project_key, prefix). Defined here; the allocation
+-- BEHAVIOR lands in Slice B once Markdown is no longer authoritative.
+CREATE TABLE IF NOT EXISTS ticket_id_sequence (
+  project_key TEXT NOT NULL,
+  prefix      TEXT NOT NULL,
+  next_seq    INTEGER NOT NULL,
+  PRIMARY KEY (project_key, prefix)
+);
+
+-- Minimal durable blocker evidence (introduced HERE, not Slice D). Import maps a
+-- legacy status:blocked ticket to active + a row here, so blocker state survives
+-- the Slice C cutover (which precedes Slice D). The UNIQUE natural key
+-- (project_key, ticket_id, source) makes re-import idempotent. Slice D ENRICHES
+-- this table; it does not introduce it.
+CREATE TABLE IF NOT EXISTS blocker_evidence (
+  id          TEXT PRIMARY KEY,
+  project_key TEXT NOT NULL,
+  ticket_id   TEXT NOT NULL,
+  reason      TEXT,
+  source      TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  UNIQUE (project_key, ticket_id, source)
+);
+CREATE INDEX IF NOT EXISTS idx_blocker_evidence_ticket
+  ON blocker_evidence(project_key, ticket_id);
 `;
