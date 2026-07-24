@@ -22,9 +22,6 @@ import {
   ensureStorageMode,
   bumpIdSequence,
   getIdSequence,
-  pruneRemovedTickets,
-  reconcileRelations,
-  reconcileImportedBlockerEvidence,
   type TicketRow,
 } from "./tickets.js";
 
@@ -197,65 +194,6 @@ test("storage mode defaults to markdown and is stored per project_key", () => {
   assert.equal(getStorageMode("pk-A"), "db");
   // isolation across project_keys
   assert.equal(getStorageMode("pk-B"), "markdown");
-});
-
-test("pruneRemovedTickets prunes this source's removed tickets + orphaned deps, provenance-scoped", () => {
-  // Two sources sharing project pk-A: a local worktree and a SIBLING worktree.
-  upsertTicket(ticket({ projectKey: "pk-A", ticketId: "FG-1", importedFrom: "/wt/local" }));
-  upsertTicket(ticket({ projectKey: "pk-A", ticketId: "FG-2", importedFrom: "/wt/local" }));
-  upsertTicket(ticket({ projectKey: "pk-A", ticketId: "FG-8", importedFrom: "/wt/sibling" }));
-  upsertTicket(ticket({ projectKey: "pk-B", ticketId: "FG-1", importedFrom: "/wt/local" }));
-  upsertTicketEvent({ eventKey: "e:A:FG-2", projectKey: "pk-A", ticketId: "FG-2", eventType: "imported", createdAt: NOW });
-  upsertBlockerEvidence({ projectKey: "pk-A", ticketId: "FG-2", source: "import-legacy-blocked", createdAt: NOW });
-
-  // Local source drops FG-2 (keeps FG-1). Sibling's FG-8 and pk-B untouched.
-  pruneRemovedTickets("pk-A", "/wt/local", ["FG-1"]);
-
-  assert.ok(getTicket("pk-A", "FG-1"), "kept ticket survives");
-  assert.equal(getTicket("pk-A", "FG-2"), undefined, "removed ticket pruned");
-  assert.equal(eventsForTicket("pk-A", "FG-2").length, 0, "orphaned event pruned");
-  assert.equal(blockerEvidenceForTicket("pk-A", "FG-2").length, 0, "orphaned evidence pruned");
-  assert.ok(getTicket("pk-A", "FG-8"), "sibling worktree's ticket untouched");
-  assert.ok(getTicket("pk-B", "FG-1"), "other project untouched");
-
-  // Empty keepIds clears only THIS source's tickets in the project.
-  pruneRemovedTickets("pk-A", "/wt/local", []);
-  assert.equal(getTicket("pk-A", "FG-1"), undefined, "local source emptied");
-  assert.ok(getTicket("pk-A", "FG-8"), "sibling still untouched");
-  assert.ok(getTicket("pk-B", "FG-1"), "other project still untouched");
-});
-
-test("reconcileRelations prunes relations of SURVIVING tickets not in the desired set", () => {
-  upsertTicket(ticket({ projectKey: "pk-A", ticketId: "FG-1" }));
-  upsertTicket(ticket({ projectKey: "pk-A", ticketId: "FG-8" }));
-  upsertTicket(ticket({ projectKey: "pk-B", ticketId: "FG-1" }));
-  upsertTicketRelation({ projectKey: "pk-A", ticketId: "FG-1", relatedId: "FG-2", relType: "related" });
-  upsertTicketRelation({ projectKey: "pk-A", ticketId: "FG-1", relatedId: "FG-3", relType: "related" });
-  // A relation on a ticket NOT in keepIds (a sibling worktree's) must be untouched.
-  upsertTicketRelation({ projectKey: "pk-A", ticketId: "FG-8", relatedId: "FG-9", relType: "related" });
-  upsertTicketRelation({ projectKey: "pk-B", ticketId: "FG-1", relatedId: "FG-9", relType: "related" });
-
-  reconcileRelations("pk-A", ["FG-1"], [
-    { projectKey: "pk-A", ticketId: "FG-1", relatedId: "FG-2", relType: "related" },
-  ]);
-
-  assert.deepEqual(relationsForTicket("pk-A", "FG-1").map((r) => r.relatedId), ["FG-2"]);
-  assert.equal(relationsForTicket("pk-A", "FG-8").length, 1, "ticket outside keepIds untouched");
-  assert.equal(relationsForTicket("pk-B", "FG-1").length, 1, "other project untouched");
-});
-
-test("reconcileImportedBlockerEvidence prunes source-scoped evidence for unblocked surviving tickets", () => {
-  upsertTicket(ticket({ projectKey: "pk-A", ticketId: "FG-1" }));
-  upsertTicket(ticket({ projectKey: "pk-A", ticketId: "FG-2" }));
-  upsertBlockerEvidence({ projectKey: "pk-A", ticketId: "FG-1", source: "import-legacy-blocked", createdAt: NOW });
-  upsertBlockerEvidence({ projectKey: "pk-A", ticketId: "FG-2", source: "import-legacy-blocked", createdAt: NOW });
-  upsertBlockerEvidence({ projectKey: "pk-A", ticketId: "FG-1", source: "slice-d-source", createdAt: NOW });
-
-  // keepIds = both surviving tickets; only FG-1 is still blocked.
-  reconcileImportedBlockerEvidence("pk-A", ["FG-1", "FG-2"], ["FG-1"], "import-legacy-blocked");
-
-  assert.equal(blockerEvidenceForTicket("pk-A", "FG-1").length, 2, "still-blocked + other-source rows kept");
-  assert.equal(blockerEvidenceForTicket("pk-A", "FG-2").length, 0, "unblocked import evidence pruned");
 });
 
 // The composite FK invariant: dependent rows cannot orphan or cross projects, and

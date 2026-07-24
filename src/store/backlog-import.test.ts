@@ -253,11 +253,11 @@ function removeTicketFile(projectDir: string, subdir: string, id: string): void 
   rmSync(join(projectDir, "backlog", subdir, `${id}-slug.md`));
 }
 
-// Must-fix #2: re-import after a Markdown REMOVAL/RENAME reconciles stale rows so
-// the shadow EQUALS the current source set — removed tickets, orphaned relations,
-// evidence and events are pruned; a dropped `related:` entry on a SURVIVING ticket
-// is pruned; unrelated rows are untouched.
-test("re-import reconciles removed tickets and relations so the shadow equals Markdown", () => {
+// The DB is a non-authoritative shadow this slice, so import is idempotent-ADDITIVE:
+// re-importing after a Markdown REMOVAL RETAINS the removed ticket (and its
+// dependent rows) rather than destructively deleting it — cross-source pruning is
+// deferred to the authoritative-cutover slice. Re-import still never duplicates rows.
+test("re-import retains a removed-in-Markdown ticket (additive shadow, no duplicates)", () => {
   const dir = newProject();
   writeTicketFile(
     dir,
@@ -275,7 +275,7 @@ test("re-import reconciles removed tickets and relations so the shadow equals Ma
   assert.equal(blockerEvidenceForTicket(key, "FG-71").length, 1);
   assert.deepEqual(relationsForTicket(key, "FG-70").map((r) => r.relatedId).sort(), ["FG-71", "FG-72"]);
 
-  // Remove FG-71 entirely; drop the FG-71 relation from FG-70 (keep only FG-72).
+  // Remove FG-71 from Markdown; drop the FG-71 relation from FG-70 (keep only FG-72).
   removeTicketFile(dir, "stories", "FG-71");
   writeTicketFile(
     dir,
@@ -287,47 +287,52 @@ test("re-import reconciles removed tickets and relations so the shadow equals Ma
   const second = importBacklog(dir, { git, now: NOW });
   assert.equal(second.projectKey, key);
 
-  // The removed ticket and all its dependent rows are gone.
-  assert.equal(getTicket(key, "FG-71"), undefined, "removed ticket pruned");
-  assert.equal(blockerEvidenceForTicket(key, "FG-71").length, 0, "orphaned evidence pruned");
-  // The dropped relation is gone; the surviving one remains.
-  assert.deepEqual(relationsForTicket(key, "FG-70").map((r) => r.relatedId), ["FG-72"], "stale relation pruned");
-  // Unrelated rows untouched; the shadow equals the current Markdown set.
-  assert.ok(getTicket(key, "FG-70"));
-  assert.ok(getTicket(key, "FG-72"));
+  // The removed ticket and its dependent rows are RETAINED — no destructive delete.
+  assert.ok(getTicket(key, "FG-71"), "removed ticket retained (additive shadow)");
+  assert.equal(blockerEvidenceForTicket(key, "FG-71").length, 1, "its evidence retained");
+  // The dropped relation is retained too; the still-present one is not duplicated.
+  assert.deepEqual(
+    relationsForTicket(key, "FG-70").map((r) => r.relatedId).sort(),
+    ["FG-71", "FG-72"],
+    "relations are additive — nothing pruned, nothing duplicated",
+  );
+  // Re-import did not duplicate any row.
   assert.deepEqual(
     ticketsForProject(key).map((t) => t.ticketId).sort(),
-    ["FG-70", "FG-72"],
-    "DB rows equal the current Markdown ticket set",
+    ["FG-70", "FG-71", "FG-72"],
+    "no duplicate rows; the shadow accumulates",
   );
 });
 
-// Must-fix #2 + protocol invariant: removal reconciliation is PROVENANCE-scoped —
-// removing a ticket from ONE linked worktree must NOT prune a sibling worktree's
-// tickets (they share a project_key but have different Markdown sets).
-test("removal in one worktree preserves a sibling worktree's tickets", () => {
+// The accumulation invariant: two linked worktrees sharing a project_key AND a
+// ticket id. Removing the shared ticket from ONE worktree's Markdown and
+// re-importing leaves it present — there is no cross-source deletion to destroy it.
+test("removing a shared ticket from one worktree leaves it present (no destructive delete)", () => {
   const wtA = newProject();
   const wtB = newProject();
-  writeTicketFile(wtA, "stories", { id: "FG-40", type: "story", status: "active", title: "from A" }, "a");
-  writeTicketFile(wtB, "stories", { id: "FG-41", type: "story", status: "active", title: "from B" }, "b");
+  // Both worktrees carry FG-40 (shared id); wtA additionally carries FG-41.
+  writeTicketFile(wtA, "stories", { id: "FG-40", type: "story", status: "active", title: "shared" }, "a");
+  writeTicketFile(wtA, "stories", { id: "FG-41", type: "story", status: "active", title: "A-only" }, "a2");
+  writeTicketFile(wtB, "stories", { id: "FG-40", type: "story", status: "active", title: "shared" }, "b");
 
   const git = fixedRemoteGit("git@github.com:acme/siblings.git");
   const a = importBacklog(wtA, { git, now: NOW });
   importBacklog(wtB, { git, now: NOW });
   const key = a.projectKey;
-  assert.equal(ticketsForProject(key).length, 2, "union of both worktrees");
+  assert.equal(ticketsForProject(key).length, 2, "FG-40 (shared, upserted once) + FG-41");
 
-  // wtA removes FG-40 and re-imports. FG-41 (owned by wtB) must survive.
+  // wtA removes the shared FG-40 and re-imports. It must remain present.
   removeTicketFile(wtA, "stories", "FG-40");
   importBacklog(wtA, { git, now: NOW });
 
-  assert.equal(getTicket(key, "FG-40"), undefined, "wtA's removed ticket pruned");
-  assert.ok(getTicket(key, "FG-41"), "sibling worktree's ticket survives");
+  assert.ok(getTicket(key, "FG-40"), "shared ticket survives — no cross-source delete");
+  assert.ok(getTicket(key, "FG-41"), "wtA's other ticket survives");
+  assert.equal(ticketsForProject(key).length, 2, "still exactly two rows, no duplicates");
 });
 
-// Must-fix #2: reconciliation is project-scoped — another project's rows are never
-// touched when this project drops tickets.
-test("reconciliation never deletes another project's rows", () => {
+// Project isolation holds trivially now that import never deletes: another
+// project's rows are untouched, and this project retains its own rows on re-import.
+test("re-import never deletes another project's rows", () => {
   const dirA = newProject();
   const dirB = newProject();
   writeTicketFile(dirA, "stories", { id: "FG-80", type: "story", status: "active", title: "A-only" }, "a");
@@ -336,11 +341,11 @@ test("reconciliation never deletes another project's rows", () => {
   const a = importBacklog(dirA, { git: fixedRemoteGit("git@github.com:acme/ra.git"), now: NOW });
   const b = importBacklog(dirB, { git: fixedRemoteGit("git@github.com:acme/rb.git"), now: NOW });
 
-  // Empty A's Markdown and re-import: A's rows vanish, B's are untouched.
+  // Empty A's Markdown and re-import: A RETAINS its shadow row; B is untouched.
   removeTicketFile(dirA, "stories", "FG-80");
   importBacklog(dirA, { git: fixedRemoteGit("git@github.com:acme/ra.git"), now: NOW });
 
-  assert.equal(ticketsForProject(a.projectKey).length, 0, "A fully reconciled to empty");
+  assert.equal(ticketsForProject(a.projectKey).length, 1, "A retains its row (additive shadow)");
   assert.equal(ticketsForProject(b.projectKey).length, 1, "B untouched");
   assert.equal(getTicket(b.projectKey, "FG-80")!.title, "B-keep");
 });

@@ -38,9 +38,6 @@ import {
   upsertBlockerEvidence,
   ensureStorageMode,
   bumpIdSequence,
-  pruneRemovedTickets,
-  reconcileRelations,
-  reconcileImportedBlockerEvidence,
   type DbTicketStatus,
   type TicketRelation,
   type TicketRow,
@@ -200,8 +197,8 @@ export function importBacklog(projectDir: string, opts: ImportOptions = {}): Imp
   // writes zero rows.
   const rawFrontmatter = scanSourceFrontmatter(projectDir);
   const tickets = listTickets(projectDir); // FS read, outside the write transaction
-  // Canonical source dir — the reconcile provenance key. realpath so re-imports
-  // from the same worktree match, and two linked worktrees resolve distinctly.
+  // Canonical source dir (realpath), recorded as provenance on each ticket row.
+  // Harmless metadata this slice — no longer drives any deletion.
   const importedFrom = realpathSync(projectDir);
   const evidence = computeRepositoryEvidence(projectDir, opts.git);
   const config = readBacklogConfig(projectDir);
@@ -255,8 +252,6 @@ export function importBacklog(projectDir: string, opts: ImportOptions = {}): Imp
         ensureStorageMode(resolved.projectKey, now);
 
         const prefixMax = new Map<string, number>();
-        const desiredRelations: TicketRelation[] = [];
-        const blockedIds: string[] = [];
         for (const t of tickets) {
           const dbStatus = mapStatus(t.status);
           const row: TicketRow = {
@@ -294,7 +289,6 @@ export function importBacklog(projectDir: string, opts: ImportOptions = {}): Imp
               relType: "related",
             };
             upsertTicketRelation(relation);
-            desiredRelations.push(relation);
           }
 
           // Legacy blocked -> active + a durable blocker_evidence row (never a
@@ -307,7 +301,6 @@ export function importBacklog(projectDir: string, opts: ImportOptions = {}): Imp
               source: LEGACY_BLOCKED_SOURCE,
               createdAt: now,
             });
-            blockedIds.push(t.id);
           }
 
           const parsed = parsePrefixSeq(t.id);
@@ -316,19 +309,13 @@ export function importBacklog(projectDir: string, opts: ImportOptions = {}): Imp
           }
         }
 
-        // Reconcile removals/renames WITHIN this same transaction so the shadow
-        // EQUALS the current Markdown set — stale tickets/relations/evidence/events
-        // for ids (or `related:` entries) no longer in the source are pruned. Other
-        // projects' rows are untouched.
-        const keepIds = tickets.map((t) => t.id);
-        pruneRemovedTickets(resolved.projectKey, importedFrom, keepIds);
-        reconcileRelations(resolved.projectKey, keepIds, desiredRelations);
-        reconcileImportedBlockerEvidence(
-          resolved.projectKey,
-          keepIds,
-          blockedIds,
-          LEGACY_BLOCKED_SOURCE,
-        );
+        // The DB is a non-authoritative shadow this slice: import is
+        // idempotent-ADDITIVE (every write above is an UPSERT), never destructive.
+        // A ticket removed from ONE source's Markdown is deliberately NOT deleted —
+        // with a single imported_from, cross-source pruning could destroy a ticket a
+        // sibling linked worktree still owns. Aggressive removal reconciliation is
+        // deferred to the authoritative-cutover slice; a stale row in an unread
+        // shadow is harmless.
 
         // next_seq means "the next id to allocate" (Slice B), so seed it at the
         // highest existing number PLUS ONE. bumpIdSequence stays monotonic — a
