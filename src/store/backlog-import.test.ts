@@ -396,3 +396,32 @@ test("malformed file aborts import with a precise file+field error and writes ze
   assert.equal(ticketsForProject(wouldBeKey).length, 0, "zero rows written on a malformed import");
   assert.equal(getTicket(wouldBeKey, "FG-95"), undefined);
 });
+
+// Status preservation: an unrecognized source status (e.g. a typo) is a HARD,
+// ticket-identified refusal — never a silent coercion to active — and writes
+// ZERO rows (all-or-nothing atomic), matching the malformed-file contract.
+test("unrecognized source status aborts import naming the ticket + bad status and writes zero rows", () => {
+  const dir = newProject();
+  writeTicketFile(dir, "stories", { id: "FG-97", type: "story", status: "active", title: "good" }, "ok");
+  // Typo'd status — not one of active/done/deferred/blocked.
+  writeTicketFile(dir, "stories", { id: "FG-98", type: "story", status: "activ", title: "typo status" }, "x");
+
+  const git = fixedRemoteGit("git@github.com:acme/badstatus.git");
+  const ev = computeRepositoryEvidence(dir, git);
+  const wouldBeKey = deriveProjectKey(ev.key);
+
+  assert.throws(
+    () => importBacklog(dir, { git, now: NOW }),
+    (e: unknown) =>
+      e instanceof BacklogImportError &&
+      e.field === "status" &&
+      e.file.includes("FG-98") &&
+      /ticket FG-98/.test(e.message) &&
+      /unrecognized status 'activ'/.test(e.message) &&
+      /expected active\/done\/deferred\/blocked/.test(e.message),
+  );
+
+  // Atomic: the good ticket is not written either.
+  assert.equal(ticketsForProject(wouldBeKey).length, 0, "zero rows written on an unrecognized-status import");
+  assert.equal(getTicket(wouldBeKey, "FG-97"), undefined);
+});

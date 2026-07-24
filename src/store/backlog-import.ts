@@ -82,19 +82,25 @@ export type ImportOptions = {
   __afterClaimBeforeTickets?: () => void;
 };
 
+// The full valid source-status vocabulary. An import refuses (at the pre-write
+// scan seam) any ticket whose status is outside this set rather than silently
+// coercing it — see scanSourceFrontmatter and mapStatus.
+const VALID_SOURCE_STATUSES = new Set<string>(["active", "done", "blocked", "deferred"]);
+
 // Map the structured file status to the DB's active/done/deferred vocabulary.
 // Legacy 'blocked' becomes 'active' (the caller separately records a
 // blocker_evidence row so the blocked FACT survives the Slice C cutover).
+// Exhaustive over the valid set — never coerces an unknown status to active;
+// scanSourceFrontmatter rejects unrecognized statuses before any write.
 function mapStatus(status: StructuredTicket["status"]): DbTicketStatus {
   switch (status) {
+    case "active":
     case "blocked":
       return "active";
     case "done":
       return "done";
     case "deferred":
       return "deferred";
-    default:
-      return "active";
   }
 }
 
@@ -135,6 +141,19 @@ function scanSourceFrontmatter(projectDir: string): Map<string, Record<string, u
             field,
           );
         }
+      }
+      // Fail closed on an unrecognized status rather than silently coercing it to
+      // active (which would erase the real source state). Same all-or-nothing
+      // atomic contract as the missing-field refusal above — zero rows written.
+      const status = String(fm["status"]);
+      if (!VALID_SOURCE_STATUSES.has(status)) {
+        throw new BacklogImportError(
+          `forge: refusing import — ticket ${String(fm["id"])} (backlog file '${relPath}') has ` +
+            `unrecognized status '${status}' — expected active/done/deferred/blocked. Fix the file ` +
+            `and re-import (no tickets were written).`,
+          relPath,
+          "status",
+        );
       }
       byId.set(String(fm["id"]), fm);
     }
