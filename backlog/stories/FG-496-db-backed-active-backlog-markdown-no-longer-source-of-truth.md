@@ -112,7 +112,13 @@ or trip the FG-568 forward gate.
 Children (each independently shippable + testable, in sequence):
 
 1. **FG-606 — Slice A:** DB ticket schema (`tickets` / `ticket_events` / `ticket_relations`, explicit `type`) +
-   idempotent Markdown import as a non-authoritative shadow. Zero authority change, zero reader coupling.
+   idempotent Markdown import as a non-authoritative shadow. Zero authority change, zero reader coupling. As the
+   schema-foundation slice it ALSO fixes two load-bearing schema decisions the epic depends on: (a) a stable
+   cross-worktree **project identity** — a durable `project_key` in `.forge/config.yml`, all ticket tables keyed
+   by `(project_key, ticket_id)`, storage mode stored host-side in the DB under `project_key`, id allocation a
+   transactional sequence per `(project_key, prefix)`; and (b) a **minimal `blocker_evidence` table** with
+   legacy `blocked` mapped to active + evidence at import, so blocker state survives the Slice C cutover (which
+   precedes Slice D).
 2. **FG-607 — Slice B:** DB-backed CRUD behind the structured.ts seam + per-project storage mode
    (`markdown` | `db`); default stays `markdown`. Delivers the FG-495 cross-worktree shape in db mode.
 3. **FG-608 — Slice C:** migrate the seam-bypassing readers (dashboard ticket source, campaign dir-guards) +
@@ -120,8 +126,8 @@ Children (each independently shippable + testable, in sequence):
    becomes source of truth. Post-cutover import conflict rule: create-only, divergent ids write a conflict
    event, Markdown never silently clobbers a newer DB edit (`--force` to override).
 4. **FG-609 — Slice D:** queue primitives — canonical nullable `priority_rank`, explicit queue membership,
-   revision-bound readiness (reuse FG-382), durable blocker evidence, append-only event history. Derived
-   `in_progress`/`blocked` are computed, never stored.
+   revision-bound readiness (reuse FG-382), and ENRICHMENT of Slice A's minimal blocker evidence, append-only
+   event history. Derived `in_progress`/`blocked` are computed, never stored.
 5. **FG-610 — Slice E:** atomic queue claims / leases / recovery / capacity accounting + the canonical
    atomic claim-next query that FG-591 consumes. Primitives only — no dispatcher, no UI.
 
@@ -140,10 +146,23 @@ primitives it depends on have landed.
 - The boundary with FG-591 is firm: FG-496 stops at the canonical claim-next query. Any UI, operator control,
   or running dispatcher work belongs to FG-591 and must not be pulled into a FG-496 child.
 
-### Open architecture decisions (operator input) carried on the relevant child
+### Resolved architecture decisions (operator, 2026-07-24)
 
-- Storage-mode granularity: per-project (proposed) vs host-global default. (FG-607)
-- Ticket-ID allocation once Markdown is no longer authoritative: per-prefix DB sequence (proposed). (FG-607)
-- `forge backlog migrate`: single import+flip with `--dry-run` (proposed) vs two explicit steps. (FG-608)
-- Dashboard after cutover: per-project ticket board (proposed) vs host-wide cross-project board (arguably FG-591). (FG-608)
-- Re-import conflict default: skip + conflict event, Markdown loses, `--force` to override (proposed). (FG-608)
+- **Storage granularity:** per-project, keyed by stable `project_key`; storage mode stored host-side in the DB
+  under that key (not per-worktree config), so two worktrees cannot disagree. (FG-606 / FG-607)
+- **ID allocation:** transactional sequence per `(project_key, prefix)`. (FG-606 / FG-607)
+- **`forge backlog migrate`:** one atomic import + validation + mode flip, with `--dry-run`; on any failure
+  Markdown remains authoritative (no half-migrated project). Cutover is per-project opt-in — no global flip.
+  (FG-608)
+- **Dashboard:** per-project board in FG-608; cross-project aggregation belongs to FG-591. (FG-608)
+- **Import conflicts:** skip and record a conflict by default; `--force` overwrites only when explicitly
+  supplied and must record before/after evidence. (FG-608)
+- Additive-only migration / no `user_version` bump confirmed (matches the FG-568 forward-gate contract).
+
+### Migration path for other Forge projects
+
+Default-safe: every other project keeps reading its own `backlog/*.md` untouched throughout the build (mode
+defaults to `markdown`; the additive shared-DB tables sit unused until opted in). Per-project opt-in: run
+`forge backlog migrate` in a project when ready. Cutover is effectively one-way — once a migrated project makes
+DB-only edits, its Markdown is a frozen snapshot (no export; FG-496 non-goal), so clean rollback exists only
+before the first DB-only edit.

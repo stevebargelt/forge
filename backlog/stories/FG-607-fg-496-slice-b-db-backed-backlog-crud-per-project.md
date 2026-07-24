@@ -16,26 +16,36 @@ mode stays `markdown` in this slice, so live behavior is unchanged until an oper
 
 ## Scope
 
-- Dual-mode dispatch behind the **unchanged** structured.ts signatures (every existing caller compiles/passes).
-- Per-project storage mode in `.forge/config.yml`: values `markdown` | `db`. The mode is authoritative — NO
-  silent read-through blending of DB + Markdown (that reintroduces split-truth).
+- Dual-mode dispatch behind the **unchanged** structured.ts signatures (every existing caller compiles/passes),
+  scoped by the `(project_key, ticket_id)` identity established in Slice A.
+- **Storage mode is read from the DB, keyed by `project_key`** (Slice A's host-side record) — NOT from each
+  worktree's config. `.forge/config.yml` holds only the durable `project_key`; two worktrees therefore cannot
+  disagree about which store is authoritative. The mode is authoritative — NO silent read-through blending of
+  DB + Markdown (that reintroduces split-truth).
+- **Transactional id allocation:** in db mode, `forge backlog file` allocates the next id from the
+  per-`(project_key, prefix)` sequence (Slice A's table) inside the write transaction, so concurrent files in
+  two worktrees cannot collide or reuse an id.
 - CLI `file` / `edit` / `close` / `show` / `list` work with **no `backlog/` dir present** in db mode.
-- CLI surfaces the active storage mode on every invocation (operators can always tell which store they read).
+- CLI surfaces the active storage mode (and which store it read) on every invocation.
 - Filing / editing / closing no longer dirties project `git status` in db mode.
 
 ## Files (grounded)
 
 - `src/backlog/structured.ts` — the seam; dual-mode behind unchanged signatures.
-- `src/backlog/config.ts` — add the per-project storage-mode field.
+- `src/store/*` — read/write the host-side storage-mode record + the id-allocation sequence (both from Slice A).
 - `src/cli/commands/backlog.ts` — mode banner; drop the `existsSync('backlog')` hard requirement (~line 196).
 - `src/store/db.ts` — `BEGIN IMMEDIATE` / writeTxn for atomic DB writes (replaces the `withBacklogLock` fs lock).
 
 ## Acceptance Criteria
 
 - **FG-495 shape:** create a ticket in db mode, then read it from a clean secondary worktree/checkout with NO
-  Markdown file present — Forge still finds it via the DB.
+  Markdown file present — Forge still finds it via the DB, using the same `project_key`.
+- Two linked worktrees of one project resolve the SAME storage mode (it lives in the DB under `project_key`);
+  changing the mode is visible to both without editing either worktree's files.
 - A project with no `backlog/` dir supports full CRUD (file/edit/close/show/list) in db mode.
 - `git status` stays clean after file/edit/close in db mode.
+- Concurrent `file` in two worktrees allocate distinct ids from the `(project_key, prefix)` sequence (no
+  collision, no reuse).
 - CLI clearly prints whether it read legacy Markdown or the DB.
 - Every existing structured.ts caller (see FG-496 consumer inventory) compiles and passes unchanged.
 - Additive schema only; no `user_version` bump.
@@ -43,15 +53,10 @@ mode stays `markdown` in this slice, so live behavior is unchanged until an oper
 ## Dependencies / Relations
 
 - Parent: FG-496. Epic: FG-593.
-- Depends on: Slice A (FG-606, the schema).
+- Depends on: Slice A (FG-606 — schema, project identity, host-side mode record, id-allocation sequence).
 - Blocks: Slice C (the cutover), Slice D (queue fields).
 
 ## Non-Goals
 
-- Does NOT flip the default authority to the DB (that is Slice C). No queue primitives, claims, UI, or
-  dispatcher. No Markdown export.
-
-## Open decision (surface at planning)
-
-- Ticket-ID allocation once Markdown is no longer authoritative: a per-prefix DB sequence is the proposed
-  default; confirm before implementing (changes id semantics).
+- Does NOT flip the default authority to the DB (that is Slice C). No queue rank/membership/readiness (Slice D),
+  claims (Slice E), UI, or dispatcher. No Markdown export.
