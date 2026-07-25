@@ -6,36 +6,75 @@
 // runtime FROM THE RUNNING PROCESS, per FG-551 (a grep of bin/forge is hollow;
 // running the entry and reading process.execPath is real).
 //
-// Runs in the forge-test scratch (/tmp/forge-work), where node_modules is rebuilt
-// for the container and the tree is a git repo — so the closure carries a binding
-// that actually loads and the manifest carries a real commit SHA.
+// It runs wherever it is invoked from — the checkout, a clone, the forge-test scratch —
+// and it NEVER writes to that repository (FG-575). Every release it builds comes from an
+// isolated, committed COPY of the invoking tree made under a disposable temp workspace, so
+// the closure carries a binding that actually loads and the manifest carries a real commit
+// SHA without the suite committing, stashing, or otherwise touching the invoking checkout.
+// The last test in this file asserts that invariant over the whole run.
+//
+// Precondition (shared with the sibling launch-*.integration release tests): the invoking
+// checkout's own src/, package.json and lockfile must be committed, because forge refuses to
+// build a release from a dirty BUILDER — and this file will not commit them for you. See
+// assertBuilderCheckoutIsCommitted below.
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, cpSync, writeFileSync, existsSync, lstatSync, readdirSync, rmSync, renameSync, symlinkSync, appendFileSync, readFileSync, chmodSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, cpSync, writeFileSync, existsSync, lstatSync, readdirSync, rmSync, renameSync, symlinkSync, appendFileSync, readFileSync, chmodSync, statSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { buildRelease, assertReleaseCloses, thawReleaseTree, renderEntry, RELEASE_BINDING_REL, RELEASE_LOADER_NAME, RELEASE_MANIFEST_NAME, type BuildReleaseResult } from "./release.js";
 import { interpreterPath, storedIdentityOf, validatedInterpreter } from "./runtime-store.js";
 import { findGitRoot } from "../util/git-root.js";
 
-const sourceRoot = findGitRoot(process.cwd());
+/** The repository this suite was INVOKED from. READ-ONLY here (FG-575): its bytes are
+ *  copied out, but nothing in this file builds from it, commits into it, or writes to it. */
+const checkoutRoot = findGitRoot(process.cwd());
 let workspace: string;
 /** The disposable forge home whose interpreter store these builds install into and pin
  *  (FG-571). Not the ambient FORGE_HOME: a build with no `home` would land a copy of node
  *  in the operator's real ~/.forge/interpreters just for running the suite. */
 let buildHome: string;
+/** The isolated, committed copy of the invoking checkout's WORKING TREE that every
+ *  self-build in this file builds from (FG-575). */
+let buildRoot: string;
 let built: BuildReleaseResult;
+/** The invoking repository's git state at suite start — the AC baseline the last test
+ *  in this file compares against. */
+let checkoutStateBefore: GitState;
+
+type GitState = { head: string; branch: string; status: string; stash: string };
+
+/** Everything the FG-575 invariant covers: which commit, which branch, what is
+ *  modified/untracked, and what is stashed. */
+function gitState(root: string): GitState {
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8" });
+  return {
+    head: git("rev-parse", "HEAD").trim(),
+    branch: git("rev-parse", "--abbrev-ref", "HEAD").trim(),
+    status: git("status", "--porcelain"),
+    stash: git("stash", "list"),
+  };
+}
 
 /** Commit a buildable tree's SHIPPED source paths (src/, package.json, and any
  *  lockfile) so HEAD describes them — buildRelease now refuses a dirty source
  *  (FG-569 GAP 2). node_modules stays untracked: it is install output bound to the
  *  lockfile separately, not part of the commit's source identity (and it is huge).
- *  A no-op when the tree is already clean (CI runs on a committed checkout). */
+ *  A no-op when the tree is already clean.
+ *
+ *  FG-575: only ever called on a disposable fixture under `workspace`. It used to be
+ *  called on the invoking checkout too, which swept an operator's in-progress work into
+ *  a `source snapshot` commit authored `t <t@t>`. The guard below makes that regression
+ *  fail loudly at the call site instead of silently in someone's branch. */
 function commitSource(root: string): void {
+  assert.ok(
+    root.startsWith(workspace + sep),
+    `FG-575: commitSource may only commit into a disposable fixture under ${workspace} — refusing to commit into ${root}`,
+  );
   // FG-569 Resolution B: the commit now binds the bundled asset dirs too (seeds/,
   // scripts/, docker/), so a build refuses a dirty seed/hook/docker file. Stage them
   // here alongside src/+package.json+lockfile, else buildRelease would refuse the
@@ -62,21 +101,83 @@ function copyBundledAssets(root: string): void {
   // (real bytes, incl. the vendored client libs, so the missing-vendored-lib mutation
   // proof can remove a genuine file).
   for (const asset of ["seeds", "scripts", "docker", "dashboard"]) {
-    cpSync(join(sourceRoot, asset), join(root, asset), { recursive: true, dereference: true });
+    cpSync(join(checkoutRoot, asset), join(root, asset), { recursive: true, dereference: true });
   }
 }
 
+/** An isolated, committed COPY of `root`'s WORKING TREE (real src/ + node_modules + bundled
+ *  assets) as its own throwaway git repo under the workspace — the only kind of source this
+ *  file ever builds from (FG-575).
+ *
+ *  The copy is of the working tree, not of HEAD, so `root`'s uncommitted edits still reach
+ *  the release — that is what the old `commitSource(<the invoking checkout>)` was there to
+ *  provide, and this provides it without writing a byte into `root`. The copy's own first
+ *  commit gives buildRelease the clean, commit-described source it requires (FG-569 GAP 2).
+ *
+ *  A source built this way can also have its checkout RENAMED away afterwards, so a release
+ *  can be proven to run with no source-checkout fallback. */
+function isolatedSourceFrom(root: string, label: string): string {
+  const src = mkdtempSync(join(workspace, label));
+  execFileSync("git", ["init", "-q"], { cwd: src });
+  for (const rel of ["src", "package.json", "package-lock.json", "npm-shrinkwrap.json", "seeds", "scripts", "docker", "dashboard"]) {
+    const from = join(root, rel);
+    if (existsSync(from)) cpSync(from, join(src, rel), { recursive: true, dereference: true });
+  }
+  cpSync(join(root, "node_modules"), join(src, "node_modules"), { recursive: true, dereference: true });
+  commitSource(src);
+  return src;
+}
+
+/** The IN-PROCESS buildRelease() calls below (the fixture builds) resolve their BUILDER
+ *  identity from this module's own location — the invoking checkout — and a release refuses
+ *  a builder whose shipped source paths are dirty (FG-569 GAP 2). That refusal is a hard
+ *  precondition of this file, shared with the sibling launch-*.integration release tests.
+ *
+ *  It is stated ONCE here rather than surfacing as the same failure inside sixteen test
+ *  bodies. What this suite will NOT do is satisfy it for you by committing your working tree:
+ *  that was the FG-575 defect — it swept operators' in-progress work into a `source snapshot`
+ *  commit authored `t <t@t>`. Commit or stash, or run the tier from a throwaway clone. */
+function assertBuilderCheckoutIsCommitted(): void {
+  const paths = ["src", "package.json", "package-lock.json", "npm-shrinkwrap.json"].filter((p) => existsSync(join(checkoutRoot, p)));
+  const dirty = execFileSync("git", ["status", "--porcelain", "--", ...paths], { cwd: checkoutRoot, encoding: "utf8" });
+  assert.equal(
+    dirty,
+    "",
+    `this suite builds releases with ${checkoutRoot} as the BUILDER checkout, and forge refuses a dirty builder. FG-575: it will not commit your work to get around that. Commit or stash these paths, or run this tier from a throwaway clone:\n${dirty}`,
+  );
+}
+
+/** Build a release by EXECUTING an isolated source's OWN cli, with cwd and --source both
+ *  inside it — so the builder checkout and the source checkout are one repo, the production
+ *  `forge release build` shape, and the invoking checkout takes no part in the build at all
+ *  (FG-575). FORGE_HOME pins the interpreter store to the disposable buildHome (FG-571). */
+function buildFromIsolatedSource(root: string, outDir: string): BuildReleaseResult {
+  const r = spawnSync(
+    process.execPath,
+    ["--import", "tsx", join(root, "src", "cli", "index.ts"), "release", "build", "--source", root, "--out", outDir, "--json"],
+    { cwd: root, encoding: "utf8", env: { ...process.env, FORGE_HOME: buildHome } },
+  );
+  assert.equal(r.status, 0, `release build from the isolated source ${root} failed: ${r.stderr}`);
+  return JSON.parse(r.stdout) as BuildReleaseResult;
+}
+
 before(() => {
-  workspace = mkdtempSync(join(tmpdir(), "fg569-rel-"));
+  // realpathSync: macOS reaches the OS tmpdir through /var -> /private/var, and a release
+  // records the CANONICAL path it was built at, so an expected value spelled /var/... never
+  // matched the actual /private/var/... (FG-575, same shape as FG-556). Canonicalizing the
+  // workspace ROOT once makes every path derived from it canonical on both sides of every
+  // comparison in this file — a no-op wherever the tmpdir is already canonical (Linux CI),
+  // not a platform branch.
+  workspace = realpathSync(mkdtempSync(join(tmpdir(), "fg569-rel-")));
   buildHome = join(workspace, "forge-home");
-  // FG-569 GAP 2: a release binds its commit to the shipped source, so the tree must
-  // be committed before it can build. CI runs on a committed checkout (no-op here);
-  // under forge-test the scratch carries this run's synced-but-uncommitted edits, so
-  // snapshot them first — mirroring the clean committed state CI builds against.
-  commitSource(sourceRoot);
-  // The one full build the whole file shares (copying node_modules is the slow
-  // part). outDir is OUTSIDE sourceRoot so the copy never recurses into itself.
-  built = buildRelease({ sourceRoot, home: buildHome, outDir:join(workspace, "release") });
+  checkoutStateBefore = gitState(checkoutRoot);
+  assertBuilderCheckoutIsCommitted();
+  // FG-575: the source is an isolated copy, never the invoking repository. buildRoot carries
+  // this run's working-tree bytes (incl. any uncommitted edits) under its own first commit.
+  buildRoot = isolatedSourceFrom(checkoutRoot, "selfsrc-");
+  // The one full build the whole file shares (copying node_modules is the slow part).
+  // outDir is OUTSIDE buildRoot so the copy never recurses into itself.
+  built = buildFromIsolatedSource(buildRoot, join(workspace, "release"));
 });
 
 after(() => {
@@ -91,14 +192,14 @@ test("FG-569 (finding): an --out path INSIDE the source tree is REFUSED before a
   // --out src/<x> makes src/<x>.building-* part of the copied src/ input, so the
   // recursive cpSync of src/ + node_modules/ would copy the growing staging tree into
   // itself. The build must refuse the path before creating anything.
-  const badOut = join(sourceRoot, "src", "release-would-recurse");
+  const badOut = join(buildRoot, "src", "release-would-recurse");
   assert.throws(
-    () => buildRelease({ sourceRoot, home: buildHome, outDir:badOut }),
+    () => buildRelease({ sourceRoot: buildRoot, home: buildHome, outDir:badOut }),
     /inside the source root/i,
-    "an out dir contained by sourceRoot must be refused",
+    "an out dir contained by the source root must be refused",
   );
   assert.ok(!existsSync(badOut), "no out dir was created");
-  const leaked = readdirSync(join(sourceRoot, "src")).filter((n) => n.startsWith("release-would-recurse"));
+  const leaked = readdirSync(join(buildRoot, "src")).filter((n) => n.startsWith("release-would-recurse"));
   assert.deepEqual(leaked, [], "no `.building-*` staging dir leaked into the source tree");
 });
 
@@ -116,7 +217,7 @@ test("FG-569 build: the manifest pins the building interpreter, its ABI, the com
   assert.equal(validatedInterpreter(buildHome, storeId), m.interpreter, "and it validates BY EXECUTION at that key — a release may reference nothing less");
   assert.notEqual(m.interpreter, process.execPath, "the mutable external path the build ran from is NOT what the release pins");
   assert.equal(m.abi, process.versions.modules, "the ABI the native binding needs");
-  assert.equal(m.commit, execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceRoot, encoding: "utf8" }).trim());
+  assert.equal(m.commit, execFileSync("git", ["rev-parse", "HEAD"], { cwd: buildRoot, encoding: "utf8" }).trim());
   assert.match(m.lockfile.sha256, /^[0-9a-f]{64}$/, "lockfile identity is recorded");
   assert.ok(existsSync(join(built.releaseDir, RELEASE_BINDING_REL)), "the compiled native binding is inside the closure");
   assert.ok(existsSync(built.entryPath), "the entry script exists");
@@ -312,7 +413,7 @@ test("FG-569 closure: a symlinked node_modules dependency is DEREFERENCED into t
   writeFileSync(join(src, "package-lock.json"), `{"name":"symlink-src","lockfileVersion":3}`);
   // The real, complete node_modules so the closure gate (better-sqlite3 loads +
   // the full tsx dep tree) passes — the external link below is what's under test.
-  cpSync(join(sourceRoot, "node_modules"), join(src, "node_modules"), { recursive: true, dereference: true });
+  cpSync(join(checkoutRoot, "node_modules"), join(src, "node_modules"), { recursive: true, dereference: true });
   // The linked dependency lives OUTSIDE the source tree; node_modules only links to it.
   const external = mkdtempSync(join(workspace, "external-linked-"));
   writeFileSync(join(external, "index.js"), `module.exports = "from the external host location";\n`);
@@ -366,8 +467,8 @@ test("FG-569 lockfile binding (RED pre-fix, GREEN after): a content-mutated inst
   // Build from THIS project's real lockfile + node_modules, so the npm cache holds
   // every pinned tarball (the scratch install populated it) and the binding has an
   // authentic tarball to compare each shipped dependency against.
-  for (const f of ["package.json", "package-lock.json"]) cpSync(join(sourceRoot, f), join(src, f));
-  cpSync(join(sourceRoot, "node_modules"), join(src, "node_modules"), { recursive: true, dereference: true });
+  for (const f of ["package.json", "package-lock.json"]) cpSync(join(checkoutRoot, f), join(src, f));
+  cpSync(join(checkoutRoot, "node_modules"), join(src, "node_modules"), { recursive: true, dereference: true });
   copyBundledAssets(src);
   commitSource(src);
 
@@ -419,7 +520,7 @@ test("FG-569 FIX 4: the COPIED-closure gate REJECTS a release whose OWN binding 
   // Build a valid release, then corrupt its OWN copied binding. The source gate ran
   // BEFORE the copy, so only a gate over the COPY catches this. assertReleaseCloses
   // loads the release's own binding under the pinned interpreter and must throw.
-  const rel = buildRelease({ sourceRoot, home: buildHome, outDir:join(workspace, "corrupt-copy-release") });
+  const rel = buildRelease({ sourceRoot: buildRoot, home: buildHome, outDir:join(workspace, "corrupt-copy-release") });
   // The build freezes the closure (files read-only), so make this one file writable
   // before corrupting it — the tamper we then prove assertReleaseCloses catches.
   const binding = join(rel.releaseDir, RELEASE_BINDING_REL);
@@ -439,7 +540,7 @@ test("FG-569 torn closure: a CORRUPT / ABI-mismatched native binding is REFUSED 
   // Real better-sqlite3 JS + its runtime deps, so require() reaches the binding —
   // then corrupt the binding so the load throws exactly as a torn closure would.
   for (const dep of ["better-sqlite3", "bindings", "file-uri-to-path"]) {
-    const from = join(sourceRoot, "node_modules", dep);
+    const from = join(checkoutRoot, "node_modules", dep);
     if (existsSync(from)) cpSync(from, join(torn, "node_modules", dep), { recursive: true });
   }
   writeFileSync(join(torn, RELEASE_BINDING_REL), "not a real .node\n");
@@ -462,15 +563,15 @@ function makeLockSource(label: string): string {
   // content to materialize — git does not track an empty directory, and archive fatally
   // errors on a pathspec that matches no tracked files. Real sources always carry src/*.
   writeFileSync(join(src, "src", "index.ts"), "export {};\n");
-  cpSync(join(sourceRoot, "package.json"), join(src, "package.json"));
-  cpSync(join(sourceRoot, "node_modules"), join(src, "node_modules"), { recursive: true, dereference: true });
+  cpSync(join(checkoutRoot, "package.json"), join(src, "package.json"));
+  cpSync(join(checkoutRoot, "node_modules"), join(src, "node_modules"), { recursive: true, dereference: true });
   copyBundledAssets(src);
   return src;
 }
 
 test("FG-569 Finding 4 (lockfile selection): a package-lock-only source builds and binds+manifests against package-lock.json", () => {
   const src = makeLockSource("lock-pl-only-");
-  cpSync(join(sourceRoot, "package-lock.json"), join(src, "package-lock.json"));
+  cpSync(join(checkoutRoot, "package-lock.json"), join(src, "package-lock.json"));
   commitSource(src);
 
   const rel = buildRelease({ sourceRoot: src, home: buildHome, outDir:join(workspace, "lock-pl-only-rel") });
@@ -483,7 +584,7 @@ test("FG-569 Finding 4 (lockfile selection): a shrinkwrap-only source builds —
   // hardcoded package-lock.json, so a shrinkwrap-only source always failed the binding.
   const src = makeLockSource("lock-sw-only-");
   // npm-shrinkwrap.json has the same shape as package-lock.json, so reuse the real one.
-  cpSync(join(sourceRoot, "package-lock.json"), join(src, "npm-shrinkwrap.json"));
+  cpSync(join(checkoutRoot, "package-lock.json"), join(src, "npm-shrinkwrap.json"));
   commitSource(src);
 
   const rel = buildRelease({ sourceRoot: src, home: buildHome, outDir:join(workspace, "lock-sw-only-rel") });
@@ -496,7 +597,7 @@ test("FG-569 Finding 4 (lockfile selection): a shrinkwrap-only source builds —
 
 test("FG-569 Finding 4 (lockfile selection): both present ⇒ shrinkwrap WINS for copy, verify, and manifest", () => {
   const src = makeLockSource("lock-both-");
-  cpSync(join(sourceRoot, "package-lock.json"), join(src, "npm-shrinkwrap.json"));
+  cpSync(join(checkoutRoot, "package-lock.json"), join(src, "npm-shrinkwrap.json"));
   // A DECOY package-lock.json that, if it were the one selected, would FAIL the
   // byte-binding (it pins a package that isn't installed / isn't in the npm cache).
   // A clean build therefore proves the shrinkwrap — not this file — was selected.
@@ -520,7 +621,7 @@ test("FG-569 GAP 1 (install-script pkg, RED pre-fix / GREEN after): a TARBALL-OW
   // files. This proves the skip is gone: a benign in-place mutation of a tarball-owned
   // better-sqlite3 source file, with package-lock.json left byte-identical, is refused.
   const src = makeLockSource("gap1-installscript-");
-  cpSync(join(sourceRoot, "package-lock.json"), join(src, "package-lock.json"));
+  cpSync(join(checkoutRoot, "package-lock.json"), join(src, "package-lock.json"));
   commitSource(src);
 
   // Untampered: the SAME real tree — which INCLUDES the install-script packages —
@@ -554,7 +655,7 @@ test("FG-569 GAP 1 (install-script pkg, RED pre-fix / GREEN after): a TARBALL-OW
 
 test("FG-569 GAP 2 (dirty source, RED pre-fix / GREEN after): an uncommitted change under src/ is REFUSED so the manifest commit can never lie about the shipped bytes", () => {
   const src = makeLockSource("gap2-dirty-src-");
-  cpSync(join(sourceRoot, "package-lock.json"), join(src, "package-lock.json"));
+  cpSync(join(checkoutRoot, "package-lock.json"), join(src, "package-lock.json"));
   commitSource(src);
   // Baseline: the committed tree builds — refuse-dirty does not false-refuse a clean source.
   buildRelease({ sourceRoot: src, home: buildHome, outDir:join(workspace, "gap2-clean") });
@@ -592,7 +693,7 @@ test("FG-569 TOCTOU (snapshot from commit, RED pre-fix / GREEN after): a LIVE-tr
   // window cannot leak in. Against the old live-cpSync builder this is RED (it ships the live
   // bytes); against the snapshot builder it is GREEN (it ships the committed bytes).
   const src = makeLockSource("toctou-snapshot-");
-  cpSync(join(sourceRoot, "package-lock.json"), join(src, "package-lock.json"));
+  cpSync(join(checkoutRoot, "package-lock.json"), join(src, "package-lock.json"));
   // A representative commit-bound file with KNOWN committed content.
   const relPosix = "src/toctou-marker.ts";
   const marker = join(src, "src", "toctou-marker.ts");
@@ -651,7 +752,7 @@ test("FG-569 GAP 2 (builder identity): builderCommit is recorded and EQUALS comm
   assert.equal(m.builderCommit, m.commit, "on a self-build the builder IS the source checkout, so the two commits are equal");
   assert.equal(
     m.commit,
-    execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceRoot, encoding: "utf8" }).trim(),
+    execFileSync("git", ["rev-parse", "HEAD"], { cwd: buildRoot, encoding: "utf8" }).trim(),
     "and both name the committed source HEAD the release was built from",
   );
 });
@@ -738,7 +839,7 @@ test("FG-580 (closure validation, mutation proofs): a source missing a required 
   ];
   for (const c of cases) {
     const src = makeLockSource(`dash-omit-${c.label}-`);
-    cpSync(join(sourceRoot, "package-lock.json"), join(src, "package-lock.json"));
+    cpSync(join(checkoutRoot, "package-lock.json"), join(src, "package-lock.json"));
     const target = c.underNodeModules ? join(src, "node_modules", c.remove) : join(src, c.remove);
     rmSync(target, { recursive: true, force: true });
     commitSource(src); // node_modules is untracked; tracked-file removals commit cleanly
@@ -760,7 +861,7 @@ test("FG-580 (Option A, mutation proof): a source WITHOUT a dashboard/ dir REFUS
   // RED against exactly that defect (the build completed instead of throwing). With the
   // mandatory gate it refuses by name.
   const src = makeLockSource("no-dashboard-");
-  cpSync(join(sourceRoot, "package-lock.json"), join(src, "package-lock.json"));
+  cpSync(join(checkoutRoot, "package-lock.json"), join(src, "package-lock.json"));
   // Remove the dashboard/ workspace that copyBundledAssets staged — everything ELSE the
   // build needs is present, so this isolates the mandatory-dashboard refusal.
   rmSync(join(src, "dashboard"), { recursive: true, force: true });
@@ -775,7 +876,7 @@ test("FG-580 (Option A, mutation proof): a source WITHOUT a dashboard/ dir REFUS
 
 test("FG-580 (commit-binding): a dirty (uncommitted) VENDORED client lib refuses the build BY NAME — the manifest commit cannot describe dashboard bytes it did not produce", () => {
   const src = makeLockSource("dash-dirty-vendor-");
-  cpSync(join(sourceRoot, "package-lock.json"), join(src, "package-lock.json"));
+  cpSync(join(checkoutRoot, "package-lock.json"), join(src, "package-lock.json"));
   commitSource(src);
   // Baseline: the committed tree (with vendored libs) builds cleanly.
   buildRelease({ sourceRoot: src, home: buildHome, outDir: join(workspace, "dash-dirty-vendor-clean") });
@@ -794,7 +895,7 @@ test("FG-580 (commit-binding): a dirty (uncommitted) VENDORED client lib refuses
 
 test("FG-569 Resolution B (dirty seed/hook REFUSED at build): an uncommitted edit to a bundled seed OR script refuses the build — the manifest commit would not describe the shipped bytes", () => {
   const src = makeLockSource("dirty-asset-");
-  cpSync(join(sourceRoot, "package-lock.json"), join(src, "package-lock.json"));
+  cpSync(join(checkoutRoot, "package-lock.json"), join(src, "package-lock.json"));
   commitSource(src);
   // Baseline: the committed tree (with real seeds/scripts/docker) builds cleanly.
   buildRelease({ sourceRoot: src, home: buildHome, outDir:join(workspace, "dirty-asset-clean") });
@@ -826,7 +927,7 @@ test("FG-569 Resolution B (dirty seed/hook REFUSED at build): an uncommitted edi
 
 test("FG-569 Resolution B (required asset missing): a source lacking a bundled asset dir is REFUSED as a torn closure, no release produced", () => {
   const src = makeLockSource("missing-asset-");
-  cpSync(join(sourceRoot, "package-lock.json"), join(src, "package-lock.json"));
+  cpSync(join(checkoutRoot, "package-lock.json"), join(src, "package-lock.json"));
   // Remove a required asset dir that makeLockSource copied — the closure gate (binding)
   // passes, so this proves the DEDICATED required-asset refusal, not an optional skip.
   rmSync(join(src, "docker"), { recursive: true, force: true });
@@ -839,21 +940,6 @@ test("FG-569 Resolution B (required asset missing): a source lacking a bundled a
   assert.ok(!existsSync(join(workspace, "missing-asset-rel")), "a refused build leaves no release behind");
 });
 
-/** A full, committed COPY of this project (real src/ + node_modules + bundled assets)
- *  as an isolated git checkout, so a release built from it can have its source RENAMED
- *  away and the release still proven to run with NO source-checkout fallback. */
-function makeFullSource(label: string): string {
-  const src = mkdtempSync(join(workspace, label));
-  execFileSync("git", ["init", "-q"], { cwd: src });
-  for (const rel of ["src", "package.json", "package-lock.json", "seeds", "scripts", "docker", "dashboard"]) {
-    const from = join(sourceRoot, rel);
-    if (existsSync(from)) cpSync(from, join(src, rel), { recursive: true, dereference: true });
-  }
-  cpSync(join(sourceRoot, "node_modules"), join(src, "node_modules"), { recursive: true, dereference: true });
-  commitSource(src);
-  return src;
-}
-
 test("FG-569 successor build (EXECUTED, RED pre-fix / GREEN after): release A builds release B from a clean checkout, B runs, and B records A's builder identity SEPARATELY from B's source commit", () => {
   // The HIGH production-path gap: a BUILT release must be able to build its successor.
   // Pre-fix, builderRoot() = findGitRoot(<release>/src/v2); a release has no .git, so
@@ -864,7 +950,11 @@ test("FG-569 successor build (EXECUTED, RED pre-fix / GREEN after): release A bu
 
   // B's source: an isolated, committed clean checkout whose HEAD is DISTINCT from A's
   // commit — so builderCommit (A's) vs commit (B's source) are provably separate SHAs.
-  const bSource = makeFullSource("successor-bsrc-");
+  // A's source is an isolated copy of the same working tree, so give B's a byte A's does
+  // not have: identical trees committed in the same second would hash to the same commit.
+  const bSource = isolatedSourceFrom(checkoutRoot, "successor-bsrc-");
+  writeFileSync(join(bSource, "src", "successor-b-marker.ts"), "export const bSource = true;\n");
+  commitSource(bSource);
   const bSourceHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: bSource, encoding: "utf8" }).trim();
   assert.notEqual(bSourceHead, built.manifest.commit, "B's source HEAD differs from A's commit — the separation is observable");
 
@@ -899,7 +989,7 @@ test("FG-569 Resolution B (EXECUTED, SOURCE RENAMED AWAY): supported commands �
   // from an isolated source, then RENAME the source away so it cannot be resolved, and
   // exercise the release's own entry. Every supported command must run from the release's
   // OWN bundled bytes; forge dashboard must refuse (release mode) rather than reach out.
-  const fullSrc = makeFullSource("srcgone-");
+  const fullSrc = isolatedSourceFrom(checkoutRoot, "srcgone-");
   const built2 = buildRelease({ sourceRoot: fullSrc, home: buildHome, outDir: join(workspace, "srcgone-release") });
   renameSync(fullSrc, `${fullSrc}.GONE`);
   assert.ok(!existsSync(fullSrc), "the source checkout is now inaccessible");
@@ -969,4 +1059,87 @@ test("FG-569 Resolution B (EXECUTED, SOURCE RENAMED AWAY): supported commands �
   } finally {
     try { process.kill(-dashChild.pid!, "SIGKILL"); } catch { /* group already gone */ }
   }
+});
+
+test("FG-575 (canonical paths): the workspace root IS its own realpath, so every path this file compares is canonical on macOS exactly as on Linux", () => {
+  // macOS reaches the OS tmpdir through /var -> /private/var; Linux has no such symlink, so
+  // the two spellings are identical there and CI never saw the split. Every path this file
+  // asserts on is derived from `workspace`, so canonicalizing that one root canonicalizes
+  // both sides of every comparison — no platform branch, and a no-op where /tmp is already
+  // canonical. RED on macOS before FG-575 (workspace was the raw /var/folders/... mkdtemp).
+  assert.equal(workspace, realpathSync(workspace), "the workspace is its own realpath — no /var vs /private/var split is possible");
+  assert.equal(built.releaseDir, realpathSync(built.releaseDir), "so the built release's path is canonical too");
+  assert.equal(buildHome, realpathSync(buildHome), "and so is the interpreter store's home, which the manifest pins a path under");
+});
+
+test("FG-575: a DIRTY invoking checkout is NEVER committed into — the build runs off an isolated copy that carries the uncommitted work, and the checkout's git state is untouched", () => {
+  // The defect this kills only fires on a DIRTY tree: the old commitSource(<invoking repo>)
+  // staged and committed whatever the operator had in progress under `t <t@t>`, and on a
+  // clean tree it was a no-op — so asserting the invariant against a clean checkout passes
+  // VACUOUSLY even with the bug fully present. Stand in for the invoking checkout with a
+  // disposable copy, dirty it exactly as in-progress work would, and drive the SAME
+  // prepare-then-build path `before()` runs.
+  const standIn = isolatedSourceFrom(checkoutRoot, "fg575-standin-");
+  const wip = join(standIn, "src", "fg575-operator-work-in-progress.ts");
+  writeFileSync(wip, "export const inProgress = 1;\n");
+  appendFileSync(join(standIn, "seeds", "orchestrator-template.md"), "\n<!-- an operator edit in progress -->\n");
+  const before = gitState(standIn);
+  // The premise, asserted by NAMING the in-progress paths. A bare `status !== ""` check does
+  // not state it: isolatedSourceFrom does not copy the root .gitignore, so every isolated copy
+  // carries an untracked node_modules/ and its porcelain is non-empty even when nothing was
+  // dirtied — the guard would hold with the dirtying deleted, and this test would silently
+  // stop exercising the only case the defect fires in.
+  assert.match(before.status, /\?\? src\/fg575-operator-work-in-progress\.ts/, "the stand-in carries UNTRACKED in-progress work under src/ — the bytes the old commitSource swept up");
+  assert.match(before.status, / M seeds\/orchestrator-template\.md/, "and a MODIFIED bundled asset — against a clean stand-in this test would prove nothing");
+
+  const isolated = isolatedSourceFrom(standIn, "fg575-standin-iso-");
+  assert.ok(!isolated.startsWith(standIn + sep) && isolated !== standIn, "the build source is a COPY under the workspace, not the checkout itself");
+  const rel = buildFromIsolatedSource(isolated, join(workspace, "fg575-standin-release"));
+
+  assert.deepEqual(gitState(standIn), before, "same HEAD, same branch, same porcelain, same stash list — nothing was committed, stashed, or cleaned in the invoking checkout");
+  assert.equal(readFileSync(wip, "utf8"), "export const inProgress = 1;\n", "the in-progress work is still sitting uncommitted in the working tree");
+
+  // And the property the commit-into-the-checkout existed to provide survives: the release
+  // is built from the WORKING TREE's bytes, uncommitted edits included.
+  assert.ok(existsSync(join(rel.releaseDir, "src", "fg575-operator-work-in-progress.ts")), "the isolated copy carried the checkout's UNCOMMITTED edits into the release");
+  assert.match(readFileSync(join(rel.releaseDir, "seeds", "orchestrator-template.md"), "utf8"), /an operator edit in progress/, "including the uncommitted bundled-asset edit");
+});
+
+test("FG-575 (guard): commitSource REFUSES a root outside the disposable workspace, without writing a byte into it", () => {
+  // The guard is what keeps the sixteen fixture call sites honest: if one ever regresses to
+  // naming the invoking checkout again, it must fail loudly AT THE CALL SITE instead of
+  // landing a `source snapshot` commit in an operator's branch. Exercised against a throwaway
+  // repo outside the workspace — deliberately NOT checkoutRoot, because a run in which the
+  // guard had been removed would then commit into the very checkout this file exists to protect.
+  const outside = mkdtempSync(join(tmpdir(), "fg575-outside-workspace-"));
+  try {
+    assert.ok(!outside.startsWith(workspace + sep), "the fixture genuinely sits outside the workspace");
+    execFileSync("git", ["init", "-q"], { cwd: outside });
+    execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"], { cwd: outside });
+    mkdirSync(join(outside, "src"));
+    // Uncommitted work of exactly the kind the defect swept up — so a guard-less commitSource
+    // has something to stage, and this test goes RED on the commit rather than passing blind.
+    writeFileSync(join(outside, "src", "in-progress.ts"), "export const inProgress = 1;\n");
+    const before = gitState(outside);
+
+    assert.throws(
+      () => commitSource(outside),
+      /FG-575: commitSource may only commit into a disposable fixture under/,
+      "committing into a root outside the workspace must be REFUSED",
+    );
+    // The refusal lands BEFORE any git write — nothing staged, nothing committed, HEAD unmoved.
+    assert.deepEqual(gitState(outside), before, "the refused call left the outside repository's git state untouched");
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("FG-575: the whole suite left the INVOKING repository's git state completely unchanged", () => {
+  // Declared last, so it covers every test above it. A regression fails HERE, loudly, instead
+  // of being discovered by an operator whose branch moved under them.
+  assert.deepEqual(
+    gitState(checkoutRoot),
+    checkoutStateBefore,
+    `running this suite must leave ${checkoutRoot} on the same HEAD and branch, with no new or rewritten commits, no stash entries, and no modified or untracked files`,
+  );
 });
