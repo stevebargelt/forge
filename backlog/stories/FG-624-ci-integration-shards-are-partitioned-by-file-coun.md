@@ -72,3 +72,21 @@ without duration data.
   suite killed by the job clock currently reads as a test failure, which cost one wrong triage turn.
   Worth doing, but it is an observability nicety — it does not affect whether the shards balance, and it
   must not be allowed to expand this ticket. Split it out if it grows.
+
+## If 6 minutes proves impossible with the current tests
+
+Operator direction (2026-07-25): do NOT stall on this. If balancing cannot fit the work inside the
+existing budget with the tests as they stand, **record what the measurements show, leave this ticket
+open, and move on** — do not raise `timeout-minutes` as a consolation, and do not weaken tests to fit.
+The follow-on conversation is whether the integration tests themselves should be reshaped, which is a
+larger design question than partitioning.
+
+The arithmetic says balancing alone should be sufficient, so this caveat is a backstop rather than the
+expected outcome: measured shard totals on main were 2m43 + 2m27 + 3m12 + 5m25 = **13m47 across four
+shards, i.e. ~3m27 average**. An even partition lands every shard near half the budget. The only way
+that fails is a single file that alone approaches or exceeds 6 minutes — which is precisely why the
+per-file measurement in Step 1 has to happen before any design, and why a file over ~90s is called out
+for reporting.
+
+If such a file exists, name it here with its measured time. That is the input to the reshape
+conversation.
