@@ -1084,7 +1084,13 @@ test("FG-575: a DIRTY invoking checkout is NEVER committed into — the build ru
   writeFileSync(wip, "export const inProgress = 1;\n");
   appendFileSync(join(standIn, "seeds", "orchestrator-template.md"), "\n<!-- an operator edit in progress -->\n");
   const before = gitState(standIn);
-  assert.notEqual(before.status.trim(), "", "the stand-in checkout is genuinely DIRTY — against a clean one this test would prove nothing");
+  // The premise, asserted by NAMING the in-progress paths. A bare `status !== ""` check does
+  // not state it: isolatedSourceFrom does not copy the root .gitignore, so every isolated copy
+  // carries an untracked node_modules/ and its porcelain is non-empty even when nothing was
+  // dirtied — the guard would hold with the dirtying deleted, and this test would silently
+  // stop exercising the only case the defect fires in.
+  assert.match(before.status, /\?\? src\/fg575-operator-work-in-progress\.ts/, "the stand-in carries UNTRACKED in-progress work under src/ — the bytes the old commitSource swept up");
+  assert.match(before.status, / M seeds\/orchestrator-template\.md/, "and a MODIFIED bundled asset — against a clean stand-in this test would prove nothing");
 
   const isolated = isolatedSourceFrom(standIn, "fg575-standin-iso-");
   assert.ok(!isolated.startsWith(standIn + sep) && isolated !== standIn, "the build source is a COPY under the workspace, not the checkout itself");
@@ -1097,6 +1103,35 @@ test("FG-575: a DIRTY invoking checkout is NEVER committed into — the build ru
   // is built from the WORKING TREE's bytes, uncommitted edits included.
   assert.ok(existsSync(join(rel.releaseDir, "src", "fg575-operator-work-in-progress.ts")), "the isolated copy carried the checkout's UNCOMMITTED edits into the release");
   assert.match(readFileSync(join(rel.releaseDir, "seeds", "orchestrator-template.md"), "utf8"), /an operator edit in progress/, "including the uncommitted bundled-asset edit");
+});
+
+test("FG-575 (guard): commitSource REFUSES a root outside the disposable workspace, without writing a byte into it", () => {
+  // The guard is what keeps the sixteen fixture call sites honest: if one ever regresses to
+  // naming the invoking checkout again, it must fail loudly AT THE CALL SITE instead of
+  // landing a `source snapshot` commit in an operator's branch. Exercised against a throwaway
+  // repo outside the workspace — deliberately NOT checkoutRoot, because a run in which the
+  // guard had been removed would then commit into the very checkout this file exists to protect.
+  const outside = mkdtempSync(join(tmpdir(), "fg575-outside-workspace-"));
+  try {
+    assert.ok(!outside.startsWith(workspace + sep), "the fixture genuinely sits outside the workspace");
+    execFileSync("git", ["init", "-q"], { cwd: outside });
+    execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"], { cwd: outside });
+    mkdirSync(join(outside, "src"));
+    // Uncommitted work of exactly the kind the defect swept up — so a guard-less commitSource
+    // has something to stage, and this test goes RED on the commit rather than passing blind.
+    writeFileSync(join(outside, "src", "in-progress.ts"), "export const inProgress = 1;\n");
+    const before = gitState(outside);
+
+    assert.throws(
+      () => commitSource(outside),
+      /FG-575: commitSource may only commit into a disposable fixture under/,
+      "committing into a root outside the workspace must be REFUSED",
+    );
+    // The refusal lands BEFORE any git write — nothing staged, nothing committed, HEAD unmoved.
+    assert.deepEqual(gitState(outside), before, "the refused call left the outside repository's git state untouched");
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+  }
 });
 
 test("FG-575: the whole suite left the INVOKING repository's git state completely unchanged", () => {
