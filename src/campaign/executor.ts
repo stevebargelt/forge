@@ -51,6 +51,7 @@ import type { Campaign, CampaignItem, CampaignItemLifecycleStatus, CampaignItemO
 import { resolvePlan, sourceInputToPlannerInput, getItemPlanEntry } from "./planner.js";
 import type { PlannerInput, PlanMode, ExecutionLane, ItemModeOverride } from "./planner.js";
 import { listTickets } from "../backlog/structured.js";
+import { projectHasBacklog } from "../backlog/storage-mode.js";
 import type { StructuredTicket } from "../backlog/structured.js";
 import { getRun, insertRun, updateRunStatus } from "../store/runs.js";
 import { computeReadyQueue } from "../v2/ready-queue.js";
@@ -155,8 +156,11 @@ export type DriveOneItemResult = {
 // launcher (the same drive, no subprocess) to exercise the controller deterministically.
 export type DriveItemLaunchFn = (campaignId: string, itemId: string) => Promise<DriveOneItemResult>;
 
+// FG-607: "has a backlog" is a question about the AUTHORITATIVE store, not about
+// the filesystem. A db-mode project legitimately has no backlog/ directory and
+// must not be rejected as invalid_project_dir while its CLI CRUD works fine.
 function hasBacklog(dir: string): boolean {
-  return existsSync(join(dir, "backlog"));
+  return projectHasBacklog(dir);
 }
 
 // Re-exported for existing external callers — now a single shared implementation

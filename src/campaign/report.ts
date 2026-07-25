@@ -6,6 +6,7 @@ import { getRun } from "../store/runs.js";
 import { tasksForRun } from "../store/tasks.js";
 import { verdictsForRun } from "../store/verdicts.js";
 import { listTickets, readTicket } from "../backlog/structured.js";
+import { projectHasBacklog } from "../backlog/storage-mode.js";
 import { evaluateReadiness } from "../readiness/readiness.js";
 import type { ReadinessResult } from "../readiness/readiness.js";
 import { evaluateDoneAudit } from "../done-audit/done-audit.js";
@@ -31,7 +32,9 @@ import { evaluateReconcileEvidence, describeMissingReason, AUTHORITATIVE_OUTCOME
 
 function computeCurrentPlanHash(campaign: Campaign): string | null {
   if (!campaign.projectDir) return null;
-  if (!existsSync(campaign.projectDir) || !existsSync(join(campaign.projectDir, "backlog"))) return null;
+  // FG-607: a db-mode project has no backlog/ directory; probing the filesystem
+  // here would silently return null and produce an empty report.
+  if (!existsSync(campaign.projectDir) || !projectHasBacklog(campaign.projectDir)) return null;
   try {
     const plannerInput = sourceInputToPlannerInput(campaign.sourceInput);
     const { planHash } = resolvePlan(plannerInput, {

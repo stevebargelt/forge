@@ -105,6 +105,48 @@ export function upsertTicket(t: TicketRow): void {
     });
 }
 
+// FG-607: the SEAM's write path. Identical to upsertTicket except that it never
+// modifies imported_at / imported_from — those columns record when and where a row
+// was imported FROM MARKDOWN (see schema.ts), and a db-mode edit is not an import.
+// Carrying them forward on every write made both columns mean "last edited", which
+// is what the import's own reconcile provenance needs them NOT to mean.
+//
+// On INSERT (a ticket the seam creates, never imported) imported_from is left
+// null — the discriminator provenance actually reads. imported_at is NOT NULL in
+// the schema, so the row's creation time is the only value available there.
+export function upsertSeamTicket(t: TicketRow): void {
+  getDb()
+    .prepare(
+      `INSERT INTO tickets
+         (project_key, ticket_id, type, status, title, body, created, closed, closed_commit, epic, frontmatter, imported_at, imported_from)
+       VALUES (@projectKey, @ticketId, @type, @status, @title, @body, @created, @closed, @closedCommit, @epic, @frontmatter, @importedAt, NULL)
+       ON CONFLICT(project_key, ticket_id) DO UPDATE SET
+         type = excluded.type,
+         status = excluded.status,
+         title = excluded.title,
+         body = excluded.body,
+         created = excluded.created,
+         closed = excluded.closed,
+         closed_commit = excluded.closed_commit,
+         epic = excluded.epic,
+         frontmatter = excluded.frontmatter`,
+    )
+    .run({
+      projectKey: t.projectKey,
+      ticketId: t.ticketId,
+      type: t.type,
+      status: t.status,
+      title: t.title,
+      body: t.body,
+      created: t.created ?? null,
+      closed: t.closed ?? null,
+      closedCommit: t.closedCommit ?? null,
+      epic: t.epic ?? null,
+      frontmatter: t.frontmatter ? JSON.stringify(t.frontmatter) : null,
+      importedAt: t.importedAt,
+    });
+}
+
 export function getTicket(projectKey: string, ticketId: string): TicketRow | undefined {
   const row = getDb()
     .prepare(`SELECT * FROM tickets WHERE project_key = ? AND ticket_id = ?`)
@@ -136,6 +178,15 @@ export function upsertTicketRelation(r: TicketRelation): void {
        ON CONFLICT(project_key, ticket_id, related_id, rel_type) DO NOTHING`,
     )
     .run(r.projectKey, r.ticketId, r.relatedId, r.relType);
+}
+
+// Replace-set support for the seam: import is idempotent-ADDITIVE by design, but
+// writing a ticket whose `related:` list dropped an id must actually drop it.
+// The seam deletes then re-inserts inside one write transaction.
+export function deleteTicketRelations(projectKey: string, ticketId: string, relType: string): void {
+  getDb()
+    .prepare(`DELETE FROM ticket_relations WHERE project_key = ? AND ticket_id = ? AND rel_type = ?`)
+    .run(projectKey, ticketId, relType);
 }
 
 export function relationsForTicket(projectKey: string, ticketId: string): TicketRelation[] {
@@ -250,6 +301,21 @@ export function upsertBlockerEvidence(b: BlockerEvidence): void {
     });
 }
 
+// The evidence source both writers use for a legacy `status: blocked` ticket: the
+// import (Markdown -> DB) and the FG-607 seam (a ticket written with status
+// 'blocked' in db mode). Defined HERE so there is exactly ONE constant — two
+// writers with two copies of this string drift silently, and a blocked ticket
+// would round-trip as active.
+export const LEGACY_BLOCKED_SOURCE = "import-legacy-blocked";
+
+// The inverse of upsertBlockerEvidence — used by the seam for the
+// blocked -> unblocked transition. Silently no-ops when no row exists.
+export function deleteBlockerEvidence(projectKey: string, ticketId: string, source: string): void {
+  getDb()
+    .prepare(`DELETE FROM blocker_evidence WHERE project_key = ? AND ticket_id = ? AND source = ?`)
+    .run(projectKey, ticketId, source);
+}
+
 export function blockerEvidenceForTicket(projectKey: string, ticketId: string): BlockerEvidence[] {
   const rows = getDb()
     .prepare(
@@ -329,4 +395,31 @@ export function getIdSequence(projectKey: string, prefix: string): number | unde
     .prepare(`SELECT next_seq FROM ticket_id_sequence WHERE project_key = ? AND prefix = ?`)
     .get(projectKey, prefix) as { next_seq: number } | undefined;
   return row?.next_seq;
+}
+
+// FG-607: allocate the next id for (project_key, prefix) and advance the sequence.
+//
+// MUST be called from inside the caller's writeTransaction (BEGIN IMMEDIATE) — it
+// has no transaction of its own, so the read and the bump are only atomic against
+// a concurrent forge process when the caller holds the write lock. That is what
+// makes two `forge backlog file` invocations in two linked worktrees allocate
+// distinct ids instead of both observing the same next_seq.
+//
+// THROWS on an unseeded sequence rather than defaulting to 1: a project flipped
+// to db mode without a prior import would otherwise silently mint ids that
+// duplicate its entire Markdown history — the DB's collision check knows nothing
+// about ids that only exist in backlog/*.md.
+export function allocateTicketId(projectKey: string, prefix: string): string {
+  const next = getIdSequence(projectKey, prefix);
+  if (next === undefined) {
+    throw new Error(
+      `forge: cannot allocate a ticket id — no id sequence is seeded for prefix '${prefix}' under ` +
+        `project_key '${projectKey}'. Run \`forge backlog import\` so allocation continues past the ` +
+        `existing Markdown ids instead of duplicating them.`,
+    );
+  }
+  getDb()
+    .prepare(`UPDATE ticket_id_sequence SET next_seq = ? WHERE project_key = ? AND prefix = ?`)
+    .run(next + 1, projectKey, prefix);
+  return `${prefix}-${next}`;
 }

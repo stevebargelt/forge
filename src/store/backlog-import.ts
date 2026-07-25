@@ -24,7 +24,7 @@ import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { writeTransaction } from "./db.js";
 import { assertConfigWritable, readBacklogConfig, writeProjectKey } from "../backlog/config.js";
-import { listTickets, type StructuredTicket } from "../backlog/structured.js";
+import { listMarkdownTickets, mapStatusToDb, type StructuredTicket } from "../backlog/structured.js";
 import type { GitRunner } from "../util/github-url.js";
 import {
   computeRepositoryEvidence,
@@ -38,13 +38,13 @@ import {
   upsertBlockerEvidence,
   ensureStorageMode,
   bumpIdSequence,
-  type DbTicketStatus,
+  ticketsForProject,
+  LEGACY_BLOCKED_SOURCE,
   type TicketRelation,
   type TicketRow,
 } from "./tickets.js";
 
 const MAX_CLAIM_RETRIES = 8;
-const LEGACY_BLOCKED_SOURCE = "import-legacy-blocked";
 
 // The backlog subdirectories a ticket file can live in, scanned in the same order
 // listTickets uses so a duplicate id resolves to the done/ copy (done wins).
@@ -98,22 +98,13 @@ export type ImportOptions = {
 // coercing it — see scanSourceFrontmatter and mapStatus.
 const VALID_SOURCE_STATUSES = new Set<string>(["active", "done", "blocked", "deferred"]);
 
-// Map the structured file status to the DB's active/done/deferred vocabulary.
+// FG-607: the file-status -> DB-status mapping now lives in the seam
+// (backlog/structured.ts) and is SHARED with it. There are two writers into the
+// tickets table; a second private copy of this mapping would drift silently.
 // Legacy 'blocked' becomes 'active' (the caller separately records a
 // blocker_evidence row so the blocked FACT survives the Slice C cutover).
 // Exhaustive over the valid set — never coerces an unknown status to active;
 // scanSourceFrontmatter rejects unrecognized statuses before any write.
-function mapStatus(status: StructuredTicket["status"]): DbTicketStatus {
-  switch (status) {
-    case "active":
-    case "blocked":
-      return "active";
-    case "done":
-      return "done";
-    case "deferred":
-      return "deferred";
-  }
-}
 
 // Scan the backlog source files ONCE to (a) validate required frontmatter before
 // any write, and (b) capture the FULL raw frontmatter per ticket id so nothing —
@@ -187,6 +178,33 @@ function parsePrefixSeq(ticketId: string): { prefix: string; seq: number } | und
   return { prefix: m[1]!, seq: parseInt(m[2]!, 10) };
 }
 
+// FG-607: the ONE definition of "the lowest next_seq that cannot collide", shared
+// by both writers of ticket_id_sequence — this import (which SEEDS it) and
+// `forge backlog mode --set db` (which GUARDS it). While they scanned
+// independently they drifted: import seeded from one checkout's backlog/ at one
+// moment, the flip only checked that a row existed, and every id filed in
+// markdown mode in between got minted a second time.
+//
+// It observes both stores BY ID, never by directory: `markdownIds` is what the
+// caller's checkout can see right now, `dbIds` is what the project's DB holds.
+// It cannot see a sibling worktree's branch content — a caller that needs
+// CURRENCY must fail closed on what it could not observe (see setBacklogMode).
+export function requiredNextSeq(
+  markdownIds: string[],
+  dbIds: string[],
+  configuredPrefix: string,
+): Map<string, number> {
+  // The configured prefix carries a floor of 1: a project with nothing in either
+  // store still needs an allocatable sequence, and import is its bootstrap.
+  const required = new Map<string, number>([[configuredPrefix, 1]]);
+  for (const id of [...markdownIds, ...dbIds]) {
+    const parsed = parsePrefixSeq(id);
+    if (!parsed) continue;
+    required.set(parsed.prefix, Math.max(required.get(parsed.prefix) ?? 0, parsed.seq + 1));
+  }
+  return required;
+}
+
 // Populate the DB shadow from a project's backlog/*.md. Idempotent: re-running
 // UPSERTs and yields no duplicate rows / no drift. REFUSES (throws
 // ProjectIdentityConflictError) rather than silently maintaining two backlogs
@@ -196,7 +214,9 @@ export function importBacklog(projectDir: string, opts: ImportOptions = {}): Imp
   // aborts the whole atomic import with a precise, file-identified error and
   // writes zero rows.
   const rawFrontmatter = scanSourceFrontmatter(projectDir);
-  const tickets = listTickets(projectDir); // FS read, outside the write transaction
+  // Always the MARKDOWN reader: import is a migration from the filesystem, so it
+  // must not follow a project that has already flipped to db mode.
+  const tickets = listMarkdownTickets(projectDir); // FS read, outside the write transaction
   // Canonical source dir (realpath), recorded as provenance on each ticket row.
   // Harmless metadata this slice — no longer drives any deletion.
   const importedFrom = realpathSync(projectDir);
@@ -251,9 +271,8 @@ export function importBacklog(projectDir: string, opts: ImportOptions = {}): Imp
 
         ensureStorageMode(resolved.projectKey, now);
 
-        const prefixMax = new Map<string, number>();
         for (const t of tickets) {
-          const dbStatus = mapStatus(t.status);
+          const dbStatus = mapStatusToDb(t.status);
           const row: TicketRow = {
             projectKey: resolved.projectKey,
             ticketId: t.id,
@@ -302,11 +321,6 @@ export function importBacklog(projectDir: string, opts: ImportOptions = {}): Imp
               createdAt: now,
             });
           }
-
-          const parsed = parsePrefixSeq(t.id);
-          if (parsed) {
-            prefixMax.set(parsed.prefix, Math.max(prefixMax.get(parsed.prefix) ?? 0, parsed.seq));
-          }
         }
 
         // The DB is a non-authoritative shadow this slice: import is
@@ -317,11 +331,21 @@ export function importBacklog(projectDir: string, opts: ImportOptions = {}): Imp
         // deferred to the authoritative-cutover slice; a stale row in an unread
         // shadow is harmless.
 
-        // next_seq means "the next id to allocate" (Slice B), so seed it at the
-        // highest existing number PLUS ONE. bumpIdSequence stays monotonic — a
-        // re-import never lowers it, so removing the highest ticket never reuses id.
-        for (const [prefix, seq] of prefixMax) {
-          bumpIdSequence(resolved.projectKey, prefix, seq + 1);
+        // next_seq means "the next id to allocate" (Slice B). Seed it from the
+        // SAME observation `mode --set db` re-checks at the flip — this checkout's
+        // Markdown ids AND the project's DB rows (which may already hold ids a
+        // SIBLING checkout imported that this one's backlog/ does not carry).
+        // bumpIdSequence stays monotonic, so a re-import from a subset checkout
+        // never lowers the sequence. The configured prefix's floor of 1 is import's
+        // bootstrap for a project with nothing in either store — `mode --set db`
+        // refuses on an unseeded sequence, so without it an empty project could
+        // never adopt db mode.
+        for (const [prefix, next] of requiredNextSeq(
+          tickets.map((t) => t.id),
+          ticketsForProject(resolved.projectKey).map((t) => t.ticketId),
+          config.prefix ?? "FG",
+        )) {
+          bumpIdSequence(resolved.projectKey, prefix, next);
         }
       });
       break;

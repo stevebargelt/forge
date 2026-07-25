@@ -170,13 +170,16 @@ test("FG-389: forge backlog config --show reports prefix from .forge/config.yml"
   assert.match(res.stdout, /prefix:\s*FG/, "prefix should match config");
 });
 
-test("FG-389: forge backlog config --show fails without backlog/ dir (no BACKLOG.md fallback)", () => {
-  // No backlog/ dir, only a BACKLOG.md — should fail, not fall back to legacy
+// FG-607 updated the contract: `config --show` no longer requires a backlog/
+// directory (a db-mode project legitimately has none). The FG-389 property this
+// test exists for is unchanged — a BACKLOG.md is never read as a fallback.
+test("FG-389: forge backlog config --show never falls back to BACKLOG.md", () => {
+  // No backlog/ dir, only a BACKLOG.md.
   writeFileSync(join(projectDir, "BACKLOG.md"), LEGACY_BACKLOG_CONTENT);
   const res = runForge(["backlog", "config", "--show", "--project", projectDir]);
-  assert.notEqual(res.status, 0, "must fail when only BACKLOG.md exists; no legacy fallback");
-  const combined = res.stderr + res.stdout;
-  assert.match(combined, /No backlog found|backlog/i, "error should mention backlog");
+  assert.equal(res.status, 0, `stderr: ${res.stderr}`);
+  assert.match(res.stdout, /format:\s*structured/, "always structured; never legacy");
+  assert.doesNotMatch(res.stdout, /first active ticket/, "must not read BACKLOG.md content");
 });
 
 // ─── forge backlog-migrate: isolated legacy import ─────────────────────────
