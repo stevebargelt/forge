@@ -90,7 +90,7 @@ export function planShards(files: readonly string[], timings: Timings, shardCoun
       if (loads[i]! < loads[lightest]!) lightest = i;
     }
     shards[lightest]!.push(file);
-    loads[lightest] += timings[file] ?? fallback;
+    loads[lightest] = loads[lightest]! + (timings[file] ?? fallback);
   }
   return shards.map((s) => s.sort());
 }
