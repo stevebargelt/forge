@@ -1,9 +1,11 @@
 ---
 id: FG-615
 type: story
-status: active
+status: done
 title: "docs drift: 'strip the stale closed:/closed_commit: frontmatter' reopen instruction is wrong since FG-409 (moveTicket already strips it) — in SKILL.md, orchestrator-template.md, and every rendered CLAUDE.md"
 created: 2026-07-25
+closed: 2026-07-25
+closed_commit: 58b6b68
 ---
 
 ## The drift
@@ -47,3 +49,17 @@ deliberately left out of that pass to keep it scoped.
   what `moveTicket` actually does.
 - The fix is made in the SEED and the rendered `CLAUDE.md` is regenerated via `forge-dev upgrade`, not hand-edited.
 - The `learnings/README.md` index lists FORGE-DEC-026 and FORGE-DEC-027 (or that is split into its own ticket).
+
+---
+
+## Acceptance Evidence
+
+| AC | Evidence | Verdict |
+|---|---|---|
+| Fix `seeds/skills/forge-backlog/SKILL.md` | Reopen bullet now reads "the move clears the `closed:`/`closed_commit:` frontmatter itself, so there is nothing to hand-strip" — commit `58b6b68` | met |
+| Fix `seeds/orchestrator-template.md` (the SOURCE) | Closing-gate step 4 corrected in the seed, not in the rendered block — commit `58b6b68` | met |
+| Re-render with `forge-dev upgrade`, not `forge upgrade` | Ran `./bin/forge-dev upgrade` from the dev checkout (`forge-dev` is not on PATH; it is `bin/forge-dev` per `package.json` bin) | met |
+| Verify the rendered `CLAUDE.md` picks up the corrected text | `grep -n "strip the stale" CLAUDE.md` returns nothing; `CLAUDE.md:460` now carries the corrected sentence | met |
+
+Premise verified before editing rather than taken from the ticket: `moveTicket` destructures
+`closed`/`closedCommit` out in BOTH modes — `src/backlog/structured.ts:457` (markdown) and `:727` (db).
