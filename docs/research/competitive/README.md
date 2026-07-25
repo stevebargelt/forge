@@ -78,6 +78,29 @@ solutions across projects. Original documents, Git, and Forge records must
 remain authoritative. Retrieved context should name its source, revision,
 generation, and model, and its absence must not break orchestration.
 
+## Provider And Authentication Compatibility
+
+Subscription sign-in and API-key billing are different authentication modes.
+In particular, Nimbalyst's OpenAI API-key option is not evidence of subscription
+support; its Codex subscription support comes from ChatGPT OAuth.
+
+| Product | Claude Pro/Max subscription | Codex via ChatGPT subscription | Claude via Amazon Bedrock | Important caveat |
+|---|---|---|---|---|
+| Nimbalyst | Yes — Claude Code subscription sign-in | Yes — ChatGPT OAuth | Yes, with caveats | OpenAI API-key sign-in is a separate, usage-billed alternative. Bedrock has documented MCP and tool-search compatibility limitations. |
+| GasTown / GasCity | Yes — launches the authenticated Claude CLI | Yes — launches the authenticated Codex CLI | Yes — forwards AWS and Bedrock environment variables | Authentication belongs to the underlying CLI; GasTown does not turn API billing into subscription access. |
+| Agent Deck | Yes — uses authenticated host sessions and Claude profiles | Yes — uses authenticated host sessions and can share Codex auth with its sandbox | Yes on the host; limited in the Docker sandbox | The sandbox rejects a home-relative `.aws` mount, so AWS-profile or SSO-based Bedrock does not work there by default. |
+
+Primary evidence: [Codex authentication modes](https://learn.chatgpt.com/docs/auth)
+and [Claude Code setup](https://docs.anthropic.com/en/docs/claude-code/getting-started);
+Nimbalyst on [Claude subscriptions](https://github.com/Nimbalyst/nimbalyst/blob/b4ed503e0252a88bfe4ba4b91545f7a7bcb3d7a8/CHANGELOG.md#L780),
+[Codex subscription sign-in](https://github.com/Nimbalyst/nimbalyst/blob/b4ed503e0252a88bfe4ba4b91545f7a7bcb3d7a8/CHANGELOG.md#L93),
+and [Bedrock detection](https://github.com/Nimbalyst/nimbalyst/blob/b4ed503e0252a88bfe4ba4b91545f7a7bcb3d7a8/packages/electron/src/main/services/ai/aiServiceUtils.ts#L174-L180);
+GasTown on [runtime configuration](https://github.com/gastownhall/gastown/blob/649b832b7672bc7a2dbef26f5983aba6198b819b/README.md#L454-L481)
+and [Bedrock environment forwarding](https://github.com/gastownhall/gastown/blob/649b832b7672bc7a2dbef26f5983aba6198b819b/internal/config/env.go#L359-L368);
+Agent Deck on [profiles and environment files](https://github.com/asheshgoplani/agent-deck/blob/d639ae83b7a40a761666a74f006f3c428cf6998b/README.md#L185-L220),
+[sandbox authentication sharing](https://github.com/asheshgoplani/agent-deck/blob/d639ae83b7a40a761666a74f006f3c428cf6998b/README.md#L409-L424),
+and the [AWS credential-mount limitation](https://github.com/asheshgoplani/agent-deck/blob/d639ae83b7a40a761666a74f006f3c428cf6998b/skills/agent-deck/references/sandbox.md#L194-L205).
+
 ## Analysis Index
 
 | Subject | Best idea to retain | Forge assessment | Original source |
@@ -89,6 +112,12 @@ generation, and model, and its absence must not break orchestration.
 | Claude Deck | Plan hashes, team presets, honest reachability, and safe configuration changes | [Assessment](claude-deck-forge-assessment.md) | [Product](https://claudedeck.org/) · [Source](https://github.com/adrirubio/claude-deck) |
 | GasTown / GasCity | Durable work ledger, capacity scheduling, merge queues, and human-scale progress objects | [Assessment](gastown-forge-assessment.md) | [Source](https://github.com/gastownhall/gastown) |
 | Pinecone | Attributed cross-project semantic retrieval as a rebuildable, non-authoritative plane | [Assessment](pinecone-forge-assessment.md) | [Database](https://docs.pinecone.io/guides/get-started/overview) · [Nexus](https://www.pinecone.io/blog/pinecone-nexus-public-preview/) |
+| Open agentic workflow landscape | Free, open-source, non-Python shortlist with a common failure scenario and explicit eliminations | [Landscape snapshot](agentic-workflow-landscape.md) | [Primary sources](agentic-workflow-landscape.md#primary-sources) |
+| Forge feature opportunities | Prioritized features to borrow, existing backlog coverage, minimal slices, and explicit non-goals | [Feature pass](forge-feature-opportunities.md) | Synthesis of the pinned assessments in this index |
+| Stoneforge | Same-worktree crash recovery and detached publication, with correctness gaps made explicit | [Assessment](stoneforge-forge-assessment.md) | [Source](https://github.com/stoneforge-ai/stoneforge) |
+| Agent Orchestrator | Generation-fenced lifecycle observations, preservation refs, and daemon reconciliation | [Assessment](agent-orchestrator-forge-assessment.md) | [Source](https://github.com/AgentWrapper/agent-orchestrator) |
+| Maestro | One canonical workflow source generated across agent runtimes, plus an Express/Standard split | [Assessment](maestro-forge-assessment.md) | [Source](https://github.com/josstei/maestro-orchestrate) |
+| Claude Squad | Worktree-per-session as a compact default, plus a warning about shared host tmux ownership | [Assessment](claude-squad-forge-assessment.md) | [Source](https://github.com/smtg-ai/claude-squad) |
 
 ## Standing Boundary
 
