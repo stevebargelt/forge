@@ -1,23 +1,44 @@
-**Last session ended 2026-07-24.**
+**Last session ended 2026-07-25 (long autonomous run).**
 
-**Where we left off:** Took up FG-496 (DB-backed backlog). Did an architecture + decomposition pass, split it into five sequential slices (FG-606..FG-610), then implemented, reviewed, and shipped **Slice A (FG-606)** end-to-end through the feature pipeline + review-loop → merged to main (`642b952`, PR #156) and closed. Stopped there per operator direction ("report before starting FG-607").
+**Where we left off:** Shipped FG-607 (FG-496 Slice B), then FG-612, FG-614, and FG-613 off the back of a
+worktree-isolation incident. Four of the eight queued items landed; the queue was NOT finished.
 
-**Picked up next:**
-1. **FG-607 — FG-496 Slice B** (DB-backed backlog CRUD behind the `src/backlog/structured.ts` seam + per-project storage mode; default stays `markdown`). The natural next slice; delivers the FG-495 cross-worktree shape in db mode. Open decisions already resolved on the ticket (storage-mode = per-project keyed by project_key host-side in DB; id allocation = transactional sequence per (project_key, prefix)).
-2. Then **FG-608** (Slice C — seam-bypassing readers + authoritative cutover; it now also OWNS the removal-reconciliation deferred out of FG-606), **FG-609** (D — queue primitives), **FG-610** (E — atomic claims + claim-next).
-3. Route Slice B as `implementation_full` (foundational, builds on Slice A's schema/identity). Same drive pattern worked: launch waves under `forge launch run` + launch-wait Monitor; feature pipeline architect→plan→build→verify→docs, then `forge review-loop FG-607 --since <mergebase> --max-rounds 1`.
+**Picked up next (in this order — the operator set it):**
+1. **FG-575** — release.integration.test.ts commits AND REWRITES history in whatever repo it runs in, plus
+   `/private/var` vs `/var` assertions. Its body was EMPTY; it is now written up from first-hand evidence (it
+   rewrote the FG-607 branch twice this session), including an AC requiring the test to assert the checkout's git
+   state is unchanged.
+2. **FG-559** — agents on a linked worktree have no working git. This is the blocker for item 4.
+3. **FG-356** — orphan worktree reaper + unlock-first removal (`--force` is a SINGLE force; a locked worktree
+   needs `git worktree unlock` or `-f -f`).
+4. **worktree default-on** — FG-345's parent decision. Do NOT flip before FG-559.
 
-**External state to remember:**
-- PR #156 merged; nothing pending off-repo. All FG-606 work is on main.
-- **Account is on claude_max with a WEEKLY usage cap.** A long agent build hit "out of credits / weekly limit" mid-session (429, reset 17:00 UTC) and killed a build wave; recovered via `forge retry <fanout-parent> --force` + `forge next` after the reset. If invokes start 429ing, that's the cap, not a bug.
-- review-loop CI probe quirk: it kept printing "CI unavailable: no status for CI / test-extended" and fell back to LOCAL verification, because `test-extended` is a fail-closed AGGREGATE of six shard jobs that finalizes only after all shards finish. CI was actually healthy — confirm merge-gate green independently with `gh pr checks <pr>` (look for `test` + `test-extended` pass), don't trust the loop's "unavailable".
+**Operational state you must know:**
+- **The FG-612 guard is LIVE.** Every dispatch against the forge repo refuses unless worktree mode is armed.
+  Ambient env does NOT reach the tmux workload, so the override rides INSIDE the launched command:
+  `forge launch run --require-control-toolchain -- env FORGE_NO_WORKTREES=1 forge invoke ...`
+  Use `FORGE_NO_WORKTREES=1` until FG-559 lands; `FORGE_WORKTREES=1` walks straight into FG-559.
+- **Do NOT run the ROOT integration tier in this checkout** until FG-575 is fixed — it commits and rewrites branch
+  history (observed twice). Individual files are fine; the dashboard workspace tier is fine.
+- **Another session works in this repo.** `docs/research/competitive/` held uncommitted work all session; it was
+  excluded from every commit and backed up to the scratchpad. Leave it alone. It also blocked `forge review-loop`,
+  which refuses a dirty tree — the manual reviewer chain was the documented fallback.
+- `~/code/forge-stable` is a worktree pinned to an older main, built so another project could keep using a working
+  `forge` while this checkout churned. Keep or delete at will.
 
-**Decisions worth not relitigating:**
-- **FG-606 import is APPEND-ONLY by deliberate decision.** The Slice-A shadow is non-authoritative (nothing reads it), so it does NOT prune tickets/relations removed from Markdown. Do NOT re-add cross-source pruning to Slice A — a naive single-`imported_from` prune destructively deletes a ticket a sibling linked worktree still has. Multi-source-safe removal reconciliation is deferred to **FG-608** (where the DB becomes authoritative). The "DB rows == Markdown set" AC on FG-606 was refined to append-only scope to match.
-- **Project identity:** the shared-DB `project_identity` registry is the authority; `.forge/config.yml` `project_key` is a cache/seed. Derive from `src/util/repository-identity.ts` `repositoryCheckoutIdentity` (converges linked worktrees via git-common-dir) — NEVER `src/v2/project-identity.ts` (`projectIdentity` deliberately diverges per checkout, FG-425). Registry enforces two-directional uniqueness + a 5-rung authority ladder + refuse-on-conflict.
-- **Config/DB write atomicity:** the guarded atomic config write happens INSIDE the import `BEGIN IMMEDIATE` txn, BEFORE the commit; the only safe residual is config-only (inert, adopted on retry), never an authoritative DB identity with a missing config.
-- **Don't over-guard this personal tool.** I over-drove red-wide across ~6 review rounds on adversarial "maybe" findings (self-symlink attacks, exotic worktree races) and escalated each; operator pushback: "this isn't used by anyone but me." Fix REAL bugs + genuine design forks; disposition theoretical red findings yourself; prefer SIMPLIFYING over adding guards/layers. Saved as memory `feedback_dont_overguard_personal_tool`.
+**Open tickets filed this session:** FG-611 (forge continue cannot arm an orchestrator continuation — the
+exactly-once machinery documented in CLAUDE.md has never been reachable from a plain pipeline drive), FG-615
+(stale "strip closed: frontmatter" reopen instruction in SKILL.md + orchestrator-template + every rendered
+CLAUDE.md), FG-616 (dashboard/src/queries.ts holds its own module-eval FORGE_HOME/DB_PATH snapshot — the latent
+twin of the bug that broke the dashboard during FG-607).
 
-**Shipped (for reference):**
-- **FG-606** — FG-496 Slice A: DB ticket schema (`tickets`/`ticket_events`(composite PK)/`ticket_relations`/`blocker_evidence`/storage-mode/id-sequence, all `(project_key, ticket_id)`-keyed, additive-only no user_version bump) + cross-worktree project-identity registry + `forge backlog import` (idempotent-additive, fail-closed on bad status/malformed, symlink/TOCTOU-safe config writes). `642b952` PR #156.
-- FG-496 decomposed into FG-606..FG-610 (backlog commits `8cc99e5`, `c1c450a`); FG-608 updated to inherit removal reconciliation.
+**Deferred onto FG-608 (Slice C), with reasoning on that ticket:** stale blocker evidence surviving a re-import;
+an evidence-key `reidentify` path (a `git remote add` changes the evidence key and FG-607's new refusal then fires
+on every backlog command with no in-tool recovery — a CUTOVER PRECONDITION, not a follow-up); the two campaign
+`existsSync('backlog')` probes; and agent containers having no DB, so db-mode tickets are invisible inside every
+container including the shipping-reviewer red.
+
+**Worth not relitigating:** FG-607's AC 1 was formally amended (its zero-DB-open cost target is not simultaneously
+satisfiable with the cross-worktree correctness invariant). FG-612's AC was amended after an external review caught
+a hedged verdict — "no task row" was a bad proxy, and `forge next` keeps a failed row on purpose so `forge show`
+can explain the refusal.
