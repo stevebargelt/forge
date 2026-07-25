@@ -50,6 +50,29 @@ mode stays `markdown` in this slice, so live behavior is unchanged until an oper
 - Every existing structured.ts caller (see FG-496 consumer inventory) compiles and passes unchanged.
 - Additive schema only; no `user_version` bump.
 
+## AC 1 AMENDED (2026-07-24) — cost target yields to the cross-worktree correctness invariant
+
+AC 1 originally required that a never-imported markdown project pay **no DB open and no git subprocess** on the
+seam path. That is not simultaneously satisfiable with AC 2 ("two linked worktrees resolve the SAME storage
+mode"), and the first implementation attempt proved it by choosing cost and breaking correctness:
+`storage-mode.ts` short-circuited to markdown whenever config had no `project_key` but a local `backlog/`
+directory existed — so a linked worktree on a branch predating the `project_key` commit (which has `backlog/`,
+because it is git-tracked, and no key, because config is git-tracked and per-branch) resolved **markdown** while
+its sibling resolved **db**. Silent split truth, which is the bug FG-496 exists to eliminate.
+
+Distinguishing "never imported" from "imported, but this branch predates the key commit" requires information
+that exists only in the DB, so there is no local, free way to satisfy both. Correctness wins.
+
+**AC 1 now reads:** a markdown-mode project that has never been imported produces behavior identical to main,
+and pays no per-call cost regression — store resolution is memoized per (process, projectDir), so the
+`listTickets`/`readTicket` loops in campaign planner / report / done-audit pay it once rather than per call. On a
+host with no `forge.db` at all, resolution stays completely free (no DB created, no git invoked). On a host that
+has a `forge.db`, one git evidence computation plus one DB open per process is accepted.
+
+AC 2 is unchanged and is now load-bearing: when config carries no `project_key`, the registry is ALWAYS consulted,
+because `repositoryCheckoutIdentity` converging linked worktrees via git-common-dir is the mechanism that makes
+AC 2 true.
+
 ## Dependencies / Relations
 
 - Parent: FG-496. Epic: FG-593.
