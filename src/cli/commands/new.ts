@@ -9,6 +9,7 @@ import { loadWorkflow } from "../../v2/loader.js";
 import { resolveSeedGeneration } from "../../v2/seed-generation.js";
 import type { Workflow } from "../../v2/schema.js";
 import { startRun, CONTROL_PLANE_METADATA_KEYS } from "../../v2/startRun.js";
+import { assertSelfHostDispatchAllowed } from "../../v2/self-host-guard.js";
 import { applyRoutePreflight, preflightEnforceFromEnv, validateRouteKeyUnder } from "../route-preflight.js";
 import { readTicket } from "../../backlog/structured.js";
 
@@ -49,6 +50,10 @@ export function registerNew(program: Command): void {
           allowSubproject: (options as { allowSubproject?: boolean }).allowSubproject ?? false,
         }
       );
+      // FG-612: refuse a self-host dispatch with worktree isolation off, before
+      // any cred/Docker work and before the run and task rows exist.
+      assertSelfHostDispatchAllowed(projectDir);
+
       const workspace = expandTildePath((options as { workspace?: string }).workspace ?? process.cwd());
 
       // #297: route-resolution preflight FIRST — before any credential/Docker work.
