@@ -88,13 +88,15 @@ test("integ CLI forge backlog config --show: structured format with prefix shows
   assert.match(res.stdout, /prefix:\s*FG/);
 });
 
-test("integ CLI forge backlog config --show: exits non-zero when no backlog found", () => {
+// FG-607 dropped the backlog/-must-exist gate: in db mode a project has no
+// backlog directory at all, and `config --show` must still report its settings.
+test("integ CLI forge backlog config --show: succeeds with no backlog/ directory", () => {
   const emptyDir = mkdtempSync(join(tmpdir(), "forge-config-nobl-"));
   try {
     const res = runForge(["backlog", "config", "--show", "--project", emptyDir]);
-    assert.notEqual(res.status, 0, "must exit non-zero when no backlog found");
-    const combined = res.stderr + res.stdout;
-    assert.match(combined, /No backlog found|backlog/i);
+    assert.equal(res.status, 0, `stderr: ${res.stderr}`);
+    assert.match(res.stdout, /format:\s*structured/);
+    assert.match(res.stdout, /prefix:\s*\(none\)/, "an unconfigured project reports no prefix");
   } finally {
     rmSync(emptyDir, { recursive: true, force: true });
   }

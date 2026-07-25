@@ -22,6 +22,10 @@ import {
   ensureStorageMode,
   bumpIdSequence,
   getIdSequence,
+  allocateTicketId,
+  deleteTicketRelations,
+  deleteBlockerEvidence,
+  LEGACY_BLOCKED_SOURCE,
   type TicketRow,
 } from "./tickets.js";
 
@@ -263,4 +267,60 @@ test("id sequence is monotonic per (project_key, prefix)", () => {
   assert.equal(getIdSequence("pk-A", "MG"), 3);
   assert.equal(getIdSequence("pk-A", "FG"), 42);
   assert.equal(getIdSequence("pk-A", "ZZ"), undefined);
+});
+
+// ─── FG-607 ──────────────────────────────────────────────────────────────────
+
+test("allocateTicketId hands out monotonic ids and advances the sequence", () => {
+  bumpIdSequence("pk-A", "FG", 7);
+
+  assert.equal(allocateTicketId("pk-A", "FG"), "FG-7");
+  assert.equal(allocateTicketId("pk-A", "FG"), "FG-8");
+  assert.equal(getIdSequence("pk-A", "FG"), 9, "next_seq points at the id NOT yet handed out");
+
+  // Per-prefix and per-project isolation.
+  bumpIdSequence("pk-A", "MG", 1);
+  assert.equal(allocateTicketId("pk-A", "MG"), "MG-1");
+  bumpIdSequence("pk-B", "FG", 1);
+  assert.equal(allocateTicketId("pk-B", "FG"), "FG-1");
+  assert.equal(getIdSequence("pk-A", "FG"), 9, "another project's allocation does not move this one");
+});
+
+// Defaulting to 1 would silently mint ids duplicating a project's entire Markdown
+// history — the DB collision check cannot see ids that exist only in backlog/*.md.
+test("allocateTicketId THROWS on an unseeded sequence instead of returning prefix-1", () => {
+  assert.throws(() => allocateTicketId("pk-A", "FG"), /no id sequence is seeded/);
+  assert.throws(() => allocateTicketId("pk-A", "FG"), /forge backlog import/);
+  assert.equal(getIdSequence("pk-A", "FG"), undefined, "a refused allocation seeds nothing");
+});
+
+test("deleteTicketRelations removes only the named rel_type for that ticket", () => {
+  upsertTicket(ticket({ ticketId: "FG-1" }));
+  upsertTicket(ticket({ ticketId: "FG-2" }));
+  upsertTicketRelation({ projectKey: "pk-A", ticketId: "FG-1", relatedId: "FG-9", relType: "related" });
+  upsertTicketRelation({ projectKey: "pk-A", ticketId: "FG-1", relatedId: "FG-9", relType: "blocks" });
+  upsertTicketRelation({ projectKey: "pk-A", ticketId: "FG-2", relatedId: "FG-9", relType: "related" });
+
+  deleteTicketRelations("pk-A", "FG-1", "related");
+
+  assert.deepEqual(relationsForTicket("pk-A", "FG-1").map((r) => r.relType), ["blocks"]);
+  assert.equal(relationsForTicket("pk-A", "FG-2").length, 1, "another ticket's relations are untouched");
+});
+
+test("deleteBlockerEvidence removes the named source and no-ops when absent", () => {
+  upsertTicket(ticket({ ticketId: "FG-1" }));
+  upsertBlockerEvidence({
+    projectKey: "pk-A",
+    ticketId: "FG-1",
+    reason: "r",
+    source: LEGACY_BLOCKED_SOURCE,
+    createdAt: NOW,
+  });
+  upsertBlockerEvidence({ projectKey: "pk-A", ticketId: "FG-1", reason: "r", source: "other", createdAt: NOW });
+
+  deleteBlockerEvidence("pk-A", "FG-1", LEGACY_BLOCKED_SOURCE);
+  assert.deepEqual(blockerEvidenceForTicket("pk-A", "FG-1").map((b) => b.source), ["other"]);
+
+  deleteBlockerEvidence("pk-A", "FG-1", LEGACY_BLOCKED_SOURCE); // already gone — silent
+  assert.equal(blockerEvidenceForTicket("pk-A", "FG-1").length, 1);
 });

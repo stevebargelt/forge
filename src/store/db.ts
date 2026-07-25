@@ -483,6 +483,14 @@ export function runDestructiveConvergenceMigration(
 let _dbRW: DatabaseInstance | null = null;
 let _dbRO: DatabaseInstance | null = null;
 
+// Is there a store to consult at all? True once a handle is open (including the
+// in-memory test seam) or a forge.db exists on disk. Lets a pure reader skip the
+// open on a host that has never run forge — where no row it could ask about can
+// exist anyway, and where getDb() would CREATE the file just to find nothing.
+export function storeExists(): boolean {
+  return _dbRW !== null || _dbRO !== null || existsSync(DB_PATH);
+}
+
 export function getDb(opts?: { readOnly?: boolean }): DatabaseInstance {
   ensureForgeDirs();
   // A read-only open on a non-existent file would fail. If no DB exists yet,

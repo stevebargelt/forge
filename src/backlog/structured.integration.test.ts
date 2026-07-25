@@ -27,6 +27,16 @@ function makeTicketFile(content: string): string {
   return content;
 }
 
+// FG-607: every `forge backlog` invocation now prints which store it read to
+// stderr. These tests are about ghost/duplicate WARNINGS, so drop that one line
+// before asserting stderr is otherwise silent.
+function warnings(res: { stderr: string }): string {
+  return res.stderr
+    .split("\n")
+    .filter((l) => !l.startsWith("store: "))
+    .join("\n");
+}
+
 // Sets up a structured backlog fixture:
 //   backlog/
 //     ideas/   FG-10-improve-docs.md
@@ -493,7 +503,7 @@ test("integ FG-397: close story then list shows exactly one done copy, no active
   const copies = tickets.filter((t) => t.id === "FG-30");
   assert.equal(copies.length, 1, "ticket must appear exactly once in list after close");
   assert.equal(copies[0]!.status, "done", "ticket must be shown with done status after close");
-  assert.equal(list.stderr, "", "no duplicate-id warnings expected after atomic close");
+  assert.equal(warnings(list), "", "no duplicate-id warnings expected after atomic close");
 });
 
 test("integ FG-397: close story then show returns done status (atomicity)", () => {
@@ -503,7 +513,7 @@ test("integ FG-397: close story then show returns done status (atomicity)", () =
   assert.equal(show.status, 0, `show after close failed: ${show.stderr}`);
   const ticket = JSON.parse(show.stdout) as Record<string, unknown>;
   assert.equal(ticket["status"], "done", "show must return done status after close");
-  assert.equal(show.stderr, "", "no ghost warning expected after atomic close");
+  assert.equal(warnings(show), "", "no ghost warning expected after atomic close");
 });
 
 test("integ FG-397: close epic then list shows exactly one done copy, no active ghost", () => {
@@ -515,7 +525,7 @@ test("integ FG-397: close epic then list shows exactly one done copy, no active 
   const copies = tickets.filter((t) => t.id === "FG-20");
   assert.equal(copies.length, 1, "epic must appear exactly once after close");
   assert.equal(copies[0]!.status, "done");
-  assert.equal(list.stderr, "", "no ghost warning expected after atomic close");
+  assert.equal(warnings(list), "", "no ghost warning expected after atomic close");
 });
 
 test("integ FG-397: close idea then list shows exactly one done copy, no active ghost", () => {
@@ -527,7 +537,7 @@ test("integ FG-397: close idea then list shows exactly one done copy, no active 
   const copies = tickets.filter((t) => t.id === "FG-10");
   assert.equal(copies.length, 1, "idea must appear exactly once after close");
   assert.equal(copies[0]!.status, "done");
-  assert.equal(list.stderr, "", "no ghost warning expected after atomic close");
+  assert.equal(warnings(list), "", "no ghost warning expected after atomic close");
 });
 
 test("integ FG-397: move story to epic leaves exactly one copy across all dirs", () => {
@@ -847,7 +857,7 @@ test("integ FG-403: list --status done --json surfaces ticket with done-frontmat
   assert.equal(match!.status, "done");
   assert.equal(match!.title, "Stranded done ticket");
   // Single copy — no duplicate warning expected
-  assert.equal(res.stderr, "", "no duplicate warning expected for a single-copy stranded ticket");
+  assert.equal(warnings(res), "", "no duplicate warning expected for a single-copy stranded ticket");
 });
 
 test("integ FG-403: list --status done emits ERROR to stderr AND returns done copy for ghost duplicate", () => {
@@ -870,7 +880,7 @@ test("integ FG-403: list --status done with no ghost returns exactly done ticket
   // Clean fixture (from setupStructuredBacklog): only FG-5 is in done/; no ghost copies anywhere.
   const res = runForge(["backlog", "list", "--status", "done", "--json", "--project", projectDir]);
   assert.equal(res.status, 0, `stderr: ${res.stderr}`);
-  assert.equal(res.stderr, "", "no duplicate warning must be emitted when there are no ghost copies");
+  assert.equal(warnings(res), "", "no duplicate warning must be emitted when there are no ghost copies");
 
   const tickets = JSON.parse(res.stdout) as Array<{ id: string; status: string }>;
   assert.equal(tickets.length, 1, "must return exactly the done tickets — no spurious additions");

@@ -13,6 +13,7 @@ import { assembleCampaignShow, assembleCampaignReport, renderCampaignReportHuman
 import { reconcileCampaign } from "../../campaign/reconcile.js";
 import { describeMissingReason } from "../../campaign/reconcile-evidence.js";
 import { listTickets } from "../../backlog/structured.js";
+import { projectHasBacklog } from "../../backlog/storage-mode.js";
 
 // FG-442: builds the injectable classifyTicket judgment for `forge campaign
 // plan --routes`. The judgment itself (ticketId -> routeKey) is supplied by the
@@ -501,7 +502,8 @@ export function registerCampaign(program: Command): void {
         );
         process.exit(1);
       }
-      if (!existsSync(projectDir) || !existsSync(join(projectDir, "backlog"))) {
+      // FG-607: db-mode projects have no backlog/ directory — ask the store.
+      if (!existsSync(projectDir) || !projectHasBacklog(projectDir)) {
         process.stderr.write(`Error: campaign projectDir is invalid or missing backlog: ${projectDir}\n`);
         process.exit(1);
       }
