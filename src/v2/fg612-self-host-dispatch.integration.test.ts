@@ -388,7 +388,9 @@ test("project is a SUBDIR of the forge source root (the --allow-subproject shape
 test("a sibling directory that merely shares a string prefix with the forge root dispatches normally", async () => {
   // `<root>-scratch` startsWith `<root>` — the exact false positive a naive
   // prefix compare produces, and it would refuse a legitimate project forever.
-  const sibling = `${SELF_HOST}-fg612-sibling`;
+  // Suffix is per-FILE — see the matching note in
+  // src/cli/fg612-self-host-cli.integration.test.ts.
+  const sibling = `${SELF_HOST}-fg612-sibling-dispatch`;
   mkdirSync(sibling, { recursive: true });
   tmpDirs.push(sibling);
   const spy = spyExec();
