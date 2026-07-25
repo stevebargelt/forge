@@ -66,7 +66,10 @@ test("FG-535 start: persists meta.json (command, session, start time, log path) 
 
   // The ORDER is the invariant: remain-on-exit must be armed before the target
   // command can ever run, or a fast command destroys the session first.
-  assert.deepEqual(names(startup), ["-V", "new-session", "set-option", "respawn-pane", "display-message"]);
+  // FG-614 inserted one `display-message` BEFORE new-session: the tmux server's own cwd
+  // is probed against the EXISTING server, so it must be asked before forge's own
+  // new-session can be the thing that starts one.
+  assert.deepEqual(names(startup), ["-V", "display-message", "new-session", "set-option", "respawn-pane", "display-message"]);
   assert.ok(!newSession.includes("forge"), "the session is born with an inert pane, not the target command");
   const respawn = startup.find((c) => c[0] === "respawn-pane")!;
   assert.ok(respawn.some((a) => a.includes("review-loop")), "the target command arrives via respawn-pane");
@@ -136,8 +139,9 @@ test("FG-535 start: persists launcher identity — the submitting pid and the tm
   assert.equal(meta.ownerPid, 4242, "the tmux pane's pid — the process that actually owns the command");
 
   // The owner pid must be read AFTER the real command takes the pane, or it
-  // would name the inert bootstrap pane instead.
-  const askedAt = calls.findIndex((c) => c[0] === "display-message");
+  // would name the inert bootstrap pane instead. Matched on the pane_pid FORMAT: the
+  // FG-614 server-cwd probe is also a display-message, and it runs before new-session.
+  const askedAt = calls.findIndex((c) => c[0] === "display-message" && c.includes("#{pane_pid}"));
   assert.ok(askedAt > calls.findIndex((c) => c[0] === "respawn-pane"), "owner pid is queried after respawn-pane");
 
   const persisted = readLaunch(meta.id, tmux)!;

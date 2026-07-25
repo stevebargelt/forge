@@ -1,7 +1,7 @@
 import type { Command } from "commander";
 import { basename } from "node:path";
 import { readFileSync } from "node:fs";
-import { controlRuntimeProfile, listLaunches, readLaunch, removeLaunch, startLaunch, statusLine, type ControlRuntime, type LaunchView, type WorkloadNestedShell, type WorkloadTopLevel } from "../../v2/launch.js";
+import { controlRuntimeProfile, listLaunches, readLaunch, removeLaunch, startLaunch, statusLine, tmuxServerCwdDiagnosis, type ControlRuntime, type LaunchView, type WorkloadNestedShell, type WorkloadTopLevel } from "../../v2/launch.js";
 import { waitAndRender } from "./launch-wait.js";
 
 // FG-535: `forge launch` — the supported durable launch path for long-running
@@ -56,6 +56,14 @@ function renderView(v: LaunchView, logTailLines = 15): string {
     `log:      ${v.logPath}`,
     `status:   ${statusLine(v.status)}`,
   ];
+  // FG-614: forge's OWN diagnosis first — a launch that never started because its
+  // recorded cwd was gone must name that cause, not leave a reader to infer it from an
+  // ENOENT/uv_cwd trace in the child's log. Rendered before the provenance block
+  // because it explains why most of that block is empty.
+  if (v.diagnosis) lines.push("", `── diagnosis (forge, not the launched command) ──`, v.diagnosis, "");
+  if (v.tmuxServerCwd?.state === "missing") {
+    lines.push("", `── tmux server condition at submission (FG-614) ──`, tmuxServerCwdDiagnosis(v.tmuxServerCwd), "");
+  }
   // FG-569: R1 and R2 are surfaced as SEPARATE lines. R1 (control) = the CLI that
   // SUBMITTED the launch; R2 (recorder) = the exit recorder. They are distinct
   // runtimes and never merged. R1 is ALWAYS rendered: an old record with no R1
@@ -117,6 +125,13 @@ export function registerLaunch(program: Command): void {
     .action((command: string[], opts: { name?: string; json?: boolean; requireControlToolchain?: boolean }) => {
       const profile = opts.requireControlToolchain ? controlRuntimeProfile({ label: "control-runtime" }) : undefined;
       const meta = startLaunch(command, { name: opts.name, profile });
+      // FG-614: the launch is unaffected (the wrapper enters the recorded cwd itself),
+      // but a bricked tmux server is a host-wide condition the operator needs named —
+      // with the remedy and what the remedy costs. On stderr, so --json stays clean.
+      if (meta.tmuxServerCwd?.state === "missing") {
+        console.error(tmuxServerCwdDiagnosis(meta.tmuxServerCwd));
+        console.error("");
+      }
       if (opts.json) {
         console.log(JSON.stringify(meta, null, 2));
         return;
