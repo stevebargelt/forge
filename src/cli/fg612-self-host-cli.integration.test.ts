@@ -198,7 +198,11 @@ test("a SUBDIR of the forge checkout (--allow-subproject) refuses", () => {
 });
 
 test("a sibling directory that merely shares a string prefix with the checkout is NOT refused", () => {
-  const sibling = `${REPO_ROOT}-fg612-sibling`;
+  // Suffix is per-FILE: fg612-self-host-dispatch.integration.test.ts builds the
+  // same kind of sibling off the same repo root, and the two files can run
+  // concurrently (same shard, or unsharded) — a shared path means one file's
+  // cleanup deletes the other's fixture mid-test.
+  const sibling = `${REPO_ROOT}-fg612-sibling-cli`;
   mkdirSync(join(sibling, ".git"), { recursive: true });
   tmpDirs.push(sibling);
   assertReachedDispatch(
