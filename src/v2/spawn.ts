@@ -16,8 +16,8 @@
 // substitution context per-step (TASK_ID, MODEL, etc.) and this function
 // produces the full `docker run ... claude ...` argv.
 
-import { existsSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 import type { Runtime } from "./schema.js";
 import { resolveRuntimeMetadata } from "./schema.js";
 import {
@@ -114,6 +114,93 @@ function assertWithinArgLimit(label: string, value: string): void {
         `Move this content onto stdin instead of argv/env.`,
     );
   }
+}
+
+// FG-559: the sentinel the container entrypoint exits with when git does not
+// resolve inside the project mount (docker/agent-entrypoint.sh — the two MUST
+// match). Peer of DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE (123); the runner
+// classifies both as verification_environment_unavailable rather than letting
+// them fall into the generic container_crash branch. Not 124 — that is
+// timeout(1)'s conventional code and would be ambiguous in a wrapped exec.
+export const GIT_UNAVAILABLE_EXIT_CODE = 122;
+
+// The absolute path a linked worktree's (or submodule's) `.git` POINTER FILE
+// names, or undefined when `.git` is a real directory / absent.
+function readGitdirPointer(projectDir: string): string | undefined {
+  const dotGit = join(projectDir, ".git");
+  const st = statSync(dotGit, { throwIfNoEntry: false });
+  if (!st || !st.isFile()) return undefined;
+  const m = /^gitdir:\s*(.+)$/m.exec(readFileSync(dotGit, "utf8"));
+  if (!m) return undefined;
+  return resolve(projectDir, m[1]!.trim());
+}
+
+function isUnder(child: string, ancestor: string): boolean {
+  return child.startsWith(ancestor.endsWith(sep) ? ancestor : ancestor + sep);
+}
+
+/** FG-559: host absolute paths that must be bind-mounted AT THEIR OWN PATH for
+ *  a linked worktree's git to resolve inside the container; [] for a plain
+ *  clone or a non-git dir.
+ *
+ *  A linked worktree's `.git` is a FILE holding `gitdir: <absolute path>` into
+ *  the PARENT repo's `.git`, which forge does not otherwise mount — so every
+ *  git command in the container fails and the agent silently works from the
+ *  file tree. Resolution is TWO hops and both must land on mounted storage: the
+ *  absolute hop into the worktree admin dir, then the RELATIVE `commondir` hop
+ *  (`../..`) into the common `.git`. Mounting the admin dir alone is verified
+ *  insufficient — hence resolving commondir here rather than assuming.
+ *
+ *  Mounting at the host path is what makes this work with ZERO env vars:
+ *  GIT_DIR/GIT_WORK_TREE are global to the container process tree and make
+ *  unrelated repos report the worktree's status (a silent wrong answer, which
+ *  is worse than the loud failure they'd replace). */
+export function planWorktreeGitMounts(projectDir: string): string[] {
+  const gitdir = readGitdirPointer(projectDir);
+  if (!gitdir) return [];
+  const paths = new Set([gitdir]);
+  const commondirFile = join(gitdir, "commondir");
+  if (existsSync(commondirFile)) {
+    paths.add(resolve(gitdir, readFileSync(commondirFile, "utf8").trim()));
+  }
+  // The admin dir lives INSIDE the common .git, so one mount of the common dir
+  // covers both hops. Keep only the outermost paths.
+  const all = [...paths];
+  return all.filter((p) => !all.some((other) => isUnder(p, other)));
+}
+
+/** FG-559 piece A — the mount-plan assertion. The host CANNOT detect this by
+ *  resolving the path: host-side the `gitdir:` target resolves perfectly, which
+ *  is exactly why the defect stayed silent. The question is about the argv being
+ *  built — "`PROJECT_DIR/.git` points OUTSIDE `PROJECT_DIR`; is that path in the
+ *  mount list I am about to hand docker?"
+ *
+ *  Refuses rather than warns, and unconditionally: the predicate has no
+ *  false-positive class. A non-git project has no `.git`; a plain clone has a
+ *  `.git` directory; a correctly-mounted worktree passes. It can only fire on
+ *  the exact broken state. */
+export function assertWorktreeGitMountPlanned(projectDir: string, args: string[]): void {
+  const required = planWorktreeGitMounts(projectDir);
+  const missing = required.filter((p) => !isIdentityMountPlanned(p, args));
+  if (missing.length === 0) return;
+  throw new Error(
+    `FG-559: ${projectDir}/.git is a gitdir: pointer into ${missing.join(", ")}, which the docker ` +
+      `mount plan does not bind at its own host path. Every git command inside the container would ` +
+      `fail with "fatal: not a git repository" and the agent would work history-blind. Refusing to dispatch.`,
+  );
+}
+
+// True when argv already binds `hostPath` (or an ancestor of it) to the SAME
+// path inside the container. Identity is the point: the `gitdir:` line is an
+// absolute HOST path, so only a host-path-preserving bind makes it resolve.
+function isIdentityMountPlanned(hostPath: string, args: string[]): boolean {
+  for (let i = 0; i < args.length - 1; i++) {
+    if (args[i] !== "-v") continue;
+    const [host, container] = args[i + 1]!.split(":");
+    if (!host || host !== container) continue;
+    if (hostPath === host || isUnder(hostPath, host)) return true;
+  }
+  return false;
 }
 
 export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsResult {
@@ -375,6 +462,21 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
     // never install; matches pre-existing reviewer behavior).
   }
 
+  // FG-559 piece B: when PROJECT_DIR is a linked git worktree, bind the parent
+  // repo's .git READ-ONLY at its own host absolute path so the worktree's
+  // `gitdir:` pointer resolves in the container. `:ro` for EVERY agent class,
+  // blue and red alike — PROJECT_MODE (rw-for-blue / ro-for-red) is unrelated
+  // and unchanged. Computed here, NOT declared in runtime YAML: the mount set
+  // is spread across six seeds/runtimes/*.yml resolved from a versioned seed
+  // generation, so a YAML-declared mount would silently keep the broken
+  // behavior on any generation that wasn't regenerated. Same shape as the
+  // FG-376 dependency volumes above — a dynamic, conditional mount in code.
+  if (projectContainerPath) {
+    for (const gitPath of planWorktreeGitMounts(ctx.PROJECT_DIR)) {
+      args.push("-v", `${gitPath}:${gitPath}:ro`);
+    }
+  }
+
   // Working directory = the persistent project bind mount (not the image's
   // ephemeral /workspace WORKDIR). Aligns Claude runtimes with codex (which
   // already targets /project) and with every agent seed's /project contract,
@@ -408,6 +510,12 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
   const stdin = runtime.invocation.stdin
     ? substitute(runtime.invocation.stdin, ctx)
     : undefined;
+
+  // FG-559 piece A: refuse to hand docker an argv that mounts a linked
+  // worktree without the parent .git it points into. Gated on the project
+  // actually being mounted — a runtime that mounts no project has no
+  // in-container git to be blind about.
+  if (projectContainerPath) assertWorktreeGitMountPlanned(ctx.PROJECT_DIR, args);
 
   // FG-497: fail fast, on the host, before exec — not with a bare E2BIG death
   // inside the container. Checks every argv string, including each "-e
@@ -460,6 +568,12 @@ export function buildProvisionerDockerArgs(
   args.push("--name", provisionerContainerName(plan.lockfileHash));
   args.push("-e", "FORGE_NO_BROWSER=1");
   args.push("-v", `${ctx.PROJECT_DIR}:${projectContainerPath}:ro`);
+  // FG-559: same read-only parent-.git bind as the agent container gets. The
+  // provisioner runs the shared entrypoint, whose git probe would otherwise
+  // refuse a worktree project.
+  for (const gitPath of planWorktreeGitMounts(ctx.PROJECT_DIR)) {
+    args.push("-v", `${gitPath}:${gitPath}:ro`);
+  }
   for (const v of plan.volumes) {
     args.push("-v", `${v.name}:${v.containerPath}`); // rw — the ONLY container allowed to write here
   }
@@ -498,13 +612,30 @@ export function preflightProjectMount(projectDir: string): void {
     );
     return;
   }
-  const hasGit = existsSync(join(projectDir, ".git"));
+  const dotGit = statSync(join(projectDir, ".git"), { throwIfNoEntry: false });
   const hasPkg = existsSync(join(projectDir, "package.json"));
-  if (!hasGit && !hasPkg) {
+  if (!dotGit && !hasPkg) {
     console.warn(
       `forge: project mount preflight: ${projectDir} has no .git or package.json — ` +
         `proceeding; verify this is the intended project root`
     );
+  }
+  // FG-559: `.git` existing is NOT evidence of a usable repo. For a linked
+  // worktree it is a `gitdir:` pointer FILE, and the bare existsSync this
+  // replaced read that as a healthy marker — the seam the whole defect walked
+  // through. A pointer whose target is gone is broken on the HOST too, so
+  // refuse rather than dispatch an agent that cannot run git. (A pointer that
+  // resolves host-side but is not MOUNTED is a different failure, caught by
+  // assertWorktreeGitMountPlanned against the argv, not by a filesystem stat.)
+  if (dotGit?.isFile()) {
+    const target = readGitdirPointer(projectDir);
+    if (!target || !existsSync(target)) {
+      throw new Error(
+        `project mount preflight failed: ${projectDir}/.git is a gitdir: pointer to ` +
+          `${target ?? "an unparseable path"}, which does not exist on the host — ` +
+          `the worktree's parent repo is missing or the worktree was pruned`
+      );
+    }
   }
 }
 

@@ -58,7 +58,7 @@ import { evaluateValidationContract } from "./validation-contract.js";
 import { deriveUpstream } from "./inputs.js";
 import { composeSystemPrompt } from "./compose.js";
 import { filterConstraints, loadAllConstraints } from "./constraints.js";
-import { buildDockerArgs, buildProvisionerDockerArgs, resolveProjectContainerPath, preflightProjectMount, type SpawnContext } from "./spawn.js";
+import { buildDockerArgs, buildProvisionerDockerArgs, resolveProjectContainerPath, preflightProjectMount, GIT_UNAVAILABLE_EXIT_CODE, type SpawnContext } from "./spawn.js";
 import { assertSelfHostDispatchAllowed } from "./self-host-guard.js";
 import { resolveAuthStateForContainer, AuthProfileError, roleUsesBrowser, cleanupStagedAuth } from "./auth-state.js";
 import { loadProjectAuthProfile, resolveProjectAuthForContainer, ProjectAuthError } from "./project-auth.js";
@@ -3234,6 +3234,18 @@ async function runContainer(args: {
     const msg = `verification_environment_unavailable: dependency install failed${stderrTail ? ` — ${stderrTail}` : ""}`;
     failTask(args.taskId, { runId: args.runId, kind: classify({ source: "verification_environment_unavailable" }), error: msg });
     // FG-492 review: task failed — retain (see finalizeContainerRetention in docker-exec.ts).
+    finalizeContainerRetention(containerName, false);
+    return { kind: "failed", error: msg };
+  }
+
+  // FG-559: the entrypoint's git probe found git unusable in the project mount
+  // (a linked worktree whose parent .git never made it into the container).
+  // Same footing as the provisioning sentinel above — an environment failure.
+  if (exitCode === GIT_UNAVAILABLE_EXIT_CODE) {
+    const stderrTail = existsSync(stderrPath) ? readFileSync(stderrPath, "utf8").trim() : "";
+    logEvent("container.git_unavailable", { runId: args.runId, taskId: args.taskId, payload: { containerName, exitCode, ...(containerEvidence ? { containerEvidence } : {}) } });
+    const msg = `verification_environment_unavailable: git is unusable in the project mount${stderrTail ? ` — ${stderrTail}` : ""}`;
+    failTask(args.taskId, { runId: args.runId, kind: classify({ source: "verification_environment_unavailable" }), error: msg });
     finalizeContainerRetention(containerName, false);
     return { kind: "failed", error: msg };
   }

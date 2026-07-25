@@ -42,7 +42,7 @@ import { resolveIdleTimeoutMs, IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js
 import { DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE } from "./dependency-provisioning.js";
 import { productionDockerExec, finalizeContainerRetention, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
 import { composeSystemPrompt } from "./compose.js";
-import { buildDockerArgs, preflightProjectMount, type SpawnContext } from "./spawn.js";
+import { buildDockerArgs, preflightProjectMount, GIT_UNAVAILABLE_EXIT_CODE, type SpawnContext } from "./spawn.js";
 import { loadRuntimeWithSource, loadModelPolicyWithSource } from "./loader.js";
 import { resolveSeedGeneration, type SeedGeneration } from "./seed-generation.js";
 import { resolveModel, taskModelFields, manifestModelBlock, type ModelResolution } from "./model-resolution.js";
@@ -749,6 +749,21 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     const kind = classify({ source: "verification_environment_unavailable" });
     failTask(taskId, { runId, kind, error });
     // FG-492 review: task failed — retain (see finalizeContainerRetention above).
+    finalizeContainerRetention(containerName, false);
+    closeRunIfIdle(false);
+    return { runId, taskId, status: "failed", error, failureKind: kind };
+  }
+
+  // FG-559: the entrypoint's git probe found git unusable in the project mount
+  // (a linked worktree whose parent .git never made it into the container) and
+  // exited before the agent ran. Same footing as the provisioning sentinel
+  // above: an environment failure, not a crash and not a task failure.
+  if (exitCode === GIT_UNAVAILABLE_EXIT_CODE) {
+    const stderrTail = existsSync(stderrPath) ? readFileSync(stderrPath, "utf8").trim() : "";
+    logEvent("container.git_unavailable", { runId, taskId, payload: { containerName, exitCode, ...(containerEvidence ? { containerEvidence } : {}) } });
+    const error = `verification_environment_unavailable: git is unusable in the project mount${stderrTail ? ` — ${stderrTail}` : ""}`;
+    const kind = classify({ source: "verification_environment_unavailable" });
+    failTask(taskId, { runId, kind, error });
     finalizeContainerRetention(containerName, false);
     closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error, failureKind: kind };

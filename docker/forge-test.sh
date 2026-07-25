@@ -300,11 +300,20 @@ _ensure_deps() {
 if [[ ! -d "$WORK_DIR" ]]; then
   echo "forge-test: setting up writable scratch at $WORK_DIR" >&2
   mkdir -p "$WORK_DIR"
-  # Once, cold: the scratch is a git repo like the source is, so any test whose
-  # code walks up from cwd looking for one still finds it. The per-run sync skips
+  # Once, cold: the scratch carries the source's .git, so any test whose code
+  # walks up from cwd looking for one still finds it. The per-run sync skips
   # .git — nothing under test reads history, and it is the biggest dir in the tree.
-  if [[ -d "$SRC_DIR/.git" ]]; then
-    cp -r "$SRC_DIR/.git" "$WORK_DIR/.git"
+  #
+  # FG-559: -e, not -d. On a linked worktree .git is a `gitdir:` POINTER FILE,
+  # so the old -d guard was FALSE and the scratch was silently created with no
+  # git at all — on the path every agent uses to run tests. Copying the pointer
+  # verbatim works because forge bind-mounts the parent .git read-only at its own
+  # host absolute path, so the same absolute target resolves from the scratch.
+  # (It then shares the worktree's admin dir rather than being an independent
+  # copy, and that mount is read-only — fine here, since nothing under test
+  # reads history or writes git state.)
+  if [[ -e "$SRC_DIR/.git" ]]; then
+    cp -R "$SRC_DIR/.git" "$WORK_DIR/.git"
   fi
 fi
 

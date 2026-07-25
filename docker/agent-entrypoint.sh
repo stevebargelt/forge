@@ -101,4 +101,24 @@ if [ -n "${FORGE_NM_INSTALL_ROOT:-}" ]; then
   unset _forge_nm_install_cmd
 fi
 
+# FG-559: prove git actually RESOLVES in the project mount before handing off.
+# A linked worktree's .git is a `gitdir:` pointer into the PARENT repo's .git,
+# which forge bind-mounts read-only at its own host absolute path (spawn.ts,
+# planWorktreeGitMounts). The host mount-plan assertion proves the mount was
+# PLANNED; this proves it RESOLVED — they fail for different reasons, and this
+# is what catches a regression in a mount set nobody regenerated. Without it the
+# failure is silent: every git command fails, the agent works from the file tree
+# and reports success. Exit with the shared sentinel (122 — must match
+# GIT_UNAVAILABLE_EXIT_CODE in src/v2/spawn.ts) so the runner classifies it as
+# verification_environment_unavailable, not a generic container crash.
+if [ "${FORGE_SKIP_GIT_PROBE:-0}" != "1" ] && [ -e .git ]; then
+  if ! _forge_git_probe=$(git rev-parse --git-dir 2>&1); then
+    echo "forge: git is unusable in $(pwd): ${_forge_git_probe}" >&2
+    echo "forge: if this project is a linked git worktree, its parent .git is not mounted (FG-559)." >&2
+    echo "forge: set FORGE_SKIP_GIT_PROBE=1 to dispatch anyway, accepting a history-blind agent." >&2
+    exit 122
+  fi
+  unset _forge_git_probe
+fi
+
 exec "$@"
