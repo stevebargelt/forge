@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { existsSync } from "node:fs";
-import { DB_PATH, ensureForgeDirs } from "../util/paths.js";
+import { resolveDbPath, ensureForgeDirs } from "../util/paths.js";
 import { SCHEMA_SQL } from "./schema.js";
 
 // FG-568 (BD-15): store-compatibility policy across the supported overlap window
@@ -482,21 +482,60 @@ export function runDestructiveConvergenceMigration(
 // twice now (#155 backfill, #157 sweep). Fixed by keeping both handles.
 let _dbRW: DatabaseInstance | null = null;
 let _dbRO: DatabaseInstance | null = null;
+let _generation = 0;
+
+// A CLOSED handle is not a connection. better-sqlite3 keeps the object alive
+// after close() and throws "The database connection is not open" on first use,
+// so a cached-but-closed handle is a landmine that only detonates at the call
+// site. It used to be harmless — whoever closed the DB was the only one reaching
+// for it. Since FG-607, reading a ticket resolves a storage mode, so ANY reader
+// sits downstream of these handles, including one that legitimately closed the
+// DB (a simulated restart, a swap between stores). Treat closed as absent
+// everywhere, so the next getDb() reopens and a reopen is transparent.
+function forgetClosedHandles(): void {
+  if (_dbRW && !_dbRW.open) {
+    _dbRW = null;
+    _generation++;
+  }
+  if (_dbRO && !_dbRO.open) {
+    _dbRO = null;
+    _generation++;
+  }
+}
+
+// Bumped whenever the process stops pointing at a connection it previously
+// served (closed, forgotten, or swapped by a test). Anything memoizing an answer
+// DERIVED from the store — see resolveBacklogStore — records the generation it
+// was computed under, so a resolution can never outlive the connection that
+// produced it.
+export function dbGeneration(): number {
+  forgetClosedHandles();
+  return _generation;
+}
 
 // Is there a store to consult at all? True once a handle is open (including the
 // in-memory test seam) or a forge.db exists on disk. Lets a pure reader skip the
 // open on a host that has never run forge — where no row it could ask about can
 // exist anyway, and where getDb() would CREATE the file just to find nothing.
 export function storeExists(): boolean {
-  return _dbRW !== null || _dbRO !== null || existsSync(DB_PATH);
+  forgetClosedHandles();
+  return _dbRW !== null || _dbRO !== null || existsSync(resolveDbPath());
 }
 
 export function getDb(opts?: { readOnly?: boolean }): DatabaseInstance {
   ensureForgeDirs();
+  forgetClosedHandles();
+  // Resolved per call, not from paths.ts's import-time snapshot: since FG-607
+  // `@forge/backlog` drags this module into the import graph, so it can be
+  // evaluated before a host has set FORGE_HOME (see resolveDbPath's note).
+  // Opening the wrong host's forge.db is a data-correctness failure, not a
+  // cosmetic one. The handle caches below are unaffected — an OPEN handle stays
+  // the store for this process; closing it is how you re-point.
+  const dbPath = resolveDbPath();
   // A read-only open on a non-existent file would fail. If no DB exists yet,
   // fall through to a writable open so the schema gets created — read-only
   // callers on a fresh install simply observe an empty DB.
-  const wantReadOnly = opts?.readOnly === true && existsSync(DB_PATH);
+  const wantReadOnly = opts?.readOnly === true && existsSync(dbPath);
 
   if (wantReadOnly) {
     if (_dbRO) return _dbRO;
@@ -505,14 +544,14 @@ export function getDb(opts?: { readOnly?: boolean }): DatabaseInstance {
     // bootstrap schema, then return a fresh readonly handle. (Idempotent —
     // both `getDb()` and the bootstrap point at the same on-disk file.)
     if (!_dbRW) getDb();
-    const db = new Database(DB_PATH, { readonly: true });
+    const db = new Database(dbPath, { readonly: true });
     db.pragma("busy_timeout = 5000");
     _dbRO = db;
     return db;
   }
 
   if (_dbRW) return _dbRW;
-  const db = new Database(DB_PATH);
+  const db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
   // FG-568: forward gate BEFORE we touch the schema — refuse a store a newer forge
@@ -554,8 +593,8 @@ export function writeTransaction<T>(fn: () => T): T {
 }
 
 export function closeDb(): void {
-  if (_dbRW) { _dbRW.close(); _dbRW = null; }
-  if (_dbRO) { _dbRO.close(); _dbRO = null; }
+  if (_dbRW) { _dbRW.close(); _dbRW = null; _generation++; }
+  if (_dbRO) { _dbRO.close(); _dbRO = null; _generation++; }
 }
 
 // Test seam: install a fresh in-memory DB as the singleton. Used by tests so
@@ -567,6 +606,7 @@ export function setDbForTest(db: DatabaseInstance): DatabaseInstance | null {
   const prev = _dbRW;
   _dbRW = db;
   _dbRO = db;
+  _generation++;
   return prev;
 }
 
