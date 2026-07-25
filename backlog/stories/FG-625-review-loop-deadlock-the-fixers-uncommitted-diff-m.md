@@ -80,3 +80,23 @@ Whichever is chosen, the loop must not silently discard a correct fix.
 - The FG-575 clean-checkout assertion is unchanged and still passes.
 - The chosen behavior is documented in `docs/how-to-testing.md` or the review-loop docs, including what
   happens to the commit when a round fails verification.
+
+---
+
+## Correction: the deadlock is UNCONDITIONAL, not situational (2026-07-25)
+
+Filed on the assumption that a dirty tree at loop start was a contributing factor. It is not.
+
+Re-ran `review-loop` from a verified-clean tree (`run-review-loop-fg-559-632048`, tip `61866dac`, all
+nine CI checks green at that exact sha). It deadlocked identically: reviewer returned `needs_fix`, the
+fixer produced a correct fix, verification failed, fix left uncommitted.
+
+The mechanism is structural. The fixer ALWAYS dirties the tree — that is what a fixer does — and
+verification always runs before the commit. So **every round that produces a fix deadlocks, regardless
+of the tree's state when the loop starts.** Only a round in which the reviewer passes outright can
+reach a verified state.
+
+Both rounds observed so far produced genuine, correct findings (`reconcile.ts:485` not honoring
+`container.git_unavailable`; the `FORGE_SKIP_GIT_PROBE=1` bypass contradicting the no-silent-degradation
+criterion). Both fixes had to be committed by hand. The loop is currently usable as a REVIEWER and
+unusable as a LOOP.
