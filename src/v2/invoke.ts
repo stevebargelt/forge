@@ -55,6 +55,7 @@ import { loadAllConstraints, filterConstraints } from "./constraints.js";
 import { resolveDocsSurfacesReceipt } from "./contract.js";
 import { emitAgentProgressEvents } from "./agent-progress.js";
 import { inferredResultFrom } from "./inferred-result.js";
+import { assertSelfHostDispatchAllowed } from "./self-host-guard.js";
 import { recoverStructuredStreamResult } from "./stream-result-recovery.js";
 
 export type InvokeArgs = {
@@ -132,6 +133,11 @@ function reapContainerAndReportFailure(containerName: string, taskSucceeded: boo
 }
 
 export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
+  // FG-612: refuse a self-host dispatch with worktree isolation off BEFORE the
+  // run or task row exists. Covers `forge invoke` and the review-loop's
+  // reviewer/fixer dispatches, which both land here.
+  assertSelfHostDispatchAllowed(args.projectDir);
+
   // Resolve / create the run.
   const runId = args.runId ?? createInvokeRun(args.agentRole, args.projectDir, args.designDir, args.runTitle, args.workspace, args.dispatchKey);
   const run = getRun(runId);
@@ -357,6 +363,21 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
       owned: args.ownsRun,
     });
   };
+
+  // FG-612: the pre-container chokepoint for callers that reach
+  // dispatchInvokeTask without passing through invoke() (`forge retry`). It sits
+  // at the FIRST point where projectDir and worktree mode are both known —
+  // before the task dir, the manifest, auth staging and buildDockerArgs — so a
+  // refused retry is pre-WRITE, matching the other four entry points. Refusing
+  // after the first file lands defeats the property the guard exists for.
+  try {
+    assertSelfHostDispatchAllowed(args.projectDir);
+  } catch (e) {
+    const error = (e as Error).message;
+    failTask(taskId, { runId, kind: classify({}), error });
+    closeRunIfIdle(false);
+    return { runId, taskId, status: "failed", error };
+  }
 
   // FG-583: no per-consumer seed-state gating. The runtime/workflow/policy loads
   // below reach the seed surface through the loader's single resolve point, which

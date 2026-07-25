@@ -59,6 +59,7 @@ import { deriveUpstream } from "./inputs.js";
 import { composeSystemPrompt } from "./compose.js";
 import { filterConstraints, loadAllConstraints } from "./constraints.js";
 import { buildDockerArgs, buildProvisionerDockerArgs, resolveProjectContainerPath, preflightProjectMount, type SpawnContext } from "./spawn.js";
+import { assertSelfHostDispatchAllowed } from "./self-host-guard.js";
 import { resolveAuthStateForContainer, AuthProfileError, roleUsesBrowser, cleanupStagedAuth } from "./auth-state.js";
 import { loadProjectAuthProfile, resolveProjectAuthForContainer, ProjectAuthError } from "./project-auth.js";
 import { writeTaskManifest, manifestControlPlaneBlock } from "./task-manifest.js";
@@ -606,6 +607,15 @@ async function dispatchSingleStep(args: {
   } catch (e) {
     const msg = `preflightProjectMount failed: ${(e as Error).message}`;
     failTask(taskId, { runId: args.runId, kind: classify({}), error: msg });
+    return "failed";
+  }
+
+  // FG-612: a run created before the guard existed (or under a different env)
+  // must still not dispatch into the live forge source unisolated.
+  try {
+    assertSelfHostDispatchAllowed(args.projectDir);
+  } catch (e) {
+    failTask(taskId, { runId: args.runId, kind: classify({}), error: (e as Error).message });
     return "failed";
   }
 
@@ -2551,6 +2561,14 @@ async function runFanoutChild(args: {
     return { index: args.index, value: args.value, childTaskId, status: "failed" };
   }
 
+  // FG-612: same self-host refusal as primary dispatch — pre-worktree, pre-container.
+  try {
+    assertSelfHostDispatchAllowed(args.projectDir);
+  } catch (e) {
+    failTask(childTaskId, { runId: args.runId, kind: classify({}), error: (e as Error).message });
+    return { index: args.index, value: args.value, childTaskId, status: "failed" };
+  }
+
   // FG-351: create a task-scoped git worktree for each fanout child when worktree
   // mode is enabled. Same pattern as primary dispatch: DB write before container
   // start so reconcile can find the path after a process restart.
@@ -2759,6 +2777,18 @@ async function runContainer(args: {
     explicitSubproject?: boolean;
   };
 }): Promise<ContainerOutcome> {
+  // FG-612: the last chokepoint every runNext spawn funnels through — primary,
+  // red, fanout child. First statement in the body so nothing (not even
+  // dependency provisioning, which spawns its own container below) can start
+  // ahead of the refusal.
+  try {
+    assertSelfHostDispatchAllowed(args.projectDir);
+  } catch (e) {
+    const msg = (e as Error).message;
+    failTask(args.taskId, { runId: args.runId, kind: classify({}), error: msg });
+    return { kind: "failed", error: msg };
+  }
+
   const dir = taskDir(args.runId, args.taskId);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "CLAUDE.md"), args.taskPackage.composedSystemPrompt);
