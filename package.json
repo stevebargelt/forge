@@ -15,6 +15,7 @@
     "test": "npm run test:unit",
     "test:unit": "node --import tsx --import ./src/test-setup.ts --test $(find src -name '*.test.ts' -not -name '*.integration.test.ts' -not -name '*.worktree.test.ts' -not -name 'test-setup.ts' -type f)",
     "test:integration": "bash scripts/run-integration-tests.sh",
+    "test:integration:timings": "node --import tsx scripts/measure-integration-timings.ts",
     "test:worktree": "node --import tsx --import ./src/test-setup.ts --test $(find src -name '*.worktree.test.ts' -type f)",
     "test:extended": "npm run test:integration && npm run test:worktree && npm run test:integration -w dashboard",
     "test:all": "npm test && npm test -w dashboard"
