@@ -118,21 +118,28 @@ test("FG-474: .nvmrc pins the Node major version the better-sqlite3 ABI note ref
   assert.equal(nvmrc, "24", ".nvmrc must stay pinned to 24 — the ABI mismatch this workflow guards against was observed against this exact version");
 });
 
-// FG-495 regression guard (updated: sharded extended gate): the slow
-// integration/worktree coverage moved out of the fast `test` gate must still
-// run somewhere routine and visible. It now runs as SIX concurrent jobs —
-// four root integration shards (`integration_1`..`integration_4`, partitioned
-// by Node's --test-shard), a `worktree` job, and a `dashboard_integration`
-// job — with the required `test-extended` job reduced to a fail-closed
-// aggregate over all six. If a future edit drops a shard, mistargets a shard
+// FG-495 regression guard (updated: sharded extended gate; FG-624: 5-way and
+// duration-aware): the slow integration/worktree coverage moved out of the
+// fast `test` gate must still run somewhere routine and visible. It now runs
+// as SEVEN concurrent jobs — five root integration shards
+// (`integration_1`..`integration_5`, partitioned by measured per-file duration
+// via scripts/run-integration-tests.sh), a `worktree` job, and a
+// `dashboard_integration` job — with the required `test-extended` job reduced
+// to a fail-closed aggregate over all seven. If a future edit drops a shard, mistargets a shard
 // selector, drops the F31 provision step, or lets the aggregate go green on a
 // failed dependency, the trust-sensitive coverage (FG-419/FG-440/FG-474
 // gate-enforcement tests, among others) would stop gating merges without
 // anyone deciding that on purpose.
 
-const INTEGRATION_SHARD_JOBS = ["integration_1", "integration_2", "integration_3", "integration_4"] as const;
+const INTEGRATION_SHARD_JOBS = [
+  "integration_1",
+  "integration_2",
+  "integration_3",
+  "integration_4",
+  "integration_5",
+] as const;
 
-test("FG-495 (sharded): ci.yml has four integration shard jobs each running the shard script with its own k/4 selector", () => {
+test("FG-495 (sharded, FG-624 5-way): ci.yml has five integration shard jobs each running the shard script with its own k/5 selector", () => {
   const wf = loadWorkflow();
   const selectors: string[] = [];
   for (const name of INTEGRATION_SHARD_JOBS) {
@@ -150,8 +157,8 @@ test("FG-495 (sharded): ci.yml has four integration shard jobs each running the 
   }
   assert.deepEqual(
     [...selectors].sort(),
-    ["1/4", "2/4", "3/4", "4/4"],
-    "the four shard jobs must cover exactly 1/4,2/4,3/4,4/4 — each appearing exactly once (a clean disjoint cover)"
+    ["1/5", "2/5", "3/5", "4/5", "5/5"],
+    "the five shard jobs must cover exactly 1/5..5/5 — each appearing exactly once. The selectors are what make the partition a cover: src/test-shards.ts plans N shards and each job takes one, so a duplicated or missing k means files run twice or not at all"
   );
 });
 
@@ -163,7 +170,7 @@ test("FG-495 (sharded): each integration shard job provisions the F31 ABI-incomp
     const runCommands = (job!.steps ?? []).map((s) => s.run).filter((r): r is string => typeof r === "string");
     assert.ok(
       runCommands.some((r) => r.includes("FORGE_TEST_MISMATCHED_NODE")),
-      `${name} must include the F31 provision step — --test-shard can route node-preflight.integration.test.ts to ANY shard, and that test treats FORGE_TEST_MISMATCHED_NODE as a HARD requirement, so every shard needs it`
+      `${name} must include the F31 provision step — the duration-aware planner can route node-preflight.integration.test.ts to ANY shard, and that test treats FORGE_TEST_MISMATCHED_NODE as a HARD requirement, so every shard needs it`
     );
   }
 });
@@ -190,7 +197,7 @@ test("FG-495 (sharded): ci.yml has a dashboard_integration job that runs test:in
   );
 });
 
-test("FG-495 (sharded): the test-extended aggregate needs all six extended-gate jobs, uses if: always(), and fails closed on any non-success", () => {
+test("FG-495 (sharded): the test-extended aggregate needs all seven extended-gate jobs, uses if: always(), and fails closed on any non-success", () => {
   const wf = loadWorkflow();
   const job = wf.jobs?.["test-extended"];
   assert.ok(job, "ci.yml must define the test-extended aggregate job (the required branch-protection context)");
@@ -201,13 +208,14 @@ test("FG-495 (sharded): the test-extended aggregate needs all six extended-gate 
     "integration_2",
     "integration_3",
     "integration_4",
+    "integration_5",
     "worktree",
     "dashboard_integration",
   ];
   assert.deepEqual(
     [...needs].sort(),
     [...expectedNeeds].sort(),
-    "test-extended must `needs` exactly the six sharded/tiered extended-gate jobs"
+    "test-extended must `needs` exactly the seven sharded/tiered extended-gate jobs — a shard added to ci.yml but left out of `needs` runs without gating anything"
   );
 
   assert.equal(
@@ -254,10 +262,10 @@ test("FG-495: the test-extended job is a required merge check — no continue-on
   );
 });
 
-// Extended-gate wall-clock ceiling: each of the six concurrent extended-gate
+// Extended-gate wall-clock ceiling: each of the seven concurrent extended-gate
 // jobs carries `timeout-minutes: 6`, so a suite that runs long is cancelled →
 // its result is not `success` → the fail-closed aggregate goes red → merge is
-// blocked. Because the six jobs run concurrently, bounding each to 6 min bounds
+// blocked. Because the seven jobs run concurrently, bounding each to 6 min bounds
 // the whole extended gate to ~6 min. The fast `test` gate (separate) and the
 // `test-extended` aggregate (a 3s step) must NOT carry this ceiling.
 const EXTENDED_GATE_JOBS = [
@@ -265,11 +273,12 @@ const EXTENDED_GATE_JOBS = [
   "integration_2",
   "integration_3",
   "integration_4",
+  "integration_5",
   "worktree",
   "dashboard_integration",
 ] as const;
 
-test("extended-gate ceiling: each of the six extended-gate jobs has timeout-minutes: 6", () => {
+test("extended-gate ceiling: each of the seven extended-gate jobs has timeout-minutes: 6", () => {
   const wf = loadWorkflow();
   for (const name of EXTENDED_GATE_JOBS) {
     const job = wf.jobs?.[name];
