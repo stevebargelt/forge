@@ -1,9 +1,11 @@
 ---
 id: FG-607
 type: story
-status: active
+status: done
 title: "FG-496 Slice B: DB-backed backlog CRUD + per-project storage mode (behind the structured.ts seam)"
 created: 2026-07-24
+closed: 2026-07-25
+closed_commit: a59ba14
 ---
 
 ## Slice B of FG-496 — DB-backed CRUD behind the seam (still default-markdown)
@@ -83,3 +85,24 @@ AC 2 true.
 
 - Does NOT flip the default authority to the DB (that is Slice C). No queue rank/membership/readiness (Slice D),
   claims (Slice E), UI, or dispatcher. No Markdown export.
+
+## Acceptance Evidence
+
+Shipped in `33bc5f2` (slice) + `a59ba14` (store-path / closed-handle fixes), merged to main 2026-07-24.
+Required CI green at `a59ba14`: `test` and `test-extended` (all six member jobs).
+
+| AC | Evidence | Verdict |
+|---|---|---|
+| FG-495 shape: a db-mode ticket is readable from a clean secondary worktree with NO Markdown file, same `project_key` | `src/backlog/fg607-cross-worktree.integration.test.ts:75` — real `git worktree add`, sibling asserted to have no `.forge/config.yml` (`:97`), ticket read back through the real CLI (`:109`) | met |
+| Two linked worktrees resolve the SAME storage mode; the mode lives in the DB under `project_key` | `fg607-cross-worktree.integration.test.ts:145` "a sibling worktree with a STALE local backlog/ and no key still resolves db" — the case an earlier implementation got wrong (F8); verified failing pre-fix with `'markdown' !== 'db'`. Resolver: `src/backlog/storage-mode.ts` always consults `registryByEvidence` when config carries no key | met |
+| A project with no `backlog/` dir supports full CRUD in db mode | `src/backlog/fg607-store-banner.integration.test.ts`, `fg607-mode-flip.integration.test.ts`, `fg607-seam-consumers.integration.test.ts` drive file/edit/close/show/list with no directory present; `src/cli/commands/backlog.ts` drops the `existsSync('backlog')` gates at `import` and `config --show` | met |
+| `git status` stays clean after file/edit/close in db mode | `fg607-db-mode.test.ts:108` "writes create NO files — git status stays clean in db mode"; `fg607-cross-worktree.integration.test.ts:58` `porcelain()` asserts both trees clean after a full CRUD cycle; `fg607-store-banner.integration.test.ts:177` | met |
+| Concurrent `file` in two worktrees allocate distinct, non-reused ids | `fg607-id-allocation.integration.test.ts:98` — 6 REAL concurrent child processes against a real on-disk SQLite file (an in-memory DB degenerates `BEGIN IMMEDIATE` to `BEGIN`, `src/store/db.ts:526-543`, so it cannot demonstrate this). `allocateTicketId` runs inside the caller's `writeTransaction` | met |
+| CLI clearly prints whether it read legacy Markdown or the DB | `fg607-store-banner.integration.test.ts:97` (markdown), `:117` (db + stale-`backlog/` flag), `:142` asserts the banner never contaminates `--json` stdout (it is stderr-only). `describeBacklogStore` in `storage-mode.ts` | met |
+| Every existing structured.ts caller compiles and passes unchanged | Signatures unchanged; `npm run typecheck` clean on the host; the pre-existing `structured.test.ts` / `structured.integration.test.ts` markdown regression suites pass unmodified; `fg607-seam-consumers.integration.test.ts` covers the consumer surface; full CI green at the merged tip | met |
+| Additive schema only; no `user_version` bump | `git diff e0c1c2c..HEAD -- src/store/schema.ts` is EMPTY — Slice A (FG-606) had already added every table this slice writes | met |
+| AC 1 as AMENDED (see the amendment section): identical markdown behavior, no PER-CALL cost regression, still free with no `forge.db` | `fg607-seam-cost.integration.test.ts` — child process with its own empty `FORGE_HOME` and a recording `git` shim first on PATH; after `backlog list`/`show`/`notes show` no `forge.db` was created and the git shim was never invoked. Memoization asserted (fails with `CACHE_TTL_MS=0`: 1 call = 3 git invocations, 25 calls = 75) | met |
+
+Deferred to FG-608 with reasoning recorded there (neither is this ticket's AC): stale blocker evidence surviving
+a re-import (the append-only-import boundary FG-606 settled), and the evidence-key `reidentify` path the Slice C
+cutover requires.
