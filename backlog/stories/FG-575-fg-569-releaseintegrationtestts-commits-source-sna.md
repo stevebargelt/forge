@@ -45,6 +45,30 @@ Two assertions compare an expected `/var/folders/...` path against an actual `/p
 macOS resolves `/var` through a symlink to `/private/var`; Linux has no such symlink, so the two spellings are
 identical there and CI stays green. Same class as FG-556 and the dashboard `checkoutDir` assertions.
 
+## Root cause of defect 1: an invariant asserted only in a comment
+
+The file's own header (lines 9-11) claims:
+
+> Runs in the forge-test scratch (/tmp/forge-work), where node_modules is rebuilt for the container and the tree
+> is a git repo — so the closure carries a binding that actually loads and the manifest carries a real commit SHA.
+
+**Nothing enforces this.** `npm run test:integration` runs `bash scripts/run-integration-tests.sh`, which `find`s
+the `*.integration.test.ts` files and `exec`s `node --test` **in place**, with no scratch sync. And the file
+derives its target from the ambient cwd:
+
+```
+const sourceRoot = findGitRoot(process.cwd());   // :25
+...
+commitSource(sourceRoot);                         // :76, inside before()
+```
+
+So `commitSource` — `git add` + `git commit` at `:49-51` — lands in whatever repo the suite was invoked from. The
+"disposable scratch" the code was written against is an assumption stated in prose and true only when the operator
+happens to invoke via `forge-test`.
+
+This is why a fix that merely relocates the build is insufficient: it leaves the same false invariant in place for
+the next author. **Delete or make true that header claim as part of this ticket.**
+
 ## Scope
 
 - **Make the test build its release from an isolated copy** (a temp clone or worktree it creates and removes),
@@ -52,6 +76,8 @@ identical there and CI stays green. Same class as FG-556 and the dashboard `chec
   pattern: verify in a throwaway clone, delete it, touch no git history in the checkout.
 - **Canonicalize both sides** of the path assertions (`realpathSync` the expected value, or compare canonicalized
   forms), so they hold on macOS and Linux alike.
+- **Reconcile the header comment with what the harness actually guarantees** — the file must be correct when run
+  directly via `node --test` from the checkout, not only under `forge-test`.
 - Sweep the rest of the file for other real-checkout writes or un-canonicalized path comparisons rather than
   fixing only the two that fail today.
 
@@ -64,8 +90,16 @@ identical there and CI stays green. Same class as FG-556 and the dashboard `chec
 - Still passes in Linux CI (`test-extended`).
 - `npm run test:integration` becomes safe to run in the working checkout — which is the operational point of this
   ticket, not just a green test.
+- The header comment no longer asserts a scratch-execution invariant the harness does not enforce.
 
 ## Relations
 
 Same host-red class as FG-556 and FG-613 (FG-613 turned out to be shared-tmux-server contention and was fixed by
 FG-614). The `/private/var` canonicalization half is the same defect shape as the FG-556 worktree assertion.
+
+**Not blocked by FG-559.** Worktree mode is off by default (`isWorktreeModeEnabled()` returns
+`FORGE_WORKTREES === "1"`, `worktree-lifecycle.ts:42-43`), so FG-559's dangling-`gitdir:` failure is only reachable
+by opting in. The dispatch constraint for this ticket is narrower: the implementing agent needs a mount with a real
+working `.git` **in a repo whose history is expendable** — because validating the fix means executing the test that
+rewrites history. A disposable clone satisfies both; the live checkout fails the second; a linked worktree fails
+the first.
