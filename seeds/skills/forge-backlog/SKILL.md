@@ -66,7 +66,7 @@ Prefer `forge backlog` over directly reading/writing files under `backlog/` — 
 
 ## Discipline
 
-- **Reopen vs. follow-up.** Reopen a ticket to finish its own unmet acceptance criteria (`forge backlog move <id> story`, then strip the stale `closed:`/`closed_commit:` frontmatter the move leaves behind). File a follow-up ticket only for genuinely *new* scope discovered later — never for the original ticket's own unmet AC.
+- **Reopen vs. follow-up.** Reopen a ticket to finish its own unmet acceptance criteria (`forge backlog move <id> story` — the move clears the `closed:`/`closed_commit:` frontmatter itself, so there is nothing to hand-strip). File a follow-up ticket only for genuinely *new* scope discovered later — never for the original ticket's own unmet AC.
 - **Never close-and-defer.** Do not close a ticket by pushing its own unmet AC into a vague follow-up — that launders incomplete work past the gate. An AC line with no evidence is not met; the ticket stays open until it is.
 - **Persist closeout evidence.** Before closing a newly completed ticket, add or update its `## Acceptance Evidence` section with a Markdown grid containing exactly one row per AC and the columns `AC`, `Evidence`, and `Verdict`; preserve the original AC text. Do this after merge so the evidence can cite the shipped commit. This requirement is prospective — do not reopen historical tickets only to backfill it.
 - **Real scope change → a named ticket.** If work genuinely changes scope mid-flight, move the affected AC into an explicit ticket (`forge backlog file` / `move`) rather than dropping or hand-waving it.
