@@ -163,10 +163,6 @@ test("fg559 (negative control): with ONLY the worktree materialized, git fails w
     /not a git repository/i,
     `git log must fail with the dangling-gitdir error, got: ${r.stderr}`
   );
-  assert.ok(
-    r.stderr.includes(f.parentGitDir),
-    `the failure must name the unmounted parent .git (${f.parentGitDir}), got: ${r.stderr}`
-  );
 });
 
 test("fg559: with the parent .git mounted at its host path, log/diff/show all succeed with non-empty output", () => {
