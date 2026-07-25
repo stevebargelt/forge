@@ -145,6 +145,9 @@ export const KILL_POINTS: KillPoint[] = [
   { point: "reconcile:inside-fail-oom-killed-txn", surface: "reconcile" },
   { point: "reconcile:before-fail-orphaned-work-may-persist", surface: "reconcile" },
   { point: "reconcile:inside-fail-orphaned-work-may-persist-txn", surface: "reconcile" },
+  // FG-559: the git-probe sentinel landing reconcile owns when the watcher dies.
+  { point: "reconcile:before-fail-git-unavailable", surface: "reconcile" },
+  { point: "reconcile:inside-fail-git-unavailable-txn", surface: "reconcile" },
   { point: "reconcile:before-fail-orphaned-no-result", surface: "reconcile" },
   { point: "reconcile:inside-fail-orphaned-no-result-txn", surface: "reconcile" },
   { point: "reconcile:before-complete-invoke-like", surface: "reconcile" },

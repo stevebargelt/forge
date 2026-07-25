@@ -25,6 +25,10 @@ import { dirname, join } from "node:path";
 import { invoke, type DockerExecFn } from "./invoke.js";
 import { runNext } from "./runNext.js";
 import { startRun } from "./startRun.js";
+import { reconcileRun } from "./reconcile.js";
+import { insertTask } from "../store/tasks.js";
+import { logEvent } from "../store/events.js";
+import { getContainerCausalEvidenceFromEvents } from "./failure-kind.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { GIT_UNAVAILABLE_EXIT_CODE } from "./spawn.js";
 import { DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE } from "./dependency-provisioning.js";
@@ -231,4 +235,80 @@ test("fg559: runNext — a git-unavailable step is classified the same as a prov
   assert.ok(!git.types.includes("container.dependency_provisioning_failed"));
   assert.ok(deps.types.includes("container.dependency_provisioning_failed"));
   assert.ok(!deps.types.includes("container.git_unavailable"));
+});
+
+// ─── reconcile (the watcher died) ────────────────────────────────────────────
+//
+// The two classification paths above both assume a live watcher: it sees the 122,
+// logs container.git_unavailable, and fails the task. Kill the forge process in
+// that window and reconcile inherits the landing — from EITHER surviving signal
+// (docker still reports 122, or the event landed before the write did). It has to
+// reach the same verification_environment_unavailable with the same git-specific
+// diagnosis; the generic orphan landings send the operator hunting for agent work
+// that was never done, since the probe exits before the agent command execs.
+
+const GONE = () => false;
+const NO_REAP = () => "not_found" as const;
+
+/** A `running` row whose container has started — past reconcile's pre-container
+ *  and provisioning gates, at the container-gone sweep. */
+function strandRunning(runId: string, taskId: string): void {
+  insertTask({
+    id: taskId,
+    runId,
+    phase: "first",
+    agentRole: "engineer",
+    status: "running",
+    taskPackage: { taskId, runId, phase: "first", role: "engineer", dispatchSource: "workflow", inputs: {}, composedSystemPrompt: "" },
+    createdAt: "2026-07-25T00:00:00Z",
+    startedAt: "2026-07-25T00:00:01Z",
+  });
+  logEvent("container.started", { runId, taskId, payload: { containerName: `forge-${taskId}` } });
+}
+
+function strandedRun(title: string): string {
+  const { runId } = startRun({ workflow: LINEAR_WORKFLOW, title, inputs: { brief: "x" }, projectDir: "/tmp/test-project" });
+  return runId;
+}
+
+test("fg559: reconcile — a container gone at exit 122 lands verification_environment_unavailable with the git diagnosis, not a generic orphan", () => {
+  const runId = strandedRun("fg559 reconcile exit-122");
+  strandRunning(runId, "task-fg559-exit");
+
+  const r = reconcileRun(runId, GONE, NO_REAP, () => ({ exitCode: GIT_UNAVAILABLE_EXIT_CODE }));
+
+  const t = getTask("task-fg559-exit")!;
+  assert.equal(t.status, "failed");
+  assert.equal(failureKindForTask(t.id), "verification_environment_unavailable");
+  assert.match(t.error ?? "", /git is unusable in the project mount/);
+  assert.match(t.error ?? "", /parent repo/, "the landing must carry the git-specific operator fix, not just the kind");
+  assert.doesNotMatch(t.error ?? "", /^orphaned/);
+  assert.ok(
+    r.taskChanges.some((c) => c.taskId === t.id && c.to === "failed" && c.reason === "container_git_unavailable"),
+    `got: ${JSON.stringify(r.taskChanges)}`,
+  );
+});
+
+test("fg559: reconcile — the event alone is enough: the watcher logged container.git_unavailable and died before failTask", () => {
+  const runId = strandedRun("fg559 reconcile event-only");
+  strandRunning(runId, "task-fg559-event");
+  logEvent("container.git_unavailable", {
+    runId,
+    taskId: "task-fg559-event",
+    payload: { containerName: "forge-task-fg559-event", exitCode: GIT_UNAVAILABLE_EXIT_CODE },
+  });
+
+  // Docker knows nothing by then — the container is long reaped.
+  reconcileRun(runId, GONE, NO_REAP, () => ({}));
+
+  const t = getTask("task-fg559-event")!;
+  assert.equal(t.status, "failed");
+  assert.equal(failureKindForTask(t.id), "verification_environment_unavailable");
+  assert.match(t.error ?? "", /git is unusable in the project mount/);
+
+  // FG-492's distinction: forge DID witness this container's terminal event
+  // before it died, so the recorded evidence must not read as "the container
+  // disappeared with no terminal evidence".
+  const evidence = getContainerCausalEvidenceFromEvents(eventsForTask(t.id));
+  assert.equal(evidence?.containerExitedEventObserved, true, "container.git_unavailable is a terminal exit event forge observed");
 });
