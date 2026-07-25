@@ -26,3 +26,19 @@ Refs: src/v2/reconcile.ts:65-96, FG-351, FG-352.
 ## Concrete leak evidence from the FG-530 crash matrix (2026-07-11)
 
 The worktree-tier crash lane (src/v2/fg530-crash-worktree.worktree.test.ts) demonstrated the leak precisely: killing at finalizePrimary:between-complete-status-and-event writes the terminal `complete` status but dies before removeWorktreeIfSafe — recovery sees a terminal task, nothing sweeps the leftover worktree, and the tree + its branch leak permanently, one per such crash. Deliberately NOT pinned as an invariant violation there (a leak is the opposite failure from a discard); this ticket owns the reaper. When implementing, flip that scenario into a positive cleanup assertion in the lane.
+
+## Priority bump + locked-worktree hardening (2026-07-24)
+
+**Promoted:** this is the last substantive blocker to making worktree mode the default, and the default being off is
+what allowed the FG-607 live-source incident (see FG-612). Take it directly after FG-607.
+
+**Removal must survive a LOCKED worktree.** `removeWorktree` (src/v2/worktree-lifecycle.ts:203) runs
+`git worktree remove --force` — a SINGLE force, which still fails on a worktree git considers locked. Any tool that
+adopts and locks a worktree (Supacode does this for worktrees it adopts under its tracked repo roots) therefore
+wedges cleanup permanently, and the reaper this ticket adds would inherit the same failure. Use `git worktree unlock`
+first, or `-f -f`, and treat "already unlocked" as a no-op.
+
+Current mitigation making this narrow rather than urgent: forge creates agent worktrees under
+`WORKTREES_DIR` = `~/.forge/worktrees/<runId>/<taskId>` (src/util/paths.ts:11, :133), outside `~/code` where
+Supacode tracks repos — so adoption should not occur for agent worktrees in normal operation. Verified 2026-07-24:
+no locked worktrees present on the forge repo. Harden the removal path anyway; it is one flag.

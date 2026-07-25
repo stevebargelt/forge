@@ -84,6 +84,20 @@ after DB edits would lose them. Surface this in the cutover UX.
 - The canonical-source regression test is updated/replaced to assert host-wide DB truth.
 - A grep/lint gate fails on any NEW direct `backlog/*.md` ticket read outside the seam.
 
+## Blocker discovered during the FG-607 architecture pass (must be resolved before the flip)
+
+**Agent containers cannot see db-mode tickets.** Agents get a read-only `/project` mount and no host DB, so
+once a project's tickets live only in the DB, every containerized agent loses ticket visibility — including
+the shipping-reviewer red, which reads a ticket's acceptance criteria from the mounted project to review a diff
+against it. The seam cannot fix this from inside the container. Decide and implement the access path (inject the
+ticket body into the task package, mount a read-only export, or expose a read API) as part of this slice; the
+per-project flip to `db` is not safe until it is.
+
+**Seam-bypassing `existsSync('backlog')` gates enumerated in FG-607 and deliberately left here:**
+`src/campaign/executor.ts:158` (`hasBacklog()`, consumed at :194 and :213 where absence yields the
+`invalid_project_dir` campaign blocker) and `src/campaign/report.ts:34` (returns null, so reporting silently
+produces nothing). FG-607 converts only the two CLI sites (`src/cli/commands/backlog.ts:202` and `:275`).
+
 ## Dependencies / Relations
 
 - Parent: FG-496. Epic: FG-593.
@@ -95,3 +109,46 @@ after DB edits would lose them. Surface this in the cutover UX.
 - No queue rank/membership/readiness (Slice D), no claims (Slice E), no UI/dispatcher and no cross-project board
   (FG-591). `init` still scaffolds `notes.md` (operational); it must not gate ticket features on the dir. No
   Markdown export; forge.db and `backlog/*.md` are deliberately NOT reconciled after cutover.
+
+## Additional removal-reconciliation case found during FG-607 review (2026-07-24)
+
+**Stale blocker evidence survives a re-import, so a ticket reads as `blocked` after it was unblocked.**
+`src/store/backlog-import.ts:286-296` upserts a `blocker_evidence` row for a source ticket whose status is
+`blocked`, but has NO inverse deletion when a later import supplies `active` / `done` / `deferred` for that same
+ticket. `src/backlog/structured.ts:519` reconstructs any `active` row carrying that evidence as `blocked` — so in
+db mode the ticket stays blocked forever after the Markdown said otherwise, and `src/readiness/readiness.ts:83`
+then holds it back from campaign dispatch.
+
+This is the SAME append-only-import boundary this slice already owns: FG-606 deliberately made import additive,
+and FG-607's own blocked round trip is symmetric on the SEAM side (write `blocked` -> evidence row; write any
+other status -> delete it) but cannot fix the IMPORT side without taking on the removal semantics deferred here.
+Handle it with the rest of removal reconciliation, and apply the same multi-worktree caution: evidence recorded
+from one source must not be dropped merely because a sibling worktree's Markdown lacks the blocked marker.
+
+Found by red-security during the FG-607 post-fix re-audit (medium; fail-safe direction — it withholds a ticket
+from dispatch rather than wrongly shipping one).
+
+## Identity re-identify path REQUIRED before the cutover (found during FG-607 review, 2026-07-24)
+
+FG-607 added a read-side identity refusal: `src/backlog/storage-mode.ts:71-72` refuses whenever the registry's
+`repoEvidenceKey` for a committed `project_key` differs from the checkout's computed evidence. That guard closes a
+real trust boundary (a copied `.forge/config.yml` otherwise reads and WRITES another project's tickets), and it
+stays.
+
+But the evidence key is **source-dependent**: `src/util/repository-identity.ts` prefers a normalized remote and
+falls back to the git common dir. A repository registered while it had NO remote gets a DIFFERENT evidence key the
+moment `git remote add origin` runs (SSH vs HTTPS spellings converge; remote-absent vs remote-present does not).
+After that, the refusal fires on EVERY `forge backlog` command, the printed repair is wrong for this case (it says
+to reconcile config to the registered key, but the mismatch is on the evidence side), and there is **no in-tool
+way to re-identify** — so the project's db tickets are stranded.
+
+This cannot fire today because no project has a committed `project_key` yet; it becomes reachable exactly when
+this slice's `forge backlog migrate` starts committing one. So it is a **precondition of the cutover**, not a
+follow-up to it.
+
+Required here: an operator-present re-identify path (e.g. `forge backlog reidentify --confirm`) that updates the
+registry's evidence for a key the operator asserts, consistent with the existing boundary that identity CLAIMS
+happen in import / mode-set / migrate where an operator is present — never on the read path. Also correct the
+refusal message so it names the evidence-side mismatch and points at that command.
+
+Found by red-backend during the FG-607 post-fix re-audit (medium).
