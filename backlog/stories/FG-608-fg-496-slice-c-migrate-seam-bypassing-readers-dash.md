@@ -152,3 +152,14 @@ happen in import / mode-set / migrate where an operator is present — never on 
 refusal message so it names the evidence-side mismatch and points at that command.
 
 Found by red-backend during the FG-607 post-fix re-audit (medium).
+
+---
+
+## Folded in: FG-616 (2026-07-25)
+
+`dashboard/src/queries.ts` keeps its own module-eval `FORGE_HOME`/`DB_PATH` snapshot — the same latent
+shape as the FG-607 store-path bug.
+
+Folded here rather than tracked separately: this ticket already owns the dashboard's seam-bypassing
+readers, and the issue is latent (not reachable in the dashboard's current single-home usage). Fix it as
+part of the seam migration rather than as its own ticket.

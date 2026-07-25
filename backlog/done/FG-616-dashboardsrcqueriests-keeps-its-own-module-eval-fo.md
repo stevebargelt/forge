@@ -1,9 +1,10 @@
 ---
 id: FG-616
 type: story
-status: active
+status: done
 title: dashboard/src/queries.ts keeps its own module-eval FORGE_HOME/DB_PATH snapshot — same latent shape as the FG-607 store-path bug
 created: 2026-07-25
+closed: 2026-07-25
 ---
 
 ## The latent bug
@@ -47,3 +48,9 @@ two consumers — never two definitions.
 ## Relations
 
 Follow-up from FG-607 round 4 (`src/util/paths.ts` `resolveDbPath()`), flagged by the implementing engineer.
+
+---
+
+## Closed 2026-07-25 — folded into FG-608
+
+Latent, not reachable in the dashboard's current single-home usage, and on a surface FG-608 already owns (seam-bypassing dashboard readers). Recorded there; fix lands with the seam migration.

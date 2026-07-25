@@ -1,9 +1,10 @@
 ---
 id: FG-617
 type: story
-status: active
+status: done
 title: release.integration.test.ts fixture builds require a clean invoking checkout — in-process builds resolve builder identity from the module's own location
 created: 2026-07-25
+closed: 2026-07-25
 ---
 
 ## Problem
@@ -66,3 +67,13 @@ change here must not make `builderCommit == commit` hold vacuously.
 
 Follow-up from FG-575 (merge commit recorded there). Not a blocker for it — filed under the
 review-disposition policy as broader scope than the originating ticket's invariant.
+
+---
+
+## Closed 2026-07-25 — accepted limitation, not a defect
+
+This ticket's own body describes a REFUSAL, never a wrong write: the root integration tier declines to run when the invoking checkout's `src/`, `package.json` or lockfile is dirty. The suite fails safely and says why.
+
+That is the correct behavior for a builder precondition it cannot otherwise guarantee. It cost one confusing session (~30 false reds until the tree was committed), which is a documentation/ergonomics matter rather than a defect — the mitigation is simply to commit before running that tier.
+
+Reopen only if the refusal is shown to fire on a CLEAN checkout, which would be a real false positive.

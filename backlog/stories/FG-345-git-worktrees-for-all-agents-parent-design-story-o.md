@@ -55,3 +55,36 @@ This brings blue write-isolation up to the OS-enforced standard forge already ma
 ## Implementation surface (for scoping only — not a plan)
 
 `spawn.ts` (PROJECT_DIR → worktree path), `invoke.ts`/`runNext.ts` (worktree lifecycle), persistence-check subsystem, dependency provisioning for real container-side test runs (FG-376), the new reconcile/merge step, the integration gate. Relates: DEC-004 (orchestrator-on-host/agents-in-containers), DEC-019 (node_modules shadow volume), the red read-only mount principle, the existing `src/v2/` reconcile/orphan path.
+
+---
+
+## Folded in: FG-621 — the writable-in-container-git decision (2026-07-25)
+
+FG-559 mounts the parent repo's `.git` READ-ONLY, which gives every agent working `git log`/`diff`/`show`
+on a linked worktree but deliberately prevents in-container `git commit`.
+
+That collides with the contract at `src/v2/worktree-lifecycle.ts:231-242`:
+
+> *Contract: agents are expected to commit their work on the task branch. As a safety net, this function
+> auto-stages and commits any uncommitted changes in the worktree before merging.*
+
+Host-side commit is documented as the SAFETY NET, not the primary path. The read-only mount demotes the
+documented primary path to an always-unused one. No work is lost — the safety net preserves the agent's
+filesystem changes — but the contract goes stale.
+
+**This ticket must decide, before the worktree default-on flip, one of:**
+
+1. **Declare host-side commit authoritative** under worktree mode, and update the stale contract at
+   `worktree-lifecycle.ts:231`. No further implementation needed.
+2. **Give agents a writable git** — requires a SEPARATE object store, because a linked worktree shares the
+   parent's object store and ref namespace by construction. Proven during the FG-559 experiment: a
+   read-write parent `.git` lets a container create branches in the parent repo (incompatible with the red
+   boundary), and a scoped-write variant protects the ref namespace but leaves `objects/` deletable. The
+   cheap viable form is `git clone --shared` off a read-only parent `objects/` — measured 0.106s, <1MB,
+   full depth, local commits work, parent unwritable. Merge-back would become `git fetch <clone> <branch>`
+   instead of `mergeWorktreeBranch`'s `git merge --ff-only`.
+
+Worth stating plainly against this ticket's framing of worktrees as "OS-level write isolation":
+**worktrees isolate the WORKING TREE, not the repository.** FG-559 is what exposed that distinction.
+
+Create an implementable child ONLY if this ticket chooses option 2.

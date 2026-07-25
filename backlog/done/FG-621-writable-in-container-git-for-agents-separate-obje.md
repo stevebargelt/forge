@@ -1,9 +1,10 @@
 ---
 id: FG-621
 type: story
-status: active
+status: done
 title: "Writable in-container git for agents: separate object store so an agent can commit without write access to the parent repo (FG-559 piece C)"
 created: 2026-07-25
+closed: 2026-07-25
 ---
 
 ## Context
@@ -85,3 +86,13 @@ default for everyone; this is the escape hatch.
   PARENT repo's refs or object store is still refused (negative test, not a comment).
 - If built: merge-back retrieves the agent's own commits, with the host-side safety-net commit still
   covering the uncommitted case.
+
+---
+
+## Closed 2026-07-25 — decision folded into FG-345
+
+This was a deferred design OPTION, not implementable work: it is gated entirely on FG-345 deciding whether host-side commit becomes authoritative under worktree mode, or agents get a writable git.
+
+That decision, with the FG-559 evidence behind it (the `worktree-lifecycle.ts:231` contract tension, the read-write and scoped-write experiment results, and the `clone --shared` cost measurement), is now recorded in FG-345.
+
+Create an implementable child ONLY if FG-345 chooses the writable-git option.

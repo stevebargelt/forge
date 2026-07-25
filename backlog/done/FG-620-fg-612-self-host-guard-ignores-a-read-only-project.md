@@ -1,9 +1,10 @@
 ---
 id: FG-620
 type: story
-status: active
+status: done
 title: FG-612 self-host guard ignores a read-only project mount — refuses --read-only dispatches that cannot write to the checkout
 created: 2026-07-25
+closed: 2026-07-25
 ---
 
 ## Problem
@@ -76,3 +77,13 @@ since it asserts writes that a `:ro` mount forbids.
   claim writes are happening when the mount is `:ro`.
 - Tests cover both mount modes explicitly. A test that only exercises the read-write path would pass
   vacuously against this bug.
+
+---
+
+## Closed 2026-07-25 — superseded by the FG-345 direction
+
+This ticket argued the FG-612 self-host guard should exempt a `--read-only` project mount, since a `:ro` mount cannot produce the half-written-file hazard the refusal names.
+
+Superseded: **FG-345 deliberately puts EVERY agent on a worktree, read-only agents included**, and FG-559 makes that path actually usable (working `git log`/`diff`/`show` in the container). So the guard's own suggested remedy — `FORGE_WORKTREES=1` — becomes the correct answer for read-only dispatches too, rather than a workaround. Exempting `:ro` would add a special case to a guard whose blanket behavior is about to be right.
+
+The one durable observation worth keeping: the `FORGE_NO_WORKTREES=1` warning text asserts "Agents are writing to the source tree", which is false under a `:ro` mount. Cosmetic, and it disappears with the same direction.
