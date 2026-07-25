@@ -1,9 +1,11 @@
 ---
 id: FG-613
 type: story
-status: active
+status: done
 title: "campaign.integration.test.ts: 10 FG-416/FG-490 tests fail on macOS host at origin/main while CI is green — host-red suite masks real regressions"
 created: 2026-07-25
+closed: 2026-07-25
+closed_commit: d92a063
 ---
 
 ## Evidence (2026-07-24, during FG-607)
@@ -81,3 +83,21 @@ state.
 outright, and any remaining failures will be measured against a clean isolation baseline instead of a polluted one.
 Candidate contended state to check if failures survive: the shared `~/.forge/forge.db`, temp-dir reuse across
 cases, and fixed ports.
+
+## Acceptance Evidence — resolved by FG-614 (`d92a063`), not by a separate fix
+
+The corrected diagnosis above was right: these tests fail only IN AGGREGATE, so the cause was shared state, not a
+platform bug. FG-614's per-test tmux socket isolation (`src/test-setup.ts`, every tmux-touching test gets a private
+`TMUX_TMPDIR`) removed exactly the state they were contending over — and `campaign.integration.test.ts` is the same
+file that leaked a fixture cwd into the host tmux server in the first place.
+
+| AC | Evidence | Verdict |
+|---|---|---|
+| `node --test src/cli/commands/campaign.integration.test.ts` passes on the macOS host from a clean checkout | Run on this host after FG-614: **127 tests, 127 pass, 0 fail, 0 skipped** (launch `launch-fg613-verify-jr5myz`). Baseline for comparison: the SAME file on the SAME host at `origin/main` failed **10** (measured in a clean detached worktree at e0c1c2c) | met |
+| Still passes in Linux CI (`test-extended`) | Green at `d92a063`; `integration_*` shards all pass. It was always green on Linux — hence the host-only classification | met |
+| The root cause is stated, and the pattern checked for elsewhere | Root cause: contention over the shared default-socket tmux server. FG-614 fixes it suite-wide, not just for this file, and adds a guard test that FAILS and names any test bypassing socket isolation — so the class cannot silently return | met |
+| NOT "fixed" by skipping on darwin | No skip was added. The tests run and pass on macOS | met |
+
+Measured on the macOS host deliberately: the implementing agent reported 127/127 from its Linux container and
+explicitly refused to let that count as evidence here, since Linux was already green. That caveat is why the
+decisive run was done on the platform where the failures actually lived.
