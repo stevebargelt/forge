@@ -111,11 +111,13 @@ fi
 # and reports success. Exit with the shared sentinel (122 — must match
 # GIT_UNAVAILABLE_EXIT_CODE in src/v2/spawn.ts) so the runner classifies it as
 # verification_environment_unavailable, not a generic container crash.
-if [ "${FORGE_SKIP_GIT_PROBE:-0}" != "1" ] && [ -e .git ]; then
+# The refusal is unconditional: there is no env-var bypass, because a bypass is
+# exactly the silent history-blind dispatch this probe exists to prevent.
+if [ -e .git ]; then
   if ! _forge_git_probe=$(git rev-parse --git-dir 2>&1); then
     echo "forge: git is unusable in $(pwd): ${_forge_git_probe}" >&2
     echo "forge: if this project is a linked git worktree, its parent .git is not mounted (FG-559)." >&2
-    echo "forge: set FORGE_SKIP_GIT_PROBE=1 to dispatch anyway, accepting a history-blind agent." >&2
+    echo "forge: fix the mount (dispatch against the parent repo, or restore the repo the worktree points at)." >&2
     exit 122
   fi
   unset _forge_git_probe

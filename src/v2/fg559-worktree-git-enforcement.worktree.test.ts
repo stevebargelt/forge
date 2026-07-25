@@ -495,10 +495,9 @@ function runBash(script: string, cwd: string, env: Record<string, string> = {}) 
   return { code: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
-test("fg559e (entrypoint probe): exits 122 on a broken worktree, passes a healthy one and a non-git dir, and FORGE_SKIP_GIT_PROBE=1 bypasses it", () => {
+test("fg559e (entrypoint probe): exits 122 on a broken worktree UNCONDITIONALLY, and passes a healthy one and a non-git dir", () => {
   const probe = extractShellBlock("docker/agent-entrypoint.sh", "# FG-559: prove git actually RESOLVES", 'exec "$@"');
   assert.match(probe, /exit 122/, "the extracted block must be the git probe");
-  assert.match(probe, /FORGE_SKIP_GIT_PROBE/, "the extracted block must carry the escape hatch");
 
   const broken = makeWorktreeFixture(); // parent .git deliberately NOT materialized
   const rBroken = runBash(probe, broken.projectPath);
@@ -510,9 +509,15 @@ test("fg559e (entrypoint probe): exits 122 on a broken worktree, passes a health
   assert.match(rBroken.stderr, /git is unusable/, "the probe must say why");
   assert.match(rBroken.stderr, /FG-559/, "the probe must name the ticket so the operator can find the cause");
 
-  const rSkipped = runBash(probe, broken.projectPath, { FORGE_SKIP_GIT_PROBE: "1" });
-  assert.equal(rSkipped.code, 0, "FORGE_SKIP_GIT_PROBE=1 must bypass the probe on the SAME broken tree");
-  assert.equal(rSkipped.stderr.trim(), "", "the bypassed probe must be silent");
+  // No env-var escape hatch: a bypass is the silent history-blind dispatch the
+  // probe exists to prevent, so the old FORGE_SKIP_GIT_PROBE=1 must do nothing.
+  assert.doesNotMatch(probe, /FORGE_SKIP_GIT_PROBE/, "the probe must carry no bypass variable");
+  const rSkipAttempt = runBash(probe, broken.projectPath, { FORGE_SKIP_GIT_PROBE: "1" });
+  assert.equal(
+    rSkipAttempt.code,
+    GIT_UNAVAILABLE_EXIT_CODE,
+    "FORGE_SKIP_GIT_PROBE=1 must NOT bypass the refusal on the SAME broken tree"
+  );
 
   const healthy = makeWorktreeFixture();
   materializeCommonGit(healthy);
