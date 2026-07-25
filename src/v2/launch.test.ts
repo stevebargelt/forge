@@ -174,6 +174,29 @@ test("FG-535 wrapper: runs the target under a node runner that records signal se
   assert.ok(w.endsWith(`'/l/exit' '/l/out.log' '/l/runtime.json' 'forge' 'review-loop' 'FG-1'`), w);
 });
 
+test("FG-614 wrapper: given a cwd, the pane command ENTERS it before node starts — and the recorder argv stays singly-quoted and readable", () => {
+  const bare = buildWrapperCommand(["forge", "next"], "/l/out.log", "/l/exit", "/l/runtime.json", "/usr/bin/node");
+  const guarded = buildWrapperCommand(["forge", "next"], "/l/out.log", "/l/exit", "/l/runtime.json", "/usr/bin/node", null, null, "/work/proj");
+
+  // node reads its cwd during bootstrap, so a chdir INSIDE the recorder can never run —
+  // the shell has to do it first. This is what makes the tmux server's own cwd irrelevant.
+  assert.ok(guarded.startsWith(`'/bin/sh' '-c'`), guarded);
+  assert.ok(guarded.includes(`'/work/proj'`), "the recorded cwd is passed to the guard");
+  assert.ok(guarded.includes(`cd "$d" 2>/dev/null && exec "$@"`), "on success it execs the recorder — the pane pid stays the recorder's");
+  assert.ok(guarded.includes(`'/l/diagnosis.txt'`), "and on failure it has somewhere to write forge's own explanation");
+
+  // The guard script takes its paths as POSITIONAL PARAMETERS, so nothing is interpolated
+  // into it and the recorder argv is quoted exactly ONCE. Double-quoting would turn every
+  // token into `'\''`-escaped noise — unreadable in `forge launch show`, and unparseable
+  // to anything that reads the pane command.
+  assert.ok(guarded.endsWith(bare), "the guarded command ends with the UNCHANGED, singly-quoted recorder command");
+  const escapes = (s: string): number => s.split(`'\\''`).length - 1;
+  assert.equal(escapes(guarded), escapes(bare), "the guard itself adds no shell escaping — the only escapes are the recorder's own, unchanged");
+
+  // Absent a cwd the command is byte-identical to the pre-FG-614 shape.
+  assert.ok(bare.startsWith(`'/usr/bin/node' '-e'`), bare);
+});
+
 test("FG-555 argv preservation: buildWrapperCommand spawns argv[0] DIRECTLY — no synthesized bash / login shell around the caller argv", () => {
   const w = buildWrapperCommand(["npm", "run", "test:all"], "/l/out.log", "/l/exit", "/l/runtime.json", "/usr/bin/node");
   // The ONLY shell is the /bin/sh tmux uses to run the `node -e` wrapper. The

@@ -589,10 +589,12 @@ test(
 
     // ── THE REAL LAUNCH BOUNDARY WAS CROSSED ────────────────────────────────────────
     // startLaunch drove the full tmux handshake in the remain-on-exit-safe order (these
-    // five run synchronously inside startLaunch, before the wait ever ticks).
+    // run synchronously inside startLaunch, before the wait ever ticks). FG-614 added the
+    // leading server-cwd probe — it must precede new-session, since it interrogates the
+    // EXISTING server rather than one forge's own new-session would start.
     assert.deepEqual(
-      driveTmux.calls.slice(0, 5).map((c) => c[0]),
-      ["-V", "new-session", "set-option", "respawn-pane", "display-message"],
+      driveTmux.calls.slice(0, 6).map((c) => c[0]),
+      ["-V", "display-message", "new-session", "set-option", "respawn-pane", "display-message"],
       "startLaunch drove the real tmux handshake in order",
     );
     assert.equal(driveTmux.state.newSessionCwd, projectDir, "the drive runs in the CAMPAIGN's project dir (cwd propagation)");

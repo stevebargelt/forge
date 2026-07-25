@@ -35,7 +35,7 @@
 // available") — the command may not be a forge command at all.
 
 import { execFileSync } from "node:child_process";
-import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, watch, writeFileSync, type FSWatcher } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, watch, writeFileSync, type FSWatcher } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FORGE_HOME } from "../util/paths.js";
@@ -66,6 +66,21 @@ export type ControlRuntime = {
   release: ControlRelease;
 };
 
+// FG-614: the LAUNCHER's own condition, probed at submission — the long-lived tmux
+// server's working directory. The server outlives every session, so once that
+// directory is deleted (a test fixture leaked into it, a removed worktree) every
+// session it forks starts in a dead directory and any process that reads its cwd at
+// startup — node does, at bootstrap — dies before executing a line. `missing` is
+// asserted ONLY on positive evidence (a path was resolved AND it does not exist);
+// anything we could not read is `unprobed` with the reason, never guessed into a
+// claim about the operator's tmux server. `sessions`/`livePanes` are the COST of the
+// remedy (`tmux kill-server`), counted only when the condition is real.
+export type TmuxServerCwd =
+  | { state: "ok"; path: string }
+  | { state: "missing"; path: string; sessions?: number; livePanes?: number }
+  | { state: "no_server" }
+  | { state: "unprobed"; reason: string };
+
 export type LaunchMeta = {
   id: string;
   command: string[];
@@ -93,6 +108,10 @@ export type LaunchMeta = {
   // no live session / exit record exists, the record is reconciled to a terminal
   // disposition rather than reported `running` forever. See startLaunch / readLaunch.
   starting?: boolean;
+  // FG-614: the tmux server's own working directory as probed AT SUBMISSION. Recorded
+  // so a later reader can name the LAUNCHER's condition instead of blaming the child;
+  // optional so a record written before FG-614 still loads.
+  tmuxServerCwd?: TmuxServerCwd;
 };
 
 export type LaunchStatus =
@@ -210,6 +229,11 @@ export type LaunchView = LaunchMeta & {
   // launch terminal). If the owner LATER dies, reconcile arms the bound then. Never a
   // second status vocabulary: `terminal` is drawn from the existing LaunchStatus set (BD-10).
   pendingUnreadableExit?: { terminal: LaunchStatus };
+  // FG-614: a FORGE-authored explanation of why this launch failed, written by the
+  // launcher itself (the cwd guard) rather than captured from the child. Present only
+  // when forge has something to say that the child's stderr cannot: `forge launch show`
+  // renders it above the log tail so the cause is named, not inferred from a trace.
+  diagnosis?: string;
 };
 
 export function classifyExit(rec: ExitRecord): LaunchStatus {
@@ -356,6 +380,55 @@ function exitRecorderScript(releaseIdLiteral: string, profileLiteral: string): s
   ].join("");
 }
 
+/** FG-614: the exit code the cwd guard records when it cannot enter the recorded
+ *  working directory. The command never ran, so this is FORGE's disposition, not the
+ *  command's — `diagnosis.txt` (written beside it) is what names the cause, and
+ *  `forge launch show` renders it. */
+export const LAUNCH_CWD_UNAVAILABLE_EXIT = 78;
+
+/** FG-614: the cwd guard's script. A CONSTANT — it takes the four paths it needs as
+ *  positional parameters and the recorder argv as the rest, so no caller data is ever
+ *  interpolated into it. That is deliberate: the guard has to be shell-quoted into the
+ *  single string tmux runs, and interpolating quoted paths would mean quoting a second
+ *  time, which turns every recorder token into `'\''`-escaped noise — unreadable in
+ *  `forge launch show`, and unparseable to anything reading the pane command.
+ *
+ *  Node reads its cwd during bootstrap (`uv_cwd`), so a `node -e …` handed a dead
+ *  inherited cwd dies before executing a line — a chdir INSIDE the recorder can never
+ *  run. `tmux new-session -c <dir>` is not a substitute either: it was verified by hand
+ *  during the FG-614 incident not to rescue the condition. So the chdir happens here, in
+ *  a shell (which starts fine with a deleted cwd), and only then is the recorder exec'd.
+ *  `exec` keeps the pane pid the recorder's, exactly as before this guard existed.
+ *
+ *  On failure the guard is the LAST writer: it commits a terminal exit record with the
+ *  same temp+rename atomicity as the recorder (FG-552 BD-4) and leaves a diagnosis file
+ *  naming the cause, so the launch reads as a named forge refusal instead of an owner
+ *  that vanished. No single quotes and no backticks appear in the script or its message:
+ *  the script travels inside single quotes, so an apostrophe would be escaped to `'\''`
+ *  and make the pane command an operator reads in `forge launch show` much harder to
+ *  follow; and the message is expanded inside double quotes, where a backtick would be
+ *  command substitution. */
+const CWD_GUARD_SCRIPT = [
+  `d=$1; l=$2; e=$3; g=$4; shift 4;`,
+  `cd "$d" 2>/dev/null && exec "$@";`,
+  `m="forge launch: the command was NOT started — forge could not enter the working directory it recorded for this launch.`,
+  `\\n  recorded cwd: $d`,
+  `\\n  cause: chdir into that directory failed. It was removed between submission and start (a temp/fixture directory, a deleted git worktree, an unmounted volume).`,
+  `\\n  this is not a fault of the launched command: nothing of it ran.`,
+  `\\n  remedy: relaunch from a directory that still exists.`,
+  `\\n  if EVERY launch fails this way, the condition is instead that the tmux server itself is stuck in a deleted working directory. Remedy: tmux kill-server — that terminates every existing tmux session and any live process inside them, so check tmux list-sessions first.";`,
+  `printf "%b\\n" "$m" >> "$l" 2>/dev/null;`,
+  `printf "%b\\n" "$m" > "$g" 2>/dev/null;`,
+  `printf %s "{\\"code\\":${LAUNCH_CWD_UNAVAILABLE_EXIT},\\"signal\\":null}" > "$e.tmp.cwd" && mv "$e.tmp.cwd" "$e";`,
+  `exit ${LAUNCH_CWD_UNAVAILABLE_EXIT}`,
+].join("");
+
+function cwdGuardedCommand(cwd: string, logPath: string, exitPath: string, recorderArgv: string[]): string {
+  const diagPath = join(dirname(exitPath), "diagnosis.txt");
+  const parts = ["/bin/sh", "-c", CWD_GUARD_SCRIPT, "forge-launch-cwd-guard", cwd, logPath, exitPath, diagPath, ...recorderArgv];
+  return parts.map(shellQuote).join(" ");
+}
+
 /** The command the tmux pane runs: the recorder writes its own R2 runtime, then
  *  runs the target with stdout+stderr to the log, then writes the terminal exit
  *  record. The exit write is the LAST act, so an exit file existing is proof the
@@ -363,11 +436,15 @@ function exitRecorderScript(releaseIdLiteral: string, profileLiteral: string): s
  *
  *  FG-569 (R2): `releaseId` is the TRUSTED, manifest-derived id (or null). It is
  *  string-interpolated into the recorder script as a JSON literal, so the recorded
- *  release identity has NO ambient-env dependency. */
-export function buildWrapperCommand(argv: string[], logPath: string, exitPath: string, runtimePath: string, node = process.execPath, releaseId: string | null = null, profile: LaunchProfile | null = null): string {
+ *  release identity has NO ambient-env dependency.
+ *
+ *  FG-614: `cwd`, when given, wraps the recorder in the cwd guard above so the launch
+ *  starts in the directory forge RECORDED rather than whatever it inherited. */
+export function buildWrapperCommand(argv: string[], logPath: string, exitPath: string, runtimePath: string, node = process.execPath, releaseId: string | null = null, profile: LaunchProfile | null = null, cwd: string | null = null): string {
   const script = exitRecorderScript(JSON.stringify(releaseId), JSON.stringify(profile));
-  const parts = [node, "-e", script, exitPath, logPath, runtimePath, ...argv];
-  return parts.map(shellQuote).join(" ");
+  const recorderArgv = [node, "-e", script, exitPath, logPath, runtimePath, ...argv];
+  if (cwd === null) return recorderArgv.map(shellQuote).join(" ");
+  return cwdGuardedCommand(cwd, logPath, exitPath, recorderArgv);
 }
 
 /** Parse the R2 runtime record the recorder wrote. Returns undefined if absent
@@ -827,6 +904,110 @@ export function defaultTmux(args: string[]): string {
   return execFileSync("tmux", args, { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" });
 }
 
+// ── FG-614: naming the bricked-tmux-server condition instead of leaking uv_cwd ──
+
+/** Read a live process's working directory — the `lsof -a -p <pid> -d cwd` an operator
+ *  had to run BY HAND to diagnose the FG-614 incident. Linux answers from procfs
+ *  (a deleted directory reads back with a ` (deleted)` suffix, which is stripped so the
+ *  caller judges existence itself); darwin asks lsof. Any other platform, or any
+ *  failure, is `undefined` — the caller then reports `unprobed`, never a guess. */
+function readProcCwd(pid: number): string | undefined {
+  if (process.platform === "linux") {
+    try {
+      const link = readlinkSync(`/proc/${pid}/cwd`);
+      return link.endsWith(" (deleted)") ? link.slice(0, -" (deleted)".length) : link;
+    } catch {
+      return undefined;
+    }
+  }
+  if (process.platform === "darwin") {
+    try {
+      const out = execFileSync("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-F", "n"], { stdio: ["ignore", "pipe", "ignore"], encoding: "utf8" });
+      // -F n emits one field per line, each prefixed by its identifier; `n` is the name.
+      const name = out.split("\n").find((l) => l.startsWith("n") && l.length > 1);
+      return name?.slice(1);
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+/** What `tmux kill-server` would cost: how many sessions exist and how many still hold
+ *  a live process. Undefined when tmux cannot answer — the diagnosis then states the
+ *  cost qualitatively rather than inventing a count. */
+export function tmuxSessionCost(tmux: TmuxRunner = defaultTmux): { sessions: number; livePanes: number } | undefined {
+  let out: string | void;
+  try {
+    out = tmux(["list-panes", "-a", "-F", "#{session_name} #{pane_dead}"]);
+  } catch {
+    return undefined;
+  }
+  const lines = String(out ?? "").split("\n").map((l) => l.trim()).filter((l) => l !== "");
+  if (lines.length === 0) return undefined;
+  const sessions = new Set<string>();
+  let livePanes = 0;
+  for (const line of lines) {
+    const [name, dead] = line.split(" ");
+    if (name === undefined || name === "") return undefined; // not the format we asked for
+    sessions.add(name);
+    if (dead === "0") livePanes++;
+  }
+  return { sessions: sessions.size, livePanes };
+}
+
+/** Probe the LAUNCHER's own condition: does the long-lived tmux server's working
+ *  directory still exist? Cheap — one `display-message` against the existing server,
+ *  and the session count only when the answer is bad. Never starts a server: with no
+ *  server running `display-message` fails and tmux says so in stderr, which is
+ *  `no_server` (the next `new-session` will start one from forge's own, verified cwd). */
+export function probeTmuxServerCwd(opts: { tmux?: TmuxRunner } = {}): TmuxServerCwd {
+  const tmux = opts.tmux ?? defaultTmux;
+  let out: string | void;
+  try {
+    out = tmux(["display-message", "-p", "#{pid}"]);
+  } catch (e) {
+    // A failed `display-message` is TWO different facts and only one of them is an
+    // observation: tmux reached the socket and reported nothing listening (`no_server`,
+    // a real reading of the host), or forge could not ASK at all — tmux not on PATH, an
+    // unreadable socket directory, a broken TMUX_TMPDIR. Claiming `no_server` for the
+    // second is the FG-614 mistake in miniature: an opaque failure attributed to
+    // something forge never verified.
+    const stderr = String((e as { stderr?: unknown }).stderr ?? "").trim();
+    if (/no server running/.test(stderr) || /error connecting to .*\(No such file or directory\)/.test(stderr)) {
+      return { state: "no_server" };
+    }
+    const detail = stderr !== "" ? stderr : (e as Error).message;
+    return { state: "unprobed", reason: `could not run \`tmux display-message -p '#{pid}'\`: ${detail}` };
+  }
+  const pid = Number(String(out ?? "").trim());
+  if (!Number.isInteger(pid) || pid <= 0) return { state: "unprobed", reason: "tmux did not report a server pid" };
+  const path = readProcCwd(pid);
+  if (path === undefined || path === "") {
+    return { state: "unprobed", reason: `could not read the working directory of tmux server pid ${pid} on ${process.platform}` };
+  }
+  if (existsSync(path)) return { state: "ok", path };
+  const cost = tmuxSessionCost(tmux);
+  return { state: "missing", path, ...(cost ? cost : {}) };
+}
+
+/** The ONE named rendering of the bricked-server condition (FG-614). It names the
+ *  cause, states that forge no longer depends on it, gives the remedy, and states what
+ *  the remedy COSTS — because the remedy kills live work and is therefore the
+ *  operator's call, never forge's. */
+export function tmuxServerCwdDiagnosis(probe: { path: string; sessions?: number; livePanes?: number }): string {
+  const cost = probe.sessions === undefined
+    ? `\`tmux kill-server\` kills EVERY tmux session on this host and any live process inside them. Forge could not count them — check \`tmux list-sessions\` first.`
+    : `\`tmux kill-server\` kills ${probe.sessions} tmux session(s), ${probe.livePanes ?? 0} of which still hold a live process — those processes die with the server. Check \`tmux list-sessions\` first.`;
+  return [
+    `forge launch: the tmux server's own working directory no longer exists.`,
+    `  tmux server cwd: ${probe.path} (deleted)`,
+    `  cause: the long-lived tmux server inherited this directory and it has since been removed. The server outlives every session, so sessions it forks start in a dead directory and any process that reads its working directory at startup — node does, during bootstrap — dies with ENOENT/uv_cwd before executing a line. This is the LAUNCHER's condition, not a fault of any launched command.`,
+    `  this launch is unaffected: forge enters the directory it recorded for the launch before the command starts, so the server's cwd is irrelevant to it.`,
+    `  remedy (the operator's call — forge will NOT restart your tmux server): ${cost}`,
+  ].join("\n");
+}
+
 /** The pid of the tmux pane's process — the wrapper that owns the command, and
  *  the only process identity worth persisting for later attribution. */
 function ownerPidOf(session: string, tmux: TmuxRunner): number | null {
@@ -903,6 +1084,42 @@ export function startLaunch(argv: string[], opts: { name?: string; cwd?: string;
     throw new Error("forge launch requires tmux — install it (brew install tmux / apt install tmux) and retry");
   }
 
+  // FG-614: the launch OWNS its working directory — the wrapper chdir's into it rather
+  // than inheriting whatever the tmux server had. So it must be a directory that
+  // exists, verified BEFORE anything is written: a launch that cannot establish its
+  // recorded cwd is refused here, by name, instead of dying inside the pane as an
+  // ENOENT/uv_cwd trace that reads as if the launched command were at fault.
+  // process.cwd() itself THROWS when this process's directory has been deleted (uv_cwd) —
+  // the same ENOENT the incident surfaced, just one layer up. Name it here rather than
+  // letting the raw libuv message stand as the whole explanation.
+  let cwd: string;
+  if (opts.cwd !== undefined) {
+    cwd = opts.cwd;
+  } else {
+    try {
+      cwd = process.cwd();
+    } catch (e) {
+      throw new Error(
+        `forge launch: refusing to launch — THIS forge process's own working directory no longer exists, so there is no directory to record for the launch (${(e as Error).message}).\n` +
+          `  cause: the directory this shell is sitting in was deleted underneath it.\n` +
+          `  fix: cd to a directory that exists (\`cd "$PWD"\` will not work — the directory is gone) and retry.`,
+      );
+    }
+  }
+  if (!existsSync(cwd)) {
+    throw new Error(
+      `forge launch: refusing to launch — the working directory recorded for this launch does not exist: ${cwd}\n` +
+        `  every launch is started IN this directory (forge does not inherit the tmux server's cwd), so it must exist at submission.\n` +
+        `  fix: relaunch from a directory that exists, or pass a cwd that does.`,
+    );
+  }
+
+  // FG-614: probe the LAUNCHER's own condition before creating anything. The launch
+  // proceeds either way (the wrapper's chdir makes the server's cwd irrelevant), but
+  // the fact is recorded so `forge launch show` can name it, the CLI can warn, and a
+  // tmux failure below can be attributed to it instead of surfacing raw.
+  const serverCwd = probeTmuxServerCwd({ tmux });
+
   const now = opts.now ?? new Date();
   const rand = Math.random().toString(36).slice(2, 8);
   // The name becomes a directory segment under LAUNCHES_DIR and a tmux session
@@ -922,7 +1139,8 @@ export function startLaunch(argv: string[], opts: { name?: string; cwd?: string;
     ownerPid: null,
     startedAt: now.toISOString(),
     logPath: join(dir, "out.log"),
-    cwd: opts.cwd ?? process.cwd(),
+    cwd,
+    tmuxServerCwd: serverCwd,
     // FG-569 (R1): captured here, in the submitting CLI, INDEPENDENTLY of the
     // recorder (R2) — the CLI is gone by the time anyone inspects this launch.
     control: collectControlRuntime(),
@@ -950,7 +1168,7 @@ export function startLaunch(argv: string[], opts: { name?: string; cwd?: string;
   const metaPath = join(dir, "meta.json");
   writeJsonAtomic(metaPath, { ...meta, starting: true });
 
-  const wrapped = buildWrapperCommand(argv, meta.logPath, join(dir, "exit"), join(dir, "runtime.json"), process.execPath, trustedReleaseId(), opts.profile ?? null);
+  const wrapped = buildWrapperCommand(argv, meta.logPath, join(dir, "exit"), join(dir, "runtime.json"), process.execPath, trustedReleaseId(), opts.profile ?? null, meta.cwd);
   try {
     // Order matters. Starting the target command AS the session command races
     // it against `set-option`: a command that finishes first destroys the
@@ -983,7 +1201,10 @@ export function startLaunch(argv: string[], opts: { name?: string; cwd?: string;
       try { tmux(["kill-session", "-t", session]); } catch { /* already gone */ }
     }
     rmSync(dir, { recursive: true, force: true });
-    throw new Error(`forge launch: tmux failed to start the session — ${(e as Error).message}`);
+    // FG-614: if the server's cwd is gone, THAT is the diagnosis the operator needs —
+    // attach it rather than letting a raw tmux/node message stand as the whole story.
+    const named = serverCwd.state === "missing" ? `\n\n${tmuxServerCwdDiagnosis(serverCwd)}` : "";
+    throw new Error(`forge launch: tmux failed to start the session — ${(e as Error).message}${named}`);
   }
 
   // Only knowable once the pane holds the real command, so the record is
@@ -1149,7 +1370,15 @@ export function readLaunch(id: string, tmux: TmuxRunner = defaultTmux, isLaunche
     try { workload = parseWorkloadProvenance(readFileSync(wlPath, "utf8")); } catch { /* not readable yet */ }
   }
 
-  return { ...meta, status, forgeIds: extractForgeIds(log), ...(recorder ? { recorder } : {}), ...(workload ? { workload } : {}), ...(pendingUnreadableExit ? { pendingUnreadableExit } : {}) };
+  // FG-614: forge's own explanation, written by the cwd guard when the command never
+  // started. Read as text (it is prose for an operator, not a parsed record).
+  let diagnosis: string | undefined;
+  try {
+    const text = readFileSync(join(dir, "diagnosis.txt"), "utf8").trim();
+    if (text !== "") diagnosis = text;
+  } catch { /* nothing to say */ }
+
+  return { ...meta, status, forgeIds: extractForgeIds(log), ...(recorder ? { recorder } : {}), ...(workload ? { workload } : {}), ...(pendingUnreadableExit ? { pendingUnreadableExit } : {}), ...(diagnosis ? { diagnosis } : {}) };
 }
 
 export function listLaunches(tmux: TmuxRunner = defaultTmux): LaunchView[] {
