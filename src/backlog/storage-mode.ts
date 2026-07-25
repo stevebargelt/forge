@@ -18,7 +18,7 @@ import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { readBacklogConfig } from "./config.js";
 import { getStorageMode } from "../store/tickets.js";
-import { storeExists } from "../store/db.js";
+import { dbGeneration, storeExists } from "../store/db.js";
 import {
   computeRepositoryEvidence,
   registryByEvidence,
@@ -40,8 +40,17 @@ const MARKDOWN_UNKNOWN: BacklogStore = { mode: "markdown", projectKey: null, sta
 // otherwise serve the old store forever after an operator flips a project's mode.
 // A few seconds is the whole point — long enough to collapse a loop, short enough
 // that no invalidation plumbing is needed.
+//
+// The generation is what makes it correct across a CONNECTION change. A TTL
+// bounds staleness in time; it does not bound it to the store the answer came
+// from. A process that closes its DB and reopens another one (a restart
+// simulation, a test swapping stores) would otherwise be handed a `db`-mode
+// project_key resolved against the DEAD connection and go read — or write —
+// tickets under it in a store that never registered that project. Entries are
+// keyed to the connection generation they were resolved under, so a swap
+// invalidates them on the spot.
 const CACHE_TTL_MS = 3_000;
-const cache = new Map<string, { store: BacklogStore; expiresAt: number }>();
+const cache = new Map<string, { store: BacklogStore; generation: number; expiresAt: number }>();
 
 /** Drop the memoized resolutions. Called after `forge backlog mode --set` (the
  *  CLI's immediate-consistency case) and by tests that swap the DB or flip a
@@ -133,9 +142,11 @@ export function resolveBacklogStore(projectDir: string): BacklogStore {
   const key = resolve(projectDir);
   const now = Date.now();
   const hit = cache.get(key);
-  if (hit && hit.expiresAt > now) return hit.store;
+  if (hit && hit.expiresAt > now && hit.generation === dbGeneration()) return hit.store;
   const store = resolveUncached(key);
-  cache.set(key, { store, expiresAt: now + CACHE_TTL_MS });
+  // Read AFTER resolving: resolveUncached may itself be the call that opens the
+  // store, and the entry must carry the generation it was actually derived from.
+  cache.set(key, { store, generation: dbGeneration(), expiresAt: now + CACHE_TTL_MS });
   return store;
 }
 

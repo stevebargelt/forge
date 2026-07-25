@@ -33,7 +33,21 @@ export const CLAUDE_SKILLS_DIR =
 // One line per `forge raci apply --confirm`; host-global, outside any repo.
 export const RACI_AUDIT_LOG_PATH = join(FORGE_HOME, "raci-audit.log");
 // FORGE_DB_PATH overrides the default; pass `:memory:` in tests for an in-memory SQLite.
-export const DB_PATH = process.env.FORGE_DB_PATH ?? join(FORGE_HOME, "forge.db");
+//
+// FG-607 made this module reachable from `@forge/backlog` (src/backlog/structured.ts
+// now imports src/store/db.ts for the db-mode seam), so paths.ts can be EVALUATED
+// before the importing module's own body runs — ESM evaluates static imports first.
+// Anything that sets process.env.FORGE_HOME programmatically after importing the
+// backlog seam therefore gets a snapshot of the WRONG home, and the store silently
+// opens another host's forge.db. The consts stay a process-start snapshot (a CLI's
+// env genuinely is fixed at process start, and 100+ call sites read them); the
+// store path additionally resolves at OPEN time, because it is the one path whose
+// staleness reads and writes a different host's data rather than merely misnaming a
+// directory. Same expression, two consumers — never two definitions.
+export function resolveDbPath(): string {
+  return process.env.FORGE_DB_PATH ?? join(process.env.FORGE_HOME ?? join(homedir(), ".forge"), "forge.db");
+}
+export const DB_PATH = resolveDbPath();
 
 // FG-571 (FG-553 Child 4): the promotion surface. EVERY path here is derived from a
 // `home` argument (defaulting to FORGE_HOME) rather than homedir() — setting FORGE_HOME

@@ -146,17 +146,33 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       (checkout) => checkout.exists && (checkout.branch === "main" || checkout.branch === "master"),
     );
     const tickets: Array<Record<string, unknown>> = [];
+    let ticketsError: string | undefined;
     if (ticketSource) {
       try {
         for (const ticket of listTickets(ticketSource.projectDir)) {
           tickets.push({ ...ticket, checkoutDir: ticketSource.projectDir, checkoutBranch: ticketSource.branch ?? null });
         }
-      } catch {
-        // A checkout may disappear between registry resolution and reading.
+      } catch (err) {
+        // ONLY "the checkout disappeared between registry resolution and reading"
+        // is absorbed silently — that one is expected and an empty backlog is the
+        // truthful answer for it. Every other throw (an identity refusal, a store
+        // that won't open, a parse failure) means we do NOT know this project's
+        // tickets, and rendering [] as if we did is how FG-607 turned a five-line
+        // change into four red test files with no diagnostic. Still 200 with what
+        // we have — a dashboard panel must not take the page down — but the error
+        // is named on stderr and in the payload rather than vanishing.
+        if (isMissingPath(err)) {
+          tickets.length = 0;
+        } else {
+          ticketsError = err instanceof Error ? err.message : String(err);
+          console.error(`/api/backlog: reading tickets from ${ticketSource.projectDir} failed:`, err);
+        }
       }
     }
     const notes = checkouts.length === 1 ? notesByCheckout[0]?.notes ?? "" : "";
-    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ notes, notesByCheckout, tickets }));
+    res.writeHead(200, { "Content-Type": "application/json" }).end(
+      JSON.stringify({ notes, notesByCheckout, tickets, ...(ticketsError ? { ticketsError } : {}) }),
+    );
     return;
   }
 
@@ -275,6 +291,13 @@ function serveShell(res: ServerResponse): void {
 
 function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
+}
+
+/** The checkout is gone from disk — the one ticket-read failure /api/backlog is
+ *  entitled to report as an empty backlog. */
+function isMissingPath(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
 }
 
 function scopeFromUrl(url: URL): ProjectScope {
