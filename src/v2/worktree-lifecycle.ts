@@ -340,16 +340,17 @@ export function cleanupFailedWorktreeSetup(
   // FIX3 (FG-376 review): no dependency-volume cleanup here — see
   // removeWorktreeIfSafe above for why a shared cache volume must not be
   // removed at individual worktree disposal.
-  if (!forceRemoveWorktree(projectDir, path)) {
-    // Removal failed (e.g., directory exists but was never registered) — prune
-    // stale entries to keep the repo worktree list clean.
-    try {
-      execFileSync("git", ["worktree", "prune"], {
-        cwd: projectDir,
-        stdio: ["ignore", "ignore", "ignore"],
-      });
-    } catch { /* fully best-effort */ }
-  }
+  forceRemoveWorktree(projectDir, path);
+  // Prune unconditionally: forceRemoveWorktree reports path ABSENCE, not that
+  // `git worktree remove` succeeded, so a failed remove whose directory is gone
+  // anyway (never registered, or removed out from under us) would otherwise
+  // leave a stale registration behind that breaks later worktree operations.
+  try {
+    execFileSync("git", ["worktree", "prune"], {
+      cwd: projectDir,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+  } catch { /* fully best-effort */ }
 }
 
 // ── FG-356: the orphan workspace reaper ───────────────────────────────────────

@@ -203,3 +203,43 @@ test("cleanupFailedWorktreeSetup / cleanupIntegrationWorktree: neither invokes d
     process.env.PATH = origPath;
   }
 });
+
+// Shadows `git` with a stub whose `worktree remove` deletes the directory and
+// THEN fails — the shape that makes path-absence a lie about removal success.
+function makeFailingRemoveGitStub(): { binDir: string; logPath: string } {
+  const binDir = mkdtempSync(join(tmpdir(), "forge-git-stub-"));
+  const logPath = join(binDir, "git-calls.log");
+  writeFileSync(
+    join(binDir, "git"),
+    `#!/bin/sh\necho "$@" >> "${logPath}"\nif [ "$1" = "worktree" ] && [ "$2" = "remove" ]; then\n  for a in "$@"; do last="$a"; done\n  rm -rf "$last"\n  exit 1\nfi\nexit 0\n`
+  );
+  chmodSync(join(binDir, "git"), 0o755);
+  writeFileSync(logPath, "");
+  return { binDir, logPath };
+}
+
+test("cleanupFailedWorktreeSetup: prunes stale registrations when `git worktree remove` fails but the directory is gone anyway", () => {
+  const projectDir = makeTmpDir("forge-fg356-repo-");
+  initGitRepo(projectDir);
+  const runId = "run-fg356-prune";
+  const taskId = "task-fg356-prune";
+  const wtPath = worktreeDir(runId, taskId);
+  mkdirSync(wtPath, { recursive: true });
+
+  const { binDir, logPath } = makeFailingRemoveGitStub();
+  const origPath = process.env.PATH;
+  process.env.PATH = `${binDir}:${origPath ?? ""}`;
+  try {
+    assert.doesNotThrow(() => cleanupFailedWorktreeSetup(projectDir, runId, taskId));
+  } finally {
+    process.env.PATH = origPath;
+  }
+
+  assert.ok(!existsSync(wtPath), "the stub removed the directory before failing");
+  const gitCalls = readFileSync(logPath, "utf8");
+  assert.match(
+    gitCalls,
+    /worktree prune/,
+    `a failed remove must still prune the parent repo's stale registrations — git calls were: ${JSON.stringify(gitCalls)}`
+  );
+});
