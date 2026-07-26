@@ -582,6 +582,11 @@ export function buildProvisionerDockerArgs(
   args.push("-w", projectContainerPath);
   args.push(runtime.image);
   args.push("true"); // entrypoint installs, then execs this trivial no-op and exits 0
+  // FG-559 piece A: the provisioner is a container too, and on a worktree
+  // dispatch it starts BEFORE the agent container — so the same refusal has to
+  // hold here, not only in buildDockerArgs. A git bind the argv cannot express
+  // (a host path holding a `:`) is emitted above and caught here.
+  assertWorktreeGitMountPlanned(ctx.PROJECT_DIR, args);
   return args;
 }
 

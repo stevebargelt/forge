@@ -3022,6 +3022,23 @@ async function runContainer(args: {
       }
     }
     if (plan) {
+      // FG-559: build the provisioner argv HERE, not inside the lock callback —
+      // its mount-plan assertion is a host-side refusal that must precede every
+      // container this dispatch starts, and the provisioner starts before the
+      // agent container buildDockerArgs guards below.
+      let provisionerArgs: string[];
+      try {
+        provisionerArgs = buildProvisionerDockerArgs(
+          runtime,
+          { TASK_ID: args.taskId, PROJECT_DIR: repoRootForMount },
+          plan,
+        );
+      } catch (e) {
+        const msg = `buildProvisionerDockerArgs failed: ${(e as Error).message}`;
+        cleanupStagedAuth(dir); // AWN-8
+        failTask(args.taskId, { runId: args.runId, kind: classify({}), error: msg });
+        return { kind: "failed", error: msg };
+      }
       let provisionerExitCode = -1;
       // FG-437: the real, durable provisioner container name/cacheKey — logged
       // independently of the worktree (which may be gone by the time reconcile
@@ -3038,11 +3055,6 @@ async function runContainer(args: {
           taskId: args.taskId,
           payload: provisionEventPayload,
         });
-        const provisionerArgs = buildProvisionerDockerArgs(
-          runtime,
-          { TASK_ID: args.taskId, PROJECT_DIR: repoRootForMount },
-          plan!,
-        );
         const provisionStdoutPath = join(dir, "container.provision.stdout.log");
         const provisionStderrPath = join(dir, "container.provision.stderr.log");
         provisionerExitCode = await exec({

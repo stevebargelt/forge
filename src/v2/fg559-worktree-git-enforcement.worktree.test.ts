@@ -304,19 +304,57 @@ test("fg559e (piece A): the guard NEVER refuses an ordinary dispatch — non-git
   }
 });
 
+const PROVISIONER_PLAN: DependencyVolumePlan = {
+  lockfileHash: "fg559ehash",
+  volumes: [{ name: "forge-deps-fg559ehash", relPath: "", containerPath: "/project/node_modules" }],
+  installRoot: "/project",
+};
+
 test("fg559e: the PROVISIONER argv carries the same read-only parent .git bind — it runs the same entrypoint probe", () => {
   const f = makeWorktreeFixture();
   materializeCommonGit(f);
 
-  const plan: DependencyVolumePlan = {
-    lockfileHash: "fg559ehash",
-    volumes: [{ name: "forge-deps-fg559ehash", relPath: "", containerPath: "/project/node_modules" }],
-    installRoot: "/project",
-  };
-  const args = buildProvisionerDockerArgs(RUNTIME, ctxFor(f.projectPath, "rw"), plan);
+  const args = buildProvisionerDockerArgs(RUNTIME, ctxFor(f.projectPath, "rw"), PROVISIONER_PLAN);
   assert.ok(
     mountSpecs(args).includes(`${f.parentGitDir}:${f.parentGitDir}:ro`),
     `the provisioner must bind the parent .git read-only too, got: ${mountSpecs(args).join(" ")}`
+  );
+});
+
+test("fg559e: the PROVISIONER argv is refused when the parent .git bind cannot be expressed — the provisioner container starts BEFORE the agent one", () => {
+  // Same colon-bearing host path as the dispatch test below: `-v` is
+  // colon-delimited, so the bind buildProvisionerDockerArgs emits above is
+  // malformed and its own assertion finds the required path unbound.
+  const base = mkdtempSync(join(tmpdir(), "fg559e-colon-prov-"));
+  tmpDirs.push(base);
+  const f = makeWorktreeFixture(join(base, "ho:st"));
+  materializeCommonGit(f);
+  assert.ok(f.parentGitDir.includes(":"), "the fixture must actually sit under a colon-bearing path");
+
+  assert.throws(
+    () => buildProvisionerDockerArgs(RUNTIME, ctxFor(f.projectPath, "rw"), PROVISIONER_PLAN),
+    /FG-559[\s\S]*Refusing to dispatch/,
+    "the provisioner argv must be refused host-side, not handed to docker"
+  );
+
+  const ordinary = makeWorktreeFixture();
+  materializeCommonGit(ordinary);
+  assert.doesNotThrow(
+    () => buildProvisionerDockerArgs(RUNTIME, ctxFor(ordinary.projectPath, "rw"), PROVISIONER_PLAN),
+    "an ordinary worktree provisioner argv must NOT be refused"
+  );
+});
+
+test("fg559e: runContainer builds (and so asserts) the provisioner argv BEFORE it takes the provisioning lock and execs", () => {
+  const src = readFileSync(join(REPO_ROOT, "src", "v2", "runNext.ts"), "utf8");
+  const runContainerAt = src.indexOf("async function runContainer(");
+  const buildAt = src.indexOf("buildProvisionerDockerArgs(", runContainerAt);
+  const provisionAt = src.indexOf("provisionDependencyCache(", runContainerAt);
+
+  assert.ok(runContainerAt > 0 && buildAt > 0 && provisionAt > 0);
+  assert.ok(
+    buildAt < provisionAt,
+    "the FG-559 refusal must land before any provisioner container starts — build the argv outside the lock callback"
   );
 });
 
