@@ -66,6 +66,7 @@ import { taskDir } from "../util/paths.js";
 import { newTaskId, newVerdictId, nowIso } from "../util/ids.js";
 
 import { setCrashHookForTest } from "./crash-points.js";
+import { GIT_UNAVAILABLE_EXIT_CODE } from "./spawn.js";
 import { runNext, type DockerExecFn } from "./runNext.js";
 import { startRun } from "./startRun.js";
 import { gate } from "./gate.js";
@@ -650,6 +651,22 @@ const SCENARIOS: Scenario[] = [
     workflow: PLAIN_WF,
     yaml: PLAIN_YAML,
     exec: { redVerdict: "pass" },
+    drive: async (runId, workflow, exec) => {
+      await runNext({ runId, workflow, dockerExec: exec });
+    },
+    strand: strandWithNoRecoverableResult,
+  },
+  {
+    // FG-559: the same stranded shape, but docker reports the git-probe sentinel —
+    // the container died before the agent ran because git was unusable in the
+    // project mount. Its own landing (verification_environment_unavailable, git
+    // diagnosis) in its own transaction, ahead of the result split, so none of the
+    // container-gone cells above can vouch for it.
+    name: "container-gone-git-unavailable",
+    workflow: PLAIN_WF,
+    yaml: PLAIN_YAML,
+    exec: { redVerdict: "pass" },
+    exitInfo: () => ({ exitCode: GIT_UNAVAILABLE_EXIT_CODE }),
     drive: async (runId, workflow, exec) => {
       await runNext({ runId, workflow, dockerExec: exec });
     },

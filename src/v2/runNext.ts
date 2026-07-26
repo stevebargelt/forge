@@ -58,7 +58,7 @@ import { evaluateValidationContract } from "./validation-contract.js";
 import { deriveUpstream } from "./inputs.js";
 import { composeSystemPrompt } from "./compose.js";
 import { filterConstraints, loadAllConstraints } from "./constraints.js";
-import { buildDockerArgs, buildProvisionerDockerArgs, resolveProjectContainerPath, preflightProjectMount, type SpawnContext } from "./spawn.js";
+import { buildDockerArgs, buildProvisionerDockerArgs, resolveProjectContainerPath, preflightProjectMount, GIT_UNAVAILABLE_EXIT_CODE, type SpawnContext } from "./spawn.js";
 import { assertSelfHostDispatchAllowed } from "./self-host-guard.js";
 import { resolveAuthStateForContainer, AuthProfileError, roleUsesBrowser, cleanupStagedAuth } from "./auth-state.js";
 import { loadProjectAuthProfile, resolveProjectAuthForContainer, ProjectAuthError } from "./project-auth.js";
@@ -3022,7 +3022,25 @@ async function runContainer(args: {
       }
     }
     if (plan) {
+      // FG-559: build the provisioner argv HERE, not inside the lock callback —
+      // its mount-plan assertion is a host-side refusal that must precede every
+      // container this dispatch starts, and the provisioner starts before the
+      // agent container buildDockerArgs guards below.
+      let provisionerArgs: string[];
+      try {
+        provisionerArgs = buildProvisionerDockerArgs(
+          runtime,
+          { TASK_ID: args.taskId, PROJECT_DIR: repoRootForMount },
+          plan,
+        );
+      } catch (e) {
+        const msg = `buildProvisionerDockerArgs failed: ${(e as Error).message}`;
+        cleanupStagedAuth(dir); // AWN-8
+        failTask(args.taskId, { runId: args.runId, kind: classify({}), error: msg });
+        return { kind: "failed", error: msg };
+      }
       let provisionerExitCode = -1;
+      let provisionerStderrTail = "";
       // FG-437: the real, durable provisioner container name/cacheKey — logged
       // independently of the worktree (which may be gone by the time reconcile
       // runs) so a mid-provision crash is recoverable.
@@ -3038,11 +3056,6 @@ async function runContainer(args: {
           taskId: args.taskId,
           payload: provisionEventPayload,
         });
-        const provisionerArgs = buildProvisionerDockerArgs(
-          runtime,
-          { TASK_ID: args.taskId, PROJECT_DIR: repoRootForMount },
-          plan!,
-        );
         const provisionStdoutPath = join(dir, "container.provision.stdout.log");
         const provisionStderrPath = join(dir, "container.provision.stderr.log");
         provisionerExitCode = await exec({
@@ -3057,11 +3070,20 @@ async function runContainer(args: {
           // container the daemon has likely already auto-removed.
           isProvisionerExec: true,
         });
-        const stderrTail = existsSync(provisionStderrPath) ? readFileSync(provisionStderrPath, "utf8").trim() : "";
-        return { exitCode: provisionerExitCode, stderrTail };
+        provisionerStderrTail = existsSync(provisionStderrPath) ? readFileSync(provisionStderrPath, "utf8").trim() : "";
+        return { exitCode: provisionerExitCode, stderrTail: provisionerStderrTail };
       });
       if (provision.outcome === "failed") {
-        logEvent("container.dependency_provisioning_failed", {
+        // FG-559: the provisioner runs the same entrypoint as the agent, so it
+        // hits the git probe too — and on a fresh cache key it is the FIRST
+        // container this dispatch starts, so 122 surfaces HERE, never at the
+        // agent branch below. Diagnose it as the git failure it is; calling it
+        // a dependency-install failure sends the operator hunting npm.
+        const gitUnavailable = provisionerExitCode === GIT_UNAVAILABLE_EXIT_CODE;
+        const error = gitUnavailable
+          ? `verification_environment_unavailable: git is unusable in the project mount${provisionerStderrTail ? ` — ${provisionerStderrTail}` : ""}`
+          : provision.error;
+        logEvent(gitUnavailable ? "container.git_unavailable" : "container.dependency_provisioning_failed", {
           runId: args.runId,
           taskId: args.taskId,
           payload: { containerName: provisionContainerName, exitCode: provisionerExitCode },
@@ -3070,9 +3092,9 @@ async function runContainer(args: {
         failTask(args.taskId, {
           runId: args.runId,
           kind: classify({ source: "verification_environment_unavailable" }),
-          error: provision.error,
+          error,
         });
-        return { kind: "failed", error: provision.error };
+        return { kind: "failed", error };
       } else if (provisionerExitCode !== -1) {
         // We actually ran the provisioner (as opposed to reusing an
         // already-ready cache) and it succeeded.
@@ -3121,8 +3143,12 @@ async function runContainer(args: {
 
   // FG-374: verify the resolved projectDir is a non-empty directory before
   // exec'ing — mirrors the same guard in invoke.ts.
+  //
+  // FG-559: preflight repoRootForMount, NOT args.projectDir — the worktree is
+  // what gets mounted at /project, so it is the tree whose `.git` pointer has to
+  // resolve. On a non-worktree dispatch the two are the same value.
   try {
-    preflightProjectMount(args.projectDir);
+    preflightProjectMount(repoRootForMount);
   } catch (e) {
     const msg = `preflightProjectMount failed: ${(e as Error).message}`;
     cleanupStagedAuth(dir); // AWN-8
@@ -3234,6 +3260,18 @@ async function runContainer(args: {
     const msg = `verification_environment_unavailable: dependency install failed${stderrTail ? ` — ${stderrTail}` : ""}`;
     failTask(args.taskId, { runId: args.runId, kind: classify({ source: "verification_environment_unavailable" }), error: msg });
     // FG-492 review: task failed — retain (see finalizeContainerRetention in docker-exec.ts).
+    finalizeContainerRetention(containerName, false);
+    return { kind: "failed", error: msg };
+  }
+
+  // FG-559: the entrypoint's git probe found git unusable in the project mount
+  // (a linked worktree whose parent .git never made it into the container).
+  // Same footing as the provisioning sentinel above — an environment failure.
+  if (exitCode === GIT_UNAVAILABLE_EXIT_CODE) {
+    const stderrTail = existsSync(stderrPath) ? readFileSync(stderrPath, "utf8").trim() : "";
+    logEvent("container.git_unavailable", { runId: args.runId, taskId: args.taskId, payload: { containerName, exitCode, ...(containerEvidence ? { containerEvidence } : {}) } });
+    const msg = `verification_environment_unavailable: git is unusable in the project mount${stderrTail ? ` — ${stderrTail}` : ""}`;
+    failTask(args.taskId, { runId: args.runId, kind: classify({ source: "verification_environment_unavailable" }), error: msg });
     finalizeContainerRetention(containerName, false);
     return { kind: "failed", error: msg };
   }

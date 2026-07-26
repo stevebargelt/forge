@@ -44,6 +44,7 @@ import { taskHasPipelineFinalize } from "./run-kind.js";
 import { isPhasePrimaryRow } from "./lifecycle-evaluator.js";
 import { shouldRetainContainer } from "./docker-exec.js";
 import { liveRunLockHolder } from "../util/run-lock.js";
+import { GIT_UNAVAILABLE_EXIT_CODE } from "./spawn.js";
 
 export type ContainerAlive = (containerName: string) => boolean;
 
@@ -486,7 +487,8 @@ export function reconcileRun(
       (e) =>
         e.eventType === "container.exited" ||
         e.eventType === "container.idle_timeout" ||
-        e.eventType === "container.dependency_provisioning_failed",
+        e.eventType === "container.dependency_provisioning_failed" ||
+        e.eventType === "container.git_unavailable",
     );
 
     // FG-437: a task can crash between task.started and container.started —
@@ -733,6 +735,17 @@ export function reconcileRun(
     } catch {
       exitInfo = {};
     }
+    // FG-559: the entrypoint's git probe found git unusable in the project mount
+    // and exited 122 before the agent ran. The attached-exit path classifies that
+    // as verification_environment_unavailable, but it can die first — either after
+    // logging container.git_unavailable and before failTask, or before seeing the
+    // exit at all (docker still reports 122). Either signal is enough: reconcile
+    // owns the landing and must reach the SAME classification, not a generic
+    // orphan/crash that sends the operator looking for lost agent work.
+    const gitUnavailable =
+      exitInfo.exitCode === GIT_UNAVAILABLE_EXIT_CODE ||
+      taskEvents.some((e) => e.eventType === "container.git_unavailable");
+
     const baseEvidence = {
       containerName,
       containerLiveness: "gone" as const,
@@ -893,6 +906,25 @@ export function reconcileRun(
           if (completed) taskChanges.push({ taskId: t.id, from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout" });
           taskCompletedSuccessfully = completed;
         }
+      } else if (gitUnavailable) {
+        // Below the recovery arms above (nothing persisted may ever be discarded)
+        // and above the generic ones below: with no work to account for, the
+        // sentinel is the most specific cause on record, and the only one that
+        // names a mount the operator has to fix before any retry can help.
+        const error =
+          "verification_environment_unavailable: git is unusable in the project mount — the container's git probe exited " +
+          `${GIT_UNAVAILABLE_EXIT_CODE} before the agent ran, so no work was lost. Retrying is pointless until the mount is fixed: ` +
+          "dispatch against the parent repo instead of the worktree, or restore the parent repo the worktree points at, then " +
+          `\`forge retry ${t.id}\`.`;
+        const containerEvidence = toContainerCausalEvidence(evidence);
+        crashPoint("reconcile:before-fail-git-unavailable");
+        writeTransaction(() => { // FG-463: fail write + its events atomic
+          markTaskFailed(t.id, error);
+          crashPoint("reconcile:inside-fail-git-unavailable-txn");
+          logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "verification_environment_unavailable", error, containerEvidence } });
+          logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_git_unavailable", evidence, containerEvidence } });
+        });
+        taskChanges.push({ taskId: t.id, from: "running", to: "failed", reason: "container_git_unavailable" });
       } else if (exitInfo.oomKilled === true || exitInfo.exitCode === 137) {
         // FG-455 p4: a positively-identified OOM/SIGKILL death is a distinct,
         // more specific cause than the generic orphaned/orphaned_work_may_persist

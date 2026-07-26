@@ -236,3 +236,58 @@ It behaves more strictly, so the gap is in the safe direction — but capture on
   Mitigated by mounting the whole `.git` rather than a narrowed set.
 - **`objects/info/alternates`** in the parent is not followed when planning the mount. A parent that is
   itself a `--shared` clone is rare and the failure is loud. Documented limit, not handled.
+
+---
+
+## Closeout audit (2026-07-26) — every container-starting path, once
+
+Five review-loop rounds each found a different uncovered path one at a time, because nobody had
+enumerated the paths. Operator called the stop: audit all paths against the four promises, fix only
+concrete gaps, run CI once, **do not restart review-loop**, merge on green.
+
+**Structural finding that closes the question:** exactly TWO argv builders in the repo bind a project
+directory into a container — `spawn.ts:232 buildDockerArgs` and `spawn.ts:587
+buildProvisionerDockerArgs`. Both call `assertWorktreeGitMountPlanned` before returning, so promise 1
+is enforced at a CHOKEPOINT, not per-caller. Every other container start (6 production auxiliary, 3
+test-only) mounts no project and so has no in-container git to be blind about. The argv is never
+mutated after the assert — `docker-exec.ts:317 toDetachedArgs` splices only `-i`→`-d` and the entry
+script, preserving every `-v`.
+
+Promises: P1 refuse before any container starts · P2 exit 122 classified
+`verification_environment_unavailable` · P3 `container.git_unavailable` recorded · P4 docs match code.
+
+| Path | Mounts project | P1 | P2 | P3 | P4 |
+|---|---|---|---|---|---|
+| Agent / reviewer / red | yes | HOLDS | HOLDS | HOLDS | HOLDS |
+| Dependency provisioner (FG-376) | yes | HOLDS | HOLDS | HOLDS | HOLDS |
+| Publication worktree (FG-425) | no — starts no container | N/A | N/A | N/A | HOLDS |
+| Reconcile / orphan recovery | no — starts no container | N/A | HOLDS (agent window) | gap, accepted (R1) | fixed `3e5c578` |
+| OAuth volume probe (alpine) | no | N/A | N/A | N/A | vacuous |
+| OAuth presence probe (agent image) | no | N/A | skipped — WORKDIR has no `.git` | N/A | HOLDS |
+| `forge auth login` + verify probe | no | N/A | N/A | N/A | vacuous |
+| `forge pi login` | no | N/A | N/A — `--entrypoint pi` | N/A | vacuous |
+| `forge doctor` CLI probe | no | N/A | N/A — `--entrypoint sh` | N/A | vacuous |
+| 3 test-only script families | fixture only | N/A | N/A | N/A | N/A |
+
+The provisioner cell — not the agent cell — is what makes "before ANY container starts" true: on a
+cold dependency cache it is the FIRST container a worktree dispatch starts.
+
+**Fixed:** `docs/concepts.md:451`. The reconcile-inheritance sentence named two signals (a recorded
+`container.git_unavailable`, or a docker-reported exit 122 on a gone container) and claimed reconcile
+lands the git classification on that basis. Neither signal exists in the PROVISIONING sub-window, so
+the claim was false there. Now bounded to the agent-container window.
+
+**Reported, not fixed** (deliberate — operator instruction was to prefer reporting a marginal gap over
+fixing it):
+
+- **R1 — reconcile records no `container.git_unavailable` for a 122 provisioner death inside the
+  host-crash window (P3).** Unrecordable rather than unrecorded: the provisioner runs `--rm` so docker
+  retains no exit code, and the branch that would log it never executed. P2 (the failure kind) still
+  holds. Coding it means reconcile parsing `container.provision.stderr.log` for the probe's git string —
+  new evidence machinery gated on a five-condition conjunction. Documented instead.
+- **R2 — a `.git` that is a FILE but not a `gitdir:` pointer lets the provisioner start before
+  `preflightProjectMount` refuses it.** Not reachable in practice: `worktreePath` is only set for a
+  worktree forge created with `git worktree add`, which always writes a well-formed pointer, and an
+  operator-supplied `--project` is preflighted at `runNext.ts:606` before any state mutation.
+
+3029 tests, 0 failures.

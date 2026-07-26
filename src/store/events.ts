@@ -55,6 +55,10 @@ export type EventType =
   | "container.killed"
   | "container.idle_timeout"
   | "container.dependency_provisioning_failed"
+  // FG-559: the entrypoint's git probe found git unusable in the project mount
+  // (a linked worktree whose parent .git never made it into the container) and
+  // exited before the agent ran.
+  | "container.git_unavailable"
   // FG-503: finalizeContainerRetention(..., true) attempted a reap on a
   // successful task and `docker rm -f -v` errored — the container (and its
   // anonymous DEC-019 shadow volume) is left behind, unrecorded and

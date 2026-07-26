@@ -122,6 +122,8 @@ const PROBE_NAMES = [
   "reconcile:inside-fail-oom-killed-txn",
   "reconcile:before-fail-orphaned-work-may-persist",
   "reconcile:inside-fail-orphaned-work-may-persist-txn",
+  "reconcile:before-fail-git-unavailable",
+  "reconcile:inside-fail-git-unavailable-txn",
   "reconcile:before-fail-orphaned-no-result",
   "reconcile:inside-fail-orphaned-no-result-txn",
   "reconcile:before-complete-invoke-like",
