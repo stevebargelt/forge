@@ -187,3 +187,22 @@ Still owned by this parent (not delegated to either child, and each still a defa
 - The unanswered original architecture questions that survive the decision: non-git projects,
   untracked/ignored file carry-in contract, dirty host state under forge-on-forge, and red review
   timing (pre-merge candidate vs post-reconcile merged result).
+
+---
+
+## Default-on blocker recorded at FG-621's architect gate (2026-07-26): the Linux gate
+
+FG-621 inherits `preflightWorktreeGate`'s Linux hard-fail (`src/v2/worktree-lifecycle.ts:63`), so its
+AC 2 (parent-unwritable negative proof) and AC 11 (dogfood) evidence is **macOS-only**. That is
+accepted for FG-621 itself, but it means **FG-621 alone cannot justify flipping isolation default-on
+universally.**
+
+At FG-345 closeout the choice must be made explicitly, and it is one of exactly two:
+
+- **macOS-first default** — isolation defaults on for macOS only; Linux keeps the hard-fail and the
+  shared-bind-mount path, documented as a platform limitation; or
+- **lift the Linux gate** — which carries its own test burden (the `node_modules` bind-mount gap
+  FG-358 tracks) and is a scope addition, not a flag change.
+
+Linux support was deliberately NOT smuggled into FG-621. Whichever option is taken, it is a decision
+this parent owns, alongside the post-merge integration gate and publication-contention items above.

@@ -162,3 +162,109 @@ workspace's own branch tip as a third input and de-duplicate before testing reac
 Note the substrate asymmetry this implies for merge-back: a clone is not registered with the parent, so
 `git worktree remove` has nothing to act on — the directory IS the repo and its private refs go with
 it, while the parent often never held the branch at all.
+
+---
+
+## Operator decisions recorded at the architect gate (2026-07-26) — BINDING on the plan
+
+The architect phase of `run-fg-621-private-writable-git-for-mutating-agents-0d5074` verified two
+claims against HEAD that CONTRADICT this ticket's earlier text. Both are confirmed; the ticket text
+below supersedes the older wording.
+
+### Correction 1 — scope item 4's re-plumbing target is DEAD CODE
+
+`mergeWorktreeBranch` (`src/v2/worktree-lifecycle.ts:306`, the `git merge --ff-only` at `:352`) has
+**zero production callers** — FG-425 routed every merge through `publishIntegration`. Worse,
+`src/v2/fg425-publisher-scope.test.ts:184-188` actively ASSERTS that `runNext.ts` matches neither
+`mergeWorktreeBranch(` nor `mergeIntegrationBranchToHead(`. Editing that function is a no-op change,
+and wiring it back into `runNext.ts` BREAKS `test-extended`.
+
+The live seams that resolve a task branch in the parent's ref namespace are
+`mergeSourceIntoCandidate` (`src/v2/integration-publisher.ts:329`), `mergeChildIntoIntegration`
+(`src/v2/worktree-lifecycle.ts:865`, called at `runNext.ts:1923`), `createIntegrationWorktree`
+(`worktree-lifecycle.ts:795`) and `integrationBranchExists` (`:759`).
+
+**Do not edit `mergeWorktreeBranch` as the merge-back re-plumbing.** The boundary decision below is
+what replaces it, and it requires zero edits to either live seam.
+
+### Correction 2 — scope-fence wording
+
+FG-357 (post-merge integration gate) and FG-425 (serialized integration publisher) are **SHIPPED
+SYSTEMS**, not unfinished FG-345 work and not future work. FG-621 **integrates with them**. Do not
+redesign or modify either. Where earlier text lists them under "out of scope", read that as *"not
+modified by this ticket — integrate with their existing interfaces"*:
+`src/v2/publication-target.ts`, `src/v2/integration-publisher.ts`, the `publication_attempts` /
+`publication_lane` tables in `src/store/schema.ts`, and `src/store/publications.ts`.
+
+### NON-NEGOTIABLE — the capture ordering (resolves the red-wide high finding)
+
+red-wide found the fetch boundary internally inconsistent: the publisher's `autoCommitSource`
+(`src/v2/integration-publisher.ts:323`) can commit into a source AFTER its branch has been fetched
+and then merge the now-stale parent ref. For a linked worktree that ordering is harmless (the
+worktree and the branch share one ref namespace); for a private clone they are DIFFERENT
+REPOSITORIES, so a post-fetch clone-side commit advances only the clone's ref and is silently
+absent from the candidate. `mergeChildIntoIntegration` (`worktree-lifecycle.ts:833-855`) has the
+identical shape on the fan-out path.
+
+The capture ordering is a CONTRACT, not an implementation detail. It must be exactly:
+
+1. Safety-commit remaining clone state (tracked AND untracked).
+2. Resolve the resulting clone branch tip.
+3. Fetch that branch into the parent's ref namespace, under the deterministic
+   `forge/<runId>/<taskId>` name (`worktreeBranchName`, `worktree-lifecycle.ts:28`).
+4. **Verify the fetched ref EQUALS the resolved clone tip.**
+5. Hand that captured ref/commit to the existing publisher.
+6. Perform **no later clone-side auto-commit** that could make the fetched ref stale.
+
+**The tech lead must explicitly define what `worktreePath` means at the publisher boundary for a
+clone source.** "The publisher is unchanged" cannot coexist with `autoCommitSource()` mutating the
+clone after the fetch. State the resolution; do not leave it implicit. AC 3 is the test for this.
+
+### AC 2 / AC 11 evidence lane — DECIDED
+
+**Do NOT add a third required CI check.** The repo has no test tier that can run a real Docker
+container (agent containers have no daemon; no CI job builds or runs the image), and a
+skip-capable CI test is not acceptable as the live proof of a security boundary.
+
+**Standing automated coverage** — unit/integration assertions on the exact Docker argv:
+
+- only `<parent>/.git/objects` is identity-mounted (host path === container path);
+- that mount is `:ro`;
+- NO parent refs, index, HEAD, packed-refs, or broader `.git` mount is present;
+- a tampered or mismatched `objects/info/alternates` **fails closed**.
+
+**One-time operator-run evidence**, executed host-side on macOS against the candidate
+implementation and image, with the run id / output pasted into this ticket (the FG-559 precedent,
+which recorded `run-fg-559-live-worktree-smoke-42c126`):
+
+- AC 2 — the real-container negative test (parent ref creation, `main` / `origin/*` / packed-ref
+  updates, object-store deletion all refused);
+- AC 11 — the dogfood run proving a mutating task actually RECEIVED the private-clone substrate,
+  actually COMMITTED in it, and could NOT mutate the parent.
+
+Preserve the exact host command as a small reproducible smoke script that **exits nonzero when
+Docker or the candidate image is unavailable** — never skips to green.
+
+### Other decisions
+
+- **Existing clone directory on re-dispatch/retry → REFUSE and surface.** Never silently reuse a
+  workspace an agent has already written to (`createCandidateWorktree`'s create-only posture at
+  `integration-publisher.ts:266-271` is the precedent).
+- **The fan-out INTEGRATION worktree is fenced OUT.** AC 4 governs fan-out SIBLINGS. Whether
+  `createIntegrationWorktree` should also take a recorded base SHA is FG-353/FG-425 territory, not
+  this ticket's.
+- **Linux hard-fail is INHERITED** (`preflightWorktreeGate`, `worktree-lifecycle.ts:63`). AC 2 and
+  AC 11 evidence is therefore macOS-only, and that is accepted FOR THIS TICKET.
+  **Qualification:** this means FG-621 alone cannot justify a universal default-on flip. At FG-345
+  closeout the choice is either a macOS-first default or lifting the Linux gate — each with its own
+  test burden. **Do not smuggle Linux support into FG-621.**
+- **Reachability authority.** `isAncestorOfHead` (`worktree-lifecycle.ts:605`) asks reachability
+  from `projectDir` HEAD, but the publish target may be `remote:<remote>#<branch>`, which never
+  advances `projectDir` HEAD — every clone would then fail the capture proof and be retained
+  forever. AC 9's "Forge-owned state" is the recorded publication receipt
+  (`publication_attempts.published_sha`). If the HEAD proxy is kept, the remote-target case must be
+  an explicit, NAMED retain rather than a silent forever-retain.
+- **`WorkspaceRetainReason` changes must be ADDITIVE and land with their docs in the same step** —
+  the enum is a published contract surface (`docs/SCHEMA-CONTRACT.md:114`, `docs/concepts.md:327-334`,
+  `docs/invariants.md:32`) proven complete by `fg356-reaper-evidence.integration.test.ts:389`. The
+  discarded FG-356 clone-reaping code died on exactly this.
