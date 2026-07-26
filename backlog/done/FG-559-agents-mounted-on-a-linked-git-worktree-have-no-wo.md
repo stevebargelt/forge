@@ -1,9 +1,11 @@
 ---
 id: FG-559
 type: story
-status: active
+status: done
 title: "agents mounted on a linked git worktree have NO working git — .git is a gitdir: pointer file into the parent repo, which is outside the container mount"
 created: 2026-07-14
+closed: 2026-07-26
+closed_commit: 7549b9f
 ---
 
 ## Problem
@@ -301,10 +303,27 @@ fixing it):
 | An agent invoked with `--project <linked-worktree>` can run `git log`, `git diff <sha>..<sha>`, and `git show` against the project's real history | LIVE container smoke run against a real linked worktree (`run-fg-559-live-worktree-smoke-42c126`, `red-wide --read-only`). Raw agent output: `cat .git` → the `gitdir:` pointer; `git log --oneline` → both commits; `git diff HEAD~1..HEAD --stat` → `b.txt \| 1 +`; `git show --stat HEAD` → the full commit. `every_command_succeeded: true`. Implementation: `planWorktreeGitMounts` / `resolveVerifiedCommonGitDir` (`src/v2/spawn.ts`) | met |
 | A `red-wide` review-loop reviewer mounted on a worktree can diff the range it is reviewing | Dogfooded: five `forge review-loop` passes ran `red-wide` on a linked worktree under `FORGE_WORKTREES=1` and each returned a diff-based review with `file:line` findings (`run-review-loop-fg-559-fdc4ce`, `-632048`, `-980aea`, `-dda6fc`, `-84e88c`). Before this change the same reviewer returned `inconclusive` because git would not run at all — the failure that motivated the ticket | met |
 | A regression test covers the linked-worktree case specifically, using a REAL linked worktree (a plain-clone mount would pass vacuously) | `src/v2/fg559-worktree-git-mount.worktree.test.ts` and `src/v2/fg559-worktree-git-enforcement.worktree.test.ts` — fixtures call `git worktree add` and assert `statSync(<wt>/.git).isFile()`; the negative control asserts `git log` FAILS with only the worktree materialized. Mutation-verified non-vacuous by the test-engineer pass: reverting to an admin-dir-only mount, deleting `packed-refs`, and removing the `:ro` chmod each turn specific tests red | met |
-| Silent degradation is impossible: if git is unavailable in the mount, forge says so rather than letting the agent proceed history-blind | Host-side: `assertWorktreeGitMountPlanned` refuses on the argv in BOTH project-mounting builders (`buildDockerArgs`, `buildProvisionerDockerArgs`), unconditionally — no env-var bypass (`docker/agent-entrypoint.sh`, pinned by the probe test). Classification: exit 122 → `verification_environment_unavailable` + `container.git_unavailable` on the agent (`invoke.ts:763`, `runNext.ts:3272`), provisioner (`runNext.ts:3086`) and reconcile (`reconcile.ts:745-747`) paths. Closeout audit confirms all four promises hold on every container-starting path. **The container-side probe is verified only by a standalone shell test and unit-level classification coverage — the SHIPPED agent image has not been rebuilt and observed exiting 122, because docker.io is unreachable from this host.** | **NOT MET — open** |
+| Silent degradation is impossible: if git is unavailable in the mount, forge says so rather than letting the agent proceed history-blind | Verified 2026-07-26 against the REBUILT production image (`agent-dev-worker:latest`, entrypoint carries the probe, `FORGE_SKIP_GIT_PROBE` count 0). **Host layer** — dangling pointer (`run-fg-559-ac4-host-refusal-b5ac12`): refused BEFORE any container with the named error `FG-559: … is a gitdir: pointer to …, which is not a directory`; task failed, no container started. **Container probe** — relative-pointer case (`run-fg-559-ac4-container-probe-f1ba06`, `task-red-wide-e2fea3`): container exited 122; stored error `verification_environment_unavailable: git is unusable in the project mount — … fatal: not a git repository: /project/../parent/.git/worktrees/wt`; event sequence in `~/.forge/forge.db`: `container.started` → `container.git_unavailable` (exitCode 122, containerEvidence) → `task.failed`. **Positive regression** — healthy worktree on the same image: `git log`/`git diff`/`git show` all succeed, no false 122. | met |
 
 **FG-559 stays OPEN on the last AC line only.** Everything else shipped in `7549b9f`. Closing it
 requires `docker/build.sh` once the registry is reachable, then one dispatch against a deliberately
 broken worktree confirming the container exits 122 and forge records `container.git_unavailable`.
 Per the closing gate, an AC without evidence is not met, and this one is not being waved through on
 inference.
+
+---
+
+## AC 4 closeout (2026-07-26)
+
+Held open deliberately after the merge because the shipped image had never been observed exiting 122 —
+only a standalone shell test and unit-level classification coverage existed, which is not the same
+claim. `docker.io` became reachable, `docker/build.sh` was re-run, and the AC was verified end-to-end.
+
+**Method note worth keeping:** moving the parent repo away does NOT reach the container probe — the
+host-side preflight/mount-plan refusal fires first and no container starts. Exercising the probe
+requires a mount plan that succeeds host-side and fails to resolve in-container, i.e. the documented
+FG-622 relative-pointer shape (`gitdir: ../parent/.git/worktrees/wt`): `resolve(projectDir, …)` gives a
+valid host path so the bind is planned, but in-container it resolves against `/project` to an unmounted
+path. Both enforcement layers were confirmed independently rather than one masking the other.
+
+All four acceptance criteria met. Closed.
