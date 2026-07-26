@@ -422,6 +422,9 @@ export type WorkspaceRetainReason =
 
 export type WorkspaceReapOutcome =
   | { action: "absent"; branch: string }
+  /** The workspace was already gone, but its branch had outlived it — a prior
+   *  pass removed the tree and lost the `git branch -d`. The ref is gone now. */
+  | { action: "branch_reaped"; branch: string }
   | { action: "reaped"; substrate: "linked_worktree"; branch: string; branchRemoved: boolean }
   | {
       action: "retained";
@@ -538,6 +541,21 @@ function isAncestorOfHead(projectDir: string, commit: string): boolean {
   }
 }
 
+/** `git branch -d` — the merged-only form, never `-D`. True once the ref is
+ *  gone; a branch git declines to delete because it is not merged stays, and is
+ *  never forced. Deliberately a second opinion on the one irreversible step. */
+function deleteMergedBranch(projectDir: string, branch: string): boolean {
+  try {
+    execFileSync("git", ["branch", "-d", branch], {
+      cwd: projectDir,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    return true;
+  } catch {
+    return resolveCommit(projectDir, branch) === undefined;
+  }
+}
+
 /** Dispose of a task's workspace and its branch — but ONLY once the work inside
  *  is provably captured. Never throws; reaping an already-gone workspace is a
  *  no-op, so repeated calls are safe.
@@ -557,7 +575,18 @@ export function reapTaskWorkspace(
   const branch = worktreeBranchName(runId, taskId);
   const substrate = classifyWorkspace(workspacePath);
 
-  if (substrate === "absent") return { action: "absent", branch };
+  if (substrate === "absent") {
+    // The tree can be gone while the branch is not: the deletion below runs
+    // AFTER the removal, so a transient failure there leaves the ref behind and
+    // every later pass used to return here without ever retrying it — stranding
+    // a forge/<runId>/<taskId> ref permanently. Retry it, scoped to this task's
+    // own deterministic branch and on the same merged-only posture, so a branch
+    // git still declines survives untouched and records nothing.
+    if (resolveCommit(projectDir, branch) === undefined) return { action: "absent", branch };
+    return deleteMergedBranch(projectDir, branch)
+      ? { action: "branch_reaped", branch }
+      : { action: "absent", branch };
+  }
   if (substrate === "private_clone") {
     // FG-621 owns clone reaping (see the header): a clone is not a registered
     // worktree, and its removal has to sequence against the parent's object
@@ -605,20 +634,7 @@ export function reapTaskWorkspace(
     return { action: "retained", substrate, branch, reason: "removal_failed", details: [] };
   }
 
-  // -d, not -D: the branch is provably merged into HEAD by the check above, so
-  // git's own merged-only guard should agree. It is a second opinion on the one
-  // irreversible step, and a disagreement leaves the ref rather than forcing it.
-  let branchRemoved = false;
-  try {
-    execFileSync("git", ["branch", "-d", branch], {
-      cwd: projectDir,
-      stdio: ["ignore", "ignore", "ignore"],
-    });
-    branchRemoved = true;
-  } catch {
-    branchRemoved = resolveCommit(projectDir, branch) === undefined;
-  }
-  return { action: "reaped", substrate, branch, branchRemoved };
+  return { action: "reaped", substrate, branch, branchRemoved: deleteMergedBranch(projectDir, branch) };
 }
 
 // ── FG-353 Integration worktree helpers ───────────────────────────────────────

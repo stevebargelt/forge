@@ -735,3 +735,93 @@ test("fg356 drive: one pass over a run of mixed dispositions settles all of them
     assert.deepEqual(workspaceEvents("t-mix-absent"), [], `pass ${pass}: nothing for an absent workspace`);
   }
 });
+
+// ── 7. The branch deletion is retried until it lands ──────────────────────────
+//
+// A reap removes the tree and THEN deletes the branch. A failure in that second
+// step used to be permanent: every later pass found the workspace absent,
+// returned early, and the forge/<runId>/<taskId> ref was stranded forever.
+
+/** A `git` shim on PATH that fails the FIRST `git branch -d` and forwards
+ *  everything else to the real git — a transient failure of exactly the step
+ *  that runs after the point of no return. Returns the restore. */
+function failFirstBranchDelete(): () => void {
+  const dir = tmpRoot("gitshim");
+  const marker = join(dir, "already-failed");
+  const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+  const shim = join(dir, "git");
+  writeFileSync(
+    shim,
+    [
+      "#!/bin/sh",
+      `if [ "$1" = "branch" ] && [ "$2" = "-d" ] && [ ! -f "${marker}" ]; then`,
+      `  : > "${marker}"`,
+      '  echo "fatal: simulated transient failure" >&2',
+      "  exit 1",
+      "fi",
+      `exec "${realGit}" "$@"`,
+      "",
+    ].join("\n"),
+  );
+  chmodSync(shim, 0o755);
+  const before = process.env.PATH ?? "";
+  process.env.PATH = `${dir}:${before}`;
+  return () => {
+    process.env.PATH = before;
+  };
+}
+
+test("fg356 drive: a branch deletion that failed on the reaping pass is retried on a later one — a transient failure never strands the ref", () => {
+  const repo = makeRepo();
+  startRunFor(repo);
+  const wt = addWorktree(repo, "t-branch-retry");
+  commitInWorkspace(wt, "captured.ts");
+  mergeBack(repo, "t-branch-retry");
+  insertTaskRow("t-branch-retry", { status: "complete", workspace: wt });
+
+  const restorePath = failFirstBranchDelete();
+  try {
+    reconcileRun(RUN_ID, ALIVE);
+  } finally {
+    restorePath();
+  }
+
+  assert.equal(existsSync(wt), false, "the tree was removed");
+  assert.ok(branchExists(repo, "t-branch-retry"), "but `git branch -d` failed, so the ref outlived it");
+  let evs = workspaceEvents("t-branch-retry");
+  assert.equal(evs.length, 1);
+  assert.equal(evs[0]!.payload["branchRemoved"], false, "and the disagreement is recorded rather than forced");
+
+  // The next reconcile sees an absent workspace — exactly where the retry used
+  // to be skipped.
+  reconcileRun(RUN_ID, ALIVE);
+  assert.equal(branchExists(repo, "t-branch-retry"), false, "the later pass retries the deletion it lost");
+  evs = workspaceEvents("t-branch-retry");
+  assert.equal(evs.length, 2, "and records that the ref finally went");
+  assert.equal(evs[1]!.type, "task.workspace_reaped");
+  assert.equal(evs[1]!.payload["reason"], "branch_deletion_retried");
+  assert.equal(evs[1]!.payload["branch"], worktreeBranchName(RUN_ID, "t-branch-retry"));
+  assert.equal(evs[1]!.payload["branchRemoved"], true);
+
+  for (let pass = 0; pass < 3; pass++) reconcileRun(RUN_ID, ALIVE);
+  assert.equal(workspaceEvents("t-branch-retry").length, 2, "the retry is a one-shot, not a per-pass re-log");
+});
+
+test("fg356 drive: a branch its workspace outlived but git will not delete is left alone across passes — never -D", () => {
+  const repo = makeRepo();
+  startRunFor(repo);
+  const wt = addWorktree(repo, "t-branch-unmerged");
+  const tip = commitInWorkspace(wt, "never-captured.ts");
+  // The tree is gone — cleared by hand, or by a host that reclaims tmp — but its
+  // commit never reached projectDir, so `-d` refuses the ref and it must stay.
+  git(repo, "worktree", "remove", "--force", wt);
+  insertTaskRow("t-branch-unmerged", { status: "failed", workspace: wt, failureKind: "orphaned" });
+
+  const branch = worktreeBranchName(RUN_ID, "t-branch-unmerged");
+  for (let pass = 1; pass <= 3; pass++) {
+    reconcileRun(RUN_ID, ALIVE);
+    assert.ok(branchExists(repo, "t-branch-unmerged"), `pass ${pass}: an unmerged branch is never forced`);
+    assert.equal(git(repo, "rev-parse", branch).trim(), tip, `pass ${pass}: still pointing at the uncaptured work`);
+    assert.deepEqual(workspaceEvents("t-branch-unmerged"), [], `pass ${pass}: a no-op records nothing`);
+  }
+});

@@ -1406,6 +1406,21 @@ export function reconcileRun(
         retain(outcome.substrate, outcome.branch, outcome.reason, outcome.details);
         continue;
       }
+      if (outcome.action === "branch_reaped") {
+        logEvent("task.workspace_reaped", {
+          runId,
+          taskId: t.id,
+          payload: {
+            workspacePath,
+            branch: outcome.branch,
+            substrate: "absent",
+            branchRemoved: true,
+            reason: "branch_deletion_retried",
+            taskStatus: t.status,
+          },
+        });
+        continue;
+      }
       logEvent("task.workspace_reaped", {
         runId,
         taskId: t.id,

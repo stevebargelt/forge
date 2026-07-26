@@ -24,10 +24,11 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 
@@ -42,6 +43,10 @@ import type { Run, Task, TaskStatus } from "../types/index.js";
 
 const RUN_ID = "run-fg356-evidence";
 const ALIVE = () => true;
+
+const here = dirname(fileURLToPath(import.meta.url));
+const CLI_ENTRY = resolve(here, "..", "cli", "index.ts");
+const TSX = resolve(here, "..", "..", "node_modules", ".bin", "tsx");
 
 const tmpDirs: string[] = [];
 let openDbs: DatabaseInstance[] = [];
@@ -301,6 +306,82 @@ test("fg356 evidence: an unrelated repository's main checkout is not reaped eith
   assert.equal(readFileSync(join(unrelated, "somebody-elses-source.txt"), "utf8"), "not forge's to delete\n");
   assert.equal(git(unrelated, "status", "--porcelain").trim(), "?? somebody-elses-source.txt", "untouched, down to its git state");
   assert.equal(workspaceEvents("t-unrelated").length, 1, "the refusal is recorded rather than silent");
+});
+
+// ── The evidence as an operator actually reads it ─────────────────────────────
+//
+// A durable event nobody can read is not evidence. `forge show`'s timeline
+// renders payloads through a generic summary that prints KEY NAMES and stops
+// after three, so a retention displayed as `{workspacePath, branch, substrate,
+// …}` — the docs promise the timeline names WHERE the work is and WHY it was
+// kept, and it named neither. This runs the real command surface, in its own
+// process, against the store the reaper wrote, and greps what an operator sees.
+
+/** `forge show` as a subprocess: real commander parsing, real on-disk store,
+ *  real rendering — the thing a unit test of the renderer cannot prove. */
+function forgeShow(home: string, args: string[]): string {
+  const r = spawnSync(TSX, [CLI_ENTRY, "show", ...args], {
+    encoding: "utf8",
+    env: { ...process.env, FORGE_HOME: home, NO_NOTIFY: "true" },
+  });
+  assert.equal(r.status, 0, `forge show ${args.join(" ")} exited ${r.status}: ${r.stderr}`);
+  return r.stdout;
+}
+
+function timelineLine(out: string, eventType: string): string {
+  const line = out.split("\n").find((l) => l.includes(eventType));
+  assert.ok(line, `no ${eventType} line in the rendered timeline:\n${out}`);
+  return line;
+}
+
+test("fg356 evidence: `forge show` names the retained path, branch and reason as VALUES", () => {
+  const home = tmpRoot("home");
+  const repo = makeRepo();
+  openStore(join(home, "forge.db"));
+  startRunFor(repo);
+
+  const clone = makePrivateClone(repo, "t-cli-retained");
+  writeFileSync(join(clone, "unfetched.ts"), "work that exists nowhere else\n");
+  insertTaskRow("t-cli-retained", { status: "failed", workspace: clone, failureKind: "orphaned" });
+
+  // A workspace already gone whose branch outlived it — the reaper retries the
+  // deletion it lost, and records a disposal with no worktree in play.
+  const reapedBranch = worktreeBranchName(RUN_ID, "t-cli-reaped");
+  git(repo, "branch", reapedBranch);
+  insertTaskRow("t-cli-reaped", { status: "complete", workspace: join(repo, "already-gone") });
+
+  reconcileRun(RUN_ID, ALIVE);
+  assert.equal(onlyEvent("t-cli-retained").type, "task.workspace_retained");
+  assert.equal(onlyEvent("t-cli-reaped").type, "task.workspace_reaped");
+
+  // The forge process that recorded it exits; the CLI below is a different one.
+  openDbs.pop()!.close();
+
+  const retained = timelineLine(forgeShow(home, ["t-cli-retained"]), "task.workspace_retained");
+  assert.ok(retained.includes(clone), `the timeline must name WHERE the work still is: ${retained}`);
+  assert.ok(retained.includes(worktreeBranchName(RUN_ID, "t-cli-retained")), `...and its branch: ${retained}`);
+  assert.ok(retained.includes("private_clone_substrate"), `...and why it was kept: ${retained}`);
+  assert.ok(!retained.includes("{workspacePath"), `key names are not evidence: ${retained}`);
+
+  const reaped = timelineLine(forgeShow(home, ["t-cli-reaped"]), "task.workspace_reaped");
+  assert.ok(reaped.includes(join(repo, "already-gone")), `a disposal names the path it disposed of: ${reaped}`);
+  assert.ok(reaped.includes(reapedBranch), `...and the branch that went with it: ${reaped}`);
+  assert.ok(reaped.includes("branch_deletion_retried"), `...and why: ${reaped}`);
+
+  // Every OTHER event type keeps the generic key-name summary untouched.
+  const failed = timelineLine(forgeShow(home, ["t-cli-retained"]), "task.failed");
+  assert.ok(failed.includes("{failure_kind, error}"), `the generic summary must be unchanged: ${failed}`);
+
+  // And the JSON surface is untouched — this is the human rendering only.
+  const parsed = JSON.parse(forgeShow(home, ["t-cli-retained", "--json"])) as {
+    events: { eventType: string; payload: Record<string, unknown> | null }[];
+  };
+  const ev = parsed.events.find((e) => e.eventType === "task.workspace_retained");
+  assert.ok(ev, "the retain event must still be in --json");
+  assert.equal(ev.payload?.["workspacePath"], clone);
+  assert.equal(ev.payload?.["branch"], worktreeBranchName(RUN_ID, "t-cli-retained"));
+  assert.equal(ev.payload?.["reason"], "private_clone_substrate");
+  assert.equal(ev.payload?.["substrate"], "private_clone");
 });
 
 // ── The retain-by-design set cannot grow uncovered ────────────────────────────
