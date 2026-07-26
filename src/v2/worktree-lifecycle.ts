@@ -410,6 +410,10 @@ export type WorkspaceRetainReason =
   | "uncommitted_work"
   /** The task's commits are not reachable from the project's HEAD — never captured. */
   | "unmerged_commits"
+  /** The workspace has at least one checked-out submodule. Forge never creates
+   *  one (`git worktree add` leaves every gitlink uninitialized and empty), so
+   *  this is a workspace shape the reaper was not built to prove capture for. */
+  | "submodules_present"
   /** FG-621's substrate; reaping it is not implemented here (see the header). */
   | "private_clone_substrate"
   /** A directory we cannot identify as either substrate — never guessed at. */
@@ -458,10 +462,11 @@ function statusPorcelainIgnored(treePath: string): string[] | undefined {
   }
 }
 
-/** Checked-out submodules of a working tree, as paths relative to it, deepest
- *  ones included. `git submodule status` marks an uninitialized entry with a
- *  leading `-`: its directory is empty, so it holds nothing to lose. undefined
- *  when git could not answer. */
+/** Checked-out submodules of a working tree, as paths relative to it. `git
+ *  submodule status` marks an uninitialized entry with a leading `-`: its
+ *  directory is empty, which is the only shape `git worktree add` ever produces
+ *  (it never runs `submodule update --init`). undefined when git could not
+ *  answer. Read as a yes/no question — any checked-out submodule retains. */
 function checkedOutSubmodules(treePath: string): string[] | undefined {
   try {
     const out = execFileSync("git", ["submodule", "status", "--recursive"], {
@@ -481,28 +486,6 @@ function checkedOutSubmodules(treePath: string): string[] | undefined {
   } catch {
     return undefined;
   }
-}
-
-/** Everything in the workspace that exists nowhere else, submodules included.
- *
- *  The superproject's own status does NOT recurse: a submodule whose only
- *  content is git-ignored reports clean there, so probing the top level alone
- *  would force-remove an agent's output out of a submodule that looks pristine.
- *  Each checked-out submodule is therefore probed on its own, and a submodule
- *  git cannot answer for is dirt in itself rather than a clean answer. */
-function uncommittedFiles(workspacePath: string): string[] | undefined {
-  const top = statusPorcelainIgnored(workspacePath);
-  if (top === undefined) return undefined;
-
-  const submodules = checkedOutSubmodules(workspacePath);
-  if (submodules === undefined) return ["git submodule status could not be read in the workspace"];
-
-  const nested = submodules.flatMap((sub) => {
-    const inner = statusPorcelainIgnored(join(workspacePath, sub));
-    return (inner ?? ["git status could not be read"]).map((l) => `${sub}: ${l}`);
-  });
-
-  return [...top, ...nested];
 }
 
 function resolveCommit(cwd: string, rev: string): string | undefined {
@@ -608,9 +591,10 @@ function deleteMergedBranch(projectDir: string, branch: string): boolean {
  *  is provably captured. Never throws; reaping an already-gone workspace is a
  *  no-op, so repeated calls are safe.
  *
- *  Safe means all of: the substrate is a linked worktree, the tree is clean (no
- *  uncommitted, untracked or ignored files), every commit the task's branch/HEAD
- *  points at is reachable from projectDir's HEAD, and the worktree is THIS task's
+ *  Safe means all of: the substrate is a linked worktree, it holds no checked-out
+ *  submodule, the tree is clean (no uncommitted, untracked or ignored files),
+ *  every commit the task's branch/HEAD points at is reachable from projectDir's
+ *  HEAD, and the worktree is THIS task's
  *  — projectDir's own repository, checked out on the task's deterministic branch.
  *  Anything else — including anything git declines to answer — is RETAINED with
  *  the reason, so the caller can record where the work still lives. */
@@ -645,7 +629,23 @@ export function reapTaskWorkspace(
     return { action: "retained", substrate, branch, reason: "unknown_substrate", details: [] };
   }
 
-  const dirty = uncommittedFiles(workspacePath);
+  // A checked-out submodule is not a shape this reaper proves capture for: the
+  // superproject's status does not recurse, so a submodule holding the only copy
+  // of an agent's output reports clean at the top level. Rather than probe each
+  // one, retain the whole workspace — forge's own worktrees never reach here,
+  // since `git worktree add` leaves every gitlink uninitialized and empty.
+  const submodules = checkedOutSubmodules(workspacePath);
+  if (submodules === undefined || submodules.length > 0) {
+    return {
+      action: "retained",
+      substrate,
+      branch,
+      reason: "submodules_present",
+      details: submodules ?? ["git submodule status could not be read in the workspace"],
+    };
+  }
+
+  const dirty = statusPorcelainIgnored(workspacePath);
   if (dirty === undefined || dirty.length > 0) {
     return {
       action: "retained",

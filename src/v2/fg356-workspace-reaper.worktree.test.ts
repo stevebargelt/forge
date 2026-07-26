@@ -306,16 +306,12 @@ test("fg356: a crashed task whose only output is GIT-IGNORED is retained — ign
   assert.deepEqual(evs[0]!.payload["details"], ["!! out/"]);
 });
 
-test("fg356: a crashed task whose ignored output sits inside a CLEAN SUBMODULE is retained — the superproject's status does not recurse", () => {
-  // The submodule carries its OWN .gitignore, so the agent's output is invisible
-  // from the superproject: `git status --porcelain --ignored` at the top reports
-  // nothing at all, not even a dirty gitlink. Probing only the top level here
-  // force-removes the one copy of that output.
+/** A repo carrying one real submodule at `sub`. */
+function makeRepoWithSubmodule(): string {
   const child = tmpRoot("submodule-src");
   git(child, "init", "-q", "-b", "main");
   git(child, "config", "user.email", "test@forge.test");
   git(child, "config", "user.name", "Forge Test");
-  writeFileSync(join(child, ".gitignore"), "out/\n");
   writeFileSync(join(child, "lib.ts"), "export const lib = 1;\n");
   git(child, "add", ".");
   git(child, "commit", "-q", "-m", "child initial");
@@ -323,53 +319,50 @@ test("fg356: a crashed task whose ignored output sits inside a CLEAN SUBMODULE i
   const repo = makeRepo();
   git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", child, "sub");
   git(repo, "commit", "-q", "-m", "add submodule");
+  return repo;
+}
+
+test("fg356: a workspace with a CHECKED-OUT submodule is retained — the superproject's status does not recurse, so capture is unprovable", () => {
+  const repo = makeRepoWithSubmodule();
   startRunFor(repo);
 
   const wt = addWorktree(repo, "t-submodule");
-  git(wt, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive");
-  mkdirSync(join(wt, "sub", "out"));
-  writeFileSync(join(wt, "sub", "out", "report.json"), '{"finding":"only copy of this"}\n');
-
-  // Not vacuous: the superproject probe is genuinely blind to this file.
+  git(wt, "-c", "protocol.file.allow=always", "submodule", "update", "--init");
+  // Every other capture check passes: tracked-clean, nothing ignored, no commits
+  // of its own. The submodule is the only thing standing between it and removal.
   assert.equal(git(wt, "status", "--porcelain", "--ignored").trim(), "");
-
   insertTerminalTask("t-submodule", { status: "failed", worktreePath: wt, failureKind: "orphaned" });
 
   reconcileRun(RUN_ID, () => false);
 
-  assert.ok(existsSync(wt), "a workspace whose submodule holds ignored agent output is not provably captured");
-  assert.ok(existsSync(join(wt, "sub", "out", "report.json")), "and the output itself survives");
+  assert.ok(existsSync(wt), "a workspace with an initialized submodule is never reaped");
 
   const evs = workspaceEvents("t-submodule");
   assert.equal(evs.length, 1);
   assert.equal(evs[0]!.type, "task.workspace_retained");
-  assert.equal(evs[0]!.payload["reason"], "uncommitted_work");
-  assert.deepEqual(evs[0]!.payload["details"], ["sub: !! out/"], "the evidence names which submodule the work is in");
+  assert.equal(evs[0]!.payload["reason"], "submodules_present");
+  assert.deepEqual(evs[0]!.payload["details"], ["sub"], "the evidence names the submodule");
 });
 
-test("fg356: a worktree with a CLEAN submodule is still reaped — recursing must not make every submodule project unreapable", () => {
-  const child = tmpRoot("submodule-src");
-  git(child, "init", "-q", "-b", "main");
-  git(child, "config", "user.email", "test@forge.test");
-  git(child, "config", "user.name", "Forge Test");
-  writeFileSync(join(child, "lib.ts"), "export const lib = 1;\n");
-  git(child, "add", ".");
-  git(child, "commit", "-q", "-m", "child initial");
-
-  const repo = makeRepo();
-  git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", child, "sub");
-  git(repo, "commit", "-q", "-m", "add submodule");
+test("fg356: a workspace with an UNINITIALIZED submodule entry still reaps — the shape `git worktree add` actually produces", () => {
+  // createWorktree runs a plain `git worktree add` and never `submodule update
+  // --init`, so every forge workspace of a submodule-carrying project looks like
+  // this: a gitlink recorded in the index, an empty directory on disk, nothing
+  // to lose. The retain rule above must be a no-op here or it reaps nothing.
+  const repo = makeRepoWithSubmodule();
   startRunFor(repo);
 
-  const wt = addWorktree(repo, "t-submodule-clean");
-  git(wt, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive");
-  insertTerminalTask("t-submodule-clean", { status: "failed", worktreePath: wt, failureKind: "orphaned" });
+  const wt = addWorktree(repo, "t-submodule-uninit");
+  assert.match(git(wt, "submodule", "status"), /^-/, "the entry is uninitialized, as git worktree add leaves it");
+  commitInWorktree(wt, "agent-work.ts");
+  mergeBack(repo, "t-submodule-uninit");
+  insertTerminalTask("t-submodule-uninit", { status: "complete", worktreePath: wt });
 
   reconcileRun(RUN_ID, () => false);
 
-  assert.equal(existsSync(wt), false, "nothing in the submodule is unrecovered, so the tree is still a leak");
-  assert.equal(branchExists(repo, "t-submodule-clean"), false);
-  assert.equal(workspaceEvents("t-submodule-clean")[0]!.type, "task.workspace_reaped");
+  assert.equal(existsSync(wt), false, "an uninitialized gitlink holds nothing, so the captured tree is still a leak");
+  assert.equal(branchExists(repo, "t-submodule-uninit"), false);
+  assert.equal(workspaceEvents("t-submodule-uninit")[0]!.type, "task.workspace_reaped");
 });
 
 test("fg356: a crashed task whose COMMITS were never captured is retained — a clean tree is not proof the work landed", () => {
