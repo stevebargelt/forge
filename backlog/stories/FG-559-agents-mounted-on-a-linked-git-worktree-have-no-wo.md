@@ -291,3 +291,20 @@ fixing it):
   operator-supplied `--project` is preflighted at `runNext.ts:606` before any state mutation.
 
 3029 tests, 0 failures.
+
+---
+
+## Acceptance Evidence (merged as `7549b9f`, PR #161)
+
+| AC | Evidence | Verdict |
+|---|---|---|
+| An agent invoked with `--project <linked-worktree>` can run `git log`, `git diff <sha>..<sha>`, and `git show` against the project's real history | LIVE container smoke run against a real linked worktree (`run-fg-559-live-worktree-smoke-42c126`, `red-wide --read-only`). Raw agent output: `cat .git` → the `gitdir:` pointer; `git log --oneline` → both commits; `git diff HEAD~1..HEAD --stat` → `b.txt \| 1 +`; `git show --stat HEAD` → the full commit. `every_command_succeeded: true`. Implementation: `planWorktreeGitMounts` / `resolveVerifiedCommonGitDir` (`src/v2/spawn.ts`) | met |
+| A `red-wide` review-loop reviewer mounted on a worktree can diff the range it is reviewing | Dogfooded: five `forge review-loop` passes ran `red-wide` on a linked worktree under `FORGE_WORKTREES=1` and each returned a diff-based review with `file:line` findings (`run-review-loop-fg-559-fdc4ce`, `-632048`, `-980aea`, `-dda6fc`, `-84e88c`). Before this change the same reviewer returned `inconclusive` because git would not run at all — the failure that motivated the ticket | met |
+| A regression test covers the linked-worktree case specifically, using a REAL linked worktree (a plain-clone mount would pass vacuously) | `src/v2/fg559-worktree-git-mount.worktree.test.ts` and `src/v2/fg559-worktree-git-enforcement.worktree.test.ts` — fixtures call `git worktree add` and assert `statSync(<wt>/.git).isFile()`; the negative control asserts `git log` FAILS with only the worktree materialized. Mutation-verified non-vacuous by the test-engineer pass: reverting to an admin-dir-only mount, deleting `packed-refs`, and removing the `:ro` chmod each turn specific tests red | met |
+| Silent degradation is impossible: if git is unavailable in the mount, forge says so rather than letting the agent proceed history-blind | Host-side: `assertWorktreeGitMountPlanned` refuses on the argv in BOTH project-mounting builders (`buildDockerArgs`, `buildProvisionerDockerArgs`), unconditionally — no env-var bypass (`docker/agent-entrypoint.sh`, pinned by the probe test). Classification: exit 122 → `verification_environment_unavailable` + `container.git_unavailable` on the agent (`invoke.ts:763`, `runNext.ts:3272`), provisioner (`runNext.ts:3086`) and reconcile (`reconcile.ts:745-747`) paths. Closeout audit confirms all four promises hold on every container-starting path. **The container-side probe is verified only by a standalone shell test and unit-level classification coverage — the SHIPPED agent image has not been rebuilt and observed exiting 122, because docker.io is unreachable from this host.** | **NOT MET — open** |
+
+**FG-559 stays OPEN on the last AC line only.** Everything else shipped in `7549b9f`. Closing it
+requires `docker/build.sh` once the registry is reachable, then one dispatch against a deliberately
+broken worktree confirming the container exits 122 and forge records `container.git_unavailable`.
+Per the closing gate, an AC without evidence is not met, and this one is not being waved through on
+inference.
