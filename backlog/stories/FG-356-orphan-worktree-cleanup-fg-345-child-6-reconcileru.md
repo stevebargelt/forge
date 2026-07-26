@@ -72,9 +72,18 @@ Recovery half, carried down from FG-345's default-on acceptance list:
 
 ## Added acceptance
 
-- A mutating task's private clone and its branch are removed on the next `reconcileRun` after an
-  orphan/crash — **only when its work has been captured or explicitly discarded.**
-- A crashed mutating task whose commits were never fetched is RETAINED, with durable evidence naming
-  the workspace path and branch.
+- **CORRECTED 2026-07-26 — this line originally demanded that a mutating task's private clone and its
+  branch be REMOVED on the next `reconcileRun`, which contradicted this same ticket's scope note (and
+  FG-621's) requiring the clone path to be an explicit, tested no-op. The orchestrator wrote both; the
+  reviewer caught the contradiction. The decided scope stands: FG-621 owns clone reaping.** What FG-356
+  must prove is that a private clone is CLASSIFIED as its own substrate and RETAINED with reason
+  `private_clone_substrate` — never silently fall through an unhandled path, and never be removed by
+  this ticket's reaper.
+- A crashed task whose work was never captured is RETAINED, with durable evidence naming the workspace
+  path and branch. This holds for every substrate, and it is the half of the contract that must not
+  regress when FG-621 implements clone removal.
+- **Ignored files count as unrecovered work.** A clean tracked tree is not proof of capture: a
+  workspace holding only git-ignored output an agent produced must be RETAINED, not reaped. A capture
+  probe that reads `git status --porcelain` without `--ignored` is insufficient.
 - A locked worktree is unlocked (or `-f -f`) and removed rather than wedging the reaper permanently.
 - Both substrates covered; the not-yet-implemented one is an asserted no-op, not an unhandled path.
