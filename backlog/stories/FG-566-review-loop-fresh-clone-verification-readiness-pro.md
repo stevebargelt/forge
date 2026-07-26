@@ -118,3 +118,49 @@ Each regression must be observed red against the relevant pre-fix behavior:
 durable events/run notes, CLI/JSON/dashboard propagation, and production-path tests. It should receive a
 short architecture/planning pass to choose reuse of the existing container cache versus controlled
 standalone-clone provisioning, then land as one cohesive implementation if that plan remains bounded.
+
+## Live instance 2026-07-26 (FG-356 review-loop, run-review-loop-fg-356-34ce60)
+
+Reproduced end-to-end, and it burned a fixer round on a phantom failure.
+
+**Setup.** FG-356 was implemented in a disposable clone at `~/code/forge-fg356` (the FG-612 self-host
+guard refuses an agent dispatch against the live forge checkout, so a clone is the supported path for
+forge-on-forge work). Agents ran their suites through `forge-test`'s container scratch and never needed
+the clone's own `node_modules`, so the clone never had one. `forge review-loop --project <clone>` then
+ran its verification on the HOST, in that clone.
+
+**What happened.**
+
+    Round 1  verification: FAILED (typecheck=FAIL, test=FAIL)   reviewer: skipped   fix: applied
+    Round 2  verification: FAILED (typecheck=FAIL, test=FAIL)   reviewer: skipped
+    stop reason: verification_failed   closeable: no
+
+The commits were fine — the same tree went on to pass CI (`test`, `worktree`, `dashboard_integration`
+and four of five integration shards all green at the reviewed sha `e029020`). `npm run typecheck` and
+`npm run test` failed only because the binaries were not installed.
+
+**Three distinct defects this exposes, all inside this ticket's scope:**
+
+1. **No dependency provisioning before round 1.** The loop verified against a tree it never made
+   runnable. An `npm ci` (or an explicit refusal to start) belongs before the first verification.
+2. **An environment failure is not classified as one.** It presents identically to a genuine test
+   failure — `verification_failed` — so the loop dispatched the FIXER in round 1 against a failure no
+   code change could fix, then re-verified and stopped. That is a wasted agent round and, worse, an
+   agent invited to "fix" passing code. Environment-unrunnable must be its own stop reason that does
+   NOT dispatch a fixer.
+3. **The findings carry no output.** Both rounds reported literally
+   `deterministic verification step 'typecheck' failed:` with nothing after the colon — no command, no
+   tier, no stderr. Diagnosis took a manual `ls node_modules`. This is the same discarded-step-detail
+   defect FG-625 owns on the post-fixer path; here it is the ROUND-ENTRY verifier, so fixing FG-625's
+   path alone would not have surfaced it.
+
+**Adjacent observation (not necessarily this ticket).** The loop logged
+`CI unavailable: no CI status available for check "CI / test-extended"` and fell back to local, rather
+than WAITING as FG-501 describes. The push and the loop launch were seconds apart, so the
+`test-extended` job likely did not exist yet at probe time — an in-flight run whose jobs have not been
+created reads the same as no CI at all. If FG-501's wait is meant to cover that window, the probe needs
+to distinguish "workflow queued, job not yet created" from "no CI configured"; if it is not, then this
+ticket's dependency provisioning is the only thing standing between a fresh clone and a false red.
+
+**No pollution to report:** the round-1 fixer left the branch at exactly its three commits with a clean
+tree, so nothing had to be reverted.

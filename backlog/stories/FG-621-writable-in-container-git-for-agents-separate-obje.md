@@ -118,3 +118,32 @@ FG-345 (parent decision + authority contract), FG-559 (read-only parent `.git` m
 experiment that produced every measurement above), FG-351 (Task workspace state in DB), FG-352
 (retain-on-conflict), FG-356 (cleanup/recovery), FG-376 (dependency parity), FG-340 (agents do not
 publish), `docs/invariants.md` #9.
+
+## Prior art from an FG-356 review round (2026-07-26) — do not re-derive this
+
+During FG-356's review-loop, a fixer was handed a contradictory acceptance line (since corrected) and
+implemented clone reaping inside FG-356. That work was DISCARDED as out of scope and unvalidated — it
+died before any test ran, and it broke the retain-reason enum FG-356's tests and docs depend on. Two
+ideas in it are worth keeping for this ticket:
+
+1. **The alternates file is a proof of ownership a main checkout cannot forge.** Classification alone
+   cannot distinguish a private clone from the operator's live source — both have a `.git` DIRECTORY.
+   But a `--shared` clone's `objects/info/alternates` resolves to the PARENT's `objects` dir, and no
+   repo is ever its own alternate. So: resolve `git rev-parse --git-common-dir` for both the workspace
+   and `projectDir`, require they differ, then require the workspace's alternates to realpath-match the
+   parent's objects dir. Everything else about a clone — layout, branch name, remote — is imitable by
+   the live source; this is not. That check, not the substrate classification, is what structurally
+   keeps the FG-607 live-source incident out of reach on the clone path.
+
+2. **`gc.pid` in the common git dir is the "parent is repacking" signal.** Git writes it for the
+   duration of a gc and checks it to refuse a concurrent one. A `--shared` clone's alternates point
+   into the very object store being rewritten, so disposal should wait for the next pass rather than
+   race it.
+
+Also worth carrying: a clone is a FULL repo, so its branch can hold commits its `HEAD` is not sitting
+on. A capture check that reads only `HEAD` (plus the parent-side branch ref) misses them — resolve the
+workspace's own branch tip as a third input and de-duplicate before testing reachability.
+
+Note the substrate asymmetry this implies for merge-back: a clone is not registered with the parent, so
+`git worktree remove` has nothing to act on — the directory IS the repo and its private refs go with
+it, while the parent often never held the branch at all.
