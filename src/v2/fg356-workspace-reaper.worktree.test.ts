@@ -16,7 +16,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
@@ -219,6 +219,61 @@ test("fg356: an ORPHANED task's worktree and branch are gone after the next reco
   assert.equal(evs[0]!.payload["branch"], worktreeBranchName(RUN_ID, "t-orphan"));
   assert.equal(evs[0]!.payload["substrate"], "linked_worktree");
   assert.equal(evs[0]!.payload["branchRemoved"], true);
+  assert.equal(evs[0]!.payload["removal"], "git_removed", "and the disposal records that git itself completed it");
+});
+
+/** Shadows `git` on PATH with a pass-through stub whose `worktree remove`
+ *  deletes the directory and THEN fails — the partially-completed removal that
+ *  makes path-absence a lie about removal success. Every other git command runs
+ *  for real, so the reaper's capture probes, its prune and its branch deletion
+ *  all behave exactly as they do in production. */
+function withFailingWorktreeRemove<T>(fn: () => T): T {
+  const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+  const binDir = tmpRoot("git-stub");
+  const stub = join(binDir, "git");
+  writeFileSync(
+    stub,
+    `#!/bin/sh\nif [ "$1" = "worktree" ] && [ "$2" = "remove" ]; then\n  for a in "$@"; do last="$a"; done\n  rm -rf "$last"\n  exit 1\nfi\nexec ${realGit} "$@"\n`,
+  );
+  chmodSync(stub, 0o755);
+  const origPath = process.env.PATH;
+  process.env.PATH = `${binDir}:${origPath ?? ""}`;
+  try {
+    return fn();
+  } finally {
+    process.env.PATH = origPath;
+  }
+}
+
+test("fg356: a removal git DECLINES whose tree is gone anyway is reaped honestly — the registration is pruned, not reported as a clean removal", () => {
+  const repo = makeRepo();
+  startRunFor(repo);
+  const wt = addWorktree(repo, "t-partial");
+  commitInWorktree(wt, "agent-work.ts");
+  mergeBack(repo, "t-partial"); // captured — the reaper reaches the removal
+  insertTerminalTask("t-partial", { status: "failed", worktreePath: wt, failureKind: "orphaned" });
+  const registration = join(repo, ".git", "worktrees", "t-partial");
+  assert.ok(existsSync(registration), "the worktree is registered before the pass");
+
+  withFailingWorktreeRemove(() => reconcileRun(RUN_ID, () => false));
+
+  assert.equal(existsSync(wt), false, "the tree really is gone — there is nothing left to retain");
+  assert.equal(
+    existsSync(registration),
+    false,
+    "and the registration a failed remove leaves behind — the thing that breaks later worktree ops — is pruned",
+  );
+  assert.ok(existsSync(join(repo, "agent-work.ts")), "the work itself is untouched, as always");
+
+  const evs = workspaceEvents("t-partial");
+  assert.equal(evs.length, 1);
+  assert.equal(evs[0]!.type, "task.workspace_reaped");
+  assert.equal(evs[0]!.payload["workspacePath"], wt);
+  assert.equal(
+    evs[0]!.payload["removal"],
+    "path_vanished",
+    "a removal git declined is never recorded as one git completed",
+  );
 });
 
 test("fg356: a crashed task whose worktree holds NO work at all (pre-container crash) is reaped — an empty tree is a leak, not evidence", () => {

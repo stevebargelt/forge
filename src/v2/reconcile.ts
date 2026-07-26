@@ -1450,6 +1450,7 @@ export function reconcileRun(
           branch: outcome.branch,
           substrate: outcome.substrate,
           branchRemoved: outcome.branchRemoved,
+          removal: outcome.removal,
           reason: "work_captured",
           taskStatus: t.status,
         },

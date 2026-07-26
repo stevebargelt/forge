@@ -95,6 +95,22 @@ export function preflightWorktreeGate(projectDir: string): void {
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
+/** What a forceRemoveWorktree call actually established.
+ *
+ *  The two facts come apart exactly when `git worktree remove` FAILS and the
+ *  directory is gone anyway — a race, a partially-completed removal (git unlinks
+ *  the working tree before its registration, so a failure at the second step
+ *  leaves the first done), or a tree something else already deleted. Path
+ *  absence alone is therefore NOT proof that git completed the removal, and a
+ *  caller that needs that proof must read `gitRemoved`. */
+export type ForceRemoveWorktreeResult = {
+  /** `git worktree remove` exited 0: git unlinked the tree AND cleared its
+   *  `$GIT_DIR/worktrees` registration itself. */
+  gitRemoved: boolean;
+  /** The path is gone once this returns — however that came about. */
+  pathAbsent: boolean;
+};
+
 /** `git worktree remove` that survives a LOCKED worktree (FG-356).
  *
  *  A single `--force` still refuses a worktree git considers locked, so any tool
@@ -103,10 +119,19 @@ export function preflightWorktreeGate(projectDir: string): void {
  *  expected no-op, not an error — then use the double-force form, which is what
  *  git actually requires for a locked tree.
  *
- *  Best-effort and never throws: an already-gone worktree is a no-op. Returns
- *  whether the directory is gone afterwards, so a caller that needs PROOF of
- *  removal (the reaper below) can tell a real removal from a silent failure. */
-export function forceRemoveWorktree(projectDir: string, worktreePath: string): boolean {
+ *  Registration hygiene is handled HERE rather than at each call site: when the
+ *  removal does not cleanly succeed, the `$GIT_DIR/worktrees` entry can outlive
+ *  the directory, and a stale entry breaks later worktree operations on the
+ *  parent. `git worktree prune` is the remedy git provides, and it only ever
+ *  drops entries whose working tree is already missing — so a removal that
+ *  genuinely failed with the tree still on disk keeps its registration, and
+ *  pruning never widens what gets disposed of.
+ *
+ *  Best-effort and never throws: an already-gone worktree is a no-op. */
+export function forceRemoveWorktree(
+  projectDir: string,
+  worktreePath: string
+): ForceRemoveWorktreeResult {
   try {
     execFileSync("git", ["worktree", "unlock", worktreePath], {
       cwd: projectDir,
@@ -115,6 +140,8 @@ export function forceRemoveWorktree(projectDir: string, worktreePath: string): b
   } catch {
     // Already unlocked (or not a registered worktree) — nothing to undo.
   }
+
+  let gitRemoved = true;
   try {
     execFileSync("git", ["worktree", "remove", "--force", "--force", worktreePath], {
       cwd: projectDir,
@@ -122,8 +149,19 @@ export function forceRemoveWorktree(projectDir: string, worktreePath: string): b
     });
   } catch {
     // Best-effort: if the worktree is already gone, ignore.
+    gitRemoved = false;
   }
-  return !existsSync(worktreePath);
+
+  if (!gitRemoved) {
+    try {
+      execFileSync("git", ["worktree", "prune"], {
+        cwd: projectDir,
+        stdio: ["ignore", "ignore", "ignore"],
+      });
+    } catch { /* fully best-effort */ }
+  }
+
+  return { gitRemoved, pathAbsent: !existsSync(worktreePath) };
 }
 
 export type CreateWorktreeResult = {
@@ -340,17 +378,9 @@ export function cleanupFailedWorktreeSetup(
   // FIX3 (FG-376 review): no dependency-volume cleanup here — see
   // removeWorktreeIfSafe above for why a shared cache volume must not be
   // removed at individual worktree disposal.
+  // forceRemoveWorktree prunes the registration itself when the removal does not
+  // cleanly succeed, so there is nothing left to do here.
   forceRemoveWorktree(projectDir, path);
-  // Prune unconditionally: forceRemoveWorktree reports path ABSENCE, not that
-  // `git worktree remove` succeeded, so a failed remove whose directory is gone
-  // anyway (never registered, or removed out from under us) would otherwise
-  // leave a stale registration behind that breaks later worktree operations.
-  try {
-    execFileSync("git", ["worktree", "prune"], {
-      cwd: projectDir,
-      stdio: ["ignore", "ignore", "ignore"],
-    });
-  } catch { /* fully best-effort */ }
 }
 
 // ── FG-356: the orphan workspace reaper ───────────────────────────────────────
@@ -425,12 +455,24 @@ export type WorkspaceRetainReason =
   /** git refused the removal even after unlock + double force. */
   | "removal_failed";
 
+/** How a reaped workspace actually went away. `git_removed` is git completing the
+ *  removal; `path_vanished` is git DECLINING it while the tree turned out to be
+ *  gone anyway — the stale registration is pruned, and the difference is recorded
+ *  rather than reported as a clean removal. */
+export type WorkspaceRemovalDisposition = "git_removed" | "path_vanished";
+
 export type WorkspaceReapOutcome =
   | { action: "absent"; branch: string }
   /** The workspace was already gone, but its branch had outlived it — a prior
    *  pass removed the tree and lost the `git branch -d`. The ref is gone now. */
   | { action: "branch_reaped"; branch: string }
-  | { action: "reaped"; substrate: "linked_worktree"; branch: string; branchRemoved: boolean }
+  | {
+      action: "reaped";
+      substrate: "linked_worktree";
+      branch: string;
+      branchRemoved: boolean;
+      removal: WorkspaceRemovalDisposition;
+    }
   | {
       action: "retained";
       substrate: WorkspaceSubstrate;
@@ -678,11 +720,23 @@ export function reapTaskWorkspace(
     return { action: "retained", substrate, branch, reason: "workspace_not_owned", details: notOurs };
   }
 
-  if (!forceRemoveWorktree(projectDir, workspacePath)) {
+  // Path absence is what decides whether there is still a workspace to retain;
+  // git's own verdict is what decides how the disposal is REPORTED. A removal
+  // git declined whose tree was gone anyway is a real disposal — retaining a
+  // directory that does not exist would name a place the work is not — but it is
+  // not a clean `git worktree remove`, so it is not recorded as one.
+  const removal = forceRemoveWorktree(projectDir, workspacePath);
+  if (!removal.pathAbsent) {
     return { action: "retained", substrate, branch, reason: "removal_failed", details: [] };
   }
 
-  return { action: "reaped", substrate, branch, branchRemoved: deleteMergedBranch(projectDir, branch) };
+  return {
+    action: "reaped",
+    substrate,
+    branch,
+    branchRemoved: deleteMergedBranch(projectDir, branch),
+    removal: removal.gitRemoved ? "git_removed" : "path_vanished",
+  };
 }
 
 // ── FG-353 Integration worktree helpers ───────────────────────────────────────
