@@ -1,0 +1,335 @@
+// FG-356 — the reaper's EVIDENCE and its blast radius, over a real on-disk store.
+//
+// The companion lane (fg356-reaper-drive.worktree.test.ts) drives reconcileRun
+// over real linked worktrees; this one covers the halves of the contract that do
+// not involve a worktree at all, and the one property an in-memory DB cannot
+// prove:
+//
+//   • DURABILITY. The retain event is the whole recovery contract — it is how an
+//     operator learns, possibly weeks later, that a crashed task's work is still
+//     sitting in a workspace and where. If it did not survive the process that
+//     wrote it, retaining the workspace would just be a silent leak with extra
+//     steps. So the store here is a real SQLite file, closed and reopened.
+//   • The substrates that are NOT linked worktrees: FG-621's private clone (an
+//     explicit, tested no-op), an unidentifiable directory, and — the safety
+//     catch that matters most — a main checkout, including the run's own
+//     projectDir.
+//   • That the production retain-by-design kind set cannot grow without the
+//     drive lane growing with it.
+//
+// Per the tier rule in docs/how-to-testing.md, no test in this file creates a git
+// worktree; real repos, clones and an on-disk DB are integration-tier fixtures.
+// Every fixture builds its own repo under its own temp dir and its own DB file —
+// nothing touches ~/.forge/forge.db.
+
+import { test, beforeEach, afterEach } from "node:test";
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import Database from "better-sqlite3";
+import type { Database as DatabaseInstance } from "better-sqlite3";
+
+import { applyMigrations, setDbForTest } from "../store/db.js";
+import { SCHEMA_SQL } from "../store/schema.js";
+import { insertRun } from "../store/runs.js";
+import { insertTask, getTask } from "../store/tasks.js";
+import { eventsForTask, logEvent } from "../store/events.js";
+import { reconcileRun } from "./reconcile.js";
+import { classifyWorkspace, worktreeBranchName } from "./worktree-lifecycle.js";
+import type { Run, Task, TaskStatus } from "../types/index.js";
+
+const RUN_ID = "run-fg356-evidence";
+const ALIVE = () => true;
+
+const tmpDirs: string[] = [];
+let openDbs: DatabaseInstance[] = [];
+let prev: DatabaseInstance | null = null;
+
+function tmpRoot(label: string): string {
+  const dir = mkdtempSync(join(tmpdir(), `forge-fg356e-${label}-`));
+  tmpDirs.push(dir);
+  return dir;
+}
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+}
+
+/** A REAL on-disk store, so a close/reopen is a genuine process restart rather
+ *  than a same-handle read. */
+function openStore(dbFile: string): DatabaseInstance {
+  const db = new Database(dbFile);
+  db.pragma("foreign_keys = ON");
+  db.exec(SCHEMA_SQL);
+  applyMigrations(db);
+  openDbs.push(db);
+  const previous = setDbForTest(db);
+  if (prev === null) prev = previous;
+  return db;
+}
+
+function makeRepo(label = "repo"): string {
+  const dir = tmpRoot(label);
+  git(dir, "init", "-q", "-b", "main");
+  git(dir, "config", "user.email", "test@forge.test");
+  git(dir, "config", "user.name", "Forge Test");
+  writeFileSync(join(dir, "README.md"), "# fg356 evidence\n");
+  git(dir, "add", ".");
+  git(dir, "commit", "-q", "-m", "initial");
+  return dir;
+}
+
+function startRunFor(projectDir: string): void {
+  const run: Run = {
+    id: RUN_ID,
+    workflow: "invoke",
+    title: "fg356 reaper evidence",
+    status: "active",
+    createdAt: "2026-07-26T00:00:00Z",
+    projectDir,
+  };
+  insertRun(run);
+}
+
+function insertTaskRow(id: string, opts: { status: TaskStatus; workspace: string; failureKind?: string }): Task {
+  const t: Task = {
+    id,
+    runId: RUN_ID,
+    phase: "build",
+    agentRole: "engineer",
+    status: opts.status,
+    taskPackage: { taskId: id, runId: RUN_ID, phase: "build", role: "engineer", inputs: {}, composedSystemPrompt: "" },
+    createdAt: "2026-07-26T00:00:00Z",
+    startedAt: "2026-07-26T00:00:01Z",
+    worktreePath: opts.workspace,
+  };
+  insertTask(t);
+  if (opts.status === "failed") {
+    logEvent("task.failed", {
+      runId: RUN_ID,
+      taskId: id,
+      payload: { failure_kind: opts.failureKind ?? "orphaned", error: "reconciled after crash" },
+    });
+  }
+  if (opts.status === "complete") logEvent("task.completed", { runId: RUN_ID, taskId: id });
+  return t;
+}
+
+type WorkspaceEvent = { type: string; payload: Record<string, unknown> };
+
+function workspaceEvents(taskId: string): WorkspaceEvent[] {
+  return eventsForTask(taskId)
+    .filter((e) => e.eventType === "task.workspace_reaped" || e.eventType === "task.workspace_retained")
+    .map((e) => ({ type: e.eventType, payload: (e.payload ?? {}) as Record<string, unknown> }));
+}
+
+function onlyEvent(taskId: string): WorkspaceEvent {
+  const evs = workspaceEvents(taskId);
+  assert.equal(evs.length, 1, `expected exactly one workspace disposition event, got ${JSON.stringify(evs)}`);
+  return evs[0]!;
+}
+
+/** A mutating agent's private `--shared` clone (FG-621's substrate). */
+function makePrivateClone(parent: string, taskId: string): string {
+  const clone = join(tmpRoot("clone"), taskId);
+  execFileSync("git", ["clone", "--quiet", "--shared", parent, clone], { stdio: ["ignore", "ignore", "pipe"] });
+  git(clone, "config", "user.email", "agent@forge.test");
+  git(clone, "config", "user.name", "Agent");
+  git(clone, "checkout", "-q", "-b", worktreeBranchName(RUN_ID, taskId));
+  return clone;
+}
+
+beforeEach(() => {
+  openDbs = [];
+});
+
+afterEach(() => {
+  for (const db of openDbs.splice(0)) {
+    try {
+      db.close();
+    } catch {
+      // already closed by the test
+    }
+  }
+  if (prev) setDbForTest(prev);
+  for (const dir of tmpDirs.splice(0)) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // best-effort cleanup
+    }
+  }
+});
+
+// ── Durable evidence ──────────────────────────────────────────────────────────
+
+test("fg356 evidence: a retain event survives a store close + reopen, and the reopened process does not re-record it", () => {
+  const dbFile = join(tmpRoot("db"), "forge.db");
+  const repo = makeRepo();
+  openStore(dbFile);
+  startRunFor(repo);
+
+  const clone = makePrivateClone(repo, "t-durable");
+  writeFileSync(join(clone, "unfetched.ts"), "commits the parent never fetched\n");
+  git(clone, "add", ".");
+  git(clone, "commit", "-q", "-m", "agent work in a private clone");
+  insertTaskRow("t-durable", { status: "failed", workspace: clone, failureKind: "orphaned" });
+
+  reconcileRun(RUN_ID, ALIVE);
+  const written = onlyEvent("t-durable");
+  assert.equal(written.type, "task.workspace_retained");
+
+  // The forge process that recorded it exits. Days later, another one opens the
+  // same store — which is the only way this evidence is ever useful.
+  openDbs.pop()!.close();
+
+  const reopened = new Database(dbFile);
+  reopened.pragma("foreign_keys = ON");
+  openDbs.push(reopened);
+  setDbForTest(reopened);
+
+  const rehydrated = onlyEvent("t-durable");
+  assert.equal(rehydrated.type, "task.workspace_retained", "the disposition outlived the process that decided it");
+  assert.equal(rehydrated.payload["workspacePath"], clone, "and still names WHERE the unrecovered work is");
+  assert.equal(rehydrated.payload["branch"], worktreeBranchName(RUN_ID, "t-durable"), "and on which branch");
+  assert.equal(rehydrated.payload["substrate"], "private_clone");
+  assert.equal(rehydrated.payload["reason"], "private_clone_substrate");
+  assert.equal(rehydrated.payload["taskStatus"], "failed");
+  assert.equal(getTask("t-durable")!.worktreePath, clone, "the row still points at the workspace it named");
+
+  // Re-entry across the restart: the dedupe reads the persisted events, not
+  // in-process memory, so the second process must not re-log the same retention.
+  reconcileRun(RUN_ID, ALIVE);
+  reconcileRun(RUN_ID, ALIVE);
+  assert.equal(workspaceEvents("t-durable").length, 1, "a restart is not a licence to re-log the same fact");
+  assert.ok(existsSync(join(clone, "unfetched.ts")), "and the work is still there — the retain held across the restart");
+});
+
+// ── The substrates that are not linked worktrees ──────────────────────────────
+
+test("fg356 evidence: a private clone is retained for its SUBSTRATE even when its tree is clean and its commits are captured", () => {
+  const dbFile = join(tmpRoot("db"), "forge.db");
+  const repo = makeRepo();
+  openStore(dbFile);
+  startRunFor(repo);
+
+  // Clean, and holding nothing the parent does not already have: the git capture
+  // probe would sanction removing this. It is not removed, because FG-621 owns
+  // clone disposal (a clone is not a registered worktree, and its alternates
+  // point back into the parent object store).
+  const clone = makePrivateClone(repo, "t-clone-clean");
+  assert.equal(classifyWorkspace(clone), "private_clone");
+  assert.equal(git(clone, "status", "--porcelain").trim(), "", "fixture: clean tree");
+  insertTaskRow("t-clone-clean", { status: "complete", workspace: clone });
+
+  reconcileRun(RUN_ID, ALIVE);
+
+  assert.ok(existsSync(clone), "the unimplemented substrate is left alone");
+  assert.ok(existsSync(join(clone, ".git")), "including its private object store and refs");
+  const ev = onlyEvent("t-clone-clean");
+  assert.equal(ev.type, "task.workspace_retained");
+  assert.equal(ev.payload["reason"], "private_clone_substrate", "the SUBSTRATE is the reason, decided before any git probe");
+  assert.equal(ev.payload["substrate"], "private_clone");
+  assert.deepEqual(ev.payload["details"], []);
+});
+
+test("fg356 evidence: a workspace that is neither substrate is retained as unknown_substrate — never guessed at", () => {
+  const dbFile = join(tmpRoot("db"), "forge.db");
+  const repo = makeRepo();
+  openStore(dbFile);
+  startRunFor(repo);
+
+  // A directory forge cannot identify: no .git at all. It may be a half-created
+  // workspace, a stale mount point, or something entirely else — the one thing
+  // the reaper may not do is assume.
+  const opaque = join(tmpRoot("opaque"), "t-unknown");
+  mkdirSync(opaque, { recursive: true });
+  writeFileSync(join(opaque, "unclassifiable-work.txt"), "no repository here\n");
+  assert.equal(classifyWorkspace(opaque), "unknown");
+  insertTaskRow("t-unknown", { status: "failed", workspace: opaque, failureKind: "orphaned" });
+
+  reconcileRun(RUN_ID, ALIVE);
+
+  assert.ok(existsSync(opaque), "an unidentifiable directory is not removed");
+  assert.equal(readFileSync(join(opaque, "unclassifiable-work.txt"), "utf8"), "no repository here\n");
+  const ev = onlyEvent("t-unknown");
+  assert.equal(ev.type, "task.workspace_retained");
+  assert.equal(ev.payload["reason"], "unknown_substrate");
+  assert.equal(ev.payload["substrate"], "unknown");
+  assert.equal(ev.payload["workspacePath"], opaque);
+  assert.equal(ev.payload["branch"], worktreeBranchName(RUN_ID, "t-unknown"), "still named, so the operator can look");
+});
+
+// ── Blast radius: main checkouts ──────────────────────────────────────────────
+
+test("fg356 evidence: the run's OWN projectDir recorded as a workspace is never reaped — the live source survives verbatim", () => {
+  const dbFile = join(tmpRoot("db"), "forge.db");
+  const repo = makeRepo();
+  writeFileSync(join(repo, "operator-uncommitted.txt"), "the operator's live edit\n");
+  openStore(dbFile);
+  startRunFor(repo);
+
+  // The no-worktree path: a task whose recorded workspace IS the shared project
+  // checkout (FG-455 calls this evidence source "project_dir_shared"). Reaping it
+  // would delete the operator's source tree.
+  insertTaskRow("t-livesource", { status: "complete", workspace: repo });
+
+  reconcileRun(RUN_ID, ALIVE);
+
+  assert.ok(existsSync(repo), "a main checkout has a .git DIRECTORY, so it can never classify as a linked worktree");
+  assert.equal(readFileSync(join(repo, "README.md"), "utf8"), "# fg356 evidence\n");
+  assert.equal(readFileSync(join(repo, "operator-uncommitted.txt"), "utf8"), "the operator's live edit\n");
+  assert.equal(git(repo, "rev-parse", "--is-inside-work-tree").trim(), "true", "and the repository itself is untouched");
+  assert.equal(onlyEvent("t-livesource").payload["reason"], "private_clone_substrate");
+});
+
+test("fg356 evidence: an unrelated repository's main checkout is not reaped either, whatever the task row claims", () => {
+  const dbFile = join(tmpRoot("db"), "forge.db");
+  const repo = makeRepo();
+  const unrelated = makeRepo("unrelated");
+  writeFileSync(join(unrelated, "somebody-elses-source.txt"), "not forge's to delete\n");
+  openStore(dbFile);
+  startRunFor(repo);
+
+  insertTaskRow("t-unrelated", { status: "failed", workspace: unrelated, failureKind: "orphaned" });
+
+  reconcileRun(RUN_ID, ALIVE);
+
+  assert.ok(existsSync(unrelated));
+  assert.equal(readFileSync(join(unrelated, "somebody-elses-source.txt"), "utf8"), "not forge's to delete\n");
+  assert.equal(git(unrelated, "status", "--porcelain").trim(), "?? somebody-elses-source.txt", "untouched, down to its git state");
+  assert.equal(workspaceEvents("t-unrelated").length, 1, "the refusal is recorded rather than silent");
+});
+
+// ── The retain-by-design set cannot grow uncovered ────────────────────────────
+
+test("fg356 evidence: every kind in RETAIN_WORKSPACE_FAILURE_KINDS is exercised by the drive lane", () => {
+  const source = readFileSync(new URL("./reconcile.ts", import.meta.url), "utf8");
+  const block = /RETAIN_WORKSPACE_FAILURE_KINDS\s*=\s*new Set\(\[([\s\S]*?)\]\)/.exec(source);
+  assert.ok(block, "RETAIN_WORKSPACE_FAILURE_KINDS must remain a literal set in src/v2/reconcile.ts");
+  const kinds = [...block[1]!.matchAll(/"([^"]+)"/g)].map((m) => m[1]!);
+  assert.ok(kinds.length > 0, "parsed no kinds — the parity check would be vacuous");
+
+  // The retain contract is enforcement, not documentation: a kind that says it
+  // keeps its workspace has to be driven through reconcileRun and asserted, or
+  // the guarantee is only a comment. Adding a kind above without adding it to the
+  // drive lane's table fails here.
+  const driveLane = readFileSync(new URL("./fg356-reaper-drive.worktree.test.ts", import.meta.url), "utf8");
+  const table = /RETAIN_BY_DESIGN_KINDS\s*=\s*\[([\s\S]*?)\] as const/.exec(driveLane);
+  assert.ok(table, "the drive lane must keep its retain-by-design table as a literal array");
+  const covered = new Set([...table[1]!.matchAll(/"([^"]+)"/g)].map((m) => m[1]!));
+
+  for (const kind of kinds) {
+    assert.ok(
+      covered.has(kind),
+      `${kind} retains a workspace by design but no fg356-reaper-drive.worktree.test.ts case proves it — add one`,
+    );
+  }
+  assert.deepEqual(
+    [...covered].filter((k) => !kinds.includes(k)),
+    [],
+    "the drive lane asserts retain-by-design for a kind production no longer retains",
+  );
+});
