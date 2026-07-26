@@ -2,101 +2,121 @@
 id: FG-625
 type: story
 status: active
-title: "review-loop deadlock: the fixer's uncommitted diff makes the extended tier refuse, so a fix round can never pass verification"
+title: "review-loop fix rounds stop verification_failed and leave fixes uncommitted without naming the failed check or output"
 created: 2026-07-25
 ---
 
 ## Problem
 
-`forge review-loop` cannot complete a fix round in this repo. The loop's own sequencing deadlocks
-against the release-build tests' clean-checkout precondition:
+`forge review-loop` has twice produced a correct fixer diff, then stopped
+`verification_failed` and left the diff uncommitted. The durable report says only:
 
-1. The reviewer returns `needs_fix` with a finding.
-2. The fixer edits source. The loop does **not** commit yet — it commits only after verification passes.
-3. Verification runs the extended tier against the working tree, which now carries the fixer's
-   **uncommitted** changes.
-4. The FG-569 / FG-575 / FG-580 release-build tests refuse to build from a dirty checkout.
-5. Verification fails → the loop stops `verification_failed` → the fix is **left uncommitted**.
+```
+fix left uncommitted (verification failed): <paths>
+```
 
-The fix can never be committed, no matter how correct it is.
+It does not name the failing verification step, command, tier, exit status, or output. The actual
+cause of the two observed failures is therefore **unknown**.
+
+The initial diagnosis blamed the release integration tests' clean-builder precondition. That was an
+inference from the fixer's separate `forge-test --integration` run, not evidence from review-loop's
+own failing verifier. The ticket must not turn that inference into an implementation direction.
+
+## Two verification paths — do not conflate them
+
+`buildReviewLoopDeps` has two distinct local-verification paths:
+
+1. **Round-entry verification** — `verifyWithReuse()` in
+   `src/cli/commands/review-loop.ts`. It checks tree state first. A dirty tree runs
+   `scriptsForVerification()`, which retains `test:extended` whenever the derived required-gate list
+   has more than one entry. Measured for this project on 2026-07-25:
+
+   ```
+   requiredHostGate = "npm run test:all"
+   deriveRequiredGateList(...) = ["npm run test:all", "npm run test:extended"]
+   extendedIsRequired = true
+   ```
+
+   Therefore a dirty tree runs the extended tier by default; `--local-extended` is not required.
+
+2. **Post-fixer, pre-commit verification** — `fix()` after its scope-guard reverts. It calls
+   `runVerify(localFallbackScripts())`. That is the fast tier (`typecheck` + `test`) unless
+   `--local-extended` was explicitly requested. If this verification fails, `fix()` returns only
+   `{ verificationFailed: true, dirtyPaths }`; it discards `verification.steps`, including every
+   failed step's output.
+
+The operator message `fix left uncommitted (verification failed)` comes from path 2. On the resulting
+FG-559 tree, the two path-2 commands were rerun directly:
+
+```
+npm run --silent typecheck  # exit 0
+npm run --silent test       # exit 0, 2785/2785
+```
+
+Those later passes do not prove what happened during review-loop. They prove only that the previously
+asserted release-tier mechanism does not explain the recorded path-2 stop.
 
 ## Evidence
 
-Observed live on `run-review-loop-fg-559-fdc4ce` (FG-559, 2026-07-25).
+Observed on two clean-start FG-559 runs:
 
-The fixer's own result:
+- `run-review-loop-fg-559-fdc4ce` — reviewer found the missing reconcile classification; the correct
+  fix was committed by hand as `aba8d32`.
+- `run-review-loop-fg-559-632048` — reviewer found the `FORGE_SKIP_GIT_PROBE` bypass; the correct fix
+  was committed by hand as `7ef7141`.
 
-> Full `forge-test --integration` reports 3857/3897 with **39 failures, ALL in the FG-569/FG-575/FG-580
-> release-build files, which refuse to build from a dirty checkout**; stashing the working tree makes
-> `src/v2/release.integration.test.ts` pass 36/36, so those are an uncommitted-tree precondition, not a
-> regression from this diff.
+Both runs began at SHAs with all required CI checks green. In both, the fixer completed and left a
+concrete in-scope diff. In both, review-loop stopped `verification_failed`, reported only the dirty
+paths, and supplied no failed-step evidence. The five FG-559 review fixes ultimately required five
+hand commits; this missing evidence made the first two failures impossible to diagnose honestly and
+caused the release-tier misdiagnosis to be repeated across sessions.
 
-Everything else the fixer ran was green: typecheck clean, unit 2785/2785, worktree 239/239, the two
-targeted integration files green, plus an anti-regression proof (stash `reconcile.ts` → the two new
-tests fail; restore → they pass).
+FG-617 remains closed. Its safe refusal when an operator manually runs the release tier from a dirty
+builder checkout is a separate accepted limitation. Do not reopen or fold it into this ticket unless
+new path-2 evidence actually identifies that tier as the cause.
 
-The loop reported:
+## Direction (decided)
 
-```
-- **stop reason:** verification_failed
-- **closeable:** no
-- fix left uncommitted (verification failed): docs/concepts.md, src/v2/crash-points.test.ts,
-  src/v2/fg530-crash-matrix.integration.test.ts, src/v2/fg530-harness.ts,
-  src/v2/fg559-git-unavailable-classification.integration.test.ts, src/v2/reconcile.ts
-```
+**Evidence first. Do not change commit ordering or release-test behavior on an unproven cause.**
 
-The finding itself was real and the fix was correct — it was committed by hand as `aba8d32` after the
-loop gave up, which is precisely the manual relay `review-loop` exists to remove.
+1. Preserve the complete post-fixer `VerificationResult` when verification fails.
+2. Carry the failed step name, command/tier, and bounded output through `FixDispatch`, `RoundRecord`,
+   the durable review-loop note, and the `review_loop.verification_finished` event (or an equally
+   queryable dedicated post-fix verification event).
+3. Reproduce one correct-fix round and one deliberately failing-fix round with that instrumentation.
+4. Use the resulting evidence to fix the demonstrated cause. If the cause differs between the two
+   historical shapes, split only after the evidence proves two independent defects.
 
-## Why this is new
+Do not:
 
-FG-575 (shipped 2026-07-24, `9a73105`) added the assertion that the release tier never builds from a
-dirty invoking checkout. That assertion is correct and should stay. But it converted a previously
-tolerable condition — a dirty tree during verification — into a hard refusal, and nothing in
-`review-loop` was updated to account for it.
-
-Related, deliberately NOT reopened: FG-617 recorded the same refusal as an accepted limitation for the
-operator-runs-tests case, which it is. This ticket is different scope — the refusal structurally breaks
-an automated loop, which FG-617's body never considered.
-
-## Direction (not decided)
-
-- **Commit the fixer's work before verifying**, then verify the committed tree. Matches what a human
-  does, and what had to be done by hand here. Needs a story for a round whose verification then fails —
-  amend, revert, or leave the commit and stop.
-- **Verify in a clean worktree** at the fixer's proposed tree rather than in the invoking checkout.
-- **Have the loop's verification skip the release tier**, since a review round is not a release. Cheapest
-  and most targeted, but a real coverage reduction inside the loop — the gate would no longer be the
-  same gate CI runs.
-
-Whichever is chosen, the loop must not silently discard a correct fix.
+- Commit before verification merely to satisfy a guessed clean-tree precondition.
+- Skip `test:extended`.
+- Relax FG-575's checkout-state assertion.
+- Claim the release tier caused the historical stop unless the newly preserved step output says so.
 
 ## Acceptance criteria
 
-- A `review-loop` round that produces a correct fix in this repo reaches a committed fix and a
-  `passed`/`closeable` verdict without hand-intervention. Demonstrated on a real ticket, not a fixture.
-- A round whose fix is genuinely BAD still fails verification and does not land — the deadlock fix must
-  not become a way to commit unverified work.
-- The FG-575 clean-checkout assertion is unchanged and still passes.
-- The chosen behavior is documented in `docs/how-to-testing.md` or the review-loop docs, including what
-  happens to the commit when a round fails verification.
+- A post-fixer verification failure names every failed step and records its command/tier and useful
+  output in the run note and durable events. `verification_failed` with only dirty paths is impossible.
+- Unit/integration coverage drives a post-fixer verifier where one step passes and another fails, and
+  proves the failing step and its output survive through `FixDispatch`, `RoundRecord`, and rendering.
+- Round-entry dirty-tree verification and post-fixer verification are covered separately, with their
+  actual tier selection asserted so they cannot be conflated again.
+- A real reproduction of the FG-559 shape records the previously missing evidence. The ticket's root
+  cause and implementation direction are updated from that evidence before any behavioral fix lands.
+- After the demonstrated cause is fixed, a correct fixer diff is verified and committed without hand
+  intervention.
+- A deliberately bad fixer diff still fails verification, remains uncommitted, and reports the exact
+  failing evidence.
+- No required tier is skipped, verify-before-commit remains intact, and FG-575's strict
+  invoking-checkout invariant is unchanged.
 
----
+## Corrections recorded
 
-## Correction: the deadlock is UNCONDITIONAL, not situational (2026-07-25)
-
-Filed on the assumption that a dirty tree at loop start was a contributing factor. It is not.
-
-Re-ran `review-loop` from a verified-clean tree (`run-review-loop-fg-559-632048`, tip `61866dac`, all
-nine CI checks green at that exact sha). It deadlocked identically: reviewer returned `needs_fix`, the
-fixer produced a correct fix, verification failed, fix left uncommitted.
-
-The mechanism is structural. The fixer ALWAYS dirties the tree — that is what a fixer does — and
-verification always runs before the commit. So **every round that produces a fix deadlocks, regardless
-of the tree's state when the loop starts.** Only a round in which the reviewer passes outright can
-reach a verified state.
-
-Both rounds observed so far produced genuine, correct findings (`reconcile.ts:485` not honoring
-`container.git_unavailable`; the `FORGE_SKIP_GIT_PROBE=1` bypass contradicting the no-silent-degradation
-criterion). Both fixes had to be committed by hand. The loop is currently usable as a REVIEWER and
-unusable as a LOOP.
+- The original filing asserted that release integration failures caused the post-fixer stop. That was
+  unsupported: the cited integration run was performed separately by the fixer.
+- A later amendment narrowed the defect to `--local-extended`. That was also wrong:
+  `verifyWithReuse()` runs `scriptsForVerification()` on any dirty tree, and this project's required
+  gate list includes `test:extended` without the flag.
+- Neither correction explains the observed path-2 failure. Until the discarded verification result is
+  preserved, the honest root cause is **unknown**.
