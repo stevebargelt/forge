@@ -16,7 +16,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
@@ -277,6 +277,33 @@ test("fg356: a crashed task with UNCOMMITTED work is retained, and the evidence 
   assert.equal(evs[0]!.payload["workspacePath"], wt, "durable evidence must name WHERE the work is");
   assert.equal(evs[0]!.payload["branch"], worktreeBranchName(RUN_ID, "t-dirty"), "and on which branch");
   assert.deepEqual(evs[0]!.payload["details"], ["?? uncommitted-sentinel.txt"]);
+});
+
+test("fg356: a crashed task whose only output is GIT-IGNORED is retained — ignored files are unrecovered work, not noise", () => {
+  const repo = makeRepo();
+  writeFileSync(join(repo, ".gitignore"), "out/\n");
+  git(repo, "add", ".gitignore");
+  git(repo, "commit", "-q", "-m", "ignore agent output dir");
+  startRunFor(repo);
+
+  const wt = addWorktree(repo, "t-ignored");
+  mkdirSync(join(wt, "out"));
+  writeFileSync(join(wt, "out", "report.json"), '{"finding":"only copy of this"}\n');
+  // Tracked-clean and fully merged: every other capture check PASSES, so the
+  // ignored probe is the only thing standing between this output and removal.
+  assert.equal(git(wt, "status", "--porcelain").trim(), "");
+  insertTerminalTask("t-ignored", { status: "failed", worktreePath: wt, failureKind: "orphaned" });
+
+  reconcileRun(RUN_ID, () => false);
+
+  assert.ok(existsSync(wt), "a workspace holding ignored agent output is not provably captured");
+  assert.ok(existsSync(join(wt, "out", "report.json")), "and the output itself survives");
+
+  const evs = workspaceEvents("t-ignored");
+  assert.equal(evs.length, 1);
+  assert.equal(evs[0]!.type, "task.workspace_retained");
+  assert.equal(evs[0]!.payload["reason"], "uncommitted_work");
+  assert.deepEqual(evs[0]!.payload["details"], ["!! out/"]);
 });
 
 test("fg356: a crashed task whose COMMITS were never captured is retained — a clean tree is not proof the work landed", () => {

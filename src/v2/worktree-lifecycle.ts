@@ -404,7 +404,8 @@ export function classifyWorkspace(workspacePath: string): WorkspaceSubstrate {
 }
 
 export type WorkspaceRetainReason =
-  /** Uncommitted or untracked files in the tree — work that exists nowhere else. */
+  /** Uncommitted, untracked or ignored files in the tree — work that exists
+   *  nowhere else. */
   | "uncommitted_work"
   /** The task's commits are not reachable from the project's HEAD — never captured. */
   | "unmerged_commits"
@@ -426,12 +427,17 @@ export type WorkspaceReapOutcome =
       details: string[];
     };
 
-/** `git status --porcelain` inside the workspace. undefined when git could not
- *  answer at all — indistinguishable from "there may be work here", so callers
- *  treat it as unsafe rather than clean. */
+/** `git status --porcelain --ignored` inside the workspace. undefined when git
+ *  could not answer at all — indistinguishable from "there may be work here", so
+ *  callers treat it as unsafe rather than clean.
+ *
+ *  `--ignored` because an agent's output frequently lands on paths the project
+ *  ignores (build artifacts, scratch dirs, logs). Those files exist nowhere but
+ *  this workspace, so a tracked-clean tree holding only ignored output is NOT
+ *  proof of capture — probing without it would force-remove unrecovered work. */
 function uncommittedFiles(workspacePath: string): string[] | undefined {
   try {
-    return execFileSync("git", ["status", "--porcelain"], {
+    return execFileSync("git", ["status", "--porcelain", "--ignored"], {
       cwd: workspacePath,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
@@ -473,7 +479,7 @@ function isAncestorOfHead(projectDir: string, commit: string): boolean {
  *  no-op, so repeated calls are safe.
  *
  *  Safe means all of: the substrate is a linked worktree, the tree is clean (no
- *  uncommitted and no untracked files), and every commit the task's branch/HEAD
+ *  uncommitted, untracked or ignored files), and every commit the task's branch/HEAD
  *  points at is reachable from projectDir's HEAD. Anything else — including
  *  anything git declines to answer — is RETAINED with the reason, so the caller
  *  can record where the work still lives. */
