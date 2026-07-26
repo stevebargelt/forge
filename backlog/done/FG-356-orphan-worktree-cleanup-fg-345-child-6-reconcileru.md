@@ -58,9 +58,14 @@ now TWO kinds of per-task workspace to reap, not one:
   is a directory removal plus disposal of its private branch/refs, and the clone's alternates point back
   into the parent object store, so removal must not be attempted while the parent is mid-`gc`.
 
-**This ticket owns the reaper for BOTH.** FG-621 explicitly does not implement a second one. Whichever
-child lands first should leave the other substrate's hook as a stated, tested no-op rather than an
-unhandled case.
+**FG-356 reaps linked worktrees and explicitly RETAINS private clones; FG-621 owns clone reaping.**
+This ticket's reaper disposes of the linked-worktree substrate only. A private clone is classified as
+its own substrate and retained with reason `private_clone_substrate` — a stated, tested no-op rather
+than an unhandled case — and its removal is FG-621's to implement.
+
+*(Corrected after shipping: this paragraph previously claimed FG-356 owned the reaper for both
+substrates and that FG-621 would not implement one. That contradicted the corrected scope recorded
+below and the behavior actually shipped in `f88de02`.)*
 
 Recovery half, carried down from FG-345's default-on acceptance list:
 
@@ -133,7 +138,7 @@ remote head) after seven loops and five reachable-path defects found and fixed. 
 | Idempotent across repeated reconciles; `forge-test` green | `fg356: repeated reconciles are idempotent — reaping an already-gone workspace is a no-op, and retention is recorded once`; `fg356 drive: one pass over a run of mixed dispositions settles all of them, and the second pass is a fixpoint`; `fg356 evidence: a retain event survives a store close + reopen, and the reopened process does not re-record it`. Suite green at `d9acfea`: unit 2785, worktree 291, integration 3904 (1 pre-existing environment-gated skip), typecheck clean — and all nine CI jobs green | met |
 | A private clone is CLASSIFIED as its own substrate and RETAINED with reason `private_clone_substrate` — never silently unhandled, never removed by this reaper *(corrected criterion — see the Added acceptance note)* | `fg356: a mutating agent's PRIVATE CLONE is an explicit no-op, not an unhandled path (FG-621 owns clone reaping)`; `fg356 evidence: a private clone is retained for its SUBSTRATE even when its tree is clean and its commits are captured`. **Clone REAPING is deliberately not implemented here and this AC does not claim it is** — FG-621 owns that substrate, and FG-345's default-on gate is not closed by this ticket | met |
 | A crashed task whose work was never captured is RETAINED, with durable evidence naming the workspace path and branch | `fg356: a crashed task with UNCOMMITTED work is retained, and the evidence names the workspace path and branch`; `fg356: a crashed task whose COMMITS were never captured is retained — a clean tree is not proof the work landed`; and four adversarial drive-lane cases over `complete` tasks (the status the old FG-530 invariant EXEMPTED): uncaptured commits, uncommitted work, merged-then-rolled-back, and a workspace HEAD advanced past the merged branch tip. Every disposition in the drive lane is additionally held to `assertNoWorkDestroyed` — if a workspace is gone, every file it held must be in `projectDir` byte for byte | met |
-| Ignored files count as unrecovered work; a probe without `--ignored` is insufficient | `fg356: a crashed task whose only output is GIT-IGNORED is retained — ignored files are unrecovered work, not noise`. Non-vacuous by construction: the test asserts plain `git status --porcelain` is EMPTY first, so `--ignored` is provably the only thing standing between that output and removal (`uncommittedFiles`, `src/v2/worktree-lifecycle.ts`) | met |
+| Ignored files count as unrecovered work; a probe without `--ignored` is insufficient | `fg356: a crashed task whose only output is GIT-IGNORED is retained — ignored files are unrecovered work, not noise`. Non-vacuous by construction: the test asserts plain `git status --porcelain` is EMPTY first, so `--ignored` is provably the only thing standing between that output and removal (`statusPorcelainIgnored`, `src/v2/worktree-lifecycle.ts`) | met |
 | A locked worktree is unlocked (or `-f -f`) and removed rather than wedging the reaper | `fg356: a LOCKED worktree is unlocked and removed rather than wedging the reaper` — the fixture asserts a single `--force` genuinely refuses first, so it cannot pass vacuously. `forceRemoveWorktree` unlocks (already-unlocked is a no-op) then uses the double-force form | met |
 | Both substrates covered; the not-yet-implemented one is an asserted no-op, not an unhandled path | The private-clone no-op test above, plus `fg356: a workspace with an UNINITIALIZED submodule entry still reaps — the shape git worktree add actually produces` (pins that the submodule retain rule is a no-op on forge's real path) and `fg356: a workspace with a CHECKED-OUT submodule is retained` | met |
 
