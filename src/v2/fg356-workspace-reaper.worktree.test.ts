@@ -151,7 +151,49 @@ afterEach(() => {
   }
 });
 
+/** The duplicate-primary shape: a pending row in a phase another primary
+ *  already completed, provisioned far enough to own a worktree before the rerun
+ *  that stranded it. reconcileRun fails it; the reaper must see that. */
+function insertPendingPrimary(id: string, worktreePath: string): void {
+  insertTask({
+    id,
+    runId: RUN_ID,
+    phase: "build",
+    agentRole: "engineer",
+    status: "pending",
+    taskPackage: { taskId: id, runId: RUN_ID, phase: "build", role: "engineer", inputs: {}, composedSystemPrompt: "" },
+    createdAt: "2026-07-26T00:00:00Z",
+    worktreePath,
+  });
+}
+
 // ── the reap path ─────────────────────────────────────────────────────────────
+
+test("fg356: a duplicate primary this same reconcile finalizes is reaped by this same reconcile — not deferred to a next pass that may never come", () => {
+  const repo = makeRepo();
+  startRunFor(repo);
+  const wt = addWorktree(repo, "t-dup");
+  commitInWorktree(wt, "agent-work.ts");
+  mergeBack(repo, "t-dup"); // captured — the tree holds nothing unique
+  insertPendingPrimary("t-dup", wt);
+  insertTerminalTask("t-dup-winner", { status: "complete" });
+
+  const result = reconcileRun(RUN_ID, () => false);
+
+  assert.ok(
+    result.taskChanges.some((c) => c.taskId === "t-dup" && c.reason === "orphaned_duplicate_primary"),
+    "the duplicate must be finalized by this pass, or the test proves nothing about ordering",
+  );
+  assert.equal(getTask("t-dup")!.status, "failed");
+  assert.equal(existsSync(wt), false, "ONE reconcile must both finalize the orphan and sweep the tree it left");
+  assert.equal(branchExists(repo, "t-dup"), false);
+
+  const evs = workspaceEvents("t-dup");
+  assert.equal(evs.length, 1, "exactly one durable workspace event");
+  assert.equal(evs[0]!.type, "task.workspace_reaped");
+  assert.equal(evs[0]!.payload["workspacePath"], wt);
+  assert.equal(evs[0]!.payload["taskStatus"], "failed");
+});
 
 test("fg356: an ORPHANED task's worktree and branch are gone after the next reconcileRun", () => {
   const repo = makeRepo();

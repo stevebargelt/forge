@@ -1347,6 +1347,27 @@ export function reconcileRun(
     }
   } catch { /* FG-459: never throw — the lock probe / task scan must not abort reconcile */ }
 
+  // Orphaned duplicate primaries: a pending primary in a phase that another
+  // primary already completed. Produced by the duplicate-primary bug (`forge
+  // retry` mints a parallel pending primary; a different rerun path completes the
+  // phase first, stranding the retry's row). Left alone it never runs yet keeps
+  // the run out of "complete" (it's non-terminal pending work) and, before the
+  // ready-queue was made duplicate-tolerant, blocked the next phase. Finalize it
+  // as failed/orphaned so the run can advance and complete.
+  // FG-459: finalizeOrphanedPrimaries is itself never-throw (see its own
+  // per-item guard), but guard the call site too so an unexpected throw can't
+  // skip the run-level completion check below.
+  //
+  // FG-356: this runs BEFORE the workspace reaper, not after. A duplicate
+  // primary that was provisioned before it was stranded has a recorded
+  // worktree; finalizing it after the reaper's terminal-status scan would leave
+  // that tree standing until some later lifecycle command happened to reconcile
+  // the run again — and if none ever came, forever. Failing it first puts it in
+  // the very sweep that is meant to catch it.
+  try {
+    for (const c of finalizeOrphanedPrimaries(runId)) taskChanges.push(c);
+  } catch { /* FG-459: never throw */ }
+
   // ── FG-356: the orphan workspace reaper ────────────────────────────────────
   // Every other cleanup in this file fires on the transition it is attached to,
   // which is exactly why workspaces leak: the crash that stranded the task is
@@ -1435,20 +1456,6 @@ export function reconcileRun(
       });
     } catch { /* FG-459: never throw — one task's workspace must not abort the pass */ }
   }
-
-  // Orphaned duplicate primaries: a pending primary in a phase that another
-  // primary already completed. Produced by the duplicate-primary bug (`forge
-  // retry` mints a parallel pending primary; a different rerun path completes the
-  // phase first, stranding the retry's row). Left alone it never runs yet keeps
-  // the run out of "complete" (it's non-terminal pending work) and, before the
-  // ready-queue was made duplicate-tolerant, blocked the next phase. Finalize it
-  // as failed/orphaned so the run can advance and complete.
-  // FG-459: finalizeOrphanedPrimaries is itself never-throw (see its own
-  // per-item guard), but guard the call site too so an unexpected throw can't
-  // skip the run-level completion check below.
-  try {
-    for (const c of finalizeOrphanedPrimaries(runId)) taskChanges.push(c);
-  } catch { /* FG-459: never throw */ }
 
   // Run-level: an active run with no remaining non-terminal work is no longer in
   // flight. We only complete it when there are no further workflow steps to come
