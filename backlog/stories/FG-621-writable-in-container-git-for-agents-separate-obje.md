@@ -75,12 +75,16 @@ distinction, and it is why the writable path needs a separate repository rather 
    (`src/v2/dependency-provisioning.ts`) resolves the SAME lockfile hash and the SAME already-populated
    volume that `spawn.ts` mounts today. Confirm this holds for the clone path; the `cp -R node_modules`
    half of the proven disposable-clone workaround should be redundant. Relates FG-376.
+7. **Private-clone lifecycle and recovery.** FG-621 owns cleanup for the substrate it introduces.
+   Extend the existing `reconcileRun` orphan-reaper path rather than creating a second reaper. A private
+   clone may be removed only after Forge proves that it owns the workspace, that no uncaptured tracked,
+   untracked, or ignored output remains, and that every relevant clone commit is reachable from
+   Forge-owned state. Anything not proven safe is retained with durable evidence naming the path and
+   reason. FG-356's linked-worktree cleanup remains unchanged; its shipped
+   `private_clone_substrate` classification is the fail-safe handoff to this implementation.
 
 ## Out of scope
 
-- **Orphan/crash cleanup and recovery — FG-356.** That ticket must now reap BOTH substrates (linked
-  worktrees for non-mutators, private clones for mutators). Coordinate; do not implement a second
-  reaper here.
 - **The post-merge integration gate** (build + test the MERGED result). FG-345 hard constraint 1:
   worktrees and clones catch same-file TEXTUAL races only — a cross-file semantic break merges CLEAN
   with zero conflict. Isolation is necessary but NOT sufficient. Separate story.
@@ -88,7 +92,9 @@ distinction, and it is why the writable path needs a separate repository rather 
   Stays an FG-345 default-on blocker owned by the integration publisher.
 - **Periodic WIP checkpointing.** A later resilience improvement, explicitly not a blocker for
   restoring private commit authority.
-- **Flipping worktree/isolation default-on.** Blocked until this ticket AND FG-356 are both proven.
+- **Flipping worktree/isolation default-on.** FG-356 is closed and proven. The flip remains blocked on
+  this ticket plus FG-345's post-merge gate, publication serialization, remaining contracts, and
+  dogfood evidence.
 
 ## Acceptance criteria
 
@@ -104,27 +110,36 @@ distinction, and it is why the writable path needs a separate repository rather 
    inferred.
 5. Merge-back retrieves the agent's own commits via fetch from the private clone, with the host-side
    safety-net commit still covering the fully-uncommitted case.
-6. The tree Forge publishes is byte-for-byte the tree that passed the authoritative gates.
+6. Through the gate path that exists when this ticket starts, the tree Forge publishes is
+   byte-for-byte the tree that passed those gates. This criterion requires candidate identity and
+   receipt continuity; it does **not** pull FG-345's new post-merge integration gate into this ticket.
 7. **Regression:** a non-mutating/red agent still reads the history it needs (`git log` / `diff` /
    `show`) and still cannot commit or update a ref — FG-559's substrate is unchanged for that class.
 8. Dependency provisioning resolves the same lockfile hash and reuses the same populated volume for a
    clone as for the current worktree path.
-9. Dogfooded forge-on-forge on a real run before this ticket closes.
-10. `forge-test` green; required CI checks (`test` and `test-extended`) green.
+9. An orphaned private clone is removed only when an ownership proof based on its resolved alternates
+   target matches the parent object store, its status including ignored files is clean, and its HEAD,
+   checked-out branch tip, and other task-relevant commits are reachable from Forge-owned state.
+10. A private clone that fails any ownership, capture, cleanliness, or reachability proof is retained.
+    `forge show` exposes a durable retention event with a human-readable reason and the retained path.
+    A stale or misassigned workspace path cannot cause the live source checkout, an ordinary clone, or
+    another task's private clone to be removed.
+11. Dogfooded forge-on-forge on a real run before this ticket closes.
+12. `forge-test` green; required CI checks (`test` and `test-extended`) green.
 
 ## Refs
 
 FG-345 (parent decision + authority contract), FG-559 (read-only parent `.git` mount, and the
 experiment that produced every measurement above), FG-351 (Task workspace state in DB), FG-352
-(retain-on-conflict), FG-356 (cleanup/recovery), FG-376 (dependency parity), FG-340 (agents do not
-publish), `docs/invariants.md` #9.
+(retain-on-conflict), FG-356 (shipped linked-worktree cleanup and fail-safe private-clone retention
+classification), FG-376 (dependency parity), FG-340 (agents do not publish), `docs/invariants.md` #9.
 
 ## Prior art from an FG-356 review round (2026-07-26) — do not re-derive this
 
 During FG-356's review-loop, a fixer was handed a contradictory acceptance line (since corrected) and
-implemented clone reaping inside FG-356. That work was DISCARDED as out of scope and unvalidated — it
-died before any test ran, and it broke the retain-reason enum FG-356's tests and docs depend on. Two
-ideas in it are worth keeping for this ticket:
+implemented clone reaping inside FG-356. That work was DISCARDED as outside FG-356's scope and
+unvalidated — it died before any test ran, and it broke the retain-reason enum FG-356's tests and docs
+depend on. Two ideas in it are worth keeping for this ticket:
 
 1. **The alternates file is a proof of ownership a main checkout cannot forge.** Classification alone
    cannot distinguish a private clone from the operator's live source — both have a `.git` DIRECTORY.
