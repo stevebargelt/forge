@@ -434,7 +434,7 @@ export type WorkspaceReapOutcome =
       details: string[];
     };
 
-/** `git status --porcelain --ignored` inside the workspace. undefined when git
+/** `git status --porcelain --ignored` in one working tree. undefined when git
  *  could not answer at all — indistinguishable from "there may be work here", so
  *  callers treat it as unsafe rather than clean.
  *
@@ -442,10 +442,10 @@ export type WorkspaceReapOutcome =
  *  ignores (build artifacts, scratch dirs, logs). Those files exist nowhere but
  *  this workspace, so a tracked-clean tree holding only ignored output is NOT
  *  proof of capture — probing without it would force-remove unrecovered work. */
-function uncommittedFiles(workspacePath: string): string[] | undefined {
+function statusPorcelainIgnored(treePath: string): string[] | undefined {
   try {
     return execFileSync("git", ["status", "--porcelain", "--ignored"], {
-      cwd: workspacePath,
+      cwd: treePath,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     })
@@ -455,6 +455,53 @@ function uncommittedFiles(workspacePath: string): string[] | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** Checked-out submodules of a working tree, as paths relative to it, deepest
+ *  ones included. `git submodule status` marks an uninitialized entry with a
+ *  leading `-`: its directory is empty, so it holds nothing to lose. undefined
+ *  when git could not answer. */
+function checkedOutSubmodules(treePath: string): string[] | undefined {
+  try {
+    const out = execFileSync("git", ["submodule", "status", "--recursive"], {
+      cwd: treePath,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const paths: string[] = [];
+    for (const line of out.split("\n")) {
+      if (!line || line.startsWith("-")) continue;
+      // "<marker><sha> <path>[ (<describe>)]" — the describe suffix is optional
+      // and the path may contain spaces, so take everything between them.
+      const m = /^.[0-9a-f]+ (.*?)(?: \([^)]*\))?$/.exec(line);
+      if (m?.[1]) paths.push(m[1]);
+    }
+    return paths;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Everything in the workspace that exists nowhere else, submodules included.
+ *
+ *  The superproject's own status does NOT recurse: a submodule whose only
+ *  content is git-ignored reports clean there, so probing the top level alone
+ *  would force-remove an agent's output out of a submodule that looks pristine.
+ *  Each checked-out submodule is therefore probed on its own, and a submodule
+ *  git cannot answer for is dirt in itself rather than a clean answer. */
+function uncommittedFiles(workspacePath: string): string[] | undefined {
+  const top = statusPorcelainIgnored(workspacePath);
+  if (top === undefined) return undefined;
+
+  const submodules = checkedOutSubmodules(workspacePath);
+  if (submodules === undefined) return ["git submodule status could not be read in the workspace"];
+
+  const nested = submodules.flatMap((sub) => {
+    const inner = statusPorcelainIgnored(join(workspacePath, sub));
+    return (inner ?? ["git status could not be read"]).map((l) => `${sub}: ${l}`);
+  });
+
+  return [...top, ...nested];
 }
 
 function resolveCommit(cwd: string, rev: string): string | undefined {
