@@ -44,6 +44,16 @@ export type EventType =
   // recovery is always distinguishable from FG-337 narrative synthesis, which
   // never emits this event.
   | "task.result_recovered_from_stream"
+  // FG-356: reconcile's orphan workspace reaper disposed of a terminal task's
+  // workspace and branch after proving the work in it was captured — the sweep
+  // for a tree whose own dispatch-path cleanup died with its forge process.
+  | "task.workspace_reaped"
+  // FG-356: the same pass REFUSED to dispose of one, and this is the durable
+  // record of where that work still lives: the workspace path, the branch, the
+  // substrate, and why (uncommitted work, unmerged commits, a retain-by-design
+  // failure kind such as merge_conflict, or FG-621's not-yet-implemented private
+  // clone substrate). Emitted once per (task, reason).
+  | "task.workspace_retained"
   | "task.progress"
   | "task.artifact"
   | "task.decision"

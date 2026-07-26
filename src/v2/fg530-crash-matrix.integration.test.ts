@@ -1308,7 +1308,7 @@ test("FG-530 invariant 1 [multi-red, real path]: a step declaring TWO gating red
 
 // ── invariant 4: the snapshot covers worktrees, not just result.json ───────────
 
-test("FG-530 invariant 4 [worktree discard]: a worktree that existed at the kill and is GONE after recovery on a NON-complete task is flagged; the same removal on a complete (proven-merged) task is not", () => {
+test("FG-530 invariant 4 [worktree discard]: a removed worktree whose work is NOWHERE ELSE is flagged; the same removal is sanctioned once the work is in projectDir (FG-356)", () => {
   ensureRuntime();
   writeWorkflowYaml(PLAIN_WF.name, PLAIN_YAML);
   const projectDir = makeTmpDir();
@@ -1316,6 +1316,12 @@ test("FG-530 invariant 4 [worktree discard]: a worktree that existed at the kill
 
   // Worktree mode is macOS-only (preflightWorktreeGate), so no Linux matrix cell
   // can produce a real worktree — the checker's teeth are proven here instead.
+  //
+  // FG-356 moved the sanctioned-removal line off the task's STATUS and onto the
+  // work: reconcile now reaps any terminal task's workspace once the work in it is
+  // captured, including a tree a crashed task never wrote into. So the two fixtures
+  // below differ by where their file ENDED UP, not by status — a status-shaped
+  // exception would have hollowed the invariant out, and this is what replaced it.
   const mk = (id: string, status: TaskStatus): string => {
     insertTask({
       id,
@@ -1327,11 +1333,15 @@ test("FG-530 invariant 4 [worktree discard]: a worktree that existed at the kill
       createdAt: nowIso(),
     });
     const wt = makeTmpDir();
+    writeFileSync(join(wt, `${id}.ts`), "export const work = 1;\n");
     setTaskWorktreePath(id, wt);
     return wt;
   };
   const crashedWt = mk("task-build-crashed", "failed");
   const mergedWt = mk("task-build-merged", "complete");
+  // Only the merged task's work reached the project — that, and nothing about the
+  // row, is what makes removing its tree safe.
+  writeFileSync(join(projectDir, "task-build-merged.ts"), "export const work = 1;\n");
 
   const pre = capturePersistedWork(runId);
   assert.deepEqual(
@@ -1343,10 +1353,20 @@ test("FG-530 invariant 4 [worktree discard]: a worktree that existed at the kill
   rmSync(crashedWt, { recursive: true, force: true });
   rmSync(mergedWt, { recursive: true, force: true });
 
-  const violations = checkPersistedWorkNeverDiscarded(pre);
-  assert.equal(violations.length, 1, "exactly the failed task's worktree is a discard; the merged one's removal is sanctioned");
+  const violations = checkPersistedWorkNeverDiscarded(pre, projectDir);
+  assert.equal(violations.length, 1, "the uncaptured work is a discard; removing the captured one's tree is sanctioned");
   assert.equal(violations[0]!.invariant, "4-persisted-work-never-discarded");
   assert.match(violations[0]!.detail, /worktree for task task-build-crashed .* is GONE after recovery/);
+  assert.match(violations[0]!.detail, /task-build-crashed\.ts/, "and it must name the file that was lost, not just the directory");
+
+  // With no projectDir to check against — the matrix's own posture, and the
+  // detection suite's — capture cannot be proven, so BOTH removals are flagged.
+  // The checker never assumes work landed somewhere it cannot see.
+  assert.equal(
+    checkPersistedWorkNeverDiscarded(pre).length,
+    2,
+    "an unverifiable removal is treated as a discard, not waved through",
+  );
 });
 
 // ── FG-536: the watcher window, with the container still RUNNING ──────────────

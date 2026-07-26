@@ -610,6 +610,30 @@ const ALLOWLIST: Allow[] = [
       "is authoritative and idempotent); a crash after it leaves the event without consequence until the same next-pass " +
       "landing. Nothing reads this event to decide a transition, so there is no window to strand or ship through.",
   },
+  // ── reconcile.ts: FG-356's orphan workspace reaper ─────────────────────────
+  {
+    file: "v2/reconcile.ts",
+    fn: "reconcileRun",
+    call: "logEvent",
+    near: "task.workspace_reaped",
+    reason:
+      "the disposal record written AFTER the workspace is already gone from disk — append-only evidence with no paired " +
+      "status write (the task was already terminal before this pass looked at it). A crash before the append leaves a " +
+      "reaped tree with no event, and the next pass finds the path absent and no-ops: the only loss is a line of " +
+      "provenance about a workspace that provably held nothing unrecovered, never state. Nothing reads it to decide a " +
+      "transition. The irreversible half — the removal itself — is gated on proof, not on this write.",
+  },
+  {
+    file: "v2/reconcile.ts",
+    fn: "reconcileRun",
+    call: "logEvent",
+    near: "task.workspace_retained",
+    reason:
+      "the retention record for a workspace the reaper REFUSED to dispose of — append-only, and the refusal is the " +
+      "conservative outcome, so a crash on either side of it changes nothing on disk. The next pass re-derives the same " +
+      "refusal from the same git state and appends the event then (it is deduped per (task, reason), which is what keeps " +
+      "repeated reconciles at fixpoint).",
+  },
   // ── runNext.ts: the PRE-container dispatch path ─────────────────────────────
   // FG-530's covered surface is runNext's POST-container finalize path — the
   // sequence that turns an agent's result into lifecycle state. Everything below
