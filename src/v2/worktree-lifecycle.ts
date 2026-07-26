@@ -15,8 +15,8 @@
 // FORGE_NO_WORKTREES; the kill switch works at the feature-enable level so the
 // caller never reaches the gate.
 
-import { existsSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { findGitRoot } from "../util/git-root.js";
 import { WORKTREES_DIR, worktreeDir, integrationWorktreeDir } from "../util/paths.js";
@@ -94,6 +94,75 @@ export function preflightWorktreeGate(projectDir: string): void {
 }
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
+
+/** What a forceRemoveWorktree call actually established.
+ *
+ *  The two facts come apart exactly when `git worktree remove` FAILS and the
+ *  directory is gone anyway — a race, a partially-completed removal (git unlinks
+ *  the working tree before its registration, so a failure at the second step
+ *  leaves the first done), or a tree something else already deleted. Path
+ *  absence alone is therefore NOT proof that git completed the removal, and a
+ *  caller that needs that proof must read `gitRemoved`. */
+export type ForceRemoveWorktreeResult = {
+  /** `git worktree remove` exited 0: git unlinked the tree AND cleared its
+   *  `$GIT_DIR/worktrees` registration itself. */
+  gitRemoved: boolean;
+  /** The path is gone once this returns — however that came about. */
+  pathAbsent: boolean;
+};
+
+/** `git worktree remove` that survives a LOCKED worktree (FG-356).
+ *
+ *  A single `--force` still refuses a worktree git considers locked, so any tool
+ *  that adopts and locks one (Supacode does this under its tracked repo roots)
+ *  wedges every cleanup path here permanently. Unlock first — "not locked" is an
+ *  expected no-op, not an error — then use the double-force form, which is what
+ *  git actually requires for a locked tree.
+ *
+ *  Registration hygiene is handled HERE rather than at each call site: when the
+ *  removal does not cleanly succeed, the `$GIT_DIR/worktrees` entry can outlive
+ *  the directory, and a stale entry breaks later worktree operations on the
+ *  parent. `git worktree prune` is the remedy git provides, and it only ever
+ *  drops entries whose working tree is already missing — so a removal that
+ *  genuinely failed with the tree still on disk keeps its registration, and
+ *  pruning never widens what gets disposed of.
+ *
+ *  Best-effort and never throws: an already-gone worktree is a no-op. */
+export function forceRemoveWorktree(
+  projectDir: string,
+  worktreePath: string
+): ForceRemoveWorktreeResult {
+  try {
+    execFileSync("git", ["worktree", "unlock", worktreePath], {
+      cwd: projectDir,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+  } catch {
+    // Already unlocked (or not a registered worktree) — nothing to undo.
+  }
+
+  let gitRemoved = true;
+  try {
+    execFileSync("git", ["worktree", "remove", "--force", "--force", worktreePath], {
+      cwd: projectDir,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+  } catch {
+    // Best-effort: if the worktree is already gone, ignore.
+    gitRemoved = false;
+  }
+
+  if (!gitRemoved) {
+    try {
+      execFileSync("git", ["worktree", "prune"], {
+        cwd: projectDir,
+        stdio: ["ignore", "ignore", "ignore"],
+      });
+    } catch { /* fully best-effort */ }
+  }
+
+  return { gitRemoved, pathAbsent: !existsSync(worktreePath) };
+}
 
 export type CreateWorktreeResult = {
   worktreePath: string;
@@ -199,14 +268,7 @@ export function removeWorktreeIfSafe(
   // see dependency-provisioning.ts:removeDependencyVolumes for the explicit
   // prune entry point (not auto-invoked from here).
 
-  try {
-    execFileSync("git", ["worktree", "remove", "--force", worktreePath], {
-      cwd: projectDir,
-      stdio: ["ignore", "ignore", "ignore"],
-    });
-  } catch {
-    // Best-effort: if the worktree is already gone, ignore.
-  }
+  forceRemoveWorktree(projectDir, worktreePath);
 
   try {
     // Force-delete (-D) is safe here: FORGE_WORKTREES_EPHEMERAL=1 is the
@@ -316,21 +378,365 @@ export function cleanupFailedWorktreeSetup(
   // FIX3 (FG-376 review): no dependency-volume cleanup here — see
   // removeWorktreeIfSafe above for why a shared cache volume must not be
   // removed at individual worktree disposal.
+  // forceRemoveWorktree prunes the registration itself when the removal does not
+  // cleanly succeed, so there is nothing left to do here.
+  forceRemoveWorktree(projectDir, path);
+}
+
+// ── FG-356: the orphan workspace reaper ───────────────────────────────────────
+//
+// removeWorktreeIfSafe above is the DISPATCH-path disposal: it fires inline on a
+// step that merged cleanly, and it is a deliberate no-op otherwise. Nothing swept
+// the workspace of a task whose forge process DIED — the crash lane
+// (fg530-crash-worktree.worktree.test.ts) demonstrated the leak precisely: a kill
+// between the terminal status write and the cleanup call leaves a merged-and-done
+// tree that no later pass ever looks at. This is the reaper for that, driven off
+// the recorded workspace path on the Task row (never a filesystem scan).
+//
+// Two substrates, because FG-345 decided the workspace follows capability:
+//   • LINKED WORKTREE — non-mutating agents. Removed with `git worktree remove`.
+//   • PRIVATE `--shared` CLONE — mutating agents, being built in FG-621. NOT a
+//     registered worktree: `git worktree remove` does not apply to it and
+//     `git worktree list` never shows it. Reaping one is a directory removal plus
+//     disposal of its private refs, and its alternates point back into the parent
+//     object store — so it must not be removed while the parent is mid-`gc`.
+//     FG-621 owns that; this reaper's clone branch is an EXPLICIT, TESTED no-op.
+//
+// The substrate is read off the workspace itself rather than a column, so it is
+// right for both the trees forge creates today and the clones FG-621 will add. It
+// doubles as the safety catch that matters most: a main checkout (the operator's
+// live source) has a `.git` DIRECTORY, so it can never classify as a linked
+// worktree and can never be removed here.
+//
+// REMOVAL MUST BE PROVABLY SAFE, not best-effort (FG-345's recovery half). A
+// crashed task whose output was never captured is RETAINED and its path + branch
+// recorded as durable evidence; the reaper exists to stop leaks, the retain
+// contract exists to stop discards, and where they disagree the retain wins.
+
+export type WorkspaceSubstrate = "linked_worktree" | "private_clone" | "absent" | "unknown";
+
+/** Which substrate the recorded workspace path holds. A linked worktree's `.git`
+ *  is a FILE pointing at the parent's `.git/worktrees/<name>`; a clone's (and a
+ *  main checkout's) is a DIRECTORY. */
+export function classifyWorkspace(workspacePath: string): WorkspaceSubstrate {
+  const dotGit = join(workspacePath, ".git");
+  let isDir: boolean;
   try {
-    execFileSync("git", ["worktree", "remove", "--force", path], {
+    isDir = statSync(dotGit).isDirectory();
+  } catch {
+    return existsSync(workspacePath) ? "unknown" : "absent";
+  }
+  if (isDir) return "private_clone";
+  try {
+    return readFileSync(dotGit, "utf8").startsWith("gitdir:") ? "linked_worktree" : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+export type WorkspaceRetainReason =
+  /** Uncommitted, untracked or ignored files in the tree — work that exists
+   *  nowhere else. */
+  | "uncommitted_work"
+  /** The task's commits are not reachable from the project's HEAD — never captured. */
+  | "unmerged_commits"
+  /** The workspace has at least one checked-out submodule. Forge never creates
+   *  one (`git worktree add` leaves every gitlink uninitialized and empty), so
+   *  this is a workspace shape the reaper was not built to prove capture for. */
+  | "submodules_present"
+  /** FG-621's substrate; reaping it is not implemented here (see the header). */
+  | "private_clone_substrate"
+  /** A directory we cannot identify as either substrate — never guessed at. */
+  | "unknown_substrate"
+  /** The workspace is a linked worktree, but not THIS task's: it belongs to
+   *  another repository, or is checked out on something other than the task's
+   *  deterministic branch. */
+  | "workspace_not_owned"
+  /** git refused the removal even after unlock + double force. */
+  | "removal_failed";
+
+/** How a reaped workspace actually went away. `git_removed` is git completing the
+ *  removal; `path_vanished` is git DECLINING it while the tree turned out to be
+ *  gone anyway — the stale registration is pruned, and the difference is recorded
+ *  rather than reported as a clean removal. */
+export type WorkspaceRemovalDisposition = "git_removed" | "path_vanished";
+
+export type WorkspaceReapOutcome =
+  | { action: "absent"; branch: string }
+  /** The workspace was already gone, but its branch had outlived it — a prior
+   *  pass removed the tree and lost the `git branch -d`. The ref is gone now. */
+  | { action: "branch_reaped"; branch: string }
+  | {
+      action: "reaped";
+      substrate: "linked_worktree";
+      branch: string;
+      branchRemoved: boolean;
+      removal: WorkspaceRemovalDisposition;
+    }
+  | {
+      action: "retained";
+      substrate: WorkspaceSubstrate;
+      branch: string;
+      reason: WorkspaceRetainReason;
+      details: string[];
+    };
+
+/** `git status --porcelain --ignored` in one working tree. undefined when git
+ *  could not answer at all — indistinguishable from "there may be work here", so
+ *  callers treat it as unsafe rather than clean.
+ *
+ *  `--ignored` because an agent's output frequently lands on paths the project
+ *  ignores (build artifacts, scratch dirs, logs). Those files exist nowhere but
+ *  this workspace, so a tracked-clean tree holding only ignored output is NOT
+ *  proof of capture — probing without it would force-remove unrecovered work. */
+function statusPorcelainIgnored(treePath: string): string[] | undefined {
+  try {
+    return execFileSync("git", ["status", "--porcelain", "--ignored"], {
+      cwd: treePath,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Checked-out submodules of a working tree, as paths relative to it. `git
+ *  submodule status` marks an uninitialized entry with a leading `-`: its
+ *  directory is empty, which is the only shape `git worktree add` ever produces
+ *  (it never runs `submodule update --init`). undefined when git could not
+ *  answer. Read as a yes/no question — any checked-out submodule retains. */
+function checkedOutSubmodules(treePath: string): string[] | undefined {
+  try {
+    const out = execFileSync("git", ["submodule", "status", "--recursive"], {
+      cwd: treePath,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const paths: string[] = [];
+    for (const line of out.split("\n")) {
+      if (!line || line.startsWith("-")) continue;
+      // "<marker><sha> <path>[ (<describe>)]" — the describe suffix is optional
+      // and the path may contain spaces, so take everything between them.
+      const m = /^.[0-9a-f]+ (.*?)(?: \([^)]*\))?$/.exec(line);
+      if (m?.[1]) paths.push(m[1]);
+    }
+    return paths;
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveCommit(cwd: string, rev: string): string | undefined {
+  try {
+    return execFileSync("git", ["rev-parse", "--verify", `${rev}^{commit}`], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return undefined;
+  }
+}
+
+/** The repository a working tree belongs to, as an absolute resolved path to its
+ *  shared `.git` dir. A linked worktree reports its PARENT's — which is what
+ *  makes it the ownership test. undefined when git could not answer. */
+function gitCommonDir(cwd: string): string | undefined {
+  try {
+    const out = execFileSync("git", ["rev-parse", "--git-common-dir"], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return out ? realpathSync(resolve(cwd, out)) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The ref a working tree has checked out, e.g. `refs/heads/forge/<run>/<task>`.
+ *  undefined on a detached HEAD or when git could not answer. */
+function checkedOutRef(cwd: string): string | undefined {
+  try {
+    return (
+      execFileSync("git", ["symbolic-ref", "--quiet", "HEAD"], {
+        cwd,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim() || undefined
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+/** Why the recorded path is not this task's workspace — empty when it is.
+ *
+ *  The capture checks all ask "is the work here safe to lose?", and a workspace
+ *  that was never this task's answers YES trivially: another clean worktree of
+ *  the SAME repository is clean, and its HEAD is already reachable from HEAD, so
+ *  a stale or misassigned worktree_path passes every one of them and the reaper
+ *  deletes a tree it was never asked about — then deletes the task's branch on
+ *  top of it. Ownership is checked from the workspace itself (its repository and
+ *  its checked-out branch), never inferred from the path. */
+function ownershipMismatch(workspacePath: string, projectDir: string, branch: string): string[] {
+  const details: string[] = [];
+
+  const workspaceRepo = gitCommonDir(workspacePath);
+  const projectRepo = gitCommonDir(projectDir);
+  if (workspaceRepo === undefined || projectRepo === undefined || workspaceRepo !== projectRepo) {
+    details.push(
+      `workspace belongs to ${workspaceRepo ?? "an unreadable repository"}, not to ${projectRepo ?? "an unreadable repository"}`
+    );
+  }
+
+  const ref = checkedOutRef(workspacePath);
+  if (ref !== `refs/heads/${branch}`) {
+    details.push(`workspace is checked out on ${ref ?? "a detached HEAD"}, not on refs/heads/${branch}`);
+  }
+
+  return details;
+}
+
+function isAncestorOfHead(projectDir: string, commit: string): boolean {
+  try {
+    execFileSync("git", ["merge-base", "--is-ancestor", commit, "HEAD"], {
       cwd: projectDir,
       stdio: ["ignore", "ignore", "ignore"],
     });
+    return true;
   } catch {
-    // If git worktree remove fails (e.g., directory exists but was never
-    // registered), prune stale entries to keep the repo worktree list clean.
-    try {
-      execFileSync("git", ["worktree", "prune"], {
-        cwd: projectDir,
-        stdio: ["ignore", "ignore", "ignore"],
-      });
-    } catch { /* fully best-effort */ }
+    return false;
   }
+}
+
+/** `git branch -d` — the merged-only form, never `-D`. True once the ref is
+ *  gone; a branch git declines to delete because it is not merged stays, and is
+ *  never forced. Deliberately a second opinion on the one irreversible step. */
+function deleteMergedBranch(projectDir: string, branch: string): boolean {
+  try {
+    execFileSync("git", ["branch", "-d", branch], {
+      cwd: projectDir,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    return true;
+  } catch {
+    return resolveCommit(projectDir, branch) === undefined;
+  }
+}
+
+/** Dispose of a task's workspace and its branch — but ONLY once the work inside
+ *  is provably captured. Never throws; reaping an already-gone workspace is a
+ *  no-op, so repeated calls are safe.
+ *
+ *  Safe means all of: the substrate is a linked worktree, it holds no checked-out
+ *  submodule, the tree is clean (no uncommitted, untracked or ignored files),
+ *  every commit the task's branch/HEAD points at is reachable from projectDir's
+ *  HEAD, and the worktree is THIS task's
+ *  — projectDir's own repository, checked out on the task's deterministic branch.
+ *  Anything else — including anything git declines to answer — is RETAINED with
+ *  the reason, so the caller can record where the work still lives. */
+export function reapTaskWorkspace(
+  workspacePath: string,
+  runId: string,
+  taskId: string,
+  projectDir: string
+): WorkspaceReapOutcome {
+  const branch = worktreeBranchName(runId, taskId);
+  const substrate = classifyWorkspace(workspacePath);
+
+  if (substrate === "absent") {
+    // The tree can be gone while the branch is not: the deletion below runs
+    // AFTER the removal, so a transient failure there leaves the ref behind and
+    // every later pass used to return here without ever retrying it — stranding
+    // a forge/<runId>/<taskId> ref permanently. Retry it, scoped to this task's
+    // own deterministic branch and on the same merged-only posture, so a branch
+    // git still declines survives untouched and records nothing.
+    if (resolveCommit(projectDir, branch) === undefined) return { action: "absent", branch };
+    return deleteMergedBranch(projectDir, branch)
+      ? { action: "branch_reaped", branch }
+      : { action: "absent", branch };
+  }
+  if (substrate === "private_clone") {
+    // FG-621 owns clone reaping (see the header): a clone is not a registered
+    // worktree, and its removal has to sequence against the parent's object
+    // store. Explicit no-op — never a silent fall-through.
+    return { action: "retained", substrate, branch, reason: "private_clone_substrate", details: [] };
+  }
+  if (substrate === "unknown") {
+    return { action: "retained", substrate, branch, reason: "unknown_substrate", details: [] };
+  }
+
+  // A checked-out submodule is not a shape this reaper proves capture for: the
+  // superproject's status does not recurse, so a submodule holding the only copy
+  // of an agent's output reports clean at the top level. Rather than probe each
+  // one, retain the whole workspace — forge's own worktrees never reach here,
+  // since `git worktree add` leaves every gitlink uninitialized and empty.
+  const submodules = checkedOutSubmodules(workspacePath);
+  if (submodules === undefined || submodules.length > 0) {
+    return {
+      action: "retained",
+      substrate,
+      branch,
+      reason: "submodules_present",
+      details: submodules ?? ["git submodule status could not be read in the workspace"],
+    };
+  }
+
+  const dirty = statusPorcelainIgnored(workspacePath);
+  if (dirty === undefined || dirty.length > 0) {
+    return {
+      action: "retained",
+      substrate,
+      branch,
+      reason: "uncommitted_work",
+      details: dirty ?? ["git status could not be read in the workspace"],
+    };
+  }
+
+  const tips = [resolveCommit(projectDir, branch), resolveCommit(workspacePath, "HEAD")].filter(
+    (c): c is string => c !== undefined
+  );
+  const uncaptured = tips.filter((c) => !isAncestorOfHead(projectDir, c));
+  if (tips.length === 0 || uncaptured.length > 0) {
+    return {
+      action: "retained",
+      substrate,
+      branch,
+      reason: "unmerged_commits",
+      details: tips.length === 0 ? ["the workspace's history could not be resolved"] : uncaptured,
+    };
+  }
+
+  // Last gate before the irreversible step, and deliberately after the capture
+  // checks: where both would refuse, the capture reasons name the exact commits
+  // or files at stake, which is the more useful evidence for an operator.
+  const notOurs = ownershipMismatch(workspacePath, projectDir, branch);
+  if (notOurs.length > 0) {
+    return { action: "retained", substrate, branch, reason: "workspace_not_owned", details: notOurs };
+  }
+
+  // Path absence is what decides whether there is still a workspace to retain;
+  // git's own verdict is what decides how the disposal is REPORTED. A removal
+  // git declined whose tree was gone anyway is a real disposal — retaining a
+  // directory that does not exist would name a place the work is not — but it is
+  // not a clean `git worktree remove`, so it is not recorded as one.
+  const removal = forceRemoveWorktree(projectDir, workspacePath);
+  if (!removal.pathAbsent) {
+    return { action: "retained", substrate, branch, reason: "removal_failed", details: [] };
+  }
+
+  return {
+    action: "reaped",
+    substrate,
+    branch,
+    branchRemoved: deleteMergedBranch(projectDir, branch),
+    removal: removal.gitRemoved ? "git_removed" : "path_vanished",
+  };
 }
 
 // ── FG-353 Integration worktree helpers ───────────────────────────────────────
@@ -375,12 +781,7 @@ export function createIntegrationWorktree(
   const branch = integrationBranchName(runId, parentTaskId);
 
   if (integrationBranchExists(projectDir, runId, parentTaskId)) {
-    try {
-      execFileSync("git", ["worktree", "remove", "--force", integrationPath], {
-        cwd: projectDir,
-        stdio: ["ignore", "ignore", "ignore"],
-      });
-    } catch { /* best-effort */ }
+    forceRemoveWorktree(projectDir, integrationPath);
     try {
       execFileSync("git", ["branch", "-D", branch], {
         cwd: projectDir,
@@ -518,12 +919,7 @@ export function cleanupIntegrationWorktree(
   // FIX3 (FG-376 review): no dependency-volume cleanup here — see
   // removeWorktreeIfSafe above for why a shared cache volume must not be
   // removed at individual worktree disposal.
-  try {
-    execFileSync("git", ["worktree", "remove", "--force", path], {
-      cwd: projectDir,
-      stdio: ["ignore", "ignore", "ignore"],
-    });
-  } catch { /* best-effort */ }
+  forceRemoveWorktree(projectDir, path);
   try {
     execFileSync("git", ["branch", "-D", branch], {
       cwd: projectDir,

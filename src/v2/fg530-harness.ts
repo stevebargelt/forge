@@ -996,11 +996,23 @@ export function worktreeFiles(root: string): string[] {
  *  after recovery, and (b) still be REFERENCED by its task row once that row is
  *  terminal — reconcile's failPipelineUnfinalized preserves the result onto the
  *  row precisely so a crashed step's work is inspectable, not silently dropped.
- *  A worktree that existed before the kill must survive too, unless its task went
- *  on to COMPLETE: removeWorktreeIfSafe is only ever called on a proven-merged
- *  worktree, so a crashed or failed step losing its worktree is the work-discard
- *  this invariant is named for. */
-export function checkPersistedWorkNeverDiscarded(pre: PersistedWork): Violation[] {
+ *
+ *  A worktree that existed before the kill must survive too — unless the WORK it
+ *  held is provably somewhere else. Before FG-356 that exception was spelled
+ *  "unless its task COMPLETED", because a completed task's proven-merged tree was
+ *  the only workspace forge ever removed. FG-356's reaper widened the sanctioned
+ *  removal to any terminal task whose workspace holds nothing unrecovered — which
+ *  includes a tree a crashed task never wrote into at all. Widening the exception
+ *  by STATUS would have hollowed this invariant out, so it is checked instead:
+ *  when a tree is gone, every file it held at the kill must be findable in
+ *  projectDir. That is strictly more teeth than the old status skip had (it now
+ *  also holds the complete-task cleanup to account), and it keeps the invariant
+ *  about the work rather than about the directory.
+ *
+ *  projectDir is where the captured work must turn up. Omit it — as the matrix
+ *  lane and the detection suite do, neither of which produces worktrees — and any
+ *  removal of a non-empty tree is flagged, the pre-FG-356 posture. */
+export function checkPersistedWorkNeverDiscarded(pre: PersistedWork, projectDir?: string): Violation[] {
   const v: Violation[] = [];
   const name = "4-persisted-work-never-discarded";
   for (const w of pre.results) {
@@ -1028,14 +1040,18 @@ export function checkPersistedWorkNeverDiscarded(pre: PersistedWork): Violation[
   }
   for (const w of pre.worktrees) {
     const t = getTask(w.taskId);
-    if (t?.status === "complete") continue; // proven-merged cleanup — the one sanctioned removal
     if (!existsSync(w.worktreePath)) {
-      v.push({
-        invariant: name,
-        detail:
-          `the worktree for task ${w.taskId} existed before the kill and is GONE after recovery (${w.worktreePath}), ` +
-          `while the task is '${t?.status ?? "missing"}' — an unmerged step's worktree is its only copy of the work`,
-      });
+      // FG-356: the tree may be reaped, but only against proof the work landed.
+      const lost = projectDir === undefined ? w.files : w.files.filter((f) => !existsSync(join(projectDir, f)));
+      if (lost.length > 0) {
+        v.push({
+          invariant: name,
+          detail:
+            `the worktree for task ${w.taskId} existed before the kill and is GONE after recovery (${w.worktreePath}), ` +
+            `while the task is '${t?.status ?? "missing"}' — and ${lost.length} file(s) it held [${lost.slice(0, 5).join(", ")}] ` +
+            `are in neither the tree nor the project: the work was discarded, not captured`,
+        });
+      }
       continue;
     }
     // The directory surviving is not the work surviving: a recovery that emptied
@@ -1094,7 +1110,7 @@ export async function checkAllInvariants(args: {
     ...checkNoCompleteWithoutEvidence(args.runId, args.workflow),
     ...checkNoPermanentWedge(args.runId, args.workflow),
     ...checkAbandonedNeverOverwritten(args.runId, args.wasAbandoned),
-    ...checkPersistedWorkNeverDiscarded(args.persistedPreKill),
+    ...checkPersistedWorkNeverDiscarded(args.persistedPreKill, getRun(args.runId)?.projectDir),
     ...(await checkFixpointIdempotent(args.runId, args.workflow, args.exec)),
   ];
 }

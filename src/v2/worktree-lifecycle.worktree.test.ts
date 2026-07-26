@@ -14,11 +14,12 @@ import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import {
   worktreeBranchName,
   integrationBranchName,
+  forceRemoveWorktree,
   removeWorktreeIfSafe,
   cleanupFailedWorktreeSetup,
   cleanupIntegrationWorktree,
@@ -202,4 +203,113 @@ test("cleanupFailedWorktreeSetup / cleanupIntegrationWorktree: neither invokes d
   } finally {
     process.env.PATH = origPath;
   }
+});
+
+// Shadows `git` with a stub whose `worktree remove` deletes the directory and
+// THEN fails — the shape that makes path-absence a lie about removal success.
+function makeFailingRemoveGitStub(): { binDir: string; logPath: string } {
+  const binDir = mkdtempSync(join(tmpdir(), "forge-git-stub-"));
+  const logPath = join(binDir, "git-calls.log");
+  writeFileSync(
+    join(binDir, "git"),
+    `#!/bin/sh\necho "$@" >> "${logPath}"\nif [ "$1" = "worktree" ] && [ "$2" = "remove" ]; then\n  for a in "$@"; do last="$a"; done\n  rm -rf "$last"\n  exit 1\nfi\nexit 0\n`
+  );
+  chmodSync(join(binDir, "git"), 0o755);
+  writeFileSync(logPath, "");
+  return { binDir, logPath };
+}
+
+test("cleanupFailedWorktreeSetup: prunes stale registrations when `git worktree remove` fails but the directory is gone anyway", () => {
+  const projectDir = makeTmpDir("forge-fg356-repo-");
+  initGitRepo(projectDir);
+  const runId = "run-fg356-prune";
+  const taskId = "task-fg356-prune";
+  const wtPath = worktreeDir(runId, taskId);
+  mkdirSync(wtPath, { recursive: true });
+
+  const { binDir, logPath } = makeFailingRemoveGitStub();
+  const origPath = process.env.PATH;
+  process.env.PATH = `${binDir}:${origPath ?? ""}`;
+  try {
+    assert.doesNotThrow(() => cleanupFailedWorktreeSetup(projectDir, runId, taskId));
+  } finally {
+    process.env.PATH = origPath;
+  }
+
+  assert.ok(!existsSync(wtPath), "the stub removed the directory before failing");
+  const gitCalls = readFileSync(logPath, "utf8");
+  assert.match(
+    gitCalls,
+    /worktree prune/,
+    `a failed remove must still prune the parent repo's stale registrations — git calls were: ${JSON.stringify(gitCalls)}`
+  );
+});
+
+// ── FG-356: the forceRemoveWorktree contract itself ───────────────────────────
+//
+// "the directory is gone" and "git completed the removal" are two different
+// facts. Returning the first as if it were the second is what let a caller
+// report a clean disposal over a stale $GIT_DIR/worktrees entry — the entry that
+// breaks the parent's later worktree operations. These pin both halves over REAL
+// git, with no stub in sight.
+
+/** Where git records a linked worktree in the parent repo. */
+function registrationDir(projectDir: string, wtPath: string): string {
+  return join(projectDir, ".git", "worktrees", basename(wtPath));
+}
+
+test("forceRemoveWorktree: an ordinary removal reports git's own verdict and leaves no registration behind", () => {
+  const projectDir = makeTmpDir("forge-fg356-force-ok-");
+  initGitRepo(projectDir);
+  const wtPath = join(makeTmpDir("forge-fg356-wt-"), "ordinary");
+  execFileSync("git", ["worktree", "add", wtPath, "-b", "forge/run/ordinary"], { cwd: projectDir, stdio: "ignore" });
+
+  const result = forceRemoveWorktree(projectDir, wtPath);
+
+  assert.equal(result.gitRemoved, true, "git removed it, and that is what gets reported");
+  assert.equal(result.pathAbsent, true);
+  assert.equal(existsSync(registrationDir(projectDir, wtPath)), false, "git clears its own registration on success");
+});
+
+test("forceRemoveWorktree: a removal git DECLINES whose directory is gone anyway is reported as declined, and the stale registration is pruned", () => {
+  const projectDir = makeTmpDir("forge-fg356-force-declined-");
+  initGitRepo(projectDir);
+  const wtPath = join(makeTmpDir("forge-fg356-wt-"), "declined");
+  execFileSync("git", ["worktree", "add", wtPath, "-b", "forge/run/declined"], { cwd: projectDir, stdio: "ignore" });
+  const registration = registrationDir(projectDir, wtPath);
+  assert.ok(existsSync(registration));
+
+  // A partially-completed removal, built with real git: the working tree is gone
+  // and the registration's `gitdir` pointer with it, so git no longer resolves
+  // the path to a worktree — while the registration itself survives.
+  rmSync(wtPath, { recursive: true, force: true });
+  rmSync(join(registration, "gitdir"), { force: true });
+  assert.throws(
+    () => execFileSync("git", ["worktree", "remove", "--force", "--force", wtPath], { cwd: projectDir, stdio: "ignore" }),
+    "the fixture must genuinely make git refuse the removal, or this test proves nothing"
+  );
+  assert.ok(existsSync(registration), "...and genuinely leave the registration behind");
+
+  const result = forceRemoveWorktree(projectDir, wtPath);
+
+  assert.equal(result.gitRemoved, false, "git did not complete the removal — reporting otherwise is the bug");
+  assert.equal(result.pathAbsent, true, "the directory is gone all the same, and that is a separate fact");
+  assert.equal(existsSync(registration), false, "the stale registration is pruned, not left to break later worktree ops");
+});
+
+test("forceRemoveWorktree: a path that was never a worktree is a no-op across repeated calls, and the prune never touches a live registration", () => {
+  const projectDir = makeTmpDir("forge-fg356-force-noop-");
+  initGitRepo(projectDir);
+  const live = join(makeTmpDir("forge-fg356-wt-"), "live");
+  execFileSync("git", ["worktree", "add", live, "-b", "forge/run/live"], { cwd: projectDir, stdio: "ignore" });
+  const absent = join(projectDir, "never-a-worktree");
+
+  for (let pass = 1; pass <= 3; pass++) {
+    const result = forceRemoveWorktree(projectDir, absent);
+    assert.equal(result.gitRemoved, false, `pass ${pass}: git has nothing to remove and says so`);
+    assert.equal(result.pathAbsent, true, `pass ${pass}: nothing there is still nothing there`);
+  }
+
+  assert.ok(existsSync(live), "a registration whose working tree is still on disk is not prunable");
+  assert.ok(existsSync(registrationDir(projectDir, live)), "so pruning never widens what gets disposed of");
 });

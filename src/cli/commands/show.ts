@@ -755,6 +755,28 @@ function payloadSummary(payload: unknown): string {
   return ` — ${String(payload).slice(0, 60)}`;
 }
 
+/** FG-356: the workspace disposition events are the durable record of WHERE
+ *  unrecovered work still lives and WHY it was kept — and payloadSummary prints
+ *  key NAMES, so a retention rendered as `{workspacePath, branch, substrate, …}`
+ *  and named none of it. These two print their values; every other event type
+ *  keeps the generic summary. */
+function workspaceSummary(payload: unknown): string | undefined {
+  if (payload === null || typeof payload !== "object") return undefined;
+  const p = payload as Record<string, unknown>;
+  const parts: string[] = [];
+  if (typeof p["workspacePath"] === "string") parts.push(p["workspacePath"]);
+  if (typeof p["branch"] === "string") parts.push(`branch ${p["branch"]}`);
+  if (typeof p["reason"] === "string") parts.push(`reason ${p["reason"]}`);
+  return parts.length > 0 ? ` — ${parts.join("  ")}` : undefined;
+}
+
+function eventSummary(e: Event): string {
+  if (e.eventType === "task.workspace_reaped" || e.eventType === "task.workspace_retained") {
+    return workspaceSummary(e.payload) ?? payloadSummary(e.payload);
+  }
+  return payloadSummary(e.payload);
+}
+
 function printTimeline(events: Event[]): void {
   console.log("");
   console.log("Timeline:");
@@ -764,7 +786,7 @@ function printTimeline(events: Event[]): void {
   }
   for (const e of events) {
     const taskPart = e.taskId ? `  [task:${e.taskId}]` : "";
-    console.log(`  ${fmtTime(e.createdAt)}  ${e.eventType}${taskPart}${payloadSummary(e.payload)}`);
+    console.log(`  ${fmtTime(e.createdAt)}  ${e.eventType}${taskPart}${eventSummary(e)}`);
   }
 }
 

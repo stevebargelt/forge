@@ -2,36 +2,40 @@
 id: FG-345
 type: story
 status: active
-title: "git worktrees for ALL agents (parent design story): OS-level write isolation + reconcile/merge — needs architecture pass before implementation"
+title: "isolated Git workspaces for ALL agents: writable private Git for mutators + read-only worktrees for non-mutators"
 created: 2026-06-22
 ---
 
-### git worktrees for ALL agents (PARENT DESIGN STORY): OS-level write isolation + reconcile/merge
+### Isolated Git workspaces for ALL agents: private commit authority + Forge publication authority
 
-(story/active — NOT implementation-ready; needs an architecture pass first. This is a decision record + design brief, not a single implementable story. It is epic-sized: it touches spawn, invoke, runNext, persistence-check, task/run state, red review semantics, merge-conflict failure states, cleanup, and integration validation.)
+(story/active — parent decision record + design brief. The remaining writable-Git work needs an implementable child before isolation becomes default-on.)
 
-**DECISION (settled — do not relitigate): forge uses a dedicated git worktree per agent. Always. All agent classes.** Decided in conversation after the dogfood research run `run-always-use-git-worktrees-c31675` (report at `docs/research/always-use-git-worktrees-s-c31675.md`). A prior handoff narrowed this to "rw/blue only" — that narrowing is WRONG. The decision is "worktrees, period." This story is about HOW, not WHETHER — and the HOW is large enough that it must go to architecture/planning and be split into implementation children before any engineer touches it.
+**CORRECTED DECISION (2026-07-26; supersedes the uniform-substrate wording below): every agent runs away from the live checkout in an isolated Git workspace, but the substrate follows capability.** Mutating agents get private writable Git metadata and may commit on private task branches. Non-mutating agents get stable read-only linked worktrees with read-only history. Forge alone constructs, validates, and publishes the candidate. The invariant is isolation and authority separation, not "one Git mechanism for every role."
 
-## Why "always, all agents" (not just blue fan-out)
+## Why isolated workspaces for every agent
 
-1. **Silent lost-updates are unacceptably costly.** Concurrent rw/blue fan-out shares ONE working dir (all blue containers get `projectMode: rw` against the same `PROJECT_DIR`; `dispatchFanoutStep` runs up to 4 concurrent containers on the identical host path). Collisions are NOT recoverable merge conflicts — they are last-writer-wins filesystem races: torn/partial writes, silent clobbers, no detection. Worktrees CONVERT these silent races into detectable `git merge` conflicts.
-2. **Uniformity is simpler than a split.** One mount model for every agent beats maintaining "worktree for blue, live-mount for red/narrative."
-3. **forge-on-forge host protection + consistent review snapshots.** Worktrees keep EVERY agent container off the live host source, and a red reviewing a stable snapshot beats reviewing a still-mutating `/project`.
+1. **Silent lost-updates are unacceptably costly.** Concurrent rw/blue fan-out shares ONE working dir (all blue containers get `projectMode: rw` against the same `PROJECT_DIR`; `dispatchFanoutStep` runs up to 4 concurrent containers on the identical host path). Collisions are NOT recoverable merge conflicts — they are last-writer-wins filesystem races: torn/partial writes, silent clobbers, no detection. Isolated branches and workspaces CONVERT these silent races into detectable integration conflicts.
+2. **Uniform lifecycle does not require a uniform Git substrate.** Every task still has recorded identity, base SHA, workspace, branch/ref, process, result, and disposition. Mutators need writable private Git; reviewers need a stable read-only snapshot. Forcing both through a linked worktree makes the parent object store either dangerously writable or agent commits impossible.
+3. **forge-on-forge host protection + consistent review snapshots.** Isolated workspaces keep EVERY agent container off the live host source, and a red reviewing a stable snapshot beats reviewing a still-mutating `/project`.
 
 This brings blue write-isolation up to the OS-enforced standard forge already mandates for reds (today it is nothing but an honor-system file-independence contract).
 
 ## Cost is a non-factor (do not relitigate)
 
-~222ms / ~12MB per `git worktree add` on this repo (762 files; git objects shared). Creation lands in the `Promise.all` dispatch wave so concurrent wall-clock is ~one add, not 4×. grpcfuse is not a new tax; node_modules is already container-local ext4 (DEC-019). Caveat: a 50k-file monorepo needs a one-off checkout benchmark before promising "free" there.
+~222ms / ~12MB per `git worktree add` on this repo (762 files; git objects shared). The FG-559 experiment measured the viable mutator substrate, `git clone --shared`, at 0.106s and <1MB of new storage, with local commits working and the parent remaining unwritable. Creation lands in the parallel dispatch wave. grpcfuse is not a new tax; node_modules is already container-local ext4 (DEC-019). Caveat: a 50k-file monorepo needs a one-off checkout benchmark before promising "free" there.
 
 ## HARD DESIGN CONSTRAINTS (these are the real design pivots — the architecture pass must answer each)
 
 1. **Worktrees catch same-file TEXTUAL races only; semantic cross-file breakage merges CLEAN.** Agent A changes a signature in `foo.ts`; agent B (own worktree) calls the old signature in `bar.ts` → `git merge` succeeds with ZERO conflict → broken code merged with no signal. **Therefore worktrees are NECESSARY BUT NOT SUFFICIENT: the design MUST include a post-merge integration gate (build + test the MERGED result).** The trap: believing worktrees make parallel work safe. They relocate the risk, not remove it.
-2. **Most forge work is SEQUENTIAL; naive worktrees add a merge step to a path that cannot collide.** A pipeline runs architect → tech-lead → engineer → test-engineer in series; each sees the prior step today because it is just there on `/project`. If every step branches off `HEAD`, the engineer can't see the tech-lead's work, forcing 3-way merges between steps that never conflicted. **Required: chain each step's worktree off the PREVIOUS step's branch (fast-forward), not all-off-HEAD.**
+2. **Most forge work is SEQUENTIAL; naive isolated workspaces add a merge step to a path that cannot collide.** A pipeline runs architect → tech-lead → engineer → test-engineer in series; each sees the prior step today because it is just there on `/project`. If every step branches off `HEAD`, the engineer can't see the tech-lead's work, forcing 3-way merges between steps that never conflicted. **Required: base each sequential workspace on the exact accepted PREVIOUS candidate, not all-off-HEAD.**
 3. **The reconcile/merge step is genuine net-new orchestrator complexity.** New "agent succeeded but reconcile failed" failure state, conflict-resolution ownership, persistence-check rework, lockfile / node_modules merge questions. Runtime cost nil; design cost real.
-4. **Worktrees make real container-side dependency installs safe.** A disposable agent worktree can have its own `node_modules` install or dependency volume, letting engineers/test-engineers/reviewers run normal `npm test` / typecheck commands without corrupting the live host checkout. This is not solved by worktrees alone because `node_modules` is ignored by git, but worktrees are the safe writable boundary that makes dependency parity feasible. See FG-376.
+4. **Isolated disposable workspaces make real container-side dependency installs safe.** A private clone or worktree can have its own `node_modules` install or dependency volume, letting engineers/test-engineers/reviewers run normal `npm test` / typecheck commands without corrupting the live host checkout. This is not solved by Git isolation alone because `node_modules` is ignored by git, but the isolated workspace is the safe writable boundary that makes dependency parity feasible. See FG-376.
+5. **Commit authority is not publication authority.** A mutating agent may create private commits for checkpointing, recovery, rebase, bisect, and transport. Those commits are untrusted inputs. Forge must capture any remaining dirty files, build the candidate, run the required gates against that exact tree, and alone decide what reaches the target branch.
 
-## OPEN QUESTIONS THE ARCHITECTURE PASS MUST RESOLVE (each is a kickoff blocker)
+## Original architecture questions (retained for history)
+
+These questions drove the existing FG-345 children. They are not a current blocker list; the binding
+remaining default-on blockers are the implementation and acceptance proof recorded below.
 
 - **Non-git projects.** Forge runs across arbitrary projects. If `/project` is NOT a git repo, what happens? Fail loud / fall back to current shared-mount behavior / `git init` a temp copy / require git for worktree mode. Must be explicit — silence here breaks cross-project use.
 - **Untracked & ignored files (likely the biggest practical adoption risk).** `git worktree add` carries ONLY committed tracked content. `.env`, generated local config, design files, test fixtures, local-only assets, build caches — none come along. Define the contract: copy-in which classes? symlink? require committed? This is the most likely real-world breakage.
@@ -42,7 +46,7 @@ This brings blue write-isolation up to the OS-enforced standard forge already ma
 - **persistence-check adaptation.** It currently asserts `files_modified` landed under the project bind mount; with worktrees that invariant moves to the worktree path.
 - **Where the post-merge integration gate lives.** Almost certainly its OWN implementation story — wiring build+test of the merged result is separable from "create worktrees and merge them," and folding it into the first cut makes that cut too risky.
 
-## Proposed child-story split (to be CONFIRMED/redrawn by the architecture pass — do not pre-file blindly)
+## Original proposed child-story split (historical)
 
 1. **Worktree architecture plan / ADR** (this is the immediate next step — architecture-advisor).
 2. per-task worktree lifecycle + manifest/DB state (create-before-dispatch, remove-after-exit, ref recording).
@@ -58,7 +62,7 @@ This brings blue write-isolation up to the OS-enforced standard forge already ma
 
 ---
 
-## Folded in: FG-621 — the writable-in-container-git decision (2026-07-25)
+## Folded in: FG-621 — the writable-in-container-git decision
 
 FG-559 mounts the parent repo's `.git` READ-ONLY, which gives every agent working `git log`/`diff`/`show`
 on a linked worktree but deliberately prevents in-container `git commit`.
@@ -69,22 +73,117 @@ That collides with the contract at `src/v2/worktree-lifecycle.ts:231-242`:
 > auto-stages and commits any uncommitted changes in the worktree before merging.*
 
 Host-side commit is documented as the SAFETY NET, not the primary path. The read-only mount demotes the
-documented primary path to an always-unused one. No work is lost — the safety net preserves the agent's
-filesystem changes — but the contract goes stale.
+documented primary path to an always-unused one. No work is lost at normal completion because the safety
+net preserves the filesystem changes, but long-running agents lose checkpointing, recovery, rebase,
+bisect, and stash. That is a material autonomy and resilience regression.
 
-**This ticket must decide, before the worktree default-on flip, one of:**
-
-1. **Declare host-side commit authoritative** under worktree mode, and update the stale contract at
-   `worktree-lifecycle.ts:231`. No further implementation needed.
-2. **Give agents a writable git** — requires a SEPARATE object store, because a linked worktree shares the
-   parent's object store and ref namespace by construction. Proven during the FG-559 experiment: a
-   read-write parent `.git` lets a container create branches in the parent repo (incompatible with the red
-   boundary), and a scoped-write variant protects the ref namespace but leaves `objects/` deletable. The
-   cheap viable form is `git clone --shared` off a read-only parent `objects/` — measured 0.106s, <1MB,
-   full depth, local commits work, parent unwritable. Merge-back would become `git fetch <clone> <branch>`
-   instead of `mergeWorktreeBranch`'s `git merge --ff-only`.
+**DECIDED 2026-07-26: give mutating agents writable private Git. Do not make host-side commit the only
+commit path.** This requires a separate writable object/ref namespace because a linked worktree shares
+the parent's repository metadata by construction. The parent `.git` must never be writable by a
+container. The cheap viable form is `git clone --shared` off read-only parent objects — measured 0.106s,
+<1MB, full depth, local commits work, parent unwritable. Merge-back becomes host-side
+`git fetch <clone> <branch>` followed by candidate construction, rather than assuming the task branch
+already exists in the parent's ref namespace.
 
 Worth stating plainly against this ticket's framing of worktrees as "OS-level write isolation":
 **worktrees isolate the WORKING TREE, not the repository.** FG-559 is what exposed that distinction.
 
-Create an implementable child ONLY if this ticket chooses option 2.
+FG-621 should be reopened and made implementation-ready (or replaced by exactly one implementable child
+that preserves its evidence). Do not file another architecture exploration.
+
+## Course correction and authority contract (2026-07-26)
+
+Forge began from the GasTown/GasCity worker-workspace + Refinery model, but copied the topology without
+pinning its most important authority boundary. The drift is visible in the repository:
+
+1. FG-340 reacted to agents creating partial/broken commits by declaring all agent commits the wrong
+   boundary and making commit an orchestrator closeout action.
+2. FG-352 then documented the opposite contract: agents are expected to commit, with host auto-commit
+   only as a safety net.
+3. Because both paths preserved files at normal completion, the contradiction remained latent.
+4. FG-559 exposed that linked worktrees inside Docker have no usable Git unless the parent metadata is
+   mounted. Mounting it read-only restored honest review while preventing commits.
+5. The local safety constraint was then allowed to frame writable agent Git as an optional escape hatch,
+   instead of preserving the original worker/refinery split.
+
+The correction is not to let agents publish. It is to distinguish two authorities:
+
+- **Private commit authority:** a mutating agent may commit freely on its isolated task branch. These are
+  untrusted checkpoints and transport artifacts; Forge may squash or replace their commit boundaries.
+- **Publication authority:** only Forge may construct the candidate, run the authoritative gates, update
+  the target ref, push, merge, close work, or claim that a commit shipped.
+
+FG-340 remains correct about agents not closing, merging, publishing, or treating partial commits as the
+finished artifact. Its blanket no-commit rule is superseded for isolated mutating agents.
+
+## Binding workspace and publication model
+
+| Role capability | Workspace | Git write authority | Completion path |
+|---|---|---|---|
+| Mutating (blue/implementer/fixer/test writer) | Private writable clone at the exact recorded base SHA, on a deterministic private task branch | May create commits only in its private repo | Forge safety-commits remaining dirty files, fetches the branch, constructs and gates the candidate |
+| Non-mutating (red/reviewer/narrative) | Stable linked worktree/snapshot with project and parent Git metadata read-only | None | Returns verdict/evidence; cannot alter the candidate |
+| Forge controller/publisher | Host-owned integration/publication workspace | Owns candidate refs and target publication | Serializes only the target-branch publication window and publishes the exact validated candidate |
+
+No new permanent LLM agent is required as a centralized component. Candidate construction, queueing,
+gating, compare-and-swap publication, receipts, and recovery are deterministic controller/state-machine
+work and belong in the existing serialized integration publisher. Serialization is keyed per project and
+target branch, never global. Agents are dispatched only for judgment-bearing recovery such as resolving
+a merge conflict or fixing a failed gate, and they receive a new isolated writable workspace.
+
+## Minimal implementation and rollout
+
+1. Keep worktree/isolation default-on blocked.
+2. Make FG-621 implement the proven private-clone substrate for mutating agents; retain FG-559 for
+   read-only agents.
+3. Create each mutating clone from the exact recorded base SHA with its own writable refs, index, and
+   object overlay; expose parent objects read-only only.
+4. On completion, capture uncommitted tracked and untracked output with a Forge safety commit, fetch the
+   private branch, and hand the resulting tree to the existing candidate publisher.
+5. Gate the exact candidate that may be published. Agent commit topology is not automatically canonical
+   project history; publication may squash it.
+6. Preserve failed/crashed private workspaces until their work is recovered or explicitly discarded.
+7. Dogfood forge-on-forge before flipping the default. Periodic WIP checkpointing is a later resilience
+   improvement, not a blocker for restoring private commit authority.
+
+## Acceptance proof required before default-on
+
+- Two mutating agents can commit concurrently in independent private repositories.
+- Neither agent can mutate the parent repository's refs, index, object store, or target branch.
+- Uncommitted tracked and untracked output is captured at completion.
+- A non-mutating/red agent can read the required history but cannot commit or update a ref.
+- Sequential tasks start from the exact accepted predecessor candidate; fan-out tasks start from the same
+  recorded base and integrate through the existing ordered candidate path.
+- The tree Forge publishes is byte-for-byte the tree that passed the authoritative integration and red
+  gates.
+- A crash leaves a recoverable private workspace/branch and durable evidence; cleanup cannot silently
+  discard it.
+- Publication contention serializes only the affected project + target branch while other agents keep
+  editing and committing in parallel.
+
+---
+
+## Current status (2026-07-26) — decision recorded, children dispatched
+
+The operator decision this ticket was blocked on is **RECORDED and final**: mutating agents get private
+writable Git; Forge retains publication authority. Do not reopen that question.
+
+Children carrying the remaining default-on gate:
+
+| Child | Owns | State |
+|---|---|---|
+| **FG-621** | The writable-Git path: per-task private `--shared` clone at the recorded base SHA, base selection from the accepted predecessor candidate, safety-commit capture, merge-back re-plumbing (`fetch` in place of `merge --ff-only`), stale-contract correction at `worktree-lifecycle.ts:231-242` | REOPENED 2026-07-26 and rewritten implementation-ready. No further architecture pass. |
+| **FG-356** | Cleanup / recovery: orphan reaper in `reconcileRun`, locked-worktree hardening, retain-on-conflict. **Now must reap BOTH substrates** — linked worktrees for non-mutators and private clones for mutators. | Active, may proceed concurrently. Dependency FG-351 is done. |
+
+**FG-345 does not close and isolation does not flip default-on until BOTH are proven**, per the
+acceptance list above. Neither child's completion alone is sufficient.
+
+Still owned by this parent (not delegated to either child, and each still a default-on blocker):
+
+- The **post-merge integration gate** — build + test the MERGED result. Hard constraint 1: isolation
+  converts silent filesystem races into detectable textual conflicts, but a cross-file semantic break
+  merges CLEAN. Isolation is necessary, not sufficient. Needs its own story before default-on.
+- **Publication-contention serialization** keyed per project + target branch, in the existing
+  serialized integration publisher.
+- The unanswered original architecture questions that survive the decision: non-git projects,
+  untracked/ignored file carry-in contract, dirty host state under forge-on-forge, and red review
+  timing (pre-merge candidate vs post-reconcile merged result).

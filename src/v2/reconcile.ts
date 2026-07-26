@@ -33,13 +33,13 @@ import { resolveIdleTimeoutMs } from "./idle-watchdog.js";
 import { getDb, writeTransaction } from "../store/db.js";
 import { taskDir } from "../util/paths.js";
 import { cleanupStagedAuth } from "./auth-state.js";
-import { removeWorktreeIfSafe } from "./worktree-lifecycle.js";
+import { removeWorktreeIfSafe, reapTaskWorkspace, classifyWorkspace, worktreeBranchName } from "./worktree-lifecycle.js";
 import { getManifestRuntime } from "./task-manifest.js";
 import { analyzeProviderFailure } from "./provider-failure.js";
 import { inferredResultFrom } from "./inferred-result.js";
 import { recoverStructuredStreamResult } from "./stream-result-recovery.js";
 import type { OrphanEvidence, ContainerExitInfo, ContainerCausalEvidence } from "./failure-kind.js";
-import { parseDockerInspectState } from "./failure-kind.js";
+import { parseDockerInspectState, failureKindForTask } from "./failure-kind.js";
 import { taskHasPipelineFinalize } from "./run-kind.js";
 import { isPhasePrimaryRow } from "./lifecycle-evaluator.js";
 import { shouldRetainContainer } from "./docker-exec.js";
@@ -151,6 +151,23 @@ export type ReconcileWriters = {
 export const defaultReconcileWriters: ReconcileWriters = { markTaskComplete, markTaskFailed, backfillTaskResult };
 
 const TERMINAL_TASK = new Set(["complete", "failed"]);
+
+/** FG-356: failure kinds whose workspace is retained BY DESIGN, as the evidence
+ *  an operator is expected to go and inspect. The reaper's own capture proof
+ *  (worktree-lifecycle.ts) would already retain most of these — an unmerged
+ *  branch is exactly what a merge/integration/publication failure leaves behind —
+ *  but the retain contract is not something to infer from a git probe when the
+ *  failure kind states it outright. FG-352 (merge_conflict) is the precedent;
+ *  FG-357 and FG-425 documented the same no-discard contract for theirs. */
+const RETAIN_WORKSPACE_FAILURE_KINDS = new Set([
+  "merge_conflict",
+  "integration_failed",
+  "integration_gate_timeout",
+  "integration_gate_crashed",
+  "publish_base_churn",
+  "publication_refused",
+  "dirty_publish_target",
+]);
 
 /** Is the named container actually running? Conservative on ambiguity: a clear
  *  "No such object" means gone; anything else (daemon unreachable, docker
@@ -1340,9 +1357,106 @@ export function reconcileRun(
   // FG-459: finalizeOrphanedPrimaries is itself never-throw (see its own
   // per-item guard), but guard the call site too so an unexpected throw can't
   // skip the run-level completion check below.
+  //
+  // FG-356: this runs BEFORE the workspace reaper, not after. A duplicate
+  // primary that was provisioned before it was stranded has a recorded
+  // worktree; finalizing it after the reaper's terminal-status scan would leave
+  // that tree standing until some later lifecycle command happened to reconcile
+  // the run again — and if none ever came, forever. Failing it first puts it in
+  // the very sweep that is meant to catch it.
   try {
     for (const c of finalizeOrphanedPrimaries(runId)) taskChanges.push(c);
   } catch { /* FG-459: never throw */ }
+
+  // ── FG-356: the orphan workspace reaper ────────────────────────────────────
+  // Every other cleanup in this file fires on the transition it is attached to,
+  // which is exactly why workspaces leak: the crash that stranded the task is
+  // usually the crash that skipped its cleanup. This pass is keyed on STATE
+  // instead — every terminal task of the run that still has a workspace on the
+  // path its row records — so a tree left behind by a process that died between
+  // the status write and the cleanup call is swept by the next reconcile,
+  // whether that is one second or one week later. No filesystem scanning: the
+  // recorded path is the only thing consulted, and a task that never had a
+  // workspace is never looked at.
+  //
+  // Non-terminal tasks are deliberately out of scope. blocked_by_red,
+  // awaiting_gate and the FG-523 hold are all states where the operator is being
+  // asked to look at the work, and their workspace is what they would look at.
+  //
+  // Removal is provably safe or it does not happen (reapTaskWorkspace), and a
+  // retained workspace gets one durable event naming its path and branch — a
+  // crashed task's uncaptured work is never silently discarded, and never
+  // silently forgotten either.
+  for (const t of tasksForRun(runId)) {
+    if (!TERMINAL_TASK.has(t.status)) continue;
+    const workspacePath = t.worktreePath;
+    // run.projectDir is required as git cwd — skip when the run has no recorded
+    // projectDir (legacy rows created before FG-374).
+    if (!workspacePath || !run.projectDir) continue;
+    try {
+      const retain = (substrate: string, branch: string, reason: string, details: string[]): void => {
+        // One event per (task, reason). Reconcile runs on every lifecycle
+        // command; re-logging the same retention each pass would flood the
+        // timeline and break the fixpoint the crash lane asserts.
+        const recorded = eventsForTask(t.id).some(
+          (e) =>
+            e.eventType === "task.workspace_retained" &&
+            (e.payload as { reason?: unknown } | null)?.reason === reason,
+        );
+        if (recorded) return;
+        logEvent("task.workspace_retained", {
+          runId,
+          taskId: t.id,
+          payload: { workspacePath, branch, substrate, reason, details, taskStatus: t.status },
+        });
+      };
+
+      // The failure kinds that state their own retention (see the set above) are
+      // answered without probing git at all.
+      const failureKind = t.status === "failed" ? failureKindForTask(t.id) : undefined;
+      if (failureKind !== undefined && RETAIN_WORKSPACE_FAILURE_KINDS.has(failureKind)) {
+        const substrate = classifyWorkspace(workspacePath);
+        if (substrate === "absent") continue;
+        retain(substrate, worktreeBranchName(runId, t.id), "retained_failure_kind", [failureKind]);
+        continue;
+      }
+
+      const outcome = reapTaskWorkspace(workspacePath, runId, t.id, run.projectDir);
+      if (outcome.action === "absent") continue;
+      if (outcome.action === "retained") {
+        retain(outcome.substrate, outcome.branch, outcome.reason, outcome.details);
+        continue;
+      }
+      if (outcome.action === "branch_reaped") {
+        logEvent("task.workspace_reaped", {
+          runId,
+          taskId: t.id,
+          payload: {
+            workspacePath,
+            branch: outcome.branch,
+            substrate: "absent",
+            branchRemoved: true,
+            reason: "branch_deletion_retried",
+            taskStatus: t.status,
+          },
+        });
+        continue;
+      }
+      logEvent("task.workspace_reaped", {
+        runId,
+        taskId: t.id,
+        payload: {
+          workspacePath,
+          branch: outcome.branch,
+          substrate: outcome.substrate,
+          branchRemoved: outcome.branchRemoved,
+          removal: outcome.removal,
+          reason: "work_captured",
+          taskStatus: t.status,
+        },
+      });
+    } catch { /* FG-459: never throw — one task's workspace must not abort the pass */ }
+  }
 
   // Run-level: an active run with no remaining non-terminal work is no longer in
   // flight. We only complete it when there are no further workflow steps to come

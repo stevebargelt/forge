@@ -29,11 +29,19 @@
 // names why it is here in KILLS below.
 //
 // After every kill: recoverToFixpoint, then the five invariants (the shared
-// checkers), and then this lane's own three assertions, which the matrix cannot
-// make — the worktree path still exists, the work INSIDE it survives file by file,
-// and the task row still points at it. Plus the positive control: a task that
-// COMPLETES cleanly still gets its worktree merged and cleaned up, so "survival" is
-// not being over-asserted into "forge leaks every worktree".
+// checkers), and then this lane's own assertions, which the matrix cannot make.
+// Since FG-356 those assertions cover BOTH dispositions a tree can legitimately
+// end in, and demand that whichever one it lands in was deliberate:
+//   • RETAINED — the path still exists, the work INSIDE it survives file by file,
+//     the row still points at it, its branch still resolves, and reconcile
+//     recorded why it refused to dispose of it.
+//   • REAPED — the tree and its branch are gone AND every file the tree held is
+//     in projectDir instead, with the disposal recorded. This is FG-356's reaper,
+//     and it is what closes the leak this lane found: a kill between the complete
+//     status write and the cleanup call used to strand a merged tree forever.
+// Plus the positive control: a task that COMPLETES cleanly still gets its worktree
+// merged and cleaned up on the dispatch path, so "survival" is not being
+// over-asserted into "forge leaks every worktree".
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -45,7 +53,7 @@ import type { Database as DatabaseInstance } from "better-sqlite3";
 
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { getTask } from "../store/tasks.js";
-import { logEvent } from "../store/events.js";
+import { logEvent, eventsForTask } from "../store/events.js";
 import { setCrashHookForTest } from "./crash-points.js";
 import { runNext, type DockerExecFn } from "./runNext.js";
 import { startRun } from "./startRun.js";
@@ -325,7 +333,8 @@ const KILLS: Cell[] = [
     point: "runContainer:after-mark-running-before-container-launch",
     why:
       "the worktree is created and setTaskWorktreePath committed BEFORE the container launches. A crash here is the " +
-      "first moment a worktree exists at all — the row already points at a tree the agent never touched.",
+      "first moment a worktree exists at all — the row already points at a tree the agent never touched. Since FG-356 " +
+      "that tree is REAPED, not retained: an empty tree is a leak, and the reaper proves it empty before removing it.",
   },
   {
     scenario: "plain",
@@ -350,9 +359,10 @@ const KILLS: Cell[] = [
     scenario: "plain",
     point: "finalizePrimary:between-complete-status-and-event",
     why:
-      "the complete status IS written but the process dies before the cleanup call. The task is terminal-complete, so the " +
-      "worktree's removal is sanctioned but never happened — recovery must not treat that leftover tree as garbage to " +
-      "collect blind (a complete task's tree is merged; a crashed one's is not, and reconcile cannot tell them apart by path).",
+      "the complete status IS written but the process dies before the cleanup call — THE leak this lane found and FG-356 " +
+      "fixed. The tree is merged and redundant, and nothing used to sweep it: one leaked tree per crash of this shape, " +
+      "forever. The reaper now disposes of it, and it does so by proving the work captured rather than by trusting the " +
+      "path (see the dedicated positive cleanup test below).",
   },
   {
     scenario: "contract-hold",
@@ -406,8 +416,9 @@ const KILLS: Cell[] = [
     point: "reconcile:before-fail-provisioning-phase-crash",
     why:
       "a reconcile callsite that calls removeWorktreeIfSafe (the FG-437 landing; the FG-533 sweep below is the other). " +
-      "It passes provenMerged=false, so outside EPHEMERAL mode it must be a no-op — this cell is what proves the guard " +
-      "holds on a live tree instead of trusting the flag.",
+      "It passes provenMerged=false, so that call stays a no-op outside EPHEMERAL mode — but FG-356's reaper then sweeps " +
+      "the tree anyway, because a task that crashed mid-PROVISIONING has an empty tree and nothing to lose. The proof, " +
+      "not the flag, is what sanctions it: the cell asserts the work landed in projectDir.",
   },
   {
     scenario: "provisioning-crash",
@@ -419,8 +430,9 @@ const KILLS: Cell[] = [
     point: "reconcile:before-fail-pre-container-crash",
     why:
       "the FG-533 pre-container sweep's landing — the other failed-task reconcile callsite that calls " +
-      "removeWorktreeIfSafe(provenMerged=false). Same no-op guard, proven on a live tree the agent never touched: the " +
-      "row must land failed/retryable while the tree survives (invariant 4 — discarding is never reconcile's call).",
+      "removeWorktreeIfSafe(provenMerged=false). The row lands failed/retryable, and FG-356's reaper disposes of the " +
+      "tree the agent never touched. Invariant 4 is unharmed and still checked: it is about the WORK, and this tree " +
+      "holds none — every file it had is still in projectDir.",
   },
   {
     scenario: "pre-container-crash",
@@ -429,23 +441,76 @@ const KILLS: Cell[] = [
   },
 ];
 
+const TERMINAL = new Set(["complete", "failed"]);
+
+function branchExists(projectDir: string, runId: string, taskId: string): boolean {
+  try {
+    execFileSync("git", ["rev-parse", "--verify", worktreeBranchName(runId, taskId)], {
+      cwd: projectDir,
+      stdio: "ignore",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function workspaceEventsFor(taskId: string): { type: string; payload: Record<string, unknown> }[] {
+  return eventsForTask(taskId)
+    .filter((e) => e.eventType === "task.workspace_reaped" || e.eventType === "task.workspace_retained")
+    .map((e) => ({ type: e.eventType, payload: (e.payload ?? {}) as Record<string, unknown> }));
+}
+
 /** This lane's own assertions — the ones the matrix structurally cannot make.
- *  checkAllInvariants already flags a vanished worktree or vanished work inside one
- *  (invariant 4); these add the row-level reference and the branch, so a "surviving"
- *  tree that nothing points at and no branch names — work stranded beyond reach —
- *  still fails. */
-function assertWorktreeSurvived(pre: PersistedWork, runId: string, projectDir: string): number {
-  let checked = 0;
+ *  checkAllInvariants already holds the work itself to account (invariant 4);
+ *  these add what a bare file check cannot see — the row-level reference, the
+ *  branch, and the durable record of which disposition FG-356's reaper chose —
+ *  so a "surviving" tree that nothing points at and no branch names (work
+ *  stranded beyond reach) still fails, and so does a disposal nothing recorded.
+ *
+ *  There are exactly two legitimate outcomes per tree, and every tree must land
+ *  in one of them ON PURPOSE:
+ *    RETAINED — the tree, its work, its row reference and its branch all survive,
+ *      and reconcile recorded WHY it refused to dispose of it.
+ *    REAPED — the tree and its branch are gone, every file it held is in
+ *      projectDir instead, and reconcile recorded that it disposed of it. */
+function assertWorktreeDisposition(
+  pre: PersistedWork,
+  runId: string,
+  projectDir: string,
+): { retained: number; reaped: number } {
+  let retained = 0;
+  let reaped = 0;
   for (const w of pre.worktrees) {
     const t = getTask(w.taskId);
     assert.ok(t, `task ${w.taskId} vanished during recovery`);
-    if (t.status === "complete") continue; // proven-merged cleanup is the sanctioned removal
-    checked += 1;
+    const events = workspaceEventsFor(w.taskId);
 
-    assert.ok(
-      existsSync(w.worktreePath),
-      `INVARIANT 4: the worktree for '${t.status}' task ${w.taskId} is GONE after recovery (${w.worktreePath})`,
-    );
+    if (!existsSync(w.worktreePath)) {
+      reaped += 1;
+      assert.ok(
+        TERMINAL.has(t.status),
+        `FG-356: task ${w.taskId} is '${t.status}' — a NON-terminal task's workspace must never be disposed of; the operator is still being asked to look at it`,
+      );
+      for (const f of w.files) {
+        assert.ok(
+          existsSync(join(projectDir, f)),
+          `INVARIANT 4: '${f}' was in task ${w.taskId}'s worktree at the kill, the tree was reaped, and the file is not in the project either — that is a discard`,
+        );
+      }
+      assert.equal(
+        branchExists(projectDir, runId, w.taskId),
+        false,
+        `FG-356: task ${w.taskId}'s tree was reaped but its branch was left behind — a dangling ref is half a cleanup`,
+      );
+      const reap = events.find((e) => e.type === "task.workspace_reaped");
+      assert.ok(reap, `FG-356: task ${w.taskId}'s workspace was disposed of with NO durable record of it`);
+      assert.equal(reap.payload["workspacePath"], w.worktreePath);
+      assert.equal(reap.payload["branch"], worktreeBranchName(runId, w.taskId));
+      continue;
+    }
+
+    retained += 1;
     for (const f of w.files) {
       assert.ok(
         existsSync(join(w.worktreePath, f)),
@@ -457,16 +522,22 @@ function assertWorktreeSurvived(pre: PersistedWork, runId: string, projectDir: s
       w.worktreePath,
       `INVARIANT 4: task ${w.taskId} no longer REFERENCES its worktree — a tree nothing points at is work the operator cannot find`,
     );
-    assert.doesNotThrow(
-      () =>
-        execFileSync("git", ["rev-parse", "--verify", worktreeBranchName(runId, w.taskId)], {
-          cwd: projectDir,
-          stdio: "ignore",
-        }),
+    assert.ok(
+      branchExists(projectDir, runId, w.taskId),
       `INVARIANT 4: the task branch for ${w.taskId} was deleted — the committed half of the agent's work is unreachable`,
     );
+    if (TERMINAL.has(t.status)) {
+      const kept = events.find((e) => e.type === "task.workspace_retained");
+      assert.ok(
+        kept,
+        `FG-356: terminal task ${w.taskId}'s workspace was retained with no durable evidence — work nobody records is work nobody finds`,
+      );
+      assert.equal(kept.payload["workspacePath"], w.worktreePath, "the evidence must name the workspace path");
+      assert.equal(kept.payload["branch"], worktreeBranchName(runId, w.taskId), "and the branch");
+      assert.ok(typeof kept.payload["reason"] === "string", "and why it was kept");
+    }
   }
-  return checked;
+  return { retained, reaped };
 }
 
 for (const cell of KILLS) {
@@ -511,11 +582,10 @@ for (const cell of KILLS) {
       `crash @ ${cell.point} in worktree scenario '${sc.name}' left the run violating lifecycle invariants:\n${formatViolations(unexpected)}`,
     );
 
-    const checked = assertWorktreeSurvived(persistedPreKill, runId, projectDir);
+    const { retained, reaped } = assertWorktreeDisposition(persistedPreKill, runId, projectDir);
     t.diagnostic(
-      checked > 0
-        ? `${checked} non-complete worktree(s) survived recovery with their work and their row reference intact`
-        : `every worktree's task completed — survival is not asserted (cleanup is sanctioned); see the positive control`,
+      `${retained} worktree(s) retained with their work, row reference and branch intact; ` +
+        `${reaped} reaped with their work proven present in projectDir (FG-356)`,
     );
   });
 }
@@ -568,6 +638,59 @@ test("FG-530 worktree [positive control]: a task that COMPLETES has its work mer
       }),
     "and the merged task branch with it",
   );
+});
+
+// ── FG-356: the leak this lane found, now asserted as a sweep ─────────────────
+//
+// The cell above proves the invariants survive this kill. This proves the thing
+// they cannot: that the leftover tree is actually GONE afterwards. It is the same
+// crash — the complete status written, the process dead before the cleanup call —
+// held to the opposite standard, because before FG-356 nothing swept it and every
+// crash of this shape leaked a tree and a branch permanently.
+
+test("FG-356 [flip of the FG-530 leak]: a kill between the complete status write and the cleanup call leaves a leaked tree — and the next reconcile sweeps it, work captured, branch and all", async () => {
+  const sc = SCENARIOS["plain"]!;
+  writeWorkflowYaml(sc.workflow.name, sc.yaml);
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
+  const projectDir = makeRepo();
+  const exec = makeExec(sc.exec);
+  const { runId } = startRun({ workflow: sc.workflow, title: "fg356 flip", inputs: {}, projectDir });
+
+  const { fired, persistedPreKill } = await runCrashPhase(
+    sc,
+    runId,
+    exec,
+    killPoint("finalizePrimary:between-complete-status-and-event"),
+  );
+  assert.ok(fired, "the kill must fire — this test is about that exact window");
+  assert.equal(persistedPreKill.worktrees.length, 1, "the primary's worktree existed at the kill");
+  const wt = persistedPreKill.worktrees[0]!;
+  const primary = primaryOf(runId, "build")!;
+
+  // The leak, stated as a precondition rather than assumed: terminal-complete row,
+  // tree and branch still on disk because the process died before the cleanup.
+  assert.equal(primary.status, "complete", "the kill point writes the terminal status and THEN dies");
+  assert.ok(existsSync(wt.worktreePath), "so the tree is still there — nothing in the dispatch path will ever revisit it");
+  assert.ok(branchExists(projectDir, runId, primary.id), "and so is its branch");
+
+  await recoverToFixpoint(runId, sc.workflow, exec);
+
+  assert.equal(
+    existsSync(wt.worktreePath),
+    false,
+    "FG-356: the next reconcile must sweep the leaked tree — one per crash of this shape is how a host fills up",
+  );
+  assert.equal(branchExists(projectDir, runId, primary.id), false, "and the branch with it");
+  assert.ok(existsSync(join(projectDir, COMMITTED_WORK)), "the committed work is in the project, which is why removal was safe");
+  assert.ok(existsSync(join(projectDir, UNCOMMITTED_SENTINEL)), "and the uncommitted half too (merge-back's safety commit)");
+
+  const evs = workspaceEventsFor(primary.id);
+  assert.equal(evs.length, 1, "the disposal is recorded exactly once, no matter how many reconcile passes ran");
+  assert.equal(evs[0]!.type, "task.workspace_reaped");
+  assert.equal(evs[0]!.payload["workspacePath"], wt.worktreePath);
+  assert.equal(evs[0]!.payload["branch"], worktreeBranchName(runId, primary.id));
+  assert.equal(evs[0]!.payload["substrate"], "linked_worktree");
+  assert.equal(evs[0]!.payload["branchRemoved"], true);
 });
 
 // ── the lane's own integrity: it must be running the world it claims ──────────
