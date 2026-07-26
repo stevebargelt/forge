@@ -3040,6 +3040,7 @@ async function runContainer(args: {
         return { kind: "failed", error: msg };
       }
       let provisionerExitCode = -1;
+      let provisionerStderrTail = "";
       // FG-437: the real, durable provisioner container name/cacheKey — logged
       // independently of the worktree (which may be gone by the time reconcile
       // runs) so a mid-provision crash is recoverable.
@@ -3069,11 +3070,20 @@ async function runContainer(args: {
           // container the daemon has likely already auto-removed.
           isProvisionerExec: true,
         });
-        const stderrTail = existsSync(provisionStderrPath) ? readFileSync(provisionStderrPath, "utf8").trim() : "";
-        return { exitCode: provisionerExitCode, stderrTail };
+        provisionerStderrTail = existsSync(provisionStderrPath) ? readFileSync(provisionStderrPath, "utf8").trim() : "";
+        return { exitCode: provisionerExitCode, stderrTail: provisionerStderrTail };
       });
       if (provision.outcome === "failed") {
-        logEvent("container.dependency_provisioning_failed", {
+        // FG-559: the provisioner runs the same entrypoint as the agent, so it
+        // hits the git probe too — and on a fresh cache key it is the FIRST
+        // container this dispatch starts, so 122 surfaces HERE, never at the
+        // agent branch below. Diagnose it as the git failure it is; calling it
+        // a dependency-install failure sends the operator hunting npm.
+        const gitUnavailable = provisionerExitCode === GIT_UNAVAILABLE_EXIT_CODE;
+        const error = gitUnavailable
+          ? `verification_environment_unavailable: git is unusable in the project mount${provisionerStderrTail ? ` — ${provisionerStderrTail}` : ""}`
+          : provision.error;
+        logEvent(gitUnavailable ? "container.git_unavailable" : "container.dependency_provisioning_failed", {
           runId: args.runId,
           taskId: args.taskId,
           payload: { containerName: provisionContainerName, exitCode: provisionerExitCode },
@@ -3082,9 +3092,9 @@ async function runContainer(args: {
         failTask(args.taskId, {
           runId: args.runId,
           kind: classify({ source: "verification_environment_unavailable" }),
-          error: provision.error,
+          error,
         });
-        return { kind: "failed", error: provision.error };
+        return { kind: "failed", error };
       } else if (provisionerExitCode !== -1) {
         // We actually ran the provisioner (as opposed to reusing an
         // already-ready cache) and it succeeded.

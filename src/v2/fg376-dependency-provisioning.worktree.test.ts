@@ -35,6 +35,7 @@ import { startRun } from "./startRun.js";
 import { runNext, type DockerExecFn } from "./runNext.js";
 import { failureKindForTask } from "./failure-kind.js";
 import { DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE, lockfileHash } from "./dependency-provisioning.js";
+import { GIT_UNAVAILABLE_EXIT_CODE } from "./spawn.js";
 import type { Workflow } from "./schema.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
@@ -209,7 +210,11 @@ function makeTwoPhaseExec(calls: Call[]): DockerExecFn {
 // Every provisioner call fails with the install-failure sentinel; the agent
 // must never be reached (provisioning fails before the agent container is
 // ever built), so a non-provisioner call here is a test bug, not a real path.
-function makeProvisionerFailingExec(stderrText: string, calls: Call[]): DockerExecFn {
+function makeProvisionerFailingExec(
+  stderrText: string,
+  calls: Call[],
+  exitCode: number = DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE,
+): DockerExecFn {
   return async ({ args, stdoutPath, stderrPath }) => {
     const kind = isProvisionerCall(args) ? "provisioner" : "agent";
     calls.push({ args: [...args], kind });
@@ -217,7 +222,7 @@ function makeProvisionerFailingExec(stderrText: string, calls: Call[]): DockerEx
     mkdirSync(dir, { recursive: true });
     writeFileSync(stdoutPath, "");
     writeFileSync(stderrPath, stderrText);
-    return DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE;
+    return exitCode;
   };
 }
 
@@ -439,6 +444,53 @@ test("fg376 (d): a failed provisioner (exit 123) leaves no ready marker, fails t
     calls2.map((c) => c.kind),
     ["provisioner", "agent"],
     "no marker was left by the failed attempt, so this dispatch must re-provision, not reuse",
+  );
+});
+
+// FG-559: on a fresh cache key the PROVISIONER is the first container the
+// dispatch starts, and it runs the same entrypoint — so its git probe fires
+// first and 122 never reaches runNext's agent-exit branch. Classifying it as a
+// dependency-install failure hides the git diagnosis on exactly the path
+// production takes.
+test("fg559: a provisioner that exits 122 records container.git_unavailable with the git diagnosis, not a dependency-install failure", async () => {
+  setPlatform("darwin");
+  process.env.FORGE_WORKTREES = "1";
+  process.env.FORGE_WORKTREE_IGNORE_DIRTY = "1";
+
+  const repo = makeRepoWithLockContent('{"lockfileVersion":3,"fg559-provisioner-git":true}');
+  const { runId } = startRun({ workflow: DISPATCH_TEST_WORKFLOW, title: "fg559 provisioner git probe", inputs: {}, projectDir: repo });
+  const calls: Call[] = [];
+  const wave = await runNext({
+    runId,
+    workflow: DISPATCH_TEST_WORKFLOW,
+    dockerExec: makeProvisionerFailingExec(
+      "forge: git is unusable in /project: fatal: not a git repository",
+      calls,
+      GIT_UNAVAILABLE_EXIT_CODE,
+    ),
+  });
+
+  assert.deepEqual(wave.failedSteps, ["build"]);
+  assert.deepEqual(calls.map((c) => c.kind), ["provisioner"], "the agent container must never be spawned");
+
+  const primary = tasksForRun(runId).find((t) => t.phase === "build" && t.parentId === undefined)!;
+  assert.equal(primary.status, "failed");
+  assert.equal(failureKindForTask(primary.id), "verification_environment_unavailable");
+  assert.match(primary.error ?? "", /git is unusable in the project mount/);
+  assert.match(primary.error ?? "", /not a git repository/, "the container's own stderr tail must reach the operator");
+  assert.doesNotMatch(primary.error ?? "", /dependency install/i);
+
+  const types = eventsForTask(primary.id).map((e) => e.eventType);
+  assert.ok(types.includes("container.git_unavailable"), `got: ${types.join(", ")}`);
+  assert.ok(!types.includes("container.dependency_provisioning_failed"), "122 is not a dependency-install failure");
+
+  const ev = eventsForTask(primary.id).find((e) => e.eventType === "container.git_unavailable")!;
+  assert.equal((ev.payload as Record<string, unknown>)["exitCode"], GIT_UNAVAILABLE_EXIT_CODE);
+  const nameIdx = calls[0]!.args.indexOf("--name");
+  assert.equal(
+    (ev.payload as Record<string, unknown>)["containerName"],
+    calls[0]!.args[nameIdx + 1],
+    "the event must name the provisioner container that actually ran",
   );
 });
 
