@@ -31,3 +31,20 @@ the same commit. Net effect: an operator on macOS cannot run the worktree tier l
 The fix pattern is already established: FG-575 `realpathSync`'d its workspace root for exactly this
 reason. Whatever this ticket does for `fg425-publication-cas.worktree.test.ts` should be applied to
 these two files in the same pass.
+
+---
+
+## Correction (2026-07-25): the FG-559 files are FIXED — this ticket is back to its original single file
+
+The section above added `fg559-worktree-git-enforcement.worktree.test.ts` and
+`fg559-worktree-git-mount.worktree.test.ts` to this ticket's scope. That was the wrong call: they were
+brand-new files in an unmerged branch, fixable in place, and deferring them would have shipped tests
+that cannot run on the operator's own platform. A review round flagged exactly that, and both were
+canonicalized with `realpathSync` in `4c6e5d0` before FG-559 merged.
+
+Worktree tier on the macOS host after that fix: **243 tests, 242 pass, 1 fail** — and the one failure is
+this ticket's original case, `fg425-publication-cas.worktree.test.ts`.
+
+So the scope here is unchanged from how it was filed: `fg425-publication-cas.worktree.test.ts` only. The
+fix pattern is now demonstrated twice in-repo (FG-575's workspace root, and the two FG-559 fixtures):
+`realpathSync(mkdtempSync(...))` at the fixture root.
