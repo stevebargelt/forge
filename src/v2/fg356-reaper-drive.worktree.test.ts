@@ -26,7 +26,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
@@ -411,7 +411,7 @@ for (const kind of ["orphaned", "orphaned_work_may_persist", "oom_killed", "cont
 
 // ── 3. Removal that git refuses, and the blast radius ─────────────────────────
 
-test("fg356 drive: a worktree the run does NOT own is never removed — git refuses it and reconcile records removal_failed", () => {
+test("fg356 drive: a worktree of ANOTHER repository is never removed — ownership is checked before the removal is attempted", () => {
   const repo = makeRepo();
   startRunFor(repo);
   // A different repository's worktree that happens to sit at a commit projectDir
@@ -433,7 +433,7 @@ test("fg356 drive: a worktree the run does NOT own is never removed — git refu
 
   reconcileRun(RUN_ID, ALIVE);
 
-  assert.ok(existsSync(foreignWt), "the reaper only ever runs git in the run's OWN projectDir, which does not own this tree");
+  assert.ok(existsSync(foreignWt), "the tree reports a different repository as its own, so it is not this run's to dispose of");
   assert.ok(existsSync(join(foreignWt, "README.md")), "with its checkout intact");
   assert.ok(
     branchExists(foreignRepo, "t-foreign"),
@@ -446,9 +446,99 @@ test("fg356 drive: a worktree the run does NOT own is never removed — git refu
 
   const ev = onlyEvent("t-foreign");
   assert.equal(ev.type, "task.workspace_retained");
-  assert.equal(ev.payload["reason"], "removal_failed", "a removal git declined is recorded, not assumed successful");
+  assert.equal(ev.payload["reason"], "workspace_not_owned", "and the refusal names ownership, not a failed removal");
   assert.equal(ev.payload["workspacePath"], foreignWt);
   assert.equal(ev.payload["substrate"], "linked_worktree");
+  assert.ok(
+    (ev.payload["details"] as string[]).some((d) => d.includes("belongs to")),
+    "the evidence names the repository the tree actually belongs to",
+  );
+});
+
+test("fg356 drive: a row pointing at ANOTHER task's worktree of the SAME repo retains — every capture check passes on a tree that is not ours", () => {
+  const repo = makeRepo();
+  startRunFor(repo);
+
+  // The neighbour: same repository, same parent object store, its own
+  // deterministic branch, clean, and already merged back — so the clean-tree and
+  // reachable-commits checks both pass on it. It belongs to a task that is still
+  // running, and reconciling this run must leave it exactly where it is.
+  const neighbour = addWorktree(repo, "t-neighbour");
+  commitInWorkspace(neighbour, "neighbour.ts");
+  mergeBack(repo, "t-neighbour");
+  insertTaskRow("t-neighbour", { status: "running", workspace: neighbour, containerized: true });
+
+  // The orphan: a stale/misassigned worktree_path naming the NEIGHBOUR's tree.
+  // Its real workspace sits elsewhere and is still registered on its own branch.
+  const own = addWorktree(repo, "t-misassigned");
+  commitInWorkspace(own, "own.ts");
+  mergeBack(repo, "t-misassigned");
+  insertTaskRow("t-misassigned", { status: "failed", workspace: neighbour, failureKind: "orphaned" });
+
+  // The fixture is deliberately NOT vacuous: the neighbour's tree is clean and
+  // its history is captured, so every capture check passes on it and nothing but
+  // ownership stands between the reaper and someone else's workspace.
+  assert.equal(git(neighbour, "status", "--porcelain", "--ignored").trim(), "", "fixture: the neighbour is clean");
+  git(repo, "merge-base", "--is-ancestor", git(neighbour, "rev-parse", "HEAD").trim(), "HEAD");
+  git(repo, "merge-base", "--is-ancestor", git(repo, "rev-parse", worktreeBranchName(RUN_ID, "t-misassigned")).trim(), "HEAD");
+
+  const before = snapshotFiles(neighbour);
+
+  reconcileRun(RUN_ID, ALIVE);
+
+  assert.ok(existsSync(neighbour), "the neighbour's workspace is not this task's to dispose of");
+  assert.ok(existsSync(join(neighbour, "neighbour.ts")), "with its checkout intact");
+  assert.ok(
+    git(repo, "worktree", "list").includes(neighbour),
+    "and its worktree registration intact — nothing was pruned out from under a live task",
+  );
+  assert.ok(branchExists(repo, "t-neighbour"), "and the branch it is checked out on");
+  assert.ok(
+    branchExists(repo, "t-misassigned"),
+    "and the orphan's OWN branch survives — a reap of the wrong tree would have deleted it out from under the right one",
+  );
+  assert.ok(existsSync(join(own, "own.ts")), "whose workspace the reaper never looked at either");
+  assertNoWorkDestroyed(neighbour, before, repo);
+  assert.deepEqual(workspaceEvents("t-neighbour"), [], "and nothing is recorded against the neighbour's own task");
+
+  const ev = onlyEvent("t-misassigned");
+  assert.equal(ev.type, "task.workspace_retained");
+  assert.equal(ev.payload["reason"], "workspace_not_owned");
+  assert.equal(ev.payload["workspacePath"], neighbour);
+  assert.equal(ev.payload["branch"], worktreeBranchName(RUN_ID, "t-misassigned"));
+  assert.equal(ev.payload["substrate"], "linked_worktree");
+  assert.ok(
+    (ev.payload["details"] as string[]).some((d) =>
+      d.includes(worktreeBranchName(RUN_ID, "t-neighbour")) && d.includes(worktreeBranchName(RUN_ID, "t-misassigned")),
+    ),
+    "the evidence names the branch the tree is on and the branch it should have been on",
+  );
+});
+
+test("fg356 drive: a removal git cannot complete is recorded as removal_failed, not assumed successful", () => {
+  const repo = makeRepo();
+  startRunFor(repo);
+  const wt = addWorktree(repo, "t-undeletable");
+  commitInWorkspace(wt, "work.ts");
+  mergeBack(repo, "t-undeletable");
+  insertTaskRow("t-undeletable", { status: "failed", workspace: wt, failureKind: "orphaned" });
+  const before = snapshotFiles(wt);
+
+  // Owned, clean, captured — the reaper reaches the removal, and git cannot
+  // unlink the tree's contents because the tree itself is not writable.
+  chmodSync(wt, 0o500);
+  try {
+    reconcileRun(RUN_ID, ALIVE);
+  } finally {
+    chmodSync(wt, 0o700);
+  }
+
+  assert.ok(existsSync(wt), "a removal that did not happen leaves the tree");
+  assertNoWorkDestroyed(wt, before, repo);
+  const ev = onlyEvent("t-undeletable");
+  assert.equal(ev.type, "task.workspace_retained");
+  assert.equal(ev.payload["reason"], "removal_failed", "a removal git declined is recorded, not assumed successful");
+  assert.equal(ev.payload["workspacePath"], wt);
 });
 
 test("fg356 drive: reconciling one run never touches another run's workspaces", () => {

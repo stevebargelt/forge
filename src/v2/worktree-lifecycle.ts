@@ -15,8 +15,8 @@
 // FORGE_NO_WORKTREES; the kill switch works at the feature-enable level so the
 // caller never reaches the gate.
 
-import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { findGitRoot } from "../util/git-root.js";
 import { WORKTREES_DIR, worktreeDir, integrationWorktreeDir } from "../util/paths.js";
@@ -413,6 +413,10 @@ export type WorkspaceRetainReason =
   | "private_clone_substrate"
   /** A directory we cannot identify as either substrate — never guessed at. */
   | "unknown_substrate"
+  /** The workspace is a linked worktree, but not THIS task's: it belongs to
+   *  another repository, or is checked out on something other than the task's
+   *  deterministic branch. */
+  | "workspace_not_owned"
   /** git refused the removal even after unlock + double force. */
   | "removal_failed";
 
@@ -462,6 +466,66 @@ function resolveCommit(cwd: string, rev: string): string | undefined {
   }
 }
 
+/** The repository a working tree belongs to, as an absolute resolved path to its
+ *  shared `.git` dir. A linked worktree reports its PARENT's — which is what
+ *  makes it the ownership test. undefined when git could not answer. */
+function gitCommonDir(cwd: string): string | undefined {
+  try {
+    const out = execFileSync("git", ["rev-parse", "--git-common-dir"], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return out ? realpathSync(resolve(cwd, out)) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The ref a working tree has checked out, e.g. `refs/heads/forge/<run>/<task>`.
+ *  undefined on a detached HEAD or when git could not answer. */
+function checkedOutRef(cwd: string): string | undefined {
+  try {
+    return (
+      execFileSync("git", ["symbolic-ref", "--quiet", "HEAD"], {
+        cwd,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim() || undefined
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+/** Why the recorded path is not this task's workspace — empty when it is.
+ *
+ *  The capture checks all ask "is the work here safe to lose?", and a workspace
+ *  that was never this task's answers YES trivially: another clean worktree of
+ *  the SAME repository is clean, and its HEAD is already reachable from HEAD, so
+ *  a stale or misassigned worktree_path passes every one of them and the reaper
+ *  deletes a tree it was never asked about — then deletes the task's branch on
+ *  top of it. Ownership is checked from the workspace itself (its repository and
+ *  its checked-out branch), never inferred from the path. */
+function ownershipMismatch(workspacePath: string, projectDir: string, branch: string): string[] {
+  const details: string[] = [];
+
+  const workspaceRepo = gitCommonDir(workspacePath);
+  const projectRepo = gitCommonDir(projectDir);
+  if (workspaceRepo === undefined || projectRepo === undefined || workspaceRepo !== projectRepo) {
+    details.push(
+      `workspace belongs to ${workspaceRepo ?? "an unreadable repository"}, not to ${projectRepo ?? "an unreadable repository"}`
+    );
+  }
+
+  const ref = checkedOutRef(workspacePath);
+  if (ref !== `refs/heads/${branch}`) {
+    details.push(`workspace is checked out on ${ref ?? "a detached HEAD"}, not on refs/heads/${branch}`);
+  }
+
+  return details;
+}
+
 function isAncestorOfHead(projectDir: string, commit: string): boolean {
   try {
     execFileSync("git", ["merge-base", "--is-ancestor", commit, "HEAD"], {
@@ -479,10 +543,11 @@ function isAncestorOfHead(projectDir: string, commit: string): boolean {
  *  no-op, so repeated calls are safe.
  *
  *  Safe means all of: the substrate is a linked worktree, the tree is clean (no
- *  uncommitted, untracked or ignored files), and every commit the task's branch/HEAD
- *  points at is reachable from projectDir's HEAD. Anything else — including
- *  anything git declines to answer — is RETAINED with the reason, so the caller
- *  can record where the work still lives. */
+ *  uncommitted, untracked or ignored files), every commit the task's branch/HEAD
+ *  points at is reachable from projectDir's HEAD, and the worktree is THIS task's
+ *  — projectDir's own repository, checked out on the task's deterministic branch.
+ *  Anything else — including anything git declines to answer — is RETAINED with
+ *  the reason, so the caller can record where the work still lives. */
 export function reapTaskWorkspace(
   workspacePath: string,
   runId: string,
@@ -526,6 +591,14 @@ export function reapTaskWorkspace(
       reason: "unmerged_commits",
       details: tips.length === 0 ? ["the workspace's history could not be resolved"] : uncaptured,
     };
+  }
+
+  // Last gate before the irreversible step, and deliberately after the capture
+  // checks: where both would refuse, the capture reasons name the exact commits
+  // or files at stake, which is the more useful evidence for an operator.
+  const notOurs = ownershipMismatch(workspacePath, projectDir, branch);
+  if (notOurs.length > 0) {
+    return { action: "retained", substrate, branch, reason: "workspace_not_owned", details: notOurs };
   }
 
   if (!forceRemoveWorktree(projectDir, workspacePath)) {
