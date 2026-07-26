@@ -3133,8 +3133,12 @@ async function runContainer(args: {
 
   // FG-374: verify the resolved projectDir is a non-empty directory before
   // exec'ing — mirrors the same guard in invoke.ts.
+  //
+  // FG-559: preflight repoRootForMount, NOT args.projectDir — the worktree is
+  // what gets mounted at /project, so it is the tree whose `.git` pointer has to
+  // resolve. On a non-worktree dispatch the two are the same value.
   try {
-    preflightProjectMount(args.projectDir);
+    preflightProjectMount(repoRootForMount);
   } catch (e) {
     const msg = `preflightProjectMount failed: ${(e as Error).message}`;
     cleanupStagedAuth(dir); // AWN-8

@@ -17,7 +17,7 @@
 // produces the full `docker run ... claude ...` argv.
 
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import type { Runtime } from "./schema.js";
 import { resolveRuntimeMetadata } from "./schema.js";
 import {
@@ -124,8 +124,9 @@ function assertWithinArgLimit(label: string, value: string): void {
 // timeout(1)'s conventional code and would be ambiguous in a wrapped exec.
 export const GIT_UNAVAILABLE_EXIT_CODE = 122;
 
-// The absolute path a linked worktree's (or submodule's) `.git` POINTER FILE
-// names, or undefined when `.git` is a real directory / absent.
+// The absolute path a `.git` POINTER FILE names, or undefined when `.git` is a
+// real directory / absent. What the pointer names is NOT trusted — see
+// resolveVerifiedCommonGitDir.
 function readGitdirPointer(projectDir: string): string | undefined {
   const dotGit = join(projectDir, ".git");
   const st = statSync(dotGit, { throwIfNoEntry: false });
@@ -158,15 +159,40 @@ function isUnder(child: string, ancestor: string): boolean {
 export function planWorktreeGitMounts(projectDir: string): string[] {
   const gitdir = readGitdirPointer(projectDir);
   if (!gitdir) return [];
-  const paths = new Set([gitdir]);
-  const commondirFile = join(gitdir, "commondir");
-  if (existsSync(commondirFile)) {
-    paths.add(resolve(gitdir, readFileSync(commondirFile, "utf8").trim()));
+  // The admin dir lives INSIDE the common .git, so the single common-dir mount
+  // covers both hops.
+  return [resolveVerifiedCommonGitDir(projectDir, gitdir)];
+}
+
+/** FG-559: the `gitdir:` line lives in the PROJECT TREE, which a project — or a
+ *  prior writable agent — can rewrite to name any host path. Bind-mounting
+ *  whatever it says would hand every later container arbitrary host data at its
+ *  own path, so accept only the shape `git worktree add` writes and refuse
+ *  everything else: an admin dir `<common>/worktrees/<name>` carrying git's own
+ *  `commondir` + `gitdir` files, whose `commondir` resolves back to that same
+ *  grandparent, and whose common dir is really a git dir. Returns the common
+ *  dir — the one path that must be mounted. */
+function resolveVerifiedCommonGitDir(projectDir: string, adminDir: string): string {
+  const commonDir = dirname(dirname(adminDir));
+  const refuse = (why: string): never => {
+    throw new Error(
+      `FG-559: ${projectDir}/.git is a gitdir: pointer to ${adminDir}, which ${why}. Only a linked ` +
+        `worktree's admin dir (<repo>/.git/worktrees/<name>) is bind-mounted into agent containers; ` +
+        `refusing to mount an unverified host path.`
+    );
+  };
+  if (!statSync(adminDir, { throwIfNoEntry: false })?.isDirectory()) refuse("is not a directory");
+  if (basename(dirname(adminDir)) !== "worktrees") refuse("does not sit under a worktrees/ parent");
+  if (!existsSync(join(adminDir, "gitdir"))) refuse("has no gitdir back-pointer file");
+  const commondirFile = join(adminDir, "commondir");
+  if (!existsSync(commondirFile)) refuse("has no commondir file");
+  if (resolve(adminDir, readFileSync(commondirFile, "utf8").trim()) !== commonDir) {
+    refuse(`has a commondir that does not resolve to its own parent repo (${commonDir})`);
   }
-  // The admin dir lives INSIDE the common .git, so one mount of the common dir
-  // covers both hops. Keep only the outermost paths.
-  const all = [...paths];
-  return all.filter((p) => !all.some((other) => isUnder(p, other)));
+  for (const marker of ["HEAD", "objects", "refs"]) {
+    if (!existsSync(join(commonDir, marker))) refuse(`resolves to ${commonDir}, which has no ${marker}`);
+  }
+  return commonDir;
 }
 
 /** FG-559 piece A — the mount-plan assertion. The host CANNOT detect this by

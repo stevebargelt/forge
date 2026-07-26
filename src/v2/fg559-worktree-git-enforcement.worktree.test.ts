@@ -29,6 +29,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -94,7 +95,7 @@ type Fixture = {
  *  subset of the parent `.git` back at its original absolute path — which is
  *  precisely what a host-path-preserving bind mount does in the container. */
 function makeWorktreeFixture(baseDir?: string): Fixture {
-  const base = baseDir ?? mkdtempSync(join(tmpdir(), "fg559e-"));
+  const base = baseDir ?? realpathSync(mkdtempSync(join(tmpdir(), "fg559e-")));
   if (!baseDir) tmpDirs.push(base);
 
   const repo = join(base, "host", "parent");
@@ -264,7 +265,7 @@ test("fg559e (piece A): an identity bind of the required path — or of an ances
 });
 
 test("fg559e (piece A): the guard NEVER refuses an ordinary dispatch — non-git, plain clone, absent dir, junk .git file", () => {
-  const base = mkdtempSync(join(tmpdir(), "fg559e-ord-"));
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "fg559e-ord-")));
   tmpDirs.push(base);
 
   const nonGit = join(base, "plain-dir");
@@ -310,6 +311,80 @@ const PROVISIONER_PLAN: DependencyVolumePlan = {
   installRoot: "/project",
 };
 
+test("fg559e (piece A): a gitdir: pointer that is not a VERIFIED worktree admin dir is refused, never bind-mounted", () => {
+  // The pointer line lives in the PROJECT tree, which the project itself — or a
+  // prior writable agent — can rewrite. Resolving it and binding whatever it
+  // names at its own host path would hand every later container arbitrary host
+  // data, so anything but the shape `git worktree add` writes is refused.
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "fg559e-hostile-")));
+  tmpDirs.push(base);
+
+  const secrets = join(base, "home", "victim", ".ssh");
+  mkdirSync(secrets, { recursive: true });
+  writeFileSync(join(secrets, "id_ed25519"), "PRIVATE KEY\n");
+
+  // The near-miss that a shape check alone would let through: the
+  // <parent>/worktrees/<name> layout with a commondir that resolves cleanly,
+  // but a "common dir" that is not a git dir at all.
+  const fakeAdmin = join(base, "home", "victim", "worktrees", "x");
+  mkdirSync(fakeAdmin, { recursive: true });
+  writeFileSync(join(fakeAdmin, "commondir"), "../..\n");
+  writeFileSync(join(fakeAdmin, "gitdir"), `${base}/proj/.git\n`);
+
+  const proj = join(base, "proj");
+  mkdirSync(proj, { recursive: true });
+
+  for (const [label, target] of [
+    ["a plain host directory", secrets],
+    ["a path that does not exist", join(base, "nope")],
+    ["an admin-shaped dir whose common dir is not a git dir", fakeAdmin],
+    ["the ancestor that holds an admin-shaped worktrees/ subtree", join(base, "home", "victim")],
+  ] as Array<[string, string]>) {
+    writeFileSync(join(proj, ".git"), `gitdir: ${target}\n`);
+    assert.throws(() => planWorktreeGitMounts(proj), /FG-559/, `${label} must be refused, not planned`);
+    assert.throws(
+      () => buildDockerArgs(RUNTIME, ctxFor(proj, "rw")),
+      /FG-559/,
+      `${label} must never reach docker as a bind`
+    );
+    assert.throws(
+      () => buildProvisionerDockerArgs(RUNTIME, ctxFor(proj, "rw"), PROVISIONER_PLAN),
+      /FG-559/,
+      `${label} must be refused on the provisioner argv too`
+    );
+  }
+
+  // Non-vacuity: a REAL worktree still flows through the same code path.
+  const f = makeWorktreeFixture();
+  materializeCommonGit(f);
+  assert.deepEqual(
+    planWorktreeGitMounts(f.projectPath),
+    [f.parentGitDir],
+    "the verification must not refuse the shape git actually writes"
+  );
+});
+
+test("fg559e: runContainer preflights the path it MOUNTS (repoRootForMount), not args.projectDir", () => {
+  // Structural, like the provisioner-ordering test above: the two paths differ
+  // only on a worktree dispatch, and the difference is which tree's `.git`
+  // pointer gets checked — a state no in-process fixture can reach, because
+  // forge creates the worktree itself and it is healthy when it does.
+  const src = readFileSync(join(REPO_ROOT, "src", "v2", "runNext.ts"), "utf8");
+  const runContainerAt = src.indexOf("async function runContainer(");
+  assert.ok(runContainerAt > 0, "runContainer must still be findable — otherwise this test proves nothing");
+  const body = src.slice(runContainerAt);
+
+  assert.ok(
+    body.includes("preflightProjectMount(repoRootForMount)"),
+    "the workflow dispatch must preflight the worktree it mounts at /project"
+  );
+  assert.equal(
+    body.includes("preflightProjectMount(args.projectDir)"),
+    false,
+    "preflighting args.projectDir leaves a dangling .git pointer in the WORKTREE unchecked"
+  );
+});
+
 test("fg559e: the PROVISIONER argv carries the same read-only parent .git bind — it runs the same entrypoint probe", () => {
   const f = makeWorktreeFixture();
   materializeCommonGit(f);
@@ -325,7 +400,7 @@ test("fg559e: the PROVISIONER argv is refused when the parent .git bind cannot b
   // Same colon-bearing host path as the dispatch test below: `-v` is
   // colon-delimited, so the bind buildProvisionerDockerArgs emits above is
   // malformed and its own assertion finds the required path unbound.
-  const base = mkdtempSync(join(tmpdir(), "fg559e-colon-prov-"));
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "fg559e-colon-prov-")));
   tmpDirs.push(base);
   const f = makeWorktreeFixture(join(base, "ho:st"));
   materializeCommonGit(f);
@@ -402,7 +477,7 @@ test("fg559e (piece A, dispatch): a worktree whose parent .git cannot be bound a
   // route that reaches the guard through the REAL dispatch path — everywhere
   // else the mount and the check are computed from the same call, so proving
   // "refuses before any side effect" needs a state the two disagree on.
-  const base = mkdtempSync(join(tmpdir(), "fg559e-colon-"));
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "fg559e-colon-")));
   tmpDirs.push(base);
   const f = makeWorktreeFixture(join(base, "ho:st"));
   materializeCommonGit(f);
@@ -473,7 +548,7 @@ test("fg559e (dispatch): an ordinary worktree dispatch is NOT refused — it rea
 // ─── 4. preflightProjectMount — the latent surface (FG-559 fix 1) ────────────
 
 test("fg559e: preflightProjectMount refuses ONLY the broken pointer — healthy worktree, plain clone and non-git all still pass", () => {
-  const base = mkdtempSync(join(tmpdir(), "fg559e-pre-"));
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "fg559e-pre-")));
   tmpDirs.push(base);
 
   const f = makeWorktreeFixture();
@@ -561,7 +636,7 @@ test("fg559e (entrypoint probe): exits 122 on a broken worktree UNCONDITIONALLY,
   materializeCommonGit(healthy);
   assert.equal(runBash(probe, healthy.projectPath).code, 0, "a correctly-mounted worktree must fall through");
 
-  const nonGit = mkdtempSync(join(tmpdir(), "fg559e-nogit-"));
+  const nonGit = realpathSync(mkdtempSync(join(tmpdir(), "fg559e-nogit-")));
   tmpDirs.push(nonGit);
   assert.equal(runBash(probe, nonGit).code, 0, "a project with no .git at all must fall through, not be refused");
 });
@@ -614,7 +689,7 @@ test("fg559e (forge-test.sh): the cold-start scratch for a WORKTREE source ends 
 test("fg559e (forge-test.sh): a PLAIN-CLONE source is unaffected by the -e widening", () => {
   const block = extractShellBlock("docker/forge-test.sh", 'if [[ ! -d "$WORK_DIR" ]]; then', "_sync_sources");
 
-  const base = mkdtempSync(join(tmpdir(), "fg559e-clone-src-"));
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "fg559e-clone-src-")));
   tmpDirs.push(base);
   const src = join(base, "clone");
   mkdirSync(src, { recursive: true });

@@ -27,6 +27,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -83,7 +84,7 @@ type Fixture = {
  *  copied worktree exists. `materializeGitMount()` recreates the parent .git at
  *  its original absolute path — the harness's stand-in for the bind mount. */
 function makeWorktreeFixture(): Fixture {
-  const base = mkdtempSync(join(tmpdir(), "fg559-"));
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "fg559-")));
   tmpDirs.push(base);
 
   const repo = join(base, "host", "parent");
@@ -255,7 +256,7 @@ test("fg559: planWorktreeGitMounts resolves BOTH hops to the single common .git 
     "the worktree admin dir lives inside the common .git, so one mount of the common .git covers the absolute hop AND the relative commondir hop"
   );
 
-  const plainClone = mkdtempSync(join(tmpdir(), "fg559-clone-"));
+  const plainClone = realpathSync(mkdtempSync(join(tmpdir(), "fg559-clone-")));
   tmpDirs.push(plainClone);
   execFileSync("git", ["init", "-b", "main"], { cwd: plainClone, stdio: "ignore" });
   assert.deepEqual(planWorktreeGitMounts(plainClone), [], "a plain clone needs no extra mount — .git is a real directory");
@@ -281,7 +282,7 @@ test("fg559: a dispatch whose PROJECT_DIR is a linked worktree produces the pare
 });
 
 test("fg559: a plain-clone dispatch adds no git mount at all", () => {
-  const plainClone = mkdtempSync(join(tmpdir(), "fg559-clone-"));
+  const plainClone = realpathSync(mkdtempSync(join(tmpdir(), "fg559-clone-")));
   tmpDirs.push(plainClone);
   execFileSync("git", ["init", "-b", "main"], { cwd: plainClone, stdio: "ignore" });
 
