@@ -268,3 +268,23 @@ Docker or the candidate image is unavailable** — never skips to green.
   the enum is a published contract surface (`docs/SCHEMA-CONTRACT.md:114`, `docs/concepts.md:327-334`,
   `docs/invariants.md:32`) proven complete by `fg356-reaper-evidence.integration.test.ts:389`. The
   discarded FG-356 clone-reaping code died on exactly this.
+
+### AC 6 evidence requirement — gate amendment recorded at the plan gate (2026-07-27)
+
+The plan phase decomposed FG-621 into four steps with correct disjoint file boundaries, but AC 6 is
+referenced in none of them. AC 6 is structurally addressed — omitting `worktreePath` for a clone
+source removes the only new candidate-identity hazard FG-621 introduces, and FG-425 already owns and
+tests the rest — but "structurally addressed" is not cited evidence, and this ticket does not close
+on an acceptance criterion that has none.
+
+This is a gate AMENDMENT, not a re-plan: the omission is precise, bounded, and alters neither the
+decomposition nor the architecture. Add to step 1's test coverage:
+
+> For a clone source, assert `CandidateSource.worktreePath` is absent; the gate observes candidate
+> C; the publication receipt records `candidateSha === publishedSha`; and the published target's Git
+> tree equals `C^{tree}`.
+
+**The test must CAPTURE the SHA and tree actually observed by the gate**, and compare against that
+captured value. Do NOT infer the property after the fact from `candidateSha === publishedSha` alone
+— that comparison is self-consistent even if the gate observed a different tree, which is precisely
+the failure mode AC 6 exists to exclude.
