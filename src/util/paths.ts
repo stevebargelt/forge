@@ -9,6 +9,14 @@ export const CONSTRAINTS_DIR = join(FORGE_HOME, "constraints");
 // FG-351: git worktrees live under WORKTREES_DIR/<runId>/<taskId>. Inside
 // Docker Desktop's macOS file-sharing allowlist (under ~/.forge).
 export const WORKTREES_DIR = join(FORGE_HOME, "worktrees");
+// FG-621: private per-task `git clone --shared` workspaces for MUTATING agents.
+// Namespaced under WORKTREES_DIR the same way PUBLICATIONS_DIR is — every forge
+// workspace stays under one managed root (and inside Docker Desktop's macOS
+// file-sharing allowlist) — but on its OWN prefix, because the two substrates are
+// disposed of by different machinery: a linked worktree through `git worktree
+// remove`, a clone by removing the directory that IS the repository. A path that
+// could resolve to both is a path the reaper could act on with the wrong proof.
+export const CLONES_DIR = join(WORKTREES_DIR, "clones");
 // FG-425: per-ATTEMPT integration worktrees for the serialized publisher. Lives
 // under FORGE_HOME, NEVER inside projectDir: publisher bookkeeping written into
 // the publish target would register as target dirt (tripping AD-3's dirty check
@@ -146,6 +154,13 @@ export function taskDir(runId: string, taskId: string): string {
 // FG-351: path where a task's git worktree is checked out.
 export function worktreeDir(runId: string, taskId: string): string {
   return join(WORKTREES_DIR, runId, taskId);
+}
+
+// FG-621: path where a mutating task's private `--shared` clone lives. Distinct
+// from worktreeDir() by construction — a clone must never be able to collide
+// with (or be mistaken for) a linked worktree.
+export function cloneDir(runId: string, taskId: string): string {
+  return join(CLONES_DIR, runId, taskId);
 }
 
 // FG-353: path where the fan-out integration worktree is checked out.

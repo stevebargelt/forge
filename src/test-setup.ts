@@ -1,10 +1,30 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const tempHome = mkdtempSync(join(tmpdir(), "forge-test-"));
 process.env["FORGE_HOME"] = tempHome;
+
+// FG-621: no test may read the OPERATOR's global git config. A `git clone`
+// inherits none of the source repo's LOCAL config, so every commit made in a
+// task's private clone resolves its identity from the global file — which exists
+// on a developer machine and does NOT exist on a CI runner. That difference made
+// the worktree tier pass locally and fail on CI, and it made a green local run
+// worthless as evidence. Neutralizing the global file here makes every host agree
+// with the runner, so identity must be supplied explicitly at each commit site
+// (as the agent container does via GIT_AUTHOR_*/GIT_COMMITTER_*) instead of being
+// silently borrowed. Deliberately NOT setting GIT_AUTHOR_*/GIT_COMMITTER_* here:
+// a blanket identity would also satisfy Forge's OWN commits and stop the suite
+// from proving they carry one.
+//
+// An empty REAL file, not /dev/null: a fixture that legitimately writes global
+// config (`git config --global ...`, as the release-build suites do) must still
+// succeed, and a write to /dev/null fails. This file is empty and lives in the
+// per-process temp home, so it starts with no identity and dies with the run.
+const gitConfigGlobal = join(tempHome, "gitconfig");
+writeFileSync(gitConfigGlobal, "");
+process.env["GIT_CONFIG_GLOBAL"] = gitConfigGlobal;
 
 // FG-614: NO test may touch the DEFAULT tmux socket. The tmux server is a host-wide
 // daemon that outlives every session and holds ONE working directory — the first

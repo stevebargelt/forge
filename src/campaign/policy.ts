@@ -48,6 +48,10 @@ const BLOCKER_BY_FAILURE_KIND: Record<FailureKind, BlockerKind> = {
   integration_gate_crashed: "infrastructure",
 
   merge_conflict: "merge_conflict",
+  // FG-621: a capture failure is about ONE task's own workspace — the clone's
+  // state, its git status, its fetch — not about a shared target or the host.
+  // Scoped to the item, like the other work-specific kinds.
+  capture_failed: "scope",
 
   cancelled: "campaign_system",
   unknown: "campaign_system",

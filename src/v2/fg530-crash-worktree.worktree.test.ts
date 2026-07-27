@@ -162,7 +162,10 @@ const agentWork = ({ projectMountHost }: { projectMountHost: string | undefined 
   const wt = projectMountHost;
   writeFileSync(join(wt, COMMITTED_WORK), "export const work = 1;\n");
   execFileSync("git", ["add", "."], { cwd: wt, stdio: "ignore" });
-  execFileSync("git", ["commit", "-q", "-m", "agent output"], { cwd: wt, stdio: "ignore" });
+  // FG-621: the workspace is a `git clone`, which inherits none of the source
+  // repo's LOCAL config, so this commit must carry its own identity — as the
+  // agent container supplies one via GIT_AUTHOR_*/GIT_COMMITTER_*.
+  execFileSync("git", ["-c", "user.name=Agent", "-c", "user.email=agent@forge.test", "commit", "-q", "-m", "agent output"], { cwd: wt, stdio: "ignore" });
   writeFileSync(join(wt, UNCOMMITTED_SENTINEL), "work the agent had not committed when the host died\n");
 };
 
@@ -689,7 +692,10 @@ test("FG-356 [flip of the FG-530 leak]: a kill between the complete status write
   assert.equal(evs[0]!.type, "task.workspace_reaped");
   assert.equal(evs[0]!.payload["workspacePath"], wt.worktreePath);
   assert.equal(evs[0]!.payload["branch"], worktreeBranchName(runId, primary.id));
-  assert.equal(evs[0]!.payload["substrate"], "linked_worktree");
+  // FG-621: the substrate a mutating task gets is a private clone, and reaping it
+  // is a directory removal rather than `git worktree remove` — the disposal, its
+  // proof and its single durable record are otherwise identical.
+  assert.equal(evs[0]!.payload["substrate"], "private_clone");
   assert.equal(evs[0]!.payload["branchRemoved"], true);
 });
 
@@ -725,9 +731,14 @@ test("FG-530 worktree [harness integrity]: the fixture really does produce a git
   );
 
   // The committed half is really on the task branch, not just loose on disk.
+  //
+  // FG-621: read the branch in the WORKSPACE, which is the repository that holds
+  // it. A mutating task's workspace is a private clone, so before capture its
+  // commits live in the clone's own refs; the parent carries only the anchor at
+  // the base. Asking projectDir would be asking the wrong repository.
   const branch = worktreeBranchName(runId, primaryOf(runId, "build")!.id);
   const listed = execFileSync("git", ["ls-tree", "--name-only", branch], {
-    cwd: projectDir,
+    cwd: wt.worktreePath,
     encoding: "utf8",
   });
   assert.match(listed, new RegExp(COMMITTED_WORK), "the committed work must exist on the task branch");

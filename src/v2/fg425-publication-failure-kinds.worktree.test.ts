@@ -119,6 +119,11 @@ function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
 
+// FG-621: a task workspace is a `git clone`, which inherits none of the source
+// repo's LOCAL config, so a simulated agent commit must carry its own identity —
+// exactly as the agent container supplies one via GIT_AUTHOR_*/GIT_COMMITTER_*.
+const AGENT_IDENTITY = ["-c", "user.name=Agent", "-c", "user.email=agent@forge.test"];
+
 function makeRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "fg425-kinds-"));
   tmpDirs.push(dir);
@@ -214,7 +219,7 @@ function stubExec(file: string, onRed?: (n: number) => void): DockerExecFn {
     mkdirSync(dirname(join(mount, file)), { recursive: true });
     writeFileSync(join(mount, file), "the agent's output\n");
     git(mount, ["add", "."]);
-    git(mount, ["commit", "-q", "-m", "primary output"]);
+    git(mount, [...AGENT_IDENTITY, "commit", "-q", "-m", "primary output"]);
     writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, files_modified: [file] });
     return 0;
   };

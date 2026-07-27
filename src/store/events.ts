@@ -54,6 +54,13 @@ export type EventType =
   // failure kind such as merge_conflict, or FG-621's not-yet-implemented private
   // clone substrate). Emitted once per (task, reason).
   | "task.workspace_retained"
+  // FG-621: the same pass POSTPONED the decision — the parent repository is
+  // repacking, and a private clone's alternates point into the very object store
+  // being rewritten, so disposal waits for the next pass rather than racing it.
+  // Not a disposition: the workspace is neither reaped nor retained, and a later
+  // pass still has to settle it. Emitted once per (task, reason), so a deferral
+  // that persists is visible instead of silent while a resolved one stays quiet.
+  | "task.workspace_reap_deferred"
   | "task.progress"
   | "task.artifact"
   | "task.decision"

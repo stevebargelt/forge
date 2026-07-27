@@ -497,7 +497,7 @@ test("fg356: a NON-terminal task's workspace is never touched — blocked_by_red
 
 // ── the second substrate (FG-621) ─────────────────────────────────────────────
 
-test("fg356: a mutating agent's PRIVATE CLONE is an explicit no-op, not an unhandled path (FG-621 owns clone reaping)", () => {
+test("fg356/fg621: a mutating agent's PRIVATE CLONE is reaped once its work is captured — the substrate is no longer a blanket no-op", () => {
   const repo = makeRepo();
   startRunFor(repo);
   const clone = join(tmpRoot("clone"), "t-clone");
@@ -513,17 +513,19 @@ test("fg356: a mutating agent's PRIVATE CLONE is an explicit no-op, not an unhan
 
   reconcileRun(RUN_ID, () => false);
 
-  assert.ok(existsSync(clone), "the clone substrate is left alone until FG-621 implements its disposal");
-  assert.ok(existsSync(join(clone, ".git")), "including its private object store and refs");
+  // Clean, owned by its alternates, and holding nothing the parent does not
+  // already have: every proof passes, so the clone is disposed of rather than
+  // leaked. Before FG-621 this returned `private_clone_substrate` unconditionally.
+  assert.equal(existsSync(clone), false, "a fully-proven clone is removed — the directory IS the repository");
   const evs = workspaceEvents("t-clone");
-  assert.equal(evs.length, 1, "the no-op is RECORDED — a silent skip is how an unhandled substrate hides");
-  assert.equal(evs[0]!.type, "task.workspace_retained");
-  assert.equal(evs[0]!.payload["reason"], "private_clone_substrate");
+  assert.equal(evs.length, 1);
+  assert.equal(evs[0]!.type, "task.workspace_reaped");
   assert.equal(evs[0]!.payload["substrate"], "private_clone");
   assert.equal(evs[0]!.payload["workspacePath"], clone);
+  assert.equal(evs[0]!.payload["reason"], "work_captured");
 });
 
-test("fg356: a MAIN CHECKOUT can never be reaped — the operator's live source classifies as a clone, not a worktree", () => {
+test("fg356/fg621: a MAIN CHECKOUT can never be reaped — the live source has no alternates, so it can never pass the clone ownership proof", () => {
   const repo = makeRepo();
   startRunFor(repo);
   assert.equal(classifyWorkspace(repo), "private_clone");
@@ -531,8 +533,12 @@ test("fg356: a MAIN CHECKOUT can never be reaped — the operator's live source 
 
   reconcileRun(RUN_ID, () => false);
 
-  assert.ok(existsSync(repo), "the substrate classification is the catch that makes this structurally impossible");
+  assert.ok(existsSync(repo), "classification alone would not save it — the alternates proof is what does");
   assert.ok(existsSync(join(repo, "README.md")));
+  const evs = workspaceEvents("t-livecheckout");
+  assert.equal(evs.length, 1);
+  assert.equal(evs[0]!.type, "task.workspace_retained");
+  assert.equal(evs[0]!.payload["reason"], "workspace_not_owned");
 });
 
 // ── idempotence ───────────────────────────────────────────────────────────────

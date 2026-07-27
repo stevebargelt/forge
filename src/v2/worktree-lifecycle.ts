@@ -15,11 +15,12 @@
 // FORGE_NO_WORKTREES; the kill switch works at the feature-enable level so the
 // caller never reaches the gate.
 
-import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
+import { hostname } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { findGitRoot } from "../util/git-root.js";
-import { WORKTREES_DIR, worktreeDir, integrationWorktreeDir } from "../util/paths.js";
+import { WORKTREES_DIR, cloneDir, worktreeDir, integrationWorktreeDir } from "../util/paths.js";
 
 // ── Branch naming ─────────────────────────────────────────────────────────────
 
@@ -229,6 +230,361 @@ export function createWorktree(
   return { worktreePath, untrackedFiles };
 }
 
+// ── FG-621: the private clone substrate (MUTATING agents) ─────────────────────
+//
+// A linked worktree isolates the WORKING TREE, not the repository: every worktree
+// of a repo shares one `objects/`, one ref namespace and one packed-refs, so an
+// agent handed write access to any of them has write access to the parent's
+// history and to every sibling worktree's basis. A mutating agent instead gets its
+// own REPOSITORY — `git clone --shared` at the recorded base SHA — with its own
+// refs, index and object overlay, and the parent's object store reachable only
+// through `objects/info/alternates` (mounted read-only into the container; that
+// mount is what makes the parent structurally unwritable, not git).
+//
+// The agent may commit freely there. Those commits are untrusted checkpoints and
+// transport artifacts: Forge alone constructs the candidate, runs the
+// authoritative gates and moves the target ref (FG-345).
+
+/** The forge identity every host-side commit in a task workspace is made under.
+ *  A clone inherits no user config, so the safety commit MUST carry one. */
+const FORGE_IDENTITY = ["-c", "user.name=forge", "-c", "user.email=forge@local"];
+
+/** The identity a MUTATING AGENT's own commits carry inside its private clone.
+ *
+ *  "The agent may commit freely there" is not a property of the substrate — it is
+ *  a property something has to SUPPLY. A linked worktree shared the source repo's
+ *  LOCAL config, so an agent silently borrowed whatever identity the operator's
+ *  checkout carried. A clone inherits none of it, the agent image sets none, and
+ *  the container has no global file: on this substrate a bare `git commit` dies
+ *  with "Author identity unknown" before it writes anything. The substrate that
+ *  took the identity away hands it back, written LOCAL into the clone at creation
+ *  — not exported at container spawn — so it holds for every reader of that
+ *  workspace (the container, the host, a later `forge show`) rather than only
+ *  inside one container's env.
+ *
+ *  DELIBERATELY NOT FORGE_IDENTITY. Agent commits are untrusted checkpoints Forge
+ *  may squash; the safety commit is Forge's own authoritative record of what the
+ *  agent left behind. One identity for both would make them indistinguishable in
+ *  the captured history AND would let a dropped `-c` on the safety commit pass
+ *  unnoticed. `-c` outranks local config, so the safety commit still overrides
+ *  this and still has to carry its own. */
+export const AGENT_IDENTITY = { name: "forge-agent", email: "agent@forge.local" } as const;
+
+/** The create-only refusal, NAMED so the caller can tell it apart from every
+ *  other setup failure. It must never be followed by cleanup: the directory it
+ *  names is one an agent may already have written to, and deleting it would
+ *  destroy the very work the refusal exists to protect. */
+export class TaskCloneExistsError extends Error {
+  readonly reason = "task_clone_exists" as const;
+  constructor(public readonly clonePath: string) {
+    super(
+      `private clone ${clonePath} already exists — a task workspace identity must be fresh (FG-621). ` +
+        "Refusing to reuse a workspace an agent may already have written to; inspect or remove it deliberately."
+    );
+    this.name = "TaskCloneExistsError";
+  }
+}
+
+/** The other create-only refusal: the task's PARENT-SIDE anchor ref already
+ *  exists. Distinct from TaskCloneExistsError because the thing it protects is
+ *  different — a ref, not a directory — and because it is the failure most likely
+ *  to reach the setup-cleanup path: a prior attempt that captured work left its
+ *  tip on exactly this ref. Like its sibling it must never be followed by
+ *  cleanup; disposing of that ref would destroy the prior attempt's only durable
+ *  record of the work. */
+export class TaskCloneAnchorExistsError extends Error {
+  readonly reason = "task_clone_anchor_exists" as const;
+  constructor(public readonly branch: string, public readonly sha: string) {
+    super(
+      `parent-side ref ${branch} already exists at ${sha} — a task workspace identity must be fresh (FG-621). ` +
+        "Refusing to reuse or dispose of a ref this attempt did not create; it may hold a prior attempt's " +
+        "captured work. Inspect it, then delete it deliberately if it is genuinely stale."
+    );
+    this.name = "TaskCloneAnchorExistsError";
+  }
+}
+
+export type CreateTaskCloneResult = {
+  clonePath: string;
+  /** The deterministic private task branch, checked out at baseSha. */
+  branch: string;
+  /** The commit the clone was created at — echoed back so the caller records the
+   *  value that was actually realized, never the one it merely asked for. */
+  baseSha: string;
+  /** Untracked/ignored files in the SOURCE tree that the clone does not carry.
+   *  Same operator diagnostic createWorktree emits, for the same reason. */
+  untrackedFiles: string[];
+};
+
+/** Provision a mutating task's private writable repository at `baseSha`.
+ *
+ *  CREATE-ONLY. An existing directory at this identity is refused, never reused
+ *  and never force-deleted — the same posture createCandidateWorktree takes
+ *  (integration-publisher.ts): a workspace an agent has already written to is
+ *  evidence, and silently reusing one would hand a retry the previous attempt's
+ *  half-finished state as if it were a clean base.
+ *
+ *  The base is ASSERTED, not assumed: the checkout is verified to sit on exactly
+ *  the requested commit before the path is returned, so a caller can record
+ *  base_sha knowing it describes the tree the agent will actually see. */
+export function createTaskClone(
+  projectDir: string,
+  runId: string,
+  taskId: string,
+  baseSha: string
+): CreateTaskCloneResult {
+  const clonePath = cloneDir(runId, taskId);
+  const branch = worktreeBranchName(runId, taskId);
+
+  if (existsSync(clonePath)) throw new TaskCloneExistsError(clonePath);
+
+  // Both create-only refusals are decided BEFORE anything is created, so that by
+  // the time any on-disk or ref state exists, everything this attempt finds
+  // belongs to this attempt. That is what makes cleanupFailedCloneSetup's
+  // disposal safe: it can only ever be aimed at state this attempt made.
+  const existingAnchor = resolveCommit(projectDir, branch);
+  if (existingAnchor !== undefined) throw new TaskCloneAnchorExistsError(branch, existingAnchor);
+
+  mkdirSync(dirname(clonePath), { recursive: true });
+
+  // --no-checkout: the default clone would materialize the parent's HEAD only to
+  // have the checkout below replace it. One checkout, at the recorded base.
+  execFileSync("git", ["clone", "--quiet", "--shared", "--no-checkout", projectDir, clonePath], {
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  // AC 1's precondition, written before the agent can reach the workspace: a
+  // clone inherits no local config, so without this the agent's first commit
+  // fails on identity alone. See AGENT_IDENTITY.
+  for (const [key, value] of [["user.name", AGENT_IDENTITY.name], ["user.email", AGENT_IDENTITY.email]] as const) {
+    execFileSync("git", ["config", "--local", key, value], {
+      cwd: clonePath,
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+  }
+  execFileSync("git", ["checkout", "--quiet", "-b", branch, baseSha], {
+    cwd: clonePath,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+
+  const head = resolveCommit(clonePath, "HEAD");
+  if (head !== baseSha) {
+    throw new Error(
+      `private clone ${clonePath} was created at ${head ?? "an unresolvable commit"}, not at the recorded base ${baseSha}`
+    );
+  }
+
+  // Anchor the task's branch in the PARENT's ref namespace at the base, before
+  // the agent runs. Three jobs, none of which the clone's own refs can do:
+  //   • it pins baseSha against a parent `gc`, whose object store the clone's
+  //     alternates point into — an unreferenced base is a collectable base;
+  //   • it makes the task's identity present in the repository the operator and
+  //     `forge show` read, from dispatch rather than only after capture;
+  //   • it turns capture's fetch into a fast-forward of a ref that already
+  //     exists, rather than a creation, so a partial capture is still a ref
+  //     movement the reaper can reason about.
+  // The agent cannot touch it: the parent's refs are not in its container.
+  execFileSync("git", ["branch", branch, baseSha], {
+    cwd: projectDir,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+
+  let untrackedFiles: string[] = [];
+  try {
+    const out = execFileSync("git", ["ls-files", "--others", "--exclude-standard"], {
+      cwd: projectDir,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    untrackedFiles = out.split("\n").map((l) => l.trim()).filter(Boolean);
+  } catch {
+    // Non-fatal: diagnostic best-effort only.
+  }
+
+  return { clonePath, branch, baseSha, untrackedFiles };
+}
+
+/** Best-effort removal of a partially-created clone after a FAILED setup. The
+ *  agent never ran, so there is no output to preserve — the clone-substrate
+ *  counterpart of cleanupFailedWorktreeSetup.
+ *
+ *  NEVER call this on a TaskCloneExistsError or a TaskCloneAnchorExistsError:
+ *  both refused to touch state precisely because a previous attempt may own it,
+ *  and the ref case is the one that matters most — force-deleting a ref this
+ *  attempt did not create destroys the ONLY durable record of the previous
+ *  attempt's captured work. createTaskClone decides both refusals before it
+ *  creates anything, so anything this function finds was made by the attempt that
+ *  is now failing. */
+export function cleanupFailedCloneSetup(projectDir: string, runId: string, taskId: string): void {
+  const path = cloneDir(runId, taskId);
+  if (existsSync(path)) {
+    try {
+      rmSync(path, { recursive: true, force: true });
+    } catch {
+      // Best-effort: a clone we cannot remove is retained, which is the safe side.
+    }
+  }
+  // The parent-side anchor this setup created. `-D` is safe here for the same
+  // reason the whole function is: the agent never ran, and the ref did not exist
+  // when this attempt started, so it can only be pointing at the base this
+  // attempt created it at.
+  try {
+    execFileSync("git", ["branch", "-D", worktreeBranchName(runId, taskId)], {
+      cwd: projectDir,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+  } catch {
+    // Best-effort: the branch may never have been created.
+  }
+}
+
+/** WHY a capture failed. None of these is a merge conflict — nothing has been
+ *  merged yet at capture time, and the parent's target branch is not involved —
+ *  which is why the caller reports them all as `capture_failed` rather than
+ *  borrowing FG-352's kind for a different event. */
+export type CaptureFailureCause =
+  /** The clone is not on the task's deterministic branch. */
+  | "wrong_branch"
+  /** `git status` in the clone could not be read, so what is uncaptured is unknown. */
+  | "status_unreadable"
+  /** The Forge safety commit of remaining tracked/untracked state failed. */
+  | "safety_commit_failed"
+  /** The clone's own branch tip did not resolve after the safety commit. */
+  | "tip_unresolvable"
+  /** The parent REJECTED the fetch of the clone's branch. */
+  | "fetch_rejected"
+  /** The fetched parent ref does not equal the resolved clone tip. */
+  | "verification_mismatch";
+
+export type CaptureTaskCloneResult =
+  | {
+      ok: true;
+      branch: string;
+      /** The commit now reachable from BOTH the clone's branch tip and the parent
+       *  ref of the same name. Verified equal — this is the captured candidate. */
+      commit: string;
+      /** True when Forge had to safety-commit remaining dirty state. */
+      safetyCommitted: boolean;
+    }
+  | { ok: false; cause: CaptureFailureCause; error: string };
+
+/** THE CAPTURE ORDERING (FG-621 AC 3 / AC 5) — a contract, not an implementation
+ *  detail. Exactly, and in this order:
+ *
+ *    1. safety-commit remaining clone state, TRACKED AND UNTRACKED, in the clone;
+ *    2. resolve the resulting clone branch tip;
+ *    3. fetch that branch into the PARENT's ref namespace under the same
+ *       deterministic name — a real durable ref, never FETCH_HEAD, because it is
+ *       simultaneously the gc anchor, the publisher's input and the reaper's
+ *       reachability input;
+ *    4. verify the fetched parent ref EQUALS the resolved clone tip;
+ *    5. (caller) hand that ref to the publisher;
+ *    6. (caller) perform NO later clone-side commit.
+ *
+ *  Step 6 is what the omitted `CandidateSource.worktreePath` enforces at the
+ *  publisher boundary. The clone and the parent are DIFFERENT REPOSITORIES: a
+ *  post-fetch commit in the clone advances only the clone's ref and would be
+ *  silently absent from the candidate — which for a linked worktree, where the
+ *  tree and the branch share one ref namespace, is harmless.
+ *
+ *  Any failure returns ok:false and the caller RETAINS the clone. Nothing here
+ *  removes anything. */
+export function captureTaskClone(
+  projectDir: string,
+  clonePath: string,
+  runId: string,
+  taskId: string
+): CaptureTaskCloneResult {
+  const branch = worktreeBranchName(runId, taskId);
+
+  // The safety commit lands on whatever HEAD is, so a clone that is not on its
+  // own task branch cannot be captured under that name — fail loudly rather than
+  // publish a branch that is missing the agent's actual work.
+  const ref = checkedOutRef(clonePath);
+  if (ref !== `refs/heads/${branch}`) {
+    return {
+      ok: false,
+      cause: "wrong_branch",
+      error:
+        `private clone ${clonePath} is checked out on ${ref ?? "a detached HEAD"}, not on refs/heads/${branch} — ` +
+        "refusing to capture work under a branch name that does not describe it",
+    };
+  }
+
+  let safetyCommitted = false;
+  let statusOut = "";
+  try {
+    statusOut = execFileSync("git", ["status", "--porcelain"], {
+      cwd: clonePath,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch (e) {
+    return {
+      ok: false,
+      cause: "status_unreadable",
+      error: `git status in private clone ${clonePath} failed: ${String(e)}`,
+    };
+  }
+
+  if (statusOut.trim().length > 0) {
+    // `add -A` from the repo root stages tracked modifications, deletions AND
+    // untracked files — AC 3 requires all three, and untracked output is the half
+    // that exists nowhere else.
+    try {
+      execFileSync("git", ["add", "-A"], { cwd: clonePath, stdio: "ignore" });
+      execFileSync(
+        "git",
+        [...FORGE_IDENTITY, "commit", "-m", `forge: safety-commit task ${taskId} output`],
+        { cwd: clonePath, stdio: ["ignore", "ignore", "pipe"] }
+      );
+      safetyCommitted = true;
+    } catch (e) {
+      const stderr = ((e as { stderr?: Buffer }).stderr ?? Buffer.alloc(0)).toString().trim();
+      return {
+        ok: false,
+        cause: "safety_commit_failed",
+        error: `safety-commit of task ${taskId} output failed: ${stderr || String(e)}`,
+      };
+    }
+  }
+
+  const tip = resolveCommit(clonePath, branch);
+  if (tip === undefined) {
+    return {
+      ok: false,
+      cause: "tip_unresolvable",
+      error: `could not resolve ${branch} in private clone ${clonePath}`,
+    };
+  }
+
+  try {
+    execFileSync("git", ["fetch", "--quiet", clonePath, `${branch}:refs/heads/${branch}`], {
+      cwd: projectDir,
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+  } catch (e) {
+    const stderr = ((e as { stderr?: Buffer }).stderr ?? Buffer.alloc(0)).toString().trim();
+    return {
+      ok: false,
+      cause: "fetch_rejected",
+      error: `fetching ${branch} from private clone ${clonePath} into ${projectDir} failed: ${stderr || String(e)}`,
+    };
+  }
+
+  const fetched = resolveCommit(projectDir, `refs/heads/${branch}`);
+  if (fetched !== tip) {
+    return {
+      ok: false,
+      cause: "verification_mismatch",
+      error:
+        `capture verification failed: ${projectDir} records ${branch} at ${fetched ?? "no commit"} but the private ` +
+        `clone's tip is ${tip}. Retaining the clone — publishing the parent ref would publish a stale tree.`,
+    };
+  }
+
+  return { ok: true, branch, commit: tip, safetyCommitted };
+}
+
 /** Remove a task worktree and its branch when doing so is SAFE.
  *
  *  Safe to remove under two conditions:
@@ -268,7 +624,23 @@ export function removeWorktreeIfSafe(
   // see dependency-provisioning.ts:removeDependencyVolumes for the explicit
   // prune entry point (not auto-invoked from here).
 
-  forceRemoveWorktree(projectDir, worktreePath);
+  // FG-621: a private clone is not a REGISTERED worktree — `git worktree remove`
+  // has nothing to act on and `git worktree list` never shows it; the directory
+  // IS the repository. Disposal is therefore a directory removal, and it is
+  // gated on the one proof a main checkout cannot forge: the workspace's
+  // alternates resolve to the parent's object store (see cloneOwnershipMismatch).
+  // A clone that fails it is left exactly where it is for reapTaskWorkspace to
+  // classify and RECORD — this inline path never retains silently by deleting.
+  if (classifyWorkspace(worktreePath) === "private_clone") {
+    if (cloneOwnershipMismatch(worktreePath, projectDir, branch).length > 0) return;
+    try {
+      rmSync(worktreePath, { recursive: true, force: true });
+    } catch {
+      return;
+    }
+  } else {
+    forceRemoveWorktree(projectDir, worktreePath);
+  }
 
   try {
     // Force-delete (-D) is safe here: FORGE_WORKTREES_EPHEMERAL=1 is the
@@ -292,16 +664,30 @@ export type MergeWorktreeBranchResult =
 
 /** Merge the task worktree branch into run.projectDir using fast-forward-only.
  *
- *  Called by dispatchSingleStep after checkResultPersistence passes, before
- *  markTaskComplete. Returns ok:false on any failure (non-ff, conflict, git
- *  error) — the caller must failTask and retain the worktree for inspection.
+ *  DEAD CODE, deliberately kept: FG-425 routed every merge through
+ *  publishIntegration, and fg425-publisher-scope.test.ts asserts runNext.ts calls
+ *  neither this nor mergeIntegrationBranchToHead. Wiring it back in would
+ *  reintroduce a merge-then-gate site against the publish target. It is NOT the
+ *  FG-621 merge-back re-plumbing either — that is captureTaskClone's fetch.
  *
- *  Contract: agents are expected to commit their work on the task branch. As a
- *  safety net, this function auto-stages and commits any uncommitted changes in
- *  the worktree before merging. If the worktree has no changes, the commit is
- *  skipped entirely. If the commit fails with changes present (hook, missing
- *  identity, lock file), ok:false is returned — the caller must retain the
- *  worktree. If the merge is a clean no-op, it succeeds silently.
+ *  The commit contract, per SUBSTRATE (FG-621 corrects the older text here, which
+ *  described one path as if it covered both):
+ *
+ *    • PRIVATE CLONE (mutating agents, the shipped path). The agent commits its
+ *      own work on its own branch, in its own repository — that is the primary
+ *      capture, and FG-345 restores it deliberately. Forge's host-side commit is
+ *      the SAFETY NET for whatever is still dirty at exit (captureTaskClone step
+ *      1), and it runs BEFORE the branch is fetched into the parent. Nothing
+ *      commits into the clone afterwards.
+ *    • LINKED WORKTREE (non-mutating/red agents, FG-559's substrate). The agent
+ *      cannot commit at all — the parent's ref namespace is read-only to it — so
+ *      the host auto-commit below IS the primary capture, not a net.
+ *
+ *  Behaviour if it is ever called: auto-stages and commits any uncommitted
+ *  changes in the worktree before merging. No changes => the commit is skipped.
+ *  A commit that FAILS with changes present (hook, missing identity, lock file)
+ *  returns ok:false — the caller must retain the worktree. A clean no-op merge
+ *  succeeds silently.
  */
 export function mergeWorktreeBranch(
   projectDir: string,
@@ -395,18 +781,21 @@ export function cleanupFailedWorktreeSetup(
 //
 // Two substrates, because FG-345 decided the workspace follows capability:
 //   • LINKED WORKTREE — non-mutating agents. Removed with `git worktree remove`.
-//   • PRIVATE `--shared` CLONE — mutating agents, being built in FG-621. NOT a
-//     registered worktree: `git worktree remove` does not apply to it and
-//     `git worktree list` never shows it. Reaping one is a directory removal plus
-//     disposal of its private refs, and its alternates point back into the parent
-//     object store — so it must not be removed while the parent is mid-`gc`.
-//     FG-621 owns that; this reaper's clone branch is an EXPLICIT, TESTED no-op.
+//   • PRIVATE `--shared` CLONE — mutating agents (FG-621). NOT a registered
+//     worktree: `git worktree remove` does not apply to it and `git worktree
+//     list` never shows it. Reaping one is a directory removal — the directory IS
+//     the repository, and its private refs go with it — and because its
+//     alternates point back into the parent object store, it must not be removed
+//     while the parent is mid-`gc` (that is a DEFERRAL, not a retain).
 //
 // The substrate is read off the workspace itself rather than a column, so it is
-// right for both the trees forge creates today and the clones FG-621 will add. It
-// doubles as the safety catch that matters most: a main checkout (the operator's
-// live source) has a `.git` DIRECTORY, so it can never classify as a linked
-// worktree and can never be removed here.
+// right for both substrates forge creates. But classification ALONE cannot make
+// the clone branch safe: a main checkout (the operator's live source) also has a
+// `.git` DIRECTORY, so it classifies as a clone too. What keeps it out of reach
+// is the ownership proof FG-621 added on that branch — the workspace's
+// `objects/info/alternates` must resolve to the parent's object store, which is
+// the one property a main checkout cannot forge (no repository is ever its own
+// alternate). Layout, branch name and remote are all imitable; that is not.
 //
 // REMOVAL MUST BE PROVABLY SAFE, not best-effort (FG-345's recovery half). A
 // crashed task whose output was never captured is RETAINED and its path + branch
@@ -444,16 +833,37 @@ export type WorkspaceRetainReason =
    *  one (`git worktree add` leaves every gitlink uninitialized and empty), so
    *  this is a workspace shape the reaper was not built to prove capture for. */
   | "submodules_present"
-  /** FG-621's substrate; reaping it is not implemented here (see the header). */
+  /** RETAINED FOR CONTRACT COMPATIBILITY, no longer produced by the proven path.
+   *  Before FG-621 every private clone was retained under this reason because
+   *  clone reaping was unimplemented. It stays in the union — and in
+   *  docs/SCHEMA-CONTRACT.md, docs/concepts.md and docs/invariants.md — because
+   *  the enum is a published surface and historical events still carry the value.
+   *  A clone forge cannot prove it owns now retains as `workspace_not_owned`. */
   | "private_clone_substrate"
   /** A directory we cannot identify as either substrate — never guessed at. */
   | "unknown_substrate"
-  /** The workspace is a linked worktree, but not THIS task's: it belongs to
-   *  another repository, or is checked out on something other than the task's
-   *  deterministic branch. */
+  /** Not THIS task's workspace. For a linked worktree: another repository, or a
+   *  branch other than the task's deterministic one. For a private clone
+   *  (FG-621): its `objects/info/alternates` does not resolve to the parent's
+   *  object store — which is also how the operator's live source checkout, and
+   *  any ordinary clone, stay structurally out of reach. */
   | "workspace_not_owned"
+  /** FG-621: the task's recorded publication receipt names a `remote:` target, so
+   *  projectDir's HEAD is not a capture proxy for it, and nothing else proved the
+   *  clone's commits captured. An EXPLICIT, NAMED retain — never a silent
+   *  forever-retain that looks like an unimplemented path. */
+  | "remote_target_uncaptured"
   /** git refused the removal even after unlock + double force. */
   | "removal_failed";
+
+/** FG-621: why a disposal was POSTPONED rather than refused. A deferral is not a
+ *  disposition — nothing is reaped and nothing is retained, and the next pass
+ *  asks again. It is still RECORDED (see WorkspaceReapOutcome's `deferred`). */
+export type WorkspaceDeferReason =
+  /** `gc.pid` is present in the parent's common git dir: git is repacking the
+   *  very object store this clone's alternates point into. Transient by
+   *  definition, so disposal waits for the next pass rather than racing it. */
+  | "parent_repacking";
 
 /** How a reaped workspace actually went away. `git_removed` is git completing the
  *  removal; `path_vanished` is git DECLINING it while the tree turned out to be
@@ -468,7 +878,7 @@ export type WorkspaceReapOutcome =
   | { action: "branch_reaped"; branch: string }
   | {
       action: "reaped";
-      substrate: "linked_worktree";
+      substrate: "linked_worktree" | "private_clone";
       branch: string;
       branchRemoved: boolean;
       removal: WorkspaceRemovalDisposition;
@@ -479,7 +889,42 @@ export type WorkspaceReapOutcome =
       branch: string;
       reason: WorkspaceRetainReason;
       details: string[];
+    }
+  /** FG-621: try again next pass. NOT a disposition — the workspace was neither
+   *  reaped nor retained, so a reader must not render it as either, and a later
+   *  pass still has to settle it.
+   *
+   *  It is recorded all the same, as its OWN event type
+   *  (`task.workspace_reap_deferred`, reconcile.ts) rather than as a retention:
+   *  a deferral that never resolves would otherwise be indistinguishable from a
+   *  workspace nothing ever looked at. Once per (task, reason) — the same rule
+   *  the retentions use — so a second pass that defers again logs nothing, which
+   *  is what keeps the timeline un-flooded and the crash-lane fixpoint intact. */
+  | {
+      action: "deferred";
+      substrate: WorkspaceSubstrate;
+      branch: string;
+      reason: WorkspaceDeferReason;
+      details: string[];
     };
+
+/** FG-621: what Forge has RECORDED about a task's publication, handed to the
+ *  reaper by its caller so this module stays free of the store.
+ *
+ *  `isAncestorOfHead` asks reachability from `projectDir` HEAD, which is a proxy
+ *  — and a `remote:<remote>#<branch>` target never advances local HEAD at all, so
+ *  on that target every clone would fail the capture proof and be retained
+ *  forever. The receipts are the authority: a candidate SHA the publisher
+ *  recorded as PUBLISHED is Forge-owned state, and a clone commit reachable from
+ *  one is captured whatever HEAD says. */
+export type CaptureAuthority = {
+  /** Candidate/published SHAs from this task's publication receipts. Reachability
+   *  from ANY of them is proof of capture. */
+  anchors: string[];
+  /** The target descriptor of the newest receipt, e.g. `local:main` or
+   *  `remote:origin#main`. Names the remote case in the retain reason. */
+  target?: string | undefined;
+};
 
 /** `git status --porcelain --ignored` in one working tree. undefined when git
  *  could not answer at all — indistinguishable from "there may be work here", so
@@ -602,6 +1047,151 @@ function ownershipMismatch(workspacePath: string, projectDir: string, branch: st
   return details;
 }
 
+/** The object stores a repository borrows, as absolute realpaths. Empty when the
+ *  file is absent (an ordinary repo), undefined when it exists but cannot be read
+ *  — which is NOT the same thing and must not be read as "no alternates". */
+function alternateObjectStores(commonGitDir: string): string[] | undefined {
+  const file = join(commonGitDir, "objects", "info", "alternates");
+  if (!existsSync(file)) return [];
+  let raw: string;
+  try {
+    raw = readFileSync(file, "utf8");
+  } catch {
+    return undefined;
+  }
+  const entries: string[] = [];
+  for (const line of raw.split("\n")) {
+    const entry = line.trim();
+    if (!entry || entry.startsWith("#")) continue;
+    try {
+      entries.push(realpathSync(resolve(commonGitDir, "objects", entry)));
+    } catch {
+      // An alternate that does not resolve cannot match the parent's object
+      // store, so record it verbatim and let the comparison below refuse it.
+      entries.push(entry);
+    }
+  }
+  return entries;
+}
+
+/** FG-621: why the recorded path is not this task's PRIVATE CLONE — empty when it
+ *  is. The clone counterpart of ownershipMismatch, and it INVERTS: a `--shared`
+ *  clone is a different repository from the parent by construction, so equal
+ *  git-common-dirs is the disproof, not the proof.
+ *
+ *  The alternates file is the one property a main checkout cannot forge.
+ *  Classification cannot tell a private clone from the operator's live source —
+ *  both have a `.git` DIRECTORY — and layout, branch name and remote are all
+ *  imitable. But a `--shared` clone's `objects/info/alternates` resolves to the
+ *  PARENT's object store, and no repository is ever its own alternate. That
+ *  check, not the substrate, is what keeps the FG-607 live-source incident and
+ *  every ordinary clone structurally out of reach on this path. */
+function cloneOwnershipMismatch(workspacePath: string, projectDir: string, branch: string): string[] {
+  const details: string[] = [];
+
+  // The alternates prove the workspace is a clone of THIS repository; the
+  // checked-out branch is what makes it THIS TASK's. Without the second half, a
+  // stale or misassigned workspace_path naming a sibling task's clone would pass
+  // the ownership test, and — if that sibling's work happened to be captured and
+  // its tree clean — be disposed of under the wrong task's name.
+  const ref = checkedOutRef(workspacePath);
+  if (ref !== `refs/heads/${branch}`) {
+    details.push(`workspace is checked out on ${ref ?? "a detached HEAD"}, not on refs/heads/${branch}`);
+  }
+
+  const workspaceRepo = gitCommonDir(workspacePath);
+  const projectRepo = gitCommonDir(projectDir);
+  if (workspaceRepo === undefined || projectRepo === undefined) {
+    details.push(
+      `could not resolve the git directory of ${workspaceRepo === undefined ? workspacePath : projectDir}`
+    );
+    return details;
+  }
+  if (workspaceRepo === projectRepo) {
+    details.push(
+      `workspace shares ${projectRepo} with the project — a private clone never does, so this is the live source ` +
+        "checkout or one of its worktrees, not a task workspace"
+    );
+    return details;
+  }
+
+  const alternates = alternateObjectStores(workspaceRepo);
+  if (alternates === undefined) {
+    details.push(`${join(workspaceRepo, "objects", "info", "alternates")} exists but could not be read`);
+    return details;
+  }
+  let parentObjects: string;
+  try {
+    parentObjects = realpathSync(join(projectRepo, "objects"));
+  } catch {
+    details.push(`the project's object store ${join(projectRepo, "objects")} could not be resolved`);
+    return details;
+  }
+  if (alternates.length !== 1 || alternates[0] !== parentObjects) {
+    details.push(
+      `workspace alternates ${alternates.length === 0 ? "(none)" : alternates.join(", ")} do not resolve to the ` +
+        `project's object store ${parentObjects}`
+    );
+  }
+  return details;
+}
+
+/** How long a `gc.pid` may sit before forge stops believing it. git's own gc
+ *  uses 12 hours as the point past which a lock file is presumed abandoned
+ *  (builtin/gc.c), so forge uses the same bound rather than inventing one. */
+const GC_LOCK_MAX_AGE_MS = 12 * 60 * 60 * 1000;
+
+/** Is git ACTUALLY repacking the parent's object store right now?
+ *
+ *  A `--shared` clone's alternates point into the very store a repack rewrites,
+ *  so a live gc is a reason to wait. But the EXISTENCE of `gc.pid` is not the
+ *  same question: git leaves the file behind when a gc is killed, and a stale one
+ *  is forever. Testing existence alone therefore turns one abandoned lock into a
+ *  permanent, silent forever-deferral for every clone in the project — un-reaped
+ *  AND un-reported. So the same two things git itself checks are checked here:
+ *  the lock's age, and (when it names THIS host) whether its process is alive.
+ *  A lock naming another host cannot be probed and is believed until it expires. */
+function parentIsRepacking(projectDir: string): boolean {
+  const common = gitCommonDir(projectDir);
+  if (common === undefined) return false;
+  const lock = join(common, "gc.pid");
+  const st = statSync(lock, { throwIfNoEntry: false });
+  if (!st) return false;
+  if (Date.now() - st.mtimeMs > GC_LOCK_MAX_AGE_MS) return false;
+
+  // git writes "<pid> <hostname>".
+  let contents: string;
+  try {
+    contents = readFileSync(lock, "utf8");
+  } catch {
+    return true;
+  }
+  const [pidText, host] = contents.trim().split(/\s+/, 2);
+  const pid = Number(pidText);
+  if (!Number.isInteger(pid) || pid <= 0) return true;
+  if (host !== hostname()) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    // ESRCH: the gc that wrote this is gone. EPERM: it exists and belongs to
+    // another user — alive either way.
+    return (e as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+function isAncestorOf(projectDir: string, commit: string, anchor: string): boolean {
+  try {
+    execFileSync("git", ["merge-base", "--is-ancestor", commit, anchor], {
+      cwd: projectDir,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function isAncestorOfHead(projectDir: string, commit: string): boolean {
   try {
     execFileSync("git", ["merge-base", "--is-ancestor", commit, "HEAD"], {
@@ -612,6 +1202,38 @@ function isAncestorOfHead(projectDir: string, commit: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Dispose of a task branch on THE SAME PROOF that authorized the reap.
+ *
+ *  `git branch -d` asks one question — "is this merged into HEAD?" — and FG-621
+ *  widened the capture proof past it: a clone published to a `remote:` target is
+ *  proven captured by a recorded publication receipt while HEAD never moves. Left
+ *  on `-d` alone the tree is reaped and the ref is stranded with no retry, which
+ *  is exactly the ref-stranding FG-356 fixed and this must not regress.
+ *
+ *  So: `-d` first, because where git can answer it is the better second opinion.
+ *  Only when git declines AND the surviving tip is reachable from Forge-owned
+ *  state — the same `captured` predicate the reap itself required — is the ref
+ *  forced. A tip nothing proves captured is never forced, ever. */
+function disposeCapturedBranch(
+  projectDir: string,
+  branch: string,
+  captured: (commit: string) => boolean
+): boolean {
+  if (deleteMergedBranch(projectDir, branch)) return true;
+  const tip = resolveCommit(projectDir, branch);
+  if (tip === undefined) return true;
+  if (!captured(tip)) return false;
+  try {
+    execFileSync("git", ["branch", "-D", branch], {
+      cwd: projectDir,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+  } catch {
+    // Fall through — the ref's existence is what decides, not git's exit code.
+  }
+  return resolveCommit(projectDir, branch) === undefined;
 }
 
 /** `git branch -d` — the merged-only form, never `-D`. True once the ref is
@@ -633,39 +1255,166 @@ function deleteMergedBranch(projectDir: string, branch: string): boolean {
  *  is provably captured. Never throws; reaping an already-gone workspace is a
  *  no-op, so repeated calls are safe.
  *
- *  Safe means all of: the substrate is a linked worktree, it holds no checked-out
- *  submodule, the tree is clean (no uncommitted, untracked or ignored files),
- *  every commit the task's branch/HEAD points at is reachable from projectDir's
- *  HEAD, and the worktree is THIS task's
- *  — projectDir's own repository, checked out on the task's deterministic branch.
- *  Anything else — including anything git declines to answer — is RETAINED with
- *  the reason, so the caller can record where the work still lives. */
+ *  Safe means all of: the workspace is one of the two substrates forge creates and
+ *  is THIS task's, it holds no checked-out submodule, the tree is clean (no
+ *  uncommitted, untracked or ignored files), and every commit its branch/HEAD
+ *  points at is reachable from Forge-owned state. Anything else — including
+ *  anything git declines to answer — is RETAINED with the reason, so the caller
+ *  can record where the work still lives.
+ *
+ *  What "THIS task's" and "Forge-owned state" mean depends on the substrate:
+ *
+ *    • LINKED WORKTREE — ownership is projectDir's own repository plus the task's
+ *      deterministic branch checked out (ownershipMismatch), and it is proved
+ *      LAST, because where both would refuse, the capture reasons name the exact
+ *      commits or files at stake.
+ *    • PRIVATE CLONE — ownership INVERTS (a `--shared` clone's git-common-dir
+ *      differs from the parent's by construction) and is proved FIRST via the
+ *      alternates target (cloneOwnershipMismatch). Its capture set is THREE
+ *      de-duplicated tips, because a clone is a full repository whose branch can
+ *      hold commits its HEAD is not on.
+ *
+ *  Reachability is asked of projectDir's HEAD OR of `authority.anchors` — the
+ *  SHAs the publisher recorded for this task. HEAD alone is only a proxy, and a
+ *  `remote:` target never advances it. */
 export function reapTaskWorkspace(
   workspacePath: string,
   runId: string,
   taskId: string,
-  projectDir: string
+  projectDir: string,
+  authority: CaptureAuthority = { anchors: [] }
 ): WorkspaceReapOutcome {
   const branch = worktreeBranchName(runId, taskId);
   const substrate = classifyWorkspace(workspacePath);
+
+  /** Forge-owned state can reach this commit: it is an ancestor of projectDir's
+   *  HEAD, or of a SHA the publisher recorded as published for this task. */
+  const captured = (commit: string): boolean =>
+    isAncestorOfHead(projectDir, commit) ||
+    authority.anchors.some((anchor) => isAncestorOf(projectDir, commit, anchor));
 
   if (substrate === "absent") {
     // The tree can be gone while the branch is not: the deletion below runs
     // AFTER the removal, so a transient failure there leaves the ref behind and
     // every later pass used to return here without ever retrying it — stranding
-    // a forge/<runId>/<taskId> ref permanently. Retry it, scoped to this task's
-    // own deterministic branch and on the same merged-only posture, so a branch
-    // git still declines survives untouched and records nothing.
+    // a forge/<runId>/<taskId> ref permanently.
+    //
+    // The retry runs on the SAME warrant the first pass did — `captured`, not
+    // `git branch -d`'s merged-into-HEAD question. A clone published to a
+    // `remote:` target is proven captured by a RECEIPT anchor while HEAD never
+    // moves, so a merged-only retry refuses that ref on every later pass and
+    // strands it exactly as permanently as never retrying at all. Scoped to this
+    // task's own deterministic branch, and a tip nothing proves captured is still
+    // never forced: it survives untouched and records nothing.
     if (resolveCommit(projectDir, branch) === undefined) return { action: "absent", branch };
-    return deleteMergedBranch(projectDir, branch)
+    return disposeCapturedBranch(projectDir, branch, captured)
       ? { action: "branch_reaped", branch }
       : { action: "absent", branch };
   }
   if (substrate === "private_clone") {
-    // FG-621 owns clone reaping (see the header): a clone is not a registered
-    // worktree, and its removal has to sequence against the parent's object
-    // store. Explicit no-op — never a silent fall-through.
-    return { action: "retained", substrate, branch, reason: "private_clone_substrate", details: [] };
+    // OWNERSHIP FIRST on this branch — the opposite order from the linked-worktree
+    // path below, and deliberately so. There, ownership runs last because the
+    // capture reasons are the better evidence. Here it must run FIRST: every
+    // capture check asks "is the work here safe to lose?", and the operator's live
+    // source checkout answers yes trivially (it is clean, and its HEAD is
+    // reachable from its own HEAD). The alternates proof is the ONLY thing that
+    // separates a task's private clone from it, from an ordinary clone, and from
+    // another repository entirely.
+    const notOurs = cloneOwnershipMismatch(workspacePath, projectDir, branch);
+    if (notOurs.length > 0) {
+      return { action: "retained", substrate, branch, reason: "workspace_not_owned", details: notOurs };
+    }
+
+    const submodules = checkedOutSubmodules(workspacePath);
+    if (submodules === undefined || submodules.length > 0) {
+      return {
+        action: "retained",
+        substrate,
+        branch,
+        reason: "submodules_present",
+        details: submodules ?? ["git submodule status could not be read in the workspace"],
+      };
+    }
+
+    const dirty = statusPorcelainIgnored(workspacePath);
+    if (dirty === undefined || dirty.length > 0) {
+      return {
+        action: "retained",
+        substrate,
+        branch,
+        reason: "uncommitted_work",
+        details: dirty ?? ["git status could not be read in the workspace"],
+      };
+    }
+
+    // THREE tips, de-duplicated. A clone is a FULL repository, so its branch can
+    // hold commits its HEAD is not sitting on — reading only HEAD (plus the
+    // parent-side ref) would miss them and reap work nothing else has.
+    const tips = [
+      resolveCommit(projectDir, branch),
+      resolveCommit(workspacePath, "HEAD"),
+      resolveCommit(workspacePath, branch),
+    ].filter((c): c is string => c !== undefined);
+    const uniqueTips = [...new Set(tips)];
+    const uncaptured = uniqueTips.filter((c) => !captured(c));
+    if (uniqueTips.length === 0 || uncaptured.length > 0) {
+      // A `remote:` target never advances projectDir's HEAD, so when the receipts
+      // are what should have proved capture and did not, say THAT rather than
+      // leaving an operator to read a HEAD-relative "unmerged" verdict about a
+      // branch that was never going to reach HEAD.
+      const remoteTarget = authority.target?.startsWith("remote:") === true;
+      return {
+        action: "retained",
+        substrate,
+        branch,
+        reason: remoteTarget ? "remote_target_uncaptured" : "unmerged_commits",
+        details:
+          uniqueTips.length === 0
+            ? ["the private clone's history could not be resolved"]
+            : remoteTarget
+              ? [...uncaptured, `publish target ${authority.target}`]
+              : uncaptured,
+      };
+    }
+
+    // `gc.pid` in the parent's common git dir means git is repacking the very
+    // object store this clone's alternates point into. TRANSIENT — so this is a
+    // deferral, not a disposition: nothing is reaped or retained and the next
+    // pass asks again (the caller still records the deferral itself, under its
+    // own event type). Checked here, immediately before the irreversible step, so a clone
+    // that would have been retained for a real reason still reports that reason.
+    if (parentIsRepacking(projectDir)) {
+      return {
+        action: "deferred",
+        substrate,
+        branch,
+        reason: "parent_repacking",
+        details: ["the parent repository is running gc; disposal waits for the next pass"],
+      };
+    }
+
+    try {
+      rmSync(workspacePath, { recursive: true, force: true });
+    } catch {
+      // Fall through to the existence check — a partial removal is still a
+      // removal_failed, and the directory is what decides.
+    }
+    if (existsSync(workspacePath)) {
+      return { action: "retained", substrate, branch, reason: "removal_failed", details: [] };
+    }
+    return {
+      action: "reaped",
+      substrate,
+      branch,
+      // Same proof, both halves of the disposal. The tree above was removed
+      // because `captured` reached every tip; the ref goes on that same warrant,
+      // so a clone proven captured by a publication receipt does not leave its
+      // parent-side ref behind (FG-356's ref-stranding, on the new substrate).
+      branchRemoved: disposeCapturedBranch(projectDir, branch, captured),
+      // The directory IS the repository, so there is no `git worktree remove` to
+      // succeed or decline: rmSync either left the path gone or it did not.
+      removal: "git_removed",
+    };
   }
   if (substrate === "unknown") {
     return { action: "retained", substrate, branch, reason: "unknown_substrate", details: [] };
@@ -701,7 +1450,7 @@ export function reapTaskWorkspace(
   const tips = [resolveCommit(projectDir, branch), resolveCommit(workspacePath, "HEAD")].filter(
     (c): c is string => c !== undefined
   );
-  const uncaptured = tips.filter((c) => !isAncestorOfHead(projectDir, c));
+  const uncaptured = tips.filter((c) => !captured(c));
   if (tips.length === 0 || uncaptured.length > 0) {
     return {
       action: "retained",
@@ -802,35 +1551,44 @@ export function createIntegrationWorktree(
 
 /** Merge a single child task branch into the integration worktree.
  *
- *  Same no-discard contract as mergeWorktreeBranch (FG-352): auto-stages and
- *  commits any uncommitted changes in the child worktree before merging.
- *  Changes present + commit fails => ok:false (caller retains child worktree).
- *  Uses --no-ff so each child gets an explicit merge commit on the integration branch.
+ *  Uses --no-ff so each child gets an explicit merge commit on the integration
+ *  branch. Call in child INDEX order for deterministic history.
  *
- *  Call in child INDEX order for deterministic history. */
+ *  `childWorktreePath` is OPTIONAL, and omitting it is the FG-621 clone path.
+ *  When it is given, this keeps FG-352's no-discard contract for a LINKED
+ *  worktree: auto-stage and commit anything uncommitted before merging, and treat
+ *  a commit that fails with changes present as fatal (the caller retains the
+ *  worktree). When it is ABSENT, the child's work was already captured — Forge
+ *  safety-committed the clone and fetched its branch into this repository's ref
+ *  namespace — and committing into the clone HERE would advance only the clone's
+ *  own ref, leaving the already-fetched branch (and therefore the candidate)
+ *  silently stale. Not passing a path is what makes that structural rather than a
+ *  convention: this function can only mutate a workspace it was told about. */
 export function mergeChildIntoIntegration(
   integrationWorktreePath: string,
   runId: string,
   childTaskId: string,
-  childWorktreePath: string
+  childWorktreePath?: string
 ): MergeWorktreeBranchResult {
   const branch = worktreeBranchName(runId, childTaskId);
 
   let statusOut = "";
-  try {
-    statusOut = execFileSync("git", ["status", "--porcelain"], {
-      cwd: childWorktreePath,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-  } catch (e) {
-    return {
-      ok: false,
-      error: `git status in child worktree ${childWorktreePath} failed: ${String(e)}`,
-    };
+  if (childWorktreePath !== undefined) {
+    try {
+      statusOut = execFileSync("git", ["status", "--porcelain"], {
+        cwd: childWorktreePath,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+    } catch (e) {
+      return {
+        ok: false,
+        error: `git status in child worktree ${childWorktreePath} failed: ${String(e)}`,
+      };
+    }
   }
 
-  if (statusOut.trim().length > 0) {
+  if (childWorktreePath !== undefined && statusOut.trim().length > 0) {
     try {
       execFileSync(
         "git",

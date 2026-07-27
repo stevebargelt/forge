@@ -270,6 +270,39 @@ export function publicationAttemptsForTask(taskId: string): PublicationAttempt[]
   return rows.map(toAttempt);
 }
 
+/** FG-621 (AC 4): the newest RECEIPT for a run — the exact SHA the last accepted
+ *  candidate landed on `target`.
+ *
+ *  This is the base authority for the next task's private clone, and it is a
+ *  RECORDED fact rather than a re-read of `projectDir` HEAD: a `remote:<remote>#<branch>`
+ *  target never advances local HEAD at all, and even on a local target HEAD is a
+ *  proxy that anything else on the host can move between two dispatches.
+ *
+ *  ORDERED BY PUBLISH TIME, not intent time. `created_at` is when the attempt
+ *  RECORDED ITS INTENT, before it did anything — an attempt that parked and
+ *  rebuilt has an early created_at and a late publication, so intent order can
+ *  name a receipt that is not the last thing actually published. `updated_at` is
+ *  written on the same update that sets `state = 'published'`, so it is the
+ *  publish time. rowid breaks a same-second tie deterministically.
+ *
+ *  SCOPED BY TARGET, when the caller knows it. A receipt for a different target
+ *  is not this target's last accepted candidate, and handing it over as a base
+ *  would build the next task on a tree that never landed here. An omitted target
+ *  keeps the unscoped answer for callers that genuinely have no target (a
+ *  detached HEAD, where nothing can publish anyway). */
+export function latestPublishedShaForRun(runId: string, target?: string): string | undefined {
+  const row = getDb()
+    .prepare(
+      `SELECT published_sha FROM publication_attempts
+        WHERE run_id = ? AND state = 'published' AND published_sha IS NOT NULL
+          AND (? IS NULL OR target = ?)
+        ORDER BY updated_at DESC, rowid DESC
+        LIMIT 1`,
+    )
+    .get(runId, target ?? null, target ?? null) as { published_sha: string } | undefined;
+  return row?.published_sha;
+}
+
 export function allPublicationAttempts(): PublicationAttempt[] {
   const rows = getDb()
     .prepare(`SELECT * FROM publication_attempts ORDER BY created_at DESC`)

@@ -634,6 +634,17 @@ const ALLOWLIST: Allow[] = [
       "refusal from the same git state and appends the event then (it is deduped per (task, reason), which is what keeps " +
       "repeated reconciles at fixpoint).",
   },
+  {
+    file: "v2/reconcile.ts",
+    fn: "reconcileRun",
+    call: "logEvent",
+    near: "task.workspace_reap_deferred",
+    reason:
+      "FG-621: the record that a clone's disposal was POSTPONED because the parent is mid-gc — append-only, and the " +
+      "deferral is the conservative outcome (nothing on disk changes on either side of this write). It is not a " +
+      "disposition and nothing reads it to decide a transition; the next pass re-derives the same deferral from the same " +
+      "gc.pid and appends it then, deduped per (task, reason) so repeated reconciles stay at fixpoint.",
+  },
   // ── runNext.ts: the PRE-container dispatch path ─────────────────────────────
   // FG-530's covered surface is runNext's POST-container finalize path — the
   // sequence that turns an agent's result into lifecycle state. Everything below
@@ -657,11 +668,24 @@ const ALLOWLIST: Allow[] = [
   },
   {
     file: "v2/runNext.ts",
-    fn: "dispatchSingleStep",
-    call: "setTaskWorktreePath",
+    fn: "provisionTaskClone",
+    call: "setTaskWorkspace",
     reason:
-      "pre-container, and deliberately so: FG-351 writes the worktree path BEFORE the container starts precisely so a " +
-      "crash leaves the path findable. A crash on either side is the exact state that rule exists to keep recoverable.",
+      "pre-container, and deliberately so: FG-351's rule, widened by FG-621 to cover the base SHA — the workspace path " +
+      "AND the commit the private clone was created at are written BEFORE the container starts precisely so a crash " +
+      "leaves both findable. A crash on either side is the exact state that rule exists to keep recoverable. One write " +
+      "site now serves both dispatch paths (dispatchSingleStep and runFanoutChild both call it).",
+  },
+  {
+    file: "v2/runNext.ts",
+    fn: "settleFailedCloneProvisioning",
+    call: "clearTaskWorkspace",
+    reason:
+      "FG-621: the mirror of the write above, and it runs ONLY after cleanup has proved there is no directory at the " +
+      "recorded path — so it unrecords a workspace that does not exist. A crash before it leaves the pre-FG-621 state " +
+      "(a row naming an absent path, which the reaper already reads as `absent` and records nothing about); a crash " +
+      "after it leaves a row naming nothing, which is the truth. Neither strands, loses, nor ships any state, and the " +
+      "next attempt at this task re-derives the path from cloneDir() rather than from the row.",
   },
   {
     file: "v2/runNext.ts",
@@ -962,14 +986,6 @@ const ALLOWLIST: Allow[] = [
     fn: "runFanoutChild",
     call: "logEvent",
     reason: "the child's task.created / task.completed audit appends — append-only evidence, no lifecycle state.",
-  },
-  {
-    file: "v2/runNext.ts",
-    fn: "runFanoutChild",
-    call: "setTaskWorktreePath",
-    reason:
-      "pre-container, FG-351's DB-write-before-container-start rule — the same reason as dispatchSingleStep's copy: the " +
-      "write exists so a crash leaves the child's worktree findable.",
   },
   {
     file: "v2/runNext.ts",

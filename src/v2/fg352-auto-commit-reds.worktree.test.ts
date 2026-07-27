@@ -149,6 +149,11 @@ function initGitRepo(dir: string): void {
   execFileSync("git", ["commit", "-m", "initial"], { cwd: dir, stdio: "ignore" });
 }
 
+// FG-621: a task workspace is a `git clone`, which inherits none of the source
+// repo's LOCAL config, so a simulated agent commit must carry its own identity —
+// exactly as the agent container supplies one via GIT_AUTHOR_*/GIT_COMMITTER_*.
+const AGENT_IDENTITY = ["-c", "user.name=Agent", "-c", "user.email=agent@forge.test"];
+
 function ensureDispatchTestRuntime(): void {
   const forgeHome = process.env.FORGE_HOME!;
   const runtimePath = join(forgeHome, "runtimes", "fg352-dispatch-test.yml");
@@ -238,7 +243,7 @@ test("fg352 (8): agent already committed work — auto-commit no-op, merge still
     // will run `git commit` and get a "nothing to commit" non-zero exit.
     writeFileSync(join(worktreePath!, "agent-pre-committed.ts"), "export const v = 42;\n");
     execFileSync("git", ["add", "."], { cwd: worktreePath!, stdio: "ignore" });
-    execFileSync("git", ["commit", "-m", "agent committed before forge auto-commit"], {
+    execFileSync("git", [...AGENT_IDENTITY, "commit", "-m", "agent committed before forge auto-commit"], {
       cwd: worktreePath!,
       stdio: "ignore",
     });
@@ -406,7 +411,7 @@ test("fg352 (10): reds run before publication (target untouched at red time); pr
 
       writeFileSync(join(worktreePath!, "merge-before-reds.ts"), "export const x = 1;\n");
       execFileSync("git", ["add", "."], { cwd: worktreePath!, stdio: "ignore" });
-      execFileSync("git", ["commit", "-m", "primary output"], { cwd: worktreePath!, stdio: "ignore" });
+      execFileSync("git", [...AGENT_IDENTITY, "commit", "-m", "primary output"], { cwd: worktreePath!, stdio: "ignore" });
 
       writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, files_modified: ["merge-before-reds.ts"] });
     } else {

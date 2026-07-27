@@ -61,6 +61,12 @@ const POLICY: Record<FailureKind, RetryDisposition> = {
   // (quite possibly an earlier, correctly-validated publication). Never advise
   // resetting the publish target.
   merge_conflict:       { retryable: true, reason: "the task's branch could not be merged into the candidate; nothing was published and the publish target is unchanged", advice: "the branch and its worktree are retained — rebase the task branch onto the current base and resolve the conflict, or retry to re-do the work against the current base" },
+  // FG-621: capture is the step BEFORE any merge — Forge safety-commits the
+  // private clone, fetches its branch into the parent's ref namespace, and
+  // verifies the two agree. A failure there merged nothing and touched no
+  // publish target, so the remediation is about the clone, never about a
+  // conflict or a target. The clone is retained with the agent's work in it.
+  capture_failed:       { retryable: false, reason: "forge could not capture the task's private clone into the parent repository (unreadable status, failed safety commit, rejected fetch, or a fetched ref that did not match the clone's tip). Nothing was merged and nothing was published — the work is still in the clone", advice: "inspect the retained clone named in the error (`forge show <id>`); once its state is resolved, `forge retry <id> --force` — a plain retry refuses, because a fresh attempt would refuse to reuse that workspace" },
   integration_failed:   { retryable: false, reason: "the candidate merged cleanly but build+test of the candidate failed; retry would re-dispatch against the same broken code. Nothing was published — the publish target was never modified", advice: "fix the break in code, then retry. Do NOT reset the publish target: it does not carry this merge" },
   integration_gate_timeout: { retryable: true, reason: "the integration gate run against the candidate timed out; a fresh attempt may complete. Nothing was published" },
   integration_gate_crashed: { retryable: false, reason: "the integration gate run against the candidate was killed unexpectedly (signal), not failed on its own merits; a tree's state after an abrupt kill is not trustworthy to blindly re-run. Nothing was published", advice: "inspect the host for a broken or half-updated toolchain/cache, resolve it, then retry — a retry validates a FRESH candidate worktree, so nothing has to be cleaned up in the publish target" },

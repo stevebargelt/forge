@@ -605,6 +605,12 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     TASK_ID: taskId,
     TASK_DIR: dir,
     PROJECT_DIR: args.projectDir,
+    // FG-621: `forge invoke` creates no workspace, so the project dir IS the
+    // canonical one — and it is Forge's own record of it either way (the resolved
+    // --project, never anything read out of the tree). The clone mount planner
+    // REFUSES without it, so omitting it turned a project dir that itself borrows
+    // objects (`clone --shared` / `--reference`) into a hard invoke failure.
+    CANONICAL_PROJECT_DIR: args.projectDir,
     PROJECT_MODE: args.readOnlyProject ? "ro" : "rw",
     MODEL: resolution.model,
     UPSTREAM_PROVIDER: resolution.provider ?? "",

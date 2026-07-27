@@ -216,6 +216,11 @@ function makeTmpDir(): string {
 /** Init a git repo whose committed package.json exposes a `test:unit` script
  *  that deterministically passes or fails — standing in for "the merged tree
  *  builds+tests cleanly" vs. "clean merge, broken integration". */
+// FG-621: a task workspace is a `git clone`, which inherits none of the source
+// repo's LOCAL config, so a simulated agent commit must carry its own identity —
+// exactly as the agent container supplies one via GIT_AUTHOR_*/GIT_COMMITTER_*.
+const AGENT_IDENTITY = ["-c", "user.name=Agent", "-c", "user.email=agent@forge.test"];
+
 function initGitRepo(dir: string, testUnitPasses: boolean): void {
   execFileSync("git", ["init", "-b", "main"], { cwd: dir, stdio: "ignore" });
   execFileSync("git", ["config", "user.email", "test@forge.test"], { cwd: dir, stdio: "ignore" });
@@ -370,7 +375,7 @@ function makeCleanMergeExec(fileName: string): DockerExecFn {
 
     writeFileSync(join(worktreePath!, fileName), "export const x = 1;\n");
     execFileSync("git", ["add", "."], { cwd: worktreePath!, stdio: "ignore" });
-    execFileSync("git", ["commit", "-m", "task output"], { cwd: worktreePath!, stdio: "ignore" });
+    execFileSync("git", [...AGENT_IDENTITY, "commit", "-m", "task output"], { cwd: worktreePath!, stdio: "ignore" });
 
     writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, files_modified: [fileName] });
     return 0;

@@ -107,6 +107,11 @@ function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
 
+// FG-621: a task workspace is a `git clone`, which inherits none of the source
+// repo's LOCAL config, so a simulated agent commit must carry its own identity —
+// exactly as the agent container supplies one via GIT_AUTHOR_*/GIT_COMMITTER_*.
+const AGENT_IDENTITY = ["-c", "user.name=Agent", "-c", "user.email=agent@forge.test"];
+
 function initGitRepo(dir: string): void {
   git(dir, ["init", "-b", "main"]);
   git(dir, ["config", "user.email", "test@forge.test"]);
@@ -240,7 +245,7 @@ test("FG-425 (finding 1): a red that REJECTS the candidate publishes NOTHING —
     // The primary commits work on its task branch.
     writeFileSync(join(mount!, "rejected-work.ts"), "export const bad = 1;\n");
     git(mount!, ["add", "."]);
-    git(mount!, ["commit", "-m", "primary output"]);
+    git(mount!, [...AGENT_IDENTITY, "commit", "-m", "primary output"]);
     writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, files_modified: ["rejected-work.ts"] });
     return 0;
   };
@@ -309,7 +314,7 @@ test("FG-425: force-advancing a blocked_by_red primary PUBLISHES the work it was
     }
     writeFileSync(join(mount!, "overridden-work.ts"), "export const x = 1;\n");
     git(mount!, ["add", "."]);
-    git(mount!, ["commit", "-m", "primary output"]);
+    git(mount!, [...AGENT_IDENTITY, "commit", "-m", "primary output"]);
     writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, files_modified: ["overridden-work.ts"] });
     return 0;
   };
@@ -393,7 +398,7 @@ test("FG-425 (finding 2): an AD-1 moved-base rebuild re-runs the REDS for the NE
 
     writeFileSync(join(mount!, "work.ts"), "export const work = 1;\n");
     git(mount!, ["add", "."]);
-    git(mount!, ["commit", "-m", "primary output"]);
+    git(mount!, [...AGENT_IDENTITY, "commit", "-m", "primary output"]);
     writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, files_modified: ["work.ts"] });
     return 0;
   };
