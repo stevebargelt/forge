@@ -288,3 +288,39 @@ decomposition nor the architecture. Add to step 1's test coverage:
 captured value. Do NOT infer the property after the fact from `candidateSha === publishedSha` alone
 — that comparison is self-consistent even if the gate observed a different tree, which is precisely
 the failure mode AC 6 exists to exclude.
+
+### Operator evidence lane (AC 2 / AC 11) — how to actually run it
+
+The live proof is a one-time operator-run script, host-side on macOS, against the FINAL stable
+candidate SHA and image:
+
+```
+./scripts/fg621-clone-boundary-smoke.sh [--project-dir DIR] [--image IMAGE]
+```
+
+`--project-dir` is the PARENT repo to prove unwritable (defaults to the repo it runs in);
+`--image` is the candidate agent image (defaults to `$FORGE_AGENT_IMAGE` /
+`agent-dev-worker:latest`). It fails closed — a missing Docker daemon, a missing image, or any
+missing prerequisite exits NONZERO, never a skip-to-green. It requires this repo's `node_modules`,
+because it builds its fixture through forge's OWN `createTaskClone` rather than hand-rolling a
+clone: that is deliberate, so the script proves the PRODUCT supplies what an agent needs instead of
+supplying it on the product's behalf (it previously injected `GIT_AUTHOR_*` and `safe.directory`,
+which would have reported SUCCESS while real dispatch failed).
+
+It prints a copy-pasteable evidence block; paste that into this ticket's Acceptance Evidence grid
+for AC 2 and AC 11, citing the candidate SHA and image it ran against. **Re-run it if relevant code
+changes afterward** — acceptance evidence against a superseded SHA is worse than none, because it
+reads as proof.
+
+### Documentation gaps the docs phase MUST close (raised by the verify phase, 2026-07-27)
+
+Both are real, both are operator-facing, and neither was written by the implementers that flagged
+`operator_behavior_changed`:
+
+1. **The new hard dispatch refusal is undocumented.** A project dir that IS a shared clone with an
+   unverifiable `objects/info/alternates` now REFUSES to dispatch instead of silently dispatching a
+   history-blind container. Nothing in `docs/` mentions this refusal, the alternates verification,
+   or `CANONICAL_PROJECT_DIR`. An operator who hits it has no documentation to land on.
+2. **The evidence lane is undiscoverable.** `scripts/fg621-clone-boundary-smoke.sh` is named in no
+   markdown in the repo — not `docs/`, not `README`. An evidence lane an operator cannot discover
+   is one AC 11 will not get run through.
