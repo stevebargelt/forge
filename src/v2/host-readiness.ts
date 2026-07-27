@@ -413,7 +413,18 @@ function resolveRuntimeRequirement(
   // native-loader crash this contract exists to preempt. It outranks a non-exact
   // declaration deliberately: a tree installed under Node 22 crashes its native
   // loader under Node 24 no matter how happily ">=18" admits both.
-  if (record?.abi) return { kind: "abi", abi: record.abi, source: "the workspace's prior readiness record" };
+  //
+  // ONLY a `ready` record, for the same reason readinessMatches requires one: a
+  // `preparing` record is an install that did NOT complete, so there may be no
+  // bindings built under its ABI at all. Trusted irrespective of state, the record
+  // a FAILED attempt left behind becomes the requirement the NEXT attempt is
+  // checked against — so an operator who corrects the interpreter is refused
+  // `runtime_abi_mismatch` citing the very interpreter that failed, identically
+  // forever, and the setup command never runs again. A non-ready record supplies
+  // nothing; the requirement falls through as if no record existed.
+  if (record?.state === "ready" && record.abi) {
+    return { kind: "abi", abi: record.abi, source: "the workspace's prior readiness record" };
+  }
   if (declared) {
     return { kind: "majorRange", ranges: declared.ranges, declaration: declared.declaration, source: declared.source };
   }
