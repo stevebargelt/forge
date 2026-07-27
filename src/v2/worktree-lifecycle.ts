@@ -20,6 +20,7 @@ import { hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { findGitRoot } from "../util/git-root.js";
+import { createDependencyMountpoints } from "./dependency-provisioning.js";
 import { WORKTREES_DIR, cloneDir, worktreeDir, integrationWorktreeDir } from "../util/paths.js";
 
 // ── Branch naming ─────────────────────────────────────────────────────────────
@@ -211,6 +212,8 @@ export function createWorktree(
     stdio: ["ignore", "ignore", "pipe"],
   });
 
+  createDependencyMountpoints(worktreePath);
+
   // Collect untracked/ignored files for the operator diagnostic.
   let untrackedFiles: string[] = [];
   try {
@@ -365,6 +368,8 @@ export function createTaskClone(
     cwd: clonePath,
     stdio: ["ignore", "ignore", "pipe"],
   });
+
+  createDependencyMountpoints(clonePath);
 
   const head = resolveCommit(clonePath, "HEAD");
   if (head !== baseSha) {
