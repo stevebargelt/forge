@@ -2,7 +2,7 @@
 id: FG-625
 type: story
 status: active
-title: "review-loop fix rounds stop verification_failed and leave fixes uncommitted without naming the failed check or output"
+title: review-loop fix rounds stop verification_failed and leave fixes uncommitted without naming the failed check or output
 created: 2026-07-25
 ---
 
@@ -120,3 +120,21 @@ Do not:
   gate list includes `test:extended` without the flag.
 - Neither correction explains the observed path-2 failure. Until the discarded verification result is
   preserved, the honest root cause is **unknown**.
+
+## Independently rediscovered 2026-07-27 (FG-566 red re-check)
+
+red-backend flagged the same call site while reviewing FG-566, confirming this path is real and still
+open after FG-566 lands:
+
+> The post-revert verification inside `fix()` runs local verification with no readiness preflight, so
+> on the CI-reuse path an unprepared workspace still reports an environment fault as a code failure —
+> the exact FG-566 defect shape, surviving on a sibling path in the same consumer.
+> Evidence: `src/cli/commands/review-loop.ts:924` — `const verification = runVerify(localFallbackScripts(), { cwd: ctx.projectDir });`
+> with no preceding `prepareLocalVerification` call, unlike the two round-entry sites at `:603` and `:686`.
+
+FG-566 deliberately fenced this site to FG-625 rather than fixing it (its architect artifact fences
+"FG-625 — the post-fixer verification path. OUT, except that the step-detail channel this ticket must
+add on the round-entry path is the same channel FG-625 will consume"). So this ticket now owns two
+distinct defects on the same line: the missing step detail it was filed for, AND the missing readiness
+preflight. Address both, or explicitly split the second out — but do not close this ticket having
+fixed only the naming half while `:924` still misclassifies an environment fault as a code failure.
