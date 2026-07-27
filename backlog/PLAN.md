@@ -1,6 +1,6 @@
 # Forge Working Plan
 
-**Last revised:** 2026-07-26
+**Last revised:** 2026-07-27
 
 This is a mutable statement of current operator intent. It is not an approval boundary, ticket
 specification, execution record, or source of lifecycle truth.
@@ -17,25 +17,39 @@ Finish FG-345's isolated-workspace program and make isolation the ordinary/defau
 interrupted the FG-496 slice chain under the plan's existing interruption policy after forge-on-forge work
 demonstrated live-checkout damage and the worktree path exposed incomplete Git and cleanup boundaries.
 
-The foundation is already shipped: lifecycle and state (FG-351), merge/integration mechanics
-(FG-352/FG-353), persistence and red semantics (FG-354/FG-355), the candidate integration gate and
-serialized publisher (FG-357/FG-425), dependency parity (FG-376), read-only Git for non-mutators (FG-559),
-self-host refusal (FG-612), and fail-safe linked-worktree recovery (FG-356). Do not reopen those decisions
-or create replacement tickets without evidence of a reachable gap.
+The foundation is shipped: lifecycle and state (FG-351), merge/integration mechanics (FG-352/FG-353),
+persistence and red semantics (FG-354/FG-355), the candidate integration gate and serialized publisher
+(FG-357/FG-425), dependency parity (FG-376), read-only Git for non-mutators (FG-559), self-host refusal
+(FG-612), fail-safe linked-worktree recovery (FG-356), **private writable Git for mutators (FG-621, #164)**
+and **isolated-workspace dependency mountpoints (FG-627, #165)**. Do not reopen those decisions or create
+replacement tickets without evidence of a reachable gap.
+
+**What changed on 2026-07-27.** FG-621 landed and the first real end-to-end isolated dispatch was run. The
+substrate itself works — a mutating task receives a private clone at a recorded base SHA, the parent repo
+is provably unwritable from the container, and the agent's commit is captured by the host. What the
+dogfood exposed is that the *verification paths around* isolation had never been exercised, and three
+separate defects fell out of one run: FG-626, FG-627 (fixed same day), and the integration-gate half of
+FG-566. The correction to carry forward is that isolation was never "nearly ready"; only its substrate was.
 
 ## Now
 
-1. **FG-621** — give mutating agents private writable Git while Forge retains publication authority.
-   Includes the private-clone lifecycle and fail-safe reaping for the substrate it introduces. This is the
-   remaining substantive implementation child of FG-345.
-2. When FG-621 lands, walk FG-345's aggregate acceptance proof against the implementation that actually
-   exists. Count FG-357/FG-425 as the integration/publication solution, FG-351 as the non-Git/dirty/carry-in
-   contract, and FG-353/FG-355 as the red-timing decision. Do not file another child for a requirement that
-   is already proven.
-3. Dogfood the complete path forge-on-forge, then flip isolation default-on while retaining the explicit
-   `FORGE_NO_WORKTREES=1` escape hatch. If the aggregate walk demonstrates a concrete blocker, fix that
-   bounded blocker first; possibility alone does not expand the program.
-4. Close FG-345 only after the default-on run proves mutators, non-mutators, candidate validation,
+1. **FG-566** — the shared readiness contract for all Forge-owned host-side verification, with two
+   consumers: the review-loop local fallback, and FG-357/FG-425 integration-gate verification against the
+   exact publication candidate worktree. **Promoted under the interruption policy** as a defect blocking
+   the current objective: it was expanded on evidence when the dogfood's integration gate failed
+   `ERR_MODULE_NOT_FOUND` against a candidate worktree with no dependencies and recorded the result as
+   `integration_failed` — an environment fault reported as a verdict on the reviewed code.
+2. **FG-621 AC 11** — the only criterion still open; everything else shipped in #164, and AC 2's live
+   container evidence is captured. It closes on a dogfood run, which is blocked on FG-566. FG-566 work and
+   the dogfood run in the disposable clone, never the live checkout.
+3. Walk FG-345's aggregate acceptance proof against the implementation that actually exists. Count
+   FG-357/FG-425 as the integration/publication solution, FG-351 as the non-Git/dirty/carry-in contract,
+   and FG-353/FG-355 as the red-timing decision. Do not file another child for a requirement already
+   proven.
+4. Decide the platform question before default-on: FG-621 inherits the Linux hard-fail, so its evidence is
+   macOS-only. Either adopt a macOS-first default or lift the gate; each carries its own test burden, and
+   FG-621 alone does not justify a universal flip.
+5. Close FG-345 only after the default-on run proves mutators, non-mutators, candidate validation,
    publication, and recovery compose end to end.
 
 ## Next
@@ -66,14 +80,31 @@ A newly discovered hardening opportunity is captured in the backlog but does not
 
 ## Explicitly deferred
 
+- **FG-626** — `forge launch run` does not propagate the caller's environment, so every `FORGE_*` gate is
+  inert under the launch pattern the orchestrator template mandates. Real and operator-facing, but it has
+  a working escape (`forge launch run -- env VAR=… <cmd>`), so it is captured rather than promoted. Note
+  the only reason it surfaced is that FG-612 independently refused the dispatch; a safety gate the
+  operator believes is armed and is not is the worst shape this can take, so promote it if it recurs
+  anywhere that guard does not cover.
 - FG-597, FG-598, FG-599, FG-600, FG-601, FG-602, and FG-604 follow-up hardening, unless promoted by the
   interruption policy.
-- FG-566, FG-623, and FG-625 do not move ahead of FG-621 or the FG-345 closeout unless one becomes a
-  demonstrated blocker or required-CI failure.
+- FG-623 and FG-625 do not move ahead of the FG-345 closeout unless one becomes a demonstrated blocker or
+  required-CI failure. (FG-566 was in this set and has been promoted on evidence.)
 - Further worktree/isolation hardening after FG-345, unless the aggregate proof exposes a reachable gap.
 - Broad lifecycle-evaluator, provider-adapter, and workflow-semantics programs.
 - Declarative phase mutation contracts and the red/green workflow described in the 2026-07-21 Vjeko
   article.
+
+## Working rules for the live checkout
+
+- Agent work and branch setup happen in the disposable clone (`~/code/forge-fg356`), never in
+  `~/code/forge`. Task workspaces are created under `~/.forge/worktrees/clones/` regardless of project
+  dir, so the clone substrate is still exercised either way.
+- No destructive git command (`reset --hard`, `checkout -f`, `clean`) runs against the live checkout as
+  part of a compound chain. Check the working tree as its own step first. This rule exists because a
+  `reset --hard` here destroyed five files of uncommitted operator work on 2026-07-27; it was recovered
+  from a Codex session transcript, which is a real recovery surface worth checking before calling
+  anything unrecoverable.
 
 ## Maintenance rules
 
