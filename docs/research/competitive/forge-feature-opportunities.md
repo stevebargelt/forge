@@ -5,8 +5,9 @@ recent competitive assessments would materially improve Forge without
 importing another product's authority model, vocabulary, or operational
 sprawl.
 
-The findings are based on the pinned product snapshots in this directory.
-They are not claims about uninspected future versions.
+The findings are based on the pinned product snapshots in this directory,
+plus the 2026-07-26 GasTown/Gas City authority-model correction recorded in
+their assessment. They are not claims about other uninspected future versions.
 
 ## Executive Conclusion
 
@@ -16,7 +17,8 @@ see and operate than competitors' weaker models.
 
 The highest-value direction is therefore:
 
-1. finish safe worktree isolation and recovery;
+1. finish safe isolated Git workspaces with private agent commits and
+   Forge-authoritative publication;
 2. project Forge's existing truth into one operator surface;
 3. make recovery, attention, and provider reachability explicit;
 4. feed external review state back into the owning work;
@@ -30,7 +32,7 @@ parallel roadmap.
 
 | Priority | Feature | Strongest references | Forge disposition |
 |---|---|---|---|
-| P0 | Worktree isolation as the ordinary mutating path, with verified readiness and reliable cleanup | Claude Squad, Agent Deck, GasTown, Stoneforge | Finish FG-345, FG-356, and FG-559; do not create another ticket |
+| P0 | Isolated Git workspaces as the ordinary path: private writable Git for mutators, read-only snapshots for reviewers, and Forge-authoritative publication | Claude Squad, Agent Deck, GasTown, Stoneforge | Finish FG-345, reopen/implement FG-621, retain FG-559 for read-only agents, and finish FG-356 before default-on |
 | P0 | Project-first operator cockpit with provenance and attention routing | Nimbalyst, Agent Deck, GasTown, Claude Deck | Compose FG-348, FG-349, FG-386, FG-401, FG-402, and FG-591 into one experience |
 | P1 | Recovery ladder that preserves the filesystem before replacing the process | Stoneforge, Agent Orchestrator | Gap-audit current recovery; add only the missing provider-session/worktree behavior |
 | P1 | External CI and review feedback bound to the exact artifact and owning task | Agent Orchestrator | Extend existing review/CI handoff rather than introduce another review engine |
@@ -48,6 +50,8 @@ The product lesson is stronger than “use Git worktrees”:
 - isolation is automatic;
 - setup and dependency readiness are visible;
 - branch, worktree, task, process, and provider session remain distinct;
+- mutating agents can checkpoint work in private commits without gaining
+  publication authority;
 - pause or recovery preserves dirty work;
 - merge happens away from the running checkout;
 - cleanup is reconciled and never silently discards evidence.
@@ -55,14 +59,59 @@ The product lesson is stronger than “use Git worktrees”:
 Forge already has the harder publication and gate semantics. Its remaining
 work is to make isolation the reliable ordinary path:
 
-- FG-559 must make real Git history available inside a linked-worktree agent;
+- FG-559 makes real Git history available to read-only linked-worktree agents;
+- FG-621 must give mutating agents private writable Git without making the
+  parent repository writable;
 - FG-356 must reap orphaned and locked worktrees without discarding
   recoverable work;
-- the FG-345 default-on decision must depend on both, not cleanup alone;
+- the FG-345 default-on decision must depend on all three, not cleanup alone;
 - readiness must fail before dispatch when required history, dependencies, or
   tools are unavailable.
 
-### Immediate correction: FG-356 is unsafe as written
+### P0 correction A: commit authority is not publication authority
+
+GasTown's polecats commit on private worktree branches; `gt done` pushes the
+branch and creates an MR; the Refinery verifies and lands it. Its checkpoint
+dog periodically commits WIP. Gas City's controller owns infrastructure
+behavior and its role guidance reserves separate `work_dir` isolation for
+roles that mutate repositories.
+
+Forge drifted by treating Docker's inability to safely write the parent
+`.git` as a reason to prevent all agent commits. That conflates:
+
+- **private commit authority**, which mutating agents need for checkpointing,
+  recovery, rebase, bisect, and transport; and
+- **publication authority**, which must remain with Forge after exact-candidate
+  integration and red gates.
+
+The correction is capability-specific:
+
+1. mutating agents receive a private writable clone at an exact base SHA;
+2. reviewers receive a stable linked worktree with project and Git metadata
+   read-only;
+3. Forge safety-commits any remaining dirty output, fetches the private branch,
+   constructs and gates the candidate, and alone publishes it;
+4. agent commit boundaries are not automatically canonical project history and
+   may be squashed by publication;
+5. the existing serialized integration publisher is the deterministic
+   Refinery equivalent—do not add a permanent LLM agent for Git/state-machine
+   work;
+6. publication serialization is keyed by project and target branch, so agent
+   editing and commits remain parallel.
+
+FG-345 is the authority decision. FG-621 is the implementation path already
+measured through `git clone --shared`; it should be reopened rather than
+replaced with another design ticket. Default-on remains blocked until
+concurrent private commits, parent-repository write refusal, dirty-output
+capture, red write refusal, exact-candidate publication, and crash recovery
+are proven.
+
+References:
+[GasTown](gastown-forge-assessment.md),
+[Claude Squad](claude-squad-forge-assessment.md), and
+[Stoneforge](stoneforge-forge-assessment.md).
+
+### P0 correction B: FG-356 is unsafe as written
 
 The current FG-356 scope says to force-remove every orphaned/crashed worktree
 and delete its branch, preserving only `merge_conflict`. That conflicts with

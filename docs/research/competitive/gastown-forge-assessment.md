@@ -1,8 +1,10 @@
 # GasTown / GasCity Assessment Compared To Forge
 
-Date: 2026-06-22
+Date: 2026-06-22. Authority-model correction: 2026-07-26.
 
 GasTown source inspected: [`gastownhall/gastown`](https://github.com/gastownhall/gastown), local shallow clone at `/private/tmp/gastown-research`, commit `5118351294c8e3cad288314b9a9b7d106ebce960` from 2026-06-17.
+
+The 2026-07-26 authority correction was checked against the current official GasTown README/changelog and Gas City migration guidance linked under Sources Inspected.
 
 ## Executive Take
 
@@ -30,9 +32,9 @@ Core pieces:
 - **Witness/Deacon/Dogs:** watchdog and recovery chain.
 - **Refinery:** merge queue and integration branch manager.
 - **Scheduler:** capacity governor for dispatch.
-- **GasCity:** planned declarative layer over GasTown roles/formulas; docs describe it as forward-looking rather than a complete standalone system.
+- **Gas City:** composable orchestration SDK extracted from GasTown. Controllers own infrastructure behavior; packs define roles and policy.
 
-Sources: [README](https://github.com/gastownhall/gastown/blob/main/README.md), [overview](https://github.com/gastownhall/gastown/blob/main/docs/overview.md), [glossary](https://github.com/gastownhall/gastown/blob/main/docs/glossary.md), [architecture](https://github.com/gastownhall/gastown/blob/main/docs/design/architecture.md), [Gas City provider notes](https://github.com/gastownhall/gastown/blob/main/docs/agent-provider-integration.md).
+Sources: [README](https://github.com/gastownhall/gastown/blob/main/README.md), [overview](https://github.com/gastownhall/gastown/blob/main/docs/overview.md), [glossary](https://github.com/gastownhall/gastown/blob/main/docs/glossary.md), [architecture](https://github.com/gastownhall/gastown/blob/main/docs/design/architecture.md), [agent-provider notes](https://github.com/gastownhall/gastown/blob/main/docs/agent-provider-integration.md), and [Gas City migration guidance](https://github.com/gastownhall/gascity/blob/main/docs/getting-started/coming-from-gastown.md).
 
 ## Strong Ideas Worth Borrowing
 
@@ -77,9 +79,21 @@ That separation is useful for Forge's FG-345/FG-351 thread. It confirms the valu
 
 GasTown's Refinery also has a real merge queue model: MRs target branches, gates run, conflicts get handled, batches can be built and bisected, and integration branches collect epic work before landing to main. Forge's current worktree design should borrow the shape, but not the whole implementation.
 
-The key lesson for Forge: worktrees alone are not the safety feature. The safety feature is the combination of worktree isolation, merge conflict surfacing, post-merge validation, visible branch/merge state, and cleanup/reconcile.
+The worker/refinery authority split is load-bearing, not an incidental implementation detail. A polecat completes through `gt done`, which pushes its private branch and creates an MR; the Refinery batches, verifies, and merges it, while polecats do not push directly to main. GasTown also propagates Git identity into polecat worktrees and has a checkpoint dog that periodically commits WIP. Worker-side commits are therefore recovery and transport inputs; centralized integration remains authoritative.
 
-Forge trace: FG-345 is the parent worktree arc. FG-351 established the worktree lifecycle foundation, FG-354 adapted persistence checks, FG-352 added single-primary merge-back, and FG-353 added fan-out integration branches. Remaining/related items include FG-355 red snapshots for single-primary worktrees, FG-356 orphan cleanup, FG-357 post-merge integration gate, FG-358 Linux dependency provisioning, FG-376 dependency parity, and FG-379 operator docs.
+Gas City makes the infrastructure boundary clearer. The controller owns reconciliation, scaling, health, and garbage collection; a pack decides role behavior. Its migration guidance recommends a separate `work_dir` when a role mutates a repository and needs an isolated worktree. That supports capability-specific workspaces rather than requiring one Git substrate for every role.
+
+The key lesson for Forge: worktrees alone are not the safety feature. The safety feature is the combination of isolated private worker Git, merge conflict surfacing, post-merge validation, visible branch/merge state, and cleanup/reconcile. Commit authority and publication authority must remain separate:
+
+- a mutating agent may commit privately for checkpointing, recovery, and transport;
+- those commits remain untrusted candidate inputs;
+- the deterministic Forge controller/publisher constructs and gates the exact candidate;
+- only Forge updates or publishes the target branch;
+- reviewers retain read-only snapshot and history access.
+
+A centralized publisher does not require another LLM role. Git reconciliation, queueing, exact-candidate gates, compare-and-swap publication, receipts, and cleanup are deterministic controller work. An agent is appropriate only when a failure requires judgment, such as resolving a merge conflict or fixing a red gate, and that agent should receive a new isolated writable workspace.
+
+Forge trace: FG-345 now records this corrected authority model. FG-351 established the worktree lifecycle foundation, FG-354 adapted persistence checks, FG-352 added single-primary merge-back, and FG-353 added fan-out integration branches. FG-559 supplies read-only Git for non-mutating linked-worktree agents. FG-621 must supply private writable Git for mutating agents before default-on. Remaining/related items include FG-356 orphan cleanup, FG-357 post-merge integration gates, FG-376 dependency parity, and FG-379 operator docs.
 
 ### 4. Convoys As Human Attention Objects
 
@@ -321,7 +335,8 @@ This section keeps GasTown-derived concepts tied to Forge backlog items without 
 - Durable work ledger: queryable identity, status, actor, event, receipt, and artifact history for work. Implemented in pieces through Forge runs/tasks/events, FG-350 receipts, structured backlog, and Campaign Runner planning.
 - Agent execution history: model/runtime/role reliability over time, including red precision and retry outcomes. Unfiled as a dedicated dashboard/reporting story.
 - Identity / sandbox / session separation: task identity, worktree/branch sandbox, and agent/container session are distinct concepts. Tracked by FG-345 and children.
-- Refinery / merge queue: ordered integration of isolated work before landing. Forge's current equivalent is worktree merge-back plus fan-out integration branch work in FG-352/FG-353, with FG-357 still needed for post-merge validation.
+- Private worker commit / Refinery publication split: workers may checkpoint and transport work through private branches; the deterministic integration authority gates and lands the candidate. Forge tracks the corrected split in FG-345, with FG-559 for read-only Git and FG-621 for mutator-private writable Git.
+- Refinery / merge queue: ordered integration of isolated work before landing. Forge's current equivalent is the serialized integration publisher plus worktree merge-back and fan-out integration work in FG-352/FG-353, with FG-357 still needed for post-merge validation. This is controller machinery, not a reason to add a permanent LLM agent.
 - Convoy / attention object: a human-facing rollup for grouped work. Forge equivalents should be Run Map groups and Campaign Runner, not a new GasTown-style noun.
 - Scheduler / backpressure context: separate dispatch/capacity state that does not mutate the underlying task contract. Unfiled.
 - Typed coordination message: durable messages such as task completed, review blocked, merge conflicted, route resolved, receipt recorded, escalation opened, and handoff created. Partially represented by events/gates today; general primitive unfiled.
@@ -369,6 +384,8 @@ For Forge, the winning path is: fewer nouns, stronger receipts, dashboard-first 
 
 - [GasTown repository](https://github.com/gastownhall/gastown)
 - [README](https://github.com/gastownhall/gastown/blob/main/README.md)
+- [Changelog](https://github.com/gastownhall/gastown/blob/main/CHANGELOG.md)
+- [Gas City: coming from GasTown](https://github.com/gastownhall/gascity/blob/main/docs/getting-started/coming-from-gastown.md)
 - [Overview](https://github.com/gastownhall/gastown/blob/main/docs/overview.md)
 - [Glossary](https://github.com/gastownhall/gastown/blob/main/docs/glossary.md)
 - [Architecture design](https://github.com/gastownhall/gastown/blob/main/docs/design/architecture.md)
