@@ -140,7 +140,29 @@ When workspace and project diverge — e.g. running an orchestrator in `~/code/a
 
 Forge IS its own project. You can run `forge init ~/code/forge` (or `cd ~/code/forge && forge init`) to install the orchestrator block into forge's own `CLAUDE.md`, then use `forge invoke engineer`, `forge new feature`, etc. to evolve forge through the same pipeline it provides to other projects. The forge repo uses the structured backlog format (tickets under `backlog/`, notes at `backlog/notes.md`); `forge backlog list --status active` works from `~/code/forge` like it does from any other project.
 
-Two caveats specific to the meta case:
+Three caveats specific to the meta case:
 
-1. **Don't edit forge source files from inside an agent container that has forge mounted at `/project`.** That works — but you're now changing the same binary that's running the run. If the agent edits `src/v2/spawn.ts` and the parent forge process re-spawns a child container mid-run, the source has moved underneath. Use the pipeline for forge changes, but expect to restart any in-flight orchestrator session afterward to pick up the new behavior.
-2. **The forge repo's `CLAUDE.md` (the one at the repo root, checked into git) is for sessions WORKING ON forge** — it doesn't contain the orchestrator block. If you want to be orchestrated when developing forge, run `forge init --project ~/code/forge`; the block will be appended after the existing content.
+1. **`forge review-loop` must be pointed at a clone, not at the forge checkout itself (FG-566).** `--project` defaults to cwd, so running the loop from `~/code/forge` targets the very tree the running forge is executing from — and the loop's local verification fallback prepares its workspace by running `npm ci`, which deletes `node_modules` before rebuilding it. That would take out the `better-sqlite3` binding this forge and every concurrent forge on the host are loaded from. Forge therefore refuses, before anything runs, with a classified `self_host_workspace` readiness refusal:
+
+   ```
+   review-loop: verification_environment_unavailable: review-loop could not establish an
+   execution-ready verification environment in /Users/you/code/forge (self_host_workspace). …
+
+   ✗ not closeable — stop reason: verification_environment_unavailable (self_host_workspace).
+   Forge could not establish an execution-ready verification environment in
+   /Users/you/code/forge, so NO verification ran: this is NOT a verdict on the reviewed code.
+   Rounds consumed: 0; the reviewer was NOT dispatched and the fixer was NOT dispatched.
+   ```
+
+   That refusal is **intended**, and it is not a verdict on the code — no reviewer or fixer was dispatched and no round was consumed. There is deliberately no override, and having `node_modules` already installed does not exempt the checkout. Run the loop against a clone outside the forge source root instead:
+
+   ```bash
+   git clone ~/code/forge ~/code/forge-review   # once
+   git -C ~/code/forge-review fetch origin      # then refresh before each loop run, so the
+                                                # clone carries the range under review
+   forge review-loop <ticket-id> --project ~/code/forge-review --max-rounds 2 --route <route>
+   ```
+
+   Only the loop's *local* verification arms are affected. When a green required CI check covers `HEAD`, the loop reuses that evidence and never attempts a local install at all — so the common path from the forge checkout is unchanged. See [Host verification readiness](concepts.md#host-verification-readiness) for the full contract and the rest of the refusal vocabulary.
+2. **Don't edit forge source files from inside an agent container that has forge mounted at `/project`.** That works — but you're now changing the same binary that's running the run. If the agent edits `src/v2/spawn.ts` and the parent forge process re-spawns a child container mid-run, the source has moved underneath. Use the pipeline for forge changes, but expect to restart any in-flight orchestrator session afterward to pick up the new behavior.
+3. **The forge repo's `CLAUDE.md` (the one at the repo root, checked into git) is for sessions WORKING ON forge** — it doesn't contain the orchestrator block. If you want to be orchestrated when developing forge, run `forge init --project ~/code/forge`; the block will be appended after the existing content.
