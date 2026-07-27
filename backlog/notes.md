@@ -1,30 +1,89 @@
-**Last session ended 2026-07-26.**
+**Last session ended 2026-07-27.**
 
-**Where we left off:** FG-356 shipped and CLOSED (`f88de02`, PR #163) with a full acceptance-evidence grid. The operator recorded the FG-345 decision — *mutating agents get private writable Git; Forge retains publication authority* — and FG-621 was reopened and rewritten implementation-ready as its child. FG-356 was landed first, deliberately serialized ahead of FG-621 rather than run concurrently. Last acts were two operator-caught ticket-text corrections (`581960c`). Nothing from FG-356 is outstanding.
+**Where we left off:** FG-621 merged (#164, `3b42035`) and FG-627 merged (#165, `8714232`). The first
+real end-to-end isolated dispatch forge has ever run was executed, and it exposed three separate
+defects in one afternoon — the substrate works, the verification paths around it had never been
+exercised. Stopped before implementing the expanded FG-566, at the operator's call.
 
 **Picked up next:**
-1. **FG-621** — the writable-Git half of FG-345's default-on gate, and the critical path. Already implementation-ready: private `--shared` clone at the recorded base SHA, predecessor-candidate base selection, safety capture of tracked AND untracked output, merge-back re-plumbing (`git fetch <clone> <branch>` replacing `merge --ff-only`), and correcting the stale contract at `worktree-lifecycle.ts:231-242`. **It already carries clone-ownership prior art — read it before designing anything; do not re-derive.** Needs the disposable-clone dispatch setup below.
-2. **FG-566** — review-loop fresh-clone verification readiness. Now carries a full live reproduction from this session (three distinct defects: no dep provisioning before round 1; an environment failure classified as `verification_failed` so a FIXER was dispatched against a phantom failure; findings with empty step output). Small, self-contained, and it directly de-frictions every future FG-621 loop.
-3. **FG-623** (~2% flake on the REQUIRED `test` check, 1ms knife-edge) and **FG-556** (last macOS-only worktree-tier failure). Both small, both remove noise from every future merge gate. FG-623 gained a second data point: `FG-536 detachedDockerExec` also flaked once in ~5 unit-tier runs this session — different test, same timing-flake class; fold in if it recurs.
 
-**Non-ticket thread:** FG-345 itself still owns three default-on blockers NOT delegated to either child — the post-merge integration gate (build+test the MERGED result), publication-contention serialization, and four surviving architecture questions (non-git projects, untracked/ignored carry-in contract, dirty host state, red review timing). FG-345 does not close when FG-621 lands.
+1. **FG-566** — implement the expanded scope. **Dispatch with isolation OFF (`--project
+   ~/code/forge-fg356`, no `FORGE_WORKTREES`).** This is a hard constraint, not a preference: FG-566
+   fixes the very thing that breaks isolated pipeline runs, so turning isolation on kills the
+   integration gate on the dependency-less candidate worktree before any work happens. Route
+   `implementation_full` (two consumers, a new declared contract, publication-path failure
+   classification). Worth asking the architect explicitly whether the expanded scope stays ONE
+   cohesive change — it grew substantially and may want splitting, better learned at the plan gate
+   than mid-build.
+2. **FG-627 — record AC 4's answer in the ticket and CLOSE it.** Every AC is met but the ticket is
+   still open. Evidence: the real dispatch started an agent container (run
+   `…-dogfood-693dbc`, task `task-architect-824e5d`, `container evidence: confirmed container exit …
+   exit code 0`) where it previously died at provisioner exit 125; the provisioner's project mount is
+   still `:ro` (`spawn.ts:1011` untouched); CI green on #165. AC 4 asked whether the linked-worktree
+   substrate fails identically — **it does**, measured directly (fresh worktree and fresh clone are
+   both empty of `node_modules`; `runNext.ts:3226` sets `repoRootForMount = args.worktreePath ??
+   args.projectDir`, so the read-only mount source is the isolated workspace on both). So FG-627 is a
+   pre-existing FG-376 defect, not an FG-621 regression. Needs the AC walk + Acceptance Evidence grid.
+3. **FG-621 AC 11** — the only open criterion. After FG-566 lands, re-run the dogfood WITH isolation
+   and verify from durable state: task workspace under `~/.forge/worktrees/clones/`, `tasks.base_sha`
+   recorded, the agent's commit on `forge/<runId>/<taskId>`, parent unchanged apart from the capture
+   fetch. Then the full AC walk and close.
 
 **External state to remember:**
-- **Forge-on-forge dispatch is REFUSED against the live checkout.** The FG-612 guard (`src/v2/self-host-guard.ts:99`) refuses when the project overlaps the executing forge's source root and worktree isolation is off. The supported path used all session: dispatch with `--project` pointed at a **disposable clone**. `~/code/forge-fg356` still exists (branch merged, `node_modules` installed) — reusable as the FG-621 clone after a `git fetch && git reset --hard origin/main`, or make a fresh one.
-- **Run `npm ci` in the clone BEFORE any review-loop.** Agents get deps from the container scratch and never need the host clone's `node_modules`, but review-loop verifies on the HOST — a missing install presents as bare `typecheck=FAIL, test=FAIL` with no output and burns a fixer round. This cost two loops.
-- **Re-point the clone's `origin` to `git@github.com:stevebargelt/forge.git`** before pushing. A clone's default origin is the local checkout path, and the FG-514 trust check requires the reviewed tip to EQUAL the fetched remote head.
-- **Push backlog commits to `main` before cutting a branch from them.** Local `main` had four unpushed backlog commits; the PR branch was cut from the first, so the squash absorbed part of that content and `main` diverged. Recovered by stashing WIP, `reset --hard origin/main`, restoring the four-file backlog delta, committing.
-- **The operator has uncommitted WIP at `docs/research/competitive/` (3 files) — these are THEIRS and coherent. Do not commit, revert, stash, or fence agents near them.** They survived this session untouched; keep it that way.
-- **`forge-dev` is NOT on PATH** despite the `package.json` bin declaration — use `./bin/forge-dev` from the checkout. CLAUDE.md's `forge-dev upgrade` instruction fails as written.
-- Backlog-only pushes to `main` print `Bypassed rule violations ... 2 of 2 required status checks are expected`. Expected under `enforce_admins: off`; not an error.
+
+- **`forge launch run` does NOT propagate the caller's environment (FG-626).** Every `FORGE_*` gate is
+  silently inert under the launch pattern the orchestrator template mandates. Use
+  `forge launch run --name X -- env FORGE_WORKTREES=1 <cmd>`. Ambient profile env survives (the tmux
+  server inherited it), which is why auth always worked and masked this.
+- **FG-621's AC 2 live evidence was captured at `09fd810c` but is NOT in the ticket yet** — it lives
+  only in this session's scratchpad. Do not paste it as-is at close time: re-run
+  `./scripts/fg621-clone-boundary-smoke.sh` against the FINAL SHA, per the operator's rule that
+  acceptance evidence against a superseded SHA is worse than none.
+- The smoke script requires this repo's `node_modules` because it builds its fixture through forge's
+  own `createTaskClone`. That is deliberate — it previously injected `GIT_AUTHOR_*` and
+  `safe.directory` and would have reported SUCCESS while real dispatch failed.
+- **Live-checkout rules are now in `backlog/PLAN.md`** and are not optional: agent work and branch
+  setup happen only in `~/code/forge-fg356`; no destructive git command against `~/code/forge` inside
+  a compound chain.
+- WIP backup at `~/forge-wip-backup-20260727T093244/` (5 files). The operator has since committed and
+  pushed them (`1b6f13a`); the backup can be deleted once they are satisfied.
+- Two failed dogfood runs remain (`…-6c5400`, `…-dogfood-693dbc`), deliberately left as the record of
+  what FG-626 and FG-627 cost. Their `forge/run-fg-566-…/task-architect-*` anchor refs are still in
+  `~/code/forge` — harmless, but they accumulate.
 
 **Decisions worth not relitigating:**
-- **Submodules are NOT a reachable risk for the reaper — verified and fenced in FG-356's ticket text.** `createWorktree` runs plain `git worktree add` and NEVER `git submodule update --init`, and forge has no `.gitmodules`. Three consecutive review rounds drilled this vein (probe submodules → a regression → `submodule.<name>.ignore=all`) before the premise was checked. Resolved by one conservative rule: any checked-out submodule → RETAIN, never reap. **Do not add submodule probing back.** If forge ever starts initializing submodules in task worktrees, THAT change revisits this and carries its own ticket.
-- **Clone reaping is FG-621's, not FG-356's.** FG-356 classifies a private clone and retains it with reason `private_clone_substrate`. A contradictory AC line (written by the orchestrator) caused a fixer to implement full clone reaping inside FG-356; it was discarded and the AC corrected. Its good ideas were preserved on FG-621.
-- **`review-loop` is NOT a finding tracker — keep your own ledger.** The `show.ts` operator-surface finding was raised in two loops, then silently absent from the next while remaining completely unfixed (`git log` confirmed the file was never touched). Treating "not re-raised" as "resolved" would have shipped it.
-- **The stop test for review findings is REACHABILITY on forge's actual code path, not the reviewer's claimed severity.** Five findings passed that test and were fixed; the submodule vein failed it and was stopped.
-- **`--max-rounds` bounds reviewer→fixer CYCLES, not findings.** An earlier claim that a clean pass needs `rounds ≥ findings + 1` was wrong and was retracted — one fixer round addresses all of a round's findings.
-- **FG-625's root cause remains UNKNOWN — do not re-guess it.** This session added a second instance of the SYMPTOM on a different path (round-entry verifier, not post-fixer) — findings reading `deterministic verification step 'typecheck' failed:` with nothing after the colon. Logged on FG-566; it does not identify FG-625's cause.
+
+- **FG-566 was expanded IN PLACE** into the shared readiness contract for all Forge-owned host-side
+  verification, with two consumers (review-loop local fallback; FG-357/FG-425 integration-gate
+  verification against the exact publication candidate). Operator decision; explicitly **no separate
+  integration-gate ticket**.
+- **FG-627 stays separate** and owns container-side nested-volume mount mechanics. FG-566 owns
+  host-side readiness. Do not merge them.
+- **AC 2 / AC 11 are not operator-only work.** "Operator-run" came from *agent containers* having no
+  Docker daemon; it never applied to the orchestrator, which has Docker on this host and ran AC 2
+  itself. Do not hand these to the user as their step.
+- **No third required CI check for AC 2.** Standing argv-shape coverage plus one-time live evidence
+  from a fail-closed script (exit 0 pass / 1 failed assertion / 2 prerequisite, never a skip).
+- **Linux hard-fail is inherited**, so FG-621's evidence is macOS-only and cannot alone justify a
+  universal default-on flip. FG-345 closeout must choose macOS-first or lift the gate. Do not smuggle
+  Linux support into FG-621.
+- **Isolation was never "nearly ready" — only its substrate was.** Three verification-path defects fell
+  out of one real run. Carry this into FG-345's aggregate walk rather than assuming the remaining work
+  is small.
+- The recurring failure shape this session, worth naming at every gate: **silence read as success** —
+  a verification block behind a condition production never satisfied; fixtures supplying the identity
+  the product owed; a smoke script that could only fail at real scale; a parity test that proved a
+  plan, not a mount; and a CI-watch condition that read "no checks yet" as "all passed."
 
 **Shipped (for reference):**
-- **FG-356** — reconcileRun reaps orphaned task workspaces, but only against proof of capture (linked-worktree substrate + clean tree incl. ignored files + every branch/HEAD commit reachable from projectDir HEAD); anything unproven RETAINED with a durable `task.workspace_retained` event. Locked-worktree hardening (unlock then double-force). Two new timeline events. `docs/invariants.md` #17 added. Five reachable-path defects found and fixed by review across seven loops: ignored-file output silently destroyed; a stale `worktree_path` deleting an UNRELATED workspace; reaper ordering leaking a duplicate primary's tree; `!existsSync()` conflating "git succeeded" with "path gone" and stranding registrations (fixed at source across all five call sites); a transient branch-delete failure stranding a ref. `f88de02` (PR #163), closed `1eec7c4`, text corrected `581960c`.
+
+- **FG-621 (#164)** — private writable `git clone --shared` for mutating agents at a recorded base
+  SHA; objects-only `:ro` parent mount (parent refs/index/HEAD/packed-refs ABSENT, not merely
+  unwritable); mandatory derive-then-verify alternates identity check; six-step capture ordering with
+  `worktreePath` omitted for clone sources so post-fetch mutation is structurally impossible; clone
+  reaping extended in the existing reaper; `tasks.base_sha`; agent commits as
+  `forge-agent <agent@forge.local>`. Ticket REMAINS OPEN on AC 11.
+- **FG-627 (#165)** — dependency mountpoints created at workspace creation for both substrates, derived
+  from `planDependencyVolumes` so they cannot drift from what gets mounted. Ticket open pending closeout.
+- **FG-626** — filed: `forge launch run` drops caller env.
+- **FG-566** — expanded and retitled to the shared host-side verification readiness contract.
