@@ -28,19 +28,26 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const SCRIPT = join(REPO_ROOT, "scripts", "fg621-clone-boundary-smoke.sh");
 const SCRIPT_SRC = readFileSync(SCRIPT, "utf8");
 
+// Where the node running THIS test lives. The script builds its fixture through
+// forge's own createTaskClone, so it needs a node — and on a GitHub runner node
+// is in the tool cache (/opt/hostedtoolcache/node/<ver>/x64/bin), which is on no
+// standard tool dir. Deriving it from process.execPath rather than naming a
+// directory is what makes the fixture work on a runner and a container alike.
+const NODE_BIN_DIR = dirname(process.execPath);
+
 // The standard tool dirs, carrying the git/mktemp/coreutils the script needs but
 // NOT the operator's macOS docker (which lives in /usr/local/bin or ~/.docker/bin).
 // It is NOT docker-free in general — a Linux CI runner installs docker to
 // /usr/bin/docker — so it is only ever safe for the cases that shadow docker with
 // stubDockerPath. The genuine-absence case below uses EMPTY_PATH instead.
-const TOOLS_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
+const TOOLS_PATH = `/usr/bin:/bin:/usr/sbin:/sbin:${NODE_BIN_DIR}`;
 
 // A PATH nothing at all is on, so `command -v docker` cannot find a docker on ANY
 // host. Usable only because the docker check is the script's FIRST prerequisite
