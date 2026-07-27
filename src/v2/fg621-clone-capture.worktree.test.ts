@@ -44,7 +44,7 @@ import { CLONES_DIR } from "../util/paths.js";
 import { startRun } from "./startRun.js";
 import { runNext, type DockerExecFn } from "./runNext.js";
 import type { Workflow } from "./schema.js";
-import { captureTaskClone, createTaskClone, worktreeBranchName } from "./worktree-lifecycle.js";
+import { AGENT_IDENTITY, captureTaskClone, createTaskClone, worktreeBranchName } from "./worktree-lifecycle.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
 const RUNTIME = "fg621-capture-test";
@@ -57,6 +57,23 @@ const SINGLE: Workflow = {
   inputs: [],
   steps: [
     { id: "build", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: RUNTIME, reds: [] },
+  ],
+};
+
+const SINGLE_WITH_RED: Workflow = {
+  name: "fg621-capture-single-red",
+  description: "FG-621: one mutating step reviewed by an authoritative red",
+  inputs: [],
+  steps: [
+    {
+      id: "build",
+      agent: "engineer",
+      gate: "auto",
+      manual: false,
+      depends_on: [],
+      runtime: RUNTIME,
+      reds: [{ agent: "red-narrow", authority: "authoritative", gate_on_verdict: true }],
+    },
   ],
 };
 
@@ -148,6 +165,20 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 }
 
+/** Git the way the AGENT's container runs it: no identity in the environment, no
+ *  global file, no system file — the state a real `docker run` of the agent image
+ *  actually has. Every stub-exec "agent" below commits through this, so a commit
+ *  that succeeds proves the PRODUCT supplied the identity. A stub that passes its
+ *  own `-c user.email=…` proves only that the stub can commit, which is precisely
+ *  how AC 1 stayed green here while failing on the real dispatch path. */
+function agentGit(cwd: string, ...args: string[]): string {
+  const env: NodeJS.ProcessEnv = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" };
+  for (const k of ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL", "GIT_CONFIG_COUNT"]) {
+    delete env[k];
+  }
+  return execFileSync("git", args, { cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+}
+
 function makeRepo(): string {
   const dir = tmpRoot("repo");
   git(dir, "init", "-q", "-b", "main");
@@ -234,11 +265,11 @@ test("fg621 (AC 5): capture fetches the agent's OWN commits into the parent unde
   // The agent commits freely in its own repository — twice, so this proves a
   // whole commit SET travels, not just a tip.
   writeFileSync(join(clone.clonePath, "first.ts"), "export const a = 1;\n");
-  git(clone.clonePath, "add", ".");
-  git(clone.clonePath, "-c", "user.email=a@b.c", "-c", "user.name=Agent", "commit", "-q", "-m", "agent commit 1");
+  agentGit(clone.clonePath, "add", ".");
+  agentGit(clone.clonePath, "commit", "-q", "-m", "agent commit 1");
   writeFileSync(join(clone.clonePath, "second.ts"), "export const b = 2;\n");
-  git(clone.clonePath, "add", ".");
-  git(clone.clonePath, "-c", "user.email=a@b.c", "-c", "user.name=Agent", "commit", "-q", "-m", "agent commit 2");
+  agentGit(clone.clonePath, "add", ".");
+  agentGit(clone.clonePath, "commit", "-q", "-m", "agent commit 2");
   const tip = git(clone.clonePath, "rev-parse", branch).trim();
 
   // Before capture, the parent still sits on the anchor at the base.
@@ -317,8 +348,8 @@ test("fg621 (AC 3, end to end): both halves of an agent's output reach the publi
     writeFileSync(stderrPath, "");
     // Agent commits one file itself (private commit authority) …
     writeFileSync(join(ws, "committed-by-agent.ts"), "export const own = true;\n");
-    git(ws, "add", ".");
-    git(ws, "-c", "user.email=a@b.c", "-c", "user.name=Agent", "commit", "-q", "-m", "agent's own commit");
+    agentGit(ws, "add", ".");
+    agentGit(ws, "commit", "-q", "-m", "agent's own commit");
     // … and leaves a tracked edit plus an untracked file behind at exit.
     writeFileSync(join(ws, "tracked.ts"), "export const version = 99;\n");
     writeFileSync(join(ws, "left-untracked.ts"), "export const dirty = true;\n");
@@ -336,6 +367,144 @@ test("fg621 (AC 3, end to end): both halves of an agent's output reach the publi
   assert.ok(existsSync(join(repo, "committed-by-agent.ts")), "the agent's own commit was retrieved");
   assert.ok(existsSync(join(repo, "left-untracked.ts")), "and the untracked half the safety commit captured");
   assert.equal(readFileSync(join(repo, "tracked.ts"), "utf8"), "export const version = 99;\n", "and the tracked edit");
+});
+
+// ── AC 1 through the REAL dispatch path: private COMMIT AUTHORITY ─────────────
+//
+// "The agent may commit freely there" is the ticket's premise, and it is the one
+// property a fixture can fake into permanent green: a stub that passes its own
+// `-c user.email=…` proves the stub can commit. These commit through agentGit —
+// no identity in the env, no global file, no system file — which is the state a
+// real agent container is actually in. A clone inherits no local config, so
+// before the identity was written at creation this section failed with
+// "Author identity unknown" while every other FG-621 test stayed green.
+
+test("fg621 (AC 1, end to end): two concurrent mutating agents commit in their private clones with NO ambient git identity, and both sets reach the host", async () => {
+  armWorktreeMode();
+  const repo = makeRepo();
+  const { runId } = startRun({ workflow: FANOUT, title: "fg621 ac1 commit authority", inputs: {}, projectDir: repo });
+
+  const commitErrors: string[] = [];
+  const agentCommits = new Map<string, string>();
+  const stubExec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+    const taskId = taskIdOf(args);
+    writeFileSync(stderrPath, "");
+    if (taskId.startsWith("task-source")) {
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, items: ["alpha", "beta"] });
+      return 0;
+    }
+    const ws = projectMountHost(args)!;
+    writeFileSync(join(ws, `${taskId}.ts`), `export const child = "${taskId}";\n`);
+    try {
+      agentGit(ws, "add", "-A");
+      agentGit(ws, "commit", "-q", "-m", `agent checkpoint ${taskId}`);
+      agentCommits.set(taskId, agentGit(ws, "rev-parse", "HEAD").trim());
+    } catch (e) {
+      const detail = (e as { stderr?: Buffer }).stderr?.toString() ?? (e as Error).message;
+      commitErrors.push(`${taskId}: ${detail.trim()}`);
+    }
+    writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, files_modified: [`${taskId}.ts`] });
+    return 0;
+  };
+
+  await runNext({ runId, workflow: FANOUT, dockerExec: stubExec });
+  const wave = await runNext({ runId, workflow: FANOUT, dockerExec: stubExec });
+
+  assert.deepEqual(
+    commitErrors,
+    [],
+    "a mutating agent must be able to run a BARE `git commit` in its private clone — nothing in a real container supplies an identity",
+  );
+  assert.deepEqual(wave.completedSteps, ["build"], "the fan-out step must complete");
+  assert.equal(agentCommits.size, 2, "both concurrent agents committed");
+
+  const children = tasksForRun(runId).filter((t) => t.phase === "build" && t.parentId !== undefined);
+  for (const child of children) {
+    const sha = agentCommits.get(child.id);
+    assert.ok(sha, `agent ${child.id} recorded a commit`);
+    // Retrievable by the host: the parent repository can reach the very object
+    // the agent made in its own repository, on the task's deterministic ref.
+    git(repo, "cat-file", "-e", `${sha}^{commit}`);
+    assert.equal(
+      git(repo, "log", "-1", "--format=%an <%ae>", sha!).trim(),
+      `${AGENT_IDENTITY.name} <${AGENT_IDENTITY.email}>`,
+      "and it is attributable as an AGENT commit",
+    );
+    assert.ok(existsSync(join(repo, `${child.id}.ts`)), "and its content landed in the host tree");
+  }
+});
+
+test("fg621 (AC 1): Forge's own safety commit still carries its OWN identity, distinct from the agent's", async () => {
+  armWorktreeMode();
+  const repo = makeRepo();
+  const { runId } = startRun({ workflow: SINGLE, title: "fg621 safety identity", inputs: {}, projectDir: repo });
+
+  const stubExec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+    const ws = projectMountHost(args)!;
+    writeFileSync(stderrPath, "");
+    writeFileSync(join(ws, "agent-committed.ts"), "export const own = true;\n");
+    agentGit(ws, "add", "-A");
+    agentGit(ws, "commit", "-q", "-m", "agent checkpoint");
+    // Left behind at exit → Forge safety-commits it on top of the agent's own.
+    writeFileSync(join(ws, "left-behind.ts"), "export const dirty = true;\n");
+    writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
+    return 0;
+  };
+
+  const wave = await runNext({ runId, workflow: SINGLE, dockerExec: stubExec });
+  assert.deepEqual(wave.completedSteps, ["build"], "the step must complete");
+
+  const primary = tasksForRun(runId).find((t) => t.phase === "build" && t.parentId === undefined)!;
+  const authors = git(repo, "log", "--format=%an <%ae>", `${primary.baseSha}..HEAD`).trim().split("\n");
+
+  assert.deepEqual(
+    authors,
+    ["forge <forge@local>", `${AGENT_IDENTITY.name} <${AGENT_IDENTITY.email}>`],
+    "the safety commit is Forge's authoritative record and the checkpoint under it is the agent's — one identity for both " +
+      "would hide a dropped `-c` on the safety commit and make an untrusted checkpoint indistinguishable from Forge's own work",
+  );
+});
+
+test("fg621: the RED / non-mutating path is untouched — no clone, and no agent identity anywhere it can see", async () => {
+  armWorktreeMode();
+  const repo = makeRepo();
+  const { runId } = startRun({ workflow: SINGLE_WITH_RED, title: "fg621 red unaffected", inputs: {}, projectDir: repo });
+
+  // Read INSIDE the stub: a red's candidate workspace is disposed of when the run
+  // completes, so anything asserted about it afterwards is asserted about nothing.
+  const redMounts: { path: string; localIdentity: string }[] = [];
+  const stubExec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+    const taskId = taskIdOf(args);
+    const ws = projectMountHost(args)!;
+    writeFileSync(stderrPath, "");
+    if (taskId.startsWith("task-red-")) {
+      redMounts.push({
+        path: ws,
+        localIdentity: execFileSync("git", ["config", "--local", "--get", "user.name"], {
+          cwd: ws,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+        }).trim(),
+      });
+      writeTaskResult(stdoutPath, { status: "complete", verdict: "pass", confidence: "high", findings: [] });
+      return 0;
+    }
+    writeFileSync(join(ws, "work.ts"), "export const work = true;\n");
+    agentGit(ws, "add", "-A");
+    agentGit(ws, "commit", "-q", "-m", "agent checkpoint");
+    writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, files_modified: ["work.ts"] });
+    return 0;
+  };
+
+  await runNext({ runId, workflow: SINGLE_WITH_RED, dockerExec: stubExec });
+
+  assert.equal(redMounts.length, 1, "the red ran");
+  const red = redMounts[0]!;
+  assert.equal(red.path.startsWith(CLONES_DIR), false, "a red is dispatched against the publisher's candidate, never a private clone");
+  assert.notEqual(red.localIdentity, AGENT_IDENTITY.name, "the agent identity is written to the mutating clone ONLY");
+
+  const redTask = tasksForRun(runId).find((t) => t.id.startsWith("task-red-"))!;
+  assert.equal(redTask.worktreePath ?? null, null, "and it is provisioned no workspace of its own");
 });
 
 // ── AC 4: base selection, asserted on the RECORDED row ────────────────────────

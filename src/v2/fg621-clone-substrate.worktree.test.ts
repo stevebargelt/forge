@@ -25,7 +25,9 @@ import { insertRun } from "../store/runs.js";
 import { insertTask, getTask, setTaskWorkspace } from "../store/tasks.js";
 import { cloneDir, WORKTREES_DIR } from "../util/paths.js";
 import {
+  AGENT_IDENTITY,
   createTaskClone,
+  createWorktree,
   cleanupFailedCloneSetup,
   classifyWorkspace,
   worktreeBranchName,
@@ -68,11 +70,26 @@ function makeRepo(): { dir: string; first: string; head: string } {
   return { dir, first, head: git(dir, "rev-parse", "HEAD").trim() };
 }
 
+/** Git the way the AGENT's container runs it: no identity in the environment, no
+ *  global file, no system file. This is what makes every "the agent commits"
+ *  assertion below a proof of the PRODUCT — a fixture that passes its own
+ *  `-c user.email=…` proves only that the fixture can commit, which is exactly
+ *  how AC 1 stayed green in test while failing on the real dispatch path.
+ *  (src/test-setup.ts neutralizes the operator's global config for the whole
+ *  suite; this restates it at the call site and closes the system file too.) */
+function agentGit(cwd: string, ...args: string[]): string {
+  const env: NodeJS.ProcessEnv = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" };
+  for (const k of ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL", "GIT_CONFIG_COUNT"]) {
+    delete env[k];
+  }
+  return execFileSync("git", args, { cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+}
+
 function agentCommit(clonePath: string, file: string, body: string): string {
   writeFileSync(join(clonePath, file), body);
-  git(clonePath, "add", ".");
-  git(clonePath, "-c", "user.email=a@b.c", "-c", "user.name=Agent", "commit", "-q", "-m", `agent output ${file}`);
-  return git(clonePath, "rev-parse", "HEAD").trim();
+  agentGit(clonePath, "add", ".");
+  agentGit(clonePath, "commit", "-q", "-m", `agent output ${file}`);
+  return agentGit(clonePath, "rev-parse", "HEAD").trim();
 }
 
 beforeEach(() => {
@@ -213,6 +230,56 @@ test("fg621 (AC 1): two clones of one parent commit independently — neither se
     git(repo.dir, "rev-parse", worktreeBranchName(RUN_ID, "t-a")).trim(),
     repo.head,
     "and the parent's anchor ref still sits at the base until capture fetches the tip",
+  );
+});
+
+// ── AC 1's precondition: the identity a clone does NOT inherit ────────────────
+
+test("fg621 (AC 1): a fresh clone carries the AGENT identity in its own local config — the thing a clone inherits none of", () => {
+  const repo = makeRepo();
+  const created = createTaskClone(repo.dir, RUN_ID, "t-identity", repo.head);
+
+  assert.equal(agentGit(created.clonePath, "config", "--local", "user.name").trim(), AGENT_IDENTITY.name);
+  assert.equal(agentGit(created.clonePath, "config", "--local", "user.email").trim(), AGENT_IDENTITY.email);
+
+  // The source repo's local identity is NOT what arrived: `git clone` inherits no
+  // local config, which is the whole reason this has to be written.
+  assert.equal(git(repo.dir, "config", "--local", "user.email").trim(), "test@forge.test");
+  assert.notEqual(agentGit(created.clonePath, "config", "--local", "user.email").trim(), "test@forge.test");
+
+  // And it is not Forge's: an untrusted checkpoint must stay tellable apart from
+  // the safety commit that is Forge's own authoritative record.
+  assert.notEqual(AGENT_IDENTITY.name, "forge");
+  assert.notEqual(AGENT_IDENTITY.email, "forge@local");
+});
+
+test("fg621 (AC 1): the agent's commit is ATTRIBUTED to that identity, with nothing ambient to borrow one from", () => {
+  const repo = makeRepo();
+  const created = createTaskClone(repo.dir, RUN_ID, "t-attrib", repo.head);
+  const sha = agentCommit(created.clonePath, "work.ts", "export const work = true;\n");
+
+  assert.equal(
+    agentGit(created.clonePath, "log", "-1", "--format=%an <%ae>", sha).trim(),
+    `${AGENT_IDENTITY.name} <${AGENT_IDENTITY.email}>`,
+  );
+  assert.equal(agentGit(created.clonePath, "log", "-1", "--format=%cn <%ce>", sha).trim(), `${AGENT_IDENTITY.name} <${AGENT_IDENTITY.email}>`);
+});
+
+test("fg621: the NON-MUTATING linked-worktree substrate is untouched — it shares the parent's config and forge writes it none", () => {
+  const repo = makeRepo();
+  const wt = createWorktree(repo.dir, RUN_ID, "t-red");
+
+  // A worktree has no local config of its own to write, and FG-621 wrote none:
+  // it resolves the parent's, exactly as it did before this ticket.
+  assert.equal(agentGit(wt.worktreePath, "config", "user.email").trim(), "test@forge.test");
+  assert.equal(
+    execFileSync("git", ["config", "--local", "--get-all", "user.email"], {
+      cwd: repo.dir,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim(),
+    "test@forge.test",
+    "and the parent's own config gained no forge-agent entry",
   );
 });
 

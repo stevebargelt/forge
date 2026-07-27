@@ -249,6 +249,27 @@ export function createWorktree(
  *  A clone inherits no user config, so the safety commit MUST carry one. */
 const FORGE_IDENTITY = ["-c", "user.name=forge", "-c", "user.email=forge@local"];
 
+/** The identity a MUTATING AGENT's own commits carry inside its private clone.
+ *
+ *  "The agent may commit freely there" is not a property of the substrate — it is
+ *  a property something has to SUPPLY. A linked worktree shared the source repo's
+ *  LOCAL config, so an agent silently borrowed whatever identity the operator's
+ *  checkout carried. A clone inherits none of it, the agent image sets none, and
+ *  the container has no global file: on this substrate a bare `git commit` dies
+ *  with "Author identity unknown" before it writes anything. The substrate that
+ *  took the identity away hands it back, written LOCAL into the clone at creation
+ *  — not exported at container spawn — so it holds for every reader of that
+ *  workspace (the container, the host, a later `forge show`) rather than only
+ *  inside one container's env.
+ *
+ *  DELIBERATELY NOT FORGE_IDENTITY. Agent commits are untrusted checkpoints Forge
+ *  may squash; the safety commit is Forge's own authoritative record of what the
+ *  agent left behind. One identity for both would make them indistinguishable in
+ *  the captured history AND would let a dropped `-c` on the safety commit pass
+ *  unnoticed. `-c` outranks local config, so the safety commit still overrides
+ *  this and still has to carry its own. */
+export const AGENT_IDENTITY = { name: "forge-agent", email: "agent@forge.local" } as const;
+
 /** The create-only refusal, NAMED so the caller can tell it apart from every
  *  other setup failure. It must never be followed by cleanup: the directory it
  *  names is one an agent may already have written to, and deleting it would
@@ -331,6 +352,15 @@ export function createTaskClone(
   execFileSync("git", ["clone", "--quiet", "--shared", "--no-checkout", projectDir, clonePath], {
     stdio: ["ignore", "ignore", "pipe"],
   });
+  // AC 1's precondition, written before the agent can reach the workspace: a
+  // clone inherits no local config, so without this the agent's first commit
+  // fails on identity alone. See AGENT_IDENTITY.
+  for (const [key, value] of [["user.name", AGENT_IDENTITY.name], ["user.email", AGENT_IDENTITY.email]] as const) {
+    execFileSync("git", ["config", "--local", key, value], {
+      cwd: clonePath,
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+  }
   execFileSync("git", ["checkout", "--quiet", "-b", branch, baseSha], {
     cwd: clonePath,
     stdio: ["ignore", "ignore", "pipe"],

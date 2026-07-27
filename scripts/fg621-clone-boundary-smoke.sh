@@ -15,7 +15,11 @@
 # it and do not make it a required check — that decision is recorded in FG-621.
 #
 # REQUIRES A WORKING DOCKER DAEMON and the agent image on the machine that runs
-# it. Run it on the macOS host, never inside an agent container.
+# it. Run it on the macOS host, never inside an agent container. It also requires
+# this repo's node_modules, because the fixture clone is built by forge's OWN
+# createTaskClone rather than by a hand-rolled `git clone --shared` — see the
+# fixture section for why that distinction is the difference between evidence and
+# theatre.
 #
 # FAILS CLOSED IS THE WHOLE POINT. Every missing prerequisite — no docker
 # binary, no reachable daemon, no image, no git, an unusable project dir —
@@ -132,26 +136,73 @@ RUN_ID="${FORGE_SMOKE_RUN_ID:-fg621-smoke-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 TASK_ID="${FORGE_SMOKE_TASK_ID:-task-clone-boundary}"
 BRANCH="forge/$RUN_ID/$TASK_ID"
 
-# ── Fixture: the private writable clone ──────────────────────────────────────
+# ── Fixture: the private writable clone, BUILT BY THE PRODUCT ────────────────
+#
+# createTaskClone, not a hand-rolled `git clone --shared`. The workspace an agent
+# is handed is not just a clone: it is a clone plus everything forge writes into
+# it at creation, and the identity a mutating agent commits under is part of that
+# (worktree-lifecycle.ts, AGENT_IDENTITY — a clone inherits no local config, the
+# agent image sets none, and the container has no global file). A fixture that
+# built the clone itself and then handed the container GIT_AUTHOR_*/GIT_COMMITTER_*
+# would report AC 11 SUCCESS while real dispatch failed with "Author identity
+# unknown" — the evidence papering over the exact gap it exists to prove. So this
+# script supplies the container NOTHING the real dispatch path does not: no
+# identity env, no git config of any kind. If the p5 commit probe fails on
+# identity, the product is broken and that is the finding.
+#
+# FORGE_HOME is redirected into the throwaway work dir, so the product's own
+# path layout (WORKTREES_DIR/clones/...) lands there and never in the operator's
+# real ~/.forge.
 
 WORK="$(mktemp -d "${FORGE_SMOKE_WORKDIR:-${TMPDIR:-/tmp}}/fg621-smoke.XXXXXX")" \
   || fatal "cannot create a work dir."
-CLONE="$WORK/clone"
 CLOG="$WORK/container.log"
 FETCHED_REF=""
+ANCHOR_REF=""
 
 cleanup() {
-  if [ -n "$FETCHED_REF" ]; then
-    git -C "$PROJECT_DIR" update-ref -d "$FETCHED_REF" >/dev/null 2>&1 || true
-  fi
+  # One deletion covers both: capture fetches onto the SAME ref createTaskClone
+  # anchored, so a successful run leaves one ref, not two.
+  for ref in "$FETCHED_REF" "$ANCHOR_REF"; do
+    [ -n "$ref" ] || continue
+    git -C "$PROJECT_DIR" update-ref -d "$ref" >/dev/null 2>&1 || true
+  done
   rm -rf "$WORK" || true
 }
 trap cleanup EXIT
 
-git clone --quiet --shared "$PROJECT_DIR" "$CLONE" \
-  || fatal "'git clone --shared $PROJECT_DIR' failed."
-git -C "$CLONE" checkout --quiet -B "$BRANCH" "$BASE_SHA" \
-  || fatal "cannot check out $BASE_SHA on $BRANCH in the clone."
+REPO_ROOT="$(cd "$HERE/.." && pwd -P)"
+[ -d "$REPO_ROOT/node_modules/tsx" ] \
+  || fatal "$REPO_ROOT/node_modules/tsx is absent — the fixture is built by forge's OWN createTaskClone; run 'npm install' in $REPO_ROOT."
+
+CLONE="$(
+  cd "$REPO_ROOT" \
+    && FORGE_HOME="$WORK/forge-home" \
+       FG621_PROJECT_DIR="$PROJECT_DIR" FG621_RUN_ID="$RUN_ID" FG621_TASK_ID="$TASK_ID" FG621_BASE_SHA="$BASE_SHA" \
+       node --import tsx --input-type=module -e '
+         const { createTaskClone } = await import("./src/v2/worktree-lifecycle.js");
+         const r = createTaskClone(
+           process.env.FG621_PROJECT_DIR,
+           process.env.FG621_RUN_ID,
+           process.env.FG621_TASK_ID,
+           process.env.FG621_BASE_SHA,
+         );
+         process.stdout.write(r.clonePath);
+       '
+)" || fatal "forge's createTaskClone failed to provision the fixture clone."
+[ -d "$CLONE" ] || fatal "createTaskClone reported '$CLONE', which is not a directory."
+ANCHOR_REF="refs/heads/$BRANCH"
+
+[ "$(git -C "$CLONE" rev-parse --abbrev-ref HEAD)" = "$BRANCH" ] \
+  || fatal "the product's clone is not on $BRANCH — the branch name this script derives no longer matches worktreeBranchName."
+
+# The identity the PRODUCT wrote into the clone, read back off disk rather than
+# restated here — this is the value the container's commit must turn out to carry.
+# Empty means the clone was handed no identity, which is AC 1 broken before a
+# container has even started: `git commit` in there cannot resolve an author.
+AGENT_IDENTITY="$(git -C "$CLONE" config --local --get user.name) <$(git -C "$CLONE" config --local --get user.email)>"
+[ "$AGENT_IDENTITY" != " <>" ] \
+  || fatal "the product's clone carries no local git identity — a mutating agent cannot commit in it (FG-621 AC 1)."
 
 ALTERNATES="$CLONE/.git/objects/info/alternates"
 [ -f "$ALTERNATES" ] \
@@ -225,8 +276,12 @@ probe n10_parent_head_write "printf 'fg621 intruder\n' >> '$FG621_PARENT_GIT_DIR
 probe n11_push_to_parent_target "git -C /project push origin HEAD:refs/heads/fg621-smoke-push"
 
 # ---- AC 11: the agent commits in its own repository ------------------------
+# A BARE `git commit` — no `-c user.name=…`, and nothing in this container's env
+# supplies one. It resolves an author only because forge wrote one into the clone
+# at creation, which is the property p7 then reads back.
 probe p5_agent_commit "cd /project && printf 'fg621 agent output for %s\n' \"\$FG621_RUN_ID\" > fg621-agent-output.txt && git add -A && git commit -q -m 'fg621: agent commit inside the private clone' && git rev-parse HEAD"
 probe p6_clone_branch_tip "git -C /project rev-parse 'refs/heads/$FG621_BRANCH'"
+probe p7_agent_commit_identity "git -C /project log -1 --format='%an <%ae>' 'refs/heads/$FG621_BRANCH'"
 
 echo "CONTAINER_DONE"
 CEOF
@@ -242,16 +297,19 @@ DOCKER_ARGS=(
   -e "FG621_PARENT_OBJECTS=$PARENT_OBJECTS"
   -e "FG621_PARENT_OBJECT_FILE=$PARENT_OBJECT_FILE"
   -e "FG621_PACKED_REF=$PACKED_REF"
-  -e "GIT_AUTHOR_NAME=forge-fg621-smoke"
-  -e "GIT_AUTHOR_EMAIL=forge@localhost"
-  -e "GIT_COMMITTER_NAME=forge-fg621-smoke"
-  -e "GIT_COMMITTER_EMAIL=forge@localhost"
-  # Bind-mount ownership differs from the container's uid on Docker Desktop;
-  # without this git refuses the workspace as "dubious ownership" and every
-  # probe fails for a reason that has nothing to do with the boundary.
-  -e "GIT_CONFIG_COUNT=1"
-  -e "GIT_CONFIG_KEY_0=safe.directory"
-  -e "GIT_CONFIG_VALUE_0=*"
+  # NOTHING GIT-RELATED IS PASSED IN, deliberately. Earlier revisions exported
+  # GIT_AUTHOR_*/GIT_COMMITTER_* (an identity) and GIT_CONFIG_COUNT
+  # safe.directory=* (a config the dispatch path does not set either). Both made
+  # this script supply on the product's behalf: p5 would report the agent
+  # committing successfully while a real mutating dispatch died with "Author
+  # identity unknown". The container gets exactly the env real dispatch gives it,
+  # so every probe below measures the product. FORGE_NO_BROWSER and the FG621_*
+  # probe parameters are the only additions, and neither touches git.
+  #
+  # If git ever refuses /project here as "dubious ownership", that is a REAL
+  # finding, not a fixture problem: real dispatch mounts a host-owned workspace
+  # the same way and would be refused identically — loudly, by the entrypoint's
+  # FG-559 probe (exit 122), which this script already reports on.
   # THE MOUNT SHAPE UNDER TEST. The workspace rw at /project, and the parent's
   # OBJECT STORE ALONE, identity-mounted read-only. The parent's refs, index,
   # HEAD and packed-refs are ABSENT from the container, not merely read-only —
@@ -365,6 +423,9 @@ expect_success p3_parent_object_readable "AC11: a parent object resolves through
 expect_success p4_private_branch_checked_out "AC11: the deterministic private branch is checked out" "$BRANCH"
 expect_success p5_agent_commit "AC11: the agent commits inside its private clone"
 expect_success p6_clone_branch_tip "AC11: the private branch holds the agent's commit"
+expect_success p7_agent_commit_identity \
+  "AC11: the commit carries the identity the PRODUCT put in the clone ($AGENT_IDENTITY), not one this script supplied" \
+  "$AGENT_IDENTITY"
 
 # AC 2 negatives.
 expect_refused n1_parent_ref_create "AC2: creating a ref in the PARENT repo"
@@ -435,7 +496,8 @@ echo "project dir : $PROJECT_DIR"
 echo "base sha    : $BASE_SHA"
 echo "parent .git : $PARENT_GIT_DIR   (NOT mounted)"
 echo "parent objs : $PARENT_OBJECTS   (identity-mounted :ro)"
-echo "clone       : $CLONE            (mounted rw at /project)"
+echo "clone       : $CLONE            (built by forge's createTaskClone, mounted rw at /project)"
+echo "agent ident : $AGENT_IDENTITY   (written into the clone BY THE PRODUCT; no git env passed to the container)"
 echo "packed ref  : $PACKED_REF"
 echo "docker rc   : $CONTAINER_RC"
 echo

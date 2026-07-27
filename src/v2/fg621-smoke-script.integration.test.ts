@@ -337,6 +337,27 @@ test("FG-621 smoke body covers all five AC-2 negative writes", () => {
   }
 });
 
+test("FG-621 smoke supplies the container NOTHING git-related — the evidence must measure the product, not itself", () => {
+  // The defect this guards: an earlier revision exported GIT_AUTHOR_*/
+  // GIT_COMMITTER_* into the container, so the AC 11 commit probe reported
+  // SUCCESS while a real mutating dispatch died with "Author identity unknown".
+  // An evidence script that supplies what it is meant to be proving is worse
+  // than no evidence, because it reads as a pass.
+  for (const forbidden of [
+    /-e "GIT_AUTHOR_/,
+    /-e "GIT_COMMITTER_/,
+    /-e "GIT_CONFIG_/,
+    /-e "EMAIL=/,
+  ]) {
+    assert.doesNotMatch(SCRIPT_SRC, forbidden, `the script must not hand the container ${forbidden.source}`);
+  }
+  // And the fixture must be the PRODUCT's workspace, not a hand-rolled clone —
+  // that is what makes the identity the container finds forge's own.
+  assert.match(SCRIPT_SRC, /createTaskClone/, "the fixture clone must be built by forge's own constructor");
+  assert.doesNotMatch(SCRIPT_SRC, /^git clone --quiet --shared/m, "no hand-rolled clone may stand in for it");
+  assert.match(SCRIPT_SRC, /expect_success p7_agent_commit_identity/, "and the commit's identity must be adjudicated");
+});
+
 test("FG-621 smoke body covers all four AC-11 positives", () => {
   const required: Array<[string, RegExp]> = [
     ["parent history readable in-container", /probe p1_parent_history_readable "git -C \/project log/],
