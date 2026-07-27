@@ -2,122 +2,143 @@
 id: FG-566
 type: story
 status: active
-title: "review-loop fresh-clone verification readiness: provision dependencies before round 1 and classify environment failures separately"
+title: "Shared readiness contract for Forge-owned host-side verification: prepare the review-loop clone AND the integration-gate publication candidate, and classify preparation failure separately"
 created: 2026-07-14
 ---
 
-## Problem
+**Scope EXPANDED 2026-07-27 by operator decision.** This was a review-loop-only ticket. It is now the
+**shared readiness contract for ALL Forge-owned host-side verification**, with two consumers. The
+expansion was forced by evidence, not preference: the FG-621 dogfood hit the identical defect on the
+integration-gate path (see *Live instance 2026-07-27* below), and two competing readiness mechanisms
+would drift.
 
-`forge review-loop` can be pointed at a clean standalone clone with valid Git history but no
-`node_modules` (correctly absent because dependencies are ignored by Git). When CI evidence is unavailable
-and the loop falls back to local verification, it runs the discovered `npm` scripts directly in that clone.
-Typecheck and test then fail before they can examine the implementation.
+## The one defect, on two paths
 
-This happened during FG-551 under the FG-561 campaign's required standalone-clone containment. The loop
-reported `verification_failed` twice and skipped the reviewer in both rounds. The orchestrator had to infer
-that the clone had never been installed, distinguish infrastructure failure from code failure, select the
-Node/ABI to install under, run the install, and restart the review.
+A Forge-owned verification runs in a freshly-created workspace that has no dependencies, and the
+resulting failure is reported as if the reviewed code were broken.
 
-That is control-plane setup work, not orchestration judgment.
+**Consumer 1 — review-loop local fallback**, against a standalone clone. When CI evidence is
+unavailable and the loop falls back to local verification, it runs the discovered npm scripts in a
+clone whose `node_modules` is correctly absent (gitignored). Typecheck and test fail before they can
+examine the implementation; `src/v2/review-loop.ts` converts every failed verification into fixer
+findings, so the reviewer is short-circuited and a review round is consumed.
 
-Two existing contracts stop at either side of this seam:
-
-- FG-376 provisions lockfile-keyed dependency volumes for worktree-mounted agent and reviewer containers,
-  and already classifies a failed install as `verification_environment_unavailable`.
-- `forge-test` maintains a writable scratch, repairs missing or incompatible dependencies, and treats an
-  unrepairable scratch as infrastructure failure rather than red tests.
-
-The host-side review-loop fallback uses neither contract. In
-`src/cli/commands/review-loop.ts`, it calls `runVerification(..., { cwd: projectDir })` directly. In
-`src/v2/review-loop.ts`, every failed verification is converted into fixer findings; the reviewer is
-short-circuited and the failed attempt consumes a review round. A missing dependency graph is therefore
-misclassified as a defect in the reviewed change.
+**Consumer 2 — FG-357 / FG-425 integration-gate verification**, against the exact publication
+candidate worktree. The gate runs the project's verification on the HOST against the candidate built
+by `createCandidateWorktree`. That worktree has no `node_modules` either, so the gate dies with
+`ERR_MODULE_NOT_FOUND` and the phase is recorded `integration_failed` — a code verdict for an
+environment fault.
 
 ## Goal
 
-Before the first **local** verification attempt consumes a review round, Forge either establishes an
-execution-ready verification environment or stops once with a distinct, actionable environment outcome.
-The orchestrator never manually installs dependencies merely to make a Forge-owned review runnable.
+Before any Forge-owned host-side verification runs, Forge either establishes an execution-ready
+verification environment bound to that exact workspace, or stops once with a distinct, actionable
+environment/readiness outcome. The orchestrator never hand-installs dependencies to make a
+Forge-owned verification runnable.
 
-CI reuse remains first-class: a clean commit with sufficient trusted CI/host evidence does not need a local
-dependency installation just to begin review. Readiness is required immediately before a real local
-fallback, not unconditionally before every review-loop invocation.
+## Consumer-specific behavior — PRESERVE THESE DISTINCTIONS
 
-## Design boundaries
+- **Review-loop preparation failure** consumes **zero review rounds** and dispatches neither reviewer
+  nor fixer.
+- **Integration-candidate preparation failure** is an **environment/readiness failure — NOT
+  `integration_failed`** — and **publishes nothing**.
+- **Genuine test failures after successful preparation retain existing behavior** on both paths. This
+  ticket must never launder a real failure into an infrastructure outcome.
+
+## Readiness binding
+
+Readiness is bound to the exact **workspace/candidate identity, lockfile, declared runtime/ABI, and
+verification command set**. A moved-base rebuild or a changed lockfile **invalidates** previous
+readiness — readiness is never inherited by a different candidate.
+
+**Dependencies must not alter the candidate Git tree or the published commit.** The tree Forge
+publishes must be byte-for-byte the tree that passed the gate, exactly as FG-621 AC 6 requires;
+preparation is not allowed to move it.
+
+## One contract, not identical mechanics
+
+A persistent review clone and a disposable publication worktree may legitimately install differently
+(reuse of a warm cache versus a throwaway materialization). They must nonetheless share:
+
+- the same **fidelity checks** (source, lockfile, runtime/ABI),
+- the same **durable evidence**, and
+- the same **failure classification** vocabulary.
+
+Do not create a third incompatible notion of dependency readiness; reuse or deliberately extend the
+FG-376 / `forge-test` vocabulary.
+
+## Boundary with FG-627
+
+**FG-627 owns Docker nested-volume mount mechanics for CONTAINER verification** — making the deps
+volume mountpoint pre-exist so the provisioner can mount into a read-only `/project`. It is merged.
+**FG-566 owns HOST-SIDE verification readiness.** They are adjacent and must not be merged into one
+another.
+
+## Design boundaries (unchanged from the original scope)
 
 - Use one declared project-verification setup contract. For an npm project with a lockfile this may be
-  `npm ci`; another project may supply an explicit configured bootstrap. If Forge cannot identify a safe
-  setup contract, it fails before round 1 rather than guessing.
-- Reuse or deliberately extend the FG-376 / `forge-test` dependency-provisioning vocabulary and failure
-  classification. Do not create a third incompatible notion of dependency readiness.
-- The mechanism is open: provision the standalone clone under the declared runtime, or execute local
-  verification through an existing container/scratch dependency cache. The chosen mechanism must prove
-  source fidelity, lockfile fidelity, runtime/ABI compatibility, and isolation from the live checkout.
-- Dependency setup uses the intended verification runtime, never whichever `node` or package manager an
-  ambient login shell happens to resolve. Coordinate with FG-555's launched-workload environment contract;
-  do not pre-empt or contradict it.
-- Never mutate the live `main` checkout, its shared native bindings, the reviewed source/lockfile, or another
-  clone's dependency tree as remediation.
+  `npm ci`; another project may supply an explicit configured bootstrap. If Forge cannot identify a
+  safe setup contract, it fails before verification rather than guessing.
+- The mechanism is open, but must prove source fidelity, lockfile fidelity, runtime/ABI compatibility,
+  and isolation from the live checkout.
+- Dependency setup uses the intended verification runtime, never whichever `node` an ambient login
+  shell resolves. Coordinate with FG-555; do not contradict it.
+- Never mutate the live `main` checkout, its shared native bindings, the reviewed source/lockfile, or
+  another clone's dependency tree as remediation.
 - Environment preparation is not a review round, reviewer verdict, or fixer attempt.
+- CI reuse stays first-class on the review-loop path: trusted covering evidence must not trigger an
+  unnecessary local install.
 
-## Acceptance criteria
+## Required falsification — each observed RED against pre-fix behavior
 
-- Immediately before a real local verification fallback, review-loop checks whether the selected
-  typecheck/test commands have an execution-ready dependency environment.
-- When a supported setup contract exists, Forge provisions or repairs the environment once using the
-  project lockfile and declared verification runtime. A successful preparation then starts the real review
-  at round 1.
-- Missing dependencies, failed dependency installation, missing package-manager/runtime, and native ABI
-  incompatibility are represented as `verification_environment_unavailable` (or one explicitly equivalent
-  environment disposition), never generic `verification_failed` and never a failed product test.
-- An environment-unavailable outcome consumes **zero review rounds**, dispatches neither reviewer nor
-  fixer, and returns one actionable recovery instruction. Re-running after repair begins at round 1.
-- Deterministic verification failures produced by an execution-ready environment retain existing behavior;
-  this ticket must not launder real typecheck/test failures into infrastructure outcomes.
-- Durable review-loop evidence records environment preparation start/result, the setup mechanism or cache
-  identity, lockfile identity, runtime/ABI identity when relevant, and whether verification used CI reuse or
-  a prepared local fallback.
-- Human CLI output, structured output, run notes, and dashboard surfaces distinguish environment readiness
-  failure from reviewed-code verification failure. They do not say that a reviewer reviewed anything when
-  verification prevented reviewer dispatch.
-- Provisioning is bounded and crash-safe. A failed or interrupted install cannot be marked ready or reused
-  by a later review.
-
-## Required falsification
-
-Each regression must be observed red against the relevant pre-fix behavior:
-
-1. A fresh standalone clone of Forge with no `node_modules`, forced onto local fallback, currently fails
-   typecheck/test, skips the reviewer, and consumes review rounds. After the fix it prepares dependencies,
-   runs real verification, and dispatches the reviewer as round 1.
-2. A forced dependency-install failure currently appears as ordinary verification failure. After the fix it
-   stops before round 1 as `verification_environment_unavailable`, with no reviewer or fixer dispatch.
-3. Dependencies absent or built for an incompatible Node ABI are not accepted as ready and cannot produce a
-   wall of false product-test failures.
-4. Trusted covering CI evidence still avoids unnecessary local provisioning and retains current reuse
-   semantics.
-5. A real typecheck/test regression in a prepared environment still follows the ordinary review-loop
-   verification/fixer policy.
+1. **A fresh candidate worktree with no `node_modules` is prepared and successfully gated.** Today it
+   fails `ERR_MODULE_NOT_FOUND` and records `integration_failed`.
+2. **Preparation failure is classified environment-unavailable, and NOTHING is published.** Not
+   `integration_failed`, and no target ref movement.
+3. **A real test failure after successful preparation remains an integration failure** — the fix must
+   not make every failure look environmental. This is the inverse defect and it is the more dangerous
+   one.
+4. **Candidate, lockfile and runtime fidelity**: readiness prepared for one candidate/lockfile/runtime
+   is not accepted for another; a moved-base rebuild or changed lockfile forces re-preparation.
+5. **Published tree identity is unchanged by preparation** — the gated tree and the published tree
+   remain byte-for-byte identical with preparation in the path.
+6. Review-loop path (original set, retained): a fresh standalone clone forced onto local fallback
+   prepares and reaches round 1; a forced install failure stops before round 1 consuming zero rounds
+   with no reviewer/fixer; an incompatible Node ABI is not accepted as ready; trusted CI evidence
+   still avoids local provisioning.
 
 ## Relationships and non-scope
 
-- **FG-376:** existing container dependency provisioning and environment-failure vocabulary; reuse where
-  the boundary permits.
-- **FG-555:** the runtime/environment contract under which Forge-owned unattended verification and any
-  dependency setup execute.
-- **FG-559:** provides Git-capable linked-worktree mounts. Working Git and an execution-ready verification
-  environment are distinct contracts; do not fold this ticket into FG-559.
-- **FG-561:** standalone clones are currently required containment before FG-553/FG-559 land, making this
-  defect repeatedly reachable during that campaign. This ticket is not a new durable-continuation slice.
-- No package-manager-unification project, arbitrary shell-hook framework, review-policy redesign, or change
-  to reviewer/fixer round limits.
+- **FG-376**: container dependency provisioning and environment-failure vocabulary; reuse where the
+  boundary permits.
+- **FG-627**: container-side mountpoint mechanics. Adjacent, merged, separate.
+- **FG-555**: the runtime/environment contract for unattended verification.
+- **FG-357 / FG-425**: the integration gate and serialized publisher are the second CONSUMER. Do not
+  redesign them; integrate readiness ahead of the gate they already run.
+- **FG-621**: AC 11 is blocked until this lands and a dogfood run completes.
+- **FG-345**: default-on is blocked on the same.
+- No package-manager unification, shell-hook framework, review-policy redesign, or change to
+  reviewer/fixer round limits.
 
-## Size / routing note
+## Live instance 2026-07-27 (FG-621 dogfood, run-…-dogfood-693dbc) — consumer 2
 
-**Medium.** This crosses review-loop verification classification, readiness/provisioning integration,
-durable events/run notes, CLI/JSON/dashboard propagation, and production-path tests. It should receive a
-short architecture/planning pass to choose reuse of the existing container cache versus controlled
-standalone-clone provisioning, then land as one cohesive implementation if that plan remains bounded.
+The first real end-to-end isolated dispatch forge has ever run. The architect agent SUCCEEDED
+(container exit 0, artifact produced). The FG-357 integration gate then ran on the host against the
+publication candidate and failed:
+
+    integration gate failed against candidate 871423232dbcd279c189fd1e6f9e4f945f38a156:
+    Command failed: npm run test:unit
+    node --import tsx --import ./src/test-setup.ts --test ...
+    node:internal/modules/package_json_reader:301
+      throw new ERR_MODULE_NOT_FOUND(packageName, fileURLToPath(base), null);
+
+Confirmed directly: `~/.forge/worktrees/publications/<attempt>-r0` contains `.git`, `.github`,
+`.gitignore`, `.nvmrc`, `.vscode` — and **no `node_modules`**. `tsx` is unresolvable, so the gate
+cannot run at all.
+
+The task was recorded `integration_failed`, i.e. an environment fault presented as a verdict on the
+reviewed code — the exact misclassification this ticket exists to eliminate, reproduced on the
+second consumer before a line of the first was written.
 
 ## Live instance 2026-07-26 (FG-356 review-loop, run-review-loop-fg-356-34ce60)
 
