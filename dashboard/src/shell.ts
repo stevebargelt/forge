@@ -260,6 +260,15 @@ section.feed { margin-top: 24px; }
 .badge.status-awaiting_recovery { background: rgba(250, 204, 21, 0.15); color: var(--warn); }
 .badge.status-running { background: rgba(96, 165, 250, 0.15); color: var(--info); }
 .badge.status-pending { background: rgba(154, 154, 163, 0.15); color: var(--fg-dim); }
+/* FG-566: an environment/readiness REFUSAL — the verification never ran, so this
+   must not read as the red of a failed verification NOR as the grey of something
+   still in flight. Amber with a dashed edge: terminal, but not a verdict on the
+   code. */
+.badge.status-environment_unavailable {
+  background: rgba(250, 204, 21, 0.12);
+  border: 1px dashed var(--warn);
+  color: var(--warn);
+}
 /* #290: a running task whose container is gone — stale DB row, needs reconcile. */
 .badge.status-reconcile_candidate { background: rgba(250, 204, 21, 0.18); color: var(--warn); }
 

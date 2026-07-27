@@ -12,11 +12,33 @@ import { verificationRowLabel } from "./verification-label.js";
 // verifyWithEvents); campaign_item.host_gate_finished carries `exitCode`
 // (src/campaign/reconcile-collect.ts). Check both — never a "passed" kind or a
 // bare `passed` field, neither of which either producer emits.
+// FG-566: an environment REFUSAL is not a failed verification, and the BADGE is
+// where an operator scans. The producer sets `ok: false` on a refusal (literally
+// true — nothing ran), so reading `ok` alone painted the refusal in the same red
+// as a genuine test failure and left the distinction to a muted detail span
+// nobody scans. Checked BEFORE `ok` for exactly that reason. A payload with no
+// readiness field (every pre-FG-566 event) reaches none of this.
+export const ENVIRONMENT_UNAVAILABLE_CLASS = "status-environment_unavailable";
+
+export function isReadinessRefusal(p) {
+  return Boolean(p && typeof p === "object" && p.readiness && typeof p.readiness === "object" && p.readiness.outcome === "refused");
+}
+
 export function verificationOutcomeClass(p) {
   if (!p || typeof p !== "object") return "status-pending";
+  if (isReadinessRefusal(p)) return ENVIRONMENT_UNAVAILABLE_CLASS;
   if (typeof p.exitCode === "number") return p.exitCode === 0 ? "status-complete" : "status-failed";
   if (typeof p.ok === "boolean") return p.ok ? "status-complete" : "status-failed";
   return "status-pending";
+}
+
+/** The timeline badge's TEXT. The event type alone is byte-identical for a
+ *  refusal and a genuine failure — `review_loop.verification_finished` either way
+ *  — so the badge carries the classification itself, in text as well as colour.
+ *  Every other event, and every pre-FG-566 payload, returns the bare event type
+ *  unchanged. */
+export function eventBadgeText(e) {
+  return isReadinessRefusal(e && e.payload) ? `${e.eventType} · environment` : e.eventType;
 }
 
 export function eventBadgeClass(e) {
@@ -38,20 +60,63 @@ export function eventBadgeClass(e) {
   if (type === "publication.published") return "status-complete";
   if (type === "publication.refused" || type === "publication.parked") return "status-failed";
   if (type === "publication.recovered") return "status-complete";
+  // FG-566: the readiness preflight's terminal events match none of the generic
+  // patterns below either — "ready" contains no "complete", "refused" no
+  // "failed" — so both fell through to the dim in-flight grey. A refusal is a
+  // TERMINAL environment fault that stopped the path before it ran; it must not
+  // read as pending.
+  if (type === "host_readiness.ready") return "status-complete";
+  if (type === "host_readiness.refused") return "status-failed";
   if (/failed|blocked|killed|idle_timeout|abandoned|cancelled/.test(type)) return "status-failed";
   if (/completed|complete/.test(type)) return "status-complete";
   if (/awaiting/.test(type)) return "status-awaiting_gate";
   return "status-pending";
 }
 
+// FG-566: the readiness preflight's classified outcome, carried on
+// review_loop.verification_finished as `readiness: { outcome, reason? } | null`
+// (src/cli/commands/review-loop.ts's verifyWithEvents). An event emitted BEFORE
+// FG-566 carries no such field at all, and `null` means readiness was never
+// consulted — the CI/evidence-reuse path returned before any local provisioning
+// was considered. Both must render byte-identically to the pre-FG-566 line.
+function readinessOf(p) {
+  const r = p.readiness;
+  return r && typeof r === "object" ? r : null;
+}
+
+// The whole point of this ticket, reproduced on the operator surface: a
+// preparation REFUSAL is an environment fault, not a failed verification of the
+// reviewed code. Rendering it through the ordinary "mode · round · command"
+// detail line would tell the operator the same lie the loop used to tell the
+// fixer. So a refusal gets its own line shape — leading marker, the shared
+// `verification_environment_unavailable` classification token, the refusal
+// reason, and the two facts an operator needs to know the loop did NOT charge
+// them for this: no round consumed, no agents dispatched. The signal is carried
+// by text, not by colour — the timeline renders this span dim-muted either way.
+function readinessRefusedDetail(p, readiness) {
+  const reason = typeof readiness.reason === "string" && readiness.reason ? readiness.reason : "unclassified";
+  const parts = [`⚠ verification_environment_unavailable: ${reason}`];
+  if (typeof p.round === "number") parts.push(`round ${p.round}`);
+  parts.push("no round consumed — neither reviewer nor fixer ran");
+  const command = readiness.command || p.command;
+  if (command) parts.push(`setup: ${String(command)}`);
+  return parts.join(" · ");
+}
+
 // review_loop.verification_started/finished payload (src/cli/commands/review-loop.ts's
 // verifyWithEvents): round + ticketId + sha + mode ("local" | "ci_wait"), plus on finish
 // ok + reusedEvidence + ciOutcome, and (AC2) checkContexts for ci_wait or command/tier
-// for local.
+// for local, and (FG-566) readiness.
 export function reviewLoopVerificationDetail(p) {
+  const readiness = readinessOf(p);
+  if (readiness && readiness.outcome === "refused") return readinessRefusedDetail(p, readiness);
   const parts = [];
   if (p.mode) parts.push(String(p.mode));
   if (typeof p.round === "number") parts.push(`round ${p.round}`);
+  // "deps", not "evidence": `reused evidence` below is CI/host-verification
+  // evidence reuse, a different fact from reusing a warm dependency assertion.
+  if (readiness && readiness.outcome === "prepared") parts.push("deps prepared");
+  if (readiness && readiness.outcome === "reused") parts.push("deps ready (reused)");
   if (p.command) parts.push(String(p.command));
   if (p.tier) parts.push(String(p.tier));
   if (Array.isArray(p.checkContexts) && p.checkContexts.length > 0) parts.push(p.checkContexts.join(", "));

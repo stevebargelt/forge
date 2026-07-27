@@ -441,7 +441,14 @@ export function taskDetail(taskId: string): TaskDetail | null {
     WHERE task_id = ?
        OR (run_id = ? AND task_id IS NULL AND event_type IN (
             'review_loop.verification_started', 'review_loop.verification_finished',
-            'campaign_item.host_gate_started', 'campaign_item.host_gate_finished'))
+            'campaign_item.host_gate_started', 'campaign_item.host_gate_finished',
+            -- FG-566: the readiness preflight is emitted RUN-scoped from the review
+            -- loop (the loop's verification happens between tasks, so there is no
+            -- task_id to attach), and its refusal payload — workspace, command,
+            -- exitStatus, stderrTail — is the ONLY place those facts exist. Omitted
+            -- from this whitelist it had no dashboard surface at all: an operator
+            -- saw a stopped loop and no reason for it.
+            'host_readiness.ready', 'host_readiness.refused'))
     ORDER BY created_at ASC, id ASC
   `).all(taskId, taskRow.run_id) as Array<{ event_type: string; payload: string | null; created_at: string }>;
   const events: TaskEventEntry[] = eventRows.map((e) => ({

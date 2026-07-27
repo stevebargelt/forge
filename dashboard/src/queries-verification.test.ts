@@ -125,6 +125,13 @@ db.prepare(`INSERT INTO runs VALUES ('run-reviewing','review-loop #FG-920','invo
 insertEvent("run-reviewing", "review_loop.verification_started", { attemptId: "attempt-rev-1", round: 1, ticketId: "FG-920", sha: "eee4444", mode: "local" }, iso(10 * 60_000));
 insertEvent("run-reviewing", "review_loop.verification_finished", { attemptId: "attempt-rev-1", ok: true }, iso(9 * 60_000));
 db.prepare(`INSERT INTO tasks (id, run_id, phase, agent_role, agent_model, status, started_at, created_at, parent_id) VALUES ('task-red-1','run-reviewing','red-wide','red-wide','sonnet','running', ?, ?, NULL)`).run(iso(9 * 60_000), iso(9 * 60_000));
+// FG-566: the readiness preflight is RUN-scoped from the review loop (its
+// verification happens between tasks, so there is no task_id to attach) and its
+// refusal payload is the ONLY place workspace/command/exitStatus/stderrTail exist.
+insertEvent("run-reviewing", "host_readiness.refused", {
+  reason: "setup_failed", workspace: "/proj/b", command: "npm ci", exitStatus: 1,
+  stderrTail: "npm ERR! code EUSAGE", label: "review-loop", treeSha: "eee4444",
+}, iso(10 * 60_000));
 
 // ── reviewLoopRunPhases: waiting-on-ci mode, no task yet ────────────────────
 db.prepare(`INSERT INTO runs VALUES ('run-ciwait','review-loop #FG-921','invoke','/proj/b','active', ?)`).run(iso(3 * 60_000));
@@ -285,6 +292,19 @@ test("taskDetail: folds the run's RUN-scoped verification events into the task t
     types.includes("review_loop.verification_started") && types.includes("review_loop.verification_finished"),
     `run-scoped verification events must appear in the task's timeline, got: ${JSON.stringify(types)}`,
   );
+});
+
+test("taskDetail (FG-566): a RUN-scoped host_readiness refusal reaches the task timeline WITH its diagnostic payload", () => {
+  const detail = taskDetail("task-red-1");
+  const refusal = detail!.events.find((e) => e.eventType === "host_readiness.refused");
+  assert.ok(refusal, "a review-loop readiness refusal is run-scoped with task_id NULL; omitted from the timeline whitelist it has no dashboard surface at all");
+  const payload = refusal!.payload as Record<string, unknown>;
+  // The four facts an operator needs to act on an environment refusal.
+  assert.equal(payload["reason"], "setup_failed");
+  assert.equal(payload["workspace"], "/proj/b");
+  assert.equal(payload["command"], "npm ci");
+  assert.equal(payload["exitStatus"], 1);
+  assert.match(String(payload["stderrTail"]), /EUSAGE/);
 });
 
 test("inProgressVerifications: no projectDir filter returns rows across projects (cross-project survey default)", () => {

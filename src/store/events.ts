@@ -203,6 +203,22 @@ export type EventType =
   // fallback profile — payload carries {ticketId, round, failedProfile?,
   // retryProfile?, cause}. Emitted whether or not the retry then succeeded.
   | "review_loop.reviewer_model_error_retry"
+  // FG-566: the SHARED readiness contract for Forge-owned host-side verification
+  // (src/v2/host-readiness.ts), emitted by BOTH consumers — the review loop's
+  // local fallback and the FG-357/FG-425 integration gate — so a preparation is
+  // always distinguishable from the verification it precedes.
+  //   ready:   {workspace, treeSha, lockfileDigest, nodeVersion, abi, setupCommand, reused, coveredCommandSet, label}
+  //   refused: {reason, workspace, command, exitStatus, stderrTail, label, treeSha}
+  // `not_required` is deliberately silent: nothing was established and nothing was
+  // touched — it is carried on review_loop.verification_finished's `readiness`
+  // field instead of manufacturing an event for a no-op.
+  | "host_readiness.ready"
+  | "host_readiness.refused"
+  // FG-566: the publication-side projection — preparation refused for a
+  // publication candidate, so the gate never ran. NOT publication.validation_failed
+  // (which would be a code verdict for an environment fault) and NOT
+  // integration_failed: nothing was published and no ref moved.
+  | "publication.readiness_failed"
   | "campaign_item.host_gate_started"
   | "campaign_item.host_gate_finished";
 

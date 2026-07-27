@@ -429,10 +429,16 @@ forge review-loop <ticket-id> --max-rounds 2 --route <resolved-route>
 # or pin the range explicitly:  --since <sha>
 ```
 
+**Forge-on-Forge: pass `--project <clone>` — `--project` defaults to cwd, and the forge checkout itself is now refused (FG-566).** Host-side verification readiness refuses unconditionally when the target workspace overlaps the forge checkout the process is executing from, because an install there would delete the running orchestrator's own native bindings. Run from `~/code/forge`, the bare command above stops with a classified `self_host_workspace` readiness refusal instead of reviewing anything. That refusal is correct, not a bug — point the loop at the disposable clone you did the implementation in:
+
+```bash
+forge review-loop <ticket-id> --max-rounds 2 --route <resolved-route> --project <clone-path>
+```
+
 The bounded review-loop is the **policy-derived default** for landed implementation work that changes code or durable behavior — not an operator preference. Do NOT ask the user to choose between the review-loop and a human PR review; select the loop and run it (FG-436). Ask before *skipping* the loop only for an explicit exception: docs-only, backlog-only, trivial metadata, emergency/unblock work, or when the user explicitly asked to skip automated review.
 
 Rules:
-- **Post-implementation ONLY.** `review-loop` reviews already-committed work — it is NOT for the initial implementation. You still own route resolution and the first implementation dispatch (for Forge-on-Forge, the first implementation you do directly), and you commit it before looping.
+- **Post-implementation ONLY.** `review-loop` reviews already-committed work — it is NOT for the initial implementation. You still own route resolution and the first implementation dispatch (for Forge-on-Forge, the first implementation you do directly, in a clone — see the `--project` note above), and you commit it before looping.
 - **Present before you start the loop:** ticket id, route key, commit range (or `--since`), max rounds, the reviewer/fixer roles (`red-wide` read-only / `engineer`), the verification commands, the required CI checks (`test` and `test-extended` — `.github/workflows/ci.yml`), and the stop conditions. (`forge review-loop … --dry-run` prints most of this.)
 - **Don't manually relay** reviewer/fixer when `review-loop` is available. The manual `red-wide` → `engineer` chain is the **fallback** only.
 - **Stop and ask the user** when the loop stops on `blocked_by_reviewer` or `needs_fix_max_rounds`, or whenever the work would need live spend, a credential, a live DB migration, a destructive operation, or a product/acceptance decision. The loop never auto-does any of those. (A routine fix/defer disposition on a finding is NOT one of these — apply the **Review-disposition & autonomy policy** above and act.)

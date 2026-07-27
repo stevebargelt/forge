@@ -2608,6 +2608,15 @@ function publicationFailureKind(p: PublishOutcome): FailureKind {
         `it. This is a caller bug: route recovery_pending to awaitPublicationRecovery.`,
     );
   }
+  if (p.kind === "readiness_failed") {
+    // FG-566: an ENVIRONMENT fault, classified as one. It reuses the EXISTING
+    // FG-376 kind — `verification_environment_unavailable` (retryable, with
+    // dependency-install advice, and already mapped to the campaign_system lane) —
+    // discriminated by the readiness reason carried in the error, rather than
+    // inventing a third incompatible notion of dependency readiness. Critically NOT
+    // integration_failed: the gate never ran, so there is no verdict on the code.
+    return classify({ source: "verification_environment_unavailable" });
+  }
   if (p.kind === "validation_failed") {
     return classify({
       integrationGate: {
@@ -2624,6 +2633,13 @@ function publicationFailureKind(p: PublishOutcome): FailureKind {
 }
 
 function publicationFailureError(p: PublishOutcome): string {
+  if (p.kind === "readiness_failed") {
+    // FG-566: never phrased as a gate failure. The gate did not run.
+    return (
+      `verification environment could not be prepared for candidate ${p.candidateSha} (${p.reason}) — the integration ` +
+      `gate never ran, so this is NOT a verdict on the code, and nothing was published: ${p.error}`
+    );
+  }
   if (p.kind === "validation_failed") {
     return `integration gate failed against candidate ${p.candidateSha}: ${p.error}`;
   }

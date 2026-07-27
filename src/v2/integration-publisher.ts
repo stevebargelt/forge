@@ -47,13 +47,18 @@ import {
 import { projectIdentity, describeRefusal, describeWait } from "./project-identity.js";
 import {
   awaitLaneTurn,
+  gateSpanLeaseMs,
+  LANE_HEARTBEAT_MS,
   LaneTakenOverError,
   leaveLane,
   preExtendLeaseForGate,
+  preExtendLeaseForReadiness,
+  readinessSpanLeaseMs,
   renewLease,
   startLeaseHeartbeat,
   type LaneWaitOpts,
 } from "./publication-lane.js";
+import { integrationGateCommandSet, prepareHostVerification } from "./host-readiness.js";
 import {
   CheckoutSyncError,
   DirtyPublishTargetError,
@@ -172,6 +177,25 @@ export type PublishOutcome =
       status?: number | null;
       signal?: string | null;
       timedOut?: boolean;
+    }
+  /** FG-566: the verification ENVIRONMENT for this candidate could not be
+   *  established, so `validate` never ran and the gate never saw the tree.
+   *
+   *  DELIBERATELY DISTINCT FROM validation_failed. The FG-621 dogfood recorded
+   *  `integration_failed` for a publication worktree that simply had no
+   *  node_modules — a code verdict for an environment fault. This arm is what
+   *  makes that impossible: it is produced BEFORE validation, never by
+   *  reinterpreting gate output, so a REAL test failure after a SUCCESSFUL
+   *  preparation still lands as validation_failed with the gate's own
+   *  classification untouched. Nothing is published and no ref moves. */
+  | {
+      kind: "readiness_failed";
+      attemptId: string;
+      candidateSha: string;
+      candidateWorktree: string;
+      /** The shared readiness refusal vocabulary (host-readiness.ts). */
+      reason: string;
+      error: string;
     }
   | {
       kind: "parked";
@@ -500,6 +524,73 @@ export async function publishIntegration(req: PublishRequest): Promise<PublishOu
       const candidateSha = git(candidate.path, ["rev-parse", "HEAD"]);
       updatePublicationAttempt(attemptId, { candidateSha, state: "validating" });
 
+      // FG-566: READINESS, a PRECONDITION established here — after the candidate
+      // identity is captured and BEFORE `validate` runs. The gate runs on the HOST
+      // against this exact worktree, and a fresh worktree has no node_modules
+      // (`node_modules` is gitignored, so neither `git worktree add` nor a clone
+      // carries one), which is how the FG-621 dogfood's architect-approved candidate
+      // died with ERR_MODULE_NOT_FOUND and was recorded `integration_failed`.
+      //
+      // It is bound to THIS candidate: a moved-base rebuild gets a fresh
+      // publicationWorktreeDir path and therefore cannot inherit r0's assertion.
+      // It inherits the gate's own skip — a project with no test:unit script has
+      // nothing for the gate to run and therefore nothing to prepare for, so it is
+      // never newly blocked. And it NEVER inspects gate output: that is what keeps a
+      // real test failure a real test failure.
+      //
+      // Both lease mechanisms, for the same reason validation gets both: a
+      // heartbeat for the async wrapper, and a PRE-EXTENSION across the synchronous
+      // install (an execFileSync, inside which no timer can fire) — established
+      // ahead of the gate's own pre-extension so a cold install cannot be smuggled
+      // into the gate's budget and surface as `lane_taken_over`.
+      preExtendLeaseForReadiness(attemptId);
+      // The heartbeat renews TO the readiness span, not to the 90s base: a tick
+      // that fires while readiness waits on another process's lock must not undo
+      // the pre-extension the install that follows depends on.
+      const readinessHeartbeat = startLeaseHeartbeat(attemptId, LANE_HEARTBEAT_MS, readinessSpanLeaseMs());
+      let readiness;
+      try {
+        readiness = await prepareHostVerification({
+          workspace: candidate.path,
+          treeSha: candidateSha,
+          // No configDir: the setup command comes from HOST-LEVEL operator config
+          // only. The canonical checkout is not a safe source either — a merged
+          // agent branch reaches its .forge/config.json on the next publication.
+          coveredCommandSet: integrationGateCommandSet(candidate.path),
+          label: "integration-candidate",
+          runId: req.runId,
+          taskId: req.taskId,
+        });
+      } finally {
+        readinessHeartbeat.stop();
+        renewLease(attemptId);
+      }
+      if (readiness.kind === "refused") {
+        const refusal = readiness.refusal;
+        updatePublicationAttempt(attemptId, { state: "failed" });
+        logEvent("publication.readiness_failed", {
+          runId: req.runId,
+          taskId: req.taskId,
+          payload: {
+            attemptId,
+            candidateSha,
+            reason: refusal.reason,
+            workspace: refusal.workspace,
+            command: refusal.command,
+            exitStatus: refusal.exitStatus,
+            stderrTail: refusal.stderrTail,
+          },
+        });
+        return {
+          kind: "readiness_failed",
+          attemptId,
+          candidateSha,
+          candidateWorktree: candidate.path,
+          reason: refusal.reason,
+          error: refusal.message,
+        };
+      }
+
       // 4. Validate the EXACT candidate, in its own worktree. The publication
       //    mutex is NOT held here — this is the span that used to run against the
       //    publish target. The LANE turn deliberately DOES span it (AD-2:
@@ -516,7 +607,10 @@ export async function publishIntegration(req: PublishRequest): Promise<PublishOu
       //    Both lease mechanisms, because validation is both kinds of span: a
       //    heartbeat for the async part (reds are containers), a pre-extension for
       //    the synchronous gate, inside which no timer can fire.
-      const heartbeat = startLeaseHeartbeat(attemptId);
+      //    The heartbeat renews TO the gate span, not to the 90s base, for the same
+      //    reason readiness does: a tick that fires while the reds are still running
+      //    would otherwise undo the pre-extension the synchronous gate depends on.
+      const heartbeat = startLeaseHeartbeat(attemptId, LANE_HEARTBEAT_MS, gateSpanLeaseMs());
       preExtendLeaseForGate(attemptId);
       let validation: ValidationResult;
       try {

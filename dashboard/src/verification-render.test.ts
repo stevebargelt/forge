@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  eventBadgeClass, verificationOutcomeClass, reviewLoopVerificationDetail, hostGateDetail,
+  eventBadgeClass, eventBadgeText, verificationOutcomeClass, reviewLoopVerificationDetail, hostGateDetail,
   groupVerificationRows, verificationRowBadge, evidenceState,
 } from "../client/verification-render.js";
 
@@ -32,6 +32,51 @@ test("verificationOutcomeClass: a campaign_item.host_gate_finished payload (exit
 test("verificationOutcomeClass: no recognizable field -> pending", () => {
   assert.equal(verificationOutcomeClass({}), "status-pending");
   assert.equal(verificationOutcomeClass(null), "status-pending");
+});
+
+// ─── FG-566: the BADGE is what distinguishes the two, not a muted detail span ──
+//
+// The producer sets `ok: false` on a readiness refusal (nothing ran, so it is
+// literally true), which made the refusal badge byte-identical to the badge for a
+// genuine failed verification. The badge IS the scan affordance: an operator
+// triaging a run looks at colour and label, and a distinction that survives only
+// in a secondary detail line does not distinguish anything.
+
+test("verificationOutcomeClass (FG-566): a readiness REFUSAL is classed as an environment fault, NOT as a failed verification", () => {
+  const refusal = { ok: false, readiness: { outcome: "refused", reason: "setup_failed" } };
+  assert.equal(verificationOutcomeClass(refusal), "status-environment_unavailable");
+  // The load-bearing assertion: the two badges are not the same badge.
+  assert.notEqual(verificationOutcomeClass(refusal), verificationOutcomeClass({ ok: false }));
+});
+
+test("verificationOutcomeClass (FG-566): a genuine failed verification keeps the failure class — refusals must not swallow real failures", () => {
+  assert.equal(verificationOutcomeClass({ ok: false }), "status-failed");
+  assert.equal(verificationOutcomeClass({ ok: false, readiness: null }), "status-failed");
+  assert.equal(verificationOutcomeClass({ ok: false, readiness: { outcome: "prepared" } }), "status-failed");
+  assert.equal(verificationOutcomeClass({ ok: true, readiness: { outcome: "reused" } }), "status-complete");
+  // Legacy (no readiness field at all) is untouched, byte for byte.
+  assert.equal(verificationOutcomeClass({ exitCode: 1 }), "status-failed");
+});
+
+test("eventBadgeClass (FG-566): the refusal badge on the timeline differs from the failed-verification badge", () => {
+  assert.equal(
+    eventBadgeClass({ eventType: "review_loop.verification_finished", payload: { ok: false, readiness: { outcome: "refused", reason: "self_host_workspace" } } }),
+    "status-environment_unavailable",
+  );
+});
+
+test("eventBadgeText (FG-566): the badge LABEL names the environment refusal; every other event is unchanged", () => {
+  assert.equal(
+    eventBadgeText({ eventType: "review_loop.verification_finished", payload: { ok: false, readiness: { outcome: "refused", reason: "setup_timed_out" } } }),
+    "review_loop.verification_finished · environment",
+  );
+  assert.equal(eventBadgeText({ eventType: "review_loop.verification_finished", payload: { ok: false } }), "review_loop.verification_finished");
+  assert.equal(eventBadgeText({ eventType: "task.completed", payload: null }), "task.completed");
+});
+
+test("eventBadgeClass (FG-566): the readiness events themselves are terminal badges, never the dim in-flight grey", () => {
+  assert.equal(eventBadgeClass({ eventType: "host_readiness.refused", payload: { reason: "setup_failed" } }), "status-failed");
+  assert.equal(eventBadgeClass({ eventType: "host_readiness.ready", payload: { reused: false } }), "status-complete");
 });
 
 test("eventBadgeClass: a successful verification_finished event gets the success class", () => {
@@ -128,6 +173,148 @@ test("reviewLoopVerificationDetail: a local failure lists which steps failed", (
     mode: "local", steps: [{ name: "typecheck", ok: true }, { name: "test", ok: false }],
   });
   assert.match(detail, /failed: test/);
+});
+
+// ─── FG-566: the readiness preflight on the operator surface ─────────────────
+//
+// review_loop.verification_finished now carries `readiness: { outcome, reason? }
+// | null`. A preparation REFUSAL means forge never ran the reviewed code at all
+// — no round consumed, no reviewer, no fixer. Rendering it through the ordinary
+// "mode · round · command" detail line reproduces, on the operator surface, the
+// exact misclassification this ticket exists to eliminate: an environment fault
+// reported as a verdict on the code.
+
+// The pre-change output, captured verbatim from the shipped renderer before the
+// readiness field existed. The legacy tests below assert against these literals
+// rather than against a recomputed value, so a regression in the untouched path
+// cannot be hidden by both sides moving together.
+const LEGACY_LOCAL_PASS = "local · round 1 · npm run typecheck && npm run test · fast";
+const LEGACY_LOCAL_FAIL = "local · round 2 · npm run typecheck && npm run test · fast · failed: test";
+const LEGACY_CI_WAIT = "ci_wait · round 1 · CI / test, CI / test-extended";
+
+test("reviewLoopVerificationDetail (FG-566 LEGACY): a payload with NO readiness field renders byte-identically to the pre-change output", () => {
+  // Every event emitted before FG-566 landed is this shape. It must not shift by
+  // a single character — the timeline re-renders historical runs.
+  assert.equal(
+    reviewLoopVerificationDetail({
+      attemptId: "a1", round: 1, ticketId: "FG-566", sha: "abc", mode: "local", ok: true,
+      reusedEvidence: null, ciOutcome: null, checkContexts: null,
+      command: "npm run typecheck && npm run test", tier: "fast",
+      steps: [{ name: "typecheck", ok: true }, { name: "test", ok: true }],
+    }),
+    LEGACY_LOCAL_PASS,
+  );
+  assert.equal(
+    reviewLoopVerificationDetail({
+      mode: "local", round: 2, command: "npm run typecheck && npm run test", tier: "fast",
+      steps: [{ name: "typecheck", ok: true }, { name: "test", ok: false }],
+    }),
+    LEGACY_LOCAL_FAIL,
+  );
+  assert.equal(
+    reviewLoopVerificationDetail({ mode: "ci_wait", round: 1, checkContexts: ["CI / test", "CI / test-extended"] }),
+    LEGACY_CI_WAIT,
+  );
+});
+
+test("reviewLoopVerificationDetail (FG-566): readiness: null — never consulted, CI reuse won — renders byte-identically to legacy", () => {
+  assert.equal(
+    reviewLoopVerificationDetail({ mode: "ci_wait", round: 1, checkContexts: ["CI / test", "CI / test-extended"], readiness: null }),
+    LEGACY_CI_WAIT,
+  );
+});
+
+test("reviewLoopVerificationDetail (FG-566): readiness not_required renders byte-identically to legacy — nothing to prepare is not news", () => {
+  assert.equal(
+    reviewLoopVerificationDetail({
+      mode: "local", round: 1, command: "npm run typecheck && npm run test", tier: "fast",
+      steps: [{ name: "typecheck", ok: true }, { name: "test", ok: true }],
+      readiness: { outcome: "not_required" },
+    }),
+    LEGACY_LOCAL_PASS,
+  );
+});
+
+test("reviewLoopVerificationDetail (FG-566): readiness prepared notes the preparation ALONGSIDE the existing command/tier detail", () => {
+  const detail = reviewLoopVerificationDetail({
+    mode: "local", round: 1, command: "npm run typecheck && npm run test", tier: "fast",
+    steps: [{ name: "typecheck", ok: true }, { name: "test", ok: true }],
+    readiness: { outcome: "prepared" },
+  });
+  assert.match(detail, /deps prepared/);
+  // The ordinary detail is not replaced — a successful preparation is a note on
+  // a normal verification, not a different kind of event.
+  assert.match(detail, /npm run typecheck && npm run test/);
+  assert.match(detail, /fast/);
+  assert.match(detail, /^local · round 1/);
+});
+
+test("reviewLoopVerificationDetail (FG-566): readiness reused is distinguishable from CI evidence reuse", () => {
+  const detail = reviewLoopVerificationDetail({
+    mode: "local", round: 3, command: "npm run typecheck && npm run test", tier: "fast",
+    readiness: { outcome: "reused" },
+  });
+  assert.match(detail, /deps ready \(reused\)/);
+  // "reused evidence" is the CI/host_verifications reuse marker — a different
+  // fact. The two must not read as the same thing on one line.
+  assert.doesNotMatch(detail, /reused evidence/);
+});
+
+test("reviewLoopVerificationDetail (FG-566): a REFUSAL names the reason and states no round was consumed and no reviewer or fixer ran", () => {
+  const detail = reviewLoopVerificationDetail({
+    mode: "local", round: 1, ok: false, command: "npm ci", tier: null, steps: [],
+    readiness: {
+      outcome: "refused", reason: "setup_failed", workspace: "/tmp/clone",
+      command: "npm ci", exitStatus: 1, stderrTail: "ENOENT",
+    },
+  });
+  assert.match(detail, /setup_failed/);
+  assert.match(detail, /verification_environment_unavailable/);
+  assert.match(detail, /no round consumed/);
+  assert.match(detail, /neither reviewer nor fixer ran/);
+  assert.match(detail, /npm ci/);
+});
+
+test("reviewLoopVerificationDetail (FG-566): a REFUSAL is visually distinct from the ordinary failed-verification detail line", () => {
+  const refused = reviewLoopVerificationDetail({
+    mode: "local", round: 2, ok: false, command: "npm ci", steps: [],
+    readiness: { outcome: "refused", reason: "runtime_abi_mismatch" },
+  });
+  const ordinaryFailure = reviewLoopVerificationDetail({
+    mode: "local", round: 2, ok: false, command: "npm run typecheck && npm run test", tier: "fast",
+    steps: [{ name: "typecheck", ok: true }, { name: "test", ok: false }],
+  });
+  // The ordinary line opens with the mode; the refusal opens with a marker and
+  // the classification token, so the two never read as the same kind of fact.
+  assert.match(ordinaryFailure, /^local · /);
+  assert.doesNotMatch(refused, /^local · /);
+  assert.match(refused, /^⚠ /);
+  assert.notEqual(refused, ordinaryFailure);
+  // The refusal must NOT claim a verification step failed — nothing ran.
+  assert.doesNotMatch(refused, /failed: /);
+});
+
+test("reviewLoopVerificationDetail (FG-566): a refusal with no reason still renders a classified line rather than throwing", () => {
+  const detail = reviewLoopVerificationDetail({ mode: "local", round: 1, readiness: { outcome: "refused" } });
+  assert.match(detail, /verification_environment_unavailable: unclassified/);
+  assert.match(detail, /no round consumed/);
+});
+
+test("eventBadgeClass (FG-566): host_readiness.refused is a FAILURE badge, not the dim in-flight one", () => {
+  assert.equal(
+    eventBadgeClass({ eventType: "host_readiness.refused", payload: { reason: "setup_failed" } }),
+    "status-failed",
+  );
+});
+
+test("eventBadgeClass (FG-566): host_readiness.ready is a SUCCESS badge", () => {
+  assert.equal(eventBadgeClass({ eventType: "host_readiness.ready", payload: { reused: false } }), "status-complete");
+});
+
+test("eventBadgeClass (FG-566): neither host_readiness event renders as status-pending — both are TERMINAL", () => {
+  for (const eventType of ["host_readiness.ready", "host_readiness.refused"]) {
+    assert.notEqual(eventBadgeClass({ eventType, payload: {} }), "status-pending", `${eventType} is TERMINAL`);
+  }
 });
 
 test("hostGateDetail: shows gate/command and exit code", () => {

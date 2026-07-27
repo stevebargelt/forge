@@ -176,6 +176,33 @@ export function publicationWorktreeDir(attemptId: string, rebuild = 0): string {
   return join(PUBLICATIONS_DIR, `${attemptId}-r${rebuild}`);
 }
 
+// FG-566: durable HOST-side verification readiness assertions, one record per
+// prepared workspace. A DELIBERATELY SEPARATE KEYSPACE from FG-376's
+// ~/.forge/dependency-cache/, and the two must never be written by each other:
+// the container cache key is ABI-FREE by design (the agent image pins the
+// interpreter, so a lockfile hash fully identifies the install), while the host
+// key MUST include the runtime/ABI because the host interpreter varies per
+// operator. Writing FG-376's marker from here would make runNext's
+// isDependencyCacheReady skip container provisioning against an empty volume.
+//
+// Resolved at CALL time (not a module-eval const) for the same reason
+// resolveDbPath is: this is a path whose staleness would read and write ANOTHER
+// forge home's readiness assertions rather than merely misnaming a directory.
+export function hostReadinessDir(): string {
+  return join(process.env.FORGE_HOME ?? join(homedir(), ".forge"), "host-readiness");
+}
+
+// FG-566: HOST-LEVEL operator configuration. The one file a tree under review
+// cannot influence: it lives in the operator's forge home, outside every project
+// checkout, so no reviewed change and no merged agent branch can reach it. The
+// host-side verification setup COMMAND is read from here and nowhere else —
+// `<project>/.forge/config.json` is inside the workspace under test and is
+// therefore attacker-selectable input to an execFileSync that runs with forge's
+// host identity. Resolved at CALL time, same as hostReadinessDir.
+export function hostConfigPath(): string {
+  return join(process.env.FORGE_HOME ?? join(homedir(), ".forge"), "config.json");
+}
+
 // Host path of the PROMPT.md a prompt-author task wrote. The agent writes to
 // `/task/PROMPT.md` (in-container); that bind-mounts to taskDir() on the host.
 // The dashboard renders the prompt body inline; validation works off the run's

@@ -17,10 +17,12 @@ import { readTicket } from "../../backlog/structured.js";
 import { applyRoutePreflight, preflightEnforceFromEnv } from "../route-preflight.js";
 import {
   resolveCommitRange, runVerification, runReviewLoop, renderReviewLoopNote, parseReviewerVerdict,
+  verificationCommandSet,
   type CommitRange, type ReviewLoopDeps, type VerificationResult, type Finding,
   type ReviewedTipTrust, type RevertedPathGuidance, type GitRunner,
-  type ReviewDispatch, type ReviewerModelErrorRetry,
+  type ReviewDispatch, type ReviewerModelErrorRetry, type VerificationReadiness,
 } from "../../v2/review-loop.js";
+import { prepareHostVerification, readinessNote } from "../../v2/host-readiness.js";
 import { resolveModel } from "../../v2/model-resolution.js";
 import { loadModelPolicy } from "../../v2/loader.js";
 import { getRequiredHostGate } from "../../campaign/reconcile-collect.js";
@@ -538,12 +540,68 @@ export function buildReviewLoopDeps(
   // wait/poll (bounded) and reuse once green. Failed → report the deterministic
   // failure directly from CI evidence, no local run. Only a genuinely unavailable
   // CI setup (or a wait that times out) falls back to a real local run.
+  // FG-566: the readiness preflight for the LOCAL arms only.
+  //
+  // PLACEMENT IS THE CONTRACT. It is invoked ONLY after the covering-evidence and
+  // CI-status decisions have already declined to satisfy verification, so trusted
+  // covering evidence (a passing host_verifications row, a green required CI check)
+  // returns from verifyWithReuse BEFORE any local provisioning is even considered —
+  // CI reuse stays first-class and never triggers an install.
+  //
+  // Always returns the classified readiness decision — `refused` is the DISTINCT
+  // THIRD state the loop stops on; every other outcome means the local run may
+  // proceed.
+  const prepareLocalVerification = async (scripts: Record<string, unknown>): Promise<VerificationReadiness> => {
+    let treeSha: string;
+    try {
+      treeSha = gitInDir(["rev-parse", "HEAD"]).trim();
+    } catch {
+      treeSha = "(unresolved)";
+    }
+    const outcome = await prepareHostVerification({
+      workspace: ctx.projectDir,
+      treeSha,
+      // No configDir: the setup command comes from HOST-LEVEL operator config only
+      // (host-readiness.ts's provenance rule). Here workspace IS the tree under
+      // review, so any project-dir seam would let a reviewed change name the binary
+      // forge executes on the host.
+      coveredCommandSet: verificationCommandSet(scripts),
+      label: "review-loop",
+      ...(runId ? { runId } : {}),
+    });
+    if (outcome.kind !== "refused") return readinessNote(outcome);
+    const r = outcome.refusal;
+    console.log(`review-loop: ${r.message}`);
+    return {
+      outcome: "refused",
+      reason: r.reason,
+      workspace: r.workspace,
+      command: r.command,
+      exitStatus: r.exitStatus,
+      stderrTail: r.stderrTail,
+      message: r.message,
+    };
+  };
+
+  /** A refusal, shaped as the verification result the loop reads. `ok:false` with
+   *  no steps is literally true — nothing ran — but it is NEVER what the loop
+   *  branches on; `readiness.outcome === "refused"` is. */
+  const refusedResult = (readiness: VerificationReadiness): VerificationResultWithDetail => ({
+    ok: false,
+    steps: [],
+    readiness,
+    ...(readiness.command ? { command: readiness.command } : {}),
+  });
+
   const verifyWithReuse = async (): Promise<VerificationResultWithDetail> => {
     const dirty = gitInDir(["status", "--porcelain"]).trim().length > 0;
     if (dirty) {
       console.log("review-loop: dirty tree — local verification");
-      const result = runVerify(scriptsForVerification(), { cwd: ctx.projectDir });
-      return { ...result, command: commandFromSteps(result.steps), tier: tierFromSteps(result.steps) };
+      const dirtyScripts = scriptsForVerification();
+      const readiness = await prepareLocalVerification(dirtyScripts);
+      if (readiness.outcome === "refused") return refusedResult(readiness);
+      const result = runVerify(dirtyScripts, { cwd: ctx.projectDir });
+      return { ...result, readiness, command: commandFromSteps(result.steps), tier: tierFromSteps(result.steps) };
     }
 
     const headSha = gitInDir(["rev-parse", "HEAD"]).trim();
@@ -620,9 +678,14 @@ export function buildReviewLoopDeps(
 
     console.log(`review-loop: CI unavailable: ${status.reason} — falling back to local verification.`);
     const extendedDelegatedToCi = !ctx.localExtended;
-    const result = runVerify(localFallbackScripts(), { cwd: ctx.projectDir });
+    const fallbackScripts = localFallbackScripts();
+    const readiness = await prepareLocalVerification(fallbackScripts);
+    if (readiness.outcome === "refused") {
+      return { ...refusedResult(readiness), ciOutcome: { kind: "local_fallback", reason: status.reason, extendedDelegatedToCi } };
+    }
+    const result = runVerify(fallbackScripts, { cwd: ctx.projectDir });
     return {
-      ...result, ciOutcome: { kind: "local_fallback", reason: status.reason, extendedDelegatedToCi },
+      ...result, readiness, ciOutcome: { kind: "local_fallback", reason: status.reason, extendedDelegatedToCi },
       command: commandFromSteps(result.steps), tier: tierFromSteps(result.steps),
     };
   };
@@ -671,6 +734,13 @@ export function buildReviewLoopDeps(
         command: result.command ?? null,
         tier: result.tier ?? null,
         steps: result.steps.map((s) => ({ name: s.name, ok: s.ok })),
+        // FG-566: the field the operator surface reads. `null` means readiness was
+        // never consulted at all — the covering-evidence / CI-reuse path returned
+        // before any local provisioning was considered, which is exactly the "CI
+        // reuse stays first-class" invariant made observable. An OLDER event
+        // carries no such field and every consumer must keep rendering it
+        // byte-identically.
+        readiness: result.readiness ?? null,
       },
     });
     return result;
@@ -979,6 +1049,15 @@ export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void 
       console.log(`  max rounds:   ${opts.maxRounds}`);
       console.log(`  reviewer:     red-wide (read-only)   fixer: engineer`);
       console.log(`  stops on:     passed | blocked_by_reviewer | needs_fix_max_rounds | verification_failed | fixer_failed | fixer_out_of_scope | closeout_guidance_only | reviewer_failed`);
+      // FG-566: described in PROSE, deliberately without the literal outcome token.
+      // That token is reserved for a run that actually hit it — printing it in a
+      // preamble every run would make "did this run fail on the environment?"
+      // un-greppable, which is the diagnosability this ticket exists to restore.
+      console.log(
+        `  readiness:    before any LOCAL verification the workspace is made execution-ready (or the loop stops ` +
+        `before round 1 with a distinct environment/readiness outcome, consuming no round and dispatching neither ` +
+        `reviewer nor fixer); reused CI evidence never triggers a local install`,
+      );
       console.log(
         `  verification: reuse a passing host row or green CI first; if the required CI checks are in flight, ` +
         `wait/poll for them (default up to 20m, 30s interval — FORGE_CI_WAIT_TIMEOUT_SECONDS/FORGE_CI_POLL_SECONDS) ` +
@@ -1120,6 +1199,23 @@ export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void 
         // orchestrator's post-merge job); the code review is otherwise clean. Not
         // auto-closeable — the orchestrator decides after merge + verification.
         console.log(`\n✗ not closeable — stop reason: closeout_guidance_only. The reviewer's only remaining findings are backlog closeout guidance (orchestrator post-merge work), which the fixer is not asked to perform. Review the closeout guidance in the note, then close after merge + verification if appropriate.`);
+        process.exitCode = 1;
+      } else if (outcome.stopReason === "verification_environment_unavailable") {
+        // FG-566: an ENVIRONMENT fault, printed as one. It must never read like a
+        // verdict on the reviewed code — the terminal line carries the same literal
+        // `verification_environment_unavailable` token the note and the events do,
+        // names the refusal reason, and states plainly that no round was consumed
+        // and neither agent ran.
+        const env = outcome.environment;
+        console.log(
+          `\n✗ not closeable — stop reason: verification_environment_unavailable` +
+          `${env?.reason ? ` (${env.reason})` : ""}. Forge could not establish an execution-ready verification environment` +
+          `${env?.workspace ? ` in ${env.workspace}` : ""}, so NO verification ran: this is NOT a verdict on the reviewed code. ` +
+          `Rounds consumed: ${outcome.rounds.length}; the reviewer was NOT dispatched and the fixer was NOT dispatched.` +
+          `${env?.command ? `\n  setup command: ${env.command}` : ""}` +
+          `${env?.stderrTail ? `\n  stderr tail:\n${env.stderrTail}` : ""}` +
+          `${env?.message ? `\n  ${env.message}` : ""}`,
+        );
         process.exitCode = 1;
       } else {
         console.log(`\n✗ not closeable — stop reason: ${outcome.stopReason}. The ticket is left open.`);

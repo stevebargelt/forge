@@ -10,7 +10,7 @@ import { GovernanceView } from "./governance.js";
 import { BacklogView } from "./backlog.js";
 import { initialView, hashForView } from "./view-routing.js";
 import {
-  eventBadgeClass, reviewLoopVerificationDetail, hostGateDetail,
+  eventBadgeClass, eventBadgeText, reviewLoopVerificationDetail, hostGateDetail,
   groupVerificationRows, verificationRowBadge, evidenceState,
 } from "./verification-render.js";
 
@@ -940,7 +940,7 @@ function TaskDetail({ taskId, onClose }) {
             ${detail.events.map((e, i) => html`
               <div class="row" key=${i} style="gap: 8px; padding: 2px 0; align-items: baseline;">
                 <span class="muted mono" style="font-size: 11px; min-width: 76px;">${formatClock(e.createdAt)}</span>
-                <span class="badge ${eventBadgeClass(e)}">${e.eventType}</span>
+                <span class="badge ${eventBadgeClass(e)}">${eventBadgeText(e)}</span>
                 ${eventDetail(e) ? html`<span class="muted" style="font-size: 12px;">${eventDetail(e)}</span>` : null}
               </div>
             `)}
