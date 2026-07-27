@@ -39,6 +39,7 @@ import {
   type LaneState,
 } from "../store/publications.js";
 import { integrationGateTimeoutMs } from "./integration-gate.js";
+import { hostReadinessSetupTimeoutMs } from "./host-readiness-store.js";
 import { describeWait } from "./project-identity.js";
 
 /** Base lease TTL. Comfortably longer than a poll tick, so an ordinary scheduling
@@ -54,6 +55,29 @@ export const LANE_POLL_MS = 12_000;
  *  silently desync the lease from the thing it is covering. */
 export function gateSpanLeaseMs(): number {
   return integrationGateTimeoutMs() + 60_000;
+}
+
+/** FG-566: the lease a holder must carry across the READINESS span that now
+ *  precedes the gate — the host-side dependency setup for the publication
+ *  candidate. COMPOSED, never a literal: the setup ceiling
+ *  (hostReadinessSetupTimeoutMs) PLUS the gate span it protects, read from their
+ *  own modules so raising either can never silently desync the lease.
+ *
+ *  It covers BOTH spans deliberately. A cold `npm ci` smuggled into the gate's
+ *  budget would let the holder's lease lapse mid-install and be taken over — the
+ *  environment fault would then surface as `lane_taken_over`, which is a
+ *  publication-ordering verdict for what is really an install that took longer
+ *  than the gate's ceiling. So readiness is pre-extended BEFORE the gate's own
+ *  pre-extension, with room for both. */
+export function readinessSpanLeaseMs(): number {
+  return hostReadinessSetupTimeoutMs() + gateSpanLeaseMs();
+}
+
+/** Cover the SYNCHRONOUS readiness setup (an execFileSync install — no timer can
+ *  fire inside it) the same way preExtendLeaseForGate covers the gate. Call
+ *  immediately before preparation, ahead of the gate pre-extension. */
+export function preExtendLeaseForReadiness(attemptId: string): void {
+  extendLaneLease(attemptId, readinessSpanLeaseMs());
 }
 
 /** Our lane entry was taken over by a later attempt while we were still alive: a
@@ -169,8 +193,18 @@ export const LANE_HEARTBEAT_MS = 20_000;
  *
  *  Validation is both — an async red dispatch wrapped around a synchronous gate —
  *  so it gets both. */
-export function startLeaseHeartbeat(attemptId: string, everyMs: number = LANE_HEARTBEAT_MS): { stop: () => void } {
-  const timer = setInterval(() => renewLease(attemptId), everyMs);
+export function startLeaseHeartbeat(
+  attemptId: string,
+  everyMs: number = LANE_HEARTBEAT_MS,
+  // FG-566: the TTL each tick renews TO. It matters when a heartbeat wraps a span
+  // that was ALSO pre-extended: a tick that fired during the async part of that
+  // span (waiting on the readiness lock, say) would otherwise renew back down to
+  // the 90s base and leave the following SYNCHRONOUS install running on a lease
+  // shorter than its own ceiling — reintroducing the takeover the pre-extension
+  // exists to prevent, one span further along.
+  ttlMs: number = LANE_BASE_TTL_MS,
+): { stop: () => void } {
+  const timer = setInterval(() => renewLease(attemptId, ttlMs), everyMs);
   // Never hold the process open on the publisher's account.
   timer.unref?.();
   return { stop: () => clearInterval(timer) };

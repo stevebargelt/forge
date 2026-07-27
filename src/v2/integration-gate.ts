@@ -15,6 +15,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { pinnedVerificationEnv } from "./host-readiness.js";
 
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -67,6 +68,11 @@ export function runIntegrationGate(dir: string): IntegrationGateResult {
   try {
     const output = execFileSync("npm", ["run", "test:unit"], {
       cwd: dir,
+      // FG-566: the SAME pinned interpreter/PATH the readiness preflight certified
+      // this candidate under. Without it the gate resolves whatever node the
+      // ambient environment offers, and the ABI assertion made moments earlier
+      // covers a different process than the one that runs.
+      env: pinnedVerificationEnv("integration-gate"),
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout,

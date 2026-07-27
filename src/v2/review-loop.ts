@@ -9,6 +9,7 @@
 
 import { execFileSync } from "node:child_process";
 import { z } from "zod";
+import { pinnedVerificationEnv } from "./host-readiness.js";
 
 // ── Slice 1: commit-range resolution ─────────────────────────────────────────
 
@@ -258,7 +259,22 @@ export function parseReviewerVerdict(raw: unknown): ParsedVerdict {
 
 // ── Slice 3: deterministic verification ──────────────────────────────────────
 
-export type VerificationStep = { name: string; ok: boolean; output: string };
+// FG-566: `command` and `tier` are STEP-LEVEL PROVENANCE, and they are load-bearing.
+// The FG-356 incident reported `deterministic verification step 'typecheck' failed:`
+// with nothing after the colon — no command, no tier, no stderr — and diagnosis took
+// a manual `ls node_modules`. FG-625 owns the POST-FIXER path; this is the
+// ROUND-ENTRY verifier, so fixing FG-625 alone would never have surfaced it. Both
+// fields are optional so a caller that synthesizes a step from CI evidence (rather
+// than running anything locally) is not forced to invent a command it never ran.
+export type VerificationStep = {
+  name: string;
+  ok: boolean;
+  output: string;
+  /** The command actually run for this step, verbatim. */
+  command?: string;
+  /** Which gate tier the step belongs to. */
+  tier?: "fast" | "extended";
+};
 // FG-474: reusedEvidence is set ONLY when verification was satisfied by covering
 // evidence (a host_verifications row or green CI check) instead of actually
 // running typecheck/test — see buildReviewLoopDeps.verify in
@@ -278,9 +294,40 @@ export type VerificationStep = { name: string; ok: boolean; output: string };
 //    `reason` is the operator-facing explanation and `extendedDelegatedToCi`
 //    records whether test:extended was skipped locally (the review-loop
 //    default — see --local-extended) or actually run.
+// FG-566: the DISTINCT THIRD verification state, carried as its own field rather
+// than folded into `ok`. An unrunnable ENVIRONMENT is neither a pass nor a fail,
+// and the loop branches on THIS field BEFORE it ever consults `ok`/`steps` — which
+// is the whole fix: modelling an environment fault as ok:false is what made the
+// loop convert it into fixer findings, short-circuit the reviewer and burn a
+// round against a failure no code change could fix.
+//
+// The vocabulary is the readiness contract's own (src/v2/host-readiness.ts); the
+// loop never re-derives or re-classifies it.
+//   prepared     — readiness ran a setup and the workspace is now execution-ready
+//   reused       — a prior assertion for this exact binding still holds
+//   not_required — nothing to establish (no commands to cover, no dependency graph,
+//                  or a workspace forge did not provision and must not touch)
+//   refused      — one classified refusal; NO verification ran
+// The field being ABSENT means readiness was never consulted at all — the CI-reuse
+// path returns before any local provisioning is considered, and that absence is
+// how "CI reuse stays first-class" is observable.
+export type VerificationReadiness = {
+  outcome: "prepared" | "reused" | "refused" | "not_required";
+  /** The refusal reason from the shared vocabulary. Refusals only. */
+  reason?: string;
+  workspace?: string;
+  /** The setup command that was run (or would have been). */
+  command?: string;
+  exitStatus?: number | null;
+  stderrTail?: string;
+  message?: string;
+};
+
 export type VerificationResult = {
   ok: boolean;
   steps: VerificationStep[];
+  /** FG-566: see VerificationReadiness. */
+  readiness?: VerificationReadiness;
   reusedEvidence?: string;
   ciOutcome?:
     | { kind: "reused_after_wait" }
@@ -288,11 +335,21 @@ export type VerificationResult = {
     | { kind: "local_fallback"; reason: string; extendedDelegatedToCi: boolean };
 };
 
+/** FG-566: the ONE predicate every consumer branches on. Never `!v.ok` — an
+ *  environment refusal and a code failure are different facts. */
+export function isEnvironmentUnavailable(v: VerificationResult): boolean {
+  return v.readiness?.outcome === "refused";
+}
+
 export type CommandRunner = (cmd: string, args: string[]) => { ok: boolean; output: string };
 function makeDefaultRunner(cwd?: string): CommandRunner {
   return (cmd, args) => {
     try {
-      const output = execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], cwd });
+      // FG-566: the same pinned PATH/interpreter the readiness preflight certified
+      // this workspace under — the assertion covers THIS process or it covers
+      // nothing.
+      const env = pinnedVerificationEnv("review-loop");
+      const output = execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], cwd, env });
       return { ok: true, output };
     } catch (e) {
       const err = e as { stdout?: Buffer | string; stderr?: Buffer | string };
@@ -314,10 +371,22 @@ export function runVerification(
   const steps: VerificationStep[] = [];
   for (const name of ["typecheck", "test", "test:extended"]) {
     if (typeof scripts[name] !== "string") continue;
-    const { ok, output } = run("npm", ["run", "--silent", name]);
-    steps.push({ name, ok, output });
+    const args = ["run", "--silent", name];
+    const { ok, output } = run("npm", args);
+    // FG-566: record the command and tier ON THE STEP, at the only place that
+    // knows them for certain — the site that ran it.
+    steps.push({ name, ok, output, command: `npm ${args.join(" ")}`, tier: name === "test:extended" ? "extended" : "fast" });
   }
   return { ok: steps.length > 0 && steps.every((s) => s.ok), steps };
+}
+
+/** The verification commands a `runVerification(scripts)` call will actually run.
+ *  Shared with the readiness preflight so the covered command set recorded in
+ *  readiness evidence can never drift from what the verification runs. */
+export function verificationCommandSet(scripts: Record<string, unknown>): string[] {
+  return ["typecheck", "test", "test:extended"]
+    .filter((name) => typeof scripts[name] === "string")
+    .map((name) => `npm run --silent ${name}`);
 }
 
 // ── Slice 4: the bounded loop engine ─────────────────────────────────────────
@@ -368,7 +437,13 @@ export type StopReason =
   | "fixer_out_of_scope"    // the fixer mutated orchestrator-owned paths (backlog/, docs/, etc.)
   | "scope_guard_revert_failed" // FG-502: a disallowed path's revert could not be verified clean — round aborted, nothing staged/committed
   | "closeout_guidance_only" // FG-462: reviewer's ONLY remaining asks are backlog closeout (orchestrator post-merge work); nothing for the fixer
-  | "reviewer_failed";      // the reviewer dispatch failed or returned an invalid verdict
+  | "reviewer_failed"       // the reviewer dispatch failed or returned an invalid verdict
+  /** FG-566: the verification ENVIRONMENT could not be established, so no
+   *  verification ever ran. Consumes ZERO review rounds and dispatches NEITHER
+   *  reviewer NOR fixer — environment preparation is not a review round, a
+   *  reviewer verdict, or a fixer attempt. Never conflated with
+   *  `verification_failed`, which is a verdict on the code. */
+  | "verification_environment_unavailable";
 
 export type RoundRecord = {
   round: number;
@@ -397,12 +472,32 @@ export type RoundRecord = {
   reviewerModelErrorRetry?: ReviewerModelErrorRetry;
 };
 
+/** The LAST bytes of a step's output. FG-566: the failure's own words live at the
+ *  END of a failed npm run (`ERR_MODULE_NOT_FOUND`, the tsc error list's tail, npm's
+ *  error summary); a head slice of a long log is what left the FG-356 findings
+ *  reporting a step name and a bare colon. */
+function stepOutputTail(output: string, chars = 2000): string {
+  const trimmed = output.trim();
+  if (trimmed.length === 0) return "(no output captured)";
+  return trimmed.length <= chars ? trimmed : `…${trimmed.slice(trimmed.length - chars)}`;
+}
+
 /** Turn failed verification steps into fixer findings (unanchored — typecheck/test
- *  output isn't generically file/line addressable; the fixer reads the output). */
+ *  output isn't generically file/line addressable; the fixer reads the output).
+ *  FG-566: each finding NAMES the command and the tier and carries a stderr tail.
+ *  A finding that reports only a step name is not diagnosable — that is the
+ *  round-entry half of the discarded-step-detail defect (FG-625 owns the
+ *  post-fixer half). */
 function verificationFindings(v: VerificationResult): Finding[] {
   return v.steps
     .filter((s) => !s.ok)
-    .map((s) => ({ summary: `deterministic verification step '${s.name}' failed:\n${s.output.slice(0, 2000)}`, unanchored: true }));
+    .map((s) => ({
+      summary:
+        `deterministic verification step '${s.name}' failed ` +
+        `(command: ${s.command ?? "(not recorded)"}, tier: ${s.tier ?? "(not recorded)"}):\n` +
+        stepOutputTail(s.output),
+      unanchored: true,
+    }));
 }
 
 export type ReviewLoopOutcome = {
@@ -410,6 +505,9 @@ export type ReviewLoopOutcome = {
   /** true ONLY when stopReason === "passed" — the close guardrail (#301). */
   closeable: boolean;
   rounds: RoundRecord[];
+  /** FG-566: set ONLY with stopReason "verification_environment_unavailable" —
+   *  the classified refusal, verbatim. No RoundRecord is ever pushed for it. */
+  environment?: VerificationReadiness;
 };
 
 type Awaitable<T> = T | Promise<T>;
@@ -418,6 +516,8 @@ type Awaitable<T> = T | Promise<T>;
 // pure unit tests keep returning plain values. The loop control flow is unchanged
 // from the reviewed sync version — only `await`ed.
 export type ReviewLoopDeps = {
+  /** FG-566: may report the DISTINCT THIRD state via `readiness.outcome ===
+   *  "refused"`. The loop reads THAT before it reads `ok`. */
   verify: () => Awaitable<VerificationResult>;
   review: (verification: VerificationResult) => Awaitable<ReviewDispatch>;
   fix: (findings: Finding[]) => Awaitable<FixDispatch>;
@@ -436,6 +536,22 @@ export async function runReviewLoop(opts: { maxRounds?: number; ticketId?: strin
 
   for (let round = 1; round <= maxRounds; round++) {
     const verification = await deps.verify();
+
+    // FG-566: the environment could not be made runnable, so NO verification ever
+    // ran. Checked BEFORE `ok` and BEFORE `steps` — a refusal that also carries the
+    // failed steps of a dependency-less local run must still stop here, never fall
+    // through to the findings-and-fixer path. NO RoundRecord is pushed for it —
+    // environment preparation is not a review round — so a refusal on round 1
+    // returns with `rounds` empty and a refusal on a later round leaves only the
+    // rounds that genuinely ran.
+    if (isEnvironmentUnavailable(verification)) {
+      return {
+        stopReason: "verification_environment_unavailable",
+        closeable: false,
+        rounds,
+        environment: verification.readiness!,
+      };
+    }
 
     // Verification first. If it fails, do NOT review — the failure is the work.
     if (!verification.ok) {
@@ -587,6 +703,14 @@ export type ReviewLoopNoteMeta = {
   remoteTrust: ReviewedTipTrust;
 };
 
+/** One finding as note lines: the anchor + its first line, then every remaining
+ *  line indented under it. FG-566 — a multi-line finding (a verification failure
+ *  carrying command, tier and a stderr tail) must survive into the note intact. */
+function renderFindingLines(where: string, summary: string): string[] {
+  const [first = "", ...rest] = summary.split("\n");
+  return [`  - ${where} ${first}`, ...rest.map((line) => `      ${line}`)];
+}
+
 /** Render the loop's outcome as a durable markdown artifact: commit range,
  *  per-round verdicts/verification/findings/fixes, and the stop reason. Pure. */
 export function renderReviewLoopNote(meta: ReviewLoopNoteMeta, outcome: ReviewLoopOutcome): string {
@@ -633,6 +757,26 @@ export function renderReviewLoopNote(meta: ReviewLoopNoteMeta, outcome: ReviewLo
   const span = meta.range.spansUnmatched ? " — span includes unrelated commits; reviewed the specific shas" : "";
   L.push(`- **commit range:** \`${meta.range.diffRange || "(none)"}\` (${meta.range.mode}${span})`);
   L.push(`- **commits:** ${meta.range.shas.join(", ") || "(none)"}`, "");
+
+  // FG-566: the readiness section. The literal token `verification_environment_unavailable`
+  // is what makes this outcome greppable and unmistakable for a code verdict on
+  // every surface that renders the note.
+  if (outcome.environment) {
+    const env = outcome.environment;
+    L.push(`## Verification environment — verification_environment_unavailable`, "");
+    L.push(`- **readiness:** REFUSED (${env.reason ?? "(reason not recorded)"})`);
+    L.push(`- **workspace:** \`${env.workspace ?? "(not recorded)"}\``);
+    L.push(`- **setup command:** \`${env.command ?? "(not recorded)"}\``);
+    if (env.exitStatus !== undefined && env.exitStatus !== null) L.push(`- **exit status:** ${env.exitStatus}`);
+    L.push(`- **rounds consumed:** ${outcome.rounds.length} — the reviewer was NOT dispatched and the fixer was NOT dispatched`);
+    L.push(`- **detail:** ${env.message ?? "no verification ran; this is NOT a verdict on the reviewed code"}`);
+    if (env.stderrTail) {
+      L.push(`- **stderr tail:**`, "```");
+      for (const line of env.stderrTail.split("\n")) L.push(line);
+      L.push("```");
+    }
+    L.push("");
+  }
 
   for (const r of outcome.rounds) {
     L.push(`## Round ${r.round}`);
@@ -681,7 +825,11 @@ export function renderReviewLoopNote(meta: ReviewLoopNoteMeta, outcome: ReviewLo
       L.push(`- findings:`);
       for (const f of generalFindings) {
         const where = f.unanchored ? "[unanchored]" : `${f.file}:${f.line}`;
-        L.push(`  - ${where} ${f.summary.split("\n")[0]}`);
+        // FG-566: NO first-line truncation. `summary.split("\n")[0]` is exactly what
+        // reduced the FG-356 rounds to `deterministic verification step 'typecheck'
+        // failed:` with nothing after the colon — the command, tier and stderr the
+        // finding carries were all on the discarded lines.
+        L.push(...renderFindingLines(where, f.summary));
       }
     }
     if (r.closeoutFindings && r.closeoutFindings.length > 0) {

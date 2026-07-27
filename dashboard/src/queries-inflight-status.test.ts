@@ -55,10 +55,12 @@ const IN_FLIGHT_STATUSES = ALL_STATUSES.filter((s) => EXPECTED_IN_FLIGHT[s]);
 const UNKNOWN_STATUS = "not_a_task_status";
 
 /** Badge tokens in the shell CSS that are legitimately NOT TaskStatus values:
- *  verdict badges (pass/fail) and the derived reconcile-candidate marker. Every
- *  other `.badge.status-X` rule must name a real status — that is what keeps a
- *  phantom's CSS from creeping back in. */
-const NON_STATUS_BADGES = new Set(["pass", "fail", "reconcile_candidate"]);
+ *  verdict badges (pass/fail), the derived reconcile-candidate marker, and
+ *  (FG-566) the readiness-refusal badge — an EVENT classification, not a task
+ *  status: the verification environment could not be established, so nothing ran
+ *  and no task changed state. Every other `.badge.status-X` rule must name a real
+ *  status — that is what keeps a phantom's CSS from creeping back in. */
+const NON_STATUS_BADGES = new Set(["pass", "fail", "reconcile_candidate", "environment_unavailable"]);
 
 {
   const db = new Database(join(tmpHome, "forge.db"));
