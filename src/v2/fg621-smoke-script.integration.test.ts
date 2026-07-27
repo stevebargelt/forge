@@ -35,17 +35,29 @@ const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const SCRIPT = join(REPO_ROOT, "scripts", "fg621-clone-boundary-smoke.sh");
 const SCRIPT_SRC = readFileSync(SCRIPT, "utf8");
 
-// A PATH with no `docker` on it, on macOS and Linux alike. Deliberately not
-// derived from process.env.PATH: on the operator's host a real docker IS on
-// PATH, and this file's whole job is to be deterministic about its absence.
-const NO_DOCKER_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
+// The standard tool dirs, carrying the git/mktemp/coreutils the script needs but
+// NOT the operator's macOS docker (which lives in /usr/local/bin or ~/.docker/bin).
+// It is NOT docker-free in general — a Linux CI runner installs docker to
+// /usr/bin/docker — so it is only ever safe for the cases that shadow docker with
+// stubDockerPath. The genuine-absence case below uses EMPTY_PATH instead.
+const TOOLS_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
+
+// A PATH nothing at all is on, so `command -v docker` cannot find a docker on ANY
+// host. Usable only because the docker check is the script's FIRST prerequisite
+// and everything preceding it (case, [, echo, command, exit) is a bash builtin.
+const EMPTY_PATH = "";
+
+// The interpreter, resolved to an absolute path ONCE. A case that hands the
+// script an empty PATH must not thereby hide bash itself from the spawn.
+const BASH =
+  spawnSync("bash", ["-c", "command -v bash"], { encoding: "utf8" }).stdout?.trim() || "/bin/bash";
 
 type Run = { status: number | null; stdout: string; stderr: string; all: string };
 
 function runScript(args: string[], env: Record<string, string>): Run {
-  const r = spawnSync("bash", [SCRIPT, ...args], {
+  const r = spawnSync(BASH, [SCRIPT, ...args], {
     encoding: "utf8",
-    env: { ...process.env, PATH: NO_DOCKER_PATH, ...env },
+    env: { ...process.env, PATH: TOOLS_PATH, ...env },
     timeout: 120_000,
   });
   const stdout = r.stdout ?? "";
@@ -60,7 +72,7 @@ function stubDockerPath(body: string): string {
   const bin = join(dir, "docker");
   writeFileSync(bin, `#!/usr/bin/env bash\n${body}\n`);
   chmodSync(bin, 0o755);
-  return `${dir}:${NO_DOCKER_PATH}`;
+  return `${dir}:${TOOLS_PATH}`;
 }
 
 /** A real parent repo the script can clone --shared from: one commit, packed
@@ -153,7 +165,11 @@ test("FG-621 smoke script is committed executable and syntactically valid", () =
 // ── fail-closed on every missing prerequisite ────────────────────────────────
 
 test("FG-621 smoke exits nonzero when docker is not on PATH", () => {
-  const r = runScript([], {});
+  // EMPTY_PATH, not the standard tool dirs: a Linux runner keeps docker at
+  // /usr/bin/docker, so handing the script /usr/bin would let it sail past this
+  // prerequisite and refuse at the NEXT one — proving fail-closed, but not this
+  // branch. An empty PATH is the only way to prove genuine absence on every host.
+  const r = runScript([], { PATH: EMPTY_PATH });
   assert.notEqual(r.status, 0, "a missing docker binary must never exit 0");
   assert.match(r.all, /FATAL/);
   assert.match(r.all, /no 'docker' on PATH/);

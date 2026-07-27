@@ -141,6 +141,13 @@ function setPlatform(p: string): void {
   Object.defineProperty(process, "platform", { value: p, configurable: true });
 }
 
+// FG-621: a task workspace is a `git clone`, which inherits none of the source
+// repo's LOCAL config, so a simulated agent commit must carry its own identity —
+// exactly as the agent container supplies one via GIT_AUTHOR_*/GIT_COMMITTER_*.
+// Without it these commits resolve identity from the operator's global config,
+// which exists on a dev machine and not on a CI runner.
+const AGENT_IDENTITY = ["-c", "user.name=Agent", "-c", "user.email=agent@forge.test"];
+
 function makeTmpDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "forge-fg352-disp-"));
   tmpDirs.push(dir);
@@ -285,7 +292,7 @@ test("fg352 (2): successful worktree task fast-forwards changes into run.project
     // Write a file and commit it on the worktree branch (simulating agent work).
     writeFileSync(join(worktreePath!, "output.ts"), "export const x = 1;\n");
     execFileSync("git", ["add", "."], { cwd: worktreePath!, stdio: "ignore" });
-    execFileSync("git", ["commit", "-m", "task output"], { cwd: worktreePath!, stdio: "ignore" });
+    execFileSync("git", [...AGENT_IDENTITY, "commit", "-m", "task output"], { cwd: worktreePath!, stdio: "ignore" });
 
     writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, files_modified: ["output.ts"] });
     writeFileSync(stderrPath, "");
@@ -341,7 +348,7 @@ test("fg352 (3): downstream sequential step sees previous step's merged changes"
       // Step 1 (build): write and commit output.ts on the worktree branch.
       writeFileSync(join(worktreePath!, "output.ts"), "export const x = 1;\n");
       execFileSync("git", ["add", "."], { cwd: worktreePath!, stdio: "ignore" });
-      execFileSync("git", ["commit", "-m", "step1 output"], { cwd: worktreePath!, stdio: "ignore" });
+      execFileSync("git", [...AGENT_IDENTITY, "commit", "-m", "step1 output"], { cwd: worktreePath!, stdio: "ignore" });
       writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, files_modified: ["output.ts"] });
     } else {
       // Step 2 (verify): check that output.ts from step 1 is visible in the worktree.
@@ -401,7 +408,7 @@ test("fg352 (4): merge failure leaves task failed with failure_kind merge_confli
     // Commit on the worktree branch (task output).
     writeFileSync(join(worktreePath!, "task.ts"), "export const y = 2;\n");
     execFileSync("git", ["add", "."], { cwd: worktreePath!, stdio: "ignore" });
-    execFileSync("git", ["commit", "-m", "worktree commit"], { cwd: worktreePath!, stdio: "ignore" });
+    execFileSync("git", [...AGENT_IDENTITY, "commit", "-m", "worktree commit"], { cwd: worktreePath!, stdio: "ignore" });
 
     // Land a CONFLICTING commit on the target: the same file, different content.
     //
@@ -469,7 +476,7 @@ test("fg352 (5): merge failure retains worktree directory and task branch", asyn
     // Commit on worktree branch.
     writeFileSync(join(worktreePath!, "task.ts"), "export const a = 1;\n");
     execFileSync("git", ["add", "."], { cwd: worktreePath!, stdio: "ignore" });
-    execFileSync("git", ["commit", "-m", "worktree commit"], { cwd: worktreePath!, stdio: "ignore" });
+    execFileSync("git", [...AGENT_IDENTITY, "commit", "-m", "worktree commit"], { cwd: worktreePath!, stdio: "ignore" });
 
     // A CONFLICTING commit on the target — same file, different content. See the
     // note in fg352 (4): under FG-425 a merely-diverged target is rebuilt onto and
@@ -542,7 +549,7 @@ test("fg352 (6): successful merge removes worktree directory and task branch", a
     // Commit agent output on the worktree branch.
     writeFileSync(join(worktreePath!, "cleanup-test.ts"), "export const x = 42;\n");
     execFileSync("git", ["add", "."], { cwd: worktreePath!, stdio: "ignore" });
-    execFileSync("git", ["commit", "-m", "task output"], { cwd: worktreePath!, stdio: "ignore" });
+    execFileSync("git", [...AGENT_IDENTITY, "commit", "-m", "task output"], { cwd: worktreePath!, stdio: "ignore" });
 
     writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, files_modified: ["cleanup-test.ts"] });
     return 0;
@@ -626,7 +633,7 @@ test("fg352 (7): no downstream step dispatched after merge failure", async () =>
       // conflict to exercise the merge-failure path.)
       writeFileSync(join(worktreePath!, "task.ts"), "x");
       execFileSync("git", ["add", "."], { cwd: worktreePath!, stdio: "ignore" });
-      execFileSync("git", ["commit", "-m", "worktree commit"], { cwd: worktreePath!, stdio: "ignore" });
+      execFileSync("git", [...AGENT_IDENTITY, "commit", "-m", "worktree commit"], { cwd: worktreePath!, stdio: "ignore" });
 
       writeFileSync(join(repo, "task.ts"), "conflicting content on the target");
       execFileSync("git", ["add", "."], { cwd: repo, stdio: "ignore" });

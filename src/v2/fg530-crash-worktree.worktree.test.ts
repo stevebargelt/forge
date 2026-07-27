@@ -162,7 +162,10 @@ const agentWork = ({ projectMountHost }: { projectMountHost: string | undefined 
   const wt = projectMountHost;
   writeFileSync(join(wt, COMMITTED_WORK), "export const work = 1;\n");
   execFileSync("git", ["add", "."], { cwd: wt, stdio: "ignore" });
-  execFileSync("git", ["commit", "-q", "-m", "agent output"], { cwd: wt, stdio: "ignore" });
+  // FG-621: the workspace is a `git clone`, which inherits none of the source
+  // repo's LOCAL config, so this commit must carry its own identity — as the
+  // agent container supplies one via GIT_AUTHOR_*/GIT_COMMITTER_*.
+  execFileSync("git", ["-c", "user.name=Agent", "-c", "user.email=agent@forge.test", "commit", "-q", "-m", "agent output"], { cwd: wt, stdio: "ignore" });
   writeFileSync(join(wt, UNCOMMITTED_SENTINEL), "work the agent had not committed when the host died\n");
 };
 

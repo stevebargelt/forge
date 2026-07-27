@@ -271,6 +271,11 @@ function initGitRepo(dir: string): void {
   execFileSync("git", ["commit", "-m", "initial"], { cwd: dir, stdio: "ignore" });
 }
 
+// FG-621: a task workspace is a `git clone`, which inherits none of the source
+// repo's LOCAL config, so a simulated agent commit must carry its own identity —
+// exactly as the agent container supplies one via GIT_AUTHOR_*/GIT_COMMITTER_*.
+const AGENT_IDENTITY = ["-c", "user.name=Agent", "-c", "user.email=agent@forge.test"];
+
 function ensureDispatchTestRuntime(): void {
   const forgeHome = process.env.FORGE_HOME!;
   const runtimePath = join(forgeHome, "runtimes", "fg353-dispatch-test.yml");
@@ -768,14 +773,14 @@ test("fg353 (4): child merge conflict => merge_conflict on parent, reds never di
       // Child 0: write and commit shared.ts with content A.
       writeFileSync(join(projectMount!, "shared.ts"), "export const shared = 'A';\n");
       execFileSync("git", ["add", "."], { cwd: projectMount!, stdio: "ignore" });
-      execFileSync("git", ["commit", "-m", "child0: shared.ts = A"], { cwd: projectMount!, stdio: "ignore" });
+      execFileSync("git", [...AGENT_IDENTITY, "commit", "-m", "child0: shared.ts = A"], { cwd: projectMount!, stdio: "ignore" });
       writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-build-1-")) {
       assert.ok(projectMount, "child 1 must have /project mount");
       // Child 1: write and commit shared.ts with content B (conflicts with A).
       writeFileSync(join(projectMount!, "shared.ts"), "export const shared = 'B';\n");
       execFileSync("git", ["add", "."], { cwd: projectMount!, stdio: "ignore" });
-      execFileSync("git", ["commit", "-m", "child1: shared.ts = B"], { cwd: projectMount!, stdio: "ignore" });
+      execFileSync("git", [...AGENT_IDENTITY, "commit", "-m", "child1: shared.ts = B"], { cwd: projectMount!, stdio: "ignore" });
       writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else {
       writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
@@ -971,13 +976,13 @@ test("fg353 (6): cleanup removes proven-merged child/integration worktrees; conf
       assert.ok(projectMount, "child 0 must have /project mount");
       writeFileSync(join(projectMount!, "shared.ts"), "export const shared = 'A';\n");
       execFileSync("git", ["add", "."], { cwd: projectMount!, stdio: "ignore" });
-      execFileSync("git", ["commit", "-m", "child0: conflict"], { cwd: projectMount!, stdio: "ignore" });
+      execFileSync("git", [...AGENT_IDENTITY, "commit", "-m", "child0: conflict"], { cwd: projectMount!, stdio: "ignore" });
       writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-build-1-")) {
       assert.ok(projectMount, "child 1 must have /project mount");
       writeFileSync(join(projectMount!, "shared.ts"), "export const shared = 'B';\n");
       execFileSync("git", ["add", "."], { cwd: projectMount!, stdio: "ignore" });
-      execFileSync("git", ["commit", "-m", "child1: conflict"], { cwd: projectMount!, stdio: "ignore" });
+      execFileSync("git", [...AGENT_IDENTITY, "commit", "-m", "child1: conflict"], { cwd: projectMount!, stdio: "ignore" });
       writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else {
       writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
@@ -1663,14 +1668,14 @@ test("fg353 (12): merge --abort leaves integration worktree in clean non-MERGING
       // Child 0 commits shared.ts = 'A' on its branch.
       writeFileSync(join(projectMount!, "shared.ts"), "export const shared = 'A';\n");
       execFileSync("git", ["add", "."], { cwd: projectMount!, stdio: "ignore" });
-      execFileSync("git", ["commit", "-m", "child0: shared = A"], { cwd: projectMount!, stdio: "ignore" });
+      execFileSync("git", [...AGENT_IDENTITY, "commit", "-m", "child0: shared = A"], { cwd: projectMount!, stdio: "ignore" });
       writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-build-1-")) {
       assert.ok(projectMount, "child 1 must have /project mount");
       // Child 1 commits shared.ts = 'B' (will conflict with child 0 in integration).
       writeFileSync(join(projectMount!, "shared.ts"), "export const shared = 'B';\n");
       execFileSync("git", ["add", "."], { cwd: projectMount!, stdio: "ignore" });
-      execFileSync("git", ["commit", "-m", "child1: shared = B"], { cwd: projectMount!, stdio: "ignore" });
+      execFileSync("git", [...AGENT_IDENTITY, "commit", "-m", "child1: shared = B"], { cwd: projectMount!, stdio: "ignore" });
       writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else {
       writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
