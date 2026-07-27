@@ -83,8 +83,13 @@ function stubDockerPath(body: string): string {
 }
 
 /** A real parent repo the script can clone --shared from: one commit, packed
- *  refs (the packed-ref probe needs a genuinely packed ref), real objects. */
-function makeParentRepo(): string {
+ *  refs (the packed-ref probe needs a genuinely packed ref), real objects.
+ *
+ *  `looseObjects` pads the object store out to a REAL repo's scale — see the
+ *  SIGPIPE section at the bottom of this file for why a four-object store is
+ *  the blind spot rather than the baseline. They are hashed in, not committed,
+ *  so the working tree and the ref graph are identical either way. */
+function makeParentRepo(looseObjects = 0): string {
   const dir = mkdtempSync(join(tmpdir(), "fg621-parent-"));
   const git = (...a: string[]): void => {
     const r = spawnSync("git", ["-C", dir, ...a], { encoding: "utf8" });
@@ -98,6 +103,24 @@ function makeParentRepo(): string {
   git("add", "-A");
   git("commit", "-qm", "base");
   git("pack-refs", "--all");
+
+  if (looseObjects > 0) {
+    const blobs = join(dir, "blobs");
+    mkdirSync(blobs, { recursive: true });
+    const paths: string[] = [];
+    for (let i = 0; i < looseObjects; i++) {
+      const rel = join("blobs", `f${i}.txt`);
+      writeFileSync(join(dir, rel), `fg621 filler ${i}\n`);
+      paths.push(rel);
+    }
+    // One hash-object for all of them: ~0.15s for 4000, versus a fork each.
+    const r = spawnSync("git", ["-C", dir, "hash-object", "-w", "--stdin-paths"], {
+      encoding: "utf8",
+      input: `${paths.join("\n")}\n`,
+    });
+    assert.equal(r.status, 0, `bulk hash-object failed: ${r.stderr}`);
+    rmSync(blobs, { recursive: true, force: true });
+  }
   return dir;
 }
 
@@ -113,14 +136,19 @@ function probeIds(): { negatives: string[]; positives: string[]; all: string[] }
   };
 }
 
-/** A docker stub that passes every prerequisite and, on `run`, emits `log`. */
-function cannedLogStub(log: string): string {
+/** A docker stub that passes every prerequisite and, on `run`, emits `log`.
+ *  `sideEffect` is shell run before the log — it stands in for whatever the
+ *  container did to the host while the script was not looking, and so is the
+ *  only way to drive the before/after comparison down its unequal branch. */
+function cannedLogStub(log: string, sideEffect = ""): string {
   return [
     `case "$1" in`,
     `  info) exit 0 ;;`,
     `  image) exit 0 ;;`,
     `  version) echo "stub" ; exit 0 ;;`,
-    `  run) cat <<'FG621_CANNED_LOG'`,
+    `  run)`,
+    sideEffect,
+    `    cat <<'FG621_CANNED_LOG'`,
     log,
     `FG621_CANNED_LOG`,
     `    exit 0 ;;`,
@@ -134,7 +162,10 @@ function cannedLog(entries: Array<{ id: string; rc: number; out: string }>, done
   for (const e of entries) {
     lines.push(`PROBE_BEGIN ${e.id}`);
     lines.push(`PROBE_CMD ${e.id} | (canned)`);
-    lines.push(`PROBE_OUT ${e.id} | ${e.out}`);
+    // Per LINE, because that is how the container's probe() prefixes output —
+    // a multi-line `out` here is a probe that printed multi-line output, not a
+    // malformed record.
+    for (const line of e.out.split("\n")) lines.push(`PROBE_OUT ${e.id} | ${line}`);
     lines.push(`PROBE_RC ${e.id} ${e.rc}`);
   }
   if (done) lines.push("CONTAINER_DONE");
@@ -385,6 +416,160 @@ test("FG-621 smoke body covers all four AC-11 positives", () => {
   assert.ok(beforeAt > 0 && dockerAt > beforeAt, "the baseline must be captured before the container runs");
   assert.ok(afterAt > dockerAt, "the comparison snapshot must be taken after the container runs");
   assert.ok(fetchAt > afterAt, "the host capture fetch must happen after the parent-unchanged comparison");
+});
+
+// ── size-dependent death: the blind spot every case above shared ─────────────
+//
+// THE DEFECT THESE EXIST FOR. The script used `find … | head -n 1`,
+// `diff … | head -n 5` and `printf '%s' "$out" | grep -q`. Every one of those
+// readers exits as soon as it has what it needs and closes the pipe; the writer
+// then takes SIGPIPE. Under the script's `set -euo pipefail` that is a 141 the
+// shell reads as a failed command — so on /project the script died at the first
+// one and produced ZERO bytes of output, having never run a container.
+//
+// It is SIZE-DEPENDENT, and that is precisely why sixteen green tests above did
+// not catch it: makeParentRepo() holds four objects, find finishes writing
+// before head exits, and no one takes a signal. A test that only drives the
+// small case re-creates the exact blind spot.
+//
+// So each case below drives ONE reader at a scale where the writer is provably
+// still producing output when the reader would have gone away, and states the
+// scale and the reason inline. The numbers are sized against the pipe buffer —
+// 64 KiB on Linux, 16 KiB on macOS — because a writer whose whole output fits
+// in the buffer never blocks and so never notices the reader left.
+
+/** Loose objects for the first-object find. 4000 paths of ~110 bytes is ~440 KB
+ *  of find output — ~7x a Linux pipe buffer, ~27x a macOS one — so find is still
+ *  walking when `head -n 1` would have exited, on any host. Costs ~0.15s. */
+const SIGPIPE_OBJECT_COUNT = 4000;
+
+/** Parent refs and objects the "container" adds behind the script's back. 60 of
+ *  each makes both before/after diffs far longer than the 5 lines the detail
+ *  prints, which is the only condition under which `diff | head -n 5` breaks. */
+const SIGPIPE_MUTATION_COUNT = 60;
+
+/** Lines of probe output. 2000 x ~80 bytes is ~160 KB — over 2x a Linux pipe
+ *  buffer — so `printf | grep -q` blocks with the match already consumed. */
+const SIGPIPE_OUT_LINES = 2000;
+
+test("FG-621 smoke survives an object store large enough to SIGPIPE the first-object find", () => {
+  // Drives the prerequisite at line ~126 against ~4004 object files rather than
+  // four. Before the fix this exited 141 with zero output, never reaching the
+  // container at all — the reproduction from the ticket, at fixture scale.
+  const { negatives, positives } = probeIds();
+  const log = cannedLog([
+    ...positives.map((id) => ({ id, rc: 0, out: "ok" })),
+    ...negatives.map((id) => ({ id, rc: 1, out: "fatal: not a git repository" })),
+  ]);
+  const parent = makeParentRepo(SIGPIPE_OBJECT_COUNT);
+  try {
+    const r = runScript(["--project-dir", parent], { PATH: stubDockerPath(cannedLogStub(log)) });
+    assert.notEqual(r.status, 141, "SIGPIPE: a reader closed the pipe on a writer that was still going");
+    assert.ok(r.stdout.length > 0, "the script produced NO output at all — it died before adjudicating anything");
+    assert.match(r.stdout, /Paste everything between the fences into FG-621/);
+
+    // Not just "it survived": it adjudicated against the large store. The h4
+    // label carries the file count it actually compared.
+    const m = /parent object store file list identical before\/after \((\d+) files\)/.exec(r.stdout);
+    assert.ok(m, "the object-store verdict must name the store it compared");
+    assert.ok(
+      Number(m[1]) >= SIGPIPE_OBJECT_COUNT,
+      `expected >=${SIGPIPE_OBJECT_COUNT} object files in the comparison, saw ${m[1]}`,
+    );
+    for (const id of negatives) assert.match(r.stdout, new RegExp(`${id}\\s+PASS\\s+refused`), `${id} must adjudicate`);
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("FG-621 smoke REPORTS a parent that was modified, even when the diff is long", () => {
+  // The container writes 60 refs and 60 objects into the parent while the script
+  // is between its before and after snapshots. That is the AC 2 catastrophe —
+  // the one outcome that must never be misreported — and it is ALSO the only
+  // case in which the diff runs past `head -n 5`. Before the fix the detail
+  // lines died twice over: SIGPIPE from head, and diff's own "they differ"
+  // status reaching errexit through pipefail. Either killed the script before
+  // it could say the parent had been touched.
+  const { negatives, positives } = probeIds();
+  const log = cannedLog([
+    ...positives.map((id) => ({ id, rc: 0, out: "ok" })),
+    ...negatives.map((id) => ({ id, rc: 1, out: "fatal: not a git repository" })),
+  ]);
+  const parent = makeParentRepo();
+  const mutate = [
+    `    for i in $(seq 1 ${SIGPIPE_MUTATION_COUNT}); do`,
+    `      git -C '${parent}' update-ref "refs/heads/fg621-intruder-$i" HEAD`,
+    `      printf 'fg621 intruder %s\\n' "$i" | git -C '${parent}' hash-object -w --stdin >/dev/null`,
+    `    done`,
+  ].join("\n");
+  try {
+    const r = runScript(["--project-dir", parent], { PATH: stubDockerPath(cannedLogStub(log, mutate)) });
+    assert.notEqual(r.status, 141, "SIGPIPE: the long-diff path killed the script instead of reporting");
+    assert.notEqual(r.status, 0, "a parent that was written to must never exit 0");
+    assert.match(r.stdout, /Paste everything between the fences into FG-621/, "the operator must still get evidence");
+    assert.match(r.stdout, /h1_parent_refs_unchanged\s+FAIL/, "the modified ref listing must be reported");
+    assert.match(r.stdout, /h4_parent_object_store_unchanged\s+FAIL/, "the modified object store must be reported");
+    // And the detail must be non-empty — a fix that merely stopped dying while
+    // reporting an empty diff would be no better for the operator reading this.
+    assert.match(r.stdout, /h1_parent_refs_unchanged\s+FAIL.*fg621-intruder-/, "the detail must name what changed");
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("FG-621 smoke recognises a refusal buried in thousands of lines of probe output", () => {
+  // The refusal message is on line 1 of 2000, which is the worst case for
+  // `printf '%s' "$out" | grep -q`: grep matches immediately and exits, printf
+  // takes SIGPIPE, pipefail makes the pipeline nonzero — and because it sits in
+  // an `if` condition, errexit does NOT fire. The refusal silently reads as NO
+  // refusal and every AC 2 negative flips to FAIL. Fails safe, reports wrong.
+  const { negatives, positives } = probeIds();
+  const noise = Array.from({ length: SIGPIPE_OUT_LINES }, (_, i) => `noise ${i} ${"x".repeat(64)}`);
+  const log = cannedLog([
+    // "commit" first for the same reason: it is what expect_success's own
+    // `grep -qF "$want"` is looking for, so grep leaves the pipe immediately.
+    ...positives.map((id) => ({ id, rc: 0, out: ["commit", ...noise].join("\n") })),
+    ...negatives.map((id) => ({ id, rc: 1, out: ["fatal: not a git repository", ...noise].join("\n") })),
+  ]);
+  const parent = makeParentRepo();
+  try {
+    const r = runScript(["--project-dir", parent], { PATH: stubDockerPath(cannedLogStub(log)) });
+    assert.notEqual(r.status, 141);
+    for (const id of negatives) {
+      assert.match(
+        r.stdout,
+        new RegExp(`${id}\\s+PASS\\s+refused rc=1: fatal: not a git repository`),
+        `${id}: a real refusal must be recognised regardless of how much the probe printed`,
+      );
+    }
+    // The one-line summary must be the FIRST line, not the whole 2000-line dump.
+    assert.doesNotMatch(r.stdout, /refused rc=1:.*noise 0/, "the verdict must carry one line, not the whole output");
+    // The positive side of the same reader: expect_success's substring check.
+    // (p4/p7 want values this canned log cannot know, so they stay unasserted.)
+    assert.match(
+      r.stdout,
+      /p3_parent_object_readable\s+PASS\s+ok rc=0: commit/,
+      "a wanted substring must be found regardless of how much followed it",
+    );
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("FG-621 smoke builds no pipe whose reader can exit before its writer", () => {
+  // A structural backstop for the three cases above: they prove today's readers
+  // are safe at scale, this stops a new `| head` / `| grep -q` from being added
+  // back. The whole class is "reader exits early, writer takes SIGPIPE, pipefail
+  // + errexit kills a script that had already got the right answer".
+  const host = SCRIPT_SRC.replace(/^CONTAINER_SCRIPT=\$\(cat <<'CEOF'$[\s\S]*?^CEOF$/m, "");
+  const offenders = host
+    .split("\n")
+    .filter((l) => !/^\s*#/.test(l))
+    // `[^|]` so an `||` list — two pipe CHARACTERS, no pipeline — is not a hit.
+    .filter((l) => /[^|]\|\s*(head|grep\s+-[A-Za-z]*q)\b/.test(l));
+  assert.deepEqual(offenders, [], "pipe into an early-exiting reader — use a here-string or -print -quit");
+  assert.match(SCRIPT_SRC, /-print -quit/, "the first-object find must stop itself rather than be stopped by head");
+  assert.match(SCRIPT_SRC, /set -euo pipefail/, "and the fix must not have been to weaken the error handling");
 });
 
 // ── it stays out of every tier and out of CI ─────────────────────────────────

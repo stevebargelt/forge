@@ -115,7 +115,15 @@ esac
 
 # A real file inside the object store for the deletion probe. Excluding info/
 # keeps it to an actual object (loose or pack), not the alternates bookkeeping.
-PARENT_OBJECT_FILE="$(find "$PARENT_OBJECTS" -type f -not -path "$PARENT_OBJECTS/info/*" 2>/dev/null | head -n 1)"
+#
+# `-print -quit`, NOT `| head -n 1`: head closes the pipe after the first line
+# and a real repo's object store is big enough that find is still walking when
+# it does. find takes SIGPIPE, pipefail makes the pipeline 141, and errexit
+# kills the script — with the variable already correctly assigned, and only on
+# repos large enough for the race to be lost. `|| true` would hide a genuinely
+# failing find too, so the fix is to stop building the pipe: find quits itself
+# at the first match, on BSD/macOS and GNU alike.
+PARENT_OBJECT_FILE="$(find "$PARENT_OBJECTS" -type f -not -path "$PARENT_OBJECTS/info/*" -print -quit 2>/dev/null)"
 [ -n "$PARENT_OBJECT_FILE" ] \
   || fatal "$PARENT_OBJECTS holds no object files — nothing for the deletion probe to be refused on."
 
@@ -343,10 +351,26 @@ record() { # id verdict detail
   [ "$2" = "PASS" ] || FAILURES=$((FAILURES + 1))
 }
 
+# Trimming happens in the shell, never with `| head`. head exits as soon as it
+# has its lines and SIGPIPEs whatever is still writing; under this script's
+# pipefail+errexit that is a silent 141 death whose likelihood grows with the
+# input — the container log grows with the probe set, and a probe's output is
+# whatever the container chose to print. No pipe, no race.
+first_line()  { printf '%s' "${1%%$'\n'*}"; }
+first_lines() { # $1 = text, $2 = how many lines, space-joined
+  local line n=0 out=""
+  while IFS= read -r line; do
+    n=$((n + 1))
+    [ "$n" -le "$2" ] || break
+    out="$out$line "
+  done <<<"$1"
+  printf '%s' "$out"
+}
+
 probe_ran()  { grep -q "^PROBE_BEGIN $1\$" "$CLOG"; }
-probe_cmd()  { sed -n "s/^PROBE_CMD $1 | //p" "$CLOG" | head -n 1; }
+probe_cmd()  { first_line "$(sed -n "s/^PROBE_CMD $1 | //p" "$CLOG")"; }
 probe_out()  { sed -n "s/^PROBE_OUT $1 | //p" "$CLOG"; }
-probe_rc()   { sed -n "s/^PROBE_RC $1 //p" "$CLOG" | head -n 1; }
+probe_rc()   { first_line "$(sed -n "s/^PROBE_RC $1 //p" "$CLOG")"; }
 
 # Messages that constitute a genuine kernel/git refusal. Matching one is not
 # what makes a negative pass on its own — a nonzero exit that is NOT a
@@ -367,13 +391,18 @@ expect_refused() { # id label
   if [ "$rc" -eq 0 ]; then
     record "$id" FAIL "NOT REFUSED — the write SUCCEEDED (rc=0): $label"; return
   fi
-  if [ "$rc" -eq 127 ] || printf '%s' "$out" | grep -Eq 'not found|command not found'; then
+  # `grep -q <<<` and not `printf | grep -q`: grep -q exits at the FIRST match,
+  # SIGPIPEs the writer, and pipefail turns that into a nonzero pipeline. These
+  # are `if` conditions, so errexit spares them — a matched refusal in a long
+  # probe output would instead read as NO match and be recorded FAIL. Safe, but
+  # a misreport, and the container decides how much it prints.
+  if [ "$rc" -eq 127 ] || grep -Eq 'not found|command not found' <<<"$out"; then
     record "$id" FAIL "COMMAND DID NOT RUN (rc=$rc, 'not found') — a typo must never read as a refusal: $label"; return
   fi
-  if printf '%s' "$out" | grep -Eq "$REFUSAL_RE"; then
-    record "$id" PASS "refused rc=$rc: $(printf '%s' "$out" | head -n 1)"
+  if grep -Eq "$REFUSAL_RE" <<<"$out"; then
+    record "$id" PASS "refused rc=$rc: $(first_line "$out")"
   else
-    record "$id" FAIL "rc=$rc but no recognizable refusal message — investigate: $(printf '%s' "$out" | head -n 1)"
+    record "$id" FAIL "rc=$rc but no recognizable refusal message — investigate: $(first_line "$out")"
   fi
 }
 
@@ -388,12 +417,12 @@ expect_success() { # id label [expected-substring]
   fi
   out="$(probe_out "$id")"
   if [ "$rc" -ne 0 ]; then
-    record "$id" FAIL "FAILED rc=$rc ($label): $(printf '%s' "$out" | head -n 1)"; return
+    record "$id" FAIL "FAILED rc=$rc ($label): $(first_line "$out")"; return
   fi
-  if [ -n "$want" ] && ! printf '%s' "$out" | grep -qF "$want"; then
+  if [ -n "$want" ] && ! grep -qF "$want" <<<"$out"; then
     record "$id" FAIL "succeeded but output does not contain '$want' ($label)"; return
   fi
-  record "$id" PASS "ok rc=0: $(printf '%s' "$out" | head -n 1)"
+  record "$id" PASS "ok rc=0: $(first_line "$out")"
 }
 
 expect_host() { # id ok? label detail
@@ -442,8 +471,16 @@ expect_refused n11_push_to_parent_target "AC2: pushing to the parent target bran
 
 # AC 11 host side: the parent is byte-identically unchanged, then the commit is
 # retrievable by the host exactly the way forge's capture step retrieves it.
+
+# diff_detail is called only where `diff -q` has ALREADY decided the two snapshots differ, so
+# diff's nonzero "they differ" status carries no information here and is
+# discarded — but it would otherwise trip errexit, and `| head -n 5` would
+# SIGPIPE diff, exactly when the diff runs long. That is the parent-WAS-modified
+# case: the one result this script must never fail to report.
+diff_detail() { first_lines "$(diff "$1" "$2" || true)" 5; }
+
 DIFF_DETAIL=""
-if diff -q "$WORK/before.refs" "$WORK/after.refs" >/dev/null 2>&1; then h=0; else h=1; DIFF_DETAIL="$(diff "$WORK/before.refs" "$WORK/after.refs" | head -n 5 | tr '\n' ' ')"; fi
+if diff -q "$WORK/before.refs" "$WORK/after.refs" >/dev/null 2>&1; then h=0; else h=1; DIFF_DETAIL="$(diff_detail "$WORK/before.refs" "$WORK/after.refs")"; fi
 expect_host h1_parent_refs_unchanged "$h" "AC11: parent ref listing identical before/after" "$DIFF_DETAIL"
 
 if diff -q "$WORK/before.head" "$WORK/after.head" >/dev/null 2>&1; then h=0; else h=1; fi
@@ -452,7 +489,7 @@ expect_host h2_parent_head_unchanged "$h" "AC11: parent HEAD identical before/af
 if diff -q "$WORK/before.packed-refs" "$WORK/after.packed-refs" >/dev/null 2>&1; then h=0; else h=1; fi
 expect_host h3_parent_packed_refs_unchanged "$h" "AC11: parent packed-refs byte-identical before/after" "packed-refs changed"
 
-if diff -q "$WORK/before.objects" "$WORK/after.objects" >/dev/null 2>&1; then h=0; else h=1; DIFF_DETAIL="$(diff "$WORK/before.objects" "$WORK/after.objects" | head -n 5 | tr '\n' ' ')"; fi
+if diff -q "$WORK/before.objects" "$WORK/after.objects" >/dev/null 2>&1; then h=0; else h=1; DIFF_DETAIL="$(diff_detail "$WORK/before.objects" "$WORK/after.objects")"; fi
 expect_host h4_parent_object_store_unchanged "$h" "AC11: parent object store file list identical before/after ($(wc -l < "$WORK/before.objects" | tr -d ' ') files)" "$DIFF_DETAIL"
 
 AGENT_SHA="$(probe_out p5_agent_commit | grep -Eo '^[0-9a-f]{40}$' | tail -n 1 || true)"
