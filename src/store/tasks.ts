@@ -22,6 +22,7 @@ type TaskRow = {
   resolved_auth: string | null;
   resolved_by: string | null;
   worktree_path: string | null;
+  base_sha: string | null;
 };
 
 function rowToTask(row: TaskRow): Task {
@@ -45,6 +46,7 @@ function rowToTask(row: TaskRow): Task {
     completedAt: row.completed_at ?? undefined,
     error: row.error ?? undefined,
     worktreePath: row.worktree_path ?? undefined,
+    baseSha: row.base_sha ?? undefined,
   };
 }
 
@@ -81,6 +83,30 @@ export function setTaskWorktreePath(id: string, worktreePath: string): void {
   getDb()
     .prepare(`UPDATE tasks SET worktree_path = ? WHERE id = ?`)
     .run(worktreePath, id);
+}
+
+// FG-621: record a private clone's workspace path AND the base commit it was
+// created at, in ONE write. They are one fact — "this task's workspace is at
+// this path, holding this base" — and AC 4 is asserted on the recorded value, so
+// a row that carries the path without the base would be a workspace whose base
+// is once again only inferrable. Branch identity stays derived (worktreeBranchName).
+export function setTaskWorkspace(id: string, workspacePath: string, baseSha: string): void {
+  getDb()
+    .prepare(`UPDATE tasks SET worktree_path = ?, base_sha = ? WHERE id = ?`)
+    .run(workspacePath, baseSha, id);
+}
+
+// FG-621: unrecord a workspace that does not exist. The counterpart of
+// setTaskWorkspace, for the failed-setup lane: the path is written BEFORE the
+// clone is created (so a workspace no row names is impossible), which leaves a
+// row naming a workspace whose creation then failed. The reaper tolerates that
+// — it reads the path as `absent` — but every other consumer reads a non-null
+// worktree_path as "a workspace exists here". Both columns go, because they are
+// the one fact setTaskWorkspace wrote.
+export function clearTaskWorkspace(id: string): void {
+  getDb()
+    .prepare(`UPDATE tasks SET worktree_path = NULL, base_sha = NULL WHERE id = ?`)
+    .run(id);
 }
 
 export function getTask(id: string): Task | undefined {

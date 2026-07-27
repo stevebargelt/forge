@@ -206,7 +206,10 @@ test("fg559: under a READ-ONLY mount, reads succeed and writes are refused", () 
 
   writeFileSync(join(f.projectPath, "file.txt"), "agent edit\n");
   const commit = git(f.projectPath, "commit", "-am", "should be refused");
-  assert.notEqual(commit.code, 0, "git commit MUST be refused under a read-only parent .git (FG-621 defers writable in-container git)");
+  // FG-621 did NOT change this: writable in-container git is the private-CLONE
+  // substrate only (fg621-clone-git-mount.worktree.test.ts). The linked worktree
+  // remains the non-mutating/red substrate, and a red still cannot commit.
+  assert.notEqual(commit.code, 0, "git commit MUST be refused under a read-only parent .git (the red substrate is read-only by design)");
   assert.match(commit.stderr, /permission denied/i, `refusal must come from the filesystem, got: ${commit.stderr}`);
 });
 
@@ -329,6 +332,47 @@ test("fg559 (piece A): the mount-plan check REFUSES an argv missing the parent .
     /FG-559/,
     "mounting the admin dir alone must still be refused — commondir hops OUT of it"
   );
+});
+
+// ─── FG-621 AC 7: the non-mutating/red substrate is UNCHANGED ────────────────
+
+test("fg621 (AC 7 regression): the red linked-worktree substrate is unchanged — reads work, commit and update-ref are still refused", () => {
+  const f = makeWorktreeFixture();
+  materializeGitMount(f, { readOnly: true });
+
+  // 1. PLAN — still exactly the parent's common .git, not FG-621's narrower
+  //    object-store mount. A red never gets the clone substrate.
+  assert.deepEqual(
+    planWorktreeGitMounts(f.projectPath),
+    [f.parentGitDir],
+    "a `gitdir:` pointer must still plan the parent common .git — FG-621 widened the planner to a second substrate, it did not re-route this one",
+  );
+  const objectsOnly = join(f.parentGitDir, "objects");
+  assert.equal(
+    planWorktreeGitMounts(f.projectPath).includes(objectsOnly),
+    false,
+    "the worktree substrate needs refs/HEAD/packed-refs too — narrowing it to objects/ would break red reads",
+  );
+
+  // 2. ARGV — a red dispatch (PROJECT_MODE=ro) still binds it read-only at its
+  //    own host path, and nothing about the project mount changed.
+  const { args } = buildDockerArgs(RUNTIME, ctxFor(f.projectPath, "ro"));
+  const specs = mountSpecs(args);
+  assert.ok(specs.includes(`${f.parentGitDir}:${f.parentGitDir}:ro`), `red argv must still bind the parent .git :ro, got: ${specs.join(" ")}`);
+  assert.ok(specs.includes(`${f.projectPath}:/project:ro`), "the red project mount stays read-only");
+
+  // 3. CAPABILITY — the history a red needs is readable...
+  assert.match(gitOk(f.projectPath, "log", "--oneline"), /commit 1/, "a red must still read history");
+  assert.ok(gitOk(f.projectPath, "diff", `${f.shaA}..${f.shaC}`).trim().length > 0, "a red must still diff");
+  assert.ok(gitOk(f.projectPath, "show", f.shaB).trim().length > 0, "a red must still show a commit");
+  assert.equal(gitOk(f.projectPath, "rev-parse", "origin/main").trim(), f.shaC, "a red must still resolve packed remote refs");
+
+  // ...and the writes it must never have are still refused.
+  const updateRef = git(f.projectPath, "update-ref", "refs/heads/fg621-red-should-not-exist", f.shaC);
+  assert.notEqual(updateRef.code, 0, "a red MUST still be unable to update a ref");
+  writeFileSync(join(f.projectPath, "file.txt"), "red edit\n");
+  const commit = git(f.projectPath, "commit", "-am", "red should not commit");
+  assert.notEqual(commit.code, 0, "a red MUST still be unable to commit — private writable git is the CLONE path only");
 });
 
 // ─── preflightProjectMount: the seam the defect walked through ───────────────

@@ -771,7 +771,11 @@ function workspaceSummary(payload: unknown): string | undefined {
 }
 
 function eventSummary(e: Event): string {
-  if (e.eventType === "task.workspace_reaped" || e.eventType === "task.workspace_retained") {
+  if (
+    e.eventType === "task.workspace_reaped" ||
+    e.eventType === "task.workspace_retained" ||
+    e.eventType === "task.workspace_reap_deferred"
+  ) {
     return workspaceSummary(e.payload) ?? payloadSummary(e.payload);
   }
   return payloadSummary(e.payload);

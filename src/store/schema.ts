@@ -56,7 +56,12 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- FG-351: per-task git worktree path. Null when worktree mode is disabled (default).
   -- Set BEFORE runContainer and readable after process restart. Task branch identity
   -- is deterministically derived as forge/<runId>/<taskId> — no separate DB column needed.
-  worktree_path     TEXT
+  worktree_path     TEXT,
+  -- FG-621: the commit the task's private clone was created AT. Recorded with
+  -- worktree_path, BEFORE the container starts, so base selection is an asserted
+  -- fact rather than something inferred from where HEAD happened to be. Null for
+  -- the linked-worktree/shared-mount paths and for pre-FG-621 rows.
+  base_sha          TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_run ON tasks(run_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);

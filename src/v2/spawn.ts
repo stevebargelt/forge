@@ -16,8 +16,9 @@
 // substitution context per-step (TASK_ID, MODEL, etc.) and this function
 // produces the full `docker run ... claude ...` argv.
 
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { Runtime } from "./schema.js";
 import { resolveRuntimeMetadata } from "./schema.js";
 import {
@@ -74,6 +75,16 @@ export type SpawnContext = SubstContext & {
   // agent/reviewer container built by buildDockerArgs NEVER installs and
   // NEVER mounts these volumes read-write, regardless of PROJECT_MODE.
   DEPENDENCY_CACHE_MOUNT_RO?: string;
+  // FG-621: the CANONICAL project directory — the parent repository a private
+  // clone workspace was made from, as FORGE recorded it (the run's projectDir),
+  // never anything read out of the workspace. It is what the clone mount planner
+  // derives the expected parent object store from, and on the clone substrate it
+  // is MANDATORY: without it the planner has nothing Forge-owned to verify the
+  // agent-writable `objects/info/alternates` against, so it refuses rather than
+  // falling back to shape checks. Optional in the TYPE only because the
+  // overwhelmingly common dispatch is not a clone at all, where it is never read.
+  // Every production dispatch site sets it; see planWorktreeGitMounts.
+  CANONICAL_PROJECT_DIR?: string;
 };
 
 // Fixed in-container path for the mounted auth-profile state. A top-level path
@@ -155,13 +166,394 @@ function isUnder(child: string, ancestor: string): boolean {
  *  Mounting at the host path is what makes this work with ZERO env vars:
  *  GIT_DIR/GIT_WORK_TREE are global to the container process tree and make
  *  unrelated repos report the worktree's status (a silent wrong answer, which
- *  is worse than the loud failure they'd replace). */
-export function planWorktreeGitMounts(projectDir: string): string[] {
+ *  is worse than the loud failure they'd replace).
+ *
+ *  FG-621: the name is now narrower than the job. This also plans the PRIVATE
+ *  CLONE substrate, whose `.git` is a real DIRECTORY and whose borrowed object
+ *  store dangles in the container for the same reason a worktree's `gitdir:`
+ *  pointer did — see planGitMounts below for the substrate split. The linked
+ *  worktree behavior above is unchanged, and `canonicalProjectDir` is only ever
+ *  consulted on the clone path — where it is REQUIRED, not optional: a borrowed
+ *  object store with no Forge-owned parent to check it against is refused. */
+export function planWorktreeGitMounts(projectDir: string, canonicalProjectDir?: string): string[] {
+  return planGitMounts(projectDir, canonicalProjectDir).paths;
+}
+
+/** FG-621: which SUBSTRATE `projectDir` is, and the host paths that substrate
+ *  needs bound for git to resolve inside the container.
+ *
+ *   - "worktree" — FG-559's linked worktree (`.git` is a `gitdir:` POINTER FILE).
+ *     Needs the parent's whole common `.git`, read-only. Unchanged by FG-621:
+ *     this is the non-mutating/red substrate and it stays exactly as shipped.
+ *   - "clone" — FG-621's private writable clone (`.git` is a DIRECTORY carrying
+ *     `objects/info/alternates`). Needs the parent's OBJECT STORE ALONE,
+ *     read-only — never the parent `.git`. That narrowness is the boundary: the
+ *     parent's refs, index, HEAD and packed-refs are then ABSENT from the
+ *     container rather than merely unwritable, so ref creation and
+ *     `main`/`origin/*`/packed-ref updates are refused by absence, and
+ *     object-store deletion by the kernel-enforced `:ro` bind.
+ *   - "none" — an ordinary checkout, a plain (non-shared) clone, or a non-git
+ *     directory: `.git` rides along inside the /project mount, no extra bind.
+ */
+type GitMountPlan = { kind: "worktree" | "clone" | "none"; paths: string[] };
+
+function planGitMounts(projectDir: string, canonicalProjectDir?: string): GitMountPlan {
   const gitdir = readGitdirPointer(projectDir);
-  if (!gitdir) return [];
-  // The admin dir lives INSIDE the common .git, so the single common-dir mount
-  // covers both hops.
-  return [resolveVerifiedCommonGitDir(projectDir, gitdir)];
+  if (gitdir) {
+    // The admin dir lives INSIDE the common .git, so the single common-dir mount
+    // covers both hops.
+    return { kind: "worktree", paths: [resolveVerifiedCommonGitDir(projectDir, gitdir)] };
+  }
+  const dotGit = join(projectDir, ".git");
+  if (!statSync(dotGit, { throwIfNoEntry: false })?.isDirectory()) return { kind: "none", paths: [] };
+  const objects = planSharedCloneObjectStoreMount(projectDir, dotGit, canonicalProjectDir);
+  return objects.length > 0 ? { kind: "clone", paths: objects } : { kind: "none", paths: [] };
+}
+
+/** FG-621: the object stores a `git clone --shared` workspace borrows — the whole
+ *  chain, nearest first — or [] when `projectDir` is an ordinary self-contained
+ *  repo.
+ *
+ *  DERIVE, THEN VERIFY — never trust-then-bind. `objects/info/alternates` lives
+ *  INSIDE the rw-mounted workspace, so it is strictly MORE agent-writable than
+ *  the `gitdir:` pointer resolveVerifiedCommonGitDir already refuses to trust.
+ *  It is therefore never treated as an instruction to mount a path; it is a
+ *  VALUE that has to survive proof:
+ *
+ *    1. shape — exactly one entry, absolute, resolving to a real directory that
+ *       is really the `objects` dir of a real git dir (the same HEAD/objects/refs
+ *       marker triple resolveVerifiedCommonGitDir requires), and never the
+ *       clone's own object store: no repository is ever its own alternate;
+ *    2. IDENTITY, MANDATORY — the resolved path must be one of the object stores
+ *       the caller's Forge-owned canonical project directory ITSELF reaches
+ *       (canonicalObjectStores), realpath-normalized. This is the only proof that
+ *       says "this project's parent" rather than "some git repository", and it is
+ *       exactly what the shape checks cannot say: an agent that repoints its own
+ *       alternates at any other repo on the host passes every one of them. So a
+ *       missing canonical dir is a REFUSAL, never a skip and never a fallback to
+ *       (1) and (3) — a verification that silently does not run is not a
+ *       verification, which is how this defect stayed invisible;
+ *    3. base-commit containment — the resolved store must actually hold this
+ *       workspace's checked-out commit. The mount plan is built BEFORE the
+ *       container starts, against a create-only clone whose HEAD is the recorded
+ *       base SHA, so HEAD is by construction an object the PARENT owns. Kept as
+ *       a second, independent binding of the value to THIS clone; it does not
+ *       substitute for (2), because a sibling task's clone of the same parent
+ *       holds the same base commit;
+ *    4. the WHOLE CHAIN, not one hop. A parent that itself borrows (a project dir
+ *       cloned with `--shared` / `--reference`) serves part of its history from a
+ *       store one hop further out, and mounting only the first hop hands the
+ *       container an object graph that is still incomplete — the FG-559
+ *       history-blind failure in a new place, and the one outcome that is not
+ *       acceptable. Each further hop is proved the same way (1) is, must be
+ *       ABSOLUTE (a relative entry resolves against the mounted path, which the
+ *       container reaches through a bind rather than the host's symlinks, so it
+ *       can name a different directory inside than out), and is bounded by
+ *       MAX_ALTERNATE_HOPS with a cycle guard.
+ *
+ *  Every failure REFUSES. Never a warn, never a fallback to []: a silent [] here
+ *  is the FG-559 defect twin — a container whose object store is broken, whose
+ *  `git log` and `git commit` both fail, and whose agent then works from the file
+ *  tree and reports success. */
+function planSharedCloneObjectStoreMount(
+  projectDir: string,
+  gitDir: string,
+  canonicalProjectDir?: string,
+): string[] {
+  const objectsDir = join(gitDir, "objects");
+  const alternatesFile = join(objectsDir, "info", "alternates");
+  // Explicitly typed so TypeScript treats every call as never-returning: the
+  // proofs below narrow through it rather than re-testing what it already refused.
+  const refuse: (why: string) => never = (why) => {
+    throw new Error(
+      `FG-621: ${projectDir} is a git repository whose object store ${why}. Forge bind-mounts ONLY ` +
+        `the parent repository's own object store — read-only, at its own host path — into agent ` +
+        `containers; refusing to mount an unverified host path.`,
+    );
+  };
+
+  const entry = soleAlternateEntry(objectsDir, refuse);
+  if (entry === undefined) {
+    // No alternates: an ordinary checkout or a plain clone, which needs no extra
+    // bind (FG-559 behavior, unchanged — this is the overwhelmingly common
+    // dispatch and it costs one stat). The one exception is a borrowing clone
+    // whose alternates file was DELETED: its own object store owns nothing, yet
+    // HEAD still resolves, so it cannot serve its own history to anyone. That is
+    // an unverifiable state, not an ordinary repo — refuse it rather than
+    // dispatch a container that is history-blind by construction.
+    if (objectStoreOwnsNoObjects(objectsDir) && gitRun(["-C", projectDir, "rev-parse", "--verify", "--quiet", "HEAD"]).code === 0) {
+      refuse(
+        `owns no objects and has no ${alternatesFile}, yet HEAD resolves — a borrowed (\`clone --shared\`) ` +
+          `object store whose alternates file is missing or was removed`,
+      );
+    }
+    return [];
+  }
+  const parent = provenAlternateStore(entry, alternatesFile, refuse);
+  if (existsSync(objectsDir) && parent.resolved === realpathSync(objectsDir)) {
+    refuse(`names its OWN object store ${parent.resolved} in ${alternatesFile} — no repository is ever its own alternate`);
+  }
+
+  if (canonicalProjectDir === undefined) {
+    refuse(
+      `is borrowed from ${parent.resolved}, but no Forge-owned canonical project directory was supplied to derive the ` +
+        `expected parent object store from. ${alternatesFile} lives inside the workspace forge mounts READ-WRITE, ` +
+        `so it is agent-controlled: it can name any git repository on this host and satisfy every shape check. ` +
+        `Only a derive-and-compare against Forge's own record of the parent proves it is THIS project's`,
+    );
+  }
+  const expected = canonicalObjectStores(canonicalProjectDir);
+  if (expected.length === 0) {
+    refuse(
+      `is borrowed, but the canonical project directory ${canonicalProjectDir} has no resolvable object ` +
+        `store to verify ${parent.resolved} against`,
+    );
+  }
+  if (!expected.includes(parent.resolved)) {
+    refuse(
+      `names ${parent.resolved} in ${alternatesFile}, which is NOT an object store of the canonical project ` +
+        `directory ${canonicalProjectDir} (${expected.join(", ")})`,
+    );
+  }
+
+  const head = gitRun(["-C", projectDir, "rev-parse", "--verify", "HEAD"]);
+  if (head.code !== 0) {
+    refuse(
+      `is borrowed from ${parent.resolved}, but this workspace's HEAD does not resolve, so there is no base commit ` +
+        `to prove that borrow against`,
+    );
+  }
+  if (gitRun(["--git-dir", parent.gitDir, "cat-file", "-e", `${head.stdout}^{commit}`]).code !== 0) {
+    refuse(
+      `names ${parent.resolved} in ${alternatesFile}, which does not contain this workspace's checked-out commit ` +
+        `${head.stdout} — it is not the parent repository this clone was made from`,
+    );
+  }
+
+  // Proof (4): the parent may borrow too. Follow the chain to its end, holding
+  // every hop to the same shape proof soleAlternateEntry applies to the first —
+  // absolute entries included, which matters MORE here: a deeper hop is resolved
+  // by git INSIDE the container, against a bind mount rather than this host's
+  // symlinks, so a relative entry can name a different directory there than here.
+  // Mounting hop 1 alone would leave `git log` blind to whatever the grandparent
+  // owns, and an object graph the agent cannot see whole is not a graph.
+  const mounts = [parent.named];
+  const seen = new Set([parent.resolved]);
+  let cursor = parent;
+  for (let hop = 2; ; hop++) {
+    const file = join(cursor.resolved, "info", "alternates");
+    const next = soleAlternateEntry(cursor.resolved, refuse);
+    if (next === undefined) break;
+    if (hop > MAX_ALTERNATE_HOPS) {
+      refuse(
+        `is borrowed through a chain of more than ${MAX_ALTERNATE_HOPS} object stores (via ${file}) — ` +
+          `forge mounts the chain it can prove, and refuses rather than truncate one`,
+      );
+    }
+    const store = provenAlternateStore(next, file, refuse);
+    if (seen.has(store.resolved)) {
+      refuse(`is borrowed through a CYCLE of alternate object stores, revisiting ${store.resolved} via ${file}`);
+    }
+    seen.add(store.resolved);
+    mounts.push(store.named);
+    cursor = store;
+  }
+  return mounts;
+}
+
+/** How far the alternates chain may run before forge refuses it outright. Any
+ *  real `--shared`/`--reference` topology is one or two hops; the bound exists so
+ *  a pathological chain fails loudly instead of being silently truncated into an
+ *  incomplete object graph. */
+const MAX_ALTERNATE_HOPS = 8;
+
+/** The ONE alternate object store an `objects` dir names, verbatim — undefined
+ *  when it has no `objects/info/alternates` at all. Every shape forge does not
+ *  write is refused rather than interpreted. Shared by the workspace's own hop and
+ *  by each further hop of the parent chain, so a borrowing parent is held to
+ *  exactly the standard the workspace is. */
+function soleAlternateEntry(objectsDir: string, refuse: (why: string) => never): string | undefined {
+  const file = join(objectsDir, "info", "alternates");
+  const st = statSync(file, { throwIfNoEntry: false });
+  if (!st) return undefined;
+  if (!st.isFile()) return refuse(`has an ${file} that is not a regular file`);
+
+  let raw: string;
+  try {
+    raw = readFileSync(file, "utf8");
+  } catch (e) {
+    return refuse(`has an unreadable ${file} (${(e as Error).message})`);
+  }
+  // git's own format: one object store per line; `#` comments and blank lines
+  // are ignored. A quoted entry is legal git but not a shape forge writes.
+  const entries = raw.split("\n").map((l) => l.trim()).filter((l) => l.length > 0 && !l.startsWith("#"));
+  if (entries.length === 0) return refuse(`has an empty ${file}`);
+  if (entries.length > 1) {
+    return refuse(
+      `names ${entries.length} alternate object stores (${entries.join(", ")}) in ${file} — ` +
+        `a forge private clone borrows exactly ONE, its parent's`,
+    );
+  }
+  const entry = entries[0]!;
+  if (entry.startsWith('"')) return refuse(`names a quoted alternate (${entry}) in ${file}`);
+  if (!isAbsolute(entry)) {
+    return refuse(
+      `names a RELATIVE alternate (${entry}) in ${file} — the mount is an identity bind of an ` +
+        `ABSOLUTE host path, and a relative entry resolves against a different tree inside the container`,
+    );
+  }
+  return entry;
+}
+
+/** Prove one alternates entry really is the object store of a real git dir, and
+ *  return the paths that matter.
+ *
+ *  Two of them, deliberately: `named` is the string the CONTAINER will look up
+ *  (git re-reads the same alternates file inside the container, so the bind has to
+ *  land at exactly the path it names — resolving symlinks for the mount would
+ *  silently dangle the entry again, which is the FG-559 failure mode). `resolved`
+ *  is what every PROOF runs against, so a symlink cannot be used to dress one
+ *  directory up as another. */
+function provenAlternateStore(
+  entry: string,
+  file: string,
+  refuse: (why: string) => never,
+): { named: string; resolved: string; gitDir: string } {
+  const named = resolve(entry);
+  let resolved: string;
+  try {
+    resolved = realpathSync(named);
+  } catch {
+    return refuse(`names ${entry} in ${file}, which does not exist on this host`);
+  }
+  if (!statSync(resolved, { throwIfNoEntry: false })?.isDirectory()) {
+    return refuse(`names ${entry} in ${file}, which is not a directory`);
+  }
+  if (basename(resolved) !== "objects") {
+    return refuse(`names ${resolved} in ${file}, which is not a git \`objects\` directory`);
+  }
+  const gitDir = dirname(resolved);
+  for (const marker of ["HEAD", "objects", "refs"]) {
+    if (!existsSync(join(gitDir, marker))) {
+      return refuse(`names ${resolved} in ${file}, whose repository ${gitDir} has no ${marker}`);
+    }
+  }
+  return { named, resolved, gitDir };
+}
+
+/** FG-621: every object store the Forge-owned canonical project directory itself
+ *  reaches — the one its repository owns, plus the ones that repository borrows,
+ *  transitively. Empty only when git cannot answer at all, which the caller
+ *  REFUSES on.
+ *
+ *  DERIVED THROUGH GIT, never by assuming a layout. `<dir>/.git/objects` is merely
+ *  the shape of an ORDINARY checkout: when the run's projectDir is ITSELF a linked
+ *  worktree its `.git` is a `gitdir:` POINTER FILE and that path does not exist at
+ *  all, so the layout assumption turned the (correct, mandatory) identity check
+ *  into a hard refusal of EVERY mutating dispatch in that configuration.
+ *  `rev-parse --git-path objects` answers for a checkout, a linked worktree and a
+ *  bare repo alike.
+ *
+ *  A SET rather than one path, for the same reason the mount plan follows the
+ *  chain: a project dir cloned with `--shared`/`--reference` serves part of its
+ *  own history from a store one hop further out, so a workspace naming that store
+ *  is naming something THIS project genuinely reaches. Membership is no weaker
+ *  than equality was — every member is derived from the canonical dir's own git
+ *  configuration, which is Forge-owned state, never from the agent-writable
+ *  workspace — and where the canonical dir borrows nothing the set is exactly the
+ *  single path it always was. */
+function canonicalObjectStores(canonicalProjectDir: string): string[] {
+  const probe = gitRun(["-C", canonicalProjectDir, "rev-parse", "--git-path", "objects"]);
+  if (probe.code !== 0 || probe.stdout.length === 0) return [];
+  let own: string;
+  try {
+    own = realpathSync(resolve(canonicalProjectDir, probe.stdout));
+  } catch {
+    return [];
+  }
+
+  const stores: string[] = [];
+  const queue = [own];
+  const seen = new Set(queue);
+  while (queue.length > 0 && stores.length < MAX_ALTERNATE_HOPS) {
+    const store = queue.shift()!;
+    stores.push(store);
+    let raw: string;
+    try {
+      raw = readFileSync(join(store, "info", "alternates"), "utf8");
+    } catch {
+      continue; // no alternates, or unreadable — either way this store borrows nothing we can name
+    }
+    for (const line of raw.split("\n")) {
+      const entry = line.trim();
+      if (entry.length === 0 || entry.startsWith("#")) continue;
+      let rp: string;
+      try {
+        // git resolves a relative alternate against the object store holding the
+        // file — this list is only ever compared against, never mounted, so a
+        // relative entry is resolvable here where it would not be bindable.
+        rp = realpathSync(resolve(store, entry));
+      } catch {
+        continue;
+      }
+      if (seen.has(rp)) continue;
+      seen.add(rp);
+      queue.push(rp);
+    }
+  }
+  return stores;
+}
+
+/** True when this object store contains no objects of its own — no loose fanout
+ *  directory and no packfile. A `git clone --shared` starts exactly this way (it
+ *  borrows everything); an ordinary repo with any history does not. Pure
+ *  filesystem, so the common dispatch never pays for a git subprocess. */
+function objectStoreOwnsNoObjects(objectsDir: string): boolean {
+  let entries;
+  try {
+    entries = readdirSync(objectsDir, { withFileTypes: true });
+  } catch {
+    return false;
+  }
+  for (const e of entries) {
+    if (e.name === "info") continue;
+    if (e.name === "pack") {
+      try {
+        if (readdirSync(join(objectsDir, "pack")).some((n) => n.endsWith(".pack"))) return false;
+      } catch {
+        return false;
+      }
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+/** FG-621: git, host-side, for the clone-substrate proofs only. Reached solely on
+ *  the borrowed-object-store path — never on an ordinary dispatch.
+ *
+ *  The git-plumbing env vars are STRIPPED, not inherited. `GIT_OBJECT_DIRECTORY`
+ *  in particular would redirect the containment proof's object lookup away from
+ *  the store being verified and turn it into a rubber stamp; `GIT_DIR` /
+ *  `GIT_WORK_TREE` / `GIT_COMMON_DIR` would answer the HEAD question about some
+ *  other repository. A proof that an ambient variable can steer is not a proof. */
+function gitRun(args: string[]): { code: number; stdout: string } {
+  const env = { ...process.env };
+  for (const key of [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES",
+  ]) {
+    delete env[key];
+  }
+  const r = spawnSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env });
+  return { code: r.status ?? -1, stdout: (r.stdout ?? "").trim() };
 }
 
 /** FG-559: the `gitdir:` line lives in the PROJECT TREE, which a project — or a
@@ -204,11 +596,30 @@ function resolveVerifiedCommonGitDir(projectDir: string, adminDir: string): stri
  *  Refuses rather than warns, and unconditionally: the predicate has no
  *  false-positive class. A non-git project has no `.git`; a plain clone has a
  *  `.git` directory; a correctly-mounted worktree passes. It can only fire on
- *  the exact broken state. */
-export function assertWorktreeGitMountPlanned(projectDir: string, args: string[]): void {
-  const required = planWorktreeGitMounts(projectDir);
-  const missing = required.filter((p) => !isIdentityMountPlanned(p, args));
+ *  the exact broken state.
+ *
+ *  FG-621 widens WHAT it covers, not how it behaves: on the private-clone
+ *  substrate the required path is the parent's object store rather than the
+ *  parent's common `.git`, and the same "is that path in the argv I am about to
+ *  hand docker?" question is asked of it. Before FG-621 this assertion was
+ *  vacuous on a clone — the planner returned [] for it, so nothing was required
+ *  and nothing was checked. */
+export function assertWorktreeGitMountPlanned(
+  projectDir: string,
+  args: string[],
+  canonicalProjectDir?: string,
+): void {
+  const plan = planGitMounts(projectDir, canonicalProjectDir);
+  const missing = plan.paths.filter((p) => !isIdentityMountPlanned(p, args));
   if (missing.length === 0) return;
+  if (plan.kind === "clone") {
+    throw new Error(
+      `FG-621: ${projectDir} is a private clone borrowing the object store ${missing.join(", ")}, which ` +
+        `the docker mount plan does not bind READ-ONLY at its own host path. Inside the container the ` +
+        `alternates entry would dangle, so \`git log\` and \`git commit\` would both fail and the agent ` +
+        `would work history-blind. Refusing to dispatch.`,
+    );
+  }
   throw new Error(
     `FG-559: ${projectDir}/.git is a gitdir: pointer into ${missing.join(", ")}, which the docker ` +
       `mount plan does not bind at its own host path. Every git command inside the container would ` +
@@ -497,8 +908,12 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
   // generation, so a YAML-declared mount would silently keep the broken
   // behavior on any generation that wasn't regenerated. Same shape as the
   // FG-376 dependency volumes above — a dynamic, conditional mount in code.
+  //
+  // FG-621 rides the SAME loop for the private-clone substrate, with a narrower
+  // path: the parent's `.git/objects` ALONE, never the parent `.git`. Read-only
+  // is the same for every agent class, and PROJECT_MODE stays unrelated.
   if (projectContainerPath) {
-    for (const gitPath of planWorktreeGitMounts(ctx.PROJECT_DIR)) {
+    for (const gitPath of planWorktreeGitMounts(ctx.PROJECT_DIR, ctx.CANONICAL_PROJECT_DIR)) {
       args.push("-v", `${gitPath}:${gitPath}:ro`);
     }
   }
@@ -541,7 +956,7 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
   // worktree without the parent .git it points into. Gated on the project
   // actually being mounted — a runtime that mounts no project has no
   // in-container git to be blind about.
-  if (projectContainerPath) assertWorktreeGitMountPlanned(ctx.PROJECT_DIR, args);
+  if (projectContainerPath) assertWorktreeGitMountPlanned(ctx.PROJECT_DIR, args, ctx.CANONICAL_PROJECT_DIR);
 
   // FG-497: fail fast, on the host, before exec — not with a bare E2BIG death
   // inside the container. Checks every argv string, including each "-e
@@ -586,7 +1001,7 @@ export function resolveProjectContainerPath(runtime: Runtime): string | undefine
  *  that's still running. */
 export function buildProvisionerDockerArgs(
   runtime: Runtime,
-  ctx: { TASK_ID: string; PROJECT_DIR: string },
+  ctx: { TASK_ID: string; PROJECT_DIR: string; CANONICAL_PROJECT_DIR?: string },
   plan: DependencyVolumePlan,
 ): string[] {
   const projectContainerPath = resolveProjectContainerPath(runtime) ?? "/project";
@@ -596,8 +1011,12 @@ export function buildProvisionerDockerArgs(
   args.push("-v", `${ctx.PROJECT_DIR}:${projectContainerPath}:ro`);
   // FG-559: same read-only parent-.git bind as the agent container gets. The
   // provisioner runs the shared entrypoint, whose git probe would otherwise
-  // refuse a worktree project.
-  for (const gitPath of planWorktreeGitMounts(ctx.PROJECT_DIR)) {
+  // refuse a worktree project. FG-621: on the private-clone substrate the same
+  // call yields the parent's object store instead — the provisioner sees the
+  // identical narrow, read-only view the agent container gets, verified against
+  // the same Forge-owned parent. It starts BEFORE the agent container, so it is
+  // the first place the derive-and-compare has to hold, not the second.
+  for (const gitPath of planWorktreeGitMounts(ctx.PROJECT_DIR, ctx.CANONICAL_PROJECT_DIR)) {
     args.push("-v", `${gitPath}:${gitPath}:ro`);
   }
   for (const v of plan.volumes) {
@@ -612,7 +1031,7 @@ export function buildProvisionerDockerArgs(
   // dispatch it starts BEFORE the agent container — so the same refusal has to
   // hold here, not only in buildDockerArgs. A git bind the argv cannot express
   // (a host path holding a `:`) is emitted above and caught here.
-  assertWorktreeGitMountPlanned(ctx.PROJECT_DIR, args);
+  assertWorktreeGitMountPlanned(ctx.PROJECT_DIR, args, ctx.CANONICAL_PROJECT_DIR);
   return args;
 }
 

@@ -134,6 +134,7 @@ export type FailureKind =
   | "result_malformed"
   | "work_not_persisted"  // result claims files_modified but none landed on the host project mount (#254)
   | "merge_conflict"      // FG-352: worktree branch could not be fast-forwarded into run.projectDir
+  | "capture_failed"      // FG-621: Forge could not capture a private clone's work into the parent's ref namespace — an unreadable `git status`, a failed safety commit, a rejected fetch, or a fetched ref that does not equal the clone's tip. Nothing was merged and the publish target was never involved (which is why this is NOT merge_conflict); the clone is retained with its work
   | "integration_failed"  // FG-357: clean merge, but build+test of the merged tree failed
   | "integration_gate_timeout"  // FG-424: post-merge gate run hit its timeout — transient, may complete on retry
   | "integration_gate_crashed"  // FG-424: post-merge gate run was killed by a signal outside the timeout path (e.g. kill -9/SIGSEGV) — worktree state after an abrupt kill is not trustworthy to blindly re-run against

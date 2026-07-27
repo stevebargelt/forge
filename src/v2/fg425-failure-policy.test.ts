@@ -38,6 +38,7 @@ const ALL_FAILURE_KINDS: Record<FailureKind, true> = {
   result_malformed: true,
   work_not_persisted: true,
   merge_conflict: true,
+  capture_failed: true,
   integration_failed: true,
   integration_gate_timeout: true,
   integration_gate_crashed: true,

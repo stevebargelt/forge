@@ -140,6 +140,10 @@ export type Task = {
   // without worktree isolation. Branch identity is derived deterministically as
   // forge/<runId>/<taskId> and does not need a separate column.
   worktreePath?: string;
+  // FG-621: the commit this task's private clone was created AT, recorded with
+  // worktreePath before the container starts. Undefined on the linked-worktree
+  // and shared-mount paths, and on pre-FG-621 rows.
+  baseSha?: string;
 };
 
 export type DispatchResult = {

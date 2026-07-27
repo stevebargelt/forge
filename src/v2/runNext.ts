@@ -37,7 +37,7 @@ import { tasksForRun } from "../store/tasks.js";
 import { getRun } from "../store/runs.js";
 import { finalizeRunIfSettled } from "./run-finalize.js";
 import { notifyOnTaskBlockedByRed, notifyOnGateAwaiting } from "../notify/trigger.js";
-import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskAwaitingGate, markTaskAwaitingRecovery, markTaskHeldForGate, markTaskBlockedByRed, markTaskFailed, setTaskStatus, setTaskWorktreePath } from "../store/tasks.js";
+import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskAwaitingGate, markTaskAwaitingRecovery, markTaskHeldForGate, markTaskBlockedByRed, markTaskFailed, setTaskStatus, setTaskWorkspace, clearTaskWorkspace } from "../store/tasks.js";
 import { failTask, classify, failureKindFromEvents, ORPHAN_EVIDENCE_KINDS } from "./failure-kind.js";
 import type { FailureKind, OrphanEvidence, ContainerCausalEvidence } from "./failure-kind.js";
 import { captureUsageForTask } from "../store/model-calls.js";
@@ -48,7 +48,7 @@ import { assembleReviewerContextPacket } from "./reviewer-context-packet.js";
 import { validateVerdict } from "./validate-findings.js";
 import { gradeFindings } from "./review-quality.js";
 import { logEvent, eventsForTask } from "../store/events.js";
-import { taskDir, integrationWorktreeDir } from "../util/paths.js";
+import { taskDir, integrationWorktreeDir, cloneDir } from "../util/paths.js";
 import { computeReadyQueue, isRunSettled, resolvePhasePrimary, classifyRunTerminalState, type RunTerminalClassification } from "./ready-queue.js";
 import { classifyTaskLineage, isWorkflowPrimaryRow } from "./lifecycle-evaluator.js";
 import { finalizeOrphanedPrimaries, attachedExitEvidence } from "./reconcile.js";
@@ -81,13 +81,19 @@ import { inferredResultFrom } from "./inferred-result.js";
 import { recoverStructuredStreamResult } from "./stream-result-recovery.js";
 // FG-351/FG-352: worktree lifecycle — gate check, create, merge-back, cleanup.
 // FG-353: integration worktree helpers added.
+// FG-621: mutating tasks are provisioned a PRIVATE `--shared` clone instead of a
+// linked worktree, and their work is captured by fetching the clone's branch into
+// this repository's ref namespace.
 import {
   isWorktreeModeEnabled,
   preflightWorktreeGate,
-  createWorktree,
+  createTaskClone,
+  captureTaskClone,
+  TaskCloneExistsError,
+  TaskCloneAnchorExistsError,
   worktreeBranchName,
   removeWorktreeIfSafe,
-  cleanupFailedWorktreeSetup,
+  cleanupFailedCloneSetup,
   integrationBranchName,
   integrationBranchExists,
   createIntegrationWorktree,
@@ -107,7 +113,9 @@ import {
   type PublishOutcome,
   type ValidationResult,
 } from "./integration-publisher.js";
-import { getPublicationAttempt, publicationAttemptsForTask, type PublicationAttempt } from "../store/publications.js";
+import { getPublicationAttempt, latestPublishedShaForRun, publicationAttemptsForTask, type PublicationAttempt } from "../store/publications.js";
+import { localTargetFor, targetDescriptor } from "./publication-target.js";
+import { projectIdentity } from "./project-identity.js";
 
 // Resolve the agent role for a fanout child. When fanout.agent_map is set and
 // the input value carries a discipline string that's in the map, route to the
@@ -427,6 +435,127 @@ function reapContainerAndReportFailure(containerName: string, taskSucceeded: boo
   }
 }
 
+// ── FG-621: private-clone provisioning for mutating tasks ─────────────────────
+//
+// Both workspace-creating sites in this file dispatch a MUTATING task, so there
+// is no capability predicate to introduce here: a red creates no workspace at all
+// (it is dispatched read-only against the publisher's candidate). The substrate
+// swap is therefore unconditional on these two paths.
+//
+// The clone path travels through runContainer's EXISTING `worktreePath` argument,
+// whose meaning becomes "this task's isolated workspace, whatever the substrate".
+// That single decision is what makes isWorktreeRwDispatch and the
+// IS_WORKTREE_DISPATCH dependency-cache flag cover clones with no spawn.ts change.
+
+/** The two create-only refusals, which name state a PREVIOUS attempt owns: an
+ *  existing clone directory, and an existing parent-side anchor ref. Neither may
+ *  be followed by cleanup — a directory an agent wrote to and a ref holding a
+ *  prior attempt's captured tip are both evidence, and the refusal exists to
+ *  protect them. */
+function isCreateOnlyRefusal(e: unknown): boolean {
+  return e instanceof TaskCloneExistsError || e instanceof TaskCloneAnchorExistsError;
+}
+
+/** The failed-setup lane's last act: dispose of this attempt's partial state, then
+ *  make the ROW agree with the disk.
+ *
+ *  provisionTaskClone records the workspace path before the clone exists — that
+ *  order is what makes a workspace no row names impossible. Its cost is the
+ *  mirror image: a row naming a workspace whose creation then failed. The reaper
+ *  tolerates it (classifyWorkspace reads the path as `absent` and records
+ *  nothing), but `forge show`, the dashboard and every other reader treat a
+ *  non-null worktree_path as "a workspace exists here", so leaving it is a
+ *  phantom for everyone except the one consumer that was written around it.
+ *
+ *  THE DISK DECIDES, not the failure class. Cleanup is skipped for the two
+ *  create-only refusals, which name state a PREVIOUS attempt owns — but the
+ *  anchor refusal happens before any directory is created, so its row is a
+ *  phantom too, and clearing a row never touches a ref. A directory that
+ *  survived (an existing clone, or a removal that failed) KEEPS its row: the
+ *  recorded path is the only thing that will ever find it again. */
+function settleFailedCloneProvisioning(projectDir: string, runId: string, taskId: string, e: unknown): void {
+  if (!isCreateOnlyRefusal(e)) cleanupFailedCloneSetup(projectDir, runId, taskId);
+  if (!existsSync(cloneDir(runId, taskId))) clearTaskWorkspace(taskId);
+}
+
+/** The target descriptor this dispatch's work will be published to — the same
+ *  value publishIntegration records on the attempt, derived the same way, so a
+ *  receipt lookup scoped by it selects receipts for THIS target only.
+ *
+ *  undefined when the target cannot be resolved at all (a detached HEAD, where
+ *  publication is impossible anyway). The lookup then falls back to unscoped,
+ *  which is the pre-existing behavior for a case that has no receipts to confuse. */
+function publishTargetDescriptor(projectDir: string): string | undefined {
+  try {
+    return targetDescriptor(localTargetFor(projectIdentity(projectDir).canonicalDir));
+  } catch {
+    return undefined;
+  }
+}
+
+/** AC 4: the base a task's private clone is created at.
+ *
+ *  The authority is the RECORDED publication receipt of the run's last accepted
+ *  candidate — not a re-read of HEAD. A sequential task therefore starts from the
+ *  exact accepted predecessor candidate even when the publish target is a remote
+ *  that never advances local HEAD, and the value is a fact Forge wrote rather than
+ *  one inferred from where the checkout happened to be at dispatch time.
+ *
+ *  SCOPED BY TARGET, and ordered by PUBLISH time. A run may publish to more than
+ *  one target, and a receipt for another target is not this target's last
+ *  accepted candidate. Ordering by intent time is wrong for the same class of
+ *  reason: an attempt that parked and rebuilt is RECORDED earlier than one that
+ *  published before it but LANDS later, so intent order can hand the next task a
+ *  base that is not the last thing actually published (AC 4).
+ *
+ *  With no receipt yet (the run's first mutating task), projectDir HEAD is the
+ *  base — and the SHA it RESOLVES to is what gets recorded. */
+function resolveTaskBaseSha(projectDir: string, runId: string): string {
+  const published = latestPublishedShaForRun(runId, publishTargetDescriptor(projectDir));
+  if (published) return published;
+  return execFileSync("git", ["rev-parse", "HEAD^{commit}"], {
+    cwd: projectDir,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+}
+
+/** Record {workspace path, base SHA} DURABLY BEFORE any on-disk or ref state
+ *  exists, then create the clone, then ASSERT on what was recorded. Throws on any
+ *  failure; the caller's existing worktree-setup failure lane handles it.
+ *
+ *  THE ORDER IS THE POINT. Clone provisioning creates a workspace directory and a
+ *  parent-side anchor ref, and NOTHING sweeps the clones root by scanning it —
+ *  the reaper is keyed on the recorded path, deliberately (FG-356). So a crash
+ *  between creating that state and recording it leaks both, invisibly and
+ *  permanently: no row names the directory, so no pass ever looks at it again.
+ *  Writing the row first makes the window leak-free in the only direction that
+ *  matters — a row naming a workspace that was never created is self-correcting
+ *  (the reaper reads it as `absent` and records nothing), while a workspace no row
+ *  names is forever. The path is deterministic (cloneDir), which is what lets it
+ *  be recorded before the thing it names exists. */
+function provisionTaskClone(
+  projectDir: string,
+  runId: string,
+  taskId: string,
+  baseSha: string
+): { clonePath: string; baseSha: string; untrackedFiles: string[] } {
+  setTaskWorkspace(taskId, cloneDir(runId, taskId), baseSha);
+
+  const clone = createTaskClone(projectDir, runId, taskId, baseSha);
+  setTaskWorkspace(taskId, clone.clonePath, clone.baseSha);
+
+  const recorded = getTask(taskId);
+  if (recorded?.worktreePath !== clone.clonePath || recorded?.baseSha !== clone.baseSha) {
+    throw new Error(
+      `task ${taskId}: workspace state did not persist — recorded ` +
+        `{path: ${recorded?.worktreePath ?? "none"}, base: ${recorded?.baseSha ?? "none"}} but created ` +
+        `{path: ${clone.clonePath}, base: ${clone.baseSha}}`
+    );
+  }
+  return { clonePath: clone.clonePath, baseSha: clone.baseSha, untrackedFiles: clone.untrackedFiles };
+}
+
 // Standard single-agent dispatch. Spawns primary, then any reds (in parallel),
 // aggregates verdicts, sets final status per gate + verdict policy.
 async function dispatchSingleStep(args: {
@@ -619,34 +748,38 @@ async function dispatchSingleStep(args: {
     return "failed";
   }
 
-  // FG-351: create a task-scoped git worktree when worktree mode is enabled.
-  // preflightWorktreeGate + createWorktree run BEFORE runContainer; the DB write
-  // (setTaskWorktreePath) is durable BEFORE the container starts so reconcile can
-  // find the path after a process restart. checkResultPersistence keeps args.projectDir
-  // (the original host mount) — that seam is owned by FG-354.
+  // FG-351/FG-621: provision this mutating task's PRIVATE CLONE when workspace
+  // isolation is enabled. preflightWorktreeGate (unchanged, Linux hard-fail
+  // included) and the clone creation both run BEFORE runContainer, and the DB
+  // write is durable BEFORE the container starts so reconcile can find the path
+  // and the base after a process restart. checkResultPersistence keeps
+  // args.projectDir (the original host mount) — that seam is owned by FG-354.
   let primaryWorktreePath: string | undefined;
   if (isWorktreeModeEnabled()) {
     try {
       preflightWorktreeGate(args.projectDir);
-      const wt = createWorktree(args.projectDir, args.runId, taskId);
-      primaryWorktreePath = wt.worktreePath;
-      setTaskWorktreePath(taskId, primaryWorktreePath);
-      // Operator diagnostic: untracked/ignored host files are NOT in the worktree.
-      // Git worktrees carry committed/tracked content only. Emit a warning so the
-      // limitation is visible in forge logs even before a dedicated event type lands.
-      if (wt.untrackedFiles.length > 0) {
+      const baseSha = resolveTaskBaseSha(args.projectDir, args.runId);
+      const clone = provisionTaskClone(args.projectDir, args.runId, taskId, baseSha);
+      primaryWorktreePath = clone.clonePath;
+      // Operator diagnostic: untracked/ignored host files are NOT in the clone.
+      // A clone carries committed content only, exactly as a worktree does.
+      if (clone.untrackedFiles.length > 0) {
         process.stderr.write(
-          `[forge/worktree] task ${taskId}: ${wt.untrackedFiles.length} untracked host file(s) not in worktree: ${wt.untrackedFiles.slice(0, 5).join(", ")}${wt.untrackedFiles.length > 5 ? ` (+${wt.untrackedFiles.length - 5} more)` : ""}\n`
+          `[forge/worktree] task ${taskId}: ${clone.untrackedFiles.length} untracked host file(s) not in workspace: ${clone.untrackedFiles.slice(0, 5).join(", ")}${clone.untrackedFiles.length > 5 ? ` (+${clone.untrackedFiles.length - 5} more)` : ""}\n`
         );
       }
     } catch (e) {
-      // Gate or create failure: no durable DB state to unwind (setTaskWorktreePath
-      // only runs after a successful createWorktree), but the task must not stay
-      // stuck in pending — transition to failed so the run can report the error.
-      // cleanupFailedWorktreeSetup is NOT EPHEMERAL-gated: the agent never ran,
-      // so there is no output to preserve — always safe to remove partial state.
+      // Gate or create failure: the task must not stay stuck in pending —
+      // transition to failed so the run can report the error. The cleanup is NOT
+      // EPHEMERAL-gated: the agent never ran, so there is no output to preserve
+      // and removing partial state is always safe.
       const msg = `worktree setup failed: ${(e as Error).message}`;
-      cleanupFailedWorktreeSetup(args.projectDir, args.runId, taskId);
+      // A create-only REFUSAL must not be followed by cleanup: the directory it
+      // names is one an agent may already have written to, and the ref it names
+      // may hold a prior attempt's captured work. Cleanup disposes only of state
+      // THIS attempt created, so both refusals are surfaced, never swept — and
+      // the recorded workspace path is then left naming only what is really there.
+      settleFailedCloneProvisioning(args.projectDir, args.runId, taskId, e);
       failTask(taskId, { runId: args.runId, kind: classify({}), error: msg });
       return "failed";
     }
@@ -806,12 +939,39 @@ async function dispatchSingleStep(args: {
   };
 
   if (primaryWorktreePath) {
+    // FG-621 (AC 3 / AC 5): capture BEFORE the publisher runs, in the fixed order
+    // captureTaskClone documents — safety-commit tracked AND untracked state in
+    // the clone, resolve its branch tip, fetch that branch into THIS repository's
+    // ref namespace under the deterministic name, and verify the two agree. The
+    // agent's own commits arrive with it.
+    const capture = captureTaskClone(args.projectDir, primaryWorktreePath, args.runId, taskId);
+    if (!capture.ok) {
+      // No-discard: the clone is retained exactly where it is, and the reaper
+      // will record it rather than dispose of unproven work. The kind is
+      // `capture_failed`, not `merge_conflict`: nothing has been merged at this
+      // point and the publish target is not involved — the clone's work never
+      // reached the parent's ref namespace at all.
+      failTask(taskId, {
+        runId: args.runId,
+        kind: "capture_failed",
+        error: `${capture.error} [${capture.cause}]`,
+        result,
+      });
+      finalizeContainerRetention(containerName, false);
+      return "failed";
+    }
     const publication = await publishIntegration({
       runId: args.runId,
       taskId,
       projectDir: args.projectDir,
+      // `worktreePath` is deliberately OMITTED for a clone source. The publisher's
+      // autoCommitSource can only mutate a source it was told the path of, so
+      // omitting it makes "no clone-side commit after the fetch" STRUCTURAL rather
+      // than a convention — a post-fetch commit would advance only the clone's own
+      // ref and be silently absent from the candidate (they are different
+      // repositories). The branch below is the captured, verified parent ref.
       sources: [
-        { branch: worktreeBranchName(args.runId, taskId), worktreePath: primaryWorktreePath, label: `task ${taskId}` },
+        { branch: capture.branch, label: `task ${taskId}` },
       ],
       // Runs AFTER the publisher's integration gate has passed against this
       // candidate — and once per candidate, so a rebuild re-runs it too.
@@ -939,8 +1099,11 @@ async function republishForcedPrimary(
     runId: args.runId,
     taskId: task.id,
     projectDir: args.projectDir,
+    // FG-621: same omission as the first-pass publish above — the source was
+    // already captured (safety-committed and fetched) when the task first ran, so
+    // the publisher must not commit into the clone now and make that ref stale.
     sources: [
-      { branch: worktreeBranchName(args.runId, task.id), worktreePath, label: `task ${task.id}` },
+      { branch: worktreeBranchName(args.runId, task.id), label: `task ${task.id}` },
     ],
     // No alsoValidate: the publisher's integration gate still runs against the
     // candidate, but the reds are not re-collected — the human overrode them.
@@ -1809,6 +1972,28 @@ async function dispatchFanoutStep(args: {
   const maxConc = fanout.max_concurrency ?? 4;
   const childOutcomes: ChildOutcome[] = [];
 
+  // FG-621 (AC 4): ONE base for the whole wave, resolved before any child is
+  // spawned and recorded on every sibling's row. Siblings integrate through the
+  // existing ordered candidate path, so they must start from the same commit —
+  // resolving per-child would let a concurrent publication move the base
+  // mid-wave. Skipped entirely when isolation is off: the children create no
+  // workspace then, and the empty string they receive is never read.
+  let waveBaseSha = "";
+  if (isWorktreeModeEnabled()) {
+    try {
+      waveBaseSha = resolveTaskBaseSha(args.projectDir, args.runId);
+    } catch (e) {
+      // The parent row exists by now (inserted or marked running above), so this
+      // is a plain failTask rather than the create-and-fail helper.
+      failTask(parentId, {
+        runId: args.runId,
+        kind: classify({}),
+        error: `fanout: could not resolve the wave's base commit: ${(e as Error).message}`,
+      });
+      return "failed";
+    }
+  }
+
   let queue = rawArray.map((value, idx) => ({ value, idx }));
   let aborted = false;
 
@@ -1830,6 +2015,7 @@ async function dispatchFanoutStep(args: {
         getModelPolicy: args.getModelPolicy,
         seedGeneration: args.seedGeneration,
         requestedChanges,
+        baseSha: waveBaseSha,
       })),
     );
     childOutcomes.push(...results);
@@ -1858,6 +2044,8 @@ async function dispatchFanoutStep(args: {
           getModelPolicy: args.getModelPolicy,
           seedGeneration: args.seedGeneration,
           requestedChanges,
+          // The retry is part of the SAME wave, so it starts from the same base.
+          baseSha: waveBaseSha,
         })),
       );
       // Replace failed outcomes with retry outcomes.
@@ -1920,11 +2108,16 @@ async function dispatchFanoutStep(args: {
       });
       for (const child of successfulChildren) {
         if (!child.worktreePath) continue;
+        // FG-621: the child workspace path is deliberately NOT passed. Every
+        // completed child was already captured (safety-committed, then fetched
+        // into this repository's ref namespace) when it finished, so the branch
+        // this merge resolves is final. Committing into the clone now would
+        // advance only the clone's own ref and leave the fetched branch — and
+        // therefore the candidate — silently stale.
         const merge = mergeChildIntoIntegration(
           integrationWorktreePath,
           args.runId,
           child.childTaskId,
-          child.worktreePath,
         );
         logEvent("integration.child_merged", {
           runId: args.runId,
@@ -2464,6 +2657,9 @@ async function runFanoutChild(args: {
   getModelPolicy: (projectDir: string) => ModelPolicyWithSource;
   seedGeneration?: SeedGeneration | null;
   requestedChanges?: string;
+  /** FG-621 (AC 4): the ONE base every sibling of this wave is created from,
+   *  resolved once by the caller before any child was spawned. */
+  baseSha: string;
 }): Promise<ChildOutcome> {
   const step = args.step;
   const agentRole = resolveChildAgent(step, args.fanout, args.value);
@@ -2569,19 +2765,23 @@ async function runFanoutChild(args: {
     return { index: args.index, value: args.value, childTaskId, status: "failed" };
   }
 
-  // FG-351: create a task-scoped git worktree for each fanout child when worktree
-  // mode is enabled. Same pattern as primary dispatch: DB write before container
-  // start so reconcile can find the path after a process restart.
+  // FG-351/FG-621: provision each fanout child's PRIVATE CLONE when workspace
+  // isolation is enabled. Same pattern as primary dispatch: DB write before
+  // container start so reconcile can find the path after a process restart.
+  //
+  // AC 4: every sibling of one wave is created from the SAME base — args.baseSha,
+  // resolved ONCE by dispatchFanoutStep before any child was spawned. Resolving it
+  // per-child would let a concurrent publication move the base mid-wave and give
+  // two siblings different starting points.
   let childWorktreePath: string | undefined;
   if (isWorktreeModeEnabled()) {
     try {
       preflightWorktreeGate(args.projectDir);
-      const wt = createWorktree(args.projectDir, args.runId, childTaskId);
-      childWorktreePath = wt.worktreePath;
-      setTaskWorktreePath(childTaskId, childWorktreePath);
-      if (wt.untrackedFiles.length > 0) {
+      const clone = provisionTaskClone(args.projectDir, args.runId, childTaskId, args.baseSha);
+      childWorktreePath = clone.clonePath;
+      if (clone.untrackedFiles.length > 0) {
         process.stderr.write(
-          `[forge/worktree] task ${childTaskId}: ${wt.untrackedFiles.length} untracked host file(s) not in worktree: ${wt.untrackedFiles.slice(0, 5).join(", ")}${wt.untrackedFiles.length > 5 ? ` (+${wt.untrackedFiles.length - 5} more)` : ""}\n`
+          `[forge/worktree] task ${childTaskId}: ${clone.untrackedFiles.length} untracked host file(s) not in workspace: ${clone.untrackedFiles.slice(0, 5).join(", ")}${clone.untrackedFiles.length > 5 ? ` (+${clone.untrackedFiles.length - 5} more)` : ""}\n`
         );
       }
     } catch (e) {
@@ -2590,7 +2790,7 @@ async function runFanoutChild(args: {
       // cleanupFailedWorktreeSetup is NOT EPHEMERAL-gated: the agent never ran,
       // so there is no output to preserve — always safe to remove partial state.
       const msg = `worktree setup failed: ${(e as Error).message}`;
-      cleanupFailedWorktreeSetup(args.projectDir, args.runId, childTaskId);
+      settleFailedCloneProvisioning(args.projectDir, args.runId, childTaskId, e);
       failTask(childTaskId, { runId: args.runId, kind: classify({}), error: msg });
       return { index: args.index, value: args.value, childTaskId, status: "failed" };
     }
@@ -2634,6 +2834,25 @@ async function runFanoutChild(args: {
   if (dispatchResult.kind === "failed") {
     // FG-353: include worktreePath so dispatchFanoutStep can clean up failed children.
     return { index: args.index, value: args.value, childTaskId, status: "failed", worktreePath: childWorktreePath };
+  }
+
+  // FG-621 (AC 3 / AC 5): capture the child's clone HERE, at completion, in the
+  // fixed order — safety-commit tracked AND untracked state, then fetch the
+  // branch into this repository's ref namespace. The integration merge below
+  // resolves that branch by name, and the clone's private refs are not visible to
+  // the parent until this runs.
+  if (childWorktreePath) {
+    const capture = captureTaskClone(args.projectDir, childWorktreePath, args.runId, childTaskId);
+    if (!capture.ok) {
+      failTask(childTaskId, {
+        runId: args.runId,
+        kind: "capture_failed",
+        error: `${capture.error} [${capture.cause}]`,
+        result: dispatchResult.result,
+      });
+      finalizeContainerRetention(dispatchResult.containerName, false);
+      return { index: args.index, value: args.value, childTaskId, status: "failed", worktreePath: childWorktreePath };
+    }
   }
 
   // AWN-2 task-level race: don't overwrite / re-announce a concurrently-cancelled child.
@@ -3030,7 +3249,15 @@ async function runContainer(args: {
       try {
         provisionerArgs = buildProvisionerDockerArgs(
           runtime,
-          { TASK_ID: args.taskId, PROJECT_DIR: repoRootForMount },
+          {
+            TASK_ID: args.taskId,
+            PROJECT_DIR: repoRootForMount,
+            // FG-621: Forge's OWN record of the parent this workspace was made
+            // from. On the clone substrate the planner refuses without it — the
+            // workspace's alternates file is agent-writable, so it is only ever a
+            // value to verify, never a path to trust.
+            CANONICAL_PROJECT_DIR: args.projectDir,
+          },
           plan,
         );
       } catch (e) {
@@ -3121,6 +3348,13 @@ async function runContainer(args: {
     // This is the ONLY place the worktree substitution enters spawn processing.
     // The shadow-volume trigger (spawn.ts:247-259) is NOT affected.
     PROJECT_DIR: repoRootForMount,
+    // FG-621: the parent repository as FORGE recorded it — the run's projectDir,
+    // which is Forge-owned state, never anything read out of the workspace. The
+    // clone mount planner derives the expected parent object store from this and
+    // refuses any workspace whose `objects/info/alternates` disagrees; supplying
+    // it here is what makes that verification run on the production path instead
+    // of only when a test passes one in.
+    CANONICAL_PROJECT_DIR: args.projectDir,
     PROJECT_MODE: args.projectMode,
     MODEL: args.resolution.model,
     UPSTREAM_PROVIDER: args.resolution.provider ?? "",

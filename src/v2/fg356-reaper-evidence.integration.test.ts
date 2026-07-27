@@ -200,7 +200,9 @@ test("fg356 evidence: a retain event survives a store close + reopen, and the re
   assert.equal(rehydrated.payload["workspacePath"], clone, "and still names WHERE the unrecovered work is");
   assert.equal(rehydrated.payload["branch"], worktreeBranchName(RUN_ID, "t-durable"), "and on which branch");
   assert.equal(rehydrated.payload["substrate"], "private_clone");
-  assert.equal(rehydrated.payload["reason"], "private_clone_substrate");
+  // FG-621: the clone is retained for a PROVEN reason now, not for its substrate
+  // — its commit is in no Forge-owned ref, so the work exists only here.
+  assert.equal(rehydrated.payload["reason"], "unmerged_commits");
   assert.equal(rehydrated.payload["taskStatus"], "failed");
   assert.equal(getTask("t-durable")!.worktreePath, clone, "the row still points at the workspace it named");
 
@@ -214,16 +216,16 @@ test("fg356 evidence: a retain event survives a store close + reopen, and the re
 
 // ── The substrates that are not linked worktrees ──────────────────────────────
 
-test("fg356 evidence: a private clone is retained for its SUBSTRATE even when its tree is clean and its commits are captured", () => {
+test("fg356/fg621 evidence: a private clone that passes every proof is DISPOSED of, and the disposal is what gets recorded", () => {
   const dbFile = join(tmpRoot("db"), "forge.db");
   const repo = makeRepo();
   openStore(dbFile);
   startRunFor(repo);
 
-  // Clean, and holding nothing the parent does not already have: the git capture
-  // probe would sanction removing this. It is not removed, because FG-621 owns
-  // clone disposal (a clone is not a registered worktree, and its alternates
-  // point back into the parent object store).
+  // Clean, owned by its alternates, and holding nothing the parent does not
+  // already have. Before FG-621 this was retained for its SUBSTRATE alone —
+  // clone disposal was unimplemented, so the reaper refused before probing
+  // anything. It is now proven and disposed of, and the record says so.
   const clone = makePrivateClone(repo, "t-clone-clean");
   assert.equal(classifyWorkspace(clone), "private_clone");
   assert.equal(git(clone, "status", "--porcelain").trim(), "", "fixture: clean tree");
@@ -231,13 +233,40 @@ test("fg356 evidence: a private clone is retained for its SUBSTRATE even when it
 
   reconcileRun(RUN_ID, ALIVE);
 
-  assert.ok(existsSync(clone), "the unimplemented substrate is left alone");
-  assert.ok(existsSync(join(clone, ".git")), "including its private object store and refs");
+  assert.equal(existsSync(clone), false, "the directory IS the repository, so removing it disposes of both");
   const ev = onlyEvent("t-clone-clean");
-  assert.equal(ev.type, "task.workspace_retained");
-  assert.equal(ev.payload["reason"], "private_clone_substrate", "the SUBSTRATE is the reason, decided before any git probe");
+  assert.equal(ev.type, "task.workspace_reaped");
+  assert.equal(ev.payload["reason"], "work_captured");
   assert.equal(ev.payload["substrate"], "private_clone");
-  assert.deepEqual(ev.payload["details"], []);
+  assert.equal(ev.payload["workspacePath"], clone, "and it names the path it disposed of");
+});
+
+test("fg356/fg621 evidence: a clone whose ALTERNATES point somewhere else is retained as not-owned, however much it looks like a task workspace", () => {
+  const dbFile = join(tmpRoot("db"), "forge.db");
+  const repo = makeRepo();
+  const stranger = makeRepo("stranger");
+  openStore(dbFile);
+  startRunFor(repo);
+
+  // Same layout, same deterministic branch name, same substrate — and clean, so
+  // every capture probe would sanction removing it. It is a clone of a DIFFERENT
+  // repository, and the alternates target is the only thing that says so.
+  const foreign = join(tmpRoot("foreign"), "t-foreign");
+  execFileSync("git", ["clone", "--quiet", "--shared", stranger, foreign], { stdio: ["ignore", "ignore", "pipe"] });
+  git(foreign, "checkout", "-q", "-b", worktreeBranchName(RUN_ID, "t-foreign"));
+  insertTaskRow("t-foreign", { status: "complete", workspace: foreign });
+
+  reconcileRun(RUN_ID, ALIVE);
+
+  assert.ok(existsSync(foreign), "a clone of somebody else's repository is not forge's to delete");
+  const ev = onlyEvent("t-foreign");
+  assert.equal(ev.type, "task.workspace_retained");
+  assert.equal(ev.payload["reason"], "workspace_not_owned");
+  assert.equal(ev.payload["substrate"], "private_clone");
+  assert.ok(
+    (ev.payload["details"] as string[]).some((d) => d.includes("alternates")),
+    "and the evidence names the proof that failed",
+  );
 });
 
 test("fg356 evidence: a workspace that is neither substrate is retained as unknown_substrate — never guessed at", () => {
@@ -287,7 +316,10 @@ test("fg356 evidence: the run's OWN projectDir recorded as a workspace is never 
   assert.equal(readFileSync(join(repo, "README.md"), "utf8"), "# fg356 evidence\n");
   assert.equal(readFileSync(join(repo, "operator-uncommitted.txt"), "utf8"), "the operator's live edit\n");
   assert.equal(git(repo, "rev-parse", "--is-inside-work-tree").trim(), "true", "and the repository itself is untouched");
-  assert.equal(onlyEvent("t-livesource").payload["reason"], "private_clone_substrate");
+  // FG-621: classification alone no longer saves it — a main checkout classifies
+  // as `private_clone` and the clone branch now REAPS. What keeps it out of reach
+  // is the alternates proof: no repository is ever its own alternate.
+  assert.equal(onlyEvent("t-livesource").payload["reason"], "workspace_not_owned");
 });
 
 test("fg356 evidence: an unrelated repository's main checkout is not reaped either, whatever the task row claims", () => {
@@ -360,7 +392,7 @@ test("fg356 evidence: `forge show` names the retained path, branch and reason as
   const retained = timelineLine(forgeShow(home, ["t-cli-retained"]), "task.workspace_retained");
   assert.ok(retained.includes(clone), `the timeline must name WHERE the work still is: ${retained}`);
   assert.ok(retained.includes(worktreeBranchName(RUN_ID, "t-cli-retained")), `...and its branch: ${retained}`);
-  assert.ok(retained.includes("private_clone_substrate"), `...and why it was kept: ${retained}`);
+  assert.ok(retained.includes("uncommitted_work"), `...and why it was kept: ${retained}`);
   assert.ok(!retained.includes("{workspacePath"), `key names are not evidence: ${retained}`);
 
   const reaped = timelineLine(forgeShow(home, ["t-cli-reaped"]), "task.workspace_reaped");
@@ -380,7 +412,7 @@ test("fg356 evidence: `forge show` names the retained path, branch and reason as
   assert.ok(ev, "the retain event must still be in --json");
   assert.equal(ev.payload?.["workspacePath"], clone);
   assert.equal(ev.payload?.["branch"], worktreeBranchName(RUN_ID, "t-cli-retained"));
-  assert.equal(ev.payload?.["reason"], "private_clone_substrate");
+  assert.equal(ev.payload?.["reason"], "uncommitted_work");
   assert.equal(ev.payload?.["substrate"], "private_clone");
 });
 

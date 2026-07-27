@@ -355,6 +355,7 @@ test("fg356 drive: the sanction is real — a COMPLETE task whose work IS in pro
 
 const RETAIN_BY_DESIGN_KINDS = [
   "merge_conflict", // FG-352
+  "capture_failed", // FG-621: the agent's work is in the workspace and nowhere else
   "integration_failed", // FG-357
   "integration_gate_timeout",
   "integration_gate_crashed",

@@ -31,9 +31,10 @@ import { logEvent, eventsForTask } from "../store/events.js";
 import { crashPoint } from "./crash-points.js";
 import { resolveIdleTimeoutMs } from "./idle-watchdog.js";
 import { getDb, writeTransaction } from "../store/db.js";
+import { publicationAttemptsForTask } from "../store/publications.js";
 import { taskDir } from "../util/paths.js";
 import { cleanupStagedAuth } from "./auth-state.js";
-import { removeWorktreeIfSafe, reapTaskWorkspace, classifyWorkspace, worktreeBranchName } from "./worktree-lifecycle.js";
+import { removeWorktreeIfSafe, reapTaskWorkspace, classifyWorkspace, worktreeBranchName, type CaptureAuthority } from "./worktree-lifecycle.js";
 import { getManifestRuntime } from "./task-manifest.js";
 import { analyzeProviderFailure } from "./provider-failure.js";
 import { inferredResultFrom } from "./inferred-result.js";
@@ -161,6 +162,9 @@ const TERMINAL_TASK = new Set(["complete", "failed"]);
  *  FG-357 and FG-425 documented the same no-discard contract for theirs. */
 const RETAIN_WORKSPACE_FAILURE_KINDS = new Set([
   "merge_conflict",
+  // FG-621: a capture failure leaves the agent's work in the clone and nowhere
+  // else — the most literal case there is of a workspace that IS the evidence.
+  "capture_failed",
   "integration_failed",
   "integration_gate_timeout",
   "integration_gate_crashed",
@@ -168,6 +172,34 @@ const RETAIN_WORKSPACE_FAILURE_KINDS = new Set([
   "publication_refused",
   "dirty_publish_target",
 ]);
+
+/** FG-621: what Forge has RECORDED about a task's publication, for the reaper's
+ *  capture proof. The reaper lives in worktree-lifecycle.ts, which is deliberately
+ *  free of the store, so the receipts are read HERE and handed in.
+ *
+ *  ONLY `published` attempts contribute an anchor, and only their published SHA.
+ *  A candidate that was merely BUILT proves nothing: its worktree is torn down
+ *  and its branch deleted, so a task commit reachable from an unpublished
+ *  candidate can still exist nowhere durable. A PUBLISHED SHA is durable, and it
+ *  is what makes the proof survive a `remote:<remote>#<branch>` target — that
+ *  target never advances local HEAD, so without the receipts every clone
+ *  published to a remote would fail the capture proof and be retained forever.
+ *  The newest attempt's target is carried through so that residual case can be
+ *  NAMED rather than reported as a HEAD-relative "unmerged". */
+function captureAuthorityFor(taskId: string): CaptureAuthority {
+  try {
+    const attempts = publicationAttemptsForTask(taskId);
+    const anchors = attempts
+      .filter((a) => a.state === "published")
+      .map((a) => a.publishedSha)
+      .filter((s): s is string => typeof s === "string");
+    return { anchors: [...new Set(anchors)], target: attempts[0]?.target };
+  } catch {
+    // A store read that fails proves nothing — an empty authority falls back to
+    // the HEAD proxy, which is the conservative (retain-more) side.
+    return { anchors: [] };
+  }
+}
 
 /** Is the named container actually running? Conservative on ambiguity: a clear
  *  "No such object" means gone; anything else (daemon unreachable, docker
@@ -1421,10 +1453,44 @@ export function reconcileRun(
         continue;
       }
 
-      const outcome = reapTaskWorkspace(workspacePath, runId, t.id, run.projectDir);
+      const outcome = reapTaskWorkspace(workspacePath, runId, t.id, run.projectDir, captureAuthorityFor(t.id));
       if (outcome.action === "absent") continue;
       if (outcome.action === "retained") {
         retain(outcome.substrate, outcome.branch, outcome.reason, outcome.details);
+        continue;
+      }
+      // FG-621: a DEFERRAL is not a disposition — the parent is mid-`gc` and this
+      // clone's alternates point into the object store being rewritten, so
+      // disposal waits for the next pass. It is NOT recorded as a retention: that
+      // would claim a verdict that has not been reached.
+      //
+      // But it is not silent either. A deferral that never resolves leaves a
+      // workspace both un-reaped and un-reported — indistinguishable, from
+      // outside, from a workspace nothing ever looked at. So it gets its own
+      // event type, on the same once-per-(task, reason) rule the retentions use:
+      // observable in `forge show`, and still a fixpoint (a second pass that
+      // defers again logs nothing, and the reap event that eventually follows is
+      // what settles the disposition).
+      if (outcome.action === "deferred") {
+        const alreadyRecorded = eventsForTask(t.id).some(
+          (e) =>
+            e.eventType === "task.workspace_reap_deferred" &&
+            (e.payload as { reason?: unknown } | null)?.reason === outcome.reason,
+        );
+        if (!alreadyRecorded) {
+          logEvent("task.workspace_reap_deferred", {
+            runId,
+            taskId: t.id,
+            payload: {
+              workspacePath,
+              branch: outcome.branch,
+              substrate: outcome.substrate,
+              reason: outcome.reason,
+              details: outcome.details,
+              taskStatus: t.status,
+            },
+          });
+        }
         continue;
       }
       if (outcome.action === "branch_reaped") {

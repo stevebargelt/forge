@@ -690,10 +690,15 @@ test("fg352 (11): auto-commit fails with changes present — ok:false, task fail
     assert.ok(worktreePath, "stub: /project mount must be in docker args");
     writeFileSync(stderrPath, "");
 
-    // Install a pre-commit hook that always exits 1. Hooks are shared across all
-    // worktrees of this repo, so this deterministically fails the auto-commit in
-    // mergeWorktreeBranch.
-    const hookPath = join(repo, ".git", "hooks", "pre-commit");
+    // Install a pre-commit hook that always exits 1, so the host-side safety
+    // commit deterministically fails with changes present.
+    //
+    // FG-621: the hook goes in the WORKSPACE's own .git/hooks, not the project's.
+    // A linked worktree shares its parent's hooks; a private clone is a separate
+    // repository with its own, and the safety commit runs in the workspace. The
+    // hook has to live in the repository the commit is made in, or this fixture
+    // silently stops inducing the failure it exists to induce.
+    const hookPath = join(worktreePath!, ".git", "hooks", "pre-commit");
     writeFileSync(hookPath, "#!/bin/sh\nexit 1\n");
     chmodSync(hookPath, 0o755);
 
@@ -721,8 +726,10 @@ test("fg352 (11): auto-commit fails with changes present — ok:false, task fail
   assert.equal(primary!.status, "failed", "task status must be failed");
   assert.equal(
     failureKindForTask(primary!.id),
-    "merge_conflict",
-    "failure kind must be merge_conflict",
+    "capture_failed",
+    "FG-621: a failed safety commit is a CAPTURE failure, not a merge conflict — nothing was merged, no candidate was " +
+      "built, and the publish target was never involved. The no-discard consequence is identical (both retain), but the " +
+      "kind an operator reads has to describe what actually happened",
   );
 
   // Worktree directory must be RETAINED — removeWorktreeIfSafe must NOT have

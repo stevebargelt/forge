@@ -154,6 +154,13 @@ export function applyMigrations(db: DatabaseInstance): void {
   if (!haveTasks.has("worktree_path")) {
     db.exec(`ALTER TABLE tasks ADD COLUMN worktree_path TEXT`);
   }
+  // FG-621: the base commit a task's private clone was created at. Additive +
+  // nullable, same posture as worktree_path above — every forge process on this
+  // host re-runs these migrations on its next open, so nothing here may be
+  // destructive or non-additive.
+  if (!haveTasks.has("base_sha")) {
+    db.exec(`ALTER TABLE tasks ADD COLUMN base_sha TEXT`);
+  }
 
   // Workflow rename (2026-05-08): old run rows reference deleted workflow names.
   // Rather than maintain alias maps in workflows.ts forever (Steven 2026-05-08:
