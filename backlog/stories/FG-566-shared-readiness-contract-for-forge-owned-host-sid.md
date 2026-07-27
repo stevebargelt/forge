@@ -1,11 +1,9 @@
 ---
 id: FG-566
 type: story
-status: done
+status: active
 title: "Shared readiness contract for Forge-owned host-side verification: prepare the review-loop clone AND the integration-gate publication candidate, and classify preparation failure separately"
 created: 2026-07-14
-closed: 2026-07-27
-closed_commit: 79fba76e
 ---
 
 **Scope EXPANDED 2026-07-27 by operator decision.** This was a review-loop-only ticket. It is now the
@@ -226,3 +224,91 @@ that line and was deliberately fenced by this ticket's architect.
 ### Unblocks
 
 FG-621 AC 11 (isolated dogfood) and FG-345 (default-on) — both were blocked on this landing.
+
+---
+
+## REOPENED 2026-07-27 — AC 1 is not met against a real project (FG-621 AC 11 dogfood)
+
+Closed on `79fba76e`, then **reopened the same day** when the first real isolated run
+(`run-fg-628-…-a64a73`, under `FORGE_WORKTREES=1`) falsified AC 1. Not new scope — this is AC 1's own
+promise failing on the project the ticket was written for.
+
+### What the dogfood proved WORKS
+
+Real progress, and it should not be re-litigated. The candidate was prepared and the gate **ran
+`npm run test:unit` for real** instead of dying at `ERR_MODULE_NOT_FOUND` — the exact failure of the
+previous dogfood. The isolation substrate is sound: task workspace at
+`~/.forge/worktrees/clones/run-fg-628-…-a64a73/task-architect-0ca386`, `tasks.base_sha` =
+`79fba76e761e9d2c0c4df7abc8f07d0e1566467e`, provisioning succeeded and the agent container ran.
+
+### What it falsified
+
+**FG-566 cannot prepare any project with native dependencies — including forge itself.**
+
+`src/v2/host-readiness.ts:474` sets `npm_config_ignore_scripts: "true"` (the minimal-env /
+no-lifecycle-scripts contract, added for red-security's finding that a candidate's lifecycle scripts
+are attacker-controlled code). `better-sqlite3` builds its native binding *in* its install script.
+With scripts suppressed the candidate gets source and no binary:
+
+```
+~/.forge/worktrees/publications/49b0b57a-…-r0/node_modules/better-sqlite3/
+  binding.gyp  deps  lib  LICENSE  package.json  README.md  src        ← no build/
+```
+
+```
+Error: Could not locate the bindings file. Tried:
+ → …/publications/49b0b57a-…-r0/node_modules/better-sqlite3/build/better_sqlite3.node
+```
+
+1976 failing assertions, all DB-backed, at a sha whose nine CI checks were green.
+
+**Three defects, in dependency order:**
+
+1. **Lifecycle-script suppression vs. native modules.** The security requirement (suppress
+   attacker-controlled install scripts on a candidate built from merged agent branches) and the
+   functional requirement (native modules build in exactly those scripts) are in direct conflict.
+   Neither can simply be dropped. This needs a real answer — a trusted rebuild step after a
+   scripts-suppressed install, an allowlist, a prebuilt-binary path, or an explicit refusal for
+   projects whose dependencies cannot be prepared safely. Note the repo's own CI treats the rebuild
+   as *mandatory*, not optional: `.github/workflows/ci.yml:57,62` and `:93,96` run `npm ci` then
+   `npm rebuild better-sqlite3` in both jobs.
+
+2. **The configured bootstrap cannot express the workaround.** `npm ci && npm rebuild better-sqlite3`
+   is not a single argv, and the contract is argv-split on whitespace with no shell. So the operator
+   escape hatch the ticket relies on does not reach this case. **This was flagged during the build
+   phase as a CONVERGENT medium by red-backend AND shipping-reviewer** — *"argv-split on whitespace
+   with no shell and no documented grammar, so a plausible multi-step or quoted-argument contract
+   mis-executes and refuses permanently"* — and it was **neither fixed nor filed**. That was an
+   orchestrator dispositioning miss, and the dogfood turned it into the blocker.
+
+3. **Readiness asserts executability without proving it — the ticket's own defect, one level down.**
+   `npm ci` exited 0, so preparation reported `ready` and the gate ran. The workspace was not
+   actually executable for the covered command set, so an ENVIRONMENT fault surfaced as
+   `integration_failed` — a code verdict. FG-566 exists to stop exactly that. "Preparation succeeded"
+   is currently "the setup command exited 0", not "the covered command set can run here."
+
+### Why the tests did not catch it
+
+Falsification 1's fixture project has no native dependencies, so `npm ci` with scripts suppressed
+produces a working tree there. The suite proved the contract against a project shape that does not
+match the real one. This is the fixtures-must-match-the-real-contract failure, and it is why AC 1
+needs a native-dependency case before it can be called met.
+
+### Added acceptance criteria
+
+13. A project with a NATIVE dependency (better-sqlite3 is the obvious fixture — forge itself is the
+    real case) is prepared into a candidate worktree and **the covered command set actually runs
+    there**. Observed RED against current behavior first, citing the missing
+    `better-sqlite3/build/`.
+14. The setup contract can express a real multi-step bootstrap, or the ticket states explicitly why a
+    single argv is sufficient and how a native-dependency project is served without one. Whatever the
+    grammar becomes, it must be documented, and it must not reintroduce free-form shell from an
+    untrusted tree (the FG-566 trust boundary stands).
+15. A workspace that is prepared but NOT executable for its covered command set is a readiness
+    REFUSAL, not a `ready`. A `ready` assertion that yields `Cannot find module` / missing-binding
+    failures downstream is the defect this ticket exists to eliminate.
+16. Lifecycle-script suppression is preserved for the publication path, or the change states what
+    replaces it and why the merged-agent-branch threat is still addressed.
+
+AC 11 of FG-621 remains blocked on this: the dogfood cannot complete while the integration gate
+cannot prepare forge itself.
