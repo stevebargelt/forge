@@ -1,9 +1,11 @@
 ---
 id: FG-628
 type: story
-status: active
+status: done
 title: Reviewer dispatch crashes on any project directory missing a workspace-member node_modules — FG-627's mountpoint fix never covers the non-isolated path
 created: 2026-07-27
+closed: 2026-07-28
+closed_commit: 71d7eae
 ---
 
 **Found live 2026-07-27** during the FG-566 architect phase (`run-fg-566-shared-host-side-verification-readiness-contract-0f7edc`), with isolation **OFF**. Both architect reds died before starting, and their verdicts were ingested as non-blocking `inconclusive (0.00)` — so the gate opened with **no adversarial review having run at all**. Silence read as success.
@@ -239,3 +241,31 @@ the authoritative case; the BLOCK itself now comes from the general rule.
 - genuine reviewer-authored `inconclusive` — still non-blocking, the regression guard that keeps this
   from becoming "any red failure blocks";
 - the AWN-5 downgraded-`fail` path — still non-blocking.
+
+## Acceptance Evidence
+
+Shipped across 14 commits on `fg-628-reviewer-mountpoints` (PR #169, merged as `71d7eae`).
+**AC 2 and AC 5 are the WIDENED wordings** recorded in "Dogfood 4" and "AC 5 — WIDENED"; the originals
+were falsified during implementation and both amendments are recorded above with their reasoning.
+
+| AC | Evidence | Verdict |
+|---|---|---|
+| 1. A dispatch against a project dir whose workspace member lacks `node_modules` starts its reviewer/red containers successfully — **reproduced RED first**, using a checkout with a root-only install. | RED demonstrated twice. **Live:** run `run-fg-628-…-3dc222` under `FORGE_WORKTREES=1` crashed `task-red-architect-94c56b` and `-58946b`, both `container_crash (exit 1)`, with the `create mountpoint … read-only file system` signature. **Differential:** stashing only `src/v2/runNext.ts`, A1/A2/A3 + B1 FAIL and B2/B3 PASS; with the fix all pass. **The OUTCOME (a container actually starting) is proven by `FG-628 (A4)` against a REAL docker daemon** — the nested read-only bind fails without the mountpoint and starts with it. The stubbed A1–A3 establish the precondition only; the reviewer was right that they could not reach AC 1's outcome, and A4 exists because of that finding. | met |
+| 2. The fix covers every tree that can be bound at the container's project path (**widened**); reuse `createDependencyMountpoints`, no second mechanism, no drift. | Precondition established against `repoRootForMount` at the point the read-only mount is decided, so FG-425 publication candidates — the site that actually fired — are covered by construction rather than enumeration; `worktree-lifecycle.ts:215`/`:372` remain two callers of one mechanism. No-drift asserted structurally: `FG-628 (D1)` adds a workspace member and requires both `planDependencyVolumes` and the created set to move together; `(D2)` requires the created mountpoints to equal exactly the volumes `spawn.ts` binds. Mutation M8 (hardcoding the member list) kills both. | met |
+| 3. The provisioner's and reviewer's project mounts stay read-only. | Asserted inside the A-tests, each with a non-vacuity check that the member volume genuinely appears in the container argv — without it "the mountpoint exists" would pass against a dispatch that mounts nothing. | met |
+| 4. Creating mountpoints in a live, non-disposable checkout is safe and reversible, **and it is explicitly stated** what else is affected — or the fix belongs at preflight with a refusal. | Fork resolved to **create, not refuse** (refusing would convert a crash into a permanent refusal for every project that ever ran a root-only install). Safety asserted empirically, not argued: `FG-628 (A2)` compares `status --porcelain`, `status --porcelain --ignored` and `ls-files --others` against their **pre-dispatch** output. Non-destructive: `(D3)`, killed by mutation M9 (`rmSync` before `mkdirSync`). Idempotent under concurrency: `(A3)`. **Containment:** `(A6)` a member symlinked out of the checkout creates NOTHING outside it, `(A6b)` the escape degrades the dispatch rather than crashing — a review finding, since the original code followed the symlink and `mkdir`'d outside the tree, which broke this AC's own basis. **Fail-safe:** `(A5)` an unwritable checkout records `dependency_mountpoints_unavailable` and mounts NO dependency volume. **Stated** as required: `docs/concepts.md` carries an explicit operator-visible side-effect paragraph — including the corrected fact that `git clean -fdX` **can** remove these directories (harmless: the next dispatch recreates them). The earlier "invisible to git" phrasing was too strong and is fixed. | met |
+| 5. A dispatched red that produced no valid review must not ingest as a non-blocking `inconclusive`; assert BOTH directions (**widened** — keyed on the review artifact, not the container lifecycle). | **Blocks:** `(B1)` pre-container crash, `(B5)` container started then crashed with no result, `(B6)` attached-mode docker startup failure *while `container.started` was already signalled* — the exact fail-open a narrower rule produced, `(C5)` `oom_killed`, `(C6)` `idle_timeout`, `(C7)` `model_error`, `(C9)` specialist post-start crash, `(C2)` specialist unreadable result. Every blocking assertion is made against a **specialist** red with `gate_on_verdict: false`, so a fix routed through authority fails them. **Does not block:** `(B2)` reviewer-authored `inconclusive`, `(B3)` reviewer passed, `(B7)` AWN-5's downgraded unsubstantiated `fail`. **Non-regression:** `(C1)` FG-586 authoritative unreadable still fails closed, `(C3)` FG-420 shipping-reviewer, `(C4)` FG-420's finding stays at `findings[0]` when both fire. **Atomicity:** `(B4)` a failed verdict insert leaves no `verdict.review_missing` event behind — the event and the block roll back together, restoring FG-482's invariant. **Operator surface:** `(B8)` `forge show` renders the distinction in human and `--json`; `(B9)` a reviewer-authored inconclusive carries neither marker. | met |
+| 6. `forge-test` green; required CI checks green. | Unit tier 2829/2829. Worktree tier green (the single macOS-only failure is pre-existing **FG-556**, `/var` vs `/private/var`, proved pre-existing by differential and green in Linux CI). Integration tier green on a clean tree — the 39 failures seen with a dirty tree are `assertBuilderCheckoutIsCommitted` refusing to build a release from uncommitted work, verified by stash-differential three separate times and independently corroborated by the orchestrator's own 36/36 clean run of that suite. Required CI on PR #169: `test` and `test-extended` both green at the reviewed tip `2a6b9271`. | met |
+
+### Honest limits — recorded, not waived
+
+- **Linux CI does not exercise the mount.** The dependency-cache mechanism is `process.platform === "darwin"`-gated, so a green CI run is not evidence for Half A's mount. `(A4)` is the daemon-level proof and it ran on the macOS host.
+- **`(A4)` skips without a reachable probe image.** It defaults to `busybox:latest`; this host cannot pull from the registry, so it was run with `FORGE_TEST_DOCKER_PROBE_IMAGE=ubuntu:22.04`. A machine with a daemon but no probe image gets a loud skip, not a pass — but it is a skip, so `(A4)` is not self-certifying on an arbitrary host.
+- **Fan-out composition is untested end to end.** The decision logic is shared (`dispatchReds` → `redRejection`) and the transition mechanics are covered by FG-482's fan-out cases, so the path is correct by construction — but the composition has no test. Deferred deliberately to a filed follow-up rather than closed over.
+
+**Docs impact:** updated — `docs/concepts.md` (Gate, Verdict, Blocked by red as four conditions with the
+provenance rule, the mountpoint precondition, the operator-visible live-checkout write, the two new
+timeline events, the non-fatal unavailable posture), `docs/how-to-new-feature.md`,
+`docs/how-to-set-up-notifications.md`, `seeds/workflows/feature.yml` and `security-audit.yml` (comments
+only — no values changed), `src/v2/DECISIONS.md`, and the orchestrator template plus its rendered
+`CLAUDE.md` block, kept in parity by `orchestrator-block-parity.test.ts`.
