@@ -73,13 +73,21 @@ written to the `verdicts` table.
 **Aggregation policy** (mirrors v1 `spawnRed.ts`):
 - Any red with `authority: authoritative` + `gate_on_verdict: true` returning
   `verdict: fail` ⇒ primary status `blocked_by_red`. Orchestrator surfaces.
+- A red whose container crashes produces an `inconclusive` verdict; the red
+  task itself is marked `failed`. ~~It doesn't block the gate.~~ **Amended by
+  FG-628:** a `container_crash` means the red never reviewed the artifact at
+  all, so it now blocks (`blocked_by_red`) orthogonally to authority AND to the
+  step's gate — a specialist red configured `gate_on_verdict: false` blocks
+  exactly as an authoritative one does, and a `gate: auto` step does not
+  advance. The recorded verdict value stays `inconclusive`, with a prepended
+  synthetic HIGH "never ran" finding; `oom_killed`, `idle_timeout` and
+  `model_error` still ingest as non-blocking inconclusives. See "Blocked by
+  red" in `docs/concepts.md`.
 - Otherwise, primary status follows the step's `gate`:
   - `gate: auto` ⇒ `complete` (specialist verdicts are advisory only — recorded
     but don't block)
   - `gate: human` ⇒ `awaiting_gate`
   - `gate: verdict` ⇒ `awaiting_gate` (orchestrator reads verdicts to decide)
-- A red whose container crashes produces an `inconclusive` verdict; the red
-  task itself is marked `failed`, but it doesn't block the gate.
 
 **State transitions:** per FORGE-DEC-017, the primary moves through
 `running → awaiting_red → (awaiting_gate | blocked_by_red | complete)`.
