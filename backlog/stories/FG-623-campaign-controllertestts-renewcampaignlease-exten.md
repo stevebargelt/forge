@@ -71,6 +71,14 @@ While in the file, check the sibling lease tests for the same pattern — any ot
 
 ## Sighting log
 
+- **2026-07-28 (impact escalation).** This flake **failed a `forge review-loop` verification gate** on
+  FG-345, stopping the loop with `verification_failed` and withholding `closeable` — on a change that
+  touches neither leases nor clocks. Reproduced immediately afterwards at **1 failure in 5 runs** of
+  `campaign-controller.test.ts` alone on an otherwise idle host, well above the ~2% this ticket records.
+  That reclassifies it: it is no longer only a cosmetic CI annoyance, it can halt a review loop and
+  costs a full re-run each time it fires. Worth prioritising accordingly.
+
+
 - **2026-07-28** (third recorded sighting) — hit once during FG-636's implementation, on the FIRST
   full unit-tier run inside the engineer's container; did not recur across 4 subsequent full-tier runs
   or 8 isolated runs of the file. Causally unrelated to that diff (the file uses an in-memory DB and a
