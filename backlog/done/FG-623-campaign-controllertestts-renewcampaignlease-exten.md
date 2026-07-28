@@ -1,9 +1,11 @@
 ---
 id: FG-623
 type: story
-status: active
+status: done
 title: campaign-controller.test.ts 'renewCampaignLease extends a live lease' is a 1ms knife-edge against a live clock — ~2% flake rate on an idle host
 created: 2026-07-25
+closed: 2026-07-28
+closed_commit: 612e481f
 ---
 
 ## Problem
@@ -85,3 +87,20 @@ While in the file, check the sibling lease tests for the same pattern — any ot
   fake clock offset, and reads no `FORGE_*` variable). Consistent with the ~2% idle-host flake rate
   this ticket already records, and independent corroboration that the knife-edge is timing, not
   environment.
+
+## Acceptance Evidence
+
+Shipped in `612e481f` (PR #172, squash of `877b3c85`). Renewal offset changed from `TTL-1` to `TTL/2`
+in `src/store/campaign-controller.test.ts` — a 4-insertion/2-deletion diff in that one file.
+
+| AC | Evidence | Verdict |
+|----|----------|---------|
+| Test asserts live-lease renewal without sub-millisecond wall-clock timing | `setPublicationClockOffsetForTest(TTL / 2)` at src/store/campaign-controller.test.ts:127 (was `TTL - 1`); renewal now has ~150,000 ms of clock headroom (`612e481f`) | met |
+| Non-flakiness demonstrated by margin measurement, not only pass count | 400-iteration probe replicating the test's exact sequence against the real store functions: before, margin {-1: 385, 0: 10, +1: 5} with 2/400 renew failures (reproducing the ticket's knife-edge); after, margin min=149999ms max=150000ms with 0/400 failures — 5 orders of magnitude beyond observed jitter. Corroborated (not substituted) by 50/50 green isolated runs of the file and two full unit-tier runs at 2845/2845 | met |
+| Generation-fencing half preserved | `assert.equal(renewCampaignLease(cid, ownerA, 99, TTL), false)` at src/store/campaign-controller.test.ts:133 unchanged and passing in all runs; the TTL+1 liveness check also retains ~150s margin (renewal stamps expiry at 1.5×TTL) | met |
+| Sibling lease tests audited for the same knife-edge | All 10 other tests in the file inspected: every other `setPublicationClockOffsetForTest` site is offset 0 or TTL+1 in the expiry direction, where elapsed wall time strengthens the assertion (monotone-safe); the AC10 linkage block uses no clock offset. Exactly one occurrence of the pattern existed — the fixed test | met |
+
+Verification: review-loop `run-review-loop-fg-623-5eb9a1` — stop reason `passed`, closeable, reviewed
+tip `877b3c85` equal to remote head; CI at `877b3c85` green on both required checks (`test`,
+`test-extended` — all four integration shards, worktree, dashboard_integration pass). Docs impact: none
+(test-only change).
