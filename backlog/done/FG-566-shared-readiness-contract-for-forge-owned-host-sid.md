@@ -1,9 +1,11 @@
 ---
 id: FG-566
 type: story
-status: active
+status: done
 title: "Shared readiness contract for Forge-owned host-side verification: prepare the review-loop clone AND the integration-gate publication candidate, and classify preparation failure separately"
 created: 2026-07-14
+closed: 2026-07-28
+closed_commit: de356f6a
 ---
 
 **Scope EXPANDED 2026-07-27 by operator decision.** This was a review-loop-only ticket. It is now the
@@ -374,3 +376,33 @@ executing checkout first.
 
 This is a property of FG-621 AC 11 in general, not of this ticket. Any AC that says "dogfood it"
 needs to say *which* forge is running.
+
+## Acceptance Evidence — reopen ACs 13-18
+
+Shipped as `de356f6a` (PR #167), squash of `7f0849b7` + `772eb5a0`. All nine CI checks green.
+Operator ruling on the close condition: *"the real gate completes" means it executes to a genuine
+code verdict — not that every downstream test passes.*
+
+| AC | Evidence | Verdict |
+|----|----------|---------|
+| **13.** Lifecycle-script suppression removed; reduced setup env and provenance rule survive. | `npm_config_ignore_scripts` is no longer set in `setupEnv` — the only surviving mention in `src/v2/host-readiness.ts` is the comment at `:603` stating it is deliberately NOT set. `SETUP_ENV_PASSTHROUGH` is byte-identical (only its doc comment changed, from "security boundary" to "hygiene") and the explicit non-`process.env` construction survives. Verified behaviourally by the test-engineer's allowlist-COMPLEMENT test: the setup child receives nothing outside the passthrough list. `resolveSetupCommand` still takes exactly one parameter (the workspace) and reads the command only from `FORGE_HOST_VERIFICATION_SETUP` or `hostConfigPath()`; the new `parseSetupContract` added no seam reading from the workspace. All four trust-boundary tests pass unchanged. | met |
+| **14.** A project with a NATIVE dependency is prepared and the binding LOADS. Observed RED first. | Unit evidence: `writeNativeVendorDep` vendors a `file:` package whose `install` lifecycle script produces `build/binding.mjs`, statically imported by its index — better-sqlite3's shape, hermetic (succeeds against `http://127.0.0.1:1/`) and toolchain-free (`node ./build.mjs`). Against pre-fix `host-readiness.ts`: 9 tests / 6 pass / **3 FAIL** with `ERR_MODULE_NOT_FOUND: Cannot find module '.../vendor/native-dep/build/binding.mjs'` recorded as `validation_failed`. Post-fix: 9/9. **LIVE evidence** (`run-fg-628-…-dogfood-3-8a668c`): `~/.forge/worktrees/publications/<attemptId>-r0/node_modules/better-sqlite3/build/Release` **exists**, and the gate output contains **zero** occurrences of `Could not locate the bindings`, `ERR_MODULE_NOT_FOUND`, `ERR_DLOPEN`, or `NODE_MODULE_VERSION` — against 984 and 13776 such hits in the pre-fix dogfood. | met |
+| **15.** Structured argv sequence; default `[["npm","ci"]]`; never a shell; ambiguous compound commands rejected, not split; grammar documented. | `resolveSetupCommand` returns a `SetupContract` — a sequence of `SetupStep = [string, ...string[]]`. Accepts one argv array, a sequence, JSON via `FORGE_HOST_VERIFICATION_SETUP`, and a bare-string shorthand; refuses any value containing a shell operator (`&&`, `||`, `;`, `\|`, redirect, backtick, `$()`) or a quote character with the new named reason `ambiguous_setup_contract`. Steps run in order as direct `execFile`s; the first failure stops the sequence and the refusal names the failing step. The test-engineer pinned the two things nobody had shown — that **no shell is invoked at the real sink**, and that **the ceiling bounds the whole contract** — *by execution rather than by an injected recorder*. All four accepted shapes, eight compound spellings and five malformed structures covered (41/41 across the two unit-tier files). Grammar documented on the type and in `docs/concepts.md`. Closes the convergent red-backend / shipping-reviewer finding dropped during the build phase. | met |
+| **16.** Native build failure during setup = readiness refusal, nothing published. Test failure after successful setup = still a code verdict. Both halves. | Publication path: engineer's falsifications 8 and 9 (re-run 9/9). Review-loop path: two new test-engineer tests that did not previously exist, using a fixture pair **differing only in whether the build script exits zero** — producing a readiness refusal on one side and a fixer dispatch with a consumed round on the other. **LIVE evidence**: the dogfood gate ran the real suite to completion and returned `integration_failed` on nine genuine test failures — a CODE verdict after a successful preparation, on the real project, on the exact path that produced an environment-fault-as-code-verdict three times earlier the same day. | met |
+| **17.** Docs state the trust model honestly. | `docs/concepts.md` states outright that lifecycle scripts run, that suppression was never a boundary, that a rebuild allowlist was considered and rejected, and that only sandboxing installation AND verification would be one. A repo-wide grep (not the diff summary) found **no** surviving stale "lifecycle scripts suppressed" claim — the only remaining ignore-scripts hits describe npm's own default in `docker/forge-test.sh`, two closed backlog tickets about the agent image, and FG-566 assertions pointing the correct way. The ceiling wording was separately corrected (`772eb5a0`) after the test-engineer found it documented per-command but implemented per-contract. | met |
+| **18.** The FG-621 AC 11 dogfood is re-run and the real gate completes. | `run-fg-628-…-dogfood-3-8a668c`, task `task-architect-2b12d8`, candidate `de356f6a`, under `FORGE_WORKTREES=1`. Isolation substrate confirmed from durable state: task workspace under `~/.forge/worktrees/clones/`, `tasks.base_sha` recorded, provisioning succeeded, agent container ran. The gate prepared the candidate, the native binding loaded, and it **executed to a genuine code verdict**. Per the operator's ruling, that is what this AC requires. The nine failures in that verdict are a SEPARATE defect — the gate disagrees with CI and with the host at the same unmodified sha — filed as **FG-636** and explicitly not owned here. | met |
+
+### Deferred, each with a filed ticket
+
+Nothing in this ticket's own AC was deferred. [[FG-631]] publication-attempt `node_modules`
+retention · [[FG-632]] unbounded readiness keyspace · [[FG-633]] no warm reuse · [[FG-634]] setup
+command / stderr persistence and `HOME` forwarding · [[FG-636]] the gate's false verdict on an
+unmodified candidate. The missing readiness preflight at `review-loop.ts:924` is owned by FG-625.
+
+### What this ticket cost, recorded for FG-345
+
+Three dogfood attempts. The first found the native-dependency gap; the second was wasted because a
+host-side fix was committed but not INSTALLED (see the note above); the third proved it. The ticket
+was closed once on fixture-backed evidence and reopened the same day when the first real run
+falsified AC 1. Carry that into FG-345's aggregate walk rather than assuming the remaining isolation
+work is small.
