@@ -80,6 +80,10 @@ beforeEach(() => {
     delete process.env[k];
   }
   process.env.ANTHROPIC_API_KEY = "sk-stub";
+  // FG-345: isolation is default-ON and the default is platform-dependent, so
+  // clearing FORGE_WORKTREES no longer means "off". This file's subject is the
+  // NON-worktree lane; say so explicitly or the outcome follows process.platform.
+  process.env.FORGE_WORKTREES = "0";
 
   const runtimePath = join(process.env.FORGE_HOME!, "runtimes", "fg425-scope-test.yml");
   mkdirSync(dirname(runtimePath), { recursive: true });
@@ -125,7 +129,7 @@ afterEach(() => {
 });
 
 test("FG-425 (SCOPE): worktree mode OFF routes through NO lane, NO publication lock, and NO gate", async () => {
-  // FORGE_WORKTREES is cleared in beforeEach — this is the default production path.
+  // FORGE_WORKTREES is pinned off in beforeEach — this is the bind-mount lane.
   const projectDir = mkdtempSync(join(tmpdir(), "fg425-scope-"));
   tmpDirs.push(projectDir);
 

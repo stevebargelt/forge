@@ -31,7 +31,9 @@ beforeEach(() => {
     stderr.push(typeof chunk === "string" ? chunk : chunk.toString());
     return true;
   });
-  delete process.env["FORGE_WORKTREES"];
+  // FG-345: isolation is default-ON, so "unset" no longer means off — these cases
+  // mean isolation is NOT armed, and must say so explicitly.
+  process.env["FORGE_WORKTREES"] = "0";
   delete process.env["FORGE_NO_WORKTREES"];
   _resetSelfHostWarnings();
 });
@@ -101,7 +103,7 @@ test("a DIFFERENT project is unaffected in every env combination", () => {
     { FORGE_WORKTREES: "1", FORGE_NO_WORKTREES: "1" },
   ];
   for (const combo of combos) {
-    delete process.env["FORGE_WORKTREES"];
+    process.env["FORGE_WORKTREES"] = "0"; // FG-345: the empty combo means isolation OFF, not "unset"
     delete process.env["FORGE_NO_WORKTREES"];
     Object.assign(process.env, combo);
     stderr = [];

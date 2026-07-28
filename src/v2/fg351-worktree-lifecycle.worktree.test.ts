@@ -12,7 +12,8 @@
 //   (f) Persisted task state — setTaskWorktreePath + getTask round-trip across restart.
 //   (g) Cleanup safety — removeWorktreeIfSafe no-ops without EPHEMERAL; removes with EPHEMERAL.
 //   (h) worktreeBranchName returns 'forge/<runId>/<taskId>'.
-//   (default-off) isWorktreeModeEnabled gate tests — mode disabled by default.
+//   (FG-345) isWorktreeModeEnabled resolution table — kill switch, explicit on,
+//       explicit off, and the platform default in BOTH directions.
 //
 // Strategy: real temp git repos for git-path tests (NOT the project repo). Object.defineProperty
 // for process.platform overrides. removeWorktreeIfSafe receives explicit projectDir — no
@@ -114,8 +115,10 @@ afterEach(() => {
     else process.env[k] = savedEnv[k] as string;
   }
 
-  // Restore process.platform
-  setPlatform(process.platform);
+  // Restore process.platform. REAL_PLATFORM, not process.platform: by the time
+  // this runs the value has already been overridden, so re-reading it here
+  // restores the spoof and leaks it into every later test in the file.
+  setPlatform(REAL_PLATFORM);
 
   for (const dir of tmpDirs.splice(0)) {
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
@@ -129,6 +132,9 @@ function makeTmpDir(): string {
   tmpDirs.push(dir);
   return dir;
 }
+
+/** Captured before any test can spoof it. */
+const REAL_PLATFORM = process.platform;
 
 /** Override process.platform for the duration of this test. */
 function setPlatform(p: string): void {
@@ -170,30 +176,65 @@ test("fg351 (h): worktreeBranchName returns forge/<runId>/<taskId>", () => {
   );
 });
 
-// ─── (default-off) Worktree mode disabled by default ─────────────────────────
+// ─── (FG-345) isWorktreeModeEnabled resolution table ─────────────────────────
+//
+// Isolation is default-ON as of the FG-345 operator decision, and the default is
+// PLATFORM-AWARE: darwin on, everything else off. It has to be, because
+// preflightWorktreeGate's Linux hard-fail is permanent — a bare `true` would arm
+// worktree mode on a Linux host and then throw on every dispatch.
+//
+// Every case below pins process.platform explicitly. That is the point: this
+// table is the one piece of production logic whose answer depends on the host,
+// so a test of it that reads the real host proves nothing on one of the two.
 
-test("fg351 (default-off): isWorktreeModeEnabled returns false when FORGE_WORKTREES unset", () => {
-  // FORGE_WORKTREES is cleared in beforeEach
-  assert.equal(
-    isWorktreeModeEnabled(),
-    false,
-    "worktree mode must be disabled by default (FORGE_WORKTREES unset)"
-  );
+test("fg351 (FG-345): the platform default is ON for darwin and OFF elsewhere", () => {
+  // Neither switch set (beforeEach clears both) — this is rule 3.
+  for (const [platform, expected] of [
+    ["darwin", true],
+    ["linux", false],
+    ["win32", false],
+  ] as const) {
+    setPlatform(platform);
+    assert.equal(
+      isWorktreeModeEnabled(),
+      expected,
+      `with neither switch set, ${platform} must resolve worktree mode ${expected ? "ON" : "OFF"}`
+    );
+  }
 });
 
-test("fg351 (default-off): isWorktreeModeEnabled returns false when FORGE_WORKTREES=0", () => {
-  process.env.FORGE_WORKTREES = "0";
-  assert.equal(isWorktreeModeEnabled(), false, "FORGE_WORKTREES=0 must not enable worktree mode");
-});
-
-test("fg351 (default-off): isWorktreeModeEnabled returns true only when FORGE_WORKTREES=1", () => {
+test("fg351 (FG-345): FORGE_WORKTREES=1 forces mode ON regardless of platform", () => {
   process.env.FORGE_WORKTREES = "1";
-  assert.equal(isWorktreeModeEnabled(), true, "worktree mode must be enabled with FORGE_WORKTREES=1");
+  for (const platform of ["darwin", "linux", "win32"] as const) {
+    setPlatform(platform);
+    assert.equal(
+      isWorktreeModeEnabled(),
+      true,
+      `explicit FORGE_WORKTREES=1 must force-enable on ${platform} (the Linux GATE, not this gate, is what refuses)`
+    );
+  }
 });
 
-test("fg351 (default-off): FORGE_NO_WORKTREES=1 disables mode even when FORGE_WORKTREES=1", () => {
-  process.env.FORGE_WORKTREES = "1";
+test("fg351 (FG-345): an explicit-off FORGE_WORKTREES beats the platform default", () => {
+  // The explicit-off spelling is what src/test-setup.ts pins the suite to, so a
+  // test's own FORGE_WORKTREES="1" still wins by overwriting the same variable.
+  setPlatform("darwin");
+  for (const value of ["0", "false", ""]) {
+    process.env.FORGE_WORKTREES = value;
+    assert.equal(
+      isWorktreeModeEnabled(),
+      false,
+      `FORGE_WORKTREES=${JSON.stringify(value)} must disable mode even on darwin, where the default is ON`
+    );
+  }
+});
+
+test("fg351 (FG-345): FORGE_NO_WORKTREES=1 outranks everything, including the darwin default", () => {
+  setPlatform("darwin");
   process.env.FORGE_NO_WORKTREES = "1";
+  assert.equal(isWorktreeModeEnabled(), false, "the kill switch must beat the platform default");
+
+  process.env.FORGE_WORKTREES = "1";
   assert.equal(
     isWorktreeModeEnabled(),
     false,
@@ -201,11 +242,11 @@ test("fg351 (default-off): FORGE_NO_WORKTREES=1 disables mode even when FORGE_WO
   );
 });
 
-test("fg351 (default-off): task worktreePath is undefined when mode is disabled (default production path)", () => {
-  // FORGE_WORKTREES is unset — isWorktreeModeEnabled() returns false.
+test("fg351 (FG-345): task worktreePath is undefined when mode is disabled (bind-mount path)", () => {
   // runNext.ts skips setTaskWorktreePath entirely when mode is disabled.
   // This proves the DB path is clean: tasks created without worktree mode
-  // have worktreePath undefined, preserving today's bind-mount behavior.
+  // have worktreePath undefined, preserving the pre-FG-351 bind-mount behavior.
+  process.env.FORGE_WORKTREES = "0";
   assert.equal(isWorktreeModeEnabled(), false);
   insertTask(makeTask());
   const task = getTask(TASK_ID);

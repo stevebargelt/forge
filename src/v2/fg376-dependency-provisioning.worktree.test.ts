@@ -70,6 +70,10 @@ beforeEach(() => {
     delete process.env[k];
   }
   process.env.ANTHROPIC_API_KEY = "sk-stub";
+  // FG-345: isolation is default-ON and the default follows process.platform, so
+  // clearing the switch above no longer means "off". Pin it; the cases that want
+  // worktree mode set "1" themselves and still win.
+  process.env.FORGE_WORKTREES = "0";
   ensureDispatchTestRuntime();
 });
 
@@ -351,7 +355,8 @@ test("fg376 (b): container exit 123 → task fails with failure_kind=verificatio
 
 test("fg376 FIX1: darwin + non-worktree mode (FORGE_WORKTREES unset) → legacy anonymous shadow volume only, one container call, no provisioner", async () => {
   setPlatform("darwin");
-  // FORGE_WORKTREES intentionally left unset — beforeEach already deletes it.
+  // FORGE_WORKTREES is pinned off in beforeEach — the bind-mount lane on darwin,
+  // where FG-345 would otherwise default it ON.
 
   const repo = makeTmpDir();
   initGitRepoWithWorkspace(repo);

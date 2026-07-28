@@ -80,6 +80,18 @@ process.env["FORGE_NOTIFY"] = "";
 // Safe because every worktree-tier test sets its own value INSIDE the test rather
 // than reading an ambient one.
 //
+// FG-345: FORGE_WORKTREES is PINNED to explicit-off rather than cleared, because
+// clearing it no longer means "off" — the production default is now PLATFORM-
+// dependent (darwin on, else off). Left ambient, ~39 unit-tier files that dispatch
+// without setting either switch would take the worktree path on the macOS host,
+// hit preflightWorktreeGate against a `.git`-less mkdtemp dir, and throw — while
+// CI, which runs on Linux, stayed green. A suite whose outcome depends on
+// process.platform is not evidence, so it is pinned to one value on every host.
+// It must be this variable and not FORGE_NO_WORKTREES: the kill switch outranks
+// everything, so it would also disable the ~42 worktree-tier files that legitimately
+// opt in with `process.env.FORGE_WORKTREES = "1"` inside the test. Pinning the same
+// variable they assign means their assignment still wins.
+//
 // An explicit named list, deliberately NOT a blanket FORGE_* deletion: harness
 // INPUTS are legitimate and must survive. CI injects FORGE_TEST_MISMATCHED_NODE
 // into all five test-extended shards (.github/workflows/ci.yml) and
@@ -87,9 +99,10 @@ process.env["FORGE_NOTIFY"] = "";
 // FORGE_TEST_PRINT_CMD is the other one. Only production behavior switches belong
 // below. FORGE_WORKTREES_EPHEMERAL is not here on purpose — it only affects
 // cleanup once worktree mode is already engaged, which these three now prevent.
-for (const key of ["FORGE_WORKTREES", "FORGE_NO_WORKTREES", "FORGE_WORKTREE_IGNORE_DIRTY"]) {
+for (const key of ["FORGE_NO_WORKTREES", "FORGE_WORKTREE_IGNORE_DIRTY"]) {
   delete process.env[key];
 }
+process.env["FORGE_WORKTREES"] = "0";
 
 process.on("exit", () => {
   try {
