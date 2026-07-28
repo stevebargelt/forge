@@ -299,16 +299,30 @@ test("entry point `forge retry`: an override-once dispatch cannot be silently re
 
 // ── 3. The two ways through must actually REACH dispatch ─────────────────────
 
-test("FORGE_WORKTREES=1 reaches the container against the forge source, silently", async () => {
+// EXPECTATION CHANGE (was: "FORGE_WORKTREES=1 reaches the container against the
+// forge source, silently"). invoke() provisions no workspace, so the flag never
+// isolated this dispatch — it only silenced the guard. Only the acknowledged
+// override is a way through here now; the flag's way-through is proven on the
+// WORKFLOW path, which does provision, by `forge next` above.
+test("FORGE_WORKTREES=1 is no longer a way through for a self-host invoke — it isolates nothing on this path", async () => {
   process.env["FORGE_WORKTREES"] = "1";
-  const spy = spyExec();
+  await assertRefusedWithoutTrace("forge invoke, FORGE_WORKTREES=1", (exec) =>
+    invoke({ agentRole: "engineer", task: "edit forge itself", projectDir: SELF_HOST, dockerExec: exec }),
+  );
+});
 
-  const r = await invoke({ agentRole: "engineer", task: "edit forge itself", projectDir: SELF_HOST, dockerExec: spy.exec });
-
-  assert.equal(spy.calls(), 1, "isolation armed → the dispatch must reach the container, not merely not-refuse");
-  assert.equal(r.status, "complete");
-  assert.equal(tasksForRun(r.runId).length, 1);
-  assert.doesNotMatch(stderr.join(""), /REFUSING|WARNING — dispatching against the live forge source/);
+test("the FG-345 default-on host: a self-host invoke refuses with NO env set at all, tracelessly", async () => {
+  // The live regression shape — macOS, nothing configured. isWorktreeModeEnabled()
+  // is true here, and the guard used to read that as "this dispatch is isolated".
+  const realPlatform = process.platform;
+  Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
+  try {
+    await assertRefusedWithoutTrace("forge invoke, default-on host", (exec) =>
+      invoke({ agentRole: "engineer", task: "edit forge itself", projectDir: SELF_HOST, dockerExec: exec }),
+    );
+  } finally {
+    Object.defineProperty(process, "platform", { value: realPlatform, configurable: true });
+  }
 });
 
 test("FORGE_NO_WORKTREES=1 reaches the container and warns", async () => {

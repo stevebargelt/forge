@@ -10,6 +10,7 @@ import { resolveSeedGeneration } from "../../v2/seed-generation.js";
 import type { Workflow } from "../../v2/schema.js";
 import { startRun, CONTROL_PLANE_METADATA_KEYS } from "../../v2/startRun.js";
 import { assertSelfHostDispatchAllowed } from "../../v2/self-host-guard.js";
+import { isWorktreeModeEnabled } from "../../v2/worktree-lifecycle.js";
 import { applyRoutePreflight, preflightEnforceFromEnv, validateRouteKeyUnder } from "../route-preflight.js";
 import { readTicket } from "../../backlog/structured.js";
 
@@ -50,9 +51,11 @@ export function registerNew(program: Command): void {
           allowSubproject: (options as { allowSubproject?: boolean }).allowSubproject ?? false,
         }
       );
-      // FG-612: refuse a self-host dispatch with worktree isolation off, before
-      // any cred/Docker work and before the run and task rows exist.
-      assertSelfHostDispatchAllowed(projectDir);
+      // FG-612: refuse a self-host dispatch before any cred/Docker work and
+      // before the run and task rows exist. The workflow dispatch this run feeds
+      // provisions a workspace per task when worktree mode is on, so the guard
+      // gets that same answer here.
+      assertSelfHostDispatchAllowed(projectDir, isWorktreeModeEnabled() ? "isolated" : "not-armed");
 
       const workspace = expandTildePath((options as { workspace?: string }).workspace ?? process.cwd());
 

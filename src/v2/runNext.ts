@@ -741,9 +741,11 @@ async function dispatchSingleStep(args: {
   }
 
   // FG-612: a run created before the guard existed (or under a different env)
-  // must still not dispatch into the live forge source unisolated.
+  // must still not dispatch into the live forge source unisolated. This path
+  // provisions the private clone below when worktree mode is on, so it passes
+  // that same answer through.
   try {
-    assertSelfHostDispatchAllowed(args.projectDir);
+    assertSelfHostDispatchAllowed(args.projectDir, isWorktreeModeEnabled() ? "isolated" : "not-armed");
   } catch (e) {
     failTask(taskId, { runId: args.runId, kind: classify({}), error: (e as Error).message });
     return "failed";
@@ -2901,7 +2903,7 @@ async function runFanoutChild(args: {
 
   // FG-612: same self-host refusal as primary dispatch — pre-worktree, pre-container.
   try {
-    assertSelfHostDispatchAllowed(args.projectDir);
+    assertSelfHostDispatchAllowed(args.projectDir, isWorktreeModeEnabled() ? "isolated" : "not-armed");
   } catch (e) {
     failTask(childTaskId, { runId: args.runId, kind: classify({}), error: (e as Error).message });
     return { index: args.index, value: args.value, childTaskId, status: "failed" };
@@ -3151,7 +3153,7 @@ async function runContainer(args: {
   // dependency provisioning, which spawns its own container below) can start
   // ahead of the refusal.
   try {
-    assertSelfHostDispatchAllowed(args.projectDir);
+    assertSelfHostDispatchAllowed(args.projectDir, isWorktreeModeEnabled() ? "isolated" : "not-armed");
   } catch (e) {
     const msg = (e as Error).message;
     failTask(args.taskId, { runId: args.runId, kind: classify({}), error: msg });

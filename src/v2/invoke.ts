@@ -133,10 +133,12 @@ function reapContainerAndReportFailure(containerName: string, taskSucceeded: boo
 }
 
 export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
-  // FG-612: refuse a self-host dispatch with worktree isolation off BEFORE the
-  // run or task row exists. Covers `forge invoke` and the review-loop's
-  // reviewer/fixer dispatches, which both land here.
-  assertSelfHostDispatchAllowed(args.projectDir);
+  // FG-612: refuse a self-host dispatch BEFORE the run or task row exists.
+  // Covers `forge invoke` and the review-loop's reviewer/fixer dispatches, which
+  // both land here. "never-isolated" is the literal truth of this file: nothing
+  // below provisions a workspace, so the live projectDir is mounted even where
+  // FG-345's default resolves isolation ON.
+  assertSelfHostDispatchAllowed(args.projectDir, "never-isolated");
 
   // Resolve / create the run.
   const runId = args.runId ?? createInvokeRun(args.agentRole, args.projectDir, args.designDir, args.runTitle, args.workspace, args.dispatchKey);
@@ -366,12 +368,12 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
 
   // FG-612: the pre-container chokepoint for callers that reach
   // dispatchInvokeTask without passing through invoke() (`forge retry`). It sits
-  // at the FIRST point where projectDir and worktree mode are both known —
-  // before the task dir, the manifest, auth staging and buildDockerArgs — so a
-  // refused retry is pre-WRITE, matching the other four entry points. Refusing
-  // after the first file lands defeats the property the guard exists for.
+  // at the FIRST point where projectDir is known — before the task dir, the
+  // manifest, auth staging and buildDockerArgs — so a refused retry is pre-WRITE,
+  // matching the other four entry points. Refusing after the first file lands
+  // defeats the property the guard exists for.
   try {
-    assertSelfHostDispatchAllowed(args.projectDir);
+    assertSelfHostDispatchAllowed(args.projectDir, "never-isolated");
   } catch (e) {
     const error = (e as Error).message;
     failTask(taskId, { runId, kind: classify({}), error });

@@ -138,11 +138,35 @@ When workspace and project diverge — e.g. running an orchestrator in `~/code/a
 
 ## Running forge on the forge repo itself
 
-Forge IS its own project. You can run `forge init ~/code/forge` (or `cd ~/code/forge && forge init`) to install the orchestrator block into forge's own `CLAUDE.md`, then use `forge invoke engineer`, `forge new feature`, etc. to evolve forge through the same pipeline it provides to other projects. The forge repo uses the structured backlog format (tickets under `backlog/`, notes at `backlog/notes.md`); `forge backlog list --status active` works from `~/code/forge` like it does from any other project.
+Forge IS its own project. You can run `forge init ~/code/forge` (or `cd ~/code/forge && forge init`) to install the orchestrator block into forge's own `CLAUDE.md`, then use `forge new feature` etc. to evolve forge through the same pipeline it provides to other projects. The forge repo uses the structured backlog format (tickets under `backlog/`, notes at `backlog/notes.md`); `forge backlog list --status active` works from `~/code/forge` like it does from any other project.
 
-Three caveats specific to the meta case:
+**Use the workflow path — `forge new` / `forge next` — for the meta case.** Those provision an isolated workspace per task, so agents never write into the tree forge is running from. `forge invoke` provides no such isolation and is refused here; that is caveat 1.
 
-1. **`forge review-loop` must be pointed at a clone, not at the forge checkout itself (FG-566).** `--project` defaults to cwd, so running the loop from `~/code/forge` targets the very tree the running forge is executing from — and the loop's local verification fallback prepares its workspace by running `npm ci`, which deletes `node_modules` before rebuilding it. That would take out the `better-sqlite3` binding this forge and every concurrent forge on the host are loaded from. Forge therefore refuses, before anything runs, with a classified `self_host_workspace` readiness refusal:
+Four caveats specific to the meta case:
+
+1. **`forge invoke` against the forge checkout itself is refused (FG-612).** `forge invoke <role> --project ~/code/forge` — and `forge review-loop` pointed there, whose reviewer and fixer both dispatch through the same path — mounts the live checkout and provisions no workspace, so agent writes land in the tree this forge is executing from. Since forge runs `src/` in-process, a half-written file is immediately live for every forge process on the host. Forge refuses before the container starts and before the task row exists:
+
+   ```
+   forge: REFUSING to dispatch — self-host dispatch on a path that provisions no isolated workspace (FG-612).
+     project:            /Users/you/code/forge
+     forge source root:  /Users/you/code/forge  (the tree this forge is executing)
+   ```
+
+   **Do not reach for `FORGE_WORKTREES=1` — it will not help, and the refusal deliberately never mentions it.** FG-345 made workspace isolation default-on, but that guarantee is a property of *workflow* dispatch; arming the flag does not change what an invoke mounts, so you would land back on the live checkout believing you had fixed it. The refusal is structural, not a missing flag. Two ways through:
+
+   ```bash
+   # The fix: dispatch against a disposable clone, outside the forge source root.
+   git clone ~/code/forge ~/code/forge-work
+   forge invoke engineer --project ~/code/forge-work
+
+   # The override: proceed on the shared checkout anyway, having accepted the hazard.
+   # Warns once per project; isolates nothing.
+   FORGE_NO_WORKTREES=1 forge invoke engineer --project ~/code/forge
+   ```
+
+   This is scoped to the self-host case. `forge invoke` against any *other* project is unaffected and still runs against that project's checkout. See [Workspace isolation](concepts.md#self-host-dispatch-on-a-never-isolated-path) for the full contract.
+
+2. **`forge review-loop` must be pointed at a clone, not at the forge checkout itself (FG-566).** `--project` defaults to cwd, so running the loop from `~/code/forge` targets the very tree the running forge is executing from — and the loop's local verification fallback prepares its workspace by running `npm ci`, which deletes `node_modules` before rebuilding it. That would take out the `better-sqlite3` binding this forge and every concurrent forge on the host are loaded from. Forge therefore refuses, before anything runs, with a classified `self_host_workspace` readiness refusal:
 
    ```
    review-loop: verification_environment_unavailable: review-loop could not establish an
@@ -163,6 +187,6 @@ Three caveats specific to the meta case:
    forge review-loop <ticket-id> --project ~/code/forge-review --max-rounds 2 --route <route>
    ```
 
-   Only the loop's *local* verification arms are affected. When a green required CI check covers `HEAD`, the loop reuses that evidence and never attempts a local install at all — so the common path from the forge checkout is unchanged. See [Host verification readiness](concepts.md#host-verification-readiness) for the full contract and the rest of the refusal vocabulary.
-2. **Don't edit forge source files from inside an agent container that has forge mounted at `/project`.** That works — but you're now changing the same binary that's running the run. If the agent edits `src/v2/spawn.ts` and the parent forge process re-spawns a child container mid-run, the source has moved underneath. Use the pipeline for forge changes, but expect to restart any in-flight orchestrator session afterward to pick up the new behavior.
-3. **The forge repo's `CLAUDE.md` (the one at the repo root, checked into git) is for sessions WORKING ON forge** — it doesn't contain the orchestrator block. If you want to be orchestrated when developing forge, run `forge init --project ~/code/forge`; the block will be appended after the existing content.
+   This readiness refusal is what fires when the loop reaches its *local* verification arms. When a green required CI check covers `HEAD`, the loop reuses that evidence and never attempts a local install, so it gets past readiness — and then stops at caveat 1 instead, because its reviewer dispatch is a self-host invoke. **Either way the loop cannot run from the forge checkout**, and a clone is the answer to both. See [Host verification readiness](concepts.md#host-verification-readiness) for the full contract and the rest of the refusal vocabulary.
+3. **Don't edit forge source files from inside an agent container that has forge mounted at `/project`.** That works — but you're now changing the same binary that's running the run. If the agent edits `src/v2/spawn.ts` and the parent forge process re-spawns a child container mid-run, the source has moved underneath. Use the pipeline for forge changes, but expect to restart any in-flight orchestrator session afterward to pick up the new behavior.
+4. **The forge repo's `CLAUDE.md` (the one at the repo root, checked into git) is for sessions WORKING ON forge** — it doesn't contain the orchestrator block. If you want to be orchestrated when developing forge, run `forge init --project ~/code/forge`; the block will be appended after the existing content.
