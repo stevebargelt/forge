@@ -141,26 +141,33 @@ export function planDependencyVolumes(repoRoot: string, projectContainerPath: st
   return { volumes, lockfileHash: hash, installRoot: projectContainerPath };
 }
 
-/** FG-627: create the mountpoint DIRECTORY for every volume the plan for this
- *  workspace will mount, inside the workspace itself.
+/** FG-627, widened by FG-628: create the mountpoint DIRECTORY for every volume
+ *  the plan for this tree will mount, inside the tree itself.
  *
  *  The provisioner mounts the project READ-ONLY and mounts each dependency
- *  volume at a path INSIDE it (buildProvisionerDockerArgs). Docker has to
- *  create the mountpoint before it can bind there, and it cannot mkdir on a
- *  read-only rootfs — so a missing `<member>/node_modules` in the source tree
- *  kills the provisioner with exit 125 before any install runs. A main
- *  checkout happens to have those directories already; no fresh workspace does
- *  (`node_modules` is gitignored, so neither `git clone --shared` nor `git
- *  worktree add` carries it), which is why this only ever bites isolated
- *  workspaces. Creating them at workspace creation is what makes the read-only
- *  project mount survivable — the alternative is relaxing that mount, which
- *  the provisioner must never do.
+ *  volume at a path INSIDE it (buildProvisionerDockerArgs); so does every
+ *  reviewer/red, at `:ro`. Docker has to create the mountpoint before it can
+ *  bind there, and it cannot mkdir on a read-only rootfs — so a missing
+ *  `<member>/node_modules` in the source tree kills the container before
+ *  anything runs.
  *
- *  The mountpoints are derived from planDependencyVolumes itself, with the
- *  workspace standing in for the container path, so the set can never drift
- *  from what the spawn path actually mounts. Empty directories are invisible
- *  to git (`status --porcelain`, and `--ignored` too), so this leaves the
- *  workspace clean for capture and the reaper.
+ *  This is NOT confined to isolated workspaces. A main checkout only happens to
+ *  carry the ROOT member's directory: a root-only install leaves every other
+ *  workspace member's absent, and `node_modules` is gitignored so no fresh tree
+ *  carries any of them — not `git clone --shared`, not `git worktree add`, and
+ *  not an FG-425 publication candidate, which is the tree the reds actually
+ *  review under worktree mode. FG-628 measured all three failing. Callers
+ *  therefore establish the precondition against the tree that will actually be
+ *  bound, at the point the read-only mount is decided (runNext.ts's
+ *  runContainer); worktree-lifecycle.ts's two calls are now two more callers of
+ *  this one mechanism rather than the only ones. The alternative is relaxing
+ *  the read-only mount, which no caller may do.
+ *
+ *  The mountpoints are derived from planDependencyVolumes itself, with the tree
+ *  standing in for the container path, so the set can never drift from what the
+ *  spawn path actually mounts. Empty directories are invisible to git
+ *  (`status --porcelain`, and `--ignored` too), so this leaves even an
+ *  operator's own live checkout clean for capture and the reaper.
  *
  *  Returns the created paths; empty when the project has no lockfile, i.e. no
  *  plan and nothing to mount. */

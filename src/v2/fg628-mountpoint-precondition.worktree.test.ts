@@ -25,11 +25,11 @@
 // never been prepared for one. Both tests therefore mark the cache ready by hand:
 // that is not a shortcut, it is the precondition that makes the bug reachable.
 //
-// What these tests assert is that the mountpoint exists in the mounted tree AT THE
+// What (1) and (2) assert is that the mountpoint exists in the mounted tree AT THE
 // MOMENT the container is built, together with the non-vacuity check that the
-// member volume is genuinely in that container's argv. What they deliberately do
-// NOT assert — because assuming it is the whole defect — is that the mount then
-// succeeds; that needs a real docker daemon.
+// member volume is genuinely in that container's argv. Their exec is stubbed, so
+// on their own they cannot speak to whether the mount then SUCCEEDS — and AC 1
+// asks for exactly that outcome. (4) closes it against a real docker daemon.
 //
 // Tier: worktree (`npm run test:worktree`) — real git repos, real worktree-mode
 // dispatch, real publication candidates.
@@ -46,7 +46,12 @@ import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { tasksForRun } from "../store/tasks.js";
 import { startRun } from "./startRun.js";
 import { runNext, type DockerExecFn } from "./runNext.js";
-import { lockfileHash, markDependencyCacheReady, dependencyVolumeName } from "./dependency-provisioning.js";
+import {
+  lockfileHash,
+  markDependencyCacheReady,
+  dependencyVolumeName,
+  createDependencyMountpoints,
+} from "./dependency-provisioning.js";
 import type { Workflow } from "./schema.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
@@ -74,6 +79,7 @@ const WORKFLOW: Workflow = {
 let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
 const tmpDirs: string[] = [];
+const tmpVolumes: string[] = [];
 
 const ENV_VARS = [
   "FORGE_WORKTREES",
@@ -110,6 +116,7 @@ afterEach(() => {
       rmSync(dir, { recursive: true, force: true });
     } catch { /* best-effort */ }
   }
+  for (const volume of tmpVolumes.splice(0)) dockerTry(["volume", "rm", "-f", volume]);
 });
 
 function setPlatform(p: string): void {
@@ -440,4 +447,84 @@ test("FG-628 (A3): two concurrent dispatches into the SAME non-isolated checkout
 
   assert.equal(seen.length, 2, "both runs' reds must have dispatched");
   assert.deepEqual(seen, [true, true], "concurrent creation of the same mountpoint must be a no-op, not a failure");
+});
+
+// ─── (4) AC 1's actual outcome, against a real docker daemon ──────────────────
+
+// (1)-(3) stop at the container's argv. Their exec is stubbed, so it returns 0
+// whatever docker would have made of those arguments — which means they establish
+// the precondition but cannot establish AC 1's OUTCOME, that the container then
+// starts. Only a daemon answers that, so this pairs both directions against one:
+// the same nested read-only bind FAILS without the mountpoint (the ticket's crash,
+// reproduced) and STARTS with it. It runs `true` in a scratch image rather than an
+// agent image because what is under test is runc's mountpoint creation, not
+// anything forge puts inside the container.
+//
+// Skips — loudly, with the reason — when no daemon or no scratch image is
+// reachable. A silent pass on a missing daemon would be this ticket's own failure
+// mode wearing a green tick.
+
+const PROBE_IMAGE = process.env.FORGE_TEST_DOCKER_PROBE_IMAGE ?? "busybox:latest";
+
+function dockerTry(args: string[]): { ok: boolean; stderr: string } {
+  try {
+    execFileSync("docker", args, { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" });
+    return { ok: true, stderr: "" };
+  } catch (e) {
+    const err = e as { stderr?: unknown; message?: string };
+    return { ok: false, stderr: String(err.stderr ?? err.message ?? e) };
+  }
+}
+
+function dockerProbeUnavailable(): string | undefined {
+  if (!dockerTry(["info", "--format", "{{.ServerVersion}}"]).ok) return "no docker daemon reachable";
+  if (dockerTry(["image", "inspect", PROBE_IMAGE]).ok) return undefined;
+  const pulled = dockerTry(["pull", PROBE_IMAGE]);
+  return pulled.ok ? undefined : `scratch image ${PROBE_IMAGE} unavailable (${pulled.stderr.trim().split("\n").pop()})`;
+}
+
+test("FG-628 (A4): a real container fails to start on the nested read-only volume WITHOUT the mountpoint and starts WITH it", async (t) => {
+  const unavailable = dockerProbeUnavailable();
+  if (unavailable) {
+    t.skip(`AC 1's live outcome NOT verified here — ${unavailable}`);
+    return;
+  }
+
+  const repo = makeRootOnlyInstallRepo();
+  const volume = `forge-fg628-probe-${process.pid}`;
+  dockerTry(["volume", "rm", "-f", volume]);
+  assert.ok(dockerTry(["volume", "create", volume]).ok, "the probe volume must be creatable");
+  tmpVolumes.push(volume);
+
+  // The reviewer's shape exactly: project bound read-only, the member's dependency
+  // volume bound read-only at a path inside it (AC 3 — neither is relaxed here).
+  const startContainer = (): { ok: boolean; stderr: string } =>
+    dockerTry([
+      "run", "--rm",
+      "-v", `${repo}:/project:ro`,
+      "-v", `${volume}:/project/${MEMBER}/node_modules:ro`,
+      PROBE_IMAGE, "true",
+    ]);
+
+  const withoutMountpoint = startContainer();
+  assert.equal(
+    withoutMountpoint.ok,
+    false,
+    "a nested read-only bind with no mountpoint in the source tree must fail — if it succeeds there is no defect here and the rest of this file proves nothing",
+  );
+  assert.match(
+    withoutMountpoint.stderr,
+    /mountpoint|read-only file system/i,
+    `expected docker's mountpoint-creation failure; got: ${withoutMountpoint.stderr}`,
+  );
+
+  // The mechanism the mount decision now runs against repoRootForMount.
+  createDependencyMountpoints(repo);
+
+  const withMountpoint = startContainer();
+  assert.equal(
+    withMountpoint.ok,
+    true,
+    `the container must START once the mountpoint exists — that is AC 1; docker said: ${withMountpoint.stderr}`,
+  );
 });
