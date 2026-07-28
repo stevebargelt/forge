@@ -286,3 +286,50 @@ Recommended sequence before flipping:
    adversarial review across every run. One green end-to-end run is cheap insurance against the next
    defect of that shape.
 3. Reword `preflightWorktreeGate`'s Linux message to state permanence rather than citing FG-358.
+
+## OPERATOR DECISION 2026-07-28 — default-on, and the workspace contract that settles carry-in
+
+**Isolation flips default-on.** The aggregate walk above is accepted: every structural blocker is
+closed, and the two that appeared open rested on superseded premises.
+
+### The workspace contract (the invariant carry-in was blocking on)
+
+**A task workspace consists of exactly two things:**
+
+1. **Committed tracked content at the recorded base SHA.**
+2. **Inputs explicitly supplied through Forge's own provisioning or environment mechanisms** — the
+   dependency cache, the runtime's declared mounts and env, the task package.
+
+**Ambient local checkout state is intentionally NOT inherited.** Uncommitted, untracked and ignored
+files in the operator's checkout do not reach a task workspace, and that is the contract rather than a
+gap in it. Forge controls the supported workflows; a workflow that needs a local file supplies it
+through a Forge mechanism, not by depending on whatever happens to be lying in a working tree.
+
+This closes the "untracked / ignored carry-in" question from the original architecture list. It is
+**answered, not deferred**: no generic carry-in system is to be built, and no child ticket is filed for
+one. A project that genuinely requires ambient checkout state is not a supported worktree-mode workflow
+and uses the escape hatch below.
+
+**`FORGE_NO_WORKTREES=1` remains the explicit legacy escape hatch** — the supported way to run the
+shared bind-mount path for anything the contract does not fit.
+
+### Bar for reversing this
+
+From here, only a **deterministic reproduction** of one of the following stops or reverts default-on:
+
+- data loss,
+- corruption,
+- wrong-candidate publication or verification,
+- failure in a supported Forge workflow.
+
+Speculative risk, theoretical edge cases, and non-deterministic one-offs do not qualify.
+
+### Not blockers
+
+- **FG-637** (fan-out end-to-end composition coverage) is a follow-up. The decision path is shared with
+  the single-step path and correct by construction; the gap is composition coverage only.
+- **Registry-dependent probe skips** are an **environmental evidence gap**, not an evidence failure.
+  They do not override live evidence already captured. (Recorded state as of 2026-07-28: the FG-628
+  `(A4)` probe self-certifies on its default image and was re-verified 7/7 with 0 skipped — the earlier
+  skip was a wedged local credential helper, since cleared. The general point stands for any host that
+  cannot reach an image.)
