@@ -248,6 +248,16 @@ test("FORGE_NO_WORKTREES=1 lets it through and warns that agents write to the li
   assertReachedDispatch("FORGE_NO_WORKTREES=1", r);
   assert.match(r.stderr, /WARNING — dispatching against the live forge source/);
   assert.match(r.stderr, /FORGE_NO_WORKTREES=1/);
+  assert.match(
+    r.stderr,
+    /disposable CLONE of the forge checkout/,
+    `invoke provisions nothing — a clone is the only fix\n${r.stderr}`,
+  );
+  assert.doesNotMatch(
+    r.stderr,
+    /unset FORGE_NO_WORKTREES/,
+    `unsetting it turns this allowed dispatch into the refusal — it does not isolate\n${r.stderr}`,
+  );
 });
 
 // ── The regression that matters most ────────────────────────────────────────

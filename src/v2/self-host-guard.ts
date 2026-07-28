@@ -161,8 +161,12 @@ export function assertSelfHostDispatchAllowed(
       process.stderr.write(
         `forge: WARNING — dispatching against the live forge source at ${key} with worktree isolation ` +
           `disabled (FORGE_NO_WORKTREES=1). Agents are writing to the source tree this forge is executing; ` +
-          `partial writes are live for every forge process on this host. On a host where isolation is ` +
-          `supported, unset FORGE_NO_WORKTREES (and any explicit FORGE_WORKTREES=0) to isolate instead.\n`
+          `partial writes are live for every forge process on this host. ` +
+          (isolation === "never-isolated"
+            ? `This path provisions no task-scoped workspace at all, so no worktree flag isolates it — ` +
+              `dispatch against a disposable CLONE of the forge checkout instead.\n`
+            : `On a host where isolation is supported, unset FORGE_NO_WORKTREES (and any explicit ` +
+              `FORGE_WORKTREES=0) to isolate instead.\n`)
       );
     }
     return;

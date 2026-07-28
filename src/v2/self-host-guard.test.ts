@@ -131,6 +131,7 @@ test("FORGE_NO_WORKTREES=1 proceeds, loudly", () => {
   assert.match(out, /WARNING/);
   assert.match(out, /live forge source/);
   assert.match(out, /FORGE_NO_WORKTREES=1/);
+  assert.match(out, /unset FORGE_NO_WORKTREES/, `on a path that CAN isolate, unsetting it is the fix:\n${out}`);
 });
 
 test("the kill switch beats FORGE_WORKTREES=1 — worktree mode is off, so the override path is what proceeds", () => {
@@ -179,6 +180,25 @@ test("FORGE_NO_WORKTREES=1 still permits the no-isolation path, loudly", () => {
   const out = stderr.join("");
   assert.match(out, /WARNING/);
   assert.match(out, /live forge source/);
+});
+
+// The override warning must agree with the refusal above: on a path that
+// provisions nothing, "unset the flag to isolate instead" is false advice —
+// unsetting it only turns this acknowledged dispatch into the refusal.
+test("the no-isolation override warning advises a CLONE and never advises unsetting the flag to isolate", () => {
+  setPlatform("darwin");
+  process.env["FORGE_NO_WORKTREES"] = "1";
+
+  assertSelfHostDispatchAllowed(forgeRoot, "never-isolated", forgeRoot);
+  const out = stderr.join("");
+  assert.match(out, /disposable CLONE of the forge checkout/, `the only real fix must be named:\n${out}`);
+  assert.match(out, /no worktree flag isolates it/, `the warning must read as structural:\n${out}`);
+  assert.doesNotMatch(
+    out,
+    /unset FORGE_NO_WORKTREES/,
+    `unsetting it turns this allowed dispatch into the structural refusal, it does not isolate:\n${out}`
+  );
+  assert.doesNotMatch(out, /FORGE_WORKTREES=0/, `arming isolation cannot create a workspace here:\n${out}`);
 });
 
 test("a DIFFERENT project on the no-isolation path is untouched — the refusal is about the forge tree", () => {
