@@ -105,3 +105,88 @@ Refs: FG-627 (isolated-workspace mountpoints — the covered half), FG-376 (depe
 `planDependencyVolumes`, `verification_environment_unavailable`), `src/v2/spawn.ts:845-895`,
 `src/v2/dependency-provisioning.ts:167`, `src/v2/worktree-lifecycle.ts:215,372`. Red-ingestion half
 is adjacent to the `runNext.ts:691` downgrade behavior already recorded for unsubstantiated fails.
+
+## Dogfood 4 (2026-07-28) — the ticket's scope was WRONG; a third uncovered site, and it is the one that fires
+
+Run `run-fg-628-reviewer-mountpoints-and-crashed-red-ingestion-3dc222`, dispatched
+`env FORGE_WORKTREES=1 forge next …` against `/Users/stevebargelt/code/forge-fg356` at `4462a661`,
+on an installed forge carrying FG-566 + FG-636. **Both architect reds crashed with the byte-identical
+signature, and the phase still advanced to `awaiting_gate`.** Fourth consecutive dogfood killed here.
+
+### What this falsifies
+
+This ticket states the uncovered path is the **non-isolated** `--project <dir>` dispatch, and that
+FG-627 covers the isolated one. **Both halves of that framing are incomplete.** This crash happened
+with isolation **ON** (`FORGE_WORKTREES=1`).
+
+The red's mounted project was neither the checkout nor a linked worktree:
+
+```
+controlPlane.projectDir = ~/.forge/worktrees/publications/e790cfb2-19a0-4f19-a0b5-93bd20cf3036-r0
+controlPlane.mountMode  = ro
+```
+
+It is a **publication candidate worktree** (`createCandidateWorktree`, FG-425). Under worktree mode a
+phase publishes a candidate and the reds review *that*, not the project dir. `createCandidateWorktree`
+never calls `createDependencyMountpoints`. `.gitignore:1` is `node_modules/`, so a fresh candidate
+checkout can never contain `dashboard/node_modules` — the hand-made workaround in `forge-fg356` is
+irrelevant, because that tree is not what gets bound.
+
+So there are **three** sites, not one: non-isolated `--project` dispatch (found first), linked
+worktrees and private clones (covered by FG-627), and **publication candidates (uncovered, and the
+only one that fires in the pipeline the project actually runs)**.
+
+**Consequence for AC 2 as written:** implementing exactly "the fix covers the non-isolated path" would
+have shipped, passed review, and left the pipeline just as broken. AC 2 is widened below.
+
+### Both halves reproduced, live
+
+- **Half A** — `docker: ... error mounting ".../forge-deps-5f33f1ce08f5973b-dashboard/_data" to rootfs
+  at "/project/dashboard/node_modules": create mountpoint ...: read-only file system`, on
+  `task-red-architect-94c56b` and `task-red-architect-58946b`, both `container_crash (exit 1)`.
+- **Half B** — both ingested as `inconclusive (0.00)` (`forge show task-architect-d69998`), the phase
+  reached `awaiting_gate`, and **the architect gate opened with zero adversarial review having run.**
+
+### Chicken-and-egg (why the pipeline is not the vehicle for this ticket)
+
+Every phase publishes a candidate and every phase's reds review it, so *every* red in a worktree-mode
+pipeline hits this. FG-628 cannot be implemented *through* the pipeline, because FG-628's own defect
+prevents the pipeline from reviewing anything. This ticket is implemented via the invoke chain and the
+pipeline is re-dogfooded afterwards to confirm reds start.
+
+### AC 2 — WIDENED (supersedes the original wording)
+
+The fix must cover **every tree that can be bound at the container's project path**, not an enumerated
+list of paths. Establish the mountpoint precondition against `repoRootForMount` at the point the
+read-only mount is decided, so isolated constructors (`worktree-lifecycle.ts:215`, `:372`) become two
+callers of one mechanism rather than the only ones, and publication candidates are covered by
+construction. Still `createDependencyMountpoints`, still no second mechanism.
+
+### Architect findings worth keeping (task `task-architect-d69998`, this run)
+
+1. **AC 4 fork — RESOLVED: create the mountpoints; do NOT take the preflight-refusal branch.** Four
+   empirical probes came back negative. The FG-356 reaper cannot see them (its probe is
+   `git status --porcelain --ignored` against the *task workspace* from the DB row, and a non-isolated
+   dispatch has no task workspace at all); git ignores empty ignored dirs across `status`/`ls-files`/
+   `clean` variants, verified in a purpose-built fixture. Refusing instead would convert a crash into a
+   permanent refusal for every project that ever ran a root-only install — strictly worse.
+2. **HIGH risk on Half B: do not implement it by extending FG-586's `resultUnreadable` channel.** That
+   channel blocks only when `authority === "authoritative" && gate_on_verdict`
+   (`runNext.ts:1382-1394`, `gate.ts:60-66`), and both crashed reds were **specialist**. An engineer
+   using FG-586 as the template ships a change that passes review and still lets this exact gate open.
+   Container-crash-before-start must be **orthogonal to authority**: authority weights an *opinion*, and
+   a container that never started produced none. A missing panel member makes the panel incomplete
+   regardless of rank.
+3. **HIGH risk: the crash/undecided distinction is destroyed one call before the seam that needs it.**
+   `runContainer`'s container-crash branch (`runNext.ts:3554`) is the only one of its three `failed`
+   returns that does not thread `failureKind` back to the caller — the malformed (`:3572`) and
+   missing-result (`:3638`) branches both do, and the result type already permits it (`:2914`). At
+   `runOneRed` (`:1596-1618`) a `container_crash` is therefore indistinguishable from any other
+   dispatch failure. Thread it before trying to gate on it.
+4. **Constraint: do not "correct" the readiness/mountability key asymmetry.** The container cache key is
+   ABI-free by design and host-global, so a `.ready` marker legitimately spans checkouts; what must
+   become checkout-scoped is the **mountpoint precondition**, not the readiness key. Making readiness
+   per-checkout collides head-on with FG-566.
+5. **Constraint: no host-side mutual exclusion on a non-isolated project dir** — the only dispatch lock
+   is per-run, and a fanout wave dispatches children in parallel. Anything written into the operator's
+   tree at dispatch must be idempotent under concurrency.
