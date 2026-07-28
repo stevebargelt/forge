@@ -67,6 +67,30 @@ for (const dir of [
 process.env["NO_NOTIFY"] = "true";
 process.env["FORGE_NOTIFY"] = "";
 
+// FG-636: NO ambient worktree PRODUCTION switch may reach the suite. These three
+// decide whether dispatch takes the git-worktree path at all
+// (isWorktreeModeEnabled, src/v2/worktree-lifecycle.ts), and the tests dispatch
+// against mkdtemp project dirs with no `.git` — so an inherited FORGE_WORKTREES=1
+// aborts worktree creation and the task manifest is never written. That is not
+// hypothetical: the integration gate spread the orchestrator's whole environment
+// into the candidate's test child, a wave launched as
+// `env FORGE_WORKTREES=1 forge next …` turned the switch on, and nine tests
+// "failed" on a candidate containing no code change. The gate no longer leaks
+// them; clearing here means no launcher's ambient value can decide a test outcome.
+// Safe because every worktree-tier test sets its own value INSIDE the test rather
+// than reading an ambient one.
+//
+// An explicit named list, deliberately NOT a blanket FORGE_* deletion: harness
+// INPUTS are legitimate and must survive. CI injects FORGE_TEST_MISMATCHED_NODE
+// into all five test-extended shards (.github/workflows/ci.yml) and
+// src/cli/node-preflight.integration.test.ts treats it as a hard requirement;
+// FORGE_TEST_PRINT_CMD is the other one. Only production behavior switches belong
+// below. FORGE_WORKTREES_EPHEMERAL is not here on purpose — it only affects
+// cleanup once worktree mode is already engaged, which these three now prevent.
+for (const key of ["FORGE_WORKTREES", "FORGE_NO_WORKTREES", "FORGE_WORKTREE_IGNORE_DIRTY"]) {
+  delete process.env[key];
+}
+
 process.on("exit", () => {
   try {
     rmSync(tempHome, { recursive: true, force: true });

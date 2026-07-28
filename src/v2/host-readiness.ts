@@ -624,11 +624,30 @@ function setupEnv(pinnedPath: string): NodeJS.ProcessEnv {
 /** The environment a COVERED verification must run under. Same pinned PATH the
  *  readiness assertion was made against — without this the assertion covers a
  *  different interpreter than the one that runs, which makes it meaningless.
- *  Unlike setupEnv this inherits process.env: a verification legitimately needs
- *  the operator's environment (it is running the operator's own test suite), and
- *  it runs AFTER preparation, not as an install-time lifecycle hook. */
+ *
+ *  Unlike setupEnv this inherits the operator's general environment (HOME, npm
+ *  config, TMPDIR, locale, …): a verification legitimately needs it, it is
+ *  running the operator's own test suite, and it runs AFTER preparation rather
+ *  than as an install-time lifecycle hook. The one exception is forge's OWN
+ *  reserved namespace, withheld in full.
+ *
+ *  FG-636: `FORGE_*` are CONTROL-PLANE switches, so inheriting them lets the
+ *  orchestrator's configuration reconfigure the very code under verification. A
+ *  wave launched as `env FORGE_WORKTREES=1 forge next …` turned worktree mode on
+ *  inside every unit-test child (isWorktreeModeEnabled, worktree-lifecycle.ts),
+ *  aborting dispatch against the tests' .git-less project dirs and producing
+ *  nine FALSE failures on a candidate that contained no code change. The gate's
+ *  job is to answer the same question CI answers, and CI runs the tier with no
+ *  FORGE_* switch set. A DENYLIST on forge's own namespace, not setupEnv's
+ *  allowlist: it kills exactly the leak and cannot break an arbitrary project's
+ *  suite, which an allowlist would. */
 export function pinnedVerificationEnv(label: string): NodeJS.ProcessEnv {
-  return { ...process.env, PATH: controlRuntimeProfile({ label: `host-verification:${label}` }).path };
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!key.startsWith("FORGE_")) env[key] = value;
+  }
+  env["PATH"] = controlRuntimeProfile({ label: `host-verification:${label}` }).path;
+  return env;
 }
 
 /** The verification command set the FG-357 integration gate will actually run
