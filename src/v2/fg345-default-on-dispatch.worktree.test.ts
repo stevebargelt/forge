@@ -20,6 +20,12 @@
 //       COMPLETES. It must not throw: preflightWorktreeGate hard-fails on Linux
 //       permanently, so a bare `return true` default would have failed every
 //       dispatch on every Linux host. That is the regression this file pins.
+//   (invoke-scope) The default-on claim is scoped to WORKFLOW dispatch. `forge
+//       invoke` provisions no workspace, so the same darwin/no-switch env that
+//       isolates the case above hands an invoke-dispatched agent — including
+//       review-loop's reviewer and fixer — the live checkout. Pinned so the docs
+//       claim stays checkable and so extending isolation to that surface has to
+//       update the contract deliberately.
 //
 // The env is read as the PRODUCTION default, so beforeEach deletes both switches
 // (undoing src/test-setup.ts's suite pin) rather than pinning them — a test of a
@@ -38,9 +44,10 @@ import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
-import { tasksForRun } from "../store/tasks.js";
+import { getTask, tasksForRun } from "../store/tasks.js";
 import { CLONES_DIR, WORKTREES_DIR } from "../util/paths.js";
 import { startRun } from "./startRun.js";
+import { invoke } from "./invoke.js";
 import { runNext, type DockerExecFn } from "./runNext.js";
 import type { Workflow } from "./schema.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
@@ -362,3 +369,40 @@ test("fg345 (non-darwin): NO switch set on a non-darwin host → bind-mount disp
 
 // A win32 host takes the same off-by-default branch; the predicate table covers
 // the third platform value, and there is no separate dispatch path to prove.
+
+// ─── (invoke-scope) Default-on is a WORKFLOW-dispatch property ────────────────
+
+test("fg345 (invoke-scope): darwin + NO switch set → `forge invoke` still mounts the live checkout and records no workspace", async () => {
+  // Same env as the (default-on) case above, which isolates. invoke.ts has no
+  // workspace lifecycle: it has no candidate/publication step to merge one back
+  // through, and review-loop reads its fixer's output from the directory mounted
+  // here. If isolation ever reaches this surface, this test SHOULD fail — update
+  // it together with docs/concepts.md → Workspace isolation → Which dispatches
+  // provision one.
+  setPlatform("darwin");
+  assert.equal(process.env.FORGE_WORKTREES, undefined, "the default must be exercised, not configured");
+  assert.equal(process.env.FORGE_NO_WORKTREES, undefined, "the default must be exercised, not configured");
+
+  const repo = makeRepo();
+  const seen: Observed = { called: false, args: [] };
+
+  const r = await invoke({
+    agentRole: "engineer",
+    task: "fg345 invoke-scope",
+    projectDir: repo,
+    runtimeName: RUNTIME,
+    dockerExec: makeObservingExec(seen),
+  });
+
+  assert.equal(r.status, "complete", `invoke must dispatch and complete: ${r.error ?? ""}`);
+  assert.ok(seen.called, "docker exec must have been called");
+  assert.equal(seen.mount, repo, "/project must be the operator's checkout — invoke provisions no workspace");
+  assert.equal(
+    getTask(r.taskId)?.worktreePath,
+    undefined,
+    "an invoke-dispatched task must record no worktree_path (docs/SCHEMA-CONTRACT.md)"
+  );
+  assert.equal(getTask(r.taskId)?.baseSha, undefined, "an invoke-dispatched task must record no base_sha");
+  assert.equal(existsSync(join(CLONES_DIR, r.runId)), false, "no private clone may be created for an invoke dispatch");
+  assert.equal(existsSync(join(WORKTREES_DIR, r.runId)), false, "no linked worktree may be created for an invoke dispatch");
+});

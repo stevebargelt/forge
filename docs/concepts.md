@@ -476,6 +476,14 @@ The publisher's lifecycle is also on the run timeline (`forge show`, dashboard):
 
 Rule 3 is platform-aware rather than a bare "on" because the preflight gate below **hard-fails on Linux, permanently by design**: forge's orchestrator runs on a macOS host, and "Linux" in these gates can only mean the agent container. A bare "on" would arm isolation on a Linux host and then throw on every dispatch, so a non-darwin host keeps the shared bind-mount path exactly as it behaved before. An explicit `FORGE_WORKTREES=1` still force-enables everywhere — and on Linux still hits that gate loudly, which is the intended behavior.
 
+### Which dispatches provision one
+
+**Isolation is a property of WORKFLOW dispatch** — `forge new` / `forge next`, primary steps and fan-out children alike (`runNext.ts`). Those tasks get a workspace, a recorded `worktree_path` and `base_sha`, and a Forge-owned publication path back to the project.
+
+**`forge invoke` provisions no workspace, and default-on did not change that.** A single-agent dispatch mounts the resolved `--project` directory itself and records no workspace path or base SHA. `forge review-loop` inherits this for **both** of its dispatches — its red reviewer (read-only mount) and its fixer (read-write) run against the operator's checkout, which is also where the loop stages and commits the fixer's work host-side. So on a darwin host with no switch set, those agents are on the shared checkout while a workflow-dispatched task beside them is isolated.
+
+That asymmetry is a **scope boundary, not a decided exclusion**: the invoke surface has no candidate/publication step to merge a workspace back through, and review-loop reads its fixer's output from the directory it mounts, so isolating it needs a capture path built first. Read every claim below — the workspace contract, the preflight gates, the substrate split — as describing workflow-dispatched tasks. `FORGE_NO_WORKTREES=1` is a no-op on the invoke path because there is nothing there to disable.
+
 ### The workspace contract
 
 **A task workspace is committed tracked content at the recorded base SHA, plus inputs explicitly supplied through Forge's own provisioning or environment mechanisms** — the dependency cache, the runtime's declared mounts and env, the task package. **Ambient local checkout state — uncommitted, untracked, ignored — is intentionally NOT inherited. That is the contract, not a gap in it.** A workflow that needs a local file supplies it through a Forge mechanism rather than depending on whatever happens to be lying in a working tree; `FORGE_NO_WORKTREES=1` is the supported escape for anything the contract does not fit.

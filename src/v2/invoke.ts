@@ -610,6 +610,17 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     // --project, never anything read out of the tree). The clone mount planner
     // REFUSES without it, so omitting it turned a project dir that itself borrows
     // objects (`clone --shared` / `--reference`) into a hard invoke failure.
+    //
+    // FG-345 SCOPE: default-on isolation did NOT change this. Workspace
+    // provisioning lives on the workflow-dispatch path (runNext.ts); this surface
+    // has no candidate/publication step to merge a workspace back through, and
+    // `forge review-loop` reads its fixer's output from the very directory mounted
+    // here (it stages and commits host-side in ctx.projectDir). So an invoke-
+    // dispatched agent — including the loop's red reviewer and its fixer — runs
+    // against the live checkout even where the default resolves ON, and its task
+    // row records no worktree_path or base_sha. Documented in
+    // docs/concepts.md → Workspace isolation; pinned by
+    // fg345-default-on-dispatch.worktree.test.ts's (invoke-scope) case.
     CANONICAL_PROJECT_DIR: args.projectDir,
     PROJECT_MODE: args.readOnlyProject ? "ro" : "rw",
     MODEL: resolution.model,

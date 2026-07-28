@@ -218,11 +218,6 @@ export type CreateWorktreeResult = {
  *  - git commands use `cwd: projectDir` (the resolved repo root) — NEVER
  *    process.cwd() or a project subdir.
  *  - Returns the worktree path and a diagnostic list of untracked host files.
- *
- *  Advisory: while FORGE_WORKTREES=1, the FG-354 persistence-check scans
- *  args.projectDir (the main checkout), not the worktree. It may false-fail
- *  until FG-354 lands. This warning is emitted once per worktree creation so
- *  operators running worktree mode are not surprised by the limitation.
  */
 export function createWorktree(
   projectDir: string,
@@ -231,15 +226,6 @@ export function createWorktree(
 ): CreateWorktreeResult {
   const worktreePath = worktreeDir(runId, taskId);
   const branch = worktreeBranchName(runId, taskId);
-
-  // FG-354 seam: persistence-check currently scans args.projectDir (main
-  // checkout) and will false-fail for worktree runs until FG-354 adapts it.
-  // Emit a visible advisory so operators running opt-in worktree mode are aware.
-  console.warn(
-    `[forge:worktrees] ADVISORY: Creating worktree at ${worktreePath} (branch ${branch}). ` +
-      "FG-354 persistence-check scans the main checkout, not the worktree — it may " +
-      "false-fail until FG-354 lands. This is expected in worktree mode (FG-351)."
-  );
 
   // Ensure the parent directory exists under WORKTREES_DIR.
   mkdirSync(join(WORKTREES_DIR, runId), { recursive: true });
