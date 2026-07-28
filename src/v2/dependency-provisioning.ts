@@ -15,8 +15,8 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { basename, isAbsolute, join, normalize, sep } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, normalize, relative, sep } from "node:path";
 import { worktreeDir, integrationWorktreeDir } from "../util/paths.js";
 import { acquireFileLockBlocking, releaseFileLock, type LockInfo } from "../util/run-lock.js";
 
@@ -141,26 +141,59 @@ export function planDependencyVolumes(repoRoot: string, projectContainerPath: st
   return { volumes, lockfileHash: hash, installRoot: projectContainerPath };
 }
 
-/** FG-627: create the mountpoint DIRECTORY for every volume the plan for this
- *  workspace will mount, inside the workspace itself.
+/** FG-627, widened by FG-628: create the mountpoint DIRECTORY for every volume
+ *  the plan for this tree will mount, inside the tree itself.
  *
  *  The provisioner mounts the project READ-ONLY and mounts each dependency
- *  volume at a path INSIDE it (buildProvisionerDockerArgs). Docker has to
- *  create the mountpoint before it can bind there, and it cannot mkdir on a
- *  read-only rootfs — so a missing `<member>/node_modules` in the source tree
- *  kills the provisioner with exit 125 before any install runs. A main
- *  checkout happens to have those directories already; no fresh workspace does
- *  (`node_modules` is gitignored, so neither `git clone --shared` nor `git
- *  worktree add` carries it), which is why this only ever bites isolated
- *  workspaces. Creating them at workspace creation is what makes the read-only
- *  project mount survivable — the alternative is relaxing that mount, which
- *  the provisioner must never do.
+ *  volume at a path INSIDE it (buildProvisionerDockerArgs); so does every
+ *  reviewer/red, at `:ro`. Docker has to create the mountpoint before it can
+ *  bind there, and it cannot mkdir on a read-only rootfs — so a missing
+ *  `<member>/node_modules` in the source tree kills the container before
+ *  anything runs.
  *
- *  The mountpoints are derived from planDependencyVolumes itself, with the
- *  workspace standing in for the container path, so the set can never drift
- *  from what the spawn path actually mounts. Empty directories are invisible
- *  to git (`status --porcelain`, and `--ignored` too), so this leaves the
- *  workspace clean for capture and the reaper.
+ *  This is NOT confined to isolated workspaces. A main checkout only happens to
+ *  carry the ROOT member's directory: a root-only install leaves every other
+ *  workspace member's absent, and `node_modules` is gitignored so no fresh tree
+ *  carries any of them — not `git clone --shared`, not `git worktree add`, and
+ *  not an FG-425 publication candidate, which is the tree the reds actually
+ *  review under worktree mode. FG-628 measured all three failing. Callers
+ *  therefore establish the precondition against the tree that will actually be
+ *  bound, at the point the read-only mount is decided (runNext.ts's
+ *  runContainer); worktree-lifecycle.ts's two calls are now two more callers of
+ *  this one mechanism rather than the only ones. The alternative is relaxing
+ *  the read-only mount, which no caller may do.
+ *
+ *  The mountpoints are derived from planDependencyVolumes itself, with the tree
+ *  standing in for the container path, so the set can never drift from what the
+ *  spawn path actually mounts. An empty directory is not something git will
+ *  report as a change (`status --porcelain`, and `--ignored` too), so this
+ *  leaves even an operator's own live checkout clean for capture and the
+ *  reaper. It is NOT beyond git's reach: `git clean -fdX` explicitly targets
+ *  ignored paths and will remove an empty `<member>/node_modules` like any
+ *  other. That is harmless — the next dispatch recreates the mountpoint.
+ *
+ *  Containment (FG-628 review): every mountpoint must genuinely land inside
+ *  `workspacePath`. The member paths come from the tree's own package.json
+ *  `workspaces`, so a member directory that is a SYMLINK out of the checkout
+ *  would otherwise be followed and `mkdirSync` would create `node_modules`
+ *  somewhere forge never intended to write — which breaks the whole safety
+ *  argument above at its root. isSafeWorkspacePath is lexical and cannot see
+ *  this: the escape happens through a symlink at an intermediate component, not
+ *  through the text of the entry. So each mountpoint's deepest EXISTING
+ *  ancestor is resolved through symlinks and required to be inside the resolved
+ *  workspace root; only then is the rest created beneath it.
+ *
+ *  An escape REFUSES the whole tree (throws) rather than skipping the offending
+ *  member. A per-member skip cannot stay consistent with the mount decision:
+ *  spawn.ts derives what it binds from the same plan, so a skipped member's
+ *  volume would still be mounted at a path with no mountpoint — the original
+ *  container_crash, silently. Throwing is this function's established failure
+ *  signal (mkdirSync already throws on a read-only/permission-denied checkout),
+ *  and the caller that owns the mount decision — runNext.ts's
+ *  projectTreeIsMountable — already converts it into "mount no dependency
+ *  volume at all" plus a `container.dependency_mountpoints_unavailable` event.
+ *  So the refusal degrades the dispatch instead of failing it, and the skip is
+ *  observable on the run timeline.
  *
  *  Returns the created paths; empty when the project has no lockfile, i.e. no
  *  plan and nothing to mount. */
@@ -171,9 +204,47 @@ export function createDependencyMountpoints(workspacePath: string): string[] {
   } catch {
     return [];
   }
-  const created = plan.volumes.map((v) => v.containerPath);
-  for (const path of created) mkdirSync(path, { recursive: true });
+  const root = realpathSync.native(workspacePath);
+  const created: string[] = [];
+  for (const path of plan.volumes.map((v) => v.containerPath)) {
+    const anchor = deepestExistingAncestor(path);
+    if (!isInsideTree(root, anchor)) {
+      throw new Error(
+        `dependency-provisioning: refusing to create mountpoint ${path} — it resolves to ${anchor}, outside ${root}`,
+      );
+    }
+    // mkdir -p racing itself is a no-op, and every component above `anchor` is
+    // real (it came back from realpath), so the components created below it are
+    // real directories inside the tree, not a followed symlink.
+    mkdirSync(path, { recursive: true });
+    created.push(path);
+  }
   return created;
+}
+
+/** The deepest ancestor of `path` (or `path` itself) that exists, fully
+ *  resolved through symlinks. The normal case is that the mountpoint does not
+ *  exist yet at all, so containment has to be decided against whatever part of
+ *  the chain IS on disk. */
+function deepestExistingAncestor(path: string): string {
+  let current = path;
+  for (;;) {
+    try {
+      return realpathSync.native(current);
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) return current; // filesystem root — nothing left to resolve
+      current = parent;
+    }
+  }
+}
+
+/** Componentwise containment of two already-resolved absolute paths. A string
+ *  prefix test would count `/a/bc` as inside `/a/b`; `relative` cannot. */
+function isInsideTree(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate);
+  if (rel === "") return true;
+  return !isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`);
 }
 
 function volumeNamesForRepoRoot(repoRoot: string): string[] {

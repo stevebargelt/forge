@@ -73,13 +73,34 @@ written to the `verdicts` table.
 **Aggregation policy** (mirrors v1 `spawnRed.ts`):
 - Any red with `authority: authoritative` + `gate_on_verdict: true` returning
   `verdict: fail` ⇒ primary status `blocked_by_red`. Orchestrator surfaces.
+- A red whose container crashes produces an `inconclusive` verdict; the red
+  task itself is marked `failed`. ~~It doesn't block the gate.~~ **Amended by
+  FG-628:** any verdict forge SYNTHESIZED because no review came back now blocks
+  (`blocked_by_red`) orthogonally to authority AND to the step's gate — a
+  specialist red configured `gate_on_verdict: false` blocks exactly as an
+  authoritative one does, and a `gate: auto` step does not advance. The recorded
+  verdict value stays `inconclusive`, with a prepended synthetic HIGH "produced
+  NO review" finding and a `verdict.review_missing` event.
+
+  The rule is keyed on PROVENANCE — the marker is set at the one place forge
+  fabricates a verdict (`runOneRed`'s failure return) — so it covers every
+  crash, `oom_killed`, `idle_timeout`, `model_error`, `result_missing` and
+  `result_malformed`, plus any future kind arriving at that return. Two earlier,
+  narrower cuts each failed open: an enumerated list of failure kinds cannot see
+  a kind nobody enumerated (`idle_timeout` does not even thread one), and
+  `containerStarted` is not trustworthy — in attached mode the start callback
+  fires before docker creates the container. The failure kind and the start
+  outcome are still threaded out of `runContainer`, now purely as diagnostics in
+  the event payload.
+
+  A reviewer-AUTHORED verdict is unaffected: a genuine `inconclusive`, and
+  AWN-5's downgrade of an unsubstantiated `fail`, stay non-blocking. See
+  "Blocked by red" in `docs/concepts.md`.
 - Otherwise, primary status follows the step's `gate`:
   - `gate: auto` ⇒ `complete` (specialist verdicts are advisory only — recorded
     but don't block)
   - `gate: human` ⇒ `awaiting_gate`
   - `gate: verdict` ⇒ `awaiting_gate` (orchestrator reads verdicts to decide)
-- A red whose container crashes produces an `inconclusive` verdict; the red
-  task itself is marked `failed`, but it doesn't block the gate.
 
 **State transitions:** per FORGE-DEC-017, the primary moves through
 `running → awaiting_red → (awaiting_gate | blocked_by_red | complete)`.
