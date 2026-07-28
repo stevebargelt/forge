@@ -37,12 +37,13 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
+import { eventsForRun } from "../store/events.js";
 import { tasksForRun } from "../store/tasks.js";
 import { startRun } from "./startRun.js";
 import { runNext, type DockerExecFn } from "./runNext.js";
@@ -51,6 +52,7 @@ import {
   markDependencyCacheReady,
   dependencyVolumeName,
   createDependencyMountpoints,
+  planDependencyVolumes,
 } from "./dependency-provisioning.js";
 import type { Workflow } from "./schema.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
@@ -532,3 +534,104 @@ test("FG-628 (A4): a real container fails to start on the nested read-only volum
     `the container must START once the mountpoint exists — that is AC 1; docker said: ${withMountpoint.stderr}`,
   );
 });
+
+// ─── (5) the fallback when the mountpoint CANNOT be created ───────────────────
+
+// (1)-(4) all exercise successful creation. The failure side is the other half of
+// the fix and is load-bearing: the precondition is best-effort by construction, so
+// a checkout forge cannot write into must become neither a refusal nor the crash.
+// runNext's catch records `container.dependency_mountpoints_unavailable` and leaves
+// the cache unmounted — the pre-existing "cache isn't ready" posture. Both halves
+// are asserted here, because mounting anyway is exactly the container_crash this
+// ticket closes and a silent omission is how it would come back unnoticed.
+
+test("FG-628 (A5): a checkout forge cannot write into records dependency_mountpoints_unavailable and mounts NO dependency volume", async (t) => {
+  setPlatform("darwin");
+  process.env.FORGE_NO_WORKTREES = "1";
+
+  const repo = makeRootOnlyInstallRepo();
+  // Marked ready on purpose: readiness is keyed on the lockfile, so it authorizes
+  // the CONTENT of a mount into a tree that cannot host one. Without it the red
+  // would skip the cache for the ordinary reason and prove nothing.
+  markDependencyCacheReady(lockfileHash(repo));
+
+  // The "read-only or permission-denied checkout" the fallback exists for, applied
+  // to the one directory the member's mountpoint has to be created in.
+  chmodSync(join(repo, MEMBER), 0o500);
+  if (canCreateUnder(join(repo, MEMBER))) {
+    chmodSync(join(repo, MEMBER), 0o700);
+    t.skip("the fallback is NOT verified here — this process can write through a 0500 directory (running as root?)");
+    return;
+  }
+
+  let redArgs: string[] | undefined;
+  let redTaskId: string | undefined;
+
+  const stubExec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+    const taskId = extractTaskId(args);
+    writeFileSync(stderrPath, "");
+    if (taskId.startsWith("provision-")) return 0;
+    if (taskId.startsWith("task-red-")) {
+      redArgs = args;
+      redTaskId = taskId;
+      writeTaskResult(stdoutPath, PASS_VERDICT);
+      return 0;
+    }
+    writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, files_modified: [] });
+    return 0;
+  };
+
+  const { runId } = startRun({ workflow: WORKFLOW, title: "fg628 A5", inputs: {}, projectDir: repo });
+  try {
+    await runNext({ runId, workflow: WORKFLOW, dockerExec: stubExec });
+  } finally {
+    chmodSync(join(repo, MEMBER), 0o700);
+  }
+
+  assert.ok(redArgs !== undefined, "the read-only reviewer must still have been dispatched — the fallback never blocks");
+
+  // Property 1 — the failure is recorded, against the tree that could not host the
+  // mount, with the underlying error.
+  const unavailable = eventsForRun(runId).filter((e) => e.eventType === "container.dependency_mountpoints_unavailable");
+  assert.equal(unavailable.length, 1, "exactly one mountpoints-unavailable event must be recorded for the reviewer dispatch");
+  assert.equal(unavailable[0]!.taskId, redTaskId, "the event must be attributed to the reviewer's task");
+  const payload = unavailable[0]!.payload as { repoRoot?: string; error?: string };
+  assert.equal(payload.repoRoot, repo, "the event must name the tree that would have been bound");
+  assert.match(String(payload.error), /EACCES|permission denied/i, `the underlying error must be carried; got: ${payload.error}`);
+
+  // Property 2 — the reviewer's argv omits EVERY dependency-cache mount. Mounting
+  // one anyway is the crash; this is the assertion that says it does not happen.
+  // Scanned over the raw `-v` values rather than the parsed pairs so the anonymous
+  // single-argument shadow form (`-v /project/node_modules`) is covered too.
+  const dependencyMounts = redArgs!.filter((a, i) => redArgs![i - 1] === "-v" && a.includes("node_modules"));
+  assert.deepEqual(dependencyMounts, [], `no dependency-cache volume may be mounted; got ${JSON.stringify(dependencyMounts)}`);
+  assert.equal(projectMount(redArgs!)!.mode, "ro", "the reviewer's project mount stays read-only");
+
+  // Non-vacuity: those mounts were genuinely planned for this tree — the omission
+  // is the fallback firing, not a project that had nothing to mount in the first
+  // place (compare A2, where the same fixture DOES mount the member volume).
+  const planned = planDependencyVolumes(repo, "/project").volumes.map((v) => v.containerPath);
+  assert.ok(
+    planned.includes(`/project/${MEMBER}/node_modules`),
+    `the plan for this fixture must name the member volume; got ${JSON.stringify(planned)}`,
+  );
+  assert.equal(existsSync(join(repo, MEMBER, "node_modules")), false, "the mountpoint really was never created");
+
+  // Never a block: the dispatch reaches its normal outcome without the cache.
+  const primary = tasksForRun(runId).find((t2) => t2.phase === "build" && t2.parentId === undefined);
+  assert.equal(primary!.status, "complete", "an unmountable checkout must not fail the run");
+});
+
+/** Whether this process can actually create a directory under `dir` — root ignores
+ *  the permission bits the test above relies on, and a fallback that never fired
+ *  would otherwise pass silently. */
+function canCreateUnder(dir: string): boolean {
+  const probe = join(dir, ".forge-fg628-perm-probe");
+  try {
+    mkdirSync(probe);
+    rmSync(probe, { recursive: true, force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}

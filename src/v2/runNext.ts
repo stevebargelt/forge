@@ -3405,8 +3405,9 @@ async function runContainer(args: {
   // Safety of writing into a live, non-disposable checkout (AC 4): the only thing
   // created is an EMPTY directory under an already-gitignored path. Git cannot see
   // an empty ignored directory through `status --porcelain`, `status --porcelain
-  // --ignored`, `ls-files --others`, or `clean` — verified in a fixture — so
-  // capture stays clean, and the FG-356 reaper's unrecovered-work probe runs
+  // --ignored`, or `ls-files --others` — verified in a fixture — so capture
+  // stays clean. (`git clean -fdX`/`-fdx` DOES remove it, like any ignored path;
+  // harmless, the next dispatch recreates it.) The FG-356 reaper's probe runs
   // against the task workspace from the DB row, which a non-isolated dispatch does
   // not have at all. FG-566's `workspaceHasNodeModules` non-empty check is what
   // keeps an empty mountpoint from reading as an installed tree; that check is the
