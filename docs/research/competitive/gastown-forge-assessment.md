@@ -249,9 +249,13 @@ This gives Forge the good part of GasTown's humane naming without making the met
 
    Forge trace: this was written before the later worktree arc advanced. FG-351/FG-354/FG-352/FG-353 landed opt-in worktree machinery first; FG-348, FG-349, FG-356, FG-357, and FG-379 remain important to make that machinery visible and production-complete.
 
+   *Superseded by FG-345 (2026-07-28): isolation is now default-on, and FG-379 closed with it — the operator env vars are documented under `docs/concepts.md` → Workspace isolation.*
+
 2. **Keep FG-345/FG-351 scoped.** Borrow GasTown's identity/sandbox/session separation, but do not copy persistent worker pools yet. First cut should be task-scoped worktrees, explicit cleanup, recorded worktree path, visible merge conflict failure, and macOS-only if Linux dependency state is unresolved.
 
    Forge trace: FG-351 delivered the lifecycle foundation. FG-352 and FG-353 delivered merge-back paths. FG-356, FG-357, FG-358, FG-376, and FG-379 carry the remaining cleanup, validation, dependency, and operator-doc work.
+
+   *Superseded by FG-345 (2026-07-28): that list is closed out. FG-358 was closed out-of-scope on 2026-07-02 — the Linux gate is permanent by design, not pending work — and macOS-only is the settled position rather than a provisional one.*
 
 3. **Add a group-level run/fan-out object in the dashboard.** GasTown convoys are valuable because they are attention objects. Forge run map should show groups and blockers, not just a list of task rows.
 
