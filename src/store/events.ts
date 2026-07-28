@@ -66,12 +66,23 @@ export type EventType =
   | "task.decision"
   | "verdict.received"
   | "verdict.findings_dropped"
+  // FG-628: a red's container crashed before producing a verdict, so the recorded
+  // `inconclusive` is the ABSENCE of a review rather than a reviewer that could
+  // not decide. Blocks the gate orthogonally to the red's authority — an
+  // incomplete panel is incomplete regardless of the missing member's rank.
+  | "verdict.review_never_ran"
   | "gate.decided"
   | "container.started"
   | "container.exited"
   | "container.killed"
   | "container.idle_timeout"
   | "container.dependency_provisioning_failed"
+  // FG-628: the dependency-volume mountpoints could not be created in the tree
+  // about to be bound at the container's project path (a read-only or
+  // permission-denied checkout). The cache is left unmounted rather than mounted
+  // into a tree docker cannot bind it in — the same "cache isn't ready" posture,
+  // never a block.
+  | "container.dependency_mountpoints_unavailable"
   // FG-559: the entrypoint's git probe found git unusable in the project mount
   // (a linked worktree whose parent .git never made it into the container) and
   // exited before the agent ran.

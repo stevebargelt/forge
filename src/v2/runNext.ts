@@ -24,6 +24,7 @@ import {
   isDependencyCacheReady,
   provisionDependencyCache,
   planDependencyVolumes,
+  createDependencyMountpoints,
   provisionerContainerName,
   type DependencyVolumePlan,
 } from "./dependency-provisioning.js";
@@ -1373,6 +1374,52 @@ async function dispatchReds(args: {
         },
       });
     }
+    // FG-628: a red whose CONTAINER never ran is an infrastructure failure, not a
+    // review outcome. It ingested as a bare non-blocking `inconclusive (0.00)`,
+    // which is the ingestion an orchestrator reads as "reviewed, undecided" — so
+    // an entire adversarial panel could die at dispatch and the phase would still
+    // advance to awaiting_gate with zero review having run. Silence read as
+    // success.
+    //
+    // Deliberately its OWN channel, evaluated BEFORE (and independently of) the
+    // authority chain below: FG-586's resultUnreadable channel blocks only for
+    // `authority === "authoritative" && gate_on_verdict`, and every red observed
+    // crashing this way was SPECIALIST. Authority weights an opinion; there is no
+    // opinion here to weight. A missing panel member makes the panel incomplete
+    // regardless of rank, so this blocks orthogonally to authority.
+    //
+    // It runs FIRST so that when a crash ALSO trips the FG-420 authoritative
+    // shipping-reviewer trigger, that one's finding still lands at the head of the
+    // list where it has always been and this one sits behind it — both facts kept,
+    // neither reordered out from under an existing reader.
+    //
+    // The verdict value stays `inconclusive` — claiming `fail` would misreport the
+    // red as having judged the artifact and found it wanting. What changes is that
+    // it BLOCKS (the primary lands blocked_by_red instead of awaiting_gate) and
+    // carries a HIGH finding naming the crash, which `forge show` prints under the
+    // verdict line. An operator who decides the panel can be waived overrides it
+    // the same way as any other red block: forge gate --force --rationale.
+    let reviewNeverRanBlock = false;
+    if (r.reviewNeverRan) {
+      reviewNeverRanBlock = true;
+      finalVerdict = {
+        ...finalVerdict,
+        findings: [
+          {
+            severity: "high",
+            summary: `${r.red.agent} never ran — its container crashed before producing a verdict, so this artifact was NOT adversarially reviewed`,
+            evidence: `the ${r.red.agent} container exited non-zero with no result.json (container_crash); the recorded inconclusive is the absence of a review, not a reviewer that could not decide — see forge show ${r.redTaskId} for the container's stderr`,
+            hypothesis: "fix the dispatch/infrastructure failure and re-run the reds; operator must run forge gate --force --rationale to advance a phase whose adversarial review never executed",
+          },
+          ...finalVerdict.findings,
+        ],
+      };
+      logEvent("verdict.review_never_ran", {
+        runId: args.runId,
+        taskId: args.primaryTaskId,
+        payload: { redRole: r.red.agent, redTaskId: r.redTaskId, authority: r.red.authority },
+      });
+    }
     // FG-420 / FG-586: an authoritative gate_on_verdict red that could not deliver
     // a real, shippable verdict must BLOCK — never silently advance as inconclusive.
     // Two triggers, one mechanism (synthetic HIGH finding prepended BEFORE
@@ -1457,6 +1504,10 @@ async function dispatchReds(args: {
     if (authoritativeGateBlock) {
       authoritativeFail = true;
     }
+    // FG-628: an incomplete panel blocks regardless of the missing member's rank.
+    if (reviewNeverRanBlock) {
+      authoritativeFail = true;
+    }
   }
   // Missing required reviewer context is a hard stop: the packet could not be
   // built so there is nothing to review — block regardless of red configuration.
@@ -1481,7 +1532,7 @@ async function runOneRed(args: {
   getModelPolicy: (projectDir: string) => ModelPolicyWithSource;
   seedGeneration?: SeedGeneration | null;
   reviewerContextPacket?: ReviewerContextPacket;
-}): Promise<{ red: RedDef; verdict: Verdict; redTaskId: string; resultUnreadable?: boolean }> {
+}): Promise<{ red: RedDef; verdict: Verdict; redTaskId: string; resultUnreadable?: boolean; reviewNeverRan?: boolean }> {
   const redTaskId = newTaskId(`red-${args.step.id}`);
   // failureModes: the force-level anti-prompts for the artifact under review.
   // Scoped to the PRIMARY (blue) role/workflow/phase being audited, not the red's
@@ -1608,6 +1659,8 @@ async function runOneRed(args: {
     // read, so whitespace-only reviewer output classifies missing, not malformed).
     // Scoped to those two: a container crash / OOM / idle-timeout / model_error
     // stays a non-blocking inconclusive for non-authoritative reds, exactly as before.
+    // FG-628: EXCEPT container_crash, which is a distinct fact and a distinct
+    // channel — see reviewNeverRan below.
     return {
       red: args.red,
       redTaskId,
@@ -1615,6 +1668,15 @@ async function runOneRed(args: {
       ...(result.failureKind === "result_malformed" || result.failureKind === "result_missing"
         ? { resultUnreadable: true }
         : {}),
+      // FG-628: the red's container crashed without producing a result — it never
+      // reviewed anything, so there is no opinion here to weigh. Deliberately NOT
+      // folded into resultUnreadable: that channel is gated on
+      // `authority === "authoritative" && gate_on_verdict`, and the reds this
+      // actually happened to were SPECIALIST. Authority weights an opinion; a
+      // container that never started produced none, so a missing panel member
+      // makes the panel incomplete regardless of that member's rank. dispatchReds
+      // consumes this orthogonally to authority.
+      ...(result.failureKind === "container_crash" ? { reviewNeverRan: true } : {}),
     };
   }
 
@@ -3245,7 +3307,74 @@ async function runContainer(args: {
 
   const exec = args.dockerExec ?? productionDockerExec;
 
-  if (dependencyCacheEligible && isWorktreeRwDispatch) {
+  // FG-628: establish the mountpoint precondition against repoRootForMount — the
+  // tree that will ACTUALLY be bound at the container's project path — here, at
+  // the point the mount is decided, not at each isolated-workspace constructor.
+  //
+  // Every dependency volume binds at a path INSIDE a read-only project mount (the
+  // provisioner's at spawn.ts's buildProvisionerDockerArgs, the reviewer's at the
+  // `:ro` planned volumes), and docker cannot mkdir a mountpoint on a read-only
+  // rootfs. FG-627 created them at worktree/clone creation, which covers two of
+  // the trees that can be bound here and misses the rest — a plain `--project
+  // <dir>` dispatch and, the one that actually fires in worktree mode, an FG-425
+  // publication candidate (`createCandidateWorktree`), whose fresh checkout can
+  // never carry a gitignored `<member>/node_modules`. Deriving the precondition
+  // from the mount decision instead of from a list of constructors is what makes
+  // those covered by construction. worktree-lifecycle.ts's two calls stay: they
+  // are now two callers of this mechanism, not the only ones.
+  //
+  // The underlying defect: readiness is a property of the LOCKFILE (host-global
+  // `~/.forge/dependency-cache/<hash>.ready`, ABI-free and deliberately
+  // checkout-independent), while mountability is a property of the SPECIFIC
+  // CHECKOUT. The `.ready` marker was being used to authorize a mount into a tree
+  // that had never been prepared for one. What becomes checkout-scoped here is the
+  // mountpoint precondition; the readiness key stays exactly as FG-566 left it.
+  //
+  // Safety of writing into a live, non-disposable checkout (AC 4): the only thing
+  // created is an EMPTY directory under an already-gitignored path. Git cannot see
+  // an empty ignored directory through `status --porcelain`, `status --porcelain
+  // --ignored`, `ls-files --others`, or `clean` — verified in a fixture — so
+  // capture stays clean, and the FG-356 reaper's unrecovered-work probe runs
+  // against the task workspace from the DB row, which a non-isolated dispatch does
+  // not have at all. FG-566's `workspaceHasNodeModules` non-empty check is what
+  // keeps an empty mountpoint from reading as an installed tree; that check is the
+  // reason this is safe, and it stays untouched. Refusing at preflight instead
+  // would convert a crash into a permanent refusal for every project that ever ran
+  // a root-only install — strictly worse than the bug.
+  //
+  // Idempotent under concurrency by construction: a non-isolated project dir has
+  // no host-side mutual exclusion (the only dispatch lock is per-run, and a fanout
+  // wave dispatches children in parallel), and `mkdir -p` racing itself is a
+  // no-op, not a conflict.
+  //
+  // Failure is not fatal. If the mountpoints cannot be created (a read-only or
+  // permission-denied checkout), we simply do not mount the cache — the exact
+  // pre-existing "cache isn't ready" posture: never block, never install. Mounting
+  // anyway is what crashes the container.
+  //
+  // Lazy + memoized so it runs exactly when a volume is about to be bound into
+  // this tree and never otherwise: a plain rw non-worktree primary takes the
+  // legacy anonymous shadow and mounts none of these, so it has no business
+  // writing into the operator's checkout.
+  let mountpointsReady: boolean | undefined;
+  const projectTreeIsMountable = (): boolean => {
+    if (mountpointsReady === undefined) {
+      try {
+        createDependencyMountpoints(repoRootForMount);
+        mountpointsReady = true;
+      } catch (e) {
+        logEvent("container.dependency_mountpoints_unavailable", {
+          runId: args.runId,
+          taskId: args.taskId,
+          payload: { repoRoot: repoRootForMount, error: (e as Error).message },
+        });
+        mountpointsReady = false;
+      }
+    }
+    return mountpointsReady;
+  };
+
+  if (dependencyCacheEligible && isWorktreeRwDispatch && projectTreeIsMountable()) {
     depSpawnFields.IS_WORKTREE_DISPATCH = "1";
     const projectContainerPath = resolveProjectContainerPath(runtime);
     let plan: DependencyVolumePlan | undefined;
@@ -3350,8 +3479,12 @@ async function runContainer(args: {
       depSpawnFields.DEPENDENCY_CACHE_MOUNT_RO = "1";
     }
   } else if (dependencyCacheEligible && args.projectMode === "ro") {
+    // FG-628: a ready cache key authorizes the CONTENT of the mount; the
+    // mountpoints authorize the mount itself. Both, or neither — this pairing is
+    // the whole fix, because readiness is keyed on the lockfile and mountability
+    // is a property of this specific checkout.
     const cacheKey = safeLockfileHash(repoRootForMount);
-    if (cacheKey && isDependencyCacheReady(cacheKey)) {
+    if (cacheKey && isDependencyCacheReady(cacheKey) && projectTreeIsMountable()) {
       depSpawnFields.DEPENDENCY_CACHE_MOUNT_RO = "1";
     }
   }
@@ -3551,7 +3684,12 @@ async function runContainer(args: {
     failTask(args.taskId, { runId: args.runId, kind, error: msg, evidence: recoveryEvidenceFor(kind) });
     // FG-492 review: task failed — retain (see finalizeContainerRetention in docker-exec.ts).
     finalizeContainerRetention(containerName, false);
-    return { kind: "failed", error: msg };
+    // FG-628: this was the ONE `failed` return that dropped its failureKind — the
+    // malformed and missing-result branches below both thread it. Without it a
+    // container_crash arrives at runOneRed indistinguishable from any other
+    // dispatch failure, which is precisely the distinction ingestion needs: a red
+    // whose container never ran produced no review at all.
+    return { kind: "failed", error: msg, failureKind: kind };
   }
   let result: unknown;
   if (resultRaw.length > 0) {
