@@ -37,7 +37,7 @@ not armed, and arming it is an unenforced convention.
   creates no container and writes NO BYTES into the project or the run's task directory — no task directory, no
   `manifest.json`, no staged auth, no worktree. (AMENDED 2026-07-25 — see the amendment note below; the original
   wording said "no task row", which was a bad proxy and is not met on the `forge next` path by design.)
-- The same dispatch with `FORGE_WORKTREES=1` proceeds.
+- The same dispatch with `FORGE_WORKTREES=1` proceeds.  *(Superseded by FG-345, 2026-07-28: true only for WORKFLOW dispatch. `forge invoke` provisions no workspace, so a self-host invoke now REFUSES regardless of `FORGE_WORKTREES` — the guard keys on whether THIS dispatch isolates, not on the global flag. Do not read this line as operator guidance for the invoke path.)*
 - The same dispatch with `FORGE_NO_WORKTREES=1` proceeds (explicit operator override, warns loudly).
 - A dispatch against any OTHER project is unaffected (no new refusal path for normal use).
 - Self-host detection resolves symlinks and works when forge is invoked via the npm-link symlink on PATH.

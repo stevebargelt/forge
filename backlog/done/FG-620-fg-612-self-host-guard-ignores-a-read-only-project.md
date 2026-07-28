@@ -86,4 +86,6 @@ This ticket argued the FG-612 self-host guard should exempt a `--read-only` proj
 
 Superseded: **FG-345 deliberately puts EVERY agent on a worktree, read-only agents included**, and FG-559 makes that path actually usable (working `git log`/`diff`/`show` in the container). So the guard's own suggested remedy — `FORGE_WORKTREES=1` — becomes the correct answer for read-only dispatches too, rather than a workaround. Exempting `:ro` would add a special case to a guard whose blanket behavior is about to be right.
 
+> *Superseded by FG-345, 2026-07-28.* FG-345 shipped narrowed to **managed workflow-dispatched agents**; `forge invoke` and today's `review-loop` provision no workspace and remain `never-isolated`. **`FORGE_WORKTREES=1` is therefore NOT the remedy for those paths** — arming it does not change what an invoke mounts, and the shipped refusal deliberately never names it. The remedy is a disposable clone, or `FORGE_NO_WORKTREES=1` as an explicit acknowledged override.
+
 The one durable observation worth keeping: the `FORGE_NO_WORKTREES=1` warning text asserts "Agents are writing to the source tree", which is false under a `:ro` mount. Cosmetic, and it disappears with the same direction.
