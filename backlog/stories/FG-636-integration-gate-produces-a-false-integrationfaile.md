@@ -37,7 +37,7 @@ Three files, nine distinct tests:
 They share a shape: they exercise seed generations, runtime resolution, and task-package rendering —
 all of which read or publish under `FORGE_HOME`.
 
-## What is NOT yet established
+## What is NOT yet established (ANSWERED 2026-07-28 — hypothesis 3 confirmed; see Mechanism below)
 
 The mechanism. Do not assume it; the obvious hypotheses are each cheap to test and each would imply a
 different fix:
@@ -89,3 +89,89 @@ three-way classification (FG-424), which also behaved correctly given the inputs
 Refs: FG-566 (readiness — the reason this became visible), FG-357/FG-425 (the gate and serialized
 publisher), FG-424 (gate failure classification), `~/.forge/worktrees/publications/<attemptId>-r0` as
 the candidate location. Evidence run: `run-fg-628-…-dogfood-3-8a668c`, task `task-architect-2b12d8`.
+
+## Mechanism — ESTABLISHED 2026-07-28
+
+**The gate inherits the orchestrator's `FORGE_*` control-plane switches into the candidate's own test
+suite.** `src/v2/host-readiness.ts:630`:
+
+```ts
+export function pinnedVerificationEnv(label: string): NodeJS.ProcessEnv {
+  return { ...process.env, PATH: controlRuntimeProfile({ label: `host-verification:${label}` }).path };
+}
+```
+
+Its doc comment names the assumption that breaks: *"Unlike setupEnv this inherits process.env: a
+verification legitimately needs the operator's environment (it is running the operator's own test
+suite)."* True for generic environment; **false for forge's own control switches**, which reconfigure
+the very code under test. The sibling `setupEnv` (same file, line 611) already withholds everything
+outside an explicit `SETUP_ENV_PASSTHROUGH` allowlist — the correct pattern was ten lines above the bug.
+
+The chain for this run:
+
+1. The dogfood's wave was launched as `env FORGE_WORKTREES=1 forge next run-fg-628-…` (launch record,
+   `2026-07-28T01:55:35.994Z`), so the switch was live in the forge process env.
+2. `pinnedVerificationEnv` spread it into the `npm run test:unit` child.
+3. `src/v2/worktree-lifecycle.ts:45` — `isWorktreeModeEnabled()` returns `process.env.FORGE_WORKTREES === "1"`
+   — so **worktree mode was ON for every unit-test child process**.
+4. The affected tests dispatch against `mkdtemp` project dirs with no `.git`, so worktree creation
+   fails and dispatch aborts before writing the task manifest: fg366 reads a manifest that was never
+   written (ENOENT), fg482's task lands `failed` instead of `blocked_by_red`, and the fanout parent /
+   red-wide tasks are never created at all.
+
+### Evidence — four runs, one variable
+
+All four in the retained failing candidate
+`~/.forge/worktrees/publications/f803fe43-1697-42b4-8abd-aa0749fcab99-r0`, clean at `de356f6a`:
+
+| Run | Result |
+|---|---|
+| The 3 suspect files, in the exact failing directory | 10/10 pass |
+| **Full `npm run test:unit`** in that same directory | **2826 pass, 0 fail** |
+| 3 files x 5 rounds under 20-way CPU saturation | 10/10 pass every round |
+| 3 files with **`FORGE_WORKTREES=1`** | **9 fail / 1 pass — the identical nine, same single passer** |
+
+This eliminates hypothesis 1 (CWD inside `FORGE_HOME`) and hypothesis 2 (load / concurrency with the
+live DB), and confirms hypothesis 3 (environment shape) with a deterministic single-command
+reproduction. The one test that passes under the repro — `fg482 single-step: CAS loses a race` — is
+the same one that passed in the gate, so the match is exact rather than approximate.
+
+### Both callers are affected
+
+`pinnedVerificationEnv` has two callers, and the ticket's framing understates the blast radius:
+
+- `src/v2/integration-gate.ts:75` — the post-merge integration gate (the observed failure).
+- `src/v2/review-loop.ts:351` — **review-loop host verification**. Since FG-474 its result is recorded
+  as a `host_verifications` row and reused as covering evidence, so a false verdict here is persisted
+  as audit evidence rather than merely blocking one publication.
+
+32 distinct `FORGE_*` switches can currently reach a candidate's suite by this route.
+
+## Fix scope (operator-approved 2026-07-28)
+
+1. **Gate-side (primary).** `pinnedVerificationEnv` removes the entire Forge-reserved `FORGE_*`
+   namespace from the candidate verification environment, then applies the pinned PATH. A denylist on
+   forge's own namespace rather than a full allowlist: it kills exactly the leak while preserving the
+   documented intent of inheriting the operator's general environment, and cannot break an arbitrary
+   project's suite. Fixes both callers at once.
+2. **Test-side (defense in depth, AC 5).** `src/test-setup.ts` explicitly clears the ambient
+   *production behavior switches* that affect suite-wide behavior — at minimum `FORGE_WORKTREES`,
+   `FORGE_NO_WORKTREES`, `FORGE_WORKTREE_IGNORE_DIRTY` — before tests set their own controlled values.
+   Verified safe: the worktree tier sets `process.env.FORGE_WORKTREES = "1"` inside the tests
+   themselves and does not depend on an ambient value.
+   **NOT a blanket namespace deletion.** Test-harness inputs must be preserved — `FORGE_TEST_MISMATCHED_NODE`
+   is injected deliberately by CI into all five `test-extended` shards (`.github/workflows/ci.yml`) and is
+   a HARD requirement of `src/cli/node-preflight.integration.test.ts:287`; clearing it would erase a valid
+   harness input and break `test-extended`. `FORGE_TEST_PRINT_CMD` is the other harness variable.
+3. **Regressions (AC 4).** (a) an environment-shape unit test asserting `pinnedVerificationEnv()` drops
+   `FORGE_*` while keeping the pinned PATH; (b) an execution test that runs a representative dispatch
+   test with `FORGE_WORKTREES=1` set in the PARENT env and asserts it still passes — i.e. the gate's
+   execution context cannot change a test outcome.
+
+**Why the gate exposed this when CI did not:** CI runs the tier in a clean environment with no
+`FORGE_*` production switch set; the gate ran it with the orchestrator's inherited environment.
+
+**Known interaction (no action):** `FORGE_TEST_MISMATCHED_NODE` is itself `FORGE_*`, so the gate-side
+strip withholds it from verification as well. That is a no-op today — it is unset in the orchestrator
+environment, and `node-preflight.integration.test.ts` falls back to scanning installed interpreters —
+but it is recorded here in case a future host relies on it for extended verification.
