@@ -1,85 +1,66 @@
-**Last session ended 2026-07-28.**
+**Last updated 2026-07-28 (mid-session — decomposition review pending).**
 
-**Where we left off:** FG-345 shipped isolation **default-on** and closed, but only after the operator
-caught a regression neither the reviewer nor the orchestrator found: the self-host guard read
-`isWorktreeModeEnabled()` ("is isolation the default on this host") as "is this dispatch isolated". Those
-coincided while isolation was opt-in; default-on made them different, and a self-host `forge invoke`
-would have mounted the live forge checkout unrefused. Fixed in `f50e383`.
-
-**READ THIS BEFORE DISPATCHING ANYTHING — the dispatch contract changed today.**
-
-1. **Isolation is now default-ON on macOS** (`FORGE_NO_WORKTREES=1` is the escape). Two preflight gates
-   you will now meet that you did not before: the project must be a git repo, and its **tracked tree
-   must be clean**. Commit or stash first; `FORGE_WORKTREE_IGNORE_DIRTY=1` bypasses but the agent then
-   sees the committed snapshot, not your edits.
-2. **`forge invoke` against `~/code/forge` now REFUSES** (self-host, `never-isolated`). So does
-   `forge review-loop` pointed there — both its reviewer and its fixer dispatch through the same path.
-   **`FORGE_WORKTREES=1` will NOT help and the refusal deliberately never mentions it** — arming it does
-   not change what an invoke mounts. Use the workflow path (`forge new` / `forge next`) for forge-on-forge,
-   or dispatch against the `~/code/forge-fg356` clone, or `FORGE_NO_WORKTREES=1` as an acknowledged override.
+**Where things stand:** FG-345, FG-623, and evidence-led review Change 0 are COMPLETE (recorded in
+`backlog/PLAN.md`). The interim evidence-led review policy is ACTIVE as of `cc10232a` — both
+authoritative sources (`docs/autonomous-run-prompt.md`, now git-tracked, and the orchestrator
+seed/rendered CLAUDE.md block) agree, which is the PRD's activation condition. All review dispatches
+now follow it: deterministic verification first, ONE risk-targeted discovery pass
+(`review-loop --max-rounds 1` as transport only), manual finding ledger, disposition-before-fix, one
+batch fixer, exact-ID recheck + delta-bounded discovery, absence-is-never-resolution. The old #302
+phrase guard test was deleted (operator decision: it pinned superseded English, not behavior);
+`orchestrator-block-parity.test.ts` remains the mechanical guard.
 
 **Picked up next:**
 
-1. **FG-623 — the lease flake now blocks review-loop verification.** Promoted from cosmetic today: it
-   failed a `forge review-loop` verification gate on FG-345 and reproduced at **1-in-5** on an idle host
-   against the ~2% the ticket records. It is a 1ms comparison against a live clock — cheap to fix, and it
-   now taxes every review cycle including merge-gating ones. Highest value-per-effort item open.
-2. **FG-637 — fan-out end-to-end composition coverage** (FG-628 follow-up). Deliberately deferred, not a
-   defect: the decision path is shared (`dispatchReds` → `redRejection`) and correct by construction, and
-   FG-482's fan-out cases cover the transition mechanics. What is untested is the composition. Its AC 3
-   asks for the publisher interaction — a review-missing block must REFUSE publication and leave the
-   target unmoved, not merely flip the task row.
-3. **Non-ticket thread — rotate the leaked Docker Hub token.** A `dckr_pat_…` was printed into the
-   session transcript while diagnosing docker. Treat as compromised; rotate at hub.docker.com → Account
-   Settings → Personal access tokens. Not a backlog item, do not file one, but do not lose it either.
+1. **Evidence-led review Changes 1–3 decomposition — awaiting operator review.** Proposed 2026-07-28
+   as three serial tickets (ledger → coordinator → authority/migration), per the PRD's own "do not
+   create additional implementation children" rule. Tickets NOT filed, no implementation authorized,
+   until the operator approves. FG-541 must be folded into or superseded by Change 3 (PRD migration
+   safety) — flagged in the proposal.
+2. **FG-608 (FG-496 Slice C)** — next implementation item under the current plan unless the approved
+   decomposition establishes a concrete dependency requiring otherwise.
+3. **Non-ticket thread — rotate the leaked Docker Hub token** (carried from last session, still
+   presumed unrotated). hub.docker.com → Account Settings → Personal access tokens. Do not file a
+   ticket; do not lose it.
 
-**External state to remember:**
+**Standing operator directives (this session):**
 
-- **ntfy is DOWN, and it is not a forge bug.** DNS resolves (`20.84.16.188`) but **TCP 443 never
-  connects** to the Azure Container Apps host. Every `forge notify` this session failed
-  `network: fetch failed`. Do not rely on push for an unattended run until the endpoint is back.
-- **`docker-credential-desktop` was wedged** — `docker pull` hung with zero output for an hour, which
-  looked exactly like a blocked network and was not (the registry answered in 225ms throughout). Fixed by
-  restarting Docker Desktop. If pulls hang silently again, test the helper directly before blaming the
-  network. A cosmetic leftover: `docker images` lists busybox while `docker image inspect` says no such
-  image — harmless here, worth a look if it spreads.
-- **`~/code/forge-fg356`** is the disposable clone, reset to merged `main`, clean. It is where all
-  implementation ran this session and where `review-loop --project` must point for forge-on-forge.
-- `agent-dev-worker:latest` (`1432466af8b5`) is current — FG-628 touched no `docker/` files, so no
-  rebuild is needed for the FG-621 smoke or anything else.
+- **Do NOT dispatch FG-637.** It is deliberately deferred (PLAN.md deferred set); its position in a
+  prior handoff list was not priority authorization. No further worktree/FG-637 coverage work without
+  a deterministic supported-workflow failure.
+- No further scope expansion of the Change 0 work; the historical prompt-text-test pattern gets
+  assessed separately, not cleaned up piecemeal.
+
+**External state:**
+
+- **ntfy is still DOWN** — every `forge notify` this session failed `network: fetch failed` (Azure
+  Container Apps host; TCP 443 never connects). Do not rely on push for unattended runs.
+- **`~/code/forge-fg356`** (disposable clone) is synced to merged main `cc10232a`, clean, on `main`.
+  All agent implementation work runs there (`--project`), never in `~/code/forge`.
+- Dispatch contract reminders: isolation is default-ON on macOS (`FORGE_NO_WORKTREES=1` escape);
+  project must be a clean committed git tree; `forge invoke`/`review-loop` against `~/code/forge`
+  refuses (self-host) — use the clone.
+- `forge ops check` shows 17 historical `orphaned_work_may_persist` incidents — known FG-549 noise
+  (detector never clears); ignore unless one is recent.
 
 **Decisions worth not relitigating:**
 
-- **The workspace contract (operator, 2026-07-28).** A task workspace is committed tracked content at the
-  recorded base SHA plus inputs explicitly supplied through Forge's own provisioning/environment
-  mechanisms. Ambient local state — uncommitted, untracked, ignored — is **intentionally not inherited**.
-  That is the contract, not a gap. **No generic carry-in system, no child ticket for one.**
-- **The macOS-only worktree gate is PERMANENT**, not pending work. FG-358 was closed out-of-scope
-  (`6c0a1a6`): forge runs only on a macOS host per DEC-004, and "Linux" in these gates means the agent
-  CONTAINER. Any doc or comment still citing FG-358 as pending is stale.
-- **FG-345 is narrowed to managed workflow-dispatched agents.** `forge invoke` and today's `review-loop`
-  are direct shared-checkout surfaces outside the guarantee. **Do not build invoke
-  merge/publication machinery** — the evidence-led review programme is expected to replace legacy
-  review-loop behavior, and that question lands there.
-- **The not-carried diagnostic misses ignored files, knowingly.** It uses
-  `git ls-files --others --exclude-standard`, so `.env` — the highest-value case — emits no warning.
-  Collecting ignored files is out of scope by decision (unbounded `--ignored` enumerates `node_modules`).
-- **FG-628's AC 2 and AC 5 were both widened mid-implementation** and the originals were wrong, not
-  merely incomplete. AC 5's rule is keyed on the **review artifact's provenance**, never on failure kind
-  or container lifecycle — a synthesized verdict blocks orthogonally to authority. `idle_timeout` threads
-  no failure kind at all, which is why a kind-list approach could never have worked.
-- **Do not start exploratory review-loop passes** (operator instruction). Run it for its purpose; do not
-  re-loop clean code chasing polish.
+- The workspace contract (operator, 2026-07-28): committed tracked content at the recorded base SHA +
+  explicitly supplied inputs; ambient local state intentionally not inherited. No generic carry-in.
+- The macOS-only worktree gate is PERMANENT (DEC-004; "Linux" in those gates means the agent
+  container). FG-358 closed out-of-scope.
+- FG-345 is narrowed to managed workflow-dispatched agents; do not build invoke merge/publication
+  machinery — the evidence-led review program owns that question.
+- Change 0 is instruction-only BY DESIGN: no ledger tables, no coordinator, no new gates until the
+  operator approves the Changes 1–3 decomposition.
 
-**Shipped (for reference):**
+**Shipped this session (for reference):**
 
-- **FG-345** (`3ce0385` + `f50e383`) — isolation default-on, platform-aware; self-host guard keyed on
-  actual per-dispatch isolation. Closed narrowed in scope.
-- **FG-628** (`71d7eae`, 14 commits) — mountpoint precondition moved to the mount decision; a red that
-  produced no review now blocks. The dogfood falsified the ticket's own scope before any code changed.
-- **FG-621** — closed on a 12-AC walk with the boundary smoke re-captured live at `71d7eae` (25 probes).
-- **FG-636** — verification env no longer leaks forge's `FORGE_*` control switches into candidate suites.
-- **FG-379** — the four worktree env vars documented with precedence.
-- **Filed:** FG-637. **Escalated:** FG-623. **Annotated as superseded:** FG-636, FG-351, FG-612, FG-620 —
-  four *closed* records that had become wrong operator guidance, FG-620's the worst (it named
-  `FORGE_WORKTREES=1` as the guard remedy, the exact advice the shipped refusal withholds).
+- **FG-623** (`612e481f`, PR #172) — lease-renewal test moved off the 1 ms knife-edge to TTL/2
+  (~150 s headroom, 0/400 probe failures, 50/50 isolated runs); closed with Acceptance Evidence grid.
+- **Change 0** (`cc10232a`, PR #173) — interim evidence-led review policy on both authoritative
+  sources + rendered block (byte-identical parity verified post-merge); `.git/info/exclude` entry for
+  the autonomous-run prompt removed; stale `--max-rounds 2` example in
+  `docs/how-to-use-forge-across-projects.md` corrected; obsolete phrase-guard test deleted.
+- Watch item (not filed, n=1): one-off `ENOTEMPTY` cleanup race in `src/v2/docker-exec.test.ts:380`
+  during an engineer container run; didn't reproduce across two subsequent full-tier runs.

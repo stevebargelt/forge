@@ -13,45 +13,45 @@ session handoff. This file may be rewritten whenever priorities change; Git is s
 
 ## Current objective
 
-Finish FG-345 by making isolated workspaces the ordinary/default path. The structural program is proven:
-workspace lifecycle, mutator and non-mutator Git access, merge/publication, verification, self-host refusal,
-recovery, and fail-closed review behavior have shipped and passed the aggregate/live evidence walks. FG-621,
-FG-628, and FG-636 are closed; the supported host is macOS under DEC-004.
+Advance the FG-496 DB-backed backlog program (FG-608 is the next implementation item) while the
+evidence-led review decomposition completes operator review. The isolation program and the interim
+review policy are done and in force.
 
-The workspace contract is committed tracked content at the recorded base SHA plus inputs explicitly supplied
-through Forge. Ambient uncommitted, untracked, or ignored checkout state is intentionally not inherited and is
-not a default-on blocker. `FORGE_NO_WORKTREES=1` remains the explicit legacy escape hatch. Do not create a
-generic carry-in system or another isolation child without a deterministic failure in a supported workflow.
+**Complete (recorded 2026-07-28):**
 
-After FG-345 closes, fix FG-623's measured 1 ms lease-test flake, then activate Change 0 from the confirmed
-evidence-led review PRD so the interim operating policy governs the remaining build period.
+- **FG-345** — isolation default-on shipped and closed (`3ce0385` + `f50e383`); self-host guard keyed on
+  actual per-dispatch isolation. The workspace contract stands: committed tracked content at the recorded
+  base SHA plus explicitly supplied inputs; ambient checkout state intentionally not inherited;
+  `FORGE_NO_WORKTREES=1` is the explicit escape. No generic carry-in system, no further isolation
+  children without a deterministic supported-workflow failure.
+- **FG-623** — the 1 ms lease-test knife-edge fixed (`612e481f`): renewal at TTL/2, ~150 s headroom,
+  0/400 probe failures; closed on the acceptance walk.
+- **Evidence-led review Change 0** — interim operating policy ACTIVE (`cc10232a`): both authoritative
+  sources (`docs/autonomous-run-prompt.md`, now tracked, and the orchestrator seed/rendered block) carry
+  the one-discovery/disposition/batch-fix/exact-recheck policy; the obsolete #302 phrase guard is
+  removed; deterministic and authority gates unchanged. Review dispatches now run under this policy.
 
 ## Now
 
-1. **FG-345** — implement the default-on flip, verify the supported committed-tree workflow, record the final
-   aggregate evidence, and close. FG-637 and registry-dependent probe availability are recorded follow-ups,
-   not blockers absent a deterministic supported-workflow failure.
-2. **FG-623** — remove the measured 1 ms live-clock knife-edge from the lease-renewal test after FG-345
-   closes. This is a bounded test-reliability fix promoted under the required-CI interruption rule; do not
-   fold it into FG-345 or expand it into a production clock redesign.
-3. **Evidence-led review Change 0** — commit the confirmed
-   `docs/prds/evidence-led-review-lifecycle.md`, decompose it into stable backlog work, then align the
-   autonomous-run prompt and orchestrator seed with the interim one-discovery/batch-fix/recheck policy before
-   ledger implementation begins.
+1. **Evidence-led review Changes 1–3 decomposition** — proposed to the operator for review
+   (2026-07-28); tickets are NOT filed and no implementation is authorized until the operator approves
+   the decomposition. Per the PRD, the split is the three Changes only — no further children until a
+   boundary proves it cannot ship together.
+2. **FG-608 — FG-496 Slice C:** make the DB backlog authoritative per project, migrate seam-bypassing
+   readers, and provide containers the live read-only project-scoped backlog authority. Next
+   implementation item unless the approved decomposition establishes a concrete dependency requiring
+   otherwise.
 
 ## Next
 
-1. **FG-608 — FG-496 Slice C:** make the DB backlog authoritative per project, migrate seam-bypassing
-   readers, and provide containers the live read-only project-scoped backlog authority.
-2. **Evidence-led review program — reserved position, decomposition pending:** the confirmed PRD is ready to
-   be broken into implementation tickets; it is not itself an executable implementation brief. After
-   decomposition, replace this placeholder with the stable ready ticket IDs and their dependency order before
-   dispatching any Changes 1–3 work.
-3. **FG-609 — FG-496 Slice D:** queue rank, membership, revision-bound readiness, blocker evidence, and
+1. **Evidence-led review program — reserved position:** after the operator approves the decomposition,
+   replace this placeholder with the filed ticket IDs and their dependency order before dispatching any
+   Changes 1–3 work.
+2. **FG-609 — FG-496 Slice D:** queue rank, membership, revision-bound readiness, blocker evidence, and
    event-history primitives.
-4. **FG-610 — FG-496 Slice E:** atomic claims, leases, recovery, capacity accounting, and canonical
+3. **FG-610 — FG-496 Slice E:** atomic claims, leases, recovery, capacity accounting, and canonical
    claim-next.
-5. Reconcile and close **FG-496** with its aggregate acceptance walk.
+4. Reconcile and close **FG-496** with its aggregate acceptance walk.
 
 `Next` is deliberately short. Ordering here expresses current intent; it does not override ticket
 dependencies or authorize execution.
