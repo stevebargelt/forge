@@ -184,7 +184,7 @@ Four caveats specific to the meta case:
    git clone ~/code/forge ~/code/forge-review   # once
    git -C ~/code/forge-review fetch origin      # then refresh before each loop run, so the
                                                 # clone carries the range under review
-   forge review-loop <ticket-id> --project ~/code/forge-review --max-rounds 2 --route <route>
+   forge review-loop <ticket-id> --project ~/code/forge-review --max-rounds 1 --route <route>
    ```
 
    This readiness refusal is what fires when the loop reaches its *local* verification arms. When a green required CI check covers `HEAD`, the loop reuses that evidence and never attempts a local install, so it gets past readiness — and then stops at caveat 1 instead, because its reviewer dispatch is a self-host invoke. **Either way the loop cannot run from the forge checkout**, and a clone is the answer to both. See [Host verification readiness](concepts.md#host-verification-readiness) for the full contract and the rest of the refusal vocabulary.
