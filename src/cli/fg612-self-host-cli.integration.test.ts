@@ -229,16 +229,27 @@ test("FORGE_WORKTREES=1 does NOT let the self-host invoke through — the flag i
 });
 
 test("`forge new` — the workflow path — is unchanged: FORGE_WORKTREES=1 is still a way past the guard", () => {
-  // assertReachedDispatch is not usable here: `forge new` mints nothing in a
-  // throwaway $FORGE_HOME, it stops at the unpublished seed generation. That stop
-  // IS the evidence — it is downstream of the guard, so reaching it means the
-  // workflow path got past the refusal that now blocks the invoke path.
+  // assertReachedDispatch is not usable here: `forge new` mints neither the store
+  // nor a run directory in a throwaway $FORGE_HOME — it stops at one of the gates
+  // the guard sits in front of, and WHICH one it reaches is a property of the host,
+  // not of the guard. new.ts runs them in this order, all strictly after
+  // assertSelfHostDispatchAllowed(): the unrouted route preflight (always emitted —
+  // this case passes neither --route nor --unrouted), then validateCredsForNewRun()
+  // (fires on a host that can see it has no usable credentials — CI's Linux runner),
+  // then the seed-generation resolve (fires on a host whose auth resolves — the dev
+  // Mac). Pinning any single one made the test hostage to that ordering. So: match
+  // the union — downstream markers, any of which proves the guard was passed,
+  // because the guard throws and none of them can be reached if it fires.
   const r = runForge(["new", "feature", "fg612 probe", "--project", REPO_ROOT], { FORGE_WORKTREES: "1" });
   const out = r.stdout + r.stderr;
 
   assert.doesNotMatch(out, /REFUSING to dispatch/, `the workflow path must not be refused\n${out}`);
   assert.doesNotMatch(out, /FG-612/, `no self-host refusal may fire on the workflow path\n${out}`);
-  assert.match(out, /no complete seed generation/, `it must get downstream of the guard\n${out}`);
+  assert.match(
+    out,
+    /dispatching WITHOUT a resolved route|Auth error: |no complete seed generation/,
+    `it must get downstream of the guard\n${out}`,
+  );
 });
 
 test("FORGE_NO_WORKTREES=1 lets it through and warns that agents write to the live source", () => {
