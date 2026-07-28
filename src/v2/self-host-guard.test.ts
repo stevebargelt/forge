@@ -11,8 +11,17 @@ import {
   isSelfHostDispatch,
   forgeSourceRoot,
   _resetSelfHostWarnings,
+  type DispatchIsolation,
 } from "./self-host-guard.js";
 import { assetRoot } from "./asset-root.js";
+import { isWorktreeModeEnabled } from "./worktree-lifecycle.js";
+
+/** Exactly what the workflow-dispatch sites (runNext.ts x3, new.ts) pass: those
+ *  paths provision a task-scoped workspace when worktree mode is armed. The
+ *  guard is given this answer; it never derives it. */
+function workflowIsolation(): DispatchIsolation {
+  return isWorktreeModeEnabled() ? "isolated" : "not-armed";
+}
 
 let workspace: string;
 let forgeRoot: string;
@@ -31,7 +40,7 @@ function setPlatform(p: string): void {
 function refusalOn(platform: string): string {
   setPlatform(platform);
   try {
-    assertSelfHostDispatchAllowed(forgeRoot, forgeRoot);
+    assertSelfHostDispatchAllowed(forgeRoot, workflowIsolation(), forgeRoot);
   } catch (e) {
     return (e as Error).message;
   }
@@ -67,7 +76,7 @@ afterEach(() => {
 
 test("self-host dispatch with worktree mode off REFUSES", () => {
   assert.throws(
-    () => assertSelfHostDispatchAllowed(forgeRoot, forgeRoot),
+    () => assertSelfHostDispatchAllowed(forgeRoot, workflowIsolation(), forgeRoot),
     (e: Error) => {
       assert.match(e.message, /REFUSING to dispatch/);
       assert.match(e.message, /self-host/i);
@@ -111,13 +120,13 @@ test("on win32 FORGE_WORKTREES=1 IS the fix — the platform default is off but 
 
 test("FORGE_WORKTREES=1 proceeds silently — isolation is armed", () => {
   process.env["FORGE_WORKTREES"] = "1";
-  assertSelfHostDispatchAllowed(forgeRoot, forgeRoot);
+  assertSelfHostDispatchAllowed(forgeRoot, workflowIsolation(), forgeRoot);
   assert.equal(stderr.join(""), "");
 });
 
 test("FORGE_NO_WORKTREES=1 proceeds, loudly", () => {
   process.env["FORGE_NO_WORKTREES"] = "1";
-  assertSelfHostDispatchAllowed(forgeRoot, forgeRoot);
+  assertSelfHostDispatchAllowed(forgeRoot, workflowIsolation(), forgeRoot);
   const out = stderr.join("");
   assert.match(out, /WARNING/);
   assert.match(out, /live forge source/);
@@ -127,8 +136,78 @@ test("FORGE_NO_WORKTREES=1 proceeds, loudly", () => {
 test("the kill switch beats FORGE_WORKTREES=1 — worktree mode is off, so the override path is what proceeds", () => {
   process.env["FORGE_WORKTREES"] = "1";
   process.env["FORGE_NO_WORKTREES"] = "1";
-  assertSelfHostDispatchAllowed(forgeRoot, forgeRoot);
+  assertSelfHostDispatchAllowed(forgeRoot, workflowIsolation(), forgeRoot);
   assert.match(stderr.join(""), /WARNING/);
+});
+
+// ── FG-345 regression: the guard keys on THIS dispatch, not the global default ─
+//
+// isWorktreeModeEnabled() answers "is isolation the default on this host".
+// FG-345 made that true by default on darwin, and reading it as "this dispatch
+// is isolated" then permitted the exact dispatch the guard exists to refuse:
+// invoke.ts provisions no workspace and mounts the live checkout regardless.
+
+test("a self-host INVOKE refuses even where isolation is on by default — that path provisions nothing", () => {
+  setPlatform("darwin");
+  delete process.env["FORGE_WORKTREES"];
+  assert.equal(isWorktreeModeEnabled(), true, "fixture: the FG-345 default-on host, no env set");
+
+  assert.throws(
+    () => assertSelfHostDispatchAllowed(forgeRoot, "never-isolated", forgeRoot),
+    (e: Error) => {
+      assert.match(e.message, /REFUSING to dispatch/);
+      assert.match(e.message, /provisions no isolated workspace/);
+      return true;
+    }
+  );
+});
+
+test("the same host, WORKFLOW dispatch: default-on isolation still proceeds silently — unchanged", () => {
+  setPlatform("darwin");
+  delete process.env["FORGE_WORKTREES"];
+  assert.equal(workflowIsolation(), "isolated");
+
+  assertSelfHostDispatchAllowed(forgeRoot, workflowIsolation(), forgeRoot);
+  assert.equal(stderr.join(""), "");
+});
+
+test("FORGE_NO_WORKTREES=1 still permits the no-isolation path, loudly", () => {
+  setPlatform("darwin");
+  process.env["FORGE_NO_WORKTREES"] = "1";
+
+  assertSelfHostDispatchAllowed(forgeRoot, "never-isolated", forgeRoot);
+  const out = stderr.join("");
+  assert.match(out, /WARNING/);
+  assert.match(out, /live forge source/);
+});
+
+test("a DIFFERENT project on the no-isolation path is untouched — the refusal is about the forge tree", () => {
+  setPlatform("darwin");
+  delete process.env["FORGE_WORKTREES"];
+
+  assertSelfHostDispatchAllowed(otherProject, "never-isolated", forgeRoot);
+  assert.equal(stderr.join(""), "");
+});
+
+test("the no-isolation refusal advises a CLONE and never FORGE_WORKTREES=1 — arming it would not isolate an invoke", () => {
+  setPlatform("darwin");
+  delete process.env["FORGE_WORKTREES"];
+  let message = "";
+  try {
+    assertSelfHostDispatchAllowed(forgeRoot, "never-isolated", forgeRoot);
+  } catch (e) {
+    message = (e as Error).message;
+  }
+
+  assert.match(message, /CLONE of the forge checkout/, `the actual fix must be named:\n${message}`);
+  assert.match(message, /FORGE_NO_WORKTREES=1/);
+  assert.match(message, /forge invoke/, `the operator must learn WHICH surface is uncovered:\n${message}`);
+  assert.match(message, /structural/, `the refusal must read as structural, not as a missing flag:\n${message}`);
+  assert.doesNotMatch(
+    message,
+    /FORGE_WORKTREES=1/,
+    `arming isolation does not isolate an invoke — advising it lands the operator back in the hazard:\n${message}`
+  );
 });
 
 // ── No effect on any other project ────────────────────────────────────────────
@@ -145,7 +224,7 @@ test("a DIFFERENT project is unaffected in every env combination", () => {
     delete process.env["FORGE_NO_WORKTREES"];
     Object.assign(process.env, combo);
     stderr = [];
-    assertSelfHostDispatchAllowed(otherProject, forgeRoot);
+    assertSelfHostDispatchAllowed(otherProject, workflowIsolation(), forgeRoot);
     assert.equal(stderr.join(""), "", `unexpected output for ${JSON.stringify(combo)}`);
     assert.equal(isSelfHostDispatch(otherProject, forgeRoot), false);
   }
@@ -155,7 +234,7 @@ test("a sibling whose path is a string prefix of the forge root is NOT self-host
   const sibling = `${forgeRoot}-scratch`;
   mkdirSync(sibling, { recursive: true });
   assert.equal(isSelfHostDispatch(sibling, forgeRoot), false);
-  assertSelfHostDispatchAllowed(sibling, forgeRoot);
+  assertSelfHostDispatchAllowed(sibling, workflowIsolation(), forgeRoot);
 });
 
 // ── Symlink resolution: the case that would make the guard silently inert ─────
@@ -170,7 +249,7 @@ test("detection survives the npm-link style symlink forge is invoked through", (
 
   assert.equal(isSelfHostDispatch(linked, forgeRoot), true);
   assert.equal(isSelfHostDispatch(forgeRoot, linked), true);
-  assert.throws(() => assertSelfHostDispatchAllowed(linked, forgeRoot), /REFUSING/);
+  assert.throws(() => assertSelfHostDispatchAllowed(linked, workflowIsolation(), forgeRoot), /REFUSING/);
 });
 
 test("detection survives a /var -> /private/var style symlinked ancestor", () => {
@@ -184,7 +263,7 @@ test("detection survives a /var -> /private/var style symlinked ancestor", () =>
 
   assert.notEqual(viaLink, real);
   assert.equal(isSelfHostDispatch(viaLink, real), true);
-  assert.throws(() => assertSelfHostDispatchAllowed(viaLink, real), /REFUSING/);
+  assert.throws(() => assertSelfHostDispatchAllowed(viaLink, workflowIsolation(), real), /REFUSING/);
 });
 
 test("a subdir mount of the forge checkout is still self-host — agents write into the live tree either way", () => {

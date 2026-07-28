@@ -9,12 +9,12 @@
 //
 // The guard: refuse, pre-container and pre-row, when the project being
 // dispatched against overlaps the source root of the forge that is executing
-// and worktree isolation is not armed.
+// and THIS dispatch provisions no isolated workspace. "This dispatch" is the
+// load-bearing word — see DispatchIsolation.
 
 import { realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import { assetRoot } from "./asset-root.js";
-import { isWorktreeModeEnabled } from "./worktree-lifecycle.js";
 
 /** Canonical path, tolerant of a path that does not exist yet (realpath throws
  *  there; existence is preflightProjectMount's job, not this guard's). Both
@@ -53,6 +53,19 @@ export function isSelfHostDispatch(projectDir: string, sourceRoot = forgeSourceR
   return contains(root, project) || contains(project, root);
 }
 
+/** What THIS dispatch does about isolation, stated by the caller. The guard must
+ *  never derive it from isWorktreeModeEnabled(): since FG-345 that flag answers
+ *  "is isolation the default on this host", which is a different question from
+ *  "does this code path provision a workspace". Reading the first as the second
+ *  is what let a self-host `forge invoke` onto the live checkout unrefused. */
+export type DispatchIsolation =
+  /** This dispatch provisions a task-scoped workspace; the agent never touches the live tree. */
+  | "isolated"
+  /** This path provisions one when worktree mode is armed — and it is not armed here. */
+  | "not-armed"
+  /** This path mounts the live project dir unconditionally, whatever the flag says. */
+  | "never-isolated";
+
 /** FG-345 made isolation default-on, which makes the remediation platform-specific:
  *  "set FORGE_WORKTREES=1" is only ever the fix on a host where the platform
  *  default is OFF and the worktree preflight would actually pass. */
@@ -84,33 +97,62 @@ function remediation(): string {
   );
 }
 
-function refusalMessage(projectDir: string, sourceRoot: string): string {
+/** The no-isolation-on-this-path refusal. Naming FORGE_WORKTREES here would be
+ *  actively wrong: arming it does not isolate an invoke, so an operator who
+ *  followed that advice would land back on the live checkout believing they had
+ *  fixed it. The token is deliberately absent from this message. */
+function sharedCheckoutRemediation(): string {
   return (
-    `forge: REFUSING to dispatch — self-host dispatch with worktree isolation off (FG-612).\n` +
+    `\`forge invoke\` dispatches straight at the project mount — it provisions no task-scoped\n` +
+    `workspace, so FG-345's default-on isolation does NOT cover this path (that guarantee is a\n` +
+    `workflow-dispatch property). This refusal is structural, not a missing flag: arming worktree\n` +
+    `isolation would not change what this dispatch mounts.\n` +
+    `\n` +
+    `  dispatch against a disposable CLONE of the forge checkout instead (the fix)\n` +
+    `  FORGE_NO_WORKTREES=1   proceed anyway on the shared checkout (explicit, acknowledged override)`
+  );
+}
+
+function refusalMessage(projectDir: string, sourceRoot: string, isolation: DispatchIsolation): string {
+  const headline =
+    isolation === "never-isolated"
+      ? `self-host dispatch on a path that provisions no isolated workspace (FG-612)`
+      : `self-host dispatch with worktree isolation off (FG-612)`;
+  return (
+    `forge: REFUSING to dispatch — ${headline}.\n` +
     `  project:            ${canonical(projectDir)}\n` +
     `  forge source root:  ${canonical(sourceRoot)}  (the tree this forge is executing)\n` +
     `\n` +
-    `Agents write into the shared project mount when worktree mode is off, and forge runs\n` +
-    `src/ in-process (FG-569) — a half-written file is immediately live for every forge\n` +
-    `process on this host.\n` +
+    `Agents write into the shared project mount, and forge runs src/ in-process (FG-569) —\n` +
+    `a half-written file is immediately live for every forge process on this host.\n` +
     `\n` +
-    remediation()
+    (isolation === "never-isolated" ? sharedCheckoutRemediation() : remediation())
   );
 }
 
 const warned = new Set<string>();
 
-/** Refuse a self-host dispatch unless worktree isolation is armed or the
- *  operator has explicitly acknowledged the shared checkout. Throws — callers
- *  must invoke this BEFORE any container starts and before any run/task row is
- *  written; after the first agent file lands the damage is already done.
+/** Refuse a self-host dispatch unless THIS dispatch actually provisions an
+ *  isolated workspace, or the operator has explicitly acknowledged the shared
+ *  checkout. Throws — callers must invoke this BEFORE any container starts and
+ *  before any run/task row is written; after the first agent file lands the
+ *  damage is already done.
  *
- *  Ordering note: isWorktreeModeEnabled() is false under FORGE_NO_WORKTREES=1,
- *  so the kill switch is checked on its own AFTER it — the override proceeds
- *  loudly rather than tripping the refusal it exists to bypass. */
-export function assertSelfHostDispatchAllowed(projectDir: string, sourceRoot = forgeSourceRoot()): void {
+ *  `isolation` is the caller's, never inferred: workflow dispatch passes
+ *  isWorktreeModeEnabled(), the invoke path passes "never-isolated" because it
+ *  mounts args.projectDir whatever the flag resolves to.
+ *
+ *  Ordering note: the caller's isolation is "not-armed" under
+ *  FORGE_NO_WORKTREES=1, so the kill switch is checked on its own AFTER it — the
+ *  override proceeds loudly rather than tripping the refusal it exists to
+ *  bypass. */
+export function assertSelfHostDispatchAllowed(
+  projectDir: string,
+  isolation: DispatchIsolation,
+  sourceRoot = forgeSourceRoot()
+): void {
   if (!isSelfHostDispatch(projectDir, sourceRoot)) return;
-  if (isWorktreeModeEnabled()) return;
+  if (isolation === "isolated") return;
 
   if (process.env.FORGE_NO_WORKTREES === "1") {
     const key = canonical(projectDir);
@@ -126,7 +168,7 @@ export function assertSelfHostDispatchAllowed(projectDir: string, sourceRoot = f
     return;
   }
 
-  throw new Error(refusalMessage(projectDir, sourceRoot));
+  throw new Error(refusalMessage(projectDir, sourceRoot, isolation));
 }
 
 /** Test-only: the once-per-project warning latch is process-global. */

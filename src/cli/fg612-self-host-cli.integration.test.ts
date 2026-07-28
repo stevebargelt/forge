@@ -130,12 +130,17 @@ test("`forge new` against the live forge checkout refuses before the run exists"
   assertRefusedAndTraceless("forge new", r);
 });
 
-test("the refusal names both the project and the executing source root, and both escape hatches", () => {
+// EXPECTATION CHANGE (was: this case asserted the invoke refusal offers
+// FORGE_WORKTREES=1). It is the wrong advice on this surface: arming isolation
+// does not isolate an invoke, so an operator who followed it would be back on the
+// live checkout believing it fixed. The refusal now names the clone instead.
+test("the invoke refusal names the source root and the two things that actually work: a clone, or the acknowledged override", () => {
   const r = runForge(["invoke", "engineer", "--task", "t", "--project", REPO_ROOT, "--unrouted"]);
   const out = r.stdout + r.stderr;
-  assert.match(out, /FORGE_WORKTREES=1/);
-  assert.match(out, /FORGE_NO_WORKTREES=1/);
   assert.match(out, /forge source root:/);
+  assert.match(out, /CLONE of the forge checkout/, `the actual fix must be named\n${out}`);
+  assert.match(out, /FORGE_NO_WORKTREES=1/);
+  assert.doesNotMatch(out, /FORGE_WORKTREES=1/, `arming isolation does not isolate an invoke\n${out}`);
 });
 
 // ── Symlinks: the two shapes that would make the guard silently inert ────────
@@ -213,12 +218,27 @@ test("a sibling directory that merely shares a string prefix with the checkout i
 
 // ── The two ways through must reach the dispatch machinery ──────────────────
 
-test("FORGE_WORKTREES=1 lets the self-host dispatch through to the dispatch machinery, silently", () => {
+// EXPECTATION CHANGE (was: FORGE_WORKTREES=1 let this through). `forge invoke`
+// provisions no workspace, so the flag only ever silenced the guard here. It
+// remains a way through on the workflow-dispatch path, which does provision one.
+test("FORGE_WORKTREES=1 does NOT let the self-host invoke through — the flag isolates nothing on this path", () => {
   const r = runForge(["invoke", "engineer", "--task", "t", "--project", REPO_ROOT, "--unrouted"], {
     FORGE_WORKTREES: "1",
   });
-  assertReachedDispatch("FORGE_WORKTREES=1", r);
-  assert.doesNotMatch(r.stdout + r.stderr, /WARNING — dispatching against the live forge source/);
+  assertRefusedAndTraceless("FORGE_WORKTREES=1", r);
+});
+
+test("`forge new` — the workflow path — is unchanged: FORGE_WORKTREES=1 is still a way past the guard", () => {
+  // assertReachedDispatch is not usable here: `forge new` mints nothing in a
+  // throwaway $FORGE_HOME, it stops at the unpublished seed generation. That stop
+  // IS the evidence — it is downstream of the guard, so reaching it means the
+  // workflow path got past the refusal that now blocks the invoke path.
+  const r = runForge(["new", "feature", "fg612 probe", "--project", REPO_ROOT], { FORGE_WORKTREES: "1" });
+  const out = r.stdout + r.stderr;
+
+  assert.doesNotMatch(out, /REFUSING to dispatch/, `the workflow path must not be refused\n${out}`);
+  assert.doesNotMatch(out, /FG-612/, `no self-host refusal may fire on the workflow path\n${out}`);
+  assert.match(out, /no complete seed generation/, `it must get downstream of the guard\n${out}`);
 });
 
 test("FORGE_NO_WORKTREES=1 lets it through and warns that agents write to the live source", () => {
