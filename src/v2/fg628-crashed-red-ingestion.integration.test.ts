@@ -39,11 +39,12 @@
 // must still ingest exactly as it does today (B2), and so must AWN-5's downgrade of
 // an unsubstantiated `fail` (B7).
 
-import { test, beforeEach, afterEach } from "node:test";
+import { test, beforeEach, afterEach, mock } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, mkdtempSync, rmSync, chmodSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
+import { Command } from "commander";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { tasksForRun } from "../store/tasks.js";
@@ -55,6 +56,7 @@ import { runNext, type DockerExecFn } from "./runNext.js";
 import { productionDockerExec } from "./docker-exec.js";
 import type { Workflow } from "./schema.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
+import { registerShow } from "../cli/commands/show.js";
 
 const RUNTIME = "fg628-red-test";
 
@@ -509,4 +511,116 @@ test("(fg628-B4) a failed verdict insert leaves NO verdict.review_missing event 
 
   const persistedVerdicts = db.prepare(`SELECT COUNT(*) AS n FROM verdicts`).get() as { n: number };
   assert.equal(persistedVerdicts.n, 0, "non-vacuity: the insert really did fail");
+});
+
+// ─── (B8/B9) the operator surface: `forge show` must render the distinction ────
+
+// Everything above reads the STORE. AC 5 is about what an orchestrator can see, and
+// the only thing an orchestrator sees is `forge show` — so a renderer regression
+// (dropping the synthetic finding, dropping the event from --json) would collapse a
+// never-reviewed phase back into a generic inconclusive with every assertion above
+// still green. These two drive the real CLI over the real crashed-red fixture.
+
+async function renderShowCli(args: string[]): Promise<string> {
+  const lines: string[] = [];
+  mock.method(console, "log", (...a: unknown[]) => {
+    lines.push(a.map(String).join(" "));
+  });
+  try {
+    const program = new Command();
+    registerShow(program);
+    await program.parseAsync(args, { from: "user" });
+    return lines.join("\n");
+  } finally {
+    mock.restoreAll();
+  }
+}
+
+function primaryAndRedIds(runId: string): { primaryId: string; redTaskId: string } {
+  const tasks = tasksForRun(runId);
+  const primary = tasks.find((t) => t.agentRole === "engineer" && t.parentId === undefined);
+  const red = tasks.find((t) => t.agentRole === "red-wide" && t.parentId !== undefined);
+  assert.ok(primary !== undefined && red !== undefined, "fixture must have a primary and a red task");
+  return { primaryId: primary!.id, redTaskId: red!.id };
+}
+
+type ShowJson = {
+  task: { status: string };
+  events: Array<{ eventType: string; payload?: Record<string, unknown> }>;
+  verdicts: Array<{ redTaskId: string; verdict: string; findings: Array<{ severity: string; summary: string }> }>;
+};
+
+test("(fg628-B8) `forge show` renders the never-reviewed distinction on BOTH surfaces — human finding + id, and --json finding + verdict.review_missing payload", async () => {
+  const { runId } = await runWithRed({ exitCode: 1, startsContainer: false });
+  const { primaryId, redTaskId } = primaryAndRedIds(runId);
+
+  const human = await renderShowCli(["show", primaryId]);
+  assert.match(
+    human,
+    /^ {2}- red-wide \(specialist\): inconclusive \(0\.00\) — \S+$/m,
+    `the verdict line must render; got:\n${human}`,
+  );
+  assert.ok(
+    human.includes(redTaskId),
+    "the human output must name the red task id — it is the argument for the `forge show <redTaskId>` next-command",
+  );
+  const findingLine = human
+    .split("\n")
+    .find((l) => l.includes(MISSING_SUMMARY_MARKER));
+  assert.ok(
+    findingLine,
+    `the human Verdicts section must print the produced-NO-review finding — without it this is indistinguishable ` +
+      `from a reviewer that looked and could not decide. Got:\n${human}`,
+  );
+  assert.match(findingLine!, /^ +\[high\] /, "and it must print at HIGH severity, not as an ordinary note");
+  assert.ok(
+    human.includes("verdict.review_missing"),
+    "the timeline must carry verdict.review_missing",
+  );
+
+  const json = JSON.parse(await renderShowCli(["show", primaryId, "--json"])) as ShowJson;
+  assert.equal(json.task.status, "blocked_by_red", "non-vacuity: --json is describing the blocked primary");
+
+  const verdict = json.verdicts.find((v) => v.redTaskId === redTaskId);
+  assert.ok(verdict !== undefined, "--json must carry the red's verdict");
+  const synthetic = verdict!.findings.find((f) => f.summary.includes(MISSING_SUMMARY_MARKER));
+  assert.ok(
+    synthetic !== undefined,
+    `--json verdict findings must carry the synthetic finding; got ${JSON.stringify(verdict!.findings)}`,
+  );
+  assert.equal(synthetic!.severity, "high");
+
+  const ev = json.events.find((e) => e.eventType === "verdict.review_missing");
+  assert.ok(ev !== undefined, "--json events must carry verdict.review_missing — the machine-readable half of AC 5");
+  assert.equal(ev!.payload?.["redRole"], "red-wide");
+  assert.equal(ev!.payload?.["redTaskId"], redTaskId, "the payload names the red to inspect");
+  assert.equal(ev!.payload?.["authority"], "specialist");
+  assert.equal(ev!.payload?.["failureKind"], "container_crash");
+});
+
+test("(fg628-B9) `forge show` over a reviewer-AUTHORED inconclusive carries NEITHER marker — the distinction is real, not decoration", async () => {
+  const { runId } = await runWithRed({
+    exitCode: 0,
+    result: { status: "complete", verdict: "inconclusive", confidence: 0.4, findings: [] },
+  });
+  const { primaryId, redTaskId } = primaryAndRedIds(runId);
+
+  const human = await renderShowCli(["show", primaryId]);
+  assert.match(
+    human,
+    /^ {2}- red-wide \(specialist\): inconclusive \(0\.40\) — \S+$/m,
+    `non-vacuity: the genuine inconclusive really did render; got:\n${human}`,
+  );
+  assert.ok(!human.includes(MISSING_SUMMARY_MARKER), "no produced-NO-review finding on a review that happened");
+  assert.ok(!human.includes("verdict.review_missing"), "no verdict.review_missing on the timeline");
+
+  const json = JSON.parse(await renderShowCli(["show", primaryId, "--json"])) as ShowJson;
+  const verdict = json.verdicts.find((v) => v.redTaskId === redTaskId);
+  assert.ok(verdict !== undefined, "non-vacuity: --json really is carrying this red's verdict");
+  assert.deepEqual(verdict!.findings, [], "no synthetic finding may be injected into a verdict the reviewer authored");
+  assert.equal(
+    json.events.find((e) => e.eventType === "verdict.review_missing"),
+    undefined,
+    "verdict.review_missing must be absent from --json events too",
+  );
 });
