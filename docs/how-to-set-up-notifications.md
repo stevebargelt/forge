@@ -11,7 +11,7 @@ When a forge run hits a terminal-ish state, forge POSTs a one-line SMS via Twili
 Default trigger set (override via `FORGE_NOTIFY_ON`):
 - **`complete`** — the run finished successfully (`runs.status` flipped to `complete`).
 - **`failed`** — the run was abandoned (`runs.status` flipped to `abandoned`).
-- **`blocked_by_red`** — a task got blocked by an authoritative red verdict; the run is parked, needs you to decide.
+- **`blocked_by_red`** — a task got blocked by an adversarial review: an authoritative red verdict, or a red of any authority whose container crashed before it reviewed anything. Either way the run is parked and needs you to decide.
 - **`awaiting_gate`** — a task paused for a human/verdict gate; a gate is exactly the kind of thing that needs your action, so it's on by default (not opt-in).
 
 These four are the run/task *lifecycle* triggers, governed by `FORGE_NOTIFY_ON` (below). Forge also emits some notifications **automatically as milestones** — campaign parks and live `forge ops check` incidents — which push via the milestone policy, not `FORGE_NOTIFY_ON`. See [Orchestrator milestones](#orchestrator-milestones-202203) for both.
