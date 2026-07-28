@@ -206,3 +206,83 @@ At FG-345 closeout the choice must be made explicitly, and it is one of exactly 
 
 Linux support was deliberately NOT smuggled into FG-621. Whichever option is taken, it is a decision
 this parent owns, alongside the post-merge integration gate and publication-contention items above.
+
+## Aggregate default-on walk (2026-07-28)
+
+Performed after FG-621 closed. Every item below was checked against the tree or a recorded decision, not
+inferred from ticket state — two of this ticket's own stated blockers turned out to rest on superseded
+premises.
+
+### The 8-item acceptance list
+
+| Required proof | Status |
+|---|---|
+| Two mutating agents commit concurrently in independent private repositories | **met** — FG-621 AC 1 |
+| Neither agent can mutate the parent's refs, index, object store, or target branch | **met** — FG-621 AC 2, re-captured live at `71d7eae`: 11 negative probes, each refused by the kernel or git |
+| Uncommitted tracked and untracked output captured at completion | **met** — FG-621 AC 3 |
+| A non-mutating/red agent reads required history but cannot commit or update a ref | **met** — FG-621 AC 7 |
+| Sequential tasks start from the accepted predecessor candidate; fan-out from the same recorded base | **met** — FG-621 AC 4, recorded-state assertions plus live corroboration |
+| The published tree is byte-for-byte the tree that passed the gates | **met** — FG-621 AC 6 via FG-425's candidate gate |
+| A crash leaves a recoverable private workspace and durable evidence; cleanup cannot silently discard it | **met** — FG-621 AC 9/AC 10 + FG-356 (reaps BOTH substrates) |
+| Publication contention serializes only the affected project + target branch | **met** — FG-425 serialized publisher, keyed per project + target |
+
+### Parent-owned blockers
+
+| Blocker | Status |
+|---|---|
+| Post-merge integration gate (build + test the MERGED result) | **DONE** — FG-357, now run by FG-425's publisher against the candidate before publication |
+| Publication-contention serialization per project + target branch | **DONE** — FG-425 |
+| Original question: non-git projects | **ANSWERED** — `preflightWorktreeGate` gate 2 hard-fails with a named message and a `FORGE_NO_WORKTREES=1` escape. "Fail loud" was chosen. |
+| Original question: dirty host state under forge-on-forge | **ANSWERED** — gate 3 hard-fails on a dirty tracked tree, with a documented `FORGE_WORKTREE_IGNORE_DIRTY=1` bypass. "Error on dirty" was chosen. |
+| Original question: red review timing | **ANSWERED** — reds review the FG-425 **publication candidate** (post-merge, pre-publication). Confirmed live 2026-07-28: the architect reds' `controlPlane.projectDir` was `~/.forge/worktrees/publications/<attemptId>-r0`. |
+| Original question: untracked / ignored carry-in contract | **OPEN — the one remaining blocker.** See below. |
+
+### Two stated blockers that rest on superseded premises — corrected here
+
+**The "Linux gate" fork is not a fork.** This ticket frames the closeout choice as *macOS-first default*
+vs *lift the Linux gate*, and cites FG-358 as tracking the `node_modules` bind-mount gap. FG-358 was
+**dropped as out-of-scope on 2026-07-02** (`6c0a1a6`), with the reasoning recorded in that commit: forge
+runs only on the macOS host per DEC-004; "Linux" in the worktree gates refers to the agent CONTAINER,
+never the host; and **FG-351's macOS-only gate is intended PERMANENT behavior, not a temporary gate**.
+So "lift the Linux gate" is not an available option, macOS-only is not a compromise, and no choice needs
+making here. The gate's own error text still says "see FG-358", which is stale and should be reworded to
+state the permanence instead of implying a pending ticket.
+
+**Both children are closed.** FG-621 closed 2026-07-28 with a 12-AC grid and live evidence at `71d7eae`;
+FG-356 was already done.
+
+### The remaining blocker: untracked / ignored carry-in
+
+`git worktree add` and `git clone --shared --no-checkout` both carry **only committed tracked content**.
+`node_modules` is handled separately by the dependency cache (macOS), but nothing carries in `.env`,
+generated local config, local-only fixtures, or uncommitted assets. There is no carry-in mechanism in
+`worktree-lifecycle.ts`, and no ticket owns the contract — this parent flagged it as *"likely the biggest
+practical adoption risk"* and it is the last of the original questions still unanswered.
+
+The failure mode matters more than the frequency: a project that needs a local `.env` gets a workspace
+silently missing it, and the agent's failure looks like a code problem rather than an environment one.
+That is the same silence-read-as-success class this parent's other gates were built to eliminate, so
+shipping default-on without a stated contract would reintroduce it at the workspace boundary.
+
+Note this is a **cross-project** risk, not a forge-on-forge one: forge's own tree needs no `.env`, so
+dogfooding cannot surface it. The 10–20 prototype projects this orchestrator runs against are where it
+would bite.
+
+### Recommendation
+
+**Hold default-on.** Every structural blocker is now closed and the two remaining "open questions" that
+looked blocking were already decided; the honest remaining gap is exactly one item, and it is the one
+this ticket predicted would hurt most in real use.
+
+Recommended sequence before flipping:
+
+1. Define and implement the untracked/ignored carry-in contract as one child (which classes carry in,
+   by what mechanism, and what happens when the contract cannot be met) — or explicitly decide the
+   contract is "nothing carries in; projects requiring local files must not enable worktree mode", and
+   make THAT a loud preflight rather than a silent absence.
+2. One clean end-to-end worktree-mode pipeline run. Worth stating plainly: before FG-628 shipped
+   (2026-07-28), **every** red in a worktree-mode pipeline crashed before starting, so no worktree-mode
+   pipeline had ever reached a gate verdict. Default-on before that would have silently disabled
+   adversarial review across every run. One green end-to-end run is cheap insurance against the next
+   defect of that shape.
+3. Reword `preflightWorktreeGate`'s Linux message to state permanence rather than citing FG-358.
