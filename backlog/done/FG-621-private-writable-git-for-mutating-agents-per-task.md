@@ -1,9 +1,11 @@
 ---
 id: FG-621
 type: story
-status: active
+status: done
 title: "Private writable Git for mutating agents: per-task shared clone at the recorded base SHA, with Forge retaining publication authority (FG-345 implementation child)"
 created: 2026-07-25
+closed: 2026-07-28
+closed_commit: 71d7eae
 ---
 
 **Reopened 2026-07-26 by operator decision.** FG-345 recorded the call: *mutating agents get private
@@ -324,3 +326,40 @@ Both are real, both are operator-facing, and neither was written by the implemen
 2. **The evidence lane is undiscoverable.** `scripts/fg621-clone-boundary-smoke.sh` is named in no
    markdown in the repo — not `docs/`, not `README`. An evidence lane an operator cannot discover
    is one AC 11 will not get run through.
+
+## Acceptance Evidence
+
+Implementation shipped earlier on this ticket. The two criteria that required LIVE evidence were
+re-captured at the current sha — the prior capture was against the superseded `09fd810c`, and evidence
+against a stale sha is worse than none.
+
+**Live evidence run:** `scripts/fg621-clone-boundary-smoke.sh --project-dir ~/code/forge-fg356`,
+executed on the macOS host against `agent-dev-worker:latest` (`1432466af8b5`) with the parent repository
+at **`71d7eae`** (current `main`). Result: **AC 2 PASS, AC 11 PASS, ALL PASS**, 25 probes. The script
+fails closed — every missing prerequisite exits nonzero, and it contains exactly one `exit 0`, on the
+last line.
+
+| AC | Evidence | Verdict |
+|---|---|---|
+| 1. Two mutating agents commit concurrently in independent private repositories; both sets retrievable by the host. | `fg621 (AC 1, end to end): two concurrent mutating agents commit in their private clones with NO ambient git identity, and both sets reach the host`; `fg621 (AC 1): two clones of one parent commit independently — neither sees the other's work, and both sets survive`; `fg621 (AC 1): a fresh clone carries the AGENT identity in its own local config`; `fg621 (AC 1): Forge's own safety commit still carries its OWN identity, distinct from the agent's`. | met |
+| 2. **Negative test, not a comment:** a container write to the PARENT's refs, index, object store, or target branch is refused — covering ref creation, `main` / `origin/*` / packed-ref updates, and object-store deletion. | **Live, re-captured at `71d7eae`.** Eleven negative probes, every one refused by the kernel or git, not by absence: `n1` ref creation, `n2` `main` update, `n3` `origin/*` update, `n4` packed-ref update, `n5` raw `packed-refs` append (`Permission denied`), `n6` object deletion (`Read-only file system`), `n7` object-store write, `n8` pack-directory delete, `n9` index write, `n10` HEAD write, `n11` push to the parent target. Every AC-2-enumerated case is covered by name. Argv-shape half: `fg621 (AC 2): the argv identity-binds the parent objects dir :ro — for blue AND red — and nothing wider`, plus two fails-closed cases refusing alternates that name a foreign path or a foreign real repository. | met |
+| 3. Uncommitted **tracked and untracked** output present at agent exit is captured by the Forge safety commit and appears in the candidate. | `fg621 (AC 3): a clone left with a TRACKED edit and an UNTRACKED file has both in the captured tip`; `fg621 (AC 3, end to end): both halves of an agent's output reach the published project tree`. | met |
+| 4. A sequential task's workspace is created from the exact accepted predecessor candidate SHA; a fan-out wave's siblings from the same recorded base. **Asserted on recorded state, not inferred.** | `fg621 (AC 4): the base is the one PASSED IN, not wherever the parent's HEAD happens to be`; `fg621 (AC 4): the recorded row carries BOTH the workspace path and the base, and survives a re-read`. Column-level durability: six `fg621-base-sha-migration` cases. **Live corroboration** from the AC 11 dogfood below — `tasks.base_sha = 4462a661…` was written before the container started, and the clone's on-disk `HEAD` equalled it. | met |
+| 5. Merge-back retrieves the agent's own commits via fetch from the private clone, with the host-side safety-net commit still covering the fully-uncommitted case. | `fg621 (AC 5): capture fetches the agent's OWN commits into the parent under the deterministic name, and VERIFIES the two agree`; `fg621 (AC 5): the fully-uncommitted case still captures — the agent committing nothing is the safety net's whole point`; plus `capture REFUSES a clone that is not on its own task branch`. **Live:** smoke `h5` — the host fetched `c394f99` out of the clone; `h6` — the agent's file is present in the fetched tree. | met |
+| 6. Through the gate path that exists when this ticket starts, the tree Forge publishes is byte-for-byte the tree that passed those gates (candidate identity + receipt continuity; does NOT pull in FG-345's post-merge gate). | `FG-425: the gate runs against the CANDIDATE worktree, and the exact validated commit is what lands`; `FG-425 (AD-1): the base moves once — the candidate is REBUILT on the new base and re-validated, not published unvalidated`; `FG-425 (AD-1): an EXTERNAL writer moving the target twice reaches the operator as publish_base_churn, with nothing unvalidated published`. Green in Linux CI (this file carries the macOS-only FG-556 `/var` vs `/private/var` failure, which is a test-side path assertion, not a publication defect). | met |
+| 7. **Regression:** a non-mutating/red agent still reads the history it needs and still cannot commit or update a ref — FG-559's substrate unchanged for that class. | `fg621: the RED / non-mutating path is untouched — no clone, and no agent identity anywhere it can see`; `fg621: the NON-MUTATING linked-worktree substrate is untouched — it shares the parent's config and forge writes it none`; `fg621: substrates that borrow nothing still plan no mount at all (FG-559 behavior, unchanged)`. **Live:** the smoke's argv assertion binds the parent objects dir `:ro` for red as well as blue. | met |
+| 8. Dependency provisioning resolves the same lockfile hash and reuses the same populated volume for a clone as for the current worktree path. | `FG-621 AC 8: a --shared clone resolves the same lockfile hash as its parent checkout`; `FG-621 AC 8: clone, linked worktree and parent all resolve one identical volume set`; `FG-621 AC 8 negative control: editing the clone's lockfile changes the cache key` — the negative control is what stops the first two passing vacuously. | met |
+| 9. An orphaned private clone is removed only on an ownership proof based on its resolved alternates target, a clean status including ignored files, and reachability of HEAD / branch tip / task-relevant commits from Forge-owned state. | `fg621 (AC 9): a clone that is owned, clean and fully reachable is REAPED — directory, private refs and all`; `fg621 (AC 9): the capture set reads the CLONE's own tips, not just the parent's ref — a partial capture still blocks the reap`; `fg621 (AC 9, reconcile seam): a PUBLISHED receipt read from the store authorizes the reap where HEAD proves nothing`. | met |
+| 10. A clone failing any ownership/capture/cleanliness/reachability proof is RETAINED; `forge show` exposes a durable retention event with reason and path; a stale or misassigned path cannot remove the live source checkout, an ordinary clone, or another task's clone. | Six reaper cases: foreign alternates retained; an ordinary (non-shared) clone of the same repository retained; **the LIVE SOURCE checkout can never be reaped — no repository is its own alternate**; another task's clone retained even when its work IS captured and its tree clean; a DIRTY clone retained including when the only output is on a git-ignored path. Reconcile seam: a candidate SHA on a non-published attempt authorizes nothing; a published receipt that does not reach the clone's tip authorizes nothing; authority is read PER TASK. | met |
+| 11. Dogfooded forge-on-forge on a real run before this ticket closes. | **Two independent live runs.** (a) Pipeline run `run-fg-628-…-3dc222`, dispatched `env FORGE_WORKTREES=1 forge next` against a real project: private clone created at `~/.forge/worktrees/clones/…/task-architect-d69998`, `objects/info/alternates` → the parent's object store, deterministic branch `forge/<runId>/<taskId>`, `base_sha` recorded before container start and equal to the clone's HEAD, agent container started and ran to completion. (b) The smoke's own AC 11 section at `71d7eae`: the agent committed inside the private clone as `forge-agent <agent@forge.local>`, the host fetched that commit out, and four before/after checks proved the parent's refs, HEAD, packed-refs and all **1931** object-store files byte-identical. | met |
+| 12. `forge-test` green; required CI checks (`test` and `test-extended`) green. | Both required checks green on `main` at `71d7eae` (PR #169's merge commit; all nine checks passed at the reviewed tip). The smoke script itself is guarded by `fg621-smoke-script.integration.test.ts`, which asserts it is committed executable, syntactically valid, exits nonzero on every missing prerequisite, and **FAILS when a parent write is NOT refused** — so a future weakening of the boundary cannot make the smoke silently pass. | met |
+
+### Note on the live-evidence method
+
+The boundary is proven host-side by script rather than by a CI test, deliberately: this repo has no test
+tier that can run a real Docker container, and a skip-capable CI test would make a green skip read as a
+security proof. That decision is recorded in the script's own header and in this ticket. The parent
+chosen for this capture was the clean clone `~/code/forge-fg356` at `71d7eae` rather than the live
+`~/code/forge`, which carried unrelated uncommitted work; the script's only write to the parent is a
+fetch into its ref namespace, deleted on exit, and it is performed strictly AFTER the
+parent-unchanged comparison.
