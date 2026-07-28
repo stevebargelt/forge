@@ -25,12 +25,14 @@
 //      reader, and it asserts `findings[0]`.) When a crash ALSO trips the FG-420
 //      trigger, BOTH facts must be kept and FG-420's must still be at the head. That
 //      guarantee is load-bearing and was untested.
-//   3. THE DEATH-MODE BOUNDARY. Only `container_crash` sets `reviewNeverRan`.
-//      `oom_killed`, `idle_timeout` and `model_error` deliberately still ingest as
-//      NON-blocking `inconclusive` in this cut. That is the CURRENT contract, pinned
-//      here so the follow-up that widens it has a baseline and so nobody widens it by
-//      accident. Every death-mode test asserts the red task's recorded failure_kind,
-//      so a mode that silently reclassifies fails loudly instead of passing vacuously.
+//   3. THE DEATH-MODE BOUNDARY. Only a `container_crash` whose container was never
+//      observed to START sets `reviewNeverRan`. `oom_killed`, `idle_timeout`,
+//      `model_error` — and a `container_crash` AFTER the container came up — all
+//      deliberately still ingest as NON-blocking `inconclusive` in this cut. That is
+//      the CURRENT contract, pinned here so the follow-up that widens it has a
+//      baseline and so nobody widens it by accident. Every death-mode test asserts
+//      the red task's recorded failure_kind, so a mode that silently reclassifies
+//      fails loudly instead of passing vacuously.
 //
 // Tier: integration — real task dirs on a real (temp) filesystem, real dispatch.
 
@@ -236,6 +238,11 @@ type RedBehavior = {
   /** Written to the container's stdout log — the only input the provider-failure
    *  analyzer reads, and therefore the only way to reach `model_error`. */
   stdout?: string;
+  /** Whether the container ever came up. The fake reports it exactly like the
+   *  production detached executor (`signalsContainerStart` + `onContainerStarted`
+   *  only once `docker run -d` succeeded). Defaults to true: every mode below is a
+   *  container that RAN, except the mount-failure crash the channel is scoped to. */
+  startsContainer?: boolean;
 };
 
 async function drive(wf: Workflow, redBehavior: RedBehavior) {
@@ -245,22 +252,25 @@ async function drive(wf: Workflow, redBehavior: RedBehavior) {
 
   const { runId } = startRun({ workflow: wf, title: `fg628 channels ${wf.name}`, inputs: { ticketId }, projectDir });
 
-  const exec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+  const exec: DockerExecFn = async ({ args, stdoutPath, stderrPath, onContainerStarted }) => {
     const taskId = taskIdFromDockerArgs(args);
     const dir = dirname(stdoutPath);
     mkdirSync(dir, { recursive: true });
     writeFileSync(stderrPath, "");
     if (taskId.startsWith("task-build-")) {
+      onContainerStarted?.();
       writeFileSync(stdoutPath, "");
       writeFileSync(join(dir, "result.json"), JSON.stringify(PRIMARY_RESULT));
       return 0;
     }
+    if (redBehavior.startsContainer !== false) onContainerStarted?.();
     writeFileSync(stdoutPath, redBehavior.stdout ?? "");
     if (redBehavior.rawResult !== undefined) {
       writeFileSync(join(dir, "result.json"), redBehavior.rawResult);
     }
     return redBehavior.exitCode;
   };
+  exec.signalsContainerStart = true;
 
   const wave = await runNext({ runId, workflow: wf, dockerExec: exec });
   const redRole = wf.steps[0]!.reds![0]!.agent;
@@ -357,7 +367,7 @@ test("(fg628-C4) ORDERING: when a crash ALSO trips FG-420, BOTH findings are kep
   // in front of it. Reverse the two blocks in dispatchReds and this test fails while
   // every "does it block" assertion in the suite still passes: the block is not the
   // fragile part, the head of the list is.
-  const r = await drive(WF_AUTH_SHIPPING, { exitCode: 1 });
+  const r = await drive(WF_AUTH_SHIPPING, { exitCode: 1, startsContainer: false });
 
   assert.equal(failureKindForTask(r.redTask.id), "container_crash", "non-vacuity: the reviewer's container really crashed");
   assert.equal(r.primary.status, "blocked_by_red", "both channels agree this blocks");
@@ -395,6 +405,39 @@ test("(fg628-C4) ORDERING: when a crash ALSO trips FG-420, BOTH findings are kep
 // deliberate, documented exclusion, NOT an oversight — they are pinned so that
 // widening the channel is a visible, intentional edit to this file rather than an
 // accident, and so the follow-up that widens it starts from a stated baseline.
+
+test("(fg628-C8) boundary: a `container_crash` AFTER the container started keeps its old behavior — FG-420 blocks alone, with ONE finding", async () => {
+  // The counterpart to C4, and the sharpest edge of the boundary: byte-identical
+  // failure_kind, byte-identical exit shape, same authoritative shipping-reviewer —
+  // the container merely came up first, so nothing here "never ran". FG-420 must
+  // block exactly as it did before FG-628 existed, and FG-628's channel must be
+  // silent. Key the channel on failure_kind alone and this test sees two findings.
+  const r = await drive(WF_AUTH_SHIPPING, { exitCode: 1, startsContainer: true });
+
+  assert.equal(failureKindForTask(r.redTask.id), "container_crash", "non-vacuity: same failure_kind as C4");
+  assert.equal(r.primary.status, "blocked_by_red", "FG-420's own block on a resultless authoritative reviewer is unchanged");
+  assert.equal(r.verdict.verdict, "inconclusive");
+  assert.equal(
+    r.verdict.findings.length,
+    1,
+    `only FG-420's finding — a container that started must not be reported as "never ran"; got ${JSON.stringify(r.verdict.findings.map((f) => f.summary))}`,
+  );
+  assert.ok(r.verdict.findings[0]!.summary.includes(FG420_SUMMARY_MARKER));
+  assert.equal(r.reviewNeverRanEvents.length, 0, "verdict.review_never_ran must not fire for a container that started");
+});
+
+test("(fg628-C9) boundary: a SPECIALIST `container_crash` after the container started still ADVANCES the phase", async () => {
+  // The block-vs-advance half of C8, on the weakest rank — this is the input the
+  // FG-628 channel widened, so pinning it at the exact configuration the live
+  // incident used is what keeps the widening scoped to a pre-start death.
+  const r = await drive(WF_SPECIALIST_ADVISORY, { exitCode: 1, startsContainer: true });
+
+  assert.equal(failureKindForTask(r.redTask.id), "container_crash", "non-vacuity: really the crash kind");
+  assert.ok(r.wave.completedSteps.includes("build"), "CURRENT CONTRACT: a specialist red that started and died mid-review does not block");
+  assert.equal(r.primary.status, "complete");
+  assert.equal(r.verdict.findings.length, 0);
+  assert.equal(r.reviewNeverRanEvents.length, 0, "reviewNeverRan is scoped to a container that never started");
+});
 
 test("(fg628-C5) boundary: `oom_killed` (exit 137, no result) still ingests as a NON-blocking inconclusive", async () => {
   const r = await drive(WF_SPECIALIST_ADVISORY, { exitCode: 137 });

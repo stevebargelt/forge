@@ -92,7 +92,7 @@ In the `audit` step: `red-security` and `red-wide` are `authority: authoritative
 
 Both fields take effect only in combination: a verdict blocks when it is a `fail` from an `authority: authoritative` red whose `gate_on_verdict` is not `false`. The red's `gate_on_verdict` is captured on the verdict row when the verdict is written, so red dispatch and the later gate re-check apply that one rule to the same recorded fact rather than each deriving it from their own data (see [Verdict](concepts.md#verdict)).
 
-That rule governs a verdict the red actually **produced**. It does not cover a red whose container crashed before it reviewed anything — that blocks regardless of both fields, so even `red-narrow` above will park the task at `blocked_by_red` if it never ran (see [Blocked by red](concepts.md#blocked-by-red)).
+That rule governs a verdict the red actually **produced**. It does not cover a red whose container **never started** — that blocks regardless of both fields, so even `red-narrow` above will park the task at `blocked_by_red` if it never ran. A red that started and then died mid-review is not this case and keeps the ordinary non-blocking `inconclusive` (see [Blocked by red](concepts.md#blocked-by-red)).
 
 When blocked, the human can force-advance anyway: `forge gate <task-id> advance --force --rationale "..."`.
 

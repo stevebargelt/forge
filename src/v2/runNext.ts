@@ -1374,8 +1374,8 @@ async function dispatchReds(args: {
         },
       });
     }
-    // FG-628: a red whose CONTAINER never ran is an infrastructure failure, not a
-    // review outcome. It ingested as a bare non-blocking `inconclusive (0.00)`,
+    // FG-628: a red whose CONTAINER never STARTED is an infrastructure failure, not
+    // a review outcome. It ingested as a bare non-blocking `inconclusive (0.00)`,
     // which is the ingestion an orchestrator reads as "reviewed, undecided" — so
     // an entire adversarial panel could die at dispatch and the phase would still
     // advance to awaiting_gate with zero review having run. Silence read as
@@ -1407,8 +1407,8 @@ async function dispatchReds(args: {
         findings: [
           {
             severity: "high",
-            summary: `${r.red.agent} never ran — its container crashed before producing a verdict, so this artifact was NOT adversarially reviewed`,
-            evidence: `the ${r.red.agent} container exited non-zero with no result.json (container_crash); the recorded inconclusive is the absence of a review, not a reviewer that could not decide — see forge show ${r.redTaskId} for the container's stderr`,
+            summary: `${r.red.agent} never ran — its container never started, so this artifact was NOT adversarially reviewed`,
+            evidence: `the ${r.red.agent} container failed to start and exited non-zero with no result.json (container_crash, no container.started record); the recorded inconclusive is the absence of a review, not a reviewer that could not decide — see forge show ${r.redTaskId} for the container's stderr`,
             hypothesis: "fix the dispatch/infrastructure failure and re-run the reds; operator must run forge gate --force --rationale to advance a phase whose adversarial review never executed",
           },
           ...finalVerdict.findings,
@@ -1665,8 +1665,10 @@ async function runOneRed(args: {
     // read, so whitespace-only reviewer output classifies missing, not malformed).
     // Scoped to those two: a container crash / OOM / idle-timeout / model_error
     // stays a non-blocking inconclusive for non-authoritative reds, exactly as before.
-    // FG-628: EXCEPT container_crash, which is a distinct fact and a distinct
-    // channel — see reviewNeverRan below.
+    // FG-628: EXCEPT a container_crash that never STARTED, which is a distinct
+    // fact and a distinct channel — see reviewNeverRan below. A container_crash
+    // after the container came up keeps this branch's ordinary non-blocking
+    // inconclusive (for a non-authoritative red), exactly as before.
     return {
       red: args.red,
       redTaskId,
@@ -1674,15 +1676,24 @@ async function runOneRed(args: {
       ...(result.failureKind === "result_malformed" || result.failureKind === "result_missing"
         ? { resultUnreadable: true }
         : {}),
-      // FG-628: the red's container crashed without producing a result — it never
-      // reviewed anything, so there is no opinion here to weigh. Deliberately NOT
-      // folded into resultUnreadable: that channel is gated on
-      // `authority === "authoritative" && gate_on_verdict`, and the reds this
-      // actually happened to were SPECIALIST. Authority weights an opinion; a
-      // container that never started produced none, so a missing panel member
-      // makes the panel incomplete regardless of that member's rank. dispatchReds
-      // consumes this orthogonally to authority.
-      ...(result.failureKind === "container_crash" ? { reviewNeverRan: true } : {}),
+      // FG-628: the red's container never STARTED — it reviewed nothing, so there
+      // is no opinion here to weigh. Deliberately NOT folded into resultUnreadable:
+      // that channel is gated on `authority === "authoritative" && gate_on_verdict`,
+      // and the reds this actually happened to were SPECIALIST. Authority weights an
+      // opinion; a container that never started produced none, so a missing panel
+      // member makes the panel incomplete regardless of that member's rank.
+      // dispatchReds consumes this orthogonally to authority.
+      //
+      // `containerStarted === false` — not merely falsy — is the load-bearing test.
+      // `container_crash` alone does NOT prove a pre-start death (it is assigned to
+      // every non-zero exit with no result.json, including a red that started,
+      // reviewed, and crashed before writing its result), and `undefined` means the
+      // executor gave no start signal to read. Only an observed never-started
+      // container claims this channel; everything else keeps its existing
+      // failed/inconclusive behavior.
+      ...(result.failureKind === "container_crash" && result.containerStarted === false
+        ? { reviewNeverRan: true }
+        : {}),
     };
   }
 
@@ -2979,7 +2990,15 @@ type ContainerOutcome =
   // FG-586: failureKind threads the reason a container failed so callers can
   // distinguish an unreadable-result failure (result_malformed) from an ordinary
   // container failure. runOneRed uses it to fail an authoritative reviewer closed.
-  | { kind: "failed"; error: string; failureKind?: FailureKind };
+  //
+  // FG-628: `containerStarted` is the START outcome, which `failureKind` alone
+  // does NOT carry — `container_crash` is assigned to ANY non-zero exit with no
+  // result.json, so it covers an agent that started, ran, and died mid-review just
+  // as much as a container that never came up. Only present when the executor
+  // reports a real start (`signalsContainerStart`, FG-536); left undefined for
+  // legacy/fake executors, which record the start up-front and therefore cannot
+  // tell "started" from "never started" at all.
+  | { kind: "failed"; error: string; failureKind?: FailureKind; containerStarted?: boolean };
 
 // FG-586 Part A: bounded envelope tolerance for a result payload that JSON.parse
 // rejects as-is. Before declaring the result unreadable, retry the parse against a
@@ -3695,7 +3714,18 @@ async function runContainer(args: {
     // container_crash arrives at runOneRed indistinguishable from any other
     // dispatch failure, which is precisely the distinction ingestion needs: a red
     // whose container never ran produced no review at all.
-    return { kind: "failed", error: msg, failureKind: kind };
+    //
+    // The start outcome rides along because `kind` cannot express it: the branch is
+    // reached by any non-zero exit with no result.json, so a container that never
+    // came up and an agent that died halfway through its review land here the same
+    // way. `containerStartRecorded` is the only fact that separates them, and it is
+    // only a fact for an executor that signals a real start.
+    return {
+      kind: "failed",
+      error: msg,
+      failureKind: kind,
+      ...(exec.signalsContainerStart ? { containerStarted: containerStartRecorded } : {}),
+    };
   }
   let result: unknown;
   if (resultRaw.length > 0) {

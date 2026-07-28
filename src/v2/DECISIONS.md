@@ -75,14 +75,18 @@ written to the `verdicts` table.
   `verdict: fail` ⇒ primary status `blocked_by_red`. Orchestrator surfaces.
 - A red whose container crashes produces an `inconclusive` verdict; the red
   task itself is marked `failed`. ~~It doesn't block the gate.~~ **Amended by
-  FG-628:** a `container_crash` means the red never reviewed the artifact at
-  all, so it now blocks (`blocked_by_red`) orthogonally to authority AND to the
-  step's gate — a specialist red configured `gate_on_verdict: false` blocks
-  exactly as an authoritative one does, and a `gate: auto` step does not
-  advance. The recorded verdict value stays `inconclusive`, with a prepended
-  synthetic HIGH "never ran" finding; `oom_killed`, `idle_timeout` and
-  `model_error` still ingest as non-blocking inconclusives. See "Blocked by
-  red" in `docs/concepts.md`.
+  FG-628:** a `container_crash` on a container that was never observed to START
+  means the red never reviewed the artifact at all, so it now blocks
+  (`blocked_by_red`) orthogonally to authority AND to the step's gate — a
+  specialist red configured `gate_on_verdict: false` blocks exactly as an
+  authoritative one does, and a `gate: auto` step does not advance. The recorded
+  verdict value stays `inconclusive`, with a prepended synthetic HIGH "never
+  ran" finding; `oom_killed`, `idle_timeout`, `model_error` — and a
+  `container_crash` after the container came up — still ingest as non-blocking
+  inconclusives. The start outcome is threaded out of `runContainer` alongside
+  `failureKind` because the kind alone cannot express it: `container_crash` is
+  assigned to every non-zero exit with no `result.json`, including an agent that
+  died mid-review. See "Blocked by red" in `docs/concepts.md`.
 - Otherwise, primary status follows the step's `gate`:
   - `gate: auto` ⇒ `complete` (specialist verdicts are advisory only — recorded
     but don't block)

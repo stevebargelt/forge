@@ -23,6 +23,12 @@
 //     runContainer's container-crash branch was the only one of its three `failed`
 //     returns that dropped `failureKind`, so at runOneRed a container_crash was
 //     indistinguishable from any other dispatch failure.
+//   • `failureKind` alone is NOT the distinction. `container_crash` is assigned to
+//     every non-zero exit with no result.json, which includes a red that started,
+//     reviewed, and died before writing its result — that one produced a real (if
+//     lost) review and keeps its ordinary non-blocking inconclusive. The channel is
+//     keyed on the container START outcome, threaded alongside it; B5 below is the
+//     case that separates the two.
 //
 // AC 5 asserts BOTH directions, and the second is what keeps this from being a
 // blanket "any red failure blocks": a genuine reviewed-but-undecided `inconclusive`
@@ -38,6 +44,7 @@ import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { tasksForRun } from "../store/tasks.js";
 import { verdictsForRun } from "../store/verdicts.js";
 import { eventsForRun } from "../store/events.js";
+import { failureKindForTask } from "./failure-kind.js";
 import { startRun } from "./startRun.js";
 import { runNext, type DockerExecFn } from "./runNext.js";
 import type { Workflow } from "./schema.js";
@@ -165,9 +172,15 @@ function taskIdFromDockerArgs(args: string[]): string {
 const PRIMARY_RESULT = { status: "complete", tests_run: 1, files_modified: [], commitSha: "deadbeef" };
 
 /** Drives one wave. `redBehavior` decides what the red's container does — the whole
- *  point of the file is that "crashed before producing anything" and "ran and
- *  returned inconclusive" must land differently. */
-async function runWithRed(redBehavior: { exitCode: number; result?: unknown }) {
+ *  point of the file is that "never started", "started and died with nothing" and
+ *  "ran and returned inconclusive" must land differently.
+ *
+ *  `startsContainer` is the fact the channel is actually keyed on: the fake reports
+ *  a real container start (`signalsContainerStart` + `onContainerStarted`) exactly
+ *  like the production detached executor, which fires the callback only once
+ *  `docker run -d` has succeeded. A mount failure — FG-628's live crash — fails
+ *  before that point and never fires it. */
+async function runWithRed(redBehavior: { exitCode: number; result?: unknown; startsContainer?: boolean }) {
   const projectDir = makeTmpDir();
   const { runId } = startRun({
     workflow: WORKFLOW_SPECIALIST_RED,
@@ -176,25 +189,28 @@ async function runWithRed(redBehavior: { exitCode: number; result?: unknown }) {
     projectDir,
   });
 
-  const exec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+  const exec: DockerExecFn = async ({ args, stdoutPath, stderrPath, onContainerStarted }) => {
     const taskId = taskIdFromDockerArgs(args);
     const dir = dirname(stdoutPath);
     mkdirSync(dir, { recursive: true });
     writeFileSync(stdoutPath, "");
     writeFileSync(stderrPath, "");
     if (taskId.startsWith("task-build-")) {
+      onContainerStarted?.();
       writeFileSync(join(dir, "result.json"), JSON.stringify(PRIMARY_RESULT));
       return 0;
     }
-    // The red. A container that crashes before its agent runs writes NO
-    // result.json — that combination (non-zero exit, no result) is exactly what
-    // the docker mount failure produces, and it is what classify() reads as
+    // The red. A container that never starts writes NO result.json — that
+    // combination (no start signal, non-zero exit, no result) is exactly what the
+    // docker mount failure produces, and the exit half is what classify() reads as
     // container_crash.
+    if (redBehavior.startsContainer !== false) onContainerStarted?.();
     if (redBehavior.result !== undefined) {
       writeFileSync(join(dir, "result.json"), JSON.stringify(redBehavior.result));
     }
     return redBehavior.exitCode;
   };
+  exec.signalsContainerStart = true;
 
   const wave = await runNext({ runId, workflow: WORKFLOW_SPECIALIST_RED, dockerExec: exec });
   return { runId, wave };
@@ -204,8 +220,8 @@ const CRASH_SUMMARY_MARKER = "never ran";
 
 // ─── (B1) direction one: a crashed red BLOCKS, orthogonally to authority ──────
 
-test("(fg628-B1) a SPECIALIST red whose container crashed before producing a verdict BLOCKS — the panel is incomplete regardless of rank", async () => {
-  const { runId, wave } = await runWithRed({ exitCode: 1 });
+test("(fg628-B1) a SPECIALIST red whose container never started BLOCKS — the panel is incomplete regardless of rank", async () => {
+  const { runId, wave } = await runWithRed({ exitCode: 1, startsContainer: false });
 
   assert.ok(
     !wave.completedSteps.includes("build"),
@@ -295,6 +311,42 @@ test("(fg628-B3) a red that RAN and passed advances the phase — the new channe
   assert.equal(verdict!.findings.length, 0, "a clean pass must carry no synthetic findings");
 });
 
+// ─── (B5) the START boundary: a crash AFTER the container came up is unchanged ─
+
+test("(fg628-B5) a red whose container STARTED and then crashed with no result still ingests as a NON-blocking inconclusive", async () => {
+  // Same failure_kind as B1 (`container_crash`: non-zero exit, no result.json) and
+  // the same recorded verdict — the ONLY difference is that this container really
+  // started, so the claim "never ran" would be false. Keying the channel on
+  // failure_kind alone blocks here too, and this test is the one that catches it.
+  const { runId, wave } = await runWithRed({ exitCode: 1, startsContainer: true });
+
+  const primary = tasksForRun(runId).find((t) => t.agentRole === "engineer" && t.parentId === undefined);
+  assert.ok(
+    wave.completedSteps.includes("build"),
+    "build MUST complete — a red that started and died mid-review keeps its pre-FG-628 non-blocking inconclusive",
+  );
+  assert.equal(primary!.status, "complete");
+
+  const redTask = tasksForRun(runId).find((t) => t.agentRole === "red-wide" && t.parentId !== undefined);
+  assert.equal(
+    failureKindForTask(redTask!.id),
+    "container_crash",
+    "non-vacuity: this really is the same failure_kind B1 blocks on — only the start outcome differs",
+  );
+
+  const verdict = verdictsForRun(runId).find((v) => v.redRole === "red-wide");
+  assert.equal(verdict!.verdict, "inconclusive");
+  assert.ok(
+    !verdict!.findings.some((f) => f.summary.includes(CRASH_SUMMARY_MARKER)),
+    `a container that started must never be reported as "never ran"; got ${JSON.stringify(verdict!.findings)}`,
+  );
+  assert.equal(
+    eventsForRun(runId).find((e) => e.eventType === "verdict.review_never_ran"),
+    undefined,
+    "verdict.review_never_ran must not fire for a container that started",
+  );
+});
+
 // ─── (B4) the event and the block it describes are one transition ────────────
 
 // FG-482's invariant applied to this channel: the timeline must never claim a red
@@ -315,7 +367,7 @@ test("(fg628-B4) a failed verdict insert leaves NO verdict.review_never_ran even
   `);
 
   await assert.rejects(
-    () => runWithRed({ exitCode: 1 }),
+    () => runWithRed({ exitCode: 1, startsContainer: false }),
     /forced failure for fg628 ordering test/,
     "runNext must propagate the forced insertVerdict failure",
   );
