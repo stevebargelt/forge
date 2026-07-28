@@ -12,13 +12,16 @@ phrase guard test was deleted (operator decision: it pinned superseded English, 
 
 **Picked up next:**
 
-1. **Evidence-led review Changes 1–3 decomposition — awaiting operator review.** Proposed 2026-07-28
-   as three serial tickets (ledger → coordinator → authority/migration), per the PRD's own "do not
-   create additional implementation children" rule. Tickets NOT filed, no implementation authorized,
-   until the operator approves. FG-541 must be folded into or superseded by Change 3 (PRD migration
-   safety) — flagged in the proposal.
-2. **FG-608 (FG-496 Slice C)** — next implementation item under the current plan unless the approved
-   decomposition establishes a concrete dependency requiring otherwise.
+1. **FG-608 (FG-496 Slice C)** — the next implementation item. The approved decomposition established
+   no dependency displacing it.
+2. **Evidence-led review decomposition APPROVED and FILED: FG-638 → FG-639 → FG-640 (strictly
+   serial).** Operator amendments applied: PRD scenarios #2/#3/#10 live in FG-639 (FG-638 proves only
+   persistence capability); FG-638 requires `duplicate` to cite its canonical finding ID and specifies
+   the operator-authority mechanism (`--operator` flag → `decided_by: operator` + event, the existing
+   gate/raci confirm pattern); FG-640 carries the REQUIRED FG-541 evidence mapping (local-only fixer
+   commits, no silent publication of unrelated work, exact-head CI, trusted-tip equality). FG-541 is
+   annotated folded-into/blocked-on FG-640 — superseded only when that mapping is durable.
+   **Implementation NOT started — dispatch not yet authorized.**
 3. **Non-ticket thread — rotate the leaked Docker Hub token** (carried from last session, still
    presumed unrotated). hub.docker.com → Account Settings → Personal access tokens. Do not file a
    ticket; do not lose it.

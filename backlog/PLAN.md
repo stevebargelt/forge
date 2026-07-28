@@ -33,20 +33,18 @@ review policy are done and in force.
 
 ## Now
 
-1. **Evidence-led review Changes 1–3 decomposition** — proposed to the operator for review
-   (2026-07-28); tickets are NOT filed and no implementation is authorized until the operator approves
-   the decomposition. Per the PRD, the split is the three Changes only — no further children until a
-   boundary proves it cannot ship together.
-2. **FG-608 — FG-496 Slice C:** make the DB backlog authoritative per project, migrate seam-bypassing
-   readers, and provide containers the live read-only project-scoped backlog authority. Next
-   implementation item unless the approved decomposition establishes a concrete dependency requiring
-   otherwise.
+1. **FG-608 — FG-496 Slice C:** make the DB backlog authoritative per project, migrate seam-bypassing
+   readers, and provide containers the live read-only project-scoped backlog authority. The next
+   implementation item; the evidence-led decomposition established no dependency displacing it.
 
 ## Next
 
-1. **Evidence-led review program — reserved position:** after the operator approves the decomposition,
-   replace this placeholder with the filed ticket IDs and their dependency order before dispatching any
-   Changes 1–3 work.
+1. **Evidence-led review program — FG-638 → FG-639 → FG-640, strictly serial** (decomposition
+   approved with amendments 2026-07-28; filed; implementation NOT yet authorized to start):
+   FG-638 (Change 1: durable ledger + read surfaces, no gate change) → FG-639 (Change 2: staged
+   coordinator, `forge review` pilot, `feature` not migrated) → FG-640 (Change 3: `review_disposition`
+   gate + `feature` migration + review-loop deprecation; carries the required FG-541 evidence mapping —
+   FG-541 is annotated folded-into/blocked-on FG-640, superseded only when that mapping is durable).
 2. **FG-609 — FG-496 Slice D:** queue rank, membership, revision-bound readiness, blocker evidence, and
    event-history primitives.
 3. **FG-610 — FG-496 Slice E:** atomic claims, leases, recovery, capacity accounting, and canonical

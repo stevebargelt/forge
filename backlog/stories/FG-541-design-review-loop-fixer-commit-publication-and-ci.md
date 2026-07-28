@@ -17,11 +17,7 @@ it creates no fixer commit to publish. In the target lifecycle, immutable
 FixBatch delivery, deterministic verification, trusted-tip equality, and
 publication receipts own the relevant handoff and authority instead.
 
-If the PRD is confirmed, fold this ticket's evidence and honest `local_only`
-requirements into that implementation or mark FG-541 superseded with an
-explicit evidence mapping. Do not silently close it. Until that decision, only
-correctness, recovery, or evidence-preservation fixes to the legacy loop are in
-scope; no new push authority should be added under FG-541.
+**DECIDED (operator, 2026-07-28): FOLDED INTO / BLOCKED ON FG-640.** The PRD is confirmed; Change 0 (interim policy) is active; the implementation decomposition is FG-638 → FG-639 → FG-640. FG-640 carries a REQUIRED evidence mapping for this ticket’s requirements — local-only fixer commits, no silent publication of unrelated work, exact-head CI, trusted-tip equality — each row citing the shipped enforcing mechanism. Do NOT design or implement FG-541 independently. Mark it superseded ONLY once that mapping is durable (every requirement mapped to a shipped mechanism with evidence), not merely because FG-640 was filed. Until then, only correctness, recovery, or evidence-preservation fixes to the legacy loop are in scope; no new push authority under FG-541.
 
 ## Problem
 
