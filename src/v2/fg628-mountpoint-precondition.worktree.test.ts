@@ -37,7 +37,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
@@ -620,6 +620,132 @@ test("FG-628 (A5): a checkout forge cannot write into records dependency_mountpo
   // Never a block: the dispatch reaches its normal outcome without the cache.
   const primary = tasksForRun(runId).find((t2) => t2.phase === "build" && t2.parentId === undefined);
   assert.equal(primary!.status, "complete", "an unmountable checkout must not fail the run");
+});
+
+// ─── (6) a workspace member that SYMLINKS out of the checkout ─────────────────
+
+// The member paths are derived from the tree's own package.json `workspaces`, so
+// the tree gets a say in where forge writes. isSafeWorkspacePath is lexical and
+// clears "dashboard" — the escape is a symlink at an intermediate component, which
+// no string check can see. Following it would put a `node_modules` OUTSIDE the
+// checkout, and "the only thing created is an empty directory inside an already-
+// gitignored path in the tree being bound" is the entire argument for creating
+// mountpoints in an operator's live checkout rather than refusing at preflight.
+// Both halves are asserted: nothing is created outside, AND the dispatch degrades
+// the same way an unwritable checkout does (A5) instead of crashing.
+
+/** makeRootOnlyInstallRepo, except the declared workspace member is a committed
+ *  SYMLINK to a directory in a different tmp tree. Returns both ends so the test
+ *  can assert against the escape target directly. */
+function makeEscapingMemberRepo(): { repo: string; outsideMember: string } {
+  const dir = makeTmpDir();
+  const outside = makeTmpDir();
+  const outsideMember = join(outside, MEMBER);
+  mkdirSync(outsideMember, { recursive: true });
+  writeFileSync(
+    join(outsideMember, "package.json"),
+    JSON.stringify({ name: "@fg628/dashboard", version: "1.0.0" }, null, 2) + "\n",
+  );
+
+  git(dir, ["init", "-b", "main"]);
+  git(dir, ["config", "user.email", "test@forge.test"]);
+  git(dir, ["config", "user.name", "Forge Test"]);
+  symlinkSync(outsideMember, join(dir, MEMBER));
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({ name: "fg628", private: true, workspaces: [MEMBER] }, null, 2) + "\n",
+  );
+  writeFileSync(
+    join(dir, "package-lock.json"),
+    JSON.stringify({ name: "fg628", lockfileVersion: 3, packages: {} }, null, 2) + "\n",
+  );
+  writeFileSync(join(dir, ".gitignore"), "node_modules/\n");
+  git(dir, ["add", "."]);
+  git(dir, ["commit", "-m", "initial"]);
+  mkdirSync(join(dir, "node_modules"), { recursive: true });
+  writeFileSync(join(dir, "node_modules", ".package-lock.json"), "{}\n");
+  return { repo: dir, outsideMember };
+}
+
+test("FG-628 (A6): a workspace member symlinked out of the checkout creates NOTHING outside it", () => {
+  const { repo, outsideMember } = makeEscapingMemberRepo();
+
+  // Non-vacuity: the plan really does name this member, so the mountpoint really
+  // would have been created had the containment check not refused.
+  assert.ok(
+    planDependencyVolumes(repo, repo).volumes.some((v) => v.containerPath === join(repo, MEMBER, "node_modules")),
+    "the plan for this fixture must name the escaping member — otherwise this test proves nothing",
+  );
+
+  // Ordered deliberately: the escape target is checked FIRST and unconditionally,
+  // so this test fails on the WRITE rather than on the missing exception. Whatever
+  // a future version does about the refusal, creating that directory is the defect.
+  let refusal: unknown;
+  try {
+    createDependencyMountpoints(repo);
+  } catch (e) {
+    refusal = e;
+  }
+  assert.equal(
+    existsSync(join(outsideMember, "node_modules")),
+    false,
+    `nothing may be created at ${join(outsideMember, "node_modules")} — that is outside the tree forge intended to write to`,
+  );
+  assert.match(
+    String((refusal as Error | undefined)?.message ?? ""),
+    /outside/,
+    "a member that resolves out of the tree must refuse, not be followed",
+  );
+});
+
+test("FG-628 (A6b): the escaping member degrades the dispatch — no cache mount, no crash", async () => {
+  setPlatform("darwin");
+  process.env.FORGE_NO_WORKTREES = "1";
+
+  const { repo, outsideMember } = makeEscapingMemberRepo();
+  // As in A5: readiness is keyed on the lockfile, so it already authorizes the
+  // mount into a tree that cannot host one.
+  markDependencyCacheReady(lockfileHash(repo));
+
+  let redArgs: string[] | undefined;
+  let redTaskId: string | undefined;
+
+  const stubExec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+    const taskId = extractTaskId(args);
+    writeFileSync(stderrPath, "");
+    if (taskId.startsWith("provision-")) return 0;
+    if (taskId.startsWith("task-red-")) {
+      redArgs = args;
+      redTaskId = taskId;
+      writeTaskResult(stdoutPath, PASS_VERDICT);
+      return 0;
+    }
+    writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, files_modified: [] });
+    return 0;
+  };
+
+  const { runId } = startRun({ workflow: WORKFLOW, title: "fg628 A6b", inputs: {}, projectDir: repo });
+  await runNext({ runId, workflow: WORKFLOW, dockerExec: stubExec });
+
+  assert.ok(redArgs !== undefined, "the read-only reviewer must still have been dispatched — the refusal never blocks");
+
+  const unavailable = eventsForRun(runId).filter((e) => e.eventType === "container.dependency_mountpoints_unavailable");
+  assert.equal(unavailable.length, 1, "the refusal must be observable on the timeline, not silent");
+  assert.equal(unavailable[0]!.taskId, redTaskId, "the event must be attributed to the reviewer's task");
+  const payload = unavailable[0]!.payload as { repoRoot?: string; error?: string };
+  assert.equal(payload.repoRoot, repo, "the event must name the tree that would have been bound");
+  assert.match(String(payload.error), /outside/i, `the escape must be carried as the reason; got: ${payload.error}`);
+
+  // The skip and the mount decision stay consistent: a skipped member whose volume
+  // was mounted anyway is the container_crash this ticket closed.
+  const dependencyMounts = redArgs!.filter((a, i) => redArgs![i - 1] === "-v" && a.includes("node_modules"));
+  assert.deepEqual(dependencyMounts, [], `no dependency-cache volume may be mounted; got ${JSON.stringify(dependencyMounts)}`);
+  assert.equal(projectMount(redArgs!)!.mode, "ro", "the reviewer's project mount stays read-only");
+
+  assert.equal(existsSync(join(outsideMember, "node_modules")), false, "no directory was created outside the checkout");
+
+  const primary = tasksForRun(runId).find((t) => t.phase === "build" && t.parentId === undefined);
+  assert.equal(primary!.status, "complete", "an escaping member must not fail the run");
 });
 
 /** Whether this process can actually create a directory under `dir` — root ignores
