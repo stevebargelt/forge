@@ -44,8 +44,9 @@ open defect.
 - **ntfy delivery is failing** (`network: fetch failed`). Milestone events record fine but nothing
   reaches the phone — two went undelivered this session (`risk_found`, `shipped`). Non-ticket thread;
   check the endpoint before relying on notifications for an unattended run.
-- **`docs/prds/evidence-led-review-lifecycle.md` is untracked in `~/code/forge` and is not mine.**
-  Left alone deliberately. Decide whether to commit or delete it.
+- **`docs/prds/evidence-led-review-lifecycle.md` has a committed baseline at
+  `84a36a7`.** Later advisor/operator refinements are currently uncommitted
+  working-tree changes; preserve them as intentional WIP.
 - `~/code/forge-fg356` is reset to merged `main`, clean. Its `dashboard/node_modules` was created by
   hand as the FG-628 workaround — leave it until FG-628 lands, or reds will crash there again.
 - Publication candidates are retained on failure and now carry a full installed `node_modules` (that

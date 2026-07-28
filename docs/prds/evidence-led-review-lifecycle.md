@@ -1,10 +1,12 @@
 # PRD — Evidence-Led Review Lifecycle
 
-**Status:** draft for operator discussion
+**Status:** confirmed; ready for implementation decomposition
 
 **Date:** 2026-07-27
 
-**Backlog linkage:** none yet. Confirm this PRD before decomposing implementation work.
+**Last revised:** 2026-07-28
+
+**Backlog linkage:** implementation decomposition pending
 
 ## Objective
 
@@ -17,7 +19,8 @@ evidence-led review lifecycle:
 4. one batch fix for findings accepted as current scope;
 5. documentation reconciliation;
 6. deterministic verification of the final candidate;
-7. exact recheck of the accepted finding IDs;
+7. exact recheck of the accepted finding IDs plus bounded review of the
+   remediation delta;
 8. shipping review against acceptance criteria and the settled ledger.
 
 Adversarial reviewers remain an important source of evidence. They stop being
@@ -28,14 +31,17 @@ has stable identity, provenance, disposition, and closing evidence, and where
 the stop condition is derived from that durable state rather than from a later
 reviewer happening to return `pass`.
 
-## Decisions this draft asks the operator to confirm
+## Confirmed decisions
 
 1. Discipline reds are advisory evidence producers; ledger disposition is the
    blocking authority.
 2. Review performs one discovery pass, batches all current `fix_now` findings,
-   and exactly rechecks those IDs. New evidence returns to disposition, never
-   an automatic discovery/fix loop.
-3. The plan gate approves the review contract and threat model before discovery.
+   exactly rechecks those IDs, and inspects the bounded post-discovery delta
+   for regressions. New evidence returns to disposition, never an automatic
+   discovery/fix loop.
+3. The plan gate approves the review contract and threat model. Forge confirms
+   that the final implementation surface is still plausibly covered by that
+   contract immediately before discovery; material drift requires amendment.
 4. Among model review roles, only shipping review remains directly
    authoritative, and only for explicit
    acceptance/evidence/ledger/identity checks.
@@ -43,6 +49,9 @@ reviewer happening to return `pass`.
    one is `accepted_risk`, not an invisible deferral.
 6. `feature` is the first migrated workflow; legacy verdict gates remain intact
    until the new path is proven.
+7. Each run persists exactly one review mode. Legacy verdict gates,
+   `review-loop`, and the evidence-led lifecycle may coexist during migration,
+   but their authority models are never combined within one run.
 
 ## Why this is needed
 
@@ -110,14 +119,20 @@ Removing adversarial review would discard a real Forge advantage.
    provenance to it.
 5. **Fix accepted findings as a set.** The implementation unit is the coherent
    change, not one finding per stochastic round.
-6. **Recheck known claims exactly.** New discovery during recheck is allowed but
-   enters disposition as new work.
+6. **Recheck known claims exactly and inspect what fixed them.** Recheck every
+   accepted finding ID and review the bounded candidate delta created after
+   discovery. New findings enter disposition as new work.
 7. **Gate on settled state, not historical raw verdicts.**
 8. **Reviewer selection follows declared risk.** Every feature does not need
    every discipline red.
 9. **Deterministic checks run before model review.** Do not spend reviewer
    tokens explaining a typecheck or test failure.
-10. **The dashboard must show the review object a human actually manages.**
+10. **The durable review is the managed object.** The coordinator, CLI, API,
+    and dashboard operate on the same review state; humans see and manage it
+    when authority or intervention is required.
+11. **A selected lens must actually run.** Advisory authority does not make a
+    selected review optional. A missing or synthetic lens outcome is
+    incomplete evidence, not a clean panel.
 
 ## Authority model
 
@@ -135,6 +150,15 @@ Their findings may ultimately block shipping, but only through the disposition
 and ledger-closure rules below. Their raw verdict does not directly write
 `blocked_by_red`.
 
+Demoting a discipline red to specialist does not weaken lens completeness.
+Every lens selected in the review contract must produce a schema-valid,
+reviewer-authored discovery result for the confirmed candidate. A reviewer may
+author `pass`, `fail`, or `inconclusive`; a crash, timeout, OOM, model error,
+missing result, malformed result, or synthesized fallback does not count as
+completed discovery. This expected-set rule carries FG-628's fail-closed
+artifact invariant into the new authority model instead of reopening its
+specialist-crash hole.
+
 ### Disposition authority
 
 Forge distinguishes routine engineering disposition from product/policy
@@ -142,6 +166,8 @@ authority:
 
 - The orchestrator may choose `fix_now`, `duplicate`, or `rejected_premise`
   when evidence and existing policy make the answer mechanical.
+  `rejected_premise` requires candidate-bound evidence that disproves the
+  finding's premise; a rationale alone is insufficient.
 - The orchestrator may choose `deferred` only when it can name an existing
   durable destination or the operator has authorized a new one. Forge does not
   automatically file a ticket for every low finding.
@@ -154,12 +180,16 @@ authority:
 
 ### Shipping reviewer
 
-The shipping reviewer remains authoritative, but its authority is narrowed to:
+The shipping reviewer remains authoritative. This mostly formalizes duties its
+current seed already performs, while narrowing free-form late finding
+authority to:
 
 - mapping every ticket acceptance criterion to evidence;
 - confirming required verification exists for the reviewed candidate;
 - confirming every ledger finding is settled under policy;
 - confirming candidate, gate, receipt, and publication identity are continuous;
+- confirming the final diff remains plausibly covered by the confirmed review
+  contract and declared risk lenses;
 - reporting documentation or closeout gaps explicitly required by the ticket.
 
 A free-form new concern from the shipping reviewer becomes a ledger finding
@@ -188,6 +218,27 @@ The plan gate persists a small review contract before code review begins:
 The exact schema is validated and persisted with the review. It is not
 reconstructed from prompts after the fact.
 
+The plan gate approves the initial contract. Immediately before discovery,
+Forge presents the final implementation diff and affected surface for a
+lightweight contract confirmation. The coordinator:
+
+- confirms an unchanged contract when its declared lenses still plausibly
+  cover the implementation;
+- may add risk lenses, recording the diff evidence and reason for widening;
+- returns to the original approving authority before removing a lens or
+  changing `threat_model`, `protected_invariants`, `acceptance_refs`, or
+  `non_goals`; and
+- returns to plan/architecture rather than guessing when it cannot classify
+  material drift safely.
+
+This widening asymmetry keeps an unchanged autonomous run moving while ensuring
+the coordinator can broaden review coverage but cannot silently weaken the
+approved contract.
+
+This is not a file-path classifier and does not rerun architecture. It prevents
+a plan labeled "backend" from silently reaching discovery after growing a
+frontend, runtime, or security-sensitive surface that its lenses do not cover.
+
 ### Required fields
 
 - `threat_model`: a named trust posture, with prose available in the ticket or
@@ -209,6 +260,9 @@ considered only after this lifecycle produces trustworthy measurements.
 verified candidate
       |
       v
+confirming review contract
+      |
+      v
 discovering
       |
       v
@@ -228,7 +282,7 @@ docs reconciliation
 verifying final candidate
       |
       v
-rechecking known finding IDs
+rechecking known finding IDs + remediation delta
       |
       +---- still present/new finding -> awaiting_disposition
       |
@@ -253,10 +307,24 @@ and no review cycle is consumed.
 If verification fails, stop on the deterministic failure. It is not converted
 into a red finding.
 
-### Stage 2 — discovery
+### Stage 2 — contract confirmation and discovery
+
+Confirm the approved review contract against the final implementation diff and
+persist the confirmed candidate SHA. The coordinator may confirm an unchanged
+contract or add lenses with recorded evidence. Removing a lens or changing any
+other contract boundary requires the original approving authority. Uncertain
+or scope-changing drift returns to plan/architecture. The coordinator does not
+infer lenses mechanically from paths.
 
 Run the selected risk lenses in parallel, read-only, against one recorded
-candidate SHA and one review contract.
+candidate SHA and one confirmed review contract. Discovery is complete only
+when every selected lens has a schema-valid, reviewer-authored outcome.
+Reviewer-authored `inconclusive` is valid evidence that must be dispositioned;
+a synthesized result for an infrastructure or output failure is not completion.
+Forge normalizes an authored `inconclusive` into an untriaged
+`lens_inconclusive` finding. Missing or synthetic outcomes remain an
+expected-lens completeness failure; any authorized acceptance of that missing
+evidence attaches to the named lens rather than pretending a review occurred.
 
 The discovery prompt requires every finding to state:
 
@@ -298,17 +366,27 @@ Every new finding begins `untriaged`. It must receive exactly one disposition:
 Disposition records who decided, when, against which candidate, and why.
 
 `fix_now` findings are the only findings sent to the fixer. `accepted_risk`,
-`deferred`, `rejected_premise`, and `duplicate` are settled when their required
-rationale/linkage is present. `architecture_question` leaves the review
+`deferred`, `rejected_premise`, and `duplicate` are settled only when their
+required authority, rationale, linkage, and evidence are present.
+`rejected_premise` must cite candidate-bound disproving evidence such as a
+replayed command and output, a deterministic reproduction, or an anchored fact
+that contradicts the premise. `architecture_question` leaves the review
 unsettled until the contract or finding is dispositioned by the appropriate
 authority.
 
 ### Stage 5 — batch fix
 
-One fixer receives all `fix_now` findings in a structured payload:
+Forge persists an immutable, revisioned `FixBatch` containing every current
+`fix_now` finding. One fixer is dispatched with the batch ID and a verified
+delivery snapshot; the persisted batch, not an assembled prose brief, is the
+authoritative handoff.
+
+The logical payload is:
 
 ```json
 {
+  "fix_batch_id": "fix-batch-...",
+  "revision": 1,
   "review_id": "review-...",
   "candidate_sha": "...",
   "findings": [
@@ -321,6 +399,9 @@ One fixer receives all `fix_now` findings in a structured payload:
   ]
 }
 ```
+
+Appendix A sketches the storage and delivery mechanism. It is deliberately
+review-specific; this PRD does not require a general agent messaging platform.
 
 The fixer is instructed to solve the set coherently and report, per finding:
 
@@ -347,25 +428,59 @@ documentation changes. A failing verification is a deterministic
 code/environment outcome, not a reviewer opinion. It stops the lifecycle
 before recheck.
 
-### Stage 8 — exact recheck
+### Stage 8 — exact recheck and remediation-regression review
 
-The rechecker receives every `fix_now` finding ID and its original evidence.
-When discovery produced no `fix_now` findings, this stage is a no-op rather
-than a second discovery pass.
+The rechecker receives:
+
+- every `fix_now` finding ID and its original evidence;
+- the fixer's per-finding evidence;
+- the confirmed discovery SHA and final candidate SHA;
+- the complete delta between those SHAs, including documentation-phase changes;
+- the confirmed review contract.
+
+One dedicated `review-rechecker` role performs this stage. It receives each
+finding's source lens and applicable lens instructions in addition to the full
+contract, so exact recheck and delta review remain risk-aware without
+redispatching the original discovery panel. When it cannot establish a
+domain-specific claim, it returns `inconclusive` or a new finding to
+disposition; it does not silently launch another sampling cycle.
+
+It performs two bounded jobs: exact recheck of every known finding ID, and
+discovery over the post-discovery delta plus directly adjacent production paths
+needed to understand that delta. It does not resample the whole repository.
+When discovery produced no `fix_now` findings and the candidate has not changed,
+this stage is a no-op. Any post-discovery candidate change still receives the
+bounded delta review.
+
 For each ID it must return:
 
 ```json
 {
   "finding_id": "RF-104",
   "result": "resolved | still_present | inconclusive",
+  "evidence_kind": "regression_test | replayed_reproduction | anchored_verification | bounded_inspection",
   "evidence": "..."
 }
 ```
 
 Omission is a schema failure, never resolution.
 
-The rechecker may also return `new_findings`. New findings enter the ledger as
-`untriaged`; they do not automatically dispatch another fixer. A new
+Resolution evidence is proportional to the finding's original reachability:
+
+- `demonstrated` requires a named regression test, replayed reproduction, or
+  equivalent deterministic proof;
+- `supported` requires anchored contradictory evidence plus a relevant
+  verification step;
+- `speculative` may be resolved by bounded inspection with its limitation
+  explicit.
+
+The rechecker verifies this evidence; it does not merely repeat the fixer's
+claim. If the required proof is unavailable, the result is `inconclusive`
+unless the appropriate authority explicitly accepts the limitation.
+
+The rechecker returns `new_findings` discovered in the bounded remediation
+delta. New findings enter the ledger as `untriaged`; they do not automatically
+dispatch another fixer. A new
 demonstrably reachable violation of an explicit invariant returns immediately
 to disposition. Lower-confidence observations are still recorded and
 dispositioned, but do not acquire blocking force from lateness alone.
@@ -380,7 +495,9 @@ Shipping review checks:
 3. every finding is settled;
 4. every `fix_now` finding is explicitly `resolved`;
 5. the reviewed SHA equals the trusted remote head;
-6. candidate/gate/receipt/publication identity remains continuous.
+6. candidate/gate/receipt/publication identity remains continuous;
+7. the final diff remains plausibly covered by the confirmed review contract,
+   with any post-confirmation drift reviewed or returned for amendment.
 
 `unmet` or `unproven` acceptance criteria block shipping. New free-form
 findings return to disposition.
@@ -388,7 +505,8 @@ findings return to disposition.
 ## Persistence model
 
 Raw verdicts remain immutable in the existing `verdicts` table for provenance.
-Add two tables.
+Persist `review_mode` on the run or workflow execution so legacy runs without a
+`reviews` row still have one unambiguous authority model. Add two review tables.
 
 ### `reviews`
 
@@ -399,15 +517,28 @@ Suggested fields:
 - `ticket_id`
 - `base_sha`
 - `candidate_sha`
+- `contract_confirmed_sha`
 - `trusted_remote_sha`
 - `contract_json`
+- `lens_outcomes_json`
+- `review_mode` — copied from the run for convenient read surfaces
 - `state`
 - `created_at`
 - `updated_at`
 - `settled_at`
 
+SHA semantics:
+
+- `base_sha` is the implementation comparison base;
+- `contract_confirmed_sha` is the frozen anchor reviewed by discovery;
+- `candidate_sha` is the mutable current candidate as remediation and
+  documentation changes land;
+- `trusted_remote_sha` is the fetched remote identity used for final
+  trusted-tip equality.
+
 Review states:
 
+- `confirming_contract`
 - `discovering`
 - `awaiting_disposition`
 - `fixing`
@@ -439,9 +570,11 @@ Suggested fields:
 - `sources_json` — raw verdict/reviewer provenance
 - `disposition`
 - `disposition_rationale`
+- `disposition_evidence`
 - `decided_by`
 - `followup_ticket_id`
 - `resolution`
+- `resolution_evidence_kind`
 - `resolution_evidence`
 - `discovered_sha`
 - `resolved_sha`
@@ -464,9 +597,14 @@ Introduce a `review_disposition` gate backed by ledger state.
 
 It blocks when:
 
+- any risk lens selected by the confirmed contract lacks a schema-valid,
+  reviewer-authored discovery outcome for the confirmed candidate;
 - any finding is `untriaged`;
 - any finding is `architecture_question`;
+- any `rejected_premise` lacks candidate-bound disproving evidence;
 - any `fix_now` finding lacks `resolved` recheck evidence at the current SHA;
+- any `fix_now` resolution lacks the evidence required for its original
+  reachability;
 - deterministic verification is absent or red;
 - shipping review reports an unmet/unproven acceptance criterion;
 - reviewed-tip trust is not equality with the fetched remote head.
@@ -475,8 +613,13 @@ It does not block on:
 
 - a raw advisory red `fail` whose findings have been dispositioned;
 - `accepted_risk`, `deferred`, `rejected_premise`, or `duplicate` findings with
-  the required rationale/linkage;
+  the required authority, rationale, linkage, and evidence;
 - historical verdicts against superseded SHAs.
+
+An absent lens may be cleared only by retrying it, amending the review contract
+through the same authority that approved it, or recording an authorized risk
+acceptance that names the missing evidence. A routine finding disposition
+cannot make an expected lens disappear.
 
 Legacy workflows retain current `verdict` gate and `blocked_by_red` behavior
 during migration. Evidence-led workflows use `awaiting_gate` with the explicit
@@ -497,14 +640,14 @@ forge review disposition <finding-id> <decision> --rationale "..."
 forge review continue <review-id>
 ```
 
-`start` verifies and performs discovery, then stops at disposition when
-findings exist.
+`start` verifies, confirms the review contract against the final diff, and
+performs discovery, then stops at disposition when findings exist.
 
 `continue` drives the one valid next transition from durable state:
 
 - batch fix after disposition;
 - verification after a fix;
-- exact recheck after green verification;
+- exact recheck plus bounded remediation-delta review after green verification;
 - shipping review after ledger closure.
 
 It never repeats discovery automatically.
@@ -555,9 +698,14 @@ architect
   -> build
   -> test-engineer
   -> deterministic aggregate verification
-  -> evidence-led review lifecycle
+  -> final-diff review-contract confirmation
+  -> risk-targeted discovery + disposition
+  -> batch remediation when required
   -> docs
-  -> shipping review / publication
+  -> final deterministic verification
+  -> exact recheck + remediation-delta review
+  -> shipping review
+  -> publication
 ```
 
 Review should see the combined implementation and test changes, not only the
@@ -575,7 +723,8 @@ risk-routing syntax is future work only if another consumer needs it.
 
 - Reviewer crash: review becomes `failed` with no verdict inferred.
 - One discovery red crashes while others succeed: review is incomplete; retry
-  that role or disposition its absence explicitly. Do not call the panel clean.
+  that role, amend the contract through its approval authority, or record an
+  authorized acceptance of the missing evidence. Do not call the panel clean.
 - Fixer crash: preserve its workspace through existing retention rules and
   leave findings `fix_now`, unresolved.
 - Verification environment unavailable: `blocked_environment`; no model
@@ -586,6 +735,8 @@ risk-routing syntax is future work only if another consumer needs it.
 - Candidate changes out of band: invalidate recheck and shipping evidence;
   return to deterministic verification. Existing dispositions remain, but
   `fix_now` resolutions must be re-established when affected.
+- Candidate surface changes materially after contract confirmation: return to
+  contract confirmation before discovery or shipping, as appropriate.
 
 ## Out of scope
 
@@ -603,9 +754,24 @@ risk-routing syntax is future work only if another consumer needs it.
 
 ## Implementation sequence
 
+### Change 0 — activate the interim operating policy
+
+- update `docs/autonomous-run-prompt.md` and the orchestrator seed to require
+  one discovery pass, explicit disposition, one targeted batch fix, and one
+  known-finding plus fix-delta recheck;
+- stop requiring repeated open-ended `review-loop` execution in autonomous
+  runs;
+- retain legacy control-plane behavior until the evidence-led mode ships; this
+  is an operating-policy change, not an early implementation cutover.
+
+Change 0 precedes Change 1 and is independent of ledger code. The interim
+policy becomes active only when both authoritative sources agree.
+
 ### Change 1 — durable ledger and read surfaces
 
 - additive `reviews` and `review_findings` schema/migrations;
+- persisted review mode, confirmed contract SHA, and per-lens outcome
+  provenance;
 - store methods and lifecycle events;
 - ingestion of raw verdict findings with Forge-assigned IDs;
 - explicit disposition CLI;
@@ -618,12 +784,14 @@ This change does not alter gate behavior.
 
 - review-contract validation;
 - deterministic verification entry;
+- final-diff contract confirmation;
 - one discovery pass;
+- selected-lens completeness enforcement;
 - normalization/deduplication;
 - disposition stop;
 - one batch fixer;
 - guaranteed docs reconciliation;
-- exact-ID recheck;
+- exact-ID recheck plus bounded remediation-delta review;
 - shipping-review ledger/AC check;
 - `forge review start|continue`;
 - recovery from persisted stage.
@@ -636,12 +804,27 @@ Pilot through explicit `forge review`; do not migrate `feature` yet.
 - migrate `feature` from six authoritative build reds to the evidence-led
   lifecycle;
 - risk-targeted red selection;
-- narrow shipping-reviewer authority;
+- formalize the shipping reviewer's existing AC/evidence/path duties and narrow
+  free-form late finding authority;
 - update orchestrator, red, fixer, and review skills;
 - deprecate `review-loop` as the default.
 
 Do not create additional implementation children before these three prove an
 actual boundary that cannot ship together.
+
+### Migration safety
+
+- Persist exactly one `review_mode` per run:
+  `legacy_verdict`, `legacy_review_loop`, or `evidence_led`.
+- Never combine gate authority from two review modes in one run.
+- Keep the coexistence window short and migrate `feature` through an explicit
+  cutover rather than implicit command behavior.
+- Freeze new `review-loop` workflow investment during the migration except for
+  correctness, recovery, and evidence-preservation fixes. FG-541 must be
+  folded into or explicitly superseded by this lifecycle before independent
+  implementation.
+- Change 0 activates the interim policy before ledger implementation begins;
+  Change 3 replaces that temporary policy with the evidence-led default.
 
 ## Acceptance scenarios
 
@@ -678,6 +861,33 @@ actual boundary that cannot ship together.
     even when the ledger has no open findings.
 18. A clean ledger plus green deterministic verification and trusted-tip
     equality can advance without `--force`.
+19. A fixer retry receives the same immutable FixBatch revision and verified
+    payload hash; a changed disposition creates a new revision instead of
+    changing the running task's inputs.
+20. A fixer result that omits an expected finding ID or names a finding outside
+    its FixBatch is refused during host ingestion.
+21. One selected risk lens crashes while the others pass; the gate remains
+    blocked because no reviewer-authored outcome exists for that lens.
+22. A reviewer-authored `inconclusive` result counts as completed discovery but
+    remains evidence that must be dispositioned; a synthesized inconclusive
+    result does not count as completed discovery.
+23. The implementation surface drifts beyond the approved risk lenses before
+    discovery; Forge requires contract confirmation or amendment rather than
+    guessing from file paths.
+24. A fixer resolves every known finding but introduces a new reachable defect;
+    bounded review of the remediation delta creates a new ledger finding.
+25. `rejected_premise` without candidate-bound disproving evidence cannot
+    settle a finding.
+26. A demonstrated finding cannot be marked `resolved` solely from model
+    re-inspection; it requires deterministic resolution evidence or an
+    explicit authorized limitation.
+27. The final diff adds a risk-sensitive surface not covered by the approved
+    lenses; the coordinator may add the relevant lens with recorded evidence,
+    but cannot remove a lens or change the threat model without the original
+    approving authority.
+28. The dedicated rechecker cannot establish a domain-specific resolution; it
+    returns `inconclusive` to disposition rather than synthesizing closure or
+    launching another discovery panel.
 
 ## Interim operating policy
 
@@ -687,14 +897,18 @@ Until this lifecycle ships:
 - keep a manual finding ledger;
 - disposition findings before dispatching a fixer;
 - send all accepted findings to one targeted fixer;
-- recheck the known findings explicitly once;
+- recheck the known findings explicitly once and inspect the fix delta for
+  regressions;
 - treat a new finding as new disposition work, not an automatic loop;
 - never infer resolution from a finding not being re-raised;
 - do not let a red finding silently change the threat model or acceptance scope.
 
 `review-loop --max-rounds 1` can be used as a discovery-only stop, but its
 output is not a durable ledger and must not be represented as the finished
-model.
+model. This is advisory policy until `docs/autonomous-run-prompt.md` and the
+orchestrator seed are updated; both currently encode the legacy repeated-loop
+behavior and remain authoritative for autonomous runs. Change 0 performs that
+activation before ledger implementation begins.
 
 ## Reference architecture alignment
 
@@ -713,3 +927,97 @@ while adopting the strongest competitive lessons already recorded:
 The one justified new noun is the review ledger itself: it replaces the
 implicit state currently scattered across verdict JSON, task statuses,
 review-loop markdown notes, fixer commits, and operator memory.
+
+## Appendix A — Durable FixBatch storage and delivery
+
+This appendix is an implementation sketch for the Stage 5 handoff. The
+normative requirements are in the lifecycle above: a FixBatch is durable,
+immutable at a revision, candidate-bound, and delivered by ID with a verified
+snapshot.
+
+### Storage split
+
+Use SQLite for the two pieces of authoritative review-specific state that do
+not already exist:
+
+- `fix_batches`: ID, review ID, revision, candidate SHA, superseded batch ID,
+  immutable payload JSON, payload hash, and creation time;
+- `fix_batch_results`: batch ID, task ID, finding ID, result, structured
+  evidence, and references to existing task output files.
+
+The FixBatch payload contains the ordered finding membership; a separate join
+table is unnecessary for the first consumer. The FixBatch identity and payload
+do not change after creation. A changed disposition or candidate creates a new
+batch revision.
+
+Existing task rows and append-only events represent dispatch, consumption,
+completion, retry, and failure. Existing per-task input/output directories hold
+the immutable delivery snapshot and large evidence. SQLite stores paths and
+hashes needed to bind those files to the batch; this PRD does not introduce a
+second delivery ledger or a new global artifact store.
+
+### Container delivery
+
+Agents do not receive write access to the host control database. At dispatch,
+Forge materializes an immutable input bundle in the task input mount. Its
+envelope has this shape:
+
+```json
+{
+  "kind": "review_fix_batch",
+  "schema_version": 1,
+  "fix_batch_id": "fix-batch-...",
+  "revision": 1,
+  "review_id": "review-...",
+  "candidate_sha": "...",
+  "payload_sha256": "..."
+}
+```
+
+The bundle includes the structured finding set and references to any existing
+task files needed by the fixer. Forge verifies the materialized payload against
+the persisted hash before container start. The files are the delivery snapshot;
+SQLite remains authoritative for the batch.
+
+A FixBatch is intentionally not live-mutating. The fixer must see one stable
+scope for its lifetime. If the operator changes disposition while it runs, the
+existing task remains bound to its recorded revision and the coordinator
+creates a superseding revision for subsequent work.
+
+### Result ingestion
+
+The fixer writes `result.json` and optional evidence files only to its existing
+task output area. The host then:
+
+1. validates the result schema and batch identity;
+2. requires one result for every expected finding ID;
+3. rejects unknown, duplicate, or omitted finding IDs;
+4. stores structured results in SQLite;
+5. records paths and hashes for large evidence left in the task output area;
+6. records ingestion and completion events through the existing event log.
+
+Agents never update `fix_batches`, findings, dispositions, task rows, or events
+directly.
+
+### Retry and recovery semantics
+
+Delivery is at-least-once; durable application is idempotent. A retry of the
+same work references the same FixBatch revision and payload hash. Result
+ingestion is keyed by batch and task identity so repeating an ingest cannot
+apply the same result twice.
+
+An orchestrator crash resumes from the existing task row/event state and the
+persisted batch. It does not reconstruct the batch from a prior brief or
+reviewer output. A candidate change invalidates the batch for further dispatch
+and requires a new revision.
+
+### Deliberate boundary
+
+Do not introduce a generic `messages` table or real-time agent inbox for this
+PRD. The current workflow is coordinator-driven and pull-based; FixBatch is a
+domain object, not free-form chat.
+
+If a second concrete workflow needs durable post-dispatch communication,
+revisit a shared delivery table and content-addressed artifact store using
+measured payload and recovery needs. Until then, keep the implementation
+review-specific and reuse task storage and events.

@@ -1,6 +1,6 @@
 # Forge Working Plan
 
-**Last revised:** 2026-07-27
+**Last revised:** 2026-07-28
 
 This is a mutable statement of current operator intent. It is not an approval boundary, ticket
 specification, execution record, or source of lifecycle truth.
@@ -13,58 +13,54 @@ session handoff. This file may be rewritten whenever priorities change; Git is s
 
 ## Current objective
 
-Finish FG-345's isolated-workspace program and make isolation the ordinary/default path. This objective
-interrupted the FG-496 slice chain under the plan's existing interruption policy after forge-on-forge work
-demonstrated live-checkout damage and the worktree path exposed incomplete Git and cleanup boundaries.
+Finish FG-345 by making isolated workspaces the ordinary/default path. The structural program is proven:
+workspace lifecycle, mutator and non-mutator Git access, merge/publication, verification, self-host refusal,
+recovery, and fail-closed review behavior have shipped and passed the aggregate/live evidence walks. FG-621,
+FG-628, and FG-636 are closed; the supported host is macOS under DEC-004.
 
-The foundation is shipped: lifecycle and state (FG-351), merge/integration mechanics (FG-352/FG-353),
-persistence and red semantics (FG-354/FG-355), the candidate integration gate and serialized publisher
-(FG-357/FG-425), dependency parity (FG-376), read-only Git for non-mutators (FG-559), self-host refusal
-(FG-612), fail-safe linked-worktree recovery (FG-356), **private writable Git for mutators (FG-621, #164)**
-and **isolated-workspace dependency mountpoints (FG-627, #165)**. Do not reopen those decisions or create
-replacement tickets without evidence of a reachable gap.
+The workspace contract is committed tracked content at the recorded base SHA plus inputs explicitly supplied
+through Forge. Ambient uncommitted, untracked, or ignored checkout state is intentionally not inherited and is
+not a default-on blocker. `FORGE_NO_WORKTREES=1` remains the explicit legacy escape hatch. Do not create a
+generic carry-in system or another isolation child without a deterministic failure in a supported workflow.
 
-**What changed on 2026-07-27.** FG-621 landed and the first real end-to-end isolated dispatch was run. The
-substrate itself works — a mutating task receives a private clone at a recorded base SHA, the parent repo
-is provably unwritable from the container, and the agent's commit is captured by the host. What the
-dogfood exposed is that the *verification paths around* isolation had never been exercised, and three
-separate defects fell out of one run: FG-626, FG-627 (fixed same day), and the integration-gate half of
-FG-566. The correction to carry forward is that isolation was never "nearly ready"; only its substrate was.
+After FG-345 closes, fix FG-623's measured 1 ms lease-test flake, then activate Change 0 from the confirmed
+evidence-led review PRD so the interim operating policy governs the remaining build period.
 
 ## Now
 
-1. **FG-566** — the shared readiness contract for all Forge-owned host-side verification, with two
-   consumers: the review-loop local fallback, and FG-357/FG-425 integration-gate verification against the
-   exact publication candidate worktree. **Promoted under the interruption policy** as a defect blocking
-   the current objective: it was expanded on evidence when the dogfood's integration gate failed
-   `ERR_MODULE_NOT_FOUND` against a candidate worktree with no dependencies and recorded the result as
-   `integration_failed` — an environment fault reported as a verdict on the reviewed code.
-2. **FG-621 AC 11** — the only criterion still open; everything else shipped in #164, and AC 2's live
-   container evidence is captured. It closes on a dogfood run, which is blocked on FG-566. FG-566 work and
-   the dogfood run in the disposable clone, never the live checkout.
-3. Walk FG-345's aggregate acceptance proof against the implementation that actually exists. Count
-   FG-357/FG-425 as the integration/publication solution, FG-351 as the non-Git/dirty/carry-in contract,
-   and FG-353/FG-355 as the red-timing decision. Do not file another child for a requirement already
-   proven.
-4. Decide the platform question before default-on: FG-621 inherits the Linux hard-fail, so its evidence is
-   macOS-only. Either adopt a macOS-first default or lift the gate; each carries its own test burden, and
-   FG-621 alone does not justify a universal flip.
-5. Close FG-345 only after the default-on run proves mutators, non-mutators, candidate validation,
-   publication, and recovery compose end to end.
+1. **FG-345** — implement the default-on flip, verify the supported committed-tree workflow, record the final
+   aggregate evidence, and close. FG-637 and registry-dependent probe availability are recorded follow-ups,
+   not blockers absent a deterministic supported-workflow failure.
+2. **FG-623** — remove the measured 1 ms live-clock knife-edge from the lease-renewal test after FG-345
+   closes. This is a bounded test-reliability fix promoted under the required-CI interruption rule; do not
+   fold it into FG-345 or expand it into a production clock redesign.
+3. **Evidence-led review Change 0** — commit the confirmed
+   `docs/prds/evidence-led-review-lifecycle.md`, decompose it into stable backlog work, then align the
+   autonomous-run prompt and orchestrator seed with the interim one-discovery/batch-fix/recheck policy before
+   ledger implementation begins.
 
 ## Next
 
-Resume the interrupted operator-work-management program at the first unfinished slice. FG-606 and FG-607
-are already shipped.
-
-1. **FG-608 — FG-496 Slice C:** migrate seam-bypassing readers and make the DB backlog authoritative.
-2. **FG-609 — Slice D:** queue primitives.
-3. **FG-610 — Slice E:** atomic claims, leases, recovery, capacity accounting, and claim-next.
-4. **FG-591:** Kanban, CLI/API controls, and capacity-limited compatible-work dispatch.
-5. Reconcile **FG-496** with an aggregate acceptance walk, then continue **FG-593**.
+1. **FG-608 — FG-496 Slice C:** make the DB backlog authoritative per project, migrate seam-bypassing
+   readers, and provide containers the live read-only project-scoped backlog authority.
+2. **Evidence-led review program — reserved position, decomposition pending:** the confirmed PRD is ready to
+   be broken into implementation tickets; it is not itself an executable implementation brief. After
+   decomposition, replace this placeholder with the stable ready ticket IDs and their dependency order before
+   dispatching any Changes 1–3 work.
+3. **FG-609 — FG-496 Slice D:** queue rank, membership, revision-bound readiness, blocker evidence, and
+   event-history primitives.
+4. **FG-610 — FG-496 Slice E:** atomic claims, leases, recovery, capacity accounting, and canonical
+   claim-next.
+5. Reconcile and close **FG-496** with its aggregate acceptance walk.
 
 `Next` is deliberately short. Ordering here expresses current intent; it does not override ticket
 dependencies or authorize execution.
+
+## Committed follow-on
+
+- **FG-591** — build the Kanban/CLI/API operator surface and capacity-limited dispatcher after FG-496's
+  source-of-truth and queue primitives are closed.
+- Continue **FG-593** after FG-591 according to its remaining operator-work-management scope.
 
 ## Interruption policy
 
@@ -88,10 +84,11 @@ A newly discovered hardening opportunity is captured in the backlog but does not
   anywhere that guard does not cover.
 - FG-597, FG-598, FG-599, FG-600, FG-601, FG-602, and FG-604 follow-up hardening, unless promoted by the
   interruption policy.
-- FG-623 and FG-625 do not move ahead of the FG-345 closeout unless one becomes a demonstrated blocker or
-  required-CI failure. (FG-566 was in this set and has been promoted on evidence.)
-- Further worktree/isolation hardening after FG-345, unless the aggregate proof exposes a reachable gap.
-- Broad lifecycle-evaluator, provider-adapter, and workflow-semantics programs.
+- FG-625 does not move ahead of the FG-345 closeout unless it becomes a demonstrated blocker or required-CI
+  failure. FG-623 was promoted after it halted required review-loop verification.
+- **FG-637** and further worktree/isolation hardening after FG-345, unless a deterministic reproduction
+  exposes data loss, corruption, wrong-candidate behavior, or failure in a supported workflow.
+- Broad provider-adapter and workflow-semantics programs.
 - Declarative phase mutation contracts and the red/green workflow described in the 2026-07-21 Vjeko
   article.
 

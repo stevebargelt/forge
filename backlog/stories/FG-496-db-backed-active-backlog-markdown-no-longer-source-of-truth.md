@@ -18,6 +18,12 @@ Forge's active backlog is currently represented as git-tracked markdown files un
 
 Recent concrete example: FG-495 was visible in the current working tree but untracked. `forge backlog show FG-495` worked locally, while another Forge run/worktree correctly reported that FG-495 did not exist until the file was committed and pushed.
 
+The same split can happen after dispatch. During FG-628, AC 5 was amended and committed in the live checkout
+while the implementation agent worked in a disposable clone. Inside the container, `forge backlog show FG-628`
+correctly read that clone's older Markdown snapshot and could not see the amendment. The task package happened
+to carry the widened invariant, so that run was not harmed; a brief that only said "read the authoritative
+ticket" would have been stale.
+
 Git-tracked markdown is useful for migration, audit, or optional human-readable snapshots, but it is a poor live coordination store.
 
 ## Goal
@@ -34,12 +40,20 @@ Move Forge's active backlog/work queue to Forge DB-backed storage. The DB become
 - Campaign planning reads ticket definitions from the DB-backed backlog.
 - Review-loop and shipping-reviewer ticket lookup read from the DB-backed backlog.
 - Autonomous runs and handoff/orient read the same DB-backed backlog state across Forge worktrees.
+- Containerized agents read the same live DB-backed ticket authority as the host even when their mounted
+  checkout or clone contains stale or absent `backlog/*.md`.
+- Agent access to the backlog authority is read-only, project-scoped, and backlog-only. A container cannot
+  mutate tickets, read another project's tickets, or inspect unrelated host control-plane tables merely
+  because it needs `forge backlog show`.
 - Dashboard backlog views read from Forge's DB/API, not by scanning markdown files.
 - Filing, editing, or closing a backlog item no longer dirties project `git status` by default.
 - The CLI surfaces the active backlog storage mode clearly during migration, so operators can tell whether they are still reading legacy markdown or the DB store.
 - Migration is idempotent: re-running import does not duplicate tickets or lose newer DB edits without an explicit conflict decision.
 - Tests cover the FG-495 shape: create a ticket, then read it from a clean secondary worktree/checkout where no markdown file exists; Forge still finds it through the DB-backed store.
 - Tests cover a project with no `backlog/` directory: backlog CRUD, campaign planning, and dashboard/API listing still work.
+- Tests cover the FG-628 mid-run amendment shape: after a container has started from a stale clone, a host DB
+  edit to its ticket becomes visible to a subsequent `forge backlog show` in that same container, while the
+  task's originally bound ticket revision remains recorded for audit.
 
 ## Non-Goals
 
@@ -57,6 +71,27 @@ Suggested model:
 - `ticket_relations`: blocks, related, parent/epic, discovered-from, supersedes, or similar relationships.
 
 Important product decision already made: do not make markdown export a core requirement. The dashboard needs to show backlog items, but it should do that through Forge's DB/API.
+
+### Container ticket authority (binding decision, 2026-07-28)
+
+DB cutover is not safe until containerized agents can read authoritative tickets. The access surface must have
+all of these properties:
+
+- **Live:** a host edit committed after container start is visible on the container's next backlog read. A
+  dispatch-time Markdown or DB snapshot alone does not close the FG-628 failure.
+- **Read-only at the boundary:** backlog mutation commands from an agent container refuse, and the mounted
+  storage itself is not writable. Prompt instructions are not the write boundary.
+- **Project-scoped and backlog-only:** do not mount `~/.forge/forge.db` wholesale. It contains other projects
+  and unrelated run/task/event control-plane state. Expose a dedicated per-project backlog DB view/projection
+  (or an equivalently constrained read-only DB access surface) containing only the selected `project_key`.
+- **Revision-aware:** dispatch records the ticket revision/body hash it was planned against. Live
+  `forge backlog show` may reveal a newer revision, but that does not rewrite historical task inputs; Forge
+  surfaces the revision mismatch so the agent/orchestrator can reconcile it explicitly.
+- **SQLite-correct:** concurrent host writes are atomic to readers; WAL/sidecar behavior and atomic projection
+  refresh are handled deliberately. A read-only mount must never produce a torn or silently stale ticket.
+
+FG-608 owns this cutover requirement because it is the slice that makes DB authority real. Later queue/claim
+slices consume the same ticket revision; they do not invent a second container backlog channel.
 
 ## Relations
 
@@ -122,9 +157,10 @@ Children (each independently shippable + testable, in sequence):
 2. **FG-607 — Slice B:** DB-backed CRUD behind the structured.ts seam + per-project storage mode
    (`markdown` | `db`); default stays `markdown`. Delivers the FG-495 cross-worktree shape in db mode.
 3. **FG-608 — Slice C:** migrate the seam-bypassing readers (dashboard ticket source, campaign dir-guards) +
-   `forge backlog migrate` (import + atomic flip). **This slice is the authoritative-cutover point** — DB
-   becomes source of truth. Post-cutover import conflict rule: create-only, divergent ids write a conflict
-   event, Markdown never silently clobbers a newer DB edit (`--force` to override).
+   container read-only ticket access + `forge backlog migrate` (import + atomic flip). **This slice is the
+   authoritative-cutover point** — DB becomes source of truth. Post-cutover import conflict rule: create-only,
+   divergent ids write a conflict event, Markdown never silently clobbers a newer DB edit (`--force` to
+   override).
 4. **FG-609 — Slice D:** queue primitives — canonical nullable `priority_rank`, explicit queue membership,
    revision-bound readiness (reuse FG-382), and ENRICHMENT of Slice A's minimal blocker evidence, append-only
    event history. Derived `in_progress`/`blocked` are computed, never stored.

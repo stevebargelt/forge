@@ -37,6 +37,9 @@ serving stale branch-local Markdown while the DB is truth.
   `notes.md` reads per-checkout (FG-380 operational state, orthogonal to ticket truth). Dashboard stays a
   **per-project board**; cross-project aggregation is FG-591, not here.
 - **Campaign dir-guards:** convert `existsSync('backlog')` dir-presence guards to DB-existence checks.
+- **Container ticket authority:** give agent/reviewer containers a live, project-scoped, backlog-only DB
+  read surface mounted read-only. `forge backlog show/list` inside a container must resolve this authority
+  instead of the mounted checkout's stale Markdown. Do not mount the full host `forge.db`.
 - **`forge backlog migrate`** as specified above (atomic import+validate+flip, `--dry-run`, fail-safe).
 - **Removal reconciliation (INHERITED FROM FG-606 — Slice A deferred it here).** Slice A's import is
   deliberately append-only (a ticket/relation removed from Markdown is NOT pruned from the non-authoritative
@@ -72,6 +75,18 @@ after DB edits would lose them. Surface this in the cutover UX.
   no longer determine truth), scoped per project.
 - Campaign planning, review-loop, and shipping-reviewer read DB tickets (inherited from Slice B; verified here).
 - Cross-worktree consistency test passes with a project's mode = db.
+- **FG-628 container amendment shape:** start a container against a clone whose Markdown lacks a ticket
+  amendment; edit the DB ticket on the host after container start; a subsequent `forge backlog show` in that
+  same container returns the amended body and current revision.
+- The container's backlog storage is read-only at the filesystem/store boundary: `file`, `edit`, `close`,
+  relation mutation, and direct SQLite writes fail without changing host state.
+- The container can read only the selected `project_key`'s backlog data and cannot inspect tickets for another
+  project or unrelated host run/task/event tables. The full `~/.forge/forge.db` is never mounted.
+- Task/dispatch evidence records the ticket revision/body hash used to construct the task. If the live ticket
+  advances during execution, backlog output surfaces both the current and dispatched revisions rather than
+  silently pretending the original task package changed.
+- Concurrent host edits are atomic to the container reader, including the chosen SQLite WAL/projection
+  strategy; the container never sees a torn row or a permanently stale dispatch-time snapshot.
 - **Removal reconciliation (deferred from FG-606):** after cutover, a ticket/relation removed from Markdown is
   reflected as its absence in the DB — the shadow equals the current Markdown set INCLUDING removals — and, for
   a `project_key` shared across linked worktrees, a ticket is pruned only when absent from ALL sources (never
@@ -84,14 +99,19 @@ after DB edits would lose them. Surface this in the cutover UX.
 - The canonical-source regression test is updated/replaced to assert host-wide DB truth.
 - A grep/lint gate fails on any NEW direct `backlog/*.md` ticket read outside the seam.
 
-## Blocker discovered during the FG-607 architecture pass (must be resolved before the flip)
+## Container blocker discovered during FG-607 — resolved architecture direction
 
-**Agent containers cannot see db-mode tickets.** Agents get a read-only `/project` mount and no host DB, so
-once a project's tickets live only in the DB, every containerized agent loses ticket visibility — including
-the shipping-reviewer red, which reads a ticket's acceptance criteria from the mounted project to review a diff
-against it. The seam cannot fix this from inside the container. Decide and implement the access path (inject the
-ticket body into the task package, mount a read-only export, or expose a read API) as part of this slice; the
-per-project flip to `db` is not safe until it is.
+**Agent containers cannot currently see db-mode tickets.** Agents get a read-only `/project` mount and no host
+ticket database, so after cutover they would either lose the ticket or read stale branch-local Markdown.
+
+The decision is now binding: provide a live, read-only, project-scoped, backlog-only DB view/access surface.
+A dispatch-time injection by itself is insufficient because it cannot expose an operator amendment made while
+the container is running. Mounting the whole host `forge.db` is forbidden because read-only still exposes other
+projects and unrelated control-plane data. The task package continues to carry the dispatched ticket revision
+for reproducibility; the live read surface reports newer authority and the revision mismatch explicitly.
+
+The per-project flip to `db` is not safe until the live-read, mutation-refusal, project-isolation, revision, and
+concurrent-update acceptance cases above pass through a real container.
 
 **Seam-bypassing `existsSync('backlog')` gates enumerated in FG-607 and deliberately left here:**
 `src/campaign/executor.ts:158` (`hasBacklog()`, consumed at :194 and :213 where absence yields the

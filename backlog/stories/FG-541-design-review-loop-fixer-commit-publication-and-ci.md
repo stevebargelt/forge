@@ -6,6 +6,23 @@ title: Design review-loop fixer-commit publication and CI handoff policy
 created: 2026-07-12
 ---
 
+## Relationship to the evidence-led review lifecycle (2026-07-28)
+
+The local-only fixer evidence below remains valid, but this ticket must not be
+designed or implemented as an independent expansion of `review-loop` while
+`docs/prds/evidence-led-review-lifecycle.md` is under confirmation.
+
+That PRD makes the interim use of `review-loop --max-rounds 1` discovery-only:
+it creates no fixer commit to publish. In the target lifecycle, immutable
+FixBatch delivery, deterministic verification, trusted-tip equality, and
+publication receipts own the relevant handoff and authority instead.
+
+If the PRD is confirmed, fold this ticket's evidence and honest `local_only`
+requirements into that implementation or mark FG-541 superseded with an
+explicit evidence mapping. Do not silently close it. Until that decision, only
+correctness, recovery, or evidence-preservation fixes to the legacy loop are in
+scope; no new push authority should be added under FG-541.
+
 ## Problem
 
 The 2026-07-12 handoff attributed six `review-loop: CI unavailable` fallbacks to a race where a just-pushed SHA had not registered GitHub checks. Investigation disproved that cause.
