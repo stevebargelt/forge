@@ -122,8 +122,10 @@ describe("campaign-controller lease (AC7/D1)", () => {
   test("renewCampaignLease extends a live lease across a long drive; wrong generation is fenced", () => {
     const cid = seedCampaign();
     acquireCampaignLease({ campaignId: cid, owner: ownerA, ttlMs: TTL });
-    // A renewal at TTL-1 keeps it live past the original expiry.
-    setPublicationClockOffsetForTest(TTL - 1);
+    // Renew mid-drive, with real headroom to spare: the store clock is a LIVE ticking
+    // clock plus this offset, so renewing at TTL-1 would assert "a lease with 1ms left
+    // renews within 1ms of wall clock" rather than "a live lease renews" (FG-623).
+    setPublicationClockOffsetForTest(TTL / 2);
     assert.equal(renewCampaignLease(cid, ownerA, 1, TTL), true);
     setPublicationClockOffsetForTest(TTL + 1);
     assert.equal(campaignLeaseHeldBy(cid, ownerA, 1), true, "renewal kept it live");
