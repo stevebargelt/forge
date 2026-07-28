@@ -6,8 +6,11 @@
 // integration branch is fast-forward merged to HEAD before the parent completes.
 //
 // Covers:
-//   (1) Default non-worktree path: FORGE_WORKTREES unset → fanout completes
-//       without any integration branch (byte-for-byte unchanged from pre-FG-353).
+//   (1) Explicit bind-mount path: FORGE_WORKTREES=0 → fanout completes without
+//       any integration branch (byte-for-byte unchanged from pre-FG-353).
+//   (1b) Default-on path (FG-345): NO switch set on darwin → the same fan-out
+//       isolates — children in private workspaces, the red on the publication
+//       candidate, the candidate's commit landing in run.projectDir.
 //   (2) Child branches merged into integration branch in child index order.
 //   (3) Fan-out red /project mount is the integration worktree, not projectDir.
 //   (4) Child merge conflict → merge_conflict on parent, reds never dispatched.
@@ -35,7 +38,7 @@ import { startRun } from "./startRun.js";
 import { runNext, type DockerExecFn } from "./runNext.js";
 import type { Workflow } from "./schema.js";
 import { failureKindForTask } from "./failure-kind.js";
-import { integrationWorktreeDir, taskDir, PUBLICATIONS_DIR } from "../util/paths.js";
+import { integrationWorktreeDir, taskDir, CLONES_DIR, PUBLICATIONS_DIR } from "../util/paths.js";
 import { allPublicationAttempts } from "../store/publications.js";
 import { gate } from "./gate.js";
 import { integrationBranchName } from "./worktree-lifecycle.js";
@@ -230,7 +233,8 @@ beforeEach(() => {
   process.env.ANTHROPIC_API_KEY = "sk-stub";
   // FG-345: isolation is default-ON and the default follows process.platform, so
   // clearing the switch above no longer means "off". Pin it; the cases that want
-  // worktree mode set "1" themselves and still win.
+  // worktree mode set "1" themselves and still win, and case (1b) — the one that
+  // proves the DEFAULT on this dispatch path — deletes the pin outright.
   process.env.FORGE_WORKTREES = "0";
 
   ensureDispatchTestRuntime();
@@ -479,18 +483,28 @@ function writeTaskResult(stdoutPath: string, result: unknown): void {
   writeFileSync(join(dir, "container.stderr.log"), "");
 }
 
-// ─── (1) Default non-worktree path unchanged ─────────────────────────────────
+// ─── (1) Explicit bind-mount path unchanged ──────────────────────────────────
 //
-// FORGE_WORKTREES unset → fanout completes without creating an integration branch.
+// FORGE_WORKTREES=0 → fanout completes without creating an integration branch.
 // No git operations, no worktrees — behavior is byte-for-byte unchanged.
+//
+// This is the EXPLICIT off, not a default: since FG-345 an unset switch resolves
+// from process.platform (darwin on), so the pre-FG-353 shape is now reached by
+// pinning the switch off. The default an operator actually meets on darwin is
+// case (1b) below.
 
-test("fg353 (1): FORGE_WORKTREES unset => fanout completes without integration branch", async () => {
-  // FORGE_WORKTREES cleared in beforeEach — default production state.
+test("fg353 (1): FORGE_WORKTREES=0 => fanout bind-mounts and completes without integration branch", async () => {
+  // The suite/beforeEach pin IS the explicit off — assert it rather than assume it.
+  assert.equal(
+    process.env.FORGE_WORKTREES,
+    "0",
+    "this case is the explicitly-off arm; an unset switch would resolve from the platform (FG-345)",
+  );
   const projectDir = "/tmp/test-project";
 
   const { runId } = startRun({
     workflow: FANOUT_WORKFLOW,
-    title: "fg353 default-off test",
+    title: "fg353 explicit bind-mount test",
     inputs: {},
     projectDir,
   });
@@ -521,12 +535,143 @@ test("fg353 (1): FORGE_WORKTREES unset => fanout completes without integration b
   assert.ok(parentTask, "fanout parent task must exist");
   assert.equal(parentTask!.status, "complete", "parent must be complete");
   // No integration branch should exist in /tmp/test-project (which isn't a git repo,
-  // confirming we never attempted any git operations on the default-off path).
+  // confirming we never attempted any git operations with the switch pinned off).
   assert.equal(
     parentTask!.worktreePath,
     undefined,
-    "parent task must have no worktreePath in default-off mode",
+    "parent task must have no worktreePath with FORGE_WORKTREES=0",
   );
+  const children = allTasks.filter(
+    (t) => t.parentId === parentTask!.id && !t.agentRole.startsWith("red-"),
+  );
+  assert.equal(children.length, 2, "two children must exist");
+  for (const child of children) {
+    assert.equal(
+      child.worktreePath,
+      undefined,
+      `child ${child.id} must have no worktreePath with FORGE_WORKTREES=0`,
+    );
+  }
+});
+
+// ─── (1b) Default-on fan-out: no switch set on darwin → the ISOLATED path ─────
+//
+// FG-345 made isolation default-ON on darwin, so the fan-out an operator now gets
+// is the isolated one. Every other worktree case in this file ARMS the switch,
+// which cannot prove a default — this one DELETES it (undoing both src/test-setup.ts's
+// suite pin and beforeEach's) and asserts the independently-dispatched fan-out path
+// isolates anyway, all the way through the red and the publication:
+//   · each child runs in its own managed workspace, never run.projectDir;
+//   · all siblings share ONE wave base (FG-621);
+//   · the red reviews the publication candidate, and the commit it reviewed is the
+//     commit that lands on the target.
+
+test("fg353 (1b): NO worktree switch set on darwin => fan-out isolates, red reviews the candidate, candidate lands in projectDir", async () => {
+  setPlatform("darwin");
+  delete process.env.FORGE_WORKTREES;
+  assert.equal(process.env.FORGE_WORKTREES, undefined, "the default must be exercised, not configured");
+  assert.equal(process.env.FORGE_NO_WORKTREES, undefined, "the default must be exercised, not configured");
+
+  const repo = makeTmpDir();
+  initGitRepo(repo);
+  const baseSha = execFileSync("git", ["rev-parse", "HEAD^{commit}"], {
+    cwd: repo,
+    encoding: "utf8",
+  }).trim();
+
+  const { runId } = startRun({
+    workflow: FANOUT_WITH_RED_WORKFLOW,
+    title: "fg353 default-on fanout",
+    inputs: {},
+    projectDir: repo,
+  });
+
+  const capturedMounts: { taskId: string; projectMount: string }[] = [];
+
+  const stubExec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+    const taskId = extractTaskId(args);
+    const projectMount = findProjectMountHost(args) ?? "";
+    capturedMounts.push({ taskId, projectMount });
+    writeFileSync(stderrPath, "");
+
+    if (taskId.startsWith("task-source-")) {
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, items: ["item-a", "item-b"] });
+    } else if (taskId.startsWith("task-build-0-")) {
+      writeFileSync(join(projectMount, "child0.ts"), "export const child0 = 0;\n");
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
+    } else if (taskId.startsWith("task-build-1-")) {
+      writeFileSync(join(projectMount, "child1.ts"), "export const child1 = 1;\n");
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
+    } else if (taskId.startsWith("task-red-build-")) {
+      writeTaskResult(stdoutPath, { status: "complete", verdict: "pass", confidence: 1.0, findings: [] });
+    } else {
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
+    }
+    return 0;
+  };
+
+  const wave1 = await runNext({ runId, workflow: FANOUT_WITH_RED_WORKFLOW, dockerExec: stubExec });
+  assert.deepEqual(wave1.completedSteps, ["source"], "the default path must dispatch the source step");
+
+  const wave2 = await runNext({ runId, workflow: FANOUT_WITH_RED_WORKFLOW, dockerExec: stubExec });
+  assert.deepEqual(wave2.completedSteps, ["build"], "the default path must complete the fan-out");
+  assert.deepEqual(wave2.failedSteps, [], "the default path must not fail");
+
+  const allTasks = tasksForRun(runId);
+  const parentTask = allTasks.find((t) => t.phase === "build" && t.parentId === undefined);
+  assert.ok(parentTask, "fanout parent task must exist");
+  const parentId = parentTask!.id;
+
+  // Every child got a PRIVATE workspace at the deterministic path, recorded on its
+  // row — before FG-345 this same env bind-mounted the operator's checkout.
+  const children = allTasks
+    .filter((t) => t.parentId === parentId && !t.agentRole.startsWith("red-"))
+    .sort((a, b) => a.id.localeCompare(b.id));
+  assert.equal(children.length, 2, "two children must exist");
+  for (const child of children) {
+    assert.ok(
+      child.worktreePath,
+      `child ${child.id} must have tasks.worktree_path recorded on the default path`,
+    );
+    assert.equal(
+      child.worktreePath,
+      join(CLONES_DIR, runId, child.id),
+      "the child workspace must be the deterministic per-(run, task) path under the managed clones root",
+    );
+    assert.equal(child.baseSha, baseSha, "the recorded base SHA must be the repo HEAD the wave was cut from");
+    const capture = capturedMounts.find((c) => c.taskId === child.id);
+    assert.ok(capture, `child ${child.id} must have been dispatched`);
+    assert.equal(capture!.projectMount, child.worktreePath, "/project must be mounted from the child's workspace");
+    assert.notEqual(capture!.projectMount, repo, "the operator's checkout must NOT be what a child got");
+  }
+  assert.equal(children[0]!.baseSha, children[1]!.baseSha, "FG-621: one base for the whole wave");
+
+  // The red reviewed the publication candidate, never the publish target.
+  const redCapture = capturedMounts.find((c) => c.taskId.startsWith("task-red-build-"));
+  assert.ok(redCapture, "the fan-out red must have been dispatched on the default path");
+  assert.notEqual(redCapture!.projectMount, repo, "red /project must NOT be run.projectDir (the publish target)");
+  assert.ok(
+    redCapture!.projectMount.startsWith(PUBLICATIONS_DIR),
+    `red /project must be the publisher's candidate worktree (under ${PUBLICATIONS_DIR}), got ${redCapture!.projectMount}`,
+  );
+
+  // …and the commit the red reviewed is the commit the target now carries.
+  const attempt = allPublicationAttempts().find((a) => a.taskId === parentId);
+  assert.ok(attempt, "a publication attempt must have been recorded on the default path");
+  assert.equal(attempt!.state, "published");
+  assert.equal(attempt!.publishedSha, attempt!.candidateSha, "publishedSha === candidateSha (AD-6)");
+  assert.equal(
+    redCapture!.projectMount,
+    attempt!.worktreePath,
+    "the tree the red reviewed must be the candidate worktree whose commit was published",
+  );
+  const targetSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+  assert.equal(targetSha, attempt!.candidateSha, "the target must carry exactly the commit the red reviewed");
+  assert.notEqual(targetSha, baseSha, "the integrated child work must actually have landed on the target");
+
+  // Both children's work reached run.projectDir through the integration.
+  assert.ok(existsSync(join(repo, "child0.ts")), "child0.ts must exist in run.projectDir on the default path");
+  assert.ok(existsSync(join(repo, "child1.ts")), "child1.ts must exist in run.projectDir on the default path");
 });
 
 // ─── (2) Child branches merged into integration branch in index order ─────────
