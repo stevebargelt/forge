@@ -80,6 +80,10 @@ beforeEach(() => {
   }
 
   process.env.ANTHROPIC_API_KEY = "sk-stub";
+  // FG-345: isolation is default-ON and the default follows process.platform, so
+  // clearing the switch above no longer means "off". Pin it; the cases that want
+  // worktree mode set "1" themselves and still win.
+  process.env.FORGE_WORKTREES = "0";
 
   ensureDispatchTestRuntime();
 });
@@ -345,7 +349,7 @@ test("fg354 (dispatch-2): FORGE_WORKTREES=1 → file only in projectDir (not wor
 // This guards against a naive "always use worktreePath" regression.
 
 test("fg354 (dispatch-3): FORGE_WORKTREES unset → file in projectDir satisfies persistence check → task completes", async () => {
-  // FORGE_WORKTREES is cleared in beforeEach — default production state.
+  // FORGE_WORKTREES is pinned off in beforeEach — the bind-mount lane.
   const projectDir = makeTmpDir();
   // Create changed.ts in projectDir (no git repo needed — not in worktree mode).
   writeFileSync(join(projectDir, "changed.ts"), "x");

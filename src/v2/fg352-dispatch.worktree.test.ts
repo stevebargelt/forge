@@ -113,6 +113,10 @@ beforeEach(() => {
   }
 
   process.env.ANTHROPIC_API_KEY = "sk-stub";
+  // FG-345: isolation is default-ON and the default follows process.platform, so
+  // clearing the switch above no longer means "off". Pin it; the cases that want
+  // worktree mode set "1" themselves and still win.
+  process.env.FORGE_WORKTREES = "0";
 
   ensureDispatchTestRuntime();
 });

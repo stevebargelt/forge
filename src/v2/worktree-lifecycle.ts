@@ -14,6 +14,8 @@
 // preflightWorktreeGate are unconditional — they are never bypassed by
 // FORGE_NO_WORKTREES; the kill switch works at the feature-enable level so the
 // caller never reaches the gate.
+//
+// FG-345: isolation is the DEFAULT, not an opt-in. See isWorktreeModeEnabled().
 
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { hostname } from "node:os";
@@ -33,16 +35,39 @@ export function worktreeBranchName(runId: string, taskId: string): string {
 
 // ── Feature gate ──────────────────────────────────────────────────────────────
 
-/** Worktree mode is behind an explicit env gate until FG-352 (merge-back) and
- *  FG-354 (persistence-check) make the full path safe.
+/** FG-345: workspace isolation is ON by default. Resolution order:
  *
- *  FORGE_NO_WORKTREES=1 is a KILL SWITCH that disables worktree mode entirely,
- *  regardless of FORGE_WORKTREES. When this returns false, callers must skip
- *  preflightWorktreeGate, createWorktree, and setTaskWorktreePath — the default
- *  bind-mount path is preserved exactly as it was before FG-351. */
+ *    1. FORGE_NO_WORKTREES=1  → off. The legacy escape hatch; highest precedence.
+ *    2. FORGE_WORKTREES set   → honored explicitly ("1" on, anything else off).
+ *    3. neither set           → the PLATFORM default: on for darwin, off elsewhere.
+ *
+ *  Rule 3 is platform-aware rather than a bare `true` because preflightWorktreeGate
+ *  hard-fails on Linux and that gate is permanent by design (DEC-004: the
+ *  orchestrator runs on a macOS host; "Linux" in these gates means the agent
+ *  CONTAINER). A bare `true` would arm worktree mode on a Linux host and then throw
+ *  on every dispatch. A non-darwin host therefore keeps the shared bind-mount path
+ *  exactly as it behaved before this change. An explicit FORGE_WORKTREES=1 still
+ *  force-enables everywhere — and still hits the Linux gate loudly, which is the
+ *  documented behavior and unchanged.
+ *
+ *  Rule 2 honors an explicit OFF ("0"), which is what lets `src/test-setup.ts` pin
+ *  the suite to a host-independent value while a test that assigns "1" still wins.
+ *
+ *  THE WORKSPACE CONTRACT (FG-345 operator decision, 2026-07-28). A task workspace
+ *  is committed tracked content at the recorded base SHA, plus inputs explicitly
+ *  supplied through Forge's own provisioning or environment mechanisms. Ambient
+ *  local checkout state — uncommitted, untracked, ignored — is intentionally NOT
+ *  inherited; that is the contract, not a gap in it. FORGE_NO_WORKTREES=1 is the
+ *  supported escape for a workflow that needs the shared checkout.
+ *
+ *  When this returns false, callers must skip preflightWorktreeGate, createWorktree,
+ *  and setTaskWorktreePath — the bind-mount path is preserved exactly as it was
+ *  before FG-351. */
 export function isWorktreeModeEnabled(): boolean {
   if (process.env.FORGE_NO_WORKTREES === "1") return false;
-  return process.env.FORGE_WORKTREES === "1";
+  const explicit = process.env.FORGE_WORKTREES;
+  if (explicit !== undefined) return explicit === "1";
+  return process.platform === "darwin";
 }
 
 // ── Preflight gate ────────────────────────────────────────────────────────────
@@ -50,7 +75,8 @@ export function isWorktreeModeEnabled(): boolean {
 /** Run ALL gate checks BEFORE any state mutation. Throws on any violation.
  *
  * Gates (in order):
- *   1. Platform: macOS only (Linux hard-fail; linux support is FG-358).
+ *   1. Platform: macOS only. The Linux hard-fail is PERMANENT by design, not
+ *      pending work — see the gate below.
  *   2. Git: projectDir must be inside a git repo (findGitRoot two-step).
  *   3. Dirty: tracked tree must be clean unless FORGE_WORKTREE_IGNORE_DIRTY=1.
  *
@@ -58,13 +84,24 @@ export function isWorktreeModeEnabled(): boolean {
  * The kill switch works at the isWorktreeModeEnabled() level: when it returns
  * false, the caller skips this function entirely and preflightWorktreeGate is
  * never reached.
+ *
+ * Gate 3 is where the FG-345 workspace contract bites: the agent gets the
+ * committed snapshot at the recorded base SHA, so a dirty tracked tree makes the
+ * workspace stale by construction. Ambient uncommitted/untracked/ignored state is
+ * not inherited, by decision — see isWorktreeModeEnabled() for the full contract.
  */
 export function preflightWorktreeGate(projectDir: string): void {
-  // 1. Platform gate — Linux is hard-fail; worktree node_modules issues
-  //    surface as confusing agent failures (FG-358 tracks Linux support).
+  // 1. Platform gate — Linux is hard-fail, PERMANENTLY. Forge's orchestrator runs
+  //    on a macOS host (DEC-004) and "Linux" here can only mean the agent
+  //    container, so a Linux HOST is out of scope rather than unfinished: FG-358
+  //    was closed out-of-scope in 6c0a1a6 and nothing succeeds it. The platform
+  //    default in isWorktreeModeEnabled() resolves OFF on non-darwin, so a Linux
+  //    host never reaches this gate by accident — arriving here means someone set
+  //    FORGE_WORKTREES=1 explicitly, and that should fail loudly.
   if (process.platform === "linux") {
     throw new Error(
-      "worktree mode is not supported on Linux (node_modules bind-mount gap; see FG-358). " +
+      "worktree mode is not supported on Linux (node_modules bind-mount gap). Linux hosts are " +
+        "permanently out of scope — forge's orchestrator is macOS-only. " +
         "Set FORGE_NO_WORKTREES=1 to disable worktree mode entirely and revert to the shared bind-mount."
     );
   }
@@ -181,11 +218,6 @@ export type CreateWorktreeResult = {
  *  - git commands use `cwd: projectDir` (the resolved repo root) — NEVER
  *    process.cwd() or a project subdir.
  *  - Returns the worktree path and a diagnostic list of untracked host files.
- *
- *  Advisory: while FORGE_WORKTREES=1, the FG-354 persistence-check scans
- *  args.projectDir (the main checkout), not the worktree. It may false-fail
- *  until FG-354 lands. This warning is emitted once per worktree creation so
- *  operators running worktree mode are not surprised by the limitation.
  */
 export function createWorktree(
   projectDir: string,
@@ -194,15 +226,6 @@ export function createWorktree(
 ): CreateWorktreeResult {
   const worktreePath = worktreeDir(runId, taskId);
   const branch = worktreeBranchName(runId, taskId);
-
-  // FG-354 seam: persistence-check currently scans args.projectDir (main
-  // checkout) and will false-fail for worktree runs until FG-354 adapts it.
-  // Emit a visible advisory so operators running opt-in worktree mode are aware.
-  console.warn(
-    `[forge:worktrees] ADVISORY: Creating worktree at ${worktreePath} (branch ${branch}). ` +
-      "FG-354 persistence-check scans the main checkout, not the worktree — it may " +
-      "false-fail until FG-354 lands. This is expected in worktree mode (FG-351)."
-  );
 
   // Ensure the parent directory exists under WORKTREES_DIR.
   mkdirSync(join(WORKTREES_DIR, runId), { recursive: true });

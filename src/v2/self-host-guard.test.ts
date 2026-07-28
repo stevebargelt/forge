@@ -20,6 +20,24 @@ let otherProject: string;
 let stderr: string[];
 const savedEnv = { ...process.env };
 
+/** Captured before any test can spoof it — restoring from process.platform inside
+ *  afterEach would read the spoof and leak it into every later test. */
+const REAL_PLATFORM = process.platform;
+
+function setPlatform(p: string): void {
+  Object.defineProperty(process, "platform", { value: p, configurable: true });
+}
+
+function refusalOn(platform: string): string {
+  setPlatform(platform);
+  try {
+    assertSelfHostDispatchAllowed(forgeRoot, forgeRoot);
+  } catch (e) {
+    return (e as Error).message;
+  }
+  assert.fail(`expected a refusal on ${platform}`);
+}
+
 beforeEach(() => {
   workspace = mkdtempSync(join(tmpdir(), "forge-fg612-"));
   forgeRoot = join(workspace, "code", "forge");
@@ -31,7 +49,9 @@ beforeEach(() => {
     stderr.push(typeof chunk === "string" ? chunk : chunk.toString());
     return true;
   });
-  delete process.env["FORGE_WORKTREES"];
+  // FG-345: isolation is default-ON, so "unset" no longer means off — these cases
+  // mean isolation is NOT armed, and must say so explicitly.
+  process.env["FORGE_WORKTREES"] = "0";
   delete process.env["FORGE_NO_WORKTREES"];
   _resetSelfHostWarnings();
 });
@@ -40,6 +60,7 @@ afterEach(() => {
   rmSync(workspace, { recursive: true, force: true });
   mock.restoreAll();
   process.env = { ...savedEnv };
+  setPlatform(REAL_PLATFORM);
 });
 
 // ── The refusal ───────────────────────────────────────────────────────────────
@@ -55,16 +76,35 @@ test("self-host dispatch with worktree mode off REFUSES", () => {
   );
 });
 
-test("the refusal names the project path and BOTH env vars — an operator must be able to act on it", () => {
-  let message = "";
-  try {
-    assertSelfHostDispatchAllowed(forgeRoot, forgeRoot);
-  } catch (e) {
-    message = (e as Error).message;
-  }
+test("the refusal names the project path and the shared-mount escape — an operator must be able to act on it", () => {
+  const message = refusalOn(REAL_PLATFORM);
   assert.ok(message.includes(realpathSync(forgeRoot)), `refusal must name the project path:\n${message}`);
-  assert.match(message, /FORGE_WORKTREES=1/);
   assert.match(message, /FORGE_NO_WORKTREES=1/);
+});
+
+// FG-345 made isolation default-on, so the remediation is platform-specific:
+// "set FORGE_WORKTREES=1" is the fix ONLY where the platform default is off AND
+// the worktree preflight would pass. Naming it anywhere else sends the operator
+// into a no-op (darwin) or into the permanent Linux hard-fail.
+
+test("on darwin the remediation is to UNSET the explicit off — isolation is already the default there", () => {
+  const message = refusalOn("darwin");
+  assert.match(message, /unset FORGE_WORKTREES/);
+  assert.match(message, /default/i);
+  assert.doesNotMatch(message, /FORGE_WORKTREES=1/, `darwin must not present FORGE_WORKTREES=1 as the fix:\n${message}`);
+});
+
+test("on linux the remediation does NOT present FORGE_WORKTREES=1 — that reaches the permanent platform hard-fail", () => {
+  const message = refusalOn("linux");
+  assert.match(message, /hard-fails on Linux/);
+  assert.match(message, /will NOT arm it/);
+  assert.match(message, /FORGE_NO_WORKTREES=1/);
+});
+
+test("on win32 FORGE_WORKTREES=1 IS the fix — the platform default is off but the preflight gate lets it through", () => {
+  const message = refusalOn("win32");
+  assert.match(message, /FORGE_WORKTREES=1 {6}arm worktree isolation/);
+  assert.match(message, /win32/);
 });
 
 // ── The two ways through ──────────────────────────────────────────────────────
@@ -101,7 +141,7 @@ test("a DIFFERENT project is unaffected in every env combination", () => {
     { FORGE_WORKTREES: "1", FORGE_NO_WORKTREES: "1" },
   ];
   for (const combo of combos) {
-    delete process.env["FORGE_WORKTREES"];
+    process.env["FORGE_WORKTREES"] = "0"; // FG-345: the empty combo means isolation OFF, not "unset"
     delete process.env["FORGE_NO_WORKTREES"];
     Object.assign(process.env, combo);
     stderr = [];

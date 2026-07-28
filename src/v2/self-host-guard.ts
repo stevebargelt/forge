@@ -53,6 +53,37 @@ export function isSelfHostDispatch(projectDir: string, sourceRoot = forgeSourceR
   return contains(root, project) || contains(project, root);
 }
 
+/** FG-345 made isolation default-on, which makes the remediation platform-specific:
+ *  "set FORGE_WORKTREES=1" is only ever the fix on a host where the platform
+ *  default is OFF and the worktree preflight would actually pass. */
+function remediation(): string {
+  if (process.platform === "darwin") {
+    return (
+      `Isolation is ON by default on this host (FG-345), so reaching this refusal means\n` +
+      `FORGE_WORKTREES is explicitly set to a non-"1" value.\n` +
+      `\n` +
+      `  unset FORGE_WORKTREES  restore the default so agents work in a task-scoped workspace (the fix)\n` +
+      `  FORGE_NO_WORKTREES=1   proceed anyway on the shared checkout (explicit, acknowledged override)`
+    );
+  }
+  if (process.platform === "linux") {
+    return (
+      `Isolation is off by default on a Linux host, and FORGE_WORKTREES=1 will NOT arm it here —\n` +
+      `the worktree preflight hard-fails on Linux, permanently by design (forge's orchestrator is\n` +
+      `macOS-only; "Linux" in those gates means the agent container).\n` +
+      `\n` +
+      `  dispatch against a CLONE of the forge checkout instead (the fix)\n` +
+      `  FORGE_NO_WORKTREES=1   proceed anyway on the shared checkout (explicit, acknowledged override)`
+    );
+  }
+  return (
+    `Isolation is off by default on this ${process.platform} host — the platform default is darwin-only.\n` +
+    `\n` +
+    `  FORGE_WORKTREES=1      arm worktree isolation so agents work in a task-scoped workspace (the fix)\n` +
+    `  FORGE_NO_WORKTREES=1   proceed anyway on the shared checkout (explicit, acknowledged override)`
+  );
+}
+
 function refusalMessage(projectDir: string, sourceRoot: string): string {
   return (
     `forge: REFUSING to dispatch — self-host dispatch with worktree isolation off (FG-612).\n` +
@@ -63,8 +94,7 @@ function refusalMessage(projectDir: string, sourceRoot: string): string {
     `src/ in-process (FG-569) — a half-written file is immediately live for every forge\n` +
     `process on this host.\n` +
     `\n` +
-    `  FORGE_WORKTREES=1     arm worktree isolation so agents work in a task-scoped worktree (the fix)\n` +
-    `  FORGE_NO_WORKTREES=1  proceed anyway on the shared checkout (explicit, acknowledged override)`
+    remediation()
   );
 }
 
@@ -89,8 +119,8 @@ export function assertSelfHostDispatchAllowed(projectDir: string, sourceRoot = f
       process.stderr.write(
         `forge: WARNING — dispatching against the live forge source at ${key} with worktree isolation ` +
           `disabled (FORGE_NO_WORKTREES=1). Agents are writing to the source tree this forge is executing; ` +
-          `partial writes are live for every forge process on this host. Set FORGE_WORKTREES=1 (and unset ` +
-          `FORGE_NO_WORKTREES) to isolate instead.\n`
+          `partial writes are live for every forge process on this host. On a host where isolation is ` +
+          `supported, unset FORGE_NO_WORKTREES (and any explicit FORGE_WORKTREES=0) to isolate instead.\n`
       );
     }
     return;

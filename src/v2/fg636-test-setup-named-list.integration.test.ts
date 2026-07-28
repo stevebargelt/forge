@@ -1,9 +1,17 @@
 // FG-636 defense in depth (AC 5) — `src/test-setup.ts`'s named list is a
 // CONTRACT with two sides, and both of them can be broken by a tidy-up.
 //
-// The list clears exactly three ambient PRODUCTION switches so no launcher's
+// The list neutralizes exactly three ambient PRODUCTION switches so no launcher's
 // environment can decide a test outcome:
 //     FORGE_WORKTREES, FORGE_NO_WORKTREES, FORGE_WORKTREE_IGNORE_DIRTY
+//
+// FG-345 split how: two are CLEARED, but FORGE_WORKTREES is PINNED to "0", because
+// isolation is now default-ON with a platform-dependent default. Clearing it would
+// hand the suite's outcome to process.platform — green on CI's Linux, red on the
+// macOS host — which is the failure mode this file exists to prevent, arriving by a
+// different door. Both spellings are equally load-bearing here: an ambient "1" must
+// not survive either way.
+//
 // It is deliberately NOT `for (const k of Object.keys(process.env)) if
 // (k.startsWith("FORGE_")) delete …`, which is the obvious "simplification" and
 // is wrong: harness INPUTS live in the same namespace and are legitimate.
@@ -35,8 +43,13 @@ import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-/** Cleared: production switches that reconfigure the code under test. */
-const PRODUCTION_SWITCHES = ["FORGE_WORKTREES", "FORGE_NO_WORKTREES", "FORGE_WORKTREE_IGNORE_DIRTY"] as const;
+/** Production switches that reconfigure the code under test. Each maps to what
+ *  must survive preload: `undefined` for cleared, a string for pinned (FG-345). */
+const PRODUCTION_SWITCHES: Record<string, string | undefined> = {
+  FORGE_WORKTREES: "0",
+  FORGE_NO_WORKTREES: undefined,
+  FORGE_WORKTREE_IGNORE_DIRTY: undefined,
+};
 
 /** Preserved: harness inputs the suite is *supposed* to read. */
 const HARNESS_INPUTS: Record<string, string> = {
@@ -49,14 +62,14 @@ const PROBE = `console.log("FG636_PROBE " + JSON.stringify(
 ));
 `;
 
-test("FG-636 — test-setup clears the production switches and PRESERVES the harness inputs", (t) => {
+test("FG-636 — test-setup neutralizes the production switches and PRESERVES the harness inputs", (t) => {
   const dir = mkdtempSync(join(tmpdir(), "fg636-probe-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const probe = join(dir, "probe.mjs");
   writeFileSync(probe, PROBE);
 
   const childEnv: NodeJS.ProcessEnv = { ...process.env };
-  for (const key of PRODUCTION_SWITCHES) childEnv[key] = "1";
+  for (const key of Object.keys(PRODUCTION_SWITCHES)) childEnv[key] = "1";
   Object.assign(childEnv, HARNESS_INPUTS);
   delete childEnv["NODE_TEST_CONTEXT"];
 
@@ -75,11 +88,13 @@ test("FG-636 — test-setup clears the production switches and PRESERVES the har
   assert.ok(line, `the probe never reported — a child that did not run proves nothing:\n${output}`);
   const seen = JSON.parse(line.slice("FG636_PROBE ".length)) as Record<string, string>;
 
-  for (const key of PRODUCTION_SWITCHES) {
+  for (const [key, expected] of Object.entries(PRODUCTION_SWITCHES)) {
     assert.equal(
       seen[key],
-      undefined,
-      `${key} survived test-setup: an ambient production switch can still decide a test outcome (${JSON.stringify(seen)})`,
+      expected,
+      `${key} was set to "1" in the child's environment and test-setup left it at ${JSON.stringify(seen[key])} ` +
+        `instead of ${JSON.stringify(expected)}: an ambient production switch can still decide a test outcome ` +
+        `(${JSON.stringify(seen)})`,
     );
   }
 
