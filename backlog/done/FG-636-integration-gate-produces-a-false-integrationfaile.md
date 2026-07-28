@@ -1,9 +1,11 @@
 ---
 id: FG-636
 type: story
-status: active
+status: done
 title: Integration gate produces a false integration_failed on an UNMODIFIED candidate — the unit tier passes in CI and on the host at the same sha but fails inside the publication worktree
 created: 2026-07-28
+closed: 2026-07-28
+closed_commit: d731ed5e
 ---
 
 **Found 2026-07-28** by the FG-621 AC 11 dogfood (`run-fg-628-…-dogfood-3-8a668c`), immediately after
@@ -175,3 +177,18 @@ the same one that passed in the gate, so the match is exact rather than approxim
 strip withholds it from verification as well. That is a no-op today — it is unset in the orchestrator
 environment, and `node-preflight.integration.test.ts` falls back to scanning installed interpreters —
 but it is recorded here in case a future host relies on it for extended verification.
+
+## Acceptance Evidence
+
+Shipped in `8cdb5f8f` (PR #168, merged as `d731ed5e`).
+
+| AC | Evidence | Verdict |
+|---|---|---|
+| 1. Reproduce deterministically: the unit tier passes on the host and in CI at a given sha, and the same tier run by the gate against an unmodified candidate at that sha fails; capture the failing set. | Four runs in the retained failing candidate `~/.forge/worktrees/publications/f803fe43-…-r0`, clean at `de356f6a`: the 3 suspect files pass 10/10; the FULL `npm run test:unit` passes 2826/0 (launch `launch-fg636-repro-tier-ppatvs`); 5 rounds under 20-way CPU saturation pass 10/10 each (`launch-fg636-load-ki9inh`); and `FORGE_WORKTREES=1` on the same 3 files yields **9 fail / 1 pass**. The failing set is captured in the ticket's Mechanism section and matches the gate's original nine exactly, including the single passer (`fg482 single-step: CAS loses a race`). CI green at `de356f6a` = PR #167, nine checks. | met |
+| 2. Identify the actual mechanism with evidence — name the file and the assumption that breaks. | `src/v2/host-readiness.ts:630` `pinnedVerificationEnv`. The broken assumption is stated in its own former doc comment: *"a verification legitimately needs the operator's environment."* True for generic env, false for forge's `FORGE_*` control switches, which reconfigure the code under test. Chain proven end-to-end: launch record `2026-07-28T01:55:35.994Z` shows the wave ran as `env FORGE_WORKTREES=1 forge next …` → `pinnedVerificationEnv` spreads it → `src/v2/worktree-lifecycle.ts:45` `isWorktreeModeEnabled()` returns true in every test child → dispatch aborts against `.git`-less mkdtemp project dirs before `writeTaskManifest` (`runNext.ts:3212`). Hypotheses 1 (location) and 2 (load/DB concurrency) each falsified by their own run above. | met |
+| 3. Fix it so the gate's verdict reflects the candidate's code and nothing about where the candidate lives or what else runs on the host. | `pinnedVerificationEnv` now copies `process.env` except every `FORGE_`-prefixed key, then applies the pinned PATH — a denylist on forge's reserved namespace, not `setupEnv`'s allowlist. Covers both Forge-owned callers in one change: `src/v2/integration-gate.ts:75` and `src/v2/review-loop.ts:351`. Proven at the caller, not just the constructor: `FG-636 — runIntegrationGate passes a candidate whose suite the orchestrator's FORGE_* would have failed` and `FG-636 — review-loop verification (default runner) reaches the candidate with no FORGE_* set` (`src/v2/fg636-verification-callers.integration.test.ts`). Location and load were independently eliminated in AC 1. | met |
+| 4. Add a regression that would fail if the gate's execution context could again change a test outcome. | Nine regression tests across four files. Execution-context tests: `FG-636 — a dispatch test still passes with FORGE_WORKTREES=1 in the PARENT environment` and `FG-636 — the same test passes under the env the gate actually builds from a poisoned parent` (`src/v2/fg636-gate-execution-context.integration.test.ts`). Env-shape tests: three in `src/v2/fg636-verification-env.test.ts`. **Each proven to bite** by reverting its own fix independently: reverting `host-readiness.ts` alone fails 3, reverting `test-setup.ts` alone fails 1, neither masking the other (orchestrator-run mutation test). The caller tests fail on the caller's own verdict field (`gate.ok false`), reproducing the original harm through the shipped entrypoint rather than re-asserting an env shape. | met |
+| 5. If part is genuinely test-side, fix the test AND state why the gate exposed it when CI did not. | Test-side half shipped in `src/test-setup.ts`: an explicit named list clearing `FORGE_WORKTREES`, `FORGE_NO_WORKTREES`, `FORGE_WORKTREE_IGNORE_DIRTY` before any test sets a controlled value. Deliberately NOT a namespace sweep — harness inputs `FORGE_TEST_MISMATCHED_NODE` (provisioned by CI into all five `test-extended` shards, a hard requirement of `src/cli/node-preflight.integration.test.ts:287`) and `FORGE_TEST_PRINT_CMD` survive; the boundary is pinned from both sides by `FG-636 — test-setup clears the production switches and PRESERVES the harness inputs` and `FG-636 — the CI side of that contract: every integration shard still provisions the mismatched Node`. **Why the gate exposed it when CI did not:** CI runs the tier in a clean environment with no `FORGE_*` production switch set; the gate ran it with the orchestrator's inherited environment. Recorded in the ticket and in `docs/concepts.md`. | met |
+| 6. `forge-test` green; required CI checks green. | `forge-test` unit tier 2829/0 and `forge-test --all` (2829 root + 138 dashboard) green in-loop; `forge-test --worktree` 401/401 — the tier most at risk from the test-setup change — and `--integration` 3983 pass / 0 fail / 1 skipped. `npm run typecheck` clean on the host at `8cdb5f8f`. Bounded review-loop `run-review-loop-fg-636-56e63f`: stop reason `passed`, `closeable: yes`, reviewer `red-wide` pass round 1, reviewed tip equal to remote head. Required CI on PR #168: `test` and `test-extended` both green at `8cdb5f8f`. | met |
+
+**Docs impact:** updated — `docs/concepts.md` (verification-environment contract added; the prepare-or-refuse primitive points at it; the trust model's "operator's inherited environment" corrected, with an explicit statement that withholding the namespace is correctness hygiene and narrows no attack surface).

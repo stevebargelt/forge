@@ -68,3 +68,12 @@ While in the file, check the sibling lease tests for the same pattern — any ot
   passing condition has headroom well beyond observed scheduling jitter.
 - The generation-fencing half of the test (wrong generation is refused) is preserved.
 - Sibling lease tests audited for the same live-clock knife-edge.
+
+## Sighting log
+
+- **2026-07-28** (third recorded sighting) — hit once during FG-636's implementation, on the FIRST
+  full unit-tier run inside the engineer's container; did not recur across 4 subsequent full-tier runs
+  or 8 isolated runs of the file. Causally unrelated to that diff (the file uses an in-memory DB and a
+  fake clock offset, and reads no `FORGE_*` variable). Consistent with the ~2% idle-host flake rate
+  this ticket already records, and independent corroboration that the knife-edge is timing, not
+  environment.
