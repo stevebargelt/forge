@@ -98,6 +98,50 @@ function writeVendorDep(dir: string, dep: string): void {
   writeFileSync(join(depDir, "index.js"), `export const name = ${JSON.stringify(dep)};\n`);
 }
 
+/** A vendored dependency shaped like a NATIVE one: it ships no usable entrypoint
+ *  until its `install` lifecycle script has produced `build/`. This is
+ *  better-sqlite3's shape with node-gyp swapped for a script that needs no
+ *  toolchain and no network — `binding.mjs` stands in for
+ *  `build/Release/better_sqlite3.node`, and the STATIC import of it in index.js is
+ *  what makes an unbuilt package fail at module load, exactly as
+ *  `Could not locate the bindings file` does.
+ *
+ *  THIS IS THE FIXTURE THE SUITE WAS MISSING. Every dependency above is pure
+ *  JavaScript, which is precisely why suppressed lifecycle scripts sailed through
+ *  it: `npm ci` exits zero either way, and only a package that must BUILD can tell
+ *  the difference between "installed" and "installed and usable".
+ *
+ *  `buildExit` non-zero is the native BUILD FAILURE case — a node-gyp that cannot
+ *  compile. */
+function writeNativeVendorDep(dir: string, dep: string, opts: { buildExit?: number } = {}): void {
+  const depDir = join(dir, "vendor", dep);
+  mkdirSync(depDir, { recursive: true });
+  writeFileSync(
+    join(depDir, "package.json"),
+    `${JSON.stringify(
+      { name: dep, version: "1.0.0", type: "module", main: "index.js", scripts: { install: "node ./build.mjs" } },
+      null,
+      2,
+    )}\n`,
+  );
+  writeFileSync(
+    join(depDir, "build.mjs"),
+    opts.buildExit
+      ? [
+          `process.stderr.write("FG566_NATIVE_BUILD_FAILURE: gyp ERR! build error — no toolchain for ${dep}\\n");`,
+          `process.exit(${opts.buildExit});`,
+          ``,
+        ].join("\n")
+      : [
+          `import { mkdirSync, writeFileSync } from "node:fs";`,
+          `mkdirSync(new URL("./build/", import.meta.url), { recursive: true });`,
+          `writeFileSync(new URL("./build/binding.mjs", import.meta.url), "export const binding = 'built';\\n");`,
+          ``,
+        ].join("\n"),
+  );
+  writeFileSync(join(depDir, "index.js"), `export { binding as name } from "./build/binding.mjs";\n`);
+}
+
 function packageJson(deps: string[]): string {
   return `${JSON.stringify(
     {
@@ -213,6 +257,11 @@ type GateRun = { cwd: string; deps: string[]; nodeModules: boolean };
 type ProjectOpts = {
   /** Dependencies package.json declares and the gate imports. */
   deps?: string[];
+  /** Dependencies that must BUILD during install to be importable — the native
+   *  shape. Declared and imported exactly like `deps`. */
+  nativeDeps?: string[];
+  /** Non-zero ⇒ the native dependency's build script fails with that exit code. */
+  nativeBuildExit?: number;
   /** Dependencies the LOCKFILE records. Defaults to `deps`; making it differ puts
    *  package.json and the lockfile out of sync, which is how falsification 2 forces
    *  a deterministic, offline setup failure (`npm ci` exits EUSAGE). */
@@ -230,11 +279,18 @@ function makeProject(runId: string, opts: ProjectOpts = {}): Fixture {
   const gateLog = join(root, "gate-runs.jsonl");
   mkdirSync(dir, { recursive: true });
 
-  const deps = opts.deps ?? ["dep-one"];
+  const nativeDeps = opts.nativeDeps ?? [];
+  const deps = [...(opts.deps ?? ["dep-one"]), ...nativeDeps];
   const lockDeps = opts.lockDeps ?? deps;
 
-  writeFileSync(join(dir, ".gitignore"), "node_modules/\n");
-  for (const d of new Set([...deps, ...lockDeps])) writeVendorDep(dir, d);
+  // `vendor/*/build/` is the native dependency's build OUTPUT, gitignored the way
+  // every real project gitignores one — so a preparation that runs lifecycle
+  // scripts still leaves the candidate porcelain-clean (falsification 5).
+  writeFileSync(join(dir, ".gitignore"), "node_modules/\nvendor/*/build/\n");
+  for (const d of new Set([...deps, ...lockDeps])) {
+    if (nativeDeps.includes(d)) writeNativeVendorDep(dir, d, { ...(opts.nativeBuildExit ? { buildExit: opts.nativeBuildExit } : {}) });
+    else writeVendorDep(dir, d);
+  }
   writeFileSync(join(dir, "package.json"), packageJson(deps));
   writeFileSync(join(dir, "package-lock.json"), lockfile(lockDeps));
   writeFileSync(join(dir, "gate.mjs"), gateScript(deps, gateLog));
@@ -639,4 +695,133 @@ test("FG-566 falsification 5: with preparation in the path, the GATED tree and t
     "dependencies must NOT alter the candidate Git tree or the published commit",
   );
   assert.equal(git(p.dir, ["status", "--porcelain"]), "", "the publish target's working tree is clean after publication");
+});
+
+// ---------------------------------------------------------------------------
+// Falsifications 7-9 — THE NATIVE DEPENDENCY. Everything above is pure
+// JavaScript, and that is exactly why suppressed install lifecycle scripts
+// shipped: `npm ci` exits zero with or without them, so a JS-only fixture cannot
+// tell "installed" from "installed and usable". Only a package that must BUILD
+// can.
+//
+// THE LIVE FAILURE, reproduced: a candidate worktree prepared by the pre-fix code
+// contained `node_modules/better-sqlite3/` with `binding.gyp`, `deps`, `lib`,
+// `src` — and NO `build/` directory. `npm ci` reported success, readiness
+// certified the workspace ready, and every DB-backed test then died on
+// `Error: Could not locate the bindings file`, recorded as a verdict on the code.
+// ---------------------------------------------------------------------------
+
+test("FG-566 falsification 7 (NATIVE): a candidate whose dependency must BUILD during install is prepared and gated GREEN (pre-fix: install scripts suppressed ⇒ no build/ ⇒ the gate dies at module load)", async () => {
+  const runId = "fg566-f7";
+  const p = makeProject(runId, { nativeDeps: ["native-dep"] });
+  const branch = branchWithWork(p, "task-a", (dir) => {
+    writeFileSync(join(dir, "agent-work.txt"), "the agent's output\n");
+  });
+
+  const out = await publishIntegration({
+    runId,
+    taskId: "task-build-1",
+    projectDir: p.dir,
+    sources: [{ branch, label: "task" }],
+    lane: laneOpts,
+    alsoValidate: () => ok(),
+  });
+  trackCandidate(out);
+
+  assert.equal(
+    out.kind,
+    "published",
+    `a native dependency must be BUILT by preparation, not merely unpacked — got ${String(out.kind)}`,
+  );
+  if (out.kind !== "published") return;
+
+  const runs = gateRuns(p);
+  assert.equal(runs.length, 1, "the gate ran to completion — an unbuilt native package dies at module load instead");
+  assert.deepEqual(
+    runs[0]?.deps,
+    ["dep-one", "built"],
+    "the gate imported the BUILT artifact: `built` is produced only by the install lifecycle script",
+  );
+
+  // Falsification 5 still holds with lifecycle scripts in the path: the build
+  // output is gitignored, so preparation did not move the tree it prepared.
+  assert.equal(out.publishedSha, out.candidateSha, "the gated tree is the published tree");
+  assert.equal(git(p.dir, ["status", "--porcelain"]), "", "the publish target is clean");
+  assert.equal(readinessRefusals(runId).length, 0, "a successful native build is not a refusal");
+});
+
+test("FG-566 falsification 8 (NATIVE BUILD FAILURE): a failed native build during setup is a READINESS failure — nothing published, no target ref movement, and NO gate verdict", async () => {
+  const runId = "fg566-f8";
+  // The build script exits non-zero, the way node-gyp does on a host with no
+  // toolchain. Pre-fix this was UNREACHABLE: the build never ran at all, so the
+  // workspace was certified ready and the failure surfaced later as a code verdict.
+  const p = makeProject(runId, { nativeDeps: ["native-dep"], nativeBuildExit: 9 });
+  const branch = branchWithWork(p, "task-a", (dir) => {
+    writeFileSync(join(dir, "agent-work.txt"), "the agent's output\n");
+  });
+  const baseBefore = readTargetSha(localTargetFor(p.dir));
+
+  let alsoValidateRan = false;
+  const out = await publishIntegration({
+    runId,
+    taskId: "task-build-1",
+    projectDir: p.dir,
+    sources: [{ branch, label: "task" }],
+    lane: laneOpts,
+    alsoValidate: () => {
+      alsoValidateRan = true;
+      return ok();
+    },
+  });
+  trackCandidate(out);
+
+  assert.ok(
+    !EXISTING_PUBLISH_OUTCOMES.includes(String(out.kind)),
+    `a native build failure is an ENVIRONMENT outcome, not a verdict on the candidate — got ${String(out.kind)}`,
+  );
+  assert.equal(readTargetSha(localTargetFor(p.dir)), baseBefore, "the target ref is byte-identical");
+  assert.equal(existsSync(join(p.dir, "agent-work.txt")), false, "nothing was published");
+  assert.equal(gateRuns(p).length, 0, "the gate must not run against a workspace whose bindings could not be built");
+  assert.equal(alsoValidateRan, false);
+
+  const refusals = readinessRefusals(runId);
+  assert.equal(refusals.length, 1, "readiness stops ONCE, with one classified refusal");
+  const payload = refusals[0] ?? {};
+  assert.equal(payload["reason"], "setup_failed", "a build that exited non-zero failed the SETUP, and that is what it is called");
+  assert.match(
+    String(payload["stderrTail"]),
+    /FG566_NATIVE_BUILD_FAILURE/,
+    "the build's own output is what the operator is handed — diagnosis without an `ls`",
+  );
+});
+
+test("FG-566 falsification 9 (NATIVE, INVERSE DEFECT): a genuine test failure after a SUCCESSFUL native build is still a code verdict", async () => {
+  const runId = "fg566-f9";
+  const p = makeProject(runId, { nativeDeps: ["native-dep"] });
+  const branch = branchWithWork(p, "task-a", (dir) => {
+    writeFileSync(join(dir, "verdict.txt"), "fail\n");
+  });
+  const baseBefore = readTargetSha(localTargetFor(p.dir));
+
+  const out = await publishIntegration({
+    runId,
+    taskId: "task-build-1",
+    projectDir: p.dir,
+    sources: [{ branch, label: "task" }],
+    lane: laneOpts,
+    alsoValidate: () => ok(),
+  });
+  trackCandidate(out);
+
+  // The half that gets broken by accident: making native build failures
+  // environmental must not make ANY failure environmental.
+  assert.equal(out.kind, "validation_failed", `a real code failure keeps EXISTING behavior — got ${String(out.kind)}`);
+  if (out.kind !== "validation_failed") return;
+  assert.match(out.error, /FG566_GENUINE_TEST_FAILURE/);
+  assert.equal(readinessRefusals(runId).length, 0, "a code failure must NOT emit a readiness refusal");
+
+  const runs = gateRuns(p);
+  assert.equal(runs.length, 1);
+  assert.deepEqual(runs[0]?.deps, ["dep-one", "built"], "the gate that failed was running against a BUILT workspace");
+  assert.equal(readTargetSha(localTargetFor(p.dir)), baseBefore, "a failed gate publishes nothing");
 });

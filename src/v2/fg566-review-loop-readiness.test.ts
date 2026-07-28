@@ -59,6 +59,7 @@ const READINESS_TOKEN = "verification_environment_unavailable";
  *  state — a refusal is a refusal regardless of which fidelity check produced it. */
 const REFUSAL_REASONS = [
   "no_setup_contract",
+  "ambiguous_setup_contract",
   "runtime_unresolved",
   "runtime_abi_mismatch",
   "setup_failed",
