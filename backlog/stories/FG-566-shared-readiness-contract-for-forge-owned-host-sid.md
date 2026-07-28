@@ -294,21 +294,59 @@ produces a working tree there. The suite proved the contract against a project s
 match the real one. This is the fixtures-must-match-the-real-contract failure, and it is why AC 1
 needs a native-dependency case before it can be called met.
 
+### Trust model — DECIDED 2026-07-27 by the operator
+
+**Lifecycle-script suppression is DROPPED.** The boundary it appeared to provide was internally
+inconsistent: immediately after preparation, Forge runs the candidate-controlled `npm run test:unit`
+on the host with the inherited operator environment, and the candidate can modify that script and
+every test file it names. Blocking install scripts therefore never prevented hostile candidate code
+from executing — it only prevented legitimate native dependencies from working.
+
+**A rebuild allowlist was considered and REJECTED** as worse architecture: package names and lockfile
+identities are themselves candidate-controlled; native-dependency requirements vary by project; it
+grows into the dependency-policy system this ticket explicitly fenced out; and it still does not
+protect the host once verification begins.
+
+**What is kept:** the reduced/minimal setup environment, and the setup-command provenance rule (the
+workspace under test supplies data only; the operator supplies the command). Normal `npm ci`
+lifecycle scripts run.
+
+**The honest trust model, to be documented as such:** host verification assumes candidate code is not
+actively malicious. If hostile-candidate isolation ever becomes a requirement, **installation and
+verification must both move into a sandbox** — an install-script allowlist cannot provide that
+boundary, and should not be presented as if it could.
+
+### Readiness, defined narrowly and truthfully
+
+Readiness asserts exactly three things and no more:
+
+1. the standard dependency setup completed;
+2. runtime/ABI bindings match;
+3. preparation did not modify the Git tree.
+
+It **cannot** promise that arbitrary verification commands will pass without running them, and must
+not be documented or implemented as if it does. With lifecycle scripts restored, a **native build
+failure becomes a correctly classified readiness failure**, while a **subsequent test failure remains
+a code verdict**. That is the whole distinction this ticket exists to draw.
+
 ### Added acceptance criteria
 
-13. A project with a NATIVE dependency (better-sqlite3 is the obvious fixture — forge itself is the
-    real case) is prepared into a candidate worktree and **the covered command set actually runs
-    there**. Observed RED against current behavior first, citing the missing
-    `better-sqlite3/build/`.
-14. The setup contract can express a real multi-step bootstrap, or the ticket states explicitly why a
-    single argv is sufficient and how a native-dependency project is served without one. Whatever the
-    grammar becomes, it must be documented, and it must not reintroduce free-form shell from an
-    untrusted tree (the FG-566 trust boundary stands).
-15. A workspace that is prepared but NOT executable for its covered command set is a readiness
-    REFUSAL, not a `ready`. A `ready` assertion that yields `Cannot find module` / missing-binding
-    failures downstream is the defect this ticket exists to eliminate.
-16. Lifecycle-script suppression is preserved for the publication path, or the change states what
-    replaces it and why the merged-agent-branch threat is still addressed.
-
-AC 11 of FG-621 remains blocked on this: the dogfood cannot complete while the integration gate
-cannot prepare forge itself.
+13. Lifecycle-script suppression is removed: `npm_config_ignore_scripts` is no longer forced
+    (`src/v2/host-readiness.ts:474`). The minimal/reduced setup environment and the setup-command
+    provenance rule both survive unchanged — verify the FG-566 trust-boundary tests still pass.
+14. A project with a NATIVE dependency is prepared into a candidate worktree and the native binding
+    LOADS there. `better-sqlite3` is the fixture and forge itself is the real case. Observed RED
+    against current behavior first, citing the missing `better-sqlite3/build/`.
+15. The setup contract is a **structured sequence of argv arrays**, defaulting to `[["npm", "ci"]]`. A shell is **never** invoked. An ambiguous free-form compound
+    command is **rejected** rather than split on whitespace (this closes the convergent
+    red-backend / shipping-reviewer finding that was dropped during the build phase). The grammar is
+    documented.
+16. A **native build failure during setup** is a readiness failure with a named reason and publishes
+    nothing. A **test failure after a successful setup** is still a code verdict
+    (`integration_failed` / normal verification failure). Assert both halves — this is the inverse
+    defect, restated for the native case.
+17. Docs state the trust model honestly: host verification assumes candidate code is not actively
+    malicious, and real isolation would require sandboxing both installation and verification.
+18. **The FG-621 AC 11 dogfood is re-run and the real gate completes** — the native binding loads and
+    the gate reaches a genuine verdict. FG-566 closes only on that, not on the suite alone. The
+    fixture-only pass is what let AC 1 be wrongly called met the first time.
