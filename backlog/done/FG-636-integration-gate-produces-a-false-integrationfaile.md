@@ -114,7 +114,7 @@ The chain for this run:
 1. The dogfood's wave was launched as `env FORGE_WORKTREES=1 forge next run-fg-628-…` (launch record,
    `2026-07-28T01:55:35.994Z`), so the switch was live in the forge process env.
 2. `pinnedVerificationEnv` spread it into the `npm run test:unit` child.
-3. `src/v2/worktree-lifecycle.ts:45` — `isWorktreeModeEnabled()` returns `process.env.FORGE_WORKTREES === "1"`
+3. `src/v2/worktree-lifecycle.ts:45` — `isWorktreeModeEnabled()` returns `process.env.FORGE_WORKTREES === "1"`  *(Superseded by FG-345, 2026-07-28: isolation is default-on. The resolver is now kill-switch → explicit value → platform default (darwin on, else off), and `test-setup.ts` PINS `FORGE_WORKTREES="0"` rather than clearing it — clearing would hand the suite's outcome to `process.platform`. The mechanism FG-636 relied on is unchanged in effect: an ambient `"1"` still cannot survive preload.)*
    — so **worktree mode was ON for every unit-test child process**.
 4. The affected tests dispatch against `mkdtemp` project dirs with no `.git`, so worktree creation
    fails and dispatch aborts before writing the task manifest: fg366 reads a manifest that was never
