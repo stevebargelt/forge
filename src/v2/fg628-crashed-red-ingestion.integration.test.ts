@@ -294,3 +294,42 @@ test("(fg628-B3) a red that RAN and passed advances the phase — the new channe
   assert.equal(verdict!.verdict, "pass");
   assert.equal(verdict!.findings.length, 0, "a clean pass must carry no synthetic findings");
 });
+
+// ─── (B4) the event and the block it describes are one transition ────────────
+
+// FG-482's invariant applied to this channel: the timeline must never claim a red
+// never ran unless the verdict that BLOCKS the gate is persisted too. Written
+// outside and ahead of insertVerdict, a crash (or a failing insert) leaves the
+// unsafe half — an operator reads "review never ran" while nothing stops the gate.
+//
+// Forces the verdict insert to fail with the same technique
+// fg482-blocked-by-red-atomicity.test.ts uses for its own write (a BEFORE INSERT
+// trigger that RAISE(ABORT)s) and asserts the event rolled back with it.
+test("(fg628-B4) a failed verdict insert leaves NO verdict.review_never_ran event behind — the event and the block it describes roll back together", async () => {
+  db.exec(`
+    CREATE TRIGGER force_fail_verdict_insert
+    BEFORE INSERT ON verdicts
+    BEGIN
+      SELECT RAISE(ABORT, 'forced failure for fg628 ordering test');
+    END;
+  `);
+
+  await assert.rejects(
+    () => runWithRed({ exitCode: 1 }),
+    /forced failure for fg628 ordering test/,
+    "runNext must propagate the forced insertVerdict failure",
+  );
+
+  const leftoverEvents = db
+    .prepare(`SELECT COUNT(*) AS n FROM events WHERE event_type = 'verdict.review_never_ran'`)
+    .get() as { n: number };
+  assert.equal(
+    leftoverEvents.n,
+    0,
+    "a verdict.review_never_ran event with no persisted verdict is the UNSAFE half-state: the timeline claims " +
+      "no review ran while nothing blocks the gate",
+  );
+
+  const persistedVerdicts = db.prepare(`SELECT COUNT(*) AS n FROM verdicts`).get() as { n: number };
+  assert.equal(persistedVerdicts.n, 0, "non-vacuity: the insert really did fail");
+});

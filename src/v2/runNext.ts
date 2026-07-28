@@ -1414,11 +1414,6 @@ async function dispatchReds(args: {
           ...finalVerdict.findings,
         ],
       };
-      logEvent("verdict.review_never_ran", {
-        runId: args.runId,
-        taskId: args.primaryTaskId,
-        payload: { redRole: r.red.agent, redTaskId: r.redTaskId, authority: r.red.authority },
-      });
     }
     // FG-420 / FG-586: an authoritative gate_on_verdict red that could not deliver
     // a real, shippable verdict must BLOCK — never silently advance as inconclusive.
@@ -1489,6 +1484,17 @@ async function dispatchReds(args: {
         taskId: args.primaryTaskId,
         payload: { redRole: r.red.agent, verdict: finalVerdict.verdict, authority: r.red.authority },
       });
+      // FG-628: written INSIDE the same transaction as the verdict it describes.
+      // On its own (outside, ahead of the insert) the timeline could claim a red
+      // never ran while no persisted verdict/block exists to stop the gate —
+      // the half-applied state FG-482 forbids for this transition.
+      if (reviewNeverRanBlock) {
+        logEvent("verdict.review_never_ran", {
+          runId: args.runId,
+          taskId: args.primaryTaskId,
+          payload: { redRole: r.red.agent, redTaskId: r.redTaskId, authority: r.red.authority },
+        });
+      }
     });
     crashPoint("dispatchReds:after-verdict-insert");
     // Gate on the GRADED verdict — a fail emptied by grading no longer blocks.
