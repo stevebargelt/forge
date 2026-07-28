@@ -350,3 +350,27 @@ a code verdict**. That is the whole distinction this ticket exists to draw.
 18. **The FG-621 AC 11 dogfood is re-run and the real gate completes** — the native binding loads and
     the gate reaches a genuine verdict. FG-566 closes only on that, not on the suite alone. The
     fixture-only pass is what let AC 1 be wrongly called met the first time.
+
+### Dogfooding host-side behavior requires the fix to be INSTALLED, not merely committed
+
+Learned by wasting a run (`run-fg-628-…-dogfood-2-3ea443`, 2026-07-28). Record this before anyone
+designs another dogfood around a branch.
+
+The integration gate — and readiness with it — runs **host-side, in the forge process that is
+executing**, which is the npm-linked live checkout at `~/code/forge`. The *candidate tree* comes from
+the project under test, but the *readiness code* does not. So a dogfood run against a clone that
+carries the fix, driven by a `forge` binary that does not, silently exercises the OLD code path
+against a NEW candidate and reproduces the original failure verbatim.
+
+Concretely: candidate `772eb5a0` (clone, fix present, `npm_config_ignore_scripts` deliberately unset)
+was prepared by `~/code/forge` at a commit where `host-readiness.ts:474` still forced
+`npm_config_ignore_scripts: "true"`. Identical `Could not locate the bindings file` failure, 1992
+assertions, and nothing about the fix was tested.
+
+**The distinction that matters:** agent-side changes dogfood correctly from a branch, because the
+container mounts the project under test. **Orchestrator/host-side changes do not** — readiness, the
+integration gate, publication, the review-loop, capture. Those must be merged and pulled into the
+executing checkout first.
+
+This is a property of FG-621 AC 11 in general, not of this ticket. Any AC that says "dogfood it"
+needs to say *which* forge is running.
