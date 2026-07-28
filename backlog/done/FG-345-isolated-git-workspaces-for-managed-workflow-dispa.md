@@ -1,9 +1,11 @@
 ---
 id: FG-345
 type: story
-status: active
+status: done
 title: "isolated Git workspaces for managed workflow-dispatched agents: writable private Git for mutators + read-only worktrees for non-mutators"
 created: 2026-06-22
+closed: 2026-07-28
+closed_commit: f50e383
 ---
 
 ### Isolated Git workspaces for ALL agents: private commit authority + Forge publication authority
@@ -367,3 +369,72 @@ sites declare `never-isolated` and refuse. The refusal deliberately omits `FORGE
 would not change what an invoke mounts, so that advice would return the operator to the hazard believing
 it fixed — and points at a disposable clone, with `FORGE_NO_WORKTREES=1` as the explicit acknowledged
 override.
+
+## Acceptance Evidence
+
+Default-on shipped in `3ce0385` (PR #170). The self-host guard regression it exposed was fixed in
+`f50e383` (PR #171). Scope narrowed to **managed workflow-dispatched agents** — see the scope
+reconciliation above; `forge invoke` and today's `review-loop` are deliberately outside the guarantee.
+
+### "Acceptance proof required before default-on"
+
+| Required proof | Evidence | Verdict |
+|---|---|---|
+| Two mutating agents commit concurrently in independent private repositories. | FG-621 AC 1 — `two concurrent mutating agents commit in their private clones with NO ambient git identity, and both sets reach the host`; `two clones of one parent commit independently — neither sees the other's work`. | met |
+| Neither agent can mutate the parent's refs, index, object store, or target branch. | FG-621 AC 2, re-captured live at `71d7eae`: eleven negative probes, each refused by the kernel or git — ref creation, `main`, `origin/*`, packed-ref, raw `packed-refs` append, object delete, object-store write, pack-dir delete, index write, HEAD write, push-to-parent. | met |
+| Uncommitted tracked and untracked output is captured at completion. | FG-621 AC 3 — a clone left with a tracked edit AND an untracked file has both in the captured tip; end-to-end both halves reach the published tree. | met |
+| A non-mutating/red agent reads the history it needs but cannot commit or update a ref. | FG-621 AC 7 — the red path is untouched, no clone, no agent identity; the parent objects dir binds `:ro` for red as well as blue. | met |
+| Sequential tasks start from the accepted predecessor candidate; fan-out siblings from the same recorded base. | FG-621 AC 4, asserted on recorded state (`tasks.base_sha`), plus live corroboration from the FG-628 dogfood where the recorded base equalled the clone's on-disk HEAD before the container started. | met |
+| The published tree is byte-for-byte the tree that passed the gates. | FG-621 AC 6 via FG-425 — `the gate runs against the CANDIDATE worktree, and the exact validated commit is what lands`, plus the base-churn rebuild-and-revalidate cases. | met |
+| A crash leaves a recoverable private workspace and durable evidence; cleanup cannot silently discard it. | FG-621 AC 9/AC 10 + FG-356 (reaps BOTH substrates). Retention is proved from the fail-safe side: foreign alternates, an ordinary clone, another task's clone, a dirty clone, and **the live source checkout — which can never be reaped, because no repository is its own alternate**. | met |
+| Publication contention serializes only the affected project + target branch. | FG-425 serialized publisher, keyed on a realpath-canonicalized `projectDir` + target. | met |
+
+### The default-on change itself
+
+| Claim | Evidence | Verdict |
+|---|---|---|
+| Isolation is the default, with a legacy escape. | `isWorktreeModeEnabled()` resolves kill switch → explicit value → platform default. `FORGE_NO_WORKTREES=1` retains highest precedence. | met |
+| The default cannot break a non-darwin host. | Platform-aware rather than a bare `true`: `preflightWorktreeGate` hard-fails on Linux and that gate is permanent by design (DEC-004; FG-358 closed out-of-scope). `fg345 (non-darwin)` asserts a bind-mount dispatch that COMPLETES, never throws — and mutation M2 (bare `return true`) fails it with the build step throwing on the Linux gate. | met |
+| The suite's outcome does not depend on the host platform. | `test-setup.ts` pins `FORGE_WORKTREES="0"`; `fg345 (pin-1)` asserts worktree mode is off under the preload on every platform, `(pin-3)` that a test's own opt-in still wins and that deleting the pin restores the platform default. **Verified end to end: the unit tier is 2829/2829 on the macOS host where the default resolves ON, matching CI's Linux count exactly.** Mutation M4 (restore clearing) fails the pin tests. | met |
+| Behavioral, not just predicate-level. | `fg345 (default-on)` drives a real dispatch and asserts an isolated workspace is created and `tasks.worktree_path` recorded; `(escape-1)`/`(escape-2)` assert the kill switch produces a bind-mount dispatch and outranks an explicit opt-in **at dispatch level**. Each proven to bite by a four-mutation matrix. | met |
+
+### The regression default-on exposed, and its fix
+
+| | Evidence |
+|---|---|
+| **What broke** | `assertSelfHostDispatchAllowed` short-circuited on `isWorktreeModeEnabled()`, reading *"isolation is the default on this host"* as *"this dispatch is isolated"*. Those coincided while isolation was opt-in. After default-on they diverged: `invoke.ts` provisions no workspace, so on macOS the flag read true, the guard returned early, and a **self-host `forge invoke` reached the live forge checkout unrefused** — the FG-612 hazard, silently reachable where it previously refused. Forge runs `src/` in-process (FG-569), so a half-written agent file is immediately live for every forge process on the host. |
+| **The fix** | The caller states what the dispatch does — `isolated` / `not-armed` / `never-isolated`. Workflow sites pass worktree mode through and keep prior behavior; invoke sites declare `never-isolated` and refuse. 30/30 in the guard suites; reverting the guard fails 6, including the regression itself. |
+| **Refusal quality** | The `never-isolated` refusal deliberately omits `FORGE_WORKTREES=1` — arming it would not change what an invoke mounts, so that advice would return the operator to the hazard believing it fixed. It names a disposable clone, with `FORGE_NO_WORKTREES=1` as the acknowledged override. The `not-armed` remediation is platform-correct: unset the explicit off on darwin, never suggest arming on linux, arming genuinely is the fix on win32. |
+
+### Docs
+
+`concepts.md` (isolation default-on, the workspace contract, the boundary), `invariants.md`,
+`SCHEMA-CONTRACT.md`, `quick-start.md` (first-dispatch callout), and
+`how-to-use-forge-across-projects.md` (the self-host refusal with real output, and why
+`FORGE_WORKTREES=1` is not the way through). The serialized-integration-publisher ADR carries a dated
+supersession marker rather than a rewrite; the fanout-orphan ADR was deliberately left alone because its
+claims describe the shared non-worktree path, which still exists.
+
+Four **closed** records that had become wrong operator guidance were annotated in place, original text
+preserved: FG-636 and FG-351 (superseded resolver / Linux-pending claims), FG-612 (a self-host dispatch
+with `FORGE_WORKTREES=1` proceeds — now workflow-only), and FG-620 (which named `FORGE_WORKTREES=1` as
+the guard's remedy, the exact advice the shipped refusal withholds).
+
+### The workspace contract — the carry-in question, answered
+
+Operator decision, recorded above and in `concepts.md`: a task workspace is committed tracked content at
+the recorded base SHA plus inputs explicitly supplied through Forge's own provisioning or environment
+mechanisms; ambient local checkout state is intentionally not inherited. No generic carry-in system was
+built and no child ticket was filed for one. `FORGE_NO_WORKTREES=1` is the supported escape.
+
+Honest limit recorded in `concepts.md`: the not-carried diagnostic uses
+`git ls-files --others --exclude-standard`, so it lists untracked-but-not-ignored paths only. `.env` and
+files like it are canonically gitignored, so the highest-value missing-input case emits **no diagnostic
+at all**. Collecting ignored files is out of scope by decision, not oversight.
+
+### Deferred, not closed over
+
+**FG-637** — fan-out end-to-end composition coverage. **Invoke-path isolation** — out of scope by
+decision; the invoke path has no candidate construction or publication machinery, and the evidence-led
+review programme is expected to replace legacy `review-loop` behavior, which is where that question
+lands. No merge/publication machinery was built for it here.
