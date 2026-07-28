@@ -2,7 +2,7 @@
 id: FG-345
 type: story
 status: active
-title: "isolated Git workspaces for ALL agents: writable private Git for mutators + read-only worktrees for non-mutators"
+title: "isolated Git workspaces for managed workflow-dispatched agents: writable private Git for mutators + read-only worktrees for non-mutators"
 created: 2026-06-22
 ---
 
@@ -333,3 +333,37 @@ Speculative risk, theoretical edge cases, and non-deterministic one-offs do not 
   `(A4)` probe self-certifies on its default image and was re-verified 7/7 with 0 skipped — the earlier
   skip was a wedged local credential helper, since cleared. The general point stands for any host that
   cannot reach an image.)
+
+## Scope reconciliation 2026-07-28 — "ALL agents" narrowed to managed workflow dispatch
+
+**Retitled** from *"isolated Git workspaces for ALL agents"* to *"...for managed workflow-dispatched
+agents"*. The original framing over-claimed, and default-on made the gap load-bearing rather than
+theoretical.
+
+`src/v2/invoke.ts` provisions no workspace — `dispatchInvokeTask` mounts the live `projectDir`
+unconditionally. So `forge invoke`, and today's `review-loop` (which dispatches **both** its red reviewer
+and its **mutating fixer** through `invokeFn`), are **direct shared-checkout surfaces outside this
+ticket's isolation guarantee.** That is a deliberate boundary: the invoke path has no candidate
+construction and no publication machinery, so isolating it raises what base to clone at and who
+publishes an invoke's output — questions this ticket's model answers only for workflow runs.
+
+**Deferred by operator decision:** do not build invoke merge/publication machinery. The evidence-led
+review programme is expected to replace legacy `review-loop` behavior later, which is where that
+question properly lands.
+
+### The regression this exposed, and its bounded fix
+
+Default-on did not merely leave invoke un-isolated — it broke the **self-host guard**.
+`assertSelfHostDispatchAllowed` short-circuited on `isWorktreeModeEnabled()`, treating *"isolation is the
+default on this host"* as *"this dispatch is isolated"*. Those coincided while isolation was opt-in and
+only workflow dispatch used it. After default-on they diverged: on macOS the flag read true, the guard
+returned early, and a **self-host `forge invoke` reached the live forge checkout unrefused** — the exact
+FG-612 hazard, silently reachable where it previously refused, and forge runs `src/` in-process (FG-569)
+so a half-written agent file is immediately live for every forge process on the host.
+
+Fixed at `e4d963e9`: the caller now states what the dispatch does (`isolated` / `not-armed` /
+`never-isolated`). Workflow sites pass worktree mode through and keep prior behavior exactly; invoke
+sites declare `never-isolated` and refuse. The refusal deliberately omits `FORGE_WORKTREES=1` — arming it
+would not change what an invoke mounts, so that advice would return the operator to the hazard believing
+it fixed — and points at a disposable clone, with `FORGE_NO_WORKTREES=1` as the explicit acknowledged
+override.
