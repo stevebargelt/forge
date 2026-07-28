@@ -1690,11 +1690,17 @@ async function runOneRed(args: {
   });
 
   if (result.kind === "failed") {
-    // A red that fails to produce a verdict counts as inconclusive — don't let
-    // a broken container block the gate. runContainer already marked the task
-    // failed. FG-420 EXCEPTION: an authoritative shipping-reviewer that crashed
-    // still triggers authoritativeFail (fail-safe) — dispatchReds detects the
-    // inconclusive and blocks. Other reds' broken-container inconclusive is non-blocking.
+    // No reviewer-authored verdict exists on this path, so forge SYNTHESIZES the
+    // `inconclusive` below — and a synthesized inconclusive means the panel is
+    // incomplete and BLOCKS, orthogonally to the red's authority. That holds for
+    // every failureKind reaching here (container_crash, idle_timeout, oom_killed,
+    // result_missing, result_malformed, model_error, and any kind added later):
+    // the marker at the return is set unconditionally so an unenumerated failure
+    // fails CLOSED by construction rather than by someone remembering to extend a
+    // list. FG-420's authoritative shipping-reviewer fail-safe still exists, but it
+    // is no longer what makes a crashed red block — the general rule is. See the
+    // FG-628 note at the return for why provenance, not outcome, is the test.
+    // runContainer already marked the task failed.
     // FG-586: an UNREADABLE result is a distinct case — surfaced to dispatchReds
     // so an authoritative gate_on_verdict red fails CLOSED rather than advancing as
     // a bare inconclusive. Two shapes count as unreadable: result_malformed (a bad

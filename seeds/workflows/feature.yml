@@ -44,7 +44,11 @@ steps:
     reds:
       - agent: red-wide
         activity: fast-orchestrator
-        authority: specialist     # informational; doesn't block the gate on its own
+        # Informational: a verdict this red AUTHORS doesn't block the gate on its
+        # own, fail included. A red that returns NO review (crash, idle timeout,
+        # OOM, unreadable result, model error) blocks regardless of authority —
+        # forge synthesized that inconclusive, so the panel is incomplete.
+        authority: specialist
         gate_on_verdict: false
       - agent: red-narrow
         activity: fast-orchestrator

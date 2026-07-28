@@ -35,7 +35,15 @@ forge next run-clock-skew-fix-<suffix> --project ~/code/atlas
 
 Output: `{decisions, components, interfaces, openQuestions}` written to `~/.forge/runs/<run-id>/<task-id>/result.json`.
 
-Reds: wide + narrow, specialist authority (informs but doesn't block). The narrow red gets the `atlas-stack-rn` anti-prompt — it tries to demonstrate the design uses anything other than React Native + TypeScript + @atlas/ui + Re.Pack 5.x.
+Reds: wide + narrow, specialist authority — a verdict either one **authors** informs but doesn't block, `fail` included. The narrow red gets the `atlas-stack-rn` anti-prompt — it tries to demonstrate the design uses anything other than React Native + TypeScript + @atlas/ui + Re.Pack 5.x.
+
+Authority governs the weight of an *opinion*, so it does not cover a red that produced no opinion at all. If either specialist fails to return a review — a crash, an idle timeout, an OOM, an unreadable result, a provider rejection — forge synthesizes the `inconclusive` itself, and a synthesized verdict blocks regardless of authority: the task lands `blocked_by_red` with a high-severity "produced NO review" finding rather than advancing to the human gate. Fix the underlying failure and re-run, or waive the missing review explicitly:
+
+```bash
+forge gate task-architect-<suffix> advance --force --rationale "specific reason for advancing without this red's review"
+```
+
+See [Blocked by red](concepts.md#blocked-by-red).
 
 Gate: `human`.
 

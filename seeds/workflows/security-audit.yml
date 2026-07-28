@@ -25,7 +25,8 @@ steps:
   # ----- investigate -----
   # Broad survey. Gate is human: the human reviews coverage before committing
   # to the deep audit. The specialist red annotates gaps; gate_on_verdict: false
-  # means it does not block advance even on a fail verdict.
+  # means it does not block advance even on a fail verdict it authored. A red
+  # that returns no review at all still blocks — see the note at `audit` below.
   - id: investigate
     agent: security-advisor
     activity: spec-writer
@@ -74,5 +75,9 @@ steps:
         gate_on_verdict: true
       - agent: red-narrow
         activity: fast-orchestrator
-        authority: specialist      # findings annotate; never block
+        # Findings annotate; a verdict this red AUTHORS never blocks. But a red
+        # that returns NO review does block, at any authority: forge synthesizes
+        # the inconclusive, and an incomplete panel can't clear the gate.
+        # Override with: forge gate <task-id> advance --force --rationale "..."
+        authority: specialist
         gate_on_verdict: false
