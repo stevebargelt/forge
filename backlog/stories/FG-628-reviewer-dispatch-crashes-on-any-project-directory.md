@@ -190,3 +190,52 @@ construction. Still `createDependencyMountpoints`, still no second mechanism.
 5. **Constraint: no host-side mutual exclusion on a non-isolated project dir** — the only dispatch lock
    is per-run, and a fanout wave dispatches children in parallel. Anything written into the operator's
    tree at dispatch must be idempotent under concurrency.
+
+## AC 5 — WIDENED (operator decision 2026-07-28; supersedes the "pre-start crash" wording)
+
+The review-loop drove the original wording into a dead end: narrowing the channel to a proven pre-start
+crash made it depend on `containerStarted`, which is unreliable — in attached mode
+(`FORGE_DETACHED_EXEC=off`) `defaultDockerExec` signals the start immediately after spawning the docker
+*client*, before docker creates the container, so a mountpoint failure reported `containerStarted=true`
+and the original bug survived, fail-open.
+
+**The invariant is defined by the REVIEW ARTIFACT, not by container lifecycle.**
+
+1. **Every dispatched panel slot must produce a valid review verdict.** A slot that does not means the
+   panel is incomplete.
+2. **A genuine reviewer-authored `inconclusive` remains a review** and keeps its existing semantics
+   (non-blocking for a non-authoritative red). The reviewer looked and could not decide — that is an
+   opinion.
+3. **A SYNTHESIZED `inconclusive` — one forge fabricates because no valid review came back — means the
+   panel is incomplete and MUST BLOCK, orthogonally to authority.** Causes include, and are not limited
+   to: pre-container crash, attached-mode docker startup failure, post-start crash with no result,
+   idle timeout, OOM, missing result, malformed result.
+4. **Container lifecycle signals are DIAGNOSTIC ONLY.** They belong in the event payload for an
+   operator to read. They must never determine gate completeness.
+
+Keying on provenance rather than on an enumerated list of failure kinds is the durable property: a
+failure mode nobody has enumerated yet still fails closed, because the question asked is "did a reviewer
+author this verdict?" and not "which way did it die?".
+
+**Event renamed.** `verdict.review_never_ran` is inaccurate when a reviewer started and crashed midway.
+Use `verdict.review_missing`, carrying the failure kind (and any container-lifecycle diagnostics) in its
+payload.
+
+**Careful boundary — do not over-widen.** `runNext.ts`'s AWN-5 downgrade of an unsubstantiated `fail` to
+`inconclusive` is NOT a synthesized-missing verdict: the reviewer produced an artifact and forge
+downgraded it after grading rejected its findings. That is reviewer-authored and keeps its current
+non-blocking behavior. The distinction is exactly rule 2 versus rule 3.
+
+**Consequence for FG-586.** Its authority-gated `resultUnreadable` block becomes a strict subset of this
+rule — `result_missing` / `result_malformed` are synthesized verdicts and now block for every authority,
+not only for an authoritative `gate_on_verdict` red. FG-586's distinctive finding text is retained for
+the authoritative case; the BLOCK itself now comes from the general rule.
+
+### Required coverage
+
+- pre-container crash;
+- attached-mode docker startup failure (the mode that defeated the narrowing);
+- post-start crash with no result;
+- genuine reviewer-authored `inconclusive` — still non-blocking, the regression guard that keeps this
+  from becoming "any red failure blocks";
+- the AWN-5 downgraded-`fail` path — still non-blocking.
