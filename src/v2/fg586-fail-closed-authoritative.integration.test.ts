@@ -396,16 +396,19 @@ test(
   },
 );
 
-// ─── (fg586-C5) non-authoritative unreadable stays a non-blocking inconclusive ─
+// ─── (fg586-C5) non-authoritative unreadable — WIDENED by FG-628 ──────────────
 
 test(
-  "(fg586-C5) NON-authoritative (specialist) red with an unreadable result stays a non-blocking inconclusive — gate not blocked",
+  "(fg586-C5) NON-authoritative (specialist) red with an unreadable result BLOCKS since FG-628 — but keeps a specialist's finding, not FG-586's",
   async () => {
-    // Req 5 / preserved behavior: Part B fails CLOSED only for an *authoritative*
-    // gate. The same unreadable payload behind a specialist red must NOT block —
-    // it stays inconclusive and the build advances. Uses the mid-document bad byte
+    // CONTRACT CHANGE (FG-628, operator decision 2026-07-28). This used to assert
+    // the build advanced: Part B fails CLOSED only for an *authoritative* gate, and
+    // that scoping is unchanged for FG-586's own finding text. What changed is the
+    // BLOCK, which now comes from the general rule — an unreadable result means no
+    // reviewer authored a verdict, so forge synthesized this `inconclusive` and the
+    // panel is incomplete regardless of rank. Uses the mid-document bad byte
     // (fg586-B1 fixture) that Part A deliberately does not recover, so the only
-    // thing under test here is the authority gate, not the parser.
+    // thing under test here is authority, not the parser.
     const internallyMalformed = '{ "verdict": "fail", "confidence": 0.9, XX "findings": [] }';
     const { runId, wave } = await runWithRedResult(
       internallyMalformed,
@@ -413,19 +416,11 @@ test(
       WORKFLOW_SPECIALIST_RED_WIDE,
     );
 
-    assert.ok(
-      wave.completedSteps.includes("build"),
-      "build MUST complete — a non-authoritative unreadable result must NOT block the gate (preserved behavior)",
-    );
+    assert.ok(!wave.completedSteps.includes("build"), "build must NOT complete — nothing reviewed the artifact");
 
     const primaryTask = tasksForRun(runId).find((t) => t.agentRole === "engineer" && t.parentId === undefined);
     assert.ok(primaryTask !== undefined, "primary engineer task must exist");
-    assert.notEqual(
-      primaryTask!.status,
-      "blocked_by_red",
-      "primary must NOT be blocked_by_red — a specialist unreadable result is non-blocking",
-    );
-    assert.equal(primaryTask!.status, "complete", "primary must complete on a non-authoritative unreadable result");
+    assert.equal(primaryTask!.status, "blocked_by_red");
 
     const reviewerVerdict = verdictsForRun(runId).find((v) => v.redRole === "red-wide");
     assert.ok(reviewerVerdict !== undefined, "red-wide verdict must still be recorded");
@@ -436,7 +431,12 @@ test(
     );
     assert.ok(
       !reviewerVerdict!.findings.some((f) => f.summary.includes("UNREADABLE")),
-      "no fail-closed UNREADABLE finding may be injected for a non-authoritative red",
+      "FG-586's authoritative-only finding text is still scoped — a specialist gets FG-628's generic one instead",
+    );
+    assert.equal(
+      reviewerVerdict!.findings.length,
+      1,
+      `exactly one synthetic finding — the two channels must not double up; got ${JSON.stringify(reviewerVerdict!.findings.map((f) => f.summary))}`,
     );
   },
 );
@@ -578,28 +578,27 @@ test(
   },
 );
 
-// ─── (fg586-C6) empty result behind a SPECIALIST red stays non-blocking ───────
+// ─── (fg586-C6) empty result behind a SPECIALIST red — WIDENED by FG-628 ──────
 
 test(
-  "(fg586-C6) empty result behind a NON-authoritative (specialist) red stays a non-blocking inconclusive — gate not blocked",
+  "(fg586-C6) empty result behind a NON-authoritative (specialist) red BLOCKS since FG-628 — no reviewer authored anything",
   async () => {
-    // Preserved behavior: fail-closed on missing output applies only to an
-    // *authoritative* gate. The same empty payload behind a specialist red must NOT
-    // block — it stays inconclusive and the build advances.
+    // CONTRACT CHANGE (FG-628), the C5 case with an empty payload rather than a
+    // malformed one. FG-586's UNREADABLE finding stays authoritative-only; the block
+    // now comes from the general synthesized-verdict rule, which is orthogonal to
+    // authority.
     const { runId, wave } = await runWithRedResult("", "FG-T586-C6", WORKFLOW_SPECIALIST_RED_WIDE);
 
-    assert.ok(
-      wave.completedSteps.includes("build"),
-      "build MUST complete — an empty non-authoritative result must NOT block the gate (preserved behavior)",
-    );
+    assert.ok(!wave.completedSteps.includes("build"), "build must NOT complete — an empty result is not a review");
     const primaryTask = tasksForRun(runId).find((t) => t.agentRole === "engineer" && t.parentId === undefined);
-    assert.equal(primaryTask!.status, "complete", "primary must complete on a non-authoritative empty result");
+    assert.equal(primaryTask!.status, "blocked_by_red");
     const reviewerVerdict = verdictsForRun(runId).find((v) => v.redRole === "red-wide");
     assert.equal(reviewerVerdict!.verdict, "inconclusive", "an empty specialist result is recorded inconclusive");
     assert.ok(
       !reviewerVerdict!.findings.some((f) => f.summary.includes("UNREADABLE")),
-      "no fail-closed UNREADABLE finding may be injected for a non-authoritative red",
+      "FG-586's authoritative-only finding text is still scoped — a specialist gets FG-628's generic one instead",
     );
+    assert.equal(reviewerVerdict!.findings.length, 1, "exactly one synthetic finding — the two channels must not double up");
   },
 );
 

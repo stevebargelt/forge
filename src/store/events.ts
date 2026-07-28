@@ -66,11 +66,12 @@ export type EventType =
   | "task.decision"
   | "verdict.received"
   | "verdict.findings_dropped"
-  // FG-628: a red's container crashed before producing a verdict, so the recorded
-  // `inconclusive` is the ABSENCE of a review rather than a reviewer that could
-  // not decide. Blocks the gate orthogonally to the red's authority — an
+  // FG-628: a dispatched red returned no valid review, so forge synthesized the
+  // recorded `inconclusive` — it is the ABSENCE of a review rather than a reviewer
+  // that could not decide. Blocks the gate orthogonally to the red's authority: an
   // incomplete panel is incomplete regardless of the missing member's rank.
-  | "verdict.review_never_ran"
+  // Payload carries `failureKind` and `containerStarted` as diagnostics only.
+  | "verdict.review_missing"
   | "gate.decided"
   | "container.started"
   | "container.exited"

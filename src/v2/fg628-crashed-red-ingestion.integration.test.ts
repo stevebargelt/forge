@@ -1,5 +1,5 @@
-// FG-628 Half B: a red that never started its container must not ingest as a
-// non-blocking `inconclusive`.
+// FG-628 Half B: a red that produced no review must not ingest as a non-blocking
+// `inconclusive`.
 //
 // Live evidence (dogfood 4, run-fg-628-…-3dc222): both architect reds died with
 // `container_crash (exit 1)` before their agent ever ran, both were ingested as
@@ -12,31 +12,36 @@
 // reviewed the artifact and could not decide". Silence read as success — and that
 // is what made the mount crash (Half A) invisible for four consecutive dogfoods.
 //
-// The two traps this file is built to catch:
+// The invariant (AC 5, widened by operator decision 2026-07-28) is keyed on the
+// REVIEW ARTIFACT, not on the container: a verdict forge SYNTHESIZED because no
+// review came back means the panel is incomplete and blocks, orthogonally to
+// authority. A verdict a reviewer AUTHORED — including a genuine `inconclusive` —
+// is an opinion and keeps today's behavior.
+//
+// The traps this file is built to catch, each of which has already been sprung:
 //
 //   • Both crashed reds were SPECIALIST. FG-586's `resultUnreadable` channel blocks
 //     only when `authority === "authoritative" && gate_on_verdict`, so implementing
 //     this by extending that channel produces a change that passes review and lets
 //     the exact reported gate open. Every blocking assertion here is therefore made
 //     against a specialist red.
-//   • The distinction is destroyed one call BEFORE the seam that needs it:
-//     runContainer's container-crash branch was the only one of its three `failed`
-//     returns that dropped `failureKind`, so at runOneRed a container_crash was
-//     indistinguishable from any other dispatch failure.
-//   • `failureKind` alone is NOT the distinction. `container_crash` is assigned to
-//     every non-zero exit with no result.json, which includes a red that started,
-//     reviewed, and died before writing its result — that one produced a real (if
-//     lost) review and keeps its ordinary non-blocking inconclusive. The channel is
-//     keyed on the container START outcome, threaded alongside it; B5 below is the
-//     case that separates the two.
+//   • Keying on an enumerated set of failure kinds fails open on the kind nobody
+//     enumerated. The marker is set at the ONE place forge fabricates a verdict
+//     (runOneRed's failure return), so a future death mode inherits it for free.
+//   • Keying on the container lifecycle fails open too, and B6 is the case that
+//     proves it: in ATTACHED mode (`FORGE_DETACHED_EXEC=off`) `defaultDockerExec`
+//     fires `onContainerStarted` the instant the docker CLIENT is spawned, before
+//     the daemon has created anything. A mount failure there records
+//     `container.started` and still never reviewed a byte.
 //
 // AC 5 asserts BOTH directions, and the second is what keeps this from being a
 // blanket "any red failure blocks": a genuine reviewed-but-undecided `inconclusive`
-// must still ingest exactly as it does today.
+// must still ingest exactly as it does today (B2), and so must AWN-5's downgrade of
+// an unsubstantiated `fail` (B7).
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, mkdtempSync, rmSync, chmodSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
@@ -47,6 +52,7 @@ import { eventsForRun } from "../store/events.js";
 import { failureKindForTask } from "./failure-kind.js";
 import { startRun } from "./startRun.js";
 import { runNext, type DockerExecFn } from "./runNext.js";
+import { productionDockerExec } from "./docker-exec.js";
 import type { Workflow } from "./schema.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
@@ -76,8 +82,10 @@ let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
 const tmpDirs: string[] = [];
 
-const ENV_VARS = ["ANTHROPIC_API_KEY", "FORGE_WORKTREES", "FORGE_NO_WORKTREES"] as const;
+const ENV_VARS = ["ANTHROPIC_API_KEY", "FORGE_WORKTREES", "FORGE_NO_WORKTREES", "FORGE_DETACHED_EXEC"] as const;
 const savedEnv: Partial<Record<(typeof ENV_VARS)[number], string>> = {};
+// PATH is restored, never deleted — B6 prepends a stub `docker` onto it.
+let savedPath: string | undefined;
 
 beforeEach(() => {
   db = makeInMemoryDb();
@@ -86,6 +94,7 @@ beforeEach(() => {
     savedEnv[k] = process.env[k];
     delete process.env[k];
   }
+  savedPath = process.env.PATH;
   process.env.ANTHROPIC_API_KEY = "sk-stub";
   ensureRuntime();
   ensureWorkflowYaml();
@@ -98,6 +107,7 @@ afterEach(() => {
     if (savedEnv[k] === undefined) delete process.env[k];
     else process.env[k] = savedEnv[k] as string;
   }
+  if (savedPath !== undefined) process.env.PATH = savedPath;
   for (const dir of tmpDirs.splice(0)) {
     try {
       rmSync(dir, { recursive: true, force: true });
@@ -172,14 +182,14 @@ function taskIdFromDockerArgs(args: string[]): string {
 const PRIMARY_RESULT = { status: "complete", tests_run: 1, files_modified: [], commitSha: "deadbeef" };
 
 /** Drives one wave. `redBehavior` decides what the red's container does — the whole
- *  point of the file is that "never started", "started and died with nothing" and
- *  "ran and returned inconclusive" must land differently.
+ *  point of the file is that "produced no review" and "ran and returned a verdict"
+ *  must land differently.
  *
- *  `startsContainer` is the fact the channel is actually keyed on: the fake reports
- *  a real container start (`signalsContainerStart` + `onContainerStarted`) exactly
- *  like the production detached executor, which fires the callback only once
- *  `docker run -d` has succeeded. A mount failure — FG-628's live crash — fails
- *  before that point and never fires it. */
+ *  `startsContainer` reports a container start (`signalsContainerStart` +
+ *  `onContainerStarted`) exactly like the production detached executor, which fires
+ *  the callback only once `docker run -d` has succeeded. Under the widened rule it
+ *  is a DIAGNOSTIC, not a condition: B1 and B5 differ only in this flag and must
+ *  land identically. */
 async function runWithRed(redBehavior: { exitCode: number; result?: unknown; startsContainer?: boolean }) {
   const projectDir = makeTmpDir();
   const { runId } = startRun({
@@ -216,11 +226,11 @@ async function runWithRed(redBehavior: { exitCode: number; result?: unknown; sta
   return { runId, wave };
 }
 
-const CRASH_SUMMARY_MARKER = "never ran";
+const MISSING_SUMMARY_MARKER = "produced NO review";
 
 // ─── (B1) direction one: a crashed red BLOCKS, orthogonally to authority ──────
 
-test("(fg628-B1) a SPECIALIST red whose container never started BLOCKS — the panel is incomplete regardless of rank", async () => {
+test("(fg628-B1) a SPECIALIST red killed by a PRE-CONTAINER crash BLOCKS — the panel is incomplete regardless of rank", async () => {
   const { runId, wave } = await runWithRed({ exitCode: 1, startsContainer: false });
 
   assert.ok(
@@ -251,7 +261,7 @@ test("(fg628-B1) a SPECIALIST red whose container never started BLOCKS — the p
     "inconclusive",
     "the verdict value stays inconclusive — fabricating a `fail` would misreport the red as having judged the artifact",
   );
-  const crashFinding = verdict!.findings.find((f) => f.summary.includes(CRASH_SUMMARY_MARKER));
+  const crashFinding = verdict!.findings.find((f) => f.summary.includes(MISSING_SUMMARY_MARKER));
   assert.ok(
     crashFinding !== undefined,
     `the verdict must carry a finding naming the crash — that finding is what forge show prints under the ` +
@@ -260,8 +270,8 @@ test("(fg628-B1) a SPECIALIST red whose container never started BLOCKS — the p
   );
   assert.equal(crashFinding!.severity, "high", "an unexecuted review is a HIGH-severity fact, not a note");
 
-  const crashEvent = eventsForRun(runId).find((e) => e.eventType === "verdict.review_never_ran");
-  assert.ok(crashEvent !== undefined, "verdict.review_never_ran must be on the timeline");
+  const crashEvent = eventsForRun(runId).find((e) => e.eventType === "verdict.review_missing");
+  assert.ok(crashEvent !== undefined, "verdict.review_missing must be on the timeline");
 });
 
 // ─── (B2) direction two: a genuine reviewed-but-undecided verdict is UNCHANGED ─
@@ -285,19 +295,19 @@ test("(fg628-B2) a red that RAN and returned a genuine `inconclusive` still inge
   assert.equal(verdict!.verdict, "inconclusive", "the real verdict is preserved");
   assert.equal(verdict!.confidence, 0.4, "the reviewer's own confidence is preserved, not zeroed");
   assert.ok(
-    !verdict!.findings.some((f) => f.summary.includes(CRASH_SUMMARY_MARKER)),
+    !verdict!.findings.some((f) => f.summary.includes(MISSING_SUMMARY_MARKER)),
     "no crash finding may be injected into a verdict the reviewer actually produced",
   );
   assert.equal(
-    eventsForRun(runId).find((e) => e.eventType === "verdict.review_never_ran"),
+    eventsForRun(runId).find((e) => e.eventType === "verdict.review_missing"),
     undefined,
-    "verdict.review_never_ran must not fire for a red that ran",
+    "verdict.review_missing must not fire for a red that ran",
   );
 });
 
 // ─── (B3) a red that RAN and PASSED is likewise untouched ────────────────────
 
-test("(fg628-B3) a red that RAN and passed advances the phase — the new channel fires only on a container that produced nothing", async () => {
+test("(fg628-B3) a red that RAN and passed advances the phase — the new channel fires only on a verdict forge synthesized", async () => {
   const { runId, wave } = await runWithRed({
     exitCode: 0,
     result: { status: "complete", verdict: "pass", confidence: 0.95, findings: [] },
@@ -311,21 +321,23 @@ test("(fg628-B3) a red that RAN and passed advances the phase — the new channe
   assert.equal(verdict!.findings.length, 0, "a clean pass must carry no synthetic findings");
 });
 
-// ─── (B5) the START boundary: a crash AFTER the container came up is unchanged ─
+// ─── (B5) a POST-START crash with no result blocks too ────────────────────────
 
-test("(fg628-B5) a red whose container STARTED and then crashed with no result still ingests as a NON-blocking inconclusive", async () => {
-  // Same failure_kind as B1 (`container_crash`: non-zero exit, no result.json) and
-  // the same recorded verdict — the ONLY difference is that this container really
-  // started, so the claim "never ran" would be false. Keying the channel on
-  // failure_kind alone blocks here too, and this test is the one that catches it.
+test("(fg628-B5) a red whose container STARTED and then crashed with no result BLOCKS — the container lifecycle does not decide completeness", async () => {
+  // Same failure_kind as B1 (`container_crash`: non-zero exit, no result.json), and
+  // the ONLY difference from B1 is the start signal. Under the widened rule they must
+  // land IDENTICALLY: whatever the container did, no reviewer authored a verdict, so
+  // the panel is incomplete. An earlier cut of FG-628 keyed the block on
+  // `containerStarted === false` and this input advanced the phase — the fail-open
+  // this assertion exists to prevent.
   const { runId, wave } = await runWithRed({ exitCode: 1, startsContainer: true });
 
   const primary = tasksForRun(runId).find((t) => t.agentRole === "engineer" && t.parentId === undefined);
   assert.ok(
-    wave.completedSteps.includes("build"),
-    "build MUST complete — a red that started and died mid-review keeps its pre-FG-628 non-blocking inconclusive",
+    !wave.completedSteps.includes("build"),
+    "build must NOT complete — a red that died mid-review still produced no reviewable artifact",
   );
-  assert.equal(primary!.status, "complete");
+  assert.equal(primary!.status, "blocked_by_red");
 
   const redTask = tasksForRun(runId).find((t) => t.agentRole === "red-wide" && t.parentId !== undefined);
   assert.equal(
@@ -333,17 +345,130 @@ test("(fg628-B5) a red whose container STARTED and then crashed with no result s
     "container_crash",
     "non-vacuity: this really is the same failure_kind B1 blocks on — only the start outcome differs",
   );
+  assert.ok(
+    eventsForRun(runId).some((e) => e.eventType === "container.started" && e.taskId === redTask!.id),
+    "non-vacuity: this container really was recorded as started — the signal the narrow rule trusted",
+  );
 
   const verdict = verdictsForRun(runId).find((v) => v.redRole === "red-wide");
   assert.equal(verdict!.verdict, "inconclusive");
   assert.ok(
-    !verdict!.findings.some((f) => f.summary.includes(CRASH_SUMMARY_MARKER)),
-    `a container that started must never be reported as "never ran"; got ${JSON.stringify(verdict!.findings)}`,
+    verdict!.findings.some((f) => f.summary.includes(MISSING_SUMMARY_MARKER)),
+    `the synthesized verdict must be marked as such; got ${JSON.stringify(verdict!.findings)}`,
   );
+
+  const ev = eventsForRun(runId).find((e) => e.eventType === "verdict.review_missing");
+  assert.ok(ev !== undefined, "verdict.review_missing must be on the timeline");
+  const payload = ev!.payload as Record<string, unknown>;
+  assert.equal(payload["failureKind"], "container_crash", "the failure kind rides in the payload as a DIAGNOSTIC");
+  assert.equal(payload["containerStarted"], true, "so does the container lifecycle — recorded for the operator, not consulted for the block");
+});
+
+// ─── (B6) the case that defeated the narrow rule: ATTACHED-mode startup failure ─
+
+test("(fg628-B6) an ATTACHED-mode docker startup failure BLOCKS, even though the executor already signalled container.started", async () => {
+  // Driven through the REAL production executor selection with
+  // FORGE_DETACHED_EXEC=off, against a stub `docker` on PATH that refuses `run` the
+  // way the live FG-628 mount failure did. defaultDockerExec fires onContainerStarted
+  // the instant the docker CLIENT is spawned (docker-exec.ts:198) — before the daemon
+  // has created a container — so this red records `container.started` and then dies
+  // having reviewed nothing. Keyed on the container lifecycle, this advances the
+  // phase; keyed on provenance, it blocks.
+  process.env.FORGE_DETACHED_EXEC = "off";
+  const binDir = makeTmpDir();
+  const dockerStub = join(binDir, "docker");
+  // Touched only on `run`, so the assertions below can tell a real refused-startup
+  // from a `docker`-not-on-PATH spawn error, which would land the same exit shape.
+  const runWitness = join(binDir, "run-was-attempted");
+  writeFileSync(
+    dockerStub,
+    `#!/bin/sh
+if [ "$1" = "run" ]; then
+  : > '${runWitness}'
+  echo 'docker: Error response from daemon: failed to create task for container: runc create failed: error mounting "/var/lib/docker/volumes/forge-deps-x-dashboard/_data" to rootfs at "/project/dashboard/node_modules": read-only file system: unknown' >&2
+  exit 125
+fi
+exit 0
+`,
+  );
+  chmodSync(dockerStub, 0o755);
+  process.env.PATH = `${binDir}:${process.env.PATH ?? ""}`;
+
+  const projectDir = makeTmpDir();
+  const { runId } = startRun({
+    workflow: WORKFLOW_SPECIALIST_RED,
+    title: "fg628 half B attached",
+    inputs: {},
+    projectDir,
+  });
+
+  // The primary is faked so the wave reaches its red; the RED goes through the real
+  // production executor, which FORGE_DETACHED_EXEC=off routes to the attached one.
+  const exec: DockerExecFn = async (execArgs) => {
+    const taskId = taskIdFromDockerArgs(execArgs.args);
+    if (taskId.startsWith("task-build-")) {
+      const dir = dirname(execArgs.stdoutPath);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(execArgs.stdoutPath, "");
+      writeFileSync(execArgs.stderrPath, "");
+      execArgs.onContainerStarted?.();
+      writeFileSync(join(dir, "result.json"), JSON.stringify(PRIMARY_RESULT));
+      return 0;
+    }
+    return productionDockerExec(execArgs);
+  };
+  exec.signalsContainerStart = true;
+
+  const wave = await runNext({ runId, workflow: WORKFLOW_SPECIALIST_RED, dockerExec: exec });
+
+  const redTask = tasksForRun(runId).find((t) => t.agentRole === "red-wide" && t.parentId !== undefined);
+  assert.ok(redTask !== undefined, "the red must have been dispatched");
+  assert.ok(existsSync(runWitness), "non-vacuity: the attached executor really spawned `docker run` and it really refused");
+  assert.equal(failureKindForTask(redTask!.id), "container_crash", "non-vacuity: exit 125 with no result classifies container_crash");
+  assert.ok(
+    eventsForRun(runId).some((e) => e.eventType === "container.started" && e.taskId === redTask!.id),
+    "non-vacuity: the attached executor DID record container.started — that is the whole trap",
+  );
+
+  assert.ok(!wave.completedSteps.includes("build"), "build must NOT complete — nothing reviewed the artifact");
+  const primary = tasksForRun(runId).find((t) => t.agentRole === "engineer" && t.parentId === undefined);
   assert.equal(
-    eventsForRun(runId).find((e) => e.eventType === "verdict.review_never_ran"),
+    primary!.status,
+    "blocked_by_red",
+    "a docker startup failure in attached mode must block: containerStarted=true here is an artifact of when the callback fires, not evidence a review happened",
+  );
+  const verdict = verdictsForRun(runId).find((v) => v.redRole === "red-wide");
+  assert.ok(verdict!.findings.some((f) => f.summary.includes(MISSING_SUMMARY_MARKER)));
+  assert.ok(
+    eventsForRun(runId).some((e) => e.eventType === "verdict.review_missing"),
+    "verdict.review_missing must be on the timeline",
+  );
+});
+
+// ─── (B7) the other guard: AWN-5's downgrade is reviewer-AUTHORED, not synthesized ─
+
+test("(fg628-B7) an unsubstantiated `fail` downgraded to `inconclusive` by AWN-5 still does NOT block", async () => {
+  // dispatchReds synthesizes an inconclusive here too — but from a verdict the
+  // reviewer really authored, which forge then transformed because its findings did
+  // not survive grading. That is rule 2, not rule 3. Widen the block to "any verdict
+  // forge rewrote" and this test fails; that would break the unsubstantiated-fail
+  // downgrade outright.
+  const { runId, wave } = await runWithRed({
+    exitCode: 0,
+    result: { status: "complete", verdict: "fail", confidence: 0.9, findings: [] },
+  });
+
+  assert.ok(wave.completedSteps.includes("build"), "build MUST complete — an unsubstantiated fail has no case to act on");
+  const primary = tasksForRun(runId).find((t) => t.agentRole === "engineer" && t.parentId === undefined);
+  assert.equal(primary!.status, "complete");
+
+  const verdict = verdictsForRun(runId).find((v) => v.redRole === "red-wide");
+  assert.equal(verdict!.verdict, "inconclusive", "non-vacuity: AWN-5 really did downgrade the fail");
+  assert.equal(verdict!.findings.length, 0, "no synthetic finding on a verdict the reviewer authored");
+  assert.equal(
+    eventsForRun(runId).find((e) => e.eventType === "verdict.review_missing"),
     undefined,
-    "verdict.review_never_ran must not fire for a container that started",
+    "verdict.review_missing must not fire for a reviewer-authored verdict",
   );
 });
 
@@ -357,7 +482,7 @@ test("(fg628-B5) a red whose container STARTED and then crashed with no result s
 // Forces the verdict insert to fail with the same technique
 // fg482-blocked-by-red-atomicity.test.ts uses for its own write (a BEFORE INSERT
 // trigger that RAISE(ABORT)s) and asserts the event rolled back with it.
-test("(fg628-B4) a failed verdict insert leaves NO verdict.review_never_ran event behind — the event and the block it describes roll back together", async () => {
+test("(fg628-B4) a failed verdict insert leaves NO verdict.review_missing event behind — the event and the block it describes roll back together", async () => {
   db.exec(`
     CREATE TRIGGER force_fail_verdict_insert
     BEFORE INSERT ON verdicts
@@ -373,12 +498,12 @@ test("(fg628-B4) a failed verdict insert leaves NO verdict.review_never_ran even
   );
 
   const leftoverEvents = db
-    .prepare(`SELECT COUNT(*) AS n FROM events WHERE event_type = 'verdict.review_never_ran'`)
+    .prepare(`SELECT COUNT(*) AS n FROM events WHERE event_type = 'verdict.review_missing'`)
     .get() as { n: number };
   assert.equal(
     leftoverEvents.n,
     0,
-    "a verdict.review_never_ran event with no persisted verdict is the UNSAFE half-state: the timeline claims " +
+    "a verdict.review_missing event with no persisted verdict is the UNSAFE half-state: the timeline claims " +
       "no review ran while nothing blocks the gate",
   );
 

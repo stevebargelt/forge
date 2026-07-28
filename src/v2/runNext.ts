@@ -1374,21 +1374,32 @@ async function dispatchReds(args: {
         },
       });
     }
-    // FG-628: a red whose CONTAINER never STARTED is an infrastructure failure, not
-    // a review outcome. It ingested as a bare non-blocking `inconclusive (0.00)`,
-    // which is the ingestion an orchestrator reads as "reviewed, undecided" — so
-    // an entire adversarial panel could die at dispatch and the phase would still
-    // advance to awaiting_gate with zero review having run. Silence read as
-    // success.
+    const authoritativeGate = r.red.authority === "authoritative" && r.red.gate_on_verdict;
+    // FG-628: every dispatched panel slot must produce a valid review verdict. This
+    // `inconclusive` was SYNTHESIZED by runOneRed because none came back, so the
+    // panel is incomplete and the phase cannot advance on its own. Before FG-628 it
+    // ingested as a bare non-blocking `inconclusive (0.00)` — the ingestion an
+    // orchestrator reads as "reviewed, undecided" — so an entire adversarial panel
+    // could die at dispatch and the phase would still reach awaiting_gate with zero
+    // review having run. Silence read as success.
+    //
+    // Keyed on PROVENANCE (was this authored by a reviewer?), never on the death
+    // mode and never on a container lifecycle signal. Both of those have already
+    // failed once each: `container_crash` does not enumerate idle_timeout /
+    // oom_killed / model_error / result_missing, and `containerStarted` is a lie in
+    // attached mode, where the start callback fires before docker creates the
+    // container. A genuine reviewer-authored `inconclusive` — including AWN-5's
+    // downgrade of an unsubstantiated `fail` below — is untouched: the reviewer
+    // looked and could not decide, and that is an opinion.
     //
     // Deliberately its OWN channel, evaluated BEFORE (and independently of) the
     // authority chain below: FG-586's resultUnreadable channel blocks only for
     // `authority === "authoritative" && gate_on_verdict`, and every red observed
-    // crashing this way was SPECIALIST. Authority weights an opinion; there is no
+    // dying this way was SPECIALIST. Authority weights an opinion; there is no
     // opinion here to weight. A missing panel member makes the panel incomplete
-    // regardless of rank, so this blocks orthogonally to authority.
+    // regardless of rank.
     //
-    // It runs FIRST so that when a crash ALSO trips the FG-420 authoritative
+    // It runs FIRST so that when this ALSO trips the FG-420 authoritative
     // shipping-reviewer trigger, that one's finding still lands at the head of the
     // list where it has always been and this one sits behind it — both facts kept,
     // neither reordered out from under an existing reader.
@@ -1396,24 +1407,29 @@ async function dispatchReds(args: {
     // The verdict value stays `inconclusive` — claiming `fail` would misreport the
     // red as having judged the artifact and found it wanting. What changes is that
     // it BLOCKS (the primary lands blocked_by_red instead of awaiting_gate) and
-    // carries a HIGH finding naming the crash, which `forge show` prints under the
+    // carries a HIGH finding naming the absence, which `forge show` prints under the
     // verdict line. An operator who decides the panel can be waived overrides it
     // the same way as any other red block: forge gate --force --rationale.
-    let reviewNeverRanBlock = false;
-    if (r.reviewNeverRan) {
-      reviewNeverRanBlock = true;
-      finalVerdict = {
-        ...finalVerdict,
-        findings: [
-          {
-            severity: "high",
-            summary: `${r.red.agent} never ran — its container never started, so this artifact was NOT adversarially reviewed`,
-            evidence: `the ${r.red.agent} container failed to start and exited non-zero with no result.json (container_crash, no container.started record); the recorded inconclusive is the absence of a review, not a reviewer that could not decide — see forge show ${r.redTaskId} for the container's stderr`,
-            hypothesis: "fix the dispatch/infrastructure failure and re-run the reds; operator must run forge gate --force --rationale to advance a phase whose adversarial review never executed",
-          },
-          ...finalVerdict.findings,
-        ],
-      };
+    let reviewMissingBlock = false;
+    if (r.reviewMissing) {
+      reviewMissingBlock = true;
+      // FG-586's block is now a strict subset of this rule, but it keeps its own
+      // more specific text for the case it named. Prepending the generic finding
+      // too would state the same fact twice in the same verdict.
+      if (!(authoritativeGate && r.resultUnreadable)) {
+        finalVerdict = {
+          ...finalVerdict,
+          findings: [
+            {
+              severity: "high",
+              summary: `${r.red.agent} produced NO review — this inconclusive was synthesized by forge, so this artifact was NOT adversarially reviewed`,
+              evidence: `the ${r.red.agent} red failed without returning a readable verdict (${r.failureKind ?? "dispatch failure"}${r.containerStarted !== undefined ? `, container_started=${r.containerStarted}` : ""}); the recorded inconclusive is the absence of a review, not a reviewer that could not decide — see forge show ${r.redTaskId} for the container's stderr`,
+              hypothesis: "fix the dispatch/infrastructure failure and re-run the reds; operator must run forge gate --force --rationale to advance a phase whose adversarial review never executed",
+            },
+            ...finalVerdict.findings,
+          ],
+        };
+      }
     }
     // FG-420 / FG-586: an authoritative gate_on_verdict red that could not deliver
     // a real, shippable verdict must BLOCK — never silently advance as inconclusive.
@@ -1423,8 +1439,9 @@ async function dispatchReds(args: {
     //   • FG-586: ANY authoritative red whose result payload was UNREADABLE after the
     //     Part A bounded envelope strip (malformed / truncated / internal bad byte) —
     //     the real verdict is unknown, so it fails closed instead of advancing.
+    //     FG-628 widened the BLOCK to every authority; this branch survives for its
+    //     finding text, which names the unreadable payload specifically.
     let authoritativeGateBlock = false;
-    const authoritativeGate = r.red.authority === "authoritative" && r.red.gate_on_verdict;
     if (authoritativeGate && r.resultUnreadable) {
       authoritativeGateBlock = true;
       finalVerdict = {
@@ -1485,14 +1502,24 @@ async function dispatchReds(args: {
         payload: { redRole: r.red.agent, verdict: finalVerdict.verdict, authority: r.red.authority },
       });
       // FG-628: written INSIDE the same transaction as the verdict it describes.
-      // On its own (outside, ahead of the insert) the timeline could claim a red
-      // never ran while no persisted verdict/block exists to stop the gate —
-      // the half-applied state FG-482 forbids for this transition.
-      if (reviewNeverRanBlock) {
-        logEvent("verdict.review_never_ran", {
+      // On its own (outside, ahead of the insert) the timeline could claim a
+      // review is missing while no persisted verdict/block exists to stop the gate
+      // — the half-applied state FG-482 forbids for this transition.
+      //
+      // The failure kind and the container lifecycle ride in the payload as
+      // DIAGNOSTICS for whoever reads the timeline. They are recorded here
+      // precisely because they are not allowed to decide anything above.
+      if (reviewMissingBlock) {
+        logEvent("verdict.review_missing", {
           runId: args.runId,
           taskId: args.primaryTaskId,
-          payload: { redRole: r.red.agent, redTaskId: r.redTaskId, authority: r.red.authority },
+          payload: {
+            redRole: r.red.agent,
+            redTaskId: r.redTaskId,
+            authority: r.red.authority,
+            failureKind: r.failureKind ?? null,
+            containerStarted: r.containerStarted ?? null,
+          },
         });
       }
     });
@@ -1511,7 +1538,7 @@ async function dispatchReds(args: {
       authoritativeFail = true;
     }
     // FG-628: an incomplete panel blocks regardless of the missing member's rank.
-    if (reviewNeverRanBlock) {
+    if (reviewMissingBlock) {
       authoritativeFail = true;
     }
   }
@@ -1538,7 +1565,18 @@ async function runOneRed(args: {
   getModelPolicy: (projectDir: string) => ModelPolicyWithSource;
   seedGeneration?: SeedGeneration | null;
   reviewerContextPacket?: ReviewerContextPacket;
-}): Promise<{ red: RedDef; verdict: Verdict; redTaskId: string; resultUnreadable?: boolean; reviewNeverRan?: boolean }> {
+}): Promise<{
+  red: RedDef;
+  verdict: Verdict;
+  redTaskId: string;
+  resultUnreadable?: boolean;
+  // FG-628: set on a verdict forge SYNTHESIZED because no review came back.
+  reviewMissing?: boolean;
+  // Diagnostics that ride along for the operator-facing event payload. They
+  // describe HOW the red died; they never decide whether it blocks.
+  failureKind?: FailureKind;
+  containerStarted?: boolean;
+}> {
   const redTaskId = newTaskId(`red-${args.step.id}`);
   // failureModes: the force-level anti-prompts for the artifact under review.
   // Scoped to the PRIMARY (blue) role/workflow/phase being audited, not the red's
@@ -1663,36 +1701,39 @@ async function runOneRed(args: {
     // byte the Part A bounded strip could not recover) AND result_missing (empty /
     // whitespace-only / zero-length-truncated output — resultRaw is .trim()ed at
     // read, so whitespace-only reviewer output classifies missing, not malformed).
-    // Scoped to those two: a container crash / OOM / idle-timeout / model_error
-    // stays a non-blocking inconclusive for non-authoritative reds, exactly as before.
-    // FG-628: EXCEPT a container_crash that never STARTED, which is a distinct
-    // fact and a distinct channel — see reviewNeverRan below. A container_crash
-    // after the container came up keeps this branch's ordinary non-blocking
-    // inconclusive (for a non-authoritative red), exactly as before.
+    // Scoped to those two: it is FG-586's distinctive finding text that is scoped,
+    // not the block — since FG-628 the block below covers every one of these.
+    //
+    // FG-628: THIS RETURN IS THE PROVENANCE SEAM. It is the single place in forge
+    // where a missing review becomes a verdict: the `inconclusive` below was
+    // FABRICATED here, not authored by a reviewer. Anything that reaches this line
+    // produced no reviewable artifact, so it is marked as such — unconditionally,
+    // and without consulting `failureKind`. Keying on an enumerated list of death
+    // modes is what let the original bug survive twice: a kind nobody enumerated
+    // (or one whose classification shifts) fell through to a non-blocking
+    // `inconclusive (0.00)` that an orchestrator reads as "reviewed, undecided".
+    // Asking "did a reviewer author this?" instead makes an unenumerated failure
+    // fail CLOSED by construction.
+    //
+    // Note this is NOT the only place forge rewrites a verdict: dispatchReds also
+    // downgrades an unsubstantiated `fail` to `inconclusive` (AWN-5). That one is
+    // reviewer-AUTHORED — the reviewer produced an artifact and forge transformed
+    // it — and stays non-blocking. Provenance, not outcome, is the line.
     return {
       red: args.red,
       redTaskId,
       verdict: { verdict: "inconclusive", confidence: 0, findings: [] },
+      reviewMissing: true,
+      // Diagnostics for the operator-facing event payload only. Container
+      // lifecycle in particular must never gate completeness: in attached mode
+      // (FORGE_DETACHED_EXEC=off) the start callback fires the instant the docker
+      // CLIENT is spawned, before the daemon has created the container, so a
+      // mount failure reports containerStarted=true — the exact signal that made
+      // the earlier, narrower version of this rule fail open.
+      failureKind: result.failureKind,
+      containerStarted: result.containerStarted,
       ...(result.failureKind === "result_malformed" || result.failureKind === "result_missing"
         ? { resultUnreadable: true }
-        : {}),
-      // FG-628: the red's container never STARTED — it reviewed nothing, so there
-      // is no opinion here to weigh. Deliberately NOT folded into resultUnreadable:
-      // that channel is gated on `authority === "authoritative" && gate_on_verdict`,
-      // and the reds this actually happened to were SPECIALIST. Authority weights an
-      // opinion; a container that never started produced none, so a missing panel
-      // member makes the panel incomplete regardless of that member's rank.
-      // dispatchReds consumes this orthogonally to authority.
-      //
-      // `containerStarted === false` — not merely falsy — is the load-bearing test.
-      // `container_crash` alone does NOT prove a pre-start death (it is assigned to
-      // every non-zero exit with no result.json, including a red that started,
-      // reviewed, and crashed before writing its result), and `undefined` means the
-      // executor gave no start signal to read. Only an observed never-started
-      // container claims this channel; everything else keeps its existing
-      // failed/inconclusive behavior.
-      ...(result.failureKind === "container_crash" && result.containerStarted === false
-        ? { reviewNeverRan: true }
         : {}),
     };
   }
@@ -2991,13 +3032,13 @@ type ContainerOutcome =
   // distinguish an unreadable-result failure (result_malformed) from an ordinary
   // container failure. runOneRed uses it to fail an authoritative reviewer closed.
   //
-  // FG-628: `containerStarted` is the START outcome, which `failureKind` alone
-  // does NOT carry — `container_crash` is assigned to ANY non-zero exit with no
-  // result.json, so it covers an agent that started, ran, and died mid-review just
-  // as much as a container that never came up. Only present when the executor
-  // reports a real start (`signalsContainerStart`, FG-536); left undefined for
-  // legacy/fake executors, which record the start up-front and therefore cannot
-  // tell "started" from "never started" at all.
+  // FG-628: `containerStarted` is the START outcome, threaded PURELY as a
+  // diagnostic for the operator-facing `verdict.review_missing` payload. It is
+  // deliberately not trustworthy enough to gate on: the attached executor
+  // (FORGE_DETACHED_EXEC=off) fires its start callback the instant the docker
+  // CLIENT is spawned — before the daemon has created the container — so a mount
+  // failure there reports `true`. Only present when the executor reports a start
+  // at all (`signalsContainerStart`, FG-536).
   | { kind: "failed"; error: string; failureKind?: FailureKind; containerStarted?: boolean };
 
 // FG-586 Part A: bounded envelope tolerance for a result payload that JSON.parse
@@ -3710,16 +3751,9 @@ async function runContainer(args: {
     // FG-492 review: task failed — retain (see finalizeContainerRetention in docker-exec.ts).
     finalizeContainerRetention(containerName, false);
     // FG-628: this was the ONE `failed` return that dropped its failureKind — the
-    // malformed and missing-result branches below both thread it. Without it a
-    // container_crash arrives at runOneRed indistinguishable from any other
-    // dispatch failure, which is precisely the distinction ingestion needs: a red
-    // whose container never ran produced no review at all.
-    //
-    // The start outcome rides along because `kind` cannot express it: the branch is
-    // reached by any non-zero exit with no result.json, so a container that never
-    // came up and an agent that died halfway through its review land here the same
-    // way. `containerStartRecorded` is the only fact that separates them, and it is
-    // only a fact for an executor that signals a real start.
+    // malformed and missing-result branches below both thread it. Both it and the
+    // start outcome ride out to runOneRed as DIAGNOSTICS, so the ingestion event an
+    // operator reads names how the red died. Neither decides whether it blocks.
     return {
       kind: "failed",
       error: msg,

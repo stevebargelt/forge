@@ -1,5 +1,5 @@
 // FG-628 followup coverage: the ingestion channels that SHARE dispatchReds with
-// the new `reviewNeverRan` channel, and the boundary of what that channel claims.
+// the new `reviewMissing` channel, and the boundary of what that channel claims.
 //
 // FG-628 added a third blocking channel to dispatchReds. Two were already there:
 //
@@ -16,8 +16,8 @@
 //
 //   1. NON-REGRESSION. Both adjacent channels still fire on the inputs they always
 //      fired on, still block, still carry their own finding — and are NOT
-//      contaminated by the new one (no crash finding, no `verdict.review_never_ran`
-//      event on a red that actually ran).
+//      contaminated by the new one (no synthesized-review finding, no
+//      `verdict.review_missing` event on a red that actually authored a verdict).
 //   2. ORDERING. FG-628's finding is prepended BEHIND FG-420's on purpose: an
 //      existing reader that takes `findings[0]` to be FG-420's synthetic finding
 //      must not break. (`fg420-7` in
@@ -25,14 +25,20 @@
 //      reader, and it asserts `findings[0]`.) When a crash ALSO trips the FG-420
 //      trigger, BOTH facts must be kept and FG-420's must still be at the head. That
 //      guarantee is load-bearing and was untested.
-//   3. THE DEATH-MODE BOUNDARY. Only a `container_crash` whose container was never
-//      observed to START sets `reviewNeverRan`. `oom_killed`, `idle_timeout`,
-//      `model_error` — and a `container_crash` AFTER the container came up — all
-//      deliberately still ingest as NON-blocking `inconclusive` in this cut. That is
-//      the CURRENT contract, pinned here so the follow-up that widens it has a
-//      baseline and so nobody widens it by accident. Every death-mode test asserts
-//      the red task's recorded failure_kind, so a mode that silently reclassifies
-//      fails loudly instead of passing vacuously.
+//   3. THE DEATH-MODE BOUNDARY — WIDENED (operator decision 2026-07-28). The channel
+//      is keyed on PROVENANCE, not on the death mode: any verdict forge synthesized
+//      because no review came back sets `reviewMissing`. So `oom_killed`,
+//      `idle_timeout`, `model_error`, `result_missing`/`result_malformed`, and a
+//      `container_crash` on either side of container start ALL block now. C5/C6/C7
+//      previously pinned the first three as non-blocking; that was the narrow cut's
+//      stated baseline, and this is the follow-up that widens it — an intended
+//      contract change. Every death-mode test still asserts the red task's recorded
+//      failure_kind, so a mode that silently reclassifies fails loudly instead of
+//      passing vacuously.
+//
+//      What still does NOT block is the other kind of forge-rewritten verdict:
+//      AWN-5's downgrade of an unsubstantiated `fail`, which is reviewer-AUTHORED.
+//      That guard lives in fg628-crashed-red-ingestion.integration.test.ts (B7).
 //
 // Tier: integration — real task dirs on a real (temp) filesystem, real dispatch.
 
@@ -57,7 +63,7 @@ const RUNTIME = "fg628-channels-test";
 
 // The marker the FG-628 channel's synthetic finding is identified by. Kept in one
 // place: every "must not be contaminated" assertion below is a search for it.
-const CRASH_SUMMARY_MARKER = "never ran";
+const MISSING_SUMMARY_MARKER = "produced NO review";
 const FG420_SUMMARY_MARKER = "shippable verdict";
 const FG586_SUMMARY_MARKER = "UNREADABLE";
 
@@ -240,8 +246,9 @@ type RedBehavior = {
   stdout?: string;
   /** Whether the container ever came up. The fake reports it exactly like the
    *  production detached executor (`signalsContainerStart` + `onContainerStarted`
-   *  only once `docker run -d` succeeded). Defaults to true: every mode below is a
-   *  container that RAN, except the mount-failure crash the channel is scoped to. */
+   *  only once `docker run -d` succeeded). Defaults to true. Under the widened rule
+   *  this is a DIAGNOSTIC only — C4 and C8 differ in nothing else and must land
+   *  identically. */
   startsContainer?: boolean;
 };
 
@@ -281,7 +288,7 @@ async function drive(wf: Workflow, redBehavior: RedBehavior) {
     primary: tasks.find((t) => t.agentRole === "engineer" && t.parentId === undefined)!,
     redTask: tasks.find((t) => t.agentRole === redRole && t.parentId !== undefined)!,
     verdict: verdictsForRun(runId).find((v) => v.redRole === redRole)!,
-    reviewNeverRanEvents: eventsForRun(runId).filter((e) => e.eventType === "verdict.review_never_ran"),
+    reviewMissingEvents: eventsForRun(runId).filter((e) => e.eventType === "verdict.review_missing"),
   };
 }
 
@@ -313,29 +320,40 @@ test("(fg628-C1) FG-586 non-regression: an AUTHORITATIVE gate_on_verdict red wit
   );
   assert.equal(head!.severity, "high");
 
-  // Contamination guard: a red whose container RAN did not fail to review — the
-  // FG-628 channel must be silent on this input, in both the finding list and the
-  // event stream.
-  assert.ok(
-    !r.verdict.findings.some((f) => f.summary.includes(CRASH_SUMMARY_MARKER)),
-    "no crash finding may be injected into an unreadable-result verdict — its container ran",
+  // FG-628 widened the BLOCK to cover this input too (an unreadable result is a
+  // synthesized verdict), but FG-586's finding is the more specific description of
+  // it, so the generic one must NOT be prepended alongside — one fact, one finding.
+  assert.equal(
+    r.verdict.findings.length,
+    1,
+    `exactly FG-586's finding — the generic synthesized-review finding must not double up; got ${JSON.stringify(r.verdict.findings.map((f) => f.summary))}`,
   );
-  assert.equal(r.reviewNeverRanEvents.length, 0, "verdict.review_never_ran must not fire for result_malformed");
+  assert.equal(
+    r.reviewMissingEvents.length,
+    1,
+    "the timeline still records that no review came back — the block now comes from the general rule",
+  );
 });
 
-test("(fg628-C2) FG-586 scoping non-regression: a SPECIALIST red with an unreadable result still advances the phase", async () => {
-  // FG-586 blocks only `authority === "authoritative" && gate_on_verdict`. FG-628's
-  // channel is authority-orthogonal, so the risk being pinned here is the reverse of
-  // C1: that the new channel widened blocking to every red that produced no usable
-  // verdict. It must not have — the boundary is the death mode, not the outcome.
+test("(fg628-C2) CONTRACT CHANGE: a SPECIALIST red with an unreadable result now BLOCKS — FG-586's block became a subset of the general rule", async () => {
+  // This pinned "advances" under the narrow cut, because FG-586 blocks only
+  // `authority === "authoritative" && gate_on_verdict`. The widened rule is
+  // authority-orthogonal and keyed on provenance: an unreadable result means no
+  // reviewer authored a verdict, so the panel is incomplete whatever the rank.
+  // FG-586's distinctive finding text stays scoped to the authoritative case (C1);
+  // the specialist gets the generic one.
   const r = await drive(WF_SPECIALIST_RED_WIDE, { exitCode: 0, rawResult: MALFORMED_RESULT });
 
-  assert.ok(r.wave.completedSteps.includes("build"), "build MUST complete — a specialist's unreadable result is non-blocking, exactly as before");
-  assert.equal(r.primary.status, "complete");
+  assert.ok(!r.wave.completedSteps.includes("build"), "build must NOT complete — nothing reviewed the artifact");
+  assert.equal(r.primary.status, "blocked_by_red");
   assert.equal(failureKindForTask(r.redTask.id), "result_malformed", "non-vacuity: really the unreadable path");
   assert.equal(r.verdict.verdict, "inconclusive");
-  assert.equal(r.verdict.findings.length, 0, "no synthetic finding is prepended for a specialist unreadable result");
-  assert.equal(r.reviewNeverRanEvents.length, 0, "verdict.review_never_ran must not fire");
+  assert.equal(r.verdict.findings.length, 1);
+  assert.ok(
+    r.verdict.findings[0]!.summary.includes(MISSING_SUMMARY_MARKER),
+    `the specialist gets the generic synthesized-review finding, not FG-586's; got ${JSON.stringify(r.verdict.findings.map((f) => f.summary))}`,
+  );
+  assert.equal(r.reviewMissingEvents.length, 1);
 });
 
 // ─── (2) FG-420's trigger still fires on a red that RAN ───────────────────────
@@ -354,7 +372,7 @@ test("(fg628-C3) FG-420 non-regression: an authoritative shipping-reviewer that 
     r.verdict.findings[0]!.summary.includes(FG420_SUMMARY_MARKER),
     `FG-420's finding must be at findings[0]; got ${JSON.stringify(r.verdict.findings)}`,
   );
-  assert.equal(r.reviewNeverRanEvents.length, 0, "the reviewer ran and returned a verdict — review_never_ran must not fire");
+  assert.equal(r.reviewMissingEvents.length, 0, "the reviewer ran and authored a verdict — review_missing must not fire");
 });
 
 // ─── (3) THE ORDERING GUARANTEE ───────────────────────────────────────────────
@@ -377,7 +395,7 @@ test("(fg628-C4) ORDERING: when a crash ALSO trips FG-420, BOTH findings are kep
   assert.equal(
     r.verdict.findings.length,
     2,
-    `both facts must be kept — FG-420's "no shippable verdict" AND FG-628's "never ran"; got ${JSON.stringify(summaries)}`,
+    `both facts must be kept — FG-420's "no shippable verdict" AND FG-628's "produced NO review"; got ${JSON.stringify(summaries)}`,
   );
 
   // The pin. An existing reader that takes findings[0] to be FG-420's must not break.
@@ -386,60 +404,73 @@ test("(fg628-C4) ORDERING: when a crash ALSO trips FG-420, BOTH findings are kep
     `FG-420's synthetic finding must remain at the HEAD of the list; got ${JSON.stringify(summaries)}`,
   );
   assert.ok(
-    r.verdict.findings[1]!.summary.includes(CRASH_SUMMARY_MARKER),
-    `FG-628's crash finding must sit directly BEHIND it, not in front; got ${JSON.stringify(summaries)}`,
+    r.verdict.findings[1]!.summary.includes(MISSING_SUMMARY_MARKER),
+    `FG-628's synthesized-review finding must sit directly BEHIND it, not in front; got ${JSON.stringify(summaries)}`,
   );
-  assert.equal(r.verdict.findings[1]!.severity, "high", "the crash finding keeps its HIGH severity when it rides behind FG-420's");
+  assert.equal(r.verdict.findings[1]!.severity, "high", "it keeps its HIGH severity when it rides behind FG-420's");
   assert.ok(
     r.verdict.findings[1]!.evidence?.includes(r.redTask.id),
-    "the crash finding must still name the red's task id so `forge show <id>` is actionable",
+    "it must still name the red's task id so `forge show <id>` is actionable",
   );
 
   // Both channels are independently observable on the timeline, not merged.
-  assert.equal(r.reviewNeverRanEvents.length, 1, "verdict.review_never_ran fires exactly once, even when FG-420 also blocks");
+  assert.equal(r.reviewMissingEvents.length, 1, "verdict.review_missing fires exactly once, even when FG-420 also blocks");
 });
 
-// ─── (4) THE DEATH-MODE BOUNDARY — current contract, pinned ───────────────────
+// ─── (4) THE DEATH-MODE SWEEP — widened contract, pinned ──────────────────────
 //
-// Only container_crash sets reviewNeverRan in this cut. The three modes below are a
-// deliberate, documented exclusion, NOT an oversight — they are pinned so that
-// widening the channel is a visible, intentional edit to this file rather than an
-// accident, and so the follow-up that widens it starts from a stated baseline.
+// C5/C6/C7 previously pinned oom_killed / idle_timeout / model_error as NON-blocking,
+// and C8/C9 pinned a post-start container_crash the same way. That was the narrow
+// cut's stated baseline, and the operator decision of 2026-07-28 widened past it:
+// none of these produced a reviewable artifact, so all of them are synthesized
+// verdicts and all of them block. Deliberate contract change, not a weakened test —
+// each one still asserts the recorded failure_kind, so a mode that silently
+// reclassifies fails loudly rather than passing vacuously.
+//
+// `idle_timeout` in particular is why the rule is keyed on provenance: its
+// `failed` return in runContainer threads no failureKind at all, so any rule
+// written as a list of kinds cannot see it.
 
-test("(fg628-C8) boundary: a `container_crash` AFTER the container started keeps its old behavior — FG-420 blocks alone, with ONE finding", async () => {
-  // The counterpart to C4, and the sharpest edge of the boundary: byte-identical
-  // failure_kind, byte-identical exit shape, same authoritative shipping-reviewer —
-  // the container merely came up first, so nothing here "never ran". FG-420 must
-  // block exactly as it did before FG-628 existed, and FG-628's channel must be
-  // silent. Key the channel on failure_kind alone and this test sees two findings.
+test("(fg628-C8) a `container_crash` AFTER the container started blocks EXACTLY as C4's pre-start one does", async () => {
+  // The counterpart to C4 and the sharpest edge of the rule: byte-identical
+  // failure_kind, byte-identical exit shape, same authoritative shipping-reviewer,
+  // and the container merely came up first. Under the narrow cut this advanced with
+  // one finding; the lifecycle is now a diagnostic, so C4 and C8 must be
+  // indistinguishable in outcome.
   const r = await drive(WF_AUTH_SHIPPING, { exitCode: 1, startsContainer: true });
 
   assert.equal(failureKindForTask(r.redTask.id), "container_crash", "non-vacuity: same failure_kind as C4");
-  assert.equal(r.primary.status, "blocked_by_red", "FG-420's own block on a resultless authoritative reviewer is unchanged");
+  assert.equal(r.primary.status, "blocked_by_red");
   assert.equal(r.verdict.verdict, "inconclusive");
   assert.equal(
     r.verdict.findings.length,
-    1,
-    `only FG-420's finding — a container that started must not be reported as "never ran"; got ${JSON.stringify(r.verdict.findings.map((f) => f.summary))}`,
+    2,
+    `both FG-420's and FG-628's findings, exactly as in C4; got ${JSON.stringify(r.verdict.findings.map((f) => f.summary))}`,
   );
-  assert.ok(r.verdict.findings[0]!.summary.includes(FG420_SUMMARY_MARKER));
-  assert.equal(r.reviewNeverRanEvents.length, 0, "verdict.review_never_ran must not fire for a container that started");
+  assert.ok(r.verdict.findings[0]!.summary.includes(FG420_SUMMARY_MARKER), "FG-420's finding stays at the head");
+  assert.ok(r.verdict.findings[1]!.summary.includes(MISSING_SUMMARY_MARKER));
+  assert.equal(r.reviewMissingEvents.length, 1);
+  assert.equal(
+    (r.reviewMissingEvents[0]!.payload as Record<string, unknown>)["containerStarted"],
+    true,
+    "the start fact is RECORDED for the operator — it just does not decide anything",
+  );
 });
 
-test("(fg628-C9) boundary: a SPECIALIST `container_crash` after the container started still ADVANCES the phase", async () => {
-  // The block-vs-advance half of C8, on the weakest rank — this is the input the
-  // FG-628 channel widened, so pinning it at the exact configuration the live
-  // incident used is what keeps the widening scoped to a pre-start death.
+test("(fg628-C9) CONTRACT CHANGE: a SPECIALIST `container_crash` after the container started now BLOCKS", async () => {
+  // AC 5's post-start-crash case at the weakest rank — the exact configuration the
+  // live incident used, minus the pre-start timing that the narrow rule leaned on.
   const r = await drive(WF_SPECIALIST_ADVISORY, { exitCode: 1, startsContainer: true });
 
   assert.equal(failureKindForTask(r.redTask.id), "container_crash", "non-vacuity: really the crash kind");
-  assert.ok(r.wave.completedSteps.includes("build"), "CURRENT CONTRACT: a specialist red that started and died mid-review does not block");
-  assert.equal(r.primary.status, "complete");
-  assert.equal(r.verdict.findings.length, 0);
-  assert.equal(r.reviewNeverRanEvents.length, 0, "reviewNeverRan is scoped to a container that never started");
+  assert.ok(!r.wave.completedSteps.includes("build"), "a red that died mid-review left no review behind");
+  assert.equal(r.primary.status, "blocked_by_red");
+  assert.equal(r.verdict.findings.length, 1);
+  assert.ok(r.verdict.findings[0]!.summary.includes(MISSING_SUMMARY_MARKER));
+  assert.equal(r.reviewMissingEvents.length, 1);
 });
 
-test("(fg628-C5) boundary: `oom_killed` (exit 137, no result) still ingests as a NON-blocking inconclusive", async () => {
+test("(fg628-C5) CONTRACT CHANGE: `oom_killed` (exit 137, no result) now BLOCKS", async () => {
   const r = await drive(WF_SPECIALIST_ADVISORY, { exitCode: 137 });
 
   assert.equal(
@@ -447,14 +478,19 @@ test("(fg628-C5) boundary: `oom_killed` (exit 137, no result) still ingests as a
     "oom_killed",
     "non-vacuity: exit 137 with no result must classify oom_killed, not container_crash — if this ever changes, the assertion below silently changes meaning",
   );
-  assert.ok(r.wave.completedSteps.includes("build"), "CURRENT CONTRACT: an OOM-killed red does not block in this cut");
-  assert.equal(r.primary.status, "complete");
+  assert.ok(!r.wave.completedSteps.includes("build"), "an OOM-killed red reviewed nothing");
+  assert.equal(r.primary.status, "blocked_by_red");
   assert.equal(r.verdict.verdict, "inconclusive");
-  assert.equal(r.verdict.findings.length, 0, "no synthetic finding for an OOM-killed red today");
-  assert.equal(r.reviewNeverRanEvents.length, 0, "reviewNeverRan is scoped to container_crash");
+  assert.equal(r.verdict.findings.length, 1);
+  assert.ok(r.verdict.findings[0]!.summary.includes(MISSING_SUMMARY_MARKER));
+  assert.equal(
+    (r.reviewMissingEvents[0]!.payload as Record<string, unknown>)["failureKind"],
+    "oom_killed",
+    "the death mode is preserved in the payload so the operator still sees WHY",
+  );
 });
 
-test("(fg628-C6) boundary: `idle_timeout` still ingests as a NON-blocking inconclusive", async () => {
+test("(fg628-C6) CONTRACT CHANGE: `idle_timeout` now BLOCKS — and it carries no failureKind at all", async () => {
   const r = await drive(WF_SPECIALIST_ADVISORY, { exitCode: IDLE_TIMEOUT_EXIT_CODE });
 
   assert.equal(
@@ -462,19 +498,22 @@ test("(fg628-C6) boundary: `idle_timeout` still ingests as a NON-blocking inconc
     "idle_timeout",
     "non-vacuity: the watchdog exit code must classify idle_timeout",
   );
-  assert.ok(r.wave.completedSteps.includes("build"), "CURRENT CONTRACT: an idle-timed-out red does not block in this cut");
-  assert.equal(r.primary.status, "complete");
+  assert.ok(!r.wave.completedSteps.includes("build"), "a hung red reviewed nothing");
+  assert.equal(r.primary.status, "blocked_by_red");
   assert.equal(r.verdict.verdict, "inconclusive");
-  assert.equal(r.verdict.findings.length, 0);
-  assert.equal(r.reviewNeverRanEvents.length, 0, "reviewNeverRan is scoped to container_crash");
+  assert.equal(r.verdict.findings.length, 1);
+  assert.equal(r.reviewMissingEvents.length, 1);
+  // runContainer's idle-timeout return threads no failureKind. This blocks anyway —
+  // that is the whole argument for keying on provenance instead of on a kind list.
+  assert.equal((r.reviewMissingEvents[0]!.payload as Record<string, unknown>)["failureKind"], null);
 });
 
-test("(fg628-C7) boundary: `model_error` still ingests as a NON-blocking inconclusive — even though its exit shape is identical to a crash", async () => {
-  // The sharpest edge of the boundary: this red exits non-zero with NO result.json —
-  // byte-identical to the container_crash shape — and is diverted to `model_error`
-  // only because the provider analyzer found an error event in its structured stdout.
-  // So the boundary is decided by classification, not by the exit shape, and a change
-  // to either side moves it.
+test("(fg628-C7) CONTRACT CHANGE: `model_error` now BLOCKS — a provider rejection is not a review either", async () => {
+  // This red exits non-zero with NO result.json — byte-identical to the
+  // container_crash shape — and is diverted to `model_error` only because the
+  // provider analyzer found an error event in its structured stdout. Under the
+  // widened rule the classification no longer changes the outcome; it only changes
+  // what the event payload says.
   const r = await drive(WF_SPECIALIST_ADVISORY, {
     exitCode: 1,
     stdout: JSON.stringify({ type: "error", message: "model overloaded (529)" }) + "\n",
@@ -485,9 +524,13 @@ test("(fg628-C7) boundary: `model_error` still ingests as a NON-blocking inconcl
     "model_error",
     "non-vacuity: the provider analyzer must have diverted this away from container_crash — otherwise this test is just C4 again",
   );
-  assert.ok(r.wave.completedSteps.includes("build"), "CURRENT CONTRACT: a model_error red does not block in this cut");
-  assert.equal(r.primary.status, "complete");
+  assert.ok(!r.wave.completedSteps.includes("build"), "a red the provider refused to run reviewed nothing");
+  assert.equal(r.primary.status, "blocked_by_red");
   assert.equal(r.verdict.verdict, "inconclusive");
-  assert.equal(r.verdict.findings.length, 0);
-  assert.equal(r.reviewNeverRanEvents.length, 0, "reviewNeverRan is scoped to container_crash");
+  assert.equal(r.verdict.findings.length, 1);
+  assert.equal(
+    (r.reviewMissingEvents[0]!.payload as Record<string, unknown>)["failureKind"],
+    "model_error",
+    "the provider rejection is still nameable on the timeline",
+  );
 });
