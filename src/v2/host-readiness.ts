@@ -16,6 +16,40 @@
 // laundered into an infrastructure outcome, because by then readiness has
 // already returned and has no say.
 //
+// WHAT READINESS ASSERTS, EXACTLY — THREE THINGS AND NO MORE:
+//   1. the declared dependency setup COMPLETED (every step exited zero);
+//   2. the runtime the verification will execute under matches the ABI the
+//      workspace's bindings require;
+//   3. preparation did NOT modify the Git tree under test.
+// It cannot promise that any verification command will pass, because it never
+// runs one. The two halves that follow from that are both load-bearing:
+//   - A NATIVE BUILD FAILURE DURING SETUP is a READINESS failure — `setup_failed`,
+//     nothing published, no target ref movement. Nothing was verified, so there is
+//     no verdict on the code to report. This arm is only reachable because
+//     lifecycle scripts RUN (see setupEnv): while they were suppressed the native
+//     build never happened at all, and a workspace whose bindings could not
+//     possibly load was certified ready — `npm ci` exited zero, so readiness had
+//     nothing to object to, and every DB-backed test then died on
+//     `Could not locate the bindings file` as if the CODE were broken.
+//   - A TEST FAILURE AFTER A SUCCESSFUL SETUP is a CODE VERDICT, unchanged:
+//     `validation_failed`/`integration_failed` on the publication path, an ordinary
+//     verification failure reaching the fixer on the review-loop path.
+//
+// TRUST MODEL — DECIDED, and stated plainly so it is not silently re-litigated.
+// Host verification ASSUMES CANDIDATE CODE IS NOT ACTIVELY MALICIOUS. Immediately
+// after this module returns `ready`, forge runs the candidate-controlled
+// `npm run test:unit` on the host with the operator's inherited environment, and
+// the candidate controls that script and every test file it names. Suppressing
+// install lifecycle scripts therefore never prevented hostile candidate code from
+// executing on the host — it only prevented legitimate native dependencies from
+// ever being built. An install-script allowlist was considered and REJECTED:
+// package names and lockfile identities are themselves candidate-controlled,
+// native requirements vary by project, it grows into the dependency-policy system
+// this ticket fenced out, and it still does not protect the host once verification
+// begins. If hostile-candidate isolation ever becomes a requirement, INSTALLATION
+// AND VERIFICATION MUST BOTH MOVE INTO A SANDBOX; nothing short of that is a
+// boundary.
+//
 // WHAT IS SHARED between the two consumers (and what is not): the fidelity
 // checks (tree identity, lockfile digest, runtime/ABI), the durable evidence
 // record, and the refusal vocabulary below are SHARED. What legitimately
@@ -74,8 +108,9 @@ export type HostReadinessRefusalReason =
   | "self_host_workspace"        // the workspace overlaps the forge source root this process is executing from — an install there would delete forge's own live bindings
   | "runtime_unresolved"         // the intended verification interpreter could not be resolved/probed, or the workspace's ABI requirement could not be established
   | "runtime_abi_mismatch"       // it resolved, but its ABI is not the one the workspace requires (checkAbi)
-  | "setup_failed"               // the setup command ran and exited non-zero
-  | "setup_timed_out"            // the setup command exceeded the setup ceiling
+  | "ambiguous_setup_contract"   // an operator-declared setup contract forge will not guess the argv of — refused, never split and mis-executed
+  | "setup_failed"               // a setup step ran and exited non-zero (a failed native build lands here)
+  | "setup_timed_out"            // a setup step exceeded the setup ceiling
   | "setup_contended"            // another host process holds this workspace's readiness lock and outlasted the bounded wait
   | "workspace_dirtied_by_setup"; // setup changed the workspace's git status — preparation may never move the tree under test
 
@@ -237,43 +272,141 @@ function declaresDependencies(pkg: Record<string, unknown>): boolean {
 /** HOST-LEVEL operator config only (paths.ts's hostConfigPath). Deliberately takes
  *  no directory argument: there is no seam here a caller could point at a project
  *  checkout, which is what made the workspace under test able to name the command
- *  that runs on the host. */
-function readHostConfigString(key: string): string | undefined {
+ *  that runs on the host. An empty/whitespace string reads as ABSENT so it falls
+ *  through to the next source rather than refusing. */
+function readHostConfigValue(key: string): unknown {
   try {
     const config = JSON.parse(readFileSync(hostConfigPath(), "utf8")) as Record<string, unknown>;
     const value = config[key];
-    return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+    if (value === null || value === undefined) return undefined;
+    if (typeof value === "string" && value.trim().length === 0) return undefined;
+    return value;
   } catch {
     return undefined;
   }
 }
 
+function readHostConfigString(key: string): string | undefined {
+  const value = readHostConfigValue(key);
+  return typeof value === "string" ? value.trim() : undefined;
+}
+
+/** ONE STEP of the setup contract: an argv, `[executable, ...args]`, non-empty by
+ *  construction. Each element is ONE argv element and is passed to execFile
+ *  VERBATIM — no shell, so nothing in it is ever expanded, split or quoted away. */
+export type SetupStep = [string, ...string[]];
+
+/** THE SETUP CONTRACT GRAMMAR (also documented in docs/concepts.md).
+ *
+ *    setup     := step | [ step, step, ... ]
+ *    step      := [ executable, arg, ... ]        // JSON array of strings, non-empty
+ *    shorthand := "npm ci"                        // one step, split on whitespace
+ *
+ *  Examples, all equivalent to the lockfile-derived default:
+ *    "npm ci"            ["npm","ci"]            [["npm","ci"]]
+ *  A multi-step contract is a sequence of argv arrays, run IN ORDER, each one a
+ *  direct execFile:
+ *    [["npm","ci"],["npm","run","build:native"]]
+ *
+ *  FORGE NEVER INVOKES A SHELL. There is no `sh -c`, no `bash -c`, and no
+ *  metacharacter interpretation anywhere on this path. The shorthand exists only
+ *  because a bare `npm ci` is unambiguous; the moment a configured value contains
+ *  a shell operator (`&&`, `||`, `;`, `|`, a redirect, a backtick, `$()`) or a
+ *  quote character, its intent is a SHELL's intent and whitespace-splitting it
+ *  would mis-execute it — so it is REFUSED (`ambiguous_setup_contract`) rather
+ *  than guessed at. The operator's fix is to say what they meant as argv. */
+export type SetupContract =
+  | { kind: "steps"; steps: SetupStep[]; source: string }
+  | { kind: "ambiguous"; raw: string; source: string; why: string }
+  | { kind: "none" };
+
 /** The fixed argv the lockfile-detected default resolves to. A literal, never
  *  assembled from anything the workspace supplies: the reviewed tree's only
  *  influence over it is whether a package-lock.json exists. */
-const DEFAULT_SETUP_COMMAND = "npm ci";
+const DEFAULT_SETUP_STEPS: SetupStep[] = [["npm", "ci"]];
+
+/** What a shell would treat as more than one word, or as anything other than a
+ *  literal. Quotes are in the set because their presence means the author was
+ *  writing FOR a shell, and forge is not one. */
+const SHELL_METACHARACTER = /[&|;<>`$()\\"'\n\r]/;
+
+function isArgv(value: unknown): value is SetupStep {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every((element) => typeof element === "string") &&
+    (value[0] as string).trim().length > 0
+  );
+}
+
+/** Parse an operator-declared value into the contract. `source` names where the
+ *  value came from, so a refusal can point at the file or variable to fix. */
+function parseSetupContract(value: unknown, source: string): SetupContract {
+  if (typeof value === "string") {
+    const raw = value.trim();
+    if (!raw) return { kind: "none" };
+    if (raw.startsWith("[")) {
+      try {
+        return parseSetupContract(JSON.parse(raw) as unknown, source);
+      } catch {
+        return { kind: "ambiguous", raw, source, why: "it opens with `[` but is not valid JSON, so forge cannot tell which argv it means" };
+      }
+    }
+    const offender = SHELL_METACHARACTER.exec(raw);
+    if (offender) {
+      return {
+        kind: "ambiguous", raw, source,
+        why: `it contains \`${offender[0]}\`, which only means something to a shell — and forge never runs the setup contract through one`,
+      };
+    }
+    const argv = raw.split(/\s+/).filter(Boolean);
+    return isArgv(argv) ? { kind: "steps", steps: [argv], source } : { kind: "none" };
+  }
+  if (isArgv(value)) return { kind: "steps", steps: [value], source };
+  if (Array.isArray(value)) {
+    if (value.length === 0) return { kind: "none" };
+    if (value.every(isArgv)) return { kind: "steps", steps: value, source };
+    return {
+      kind: "ambiguous", raw: JSON.stringify(value), source,
+      why: "it is neither one argv array of non-empty strings nor a sequence of them",
+    };
+  }
+  return {
+    kind: "ambiguous", raw: JSON.stringify(value) ?? String(value), source,
+    why: `it is a ${typeof value}; the setup contract is an argv array, or a sequence of argv arrays`,
+  };
+}
+
+/** The operator-facing rendering of a contract — evidence and refusal text only,
+ *  never re-parsed. ` then ` rather than ` && ` deliberately: the steps are
+ *  sequential execFiles, and `&&` is the very thing the grammar refuses as input. */
+function formatSetupSteps(steps: SetupStep[]): string {
+  return steps.map((step) => step.join(" ")).join(" then ");
+}
 
 /** The OPERATOR-owned setup contract, in precedence order:
  *   1. FORGE_HOST_VERIFICATION_SETUP — an explicit per-invocation operator override;
  *   2. `hostVerificationSetup` in HOST-LEVEL ~/.forge/config.json;
- *   3. the derived default `npm ci`, and ONLY when the workspace actually has a
- *      package-lock.json to install from.
+ *   3. the derived default `[["npm","ci"]]`, and ONLY when the workspace actually
+ *      has a package-lock.json to install from.
  *  Both trusted sources live OUTSIDE every project checkout. A
  *  `<project>/.forge/config.json` is never consulted — it is inside the workspace
- *  under test, and this command is handed to execFileSync on the HOST with no
+ *  under test, and these argv are handed to execFileSync on the HOST with no
  *  container boundary (compare dependency-provisioning.ts's isSafeWorkspacePath:
  *  same class of sink, and that one already refuses workspace-supplied values).
- *  Returns undefined when none applies — the caller refuses `no_setup_contract`
+ *  Returns `none` when nothing applies — the caller refuses `no_setup_contract`
  *  rather than guessing (`npm install` without a lockfile is a guess: it may
  *  resolve a different graph than the one under review, and it rewrites the
  *  lockfile in the tree under test). */
-export function resolveSetupCommand(workspace: string): string | undefined {
+export function resolveSetupCommand(workspace: string): SetupContract {
   const override = process.env["FORGE_HOST_VERIFICATION_SETUP"];
-  if (override && override.trim().length > 0) return override.trim();
-  const configured = readHostConfigString("hostVerificationSetup");
-  if (configured) return configured;
-  if (existsSync(join(workspace, "package-lock.json"))) return DEFAULT_SETUP_COMMAND;
-  return undefined;
+  if (override && override.trim().length > 0) return parseSetupContract(override, "FORGE_HOST_VERIFICATION_SETUP");
+  const configured = readHostConfigValue("hostVerificationSetup");
+  if (configured !== undefined) return parseSetupContract(configured, `\`hostVerificationSetup\` in ${hostConfigPath()}`);
+  if (existsSync(join(workspace, "package-lock.json"))) {
+    return { kind: "steps", steps: DEFAULT_SETUP_STEPS, source: "the workspace's package-lock.json" };
+  }
+  return { kind: "none" };
 }
 
 /** NODE_MODULE_VERSION per Node major. Only majors whose ABI is a published fact
@@ -451,9 +584,11 @@ export function resolveVerificationInterpreter(pinnedPath: string): string | und
 
 /** Environment variables the package manager genuinely needs. Everything else in
  *  forge's process environment (credentials, tokens, auth profiles, FORGE_*) is
- *  withheld: the publication candidate is a tree with agent branches merged into
- *  it, so its package lifecycle scripts are attacker-controlled code and this is
- *  the env they would run with. */
+ *  withheld. This is HYGIENE, not a security boundary — see the trust model at the
+ *  top of this file: it keeps forge's credentials out of install logs and out of
+ *  whatever a build script happens to echo, and it keeps the setup child from
+ *  depending on ambient operator state that the next host would not have. It does
+ *  NOT contain a hostile candidate, and nothing on this path does. */
 const SETUP_ENV_PASSTHROUGH = [
   "HOME", "TMPDIR", "LANG", "LC_ALL",
   "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy",
@@ -462,16 +597,20 @@ const SETUP_ENV_PASSTHROUGH = [
 ];
 
 /** The setup child's environment: EXPLICITLY CONSTRUCTED, never `...process.env`.
- *  Pins the FG-555 PATH (so the install and the verification it certifies resolve
- *  the same interpreter) and suppresses package lifecycle scripts —
- *  preinstall/install/postinstall out of merged agent content must not execute on
- *  the host. Applied on BOTH consumers: the publication candidate carries merged
- *  agent branches, and the review-loop workspace carries the very diff under
- *  review, so neither tree's lifecycle scripts are operator-authored. */
+ *  Pins the FG-555 PATH so the install and the verification it certifies resolve
+ *  the same interpreter, and withholds everything outside SETUP_ENV_PASSTHROUGH.
+ *
+ *  LIFECYCLE SCRIPTS RUN. `npm_config_ignore_scripts` is deliberately NOT set: a
+ *  native dependency's preinstall/install/postinstall IS how its bindings get
+ *  built, and suppressing them produced a `node_modules/better-sqlite3/` with no
+ *  `build/` directory that `npm ci` reported as a clean success — so readiness
+ *  certified a workspace where every DB-backed test then died on
+ *  `Could not locate the bindings file`. Do not reinstate it: it never was a
+ *  boundary (the trust model at the top of this file explains why), and its only
+ *  observable effect was making native dependencies impossible. */
 function setupEnv(pinnedPath: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     PATH: pinnedPath,
-    npm_config_ignore_scripts: "true",
     npm_config_audit: "false",
     npm_config_fund: "false",
   };
@@ -744,8 +883,8 @@ export async function prepareHostVerification(
       });
     }
 
-    const setupCommand = resolveSetupCommand(workspace);
-    if (!setupCommand) {
+    const contract = resolveSetupCommand(workspace);
+    if (contract.kind === "none") {
       return refuse(
         req, "no_setup_contract", "(none)",
         `No operator-declared setup contract for this project: ${hostConfigPath()} names no ` +
@@ -753,10 +892,21 @@ export async function prepareHostVerification(
           `derive \`npm ci\` from. Forge fails BEFORE verification rather than guessing an install command.`,
       );
     }
-    const [cmd, ...args] = setupCommand.split(/\s+/).filter(Boolean);
-    if (!cmd) {
-      return refuse(req, "no_setup_contract", setupCommand, `The declared setup contract "${setupCommand}" is empty.`);
+    if (contract.kind === "ambiguous") {
+      // Refused, never split on whitespace and mis-executed. `npm ci && npm run
+      // build` whitespace-split runs `npm` with the literal arguments `ci`, `&&`,
+      // `npm`, `run`, `build` — which is not what the operator wrote, and the
+      // failure it produces looks like a broken project rather than a broken
+      // contract.
+      return refuse(
+        req, "ambiguous_setup_contract", contract.raw,
+        `The setup contract declared by ${contract.source} cannot be read as argv: ${contract.why}. ` +
+          `Forge never runs it through a shell and will not split it on whitespace and hope. Declare it as an argv ` +
+          `array — ["npm","ci"] — or as a sequence of them for multiple steps — [["npm","ci"],["npm","run","build:native"]].`,
+      );
     }
+    const { steps } = contract;
+    const setupCommand = formatSetupSteps(steps);
 
     // Compared BEFORE/AFTER rather than asserted absolutely clean: the review-loop
     // dirty-tree arm legitimately starts dirty, and what FG-621 AC 6 requires is
@@ -776,23 +926,40 @@ export async function prepareHostVerification(
       assertedAt: nowIso(),
     });
 
-    const run = runSetup(cmd, args, {
-      cwd: workspace,
-      // The FG-555 contract (an explicit interpreter directory pinned at the front
-      // of PATH, never whichever node an ambient login shell resolves) PLUS the
-      // minimal-env / no-lifecycle-scripts contract — see setupEnv. Never
-      // `...process.env`: this child's code comes from the tree under test.
-      env: setupEnv(profile.path),
-      timeoutMs: hostReadinessSetupTimeoutMs(),
-    });
-    if (!run.ok) {
+    // Each step is its own direct execFile, run IN ORDER, and the FIRST failure
+    // stops the sequence — a step that did not run cannot have succeeded, and
+    // continuing past a failed `npm ci` to a build step would only produce a
+    // second, more confusing failure.
+    //
+    // The ceiling bounds THE WHOLE CONTRACT, not each step: it is what
+    // readinessSpanLeaseMs() is composed from, so a per-step ceiling would let an
+    // N-step contract outrun the very lease that covers it.
+    const ceilingMs = hostReadinessSetupTimeoutMs();
+    const startedAtMs = Date.now();
+    for (const [index, step] of steps.entries()) {
+      const [cmd, ...args] = step;
+      const run = runSetup(cmd, args, {
+        cwd: workspace,
+        // The FG-555 contract (an explicit interpreter directory pinned at the front
+        // of PATH, never whichever node an ambient login shell resolves) plus the
+        // reduced setup env — see setupEnv. Never `...process.env`.
+        env: setupEnv(profile.path),
+        timeoutMs: Math.max(1, ceilingMs - (Date.now() - startedAtMs)),
+      });
+      if (run.ok) continue;
+      // A NATIVE BUILD FAILURE LANDS HERE, and that is the point: the install's
+      // own lifecycle scripts now run, so node-gyp exiting non-zero fails setup
+      // instead of being skipped into a workspace with no `build/` directory that
+      // reports itself installed. Nothing was verified, so this is a readiness
+      // refusal and never a verdict on the code.
+      const where = steps.length > 1 ? ` (step ${index + 1} of ${steps.length}: \`${step.join(" ")}\`)` : "";
       return refuse(
         req,
         run.timedOut ? "setup_timed_out" : "setup_failed",
-        setupCommand,
+        step.join(" "),
         run.timedOut
-          ? `The setup command exceeded the ${Math.round(hostReadinessSetupTimeoutMs() / 1000)}s setup ceiling.`
-          : `The setup command exited ${run.status ?? "(signal)"} — no verification was run, so this is NOT a verdict on the code.`,
+          ? `The setup command${where} exceeded the ${Math.round(hostReadinessSetupTimeoutMs() / 1000)}s setup ceiling.`
+          : `The setup command${where} exited ${run.status ?? "(signal)"} — no verification was run, so this is NOT a verdict on the code.`,
         { exitStatus: run.status, stderrTail: run.stderrTail },
       );
     }

@@ -480,7 +480,10 @@ test("FG-566 REFUSAL — a TIMED-OUT setup classifies apart from a failed one an
   const outcome = await prepare(ws, {
     porcelain: () => "",
     runSetup: (_cmd, _args, opts): SetupRun => {
-      assert.equal(opts.timeoutMs, 5000, "the operator's ceiling must reach the child");
+      // The ceiling bounds the CONTRACT, not each step, so a multi-step contract
+      // cannot outrun the span lease composed from it: the child gets what is left
+      // of the operator's ceiling, which for the first step is all of it.
+      assert.ok(opts.timeoutMs > 4900 && opts.timeoutMs <= 5000, `the operator's ceiling must reach the child, got ${opts.timeoutMs}`);
       return { ok: false, status: null, timedOut: true, stderrTail: "" };
     },
   });
@@ -542,7 +545,7 @@ test("FG-566 KEYSPACE — a torn or truncated record reads as 'never asserted' r
 const PINNED_PATH = controlRuntimeProfile({ label: "fg566-store-test" }).path;
 const REAL_NODE = resolveVerificationInterpreter(PINNED_PATH);
 
-test("FG-566 REAL CHILD — the pinned PATH, the lifecycle-script suppression and the env withholding survive defaultRunSetup", async (t) => {
+test("FG-566 REAL CHILD — the pinned PATH and the env withholding survive defaultRunSetup, and lifecycle scripts are NOT suppressed", async (t) => {
   if (!REAL_NODE) return t.skip("no executable node on the pinned verification PATH");
   const ws = workspace();
   const scriptDir = realpathSync(mkdtempSync(join(tmpdir(), "fg566-setup-")));
@@ -552,7 +555,9 @@ test("FG-566 REAL CHILD — the pinned PATH, the lifecycle-script suppression an
     join(scriptDir, "setup.mjs"),
     `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(dump)}, JSON.stringify(process.env));\n`,
   );
-  process.env["FORGE_HOST_VERIFICATION_SETUP"] = `${REAL_NODE} ${join(scriptDir, "setup.mjs")}`;
+  // The structured contract, through the env override: an argv array, so a temp
+  // path with a space in it survives verbatim instead of being split.
+  process.env["FORGE_HOST_VERIFICATION_SETUP"] = JSON.stringify([REAL_NODE, join(scriptDir, "setup.mjs")]);
   process.env["FORGE_HOST_READINESS_REQUIRE_ABI"] = process.versions.modules;
 
   // No runSetup injection: this is the real child, spawned by defaultRunSetup.
@@ -561,7 +566,11 @@ test("FG-566 REAL CHILD — the pinned PATH, the lifecycle-script suppression an
   assert.equal(outcome.kind, "ready", JSON.stringify(outcome));
   const childEnv = JSON.parse(readFileSync(dump, "utf8")) as Record<string, string>;
   assert.equal(childEnv["PATH"], PINNED_PATH, "the install must resolve the SAME interpreter the verification will");
-  assert.equal(childEnv["npm_config_ignore_scripts"], "true", "merged agent content's lifecycle scripts must not run on the host");
+  assert.equal(
+    childEnv["npm_config_ignore_scripts"],
+    undefined,
+    "a native dependency's install script IS how its bindings get built — suppressing it certified unloadable workspaces as ready",
+  );
   // Explicitly constructed, never `...process.env` — this child's code comes from
   // the tree under test.
   assert.equal(childEnv["FORGE_HOST_VERIFICATION_SETUP"], undefined);
@@ -580,7 +589,7 @@ test("FG-566 REAL CHILD — a real non-zero setup yields the exit status and the
     join(scriptDir, "fail.mjs"),
     `process.stderr.write("FIRST_LINE_MARKER\\n" + "x".repeat(4000) + "\\nnpm ERR! LAST_LINE_MARKER\\n");\nprocess.exit(17);\n`,
   );
-  process.env["FORGE_HOST_VERIFICATION_SETUP"] = `${REAL_NODE} ${join(scriptDir, "fail.mjs")}`;
+  process.env["FORGE_HOST_VERIFICATION_SETUP"] = JSON.stringify([REAL_NODE, join(scriptDir, "fail.mjs")]);
   process.env["FORGE_HOST_READINESS_REQUIRE_ABI"] = process.versions.modules;
 
   const refusal = refusalOf(await prepare(ws, { porcelain: () => "" }));

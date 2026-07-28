@@ -23,12 +23,12 @@
 // the refusal is a genuine setup failure, not a "no identifiable contract"
 // ambiguity.
 //
-// It used to be a `preinstall` that exits 1. That mechanism is gone because the
-// behaviour it depended on is gone: readiness now runs the setup child with
-// package lifecycle scripts SUPPRESSED and a minimal explicit env, precisely so
-// that install-time code out of the tree under test cannot execute on the host.
-// The preinstall script survives here as a CANARY (it writes a mark outside the
-// tree) with a test asserting it never fires.
+// It used to be a `preinstall` that exits 1. A lockfile desync is used instead
+// because it fails identically under any setup contract an operator might declare.
+// The preinstall script survives here as an OBSERVATION POINT: it dumps its own
+// environment outside the tree, so one test can assert both that lifecycle scripts
+// RUN (they build native bindings; suppressing them is the defect that shipped)
+// and that they run under the reduced setup env, with forge's credentials withheld.
 //
 // ── CONTRACT PINNED HERE (see the unit file's header for the full statement) ──
 // This file imports NO symbol introduced by the readiness build step, compares
@@ -58,7 +58,7 @@ import { listRuns } from "../../store/runs.js";
 const READINESS_TOKEN = "verification_environment_unavailable";
 
 const REFUSAL_REASONS = [
-  "no_setup_contract", "runtime_unresolved", "runtime_abi_mismatch",
+  "no_setup_contract", "ambiguous_setup_contract", "runtime_unresolved", "runtime_abi_mismatch",
   "setup_failed", "setup_timed_out", "setup_contended", "workspace_dirtied_by_setup",
 ];
 
@@ -75,20 +75,25 @@ let projectDir = "";
 let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
 
-/** Where a `preinstall` lifecycle script would leave its mark if the setup child
- *  still ran one. Outside the project so its presence is a pure signal. */
+/** Where the fixture's `preinstall` lifecycle script dumps the environment it ran
+ *  under. Outside the project so its presence is a pure signal. */
 function preinstallCanaryPath(): string {
   return join(tmpdir(), `fg566-preinstall-canary-${basename(projectDir)}`);
 }
 
+let savedApiKey: string | undefined;
+
 beforeEach(() => {
   projectDir = mkdtempSync(join(tmpdir(), "forge-fg566-rl-"));
+  savedApiKey = process.env["ANTHROPIC_API_KEY"];
   db = makeInMemoryDb();
   prev = setDbForTest(db);
 });
 
 afterEach(() => {
   setDbForTest(prev as DatabaseInstance);
+  if (savedApiKey === undefined) delete process.env["ANTHROPIC_API_KEY"];
+  else process.env["ANTHROPIC_API_KEY"] = savedApiKey;
   db.close();
   rmSync(preinstallCanaryPath(), { force: true });
   if (projectDir && existsSync(projectDir)) rmSync(projectDir, { recursive: true, force: true });
@@ -136,13 +141,13 @@ function writeReadinessProject(opts: { failSetup: boolean }): string {
   // Generate the lockfile WITHOUT installing (no node_modules is the whole point).
   execFileSync("npm", ["install", "--package-lock-only", "--no-audit", "--no-fund"], { cwd: projectDir, stdio: "ignore" });
 
-  // A `preinstall` that leaves a mark OUTSIDE the tree, on EVERY fixture. It is a
-  // canary, not a mechanism: readiness runs the setup child with package lifecycle
-  // scripts suppressed, so this must never fire. (Outside the tree deliberately —
-  // a mark written INSIDE would also trip the dirtied-by-setup refusal and
-  // conflate the two facts.)
+  // A `preinstall` that dumps its environment OUTSIDE the tree, on EVERY fixture.
+  // Lifecycle scripts RUN, so this fires — and what it wrote is how the reduced
+  // setup env is observed end to end. (Outside the tree deliberately — a mark
+  // written INSIDE would also trip the dirtied-by-setup refusal and conflate the
+  // two facts.)
   (pkg["scripts"] as Record<string, string>)["preinstall"] =
-    `node -e "require('fs').writeFileSync('${preinstallCanaryPath()}','ran')"`;
+    `node -e "require('fs').writeFileSync('${preinstallCanaryPath()}',JSON.stringify(process.env))"`;
   writeFileSync(join(projectDir, "package.json"), JSON.stringify(pkg, null, 2));
 
   if (opts.failSetup) {
@@ -151,9 +156,9 @@ function writeReadinessProject(opts: { failSetup: boolean }): string {
     // rather than resolving a different graph, so the failure is deterministic,
     // offline, and independent of which install command the contract chose.
     //
-    // It is NOT a failing `preinstall` any more: lifecycle scripts out of the tree
-    // under test no longer execute at all (that is the point of the suppression),
-    // so a preinstall-based forced failure would silently stop forcing anything.
+    // It is NOT a failing `preinstall`: a lockfile desync fails the same way under
+    // every setup contract an operator might declare, whereas a preinstall-based
+    // failure would only force anything for contracts that reach the install phase.
     (pkg["dependencies"] as Record<string, string>)["fg566-absent-from-lockfile"] = "file:./fixture";
     writeFileSync(join(projectDir, "package.json"), JSON.stringify(pkg, null, 2));
   }
@@ -328,18 +333,27 @@ test("FG-566 falsification 6 CLI: a fresh standalone clone forced onto the local
   );
 });
 
-test("FG-566 SETUP ENV CLI: the workspace's own preinstall lifecycle script does NOT execute on the host during preparation", async () => {
-  // The tree under test supplies DATA. `preinstall` is CODE, and before the fix it
-  // ran on the host with the whole of forge's process environment — on the
-  // publication path that code is whatever the merged agent branches contained.
+test("FG-566 SETUP ENV CLI: lifecycle scripts RUN during preparation, and they run under the REDUCED env", async () => {
+  // Both halves in one place, because they are easy to confuse. Lifecycle scripts
+  // execute — a native dependency's bindings are built by exactly this hook, and
+  // suppressing it certified workspaces whose bindings could not load as ready.
+  // What still holds is the ENV they run under: an explicitly constructed minimal
+  // one, so forge's credentials never reach an install script. That is hygiene,
+  // not a boundary — host verification assumes the candidate is not hostile, and
+  // the candidate-controlled test command runs on this host moments later anyway.
   const sinceSha = writeReadinessProject({ failSetup: false });
+  process.env["ANTHROPIC_API_KEY"] = "sk-should-never-reach-a-lifecycle-script";
   await runReviewLoopCli(sinceSha, ["--max-rounds", "1"]);
 
   assert.equal(existsSync(join(projectDir, "node_modules")), true, "precondition: the install really did run");
   assert.equal(
-    existsSync(preinstallCanaryPath()), false,
-    "a preinstall script out of the workspace under test executed on the host during preparation",
+    existsSync(preinstallCanaryPath()), true,
+    "install lifecycle scripts must RUN — suppressing them is what left native dependencies unbuilt",
   );
+  const childEnv = JSON.parse(readFileSync(preinstallCanaryPath(), "utf8")) as Record<string, string>;
+  assert.equal(childEnv["ANTHROPIC_API_KEY"], undefined, "forge's credentials are still withheld from the setup child");
+  assert.equal(childEnv["FORGE_HOME"], undefined);
+  assert.equal(childEnv["npm_config_ignore_scripts"], undefined);
 });
 
 test("FG-566 falsification 6 CLI: preparation does NOT move the candidate git tree — the workspace stays porcelain-clean", async () => {

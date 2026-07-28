@@ -332,7 +332,7 @@ test("FG-566 SELF-HOST — the refusal is independent of worktree mode and of th
   }
 });
 
-// ── FIX 4: the setup child gets a minimal env and no lifecycle scripts ───────
+// ── FIX 4: the setup child gets a minimal env — and lifecycle scripts RUN ────
 
 test("FG-566 SETUP ENV — the setup child never receives forge's process environment", async () => {
   process.env["ANTHROPIC_API_KEY"] = "sk-should-never-reach-a-lifecycle-script";
@@ -347,10 +347,142 @@ test("FG-566 SETUP ENV — the setup child never receives forge's process enviro
   assert.equal((env["PATH"] ?? "").split(":")[0], dirname(process.execPath));
 });
 
-test("FG-566 SETUP ENV — package lifecycle scripts are suppressed on the setup child", async () => {
+test("FG-566 LIFECYCLE SCRIPTS — normal npm lifecycle scripts RUN during setup: nothing suppresses them", async () => {
+  // The suppression was removed by operator decision, and reinstating it is a
+  // regression this test exists to catch. It never was a boundary — forge runs the
+  // candidate-controlled `npm run test:unit` on the host moments later — and its
+  // only observable effect was that a native dependency's `build/` directory was
+  // never produced, so `npm ci` exited zero over a workspace whose bindings could
+  // not load and readiness certified it ready.
   const calls: SetupCall[] = [];
   await prepare(workspace(), recordingDeps(calls));
-  assert.equal(calls[0]?.env["npm_config_ignore_scripts"], "true");
+
+  const env = calls[0]?.env ?? {};
+  assert.equal(env["npm_config_ignore_scripts"], undefined, "install lifecycle scripts must not be suppressed");
+  assert.equal(env["NPM_CONFIG_IGNORE_SCRIPTS"], undefined);
+});
+
+// ── FIX 6 (AC 13-18): the setup contract is STRUCTURED ARGV, never a shell ───
+
+test("FG-566 SETUP GRAMMAR — the default contract is exactly [[\"npm\",\"ci\"]]", async () => {
+  const calls: SetupCall[] = [];
+  const outcome = await prepare(workspace(), recordingDeps(calls));
+
+  assert.equal(outcome.kind, "ready");
+  assert.deepEqual(calls.map((c) => [c.cmd, ...c.args]), [["npm", "ci"]]);
+  assert.deepEqual(resolveSetupCommand(workspace()), {
+    kind: "steps",
+    steps: [["npm", "ci"]],
+    source: "the workspace's package-lock.json",
+  });
+});
+
+test("FG-566 SETUP GRAMMAR — a SEQUENCE of argv arrays runs each step IN ORDER, each a direct exec", async () => {
+  writeFileSync(hostConfigPath(), JSON.stringify({
+    hostVerificationSetup: [["npm", "ci"], ["npm", "run", "build:native"]],
+  }));
+  const calls: SetupCall[] = [];
+  const outcome = await prepare(workspace(), recordingDeps(calls));
+
+  assert.equal(outcome.kind, "ready");
+  assert.deepEqual(calls.map((c) => [c.cmd, ...c.args]), [["npm", "ci"], ["npm", "run", "build:native"]]);
+  // The evidence names the whole contract, in a rendering that is not shell syntax.
+  assert.equal((outcome as { evidence: { setupCommand: string } }).evidence.setupCommand, "npm ci then npm run build:native");
+});
+
+test("FG-566 SETUP GRAMMAR — a single argv array preserves an argument containing SPACES, which a split could not", async () => {
+  writeFileSync(hostConfigPath(), JSON.stringify({
+    hostVerificationSetup: ["npm", "ci", "--cache", "/tmp/a directory with spaces"],
+  }));
+  const calls: SetupCall[] = [];
+  const outcome = await prepare(workspace(), recordingDeps(calls));
+
+  assert.equal(outcome.kind, "ready");
+  assert.deepEqual(calls[0]?.args, ["ci", "--cache", "/tmp/a directory with spaces"]);
+});
+
+test("FG-566 SETUP GRAMMAR — the env override accepts the same structure, as JSON", async () => {
+  process.env["FORGE_HOST_VERIFICATION_SETUP"] = JSON.stringify([["pnpm", "install", "--frozen-lockfile"], ["pnpm", "rebuild"]]);
+  const calls: SetupCall[] = [];
+  const outcome = await prepare(workspace(), recordingDeps(calls));
+
+  assert.equal(outcome.kind, "ready");
+  assert.deepEqual(calls.map((c) => [c.cmd, ...c.args]), [["pnpm", "install", "--frozen-lockfile"], ["pnpm", "rebuild"]]);
+});
+
+test("FG-566 SETUP GRAMMAR — a COMPOUND command is REFUSED, never split on whitespace and mis-executed", async () => {
+  // Every one of these mis-executes under a whitespace split: `npm ci && npm run
+  // build` becomes `npm` with the literal arguments `ci`, `&&`, `npm`, `run`,
+  // `build`, and the failure reads like a broken project rather than a broken
+  // contract.
+  const compound = [
+    "npm ci && npm run build:native",
+    "npm ci; npm rebuild",
+    "npm ci || true",
+    "npm ci | tee install.log",
+    "npm ci > install.log",
+    "npm ci --cache $(mktemp -d)",
+    "npm ci --cache `mktemp -d`",
+    `npm ci --cache "/tmp/a directory with spaces"`,
+  ];
+  for (const raw of compound) {
+    process.env["FORGE_HOST_VERIFICATION_SETUP"] = raw;
+    const calls: SetupCall[] = [];
+    const refusal = refusalOf(await prepare(workspace(), recordingDeps(calls)));
+    assert.equal(refusal.reason, "ambiguous_setup_contract", `\`${raw}\` must be refused, not split`);
+    assert.equal(calls.length, 0, `\`${raw}\` must execute NOTHING`);
+    // The refusal is actionable: it names the source and shows the argv shape.
+    assert.match(refusal.message, /FORGE_HOST_VERIFICATION_SETUP/);
+    assert.match(refusal.message, /\["npm","ci"\]/);
+  }
+});
+
+test("FG-566 SETUP GRAMMAR — no shell is ever invoked: the executable is the operator's own, never sh -c", async () => {
+  for (const configured of [["npm", "ci"], [["npm", "ci"], ["npm", "rebuild"]]]) {
+    writeFileSync(hostConfigPath(), JSON.stringify({ hostVerificationSetup: configured }));
+    const calls: SetupCall[] = [];
+    await prepare(workspace(), recordingDeps(calls));
+    assert.ok(calls.length > 0);
+    for (const call of calls) {
+      assert.ok(!/(^|\/)(sh|bash|zsh|dash)$/.test(call.cmd), `a shell must never be the setup executable — got ${call.cmd}`);
+      assert.ok(!call.args.includes("-c"), "no `-c` payload: the argv is executed directly");
+    }
+  }
+});
+
+test("FG-566 SETUP GRAMMAR — a malformed structure is refused, not coerced", async () => {
+  for (const value of [42, { command: "npm ci" }, [["npm", "ci"], "npm rebuild"], [[]], "[not, json]"]) {
+    writeFileSync(hostConfigPath(), JSON.stringify({ hostVerificationSetup: value }));
+    const calls: SetupCall[] = [];
+    const refusal = refusalOf(await prepare(workspace(), recordingDeps(calls)));
+    assert.equal(refusal.reason, "ambiguous_setup_contract", `${JSON.stringify(value)} must be refused`);
+    assert.equal(calls.length, 0);
+  }
+});
+
+test("FG-566 SETUP GRAMMAR — a step that FAILS stops the sequence, and the refusal names THAT step", async () => {
+  writeFileSync(hostConfigPath(), JSON.stringify({
+    hostVerificationSetup: [["npm", "ci"], ["npm", "run", "build:native"], ["npm", "run", "verify:bindings"]],
+  }));
+  const calls: SetupCall[] = [];
+  const outcome = await prepare(workspace(), {
+    porcelain: () => "",
+    runSetup: (cmd, args, opts): SetupRun => {
+      calls.push({ cmd, args, env: opts.env, cwd: opts.cwd });
+      // The native build step fails — a node-gyp exit, the case restoring lifecycle
+      // scripts newly makes reachable.
+      return args.includes("build:native")
+        ? { ok: false, status: 1, timedOut: false, stderrTail: "gyp ERR! build error" }
+        : { ok: true, status: 0, timedOut: false, stderrTail: "" };
+    },
+  });
+
+  const refusal = refusalOf(outcome);
+  assert.equal(refusal.reason, "setup_failed");
+  assert.equal(calls.length, 2, "the sequence stops at the first failure — the third step must not run");
+  assert.match(refusal.message, /step 2 of 3/);
+  assert.match(refusal.message, /npm run build:native/);
+  assert.match(refusal.message, /NOT a verdict on the code/);
 });
 
 // ── FIX 5: readiness is its own declared span with its own composed lease ────
