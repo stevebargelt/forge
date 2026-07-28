@@ -160,7 +160,9 @@ Forge picks up the pending `architect` task, launches an agent container, captur
 
 This blocks for as long as the agent runs. That's what you want in your own terminal; it is not what you want when a Claude Code session is the one shelling out — see step 13 for `forge launch`, the durable owner for long commands.
 
-> **On macOS, the agent gets its own isolated workspace by default** (FG-345) — a task-scoped git clone or worktree at the committed base, not your live checkout. Two consequences on a first dispatch: the project must be inside a git repository, and its **tracked tree must be clean** — commit or stash first, or pass `FORGE_WORKTREE_IGNORE_DIRTY=1` to dispatch from a dirty tree anyway (the agent still sees the committed snapshot). Uncommitted, untracked and ignored files do not reach the agent; that's the contract, not a bug. `FORGE_NO_WORKTREES=1` reverts to the legacy shared-checkout behavior. Full detail: [Workspace isolation](concepts.md#workspace-isolation-worktree-mode).
+> **On macOS, a workflow-dispatched agent gets its own isolated workspace by default** (FG-345) — a task-scoped git clone or worktree at the committed base, not your live checkout. Two consequences on a first dispatch: the project must be inside a git repository, and its **tracked tree must be clean** — commit or stash first, or pass `FORGE_WORKTREE_IGNORE_DIRTY=1` to dispatch from a dirty tree anyway (the agent still sees the committed snapshot). Uncommitted, untracked and ignored files do not reach the agent; that's the contract, not a bug. `FORGE_NO_WORKTREES=1` reverts to the legacy shared-checkout behavior.
+>
+> **"Workflow-dispatched" is the whole guarantee** — `forge new` / `forge next`, the path this quick-start walks. `forge invoke` provisions no workspace and runs the agent directly against your checkout, and `forge review-loop` dispatches both its reviewer and its **file-modifying fixer** that way, so neither is covered by the default above. Full detail: [Workspace isolation](concepts.md#workspace-isolation-worktree-mode).
 
 While running:
 ```
