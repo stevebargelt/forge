@@ -11,7 +11,7 @@ When a forge run hits a terminal-ish state, forge POSTs a one-line SMS via Twili
 Default trigger set (override via `FORGE_NOTIFY_ON`):
 - **`complete`** — the run finished successfully (`runs.status` flipped to `complete`).
 - **`failed`** — the run was abandoned (`runs.status` flipped to `abandoned`).
-- **`blocked_by_red`** — a task got blocked by an adversarial review: an authoritative red verdict, or a red of any authority whose container crashed before it reviewed anything. Either way the run is parked and needs you to decide.
+- **`blocked_by_red`** — a task got blocked by an adversarial review: an authoritative red verdict, or a red of any authority that returned **no reviewer-authored verdict at all**. The second case keys on provenance, not on how the red died — a missing or malformed `result.json`, an idle timeout, an OOM kill, a provider/model failure, or a container that never started all count, and any of them blocks regardless of the red's authority. (A reviewer that ran and returned `inconclusive` is an opinion, not a missing review — that does not block.) Either way the run is parked and needs you to decide.
 - **`awaiting_gate`** — a task paused for a human/verdict gate; a gate is exactly the kind of thing that needs your action, so it's on by default (not opt-in).
 
 These four are the run/task *lifecycle* triggers, governed by `FORGE_NOTIFY_ON` (below). Forge also emits some notifications **automatically as milestones** — campaign parks and live `forge ops check` incidents — which push via the milestone policy, not `FORGE_NOTIFY_ON`. See [Orchestrator milestones](#orchestrator-milestones-202203) for both.
@@ -193,7 +193,7 @@ Notifications immediately stop on the next forge invocation. The other `TWILIO_*
 
 - **Individual task failures inside a still-active run.** Only the run-level terminal transition fires.
 - **Non-forge work.** A long Claude Code session that doesn't touch forge gets no notification from here. (Use a Claude Code `Stop` hook for that — orthogonal concern.)
-- **Container crashes, idle-timeouts.** These flip the task to `failed` but don't terminate the run, so no SMS. If the run subsequently gets abandoned, that triggers a `failed` SMS.
+- **Container crashes, idle-timeouts.** These flip the task to `failed` but don't terminate the run, so no SMS. If the run subsequently gets abandoned, that triggers a `failed` SMS. (Exception: when it's a *red* that died without authoring a verdict, the primary lands `blocked_by_red` — see that trigger above — which does notify.)
 
 ## Troubleshooting
 

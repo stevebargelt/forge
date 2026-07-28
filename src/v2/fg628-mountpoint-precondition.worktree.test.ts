@@ -81,6 +81,10 @@ let prev: DatabaseInstance | null;
 const tmpDirs: string[] = [];
 const tmpVolumes: string[] = [];
 
+// Captured before any test forces a platform; restoring `process.platform` in
+// afterEach would just re-set whatever the last test left behind.
+const REAL_PLATFORM = process.platform;
+
 const ENV_VARS = [
   "FORGE_WORKTREES",
   "FORGE_NO_WORKTREES",
@@ -110,7 +114,7 @@ afterEach(() => {
     if (savedEnv[k] === undefined) delete process.env[k];
     else process.env[k] = savedEnv[k] as string;
   }
-  setPlatform(process.platform);
+  setPlatform(REAL_PLATFORM);
   for (const dir of tmpDirs.splice(0)) {
     try {
       rmSync(dir, { recursive: true, force: true });
