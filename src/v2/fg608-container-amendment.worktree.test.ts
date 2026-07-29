@@ -30,7 +30,7 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -79,23 +79,90 @@ const RUNTIME: Runtime = {
 };
 
 
-function dockerTry(args: string[]): { ok: boolean; stdout: string; stderr: string } {
-  try {
+// Every docker call here is bounded. An unbounded one turns a wrong container
+// shape into a ten-minute hang that reports a single assertion failure with no
+// phase attribution — the diagnostic cost is the defect, separate from whatever
+// caused the stall.
+const DOCKER_TIMEOUT_MS = 90_000;
+const DOCKER_PULL_TIMEOUT_MS = 300_000;
+
+// spawnSync, not execFileSync: the acceptance case asserts on the reader's
+// dispatched-vs-current revision note, which container-authority.ts writes to
+// STDERR. execFileSync only hands back stdout on success, so a passing exec
+// arrived here with stderr: "" and those assertions could never hold.
+function dockerTry(
+  args: string[],
+  opts: { timeoutMs?: number; label?: string } = {},
+): { ok: boolean; stdout: string; stderr: string } {
+  const timeout = opts.timeoutMs ?? DOCKER_TIMEOUT_MS;
+  const r = spawnSync("docker", args, { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8", timeout });
+  const stdout = r.stdout ?? "";
+  const stderr = r.stderr ?? "";
+  if (r.error) {
+    const err = r.error as NodeJS.ErrnoException;
+    const label = opts.label ?? `docker ${args.slice(0, 2).join(" ")}`;
+    const timedOut = err.code === "ETIMEDOUT" || r.signal === "SIGTERM";
     return {
-      ok: true,
-      stdout: execFileSync("docker", args, { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" }),
-      stderr: "",
+      ok: false,
+      stdout,
+      stderr: timedOut ? `TIMEOUT after ${timeout}ms: ${label}` : `${label}: ${err.message}`,
     };
-  } catch (e) {
-    const err = e as { stdout?: string; stderr?: string; message?: string };
-    return { ok: false, stdout: err.stdout ?? "", stderr: err.stderr ?? err.message ?? "" };
+  }
+  return { ok: r.status === 0, stdout, stderr };
+}
+
+/** Coarse phase timing on stderr. When this test fails on a host it is almost
+ *  always a stall, and which phase burned the wall clock IS the diagnosis. */
+function phaseTimer(tag: string): (phase: string) => void {
+  const t0 = Date.now();
+  let last = t0;
+  return (phase) => {
+    const now = Date.now();
+    console.error(`[${tag}] ${phase}: +${now - last}ms (total ${now - t0}ms)`);
+    last = now;
+  };
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** Bounded readiness wait for a detached container, returning a NAMED failure
+ *  instead of leaving the stall for the first exec to discover. The agent image's
+ *  ENTRYPOINT (docker/agent-entrypoint.sh) runs under `set -eu` before it execs
+ *  the container command, and several of its probes exit non-zero on purpose
+ *  (git 122, dependency install 123) — so "started" and "still alive" are
+ *  different claims, and the entrypoint's own output is what explains the gap. */
+function waitForRunning(name: string, timeoutMs: number): string | undefined {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const state = dockerTry(
+      ["inspect", "--format", "{{.State.Running}} {{.State.ExitCode}}", name],
+      { timeoutMs: 15_000, label: `docker inspect ${name}` },
+    );
+    const [running, exitCode] = state.stdout.trim().split(" ");
+    if (running === "true") return undefined;
+    if (state.ok && running === "false") {
+      const logs = dockerTry(["logs", "--tail", "40", name], {
+        timeoutMs: 15_000,
+        label: `docker logs ${name}`,
+      });
+      return `container ${name} EXITED (code ${exitCode}) before any exec — entrypoint output:\n${logs.stdout}${logs.stderr}`;
+    }
+    if (!state.ok && /no such (object|container)/i.test(state.stderr)) {
+      return `container ${name} does not exist moments after a successful start: ${state.stderr.trim()}`;
+    }
+    if (Date.now() >= deadline) {
+      return `container ${name} never reported Running within ${timeoutMs}ms (last: ${state.stdout.trim() || state.stderr.trim()})`;
+    }
+    sleepSync(200);
   }
 }
 
 function probeUnavailable(): string | undefined {
   if (!dockerTry(["info", "--format", "{{.ServerVersion}}"]).ok) return "no docker daemon reachable";
   if (dockerTry(["image", "inspect", PROBE_IMAGE]).ok) return undefined;
-  const pulled = dockerTry(["pull", PROBE_IMAGE]);
+  const pulled = dockerTry(["pull", PROBE_IMAGE], { timeoutMs: DOCKER_PULL_TIMEOUT_MS });
   return pulled.ok ? undefined : `probe image ${PROBE_IMAGE} unavailable: ${pulled.stderr.trim()}`;
 }
 
@@ -211,14 +278,16 @@ test("FG-608 property (ii): a host amendment reaches an ALREADY-RUNNING containe
     "-e", `${SNAPSHOT_DIR_ENV}=${mount!.containerDir}`,
     "-e", `${DISPATCHED_TICKET_ENV}=${mount!.dispatchedTicket}`,
     PROBE_IMAGE, "sleep", "300",
-  ]);
+  ], { label: "docker run -d (probe image)" });
   assert.equal(started.ok, true, started.stderr);
+  const notRunning = waitForRunning(name, 30_000);
+  assert.equal(notRunning, undefined, notRunning);
 
   const readInContainer = (needle: string): boolean => {
     const r = dockerTry([
       "exec", name, "sh", "-c",
       `grep -c ${needle} ${mount!.containerDir}/${SNAPSHOT_DB_BASENAME} || true`,
-    ]);
+    ], { label: `docker exec ${name} grep` });
     assert.equal(r.ok, true, r.stderr);
     return Number.parseInt(r.stdout.trim() || "0", 10) > 0;
   };
@@ -260,6 +329,7 @@ test("FG-608 property (ii): `forge backlog show` in that SAME container returns 
     return;
   }
 
+  const mark = phaseTimer("fg608-amend-cli");
   const KEY = "pk-amendment-cli";
   const TICKET = "FG-1";
   const ORIGINAL = "ORIGINAL-BODY";
@@ -293,20 +363,40 @@ test("FG-608 property (ii): `forge backlog show` in that SAME container returns 
   dockerTry(["rm", "-f", name]);
   containers.push(name);
   const prefix = args.slice(0, imageIndex).map((a, i) => (args[i - 1] === "--name" ? name : a));
-  const started = dockerTry([...prefix, AGENT_IMAGE, "sleep", "600"]);
-  assert.equal(started.ok, true, started.stderr);
+  mark("fixture + buildDockerArgs");
 
-  const showInContainer = () => dockerTry(["exec", name, "forge", "backlog", "show", TICKET]);
+  // -d IS THE FIX, and it belongs here rather than in buildDockerArgs: production
+  // runs the agent in the FOREGROUND (`run -i`) and streams its stdio, so that
+  // prefix is correct for production and must not change. This test needs the
+  // SAME container shape kept alive across two execs. Without -d, `docker run`
+  // does not return until `sleep` has already finished, the container is EXITED
+  // by the time the first exec runs, and the whole test reports one
+  // "container ... is not running" assertion ten minutes late.
+  const started = dockerTry([prefix[0]!, "-d", ...prefix.slice(1), AGENT_IMAGE, "sleep", "300"], {
+    label: "docker run -d (agent image)",
+  });
+  assert.equal(started.ok, true, started.stderr);
+  const notRunning = waitForRunning(name, 60_000);
+  assert.equal(notRunning, undefined, notRunning);
+  mark("container running");
+
+  const showInContainer = () =>
+    dockerTry(["exec", name, "forge", "backlog", "show", TICKET], {
+      label: `docker exec ${name} forge backlog show`,
+    });
 
   const before = showInContainer();
   assert.equal(before.ok, true, before.stderr);
   assert.match(before.stdout, new RegExp(ORIGINAL));
   assert.match(before.stdout, /revision 1/);
+  mark("exec #1 (pre-amendment show)");
 
   // Host amendment through the production seam path.
   writeTicket(projectDir, { ...readTicket(projectDir, TICKET), body: AMENDED });
+  mark("host writeTicket (production fan-out)");
 
   const after = showInContainer();
+  mark("exec #2 (post-amendment show)");
   assert.equal(after.ok, true, after.stderr);
   assert.match(after.stdout, new RegExp(AMENDED), "the amended body");
   assert.match(after.stdout, /revision 2/, "and the CURRENT revision");
