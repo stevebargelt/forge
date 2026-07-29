@@ -33,9 +33,12 @@ review policy are done and in force.
 
 ## Now
 
-1. **FG-608 — FG-496 Slice C:** make the DB backlog authoritative per project, migrate seam-bypassing
-   readers, and provide containers the live read-only project-scoped backlog authority. The next
-   implementation item; the evidence-led decomposition established no dependency displacing it.
+1. **FG-608 — SHIPPED and closed** (`f9afbf59`, PR #174; AC walk in the ticket). The cutover MACHINERY
+   is live; **the forge repo itself is NOT migrated.** The pending decision is the operator-gated
+   Phase 3 dogfood cutover: `forge backlog migrate --dry-run` review → explicit operator go →
+   `forge backlog migrate` (one-way after the first DB-only edit; agent image already rebuilt;
+   `~/.forge/forge.db.pre-fg608.bak` is the machine-wide restore point). FG-609 (Slice D) is the next
+   implementation item after that decision.
 
 ## Next
 
