@@ -145,9 +145,27 @@ FG-523. Two task-scoped events carry the outcome of the [validation contract](co
 
 ### `campaigns` / `campaign_items` tables
 
-The dashboard reads these (in addition to `@forge/backlog`) only to resolve a campaign item's `ticket_id` and its campaign's `project_dir`, for scoping a `host_verifications` evidence lookup by campaign item (`hostVerificationsForCampaignItem()` — `host_verifications` itself has no `campaign_id`/`item_id` column, see below). Columns read: `campaign_items.id`, `campaign_items.ticket_id`, `campaign_items.campaign_id`; `campaigns.id`, `campaigns.project_dir`.
+The dashboard reads these only to resolve a campaign item's `ticket_id` and its campaign's `project_dir`, for scoping a `host_verifications` evidence lookup by campaign item (`hostVerificationsForCampaignItem()` — `host_verifications` itself has no `campaign_id`/`item_id` column, see below). Columns read: `campaign_items.id`, `campaign_items.ticket_id`, `campaign_items.campaign_id`; `campaigns.id`, `campaigns.project_dir`.
 
 `campaign_items.attempt_generation` — integer, `NOT NULL DEFAULT 0`, added by FG-596 (in `schema.ts` for new DBs, via `applyMigrations` in `db.ts` for existing ones). The item's **logical attempt generation**: a monotonic per-item counter bumped only on a genuinely new attempt (e.g. initial dispatch or an explicit `forge campaign retry` / `escalate-lane`) and reused unchanged on restart/reattach/re-drive. `0` means "not yet allocated" — the item has **not yet been driven** (also the read-back value of every pre-FG-596 row, no backfill), and a real dispatched attempt is `>= 1`. Initial dispatch atomically allocates generation `1` inside the single pre-dispatch reservation transaction (`reserveCampaignDriveDispatch`), so a generation-`0` item is the normal pre-drive state, not a failure condition. What the drive-item path fails closed on is a legacy/in-flight row with incompatible linkage — a `pending` item whose `run_id` still resolves to a real run row — never a generation-`0` item as such. It feeds the deterministic drive-item dispatch key (stamped into item-run control-plane metadata, see `runs` above) so a later slice (FG-564) can adopt a dead drive-item by key instead of duplicating it. Additive + `NOT NULL` with a safe default is the only SQLite `ADD COLUMN` shape that keeps old binaries tolerant of the extra column (the additive-only open-path discipline, BD-15). **Not part of the dashboard read contract** — documented here only so this file's update-in-the-same-commit rule catches the schema change.
+
+### backlog ticket tables (FG-608 dashboard read path)
+
+Since FG-608 the dashboard resolves `/api/backlog` tickets from the store by SQL, not by importing `@forge/backlog` and reading a checkout's `backlog/*.md`. Ticket truth is host-wide, keyed by `project_key`, so every checkout of one repository answers with the same rows.
+
+The `project_key` is **derived, never accepted**: `backlogTruthForProject()` takes the dashboard's own resolved project record and looks its repository evidence key up in `project_identity`. A request parameter cannot be turned into a store key, which is what keeps this a per-project board (cross-project aggregation is FG-591). A repository with no `project_identity` row has never been imported and reports `projectKey: null` — no ticket truth, distinct from an empty board.
+
+Tables and columns read:
+
+- `project_identity` — `project_key` selected by `repo_evidence_key`.
+- `ticket_storage_mode` — `mode` (`db` | `markdown`) for that key. `markdown` means the rows are a non-authoritative import shadow and the board badges them as such.
+- `tickets` — `ticket_id`, `type`, `status`, `title`, `body`, `created`, `closed`, `closed_commit`, `epic`, scoped by `project_key`.
+- `ticket_relations` — `related_id` where `rel_type = 'related'`.
+- `blocker_evidence` — presence only, to reconstruct `blocked`.
+
+**`blocked` is reconstructed, not stored** — the DB status vocabulary is exactly `active | done | deferred`, and legacy `blocked` is an `active` row plus a `blocker_evidence` row whose `source` is the literal `import-legacy-blocked`. Forge reconstructs it in `src/backlog/structured.ts`; the dashboard reconstructs it identically in `dashboard/src/queries.ts` or the board renders an unblocked-looking ticket the CLI calls blocked. **That literal exists in two places with no shared import** (`dashboard/src/queries.ts` and `src/store/tickets.ts`) — this file's standing drift caveat applies with unusual force, because each side's own tests write the string they read, so a drift in either copy stays green on both suites.
+
+The snapshot database mounted into agent containers is a *different*, derived artifact with its own reduced schema (`src/backlog/snapshot.ts`) — not this contract. It is never the dashboard's read path.
 
 ### `host_verifications` table (FG-487 dashboard read path)
 
@@ -374,6 +392,7 @@ The dashboard server exposes read-only JSON endpoints. All `GET` — no writes. 
 | `GET /api/review-loop/phases` | `projectDir` | Active review-loop runs with phase `verifying \| waiting-on-ci \| reviewing \| fixing` (FG-487) |
 | `GET /api/host-verifications` | `ticketId` + optional `projectDir`, or `itemId` | host_verifications evidence rows scoped to a ticket or campaign item (FG-487) |
 | `GET /api/host-verifications/recent` | `limit` (1–500, default 50) | Most recent host_verifications rows across all tickets — after-the-fact discoverability of bare host gates (FG-487) |
+| `GET /api/backlog` | `projectKey` or `projectDir` | One project's tickets from the host store plus its per-checkout session notes. Returns `{notes, notesByCheckout, tickets, ticketsProjectKey, ticketsStorageMode, ticketsError?}` — `ticketsProjectKey: null` means the repository has no ticket truth (never imported), and `ticketsError` means the read failed and the count is unknown, never zero (FG-608) |
 
 ### `GET /api/governance` response shape (`WorkbenchPanel`)
 

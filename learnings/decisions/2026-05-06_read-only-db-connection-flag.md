@@ -7,6 +7,13 @@
 **Supersedes**: N/A
 **Scope**: forge
 
+> **Amended 2026-07-29 (FG-608).** The decision stands; two of its recorded consequences no longer describe the code. This ADR predicted both and left them unpaid, and FG-608 paid them because the dashboard and the in-container ticket reader are pure readers that must never mutate a store:
+>
+> - **A read never creates or migrates the store.** `getDb({readOnly: true})` against a missing `~/.forge/forge.db` now throws `StoreUnavailableError` instead of falling through to a writable open — which used to exec the schema and run every migration, so a `forge status` on a fresh host silently minted the database. It also no longer calls `ensureForgeDirs()`, so a read does not create `~/.forge/` either. Callers that legitimately tolerate "no store yet" call `storeExists()` first; the survey commands do, and answer empty (see `src/cli/no-store.ts`).
+> - **An un-migrated store is READ AS-IS, not migrated and not refused.** The open path is additive-only (FG-568/BD-15), so an older file's shape is a strict subset of the current one; a query for a table this binary knows and the file lacks raises an ordinary SQLite error naming it. Refusing instead would break every read of a store written by an older peer, which is the compatibility that policy exists to preserve.
+>
+> The bullets below marked *(superseded — see the amendment above)* are kept for the record.
+
 ---
 
 ## Context
@@ -93,7 +100,7 @@ We accept the order-dependent nature of Option B because (1) CLI command files a
 
 **Negative / Trade-offs**:
 - Order-dependence: a future CLI command that wants read-only mode must call `getDb({readOnly: true})` before any store accessor. There's no compile-time check enforcing this.
-- A read-only open on a non-existent DB file would fail (SQLite refuses to create files in readonly mode), so `getDb` falls through to the writable path when `DB_PATH` doesn't exist yet. Read-only callers on a fresh install simply observe an empty DB.
+- *(superseded — see the amendment above)* A read-only open on a non-existent DB file would fail (SQLite refuses to create files in readonly mode), so `getDb` falls through to the writable path when `DB_PATH` doesn't exist yet. Read-only callers on a fresh install simply observe an empty DB.
 
 **Risks**:
 - A future schema migration runs in `getDb()` on the writable path. If a read-only call lands on a process where the writable path *would have* migrated, the DB stays at the old schema. Mitigation: schema migrations should be a `forge migrate` command, not implicit on first connection. (Not a problem in v0 — schema is `IF NOT EXISTS` and immutable.)
@@ -102,7 +109,7 @@ We accept the order-dependent nature of Option B because (1) CLI command files a
 
 ## Implementation Notes
 
-- `getDb(opts?: {readOnly?: boolean})` — when `readOnly: true` *and* the DB file already exists, opens `new Database(path, {readonly: true})` and skips schema/pragma application. Always sets `busy_timeout = 5000`, on both modes.
+- *(superseded — see the amendment above)* `getDb(opts?: {readOnly?: boolean})` — when `readOnly: true` *and* the DB file already exists, opens `new Database(path, {readonly: true})` and skips schema/pragma application. Always sets `busy_timeout = 5000`, on both modes.
 - `forge show` calls `getDb({readOnly: true})` unconditionally — the command is purely read-only.
 - `forge status` accepts `--read-only`. Without the flag: writable connection, runs `reconcileRun` for stuck-task recovery (existing behavior). With the flag: read-only connection, skips reconcile.
 - The first `getDb()` call wins. A second call with different options returns the cached instance. This is fine for the singleton model but worth knowing if you're debugging "why is my readOnly flag ignored" — something else called `getDb()` first.
