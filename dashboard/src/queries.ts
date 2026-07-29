@@ -42,19 +42,43 @@ function scopeIncludes(scope: ProjectScope, projectDir: string | null): boolean 
   return typeof scope === "string" ? projectDir === scope : scope.includes(projectDir);
 }
 
-const FORGE_HOME = process.env.FORGE_HOME ?? join(homedir(), ".forge");
-const DB_PATH = join(FORGE_HOME, "forge.db");
-const RUNS_DIR = join(FORGE_HOME, "runs");
+// FG-616: resolved PER CALL, never snapshotted at module eval. ESM evaluates a
+// static import before the importing module's body, so a module-eval snapshot
+// binds whatever FORGE_HOME happened to be set at import time — the exact shape
+// of the FG-607 store-path bug, where the dashboard read one host's store while
+// the process had settled on another. Latent in the single-home production
+// dashboard; not latent for a long-running process whose home is assigned after
+// its imports, which is every integration harness that boots this server.
+function forgeHome(): string {
+  return process.env.FORGE_HOME ?? join(homedir(), ".forge");
+}
+function dbPath(): string {
+  return join(forgeHome(), "forge.db");
+}
+function runsDir(): string {
+  return join(forgeHome(), "runs");
+}
 
-let _db: Database.Database | null = null;
+// The handle is cached against the path it was opened on. A resolved path that
+// no longer matches means the process now has a DIFFERENT store, and continuing
+// to answer from the old connection is how a reader silently serves another
+// host's tickets. Forge's own cache is keyed on dbGeneration(); this second,
+// independent read-only handle is invisible to it, so it needs its own
+// invalidation or a long-running dashboard would never observe a mode flip.
+let _db: { path: string; handle: Database.Database } | null = null;
 function db(): Database.Database {
-  if (_db) return _db;
-  if (!existsSync(DB_PATH)) {
-    throw new Error(`forge DB not found at ${DB_PATH}. Has forge run yet?`);
+  const path = dbPath();
+  if (_db) {
+    if (_db.path === path) return _db.handle;
+    _db.handle.close();
+    _db = null;
   }
-  _db = new Database(DB_PATH, { readonly: true });
+  if (!existsSync(path)) {
+    throw new Error(`forge DB not found at ${path}. Has forge run yet?`);
+  }
   // WAL readers don't block writers (forge uses WAL); no contention.
-  return _db;
+  _db = { path, handle: new Database(path, { readonly: true }) };
+  return _db.handle;
 }
 
 export type { Run, Task };
@@ -308,7 +332,7 @@ function deriveFailureKind(events: TaskEventEntry[]): string | null {
 
 function computeIdle(runId: string, taskId: string, status: string, startedAt: string | null): IdleInfo | null {
   if (status !== "running") return null;
-  const dir = join(RUNS_DIR, runId, taskId);
+  const dir = join(runsDir(), runId, taskId);
   let mtime: number | undefined;
   try { mtime = statSync(join(dir, "container.stdout.log")).mtimeMs; } catch { /* no output yet */ }
   let idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS;
@@ -398,8 +422,8 @@ export function taskDetail(taskId: string): TaskDetail | null {
     result: taskRow.result ? safeJsonParse(taskRow.result) : null,
   };
 
-  const stdoutPath = join(RUNS_DIR, taskRow.run_id, taskId, "container.stdout.log");
-  const stderrPath = join(RUNS_DIR, taskRow.run_id, taskId, "container.stderr.log");
+  const stdoutPath = join(runsDir(), taskRow.run_id, taskId, "container.stdout.log");
+  const stderrPath = join(runsDir(), taskRow.run_id, taskId, "container.stderr.log");
   const stdout = readLogTail(stdoutPath);
   const stderr = readLogTail(stderrPath);
 
@@ -871,6 +895,143 @@ export function resolveProjectScope(projectKey?: string, projectDir?: string): P
   return projectsForDashboard().find((project) => project.key === projectKey)?.projectDirs ?? [];
 }
 
+// ─── backlog ticket truth (FG-608, FG-496 Slice C) ──────────────────────────
+//
+// Tickets are HOST-WIDE truth keyed by project_key, not branch-local files.
+// Every checkout of one repository — canonical, feature branch, linked worktree,
+// clone — answers with the SAME rows, because they all resolve to the same
+// project_key. The dashboard's old canonical-main/master ticket-source
+// resolution is gone with the branch concept it encoded.
+//
+// The project_key is DERIVED, never accepted. `backlogTruthForProject` takes a
+// resolved ProjectRecord (the dashboard's own registry resolution) and looks its
+// repository EVIDENCE key up in project_identity — the same durable arbiter
+// src/store/project-registry.ts writes and src/backlog/storage-mode.ts reads.
+// Taking a ProjectRecord rather than a key string is the point: a request
+// parameter cannot be forged into one, so a client cannot name a project_key the
+// dashboard's own resolution does not authorize. The dashboard stays a
+// PER-PROJECT board (cross-project aggregation is FG-591, not here).
+//
+// A repository with no project_identity row has never been imported: it has no
+// ticket truth at all, and that is reported as projectKey: null rather than
+// papered over with a branch-local Markdown read. Same for a mismatched evidence
+// key (a repo registered before it gained a remote) — the operator repair is
+// host-side `forge backlog reidentify`, never a read-path fallback.
+
+/** Reconstructed shape of `forge backlog list` — mirrors StructuredTicket in
+ *  src/backlog/structured.ts so the dashboard and the CLI describe one ticket
+ *  the same way. No checkoutDir/checkoutBranch: a ticket belongs to a project,
+ *  not to a checkout. */
+export type BacklogTicket = {
+  id: string;
+  type: string;
+  status: string;
+  title: string;
+  body: string;
+  epic?: string;
+  created?: string;
+  closed?: string;
+  closedCommit?: string;
+  related?: string[];
+};
+
+export type BacklogTruth = {
+  /** null = this repository has no ticket truth (never imported / not registered). */
+  projectKey: string | null;
+  /** Which store is AUTHORITATIVE for those rows. `markdown` means the rows are
+   *  an imported shadow the project has not cut over to yet; null when there is
+   *  no project_key at all. */
+  storageMode: "db" | "markdown" | null;
+  tickets: BacklogTicket[];
+};
+
+const NO_TICKET_TRUTH: BacklogTruth = { projectKey: null, storageMode: null, tickets: [] };
+
+// src/store/tickets.ts:309. The DB status vocabulary is exactly
+// active/done/deferred; legacy `blocked` is stored as active + a blocker_evidence
+// row and reconstructed on the way out (src/backlog/structured.ts:519). The
+// dashboard reconstructs it identically or it would render an unblocked-looking
+// board the CLI disagrees with. Hardcoded like every other column name here —
+// the schema-contract drift surface documented at the top of this file.
+const LEGACY_BLOCKED_SOURCE = "import-legacy-blocked";
+
+/** Host-wide ticket truth for one resolved project. Throws if the store cannot
+ *  be read — the caller decides what a failed read means to its payload. */
+export function backlogTruthForProject(project: ProjectRecord): BacklogTruth {
+  const identity = db()
+    .prepare(`SELECT project_key FROM project_identity WHERE repo_evidence_key = ?`)
+    .get(project.key) as { project_key: string } | undefined;
+  if (!identity) return NO_TICKET_TRUTH;
+  const projectKey = identity.project_key;
+
+  const mode = db()
+    .prepare(`SELECT mode FROM ticket_storage_mode WHERE project_key = ?`)
+    .get(projectKey) as { mode: string } | undefined;
+
+  const rows = db().prepare(`
+    SELECT ticket_id, type, status, title, body, created, closed, closed_commit, epic
+    FROM tickets WHERE project_key = ?
+  `).all(projectKey) as Array<{
+    ticket_id: string;
+    type: string;
+    status: string;
+    title: string;
+    body: string;
+    created: string | null;
+    closed: string | null;
+    closed_commit: string | null;
+    epic: string | null;
+  }>;
+
+  // Two set-wide queries instead of two per ticket: a board with several hundred
+  // tickets is a normal size and this route is polled.
+  const related = new Map<string, string[]>();
+  for (const rel of db().prepare(`
+    SELECT ticket_id, related_id FROM ticket_relations
+    WHERE project_key = ? AND rel_type = 'related' ORDER BY related_id ASC
+  `).all(projectKey) as Array<{ ticket_id: string; related_id: string }>) {
+    const list = related.get(rel.ticket_id) ?? [];
+    list.push(rel.related_id);
+    related.set(rel.ticket_id, list);
+  }
+
+  const blocked = new Set(
+    (db().prepare(`SELECT ticket_id FROM blocker_evidence WHERE project_key = ? AND source = ?`)
+      .all(projectKey, LEGACY_BLOCKED_SOURCE) as Array<{ ticket_id: string }>).map((r) => r.ticket_id),
+  );
+
+  const tickets = rows.map((row): BacklogTicket => {
+    const rel = related.get(row.ticket_id);
+    return {
+      id: row.ticket_id,
+      type: row.type,
+      status: blocked.has(row.ticket_id) && row.status === "active" ? "blocked" : row.status,
+      title: row.title,
+      body: row.body,
+      ...(rel && rel.length > 0 ? { related: rel } : {}),
+      ...(row.created ? { created: row.created } : {}),
+      ...(row.closed ? { closed: row.closed } : {}),
+      ...(row.closed_commit ? { closedCommit: row.closed_commit } : {}),
+      ...(row.epic ? { epic: row.epic } : {}),
+    };
+  });
+  tickets.sort((a, b) => compareTicketIds(a.id, b.id));
+
+  return { projectKey, storageMode: mode?.mode === "db" ? "db" : "markdown", tickets };
+}
+
+/** Mirrors compareTicketIds in src/backlog/structured.ts:628 — FG-100 sorts
+ *  before FG-99, which a lexical ORDER BY would invert. */
+function compareTicketIds(a: string, b: string): number {
+  const ma = a.match(/^([A-Za-z]+)-(\d+)$/);
+  const mb = b.match(/^([A-Za-z]+)-(\d+)$/);
+  if (ma && mb) {
+    if (ma[1] !== mb[1]) return ma[1]!.localeCompare(mb[1]!);
+    return parseInt(ma[2]!, 10) - parseInt(mb[2]!, 10);
+  }
+  return a.localeCompare(b);
+}
+
 type ProjectPresentation = { label: string; color: string; branch?: string };
 
 const PROJECT_PRESENTATION_CACHE_MS = 5_000;
@@ -910,7 +1071,9 @@ function projectPresentation(projectDir: string | null): ProjectPresentation | n
 // dashboard can't drift from the CLI's view of routing. Augments it with the tail
 // of the host RACI audit log so policy changes are visible without reading the
 // file. Read-only: there is no write counterpart.
-const AUDIT_LOG_PATH = join(FORGE_HOME, "raci-audit.log");
+function auditLogPath(): string {
+  return join(forgeHome(), "raci-audit.log");
+}
 
 export type RaciAuditEntry = {
   timestamp: string;
@@ -952,8 +1115,9 @@ export type WorkbenchPanel = {
 /** Tail of the host-global RACI audit log (newest first). Tolerates a missing
  *  file (no changes yet) and skips any unparseable line. */
 function recentRaciAudit(limit: number): RaciAuditEntry[] {
-  if (!existsSync(AUDIT_LOG_PATH)) return [];
-  const lines = readFileSync(AUDIT_LOG_PATH, "utf8").split("\n").filter((l) => l.trim() !== "");
+  const path = auditLogPath();
+  if (!existsSync(path)) return [];
+  const lines = readFileSync(path, "utf8").split("\n").filter((l) => l.trim() !== "");
   const out: RaciAuditEntry[] = [];
   for (const line of lines.slice(-limit)) {
     try {
@@ -971,7 +1135,7 @@ export function routingGovernance(projectDir?: string): WorkbenchPanel {
   const raciPath =
     view.source === "project" && projectDir !== undefined
       ? join(projectDir, ".forge", "forge-raci.md")
-      : join(FORGE_HOME, "forge-raci.md");
+      : join(forgeHome(), "forge-raci.md");
 
   let health: WorkbenchHealth;
   let findings: WorkbenchPanel["derived"]["findings"];

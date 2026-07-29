@@ -20,11 +20,10 @@ import { fileURLToPath } from "node:url";
 import {
   recentActivity, inFlight, taskDetail, projectsForDashboard, usageRollup, usageTimeSeries, usageModelMix, opsMetrics, routingGovernance,
   inProgressVerifications, reviewLoopRunPhases, hostVerificationsForTicket, hostVerificationsForCampaignItem, recentHostVerifications,
-  resolveProjectScope,
+  resolveProjectScope, backlogTruthForProject,
 } from "./queries.js";
-import type { GroupBy, ProjectScope } from "./queries.js";
+import type { BacklogTicket, GroupBy, ProjectScope } from "./queries.js";
 import { renderShell, contentSecurityPolicy, cspNonce } from "./shell.js";
-import { listTickets } from "@forge/backlog";
 import { getPlanUsage } from "./plan-usage.js";
 import { finishUnhandledRequest } from "./http-error.js";
 
@@ -117,13 +116,17 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     // Notes are operational context and remain per-selection: a projectKey
     // request keeps every checkout's session handoff (multi-checkout); an exact
     // projectDir request keeps that one checkout's session-specific notes.
+    // FG-380 state, read per checkout from the filesystem — orthogonal to ticket
+    // truth, which moved to the host store below.
     const checkouts = project
       ? project.checkouts.filter((checkout) => checkout.exists)
       : projectDir
         ? [{ projectDir, branch: undefined }]
         : [];
     if (checkouts.length === 0) {
-      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ notes: "", tickets: [] }));
+      res.writeHead(200, { "Content-Type": "application/json" }).end(
+        JSON.stringify({ notes: "", tickets: [], ticketsProjectKey: null, ticketsStorageMode: null }),
+      );
       return;
     }
     const notesByCheckout: Array<{ checkoutDir: string; checkoutBranch: string | null; notes: string }> = [];
@@ -133,45 +136,64 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       if (notes.trim()) notesByCheckout.push({ checkoutDir: checkout.projectDir, checkoutBranch: checkout.branch ?? null, notes });
     }
 
-    // A ticket is backlog truth ONLY on the canonical repository's primary
-    // existing main/master checkout. Feature branches, linked worktrees, clones,
-    // and scratch checkouts are not backlog truth until merged. Resolve that
-    // canonical repository for BOTH request shapes — a projectKey request maps
-    // directly; an exact projectDir request (which may be a worktree/clone/
-    // feature checkout) resolves to the canonical repo whose observed paths
-    // include it — so selecting a feature checkout never exposes its
-    // branch-local ticket files. No main/master checkout means no ticket truth.
-    const canonical = project ?? (projectDir ? projects.find((entry) => entry.projectDirs.includes(projectDir)) : undefined);
-    const ticketSource = canonical?.checkouts.find(
-      (checkout) => checkout.exists && (checkout.branch === "main" || checkout.branch === "master"),
-    );
-    const tickets: Array<Record<string, unknown>> = [];
+    // FG-608: ticket truth is HOST-WIDE, keyed by project_key — the same rows for
+    // every checkout of one repository. The canonical main/master ticket-source
+    // resolution this replaced was branch-local by construction; that concept is
+    // gone, so selecting a feature checkout, a linked worktree or the canonical
+    // repo all answer identically and no branch-local ticket file is ever read.
+    //
+    // The project is resolved from the dashboard's OWN registry — by key for a
+    // projectKey request, by observed path for an exact projectDir request — and
+    // backlogTruthForProject derives the project_key from that resolved record's
+    // repository evidence. The request's projectKey parameter is never used as a
+    // store key: trusting it would turn a per-project board into a cross-project
+    // one (FG-591), which this slice is explicitly not.
+    const owner = project ?? (projectDir
+      ? projects.find((entry) =>
+          entry.projectDirs.includes(projectDir) ||
+          entry.checkouts.some((checkout) => checkout.projectDir === projectDir))
+      : undefined);
+    let tickets: BacklogTicket[] = [];
+    // null means "this project has no ticket truth" — unregistered (never
+    // imported), or not resolvable to a project at all. Distinct from a
+    // registered project whose board is simply empty, which reports its key.
+    let ticketsProjectKey: string | null = null;
+    let ticketsStorageMode: "db" | "markdown" | null = null;
     let ticketsError: string | undefined;
-    if (ticketSource) {
+    if (owner) {
       try {
-        for (const ticket of listTickets(ticketSource.projectDir)) {
-          tickets.push({ ...ticket, checkoutDir: ticketSource.projectDir, checkoutBranch: ticketSource.branch ?? null });
-        }
+        const truth = backlogTruthForProject(owner);
+        tickets = truth.tickets;
+        ticketsProjectKey = truth.projectKey;
+        ticketsStorageMode = truth.storageMode;
       } catch (err) {
-        // ONLY "the checkout disappeared between registry resolution and reading"
-        // is absorbed silently — that one is expected and an empty backlog is the
-        // truthful answer for it. Every other throw (an identity refusal, a store
-        // that won't open, a parse failure) means we do NOT know this project's
+        // ONLY "the store disappeared between resolution and reading" is absorbed
+        // silently — that one is expected and an empty backlog is the truthful
+        // answer for it. Every other throw (a store that won't open, a schema
+        // that predates the ticket tables) means we do NOT know this project's
         // tickets, and rendering [] as if we did is how FG-607 turned a five-line
         // change into four red test files with no diagnostic. Still 200 with what
         // we have — a dashboard panel must not take the page down — but the error
-        // is named on stderr and in the payload rather than vanishing.
+        // is named on stderr and in the payload rather than vanishing, and the
+        // notes half of this response is unaffected by a ticket-read failure.
         if (isMissingPath(err)) {
-          tickets.length = 0;
+          tickets = [];
         } else {
           ticketsError = err instanceof Error ? err.message : String(err);
-          console.error(`/api/backlog: reading tickets from ${ticketSource.projectDir} failed:`, err);
+          console.error(`/api/backlog: reading tickets for project ${owner.key} failed:`, err);
         }
       }
     }
     const notes = checkouts.length === 1 ? notesByCheckout[0]?.notes ?? "" : "";
     res.writeHead(200, { "Content-Type": "application/json" }).end(
-      JSON.stringify({ notes, notesByCheckout, tickets, ...(ticketsError ? { ticketsError } : {}) }),
+      JSON.stringify({
+        notes,
+        notesByCheckout,
+        tickets,
+        ticketsProjectKey,
+        ticketsStorageMode,
+        ...(ticketsError ? { ticketsError } : {}),
+      }),
     );
     return;
   }
@@ -293,8 +315,9 @@ function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
 }
 
-/** The checkout is gone from disk — the one ticket-read failure /api/backlog is
- *  entitled to report as an empty backlog. */
+/** The path underneath the read is gone — the one ticket-read failure
+ *  /api/backlog is entitled to report as an empty backlog rather than as a
+ *  named error. Since FG-608 that path is the host store, not a checkout. */
 function isMissingPath(err: unknown): boolean {
   const code = (err as { code?: unknown } | null)?.code;
   return code === "ENOENT" || code === "ENOTDIR";
