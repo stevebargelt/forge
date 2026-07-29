@@ -686,36 +686,170 @@ CREATE INDEX IF NOT EXISTS idx_ticket_dispatch_evidence_ticket
   ON ticket_dispatch_evidence(project_key, ticket_id);
 `;
 
-// FG-608: additive columns on PRE-EXISTING FG-606 tables. Declared here as data so
-// applyMigrations (db.ts) and this file cannot drift — schema.ts owns the shape,
-// db.ts owns the idempotent ALTER. Every entry is nullable or has a DEFAULT, so
-// SQLite's ADD COLUMN accepts it and an existing row reads back a safe value.
-export const FG608_TICKET_COLUMNS: { name: string; ddl: string }[] = [
-  // (i) The MONOTONIC revision counter. Bumped on EVERY authoritative write, never
-  // decreases. This is what dispatch evidence records and what answers "did the
-  // live ticket advance" — a content hash cannot, because edit-and-revert returns
-  // the original hash. DEFAULT 1 so pre-FG-608 rows read back a valid revision.
-  { name: "revision", ddl: "ALTER TABLE tickets ADD COLUMN revision INTEGER NOT NULL DEFAULT 1" },
-  // (ii) The CONTENT basis. body_hash is the hash of the row's current authoritative
-  // content, recomputed on every write; import_basis_hash is that same hash frozen
-  // at the last import. They diverge exactly when the DB row was edited since its
-  // import basis — which is the import conflict rule's entire question. A counter
-  // cannot answer it (it advances for an import too).
-  { name: "body_hash", ddl: "ALTER TABLE tickets ADD COLUMN body_hash TEXT" },
-  { name: "import_basis_hash", ddl: "ALTER TABLE tickets ADD COLUMN import_basis_hash TEXT" },
-];
+// THE ADDITIVE COLUMN LIST — the machine-checked half of the additive-only
+// open-path contract (FG-568/BD-15). Declared here as data so applyMigrations
+// (db.ts) and the CREATE shapes above cannot drift: schema.ts owns the shape,
+// db.ts owns the idempotent, PRAGMA-guarded ALTER.
+//
+// WHY IT IS EXHAUSTIVE rather than "the columns we remember adding late" (FG-608
+// reopen). `forge backlog migrate` failed on the dogfood host with "table tickets
+// has no column named imported_from": SCHEMA_SQL's CREATE named the column, so
+// every fresh DB (all tests, all CI) had it — but CREATE TABLE IF NOT EXISTS
+// no-ops against the host's older `tickets`, and no ALTER existed, so the column
+// was silently absent on exactly the DBs that matter. A migration list curated by
+// memory reproduces that failure once per forgotten column.
+//
+// The invariant instead: BECAUSE the open path is additive-only, every historical
+// shape of a known table is a strict SUBSET of its fresh shape. So this list must
+// carry EVERY column SQLite's ADD COLUMN can restore — nullable, or NOT NULL with
+// a DEFAULT, and not part of the primary key. Most entries are no-ops on every DB
+// that exists today; that is the point. Completeness is what makes the invariant
+// checkable, and fg608-migration-parity.test.ts checks it: it strips a fresh DB
+// down to the oldest shape SQLite permits, migrates it, and demands PRAGMA
+// table_info parity with a fresh one. A new SCHEMA_SQL column without an entry
+// here fails that test.
+//
+// Adding a column above therefore means adding it here too. Nothing else.
+export type AdditiveColumn = { table: string; column: string; ddl: string };
 
-export const FG608_STORAGE_MODE_COLUMNS: { name: string; ddl: string }[] = [
-  // Default (d): the first DB-only edit is RECORDED, so `mode --set markdown` can
-  // REFUSE afterward instead of relying on the operator remembering that
+export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
+  { table: "runs", column: "completed_at", ddl: "ALTER TABLE runs ADD COLUMN completed_at TEXT" },
+  { table: "runs", column: "metadata", ddl: "ALTER TABLE runs ADD COLUMN metadata TEXT" },
+  { table: "runs", column: "project_dir", ddl: "ALTER TABLE runs ADD COLUMN project_dir TEXT" },
+
+  { table: "tasks", column: "parent_id", ddl: "ALTER TABLE tasks ADD COLUMN parent_id TEXT REFERENCES tasks(id)" },
+  { table: "tasks", column: "agent_alias", ddl: "ALTER TABLE tasks ADD COLUMN agent_alias TEXT" },
+  { table: "tasks", column: "agent_model", ddl: "ALTER TABLE tasks ADD COLUMN agent_model TEXT" },
+  { table: "tasks", column: "result", ddl: "ALTER TABLE tasks ADD COLUMN result TEXT" },
+  { table: "tasks", column: "started_at", ddl: "ALTER TABLE tasks ADD COLUMN started_at TEXT" },
+  { table: "tasks", column: "completed_at", ddl: "ALTER TABLE tasks ADD COLUMN completed_at TEXT" },
+  { table: "tasks", column: "error", ddl: "ALTER TABLE tasks ADD COLUMN error TEXT" },
+  // AWN-7: the per-task model resolution record (policy mode).
+  { table: "tasks", column: "resolved_profile", ddl: "ALTER TABLE tasks ADD COLUMN resolved_profile TEXT" },
+  { table: "tasks", column: "resolved_provider", ddl: "ALTER TABLE tasks ADD COLUMN resolved_provider TEXT" },
+  { table: "tasks", column: "resolved_auth", ddl: "ALTER TABLE tasks ADD COLUMN resolved_auth TEXT" },
+  { table: "tasks", column: "resolved_by", ddl: "ALTER TABLE tasks ADD COLUMN resolved_by TEXT" },
+  // FG-351 / FG-621: the private-clone path and the commit it was created at.
+  { table: "tasks", column: "worktree_path", ddl: "ALTER TABLE tasks ADD COLUMN worktree_path TEXT" },
+  { table: "tasks", column: "base_sha", ddl: "ALTER TABLE tasks ADD COLUMN base_sha TEXT" },
+
+  // FG-523 (F16): nullable with NO default — an existing row reads back NULL, which
+  // aggregateVerdicts treats as "blocks" (fail closed), exactly as before it existed.
+  { table: "verdicts", column: "gate_on_verdict", ddl: "ALTER TABLE verdicts ADD COLUMN gate_on_verdict INTEGER" },
+
+  { table: "gates", column: "rationale", ddl: "ALTER TABLE gates ADD COLUMN rationale TEXT" },
+
+  { table: "events", column: "run_id", ddl: "ALTER TABLE events ADD COLUMN run_id TEXT" },
+  { table: "events", column: "task_id", ddl: "ALTER TABLE events ADD COLUMN task_id TEXT" },
+  { table: "events", column: "payload", ddl: "ALTER TABLE events ADD COLUMN payload TEXT" },
+
+  // #155: the model_calls reshape. The 0.1.x legacy columns (prompt_tokens/
+  // completion_tokens/cost) are deliberately NOT dropped here — see
+  // LEGACY_MODEL_CALLS_COLUMNS and runDestructiveConvergenceMigration in db.ts.
+  { table: "model_calls", column: "task_id", ddl: "ALTER TABLE model_calls ADD COLUMN task_id TEXT REFERENCES tasks(id)" },
+  { table: "model_calls", column: "alias", ddl: "ALTER TABLE model_calls ADD COLUMN alias TEXT" },
+  { table: "model_calls", column: "input_tokens", ddl: "ALTER TABLE model_calls ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0" },
+  { table: "model_calls", column: "output_tokens", ddl: "ALTER TABLE model_calls ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0" },
+  { table: "model_calls", column: "cache_read_tokens", ddl: "ALTER TABLE model_calls ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0" },
+  { table: "model_calls", column: "cache_creation_tokens", ddl: "ALTER TABLE model_calls ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0" },
+
+  { table: "campaigns", column: "metadata", ddl: "ALTER TABLE campaigns ADD COLUMN metadata TEXT" },
+  // FG-391 / FG-392: plan hash, the approval record, and the campaign's project dir.
+  { table: "campaigns", column: "plan_hash", ddl: "ALTER TABLE campaigns ADD COLUMN plan_hash TEXT" },
+  { table: "campaigns", column: "approved_by", ddl: "ALTER TABLE campaigns ADD COLUMN approved_by TEXT" },
+  { table: "campaigns", column: "approved_at", ddl: "ALTER TABLE campaigns ADD COLUMN approved_at TEXT" },
+  { table: "campaigns", column: "approval_rationale", ddl: "ALTER TABLE campaigns ADD COLUMN approval_rationale TEXT" },
+  { table: "campaigns", column: "approved_plan_hash", ddl: "ALTER TABLE campaigns ADD COLUMN approved_plan_hash TEXT" },
+  { table: "campaigns", column: "project_dir", ddl: "ALTER TABLE campaigns ADD COLUMN project_dir TEXT" },
+
+  { table: "campaign_items", column: "run_id", ddl: "ALTER TABLE campaign_items ADD COLUMN run_id TEXT" },
+  { table: "campaign_items", column: "branch", ddl: "ALTER TABLE campaign_items ADD COLUMN branch TEXT" },
+  { table: "campaign_items", column: "worktree_path", ddl: "ALTER TABLE campaign_items ADD COLUMN worktree_path TEXT" },
+  { table: "campaign_items", column: "pr_url", ddl: "ALTER TABLE campaign_items ADD COLUMN pr_url TEXT" },
+  { table: "campaign_items", column: "outcome", ddl: "ALTER TABLE campaign_items ADD COLUMN outcome TEXT" },
+  { table: "campaign_items", column: "blocker_kind", ddl: "ALTER TABLE campaign_items ADD COLUMN blocker_kind TEXT" },
+  { table: "campaign_items", column: "continue_policy", ddl: "ALTER TABLE campaign_items ADD COLUMN continue_policy TEXT" },
+  { table: "campaign_items", column: "reason", ddl: "ALTER TABLE campaign_items ADD COLUMN reason TEXT" },
+  { table: "campaign_items", column: "requested_human_action", ddl: "ALTER TABLE campaign_items ADD COLUMN requested_human_action TEXT" },
+  // FG-596: NOT NULL with DEFAULT 0 — the "never allocated" marker a pre-FG-596 row
+  // reads back without a backfill; a real attempt is >= 1.
+  { table: "campaign_items", column: "attempt_generation", ddl: "ALTER TABLE campaign_items ADD COLUMN attempt_generation INTEGER NOT NULL DEFAULT 0" },
+
+  { table: "host_verifications", column: "run_id", ddl: "ALTER TABLE host_verifications ADD COLUMN run_id TEXT REFERENCES runs(id)" },
+  // FG-474: DEFAULT 'host' so every pre-existing row (all host-run, by construction)
+  // classifies correctly without a backfill.
+  { table: "host_verifications", column: "source", ddl: "ALTER TABLE host_verifications ADD COLUMN source TEXT NOT NULL DEFAULT 'host'" },
+  { table: "host_verifications", column: "ci_url", ddl: "ALTER TABLE host_verifications ADD COLUMN ci_url TEXT" },
+
+  { table: "publication_attempts", column: "base_sha", ddl: "ALTER TABLE publication_attempts ADD COLUMN base_sha TEXT" },
+  { table: "publication_attempts", column: "candidate_sha", ddl: "ALTER TABLE publication_attempts ADD COLUMN candidate_sha TEXT" },
+  { table: "publication_attempts", column: "published_sha", ddl: "ALTER TABLE publication_attempts ADD COLUMN published_sha TEXT" },
+  { table: "publication_attempts", column: "park_reason", ddl: "ALTER TABLE publication_attempts ADD COLUMN park_reason TEXT" },
+  { table: "publication_attempts", column: "worktree_path", ddl: "ALTER TABLE publication_attempts ADD COLUMN worktree_path TEXT" },
+  { table: "publication_attempts", column: "rebuild_count", ddl: "ALTER TABLE publication_attempts ADD COLUMN rebuild_count INTEGER NOT NULL DEFAULT 0" },
+
+  { table: "continuations", column: "claim_owner", ddl: "ALTER TABLE continuations ADD COLUMN claim_owner TEXT" },
+  { table: "continuations", column: "claim_expires_at", ddl: "ALTER TABLE continuations ADD COLUMN claim_expires_at INTEGER" },
+  { table: "continuations", column: "dispatch_key", ddl: "ALTER TABLE continuations ADD COLUMN dispatch_key TEXT" },
+  { table: "continuations", column: "dispatched_run_id", ddl: "ALTER TABLE continuations ADD COLUMN dispatched_run_id TEXT" },
+  { table: "continuations", column: "dispatched_task_id", ddl: "ALTER TABLE continuations ADD COLUMN dispatched_task_id TEXT" },
+  { table: "continuations", column: "last_observed_status", ddl: "ALTER TABLE continuations ADD COLUMN last_observed_status TEXT" },
+
+  { table: "continuation_lost_signal_recoveries", column: "dispatch_key", ddl: "ALTER TABLE continuation_lost_signal_recoveries ADD COLUMN dispatch_key TEXT" },
+  { table: "continuation_lost_signal_recoveries", column: "dispatched_run_id", ddl: "ALTER TABLE continuation_lost_signal_recoveries ADD COLUMN dispatched_run_id TEXT" },
+  { table: "continuation_lost_signal_recoveries", column: "dispatched_task_id", ddl: "ALTER TABLE continuation_lost_signal_recoveries ADD COLUMN dispatched_task_id TEXT" },
+
+  { table: "campaign_item_launches", column: "run_id", ddl: "ALTER TABLE campaign_item_launches ADD COLUMN run_id TEXT" },
+
+  { table: "tickets", column: "body", ddl: "ALTER TABLE tickets ADD COLUMN body TEXT NOT NULL DEFAULT ''" },
+  { table: "tickets", column: "created", ddl: "ALTER TABLE tickets ADD COLUMN created TEXT" },
+  { table: "tickets", column: "closed", ddl: "ALTER TABLE tickets ADD COLUMN closed TEXT" },
+  { table: "tickets", column: "closed_commit", ddl: "ALTER TABLE tickets ADD COLUMN closed_commit TEXT" },
+  { table: "tickets", column: "epic", ddl: "ALTER TABLE tickets ADD COLUMN epic TEXT" },
+  { table: "tickets", column: "frontmatter", ddl: "ALTER TABLE tickets ADD COLUMN frontmatter TEXT" },
+  // THE FG-608-reopen column. Present in the CREATE since FG-606 and missing from
+  // every DB whose `tickets` predates it — including the dogfood host's, where the
+  // import INSERT that names it failed migrate outright.
+  { table: "tickets", column: "imported_from", ddl: "ALTER TABLE tickets ADD COLUMN imported_from TEXT" },
+  // FG-608 (i): the MONOTONIC revision counter, bumped on EVERY authoritative write.
+  // This is what dispatch evidence records and what answers "did the live ticket
+  // advance" — a content hash cannot, because edit-and-revert returns the original
+  // hash. DEFAULT 1 so pre-FG-608 rows read back a valid revision.
+  { table: "tickets", column: "revision", ddl: "ALTER TABLE tickets ADD COLUMN revision INTEGER NOT NULL DEFAULT 1" },
+  // FG-608 (ii): the CONTENT basis. body_hash is the hash of the row's current
+  // authoritative content, recomputed on every write; import_basis_hash is that same
+  // hash frozen at the last import. They diverge exactly when the DB row was edited
+  // since its import basis — the import conflict rule's entire question. A counter
+  // cannot answer it (it advances for an import too).
+  { table: "tickets", column: "body_hash", ddl: "ALTER TABLE tickets ADD COLUMN body_hash TEXT" },
+  { table: "tickets", column: "import_basis_hash", ddl: "ALTER TABLE tickets ADD COLUMN import_basis_hash TEXT" },
+
+  { table: "ticket_events", column: "payload", ddl: "ALTER TABLE ticket_events ADD COLUMN payload TEXT" },
+
+  { table: "ticket_storage_mode", column: "mode", ddl: "ALTER TABLE ticket_storage_mode ADD COLUMN mode TEXT NOT NULL DEFAULT 'markdown'" },
+  // FG-608 default (d): the first DB-only edit is RECORDED, so `mode --set markdown`
+  // can REFUSE afterward instead of relying on the operator remembering that
   // backlog/*.md froze.
-  { name: "first_db_edit_at", ddl: "ALTER TABLE ticket_storage_mode ADD COLUMN first_db_edit_at TEXT" },
-  { name: "first_db_edit_ticket", ddl: "ALTER TABLE ticket_storage_mode ADD COLUMN first_db_edit_ticket TEXT" },
+  { table: "ticket_storage_mode", column: "first_db_edit_at", ddl: "ALTER TABLE ticket_storage_mode ADD COLUMN first_db_edit_at TEXT" },
+  { table: "ticket_storage_mode", column: "first_db_edit_ticket", ddl: "ALTER TABLE ticket_storage_mode ADD COLUMN first_db_edit_ticket TEXT" },
   // WHICH forge performed the flip. This host runs several forge checkouts from
   // source against one ~/.forge/forge.db, and additive migrations never bump
   // user_version — so an OLDER binary opens the migrated DB happily and keeps
   // reading the frozen backlog/*.md. Nothing in the DB can stop it, so name it in
   // the flip record and in the cutover UX rather than pretend it is prevented.
-  { name: "flipped_at", ddl: "ALTER TABLE ticket_storage_mode ADD COLUMN flipped_at TEXT" },
-  { name: "flipped_by_revision", ddl: "ALTER TABLE ticket_storage_mode ADD COLUMN flipped_by_revision TEXT" },
+  { table: "ticket_storage_mode", column: "flipped_at", ddl: "ALTER TABLE ticket_storage_mode ADD COLUMN flipped_at TEXT" },
+  { table: "ticket_storage_mode", column: "flipped_by_revision", ddl: "ALTER TABLE ticket_storage_mode ADD COLUMN flipped_by_revision TEXT" },
+
+  { table: "blocker_evidence", column: "reason", ddl: "ALTER TABLE blocker_evidence ADD COLUMN reason TEXT" },
+
+  { table: "backlog_sources", column: "last_path", ddl: "ALTER TABLE backlog_sources ADD COLUMN last_path TEXT" },
+  { table: "backlog_sources", column: "last_scanned_at", ddl: "ALTER TABLE backlog_sources ADD COLUMN last_scanned_at TEXT" },
+  { table: "backlog_sources", column: "forgotten_at", ddl: "ALTER TABLE backlog_sources ADD COLUMN forgotten_at TEXT" },
+
+  { table: "backlog_snapshot_targets", column: "task_id", ddl: "ALTER TABLE backlog_snapshot_targets ADD COLUMN task_id TEXT" },
+  { table: "backlog_snapshot_targets", column: "released_at", ddl: "ALTER TABLE backlog_snapshot_targets ADD COLUMN released_at TEXT" },
+
+  { table: "backlog_snapshot_publications", column: "attempts", ddl: "ALTER TABLE backlog_snapshot_publications ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0" },
+  { table: "backlog_snapshot_publications", column: "last_ok_at", ddl: "ALTER TABLE backlog_snapshot_publications ADD COLUMN last_ok_at TEXT" },
+  { table: "backlog_snapshot_publications", column: "last_error", ddl: "ALTER TABLE backlog_snapshot_publications ADD COLUMN last_error TEXT" },
 ];

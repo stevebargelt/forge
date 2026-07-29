@@ -55,14 +55,23 @@ test("FIX A: SCHEMA_SQL + applyMigrations open a pre-existing metadata-less runs
     `CREATE TABLE runs (id TEXT PRIMARY KEY, title TEXT, workflow TEXT, project_dir TEXT, status TEXT, created_at TEXT);`,
   );
   assert.doesNotThrow(() => {
-    db.exec(SCHEMA_SQL); // brings the OTHER tables forward; runs stays metadata-less
-    applyMigrations(db); // the guarded index step must SKIP when metadata is absent
+    db.exec(SCHEMA_SQL); // CREATE TABLE IF NOT EXISTS does NOT replace the minimal runs table
+    applyMigrations(db);
   });
-  const idx = db.prepare(`PRAGMA index_list(runs)`).all() as { name: string }[];
-  assert.ok(
-    !idx.some((i) => i.name === "idx_runs_dispatch_key"),
-    "the dispatch-key index is correctly SKIPPED on a metadata-less runs table",
-  );
+  // FG-608 (reopen) CHANGED WHAT HAPPENS NEXT, and deliberately. applyMigrations now
+  // brings a pre-existing table all the way forward to the fresh shape
+  // (ADDITIVE_COLUMNS), so this runs table GAINS metadata and the guarded index step
+  // then runs instead of skipping. FIX A's actual invariant — a metadata-less open
+  // must not throw — is unchanged and still asserted above; what used to satisfy it
+  // by skipping now satisfies it by converging. The PRAGMA guard in db.ts still earns
+  // its keep for the case the ALTER cannot fix: applyMigrations called on a DB with no
+  // runs table at all.
+  const cols = (db.prepare(`PRAGMA table_info(runs)`).all() as { name: string }[]).map((c) => c.name);
+  assert.ok(cols.includes("metadata"), "the metadata-less runs table is brought forward, not left short");
+  const idx = db.prepare(`PRAGMA index_list(runs)`).all() as { name: string; unique: number }[];
+  const dispatchIdx = idx.find((i) => i.name === "idx_runs_dispatch_key");
+  assert.ok(dispatchIdx, "and the dispatch-key index is created once metadata exists");
+  assert.equal(dispatchIdx!.unique, 1, "born UNIQUE, exactly as on a fresh DB");
   db.close();
 });
 

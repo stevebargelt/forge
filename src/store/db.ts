@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { existsSync } from "node:fs";
 import { resolveDbPath, ensureForgeDirs } from "../util/paths.js";
-import { SCHEMA_SQL, FG608_TICKET_COLUMNS, FG608_STORAGE_MODE_COLUMNS } from "./schema.js";
+import { SCHEMA_SQL, ADDITIVE_COLUMNS } from "./schema.js";
 
 // FG-568 (BD-15): store-compatibility policy across the supported overlap window
 // (a version-A process and a version-B process sharing ~/.forge/forge.db).
@@ -39,18 +39,40 @@ export const DESTRUCTIVE_BOUNDARY_VERSION = 1;
 // off the ordinary open path, behind an explicit quiesce gate.
 export const LEGACY_MODEL_CALLS_COLUMNS = ["prompt_tokens", "completion_tokens", "cost"] as const;
 
-// Idempotent ALTERs for existing DBs whose `runs` table predates a column added
-// in schema.ts. New DBs get the column from CREATE TABLE; existing DBs get it
-// here. Each migration is guarded by PRAGMA table_info so the second run is a
-// noop. Add a new entry here whenever you add a column to an existing table.
-// Exported as a test seam so migration behavior (e.g. #295 legacy-column drop)
-// can be exercised against a hand-shaped DB.
+// Idempotent ALTERs for an existing DB whose tables predate a column added to
+// SCHEMA_SQL. New DBs get the column from CREATE TABLE; existing DBs get it here.
+// The column set is DATA (ADDITIVE_COLUMNS in schema.ts) so the two shapes cannot
+// drift — see the invariant stated there, and fg608-migration-parity.test.ts,
+// which proves the list is complete rather than remembered.
+//
+// Two guards, both load-bearing:
+//   - the TABLE must exist. PRAGMA table_info on a missing table returns zero rows,
+//     so an unguarded `!have.has(col)` would fire the ALTER and throw on EVERY open
+//     against a foreign/minimal fixture DB (the dashboard read tests hand-shape one,
+//     and several integration tests call applyMigrations on a legacy DDL directly).
+//     That is the FG-563 hazard.
+//   - the COLUMN must be absent, so the second run is a no-op.
+//
+// Exported as a test seam so migration behavior (e.g. #295 legacy-column drop) can
+// be exercised against a hand-shaped DB.
 export function applyMigrations(db: DatabaseInstance): void {
-  const runsCols = db.prepare(`PRAGMA table_info(runs)`).all() as { name: string }[];
-  const haveRuns = new Set(runsCols.map((r) => r.name));
-  if (!haveRuns.has("project_dir")) {
-    db.exec(`ALTER TABLE runs ADD COLUMN project_dir TEXT`);
+  const liveColumns = (table: string): Set<string> =>
+    new Set((db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name));
+
+  const present = new Map<string, Set<string>>();
+  for (const col of ADDITIVE_COLUMNS) {
+    let have = present.get(col.table);
+    if (!have) {
+      have = liveColumns(col.table);
+      present.set(col.table, have);
+    }
+    if (have.size === 0) continue; // table absent — nothing to bring forward
+    if (have.has(col.column)) continue;
+    db.exec(col.ddl);
+    have.add(col.column);
   }
+
+  const haveRuns = present.get("runs") ?? liveColumns("runs");
   // FG-563 (FIX A/FIX B, round 3): the dispatch-key discoverability index. It lives on
   // this guarded migration path (not the always-exec SCHEMA_SQL) for two reasons:
   //
@@ -126,42 +148,6 @@ export function applyMigrations(db: DatabaseInstance): void {
       createUnique();
     }).immediate();
   }
-  const tasksCols = db.prepare(`PRAGMA table_info(tasks)`).all() as { name: string }[];
-  const haveTasks = new Set(tasksCols.map((r) => r.name));
-  if (!haveTasks.has("agent_alias")) {
-    db.exec(`ALTER TABLE tasks ADD COLUMN agent_alias TEXT`);
-  }
-  if (!haveTasks.has("agent_model")) {
-    db.exec(`ALTER TABLE tasks ADD COLUMN agent_model TEXT`);
-  }
-  // AWN-7: per-task model resolution record (policy mode). Additive + nullable —
-  // old binaries tolerate the extra columns; new binaries ALTER on first open.
-  if (!haveTasks.has("resolved_profile")) {
-    db.exec(`ALTER TABLE tasks ADD COLUMN resolved_profile TEXT`);
-  }
-  if (!haveTasks.has("resolved_provider")) {
-    db.exec(`ALTER TABLE tasks ADD COLUMN resolved_provider TEXT`);
-  }
-  if (!haveTasks.has("resolved_auth")) {
-    db.exec(`ALTER TABLE tasks ADD COLUMN resolved_auth TEXT`);
-  }
-  if (!haveTasks.has("resolved_by")) {
-    db.exec(`ALTER TABLE tasks ADD COLUMN resolved_by TEXT`);
-  }
-  // FG-351: per-task worktree path. Additive + nullable — existing binaries tolerate
-  // the column; new binaries ALTER on first open. Task branch identity is NOT stored
-  // here — it is deterministically derived as forge/<runId>/<taskId> at runtime.
-  if (!haveTasks.has("worktree_path")) {
-    db.exec(`ALTER TABLE tasks ADD COLUMN worktree_path TEXT`);
-  }
-  // FG-621: the base commit a task's private clone was created at. Additive +
-  // nullable, same posture as worktree_path above — every forge process on this
-  // host re-runs these migrations on its next open, so nothing here may be
-  // destructive or non-additive.
-  if (!haveTasks.has("base_sha")) {
-    db.exec(`ALTER TABLE tasks ADD COLUMN base_sha TEXT`);
-  }
-
   // Workflow rename (2026-05-08): old run rows reference deleted workflow names.
   // Rather than maintain alias maps in workflows.ts forever (Steven 2026-05-08:
   // "Start after this run. Solves it no?"), in-place migrate. Idempotent.
@@ -174,29 +160,6 @@ export function applyMigrations(db: DatabaseInstance): void {
   // and there's no other workflow with a phase named "review" today.
   db.exec(`UPDATE tasks SET phase = 'ui-review' WHERE phase = 'review'`);
 
-  // #155: model_calls table reshape. The 0.1.x schema had prompt_tokens/
-  // completion_tokens/cost; we want input_tokens/output_tokens/cache_* and no
-  // cost column. Add the new columns idempotently; leave the legacy columns in
-  // place (they're NOT NULL with no data rows that matter — the table was
-  // empty until #155 anyway).
-  const modelCallsCols = db.prepare(`PRAGMA table_info(model_calls)`).all() as { name: string }[];
-  const haveModelCalls = new Set(modelCallsCols.map((r) => r.name));
-  if (!haveModelCalls.has("task_id")) {
-    db.exec(`ALTER TABLE model_calls ADD COLUMN task_id TEXT REFERENCES tasks(id)`);
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_model_calls_task ON model_calls(task_id)`);
-  }
-  if (!haveModelCalls.has("input_tokens")) {
-    db.exec(`ALTER TABLE model_calls ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0`);
-  }
-  if (!haveModelCalls.has("output_tokens")) {
-    db.exec(`ALTER TABLE model_calls ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0`);
-  }
-  if (!haveModelCalls.has("cache_read_tokens")) {
-    db.exec(`ALTER TABLE model_calls ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0`);
-  }
-  if (!haveModelCalls.has("cache_creation_tokens")) {
-    db.exec(`ALTER TABLE model_calls ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0`);
-  }
   // #295 / FG-568: the 0.1.x legacy columns (prompt_tokens/completion_tokens/cost)
   // are NO LONGER dropped here. A DROP on the ordinary open path is destructive
   // DDL that would remove schema an in-flight version-A peer still depends on — so
@@ -206,98 +169,13 @@ export function applyMigrations(db: DatabaseInstance): void {
   // inserts — insertUsageRows is dual-shape and fills the legacy columns with 0/0/0
   // when present. Converging it to the fresh shape (dropping the dead columns) is
   // that migration's job, not this one's. See LEGACY_MODEL_CALLS_COLUMNS.
-  // Created indexes (created_at index too — used by --since time filters).
+  // Created indexes (created_at index too — used by --since time filters). The
+  // task_id index is here rather than in SCHEMA_SQL because model_calls.task_id can
+  // arrive by ALTER above; unconditional so a fresh DB and a migrated one carry the
+  // same indexes, not just the same columns.
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_model_calls_task ON model_calls(task_id)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_model_calls_request ON model_calls(request_id)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_model_calls_created ON model_calls(created_at)`);
-
-  // FG-391: plan_hash column on campaigns. New DBs get it from CREATE TABLE in
-  // schema.ts; existing DBs get it here. Preferred over metadata-only so FG-392
-  // can compare current-vs-approved plan_hash with a simple column lookup.
-  const campaignsCols = db.prepare(`PRAGMA table_info(campaigns)`).all() as { name: string }[];
-  const haveCampaigns = new Set(campaignsCols.map((r) => r.name));
-  if (!haveCampaigns.has("plan_hash")) {
-    db.exec(`ALTER TABLE campaigns ADD COLUMN plan_hash TEXT`);
-  }
-  // FG-392: approval columns — each guarded independently so a crash between
-  // ALTER statements leaves a partial schema that subsequent opens can repair.
-  if (!haveCampaigns.has("approved_by")) {
-    db.exec(`ALTER TABLE campaigns ADD COLUMN approved_by TEXT`);
-  }
-  if (!haveCampaigns.has("approved_at")) {
-    db.exec(`ALTER TABLE campaigns ADD COLUMN approved_at TEXT`);
-  }
-  if (!haveCampaigns.has("approval_rationale")) {
-    db.exec(`ALTER TABLE campaigns ADD COLUMN approval_rationale TEXT`);
-  }
-  if (!haveCampaigns.has("approved_plan_hash")) {
-    db.exec(`ALTER TABLE campaigns ADD COLUMN approved_plan_hash TEXT`);
-  }
-  // FG-392: project_dir on campaigns. Separate guard so it applies independently.
-  if (!haveCampaigns.has("project_dir")) {
-    db.exec(`ALTER TABLE campaigns ADD COLUMN project_dir TEXT`);
-  }
-
-  // FG-596: attempt_generation on campaign_items. Additive + NOT NULL with a safe
-  // DEFAULT 0 (SQLite ADD COLUMN permits NOT NULL only WITH a default), so every
-  // pre-existing row reads back 0 without a backfill and old binaries tolerate the
-  // extra column — the additive-only open-path discipline (BD-15). A real attempt is
-  // >= 1; 0 stays the "never allocated / legacy" marker the drive-item path fails
-  // closed on. PRAGMA table_info-guarded so a second open is a no-op.
-  const campaignItemsCols = db.prepare(`PRAGMA table_info(campaign_items)`).all() as { name: string }[];
-  const haveCampaignItems = new Set(campaignItemsCols.map((r) => r.name));
-  if (!haveCampaignItems.has("attempt_generation")) {
-    db.exec(`ALTER TABLE campaign_items ADD COLUMN attempt_generation INTEGER NOT NULL DEFAULT 0`);
-  }
-
-  // FG-474: source/ci_url on host_verifications — distinguishes a row backed by a
-  // real host command execution ('host') from one backed by a green required CI
-  // check ('ci'). DEFAULT 'host' so every pre-existing row (all host-run, by
-  // construction — CI-sourced rows didn't exist before this) classifies correctly
-  // without a backfill.
-  const hostVerificationsCols = db.prepare(`PRAGMA table_info(host_verifications)`).all() as { name: string }[];
-  const haveHostVerifications = new Set(hostVerificationsCols.map((r) => r.name));
-  if (!haveHostVerifications.has("source")) {
-    db.exec(`ALTER TABLE host_verifications ADD COLUMN source TEXT NOT NULL DEFAULT 'host'`);
-  }
-  if (!haveHostVerifications.has("ci_url")) {
-    db.exec(`ALTER TABLE host_verifications ADD COLUMN ci_url TEXT`);
-  }
-
-  // FG-523 (F16): gate_on_verdict on verdicts. Additive + nullable, NO default —
-  // existing rows keep reading back NULL, which aggregateVerdicts treats as
-  // "blocks" (fail closed), exactly as before the column existed.
-  const verdictsCols = db.prepare(`PRAGMA table_info(verdicts)`).all() as { name: string }[];
-  const haveVerdicts = new Set(verdictsCols.map((r) => r.name));
-  if (!haveVerdicts.has("gate_on_verdict")) {
-    db.exec(`ALTER TABLE verdicts ADD COLUMN gate_on_verdict INTEGER`);
-  }
-
-  // FG-608: the revision counter + content-basis columns on `tickets`, and the
-  // cutover-record columns on `ticket_storage_mode`. Same additive-only posture as
-  // everything above — every column is nullable or carries a DEFAULT, so an
-  // existing row reads back a safe value with no backfill and an older binary
-  // tolerates the extra columns. The DDL text lives in schema.ts so the fresh-DB
-  // shape and this ALTER path cannot drift.
-  //
-  // Guarded on the table EXISTING as well as the column: these are FG-606 tables,
-  // and a foreign/minimal fixture DB (the dashboard read tests hand-shape one) may
-  // legitimately have no `tickets` table at all. PRAGMA table_info on a missing
-  // table returns zero rows, so `!have.has(col)` would fire the ALTER and throw on
-  // EVERY open — the exact FG-563 hazard.
-  const ticketCols = db.prepare(`PRAGMA table_info(tickets)`).all() as { name: string }[];
-  if (ticketCols.length > 0) {
-    const haveTickets = new Set(ticketCols.map((r) => r.name));
-    for (const col of FG608_TICKET_COLUMNS) {
-      if (!haveTickets.has(col.name)) db.exec(col.ddl);
-    }
-  }
-  const modeCols = db.prepare(`PRAGMA table_info(ticket_storage_mode)`).all() as { name: string }[];
-  if (modeCols.length > 0) {
-    const haveMode = new Set(modeCols.map((r) => r.name));
-    for (const col of FG608_STORAGE_MODE_COLUMNS) {
-      if (!haveMode.has(col.name)) db.exec(col.ddl);
-    }
-  }
 }
 
 // FG-568 (BD-15 §3): the forward schema-version gate. A process refuses to open a
