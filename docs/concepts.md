@@ -51,7 +51,23 @@ The mode is stored **host-side in the DB, keyed by `project_key`** — never in 
 
 Operators see and change the mode through `forge backlog mode [--set markdown|db]`, and every store-touching `forge backlog` verb names the store it read on stderr. Both flips refuse rather than strand tickets, and `--set db` requires a prior `forge backlog import` to seed the `(project_key, prefix)` id sequence — in db mode ids are allocated from that sequence *inside* the write transaction, so concurrent `file` calls in two worktrees cannot collide or reuse an id. See the `forge-backlog` skill (`seeds/skills/forge-backlog/SKILL.md`) for the operator procedure and the full refusal list.
 
-The default has **not** flipped: every project keeps reading its own `backlog/*.md` until an operator opts it in per-project. Two consequences worth knowing before opting in — there is no Markdown export, so cutover is effectively one-way once a db-mode project takes its first DB-only edit; and agent containers mount `/project` read-only with no `forge.db`, so an agent reading `backlog/*.md` inside a container cannot see db-mode tickets.
+The default has **not** flipped: every project keeps reading its own `backlog/*.md` until an operator opts it in per-project, with `forge backlog migrate`. The additive tables the DB store needs appear machine-wide on the next writable open of `~/.forge/forge.db`, but nothing reads them for a markdown-mode project.
+
+### The cutover (FG-608)
+
+`forge backlog migrate` is the per-project cutover, and it is **one atomic operation** — import → validate the DB shadow equals this checkout's Markdown set → flip the mode. The flip is last, so any failure leaves Markdown authoritative and the mode unchanged; there is no half-migrated project. `--dry-run` reports the plan and writes nothing, not even the import. It refuses over the **target** project's own active runs or running campaign (activity in unrelated projects never blocks it), because the mode is read through a short-lived cache and campaign guards re-resolve the store on every drive step — a mid-run flip would split truth within one run.
+
+The cutover is **one-way, and enforced rather than advised**. There is no Markdown export, so a migrated project's `backlog/*.md` freezes; the first DB-only edit is recorded, and `mode --set markdown` refuses afterwards rather than silently discarding every edit since (`--accept-frozen-markdown-loss` is the explicit acceptance-of-loss override). Two adjacent operator verbs exist because the cutover makes their failure modes reachable: `reidentify --confirm` re-points the registry's repository evidence for a key an operator asserts — needed when the source-dependent evidence key moves (`git remote add origin` on a repo registered without a remote) rather than the project — and `forget-source` releases a permanently-removed checkout so the tickets only it still claimed become prunable. Runbook: `docs/how-to-backlog-db-cutover.md`.
+
+Import stopped being append-only at the same point, because a DB that is authoritative must reflect removals: a ticket, relation, or blocker marker absent from Markdown is deleted — but only when **no live source claims it**. A source is one physical checkout, identified by a random id minted once into that checkout's git admin dir (never git-tracked, moves with the repo, distinct per linked worktree), so a removal in one worktree cannot delete a ticket a sibling worktree still has. It fails closed in three directions: rows no membership has ever claimed are never pruned, an import that observes no live source refuses outright, and a row whose DB content diverged from its import basis is skipped with an `import_conflict` event rather than clobbered (`migrate --force` overwrites, recording before/after evidence).
+
+### Container ticket authority
+
+A task dispatched from a **db-mode** project gives its container a **read-only, project-scoped, backlog-only snapshot database** mounted at a fixed path — `forge backlog list` / `show` inside that container resolve it, never the mounted checkout's (now frozen) Markdown and never the host store. A markdown-mode dispatch publishes no snapshot and its container reads the checkout's files as it always has; what it gets instead is the marker below, saying so. The model is push: the host publishes the snapshot on every authoritative ticket write and fans out to every live container registered for that `project_key`, so an amendment made *after* a container started is visible to its next read. The containing directory is mounted (not the file) because a file bind pins the inode, and publication is a write-temp + rename inside it, which allocates a new one.
+
+Three properties are structural rather than advisory. **Project isolation:** the published file physically contains only that project's tickets, relations and blocker evidence — no runs, tasks, events, gates or verdicts tables, and the full `~/.forge/forge.db` is never mounted. **Read-only:** the `:ro` bind is kernel-enforced, which matters because agents have root in their own container, so the CLI's refusal of every mutating verb is the polite half only. **Authority is asserted by the mount:** an unforgeable marker the host writes before the container starts says what this task's ticket authority is, and a container with no marker refuses to read rather than falling back to `$HOME/.forge` — inside a container that path is a shared named volume belonging to no project, so a fallback would answer plausibly and wrongly from another project's store.
+
+Dispatch records the ticket revision and body hash a task was built from; the live snapshot reports the current one. The two are separate records and neither overwrites the other, so `forge backlog show` in a container names both when the ticket has advanced. A publication that fails after bounded retries marks its target STALE durably, and host `forge backlog` output warns about stale targets — an unpublished amendment is visible as stale, never indistinguishable from an up-to-date container.
 
 ## Orchestrator heartbeat
 
@@ -1039,7 +1055,7 @@ Approval is a durable state-machine precondition for execution: `forge campaign 
 |---|---|---|
 | `not_planned` | Campaign status is not `planned` (already running, failed, or complete) | Inspect status with `forge campaign show <id>` |
 | `no_project_dir` | Campaign predates `projectDir` capture | Re-plan with `forge campaign plan` |
-| `invalid_project_dir` | Stored `projectDir` no longer exists or lacks a `backlog` directory | Restore the directory or re-plan |
+| `invalid_project_dir` | Stored `projectDir` no longer exists, or the project has no backlog forge can work with (in markdown mode: no `backlog/` directory) | Restore the directory or re-plan |
 | `not_approved` | `approved_plan_hash` is not set | Run `forge campaign approve <id> --rationale <text>` |
 | `stale_plan` | Current plan hash (re-resolved from stored `sourceInput` against stored `projectDir`) differs from `approved_plan_hash` | Re-plan and re-approve |
 | `plan_unresolvable` | The plan can no longer be resolved from stored `sourceInput` — a source ticket may have been deleted from the backlog since planning | Re-plan with `forge campaign plan` |
@@ -1369,7 +1385,7 @@ Resume stop reasons:
 | `not_paused` | Campaign is not paused | Check status with `forge campaign show <id>` |
 | `abandoned` | Campaign is abandoned (terminal) | No recovery |
 | `no_project_dir` | Campaign predates `projectDir` capture | Re-plan with `forge campaign plan` |
-| `invalid_project_dir` | Stored `projectDir` missing or has no backlog | Restore directory or re-plan |
+| `invalid_project_dir` | Stored `projectDir` missing, or the project has no backlog (markdown mode: no `backlog/` directory) | Restore directory or re-plan |
 | `not_approved` | `approved_plan_hash` not set | Run `forge campaign approve <id> --rationale <text>` |
 | `stale_plan` | Plan changed since approval | Re-plan and re-approve |
 | `plan_unresolvable` | The plan can no longer be resolved from stored `sourceInput` — a source ticket may have been deleted from the backlog since planning | Re-plan with `forge campaign plan` |

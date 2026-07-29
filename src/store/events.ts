@@ -232,7 +232,12 @@ export type EventType =
   // integration_failed: nothing was published and no ref moved.
   | "publication.readiness_failed"
   | "campaign_item.host_gate_started"
-  | "campaign_item.host_gate_finished";
+  | "campaign_item.host_gate_finished"
+  // FG-608 (N1): the dispatch path could not write this task's backlog authority
+  // marker into the mount source. prepareBacklogSnapshotMount NEVER throws, so the
+  // dispatch proceeds with no authority asserted — this is the only durable record
+  // that it did. Payload: { taskId, hostDir, mode, projectKey, error }.
+  | "container.backlog_authority_marker_failed";
 
 export type Event = {
   id: number;

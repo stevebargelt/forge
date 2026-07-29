@@ -123,6 +123,30 @@ RUN npm install -g @playwright/test@${PLAYWRIGHT_VERSION} \
     && test -n "$CHROME_PATH" \
     && ln -sf "$CHROME_PATH" /usr/local/bin/chromium
 
+# FG-608: the in-container `forge backlog` reader — SHIPPED, not merely claimed.
+#
+# Before this the image had NO forge CLI at all (claude-code / codex / pi / tsx and
+# two shell scripts), so "forge backlog show/list resolves the mounted authority
+# in-container" was true only in a test that bind-mounted the host checkout at
+# /forge-src and ran tsx against it. Production creates no such mount. These two
+# files are the whole surface: `forge` on PATH, and the reader it execs.
+#
+# NO NATIVE MODULE. The reader uses node:sqlite (Node 24 ships it), never
+# better-sqlite3 — a native binding has to be built for this image's platform and is
+# exactly the thing that breaks across this mount layer (FORGE-DEC-011). That also
+# keeps the reader BIND-MOUNTABLE: spawn.ts binds the dispatching forge's copies of
+# both files over these same paths, so a stale image cannot answer ticket questions
+# with an old reader, and a fresh image works even when the bind is absent.
+#
+# The reader NEVER opens the host store. It resolves the authority marker on the
+# read-only mount or refuses — see docker/forge-backlog-reader.mjs for why a
+# fallback to $HOME/.forge would answer from the shared oauth volume.
+COPY forge-backlog-reader.mjs /usr/local/lib/forge/forge-backlog-reader.mjs
+COPY forge-backlog-bin.sh /usr/local/bin/forge
+RUN chmod +x /usr/local/bin/forge \
+    && chmod a+r /usr/local/lib/forge/forge-backlog-reader.mjs \
+    && node --no-warnings -e "import('node:sqlite').then(m => { new m.DatabaseSync(':memory:').close(); console.log('node:sqlite loads'); })"
+
 # forge-test wrapper (#111): rebuilds better-sqlite3 for this container's
 # platform inside a writable scratch dir, then runs tests there. Works around
 # the host/container native-module mismatch without mutating /project's

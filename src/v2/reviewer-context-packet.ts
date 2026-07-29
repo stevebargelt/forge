@@ -3,6 +3,8 @@ import { tasksForRun } from "../store/tasks.js";
 import { gatesForRun } from "../store/gates.js";
 import { verdictsForRun } from "../store/verdicts.js";
 import { readTicket } from "../backlog/structured.js";
+import { resolveBacklogStore } from "../backlog/storage-mode.js";
+import { dispatchEvidenceForTask, getTicket } from "../store/tickets.js";
 import type { ReviewerContextPacket, MissingContextItem, Finding } from "../types/index.js";
 import { collectDoneAuditInputFor } from "../done-audit/collect.js";
 import { evaluateDoneAudit } from "../done-audit/done-audit.js";
@@ -67,6 +69,38 @@ export function assembleReviewerContextPacket(
         reason: `structured backlog ticket ${ticketId} not found under backlog/ (ideas|epics|stories|done)`,
         required: true,
       });
+    }
+
+    // FG-608: dispatch-time ticket evidence vs LIVE authority. The reviewer is
+    // handed the CURRENT ticket body (readTicket above resolves the authoritative
+    // store), but the engineer built against whatever was current at dispatch. When
+    // those differ the reviewer must be told, not silently handed a moved target —
+    // and neither record overwrites the other.
+    //
+    // Surfaced through missingContext because that is the packet's existing typed
+    // channel for "context you should know is off"; the ticket body itself stays
+    // clean. Guarded whole: a project that never cut over to the DB store has no
+    // revision to compare, which is not a failure.
+    try {
+      const dispatched = dispatchEvidenceForTask(primaryTaskId);
+      if (dispatched && structuredTicket) {
+        const store = resolveBacklogStore(projectDir);
+        const live = store.mode === "db" ? getTicket(store.projectKey, ticketId) : undefined;
+        if (live && (live.revision !== dispatched.revision || live.bodyHash !== dispatched.bodyHash)) {
+          missingContext.push({
+            field: "backlogTicketRevision",
+            reason:
+              `the ticket ADVANCED during execution: dispatched revision ${dispatched.revision} ` +
+              `(body ${dispatched.bodyHash.slice(0, 12)}), current revision ${live.revision} ` +
+              `(body ${(live.bodyHash ?? "unknown").slice(0, 12)}). The body above is CURRENT ` +
+              `authority; the engineer built against the dispatched revision.`,
+            required: false,
+          });
+        }
+      }
+    } catch {
+      // Revision evidence is diagnostic. A store that cannot be resolved here must
+      // never fail packet assembly — the packet's job is to hand over what it has.
     }
 
     if (structuredTicket) {

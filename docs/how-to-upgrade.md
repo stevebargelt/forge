@@ -26,7 +26,7 @@ The check is skipped in two cases, and says which: on a `--dry-run` (nothing was
 
 Every step's outcome — including whether it did what you asked — is available machine-readably via [`--json`](#--json-the-machine-readable-result).
 
-> `forge upgrade` does **not** rebuild the agent Docker image or run provider login by default. To rebuild after changing any of the image's **build inputs** — the Dockerfile *or* any file it `COPY`s (today `docker/forge-test.sh` and `docker/agent-entrypoint.sh`) — add `--rebuild-image` **from a dev checkout**; it is refused under a release. Auth credentials (`codex login` / `forge auth login`) are per-machine; run `forge doctor` after upgrade to verify auth and policy readiness (#229).
+> `forge upgrade` does **not** rebuild the agent Docker image or run provider login by default. To rebuild after changing any of the image's **build inputs** — the Dockerfile *or* any file it `COPY`s (today `docker/forge-test.sh`, `docker/agent-entrypoint.sh`, `docker/forge-backlog-reader.mjs` and `docker/forge-backlog-bin.sh`) — add `--rebuild-image` **from a dev checkout**; it is refused under a release. Auth credentials (`codex login` / `forge auth login`) are per-machine; run `forge doctor` after upgrade to verify auth and policy readiness (#229).
 
 ## Execution mode: what upgrade will and won't do
 

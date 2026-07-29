@@ -43,6 +43,7 @@ learnings/
 | FORGE-DEC-022 | 2026-06-23 | [Resolve project mount root on invoke/new; hard-fail on suspicious subdir mounts (FG-374)](decisions/2026-06-23_project-mount-root-resolution.md) |
 | FORGE-DEC-024 | 2026-07-03 | [Fail-safe recovery for lost containers: adopt vs. re-drive, gated behind `forge recover` (FG-455 p2/p3)](decisions/2026-07-03_fanout-orphan-recovery-fail-safe.md) |
 | FORGE-DEC-025 | 2026-07-12 | [Run agent containers docker-detached — survive host-side parent death by construction (FG-536)](decisions/2026-07-12_detached-agent-execution.md) |
+| FORGE-DEC-028 | 2026-07-29 | [Agent containers read tickets from a host-published, project-scoped snapshot on a read-only mount (FG-608)](decisions/2026-07-29_container-backlog-snapshot-authority.md) |
 
 ## Patterns index
 

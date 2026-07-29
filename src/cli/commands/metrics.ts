@@ -1,8 +1,9 @@
 import type { Command } from "commander";
 import { getDb } from "../../store/db.js";
+import { renderedEmptyStore } from "../no-store.js";
 import { ensureForgeDirs } from "../../util/paths.js";
 import { parseSince } from "../../v2/runs-query.js";
-import { computeMetrics, type MetricsFilters, type MetricDimension } from "../../v2/metrics.js";
+import { computeMetrics, type Metrics, type MetricsFilters, type MetricDimension } from "../../v2/metrics.js";
 
 // RUN-2: `forge metrics` — operational reliability rollup. Distinct from
 // `forge usage` (token/cost); read-only; cross-project by default.
@@ -33,6 +34,7 @@ export function registerMetrics(program: Command): void {
     .option("--json", "emit JSON instead of a table")
     .action((opts: { since: string; by: string; project?: string; workflow?: string; json?: boolean }) => {
       ensureForgeDirs();
+      if (renderedEmptyStore(opts.json, emptyMetrics(parseBy(opts.by)), "No forge store on this host yet — no runs, no metrics.")) return;
       getDb({ readOnly: true });
 
       const filters: MetricsFilters = {
@@ -65,4 +67,16 @@ export function registerMetrics(program: Command): void {
         for (const d of m.durations) console.log(`  ${fmtMs(d.medianMs).padStart(7)}  ${d.dimension}  (n=${d.count})`);
       }
     });
+}
+
+// A fresh host has no runs; the true answer is zeros, not a store-layer refusal.
+function emptyMetrics(by: MetricDimension): Metrics {
+  return {
+    runs: { total: 0, active: 0, terminal: 0, clean: 0, withFailures: 0, successRate: 0 },
+    taskCount: 0,
+    failureKinds: [],
+    durationsBy: by,
+    durations: [],
+    counts: { idleKills: 0, cancels: 0, retries: 0, redBlocks: 0 },
+  };
 }

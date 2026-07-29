@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { getDb } from "../../store/db.js";
+import { assertStoreForLookup } from "../no-store.js";
 import { getRun } from "../../store/runs.js";
 import { ensureForgeDirs, expandTildePath } from "../../util/paths.js";
 import { renderResearchReport } from "../../v2/report.js";
@@ -14,6 +15,7 @@ export function registerReport(program: Command): void {
     .option("--out <path>", "write the report to this path instead of (or in addition to) stdout")
     .action(async (runId: string, opts: { out?: string }) => {
       ensureForgeDirs();
+      assertStoreForLookup(`run ${runId}`);
       getDb({ readOnly: true });
 
       const run = getRun(runId);

@@ -112,6 +112,8 @@ The loader logs which YAML it picked, so you can confirm the override is taking 
 
 A single SQLite DB at `~/.forge/forge.db` holds runs and tasks from every project on the host. Each run records its `projectDir` at creation time (default: cwd; override: `--project <dir>`).
 
+**A read never creates the store.** On a host that has never run forge there is no `forge.db` (and no `~/.forge/` created just by looking), so read-only survey commands — `forge status`, `forge runs query`, `forge metrics`, `forge usage`, `forge ops check`, `forge sweep` — answer with their empty result and exit 0 rather than minting a database as a side effect. Commands addressed to a *specific* run or task (`forge show <id>`, `forge report`, `forge bundle`, `forge export`) can't be answered by an empty store, so they fail by name: *no forge store exists on this host yet…*. The store appears on the first command that legitimately writes — a workflow, or a `forge backlog import`.
+
 `forge status` filters by the current workspace by default:
 
 ```bash

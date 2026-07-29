@@ -1,18 +1,28 @@
-// Regression tests for GET /api/backlog canonical ticket-source resolution —
-// the two contract clauses the main-only suite leaves uncovered:
+// Regression tests for GET /api/backlog ticket-source resolution — the anchor
+// for the contract FG-608 replaced.
 //
-//   1. The canonical checkout may be on `master`, not only `main`. The server
-//      accepts EITHER as the primary branch; a fix that hard-codes "main" would
-//      silently drop every master-repo's backlog. This proves master is honored
-//      for BOTH a canonical projectKey request and an exact projectDir request
-//      that lands on a feature checkout of a master repo.
+// This file used to encode the branch-local rule in TWO clauses:
 //
-//   2. "No main/master checkout means no ticket truth." A canonical repository
-//      whose only existing checkout is a feature branch (nothing on main/master)
-//      must return ZERO tickets — for both request shapes — while still keeping
-//      its session-handoff NOTES (operational context is orthogonal to ticket
-//      truth). A regression that fell back to reading a feature checkout's
-//      branch-local ticket files would fail here.
+//   1. "The canonical checkout may be on `master`, not only `main`" — a
+//      primary-branch parity clause, guarding a fix that hard-coded "main".
+//   2. "No main/master checkout means no ticket truth" — a canonical repository
+//      whose only checkout is a feature branch returned ZERO tickets, with no
+//      fallback to that checkout's branch-local ticket files.
+//
+// Under host-wide DB truth BOTH clauses are re-decided, deliberately:
+//
+//   1. becomes VACUOUS AS WRITTEN and is replaced by its stronger form: the
+//      primary-branch concept is gone entirely. `master`, `main` and a feature
+//      branch are indistinguishable to ticket resolution, because no branch (and
+//      no checkout) participates in it. A regression that reintroduced ANY
+//      branch preference would fail here — the branch-only repository below
+//      would lose its tickets.
+//   2. keeps its NAME and changes its BASIS. "This project has no ticket truth"
+//      still needs a defined answer, and it is now "no project_key is registered
+//      for this repository's evidence" — never imported. That answer is an empty
+//      ticket list with ticketsProjectKey: null, session-handoff notes retained,
+//      and STILL no fallback to branch-local ticket files. The surviving half of
+//      the old clause is exactly that no-fallback guarantee.
 //
 // Harness mirrors routes-backlog-main-only.integration.test.ts: real git
 // checkouts, collapsed to canonical projects by shared origin, registered via DB
@@ -26,6 +36,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { SCHEMA_SQL } from "../../src/store/schema.js";
+import { repositoryCheckoutIdentity } from "../../src/util/repository-identity.js";
 
 const TEST_PORT = 18772;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
@@ -70,6 +81,7 @@ function makeCheckout(
 
 // ── Repo A: canonical primary checkout is on `master` (not `main`) ──────────
 const A_REMOTE = "git@github.com:stevebargelt/repo-master.git";
+const A_KEY = "pk-repo-master";
 const masterDir = makeCheckout(
   "repo-master",
   "master",
@@ -91,8 +103,11 @@ const masterFeatureDir = makeCheckout(
   "# Master-repo feature handoff\n\nfeature-a notes.\n",
 );
 
-// ── Repo B: canonical repository with NO main/master checkout at all ────────
+// ── Repo B: registered project with NO main/master checkout at all ──────────
+// The old clause 2 returned nothing for this repository. Under host-wide truth
+// it has a full inventory: the branch it happens to be sitting on is irrelevant.
 const B_REMOTE = "git@github.com:stevebargelt/repo-branch-only.git";
+const B_KEY = "pk-repo-branch-only";
 const branchOnlyDir = makeCheckout(
   "repo-branch-only",
   "feature-b",
@@ -104,6 +119,18 @@ const branchOnlyDir = makeCheckout(
   "# Branch-only handoff\n\nno main checkout exists for this repo.\n",
 );
 
+// ── Repo C: never imported — the new basis for "no ticket truth" ────────────
+const C_REMOTE = "git@github.com:stevebargelt/repo-unimported.git";
+const unimportedDir = makeCheckout(
+  "repo-unimported",
+  "main",
+  C_REMOTE,
+  [
+    { dir: "stories", file: "UN-100-story.md", content: ticket("story", "UN-100", "Unimported story") },
+  ],
+  "# Unimported handoff\n\nthis repo has never been imported.\n",
+);
+
 {
   const database = new Database(join(forgeHome, "forge.db"));
   database.exec(SCHEMA_SQL);
@@ -113,12 +140,37 @@ const branchOnlyDir = makeCheckout(
   const insertTask = database.prepare(
     "INSERT INTO tasks (id,run_id,phase,agent_role,status,task_package,result,created_at,started_at,completed_at) VALUES (?,?,?,?,?,'{}','{}',?,?,?)",
   );
-  [masterDir, masterFeatureDir, branchOnlyDir].forEach((projectDir, index) => {
+  [masterDir, masterFeatureDir, branchOnlyDir, unimportedDir].forEach((projectDir, index) => {
     const runId = `run-${index}`;
     const createdAt = `2026-07-${15 + index}T10:00:00Z`;
     insertRun.run(runId, "feature", `Run ${index}`, "complete", createdAt, projectDir);
     insertTask.run(`done-${index}`, runId, "engineer", "engineer", "complete", createdAt, createdAt, createdAt);
   });
+
+  const insertIdentity = database.prepare(
+    "INSERT INTO project_identity (project_key, repo_evidence_key, repo_evidence_source, created_at) VALUES (?,?,?,?)",
+  );
+  insertIdentity.run(A_KEY, repositoryCheckoutIdentity(masterDir).key, "remote", "2026-07-20T10:00:00Z");
+  insertIdentity.run(B_KEY, repositoryCheckoutIdentity(branchOnlyDir).key, "remote", "2026-07-20T10:00:00Z");
+  // repo C deliberately absent from the registry.
+
+  const insertMode = database.prepare(
+    "INSERT INTO ticket_storage_mode (project_key, mode, updated_at) VALUES (?,?,?)",
+  );
+  insertMode.run(A_KEY, "db", "2026-07-20T10:00:00Z");
+  insertMode.run(B_KEY, "db", "2026-07-20T10:00:00Z");
+
+  const insertTicket = database.prepare(
+    `INSERT INTO tickets (project_key,ticket_id,type,status,title,body,created,closed,closed_commit,epic,frontmatter,imported_at,imported_from)
+     VALUES (?,?,?,?,?,?,NULL,NULL,NULL,NULL,NULL,?,NULL)`,
+  );
+  const at = "2026-07-20T10:00:00Z";
+  insertTicket.run(A_KEY, "MA-100", "epic", "active", "Master Epic", "Epic body.", at);
+  insertTicket.run(A_KEY, "MA-101", "story", "active", "Master Story", "Story body.", at);
+  // Store ids deliberately DISJOINT from repo B's markdown ids, so a response
+  // naming BO-100/BO-101 could only have come from branch-local files.
+  insertTicket.run(B_KEY, "BO-500", "story", "active", "Branch-only store story", "Story body.", at);
+  insertTicket.run(B_KEY, "BO-501", "epic", "active", "Branch-only store epic", "Epic body.", at);
   database.close();
 }
 
@@ -142,6 +194,8 @@ type BacklogBody = {
   notes: string;
   notesByCheckout: Array<{ checkoutDir: string; checkoutBranch: string | null; notes: string }>;
   tickets: Array<Record<string, unknown>>;
+  ticketsProjectKey: string | null;
+  ticketsStorageMode: string | null;
 };
 
 async function getBacklog(params: string): Promise<BacklogBody> {
@@ -151,7 +205,7 @@ async function getBacklog(params: string): Promise<BacklogBody> {
 }
 
 // Resolve the canonical project key for the repo that owns `dir`, without
-// assuming a single-project registry (this file registers two repos).
+// assuming a single-project registry (this file registers three repos).
 async function keyForCheckout(dir: string): Promise<string> {
   const res = await fetch(`${BASE}/api/projects`);
   const projects = (await res.json()) as Array<{ key: string; projectDirs: string[] }>;
@@ -160,49 +214,62 @@ async function keyForCheckout(dir: string): Promise<string> {
   return owner!.key;
 }
 
-// ── master is honored as a primary branch ───────────────────────────────────
+// ── clause 1, in its stronger form: no branch participates in resolution ────
 
-test("canonical projectKey: tickets come from the master checkout when there is no main", async () => {
+test("canonical projectKey: a master-primary repo answers from the store", async () => {
   const body = await getBacklog(`?projectKey=${encodeURIComponent(await keyForCheckout(masterDir))}`);
   const ids = body.tickets.map((t) => t["id"]).sort();
-  assert.deepEqual(ids, ["MA-100", "MA-101"], "ticket ids must be exactly the master inventory");
-  for (const t of body.tickets) {
-    assert.equal(t["checkoutDir"], masterDir, "every ticket must originate from the master checkout");
-    assert.equal(t["checkoutBranch"], "master", "every ticket must be tagged with the master branch");
-  }
-  assert.ok(!body.tickets.some((t) => t["id"] === "MA-200"), "feature-only MA-200 must be excluded");
+  assert.deepEqual(ids, ["MA-100", "MA-101"], "ticket ids must be exactly the store inventory");
+  assert.equal(body.ticketsProjectKey, A_KEY);
+  assert.ok(!body.tickets.some((t) => t["id"] === "MA-200"), "the feature checkout's markdown-only id must be excluded");
 });
 
-test("exact projectDir on a feature checkout of a master repo still sources tickets from master", async () => {
-  const body = await getBacklog(`?projectDir=${encodeURIComponent(masterFeatureDir)}`);
-  const ids = body.tickets.map((t) => t["id"]).sort();
+test("exact projectDir on a feature checkout of a master repo returns the identical set", async () => {
+  const canonical = await getBacklog(`?projectKey=${encodeURIComponent(await keyForCheckout(masterDir))}`);
+  const feature = await getBacklog(`?projectDir=${encodeURIComponent(masterFeatureDir)}`);
   assert.deepEqual(
-    ids,
-    ["MA-100", "MA-101"],
-    "an exact feature-checkout request must resolve to the canonical master inventory",
+    feature.tickets.map((t) => t["id"]).sort(),
+    canonical.tickets.map((t) => t["id"]).sort(),
+    "an exact feature-checkout request resolves to the same project_key, not to a redirected checkout",
   );
-  for (const t of body.tickets) {
-    assert.equal(t["checkoutDir"], masterDir, "tickets must originate from the master checkout, not the feature dir");
-    assert.equal(t["checkoutBranch"], "master");
-  }
-  assert.ok(!body.tickets.some((t) => t["id"] === "MA-200"), "feature-only MA-200 must stay excluded");
+  assert.equal(feature.ticketsProjectKey, A_KEY);
 });
 
-// ── no main/master checkout means no ticket truth ───────────────────────────
-
-test("canonical projectKey with no main/master checkout: zero tickets, notes retained", async () => {
+test("a repository with NO main/master checkout still has full ticket truth", async () => {
   const body = await getBacklog(`?projectKey=${encodeURIComponent(await keyForCheckout(branchOnlyDir))}`);
-  assert.deepEqual(body.tickets, [], "a repo with no main/master checkout has no backlog truth");
-  assert.match(body.notes, /no main checkout exists/, "session-handoff notes remain even with no ticket truth");
+  assert.deepEqual(
+    body.tickets.map((t) => t["id"]).sort(),
+    ["BO-500", "BO-501"],
+    "the primary-branch concept is gone — a branch-only repo is a registered project like any other",
+  );
+  assert.equal(body.ticketsProjectKey, B_KEY);
 });
 
-test("exact projectDir on a branch-only repo: zero tickets, its own notes retained", async () => {
+test("a branch-only repository never falls back to its branch-local ticket files", async () => {
   const body = await getBacklog(`?projectDir=${encodeURIComponent(branchOnlyDir)}`);
+  const ids = body.tickets.map((t) => t["id"]);
+  assert.ok(!ids.includes("BO-100"), "branch-local BO-100 must never surface as truth");
+  assert.ok(!ids.includes("BO-101"), "branch-local BO-101 must never surface as truth");
+  assert.deepEqual(ids.sort(), ["BO-500", "BO-501"], "only the store's rows are truth");
+});
+
+// ── clause 2, re-based: no registered project_key means no ticket truth ─────
+
+test("never-imported repository: zero tickets, null project key, notes retained", async () => {
+  const body = await getBacklog(`?projectKey=${encodeURIComponent(await keyForCheckout(unimportedDir))}`);
+  assert.deepEqual(body.tickets, [], "a repository with no registered project_key has no backlog truth");
+  assert.equal(body.ticketsProjectKey, null, "and names that state rather than looking like an empty board");
+  assert.equal(body.ticketsStorageMode, null);
+  assert.match(body.notes, /never been imported/, "session-handoff notes remain even with no ticket truth");
+});
+
+test("exact projectDir on a never-imported repo: still no fallback to its files", async () => {
+  const body = await getBacklog(`?projectDir=${encodeURIComponent(unimportedDir)}`);
   assert.deepEqual(
     body.tickets,
     [],
-    "selecting the sole feature checkout must NOT fall back to its branch-local ticket files",
+    "selecting the checkout directly must NOT fall back to its branch-local ticket files",
   );
-  assert.ok(!body.tickets.some((t) => t["id"] === "BO-100"), "branch-local BO-100 must never surface as truth");
-  assert.match(body.notes, /no main checkout exists/, "exact-checkout handoff notes stay session-specific");
+  assert.ok(!body.tickets.some((t) => t["id"] === "UN-100"), "UN-100 exists only as markdown and is never truth");
+  assert.match(body.notes, /never been imported/, "exact-checkout handoff notes stay session-specific");
 });

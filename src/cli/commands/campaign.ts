@@ -503,6 +503,10 @@ export function registerCampaign(program: Command): void {
         process.exit(1);
       }
       // FG-607: db-mode projects have no backlog/ directory — ask the store.
+      // FG-608: existsSync stays alongside it — host-path liveness on the
+      // recorded projectDir, which the store check cannot answer (in db mode it
+      // returns `true` for a directory that has been deleted). Locked by
+      // src/campaign/fg608-dir-guard-regression.integration.test.ts.
       if (!existsSync(projectDir) || !projectHasBacklog(projectDir)) {
         process.stderr.write(`Error: campaign projectDir is invalid or missing backlog: ${projectDir}\n`);
         process.exit(1);

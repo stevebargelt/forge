@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { getDb } from "../../store/db.js";
+import { assertStoreForLookup } from "../no-store.js";
 import { ensureForgeDirs } from "../../util/paths.js";
 import { exportRunJsonl, exportRunOtlp } from "../../v2/export.js";
 
@@ -17,6 +18,7 @@ export function registerExport(program: Command): void {
     .option("--out <file>", "write to a file instead of stdout")
     .action((opts: { run: string; format: string; out?: string }) => {
       ensureForgeDirs();
+      assertStoreForLookup(`run ${opts.run}`);
       getDb({ readOnly: true });
 
       let body: string;

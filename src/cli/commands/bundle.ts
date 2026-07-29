@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { getDb } from "../../store/db.js";
+import { assertStoreForLookup } from "../no-store.js";
 import { ensureForgeDirs } from "../../util/paths.js";
 import { assembleBundle } from "../../v2/bundle.js";
 
@@ -18,6 +19,7 @@ export function registerBundle(program: Command): void {
     .option("--json", "emit the bundle manifest summary as JSON")
     .action((runId: string, opts: { out?: string; includePrompts?: boolean; tar?: boolean; json?: boolean }) => {
       ensureForgeDirs();
+      assertStoreForLookup(`run ${runId}`);
       getDb({ readOnly: true });
 
       const destRoot = resolve(opts.out ?? process.cwd());

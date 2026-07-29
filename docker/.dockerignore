@@ -5,3 +5,5 @@
 !corp-root.pem
 !forge-test.sh
 !agent-entrypoint.sh
+!forge-backlog-reader.mjs
+!forge-backlog-bin.sh

@@ -12,6 +12,7 @@
 import type { Command } from "commander";
 import { ensureForgeDirs } from "../../util/paths.js";
 import { getDb, writeTransaction } from "../../store/db.js";
+import { renderedEmptyStore } from "../no-store.js";
 
 type PhantomRow = {
   id: string;
@@ -31,6 +32,7 @@ export function registerSweep(program: Command): void {
     .option("--json", "emit JSON instead of a table")
     .action((opts: { dryRun?: boolean; limit?: number; json?: boolean }) => {
       ensureForgeDirs();
+      if (renderedEmptyStore(opts.json, { swept: 0, runs: [] }, "No phantom-active runs found. Nothing to sweep.")) return;
       const phantoms = findPhantomRuns(opts.limit);
       if (phantoms.length === 0) {
         if (opts.json) console.log(JSON.stringify({ swept: 0, runs: [] }, null, 2));

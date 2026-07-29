@@ -575,4 +575,147 @@ CREATE TABLE IF NOT EXISTS blocker_evidence (
 );
 CREATE INDEX IF NOT EXISTS idx_blocker_evidence_ticket
   ON blocker_evidence(project_key, ticket_id);
+
+-- FG-608 (FG-496 Slice C): the authoritative-cutover substrate. Every table and
+-- column below is ADDITIVE — brand-new tables via CREATE TABLE IF NOT EXISTS, and
+-- new columns on tickets / ticket_storage_mode applied by applyMigrations with
+-- a PRAGMA table_info guard. SCHEMA_VERSION is NOT bumped and user_version is NOT
+-- touched: the FG-568 additive-only open-path contract (BD-15) still holds, so an
+-- older forge binary sharing ~/.forge/forge.db is never broken by these.
+--
+-- BLAST RADIUS, stated plainly: db.ts execs SCHEMA_SQL + applyMigrations on EVERY
+-- writable open, so these tables/columns appear machine-wide for every project on
+-- the next writable open — migrated or not. That is safe precisely because they are
+-- additive and nothing reads them for a markdown-mode project.
+
+-- The durable per-source registry (FG-608 default (b)). source_id is NOT a realpath:
+-- imported_from is realpathSync(projectDir), and FG-345/FG-621 transient clones
+-- under ~/.forge/worktrees/** are reaper-deleted, so a path-derived identity either
+-- collides between two clones of one repo or evaporates when a clone is reaped.
+-- The id is minted once per physical checkout and persisted inside that checkout's
+-- git admin dir (never git-tracked, moves with the repo) — see resolveSourceIdentity
+-- in src/store/backlog-import.ts. last_path is INFORMATIONAL ONLY (operator output);
+-- nothing keys off it. forgotten_at is set by the operator forge backlog
+-- forget-source verb for a permanently-removed source.
+CREATE TABLE IF NOT EXISTS backlog_sources (
+  project_key     TEXT NOT NULL,
+  source_id       TEXT NOT NULL,
+  last_path       TEXT,
+  last_scanned_at TEXT,
+  forgotten_at    TEXT,
+  created_at      TEXT NOT NULL,
+  PRIMARY KEY (project_key, source_id)
+);
+
+-- Per-source MEMBERSHIP — the removal-reconciliation substrate. One row per
+-- (source, thing the source's Markdown claims). Prune deletes a row from the
+-- product tables only when NO live source claims it; absence of a source is never
+-- evidence of absence of a ticket.
+--
+-- kind/member_key generalize over the three shapes that need provenance and had
+-- none: tickets (member_key ''), ticket_relations (member_key
+-- '<related_id><rel_type>') and blocker_evidence (member_key '<source>').
+-- ticket_relations and blocker_evidence carry NO provenance columns of their own
+-- (see their definitions above), which is exactly why the blocker_evidence inverse
+-- deletion had nothing to reason with before this table existed.
+CREATE TABLE IF NOT EXISTS ticket_source_membership (
+  project_key TEXT NOT NULL,
+  source_id   TEXT NOT NULL,
+  kind        TEXT NOT NULL,
+  ticket_id   TEXT NOT NULL,
+  member_key  TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  PRIMARY KEY (project_key, source_id, kind, ticket_id, member_key)
+);
+CREATE INDEX IF NOT EXISTS idx_ticket_source_membership_lookup
+  ON ticket_source_membership(project_key, kind, ticket_id, member_key);
+
+-- The live per-project snapshot targets (FG-608 1d). One row per running container
+-- that holds a read-only snapshot directory mount for this project_key. Fan-out
+-- reads this: every host-side ticket write refreshes every live target.
+CREATE TABLE IF NOT EXISTS backlog_snapshot_targets (
+  project_key TEXT NOT NULL,
+  target_dir  TEXT NOT NULL,
+  task_id     TEXT,
+  created_at  TEXT NOT NULL,
+  released_at TEXT,
+  PRIMARY KEY (project_key, target_dir)
+);
+
+-- Operator-visible publication state. The snapshot is a DERIVED artifact: a failed
+-- publication must never fail or roll back the authoritative host write, so the
+-- failure has to be durable and queryable instead. state is 'ok' or 'stale'; a
+-- stale row is surfaced in forge backlog output so an unpublished amendment is
+-- never indistinguishable from an up-to-date container.
+CREATE TABLE IF NOT EXISTS backlog_snapshot_publications (
+  project_key  TEXT NOT NULL,
+  target_dir   TEXT NOT NULL,
+  state        TEXT NOT NULL,
+  attempts     INTEGER NOT NULL DEFAULT 0,
+  last_ok_at   TEXT,
+  last_error   TEXT,
+  updated_at   TEXT NOT NULL,
+  PRIMARY KEY (project_key, target_dir)
+);
+
+-- FG-608 F7 (recheck): the per-project PUBLICATION ORDINAL — the snapshot
+-- publisher's ordering stamp. The project-wide max ticket revision CANNOT serve as
+-- one: editing any ticket that is not the highest-revision ticket leaves it
+-- unchanged, so two publishers built from CONSECUTIVE states carry EQUAL stamps and
+-- the older build renames over the newer one and records 'ok'. This counter is
+-- bumped in the same write transaction that dirties the project, so consecutive
+-- states are strictly ordered no matter which ticket moved.
+CREATE TABLE IF NOT EXISTS backlog_publication_ordinal (
+  project_key TEXT PRIMARY KEY,
+  ordinal     INTEGER NOT NULL
+);
+
+-- Dispatch-time ticket evidence. The dispatched revision/body hash and the LIVE
+-- authority are two separate records and neither overwrites the other — when they
+-- differ, forge backlog show surfaces BOTH rather than pretending the original
+-- task package changed.
+CREATE TABLE IF NOT EXISTS ticket_dispatch_evidence (
+  task_id      TEXT PRIMARY KEY,
+  project_key  TEXT NOT NULL,
+  ticket_id    TEXT NOT NULL,
+  revision     INTEGER NOT NULL,
+  body_hash    TEXT NOT NULL,
+  dispatched_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ticket_dispatch_evidence_ticket
+  ON ticket_dispatch_evidence(project_key, ticket_id);
 `;
+
+// FG-608: additive columns on PRE-EXISTING FG-606 tables. Declared here as data so
+// applyMigrations (db.ts) and this file cannot drift — schema.ts owns the shape,
+// db.ts owns the idempotent ALTER. Every entry is nullable or has a DEFAULT, so
+// SQLite's ADD COLUMN accepts it and an existing row reads back a safe value.
+export const FG608_TICKET_COLUMNS: { name: string; ddl: string }[] = [
+  // (i) The MONOTONIC revision counter. Bumped on EVERY authoritative write, never
+  // decreases. This is what dispatch evidence records and what answers "did the
+  // live ticket advance" — a content hash cannot, because edit-and-revert returns
+  // the original hash. DEFAULT 1 so pre-FG-608 rows read back a valid revision.
+  { name: "revision", ddl: "ALTER TABLE tickets ADD COLUMN revision INTEGER NOT NULL DEFAULT 1" },
+  // (ii) The CONTENT basis. body_hash is the hash of the row's current authoritative
+  // content, recomputed on every write; import_basis_hash is that same hash frozen
+  // at the last import. They diverge exactly when the DB row was edited since its
+  // import basis — which is the import conflict rule's entire question. A counter
+  // cannot answer it (it advances for an import too).
+  { name: "body_hash", ddl: "ALTER TABLE tickets ADD COLUMN body_hash TEXT" },
+  { name: "import_basis_hash", ddl: "ALTER TABLE tickets ADD COLUMN import_basis_hash TEXT" },
+];
+
+export const FG608_STORAGE_MODE_COLUMNS: { name: string; ddl: string }[] = [
+  // Default (d): the first DB-only edit is RECORDED, so `mode --set markdown` can
+  // REFUSE afterward instead of relying on the operator remembering that
+  // backlog/*.md froze.
+  { name: "first_db_edit_at", ddl: "ALTER TABLE ticket_storage_mode ADD COLUMN first_db_edit_at TEXT" },
+  { name: "first_db_edit_ticket", ddl: "ALTER TABLE ticket_storage_mode ADD COLUMN first_db_edit_ticket TEXT" },
+  // WHICH forge performed the flip. This host runs several forge checkouts from
+  // source against one ~/.forge/forge.db, and additive migrations never bump
+  // user_version — so an OLDER binary opens the migrated DB happily and keeps
+  // reading the frozen backlog/*.md. Nothing in the DB can stop it, so name it in
+  // the flip record and in the cutover UX rather than pretend it is prevented.
+  { name: "flipped_at", ddl: "ALTER TABLE ticket_storage_mode ADD COLUMN flipped_at TEXT" },
+  { name: "flipped_by_revision", ddl: "ALTER TABLE ticket_storage_mode ADD COLUMN flipped_by_revision TEXT" },
+];

@@ -34,6 +34,10 @@ function computeCurrentPlanHash(campaign: Campaign): string | null {
   if (!campaign.projectDir) return null;
   // FG-607: a db-mode project has no backlog/ directory; probing the filesystem
   // here would silently return null and produce an empty report.
+  // FG-608: the existsSync operand stays — it is host-path LIVENESS on the
+  // recorded projectDir, not a leftover probe. In db mode projectHasBacklog
+  // answers `true` for a deleted directory. Locked by
+  // fg608-dir-guard-regression.integration.test.ts.
   if (!existsSync(campaign.projectDir) || !projectHasBacklog(campaign.projectDir)) return null;
   try {
     const plannerInput = sourceInputToPlannerInput(campaign.sourceInput);

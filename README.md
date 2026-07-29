@@ -118,6 +118,7 @@ Shows agent outputs across every project on the host, live-polling every 2s. Rea
 | `~/.forge/releases/<id>/` | Promoted release closures — immutable, retained (promotion deletes nothing) |
 | `~/.forge/interpreters/` | The interpreter store: the pinned nodes releases exec, keyed by version+ABI |
 | `~/.forge/runs/<run-id>/` | Per-task packages, results, stderr |
+| `~/.forge/backlog-snapshots/<task-id>/` | Per-task backlog snapshot published for an agent container's read-only ticket mount |
 | `~/.forge/launches/<id>/` | Durable launch records: command, tmux session, log, exit code (`forge launch`) |
 | `<project>/.forge/workflows/<name>.yml` | Optional per-project workflow override |
 | `<project>/CLAUDE.md` | Per-project orchestrator block (installed by `forge init`) |
@@ -141,4 +142,4 @@ Note that `forge upgrade` refreshes `~/.forge/`'s forge-owned seeds — it does 
 
 ## Docs
 
-`docs/concepts.md` (glossary), `docs/quick-start.md` (end-to-end), `docs/how-to-use-forge-across-projects.md` (multi-project setup), `docs/how-to-upgrade.md` (refresh after forge changes), `docs/how-to-set-up-notifications.md` (SMS + push notifications when workflows finish), `docs/how-to-ntfy.md` (self-hosting ntfy for push notifications), `docs/how-to-iterm-tint.md` (auto-tint iTerm2 background per project), and `docs/how-to-*.md` for adding new agents/workflows.
+`docs/concepts.md` (glossary), `docs/quick-start.md` (end-to-end), `docs/how-to-use-forge-across-projects.md` (multi-project setup), `docs/how-to-upgrade.md` (refresh after forge changes), `docs/how-to-backlog-db-cutover.md` (moving a project's backlog from `backlog/*.md` to the DB store), `docs/how-to-set-up-notifications.md` (SMS + push notifications when workflows finish), `docs/how-to-ntfy.md` (self-hosting ntfy for push notifications), `docs/how-to-iterm-tint.md` (auto-tint iTerm2 background per project), and `docs/how-to-*.md` for adding new agents/workflows.

@@ -123,4 +123,36 @@ if [ -e .git ]; then
   unset _forge_git_probe
 fi
 
+# FG-608: the in-container backlog authority.
+#
+# Ticket authority inside a container is ASSERTED BY THE MOUNT, never derived from
+# the checkout: /project's origin is a bare local path, so repositoryCheckoutIdentity
+# falls to the git-common-dir rung and yields '/project/.git' — IDENTICAL in every
+# container for every project. The pointer below is the only thing that says which
+# project this task's tickets belong to.
+#
+# When it is set, make the natively-built modules resolvable so `forge backlog
+# show/list` can open the mounted snapshot. NODE_PATH is appended, never replaced,
+# so a project's own resolution is unaffected.
+#
+# The refusal when the pointer is ABSENT lives in the reader (container-authority.ts),
+# not here: with FORGE_HOME unset the container's default store path resolves into
+# /home/agent — the forge-claude-oauth NAMED VOLUME, shared read-write by every
+# claude-oauth container on this host regardless of project, and already carrying a
+# full ticket schema. A fallback there would silently answer from another project's
+# store, so the reader refuses instead. Nothing in this script may paper over that.
+#
+# The AUTHORITY MARKER, not this env var, is what the reader gates on (FG-608
+# F1/F2) — an agent owns its own environment and could otherwise switch the gate
+# off by unsetting the pointer. This block only WARNS, and reads the marker at its
+# compiled-in path for the same reason.
+if [ -r /forge-backlog/authority.json ]; then
+  if grep -q '"mode": *"db"' /forge-backlog/authority.json 2>/dev/null \
+     && [ ! -r /forge-backlog/backlog.db ]; then
+    echo "forge: WARNING — this task was dispatched with a db ticket authority but /forge-backlog" >&2
+    echo "forge: carries no readable backlog.db. \`forge backlog\` will refuse rather than answer" >&2
+    echo "forge: from another project's store." >&2
+  fi
+fi
+
 exec "$@"
