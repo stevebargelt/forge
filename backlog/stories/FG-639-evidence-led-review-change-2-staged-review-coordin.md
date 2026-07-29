@@ -116,3 +116,18 @@ Existing ticket-named test-suite consolidation remains FG-641.
 ## Dependencies
 
 Blocked on FG-638 (tables, stable IDs, disposition CLI + authority rules). Blocks FG-640.
+
+## Skip-evidence rule (operator, 2026-07-29 — additional acceptance requirement)
+
+The coordinator's evidence semantics must encode: **a skipped test is never evidence.** Concretely:
+- Stage 8 resolution evidence (`regression_test` / `replayed_reproduction` / `anchored_verification`)
+  and Stage 9 shipping-review AC evidence can never be satisfied by a test that SKIPPED — evidence
+  validation must check the test EXECUTED (per-test identity in the runner output), not that a suite
+  exited green.
+- When a required check's environment cannot execute it and no mandatory alternate lane runs the
+  same assertion at the same candidate SHA, the recorded outcome is `not_executed` /
+  `blocked_environment` — never green, never resolved.
+- A claimed alternate-lane coverage must name the lane, the candidate SHA, and the executed
+  assertion; unnamed "covered elsewhere" is refused at ingestion.
+- Acceptance test: a recheck result citing a skipped test as resolution evidence is rejected by the
+  host with a named reason.
