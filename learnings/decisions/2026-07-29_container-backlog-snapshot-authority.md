@@ -85,7 +85,7 @@ The host builds a small non-WAL SQLite file containing only one `project_key`'s 
 
 **Chose**: Option D — host-published snapshot on a read-only directory mount.
 
-**Rationale**: It is the only option that gets post-start amendment visibility (which A cannot) while making project isolation a property of the artifact rather than of a query (which B cannot), and it does so without standing up a service and an in-container identity story (which C requires). The two hard constraints — root inside the container, and a shared oauth volume sitting exactly where a default store lookup lands — mean the boundary has to be something the kernel enforces and something the agent cannot forge. A `:ro` bind of a file the host wrote before the container started is both.
+**Rationale**: It is the only option that gets post-start amendment visibility (which A cannot) while making project isolation a property of the artifact rather than of a query (which B cannot), and it does so without standing up a service and an in-container identity story (which C requires). The two hard constraints — root inside the container, and a shared oauth volume sitting exactly where a default store lookup lands — mean the boundary has to be something the kernel enforces and something the agent cannot forge. A `:ro` bind of a directory the host publishes into — by rename, including after the container has started — is both.
 
 ---
 

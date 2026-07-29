@@ -12,10 +12,12 @@
 // converges it with every row intact.
 //
 // The mutations are not variations on one theme. The detector inspects PK
-// membership AND ordering, UNIQUE/index shape, and the composite FK — so there is a
-// case per branch, including two that are canonical in every respect the ORIGINAL
-// host bug exercised (a same-membership PK in the wrong order, and a correct FK
-// without ON DELETE CASCADE) and would sail past a PK-membership-only check.
+// membership AND ordering, the lookup index's DEFINITION (columns and order, unique
+// flag and origin, partiality), stray UNIQUE indexes, and the composite FK — so there
+// is a case per branch, including several that are canonical in every respect the
+// ORIGINAL host bug exercised (a same-membership PK in the wrong order, a correct FK
+// without ON DELETE CASCADE, and three same-NAMED lookup indexes whose definitions
+// differ) and would sail past a PK-membership-and-index-name-only check.
 //
 // The last test is the boundary: the rebuild converges ticket_events and nothing
 // else, so a divergence in any OTHER table survives a full open. That is not a
@@ -158,6 +160,36 @@ const DIVERGENT_SHAPES: { name: string; ddl: string; expect: RegExp }[] = [
       PRIMARY KEY (project_key, ticket_id, event_key),
       FOREIGN KEY (project_key, ticket_id) REFERENCES tickets(project_key, ticket_id) ON DELETE CASCADE)`,
     expect: /idx_ticket_events_ticket is missing/,
+  },
+  {
+    name: "a same-named lookup index on the wrong columns",
+    ddl: `CREATE TABLE ticket_events (
+      event_key TEXT NOT NULL, project_key TEXT NOT NULL, ticket_id TEXT NOT NULL,
+      event_type TEXT NOT NULL, payload TEXT, created_at TEXT NOT NULL,
+      PRIMARY KEY (project_key, ticket_id, event_key),
+      FOREIGN KEY (project_key, ticket_id) REFERENCES tickets(project_key, ticket_id) ON DELETE CASCADE);
+      CREATE INDEX idx_ticket_events_ticket ON ticket_events(ticket_id, project_key)`,
+    expect: /idx_ticket_events_ticket is on \(ticket_id, project_key\), canonical is \(project_key, ticket_id\)/,
+  },
+  {
+    name: "a same-named lookup index that is unexpectedly UNIQUE",
+    ddl: `CREATE TABLE ticket_events (
+      event_key TEXT NOT NULL, project_key TEXT NOT NULL, ticket_id TEXT NOT NULL,
+      event_type TEXT NOT NULL, payload TEXT, created_at TEXT NOT NULL,
+      PRIMARY KEY (project_key, ticket_id, event_key),
+      FOREIGN KEY (project_key, ticket_id) REFERENCES tickets(project_key, ticket_id) ON DELETE CASCADE);
+      CREATE UNIQUE INDEX idx_ticket_events_ticket ON ticket_events(project_key, ticket_id)`,
+    expect: /idx_ticket_events_ticket is unique=1 origin=c, canonical is unique=0 origin=c/,
+  },
+  {
+    name: "a same-named lookup index that is PARTIAL",
+    ddl: `CREATE TABLE ticket_events (
+      event_key TEXT NOT NULL, project_key TEXT NOT NULL, ticket_id TEXT NOT NULL,
+      event_type TEXT NOT NULL, payload TEXT, created_at TEXT NOT NULL,
+      PRIMARY KEY (project_key, ticket_id, event_key),
+      FOREIGN KEY (project_key, ticket_id) REFERENCES tickets(project_key, ticket_id) ON DELETE CASCADE);
+      CREATE INDEX idx_ticket_events_ticket ON ticket_events(project_key, ticket_id) WHERE payload IS NOT NULL`,
+    expect: /idx_ticket_events_ticket is partial, canonical is unconditional/,
   },
   {
     name: "the canonical PK with NO foreign key",

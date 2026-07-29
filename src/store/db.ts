@@ -203,6 +203,10 @@ export function applyMigrations(db: DatabaseInstance): void {
 // So detect what CREATE TABLE fixes and ALTER cannot change: PK membership and
 // ordering (table_info's pk flags), UNIQUE/index shape (index_list), and the composite
 // FK (foreign_key_list).
+// The definition TICKET_EVENTS_INDEX_SQL creates, in the form PRAGMA reports it.
+const LOOKUP_INDEX = "idx_ticket_events_ticket";
+const LOOKUP_INDEX_COLUMNS = ["project_key", "ticket_id"] as const;
+
 export function ticketEventsShapeDivergence(db: DatabaseInstance): string | null {
   const cols = db.prepare(`PRAGMA table_info(ticket_events)`).all() as { name: string; pk: number }[];
   if (cols.length === 0) return null;
@@ -219,10 +223,30 @@ export function ticketEventsShapeDivergence(db: DatabaseInstance): string | null
     name: string;
     unique: number;
     origin: string;
+    partial: number;
   }[];
+
+  // The lookup index is checked by DEFINITION, not by name. A same-named index with
+  // different columns, a UNIQUE flag or a WHERE clause is what an old binary can leave
+  // behind, and TICKET_EVENTS_INDEX_SQL's `CREATE INDEX IF NOT EXISTS` no-ops over it
+  // forever — so a name-only check reports canonical while the shape is still wrong.
+  const lookup = indexes.find((i) => i.name === LOOKUP_INDEX);
+  if (!lookup) return `${LOOKUP_INDEX} is missing`;
+  const lookupCols = (
+    db.prepare(`PRAGMA index_info(${LOOKUP_INDEX})`).all() as { seqno: number; name: string | null }[]
+  )
+    .sort((a, b) => a.seqno - b.seqno)
+    .map((c) => c.name ?? "<expr>");
+  if (lookupCols.join(",") !== LOOKUP_INDEX_COLUMNS.join(",")) {
+    return `${LOOKUP_INDEX} is on (${lookupCols.join(", ") || "none"}), canonical is (${LOOKUP_INDEX_COLUMNS.join(", ")})`;
+  }
+  if (lookup.unique === 1 || lookup.origin !== "c") {
+    return `${LOOKUP_INDEX} is unique=${lookup.unique} origin=${lookup.origin}, canonical is unique=0 origin=c`;
+  }
+  if (lookup.partial === 1) return `${LOOKUP_INDEX} is partial, canonical is unconditional`;
+
   const strayUnique = indexes.filter((i) => i.unique === 1 && i.origin !== "pk").map((i) => i.name);
   if (strayUnique.length > 0) return `unexpected UNIQUE index: ${strayUnique.join(", ")}`;
-  if (!indexes.some((i) => i.name === "idx_ticket_events_ticket")) return `idx_ticket_events_ticket is missing`;
 
   const fks = db.prepare(`PRAGMA foreign_key_list(ticket_events)`).all() as {
     id: number;
