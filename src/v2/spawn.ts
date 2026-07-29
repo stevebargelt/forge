@@ -33,6 +33,16 @@ import {
 } from "../util/creds.js";
 import { substitute, substituteOptional, expandTilde, type SubstContext } from "./resolve.js";
 import { planDependencyVolumes, provisionerContainerName, type DependencyVolumePlan } from "./dependency-provisioning.js";
+import { resolveBacklogStore } from "../backlog/storage-mode.js";
+import {
+  publishSnapshotOnce,
+  registerSnapshotTarget,
+  releaseFinishedTargets,
+} from "../backlog/snapshot.js";
+import { getTicket, recordDispatchEvidence } from "../store/tickets.js";
+import { getTask } from "../store/tasks.js";
+import { writeTransaction } from "../store/db.js";
+import { FORGE_HOME } from "../util/paths.js";
 
 export type SpawnContext = SubstContext & {
   TASK_ID: string;
@@ -85,11 +95,120 @@ export type SpawnContext = SubstContext & {
   // overwhelmingly common dispatch is not a clone at all, where it is never read.
   // Every production dispatch site sets it; see planWorktreeGitMounts.
   CANONICAL_PROJECT_DIR?: string;
+  // FG-608: the backlog ticket this task was built from, when there is one. Used
+  // ONLY to record dispatch evidence (revision + body hash) and to inject it into
+  // the container so `forge backlog show` can surface a dispatched-vs-current
+  // revision difference. Absent for dispatches with no ticket.
+  TICKET_ID?: string;
 };
 
 // Fixed in-container path for the mounted auth-profile state. A top-level path
 // (not under /home/agent) avoids nesting under the oauth-volume mount.
 const AUTH_STATE_CONTAINER_PATH = "/forge-auth/state.json";
+
+// FG-608: the in-container backlog authority mount.
+//
+// A DIRECTORY, not a file, and this is a REQUIREMENT rather than a preference. A
+// file bind-mount pins the inode at container start, so the host's atomic
+// write-temp + rename (which allocates a NEW inode) would be invisible to the
+// container for its entire life — and forge containers are one-per-task,
+// long-lived, and never restarted. The only way to make a pinned inode change is
+// an in-place rewrite, which is exactly the torn read the concurrency acceptance
+// case forbids. Mounting the containing directory `:ro` and renaming INSIDE it is
+// the shape that satisfies both. See src/backlog/snapshot.ts.
+//
+// `:ro` is the ENFORCEMENT primitive, not a hint: agents have passwordless root
+// (the image creates `agent` with NOPASSWD:ALL and no --user is ever passed), so a
+// CLI-level refusal is trivially bypassed with sudo. The kernel-enforced read-only
+// bind is the one thing sudo cannot undo.
+//
+// A top-level path (not under /home/agent) keeps it OFF the shared oauth volume.
+const BACKLOG_SNAPSHOT_CONTAINER_PATH = "/forge-backlog";
+
+/** Host directory holding ONE task's published backlog snapshot. Deliberately NOT
+ *  under the task dir: the task dir is bind-mounted READ-WRITE into the container
+ *  for result.json, and a snapshot living there would be agent-writable — which
+ *  would make the mutation-refusal acceptance case pass vacuously. */
+export function backlogSnapshotHostDir(taskId: string): string {
+  return join(FORGE_HOME, "backlog-snapshots", taskId);
+}
+
+export type BacklogSnapshotMount = {
+  hostDir: string;
+  containerDir: string;
+  projectKey: string;
+  dispatchedTicket?: string;
+};
+
+/** Prepare this task's live, project-scoped, backlog-only read surface.
+ *
+ *  Returns undefined — and mounts NOTHING — unless the project has actually cut
+ *  over to db mode. A markdown-mode project's tickets are in its own checkout,
+ *  which the container already has; mounting an empty snapshot there would be
+ *  noise, and mounting one for EVERY dispatch would put a snapshot publication on
+ *  the hot path of every project on the host.
+ *
+ *  Three things happen here, all on the HOST, all before the container starts:
+ *    1. publish the first snapshot, so the container's very first read has an
+ *       artifact rather than a race with the first host write;
+ *    2. REGISTER the target, so every subsequent host ticket write fans out to it
+ *       through the production publisher — this is what makes a post-start
+ *       amendment visible, and it is deliberately not something a test rigs up;
+ *    3. record DISPATCH EVIDENCE (monotonic revision + body hash) for the ticket
+ *       this task was built from, so `forge backlog show` in-container can surface
+ *       BOTH the dispatched and current revisions when the live ticket advances.
+ *
+ *  NEVER throws: a snapshot is a derived convenience. A failure here must not
+ *  block a dispatch — it degrades to "no mounted authority", which the in-container
+ *  reader REFUSES on explicitly rather than silently answering from the wrong store. */
+export function prepareBacklogSnapshotMount(
+  projectDir: string,
+  taskId: string,
+  ticketId?: string,
+): BacklogSnapshotMount | undefined {
+  try {
+    const store = resolveBacklogStore(projectDir);
+    if (store.mode !== "db") return undefined;
+    const hostDir = backlogSnapshotHostDir(taskId);
+    // Retire finished tasks' targets first. Without this every ticket write would
+    // keep publishing to the snapshot directory of every task this host has ever
+    // dispatched for the project — unbounded work per write and unbounded disk.
+    // Dispatch is the one moment we are reliably on this project's path, and
+    // docker-exec.ts (which owns container teardown) is not ours to change here.
+    releaseFinishedTargets(store.projectKey, (id) => {
+      const task = getTask(id);
+      if (!task) return false; // an unknown task is not live
+      return task.status !== "complete" && task.status !== "failed" && task.status !== "blocked_by_red";
+    });
+    registerSnapshotTarget(store.projectKey, hostDir, taskId);
+    publishSnapshotOnce(store.projectKey, hostDir);
+    let dispatchedTicket: string | undefined;
+    if (ticketId) {
+      const row = getTicket(store.projectKey, ticketId);
+      if (row && row.bodyHash) {
+        dispatchedTicket = `${ticketId}:${row.revision ?? 1}:${row.bodyHash}`;
+        writeTransaction(() =>
+          recordDispatchEvidence({
+            taskId,
+            projectKey: store.projectKey,
+            ticketId,
+            revision: row.revision ?? 1,
+            bodyHash: row.bodyHash!,
+            dispatchedAt: new Date().toISOString(),
+          }),
+        );
+      }
+    }
+    return {
+      hostDir,
+      containerDir: BACKLOG_SNAPSHOT_CONTAINER_PATH,
+      projectKey: store.projectKey,
+      ...(dispatchedTicket ? { dispatchedTicket } : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}
 
 // Fixed in-container path for the RO-mounted Codex credential (AWN-7 Walk). The
 // entrypoint detects this file and copies it into a writable CODEX_HOME. A
@@ -915,6 +1034,29 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
   if (projectContainerPath) {
     for (const gitPath of planWorktreeGitMounts(ctx.PROJECT_DIR, ctx.CANONICAL_PROJECT_DIR)) {
       args.push("-v", `${gitPath}:${gitPath}:ro`);
+    }
+  }
+
+  // FG-608: the live, project-scoped, backlog-only ticket authority. Mounted as a
+  // READ-ONLY DIRECTORY for every agent class, blue and red alike — PROJECT_MODE is
+  // unrelated and unchanged. Computed here in code (not declared in runtime YAML)
+  // for the same reason as the FG-559 git mounts: the mount set is spread across
+  // six seeds/runtimes/*.yml resolved from a versioned seed generation, so a
+  // YAML-declared mount would silently keep the old behavior on any generation
+  // nobody regenerated.
+  //
+  // The full ~/.forge/forge.db is NEVER mounted: this directory holds a snapshot
+  // database containing only this project_key's tickets/relations/blocker evidence,
+  // and no runs / tasks / events / gates / verdicts tables at all. Project isolation
+  // is structural, not a WHERE clause the agent could drop.
+  const snapshotMount = prepareBacklogSnapshotMount(ctx.PROJECT_DIR, ctx.TASK_ID, ctx.TICKET_ID);
+  if (snapshotMount) {
+    args.push("-v", `${snapshotMount.hostDir}:${snapshotMount.containerDir}:ro`);
+    args.push("-e", `FORGE_BACKLOG_SNAPSHOT_DIR=${snapshotMount.containerDir}`);
+    if (snapshotMount.dispatchedTicket) {
+      // Dispatch-time evidence and live authority are TWO records; neither
+      // overwrites the other. The container surfaces both when they differ.
+      args.push("-e", `FORGE_DISPATCHED_TICKET=${snapshotMount.dispatchedTicket}`);
     }
   }
 

@@ -104,30 +104,53 @@ function projectWithDbOnlyTickets(): { project: string; projectKey: string; dbOn
   return { project, projectKey, dbOnly };
 }
 
-test("integ FG-607: `mode --set markdown` REFUSES while db-only tickets exist, and writes nothing", () => {
+// FG-608 changed the PRECEDENCE here, not the FG-607 guard. Filing a ticket in db
+// mode is itself a DB-ONLY EDIT, and FG-608 records the first one so
+// `mode --set markdown` can refuse afterward (accepted default (d): the one-way
+// cutover property is ENFORCED, not documented). That refusal is broader and fires
+// first — it also covers db edits to tickets that DO have a Markdown file, which
+// the orphan check cannot see. The FG-607 orphan refusal below is unchanged and
+// still reachable; it is simply behind the newer, stricter one.
+test("integ FG-608/FG-607: `mode --set markdown` REFUSES after a db-only edit, and writes nothing", () => {
   const { project, projectKey, dbOnly } = projectWithDbOnlyTickets();
 
   const res = forge(project, ["backlog", "mode", "--set", "markdown"]);
   assert.equal(res.status, 1, `expected a refusal; stdout: ${res.stdout} stderr: ${res.stderr}`);
   assert.match(res.stderr, /refusing to set markdown mode/);
-  assert.match(res.stderr, /unreachable/);
-  assert.match(res.stderr, /--allow-orphaned-tickets/);
-  for (const id of dbOnly) {
-    assert.ok(res.stderr.includes(id), `the refusal must name ${id}: ${res.stderr}`);
-  }
-  assert.ok(!res.stderr.includes("FG-1 "), "a ticket that IS in Markdown is not orphaned");
+  assert.match(res.stderr, /DB-only edits since it cut over/, "the FG-608 refusal fires first");
+  assert.match(res.stderr, /--accept-frozen-markdown-loss/, "and names its own opt-out");
 
   // NO state written: the mode is untouched and every ticket is still there.
   assert.equal(shownMode(project).mode, "db", "a refused flip must not change the mode");
   getDb();
   assert.equal(getStorageMode(projectKey), "db");
   assert.equal(ticketsForProject(projectKey).length, 3);
+
+  // Behind the FG-608 refusal, the FG-607 ORPHAN refusal is unchanged: accept the
+  // frozen-Markdown loss and the orphan guard is what stops the flip next.
+  const orphanRefusal = forge(project, [
+    "backlog", "mode", "--set", "markdown", "--accept-frozen-markdown-loss",
+  ]);
+  assert.equal(orphanRefusal.status, 1, orphanRefusal.stderr);
+  assert.match(orphanRefusal.stderr, /unreachable/);
+  assert.match(orphanRefusal.stderr, /--allow-orphaned-tickets/);
+  for (const id of dbOnly) {
+    assert.ok(orphanRefusal.stderr.includes(id), `the refusal must name ${id}: ${orphanRefusal.stderr}`);
+  }
+  assert.ok(!orphanRefusal.stderr.includes("FG-1 "), "a ticket that IS in Markdown is not orphaned");
+  assert.equal(shownMode(project).mode, "db", "still refused, still unchanged");
 });
 
 test("integ FG-607: --allow-orphaned-tickets flips anyway and warns with the same list", () => {
   const { project, dbOnly } = projectWithDbOnlyTickets();
 
-  const res = forge(project, ["backlog", "mode", "--set", "markdown", "--allow-orphaned-tickets", "--json"]);
+  // Both opt-outs are required and they are deliberately SEPARATE flags: one
+  // accepts stranding db-only tickets, the other accepts losing db edits to
+  // tickets that still have a Markdown file. Neither implies the other.
+  const res = forge(project, [
+    "backlog", "mode", "--set", "markdown",
+    "--allow-orphaned-tickets", "--accept-frozen-markdown-loss", "--json",
+  ]);
   assert.equal(res.status, 0, `stderr: ${res.stderr}`);
   assert.equal((JSON.parse(res.stdout) as { mode: string }).mode, "markdown");
   assert.match(res.stderr, /unreachable/);

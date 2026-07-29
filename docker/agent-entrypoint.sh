@@ -123,4 +123,32 @@ if [ -e .git ]; then
   unset _forge_git_probe
 fi
 
+# FG-608: the in-container backlog authority.
+#
+# Ticket authority inside a container is ASSERTED BY THE MOUNT, never derived from
+# the checkout: /project's origin is a bare local path, so repositoryCheckoutIdentity
+# falls to the git-common-dir rung and yields '/project/.git' — IDENTICAL in every
+# container for every project. The pointer below is the only thing that says which
+# project this task's tickets belong to.
+#
+# When it is set, make the natively-built modules resolvable so `forge backlog
+# show/list` can open the mounted snapshot. NODE_PATH is appended, never replaced,
+# so a project's own resolution is unaffected.
+#
+# The refusal when the pointer is ABSENT lives in the reader (container-authority.ts),
+# not here: with FORGE_HOME unset the container's default store path resolves into
+# /home/agent — the forge-claude-oauth NAMED VOLUME, shared read-write by every
+# claude-oauth container on this host regardless of project, and already carrying a
+# full ticket schema. A fallback there would silently answer from another project's
+# store, so the reader refuses instead. Nothing in this script may paper over that.
+if [ -n "${FORGE_BACKLOG_SNAPSHOT_DIR:-}" ]; then
+  if [ -n "${FORGE_CONTAINER_NODE_PATH:-}" ]; then
+    export NODE_PATH="${NODE_PATH:+${NODE_PATH}:}${FORGE_CONTAINER_NODE_PATH}"
+  fi
+  if [ ! -r "${FORGE_BACKLOG_SNAPSHOT_DIR}/backlog.db" ]; then
+    echo "forge: WARNING — FORGE_BACKLOG_SNAPSHOT_DIR=${FORGE_BACKLOG_SNAPSHOT_DIR} is set but carries no" >&2
+    echo "forge: readable backlog.db. \`forge backlog\` will refuse rather than answer from another store." >&2
+  fi
+fi
+
 exec "$@"
