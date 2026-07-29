@@ -658,6 +658,18 @@ CREATE TABLE IF NOT EXISTS backlog_snapshot_publications (
   PRIMARY KEY (project_key, target_dir)
 );
 
+-- FG-608 F7 (recheck): the per-project PUBLICATION ORDINAL — the snapshot
+-- publisher's ordering stamp. The project-wide max ticket revision CANNOT serve as
+-- one: editing any ticket that is not the highest-revision ticket leaves it
+-- unchanged, so two publishers built from CONSECUTIVE states carry EQUAL stamps and
+-- the older build renames over the newer one and records 'ok'. This counter is
+-- bumped in the same write transaction that dirties the project, so consecutive
+-- states are strictly ordered no matter which ticket moved.
+CREATE TABLE IF NOT EXISTS backlog_publication_ordinal (
+  project_key TEXT PRIMARY KEY,
+  ordinal     INTEGER NOT NULL
+);
+
 -- Dispatch-time ticket evidence. The dispatched revision/body hash and the LIVE
 -- authority are two separate records and neither overwrites the other — when they
 -- differ, forge backlog show surfaces BOTH rather than pretending the original

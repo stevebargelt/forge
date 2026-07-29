@@ -3,7 +3,7 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -15,6 +15,7 @@ import {
   PUBLISH_MAX_ATTEMPTS,
   SNAPSHOT_DB_BASENAME,
   UNKNOWN_TARGET_SWEEP_MS,
+  describeStalePublications,
   liveSnapshotTargets,
   publicationStates,
   publishSnapshotOnce,
@@ -67,6 +68,18 @@ function snapshotBody(dir: string, id: string): string | undefined {
   }
 }
 
+function publicationOrdinal(): number {
+  return (
+    (db.prepare(`SELECT ordinal FROM backlog_publication_ordinal WHERE project_key = ?`).get(KEY) as
+      | { ordinal: number }
+      | undefined)?.ordinal ?? 0
+  );
+}
+
+function setPublicationOrdinal(ordinal: number): void {
+  db.prepare(`UPDATE backlog_publication_ordinal SET ordinal = ? WHERE project_key = ?`).run(ordinal, KEY);
+}
+
 function snapshotMaxRevision(dir: string): number {
   const snap = new Database(join(dir, SNAPSHOT_DB_BASENAME), { readonly: true });
   try {
@@ -101,6 +114,48 @@ test("FG-608 F7: an OLDER build does not rename over a strictly newer published 
     [...new Set([existsSync(join(dir, SNAPSHOT_DB_BASENAME))])],
     [true],
   );
+});
+
+test("FG-608 F7: an older build of a NON-MAX ticket is skipped even though max_revision is EQUAL", () => {
+  const dir = newDir();
+  // FG-HIGH is and stays the project's highest-revision ticket, so every edit to
+  // FG-1 below leaves max_revision pinned at 3. That is the ordinary case — most
+  // tickets are not the max one — and it is exactly where the first F7 fix did
+  // nothing: two racing builds carried EQUAL stamps, the strict `>` never fired,
+  // and the older build renamed over the newer one and was recorded 'ok'.
+  seed("FG-HIGH", "h1");
+  seed("FG-HIGH", "h2");
+  seed("FG-HIGH", "h3"); // revision 3 — the project-wide max, from here on
+  seed("FG-1", "v1"); // revision 1
+
+  // The state the SLOWER publisher read before it stalled.
+  const olderTickets = db.prepare(`SELECT ticket_id, revision, body FROM tickets`).all() as {
+    ticket_id: string; revision: number; body: string;
+  }[];
+  const olderOrdinal = publicationOrdinal();
+
+  seed("FG-1", "v2"); // revision 2 — still not the max
+  publishSnapshotOnce(KEY, dir); // the FASTER publisher lands first
+  assert.equal(snapshotBody(dir, "FG-1"), "v2");
+  assert.equal(snapshotMaxRevision(dir), 3);
+
+  // Now the slower publisher finally builds and attempts its rename. Restoring the
+  // ticket rows AND the ordinal is what a concurrent process's read view actually
+  // was — it observed the whole earlier state, not half of it.
+  for (const t of olderTickets) {
+    db.prepare(`UPDATE tickets SET revision = ?, body = ? WHERE ticket_id = ?`).run(t.revision, t.body, t.ticket_id);
+  }
+  setPublicationOrdinal(olderOrdinal);
+  publishSnapshotOnce(KEY, dir);
+
+  assert.equal(snapshotMaxRevision(dir), 3, "both builds carry the SAME max revision — that is the point");
+  assert.equal(
+    snapshotBody(dir, "FG-1"),
+    "v2",
+    "the older build must decline the rename; overwriting here strands a running agent on a ticket " +
+      "amendment that was already superseded, and records it as 'ok'",
+  );
+  assert.deepEqual(readdirSync(dir), [SNAPSHOT_DB_BASENAME], "and it leaves no temp file behind");
 });
 
 test("FG-608 F7: an equal-or-newer build DOES publish (the guard is ordering, not a freeze)", () => {
@@ -164,6 +219,56 @@ test("FG-608 F12: releasing a row directly keeps the artifact by default", () =>
   releaseSnapshotTarget(KEY, dir);
   assert.equal(liveSnapshotTargets(KEY).length, 0, "the row is released unconditionally");
   assert.equal(existsSync(join(dir, SNAPSHOT_DB_BASENAME)), true);
+});
+
+// ─── N2: a released target's stale publication is reclaimed, not warned forever ──
+
+test("FG-608 N2: releasing a stale target stops the warning; a LIVE stale target still warns", () => {
+  const parent = newDir();
+  const gone = join(parent, "gone");
+  const stillRunning = join(parent, "still-running");
+  writeFileSync(gone, "a file where the target dir should be — unpublishable");
+  writeFileSync(stillRunning, "likewise");
+  registerSnapshotTarget(KEY, gone, "task-gone");
+  registerSnapshotTarget(KEY, stillRunning, "task-live");
+
+  seed("FG-1", "b");
+  assert.deepEqual(
+    publicationStates(KEY).filter((p) => p.state === "stale").map((p) => p.targetDir).sort(),
+    [gone, stillRunning].sort(),
+    "both targets failed to publish and both are surfaced",
+  );
+
+  // The container behind `gone` finished. Its publication row describes a container
+  // that no longer exists: nothing can act on it, and nothing else will ever clear
+  // it, so left in place it warns on EVERY `forge backlog` command forever.
+  releaseSnapshotTarget(KEY, gone);
+
+  const remaining = publicationStates(KEY).filter((p) => p.state === "stale");
+  assert.deepEqual(remaining.map((p) => p.targetDir), [stillRunning], "only the live target still warns");
+  const warning = describeStalePublications(KEY);
+  assert.ok(warning, "a genuinely stale LIVE target must still warn — this is not a mute button");
+  assert.match(warning!, /still-running/);
+  assert.equal(warning!.includes(gone), false, "the retired target is gone from the warning");
+
+  // And when the last live stale target is released too, the warning clears entirely.
+  releaseSnapshotTarget(KEY, stillRunning);
+  assert.equal(describeStalePublications(KEY), null);
+});
+
+test("FG-608 N2: a re-registered target starts from a clean publication record", () => {
+  const parent = newDir();
+  const dir = join(parent, "target");
+  writeFileSync(dir, "unpublishable");
+  registerSnapshotTarget(KEY, dir, "task-a");
+  seed("FG-1", "b");
+  assert.equal(publicationStates(KEY)[0]!.state, "stale");
+
+  releaseSnapshotTarget(KEY, dir);
+  // A LATER task legitimately reuses the path. It inherits no verdict from the
+  // container that died there.
+  registerSnapshotTarget(KEY, dir, "task-b");
+  assert.deepEqual(publicationStates(KEY), [], "the reclaimed row does not resurrect with the path");
 });
 
 // ─── F13: a bookkeeping failure is not a delivery failure ───────────────────

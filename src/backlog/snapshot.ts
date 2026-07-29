@@ -92,7 +92,8 @@ const SNAPSHOT_SCHEMA_SQL = `
 CREATE TABLE snapshot_meta (
   project_key   TEXT NOT NULL,
   published_at  TEXT NOT NULL,
-  max_revision  INTEGER NOT NULL
+  max_revision  INTEGER NOT NULL,
+  publication_ordinal INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE tickets (
   ticket_id     TEXT PRIMARY KEY,
@@ -184,6 +185,13 @@ export function releaseSnapshotTarget(
       `UPDATE backlog_snapshot_targets SET released_at = ? WHERE project_key = ? AND target_dir = ?`,
     )
     .run(new Date().toISOString(), projectKey, targetDir);
+  // N2: RECLAIM the publication row with the target. A stale row belonging to a
+  // container that no longer exists is not an operator signal — nothing can act on
+  // it and nothing will ever clear it, so it warns on every `forge backlog` command
+  // forever and trains the operator to ignore the warning that matters.
+  getDb()
+    .prepare(`DELETE FROM backlog_snapshot_publications WHERE project_key = ? AND target_dir = ?`)
+    .run(projectKey, targetDir);
   if (!opts.deleteArtifact) return;
   try {
     rmSync(targetDir, { recursive: true, force: true });
@@ -286,10 +294,19 @@ function recordPublication(
 }
 
 export function publicationStates(projectKey: string): PublicationState[] {
+  // N2: a publication row describes a LIVE target. Releasing the target retires the
+  // row (releaseSnapshotTarget), and this join is the second half of the same fact:
+  // a row whose target has been released — by any path, including one that never
+  // went through releaseSnapshotTarget — describes a container that is gone, and
+  // reporting it as a current stale publication is a warning no operator can act on.
   const rows = getDb()
     .prepare(
-      `SELECT project_key, target_dir, state, attempts, last_ok_at, last_error, updated_at
-         FROM backlog_snapshot_publications WHERE project_key = ? ORDER BY target_dir ASC`,
+      `SELECT p.project_key, p.target_dir, p.state, p.attempts, p.last_ok_at, p.last_error, p.updated_at
+         FROM backlog_snapshot_publications p
+         JOIN backlog_snapshot_targets t
+           ON t.project_key = p.project_key AND t.target_dir = p.target_dir
+        WHERE p.project_key = ? AND t.released_at IS NULL
+        ORDER BY p.target_dir ASC`,
     )
     .all(projectKey) as {
     project_key: string;
@@ -343,10 +360,36 @@ type SnapshotTicketRow = {
   body_hash: string | null;
 };
 
+/** The ordering stamp a build carries. `ordinal` is the primary key and the whole
+ *  point of F7's recheck: it advances on EVERY write that dirties the project, so
+ *  two builds from consecutive states are strictly ordered even when the ticket that
+ *  moved is not the project's highest-revision one. `maxRevision` is kept as a
+ *  secondary tiebreak — it still catches an older build in the (production-
+ *  unreachable, test-reachable) case where the ordinal did not move. */
+type SnapshotStamp = { ordinal: number; maxRevision: number };
+
+/** True when a build carrying `built` must NOT rename over what is already on disk. */
+function isSuperseded(onDisk: SnapshotStamp, built: SnapshotStamp): boolean {
+  if (onDisk.ordinal !== built.ordinal) return onDisk.ordinal > built.ordinal;
+  return onDisk.maxRevision > built.maxRevision;
+}
+
+/** Advance this project's publication ordinal. Called from the dirty choke point, so
+ *  under an open writeTransaction the bump is atomic with the ticket write that
+ *  caused it — a build that sees the row sees the ordinal that goes with it. */
+function bumpPublicationOrdinal(projectKey: string): void {
+  getDb()
+    .prepare(
+      `INSERT INTO backlog_publication_ordinal (project_key, ordinal) VALUES (?, 1)
+       ON CONFLICT(project_key) DO UPDATE SET ordinal = ordinal + 1`,
+    )
+    .run(projectKey);
+}
+
 /** Build a complete, self-contained, NON-WAL snapshot database at `path`. Returns
- *  the max source revision it captured — the ordering stamp publishSnapshotOnce
- *  compares against whatever is already on disk. */
-function buildSnapshot(projectKey: string, path: string): number {
+ *  the ordering stamp it captured — what publishSnapshotOnce compares against
+ *  whatever is already on disk. */
+function buildSnapshot(projectKey: string, path: string): SnapshotStamp {
   const src = getDb();
   // F8: ONE read transaction over all three source tables. Un-transacted, the
   // tickets SELECT could observe a state that the relations SELECT then does not —
@@ -354,7 +397,15 @@ function buildSnapshot(projectKey: string, path: string): number {
   // reconstruction lost the blocker_evidence row that justified it. A deferred read
   // transaction gives all three statements one consistent view; it takes no write
   // lock and blocks nobody.
-  const { tickets, relations, evidence } = src.transaction(() => ({
+  const { tickets, relations, evidence, ordinal } = src.transaction(() => ({
+    // Read INSIDE the same view as the rows: the stamp must describe exactly the
+    // state this build captured, not the state the DB reached while it was building.
+    ordinal:
+      (
+        src.prepare(`SELECT ordinal FROM backlog_publication_ordinal WHERE project_key = ?`).get(projectKey) as
+          | { ordinal: number }
+          | undefined
+      )?.ordinal ?? 0,
     tickets: src
       .prepare(
         `SELECT ticket_id, type, status, title, body, created, closed, closed_commit, epic,
@@ -411,28 +462,31 @@ function buildSnapshot(projectKey: string, path: string): number {
       for (const r of relations) insRel.run(r.ticket_id, r.related_id, r.rel_type);
       for (const b of evidence) insEvidence.run(b.ticket_id, b.reason, b.source, b.created_at);
       out
-        .prepare(`INSERT INTO snapshot_meta (project_key, published_at, max_revision) VALUES (?, ?, ?)`)
-        .run(projectKey, new Date().toISOString(), maxRevision);
+        .prepare(
+          `INSERT INTO snapshot_meta (project_key, published_at, max_revision, publication_ordinal)
+           VALUES (?, ?, ?, ?)`,
+        )
+        .run(projectKey, new Date().toISOString(), maxRevision, ordinal);
     }).immediate();
-    return maxRevision;
+    return { ordinal, maxRevision };
   } finally {
     out.close();
   }
 }
 
 /** The ordering stamp already on disk at `path`, or null when there is nothing
- *  readable there. A file that will not open or carries no snapshot_meta is treated
- *  as ABSENT, never as newer: refusing to publish over an unreadable artifact would
- *  leave a container permanently stranded on garbage. */
-function onDiskMaxRevision(path: string): number | null {
+ *  readable there. A file that will not open, carries no snapshot_meta, or predates
+ *  the ordinal column is treated as ABSENT, never as newer: refusing to publish over
+ *  an unreadable artifact would leave a container permanently stranded on garbage. */
+function onDiskStamp(path: string): SnapshotStamp | null {
   if (!existsSync(path)) return null;
   let db: DatabaseInstance | undefined;
   try {
     db = new Database(path, { readonly: true, fileMustExist: true });
-    const row = db.prepare(`SELECT max_revision FROM snapshot_meta LIMIT 1`).get() as
-      | { max_revision: number }
+    const row = db.prepare(`SELECT max_revision, publication_ordinal FROM snapshot_meta LIMIT 1`).get() as
+      | { max_revision: number; publication_ordinal: number }
       | undefined;
-    return row ? row.max_revision : null;
+    return row ? { ordinal: row.publication_ordinal, maxRevision: row.max_revision } : null;
   } catch {
     return null;
   } finally {
@@ -456,14 +510,19 @@ export function publishSnapshotOnce(projectKey: string, targetDir: string): void
   try {
     const built = buildSnapshot(projectKey, tmpPath);
     // ORDERING (F7). rename(2) is atomic but not ordered: two publishers racing on
-    // one target_dir can land in either order, and the LOSER wins the file. The
-    // published artifact carries the source's max revision, so an older build can
-    // see that the on-disk one is strictly newer and decline — a skipped rename
-    // leaves the container reading MORE recent truth, which is the whole objective.
-    // Within one process this cannot even arise (publication is synchronous end to
-    // end); across processes this narrows the window to the rename itself.
-    const onDisk = onDiskMaxRevision(finalPath);
-    if (onDisk !== null && onDisk > built) {
+    // one target_dir can land in either order, and the LOSER wins the file. So the
+    // published artifact carries a stamp and an older build declines — a skipped
+    // rename leaves the container reading MORE recent truth, which is the objective.
+    //
+    // THE STAMP IS THE PUBLICATION ORDINAL, NOT THE PROJECT-WIDE MAX REVISION. Max
+    // revision is the maximum over ALL tickets, so editing any ticket that is not
+    // the highest-revision one does not move it: the two racing builds carried EQUAL
+    // stamps, the guard's strict `>` never fired, and the older build renamed over
+    // the newer one and was recorded 'ok'. That is the common case, not the corner.
+    // The ordinal advances on every write that dirties the project, so consecutive
+    // states are strictly ordered whichever ticket moved.
+    const onDisk = onDiskStamp(finalPath);
+    if (onDisk !== null && isSuperseded(onDisk, built)) {
       rmSync(tmpPath, { force: true });
       return;
     }
@@ -549,6 +608,15 @@ const pendingProjects = new Set<string>();
  *  one indexed SELECT. */
 export function markBacklogDirty(projectKey: string): void {
   if (!projectKey) return;
+  // F7: advance the ordering stamp with the write that dirtied the project. Wrapped
+  // because this runs on the authoritative write path and the whole module's
+  // invariant is that no publication concern can fail a committed ticket write — a
+  // lost bump degrades the ordering guard, it must never roll back the truth.
+  try {
+    bumpPublicationOrdinal(projectKey);
+  } catch {
+    /* no store / no table — the guard falls back to the revision tiebreak */
+  }
   if (barrierDepth > 0) {
     pendingProjects.add(projectKey);
     return;

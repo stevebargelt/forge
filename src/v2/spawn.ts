@@ -41,9 +41,14 @@ import {
   releaseFinishedTargets,
   type TargetLiveness,
 } from "../backlog/snapshot.js";
-import { CONTAINER_AUTHORITY_MOUNT, writeAuthorityMarker } from "../backlog/container-authority.js";
+import {
+  CONTAINER_AUTHORITY_MOUNT,
+  writeAuthorityMarker,
+  type AuthorityMode,
+} from "../backlog/container-authority.js";
 import { getTicket, recordDispatchEvidence } from "../store/tickets.js";
 import { getTask } from "../store/tasks.js";
+import { logEvent } from "../store/events.js";
 import { writeTransaction } from "../store/db.js";
 import { FORGE_HOME } from "../util/paths.js";
 
@@ -144,7 +149,46 @@ export type BacklogSnapshotMount = {
   mode: "db" | "markdown" | "unknown";
   projectKey: string | null;
   dispatchedTicket?: string;
+  /** Set when the authority marker could not be written (N1). The dispatch still
+   *  proceeds; this is what it proceeded WITHOUT. */
+  markerError?: string;
 };
+
+/** Write the authority marker, or record why it could not be written. Returns the
+ *  failure message, or null on success.
+ *
+ *  N1: prepareBacklogSnapshotMount documents "NEVER throws", and an unguarded marker
+ *  write broke that for every mode — including markdown-mode projects, which had no
+ *  dependency on this path at all before the marker existed. A marker that cannot be
+ *  written is a real degradation (the container asserts no authority and refuses
+ *  rather than reads), but aborting EVERY dispatch on the host is a strictly worse
+ *  one. So it is trapped, recorded durably, and the dispatch continues. */
+function writeAuthorityMarkerOrRecord(
+  hostDir: string,
+  fields: { mode: AuthorityMode; projectKey: string | null; taskId: string },
+): string | null {
+  try {
+    writeAuthorityMarker(hostDir, fields);
+    return null;
+  } catch (e) {
+    const error = (e as Error).message ?? String(e);
+    try {
+      logEvent("container.backlog_authority_marker_failed", {
+        taskId: fields.taskId,
+        payload: { taskId: fields.taskId, hostDir, mode: fields.mode, projectKey: fields.projectKey, error },
+      });
+    } catch {
+      // The store is unreachable too. stderr below is then the only trace, and a
+      // dispatch that still runs beats one that dies on its bookkeeping.
+    }
+    console.error(
+      `forge: could not write the backlog authority marker for ${fields.taskId} at ${hostDir} (${error}). ` +
+        `The container will have NO mounted ticket authority and will refuse backlog reads rather than ` +
+        `fall back to the shared volume; the dispatch itself proceeds.`,
+    );
+    return error;
+  }
+}
 
 /** Prepare this task's ticket authority: the read-only mount and the UNFORGEABLE
  *  MARKER that says what it is.
@@ -174,8 +218,12 @@ export type BacklogSnapshotMount = {
  *       this task was built from, so `forge backlog show` in-container can surface
  *       BOTH the dispatched and current revisions when the live ticket advances.
  *
- *  NEVER throws. A store that will not resolve degrades to an `unknown` marker —
- *  still a refusal surface, never a silent fallback to the shared volume. */
+ *  NEVER throws, and that is a CONTRACT the whole dispatch path leans on. A store
+ *  that will not resolve degrades to an `unknown` marker — still a refusal surface,
+ *  never a silent fallback to the shared volume. A marker that cannot be WRITTEN
+ *  (N1) degrades further, to no authority at all, and is recorded as
+ *  container.backlog_authority_marker_failed + `markerError` — but it still does not
+ *  abort the dispatch, least of all a markdown-mode one that never needed a snapshot. */
 export function prepareBacklogSnapshotMount(
   projectDir: string,
   taskId: string,
@@ -187,16 +235,25 @@ export function prepareBacklogSnapshotMount(
   try {
     store = resolveBacklogStore(projectDir);
   } catch {
-    writeAuthorityMarker(hostDir, { mode: "unknown", projectKey: null, taskId });
-    return { ...base, mode: "unknown", projectKey: null };
+    const markerError = writeAuthorityMarkerOrRecord(hostDir, { mode: "unknown", projectKey: null, taskId });
+    return { ...base, mode: "unknown", projectKey: null, ...(markerError ? { markerError } : {}) };
   }
   if (store.mode !== "db" || !store.projectKey) {
-    writeAuthorityMarker(hostDir, { mode: "markdown", projectKey: store.projectKey, taskId });
+    const markerError = writeAuthorityMarkerOrRecord(hostDir, {
+      mode: "markdown",
+      projectKey: store.projectKey,
+      taskId,
+    });
+    // A marker that was not written asserts nothing, so the dispatched authority is
+    // `unknown` however cleanly the store resolved. Reporting `markdown` here would
+    // claim a marker is in place that a container will not find.
+    if (markerError) return { ...base, mode: "unknown", projectKey: store.projectKey, markerError };
     return { ...base, mode: "markdown", projectKey: store.projectKey };
   }
   const projectKey = store.projectKey;
   try {
-    writeAuthorityMarker(hostDir, { mode: "db", projectKey, taskId });
+    const markerError = writeAuthorityMarkerOrRecord(hostDir, { mode: "db", projectKey, taskId });
+    if (markerError) return { ...base, mode: "unknown", projectKey, markerError };
     // Retire finished tasks' targets first. Without this every ticket write would
     // keep publishing to the snapshot directory of every task this host has ever
     // dispatched for the project — unbounded work per write and unbounded disk.
@@ -243,8 +300,8 @@ export function prepareBacklogSnapshotMount(
     // The publication failed. The marker must NOT keep claiming a snapshot is
     // there — that would refuse for the wrong reason. Say `unknown` and let the
     // in-container reader refuse on the honest one.
-    writeAuthorityMarker(hostDir, { mode: "unknown", projectKey, taskId });
-    return { ...base, mode: "unknown", projectKey };
+    const markerError = writeAuthorityMarkerOrRecord(hostDir, { mode: "unknown", projectKey, taskId });
+    return { ...base, mode: "unknown", projectKey, ...(markerError ? { markerError } : {}) };
   }
 }
 
