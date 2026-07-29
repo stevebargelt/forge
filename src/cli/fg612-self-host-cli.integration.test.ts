@@ -22,11 +22,10 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isSelfHostDispatch } from "../v2/self-host-guard.js";
 
 // src/cli/<this file> → the checkout root. Derived from this module rather than
 // cwd so the test targets the tree it was loaded from — the same tree the
@@ -47,9 +46,9 @@ type Run = { status: number | null; stdout: string; stderr: string; home: string
 /** Spawn the live control entry with a throwaway $FORGE_HOME. Worktree env is
  *  cleared unless the case sets it, so an ambient FORGE_WORKTREES on the
  *  developer's shell can never make a refusal case pass vacuously. */
-function runForge(args: string[], env: Record<string, string> = {}): Run {
+function runForge(args: string[], env: Record<string, string> = {}, root = REPO_ROOT): Run {
   const home = temp("forge-fg612-home-");
-  const child = spawnSync(FORGE_BIN, args, {
+  const child = spawnSync(join(root, "bin", "forge"), args, {
     encoding: "utf8",
     cwd: home,
     timeout: 120_000,
@@ -103,6 +102,25 @@ function project(prefix: string): string {
   const dir = temp(prefix);
   mkdirSync(join(dir, ".git"), { recursive: true });
   return dir;
+}
+
+/** A test-owned forge root the spawned CLI genuinely executes from: this
+ *  checkout's dispatch surface copied into a writable parent, so a
+ *  prefix-colliding sibling can exist next to it. bin/forge canonicalizes $0 and
+ *  node realpaths every module, so a symlinked tree would resolve straight back
+ *  to this checkout and prove nothing — the source files must be real copies.
+ *  node_modules is the one symlink: nothing derives a root from it. */
+function forgeRootCopy(): string {
+  const root = join(temp("forge-fg612-fixture-"), "forge");
+  mkdirSync(root, { recursive: true });
+  for (const d of ["bin", "src", "seeds", "scripts", "docker"]) {
+    cpSync(join(REPO_ROOT, d), join(root, d), { recursive: true });
+  }
+  for (const f of ["package.json", "tsconfig.json"]) {
+    cpSync(join(REPO_ROOT, f), join(root, f));
+  }
+  symlinkSync(join(REPO_ROOT, "node_modules"), join(root, "node_modules"));
+  return root;
 }
 
 beforeEach(() => {
@@ -214,19 +232,39 @@ test("a sibling directory that merely shares a string prefix with the checkout i
   //
   // FG-644: this used to mkdir that directory literally next to the checkout. A
   // checkout mounted at /project has an unwritable parent, so the fixture died
-  // EACCES and the case never ran in the environment agents actually use. The
-  // predicate needs no directory — canonical() falls back to resolve() for a path
-  // that does not exist — so the collision is asserted against the REAL source root
-  // the spawned CLI derives, and the "reaches dispatch" half is proven below on a
-  // project the test owns.
-  assert.equal(
-    isSelfHostDispatch(`${REPO_ROOT}-fg612-sibling-cli`, REPO_ROOT),
-    false,
-    "a string-prefix neighbour of the checkout is not self-host",
+  // EACCES and the case never ran in the environment agents actually use. Asserting
+  // the collision on the PREDICATE instead, while spawning the CLI at an unrelated
+  // mkdtemp project, split the two halves: the spawned CLI derives its own source
+  // root from its executing module, so a divergence between that derivation and the
+  // predicate's — or a prefix-based preflight ahead of the guard — would leave both
+  // halves green while production regressed.
+  //
+  // So the CLI is spawned from a forge root the TEST owns: a copy of this checkout's
+  // dispatch surface (the same source files, so it is the real guard running), with
+  // a writable prefix-colliding sibling next to it. Both halves then go through the
+  // live control entry.
+  const fixture = forgeRootCopy();
+  const sibling = `${fixture}-scratch`;
+  mkdirSync(join(sibling, ".git"), { recursive: true });
+  assert.ok(
+    realpathSync(sibling).startsWith(realpathSync(fixture)),
+    "fixture: the sibling must actually collide on the forge root's string prefix",
   );
+
+  // The control, through the same spawned entry: the copied tree IS the source root
+  // this CLI resolves. Without it the case below could pass because the CLI never
+  // ran from the fixture, not because the sibling is allowed.
+  const control = runForge(["invoke", "engineer", "--task", "t", "--project", fixture, "--unrouted"], {}, fixture);
+  assertRefusedAndTraceless("test-owned forge root", control);
+  assert.match(
+    control.stdout + control.stderr,
+    new RegExp(`forge source root:\\s+${realpathSync(fixture)}\\b`),
+    "the refusal must name the test-owned root — proof the CLI is executing from it",
+  );
+
   assertReachedDispatch(
-    "test-owned project",
-    runForge(["invoke", "engineer", "--task", "t", "--project", project("forge-fg612-sibling-cli-"), "--unrouted"]),
+    "prefix-colliding sibling of the forge root",
+    runForge(["invoke", "engineer", "--task", "t", "--project", sibling, "--unrouted"], {}, fixture),
   );
 });
 

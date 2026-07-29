@@ -29,7 +29,7 @@ import { invoke, createInvokeRun, type DockerExecFn } from "./invoke.js";
 import { runNext } from "./runNext.js";
 import { startRun } from "./startRun.js";
 import { retry, dispatchRetriedAdHocTask } from "./retry.js";
-import { forgeSourceRoot, isSelfHostDispatch, _resetSelfHostWarnings } from "./self-host-guard.js";
+import { forgeSourceRoot, _resetSelfHostWarnings, _setSourceRootForTest } from "./self-host-guard.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { registerNew } from "../cli/commands/new.js";
 import { buildReviewLoopDeps } from "../cli/commands/review-loop.js";
@@ -167,6 +167,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  _setSourceRootForTest(null);
   mock.restoreAll();
   setDbForTest(prev as DatabaseInstance);
   db.close();
@@ -403,20 +404,33 @@ test("a sibling directory that merely shares a string prefix with the forge root
   // `<root>-scratch` startsWith `<root>` — the exact false positive a naive
   // prefix compare produces, and it would refuse a legitimate project forever.
   //
-  // FG-644: the fixture used to be mkdir'd literally next to the forge root, which
-  // is unwritable when the checkout is mounted at /project — the shape every agent
-  // container has. The collision itself needs no directory (canonical() falls back
-  // to resolve() for a path that does not exist), so it is asserted against the REAL
-  // root this process is executing from, and the wired dispatch below runs against a
-  // project the test owns.
-  assert.equal(
-    isSelfHostDispatch(`${SELF_HOST}-fg612-sibling-dispatch`, SELF_HOST),
-    false,
-    "a string-prefix neighbour of the forge root is not self-host",
+  // FG-644 moved this fixture off the real checkout's parent, which is unwritable
+  // when the checkout is mounted at /project — the shape every agent container
+  // has. Asserting the collision on the PREDICATE while dispatching at an
+  // unrelated mkdtemp path split the two halves apart: a dispatch that resolved
+  // or canonicalized its source root differently from the helper, or grew a
+  // prefix-based preflight ahead of the guard, would keep both halves green while
+  // production regressed. So the source root is test-owned here too — and both
+  // the control and the collision go through invoke(), never the predicate.
+  const root = tempProject("forge-fg612-root-");
+  const sibling = `${root}-scratch`;
+  mkdirSync(join(sibling, ".git"), { recursive: true });
+  tmpDirs.push(sibling);
+  assert.ok(
+    realpathSync(sibling).startsWith(realpathSync(root)),
+    "fixture: the sibling must actually collide on the forge root's string prefix",
   );
-  const sibling = tempProject("forge-fg612-sibling-dispatch-");
-  const spy = spyExec();
 
+  _setSourceRootForTest(root);
+
+  // The control, through the same production dispatch: the fixture root IS the
+  // source root this invoke resolves. Without it the case below could pass
+  // because the seam never took, not because the sibling is allowed.
+  await assertRefusedWithoutTrace("fixture forge root", (exec) =>
+    invoke({ agentRole: "engineer", task: "edit forge itself", projectDir: root, dockerExec: exec }),
+  );
+
+  const spy = spyExec();
   const r = await invoke({ agentRole: "engineer", task: "normal work", projectDir: sibling, dockerExec: spy.exec });
 
   assert.equal(spy.calls(), 1, "a string-prefix sibling must reach the container");
