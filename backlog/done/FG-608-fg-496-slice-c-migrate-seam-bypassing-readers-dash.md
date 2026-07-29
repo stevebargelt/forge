@@ -1,9 +1,11 @@
 ---
 id: FG-608
 type: story
-status: active
+status: done
 title: "FG-496 Slice C: migrate seam-bypassing readers (dashboard, campaign dir-guards) + authoritative DB cutover"
 created: 2026-07-24
+closed: 2026-07-29
+closed_commit: f9afbf59
 ---
 
 ## Slice C of FG-496 — consumer migration + THE authoritative cutover (per project)
@@ -183,3 +185,31 @@ shape as the FG-607 store-path bug.
 Folded here rather than tracked separately: this ticket already owns the dashboard's seam-bypassing
 readers, and the issue is latent (not reachable in the dashboard's current single-home usage). Fix it as
 part of the seam migration rather than as its own ticket.
+
+## Acceptance Evidence
+
+Shipped in `f9afbf59` (PR #174, squash of the `feature` pipeline run
+run-fg-608-seam-bypassing-readers-authoritative-db-cutover-b20975: 4 fan-out children + 2 batch fixes +
+verify + docs). Review trail: 6 authoritative reds, 17 findings dispositioned — 16 resolved with
+exact-ID recheck evidence, F15 resolved in the docs phase, F18 deferred to FG-643. Host worktree tier
+at the final tree: 434/435 (sole failure = pre-existing FG-556 macOS-only assertion; green in Linux
+CI). Both required CI checks green at `f9afbf59`. NOTE: this closes the MACHINERY; the live forge-repo
+cutover is a separate operator-gated step and has NOT run.
+
+| AC | Evidence | Verdict |
+|----|----------|---------|
+| Dashboard shows the same tickets for a feature checkout as the canonical repo, scoped per project | `/api/backlog` rewritten to DB query by project_key; canonical-checkout resolution deleted; `dashboard/src/fg608-backlog-db-truth.integration.test.ts` + replaced routes tests + verify's `fg608-migrate-to-dashboard.integration.test.ts` (`f9afbf59`) | met |
+| Campaign planning, review-loop, shipping-reviewer read DB tickets (inherited Slice B; verified here) | `src/campaign/fg608-dir-guard-regression.integration.test.ts` + 7 mutation-tested db-mode consumer detectors in `src/backlog/fg608-db-mode-consumers.integration.test.ts` (forced Markdown seam ⇒ 7/7 fail) | met |
+| Cross-worktree consistency with mode=db | multi-worktree membership cases in `src/store/fg608-removal-reconciliation.integration.test.ts` + `src/cli/commands/backlog-import-worktree.integration.test.ts` | met |
+| FG-628 container amendment shape: host DB edit after container start visible to later in-container show | `src/v2/fg608-container-amendment.worktree.test.ts` property (ii), host-run green in 9.8s with phase marks (fan-out 2242ms, post-show 890ms), production mounts, no source bind | met |
+| Container backlog storage read-only at the fs/store boundary; file/edit/close/relation/direct SQLite writes fail without changing host state | mutating-verb refusal + sudo byte-write + ROOT sqlite INSERT/UPDATE rejection tests (`fg608-container-cli-surface.worktree.test.ts`, `fg608-container-authority.worktree.test.ts`), all green on host against the rebuilt image; host artifact compared byte-for-byte | met |
+| Container reads only the selected project_key; no other projects or control-plane tables; full forge.db never mounted | "mounted authority contains ONLY the selected project_key's backlog" + "full host forge.db is NEVER among a container's mounts" tests, green on host; snapshot is backlog-only by construction (FORGE-DEC-029) | met |
+| Dispatch evidence records ticket revision/body hash; drift surfaces both revisions | "dispatch evidence records the monotonic revision + body hash, and never overwrites live authority" test + reader `revisionDrift` stderr note asserted (dispatched rev 1 vs current rev 2) | met |
+| Concurrent host edits atomic to the container reader; no torn or permanently-stale state | non-WAL snapshot + atomic rename + per-project publication ordinal (F7 fix, revert-verified regression); ≥100-write concurrency stress loop with HOST writer, green on host | met |
+| Removal reconciliation incl. blocker_evidence inverse deletion and multi-worktree keep case | `fg608-removal-reconciliation.integration.test.ts` single-source removal + remove-from-one-keep-in-another + blocker-evidence inverse deletion; prune fails closed (≥1 live scanned source) | met |
+| forge backlog migrate atomic; failure leaves Markdown authoritative; --dry-run | `fg608-migrate-atomic.integration.test.ts` + `fg608-migrate.integration.test.ts`; check-and-flip in ONE writeTransaction (F10 fix); refuses over the TARGET project's active runs only | met |
+| Re-import never duplicates or silently loses newer DB edits; conflict = skip + event; --force records before/after | `src/store/fg608-import-conflict.integration.test.ts` (13 tests) + identical re-import holds revision (F11 fix, revert-verified) | met |
+| Canonical-source regression test updated/replaced to assert host-wide DB truth | `routes-backlog-canonical-source.integration.test.ts` replaced; browser tests cover the three new board states (no-truth / error banner / non-authoritative badge) | met |
+| Grep/lint gate fails NEW direct backlog/*.md ticket reads outside the seam | `src/backlog-seam-bypass-guard.test.ts` (allowlist-based source scan, passes against pre-build tree, fails on new bypass) | met |
+| Identity re-identify path before cutover + corrected evidence-side refusal message | `forge backlog reidentify --confirm` + `fg608-reidentify.integration.test.ts`; refusal names the evidence-side mismatch and points at the command | met |
+| Live-read/mutation-refusal/project-isolation/revision/concurrency cases pass through a REAL container before any flip is safe | host worktree tier with rebuilt production image: 434/435, 0 skipped — every fg608 container case executed and green | met |
