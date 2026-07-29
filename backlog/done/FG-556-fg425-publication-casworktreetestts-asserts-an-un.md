@@ -1,9 +1,11 @@
 ---
 id: FG-556
 type: story
-status: active
+status: done
 title: fg425-publication-cas.worktree.test.ts asserts an un-canonicalized /var target path — fails on macOS hosts only (/var is a symlink to /private/var); green in Linux CI
 created: 2026-07-14
+closed: 2026-07-29
+closed_commit: 9623a704
 ---
 
 ---
@@ -93,3 +95,11 @@ this ticket's original case, `fg425-publication-cas.worktree.test.ts`.
 So the scope here is unchanged from how it was filed: `fg425-publication-cas.worktree.test.ts` only. The
 fix pattern is now demonstrated twice in-repo (FG-575's workspace root, and the two FG-559 fixtures):
 `realpathSync(mkdtempSync(...))` at the fixture root.
+
+## Acceptance Evidence
+
+Shipped in `9623a704` (PR #176). The assertion at fg425-publication-cas.worktree.test.ts:117 canonicalizes both sides (realpath), preserving the test's intent (the exact validated commit lands from the candidate worktree — bounded-review Q4 verified). Executed evidence ON THE CLAIMING LANE: macOS host worktree tier @ 9623a704 — 435 pass / 0 fail / 0 skipped, this test executing and passing (it was the tier's sole unconditional red before). Linux CI green throughout (was never affected).
+
+| AC | Evidence | Verdict |
+|----|----------|---------|
+| Test passes on macOS hosts (the /var→/private/var symlink) without weakening the publication-CAS assertion | Canonicalized comparison; host worktree tier @ 9623a704: 435/0/0 with the test executed; bounded review confirmed intent preserved | met |
