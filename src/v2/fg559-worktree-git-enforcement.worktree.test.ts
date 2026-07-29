@@ -652,41 +652,58 @@ test("fg559e (entrypoint probe): the 122 sentinel matches GIT_UNAVAILABLE_EXIT_C
   assert.notEqual(GIT_UNAVAILABLE_EXIT_CODE, IDLE_TIMEOUT_EXIT_CODE);
 });
 
-test("fg559e (forge-test.sh): the cold-start scratch for a WORKTREE source ends up with a working git", () => {
+// EXPECTATION CHANGE (FG-644). These two used to pin the cold-start `cp -R
+// "$SRC_DIR/.git"` and the `-e` widening that made it fire for a pointer FILE. The
+// scratch no longer inherits the source's .git at all: it gets its OWN repo, and each
+// sync is committed into it, so the tree a release builds from is CLEAN and carries
+// the agent's in-flight source. FG-559's actual property — git RESOLVES in the scratch
+// for a worktree source, which the `-d` guard used to leave broken — is unchanged and
+// still asserted here. What the copy could never give is the new half: an inherited
+// `gitdir:` pointer aims at the operator's real admin dir, so committing through it
+// would write into their repository (FG-575).
+
+/** Drive the script's scratch-git code for real: seed WORK_DIR the way the old
+ *  cold start did — a verbatim copy of the source INCLUDING whatever `.git` it
+ *  carries — then let the block's own functions take it from there. */
+function runScratchGit(block: string, cwd: string, src: string, work: string) {
+  return runBash(`${block}\ncp -a "$SRC_DIR/." "$WORK_DIR/"\n_commit_scratch`, cwd, { SRC_DIR: src, WORK_DIR: work });
+}
+
+test("fg559e/FG-644 (forge-test.sh): the scratch for a WORKTREE source gets its OWN working git, never the source's admin dir", () => {
   const block = extractShellBlock("docker/forge-test.sh", 'if [[ ! -d "$WORK_DIR" ]]; then', "_sync_sources");
-  assert.match(block, /-e "\$SRC_DIR\/\.git"/, "the guard must be -e (pointer FILE or directory), not -d");
-  assert.match(block, /cp -R "\$SRC_DIR\/\.git"/, "the copy must follow the -e guard");
+  assert.match(block, /SCRATCH_REPO_MARKER/, "the scratch-git setup must live in this block");
 
   const f = makeWorktreeFixture();
   materializeCommonGit(f);
   const work = join(f.base, "forge-work");
+  const sourceHeadBefore = git(f.projectPath, "rev-parse", "HEAD").stdout.trim();
+  assert.ok(sourceHeadBefore, "fixture: the source worktree must resolve git before the scratch is built");
 
-  const r = runBash(block, f.base, { SRC_DIR: f.projectPath, WORK_DIR: work });
-  assert.equal(r.code, 0, `the cold-start block must succeed: ${r.stderr}`);
-  assert.equal(existsSync(join(work, ".git")), true, "the scratch must carry the source's .git");
+  const r = runScratchGit(block, f.base, f.projectPath, work);
+  assert.equal(r.code, 0, `the scratch-git setup must succeed: ${r.stderr}`);
 
-  const probe = git(work, "rev-parse", "--git-dir");
+  const probe = git(work, "rev-parse", "--absolute-git-dir");
   assert.equal(probe.code, 0, `git must RESOLVE in the scratch, not merely have a .git entry: ${probe.stderr}`);
-  assert.equal(
-    git(work, "log", "--oneline").code,
-    0,
-    "history must be readable from the scratch — this is the path every agent runs tests on"
+  assert.ok(
+    probe.stdout.trim().startsWith(realpathSync(work)),
+    `the scratch's git dir must live INSIDE the scratch, got ${probe.stdout.trim()} — an inherited pointer would name the operator's admin dir`
   );
+  assert.equal(git(work, "log", "--oneline").code, 0, "history must be readable from the scratch");
 
-  // Non-vacuity: the pre-FG-559 `-d` guard is FALSE for a pointer FILE, so the
-  // scratch was built with no git at all. Same block, one character reverted.
-  const preFix = block.replace('-e "$SRC_DIR/.git"', '-d "$SRC_DIR/.git"');
-  assert.notEqual(preFix, block, "the -d reversion must actually apply — otherwise this control proves nothing");
-  const work2 = join(f.base, "forge-work-prefix");
-  assert.equal(runBash(preFix, f.base, { SRC_DIR: f.projectPath, WORK_DIR: work2 }).code, 0);
+  // The FG-644 property: a clean candidate whose HEAD describes the synced bytes.
+  assert.equal(git(work, "status", "--porcelain").stdout, "", "the scratch must be a CLEAN build candidate");
+  assert.equal(git(work, "show", "HEAD:file.txt").stdout, "revision 1\n", "HEAD must describe what was synced");
+
+  // Non-vacuity: the source is a linked worktree whose pointer aims at a real admin
+  // dir. Nothing may have been written through it.
   assert.equal(
-    existsSync(join(work2, ".git")),
-    false,
-    "the pre-FG-559 -d guard must be shown to skip the copy — otherwise the fix is untested"
+    git(f.projectPath, "rev-parse", "HEAD").stdout.trim(),
+    sourceHeadBefore,
+    "the scratch's commit must NOT have landed in the source's repository"
   );
 });
 
-test("fg559e (forge-test.sh): a PLAIN-CLONE source is unaffected by the -e widening", () => {
+test("fg559e/FG-644 (forge-test.sh): a PLAIN-CLONE source is left untouched too — the scratch's repo is independent", () => {
   const block = extractShellBlock("docker/forge-test.sh", 'if [[ ! -d "$WORK_DIR" ]]; then', "_sync_sources");
 
   const base = realpathSync(mkdtempSync(join(tmpdir(), "fg559e-clone-src-")));
@@ -699,11 +716,19 @@ test("fg559e (forge-test.sh): a PLAIN-CLONE source is unaffected by the -e widen
   writeFileSync(join(src, "f.txt"), "x\n");
   gitQuiet(src, "add", ".");
   gitQuiet(src, "commit", "-m", "c1");
+  const sourceHeadBefore = git(src, "rev-parse", "HEAD").stdout.trim();
 
   const work = join(base, "scratch");
-  assert.equal(runBash(block, base, { SRC_DIR: src, WORK_DIR: work }).code, 0);
-  assert.equal(statSync(join(work, ".git")).isDirectory(), true, "a plain clone still copies a real .git DIRECTORY");
+  assert.equal(runScratchGit(block, base, src, work).code, 0);
+  assert.equal(statSync(join(work, ".git")).isDirectory(), true, "the scratch carries a real .git DIRECTORY");
   assert.equal(git(work, "log", "--oneline").code, 0, "and git still works in the scratch");
+  assert.equal(git(work, "status", "--porcelain").stdout, "", "the scratch must be a CLEAN build candidate");
+  assert.notEqual(
+    git(work, "rev-parse", "HEAD").stdout.trim(),
+    sourceHeadBefore,
+    "the scratch's history is its own — a copy of the source's would carry the source's HEAD"
+  );
+  assert.equal(git(src, "rev-parse", "HEAD").stdout.trim(), sourceHeadBefore, "the source clone is untouched");
 });
 
 // ─── 6. Known limitation: RELATIVE gitdir pointers ───────────────────────────

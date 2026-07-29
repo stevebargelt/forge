@@ -11,7 +11,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
@@ -52,7 +52,12 @@ function commit(dir: string, file: string, body: string): string {
 /** A project with a task branch carrying an agent's committed work — the shape
  *  the publisher is handed at every call site. */
 function makeProject(runId: string): { dir: string; branch: string; taskSha: string } {
-  const dir = mkdtempSync(join(tmpdir(), "fg425-cas-"));
+  // realpathSync at the fixture ROOT, so every path derived from it is canonical on
+  // both sides of every comparison below (FG-556). Forge records the project's
+  // physical path via projectIdentity()'s realpath, so a fixture spelled through a
+  // symlinked tmpdir — macOS /var → /private/var — never matched the durable target
+  // it asserts. A no-op wherever tmpdir() is already canonical, not a platform branch.
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "fg425-cas-")));
   cleanup.push(dir);
   git(dir, ["init", "-b", "main"]);
   commit(dir, "seed.txt", "seed\n");

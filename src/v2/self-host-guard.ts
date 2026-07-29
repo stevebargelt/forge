@@ -31,12 +31,24 @@ function canonical(p: string): string {
   }
 }
 
+let sourceRootForTest: string | null = null;
+
+/** Test-only: resolve the source root to a fixture tree, so an integration test
+ *  can own BOTH sides of the comparison (a writable root AND a writable
+ *  prefix-colliding sibling) while still driving the real dispatch path. A
+ *  function and deliberately not an env carrier: an ambient one would let the
+ *  environment make the guard inert, which is the failure mode the whole file
+ *  exists to prevent. */
+export function _setSourceRootForTest(root: string | null): void {
+  sourceRootForTest = root;
+}
+
 /** The source root of the forge that is currently executing. Under a release
  *  that is the release tree; under a live checkout it is the checkout — the
  *  same answer assetRoot() gives for release-owned bytes, which is exactly the
  *  tree a dispatch must not be allowed to mutate underneath itself. */
 export function forgeSourceRoot(): string {
-  return canonical(assetRoot());
+  return canonical(sourceRootForTest ?? assetRoot());
 }
 
 function contains(parent: string, child: string): boolean {

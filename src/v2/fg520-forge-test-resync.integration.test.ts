@@ -143,6 +143,17 @@ function npmCalls(f: Fixture): string[] {
   return readFileSync(f.npmLog, "utf8").trim().split("\n").filter(Boolean);
 }
 
+/** The sync's own report of the WORK it did, which is what "fast" actually means
+ *  here (FG-557). The old spelling was `elapsed < 10_000`, a wall-clock budget that
+ *  measured the host's load — it failed at 17s on a busy machine while the code
+ *  under test behaved perfectly. Copies and deletions are the O(copy) work; a
+ *  no-change run must do none of it and stay O(scan). */
+function syncCounts(stderr: string): { copied: number; deleted: number } {
+  const m = /re-synced source from \S+ — (\d+) file\(s\) updated, (\d+) stale path\(s\) deleted/.exec(stderr);
+  assert.ok(m, `the sync must report what it did\n${stderr}`);
+  return { copied: Number(m[1]), deleted: Number(m[2]) };
+}
+
 test("FG-520: forge-test re-syncs source and repairs a broken scratch on every run", async (t) => {
   const f = makeFixture();
   try {
@@ -177,6 +188,10 @@ test("FG-520: forge-test re-syncs source and repairs a broken scratch on every r
         /RAN-AGAINST: export const a = 2; \/\/ edited/,
         "the executed tier must observe the edited source, not the first snapshot"
       );
+      // The live half of the no-change assertion below: a run WITH an edit reports
+      // copy work, so a later run reporting none is a real fast path rather than a
+      // counter that always says zero.
+      assert.ok(syncCounts(r.stderr).copied >= 1, `an edited file must be copied\n${r.stderr}`);
     });
 
     await t.test("a deleted source file disappears from the scratch", () => {
@@ -196,9 +211,7 @@ test("FG-520: forge-test re-syncs source and repairs a broken scratch on every r
       const before = statSync(sentinel).mtimeMs;
       const callsBefore = npmCalls(f).length;
 
-      const started = Date.now();
       const r = runForgeTest(f);
-      const elapsed = Date.now() - started;
 
       assert.equal(r.status, 0, r.stderr);
       assert.equal(
@@ -212,8 +225,17 @@ test("FG-520: forge-test re-syncs source and repairs a broken scratch on every r
         npmCalls(f).slice(0, callsBefore).filter((c) => c.startsWith("npm ci")).length,
         "a healthy scratch must not be reinstalled"
       );
-      assert.ok(elapsed < 10_000, `no-change re-sync should be fast, took ${elapsed}ms`);
       assert.match(r.stderr, /re-synced source/, "the sync must say what it did");
+      // FG-557: the MECHANISM, not the clock. An unchanged tree must take the
+      // scan-only path — every file compared, none rewritten, nothing deleted. A
+      // regression that re-copies the tree every run shows up here as a non-zero
+      // count on any host, loaded or idle, where the old seconds budget only
+      // showed up as flake.
+      assert.deepEqual(
+        syncCounts(r.stderr),
+        { copied: 0, deleted: 0 },
+        "a no-change re-sync must do ZERO copy work — the cost is the scan, not the tree"
+      );
       // The integrity probe is the one npm call a healthy run is allowed to make, and
       // it may only make it once. Measured against forge's real 67-package scratch it
       // costs 0.15s (npm's own boot floor is 0.04s); probing twice, or reinstalling,

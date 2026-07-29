@@ -22,9 +22,9 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // src/cli/<this file> → the checkout root. Derived from this module rather than
@@ -46,9 +46,9 @@ type Run = { status: number | null; stdout: string; stderr: string; home: string
 /** Spawn the live control entry with a throwaway $FORGE_HOME. Worktree env is
  *  cleared unless the case sets it, so an ambient FORGE_WORKTREES on the
  *  developer's shell can never make a refusal case pass vacuously. */
-function runForge(args: string[], env: Record<string, string> = {}): Run {
+function runForge(args: string[], env: Record<string, string> = {}, root = REPO_ROOT): Run {
   const home = temp("forge-fg612-home-");
-  const child = spawnSync(FORGE_BIN, args, {
+  const child = spawnSync(join(root, "bin", "forge"), args, {
     encoding: "utf8",
     cwd: home,
     timeout: 120_000,
@@ -102,6 +102,25 @@ function project(prefix: string): string {
   const dir = temp(prefix);
   mkdirSync(join(dir, ".git"), { recursive: true });
   return dir;
+}
+
+/** A test-owned forge root the spawned CLI genuinely executes from: this
+ *  checkout's dispatch surface copied into a writable parent, so a
+ *  prefix-colliding sibling can exist next to it. bin/forge canonicalizes $0 and
+ *  node realpaths every module, so a symlinked tree would resolve straight back
+ *  to this checkout and prove nothing — the source files must be real copies.
+ *  node_modules is the one symlink: nothing derives a root from it. */
+function forgeRootCopy(): string {
+  const root = join(temp("forge-fg612-fixture-"), "forge");
+  mkdirSync(root, { recursive: true });
+  for (const d of ["bin", "src", "seeds", "scripts", "docker"]) {
+    cpSync(join(REPO_ROOT, d), join(root, d), { recursive: true });
+  }
+  for (const f of ["package.json", "tsconfig.json"]) {
+    cpSync(join(REPO_ROOT, f), join(root, f));
+  }
+  symlinkSync(join(REPO_ROOT, "node_modules"), join(root, "node_modules"));
+  return root;
 }
 
 beforeEach(() => {
@@ -175,9 +194,14 @@ test("a project spelled through a symlinked parent still refuses (the /var → /
   const linkFarm = temp("forge-fg612-link-");
   const aliasParent = join(linkFarm, "alias");
   symlinkSync(dirname(REPO_ROOT), aliasParent);
-  const viaLink = join(aliasParent, REPO_ROOT.slice(dirname(REPO_ROOT).length + 1));
+  // basename, not a slice of the parent's length: a checkout mounted AT a filesystem
+  // root (/project, every agent container) has dirname "/", and the arithmetic
+  // spelling ate the first character — the alias pointed at a tree that does not
+  // exist, so the case passed for the wrong reason or not at all.
+  const viaLink = join(aliasParent, basename(REPO_ROOT));
 
   assert.notEqual(viaLink, REPO_ROOT, "fixture: a different string for the same tree");
+  assert.equal(realpathSync(viaLink), REPO_ROOT, "fixture: the alias must spell the SAME tree");
   assertRefusedAndTraceless(
     "symlinked parent",
     runForge(["invoke", "engineer", "--task", "t", "--project", viaLink, "--unrouted"]),
@@ -203,16 +227,44 @@ test("a SUBDIR of the forge checkout (--allow-subproject) refuses", () => {
 });
 
 test("a sibling directory that merely shares a string prefix with the checkout is NOT refused", () => {
-  // Suffix is per-FILE: fg612-self-host-dispatch.integration.test.ts builds the
-  // same kind of sibling off the same repo root, and the two files can run
-  // concurrently (same shard, or unsharded) — a shared path means one file's
-  // cleanup deletes the other's fixture mid-test.
-  const sibling = `${REPO_ROOT}-fg612-sibling-cli`;
+  // `<root>-scratch` startsWith `<root>` — the exact false positive a naive prefix
+  // compare produces, and it would refuse a legitimate project forever.
+  //
+  // FG-644: this used to mkdir that directory literally next to the checkout. A
+  // checkout mounted at /project has an unwritable parent, so the fixture died
+  // EACCES and the case never ran in the environment agents actually use. Asserting
+  // the collision on the PREDICATE instead, while spawning the CLI at an unrelated
+  // mkdtemp project, split the two halves: the spawned CLI derives its own source
+  // root from its executing module, so a divergence between that derivation and the
+  // predicate's — or a prefix-based preflight ahead of the guard — would leave both
+  // halves green while production regressed.
+  //
+  // So the CLI is spawned from a forge root the TEST owns: a copy of this checkout's
+  // dispatch surface (the same source files, so it is the real guard running), with
+  // a writable prefix-colliding sibling next to it. Both halves then go through the
+  // live control entry.
+  const fixture = forgeRootCopy();
+  const sibling = `${fixture}-scratch`;
   mkdirSync(join(sibling, ".git"), { recursive: true });
-  tmpDirs.push(sibling);
+  assert.ok(
+    realpathSync(sibling).startsWith(realpathSync(fixture)),
+    "fixture: the sibling must actually collide on the forge root's string prefix",
+  );
+
+  // The control, through the same spawned entry: the copied tree IS the source root
+  // this CLI resolves. Without it the case below could pass because the CLI never
+  // ran from the fixture, not because the sibling is allowed.
+  const control = runForge(["invoke", "engineer", "--task", "t", "--project", fixture, "--unrouted"], {}, fixture);
+  assertRefusedAndTraceless("test-owned forge root", control);
+  assert.match(
+    control.stdout + control.stderr,
+    new RegExp(`forge source root:\\s+${realpathSync(fixture)}\\b`),
+    "the refusal must name the test-owned root — proof the CLI is executing from it",
+  );
+
   assertReachedDispatch(
-    "string-prefix sibling",
-    runForge(["invoke", "engineer", "--task", "t", "--project", sibling, "--unrouted"]),
+    "prefix-colliding sibling of the forge root",
+    runForge(["invoke", "engineer", "--task", "t", "--project", sibling, "--unrouted"], {}, fixture),
   );
 });
 

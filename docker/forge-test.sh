@@ -300,24 +300,75 @@ _ensure_deps() {
 if [[ ! -d "$WORK_DIR" ]]; then
   echo "forge-test: setting up writable scratch at $WORK_DIR" >&2
   mkdir -p "$WORK_DIR"
-  # Once, cold: the scratch carries the source's .git, so any test whose code
-  # walks up from cwd looking for one still finds it. The per-run sync skips
-  # .git — nothing under test reads history, and it is the biggest dir in the tree.
-  #
-  # FG-559: -e, not -d. On a linked worktree .git is a `gitdir:` POINTER FILE,
-  # so the old -d guard was FALSE and the scratch was silently created with no
-  # git at all — on the path every agent uses to run tests. Copying the pointer
-  # verbatim works because forge bind-mounts the parent .git read-only at its own
-  # host absolute path, so the same absolute target resolves from the scratch.
-  # (It then shares the worktree's admin dir rather than being an independent
-  # copy, and that mount is read-only — fine here, since nothing under test
-  # reads history or writes git state.)
-  if [[ -e "$SRC_DIR/.git" ]]; then
-    cp -R "$SRC_DIR/.git" "$WORK_DIR/.git"
-  fi
 fi
 
+# ── SCRATCH GIT (FG-644) ────────────────────────────────────────────────────
+# The scratch is a re-synced COPY of a checkout the agent is actively editing, so
+# every in-flight edit lands here as an UNCOMMITTED change. forge refuses to build
+# a release from a dirty tree (FG-569 GAP 2), which made the three release-build
+# suites unrunnable for any agent with work in progress — and the two ways out
+# were both worthless: skip them (validates nothing) or build HEAD (validates the
+# wrong bytes). So the scratch gets its OWN throwaway git repo and every sync is
+# committed into it. The tree the release builder sees is then CLEAN and its HEAD
+# describes exactly the source the agent just wrote.
+#
+# The repo is always one this script created. The scratch used to inherit a
+# `cp -R` of the source's .git, and on a linked worktree that is a `gitdir:`
+# POINTER into the operator's real admin dir — committing through it would write
+# into the operator's repository, the exact FG-575 defect. The marker below is
+# what distinguishes "a repo I made" from "something I inherited"; anything
+# without it is replaced rather than committed into.
+SCRATCH_REPO_MARKER=".forge-scratch-repo"
+
+_scratch_git() {
+  git -C "$WORK_DIR" -c user.email=forge-test@local -c user.name=forge-test "$@"
+}
+
+_ensure_scratch_repo() {
+  [[ ! -f "$WORK_DIR/.git/$SCRATCH_REPO_MARKER" ]] || return 0
+  rm -rf "$WORK_DIR/.git" || return 1
+  git -C "$WORK_DIR" init -q || return 1
+  # Mirror the source's branch name so anything that reads it sees the branch the
+  # agent is working on rather than git's default.
+  local branch
+  branch=$(git -C "$SRC_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+  [[ -n "$branch" && "$branch" != "HEAD" ]] || branch="main"
+  git -C "$WORK_DIR" symbolic-ref HEAD "refs/heads/$branch" || return 1
+  # node_modules is install OUTPUT, bound to the lockfile separately — never part
+  # of a commit's source identity, and by far the biggest thing in the tree.
+  printf 'node_modules/\n' > "$WORK_DIR/.git/info/exclude" || return 1
+  : > "$WORK_DIR/.git/$SCRATCH_REPO_MARKER" || return 1
+}
+
+# Make HEAD describe the bytes just synced. Loud but non-fatal on failure: a
+# scratch without git still runs every suite that does not build a release, and
+# killing the run here would report an environment fault as red tests.
+_commit_scratch() {
+  if ! command -v git >/dev/null 2>&1; then
+    echo "forge-test: git is not installed — the scratch cannot be made a clean release candidate" >&2
+    return 0
+  fi
+  if ! _ensure_scratch_repo; then
+    echo "forge-test: WARNING: could not initialise a scratch git repo in $WORK_DIR — release-build suites will refuse this tree as dirty" >&2
+    return 0
+  fi
+  if ! _scratch_git add -A; then
+    echo "forge-test: WARNING: \`git add\` failed in $WORK_DIR — release-build suites will refuse this tree as dirty" >&2
+    return 0
+  fi
+  if git -C "$WORK_DIR" diff --cached --quiet 2>/dev/null; then
+    echo "forge-test: scratch git already describes the synced source" >&2
+    return 0
+  fi
+  if _scratch_git commit -q -m "forge-test: scratch sync"; then
+    echo "forge-test: committed the synced source into the scratch's own git — the release builder sees a CLEAN tree carrying your in-flight edits" >&2
+  else
+    echo "forge-test: WARNING: could not commit the synced source in $WORK_DIR — release-build suites will refuse this tree as dirty" >&2
+  fi
+}
+
 _sync_sources
+_commit_scratch
 cd "$WORK_DIR"
 _ensure_deps
 

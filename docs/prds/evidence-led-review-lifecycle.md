@@ -135,6 +135,12 @@ Removing adversarial review would discard a real Forge advantage.
 11. **A selected lens must actually run.** Advisory authority does not make a
     selected review optional. A missing or synthetic lens outcome is
     incomplete evidence, not a clean panel.
+12. **A skipped test is never evidence.** A missing capability explains why a
+    test did not execute; it does not make the skip valid evidence, and a named
+    skip improves visibility but proves nothing. A skip is sound only when
+    another mandatory lane executes the same assertion against the same
+    candidate SHA. Where no such lane exists, the recorded outcome is
+    `not_executed` or `blocked_environment` — never green.
 
 ## Authority model
 
@@ -484,6 +490,25 @@ finding-/ticket-named file requires a recorded cross-layer capstone reason.
 FG-641 owns consolidation of the existing ticket-named suite; this lifecycle
 must prevent new debt but does not absorb that cleanup.
 
+Cited test evidence must be *executed* evidence, established per test rather
+than per suite. The rechecker confirms that the named test actually ran against
+the current candidate SHA; a green suite containing a skipped test is not proof
+that the cited assertion executed. A skipped test never resolves a finding, and
+a missing capability — an absent image, an unavailable runtime, an
+unprovisioned dependency — explains the skip without converting it into
+evidence.
+
+A skip is sound only when another mandatory lane executed the same assertion
+against the same candidate SHA. Claiming that alternate coverage requires
+naming the lane, the candidate SHA, and the executed assertion; unnamed
+"covered elsewhere" is refused.
+
+When no mandatory lane executed the required assertion, the coverage is
+recorded `not_executed` — or `blocked_environment` when the environment itself
+was unavailable — and the finding's result is `inconclusive`. It is never
+`resolved`. Accepting that gap is a disposition decision carrying its own
+authority and rationale, not a resolution.
+
 The rechecker verifies this evidence; it does not merely repeat the fixer's
 claim. If the required proof is unavailable, the result is `inconclusive`
 unless the appropriate authority explicitly accepts the limitation.
@@ -499,15 +524,20 @@ dispositioned, but do not acquire blocking force from lateness alone.
 
 Shipping review checks:
 
-1. deterministic verification is green for the current candidate;
+1. deterministic verification is green for the current candidate, with every
+   required check executed rather than skipped;
 2. every acceptance criterion is `met`, `unmet`, or `unproven`, with cited
-   evidence;
+   evidence that executed against the reviewed candidate SHA — mapping is
+   verified per test, not by a suite exiting green, and a criterion whose only
+   evidence is a skipped test is `unproven`;
 3. every finding is settled;
-4. every `fix_now` finding is explicitly `resolved`;
+4. every `fix_now` finding is explicitly `resolved` on executed evidence;
 5. the reviewed SHA equals the trusted remote head;
 6. candidate/gate/receipt/publication identity remains continuous;
 7. the final diff remains plausibly covered by the confirmed review contract,
-   with any post-confirmation drift reviewed or returned for amendment.
+   with any post-confirmation drift reviewed or returned for amendment;
+8. any claimed alternate coverage for a skipped required check names the lane,
+   the candidate SHA, and the executed assertion.
 
 `unmet` or `unproven` acceptance criteria block shipping. New free-form
 findings return to disposition.
@@ -615,7 +645,13 @@ It blocks when:
 - any `fix_now` finding lacks `resolved` recheck evidence at the current SHA;
 - any `fix_now` resolution lacks the evidence required for its original
   reachability;
-- deterministic verification is absent or red;
+- any `fix_now` resolution or acceptance-criterion mapping cites a test that
+  did not execute against the current candidate SHA;
+- deterministic verification is absent, red, or left required coverage
+  unexecuted — required coverage that no mandatory lane executed is
+  `not_executed`, not green;
+- a skipped required check claims alternate coverage without naming the lane,
+  the candidate SHA, and the executed assertion;
 - shipping review reports an unmet/unproven acceptance criterion;
 - reviewed-tip trust is not equality with the fetched remote head.
 
@@ -898,6 +934,11 @@ actual boundary that cannot ship together.
 28. The dedicated rechecker cannot establish a domain-specific resolution; it
     returns `inconclusive` to disposition rather than synthesizing closure or
     launching another discovery panel.
+29. A recheck cites a test that skipped as resolution evidence; it is refused
+    even though the enclosing suite exited green and the skip was named. The
+    coverage is recorded `not_executed` and the finding stays `inconclusive`
+    unless a named mandatory lane executed the same assertion against the same
+    candidate SHA.
 
 ## Interim operating policy
 
@@ -911,7 +952,21 @@ Until this lifecycle ships:
   regressions;
 - treat a new finding as new disposition work, not an automatic loop;
 - never infer resolution from a finding not being re-raised;
+- never treat a skipped test as evidence: a resolution or acceptance claim must
+  name a test that actually executed against the candidate SHA, verified per
+  test rather than by a suite exiting green;
+- record required coverage that no mandatory lane executed as `not_executed`
+  or `blocked_environment`, never as green and never as `resolved`;
+- refuse unnamed "covered elsewhere": any claimed alternate coverage names the
+  lane, the candidate SHA, and the executed assertion;
 - do not let a red finding silently change the threat model or acceptance scope.
+
+The alternate-lane condition is not category-wide satisfiable on Forge today,
+so assume it is unmet until a specific lane is named. CI does not build the
+agent image, so agent-image tests can skip there; host reruns are not required
+on every merge; and FG-621's live proof is one-time operator evidence outside
+CI. A skip in any of those paths is unexecuted coverage, not coverage carried
+by a second mandatory lane.
 
 `review-loop --max-rounds 1` can be used as a discovery-only stop, but its
 output is not a durable ledger and must not be represented as the finished
