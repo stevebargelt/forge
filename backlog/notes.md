@@ -1,69 +1,84 @@
-**Last updated 2026-07-28 (mid-session — decomposition review pending).**
+**Last session ended 2026-07-29.**
 
-**Where things stand:** FG-345, FG-623, and evidence-led review Change 0 are COMPLETE (recorded in
-`backlog/PLAN.md`). The interim evidence-led review policy is ACTIVE as of `cc10232a` — both
-authoritative sources (`docs/autonomous-run-prompt.md`, now git-tracked, and the orchestrator
-seed/rendered CLAUDE.md block) agree, which is the PRD's activation condition. All review dispatches
-now follow it: deterministic verification first, ONE risk-targeted discovery pass
-(`review-loop --max-rounds 1` as transport only), manual finding ledger, disposition-before-fix, one
-batch fixer, exact-ID recheck + delta-bounded discovery, absence-is-never-resolution. The old #302
-phrase guard test was deleted (operator decision: it pinned superseded English, not behavior);
-`orchestrator-block-parity.test.ts` remains the mechanical guard.
+**Where we left off:** The live forge-repo cutover (Phase 3) is PARKED at a genuine shipped gap: `forge
+backlog migrate` refuses over the target project's active runs, but the predicate counts ORCHESTRATOR
+SESSION rows (`run-orchestrator-*`) — so forge-on-forge can never migrate, since the session driving the
+migration always blocks itself. The architect's accepted default was refuse-WITH-override; the override
+half never shipped. The operator declined to dispatch the fix this session ("no need"). The dry-run
+otherwise validated: 597 tickets, correct one-way UX, DB untouched.
 
 **Picked up next:**
 
-1. **FG-608 (FG-496 Slice C)** — the next implementation item. The approved decomposition established
-   no dependency displacing it.
-2. **Evidence-led review decomposition APPROVED and FILED: FG-638 → FG-639 → FG-640 (strictly
-   serial).** Operator amendments applied: PRD scenarios #2/#3/#10 live in FG-639 (FG-638 proves only
-   persistence capability); FG-638 requires `duplicate` to cite its canonical finding ID and specifies
-   the operator-authority mechanism (`--operator` flag → `decided_by: operator` + event, the existing
-   gate/raci confirm pattern); FG-640 carries the REQUIRED FG-541 evidence mapping (local-only fixer
-   commits, no silent publication of unrelated work, exact-head CI, trusted-tip equality). FG-541 is
-   annotated folded-into/blocked-on FG-640 — superseded only when that mapping is durable.
-   **Implementation NOT started — dispatch not yet authorized.**
-3. **Non-ticket thread — rotate the leaked Docker Hub token** (carried from last session, still
-   presumed unrotated). hub.docker.com → Account Settings → Personal access tokens. Do not file a
-   ticket; do not lose it.
+1. **Cutover unblock — needs an operator decision first.** The right fix (argued and not disputed):
+   correct the migrate in-flight predicate so workflow/campaign runs block hard but orchestrator
+   session runs don't (they have no step pipeline to split truth across; reads re-resolve mode via the
+   3s cache), with a regression test each direction. That is FG-608 scope vs an accepted plan default —
+   reopen FG-608, fix, re-close, then the operator re-runs `forge backlog migrate`.
+2. **FG-645 — zero-red tranche 2** (63 in-container spawned-CLI integration reds, ONE root cause: the
+   agent container's own authority marker leaks into spawned `forge backlog` CLIs). Mechanical ~15-file
+   sweep; the repair pattern already ships in-repo (`src/backlog/container-authority.testkit.ts`
+   preload). Also fold in: `docker/verify-launch-tier-in-image.sh` still requires a committed checkout
+   (constraint recorded, change unshipped because the authoring container had no docker).
+3. **FG-646 — migrate `--dry-run` writes `project_key` into `.forge/config.yml`** despite printing
+   "nothing was written" (half-claims identity on any probed project). Live evidence: the forge repo's
+   `.forge/config.yml` is sitting UNCOMMITTED in the tree with exactly that line — left deliberately as
+   the defect artifact; the real migrate wants that line anyway, so commit-or-keep is a small call at
+   fix time.
+4. After the cutover decision: **FG-609** (FG-496 Slice D) is the next implementation item per PLAN.
+   FG-638 → FG-639 → FG-640 (evidence-led Changes 1–3) are filed, approved, and NOT started — dispatch
+   not yet authorized.
+5. **Non-ticket thread — rotate the leaked Docker Hub token** (carried since 2026-07-28, still presumed
+   unrotated). hub.docker.com → Account Settings → Personal access tokens.
 
-**Standing operator directives (this session):**
+**External state to remember:**
 
-- **Do NOT dispatch FG-637.** It is deliberately deferred (PLAN.md deferred set); its position in a
-  prior handoff list was not priority authorization. No further worktree/FG-637 coverage work without
-  a deterministic supported-workflow failure.
-- No further scope expansion of the Change 0 work; the historical prompt-text-test pattern gets
-  assessed separately, not cleaned up piecemeal.
-
-**External state:**
-
-- **ntfy is still DOWN** — every `forge notify` this session failed `network: fetch failed` (Azure
-  Container Apps host; TCP 443 never connects). Do not rely on push for unattended runs.
-- **`~/code/forge-fg356`** (disposable clone) is synced to merged main `cc10232a`, clean, on `main`.
-  All agent implementation work runs there (`--project`), never in `~/code/forge`.
-- Dispatch contract reminders: isolation is default-ON on macOS (`FORGE_NO_WORKTREES=1` escape);
-  project must be a clean committed git tree; `forge invoke`/`review-loop` against `~/code/forge`
-  refuses (self-host) — use the clone.
-- `forge ops check` shows 17 historical `orphaned_work_may_persist` incidents — known FG-549 noise
-  (detector never clears); ignore unless one is recent.
+- **ntfy still DOWN** (every `forge notify` fails `network: fetch failed`). No push for unattended runs.
+- **`~/.forge/forge.db.pre-fg608.bak`** (280MB) is the machine-wide restore point taken before the
+  FG-608 schema wave; the parity-guarded migrations have since applied cleanly (tickets.imported_from
+  verified present).
+- **Agent image was rebuilt** this session (d66e324ac4f7) and now ships the in-container backlog reader
+  — an image rebuild is a MANDATORY cutover prerequisite on any other host (documented in
+  docs/how-to-backlog-db-cutover.md).
+- `~/code/forge-fg356` (clone) is on merged main, clean. Two stale orchestrator-session run rows
+  (bf2fa4 = the ended session, 085fdf from 07-16) remain `active` in the DB — no liveness signal
+  exists; do NOT cancel by age.
 
 **Decisions worth not relitigating:**
 
-- The workspace contract (operator, 2026-07-28): committed tracked content at the recorded base SHA +
-  explicitly supplied inputs; ambient local state intentionally not inherited. No generic carry-in.
-- The macOS-only worktree gate is PERMANENT (DEC-004; "Linux" in those gates means the agent
-  container). FG-358 closed out-of-scope.
-- FG-345 is narrowed to managed workflow-dispatched agents; do not build invoke merge/publication
-  machinery — the evidence-led review program owns that question.
-- Change 0 is instruction-only BY DESIGN: no ledger tables, no coordinator, no new gates until the
-  operator approves the Changes 1–3 decomposition.
+- **ZERO-RED RULE (operator, stated twice with force):** red tests are never a tax — they stop
+  EVERYTHING, promoted ahead of all feature work. And zero-red means DETERMINISTIC TESTS THAT EXECUTE
+  everywhere they claim coverage — converting failures to skips is a horrific precedent; a skip is
+  never evidence; `not_executed`/`blocked_environment` over false green; claimed alternate coverage
+  must name lane + candidate SHA + executed assertion. Persisted in
+  memory (feedback_all_tests_pass_always), FG-644's closed record, FG-639's AC, and the evidence-led
+  PRD. Do not re-derive; do not soften.
+- **Interim evidence-led review (Change 0) is ACTIVE** — both authoritative sources agree since
+  cc10232a. One discovery pass, manual ledger, disposition-before-fix, ONE batch fixer, exact-ID
+  recheck + delta-bounded review. It was exercised end-to-end on FG-608 and works.
+- **FG-637 stays deferred** (operator: its handoff-list position was never priority authorization);
+  no worktree/isolation coverage work without a deterministic supported-workflow failure.
+- **docker-exec ENOTEMPTY (n=2 sightings total) stays on WATCH** — no retry without a demonstrated
+  race mechanism (operator explicit).
+- **FG-541 is folded into / blocked on FG-640** — superseded only when FG-640's evidence mapping is
+  durable, never merely because it was filed.
+- The migrate predicate fix was NOT dispatched this session by operator instruction — parked, not
+  forgotten (see Picked up next #1).
 
-**Shipped this session (for reference):**
+**Shipped (for reference):**
 
-- **FG-623** (`612e481f`, PR #172) — lease-renewal test moved off the 1 ms knife-edge to TTL/2
-  (~150 s headroom, 0/400 probe failures, 50/50 isolated runs); closed with Acceptance Evidence grid.
-- **Change 0** (`cc10232a`, PR #173) — interim evidence-led review policy on both authoritative
-  sources + rendered block (byte-identical parity verified post-merge); `.git/info/exclude` entry for
-  the autonomous-run prompt removed; stale `--max-rounds 2` example in
-  `docs/how-to-use-forge-across-projects.md` corrected; obsolete phrase-guard test deleted.
-- Watch item (not filed, n=1): one-off `ENOTEMPTY` cleanup race in `src/v2/docker-exec.test.ts:380`
-  during an engineer container run; didn't reproduce across two subsequent full-tier runs.
+- **Change 0** (`cc10232a`, PR #173) — interim evidence-led policy on both authoritative sources;
+  obsolete #302 phrase guard deleted; `docs/autonomous-run-prompt.md` now tracked.
+- **FG-623** (`612e481f`, PR #172) — lease-test knife-edge fixed, closed on AC walk.
+- **FG-608** (`f9afbf59` PR #174 + `935bea1` PR #175) — full Slice C machinery (dashboard DB truth,
+  container ticket authority, atomic migrate/reidentify, removal reconciliation) shipped through the
+  complete pipeline (17 red findings dispositioned, real-container acceptance on the rebuilt image),
+  then reopened for the live-host migration gap and re-closed with the fresh-vs-migrated parity guard
+  (54 missing ALTERs; mutation-tested).
+- **Zero-red tranche 1** (`9623a704`, PR #176) — FG-644 + FG-556 + FG-557 closed: release/fg612 suites
+  execute from dirty trees against candidates carrying in-flight changes; execution-identity
+  regression (caught CI's missing global tsx on its first outing); host worktree tier now
+  **435 pass / 0 fail / 0 skipped**.
+- **Filed:** FG-638/FG-639/FG-640 (evidence-led decomposition, approved with amendments), FG-642
+  (dark browser tier), FG-643 (dashboard sanitizer), FG-645 (tranche 2), FG-646 (dry-run write).
+- Backlog/PLAN reconciled throughout; FG-638 carries the --operator authority caveat; the other
+  session's housekeeping pass merged with the ADR-028/029 collision resolved.
