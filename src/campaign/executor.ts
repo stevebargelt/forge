@@ -195,6 +195,12 @@ export function campaignBlocker(
     if (campaign.status !== "planned") return "not_planned";
     const dir = campaign.projectDir;
     if (!dir) return "no_project_dir";
+    // FG-608: two DIFFERENT questions, both required. existsSync is host-path
+    // LIVENESS on the recorded projectDir (a campaign whose directory was
+    // deleted); hasBacklog is the store question. In db mode the store answers
+    // `true` for a directory that is gone, so collapsing these would run a
+    // campaign against a vanished checkout. Locked by
+    // fg608-dir-guard-regression.integration.test.ts.
     if (!existsSync(dir) || !hasBacklog(dir)) return "invalid_project_dir";
     if (campaign.mode !== "pilot" && campaign.mode !== "sequential") return "dry_run_not_executable";
     if (!campaign.approvedPlanHash) return "not_approved";
@@ -214,6 +220,7 @@ export function campaignBlocker(
     if (campaign.status !== "paused") return "not_paused";
     const dir = campaign.projectDir;
     if (!dir) return "no_project_dir";
+    // FG-608: see the start site above — liveness AND store, never one or the other.
     if (!existsSync(dir) || !hasBacklog(dir)) return "invalid_project_dir";
     if (!campaign.approvedPlanHash) return "not_approved";
     let resumeHash: string;
