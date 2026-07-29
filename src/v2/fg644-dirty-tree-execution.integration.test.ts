@@ -89,6 +89,26 @@ function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   return env;
 }
 
+/** forge-test.sh execs the `tsx` CLI by name (#299: the agent image installs tsx
+ *  globally, and `node --import tsx` cannot resolve a global install). That is a
+ *  property of the container this file simulates, not of the lane it runs in — a CI
+ *  runner has tsx only as a local devDependency, so `command -v tsx` finds nothing and
+ *  the script exits 127 before a single inner test registers. Appending the project's
+ *  own .bin completes the agent-shaped environment; it never shadows a real global tsx,
+ *  which stays first on PATH. A tree with neither fails HERE, naming the precondition,
+ *  rather than surfacing downstream as "no result at all". */
+function agentShapedPath(): string {
+  const localBin = join(repoRoot, "node_modules", ".bin");
+  const path = `${process.env["PATH"] ?? ""}:${localBin}`;
+  const found = spawnSync("bash", ["-c", "command -v tsx"], { env: { ...process.env, PATH: path }, encoding: "utf8" });
+  assert.equal(
+    found.status,
+    0,
+    `precondition: forge-test.sh execs the \`tsx\` CLI and no tsx is resolvable — not on PATH, and none at ${localBin}`,
+  );
+  return path;
+}
+
 function destroy(f: Fixture): void {
   chmodSync(f.parent, 0o755);
   rmSync(f.base, { recursive: true, force: true });
@@ -116,17 +136,38 @@ function parseTap(stdout: string): { byName: Map<string, TapResult>; summary: Re
   return { byName, summary };
 }
 
+function tail(s: string, n: number): string {
+  return s.length > n ? `…(${s.length - n} earlier bytes elided)\n${s.slice(-n)}` : s;
+}
+
+/** Why the inner run produced what it did. "no result at all" with nothing after it is
+ *  unactionable, and the inner TAP can run to megabytes — so exit status and stderr come
+ *  FIRST, where they survive a truncated assertion message. An inner run that never
+ *  started (exit 127, a FATAL from the harness) says so on line one. */
+function innerReport(r: { status: number | null; signal: NodeJS.Signals | null; error?: Error; stdout: string; stderr: string }): string {
+  return [
+    `inner run: exit=${r.status ?? "null"} signal=${r.signal ?? "none"}${r.error ? ` spawn-error=${r.error.message}` : ""}`,
+    `inner stderr:\n${tail(r.stderr ?? "", 8_000)}`,
+    `inner stdout:\n${tail(r.stdout ?? "", 20_000)}`,
+  ].join("\n");
+}
+
 /** The assertion this file exists to make: these named tests EXECUTED and passed.
  *  Matching is by identity — a renamed or deleted test fails here rather than
  *  quietly reducing coverage. */
-function assertExecuted(label: string, tap: ReturnType<typeof parseTap>, names: string[], out: string): void {
+function assertExecuted(label: string, tap: ReturnType<typeof parseTap>, names: string[], report: string): void {
+  const bad = names.some((n) => tap.byName.get(n) !== "pass") || tap.summary["skipped"] !== 0 || tap.summary["fail"] !== 0 || !(tap.summary["pass"] ?? 0);
+  // Straight to stderr as well as into the message: a reporter that elides a long
+  // assertion message would otherwise leave the CI log with the verdict and no cause.
+  if (bad) process.stderr.write(`\n${label}: inner run did not satisfy execution identity\n${report}\n`);
+
   for (const name of names) {
     const verdict = tap.byName.get(name);
-    assert.equal(verdict, "pass", `${label}: "${name}" must EXECUTE and pass, got ${verdict ?? "no result at all"}\n${out}`);
+    assert.equal(verdict, "pass", `${label}: "${name}" must EXECUTE and pass, got ${verdict ?? "no result at all"}\n${report}`);
   }
-  assert.equal(tap.summary["skipped"], 0, `${label}: nothing may be skipped — a skip is not validation\n${out}`);
-  assert.equal(tap.summary["fail"], 0, `${label}: no failures\n${out}`);
-  assert.ok((tap.summary["pass"] ?? 0) > 0, `${label}: something must have run\n${out}`);
+  assert.equal(tap.summary["skipped"], 0, `${label}: nothing may be skipped — a skip is not validation\n${report}`);
+  assert.equal(tap.summary["fail"], 0, `${label}: no failures\n${report}`);
+  assert.ok((tap.summary["pass"] ?? 0) > 0, `${label}: something must have run\n${report}`);
 }
 
 const RELEASE_TESTS = [
@@ -152,12 +193,12 @@ test("FG-644: the release suite EXECUTES from a dirty checkout, against a candid
       [join(repoRoot, "docker", "forge-test.sh"), "--test-reporter=tap", "src/v2/release.integration.test.ts"],
       {
         encoding: "utf8",
-        env: childEnv({ FORGE_SRC_DIR: f.checkout, FORGE_WORK_DIR: f.scratch }),
+        env: childEnv({ FORGE_SRC_DIR: f.checkout, FORGE_WORK_DIR: f.scratch, PATH: agentShapedPath() }),
         timeout: 800_000,
         maxBuffer: 64 * 1024 * 1024,
       },
     );
-    const out = `${r.stdout ?? ""}\n${r.stderr ?? ""}`;
+    const report = innerReport(r);
 
     // The mechanism: the scratch is a CLEAN release candidate whose HEAD describes
     // the agent's uncommitted work. Both halves matter — clean alone is satisfiable
@@ -165,12 +206,12 @@ test("FG-644: the release suite EXECUTES from a dirty checkout, against a candid
     assert.equal(
       execFileSync("git", ["status", "--porcelain"], { cwd: f.scratch, encoding: "utf8" }),
       "",
-      `the scratch must be a clean build candidate\n${out}`,
+      `the scratch must be a clean build candidate\n${report}`,
     );
     assert.equal(
       execFileSync("git", ["show", `HEAD:${MARKER_REL}`], { cwd: f.scratch, encoding: "utf8" }),
       MARKER_BODY,
-      `the candidate's HEAD must carry the in-flight edit, not just last-committed code\n${out}`,
+      `the candidate's HEAD must carry the in-flight edit, not just last-committed code\n${report}`,
     );
 
     // And the source checkout was never written into (FG-575's invariant, one layer out).
@@ -181,7 +222,7 @@ test("FG-644: the release suite EXECUTES from a dirty checkout, against a candid
       "the source's uncommitted work must still be uncommitted",
     );
 
-    assertExecuted("release suite from a dirty tree", parseTap(r.stdout ?? ""), RELEASE_TESTS, out);
+    assertExecuted("release suite from a dirty tree", parseTap(r.stdout ?? ""), RELEASE_TESTS, report);
   } finally {
     destroy(f);
   }
@@ -206,14 +247,14 @@ test("FG-644: the FG-612 self-host suites EXECUTE from a checkout whose parent i
       ],
       { cwd: f.checkout, encoding: "utf8", env: childEnv(), timeout: 500_000, maxBuffer: 64 * 1024 * 1024 },
     );
-    const out = `${r.stdout ?? ""}\n${r.stderr ?? ""}`;
+    const report = innerReport(r);
 
     assert.throws(
       () => mkdirSync(`${f.checkout}-fg612-sibling-cli`),
       /EACCES|EPERM/,
       "fixture: the point of this environment is that nothing can be created beside the checkout",
     );
-    assertExecuted("FG-612 suites beside an unwritable parent", parseTap(r.stdout ?? ""), FG612_TESTS, out);
+    assertExecuted("FG-612 suites beside an unwritable parent", parseTap(r.stdout ?? ""), FG612_TESTS, report);
   } finally {
     destroy(f);
   }
