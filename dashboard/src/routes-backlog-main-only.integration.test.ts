@@ -1,15 +1,23 @@
-// Regression tests for GET /api/backlog canonical ticket source (dashboard
-// main-only fix).
+// Regression tests for GET /api/backlog ticket truth across checkouts.
 //
-// Product contract: for BOTH a canonical projectKey request AND an exact
-// projectDir request, backlog TICKETS come ONLY from the canonical repository
-// primary checkout on main. Feature branches, linked worktrees, clones, and
-// scratch checkouts are NOT backlog truth until merged to main — selecting one
-// as an exact projectDir still resolves to the canonical main inventory. Ticket
-// files are neither concatenated nor merely deduplicated across checkouts.
-// Session-handoff NOTES remain per-selection: multi-checkout for a canonical
-// key, session-specific for an exact checkout (operational context, distinct
-// from ticket inventory).
+// FG-608 REPLACED the contract this file used to encode. It previously asserted
+// that tickets come ONLY from the canonical repository's primary checkout on
+// main — a branch-local rule, with feature branches, linked worktrees and clones
+// excluded "until merged". Ticket truth is now HOST-WIDE, keyed by project_key:
+// every checkout of one repository answers with the SAME store rows, and no
+// checkout's `backlog/*.md` is read for tickets at all.
+//
+// What SURVIVES that flip, and is what this file now guards:
+//   - one canonical project answers one ticket inventory; a ticket declared in
+//     two checkouts is still counted once, and a ticket that exists only in a
+//     feature checkout's files is still not truth (now because files are never
+//     truth, not because that branch is unmerged);
+//   - session-handoff NOTES remain per-selection — multi-checkout for a
+//     canonical key, session-specific for an exact checkout. Operational context
+//     (FG-380) stayed per-checkout when ticket truth stopped being.
+// What INVERTED: an exact request on a feature checkout used to resolve to the
+// main checkout's inventory; it now resolves to the same project_key, so the two
+// request shapes agree by construction rather than by redirection.
 //
 // Harness mirrors routes-project-identity.integration.test.ts: real git
 // checkouts sharing one origin (so they collapse to one canonical project),
@@ -23,6 +31,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { SCHEMA_SQL } from "../../src/store/schema.js";
+import { repositoryCheckoutIdentity } from "../../src/util/repository-identity.js";
 
 const TEST_PORT = 18771;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
@@ -39,6 +48,7 @@ process.env.PORT = String(TEST_PORT);
 process.env.HOST = "127.0.0.1";
 
 const REMOTE = "git@github.com:stevebargelt/forge.git";
+const PROJECT_KEY = "pk-main-only";
 
 function git(dir: string, args: string[]): void {
   execFileSync("git", args, { cwd: dir, stdio: "ignore" });
@@ -66,7 +76,8 @@ function makeCheckout(
   return dir;
 }
 
-// main: three ticket TYPES, one of each — the canonical inventory.
+// The markdown checkouts are still built exactly as before — they are now the
+// NEGATIVE fixture: whatever they contain, none of it may reach the response.
 const mainDir = makeCheckout(
   "forge",
   "main",
@@ -79,7 +90,7 @@ const mainDir = makeCheckout(
 );
 
 // feature worktree: re-declares FG-101 (must NOT multiply the Story count) and
-// adds FG-200 which exists ONLY off main (must be excluded from ticket truth).
+// adds FG-200 which exists ONLY off main (must never be ticket truth).
 const featureDir = makeCheckout(
   "forge-feature",
   "feature-x",
@@ -105,6 +116,27 @@ const featureDir = makeCheckout(
     insertRun.run(runId, "feature", `Run ${index}`, "complete", createdAt, projectDir);
     insertTask.run(`done-${index}`, runId, "engineer", "engineer", "complete", createdAt, createdAt, createdAt);
   });
+
+  // Both checkouts share one origin, so they share one evidence key and one
+  // project_key — the mechanism that makes the two request shapes agree.
+  database
+    .prepare("INSERT INTO project_identity (project_key, repo_evidence_key, repo_evidence_source, created_at) VALUES (?,?,?,?)")
+    .run(PROJECT_KEY, repositoryCheckoutIdentity(mainDir).key, "remote", "2026-07-20T10:00:00Z");
+  database
+    .prepare("INSERT INTO ticket_storage_mode (project_key, mode, updated_at) VALUES (?,?,?)")
+    .run(PROJECT_KEY, "db", "2026-07-20T10:00:00Z");
+
+  const insertTicket = database.prepare(
+    `INSERT INTO tickets (project_key,ticket_id,type,status,title,body,created,closed,closed_commit,epic,frontmatter,imported_at,imported_from)
+     VALUES (?,?,?,?,?,?,NULL,NULL,NULL,NULL,NULL,?,NULL)`,
+  );
+  const at = "2026-07-20T10:00:00Z";
+  insertTicket.run(PROJECT_KEY, "FG-100", "epic", "active", "Main Epic", "Epic body.", at);
+  insertTicket.run(PROJECT_KEY, "FG-101", "story", "active", "Main Story", "Story body.", at);
+  insertTicket.run(PROJECT_KEY, "FG-102", "idea", "active", "Main Idea", "Idea body.", at);
+  // Exists in NO checkout's files. Its presence proves the response is the
+  // store's inventory and not any directory listing.
+  insertTicket.run(PROJECT_KEY, "FG-300", "story", "active", "Store-only Story", "Filed after the freeze.", at);
   database.close();
 }
 
@@ -128,6 +160,8 @@ type BacklogBody = {
   notes: string;
   notesByCheckout: Array<{ checkoutDir: string; checkoutBranch: string | null; notes: string }>;
   tickets: Array<Record<string, unknown>>;
+  ticketsProjectKey: string | null;
+  ticketsStorageMode: string | null;
 };
 
 async function getBacklog(params: string): Promise<BacklogBody> {
@@ -143,39 +177,43 @@ async function projectKey(): Promise<string> {
   return projects[0]!.key;
 }
 
-test("canonical projectKey: tickets come ONLY from the main checkout", async () => {
+test("canonical projectKey: tickets are the project's store inventory", async () => {
   const body = await getBacklog(`?projectKey=${encodeURIComponent(await projectKey())}`);
   const ids = body.tickets.map((t) => t["id"]).sort();
-  assert.deepEqual(ids, ["FG-100", "FG-101", "FG-102"], "ticket ids must be exactly the main inventory");
-  for (const t of body.tickets) {
-    assert.equal(t["checkoutDir"], mainDir, "every ticket must originate from the main checkout");
-    assert.equal(t["checkoutBranch"], "main", "every ticket must be tagged with the main branch");
-  }
+  assert.deepEqual(ids, ["FG-100", "FG-101", "FG-102", "FG-300"], "ticket ids must be exactly the store inventory");
+  assert.equal(body.ticketsProjectKey, PROJECT_KEY);
+  assert.ok(
+    body.tickets.some((t) => t["id"] === "FG-300"),
+    "a ticket that exists in no checkout's files is still truth — the store answers, not the filesystem",
+  );
 });
 
-test("canonical projectKey: feature-branch-only tickets are excluded", async () => {
+test("canonical projectKey: feature-branch-only ticket files are not truth", async () => {
   const body = await getBacklog(`?projectKey=${encodeURIComponent(await projectKey())}`);
   assert.ok(
     !body.tickets.some((t) => t["id"] === "FG-200"),
-    "FG-200 exists only on a feature branch and must not be backlog truth",
+    "FG-200 exists only as a feature checkout's markdown file and must not be backlog truth",
   );
 });
 
 test("canonical projectKey: Story count is not multiplied across checkouts", async () => {
   const body = await getBacklog(`?projectKey=${encodeURIComponent(await projectKey())}`);
   const stories = body.tickets.filter((t) => t["type"] === "story");
-  assert.equal(stories.length, 1, "FG-101 appears in two checkouts but must be counted once");
-  assert.equal(stories[0]!["id"], "FG-101");
+  assert.deepEqual(
+    stories.map((t) => t["id"]).sort(),
+    ["FG-101", "FG-300"],
+    "FG-101 is declared in two checkouts but is one store row",
+  );
 });
 
 test("canonical projectKey: aggregate ticket count differs from the Epic-only count", async () => {
   const body = await getBacklog(`?projectKey=${encodeURIComponent(await projectKey())}`);
   const epics = body.tickets.filter((t) => t["type"] === "epic");
   assert.equal(epics.length, 1, "one epic in the fixture");
-  assert.equal(body.tickets.length, 3, "All/All aggregate spans every type");
+  assert.equal(body.tickets.length, 4, "All/All aggregate spans every type");
   assert.notEqual(body.tickets.length, epics.length, "aggregate must not equal the Epic group count");
   const types = new Set(body.tickets.map((t) => t["type"]));
-  assert.deepEqual([...types].sort(), ["epic", "idea", "story"], "all three types present once");
+  assert.deepEqual([...types].sort(), ["epic", "idea", "story"], "all three types present");
 });
 
 test("canonical projectKey: session-handoff notes remain multi-checkout", async () => {
@@ -183,25 +221,22 @@ test("canonical projectKey: session-handoff notes remain multi-checkout", async 
   const dirs = new Set(body.notesByCheckout.map((n) => n.checkoutDir));
   assert.ok(dirs.has(mainDir), "main notes present");
   assert.ok(dirs.has(featureDir), "feature notes preserved as operational context");
-  assert.equal(dirs.size, 2, "notes span both checkouts even though tickets do not");
+  assert.equal(dirs.size, 2, "notes span both checkouts — operational context stayed per-checkout");
 });
 
-test("exact projectDir on a feature checkout still sources tickets ONLY from main", async () => {
+test("exact projectDir on a feature checkout returns the same host-wide inventory", async () => {
   const body = await getBacklog(`?projectDir=${encodeURIComponent(featureDir)}`);
   const ids = body.tickets.map((t) => t["id"]).sort();
   assert.deepEqual(
     ids,
-    ["FG-100", "FG-101", "FG-102"],
-    "selecting a feature checkout must resolve to the canonical main inventory, not its branch-local files",
+    ["FG-100", "FG-101", "FG-102", "FG-300"],
+    "selecting a feature checkout resolves to the project's key, not to its branch-local files",
   );
   assert.ok(
     !body.tickets.some((t) => t["id"] === "FG-200"),
-    "feature-branch-only FG-200 must stay excluded even for an exact feature-checkout request",
+    "the feature checkout's own markdown-only ticket stays excluded",
   );
-  for (const t of body.tickets) {
-    assert.equal(t["checkoutDir"], mainDir, "every ticket must originate from the main checkout");
-    assert.equal(t["checkoutBranch"], "main", "every ticket must be tagged with the main branch");
-  }
+  assert.equal(body.ticketsProjectKey, PROJECT_KEY, "both request shapes derive the same project_key");
 });
 
 test("exact projectDir on a feature checkout keeps that checkout's session-specific notes", async () => {
