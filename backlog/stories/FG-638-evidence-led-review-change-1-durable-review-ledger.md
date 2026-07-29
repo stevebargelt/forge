@@ -93,3 +93,9 @@ execution, FixBatch, gate derivation, workflow migration — FG-639 / FG-640.
 ## Dependencies
 
 First of the serial chain FG-638 → FG-639 → FG-640. Blocks FG-639.
+
+## Authority caveat (operator, 2026-07-28)
+
+The `--operator` flag is an explicit confirmation under Forge's single-user trust model — it is NOT
+authenticated identity (same class as `FORGE_CONTROLLER_ID`, see FG-597). Documentation written for
+this ticket must not later overclaim it as an identity or auth mechanism.
