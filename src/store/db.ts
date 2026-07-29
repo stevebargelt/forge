@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { existsSync } from "node:fs";
 import { resolveDbPath, ensureForgeDirs } from "../util/paths.js";
-import { SCHEMA_SQL } from "./schema.js";
+import { SCHEMA_SQL, FG608_TICKET_COLUMNS, FG608_STORAGE_MODE_COLUMNS } from "./schema.js";
 
 // FG-568 (BD-15): store-compatibility policy across the supported overlap window
 // (a version-A process and a version-B process sharing ~/.forge/forge.db).
@@ -271,6 +271,33 @@ export function applyMigrations(db: DatabaseInstance): void {
   if (!haveVerdicts.has("gate_on_verdict")) {
     db.exec(`ALTER TABLE verdicts ADD COLUMN gate_on_verdict INTEGER`);
   }
+
+  // FG-608: the revision counter + content-basis columns on `tickets`, and the
+  // cutover-record columns on `ticket_storage_mode`. Same additive-only posture as
+  // everything above — every column is nullable or carries a DEFAULT, so an
+  // existing row reads back a safe value with no backfill and an older binary
+  // tolerates the extra columns. The DDL text lives in schema.ts so the fresh-DB
+  // shape and this ALTER path cannot drift.
+  //
+  // Guarded on the table EXISTING as well as the column: these are FG-606 tables,
+  // and a foreign/minimal fixture DB (the dashboard read tests hand-shape one) may
+  // legitimately have no `tickets` table at all. PRAGMA table_info on a missing
+  // table returns zero rows, so `!have.has(col)` would fire the ALTER and throw on
+  // EVERY open — the exact FG-563 hazard.
+  const ticketCols = db.prepare(`PRAGMA table_info(tickets)`).all() as { name: string }[];
+  if (ticketCols.length > 0) {
+    const haveTickets = new Set(ticketCols.map((r) => r.name));
+    for (const col of FG608_TICKET_COLUMNS) {
+      if (!haveTickets.has(col.name)) db.exec(col.ddl);
+    }
+  }
+  const modeCols = db.prepare(`PRAGMA table_info(ticket_storage_mode)`).all() as { name: string }[];
+  if (modeCols.length > 0) {
+    const haveMode = new Set(modeCols.map((r) => r.name));
+    for (const col of FG608_STORAGE_MODE_COLUMNS) {
+      if (!haveMode.has(col.name)) db.exec(col.ddl);
+    }
+  }
 }
 
 // FG-568 (BD-15 §3): the forward schema-version gate. A process refuses to open a
@@ -529,8 +556,71 @@ export function storeExists(): boolean {
   return _dbRW !== null || _dbRO !== null || existsSync(resolveDbPath());
 }
 
+// FG-608 (MANDATE 4): a read-only consumer asked for a store that is not there.
+// Named so a caller that legitimately tolerates "no store yet" can branch on it
+// (storeExists() is the cheap pre-check) instead of pattern-matching a message.
+export class StoreUnavailableError extends Error {
+  constructor(
+    message: string,
+    readonly dbPath: string,
+  ) {
+    super(message);
+    this.name = "StoreUnavailableError";
+  }
+}
+
+// FG-608 (MANDATE 4): the READ-ONLY policy, decided and stated — not implied.
+//
+// Before this, `getDb({readOnly: true})` was read-only in name only: it gated
+// wantReadOnly on existsSync(dbPath) and, with no writable handle cached, called
+// getDb() transiently first — which execs SCHEMA_SQL and applyMigrations
+// (db.ts's writable branch below). A "read" therefore CREATED ~/.forge/forge.db,
+// wrote the whole schema into it, and ran every migration. FORGE-DEC-012
+// predicted this and left it unpaid; FG-608 pays it, because the container read
+// surface and the dashboard are both pure readers that must never mutate a store.
+//
+// THE POLICY, in two halves:
+//
+//   ABSENT DB      -> REFUSE (StoreUnavailableError). Creating a database as a
+//                     side effect of reading it is never right: the reader learns
+//                     nothing (a fresh DB has no rows) and the host gains a file
+//                     and a full schema it never asked for. Callers that tolerate
+//                     "no store on this host" call storeExists() first — that is
+//                     what it is for.
+//
+//   UN-MIGRATED DB -> READ IT AS-IS. No schema exec, no migration. The open-path
+//                     contract is additive-only (FG-568/BD-15), so an older shape
+//                     is a strict SUBSET of the current one: every column a reader
+//                     asks for either exists or genuinely never existed. A query
+//                     against a table this binary knows but the file lacks raises
+//                     an ordinary SQLite error AT THE QUERY, which names the
+//                     missing table — strictly more honest than silently migrating
+//                     a store the reader has no authority over. Refusing instead
+//                     would be worse: it would make every read of a store written
+//                     by an older peer fail, which is exactly the compatibility the
+//                     additive-only policy exists to preserve.
+function openReadOnly(dbPath: string): DatabaseInstance {
+  if (!existsSync(dbPath)) {
+    throw new StoreUnavailableError(
+      `forge: refusing a read-only open — no store exists at ${dbPath}. A read never creates or ` +
+        `migrates the store; run a forge command that writes (e.g. \`forge backlog import\`) to ` +
+        `create it, or call storeExists() first if "no store yet" is a normal outcome here.`,
+      dbPath,
+    );
+  }
+  // NOTHING between here and the return may write: no SCHEMA_SQL, no
+  // applyMigrations, no journal_mode pragma (switching journal mode WRITES the
+  // database header and would fail on a genuinely read-only file anyway).
+  const db = new Database(dbPath, { readonly: true });
+  db.pragma("busy_timeout = 5000");
+  // The forward gate is a PRAGMA READ (user_version) — safe on a read-only handle,
+  // and a store a newer forge migrated past a one-way boundary is not one this
+  // binary may interpret, read or not.
+  assertSchemaVersionSupported(db);
+  return db;
+}
+
 export function getDb(opts?: { readOnly?: boolean }): DatabaseInstance {
-  ensureForgeDirs();
   forgetClosedHandles();
   // Resolved per call, not from paths.ts's import-time snapshot: since FG-607
   // `@forge/backlog` drags this module into the import graph, so it can be
@@ -539,24 +629,21 @@ export function getDb(opts?: { readOnly?: boolean }): DatabaseInstance {
   // cosmetic one. The handle caches below are unaffected — an OPEN handle stays
   // the store for this process; closing it is how you re-point.
   const dbPath = resolveDbPath();
-  // A read-only open on a non-existent file would fail. If no DB exists yet,
-  // fall through to a writable open so the schema gets created — read-only
-  // callers on a fresh install simply observe an empty DB.
-  const wantReadOnly = opts?.readOnly === true && existsSync(dbPath);
 
-  if (wantReadOnly) {
+  // FG-608: the read path returns BEFORE ensureForgeDirs() — creating ~/.forge as
+  // a side effect of reading is the same class of mutation as creating forge.db.
+  if (opts?.readOnly === true) {
     if (_dbRO) return _dbRO;
-    // Schema + migrations must have run at least once before a readonly handle
-    // is useful. If no writable handle has opened yet, open one transiently to
-    // bootstrap schema, then return a fresh readonly handle. (Idempotent —
-    // both `getDb()` and the bootstrap point at the same on-disk file.)
-    if (!_dbRW) getDb();
-    const db = new Database(dbPath, { readonly: true });
-    db.pragma("busy_timeout = 5000");
+    // Deliberately NOT `if (!_dbRW) getDb()`. That bootstrap was the whole bug:
+    // it ran SCHEMA_SQL + applyMigrations from a read. A cached writable handle is
+    // reused (same file, already open) only because it exists — never opened for
+    // this purpose.
+    const db = openReadOnly(dbPath);
     _dbRO = db;
     return db;
   }
 
+  ensureForgeDirs();
   if (_dbRW) return _dbRW;
   const db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
@@ -596,7 +683,46 @@ export function getDb(opts?: { readOnly?: boolean }): DatabaseInstance {
 // treats BEGIN IMMEDIATE as BEGIN when no other connection exists, so test DBs
 // see no behavior or performance change.
 export function writeTransaction<T>(fn: () => T): T {
-  return getDb().transaction(fn).immediate();
+  // FG-608: the snapshot publish barrier. Ticket writers mark their project_key
+  // dirty inside the transaction; the fan-out runs HERE, after the commit, never
+  // inside it — file I/O under the write lock would stall every other forge
+  // process, and publishing mid-transaction could ship rows that then roll back.
+  // A rollback discards the pending set (nothing durable, nothing to publish).
+  //
+  // Imported lazily: src/backlog/snapshot.ts imports getDb from this module, and a
+  // top-level import here would close that cycle at module-eval time.
+  const { beginPublishBarrier, endPublishBarrier } = publishBarrier();
+  beginPublishBarrier();
+  let committed = false;
+  try {
+    const result = getDb().transaction(fn).immediate();
+    committed = true;
+    return result;
+  } finally {
+    endPublishBarrier(committed);
+  }
+}
+
+// Resolved on first use so the module cycle (snapshot.ts -> db.ts) is broken at
+// eval time rather than at import time. `require` is unavailable under ESM, so the
+// binding is installed by snapshot.ts's own consumers via registerPublishBarrier;
+// until then this is an inert no-op and writeTransaction behaves exactly as before.
+type PublishBarrier = {
+  beginPublishBarrier: () => void;
+  endPublishBarrier: (committed: boolean) => void;
+};
+const NO_BARRIER: PublishBarrier = { beginPublishBarrier: () => {}, endPublishBarrier: () => {} };
+let _publishBarrier: PublishBarrier = NO_BARRIER;
+
+/** Installed once by src/store/tickets.ts (which imports snapshot.ts). Keeps the
+ *  publisher the OWNER of publication while letting writeTransaction — the single
+ *  host write path — decide WHEN the fan-out runs. */
+export function registerPublishBarrier(barrier: PublishBarrier): void {
+  _publishBarrier = barrier;
+}
+
+function publishBarrier(): PublishBarrier {
+  return _publishBarrier;
 }
 
 export function closeDb(): void {

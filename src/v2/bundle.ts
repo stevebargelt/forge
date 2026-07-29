@@ -14,6 +14,7 @@ import { tasksForRun } from "../store/tasks.js";
 import { eventsForRun } from "../store/events.js";
 import { verdictsForTask } from "../store/verdicts.js";
 import { usageForTask } from "../store/model-calls.js";
+import { dispatchEvidenceForTask } from "../store/tickets.js";
 import { taskDir } from "../util/paths.js";
 
 // Files safe to copy verbatim from a task dir.
@@ -93,7 +94,12 @@ export function assembleBundle(runId: string, destRoot: string, opts: BundleOpti
   const filesIncluded: string[] = [];
   const truncated: string[] = [];
 
-  const tasksData: Array<{ task: unknown; verdicts: unknown[]; usage: unknown[] }> = [];
+  const tasksData: Array<{
+    task: unknown;
+    verdicts: unknown[];
+    usage: unknown[];
+    dispatchedTicket: unknown;
+  }> = [];
   for (const t of tasks) {
     const srcDir = taskDir(t.runId, t.id);
     const outDir = join(bundleDir, "tasks", t.id);
@@ -112,7 +118,17 @@ export function assembleBundle(runId: string, destRoot: string, opts: BundleOpti
       }
     }
 
-    tasksData.push({ task: sanitizeTask(t, !!opts.includePrompts), verdicts: verdictsForTask(t.id), usage: usageForTask(t.id) });
+    tasksData.push({
+      task: sanitizeTask(t, !!opts.includePrompts),
+      verdicts: verdictsForTask(t.id),
+      usage: usageForTask(t.id),
+      // FG-608: the ticket revision + body hash this task was CONSTRUCTED from.
+      // Reproducibility evidence, not live authority — the live ticket may have
+      // advanced since, and the two records deliberately never overwrite each
+      // other. Null for a task with no ticket, or for a project that had not cut
+      // over to the DB store when it was dispatched.
+      dispatchedTicket: dispatchEvidenceForTask(t.id) ?? null,
+    });
   }
 
   const note =

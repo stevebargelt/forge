@@ -440,36 +440,41 @@ test("E7(getDb): the production getDb() open path itself refuses a future-bounda
   }
 });
 
-test("E3/E5: a read-only FIRST open still migrates (defect reproduced) — additively, running NO destructive DDL", () => {
-  // The FIRST production open in this process is logically read-only. getDb bootstraps
-  // a writable handle (db.ts:169) and runs SCHEMA_SQL + applyMigrations — the defect.
+// FG-608 (MANDATE 4) INVERTS E3. This test previously REPRODUCED the defect
+// FORGE-DEC-012 predicted and left unpaid: a logically read-only FIRST open
+// bootstrapped a WRITABLE handle and ran SCHEMA_SQL + applyMigrations, so a "read"
+// migrated the store. FG-608 pays it — the read path never migrates and never
+// writes — so the assertion flips from "reproduced" to "fixed".
+//
+// E5 is UNCHANGED and still belongs here: the ordinary WRITABLE open path stays
+// additive-only, proven by the destructive-DROP candidates continuing to exist
+// rather than by grepping the source (FG-551).
+test("E3 (FG-608, fixed): a read-only open NEVER migrates — E5: the writable open path is still additive-only", () => {
+  // E3 — the read path is now genuinely read-only. The store on disk here is the
+  // LEGACY shape (no project_dir on runs); a read must leave it that way.
   const ro = getDb({ readOnly: true });
-
-  // E3 — migration-on-open reproduced: the additive ALTER that adds project_dir ran
-  // even though the caller only wanted to read.
-  assert.ok(columnNames(ro, "runs").has("project_dir"), "migration-on-open reproduced: the read-only first open added project_dir");
-
-  // E5 — but it was ADDITIVE-ONLY: the destructive-DROP candidates SURVIVE. No
-  // DROP/RENAME ran on the ordinary open path (proven by their continued presence,
-  // not by grepping the source — FG-551).
-  const mcCols = columnNames(ro, "model_calls");
-  assert.ok(mcCols.has("prompt_tokens"), "no destructive DDL on open: prompt_tokens survives");
-  assert.ok(mcCols.has("completion_tokens"), "no destructive DDL on open: completion_tokens survives");
-  assert.ok(mcCols.has("cost"), "no destructive DDL on open: cost survives");
-
-  // Data and boundary untouched by an ordinary open.
-  assert.equal(countRows(ro, "runs"), 1, "no row churn on open");
-  assert.equal(countRows(ro, "model_calls"), 1, "no row churn on open");
-  assert.equal(ro.pragma("user_version", { simple: true }), 0, "an ordinary open never stamps the one-way boundary");
-
-  // The writable handle getDb bootstrapped points at the same file — assert the
-  // SAME survival there, covering the writable ordinary open path too.
-  const rw = getDb();
-  const rwCols = columnNames(rw, "model_calls");
-  assert.ok(
-    rwCols.has("prompt_tokens") && rwCols.has("completion_tokens") && rwCols.has("cost"),
-    "the writable getDb() open path is likewise additive-only — legacy columns survive",
+  assert.equal(ro.readonly, true, "the handle really is read-only");
+  assert.equal(
+    columnNames(ro, "runs").has("project_dir"),
+    false,
+    "FG-608: a read-only open runs NO migration — the legacy shape is read as it is",
   );
+  assert.equal(countRows(ro, "runs"), 1, "no row churn on a read");
+  assert.equal(countRows(ro, "model_calls"), 1, "no row churn on a read");
+  assert.equal(ro.pragma("user_version", { simple: true }), 0, "a read never stamps the one-way boundary");
+
+  // E5 — now open WRITABLE (the ordinary path, which does migrate). The additive
+  // ALTER lands; the destructive-DROP candidates SURVIVE.
+  const rw = getDb();
+  assert.ok(
+    columnNames(rw, "runs").has("project_dir"),
+    "the writable open path still applies the additive migration",
+  );
+  const rwCols = columnNames(rw, "model_calls");
+  assert.ok(rwCols.has("prompt_tokens"), "no destructive DDL on open: prompt_tokens survives");
+  assert.ok(rwCols.has("completion_tokens"), "no destructive DDL on open: completion_tokens survives");
+  assert.ok(rwCols.has("cost"), "no destructive DDL on open: cost survives");
+  assert.equal(rw.pragma("user_version", { simple: true }), 0, "an ordinary open never stamps the boundary");
 });
 
 // ===========================================================================

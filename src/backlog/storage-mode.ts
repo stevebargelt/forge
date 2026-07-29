@@ -81,11 +81,20 @@ function storeForConfigKey(projectDir: string, configKey: string): BacklogStore 
   if (owner && owner.repoEvidenceKey !== evidenceKey) {
     throw new ProjectIdentityConflictError(
       `forge: refusing to read the backlog — project_key '${configKey}' (from .forge/config.yml) is ` +
-        `owned by a DIFFERENT repository (evidence '${owner.repoEvidenceKey}'), but this checkout's ` +
-        `evidence is '${evidenceKey}'. A project_key was likely copied between unrelated repos; ` +
-        `reading or writing under it would touch the other project's tickets. Repair: give this ` +
-        `repository its own project_key in .forge/config.yml (or remove the copied key and run ` +
-        `\`forge backlog import\` to mint a fresh one).`,
+        `registered to a DIFFERENT repository evidence ('${owner.repoEvidenceKey}'), but this ` +
+        `checkout's evidence is '${evidenceKey}'.\n` +
+        `FG-608 — repair depends on WHICH SIDE moved, and the two look identical from here:\n` +
+        `  * The EVIDENCE moved (the common case once a project has cut over): the repository ` +
+        `evidence key is SOURCE-DEPENDENT — repositoryCheckoutIdentity prefers a normalized remote and ` +
+        `falls back to the git common dir, so a repository registered while it had NO remote gets a ` +
+        `DIFFERENT evidence key the moment \`git remote add origin\` runs. Nothing about the project ` +
+        `changed; only the evidence did, and .forge/config.yml is RIGHT. Fix it with ` +
+        `\`forge backlog reidentify --confirm --key ${configKey}\`, which re-points the registry's ` +
+        `evidence for that key at this checkout.\n` +
+        `  * The KEY moved (a project_key genuinely copied between unrelated repos): reading or ` +
+        `writing under it would touch the other project's tickets. Give this repository its own ` +
+        `project_key in .forge/config.yml (or remove the copied key and run \`forge backlog import\` ` +
+        `to mint a fresh one).`,
       {
         evidenceKey,
         configKey,
@@ -100,8 +109,16 @@ function storeForConfigKey(projectDir: string, configKey: string): BacklogStore 
     throw new ProjectIdentityConflictError(
       `forge: refusing to read the backlog — this repository (evidence '${evidenceKey}') is ` +
         `registered to project_key '${registered.projectKey}', but .forge/config.yml commits a ` +
-        `DIFFERENT key '${configKey}'. Repair: reconcile .forge/config.yml to ` +
-        `'${registered.projectKey}' (the registered owner).`,
+        `DIFFERENT key '${configKey}'.\n` +
+        `Repair depends on WHICH SIDE moved:\n` +
+        `  * The EVIDENCE moved (the common case, and the one FG-608 made reachable): the repository ` +
+        `evidence key is SOURCE-DEPENDENT — repositoryCheckoutIdentity prefers a normalized remote and ` +
+        `falls back to the git common dir, so a repository registered while it had NO remote gets a ` +
+        `DIFFERENT evidence key the moment \`git remote add origin\` runs. Nothing about the project ` +
+        `changed; only the evidence did. Fix it with \`forge backlog reidentify --confirm --key ` +
+        `${configKey}\`, which re-points the registry's evidence for that key at this checkout.\n` +
+        `  * The KEY moved (a project_key genuinely copied from another repository): reconcile ` +
+        `.forge/config.yml to '${registered.projectKey}' (the registered owner) instead.`,
       {
         evidenceKey,
         configKey,

@@ -124,6 +124,85 @@ export function registryByKey(projectKey: string): RegistryRow | undefined {
   return row ? rowToRegistry(row) : undefined;
 }
 
+// FG-608: the RE-IDENTIFY path — a CUTOVER PRECONDITION, not a follow-up.
+//
+// The registry's repo_evidence_key is SOURCE-DEPENDENT: repository-identity.ts
+// prefers a normalized remote and falls back to the git common dir. SSH and HTTPS
+// spellings of one remote converge; remote-ABSENT and remote-PRESENT do not. So a
+// repository registered while it had no remote gets a DIFFERENT evidence key the
+// instant `git remote add origin` runs — after which storage-mode.ts's read-side
+// identity guard refuses EVERY `forge backlog` command and the project's db
+// tickets are stranded with no in-tool repair.
+//
+// This could not fire before FG-608 because no project had a committed
+// project_key; it becomes reachable exactly when `forge backlog migrate` starts
+// committing one. Hence: precondition.
+//
+// BOUNDARY, unchanged: identity is CLAIMED only where an operator is present —
+// import, `mode --set`, `migrate`, and now `reidentify --confirm`. This is a
+// FOURTH operator-present door, never a read-path fallback. storage-mode.ts stays
+// a pure identity READER on purpose: a read that healed config would dirty git
+// status and mint identity rows for every throwaway directory forge is pointed at.
+//
+// MUST run inside the caller's writeTransaction — it is a read-then-write against
+// a two-directionally-unique table.
+export type ReidentifyResult = {
+  projectKey: string;
+  previousEvidenceKey: string;
+  newEvidenceKey: string;
+  newEvidenceSource: string;
+};
+
+export function reidentifyProject(input: {
+  projectKey: string;
+  evidenceKey: string;
+  evidenceSource: string;
+}): ReidentifyResult {
+  const { projectKey, evidenceKey, evidenceSource } = input;
+
+  const owner = registryByKey(projectKey);
+  if (!owner) {
+    throw new ProjectIdentityConflictError(
+      `forge: refusing to reidentify — project_key '${projectKey}' is not registered on this host, so ` +
+        `there is no evidence to re-point. Run \`forge backlog import\` to claim it first.`,
+      { evidenceKey, configKey: projectKey, registeredKey: null, registeredEvidenceKey: null },
+    );
+  }
+
+  // The evidence key this checkout computes may already belong to a DIFFERENT
+  // project_key. Re-pointing would then silently merge two projects' backlogs into
+  // one — the exact failure the two-directional uniqueness exists to prevent. The
+  // operator's assertion covers "this repository is that project"; it does not
+  // cover "and that other project should cease to exist".
+  const evidenceOwner = registryByEvidence(evidenceKey);
+  if (evidenceOwner && evidenceOwner.projectKey !== projectKey) {
+    throw new ProjectIdentityConflictError(
+      `forge: refusing to reidentify — this checkout's evidence '${evidenceKey}' is already registered ` +
+        `to project_key '${evidenceOwner.projectKey}', not '${projectKey}'. Re-pointing would merge two ` +
+        `projects' backlogs. Resolve which project this repository actually is first.`,
+      {
+        evidenceKey,
+        configKey: projectKey,
+        registeredKey: evidenceOwner.projectKey,
+        registeredEvidenceKey: evidenceOwner.repoEvidenceKey,
+      },
+    );
+  }
+
+  getDb()
+    .prepare(
+      `UPDATE project_identity SET repo_evidence_key = ?, repo_evidence_source = ? WHERE project_key = ?`,
+    )
+    .run(evidenceKey, evidenceSource, projectKey);
+
+  return {
+    projectKey,
+    previousEvidenceKey: owner.repoEvidenceKey,
+    newEvidenceKey: evidenceKey,
+    newEvidenceSource: evidenceSource,
+  };
+}
+
 export type ResolveInput = {
   evidenceKey: string;
   evidenceSource: string;

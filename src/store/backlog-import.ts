@@ -19,8 +19,10 @@
 // CONFIG-ONLY (inert, portable, adopted on retry). We never leave an authoritative
 // DB identity with a missing config identity.
 
-import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { join, resolve as resolvePath } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { writeTransaction } from "./db.js";
 import { assertConfigWritable, readBacklogConfig, writeProjectKey } from "../backlog/config.js";
@@ -39,7 +41,21 @@ import {
   ensureStorageMode,
   bumpIdSequence,
   ticketsForProject,
+  getTicket,
+  ticketContentHash,
+  upsertBacklogSource,
+  liveBacklogSources,
+  replaceSourceMembership,
+  claimedMembers,
+  allMembership,
+  membershipKey,
+  deleteTicketRow,
+  deleteTicketRelation,
+  allRelationsForProject,
+  allBlockerEvidenceForProject,
+  deleteBlockerEvidence,
   LEGACY_BLOCKED_SOURCE,
+  type MembershipKind,
   type TicketRelation,
   type TicketRow,
 } from "./tickets.js";
@@ -73,7 +89,29 @@ export type ImportResult = {
   rung: 1 | 2 | 3 | 4;
   // True when the import minted/adopted a key and healed .forge/config.yml.
   persistedConfig: boolean;
+  // FG-608: the durable source identity this import scanned under.
+  sourceId: string;
+  // FG-608 conflict rule: ids whose DB row had been edited since its import basis
+  // and were therefore LEFT AS IS (Markdown never silently clobbers a newer DB
+  // edit). Each also has a conflict event in ticket_events.
+  skippedConflicts: string[];
+  // Ids a `--force` import overwrote despite divergence. The event carries
+  // before/after evidence.
+  forcedOverwrites: string[];
+  // FG-608 removal reconciliation: what this import actually pruned.
+  prunedTickets: string[];
+  prunedRelations: string[];
+  prunedBlockerEvidence: string[];
 };
+
+// FG-608: prune refused. Keeping the ticket is the correct failure direction, so
+// this is thrown BEFORE any deletion and the whole import transaction rolls back.
+export class RemovalReconciliationRefusal extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RemovalReconciliationRefusal";
+  }
+}
 
 export type ImportOptions = {
   // Injectable git runner so tests can force a specific repository evidence key
@@ -81,6 +119,14 @@ export type ImportOptions = {
   git?: GitRunner;
   // Fixed clock for deterministic tests.
   now?: string;
+  // FG-608: overwrite a DB row that diverged from its import basis. Default false —
+  // the conflict rule SKIPS and records instead. A forced overwrite records
+  // before/after evidence in the conflict event.
+  force?: boolean;
+  // FG-608: the durable source identity to scan under. Production resolves it from
+  // the checkout (resolveSourceIdentity); tests pass it to model two worktrees of
+  // one project without materializing two real git checkouts.
+  sourceId?: string;
   // Test seam ONLY: invoked inside the transaction AFTER the registry claim and
   // BEFORE the config heal / any ticket is written, so a test can throw here and
   // prove the whole transaction rolls back atomically — zero partial tickets, zero
@@ -205,6 +251,212 @@ export function requiredNextSeq(
   return required;
 }
 
+// ─── FG-608: DURABLE SOURCE IDENTITY (accepted default (b)) ──────────────────
+//
+// A "source" is one physical checkout that can supply Markdown for a project_key.
+// Removal reconciliation prunes a ticket only when NO LIVE SOURCE claims it, so
+// the identity of a source has to survive the things that move a checkout around.
+//
+// It is deliberately NOT the realpath. `imported_from` is realpathSync(projectDir)
+// and FG-345/FG-621 transient clones live under ~/.forge/worktrees/** and are
+// reaper-deleted, so a path-derived id both COLLIDES (two clones of one repo at
+// two paths are two sources, but a git-dir-derived id would call them one) and
+// EVAPORATES (a moved or reaped checkout looks like a brand-new source, and its
+// old membership pins every ticket forever).
+//
+// Instead: mint a random id ONCE per physical checkout and persist it inside that
+// checkout's own git ADMIN directory (`git rev-parse --absolute-git-dir`) —
+//   * never git-tracked (it is inside .git, not the worktree), so it cannot dirty
+//     `git status` and cannot be copied between repos by a commit;
+//   * moves WITH the checkout, so a relocated repo keeps its identity;
+//   * dies with the checkout, so a reaped clone's file is gone (its membership is
+//     released by the operator `forge backlog forget-source` verb);
+//   * distinct per linked worktree, because a linked worktree's absolute git dir
+//     is <repo>/.git/worktrees/<name>, not the common dir.
+//
+// A non-git directory has no admin dir to hide the file in; fall back to the
+// realpath, which for a non-repo directory is as durable as anything available.
+const SOURCE_ID_FILE = "forge-source-id";
+
+export function resolveSourceIdentity(projectDir: string): string {
+  const canonicalDir = realpathSync(resolvePath(projectDir));
+  let gitDir = "";
+  try {
+    const out = execFileSync("git", ["rev-parse", "--absolute-git-dir", "--show-toplevel"], {
+      cwd: projectDir,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    const [absoluteGitDir, topLevel] = out.split("\n");
+    // Only adopt the git identity when THIS directory is the checkout root. A
+    // directory that merely sits INSIDE some enclosing repository is not that
+    // repository's backlog source — treating it as one would give two unrelated
+    // project directories a single source identity and let one's removals prune
+    // the other's tickets.
+    if (absoluteGitDir && topLevel && realpathSync(topLevel) === canonicalDir) {
+      gitDir = absoluteGitDir;
+    }
+  } catch {
+    gitDir = "";
+  }
+  if (!gitDir) return `path:${canonicalDir}`;
+  const idPath = join(gitDir, SOURCE_ID_FILE);
+  if (existsSync(idPath)) {
+    const existing = readFileSync(idPath, "utf8").trim();
+    if (existing) return existing;
+  }
+  const minted = `src-${randomBytes(12).toString("hex")}`;
+  try {
+    writeFileSync(idPath, minted + "\n");
+  } catch {
+    // A read-only or otherwise unwritable admin dir (a red agent's :ro mount)
+    // cannot persist an identity. Fall back to the canonical path rather than
+    // minting a fresh random id on every call — an id that changed per invocation
+    // would register a new "source" each time and pin every ticket forever.
+    return `path:${canonicalDir}`;
+  }
+  return minted;
+}
+
+// The relation/blocker membership member_key encodings. Kept in ONE place so the
+// record side and the prune side cannot disagree about what a member is.
+function relationMemberKey(relatedId: string, relType: string): string {
+  return `${relatedId} ${relType}`;
+}
+
+type MembershipSnapshot = { ticketId: string; memberKey: string }[];
+
+// FG-608 REMOVAL RECONCILIATION.
+//
+// Prune authority belongs to the SET OF LIVE SOURCES, not to the checkout running
+// the import. This import may add its OWN membership and remove its OWN
+// membership; a row leaves the product tables only when NO live source claims it.
+// Absence of a source is NOT evidence of absence of a ticket.
+//
+// FAIL-CLOSED, three ways:
+//   1. Zero live sources -> REFUSE outright. With nothing claiming anything, every
+//      row looks prunable, and "delete the whole project's backlog" is never the
+//      right reading of "I could not observe any source".
+//   2. Only members SOME source has been recorded as holding are candidates. A row
+//      no membership has ever mentioned (a pre-FG-608 row, imported before this
+//      substrate existed) is NEVER pruned — we cannot know which sources hold it,
+//      and keeping it is the correct failure direction.
+//   3. A member any OTHER live source still claims is kept, even though this
+//      source dropped it. That is the multi-worktree case, stated directly.
+// Exported so the fail-closed guard can be exercised DIRECTLY. The zero-live-
+// sources condition is unreachable through importBacklog (an import registers its
+// own source before reconciling), so a test that drove it through the CLI would be
+// asserting a re-implementation of the guard rather than the guard. This is the
+// product function; the test calls it.
+export function reconcileRemovals(
+  projectKey: string,
+  sourceId: string,
+  // The prune CANDIDATE set, snapshotted before this import replaced its own
+  // membership. Never derived inside this function: by the time it runs, the
+  // evidence that a member was ever claimed has already been overwritten.
+  previous: Record<MembershipKind, MembershipSnapshot>,
+): { prunedTickets: string[]; prunedRelations: string[]; prunedBlockerEvidence: string[] } {
+  const live = liveBacklogSources(projectKey);
+  if (live.length === 0) {
+    throw new RemovalReconciliationRefusal(
+      `forge: refusing removal reconciliation for project_key '${projectKey}' — no live backlog source ` +
+        `is registered, so nothing can be shown to have been removed rather than merely unobserved. ` +
+        `Keeping every ticket is the safe direction. (Nothing was deleted.)`,
+    );
+  }
+
+  const stillClaimed = {
+    ticket: claimedMembers(projectKey, "ticket"),
+    relation: claimedMembers(projectKey, "relation"),
+    blocker_evidence: claimedMembers(projectKey, "blocker_evidence"),
+  };
+
+  // Relations and blocker evidence FIRST: pruning a ticket cascades them away, and
+  // reporting a relation as "pruned" that actually vanished with its ticket would
+  // overstate what this reconciliation decided.
+  const prunedRelations: string[] = [];
+  const existingRelations = new Set(
+    allRelationsForProject(projectKey).map((r) => membershipKey(r.ticketId, relationMemberKey(r.relatedId, r.relType))),
+  );
+  for (const m of previous.relation) {
+    const key = membershipKey(m.ticketId, m.memberKey);
+    if (stillClaimed.relation.has(key)) continue;
+    if (!existingRelations.has(key)) continue;
+    const [relatedId, relType] = m.memberKey.split(" ");
+    if (!relatedId || !relType) continue;
+    deleteTicketRelation(projectKey, m.ticketId, relatedId, relType);
+    prunedRelations.push(`${m.ticketId}->${relatedId}(${relType})`);
+  }
+
+  // The blocker_evidence INVERSE DELETION the ticket calls out by name. Import
+  // upserts evidence for a `blocked` source ticket but had no deletion when a
+  // later import supplied active/done/deferred — so structured.ts reconstructed
+  // the row as blocked forever and readiness.ts held it back from dispatch. With
+  // per-source membership the inverse is decidable AND multi-worktree-safe:
+  // evidence recorded from one source is not dropped because a sibling worktree's
+  // Markdown lacks the blocked marker.
+  const prunedBlockerEvidence: string[] = [];
+  const existingEvidence = new Set(
+    allBlockerEvidenceForProject(projectKey).map((b) => membershipKey(b.ticketId, b.source)),
+  );
+  for (const m of previous.blocker_evidence) {
+    const key = membershipKey(m.ticketId, m.memberKey);
+    if (stillClaimed.blocker_evidence.has(key)) continue;
+    if (!existingEvidence.has(key)) continue;
+    deleteBlockerEvidence(projectKey, m.ticketId, m.memberKey);
+    prunedBlockerEvidence.push(`${m.ticketId}(${m.memberKey})`);
+  }
+
+  const prunedTickets: string[] = [];
+  const existingTickets = new Set(ticketsForProject(projectKey).map((t) => t.ticketId));
+  for (const m of previous.ticket) {
+    const key = membershipKey(m.ticketId, m.memberKey);
+    if (stillClaimed.ticket.has(key)) continue;
+    if (!existingTickets.has(m.ticketId)) continue;
+    deleteTicketRow(projectKey, m.ticketId);
+    prunedTickets.push(m.ticketId);
+  }
+
+  return { prunedTickets, prunedRelations, prunedBlockerEvidence };
+}
+
+// FG-608 IMPORT CONFLICT RULE.
+//
+// "The DB row was edited since its import basis" is decided by the CONTENT basis,
+// not the counter: upsertTicket (import) sets body_hash == import_basis_hash;
+// upsertSeamTicket (a db-mode edit) moves body_hash and leaves import_basis_hash
+// alone. So body_hash != import_basis_hash means, exactly, "edited since import".
+//
+// Three cases that are NOT conflicts, each for a stated reason:
+//   * no existing row                  — nothing to clobber.
+//   * body_hash IS NULL                — a pre-FG-608 row that predates the basis
+//                                        columns. It carries no evidence either
+//                                        way, so treat the import as the basis
+//                                        and backfill rather than jam every
+//                                        migrated project on its next import.
+//   * incoming content == current row  — Markdown already agrees with the DB edit.
+//                                        Writing is a no-op, so there is nothing
+//                                        for Markdown to clobber.
+//
+// import_basis_hash NULL with body_hash SET *is* a conflict: that row was created
+// by the seam and never imported, so an incoming Markdown file with the same id is
+// a genuine collision, not a re-import.
+function detectImportConflict(
+  existing: TicketRow | undefined,
+  incomingHash: string,
+): { conflict: boolean; reason: string } {
+  if (!existing) return { conflict: false, reason: "new" };
+  if (existing.bodyHash == null) return { conflict: false, reason: "pre-basis row" };
+  if (existing.bodyHash === incomingHash) return { conflict: false, reason: "content already agrees" };
+  if (existing.importBasisHash == null) {
+    return { conflict: true, reason: "row was created in the DB and never imported" };
+  }
+  if (existing.bodyHash !== existing.importBasisHash) {
+    return { conflict: true, reason: "row was edited in the DB since its import basis" };
+  }
+  return { conflict: false, reason: "row is unchanged since its import basis" };
+}
+
 // Populate the DB shadow from a project's backlog/*.md. Idempotent: re-running
 // UPSERTs and yields no duplicate rows / no drift. REFUSES (throws
 // ProjectIdentityConflictError) rather than silently maintaining two backlogs
@@ -234,9 +486,19 @@ export function importBacklog(projectDir: string, opts: ImportOptions = {}): Imp
     assertConfigWritable(projectDir);
   }
 
+  // FG-608: the durable source identity this scan is attributed to. Resolved
+  // OUTSIDE the transaction (it can mint a file inside the checkout's git admin
+  // dir) so no filesystem write happens under the write lock.
+  const sourceId = opts.sourceId ?? resolveSourceIdentity(projectDir);
+
   let resolvedKey = "";
   let resolvedRung: 1 | 2 | 3 | 4 = 4;
   let persistToConfig = false;
+  let skippedConflicts: string[] = [];
+  let forcedOverwrites: string[] = [];
+  let prunedTickets: string[] = [];
+  let prunedRelations: string[] = [];
+  let prunedBlockerEvidence: string[] = [];
 
   for (let attempt = 0; ; attempt++) {
     try {
@@ -271,6 +533,25 @@ export function importBacklog(projectDir: string, opts: ImportOptions = {}): Imp
 
         ensureStorageMode(resolved.projectKey, now);
 
+        skippedConflicts = [];
+        forcedOverwrites = [];
+
+        // FG-608: snapshot the prune CANDIDATE set BEFORE this source's membership
+        // is replaced. Candidates are everything ANY source (live or forgotten) has
+        // ever been recorded as holding — see allMembership for why "what THIS
+        // source used to claim" is too narrow across imports.
+        const previous = {
+          ticket: allMembership(resolved.projectKey, "ticket"),
+          relation: allMembership(resolved.projectKey, "relation"),
+          blocker_evidence: allMembership(resolved.projectKey, "blocker_evidence"),
+        };
+
+        upsertBacklogSource(resolved.projectKey, sourceId, importedFrom, now);
+
+        const ticketMembers: MembershipSnapshot = [];
+        const relationMembers: MembershipSnapshot = [];
+        const evidenceMembers: MembershipSnapshot = [];
+
         for (const t of tickets) {
           const dbStatus = mapStatusToDb(t.status);
           const row: TicketRow = {
@@ -288,6 +569,94 @@ export function importBacklog(projectDir: string, opts: ImportOptions = {}): Imp
             importedAt: now,
             importedFrom,
           };
+
+          // MEMBERSHIP is recorded for every ticket this source's Markdown carries,
+          // conflict or not: the source genuinely claims the id, and dropping the
+          // claim on a conflict would make a skipped ticket look prunable.
+          ticketMembers.push({ ticketId: t.id, memberKey: "" });
+          for (const related of t.related ?? []) {
+            relationMembers.push({ ticketId: t.id, memberKey: relationMemberKey(related, "related") });
+          }
+          if (t.status === "blocked") {
+            evidenceMembers.push({ ticketId: t.id, memberKey: LEGACY_BLOCKED_SOURCE });
+          }
+
+          const existing = getTicket(resolved.projectKey, t.id);
+          const incomingHash = ticketContentHash({
+            type: row.type,
+            status: row.status,
+            title: row.title,
+            body: row.body,
+            created: row.created,
+            closed: row.closed,
+            closedCommit: row.closedCommit,
+            epic: row.epic,
+          });
+          const conflict = detectImportConflict(existing, incomingHash);
+
+          if (conflict.conflict && !opts.force) {
+            // SKIP + record. Markdown never silently clobbers a newer DB edit.
+            // Deliberately NOT an abort: one diverged ticket must not block the
+            // import of the other 400.
+            skippedConflicts.push(t.id);
+            upsertTicketEvent({
+              eventKey: `import-conflict:${resolved.projectKey}:${t.id}:${incomingHash.slice(0, 16)}`,
+              projectKey: resolved.projectKey,
+              ticketId: t.id,
+              eventType: "import_conflict",
+              payload: {
+                resolution: "skipped",
+                reason: conflict.reason,
+                sourceId,
+                importedFrom,
+                dbRevision: existing?.revision ?? null,
+                dbBodyHash: existing?.bodyHash ?? null,
+                dbImportBasisHash: existing?.importBasisHash ?? null,
+                markdownBodyHash: incomingHash,
+              },
+              createdAt: now,
+            });
+            continue;
+          }
+
+          if (conflict.conflict) {
+            // --force, explicitly supplied. Record BEFORE/AFTER evidence: a forced
+            // overwrite destroys a db edit, so the event has to carry enough to
+            // reconstruct what was lost, not merely note that it happened.
+            forcedOverwrites.push(t.id);
+            upsertTicketEvent({
+              eventKey: `import-conflict:${resolved.projectKey}:${t.id}:${incomingHash.slice(0, 16)}`,
+              projectKey: resolved.projectKey,
+              ticketId: t.id,
+              eventType: "import_conflict",
+              payload: {
+                resolution: "forced",
+                reason: conflict.reason,
+                sourceId,
+                importedFrom,
+                before: existing
+                  ? {
+                      revision: existing.revision ?? null,
+                      bodyHash: existing.bodyHash ?? null,
+                      importBasisHash: existing.importBasisHash ?? null,
+                      type: existing.type,
+                      status: existing.status,
+                      title: existing.title,
+                      body: existing.body,
+                    }
+                  : null,
+                after: {
+                  bodyHash: incomingHash,
+                  type: row.type,
+                  status: row.status,
+                  title: row.title,
+                  body: row.body,
+                },
+              },
+              createdAt: now,
+            });
+          }
+
           upsertTicket(row);
 
           // Deterministic "imported" event key -> idempotent re-import.
@@ -323,13 +692,20 @@ export function importBacklog(projectDir: string, opts: ImportOptions = {}): Imp
           }
         }
 
-        // The DB is a non-authoritative shadow this slice: import is
-        // idempotent-ADDITIVE (every write above is an UPSERT), never destructive.
-        // A ticket removed from ONE source's Markdown is deliberately NOT deleted —
-        // with a single imported_from, cross-source pruning could destroy a ticket a
-        // sibling linked worktree still owns. Aggressive removal reconciliation is
-        // deferred to the authoritative-cutover slice; a stale row in an unread
-        // shadow is harmless.
+        // This source's membership is now exactly what its Markdown carries.
+        replaceSourceMembership(resolved.projectKey, sourceId, "ticket", ticketMembers, now);
+        replaceSourceMembership(resolved.projectKey, sourceId, "relation", relationMembers, now);
+        replaceSourceMembership(resolved.projectKey, sourceId, "blocker_evidence", evidenceMembers, now);
+
+        // FG-608 (inherited from FG-606, which deliberately deferred it here): the
+        // shadow now equals the current Markdown set INCLUDING removals. Slice A's
+        // import was append-only because a single `imported_from` could not tell
+        // "removed from the project" from "absent from THIS worktree"; per-source
+        // membership can, so the prune is finally safe — and still fails closed.
+        const pruned = reconcileRemovals(resolved.projectKey, sourceId, previous);
+        prunedTickets = pruned.prunedTickets;
+        prunedRelations = pruned.prunedRelations;
+        prunedBlockerEvidence = pruned.prunedBlockerEvidence;
 
         // next_seq means "the next id to allocate" (Slice B). Seed it from the
         // SAME observation `mode --set db` re-checks at the flip — this checkout's
@@ -362,5 +738,11 @@ export function importBacklog(projectDir: string, opts: ImportOptions = {}): Imp
     ticketCount: tickets.length,
     rung: resolvedRung,
     persistedConfig: persistToConfig,
+    sourceId,
+    skippedConflicts,
+    forcedOverwrites,
+    prunedTickets,
+    prunedRelations,
+    prunedBlockerEvidence,
   };
 }
