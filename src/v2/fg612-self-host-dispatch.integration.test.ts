@@ -16,8 +16,8 @@
 
 import { test, beforeEach, afterEach, mock } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { Command } from "commander";
 import type { Database as DatabaseInstance } from "better-sqlite3";
@@ -29,7 +29,7 @@ import { invoke, createInvokeRun, type DockerExecFn } from "./invoke.js";
 import { runNext } from "./runNext.js";
 import { startRun } from "./startRun.js";
 import { retry, dispatchRetriedAdHocTask } from "./retry.js";
-import { forgeSourceRoot, _resetSelfHostWarnings } from "./self-host-guard.js";
+import { forgeSourceRoot, isSelfHostDispatch, _resetSelfHostWarnings } from "./self-host-guard.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { registerNew } from "../cli/commands/new.js";
 import { buildReviewLoopDeps } from "../cli/commands/review-loop.js";
@@ -402,11 +402,19 @@ test("project is a SUBDIR of the forge source root (the --allow-subproject shape
 test("a sibling directory that merely shares a string prefix with the forge root dispatches normally", async () => {
   // `<root>-scratch` startsWith `<root>` — the exact false positive a naive
   // prefix compare produces, and it would refuse a legitimate project forever.
-  // Suffix is per-FILE — see the matching note in
-  // src/cli/fg612-self-host-cli.integration.test.ts.
-  const sibling = `${SELF_HOST}-fg612-sibling-dispatch`;
-  mkdirSync(sibling, { recursive: true });
-  tmpDirs.push(sibling);
+  //
+  // FG-644: the fixture used to be mkdir'd literally next to the forge root, which
+  // is unwritable when the checkout is mounted at /project — the shape every agent
+  // container has. The collision itself needs no directory (canonical() falls back
+  // to resolve() for a path that does not exist), so it is asserted against the REAL
+  // root this process is executing from, and the wired dispatch below runs against a
+  // project the test owns.
+  assert.equal(
+    isSelfHostDispatch(`${SELF_HOST}-fg612-sibling-dispatch`, SELF_HOST),
+    false,
+    "a string-prefix neighbour of the forge root is not self-host",
+  );
+  const sibling = tempProject("forge-fg612-sibling-dispatch-");
   const spy = spyExec();
 
   const r = await invoke({ agentRole: "engineer", task: "normal work", projectDir: sibling, dockerExec: spy.exec });
@@ -425,9 +433,13 @@ test("a project path spelled through a symlinked parent still refuses (the /var 
   tmpDirs.push(linkFarm);
   const aliasParent = join(linkFarm, "alias");
   symlinkSync(resolve(SELF_HOST, ".."), aliasParent);
-  const viaLink = join(aliasParent, SELF_HOST.slice(resolve(SELF_HOST, "..").length + 1));
+  // basename, not a slice of the parent's length: a checkout mounted AT a filesystem
+  // root (/project, every agent container) has parent "/", and the arithmetic
+  // spelling ate the first character of the name.
+  const viaLink = join(aliasParent, basename(SELF_HOST));
 
   assert.notEqual(viaLink, SELF_HOST, "fixture: a different string for the same tree");
+  assert.equal(realpathSync(viaLink), SELF_HOST, "fixture: the alias must spell the SAME tree");
   await assertRefusedWithoutTrace("symlinked parent", (exec) =>
     invoke({ agentRole: "engineer", task: "edit forge via an alias", projectDir: viaLink, dockerExec: exec }),
   );

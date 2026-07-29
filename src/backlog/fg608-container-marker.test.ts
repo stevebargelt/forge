@@ -12,8 +12,16 @@
 //
 // The fix is a MARKER FILE written by the host into the directory it binds `:ro`,
 // resolved from a COMPILED-IN path first. These tests exercise the marker's own
-// rules on the host (the compiled-in-path PRECEDENCE, which needs a real mount, is
-// asserted in the worktree tier against a real container).
+// rules against a TEST-OWNED mount root (the real one, `/forge-backlog`, is
+// asserted end to end in the worktree tier against a real container).
+//
+// FG-644: the mount root is test-owned rather than ambient because these tests run
+// INSIDE an agent container as often as on a host, and that container carries a real
+// marker at the compiled-in path. Probing it made four of these assertions depend on
+// whatever mode the host happened to dispatch — the suite passed on a laptop and
+// failed under `forge invoke`, asserting something different in each. Every case
+// below now supplies its own marker, so the tests execute and mean the same thing
+// everywhere.
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -31,6 +39,7 @@ import {
   containerListTickets,
   hasContainerBacklogAuthority,
   inContainerBacklogMode,
+  setAuthorityMountForTest,
   writeAuthorityMarker,
   AUTHORITY_MARKER_BASENAME,
   CONTAINER_AUTHORITY_MOUNT,
@@ -49,10 +58,15 @@ beforeEach(() => {
   db = makeInMemoryDb();
   prev = setDbForTest(db);
   delete process.env[SNAPSHOT_DIR_ENV];
+  // An empty, test-owned stand-in for the compiled-in mount. Every case that means
+  // "no marker at the fixed path" gets that fact deterministically — on a host, and
+  // inside a container whose real /forge-backlog is mounted and populated.
+  setAuthorityMountForTest(newDir());
 });
 
 afterEach(() => {
   closeContainerAuthorityForTest();
+  setAuthorityMountForTest(null);
   delete process.env[SNAPSHOT_DIR_ENV];
   setDbForTest(prev as DatabaseInstance);
   db.close();
@@ -119,10 +133,34 @@ test("FG-608 F2: the marker path is COMPILED IN — an agent cannot relocate the
   // The env var is the host-side test seam only. The resolver checks this exact
   // absolute path FIRST and, when it finds a marker there, never consults the
   // environment at all — which is what makes `unset` and repointing both inert
-  // inside a real container. (The precedence itself is exercised in a real
-  // container in the worktree tier; here we pin the constant it depends on.)
+  // inside a real container. Here we pin the constant the precedence depends on;
+  // the precedence itself is the next test, and the real mount is exercised
+  // against a real container in the worktree tier.
   assert.equal(CONTAINER_AUTHORITY_MOUNT, "/forge-backlog");
   assert.equal(AUTHORITY_MARKER_BASENAME, "authority.json");
+});
+
+test("FG-608 F2: the fixed mount OUTRANKS the env var — repointing it at an agent-authored dir is inert", () => {
+  // Both markers exist and disagree. The fixed path says markdown (no snapshot for
+  // this task); the env var points at a directory carrying a db marker AND a real,
+  // matching snapshot — the best forgery an agent could assemble. The resolver must
+  // never look at it.
+  const mount = newDir();
+  writeAuthorityMarker(mount, { mode: "markdown", projectKey: KEY, taskId: "task-1" });
+  setAuthorityMountForTest(mount);
+
+  const forged = newDir();
+  seed(KEY, "FG-1", "the agent's own answer");
+  publishSnapshotOnce(KEY, forged);
+  writeAuthorityMarker(forged, { mode: "db", projectKey: KEY, taskId: "task-1" });
+  process.env[SNAPSHOT_DIR_ENV] = forged;
+
+  assert.equal(hasContainerBacklogAuthority(), false, "the dispatched mode is the fixed marker's, not the forgery's");
+  assert.throws(
+    () => containerReadTicket("FG-1"),
+    (e: Error) => e instanceof ContainerAuthorityUnavailable && /says 'markdown'/.test(e.message),
+    "a readable, matching snapshot the agent pointed at is still not this task's authority",
+  );
 });
 
 test("FG-608 F2: a snapshot published for ANOTHER project_key is refused, not answered", () => {

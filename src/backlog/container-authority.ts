@@ -62,6 +62,24 @@ export const CONTAINER_AUTHORITY_MOUNT = "/forge-backlog";
  *  "this process is a dispatched agent container" MEANS here. */
 export const AUTHORITY_MARKER_BASENAME = "authority.json";
 
+/** The mount root the resolver actually probes. Production never moves it off
+ *  CONTAINER_AUTHORITY_MOUNT; the setter below exists because these rules have to be
+ *  testable INSIDE an agent container, which carries a real marker at the compiled-in
+ *  path — a suite that probed the ambient one would assert against whatever the host
+ *  happened to dispatch and mean something different in every environment.
+ *
+ *  It does not weaken F2. That finding is about what a DISPATCHED AGENT can influence
+ *  from outside the process: an env var it owns, or a directory it wrote. A module
+ *  variable set by in-process code is neither — reaching it already requires editing
+ *  forge's own source, which is not the threat the gate is for. */
+let authorityMountRoot: string = CONTAINER_AUTHORITY_MOUNT;
+
+/** Test-only: point the compiled-in probe at a directory the test owns. Pass null to
+ *  restore the production path. */
+export function setAuthorityMountForTest(dir: string | null): void {
+  authorityMountRoot = dir ?? CONTAINER_AUTHORITY_MOUNT;
+}
+
 /** What the host dispatched as this task's ticket authority.
  *
  *   db       — a snapshot was published into this directory; it is the ONLY ticket
@@ -158,8 +176,8 @@ function parseMarker(path: string): AuthorityMarker {
  *  branch below is reachable ONLY on a host with no marker at the fixed path,
  *  which is exactly the host-side test seam. */
 export function containerAuthority(): ContainerAuthority | null {
-  const fixed = join(CONTAINER_AUTHORITY_MOUNT, AUTHORITY_MARKER_BASENAME);
-  if (existsSync(fixed)) return { dir: CONTAINER_AUTHORITY_MOUNT, marker: parseMarker(fixed) };
+  const fixed = join(authorityMountRoot, AUTHORITY_MARKER_BASENAME);
+  if (existsSync(fixed)) return { dir: authorityMountRoot, marker: parseMarker(fixed) };
   const envDir = (process.env[SNAPSHOT_DIR_ENV] ?? "").trim();
   if (!envDir) return null;
   const marked = join(envDir, AUTHORITY_MARKER_BASENAME);

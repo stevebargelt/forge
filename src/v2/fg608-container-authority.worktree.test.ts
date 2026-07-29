@@ -29,7 +29,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import Database from "better-sqlite3";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest, writeTransaction } from "../store/db.js";
@@ -165,13 +165,20 @@ test("FG-608 (CLI half): every mutating verb refuses under a mounted authority",
   const tsx = existsSync(localTsx) ? localTsx : "tsx";
   const projectDir = newDir("fg608-cli-proj-");
 
+  // FG-644: point the spawned CLI's compiled-in mount probe at an empty directory the
+  // test owns. Without this the child reads the marker of the agent container the suite
+  // is running INSIDE, and every case below asserts against that host's dispatch rather
+  // than its own fixture.
+  const testkit = pathToFileURL(resolve(here, "..", "backlog", "container-authority.testkit.ts")).href;
+  const ownMount = newDir("fg608-cli-mount-root-");
+
   const run = (args: string[], env: Record<string, string>) => {
     try {
-      const stdout = execFileSync(tsx, [entry, ...args], {
+      const stdout = execFileSync(tsx, ["--import", testkit, entry, ...args], {
         cwd: projectDir,
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, ...env },
+        env: { ...process.env, FORGE_TEST_AUTHORITY_MOUNT: ownMount, ...env },
       });
       return { status: 0, stdout, stderr: "" };
     } catch (e) {

@@ -143,7 +143,12 @@ run_tier_in_image() {
   # node_modules is excluded because the host's is built for the host (macOS arm64
   # esbuild / better-sqlite3 bindings) and will not load on the container's platform;
   # `npm ci` below builds the right one. .git is carried in: forge's own tests walk up
-  # from cwd looking for a repo, same reason forge-test cold-copies it.
+  # from cwd looking for a repo.
+  #
+  # NOTE (FG-644): this path still hands the container the HOST's git state verbatim, so
+  # run it from a committed checkout — launch-cli.integration.test.ts builds a real
+  # release, and forge refuses a dirty builder. forge-test no longer has that constraint
+  # (it commits its scratch); this script has not been given the same treatment.
   echo "==> copying the working tree into $DEST (excluding node_modules)"
   docker exec -u agent "$cid" mkdir -p "$DEST"
   tar -cf - -C "$REPO_ROOT" \

@@ -22,10 +22,11 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isSelfHostDispatch } from "../v2/self-host-guard.js";
 
 // src/cli/<this file> → the checkout root. Derived from this module rather than
 // cwd so the test targets the tree it was loaded from — the same tree the
@@ -175,9 +176,14 @@ test("a project spelled through a symlinked parent still refuses (the /var → /
   const linkFarm = temp("forge-fg612-link-");
   const aliasParent = join(linkFarm, "alias");
   symlinkSync(dirname(REPO_ROOT), aliasParent);
-  const viaLink = join(aliasParent, REPO_ROOT.slice(dirname(REPO_ROOT).length + 1));
+  // basename, not a slice of the parent's length: a checkout mounted AT a filesystem
+  // root (/project, every agent container) has dirname "/", and the arithmetic
+  // spelling ate the first character — the alias pointed at a tree that does not
+  // exist, so the case passed for the wrong reason or not at all.
+  const viaLink = join(aliasParent, basename(REPO_ROOT));
 
   assert.notEqual(viaLink, REPO_ROOT, "fixture: a different string for the same tree");
+  assert.equal(realpathSync(viaLink), REPO_ROOT, "fixture: the alias must spell the SAME tree");
   assertRefusedAndTraceless(
     "symlinked parent",
     runForge(["invoke", "engineer", "--task", "t", "--project", viaLink, "--unrouted"]),
@@ -203,16 +209,24 @@ test("a SUBDIR of the forge checkout (--allow-subproject) refuses", () => {
 });
 
 test("a sibling directory that merely shares a string prefix with the checkout is NOT refused", () => {
-  // Suffix is per-FILE: fg612-self-host-dispatch.integration.test.ts builds the
-  // same kind of sibling off the same repo root, and the two files can run
-  // concurrently (same shard, or unsharded) — a shared path means one file's
-  // cleanup deletes the other's fixture mid-test.
-  const sibling = `${REPO_ROOT}-fg612-sibling-cli`;
-  mkdirSync(join(sibling, ".git"), { recursive: true });
-  tmpDirs.push(sibling);
+  // `<root>-scratch` startsWith `<root>` — the exact false positive a naive prefix
+  // compare produces, and it would refuse a legitimate project forever.
+  //
+  // FG-644: this used to mkdir that directory literally next to the checkout. A
+  // checkout mounted at /project has an unwritable parent, so the fixture died
+  // EACCES and the case never ran in the environment agents actually use. The
+  // predicate needs no directory — canonical() falls back to resolve() for a path
+  // that does not exist — so the collision is asserted against the REAL source root
+  // the spawned CLI derives, and the "reaches dispatch" half is proven below on a
+  // project the test owns.
+  assert.equal(
+    isSelfHostDispatch(`${REPO_ROOT}-fg612-sibling-cli`, REPO_ROOT),
+    false,
+    "a string-prefix neighbour of the checkout is not self-host",
+  );
   assertReachedDispatch(
-    "string-prefix sibling",
-    runForge(["invoke", "engineer", "--task", "t", "--project", sibling, "--unrouted"]),
+    "test-owned project",
+    runForge(["invoke", "engineer", "--task", "t", "--project", project("forge-fg612-sibling-cli-"), "--unrouted"]),
   );
 });
 
