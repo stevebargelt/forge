@@ -53,11 +53,19 @@ const projectsFixture = [{
 // Epic = 1, Story = 2. One story is done so the status filter has something to
 // narrow to. Bodies are empty so search matches only the titles we assert on.
 function ticket(id: string, type: string, status: string, title: string) {
-  return { id, type, status, title, body: "", epic: null, checkoutDir: "/workspace/forge", checkoutBranch: "main" };
+  return { id, type, status, title, body: "", epic: null };
 }
+// FG-608: a payload carrying tickets ALWAYS carries the project_key they belong
+// to and the store that is authoritative for them, and the board reads both
+// (client/backlog-state.js) — a null key means "never imported" and renders the
+// no-truth message INSTEAD of the groups, whatever the ticket array holds. This
+// fixture predates those fields, so without them the board legitimately rendered
+// zero groups and every count assertion below measured an empty board.
 const backlogFixture = {
   notes: "# Main handoff\n\nMain checkout context.",
   notesByCheckout: [],
+  ticketsProjectKey: "pk-fixture",
+  ticketsStorageMode: "db",
   tickets: [
     ticket("FG-100", "epic", "active", "Alpha epic"),
     ticket("FG-101", "story", "active", "Bravo story"),
