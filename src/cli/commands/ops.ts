@@ -7,7 +7,8 @@ import { performOpsRepair, type OpsRepairOutcome } from "../../ops/repair.js";
 import type { LivenessProbe } from "../../ops/reconcile-candidate.js";
 import { getTask } from "../../store/tasks.js";
 import { acquireRunLock, releaseRunLock, RunBusyError } from "../../util/run-lock.js";
-import { getDb } from "../../store/db.js";
+import { getDb, storeExists } from "../../store/db.js";
+import { renderedEmptyStore } from "../no-store.js";
 import { logEvent } from "../../store/events.js";
 import { defaultContainerReap, defaultContainerList, type ContainerReap, type ContainerLister } from "../../v2/reconcile.js";
 import { emitMilestone } from "../../notify/milestone.js";
@@ -154,6 +155,11 @@ export function performOpsReapContainers(
     return { dryRun: !!opts.dryRun, scanned: 0, reaped: [], retained: [], errors: [], completedTaskLeaks: [], completedTaskLeaksUnconfirmed: [], absenceHealed: [], resolutionWriteErrors: [], dockerUnavailable: true };
   }
 
+  // No store means no forge task can own any of these containers; the reap has
+  // nothing it may act on and must not open (or create) a store to say so.
+  if (!storeExists()) {
+    return { dryRun: !!opts.dryRun, scanned: containers.length, reaped: [], retained: [], errors: [], completedTaskLeaks: [], completedTaskLeaksUnconfirmed: [], absenceHealed: [], resolutionWriteErrors: [], dockerUnavailable: false };
+  }
   const db = getDb({ readOnly: true });
   const lookupTask = db.prepare(
     `SELECT t.status AS status, t.completed_at AS completedAt, r.project_dir AS projectDir, t.run_id AS runId
@@ -301,6 +307,7 @@ export function registerOps(program: Command): void {
     )
     .action(async (opts: { json?: boolean; all?: boolean; project?: string }) => {
       ensureForgeDirs();
+      if (renderedEmptyStore(opts.json, [], "No forge store on this host yet — no incidents to report.")) return;
       const projectDir = opts.all ? undefined : resolve(opts.project ?? process.cwd());
       const incidents = runOpsCheck({ projectDir });
 

@@ -23,6 +23,7 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { ensureForgeDirs } from "../../util/paths.js";
 import { getDb } from "../../store/db.js";
+import { renderedEmptyStore } from "../no-store.js";
 import { captureUsageForTask, extractUsageByLogFormat } from "../../store/model-calls.js";
 
 // #262: read the runtime log_format recorded in the task's manifest (written
@@ -84,6 +85,11 @@ export function registerUsage(program: Command): void {
     .action((opts: { by: string; since: string; project?: string; run?: string; task?: string; json?: boolean; limit: number }) => {
       ensureForgeDirs();
       const by = parseGroupBy(opts.by);
+      if (renderedEmptyStore(
+        opts.json,
+        { groupBy: by, since: opts.since, project: opts.project ?? null, run: opts.run ?? null, task: opts.task ?? null, rows: [] },
+        "No usage data. Run `forge usage backfill` to populate from existing run logs, or run a fresh forge dispatch.",
+      )) return;
       const sinceClause = parseSinceClause(opts.since);
       const rows = aggregate({ by, sinceClause, projectFilter: opts.project, runFilter: opts.run, taskFilter: opts.task, limit: opts.limit });
       if (opts.json) {

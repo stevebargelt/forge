@@ -123,33 +123,29 @@ RUN npm install -g @playwright/test@${PLAYWRIGHT_VERSION} \
     && test -n "$CHROME_PATH" \
     && ln -sf "$CHROME_PATH" /usr/local/bin/chromium
 
-# FG-608: the in-container `forge backlog` reader.
+# FG-608: the in-container `forge backlog` reader — SHIPPED, not merely claimed.
 #
 # Before this the image had NO forge CLI at all (claude-code / codex / pi / tsx and
 # two shell scripts), so "forge backlog show/list resolves the mounted authority
-# in-container" is an IMAGE change, not just a code change — and it drags
-# better-sqlite3's NATIVE build into the image (see the native-arm64 image ADR and
-# FORGE-DEC-011's history of native SQLite bindings breaking across this mount
-# layer). Only better-sqlite3 and commander are installed: the in-container reader
-# opens a published snapshot file directly and never touches the host store, so it
-# needs no yaml/zod/ws surface.
+# in-container" was true only in a test that bind-mounted the host checkout at
+# /forge-src and ran tsx against it. Production creates no such mount. These two
+# files are the whole surface: `forge` on PATH, and the reader it execs.
 #
-# Deliberately NOT a copy of the forge source tree. The source is mounted at run
-# time when a task needs it; baking a version in would let a stale image answer
-# ticket questions from an old reader. What the image owns is the NATIVE MODULE
-# built for this container's platform, which is the part that cannot be mounted.
+# NO NATIVE MODULE. The reader uses node:sqlite (Node 24 ships it), never
+# better-sqlite3 — a native binding has to be built for this image's platform and is
+# exactly the thing that breaks across this mount layer (FORGE-DEC-011). That also
+# keeps the reader BIND-MOUNTABLE: spawn.ts binds the dispatching forge's copies of
+# both files over these same paths, so a stale image cannot answer ticket questions
+# with an old reader, and a fresh image works even when the bind is absent.
 #
-# This layer changes the image digest: an operator must REBUILD AND REDISTRIBUTE
-# the agent image before an in-container `forge backlog` read will work. Until
-# then the mount is present and the reader refuses with a clear message rather
-# than silently answering from the shared oauth volume.
-ENV FORGE_CONTAINER_NODE_PATH=/opt/forge-node/node_modules
-RUN mkdir -p /opt/forge-node \
-    && cd /opt/forge-node \
-    && npm init -y >/dev/null \
-    && npm install --no-audit --no-fund better-sqlite3@^12.11.1 commander@^12.1.0 \
-    && node -e "require('better-sqlite3'); console.log('better-sqlite3 loads natively')" \
-    && chmod -R a+rX /opt/forge-node
+# The reader NEVER opens the host store. It resolves the authority marker on the
+# read-only mount or refuses — see docker/forge-backlog-reader.mjs for why a
+# fallback to $HOME/.forge would answer from the shared oauth volume.
+COPY forge-backlog-reader.mjs /usr/local/lib/forge/forge-backlog-reader.mjs
+COPY forge-backlog-bin.sh /usr/local/bin/forge
+RUN chmod +x /usr/local/bin/forge \
+    && chmod a+r /usr/local/lib/forge/forge-backlog-reader.mjs \
+    && node --no-warnings -e "import('node:sqlite').then(m => { new m.DatabaseSync(':memory:').close(); console.log('node:sqlite loads'); })"
 
 # forge-test wrapper (#111): rebuilds better-sqlite3 for this container's
 # platform inside a writable scratch dir, then runs tests there. Works around

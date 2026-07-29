@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import { statSync, readFileSync, openSync, readSync, closeSync } from "node:fs";
 import { join } from "node:path";
 import { getTask, tasksForRun } from "../../store/tasks.js";
+import { assertStoreForLookup } from "../no-store.js";
 import { getRun } from "../../store/runs.js";
 import { verdictsForTask } from "../../store/verdicts.js";
 import { getDb } from "../../store/db.js";
@@ -809,6 +810,7 @@ export function registerShow(program: Command, deps: ShowDeps = {}): void {
     )
     .action((id: string, opts: { json?: boolean; reconcile?: boolean; diagnostic?: boolean }) => {
       ensureForgeDirs();
+      assertStoreForLookup(`run or task ${id}`);
       // #298: forge show is READ-ONLY by default. A diagnostic that mutated state
       // (reconcileRun, formerly run unconditionally here) is exactly the incident
       // this fixes — inspecting a stale-running task silently reconciled it. The

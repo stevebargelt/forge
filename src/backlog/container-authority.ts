@@ -35,15 +35,50 @@
 
 import Database from "better-sqlite3";
 import type { Database as DatabaseInstance } from "better-sqlite3";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { SNAPSHOT_DB_BASENAME } from "./snapshot.js";
 import type { StructuredTicket, TicketStatus, TicketType } from "./structured.js";
 
-/** The mount pointer. Set by spawn.ts alongside the read-only directory mount;
- *  its ABSENCE is what tells this module it is not running under a mounted
- *  authority. Never defaulted. */
+/** The mount pointer. Set by spawn.ts alongside the read-only directory mount.
+ *
+ *  FG-608 red F2: this env var is NOT the authority gate. A child process owns its
+ *  own environment — an agent can `unset` it or repoint it at a directory it wrote
+ *  itself — so gating container mode on it meant the gate could be opened from
+ *  inside. It survives only as the HOST-SIDE test seam (a host process pointing at
+ *  a published directory exercises the real read path) and as a convenience for the
+ *  in-container reader; the MARKER below outranks it and is checked first. */
 export const SNAPSHOT_DIR_ENV = "FORGE_BACKLOG_SNAPSHOT_DIR";
+
+/** The fixed in-container path of the read-only authority mount. Compiled in, never
+ *  read from the environment — that is the whole point: an agent cannot make this
+ *  path stop existing, so it cannot make itself look like a host process. Must match
+ *  the mount spawn.ts writes. */
+export const CONTAINER_AUTHORITY_MOUNT = "/forge-backlog";
+
+/** The unforgeable container-runtime marker. Written by the host into the mount
+ *  source BEFORE the container starts, and readable at a FIXED path on a `:ro`
+ *  bind — the one primitive passwordless root cannot undo. Its presence is what
+ *  "this process is a dispatched agent container" MEANS here. */
+export const AUTHORITY_MARKER_BASENAME = "authority.json";
+
+/** What the host dispatched as this task's ticket authority.
+ *
+ *   db       — a snapshot was published into this directory; it is the ONLY ticket
+ *              truth this container may read, and its absence is a refusal.
+ *   markdown — the project has not cut over; backlog/*.md in the mounted checkout
+ *              is the truth, exactly as on the host. No snapshot exists.
+ *   unknown  — the host could not resolve the project's store at dispatch time. Not
+ *              a licence to guess: the host store stays unreachable either way. */
+export type AuthorityMode = "db" | "markdown" | "unknown";
+
+export type AuthorityMarker = {
+  kind: "forge-backlog-authority";
+  version: 1;
+  mode: AuthorityMode;
+  projectKey: string | null;
+  taskId: string | null;
+};
 
 /** Dispatch-time ticket evidence, injected as `<id>:<revision>:<bodyHash>`. The
  *  dispatched snapshot and the live authority are TWO SEPARATE RECORDS; neither
@@ -64,26 +99,135 @@ export class ContainerMutationRefused extends Error {
   }
 }
 
-/** True when this process is running against a mounted backlog authority. Callers
- *  branch on THIS, never on "am I in a container" heuristics — the mount is the
- *  fact, and a host process with the env set is deliberately treated the same way
- *  (that is how the host-side tests exercise the real read path). */
+export type ContainerAuthority = { dir: string; marker: AuthorityMarker };
+
+/** HOST SIDE. The one writer of the marker, kept here so its shape has exactly one
+ *  definition. Called by the dispatch path (spawn.ts) into the directory it is about
+ *  to bind `:ro`, before the container starts — after which the marker is beyond the
+ *  agent's reach even with root. */
+export function writeAuthorityMarker(
+  dir: string,
+  fields: { mode: AuthorityMode; projectKey: string | null; taskId: string | null },
+): void {
+  mkdirSync(dir, { recursive: true });
+  const marker: AuthorityMarker = { kind: "forge-backlog-authority", version: 1, ...fields };
+  writeFileSync(join(dir, AUTHORITY_MARKER_BASENAME), JSON.stringify(marker, null, 2) + "\n");
+}
+
+function parseMarker(path: string): AuthorityMarker {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (e) {
+    throw new ContainerAuthorityUnavailable(
+      `forge: refusing to read the backlog — the container authority marker at ${path} exists but ` +
+        `could not be read (${(e as Error).message}). A container never falls back to the host store.`,
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new ContainerAuthorityUnavailable(
+      `forge: refusing to read the backlog — the container authority marker at ${path} is not valid ` +
+        `JSON. A malformed marker is a broken dispatch, not a licence to answer from somewhere else.`,
+    );
+  }
+  const m = parsed as Partial<AuthorityMarker>;
+  if (m.kind !== "forge-backlog-authority" || (m.mode !== "db" && m.mode !== "markdown" && m.mode !== "unknown")) {
+    throw new ContainerAuthorityUnavailable(
+      `forge: refusing to read the backlog — the container authority marker at ${path} is not a forge ` +
+        `authority marker.`,
+    );
+  }
+  return {
+    kind: "forge-backlog-authority",
+    version: 1,
+    mode: m.mode,
+    projectKey: m.projectKey ?? null,
+    taskId: m.taskId ?? null,
+  };
+}
+
+/** The dispatched authority, or null when this is an ordinary host process.
+ *
+ *  RESOLUTION ORDER IS THE SECURITY PROPERTY. The compiled-in mount path is checked
+ *  FIRST and, when its marker is there, the environment is not consulted at all —
+ *  so neither `unset FORGE_BACKLOG_SNAPSHOT_DIR` nor repointing it at an
+ *  agent-authored directory can move, weaken, or switch off the gate. The env
+ *  branch below is reachable ONLY on a host with no marker at the fixed path,
+ *  which is exactly the host-side test seam. */
+export function containerAuthority(): ContainerAuthority | null {
+  const fixed = join(CONTAINER_AUTHORITY_MOUNT, AUTHORITY_MARKER_BASENAME);
+  if (existsSync(fixed)) return { dir: CONTAINER_AUTHORITY_MOUNT, marker: parseMarker(fixed) };
+  const envDir = (process.env[SNAPSHOT_DIR_ENV] ?? "").trim();
+  if (!envDir) return null;
+  const marked = join(envDir, AUTHORITY_MARKER_BASENAME);
+  if (existsSync(marked)) return { dir: envDir, marker: parseMarker(marked) };
+  // A pointed-at directory with no marker: a hand-built snapshot dir in a host
+  // test. Treated as a db authority so the read path below is the SAME code, and
+  // the snapshot's own absence still refuses.
+  return {
+    dir: envDir,
+    marker: { kind: "forge-backlog-authority", version: 1, mode: "db", projectKey: null, taskId: null },
+  };
+}
+
+/** True when this process runs under a dispatched container authority of ANY mode.
+ *  The host store is unreachable from here regardless of what that mode is. */
+export function inContainerBacklogMode(): boolean {
+  return containerAuthority() !== null;
+}
+
+/** True when the dispatched authority is a MOUNTED SNAPSHOT — i.e. ticket reads
+ *  must resolve from the mount and mutations must refuse. Callers branch on THIS,
+ *  never on "am I in a container" heuristics. */
 export function hasContainerBacklogAuthority(): boolean {
-  return (process.env[SNAPSHOT_DIR_ENV] ?? "").trim().length > 0;
+  return containerAuthority()?.marker.mode === "db";
+}
+
+/** The refusal F1 exists for: a container whose marker says the ticket authority is
+ *  NOT a mounted snapshot must still never reach the host store. With FORGE_HOME
+ *  unset, resolveDbPath() lands on /home/agent/.forge/forge.db — the SHARED
+ *  forge-claude-oauth volume, carrying a full ticket schema for unrelated projects —
+ *  so a db-mode resolution here would answer, plausibly and wrongly, from another
+ *  project's store. */
+export function assertNoHostStoreInContainer(resolvedMode: string): void {
+  const authority = containerAuthority();
+  if (!authority) return;
+  if (authority.marker.mode === "db") return; // handled by the snapshot path
+  if (resolvedMode !== "db") return;
+  throw new ContainerAuthorityUnavailable(
+    `forge: refusing to read the backlog — this task was dispatched with a '${authority.marker.mode}' ` +
+      `ticket authority, but the store resolved to db mode inside the container. There is no mounted ` +
+      `snapshot to read, and forge does NOT fall back to $HOME/.forge here: inside an agent container ` +
+      `that path is a shared named volume belonging to no project. Ask the operator to re-dispatch ` +
+      `this task with a backlog snapshot mount.`,
+  );
+}
+
+function requireSnapshotAuthority(): ContainerAuthority {
+  const authority = containerAuthority();
+  if (!authority) {
+    throw new ContainerAuthorityUnavailable(
+      `forge: refusing to read the backlog — no ticket authority was mounted for this task. forge ` +
+        `does NOT fall back to $HOME/.forge here: inside an agent container that path is a shared ` +
+        `named volume belonging to no project, and reading it would silently answer from another ` +
+        `project's store. Ask the operator to re-dispatch this task with a backlog snapshot mount.`,
+    );
+  }
+  if (authority.marker.mode !== "db") {
+    throw new ContainerAuthorityUnavailable(
+      `forge: refusing to read the backlog — this task's authority marker says '${authority.marker.mode}', ` +
+        `so no snapshot was published for it. The marker is the dispatched fact; the environment cannot ` +
+        `override it.`,
+    );
+  }
+  return authority;
 }
 
 function snapshotPath(): string {
-  const dir = (process.env[SNAPSHOT_DIR_ENV] ?? "").trim();
-  if (!dir) {
-    throw new ContainerAuthorityUnavailable(
-      `forge: refusing to read the backlog — ${SNAPSHOT_DIR_ENV} is not set, so no ticket authority ` +
-        `was mounted for this task. forge does NOT fall back to $HOME/.forge here: inside an agent ` +
-        `container that path is a shared named volume belonging to no project, and reading it would ` +
-        `silently answer from another project's store. Ask the operator to re-dispatch this task ` +
-        `with a backlog snapshot mount.`,
-    );
-  }
-  return join(dir, SNAPSHOT_DB_BASENAME);
+  return join(requireSnapshotAuthority().dir, SNAPSHOT_DB_BASENAME);
 }
 
 let _handle: DatabaseInstance | null = null;
@@ -108,7 +252,8 @@ let _handlePath: string | null = null;
  *  permanently-stale dispatch-time snapshot the acceptance criteria forbid. Hence
  *  every call opens fresh; a snapshot database is small and this is a CLI. */
 function openSnapshot(): DatabaseInstance {
-  const path = snapshotPath();
+  const authority = requireSnapshotAuthority();
+  const path = join(authority.dir, SNAPSHOT_DB_BASENAME);
   if (!existsSync(path)) {
     throw new ContainerAuthorityUnavailable(
       `forge: refusing to read the backlog — the mounted authority at ${path} does not exist. ` +
@@ -127,6 +272,27 @@ function openSnapshot(): DatabaseInstance {
   const db = new Database(path, { readonly: true, fileMustExist: true });
   _handle = db;
   _handlePath = path;
+  // F2: the artifact must MATCH THE DISPATCHED MOUNT, not merely be openable. A
+  // file that opens but carries no snapshot_meta, or one published for a different
+  // project_key than the host dispatched, is not this task's authority — answering
+  // from it is the same failure as answering from the shared volume.
+  const meta = db
+    .prepare(`SELECT project_key FROM snapshot_meta LIMIT 1`)
+    .get() as { project_key: string } | undefined;
+  if (!meta) {
+    throw new ContainerAuthorityUnavailable(
+      `forge: the mounted backlog authority at ${path} carries no snapshot_meta row — it is not a ` +
+        `forge backlog snapshot.`,
+    );
+  }
+  if (authority.marker.projectKey && meta.project_key !== authority.marker.projectKey) {
+    throw new ContainerAuthorityUnavailable(
+      `forge: refusing to read the backlog — the mounted snapshot at ${path} was published for ` +
+        `project_key '${meta.project_key}', but this task was dispatched against ` +
+        `'${authority.marker.projectKey}'. A snapshot that does not match the dispatched mount is ` +
+        `another project's ticket truth.`,
+    );
+  }
   return db;
 }
 
@@ -270,10 +436,17 @@ export function describeRevisionDrift(live: ContainerTicket): string | null {
  *  a derived read artifact; the authoritative store is on the host and is not
  *  reachable from here by design. */
 export function refuseContainerMutation(verb: string): never {
+  // The reason is mode-specific, because a markdown-mode container has no snapshot
+  // to be read-only ABOUT — what it must not reach is the host store, and saying
+  // "read-only mounted snapshot" there would be a plausible lie.
+  const snapshot = containerAuthority()?.marker.mode === "db";
   throw new ContainerMutationRefused(
-    `forge: refusing \`backlog ${verb}\` — this task's backlog authority is a READ-ONLY mounted ` +
-      `snapshot. Ticket mutations happen on the host, against the authoritative store; there is no ` +
-      `write path from an agent container, and a local write would be invisible to everyone. Report ` +
-      `the change you want in your result instead.`,
+    `forge: refusing \`backlog ${verb}\` — ` +
+      (snapshot
+        ? `this task's backlog authority is a READ-ONLY mounted snapshot. `
+        : `this command writes the host store, which no agent container may reach. `) +
+      `Ticket mutations happen on the host, against the authoritative store; there is no write path ` +
+      `from an agent container, and a local write would be invisible to everyone. Report the change ` +
+      `you want in your result instead.`,
   );
 }

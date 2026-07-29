@@ -49,7 +49,10 @@ import { computeRepositoryEvidence } from "../store/project-registry.js";
 import { SNAPSHOT_DIR_ENV, DISPATCHED_TICKET_ENV } from "../backlog/container-authority.js";
 import { writeTicket, readTicket } from "../backlog/structured.js";
 import { clearBacklogStoreCache } from "../backlog/storage-mode.js";
-import { prepareBacklogSnapshotMount } from "./spawn.js";
+import { buildDockerArgs, prepareBacklogSnapshotMount } from "./spawn.js";
+import type { SpawnContext } from "./spawn.js";
+import type { Runtime } from "./schema.js";
+
 
 const PROBE_IMAGE = process.env["FORGE_TEST_DOCKER_PROBE_IMAGE"] ?? "busybox:latest";
 // The real agent image, when this host has one built. Only IT can run the actual
@@ -58,6 +61,23 @@ const PROBE_IMAGE = process.env["FORGE_TEST_DOCKER_PROBE_IMAGE"] ?? "busybox:lat
 // native build in). Absent, the delivery half below still runs against the probe
 // image and is asserted at the byte level.
 const AGENT_IMAGE = process.env["FORGE_TEST_AGENT_IMAGE"] ?? "agent-dev-worker:latest";
+
+const RUNTIME: Runtime = {
+  name: "fg608-amend-cli",
+  description: "FG-608 amendment-delivery test runtime stub",
+  image: AGENT_IMAGE,
+  models: { default: "test-model" },
+  auth: { mode: "oauth-volume" },
+  env: {},
+  mounts: [
+    { host: "${TASK_DIR}", container: "/task", mode: "rw", optional: false },
+    { host: "${PROJECT_DIR}", container: "/project", mode: "${PROJECT_MODE:-rw}", optional: false },
+  ],
+  invocation: { command: "claude", args: ["--model", "${MODEL}"] },
+  container: { name: "forge-${TASK_ID}", remove_on_exit: true, idle_timeout_seconds: 300 },
+  result: { file: "/task/result.json", stdout_log: "container.stdout.log", stderr_log: "container.stderr.log" },
+};
+
 
 function dockerTry(args: string[]): { ok: boolean; stdout: string; stderr: string } {
   try {
@@ -249,22 +269,34 @@ test("FG-608 property (ii): `forge backlog show` in that SAME container returns 
   registerIdentity(KEY, projectDir);
   const mount = prepareBacklogSnapshotMount(projectDir, "task-amend-cli", TICKET)!;
 
-  const repoRoot = join(new URL("../../", import.meta.url).pathname);
+  // FG-608 F3: the container is the one buildDockerArgs PRODUCES — same mounts,
+  // same env, and NO /forge-src bind of the host checkout. That bind is what made
+  // the old version of this test prove nothing about production, which mounts only
+  // the project and the authority directory.
+  const { args, imageIndex } = buildDockerArgs(RUNTIME, {
+    TASK_ID: "task-amend-cli",
+    TASK_DIR: newDir("fg608-amend-task-"),
+    PROJECT_DIR: projectDir,
+    PROJECT_MODE: "rw",
+    MODEL: "test-model",
+    SYSTEM_PROMPT: "system",
+    TASK_PACKAGE_MARKDOWN: "# Task\n",
+    TICKET_ID: TICKET,
+  } as SpawnContext);
+  assert.deepEqual(
+    args.filter((a) => a.includes("/forge-src")),
+    [],
+    "production creates no source mount — the reader must be shipped, not borrowed from the host checkout",
+  );
+
   const name = `fg608-amend-cli-${process.pid}`;
   dockerTry(["rm", "-f", name]);
   containers.push(name);
-  const started = dockerTry([
-    "run", "-d", "--name", name,
-    "-v", `${mount.hostDir}:${mount.containerDir}:ro`,
-    "-v", `${repoRoot}:/forge-src:ro`,
-    "-e", `${SNAPSHOT_DIR_ENV}=${mount.containerDir}`,
-    "-e", `${DISPATCHED_TICKET_ENV}=${mount.dispatchedTicket}`,
-    AGENT_IMAGE, "sleep", "600",
-  ]);
+  const prefix = args.slice(0, imageIndex).map((a, i) => (args[i - 1] === "--name" ? name : a));
+  const started = dockerTry([...prefix, AGENT_IMAGE, "sleep", "600"]);
   assert.equal(started.ok, true, started.stderr);
 
-  const showInContainer = () =>
-    dockerTry(["exec", name, "sh", "-c", `cd /forge-src && tsx src/cli/index.ts backlog show ${TICKET}`]);
+  const showInContainer = () => dockerTry(["exec", name, "forge", "backlog", "show", TICKET]);
 
   const before = showInContainer();
   assert.equal(before.ok, true, before.stderr);

@@ -35,7 +35,7 @@ import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest, writeTransaction } from "../store/db.js";
 import { upsertTicket, setStorageMode, ensureStorageMode } from "../store/tickets.js";
 import { publishSnapshotOnce, SNAPSHOT_DB_BASENAME } from "../backlog/snapshot.js";
-import { SNAPSHOT_DIR_ENV } from "../backlog/container-authority.js";
+import { SNAPSHOT_DIR_ENV, writeAuthorityMarker } from "../backlog/container-authority.js";
 import { prepareBacklogSnapshotMount, backlogSnapshotHostDir } from "./spawn.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -133,13 +133,22 @@ test("FG-608: the snapshot host dir is NOT under the task dir (which is mounted 
   );
 });
 
-test("FG-608: a markdown-mode project gets NO snapshot mount at all", () => {
+test("FG-608: a markdown-mode project gets the MARKER but no snapshot", () => {
   const projectDir = newDir("fg608-md-proj-");
   mkdirSync(join(projectDir, "backlog"), { recursive: true });
+  const mount = prepareBacklogSnapshotMount(projectDir, "task-1");
+  dirs.push(mount.hostDir);
+
+  // F1/F2 changed this: EVERY dispatch carries the unforgeable marker, because
+  // "there is no snapshot" is exactly the case a container must be unable to talk
+  // its way out of (unsetting the pointer used to make it look like a host
+  // process, whose resolver reaches the shared oauth volume's forge.db).
+  assert.equal(mount.mode, "markdown");
+  assert.equal(existsSync(join(mount.hostDir, "authority.json")), true, "the marker is unconditional");
   assert.equal(
-    prepareBacklogSnapshotMount(projectDir, "task-1"),
-    undefined,
-    "mounting an empty snapshot for every markdown project would put a publication on every dispatch",
+    existsSync(join(mount.hostDir, SNAPSHOT_DB_BASENAME)),
+    false,
+    "but publishing a snapshot for every markdown project would put a publication on every dispatch",
   );
 });
 
@@ -191,12 +200,23 @@ test("FG-608 (CLI half): every mutating verb refuses under a mounted authority",
     assert.match(res.stderr, /READ-ONLY mounted/);
   }
 
-  // POINTER ABSENT: refuse, never fall back. This is the measured hazard — with
-  // FORGE_HOME unset a container's resolveDbPath() lands on the SHARED
-  // forge-claude-oauth volume's forge.db, which already carries a full ticket
-  // schema for unrelated projects. A silent success there is the vacuous pass.
+  // SNAPSHOT ABSENT UNDER A CONTAINER MARKER: refuse, never fall back. This is the
+  // measured hazard (F1) — with FORGE_HOME unset a container's resolveDbPath()
+  // lands on the SHARED forge-claude-oauth volume's forge.db, which already
+  // carries a full ticket schema for unrelated projects. A silent success there is
+  // the vacuous pass. The marker is what makes "I am a container" undeniable, so
+  // the refusal cannot be escaped by clearing the pointer.
+  const markerOnly = newDir("fg608-marker-only-");
+  writeAuthorityMarker(markerOnly, { mode: "db", projectKey: KEY, taskId: "task-1" });
+  const noSnapshot = run(["backlog", "show", "FG-1"], {
+    [SNAPSHOT_DIR_ENV]: markerOnly,
+    FORGE_HOME: newDir("fg608-empty-home-"),
+  });
+  assert.notEqual(noSnapshot.status, 0, "a dispatched container with no snapshot must REFUSE");
+  assert.match(noSnapshot.stderr, /refusing to read the backlog/);
+
   const noPointer = run(["backlog", "show", "FG-1"], { FORGE_HOME: newDir("fg608-empty-home-") });
-  assert.notEqual(noPointer.status, 0, "with no mounted authority a read must refuse");
+  assert.notEqual(noPointer.status, 0, "with no mounted authority a read must not answer");
 });
 
 // ─── (a) THE MOUNT half: a real container, a write attempted WITH sudo ──────

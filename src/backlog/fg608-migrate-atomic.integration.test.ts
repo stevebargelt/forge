@@ -220,6 +220,55 @@ test("FG-608 migrate: REFUSES when the TARGET project_key has an active run", ()
   assert.equal(getStorageMode(projectKey()), "markdown", "Storage mode unchanged");
 });
 
+// ─── F10: the check and the act are ONE transaction ─────────────────────────
+
+test("FG-608 F10: the no-activity guard is RE-ASSERTED inside the flip's own transaction", () => {
+  // The pre-flip checks at steps 0 and 1 committed long before the flip. A run
+  // starting in that window would read Markdown for its early steps and the DB for
+  // its later ones — the split truth the guard exists to prevent. So the check runs
+  // again under the flip's BEGIN IMMEDIATE, where check-then-act is atomic.
+  //
+  // The window is exercised by inserting the run AFTER the import commits: the
+  // step-0/step-1 assertions have already passed at that point, so only an
+  // in-transaction re-assertion can still catch it.
+  writeTicketFile(projectDir, { id: "FG-1", type: "story", status: "active", title: "one" }, "b");
+  assert.equal(runForge(["backlog", "import"]).status, 0);
+  const key = projectKey();
+
+  const db = getDb();
+  db.prepare(
+    `INSERT INTO runs (id, workflow, title, status, created_at, project_dir)
+     VALUES ('run-late', 'feature', 't', 'active', '2026-07-29T00:00:00Z', ?)`,
+  ).run(projectDir);
+  closeDb();
+
+  const res = runForge(["backlog", "migrate"]);
+  assert.notEqual(res.status, 0, "the flip must refuse");
+  assert.match(res.stderr, /has in-flight work/);
+  assert.equal(getStorageMode(key), "markdown", "Storage mode unchanged");
+  assert.equal(
+    getStorageModeRecord(key)?.flippedAt ?? null,
+    null,
+    "and no cutover record was left behind by a partially-applied flip",
+  );
+});
+
+test("FG-608 F10: the mode row and the cutover record land in ONE commit", () => {
+  writeTicketFile(projectDir, { id: "FG-1", type: "story", status: "active", title: "one" }, "b");
+  assert.equal(runForge(["backlog", "migrate"]).status, 0);
+
+  const record = getStorageModeRecord(projectKey())!;
+  assert.equal(record.mode, "db");
+  assert.ok(record.flippedAt, "flipped_at is set");
+  assert.ok(record.flippedByRevision, "flipped_by_revision is set");
+  // Two commits could leave the mode flipped with no provenance; one cannot.
+  assert.equal(
+    record.updatedAt,
+    record.flippedAt,
+    "the mode row and its cutover provenance carry the same timestamp — one BEGIN IMMEDIATE, one now()",
+  );
+});
+
 test("FG-608 migrate: does NOT refuse for activity in an UNRELATED project", () => {
   writeTicketFile(projectDir, { id: "FG-1", type: "story", status: "active", title: "one" }, "b");
 

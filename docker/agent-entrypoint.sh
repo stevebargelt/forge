@@ -141,13 +141,17 @@ fi
 # claude-oauth container on this host regardless of project, and already carrying a
 # full ticket schema. A fallback there would silently answer from another project's
 # store, so the reader refuses instead. Nothing in this script may paper over that.
-if [ -n "${FORGE_BACKLOG_SNAPSHOT_DIR:-}" ]; then
-  if [ -n "${FORGE_CONTAINER_NODE_PATH:-}" ]; then
-    export NODE_PATH="${NODE_PATH:+${NODE_PATH}:}${FORGE_CONTAINER_NODE_PATH}"
-  fi
-  if [ ! -r "${FORGE_BACKLOG_SNAPSHOT_DIR}/backlog.db" ]; then
-    echo "forge: WARNING — FORGE_BACKLOG_SNAPSHOT_DIR=${FORGE_BACKLOG_SNAPSHOT_DIR} is set but carries no" >&2
-    echo "forge: readable backlog.db. \`forge backlog\` will refuse rather than answer from another store." >&2
+#
+# The AUTHORITY MARKER, not this env var, is what the reader gates on (FG-608
+# F1/F2) — an agent owns its own environment and could otherwise switch the gate
+# off by unsetting the pointer. This block only WARNS, and reads the marker at its
+# compiled-in path for the same reason.
+if [ -r /forge-backlog/authority.json ]; then
+  if grep -q '"mode": *"db"' /forge-backlog/authority.json 2>/dev/null \
+     && [ ! -r /forge-backlog/backlog.db ]; then
+    echo "forge: WARNING — this task was dispatched with a db ticket authority but /forge-backlog" >&2
+    echo "forge: carries no readable backlog.db. \`forge backlog\` will refuse rather than answer" >&2
+    echo "forge: from another project's store." >&2
   fi
 fi
 

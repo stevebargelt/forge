@@ -325,9 +325,18 @@ describe("guard, adversarial", () => {
     const deferredUsers = tsFilesUnder(SRC)
       .filter((f) => /\.deferred\(\)/.test(stripCommentsAndStrings(readFileSync(f, "utf8"))))
       .map((f) => relative(SRC, f));
+    // THE ARGUMENT FOR THE ONE ENTRY BELOW (FG-608 F8). buildSnapshot reads
+    // tickets, ticket_relations and blocker_evidence and writes NOTHING to that
+    // connection — every INSERT it performs goes to a SEPARATE output database
+    // handle, opened on the file it is building. Un-transacted, its three SELECTs
+    // could each observe a different committed state and publish an artifact that
+    // mixes them (a ticket whose 'blocked' status lost the blocker_evidence row
+    // that justified it). Read-only is exactly what makes .deferred() correct here:
+    // BEGIN IMMEDIATE would take the write lock for the duration of a read that
+    // runs on the tail of every ticket write.
     assert.deepEqual(
       deferredUsers,
-      [],
+      ["backlog/snapshot.ts"],
       `these files declare a .deferred() transaction: ${deferredUsers.join(", ")}. That declaration claims the txn ONLY ` +
         "READS, which the guard cannot verify. If it's true, keep it and update this test; if the txn writes, it is the " +
         "FG-548 bug wearing a label.",

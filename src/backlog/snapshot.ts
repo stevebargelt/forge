@@ -72,6 +72,17 @@ export const SNAPSHOT_DB_BASENAME = "backlog.db";
  *  Exhaustion is not silent — it sets the durable stale marker. */
 export const PUBLISH_MAX_ATTEMPTS = 3;
 
+/** Backoff between publish attempts, multiplied by the attempt number. Small on
+ *  purpose: this runs on the tail of an interactive CLI write. */
+export const PUBLISH_BACKOFF_MS = 25;
+
+/** A synchronous pause. Publication is synchronous from markBacklogDirty down, so
+ *  there is no event loop to yield to — Atomics.wait on a private buffer is the one
+ *  sleep that does not busy-spin a core. */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 // ─── the published schema (backlog-only, project-scoped) ─────────────────────
 // PROJECT ISOLATION is structural, not a WHERE clause the container could drop:
 // the snapshot file physically contains ONLY this project_key's backlog rows, and
@@ -115,7 +126,17 @@ export type SnapshotTarget = {
   projectKey: string;
   targetDir: string;
   taskId: string | null;
+  createdAt: string | null;
 };
+
+/** What the dispatch path can say about a registered target's owning task. An
+ *  UNKNOWN task is not a finished one — see releaseFinishedTargets. */
+export type TargetLiveness = "live" | "finished" | "unknown";
+
+/** How long an UNKNOWN target's row is kept fanning out before an age sweep stops
+ *  it. Long enough that a task the store has not caught up on yet is never cut off
+ *  mid-run; short enough that a genuinely orphaned row does not fan out forever. */
+export const UNKNOWN_TARGET_SWEEP_MS = 24 * 60 * 60 * 1000;
 
 export type PublicationState = {
   projectKey: string;
@@ -144,16 +165,26 @@ export function registerSnapshotTarget(projectKey: string, targetDir: string, ta
     .run(projectKey, targetDir, taskId ?? null, new Date().toISOString());
 }
 
-/** Stop fanning out to a target whose container is gone, and delete the published
- *  artifact. Without this every ticket write would keep publishing to the snapshot
- *  directory of every task the host has EVER dispatched — unbounded work per write
- *  and unbounded disk. */
-export function releaseSnapshotTarget(projectKey: string, targetDir: string): void {
+/** Stop fanning out to a target whose container is gone.
+ *
+ *  THE ROW AND THE DIRECTORY ARE TWO DECISIONS, and FG-608 red F12 is what happens
+ *  when they are one. `targetDir` is the SOURCE of a live `:ro` bind mount: deleting
+ *  it out from under a running container does not "clean up", it strands that agent
+ *  with an unlinked mount for the rest of its task. Releasing the ROW is always
+ *  safe — it only stops future fan-out — so it is unconditional. Deleting the
+ *  ARTIFACT requires positive knowledge that the owning task has finished, which
+ *  only the caller has. Default: keep the bytes. */
+export function releaseSnapshotTarget(
+  projectKey: string,
+  targetDir: string,
+  opts: { deleteArtifact?: boolean } = {},
+): void {
   getDb()
     .prepare(
       `UPDATE backlog_snapshot_targets SET released_at = ? WHERE project_key = ? AND target_dir = ?`,
     )
     .run(new Date().toISOString(), projectKey, targetDir);
+  if (!opts.deleteArtifact) return;
   try {
     rmSync(targetDir, { recursive: true, force: true });
   } catch {
@@ -162,25 +193,41 @@ export function releaseSnapshotTarget(projectKey: string, targetDir: string): vo
   }
 }
 
-/** Release every live target of `projectKey` whose owning task `isTaskLive` says is
- *  finished. Called before registering a new target (spawn.ts), which is the one
- *  moment we are guaranteed to be on the dispatch path for this project.
+/** Release every live target of `projectKey` whose owning task is FINISHED. Called
+ *  before registering a new target (spawn.ts), which is the one moment we are
+ *  guaranteed to be on the dispatch path for this project.
  *
  *  The liveness predicate is INJECTED rather than imported so this module keeps
- *  knowing only about backlogs — snapshot.ts must not grow a dependency on the
- *  task state machine. Returns the target dirs it released. */
+ *  knowing only about backlogs — snapshot.ts must not grow a dependency on the task
+ *  state machine. It returns THREE states, not a boolean, because "the store has no
+ *  row for this task" and "this task finished" are different facts and only the
+ *  second one licenses deleting a mount source. An unknown target ages out: its row
+ *  is released once it is older than UNKNOWN_TARGET_SWEEP_MS, and its bytes are
+ *  never deleted here.
+ *
+ *  Returns the target dirs it released. */
 export function releaseFinishedTargets(
   projectKey: string,
-  isTaskLive: (taskId: string) => boolean,
+  liveness: (taskId: string) => TargetLiveness,
+  now: number = Date.now(),
 ): string[] {
   const released: string[] = [];
   for (const target of liveSnapshotTargets(projectKey)) {
     // A target with no task id was registered by a test or an ad-hoc caller; it has
     // no liveness signal, so leave it alone rather than guess.
     if (!target.taskId) continue;
-    if (isTaskLive(target.taskId)) continue;
-    releaseSnapshotTarget(projectKey, target.targetDir);
-    released.push(target.targetDir);
+    const state = liveness(target.taskId);
+    if (state === "live") continue;
+    if (state === "finished") {
+      releaseSnapshotTarget(projectKey, target.targetDir, { deleteArtifact: true });
+      released.push(target.targetDir);
+      continue;
+    }
+    const age = target.createdAt ? now - Date.parse(target.createdAt) : Number.NaN;
+    if (Number.isFinite(age) && age > UNKNOWN_TARGET_SWEEP_MS) {
+      releaseSnapshotTarget(projectKey, target.targetDir);
+      released.push(target.targetDir);
+    }
   }
   return released;
 }
@@ -188,11 +235,21 @@ export function releaseFinishedTargets(
 export function liveSnapshotTargets(projectKey: string): SnapshotTarget[] {
   const rows = getDb()
     .prepare(
-      `SELECT project_key, target_dir, task_id FROM backlog_snapshot_targets
+      `SELECT project_key, target_dir, task_id, created_at FROM backlog_snapshot_targets
         WHERE project_key = ? AND released_at IS NULL ORDER BY target_dir ASC`,
     )
-    .all(projectKey) as { project_key: string; target_dir: string; task_id: string | null }[];
-  return rows.map((r) => ({ projectKey: r.project_key, targetDir: r.target_dir, taskId: r.task_id }));
+    .all(projectKey) as {
+    project_key: string;
+    target_dir: string;
+    task_id: string | null;
+    created_at: string | null;
+  }[];
+  return rows.map((r) => ({
+    projectKey: r.project_key,
+    targetDir: r.target_dir,
+    taskId: r.task_id,
+    createdAt: r.created_at,
+  }));
 }
 
 // ─── durable publication state ───────────────────────────────────────────────
@@ -286,33 +343,43 @@ type SnapshotTicketRow = {
   body_hash: string | null;
 };
 
-/** Build a complete, self-contained, NON-WAL snapshot database at `path`. */
-function buildSnapshot(projectKey: string, path: string): void {
+/** Build a complete, self-contained, NON-WAL snapshot database at `path`. Returns
+ *  the max source revision it captured — the ordering stamp publishSnapshotOnce
+ *  compares against whatever is already on disk. */
+function buildSnapshot(projectKey: string, path: string): number {
   const src = getDb();
-  const tickets = src
-    .prepare(
-      `SELECT ticket_id, type, status, title, body, created, closed, closed_commit, epic,
-              revision, body_hash
-         FROM tickets WHERE project_key = ? ORDER BY ticket_id ASC`,
-    )
-    .all(projectKey) as SnapshotTicketRow[];
-  const relations = src
-    .prepare(
-      `SELECT ticket_id, related_id, rel_type FROM ticket_relations
-        WHERE project_key = ? ORDER BY ticket_id ASC`,
-    )
-    .all(projectKey) as { ticket_id: string; related_id: string; rel_type: string }[];
-  const evidence = src
-    .prepare(
-      `SELECT ticket_id, reason, source, created_at FROM blocker_evidence
-        WHERE project_key = ? ORDER BY ticket_id ASC`,
-    )
-    .all(projectKey) as {
-    ticket_id: string;
-    reason: string | null;
-    source: string;
-    created_at: string;
-  }[];
+  // F8: ONE read transaction over all three source tables. Un-transacted, the
+  // tickets SELECT could observe a state that the relations SELECT then does not —
+  // a published artifact mixing two committed states, e.g. a ticket whose 'blocked'
+  // reconstruction lost the blocker_evidence row that justified it. A deferred read
+  // transaction gives all three statements one consistent view; it takes no write
+  // lock and blocks nobody.
+  const { tickets, relations, evidence } = src.transaction(() => ({
+    tickets: src
+      .prepare(
+        `SELECT ticket_id, type, status, title, body, created, closed, closed_commit, epic,
+                revision, body_hash
+           FROM tickets WHERE project_key = ? ORDER BY ticket_id ASC`,
+      )
+      .all(projectKey) as SnapshotTicketRow[],
+    relations: src
+      .prepare(
+        `SELECT ticket_id, related_id, rel_type FROM ticket_relations
+          WHERE project_key = ? ORDER BY ticket_id ASC`,
+      )
+      .all(projectKey) as { ticket_id: string; related_id: string; rel_type: string }[],
+    evidence: src
+      .prepare(
+        `SELECT ticket_id, reason, source, created_at FROM blocker_evidence
+          WHERE project_key = ? ORDER BY ticket_id ASC`,
+      )
+      .all(projectKey) as {
+      ticket_id: string;
+      reason: string | null;
+      source: string;
+      created_at: string;
+    }[],
+  })).deferred();
 
   const out: DatabaseInstance = new Database(path);
   try {
@@ -347,8 +414,29 @@ function buildSnapshot(projectKey: string, path: string): void {
         .prepare(`INSERT INTO snapshot_meta (project_key, published_at, max_revision) VALUES (?, ?, ?)`)
         .run(projectKey, new Date().toISOString(), maxRevision);
     }).immediate();
+    return maxRevision;
   } finally {
     out.close();
+  }
+}
+
+/** The ordering stamp already on disk at `path`, or null when there is nothing
+ *  readable there. A file that will not open or carries no snapshot_meta is treated
+ *  as ABSENT, never as newer: refusing to publish over an unreadable artifact would
+ *  leave a container permanently stranded on garbage. */
+function onDiskMaxRevision(path: string): number | null {
+  if (!existsSync(path)) return null;
+  let db: DatabaseInstance | undefined;
+  try {
+    db = new Database(path, { readonly: true, fileMustExist: true });
+    const row = db.prepare(`SELECT max_revision FROM snapshot_meta LIMIT 1`).get() as
+      | { max_revision: number }
+      | undefined;
+    return row ? row.max_revision : null;
+  } catch {
+    return null;
+  } finally {
+    db?.close();
   }
 }
 
@@ -366,7 +454,19 @@ export function publishSnapshotOnce(projectKey: string, targetDir: string): void
   const finalPath = join(targetDir, SNAPSHOT_DB_BASENAME);
   const tmpPath = join(targetDir, `.${SNAPSHOT_DB_BASENAME}.${randomBytes(8).toString("hex")}.tmp`);
   try {
-    buildSnapshot(projectKey, tmpPath);
+    const built = buildSnapshot(projectKey, tmpPath);
+    // ORDERING (F7). rename(2) is atomic but not ordered: two publishers racing on
+    // one target_dir can land in either order, and the LOSER wins the file. The
+    // published artifact carries the source's max revision, so an older build can
+    // see that the on-disk one is strictly newer and decline — a skipped rename
+    // leaves the container reading MORE recent truth, which is the whole objective.
+    // Within one process this cannot even arise (publication is synchronous end to
+    // end); across processes this narrows the window to the rename itself.
+    const onDisk = onDiskMaxRevision(finalPath);
+    if (onDisk !== null && onDisk > built) {
+      rmSync(tmpPath, { force: true });
+      return;
+    }
     renameSync(tmpPath, finalPath);
   } catch (e) {
     try {
@@ -393,12 +493,28 @@ export function publishToLiveTargets(projectKey: string): void {
     for (let attempt = 1; attempt <= PUBLISH_MAX_ATTEMPTS; attempt++) {
       try {
         publishSnapshotOnce(projectKey, target.targetDir);
-        recordPublication(projectKey, target.targetDir, "ok", attempt, null);
-        lastError = undefined;
-        break;
       } catch (e) {
         lastError = e;
+        // Backoff between attempts (F13). Retrying instantly re-runs the same
+        // failure against the same transiently-busy filesystem; a short pause is
+        // what makes a bounded retry a retry rather than three copies of one
+        // attempt. Synchronous by necessity — this whole path is.
+        if (attempt < PUBLISH_MAX_ATTEMPTS) sleepSync(PUBLISH_BACKOFF_MS * attempt);
+        continue;
       }
+      // SUCCESS BOOKKEEPING SITS OUTSIDE THE PUBLISH TRY (F13). Inside it, a failing
+      // recordPublication was indistinguishable from a failing publish: the loop
+      // republished an artifact that was already CURRENT, up to the attempt ceiling,
+      // and then marked a perfectly fresh snapshot STALE. The bytes are delivered at
+      // this point; only the record of it can still fail.
+      lastError = undefined;
+      try {
+        recordPublication(projectKey, target.targetDir, "ok", attempt, null);
+      } catch {
+        // The artifact IS published. A lost bookkeeping row costs operator
+        // visibility, never delivery, and must not re-enter the retry loop.
+      }
+      break;
     }
     if (lastError !== undefined) {
       // Retry exhausted. The host write already committed and STAYS committed —

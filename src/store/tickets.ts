@@ -149,7 +149,16 @@ export function upsertTicket(t: TicketRow): void {
          frontmatter = excluded.frontmatter,
          imported_at = excluded.imported_at,
          imported_from = excluded.imported_from,
-         revision = tickets.revision + 1,
+         -- FG-608 F11: the counter advances on a CONTENT CHANGE, not on a write.
+         -- A re-import of byte-identical Markdown is a no-op in every way an agent
+         -- can observe, so bumping here published a snapshot whose only difference
+         -- was the number — and every running container then reported "this ticket
+         -- has ADVANCED since dispatch" for a ticket that had not moved. Once that
+         -- notice cries wolf on routine re-imports it stops meaning anything on the
+         -- amendment it exists to announce. The hash covers type/status/title/body,
+         -- so any real edit still advances it.
+         revision = CASE WHEN tickets.body_hash IS excluded.body_hash
+                         THEN tickets.revision ELSE tickets.revision + 1 END,
          body_hash = excluded.body_hash,
          import_basis_hash = excluded.import_basis_hash`,
     )

@@ -51,11 +51,13 @@ import {
 } from "../../store/tickets.js";
 import { describeStalePublications } from "../../backlog/snapshot.js";
 import {
+  assertNoHostStoreInContainer,
   containerListTickets,
   containerReadTicket,
   containerSnapshotMeta,
   describeRevisionDrift,
   hasContainerBacklogAuthority,
+  inContainerBacklogMode,
   refuseContainerMutation,
   ContainerAuthorityUnavailable,
   ContainerMutationRefused,
@@ -115,6 +117,10 @@ export function registerBacklog(program: Command): void {
     const opts = actionCommand.opts() as { project?: string };
     const dir = resolve(opts.project ?? process.cwd());
     const store = resolveBacklogStore(dir);
+    // FG-608 F1: a dispatched container that did NOT get a snapshot must not
+    // resolve its way into a db store — the only one reachable from here is the
+    // shared oauth volume's.
+    assertNoHostStoreInContainer(store.mode);
     process.stderr.write(describeBacklogStore(store) + "\n");
     // An unpublished amendment must be visible to the operator AS STALE, never
     // indistinguishable from an up-to-date container.
@@ -128,12 +134,21 @@ export function registerBacklog(program: Command): void {
   // POLITE half only — the ENFORCEMENT half is the docker `:ro` directory mount,
   // because agents have passwordless root and can sudo past any CLI check. Both
   // halves are asserted separately in the container tests.
-  const CONTAINER_MUTATION_VERBS = new Set(["file", "close", "edit", "retitle", "move", "import", "mode", "migrate", "reidentify", "forget-source"]);
+  //
+  // TWO SETS, because they refuse for two different reasons (FG-608 F1/F2).
+  // STORE verbs write the HOST store or the project registry; there is no host
+  // store reachable from ANY container — in one, the path they would open is the
+  // shared oauth volume's. They refuse under every authority mode. TICKET verbs
+  // refuse when the dispatched authority is a read-only snapshot; under a markdown
+  // dispatch they write backlog/*.md in the mounted checkout exactly as on the
+  // host, which is unchanged behavior.
+  const CONTAINER_STORE_VERBS = new Set(["import", "mode", "migrate", "reidentify", "forget-source"]);
+  const CONTAINER_TICKET_VERBS = new Set(["file", "close", "edit", "retitle", "move"]);
   backlog.hook("preAction", (_thisCommand, actionCommand) => {
-    if (!hasContainerBacklogAuthority()) return;
     if (actionCommand.parent?.name() === "notes") return;
-    if (!CONTAINER_MUTATION_VERBS.has(actionCommand.name())) return;
-    refuseContainerMutation(actionCommand.name());
+    const verb = actionCommand.name();
+    if (inContainerBacklogMode() && CONTAINER_STORE_VERBS.has(verb)) refuseContainerMutation(verb);
+    if (hasContainerBacklogAuthority() && CONTAINER_TICKET_VERBS.has(verb)) refuseContainerMutation(verb);
   });
 
   // ----- list -----
@@ -833,8 +848,23 @@ export function migrateProject(
   }
 
   // STEP 3 — FLIP. Last, and only if 1 and 2 succeeded.
-  const flip = setBacklogMode(projectDir, "db", { allowOrphanedTickets: false });
-  writeTransaction(() => recordModeFlip(flip.projectKey, new Date().toISOString(), revision));
+  //
+  // ONE TRANSACTION (F10). The no-activity assertions above are reads that
+  // committed long before this line: a run could start, or a campaign begin
+  // driving, in the window between them and the flip — and that run would then read
+  // Markdown for its early steps and the DB for its later ones, which is precisely
+  // the split truth assertNoActivityForProject exists to prevent. So the check is
+  // RE-RUN inside setBacklogMode's BEGIN IMMEDIATE, where the write lock makes
+  // check-then-act atomic, and the cutover record lands in that same transaction —
+  // a flip whose provenance row is a separate commit can lose one and keep the
+  // other.
+  const flip = setBacklogMode(projectDir, "db", {
+    allowOrphanedTickets: false,
+    reassertBeforeFlip: assertNoActivityForProject,
+    // `at` is the flip transaction's own timestamp — the same one the mode row
+    // carries, so the two rows cannot disagree about when the cutover happened.
+    recordWithFlip: (projectKey, at) => recordModeFlip(projectKey, at, revision),
+  });
   clearBacklogStoreCache();
 
   return {
@@ -909,7 +939,16 @@ type AdvancedSequence = { prefix: string; from: number | null; to: number };
 function setBacklogMode(
   projectDir: string,
   mode: StorageMode,
-  opts: { allowOrphanedTickets: boolean; acceptFrozenMarkdownLoss?: boolean },
+  opts: {
+    allowOrphanedTickets: boolean;
+    acceptFrozenMarkdownLoss?: boolean;
+    // Both run INSIDE the flip's BEGIN IMMEDIATE (F10). `reassertBeforeFlip` is the
+    // caller's last-moment guard — throwing from it rolls the whole flip back;
+    // `recordWithFlip` writes provenance that must commit with the mode row or not
+    // at all.
+    reassertBeforeFlip?: (projectKey: string) => void;
+    recordWithFlip?: (projectKey: string, at: string) => void;
+  },
 ): {
   mode: StorageMode;
   projectKey: string;
@@ -1044,9 +1083,12 @@ function setBacklogMode(
           }
         }
 
+        opts.reassertBeforeFlip?.(projectKey);
+
         if (resolved.persistToConfig) writeProjectKey(projectDir, resolved.projectKey);
         ensureStorageMode(projectKey, now);
         setStorageMode(projectKey, mode, now);
+        opts.recordWithFlip?.(projectKey, now);
       });
       break;
     } catch (e) {

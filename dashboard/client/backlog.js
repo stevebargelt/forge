@@ -7,6 +7,7 @@ import { h } from "preact";
 import { useState, useMemo } from "preact/hooks";
 import htm from "htm";
 import { md } from "./renderers.js";
+import { backlogBoardState, NO_TRUTH_MESSAGE, SHADOW_BADGE_TITLE } from "./backlog-state.js";
 
 const html = htm.bind(h);
 
@@ -61,9 +62,23 @@ export function BacklogView({ data, projectFilter }) {
   }, [data.tickets]);
 
   const totalTickets = (data.tickets || []).length;
+  const board = backlogBoardState(data);
 
   return html`
     <div class="backlog-view">
+      ${board.error ? html`
+        <div class="card backlog-error" role="alert" style="border-left: 3px solid var(--status-failed, #c0392b); margin-top: 16px;">
+          <strong>Backlog read failed.</strong> This board is not showing this project's tickets —
+          it is showing nothing, which is not the same as an empty backlog.
+          <div class="muted" style="font-size: 12px; margin-top: 6px; word-break: break-word;">${board.error}</div>
+        </div>
+      ` : null}
+      ${board.shadow ? html`
+        <div class="muted backlog-shadow-badge" title=${SHADOW_BADGE_TITLE} style="margin-top: 16px; font-size: 12px;">
+          <span class="badge status-pending">import shadow — not authoritative</span>
+          ${" "}markdown mode: <code>backlog/*.md</code> in the checkout is this project's ticket truth.
+        </div>
+      ` : null}
       ${data.notes && data.notes.trim() ? html`
         <section class="backlog-notes">
           <h2>Notes / Session handoff</h2>
@@ -126,7 +141,11 @@ export function BacklogView({ data, projectFilter }) {
         ` : null}
       </section>
 
-      ${totalTickets === 0
+      ${board.kind === "error"
+        ? null
+        : board.kind === "no-truth"
+        ? html`<div class="muted backlog-empty backlog-no-truth">${NO_TRUTH_MESSAGE}</div>`
+        : totalTickets === 0
         ? html`<div class="muted backlog-empty">No backlog tickets found for this project.</div>`
         : filtered.length === 0
         ? html`<div class="muted backlog-empty">No tickets match the current filters.</div>`

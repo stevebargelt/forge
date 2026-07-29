@@ -273,19 +273,34 @@ test("FG-608: a host ticket write fans out to EVERY live target for that project
   );
 });
 
-test("FG-608: a released target stops receiving publications and its artifact is removed", () => {
+test("FG-608: a released target stops receiving publications; the artifact goes only when asked", () => {
   const dir = newDir();
   registerSnapshotTarget(KEY, dir, "task-a");
   seedTicket("FG-1", "first");
   assert.equal(existsSync(join(dir, SNAPSHOT_DB_BASENAME)), true);
 
+  // F12: releasing the ROW and deleting the DIRECTORY are two decisions. The
+  // directory is the SOURCE of a live `:ro` bind — deleting it under a running
+  // container strands that agent for the rest of its task — so the default keeps
+  // the bytes and only stops future fan-out.
   releaseSnapshotTarget(KEY, dir);
   assert.deepEqual(liveSnapshotTargets(KEY), []);
-  assert.equal(existsSync(dir), false, "the derived artifact is cleaned up with the target");
+  assert.equal(existsSync(join(dir, SNAPSHOT_DB_BASENAME)), true, "the mount source survives the release");
 
-  // And a later write neither republishes it nor recreates the directory.
+  // And a later write neither republishes to it nor resurrects the row.
   seedTicket("FG-1", "second");
-  assert.equal(existsSync(dir), false, "a released target is never published to again");
+  assert.equal(
+    (new Database(join(dir, SNAPSHOT_DB_BASENAME), { readonly: true })
+      .prepare(`SELECT body FROM tickets WHERE ticket_id='FG-1'`)
+      .get() as { body: string }).body,
+    "first",
+    "a released target is never published to again",
+  );
+
+  // Reclaiming the disk is an explicit act, taken only with positive knowledge
+  // that the owning task has finished.
+  releaseSnapshotTarget(KEY, dir, { deleteArtifact: true });
+  assert.equal(existsSync(dir), false);
 });
 
 test("FG-608: finished tasks' targets are released, so fan-out cannot grow unbounded", () => {
@@ -296,7 +311,7 @@ test("FG-608: finished tasks' targets are released, so fan-out cannot grow unbou
   seedTicket("FG-1", "b");
   assert.equal(liveSnapshotTargets(KEY).length, 2);
 
-  const released = releaseFinishedTargets(KEY, (id) => id === "task-running");
+  const released = releaseFinishedTargets(KEY, (id) => (id === "task-running" ? "live" : "finished"));
   assert.deepEqual(released, [finished]);
   assert.deepEqual(
     liveSnapshotTargets(KEY).map((t) => t.targetDir),
@@ -320,7 +335,7 @@ test("FG-608: finished tasks' targets are released, so fan-out cannot grow unbou
 test("FG-608: a target with no owning task is NEVER auto-released (no liveness signal to act on)", () => {
   const dir = newDir();
   registerSnapshotTarget(KEY, dir);
-  assert.deepEqual(releaseFinishedTargets(KEY, () => false), []);
+  assert.deepEqual(releaseFinishedTargets(KEY, () => "finished"), []);
   assert.equal(liveSnapshotTargets(KEY).length, 1);
 });
 

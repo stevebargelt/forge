@@ -69,14 +69,28 @@ function conflictEvents(projectKey: string, id: string) {
 
 // ─── the two revision semantics ──────────────────────────────────────────────
 
-test("FG-608: the revision counter is MONOTONIC across import and seam writes", () => {
+test("FG-608: the revision counter is MONOTONIC across import and seam writes — and moves on CONTENT", () => {
   const dir = newProject();
   writeTicketFile(dir, { id: "FG-1", type: "story", status: "active", title: "t" }, "one");
   const { projectKey } = importBacklog(dir, { now: NOW, sourceId: "s" });
   assert.equal(getTicket(projectKey, "FG-1")!.revision, 1, "a fresh insert is revision 1");
 
+  // FG-608 red F11 narrowed this. The counter used to advance on every import,
+  // including a re-import of byte-identical Markdown — which published a snapshot
+  // whose only difference was the number, and made every running agent read "this
+  // ticket has ADVANCED since the task was dispatched" for a ticket that had not
+  // moved. What the counter has to express is that the TICKET advanced, so it
+  // tracks content, not write count.
   importBacklog(dir, { now: NOW, sourceId: "s" });
-  assert.equal(getTicket(projectKey, "FG-1")!.revision, 2, "an import IS an authoritative write");
+  assert.equal(
+    getTicket(projectKey, "FG-1")!.revision,
+    1,
+    "a re-import of identical content is not an advancement",
+  );
+
+  writeTicketFile(dir, { id: "FG-1", type: "story", status: "active", title: "t" }, "one amended");
+  importBacklog(dir, { now: NOW, sourceId: "s" });
+  assert.equal(getTicket(projectKey, "FG-1")!.revision, 2, "an import that CHANGES the ticket advances it");
 
   setStorageMode(projectKey, "db", NOW);
   clearBacklogStoreCache();

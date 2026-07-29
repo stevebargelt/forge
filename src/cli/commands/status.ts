@@ -4,6 +4,7 @@ import { listRuns, listRunsForWorkspace, getRun } from "../../store/runs.js";
 import { tasksForRun } from "../../store/tasks.js";
 import { verdictsForTask } from "../../store/verdicts.js";
 import { getDb } from "../../store/db.js";
+import { renderedEmptyStore } from "../no-store.js";
 import { ensureForgeDirs } from "../../util/paths.js";
 import { liveIdleCountdownForTask, formatIdleCountdown, orphanRecoveryMessage, describeContainerEvidence, fanoutWaveRecoveryMessage } from "./show.js";
 import { reconcileRun, reconcileRuns } from "../../v2/reconcile.js";
@@ -24,6 +25,9 @@ export function registerStatus(program: Command): void {
     .description("Show run status. Filters to the current workspace by default; use --all for the cross-project view.")
     .action(async (runId: string | undefined, opts: { readOnly?: boolean; all?: boolean; workspace?: string; json?: boolean }) => {
       ensureForgeDirs();
+      // A fresh host has no runs at all. Answer that, and do NOT fall through to
+      // reconcile — the writable path would mint forge.db from a status read.
+      if (renderedEmptyStore(opts.json, { runs: [] }, "No runs.")) return;
       const reconcileEnabled = !opts.readOnly;
       if (opts.readOnly) getDb({ readOnly: true });
 

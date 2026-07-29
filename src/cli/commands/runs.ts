@@ -1,5 +1,6 @@
 import type { Command } from "commander";
 import { getDb } from "../../store/db.js";
+import { renderedEmptyStore } from "../no-store.js";
 import { ensureForgeDirs } from "../../util/paths.js";
 import { queryRuns, parseSince, type RunFilters, type RunQueryRow } from "../../v2/runs-query.js";
 
@@ -35,6 +36,7 @@ export function registerRuns(program: Command): void {
     .option("--json", "emit JSON instead of a table")
     .action((opts: { status?: string; failureKind?: string; project?: string; workflow?: string; since: string; json?: boolean }) => {
       ensureForgeDirs();
+      if (renderedEmptyStore(opts.json, [], "No matching runs.")) return;
       getDb({ readOnly: true });
 
       const filters: RunFilters = {
