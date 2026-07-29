@@ -70,7 +70,11 @@ An item may move ahead of `Next` only for:
 - demonstrated operator-blocking behavior;
 - failing required CI;
 - credible data-loss or wrong-ship risk;
-- a defect blocking the current objective.
+- a defect blocking the current objective;
+- **ANY persistently red test, in any tier, on any supported environment (operator rule, 2026-07-29:
+  red tests are never a tax — they stop everything).** A red must always mean defect; a precondition a
+  test cannot meet is a named skip. Currently promoted under this rule: FG-644 (precondition-to-skip
+  conversion), FG-556, FG-557 — one batch, ahead of all feature work including the cutover.
 
 A newly discovered hardening opportunity is captured in the backlog but does not automatically become
 `Now` or `Next`.
