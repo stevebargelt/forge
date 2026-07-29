@@ -67,7 +67,11 @@ authority changes (FG-640).
   (never repeats the fixer's claim); returns `inconclusive` to disposition rather than synthesizing
   closure or launching another panel. `new_findings` enter the ledger `untriaged` with no automatic
   fixer. No-op when discovery produced no fix_now findings AND the candidate has not changed; any
-  post-discovery candidate change still receives the bounded delta review.
+  post-discovery candidate change still receives the bounded delta review. “Named regression test”
+  means a behavior/invariant-named test in the canonical subsystem suite — not a new RF/FG-named test
+  file. Finding/ticket provenance belongs in the ledger, test name, or comment. A dedicated
+  finding-/ticket-named file requires a recorded cross-layer capstone reason. FG-641 owns cleanup of
+  the existing ticket-named suite; this ticket prevents new debt and does not absorb that cleanup.
 - **Stage 9 — shipping review:** the seven checks (verification green at the current candidate;
   every AC `met`/`unmet`/`unproven` with cited evidence; every finding settled; every fix_now
   explicitly `resolved`; reviewed sha equals trusted remote head; candidate/gate/receipt/publication
@@ -99,12 +103,15 @@ finding), #26 (demonstrated finding cannot be resolved solely by model re-inspec
 inconclusive returns to disposition, never synthesizes closure or a new discovery panel).
 
 Plus: `blocked_environment` consumes no review cycle and dispatches nothing; a deterministic
-verification failure never becomes a finding.
+verification failure never becomes a finding. Tests added as resolution evidence follow the
+behavior-oriented placement rule above; acceptance evidence must not require one new test file per
+finding or backlog ticket.
 
 ## Non-goals
 
 Gate derivation, `feature` migration, red-seed authority changes, review-loop deprecation (FG-640).
 No generic `messages` table or real-time agent inbox (Appendix A deliberate boundary).
+Existing ticket-named test-suite consolidation remains FG-641.
 
 ## Dependencies
 

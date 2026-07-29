@@ -1,5 +1,7 @@
 # YAML-Driven Orchestrator (#116) — replace the TypeScript spine with declarative pipelines
 
+**Status:** shipped in `b818f27`; historical design and implementation record.
+
 ## What this doc is
 
 A design document for forge **v2**: rewrite forge's orchestration layer so workflows + agents + runtimes are declarative YAML files instead of TypeScript code. Keep forge's SQLite schema, dashboard, and gate UX unchanged. The result is the same forge from the dashboard's perspective — runs, tasks, verdicts, gates, reds, retries all behave as today — but the *control plane* underneath (workflow definitions, dispatch, spawn, agent registration) becomes data the human edits in YAML, not types the human compiles in TypeScript.

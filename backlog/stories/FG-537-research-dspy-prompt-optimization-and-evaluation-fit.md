@@ -16,7 +16,7 @@ DSPy offers declarative LM programs, executable metrics, evaluation, and optimiz
 
 The initial assessment recommends an isolated offline prompt laboratory rather than placing DSPy in Forge's production orchestration or merge trust path. That recommendation needs a focused research and prototype pass before Forge commits to a dependency or product direction.
 
-Primary internal reference: `notes/dspy-integration-assessment-2026-07-11.md`.
+Primary internal reference: `docs/research/dspy-integration-assessment-2026-07-11.md`.
 
 ## Goal
 
@@ -24,7 +24,7 @@ Determine whether DSPy can measurably improve a bounded Forge agent role using F
 
 ## Acceptance Criteria
 
-- The research explicitly reviews and references `notes/dspy-integration-assessment-2026-07-11.md`, preserving its central distinction between an offline prompt laboratory and production runtime integration.
+- The research explicitly reviews and references `docs/research/dspy-integration-assessment-2026-07-11.md`, preserving its central distinction between an offline prompt laboratory and production runtime integration.
 - The output lives in an appropriate durable research path, such as `docs/research/dspy-forge-prompt-optimization.md`, and clearly separates sourced facts, Forge-specific inference, experimental results, and recommendations.
 - Compare at least these options:
   - Forge-native TypeScript evaluation/replay only;
@@ -62,7 +62,7 @@ Determine whether DSPy can measurably improve a bounded Forge agent role using F
 
 ## References
 
-- Internal assessment: `notes/dspy-integration-assessment-2026-07-11.md`
+- Internal assessment: `docs/research/dspy-integration-assessment-2026-07-11.md`
 - Forge strategic review: `notes/forge-strategic-review-2026-07-10.md`
 - DSPy documentation: https://dspy.ai/
 - DSPy repository: https://github.com/stanfordnlp/dspy

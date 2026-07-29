@@ -1,5 +1,9 @@
 # Should forge always run each agent in its own dedicated git worktree of the project, instead of the current shared /project bind-mount? Consider isolation, concurrency/parallelism, disk and performance cost, complexity, and interaction with forge's container mount model (red read-only mounts, the macOS node_modules shadow volume, DEC-004/006/019).
 
+> **Lifecycle:** historical research. Its open question was resolved by FG-345:
+> workspace isolation is default-on for managed workflow dispatch. Read this as
+> supporting evidence, not current policy.
+
 Three lanes of research reveal a mixed picture on whether forge should always use per-agent git worktrees. The shared rw bind-mount interference risk is structurally real — concurrent blue agents do write to the same /project path with no filesystem isolation — but is narrower than the broadest framing: task artifacts are isolated to /task by construction, node_modules is partially protected on macOS by the shadow volume, and a file-independence contract governs feature build fanout. The per-worktree overhead claim is the most contested: the skeptic's direct measurement (222ms, 12MB per worktree for this repo with shared Git objects) directly challenges the 'materially slow' threshold, leaving that verdict inconclusive for larger user projects even as it appears refuted for the forge repo itself. The uncommitted-state hazard is structurally confirmed — git worktree add deterministically excludes host dirty-state — but the adversarial framing is nuanced: worktrees could reduce the live-code-mutation hazard in forge-on-forge while introducing a new stale-state problem for workflows that depend on in-progress changes being visible.
 
 ---

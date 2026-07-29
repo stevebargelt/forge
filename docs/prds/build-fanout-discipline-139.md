@@ -18,8 +18,8 @@
 > from a promoted release (operator Option A); the release-mode refusal above is retired.
 
 
-**Status:** draft, awaiting confirmation
-**Backlog linkage:** closes #139. Composite with #116 (v2 cutover — this is the unfinished tail of the build-phase decomposition that originated as #96).
+**Status:** shipped in `63b9f61`; original specification preserved below.
+**Backlog linkage:** #139 closed. Composite with #116 (v2 cutover — this was the unfinished tail of the build-phase decomposition that originated as #96).
 
 ## Objective
 

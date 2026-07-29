@@ -1,12 +1,14 @@
 # PRD — Evidence-Led Review Lifecycle
 
-**Status:** confirmed; ready for implementation decomposition
+**Status:** confirmed. Change 0 is active; implementation is decomposed serially
+into FG-638 → FG-639 → FG-640 and has not started.
 
 **Date:** 2026-07-27
 
-**Last revised:** 2026-07-28
+**Last revised:** 2026-07-29
 
-**Backlog linkage:** implementation decomposition pending
+**Backlog linkage:** FG-638 (durable ledger) → FG-639 (pilot coordinator) →
+FG-640 (gate and feature-workflow migration)
 
 ## Objective
 
@@ -473,6 +475,14 @@ Resolution evidence is proportional to the finding's original reachability:
   verification step;
 - `speculative` may be resolved by bounded inspection with its limitation
   explicit.
+
+“Named regression test” names the behavior and invariant; it does not imply a
+new finding- or ticket-named test file. Regression evidence normally extends the
+canonical behavior-oriented subsystem suite. Finding and ticket identity belong
+in the ledger provenance, test name, or a nearby comment. A dedicated
+finding-/ticket-named file requires a recorded cross-layer capstone reason.
+FG-641 owns consolidation of the existing ticket-named suite; this lifecycle
+must prevent new debt but does not absorb that cleanup.
 
 The rechecker verifies this evidence; it does not merely repeat the fixer's
 claim. If the required proof is unavailable, the result is `inconclusive`

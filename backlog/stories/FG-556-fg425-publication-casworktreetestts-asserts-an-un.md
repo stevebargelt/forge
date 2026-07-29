@@ -8,6 +8,51 @@ created: 2026-07-14
 
 ---
 
+## Current disposition (2026-07-28)
+
+This is an open, actionable test defect. It is **not** an accepted macOS baseline
+and `434/435 with FG-556 red` must not be described as the expected successful
+outcome. Forge's orchestrator runs on macOS; a permanently red host tier makes
+real regressions harder to distinguish from standing noise. The close condition
+for the current tier is **435/435**, with no known-failure exception.
+
+The mechanism is established:
+
+- `makeProject()` in `src/v2/fg425-publication-cas.worktree.test.ts` creates its
+  fixture with `mkdtempSync(join(tmpdir(), "fg425-cas-"))`. On macOS that spelling
+  is under `/var/folders/...`.
+- Forge correctly passes the project through `projectIdentity()`, whose
+  `realpathSync()` records the physical path under `/private/var/folders/...`.
+- The test later expects the durable target to equal ``local:${dir}#main`` using
+  the original, uncanonicalized fixture spelling. The product value is correct;
+  the assertion's fixture identity is wrong.
+- Linux CI is green because Linux does not have macOS's `/var` →
+  `/private/var` alias. That does not validate the macOS assertion.
+
+This is neither a product change nor an extreme edge case: `tmpdir()` is the
+ordinary fixture path on the supported host. The established repair is to
+canonicalize the fixture root once, at creation:
+`realpathSync(mkdtempSync(...))`. FG-575 and the corrected FG-559 tests already
+use this pattern.
+
+### Scope
+
+- Fix `src/v2/fg425-publication-cas.worktree.test.ts` only.
+- Do not weaken or remove production canonicalization in `projectIdentity()`.
+- Do not skip the test on macOS and do not encode `434/435` as an allowed result.
+
+### Acceptance criteria
+
+- The targeted FG-425 publication test passes on macOS while still asserting the
+  canonical durable target.
+- The complete worktree tier is green on macOS (**435/435 at the current test
+  count**) with no FG-556 exception.
+- Required Linux CI remains green.
+- The diff is limited to the test fixture/assertion support needed for path
+  canonicalization; no production behavior changes.
+
+---
+
 ## Same defect, more files (2026-07-25)
 
 FG-559 shipped two new worktree-tier files that carry the identical un-canonicalized `/var` assumption:

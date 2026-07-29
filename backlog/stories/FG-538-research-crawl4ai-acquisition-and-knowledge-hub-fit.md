@@ -18,7 +18,7 @@ It also introduces significant risks and ambiguity: Python/Chromium infrastructu
 
 The initial assessment recommends a host-owned, policy-constrained acquisition service whose immutable outputs are consumed read-only by agents. It rejects embedding Crawl4AI in every agent runtime or treating it as Forge's search engine, knowledge database, truth verifier, or merge evidence.
 
-Primary internal reference: `notes/crawl4ai-integration-assessment-2026-07-12.md`.
+Primary internal reference: `docs/research/crawl4ai-integration-assessment-2026-07-12.md`.
 
 ## Goal
 
@@ -26,7 +26,7 @@ Determine whether Crawl4AI provides enough measurable value over Forge's existin
 
 ## Acceptance Criteria
 
-- The research explicitly reviews and references `notes/crawl4ai-integration-assessment-2026-07-12.md` and preserves its distinction between web acquisition and a complete personal knowledge product.
+- The research explicitly reviews and references `docs/research/crawl4ai-integration-assessment-2026-07-12.md` and preserves its distinction between web acquisition and a complete personal knowledge product.
 - The output lives in an appropriate durable research path, such as `docs/research/crawl4ai-forge-acquisition.md`, and clearly separates sourced product facts, observed benchmark results, Forge-specific inference, and recommendations.
 - Verify the exact latest stable Crawl4AI release at execution time and compare it with the public documentation version. Pin the benchmark to an immutable version or image digest; do not benchmark `latest`.
 - Review Crawl4AI's license and additional attribution requirement and record the implications for private use, public Forge distribution, documentation, and derivative integration. Flag unresolved legal interpretation rather than silently calling it standard Apache-2.0.
@@ -81,7 +81,7 @@ Determine whether Crawl4AI provides enough measurable value over Forge's existin
 
 ## References
 
-- Internal assessment: `notes/crawl4ai-integration-assessment-2026-07-12.md`
+- Internal assessment: `docs/research/crawl4ai-integration-assessment-2026-07-12.md`
 - Forge strategic review: `notes/forge-strategic-review-2026-07-10.md`
 - Forge research workflow: `seeds/workflows/research-synthesis.yml`
 - Crawl4AI documentation: https://docs.crawl4ai.com/

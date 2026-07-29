@@ -1,5 +1,8 @@
 # PRD: forge dashboard
 
+> **Lifecycle:** shipped design foundation; historical original PRD. Later dashboard
+> specifications and the current implementation are authoritative for behavior.
+
 > ⚠️ **STATUS (2026-07-16): the `forge dashboard` invocations below are SUPERSEDED by FG-571.**
 > This original PRD predates both the workspace re-merge (#140) and the FG-571 stable/dev split. The dashboard
 > is a separate workspace with its own dependency tree, not bundled into a release, so stable `forge`

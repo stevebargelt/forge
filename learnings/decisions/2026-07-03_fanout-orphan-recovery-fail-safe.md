@@ -1,6 +1,6 @@
 # Decision: Fail-safe recovery for lost containers — adopt vs. re-drive, gated behind an explicit operator command
 
-**ID**: FORGE-DEC-024
+**ID**: FORGE-DEC-028
 **Date**: 2026-07-03
 **Status**: Decided
 **Decided by**: Steve (forge build, FG-455 p2/p3)

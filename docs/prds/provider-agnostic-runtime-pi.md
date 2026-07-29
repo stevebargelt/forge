@@ -1,6 +1,7 @@
 # PRD - Provider-Agnostic Runtime Architecture and Pi Pilot
 
-**Status:** accepted for backlog planning; implementation not started
+**Status:** shipped. FG-258 and its provider-neutral runtime/Pi-pilot children
+closed 2026-07-19; local-model work remains separately deferred.
 **Captured:** 2026-06-04
 **Backlog reconciled:** 2026-06-05 (#258, #262, #265, #291, #292)
 **Related backlog:** #258, #260-#268, #291, #292, #253, #252, #225, #220, #224, #226, #228

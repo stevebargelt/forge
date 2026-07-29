@@ -1,6 +1,6 @@
 # Refactor: workflow + phase naming for clarity
 
-**Status:** proposed
+**Status:** shipped via FG-70; historical decision record
 **Date:** 2026-05-08
 **Author:** Steven (with Claude Opus 4.7)
 **Scope:** workflow names, phase names, modal copy, BACKLOG references

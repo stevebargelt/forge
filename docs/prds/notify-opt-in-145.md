@@ -1,7 +1,7 @@
 # SPEC — Twilio SMS double opt-in flow (#145)
 
-**Status:** draft, awaiting confirmation
-**Backlog linkage:** closes #145. Follow-on to #142 (Twilio notifications shipped).
+**Status:** shipped in `4a6ebc6`; original specification preserved below.
+**Backlog linkage:** #145 closed. Follow-on to #142 (Twilio notifications shipped).
 
 ## Objective
 

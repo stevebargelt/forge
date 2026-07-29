@@ -1,5 +1,8 @@
 # FG-565 — Slice 6 Closeout Evidence Ledger
 
+> **Lifecycle:** shipped and closed in `1b3989e`. Retained as durable closeout
+> evidence.
+
 **Ticket:** FG-565 (Slice 6 — cross-layer recovery, observability, and campaign closeout)
 **Epic:** FG-561 · **PRD:** `docs/prds/durable-orchestration-continuation.md` @ accepted SHA `e6fd56b`
 **Author:** orchestrator (evidence inventory gating the FG-565 implementation_full dispatch)

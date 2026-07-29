@@ -8,8 +8,8 @@
 > and `forge dashboard` runs from a promoted release, so the release-mode refusal above is retired.
 
 
-**Status:** draft, awaiting confirmation
-**Backlog linkage:** closes #143. Composite with #144 (iTerm2 background tint — same color source, deferred research).
+**Status:** shipped in `e84dc63`; original specification preserved below.
+**Backlog linkage:** #143 closed. Composite with #144 (iTerm2 background tint — same color source, deferred research).
 
 ## Objective
 

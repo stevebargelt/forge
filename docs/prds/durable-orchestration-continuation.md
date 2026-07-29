@@ -1,6 +1,8 @@
 # Durable Orchestration Continuation
 
-**Status:** ACCEPTED — audit corrections applied (C1–C8); binding decisions BD-14 and BD-15 are accepted; pending campaign decomposition, not yet an implementation contract  
+**Status:** shipped and closed. The continuation campaign, including FG-565
+closeout, is complete; inline progress statements are preserved as point-in-time
+implementation history.
 **Captured:** 2026-07-13  
 **Last revised:** 2026-07-15  
 **Primary backlog:** FG-551, FG-552, FG-553, FG-555

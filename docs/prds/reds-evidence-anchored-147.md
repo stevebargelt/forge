@@ -8,8 +8,8 @@
 > exists — remove those copies first to re-test the edit. Forge-owned seeds (`workflows/`, `runtimes/`, skills)
 > still refresh normally under `FORCE=1`. **The evidence-anchoring validator this PRD specifies is unchanged.**
 
-**Status:** draft, awaiting confirmation
-**Backlog linkage:** closes #147. Composite with #148 (red-narrow investigation) — #147 lands first; if red-narrow's signal-to-noise still looks bad after, #148 revives as actual investigation work.
+**Status:** shipped in `2cbcc05`; original specification preserved below.
+**Backlog linkage:** #147 closed. Composite with #148 (red-narrow investigation).
 
 ## Objective
 

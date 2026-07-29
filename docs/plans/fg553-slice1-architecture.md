@@ -1,5 +1,9 @@
 # FG-553 (Slice 1) — architecture + plan. **STOP FOR REVIEW. No children created. No implementation.**
 
+> **Lifecycle:** shipped and closed. This point-in-time plan is retained as
+> implementation history; its original stop language no longer describes current
+> ticket state.
+
 **Epic:** FG-561 · **Contract:** `docs/prds/durable-orchestration-continuation.md` @ `e6fd56b`
 **Status:** architecture + planning complete; **REVISED after operator review (8 bounded corrections applied);
 awaiting re-review before any implementation begins.** Direction (OQ-6/BD-15) accepted and unchanged.

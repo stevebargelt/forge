@@ -16,8 +16,8 @@
 > remains the checkout path.
 
 
-**Status:** draft, awaiting confirmation
-**Backlog linkage:** closes #140. Reverses #137 (the dashboard split).
+**Status:** shipped in `d148962`; original specification preserved below.
+**Backlog linkage:** #140 closed. Reverses #137 (the dashboard split).
 
 ## Objective
 

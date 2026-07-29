@@ -1,6 +1,6 @@
 # Decision: Agent containers read tickets from a host-published, project-scoped snapshot on a read-only directory mount
 
-**ID**: FORGE-DEC-028
+**ID**: FORGE-DEC-029
 **Date**: 2026-07-29
 **Status**: Decided
 **Decided by**: forge

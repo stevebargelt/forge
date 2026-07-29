@@ -1,5 +1,7 @@
 # System Map (#105) — implement the new graph view per the designs
 
+**Status:** shipped in `5a44588`; original implementation brief preserved below.
+
 ## What this run is
 
 Build the new task-graph view for the forge dashboard, called **System Map**. Replaces the existing cytoscape+dagre "Graph View" modal. The designs are finalized: see `/design/designs/system-map.png`, `/design/designs/system-map-fanout.png`, `/design/designs/system-map-reds-detail.png`, and the implementer note `/design/designs/system-map-implementer-note.png` (host mirror: `~/code/forge-design/designs/...`).

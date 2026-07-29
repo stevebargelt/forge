@@ -41,9 +41,13 @@ learnings/
 | FORGE-DEC-020 | 2026-06-20 | [Remove `awaiting_human_input` task status](decisions/2026-06-20_remove-awaiting-human-input-status.md) *(supersedes FORGE-DEC-016)* |
 | FORGE-DEC-021 | 2026-06-20 | [Remove TaskContract feature (AWN-4 phase 1, closes FG-223 unbuilt)](decisions/2026-06-20_remove-taskcontract-feature.md) |
 | FORGE-DEC-022 | 2026-06-23 | [Resolve project mount root on invoke/new; hard-fail on suspicious subdir mounts (FG-374)](decisions/2026-06-23_project-mount-root-resolution.md) |
-| FORGE-DEC-024 | 2026-07-03 | [Fail-safe recovery for lost containers: adopt vs. re-drive, gated behind `forge recover` (FG-455 p2/p3)](decisions/2026-07-03_fanout-orphan-recovery-fail-safe.md) |
+| FORGE-DEC-023 | 2026-06-25 | [Fingerprint campaign plans by SHA-256 over canonicalized content](decisions/2026-06-25_campaign-plan-content-hash.md) |
+| FORGE-DEC-024 | 2026-06-25 | [Campaign execution: approval gate, CAS concurrency, sequential dispatch](decisions/2026-06-25_campaign-sequential-execution-model.md) |
 | FORGE-DEC-025 | 2026-07-12 | [Run agent containers docker-detached — survive host-side parent death by construction (FG-536)](decisions/2026-07-12_detached-agent-execution.md) |
-| FORGE-DEC-028 | 2026-07-29 | [Agent containers read tickets from a host-published, project-scoped snapshot on a read-only mount (FG-608)](decisions/2026-07-29_container-backlog-snapshot-authority.md) |
+| FORGE-DEC-026 | 2026-07-13 | [Serialized integration publisher: validate an isolated candidate and publish the exact tested commit](decisions/serialized-integration-publisher.md) |
+| FORGE-DEC-027 | 2026-07-13 | [`awaiting_recovery` for a publication whose window was lost after ref advance](decisions/2026-07-13_awaiting-recovery-task-status.md) |
+| FORGE-DEC-028 | 2026-07-03 | [Fail-safe recovery for lost containers: adopt vs. re-drive, gated behind `forge recover` (FG-455 p2/p3)](decisions/2026-07-03_fanout-orphan-recovery-fail-safe.md) |
+| FORGE-DEC-029 | 2026-07-29 | [Agent containers read tickets from a host-published, project-scoped snapshot on a read-only mount (FG-608)](decisions/2026-07-29_container-backlog-snapshot-authority.md) |
 
 ## Patterns index
 
