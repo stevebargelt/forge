@@ -1,11 +1,9 @@
 ---
 id: FG-608
 type: story
-status: done
+status: active
 title: "FG-496 Slice C: migrate seam-bypassing readers (dashboard, campaign dir-guards) + authoritative DB cutover"
 created: 2026-07-24
-closed: 2026-07-29
-closed_commit: f9afbf59
 ---
 
 ## Slice C of FG-496 — consumer migration + THE authoritative cutover (per project)
