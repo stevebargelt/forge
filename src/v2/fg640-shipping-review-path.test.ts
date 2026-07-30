@@ -107,6 +107,9 @@ function deps(over: ShippingOverrides = {}): CoordinatorDeps {
     }),
     materializeFixBatch: (ctx) => ctx.payload,
     dispatchFixer: () => ({ ok: true, taskId: "task-fixer", result: {} }),
+    // FG-649: Stage 5 owns the fix-cycle commit. This path has no findings, so it is never
+    // reached — a no-change commit at the one sha this fixture has is the only honest stub.
+    commitFixCycle: () => ({ kind: "no_change", sha: SHA }),
     dispatchDocs: () => ({ ok: true }),
     dispatchRechecker: (ctx) => ({
       ok: true,
