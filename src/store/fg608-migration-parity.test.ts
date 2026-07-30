@@ -51,6 +51,63 @@ function shapeOf(db: DatabaseInstance, table: string): Record<string, string> {
   return shape;
 }
 
+// The CONSTRAINT shape: everything CREATE TABLE fixes for the life of a table and
+// ALTER cannot change — PK membership and ordering, index/UNIQUE shape, foreign keys.
+//
+// Column parity alone cannot see this class. The synthetic "old" DB below is built by
+// dropping columns from the CURRENT fresh schema, so it carries today's constraints by
+// construction; the dogfood host's single-column-PK ticket_events (FG-608 reopen) was
+// invisible here while it made `forge backlog migrate` impossible. Comparing shape for
+// EVERY table is what stops a synthetic-current-schema fixture from hiding the next one.
+//
+// Each index carries its sqlite_master CREATE text as well as its PRAGMA fingerprint:
+// index_info reports neither DESC nor COLLATE, so an index diverging only in sort order
+// or collation is invisible to the PRAGMAs alone. Auto-indexes have no CREATE text.
+function constraintsOf(db: DatabaseInstance, table: string): Record<string, string[]> {
+  const pk = columns(db, table)
+    .filter((c) => c.pk > 0)
+    .sort((a, b) => a.pk - b.pk)
+    .map((c) => c.name);
+
+  const indexes = (
+    db.prepare(`PRAGMA index_list(${table})`).all() as {
+      name: string;
+      unique: number;
+      origin: string;
+      partial: number;
+    }[]
+  )
+    .map((i) => {
+      const cols = (db.prepare(`PRAGMA index_info(${i.name})`).all() as { seqno: number; name: string | null }[])
+        .sort((a, b) => a.seqno - b.seqno)
+        .map((c) => c.name ?? "<expr>");
+      const sql = (
+        db.prepare(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?`).get(i.name) as
+          | { sql: string | null }
+          | undefined
+      )?.sql;
+      const definition = (sql ?? "<auto>").replace(/\s+/g, " ").trim();
+      return `${i.name} unique=${i.unique} origin=${i.origin} partial=${i.partial} (${cols.join(", ")}) [${definition}]`;
+    })
+    .sort();
+
+  const foreignKeys = (
+    db.prepare(`PRAGMA foreign_key_list(${table})`).all() as {
+      id: number;
+      seq: number;
+      table: string;
+      from: string;
+      to: string | null;
+      on_delete: string;
+      on_update: string;
+    }[]
+  )
+    .map((f) => `${f.from} -> ${f.table}(${f.to}) on_delete=${f.on_delete} on_update=${f.on_update}`)
+    .sort();
+
+  return { pk, indexes, foreignKeys };
+}
+
 // Can SQLite's ALTER TABLE ADD COLUMN put this column back? PK columns cannot be
 // added, and NOT NULL without a DEFAULT cannot either.
 function isRestorable(c: Col): boolean {
@@ -118,6 +175,11 @@ test("FG-608: every table an old DB carries migrates to full fresh-DB parity", (
       shapeOf(migrated, table),
       shapeOf(fresh, table),
       `${table}: a migrated DB diverges from a fresh one — add the missing column(s) to ADDITIVE_COLUMNS in schema.ts`,
+    );
+    assert.deepEqual(
+      constraintsOf(migrated, table),
+      constraintsOf(fresh, table),
+      `${table}: the CONSTRAINT shape diverges from a fresh DB — a column migration cannot fix this, the table needs a rebuild (see rebuildTicketEventsIfDivergent in db.ts)`,
     );
   }
 });
@@ -205,6 +267,11 @@ test("FG-608: re-running applyMigrations on a migrated DB is a no-op", () => {
 
   for (const table of tableNames(fresh)) {
     assert.deepEqual(shapeOf(migrated, table), shapeOf(fresh, table), `${table}: re-migration must not change the shape`);
+    assert.deepEqual(
+      constraintsOf(migrated, table),
+      constraintsOf(fresh, table),
+      `${table}: re-migration must not change the constraint shape`,
+    );
   }
   assert.equal(migrated.pragma("user_version", { simple: true }), 0, "additive migrations never bump user_version");
 });

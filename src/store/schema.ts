@@ -1,5 +1,52 @@
 // SQLite schema, exactly as specified in the spine sketch. One-time migration.
 
+// FG-608 (reopen): ticket_events' CONSTRAINT shape has two consumers — the CREATE
+// below, and the rebuild migration in db.ts that converges a table whose shape
+// diverged before `CREATE TABLE IF NOT EXISTS` could ever fix it. They must be the
+// same text, so they are: the rebuild creates its replacement table from this
+// builder, and the canonical PK/column lists here are what db.ts detects against.
+export const TICKET_EVENTS_COLUMNS = [
+  "event_key",
+  "project_key",
+  "ticket_id",
+  "event_type",
+  "payload",
+  "created_at",
+] as const;
+
+export const TICKET_EVENTS_PRIMARY_KEY = ["project_key", "ticket_id", "event_key"] as const;
+
+// Always on the final table name: the rebuild creates its index only after the
+// replacement has been renamed into place (index names are database-wide, so the
+// old table's index must be gone first).
+export const TICKET_EVENTS_INDEX_NAME = "idx_ticket_events_ticket";
+
+const TICKET_EVENTS_INDEX_BODY = `${TICKET_EVENTS_INDEX_NAME} ON ticket_events(project_key, ticket_id)`;
+
+// The canonical definition as sqlite_master records it — SQLite stores the CREATE
+// text verbatim, minus `IF NOT EXISTS`. db.ts detects index divergence by comparing
+// the live sqlite_master.sql against THIS string (whitespace-normalized), which is
+// one comparison covering columns and their order, DESC, COLLATE, UNIQUE and
+// partiality — none of which PRAGMA index_info reports — and which cannot drift from
+// the DDL because it is built from the same body the DDL is.
+export const TICKET_EVENTS_INDEX_CANONICAL_SQL = `CREATE INDEX ${TICKET_EVENTS_INDEX_BODY}`;
+
+export const TICKET_EVENTS_INDEX_SQL = `CREATE INDEX IF NOT EXISTS ${TICKET_EVENTS_INDEX_BODY}`;
+
+export function ticketEventsTableSql(table: string): string {
+  return `CREATE TABLE IF NOT EXISTS ${table} (
+  event_key   TEXT NOT NULL,
+  project_key TEXT NOT NULL,
+  ticket_id   TEXT NOT NULL,
+  event_type  TEXT NOT NULL,
+  payload     TEXT,
+  created_at  TEXT NOT NULL,
+  PRIMARY KEY (project_key, ticket_id, event_key),
+  FOREIGN KEY (project_key, ticket_id)
+    REFERENCES tickets(project_key, ticket_id) ON DELETE CASCADE
+)`;
+}
+
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS runs (
   id              TEXT PRIMARY KEY,
@@ -510,19 +557,8 @@ CREATE TABLE IF NOT EXISTS tickets (
 -- logical event UPSERTs rather than duplicating. The composite FK to tickets
 -- forbids orphan/cross-project event rows; ON DELETE CASCADE prunes an event when
 -- its owning ticket is removed (the reconcile removal path relies on it).
-CREATE TABLE IF NOT EXISTS ticket_events (
-  event_key   TEXT NOT NULL,
-  project_key TEXT NOT NULL,
-  ticket_id   TEXT NOT NULL,
-  event_type  TEXT NOT NULL,
-  payload     TEXT,
-  created_at  TEXT NOT NULL,
-  PRIMARY KEY (project_key, ticket_id, event_key),
-  FOREIGN KEY (project_key, ticket_id)
-    REFERENCES tickets(project_key, ticket_id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_ticket_events_ticket
-  ON ticket_events(project_key, ticket_id);
+${ticketEventsTableSql("ticket_events")};
+${TICKET_EVENTS_INDEX_SQL};
 
 -- Ticket relations — keyed by (project_key, ticket_id). The composite PRIMARY
 -- KEY makes re-import idempotent (the same relation UPSERTs, never duplicates).

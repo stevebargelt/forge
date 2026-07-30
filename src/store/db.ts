@@ -2,7 +2,16 @@ import Database from "better-sqlite3";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { existsSync } from "node:fs";
 import { resolveDbPath, ensureForgeDirs } from "../util/paths.js";
-import { SCHEMA_SQL, ADDITIVE_COLUMNS } from "./schema.js";
+import {
+  SCHEMA_SQL,
+  ADDITIVE_COLUMNS,
+  TICKET_EVENTS_COLUMNS,
+  TICKET_EVENTS_PRIMARY_KEY,
+  TICKET_EVENTS_INDEX_SQL,
+  TICKET_EVENTS_INDEX_NAME,
+  TICKET_EVENTS_INDEX_CANONICAL_SQL,
+  ticketEventsTableSql,
+} from "./schema.js";
 
 // FG-568 (BD-15): store-compatibility policy across the supported overlap window
 // (a version-A process and a version-B process sharing ~/.forge/forge.db).
@@ -71,6 +80,17 @@ export function applyMigrations(db: DatabaseInstance): void {
     db.exec(col.ddl);
     have.add(col.column);
   }
+
+  // FG-608 (reopen): CONSTRAINT-shape convergence for ticket_events. Runs AFTER the
+  // additive loop so the copy below carries `payload` on a table that only just
+  // gained it. See rebuildTicketEventsIfDivergent for why a rebuild is allowed on a
+  // path that is otherwise additive-only.
+  //
+  // An index-only divergence takes the same full transactional rebuild as a PK or FK
+  // one, deliberately: it is a once-per-store convergence event, and one code path
+  // that always produces the canonical table is worth more than a DROP/CREATE INDEX
+  // fast path that would have to stay in sync with it.
+  rebuildTicketEventsIfDivergent(db);
 
   const haveRuns = present.get("runs") ?? liveColumns("runs");
   // FG-563 (FIX A/FIX B, round 3): the dispatch-key discoverability index. It lives on
@@ -176,6 +196,142 @@ export function applyMigrations(db: DatabaseInstance): void {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_model_calls_task ON model_calls(task_id)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_model_calls_request ON model_calls(request_id)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_model_calls_created ON model_calls(created_at)`);
+}
+
+// FG-608 (reopen): does the live ticket_events carry the canonical CONSTRAINT shape?
+// Returns null when it does (or when the table is absent — SCHEMA_SQL creates it
+// canonically), otherwise a human-readable reason, which is what the rebuild's error
+// message reports.
+//
+// Columns alone cannot answer this. The dogfood host's ticket_events had every
+// canonical COLUMN and a PRIMARY KEY of event_key alone; `CREATE TABLE IF NOT EXISTS`
+// no-ops over it forever, so upsertTicketEvent's ON CONFLICT(project_key, ticket_id,
+// event_key) was rejected at PREPARE time and `forge backlog migrate` could never run.
+// So detect what CREATE TABLE fixes and ALTER cannot change: PK membership and
+// ordering (table_info's pk flags), UNIQUE/index shape (index_list), and the composite
+// FK (foreign_key_list).
+// Both sides of the index comparison below are text this repo authors, so keyword
+// case is stable and only layout can legitimately differ.
+function normalizeIndexSql(sql: string): string {
+  return sql.replace(/\s+/g, " ").trim();
+}
+
+export function ticketEventsShapeDivergence(db: DatabaseInstance): string | null {
+  const cols = db.prepare(`PRAGMA table_info(ticket_events)`).all() as { name: string; pk: number }[];
+  if (cols.length === 0) return null;
+
+  const pk = cols
+    .filter((c) => c.pk > 0)
+    .sort((a, b) => a.pk - b.pk)
+    .map((c) => c.name);
+  if (pk.join(",") !== TICKET_EVENTS_PRIMARY_KEY.join(",")) {
+    return `PRIMARY KEY is (${pk.join(", ") || "none"}), canonical is (${TICKET_EVENTS_PRIMARY_KEY.join(", ")})`;
+  }
+
+  const indexes = db.prepare(`PRAGMA index_list(ticket_events)`).all() as {
+    name: string;
+    unique: number;
+    origin: string;
+    partial: number;
+  }[];
+
+  // The lookup index is checked by DEFINITION, not by name. A same-named index with
+  // different columns, a UNIQUE flag or a WHERE clause is what an old binary can leave
+  // behind, and TICKET_EVENTS_INDEX_SQL's `CREATE INDEX IF NOT EXISTS` no-ops over it
+  // forever — so a name-only check reports canonical while the shape is still wrong.
+  //
+  // The definition compared is sqlite_master's own CREATE text against the canonical
+  // one schema.ts builds, not a PRAGMA fingerprint: index_info reports neither DESC
+  // nor COLLATE, so a same-named index diverging only in sort order or collation reads
+  // as canonical there. One string comparison covers columns and their order, DESC,
+  // COLLATE, UNIQUE and partiality at once. An auto-index (origin 'u'/'pk') carries a
+  // NULL sql and is divergent by the same comparison.
+  const lookup = indexes.find((i) => i.name === TICKET_EVENTS_INDEX_NAME);
+  if (!lookup) return `${TICKET_EVENTS_INDEX_NAME} is missing`;
+  const liveSql = (
+    db.prepare(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?`).get(TICKET_EVENTS_INDEX_NAME) as
+      | { sql: string | null }
+      | undefined
+  )?.sql;
+  const liveIndexSql = normalizeIndexSql(liveSql ?? "");
+  const canonicalIndexSql = normalizeIndexSql(TICKET_EVENTS_INDEX_CANONICAL_SQL);
+  if (liveIndexSql !== canonicalIndexSql) {
+    return `${TICKET_EVENTS_INDEX_NAME} is defined as [${liveIndexSql}], canonical is [${canonicalIndexSql}]`;
+  }
+
+  const strayUnique = indexes.filter((i) => i.unique === 1 && i.origin !== "pk").map((i) => i.name);
+  if (strayUnique.length > 0) return `unexpected UNIQUE index: ${strayUnique.join(", ")}`;
+
+  const fks = db.prepare(`PRAGMA foreign_key_list(ticket_events)`).all() as {
+    id: number;
+    seq: number;
+    table: string;
+    from: string;
+    to: string | null;
+    on_delete: string;
+  }[];
+  const shape = fks
+    .sort((a, b) => a.id - b.id || a.seq - b.seq)
+    .map((f) => `${f.table}(${f.to}) <- ${f.from} ON DELETE ${f.on_delete}`)
+    .join(", ");
+  const canonicalFk = "tickets(project_key) <- project_key ON DELETE CASCADE, tickets(ticket_id) <- ticket_id ON DELETE CASCADE";
+  if (shape !== canonicalFk) return `FOREIGN KEY shape is [${shape}], canonical is [${canonicalFk}]`;
+
+  return null;
+}
+
+// FG-608 (reopen): the transactional constraint-shape rebuild — the standard SQLite
+// procedure (CREATE new -> INSERT-copy -> DROP old -> RENAME) inside ONE transaction,
+// so a failure anywhere leaves the original table and every row exactly as they were.
+// Returns true when it rebuilt, false when the shape was already canonical.
+//
+// WHY THIS IS ALLOWED ON THE OTHERWISE ADDITIVE-ONLY OPEN PATH (FG-568/BD-15). The
+// additive-only rule protects an in-flight old peer from losing schema it still
+// depends on. Nothing depends on the divergent shape: ticket_events' PK has been
+// composite since FG-606 shipped it, so EVERY binary that writes this table writes
+// through the composite ON CONFLICT — which the divergent table rejects at prepare
+// time. And the canonical PK is strictly WEAKER than the single-column one it
+// replaces (event_key unique per owner rather than globally), so every insert that
+// succeeded before still succeeds. The rebuild removes nothing any peer can use, and
+// it does not touch user_version — no one-way boundary is crossed.
+//
+// Every row is preserved, payload and timestamps included, and no row is filtered by
+// project_key. Rows that the old shape allowed but the canonical FK would reject
+// (events whose ticket is gone) are copied too: FK enforcement is off for the rebuild,
+// as SQLite's own table-rebuild procedure requires, and losing audit rows to a
+// constraint that did not exist when they were written would be a silent data loss.
+export function rebuildTicketEventsIfDivergent(db: DatabaseInstance): boolean {
+  const divergence = ticketEventsShapeDivergence(db);
+  if (divergence === null) return false;
+
+  const REBUILD = "ticket_events__rebuild";
+  const live = new Set(
+    (db.prepare(`PRAGMA table_info(ticket_events)`).all() as { name: string }[]).map((c) => c.name),
+  );
+  const carried = TICKET_EVENTS_COLUMNS.filter((c) => live.has(c));
+
+  // PRAGMA foreign_keys is a NO-OP inside a transaction, so it is flipped out here —
+  // and restored on every exit, including the failure path.
+  const fkEnforced = db.pragma("foreign_keys", { simple: true }) === 1;
+  if (fkEnforced) db.pragma("foreign_keys = OFF");
+  try {
+    db.transaction(() => {
+      db.exec(ticketEventsTableSql(REBUILD));
+      db.exec(`INSERT INTO ${REBUILD} (${carried.join(", ")}) SELECT ${carried.join(", ")} FROM ticket_events`);
+      db.exec(`DROP TABLE ticket_events`);
+      db.exec(`ALTER TABLE ${REBUILD} RENAME TO ticket_events`);
+      db.exec(TICKET_EVENTS_INDEX_SQL);
+    }).immediate();
+  } catch (e) {
+    throw new Error(
+      `forge: could not rebuild ticket_events into its canonical constraint shape ` +
+        `(${divergence}) — the transaction rolled back, so the table and all of its rows ` +
+        `are unchanged. Underlying: ${(e as Error).message}`,
+    );
+  } finally {
+    if (fkEnforced) db.pragma("foreign_keys = ON");
+  }
+  return true;
 }
 
 // FG-568 (BD-15 §3): the forward schema-version gate. A process refuses to open a

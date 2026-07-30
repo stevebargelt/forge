@@ -300,8 +300,8 @@ describe("guard, adversarial", () => {
     // the repo-wide test green for the wrong reason. Pin the floor.
     assert.equal(
       transactionSites(readFileSync(join(SRC, "store", "db.ts"), "utf8")),
-      2,
-      "db.ts has two sites: the writeTransaction helper and the FG-563 dispatch-key convergence (both .immediate())",
+      3,
+      "db.ts has three sites: the writeTransaction helper, the FG-563 dispatch-key convergence, and the FG-608 ticket_events shape rebuild (all .immediate())",
     );
     assert.ok(
       transactionSites(readFileSync(join(SRC, "store", "publications.ts"), "utf8")) >= 8,
