@@ -24,6 +24,13 @@
 //     that same stage rather than stepping over it. That is what makes "never repeat a
 //     completed stage" safe: only completion is recorded, so re-entry after a crash is
 //     re-entry into the stage that did not finish.
+//
+//     "NOTHING RECORDED" INCLUDES THE STATE MARKER AND ANY DISPOSITION (FG-649 RF-1). Stage 5
+//     used to move the row to `fixing` and record a scope-changing finding's disposition
+//     BEFORE the commit that its own contract says must succeed first, so a refused commit
+//     left a review parked mid-fix with a disposition it had not earned. Every Stage 5
+//     refusal now goes through one `refuse` helper that puts the state back, and the
+//     dispositions are written after the commit returns.
 
 import {
   findingsForReview,
@@ -115,9 +122,20 @@ export type RecheckContextIn = {
  *  coordinator authored, not one it read back out of a race with whoever else might commit.
  *  `no_change` is a legitimate cycle that moved nothing (the fixer resolved a finding without
  *  touching code), and the candidate correctly does not move; `fixCycleKey` already makes such
- *  a cycle earn its own recheck. `refused` is NAMED and records nothing. */
+ *  a cycle earn its own recheck. `refused` is NAMED and records nothing.
+ *
+ *  FG-649 RF-2: `recognized` marks a `committed` outcome the coordinator did not author on
+ *  THIS pass — it found the commit it had already authored for this batch revision and is
+ *  reporting it again so the ledger writes that a crash interrupted can complete. The audit
+ *  trail must be able to tell "I committed this now" from "I recovered the commit I made
+ *  before the crash"; they are the same sha but not the same event.
+ *
+ *  FG-649 RF-5: `declaredNotMoved` names the paths the fix results DECLARED that the worktree
+ *  never moved. The commit still carries only declared paths — it is a strict subset — but a
+ *  declaration the tree does not support may not travel silently beside evidence that
+ *  contradicts it, so it rides the outcome into the stage record and the operator's line. */
 export type FixCycleCommit =
-  | { kind: "committed"; sha: string; committedPaths: string[] }
+  | { kind: "committed"; sha: string; committedPaths: string[]; recognized?: boolean; declaredNotMoved?: string[] }
   | { kind: "no_change"; sha: string }
   | { kind: "refused"; reason: string; detail: string };
 
@@ -471,6 +489,21 @@ async function runBatchFix(reviewId: string, transition: Transition, deps: Coord
     };
   }
 
+  // FG-649 RF-1: EVERY REFUSAL PAST THIS POINT GOES THROUGH `refuse`. Moving the row to
+  // `fixing` is a mutation like any other, and the stage contract is that a refused stage
+  // leaves NOTHING behind — including a state marker that says a fixer is running when none
+  // is. The state goes back where the stage found it, so an operator reading `forge review
+  // show` after a refusal sees the stage it must re-enter, not a review parked mid-fix.
+  const stateBefore = review.state;
+  const refuse = (message: string): StageOutcome => {
+    if (stateBefore !== "fixing") {
+      setReviewState(reviewId, stateBefore, {
+        reason: `stage 5 refused with nothing recorded; the row returns to ${stateBefore}`,
+      });
+    }
+    return { transition, status: "refused", message };
+  };
+
   setReviewState(reviewId, "fixing", { reason: transition.reason });
 
   const batch = pending ?? ensureFixBatch(reviewId, candidate, fixNow).batch;
@@ -498,9 +531,7 @@ async function runBatchFix(reviewId: string, transition: Transition, deps: Coord
     // fixer whose scope nobody can reconstruct later.
     const materialized = await deps.materializeFixBatch(ctx);
     const verified = verifyMaterializedPayload(batch, materialized);
-    if (!verified.ok) {
-      return { transition, status: "refused", message: verified.refusal };
-    }
+    if (!verified.ok) return refuse(verified.refusal);
 
     const dispatch = await deps.dispatchFixer(ctx);
     // The empty-taskId sentinel (CoordinatorDeps.dispatchFixer): a refusal from BEFORE the
@@ -509,17 +540,14 @@ async function runBatchFix(reviewId: string, transition: Transition, deps: Coord
     if (dispatch.taskId !== "") markFixBatchDispatched(batch.id, dispatch.taskId);
     if (!dispatch.ok) {
       // Fixer crash: findings stay fix_now and unresolved. Nothing is recorded.
-      return {
-        transition,
-        status: "refused",
-        message:
-          `the fixer failed (${dispatch.error ?? "no error recorded"}) — fix batch ${batch.id} revision ` +
+      return refuse(
+        `the fixer failed (${dispatch.error ?? "no error recorded"}) — fix batch ${batch.id} revision ` +
           `${batch.revision} stays open and its findings stay fix_now, unresolved.`,
-      };
+      );
     }
 
     const parsed = parseFixerResult(dispatch.result);
-    if (!parsed.ok) return { transition, status: "refused", message: parsed.refusal };
+    if (!parsed.ok) return refuse(parsed.refusal);
 
     const ingestion = ingestFixBatchResults(
       batch.id,
@@ -527,12 +555,26 @@ async function runBatchFix(reviewId: string, transition: Transition, deps: Coord
       { batchId: parsed.claimedBatchId, revision: parsed.claimedRevision },
       parsed.results,
     );
-    if (!ingestion.ok) return { transition, status: "refused", message: ingestion.refusal };
+    if (!ingestion.ok) return refuse(ingestion.refusal);
 
     taskId = dispatch.taskId;
     results = ingestion.records;
     scopeChangeIds = parsed.scopeChanges;
     repeatIngest = ingestion.alreadyIngested;
+  }
+
+  // THE FIXER'S OWN CLAIM about what it touched, read back from the ledger — an expected-changes
+  // set the host did not have to infer, and strictly narrower than `git add -A` plus a denylist.
+  const declaredFiles = [...new Set(results.flatMap((r) => r.filesChanged))].sort();
+  const commit = await deps.commitFixCycle({ review, batch, results, declaredFiles });
+  if (commit.kind === "refused") {
+    // A NAMED refusal, and Stage 5 stays open with NOTHING recorded: the results stay ingested,
+    // so re-entry short-circuits to this same commit attempt rather than running a second fixer.
+    return refuse(
+      `${commit.reason}: ${commit.detail} — fix batch ${batch.id} revision ${batch.revision} keeps its ingested ` +
+        `results, the candidate stays at ${candidate}, and no fix stage record was written. Resolve the tree and ` +
+        `re-run \`forge review continue ${reviewId}\`; no second fixer will be dispatched for this revision.`,
+    );
   }
 
   // A scope-changing conflict returns THAT finding to disposition as an architecture
@@ -541,8 +583,11 @@ async function runBatchFix(reviewId: string, transition: Transition, deps: Coord
   // `ingestFixBatchResults` already excluded a `scope_change` result from the fix-cycle
   // invalidation it ran in the ingest transaction.
   //
-  // Guarded on the finding still being fix_now so re-entry after a commit refusal re-applies
-  // nothing: the disposition already moved on the first pass.
+  // FG-649 RF-1: THIS RUNS AFTER THE COMMIT SUCCEEDS, not before it. Recorded ahead of the
+  // commit it made a disposition durable on a stage that then refused — the row lost a
+  // finding out of `fix_now` while Stage 5 was left to be re-entered with nothing recorded.
+  // Re-entry re-derives `scopeChangeIds` from the same ingested results, so deferring it
+  // loses nothing; the fix_now guard keeps it idempotent if a later pass gets here twice.
   const scopeChanged: string[] = [];
   for (const id of scopeChangeIds) {
     const record = results.find((r) => r.findingId === id);
@@ -556,23 +601,6 @@ async function runBatchFix(reviewId: string, transition: Transition, deps: Coord
       operator: false,
     });
     if (outcome.ok) scopeChanged.push(outcome.finding.findingRef);
-  }
-
-  // THE FIXER'S OWN CLAIM about what it touched, read back from the ledger — an expected-changes
-  // set the host did not have to infer, and strictly narrower than `git add -A` plus a denylist.
-  const declaredFiles = [...new Set(results.flatMap((r) => r.filesChanged))].sort();
-  const commit = await deps.commitFixCycle({ review, batch, results, declaredFiles });
-  if (commit.kind === "refused") {
-    // A NAMED refusal, and Stage 5 stays open with NOTHING recorded: the results stay ingested,
-    // so re-entry short-circuits to this same commit attempt rather than running a second fixer.
-    return {
-      transition,
-      status: "refused",
-      message:
-        `${commit.reason}: ${commit.detail} — fix batch ${batch.id} revision ${batch.revision} keeps its ingested ` +
-        `results, the candidate stays at ${candidate}, and no fix stage record was written. Resolve the tree and ` +
-        `re-run \`forge review continue ${reviewId}\`; no second fixer will be dispatched for this revision.`,
-    };
   }
 
   // advanceCandidate is the ONE place the candidate moves, so scenario #14's invalidation fires
@@ -594,8 +622,14 @@ async function runBatchFix(reviewId: string, transition: Transition, deps: Coord
       `fix batch ${batch.id} revision ${batch.revision} ingested for ${batch.payload.findings.length} finding(s)` +
       (scopeChanged.length > 0 ? `; ${scopeChanged.join(", ")} returned as architecture question(s)` : "") +
       (commit.kind === "committed"
-        ? `; the fix cycle was committed as ${commit.sha} (${commit.committedPaths.length} path(s))`
-        : `; the fix cycle changed nothing, candidate stays ${candidateAfter}`),
+        ? commit.recognized === true
+          ? `; the fix cycle's commit ${commit.sha} (${commit.committedPaths.length} path(s)) was authored by an ` +
+            `earlier pass that crashed before recording it, and was RECOVERED rather than re-authored`
+          : `; the fix cycle was committed as ${commit.sha} (${commit.committedPaths.length} path(s))`
+        : `; the fix cycle changed nothing, candidate stays ${candidateAfter}`) +
+      (commit.kind === "committed" && commit.declaredNotMoved !== undefined
+        ? `; the results DECLARED ${commit.declaredNotMoved.join(", ")}, which the worktree never moved`
+        : ""),
     meta: {
       fixBatchId: batch.id,
       revision: batch.revision,
@@ -609,6 +643,10 @@ async function runBatchFix(reviewId: string, transition: Transition, deps: Coord
         kind: commit.kind,
         sha: commit.sha,
         committedPaths: commit.kind === "committed" ? commit.committedPaths : [],
+        // RF-2: true when this pass RECOVERED a commit an earlier crashed pass authored.
+        recognized: commit.kind === "committed" && commit.recognized === true,
+        // RF-5: the declared paths the tree never moved. Empty is the honest ledger.
+        declaredNotMoved: commit.kind === "committed" ? (commit.declaredNotMoved ?? []) : [],
         declaredFiles,
       },
     },
@@ -625,7 +663,13 @@ async function runBatchFix(reviewId: string, transition: Transition, deps: Coord
         : "") +
       (commit.kind === "committed"
         ? `; the cycle was committed as ${commit.sha} and the candidate now binds to it`
-        : `; the cycle changed no file, so the candidate stays at ${candidateAfter}`),
+        : `; the cycle changed no file, so the candidate stays at ${candidateAfter}`) +
+      // RF-5: an unsupported declaration is never silent. The commit still carries only
+      // declared paths; what the tree did not support is said out loud, on the same line.
+      (commit.kind === "committed" && commit.declaredNotMoved !== undefined
+        ? `. NOTE: the fix results declared ${commit.declaredNotMoved.join(", ")}, which the worktree never moved — ` +
+          `the commit carries only what did, and the recheck adjudicates the claim`
+        : ""),
   };
 }
 

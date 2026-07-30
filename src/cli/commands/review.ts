@@ -280,16 +280,26 @@ function checkWorkspace(
  *  > for a legacy row with no workspace_dir, the run's project_dir (adopted and RECORDED,
  *    so the next invocation is bound)
  *  > refuse by name.
- *  cwd is irrelevant in every arm. */
+ *  cwd is irrelevant in every arm.
+ *
+ *  FG-649 RF-3: `record: false` runs the identical resolution and the identical refusals but
+ *  WRITES NOTHING. It is what `--dry-run` passes. Recording the binding is a durable change to
+ *  which repository every later stage — including the coordinator's own git commit — writes
+ *  into, and a documented preview that "reports the next transition and exits without running
+ *  it" must not make it. The checks stay on the preview path so the answer is still about the
+ *  invocation being previewed; only the write is dropped. */
 export function resolveReviewWorkspace(
   review: Review,
   explicit: string | undefined,
+  opts: { record?: boolean } = {},
 ): { ok: true; dir: string; source: "flag" | "review" | "run" } | { ok: false; refusal: string } {
+  const record = opts.record !== false;
+
   if (explicit !== undefined) {
     const dir = resolve(explicit);
     const checked = checkWorkspace(dir, review.runId, "--project");
     if (!checked.ok) return checked;
-    if (review.workspaceDir !== checked.dir) updateReview(review.id, { workspaceDir: checked.dir });
+    if (record && review.workspaceDir !== checked.dir) updateReview(review.id, { workspaceDir: checked.dir });
     return { ok: true, dir: checked.dir, source: "flag" };
   }
 
@@ -303,7 +313,7 @@ export function resolveReviewWorkspace(
   if (runDir !== undefined) {
     const checked = checkWorkspace(resolve(runDir), review.runId, `the project dir of run ${review.runId},`);
     if (!checked.ok) return checked;
-    updateReview(review.id, { workspaceDir: checked.dir });
+    if (record) updateReview(review.id, { workspaceDir: checked.dir });
     return { ok: true, dir: checked.dir, source: "run" };
   }
 
@@ -343,6 +353,7 @@ function depsFor(
     evaluatedNoDrift?: string;
     acceptance?: string;
     docsCloseout?: string;
+    dryRun?: boolean;
   },
 ): { ok: true; deps: CoordinatorDeps } | { ok: false; refusal: string } {
   const review = getReview(reviewId);
@@ -351,8 +362,10 @@ function depsFor(
   const widening = parseLensWidening(opts.addLens ?? []);
   if (!widening.ok) return { ok: false, refusal: widening.refusal };
 
-  // FG-649: the dispatch workspace comes from the REVIEW, never from cwd.
-  const workspace = resolveReviewWorkspace(review, opts.project);
+  // FG-649: the dispatch workspace comes from the REVIEW, never from cwd. A --dry-run
+  // preview resolves and refuses identically but records nothing (RF-3) — rebinding which
+  // checkout later stages COMMIT into is not something a preview may do.
+  const workspace = resolveReviewWorkspace(review, opts.project, { record: opts.dryRun !== true });
   if (!workspace.ok) return { ok: false, refusal: workspace.refusal };
 
   const acceptance =

@@ -283,6 +283,17 @@ function porcelainPaths(out: string): string[] {
   return [...new Set(paths)];
 }
 
+/** THE SUBJECT IS AN INTERFACE, NOT A LOG LINE, and since FG-649/RF-2 it is also the fix
+ *  cycle's per-revision IDEMPOTENCY KEY: it is how a retry after a crash recognises the commit
+ *  this coordinator already authored instead of refusing forever. It must not reference the
+ *  ticket — `resolveCommitRange` infers a later review's comparison base from the OLDEST commit
+ *  whose subject references the ticket, and a review whose base is inferred as its own
+ *  remediation commit can never confirm its contract. One definition, because a subject written
+ *  in one place and matched in another is a key that silently stops matching. */
+function fixCycleSubject(batch: { id: string; revision: number }): string {
+  return `fix(review): fix batch ${batch.id} revision ${batch.revision}`;
+}
+
 /** The changed paths, named as far as is useful and counted beyond that. Used both by the
  *  fail-closed refusal and by the recorded `no_drift` evaluation, so the diff an evaluator
  *  is shown and the diff their evaluation is recorded against are the same summary. */
@@ -309,6 +320,33 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
   const git = ctx.git ?? realGit(ctx.projectDir);
   const invokeFn = ctx.invokeFn ?? invoke;
   const headSha = (): string => git(["rev-parse", "HEAD"]).trim();
+
+  // FG-649 RF-2/RF-6: the three reads that describe a commit that already exists. Each answers
+  // "" / [] when git cannot answer, and every caller treats that as NOT RECOGNISED and NOT
+  // VERIFIED — an unreadable commit is never adopted on the strength of a read that failed.
+  const subjectOf = (sha: string): string => {
+    try {
+      return git(["log", "-1", "--format=%s", sha]).trim();
+    } catch {
+      return "";
+    }
+  };
+  const parentsOf = (sha: string): string[] => {
+    try {
+      return git(["rev-list", "-1", "--parents", sha]).trim().split(/\s+/).filter((f) => f !== "").slice(1);
+    } catch {
+      return [];
+    }
+  };
+  const pathsOf = (sha: string): string[] => {
+    try {
+      return [...new Set(git(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", sha]).split("\0"))].filter(
+        (p) => p !== "",
+      );
+    } catch {
+      return [];
+    }
+  };
 
   // review-loop's own verify — covering evidence, CI wait, host-readiness preflight.
   const loop = buildReviewLoopDeps(
@@ -500,17 +538,38 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
     // outside it is NAMED rather than swept in by `git add -A`. That matters because this is a
     // WRITE into an operator checkout that other agents may be editing concurrently.
     //
-    // THE SUBJECT IS AN INTERFACE, NOT A LOG LINE. It must not reference the ticket:
-    // `resolveCommitRange` infers a later review's comparison base from the OLDEST commit whose
-    // subject references the ticket, and a review whose base is inferred as its own remediation
-    // commit can never confirm its contract.
+    // THE SUBJECT IS AN INTERFACE, NOT A LOG LINE — see `fixCycleSubject`, which is also the
+    // per-revision idempotency key the recovery arm below matches on.
     commitFixCycle: async ({ review, batch, declaredFiles }) => {
+      const subject = fixCycleSubject(batch);
+      const at = headSha();
+
+      // FG-649 RF-2: FIRST, RECOGNISE A COMMIT THIS COORDINATOR ALREADY AUTHORED.
+      //
+      // The git commit is an irreversible external write and the three ledger writes that
+      // record it (candidate advance, resolution invalidation, stage record) are separate
+      // SQLite transactions after it. Nothing can make those atomic with git, so the only
+      // way a crash in between is recoverable is for the retry to RECOGNISE the commit. The
+      // subject is already a per-revision idempotency key, and both crash windows land on an
+      // anchored HEAD: crash before the candidate advance leaves HEAD's PARENT at the
+      // candidate, crash after it leaves HEAD AT the candidate. Without this, the first
+      // refuses `candidate_not_checked_out` forever and the second
+      // `fix_cycle_declared_changes_absent` forever — the exact FG-649 stuck loop, whose only
+      // exits were hand re-anchoring or re-dispatching a fixer over already-fixed code.
+      //
+      // BOTH HALVES ARE REQUIRED. The subject alone would let any commit carrying that text
+      // be adopted as the candidate; the anchor alone would adopt any commit sitting on the
+      // candidate. Together they say: this commit is on the tree under review AND names this
+      // batch revision, which is what the coordinator's own commit does and nothing else.
+      if (subjectOf(at) === subject && (at === review.candidateSha || parentsOf(at).includes(review.candidateSha ?? ""))) {
+        return { kind: "committed", sha: at, committedPaths: pathsOf(at), recognized: true };
+      }
+
       // THE COMMIT GOES ON TOP OF THE CANDIDATE OR NOWHERE. This is the same HEAD-vs-candidate
       // comparison `verify` makes, under the same name, and it is not redundant with it: by the
       // time Stage 5 commits, that check ran stages ago. A fix-cycle commit authored on a head
       // the review is not about would produce a candidate whose parent is a foreign tree — a
       // silently mis-anchored evidence ledger rather than a stop.
-      const at = headSha();
       if (at !== review.candidateSha) {
         return {
           kind: "refused",
@@ -546,8 +605,27 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
             `only what the fixer itself claimed to change, so an undeclared change is never swept into it`,
         };
       }
+      // FG-649 RF-5: THE RECONCILIATION IS TWO-DIRECTIONAL. `outside` above catches a tree that
+      // moved beyond the declaration; `absent` catches a DECLARATION that reaches beyond the
+      // tree. It used to be consulted only for an ENTIRELY clean worktree, so a partly-
+      // fabricated `files_changed` went through in silence: declare [a, b], dirty only `a`, and
+      // the cycle committed `a` while the stage record stored declaredFiles [a, b] beside
+      // committedPaths [a] with nothing naming the disagreement.
+      //
+      // THE TWO CASES ARE NOT THE SAME STOP, and deliberately so:
+      //   - nothing moved at all -> refuse. The claim is wholly unsupported, there is nothing to
+      //     commit, and a resolution without a code change must declare no files.
+      //   - something moved -> COMMIT WHAT MOVED and NAME what did not. `committed ⊆ declared`
+      //     still holds, so the commit-only-declared-paths invariant is intact, and the
+      //     discrepancy travels on the outcome into the stage record and the operator's line.
+      //     Refusing here instead would dead-end a converging review: a second fix cycle that
+      //     re-writes a test file it already committed declares it honestly and moves nothing,
+      //     and no re-entry can ever change that — which is the FG-649 stuck loop again, bought
+      //     for a disagreement the recheck is what actually adjudicates.
+      const movedSet = new Set(moved);
+      const declaredNotMoved = [...declared].filter((p) => !movedSet.has(p)).sort();
       if (moved.length === 0) {
-        if (declaredFiles.length > 0) {
+        if (declaredNotMoved.length > 0) {
           return {
             kind: "refused",
             reason: "fix_cycle_declared_changes_absent",
@@ -564,10 +642,20 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
       }
 
       try {
+        // FG-649 RF-6: THE INDEX IS SHARED; THE COMMIT MUST NOT BE. `git add` + a bare `git
+        // commit` commits whatever the INDEX holds at commit time, so a process sharing this
+        // checkout could stage an undeclared file between the porcelain scan and the commit
+        // and have it carried into a review-authored commit. Passing the same pathspecs to
+        // `commit` makes it a partial commit — git builds the tree from HEAD plus exactly
+        // these paths and ignores everything else staged — which closes that window
+        // structurally rather than by narrowing it. The `add` stays because an untracked
+        // path (a fixer's new test file) must be known to git before a pathspec can name it.
+        //
         // `:/`-prefixed pathspecs are repo-root relative, matching what porcelain reported —
         // the git seam's cwd need not be the repository root for the add to name the same file.
-        git(["add", "--", ...moved.map((p) => `:/${p}`)]);
-        git(["commit", "-m", `fix(review): fix batch ${batch.id} revision ${batch.revision}`]);
+        const pathspecs = moved.map((p) => `:/${p}`);
+        git(["add", "--", ...pathspecs]);
+        git(["commit", "-m", subject, "--", ...pathspecs]);
       } catch (err) {
         return {
           kind: "refused",
@@ -575,7 +663,37 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
           detail: `git refused the fix-cycle commit in ${ctx.projectDir}: ${(err as Error).message}`,
         };
       }
-      return { kind: "committed", sha: headSha(), committedPaths: moved };
+
+      // FG-649 RF-6: AND THE COMMIT IS VERIFIED AFTER THE FACT, which no check made before it
+      // can be. A concurrent writer advancing HEAD between the candidate check and the commit
+      // would give the review a candidate whose parent is a foreign tree; reading the parent
+      // and the touched paths off the commit that actually landed is the only statement about
+      // it with no window at all. It does not un-commit — it refuses to ADOPT, which is the
+      // decision that matters: nothing is recorded and the sha never becomes the candidate.
+      const sha = headSha();
+      const parents = parentsOf(sha);
+      const committedPaths = pathsOf(sha);
+      const smuggled = committedPaths.filter((p) => !declared.has(p));
+      if (parents.length !== 1 || parents[0] !== review.candidateSha || smuggled.length > 0) {
+        return {
+          kind: "refused",
+          reason: "fix_cycle_commit_raced",
+          detail:
+            `the fix-cycle commit ${sha} in ${ctx.projectDir} did not land as authored — ` +
+            (parents.length !== 1 || parents[0] !== review.candidateSha
+              ? `its parent is ${parents.join(" ") || "(none)"}, not the candidate ${review.candidateSha ?? "(unset)"}`
+              : `it carries ${smuggled.join(", ")}, which no fix result declared`) +
+            `. Something else wrote this checkout while the cycle was committing, so the commit is NOT adopted as ` +
+            `the candidate and nothing was recorded. Inspect ${sha}, reset the checkout to ` +
+            `${review.candidateSha ?? "the candidate"}, and re-run`,
+        };
+      }
+      return {
+        kind: "committed",
+        sha,
+        committedPaths,
+        ...(declaredNotMoved.length > 0 ? { declaredNotMoved } : {}),
+      };
     },
 
     dispatchDocs: async ({ review, candidateSha }: { review: Review; candidateSha: string }) => {

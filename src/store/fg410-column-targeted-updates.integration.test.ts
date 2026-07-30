@@ -1,7 +1,12 @@
-// FG-410 integration tests: column-targeted campaign-item writes against a real
-// on-disk SQLite database, driven the way real consumers drive them.
+// FG-410 integration tests: column-targeted row writes against a real on-disk SQLite
+// database, driven the way real consumers drive them.
 //
-// Two properties are pinned here:
+// The campaign item is where the shape was first established (properties 1 and 2). The
+// review row joined it in FG-649/RF-4 (property 3) for the same reason and with the same
+// falsifiable setup — a second connection holding a snapshot read taken before the other
+// lane's commit.
+//
+// Three properties are pinned here:
 //
 // 1. INTERLEAVED DISJOINT WRITERS (the FG-396 parallel-lanes prerequisite).
 //    Two independent writers — a driver writing item state (lifecycleStatus) and a
@@ -40,6 +45,7 @@ import {
   updateCampaignItemIfCampaignRunning,
   updateCampaignStatus,
 } from "./campaigns.js";
+import { getReview, insertReview, recordStageEvidence, updateReview } from "./reviews.js";
 
 let dir: string;
 let laneA: DatabaseInstance;
@@ -252,4 +258,75 @@ test("FG-410 CAS (running variant): status flip to paused refuses the reattach w
 
   const afterWrite = inLane(laneB, () => getCampaignItem(itemId))!;
   assert.deepEqual(afterWrite, beforeWrite, "a refused CAS write must leave the row byte-for-byte unchanged");
+});
+
+// ── 3. The review row (FG-649 / RF-4) ────────────────────────────────────────
+//
+// `updateReview` was the last read-modify-write of EVERY mutable column in the review
+// ledger: it read the row outside the write lock and wrote base_sha, candidate_sha,
+// workspace_dir, contract_json, lens_outcomes_json and stage_evidence_json back from that
+// snapshot. FG-649 then put a new caller on the hot path — `resolveReviewWorkspace` rebinds
+// workspace_dir at the START of every stage-driving invocation — so the write most likely to
+// hold a stale snapshot became the one that runs first, every time, potentially alongside a
+// long-running stage of another forge process on the same review.
+//
+// RED baseline: restore the `patch.x ?? before.x ?? null` UPDATE of all eight columns in
+// src/store/reviews.ts and this arm fails on candidateSha and stageEvidence.
+
+test("FG-649/RF-4 interleaved lanes: a workspace rebind must not resurrect the candidate and stage record another lane wrote", () => {
+  inLane(laneA, () =>
+    insertReview({
+      id: "review-rf4",
+      reviewMode: "evidence_led",
+      ticketId: "FG-649",
+      baseSha: "base0000",
+      candidateSha: "cand1111",
+      workspaceDir: "/tmp/bound-before",
+      contract: { risk_lenses: ["wide"] },
+      state: "fixing",
+    })
+  );
+
+  // Lane B reads the review BEFORE lane A's stage writes. This is the snapshot the old
+  // read-merge-write shape would have written back over lane A's columns.
+  const laneBSnapshot = inLane(laneB, () => getReview("review-rf4"))!;
+  assert.equal(laneBSnapshot.candidateSha, "cand1111");
+  assert.equal(laneBSnapshot.stageEvidence, undefined);
+
+  // Lane A is mid-Stage-5: it committed the fix cycle, advanced the candidate to the sha it
+  // authored, and recorded the stage.
+  inLane(laneA, () => {
+    updateReview("review-rf4", { candidateSha: "afterfix2" });
+    recordStageEvidence("review-rf4", "fix", { sha: "cand1111", detail: "the fix cycle was committed" });
+  });
+
+  // Lane B now does what every `forge review continue` does first: rebind the workspace. It
+  // names workspace_dir only.
+  inLane(laneB, () => updateReview("review-rf4", { workspaceDir: "/tmp/bound-after" }));
+
+  for (const [laneName, conn] of [
+    ["lane A", laneA],
+    ["lane B", laneB],
+  ] as const) {
+    const row = inLane(conn, () => getReview("review-rf4"))!;
+    assert.equal(row.workspaceDir, "/tmp/bound-after", `${laneName}: the rebind persists`);
+    assert.equal(row.candidateSha, "afterfix2", `${laneName}: the candidate advance must survive the rebind`);
+    assert.equal(
+      row.stageEvidence?.fix?.sha,
+      "cand1111",
+      `${laneName}: the fix stage record must survive the rebind`,
+    );
+    assert.deepEqual(row.contract, { risk_lenses: ["wide"] }, `${laneName}: columns nobody named are untouched`);
+  }
+});
+
+test("FG-649/RF-4: an empty patch writes no column at all", () => {
+  inLane(laneA, () =>
+    insertReview({ id: "review-rf4-noop", reviewMode: "evidence_led", ticketId: "FG-649", candidateSha: "cand1111" })
+  );
+  const before = inLane(laneA, () => getReview("review-rf4-noop"))!;
+  const returned = inLane(laneA, () => updateReview("review-rf4-noop", {}));
+
+  assert.deepEqual(returned, before, "a patch naming nothing is not a write — not even of updated_at");
+  assert.deepEqual(inLane(laneB, () => getReview("review-rf4-noop")), before);
 });

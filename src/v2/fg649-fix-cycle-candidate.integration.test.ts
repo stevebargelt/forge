@@ -455,6 +455,53 @@ test("integ FG-649: a crash between ingestion and the commit starts NO second fi
   assert.equal(fixBatchesForReview(REVIEW).length, 1, "and it did not mint a second revision");
 });
 
+test("integ FG-649 / RF-2: a crash AFTER the commit but before the ledger writes RECOVERS the coordinator's own commit", async () => {
+  // The other side of the same window, and the one that used to be terminal. The git commit is
+  // an irreversible external write; the ledger writes that record it are separate SQLite
+  // transactions after it. A crash in between left HEAD post-fix and the row pre-fix, and every
+  // retry then refused `candidate_not_checked_out` — checking the candidate out as that refusal
+  // advises produced a clean tree with non-empty declaredFiles, i.e. `fix_cycle_declared_changes_absent`.
+  // Non-progressing in both directions, exits limited to the hand re-anchoring FG-649 forbids or
+  // a new revision re-dispatching a real fixer over already-fixed code.
+  //
+  // RED baseline: delete the recognition arm at the top of `commitFixCycle`
+  // (src/cli/commands/review-wiring.ts) and the resumed pass below refuses instead of advancing.
+  const h = harness();
+  await parkAt(h.deps, "batch_fix");
+  const preFix = getReview(REVIEW)?.candidateSha as string;
+
+  const crashAfterCommit: CoordinatorDeps = {
+    ...h.deps,
+    commitFixCycle: async (ctx) => {
+      await h.deps.commitFixCycle(ctx); // the REAL commit lands
+      throw new Error("the coordinator died after the git commit, before the ledger writes");
+    },
+  };
+  await assert.rejects(() => runNextStage(REVIEW, crashAfterCommit), /died after the git commit/);
+
+  const authored = head();
+  assert.notEqual(authored, preFix, "the commit landed");
+  assert.equal(porcelain(), "", "and took the fixer's edits with it");
+  assert.equal(getReview(REVIEW)?.candidateSha, preFix, "but the ledger never learned about it");
+  assert.equal(getReview(REVIEW)?.stageEvidence?.fix, undefined, "a stage records itself only on success");
+  assert.equal(pending().kind, "batch_fix", "Stage 5 re-opens");
+
+  // A fresh process picks it up and recognises the commit forge itself authored.
+  const resumed = await runNextStage(REVIEW, harness().deps);
+  assert.equal(resumed.status, "advanced", resumed.message);
+  assert.equal(head(), authored, "no second commit was authored");
+  assert.equal(getReview(REVIEW)?.candidateSha, authored, "the post-fix candidate is recorded AUTOMATICALLY");
+  assert.equal(fixRecord().meta?.["candidateAfter"], authored);
+  assert.equal(
+    (fixRecord().meta?.["fixCommit"] as { recognized: boolean }).recognized,
+    true,
+    "the audit trail says RECOVERED, not authored-on-this-pass",
+  );
+  assert.match(fixRecord().detail ?? "", /RECOVERED rather than re-authored/);
+  assert.equal(h.dispatches("engineer").length, 1, "no second fixer container over already-fixed code");
+  assert.equal(fixBatchesForReview(REVIEW).length, 1, "and no second revision");
+});
+
 // ─── the named refusals ─────────────────────────────────────────────────────
 
 test("integ FG-649: a fixer that DECLARES files against a clean tree refuses by name and records nothing", async () => {

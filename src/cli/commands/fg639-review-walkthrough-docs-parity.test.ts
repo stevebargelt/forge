@@ -144,7 +144,9 @@ const SOURCE_PARITY: { label: string; path: string; anyOf: RegExp[] }[] = [
   {
     label: "every stage-driving invocation resolves its workspace from the REVIEW ROW (FG-649)",
     path: REVIEW_CMD,
-    anyOf: [/resolveReviewWorkspace\(review, opts\.project\)/],
+    // The third argument is FG-649/RF-3's `record` flag (a --dry-run preview resolves but
+    // does not rebind); the claim under test is still "from the review row, never cwd".
+    anyOf: [/resolveReviewWorkspace\(review, opts\.project[,)]/],
   },
   {
     label: "resolveReviewBase infers from the ticket's landed range when --since is absent",

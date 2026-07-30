@@ -362,6 +362,43 @@ test("FG-649: a directory INSIDE a worktree is not its root, and is refused rath
   );
 });
 
+// ── arm 6b (FG-649 / RF-3) ──────────────────────────────────────────────────
+test("FG-649/RF-3: `continue --dry-run --project <dir>` previews without REBINDING the workspace", () => {
+  // `--dry-run` is documented as "report the one valid next transition and exit without
+  // running it". It built its deps first (deliberately, so the preview applies the same
+  // checks the act does), and depsFor's workspace resolution RECORDED the flag — so a
+  // documented preview permanently changed which repository every later stage, including the
+  // coordinator's own git commit, writes into. The checks stay; only the write is dropped.
+  seedReview({
+    id: "review-dryrun",
+    workspaceDir: workspaceRepo,
+    baseSha: workspaceBase,
+    candidateSha: workspaceHead,
+    verifiedEntryAt: workspaceHead,
+  });
+
+  const preview = runForge(["review", "continue", "review-dryrun", "--dry-run", "--project", otherRepo]);
+  assert.equal(preview.status, 0, `${preview.stdout}${preview.stderr}`);
+  assert.match(preview.stdout, /next: /, "the preview still answers");
+  assert.equal(
+    reviewRow("review-dryrun").workspace_dir,
+    workspaceRepo,
+    "a preview does not rebind which repository later stages COMMIT into",
+  );
+
+  // The preview is still ABOUT the invocation it previews: the same --project checks apply,
+  // so a dry run against an unusable dir refuses by name rather than quietly previewing
+  // against the old binding.
+  const bad = runForge(["review", "continue", "review-dryrun", "--dry-run", "--project", join(workspaceRepo, ".git")]);
+  assert.notEqual(bad.status, 0);
+  assert.match(bad.stderr, /review_workspace_unusable/);
+  assert.equal(reviewRow("review-dryrun").workspace_dir, workspaceRepo);
+
+  // And the act still binds — the write moved onto the acting path, it did not disappear.
+  runForge(["review", "continue", "review-dryrun", "--project", otherRepo]);
+  assert.equal(reviewRow("review-dryrun").workspace_dir, otherRepo, "the real invocation still RECORDS its override");
+});
+
 // ── arm 7 ───────────────────────────────────────────────────────────────────
 test("FG-649: a legacy row with no workspace_dir and no adoptable run project_dir refuses unbound, writing nothing", () => {
   seedReview({

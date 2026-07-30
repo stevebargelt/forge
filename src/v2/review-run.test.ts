@@ -616,6 +616,104 @@ test("FG-639 / PRD #5: the fixer resolves four and reports one scope-changing �
   );
 });
 
+test("FG-649 / RF-5: a declaration the tree did not support reaches the stage record and the operator's line", async () => {
+  // The harm RF-5 names is SILENCE: declaredFiles [a, b] stored beside committedPaths [a] with
+  // nothing saying they disagree. The commit still carries only declared paths — what changed
+  // is that the unsupported half is no longer something you would have to diff to notice.
+  const h = harness({
+    commitFixCycle: () => ({
+      kind: "committed",
+      sha: "afterfix2",
+      committedPaths: ["src/x.ts"],
+      declaredNotMoved: ["src/never-written.test.ts"],
+    }),
+  });
+  await drive(h.deps, "discover");
+  dispositionAll("fix_now", "will be remediated this cycle");
+
+  const fix = await runNextStage(REVIEW, h.deps);
+  assert.equal(fix.status, "advanced");
+  assert.match(fix.message, /declared src\/never-written\.test\.ts, which the worktree never moved/);
+
+  const rec = getReview(REVIEW)?.stageEvidence?.fix;
+  assert.deepEqual((rec?.meta?.["fixCommit"] as { declaredNotMoved: string[] }).declaredNotMoved, [
+    "src/never-written.test.ts",
+  ]);
+  assert.match(rec?.detail ?? "", /which the worktree never moved/);
+});
+
+test("FG-649 / RF-1: a REFUSED fix-cycle commit records NOTHING — not the state marker, not a scope_change disposition", async () => {
+  // The stage contract is that a stage records itself only on success. Stage 5 was breaking it
+  // twice on its own new path: it moved the row to `fixing` and wrote the scope-changing
+  // finding's `architecture_question` disposition BEFORE the commit that its contract says must
+  // succeed first. A refused commit then left a review parked mid-fix with a disposition it had
+  // not earned, and the operator's `forge review show` claimed a fixer was running.
+  let refuse = true;
+  let fixers = 0;
+  const h = harness({
+    findingsPerLens: 5,
+    dispatchFixer: (ctx) => {
+      fixers += 1;
+      return {
+        ok: true,
+        taskId: "task-fixer-1",
+        result: {
+          fix_batch_id: ctx.batch.id,
+          revision: ctx.batch.revision,
+          findings: ctx.batch.payload.findings.map((f, i) =>
+            i === 4
+              ? {
+                  finding_id: f.finding_id,
+                  result: "scope_change",
+                  remediation_summary: "cannot fix in scope",
+                  files_changed: [],
+                  evidence: "the fix needs a new table",
+                  scope_change_reason: "resolving it requires a schema change the plan did not approve",
+                }
+              : {
+                  finding_id: f.finding_id,
+                  result: "fixed",
+                  remediation_summary: "guarded",
+                  files_changed: ["src/x.ts"],
+                  evidence: "added the named regression test",
+                },
+          ),
+        },
+      };
+    },
+    commitFixCycle: () =>
+      refuse
+        ? { kind: "refused", reason: "fix_cycle_tree_dirty_outside_declared_scope", detail: "docs/unrelated.md" }
+        : { kind: "committed", sha: "afterfix2", committedPaths: ["src/x.ts"] },
+  });
+
+  await drive(h.deps, "discover");
+  dispositionAll("fix_now", "will be remediated this cycle");
+  const stateBefore = getReview(REVIEW)?.state;
+
+  const refused = await runNextStage(REVIEW, h.deps);
+  assert.equal(refused.status, "refused");
+  assert.match(refused.message, /fix_cycle_tree_dirty_outside_declared_scope/);
+
+  assert.equal(getReview(REVIEW)?.state, stateBefore, "the row is not parked mid-stage in `fixing`");
+  assert.equal(getReview(REVIEW)?.stageEvidence?.fix, undefined, "no fix stage record");
+  assert.equal(
+    findingsForReview(REVIEW).find((f) => f.findingRef === "RF-5")?.disposition,
+    "fix_now",
+    "a refused stage does not move a finding's disposition",
+  );
+  assert.equal(pending().kind, "batch_fix", "Stage 5 stays open, to be re-entered");
+
+  // And deferring the disposition to after the commit loses nothing: re-entry re-derives it
+  // from the SAME ingested results — no second fixer — and records it once the commit lands.
+  refuse = false;
+  const advanced = await runNextStage(REVIEW, h.deps);
+  assert.equal(advanced.status, "advanced");
+  assert.equal(fixers, 1, "the ingested results are re-used, never a second fixer container");
+  assert.equal(findingsForReview(REVIEW).find((f) => f.findingRef === "RF-5")?.disposition, "architecture_question");
+  assert.match(advanced.message, /RF-5 returned to disposition as architecture question/);
+});
+
 test("FG-639: a fixer result that omits an expected id refuses the stage and leaves findings fix_now, unresolved", async () => {
   const h = harness({
     findingsPerLens: 3,
