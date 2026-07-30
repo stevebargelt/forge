@@ -15,18 +15,17 @@
 // It is deliberately NOT `for (const k of Object.keys(process.env)) if
 // (k.startsWith("FORGE_")) delete …`, which is the obvious "simplification" and
 // is wrong: harness INPUTS live in the same namespace and are legitimate.
-// `FORGE_TEST_MISMATCHED_NODE` is provisioned by CI into all five test-extended
-// integration shards (.github/workflows/ci.yml), and
-// src/cli/node-preflight.integration.test.ts:287 treats it as a HARD
-// requirement — with it set, every failure mode there reddens instead of
-// skipping. A blanket sweep would erase it inside the child that runs that test
-// and silently demote CI's required extended gate to the local skip path: still
-// green, no longer proving anything. `FORGE_TEST_PRINT_CMD` is the other one.
+// `FORGE_TEST_PRINT_CMD` is one — a blanket sweep would erase it inside the very
+// children that are supposed to read it. (FG-647 retired the other,
+// `FORGE_TEST_MISMATCHED_NODE`, along with the environment-dependent preflight arm
+// and the CI provisioning that fed it; the named list is still named because the
+// distinction between a production switch and a harness input outlives any one
+// input.)
 //
 // Nothing in the suite observes this today (the clears happen before any test
 // body runs, so a test cannot see the difference from the inside), which is
 // exactly why it needs a test from the OUTSIDE: a child process is booted with
-// all five variables set and asked what survived preload.
+// all four variables set and asked what survived preload.
 //
 // Tier: integration — spawns a real node child. NODE_TEST_CONTEXT is deleted
 // from that child's env because this file is itself running under the test
@@ -36,7 +35,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -53,7 +52,6 @@ const PRODUCTION_SWITCHES: Record<string, string | undefined> = {
 
 /** Preserved: harness inputs the suite is *supposed* to read. */
 const HARNESS_INPUTS: Record<string, string> = {
-  FORGE_TEST_MISMATCHED_NODE: "/fg636/not/a/real/interpreter",
   FORGE_TEST_PRINT_CMD: "1",
 };
 
@@ -103,30 +101,8 @@ test("FG-636 — test-setup neutralizes the production switches and PRESERVES th
       seen[key],
       value,
       `${key} was cleared by test-setup. It is a harness INPUT, not a production switch — clearing it is how a blanket ` +
-        `FORGE_* sweep silently demotes CI's test-extended shards to the local skip path while staying green. ` +
+        `FORGE_* sweep silently changes what a test child observes while staying green. ` +
         `Keep the named list named (${JSON.stringify(seen)})`,
     );
   }
-});
-
-test("FG-636 — the CI side of that contract: every integration shard still provisions the mismatched Node", () => {
-  // The other half of why the list must stay named. If this ever drops to zero,
-  // preserving FORGE_TEST_MISMATCHED_NODE above stops being load-bearing — and
-  // whoever removes it should have to say so here rather than discover it as a
-  // permanently-skipping F31 arm.
-  const ci = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
-  const provisioned = ci.match(/FORGE_TEST_MISMATCHED_NODE=.*>> "\$GITHUB_ENV"/g) ?? [];
-  assert.equal(
-    provisioned.length,
-    5,
-    "all five test-extended integration shards must export FORGE_TEST_MISMATCHED_NODE — the shard planner can route " +
-      `node-preflight.integration.test.ts to any of them (found ${provisioned.length})`,
-  );
-
-  const preflight = readFileSync(join(REPO_ROOT, "src", "cli", "node-preflight.integration.test.ts"), "utf8");
-  assert.match(
-    preflight,
-    /process\.env\.FORGE_TEST_MISMATCHED_NODE/,
-    "node-preflight.integration.test.ts is the consumer that makes the preserved variable matter",
-  );
 });
