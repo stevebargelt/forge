@@ -125,12 +125,64 @@ function decisionCoveredByRecheckedCycle(review: Review, batches: readonly FixBa
   return batches.some((b) => covered.has(`${b.id}@${b.revision}`) && batchCarriesDecision(b, f));
 }
 
-/** Stage 5 is satisfied when every CURRENT fix_now finding was carried by an ingested batch
- *  under its current decision. The fix stage's own record cannot be checked with
- *  `stageCompleteAt` — the fixer's commits move the candidate, so its sha is deliberately
- *  the PRE-fix one. */
+/** FG-649 (change 3 / RF-8): THE UNRESOLVED fix_now SET — the ONE definition of what a fix
+ *  batch is for, shared by the predicate that SELECTS Stage 5 and the filter that BUILDS its
+ *  payload. Two separate definitions is how a finding that was already proven fixed got
+ *  re-dispatched to a fixer, and how the same batch could then clear the very resolution that
+ *  proved it (the fix-cycle invalidation is scoped to batch membership, so non-membership is
+ *  what preserves it — there is deliberately no third invalidation authority and no
+ *  per-finding preserve flag).
+ *
+ *  EVALUATED AGAINST A NAMED SHA, never "now". A resolution is candidate-BOUND, and the fix
+ *  stage itself advances the candidate, so "resolved" has to mean "resolved at the sha this
+ *  batch is being built for". A resolution proven at an earlier candidate is not evidence
+ *  about this one — `invalidateResolutionsForCandidate` already clears it when the candidate
+ *  moves, and this predicate agrees with that rule rather than restating it loosely. */
+export function unresolvedFixNow(
+  findings: readonly ReviewFinding[],
+  candidateSha: string | undefined,
+): ReviewFinding[] {
+  return fixNowFindings(findings).filter(
+    (f) =>
+      !(
+        f.resolution === "resolved" &&
+        f.resolvedSha !== undefined &&
+        candidateSha !== undefined &&
+        f.resolvedSha === candidateSha
+      ),
+  );
+}
+
+/** FG-649 (change 1): A FIX CYCLE THAT INGESTED BUT WAS NEVER RECORDED IS NOT COMPLETE.
+ *
+ *  Stage 5 now owns the fix-cycle COMMIT (the coordinator authors it; see runBatchFix), and a
+ *  stage records itself only on success — so a crash, or a refused commit, can leave a batch
+ *  `ingested` with no fix stage record naming it. Coverage alone would read that as satisfied
+ *  and walk on to docs at the PRE-fix candidate, which is the FG-649 loop with extra steps:
+ *  the fixes exist in the worktree, the candidate never moves, and the rechecker examines a
+ *  tree without them.
+ *
+ *  Keyed per CYCLE (batch id AND revision) rather than per sha, because the fix record's own
+ *  sha is deliberately the pre-fix candidate and a second cycle at an unmoved candidate must
+ *  earn its own commit+record. At most one batch is ever in `ingested` — `ensureFixBatch`
+ *  supersedes the previous one — so the LATEST batch is the only one that can be outstanding. */
+export function fixCycleAwaitingRecord(snapshot: ReviewSnapshot): FixBatch | undefined {
+  const latest = snapshot.batches[snapshot.batches.length - 1];
+  if (latest === undefined || latest.state !== "ingested") return undefined;
+  const meta = snapshot.review.stageEvidence?.fix?.meta;
+  const recorded = meta?.["fixBatchId"] === latest.id && meta?.["revision"] === latest.revision;
+  return recorded ? undefined : latest;
+}
+
+/** Stage 5 is satisfied when every UNRESOLVED fix_now finding was carried by an ingested batch
+ *  under its current decision, AND no ingested cycle is still waiting to be committed and
+ *  recorded. The fix stage's own record cannot be checked with `stageCompleteAt` — the fix
+ *  cycle's commit moves the candidate, so its sha is deliberately the PRE-fix one. */
 function fixStageSatisfied(snapshot: ReviewSnapshot): boolean {
-  return fixNowFindings(snapshot.findings).every((f) => decisionCoveredByIngestedBatch(snapshot.batches, f));
+  if (fixCycleAwaitingRecord(snapshot) !== undefined) return false;
+  return unresolvedFixNow(snapshot.findings, snapshot.review.candidateSha).every((f) =>
+    decisionCoveredByIngestedBatch(snapshot.batches, f),
+  );
 }
 
 /** Findings that hold the review at Stage 4.
@@ -317,12 +369,22 @@ function resolveTransition(snapshot: ReviewSnapshot): Transition {
   // Stage 5 — one batch fix.
   const fixNow = fixNowFindings(findings);
   if (!fixStageSatisfied(snapshot)) {
+    // The UNRESOLVED ones — the set a fixer would actually be handed (FG-649 change 3).
+    const unresolved = unresolvedFixNow(findings, candidate);
+    const outstanding = fixCycleAwaitingRecord(snapshot);
     return {
       kind: "batch_fix",
       state: "fixing",
       stage: "fix",
-      reason: `${fixNow.length} fix_now finding(s) go to ONE fixer in one batch`,
-      blockingFindings: fixNow.map((f) => f.findingRef),
+      reason:
+        outstanding !== undefined
+          ? `fix batch ${outstanding.id} revision ${outstanding.revision} has ingested results that are not ` +
+            `committed and recorded yet — the fix cycle completes by recording the post-fix candidate`
+          : `${unresolved.length} unresolved fix_now finding(s) go to ONE fixer in one batch` +
+            (unresolved.length < fixNow.length
+              ? ` (${fixNow.length - unresolved.length} already resolved at ${candidate ?? "(unset)"} and not re-dispatched)`
+              : ""),
+      blockingFindings: unresolved.map((f) => f.findingRef),
     };
   }
 

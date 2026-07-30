@@ -254,6 +254,35 @@ function recheckerTask(ctx: RecheckContextIn): string {
   ].join("\n");
 }
 
+/** FG-649: the paths `git status --porcelain -z --untracked-files=all` reports as moved.
+ *
+ *  `-z` because a NUL-separated record is the only form that cannot be misread on a path
+ *  containing a space, a quote or a newline — the C-quoting of the non-`-z` format would have
+ *  to be un-quoted here, and a scope guard that mis-parses a path is a scope guard that
+ *  commits the wrong file. `--untracked-files=all` because a fixer's new test file is
+ *  untracked and is exactly the evidence the recheck depends on.
+ *
+ *  Porcelain paths are relative to the REPOSITORY ROOT (unlike the human format, which is
+ *  relative to cwd), so they are comparable to the fixer's declared paths without knowing
+ *  where the git seam's cwd sits. A rename reports BOTH its new and its original path, and
+ *  both are returned: staging a rename without its source leaves the deletion uncommitted. */
+function porcelainPaths(out: string): string[] {
+  const fields = out.split("\0").filter((f) => f !== "");
+  const paths: string[] = [];
+  for (let i = 0; i < fields.length; i += 1) {
+    const entry = fields[i] as string;
+    if (entry.length < 4) continue;
+    paths.push(entry.slice(3));
+    // `R`/`C` in either column: the ORIGINAL path is the next NUL-separated field.
+    if (entry[0] === "R" || entry[0] === "C" || entry[1] === "R" || entry[1] === "C") {
+      i += 1;
+      const origin = fields[i];
+      if (origin !== undefined) paths.push(origin);
+    }
+  }
+  return [...new Set(paths)];
+}
+
 /** The changed paths, named as far as is useful and counted beyond that. Used both by the
  *  fail-closed refusal and by the recorded `no_drift` evaluation, so the diff an evaluator
  *  is shown and the diff their evaluation is recorded against are the same summary. */
@@ -460,6 +489,93 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
         result: res.result,
         ...(res.error !== undefined ? { error: res.error } : {}),
       };
+    },
+
+    // FG-649 change 1: THE FIX CYCLE'S COMMIT IS THE COORDINATOR'S, so the post-fix sha is one
+    // forge CREATED rather than one it read back and hoped was the right one. The orchestrator
+    // no longer commits a review fix cycle.
+    //
+    // ONLY THE DECLARED PATHS ARE COMMITTED. The expected-changes set is the fixer's own
+    // per-finding `files_changed` claim, read back from the ledger — so a tree that moved
+    // outside it is NAMED rather than swept in by `git add -A`. That matters because this is a
+    // WRITE into an operator checkout that other agents may be editing concurrently.
+    //
+    // THE SUBJECT IS AN INTERFACE, NOT A LOG LINE. It must not reference the ticket:
+    // `resolveCommitRange` infers a later review's comparison base from the OLDEST commit whose
+    // subject references the ticket, and a review whose base is inferred as its own remediation
+    // commit can never confirm its contract.
+    commitFixCycle: async ({ review, batch, declaredFiles }) => {
+      // THE COMMIT GOES ON TOP OF THE CANDIDATE OR NOWHERE. This is the same HEAD-vs-candidate
+      // comparison `verify` makes, under the same name, and it is not redundant with it: by the
+      // time Stage 5 commits, that check ran stages ago. A fix-cycle commit authored on a head
+      // the review is not about would produce a candidate whose parent is a foreign tree — a
+      // silently mis-anchored evidence ledger rather than a stop.
+      const at = headSha();
+      if (at !== review.candidateSha) {
+        return {
+          kind: "refused",
+          reason: "candidate_not_checked_out",
+          detail:
+            `the workspace at ${ctx.projectDir} is on ${at}, not the candidate ${review.candidateSha ?? "(unset)"} ` +
+            `this fix cycle was dispatched for — refusing to author a commit on a tree the review is not about. ` +
+            `Check the candidate out (or point --project at the workspace that has it) and re-run`,
+        };
+      }
+
+      let moved: string[];
+      try {
+        moved = porcelainPaths(git(["status", "--porcelain", "-z", "--untracked-files=all"]));
+      } catch (err) {
+        return {
+          kind: "refused",
+          reason: "fix_cycle_commit_failed",
+          detail: `the worktree state at ${ctx.projectDir} could not be read: ${(err as Error).message}`,
+        };
+      }
+
+      const declared = new Set(declaredFiles.map((p) => p.replace(/^\.\//, "")));
+      const outside = moved.filter((p) => !declared.has(p));
+      if (outside.length > 0) {
+        return {
+          kind: "refused",
+          reason: "fix_cycle_tree_dirty_outside_declared_scope",
+          detail:
+            `the worktree at ${ctx.projectDir} has changes no fix result declared: ${outside.slice(0, 10).join(", ")}` +
+            `${outside.length > 10 ? `, +${outside.length - 10} more` : ""} (declared: ` +
+            `${declaredFiles.length > 0 ? declaredFiles.join(", ") : "nothing"}). The fix cycle's commit carries ` +
+            `only what the fixer itself claimed to change, so an undeclared change is never swept into it`,
+        };
+      }
+      if (moved.length === 0) {
+        if (declaredFiles.length > 0) {
+          return {
+            kind: "refused",
+            reason: "fix_cycle_declared_changes_absent",
+            detail:
+              `the fix results declare ${declaredFiles.join(", ")} but the worktree at ${ctx.projectDir} is clean — ` +
+              `the fixer's own ledger claim contradicts the tree, so there is nothing to commit and the claim ` +
+              `cannot be honoured. This is deliberately NOT read as a resolution without a code change: a cycle ` +
+              `that legitimately changed nothing declares no files`,
+          };
+        }
+        // A legitimate no-change cycle. The candidate does not move, and fixCycleKey already
+        // makes this cycle earn its own recheck even at an unmoved candidate.
+        return { kind: "no_change", sha: headSha() };
+      }
+
+      try {
+        // `:/`-prefixed pathspecs are repo-root relative, matching what porcelain reported —
+        // the git seam's cwd need not be the repository root for the add to name the same file.
+        git(["add", "--", ...moved.map((p) => `:/${p}`)]);
+        git(["commit", "-m", `fix(review): fix batch ${batch.id} revision ${batch.revision}`]);
+      } catch (err) {
+        return {
+          kind: "refused",
+          reason: "fix_cycle_commit_failed",
+          detail: `git refused the fix-cycle commit in ${ctx.projectDir}: ${(err as Error).message}`,
+        };
+      }
+      return { kind: "committed", sha: headSha(), committedPaths: moved };
     },
 
     dispatchDocs: async ({ review, candidateSha }: { review: Review; candidateSha: string }) => {

@@ -22,13 +22,22 @@ import { eventsForRun } from "../store/events.js";
 import {
   findingsForReview,
   getReview,
+  ingestFindings,
   insertReview,
   recordDisposition,
+  recordResolution,
   type Review,
   type ReviewFinding,
   type ReviewStage,
 } from "../store/reviews.js";
-import { fixBatchesForReview, getFixBatch, serializeFixBatchPayload } from "../store/fix-batches.js";
+import {
+  ensureFixBatch,
+  fixBatchesForReview,
+  getFixBatch,
+  ingestFixBatchResults,
+  serializeFixBatchPayload,
+  type FixBatch,
+} from "../store/fix-batches.js";
 import { nextTransition, type TransitionKind } from "./review-coordinator.js";
 import { runNextStage, type CoordinatorDeps } from "./review-run.js";
 import type { Run } from "../types/index.js";
@@ -82,6 +91,8 @@ type Calls = {
   docs: number;
   rechecker: number;
   verify: number;
+  /** FG-649: how many times the coordinator asked to commit a fix cycle. */
+  commit: number;
 };
 
 function discoveryFinding(n: number, over: Record<string, unknown> = {}) {
@@ -108,7 +119,7 @@ type Harness = {
 };
 
 function harness(over: Partial<CoordinatorDeps> & { findingsPerLens?: number; initialHead?: string } = {}): Harness {
-  const calls: Calls = { lens: [], fixer: 0, docs: 0, rechecker: 0, verify: 0 };
+  const calls: Calls = { lens: [], fixer: 0, docs: 0, rechecker: 0, verify: 0, commit: 0 };
   // `initialHead` is what a FRESH process sees: the orchestrator that died held the head in
   // a variable, so a resuming process starts from wherever the repository actually is.
   let head = over.initialHead ?? "cand111";
@@ -155,6 +166,18 @@ function harness(over: Partial<CoordinatorDeps> & { findingsPerLens?: number; in
           })),
         },
       };
+    },
+    // FG-649: the fix cycle's commit is the COORDINATOR'S. This seam stands in for the git
+    // write and returns the sha the "commit" produced — whatever the stubbed fixer above moved
+    // the simulated head to. Note what this tier therefore CANNOT prove: `head` is a closure
+    // variable, so it can report a sha no real repository would have had, which is why the
+    // FG-649 defect (a HEAD read that was a guaranteed no-op) survived this suite. The
+    // real-repository evidence is fg649-fix-cycle-candidate.integration.test.ts.
+    commitFixCycle: ({ declaredFiles }) => {
+      calls.commit += 1;
+      return declaredFiles.length > 0
+        ? { kind: "committed", sha: head, committedPaths: [...declaredFiles] }
+        : { kind: "no_change", sha: head };
     },
     dispatchDocs: () => {
       calls.docs += 1;
@@ -443,15 +466,15 @@ test("FG-639 / PRD #15: continue after a crash resumes the persisted next stage 
 // stage is the only thing that dispatches a container, and no already-recorded stage is
 // re-recorded.
 const RESUME_BOUNDARIES: Array<{ completed: string; target: TransitionKind; expect: Calls }> = [
-  { completed: "stage 1 verification entry", target: "confirm_contract", expect: { lens: [], fixer: 0, docs: 0, rechecker: 0, verify: 0 } },
-  { completed: "stage 2 contract confirmation", target: "discover", expect: { lens: ["wide", "backend"], fixer: 0, docs: 0, rechecker: 0, verify: 0 } },
-  { completed: "stage 3 discovery", target: "await_disposition", expect: { lens: [], fixer: 0, docs: 0, rechecker: 0, verify: 0 } },
-  { completed: "stage 4 the disposition decision", target: "batch_fix", expect: { lens: [], fixer: 1, docs: 0, rechecker: 0, verify: 0 } },
-  { completed: "stage 5 the batch fix", target: "docs", expect: { lens: [], fixer: 0, docs: 1, rechecker: 0, verify: 0 } },
-  { completed: "stage 6 docs reconciliation", target: "verify_final", expect: { lens: [], fixer: 0, docs: 0, rechecker: 0, verify: 1 } },
-  { completed: "stage 7 final verification", target: "recheck", expect: { lens: [], fixer: 0, docs: 0, rechecker: 1, verify: 0 } },
-  { completed: "stage 8 the recheck", target: "shipping_review", expect: { lens: [], fixer: 0, docs: 0, rechecker: 0, verify: 0 } },
-  { completed: "stage 9 the shipping review", target: "settled", expect: { lens: [], fixer: 0, docs: 0, rechecker: 0, verify: 0 } },
+  { completed: "stage 1 verification entry", target: "confirm_contract", expect: { lens: [], fixer: 0, docs: 0, rechecker: 0, verify: 0, commit: 0 } },
+  { completed: "stage 2 contract confirmation", target: "discover", expect: { lens: ["wide", "backend"], fixer: 0, docs: 0, rechecker: 0, verify: 0, commit: 0 } },
+  { completed: "stage 3 discovery", target: "await_disposition", expect: { lens: [], fixer: 0, docs: 0, rechecker: 0, verify: 0, commit: 0 } },
+  { completed: "stage 4 the disposition decision", target: "batch_fix", expect: { lens: [], fixer: 1, docs: 0, rechecker: 0, verify: 0, commit: 1 } },
+  { completed: "stage 5 the batch fix", target: "docs", expect: { lens: [], fixer: 0, docs: 1, rechecker: 0, verify: 0, commit: 0 } },
+  { completed: "stage 6 docs reconciliation", target: "verify_final", expect: { lens: [], fixer: 0, docs: 0, rechecker: 0, verify: 1, commit: 0 } },
+  { completed: "stage 7 final verification", target: "recheck", expect: { lens: [], fixer: 0, docs: 0, rechecker: 1, verify: 0, commit: 0 } },
+  { completed: "stage 8 the recheck", target: "shipping_review", expect: { lens: [], fixer: 0, docs: 0, rechecker: 0, verify: 0, commit: 0 } },
+  { completed: "stage 9 the shipping review", target: "settled", expect: { lens: [], fixer: 0, docs: 0, rechecker: 0, verify: 0, commit: 0 } },
 ];
 
 for (const boundary of RESUME_BOUNDARIES) {
@@ -525,7 +548,11 @@ test("FG-639 / PRD #4: five fix_now findings produce exactly ONE fixer invocatio
   assert.equal(h.calls.fixer, 1, "ONE fixer, not one per finding");
   assert.equal(fixBatchesForReview(REVIEW).length, 1);
   assert.equal(fixBatchesForReview(REVIEW)[0]?.payload.findings.length, 5);
-  assert.match(outcome.message, /ONE fixer handled 5 fix_now finding\(s\)/);
+  assert.match(outcome.message, /ONE fixer handled 5 unresolved fix_now finding\(s\)/);
+  // FG-649: and the coordinator — not the orchestrator — committed that cycle, exactly once.
+  assert.equal(h.calls.commit, 1);
+  assert.equal(getReview(REVIEW)?.stageEvidence?.fix?.meta?.["candidateAfter"], h.head());
+  assert.equal(getReview(REVIEW)?.candidateSha, h.head(), "the candidate binds to the sha the commit produced");
 });
 
 test("FG-639 / PRD #5: the fixer resolves four and reports one scope-changing — four proceed, the fifth becomes an architecture question", async () => {
@@ -679,20 +706,29 @@ test("FG-639: the OTHER side of the empty-taskId sentinel — a named task marks
   assert.equal(fixBatchesForReview(REVIEW)[0]?.dispatchTaskId, "task-fixer-1");
 });
 
-test("FG-639 / RF-8: a resolution an EARLIER cycle proved survives a scope_change in a later one", async () => {
-  // The wipe used to run over the whole batch payload, unconditionally, BEFORE the
-  // scope_change arm re-dispositioned anything. So a finding cycle 1 proved `resolved`,
-  // re-carried by cycle 2's payload and reported scope_change ("already fixed, cannot touch
-  // without changing scope"), had its proof cleared and then — as an architecture question —
-  // was absent from every later recheck's `expected`. Resolution NULL, nothing mechanical to
-  // re-establish it: ledger data loss.
+test("FG-649 / RF-8: a fix_now finding already resolved at the candidate is NOT re-dispatched and keeps its proof", async () => {
+  // RF-8, in its FG-649 form. Before change 3, the selecting predicate and the payload filter
+  // both read `disposition === "fix_now"` with no resolution term, so a finding an earlier
+  // cycle had PROVEN resolved went back out to a fixer — and the batch it went out in was then
+  // the very thing entitled to clear its proof (the fix-cycle invalidation is scoped to batch
+  // membership). Preservation now falls out of NON-MEMBERSHIP: no preserve flag, no third
+  // invalidation authority.
   //
-  // RED baseline: drop the `result !== "scope_change"` or the surviving-fix_now exclusion from
-  // the invalidation ingestFixBatchResults runs, and the resolution assertion below reads
-  // undefined.
+  // The candidate deliberately does not move in this fixture (the cycles declare no file, so
+  // the commit is `no_change`), which isolates RF-8 from scenario #14 — a resolution proven at
+  // a sha the candidate LEAVES is invalidated, and that is asserted separately.
+  //
+  // RED baseline: drop the resolution term from `unresolvedFixNow` (src/v2/review-coordinator.ts)
+  // and revision 2's payload carries RF-1 again — the membership assertion below fails, and with
+  // the store-level scope_change exclusion also removed the proof assertion reads undefined.
   let cycle = 0;
   const h = harness({
     findingsPerLens: 2,
+    commitFixCycle: ({ declaredFiles }) => {
+      h.calls.commit += 1;
+      assert.deepEqual(declaredFiles, [], "this fixture's fixer declares no file, so nothing is committed");
+      return { kind: "no_change", sha: h.head() };
+    },
     dispatchFixer: (ctx) => {
       cycle += 1;
       return {
@@ -701,24 +737,13 @@ test("FG-639 / RF-8: a resolution an EARLIER cycle proved survives a scope_chang
         result: {
           fix_batch_id: ctx.batch.id,
           revision: ctx.batch.revision,
-          findings: ctx.batch.payload.findings.map((f, i) =>
-            cycle >= 2 && i === 0
-              ? {
-                  finding_id: f.finding_id,
-                  result: "scope_change",
-                  remediation_summary: "already fixed in cycle 1",
-                  files_changed: [],
-                  evidence: "already fixed; touching it again would change scope",
-                  scope_change_reason: "the remaining work is a schema change the plan did not approve",
-                }
-              : {
-                  finding_id: f.finding_id,
-                  result: "fixed",
-                  remediation_summary: `cycle ${cycle}`,
-                  files_changed: ["src/x.ts"],
-                  evidence: `cycle ${cycle}: added the named regression test`,
-                },
-          ),
+          findings: ctx.batch.payload.findings.map((f) => ({
+            finding_id: f.finding_id,
+            result: "fixed",
+            remediation_summary: `cycle ${cycle}`,
+            files_changed: [],
+            evidence: `cycle ${cycle}: the existing guard already covers it`,
+          })),
         },
       };
     },
@@ -759,8 +784,9 @@ test("FG-639 / RF-8: a resolution an EARLIER cycle proved survives a scope_chang
   assert.equal(proven.resolvedSha, h.head());
   assert.equal(unresolved.resolution, "still_present");
 
-  // RF-2's re-decision opens cycle 2, whose payload still carries RF-1 (fixNowFindings filters
-  // on disposition, and RF-1 is still fix_now).
+  // RF-2's re-decision opens cycle 2. RF-1 is STILL fix_now — nothing about its disposition
+  // changed — but it is resolved AT THIS CANDIDATE, so it is not part of the unresolved set the
+  // batch is built from.
   recordDisposition(unresolved.id, {
     decision: "fix_now",
     rationale: "second attempt on RF-2: guard the early return itself",
@@ -768,14 +794,25 @@ test("FG-639 / RF-8: a resolution an EARLIER cycle proved survives a scope_chang
   });
   const secondFix = await runNextStage(REVIEW, h.deps);
   assert.equal(secondFix.status, "advanced", secondFix.message);
-  assert.match(secondFix.message, /RF-1 returned to disposition as architecture question/);
+
+  const revision2 = fixBatchesForReview(REVIEW).at(-1) as FixBatch;
+  assert.equal(revision2.revision, 2);
+  assert.deepEqual(
+    revision2.payload.findings.map((f) => f.finding_ref),
+    ["RF-2"],
+    "the batch carries the UNRESOLVED fix_now findings only — RF-1 is not re-dispatched",
+  );
+  assert.equal(
+    findingsForReview(REVIEW).find((f) => f.findingRef === "RF-1")?.disposition,
+    "fix_now",
+    "and it stays fix_now: non-membership is not a disposition change",
+  );
 
   const after = findingsForReview(REVIEW).find((f) => f.findingRef === "RF-1") as ReviewFinding;
-  assert.equal(after.disposition, "architecture_question");
   assert.equal(
     after.resolution,
     "resolved",
-    "a cycle that demonstrably changed nothing for RF-1 may not wipe the proof an earlier one recorded",
+    "a cycle that did not carry RF-1 cannot clear the proof an earlier one recorded (RF-8)",
   );
   assert.equal(after.resolutionEvidenceKind, "regression_test", "and the evidence behind it survives with it");
 
@@ -784,16 +821,68 @@ test("FG-639 / RF-8: a resolution an EARLIER cycle proved survives a scope_chang
   assert.equal(
     findingsForReview(REVIEW).find((f) => f.findingRef === "RF-2")?.resolution,
     undefined,
-    "the surviving fix_now finding's stale verdict is still cleared",
+    "the carried finding's stale verdict is still cleared by the fix-cycle invalidation",
   );
 
+  // And it CONVERGES: the narrowed cycle earns its own recheck and the review reaches shipping
+  // with no oscillation between Stage 5 and Stage 8.
   await parkAt(h.deps, "recheck");
   const recheck = await runNextStage(REVIEW, h.deps);
   assert.equal(recheck.status, "advanced", recheck.message);
   assert.equal(
     findingsForReview(REVIEW).find((f) => f.findingRef === "RF-1")?.resolution,
     "resolved",
-    "RF-1 is not in `expected` any more, so only the un-wiped proof can still be there",
+    "RF-1 was never re-dispatched, so only the un-cleared proof can still be there",
+  );
+  assert.equal(cycle, 2, "exactly two fixer dispatches — the narrowing did not mint a third cycle");
+});
+
+test("FG-639 / RF-8: the store-level guard still holds — a scope_change cannot clear a carried finding's proof", () => {
+  // The FG-649 narrowing above means a resolved finding is not normally re-carried at all, so
+  // this store-level exclusion is now defence in depth rather than the first line. It is still
+  // the thing that makes "omission is never resolution" safe in the other direction, so it is
+  // asserted directly against `ingestFixBatchResults` rather than left to a coordinator path
+  // that can no longer reach it.
+  //
+  // RED baseline: drop the `result !== "scope_change"` term from the invalidation in
+  // src/store/fix-batches.ts:555 and the proof assertion below reads undefined.
+  const observed = ingestFindings(REVIEW, [
+    { summary: "already fixed upstream", evidence: "e1", riskLens: "backend", reachability: "demonstrated" },
+    { summary: "still open", evidence: "e2", riskLens: "backend", reachability: "demonstrated" },
+  ]);
+  for (const f of observed) {
+    assert.equal(recordDisposition(f.id, { decision: "fix_now", rationale: "this cycle", operator: false }).ok, true);
+  }
+  const [proven, open] = findingsForReview(REVIEW) as [ReviewFinding, ReviewFinding];
+  recordResolution(proven.id, {
+    resolution: "resolved",
+    evidenceKind: "regression_test",
+    evidence: EXECUTED,
+    resolvedSha: "cand111",
+  });
+
+  const { batch } = ensureFixBatch(REVIEW, "cand111", [proven, open]);
+  const ingested = ingestFixBatchResults(batch.id, "task-fixer-direct", { batchId: batch.id, revision: batch.revision }, [
+    {
+      findingId: proven.id,
+      result: "scope_change",
+      summary: "already fixed",
+      filesChanged: [],
+      evidence: "touching it again would change scope",
+    },
+    { findingId: open.id, result: "fixed", summary: "guarded", filesChanged: ["src/x.ts"], evidence: EXECUTED },
+  ]);
+
+  assert.equal(ingested.ok, true);
+  assert.equal(
+    findingsForReview(REVIEW).find((f) => f.id === proven.id)?.resolution,
+    "resolved",
+    "a scope_change result is not a fix cycle over that finding, so it may not clear its proof",
+  );
+  assert.equal(
+    findingsForReview(REVIEW).find((f) => f.id === open.id)?.resolution,
+    undefined,
+    "the finding the cycle DID work on has no stale verdict left",
   );
 });
 
@@ -1060,9 +1149,16 @@ test("FG-639 / RF-11: a re-affirmed fix_now whose new cycle INGESTED goes to tha
 
   // And the gate does not DEPEND on that invalidation having landed. Put the stale verdict
   // back — exactly the row state a coordinator dying between the ingest and a separate
-  // invalidation transaction used to leave — and the review still walks to the recheck.
+  // invalidation transaction used to leave — and the review still walks FORWARD rather than
+  // back to the disposition stop.
   db.prepare(`UPDATE review_findings SET resolution = 'inconclusive' WHERE finding_ref = 'RF-2'`).run();
-  assert.equal(pending().kind, "docs", pending().reason);
+  assert.notEqual(pending().kind, "await_disposition", pending().reason);
+  // FG-649: cycle 2's commit moved the candidate off the sha RF-1 was proven at, so scenario
+  // #14 invalidated that proof and RF-1 is an unresolved fix_now again with no CURRENT ingested
+  // cycle covering it (revision 1 was superseded). That is the ONE extra cycle the narrowing
+  // costs, and it is bounded: the next transition is a fix cycle, not a disposition stop, and
+  // the review converges on its own below.
+  assert.equal(pending().kind, "batch_fix", pending().reason);
 
   await parkAt(h.deps, "recheck");
   assert.match(pending().reason, /a further fix cycle ran|known finding id\(s\) to recheck/);

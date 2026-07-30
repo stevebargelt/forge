@@ -446,6 +446,138 @@ test("FG-639: the untampered envelope the wiring delivers IS the row-derived ren
   );
 });
 
+// ─── FG-649: the fix cycle's COMMIT, which the coordinator now owns ─────────
+//
+// The live FG-649 loop: the orchestrator committed the fixer's output AFTER the coordinator
+// process exited, so Stage 5's `headSha()` read was a guaranteed no-op, the fix stage recorded
+// the PRE-fix candidate, and the rechecker was handed a tree without the fixes it was
+// rechecking — it honestly reported still_present forever. The commit is the coordinator's now,
+// which makes the post-fix sha one forge CREATED. These pin the scope guard and the refusals;
+// the end-to-end evidence against a real repository is
+// src/v2/fg649-fix-cycle-candidate.integration.test.ts.
+
+/** A git seam that records every invocation and answers `status`/`rev-parse` from a script.
+ *
+ *  `rev-parse` answers the CANDIDATE until a commit lands and the new head after — the two reads
+ *  commitFixCycle makes are about different moments, and collapsing them into one answer would
+ *  hide whichever of them was wrong. */
+function scriptedGit(script: { status?: string; preHead?: string; head?: string; failOn?: string }) {
+  const calls: string[][] = [];
+  let committed = false;
+  const git = (args: string[]): string => {
+    calls.push(args);
+    if (script.failOn !== undefined && args[0] === script.failOn) {
+      throw new Error(`git ${args[0]} exited 1: nothing to commit`);
+    }
+    if (args[0] === "commit") committed = true;
+    if (args[0] === "status") return script.status ?? "";
+    if (args[0] === "rev-parse") return `${committed ? (script.head ?? "postfix9") : (script.preHead ?? "cand111")}\n`;
+    return "";
+  };
+  return { git, calls };
+}
+
+function commitDeps(git: (args: string[]) => string): CoordinatorDeps {
+  return buildCoordinatorDeps({ projectDir: "/nonexistent-project", ticketId: "FG-639", git, invokeFn: async () => {
+    throw new Error("a fix-cycle commit dispatches no container");
+  } });
+}
+
+function commitCtx(declaredFiles: string[]) {
+  const fixCtx = parkAtFix();
+  return { review: fixCtx.review, batch: fixCtx.batch, results: [], declaredFiles };
+}
+
+test("FG-649: the fix-cycle commit stages ONLY the declared paths and names the batch, never the ticket", async () => {
+  // RED baseline: there is no commitFixCycle dep before this change — Stage 5 read
+  // deps.headSha() (review-run.ts:470) and committed nothing.
+  const { git, calls } = scriptedGit({
+    status: "M  src/a.ts\0?? src/a.test.ts\0",
+    head: "committed7",
+  });
+  const commit = await commitDeps(git).commitFixCycle(commitCtx(["src/a.ts", "src/a.test.ts"]));
+
+  assert.equal(commit.kind, "committed");
+  assert.equal(commit.kind === "committed" ? commit.sha : "", "committed7", "the sha the commit CREATED");
+  const add = calls.find((c) => c[0] === "add");
+  assert.deepEqual(add, ["add", "--", ":/src/a.ts", ":/src/a.test.ts"], "never `git add -A`, and root-relative");
+  const message = calls.find((c) => c[0] === "commit")?.[2] ?? "";
+  assert.match(message, /^fix\(review\): fix batch .+ revision 1$/);
+  // THE SUBJECT IS AN INTERFACE: resolveCommitRange infers a later review's base from the
+  // OLDEST commit whose subject references the ticket. A ticket id here would make a later
+  // review's base its own remediation commit, and a review with no usable base can never
+  // confirm its contract.
+  assert.doesNotMatch(message, /FG-639/, "the subject must not reference the ticket");
+});
+
+test("FG-649: a tree that moved OUTSIDE the declared set is named, never swept into the commit", async () => {
+  const { git, calls } = scriptedGit({ status: "M  src/a.ts\0 M docs/unrelated.md\0" });
+  const commit = await commitDeps(git).commitFixCycle(commitCtx(["src/a.ts"]));
+
+  assert.equal(commit.kind, "refused");
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "fix_cycle_tree_dirty_outside_declared_scope");
+  assert.match(commit.kind === "refused" ? commit.detail : "", /docs\/unrelated\.md/);
+  assert.equal(calls.some((c) => c[0] === "add" || c[0] === "commit"), false, "nothing was staged or committed");
+});
+
+test("FG-649: results that declare files against a CLEAN tree refuse — the fixer's claim contradicts the tree", async () => {
+  const { git, calls } = scriptedGit({ status: "" });
+  const commit = await commitDeps(git).commitFixCycle(commitCtx(["src/a.ts"]));
+
+  assert.equal(commit.kind, "refused");
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "fix_cycle_declared_changes_absent");
+  assert.equal(calls.some((c) => c[0] === "commit"), false);
+});
+
+test("FG-649: a cycle that declares NOTHING against a clean tree is a legitimate no_change", async () => {
+  const { git, calls } = scriptedGit({ status: "" });
+  const commit = await commitDeps(git).commitFixCycle(commitCtx([]));
+
+  assert.equal(commit.kind, "no_change");
+  assert.equal(commit.kind === "no_change" ? commit.sha : "", "cand111", "the candidate legitimately does not move");
+  assert.equal(calls.some((c) => c[0] === "commit"), false);
+});
+
+test("FG-649: a git commit that fails is a NAMED refusal, not a thrown stack trace", async () => {
+  const { git } = scriptedGit({ status: "M  src/a.ts\0", failOn: "commit" });
+  const commit = await commitDeps(git).commitFixCycle(commitCtx(["src/a.ts"]));
+
+  assert.equal(commit.kind, "refused");
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "fix_cycle_commit_failed");
+  assert.match(commit.kind === "refused" ? commit.detail : "", /nothing to commit/);
+});
+
+test("FG-649: a head that is NOT the candidate refuses BEFORE anything is staged", async () => {
+  // The fix cycle is a WRITE now, so the HEAD-vs-candidate comparison has to be made again at
+  // the moment of the write: a commit authored on a foreign head would give the review a
+  // candidate whose parent is not the tree it reviewed, and mis-anchor the whole ledger
+  // silently instead of stopping. Same name as the verify-stage refusal, on purpose.
+  const { git, calls } = scriptedGit({ status: "M  src/a.ts\0", preHead: "somebodyelse4" });
+  const commit = await commitDeps(git).commitFixCycle(commitCtx(["src/a.ts"]));
+
+  assert.equal(commit.kind, "refused");
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "candidate_not_checked_out");
+  assert.match(commit.kind === "refused" ? commit.detail : "", /is on somebodyelse4, not the candidate cand111/);
+  assert.equal(calls.some((c) => c[0] === "add" || c[0] === "commit"), false, "nothing was staged or committed");
+});
+
+test("FG-649: the porcelain reader survives a path with a space and stages both halves of a rename", async () => {
+  // -z, so no C-quoting to un-quote: a scope guard that mis-parses a path is a scope guard that
+  // commits the wrong file. A rename reports its ORIGINAL path in the next field, and staging
+  // the new name without it would leave the deletion uncommitted.
+  const { git, calls } = scriptedGit({ status: "M  src/a file.ts\0R  src/new.ts\0src/old.ts\0" });
+  const commit = await commitDeps(git).commitFixCycle(commitCtx(["src/a file.ts", "src/new.ts", "src/old.ts"]));
+
+  assert.equal(commit.kind, "committed", commit.kind === "refused" ? commit.detail : "");
+  assert.deepEqual(calls.find((c) => c[0] === "add"), [
+    "add",
+    "--",
+    ":/src/a file.ts",
+    ":/src/new.ts",
+    ":/src/old.ts",
+  ]);
+});
+
 // ─── the comparison base, resolved AT OPEN ──────────────────────────────────
 //
 // Stage 2 refuses a review that records no base sha, and no verb supplies one afterwards or
