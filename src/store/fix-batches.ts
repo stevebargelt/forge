@@ -22,7 +22,13 @@
 import { createHash } from "node:crypto";
 import { getDb, writeTransaction } from "./db.js";
 import { logEvent } from "./events.js";
-import { getReview, type ReviewFinding } from "./reviews.js";
+import {
+  clearFixCycleResolutions,
+  findingsForReview,
+  getReview,
+  staleFixCycleResolutions,
+  type ReviewFinding,
+} from "./reviews.js";
 import { newFixBatchId, nowIso } from "../util/ids.js";
 
 export const FIX_BATCH_STATES = ["open", "dispatched", "ingested", "superseded"] as const;
@@ -413,7 +419,7 @@ export type IncomingFixResult = {
 };
 
 export type FixIngestion =
-  | { ok: true; records: FixBatchResultRecord[]; alreadyIngested: boolean }
+  | { ok: true; records: FixBatchResultRecord[]; alreadyIngested: boolean; invalidatedResolutions: string[] }
   | { ok: false; refusal: string };
 
 /** The identity a fixer's result claims for ITSELF. Both halves are checked, because a
@@ -526,6 +532,29 @@ export function ingestFixBatchResults(
   const at = nowIso();
   const before = fixBatchResults(batchId).filter((r) => r.taskId === taskId).length;
 
+  // A FIX CYCLE RAN, SO THE VERDICTS FROM BEFORE IT ARE STALE — including when this fixer
+  // committed nothing, which `invalidateResolutionsForCandidate` cannot see because it keys
+  // on the sha moving. Cleared in the SAME transaction that marks the batch ingested, so no
+  // crash can leave the two disagreeing.
+  //
+  // BUT ONLY FOR THE FINDINGS THIS CYCLE'S RECHECK WILL RE-EXAMINE. Stage 8's `expected` is
+  // the `fix_now` set, so wiping the whole payload's resolutions cost real ledger data: a
+  // finding an EARLIER cycle proved `resolved`, re-carried by this batch and reported
+  // `scope_change` ("already fixed, cannot touch without changing scope"), had its proof
+  // cleared and then — returned to disposition as an architecture question — was excluded
+  // from every future recheck. Resolution NULL, nothing mechanical to re-establish it, and
+  // Stage 9's findings_settled blocked on operator authority alone. A `scope_change` result
+  // and a disposition that has moved off `fix_now` are exactly the two exclusions.
+  const stillFixNow = new Set(
+    findingsForReview(batch.reviewId)
+      .filter((f) => f.disposition === "fix_now")
+      .map((f) => f.id),
+  );
+  const stale = staleFixCycleResolutions(
+    batch.reviewId,
+    incoming.filter((r) => r.result !== "scope_change" && stillFixNow.has(r.findingId)).map((r) => r.findingId),
+  );
+
   writeTransaction(() => {
     const db = getDb();
     const insert = db.prepare(
@@ -564,11 +593,13 @@ export function ingestFixBatchResults(
         repeat: before > 0,
       },
     });
+    clearFixCycleResolutions(batch.reviewId, stale, batchId);
   });
 
   return {
     ok: true,
     records: fixBatchResults(batchId).filter((r) => r.taskId === taskId),
     alreadyIngested: before > 0,
+    invalidatedResolutions: stale.map((f) => f.id),
   };
 }

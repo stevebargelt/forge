@@ -1129,40 +1129,53 @@ export function invalidateResolutionsForCandidate(reviewId: string, toSha: strin
  *  changing, and a fixer that resolves its batch without committing (or reports it
  *  scope-changing) leaves the candidate exactly where it was. The stale `still_present` /
  *  `inconclusive` then survives at the current sha and holds the review at the disposition
- *  stop forever, because every re-decision loops back through the same fixer. Cleared rather
- *  than downgraded, for the same reason as above: nothing downstream may read a leftover
- *  evidence blob as if it still applied. */
-export function invalidateResolutionsForFixCycle(
+ *  stop.
+ *
+ *  Selecting is split from clearing so `ingestFixBatchResults` can read the stale set before
+ *  opening its transaction and clear it INSIDE the one that marks the batch ingested — see
+ *  clearFixCycleResolutions. */
+export function staleFixCycleResolutions(reviewId: string, findingIds: readonly string[]): ReviewFinding[] {
+  if (!getReview(reviewId)) throw new Error(`forge: no review ${reviewId}`);
+  return findingsForReview(reviewId).filter((f) => f.resolution !== undefined && findingIds.includes(f.id));
+}
+
+/** The clearing half, WITHOUT a transaction of its own, so the ingest can run it in the same
+ *  transaction that marks the batch ingested.
+ *
+ *  That atomicity is the live-pilot fix. As two transactions, a coordinator that died between
+ *  them left a batch marked `ingested` and a resolution recorded before it still on the row —
+ *  a verdict about pre-fix code presented as a verdict on the cycle that just ran. Either
+ *  both land or neither does. Cleared rather than downgraded, for the same reason as
+ *  `invalidateResolutionsForCandidate`: nothing downstream may read a leftover evidence blob
+ *  as if it still applied. */
+export function clearFixCycleResolutions(
   reviewId: string,
-  findingIds: readonly string[],
+  stale: readonly ReviewFinding[],
   fixBatchId: string,
 ): string[] {
+  if (stale.length === 0) return [];
   const review = getReview(reviewId);
   if (!review) throw new Error(`forge: no review ${reviewId}`);
-  const stale = findingsForReview(reviewId).filter((f) => f.resolution !== undefined && findingIds.includes(f.id));
-  if (stale.length === 0) return [];
 
   const at = nowIso();
-  writeTransaction(() => {
-    const db = getDb();
-    const clear = db.prepare(
-      `UPDATE review_findings
-          SET resolution = NULL, resolution_evidence_kind = NULL, resolution_evidence = NULL,
-              resolved_sha = NULL, updated_at = ?
-        WHERE id = ?`,
-    );
-    for (const f of stale) clear.run(at, f.id);
-    logEvent("review.resolutions_invalidated", {
-      runId: review.runId,
-      taskId: review.subjectTaskId,
-      payload: {
-        reviewId,
-        fixBatchId,
-        candidateSha: review.candidateSha ?? null,
-        findingIds: stale.map((f) => f.id),
-        why: "a new fix cycle ran over these findings; a resolution recorded before it is about pre-fix code",
-      },
-    });
+  const db = getDb();
+  const clear = db.prepare(
+    `UPDATE review_findings
+        SET resolution = NULL, resolution_evidence_kind = NULL, resolution_evidence = NULL,
+            resolved_sha = NULL, updated_at = ?
+      WHERE id = ?`,
+  );
+  for (const f of stale) clear.run(at, f.id);
+  logEvent("review.resolutions_invalidated", {
+    runId: review.runId,
+    taskId: review.subjectTaskId,
+    payload: {
+      reviewId,
+      fixBatchId,
+      candidateSha: review.candidateSha ?? null,
+      findingIds: stale.map((f) => f.id),
+      why: "a new fix cycle ran over these findings; a resolution recorded before it is about pre-fix code",
+    },
   });
 
   return stale.map((f) => f.id);

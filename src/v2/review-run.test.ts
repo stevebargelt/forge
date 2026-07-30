@@ -683,8 +683,9 @@ test("FG-639 / RF-8: a resolution an EARLIER cycle proved survives a scope_chang
   // was absent from every later recheck's `expected`. Resolution NULL, nothing mechanical to
   // re-establish it: ledger data loss.
   //
-  // RED baseline: move invalidateResolutionsForFixCycle back above the scope_change loop (or
-  // drop the surviving-fix_now filter) and the resolution assertion below reads undefined.
+  // RED baseline: drop the `result !== "scope_change"` or the surviving-fix_now exclusion from
+  // the invalidation ingestFixBatchResults runs, and the resolution assertion below reads
+  // undefined.
   let cycle = 0;
   const h = harness({
     findingsPerLens: 2,
@@ -964,6 +965,126 @@ test("FG-639 / PRD #6: a still_present recheck returns to disposition and dispat
   assert.equal(next.transition.kind, "await_disposition", "it returns to disposition, not to the fixer");
   assert.equal(h.calls.fixer, fixerCallsBefore, "no automatic fixer");
   assert.match(next.message, /RF-2 \(fix_now\/still_present\)/);
+});
+
+/** The live-pilot sequence, verbatim: two findings, cycle 1 COMMITS, and RF-2 comes back
+ *  `inconclusive`. The harness the two RF-11 tests below share. */
+function inconclusiveOnSecondFinding(): Harness {
+  let cycle = 0;
+  const h: Harness = harness({
+    findingsPerLens: 2,
+    dispatchFixer: (ctx) => {
+      cycle += 1;
+      h.setHead(`afterfix${cycle}`);
+      return {
+        ok: true,
+        taskId: `task-fixer-${cycle}`,
+        result: {
+          fix_batch_id: ctx.batch.id,
+          revision: ctx.batch.revision,
+          findings: ctx.batch.payload.findings.map((f) => ({
+            finding_id: f.finding_id,
+            result: "fixed",
+            remediation_summary: `cycle ${cycle}`,
+            files_changed: ["src/x.ts"],
+            evidence: `cycle ${cycle}: committed a guard`,
+          })),
+        },
+      };
+    },
+    dispatchRechecker: (ctx) => {
+      h.calls.rechecker += 1;
+      return {
+        ok: true,
+        taskId: `task-recheck-${h.calls.rechecker}`,
+        result: {
+          review_id: ctx.review.id,
+          candidate_sha: ctx.candidateSha,
+          rechecked: ctx.expected.map((f) =>
+            f.findingRef === "RF-2"
+              ? { finding_id: f.id, result: "inconclusive", evidence_kind: "bounded_inspection", evidence: {} }
+              : {
+                  finding_id: f.id,
+                  result: "resolved",
+                  evidence_kind: "regression_test",
+                  evidence: { kind: "regression_test", test_name: "the reconcile path guards a partial write", runner_output: EXECUTED },
+                },
+          ),
+          new_findings: [],
+        },
+      };
+    },
+  });
+  return h;
+}
+
+test("FG-639 / RF-11: a re-affirmed fix_now whose new cycle INGESTED goes to that cycle's RECHECK, not back to the disposition stop", async () => {
+  // The live-pilot deadlock (review-29d1000750b0). RF-2 rechecked `inconclusive` in cycle 1,
+  // was re-dispositioned fix_now, and revision 2 carrying it was dispatched and INGESTED —
+  // and Stage 4 still blocked on "RF-2 (fix_now/inconclusive)", so `forge review continue`
+  // returned the same stop forever. The verdict was about cycle 1; Stage 4 read it as a
+  // verdict on the decision cycle 2 had just consumed, and blocked AHEAD of the Stage 8
+  // recheck that was the only thing that could have replaced it.
+  //
+  // RED baseline: read `decisionCoveredByIngestedBatch` in dispositionBlockers instead of
+  // `decisionCoveredByRecheckedCycle` and the lost-write half below reads await_disposition.
+  const h = inconclusiveOnSecondFinding();
+  await drive(h.deps, "discover");
+  dispositionAll("fix_now", "will be remediated this cycle");
+  await parkAt(h.deps, "recheck");
+  await runNextStage(REVIEW, h.deps);
+
+  const rf2 = findingsForReview(REVIEW).find((f) => f.findingRef === "RF-2") as ReviewFinding;
+  assert.equal(rf2.resolution, "inconclusive");
+  assert.deepEqual(pending().blockingFindings, ["RF-2"], "cycle 1's verdict holds the review — that part is #28");
+
+  recordDisposition(rf2.id, {
+    decision: "fix_now",
+    rationale: "second attempt: guard the early return itself, not the caller",
+    operator: false,
+  });
+  assert.equal(pending().kind, "batch_fix", "a fresh decision earns a new batch revision");
+
+  const secondFix = await runNextStage(REVIEW, h.deps);
+  assert.equal(secondFix.status, "advanced", secondFix.message);
+  assert.equal(fixBatchesForReview(REVIEW).at(-1)?.state, "ingested");
+  assert.equal(
+    findingsForReview(REVIEW).find((f) => f.findingRef === "RF-2")?.resolution,
+    undefined,
+    "the ingest invalidated the verdict recorded before the cycle it just ran",
+  );
+
+  // And the gate does not DEPEND on that invalidation having landed. Put the stale verdict
+  // back — exactly the row state a coordinator dying between the ingest and a separate
+  // invalidation transaction used to leave — and the review still walks to the recheck.
+  db.prepare(`UPDATE review_findings SET resolution = 'inconclusive' WHERE finding_ref = 'RF-2'`).run();
+  assert.equal(pending().kind, "docs", pending().reason);
+
+  await parkAt(h.deps, "recheck");
+  assert.match(pending().reason, /a further fix cycle ran|known finding id\(s\) to recheck/);
+  const rechecksBefore = h.calls.rechecker;
+  const secondRecheck = await runNextStage(REVIEW, h.deps);
+  assert.equal(secondRecheck.status, "advanced", secondRecheck.message);
+  assert.equal(h.calls.rechecker, rechecksBefore + 1, "the new cycle earned its own recheck");
+});
+
+test("FG-639 / RF-11: an inconclusive with NO fresh decision still blocks, however many times continue runs", async () => {
+  // The negative that keeps #28 intact. Nothing about the fix may let a rechecked-and-still-
+  // inconclusive finding walk past the disposition gate on its own.
+  const h = inconclusiveOnSecondFinding();
+  await drive(h.deps, "discover");
+  dispositionAll("fix_now", "will be remediated this cycle");
+  await parkAt(h.deps, "recheck");
+  await runNextStage(REVIEW, h.deps);
+
+  const fixerCallsBefore = h.calls.fixer;
+  for (let i = 0; i < 3; i++) {
+    const stop = await runNextStage(REVIEW, h.deps);
+    assert.equal(stop.transition.kind, "await_disposition", `continue #${i + 1} must still stop`);
+    assert.match(stop.message, /RF-2 \(fix_now\/inconclusive\)/);
+  }
+  assert.equal(h.calls.fixer, fixerCallsBefore, "and no automatic fixer");
+  assert.equal(getReview(REVIEW)?.state, "awaiting_disposition");
 });
 
 test("FG-639: a SECOND fix cycle at an UNMOVED candidate gets its own recheck — the review is not trapped at disposition", async () => {

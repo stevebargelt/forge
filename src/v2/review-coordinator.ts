@@ -81,7 +81,7 @@ function recordedLensOutcomes(review: Review): LensOutcome[] {
   return Array.isArray(review.lensOutcomes) ? (review.lensOutcomes as LensOutcome[]) : [];
 }
 
-/** Has an INGESTED batch already carried this finding, under the decision it carries now?
+/** Did this batch's payload carry this finding under the decision it carries NOW?
  *
  *  Per finding rather than per set, and that is the load-bearing choice. Scenario #5 removes
  *  a finding from the fix_now set mid-cycle (the fixer reports it scope-changing, so it
@@ -90,17 +90,39 @@ function recordedLensOutcomes(review: Review): LensOutcome[] {
  *  work already done. Containment says the right thing in both directions — a finding ADDED
  *  to fix_now, or RE-DECIDED (a new decidedAt or a new rationale), is not covered and does
  *  get a new batch revision. */
-function decisionCoveredByIngestedBatch(batches: readonly FixBatch[], f: ReviewFinding): boolean {
-  return batches.some(
-    (b) =>
-      b.state === "ingested" &&
-      b.payload.findings.some(
-        (m) =>
-          m.finding_id === f.id &&
-          m.decided_at === (f.decidedAt ?? undefined) &&
-          m.disposition_rationale === (f.dispositionRationale ?? ""),
-      ),
+function batchCarriesDecision(b: FixBatch, f: ReviewFinding): boolean {
+  return b.payload.findings.some(
+    (m) =>
+      m.finding_id === f.id &&
+      m.decided_at === (f.decidedAt ?? undefined) &&
+      m.disposition_rationale === (f.dispositionRationale ?? ""),
   );
+}
+
+/** Has an INGESTED batch already carried this finding, under the decision it carries now?
+ *  Stage 5's question: is there anything left for a fixer to do. */
+function decisionCoveredByIngestedBatch(batches: readonly FixBatch[], f: ReviewFinding): boolean {
+  return batches.some((b) => b.state === "ingested" && batchCarriesDecision(b, f));
+}
+
+/** Was this finding's CURRENT decision carried by a fix cycle the LATEST RECHECK covered?
+ *
+ *  The difference from `decisionCoveredByIngestedBatch` is the whole of the Stage 4 fix. An
+ *  unresolved verdict is evidence about the cycle that produced it, so it only holds the
+ *  review when the decision it is a verdict ON is the decision that has been rechecked. Once
+ *  a NEWER fix cycle has ingested the finding, the recorded verdict predates that cycle and
+ *  is not evidence about it — the next step is that cycle's recheck (Stage 8, which is keyed
+ *  on exactly these cycles), not a second trip through the disposition gate.
+ *
+ *  Reading `state === "ingested"` instead deadlocked the live pilot: the re-decided finding
+ *  went out in revision 2, revision 2 ingested, and the stale `inconclusive` from revision 1
+ *  then read as a verdict on the new decision — so Stage 4 blocked ahead of Stage 8, the
+ *  recheck that would have replaced the verdict could never run, and `forge review continue`
+ *  returned the same stop forever. Keying on the RECHECKED cycles is also what makes the
+ *  gate independent of whether the ingest's resolution invalidation landed. */
+function decisionCoveredByRecheckedCycle(review: Review, batches: readonly FixBatch[], f: ReviewFinding): boolean {
+  const covered = new Set(cycleTerms(recheckedFixCycleKey(review)));
+  return batches.some((b) => covered.has(`${b.id}@${b.revision}`) && batchCarriesDecision(b, f));
 }
 
 /** Stage 5 is satisfied when every CURRENT fix_now finding was carried by an ingested batch
@@ -114,11 +136,12 @@ function fixStageSatisfied(snapshot: ReviewSnapshot): boolean {
 /** Findings that hold the review at Stage 4.
  *
  *  TWO shapes, and the second is scenario #6: a `fix_now` whose recheck came back
- *  `still_present` or `inconclusive` AND whose decision the fixer already consumed. The
- *  review returns to disposition and no fixer is dispatched automatically — re-running the
- *  fixer on a decision that demonstrably did not resolve it is exactly the loop this
- *  lifecycle replaced. A NEW decision (a new rationale) changes the decision fingerprint
- *  and lets the fix stage run again.
+ *  `still_present` or `inconclusive` AND whose decision that RECHECKED cycle already
+ *  consumed. The review returns to disposition and no fixer is dispatched automatically —
+ *  re-running the fixer on a decision that demonstrably did not resolve it is exactly the
+ *  loop this lifecycle replaced. A NEW decision (a new rationale) changes the decision
+ *  fingerprint and lets the fix stage run again; and once that new cycle has INGESTED, the
+ *  verdict from before it stops holding the review at all (decisionCoveredByRecheckedCycle).
  *
  *  AN ARCHITECTURE QUESTION IS DELIBERATELY NOT ONE OF THESE. It leaves the review
  *  UNSETTLED — Stage 9's findings_settled check refuses it, and `awaitingAuthority` reports
@@ -128,7 +151,7 @@ function fixStageSatisfied(snapshot: ReviewSnapshot): boolean {
  *  the whole cycle on the fifth would throw away the evidence the other four are entitled
  *  to, and would do it while the review still could not settle either way. */
 function dispositionBlockers(snapshot: ReviewSnapshot): ReviewFinding[] {
-  const { findings, batches } = snapshot;
+  const { review, findings, batches } = snapshot;
   const out: ReviewFinding[] = [];
   for (const f of findings) {
     if (f.disposition === "untriaged") {
@@ -137,7 +160,7 @@ function dispositionBlockers(snapshot: ReviewSnapshot): ReviewFinding[] {
     }
     if (f.disposition !== "fix_now") continue;
     if (f.resolution !== "still_present" && f.resolution !== "inconclusive") continue;
-    if (decisionCoveredByIngestedBatch(batches, f)) out.push(f);
+    if (decisionCoveredByRecheckedCycle(review, batches, f)) out.push(f);
   }
   return out;
 }
