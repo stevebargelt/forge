@@ -126,3 +126,47 @@ test("FG-640: every gate condition the FG-541 mapping cites is a real condition 
     assert.ok(known.has(id), `${row.requirement} cites gate condition '${id}', which the gate does not define`);
   }
 });
+
+// ── the Test column: the cited TEST still exists, not just the file it lived in ──
+//
+// The path check above proves `src/v2/review-run.test.ts` is a real file. It says nothing about
+// the test named in the same breath, and a quoted title is exactly the kind of citation that
+// survives its own subject: rename or delete the test and the row still reads like evidence.
+// "Every row cites a shipped, ENFORCING mechanism" is the operator amendment's bar for marking
+// FG-541 superseded, and a citation pointing at a test that no longer runs does not clear it.
+
+/** Every `("…")` quoted fragment in a cell — how the mapping abbreviates a test title. */
+function citedTestTitles(cell: string): string[] {
+  return [...cell.matchAll(/\("([^"]+)"\)/g)]
+    .map((m) => (m[1] as string).replace(/(?:…|\.\.\.)\s*$/, "").trim())
+    .filter((t) => t !== "");
+}
+
+/** Every `test("…")` / `test(`…`)` title declared in a file. */
+function declaredTestTitles(source: string): string[] {
+  return [...source.matchAll(/^\s*test\(\s*(?:`([^`]*)`|"((?:[^"\\]|\\.)*)")/gm)].map((m) =>
+    (m[1] ?? m[2] ?? "").replace(/\\"/g, '"'),
+  );
+}
+
+test("FG-640: every test the FG-541 mapping quotes still exists in a file the same cell cites", () => {
+  let cited = 0;
+  for (const row of ROWS) {
+    // Column 3 is the Test column; the header is asserted above, so the index is pinned.
+    const cell = row.cells[3] as string;
+    const titles = citedTestTitles(cell);
+    if (titles.length === 0) continue;
+    const paths = citedPaths(cell);
+    assert.ok(paths.length > 0, `${row.requirement} quotes a test title but cites no test file to find it in`);
+    const declared = paths.flatMap((p) => declaredTestTitles(readFileSync(resolve(repoRoot, p), "utf8")));
+    for (const title of titles) {
+      cited += 1;
+      assert.ok(
+        declared.some((d) => d.includes(title)),
+        `${row.requirement} cites the test "${title}", which no longer exists in ${paths.join(", ")} — ` +
+          `a citation that outlived its test is not durable evidence`,
+      );
+    }
+  }
+  assert.ok(cited >= 3, `only ${cited} test titles quoted across ${ROWS.length} rows — the guard has nothing to hold`);
+});
