@@ -25,3 +25,5 @@
 - The forge-on-forge migrate predicate concern from the previous handoff did NOT reproduce and stays parked pending a demonstrated failure.
 
 **Shipped (for reference):** FG-608 (`f391b544` machinery + live cutover: 598 tickets, mode db, store banner `store: db`), FG-645 (`1754c386`, 129 in-container reds → 0, harness dirty-tree fix), FG-642 (`0dab8f8d`, browser tier restored + dashboard_browser in required CI), FG-638 (`ea6a9101`, review ledger + disposition CLI), FG-639 (`d118aff` coordinator + `bccec80`/`a6336f5` pilot fixes), FG-640 (`ed9394e`, review_disposition gate + feature migration + Change-0 retirement), FG-541 (superseded on the guarded evidence mapping), FG-647 (`907c899`, zero skips everywhere, first settled production review). Filed: FG-649, FG-650.
+
+Closeout framing corrected (operator, 2026-07-30): the evidence-led lifecycle is live and settled FG-647, but is NOT fully complete — FG-649 (recheck binds to pre-fix candidate after post-hoc fix commits) is a known production stabilization defect and is PROMOTED ahead of FG-648 and FG-609 as a lifecycle correctness blocker. FG-639 stays closed; its ticket body carries the corrected framing.

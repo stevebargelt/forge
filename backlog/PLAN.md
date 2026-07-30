@@ -1,6 +1,6 @@
 # Forge Working Plan
 
-**Last revised:** 2026-07-28
+**Last revised:** 2026-07-30
 
 This is a mutable statement of current operator intent. It is not an approval boundary, ticket
 specification, execution record, or source of lifecycle truth.
@@ -13,55 +13,53 @@ session handoff. This file may be rewritten whenever priorities change; Git is s
 
 ## Current objective
 
-Advance the FG-496 DB-backed backlog program (FG-608 is the next implementation item) while the
-evidence-led review decomposition completes operator review. The isolation program and the interim
-review policy are done and in force.
+Stabilize the newly-live evidence-led review lifecycle at its measured fix-cycle boundary, then ship
+the dashboard agent-runtime view and return to the FG-496 operator-work-management program.
 
-**Complete (recorded 2026-07-28):**
+**Recently completed:**
 
-- **FG-345** — isolation default-on shipped and closed (`3ce0385` + `f50e383`); self-host guard keyed on
-  actual per-dispatch isolation. The workspace contract stands: committed tracked content at the recorded
-  base SHA plus explicitly supplied inputs; ambient checkout state intentionally not inherited;
-  `FORGE_NO_WORKTREES=1` is the explicit escape. No generic carry-in system, no further isolation
-  children without a deterministic supported-workflow failure.
-- **FG-623** — the 1 ms lease-test knife-edge fixed (`612e481f`): renewal at TTL/2, ~150 s headroom,
-  0/400 probe failures; closed on the acceptance walk.
-- **Evidence-led review Change 0** — interim operating policy ACTIVE (`cc10232a`): both authoritative
-  sources (`docs/autonomous-run-prompt.md`, now tracked, and the orchestrator seed/rendered block) carry
-  the one-discovery/disposition/batch-fix/exact-recheck policy; the obsolete #302 phrase guard is
-  removed; deterministic and authority gates unchanged. Review dispatches now run under this policy.
+- **FG-608** — the Forge repo is cut over to the DB-backed backlog (`086f3b4`); Markdown is a frozen
+  snapshot and ticket verbs are DB-authoritative.
+- **FG-345 / FG-621 / FG-628** — managed workflow isolation is default-on with private writable Git
+  for mutators and fail-closed review-artifact handling.
+- **FG-644 / FG-645 / FG-642 / FG-647** — the known zero-red program is closed: in-container CLI
+  suites execute, the dashboard browser tier is mandatory, and the environment-dependent secondary
+  Node arm and its CI provisioning are removed.
+- **FG-638 → FG-639 → FG-640** — the evidence-led review ledger, staged coordinator,
+  `review_disposition` gate, and feature-workflow migration shipped. Change 0 is retired,
+  `forge review-loop` is deprecated, and FG-541 is superseded on its durable evidence mapping.
+  The lifecycle settled its first production review on FG-647. This is not a claim that its known
+  FG-649 fix-cycle defect is acceptable.
 
 ## Now
 
-1. **FG-608 — SHIPPED and closed** (`f9afbf59`, PR #174; AC walk in the ticket). The cutover MACHINERY
-   is live; **the forge repo itself is NOT migrated.** The pending decision is the operator-gated
-   Phase 3 dogfood cutover: `forge backlog migrate --dry-run` review → explicit operator go →
-   `forge backlog migrate` (one-way after the first DB-only edit; agent image already rebuilt;
-   `~/.forge/forge.db.pre-fg608.bak` is the machine-wide restore point). FG-609 (Slice D) is the next
-   implementation item after that decision.
+1. **FG-649 — evidence-led candidate re-anchoring.** A post-hoc fixer commit can leave recheck bound
+   to the pre-fix SHA; the FG-639 pilot hit this twice and remains parked before shipping review.
+   Treat this as immediate lifecycle stabilization, not optional hardening. Done means an ordinary
+   fix cycle records the candidate containing the fixes automatically, recheck examines that exact
+   candidate, and shipping review completes without a manual re-anchor. The same ticket owns
+   persisted-workspace resolution and excluding already-resolved findings from later FixBatches.
 
 ## Next
 
-1. **Evidence-led review program — FG-638 → FG-639 → FG-640, strictly serial** (decomposition
-   approved with amendments 2026-07-28; filed; implementation NOT yet authorized to start):
-   FG-638 (Change 1: durable ledger + read surfaces, no gate change) → FG-639 (Change 2: staged
-   coordinator, `forge review` pilot, `feature` not migrated) → FG-640 (Change 3: `review_disposition`
-   gate + `feature` migration + review-loop deprecation; carries the required FG-541 evidence mapping —
-   FG-541 is annotated folded-into/blocked-on FG-640, superseded only when that mapping is durable).
-2. **FG-609 — FG-496 Slice D:** queue rank, membership, revision-bound readiness, blocker evidence, and
-   event-history primitives.
+1. **FG-648 — dashboard agent runtime over time:** overall and per-role averages, sample counts, and
+   1d/7d/30d/90d/all windows. Dashboard owns the query, UI, and tests; no cross-package test coupling.
+2. **FG-609 — FG-496 Slice D:** queue rank, membership, revision-bound readiness, blocker evidence,
+   and event-history primitives.
 3. **FG-610 — FG-496 Slice E:** atomic claims, leases, recovery, capacity accounting, and canonical
    claim-next.
-4. Reconcile and close **FG-496** with its aggregate acceptance walk.
+4. **FG-591 — operator work queue:** Kanban/CLI/API surface and capacity-limited dispatch over the
+   queue primitives.
+5. Reconcile and close **FG-496** with its aggregate acceptance walk after the queue primitives and
+   operator surface prove the DB-backed objective end to end.
 
 `Next` is deliberately short. Ordering here expresses current intent; it does not override ticket
 dependencies or authorize execution.
 
 ## Committed follow-on
 
-- **FG-591** — build the Kanban/CLI/API operator surface and capacity-limited dispatcher after FG-496's
-  source-of-truth and queue primitives are closed.
-- Continue **FG-593** after FG-591 according to its remaining operator-work-management scope.
+- Continue **FG-593** after FG-591 and the FG-496 closeout according to its remaining
+  operator-work-management scope.
 
 ## Interruption policy
 
@@ -71,16 +69,27 @@ An item may move ahead of `Next` only for:
 - failing required CI;
 - credible data-loss or wrong-ship risk;
 - a defect blocking the current objective;
-- **ANY persistently red test, in any tier, on any supported environment (operator rule, 2026-07-29:
-  red tests are never a tax — they stop everything).** A red must always mean defect; a precondition a
-  test cannot meet is a named skip. Currently promoted under this rule: FG-644 (precondition-to-skip
-  conversion), FG-556, FG-557 — one batch, ahead of all feature work including the cutover.
+- **ANY persistently red test, or a required tier that silently does not execute, on any supported
+  environment.** Red tests are never a tax. A skip is never evidence: restore execution rather than
+  converting red to skip. An alternate lane only counts when it is mandatory, runs the same
+  assertion at the same candidate SHA, and records that executed identity.
 
 A newly discovered hardening opportunity is captured in the backlog but does not automatically become
 `Now` or `Next`.
 
 ## Explicitly deferred
 
+- **FG-650** — strict review schemas rejected honest reviewer payloads with extra legacy keys three
+  times. Real, with retry/accepted-lens workarounds, but its ticket is title-only and must become
+  implementation-ready before routing. Do not promote it ahead of demonstrated lifecycle
+  correctness work.
+- **FG-641** — behavior-oriented test organization. Its cleanup inventory now includes the
+  ticket-prefixed files added by FG-642/FG-638/FG-639/FG-640/FG-647; sixteen of those were added
+  after the new placement rule took effect. Do not file another cleanup ticket. New ticket-prefixed
+  files require the documented cross-layer capstone exception and its recorded reason.
+- **FG-646** — the one-time migration dry-run write defect is off-queue by operator decision. Forge
+  is single-user and the relevant projects are being cut over; do not polish obsolete migration
+  machinery.
 - **FG-626** — `forge launch run` does not propagate the caller's environment, so every `FORGE_*` gate is
   inert under the launch pattern the orchestrator template mandates. Real and operator-facing, but it has
   a working escape (`forge launch run -- env VAR=… <cmd>`), so it is captured rather than promoted. Note
@@ -89,8 +98,7 @@ A newly discovered hardening opportunity is captured in the backlog but does not
   anywhere that guard does not cover.
 - FG-597, FG-598, FG-599, FG-600, FG-601, FG-602, and FG-604 follow-up hardening, unless promoted by the
   interruption policy.
-- FG-625 does not move ahead of the FG-345 closeout unless it becomes a demonstrated blocker or required-CI
-  failure. FG-623 was promoted after it halted required review-loop verification.
+- FG-625 remains deferred unless it becomes a demonstrated blocker or required-CI failure.
 - **FG-637** and further worktree/isolation hardening after FG-345, unless a deterministic reproduction
   exposes data loss, corruption, wrong-candidate behavior, or failure in a supported workflow.
 - Broad provider-adapter and workflow-semantics programs.
