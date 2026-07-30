@@ -221,7 +221,18 @@ const FINDING_JSON_ONLY_UNASSERTABLE = {
   updatedAt: "a timestamp that can coincide with a rendered stamp",
 } as const;
 
-const SUMMARY_KEYS = ["review", "findings", "countsByDisposition", "countsByResolution", "riskLenses", "unsettledCount"] as const;
+// `lensAcceptances` (FG-640) is rendered by both surfaces; its own parity is asserted in
+// fg640-absent-lens-clearing.test.ts, where a real acceptance can be recorded (this fixture's
+// lensOutcomes is deliberately a non-array marker, which the acceptance writer refuses).
+const SUMMARY_KEYS = [
+  "review",
+  "findings",
+  "countsByDisposition",
+  "countsByResolution",
+  "riskLenses",
+  "lensAcceptances",
+  "unsettledCount",
+] as const;
 
 function classify(actual: string[], rendered: readonly string[], jsonOnly: object, unassertable: object, what: string): void {
   const declared = new Set<string>([...rendered, ...Object.keys(jsonOnly), ...Object.keys(unassertable)]);

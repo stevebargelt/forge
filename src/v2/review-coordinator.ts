@@ -23,7 +23,7 @@
 
 import type { FixBatch } from "../store/fix-batches.js";
 import type { Review, ReviewFinding, ReviewStage, ReviewState } from "../store/reviews.js";
-import { stageCompleteAt } from "../store/reviews.js";
+import { lensAcceptancesOf, lensOutcomeRecordsOf, stageCompleteAt } from "../store/reviews.js";
 import { assessDiscoveryCompleteness, type LensOutcome } from "./review-discovery.js";
 import { recheckIsNoOp } from "./review-recheck.js";
 import { validateReviewContract, type RiskLens } from "./review-contract.js";
@@ -78,7 +78,7 @@ function selectedLenses(review: Review): RiskLens[] {
 }
 
 function recordedLensOutcomes(review: Review): LensOutcome[] {
-  return Array.isArray(review.lensOutcomes) ? (review.lensOutcomes as LensOutcome[]) : [];
+  return lensOutcomeRecordsOf(review) as LensOutcome[];
 }
 
 /** Did this batch's payload carry this finding under the decision it carries NOW?
@@ -284,7 +284,10 @@ function resolveTransition(snapshot: ReviewSnapshot): Transition {
 
   // Stage 2b/3 — discovery. NEVER re-entered once complete for the confirmed sha.
   const lenses = selectedLenses(review);
-  const completeness = assessDiscoveryCompleteness(lenses, recordedLensOutcomes(review));
+  const completeness = assessDiscoveryCompleteness(lenses, recordedLensOutcomes(review), {
+    acceptances: lensAcceptancesOf(review),
+    candidateSha: review.contractConfirmedSha,
+  });
   const discoveryRecorded = stageCompleteAt(review, "discovery", review.contractConfirmedSha);
   if (!discoveryRecorded || !completeness.complete) {
     return {

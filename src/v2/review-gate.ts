@@ -19,7 +19,7 @@
 // decides it, which every refusal names. `--force` still exists and is still the human's
 // override — it is not the ordinary settlement path, and the refusal says so.
 
-import type { Review, ReviewFinding } from "../store/reviews.js";
+import { lensAcceptancesOf, lensOutcomeRecordsOf, type Review, type ReviewFinding } from "../store/reviews.js";
 import type { VerdictRow } from "../types/index.js";
 import { tasksForRun } from "../store/tasks.js";
 import { gatesForTask } from "../store/gates.js";
@@ -82,7 +82,7 @@ export type ReviewDispositionInput = {
 const SETTLED_DISPOSITIONS = new Set(["accepted_risk", "deferred", "rejected_premise", "duplicate"]);
 
 function recordedLensOutcomes(review: Review): LensOutcome[] {
-  return Array.isArray(review.lensOutcomes) ? (review.lensOutcomes as LensOutcome[]) : [];
+  return lensOutcomeRecordsOf(review) as LensOutcome[];
 }
 
 /** The selected lenses, or the reason there is no readable answer.
@@ -215,8 +215,9 @@ export function assessReviewDisposition(input: ReviewDispositionInput): ReviewDi
 
   // 1 — every selected lens has a schema-valid, reviewer-authored outcome for the confirmed
   // candidate. Cleared only by retrying the lens, amending the contract through its approving
-  // authority, or an authorized acceptance that names the missing evidence — never by
-  // dispositioning some other finding.
+  // authority, or an authorized acceptance that names the missing evidence (`forge review
+  // accept-lens`, operator authority, bound to this candidate) — never by dispositioning some
+  // other finding.
   const lenses = selectedLenses(review);
   if (!lenses.ok) {
     conditions.push({
@@ -226,7 +227,12 @@ export function assessReviewDisposition(input: ReviewDispositionInput): ReviewDi
         `cannot be established: ${lenses.refusal}`,
     });
   } else {
-    const completeness = assessDiscoveryCompleteness(lenses.lenses, recordedLensOutcomes(review));
+    const completeness = assessDiscoveryCompleteness(lenses.lenses, recordedLensOutcomes(review), {
+      acceptances: lensAcceptancesOf(review),
+      // The sha discovery was assessed at, which is what an acceptance stands in for — the
+      // outcomes beside it are recorded against the confirmed candidate too.
+      candidateSha: review.contractConfirmedSha ?? candidate,
+    });
     if (!completeness.complete) {
       conditions.push({
         id: "lens_outcome_missing",
@@ -424,7 +430,7 @@ export type EvidenceLedGateInput = {
    *  happened to fail. */
   declaredReds?: readonly { agent: string; authority: string; gate_on_verdict: boolean }[];
   /** The run row's recorded mode, when it disagrees with the workflow's declared one. */
-  modeDrift?: { runMode: string; workflowMode: string };
+  modeDrift?: ReviewModeDrift;
 };
 
 export type EvidenceLedGateResult = {
@@ -485,22 +491,47 @@ export function assessEvidenceLedGate(input: EvidenceLedGateInput): EvidenceLedG
   return { review, assessment };
 }
 
+export type ReviewModeDrift = { runMode: string; workflowMode: string };
+
+/** The run row and its workflow disagree about which authority model settles this run.
+ *
+ *  ONE text for BOTH directions, and that symmetry is the point. A run stamped legacy under a
+ *  workflow that has since migrated, and a run stamped evidence_led under a workflow that was
+ *  reverted, are the same defect seen from opposite sides: a step would be settled under a
+ *  model its reds were never dispatched with. Neither direction gets to pick a model. */
+export function reviewModeDriftCondition(drift: ReviewModeDrift): DispositionGateCondition {
+  return {
+    id: "review_mode_drift",
+    detail:
+      `the run row records review_mode '${drift.runMode}' while its workflow declares ` +
+      `'${drift.workflowMode}' — a run's authority model is fixed at creation, so this run was moved ` +
+      `under it (a mid-run seed change, or a review adopting the run). Refusing rather than picking one: ` +
+      `settling a step under a model its reds were never dispatched with is exactly the combination that ` +
+      `"one review_mode per run" exists to prevent.`,
+  };
+}
+
+/** Drift as a standalone assessment, for the gate's PRE-BRANCH check.
+ *
+ *  It is assessed before the gate decides WHICH model to judge under, because that decision is
+ *  precisely what drift makes unanswerable — reading either side would be the silent fallback
+ *  the condition exists to refuse. Nothing else is assessed alongside it: under drift, the
+ *  other conditions would be read out of a ledger whose authority model is in dispute. */
+export function assessReviewModeDrift(drift: ReviewModeDrift): ReviewDispositionAssessment {
+  return {
+    gateKind: REVIEW_DISPOSITION_GATE,
+    blocked: true,
+    conditions: [reviewModeDriftCondition(drift)],
+    nonBlocking: [],
+  };
+}
+
 /** The two conditions that are facts about the RUN's authority model rather than about any
  *  review: a run that has been moved between models, and a run that carries both at once. */
 function migrationConditions(input: EvidenceLedGateInput): DispositionGateCondition[] {
   const out: DispositionGateCondition[] = [];
 
-  if (input.modeDrift !== undefined) {
-    out.push({
-      id: "review_mode_drift",
-      detail:
-        `the run row records review_mode '${input.modeDrift.runMode}' while its workflow declares ` +
-        `'${input.modeDrift.workflowMode}' — a run's authority model is fixed at creation, so this run was moved ` +
-        `under it (a mid-run seed change, or a review adopting the run). Refusing rather than picking one: ` +
-        `settling a step under a model its reds were never dispatched with is exactly the combination that ` +
-        `"one review_mode per run" exists to prevent.`,
-    });
-  }
+  if (input.modeDrift !== undefined) out.push(reviewModeDriftCondition(input.modeDrift));
 
   // DECLARATION, not just outcome. Keying only on a failing verdict would let a half-migrated
   // step pass unnoticed for as long as its authoritative reds happen to agree — the run would

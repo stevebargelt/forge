@@ -10,13 +10,13 @@
 // conditions, and the failure mode the rule exists to prevent is a review that looks settled
 // because someone decided the findings a *different* lens produced.
 //
-// THE THIRD ROUTE IS NOT MECHANISED, and this file pins that rather than papering over it. There
-// is no writer that records an authorized acceptance against a NAMED LENS — `recordDisposition`
-// only ever decides a finding, and `assessDiscoveryCompleteness` reads `lensOutcomes` alone. So an
-// operator who accepts the missing evidence today clears the gate with `forge gate --force
-// --rationale`, which is the human override the refusal explicitly calls "NOT the ordinary
-// settlement path". The last two tests below are that behavior, written down: if a
-// lens-acceptance writer ever lands, the `accepted_risk` test is the one that must change.
+// THE THIRD ROUTE IS `forge review accept-lens`, and the distinction it has to hold is between
+// accepting a LENS's missing evidence and dispositioning a FINDING. `recordDisposition` decides
+// findings and can never clear a lens — not even an `accepted_risk` whose text names the missing
+// lens by hand. `recordLensAcceptance` writes an operator-authorized record against the NAMED
+// lens, naming what was not reviewed, bound to the confirmed candidate, and
+// `assessDiscoveryCompleteness` consults it. Both halves are tested here: the route that clears
+// the lens, and the routes that must never be able to.
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -24,17 +24,22 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
-import { makeInMemoryDb, setDbForTest } from "../store/db.js";
+import { makeInMemoryDb, setDbForTest, getDb } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
 import { insertTask, getTask } from "../store/tasks.js";
 import {
   insertReview,
+  getReview,
   ingestFindings,
+  lensAcceptancesOf,
   recordDisposition,
+  recordLensAcceptance,
   recordStageEvidence,
+  summarizeReview,
   updateReview,
   setReviewState,
 } from "../store/reviews.js";
+import { renderReview } from "../cli/commands/review.js";
 import { gate } from "./gate.js";
 import { confirmContract, validateReviewContract } from "./review-contract.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
@@ -203,11 +208,10 @@ test("FG-640: dispositioning findings the OTHER lens produced never clears the a
   assert.equal(getTask(TASK)!.status, "awaiting_gate");
 });
 
-test("FG-640: an accepted_risk finding that NAMES the missing lens still does not clear it today", async () => {
-  // The rule's third route — "an authorized risk acceptance that NAMES the missing evidence" — has
-  // no writer: `recordDisposition` decides FINDINGS, and completeness is derived from
-  // `lensOutcomes` alone. So even the most explicit possible acceptance leaves the gate blocked,
-  // and `--force` is what an operator is actually left with. Pinned, not asserted as correct.
+test("FG-640: an accepted_risk FINDING that names the missing lens still does not clear it — a disposition decides findings", async () => {
+  // The distinction the third route has to hold. Even the most explicit possible finding-level
+  // acceptance is a decision about a FINDING; the lens it talks about is still a lens no
+  // reviewer looked through, so completeness is unmoved.
   const [f] = ingestFindings(REVIEW, [
     {
       summary: "the security lens crashed and its evidence is accepted as missing for this candidate",
@@ -221,15 +225,11 @@ test("FG-640: an accepted_risk finding that NAMES the missing lens still does no
     rationale: "the security surface is untouched by this diff; accepting the missing security lens evidence",
     operator: true,
   });
-  assert.equal(out.ok, true, "the acceptance itself is recordable — it just is not a lens outcome");
+  assert.equal(out.ok, true, "the disposition itself is recordable — it just is not a lens acceptance");
 
   const msg = await refusal();
   assert.match(msg, /lens_outcome_missing/);
   assert.match(msg, /security \(crashed/);
-
-  // And the only route left is the explicit human override the refusal names.
-  const forced = await gate(TASK, "advance", "operator accepts the missing security lens evidence", { force: true });
-  assert.equal(forced.task.status, "complete");
 });
 
 // ── route 1: retry the lens ──────────────────────────────────────────────────
@@ -310,6 +310,120 @@ test("FG-640: the COORDINATOR cannot make that amendment — a removal returns t
     assert.match(confirmation.refusal, /the coordinator may only ADD lenses/);
     assert.match(confirmation.refusal, /Nothing was written/);
   }
+});
+
+// ── route 3: an authorized acceptance that NAMES the missing evidence ────────
+
+function acceptSecurity(over: Partial<Parameters<typeof recordLensAcceptance>[1]> = {}) {
+  return recordLensAcceptance(REVIEW, {
+    lens: "security",
+    missingEvidence: "no security review of the new auth-path guard at src/v2/gate.ts:158",
+    rationale: "the diff is confined to gate wiring; the auth path is unchanged and covered by FG-638's tests",
+    operator: true,
+    ...over,
+  });
+}
+
+test("FG-640: an operator ACCEPTANCE against the named lens clears it — the step advances with no --force", async () => {
+  const out = acceptSecurity();
+  assert.equal(out.ok, true, out.ok ? "" : out.refusal);
+
+  const result = await gate(TASK, "advance", undefined, {});
+  assert.equal(result.task.status, "complete");
+});
+
+test("FG-640: the acceptance requires OPERATOR authority — it narrows the coverage the contract states", async () => {
+  const out = acceptSecurity({ operator: false });
+  assert.equal(out.ok, false);
+  if (!out.ok) {
+    assert.match(out.refusal, /requires operator authority/);
+    assert.match(out.refusal, /Nothing was written/);
+  }
+  assert.match(await refusal(), /lens_outcome_missing/, "a refused acceptance leaves the gate exactly as it was");
+});
+
+test("FG-640: an acceptance that does not NAME the missing evidence is refused — that is what --force already is", async () => {
+  const unnamed = acceptSecurity({ missingEvidence: "   " });
+  assert.equal(unnamed.ok, false);
+  if (!unnamed.ok) assert.match(unnamed.refusal, /must NAME the missing evidence/);
+
+  const unreasoned = acceptSecurity({ rationale: "" });
+  assert.equal(unreasoned.ok, false);
+  if (!unreasoned.ok) assert.match(unreasoned.refusal, /must record why/);
+
+  assert.match(await refusal(), /lens_outcome_missing/);
+});
+
+test("FG-640: a lens the contract never selected has no missing evidence to accept", () => {
+  const out = recordLensAcceptance(REVIEW, {
+    lens: "frontend",
+    missingEvidence: "no frontend review",
+    rationale: "there is no UI in this diff",
+    operator: true,
+  });
+  assert.equal(out.ok, false);
+  if (!out.ok) assert.match(out.refusal, /not a lens this review's contract selected \(backend, security\)/);
+});
+
+test("FG-640: accepting one lens says nothing about another — the acceptance is per NAMED lens", async () => {
+  updateReview(REVIEW, {
+    lensOutcomes: [
+      { lens: "backend", role: "red-backend", complete: false, reason: "crashed", detail: "the backend lens did not produce a review (container_crash)" },
+      CRASHED_SECURITY,
+    ],
+  });
+  assert.equal(acceptSecurity().ok, true);
+
+  const msg = await refusal();
+  assert.match(msg, /lens_outcome_missing/);
+  assert.match(msg, /backend \(crashed/);
+  assert.doesNotMatch(msg, /security \(crashed/, "the accepted lens is cleared; the other one is not");
+});
+
+test("FG-640: an acceptance recorded against a SUPERSEDED candidate does not clear the lens", async () => {
+  assert.equal(acceptSecurity().ok, true);
+  // The contract is re-confirmed at a new candidate: the outcomes recorded at the old one are
+  // history, and so is an acceptance that stood in for one of them.
+  updateReview(REVIEW, { contractConfirmedSha: "cand640lens2", candidateSha: "cand640lens2" });
+
+  const msg = await refusal();
+  assert.match(msg, /lens_outcome_missing/);
+  assert.match(msg, /an authorized acceptance of this lens exists at cand640lens/);
+  assert.match(msg, /accept it again at the current candidate or retry the lens/);
+});
+
+test("FG-640: the acceptance is on the operator's read surfaces and in the audit trail", () => {
+  assert.equal(acceptSecurity().ok, true);
+
+  const summary = summarizeReview(REVIEW)!;
+  assert.equal(summary.lensAcceptances.length, 1);
+  assert.equal(summary.lensAcceptances[0]!.lens, "security");
+  assert.equal(summary.lensAcceptances[0]!.acceptedBy, "operator");
+
+  const human = renderReview(summary);
+  assert.match(human, /lens accepted:\s+security — missing evidence: no security review of the new auth-path guard/);
+  assert.match(human, /rationale: the diff is confined to gate wiring/);
+  assert.match(human, /candidate cand640lens/);
+
+  const event = getDb()
+    .prepare(`SELECT payload FROM events WHERE event_type = 'review.lens_accepted'`)
+    .get() as { payload: string } | undefined;
+  assert.ok(event, "an acceptance is part of the append-only half of the ledger, not only a row");
+  const payload = JSON.parse(event.payload) as Record<string, unknown>;
+  assert.equal(payload.lens, "security");
+  assert.equal(payload.acceptedBy, "operator");
+  assert.equal(payload.candidateSha, SHA);
+  assert.match(String(payload.missingEvidence), /auth-path guard/);
+});
+
+test("FG-640: a re-dispatched discovery does not erase the acceptance", () => {
+  // `runDiscovery` rewrites lensOutcomes wholesale on every retry. An operator decision must
+  // survive a retry that crashed again, or the third route would quietly need re-doing.
+  assert.equal(acceptSecurity().ok, true);
+  const outcomes = [authored("backend"), CRASHED_SECURITY];
+  updateReview(REVIEW, { lensOutcomes: [...lensAcceptancesOf(getReview(REVIEW)!), ...outcomes] });
+
+  assert.equal(lensAcceptancesOf(getReview(REVIEW)!).length, 1);
 });
 
 test("FG-640: an amendment that drops the lens but also rewrites the threat model is still refused", () => {

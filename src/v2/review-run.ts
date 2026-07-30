@@ -23,6 +23,7 @@ import {
   findingsForReview,
   getReview,
   ingestFindings,
+  lensAcceptancesOf,
   invalidateResolutionsForCandidate,
   recordDisposition,
   recordResolution,
@@ -339,9 +340,15 @@ async function runDiscovery(reviewId: string, transition: Transition, deps: Coor
     ),
   );
   const outcomes: LensOutcome[] = dispatches.map(assessLens);
-  updateReview(reviewId, { lensOutcomes: outcomes });
+  // The acceptances survive a re-dispatch: they are operator decisions about this confirmed
+  // candidate, and a retry that crashes again must not silently erase one.
+  const acceptances = lensAcceptancesOf(review);
+  updateReview(reviewId, { lensOutcomes: [...acceptances, ...outcomes] });
 
-  const completeness = assessDiscoveryCompleteness(lenses, outcomes);
+  const completeness = assessDiscoveryCompleteness(lenses, outcomes, {
+    acceptances,
+    candidateSha: confirmedSha,
+  });
   if (!completeness.complete) {
     // NOT completion. No stage record, no synthesized pass, no empty finding set — the
     // panel is incomplete and stays incomplete until the lens is retried, the contract is
@@ -357,7 +364,8 @@ async function runDiscovery(reviewId: string, transition: Transition, deps: Coor
         `discovery is INCOMPLETE — no reviewer-authored outcome for ` +
         `${completeness.missing.map((m) => `${m.lens} (${m.reason}: ${m.detail})`).join("; ")}. ` +
         `No pass and no empty finding set was synthesized. Retry the lens, amend the contract through its ` +
-        `approving authority, or record an authorized acceptance naming that lens.`,
+        `approving authority, or record an authorized acceptance naming that lens ` +
+        `(\`forge review accept-lens ${reviewId} <lens> --operator --missing-evidence "..." --rationale "..."\`).`,
     };
   }
 
@@ -366,10 +374,18 @@ async function runDiscovery(reviewId: string, transition: Transition, deps: Coor
 
   recordStageEvidence(reviewId, "discovery", {
     sha: confirmedSha,
-    detail: `${lenses.length} lens(es) authored an outcome; ${ingested.length} finding(s) ingested`,
+    detail:
+      `${lenses.length - completeness.accepted.length} lens(es) authored an outcome` +
+      (completeness.accepted.length > 0
+        ? `, ${completeness.accepted.map((a) => a.lens).join(", ")} cleared by an authorized acceptance`
+        : "") +
+      `; ${ingested.length} finding(s) ingested`,
     meta: {
       lenses: [...lenses],
       outcomes: outcomes.map((o) => ({ lens: o.lens, outcome: o.complete ? o.outcome : "incomplete" })),
+      // The stage record must not read as if an accepted lens was reviewed — the acceptance
+      // and the evidence it names are part of what this stage completed on.
+      acceptedLenses: completeness.accepted.map((a) => ({ lens: a.lens, missingEvidence: a.missingEvidence })),
       merges: normalized.merges,
       findingRefs: ingested.map((f) => f.findingRef),
     },

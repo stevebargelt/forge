@@ -28,7 +28,13 @@ import { getDb, writeTransaction } from "../store/db.js";
 import { crashPoint } from "./crash-points.js";
 import { verdictsForTask } from "../store/verdicts.js";
 import { reviewsForTask, reviewsForRun, findingsForReview } from "../store/reviews.js";
-import { assessEvidenceLedGate, renderDispositionRefusal, REVIEW_DISPOSITION_GATE } from "./review-gate.js";
+import {
+  assessEvidenceLedGate,
+  assessReviewModeDrift,
+  gatingReview,
+  renderDispositionRefusal,
+  REVIEW_DISPOSITION_GATE,
+} from "./review-gate.js";
 import { insertGate } from "../store/gates.js";
 import { getRun } from "../store/runs.js";
 import { logEvent, eventsForTask } from "../store/events.js";
@@ -155,8 +161,27 @@ export async function gate(
   // a workflow does not silently attach a ledger requirement to its architect and plan steps.
   const evidenceLed = workflow.review_mode === "evidence_led" && step.gate === "verdict";
 
+  // DRIFT IS DETECTED BEFORE THE BRANCH, IN BOTH DIRECTIONS. Which gate decides this step is
+  // exactly the question a run/workflow disagreement makes unanswerable, so asking it first
+  // and only refusing inside one arm is how the reverse drift — a run stamped evidence_led
+  // whose workflow was reverted to legacy — used to fall through to verdict aggregation
+  // silently. That is the same "settled under a model its reds were never dispatched with"
+  // the condition exists to prevent, arrived at from the other side. Either direction parks
+  // the step by name; --force remains the human override, as everywhere else on this gate.
+  const runMode = run.reviewMode ?? "legacy_verdict";
+  const modeDrift =
+    step.gate === "verdict" && runMode !== workflow.review_mode
+      ? { runMode, workflowMode: workflow.review_mode }
+      : undefined;
+
+  if (decision === "advance" && !opts.force && modeDrift !== undefined) {
+    const drifted = gatingReview(reviewsForTask(taskId)) ?? gatingReview(reviewsForRun(task.runId));
+    throw new Error(
+      renderDispositionRefusal(taskId, drifted?.id ?? "(none)", assessReviewModeDrift(modeDrift)),
+    );
+  }
+
   if (decision === "advance" && !opts.force && evidenceLed) {
-    const runMode = run.reviewMode ?? "legacy_verdict";
     const { review, assessment } = assessEvidenceLedGate({
       taskId,
       reviews: reviewsForTask(taskId),
@@ -164,9 +189,6 @@ export async function gate(
       findingsFor: findingsForReview,
       verdicts: verdictsForTask(taskId),
       declaredReds: step.reds,
-      ...(runMode !== workflow.review_mode
-        ? { modeDrift: { runMode, workflowMode: workflow.review_mode } }
-        : {}),
     });
     if (assessment.blocked) {
       throw new Error(renderDispositionRefusal(taskId, review?.id ?? "(none)", assessment));

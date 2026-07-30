@@ -275,7 +275,11 @@ export type EventType =
   // a repeat (delivery is at-least-once, application is idempotent).
   | "review.fix_batch_created"
   | "review.fix_batch_dispatched"
-  | "review.fix_batch_ingested";
+  | "review.fix_batch_ingested"
+  // FG-640: the third route by which an absent lens clears. The payload NAMES the missing
+  // evidence, the lens it attaches to, and the candidate it was accepted against — an
+  // acceptance is a decision about one candidate's missing review, never a standing waiver.
+  | "review.lens_accepted";
 
 export type Event = {
   id: number;

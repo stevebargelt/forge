@@ -9,8 +9,9 @@
 //      default do something reddens here rather than in whichever workflow notices first.
 //
 //   2. STAMPED ONCE, AT CREATION. The run row's mode is fixed when the run is created; editing the
-//      workflow file mid-run cannot move it. Both directions of the resulting disagreement are
-//      pinned, INCLUDING the one that is currently asymmetric — see the drift tests below.
+//      workflow file mid-run cannot move it. BOTH directions of the resulting disagreement are
+//      refused by name — drift is detected before the gate branches on a model, because which
+//      model applies is exactly what the disagreement makes unanswerable.
 //
 //   3. NEVER COMBINED WITHIN ONE RUN. One run, two reviewed steps, one of them half-migrated: the
 //      half-migrated step refuses by name while the migrated one settles. A workflow-level
@@ -307,15 +308,12 @@ test("FG-640: a run stamped legacy under a workflow that has since migrated is r
   assert.match(msg, /a run's authority model is fixed at creation/);
 });
 
-test("FG-640 GAP: the reverse drift is NOT refused — a de-migrated workflow silently returns the run to verdict aggregation", async () => {
-  // `gate()` computes `evidenceLed` from the WORKFLOW alone and only assembles `modeDrift` inside
-  // that branch, so the disagreement is detected in one direction only. A run stamped
-  // evidence_led whose workflow was reverted falls through to legacy aggregation with no refusal —
-  // the same "settling a step under a model its reds were never dispatched with" the
-  // review_mode_drift condition exists to prevent, arrived at from the other side.
-  //
-  // Pinned as the current behavior, not asserted as correct. If drift detection is made
-  // symmetric, this test is the one that must change.
+test("FG-640: the REVERSE drift is refused too — a de-migrated workflow never returns the run to verdict aggregation", async () => {
+  // The symmetric half. `gate()` used to compute `evidenceLed` from the WORKFLOW alone and to
+  // assemble the drift only inside that branch, so this direction fell through to legacy
+  // aggregation with no refusal — the same "settling a step under a model its reds were never
+  // dispatched with" the condition exists to prevent, arrived at from the other side. Drift is
+  // now detected BEFORE the branch, so neither direction can pick a model silently.
   writeWorkflow("wf-drift", "review_mode: legacy_verdict\n");
   seedRun("wf-drift", "evidence_led");
   // A ledger that could not possibly settle: no contract, no verification, no shipping, an
@@ -330,12 +328,26 @@ test("FG-640 GAP: the reverse drift is NOT refused — a de-migrated workflow si
   });
   ingestFindings("review-drift", [{ summary: "nobody decided about this", severity: "high" }]);
 
-  const outcome = await attempt("task-build");
-  assert.equal(outcome, "advanced:complete", "current behavior: no drift refusal in this direction");
-  const payload = JSON.parse(
-    (getDb().prepare(`SELECT payload FROM events WHERE event_type = 'gate.decided'`).get() as { payload: string }).payload,
-  ) as Record<string, unknown>;
-  assert.equal("gateKind" in payload, false, "and the audit record does not claim the disposition gate decided it");
+  const msg = await attempt("task-build");
+  assert.match(msg, /review_mode_drift/);
+  assert.match(msg, /records review_mode 'evidence_led' while its workflow declares 'legacy_verdict'/);
+  assert.match(msg, /a run's authority model is fixed at creation/);
+  // Drift is the ONLY thing named: under a disputed authority model, reading the rest of the
+  // ledger would be the gate deciding which model it is judging under.
+  assert.deepEqual([...msg.matchAll(/^ {2}- (\w+):/gm)].map((m) => m[1]), ["review_mode_drift"]);
+  assert.equal(getTask("task-build")!.status, "awaiting_gate", "the step is parked, not advanced");
+  assert.equal(
+    getDb().prepare(`SELECT payload FROM events WHERE event_type = 'gate.decided'`).get(),
+    undefined,
+    "a refused gate writes no decision at all",
+  );
+});
+
+test("FG-640: --force still overrides a drift refusal, in either direction", async () => {
+  writeWorkflow("wf-drift", "review_mode: legacy_verdict\n");
+  seedRun("wf-drift", "evidence_led");
+  const outcome = await attempt("task-build", "operator accepts the model disagreement", true);
+  assert.equal(outcome, "advanced:complete");
 });
 
 // ── 3. never combined within one run ─────────────────────────────────────────

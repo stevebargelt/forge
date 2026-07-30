@@ -1,8 +1,9 @@
 // FG-640: the orchestrator's operating policy IS the evidence-led review — on BOTH surfaces.
 //
-// `orchestrator-block-parity.test.ts` already proves the rendered CLAUDE.md block is byte-equal
-// to what the installer would render from the seed. That catches drift BETWEEN the two; it says
-// nothing about what they say. This file pins the content, because the interim Change 0 policy
+// THIS IS A CONTENT GUARD, NOT A PARITY TEST. `orchestrator-block-parity.test.ts` owns parity:
+// it proves the rendered CLAUDE.md block is byte-equal to what the installer would render from
+// the seed. That catches drift BETWEEN the two; it says nothing about what they say. This file
+// pins WHAT THEY SAY on each surface independently, because the interim Change 0 policy
 // was explicitly temporary and "temporary" text is exactly what survives its own retirement:
 // a future edit that reinstates the repeated-loop default, or that quietly re-documents
 // `review-loop` as the transport, reddens here on whichever surface it touched.
@@ -24,14 +25,14 @@ const SURFACES = [
 ];
 
 for (const surface of SURFACES) {
-  test(`FG-640: ${surface.name} states the evidence-led review is the DEFAULT, not an interim policy`, () => {
+  test(`FG-640 content guard: ${surface.name} states the evidence-led review is the DEFAULT, not an interim policy`, () => {
     const t = surface.text;
     assert.match(t, /### Reviewing implemented work — the evidence-led review \(the DEFAULT\)/);
     assert.match(t, /standing policy for landed implementation work, not an interim one/i);
     assert.match(t, /Change 0 operating policy that stood here is RETIRED/i);
   });
 
-  test(`FG-640: ${surface.name} carries no live "interim"/Change 0 policy framing`, () => {
+  test(`FG-640 content guard: ${surface.name} carries no live "interim"/Change 0 policy framing`, () => {
     // The one legal mention is the sentence that RETIRES it. Anything else is the old policy
     // still describing itself as in force.
     const t = surface.text;
@@ -42,7 +43,7 @@ for (const surface of SURFACES) {
     assert.deepEqual(stale, [], `stale interim-policy framing survives in ${surface.name}`);
   });
 
-  test(`FG-640: ${surface.name} documents \`forge review\` as the transport and DEPRECATES review-loop`, () => {
+  test(`FG-640 content guard: ${surface.name} documents \`forge review\` as the transport and DEPRECATES review-loop`, () => {
     const t = surface.text;
     assert.match(t, /forge review start <ticket-id> --contract/);
     assert.match(t, /forge review continue <review-id>/);
@@ -50,7 +51,7 @@ for (const surface of SURFACES) {
     assert.match(t, /retains its old `--max-rounds` semantics|keeps its existing semantics|retains its old `--max-rounds`/);
   });
 
-  test(`FG-640: ${surface.name} names the review_disposition gate, its conditions, and that --force is not the path`, () => {
+  test(`FG-640 content guard: ${surface.name} names the review_disposition gate, its conditions, and that --force is not the path`, () => {
     const t = surface.text;
     assert.match(t, /`review_disposition` gate/);
     // Every blocking condition the ticket enumerates has to be readable here by name, or the
@@ -76,14 +77,14 @@ for (const surface of SURFACES) {
     assert.match(t, /there is no new task status|no new task status/i);
   });
 
-  test(`FG-640: ${surface.name} states the explicit non-blocking half — advisory reds and settled dispositions`, () => {
+  test(`FG-640 content guard: ${surface.name} states the explicit non-blocking half — advisory reds and settled dispositions`, () => {
     const t = surface.text;
     assert.match(t, /does NOT block on: a raw advisory red `fail` whose findings are dispositioned/);
     assert.match(t, /settled `accepted_risk` \/ `deferred` \/ `rejected_premise` \/ `duplicate`/);
     assert.match(t, /superseded sha/i);
   });
 
-  test(`FG-640: ${surface.name} keeps the evidence rules that outlive the interim policy`, () => {
+  test(`FG-640 content guard: ${surface.name} keeps the evidence rules that outlive the interim policy`, () => {
     // These four survived Change 0's retirement because they were never interim — they are the
     // lifecycle's actual content. A rewrite that drops one has lost the point of the rewrite.
     const t = surface.text;

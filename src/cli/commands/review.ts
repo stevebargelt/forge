@@ -21,6 +21,7 @@ import {
   DISPROVING_EVIDENCE_KINDS,
   recordDisposition,
   lookupFinding,
+  recordLensAcceptance,
   summarizeReview,
   insertReview,
   getReview,
@@ -74,6 +75,13 @@ export function renderReview(s: ReviewSummary): string {
   lines.push(`  candidate sha:      ${r.candidateSha ?? DASH}`);
   lines.push(`  trusted remote sha: ${r.trustedRemoteSha ?? DASH}`);
   lines.push(`  risk lenses:        ${s.riskLenses.length > 0 ? s.riskLenses.join(", ") : DASH}`);
+  for (const a of s.lensAcceptances) {
+    lines.push(
+      `  lens accepted:      ${a.lens} — missing evidence: ${a.missingEvidence} ` +
+        `(by ${a.acceptedBy} at ${a.acceptedAt}, candidate ${a.candidateSha})`,
+    );
+    lines.push(`      rationale: ${a.rationale}`);
+  }
   lines.push(`  dispositions:       ${counts(s.countsByDisposition)}`);
   lines.push(`  resolutions:        ${counts(s.countsByResolution)}`);
   lines.push(`  unsettled findings: ${s.unsettledCount}`);
@@ -116,6 +124,13 @@ type DispositionOpts = {
   ticket?: string;
   operator?: boolean;
   review?: string;
+  json?: boolean;
+};
+
+type AcceptLensOpts = {
+  missingEvidence?: string;
+  rationale?: string;
+  operator?: boolean;
   json?: boolean;
 };
 
@@ -431,6 +446,45 @@ export function registerReview(program: Command): void {
         return;
       }
       console.log(renderReview(summary));
+    });
+
+  review
+    .command("accept-lens")
+    .argument("<review-id>", "review id")
+    .argument("<lens>", "the selected risk lens whose evidence is missing")
+    .option("--missing-evidence <text>", "WHAT was not reviewed — required; an unnamed acceptance is a blanket override")
+    .option("--rationale <text>", "why the missing evidence is acceptable for this candidate — required")
+    .option("--operator", "record this as the operator's decision — required: an acceptance narrows the approved discovery coverage")
+    .option("--json", "emit the recorded acceptance as JSON")
+    .description(
+      "Accept a selected lens's MISSING evidence — the third route by which an absent lens clears " +
+        "(the others being retrying the lens and amending the contract through its approving authority)",
+    )
+    .action((reviewId: string, lens: string, opts: AcceptLensOpts) => {
+      ensureForgeDirs();
+      assertStoreForLookup(`review ${reviewId}`);
+
+      const outcome = recordLensAcceptance(reviewId, {
+        lens,
+        missingEvidence: opts.missingEvidence ?? "",
+        rationale: opts.rationale ?? "",
+        operator: opts.operator === true,
+      });
+      if (!outcome.ok) {
+        console.error(`forge review accept-lens: ${outcome.refusal}`);
+        process.exitCode = 1;
+        return;
+      }
+
+      if (opts.json) {
+        console.log(JSON.stringify(outcome.acceptance, null, 2));
+        return;
+      }
+      const a = outcome.acceptance;
+      console.log(`${reviewId}: the ${a.lens} lens's missing evidence is accepted by ${a.acceptedBy} at ${a.acceptedAt}`);
+      console.log(`  missing evidence: ${a.missingEvidence}`);
+      console.log(`  rationale: ${a.rationale}`);
+      console.log(`  candidate sha: ${a.candidateSha}`);
     });
 
   review
