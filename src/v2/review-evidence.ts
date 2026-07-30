@@ -196,7 +196,13 @@ function stripTiming(name: string): string {
  *  parameterized-suite case where one variant skipped and another ran the assertion. A
  *  name that appears only skipped reads as SKIPPED. A name that never appears is ABSENT.
  *  A name that appears FAILED reads as failed wherever else it appears: a red assertion
- *  is the finding still being present, and a green sibling does not cancel it. */
+ *  is the finding still being present, and a green sibling does not cancel it.
+ *
+ *  FAILURE ALSO DOMINATES A DIRECTIVE ON ITS OWN LINE. `not ok 1 - the guard # TODO` is a
+ *  test the runner marked RED, and reading it as skipped is not a harmless downgrade: a
+ *  skip is a gap an alternate mandatory lane may legitimately fill, while a failure at this
+ *  candidate is the finding still being present and refuses before any lane is consulted.
+ *  So the failure test runs BEFORE the skip test, not after it. */
 export function testExecution(runnerOutput: string, testName: string): TestExecution {
   const wanted = testName.trim();
   if (wanted === "") return "absent";
@@ -213,12 +219,11 @@ export function testExecution(runnerOutput: string, testName: string): TestExecu
     const name = stripTiming(captured);
     if (name !== wanted && !name.endsWith(` > ${wanted}`) && !name.startsWith(`${wanted} > `)) continue;
 
-    const skipped = SKIP_DIRECTIVE.test(line) || /^\s*[﹣~]/u.test(line);
-    if (skipped) {
+    if (tap?.[1] !== undefined || /^\s*[✖✗]/u.test(line)) return "failed";
+    if (SKIP_DIRECTIVE.test(line) || /^\s*[﹣~]/u.test(line)) {
       sawSkipped = true;
       continue;
     }
-    if (tap?.[1] !== undefined || /^\s*[✖✗]/u.test(line)) return "failed";
     sawExecuted = true;
   }
   return sawExecuted ? "executed" : sawSkipped ? "skipped" : "absent";

@@ -142,6 +142,27 @@ function dispositionBlockers(snapshot: ReviewSnapshot): ReviewFinding[] {
   return out;
 }
 
+/** THE FIX CYCLES A RECHECK COVERED — the second half of Stage 8's completion key.
+ *
+ *  Stage 8 keyed on the candidate sha alone reads a SECOND fix cycle at an UNMOVED candidate
+ *  as already rechecked: a fixer that resolves its batch without committing leaves the sha
+ *  matching the previous recheck's record, so the stage is skipped, the finding keeps the
+ *  verdict from the cycle before, and the review loops at the disposition stop with no
+ *  mechanical path to a resolution. Keying on sha PLUS the ingested batch revisions makes a
+ *  new cycle a new key, so it earns its own recheck — while a crash-resume at an unchanged
+ *  cycle still reads as complete and is never repeated. */
+export function fixCycleKey(batches: readonly FixBatch[]): string {
+  return batches
+    .filter((b) => b.state === "ingested")
+    .map((b) => `${b.id}@${b.revision}`)
+    .join(",");
+}
+
+function recheckedFixCycleKey(review: Review): string {
+  const recorded = review.stageEvidence?.recheck?.meta?.fixCycleKey;
+  return typeof recorded === "string" ? recorded : "";
+}
+
 function openArchitectureQuestions(findings: readonly ReviewFinding[]): string[] {
   return findings.filter((f) => f.disposition === "architecture_question").map((f) => f.findingRef);
 }
@@ -282,8 +303,11 @@ function resolveTransition(snapshot: ReviewSnapshot): Transition {
     };
   }
 
-  // Stage 8 — exact recheck + bounded remediation-delta review.
-  if (!stageCompleteAt(review, "recheck", candidate)) {
+  // Stage 8 — exact recheck + bounded remediation-delta review. Complete for the candidate
+  // AND for the fix cycles that have run at it (see fixCycleKey).
+  const cycleKey = fixCycleKey(snapshot.batches);
+  const recheckedAtCandidate = stageCompleteAt(review, "recheck", candidate);
+  if (!recheckedAtCandidate || recheckedFixCycleKey(review) !== cycleKey) {
     const noop = recheckIsNoOp({
       fixNowCount: fixNow.length,
       contractConfirmedSha: review.contractConfirmedSha,
@@ -293,9 +317,13 @@ function resolveTransition(snapshot: ReviewSnapshot): Transition {
       kind: "recheck",
       state: "rechecking",
       stage: "recheck",
-      reason: noop
-        ? `no fix_now findings and the candidate never moved from ${review.contractConfirmedSha} — recheck is a no-op`
-        : `${fixNow.length} known finding id(s) to recheck exactly, plus bounded review of the delta to ${candidate ?? "(unset)"}`,
+      reason: recheckedAtCandidate
+        ? `a further fix cycle ran at candidate ${candidate ?? "(unset)"} since the last recheck ` +
+          `(rechecked ${recheckedFixCycleKey(review) || "no batch"}, now ${cycleKey}) — a new fix cycle needs its ` +
+          `own recheck even though the candidate did not move`
+        : noop
+          ? `no fix_now findings and the candidate never moved from ${review.contractConfirmedSha} — recheck is a no-op`
+          : `${fixNow.length} known finding id(s) to recheck exactly, plus bounded review of the delta to ${candidate ?? "(unset)"}`,
     };
   }
 

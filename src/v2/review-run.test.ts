@@ -849,6 +849,122 @@ test("FG-639 / PRD #6: a still_present recheck returns to disposition and dispat
   assert.match(next.message, /RF-2 \(fix_now\/still_present\)/);
 });
 
+test("FG-639: a SECOND fix cycle at an UNMOVED candidate gets its own recheck — the review is not trapped at disposition", async () => {
+  // The trap: the fixer completes without committing, so the candidate never moves. The
+  // recheck record from the FIRST cycle still matches that sha, so Stage 8 was skipped and
+  // the finding kept its stale `inconclusive` — which is itself a disposition blocker, so
+  // every re-decision looped straight back to the fixer and the review could never settle.
+  let cycle = 0;
+  let rechecks = 0;
+  const h = harness({
+    dispatchFixer: (ctx) => {
+      cycle += 1;
+      return {
+        ok: true,
+        taskId: `task-fixer-${cycle}`,
+        result: {
+          fix_batch_id: ctx.batch.id,
+          revision: ctx.batch.revision,
+          findings: ctx.batch.payload.findings.map((f) => ({
+            finding_id: f.finding_id,
+            result: "fixed",
+            remediation_summary: `cycle ${cycle}`,
+            files_changed: ["src/x.ts"],
+            evidence: `cycle ${cycle}: fixed without a commit`,
+          })),
+        },
+      };
+    },
+    dispatchRechecker: (ctx) => ({
+      ok: true,
+      taskId: `task-recheck-${++rechecks}`,
+      result: {
+        review_id: ctx.review.id,
+        candidate_sha: ctx.candidateSha,
+        rechecked: ctx.expected.map((f) =>
+          cycle >= 2
+            ? {
+                finding_id: f.id,
+                result: "resolved",
+                evidence_kind: "regression_test",
+                evidence: {
+                  kind: "regression_test",
+                  test_name: "the reconcile path guards a partial write",
+                  runner_output: EXECUTED,
+                },
+              }
+            : { finding_id: f.id, result: "inconclusive", evidence_kind: "bounded_inspection", evidence: {} },
+        ),
+        new_findings: [],
+      },
+    }),
+  });
+
+  await drive(h.deps, "discover");
+  dispositionAll("fix_now", "will be remediated this cycle");
+  await runNextStage(REVIEW, h.deps); // batch_fix — cycle 1, no commit
+  await runNextStage(REVIEW, h.deps); // docs
+  await runNextStage(REVIEW, h.deps); // verify_final
+  const firstRecheck = await runNextStage(REVIEW, h.deps);
+
+  assert.equal(firstRecheck.status, "advanced");
+  assert.equal(h.head(), "cand111", "the fixer committed nothing — the candidate never moved");
+  const stale = findingsForReview(REVIEW).find((f) => f.findingRef === "RF-1");
+  assert.equal(stale?.resolution, "inconclusive");
+  assert.equal(pending().kind, "await_disposition", "an inconclusive fix_now holds the review, as it should");
+
+  // The operator re-decides with a NEW rationale — the one mechanical path the lifecycle
+  // offers out of this stop.
+  recordDisposition(stale?.id as string, {
+    decision: "fix_now",
+    rationale: "second attempt: guard the early return itself, not the caller",
+    operator: false,
+  });
+  assert.equal(pending().kind, "batch_fix", "a new decision earns a new batch revision");
+
+  const secondFix = await runNextStage(REVIEW, h.deps);
+  assert.equal(secondFix.status, "advanced");
+  assert.equal(cycle, 2, "the second cycle really ran");
+  assert.equal(h.head(), "cand111", "and again committed nothing");
+  assert.equal(
+    findingsForReview(REVIEW).find((f) => f.findingRef === "RF-1")?.resolution,
+    undefined,
+    "the verdict from the cycle BEFORE this one is not evidence about it",
+  );
+
+  assert.equal(
+    pending().kind,
+    "recheck",
+    "the new fix cycle needs its own recheck even though the candidate sha is unchanged",
+  );
+  assert.match(pending().reason, /a further fix cycle ran at candidate cand111 since the last recheck/);
+
+  const secondRecheck = await runNextStage(REVIEW, h.deps);
+  assert.equal(secondRecheck.status, "advanced");
+  assert.match(secondRecheck.message, /1 resolved, 0 unresolved/);
+  assert.equal(rechecks, 2, "one recheck per fix cycle, not one per candidate sha");
+
+  const settled = await runNextStage(REVIEW, h.deps);
+  assert.equal(settled.transition.kind, "shipping_review");
+  assert.equal(settled.status, "advanced", settled.message);
+  assert.equal(getReview(REVIEW)?.state, "settled", "the review reaches a mechanical resolution");
+});
+
+test("FG-639: a crash-resume at an UNCHANGED fix cycle still never repeats the recheck", async () => {
+  const h = harness();
+  await drive(h.deps, "discover");
+  dispositionAll("fix_now", "will be remediated this cycle");
+  await parkAt(h.deps, "recheck");
+  await runNextStage(REVIEW, h.deps);
+  const rechecksAfterFirst = h.calls.rechecker;
+
+  // A fresh process reads the same rows: the candidate matches AND so does the fix-cycle
+  // key, so the stage is complete and the next transition is the one after it.
+  assert.equal(pending().kind, "shipping_review");
+  await runNextStage(REVIEW, h.deps);
+  assert.equal(h.calls.rechecker, rechecksAfterFirst, "a completed recheck is not re-entered on resume");
+});
+
 test("FG-639 / PRD #24: a new finding from the bounded delta review lands untriaged and blocks settlement", async () => {
   const h = harness({
     dispatchRechecker: (ctx) => ({

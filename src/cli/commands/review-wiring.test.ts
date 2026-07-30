@@ -17,6 +17,7 @@ import { join } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import {
   buildCoordinatorDeps,
+  resolveReviewBase,
   FIX_BATCH_ENVELOPE_PATH,
   FIX_BATCH_PAYLOAD_PATH,
 } from "./review-wiring.js";
@@ -443,4 +444,122 @@ test("FG-639: the untampered envelope the wiring delivers IS the row-derived ren
     renderFixBatchEnvelope(ctx.batch),
     "one rendering for delivery and verification — two would drift while both looked verified",
   );
+});
+
+// ─── the comparison base, resolved AT OPEN ──────────────────────────────────
+//
+// Stage 2 refuses a review that records no base sha, and no verb supplies one afterwards or
+// removes the row — so a review opened without a base was permanently stuck at contract
+// confirmation. These pin the resolution that moved to open time: --since names the base,
+// otherwise it is inferred from the ticket's landed range, and when neither can produce one
+// the refusal happens BEFORE the row exists.
+
+/** A git that answers only what resolveReviewBase asks: the subject log, the span count, and
+ *  rev-parse for the revisions the fixture says exist. */
+function logGit(commits: Array<[string, string]>, resolvable: Record<string, string>) {
+  return (args: string[]): string => {
+    if (args[0] === "log" && args[1] === "--format=%H %s") {
+      return commits.map(([sha, subject]) => `${sha} ${subject}`).join("\n");
+    }
+    if (args[0] === "log" && args[1] === "--format=%H") {
+      return commits.map(([sha]) => sha).join("\n");
+    }
+    if (args[0] === "rev-parse") {
+      const sha = resolvable[args[1] as string];
+      if (sha === undefined) throw new Error(`fatal: ambiguous argument '${args[1] as string}'`);
+      return `${sha}\n`;
+    }
+    throw new Error(`unexpected git ${args.join(" ")}`);
+  };
+}
+
+test("FG-639: with no --since the base is INFERRED from the oldest commit referencing the ticket", () => {
+  const base = resolveReviewBase({
+    projectDir: "/repo",
+    ticketId: "FG-700",
+    git: logGit(
+      [
+        ["cccccccccccccccccccccccccccccccccccccccc", "FG-700: the second half"],
+        ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "FG-700: the first half"],
+      ],
+      { "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb^": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+    ),
+  });
+
+  assert.equal(base.ok, true, base.ok ? "" : base.refusal);
+  if (!base.ok) return;
+  assert.equal(base.baseSha, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "the parent of the oldest ticket commit");
+  assert.equal(base.inferredFrom, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+  assert.equal(base.spansUnmatched, false);
+});
+
+test("FG-639: an inferred range that spans unrelated commits is reported, not hidden", () => {
+  const base = resolveReviewBase({
+    projectDir: "/repo",
+    ticketId: "FG-700",
+    git: logGit(
+      [
+        ["cccccccccccccccccccccccccccccccccccccccc", "FG-700: the second half"],
+        ["dddddddddddddddddddddddddddddddddddddddd", "chore: an unrelated commit in between"],
+        ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "FG-700: the first half"],
+      ],
+      { "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb^": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+    ),
+  });
+
+  assert.equal(base.ok, true, base.ok ? "" : base.refusal);
+  assert.equal(base.ok ? base.spansUnmatched : undefined, true, "the confirmation diff will include them");
+});
+
+test("FG-639: NO commit referencing the ticket refuses AT OPEN, naming --since", () => {
+  const base = resolveReviewBase({
+    projectDir: "/repo",
+    ticketId: "FG-700",
+    git: logGit([["cccccccccccccccccccccccccccccccccccccccc", "chore: something else"]], {}),
+  });
+
+  assert.equal(base.ok, false, "a review that cannot name its base must never be opened");
+  if (base.ok) return;
+  assert.match(base.refusal, /no commit subject in \/repo references FG-700/);
+  assert.match(base.refusal, /--since <sha>/);
+  assert.match(base.refusal, /Nothing was written/);
+});
+
+test("FG-639: a ticket range starting at a ROOT commit refuses rather than opening unusably", () => {
+  const base = resolveReviewBase({
+    projectDir: "/repo",
+    ticketId: "FG-700",
+    // No `<oldest>^` in the resolvable set — the oldest ticket commit is the root.
+    git: logGit([["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "FG-700: the whole thing"]], {}),
+  });
+
+  assert.equal(base.ok, false);
+  assert.match(base.ok ? "" : base.refusal, /has no parent/);
+  assert.match(base.ok ? "" : base.refusal, /--since <sha>/);
+});
+
+test("FG-639: an unreadable git log refuses AT OPEN instead of leaving a stuck review behind", () => {
+  const base = resolveReviewBase({
+    projectDir: "/not-a-repo",
+    ticketId: "FG-700",
+    git: () => {
+      throw new Error("fatal: not a git repository");
+    },
+  });
+
+  assert.equal(base.ok, false);
+  assert.match(base.ok ? "" : base.refusal, /could not be read \(fatal: not a git repository\)/);
+  assert.match(base.ok ? "" : base.refusal, /--since <sha>/);
+});
+
+test("FG-639: --since is RESOLVED to a full sha, and an unresolvable one is refused", () => {
+  const git = logGit([], { "v1.2.0": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" });
+  const named = resolveReviewBase({ projectDir: "/repo", ticketId: "FG-700", since: "v1.2.0", git });
+  assert.equal(named.ok, true, named.ok ? "" : named.refusal);
+  assert.equal(named.ok ? named.baseSha : "", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "a tag is stored as its sha");
+  assert.equal(named.ok ? named.inferredFrom : "unset", undefined, "an explicitly named base is not an inference");
+
+  const bogus = resolveReviewBase({ projectDir: "/repo", ticketId: "FG-700", since: "nope", git });
+  assert.equal(bogus.ok, false);
+  assert.match(bogus.ok ? "" : bogus.refusal, /--since nope does not resolve to a commit/);
 });

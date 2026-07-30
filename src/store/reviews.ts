@@ -1121,6 +1121,53 @@ export function invalidateResolutionsForCandidate(reviewId: string, toSha: strin
   return { reviewId, fromSha: review.candidateSha, toSha, invalidated: stale.map((f) => f.id) };
 }
 
+/** A NEW fix cycle ran over these findings, so any resolution recorded before it is a claim
+ *  about the code as it stood BEFORE that cycle — and that is true whether or not the sha
+ *  moved.
+ *
+ *  `invalidateResolutionsForCandidate` cannot see this case: it keys on the candidate
+ *  changing, and a fixer that resolves its batch without committing (or reports it
+ *  scope-changing) leaves the candidate exactly where it was. The stale `still_present` /
+ *  `inconclusive` then survives at the current sha and holds the review at the disposition
+ *  stop forever, because every re-decision loops back through the same fixer. Cleared rather
+ *  than downgraded, for the same reason as above: nothing downstream may read a leftover
+ *  evidence blob as if it still applied. */
+export function invalidateResolutionsForFixCycle(
+  reviewId: string,
+  findingIds: readonly string[],
+  fixBatchId: string,
+): string[] {
+  const review = getReview(reviewId);
+  if (!review) throw new Error(`forge: no review ${reviewId}`);
+  const stale = findingsForReview(reviewId).filter((f) => f.resolution !== undefined && findingIds.includes(f.id));
+  if (stale.length === 0) return [];
+
+  const at = nowIso();
+  writeTransaction(() => {
+    const db = getDb();
+    const clear = db.prepare(
+      `UPDATE review_findings
+          SET resolution = NULL, resolution_evidence_kind = NULL, resolution_evidence = NULL,
+              resolved_sha = NULL, updated_at = ?
+        WHERE id = ?`,
+    );
+    for (const f of stale) clear.run(at, f.id);
+    logEvent("review.resolutions_invalidated", {
+      runId: review.runId,
+      taskId: review.subjectTaskId,
+      payload: {
+        reviewId,
+        fixBatchId,
+        candidateSha: review.candidateSha ?? null,
+        findingIds: stale.map((f) => f.id),
+        why: "a new fix cycle ran over these findings; a resolution recorded before it is about pre-fix code",
+      },
+    });
+  });
+
+  return stale.map((f) => f.id);
+}
+
 // ─── read-surface projection ────────────────────────────────────────────────
 
 export type ReviewSummary = {
