@@ -2,13 +2,16 @@
 
 ## Test tiers
 
-The suite is split into three tiers selected by **filename suffix**. Every `*.test.ts` file belongs to exactly one tier — `src/test-tiers.test.ts` enforces this as a partition proof that fails the suite if any file is in two tiers or in none, plus a content guard (see "Content-guard purity" below) that catches subprocess/sleep patterns creeping into the unit tier regardless of filename.
+The root suite is split into three tiers selected by **filename suffix**. Every `src/**/*.test.ts` file belongs to exactly one tier — `src/test-tiers.test.ts` enforces this as a partition proof that fails the suite if any file is in two tiers or in none, plus a content guard (see "Content-guard purity" below) that catches subprocess/sleep patterns creeping into the unit tier regardless of filename.
+
+The `dashboard` workspace has its own fast/integration split over `dashboard/src/` (see the FG-495 review fix below), plus a **browser tier** selected by directory rather than suffix — `dashboard/browser-tests/*.test.ts`, which drive a real Chrome. The root partition proof covers `src/` only, so it says nothing about those.
 
 | Tier | Suffix | Command | Steady-state wall time |
 |------|--------|---------|---|
 | Unit (canonical/default) | `*.test.ts` (excluding the two below) | `npm test` / `npm run test:unit` | ~2s |
 | Integration | `*.integration.test.ts` | `npm run test:integration` | ~93s |
 | Worktree | `*.worktree.test.ts` | `npm run test:worktree` | ~2s |
+| Dashboard browser | `dashboard/browser-tests/*.test.ts` (directory, not suffix) | `npm run test:browser -w dashboard` | ~6.5s |
 | Extended (integration + worktree + dashboard integration) | — | `npm run test:extended` | ~95s |
 | Canonical deterministic gate | unit + dashboard workspace | `npm run test:all` | ~2.5s |
 
@@ -22,12 +25,65 @@ That command-matching pairing is necessary but not sufficient for CI-sourced evi
 
 ## Continuous Integration (FG-474, tiering FG-495)
 
-`.github/workflows/ci.yml` has the fast `test` job plus the extended merge gate, which is now sharded across seven concurrent jobs behind a fail-closed aggregate:
+`.github/workflows/ci.yml` has the fast `test` job plus the extended merge gate, which is now sharded across eight concurrent jobs behind a fail-closed aggregate:
 
 - **`test`** (check name `CI / test`) — a **required** merge-gate check. Runs `npm run test:all` (unit tier + dashboard workspace, plus `npm run typecheck`) on every push and on every PR into `main`, pinned to the Node version in `.nvmrc` (24) so the better-sqlite3 native module always matches the runner's ABI. The review-loop's own per-round verification does not duplicate this CI job by default (FG-501): on a clean tree it reuses covering evidence for HEAD, or waits for this required check to go green and reuses that once it does. Only a dirty tree, or a wait that finds CI unavailable/failed-precondition/timed-out, falls back to a real local run via `runVerification` (`src/v2/review-loop.ts`), which runs `npm run --silent typecheck` and `npm run --silent test` as two separate steps — the unit tier only, never the literal `npm run test:all` command and never the dashboard workspace — so it needs to stay under the <=60s target / <=120s ceiling. CI's `test` job additionally covers the dashboard workspace on every push/PR; it now completes in ~2.5s server-side, where the pre-FG-495 version took ~107s.
-- **`test-extended`** (check name `CI / test-extended`) — also a **required** merge-gate check, not informational, and still the exact branch-protection context. It no longer runs `npm run test:extended` itself; the extended coverage is now split across **seven concurrent jobs** so the required gate finishes in well under 4 min instead of ~9 min sequential: five root-integration shards `integration_1`..`integration_5` (each running `bash scripts/run-integration-tests.sh k/5`), a `worktree` job (`npm run test:worktree`), and a `dashboard_integration` job (`npm run test:integration -w dashboard`). **FG-624:** those shards are no longer partitioned by Node's `--test-shard`. That split the (now 173) `*.integration.test.ts` files by FILE INDEX, which is an arbitrary split of COST — on `main` three shards finished in ~2.5-3 min while `integration_4` ran 5m25s, and adding one file reshuffled the partition and pushed it past the 6-minute job ceiling (a suite reporting `pass 670 / fail 0`, killed by the job clock). `scripts/run-integration-tests.sh` still owns file selection, but now pipes the sorted list to `src/test-shards.ts`, which greedy-bin-packs it over measured per-file durations in `scripts/integration-timings.json` (regenerate with `npm run test:integration:timings`) and prints just that shard's files. A file missing from the manifest still runs — it gets a pessimistic default weight; the union of the shards is always the full discovered list (guarded by `src/test-shards.test.ts` and `src/test-shards.integration.test.ts`). Because the planner can route the F31 preflight test (`node-preflight.integration.test.ts`, which treats `FORGE_TEST_MISMATCHED_NODE` as a HARD requirement) to any shard, all five integration shards provision the ABI-incompatible Node. `test-extended` `needs` all seven and, with `if: always()`, runs a single aggregate step that exits non-zero unless every dependency's `result` is `success` — so a failed, cancelled, or skipped shard fails the required check closed; it can never go green on incomplete extended coverage. No test moved, weakened, or left the required gate — only how it is scheduled changed. Dashboard's slow/integration coverage still runs only here — its share of the canonical `test` gate (`npm run test:all` → `npm test -w dashboard`) is the fast tier only, mirroring how the root's own integration/worktree tiers are kept out of `test`. Branch protection carries both `test` and `test-extended` as required contexts (applied host-side by the orchestrator); a red `test-extended` aggregate blocks merge exactly like a red `test` run. What FG-495 changed is *where* this coverage runs (CI, off-host, in parallel with `test` and with review-loop verification) and how often the operator pays for it interactively — never per round: the review-loop's per-round verification (FG-501) defaults to reusing covering evidence or waiting for the required check to go green rather than running anything locally, and even its CI-unavailable/dirty-tree local fallback only re-runs the fast unit-tier scripts (`typecheck` + `test`), not the dashboard-inclusive `test:all` CI runs. Merge happens once per ticket, and the sharded extended jobs run in parallel with review, so full extended coverage is affordable at that boundary even though it would be too slow to re-run every round. Locally, `npm run test:extended` still runs the whole sequence unsharded (`test:integration` now calls the same `scripts/run-integration-tests.sh`).
+- **`test-extended`** (check name `CI / test-extended`) — also a **required** merge-gate check, not informational, and still the exact branch-protection context. It no longer runs `npm run test:extended` itself; the extended coverage is now split across **eight concurrent jobs** so the required gate finishes in well under 4 min instead of ~9 min sequential: five root-integration shards `integration_1`..`integration_5` (each running `bash scripts/run-integration-tests.sh k/5`), a `worktree` job (`npm run test:worktree`), a `dashboard_integration` job (`npm run test:integration -w dashboard`), and — since FG-642 — a `dashboard_browser` job (`npm run test:browser -w dashboard`, the real-Chrome tier described in [The dashboard browser tier](#the-dashboard-browser-tier-fg-642) below). **FG-624:** those shards are no longer partitioned by Node's `--test-shard`. That split the (now 173) `*.integration.test.ts` files by FILE INDEX, which is an arbitrary split of COST — on `main` three shards finished in ~2.5-3 min while `integration_4` ran 5m25s, and adding one file reshuffled the partition and pushed it past the 6-minute job ceiling (a suite reporting `pass 670 / fail 0`, killed by the job clock). `scripts/run-integration-tests.sh` still owns file selection, but now pipes the sorted list to `src/test-shards.ts`, which greedy-bin-packs it over measured per-file durations in `scripts/integration-timings.json` (regenerate with `npm run test:integration:timings`) and prints just that shard's files. A file missing from the manifest still runs — it gets a pessimistic default weight; the union of the shards is always the full discovered list (guarded by `src/test-shards.test.ts` and `src/test-shards.integration.test.ts`). Because the planner can route the F31 preflight test (`node-preflight.integration.test.ts`, which treats `FORGE_TEST_MISMATCHED_NODE` as a HARD requirement) to any shard, all five integration shards provision the ABI-incompatible Node. `test-extended` `needs` all eight and, with `if: always()`, runs a single aggregate step that exits non-zero unless every dependency's `result` is `success` — so a failed, cancelled, or skipped shard fails the required check closed; it can never go green on incomplete extended coverage. No test moved, weakened, or left the required gate — only how it is scheduled changed. Dashboard's slow/integration coverage still runs only here — its share of the canonical `test` gate (`npm run test:all` → `npm test -w dashboard`) is the fast tier only, mirroring how the root's own integration/worktree tiers are kept out of `test`. Branch protection carries both `test` and `test-extended` as required contexts (applied host-side by the orchestrator); a red `test-extended` aggregate blocks merge exactly like a red `test` run. What FG-495 changed is *where* this coverage runs (CI, off-host, in parallel with `test` and with review-loop verification) and how often the operator pays for it interactively — never per round: the review-loop's per-round verification (FG-501) defaults to reusing covering evidence or waiting for the required check to go green rather than running anything locally, and even its CI-unavailable/dirty-tree local fallback only re-runs the fast unit-tier scripts (`typecheck` + `test`), not the dashboard-inclusive `test:all` CI runs. Merge happens once per ticket, and the sharded extended jobs run in parallel with review, so full extended coverage is affordable at that boundary even though it would be too slow to re-run every round. Locally, `npm run test:extended` still runs the whole sequence unsharded (`test:integration` now calls the same `scripts/run-integration-tests.sh`).
 
 Running the aggregate on the host is still normal during local iteration (`forge-test --all`, or `npm run test:all` directly); what changed with FG-474 is that the merge decision reads CI's result rather than triggering a second, invisible host run of the same suite. What changed with FG-495 is that the per-round host/CI cost is now fast (canonical gate is unit-only), while full coverage — including the slow integration/worktree tiers — still gates the actual merge via the parallel `test-extended` check.
+
+## The dashboard browser tier (FG-642)
+
+`dashboard/browser-tests/*.test.ts` is five suites / 18 tests that drive a **real Chrome** through `playwright-core` against a fixture HTTP server serving the dashboard's actual shell and client bundle. It is the only tier that proves the rendered UI, so it is where UI regressions (the backlog aggregate count, the FG-608 cutover labels, offline boot of the released client) are pinned.
+
+```bash
+npm run test:browser -w dashboard      # the whole tier, ~6.5s with a browser present
+```
+
+**It is not in any aggregate script.** `npm run test:extended` and `npm run test:all` do not run it, and `forge-test` has no `--browser` flag — the command above is its only entry point. Before FG-642 it also ran in CI nowhere, which is how it went dark: anywhere but a Chrome-carrying host it found no browser, skipped every test, and reported green — which is how it hid a live FG-608 red. It now runs in CI as the `dashboard_browser` job feeding the required `test-extended` aggregate.
+
+### Finding Chrome
+
+One resolver, `src/util/chrome-bin.ts`, serves both the browser tier and the host-side CDP session capture behind `forge auth-profile login`. It resolves in this order:
+
+1. **`FORGE_CHROME_BIN`** — **authoritative when set.** If it is set, it is the *only* thing consulted. A value naming a path that does not exist, or naming a directory (`/Applications/Google Chrome.app` is the natural macOS mistake — the executable is several levels inside it), **fails** with the named precondition below. It does not fall through to another Chrome, so a stale override is reported as the stale override rather than silently running a different browser. This is a behavior change: the pre-FG-642 capture path treated the variable as a first candidate and fell through when it missed.
+2. **`CHROME_PATH`** — a lenient first candidate, kept for its long-standing meaning here: if it does not resolve, probing continues.
+3. The known locations, in order — the two macOS app bundles, `/usr/bin/google-chrome`, `/usr/bin/google-chrome-stable`, `/usr/bin/chromium`, `/usr/bin/chromium-browser`, and `/usr/local/bin/chromium` (the agent image's symlink to Playwright's chromium; without this entry the tier is dark in exactly the container the verify phase runs in).
+
+A candidate must be a **file**. Symlinks are followed deliberately — the agent image's `/usr/local/bin/chromium` *is* a symlink.
+
+### It fails, it never skips
+
+A Chrome-less environment takes every one of the 18 tests **red** on a file-wide `before` hook, with a precondition that names what is missing and how to supply it:
+
+```
+chrome precondition: the dashboard browser tier requires a real Chrome/Chromium binary and none was
+found — FORGE_CHROME_BIN is set to /nonexistent and no file exists there. Set FORGE_CHROME_BIN to its
+path (agent containers ship /usr/local/bin/chromium; macOS: /Applications/Google Chrome.app/Contents/
+MacOS/Google Chrome; ubuntu: npx playwright-core install --with-deps chromium). A Chrome-less
+environment must FAIL this tier, never skip to green (FG-642).
+```
+
+Modeled on the FG-551 tmux tier: an environment that cannot run the work fails loudly instead of reporting a green nothing. `dashboard/src/fg642-browser-tier-fail-first.integration.test.ts` pins it by spawning the real tier with the override pointed at an absent path and asserting 18 failures / 0 passes / 0 skips — reproducible on a laptop, a runner, or a container alike, precisely because the override outranks a working `CHROME_PATH`.
+
+### Running it in an agent container
+
+The tier works out of the box — the agent image ships chromium at `/usr/local/bin/chromium`, which the resolver probes. But `/project` is not where tests run: its `node_modules` is unusable from the container (see [What `forge-test` does](#what-forge-test-does-before-it-runs-anything-fg-520)), so run the tier from `forge-test`'s scratch instead:
+
+```bash
+forge-test src/util/chrome-bin.ts        # any invocation: syncs source + installs deps in the scratch
+cd /tmp/forge-work/dashboard && npm run test:browser
+```
+
+`FORGE_CHROME_BIN=/nonexistent npm run test:browser` in the same directory is the one-command demonstration that the tier fails rather than skips.
+
+### In CI
+
+The `dashboard_browser` job provisions the browser the same way the agent image does — `npx playwright-core install --with-deps chromium`, driven through the *pinned* `playwright-core` the tier itself imports, so the browser always matches the client with no version bump of either. Playwright installs under `~/.cache/ms-playwright`, which is not one of the resolver's system locations, so the job then sets `FORGE_CHROME_BIN` to `require('playwright-core').chromium.executablePath()`. A runner that somehow lacks a browser fails the job on the precondition — an unprovisioned runner is loud, not silently empty. `src/v2/fg642-ci-browser-job-shape.test.ts` pins that job shape.
+
+### Typechecking
+
+`dashboard/tsconfig.json`'s `include` now covers `browser-tests/**/*.ts` alongside `src/**/*.ts`, so `npm run typecheck -w dashboard` typechecks the tier. Note that CI's `Typecheck` step and the review-loop's fast gate run the **root** `npm run typecheck`, whose `tsconfig.json` includes `src/**/*.ts` only — the dashboard workspace's typecheck is not currently wired into any automated gate, so run it yourself when you touch dashboard or browser-test sources.
 
 ## What belongs in each tier
 
@@ -36,6 +92,8 @@ Running the aggregate on the host is still normal during local iteration (`forge
 **Integration** — tests that spawn a CLI subprocess, write to a real (temp) filesystem, or open an on-disk SQLite database. One process per test, no git worktrees. Typical: `forge backlog list`, reading/writing backlog files, verifying CLI error messages, real-DB round-trips. If the subprocess you spawn is `forge` itself, read [Spawning a `forge` CLI child](#spawning-a-forge-cli-child-fg-645) first — inside an agent container such a child resolves the *container's* backlog authority, not your fixture, and the suite goes green on a host either way.
 
 **Worktree** — tests that create git worktrees, exercise dispatch/fanout/merge-back orchestration, or measure control-plane timing. These are expected to be slow. Anything that calls `spawn` for a git worktree operation or tests the full orchestration pipeline at the worktree seam lives here.
+
+**Dashboard browser** — assertions that need a rendered page: the dashboard's UI contracts, driven in a real Chrome. These live in `dashboard/browser-tests/`, not under `src/`, and are the one tier that must resolve a browser — see [The dashboard browser tier](#the-dashboard-browser-tier-fg-642). Never guard one with a skip when Chrome is missing; use `requireChrome()` so the absence fails.
 
 ## Placement rule
 
@@ -67,8 +125,14 @@ npm run test:worktree
 
 # Root integration + worktree tiers, plus dashboard's integration tier —
 # the local unsharded equivalent of CI's required test-extended merge gate
-# (which runs the same coverage as seven concurrent sharded/tiered jobs)
+# (which runs the same coverage as eight concurrent sharded/tiered jobs).
+# NOTE: this does NOT include the dashboard browser tier — that one is not in
+# any root aggregate script; run it explicitly (next).
 npm run test:extended
+
+# Dashboard browser tier: 5 suites / 18 tests against a real Chrome (FG-642).
+# Needs a browser — a Chrome-less environment FAILS all 18, it never skips.
+npm run test:browser -w dashboard
 
 # Canonical deterministic gate: unit tier + dashboard workspace
 npm run test:all
@@ -84,6 +148,8 @@ Within an agent's in-loop validation, use `forge-test` at the right tier:
 - **`forge-test --extended`** — when the change plausibly affects both slow tiers at once, or you want the full non-canonical coverage locally before pushing (mirrors CI's `test-extended` job).
 - **`forge-test --all`** — the canonical deterministic gate (unit tier + dashboard workspace); fast enough (~2.5s) to run routinely, not just before claiming shipped.
 - **`forge-test <file.test.ts>`** or **`forge-test --test <pattern>`** — run a specific file or pattern regardless of tier.
+
+There is no `forge-test --browser`. When your change touches the dashboard UI, run that tier by hand from the scratch — `cd /tmp/forge-work/dashboard && npm run test:browser` — after any `forge-test` invocation has synced and installed there; see [Running it in an agent container](#running-it-in-an-agent-container).
 
 **A green unit tier is in-loop confidence for most changes; it is not, by itself, proof the integration/worktree tiers still pass.** Since FG-495 the unit tier is the fast gate the review-loop re-runs every round via `runVerification` (`npm run --silent typecheck` + `npm run --silent test` — not the literal `npm run test:all` command, and never the dashboard workspace), and CI's `test-extended` job independently re-verifies the integration/worktree tiers as its own required check before merge — both `test` and `test-extended` must be green to merge, not just the fast one. If your change touches CLI-spawn, real-FS/DB, or git-worktree/dispatch code, also run the matching `forge-test --integration` / `--worktree` / `--extended` before reporting complete: the fast gate proves the fast tier, not the slow tiers CI's `test-extended` job covers. Agents must report their validation tier honestly in their result — `status: "complete"` means the diff was validated at the level appropriate for its change.
 

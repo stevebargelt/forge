@@ -19,9 +19,8 @@
 // assertion.
 //
 // The store here is built by the REAL cutover verb (no hand-seeded ticket rows),
-// the server is the real dashboard, and the browser is real Chrome. The suite
-// skips with a named reason when no Chrome binary is present, matching the
-// convention in inactive-checkouts.test.ts and usage-limits.test.ts.
+// the server is the real dashboard, and the browser is real Chrome. A Chrome-less
+// environment FAILS this file at its `before` hook (FG-642) — it never skips.
 
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
@@ -33,6 +32,8 @@ import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import type { Server } from "node:http";
 import { chromium, type Browser, type Page } from "playwright-core";
+import { requireChrome } from "../../src/util/chrome-bin.js";
+import { authorityTestkitEnv, withAuthorityTestkit } from "../../src/backlog/container-authority.testkit-spawn.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
@@ -40,18 +41,6 @@ const CLI_ENTRY = join(REPO_ROOT, "src", "cli", "index.ts");
 const LOCAL_TSX = join(REPO_ROOT, "node_modules", ".bin", "tsx");
 const TSX = existsSync(LOCAL_TSX) ? LOCAL_TSX : "tsx";
 
-const CHROME_CANDIDATES = [
-  process.env.CHROME_PATH,
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-  "/usr/bin/google-chrome",
-  "/usr/bin/chromium",
-  "/usr/bin/chromium-browser",
-  // The agent-dev-worker image ships chromium here; without this entry the whole
-  // file would skip in exactly the container the verify phase runs in, which is
-  // how a browser suite quietly stops being evidence.
-  "/usr/local/bin/chromium",
-].filter((candidate): candidate is string => Boolean(candidate));
-const CHROME_PATH = CHROME_CANDIDATES.find(existsSync);
 const SHOT_DIR = process.env.FG608_SHOT_DIR;
 
 const TEST_PORT = 18782;
@@ -83,11 +72,19 @@ function git(dir: string, args: string[]): void {
 }
 
 function forge(projectDir: string, args: string[]): string {
-  const res = spawnSync(TSX, [CLI_ENTRY, ...args], {
+  // FG-642: now that this suite actually EXECUTES in an agent container, its spawned
+  // CLI inherits the container's read-only backlog authority and `migrate` refuses.
+  // Same FG-645 seam every other CLI-driving suite uses; a no-op on the host.
+  const res = spawnSync(TSX, withAuthorityTestkit(CLI_ENTRY, args), {
     cwd: projectDir,
     input: "",
     encoding: "utf8",
-    env: { ...process.env, FORGE_HOME: forgeHome, FORGE_DB_PATH: join(forgeHome, "forge.db") },
+    env: {
+      ...process.env,
+      FORGE_HOME: forgeHome,
+      FORGE_DB_PATH: join(forgeHome, "forge.db"),
+      ...authorityTestkitEnv(),
+    },
   });
   assert.equal(res.status, 0, `forge ${args.join(" ")} failed:\n${res.stdout}\n${res.stderr}`);
   return res.stdout ?? "";
@@ -185,7 +182,7 @@ before(async () => {
   );
 
   if (SHOT_DIR) mkdirSync(SHOT_DIR, { recursive: true });
-  if (CHROME_PATH) browser = await chromium.launch({ executablePath: CHROME_PATH, headless: true });
+  browser = await chromium.launch({ executablePath: requireChrome("the dashboard browser tier"), headless: true });
 });
 
 after(async () => {
@@ -211,7 +208,7 @@ async function openBacklog(page: Page, project: "cutover" | "shadow" | "virgin")
   await page.locator(".backlog-view").waitFor();
 }
 
-test("a migrated project's board renders the DB tickets and never the frozen Markdown", { skip: !CHROME_PATH }, async () => {
+test("a migrated project's board renders the DB tickets and never the frozen Markdown", async () => {
   const page = await newPage();
   await openBacklog(page, "cutover");
   await page.locator(".backlog-result-count").waitFor();
@@ -245,7 +242,7 @@ test("a migrated project's board renders the DB tickets and never the frozen Mar
   await page.close();
 });
 
-test("an imported-but-not-migrated project is labeled a non-authoritative shadow", { skip: !CHROME_PATH }, async () => {
+test("an imported-but-not-migrated project is labeled a non-authoritative shadow", async () => {
   const page = await newPage();
   await openBacklog(page, "shadow");
 
@@ -260,7 +257,7 @@ test("an imported-but-not-migrated project is labeled a non-authoritative shadow
   await page.close();
 });
 
-test("a never-imported project says it has no ticket truth, not that it has no tickets", { skip: !CHROME_PATH }, async () => {
+test("a never-imported project says it has no ticket truth, not that it has no tickets", async () => {
   const page = await newPage();
   await openBacklog(page, "virgin");
 

@@ -19,29 +19,21 @@
 // release server is aborted AND recorded, so a lingering esm.sh import would (a) fail the
 // module load — nothing renders — and (b) show up in the recorded external-origin list.
 //
-// This test needs Chrome and runs on the HOST tier (browser-tools), NOT the agent container
-// (Chrome absent there → the tests skip). It builds+serves a real release and is executable
-// on the host; the orchestrator runs it there with Chrome.
+// This test needs Chrome, and since FG-642 it gets one everywhere the tier runs: agent
+// containers ship /usr/local/bin/chromium and CI provisions Playwright's chromium. A
+// Chrome-less environment FAILS the `before` hook with a named precondition — it never skips.
 
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, type Browser, type Page } from "playwright-core";
 import { findGitRoot } from "../../src/util/git-root.js";
+import { requireChrome } from "../../src/util/chrome-bin.js";
 import { makeDisposableSourceRoot, removeDisposableSourceRoot, type DisposableSource } from "../../src/v2/fg571-harness.js";
 import { thawReleaseTree, type BuildReleaseResult } from "../../src/v2/release.js";
-
-const CHROME_CANDIDATES = [
-  process.env.CHROME_PATH,
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-  "/usr/bin/google-chrome",
-  "/usr/bin/chromium",
-  "/usr/bin/chromium-browser",
-].filter((candidate): candidate is string => Boolean(candidate));
-const CHROME_PATH = CHROME_CANDIDATES.find(existsSync);
 
 let disposable: DisposableSource | undefined;
 let built: BuildReleaseResult | undefined;
@@ -52,9 +44,9 @@ let dashHome = "";
 let baseUrl = "";
 
 before(async () => {
-  // Building copies node_modules (slow) and boots Chrome — skip the whole setup off the host
-  // tier, where the tests below skip too.
-  if (!CHROME_PATH) return;
+  // Resolved BEFORE the expensive release build: a Chrome-less environment must fail on the
+  // precondition, not after minutes of copying node_modules.
+  const chrome = requireChrome("the dashboard browser tier");
 
   // 1) A disposable committed checkout, and a release built FROM it into a dir OUTSIDE it.
   disposable = await makeDisposableSourceRoot(findGitRoot(process.cwd()));
@@ -85,7 +77,7 @@ before(async () => {
     await new Promise((r) => setTimeout(r, 200));
   }
 
-  browser = await chromium.launch({ executablePath: CHROME_PATH, headless: true });
+  browser = await chromium.launch({ executablePath: chrome, headless: true });
 });
 
 after(async () => {
@@ -97,7 +89,7 @@ after(async () => {
   if (dashHome) rmSync(dashHome, { recursive: true, force: true });
 });
 
-test("FG-580 AC-6: the RELEASE-served dashboard boots and renders offline — CDN/esm.sh blocked, vendored libs serve first-party", { skip: !CHROME_PATH }, async () => {
+test("FG-580 AC-6: the RELEASE-served dashboard boots and renders offline — CDN/esm.sh blocked, vendored libs serve first-party", async () => {
   const external: string[] = [];
   const pageErrors: string[] = [];
   const page: Page = await browser!.newPage({ viewport: { width: 1280, height: 900 } });
@@ -139,7 +131,7 @@ test("FG-580 AC-6: the RELEASE-served dashboard boots and renders offline — CD
   await page.close();
 });
 
-test("FG-580 AC-6 (mutation proof, RELEASE copy): with a vendored client lib 404'd, the offline boot RENDER fails", { skip: !CHROME_PATH }, async () => {
+test("FG-580 AC-6 (mutation proof, RELEASE copy): with a vendored client lib 404'd, the offline boot RENDER fails", async () => {
   // The offline-boot guarantee is load-bearing on the vendored bytes: simulate a torn
   // closure by making the release 404 a required vendored lib (preact). The import map still
   // points at it, but the module cannot load with CDN blocked, so the app never renders its

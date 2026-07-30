@@ -121,11 +121,11 @@ test("FG-474: .nvmrc pins the Node major version the better-sqlite3 ABI note ref
 // FG-495 regression guard (updated: sharded extended gate; FG-624: 5-way and
 // duration-aware): the slow integration/worktree coverage moved out of the
 // fast `test` gate must still run somewhere routine and visible. It now runs
-// as SEVEN concurrent jobs — five root integration shards
+// as EIGHT concurrent jobs — five root integration shards
 // (`integration_1`..`integration_5`, partitioned by measured per-file duration
-// via scripts/run-integration-tests.sh), a `worktree` job, and a
-// `dashboard_integration` job — with the required `test-extended` job reduced
-// to a fail-closed aggregate over all seven. If a future edit drops a shard, mistargets a shard
+// via scripts/run-integration-tests.sh), a `worktree` job, a
+// `dashboard_integration` job, and (FG-642) a `dashboard_browser` job — with the
+// required `test-extended` job reduced to a fail-closed aggregate over all eight. If a future edit drops a shard, mistargets a shard
 // selector, drops the F31 provision step, or lets the aggregate go green on a
 // failed dependency, the trust-sensitive coverage (FG-419/FG-440/FG-474
 // gate-enforcement tests, among others) would stop gating merges without
@@ -197,7 +197,29 @@ test("FG-495 (sharded): ci.yml has a dashboard_integration job that runs test:in
   );
 });
 
-test("FG-495 (sharded): the test-extended aggregate needs all seven extended-gate jobs, uses if: always(), and fails closed on any non-success", () => {
+test("FG-642: ci.yml has a dashboard_browser job that provisions a browser and runs test:browser -w dashboard", () => {
+  const wf = loadWorkflow();
+  const job = wf.jobs?.dashboard_browser;
+  assert.ok(job, "ci.yml must define a dashboard_browser job — the dashboard's real-Chrome tier ran in CI nowhere before FG-642 and skipped itself to green everywhere else");
+  const runCommands = (job!.steps ?? []).map((s) => s.run).filter((r): r is string => typeof r === "string");
+  assert.ok(
+    runCommands.some((r) => r.includes("test:browser") && r.includes("-w dashboard")),
+    "dashboard_browser job must run npm run test:browser -w dashboard"
+  );
+  // Since FG-642 a Chrome-less run FAILS on the resolver's precondition rather
+  // than skipping, so the browser has to be provisioned and named to the tier —
+  // otherwise this job is a guaranteed red instead of coverage.
+  assert.ok(
+    runCommands.some((r) => r.includes("playwright-core install") && r.includes("chromium")),
+    "dashboard_browser job must install chromium through the pinned playwright-core the tier itself drives"
+  );
+  assert.ok(
+    runCommands.some((r) => r.includes("FORGE_CHROME_BIN")),
+    "dashboard_browser job must hand the installed binary to the tier via FORGE_CHROME_BIN — Playwright's cache is not one of src/util/chrome-bin.ts's system locations"
+  );
+});
+
+test("FG-495 (sharded): the test-extended aggregate needs all eight extended-gate jobs, uses if: always(), and fails closed on any non-success", () => {
   const wf = loadWorkflow();
   const job = wf.jobs?.["test-extended"];
   assert.ok(job, "ci.yml must define the test-extended aggregate job (the required branch-protection context)");
@@ -211,11 +233,12 @@ test("FG-495 (sharded): the test-extended aggregate needs all seven extended-gat
     "integration_5",
     "worktree",
     "dashboard_integration",
+    "dashboard_browser",
   ];
   assert.deepEqual(
     [...needs].sort(),
     [...expectedNeeds].sort(),
-    "test-extended must `needs` exactly the seven sharded/tiered extended-gate jobs — a shard added to ci.yml but left out of `needs` runs without gating anything"
+    "test-extended must `needs` exactly the eight sharded/tiered extended-gate jobs — a shard added to ci.yml but left out of `needs` runs without gating anything"
   );
 
   assert.equal(
@@ -262,10 +285,10 @@ test("FG-495: the test-extended job is a required merge check — no continue-on
   );
 });
 
-// Extended-gate wall-clock ceiling: each of the seven concurrent extended-gate
+// Extended-gate wall-clock ceiling: each of the eight concurrent extended-gate
 // jobs carries `timeout-minutes: 6`, so a suite that runs long is cancelled →
 // its result is not `success` → the fail-closed aggregate goes red → merge is
-// blocked. Because the seven jobs run concurrently, bounding each to 6 min bounds
+// blocked. Because the eight jobs run concurrently, bounding each to 6 min bounds
 // the whole extended gate to ~6 min. The fast `test` gate (separate) and the
 // `test-extended` aggregate (a 3s step) must NOT carry this ceiling.
 const EXTENDED_GATE_JOBS = [
@@ -276,9 +299,10 @@ const EXTENDED_GATE_JOBS = [
   "integration_5",
   "worktree",
   "dashboard_integration",
+  "dashboard_browser",
 ] as const;
 
-test("extended-gate ceiling: each of the seven extended-gate jobs has timeout-minutes: 6", () => {
+test("extended-gate ceiling: each of the eight extended-gate jobs has timeout-minutes: 6", () => {
   const wf = loadWorkflow();
   for (const name of EXTENDED_GATE_JOBS) {
     const job = wf.jobs?.[name];

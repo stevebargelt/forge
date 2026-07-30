@@ -130,6 +130,6 @@ git status --short             # expect a clean working tree
 ```
 
 - `forge setup --dry-run` and `forge doctor` both run the release check introduced in #229.
-- `npm test` alone is the fast unit tier only (~2s) — it does not cover integration, worktree, or dashboard-integration tests, so it isn't sufficient evidence for a release. Run `test:all` and `test:extended` (or confirm CI's `test` and `test-extended` jobs are both green on the release commit) instead.
+- `npm test` alone is the fast unit tier only (~2s) — it does not cover integration, worktree, dashboard-integration, or dashboard browser tests, so it isn't sufficient evidence for a release. Run `test:all` and `test:extended` (or confirm CI's `test` and `test-extended` jobs are both green on the release commit) instead. Note that `test:extended` does *not* include the dashboard browser tier either — CI's `dashboard_browser` job covers it, or run `npm run test:browser -w dashboard` locally with a Chrome present.
 - Opt-in providers (Bedrock, Pi-Groq, Anthropic-API) reporting as warnings is **expected and not a blocker** — only hard fails block a release.
 - All six commands must pass before tagging a release on this host.
