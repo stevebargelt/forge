@@ -14,6 +14,12 @@
 // The child goes through the FG-645 authority testkit seam (docs/how-to-testing.md):
 // without it, a spawned forge inherits this process's backlog-authority signals and answers
 // from a mounted snapshot instead of the fixture the test just built.
+//
+// FG-649: the parked review now carries a workspace_dir, and `continue` is driven with NO
+// --project from a cwd (homeDir) that is not a git worktree at all — so every arm below is
+// also evidence that the dispatch workspace comes from the review row rather than from the
+// directory the process happens to run in. The unbound legacy shape (no workspace_dir, no
+// adoptable run project_dir) gets its own arm, asserting the refusal BY NAME.
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -82,9 +88,9 @@ function seedParkedReview(): void {
     );
     db.prepare(
       `INSERT INTO reviews (id, run_id, ticket_id, base_sha, contract_confirmed_sha, candidate_sha,
-                            contract_json, stage_evidence_json, lens_outcomes_json, review_mode, state,
-                            created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                            workspace_dir, contract_json, stage_evidence_json, lens_outcomes_json,
+                            review_mode, state, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       "review-parked",
       "run-parked",
@@ -92,6 +98,9 @@ function seedParkedReview(): void {
       "base000",
       "conf222",
       "conf222",
+      // FG-649: the review's OWN workspace binding. The run deliberately records no
+      // project_dir, so this is the only thing that can answer "which checkout".
+      repoDir,
       JSON.stringify(CONTRACT),
       JSON.stringify({
         verified_entry: { sha: "conf222", at: "2026-07-30T00:00:01Z" },
@@ -222,7 +231,7 @@ test("FG-639: `forge review start` refuses AT OPEN when the comparison base cann
 });
 
 test("FG-639 / PRD #15: `forge review continue` reads the PERSISTED next stage from the store", () => {
-  const r = runForge(["review", "continue", "review-parked", "--project", homeDir]);
+  const r = runForge(["review", "continue", "review-parked"]);
   assert.equal(r.status, 0, r.stderr);
   assert.match(
     r.stdout,
@@ -248,15 +257,15 @@ test("FG-639: `forge review continue` on an unknown review exits non-zero", () =
 });
 
 test("FG-639: the disposition stop is idempotent — continue at a stop reports it without advancing", () => {
-  const first = runForge(["review", "continue", "review-parked", "--project", homeDir]);
+  const first = runForge(["review", "continue", "review-parked"]);
   assert.equal(first.status, 0, first.stderr);
-  const second = runForge(["review", "continue", "review-parked", "--project", homeDir]);
+  const second = runForge(["review", "continue", "review-parked"]);
   assert.equal(second.status, 0, second.stderr);
   assert.match(second.stdout, /await_disposition/);
 });
 
 test("FG-639: `forge review continue --json` emits the stage outcome as a machine-readable object", () => {
-  const r = runForge(["review", "continue", "review-parked", "--project", homeDir, "--json"]);
+  const r = runForge(["review", "continue", "review-parked", "--json"]);
   assert.equal(r.status, 0, r.stderr);
   const parsed = JSON.parse(r.stdout) as { transition: { kind: string; blockingFindings?: string[] }; status: string };
   assert.equal(parsed.transition.kind, "await_disposition");
@@ -265,8 +274,8 @@ test("FG-639: `forge review continue --json` emits the stage outcome as a machin
 });
 
 test("FG-639: --dry-run on an unknown review emits the SAME named refusal the real path does", () => {
-  const dry = runForge(["review", "continue", "review-nope", "--project", homeDir, "--dry-run"]);
-  const real = runForge(["review", "continue", "review-nope", "--project", homeDir]);
+  const dry = runForge(["review", "continue", "review-nope", "--dry-run"]);
+  const real = runForge(["review", "continue", "review-nope"]);
   assert.notEqual(dry.status, 0, "the printed answer may not drift from the act");
   assert.match(dry.stderr, /no review review-nope/);
   assert.doesNotMatch(dry.stderr, /Not found:/, "never a raw Error out of the command action");
@@ -275,14 +284,14 @@ test("FG-639: --dry-run on an unknown review emits the SAME named refusal the re
 });
 
 test("FG-639: --dry-run applies the SAME --add-lens validation the real path does", () => {
-  const r = runForge(["review", "continue", "review-parked", "--project", homeDir, "--dry-run", "--add-lens", "security"]);
+  const r = runForge(["review", "continue", "review-parked", "--dry-run", "--add-lens", "security"]);
   assert.notEqual(r.status, 0, "a preview that skipped the checks previews a different invocation");
   assert.match(r.stderr, /--add-lens expects <lens>:<reason>:<diff-evidence>/);
   assert.doesNotMatch(r.stdout, /next:/);
 });
 
 test("FG-639: --dry-run reports the one valid next transition without running it", () => {
-  const r = runForge(["review", "continue", "review-parked", "--project", homeDir, "--dry-run", "--json"]);
+  const r = runForge(["review", "continue", "review-parked", "--dry-run", "--json"]);
   assert.equal(r.status, 0, r.stderr);
   const parsed = JSON.parse(r.stdout) as { transition: { kind: string }; status: string };
   assert.equal(parsed.status, "dry_run");
@@ -302,7 +311,7 @@ test("FG-639: dispositioning the finding moves the persisted next stage to the b
 
   // --dry-run, deliberately: the batch fix DISPATCHES a container, which this tier does not
   // do. What it asserts is the transition the coordinator would take, read from the store.
-  const r = runForge(["review", "continue", "review-parked", "--project", homeDir, "--dry-run", "--json"]);
+  const r = runForge(["review", "continue", "review-parked", "--dry-run", "--json"]);
   assert.equal(r.status, 0, r.stderr);
   const parsed = JSON.parse(r.stdout) as { transition: { kind: string } };
   assert.equal(
@@ -310,4 +319,76 @@ test("FG-639: dispositioning the finding moves the persisted next stage to the b
     "batch_fix",
     "the ONE valid next transition after disposition is the single batch fix",
   );
+});
+
+// FG-649: the LEGACY shape — a row written before workspace_dir existed, whose run records
+// no project_dir either. Nothing in the ledger can say which checkout its stages act on, and
+// the directory the operator happens to be standing in is not an answer: since the
+// coordinator COMMITS the fix cycle, guessing would be a write into an arbitrary repository.
+// So `continue` refuses BY NAME and leaves the row exactly as it found it.
+//
+// RED baseline: with src/cli/commands/review.ts back at `resolve(opts.project ?? process.cwd())`
+// this exits 0 and drives a stage against homeDir, which is not even a git worktree.
+function seedUnboundReview(): void {
+  const db = openStore();
+  try {
+    db.prepare(`INSERT INTO runs (id, workflow, title, status, created_at, review_mode) VALUES (?, ?, ?, ?, ?, ?)`).run(
+      "run-unbound",
+      "feature",
+      "unbound",
+      "active",
+      "2026-07-30T00:00:00Z",
+      "evidence_led",
+    );
+    db.prepare(
+      `INSERT INTO reviews (id, run_id, ticket_id, base_sha, contract_confirmed_sha, candidate_sha,
+                            contract_json, stage_evidence_json, review_mode, state, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      "review-unbound",
+      "run-unbound",
+      "FG-649",
+      "base000",
+      "conf222",
+      "conf222",
+      JSON.stringify(CONTRACT),
+      JSON.stringify({ verified_entry: { sha: "conf222", at: "2026-07-30T00:00:01Z" } }),
+      "evidence_led",
+      "confirming_contract",
+      "2026-07-30T00:00:00Z",
+      "2026-07-30T00:00:01Z",
+    );
+  } finally {
+    db.close();
+  }
+}
+
+test("FG-649: `forge review continue` on a review with NO bound workspace refuses by name and writes nothing", () => {
+  seedUnboundReview();
+
+  const r = runForge(["review", "continue", "review-unbound"]);
+  assert.notEqual(r.status, 0, "an unbound workspace is a refusal, not a cwd guess");
+  assert.match(r.stderr, /review_workspace_unbound/, "the refusal is NAMED");
+  assert.match(r.stderr, /--project <dir>/, "and it names the repair");
+  assert.match(r.stderr, /Nothing was written/);
+  assert.doesNotMatch(r.stdout, /verify_entry|confirm_contract/, "no stage ran");
+
+  const db = openStore();
+  try {
+    const row = db
+      .prepare(`SELECT state, workspace_dir FROM reviews WHERE id = ?`)
+      .get("review-unbound") as { state: string; workspace_dir: string | null };
+    assert.equal(row.state, "confirming_contract", "the refused invocation left the row where it was");
+    assert.equal(row.workspace_dir, null, "and bound nothing behind the operator's back");
+  } finally {
+    db.close();
+  }
+});
+
+test("FG-649: --dry-run refuses the SAME unbound workspace the real path does", () => {
+  const dry = runForge(["review", "continue", "review-unbound", "--dry-run"]);
+  const real = runForge(["review", "continue", "review-unbound"]);
+  assert.notEqual(dry.status, 0, "a preview that skipped the workspace check previews a different invocation");
+  assert.match(dry.stderr, /review_workspace_unbound/);
+  assert.equal(dry.stderr.trim(), real.stderr.trim(), "one refusal, one wording");
 });
