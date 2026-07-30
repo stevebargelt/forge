@@ -81,7 +81,7 @@ function recordedLensOutcomes(review: Review): LensOutcome[] {
   return Array.isArray(review.lensOutcomes) ? (review.lensOutcomes as LensOutcome[]) : [];
 }
 
-/** Has an INGESTED batch already carried this finding, under the decision it carries now?
+/** Did this batch's payload carry this finding under the decision it carries NOW?
  *
  *  Per finding rather than per set, and that is the load-bearing choice. Scenario #5 removes
  *  a finding from the fix_now set mid-cycle (the fixer reports it scope-changing, so it
@@ -90,17 +90,39 @@ function recordedLensOutcomes(review: Review): LensOutcome[] {
  *  work already done. Containment says the right thing in both directions — a finding ADDED
  *  to fix_now, or RE-DECIDED (a new decidedAt or a new rationale), is not covered and does
  *  get a new batch revision. */
-function decisionCoveredByIngestedBatch(batches: readonly FixBatch[], f: ReviewFinding): boolean {
-  return batches.some(
-    (b) =>
-      b.state === "ingested" &&
-      b.payload.findings.some(
-        (m) =>
-          m.finding_id === f.id &&
-          m.decided_at === (f.decidedAt ?? undefined) &&
-          m.disposition_rationale === (f.dispositionRationale ?? ""),
-      ),
+function batchCarriesDecision(b: FixBatch, f: ReviewFinding): boolean {
+  return b.payload.findings.some(
+    (m) =>
+      m.finding_id === f.id &&
+      m.decided_at === (f.decidedAt ?? undefined) &&
+      m.disposition_rationale === (f.dispositionRationale ?? ""),
   );
+}
+
+/** Has an INGESTED batch already carried this finding, under the decision it carries now?
+ *  Stage 5's question: is there anything left for a fixer to do. */
+function decisionCoveredByIngestedBatch(batches: readonly FixBatch[], f: ReviewFinding): boolean {
+  return batches.some((b) => b.state === "ingested" && batchCarriesDecision(b, f));
+}
+
+/** Was this finding's CURRENT decision carried by a fix cycle the LATEST RECHECK covered?
+ *
+ *  The difference from `decisionCoveredByIngestedBatch` is the whole of the Stage 4 fix. An
+ *  unresolved verdict is evidence about the cycle that produced it, so it only holds the
+ *  review when the decision it is a verdict ON is the decision that has been rechecked. Once
+ *  a NEWER fix cycle has ingested the finding, the recorded verdict predates that cycle and
+ *  is not evidence about it — the next step is that cycle's recheck (Stage 8, which is keyed
+ *  on exactly these cycles), not a second trip through the disposition gate.
+ *
+ *  Reading `state === "ingested"` instead deadlocked the live pilot: the re-decided finding
+ *  went out in revision 2, revision 2 ingested, and the stale `inconclusive` from revision 1
+ *  then read as a verdict on the new decision — so Stage 4 blocked ahead of Stage 8, the
+ *  recheck that would have replaced the verdict could never run, and `forge review continue`
+ *  returned the same stop forever. Keying on the RECHECKED cycles is also what makes the
+ *  gate independent of whether the ingest's resolution invalidation landed. */
+function decisionCoveredByRecheckedCycle(review: Review, batches: readonly FixBatch[], f: ReviewFinding): boolean {
+  const covered = new Set(cycleTerms(recheckedFixCycleKey(review)));
+  return batches.some((b) => covered.has(`${b.id}@${b.revision}`) && batchCarriesDecision(b, f));
 }
 
 /** Stage 5 is satisfied when every CURRENT fix_now finding was carried by an ingested batch
@@ -114,11 +136,12 @@ function fixStageSatisfied(snapshot: ReviewSnapshot): boolean {
 /** Findings that hold the review at Stage 4.
  *
  *  TWO shapes, and the second is scenario #6: a `fix_now` whose recheck came back
- *  `still_present` or `inconclusive` AND whose decision the fixer already consumed. The
- *  review returns to disposition and no fixer is dispatched automatically — re-running the
- *  fixer on a decision that demonstrably did not resolve it is exactly the loop this
- *  lifecycle replaced. A NEW decision (a new rationale) changes the decision fingerprint
- *  and lets the fix stage run again.
+ *  `still_present` or `inconclusive` AND whose decision that RECHECKED cycle already
+ *  consumed. The review returns to disposition and no fixer is dispatched automatically —
+ *  re-running the fixer on a decision that demonstrably did not resolve it is exactly the
+ *  loop this lifecycle replaced. A NEW decision (a new rationale) changes the decision
+ *  fingerprint and lets the fix stage run again; and once that new cycle has INGESTED, the
+ *  verdict from before it stops holding the review at all (decisionCoveredByRecheckedCycle).
  *
  *  AN ARCHITECTURE QUESTION IS DELIBERATELY NOT ONE OF THESE. It leaves the review
  *  UNSETTLED — Stage 9's findings_settled check refuses it, and `awaitingAuthority` reports
@@ -128,7 +151,7 @@ function fixStageSatisfied(snapshot: ReviewSnapshot): boolean {
  *  the whole cycle on the fifth would throw away the evidence the other four are entitled
  *  to, and would do it while the review still could not settle either way. */
 function dispositionBlockers(snapshot: ReviewSnapshot): ReviewFinding[] {
-  const { findings, batches } = snapshot;
+  const { review, findings, batches } = snapshot;
   const out: ReviewFinding[] = [];
   for (const f of findings) {
     if (f.disposition === "untriaged") {
@@ -137,9 +160,49 @@ function dispositionBlockers(snapshot: ReviewSnapshot): ReviewFinding[] {
     }
     if (f.disposition !== "fix_now") continue;
     if (f.resolution !== "still_present" && f.resolution !== "inconclusive") continue;
-    if (decisionCoveredByIngestedBatch(batches, f)) out.push(f);
+    if (decisionCoveredByRecheckedCycle(review, batches, f)) out.push(f);
   }
   return out;
+}
+
+/** THE FIX CYCLES A RECHECK COVERED — the second half of Stage 8's completion key.
+ *
+ *  Stage 8 keyed on the candidate sha alone reads a SECOND fix cycle at an UNMOVED candidate
+ *  as already rechecked: a fixer that resolves its batch without committing leaves the sha
+ *  matching the previous recheck's record, so the stage is skipped, the finding keeps the
+ *  verdict from the cycle before, and the review loops at the disposition stop with no
+ *  mechanical path to a resolution. Keying on sha PLUS the batch revisions makes a new cycle
+ *  a new key, so it earns its own recheck — while a crash-resume at an unchanged cycle still
+ *  reads as complete and is never repeated.
+ *
+ *  THE KEY MUST BE MONOTONE, and counting only `ingested` batches is not. `ensureFixBatch`
+ *  marks the previous batch `superseded` the moment a new revision is created, which clears
+ *  the `ingested` marker off a cycle a recheck already covered — so the key SHRANK, and a
+ *  shrunken key mismatches for the same reason a grown one does. That re-entered a recheck
+ *  that had completed at that very sha with no cycle having ingested anything since: a real
+ *  rechecker is dispatched (`recheckIsNoOp` is false whenever the candidate moved off the
+ *  confirmed sha, and by then `expected` is empty), and any new finding it reports lands as a
+ *  duplicate untriaged row that bounces a review one step from shipping back to Stage 4 —
+ *  the exact never-repeat invariant this key exists to protect.
+ *
+ *  So `superseded` counts too. A batch's state only ever moves open → dispatched → ingested
+ *  and any → superseded, and the two counted states are terminal, so the key can only grow.
+ *  Growing is the safe direction: it costs at most one extra recheck for a cycle that was
+ *  withdrawn before ingesting, and it converges. */
+export function fixCycleKey(batches: readonly FixBatch[]): string {
+  return batches
+    .filter((b) => b.state === "ingested" || b.state === "superseded")
+    .map((b) => `${b.id}@${b.revision}`)
+    .join(",");
+}
+
+function cycleTerms(key: string): string[] {
+  return key.split(",").filter((t) => t !== "");
+}
+
+function recheckedFixCycleKey(review: Review): string {
+  const recorded = review.stageEvidence?.recheck?.meta?.fixCycleKey;
+  return typeof recorded === "string" ? recorded : "";
 }
 
 function openArchitectureQuestions(findings: readonly ReviewFinding[]): string[] {
@@ -282,20 +345,32 @@ function resolveTransition(snapshot: ReviewSnapshot): Transition {
     };
   }
 
-  // Stage 8 — exact recheck + bounded remediation-delta review.
-  if (!stageCompleteAt(review, "recheck", candidate)) {
+  // Stage 8 — exact recheck + bounded remediation-delta review. Complete for the candidate
+  // AND for the fix cycles that have run at it (see fixCycleKey).
+  const cycleKey = fixCycleKey(snapshot.batches);
+  const recheckedKey = recheckedFixCycleKey(review);
+  const recheckedAtCandidate = stageCompleteAt(review, "recheck", candidate);
+  if (!recheckedAtCandidate || recheckedKey !== cycleKey) {
     const noop = recheckIsNoOp({
       fixNowCount: fixNow.length,
       contractConfirmedSha: review.contractConfirmedSha,
       candidateSha: candidate,
     });
+    // The cycles ADDED since the recorded recheck, not "now <whole key>". The key is monotone
+    // (see fixCycleKey) so there is always at least one, and the old phrasing rendered the
+    // shrink case as "now no batch" — reporting a WITHDRAWN cycle as a further one that ran.
+    const newCycles = cycleTerms(cycleKey).filter((t) => !cycleTerms(recheckedKey).includes(t));
     return {
       kind: "recheck",
       state: "rechecking",
       stage: "recheck",
-      reason: noop
-        ? `no fix_now findings and the candidate never moved from ${review.contractConfirmedSha} — recheck is a no-op`
-        : `${fixNow.length} known finding id(s) to recheck exactly, plus bounded review of the delta to ${candidate ?? "(unset)"}`,
+      reason: recheckedAtCandidate
+        ? `a further fix cycle ran at candidate ${candidate ?? "(unset)"} since the last recheck ` +
+          `(rechecked ${recheckedKey || "no batch"}; new cycle(s) ${newCycles.join(", ")}) — a new fix cycle ` +
+          `needs its own recheck even though the candidate did not move`
+        : noop
+          ? `no fix_now findings and the candidate never moved from ${review.contractConfirmedSha} — recheck is a no-op`
+          : `${fixNow.length} known finding id(s) to recheck exactly, plus bounded review of the delta to ${candidate ?? "(unset)"}`,
     };
   }
 

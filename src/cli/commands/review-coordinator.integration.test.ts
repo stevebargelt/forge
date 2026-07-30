@@ -17,7 +17,7 @@
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import Database from "better-sqlite3";
 import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -40,6 +40,7 @@ const CONTRACT = {
 };
 
 let homeDir: string;
+let repoDir: string;
 let contractPath: string;
 let badContractPath: string;
 
@@ -145,11 +146,21 @@ before(() => {
   badContractPath = join(homeDir, "bad-contract.json");
   writeFileSync(badContractPath, JSON.stringify({ threat_model: "x", risk_lenses: ["wide"] }, null, 2));
 
+  // A real repository with NO commit referencing the ticket under test: `start` now resolves
+  // the comparison base before it writes anything, and this is the shape that cannot resolve.
+  repoDir = mkdtempSync(join(tmpdir(), "forge-fg639-repo-"));
+  const git = (args: string[]): void => void execFileSync("git", args, { cwd: repoDir, encoding: "utf8" });
+  git(["init", "-q"]);
+  writeFileSync(join(repoDir, "README.md"), "fixture\n");
+  git(["add", "README.md"]);
+  git(["-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "-m", "chore: fixture base"]);
+
   seedParkedReview();
 });
 
 after(() => {
   rmSync(homeDir, { recursive: true, force: true });
+  rmSync(repoDir, { recursive: true, force: true });
 });
 
 test("FG-639: `forge review` advertises start and continue alongside the FG-638 read/write verbs", () => {
@@ -195,10 +206,19 @@ test("FG-639: `forge review start` refuses a --add-lens spec that carries no dif
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /--add-lens expects <lens>:<reason>:<diff-evidence>/);
   assert.match(r.stderr, /only with the evidence and reason that made it necessary/);
-  // The review row is opened before the deps are built, so assert the refusal is loud and
-  // the lifecycle did not proceed rather than that nothing at all was written.
+  assert.match(r.stderr, /Nothing was written/);
   assert.equal(r.stdout.includes("candidate"), false, "no candidate was resolved and no stage ran");
-  void before;
+  assert.equal(reviewCount(), before, "every precondition is checked BEFORE the row exists");
+});
+
+test("FG-639: `forge review start` refuses AT OPEN when the comparison base cannot be inferred", () => {
+  const before = reviewCount();
+  const r = runForge(["review", "start", "FG-702", "--contract", contractPath, "--project", repoDir]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /no commit subject in .* references FG-702/);
+  assert.match(r.stderr, /--since <sha>/);
+  assert.match(r.stderr, /Nothing was written/);
+  assert.equal(reviewCount(), before, "a review that could never confirm its contract is never opened");
 });
 
 test("FG-639 / PRD #15: `forge review continue` reads the PERSISTED next stage from the store", () => {
@@ -242,6 +262,23 @@ test("FG-639: `forge review continue --json` emits the stage outcome as a machin
   assert.equal(parsed.transition.kind, "await_disposition");
   assert.equal(parsed.status, "stopped");
   assert.deepEqual(parsed.transition.blockingFindings, ["RF-1"]);
+});
+
+test("FG-639: --dry-run on an unknown review emits the SAME named refusal the real path does", () => {
+  const dry = runForge(["review", "continue", "review-nope", "--project", homeDir, "--dry-run"]);
+  const real = runForge(["review", "continue", "review-nope", "--project", homeDir]);
+  assert.notEqual(dry.status, 0, "the printed answer may not drift from the act");
+  assert.match(dry.stderr, /no review review-nope/);
+  assert.doesNotMatch(dry.stderr, /Not found:/, "never a raw Error out of the command action");
+  assert.doesNotMatch(dry.stdout, /next:/, "there is no transition to preview");
+  assert.equal(dry.stderr.trim(), real.stderr.trim(), "one refusal, one wording");
+});
+
+test("FG-639: --dry-run applies the SAME --add-lens validation the real path does", () => {
+  const r = runForge(["review", "continue", "review-parked", "--project", homeDir, "--dry-run", "--add-lens", "security"]);
+  assert.notEqual(r.status, 0, "a preview that skipped the checks previews a different invocation");
+  assert.match(r.stderr, /--add-lens expects <lens>:<reason>:<diff-evidence>/);
+  assert.doesNotMatch(r.stdout, /next:/);
 });
 
 test("FG-639: --dry-run reports the one valid next transition without running it", () => {

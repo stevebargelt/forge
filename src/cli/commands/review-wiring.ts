@@ -14,6 +14,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildReviewLoopDeps, resolveReviewedTipTrust } from "./review-loop.js";
+import { resolveCommitRange } from "../../v2/review-loop.js";
 import { invoke, type InvokeArgs, type InvokeResult } from "../../v2/invoke.js";
 import { fixBatchBundleDir } from "../../util/paths.js";
 import { renderFixBatchEnvelope, verifyMaterializedEnvelope, verifyMaterializedPayload } from "../../store/fix-batches.js";
@@ -538,6 +539,96 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
       };
     },
   };
+}
+
+export type ReviewBase =
+  | { ok: true; baseSha: string; inferredFrom?: string; spansUnmatched?: boolean }
+  | { ok: false; refusal: string };
+
+/** The review's comparison base, resolved AT OPEN.
+ *
+ *  Stage 2 refuses a review that records no base sha — correctly, since an empty diff there
+ *  would auto-confirm the approved contract over a change nobody computed. But no verb
+ *  supplies a base after the fact and no verb removes a review, so a review OPENED without
+ *  one is stuck at contract confirmation permanently. The base is therefore resolved here,
+ *  where a refusal still means "nothing was written": `--since` names it, and otherwise it
+ *  is INFERRED from the ticket's landed commit range by the same `resolveCommitRange` that
+ *  gives `forge review-loop` its range — the oldest commit whose SUBJECT references the
+ *  ticket, minus one.
+ *
+ *  When inference is impossible (no commit references the ticket, the range starts at a root
+ *  commit, or the log cannot be read) this refuses and names `--since`. A review never opens
+ *  into a state it cannot advance out of. */
+export function resolveReviewBase(ctx: {
+  projectDir: string;
+  ticketId: string;
+  since?: string;
+  git?: (args: string[]) => string;
+}): ReviewBase {
+  const git = ctx.git ?? realGit(ctx.projectDir);
+  // COMMIT-NESS IS CHECKED, NOT ASSUMED. Bare `git rev-parse <40-hex>` ECHOES any 40-hex
+  // string back with exit 0 without ever consulting the object store, so a sha that was
+  // rebased away, gc'd, or pasted from another repo "resolved" here and opened exactly the
+  // permanently-stuck review this function exists to prevent — Stage 2's
+  // `git diff --name-only <base>..<candidate>` then dies inside execFileSync with a raw stack
+  // trace, no verb supplies a base after the fact, and no verb removes a review.
+  // `rev-parse --verify <rev>^{commit}` is the idiom that both consults the object store and
+  // requires the object to be a commit rather than a tag, tree or blob.
+  const revParseCommit = (rev: string): string | undefined => {
+    try {
+      const sha = git(["rev-parse", "--verify", `${rev}^{commit}`]).trim();
+      return sha === "" ? undefined : sha;
+    } catch {
+      return undefined;
+    }
+  };
+
+  if (ctx.since !== undefined) {
+    const sha = revParseCommit(ctx.since);
+    return sha !== undefined
+      ? { ok: true, baseSha: sha }
+      : {
+          ok: false,
+          refusal:
+            `--since ${ctx.since} does not name a commit in ${ctx.projectDir}, so the review has no ` +
+            `comparison base and its contract could never be confirmed. A 40-hex string that is not a commit ` +
+            `in this repository is refused here for the same reason: bare rev-parse echoes it back, but every ` +
+            `later diff against it fails. Nothing was written.`,
+        };
+  }
+
+  let range;
+  try {
+    range = resolveCommitRange(ctx.ticketId, { git });
+  } catch (err) {
+    return {
+      ok: false,
+      refusal:
+        `the commit log in ${ctx.projectDir} could not be read (${(err as Error).message}), so the comparison ` +
+        `base for ${ctx.ticketId} cannot be inferred — name it with --since <sha>. Nothing was written.`,
+    };
+  }
+  if (range.mode !== "inferred") {
+    return {
+      ok: false,
+      refusal:
+        `no commit subject in ${ctx.projectDir} references ${ctx.ticketId}, so the implementation comparison ` +
+        `base cannot be inferred — name it with --since <sha>. A review that records no base sha can never ` +
+        `confirm its contract, so it is refused HERE rather than opened into a stage it cannot pass. ` +
+        `Nothing was written.`,
+    };
+  }
+  const oldest = range.shas[range.shas.length - 1] as string;
+  const baseSha = revParseCommit(`${oldest}^`);
+  if (baseSha === undefined) {
+    return {
+      ok: false,
+      refusal:
+        `the oldest commit referencing ${ctx.ticketId} (${oldest}) has no parent, so there is nothing to ` +
+        `compare the implementation against — name a base with --since <sha>. Nothing was written.`,
+    };
+  }
+  return { ok: true, baseSha, inferredFrom: oldest, spansUnmatched: range.spansUnmatched };
 }
 
 export function parseLensWidening(specs: readonly string[]): { ok: true; widening: LensWidening[] } | { ok: false; refusal: string } {

@@ -35,7 +35,7 @@ import { newReviewId } from "../../util/ids.js";
 import { nextTransition } from "../../v2/review-coordinator.js";
 import { runNextStage, type CoordinatorDeps, type StageOutcome } from "../../v2/review-run.js";
 import { validateReviewContract } from "../../v2/review-contract.js";
-import { buildCoordinatorDeps, parseLensWidening } from "./review-wiring.js";
+import { buildCoordinatorDeps, parseLensWidening, resolveReviewBase } from "./review-wiring.js";
 import type { AcClaim } from "../../v2/review-evidence.js";
 
 const DASH = "—";
@@ -222,7 +222,10 @@ export function registerReview(program: Command): void {
     .command("start")
     .argument("<ticket-id>", "the ticket whose landed implementation is under review")
     .option("--project <dir>", "the candidate workspace (default: cwd)")
-    .option("--since <sha>", "the implementation comparison base")
+    .option(
+      "--since <sha>",
+      "the implementation comparison base (default: inferred from the commits whose subject references the ticket)",
+    )
     .option("--contract <file>", "the approved review contract, as JSON — required to open a review")
     .option("--run <run-id>", "attach the review to an existing run")
     .option("--route <route-key>", "the resolved routing-policy key for the dispatches this drives")
@@ -260,13 +263,36 @@ export function registerReview(program: Command): void {
         return;
       }
 
+      // EVERY PRECONDITION OF AN ADVANCEABLE REVIEW IS CHECKED BEFORE THE ROW EXISTS. A
+      // malformed --add-lens spec and an unresolvable comparison base both used to be
+      // discovered after the insert, which left a row nothing could advance and no verb
+      // could remove.
+      const widening = parseLensWidening(opts.addLens ?? []);
+      if (!widening.ok) {
+        console.error(`forge review start: ${widening.refusal} Nothing was written.`);
+        process.exitCode = 1;
+        return;
+      }
+
+      const projectDir = resolve(opts.project ?? process.cwd());
+      const base = resolveReviewBase({
+        projectDir,
+        ticketId,
+        ...(opts.since !== undefined ? { since: opts.since } : {}),
+      });
+      if (!base.ok) {
+        console.error(`forge review start: ${base.refusal}`);
+        process.exitCode = 1;
+        return;
+      }
+
       const reviewId = newReviewId();
       insertReview({
         id: reviewId,
         reviewMode: "evidence_led",
         ticketId,
         ...(opts.run !== undefined ? { runId: opts.run } : {}),
-        ...(opts.since !== undefined ? { baseSha: opts.since } : {}),
+        baseSha: base.baseSha,
         contract: validated.contract,
         state: "confirming_contract",
       });
@@ -281,6 +307,18 @@ export function registerReview(program: Command): void {
       updateReview(reviewId, { candidateSha: candidate });
 
       console.log(`Review ${reviewId} — ticket ${ticketId}, candidate ${candidate}`);
+      console.log(
+        `  base sha: ${base.baseSha}` +
+          (base.inferredFrom !== undefined
+            ? ` (inferred from the oldest commit referencing ${ticketId}, ${base.inferredFrom.slice(0, 9)})`
+            : ` (--since)`),
+      );
+      if (base.spansUnmatched === true) {
+        console.log(
+          `  note: that range also spans commits which do not reference ${ticketId}, so the confirmation diff ` +
+            `includes them — pass --since <sha> to narrow it.`,
+        );
+      }
       console.log(`  lenses: ${validated.contract.risk_lenses.join(", ")}`);
 
       // start drives stages 1–3 ONLY. It stops at disposition; it never fixes.
@@ -323,18 +361,23 @@ export function registerReview(program: Command): void {
       ensureForgeDirs();
       assertStoreForLookup(`review ${reviewId}`);
 
+      // THE PRECONDITIONS COME FIRST, FOR BOTH PATHS. --dry-run used to be handled before
+      // the deps were built, so an unknown review threw a raw `Not found:` out of the action
+      // instead of the named `no review <id>` refusal the real path emits, and --add-lens /
+      // --acceptance were not validated at all. An answer that skipped the checks the act
+      // applies is an answer about a different invocation than the one it previews.
+      const built = depsFor(reviewId, opts);
+      if (!built.ok) {
+        console.error(`forge review continue: ${built.refusal}`);
+        process.exitCode = 1;
+        return;
+      }
+
       // --dry-run answers "what would continue do?" without dispatching anything. It reads
       // the same nextTransition the real run does, so the answer cannot drift from the act.
       if (opts.dryRun === true) {
         const pending = nextTransition(snapshotFor(reviewId));
         console.log(opts.json === true ? JSON.stringify({ transition: pending, status: "dry_run" }, null, 2) : `• next: ${pending.kind} — ${pending.reason}`);
-        return;
-      }
-
-      const built = depsFor(reviewId, opts);
-      if (!built.ok) {
-        console.error(`forge review continue: ${built.refusal}`);
-        process.exitCode = 1;
         return;
       }
 

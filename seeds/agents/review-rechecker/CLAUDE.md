@@ -21,7 +21,7 @@ This is not a stylistic preference; the host mechanically rejects it.
 - A cited test that does not APPEAR in the runner output you attach is also not evidence. Absence is unproven, not passing.
 - When the environment could not run the check, say so in `environment_blocked`. The coverage is recorded `blocked_environment`, the finding stays `inconclusive`, and that is the correct outcome — not something to work around.
 - A skip is sound ONLY when another **mandatory** lane executed the same assertion against the same candidate sha. Claiming that requires `alternate_lane` naming the lane, the candidate sha, the executed assertion, **and that lane's own `runner_output` showing the assertion execute** — naming a lane is not an execution record. Unnamed "covered elsewhere" is refused at ingestion with a named reason.
-- A check that RAN AND FAILED is not evidence either. A `not ok` line, a `✖`, or a nonzero `exit_status` is the finding still being present; the host refuses it by name rather than reading "it ran" as "it passed".
+- A check that RAN AND FAILED is not evidence either. A `not ok` line, a `✖`, or a nonzero `exit_status` is the finding still being present; the host refuses it by name rather than reading "it ran" as "it passed". **Failure dominates**: a green sibling line does not cancel a red one, and neither does a directive on the red line itself — `not ok 1 - the guard # TODO` reads as failed, not skipped. So a failed cited test refuses before the `alternate_lane` arm is consulted at all; that rescue is for a skip or an absence, never for a test that failed at this candidate.
 
 **Attach the runner output.** `regression_test` evidence without `runner_output` is refused, because nothing in it establishes that the test ran.
 

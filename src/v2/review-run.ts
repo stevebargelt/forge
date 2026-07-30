@@ -44,6 +44,7 @@ import {
 } from "../store/fix-batches.js";
 import {
   classifyVerification,
+  fixCycleKey,
   nextTransition,
   type Transition,
   type VerificationEntry,
@@ -434,7 +435,9 @@ async function runBatchFix(reviewId: string, transition: Transition, deps: Coord
 
   // A scope-changing conflict returns THAT finding to disposition as an architecture
   // question and lets the rest of the batch proceed. Guessing through it is what the
-  // existing scope guard exists to prevent.
+  // existing scope guard exists to prevent. Its resolution is deliberately left alone —
+  // `ingestFixBatchResults` already excluded a `scope_change` result from the fix-cycle
+  // invalidation it ran in the ingest transaction.
   const scopeChanged: string[] = [];
   for (const id of parsed.scopeChanges) {
     const record = ingestion.records.find((r) => r.findingId === id);
@@ -530,7 +533,7 @@ async function runRecheck(reviewId: string, transition: Transition, deps: Coordi
     recordStageEvidence(reviewId, "recheck", {
       sha: candidate,
       detail: "no fix_now findings and the candidate never moved — Stage 8 is a legitimate no-op",
-      meta: { noop: true },
+      meta: { noop: true, fixCycleKey: fixCycleKey(snap.batches) },
     });
     return { transition, status: "advanced", message: `recheck is a no-op at ${candidate}` };
   }
@@ -609,6 +612,9 @@ async function runRecheck(reviewId: string, transition: Transition, deps: Coordi
       results: ingestion.applications.map((a) => ({ ref: a.findingRef, resolution: a.resolution, coverage: a.coverage })),
       newFindingRefs: newIngested.map((f) => f.findingRef),
       unresolved: ingestion.applications.filter((a) => a.resolution !== "resolved").map((a) => a.findingRef),
+      // Half of this stage's completion key: the fix cycles this recheck covered. Without it
+      // a later cycle at the same sha reads as already rechecked (see fixCycleKey).
+      fixCycleKey: fixCycleKey(snap.batches),
     },
   });
 

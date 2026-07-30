@@ -781,6 +781,14 @@ for (const bad of [
   { label: "reserved as a directory", key: "manifest.json/payload.json", refusal: /reserved task artifact "manifest.json"/ },
   { label: "reserved container log", key: "container.stdout.log", refusal: /reserved task artifact "container.stdout.log"/ },
   { label: "empty", key: "", refusal: /empty key names no file/ },
+  // RF-9: progress.jsonl is read BACK out of the task dir after exec and emitted as
+  // agent-attributed task.progress / task.artifact / task.decision timeline events. A caller
+  // that could pre-write it could forge them for an agent that never wrote one.
+  { label: "reserved progress.jsonl", key: "progress.jsonl", refusal: /reserved task artifact "progress.jsonl"/ },
+  // RF-10: keys the guard used to ADMIT and the write loop then threw on, mid-loop, after the
+  // task dir and its own artifacts had landed and before markTaskRunning.
+  { label: "NUL byte", key: "fix-batch/pay\0load.json", refusal: /NUL byte is not a path/ },
+  { label: "overlong segment", key: `fix-batch/${"p".repeat(300)}.json`, refusal: /over the 255-byte limit/ },
 ]) {
   test(`invoke: FG-639 a ${bad.label} taskFiles key is refused before anything is written`, async () => {
     setupRuntimeStub();
@@ -806,6 +814,45 @@ for (const bad of [
       false,
       "refusing after the first file lands defeats the property the guard exists for",
     );
+  });
+}
+
+// RF-10, the non-injective half: two DISTINCT map keys, one target. There is no key here the
+// confinement screens reject, so before the fix both were written and whichever came last
+// silently won — with no refusal and no way to tell afterwards which bytes the agent read.
+const AMBIGUOUS: { label: string; keys: Record<string, string>; refusal: RegExp }[] = [
+  {
+    label: "two keys naming one file",
+    keys: { "fix-batch/payload.json": "A", "fix-batch/./payload.json": "B" },
+    refusal: /two keys name the ONE file fix-batch\/payload\.json/,
+  },
+  {
+    label: "a name that must be both a file and a directory",
+    keys: { "fix-batch": "A", "fix-batch/payload.json": "B" },
+    refusal: /would have to be both a file and a directory/,
+  },
+];
+for (const bad of AMBIGUOUS) {
+  test(`invoke: FG-639 ${bad.label} is refused before anything is written`, async () => {
+    setupRuntimeStub();
+    process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+    let started = false;
+    const res = await invoke({
+      agentRole: "engineer",
+      task: "deliver an ambiguous file set",
+      projectDir: "/tmp/x",
+      taskFiles: bad.keys,
+      dockerExec: async () => {
+        started = true;
+        return 0;
+      },
+    });
+
+    assert.equal(res.status, "failed");
+    assert.match(res.error ?? "", bad.refusal);
+    assert.equal(started, false, "the refusal precedes the container");
+    assert.equal(existsSync(taskDir(res.runId, res.taskId)), false, "an ambiguous delivery writes nothing");
   });
 }
 

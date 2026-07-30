@@ -18,7 +18,7 @@
 // - No reds; reds are themselves invoke targets, dispatched by the orchestrator
 // - No gate concept; agent completes or fails
 
-import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync } from "node:fs";
 import { dirname, isAbsolute, join, normalize, sep } from "node:path";
 import type { Task, TaskPackage, Run } from "../types/index.js";
 import type { Workflow, Step, Runtime } from "./schema.js";
@@ -310,14 +310,27 @@ export function invokeWorkflowShape(
 // result the host reads back) or takes a name a later write needs — so it is refused
 // rather than resolved in favor of whoever wrote last. Matched case-insensitively
 // because the host filesystem is APFS on the Mac these run from.
+//
+// EVERY ARTIFACT THE HOST READS BACK OUT OF THE TASK DIR BELONGS HERE, not just the ones
+// forge writes on the way in. `progress.jsonl` was the omission: the host reads it after exec
+// and emits one task.progress / task.artifact / task.decision event per record, ATTRIBUTED TO
+// THE AGENT (see emitAgentProgressEvents in agent-progress.ts), and it is copied verbatim
+// into support bundles. A caller that could pre-write it could forge agent-authored timeline
+// records for an agent that never wrote one — which is the trust boundary this list is sold
+// as defending, so an omission from it is a hole regardless of what today's one caller passes.
 const RESERVED_TASK_ARTIFACTS = [
   "claude.md",
   "package.md",
   "result.json",
+  "progress.jsonl",
   "detached-entry.sh",
   "detached-stdin",
   "manifest.json",
 ];
+
+// The longest single path segment most host filesystems accept. A longer basename makes
+// writeFileSync throw ENAMETOOLONG mid-loop, which is a crash rather than a refusal.
+const MAX_SEGMENT_BYTES = 255;
 
 function isReservedTaskArtifact(segment: string): boolean {
   const lower = segment.toLowerCase();
@@ -329,11 +342,27 @@ function isReservedTaskArtifact(segment: string): boolean {
  *  instead of re-deriving it. Pure and total: it decides from the keys alone, so the
  *  refusal happens before the task dir exists and nothing is written on the way to it.
  *  Returns the named refusal, or undefined when every key is a plain relative file path
- *  inside the task dir and clear of its reserved artifacts. */
+ *  inside the task dir and clear of its reserved artifacts.
+ *
+ *  TOTAL AND INJECTIVE FOR EVERY KEY IT ADMITS, which the confinement screens alone did not
+ *  make it. Confinement said nothing about keys the write loop cannot execute (a NUL byte →
+ *  ERR_INVALID_ARG_VALUE, an overlong segment → ENAMETOOLONG) or cannot execute
+ *  unambiguously (two distinct map keys that join to ONE target, or one key needing as a
+ *  directory the name another key writes as a file → EEXIST). Every one of those threw from
+ *  the middle of the loop, AFTER the task dir and its own artifacts had landed and BEFORE
+ *  markTaskRunning — an unhandled rejection with no named refusal, a pending task row and an
+ *  active run. So they are screened HERE, from the keys, where a refusal still costs nothing. */
 export function taskFilesRefusal(taskFiles: Record<string, string> | undefined): string | undefined {
+  const targets = new Map<string, string>();
+  const fileTargets = new Set<string>();
+  const parentTargets = new Map<string, string>();
+
   for (const rel of Object.keys(taskFiles ?? {})) {
     if (rel.trim() === "") {
       return `taskFiles: an empty key names no file — keys are paths relative to the task dir.`;
+    }
+    if (rel.includes("\0")) {
+      return `taskFiles key ${JSON.stringify(rel)}: a NUL byte is not a path — refused.`;
     }
     if (isAbsolute(rel)) {
       return `taskFiles key "${rel}": absolute paths are refused — keys are relative to the task dir.`;
@@ -351,9 +380,46 @@ export function taskFilesRefusal(taskFiles: Record<string, string> | undefined):
     if (rel.endsWith("/") || rel.endsWith(sep)) {
       return `taskFiles key "${rel}": names a directory, not a file — refused.`;
     }
+    const over = segments.find((s) => Buffer.byteLength(s, "utf8") > MAX_SEGMENT_BYTES);
+    if (over !== undefined) {
+      return (
+        `taskFiles key "${rel}": the path segment "${over.slice(0, 40)}…" is ` +
+        `${Buffer.byteLength(over, "utf8")} bytes, over the ${MAX_SEGMENT_BYTES}-byte limit the filesystem ` +
+        `accepts — refused.`
+      );
+    }
     const top = segments[0] as string;
     if (isReservedTaskArtifact(top)) {
       return `taskFiles key "${rel}": collides with the reserved task artifact "${top}" — refused.`;
+    }
+
+    // INJECTIVITY. `fix-batch/payload.json` and `fix-batch/./payload.json` are two map keys
+    // over one target: writing both silently lets whichever came last win, with no refusal
+    // and no way to tell afterwards which bytes the agent read.
+    const target = segments.join("/");
+    const clash = targets.get(target);
+    if (clash !== undefined) {
+      return (
+        `taskFiles keys "${clash}" and "${rel}": two keys name the ONE file ${target} — refused rather than ` +
+        `resolved in favor of whichever was written last.`
+      );
+    }
+    targets.set(target, rel);
+
+    // And a name cannot be both a file and a directory. mkdirSync throws EEXIST for
+    // {"a": …, "a/b": …} in one loop order and writeFileSync throws EISDIR in the other.
+    fileTargets.add(target);
+    for (let i = 1; i < segments.length; i++) {
+      parentTargets.set(segments.slice(0, i).join("/"), rel);
+    }
+  }
+
+  for (const [dir, needer] of parentTargets) {
+    if (fileTargets.has(dir)) {
+      return (
+        `taskFiles keys "${targets.get(dir) as string}" and "${needer}": ${dir} would have to be both a file ` +
+        `and a directory — refused.`
+      );
     }
   }
   return undefined;
@@ -464,17 +530,35 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
   // loader's message. A torn/incomplete/absent generation never dispatches.
 
   // Materialize the task dir.
+  //
+  // FG-639: the taskFiles loop is the one part of this that runs on caller-supplied names, so
+  // it is the one part that can fail for a reason the guard above did not decide. The guard is
+  // now total for the keys it admits, which makes this catch a backstop rather than the
+  // mechanism — but a backstop that matters: without it the throw escaped as an unhandled
+  // rejection AFTER the dir and its artifacts had landed and BEFORE markTaskRunning, leaving a
+  // pending task row and an active run with no named refusal anywhere. Removing the dir is
+  // what keeps the guard's "nothing was written" true for an admitted key too.
   const dir = taskDir(runId, taskId);
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "CLAUDE.md"), taskPackage.composedSystemPrompt);
-  writeFileSync(join(dir, "package.md"), renderInvokeTaskPackage(taskPackage, args.taskText));
-  writeFileSync(join(dir, "result.json"), "");
-  for (const [rel, contents] of Object.entries(args.taskFiles ?? {})) {
-    const target = join(dir, rel);
-    mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, contents);
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "CLAUDE.md"), taskPackage.composedSystemPrompt);
+    writeFileSync(join(dir, "package.md"), renderInvokeTaskPackage(taskPackage, args.taskText));
+    writeFileSync(join(dir, "result.json"), "");
+    for (const [rel, contents] of Object.entries(args.taskFiles ?? {})) {
+      const target = join(dir, rel);
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, contents);
+    }
+    chmodSync(dir, 0o777);
+  } catch (e) {
+    const error =
+      `the task dir could not be materialized (${(e as Error).message}) — the dispatch is refused and the ` +
+      `partial task dir was removed. No container started.`;
+    rmSync(dir, { recursive: true, force: true });
+    failTask(taskId, { runId, kind: classify({}), error });
+    closeRunIfIdle(false);
+    return { runId, taskId, status: "failed", error };
   }
-  chmodSync(dir, 0o777);
 
   markTaskRunning(taskId);
   logEvent("task.started", { runId, taskId });

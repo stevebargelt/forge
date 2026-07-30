@@ -482,6 +482,59 @@ test("FG-639: a failure dominates a green sibling of the same name", () => {
   assert.equal(testExecution(mixed, "guard holds"), "failed", "a red assertion is not cancelled by a green one");
 });
 
+test("FG-639: a `not ok` line carrying a TAP directive reads as FAILED, not as skipped", () => {
+  // The directive branch used to be evaluated FIRST, so a red line with `# TODO` on it read
+  // as `skipped` — and a skipped reading is the one an alternate lane may rescue.
+  assert.equal(testExecution("not ok 1 - the guard # TODO", "the guard"), "failed");
+  assert.equal(testExecution("not ok 1 - the guard # SKIP no image", "the guard"), "failed");
+  assert.equal(
+    testExecution(["TAP version 13", "not ok 4 - the guard # TODO not written yet", "1..4"].join("\n"), "the guard"),
+    "failed",
+  );
+});
+
+test("FG-639: a directive on a PASSING line still reads as skipped — the reorder narrowed nothing", () => {
+  assert.equal(testExecution("ok 1 - the guard # SKIP no image", "the guard"), "skipped");
+  assert.equal(testExecution("ok 1 - the guard # TODO", "the guard"), "skipped");
+  assert.equal(testExecution("﹣ the guard (0ms) # SKIP no image", "the guard"), "skipped");
+});
+
+test("FG-639: a RED cited test with a TODO directive is not rescued by a well-formed alternate lane", () => {
+  const check = validateResolutionEvidence(
+    {
+      kind: "regression_test",
+      test_name: "the guard",
+      runner_output: "not ok 1 - the guard # TODO",
+      alternate_lane: {
+        lane: "test-extended",
+        candidate_sha: SHA,
+        executed_assertion: "the guard",
+        runner_output: "ok 1 - the guard",
+      },
+    },
+    { candidateSha: SHA, reachability: "demonstrated", findingRef: "RF-1" },
+  );
+  assert.equal(check.ok, false, "the directive must not downgrade a red test into a rescuable skip");
+  if (check.ok) return;
+  assert.match(check.refusal, /FAILED in the cited runner output/);
+  assert.equal(check.coverage, "not_executed");
+});
+
+test("FG-639: a verification step whose test line is red UNDER a directive is refused as failed", () => {
+  const check = validateResolutionEvidence(
+    {
+      kind: "anchored_verification",
+      file: "src/v2/review-evidence.ts",
+      line: 216,
+      fact: "the skip branch runs before the failure branch",
+      verification_step: { ran: "the guard", runner_output: "not ok 1 - the guard # SKIP no image" },
+    },
+    { candidateSha: SHA, reachability: "supported", findingRef: "RF-1" },
+  );
+  assert.equal(check.ok, false);
+  assert.match(check.ok ? "" : check.refusal, /FAILED — a failed check is never resolution evidence/);
+});
+
 test("FG-639: a cited regression test that FAILED is refused as resolution evidence", () => {
   const check = validateResolutionEvidence(
     {
