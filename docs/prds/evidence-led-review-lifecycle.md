@@ -1028,10 +1028,20 @@ actual boundary that cannot ship together.
 > paths the batch's own results declared (`fix_batch_results.files_changed_json`)
 > — never `git add -A` — and reconciles the worktree against that declared set,
 > refusing by name (`fix_cycle_declared_changes_absent`,
-> `fix_cycle_tree_dirty_outside_declared_scope`, `fix_cycle_commit_failed`)
-> with the stage left open and nothing recorded. Its commit subject
-> deliberately does not reference the ticket, because a later review infers its
-> comparison base from the oldest commit whose subject does. Because the
+> `fix_cycle_tree_dirty_outside_declared_scope`, `fix_cycle_commit_failed`,
+> `fix_cycle_commit_raced`) with the stage left open and nothing recorded. The
+> reconciliation is TWO-DIRECTIONAL and its two directions are deliberately not
+> the same stop: a tree that moved beyond the declaration refuses, a wholly
+> unsupported declaration refuses, but a PARTLY supported one commits what moved
+> and NAMES what did not (`meta.fixCommit.declaredNotMoved`) — `committed ⊆
+> declared` still holds, and refusing there would dead-end a converging review
+> whose next cycle honestly declares a file it already committed. Its commit
+> subject deliberately does not reference the ticket, because a later review
+> infers its comparison base from the oldest commit whose subject does; the
+> subject is ALSO the per-revision idempotency key that lets a crash between the
+> irreversible git commit and the ledger writes recording it be RECOVERED
+> (subject match AND candidate anchor, never either alone) rather than refusing
+> forever — the same stuck loop in a second form. Because the
 > advance goes through the single place the candidate ever moves, scenario #14
 > invalidation fires by construction and Stages 6–9 re-anchor through the
 > existing per-sha rules with no new key. The fix stage record's own sha is
@@ -1042,7 +1052,9 @@ actual boundary that cannot ship together.
 > persisted review row rather than cwd (`review_workspace_unbound` /
 > `review_workspace_unusable` / `review_workspace_identity_mismatch`), because
 > a wrong workspace is no longer a wrong read but a write into a different
-> repository.
+> repository — and a `--dry-run` preview resolves and refuses identically but
+> RECORDS nothing, since rebinding which repository later stages commit into is
+> not a change a preview may make.
 >
 > **(b) A fix batch carries the UNRESOLVED `fix_now` findings only.** RF-8: a
 > `fix_now` already `resolved` at the current candidate is not re-dispatched
