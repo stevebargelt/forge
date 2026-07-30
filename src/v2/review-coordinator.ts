@@ -148,14 +148,33 @@ function dispositionBlockers(snapshot: ReviewSnapshot): ReviewFinding[] {
  *  as already rechecked: a fixer that resolves its batch without committing leaves the sha
  *  matching the previous recheck's record, so the stage is skipped, the finding keeps the
  *  verdict from the cycle before, and the review loops at the disposition stop with no
- *  mechanical path to a resolution. Keying on sha PLUS the ingested batch revisions makes a
- *  new cycle a new key, so it earns its own recheck — while a crash-resume at an unchanged
- *  cycle still reads as complete and is never repeated. */
+ *  mechanical path to a resolution. Keying on sha PLUS the batch revisions makes a new cycle
+ *  a new key, so it earns its own recheck — while a crash-resume at an unchanged cycle still
+ *  reads as complete and is never repeated.
+ *
+ *  THE KEY MUST BE MONOTONE, and counting only `ingested` batches is not. `ensureFixBatch`
+ *  marks the previous batch `superseded` the moment a new revision is created, which clears
+ *  the `ingested` marker off a cycle a recheck already covered — so the key SHRANK, and a
+ *  shrunken key mismatches for the same reason a grown one does. That re-entered a recheck
+ *  that had completed at that very sha with no cycle having ingested anything since: a real
+ *  rechecker is dispatched (`recheckIsNoOp` is false whenever the candidate moved off the
+ *  confirmed sha, and by then `expected` is empty), and any new finding it reports lands as a
+ *  duplicate untriaged row that bounces a review one step from shipping back to Stage 4 —
+ *  the exact never-repeat invariant this key exists to protect.
+ *
+ *  So `superseded` counts too. A batch's state only ever moves open → dispatched → ingested
+ *  and any → superseded, and the two counted states are terminal, so the key can only grow.
+ *  Growing is the safe direction: it costs at most one extra recheck for a cycle that was
+ *  withdrawn before ingesting, and it converges. */
 export function fixCycleKey(batches: readonly FixBatch[]): string {
   return batches
-    .filter((b) => b.state === "ingested")
+    .filter((b) => b.state === "ingested" || b.state === "superseded")
     .map((b) => `${b.id}@${b.revision}`)
     .join(",");
+}
+
+function cycleTerms(key: string): string[] {
+  return key.split(",").filter((t) => t !== "");
 }
 
 function recheckedFixCycleKey(review: Review): string {
@@ -306,21 +325,26 @@ function resolveTransition(snapshot: ReviewSnapshot): Transition {
   // Stage 8 — exact recheck + bounded remediation-delta review. Complete for the candidate
   // AND for the fix cycles that have run at it (see fixCycleKey).
   const cycleKey = fixCycleKey(snapshot.batches);
+  const recheckedKey = recheckedFixCycleKey(review);
   const recheckedAtCandidate = stageCompleteAt(review, "recheck", candidate);
-  if (!recheckedAtCandidate || recheckedFixCycleKey(review) !== cycleKey) {
+  if (!recheckedAtCandidate || recheckedKey !== cycleKey) {
     const noop = recheckIsNoOp({
       fixNowCount: fixNow.length,
       contractConfirmedSha: review.contractConfirmedSha,
       candidateSha: candidate,
     });
+    // The cycles ADDED since the recorded recheck, not "now <whole key>". The key is monotone
+    // (see fixCycleKey) so there is always at least one, and the old phrasing rendered the
+    // shrink case as "now no batch" — reporting a WITHDRAWN cycle as a further one that ran.
+    const newCycles = cycleTerms(cycleKey).filter((t) => !cycleTerms(recheckedKey).includes(t));
     return {
       kind: "recheck",
       state: "rechecking",
       stage: "recheck",
       reason: recheckedAtCandidate
         ? `a further fix cycle ran at candidate ${candidate ?? "(unset)"} since the last recheck ` +
-          `(rechecked ${recheckedFixCycleKey(review) || "no batch"}, now ${cycleKey}) — a new fix cycle needs its ` +
-          `own recheck even though the candidate did not move`
+          `(rechecked ${recheckedKey || "no batch"}; new cycle(s) ${newCycles.join(", ")}) — a new fix cycle ` +
+          `needs its own recheck even though the candidate did not move`
         : noop
           ? `no fix_now findings and the candidate never moved from ${review.contractConfirmedSha} — recheck is a no-op`
           : `${fixNow.length} known finding id(s) to recheck exactly, plus bounded review of the delta to ${candidate ?? "(unset)"}`,

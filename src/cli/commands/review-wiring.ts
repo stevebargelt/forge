@@ -566,9 +566,17 @@ export function resolveReviewBase(ctx: {
   git?: (args: string[]) => string;
 }): ReviewBase {
   const git = ctx.git ?? realGit(ctx.projectDir);
-  const revParse = (rev: string): string | undefined => {
+  // COMMIT-NESS IS CHECKED, NOT ASSUMED. Bare `git rev-parse <40-hex>` ECHOES any 40-hex
+  // string back with exit 0 without ever consulting the object store, so a sha that was
+  // rebased away, gc'd, or pasted from another repo "resolved" here and opened exactly the
+  // permanently-stuck review this function exists to prevent — Stage 2's
+  // `git diff --name-only <base>..<candidate>` then dies inside execFileSync with a raw stack
+  // trace, no verb supplies a base after the fact, and no verb removes a review.
+  // `rev-parse --verify <rev>^{commit}` is the idiom that both consults the object store and
+  // requires the object to be a commit rather than a tag, tree or blob.
+  const revParseCommit = (rev: string): string | undefined => {
     try {
-      const sha = git(["rev-parse", rev]).trim();
+      const sha = git(["rev-parse", "--verify", `${rev}^{commit}`]).trim();
       return sha === "" ? undefined : sha;
     } catch {
       return undefined;
@@ -576,14 +584,16 @@ export function resolveReviewBase(ctx: {
   };
 
   if (ctx.since !== undefined) {
-    const sha = revParse(ctx.since);
+    const sha = revParseCommit(ctx.since);
     return sha !== undefined
       ? { ok: true, baseSha: sha }
       : {
           ok: false,
           refusal:
-            `--since ${ctx.since} does not resolve to a commit in ${ctx.projectDir}, so the review has no ` +
-            `comparison base and its contract could never be confirmed. Nothing was written.`,
+            `--since ${ctx.since} does not name a commit in ${ctx.projectDir}, so the review has no ` +
+            `comparison base and its contract could never be confirmed. A 40-hex string that is not a commit ` +
+            `in this repository is refused here for the same reason: bare rev-parse echoes it back, but every ` +
+            `later diff against it fails. Nothing was written.`,
         };
   }
 
@@ -609,7 +619,7 @@ export function resolveReviewBase(ctx: {
     };
   }
   const oldest = range.shas[range.shas.length - 1] as string;
-  const baseSha = revParse(`${oldest}^`);
+  const baseSha = revParseCommit(`${oldest}^`);
   if (baseSha === undefined) {
     return {
       ok: false,

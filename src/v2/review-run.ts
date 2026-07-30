@@ -434,20 +434,11 @@ async function runBatchFix(reviewId: string, transition: Transition, deps: Coord
   );
   if (!ingestion.ok) return { transition, status: "refused", message: ingestion.refusal };
 
-  // A FIX CYCLE RAN, SO THE VERDICTS FROM BEFORE IT ARE STALE — including when this fixer
-  // committed nothing. advanceCandidate below clears candidate-bound resolutions only when
-  // the sha actually moves, and an unmoved sha is exactly the case that used to leave a
-  // finding carrying the previous cycle's `still_present` at the current candidate: it holds
-  // the review at the disposition stop, and re-deciding it only runs the fixer again.
-  invalidateResolutionsForFixCycle(
-    reviewId,
-    batch.payload.findings.map((f) => f.finding_id),
-    batch.id,
-  );
-
   // A scope-changing conflict returns THAT finding to disposition as an architecture
   // question and lets the rest of the batch proceed. Guessing through it is what the
   // existing scope guard exists to prevent.
+  //
+  // IT RUNS BEFORE THE INVALIDATION BELOW, and the order is the whole content of the fix.
   const scopeChanged: string[] = [];
   for (const id of parsed.scopeChanges) {
     const record = ingestion.records.find((r) => r.findingId === id);
@@ -460,6 +451,31 @@ async function runBatchFix(reviewId: string, transition: Transition, deps: Coord
     });
     if (outcome.ok) scopeChanged.push(outcome.finding.findingRef);
   }
+
+  // A FIX CYCLE RAN, SO THE VERDICTS FROM BEFORE IT ARE STALE — including when this fixer
+  // committed nothing. advanceCandidate below clears candidate-bound resolutions only when
+  // the sha actually moves, and an unmoved sha is exactly the case that used to leave a
+  // finding carrying the previous cycle's `still_present` at the current candidate: it holds
+  // the review at the disposition stop, and re-deciding it only runs the fixer again.
+  //
+  // BUT ONLY FOR THE FINDINGS THIS CYCLE'S RECHECK WILL RE-EXAMINE. Stage 8's `expected` is
+  // the `fix_now` set, so wiping the whole payload's resolutions cost real ledger data: a
+  // finding an EARLIER cycle proved `resolved`, re-carried by this batch and reported
+  // `scope_change` ("already fixed, cannot touch without changing scope"), had its proof
+  // cleared and then — now an architecture question — was excluded from every future recheck.
+  // Resolution NULL, nothing mechanical to re-establish it, and Stage 9's findings_settled
+  // blocked on operator authority alone. Reading the surviving fix_now set AFTER the
+  // re-disposition above is what scopes the wipe to exactly what the recheck will re-prove.
+  const rechecked = new Set(
+    findingsForReview(reviewId)
+      .filter((f) => f.disposition === "fix_now")
+      .map((f) => f.id),
+  );
+  invalidateResolutionsForFixCycle(
+    reviewId,
+    batch.payload.findings.map((f) => f.finding_id).filter((id) => rechecked.has(id)),
+    batch.id,
+  );
 
   const head = await deps.headSha();
   advanceCandidate(reviewId, head);

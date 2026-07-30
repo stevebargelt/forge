@@ -455,7 +455,12 @@ test("FG-639: the untampered envelope the wiring delivers IS the row-derived ren
 // the refusal happens BEFORE the row exists.
 
 /** A git that answers only what resolveReviewBase asks: the subject log, the span count, and
- *  rev-parse for the revisions the fixture says exist. */
+ *  rev-parse for the revisions the fixture says exist.
+ *
+ *  IT MODELS REAL GIT'S PERMISSIVENESS ON PURPOSE. Bare `rev-parse <40-hex>` echoes the sha
+ *  back with exit 0 without consulting the object store — demonstrated in a real repo — while
+ *  `rev-parse --verify <rev>^{commit}` consults it and fails for a non-commit. A fake that
+ *  simply threw for every unknown rev is what let the missing commit-ness check ship. */
 function logGit(commits: Array<[string, string]>, resolvable: Record<string, string>) {
   return (args: string[]): string => {
     if (args[0] === "log" && args[1] === "--format=%H %s") {
@@ -465,9 +470,13 @@ function logGit(commits: Array<[string, string]>, resolvable: Record<string, str
       return commits.map(([sha]) => sha).join("\n");
     }
     if (args[0] === "rev-parse") {
-      const sha = resolvable[args[1] as string];
-      if (sha === undefined) throw new Error(`fatal: ambiguous argument '${args[1] as string}'`);
-      return `${sha}\n`;
+      const verify = args[1] === "--verify";
+      const rev = (verify ? args[2] : args[1]) as string;
+      const bare = rev.replace(/\^\{commit\}$/, "");
+      const sha = resolvable[bare];
+      if (sha !== undefined) return `${sha}\n`;
+      if (!verify && /^[0-9a-f]{40}$/.test(bare)) return `${bare}\n`;
+      throw new Error(`fatal: Needed a single revision`);
     }
     throw new Error(`unexpected git ${args.join(" ")}`);
   };
@@ -561,5 +570,68 @@ test("FG-639: --since is RESOLVED to a full sha, and an unresolvable one is refu
 
   const bogus = resolveReviewBase({ projectDir: "/repo", ticketId: "FG-700", since: "nope", git });
   assert.equal(bogus.ok, false);
-  assert.match(bogus.ok ? "" : bogus.refusal, /--since nope does not resolve to a commit/);
+  assert.match(bogus.ok ? "" : bogus.refusal, /--since nope does not name a commit/);
+});
+
+// RF-7: the second input into the permanently-stuck review class RF-2 closed. `git rev-parse
+// <40-hex>` echoes any 40-hex string back with exit 0 without consulting the object store, so
+// a sha rebased away, gc'd, or pasted from another repo passed the --since branch, the row was
+// inserted with it, and Stage 2's `git diff --name-only <base>..<candidate>` then threw a raw
+// stack trace out of execFileSync — with no verb to supply a base afterwards and none to
+// remove the review.
+//
+// RED baseline: revert revParseCommit to bare `["rev-parse", rev]` and this test fails,
+// because logGit models git's echo exactly.
+test("FG-639 / RF-7: a 40-hex --since that is NOT a commit in this repo is refused AT OPEN, not echoed through", () => {
+  const git = logGit([["cccccccccccccccccccccccccccccccccccccccc", "FG-700: landed"]], {
+    "cccccccccccccccccccccccccccccccccccccccc": "cccccccccccccccccccccccccccccccccccccccc",
+  });
+  const gone = "0000000000000000000000000000000000000000";
+
+  assert.equal(git(["rev-parse", gone]).trim(), gone, "the fake echoes bare rev-parse, exactly as real git does");
+
+  const base = resolveReviewBase({ projectDir: "/repo", ticketId: "FG-700", since: gone, git });
+  assert.equal(base.ok, false, "a base that no diff can name must never reach the insert");
+  if (base.ok) return;
+  assert.match(base.refusal, /--since 0{40} does not name a commit in \/repo/);
+  assert.match(base.refusal, /Nothing was written/);
+});
+
+test("FG-639 / RF-7: commit-ness is required of the INFERRED parent too, not just of --since", () => {
+  // The oldest ticket commit's parent resolves as an object but is not a commit — a tag or a
+  // tree. Inferring it would open the same stuck review by the other door.
+  const git = (args: string[]): string => {
+    if (args[0] === "log") {
+      return args[1] === "--format=%H %s"
+        ? "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb FG-700: the whole thing"
+        : "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    }
+    if (args[0] === "rev-parse" && args[1] === "--verify") {
+      throw new Error("fatal: Needed a single revision");
+    }
+    if (args[0] === "rev-parse") return "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n";
+    throw new Error(`unexpected git ${args.join(" ")}`);
+  };
+
+  const base = resolveReviewBase({ projectDir: "/repo", ticketId: "FG-700", git });
+  assert.equal(base.ok, false);
+  assert.match(base.ok ? "" : base.refusal, /has no parent/);
+  assert.match(base.ok ? "" : base.refusal, /--since <sha>/);
+});
+
+test("FG-639 / RF-7: the commit-ness idiom is the one real git honors — `rev-parse --verify <rev>^{commit}`", () => {
+  const asked: string[][] = [];
+  const git = (args: string[]): string => {
+    asked.push(args);
+    if (args[0] === "rev-parse") return "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\n";
+    throw new Error(`unexpected git ${args.join(" ")}`);
+  };
+
+  const base = resolveReviewBase({ projectDir: "/repo", ticketId: "FG-700", since: "v1.2.0", git });
+  assert.equal(base.ok, true, base.ok ? "" : base.refusal);
+  assert.deepEqual(
+    asked[0],
+    ["rev-parse", "--verify", "v1.2.0^{commit}"],
+    "bare rev-parse consults no object store; --verify <rev>^{commit} does, and requires a commit",
+  );
 });
