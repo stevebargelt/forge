@@ -12,12 +12,28 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
-import { buildCoordinatorDeps } from "./review-wiring.js";
+import {
+  buildCoordinatorDeps,
+  FIX_BATCH_ENVELOPE_PATH,
+  FIX_BATCH_PAYLOAD_PATH,
+} from "./review-wiring.js";
 import { confirmContract, validateReviewContract, type ReviewContract } from "../../v2/review-contract.js";
 import { makeInMemoryDb, setDbForTest } from "../../store/db.js";
-import { getReview, insertReview, type Review } from "../../store/reviews.js";
-import { runNextStage, type CoordinatorDeps } from "../../v2/review-run.js";
+import {
+  findingsForReview,
+  getReview,
+  ingestFindings,
+  insertReview,
+  recordDisposition,
+  type Review,
+} from "../../store/reviews.js";
+import { ensureFixBatch, fixBatchEnvelope, serializeFixBatchPayload } from "../../store/fix-batches.js";
+import { fixBatchBundleDir } from "../../util/paths.js";
+import { runNextStage, type CoordinatorDeps, type FixerContext } from "../../v2/review-run.js";
+import type { InvokeArgs, InvokeResult } from "../../v2/invoke.js";
 
 const CONTRACT = validateReviewContract({
   threat_model: "operator_trusted_candidate",
@@ -239,4 +255,128 @@ test("FG-639: no_drift and a widening claim in the same confirmation contradict 
   assert.equal(outcome.status, "refused");
   assert.match(outcome.message, /no_drift AND proposes a contract change/);
   assert.match(outcome.message, /a diff that needs a lens is drift, not no_drift/);
+});
+
+// ─── the fixer's bundle, delivered INSIDE the container ─────────────────────
+//
+// The live pilot's Stage 5 defect. dispatchFixer materialized the hash-verified bundle at
+// ~/.forge/reviews/<review>/<batch>/ on the HOST and then named THAT path in the prompt.
+// No mount carried it, so the fixer searched every mount, honestly reported the
+// authoritative handoff undelivered, and the host correctly refused its empty findings
+// array. These pin the delivery: the bundle rides the task dir that already carries
+// CLAUDE.md and package.md, the prompt names the in-container path and no other, and a
+// payload tampered after materialization never reaches a container at all.
+
+const FIX_REVIEW = "review-fg639-fixer";
+
+function parkAtFix(): FixerContext {
+  insertReview({
+    id: FIX_REVIEW,
+    runId: RUN_ID,
+    ticketId: "FG-639",
+    reviewMode: "evidence_led",
+    baseSha: "base000",
+    candidateSha: "cand111",
+    contract: APPROVED,
+    state: "fixing",
+  });
+  const observed = ingestFindings(FIX_REVIEW, [
+    {
+      summary: "the reconcile path can write partially",
+      evidence: "line 42 writes before the guard",
+      riskLens: "backend",
+      reachability: "demonstrated",
+    },
+  ])[0]!;
+  const disposed = recordDisposition(observed.id, {
+    decision: "fix_now",
+    rationale: "in scope this cycle",
+    operator: false,
+  });
+  assert.equal(disposed.ok, true);
+  const { batch } = ensureFixBatch(FIX_REVIEW, "cand111", findingsForReview(FIX_REVIEW));
+  return {
+    review: getReview(FIX_REVIEW) as Review,
+    batch,
+    envelope: fixBatchEnvelope(batch),
+    payload: serializeFixBatchPayload(batch.payload),
+  };
+}
+
+function capturingInvoke(): { invokeFn: (a: InvokeArgs) => Promise<InvokeResult>; calls: InvokeArgs[] } {
+  const calls: InvokeArgs[] = [];
+  return {
+    calls,
+    invokeFn: async (a: InvokeArgs): Promise<InvokeResult> => {
+      calls.push(a);
+      return { runId: RUN_ID, taskId: "task-fixer-1", status: "complete", result: {} };
+    },
+  };
+}
+
+function fixerDeps(invokeFn: (a: InvokeArgs) => Promise<InvokeResult>): CoordinatorDeps {
+  return buildCoordinatorDeps({
+    projectDir: "/nonexistent-project",
+    ticketId: "FG-639",
+    git: () => "",
+    invokeFn,
+  });
+}
+
+test("FG-639: the fixer's bundle is DELIVERED into the container, byte for byte", async () => {
+  const ctx = parkAtFix();
+  const { invokeFn, calls } = capturingInvoke();
+  const deps = fixerDeps(invokeFn);
+
+  await deps.materializeFixBatch(ctx);
+  const out = await deps.dispatchFixer(ctx);
+
+  assert.equal(out.ok, true);
+  assert.equal(calls.length, 1);
+  const files = calls[0]?.taskFiles ?? {};
+  assert.equal(
+    files["fix-batch/payload.json"],
+    ctx.payload,
+    "the hash-verified bytes ride the task dir — the mount the container already has",
+  );
+  assert.equal(
+    JSON.parse(files["fix-batch/envelope.json"] ?? "{}").payload_sha256,
+    ctx.batch.payloadSha256,
+    "the envelope rides along so the fixer can re-verify in-container",
+  );
+});
+
+test("FG-639: the fixer prompt names the IN-CONTAINER path and never the host bundle dir", async () => {
+  const ctx = parkAtFix();
+  const { invokeFn, calls } = capturingInvoke();
+  const deps = fixerDeps(invokeFn);
+
+  await deps.materializeFixBatch(ctx);
+  await deps.dispatchFixer(ctx);
+
+  const task = calls[0]?.task ?? "";
+  assert.equal(task.includes(FIX_BATCH_PAYLOAD_PATH), true, "the payload is named where the fixer can open it");
+  assert.equal(task.includes(FIX_BATCH_ENVELOPE_PATH), true);
+  assert.equal(
+    task.includes(fixBatchBundleDir(FIX_REVIEW, ctx.batch.id)),
+    false,
+    "a host path no mount delivers is exactly what made the pilot's fixer report the handoff undelivered",
+  );
+});
+
+test("FG-639: a payload tampered AFTER materialization refuses BEFORE the container starts", async () => {
+  const ctx = parkAtFix();
+  const { invokeFn, calls } = capturingInvoke();
+  const deps = fixerDeps(invokeFn);
+
+  await deps.materializeFixBatch(ctx);
+  const payloadPath = join(fixBatchBundleDir(FIX_REVIEW, ctx.batch.id), "payload.json");
+  writeFileSync(payloadPath, readFileSync(payloadPath, "utf8").replace("line 42", "line 43"));
+
+  const out = await deps.dispatchFixer(ctx);
+
+  assert.equal(out.ok, false);
+  assert.equal(calls.length, 0, "the bytes it would have delivered are the bytes it re-hashed");
+  assert.match(out.error ?? "", /refusing to start the fixer on an unverified delivery snapshot/);
+  assert.equal(out.taskId, "", "a refusal from before the container names no task");
 });

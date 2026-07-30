@@ -400,7 +400,9 @@ async function runBatchFix(reviewId: string, transition: Transition, deps: Coord
   }
 
   const dispatch = await deps.dispatchFixer(ctx);
-  markFixBatchDispatched(batch.id, dispatch.taskId);
+  // A refusal from BEFORE the container started names no task. Marking the batch
+  // dispatched against an empty id would record a delivery that never happened.
+  if (dispatch.taskId !== "") markFixBatchDispatched(batch.id, dispatch.taskId);
   if (!dispatch.ok) {
     // Fixer crash: findings stay fix_now and unresolved. Nothing is recorded.
     return {

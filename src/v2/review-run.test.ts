@@ -640,6 +640,31 @@ test("FG-639 / Appendix A: a materialized payload that fails the hash check refu
   assert.equal(h.calls.fixer, 0, "the container never started");
 });
 
+test("FG-639: an undeliverable bundle leaves the batch OPEN and the SAME revision retryable", async () => {
+  // The live-pilot shape: the wiring refuses before any container exists, so there is no
+  // task to name. Marking the batch dispatched against an empty id would record a delivery
+  // that never happened — and the retry must re-enter revision 1, not supersede it.
+  const h = harness({
+    dispatchFixer: () => ({ ok: false, taskId: "", error: "the fix batch bundle could not be delivered" }),
+  });
+  await drive(h.deps, "discover");
+  dispositionAll("fix_now", "will be remediated this cycle");
+
+  const refused = await runNextStage(REVIEW, h.deps);
+  assert.equal(refused.status, "refused");
+  const batches = fixBatchesForReview(REVIEW);
+  assert.equal(batches.length, 1);
+  assert.equal(batches[0]?.state, "open", "nothing was dispatched, so nothing is recorded as dispatched");
+  assert.equal(batches[0]?.dispatchTaskId, undefined);
+
+  const retried = await runNextStage(REVIEW, harness().deps);
+  assert.equal(retried.status, "advanced", retried.message);
+  const after = fixBatchesForReview(REVIEW);
+  assert.equal(after.length, 1, "the retry re-entered the same batch rather than superseding it");
+  assert.equal(after[0]?.revision, 1);
+  assert.equal(after[0]?.payloadSha256, batches[0]?.payloadSha256);
+});
+
 // ─── stage order, docs before final verification ────────────────────────────
 
 test("FG-639: docs reconciliation runs BEFORE final verification, and a docs commit re-binds both", async () => {

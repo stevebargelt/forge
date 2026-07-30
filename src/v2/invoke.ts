@@ -19,7 +19,7 @@
 // - No gate concept; agent completes or fails
 
 import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { Task, TaskPackage, Run } from "../types/index.js";
 import type { Workflow, Step, Runtime } from "./schema.js";
 import { resolveRuntimeMetadata } from "./schema.js";
@@ -86,6 +86,13 @@ export type InvokeArgs = {
   resolvedFromSubdir?: boolean;
   /** FG-374: true when --allow-subproject was passed to intentionally mount a subdir. */
   explicitSubproject?: boolean;
+  /** FG-639: extra input files to materialize INSIDE the task dir before the container
+   *  starts, keyed by path relative to it (`fix-batch/payload.json` →
+   *  `/task/fix-batch/payload.json`). The task dir is already the package delivery
+   *  channel — CLAUDE.md, package.md and result.json ride the same rw bind — so a
+   *  caller with a host artifact the agent must read delivers it here rather than
+   *  naming a host path no mount carries. */
+  taskFiles?: Record<string, string>;
   /** FG-563 (CP2, F17 receipt bridge): the deterministic continuation dispatch_key
    *  this invocation is the physical dispatch OF. Stamped into the created run's
    *  metadata BEFORE the container spawns, so runByDispatchKey adopts this exact run
@@ -238,6 +245,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     invocationCwd: args.invocationCwd,
     resolvedFromSubdir: args.resolvedFromSubdir,
     explicitSubproject: args.explicitSubproject,
+    taskFiles: args.taskFiles,
     seedGeneration,
     dockerExec: args.dockerExec,
   });
@@ -313,6 +321,9 @@ export type DispatchInvokeTaskArgs = {
   invocationCwd?: string;
   resolvedFromSubdir?: boolean;
   explicitSubproject?: boolean;
+  /** FG-639: see InvokeArgs.taskFiles. Written into the task dir before the container
+   *  starts, so the agent finds them under /task at the path the prompt names. */
+  taskFiles?: Record<string, string>;
   /** FG-583: the seed generation anchored at invoke entry. Threaded so the runtime
    *  (and any generation-coupled load) reads ONE complete generation for the life of
    *  this dispatch. `undefined` (e.g. the `forge retry` caller) → resolve the live
@@ -393,6 +404,11 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
   writeFileSync(join(dir, "CLAUDE.md"), taskPackage.composedSystemPrompt);
   writeFileSync(join(dir, "package.md"), renderInvokeTaskPackage(taskPackage, args.taskText));
   writeFileSync(join(dir, "result.json"), "");
+  for (const [rel, contents] of Object.entries(args.taskFiles ?? {})) {
+    const target = join(dir, rel);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, contents);
+  }
   chmodSync(dir, 0o777);
 
   markTaskRunning(taskId);

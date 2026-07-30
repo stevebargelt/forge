@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { buildReviewLoopDeps, resolveReviewedTipTrust } from "./review-loop.js";
 import { invoke, type InvokeArgs, type InvokeResult } from "../../v2/invoke.js";
 import { fixBatchBundleDir } from "../../util/paths.js";
+import { verifyMaterializedPayload } from "../../store/fix-batches.js";
 import { getRun } from "../../store/runs.js";
 import type { CoordinatorDeps, FixerContext, LensContext, RecheckContextIn } from "../../v2/review-run.js";
 import type { VerificationEntry } from "../../v2/review-coordinator.js";
@@ -24,6 +25,19 @@ import type { AcClaim } from "../../v2/review-evidence.js";
 import type { Review } from "../../store/reviews.js";
 
 export type InvokeFn = (args: InvokeArgs) => Promise<InvokeResult>;
+
+// FG-639 live-pilot defect: the fixer's bundle, delivered INSIDE the container.
+//
+// The host bundle under ~/.forge/reviews/<review>/<batch>/ is on NO mount, so naming it in
+// the prompt named a path the fixer cannot open — it searched every mount and honestly
+// reported the authoritative handoff undelivered, and the host then refused its empty
+// findings array. /task is already the package delivery channel (CLAUDE.md, package.md,
+// result.json all ride that rw bind), so the bundle rides along with them: no new mount,
+// and the in-container path is the one the prompt names.
+const FIX_BATCH_TASK_SUBDIR = "fix-batch";
+const FIX_BATCH_CONTAINER_DIR = `/task/${FIX_BATCH_TASK_SUBDIR}`;
+export const FIX_BATCH_PAYLOAD_PATH = `${FIX_BATCH_CONTAINER_DIR}/payload.json`;
+export const FIX_BATCH_ENVELOPE_PATH = `${FIX_BATCH_CONTAINER_DIR}/envelope.json`;
 
 export type WiringContext = {
   projectDir: string;
@@ -121,13 +135,17 @@ function discoveryTask(ctx: LensContext, diff: string, contract: unknown): strin
   ].join("\n");
 }
 
-function fixerTask(ctx: FixerContext, bundleDir: string): string {
+function fixerTask(ctx: FixerContext): string {
   return [
     `# Batch remediation — fix batch ${ctx.batch.id} revision ${ctx.batch.revision}`,
     ``,
-    `The AUTHORITATIVE handoff is the persisted batch, delivered as a verified snapshot at:`,
-    `  ${join(bundleDir, "payload.json")}   (sha256 ${ctx.batch.payloadSha256})`,
-    `  ${join(bundleDir, "envelope.json")}`,
+    `The AUTHORITATIVE handoff is the persisted batch, delivered as a verified snapshot`,
+    `INSIDE this container at:`,
+    `  ${FIX_BATCH_PAYLOAD_PATH}   (sha256 ${ctx.batch.payloadSha256})`,
+    `  ${FIX_BATCH_ENVELOPE_PATH}`,
+    ``,
+    `The host hashed those exact bytes against the persisted value before starting you; the`,
+    `envelope rides along so you can re-verify: sha256sum ${FIX_BATCH_PAYLOAD_PATH}`,
     ``,
     `Read the payload. Solve the finding set COHERENTLY — it is one batch, not N tasks.`,
     ``,
@@ -400,11 +418,22 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
       return readFileSync(payloadPath, "utf8");
     },
 
+    // Deliver the verified bundle into the container, then start it. The bytes DELIVERED
+    // are the bytes re-hashed here — verifying the materialization and then shipping a
+    // separate read of the same file would leave the delivered copy unverified.
     dispatchFixer: async (fixCtx: FixerContext) => {
       const dir = fixBatchBundleDir(fixCtx.review.id, fixCtx.batch.id);
+      const payload = readFileSync(join(dir, "payload.json"), "utf8");
+      const envelope = readFileSync(join(dir, "envelope.json"), "utf8");
+      const verified = verifyMaterializedPayload(fixCtx.batch, payload);
+      if (!verified.ok) return { ok: false, taskId: "", error: verified.refusal };
       const res = await dispatch({
         agentRole: "engineer",
-        task: fixerTask(fixCtx, dir),
+        task: fixerTask(fixCtx),
+        taskFiles: {
+          [`${FIX_BATCH_TASK_SUBDIR}/payload.json`]: payload,
+          [`${FIX_BATCH_TASK_SUBDIR}/envelope.json`]: envelope,
+        },
         projectDir: ctx.projectDir,
         ...(runIdFor() !== undefined ? { runId: runIdFor() as string } : {}),
         runTitle: `review batch fix ${fixCtx.batch.id} — ${ctx.ticketId}`,

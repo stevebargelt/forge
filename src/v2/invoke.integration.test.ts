@@ -734,6 +734,41 @@ test("invoke: composes task description into the task package (package.md/stdin)
   assert.match(capturedPackageMd, /THIS-IS-THE-TASK-MARKER/, "the task must reach the agent via package.md (stdin-bounded, unlimited size)");
 });
 
+test("invoke: FG-639 taskFiles land in the task dir BEFORE the container runs", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  let capturedPayload = "";
+  const inspectExec: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const payloadPath = join(dir, "fix-batch", "payload.json");
+    capturedPayload = existsSync(payloadPath) ? readFileSync(payloadPath, "utf8") : "";
+    writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete" }));
+    writeFileSync(stdoutPath, "");
+    writeFileSync(stderrPath, "");
+    return 0;
+  };
+
+  const res = await invoke({
+    agentRole: "engineer",
+    task: "fix the batch",
+    projectDir: "/tmp/x",
+    taskFiles: { "fix-batch/payload.json": '{"fix_batch_id":"fb-1"}' },
+    dockerExec: inspectExec,
+  });
+
+  assert.equal(
+    capturedPayload,
+    '{"fix_batch_id":"fb-1"}',
+    "the container finds the delivered file under /task at the path the caller named",
+  );
+  assert.equal(
+    readFileSync(join(taskDir(res.runId, res.taskId), "fix-batch", "payload.json"), "utf8"),
+    '{"fix_batch_id":"fb-1"}',
+  );
+});
+
 test("invoke: readOnlyProject sets PROJECT_MODE=ro in docker args", async () => {
   setupRuntimeStub();
   process.env.ANTHROPIC_API_KEY = "sk-stub";
