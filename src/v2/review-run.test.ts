@@ -25,9 +25,10 @@ import {
   insertReview,
   recordDisposition,
   type ReviewFinding,
+  type ReviewStage,
 } from "../store/reviews.js";
-import { fixBatchesForReview } from "../store/fix-batches.js";
-import { nextTransition } from "./review-coordinator.js";
+import { fixBatchesForReview, getFixBatch, serializeFixBatchPayload } from "../store/fix-batches.js";
+import { nextTransition, type TransitionKind } from "./review-coordinator.js";
 import { runNextStage, type CoordinatorDeps } from "./review-run.js";
 import type { Run } from "../types/index.js";
 
@@ -105,9 +106,11 @@ type Harness = {
   head: () => string;
 };
 
-function harness(over: Partial<CoordinatorDeps> & { findingsPerLens?: number } = {}): Harness {
+function harness(over: Partial<CoordinatorDeps> & { findingsPerLens?: number; initialHead?: string } = {}): Harness {
   const calls: Calls = { lens: [], fixer: 0, docs: 0, rechecker: 0, verify: 0 };
-  let head = "cand111";
+  // `initialHead` is what a FRESH process sees: the orchestrator that died held the head in
+  // a variable, so a resuming process starts from wherever the repository actually is.
+  let head = over.initialHead ?? "cand111";
   const perLens = over.findingsPerLens ?? 1;
 
   const deps: CoordinatorDeps = {
@@ -214,6 +217,35 @@ async function drive(deps: CoordinatorDeps, until: string, max = 12): Promise<st
     if (outcome.transition.kind === until || outcome.status !== "advanced") break;
   }
   return seen;
+}
+
+/** The next transition as a fresh process would read it: from the persisted rows only. */
+function pending() {
+  return nextTransition({
+    review: getReview(REVIEW) as never,
+    findings: findingsForReview(REVIEW),
+    batches: fixBatchesForReview(REVIEW),
+  });
+}
+
+/** Drive stages until the PERSISTED next transition is `target`, applying the operator's
+ *  disposition whenever the machine stops for one. Leaves the review parked exactly at that
+ *  boundary with the target stage not yet run — the state a crash would leave behind. */
+async function parkAt(deps: CoordinatorDeps, target: TransitionKind): Promise<void> {
+  for (let i = 0; i < 16; i++) {
+    if (pending().kind === target) return;
+    if (pending().kind === "await_disposition") {
+      dispositionAll("fix_now", "will be remediated this cycle");
+      continue;
+    }
+    const outcome = await runNextStage(REVIEW, deps);
+    assert.notEqual(
+      outcome.status,
+      "refused",
+      `parking at ${target}: ${outcome.transition.kind} refused — ${outcome.message}`,
+    );
+  }
+  assert.fail(`never reached ${target}`);
 }
 
 function dispositionAll(decision: "fix_now" | "deferred", rationale: string): ReviewFinding[] {
@@ -397,6 +429,66 @@ test("FG-639 / PRD #15: continue after a crash resumes the persisted next stage 
   assert.equal(resumed.transition.kind, "await_disposition");
   assert.equal(h.calls.lens.length, 2, "discovery was NOT re-dispatched because the process died");
   assert.equal(h.calls.verify, 1, "nor was verification re-run at the same candidate");
+});
+
+// Every stage boundary, not just the discovery one. The fixture per stage is the PERSISTED
+// LEDGER itself: the review is driven to the boundary by the real machine, then a FRESH
+// harness — zeroed call counters, head read from where the repository actually is — stands
+// in for the process that replaced the one that died. So each case asserts three things a
+// crash must not disturb: the one valid next transition comes out of the rows, the resumed
+// stage is the only thing that dispatches a container, and no already-recorded stage is
+// re-recorded.
+const RESUME_BOUNDARIES: Array<{ completed: string; target: TransitionKind; expect: Calls }> = [
+  { completed: "stage 1 verification entry", target: "confirm_contract", expect: { lens: [], fixer: 0, docs: 0, rechecker: 0, verify: 0 } },
+  { completed: "stage 2 contract confirmation", target: "discover", expect: { lens: ["wide", "backend"], fixer: 0, docs: 0, rechecker: 0, verify: 0 } },
+  { completed: "stage 3 discovery", target: "await_disposition", expect: { lens: [], fixer: 0, docs: 0, rechecker: 0, verify: 0 } },
+  { completed: "stage 4 the disposition decision", target: "batch_fix", expect: { lens: [], fixer: 1, docs: 0, rechecker: 0, verify: 0 } },
+  { completed: "stage 5 the batch fix", target: "docs", expect: { lens: [], fixer: 0, docs: 1, rechecker: 0, verify: 0 } },
+  { completed: "stage 6 docs reconciliation", target: "verify_final", expect: { lens: [], fixer: 0, docs: 0, rechecker: 0, verify: 1 } },
+  { completed: "stage 7 final verification", target: "recheck", expect: { lens: [], fixer: 0, docs: 0, rechecker: 1, verify: 0 } },
+  { completed: "stage 8 the recheck", target: "shipping_review", expect: { lens: [], fixer: 0, docs: 0, rechecker: 0, verify: 0 } },
+  { completed: "stage 9 the shipping review", target: "settled", expect: { lens: [], fixer: 0, docs: 0, rechecker: 0, verify: 0 } },
+];
+
+for (const boundary of RESUME_BOUNDARIES) {
+  test(`FG-639 / PRD #15: a crash after ${boundary.completed} resumes at ${boundary.target} and re-dispatches nothing already done`, async () => {
+    const warm = harness();
+    await parkAt(warm.deps, boundary.target);
+    const before = getReview(REVIEW)?.stageEvidence ?? {};
+
+    const first = pending();
+    assert.equal(first.kind, boundary.target, "the persisted next stage, not the one that was running");
+    assert.deepEqual(pending(), first, "reading it again is stable — there is exactly ONE valid next transition");
+
+    // The orchestrator died here. A fresh process picks the review up.
+    const cold = harness({ initialHead: getReview(REVIEW)?.candidateSha });
+    const resumed = await runNextStage(REVIEW, cold.deps);
+
+    assert.equal(resumed.transition.kind, boundary.target);
+    assert.notEqual(resumed.status, "refused", resumed.message);
+    assert.deepEqual(cold.calls, boundary.expect, "only the resumed stage dispatched anything");
+
+    const after = getReview(REVIEW)?.stageEvidence ?? {};
+    for (const stage of Object.keys(before) as ReviewStage[]) {
+      assert.deepEqual(after[stage], before[stage], `resuming re-recorded the completed ${stage} stage`);
+    }
+  });
+}
+
+test("FG-639 / PRD #15: resuming twice at the same boundary drives the stage once, not once per attempt", async () => {
+  const warm = harness();
+  await parkAt(warm.deps, "recheck");
+
+  const cold = harness({ initialHead: getReview(REVIEW)?.candidateSha });
+  const firstResume = await runNextStage(REVIEW, cold.deps);
+  assert.equal(firstResume.transition.kind, "recheck");
+  assert.equal(cold.calls.rechecker, 1);
+
+  // A second process, dispatched because nobody was sure the first one landed.
+  const colder = harness({ initialHead: getReview(REVIEW)?.candidateSha });
+  const secondResume = await runNextStage(REVIEW, colder.deps);
+  assert.equal(secondResume.transition.kind, "shipping_review", "the recheck is complete for this candidate");
+  assert.equal(colder.calls.rechecker, 0, "a completed recheck is never re-dispatched");
 });
 
 test("FG-639 / PRD #15: re-entering a stage that did NOT complete re-runs it — only completion is recorded", async () => {
@@ -786,4 +878,377 @@ test("FG-639: a stage record and a resolution each emit one event — the audit 
   }
   const stageEvents = eventsForRun(RUN.id).filter((e) => e.eventType === "review.stage_completed");
   assert.equal(stageEvents.length, 8, "one event per completed stage");
+});
+
+// ─── the skip-evidence rule, through the coordinator's own ingestion ─────────
+//
+// The unit suites prove `validateResolutionEvidence` and `ingestRecheck` refuse a skipped
+// test. These drive the same refusal through Stage 8 as the coordinator actually runs it,
+// because the thing that must not happen is a review SETTLING on a skipped test — and that
+// is a property of the whole stage: what gets written to the finding, what state the review
+// lands in, and whether the shipping stage is ever reachable.
+
+const TEST_NAME = "the reconcile path guards a partial write";
+const SKIPPED = `ok 1 - ${TEST_NAME} # SKIP no chrome binary in this container`;
+
+/** Drive to Stage 8 with one fix_now finding and the given rechecker. */
+async function driveToRecheck(h: Harness) {
+  await drive(h.deps, "discover");
+  dispositionAll("fix_now", "will be remediated this cycle");
+  await runNextStage(REVIEW, h.deps); // batch_fix
+  await runNextStage(REVIEW, h.deps); // docs
+  await runNextStage(REVIEW, h.deps); // verify_final
+  return runNextStage(REVIEW, h.deps); // recheck
+}
+
+function recheckerCiting(evidence: (candidateSha: string) => unknown): Partial<CoordinatorDeps> {
+  return {
+    dispatchRechecker: (ctx) => ({
+      ok: true,
+      taskId: "task-recheck-1",
+      result: {
+        review_id: ctx.review.id,
+        candidate_sha: ctx.candidateSha,
+        rechecked: ctx.expected.map((f) => ({
+          finding_id: f.id,
+          result: "resolved",
+          evidence_kind: "regression_test",
+          evidence: evidence(ctx.candidateSha),
+        })),
+        new_findings: [],
+      },
+    }),
+  };
+}
+
+test("FG-639 / PRD #29: a recheck resolving a finding on a SKIPPED test is rejected with a named reason and returns to disposition", async () => {
+  const h = harness(recheckerCiting(() => ({ kind: "regression_test", test_name: TEST_NAME, runner_output: SKIPPED })));
+  const recheck = await driveToRecheck(h);
+
+  assert.equal(recheck.status, "advanced", "the stage ran; what it recorded is the point");
+  assert.match(recheck.message, /0 resolved, 1 unresolved \(RF-1=inconclusive\)/);
+
+  const f = findingsForReview(REVIEW)[0] as ReviewFinding;
+  assert.equal(f.resolution, "inconclusive", "a skipped test is never evidence — and never silence either");
+  assert.equal(f.resolutionEvidenceKind, "not_executed", "the coverage outcome is recorded, never green");
+  assert.match(f.resolutionEvidence ?? "", /SKIPPED in the cited runner output/);
+  assert.match(f.resolutionEvidence ?? "", /a skipped test is never evidence/);
+  assert.match(f.resolutionEvidence ?? "", /unnamed "covered elsewhere" is refused/);
+
+  assert.equal(getReview(REVIEW)?.state, "awaiting_disposition");
+  const next = await runNextStage(REVIEW, h.deps);
+  assert.equal(next.transition.kind, "await_disposition");
+  assert.deepEqual(next.transition.blockingFindings, ["RF-1"]);
+  assert.equal(getReview(REVIEW)?.stageEvidence?.shipping, undefined, "nothing ships on a skipped test");
+});
+
+test("FG-639 / PRD #29: the same skipped test resolves once a MANDATORY LANE names the sha and the executed assertion", async () => {
+  const h = harness(
+    recheckerCiting((candidateSha) => ({
+      kind: "regression_test",
+      test_name: TEST_NAME,
+      runner_output: SKIPPED,
+      alternate_lane: {
+        lane: "dashboard-browser",
+        candidate_sha: candidateSha,
+        executed_assertion: TEST_NAME,
+        runner_output: EXECUTED,
+      },
+    })),
+  );
+  const recheck = await driveToRecheck(h);
+
+  assert.match(recheck.message, /1 resolved, 0 unresolved/);
+  const f = findingsForReview(REVIEW)[0] as ReviewFinding;
+  assert.equal(f.resolution, "resolved");
+  assert.equal(f.resolutionEvidenceKind, "regression_test");
+  assert.match(f.resolutionEvidence ?? "", /mandatory lane 'dashboard-browser' executed/);
+  assert.equal(f.resolvedSha, "afterfix2", "resolved AT the candidate the lane named");
+
+  const shipping = await runNextStage(REVIEW, h.deps);
+  assert.equal(shipping.transition.kind, "shipping_review");
+  assert.equal(shipping.status, "advanced");
+});
+
+test("FG-639 / PRD #29: an alternate lane at ANOTHER candidate is refused by name and the finding stays unresolved", async () => {
+  const h = harness(
+    recheckerCiting(() => ({
+      kind: "regression_test",
+      test_name: TEST_NAME,
+      runner_output: SKIPPED,
+      alternate_lane: {
+        lane: "dashboard-browser",
+        candidate_sha: "somethingelse7",
+        executed_assertion: TEST_NAME,
+        runner_output: EXECUTED,
+      },
+    })),
+  );
+  const recheck = await driveToRecheck(h);
+
+  assert.match(recheck.message, /0 resolved, 1 unresolved \(RF-1=inconclusive\)/);
+  const f = findingsForReview(REVIEW)[0] as ReviewFinding;
+  assert.equal(f.resolution, "inconclusive");
+  assert.match(f.resolutionEvidence ?? "", /names candidate somethingelse7, not this review's candidate afterfix2/);
+  assert.equal(getReview(REVIEW)?.state, "awaiting_disposition");
+});
+
+test("FG-639 / PRD #29: the shipping review refuses an acceptance criterion whose only evidence is a SKIPPED test", async () => {
+  const base = harness();
+  const h = harness({
+    shippingInput: async (ctx) => {
+      const input = await base.deps.shippingInput(ctx);
+      return {
+        ...input,
+        acceptance: [
+          {
+            ref: "FG-639 AC 1",
+            verdict: "met",
+            evidence: { kind: "regression_test", test_name: TEST_NAME, runner_output: SKIPPED },
+          },
+        ],
+      };
+    },
+  });
+
+  await parkAt(h.deps, "shipping_review");
+  const shipping = await runNextStage(REVIEW, h.deps);
+
+  assert.equal(shipping.status, "refused");
+  assert.match(shipping.message, /acceptance_mapped: 1 acceptance criteria are unmet\/unproven/);
+  assert.match(shipping.message, /SKIPPED in the cited runner output/);
+  assert.equal(shipping.shipping?.acceptance[0]?.verdict, "unproven");
+  assert.equal(getReview(REVIEW)?.stageEvidence?.shipping, undefined);
+  assert.notEqual(getReview(REVIEW)?.state, "settled");
+});
+
+// ─── PRD #8 — a demonstrated invariant violation stops before shipping ───────
+
+test("FG-639 / PRD #8: a demonstrated data-loss path against a protected invariant stops at disposition and can never reach shipping", async () => {
+  const h = harness({
+    dispatchLens: (ctx) => ({
+      lens: ctx.lens,
+      role: ctx.role,
+      dispatched: true,
+      taskId: `task-${ctx.lens}`,
+      result:
+        ctx.lens === "backend"
+          ? {
+              outcome: "fail",
+              findings: [
+                discoveryFinding(1, {
+                  summary: "the reconcile path writes the ledger row and returns before the receipt, losing the receipt on crash",
+                  severity: "critical",
+                  reachability: "demonstrated",
+                  file: "src/store/reviews.ts",
+                  line: 88,
+                  invariant_ref: "no partial write",
+                }),
+              ],
+            }
+          : { outcome: "pass", findings: [] },
+    }),
+  });
+
+  const seen = await drive(h.deps, "settled");
+  assert.deepEqual(
+    seen,
+    ["verify_entry:advanced", "confirm_contract:advanced", "discover:advanced", "await_disposition:stopped"],
+    "the lifecycle stops at Stage 4 — a demonstrated invariant violation is never driven past it",
+  );
+
+  const f = findingsForReview(REVIEW)[0] as ReviewFinding;
+  assert.equal(f.reachability, "demonstrated");
+  assert.equal(f.invariantRef, "no partial write");
+  assert.ok(
+    (CONTRACT.protected_invariants as readonly string[]).includes(f.invariantRef as string),
+    "the invariant it violates is one the confirmed contract protects",
+  );
+  assert.equal(f.disposition, "untriaged");
+
+  // No amount of continuing gets past the operator: every attempt lands on the same stop.
+  for (let i = 0; i < 3; i++) {
+    const again = await runNextStage(REVIEW, h.deps);
+    assert.equal(again.transition.kind, "await_disposition");
+    assert.deepEqual(again.transition.blockingFindings, ["RF-1"]);
+  }
+  assert.equal(h.calls.fixer, 0);
+  assert.equal(h.calls.docs, 0);
+  assert.equal(h.calls.rechecker, 0);
+  assert.equal(getReview(REVIEW)?.stageEvidence?.shipping, undefined);
+});
+
+// ─── FixBatch integrity under adversity ─────────────────────────────────────
+
+test("FG-639 / PRD #20: a fixer result naming a FOREIGN finding id is refused at host ingestion and nothing is recorded", async () => {
+  const h = harness({
+    dispatchFixer: (ctx) => ({
+      ok: true,
+      taskId: "task-fixer-1",
+      result: {
+        fix_batch_id: ctx.batch.id,
+        revision: ctx.batch.revision,
+        findings: [
+          {
+            finding_id: "rf-from-some-other-review",
+            result: "fixed",
+            remediation_summary: "guarded",
+            files_changed: ["src/x.ts"],
+            evidence: "added the named regression test",
+          },
+        ],
+      },
+    }),
+  });
+  await drive(h.deps, "discover");
+  dispositionAll("fix_now", "will be remediated this cycle");
+
+  const fix = await runNextStage(REVIEW, h.deps);
+  assert.equal(fix.status, "refused");
+  assert.match(fix.message, /rf-from-some-other-review, which is not in fix batch/);
+  assert.match(fix.message, /Nothing was written/);
+  assert.equal(getReview(REVIEW)?.stageEvidence?.fix, undefined);
+  assert.equal(fixBatchesForReview(REVIEW)[0]?.state, "dispatched", "the batch never reaches ingested");
+  const f = findingsForReview(REVIEW)[0] as ReviewFinding;
+  assert.equal(f.disposition, "fix_now");
+  assert.equal(f.resolution, undefined);
+});
+
+test("FG-639 / PRD #19: a disposition re-decided WHILE the fixer runs leaves that task bound to its revision and gives the next dispatch a new one", async () => {
+  const dispatched: Array<{ id: string; revision: number; payload: string; candidate: string }> = [];
+  let n = 0;
+  const h = harness({
+    findingsPerLens: 2,
+    dispatchFixer: (ctx) => {
+      n += 1;
+      dispatched.push({
+        id: ctx.batch.id,
+        revision: ctx.batch.revision,
+        payload: ctx.payload,
+        candidate: ctx.batch.candidateSha,
+      });
+      if (n === 1) {
+        // The operator changes their mind about RF-1 while THIS container is running. The
+        // head deliberately does not move, so the only thing that differs for the next
+        // dispatch is the decision — not the candidate.
+        const rf1 = findingsForReview(REVIEW).find((f) => f.findingRef === "RF-1") as ReviewFinding;
+        recordDisposition(rf1.id, {
+          decision: "fix_now",
+          rationale: "re-decided mid-flight: guard the reconcile path too",
+          operator: false,
+        });
+      }
+      return {
+        ok: true,
+        taskId: `task-fixer-${n}`,
+        result: {
+          fix_batch_id: ctx.batch.id,
+          revision: ctx.batch.revision,
+          findings: ctx.batch.payload.findings.map((f) => ({
+            finding_id: f.finding_id,
+            result: "fixed",
+            remediation_summary: "guarded",
+            files_changed: ["src/x.ts"],
+            evidence: "added the named regression test",
+          })),
+        },
+      };
+    },
+  });
+
+  await drive(h.deps, "discover");
+  dispositionAll("fix_now", "will be remediated this cycle");
+
+  const firstFix = await runNextStage(REVIEW, h.deps);
+  assert.equal(firstFix.status, "advanced");
+  const rev1 = fixBatchesForReview(REVIEW)[0] as NonNullable<ReturnType<typeof getFixBatch>>;
+  assert.equal(rev1.revision, 1);
+  assert.equal(rev1.dispatchTaskId, "task-fixer-1");
+  assert.equal(
+    serializeFixBatchPayload(rev1.payload),
+    dispatched[0]?.payload,
+    "the payload the running container was dispatched with is byte-identical after the operator's change",
+  );
+
+  // The re-decided finding is not covered by what the ingested batch carried, so the machine
+  // returns to the fix stage — with revision 2, never a mutated revision 1.
+  const secondFix = await runNextStage(REVIEW, h.deps);
+  assert.equal(secondFix.transition.kind, "batch_fix");
+  assert.equal(secondFix.status, "advanced");
+  assert.equal(n, 2, "the second dispatch is a second fixer, not a mutation of the first");
+
+  const batches = fixBatchesForReview(REVIEW);
+  assert.equal(batches.length, 2);
+  const rev2 = batches[1] as NonNullable<ReturnType<typeof getFixBatch>>;
+  assert.equal(rev2.revision, 2);
+  assert.equal(rev2.supersedesBatchId, rev1.id);
+  assert.equal(rev2.candidateSha, "cand111", "the new revision came from the DECISION, not from a moved candidate");
+  assert.notEqual(rev2.payloadSha256, rev1.payloadSha256);
+  assert.equal(rev2.dispatchTaskId, "task-fixer-2");
+  assert.equal(getFixBatch(rev1.id)?.state, "superseded");
+  assert.equal(
+    serializeFixBatchPayload(getFixBatch(rev1.id)?.payload as never),
+    dispatched[0]?.payload,
+    "superseding revision 1 did not rewrite it",
+  );
+  assert.match(
+    dispatched[1]?.payload ?? "",
+    /re-decided mid-flight: guard the reconcile path too/,
+    "the second dispatch carries the NEW decision",
+  );
+});
+
+// ─── PRD #2 / #3 — dedup across lenses, at the stage that ingests ───────────
+
+const SHARED_ANCHOR = { file: "src/store/reviews.ts", line: 88 };
+
+function bothLensesReport(invariantFor: (lens: string) => string): Partial<CoordinatorDeps> {
+  return {
+    dispatchLens: (ctx) => ({
+      lens: ctx.lens,
+      role: ctx.role,
+      dispatched: true,
+      taskId: `task-${ctx.lens}`,
+      result: {
+        outcome: "fail",
+        findings: [
+          discoveryFinding(1, {
+            ...SHARED_ANCHOR,
+            summary: `the ${ctx.lens} lens reports the ledger write is not atomic`,
+            risk_lens: ctx.lens,
+            invariant_ref: invariantFor(ctx.lens),
+          }),
+        ],
+      },
+    }),
+  };
+}
+
+test("FG-639 / PRD #2: two lenses reporting the same mechanism AND invariant become ONE ledger finding carrying both sources", async () => {
+  const h = harness(bothLensesReport(() => "no partial write"));
+  await drive(h.deps, "discover");
+
+  const findings = findingsForReview(REVIEW);
+  assert.equal(findings.length, 1, "one finding, not one per reviewer");
+  assert.deepEqual(
+    findings[0]?.sources.map((s) => s.redRole),
+    ["red-wide", "red-backend"],
+    "both reviewers survive as provenance",
+  );
+  assert.deepEqual(findings[0]?.sources.map((s) => s.redTaskId), ["task-wide", "task-backend"]);
+  assert.equal(findings[0]?.severity, "high", "a correlated agreement is not an escalation");
+  const merges = getReview(REVIEW)?.stageEvidence?.discovery?.meta?.["merges"] as unknown[];
+  assert.equal(merges.length, 1);
+});
+
+test("FG-639 / PRD #3: the same two lenses at the same anchor naming DIFFERENT invariants stay TWO findings", async () => {
+  const h = harness(bothLensesReport((lens) => (lens === "wide" ? "no partial write" : "only forge publishes")));
+  await drive(h.deps, "discover");
+
+  const findings = findingsForReview(REVIEW);
+  assert.equal(findings.length, 2, "same mechanism, different promises — merging them would hide one defect");
+  assert.deepEqual(findings.map((f) => f.invariantRef), ["no partial write", "only forge publishes"]);
+  assert.deepEqual(findings.map((f) => f.sources.length), [1, 1]);
+  assert.equal((getReview(REVIEW)?.stageEvidence?.discovery?.meta?.["merges"] as unknown[]).length, 0);
+  assert.deepEqual(pending().blockingFindings, ["RF-1", "RF-2"]);
 });

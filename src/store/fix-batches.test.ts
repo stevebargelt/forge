@@ -193,6 +193,37 @@ test("FG-639 / PRD #19: a CHANGED disposition creates a NEW revision instead of 
   assert.equal(stillRunning?.dispatchTaskId, "task-fixer-1");
 });
 
+test("FG-639 / PRD #19: a result from the container bound to a SUPERSEDED revision is recorded against that revision and never revives it", () => {
+  const findings = fixNowFindings(2);
+  const first = ensureFixBatch(REVIEW, "cand111", findings);
+  markFixBatchDispatched(first.batch.id, "task-fixer-1");
+
+  // The operator re-decides one finding while task-fixer-1 is still running, so revision 2
+  // exists before revision 1's container has delivered anything.
+  recordDisposition((findings[0] as ReviewFinding).id, {
+    decision: "fix_now",
+    rationale: "re-decided: guard the reconcile path too",
+    operator: false,
+  });
+  const next = ensureFixBatch(REVIEW, "cand111", findingsForReview(REVIEW).filter((f) => f.disposition === "fix_now"));
+  assert.equal(next.batch.revision, 2);
+  assert.equal(getFixBatch(first.batch.id)?.state, "superseded");
+
+  // Now the in-flight container delivers. It was dispatched against revision 1 and its
+  // result is about revision 1 — it is recorded there, and it does not become the current
+  // scope by arriving late.
+  const late = ingestFixBatchResults(first.batch.id, "task-fixer-1", first.batch.id, incoming(findings));
+  assert.equal(late.ok, true);
+  assert.equal(fixBatchResults(first.batch.id).length, 2, "the work the container actually did is not discarded");
+  assert.equal(
+    getFixBatch(first.batch.id)?.state,
+    "superseded",
+    "a late result never promotes a superseded revision back to ingested",
+  );
+  assert.equal(fixBatchResults(next.batch.id).length, 0, "nor is it credited to the revision that superseded it");
+  assert.equal(latestFixBatch(REVIEW)?.id, next.batch.id);
+});
+
 test("FG-639 / PRD #19: a re-decided finding changes the fingerprint even when the membership set does not", () => {
   const findings = fixNowFindings(2);
   const first = ensureFixBatch(REVIEW, "cand111", findings);

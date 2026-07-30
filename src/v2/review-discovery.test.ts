@@ -227,6 +227,63 @@ test("FG-639: a file-only observation (no line) is unanchored for dedup purposes
   assert.equal(r.observations.length, 2);
 });
 
+test("FG-639 / PRD #3: an invariant named on ONE side only stays separate — a shared anchor is not a shared claim", () => {
+  const r = normalizeObservations([
+    { finding: finding({ file: "src/a.ts", line: 12, invariant_ref: "no partial write" }), source: { redRole: "red-wide" } },
+    { finding: finding({ file: "src/a.ts", line: 12 }), source: { redRole: "red-backend" } },
+  ]);
+  assert.equal(r.observations.length, 2, "one reviewer named the affected promise and the other did not — unsure keeps both");
+  assert.equal(r.merges.length, 0);
+});
+
+test("FG-639 / PRD #2: acceptance_ref stands in for the affected invariant when that is how the lens named it", () => {
+  const same = normalizeObservations([
+    { finding: finding({ file: "src/a.ts", line: 12, acceptance_ref: "FG-639 AC 1" }), source: { redRole: "red-wide" } },
+    { finding: finding({ file: "src/a.ts", line: 12, acceptance_ref: "FG-639 AC 1" }), source: { redRole: "red-backend" } },
+  ]);
+  assert.equal(same.observations.length, 1);
+  assert.equal(same.observations[0]?.mergedFrom, 2);
+
+  const different = normalizeObservations([
+    { finding: finding({ file: "src/a.ts", line: 12, acceptance_ref: "FG-639 AC 1" }), source: { redRole: "red-wide" } },
+    { finding: finding({ file: "src/a.ts", line: 12, acceptance_ref: "FG-639 AC 4" }), source: { redRole: "red-backend" } },
+  ]);
+  assert.equal(different.observations.length, 2, "different acceptance refs are claims about different promises");
+});
+
+test("FG-639 / PRD #2 + #3: at ONE anchor, a shared invariant merges while a different one stays — dedup is not keyed on the mechanism alone", () => {
+  const at = { file: "src/store/reviews.ts", line: 88 };
+  const r = normalizeObservations([
+    { finding: finding({ ...at, invariant_ref: "no partial write" }), source: { redRole: "red-wide" } },
+    { finding: finding({ ...at, invariant_ref: "no partial write" }), source: { redRole: "red-backend" } },
+    { finding: finding({ ...at, invariant_ref: "only forge publishes" }), source: { redRole: "red-security" } },
+  ]);
+  // All three name the SAME mechanism. A mechanism-only key would have collapsed them into
+  // one row carrying three sources, which is the silent merge Stage 3 exists to refuse.
+  assert.equal(r.observations.length, 2, "keyed on the mechanism alone all three would have become one finding");
+  const merged = r.observations.find((o) => o.invariantRef === "no partial write");
+  assert.equal(merged?.mergedFrom, 2);
+  assert.deepEqual(merged?.sources?.map((s) => s.redRole), ["red-wide", "red-backend"]);
+  const separate = r.observations.find((o) => o.invariantRef === "only forge publishes");
+  assert.equal(separate?.mergedFrom, 1);
+  assert.deepEqual(separate?.sources?.map((s) => s.redRole), ["red-security"]);
+  assert.deepEqual(r.merges, [{ mechanism: "src/store/reviews.ts:88", invariant: "no partial write", sources: 2 }]);
+});
+
+test("FG-639 / PRD #2: THREE correlated sources become one finding carrying all three, and the merge arithmetic says so", () => {
+  const at = { file: "src/store/reviews.ts", line: 88, invariant_ref: "no partial write" };
+  const r = normalizeObservations([
+    { finding: finding({ ...at }), source: { redRole: "red-wide", verdictId: "v1" } },
+    { finding: finding({ ...at }), source: { redRole: "red-backend", verdictId: "v2" } },
+    { finding: finding({ ...at }), source: { redRole: "red-security", verdictId: "v3" } },
+  ]);
+  assert.equal(r.observations.length, 1);
+  assert.equal(r.observations[0]?.mergedFrom, 3);
+  assert.deepEqual(r.observations[0]?.sources?.map((s) => s.verdictId), ["v1", "v2", "v3"], "every verdict survives as provenance");
+  assert.equal(r.merges.length, 2, "two merge events, not an independent review count");
+  assert.equal(r.merges[1]?.sources, 3);
+});
+
 test("FG-639: the model's own finding id is carried as provenance, never as identity", () => {
   const obs = collectObservations([
     assessLens(dispatch({ result: { outcome: "fail", findings: [finding({ finding_id: "CVE-1" })] } })),
