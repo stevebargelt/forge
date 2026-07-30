@@ -106,7 +106,14 @@ export type Run = {
   // --project <path>` and reused by subsequent calls + the dashboard's run-next
   // button. Override by passing --project again (warns on change).
   projectDir?: string;
+  // FG-638: which review authority model settles this run. Exactly one per run —
+  // the column is NOT NULL DEFAULT 'legacy_verdict', so a run written before the
+  // ledger existed (and one written by an older binary today) resolves to the
+  // verdict/blocked_by_red model rather than to nothing.
+  reviewMode?: ReviewMode;
 };
+
+export type ReviewMode = "legacy_verdict" | "legacy_review_loop" | "evidence_led";
 
 export type Task = {
   id: string;

@@ -21,6 +21,10 @@ export function newGateId(): string {
   return `gate-${shortId()}${shortId()}`;
 }
 
+export function newReviewId(): string {
+  return `review-${shortId()}${shortId()}`;
+}
+
 export function newCampaignId(): string {
   return `campaign-${shortId()}${shortId()}`;
 }

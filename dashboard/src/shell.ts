@@ -968,4 +968,21 @@ section.home-view section.in-flight { margin-top: 0; }
 .backlog-type-badge { background: rgba(122, 159, 255, 0.12); color: var(--accent); }
 .backlog-id { user-select: all; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+/* FG-638: review ledger view */
+.reviews-view { margin-top: 20px; }
+.review-card { margin-bottom: 12px; }
+.review-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 4px 16px;
+  margin-top: 10px;
+  font-size: 12px;
+}
+.review-summary-grid .muted { margin-right: 4px; }
+.review-next {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--warn);
+}
 `;
