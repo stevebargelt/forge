@@ -34,7 +34,6 @@ import {
 } from "../store/reviews.js";
 import {
   ensureFixBatch,
-  fixBatchEnvelope,
   ingestFixBatchResults,
   markFixBatchDispatched,
   serializeFixBatchPayload,
@@ -42,7 +41,6 @@ import {
   fixBatchesForReview,
   fixBatchResults,
   type FixBatch,
-  type FixBatchEnvelope,
 } from "../store/fix-batches.js";
 import {
   classifyVerification,
@@ -79,10 +77,12 @@ export type LensContext = {
   contract: unknown;
 };
 
+// No envelope field: the envelope is rendered from the batch ROW at materialization and
+// re-derived from the row to verify the delivered bytes (renderFixBatchEnvelope). Carrying a
+// pre-rendered copy here would be a second envelope truth for a caller to deliver instead.
 export type FixerContext = {
   review: Review;
   batch: FixBatch;
-  envelope: FixBatchEnvelope;
   payload: string;
 };
 
@@ -108,6 +108,13 @@ export type CoordinatorDeps = {
   proposeContract: (ctx: { review: Review; candidateSha: string; changedPaths: string[] }) => Awaitable<ContractProposal>;
   dispatchLens: (ctx: LensContext) => Awaitable<LensDispatch>;
   materializeFixBatch: (ctx: FixerContext) => Awaitable<string>;
+  /** LOAD-BEARING CONTRACT on taskId: the empty string means "refused BEFORE any container
+   *  started". Stage 5 marks the batch dispatched only for a non-empty taskId, so an empty
+   *  one leaves the batch OPEN at this revision — the same revision and payload hash are
+   *  re-entered on retry, rather than a delivery that never happened being recorded against
+   *  a task id that does not exist. Any implementation that reaches a container MUST return
+   *  the real task id, including when that container then fails (ok: false, taskId set): a
+   *  fixer that ran and crashed is a dispatch, and its task is the audit trail. */
   dispatchFixer: (ctx: FixerContext) => Awaitable<{ ok: boolean; taskId: string; result?: unknown; error?: string }>;
   dispatchDocs: (ctx: { review: Review; candidateSha: string }) => Awaitable<{ ok: boolean; error?: string }>;
   dispatchRechecker: (ctx: RecheckContextIn) => Awaitable<{ ok: boolean; taskId?: string; result?: unknown; error?: string }>;
@@ -386,9 +393,8 @@ async function runBatchFix(reviewId: string, transition: Transition, deps: Coord
   setReviewState(reviewId, "fixing", { reason: transition.reason });
 
   const { batch } = ensureFixBatch(reviewId, candidate, fixNow);
-  const envelope = fixBatchEnvelope(batch);
   const payload = serializeFixBatchPayload(batch.payload);
-  const ctx: FixerContext = { review, batch, envelope, payload };
+  const ctx: FixerContext = { review, batch, payload };
 
   // Materialize, then verify THE BYTES against the persisted hash before the container
   // starts. A mismatch is a refusal — a fixer working from an unverified snapshot is a
@@ -400,8 +406,9 @@ async function runBatchFix(reviewId: string, transition: Transition, deps: Coord
   }
 
   const dispatch = await deps.dispatchFixer(ctx);
-  // A refusal from BEFORE the container started names no task. Marking the batch
-  // dispatched against an empty id would record a delivery that never happened.
+  // The empty-taskId sentinel (CoordinatorDeps.dispatchFixer): a refusal from BEFORE the
+  // container started names no task. Marking the batch dispatched against an empty id would
+  // record a delivery that never happened; leaving it open re-enters this revision as-is.
   if (dispatch.taskId !== "") markFixBatchDispatched(batch.id, dispatch.taskId);
   if (!dispatch.ok) {
     // Fixer crash: findings stay fix_now and unresolved. Nothing is recorded.

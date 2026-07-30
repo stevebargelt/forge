@@ -665,6 +665,16 @@ test("FG-639: an undeliverable bundle leaves the batch OPEN and the SAME revisio
   assert.equal(after[0]?.payloadSha256, batches[0]?.payloadSha256);
 });
 
+test("FG-639: the OTHER side of the empty-taskId sentinel — a named task marks the batch dispatched against it", async () => {
+  const h = harness();
+  await drive(h.deps, "discover");
+  dispositionAll("fix_now", "will be remediated this cycle");
+
+  const fix = await runNextStage(REVIEW, h.deps);
+  assert.equal(fix.status, "advanced", fix.message);
+  assert.equal(fixBatchesForReview(REVIEW)[0]?.dispatchTaskId, "task-fixer-1");
+});
+
 // ─── stage order, docs before final verification ────────────────────────────
 
 test("FG-639: docs reconciliation runs BEFORE final verification, and a docs commit re-binds both", async () => {

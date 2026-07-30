@@ -769,6 +769,62 @@ test("invoke: FG-639 taskFiles land in the task dir BEFORE the container runs", 
   );
 });
 
+// FG-639 F1: the confinement is screened at the invoke layer, so it holds for every
+// caller of taskFiles and not just the fix-batch one that introduced it. Each refusal is
+// pre-WRITE and pre-container: no task dir, no docker.
+for (const bad of [
+  { label: "traversal", key: "../../escaped.json", refusal: /resolves outside the task dir/ },
+  { label: "nested traversal", key: "fix-batch/../../escaped.json", refusal: /resolves outside the task dir/ },
+  { label: "absolute", key: "/etc/cron.d/forge", refusal: /absolute paths are refused/ },
+  { label: "reserved result.json", key: "result.json", refusal: /reserved task artifact "result.json"/ },
+  { label: "reserved CLAUDE.md", key: "CLAUDE.md", refusal: /reserved task artifact "claude.md"/i },
+  { label: "reserved as a directory", key: "manifest.json/payload.json", refusal: /reserved task artifact "manifest.json"/ },
+  { label: "reserved container log", key: "container.stdout.log", refusal: /reserved task artifact "container.stdout.log"/ },
+  { label: "empty", key: "", refusal: /empty key names no file/ },
+]) {
+  test(`invoke: FG-639 a ${bad.label} taskFiles key is refused before anything is written`, async () => {
+    setupRuntimeStub();
+    process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+    let started = false;
+    const res = await invoke({
+      agentRole: "engineer",
+      task: "deliver a file it should not be able to deliver",
+      projectDir: "/tmp/x",
+      taskFiles: { [bad.key]: "pwned" },
+      dockerExec: async () => {
+        started = true;
+        return 0;
+      },
+    });
+
+    assert.equal(res.status, "failed");
+    assert.match(res.error ?? "", bad.refusal);
+    assert.equal(started, false, "the refusal precedes the container, not the container's exit");
+    assert.equal(
+      existsSync(taskDir(res.runId, res.taskId)),
+      false,
+      "refusing after the first file lands defeats the property the guard exists for",
+    );
+  });
+}
+
+test("invoke: FG-639 a reserved name BELOW the task dir root is delivered — the guard is confinement, not a blocklist", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  const res = await invoke({
+    agentRole: "engineer",
+    task: "fix the batch",
+    projectDir: "/tmp/x",
+    taskFiles: { "fix-batch/manifest.json": "{}" },
+    dockerExec: makeStubExec({ status: "complete" }),
+  });
+
+  assert.equal(res.status, "complete");
+  assert.equal(readFileSync(join(taskDir(res.runId, res.taskId), "fix-batch", "manifest.json"), "utf8"), "{}");
+});
+
 test("invoke: readOnlyProject sets PROJECT_MODE=ro in docker args", async () => {
   setupRuntimeStub();
   process.env.ANTHROPIC_API_KEY = "sk-stub";

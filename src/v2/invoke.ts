@@ -19,7 +19,7 @@
 // - No gate concept; agent completes or fails
 
 import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, normalize, sep } from "node:path";
 import type { Task, TaskPackage, Run } from "../types/index.js";
 import type { Workflow, Step, Runtime } from "./schema.js";
 import { resolveRuntimeMetadata } from "./schema.js";
@@ -305,6 +305,60 @@ export function invokeWorkflowShape(
   };
 }
 
+// FG-639: the task dir's OWN artifacts. A taskFiles key that lands on one of these
+// overwrites the delivery channel it rides on (the composed prompt, the package, the
+// result the host reads back) or takes a name a later write needs — so it is refused
+// rather than resolved in favor of whoever wrote last. Matched case-insensitively
+// because the host filesystem is APFS on the Mac these run from.
+const RESERVED_TASK_ARTIFACTS = [
+  "claude.md",
+  "package.md",
+  "result.json",
+  "detached-entry.sh",
+  "detached-stdin",
+  "manifest.json",
+];
+
+function isReservedTaskArtifact(segment: string): boolean {
+  const lower = segment.toLowerCase();
+  return RESERVED_TASK_ARTIFACTS.includes(lower) || (lower.startsWith("container.") && lower.endsWith(".log"));
+}
+
+/** FG-639: confine taskFiles to the task dir. Screened at the invoke layer — the one
+ *  chokepoint every caller passes through — so a future caller inherits the confinement
+ *  instead of re-deriving it. Pure and total: it decides from the keys alone, so the
+ *  refusal happens before the task dir exists and nothing is written on the way to it.
+ *  Returns the named refusal, or undefined when every key is a plain relative file path
+ *  inside the task dir and clear of its reserved artifacts. */
+export function taskFilesRefusal(taskFiles: Record<string, string> | undefined): string | undefined {
+  for (const rel of Object.keys(taskFiles ?? {})) {
+    if (rel.trim() === "") {
+      return `taskFiles: an empty key names no file — keys are paths relative to the task dir.`;
+    }
+    if (isAbsolute(rel)) {
+      return `taskFiles key "${rel}": absolute paths are refused — keys are relative to the task dir.`;
+    }
+    const segments = normalize(rel)
+      .split(sep)
+      .flatMap((s) => s.split("/"))
+      .filter((s) => s !== "" && s !== ".");
+    if (segments.length === 0) {
+      return `taskFiles key "${rel}": resolves to the task dir itself, not to a file in it — refused.`;
+    }
+    if (segments.includes("..")) {
+      return `taskFiles key "${rel}": resolves outside the task dir — refused.`;
+    }
+    if (rel.endsWith("/") || rel.endsWith(sep)) {
+      return `taskFiles key "${rel}": names a directory, not a file — refused.`;
+    }
+    const top = segments[0] as string;
+    if (isReservedTaskArtifact(top)) {
+      return `taskFiles key "${rel}": collides with the reserved task artifact "${top}" — refused.`;
+    }
+  }
+  return undefined;
+}
+
 export type DispatchInvokeTaskArgs = {
   /** An already-inserted PENDING row whose taskPackage.composedSystemPrompt is set. */
   task: Task;
@@ -390,6 +444,17 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     failTask(taskId, { runId, kind: classify({}), error });
     closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error };
+  }
+
+  // FG-639: the taskFiles confinement sits at the same pre-WRITE chokepoint. A key that
+  // escapes the task dir or takes a reserved artifact's name is refused here, before the
+  // dir is created and before any container starts — so a refused delivery leaves nothing
+  // on disk to reason about.
+  const filesRefusal = taskFilesRefusal(args.taskFiles);
+  if (filesRefusal !== undefined) {
+    failTask(taskId, { runId, kind: classify({}), error: filesRefusal });
+    closeRunIfIdle(false);
+    return { runId, taskId, status: "failed", error: filesRefusal };
   }
 
   // FG-583: no per-consumer seed-state gating. The runtime/workflow/policy loads

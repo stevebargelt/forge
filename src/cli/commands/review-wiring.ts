@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { buildReviewLoopDeps, resolveReviewedTipTrust } from "./review-loop.js";
 import { invoke, type InvokeArgs, type InvokeResult } from "../../v2/invoke.js";
 import { fixBatchBundleDir } from "../../util/paths.js";
-import { verifyMaterializedPayload } from "../../store/fix-batches.js";
+import { renderFixBatchEnvelope, verifyMaterializedEnvelope, verifyMaterializedPayload } from "../../store/fix-batches.js";
 import { getRun } from "../../store/runs.js";
 import type { CoordinatorDeps, FixerContext, LensContext, RecheckContextIn } from "../../v2/review-run.js";
 import type { VerificationEntry } from "../../v2/review-coordinator.js";
@@ -139,13 +139,15 @@ function fixerTask(ctx: FixerContext): string {
   return [
     `# Batch remediation — fix batch ${ctx.batch.id} revision ${ctx.batch.revision}`,
     ``,
-    `The AUTHORITATIVE handoff is the persisted batch, delivered as a verified snapshot`,
-    `INSIDE this container at:`,
-    `  ${FIX_BATCH_PAYLOAD_PATH}   (sha256 ${ctx.batch.payloadSha256})`,
+    `The AUTHORITATIVE handoff is the batch the HOST has persisted. Your working copies of`,
+    `it were verified against that record and written here for convenience:`,
+    `  ${FIX_BATCH_PAYLOAD_PATH}   (sha256 ${ctx.batch.payloadSha256} as delivered)`,
     `  ${FIX_BATCH_ENVELOPE_PATH}`,
     ``,
-    `The host hashed those exact bytes against the persisted value before starting you; the`,
-    `envelope rides along so you can re-verify: sha256sum ${FIX_BATCH_PAYLOAD_PATH}`,
+    `That directory is writable, like the rest of /task — these copies are not a tamper-proof`,
+    `record and nothing downstream reads them back. Your result is validated against the`,
+    `host's expected finding set for this batch and revision regardless of what these files`,
+    `say, so editing them changes nothing except which findings YOU work from.`,
     ``,
     `Read the payload. Solve the finding set COHERENTLY — it is one batch, not N tasks.`,
     ``,
@@ -414,19 +416,26 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
       mkdirSync(dir, { recursive: true });
       const payloadPath = join(dir, "payload.json");
       writeFileSync(payloadPath, fixCtx.payload);
-      writeFileSync(join(dir, "envelope.json"), JSON.stringify(fixCtx.envelope, null, 2));
+      writeFileSync(join(dir, "envelope.json"), renderFixBatchEnvelope(fixCtx.batch));
       return readFileSync(payloadPath, "utf8");
     },
 
     // Deliver the verified bundle into the container, then start it. The bytes DELIVERED
     // are the bytes re-hashed here — verifying the materialization and then shipping a
     // separate read of the same file would leave the delivered copy unverified.
+    //
+    // BOTH halves are verified against the store, and neither is trusted from disk: the
+    // payload against the batch's recorded sha256, the envelope byte-for-byte against a
+    // rendering re-derived from the row. A refusal returns the empty taskId sentinel, so
+    // the batch stays open at this revision (see CoordinatorDeps.dispatchFixer).
     dispatchFixer: async (fixCtx: FixerContext) => {
       const dir = fixBatchBundleDir(fixCtx.review.id, fixCtx.batch.id);
       const payload = readFileSync(join(dir, "payload.json"), "utf8");
       const envelope = readFileSync(join(dir, "envelope.json"), "utf8");
       const verified = verifyMaterializedPayload(fixCtx.batch, payload);
       if (!verified.ok) return { ok: false, taskId: "", error: verified.refusal };
+      const envelopeVerified = verifyMaterializedEnvelope(fixCtx.batch.id, envelope);
+      if (!envelopeVerified.ok) return { ok: false, taskId: "", error: envelopeVerified.refusal };
       const res = await dispatch({
         agentRole: "engineer",
         task: fixerTask(fixCtx),
