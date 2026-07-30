@@ -30,6 +30,7 @@ import {
   getFinding,
   lookupFinding,
   recordDisposition,
+  checkDisposition,
   acceptedRiskNeedsOperator,
   summarizeReview,
   REVIEW_STATES,
@@ -206,13 +207,29 @@ test("FG-638: a run that already owns a legacy_verdict review refuses an evidenc
   assert.deepEqual(authoritySnapshot(), before);
 });
 
-test("FG-638: adoption is ATOMIC with the review insert — a failed insert leaves the run unmarked", () => {
-  // The run row is written BEFORE the review row, so "both rows or neither" is a claim
-  // about the transaction, not about statement order. Forced by re-using an id that
-  // already exists: the run UPDATE lands, then the INSERT violates the primary key.
-  getDb()
-    .prepare(`INSERT INTO runs (id, workflow, title, status, created_at) VALUES (?, ?, ?, ?, ?)`)
-    .run("run-atomic", "feature", "unmarked", "active", "2026-01-01T00:00:00Z");
+test("FG-638: adoption is ATOMIC with the review insert — a failed insert ROLLS BACK the run-mode UPDATE", () => {
+  // "Rolled back" and "never attempted" leave identical rows, so one arm cannot
+  // distinguish them. Two runs of IDENTICAL shape do: the CONTROL proves this exact
+  // insert DOES reach the run-mode UPDATE, and the failing arm proves the mark does
+  // not survive without the review row it was made for. Drop the adoption UPDATE and
+  // the control fails; move it outside the transaction and the failing arm fails.
+  for (const id of ["run-atomic", "run-atomic-control"]) {
+    getDb()
+      .prepare(`INSERT INTO runs (id, workflow, title, status, created_at) VALUES (?, ?, ?, ?, ?)`)
+      .run(id, "feature", "unmarked", "active", "2026-01-01T00:00:00Z");
+    assert.equal(getRun(id)!.reviewMode, "legacy_verdict", `precondition: ${id} carries the column DEFAULT`);
+  }
+
+  insertReview({ id: "review-control", runId: "run-atomic-control", reviewMode: "evidence_led" });
+  assert.equal(
+    getRun("run-atomic-control")!.reviewMode,
+    "evidence_led",
+    "control: an insert of exactly this shape DOES mark the run, so the failing arm below is a rollback",
+  );
+
+  // The run UPDATE lands FIRST, then the review INSERT violates the primary key —
+  // a failure after the mode moved and before the commit. Forced by re-using an id
+  // that already exists.
   insertReview({ id: "review-taken", reviewMode: "evidence_led" }); // no run — takes the id only
 
   const before = authoritySnapshot();
@@ -225,6 +242,31 @@ test("FG-638: a review with no owning run is unconstrained — there is no run t
   insertReview({ id: "review-orphan", reviewMode: "evidence_led" });
   assert.equal(getReview("review-orphan")!.reviewMode, "evidence_led");
   assert.equal(getReview("review-orphan")!.runId, undefined);
+});
+
+test("FG-638: a review NAMING a run that does not exist is REFUSED — reconciliation may not silently no-op", () => {
+  // Distinct from the unconstrained case above: this review claims a run, so the
+  // reconciliation is the thing that decides its mode — and against a missing row it
+  // has nothing to compare. Allowed through, the review would keep whatever mode the
+  // caller asked for and pair forever with a run created later under another.
+  const before = authoritySnapshot();
+  assert.throws(
+    () => insertReview({ id: "review-ghost", runId: "run-never-created", reviewMode: "evidence_led" }),
+    (e: Error) => {
+      assert.match(e.message, /no such run run-never-created/, "the refusal must name the run and say it is not there");
+      assert.match(e.message, /Nothing was written/);
+      return true;
+    },
+  );
+  assert.deepEqual(authoritySnapshot(), before, "a refused review must leave runs, reviews and events byte-identical");
+  assert.equal(getReview("review-ghost"), undefined);
+
+  // And creating the run afterwards does not resurrect it — the pair never existed.
+  getDb()
+    .prepare(`INSERT INTO runs (id, workflow, title, status, created_at) VALUES (?, ?, ?, ?, ?)`)
+    .run("run-never-created", "feature", "late", "active", "2026-01-02T00:00:00Z");
+  assert.equal(getReview("review-ghost"), undefined);
+  assert.equal(reviewsForRun("run-never-created").length, 0);
 });
 
 // ─── lifecycle + events ─────────────────────────────────────────────────────
@@ -577,6 +619,58 @@ test("FG-638 / PRD #25: rejected_premise without candidate-bound disproving evid
     evidence.detail,
     { command: "node --test src/store/x.test.ts", output: "12/12 pass" },
     "the payload is stored STRUCTURED — a reader never re-parses free text to find what was run",
+  );
+});
+
+test("FG-638: the kind's fields are REQUIRED, not exhaustive — an extra evidence field survives to the stored row", () => {
+  newReview();
+  const id = ingestOne();
+  const out = recordDisposition(id, {
+    decision: "rejected_premise",
+    rationale: "the premise is disproved",
+    operator: false,
+    evidence: JSON.stringify({
+      command: "node --test src/store/x.test.ts",
+      output: "12/12 pass",
+      exitCode: 0,
+      ranAt: "2026-07-30T12:00:00Z",
+    }),
+    evidenceKind: "replayed_command",
+  });
+  assert.equal(out.ok, true);
+
+  const detail = (JSON.parse(getFinding(id)!.dispositionEvidence!) as { detail: Record<string, unknown> }).detail;
+  assert.deepEqual(
+    detail,
+    { command: "node --test src/store/x.test.ts", output: "12/12 pass", exitCode: 0, ranAt: "2026-07-30T12:00:00Z" },
+    "the operator submitted four fields as their proof; a ledger that kept only the two it had names for " +
+      "would show a later reader something other than what was submitted",
+  );
+});
+
+test("FG-638: the write path stores EXACTLY the blob the precondition check produced — one parse, one answer", () => {
+  // The check is what proves a rejected_premise's evidence parses, so it is also what
+  // hands back the blob. Two call sites each parsing separately is how a store ends up
+  // with a rejected_premise whose detail is empty because the second parse was cast
+  // rather than checked.
+  newReview();
+  const id = ingestOne();
+  const finding = getFinding(id)!;
+  const req = {
+    decision: "rejected_premise" as const,
+    rationale: "the premise is disproved",
+    operator: false,
+    evidence: JSON.stringify({ file: "src/store/db.ts", line: 42, fact: "the call is inside the transaction", note: "x" }),
+    evidenceKind: "anchored_contradiction",
+  };
+
+  const checked = checkDisposition(finding, getReview("review-1")!, req, { destinationKnown: false });
+  assert.equal(checked.ok, true);
+  assert.equal(recordDisposition(id, req).ok, true);
+  assert.equal(
+    getFinding(id)!.dispositionEvidence,
+    checked.ok === true ? checked.evidence : undefined,
+    "the column carries the check's blob verbatim — there is no second parse to disagree with the first",
   );
 });
 

@@ -195,6 +195,27 @@ test("FG-638 / PRD #25: rejected_premise without candidate-bound evidence is ref
   assert.equal(getFinding("review-cli/RF-2")!.disposition, "untriaged");
 });
 
+test("FG-638: an extra --evidence field reaches `forge review show --json` intact", async () => {
+  // The kind names what a payload must CARRY, not all it may carry. An operator who
+  // attached the exit code submitted it as part of their proof, and the read surface
+  // an operator audits the decision through must show what was submitted.
+  const recorded = await runCli(registerReview, [
+    "review", "disposition", "review-cli/RF-2", "rejected_premise", "--rationale", "disproved",
+    "--evidence", JSON.stringify({ command: "npm test", output: "12/12 pass", exitCode: 0 }),
+    "--evidence-kind", "replayed_command",
+  ]);
+  assert.equal(process.exitCode, undefined);
+  assert.match(recorded.out, /"exitCode":\s*0/, "the human render echoes the stored blob whole");
+
+  const { out } = await runCli(registerReview, ["review", "show", "review-cli", "--json"]);
+  const shown = JSON.parse(out) as { findings: { findingRef: string; dispositionEvidence?: string }[] };
+  const rf2 = shown.findings.find((f) => f.findingRef === "RF-2")!;
+  assert.deepEqual(
+    (JSON.parse(rf2.dispositionEvidence!) as { detail: Record<string, unknown> }).detail,
+    { command: "npm test", output: "12/12 pass", exitCode: 0 },
+  );
+});
+
 test("FG-638 / PRD #13: deferred without a durable destination is refused at the CLI", async () => {
   const { err } = await runCli(registerReview, [
     "review", "disposition", "review-cli/RF-2", "deferred", "--rationale", "later",

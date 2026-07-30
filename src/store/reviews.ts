@@ -101,10 +101,16 @@ const EVIDENCE_SHAPES: Record<DisprovingEvidenceKind, readonly EvidenceField[]> 
   ],
 };
 
-export type DisprovingEvidence = Record<string, string | number>;
+export type DisprovingEvidence = Record<string, unknown>;
 
 /** Parse `--evidence` as the JSON payload its kind requires. Returns the payload, or
- *  a refusal naming the fields that are missing and the shape that was expected. */
+ *  a refusal naming the fields that are missing and the shape that was expected.
+ *
+ *  The kind's fields are what is REQUIRED, not what is allowed: the payload comes back
+ *  WHOLE, extra fields included. An operator who attaches the exit code alongside the
+ *  command and its output submitted that as their proof, and a ledger that quietly kept
+ *  the two fields it had names for would be showing a later reader something other than
+ *  what was submitted. */
 function parseDisprovingEvidence(
   kind: DisprovingEvidenceKind,
   raw: string,
@@ -127,19 +133,17 @@ function parseDisprovingEvidence(
     return { ok: false, refusal: `${wanted}, not a bare JSON value. Nothing was written.` };
   }
 
-  const obj = parsed as Record<string, unknown>;
-  const payload: DisprovingEvidence = {};
+  const obj = parsed as DisprovingEvidence;
   const missing: string[] = [];
   for (const field of shape) {
     const v = obj[field.name];
     const ok = field.type === "line" ? typeof v === "number" && Number.isInteger(v) && v >= 1 : typeof v === "string" && v.trim() !== "";
-    if (ok) payload[field.name] = v as string | number;
-    else missing.push(field.name);
+    if (!ok) missing.push(field.name);
   }
   if (missing.length > 0) {
     return { ok: false, refusal: `${wanted}; missing or empty: ${missing.join(", ")}. Nothing was written.` };
   }
-  return { ok: true, payload };
+  return { ok: true, payload: obj };
 }
 
 export type DecidedBy = "operator" | "orchestrator";
@@ -343,19 +347,33 @@ export type NewReview = {
  *  review is made to agree with it — inside the caller's write transaction, so the
  *  run row and the review's denormalized copy move together or not at all.
  *
+ *  The invariant has TWO halves and both are enforced here: a review that names a run
+ *  names a run that EXISTS, and its review_mode EQUALS that run's. The first half is
+ *  not pedantry — reconciliation against a missing run has nothing to compare, so a
+ *  review naming a run row that is not there yet would be written with whatever mode
+ *  the caller asked for and pair, permanently, with a run created later under another.
+ *  A review with no runId at all is a different thing and stays legal: there is no run
+ *  to disagree with.
+ *
  *  A run that has never been marked (still carrying the column's legacy DEFAULT, with
  *  no ledger review of its own) ADOPTS the first review's mode: that is how an
  *  evidence-led review starts on a run created before anyone chose. A run that HAS
  *  been marked — explicitly, or implicitly by already owning a review — refuses a
  *  conflicting mode rather than letting the run and its ledger disagree.
  *
- *  Returns the run's authoritative mode; the review is inserted with THAT value, so
- *  "the review's review_mode equals its run's" holds by construction rather than by
- *  the caller passing the right thing. */
+ *  Returns the run's authoritative mode; the review is inserted with THAT value. With
+ *  the orphan refused and the conflict refused, a run/review pair whose modes disagree
+ *  is unreachable through any writer — "the review's review_mode equals its run's"
+ *  holds by construction rather than by the caller passing the right thing. */
 function reconcileRunReviewMode(runId: string | undefined, attempted: ReviewMode): { mode: ReviewMode; adopted: boolean } {
   if (runId === undefined) return { mode: attempted, adopted: false };
   const run = getRun(runId);
-  if (!run) return { mode: attempted, adopted: false };
+  if (!run) {
+    throw new Error(
+      `forge: no such run ${runId} — a review cannot name a run that does not exist, or nothing reconciles ` +
+        `its review_mode. Nothing was written.`,
+    );
+  }
 
   const runMode = run.reviewMode ?? "legacy_verdict";
   if (runMode === attempted) return { mode: runMode, adopted: false };
@@ -664,94 +682,144 @@ export type DispositionContext = {
   destinationKnown: boolean;
 };
 
-/** The per-value preconditions, as one pure function. Returns a refusal message
- *  naming what is missing, or null when the decision may be written. */
-export function dispositionRefusal(
+export type DispositionCheck =
+  | { ok: true; evidence: string | null }
+  | { ok: false; refusal: string };
+
+/** Every decision but `rejected_premise` stores `--evidence` as the operator typed it —
+ *  it is a supporting note, not a payload with a defined shape. */
+function passthroughEvidence(req: DispositionRequest): DispositionCheck {
+  const raw = req.evidence ?? "";
+  return { ok: true, evidence: raw.trim() === "" ? null : raw };
+}
+
+/** The per-value preconditions, as one pure function. Returns a refusal message naming
+ *  what is missing, or — when the decision may be written — the exact blob it stores in
+ *  `disposition_evidence`.
+ *
+ *  Handing the BLOB back rather than a bare "allowed" is what makes "a stored
+ *  rejected_premise carries its structured detail" a fact about the types instead of a
+ *  fact about two call sites agreeing. `--evidence` is parsed exactly once, here; the
+ *  write path receives the result and has nothing left to re-parse, so there is no
+ *  second parse whose failure could be cast away and stored as an empty detail. */
+export function checkDisposition(
   finding: ReviewFinding,
   review: Review,
   req: DispositionRequest,
   ctx: DispositionContext,
-): string | null {
+): DispositionCheck {
   if (req.rationale.trim() === "") {
-    return `a disposition must record why: pass --rationale "..."`;
+    return { ok: false, refusal: `a disposition must record why: pass --rationale "..."` };
   }
 
   switch (req.decision) {
     case "fix_now":
     case "architecture_question":
-      return null;
+      return passthroughEvidence(req);
 
     case "accepted_risk":
       if (acceptedRiskNeedsOperator(finding) && !req.operator) {
-        return (
-          `accepting the risk on ${finding.findingRef} changes a stated threat model, protected invariant, ` +
-          `acceptance criterion, security promise or data-integrity guarantee ` +
-          `(${describeAuthorityTrigger(finding)}), which requires operator authority. ` +
-          `Re-run with --operator to record the decision as the operator's. Nothing was written.`
-        );
+        return {
+          ok: false,
+          refusal:
+            `accepting the risk on ${finding.findingRef} changes a stated threat model, protected invariant, ` +
+            `acceptance criterion, security promise or data-integrity guarantee ` +
+            `(${describeAuthorityTrigger(finding)}), which requires operator authority. ` +
+            `Re-run with --operator to record the decision as the operator's. Nothing was written.`,
+        };
       }
-      return null;
+      return passthroughEvidence(req);
 
-    case "rejected_premise":
+    case "rejected_premise": {
       if (review.candidateSha === undefined) {
-        return (
-          `rejected_premise needs candidate-bound disproving evidence, but review ${review.id} has no ` +
-          `candidate sha to bind it to. Nothing was written.`
-        );
+        return {
+          ok: false,
+          refusal:
+            `rejected_premise needs candidate-bound disproving evidence, but review ${review.id} has no ` +
+            `candidate sha to bind it to. Nothing was written.`,
+        };
       }
-      if ((req.evidence ?? "").trim() === "" || req.evidenceKind === undefined) {
-        return (
-          `rejected_premise requires disproving evidence bound to the candidate, not a rationale alone: ` +
-          `pass --evidence "..." --evidence-kind <${DISPROVING_EVIDENCE_KINDS.join(" | ")}>. Nothing was written.`
-        );
+      const raw = req.evidence ?? "";
+      if (raw.trim() === "" || req.evidenceKind === undefined) {
+        return {
+          ok: false,
+          refusal:
+            `rejected_premise requires disproving evidence bound to the candidate, not a rationale alone: ` +
+            `pass --evidence "..." --evidence-kind <${DISPROVING_EVIDENCE_KINDS.join(" | ")}>. Nothing was written.`,
+        };
       }
-      if (!(DISPROVING_EVIDENCE_KINDS as readonly string[]).includes(req.evidenceKind)) {
-        return (
-          `--evidence-kind must be one of ${DISPROVING_EVIDENCE_KINDS.join(", ")} ` +
-          `(got '${req.evidenceKind}'). Nothing was written.`
-        );
+      const kind = DISPROVING_EVIDENCE_KINDS.find((k) => k === req.evidenceKind);
+      if (kind === undefined) {
+        return {
+          ok: false,
+          refusal:
+            `--evidence-kind must be one of ${DISPROVING_EVIDENCE_KINDS.join(", ")} ` +
+            `(got '${req.evidenceKind}'). Nothing was written.`,
+        };
       }
-      {
-        const parsed = parseDisprovingEvidence(req.evidenceKind as DisprovingEvidenceKind, req.evidence as string);
-        if (!parsed.ok) return parsed.refusal;
-      }
-      return null;
+      const parsed = parseDisprovingEvidence(kind, raw);
+      if (!parsed.ok) return { ok: false, refusal: parsed.refusal };
+      // Stored STRUCTURED — a reader never has to re-guess what the text meant.
+      return {
+        ok: true,
+        evidence: JSON.stringify({ kind, detail: parsed.payload, candidateSha: review.candidateSha }),
+      };
+    }
 
     case "deferred":
       if (req.followupTicketId === undefined || req.followupTicketId.trim() === "") {
-        return (
-          `deferred requires a durable destination — pass --ticket <ticket-id> naming where the finding ` +
-          `survives this review. Nothing was written.`
-        );
+        return {
+          ok: false,
+          refusal:
+            `deferred requires a durable destination — pass --ticket <ticket-id> naming where the finding ` +
+            `survives this review. Nothing was written.`,
+        };
       }
       if (!ctx.destinationKnown && !req.operator) {
-        return (
-          `deferred names ${req.followupTicketId}, which is not a ticket this store knows. Creating a new ` +
-          `destination is an operator decision: re-run with --operator to authorize it. Nothing was written.`
-        );
+        return {
+          ok: false,
+          refusal:
+            `deferred names ${req.followupTicketId}, which is not a ticket this store knows. Creating a new ` +
+            `destination is an operator decision: re-run with --operator to authorize it. Nothing was written.`,
+        };
       }
-      return null;
+      return passthroughEvidence(req);
 
     case "duplicate":
       if (req.duplicateOf === undefined || req.duplicateOf.trim() === "") {
-        return (
-          `duplicate must cite the canonical finding it duplicates — pass --duplicate-of <finding-id>. ` +
-          `Nothing was written.`
-        );
+        return {
+          ok: false,
+          refusal:
+            `duplicate must cite the canonical finding it duplicates — pass --duplicate-of <finding-id>. ` +
+            `Nothing was written.`,
+        };
       }
       if (!ctx.canonical) {
-        return `no finding matches --duplicate-of ${req.duplicateOf}. Nothing was written.`;
+        return { ok: false, refusal: `no finding matches --duplicate-of ${req.duplicateOf}. Nothing was written.` };
       }
       if (ctx.canonical.id === finding.id) {
-        return `a finding cannot duplicate itself (${finding.findingRef}). Nothing was written.`;
+        return { ok: false, refusal: `a finding cannot duplicate itself (${finding.findingRef}). Nothing was written.` };
       }
       if (ctx.canonical.reviewId !== finding.reviewId) {
-        return (
-          `canonical ${ctx.canonical.findingRef} belongs to review ${ctx.canonical.reviewId}, not ` +
-          `${finding.reviewId} — a duplicate is scoped to one review. Nothing was written.`
-        );
+        return {
+          ok: false,
+          refusal:
+            `canonical ${ctx.canonical.findingRef} belongs to review ${ctx.canonical.reviewId}, not ` +
+            `${finding.reviewId} — a duplicate is scoped to one review. Nothing was written.`,
+        };
       }
-      return null;
+      return passthroughEvidence(req);
+
+    default:
+      // The union is exhausted above, so this arm is only reached by a word that
+      // crossed an untyped boundary. It refuses by name rather than falling out of the
+      // function as undefined — "not in the vocabulary" is a refusal, not an absence.
+      return {
+        ok: false,
+        refusal:
+          `'${String(req.decision)}' is not a disposition — expected one of ${DISPOSITIONS.join(", ")}. ` +
+          `Nothing was written.`,
+      };
   }
 }
 
@@ -784,23 +852,12 @@ export function recordDisposition(findingId: string, req: DispositionRequest): D
     destinationKnown: req.followupTicketId !== undefined && ticketKnown(req.followupTicketId),
   };
 
-  const refusal = dispositionRefusal(finding, review, req, ctx);
-  if (refusal !== null) return { ok: false, refusal };
+  const checked = checkDisposition(finding, review, req, ctx);
+  if (!checked.ok) return { ok: false, refusal: checked.refusal };
 
   const decidedBy: DecidedBy = req.operator ? "operator" : "orchestrator";
   const at = nowIso();
-  // The refusal above already proved this parses to its kind's shape, so the stored
-  // blob is the STRUCTURED payload — a reader never has to re-guess what the text meant.
-  const evidence =
-    req.decision === "rejected_premise"
-      ? JSON.stringify({
-          kind: req.evidenceKind,
-          detail: (parseDisprovingEvidence(req.evidenceKind as DisprovingEvidenceKind, req.evidence as string) as {
-            payload: DisprovingEvidence;
-          }).payload,
-          candidateSha: review.candidateSha,
-        })
-      : ((req.evidence ?? "").trim() === "" ? null : (req.evidence as string));
+  const evidence = checked.evidence;
 
   writeTransaction(() => {
     const db = getDb();
