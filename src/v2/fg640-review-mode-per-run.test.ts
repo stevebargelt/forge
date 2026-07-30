@@ -19,7 +19,8 @@ import { insertTask, markTaskComplete } from "../store/tasks.js";
 import { insertGate } from "../store/gates.js";
 import { insertReview } from "../store/reviews.js";
 import { startRun } from "./startRun.js";
-import { approvedReviewContract } from "./review-gate.js";
+import { eventsForRun } from "../store/events.js";
+import { approvedReviewContract, contractApprovingSteps } from "./review-gate.js";
 import { WorkflowSchema, type Workflow } from "./schema.js";
 import type { Run, Task } from "../types/index.js";
 
@@ -91,49 +92,119 @@ const CONTRACT = {
   non_goals: [],
 };
 
-function seedRunWithPlan(result: unknown, gateDecision?: "advance" | "reject"): string {
-  const run: Run = { id: "run-plan", workflow: "wf", title: "t", status: "active", createdAt: "2026-07-30T00:00:00Z" };
-  insertRun(run);
+/** architect (human) → plan (human) → build (the reviewed step, declaring plan as its upstream).
+ *  `architect` is deliberately human-gated too: it is the step F1's negative case comes from. */
+function reviewedWorkflow(): Workflow {
+  const parsed = WorkflowSchema.safeParse({
+    name: "wf-plan",
+    description: "plan-gate-approved contract",
+    review_mode: "evidence_led",
+    steps: [
+      { id: "architect", agent: "architecture-advisor", gate: "human" },
+      { id: "plan", agent: "tech-lead", gate: "human", depends_on: ["architect"] },
+      {
+        id: "build",
+        agent: "engineer",
+        gate: "verdict",
+        depends_on: ["plan"],
+        reds: [{ agent: "red-backend", authority: "specialist", gate_on_verdict: false }],
+      },
+    ],
+  });
+  assert.ok(parsed.success, JSON.stringify(parsed.error?.issues));
+  return parsed.data;
+}
+
+function seedTask(runId: string, phase: string, role: string, result: unknown, gateDecision?: "advance" | "reject"): void {
+  const id = `task-${phase}`;
   const task: Task = {
-    id: "task-plan",
-    runId: run.id,
-    phase: "plan",
-    agentRole: "tech-lead",
+    id,
+    runId,
+    phase,
+    agentRole: role,
     status: "running",
-    taskPackage: { taskId: "task-plan", runId: run.id, phase: "plan", role: "tech-lead", inputs: {}, composedSystemPrompt: "" },
+    taskPackage: { taskId: id, runId, phase, role, inputs: {}, composedSystemPrompt: "" },
     createdAt: "2026-07-30T00:00:00Z",
   };
   insertTask(task);
-  markTaskComplete("task-plan", result);
+  markTaskComplete(id, result);
   if (gateDecision) {
     insertGate({
-      id: "gate-plan",
-      taskId: "task-plan",
+      id: `gate-${phase}`,
+      taskId: id,
       decision: gateDecision,
       rationale: "human",
       decidedAt: "2026-07-30T00:00:01Z",
       decidedBy: "steven",
     });
   }
+}
+
+function seedRunWithPlan(result: unknown, gateDecision?: "advance" | "reject"): string {
+  const run: Run = { id: "run-plan", workflow: "wf", title: "t", status: "active", createdAt: "2026-07-30T00:00:00Z" };
+  insertRun(run);
+  seedTask(run.id, "plan", "tech-lead", result, gateDecision);
   return run.id;
+}
+
+function contractFor(runId: string): { contract: unknown; taskId: string } | undefined {
+  return approvedReviewContract(runId, reviewedWorkflow(), "build");
 }
 
 test("FG-640: an APPROVED plan's review_contract is the one selection reads", () => {
   const runId = seedRunWithPlan({ steps: [], review_contract: CONTRACT }, "advance");
-  assert.deepEqual(approvedReviewContract(runId)?.contract, CONTRACT);
+  assert.deepEqual(contractFor(runId)?.contract, CONTRACT);
 });
 
 test("FG-640: an UNGATED plan's contract is a proposal, not authority — selection never sees it", () => {
   const runId = seedRunWithPlan({ steps: [], review_contract: CONTRACT });
-  assert.equal(approvedReviewContract(runId), undefined);
+  assert.equal(contractFor(runId), undefined);
 });
 
 test("FG-640: a REJECTED plan's contract is not approved either", () => {
   const runId = seedRunWithPlan({ steps: [], review_contract: CONTRACT }, "reject");
-  assert.equal(approvedReviewContract(runId), undefined);
+  assert.equal(contractFor(runId), undefined);
 });
 
 test("FG-640: a run whose plan declared no contract has none — selection falls closed to the wide panel", () => {
   const runId = seedRunWithPlan({ steps: [] }, "advance");
-  assert.equal(approvedReviewContract(runId), undefined);
+  assert.equal(contractFor(runId), undefined);
+});
+
+// ── the contract is bound to THE PLAN STEP, not to whoever wrote one ─────────
+
+test("FG-640: a NON-PLAN advanced task's contract is ignored — an approved architect cannot select build's panel", () => {
+  const runId = seedRunWithPlan({ steps: [] }, "advance");
+  // A real human `advance` on a real step of this run. Everything about it is legitimate
+  // except that `build` does not declare `architect` as the step it was planned by.
+  seedTask(runId, "architect", "architecture-advisor", { review_contract: CONTRACT }, "advance");
+
+  assert.equal(contractFor(runId), undefined, "a contract from another human-gated step narrowed the panel");
+  const ev = eventsForRun(runId).find((e) => e.eventType === "review.contract_ignored");
+  assert.ok(ev, "the refusal must be readable — a wide panel with no event looks like nobody wrote a contract");
+  const payload = ev!.payload as { step: string; reviewedStep: string; approvingSteps: string[]; reason: string };
+  assert.equal(payload.step, "architect");
+  assert.equal(payload.reviewedStep, "build");
+  assert.deepEqual(payload.approvingSteps, ["plan"]);
+});
+
+test("FG-640: the plan step's contract still wins when a non-plan task also carries one", () => {
+  const runId = seedRunWithPlan({ steps: [], review_contract: CONTRACT }, "advance");
+  seedTask(
+    runId,
+    "architect",
+    "architecture-advisor",
+    { review_contract: { ...CONTRACT, risk_lenses: ["frontend"] } },
+    "advance",
+  );
+
+  assert.deepEqual(contractFor(runId)?.contract, CONTRACT, "a later task's contract superseded the approved plan's");
+  assert.equal(contractFor(runId)?.taskId, "task-plan");
+});
+
+test("FG-640: the approving step is the reviewed step's DECLARED upstream — read from the workflow", () => {
+  const wf = reviewedWorkflow();
+  assert.deepEqual(contractApprovingSteps(wf, "build"), ["plan"], "architect is human-gated but is not build's upstream");
+  assert.deepEqual(contractApprovingSteps(wf, "plan"), ["architect"]);
+  assert.deepEqual(contractApprovingSteps(wf, "no-such-step"), []);
 });

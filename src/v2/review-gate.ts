@@ -23,6 +23,8 @@ import { lensAcceptancesOf, lensOutcomeRecordsOf, type Review, type ReviewFindin
 import type { VerdictRow } from "../types/index.js";
 import { tasksForRun } from "../store/tasks.js";
 import { gatesForTask } from "../store/gates.js";
+import { logEvent } from "../store/events.js";
+import type { Workflow } from "./schema.js";
 import { assessDiscoveryCompleteness, type LensOutcome, type Reachability } from "./review-discovery.js";
 import { validateReviewContract, type RiskLens } from "./review-contract.js";
 import { evidenceKindSufficientFor, sufficientEvidenceKinds } from "./review-evidence.js";
@@ -229,9 +231,12 @@ export function assessReviewDisposition(input: ReviewDispositionInput): ReviewDi
   } else {
     const completeness = assessDiscoveryCompleteness(lenses.lenses, recordedLensOutcomes(review), {
       acceptances: lensAcceptancesOf(review),
-      // The sha discovery was assessed at, which is what an acceptance stands in for — the
-      // outcomes beside it are recorded against the confirmed candidate too.
-      candidateSha: review.contractConfirmedSha ?? candidate,
+      // The CONFIRMED sha discovery was assessed at, which is what an acceptance stands in
+      // for — the outcomes beside it are recorded against the confirmed candidate too. No
+      // fallback to the moving candidate: `recordLensAcceptance` binds an acceptance to the
+      // confirmed sha and nothing else, so reading a different sha here could only resurrect
+      // an acceptance whose confirmation no longer stands.
+      candidateSha: review.contractConfirmedSha,
     });
     if (!completeness.complete) {
       conditions.push({
@@ -565,20 +570,72 @@ function migrationConditions(input: EvidenceLedGateInput): DispositionGateCondit
   return out;
 }
 
+/** WHICH STEP'S APPROVAL CAN CARRY THE CONTRACT — read off the workflow's DECLARATION, never
+ *  off which task happens to have written a `review_contract`.
+ *
+ *  A contract selects the discovery panel, so "whoever wrote one" would let any other
+ *  human-gated step in the run — an architect before the plan, a docs step after it — narrow
+ *  the build panel by putting two lens names in its result, with a real human `advance` behind
+ *  it. The reviewed step's own declared upstream is what pins it: the step(s) it says it is
+ *  built FROM (`depends_on`, plus a fanout's `from_upstream.step`) that are gated by a human.
+ *  In `feature` that is exactly `plan`, and `architect` — human-gated, but not build's declared
+ *  upstream — is not in the set.
+ *
+ *  Structural, not transitive: an ancestor two hops up is not the step this one was planned by. */
+export function contractApprovingSteps(workflow: Workflow, reviewedStepId: string): string[] {
+  const step = workflow.steps.find((s) => s.id === reviewedStepId);
+  if (step === undefined) return [];
+  const declared = new Set<string>(step.depends_on);
+  if (step.fanout !== undefined) declared.add(step.fanout.from_upstream.step);
+  return workflow.steps.filter((s) => declared.has(s.id) && s.gate === "human").map((s) => s.id);
+}
+
 /** THE PLAN-GATE-APPROVED CONTRACT, and every word of that is load-bearing.
  *
- *  A contract selects the discovery panel, so an unapproved one would let an upstream agent
- *  narrow its own review by writing two lens names into its result. What makes a contract
- *  authoritative is the HUMAN GATE that advanced the step carrying it — the same act that
- *  approves the plan approves the risk surface it declares. A contract in the result of a
- *  task nobody advanced is a proposal, and this returns undefined for it.
+ *  Two things make a contract authoritative, and neither one alone is enough. The HUMAN GATE
+ *  that advanced the step carrying it — the same act that approves the plan approves the risk
+ *  surface it declares; a contract in the result of a task nobody advanced is a proposal, and
+ *  this returns undefined for it. And the STEP it came from being the reviewed step's declared
+ *  plan step (`contractApprovingSteps`) — an advanced task elsewhere in the run is not the plan
+ *  this panel is selected by, however valid its contract parses.
+ *
+ *  A contract on any other advanced task is IGNORED with `review.contract_ignored` rather than
+ *  dropped silently: a panel that stayed wide because a contract was refused should be
+ *  readable as that, not as a contract nobody wrote.
  *
  *  Newest wins, so a re-planned step's re-approved contract supersedes the first. */
-export function approvedReviewContract(runId: string): { contract: unknown; taskId: string } | undefined {
+export function approvedReviewContract(
+  runId: string,
+  workflow: Workflow,
+  reviewedStepId: string,
+): { contract: unknown; taskId: string } | undefined {
+  const approving = new Set(contractApprovingSteps(workflow, reviewedStepId));
   const approved = tasksForRun(runId)
     .filter((t) => gatesForTask(t.id).some((g) => g.decision === "advance"))
-    .map((t) => ({ taskId: t.id, contract: (t.result as { review_contract?: unknown } | undefined)?.review_contract }))
+    .map((t) => ({
+      taskId: t.id,
+      phase: t.phase,
+      contract: (t.result as { review_contract?: unknown } | undefined)?.review_contract,
+    }))
     .filter((c) => c.contract !== undefined);
-  const last = approved[approved.length - 1];
+
+  for (const foreign of approved.filter((c) => !approving.has(c.phase))) {
+    logEvent("review.contract_ignored", {
+      runId,
+      taskId: foreign.taskId,
+      payload: {
+        step: foreign.phase,
+        reviewedStep: reviewedStepId,
+        approvingSteps: [...approving],
+        reason:
+          `task ${foreign.taskId} (step '${foreign.phase}') carries a review_contract, but ${reviewedStepId}'s ` +
+          `panel is selected only by the contract its declared plan step ` +
+          `(${approving.size > 0 ? [...approving].join(", ") : "none"}) had approved at a human gate. Ignored.`,
+      },
+    });
+  }
+
+  const fromPlan = approved.filter((c) => approving.has(c.phase));
+  const last = fromPlan[fromPlan.length - 1];
   return last ? { contract: last.contract, taskId: last.taskId } : undefined;
 }

@@ -8,8 +8,9 @@
 // state and never repeats a completed stage; both read what to do next from the ledger
 // rather than from anything the process that started the review was holding.
 //
-// This is a PILOT surface. The `feature` workflow is not migrated and no gate authority
-// changes — both are FG-640.
+// FG-640 (Change 3) landed both of the things this header used to disclaim: `feature` declares
+// `review_mode: evidence_led`, so these verbs now drive the ledger that SETTLES its build gate
+// (`review_disposition`) rather than a pilot running beside verdict aggregation.
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";

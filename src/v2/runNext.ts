@@ -1313,10 +1313,15 @@ async function dispatchReds(args: {
   // untouched — `reds` there still means all of them.
   //
   // Reads `workflow.review_mode`, which is exactly what `gate()` branches on. One source for
-  // both sites: a panel narrowed here can never be judged by the other model.
+  // both sites: a panel narrowed here can never be judged by the other model. The workflow and
+  // the step id go to `approvedReviewContract` because WHICH task's contract counts is a fact
+  // about the declared structure — this step's plan step — not about who wrote one.
   const lensSelection =
     args.workflow.review_mode === "evidence_led"
-      ? selectRedsForContract(args.step.reds, approvedReviewContract(args.runId)?.contract)
+      ? selectRedsForContract(
+          args.step.reds,
+          approvedReviewContract(args.runId, args.workflow, args.step.id)?.contract,
+        )
       : { selected: args.step.reds, skipped: [], reason: "" };
   if (lensSelection.skipped.length > 0) {
     logEvent("review.lenses_selected", {

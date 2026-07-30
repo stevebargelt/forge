@@ -681,13 +681,20 @@ export function recordLensAcceptance(reviewId: string, req: LensAcceptanceReques
     return { ok: false, refusal: `an acceptance must record why: pass --rationale "...". Nothing was written.` };
   }
 
-  const candidateSha = review.contractConfirmedSha ?? review.candidateSha;
+  // THE CONFIRMED CANDIDATE, with no fallback to the moving one. An acceptance substitutes for
+  // one lens's discovery OUTCOME, and outcomes are recorded against the sha the contract was
+  // confirmed at — so binding it to review.candidateSha before confirmation would write an
+  // acceptance against a candidate discovery never ran on, and it would then read as current
+  // for whatever the first confirmation happens to land on.
+  const candidateSha = review.contractConfirmedSha;
   if (candidateSha === undefined) {
     return {
       ok: false,
       refusal:
-        `review ${reviewId} has no confirmed candidate to bind the acceptance to, and an acceptance is a ` +
-        `decision about ONE candidate's missing review. Nothing was written.`,
+        `review ${reviewId} has no CONFIRMED candidate to bind the acceptance to — its contract has not been ` +
+        `confirmed against the final diff yet, and an acceptance is a decision about ONE candidate's missing ` +
+        `review. Confirm the contract first, then accept the lens against the candidate discovery ran on. ` +
+        `Nothing was written.`,
     };
   }
 

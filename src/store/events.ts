@@ -262,6 +262,11 @@ export type EventType =
   // decision — an operator reading a run with three reds where the workflow declares six must
   // be able to see that it was selection rather than three reds failing to start.
   | "review.lenses_selected"
+  // FG-640: a review_contract that selection REFUSED to read, because it came from a task
+  // that is not the reviewed step's declared plan step. Recorded rather than dropped: a
+  // contract written by another human-gated step is an attempt to select someone else's
+  // panel, and the wide panel it fell back to should be readable as a refusal.
+  | "review.contract_ignored"
   // What a recheck ESTABLISHED for one finding, per id: resolved | still_present |
   // inconclusive, the evidence kind, and the sha it was proven at. A resolution is
   // candidate-bound; the event says which candidate.

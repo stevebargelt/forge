@@ -392,6 +392,47 @@ test("FG-640: an acceptance recorded against a SUPERSEDED candidate does not cle
   assert.match(msg, /accept it again at the current candidate or retry the lens/);
 });
 
+test("FG-640: an acceptance is bound to the CONFIRMED candidate — a confirmation that lands at another sha does not clear it", async () => {
+  // The other direction of the same binding, and the one the removed `?? candidateSha`
+  // fallback used to blur: the acceptance was recorded at confirmation sha X, and the
+  // confirmation later lands at Y while the candidate row still reads X. Reading anything but
+  // the confirmed sha here would clear a lens against a confirmation that no longer stands.
+  assert.equal(acceptSecurity().ok, true);
+  updateReview(REVIEW, { contractConfirmedSha: "cand640lens-Y" });
+
+  const msg = await refusal();
+  assert.match(msg, /lens_outcome_missing/);
+  assert.match(msg, /an authorized acceptance of this lens exists at cand640lens,/);
+});
+
+test("FG-640: an acceptance BEFORE contract confirmation is refused by name — there is no confirmed candidate to bind to", () => {
+  // The same review, one stage earlier: a candidate exists, but the contract has not been
+  // confirmed against the final diff, so no lens has yet been dispatched at any sha. An
+  // acceptance here would stand in for a discovery outcome nobody could have owed.
+  insertReview({
+    id: "review-unconfirmed",
+    runId: "run-lens",
+    subjectTaskId: TASK,
+    ticketId: "FG-640",
+    reviewMode: "evidence_led",
+    candidateSha: SHA,
+    contract: CONTRACT,
+    state: "confirming_contract",
+  });
+  const out = recordLensAcceptance("review-unconfirmed", {
+    lens: "security",
+    missingEvidence: "no security review of the new auth-path guard",
+    rationale: "accepting early",
+    operator: true,
+  });
+  assert.equal(out.ok, false);
+  if (!out.ok) {
+    assert.match(out.refusal, /no CONFIRMED candidate to bind the acceptance to/);
+    assert.match(out.refusal, /Nothing was written/);
+  }
+  assert.deepEqual(lensAcceptancesOf(getReview("review-unconfirmed")!), []);
+});
+
 test("FG-640: the acceptance is on the operator's read surfaces and in the audit trail", () => {
   assert.equal(acceptSecurity().ok, true);
 

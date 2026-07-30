@@ -185,6 +185,83 @@ test("FG-640: an evidence_led run whose contract is UNAPPROVED does not narrow �
   assert.deepEqual(buildReds, [], "an unapproved plan must not have dispatched a narrowed build panel");
 });
 
+test("FG-640: a contract from a NON-PLAN human-gated step never narrows the panel — and the refusal is recorded", async () => {
+  // The injection this binding exists to refuse: `architect` is a real step of this run, gated
+  // by a real human `advance`, and its result carries a perfectly valid two-lens contract. It
+  // is still not the step `build` declares as its upstream, so the panel stays wide.
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  ensureRuntime();
+  const dir = join(process.env.FORGE_HOME!, "workflows");
+  mkdirSync(dir, { recursive: true });
+  const reds = LENS_REDS.map(
+    (r) => `      - agent: ${r}\n        authority: specialist\n        gate_on_verdict: false`,
+  ).join("\n");
+  writeFileSync(
+    join(dir, "fg640-foreign.yml"),
+    `name: fg640-foreign
+description: a contract written by a step build was not planned by
+review_mode: evidence_led
+inputs: []
+steps:
+  - id: architect
+    agent: architecture-advisor
+    gate: human
+  - id: plan
+    agent: tech-lead
+    gate: human
+    depends_on: [architect]
+  - id: build
+    agent: engineer
+    gate: verdict
+    depends_on: [plan]
+    reds:
+${reds}
+`,
+  );
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
+  const workflow = loadWorkflow("fg640-foreign");
+
+  // architect emits the narrow contract; the plan step emits none.
+  const exec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+    const nameIdx = args.indexOf("--name");
+    const taskId = (nameIdx >= 0 ? (args[nameIdx + 1] ?? "") : "").replace(/^forge-/, "");
+    const d = dirname(stdoutPath);
+    if (!existsSync(d)) mkdirSync(d, { recursive: true });
+    const result = taskId.startsWith("task-red-")
+      ? { status: "complete", verdict: "pass", confidence: 0.9, findings: [] }
+      : taskId.startsWith("task-architect")
+        ? { status: "complete", risks: [], review_contract: CONTRACT }
+        : taskId.startsWith("task-plan")
+          ? { status: "complete", steps: [] }
+          : { status: "complete", tests_run: 4, tests_passed: 4 };
+    writeFileSync(join(d, "result.json"), JSON.stringify(result));
+    writeFileSync(stdoutPath, "stub stdout");
+    writeFileSync(stderrPath, "");
+    return 0;
+  };
+
+  const { runId } = startRun({ workflow, title: "fg640-foreign", inputs: {}, projectDir: "/tmp/test-project" });
+  for (const phase of ["architect", "plan"]) {
+    await runNext({ runId, workflow, dockerExec: exec });
+    const task = tasksForRun(runId).find((t) => t.phase === phase && t.parentId === undefined)!;
+    await gate(task.id, "advance", "approved", {});
+  }
+  await runNext({ runId, workflow, dockerExec: exec });
+
+  const roles = tasksForRun(runId)
+    .filter((t) => t.phase === "build" && t.parentId !== undefined)
+    .map((t) => t.agentRole)
+    .sort();
+  assert.deepEqual(roles, [...LENS_REDS].sort(), "an approved architect's contract narrowed a panel it does not select");
+
+  const ev = eventsForRun(runId).find((e) => e.eventType === "review.contract_ignored");
+  assert.ok(ev, "the ignored contract must be readable — a wide panel alone cannot say a contract was refused");
+  const payload = ev!.payload as { step: string; reviewedStep: string; approvingSteps: string[] };
+  assert.equal(payload.step, "architect");
+  assert.equal(payload.reviewedStep, "build");
+  assert.deepEqual(payload.approvingSteps, ["plan"]);
+});
+
 test("FG-640: a LEGACY run never narrows — selection is scoped to the evidence_led cutover", async () => {
   const roles = await runThroughBuild("fg640-legacy", "legacy_verdict", {
     status: "complete",
