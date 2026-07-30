@@ -19,8 +19,19 @@ export const TICKET_EVENTS_PRIMARY_KEY = ["project_key", "ticket_id", "event_key
 // Always on the final table name: the rebuild creates its index only after the
 // replacement has been renamed into place (index names are database-wide, so the
 // old table's index must be gone first).
-export const TICKET_EVENTS_INDEX_SQL = `CREATE INDEX IF NOT EXISTS idx_ticket_events_ticket
-  ON ticket_events(project_key, ticket_id)`;
+export const TICKET_EVENTS_INDEX_NAME = "idx_ticket_events_ticket";
+
+const TICKET_EVENTS_INDEX_BODY = `${TICKET_EVENTS_INDEX_NAME} ON ticket_events(project_key, ticket_id)`;
+
+// The canonical definition as sqlite_master records it — SQLite stores the CREATE
+// text verbatim, minus `IF NOT EXISTS`. db.ts detects index divergence by comparing
+// the live sqlite_master.sql against THIS string (whitespace-normalized), which is
+// one comparison covering columns and their order, DESC, COLLATE, UNIQUE and
+// partiality — none of which PRAGMA index_info reports — and which cannot drift from
+// the DDL because it is built from the same body the DDL is.
+export const TICKET_EVENTS_INDEX_CANONICAL_SQL = `CREATE INDEX ${TICKET_EVENTS_INDEX_BODY}`;
+
+export const TICKET_EVENTS_INDEX_SQL = `CREATE INDEX IF NOT EXISTS ${TICKET_EVENTS_INDEX_BODY}`;
 
 export function ticketEventsTableSql(table: string): string {
   return `CREATE TABLE IF NOT EXISTS ${table} (

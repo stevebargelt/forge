@@ -16,8 +16,9 @@
 // flag and origin, partiality), stray UNIQUE indexes, and the composite FK — so there
 // is a case per branch, including several that are canonical in every respect the
 // ORIGINAL host bug exercised (a same-membership PK in the wrong order, a correct FK
-// without ON DELETE CASCADE, and three same-NAMED lookup indexes whose definitions
-// differ) and would sail past a PK-membership-and-index-name-only check.
+// without ON DELETE CASCADE, and five same-NAMED lookup indexes whose definitions
+// differ — two of them, DESC and COLLATE, in ways no PRAGMA reports at all) and would
+// sail past a PK-membership-and-index-name-only check.
 //
 // The last test is the boundary: the rebuild converges ticket_events and nothing
 // else, so a divergence in any OTHER table survives a full open. That is not a
@@ -43,7 +44,8 @@ type EventRow = {
 };
 
 // The same fingerprint the parity guard compares: PK membership AND ordering,
-// index shape (name, uniqueness, origin, partiality, columns) and foreign keys.
+// index shape (name, uniqueness, origin, partiality, columns, and the sqlite_master
+// CREATE text that is the only place DESC and COLLATE show up) and foreign keys.
 // Deliberately a copy rather than an import — the guard's version lives inside a
 // test file and exports nothing, and a shared helper would let one edit weaken
 // both at once.
@@ -65,7 +67,13 @@ function constraintsOf(db: DatabaseInstance, table: string): Record<string, stri
       const cols = (db.prepare(`PRAGMA index_info(${i.name})`).all() as { seqno: number; name: string | null }[])
         .sort((a, b) => a.seqno - b.seqno)
         .map((c) => c.name ?? "<expr>");
-      return `${i.name} unique=${i.unique} origin=${i.origin} partial=${i.partial} (${cols.join(", ")})`;
+      const sql = (
+        db.prepare(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?`).get(i.name) as
+          | { sql: string | null }
+          | undefined
+      )?.sql;
+      const definition = (sql ?? "<auto>").replace(/\s+/g, " ").trim();
+      return `${i.name} unique=${i.unique} origin=${i.origin} partial=${i.partial} (${cols.join(", ")}) [${definition}]`;
     })
     .sort();
 
@@ -169,7 +177,8 @@ const DIVERGENT_SHAPES: { name: string; ddl: string; expect: RegExp }[] = [
       PRIMARY KEY (project_key, ticket_id, event_key),
       FOREIGN KEY (project_key, ticket_id) REFERENCES tickets(project_key, ticket_id) ON DELETE CASCADE);
       CREATE INDEX idx_ticket_events_ticket ON ticket_events(ticket_id, project_key)`,
-    expect: /idx_ticket_events_ticket is on \(ticket_id, project_key\), canonical is \(project_key, ticket_id\)/,
+    expect:
+      /idx_ticket_events_ticket is defined as \[CREATE INDEX idx_ticket_events_ticket ON ticket_events\(ticket_id, project_key\)\], canonical is \[CREATE INDEX idx_ticket_events_ticket ON ticket_events\(project_key, ticket_id\)\]/,
   },
   {
     name: "a same-named lookup index that is unexpectedly UNIQUE",
@@ -179,7 +188,8 @@ const DIVERGENT_SHAPES: { name: string; ddl: string; expect: RegExp }[] = [
       PRIMARY KEY (project_key, ticket_id, event_key),
       FOREIGN KEY (project_key, ticket_id) REFERENCES tickets(project_key, ticket_id) ON DELETE CASCADE);
       CREATE UNIQUE INDEX idx_ticket_events_ticket ON ticket_events(project_key, ticket_id)`,
-    expect: /idx_ticket_events_ticket is unique=1 origin=c, canonical is unique=0 origin=c/,
+    expect:
+      /idx_ticket_events_ticket is defined as \[CREATE UNIQUE INDEX idx_ticket_events_ticket ON ticket_events\(project_key, ticket_id\)\]/,
   },
   {
     name: "a same-named lookup index that is PARTIAL",
@@ -189,7 +199,34 @@ const DIVERGENT_SHAPES: { name: string; ddl: string; expect: RegExp }[] = [
       PRIMARY KEY (project_key, ticket_id, event_key),
       FOREIGN KEY (project_key, ticket_id) REFERENCES tickets(project_key, ticket_id) ON DELETE CASCADE);
       CREATE INDEX idx_ticket_events_ticket ON ticket_events(project_key, ticket_id) WHERE payload IS NOT NULL`,
-    expect: /idx_ticket_events_ticket is partial, canonical is unconditional/,
+    expect:
+      /idx_ticket_events_ticket is defined as \[CREATE INDEX idx_ticket_events_ticket ON ticket_events\(project_key, ticket_id\) WHERE payload IS NOT NULL\]/,
+  },
+  // The two attributes PRAGMA index_info does not report at all: a DESC column and a
+  // COLLATE. Both are same-named, same-columns, same-order, non-unique and total — so
+  // a fingerprint built from the PRAGMAs alone reads them as canonical, and only a
+  // comparison of the stored CREATE text sees them.
+  {
+    name: "a same-named lookup index with a DESC column",
+    ddl: `CREATE TABLE ticket_events (
+      event_key TEXT NOT NULL, project_key TEXT NOT NULL, ticket_id TEXT NOT NULL,
+      event_type TEXT NOT NULL, payload TEXT, created_at TEXT NOT NULL,
+      PRIMARY KEY (project_key, ticket_id, event_key),
+      FOREIGN KEY (project_key, ticket_id) REFERENCES tickets(project_key, ticket_id) ON DELETE CASCADE);
+      CREATE INDEX idx_ticket_events_ticket ON ticket_events(project_key, ticket_id DESC)`,
+    expect:
+      /idx_ticket_events_ticket is defined as \[CREATE INDEX idx_ticket_events_ticket ON ticket_events\(project_key, ticket_id DESC\)\], canonical is \[CREATE INDEX idx_ticket_events_ticket ON ticket_events\(project_key, ticket_id\)\]/,
+  },
+  {
+    name: "a same-named lookup index with a COLLATE NOCASE column",
+    ddl: `CREATE TABLE ticket_events (
+      event_key TEXT NOT NULL, project_key TEXT NOT NULL, ticket_id TEXT NOT NULL,
+      event_type TEXT NOT NULL, payload TEXT, created_at TEXT NOT NULL,
+      PRIMARY KEY (project_key, ticket_id, event_key),
+      FOREIGN KEY (project_key, ticket_id) REFERENCES tickets(project_key, ticket_id) ON DELETE CASCADE);
+      CREATE INDEX idx_ticket_events_ticket ON ticket_events(project_key COLLATE NOCASE, ticket_id)`,
+    expect:
+      /idx_ticket_events_ticket is defined as \[CREATE INDEX idx_ticket_events_ticket ON ticket_events\(project_key COLLATE NOCASE, ticket_id\)\], canonical is \[CREATE INDEX idx_ticket_events_ticket ON ticket_events\(project_key, ticket_id\)\]/,
   },
   {
     name: "the canonical PK with NO foreign key",

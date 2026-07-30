@@ -8,6 +8,8 @@ import {
   TICKET_EVENTS_COLUMNS,
   TICKET_EVENTS_PRIMARY_KEY,
   TICKET_EVENTS_INDEX_SQL,
+  TICKET_EVENTS_INDEX_NAME,
+  TICKET_EVENTS_INDEX_CANONICAL_SQL,
   ticketEventsTableSql,
 } from "./schema.js";
 
@@ -83,6 +85,11 @@ export function applyMigrations(db: DatabaseInstance): void {
   // additive loop so the copy below carries `payload` on a table that only just
   // gained it. See rebuildTicketEventsIfDivergent for why a rebuild is allowed on a
   // path that is otherwise additive-only.
+  //
+  // An index-only divergence takes the same full transactional rebuild as a PK or FK
+  // one, deliberately: it is a once-per-store convergence event, and one code path
+  // that always produces the canonical table is worth more than a DROP/CREATE INDEX
+  // fast path that would have to stay in sync with it.
   rebuildTicketEventsIfDivergent(db);
 
   const haveRuns = present.get("runs") ?? liveColumns("runs");
@@ -203,9 +210,11 @@ export function applyMigrations(db: DatabaseInstance): void {
 // So detect what CREATE TABLE fixes and ALTER cannot change: PK membership and
 // ordering (table_info's pk flags), UNIQUE/index shape (index_list), and the composite
 // FK (foreign_key_list).
-// The definition TICKET_EVENTS_INDEX_SQL creates, in the form PRAGMA reports it.
-const LOOKUP_INDEX = "idx_ticket_events_ticket";
-const LOOKUP_INDEX_COLUMNS = ["project_key", "ticket_id"] as const;
+// Both sides of the index comparison below are text this repo authors, so keyword
+// case is stable and only layout can legitimately differ.
+function normalizeIndexSql(sql: string): string {
+  return sql.replace(/\s+/g, " ").trim();
+}
 
 export function ticketEventsShapeDivergence(db: DatabaseInstance): string | null {
   const cols = db.prepare(`PRAGMA table_info(ticket_events)`).all() as { name: string; pk: number }[];
@@ -230,20 +239,25 @@ export function ticketEventsShapeDivergence(db: DatabaseInstance): string | null
   // different columns, a UNIQUE flag or a WHERE clause is what an old binary can leave
   // behind, and TICKET_EVENTS_INDEX_SQL's `CREATE INDEX IF NOT EXISTS` no-ops over it
   // forever — so a name-only check reports canonical while the shape is still wrong.
-  const lookup = indexes.find((i) => i.name === LOOKUP_INDEX);
-  if (!lookup) return `${LOOKUP_INDEX} is missing`;
-  const lookupCols = (
-    db.prepare(`PRAGMA index_info(${LOOKUP_INDEX})`).all() as { seqno: number; name: string | null }[]
-  )
-    .sort((a, b) => a.seqno - b.seqno)
-    .map((c) => c.name ?? "<expr>");
-  if (lookupCols.join(",") !== LOOKUP_INDEX_COLUMNS.join(",")) {
-    return `${LOOKUP_INDEX} is on (${lookupCols.join(", ") || "none"}), canonical is (${LOOKUP_INDEX_COLUMNS.join(", ")})`;
+  //
+  // The definition compared is sqlite_master's own CREATE text against the canonical
+  // one schema.ts builds, not a PRAGMA fingerprint: index_info reports neither DESC
+  // nor COLLATE, so a same-named index diverging only in sort order or collation reads
+  // as canonical there. One string comparison covers columns and their order, DESC,
+  // COLLATE, UNIQUE and partiality at once. An auto-index (origin 'u'/'pk') carries a
+  // NULL sql and is divergent by the same comparison.
+  const lookup = indexes.find((i) => i.name === TICKET_EVENTS_INDEX_NAME);
+  if (!lookup) return `${TICKET_EVENTS_INDEX_NAME} is missing`;
+  const liveSql = (
+    db.prepare(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?`).get(TICKET_EVENTS_INDEX_NAME) as
+      | { sql: string | null }
+      | undefined
+  )?.sql;
+  const liveIndexSql = normalizeIndexSql(liveSql ?? "");
+  const canonicalIndexSql = normalizeIndexSql(TICKET_EVENTS_INDEX_CANONICAL_SQL);
+  if (liveIndexSql !== canonicalIndexSql) {
+    return `${TICKET_EVENTS_INDEX_NAME} is defined as [${liveIndexSql}], canonical is [${canonicalIndexSql}]`;
   }
-  if (lookup.unique === 1 || lookup.origin !== "c") {
-    return `${LOOKUP_INDEX} is unique=${lookup.unique} origin=${lookup.origin}, canonical is unique=0 origin=c`;
-  }
-  if (lookup.partial === 1) return `${LOOKUP_INDEX} is partial, canonical is unconditional`;
 
   const strayUnique = indexes.filter((i) => i.unique === 1 && i.origin !== "pk").map((i) => i.name);
   if (strayUnique.length > 0) return `unexpected UNIQUE index: ${strayUnique.join(", ")}`;

@@ -59,6 +59,10 @@ function shapeOf(db: DatabaseInstance, table: string): Record<string, string> {
 // construction; the dogfood host's single-column-PK ticket_events (FG-608 reopen) was
 // invisible here while it made `forge backlog migrate` impossible. Comparing shape for
 // EVERY table is what stops a synthetic-current-schema fixture from hiding the next one.
+//
+// Each index carries its sqlite_master CREATE text as well as its PRAGMA fingerprint:
+// index_info reports neither DESC nor COLLATE, so an index diverging only in sort order
+// or collation is invisible to the PRAGMAs alone. Auto-indexes have no CREATE text.
 function constraintsOf(db: DatabaseInstance, table: string): Record<string, string[]> {
   const pk = columns(db, table)
     .filter((c) => c.pk > 0)
@@ -77,7 +81,13 @@ function constraintsOf(db: DatabaseInstance, table: string): Record<string, stri
       const cols = (db.prepare(`PRAGMA index_info(${i.name})`).all() as { seqno: number; name: string | null }[])
         .sort((a, b) => a.seqno - b.seqno)
         .map((c) => c.name ?? "<expr>");
-      return `${i.name} unique=${i.unique} origin=${i.origin} partial=${i.partial} (${cols.join(", ")})`;
+      const sql = (
+        db.prepare(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?`).get(i.name) as
+          | { sql: string | null }
+          | undefined
+      )?.sql;
+      const definition = (sql ?? "<auto>").replace(/\s+/g, " ").trim();
+      return `${i.name} unique=${i.unique} origin=${i.origin} partial=${i.partial} (${cols.join(", ")}) [${definition}]`;
     })
     .sort();
 
