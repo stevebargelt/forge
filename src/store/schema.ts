@@ -747,6 +747,15 @@ CREATE TABLE IF NOT EXISTS reviews (
   trusted_remote_sha     TEXT,
   contract_json          TEXT,
   lens_outcomes_json     TEXT,
+  -- FG-649: WHICH checkout this review's stages act on. Recorded when the review is
+  -- opened and re-recorded whenever an operator overrides it with --project, so
+  -- "forge review continue" resolves its dispatch workspace from the review row rather
+  -- than from the cwd of whatever process happens to run it. Since the coordinator now
+  -- COMMITS the fix cycle, a wrong cwd is no longer a wrong read -- it is a write into
+  -- the wrong repository. Nullable: a row written before FG-649 has none, and continue
+  -- then adopts the run's project_dir (recording what it adopted) or refuses by name.
+  -- There is deliberately no cwd fallback.
+  workspace_dir          TEXT,
   -- FG-639: which lifecycle stages are COMPLETE, and at which sha each completed.
   -- The state column says where the review is; this says what it has already DONE, which
   -- is a different question and the one "forge review continue" has to answer after a
@@ -1071,6 +1080,10 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
       "'documenting', 'verifying', 'rechecking', 'shipping_review', 'settled', 'blocked_environment', 'failed'))",
   },
   { table: "reviews", column: "settled_at", ddl: "ALTER TABLE reviews ADD COLUMN settled_at TEXT" },
+  // FG-649: the review's own workspace binding. Additive and nullable — a pre-FG-649 row
+  // reads back NULL, which is the legacy shape `forge review continue` adopts a run's
+  // project_dir for (and records) rather than guessing from cwd.
+  { table: "reviews", column: "workspace_dir", ddl: "ALTER TABLE reviews ADD COLUMN workspace_dir TEXT" },
 
   { table: "review_findings", column: "fingerprint", ddl: "ALTER TABLE review_findings ADD COLUMN fingerprint TEXT" },
   { table: "review_findings", column: "summary", ddl: "ALTER TABLE review_findings ADD COLUMN summary TEXT NOT NULL DEFAULT ''" },

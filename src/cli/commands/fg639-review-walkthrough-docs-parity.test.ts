@@ -131,6 +131,21 @@ const SOURCE_PARITY: { label: string; path: string; anyOf: RegExp[] }[] = [
     path: REVIEW_CMD,
     anyOf: [/resolveReviewBase\([\s\S]{0,200}?\}\);[\s\S]{0,200}?if \(!base\.ok\)[\s\S]{0,400}?insertReview/],
   },
+  // FG-649 re-anchoring (this predicate's neighbourhood is where the workspace binding was
+  // inserted): `start` now establishes TWO things before the row exists — the comparison base
+  // and the checkout the review's stages will act on. Same discipline as the base: verified
+  // first, refused at open if it cannot be established, and RECORDED on the row rather than
+  // re-derived per invocation.
+  {
+    label: "the workspace is verified BEFORE the review row is inserted, and bound BY that insert (FG-649)",
+    path: REVIEW_CMD,
+    anyOf: [/checkWorkspace\([\s\S]{0,600}?if \(!workspace\.ok\)[\s\S]{0,1600}?insertReview\([\s\S]{0,400}?workspaceDir: workspace\.dir/],
+  },
+  {
+    label: "every stage-driving invocation resolves its workspace from the REVIEW ROW (FG-649)",
+    path: REVIEW_CMD,
+    anyOf: [/resolveReviewWorkspace\(review, opts\.project\)/],
+  },
   {
     label: "resolveReviewBase infers from the ticket's landed range when --since is absent",
     path: REVIEW_WIRING,
@@ -159,4 +174,27 @@ test("FG-639 / RF-5: the walkthrough's comparison-base claims match the shipped 
         `delete the assertion to make it pass.`,
     );
   }
+});
+
+// FG-649: the removal is as load-bearing as the addition. `resolve(opts.project ?? process.cwd())`
+// on the dispatch path is the defect itself — under the coordinator's fix-cycle commit authority
+// it makes a wrong cwd a WRITE into the wrong repository — so its absence is asserted directly
+// rather than left to be re-introduced by the next convenience fix.
+//
+// RED baseline: restore that expression in depsFor and this test fails on the exact string.
+test("FG-649: the review command derives no dispatch workspace from the current directory", () => {
+  const source = read(REVIEW_CMD);
+  assert.doesNotMatch(
+    source,
+    /projectDir: resolve\(opts\.project \?\? process\.cwd\(\)\)/,
+    `src/cli/commands/review.ts resolves a dispatch workspace from cwd again. The workspace is bound to the ` +
+      `review row (workspace_dir) and overridden only by a RECORDED --project; a cwd fallback fails in the ` +
+      `least visible case — a deleted path or a repo re-cloned elsewhere — by silently acting somewhere else.`,
+  );
+  assert.match(
+    source,
+    /review_workspace_unbound|review_workspace_unusable/,
+    `the two named workspace refusals are gone from review.ts. An unresolvable workspace must REFUSE by name ` +
+      `with nothing written, not fall through to a default.`,
+  );
 });

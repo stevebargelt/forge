@@ -12,7 +12,8 @@
 // `review_mode: evidence_led`, so these verbs now drive the ledger that SETTLES its build gate
 // (`review_disposition`) rather than a pilot running beside verdict aggregation.
 
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Command } from "commander";
 import { ensureForgeDirs } from "../../util/paths.js";
@@ -29,10 +30,13 @@ import {
   findingsForReview,
   updateReview,
   type Disposition,
+  type Review,
   type ReviewFinding,
   type ReviewSummary,
 } from "../../store/reviews.js";
 import { fixBatchesForReview } from "../../store/fix-batches.js";
+import { getRun } from "../../store/runs.js";
+import { computeRepositoryEvidence, registryByEvidence } from "../../store/project-registry.js";
 import { newReviewId } from "../../util/ids.js";
 import { nextTransition } from "../../v2/review-coordinator.js";
 import { runNextStage, type CoordinatorDeps, type StageOutcome } from "../../v2/review-run.js";
@@ -75,6 +79,7 @@ export function renderReview(s: ReviewSummary): string {
   lines.push(`  contract confirmed: ${r.contractConfirmedSha ?? DASH}`);
   lines.push(`  candidate sha:      ${r.candidateSha ?? DASH}`);
   lines.push(`  trusted remote sha: ${r.trustedRemoteSha ?? DASH}`);
+  lines.push(`  workspace:          ${r.workspaceDir ?? DASH}`);
   lines.push(`  risk lenses:        ${s.riskLenses.length > 0 ? s.riskLenses.join(", ") : DASH}`);
   for (const a of s.lensAcceptances) {
     lines.push(
@@ -162,6 +167,158 @@ type ContinueOpts = {
   json?: boolean;
 };
 
+// ─── FG-649: the review row is the authority for WHICH checkout its stages act on ──
+//
+// `resolve(opts.project ?? process.cwd())` on every invocation meant `forge review
+// continue` from a wrong cwd drove a review against a different tree. That used to be a
+// wrong READ, surfaced as the candidate_not_checked_out stop; since the coordinator
+// commits the fix cycle it is a WRITE into a possibly-wrong repository.
+//
+// So the workspace is BOUND to the review: recorded when it is opened, re-recorded when
+// an operator overrides it, adopted-and-recorded from the run for a legacy row, and
+// otherwise REFUSED by name. There is deliberately no cwd fallback — the store-first-
+// with-cwd-fallback pattern in next.ts is right for a read verb, and its fallback half is
+// exactly what a committing verb must not keep: it fails in the least visible case (path
+// deleted, repo re-cloned elsewhere) by silently acting somewhere else.
+
+const WORKSPACE_REFUSALS = {
+  unbound: "review_workspace_unbound",
+  unusable: "review_workspace_unusable",
+  identityMismatch: "review_workspace_identity_mismatch",
+} as const;
+
+function canonicalPath(dir: string): string {
+  try {
+    return realpathSync(dir);
+  } catch {
+    return resolve(dir);
+  }
+}
+
+function gitToplevel(dir: string): string | undefined {
+  try {
+    return execFileSync("git", ["-C", dir, "rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
+  } catch {
+    return undefined;
+  }
+}
+
+/** Identity, not string equality: a path that still exists can be a DIFFERENT repository
+ *  than the one this review's run belongs to (re-cloned, or a scratch tree at the same
+ *  location). Only answerable where the ledger has an arbiter — the run names a project
+ *  dir whose repository evidence is REGISTERED in project_identity. Everywhere else this
+ *  says nothing rather than guessing. */
+function identityRefusal(runId: string | undefined, dir: string): string | undefined {
+  if (runId === undefined) return undefined;
+  const runDir = getRun(runId)?.projectDir;
+  if (runDir === undefined || !existsSync(runDir)) return undefined;
+
+  let runEvidenceKey: string;
+  let hereEvidenceKey: string;
+  try {
+    runEvidenceKey = computeRepositoryEvidence(runDir).key;
+    hereEvidenceKey = computeRepositoryEvidence(dir).key;
+  } catch {
+    return undefined;
+  }
+  if (runEvidenceKey === hereEvidenceKey) return undefined;
+
+  const registered = registryByEvidence(runEvidenceKey);
+  if (!registered) return undefined;
+  const here = registryByEvidence(hereEvidenceKey);
+  if (here && here.projectKey === registered.projectKey) return undefined;
+
+  return (
+    `${WORKSPACE_REFUSALS.identityMismatch}: ${dir} is not the repository this review's run ${runId} belongs to ` +
+    `(${runDir}, project ${registered.projectKey}${here ? `; that path is project ${here.projectKey}` : ""}). ` +
+    `A review's stages read and COMMIT in this directory, so a same-path different-repository match is refused ` +
+    `rather than written into — point --project <dir> at the right checkout. Nothing was written.`
+  );
+}
+
+/** A usable workspace is the ROOT of a git worktree that exists. `git -C <dir> rev-parse
+ *  --show-toplevel` resolving to <dir> is the check, so a subdirectory of a repo (whose
+ *  diffs and commits would be scoped differently than the review expects) is refused too. */
+function checkWorkspace(
+  dir: string,
+  runId: string | undefined,
+  origin: string,
+): { ok: true; dir: string } | { ok: false; refusal: string } {
+  if (!existsSync(dir)) {
+    return {
+      ok: false,
+      refusal:
+        `${WORKSPACE_REFUSALS.unusable}: ${origin} ${dir} does not exist. Name the checkout with ` +
+        `--project <dir> — it is then recorded on the review. Nothing was written.`,
+    };
+  }
+  const top = gitToplevel(dir);
+  if (top === undefined) {
+    return {
+      ok: false,
+      refusal:
+        `${WORKSPACE_REFUSALS.unusable}: ${origin} ${dir} is not a git worktree. Name the checkout with ` +
+        `--project <dir> — it is then recorded on the review. Nothing was written.`,
+    };
+  }
+  if (canonicalPath(top) !== canonicalPath(dir)) {
+    return {
+      ok: false,
+      refusal:
+        `${WORKSPACE_REFUSALS.unusable}: ${origin} ${dir} is inside the git worktree rooted at ${top}, not its ` +
+        `root. Name the checkout root with --project <dir> — it is then recorded on the review. Nothing was written.`,
+    };
+  }
+  const mismatch = identityRefusal(runId, dir);
+  if (mismatch !== undefined) return { ok: false, refusal: mismatch };
+  return { ok: true, dir };
+}
+
+/** The one resolution order, for every stage-driving invocation:
+ *    explicit --project (verified, then RECORDED)
+ *  > the review's persisted workspace_dir
+ *  > for a legacy row with no workspace_dir, the run's project_dir (adopted and RECORDED,
+ *    so the next invocation is bound)
+ *  > refuse by name.
+ *  cwd is irrelevant in every arm. */
+export function resolveReviewWorkspace(
+  review: Review,
+  explicit: string | undefined,
+): { ok: true; dir: string; source: "flag" | "review" | "run" } | { ok: false; refusal: string } {
+  if (explicit !== undefined) {
+    const dir = resolve(explicit);
+    const checked = checkWorkspace(dir, review.runId, "--project");
+    if (!checked.ok) return checked;
+    if (review.workspaceDir !== checked.dir) updateReview(review.id, { workspaceDir: checked.dir });
+    return { ok: true, dir: checked.dir, source: "flag" };
+  }
+
+  if (review.workspaceDir !== undefined) {
+    const checked = checkWorkspace(review.workspaceDir, review.runId, `the workspace recorded on ${review.id},`);
+    if (!checked.ok) return checked;
+    return { ok: true, dir: checked.dir, source: "review" };
+  }
+
+  const runDir = review.runId !== undefined ? getRun(review.runId)?.projectDir : undefined;
+  if (runDir !== undefined) {
+    const checked = checkWorkspace(resolve(runDir), review.runId, `the project dir of run ${review.runId},`);
+    if (!checked.ok) return checked;
+    updateReview(review.id, { workspaceDir: checked.dir });
+    return { ok: true, dir: checked.dir, source: "run" };
+  }
+
+  return {
+    ok: false,
+    refusal:
+      `${WORKSPACE_REFUSALS.unbound}: ${review.id} records no workspace and ` +
+      (review.runId === undefined
+        ? `names no run to adopt one from`
+        : `its run ${review.runId} records no project dir to adopt`) +
+      `. A review's stages read and COMMIT in a checkout, so forge will not guess one from the current ` +
+      `directory — name it with --project <dir> and it is recorded on the review. Nothing was written.`,
+  };
+}
+
 function readJsonFile(path: string, what: string): unknown {
   try {
     return JSON.parse(readFileSync(resolve(path), "utf8")) as unknown;
@@ -194,6 +351,10 @@ function depsFor(
   const widening = parseLensWidening(opts.addLens ?? []);
   if (!widening.ok) return { ok: false, refusal: widening.refusal };
 
+  // FG-649: the dispatch workspace comes from the REVIEW, never from cwd.
+  const workspace = resolveReviewWorkspace(review, opts.project);
+  if (!workspace.ok) return { ok: false, refusal: workspace.refusal };
+
   const acceptance =
     opts.acceptance !== undefined ? (readJsonFile(opts.acceptance, "acceptance claims") as AcClaim[]) : undefined;
 
@@ -218,7 +379,7 @@ function depsFor(
   return {
     ok: true,
     deps: buildCoordinatorDeps({
-      projectDir: resolve(opts.project ?? process.cwd()),
+      projectDir: workspace.dir,
       ticketId: review.ticketId ?? review.id,
       ...(review.runId !== undefined ? { runId: review.runId } : {}),
       ...(opts.route !== undefined ? { route: opts.route } : {}),
@@ -259,7 +420,7 @@ export function registerReview(program: Command): void {
   review
     .command("start")
     .argument("<ticket-id>", "the ticket whose landed implementation is under review")
-    .option("--project <dir>", "the candidate workspace (default: cwd)")
+    .option("--project <dir>", "the candidate workspace (default: cwd) — RECORDED on the review and used by every later stage")
     .option(
       "--since <sha>",
       "the implementation comparison base (default: inferred from the commits whose subject references the ticket)",
@@ -312,7 +473,21 @@ export function registerReview(program: Command): void {
         return;
       }
 
+      // FG-649: the workspace is BOUND when the review is opened — verified here and
+      // persisted by the same insert that records the base sha, so every later `continue`
+      // resolves it from the review row rather than from the cwd it happens to run in.
       const projectDir = resolve(opts.project ?? process.cwd());
+      const workspace = checkWorkspace(
+        projectDir,
+        opts.run,
+        opts.project !== undefined ? "--project" : "the current directory,",
+      );
+      if (!workspace.ok) {
+        console.error(`forge review start: ${workspace.refusal}`);
+        process.exitCode = 1;
+        return;
+      }
+
       const base = resolveReviewBase({
         projectDir,
         ticketId,
@@ -331,6 +506,7 @@ export function registerReview(program: Command): void {
         ticketId,
         ...(opts.run !== undefined ? { runId: opts.run } : {}),
         baseSha: base.baseSha,
+        workspaceDir: workspace.dir,
         contract: validated.contract,
         state: "confirming_contract",
       });
@@ -345,6 +521,7 @@ export function registerReview(program: Command): void {
       updateReview(reviewId, { candidateSha: candidate });
 
       console.log(`Review ${reviewId} — ticket ${ticketId}, candidate ${candidate}`);
+      console.log(`  workspace: ${workspace.dir} (recorded on the review; later stages act on it, not on cwd)`);
       console.log(
         `  base sha: ${base.baseSha}` +
           (base.inferredFrom !== undefined
@@ -377,7 +554,11 @@ export function registerReview(program: Command): void {
   review
     .command("continue")
     .argument("<review-id>", "review id")
-    .option("--project <dir>", "the candidate workspace (default: cwd)")
+    .option(
+      "--project <dir>",
+      "override the workspace recorded on the review — the override is RECORDED. Without it the workspace " +
+        "comes from the review row, never from cwd",
+    )
     .option("--route <route-key>", "the resolved routing-policy key for the dispatches this drives")
     .option("--unrouted", "acknowledge a deliberately unrouted dispatch")
     .option(
