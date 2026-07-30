@@ -9,6 +9,7 @@
 // - GET /api/review-loop/phases          active review-loop runs with a distinguishable phase (?projectDir filter, FG-487)
 // - GET /api/host-verifications           host_verifications evidence rows, ?ticketId=|&projectDir= or ?itemId= (FG-487)
 // - GET /api/host-verifications/recent    most recent host_verifications rows, unscoped (?limit) (FG-487)
+// - GET /api/reviews                      the review ledger: reviews + their findings, read-only (?limit, FG-638)
 //
 // All reads. No writes. Mutating actions (gate/next/retry) shell to the
 // `forge` CLI binary — wired in a later iteration; the MVP is read-only.
@@ -20,7 +21,7 @@ import { fileURLToPath } from "node:url";
 import {
   recentActivity, inFlight, taskDetail, projectsForDashboard, usageRollup, usageTimeSeries, usageModelMix, opsMetrics, routingGovernance,
   inProgressVerifications, reviewLoopRunPhases, hostVerificationsForTicket, hostVerificationsForCampaignItem, recentHostVerifications,
-  resolveProjectScope, backlogTruthForProject,
+  resolveProjectScope, backlogTruthForProject, reviewLedger,
 } from "./queries.js";
 import type { BacklogTicket, GroupBy, ProjectScope } from "./queries.js";
 import { renderShell, contentSecurityPolicy, cspNonce } from "./shell.js";
@@ -257,6 +258,28 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
   if (path === "/api/review-loop/phases") {
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(reviewLoopRunPhases(Date.now(), scopeFromUrl(url))));
+    return;
+  }
+
+  if (path === "/api/reviews") {
+    const limit = clamp(Number(url.searchParams.get("limit") ?? 25), 1, 200);
+    // The payload is built BEFORE any byte is written. A read that throws after
+    // writeHead cannot be reported — the headers are already out and the second
+    // write dies on ERR_HTTP_HEADERS_SENT, which is how a recoverable "old store"
+    // turns into a closed socket and a blank page.
+    let payload: string;
+    try {
+      payload = JSON.stringify({ reviews: reviewLedger(scopeFromUrl(url), limit) });
+    } catch (err) {
+      // A store written before FG-638 has no `reviews` table, and a read-only open
+      // never migrates one into existence (db.ts's policy). That is a legitimate
+      // state, not a server fault: report it in the payload and keep the page up,
+      // exactly as /api/backlog does for a pre-ticket-tables store.
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("/api/reviews: reading the review ledger failed:", err);
+      payload = JSON.stringify({ reviews: [], error: message });
+    }
+    res.writeHead(200, { "Content-Type": "application/json" }).end(payload);
     return;
   }
 

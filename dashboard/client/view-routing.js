@@ -1,4 +1,4 @@
-const VIEWS = new Set(["activity", "projects", "verify", "usage", "ops", "governance", "backlog"]);
+const VIEWS = new Set(["activity", "projects", "verify", "usage", "ops", "governance", "backlog", "reviews"]);
 
 export function initialView(hash) {
   const view = String(hash ?? "").replace(/^#/, "");

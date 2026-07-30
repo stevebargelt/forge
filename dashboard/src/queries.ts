@@ -1589,3 +1589,192 @@ export function recentHostVerifications(limit = 50, scope?: ProjectScope): HostV
     .all(...project.params, limit) as HostVerificationDbRow[];
   return rows.map(rowToHostVerification);
 }
+
+// ─── FG-638: the review ledger (read-only) ──────────────────────────────────
+//
+// The dashboard presents the review ledger as the managed object: a summary per
+// review plus its findings rows. This is the first release, so it is READ-ONLY —
+// disposition controls stay on the CLI until that surface is proven.
+//
+// Note the shape: findings are embedded in their review rather than fetched by a
+// second round trip. A review's findings are the review, and a panel that renders
+// a summary whose counts disagree with the rows below it is the exact failure this
+// avoids — both come from one query pair, at one instant.
+
+export type ReviewLedgerSource = {
+  verdictId?: string;
+  redTaskId?: string;
+  redRole?: string;
+  authority?: string;
+  modelFindingId?: string;
+  note?: string;
+};
+
+export type ReviewLedgerFinding = {
+  id: string;
+  findingRef: string;
+  summary: string;
+  severity: string | null;
+  riskLens: string | null;
+  reachability: string | null;
+  file: string | null;
+  line: number | null;
+  quotedText: string | null;
+  acceptanceRef: string | null;
+  invariantRef: string | null;
+  sources: ReviewLedgerSource[];
+  disposition: string;
+  dispositionRationale: string | null;
+  decidedBy: string | null;
+  duplicateOf: string | null;
+  followupTicketId: string | null;
+  resolution: string | null;
+  resolutionEvidenceKind: string | null;
+  resolutionEvidence: string | null;
+};
+
+export type ReviewLedgerEntry = {
+  id: string;
+  runId: string | null;
+  subjectTaskId: string | null;
+  ticketId: string | null;
+  projectDir: string | null;
+  baseSha: string | null;
+  contractConfirmedSha: string | null;
+  candidateSha: string | null;
+  trustedRemoteSha: string | null;
+  reviewMode: string;
+  state: string;
+  riskLenses: string[];
+  createdAt: string;
+  updatedAt: string;
+  settledAt: string | null;
+  countsByDisposition: Record<string, number>;
+  countsByResolution: Record<string, number>;
+  findings: ReviewLedgerFinding[];
+};
+
+type ReviewDbRow = {
+  id: string;
+  run_id: string | null;
+  subject_task_id: string | null;
+  ticket_id: string | null;
+  project_dir: string | null;
+  base_sha: string | null;
+  contract_confirmed_sha: string | null;
+  candidate_sha: string | null;
+  trusted_remote_sha: string | null;
+  contract_json: string | null;
+  review_mode: string;
+  state: string;
+  created_at: string;
+  updated_at: string;
+  settled_at: string | null;
+};
+
+type ReviewFindingDbRow = {
+  id: string;
+  review_id: string;
+  finding_ref: string;
+  summary: string;
+  severity: string | null;
+  risk_lens: string | null;
+  reachability: string | null;
+  file: string | null;
+  line: number | null;
+  quoted_text: string | null;
+  acceptance_ref: string | null;
+  invariant_ref: string | null;
+  sources_json: string;
+  disposition: string;
+  disposition_rationale: string | null;
+  decided_by: string | null;
+  duplicate_of: string | null;
+  followup_ticket_id: string | null;
+  resolution: string | null;
+  resolution_evidence_kind: string | null;
+  resolution_evidence: string | null;
+};
+
+function rowToReviewFinding(row: ReviewFindingDbRow): ReviewLedgerFinding {
+  return {
+    id: row.id,
+    findingRef: row.finding_ref,
+    summary: row.summary,
+    severity: row.severity,
+    riskLens: row.risk_lens,
+    reachability: row.reachability,
+    file: row.file,
+    line: row.line,
+    quotedText: row.quoted_text,
+    acceptanceRef: row.acceptance_ref,
+    invariantRef: row.invariant_ref,
+    sources: JSON.parse(row.sources_json) as ReviewLedgerSource[],
+    disposition: row.disposition,
+    dispositionRationale: row.disposition_rationale,
+    decidedBy: row.decided_by,
+    duplicateOf: row.duplicate_of,
+    followupTicketId: row.followup_ticket_id,
+    resolution: row.resolution,
+    resolutionEvidenceKind: row.resolution_evidence_kind,
+    resolutionEvidence: row.resolution_evidence,
+  };
+}
+
+function riskLensesOf(contractJson: string | null): string[] {
+  if (contractJson === null) return [];
+  const contract = JSON.parse(contractJson) as { risk_lenses?: unknown };
+  return Array.isArray(contract.risk_lenses) ? contract.risk_lenses.map(String) : [];
+}
+
+/** Reviews (most recently touched first) with their findings, scoped through the
+ *  owning run's project_dir. A review with no run is unscoped and always listed. */
+export function reviewLedger(scope?: ProjectScope, limit = 25): ReviewLedgerEntry[] {
+  const project = scopeSql("runs.project_dir", scope);
+  const reviews = db()
+    .prepare(
+      `SELECT reviews.*, runs.project_dir AS project_dir
+         FROM reviews LEFT JOIN runs ON runs.id = reviews.run_id
+        WHERE 1 = 1 ${project.clause}
+        ORDER BY reviews.updated_at DESC, reviews.id DESC
+        LIMIT ?`,
+    )
+    .all(...project.params, limit) as ReviewDbRow[];
+  if (reviews.length === 0) return [];
+
+  const placeholders = reviews.map(() => "?").join(", ");
+  const findings = db()
+    .prepare(`SELECT * FROM review_findings WHERE review_id IN (${placeholders}) ORDER BY review_id ASC, ordinal ASC`)
+    .all(...reviews.map((r) => r.id)) as ReviewFindingDbRow[];
+
+  return reviews.map((r) => {
+    const own = findings.filter((f) => f.review_id === r.id).map(rowToReviewFinding);
+    const countsByDisposition: Record<string, number> = {};
+    const countsByResolution: Record<string, number> = {};
+    for (const f of own) {
+      countsByDisposition[f.disposition] = (countsByDisposition[f.disposition] ?? 0) + 1;
+      const resolution = f.resolution ?? "unresolved";
+      countsByResolution[resolution] = (countsByResolution[resolution] ?? 0) + 1;
+    }
+    return {
+      id: r.id,
+      runId: r.run_id,
+      subjectTaskId: r.subject_task_id,
+      ticketId: r.ticket_id,
+      projectDir: r.project_dir,
+      baseSha: r.base_sha,
+      contractConfirmedSha: r.contract_confirmed_sha,
+      candidateSha: r.candidate_sha,
+      trustedRemoteSha: r.trusted_remote_sha,
+      reviewMode: r.review_mode,
+      state: r.state,
+      riskLenses: riskLensesOf(r.contract_json),
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+      settledAt: r.settled_at,
+      countsByDisposition,
+      countsByResolution,
+      findings: own,
+    };
+  });
+}

@@ -56,7 +56,11 @@ CREATE TABLE IF NOT EXISTS runs (
   created_at      TEXT NOT NULL,
   completed_at    TEXT,
   metadata        TEXT,
-  project_dir     TEXT
+  project_dir     TEXT,
+  -- FG-638: exactly one review authority model per run. NOT NULL with a DEFAULT so a
+  -- row written by a binary that predates the ledger (or by an INSERT that omits the
+  -- column) reads back the legacy verdict/blocked_by_red model rather than NULL.
+  review_mode     TEXT NOT NULL DEFAULT 'legacy_verdict'
 );
 -- FG-563 (CP1, FIX5): the check-before-spawn hot path (runByDispatchKey, fired on
 -- every continuation wake/dispatch) resolves the ONE physical run created under a
@@ -720,6 +724,94 @@ CREATE TABLE IF NOT EXISTS ticket_dispatch_evidence (
 );
 CREATE INDEX IF NOT EXISTS idx_ticket_dispatch_evidence_ticket
   ON ticket_dispatch_evidence(project_key, ticket_id);
+
+-- FG-638 (evidence-led review, Change 1): the durable review ledger. Two BRAND-NEW
+-- tables on the additive-only open path — an old binary that predates them is never
+-- broken and user_version is NOT bumped. The raw verdicts table above is untouched:
+-- it stays the immutable provenance record, and a ledger finding points BACK at the
+-- verdicts that produced it via sources_json rather than rewriting them.
+--
+-- The four SHAs are four different questions and none substitutes for another:
+--   base_sha               — the implementation comparison base
+--   contract_confirmed_sha — the frozen anchor discovery reviewed
+--   candidate_sha          — the mutable current candidate, as remediation lands
+--   trusted_remote_sha     — the fetched remote identity for final tip equality
+CREATE TABLE IF NOT EXISTS reviews (
+  id                     TEXT PRIMARY KEY,
+  run_id                 TEXT,
+  subject_task_id        TEXT,
+  ticket_id              TEXT,
+  base_sha               TEXT,
+  contract_confirmed_sha TEXT,
+  candidate_sha          TEXT,
+  trusted_remote_sha     TEXT,
+  contract_json          TEXT,
+  lens_outcomes_json     TEXT,
+  -- Copied from the run at creation so a read surface never has to join to answer
+  -- "which authority model settles this review".
+  review_mode            TEXT NOT NULL DEFAULT 'evidence_led'
+                           CHECK (review_mode IN ('legacy_verdict', 'legacy_review_loop', 'evidence_led')),
+  state                  TEXT NOT NULL DEFAULT 'confirming_contract'
+                           CHECK (state IN ('confirming_contract', 'discovering', 'awaiting_disposition',
+                                            'fixing', 'documenting', 'verifying', 'rechecking',
+                                            'shipping_review', 'settled', 'blocked_environment', 'failed')),
+  created_at             TEXT NOT NULL,
+  updated_at             TEXT NOT NULL,
+  settled_at             TEXT
+);
+
+-- One row per accepted observation. id is Forge-assigned and globally unique
+-- (<review-id>/RF-n); finding_ref is the RF-n an operator types. A model-supplied
+-- id is never honored — see ingestFindings in store/reviews.ts.
+--
+-- disposition and resolution are SEPARATE fields on purpose: disposition answers what
+-- Forge decided to do, resolution answers whether an accepted fix is proven complete.
+-- Collapsing them is how "we decided to fix it" silently reads as "it is fixed".
+CREATE TABLE IF NOT EXISTS review_findings (
+  id                       TEXT PRIMARY KEY,
+  review_id                TEXT NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
+  ordinal                  INTEGER NOT NULL,
+  finding_ref              TEXT NOT NULL,
+  fingerprint              TEXT,
+  summary                  TEXT NOT NULL DEFAULT '',
+  severity                 TEXT,
+  risk_lens                TEXT,
+  finding_type             TEXT,
+  evidence                 TEXT,
+  hypothesis               TEXT,
+  reachability             TEXT,
+  file                     TEXT,
+  line                     INTEGER,
+  quoted_text              TEXT,
+  acceptance_ref           TEXT,
+  invariant_ref            TEXT,
+  -- Every reviewer/verdict that produced this observation, as a JSON array. A
+  -- deduplicated finding keeps them all; the count is provenance, never an
+  -- "independent review count".
+  sources_json             TEXT NOT NULL DEFAULT '[]',
+  disposition              TEXT NOT NULL DEFAULT 'untriaged'
+                             CHECK (disposition IN ('untriaged', 'fix_now', 'accepted_risk', 'deferred',
+                                                    'rejected_premise', 'duplicate', 'architecture_question')),
+  disposition_rationale    TEXT,
+  disposition_evidence     TEXT,
+  decided_by               TEXT,
+  decided_at               TEXT,
+  decided_candidate_sha    TEXT,
+  duplicate_of             TEXT,
+  followup_ticket_id       TEXT,
+  resolution               TEXT,
+  resolution_evidence_kind TEXT,
+  resolution_evidence      TEXT,
+  discovered_sha           TEXT,
+  resolved_sha             TEXT,
+  created_at               TEXT NOT NULL,
+  updated_at               TEXT NOT NULL,
+  UNIQUE (review_id, ordinal)
+);
+-- Only over NOT-NULL-without-default columns, deliberately: the FG-608 parity guard
+-- strips every column ADD COLUMN could restore, and an index over a restorable column
+-- would make it undroppable and shrink that guard's coverage.
+CREATE INDEX IF NOT EXISTS idx_review_findings_review ON review_findings(review_id);
 `;
 
 // THE ADDITIVE COLUMN LIST — the machine-checked half of the additive-only
@@ -752,6 +844,10 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   { table: "runs", column: "completed_at", ddl: "ALTER TABLE runs ADD COLUMN completed_at TEXT" },
   { table: "runs", column: "metadata", ddl: "ALTER TABLE runs ADD COLUMN metadata TEXT" },
   { table: "runs", column: "project_dir", ddl: "ALTER TABLE runs ADD COLUMN project_dir TEXT" },
+  // FG-638: exactly one review authority model per run. NOT NULL with a DEFAULT so
+  // every pre-FG-638 run row reads back 'legacy_verdict' without a backfill — a
+  // legacy run with no `reviews` row is unambiguous rather than null-and-guessed.
+  { table: "runs", column: "review_mode", ddl: "ALTER TABLE runs ADD COLUMN review_mode TEXT NOT NULL DEFAULT 'legacy_verdict'" },
 
   { table: "tasks", column: "parent_id", ddl: "ALTER TABLE tasks ADD COLUMN parent_id TEXT REFERENCES tasks(id)" },
   { table: "tasks", column: "agent_alias", ddl: "ALTER TABLE tasks ADD COLUMN agent_alias TEXT" },
@@ -888,4 +984,70 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   { table: "backlog_snapshot_publications", column: "attempts", ddl: "ALTER TABLE backlog_snapshot_publications ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0" },
   { table: "backlog_snapshot_publications", column: "last_ok_at", ddl: "ALTER TABLE backlog_snapshot_publications ADD COLUMN last_ok_at TEXT" },
   { table: "backlog_snapshot_publications", column: "last_error", ddl: "ALTER TABLE backlog_snapshot_publications ADD COLUMN last_error TEXT" },
+
+  // FG-638: the review ledger. Both tables are brand-new, so a real old DB gets them
+  // whole from CREATE TABLE IF NOT EXISTS and none of these ALTERs ever fires there.
+  // They exist because the parity guard strips a fresh DB back to the oldest shape
+  // SQLite permits and demands the migration path restore it — which is exactly the
+  // check that would have caught tickets.imported_from.
+  { table: "reviews", column: "run_id", ddl: "ALTER TABLE reviews ADD COLUMN run_id TEXT" },
+  { table: "reviews", column: "subject_task_id", ddl: "ALTER TABLE reviews ADD COLUMN subject_task_id TEXT" },
+  { table: "reviews", column: "ticket_id", ddl: "ALTER TABLE reviews ADD COLUMN ticket_id TEXT" },
+  { table: "reviews", column: "base_sha", ddl: "ALTER TABLE reviews ADD COLUMN base_sha TEXT" },
+  { table: "reviews", column: "contract_confirmed_sha", ddl: "ALTER TABLE reviews ADD COLUMN contract_confirmed_sha TEXT" },
+  { table: "reviews", column: "candidate_sha", ddl: "ALTER TABLE reviews ADD COLUMN candidate_sha TEXT" },
+  { table: "reviews", column: "trusted_remote_sha", ddl: "ALTER TABLE reviews ADD COLUMN trusted_remote_sha TEXT" },
+  { table: "reviews", column: "contract_json", ddl: "ALTER TABLE reviews ADD COLUMN contract_json TEXT" },
+  { table: "reviews", column: "lens_outcomes_json", ddl: "ALTER TABLE reviews ADD COLUMN lens_outcomes_json TEXT" },
+  {
+    table: "reviews",
+    column: "review_mode",
+    ddl:
+      "ALTER TABLE reviews ADD COLUMN review_mode TEXT NOT NULL DEFAULT 'evidence_led' " +
+      "CHECK (review_mode IN ('legacy_verdict', 'legacy_review_loop', 'evidence_led'))",
+  },
+  {
+    table: "reviews",
+    column: "state",
+    ddl:
+      "ALTER TABLE reviews ADD COLUMN state TEXT NOT NULL DEFAULT 'confirming_contract' " +
+      "CHECK (state IN ('confirming_contract', 'discovering', 'awaiting_disposition', 'fixing', " +
+      "'documenting', 'verifying', 'rechecking', 'shipping_review', 'settled', 'blocked_environment', 'failed'))",
+  },
+  { table: "reviews", column: "settled_at", ddl: "ALTER TABLE reviews ADD COLUMN settled_at TEXT" },
+
+  { table: "review_findings", column: "fingerprint", ddl: "ALTER TABLE review_findings ADD COLUMN fingerprint TEXT" },
+  { table: "review_findings", column: "summary", ddl: "ALTER TABLE review_findings ADD COLUMN summary TEXT NOT NULL DEFAULT ''" },
+  { table: "review_findings", column: "severity", ddl: "ALTER TABLE review_findings ADD COLUMN severity TEXT" },
+  { table: "review_findings", column: "risk_lens", ddl: "ALTER TABLE review_findings ADD COLUMN risk_lens TEXT" },
+  { table: "review_findings", column: "finding_type", ddl: "ALTER TABLE review_findings ADD COLUMN finding_type TEXT" },
+  { table: "review_findings", column: "evidence", ddl: "ALTER TABLE review_findings ADD COLUMN evidence TEXT" },
+  { table: "review_findings", column: "hypothesis", ddl: "ALTER TABLE review_findings ADD COLUMN hypothesis TEXT" },
+  { table: "review_findings", column: "reachability", ddl: "ALTER TABLE review_findings ADD COLUMN reachability TEXT" },
+  { table: "review_findings", column: "file", ddl: "ALTER TABLE review_findings ADD COLUMN file TEXT" },
+  { table: "review_findings", column: "line", ddl: "ALTER TABLE review_findings ADD COLUMN line INTEGER" },
+  { table: "review_findings", column: "quoted_text", ddl: "ALTER TABLE review_findings ADD COLUMN quoted_text TEXT" },
+  { table: "review_findings", column: "acceptance_ref", ddl: "ALTER TABLE review_findings ADD COLUMN acceptance_ref TEXT" },
+  { table: "review_findings", column: "invariant_ref", ddl: "ALTER TABLE review_findings ADD COLUMN invariant_ref TEXT" },
+  { table: "review_findings", column: "sources_json", ddl: "ALTER TABLE review_findings ADD COLUMN sources_json TEXT NOT NULL DEFAULT '[]'" },
+  {
+    table: "review_findings",
+    column: "disposition",
+    ddl:
+      "ALTER TABLE review_findings ADD COLUMN disposition TEXT NOT NULL DEFAULT 'untriaged' " +
+      "CHECK (disposition IN ('untriaged', 'fix_now', 'accepted_risk', 'deferred', 'rejected_premise', " +
+      "'duplicate', 'architecture_question'))",
+  },
+  { table: "review_findings", column: "disposition_rationale", ddl: "ALTER TABLE review_findings ADD COLUMN disposition_rationale TEXT" },
+  { table: "review_findings", column: "disposition_evidence", ddl: "ALTER TABLE review_findings ADD COLUMN disposition_evidence TEXT" },
+  { table: "review_findings", column: "decided_by", ddl: "ALTER TABLE review_findings ADD COLUMN decided_by TEXT" },
+  { table: "review_findings", column: "decided_at", ddl: "ALTER TABLE review_findings ADD COLUMN decided_at TEXT" },
+  { table: "review_findings", column: "decided_candidate_sha", ddl: "ALTER TABLE review_findings ADD COLUMN decided_candidate_sha TEXT" },
+  { table: "review_findings", column: "duplicate_of", ddl: "ALTER TABLE review_findings ADD COLUMN duplicate_of TEXT" },
+  { table: "review_findings", column: "followup_ticket_id", ddl: "ALTER TABLE review_findings ADD COLUMN followup_ticket_id TEXT" },
+  { table: "review_findings", column: "resolution", ddl: "ALTER TABLE review_findings ADD COLUMN resolution TEXT" },
+  { table: "review_findings", column: "resolution_evidence_kind", ddl: "ALTER TABLE review_findings ADD COLUMN resolution_evidence_kind TEXT" },
+  { table: "review_findings", column: "resolution_evidence", ddl: "ALTER TABLE review_findings ADD COLUMN resolution_evidence TEXT" },
+  { table: "review_findings", column: "discovered_sha", ddl: "ALTER TABLE review_findings ADD COLUMN discovered_sha TEXT" },
+  { table: "review_findings", column: "resolved_sha", ddl: "ALTER TABLE review_findings ADD COLUMN resolved_sha TEXT" },
 ];

@@ -1,5 +1,5 @@
 import { getDb, writeTransaction } from "./db.js";
-import type { Run, RunStatus } from "../types/index.js";
+import type { Run, RunStatus, ReviewMode } from "../types/index.js";
 import { nowIso } from "../util/ids.js";
 import { notifyOnRunTransition } from "../notify/trigger.js";
 
@@ -12,6 +12,9 @@ type RunRow = {
   completed_at: string | null;
   metadata: string | null;
   project_dir: string | null;
+  // FG-638: absent on a hand-shaped minimal `runs` fixture, hence the optional —
+  // production and every migrated store carry it NOT NULL with a default.
+  review_mode?: string | null;
 };
 
 function rowToRun(row: RunRow): Run {
@@ -24,14 +27,22 @@ function rowToRun(row: RunRow): Run {
     completedAt: row.completed_at ?? undefined,
     metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
     projectDir: row.project_dir ?? undefined,
+    reviewMode: (row.review_mode ?? "legacy_verdict") as Run["reviewMode"],
   };
+}
+
+// FG-638: the one answer to "which review authority model settles this run".
+// A run with no `reviews` row is not ambiguous — it reads back the column, which a
+// legacy row carries as 'legacy_verdict' by DEFAULT rather than by backfill.
+export function runReviewMode(id: string): ReviewMode | undefined {
+  return getRun(id)?.reviewMode;
 }
 
 export function insertRun(run: Run): void {
   getDb()
     .prepare(
-      `INSERT INTO runs (id, workflow, title, status, created_at, completed_at, metadata, project_dir)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO runs (id, workflow, title, status, created_at, completed_at, metadata, project_dir, review_mode)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       run.id,
@@ -41,7 +52,8 @@ export function insertRun(run: Run): void {
       run.createdAt,
       run.completedAt ?? null,
       run.metadata ? JSON.stringify(run.metadata) : null,
-      run.projectDir ?? null
+      run.projectDir ?? null,
+      run.reviewMode ?? "legacy_verdict"
     );
 }
 

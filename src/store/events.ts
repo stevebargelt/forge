@@ -237,7 +237,21 @@ export type EventType =
   // marker into the mount source. prepareBacklogSnapshotMount NEVER throws, so the
   // dispatch proceeds with no authority asserted — this is the only durable record
   // that it did. Payload: { taskId, hostDir, mode, projectKey, error }.
-  | "container.backlog_authority_marker_failed";
+  | "container.backlog_authority_marker_failed"
+  // FG-638: the review ledger's append-only audit half. The `reviews` /
+  // `review_findings` rows carry CURRENT state; these carry how it got there.
+  // review.state_changed is emitted on EVERY lifecycle transition (payload
+  // {reviewId, from, to, reason, at}) — a row alone cannot say when a review
+  // entered awaiting_disposition or who moved it.
+  | "review.created"
+  | "review.state_changed"
+  // Payload names the Forge-assigned id AND the id the model supplied (or null),
+  // so "the reviewer called it CVE-1, forge calls it RF-3" stays auditable.
+  | "review.finding_ingested"
+  // Payload carries disposition, decidedBy (operator | orchestrator), the candidate
+  // sha it was decided against, rationale, evidence, and any canonical/followup
+  // linkage — the durable record behind the authority rules.
+  | "review.finding_dispositioned";
 
 export type Event = {
   id: number;

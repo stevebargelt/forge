@@ -8,6 +8,7 @@ import { UsageView } from "./usage.js";
 import { UsageLimits } from "./usage-limits.js";
 import { GovernanceView } from "./governance.js";
 import { BacklogView } from "./backlog.js";
+import { ReviewsView } from "./reviews.js";
 import { initialView, hashForView } from "./view-routing.js";
 import {
   eventBadgeClass, eventBadgeText, reviewLoopVerificationDetail, hostGateDetail,
@@ -60,6 +61,7 @@ function App() {
   const [opsSince, setOpsSince] = useState("30d");
   const [governance, setGovernance] = useState(null);
   const [backlog, setBacklog] = useState(null);
+  const [reviews, setReviews] = useState(null);
   // FG-487: review-loop verification / CI-wait windows and campaign reconcile
   // host-gate execs, in progress right now — polled alongside feed/in-flight
   // so a launched loop is visible before any task row exists for it.
@@ -212,6 +214,21 @@ function App() {
     return () => clearInterval(id);
   }, [pollGovernance, view]);
 
+  const pollReviews = useCallback(async () => {
+    try {
+      const res = await fetch(appendScope(`/api/reviews?limit=25`, projectFilter, checkoutFilter));
+      if (res.ok) setReviews(await res.json());
+      setNow(Date.now());
+    } catch (e) { setError(String(e)); }
+  }, [projectFilter, checkoutFilter]);
+
+  useEffect(() => {
+    if (view !== "reviews") return;
+    pollReviews();
+    const id = setInterval(pollReviews, USAGE_POLL_MS);
+    return () => clearInterval(id);
+  }, [pollReviews, view]);
+
   const pollBacklog = useCallback(async () => {
     if (!projectFilter) { setBacklog(null); return; }
     try {
@@ -297,6 +314,7 @@ function App() {
             <button class=${"tab " + (view === "ops" ? "tab-active" : "")} onClick=${() => switchView("ops")}>ops</button>
             <button class=${"tab " + (view === "governance" ? "tab-active" : "")} onClick=${() => switchView("governance")}>workbench</button>
             <button class=${"tab " + (view === "backlog" ? "tab-active" : "")} onClick=${() => switchView("backlog")}>backlog</button>
+            <button class=${"tab " + (view === "reviews" ? "tab-active" : "")} onClick=${() => switchView("reviews")}>reviews</button>
           </nav>
         </h1>
         <div class="muted mono">${new Date(now).toLocaleTimeString()}</div>
@@ -352,6 +370,8 @@ function App() {
           : html`<${GovernanceView} data=${governance} />`
         : view === "backlog"
         ? html`<${BacklogView} data=${backlog} projectFilter=${projectFilter} />`
+        : view === "reviews"
+        ? html`<${ReviewsView} data=${reviews} />`
         : view === "verify"
         ? html`<${VerificationsView}
             inProgress=${inProgressVerifications}

@@ -12,6 +12,10 @@ test("known view hashes remain directly addressable", () => {
   assert.equal(initialView("#activity"), "activity");
   assert.equal(initialView("#usage"), "usage");
   assert.equal(initialView("#governance"), "governance");
+  // FG-638: the review ledger is a deep-linkable view, so a dashboard link in a
+  // handoff note lands on it rather than silently falling back to home.
+  assert.equal(initialView("#reviews"), "reviews");
+  assert.equal(hashForView("reviews"), "#reviews");
 });
 
 test("home owns the hashless route while other views retain explicit hashes", () => {

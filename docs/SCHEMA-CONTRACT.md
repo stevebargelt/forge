@@ -19,6 +19,7 @@ Columns the dashboard reads:
 - `completed_at` — nullable ISO 8601 timestamp string
 - `project_dir` — nullable string, the host path mounted at `/project` for this run's containers
 - `metadata` — nullable JSON string. Dashboard does not currently parse fields beyond looking at the full blob
+- `review_mode` — string, `NOT NULL DEFAULT 'legacy_verdict'`, added by FG-638. Which review authority model settles this run: `legacy_verdict | legacy_review_loop | evidence_led`. Unconstrained TEXT on `runs` (no CHECK — FG-585 precedent), and additive with a default rather than backfilled, so every pre-FG-638 row reads back `legacy_verdict` instead of `NULL`. **The run row is the single source of this fact**; a review's own `review_mode` is a copy of it (see below). The dashboard reads it only via the `reviews` join, not on the run itself
 
 An expression index `idx_runs_dispatch_key` over `json_extract(metadata, '$.dispatchKey')` was added (FG-563) so the continuation consumer's check-before-spawn lookup (`runByDispatchKey`) resolves the one run created under a deterministic dispatch receipt with an indexed equality probe instead of a full-table scan + per-row JSON parse. Additive (index only — no column or data change, `IF NOT EXISTS` so re-open is idempotent); the dashboard does not read it.
 
@@ -172,6 +173,35 @@ The snapshot database mounted into agent containers is a *different*, derived ar
 The trust evidence FG-440/FG-483/FG-474 ship decisions rest on — a real host command execution (`source = 'host'`) or a green required CI check consulted in place of one (`source = 'ci'`). Previously only readable via `forge campaign report` / sqlite; the dashboard now renders it directly (`hostVerificationsForTicket()`, `hostVerificationsForCampaignItem()`, `recentHostVerifications()` — `GET /api/host-verifications` and `GET /api/host-verifications/recent`).
 
 Columns the dashboard reads: `id`, `ticket_id`, `project_dir`, `commit_sha`, `gate_name`, `command`, `exit_code`, `run_id` (nullable), `recorded_at`, `source` (`host | ci`), `ci_url` (nullable, `ci`-sourced rows only). Read via direct SQL against the dashboard's own handle (this file's established drift-surface caveat applies here too), not by importing `src/store/host-verifications.ts` — that module's exported lookups are single-gate/single-sha reuse-check helpers, not "everything recorded for this ticket," which is what an evidence view needs.
+
+### `reviews` / `review_findings` tables (FG-638 dashboard read path)
+
+The durable [review ledger](concepts.md#review-ledger) — what forge *decided* about a candidate's findings, as opposed to the `verdicts` table's record of what reviewers *reported*. Both tables are brand-new as of FG-638 and arrive whole via `CREATE TABLE IF NOT EXISTS` on the additive-only open path; `user_version` is not bumped, and the `verdicts` table is untouched (a ledger finding points *back* at the verdicts that produced it through `sources_json` rather than rewriting them). Read by `reviewLedger()` — `GET /api/reviews` — as direct SQL against the dashboard's own handle, **not** by importing forge's `src/store/reviews.ts`. So the summary projection exists twice (`summarizeReview()` behind `forge review show`, `reviewLedger()` behind the dashboard) with no shared import, and this file's standing drift caveat applies with the usual force: each side's tests write the shape they read. The two are expected to agree on state, counts, and disposition per finding; only the CLI pair (human render vs `--json`) is machine-held to that.
+
+`reviews` columns: `id` (PK, `review-<suffix>`), `run_id` (nullable), `subject_task_id` (nullable), `ticket_id` (nullable), `base_sha`, `contract_confirmed_sha`, `candidate_sha`, `trusted_remote_sha`, `contract_json` (nullable; the dashboard parses only `risk_lenses` out of it), `lens_outcomes_json` (nullable; **not** read by the dashboard), `review_mode`, `state`, `created_at`, `updated_at`, `settled_at` (nullable). The four SHAs are four different questions and none substitutes for another: `base_sha` is the implementation comparison base, `contract_confirmed_sha` the frozen anchor discovery reviewed, `candidate_sha` the mutable current candidate as remediation lands, `trusted_remote_sha` the fetched remote identity for final tip equality.
+
+Unlike its siblings above, this pair **does** carry CHECK constraints. The FG-585 hazard those siblings avoid — an old and a new binary fighting over an enum the other does not share — cannot arise for a table that never existed before, since only new binaries ever write these; the same reasoning that makes `continuations`' `dispatch_key` UNIQUE index safe (BD-15):
+- `reviews.review_mode` — `NOT NULL DEFAULT 'evidence_led'`, `CHECK IN ('legacy_verdict', 'legacy_review_loop', 'evidence_led')`. A **copy** of the owning run's `review_mode`, denormalized so a read surface need not join to answer "which authority model settles this review". The run row is authoritative: a run still carrying the column's `legacy_verdict` default and owning no review adopts its first review's mode atomically at insert; a run already marked (explicitly, or implicitly by owning a review) refuses a conflicting mode rather than letting run and ledger disagree.
+- `reviews.state` — `NOT NULL DEFAULT 'confirming_contract'`, `CHECK` over the 11 lifecycle states: `confirming_contract`, `discovering`, `awaiting_disposition`, `fixing`, `documenting`, `verifying`, `rechecking`, `shipping_review`, `settled`, `blocked_environment`, `failed`. FG-638 only *persists* these and emits an event per transition; the stage machine that drives them is FG-639.
+
+`review_findings` columns: `id` (PK, the globally unique `<review-id>/RF-n`), `review_id` (`REFERENCES reviews(id) ON DELETE CASCADE`), `ordinal` (`UNIQUE (review_id, ordinal)`), `finding_ref` (the `RF-n` an operator types), `fingerprint`, `summary` (`NOT NULL DEFAULT ''`), `severity`, `risk_lens`, `finding_type`, `evidence`, `hypothesis`, `reachability`, `file`, `line`, `quoted_text`, `acceptance_ref`, `invariant_ref`, `sources_json`, `disposition`, `disposition_rationale`, `disposition_evidence`, `decided_by`, `decided_at`, `decided_candidate_sha`, `duplicate_of`, `followup_ticket_id`, `resolution`, `resolution_evidence_kind`, `resolution_evidence`, `discovered_sha`, `resolved_sha`, `created_at`, `updated_at`. Index: `idx_review_findings_review` on `review_id`.
+
+The dashboard reads every one of those except `fingerprint`, `finding_type`, `evidence`, `hypothesis`, `ordinal` (used for ordering only), `disposition_evidence`, `decided_at`, `decided_candidate_sha`, `discovered_sha`, `resolved_sha`, and the timestamps.
+
+- `disposition` — `NOT NULL DEFAULT 'untriaged'`, `CHECK IN ('untriaged', 'fix_now', 'accepted_risk', 'deferred', 'rejected_premise', 'duplicate', 'architecture_question')`. **`disposition` and `resolution` are separate columns on purpose**: disposition answers what forge decided to *do*, resolution answers whether an accepted fix is *proven complete*. Collapsing them is how "we decided to fix it" silently reads as "it is fixed" — so both surfaces report counts by disposition **and** by resolution, and a `fix_now` whose `resolution` is not `resolved` counts as unsettled. `resolution` itself is unconstrained TEXT; a `NULL` renders as `unresolved` in the counts.
+- `sources_json` — `NOT NULL DEFAULT '[]'`; a JSON array of every reviewer/verdict that produced the observation, each `{verdictId?, redTaskId?, redRole?, authority?, modelFindingId?, note?}`. A deduplicated finding keeps them all, and a `duplicate` disposition merges the duplicate's sources into the canonical row — the count is **provenance, never an "independent review count"**. `modelFindingId` is the id the reviewing model invented for itself: retained here as provenance and never honored as the row's identity.
+- `decided_by` — unconstrained TEXT, `operator | orchestrator`. Under the single-user trust model this is an explicit confirmation (the `--operator` flag on the CLI invocation *is* the operator act, exactly as a `forge gate` human decision is), **not** authenticated identity — the FG-597 caveat carried forward.
+
+**Populated only by FG-639.** FG-638 shipped the tables, the store module, the events, and the read/disposition surfaces; nothing in the production path opens a review or ingests findings yet. On a live host these tables exist and are empty until the Change 2 coordinator lands, and a dashboard pointed at a store whose last **writable** open predates FG-638 will not have them at all (a read-only open never migrates — see `GET /api/reviews` below).
+
+#### FG-638: review-ledger lifecycle events
+
+The append-only half of the ledger: the rows above carry current state, these carry how it got there. Ordinary `events` rows, no schema change.
+
+- `review.created` — payload `{ reviewId, reviewMode, state, ticketId, candidateSha, runReviewModeAdopted }`. `runReviewModeAdopted: true` is the audit record that this insert moved a never-marked run's `review_mode` in the same transaction.
+- `review.state_changed` — payload `{ reviewId, from, to, reason, at }`, emitted on **every** transition including a no-op re-entry (so a coordinator that re-enters a stage after a crash is visible rather than silent). A row alone cannot say when a review entered `awaiting_disposition`.
+- `review.finding_ingested` — payload `{ reviewId, findingId, findingRef, summary, sourceCount, modelSuppliedId }`. Naming both the forge-assigned id and the model-supplied one (or `null`) keeps "the reviewer called it CVE-1, forge calls it RF-3" auditable.
+- `review.finding_dispositioned` — payload `{ reviewId, findingId, findingRef, disposition, decidedBy, decidedAt, candidateSha, rationale, evidence, duplicateOf, followupTicketId }` — the durable record behind the authority rules.
 
 ### `continuations` table (FG-562 durable continuation-claim primitive)
 
@@ -392,6 +422,7 @@ The dashboard server exposes read-only JSON endpoints. All `GET` — no writes. 
 | `GET /api/review-loop/phases` | `projectDir` | Active review-loop runs with phase `verifying \| waiting-on-ci \| reviewing \| fixing` (FG-487) |
 | `GET /api/host-verifications` | `ticketId` + optional `projectDir`, or `itemId` | host_verifications evidence rows scoped to a ticket or campaign item (FG-487) |
 | `GET /api/host-verifications/recent` | `limit` (1–500, default 50) | Most recent host_verifications rows across all tickets — after-the-fact discoverability of bare host gates (FG-487) |
+| `GET /api/reviews` | `limit` (1–200, default 25), `projectKey` or `projectDir` | The [review ledger](concepts.md#review-ledger), read-only: reviews most-recently-touched first, each with its findings **embedded** (not a second round trip — a summary whose counts disagree with the rows below it is the failure that avoids). Returns `{reviews: ReviewLedgerEntry[], error?}`. Scoped through the owning run's `project_dir`; a review with no run is unscoped and always listed. `error` is set — with `reviews: []` and still HTTP `200` — when the read failed, notably a store whose last writable open predates FG-638 and therefore has no `reviews` table (`no such table: reviews`); a read-only open never migrates one into existence, so that is a legitimate state to report, not a server fault (FG-638) |
 | `GET /api/backlog` | `projectKey` or `projectDir` | One project's tickets from the host store plus its per-checkout session notes. Returns `{notes, notesByCheckout, tickets, ticketsProjectKey, ticketsStorageMode, ticketsError?}` — `ticketsProjectKey: null` means the repository has no ticket truth (never imported), and `ticketsError` means the read failed and the count is unknown, never zero (FG-608) |
 
 ### `GET /api/governance` response shape (`WorkbenchPanel`)
@@ -402,6 +433,17 @@ Read-only. Returns a `WorkbenchPanel` JSON object with four top-level sections. 
 - `derived` — `{ policyPath: string, health: WorkbenchHealth, findings?: Finding[], accountable?: string }` — the compiled routing-policy state. `health` is one of `"ok" | "stale-drift" | "compile-error" | "uncompiled-override" | "policy-not-found"`. `findings` is present when health is not `"ok"`. `accountable` is the policy-level accountable field (present only when `ok` or `stale-drift`).
 - `effective` — `{ routes: RouteMap, diff?: OverrideDiff } | null` — routes currently in force plus an optional host→project diff. `null` when the policy is broken and no effective routes exist.
 - `recorded` — `{ entries: RaciAuditEntry[] }` — tail of `~/.forge/raci-audit.log` (up to 8 entries, newest first). Empty when no RACI changes have been recorded yet.
+
+### `GET /api/reviews` response shape (`ReviewLedgerEntry`)
+
+Read-only (FG-638). Each entry is the `reviews` row camelCased — `id`, `runId`, `subjectTaskId`, `ticketId`, `baseSha`, `contractConfirmedSha`, `candidateSha`, `trustedRemoteSha`, `reviewMode`, `state`, `createdAt`, `updatedAt`, `settledAt` — plus four fields that are **derived, not stored**:
+
+- `projectDir` — joined from the owning run, `null` for a review with no run.
+- `riskLenses` — `contract_json`'s `risk_lenses` array, `[]` when there is no contract or no such key.
+- `countsByDisposition` / `countsByResolution` — `Record<string, number>` over this review's own findings; an absent `resolution` is counted under the literal `unresolved`.
+- `findings` — `ReviewLedgerFinding[]`, ordered by `ordinal`, each carrying `sources` parsed from `sources_json`.
+
+Disposition controls are deliberately **not** exposed: the ledger's write surface is `forge review disposition` on the CLI, and the dashboard stays read-only until that surface is proven.
 
 ### `GET /api/task/:id` response shape
 

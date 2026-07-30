@@ -41,6 +41,7 @@ import { registerOps } from "./commands/ops.js";
 import { registerDependencyCache } from "./commands/dependency-cache.js";
 import { registerRaci } from "./commands/raci.js";
 import { registerPi } from "./commands/pi.js";
+import { registerReview } from "./commands/review.js";
 import { registerReviewLoop } from "./commands/review-loop.js";
 import { registerRoute } from "./commands/route.js";
 import { registerCheckAgentDiff } from "./commands/check-agent-diff.js";
@@ -114,6 +115,7 @@ export function buildProgram(): Command {
   registerDependencyCache(program);
   registerRaci(program);
   registerPi(program);
+  registerReview(program);
   registerReviewLoop(program);
   registerRoute(program);
   registerCheckAgentDiff(program);
