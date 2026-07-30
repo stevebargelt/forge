@@ -35,6 +35,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { authorityTestkitEnv, withAuthorityTestkit } from "./container-authority.testkit-spawn.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const entry = resolve(here, "..", "cli", "index.ts");
@@ -58,11 +59,11 @@ type ForgeResult = { status: number | null; stdout: string; stderr: string };
 
 /** The real CLI, in a real child process, against this test's private store. */
 function forge(projectDir: string, args: string[]): ForgeResult {
-  const res = spawnSync(tsx, [entry, ...args], {
+  const res = spawnSync(tsx, withAuthorityTestkit(entry, args), {
     cwd: projectDir,
     input: "",
     encoding: "utf8",
-    env: { ...process.env, FORGE_HOME: home, FORGE_DB_PATH: join(home, "forge.db") },
+    env: { ...process.env, FORGE_HOME: home, FORGE_DB_PATH: join(home, "forge.db"), ...authorityTestkitEnv() },
   });
   return { status: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
 }

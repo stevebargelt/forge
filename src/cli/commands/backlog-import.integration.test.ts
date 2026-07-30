@@ -21,6 +21,7 @@ import {
   blockerEvidenceForTicket,
 } from "../../store/tickets.js";
 import { readBacklogConfig } from "../../backlog/config.js";
+import { authorityTestkitEnv, withAuthorityTestkit } from "../../backlog/container-authority.testkit-spawn.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const entry = resolve(here, "..", "index.ts");
@@ -30,7 +31,12 @@ const tsx = existsSync(localTsx) ? localTsx : "tsx";
 let projectDir: string;
 
 function runForge(args: string[]) {
-  return spawnSync(tsx, [entry, ...args], { cwd: projectDir, input: "", encoding: "utf8" });
+  return spawnSync(tsx, withAuthorityTestkit(entry, args), {
+    cwd: projectDir,
+    input: "",
+    encoding: "utf8",
+    env: { ...process.env, ...authorityTestkitEnv() },
+  });
 }
 
 function writeTicketFile(subdir: string, fm: Record<string, unknown>, body: string): void {
@@ -123,10 +129,11 @@ test("integ FG-606: --json conflict emits a structured conflict object with non-
     "---\nid: FG-9\ntype: story\nstatus: active\ntitle: b\n---\n\nbody\n",
   );
 
-  const res = spawnSync(tsx, [entry, "backlog", "import", "--project", projB, "--json"], {
+  const res = spawnSync(tsx, withAuthorityTestkit(entry, ["backlog", "import", "--project", projB, "--json"]), {
     cwd: projB,
     input: "",
     encoding: "utf8",
+    env: { ...process.env, ...authorityTestkitEnv() },
   });
   assert.equal(res.status, 1, `expected non-zero exit; stdout: ${res.stdout} stderr: ${res.stderr}`);
   const obj = JSON.parse(res.stdout) as {

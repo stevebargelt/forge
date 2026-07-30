@@ -19,6 +19,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { DB_PATH } from "../util/paths.js";
+import { authorityTestkitEnv, withAuthorityTestkit } from "./container-authority.testkit-spawn.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const entry = resolve(here, "..", "cli", "index.ts");
@@ -52,10 +53,11 @@ function initRepo(dir: string): void {
 }
 
 function forge(projectDir: string, args: string[]) {
-  return spawnSync(tsx, [entry, ...args, "--project", projectDir], {
+  return spawnSync(tsx, withAuthorityTestkit(entry, [...args, "--project", projectDir]), {
     cwd: projectDir,
     input: "",
     encoding: "utf8",
+    env: { ...process.env, ...authorityTestkitEnv() },
   });
 }
 

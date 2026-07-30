@@ -14,7 +14,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -67,10 +67,38 @@ function seed(id: string, body: string, title = "readable"): void {
   setStorageMode(KEY, "db", NOW);
 }
 
+// FG-645: the reader's mount root is a COMPILED-IN CONSTANT with no runtime seam,
+// deliberately — this file is the entire forge surface a container has, and a
+// preload- or env-reachable override on it would be one NODE_OPTIONS away from the
+// agent, i.e. exactly the F2 bypass the constant exists to prevent. src/backlog's
+// TypeScript equivalent can afford setAuthorityMountForTest; this cannot.
+//
+// So the seam is applied to a COPY instead, and the only edit is that one line —
+// asserted below, so the shipped bytes remain what every other line of this suite
+// exercises. Inside an agent container the original would resolve THAT container's
+// /forge-backlog marker and answer every test from the host's snapshot, silently
+// and with exit 0.
+const REDIRECTED_READER_MOUNT = join(tmpdir(), "forge-shipped-reader-no-mount");
+
+function redirectedReader(): string {
+  const shipped = readFileSync(READER, "utf8");
+  const patched = shipped.replace(
+    /^const MOUNT = "\/forge-backlog";$/m,
+    `const MOUNT = ${JSON.stringify(REDIRECTED_READER_MOUNT)};`,
+  );
+  assert.notEqual(patched, shipped, "the shipped reader's compiled-in MOUNT line moved — retarget this seam");
+  const shippedLines = shipped.split("\n");
+  const changed = patched.split("\n").filter((l, i) => l !== shippedLines[i]);
+  assert.equal(changed.length, 1, "the copy must differ from the shipped reader in exactly one line");
+  const copy = join(newDir(), "forge-backlog-reader.mjs");
+  writeFileSync(copy, patched);
+  return copy;
+}
+
 function runReader(args: string[], env: Record<string, string> = {}) {
-  return spawnSync("node", ["--no-warnings", READER, ...args], {
+  return spawnSync("node", ["--no-warnings", redirectedReader(), ...args], {
     encoding: "utf8",
-    env: { ...process.env, ...env },
+    env: { ...process.env, [SNAPSHOT_DIR_ENV]: "", ...env },
   });
 }
 

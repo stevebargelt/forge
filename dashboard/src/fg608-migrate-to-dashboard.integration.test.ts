@@ -33,6 +33,10 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import type { Server } from "node:http";
+import {
+  authorityTestkitEnv,
+  withAuthorityTestkit,
+} from "../../src/backlog/container-authority.testkit-spawn.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
@@ -70,11 +74,16 @@ function git(dir: string, args: string[]): void {
 
 /** The real CLI, in a real child process, against this test's private store. */
 function forge(projectDir: string, args: string[]): { status: number | null; stdout: string; stderr: string } {
-  const res = spawnSync(TSX, [CLI_ENTRY, ...args], {
+  const res = spawnSync(TSX, withAuthorityTestkit(CLI_ENTRY, args), {
     cwd: projectDir,
     input: "",
     encoding: "utf8",
-    env: { ...process.env, FORGE_HOME: forgeHome, FORGE_DB_PATH: join(forgeHome, "forge.db") },
+    env: {
+      ...process.env,
+      FORGE_HOME: forgeHome,
+      FORGE_DB_PATH: join(forgeHome, "forge.db"),
+      ...authorityTestkitEnv(),
+    },
   });
   assert.equal(res.status, 0, `forge ${args.join(" ")} failed:\n${res.stdout}\n${res.stderr}`);
   return { status: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };

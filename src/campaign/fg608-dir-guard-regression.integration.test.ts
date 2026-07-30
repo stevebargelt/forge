@@ -46,6 +46,7 @@ import { fileURLToPath } from "node:url";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest, writeTransaction } from "../store/db.js";
 import { setStorageMode } from "../store/tickets.js";
+import { authorityTestkitEnv, withAuthorityTestkit } from "../backlog/container-authority.testkit-spawn.js";
 import {
   computeRepositoryEvidence,
   resolveAndClaimProjectKey,
@@ -271,7 +272,12 @@ test("integ FG-608: a vanished projectDir yields invalid_project_dir in MARKDOWN
 // ── The CLI guard (campaign.ts, `forge campaign approve`) ────────────────────
 
 function forge(cwd: string, args: string[]) {
-  return spawnSync(tsx, [entry, ...args], { cwd, input: "", encoding: "utf8" });
+  return spawnSync(tsx, withAuthorityTestkit(entry, args), {
+    cwd,
+    input: "",
+    encoding: "utf8",
+    env: { ...process.env, ...authorityTestkitEnv() },
+  });
 }
 
 function initRepo(dir: string): void {
