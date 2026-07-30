@@ -23,7 +23,7 @@
 
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -181,6 +181,47 @@ test("FG-642 (adversity): an exported-but-empty FORGE_CHROME_BIN is not an overr
     assert.ok(message.includes("probed:"), `an empty override must report the probe list: ${message}`);
     assert.ok(!message.includes("is set to"), `an empty override must not be reported as set: ${message}`);
   }
+});
+
+test("FG-642 (adversity): FORGE_CHROME_BIN naming a DIRECTORY is refused by name, not deferred to an opaque launch failure", () => {
+  // `/Applications/Google Chrome.app` is a directory — the natural macOS mistake, and
+  // one that passes existsSync. Resolving it hands a directory to chromium.launch,
+  // which dies with a spawn error naming nothing an operator can act on. The whole
+  // point of a named precondition is that it fires HERE.
+  const bundle = join(scratch, "Google Chrome.app");
+  mkdirSync(bundle);
+  const env = { FORGE_CHROME_BIN: bundle, CHROME_PATH: undefined };
+
+  assert.equal(findChrome({ env, locations: [systemLike] }), undefined, "a directory is not a browser binary");
+
+  const message = chromePreconditionMessage(PURPOSE, { env, locations: [systemLike] });
+  assert.ok(message.includes(bundle), `the failure must name the override path: ${message}`);
+  assert.ok(message.includes("is a directory"), `the failure must say WHY the path was refused: ${message}`);
+  assert.ok(message.includes("Set FORGE_CHROME_BIN to its path"), "the remedy text must survive the new refusal");
+  assert.ok(message.includes("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"), message);
+  assert.throws(() => requireChrome(PURPOSE, { env, locations: [systemLike] }), (err: Error) => {
+    assert.equal(err.message, message);
+    return true;
+  });
+});
+
+test("FG-642 (adversity): a PROBED candidate that is a directory is skipped, not resolved", () => {
+  const bundleCandidate = join(scratch, "probed-Chromium.app");
+  mkdirSync(bundleCandidate);
+  const realBinary = join(scratch, "probed-real-chromium");
+  writeFileSync(realBinary, "");
+
+  assert.equal(
+    findChrome({ env: NO_ENV, locations: [bundleCandidate, realBinary] }),
+    realBinary,
+    "a directory earlier in the probe order must not shadow the real binary behind it"
+  );
+  // And on its own it resolves nothing — a named precondition, not a crash downstream.
+  assert.equal(findChrome({ env: NO_ENV, locations: [bundleCandidate] }), undefined);
+  assert.throws(
+    () => requireChrome(PURPOSE, { env: NO_ENV, locations: [bundleCandidate] }),
+    /^Error: chrome precondition: /
+  );
 });
 
 test("FG-642 (this environment): the resolver hands back an existing known location or fails by name — never a path that does not exist", () => {

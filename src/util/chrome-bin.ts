@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 
 // FG-642: ONE Chrome/Chromium resolution path for the whole repo — the dashboard
 // browser tier (dashboard/browser-tests/*) and the host-side CDP capture. Six
@@ -35,6 +35,16 @@ function override(opts: ChromeResolveOptions): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
+// Following symlinks is the point: the agent image's /usr/local/bin/chromium IS a
+// symlink to Playwright's binary, so lstat would reject the one path that matters.
+function isExecutableFile(path: string): boolean {
+  return existsSync(path) && statSync(path).isFile();
+}
+
+function isDirectory(path: string): boolean {
+  return existsSync(path) && statSync(path).isDirectory();
+}
+
 function probeOrder(opts: ChromeResolveOptions): string[] {
   const hinted = (opts.env ?? process.env).CHROME_PATH?.trim();
   const locations = opts.locations ?? KNOWN_CHROME_LOCATIONS;
@@ -46,11 +56,15 @@ function probeOrder(opts: ChromeResolveOptions): string[] {
  * it is set it is the ONLY thing consulted, so an operator who points it somewhere
  * wrong hears about that path rather than silently getting a different browser.
  * `CHROME_PATH` stays a lenient first candidate (its long-standing meaning here).
+ *
+ * A candidate must be a FILE. `/Applications/Google Chrome.app` is a directory and the
+ * natural macOS mistake; accepting it would defer the failure to an opaque death inside
+ * chromium.launch instead of the named precondition below.
  */
 export function findChrome(opts: ChromeResolveOptions = {}): string | undefined {
   const forced = override(opts);
-  if (forced) return existsSync(forced) ? forced : undefined;
-  return probeOrder(opts).find(existsSync);
+  if (forced) return isExecutableFile(forced) ? forced : undefined;
+  return probeOrder(opts).find(isExecutableFile);
 }
 
 /**
@@ -60,9 +74,11 @@ export function findChrome(opts: ChromeResolveOptions = {}): string | undefined 
  */
 export function chromePreconditionMessage(purpose: string, opts: ChromeResolveOptions = {}): string {
   const forced = override(opts);
-  const where = forced
-    ? `FORGE_CHROME_BIN is set to ${forced} and no file exists there`
-    : `probed: ${probeOrder(opts).join(", ")}`;
+  const where = !forced
+    ? `probed: ${probeOrder(opts).join(", ")}`
+    : isDirectory(forced)
+      ? `FORGE_CHROME_BIN is set to ${forced}, which is a directory, not the browser executable`
+      : `FORGE_CHROME_BIN is set to ${forced} and no file exists there`;
   return (
     `chrome precondition: ${purpose} requires a real Chrome/Chromium binary and none was found — ${where}. ` +
     `Set FORGE_CHROME_BIN to its path (agent containers ship /usr/local/bin/chromium; ` +
