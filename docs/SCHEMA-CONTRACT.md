@@ -178,11 +178,13 @@ Columns the dashboard reads: `id`, `ticket_id`, `project_dir`, `commit_sha`, `ga
 
 The durable [review ledger](concepts.md#review-ledger) — what forge *decided* about a candidate's findings, as opposed to the `verdicts` table's record of what reviewers *reported*. Both tables are brand-new as of FG-638 and arrive whole via `CREATE TABLE IF NOT EXISTS` on the additive-only open path; `user_version` is not bumped, and the `verdicts` table is untouched (a ledger finding points *back* at the verdicts that produced it through `sources_json` rather than rewriting them). Read by `reviewLedger()` — `GET /api/reviews` — as direct SQL against the dashboard's own handle, **not** by importing forge's `src/store/reviews.ts`. So the summary projection exists twice (`summarizeReview()` behind `forge review show`, `reviewLedger()` behind the dashboard) with no shared import, and this file's standing drift caveat applies with the usual force: each side's tests write the shape they read. The two are expected to agree on state, counts, and disposition per finding; only the CLI pair (human render vs `--json`) is machine-held to that.
 
-`reviews` columns: `id` (PK, `review-<suffix>`), `run_id` (nullable), `subject_task_id` (nullable), `ticket_id` (nullable), `base_sha`, `contract_confirmed_sha`, `candidate_sha`, `trusted_remote_sha`, `contract_json` (nullable; the dashboard parses only `risk_lenses` out of it), `lens_outcomes_json` (nullable; **not** read by the dashboard), `review_mode`, `state`, `created_at`, `updated_at`, `settled_at` (nullable). The four SHAs are four different questions and none substitutes for another: `base_sha` is the implementation comparison base, `contract_confirmed_sha` the frozen anchor discovery reviewed, `candidate_sha` the mutable current candidate as remediation lands, `trusted_remote_sha` the fetched remote identity for final tip equality.
+`reviews` columns: `id` (PK, `review-<suffix>`), `run_id` (nullable), `subject_task_id` (nullable), `ticket_id` (nullable), `base_sha`, `contract_confirmed_sha`, `candidate_sha`, `trusted_remote_sha`, `contract_json` (nullable; the dashboard parses only `risk_lenses` out of it), `lens_outcomes_json` (nullable; **not** read by the dashboard), `stage_evidence_json` (nullable; added by FG-639; **not** read by the dashboard), `review_mode`, `state`, `created_at`, `updated_at`, `settled_at` (nullable). The four SHAs are four different questions and none substitutes for another: `base_sha` is the implementation comparison base, `contract_confirmed_sha` the frozen anchor discovery reviewed, `candidate_sha` the mutable current candidate as remediation lands, `trusted_remote_sha` the fetched remote identity for final tip equality.
+
+`stage_evidence_json` is the FG-639 coordinator's durable memory, and it answers a different question from `state`: `state` says where a review **is**, this says what it has already **done** and at which sha. Shape: a partial map from stage key — `verified_entry`, `contract_confirmed`, `discovery`, `fix`, `docs`, `verified_final`, `recheck`, `shipping` — to `{sha, at, detail?, meta?}`. For most stages **completion is per sha, never in the abstract**, which is what makes `forge review continue` after a crash a read rather than a guess: a stage recorded at the current candidate is never repeated merely because the process died, and a stage recorded at a superseded sha is correctly not complete for the candidate that exists now. Two stages are deliberate exceptions — `verified_entry` is checked on **existence alone** (it is the entry gate and runs once per review), and `fix` records the *pre*-fix candidate so its completion is decided per finding rather than by comparing shas. `meta` carries stage-specific durable detail (the batch id a fix stage consumed, the ids a recheck left unresolved, whether a stage was a legitimate no-op). Additive and nullable, so every pre-FG-639 row reads back as "no stage completed".
 
 Unlike its siblings above, this pair **does** carry CHECK constraints. The FG-585 hazard those siblings avoid — an old and a new binary fighting over an enum the other does not share — cannot arise for a table that never existed before, since only new binaries ever write these; the same reasoning that makes `continuations`' `dispatch_key` UNIQUE index safe (BD-15):
 - `reviews.review_mode` — `NOT NULL DEFAULT 'evidence_led'`, `CHECK IN ('legacy_verdict', 'legacy_review_loop', 'evidence_led')`. A **copy** of the owning run's `review_mode`, denormalized so a read surface need not join to answer "which authority model settles this review". The run row is authoritative: a run still carrying the column's `legacy_verdict` default and owning no review adopts its first review's mode atomically at insert; a run already marked (explicitly, or implicitly by owning a review) refuses a conflicting mode rather than letting run and ledger disagree.
-- `reviews.state` — `NOT NULL DEFAULT 'confirming_contract'`, `CHECK` over the 11 lifecycle states: `confirming_contract`, `discovering`, `awaiting_disposition`, `fixing`, `documenting`, `verifying`, `rechecking`, `shipping_review`, `settled`, `blocked_environment`, `failed`. FG-638 only *persists* these and emits an event per transition; the stage machine that drives them is FG-639.
+- `reviews.state` — `NOT NULL DEFAULT 'confirming_contract'`, `CHECK` over the 11 lifecycle states: `confirming_contract`, `discovering`, `awaiting_disposition`, `fixing`, `documenting`, `verifying`, `rechecking`, `shipping_review`, `settled`, `blocked_environment`, `failed`. FG-638 only *persisted* these and emitted an event per transition; FG-639 shipped the stage machine that drives them (see [Review coordinator](concepts.md#review-coordinator)). Note `blocked_environment` is a **stop, not a terminal state** — the coordinator's next transition out of it re-enters whichever deterministic verification stage blocked (entry or final), so the row keeps reading `blocked_environment` until the environment clears and the same review resumes.
 
 `review_findings` columns: `id` (PK, the globally unique `<review-id>/RF-n`), `review_id` (`REFERENCES reviews(id) ON DELETE CASCADE`), `ordinal` (`UNIQUE (review_id, ordinal)`), `finding_ref` (the `RF-n` an operator types), `fingerprint`, `summary` (`NOT NULL DEFAULT ''`), `severity`, `risk_lens`, `finding_type`, `evidence`, `hypothesis`, `reachability`, `file`, `line`, `quoted_text`, `acceptance_ref`, `invariant_ref`, `sources_json`, `disposition`, `disposition_rationale`, `disposition_evidence`, `decided_by`, `decided_at`, `decided_candidate_sha`, `duplicate_of`, `followup_ticket_id`, `resolution`, `resolution_evidence_kind`, `resolution_evidence`, `discovered_sha`, `resolved_sha`, `created_at`, `updated_at`. Index: `idx_review_findings_review` on `review_id`.
 
@@ -192,7 +194,7 @@ The dashboard reads every one of those except `fingerprint`, `finding_type`, `ev
 - `sources_json` — `NOT NULL DEFAULT '[]'`; a JSON array of every reviewer/verdict that produced the observation, each `{verdictId?, redTaskId?, redRole?, authority?, modelFindingId?, note?}`. A deduplicated finding keeps them all, and a `duplicate` disposition merges the duplicate's sources into the canonical row — the count is **provenance, never an "independent review count"**. `modelFindingId` is the id the reviewing model invented for itself: retained here as provenance and never honored as the row's identity.
 - `decided_by` — unconstrained TEXT, `operator | orchestrator`. Under the single-user trust model this is an explicit confirmation (the `--operator` flag on the CLI invocation *is* the operator act, exactly as a `forge gate` human decision is), **not** authenticated identity — the FG-597 caveat carried forward.
 
-**Populated only by FG-639.** FG-638 shipped the tables, the store module, the events, and the read/disposition surfaces; nothing in the production path opens a review or ingests findings yet. On a live host these tables exist and are empty until the Change 2 coordinator lands, and a dashboard pointed at a store whose last **writable** open predates FG-638 will not have them at all (a read-only open never migrates — see `GET /api/reviews` below).
+**Populated by the FG-639 coordinator, and only through the pilot verbs.** FG-638 shipped the tables, the store module, the events, and the read/disposition surfaces; FG-639 shipped the writer — `forge review start` opens a review and ingests findings, `forge review continue` advances it. That writer is reachable **only** through those two explicit verbs: the `feature` workflow is not migrated (FG-640), so no ordinary run opens a review of its own accord and on a live host these tables stay empty until an operator runs `forge review start`. A dashboard pointed at a store whose last **writable** open predates FG-638 will not have them at all (a read-only open never migrates — see `GET /api/reviews` below).
 
 #### FG-638: review-ledger lifecycle events
 
@@ -202,6 +204,33 @@ The append-only half of the ledger: the rows above carry current state, these ca
 - `review.state_changed` — payload `{ reviewId, from, to, reason, at }`, emitted on **every** transition including a no-op re-entry (so a coordinator that re-enters a stage after a crash is visible rather than silent). A row alone cannot say when a review entered `awaiting_disposition`.
 - `review.finding_ingested` — payload `{ reviewId, findingId, findingRef, summary, sourceCount, modelSuppliedId }`. Naming both the forge-assigned id and the model-supplied one (or `null`) keeps "the reviewer called it CVE-1, forge calls it RF-3" auditable.
 - `review.finding_dispositioned` — payload `{ reviewId, findingId, findingRef, disposition, decidedBy, decidedAt, candidateSha, rationale, evidence, duplicateOf, followupTicketId }` — the durable record behind the authority rules.
+
+#### FG-639: coordinator and FixBatch events
+
+The coordinator's own audit half. Ordinary `events` rows, no schema change.
+
+- `review.stage_completed` — payload `{ reviewId, stage, sha, at, detail, meta }`. Names the stage **and** the sha it completed against; this is the durable answer to "what has this review already done", which is what makes resuming after a crash a read rather than a guess.
+- `review.finding_resolution_recorded` — payload `{ reviewId, findingId, findingRef, resolution, evidenceKind, resolvedSha }`. What a recheck **established** for one finding id (`resolved` | `still_present` | `inconclusive`). A resolution is candidate-bound, so the event says which candidate it was proven at.
+- `review.resolutions_invalidated` — payload `{ reviewId, fromSha, toSha, findingIds, why }`. The candidate moved, so resolutions proven at the old sha stopped being evidence about the new one; the payload names every finding whose resolution was cleared.
+- `review.fix_batch_created` — payload `{ reviewId, fixBatchId, revision, candidateSha, supersedes, payloadSha256, findingIds }`. `supersedes` is the previous batch id or `null`.
+- `review.fix_batch_dispatched` — payload `{ reviewId, fixBatchId, revision, payloadSha256 }`, pairing the batch with the task that consumed it.
+- `review.fix_batch_ingested` — payload `{ reviewId, fixBatchId, revision, payloadSha256, results: [{findingId, result}], repeat }`. Delivery is at-least-once and application is idempotent, so `repeat: true` records that this ingest was a redelivery rather than pretending it was the first.
+
+### `fix_batches` / `fix_batch_results` tables (FG-639 FixBatch delivery)
+
+The durable FixBatch of PRD Appendix A — the unit of work Stage 5 of the [review coordinator](concepts.md#review-coordinator) hands to **one** fixer for the whole `fix_now` set. Two more brand-new tables arriving whole via `CREATE TABLE IF NOT EXISTS` on the additive-only open path; `user_version` untouched. **Like `continuations`, this is not part of the dashboard read contract** — documented here so a schema change is caught by this file's update-in-the-same-commit rule. They carry CHECK constraints for the same reason the review pair does: only new binaries ever write a table that never existed before, so the FG-585 old-vs-new enum hazard cannot arise.
+
+`fix_batches` columns: `id` (PK, `fix-batch-<suffix>`), `review_id` (`REFERENCES reviews(id) ON DELETE CASCADE`), `revision`, `candidate_sha`, `supersedes_batch_id` (nullable), `payload_json`, `payload_sha256`, `state`, `dispatch_task_id` (nullable), `created_at`. `UNIQUE (review_id, revision)`.
+
+- **A batch is immutable at a revision.** Nothing updates `payload_json` or `payload_sha256` after insert: a changed disposition set or a changed candidate creates the **next** revision and supersedes this one, so a fixer already running stays bound to the scope it was dispatched with. `state` and `dispatch_task_id` are the only mutable columns and neither is part of the payload the fixer sees.
+- `fix_batches.state` — `NOT NULL DEFAULT 'open'`, `CHECK IN ('open', 'dispatched', 'ingested', 'superseded')`.
+- `payload_sha256` is what makes the delivery snapshot verifiable. Forge materializes the payload to `$FORGE_HOME/reviews/<review-id>/<fix-batch-id>/payload.json` (alongside an `envelope.json`), reads the bytes back, and **re-hashes them against the persisted value before the container starts** — a mismatch is a refusal, because a fixer working from an unverified snapshot is one whose scope nobody can reconstruct later. The fixer's task package names that path and the expected sha256 as the authoritative handoff. SQLite stays authoritative; the files are a snapshot of it. The directory is keyed on the **batch**, not on a task, because delivery is at-least-once and a retry must read back the same bytes that hashed to the persisted value.
+
+`fix_batch_results` columns: `batch_id` (`REFERENCES fix_batches(id) ON DELETE CASCADE`), `task_id`, `finding_id`, `result`, `summary` (nullable), `files_changed_json` (`NOT NULL DEFAULT '[]'`), `evidence` (nullable), `interaction` (nullable), `evidence_path` (nullable), `evidence_sha256` (nullable), `ingested_at`. `PRIMARY KEY (batch_id, task_id, finding_id)`.
+
+- `fix_batch_results.result` — `NOT NULL`, `CHECK IN ('fixed', 'scope_change', 'not_fixed')`.
+- **The composite primary key *is* the idempotence key.** Delivery is at-least-once, so re-ingesting the same fixer result must not apply it twice: an INSERT conflicting on this key is a no-op rather than a second application.
+- **Agents never write here.** The host ingests from the task's output area, and ingestion validates schema plus batch identity and requires **exactly one** result per expected finding id — an unknown, duplicated, or omitted id is a named refusal, not a partial apply.
 
 ### `continuations` table (FG-562 durable continuation-claim primitive)
 
@@ -381,6 +410,32 @@ These five roles are the implementer roles, and their results are the ones the *
   "notes": "..."
 }
 ```
+
+### `review-rechecker` (FG-639 Stage 8)
+
+Not a `red-*` verdict shape. The rechecker answers per finding id, and the host refuses the whole result rather than reading an omitted id as a resolution.
+
+```json
+{
+  "review_id": "review-xxxx",
+  "candidate_sha": "abc1234",
+  "rechecked": [{
+    "finding_id": "review-xxxx/RF-1",
+    "result": "resolved|still_present|inconclusive",
+    "evidence_kind": "regression_test|replayed_reproduction|anchored_verification|bounded_inspection",
+    "evidence": {"kind": "regression_test", "test_name": "...", "test_file": "...", "runner_output": "..."},
+    "note": "..."
+  }],
+  "new_findings": [{
+    "summary": "...", "evidence": "...", "severity": "...",
+    "risk_lens": "wide|narrow|frontend|backend|security",
+    "reachability": "demonstrated|supported|speculative",
+    "challenges_contract": false, "remediation_advice": "..."
+  }]
+}
+```
+
+`review_id` and `candidate_sha` must match the task package's, and `rechecked` must carry **exactly one** entry per expected finding id — an unknown, duplicated, or omitted id is a named refusal. `evidence` is validated structurally against the finding's original `reachability` and the skip-evidence rule (`src/v2/review-evidence.ts`); see [A skipped test is never evidence](concepts.md#a-skipped-test-is-never-evidence). `new_findings` carry the same required shape as a discovery finding and enter the ledger `untriaged`.
 
 ### Inferred result (narrative roles on pi runtime)
 

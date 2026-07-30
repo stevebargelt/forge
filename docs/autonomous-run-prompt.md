@@ -39,6 +39,7 @@ Stop and ask before:
 
 Review (interim evidence-led policy — Change 0, docs/prds/evidence-led-review-lifecycle.md)
 - This temporary policy supersedes the former repeated review-loop closeout path: do not rerun review-loop until the reviewer passes, do not rely on fixer-per-round remediation, and never treat a reviewer pass as, by itself, evidence that earlier findings were resolved.
+- Change 0 is NOT retired by the coordinator pilot. FG-639 shipped `forge review start <ticket-id> --contract <file>` / `forge review continue <review-id>`, which drive this same sequence from a durable ledger; the `feature` workflow is not migrated and no gate authority changed. If you deliberately drive a review through those verbs, the coordinator owns the ledger and the staging. Otherwise the manual sequence below applies exactly as written.
 - For any ticket producing code or operating-policy changes (campaign lane or direct execution), run this sequence after implementation:
   1. Deterministic verification BEFORE model review: confirm the change's deterministic gates are green at the exact sha (CI / evidence reuse per Testing And Verification) before dispatching any reviewer.
   2. ONE risk-targeted discovery pass — not repeated open-ended sampling. `forge review-loop <ticket> --max-rounds 1 --route <route>` may be the discovery transport; its output is input to the ledger below, not the durable ledger and not the completion signal.

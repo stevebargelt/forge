@@ -1,10 +1,14 @@
 # PRD — Evidence-Led Review Lifecycle
 
 **Status:** confirmed. Change 0 is active; implementation is decomposed serially
-into FG-638 → FG-639 → FG-640. **Change 1 (FG-638) has shipped** — see its
-banner under [Change 1](#change-1--durable-ledger-and-read-surfaces). Changes 2
-and 3 have not started, so the Change-0 interim operating policy remains in
-force exactly as written below.
+into FG-638 → FG-639 → FG-640. **Changes 1 (FG-638) and 2 (FG-639) have
+shipped** — see their banners under
+[Change 1](#change-1--durable-ledger-and-read-surfaces) and
+[Change 2](#change-2--staged-review-coordinator). Change 2 is a **pilot** through
+the explicit `forge review start` / `forge review continue` verbs only: the
+`feature` workflow is not migrated and no gate authority changed. Change 3 has
+not started, so the Change-0 interim operating policy remains in force as written
+below for any review not driven through the pilot.
 
 **Date:** 2026-07-27
 
@@ -689,14 +693,26 @@ forge review disposition <finding-id> <decision> --rationale "..."
 forge review continue <review-id>
 ```
 
-**Shipped so far (FG-638): `show` and `disposition` only.** `start` and
-`continue` are the coordinator's verbs and land with Change 2 — they do not
-exist yet, so there is currently no command that opens a review. `disposition`
-shipped with the per-value precondition flags this document's authority rules
-imply: `--rationale` (always required), `--evidence`/`--evidence-kind` for
-`rejected_premise`, `--ticket` for `deferred`, `--duplicate-of` for `duplicate`,
-`--operator` for an authority-changing `accepted_risk` or a new deferral
-destination, and `--review` to scope a bare `RF-n` ref.
+**All four verbs have shipped.** `show` and `disposition` landed with Change 1
+(FG-638); `start` and `continue`, the coordinator's verbs, landed with Change 2
+(FG-639), so `forge review start` is the command that opens a review.
+
+`disposition` shipped with the per-value precondition flags this document's
+authority rules imply: `--rationale` (always required),
+`--evidence`/`--evidence-kind` for `rejected_premise`, `--ticket` for `deferred`,
+`--duplicate-of` for `duplicate`, `--operator` for an authority-changing
+`accepted_risk` or a new deferral destination, and `--review` to scope a bare
+`RF-n` ref.
+
+`start` shipped with **`--contract <file>` required** — not sketched above, but it
+follows from this document's rule that the contract is approved by the plan gate
+and never reconstructed from prompts after the fact: without it `start` refuses
+and writes nothing. Both verbs also carry `--add-lens <lens:reason:evidence>`
+(repeatable) and `--drift <text>` for the two halves of the widening asymmetry,
+`--route`/`--unrouted` for routing policy, and `--json`. `continue` adds
+`--dry-run` (report the one valid next transition without running it), `--all`
+(keep driving while each transition advances), and `--acceptance <file>` for the
+shipping review's acceptance-criterion claims.
 
 `start` verifies, confirms the review contract against the final diff, and
 performs discovery, then stops at disposition when findings exist.
@@ -836,9 +852,10 @@ policy becomes active only when both authoritative sources agree.
 > (`replayed_command` `{command, output}`, `deterministic_reproduction`
 > `{reproduction, result}`, `anchored_contradiction` `{file, line, fact}`) and
 > stored as that parsed payload. Whether the payload actually *disproves* its
-> finding is a semantic judgement and stays Change 2's. The ledger is not yet
-> populated by anything: no production path opens a review or ingests findings
-> until the Change 2 coordinator lands. Gate behavior is unchanged as promised.
+> finding is a semantic judgement and stayed Change 2's. At the time this shipped
+> the ledger was not populated by anything; the Change 2 coordinator has since
+> landed and `forge review start` is what opens a review and ingests findings.
+> Gate behavior is unchanged as promised.
 > The scope below is preserved as the accepted record; operator-facing detail is
 > [Review ledger](../concepts.md#review-ledger) and
 > [SCHEMA-CONTRACT](../SCHEMA-CONTRACT.md#reviews--review_findings-tables-fg-638-dashboard-read-path).
@@ -855,6 +872,40 @@ policy becomes active only when both authoritative sources agree.
 This change does not alter gate behavior.
 
 ### Change 2 — staged review coordinator
+
+> **[SHIPPED 2026-07-30 (FG-639) — `424c8d8a` + `ecf5750d` + `a5030efb`.]** Every
+> bullet below landed, as a pilot reachable only through the explicit
+> `forge review start` / `forge review continue` verbs: the `feature` workflow is
+> NOT migrated and no gate authority changed, both of which remain Change 3. Four
+> refinements the implementation settled that this scope did not state. (1) Stage
+> completion is recorded **per sha** (`reviews.stage_evidence_json`) rather than as
+> a stage cursor, and is checked three ways: `contract_confirmed`/`discovery`
+> against the frozen `contract_confirmed_sha`; `docs`/`verified_final`/`recheck`/
+> `shipping` against the moving candidate, so a docs or fixer commit re-opens
+> exactly the stages after it with no reset flag to clear; and `verified_entry` on
+> existence alone, since the entry gate runs once and remediation moving the
+> candidate does not un-verify it. (2) `blocked_environment` is a review **state**
+> and deliberately not a transition kind — the next transition out of it re-enters
+> whichever verification stage blocked (entry or final, which share one code path),
+> so a blocked review resumes rather than terminating; the most common concrete
+> refusal is `candidate_not_checked_out`, where the workspace head is not the
+> candidate under review. (3) The fix stage is the one stage checked by neither sha
+> rule: its record carries the *pre*-fix candidate, so coverage is decided **per
+> finding**, not per set — a finding is covered when an ingested batch carried it
+> *under its current decision*, which is what lets scenario #5's four resolved
+> findings proceed while the fifth becomes an architecture question. (4) A finding
+> with no recorded `reachability` is treated as `demonstrated` — the strictest case
+> — so an unknown reachability is not the cheap path to resolution. Note also that
+> resolution invalidation fires only when the coordinator itself advances the
+> candidate (the fix and docs stages); a candidate moved out of band is caught by
+> the `candidate_not_checked_out` refusal and the `identity_continuity` shipping
+> check instead, since `candidate_sha` is never re-read from HEAD once set. The
+> scope below is
+> preserved as the accepted record; operator-facing detail is
+> [Review coordinator](../concepts.md#review-coordinator),
+> [A skipped test is never evidence](../concepts.md#a-skipped-test-is-never-evidence),
+> [review-rechecker](../concepts.md#review-rechecker), and
+> [SCHEMA-CONTRACT](../SCHEMA-CONTRACT.md#fix_batches--fix_batch_results-tables-fg-639-fixbatch-delivery).
 
 - review-contract validation;
 - deterministic verification entry;
