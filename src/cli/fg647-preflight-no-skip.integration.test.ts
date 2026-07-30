@@ -77,9 +77,11 @@ test("FG-647: the ABI preflight suite runs every arm with ZERO skips — no envi
 });
 
 test("FG-647: the preflight suite carries no interpreter-discovery machinery — the mismatch is manufactured in the manifest", () => {
-  // The executed check above catches a skip. This catches the other half of the deleted
-  // arm: a MANDATORY environment-dependent arm reddens rather than skips, so it would slip
-  // past the count check while putting the tier's outcome back on the host's inventory.
+  // The executed check above catches a skip. This catches the deleted arm coming back BY
+  // NAME as a MANDATORY test, which reddens rather than skips and so slips past the count
+  // check while putting the tier's outcome back on the host's inventory. It is a denylist,
+  // not a general proof: an arm that probes some other root and early-returns green passes
+  // both arms of this guard. That shape is prohibited at review — see docs/how-to-testing.md.
   const src = readFileSync(join(REPO_ROOT, PREFLIGHT_SUITE), "utf8");
 
   for (const [needle, why] of [
