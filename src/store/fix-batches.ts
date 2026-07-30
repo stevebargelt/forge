@@ -389,7 +389,10 @@ export type ClaimedBatchIdentity = { batchId: string; revision: number };
  *  the one the batch was dispatched at, a finding the batch never contained, the same
  *  finding reported twice, and an expected finding with no result at all. The omission arm
  *  is the load-bearing one — the PRD's "omission is never resolution" is only true if the
- *  host refuses the whole result rather than applying the ids that happened to be present. */
+ *  host refuses the whole result rather than applying the ids that happened to be present.
+ *
+ *  The revision arm has a second half: recording under a PRIOR revision requires the
+ *  delivering task to be that revision's own dispatched task. See the late-result comment. */
 export function ingestFixBatchResults(
   batchId: string,
   taskId: string,
@@ -412,9 +415,22 @@ export function ingestFixBatchResults(
     // was bound to, so it is recorded THERE if that revision still exists, and it is never
     // credited to the scope it did not do. Crediting it as current is the whole defect —
     // a stale revision's result would close findings under a decision that has moved.
+    //
+    // AND THE DELIVERING TASK MUST *BE* THAT REVISION'S FIXER. Claiming an older revision
+    // number is not proof of being the older fixer: without the task-id comparison, the
+    // CURRENT dispatch can deliver under a prior revision and have its work recorded there,
+    // which is the same misattribution in the other direction. A revision's results are its
+    // own dispatched task's or nobody's.
     const bound = fixBatchesForReview(batch.reviewId).find((b) => b.revision === claimed.revision);
+    const provenance =
+      bound === undefined || bound.dispatchTaskId === taskId
+        ? undefined
+        : bound.dispatchTaskId === undefined
+          ? `revision ${claimed.revision} (${bound.id}) was never dispatched, so no task can be delivering its result`
+          : `task ${taskId} is not the task revision ${claimed.revision} (${bound.id}) was dispatched at ` +
+            `(${bound.dispatchTaskId}) — a result is recorded against a revision only by that revision's own fixer`;
     const late =
-      bound?.state === "superseded"
+      bound?.state === "superseded" && provenance === undefined
         ? ingestFixBatchResults(bound.id, taskId, { batchId: bound.id, revision: bound.revision }, incoming)
         : undefined;
     return {
@@ -428,8 +444,10 @@ export function ingestFixBatchResults(
           : bound === undefined
             ? `No revision ${claimed.revision} exists for review ${batch.reviewId}. Nothing was written.`
             : `It was not recordable against revision ${claimed.revision} (${bound.id}) either ` +
-              `(${late === undefined ? `that revision is ${bound.state}, not superseded` : late.refusal}). ` +
-              `Nothing was credited to revision ${batch.revision}.`),
+              `(${
+                provenance ??
+                (late === undefined ? `that revision is ${bound.state}, not superseded` : late.refusal)
+              }). Nothing was credited to revision ${batch.revision}.`),
     };
   }
 

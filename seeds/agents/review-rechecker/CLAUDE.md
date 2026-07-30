@@ -20,7 +20,8 @@ This is not a stylistic preference; the host mechanically rejects it.
 - Execution is established **per test**, from the runner's own output. A suite that exited green while your cited test printed `# SKIP` proves nothing about the assertion you cited.
 - A cited test that does not APPEAR in the runner output you attach is also not evidence. Absence is unproven, not passing.
 - When the environment could not run the check, say so in `environment_blocked`. The coverage is recorded `blocked_environment`, the finding stays `inconclusive`, and that is the correct outcome — not something to work around.
-- A skip is sound ONLY when another **mandatory** lane executed the same assertion against the same candidate sha. Claiming that requires `alternate_lane` naming the lane, the candidate sha, and the executed assertion. Unnamed "covered elsewhere" is refused at ingestion with a named reason.
+- A skip is sound ONLY when another **mandatory** lane executed the same assertion against the same candidate sha. Claiming that requires `alternate_lane` naming the lane, the candidate sha, the executed assertion, **and that lane's own `runner_output` showing the assertion execute** — naming a lane is not an execution record. Unnamed "covered elsewhere" is refused at ingestion with a named reason.
+- A check that RAN AND FAILED is not evidence either. A `not ok` line, a `✖`, or a nonzero `exit_status` is the finding still being present; the host refuses it by name rather than reading "it ran" as "it passed".
 
 **Attach the runner output.** `regression_test` evidence without `runner_output` is refused, because nothing in it establishes that the test ran.
 
@@ -31,7 +32,7 @@ Read each finding's `reachability` and pick your evidence kind accordingly. The 
 | reachability | what resolves it |
 |---|---|
 | `demonstrated` | a named regression test that EXECUTED, a replayed reproduction with its output, or an equivalent deterministic proof |
-| `supported` | anchored contradictory evidence PLUS a relevant verification step |
+| `supported` | anchored contradictory evidence PLUS an EXECUTED verification step — a step that carries its own runner's record, not a claim that you ran one |
 | `speculative` | bounded inspection, with its limitation stated explicitly |
 
 **A `demonstrated` finding can never be closed by re-inspecting the code.** `bounded_inspection` on a demonstrated finding is refused by name. If the deterministic proof does not exist, the answer is `inconclusive`.
@@ -72,10 +73,12 @@ The four `evidence` shapes, each field required:
 
 - `{"kind": "regression_test", "test_name", "runner_output"}` — plus optional `test_file`, `environment_blocked`, `alternate_lane: {lane, candidate_sha, executed_assertion, runner_output}`
 - `{"kind": "replayed_reproduction", "command", "output"}`
-- `{"kind": "anchored_verification", "file", "line", "fact", "verification_step": {"ran", "runner_output"}}`
+- `{"kind": "anchored_verification", "file", "line", "fact", "verification_step": …}` — the step is ONE of two shapes:
+  - a test step, `{"ran", "runner_output"}`, held to the same per-test identity a cited regression test is;
+  - a non-test step (typecheck, curl, script), `{"command", "output", "exit_status"}` — the exit status is the execution record, so it is required and must be `0`.
 - `{"kind": "bounded_inspection", "inspection", "limitation"}`
 
-An alternate lane's `runner_output` is REQUIRED, not optional: naming a lane resolves nothing, so the lane you point at must show the assertion executing in its own output. Same rule for `verification_step` — it names what RAN and carries that runner's output, never prose like "I ran the typecheck". A step whose output shows it skipped is refused exactly like a skipped regression test.
+An alternate lane's `runner_output` is REQUIRED, not optional: naming a lane resolves nothing, so the lane you point at must show the assertion executing in its own output. Same rule for `verification_step` — it names what RAN and carries that runner's own record, never prose like "I ran the typecheck". Prose that looks like a runner does not count either: a markdown bullet is not TAP, and the host parses only runner-emitted shapes. Pick the shape that matches what you ran — a `tsc` run has no TAP in it, so citing it as a test step reads as "never ran". A step whose record shows it skipped, or shows it failing, is refused exactly like a skipped or failing regression test.
 
 **Omission is a schema failure, never resolution.** If you return fewer entries than the recheck list, the host refuses your ENTIRE result and every finding stays open — including the ones you did answer. Report `inconclusive` on anything you could not establish; never leave it out.
 

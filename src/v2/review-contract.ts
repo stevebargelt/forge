@@ -7,6 +7,8 @@
 // direction is autonomous:
 //
 //   add a lens, with recorded diff evidence   → confirmed by the coordinator
+//   evaluated, no lens change needed (no_drift,
+//     with the diff examined and the statement) → confirmed by the coordinator
 //   remove a lens                             → back to the approving authority
 //   change threat_model / protected_invariants /
 //     acceptance_refs / non_goals              → back to the approving authority
@@ -87,11 +89,27 @@ export type LensWidening = {
   diffEvidence: string[];
 };
 
+/** The recorded evaluation that the final diff needs NO lens change — the third recorded
+ *  outcome beside a widening claim and named drift.
+ *
+ *  Without it "I evaluated the diff and nothing needs to change" and "nobody looked" are
+ *  the same proposal object, so a fail-closed confirmation has to refuse both. The
+ *  forbidden outcome was only ever the SILENT unevaluated auto-confirm; an evaluation that
+ *  concludes no_drift is a legitimate result and advances, because it is recorded. */
+export type NoDriftEvaluation = {
+  /** The diff the evaluator actually examined. */
+  diffSummary: string;
+  /** The evaluator's statement that no lens change is needed. */
+  statement: string;
+};
+
 export type ContractProposal = {
   /** The contract the coordinator proposes for discovery. Omit to confirm unchanged. */
   contract?: unknown;
   /** Evidence for each lens being ADDED relative to the approved contract. */
   widening?: LensWidening[];
+  /** The recorded `no_drift` evaluation. Confirms unchanged, WITH its evidence. */
+  noDrift?: NoDriftEvaluation;
   /** Set when the coordinator cannot classify the drift it observed. Returns to
    *  plan/architecture rather than guessing. */
   unclassifiableDrift?: string;
@@ -110,6 +128,9 @@ export type ContractConfirmation =
       addedLenses: RiskLens[];
       widening: LensWidening[];
       changedPaths: string[];
+      /** Present when the confirmation rests on a recorded `no_drift` evaluation rather
+       *  than on an empty diff. Persisted with the stage record. */
+      noDrift?: NoDriftEvaluation;
     }
   | {
       kind: "needs_approving_authority";
@@ -151,6 +172,27 @@ export function confirmContract(approved: ReviewContract, proposal: ContractProp
 
   const changedPaths = proposal.changedPaths ?? [];
   const widening = proposal.widening ?? [];
+  const noDrift = proposal.noDrift;
+
+  if (noDrift !== undefined) {
+    if (noDrift.diffSummary.trim() === "" || noDrift.statement.trim() === "") {
+      return {
+        kind: "refused",
+        refusal:
+          `a no_drift evaluation needs BOTH the diff summary that was examined and the statement that no lens ` +
+          `change is needed — an empty one is the silent auto-confirm it exists to replace. Nothing was written.`,
+      };
+    }
+    if (proposal.contract !== undefined || widening.length > 0) {
+      return {
+        kind: "refused",
+        refusal:
+          `the confirmation records no_drift AND proposes a contract change ` +
+          `(${widening.length > 0 ? `widening to ${widening.map((w) => w.lens).join(", ")}` : "a replacement contract"}) — ` +
+          `a diff that needs a lens is drift, not no_drift. Nothing was written.`,
+      };
+    }
+  }
 
   if (proposal.contract === undefined && widening.length === 0) {
     return {
@@ -160,6 +202,7 @@ export function confirmContract(approved: ReviewContract, proposal: ContractProp
       addedLenses: [],
       widening: [],
       changedPaths,
+      ...(noDrift !== undefined ? { noDrift } : {}),
     };
   }
 

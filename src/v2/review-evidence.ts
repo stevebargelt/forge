@@ -22,8 +22,14 @@
 //
 //   demonstrated ⇒ a named regression test, a replayed reproduction, or an equivalent
 //                  deterministic proof. Model re-inspection can never close it.
-//   supported    ⇒ anchored contradictory evidence PLUS a relevant verification step.
+//   supported    ⇒ anchored contradictory evidence PLUS an EXECUTED verification step.
 //   speculative  ⇒ bounded inspection, with its limitation stated explicitly.
+//
+// AND EXECUTION IS ESTABLISHED IN THE RUNNER'S OWN TERMS. The TAP/glyph parser answers
+// "did this test run" about a TEST RUNNER's output; a typecheck, a curl or a script has no
+// TAP in it, so a non-test step carries {command, output, exit_status} and is judged on the
+// exit status its own runner returned. A step whose output or exit shows FAILURE is refused
+// as resolution evidence by name — a red check is the finding still being present.
 //
 // "Named regression test" names a BEHAVIOR/INVARIANT in the canonical subsystem suite.
 // It does not mean, and must not become, one new finding- or ticket-named test file per
@@ -85,17 +91,45 @@ const ReplayedReproductionSchema = z
   })
   .strict();
 
-/** What a verification step IS, structurally: something that RAN, plus the runner's own
- *  output for it. Prose ("I ran the typecheck") is a claim that a step ran, and the
+/** What a verification step IS, structurally: something that RAN, plus that runner's own
+ *  record of it. Prose ("I ran the typecheck") is a claim that a step ran, and the
  *  anchored reading it accompanies is already a claim about the source — two claims are
- *  not a verification. Carrying the executed identity is what lets the same per-test
- *  check the primary lane is held to decide whether the step actually executed. */
-const ExecutedStepSchema = z
+ *  not a verification.
+ *
+ *  TWO SHAPES, BECAUSE A VERIFICATION STEP IS NOT ALWAYS A TEST. The TAP/glyph parser
+ *  below establishes per-test identity in a TEST RUNNER's output; applied to `tsc`, a
+ *  curl, or a shell script it can only ever answer "absent", so holding a typecheck to it
+ *  refuses a step that genuinely ran. A non-test step carries the executed identity its
+ *  own runner has: the command, its output, and the exit status it returned. */
+const TestStepSchema = z
   .object({
     ran: z.string().trim().min(1),
     runner_output: z.string().trim().min(1),
   })
   .strict();
+
+const CommandStepSchema = z
+  .object({
+    command: z.string().trim().min(1),
+    /** Present, possibly empty: a clean `tsc --noEmit` prints nothing, and refusing that
+     *  would refuse the commonest non-test step there is. `exit_status` is what carries
+     *  the execution record here. */
+    output: z.string(),
+    exit_status: z.number().int(),
+  })
+  .strict();
+
+const ExecutedStepSchema = z.union([TestStepSchema, CommandStepSchema]);
+
+export type ExecutedStep = z.infer<typeof ExecutedStepSchema>;
+
+function isCommandStep(step: ExecutedStep): step is z.infer<typeof CommandStepSchema> {
+  return "command" in step;
+}
+
+function stepLabel(step: ExecutedStep): string {
+  return isCommandStep(step) ? step.command : step.ran;
+}
 
 const AnchoredVerificationSchema = z
   .object({
@@ -130,10 +164,14 @@ export type ResolutionEvidence = z.infer<typeof ResolutionEvidenceSchema>;
 
 // ─── per-test execution identity ────────────────────────────────────────────
 
-export type TestExecution = "executed" | "skipped" | "absent";
+export type TestExecution = "executed" | "skipped" | "failed" | "absent";
 
-const TAP_LINE = /^\s*(?:not\s+)?ok\s+\d+\s*-?\s*(.+?)\s*$/;
-const NODE_GLYPH_LINE = /^\s*[✔✖✗﹣~-]\s+(.+?)\s*(?:\(\d+(?:\.\d+)?m?s\))?\s*$/u;
+const TAP_LINE = /^\s*(not\s+)?ok\s+\d+\s*-?\s*(.+?)\s*$/;
+/** RUNNER-EMITTED SHAPES ONLY. The ASCII hyphen used to be in this class, which made every
+ *  markdown bullet — `- I ran the typecheck` — parse as a passing test line and read as
+ *  EXECUTED. Prose that looks like a list is not a runner's output, so the glyphs are
+ *  exactly the ones node:test's spec reporter emits. */
+const NODE_GLYPH_LINE = /^\s*([✔✖✗﹣~])\s+(.+?)\s*(?:\(\d+(?:\.\d+)?m?s\))?\s*$/u;
 const SKIP_DIRECTIVE = /#\s*(skip|todo)\b/i;
 
 /** Strip the reporter's decorations off a captured test name. Order matters: the skip
@@ -156,17 +194,20 @@ function stripTiming(name: string): string {
  *
  *  A name that appears both skipped and executed reads as EXECUTED — that is the
  *  parameterized-suite case where one variant skipped and another ran the assertion. A
- *  name that appears only skipped reads as SKIPPED. A name that never appears is ABSENT. */
+ *  name that appears only skipped reads as SKIPPED. A name that never appears is ABSENT.
+ *  A name that appears FAILED reads as failed wherever else it appears: a red assertion
+ *  is the finding still being present, and a green sibling does not cancel it. */
 export function testExecution(runnerOutput: string, testName: string): TestExecution {
   const wanted = testName.trim();
   if (wanted === "") return "absent";
   let sawSkipped = false;
+  let sawExecuted = false;
 
   for (const rawLine of runnerOutput.split(/\r?\n/)) {
     const line = rawLine.trimEnd();
     const tap = TAP_LINE.exec(line);
     const glyph = tap ? null : NODE_GLYPH_LINE.exec(line);
-    const captured = tap?.[1] ?? glyph?.[1];
+    const captured = tap?.[2] ?? glyph?.[2];
     if (captured === undefined) continue;
 
     const name = stripTiming(captured);
@@ -177,9 +218,39 @@ export function testExecution(runnerOutput: string, testName: string): TestExecu
       sawSkipped = true;
       continue;
     }
-    return "executed";
+    if (tap?.[1] !== undefined || /^\s*[✖✗]/u.test(line)) return "failed";
+    sawExecuted = true;
   }
-  return sawSkipped ? "skipped" : "absent";
+  return sawExecuted ? "executed" : sawSkipped ? "skipped" : "absent";
+}
+
+/** Did the cited VERIFICATION STEP execute and succeed? Kind-aware on purpose: a test
+ *  step is held to the same per-test identity a cited regression test is, and a non-test
+ *  step is held to its own runner's exit status. Neither can be satisfied by prose. */
+function checkVerificationStep(step: ExecutedStep): { ok: true } | { ok: false; refusal: string } {
+  if (isCommandStep(step)) {
+    if (step.exit_status !== 0) {
+      return {
+        ok: false,
+        refusal:
+          `'${step.command}', which exited ${step.exit_status} — a verification step that FAILED is never ` +
+          `resolution evidence, in any lane or any evidence kind`,
+      };
+    }
+    return { ok: true };
+  }
+  const execution = testExecution(step.runner_output, step.ran);
+  if (execution === "executed") return { ok: true };
+  return {
+    ok: false,
+    refusal:
+      `'${step.ran}', but the output it carries shows that step ` +
+      (execution === "skipped"
+        ? `SKIPPED — a skipped check is never evidence, in any lane or any evidence kind`
+        : execution === "failed"
+          ? `FAILED — a failed check is never resolution evidence, in any lane or any evidence kind`
+          : `nowhere at all, so nothing establishes that it ran`),
+  };
 }
 
 // ─── validation ─────────────────────────────────────────────────────────────
@@ -243,23 +314,18 @@ export function validateResolutionEvidence(raw: unknown, ctx: EvidenceContext): 
   // each arm of the union above states the fields its kind requires (replayed_reproduction
   // needs its command AND its output; bounded_inspection its inspection AND its limitation),
   // so a missing field is already a refusal that names it. What a schema cannot decide is
-  // whether a cited step EXECUTED — so anchored_verification's step goes through the same
-  // per-test identity check the cited-test arm below uses. A step that skipped is a skip,
-  // and a skip is never evidence.
+  // whether a cited step EXECUTED — so anchored_verification's step goes through the
+  // kind-aware execution check above. A step that skipped is a skip, a step that failed is
+  // a failure, and neither is ever evidence.
   if (ev.kind === "anchored_verification") {
-    const step = ev.verification_step;
-    const stepExecution = testExecution(step.runner_output, step.ran);
-    if (stepExecution !== "executed") {
+    const step = checkVerificationStep(ev.verification_step);
+    if (!step.ok) {
       return {
         ok: false,
         coverage: "not_executed",
         refusal:
-          `${ctx.findingRef}: the anchored verification at ${ev.file}:${ev.line} rests on '${step.ran}', but the ` +
-          `output it carries shows that step ` +
-          (stepExecution === "skipped"
-            ? `SKIPPED — a skipped check is never evidence, in any lane or any evidence kind`
-            : `nowhere at all, so nothing establishes that it ran`) +
-          `. Coverage is recorded not_executed. Nothing was resolved.`,
+          `${ctx.findingRef}: the anchored verification at ${ev.file}:${ev.line} rests on ${step.refusal}. ` +
+          `Coverage is recorded not_executed. Nothing was resolved.`,
       };
     }
   }
@@ -301,6 +367,19 @@ export function validateResolutionEvidence(raw: unknown, ctx: EvidenceContext): 
   }
 
   const execution = testExecution(ev.runner_output, ev.test_name);
+  // A RED CITED TEST IS NOT RESCUED BY ANOTHER LANE. A skip or an absence is a gap another
+  // mandatory lane can fill; a failure at this candidate is the finding still being
+  // present, so it refuses before the alternate-lane arm is ever consulted.
+  if (execution === "failed") {
+    return {
+      ok: false,
+      coverage: "not_executed",
+      refusal:
+        `${ctx.findingRef}: ${ev.test_name} FAILED in the cited runner output — a failing test is never ` +
+        `resolution evidence; at ${ctx.candidateSha} it is the finding still being present. Coverage is ` +
+        `recorded not_executed. Nothing was resolved.`,
+    };
+  }
   if (execution === "executed") {
     return {
       ok: true,
@@ -376,8 +455,11 @@ function checkAlternateLane(claim: AlternateLaneClaim | undefined, ctx: Evidence
         laneExecution === "skipped"
           ? `Alternate lane '${claim.lane}' cites '${claim.executed_assertion}', but its own output shows that ` +
             `assertion skipped — a skip is never evidence, in any lane.`
-          : `Alternate lane '${claim.lane}' cites '${claim.executed_assertion}', but that assertion does not ` +
-            `appear in its own output at all, so the lane never established it ran.`,
+          : laneExecution === "failed"
+            ? `Alternate lane '${claim.lane}' cites '${claim.executed_assertion}', but its own output shows that ` +
+              `assertion FAILING — a failed check is never evidence, in any lane.`
+            : `Alternate lane '${claim.lane}' cites '${claim.executed_assertion}', but that assertion does not ` +
+              `appear in its own output at all, so the lane never established it ran.`,
     };
   }
   return {
@@ -394,7 +476,7 @@ function describeEvidence(ev: ResolutionEvidence): string {
     case "replayed_reproduction":
       return `replayed ${ev.command}`;
     case "anchored_verification":
-      return `${ev.file}:${ev.line} — ${ev.fact} (verified by ${ev.verification_step.ran}, which executed)`;
+      return `${ev.file}:${ev.line} — ${ev.fact} (verified by ${stepLabel(ev.verification_step)}, which executed)`;
     case "bounded_inspection":
       return `bounded inspection: ${ev.inspection} (limitation: ${ev.limitation})`;
   }

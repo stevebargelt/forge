@@ -371,6 +371,171 @@ test("FG-639: a SUPPORTED finding needs anchored evidence PLUS an EXECUTED verif
   assert.equal(noStep.ok, false, "anchored code reading alone is an argument about the source");
 });
 
+// ─── kind-aware execution: a verification step is not always a test ─────────
+//
+// The TAP/glyph parser answers "did this test run" about a TEST RUNNER's output. Applied to
+// tsc, a curl or a script it can only ever answer "absent", so a typecheck that genuinely ran
+// was refused for not being TAP — while a markdown bullet, which the glyph class used to match
+// on the ASCII hyphen, read as a PASSING test line. Both directions are wrong, and both are
+// pinned here.
+
+// Real `npm run typecheck` output for a clean tree: the npm banner, then nothing from tsc.
+const TSC_CLEAN = ["", "> forge@0.1.0 typecheck", "> tsc --noEmit", ""].join("\n");
+const TSC_RED = [
+  "",
+  "> forge@0.1.0 typecheck",
+  "> tsc --noEmit",
+  "",
+  "src/v2/review-run.ts(249,17): error TS2345: Argument of type 'string | undefined' is not assignable.",
+  "",
+].join("\n");
+
+test("FG-639: a NON-TEST verification step is accepted on its own runner's record — command, output, exit 0", () => {
+  const check = validateResolutionEvidence(
+    {
+      kind: "anchored_verification",
+      file: "src/v2/review-run.ts",
+      line: 249,
+      fact: "the base sha is read from persisted state before the diff is computed",
+      verification_step: { command: "npm run typecheck", output: TSC_CLEAN, exit_status: 0 },
+    },
+    { candidateSha: SHA, reachability: "supported", findingRef: "RF-10" },
+  );
+  assert.equal(check.ok, true, check.ok ? "" : check.refusal);
+  assert.match(check.ok ? check.detail : "", /npm run typecheck/, "the step that ran is named in the record");
+});
+
+test("FG-639: a FAILED non-test step is refused as resolution evidence, naming the exit status", () => {
+  const check = validateResolutionEvidence(
+    {
+      kind: "anchored_verification",
+      file: "src/v2/review-run.ts",
+      line: 249,
+      fact: "the guard is first",
+      verification_step: { command: "npm run typecheck", output: TSC_RED, exit_status: 2 },
+    },
+    { candidateSha: SHA, reachability: "supported", findingRef: "RF-10" },
+  );
+  assert.equal(check.ok, false, "a step that ran and FAILED resolves nothing");
+  if (check.ok) return;
+  assert.match(check.refusal, /exited 2/, "the refusal names what failed and how");
+  assert.match(check.refusal, /FAILED is never resolution evidence/);
+  assert.equal(check.coverage, "not_executed");
+});
+
+test("FG-639: a non-test step with NO exit status does not validate — the exit status IS the execution record", () => {
+  const check = validateResolutionEvidence(
+    {
+      kind: "anchored_verification",
+      file: "src/a.ts",
+      line: 12,
+      fact: "the guard is first",
+      verification_step: { command: "npm run typecheck", output: TSC_CLEAN },
+    },
+    { candidateSha: SHA, reachability: "supported", findingRef: "RF-10" },
+  );
+  assert.equal(check.ok, false);
+  assert.match(check.ok ? "" : check.refusal, /did not validate/);
+});
+
+test("FG-639: MARKDOWN BULLET PROSE does not read as an executed test", () => {
+  const bullets = ["- ran the typecheck", "- ran the unit tier", "- the guard is first"].join("\n");
+  assert.equal(testExecution(bullets, "ran the typecheck"), "absent", "a bullet is not a runner line");
+
+  const check = validateResolutionEvidence(
+    {
+      kind: "anchored_verification",
+      file: "src/a.ts",
+      line: 12,
+      fact: "the guard is first",
+      verification_step: { ran: "ran the typecheck", runner_output: bullets },
+    },
+    { candidateSha: SHA, reachability: "supported", findingRef: "RF-11" },
+  );
+  assert.equal(check.ok, false, "prose formatted as a list is still prose");
+  assert.match(check.ok ? "" : check.refusal, /nowhere at all, so nothing establishes that it ran/);
+});
+
+test("FG-639: TAP is still parsed for a TEST verification step", () => {
+  const check = validateResolutionEvidence(
+    {
+      kind: "anchored_verification",
+      file: "src/a.ts",
+      line: 12,
+      fact: "the guard is first",
+      verification_step: { ran: "dedup keeps both when the invariants differ", runner_output: TAP_GREEN_WITH_SKIP },
+    },
+    { candidateSha: SHA, reachability: "supported", findingRef: "RF-12" },
+  );
+  assert.equal(check.ok, true, check.ok ? "" : check.refusal);
+});
+
+// ─── the trichotomy gains `failed` ──────────────────────────────────────────
+
+test("FG-639: a `not ok` TAP line reads as FAILED, not as executed", () => {
+  assert.equal(testExecution("not ok 3 - the reconcile path guards a partial write", "the reconcile path guards a partial write"), "failed");
+  assert.equal(testExecution("✖ the reconcile path guards a partial write (2.1ms)", "the reconcile path guards a partial write"), "failed");
+});
+
+test("FG-639: a failure dominates a green sibling of the same name", () => {
+  const mixed = ["ok 1 - guard holds", "not ok 2 - guard holds"].join("\n");
+  assert.equal(testExecution(mixed, "guard holds"), "failed", "a red assertion is not cancelled by a green one");
+});
+
+test("FG-639: a cited regression test that FAILED is refused as resolution evidence", () => {
+  const check = validateResolutionEvidence(
+    {
+      kind: "regression_test",
+      test_name: "the reconcile path guards a partial write",
+      runner_output: ["TAP version 13", "not ok 1 - the reconcile path guards a partial write", "1..1", "# fail 1"].join("\n"),
+    },
+    { candidateSha: SHA, reachability: "demonstrated", findingRef: "RF-13" },
+  );
+  assert.equal(check.ok, false, "a red test is the finding still being present");
+  if (check.ok) return;
+  assert.match(check.refusal, /FAILED in the cited runner output/);
+  assert.match(check.refusal, /never resolution evidence/);
+  assert.equal(check.coverage, "not_executed");
+});
+
+test("FG-639: a failing cited test is NOT rescued by an alternate lane", () => {
+  const check = validateResolutionEvidence(
+    {
+      kind: "regression_test",
+      test_name: "the guard",
+      runner_output: "not ok 1 - the guard",
+      alternate_lane: {
+        lane: "test-extended",
+        candidate_sha: SHA,
+        executed_assertion: "the guard",
+        runner_output: "ok 1 - the guard",
+      },
+    },
+    { candidateSha: SHA, reachability: "demonstrated", findingRef: "RF-13" },
+  );
+  assert.equal(check.ok, false, "a skip is a gap another lane can fill; a failure at this candidate is not");
+  assert.match(check.ok ? "" : check.refusal, /FAILED in the cited runner output/);
+});
+
+test("FG-639: an alternate lane whose own output shows the assertion FAILING is refused by name", () => {
+  const check = validateResolutionEvidence(
+    {
+      kind: "regression_test",
+      test_name: "the guard",
+      runner_output: "ok 1 - the guard # SKIP",
+      alternate_lane: {
+        lane: "test-extended",
+        candidate_sha: SHA,
+        executed_assertion: "the guard",
+        runner_output: "not ok 1 - the guard",
+      },
+    },
+    { candidateSha: SHA, reachability: "supported", findingRef: "RF-14" },
+  );
+  assert.equal(check.ok, false);
+  assert.match(check.ok ? "" : check.refusal, /shows that assertion FAILING/);
+});
+
 test("FG-639: a SPECULATIVE finding may be resolved by bounded inspection with its limitation explicit", () => {
   const withLimit = validateResolutionEvidence(
     { kind: "bounded_inspection", inspection: "read every caller of the guard", limitation: "callers reached by reflection not covered" },

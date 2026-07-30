@@ -127,6 +127,7 @@ type StartOpts = {
   unrouted?: boolean;
   addLens?: string[];
   drift?: string;
+  evaluatedNoDrift?: string;
   json?: boolean;
 };
 
@@ -136,6 +137,7 @@ type ContinueOpts = {
   unrouted?: boolean;
   addLens?: string[];
   drift?: string;
+  evaluatedNoDrift?: string;
   acceptance?: string;
   all?: boolean;
   dryRun?: boolean;
@@ -150,13 +152,22 @@ function readJsonFile(path: string, what: string): unknown {
   }
 }
 
-/** Build the deps once per invocation. `--add-lens` / `--drift` are how the widening
- *  asymmetry is exercised: a lens is ADDED with recorded evidence, and drift the
- *  coordinator cannot classify is NAMED so the review returns to plan/architecture. There
- *  is no path classifier and there is no flag that removes a lens. */
+/** Build the deps once per invocation. `--add-lens` / `--evaluated-no-drift` / `--drift`
+ *  are the three recorded evaluations of the final diff: a lens is ADDED with recorded
+ *  evidence, an examined diff that needs no lens change is recorded as `no_drift`, and
+ *  drift the coordinator cannot classify is NAMED so the review returns to
+ *  plan/architecture. There is no path classifier and there is no flag that removes a lens. */
 function depsFor(
   reviewId: string,
-  opts: { project?: string; route?: string; unrouted?: boolean; addLens?: string[]; drift?: string; acceptance?: string },
+  opts: {
+    project?: string;
+    route?: string;
+    unrouted?: boolean;
+    addLens?: string[];
+    drift?: string;
+    evaluatedNoDrift?: string;
+    acceptance?: string;
+  },
 ): { ok: true; deps: CoordinatorDeps } | { ok: false; refusal: string } {
   const review = getReview(reviewId);
   if (!review) return { ok: false, refusal: `no review ${reviewId}` };
@@ -177,6 +188,7 @@ function depsFor(
       ...(opts.unrouted !== undefined ? { unrouted: opts.unrouted } : {}),
       ...(widening.widening.length > 0 ? { addLenses: widening.widening } : {}),
       ...(opts.drift !== undefined ? { unclassifiableDrift: opts.drift } : {}),
+      ...(opts.evaluatedNoDrift !== undefined ? { evaluatedNoDrift: opts.evaluatedNoDrift } : {}),
       ...(acceptance !== undefined ? { acceptance } : {}),
     }),
   };
@@ -222,6 +234,11 @@ export function registerReview(program: Command): void {
       (v: string, acc: string[] = []) => [...acc, v],
     )
     .option("--drift <text>", "name implementation drift you cannot classify — returns to plan/architecture")
+    .option(
+      "--evaluated-no-drift <statement>",
+      "record that you EXAMINED the final diff and no lens change is needed. The statement is stored with " +
+        "the diff summary it was made against; the confirmation then advances",
+    )
     .option("--json", "emit each stage outcome as JSON")
     .description("Open a review: verify, confirm the contract against the final diff, discover, stop at disposition")
     .action(async (ticketId: string, opts: StartOpts) => {
@@ -293,6 +310,10 @@ export function registerReview(program: Command): void {
       (v: string, acc: string[] = []) => [...acc, v],
     )
     .option("--drift <text>", "name implementation drift you cannot classify — returns to plan/architecture")
+    .option(
+      "--evaluated-no-drift <statement>",
+      "record that you EXAMINED the final diff and no lens change is needed — the confirmation then advances",
+    )
     .option("--acceptance <file>", "acceptance-criterion claims for the shipping review, as JSON")
     .option("--all", "keep driving while each transition advances, instead of one transition")
     .option("--dry-run", "report the one valid next transition and exit without running it")

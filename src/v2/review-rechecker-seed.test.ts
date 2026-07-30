@@ -49,6 +49,39 @@ test("FG-639: the seed states the skip-evidence rule and the alternate-lane requ
   assert.ok(md.includes("covered elsewhere"), "and that unnamed coverage is refused");
 });
 
+// The seed states the rules AND lists the shapes, and the two drifted apart: the normative
+// alternate-lane rule named the lane, the sha and the assertion while the shape list — and
+// the host — also required that lane's runner output, and `supported` was stated as "a
+// relevant verification step" when what the host enforces is an EXECUTED one. A rule that
+// contradicts the shape beside it teaches the wrong thing twice, so both are pinned where
+// they are STATED, not only where they are listed.
+
+test("FG-639: the alternate-lane RULE names the lane's own runner output, not just the lane", () => {
+  const md = readFileSync(seedPath, "utf8");
+  const rule = md.split("\n").find((l) => l.includes("A skip is sound ONLY when")) ?? "";
+  assert.ok(rule !== "", "the skip-soundness rule must be stated");
+  assert.ok(
+    rule.includes("runner_output"),
+    "the rule must require the lane's own execution record — naming a lane resolves nothing",
+  );
+});
+
+test("FG-639: the seed states that a check which RAN AND FAILED is not evidence either", () => {
+  const md = readFileSync(seedPath, "utf8");
+  assert.ok(md.includes("exit_status"), "the non-test step's execution record must be documented");
+  assert.ok(
+    md.toLowerCase().includes("ran and failed"),
+    "a red check is the finding still being present, and the seed must say so",
+  );
+});
+
+test("FG-639: the supported row requires an EXECUTED verification step, matching what the host enforces", () => {
+  const md = readFileSync(seedPath, "utf8");
+  const row = md.split("\n").find((l) => l.startsWith("| `supported`")) ?? "";
+  assert.ok(row !== "", "the proportionality table must carry a supported row");
+  assert.ok(row.includes("EXECUTED"), "an unexecuted step is refused, so 'relevant' understates the rule");
+});
+
 test("FG-639: the seed states proportional resolution evidence, including the demonstrated floor", () => {
   const md = readFileSync(seedPath, "utf8").toLowerCase();
   assert.ok(md.includes("proportional"), "the proportionality rule must be named");

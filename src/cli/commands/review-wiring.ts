@@ -36,6 +36,9 @@ export type WiringContext = {
   addLenses?: LensWidening[];
   /** Operator-named drift the coordinator cannot classify — returns to plan/architecture. */
   unclassifiableDrift?: string;
+  /** The evaluator's statement that the final diff needs no lens change. Recorded as the
+   *  `no_drift` evaluation, with the diff summary it was made against. */
+  evaluatedNoDrift?: string;
   /** Acceptance claims for Stage 9, read from --acceptance <file.json>. */
   acceptance?: AcClaim[];
   git?: (args: string[]) => string;
@@ -225,17 +228,25 @@ function recheckerTask(ctx: RecheckContextIn): string {
   ].join("\n");
 }
 
+/** The changed paths, named as far as is useful and counted beyond that. Used both by the
+ *  fail-closed refusal and by the recorded `no_drift` evaluation, so the diff an evaluator
+ *  is shown and the diff their evaluation is recorded against are the same summary. */
+function diffSummary(changedPaths: readonly string[]): string {
+  const shown = changedPaths.slice(0, 10);
+  const more = changedPaths.length - shown.length;
+  return `${changedPaths.length} changed path(s): ${shown.join(", ")}${more > 0 ? `, +${more} more` : ""}`;
+}
+
 /** The diff summary a fail-closed confirmation surfaces. Enough for the coordinator to
  *  evaluate and come back with a recorded evaluation — not a reproduction of the diff. */
 function unevaluatedDiffSummary(changedPaths: readonly string[]): string {
-  const shown = changedPaths.slice(0, 10);
-  const more = changedPaths.length - shown.length;
   return (
     `no drift evaluation has been recorded for the final implementation diff — ` +
-    `${changedPaths.length} changed path(s): ${shown.join(", ")}${more > 0 ? `, +${more} more` : ""}. ` +
+    `${diffSummary(changedPaths)}. ` +
     `The coordinator will not auto-confirm the approved contract against a diff nobody evaluated. Evaluate the ` +
-    `diff and record it: --add-lens <lens>:<reason>:<diff-evidence> to widen, or --drift <text> to name drift ` +
-    `you cannot classify`
+    `diff and record it: --add-lens <lens>:<reason>:<diff-evidence> to widen, ` +
+    `--evaluated-no-drift <statement> to record that you examined the diff and no lens change is needed, ` +
+    `or --drift <text> to name drift you cannot classify`
   );
 }
 
@@ -323,14 +334,21 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
     // record and never evaluated, so every candidate auto-confirmed. Silently proposing the
     // unchanged contract over a diff nobody evaluated is the one forbidden outcome, so an
     // unevaluated nonempty diff REFUSES here and surfaces its summary for the coordinator's
-    // confirmation dispatch (--add-lens, with the evidence) or the operator's --drift.
+    // confirmation dispatch (--add-lens, with the evidence), the operator's --drift, or the
+    // recorded "I looked and nothing needs widening" of --evaluated-no-drift. Only the
+    // SILENT unevaluated auto-confirm is forbidden; an evaluation that concludes no_drift is
+    // a legitimate outcome and advances, because it is recorded with what it examined.
     //
     // Still not a path classifier: the refusal reports which paths changed and stops. It
     // never decides that a path implies a lens — that is the coordinator's or operator's
     // recorded evaluation, and this seam is where it enters.
     proposeContract: ({ changedPaths }): ContractProposal => {
       const widening = ctx.addLenses !== undefined && ctx.addLenses.length > 0 ? ctx.addLenses : undefined;
-      const evaluated = widening !== undefined || ctx.unclassifiableDrift !== undefined;
+      const noDrift =
+        ctx.evaluatedNoDrift !== undefined && ctx.evaluatedNoDrift.trim() !== ""
+          ? { diffSummary: diffSummary(changedPaths), statement: ctx.evaluatedNoDrift.trim() }
+          : undefined;
+      const evaluated = widening !== undefined || ctx.unclassifiableDrift !== undefined || noDrift !== undefined;
       if (!evaluated && changedPaths.length > 0) {
         return { candidateSha: "", changedPaths, unclassifiableDrift: unevaluatedDiffSummary(changedPaths) };
       }
@@ -338,6 +356,7 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
         candidateSha: "",
         changedPaths,
         ...(widening !== undefined ? { widening } : {}),
+        ...(noDrift !== undefined ? { noDrift } : {}),
         ...(ctx.unclassifiableDrift !== undefined ? { unclassifiableDrift: ctx.unclassifiableDrift } : {}),
       };
     },

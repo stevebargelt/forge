@@ -381,6 +381,81 @@ test("FG-639: a claimed revision that never existed is refused and nothing is wr
   assert.equal(fixBatchResults(batch.id).length, 0);
 });
 
+// ─── late-result PROVENANCE ─────────────────────────────────────────────────
+//
+// Recording under a prior revision is the late arrival of THAT revision's own fixer, and
+// nothing else. Claiming an older revision number is not proof of being the older fixer, so
+// the delivering task id is compared against the one that revision was dispatched at. Three
+// revisions and three task ids, because the seam has to hold in BOTH cross directions: an
+// older task must not deliver under a newer superseded revision, and the newer task must not
+// deliver under the older one.
+
+/** Supersede the current batch by re-deciding one finding, and dispatch the new revision at
+ *  its own task id. Returns the batch that is now current. */
+function nextRevisionDispatchedAt(taskId: string, rationale: string): FixBatch {
+  const first = findingsForReview(REVIEW).find((f) => f.disposition === "fix_now") as ReviewFinding;
+  recordDisposition(first.id, { decision: "fix_now", rationale, operator: false });
+  const { batch } = ensureFixBatch(
+    REVIEW,
+    "cand111",
+    findingsForReview(REVIEW).filter((f) => f.disposition === "fix_now"),
+  );
+  markFixBatchDispatched(batch.id, taskId);
+  return getFixBatch(batch.id) as FixBatch;
+}
+
+test("FG-639: a CURRENT-dispatch task delivering under a prior revision is refused by name", () => {
+  const findings = fixNowFindings(2);
+  const r1 = ensureFixBatch(REVIEW, "cand111", findings);
+  markFixBatchDispatched(r1.batch.id, "task-fixer-1");
+  const r2 = nextRevisionDispatchedAt("task-fixer-2", "re-decided: guard the reconcile path too");
+  const r3 = nextRevisionDispatchedAt("task-fixer-3", "re-decided again: and the docs phase");
+
+  // task-fixer-3 is the CURRENT fixer. It claims revision 1 — a scope it was never
+  // dispatched at, and whose results belong to task-fixer-1 or to nobody.
+  const forward = ingestFixBatchResults(r3.id, "task-fixer-3", { batchId: r3.id, revision: 1 }, incoming(findings));
+  assert.equal(forward.ok, false);
+  if (forward.ok) return;
+  assert.match(forward.refusal, /task task-fixer-3 is not the task revision 1 .* was dispatched at \(task-fixer-1\)/);
+  assert.match(forward.refusal, /only by that revision's own fixer/);
+  assert.equal(fixBatchResults(r1.batch.id).length, 0, "nothing was recorded against the revision it named");
+  assert.equal(fixBatchResults(r3.id).length, 0, "nor against the one it was dispatched at");
+
+  // And the other direction: revision 1's own fixer delivering under revision 2, which was
+  // dispatched at task-fixer-2. Both superseded, both refused.
+  const backward = ingestFixBatchResults(r3.id, "task-fixer-1", { batchId: r3.id, revision: 2 }, incoming(findings));
+  assert.equal(backward.ok, false);
+  assert.match(
+    backward.ok ? "" : backward.refusal,
+    /task task-fixer-1 is not the task revision 2 .* was dispatched at \(task-fixer-2\)/,
+  );
+  assert.equal(fixBatchResults(r2.id).length, 0);
+});
+
+test("FG-639: the revision's OWN fixer still delivers late and is recorded against the revision it was bound to", () => {
+  const findings = fixNowFindings(2);
+  const r1 = ensureFixBatch(REVIEW, "cand111", findings);
+  markFixBatchDispatched(r1.batch.id, "task-fixer-1");
+  const r2 = nextRevisionDispatchedAt("task-fixer-2", "re-decided: guard the reconcile path too");
+
+  const late = ingestFixBatchResults(r2.id, "task-fixer-1", { batchId: r2.id, revision: 1 }, incoming(findings));
+  assert.equal(late.ok, false, "it is still a revision mismatch against the current dispatch");
+  assert.match(late.ok ? "" : late.refusal, /recorded against the superseded revision 1/);
+  assert.equal(fixBatchResults(r1.batch.id).length, 2, "the work the bound container actually did is not discarded");
+  assert.equal(fixBatchResults(r2.id).length, 0);
+});
+
+test("FG-639: a prior revision that was never dispatched can receive no late result at all", () => {
+  const findings = fixNowFindings(2);
+  const r1 = ensureFixBatch(REVIEW, "cand111", findings);
+  const r2 = nextRevisionDispatchedAt("task-fixer-2", "re-decided before revision 1 was ever dispatched");
+
+  const r = ingestFixBatchResults(r2.id, "task-fixer-2", { batchId: r2.id, revision: 1 }, incoming(findings));
+  assert.equal(r.ok, false);
+  assert.match(r.ok ? "" : r.refusal, /revision 1 .* was never dispatched, so no task can be delivering its result/);
+  assert.equal(fixBatchResults(r1.batch.id).length, 0);
+});
+
 test("FG-639: a complete result is ingested, one row per finding, and marks the batch ingested", () => {
   const findings = fixNowFindings(3);
   const { batch } = ensureFixBatch(REVIEW, "cand111", findings);

@@ -246,7 +246,23 @@ async function runContractConfirmation(reviewId: string, transition: Transition,
     return { transition, status: "refused", message: approved.refusal };
   }
   const candidate = review.candidateSha as string;
-  const paths = review.baseSha !== undefined ? await deps.changedPaths(review.baseSha, candidate) : [];
+  // NO BASE, NO CONFIRMATION. Defaulting the changed paths to [] here is not a neutral
+  // fallback: it hands the fail-closed guard an empty diff, so the unevaluated-diff refusal
+  // cannot fire and every candidate auto-confirms over a diff nobody computed, let alone
+  // evaluated. A review that cannot name its base cannot confirm a contract against the
+  // final implementation diff, so the missing base is itself the refusal.
+  if (review.baseSha === undefined) {
+    return {
+      transition,
+      status: "refused",
+      message:
+        `this review records no base sha, so the final implementation diff cannot be computed and the contract ` +
+        `confirmation has nothing to evaluate. A review that cannot name its base cannot confirm a contract — ` +
+        `an empty diff here would auto-confirm the approved contract over a change nobody looked at. Re-open the ` +
+        `review naming its comparison base (forge review start --since <sha>). Nothing was written.`,
+    };
+  }
+  const paths = await deps.changedPaths(review.baseSha, candidate);
   const proposal = await deps.proposeContract({ review, candidateSha: candidate, changedPaths: paths });
   const confirmation = confirmContract(approved.contract, { ...proposal, candidateSha: candidate, changedPaths: paths });
 
@@ -254,6 +270,7 @@ async function runContractConfirmation(reviewId: string, transition: Transition,
     return { transition, status: "refused", message: confirmation.refusal };
   }
 
+  const noDrift = confirmation.noDrift;
   updateReview(reviewId, {
     contract: confirmation.contract,
     contractConfirmedSha: confirmation.confirmedSha,
@@ -261,19 +278,30 @@ async function runContractConfirmation(reviewId: string, transition: Transition,
   recordStageEvidence(reviewId, "contract_confirmed", {
     sha: confirmation.confirmedSha,
     detail:
-      confirmation.addedLenses.length === 0
-        ? `contract confirmed unchanged; lenses ${confirmation.contract.risk_lenses.join(", ")}`
-        : `contract widened with recorded evidence: added ${confirmation.addedLenses.join(", ")}`,
-    meta: { addedLenses: confirmation.addedLenses, widening: confirmation.widening, changedPaths: paths },
+      confirmation.addedLenses.length > 0
+        ? `contract widened with recorded evidence: added ${confirmation.addedLenses.join(", ")}`
+        : noDrift !== undefined
+          ? `contract confirmed unchanged on a recorded no_drift evaluation: ${noDrift.statement}`
+          : `contract confirmed unchanged; lenses ${confirmation.contract.risk_lenses.join(", ")}`,
+    meta: {
+      addedLenses: confirmation.addedLenses,
+      widening: confirmation.widening,
+      changedPaths: paths,
+      // The evaluation itself is the durable record — the stage evidence is where an
+      // "evaluated, nothing to widen" outcome stops being indistinguishable from silence.
+      ...(noDrift !== undefined ? { evaluation: "no_drift", noDrift } : {}),
+    },
   });
 
   return {
     transition,
     status: "advanced",
     message:
-      confirmation.addedLenses.length === 0
-        ? `contract confirmed at ${confirmation.confirmedSha}`
-        : `contract confirmed at ${confirmation.confirmedSha}, widened with ${confirmation.addedLenses.join(", ")}`,
+      confirmation.addedLenses.length > 0
+        ? `contract confirmed at ${confirmation.confirmedSha}, widened with ${confirmation.addedLenses.join(", ")}`
+        : noDrift !== undefined
+          ? `contract confirmed at ${confirmation.confirmedSha} on a recorded no_drift evaluation`
+          : `contract confirmed at ${confirmation.confirmedSha}`,
   };
 }
 
