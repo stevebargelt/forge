@@ -86,6 +86,7 @@ function mkTask(opts: { id: string; runId: string; phase: string; status: Task["
 const FANOUT_WF: Workflow = {
   name: "fg519-fanout",
   description: "FG-519: fanout expands from a healed [complete + failed-newer] source phase",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     { id: "frame", agent: "framer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },

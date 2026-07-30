@@ -50,6 +50,7 @@ const ADVISORY_SHIPPING_REVIEWER_SPEC = {
 const WORKFLOW_ADVISORY_SINGLE: Workflow = {
   name: "fg418-advisory-test",
   description: "FG-418 advisory single-step test",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {
@@ -68,6 +69,7 @@ const WORKFLOW_ADVISORY_SINGLE: Workflow = {
 const WORKFLOW_FANOUT_ADVISORY: Workflow = {
   name: "fg418-fanout-test",
   description: "FG-418 fanout advisory test",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {
@@ -99,6 +101,7 @@ const WORKFLOW_FANOUT_ADVISORY: Workflow = {
 const WORKFLOW_AUTH_SHIPPING_REVIEWER: Workflow = {
   name: "fg418-auth-test",
   description: "FG-418 FG-384 guardrail regression test",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {

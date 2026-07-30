@@ -76,6 +76,7 @@ function workflow(agent: string): Workflow {
   return {
     name: `fg523-${agent}`,
     description: "validation-contract ingestion test",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       { id: "build", agent, gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
@@ -230,6 +231,7 @@ function workflowWithRed(agent: string, reds: RedDef[]): Workflow {
   return {
     name: `fg523-red-${agent}`,
     description: "validation contract vs. red dispatch",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       { id: "build", agent, gate: "verdict", manual: false, depends_on: [], runtime: "claude", reds },

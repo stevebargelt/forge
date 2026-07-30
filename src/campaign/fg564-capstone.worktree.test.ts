@@ -87,6 +87,7 @@ const TICKET_IDS = ["FG-940", "FG-941"] as const;
 const WORKFLOW: Workflow = {
   name: WORKFLOW_NAME,
   description: "FG-564 capstone: a single build step that ships through the real publisher",
+  review_mode: "legacy_verdict" as const,
   inputs: [],
   steps: [
     {

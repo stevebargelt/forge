@@ -134,6 +134,7 @@ function makeSupabaseValue(expiresAt: number): string {
 const ONE_STEP_WF: Workflow = {
   name: "test-manifest-integ-wf",
   description: "single-step workflow for manifest integration tests",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {

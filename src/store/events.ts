@@ -257,6 +257,16 @@ export type EventType =
   // answer to "what has this review already done", which is what makes resuming after a
   // crash a read rather than a guess.
   | "review.stage_completed"
+  // FG-640 (Change 3): which risk lenses the plan-gate-approved contract selected, and which
+  // declared reds it therefore did NOT dispatch. Recorded because a narrower panel is a
+  // decision — an operator reading a run with three reds where the workflow declares six must
+  // be able to see that it was selection rather than three reds failing to start.
+  | "review.lenses_selected"
+  // FG-640: a review_contract that selection REFUSED to read, because it came from a task
+  // that is not the reviewed step's declared plan step. Recorded rather than dropped: a
+  // contract written by another human-gated step is an attempt to select someone else's
+  // panel, and the wide panel it fell back to should be readable as a refusal.
+  | "review.contract_ignored"
   // What a recheck ESTABLISHED for one finding, per id: resolved | still_present |
   // inconclusive, the evidence kind, and the sha it was proven at. A resolution is
   // candidate-bound; the event says which candidate.
@@ -270,7 +280,11 @@ export type EventType =
   // a repeat (delivery is at-least-once, application is idempotent).
   | "review.fix_batch_created"
   | "review.fix_batch_dispatched"
-  | "review.fix_batch_ingested";
+  | "review.fix_batch_ingested"
+  // FG-640: the third route by which an absent lens clears. The payload NAMES the missing
+  // evidence, the lens it attaches to, and the candidate it was accepted against — an
+  // acceptance is a decision about one candidate's missing review, never a standing waiver.
+  | "review.lens_accepted";
 
 export type Event = {
   id: number;

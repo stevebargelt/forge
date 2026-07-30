@@ -76,6 +76,7 @@ function workflow(name: string, specs: StepSpec[]): Workflow {
   return {
     name,
     description: "FG-523 gate recovery",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: specs.map((s) => ({
       id: s.id,

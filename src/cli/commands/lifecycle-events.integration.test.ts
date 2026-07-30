@@ -165,6 +165,7 @@ const crashExec: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
 const SINGLE_STEP_WORKFLOW: Workflow = {
   name: "test-lifecycle-single",
   description: "one auto-gate step for lifecycle event tests",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {
@@ -183,6 +184,7 @@ const SINGLE_STEP_WORKFLOW: Workflow = {
 const HUMAN_GATE_WORKFLOW: Workflow = {
   name: "test-lifecycle-human-gate",
   description: "one human-gate step for awaiting_gate lifecycle event tests",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {
@@ -518,6 +520,7 @@ test("integ lifecycle auth.profile_applied: emitted with payload {profile} only 
   const wf: Workflow = {
     name: "test-auth-applied-lc",
     description: "one engineer step with valid auth profile",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       {
@@ -605,6 +608,7 @@ test("integ lifecycle auth.profile_failed (missing profile): emitted with profil
   const wf: Workflow = {
     name: "test-auth-failed-missing-lc",
     description: "one engineer step with missing auth profile",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       {
@@ -712,6 +716,7 @@ test("integ lifecycle auth.profile_failed (expired profile): emits auth.profile_
   const wf: Workflow = {
     name: "test-auth-failed-expired-lc",
     description: "one engineer step with expired auth profile",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       {

@@ -64,6 +64,7 @@ const MEMBER = "dashboard";
 const WORKFLOW: Workflow = {
   name: "fg628-mount-test",
   description: "FG-628: the mountpoint precondition follows the mounted tree",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {

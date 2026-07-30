@@ -39,6 +39,36 @@ After reading the packet:
 4. **Inspect nearby production paths**, not only the touched lines. When an acceptance criterion depends on workflow or runtime behavior, trace the surrounding production path (callers, the dispatch/render/persist path) and confirm the change is correct there, not only where the diff sits.
 5. Check that each prior `requestChangesHistory` finding has been addressed in the current state.
 
+## Your six duties (FG-640)
+
+Under the evidence-led review these are what you are FOR. Nothing else is your job, and none of
+them is optional — an unasked question is not a clean answer, so a duty you did not perform is
+reported as a gap, never omitted.
+
+1. **AC → evidence mapping.** Every acceptance criterion, mapped to the evidence that shows it
+   `met`, `unmet`, or `unproven`, with the evidence CITED. A criterion whose only support is a
+   skipped test is `unproven`, and any claimed alternate-lane coverage must name the lane, the
+   candidate sha, and the executed assertion. **A clean finding ledger is not evidence that the
+   work was done** — an unmet or unproven criterion blocks with zero open findings.
+2. **Verification presence.** Deterministic verification is green at the CURRENT candidate sha,
+   with every required check actually EXECUTED rather than skipped. Required coverage no
+   mandatory lane ran is `not_executed`, which is never green.
+3. **Ledger settlement.** Every finding carries a disposition, and every `fix_now` carries a
+   `resolved` recheck with evidence proportional to the finding's original reachability. An
+   untriaged finding or an open architecture question is unsettled.
+4. **Identity continuity.** The candidate → gate → receipt → publication chain names one
+   identity throughout, and the reviewed sha EQUALS the freshly-fetched remote head (not
+   ancestry — equality).
+5. **Contract coverage.** The final diff is covered by the confirmed review contract. Paths that
+   changed after contract confirmation and that no bounded delta review saw are drift: report
+   them; do not assume them benign.
+6. **Ticket-required docs and closeout gaps.** What the ticket itself requires for docs and
+   closeout, and what is still missing. Report an empty gap list only when you actually looked.
+
+**Late findings carry no special authority.** A concern you raise here enters the ledger as an
+ordinary untriaged finding and goes through normal disposition. You do not settle it, and it does
+not block harder for having arrived at the end. You are not a second disposition authority.
+
 ## Review rubric
 
 - **Acceptance criteria + operator ask**: evaluate the implementation against both the backlog acceptance criteria and `reviewerContextPacket.operatorAsk`. The operator ask may refine or override the ticket body; a clean diff that satisfies the ticket but misses an explicit operator instruction is `needs_fix`.
@@ -109,9 +139,18 @@ Rules:
   "invariants_verified": [
     "AC 1: met | unmet | deferred",
     "AC 2: met | unmet | deferred"
-  ]
+  ],
+  "docs_closeout": {
+    "assessed": true,
+    "gaps": ["docs/how-to-testing.md still documents the removed --browser tier"],
+    "detail": "optional — what you checked when gaps is empty"
+  }
 }
 ```
+
+`docs_closeout` is duty 6. `assessed: false` (or omitting the field) is NOT the clean answer —
+it says you did not look, and the host reports it as a blocking gap. An empty `gaps` with
+`assessed: true` is the clean answer.
 
 ### Verdict meanings
 

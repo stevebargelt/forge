@@ -10,6 +10,7 @@ import type { Workflow } from "./schema.js";
 const HELLO_WORKFLOW: Workflow = {
   name: "test-startup",
   description: "stub for startRun tests",
+  review_mode: "legacy_verdict",
   inputs: [
     { name: "brief", required: true, type: "text" },
     { name: "optional-thing", required: false, type: "text" },

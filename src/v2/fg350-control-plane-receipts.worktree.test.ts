@@ -210,6 +210,7 @@ test("FG-350 int: controlPlane receipt omits routing when no routeKey provided",
 const SINGLE_STEP_WORKFLOW: Workflow = {
   name: "fg350-pipe",
   description: "FG-350: single-step pipeline for receipt tests",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {
@@ -227,6 +228,7 @@ const SINGLE_STEP_WORKFLOW: Workflow = {
 const FANOUT_WORKFLOW: Workflow = {
   name: "fg350-fanout",
   description: "FG-350: fanout workflow for child receipt tests",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {
@@ -410,6 +412,7 @@ test("FG-350 int: manifest without controlPlane key is parseable (legacy compat)
 const WORKFLOW_WITH_REDS: Workflow = {
   name: "fg350-with-reds",
   description: "FG-350: step with a red for receipt accuracy tests",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {

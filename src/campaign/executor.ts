@@ -919,6 +919,26 @@ export async function driveWorkflowItem(
         } catch (err) {
           throw await parkCampaignOnDriveThrow(campaignId, itemId, ticketId, runId, err);
         }
+      } else if (gateType === "verdict" && workflow.review_mode === "evidence_led") {
+        // FG-640: on an evidence-led run this step is settled by the review LEDGER, not by
+        // verdict aggregation — the reds here are advisory, so aggregating them would park the
+        // campaign on an advisory `fail` the gate explicitly does not block on, and would do it
+        // without ever reading the ledger. Two authority models in one run is exactly what the
+        // cutover forbids, so the campaign asks the one gate that owns this step and lets its
+        // named refusal be the park reason.
+        try {
+          await doGate(awaitingTask.id, "advance", "campaign: auto-advance (gate:verdict, evidence_led ledger settled)", {});
+        } catch (err) {
+          updateCampaignItem(itemId, {
+            lifecycleStatus: "awaiting_gate",
+            requestedHumanAction:
+              `review_disposition gate withholds at step ${step?.id ?? awaitingTask.phase}: ` +
+              `${err instanceof Error ? err.message : String(err)}`,
+          });
+          await parkCampaign(campaignId, itemId, "decision_needed", { exemption: "item-carries-context" }, { bodyBlockerKind: "review_disposition" });
+          parked = true;
+          break;
+        }
       } else if (gateType === "verdict") {
         const taskVerdicts = verdictsForTask(awaitingTask.id);
         const agg = aggregateVerdicts(taskVerdicts);

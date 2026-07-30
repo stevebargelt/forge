@@ -174,6 +174,7 @@ test("FG-512 gap1 (red): retrying a runner-stamped RED row routes through the wo
   const wf: Workflow = {
     name: "fg512g-red",
     description: "primary with a red",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       {
@@ -227,6 +228,7 @@ test("FG-512 gap1 (fanout child): retry stays REFUSED regardless of provenance; 
   const wf: Workflow = {
     name: "fg512g-fanout",
     description: "seed then fan out",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       { id: "seed", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
@@ -280,6 +282,7 @@ test("FG-512 gap1 (fanout parent): a fanout-wave-orphaned parent stays non-retry
   const wf: Workflow = {
     name: "fg512g-fanout-parent",
     description: "seed then fan out",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       { id: "seed", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
@@ -435,6 +438,7 @@ steps:
   const wf: Workflow = {
     name: wfName,
     description: "single build step",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [{ id: "build", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] }],
   };
@@ -477,6 +481,7 @@ steps:
   const wf: Workflow = {
     name: wfName,
     description: "owns a step id 'task'",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [{ id: "task", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] }],
   };
@@ -522,6 +527,7 @@ test("FG-512 gap3: the retry-written `workflow` marker survives a SQLite close/r
     const wf: Workflow = {
       name: "fg512g-roundtrip",
       description: "single build step",
+      review_mode: "legacy_verdict",
       inputs: [],
       steps: [{ id: "build", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] }],
     };

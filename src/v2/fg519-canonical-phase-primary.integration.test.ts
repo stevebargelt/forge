@@ -131,6 +131,7 @@ function mkStep(id: string, depends_on: string[] = []): Step {
 const BUILD_VERIFY_WF: Workflow = {
   name: "fg519-build-verify",
   description: "FG-519 E2E: two-step linear, downstream reads the healed phase",
+  review_mode: "legacy_verdict",
   inputs: [{ name: "brief", required: true, type: "text" }],
   steps: [
     { id: "build", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
@@ -254,6 +255,7 @@ test("FG-519: the three consumers agree on the same COMPLETE row for one mixed p
   const wf: Workflow = {
     name: "fg519-crosssite",
     description: "cross-site agreement",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [mkStep("build"), mkStep("verify", ["build"])],
   };
@@ -269,6 +271,7 @@ test("FG-519: the three consumers agree on the same COMPLETE row for one mixed p
 const INVESTIGATE_AUDIT_WF: Workflow = {
   name: "fg519-recovery",
   description: "FG-519: on_reject recovery re-admission under the new helper",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     { id: "investigate", agent: "investigator", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },

@@ -18,6 +18,7 @@ function setup() {
 const WORKFLOW: Workflow = {
   name: "feature",
   description: "",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     { id: "architect", agent: "architect", activity: "spec-writer", runtime: "claude", depends_on: [], gate: "human", manual: false, reds: [] },

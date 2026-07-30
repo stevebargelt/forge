@@ -38,6 +38,7 @@ import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 const WORKFLOW_AUTH_SHIPPING_REVIEWER: Workflow = {
   name: "fg420-dispatch-test",
   description: "FG-420 authoritative shipping-reviewer integration test",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {

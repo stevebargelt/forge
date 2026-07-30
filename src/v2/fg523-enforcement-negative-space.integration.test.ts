@@ -75,6 +75,7 @@ function workflow(name: string, agent: string, reds: RedDef[] = []): Workflow {
   return {
     name,
     description: "FG-523 enforcement negative space",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       { id: "build", agent, gate: "auto", manual: false, depends_on: [], runtime: "claude", reds },

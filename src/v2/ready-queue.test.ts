@@ -10,6 +10,7 @@ function mkWorkflow(steps: Workflow["steps"]): Workflow {
   return {
     name: "test",
     description: "test",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps,
   };

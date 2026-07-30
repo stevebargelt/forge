@@ -52,6 +52,7 @@ function code(text: string): string {
 const WORKFLOW: Workflow = {
   name: "fg425-scope-test",
   description: "FG-425 scope: a non-worktree run must not touch the publisher",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {

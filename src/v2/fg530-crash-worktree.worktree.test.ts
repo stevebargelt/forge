@@ -172,6 +172,7 @@ const agentWork = ({ projectMountHost }: { projectMountHost: string | undefined 
 const PLAIN_WF: Workflow = {
   name: "fg530-wt-plain",
   description: "FG-530 worktree lane: single implementer step, auto gate",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [step("build", { runtime: WORKTREE_RUNTIME })],
 };
@@ -188,6 +189,7 @@ steps:
 const RED_WF: Workflow = {
   name: "fg530-wt-red",
   description: "FG-530 worktree lane: implementer step behind an authoritative red",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     step("build", {

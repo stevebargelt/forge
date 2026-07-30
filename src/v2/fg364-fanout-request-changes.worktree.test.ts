@@ -34,6 +34,7 @@ import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 const FG364_WORKFLOW: Workflow = {
   name: "fg364-fanout-request-changes",
   description: "FG-364 regression: fanout request-changes lineage fix",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {
@@ -390,6 +391,7 @@ steps:
   const singleStepWf: Workflow = {
     name: wfName,
     description: "single-step human-gate for request-changes regression",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       { id: "work", agent: "engineer", gate: "human", manual: false, depends_on: [], runtime: "claude", reds: [] },
@@ -679,6 +681,7 @@ test("FG-368/FG-585: a genuinely failed phase with no replacement → run settle
   const GENUINE_FAILURE_WF: Workflow = {
     name: "fg368-genuine-failure",
     description: "FG-368: negative test — genuine failure produces anyFailed: true",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       {
@@ -956,6 +959,7 @@ test("FG-371: retry-once failure_mode — requestedChanges forwarded to re-dispa
   const RETRY_ONCE_WF: Workflow = {
     name: RETRY_ONCE_WF_NAME,
     description: "FG-371: retry-once path forwards requestedChanges",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       {

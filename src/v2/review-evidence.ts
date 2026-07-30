@@ -276,6 +276,20 @@ const SUFFICIENT: Record<Reachability, readonly ResolutionEvidenceKind[]> = {
   speculative: ["regression_test", "replayed_reproduction", "anchored_verification", "bounded_inspection"],
 };
 
+/** The proportionality rule, readable WITHOUT a payload to validate.
+ *
+ *  FG-640's gate re-derives it from the ledger: a recheck stores the validated evidence KIND
+ *  and a rendered detail string, not the raw payload, so the gate can still ask "is this kind
+ *  proportional to that reachability" long after the payload itself is gone. Same table, one
+ *  reader — the gate cannot drift from what `validateResolutionEvidence` enforced. */
+export function sufficientEvidenceKinds(reachability: Reachability): readonly ResolutionEvidenceKind[] {
+  return SUFFICIENT[reachability];
+}
+
+export function evidenceKindSufficientFor(reachability: Reachability, kind: string | undefined): boolean {
+  return kind !== undefined && SUFFICIENT[reachability].some((k) => k === kind);
+}
+
 export type EvidenceContext = {
   /** The candidate the resolution is claimed against. An alternate lane must name THIS
    *  sha — coverage at some other candidate is coverage of some other code. */

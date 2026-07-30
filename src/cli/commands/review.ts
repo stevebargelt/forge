@@ -8,8 +8,9 @@
 // state and never repeats a completed stage; both read what to do next from the ledger
 // rather than from anything the process that started the review was holding.
 //
-// This is a PILOT surface. The `feature` workflow is not migrated and no gate authority
-// changes — both are FG-640.
+// FG-640 (Change 3) landed both of the things this header used to disclaim: `feature` declares
+// `review_mode: evidence_led`, so these verbs now drive the ledger that SETTLES its build gate
+// (`review_disposition`) rather than a pilot running beside verdict aggregation.
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -21,6 +22,7 @@ import {
   DISPROVING_EVIDENCE_KINDS,
   recordDisposition,
   lookupFinding,
+  recordLensAcceptance,
   summarizeReview,
   insertReview,
   getReview,
@@ -37,6 +39,7 @@ import { runNextStage, type CoordinatorDeps, type StageOutcome } from "../../v2/
 import { validateReviewContract } from "../../v2/review-contract.js";
 import { buildCoordinatorDeps, parseLensWidening, resolveReviewBase } from "./review-wiring.js";
 import type { AcClaim } from "../../v2/review-evidence.js";
+import { DocsCloseoutSchema, type DocsCloseout } from "../../v2/review-shipping.js";
 
 const DASH = "—";
 
@@ -73,6 +76,13 @@ export function renderReview(s: ReviewSummary): string {
   lines.push(`  candidate sha:      ${r.candidateSha ?? DASH}`);
   lines.push(`  trusted remote sha: ${r.trustedRemoteSha ?? DASH}`);
   lines.push(`  risk lenses:        ${s.riskLenses.length > 0 ? s.riskLenses.join(", ") : DASH}`);
+  for (const a of s.lensAcceptances) {
+    lines.push(
+      `  lens accepted:      ${a.lens} — missing evidence: ${a.missingEvidence} ` +
+        `(by ${a.acceptedBy} at ${a.acceptedAt}, candidate ${a.candidateSha})`,
+    );
+    lines.push(`      rationale: ${a.rationale}`);
+  }
   lines.push(`  dispositions:       ${counts(s.countsByDisposition)}`);
   lines.push(`  resolutions:        ${counts(s.countsByResolution)}`);
   lines.push(`  unsettled findings: ${s.unsettledCount}`);
@@ -118,6 +128,13 @@ type DispositionOpts = {
   json?: boolean;
 };
 
+type AcceptLensOpts = {
+  missingEvidence?: string;
+  rationale?: string;
+  operator?: boolean;
+  json?: boolean;
+};
+
 type StartOpts = {
   project?: string;
   since?: string;
@@ -139,6 +156,7 @@ type ContinueOpts = {
   drift?: string;
   evaluatedNoDrift?: string;
   acceptance?: string;
+  docsCloseout?: string;
   all?: boolean;
   dryRun?: boolean;
   json?: boolean;
@@ -167,6 +185,7 @@ function depsFor(
     drift?: string;
     evaluatedNoDrift?: string;
     acceptance?: string;
+    docsCloseout?: string;
   },
 ): { ok: true; deps: CoordinatorDeps } | { ok: false; refusal: string } {
   const review = getReview(reviewId);
@@ -177,6 +196,24 @@ function depsFor(
 
   const acceptance =
     opts.acceptance !== undefined ? (readJsonFile(opts.acceptance, "acceptance claims") as AcClaim[]) : undefined;
+
+  // FG-640 duty 6. Read the same way the acceptance claims are, and — like them — supplying
+  // NOTHING is not the clean answer: the shipping check reads an absent assessment as an
+  // unasked question, which blocks. There is deliberately no flag that means "assessed, no
+  // gaps" without a file, because that flag would be the rubber stamp the check replaces.
+  let docsCloseout: DocsCloseout | undefined;
+  if (opts.docsCloseout !== undefined) {
+    const parsed = DocsCloseoutSchema.safeParse(readJsonFile(opts.docsCloseout, "docs/closeout assessment"));
+    if (!parsed.success) {
+      return {
+        ok: false,
+        refusal:
+          `--docs-closeout must be {"assessed": <bool>, "gaps": [<string>, …], "detail"?: <string>}: ` +
+          parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; "),
+      };
+    }
+    docsCloseout = parsed.data;
+  }
 
   return {
     ok: true,
@@ -190,6 +227,7 @@ function depsFor(
       ...(opts.drift !== undefined ? { unclassifiableDrift: opts.drift } : {}),
       ...(opts.evaluatedNoDrift !== undefined ? { evaluatedNoDrift: opts.evaluatedNoDrift } : {}),
       ...(acceptance !== undefined ? { acceptance } : {}),
+      ...(docsCloseout !== undefined ? { docsCloseout } : {}),
     }),
   };
 }
@@ -353,6 +391,7 @@ export function registerReview(program: Command): void {
       "record that you EXAMINED the final diff and no lens change is needed — the confirmation then advances",
     )
     .option("--acceptance <file>", "acceptance-criterion claims for the shipping review, as JSON")
+    .option("--docs-closeout <file>", "FG-640 shipping duty 6: the ticket-required docs/closeout assessment, as JSON {assessed, gaps[], detail?}. Omitting it reads as NOT assessed, which blocks")
     .option("--all", "keep driving while each transition advances, instead of one transition")
     .option("--dry-run", "report the one valid next transition and exit without running it")
     .option("--json", "emit each stage outcome as JSON")
@@ -408,6 +447,45 @@ export function registerReview(program: Command): void {
         return;
       }
       console.log(renderReview(summary));
+    });
+
+  review
+    .command("accept-lens")
+    .argument("<review-id>", "review id")
+    .argument("<lens>", "the selected risk lens whose evidence is missing")
+    .option("--missing-evidence <text>", "WHAT was not reviewed — required; an unnamed acceptance is a blanket override")
+    .option("--rationale <text>", "why the missing evidence is acceptable for this candidate — required")
+    .option("--operator", "record this as the operator's decision — required: an acceptance narrows the approved discovery coverage")
+    .option("--json", "emit the recorded acceptance as JSON")
+    .description(
+      "Accept a selected lens's MISSING evidence — the third route by which an absent lens clears " +
+        "(the others being retrying the lens and amending the contract through its approving authority)",
+    )
+    .action((reviewId: string, lens: string, opts: AcceptLensOpts) => {
+      ensureForgeDirs();
+      assertStoreForLookup(`review ${reviewId}`);
+
+      const outcome = recordLensAcceptance(reviewId, {
+        lens,
+        missingEvidence: opts.missingEvidence ?? "",
+        rationale: opts.rationale ?? "",
+        operator: opts.operator === true,
+      });
+      if (!outcome.ok) {
+        console.error(`forge review accept-lens: ${outcome.refusal}`);
+        process.exitCode = 1;
+        return;
+      }
+
+      if (opts.json) {
+        console.log(JSON.stringify(outcome.acceptance, null, 2));
+        return;
+      }
+      const a = outcome.acceptance;
+      console.log(`${reviewId}: the ${a.lens} lens's missing evidence is accepted by ${a.acceptedBy} at ${a.acceptedAt}`);
+      console.log(`  missing evidence: ${a.missingEvidence}`);
+      console.log(`  rationale: ${a.rationale}`);
+      console.log(`  candidate sha: ${a.candidateSha}`);
     });
 
   review

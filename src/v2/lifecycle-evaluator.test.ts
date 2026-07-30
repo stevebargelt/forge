@@ -44,7 +44,7 @@ function mkStep(opts: Partial<Step> & { id: string }): Step {
 }
 
 function mkWorkflow(steps: Step[]): Workflow {
-  return { name: "test", description: "test", inputs: [], steps };
+  return { name: "test", description: "test", review_mode: "legacy_verdict", inputs: [], steps };
 }
 
 function mkTask(opts: {

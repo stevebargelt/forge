@@ -87,6 +87,7 @@ function makeWorkflow(agent: string): Workflow {
   return {
     name: `fg540-int-${uid}`,
     description: "FG-540 integration test workflow",
+    review_mode: "legacy_verdict",
     inputs: [{ name: "brief", required: true, type: "text" }],
     steps: [
       { id: "step", agent, gate: "auto", manual: false, depends_on: [], runtime: "codex-stub", reds: [] },

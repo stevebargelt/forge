@@ -21,6 +21,7 @@ import type { Workflow } from "./schema.js";
 const SINGLE_STEP_WORKFLOW: Workflow = {
   name: "fg366-pipe",
   description: "FG-366: single-step pipeline for runtime-name resolution test",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {

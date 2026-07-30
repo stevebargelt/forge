@@ -51,6 +51,7 @@ import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 const FANOUT_WORKFLOW: Workflow = {
   name: "fg353-fanout-test",
   description: "FG-353 dispatch-level integration test: fanout, no reds",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {
@@ -83,6 +84,7 @@ const FANOUT_WORKFLOW: Workflow = {
 const FANOUT_WITH_RED_WORKFLOW: Workflow = {
   name: "fg353-fanout-red-test",
   description: "FG-353 dispatch-level integration test: fanout with authoritative red",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {
@@ -119,6 +121,7 @@ const FANOUT_WITH_RED_WORKFLOW: Workflow = {
 const FANOUT_VERDICT_DOWNSTREAM_WORKFLOW: Workflow = {
   name: "fg353-fanout-verdict-downstream-test",
   description: "FG-353 fanout with gate:verdict and downstream step",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {
@@ -167,6 +170,7 @@ const FANOUT_VERDICT_DOWNSTREAM_WORKFLOW: Workflow = {
 const FANOUT_HUMAN_DOWNSTREAM_WORKFLOW: Workflow = {
   name: "fg353-fanout-human-downstream-test",
   description: "FG-353 fanout with gate:human and downstream step",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {

@@ -23,6 +23,7 @@ import type { CoordinatorDeps, FixerContext, LensContext, RecheckContextIn } fro
 import type { VerificationEntry } from "../../v2/review-coordinator.js";
 import type { ContractProposal, LensWidening, RiskLens } from "../../v2/review-contract.js";
 import type { AcClaim } from "../../v2/review-evidence.js";
+import type { DocsCloseout } from "../../v2/review-shipping.js";
 import type { Review } from "../../store/reviews.js";
 
 export type InvokeFn = (args: InvokeArgs) => Promise<InvokeResult>;
@@ -56,6 +57,10 @@ export type WiringContext = {
   evaluatedNoDrift?: string;
   /** Acceptance claims for Stage 9, read from --acceptance <file.json>. */
   acceptance?: AcClaim[];
+  /** FG-640 shipping duty 6, read from --docs-closeout <file.json>. Absent means NOT
+   *  assessed — which the eighth check blocks on, deliberately: the reviewer's duty is to
+   *  look, and an unasked question is not a clean answer. */
+  docsCloseout?: DocsCloseout;
   git?: (args: string[]) => string;
   invokeFn?: InvokeFn;
 };
@@ -511,6 +516,7 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
             verification.steps.map((s) => `${s.name}: ${s.ok ? "ok" : "FAILED"}`).join(", "),
         },
         acceptance: ctx.acceptance ?? [],
+        ...(ctx.docsCloseout !== undefined ? { docsCloseout: ctx.docsCloseout } : {}),
         tipTrust: {
           kind: trust.kind,
           reviewedSha: candidateSha,

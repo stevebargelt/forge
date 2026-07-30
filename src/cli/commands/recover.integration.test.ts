@@ -722,7 +722,7 @@ test("recover --re-drive: mints a fresh pending primary for a failed fanout pare
 
   // Cooperates with dispatchFanoutStep's ready-queue precondition: the step is
   // ready to dispatch exactly once (a pending primary, deps trivially met).
-  const wf: Workflow = { name: "wf", description: "wf", inputs: [], steps: [{ id: "build", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] }] };
+  const wf: Workflow = { name: "wf", description: "wf", review_mode: "legacy_verdict", inputs: [], steps: [{ id: "build", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] }] };
   const allTasks = [getTask("parent-redrive")!, getTask("child-redrive-1")!, getTask("child-redrive-2")!, newTask];
   const ready = computeReadyQueue(wf, allTasks);
   assert.equal(ready.length, 1, "the build step is ready exactly once");

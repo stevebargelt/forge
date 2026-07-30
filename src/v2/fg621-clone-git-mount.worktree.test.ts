@@ -682,6 +682,7 @@ const DISPATCH_RUNTIME = "fg621-mount-dispatch";
 const MUTATING: Workflow = {
   name: "fg621-mount-dispatch",
   description: "FG-621 mount boundary through the real dispatch path",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     { id: "build", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: DISPATCH_RUNTIME, reds: [] },

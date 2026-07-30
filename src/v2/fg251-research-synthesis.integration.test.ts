@@ -134,6 +134,7 @@ function makeWorkflow(agent: string): Workflow {
   return {
     name: `fg251-int-${uid}`,
     description: `FG-251 integration test workflow (${agent})`,
+    review_mode: "legacy_verdict",
     inputs: [{ name: "brief", required: true, type: "text" }],
     steps: [
       {

@@ -41,6 +41,56 @@ export function lensRole(lens: RiskLens): string {
   return LENS_ROLE[lens];
 }
 
+/** The reverse map: is this red agent a risk LENS, and which one?
+ *
+ *  `undefined` means "not a lens" — the shipping reviewer, an integration red, anything a
+ *  workflow declares that is not one of the five. Those are never lens-selected away: they
+ *  are not discovery panelists, so a contract that selects two lenses has said nothing about
+ *  whether the shipping review runs. */
+export function lensForRole(role: string): RiskLens | undefined {
+  return RISK_LENSES.find((l) => LENS_ROLE[l] === role);
+}
+
+/** FG-640 / scenario #16: RISK-TARGETED SELECTION. A migrated workflow still DECLARES every
+ *  discipline red it might need — the declaration is the menu, not the panel — and the
+ *  plan-gate-approved contract picks from it.
+ *
+ *  FAIL-CLOSED MEANS WIDER HERE, and that direction is deliberate. With no approved contract
+ *  there is nothing that legitimately narrows the panel, so every declared red runs: an
+ *  unreviewed surface is the failure this lifecycle exists to prevent, and an extra reviewer
+ *  costs a container. The narrow answer is only ever reached from an approved contract.
+ *
+ *  It is NOT a path classifier either (PRD "Review contract"): nothing here reads the diff.
+ *  The contract names the lenses; this filters the declared reds to them. */
+export function selectRedsForContract<T extends { agent: string }>(
+  reds: readonly T[],
+  contract: unknown,
+): { selected: T[]; skipped: T[]; reason: string } {
+  const validated = validateReviewContract(contract);
+  if (!validated.ok) {
+    return {
+      selected: [...reds],
+      skipped: [],
+      reason: `no approved review contract to select from — every declared red runs (fail closed, wider)`,
+    };
+  }
+  const wanted = new Set<RiskLens>(validated.contract.risk_lenses);
+  const selected: T[] = [];
+  const skipped: T[] = [];
+  for (const red of reds) {
+    const lens = lensForRole(red.agent);
+    if (lens === undefined || wanted.has(lens)) selected.push(red);
+    else skipped.push(red);
+  }
+  return {
+    selected,
+    skipped,
+    reason:
+      `the approved contract selects risk lens(es) ${validated.contract.risk_lenses.join(", ")}` +
+      (skipped.length > 0 ? `; ${skipped.map((r) => r.agent).join(", ")} not selected` : ""),
+  };
+}
+
 const nonEmpty = z.string().trim().min(1);
 
 export const ReviewContractSchema = z

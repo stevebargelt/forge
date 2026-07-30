@@ -48,6 +48,7 @@ import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 const SINGLE_STEP_WORKFLOW: Workflow = {
   name: "fg352-dispatch-test",
   description: "FG-352 dispatch-level integration test: single step",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {
@@ -65,6 +66,7 @@ const SINGLE_STEP_WORKFLOW: Workflow = {
 const TWO_STEP_WORKFLOW: Workflow = {
   name: "fg352-sequential-test",
   description: "FG-352 dispatch-level integration test: two sequential steps",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {

@@ -20,7 +20,7 @@
 
 import { z } from "zod";
 import { RISK_LENSES, type RiskLens } from "./review-contract.js";
-import type { FindingSource, Observation } from "../store/reviews.js";
+import type { FindingSource, LensAcceptance, Observation } from "../store/reviews.js";
 
 export const REACHABILITY = ["demonstrated", "supported", "speculative"] as const;
 export type Reachability = (typeof REACHABILITY)[number];
@@ -203,25 +203,58 @@ export type DiscoveryCompleteness = {
    *  approving authority, or an authorized acceptance that NAMES the lens — never by
    *  dispositioning some other finding. */
   missing: Array<{ lens: RiskLens; reason: LensIncompleteReason | "no_outcome"; detail: string }>;
+  /** The lenses that have no authored outcome and are cleared by an operator acceptance of
+   *  the named missing evidence — the third route, reported rather than silently folded into
+   *  completeness, because an accepted lens is a narrower review than the contract states. */
+  accepted: LensAcceptance[];
+};
+
+/** The acceptances a completeness assessment may consult, and the candidate they must be
+ *  bound to. Both or neither: an acceptance recorded against a superseded candidate is a
+ *  decision about a review of code that is no longer the one being assessed. */
+export type AcceptedLenses = {
+  acceptances?: readonly LensAcceptance[];
+  candidateSha?: string;
 };
 
 export function assessDiscoveryCompleteness(
   selectedLenses: readonly RiskLens[],
   outcomes: readonly LensOutcome[],
+  clearances: AcceptedLenses = {},
 ): DiscoveryCompleteness {
   const missing: DiscoveryCompleteness["missing"] = [];
+  const accepted: LensAcceptance[] = [];
   for (const lens of selectedLenses) {
     const found = outcomes.filter((o) => o.lens === lens);
     const authored = found.find((o) => o.complete);
     if (authored) continue;
+
+    const forLens = (clearances.acceptances ?? []).filter((a) => a.lens === lens);
+    const bound = forLens.filter(
+      (a) => clearances.candidateSha !== undefined && a.candidateSha === clearances.candidateSha,
+    );
+    const current = bound[bound.length - 1];
+    if (current) {
+      accepted.push(current);
+      continue;
+    }
+    // A superseded acceptance is named in the refusal rather than dropped: the operator who
+    // accepted this lens once needs to read that the candidate moved out from under it.
+    const stale = forLens[forLens.length - 1];
+    const staleNote =
+      stale !== undefined
+        ? ` (an authorized acceptance of this lens exists at ${stale.candidateSha}, which is not the ` +
+          `candidate being assessed — accept it again at the current candidate or retry the lens)`
+        : "";
+
     const failed = found[found.length - 1];
     if (failed && !failed.complete) {
-      missing.push({ lens, reason: failed.reason, detail: failed.detail });
+      missing.push({ lens, reason: failed.reason, detail: `${failed.detail}${staleNote}` });
     } else {
-      missing.push({ lens, reason: "no_outcome", detail: `the ${lens} lens was never dispatched` });
+      missing.push({ lens, reason: "no_outcome", detail: `the ${lens} lens was never dispatched${staleNote}` });
     }
   }
-  return { complete: missing.length === 0, missing };
+  return { complete: missing.length === 0, missing, accepted };
 }
 
 // ─── normalization + deduplication (Stage 3) ────────────────────────────────

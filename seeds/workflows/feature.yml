@@ -14,6 +14,23 @@
 name: feature
 description: Feature work without UI/UX design. Architect → plan → build → verify → docs.
 
+# FG-640 — THE CUTOVER. `feature` is migrated to the evidence-led review lifecycle. This one
+# line is the whole switch: it is stamped onto every run this workflow starts (startRun.ts),
+# and from there the `build` gate is settled by the review ledger (`review_disposition`)
+# rather than by verdict aggregation. Nothing about which command the operator typed changes
+# the authority model — deleting this line puts `feature` back on the legacy gate, and every
+# workflow that omits it (investigation, research, campaign, …) keeps verdict/blocked_by_red
+# exactly as before.
+#
+# Two consequences, both deliberate:
+#   - build's six reds are ADVISORY (authority: specialist, gate_on_verdict: false). Their
+#     findings enter the ledger and are settled there; a raw `fail` no longer blocks on its own.
+#   - the reds below are the MENU, not the panel. The plan step's approved `review_contract`
+#     selects which risk lenses actually run (selectRedsForContract) — a feature that declares
+#     backend + security does not spend a frontend reviewer. With no approved contract, every
+#     declared red runs: fail closed is WIDER here.
+review_mode: evidence_led
+
 # Model rationale: only architect uses spec-writer (Opus). plan / build / verify
 # use default (Sonnet) — translating architecture to a plan, implementing
 # against acceptance criteria, and judging tests are well within Sonnet's
@@ -63,7 +80,16 @@ steps:
     gate: human
     workflow_additions: |
       Translate the architecture document into a step-by-step plan.
-      Output {steps: [{id, summary, files, acceptance}]}.
+      Output {steps: [{id, summary, files, acceptance}], review_contract}.
+
+      review_contract is the risk surface this change must be reviewed against, and the
+      human gate on THIS step is what approves it (FG-640). Shape:
+        {threat_model, protected_invariants: [], acceptance_refs: [], non_goals: [],
+         risk_lenses: [one or more of wide, narrow, frontend, backend, security]}
+      Select the lenses the change's actual risk surface needs — a backend-only change does
+      not need a frontend reviewer. Only the selected lenses are dispatched at build. You may
+      not narrow it later: the coordinator can ADD a lens with recorded diff evidence, but
+      removing one or changing the threat model returns here, to the approving authority.
 
   # ----- build -----
   # Fanout: one child task per plan-step, agent routed by step.discipline.
@@ -73,7 +99,11 @@ steps:
     agent: engineer                    # fallback for steps with discipline=general or unmapped
     activity: default
     depends_on: [plan]
-    gate: verdict     # any authoritative red's fail blocks; human can force-advance with rationale
+    # gate: verdict is the POSITION the review_disposition gate occupies under
+    # review_mode: evidence_led — the step still parks at awaiting_gate (no new task status,
+    # FG-585), but what settles it is the ledger, not verdict aggregation. --force + rationale
+    # is still the human override; it is not the ordinary settlement path.
+    gate: verdict
     workflow_additions: |
       Implement your assigned plan-step (passed via inputs.step). Output {step_completed, diff_summary, files_modified}.
       The tech-lead asserts your step's files are independent of every other step's files in this build; do not touch files outside your step.files list.
@@ -89,31 +119,37 @@ steps:
         platform: agentic-platform-builder
       max_concurrency: 4
       failure_mode: fail-phase
+    # FG-640: all six migrated to advisory. A verdict here is EVIDENCE — it becomes ledger
+    # findings that must each be dispositioned — and no longer authority. Combining the two
+    # models in one run is refused by name (mixed_authority_model), so these must not go back
+    # to authoritative while `review_mode: evidence_led` stands above.
     reds:
       - agent: red-wide
         activity: fast-orchestrator
-        authority: authoritative
-        gate_on_verdict: true
+        authority: specialist
+        gate_on_verdict: false
       - agent: red-narrow
         activity: fast-orchestrator
-        authority: authoritative
-        gate_on_verdict: true
+        authority: specialist
+        gate_on_verdict: false
       - agent: red-frontend
         activity: fast-orchestrator
-        authority: authoritative
-        gate_on_verdict: true
+        authority: specialist
+        gate_on_verdict: false
       - agent: red-backend
         activity: fast-orchestrator
-        authority: authoritative
-        gate_on_verdict: true
+        authority: specialist
+        gate_on_verdict: false
       - agent: red-security
         activity: fast-orchestrator
-        authority: authoritative
-        gate_on_verdict: true
+        authority: specialist
+        gate_on_verdict: false
+      # Not a risk lens, so never lens-selected away: the shipping reviewer's six duties are
+      # about the review as a whole, not about one slice of the diff.
       - agent: shipping-reviewer
         activity: fast-orchestrator
-        authority: authoritative
-        gate_on_verdict: true
+        authority: specialist
+        gate_on_verdict: false
 
   # ----- verify -----
   - id: verify

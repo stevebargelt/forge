@@ -330,6 +330,7 @@ describe("FG-564 fix round 3: the born-under fence holds ACROSS the whole multi-
   const WF: Workflow = {
     name: "wf",
     description: "",
+    review_mode: "legacy_verdict" as const,
     inputs: [],
     steps: [{ id: "build", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "rt", reds: [] }],
   };

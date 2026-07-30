@@ -586,6 +586,178 @@ export function stageCompleteAt(review: Review, stage: ReviewStage, sha: string 
   return rec.sha === sha;
 }
 
+// ─── lens acceptance (FG-640) ───────────────────────────────────────────────
+
+/** An operator's authorized acceptance of ONE named lens's missing evidence.
+ *
+ *  This is the THIRD route by which an absent lens clears — the other two being retrying the
+ *  lens and amending the contract through its approving authority. It is stored in
+ *  `lens_outcomes_json` beside the reviewer-authored outcomes because that is exactly what the
+ *  rule requires: the acceptance ATTACHES TO THE NAMED LENS rather than pretending a review
+ *  occurred. Its shape is deliberately not an outcome's — nothing that reads outcomes can
+ *  mistake it for a review that happened, and `forge review show` renders it as its own line. */
+export type LensAcceptance = {
+  kind: "lens_acceptance";
+  lens: string;
+  /** WHAT WAS NOT REVIEWED, in the operator's words. Required: an acceptance that does not
+   *  name the missing evidence is a blanket waiver, which is what `--force` already is. */
+  missingEvidence: string;
+  rationale: string;
+  /** The sha the acceptance stands in for a review OF — the confirmed candidate discovery
+   *  runs against. Bound there rather than to the moving candidate on purpose: an acceptance
+   *  substitutes for one lens's discovery outcome, so it must live exactly as long as the
+   *  outcomes beside it, and a re-confirmation at a new sha retires it with them. */
+  candidateSha: string;
+  acceptedBy: DecidedBy;
+  acceptedAt: string;
+};
+
+export function isLensAcceptance(v: unknown): v is LensAcceptance {
+  return typeof v === "object" && v !== null && (v as { kind?: unknown }).kind === "lens_acceptance";
+}
+
+function lensRecordsOf(review: Review): unknown[] {
+  return Array.isArray(review.lensOutcomes) ? (review.lensOutcomes as unknown[]) : [];
+}
+
+/** The operator acceptances recorded against this review's lenses. */
+export function lensAcceptancesOf(review: Review): LensAcceptance[] {
+  return lensRecordsOf(review).filter(isLensAcceptance);
+}
+
+/** The reviewer-authored half of the same array. Every consumer that asks "did discovery
+ *  happen" reads THIS, so an acceptance can never be counted as an outcome by accident. */
+export function lensOutcomeRecordsOf(review: Review): unknown[] {
+  return lensRecordsOf(review).filter((r) => !isLensAcceptance(r));
+}
+
+export type LensAcceptanceRequest = {
+  lens: string;
+  missingEvidence: string;
+  rationale: string;
+  operator: boolean;
+};
+
+export type LensAcceptanceOutcome =
+  | { ok: true; review: Review; acceptance: LensAcceptance }
+  | { ok: false; refusal: string };
+
+/** The lenses the review's contract selected, or undefined when there is no readable list. */
+function selectedLensNames(review: Review): string[] | undefined {
+  const contract = review.contract as { risk_lenses?: unknown } | undefined;
+  return Array.isArray(contract?.risk_lenses) ? (contract.risk_lenses as unknown[]).map(String) : undefined;
+}
+
+/** Record an authorized acceptance of a named lens's missing evidence, or refuse and write
+ *  NOTHING.
+ *
+ *  `--operator` is the FG-638 authority representation, and it is required here without
+ *  exception: an acceptance narrows the discovery coverage the approved contract stated, which
+ *  is a move of the review's own threat surface. Same trust model as a `forge gate` human
+ *  decision — an explicit confirmation, not authenticated identity. */
+export function recordLensAcceptance(reviewId: string, req: LensAcceptanceRequest): LensAcceptanceOutcome {
+  const review = getReview(reviewId);
+  if (!review) return { ok: false, refusal: `no review ${reviewId}` };
+
+  if (!req.operator) {
+    return {
+      ok: false,
+      refusal:
+        `accepting the ${req.lens} lens's missing evidence narrows the discovery coverage the approved contract ` +
+        `states, which requires operator authority. Re-run with --operator to record the decision as the ` +
+        `operator's. Nothing was written.`,
+    };
+  }
+  if (req.missingEvidence.trim() === "") {
+    return {
+      ok: false,
+      refusal:
+        `an acceptance must NAME the missing evidence — pass --missing-evidence "..." saying what the ` +
+        `${req.lens} lens did not review. An unnamed acceptance is a blanket override, not evidence. ` +
+        `Nothing was written.`,
+    };
+  }
+  if (req.rationale.trim() === "") {
+    return { ok: false, refusal: `an acceptance must record why: pass --rationale "...". Nothing was written.` };
+  }
+
+  // THE CONFIRMED CANDIDATE, with no fallback to the moving one. An acceptance substitutes for
+  // one lens's discovery OUTCOME, and outcomes are recorded against the sha the contract was
+  // confirmed at — so binding it to review.candidateSha before confirmation would write an
+  // acceptance against a candidate discovery never ran on, and it would then read as current
+  // for whatever the first confirmation happens to land on.
+  const candidateSha = review.contractConfirmedSha;
+  if (candidateSha === undefined) {
+    return {
+      ok: false,
+      refusal:
+        `review ${reviewId} has no CONFIRMED candidate to bind the acceptance to — its contract has not been ` +
+        `confirmed against the final diff yet, and an acceptance is a decision about ONE candidate's missing ` +
+        `review. Confirm the contract first, then accept the lens against the candidate discovery ran on. ` +
+        `Nothing was written.`,
+    };
+  }
+
+  const selected = selectedLensNames(review);
+  if (selected === undefined) {
+    return {
+      ok: false,
+      refusal:
+        `review ${reviewId} carries no readable contract, so there is no selected lens to accept. ` +
+        `Nothing was written.`,
+    };
+  }
+  if (!selected.includes(req.lens)) {
+    return {
+      ok: false,
+      refusal:
+        `'${req.lens}' is not a lens this review's contract selected (${selected.join(", ")}) — there is no ` +
+        `missing evidence to accept. Nothing was written.`,
+    };
+  }
+  if (review.lensOutcomes !== undefined && !Array.isArray(review.lensOutcomes)) {
+    return {
+      ok: false,
+      refusal:
+        `review ${reviewId}'s recorded lens outcomes are not a list, so an acceptance cannot be appended ` +
+        `without overwriting them. Nothing was written.`,
+    };
+  }
+
+  const at = nowIso();
+  const acceptance: LensAcceptance = {
+    kind: "lens_acceptance",
+    lens: req.lens,
+    missingEvidence: req.missingEvidence,
+    rationale: req.rationale,
+    candidateSha,
+    acceptedBy: "operator",
+    acceptedAt: at,
+  };
+  const records = [...lensRecordsOf(review), acceptance];
+
+  writeTransaction(() => {
+    getDb()
+      .prepare(`UPDATE reviews SET lens_outcomes_json = ?, updated_at = ? WHERE id = ?`)
+      .run(JSON.stringify(records), at, reviewId);
+    logEvent("review.lens_accepted", {
+      runId: review.runId,
+      taskId: review.subjectTaskId,
+      payload: {
+        reviewId,
+        lens: req.lens,
+        missingEvidence: req.missingEvidence,
+        rationale: req.rationale,
+        candidateSha,
+        acceptedBy: acceptance.acceptedBy,
+        acceptedAt: at,
+      },
+    });
+  });
+
+  return { ok: true, review: getReview(reviewId) as Review, acceptance };
+}
+
 // ─── findings ───────────────────────────────────────────────────────────────
 
 /** A raw observation as a reviewer reported it. `modelFindingId` is whatever the
@@ -1189,6 +1361,11 @@ export type ReviewSummary = {
   countsByDisposition: Record<string, number>;
   countsByResolution: Record<string, number>;
   riskLenses: string[];
+  /** The operator acceptances of a selected lens's missing evidence. Part of the summary
+   *  rather than of the coordinator's per-lens surface: an accepted lens is a NARROWER review
+   *  than the contract states, which is exactly what an operator reading the review needs to
+   *  see next to the lens list. */
+  lensAcceptances: LensAcceptance[];
   /** Findings that are not settled under policy — an untriaged one, an open
    *  architecture question, or a `fix_now` whose fix is not PROVEN resolved.
    *  Counting only untriaged would report a review with unfixed accepted work as
@@ -1221,6 +1398,7 @@ export function summarizeReview(reviewId: string): ReviewSummary | undefined {
     countsByDisposition,
     countsByResolution,
     riskLenses,
+    lensAcceptances: lensAcceptancesOf(review),
     unsettledCount: findings.filter(
       (f) =>
         f.disposition === "untriaged" ||

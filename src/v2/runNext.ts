@@ -48,6 +48,8 @@ import { crashPoint } from "./crash-points.js";
 import { assembleReviewerContextPacket } from "./reviewer-context-packet.js";
 import { validateVerdict } from "./validate-findings.js";
 import { gradeFindings } from "./review-quality.js";
+import { selectRedsForContract } from "./review-contract.js";
+import { approvedReviewContract } from "./review-gate.js";
 import { logEvent, eventsForTask } from "../store/events.js";
 import { taskDir, integrationWorktreeDir, cloneDir } from "../util/paths.js";
 import { computeReadyQueue, isRunSettled, resolvePhasePrimary, classifyRunTerminalState, type RunTerminalClassification } from "./ready-queue.js";
@@ -1306,11 +1308,39 @@ async function dispatchReds(args: {
     }
   }
 
+  // FG-640 / scenario #16: under the evidence-led cutover the panel is the plan-gate-approved
+  // contract's risk lenses, not every discipline red the workflow declares. Legacy modes are
+  // untouched — `reds` there still means all of them.
+  //
+  // Reads `workflow.review_mode`, which is exactly what `gate()` branches on. One source for
+  // both sites: a panel narrowed here can never be judged by the other model. The workflow and
+  // the step id go to `approvedReviewContract` because WHICH task's contract counts is a fact
+  // about the declared structure — this step's plan step — not about who wrote one.
+  const lensSelection =
+    args.workflow.review_mode === "evidence_led"
+      ? selectRedsForContract(
+          args.step.reds,
+          approvedReviewContract(args.runId, args.workflow, args.step.id)?.contract,
+        )
+      : { selected: args.step.reds, skipped: [], reason: "" };
+  if (lensSelection.skipped.length > 0) {
+    logEvent("review.lenses_selected", {
+      runId: args.runId,
+      taskId: args.primaryTaskId,
+      payload: {
+        step: args.step.id,
+        selected: lensSelection.selected.map((r) => r.agent),
+        skipped: lensSelection.skipped.map((r) => r.agent),
+        reason: lensSelection.reason,
+      },
+    });
+  }
+
   // Exclude shipping-reviewer from launches when it was pre-failed above.
   const redsToLaunch =
     shippingReviewerRed && reviewerContextPacket === undefined
-      ? args.step.reds.filter((r) => r.agent !== "shipping-reviewer")
-      : args.step.reds;
+      ? lensSelection.selected.filter((r) => r.agent !== "shipping-reviewer")
+      : lensSelection.selected;
 
   const launches = redsToLaunch.map((red) =>
     runOneRed({

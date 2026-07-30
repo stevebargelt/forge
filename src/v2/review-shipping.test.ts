@@ -1,8 +1,8 @@
-// FG-639: Stage 9 — the shipping review's seven checks.
+// FG-639: Stage 9 — the shipping review's checks (eight since FG-640 added docs_closeout).
 //
 // PRD #17 is the reason each check is separate and named: a clean ledger with an unproven
 // acceptance criterion must BLOCK, and a review that could only say "not shippable" would
-// leave an operator guessing which of seven reasons applied. Every test below asserts on
+// leave an operator guessing which of the reasons applied. Every test below asserts on
 // the failing check's ID, not on a boolean.
 //
 // PRD #11 is the mirror image: a historical fail against a superseded sha must NOT block a
@@ -48,6 +48,7 @@ function input(over: Partial<ShippingInput> = {}): ShippingInput {
     tipTrust: { kind: "trusted", reviewedSha: SHA, remoteSha: SHA },
     identity: { continuous: true, detail: "candidate/gate/receipt/publication identity is continuous" },
     contractCoverage: { confirmedSha: SHA, finalSha: SHA, postConfirmationPaths: [], deltaReviewed: true },
+    docsCloseout: { assessed: true, gaps: [], detail: "the ticket requires no doc update this run" },
     ...over,
   };
 }
@@ -56,7 +57,7 @@ function failing(a: ReturnType<typeof assessShippingReview>): string[] {
   return a.checks.filter((c) => !c.ok).map((c) => c.id);
 }
 
-test("FG-639: all seven checks green settles the review, and all seven are reported", () => {
+test("FG-639: all checks green settles the review, and all of them are reported", () => {
   const a = assessShippingReview(input());
   assert.equal(a.ok, true);
   assert.deepEqual(a.checks.map((c) => c.id), [
@@ -67,7 +68,22 @@ test("FG-639: all seven checks green settles the review, and all seven are repor
     "tip_equality",
     "identity_continuity",
     "contract_covers_diff",
+    "docs_closeout",
   ]);
+});
+
+// FG-640 duty 6. Unassessed and clean are DIFFERENT answers, and only one of them ships.
+test("FG-640: a ticket-required docs/closeout gap blocks the shipping review", () => {
+  const a = assessShippingReview(input({ docsCloseout: { assessed: true, gaps: ["how-to-testing.md still documents the removed --browser tier"] } }));
+  assert.equal(a.ok, false);
+  assert.deepEqual(failing(a), ["docs_closeout"]);
+});
+
+test("FG-640: docs/closeout NOT assessed is not a clean answer", () => {
+  const a = assessShippingReview(input({ docsCloseout: undefined }));
+  assert.equal(a.ok, false);
+  assert.deepEqual(failing(a), ["docs_closeout"]);
+  assert.match(a.checks.find((c) => c.id === "docs_closeout")!.detail, /unasked question is not a clean answer/);
 });
 
 test("FG-639 / PRD #17: an UNPROVEN acceptance criterion blocks even with a clean ledger", () => {

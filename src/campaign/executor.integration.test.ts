@@ -1946,6 +1946,7 @@ test("FG-412: explicit failure_kind='unknown' → campaign_system (SHARED), camp
 const FEATURE_WORKFLOW_STUB = () => ({
   name: "feature",
   description: "",
+  review_mode: "legacy_verdict" as const,
   inputs: [],
   steps: [{ id: "architect", agent: "architect", runtime: "claude" as const, depends_on: [], gate: "human" as const, reds: [], manual: false }],
 });
@@ -3306,6 +3307,7 @@ test("FG-442 escalateCampaignItemLane: mutates plan_hash + resets the item; requ
       return {
         name: "feature",
         description: "",
+        review_mode: "legacy_verdict" as const,
         inputs: [],
         steps: [{ id: "engineer", agent: "engineer", runtime: "claude", depends_on: [], gate: "auto", reds: [], manual: false }],
       };
@@ -3551,6 +3553,7 @@ test("RED-WIDE fix 3: legacy pre-FG-442 stored planContent entry (no lane field)
       return {
         name: "feature",
         description: "",
+        review_mode: "legacy_verdict" as const,
         inputs: [],
         steps: [{ id: "engineer", agent: "engineer", runtime: "claude", depends_on: [], gate: "auto", reds: [], manual: false }],
       };
@@ -3576,6 +3579,7 @@ test("RED-WIDE fix 3: legacy pre-FG-442 stored planContent entry (no lane field)
 const FG488_WORKFLOW = () => ({
   name: "feature",
   description: "",
+  review_mode: "legacy_verdict" as const,
   inputs: [],
   steps: [{ id: "engineer", agent: "engineer", runtime: "claude" as const, depends_on: [], gate: "auto" as const, reds: [], manual: false }],
 });
