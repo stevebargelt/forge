@@ -1995,6 +1995,80 @@ test("FG-639 / PRD #3: the same two lenses at the same anchor naming DIFFERENT i
   assert.deepEqual(pending().blockingFindings, ["RF-1", "RF-2"]);
 });
 
+// ── FG-650 ───────────────────────────────────────────────────────────────────
+
+// The harness output contract every composed agent prompt carries REQUIRES result.json to
+// hold `status`, so a strict root schema refused every honest reviewer outcome. Tolerating
+// the extra keys is only safe if the tolerance is durable: an operator reading the review
+// afterwards must be able to see exactly which keys were stripped from which lens.
+test("FG-650: a lens outcome carrying the mandated extra root keys completes, and the tolerance is readable back", async () => {
+  const h = harness({
+    dispatchLens: (ctx) => ({
+      lens: ctx.lens,
+      role: ctx.role,
+      dispatched: true,
+      taskId: `task-${ctx.lens}`,
+      result: {
+        status: "complete",
+        verdict: ctx.lens === "backend" ? "fail" : "pass",
+        confidence: 0.9,
+        notes: `${ctx.lens} lens reviewed the reconcile path`,
+        ...(ctx.lens === "backend"
+          ? { outcome: "fail", findings: [discoveryFinding(1)] }
+          : { outcome: "pass", findings: [] }),
+      },
+    }),
+  });
+
+  const seen = await drive(h.deps, "discover");
+  assert.equal(seen.at(-1), "discover:advanced", `discovery refused the outcomes: ${seen.join(", ")}`);
+  assert.equal(findingsForReview(REVIEW).length, 1, "the finding survived the root tolerance");
+
+  const tolerated = getReview(REVIEW)?.stageEvidence?.discovery?.meta?.["toleratedRootKeys"] as Array<{
+    lens: string;
+    keys: string[];
+  }>;
+  assert.deepEqual(
+    tolerated.map((t) => t.lens).sort(),
+    ["backend", "wide"],
+    "every lens that carried extra keys is named in the durable stage record",
+  );
+  assert.deepEqual(tolerated[0]?.keys, ["confidence", "notes", "status", "verdict"]);
+
+  const persisted = (getReview(REVIEW)?.lensOutcomes as Array<Record<string, unknown>>).map((o) => o["toleratedRootKeys"]);
+  assert.deepEqual(persisted, [
+    ["confidence", "notes", "status", "verdict"],
+    ["confidence", "notes", "status", "verdict"],
+  ]);
+});
+
+test("FG-650: the rechecker's tolerated root keys land in the recheck stage evidence", async () => {
+  const h = harness({
+    dispatchRechecker: (ctx) => ({
+      ok: true,
+      taskId: "task-recheck-1",
+      result: {
+        status: "complete",
+        notes: "rechecked every id",
+        review_id: ctx.review.id,
+        candidate_sha: ctx.candidateSha,
+        rechecked: ctx.expected.map((f) => ({
+          finding_id: f.id,
+          result: "resolved",
+          evidence_kind: "regression_test",
+          evidence: { kind: "regression_test", test_name: "the reconcile path guards a partial write", runner_output: EXECUTED },
+        })),
+        new_findings: [],
+      },
+    }),
+  });
+
+  await parkAt(h.deps, "recheck");
+  const outcome = await runNextStage(REVIEW, h.deps);
+  assert.equal(outcome.status, "advanced", outcome.message);
+  assert.deepEqual(getReview(REVIEW)?.stageEvidence?.recheck?.meta?.["toleratedRootKeys"], ["notes", "status"]);
+});
+
 // ── FG-640 ───────────────────────────────────────────────────────────────────
 
 // Tip trust is established LIVE (a bounded fetch of the remote head), but the

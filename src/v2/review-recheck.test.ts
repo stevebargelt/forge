@@ -132,6 +132,48 @@ test("FG-639: a malformed per-finding entry is a schema failure, not a partial a
   assert.match(r.ok ? "" : r.refusal, /recheck result\.json invalid/);
 });
 
+// ─── FG-650: tolerate-and-record at the root ────────────────────────────────
+
+test("FG-650: extra ROOT keys the harness contract mandates are tolerated and recorded by name", () => {
+  const r = ingestRecheck(
+    output({ status: "complete", verdict: "pass", confidence: 0.9, notes: "rechecked RF-1", rechecked: [resolvedEntry("RF-1")] }),
+    { reviewId: REVIEW, candidateSha: SHA, expected: [finding({ ordinal: 1 })] },
+  );
+  assert.equal(r.ok, true, "an honest rechecker output carrying `status` is not invalid");
+  if (!r.ok) return;
+  assert.equal(r.applications[0]?.resolution, "resolved", "the per-id results survive the root tolerance intact");
+  assert.deepEqual(r.toleratedRootKeys, ["confidence", "notes", "status", "verdict"]);
+});
+
+test("FG-650: root tolerance does not weaken the omission refusal", () => {
+  const r = ingestRecheck(output({ status: "complete", rechecked: [resolvedEntry("RF-1")] }), {
+    reviewId: REVIEW,
+    candidateSha: SHA,
+    expected: [finding({ ordinal: 1 }), finding({ ordinal: 2 })],
+  });
+  assert.equal(r.ok, false);
+  assert.match(r.ok ? "" : r.refusal, /omits RF-2/);
+  assert.match(r.ok ? "" : r.refusal, /omission is a schema failure, never resolution/);
+});
+
+test("FG-650: root tolerance does not reach inside a per-id result", () => {
+  const r = ingestRecheck(
+    output({ status: "complete", rechecked: [resolvedEntry("RF-1", { certainty: "high" })] }),
+    { reviewId: REVIEW, candidateSha: SHA, expected: [finding({ ordinal: 1 })] },
+  );
+  assert.equal(r.ok, false, "an unknown key inside a per-id result is still refused");
+  assert.match(r.ok ? "" : r.refusal, /certainty/);
+});
+
+test("FG-650: a rechecker output with nothing extra records an empty tolerance list", () => {
+  const r = ingestRecheck(output({ rechecked: [resolvedEntry("RF-1")] }), {
+    reviewId: REVIEW,
+    candidateSha: SHA,
+    expected: [finding({ ordinal: 1 })],
+  });
+  assert.deepEqual(r.ok ? r.toleratedRootKeys : ["unset"], []);
+});
+
 // ─── resolution, on evidence ────────────────────────────────────────────────
 
 test("FG-639: a resolved finding with EXECUTED regression-test evidence is applied", () => {

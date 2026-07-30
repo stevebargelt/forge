@@ -438,6 +438,11 @@ async function runDiscovery(reviewId: string, transition: Transition, deps: Coor
     meta: {
       lenses: [...lenses],
       outcomes: outcomes.map((o) => ({ lens: o.lens, outcome: o.complete ? o.outcome : "incomplete" })),
+      // FG-650: which lenses carried extra root keys the validator tolerated. Recorded so
+      // tolerance is visible in the durable stage record rather than silently stripped.
+      toleratedRootKeys: outcomes
+        .filter((o) => o.complete && (o.toleratedRootKeys?.length ?? 0) > 0)
+        .map((o) => ({ lens: o.lens, keys: o.complete ? o.toleratedRootKeys : [] })),
       // The stage record must not read as if an accepted lens was reviewed — the acceptance
       // and the evidence it names are part of what this stage completed on.
       acceptedLenses: completeness.accepted.map((a) => ({ lens: a.lens, missingEvidence: a.missingEvidence })),
@@ -803,6 +808,7 @@ async function runRecheck(reviewId: string, transition: Transition, deps: Coordi
       results: ingestion.applications.map((a) => ({ ref: a.findingRef, resolution: a.resolution, coverage: a.coverage })),
       newFindingRefs: newIngested.map((f) => f.findingRef),
       unresolved: ingestion.applications.filter((a) => a.resolution !== "resolved").map((a) => a.findingRef),
+      toleratedRootKeys: ingestion.toleratedRootKeys,
       // Half of this stage's completion key: the fix cycles this recheck covered. Without it
       // a later cycle at the same sha reads as already rechecked (see fixCycleKey).
       fixCycleKey: fixCycleKey(snap.batches),
