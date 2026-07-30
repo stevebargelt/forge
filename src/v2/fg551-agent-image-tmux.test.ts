@@ -1,9 +1,10 @@
 // FG-551 regression guard: the agent image must ship tmux. `forge launch` owns
 // long host-side commands under tmux (FG-535) and its launch tier drives the real
-// tmux-owned path, so an image without tmux hard-fails 10 tests in every agent
-// container — every suite looks red and a genuine tmux regression hides in the
-// noise. Docker builds can't run in the unit tier, so this pins the image SPEC;
-// the `tmux -V` smoke it requires is what fails the actual build.
+// tmux-owned path, so an image without tmux hard-fails every test in
+// launch-cli.integration.test.ts in every agent container — the suite looks red
+// and a genuine tmux regression hides in the noise. Docker builds can't run in the
+// unit tier, so this pins the image SPEC; the `tmux -V` smoke it requires is what
+// fails the actual build.
 //
 // This guard is adversarial by construction: it parses the Dockerfile's
 // INSTRUCTIONS, never its raw text. The first cut of it matched /tmux -V/ against
@@ -22,6 +23,32 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const dockerfile = readFileSync(join(root, "docker", "agent-dev-worker.Dockerfile"), "utf8");
 const launchCliTests = readFileSync(join(root, "src", "v2", "launch-cli.integration.test.ts"), "utf8");
+const verifyHarness = readFileSync(join(root, "docker", "verify-launch-tier-in-image.sh"), "utf8");
+
+/**
+ * The tmux-gated inventory, DERIVED: every top-level test in
+ * launch-cli.integration.test.ts sits behind that file's file-wide `before` hook,
+ * which asserts tmux is present, and node:test fails a hook-failed file
+ * test-by-test. So the number of tests a tmux-less image fails is exactly this count.
+ */
+const topLevelLaunchCliTests = (): string[] => launchCliTests.match(/^test\(/gm) ?? [];
+
+/**
+ * The SAME baseline as the one the falsification harness asserts against — read out
+ * of the harness rather than restated here, so there is one number, not two that
+ * drift. FG-645: they had drifted. The harness still expected FG-551's 10 after
+ * FG-569 added four provenance tests under the same hook, so a live --pre-fix run
+ * found 14 tmux-caused failures and failed the falsification for a bookkeeping
+ * reason while the tmux path had in fact gone red exactly as designed.
+ */
+function harnessExpectedTmuxFailures(): number {
+  const declared = verifyHarness.match(/^EXPECTED_TMUX_FAILURES=(\d+)$/m)?.[1];
+  assert.ok(
+    declared,
+    "docker/verify-launch-tier-in-image.sh must declare `EXPECTED_TMUX_FAILURES=<n>` on a line of its own — it is the shared tmux-gated baseline this file pins"
+  );
+  return Number(declared);
+}
 
 /**
  * The Dockerfile's real instructions: comments stripped (so prose about tmux can
@@ -171,7 +198,7 @@ test("FG-551: the tmux smoke is the LAST RUN in the final stage, and it cannot b
 test("FG-551: the launch tier hard-fails on a tmux-less image rather than skipping", () => {
   // The ticket's key anti-regression property: "make it green by skipping" must
   // remain impossible. The assert must live in the file-wide `before` hook — a
-  // hasTmux assert buried inside ONE test would let the other 9 pass on a
+  // hasTmux assert buried inside ONE test would let all the others pass on a
   // tmux-less image, which is exactly the silent-green outcome this guards.
   assert.match(
     launchCliTests,
@@ -180,7 +207,7 @@ test("FG-551: the launch tier hard-fails on a tmux-less image rather than skippi
   );
 });
 
-test("FG-551: the launch tier's 10 tmux tests cannot be converted to skips or deleted", () => {
+test("FG-551: the launch tier's tmux tests cannot be converted to skips or deleted", () => {
   // Closing the loop on the above: even with the `before` assert intact, marking
   // the tests `{ skip: !hasTmux }` / `t.skip()` would turn a tmux-less image green.
   // So would simply deleting the tests. Both are forbidden.
@@ -201,9 +228,31 @@ test("FG-551: the launch tier's 10 tmux tests cannot be converted to skips or de
     );
   }
 
-  const topLevelTests = launchCliTests.match(/^test\(/gm) ?? [];
+  const expected = harnessExpectedTmuxFailures();
+  const topLevelTests = topLevelLaunchCliTests();
   assert.ok(
-    topLevelTests.length >= 10,
-    `the launch tier must keep its 10 real tmux-owned tests (found ${topLevelTests.length}) — deleting them is the other way to make a tmux-less image green`
+    topLevelTests.length >= expected,
+    `the launch tier must keep its ${expected} real tmux-owned tests (found ${topLevelTests.length}) — deleting them is the other way to make a tmux-less image green`
+  );
+});
+
+test("FG-645: the tmux-gated baseline has ONE source — the harness's EXPECTED_TMUX_FAILURES equals the tier's top-level test count", () => {
+  // docker/verify-launch-tier-in-image.sh --pre-fix asserts an exact INVENTORY on a
+  // tmux-less image: EXPECTED_TMUX_FAILURES tests failed, each citing the tmux
+  // precondition. That exactness is the point — a bare "it went red" is satisfied by a
+  // tier whose tmux tests were DELETED and something unrelated broke. But the harness
+  // needs Docker, so nothing re-derives its number on an ordinary test run, and FG-569's
+  // four provenance tests drifted it silently. Pinning the two here puts the drift check
+  // in the unit tier, where it fires the moment a tmux-gated test is added or removed.
+  //
+  // Do NOT relax this to a >=. Too FEW tmux failures means tests were deleted or re-gated
+  // — the hole the falsification exists to catch; too MANY means the baseline is stale and
+  // the falsification will fail for a bookkeeping reason. Both must be loud.
+  assert.equal(
+    harnessExpectedTmuxFailures(),
+    topLevelLaunchCliTests().length,
+    "docker/verify-launch-tier-in-image.sh's EXPECTED_TMUX_FAILURES no longer matches the number of top-level tests in " +
+      "src/v2/launch-cli.integration.test.ts. A tmux-gated test was added or removed: re-derive the inventory and update " +
+      "EXPECTED_TMUX_FAILURES (with the reason, as the FG-645 block there does). Do not edit this assertion to match."
   );
 });

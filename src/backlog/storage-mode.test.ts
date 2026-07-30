@@ -251,16 +251,31 @@ test("resolution of an unknown directory mints nothing", () => {
   assert.equal(existsSync(join(dir, ".forge")), false);
 });
 
-test("resolution is memoized per project dir; clearBacklogStoreCache re-reads", () => {
+// The clock is MOCKED, not waited on. The cache is TTL-bounded by design
+// (CACHE_TTL_MS = 3s), so a wall-clock version of this test races the TTL: under host
+// load the second resolve lands past the expiry and legitimately re-reads 'db', turning
+// a correct implementation red. Mocking Date — the clock resolveBacklogStore consults —
+// makes all three properties exact without widening the TTL or sleeping.
+test("resolution is memoized WITHIN the TTL; both TTL expiry and clearBacklogStoreCache re-read", (t) => {
   const dir = newProject();
   seedCommittedKey(dir, "pk-memo");
+
+  t.mock.timers.enable({ apis: ["Date"] });
   assert.equal(resolveBacklogStore(dir).mode, "markdown");
 
   setStorageMode("pk-memo", "db", NOW);
-  assert.equal(resolveBacklogStore(dir).mode, "markdown", "memoized for the life of the process");
+  t.mock.timers.tick(1_000);
+  assert.equal(resolveBacklogStore(dir).mode, "markdown", "memoized within the TTL — the flip is not observed yet");
+
+  t.mock.timers.tick(5_000);
+  assert.equal(resolveBacklogStore(dir).mode, "db", "the TTL expired, so the resolution is re-read");
+
+  setStorageMode("pk-memo", "markdown", NOW);
+  t.mock.timers.tick(1_000);
+  assert.equal(resolveBacklogStore(dir).mode, "db", "memoized again within the fresh TTL");
 
   clearBacklogStoreCache();
-  assert.equal(resolveBacklogStore(dir).mode, "db");
+  assert.equal(resolveBacklogStore(dir).mode, "markdown", "clearBacklogStoreCache forces a re-read without waiting for the TTL");
 });
 
 test("staleMarkdown flags a db-mode project that still has a backlog/ directory", () => {

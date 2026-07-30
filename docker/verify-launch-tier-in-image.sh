@@ -11,7 +11,13 @@
 #
 #   ./docker/verify-launch-tier-in-image.sh              # post-fix (default)
 #   ./docker/verify-launch-tier-in-image.sh --pre-fix    # falsification: tmux-less image
-#   ./docker/verify-launch-tier-in-image.sh --both       # both, in order
+#   ./docker/verify-launch-tier-in-image.sh --both       # post-fix FIRST, then the falsification
+#
+# --both runs the POST-FIX arm first because it is the primary claim, and it runs BOTH arms
+# even when the first one fails — an arm that aborts the script masks the other arm's result,
+# which is how a run can report a falsification failure while never checking whether the
+# shipped image is clean at all. Each arm's outcome is named in a summary at the end, and the
+# script exits non-zero if EITHER arm failed.
 #
 # POST-FIX asserts the tier is CLEAN inside the image forge actually ships: it exits
 # non-zero on any failure OR any skip. A skip is a failure here on purpose — FG-551's
@@ -25,7 +31,7 @@
 # in pre-fix mode is a FAILED falsification and exits non-zero.
 #
 # But "it went red" is NOT the assertion — any broken tier is red, so a bare failure count
-# would still be satisfied if the ten tmux tests were DELETED and something unrelated failed
+# would still be satisfied if the tmux tests were DELETED and something unrelated failed
 # in their place. The assertion is the tmux-specific failure INVENTORY: exactly
 # EXPECTED_TMUX_FAILURES tests fail, each one citing the launch tier's tmux precondition
 # message in its TAP diagnostic (so they failed BECAUSE tmux is absent), and ZERO are skipped
@@ -66,12 +72,28 @@ TESTS=(
 # The falsification's BASELINE INVENTORY — the exact number of tests that must fail on a
 # tmux-less image, and the reason they must fail with.
 #
-# DERIVED, NOT CHOSEN. src/v2/launch-cli.integration.test.ts holds 10 top-level tests behind
-# a file-wide `before` hook that runs `assert.ok(hasTmux, "these tests require tmux — ...")`.
-# node:test fails a hook-failed file test-by-test, so a tmux-less image fails exactly those 10,
-# each carrying the precondition message below in its TAP diagnostic. Nothing else in the tier
-# needs a real tmux: launch.test.ts and launch.integration.test.ts drive a tmux STUB, and the
-# FG-551 guard asserts against the Dockerfile/test SOURCE, so all three stay green regardless.
+# DERIVED, NOT CHOSEN. src/v2/launch-cli.integration.test.ts holds ALL of its top-level tests
+# behind a file-wide `before` hook that runs `assert.ok(hasTmux, "these tests require tmux — ...")`.
+# node:test fails a hook-failed file test-by-test, so the tmux-gated inventory is exactly that
+# file's top-level `test(` count — each failure carrying the precondition message below in its
+# TAP diagnostic. Nothing else in the tier needs a real tmux: launch.test.ts and
+# launch.integration.test.ts drive a tmux STUB, and the FG-551 guard asserts against the
+# Dockerfile/test SOURCE, so all three stay green regardless.
+#
+# FG-645 RE-DERIVATION (2026-07-30): the count is 14, not the 10 FG-551 recorded. A live run
+# found 14 failures, all 14 attributed to the tmux precondition by this script's own inventory
+# check. The four beyond FG-551's baseline are FG-569's launch-provenance tests, which landed
+# after that baseline was taken and sit under the same `before` hook:
+#   FG-569 R2 (END-TO-END through a BUILT release)…
+#   FG-569 R1 (release A submits, DISTINGUISHABLE recorder)…
+#   FG-569 R1 (DEV launch)…
+#   FG-569 R1 (OLD record, no R1 field)…
+#
+# ONE BASELINE, CROSS-ASSERTED IN THE UNIT TIER. src/v2/fg551-agent-image-tmux.test.ts parses the
+# `EXPECTED_TMUX_FAILURES=` line below and asserts it EQUALS the live top-level test count in
+# launch-cli.integration.test.ts. So the number is not restated in two places that can drift:
+# adding or deleting a tmux-gated test without updating this line fails `npm test`, long before
+# anyone has a Docker host to run this script on. That is the guard working, not noise.
 #
 # IF THIS COUNT DRIFTS, DO NOT EDIT THE NUMBER TO MAKE THE SCRIPT PASS. A different count means
 # the tier changed — tmux tests added, deleted, or re-gated — and which of those it was decides
@@ -79,7 +101,7 @@ TESTS=(
 # quietly green). Re-derive the inventory from the test file and have a human accept the new
 # baseline. A count silently "fixed" here turns this back into what it replaced: an assertion
 # that any red run satisfies, which proves nothing about the tmux path at all.
-EXPECTED_TMUX_FAILURES=10
+EXPECTED_TMUX_FAILURES=14
 TMUX_PRECONDITION_MSG="these tests require tmux"
 
 MODE=post-fix
@@ -127,6 +149,12 @@ EOF
 # Runs the tier inside $1 and sets TESTS_N / FAIL_N / SKIP_N / TODO_N / CANCELLED_N /
 # RUNNER_STATUS. Prints the per-test inventory and TAP totals. Asserts nothing — the
 # mode-specific pass condition is the caller's job, because pre-fix INVERTS it.
+#
+# It RETURNS non-zero rather than exiting, and every setup step is guarded explicitly:
+# the dispatch at the bottom calls each arm as `verify_x || RC=$?`, and bash suspends
+# errexit for the whole of a function invoked in a `||` list — so a bare failing command
+# here would otherwise be stepped over silently. Returning rather than exiting is also
+# what lets a failed arm report itself without taking the other arm down with it.
 run_tier_in_image() {
   local image="$1"
   TAP_LOG="$(mktemp -t forge-fg551-tap.XXXXXX)"
@@ -134,7 +162,10 @@ run_tier_in_image() {
 
   echo "==> starting a container of $image"
   local cid
-  cid=$(docker run -d -e FORGE_NO_BROWSER=1 "$image" sleep 7200)
+  cid=$(docker run -d -e FORGE_NO_BROWSER=1 "$image" sleep 7200) || {
+    echo "FAIL: could not start a container of $image." >&2
+    return 1
+  }
   CONTAINERS+=("$cid")
   echo "container: $cid"
 
@@ -145,11 +176,12 @@ run_tier_in_image() {
   # `npm ci` below builds the right one. .git is carried in: forge's own tests walk up
   # from cwd looking for a repo.
   echo "==> copying the working tree into $DEST (excluding node_modules)"
-  docker exec -u agent "$cid" mkdir -p "$DEST"
+  docker exec -u agent "$cid" mkdir -p "$DEST" || { echo "FAIL: could not create $DEST in $image." >&2; return 1; }
   tar -cf - -C "$REPO_ROOT" \
     --exclude='*/node_modules' \
     --exclude='*/node_modules/*' \
-    . | docker exec -i -u agent "$cid" tar -xf - -C "$DEST"
+    . | docker exec -i -u agent "$cid" tar -xf - -C "$DEST" \
+    || { echo "FAIL: could not copy the working tree into $image." >&2; return 1; }
 
   # FG-645: the copy above carries the HOST's git state verbatim, so an operator with
   # work in progress handed the container a DIRTY tree — and
@@ -162,10 +194,11 @@ run_tier_in_image() {
   local branch
   branch=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)
   echo "==> committing the copied tree into its own git (branch: $branch)"
-  docker exec -u agent -w "$DEST" "$cid" bash docker/commit-scratch-tree.sh "$DEST" --branch "$branch"
+  docker exec -u agent -w "$DEST" "$cid" bash docker/commit-scratch-tree.sh "$DEST" --branch "$branch" \
+    || { echo "FAIL: could not commit the copied tree into its own git inside $image." >&2; return 1; }
 
   echo "==> npm ci inside the container"
-  docker exec -u agent -w "$DEST" "$cid" npm ci
+  docker exec -u agent -w "$DEST" "$cid" npm ci || { echo "FAIL: npm ci failed inside $image." >&2; return 1; }
 
   echo "==> running the FG-535 launch tier + FG-551 guard INSIDE $image"
   set +e
@@ -198,25 +231,25 @@ run_tier_in_image() {
   if [[ -z "$TESTS_N" || -z "$FAIL_N" || -z "$SKIP_N" ]]; then
     echo "FAIL: the run produced no parseable TAP totals — treat this as a failed verification, not a pass." >&2
     echo "      runner exit status: $RUNNER_STATUS" >&2
-    exit 1
+    return 1
   fi
 
   if [[ "$TESTS_N" -eq 0 ]]; then
     echo "FAIL: zero tests ran inside $image. A tier that runs nothing verifies nothing." >&2
-    exit 1
+    return 1
   fi
 }
 
 verify_post_fix() {
   echo
   echo "############ POST-FIX: the shipped image must run the tier CLEAN ############"
-  run_tier_in_image "$IMAGE"
+  run_tier_in_image "$IMAGE" || return 1
 
   echo
   if [[ "$FAIL_N" -ne 0 || "$SKIP_N" -ne 0 || "${TODO_N:-0}" -ne 0 || "${CANCELLED_N:-0}" -ne 0 || "$RUNNER_STATUS" -ne 0 ]]; then
     echo "FAIL: in-image launch tier is not clean — $TESTS_N tests, $FAIL_N failed, $SKIP_N skipped, ${TODO_N:-0} todo, ${CANCELLED_N:-0} cancelled (runner exit $RUNNER_STATUS)." >&2
     echo "      A SKIP counts as a failure here: FG-551 requires that a tmux-less image stay red rather than go quietly green." >&2
-    exit 1
+    return 1
   fi
 
   echo "PASS (post-fix): $TESTS_N tests ran inside $IMAGE, all passed, none skipped."
@@ -246,24 +279,24 @@ tmux_caused_failures() {
 verify_pre_fix() {
   echo
   echo "############ PRE-FIX FALSIFICATION: a tmux-less image must go RED ############"
-  build_prefix_image
-  run_tier_in_image "$PREFIX_IMAGE"
+  build_prefix_image || { echo "FAILED FALSIFICATION: could not derive the tmux-less image $PREFIX_IMAGE." >&2; return 1; }
+  run_tier_in_image "$PREFIX_IMAGE" || return 1
 
   echo
   if [[ "$SKIP_N" -ne 0 || "${TODO_N:-0}" -ne 0 ]]; then
     echo "FAILED FALSIFICATION: the tmux-less image produced $SKIP_N skipped / ${TODO_N:-0} todo tests." >&2
     echo "      A tmux-less image must HARD-FAIL, never skip. A skip route is how a missing tmux goes quietly green." >&2
-    exit 1
+    return 1
   fi
 
   if [[ "$FAIL_N" -eq 0 || "$RUNNER_STATUS" -eq 0 ]]; then
     echo "FAILED FALSIFICATION: the tier passed on a tmux-less image — $TESTS_N tests, $FAIL_N failed (runner exit $RUNNER_STATUS)." >&2
     echo "      The guard proves nothing if it cannot go red against an image with no tmux. Something is gating the tmux path away." >&2
-    exit 1
+    return 1
   fi
 
   # Red is necessary but NOT sufficient. Prove the TMUX path specifically went red: the right
-  # NUMBER of tests failed, and they failed FOR THE RIGHT REASON. Without this, deleting the ten
+  # NUMBER of tests failed, and they failed FOR THE RIGHT REASON. Without this, deleting the
   # tmux tests while any unrelated test failed would still "pass" the falsification.
   local tmux_fails tmux_fail_n
   tmux_fails="$(tmux_caused_failures "$TAP_LOG")"
@@ -290,8 +323,9 @@ verify_pre_fix() {
     grep -E '^[[:space:]]*not ok [0-9]+' "$TAP_LOG" >&2 || echo "      (no failing test lines at all)" >&2
     echo >&2
     echo "      Do NOT edit EXPECTED_TMUX_FAILURES to match this run. Re-derive the inventory from" >&2
-    echo "      src/v2/launch-cli.integration.test.ts and have a human accept the new baseline." >&2
-    exit 1
+    echo "      src/v2/launch-cli.integration.test.ts and have a human accept the new baseline (the unit-tier" >&2
+    echo "      cross-assertion in src/v2/fg551-agent-image-tmux.test.ts pins the two to each other)." >&2
+    return 1
   fi
 
   # Extra failures don't sink the falsification — the tmux path still demonstrably went red —
@@ -308,11 +342,39 @@ verify_pre_fix() {
   echo "      The tmux path itself went red. The guard catches a tmux-less image."
 }
 
+# Each arm reports its own outcome; nothing here short-circuits. Under --both the POST-FIX
+# arm runs FIRST because it is the primary claim ("the image forge ships runs the tier
+# clean"), and the falsification runs afterwards WHETHER OR NOT it passed. The old order did
+# the opposite and aborted on the first arm's failure, so a red falsification meant the
+# post-fix arm — the thing the run exists to establish — was never executed at all.
+POST_RC=""
+PRE_RC=""
+
 case "$MODE" in
-  post-fix) verify_post_fix ;;
-  pre-fix) verify_pre_fix ;;
+  post-fix)
+    POST_RC=0; verify_post_fix || POST_RC=$?
+    ;;
+  pre-fix)
+    PRE_RC=0; verify_pre_fix || PRE_RC=$?
+    ;;
   both)
-    verify_pre_fix
-    verify_post_fix
+    POST_RC=0; verify_post_fix || POST_RC=$?
+    PRE_RC=0; verify_pre_fix || PRE_RC=$?
     ;;
 esac
+
+outcome() { [[ "$1" -eq 0 ]] && echo PASS || echo FAIL; }
+
+echo
+echo "############ SUMMARY ############"
+if [[ -n "$POST_RC" ]]; then
+  echo "post-fix (the shipped $IMAGE must run the tier CLEAN): $(outcome "$POST_RC")"
+fi
+if [[ -n "$PRE_RC" ]]; then
+  echo "pre-fix falsification (a tmux-less image must go RED for the tmux reason): $(outcome "$PRE_RC")"
+fi
+
+if [[ "${POST_RC:-0}" -ne 0 || "${PRE_RC:-0}" -ne 0 ]]; then
+  exit 1
+fi
+exit 0
