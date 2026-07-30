@@ -289,6 +289,13 @@ export function fixBatchEnvelope(batch: FixBatch): FixBatchEnvelope {
   };
 }
 
+/** The ONE rendering of the envelope. Materialization writes these bytes and
+ *  verifyMaterializedEnvelope re-derives them from the row — two renderings would let the
+ *  delivered envelope and the verified envelope drift apart while both looked verified. */
+export function renderFixBatchEnvelope(batch: FixBatch): string {
+  return JSON.stringify(fixBatchEnvelope(batch), null, 2);
+}
+
 export type PayloadVerification = { ok: true; sha256: string } | { ok: false; refusal: string };
 
 /** Verify a MATERIALIZED payload against the persisted hash. Called before container
@@ -305,6 +312,38 @@ export function verifyMaterializedPayload(batch: FixBatch, materialized: string)
     };
   }
   return { ok: true, sha256: actual };
+}
+
+export type EnvelopeVerification = { ok: true } | { ok: false; refusal: string };
+
+/** FG-639: verify a MATERIALIZED envelope the same way the payload is verified — against
+ *  the DB row, not against the in-memory object that produced it. The envelope carries the
+ *  batch identity the fixer reports back under (id, revision, payload hash), so trusting
+ *  the disk copy would let a rewritten envelope point a real fixer at a different batch
+ *  than the one the host will validate its result against. The comparison is byte-for-byte
+ *  against a row-derived rendering, and it re-reads the row rather than taking the caller's
+ *  FixBatch so "DB truth" means the store, not the argument. */
+export function verifyMaterializedEnvelope(batchId: string, materialized: string): EnvelopeVerification {
+  const batch = getFixBatch(batchId);
+  if (!batch) {
+    return {
+      ok: false,
+      refusal:
+        `fix batch ${batchId}: no such batch in the store — refusing to start the fixer on a delivery ` +
+        `snapshot with no persisted batch behind it.`,
+    };
+  }
+  const expected = renderFixBatchEnvelope(batch);
+  if (materialized !== expected) {
+    return {
+      ok: false,
+      refusal:
+        `fix batch ${batch.id} revision ${batch.revision}: the materialized envelope does not match the ` +
+        `persisted batch (expected ${expected.length} bytes describing revision ${batch.revision} at payload ` +
+        `sha256 ${batch.payloadSha256}) — refusing to start the fixer on an unverified delivery snapshot.`,
+    };
+  }
+  return { ok: true };
 }
 
 // ─── result ingestion ───────────────────────────────────────────────────────
