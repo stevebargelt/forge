@@ -993,6 +993,61 @@ test("FG-639 / PRD #29: an alternate lane at ANOTHER candidate is refused by nam
   assert.equal(getReview(REVIEW)?.state, "awaiting_disposition");
 });
 
+test("FG-639 / PRD #29: an alternate lane named with NO execution record leaves the finding unresolved", async () => {
+  const h = harness(
+    recheckerCiting((candidateSha) => ({
+      kind: "regression_test",
+      test_name: TEST_NAME,
+      runner_output: SKIPPED,
+      alternate_lane: { lane: "dashboard-browser", candidate_sha: candidateSha, executed_assertion: TEST_NAME },
+    })),
+  );
+  const recheck = await driveToRecheck(h);
+
+  assert.match(recheck.message, /0 resolved, 1 unresolved \(RF-1=inconclusive\)/);
+  const f = findingsForReview(REVIEW)[0] as ReviewFinding;
+  assert.equal(f.resolution, "inconclusive");
+  assert.match(f.resolutionEvidence ?? "", /carries no execution record/);
+  assert.equal(getReview(REVIEW)?.state, "awaiting_disposition");
+});
+
+test("FG-639 / PRD #20: a fixer result claiming a stale REVISION refuses the stage and credits nothing", async () => {
+  const h = harness({
+    dispatchFixer: (ctx) => ({
+      ok: true,
+      taskId: "task-fixer-1",
+      result: {
+        fix_batch_id: ctx.batch.id,
+        // Right batch, right finding ids, a revision this batch was never dispatched at.
+        revision: ctx.batch.revision + 1,
+        findings: ctx.batch.payload.findings.map((f) => ({
+          finding_id: f.finding_id,
+          result: "fixed",
+          remediation_summary: "guarded",
+          files_changed: ["src/x.ts"],
+          evidence: "added the named regression test",
+        })),
+      },
+    }),
+  });
+  await drive(h.deps, "discover");
+  dispositionAll("fix_now", "will be remediated this cycle");
+
+  const fix = await runNextStage(REVIEW, h.deps);
+  assert.equal(fix.status, "refused");
+  assert.match(fix.message, /claims revision 2/);
+  assert.match(fix.message, /dispatched at revision 1/);
+
+  const batch = fixBatchesForReview(REVIEW)[0] as NonNullable<ReturnType<typeof getFixBatch>>;
+  assert.notEqual(getFixBatch(batch.id)?.state, "ingested", "a stale revision is never credited as current");
+  assert.equal(
+    findingsForReview(REVIEW).every((f) => f.disposition === "fix_now" && f.resolution === undefined),
+    true,
+    "the findings stay fix_now and unresolved",
+  );
+  assert.equal(pending().kind, "batch_fix", "the stage was not stepped over");
+});
+
 test("FG-639 / PRD #29: the shipping review refuses an acceptance criterion whose only evidence is a SKIPPED test", async () => {
   const base = harness();
   const h = harness({

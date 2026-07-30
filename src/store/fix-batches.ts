@@ -377,27 +377,59 @@ export type FixIngestion =
   | { ok: true; records: FixBatchResultRecord[]; alreadyIngested: boolean }
   | { ok: false; refusal: string };
 
+/** The identity a fixer's result claims for ITSELF. Both halves are checked, because a
+ *  batch id alone does not identify a scope: a batch is immutable AT A REVISION, so a
+ *  result carrying the right id and the right finding ids can still be about a revision
+ *  the fixer was never dispatched at. */
+export type ClaimedBatchIdentity = { batchId: string; revision: number };
+
 /** Ingest a fixer's results, host-side.
  *
- *  Four refusals, each naming what was wrong: a foreign batch id, a finding the batch
- *  never contained, the same finding reported twice, and an expected finding with no
- *  result at all. The omission arm is the load-bearing one — the PRD's "omission is never
- *  resolution" is only true if the host refuses the whole result rather than applying the
- *  ids that happened to be present. */
+ *  Five refusals, each naming what was wrong: a foreign batch id, a revision that is not
+ *  the one the batch was dispatched at, a finding the batch never contained, the same
+ *  finding reported twice, and an expected finding with no result at all. The omission arm
+ *  is the load-bearing one — the PRD's "omission is never resolution" is only true if the
+ *  host refuses the whole result rather than applying the ids that happened to be present. */
 export function ingestFixBatchResults(
   batchId: string,
   taskId: string,
-  claimedBatchId: string,
+  claimed: ClaimedBatchIdentity,
   incoming: readonly IncomingFixResult[],
 ): FixIngestion {
   const batch = getFixBatch(batchId);
   if (!batch) return { ok: false, refusal: `no fix batch ${batchId}. Nothing was written.` };
-  if (claimedBatchId !== batchId) {
+  if (claimed.batchId !== batchId) {
     return {
       ok: false,
       refusal:
-        `fixer result names fix batch ${claimedBatchId} but was dispatched for ${batchId} — batch identity ` +
+        `fixer result names fix batch ${claimed.batchId} but was dispatched for ${batchId} — batch identity ` +
         `mismatch. Nothing was written.`,
+    };
+  }
+  if (claimed.revision !== batch.revision) {
+    // A LATE RESULT, and the same semantics scenario #19 already gives one that arrives
+    // under the superseded revision's own id: the work belongs to the revision the fixer
+    // was bound to, so it is recorded THERE if that revision still exists, and it is never
+    // credited to the scope it did not do. Crediting it as current is the whole defect —
+    // a stale revision's result would close findings under a decision that has moved.
+    const bound = fixBatchesForReview(batch.reviewId).find((b) => b.revision === claimed.revision);
+    const late =
+      bound?.state === "superseded"
+        ? ingestFixBatchResults(bound.id, taskId, { batchId: bound.id, revision: bound.revision }, incoming)
+        : undefined;
+    return {
+      ok: false,
+      refusal:
+        `fixer result claims revision ${claimed.revision} of fix batch ${batchId}, which was dispatched at ` +
+        `revision ${batch.revision} — revision mismatch. ` +
+        (late?.ok === true
+          ? `The result was recorded against the superseded revision ${claimed.revision} (${bound?.id}) it was ` +
+            `bound to; nothing was credited to revision ${batch.revision}.`
+          : bound === undefined
+            ? `No revision ${claimed.revision} exists for review ${batch.reviewId}. Nothing was written.`
+            : `It was not recordable against revision ${claimed.revision} (${bound.id}) either ` +
+              `(${late === undefined ? `that revision is ${bound.state}, not superseded` : late.refusal}). ` +
+              `Nothing was credited to revision ${batch.revision}.`),
     };
   }
 

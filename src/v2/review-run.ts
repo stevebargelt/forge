@@ -387,7 +387,12 @@ async function runBatchFix(reviewId: string, transition: Transition, deps: Coord
   const parsed = parseFixerResult(dispatch.result);
   if (!parsed.ok) return { transition, status: "refused", message: parsed.refusal };
 
-  const ingestion = ingestFixBatchResults(batch.id, dispatch.taskId, parsed.claimedBatchId, parsed.results);
+  const ingestion = ingestFixBatchResults(
+    batch.id,
+    dispatch.taskId,
+    { batchId: parsed.claimedBatchId, revision: parsed.claimedRevision },
+    parsed.results,
+  );
   if (!ingestion.ok) return { transition, status: "refused", message: ingestion.refusal };
 
   // A scope-changing conflict returns THAT finding to disposition as an architecture

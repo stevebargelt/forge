@@ -12,8 +12,11 @@
 //     `not_executed` — or `blocked_environment` when the environment itself could not
 //     run it — and the finding stays `inconclusive`. Never green. Never resolved.
 //   - Alternate-lane coverage must NAME the lane, the candidate SHA, and the executed
-//     assertion. Unnamed "covered elsewhere" is refused at ingestion, and a lane whose
-//     sha is not this candidate's is refused by name.
+//     assertion, AND carry that lane's own runner-output execution record for it. Naming a
+//     lane is not an execution record: the alternate lane is held to exactly the per-test
+//     identity the primary lane is, so a lane that cannot show its assertion executing
+//     resolves nothing. Unnamed "covered elsewhere" is refused at ingestion, and a lane
+//     whose sha is not this candidate's is refused by name.
 //
 // AND RESOLUTION EVIDENCE IS PROPORTIONAL TO THE FINDING'S ORIGINAL REACHABILITY:
 //
@@ -38,16 +41,21 @@ export const RESOLUTION_EVIDENCE_KINDS = [
 ] as const;
 export type ResolutionEvidenceKind = (typeof RESOLUTION_EVIDENCE_KINDS)[number];
 
-/** A claim that another mandatory lane executed the same assertion. All three fields are
+/** A claim that another mandatory lane executed the same assertion. Every field is
  *  required because each one is a thing an unnamed claim leaves out: WHICH lane ran it,
- *  at WHICH candidate, and WHICH assertion actually executed. */
+ *  at WHICH candidate, WHICH assertion, and — the one naming alone can never supply —
+ *  the lane's OWN runner output establishing that the assertion executed there.
+ *
+ *  `runner_output` is optional in the SCHEMA and required by `checkAlternateLane` on
+ *  purpose: a claim that omits it must refuse with a reason naming the missing execution
+ *  record, and under the coverage outcome the surrounding case calls for
+ *  (`blocked_environment` when the environment could not run the check at all), rather
+ *  than as a generic union-parse error that loses both. */
 const AlternateLaneSchema = z
   .object({
     lane: z.string().trim().min(1),
     candidate_sha: z.string().trim().min(1),
     executed_assertion: z.string().trim().min(1),
-    /** The lane's own runner output, so the named assertion is verified rather than
-     *  asserted. Optional: a lane may be evidenced by its recorded transcript instead. */
     runner_output: z.string().optional(),
   })
   .strict();
@@ -77,6 +85,18 @@ const ReplayedReproductionSchema = z
   })
   .strict();
 
+/** What a verification step IS, structurally: something that RAN, plus the runner's own
+ *  output for it. Prose ("I ran the typecheck") is a claim that a step ran, and the
+ *  anchored reading it accompanies is already a claim about the source — two claims are
+ *  not a verification. Carrying the executed identity is what lets the same per-test
+ *  check the primary lane is held to decide whether the step actually executed. */
+const ExecutedStepSchema = z
+  .object({
+    ran: z.string().trim().min(1),
+    runner_output: z.string().trim().min(1),
+  })
+  .strict();
+
 const AnchoredVerificationSchema = z
   .object({
     kind: z.literal("anchored_verification"),
@@ -85,7 +105,7 @@ const AnchoredVerificationSchema = z
     fact: z.string().trim().min(1),
     /** The "plus a relevant verification step" half. Anchored code reading alone is an
      *  argument about the source, not a verification of behavior. */
-    verification_step: z.string().trim().min(1),
+    verification_step: ExecutedStepSchema,
   })
   .strict();
 
@@ -219,6 +239,31 @@ export function validateResolutionEvidence(raw: unknown, ctx: EvidenceContext): 
     };
   }
 
+  // EVERY KIND IS ENFORCED STRUCTURALLY, PER KIND. Nothing is accepted on nonempty prose:
+  // each arm of the union above states the fields its kind requires (replayed_reproduction
+  // needs its command AND its output; bounded_inspection its inspection AND its limitation),
+  // so a missing field is already a refusal that names it. What a schema cannot decide is
+  // whether a cited step EXECUTED — so anchored_verification's step goes through the same
+  // per-test identity check the cited-test arm below uses. A step that skipped is a skip,
+  // and a skip is never evidence.
+  if (ev.kind === "anchored_verification") {
+    const step = ev.verification_step;
+    const stepExecution = testExecution(step.runner_output, step.ran);
+    if (stepExecution !== "executed") {
+      return {
+        ok: false,
+        coverage: "not_executed",
+        refusal:
+          `${ctx.findingRef}: the anchored verification at ${ev.file}:${ev.line} rests on '${step.ran}', but the ` +
+          `output it carries shows that step ` +
+          (stepExecution === "skipped"
+            ? `SKIPPED — a skipped check is never evidence, in any lane or any evidence kind`
+            : `nowhere at all, so nothing establishes that it ran`) +
+          `. Coverage is recorded not_executed. Nothing was resolved.`,
+      };
+    }
+  }
+
   if (ev.kind !== "regression_test") {
     return { ok: true, kind: ev.kind, coverage: "executed", detail: describeEvidence(ev), evidence: ev };
   }
@@ -292,15 +337,18 @@ export function validateResolutionEvidence(raw: unknown, ctx: EvidenceContext): 
 
 type LaneCheck = { ok: true; detail: string } | { ok: false; refusal: string };
 
-/** A skip is sound ONLY when another mandatory lane executed the same assertion against
- *  the same candidate. That claim has to be named to be checkable. */
+/** A skip is sound ONLY when another mandatory lane EXECUTED the same assertion against
+ *  the same candidate. Naming that lane makes the claim checkable; the lane's own runner
+ *  output is what makes it checked. Both are required — a lane accepted on its name alone
+ *  would be the skip rule with one indirection added. */
 function checkAlternateLane(claim: AlternateLaneClaim | undefined, ctx: EvidenceContext): LaneCheck {
   if (claim === undefined) {
     return {
       ok: false,
       refusal:
         `No alternate lane is named. Claiming coverage elsewhere requires --lane-style naming: the lane, the ` +
-        `candidate sha, and the executed assertion; unnamed "covered elsewhere" is refused.`,
+        `candidate sha, and the executed assertion, plus that lane's runner output for it; unnamed ` +
+        `"covered elsewhere" is refused.`,
     };
   }
   if (claim.candidate_sha !== ctx.candidateSha) {
@@ -311,16 +359,26 @@ function checkAlternateLane(claim: AlternateLaneClaim | undefined, ctx: Evidence
         `${ctx.candidateSha} — coverage at another candidate is coverage of other code.`,
     };
   }
-  if (claim.runner_output !== undefined && claim.runner_output.trim() !== "") {
-    const laneExecution = testExecution(claim.runner_output, claim.executed_assertion);
-    if (laneExecution !== "executed") {
-      return {
-        ok: false,
-        refusal:
-          `Alternate lane '${claim.lane}' claims '${claim.executed_assertion}' but its own output shows that ` +
-          `assertion ${laneExecution}.`,
-      };
-    }
+  if (claim.runner_output === undefined || claim.runner_output.trim() === "") {
+    return {
+      ok: false,
+      refusal:
+        `Alternate lane '${claim.lane}' names '${claim.executed_assertion}' but carries no execution record for ` +
+        `it — the lane's own runner output is required, because naming a lane resolves nothing. The alternate ` +
+        `lane is held to the same per-test identity the primary lane is.`,
+    };
+  }
+  const laneExecution = testExecution(claim.runner_output, claim.executed_assertion);
+  if (laneExecution !== "executed") {
+    return {
+      ok: false,
+      refusal:
+        laneExecution === "skipped"
+          ? `Alternate lane '${claim.lane}' cites '${claim.executed_assertion}', but its own output shows that ` +
+            `assertion skipped — a skip is never evidence, in any lane.`
+          : `Alternate lane '${claim.lane}' cites '${claim.executed_assertion}', but that assertion does not ` +
+            `appear in its own output at all, so the lane never established it ran.`,
+    };
   }
   return {
     ok: true,
@@ -336,7 +394,7 @@ function describeEvidence(ev: ResolutionEvidence): string {
     case "replayed_reproduction":
       return `replayed ${ev.command}`;
     case "anchored_verification":
-      return `${ev.file}:${ev.line} — ${ev.fact} (verified by ${ev.verification_step})`;
+      return `${ev.file}:${ev.line} — ${ev.fact} (verified by ${ev.verification_step.ran}, which executed)`;
     case "bounded_inspection":
       return `bounded inspection: ${ev.inspection} (limitation: ${ev.limitation})`;
   }

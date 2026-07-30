@@ -21,6 +21,8 @@ import { eventsForRun } from "./events.js";
 import { insertReview, ingestFindings, recordDisposition, findingsForReview, type ReviewFinding } from "./reviews.js";
 import {
   batchDecisionFingerprint,
+  type ClaimedBatchIdentity,
+  type FixBatch,
   ensureFixBatch,
   fixBatchEnvelope,
   fixBatchResults,
@@ -45,6 +47,12 @@ const RUN: Run = {
 };
 
 const REVIEW = "review-fg639-batch";
+
+/** The identity an honest fixer claims: the batch it was dispatched for, at the revision it
+ *  was dispatched at. Both halves are checked at ingestion, so both are stated here. */
+function self(batch: FixBatch): ClaimedBatchIdentity {
+  return { batchId: batch.id, revision: batch.revision };
+}
 
 let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
@@ -212,7 +220,7 @@ test("FG-639 / PRD #19: a result from the container bound to a SUPERSEDED revisi
   // Now the in-flight container delivers. It was dispatched against revision 1 and its
   // result is about revision 1 — it is recorded there, and it does not become the current
   // scope by arriving late.
-  const late = ingestFixBatchResults(first.batch.id, "task-fixer-1", first.batch.id, incoming(findings));
+  const late = ingestFixBatchResults(first.batch.id, "task-fixer-1", self(first.batch), incoming(findings));
   assert.equal(late.ok, true);
   assert.equal(fixBatchResults(first.batch.id).length, 2, "the work the container actually did is not discarded");
   assert.equal(
@@ -279,7 +287,7 @@ test("FG-639 / PRD #20: a result OMITTING an expected finding id is refused and 
   const { batch } = ensureFixBatch(REVIEW, "cand111", findings);
   const partial = incoming(findings.slice(0, 2));
 
-  const r = ingestFixBatchResults(batch.id, "task-fixer-1", batch.id, partial);
+  const r = ingestFixBatchResults(batch.id, "task-fixer-1", self(batch), partial);
   assert.equal(r.ok, false);
   if (r.ok) return;
   assert.match(r.refusal, /omits/);
@@ -295,7 +303,7 @@ test("FG-639 / PRD #20: a result OMITTING an expected finding id is refused and 
 test("FG-639 / PRD #20: a result naming a FOREIGN finding id is refused", () => {
   const findings = fixNowFindings(2);
   const { batch } = ensureFixBatch(REVIEW, "cand111", findings);
-  const r = ingestFixBatchResults(batch.id, "task-fixer-1", batch.id, [
+  const r = ingestFixBatchResults(batch.id, "task-fixer-1", self(batch), [
     ...incoming(findings),
     { findingId: `${REVIEW}/RF-99`, result: "fixed", summary: "?", filesChanged: [], evidence: "?" },
   ]);
@@ -308,7 +316,7 @@ test("FG-639 / PRD #20: a result reporting the same id TWICE is refused", () => 
   const findings = fixNowFindings(2);
   const { batch } = ensureFixBatch(REVIEW, "cand111", findings);
   const dup = incoming(findings);
-  const r = ingestFixBatchResults(batch.id, "task-fixer-1", batch.id, [...dup, dup[0] as never]);
+  const r = ingestFixBatchResults(batch.id, "task-fixer-1", self(batch), [...dup, dup[0] as never]);
   assert.equal(r.ok, false);
   assert.match(r.ok ? "" : r.refusal, /more than once — exactly one result per finding/);
 });
@@ -316,15 +324,67 @@ test("FG-639 / PRD #20: a result reporting the same id TWICE is refused", () => 
 test("FG-639 / PRD #20: a result claiming a DIFFERENT batch id is refused on identity", () => {
   const findings = fixNowFindings(1);
   const { batch } = ensureFixBatch(REVIEW, "cand111", findings);
-  const r = ingestFixBatchResults(batch.id, "task-fixer-1", "fix-batch-someoneelse", incoming(findings));
+  const r = ingestFixBatchResults(
+    batch.id,
+    "task-fixer-1",
+    { batchId: "fix-batch-someoneelse", revision: batch.revision },
+    incoming(findings),
+  );
   assert.equal(r.ok, false);
   assert.match(r.ok ? "" : r.refusal, /batch identity mismatch/);
+});
+
+test("FG-639 / PRD #20: a result with the right batch id and finding ids but a STALE revision is never credited as current", () => {
+  const findings = fixNowFindings(2);
+  const first = ensureFixBatch(REVIEW, "cand111", findings);
+  markFixBatchDispatched(first.batch.id, "task-fixer-1");
+
+  // The operator re-decides mid-flight, so revision 2 is what is dispatched now.
+  recordDisposition((findings[0] as ReviewFinding).id, {
+    decision: "fix_now",
+    rationale: "re-decided: guard the reconcile path too",
+    operator: false,
+  });
+  const current = ensureFixBatch(REVIEW, "cand111", findingsForReview(REVIEW).filter((f) => f.disposition === "fix_now"));
+  assert.equal(current.batch.revision, 2);
+
+  // The in-flight container delivers against revision 2's id — right batch, right finding
+  // ids — but says revision 1. That is a result about a scope that has moved.
+  const r = ingestFixBatchResults(
+    current.batch.id,
+    "task-fixer-1",
+    { batchId: current.batch.id, revision: 1 },
+    incoming(findings),
+  );
+  assert.equal(r.ok, false, "matching finding ids do not make a stale revision current");
+  if (r.ok) return;
+  assert.match(r.refusal, new RegExp(current.batch.id), "the refusal names the batch");
+  assert.match(r.refusal, /claims revision 1/, "and the claimed revision");
+  assert.match(r.refusal, /dispatched at revision 2/, "and the dispatched revision");
+  assert.equal(fixBatchResults(current.batch.id).length, 0, "nothing is credited to the current revision");
+  assert.equal(getFixBatch(current.batch.id)?.state, "open", "and the current revision is not marked ingested");
+
+  // The TE's late-result semantics: the work is recorded against the superseded revision the
+  // fixer was actually bound to, rather than discarded.
+  assert.match(r.refusal, /recorded against the superseded revision 1/);
+  assert.equal(fixBatchResults(first.batch.id).length, 2);
+  assert.equal(getFixBatch(first.batch.id)?.state, "superseded", "a late result never revives a superseded revision");
+});
+
+test("FG-639: a claimed revision that never existed is refused and nothing is written anywhere", () => {
+  const findings = fixNowFindings(1);
+  const { batch } = ensureFixBatch(REVIEW, "cand111", findings);
+  const r = ingestFixBatchResults(batch.id, "task-fixer-1", { batchId: batch.id, revision: 7 }, incoming(findings));
+  assert.equal(r.ok, false);
+  assert.match(r.ok ? "" : r.refusal, /No revision 7 exists/);
+  assert.match(r.ok ? "" : r.refusal, /Nothing was written/);
+  assert.equal(fixBatchResults(batch.id).length, 0);
 });
 
 test("FG-639: a complete result is ingested, one row per finding, and marks the batch ingested", () => {
   const findings = fixNowFindings(3);
   const { batch } = ensureFixBatch(REVIEW, "cand111", findings);
-  const r = ingestFixBatchResults(batch.id, "task-fixer-1", batch.id, incoming(findings));
+  const r = ingestFixBatchResults(batch.id, "task-fixer-1", self(batch), incoming(findings));
   assert.equal(r.ok, true);
   if (!r.ok) return;
   assert.equal(r.records.length, 3);
@@ -336,8 +396,8 @@ test("FG-639: a complete result is ingested, one row per finding, and marks the 
 test("FG-639 / Appendix A: delivery is at-least-once, so a REPEAT ingest is idempotent", () => {
   const findings = fixNowFindings(2);
   const { batch } = ensureFixBatch(REVIEW, "cand111", findings);
-  ingestFixBatchResults(batch.id, "task-fixer-1", batch.id, incoming(findings));
-  const again = ingestFixBatchResults(batch.id, "task-fixer-1", batch.id, incoming(findings, { summary: "second delivery" }));
+  ingestFixBatchResults(batch.id, "task-fixer-1", self(batch), incoming(findings));
+  const again = ingestFixBatchResults(batch.id, "task-fixer-1", self(batch), incoming(findings, { summary: "second delivery" }));
 
   assert.equal(again.ok, true);
   assert.equal(again.ok ? again.alreadyIngested : false, true, "the repeat is RECORDED as a repeat, not silently absorbed");
@@ -352,8 +412,8 @@ test("FG-639 / Appendix A: delivery is at-least-once, so a REPEAT ingest is idem
 test("FG-639: a retry under a DIFFERENT task id records its own rows against the same batch", () => {
   const findings = fixNowFindings(1);
   const { batch } = ensureFixBatch(REVIEW, "cand111", findings);
-  ingestFixBatchResults(batch.id, "task-fixer-1", batch.id, incoming(findings));
-  const retry = ingestFixBatchResults(batch.id, "task-fixer-2", batch.id, incoming(findings, { summary: "retry" }));
+  ingestFixBatchResults(batch.id, "task-fixer-1", self(batch), incoming(findings));
+  const retry = ingestFixBatchResults(batch.id, "task-fixer-2", self(batch), incoming(findings, { summary: "retry" }));
   assert.equal(retry.ok, true);
   assert.equal(fixBatchResults(batch.id).length, 2);
   assert.equal(retry.ok ? retry.records.length : 0, 1, "the retry's own rows are reported, keyed by its task id");
@@ -362,7 +422,7 @@ test("FG-639: a retry under a DIFFERENT task id records its own rows against the
 test("FG-639: a scope_change result is stored as such — it is an outcome, not an error", () => {
   const findings = fixNowFindings(2);
   const { batch } = ensureFixBatch(REVIEW, "cand111", findings);
-  const r = ingestFixBatchResults(batch.id, "task-fixer-1", batch.id, [
+  const r = ingestFixBatchResults(batch.id, "task-fixer-1", self(batch), [
     { findingId: (findings[0] as ReviewFinding).id, result: "fixed", summary: "done", filesChanged: ["src/x.ts"], evidence: "test added" },
     { findingId: (findings[1] as ReviewFinding).id, result: "scope_change", summary: "needs a new table", filesChanged: [], evidence: "cannot fix without a schema change" },
   ]);
@@ -376,7 +436,7 @@ test("FG-639: a scope_change result is stored as such — it is an outcome, not 
 test("FG-639: agents never write the batch tables — ingestion is the only writer, keyed host-side", () => {
   const findings = fixNowFindings(1);
   const { batch } = ensureFixBatch(REVIEW, "cand111", findings);
-  ingestFixBatchResults(batch.id, "task-fixer-1", batch.id, incoming(findings));
+  ingestFixBatchResults(batch.id, "task-fixer-1", self(batch), incoming(findings));
   const pk = getDb().prepare(`PRAGMA table_info(fix_batch_results)`).all() as { name: string; pk: number }[];
   assert.deepEqual(
     pk.filter((c) => c.pk > 0).sort((a, b) => a.pk - b.pk).map((c) => c.name),

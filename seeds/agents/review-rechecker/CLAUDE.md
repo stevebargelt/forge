@@ -70,10 +70,12 @@ Read each finding's `reachability` and pick your evidence kind accordingly. The 
 
 The four `evidence` shapes, each field required:
 
-- `{"kind": "regression_test", "test_name", "runner_output"}` — plus optional `test_file`, `environment_blocked`, `alternate_lane: {lane, candidate_sha, executed_assertion}`
+- `{"kind": "regression_test", "test_name", "runner_output"}` — plus optional `test_file`, `environment_blocked`, `alternate_lane: {lane, candidate_sha, executed_assertion, runner_output}`
 - `{"kind": "replayed_reproduction", "command", "output"}`
-- `{"kind": "anchored_verification", "file", "line", "fact", "verification_step"}`
+- `{"kind": "anchored_verification", "file", "line", "fact", "verification_step": {"ran", "runner_output"}}`
 - `{"kind": "bounded_inspection", "inspection", "limitation"}`
+
+An alternate lane's `runner_output` is REQUIRED, not optional: naming a lane resolves nothing, so the lane you point at must show the assertion executing in its own output. Same rule for `verification_step` — it names what RAN and carries that runner's output, never prose like "I ran the typecheck". A step whose output shows it skipped is refused exactly like a skipped regression test.
 
 **Omission is a schema failure, never resolution.** If you return fewer entries than the recheck list, the host refuses your ENTIRE result and every finding stays open — including the ones you did answer. Report `inconclusive` on anything you could not establish; never leave it out.
 

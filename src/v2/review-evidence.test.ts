@@ -5,8 +5,13 @@
 // rejected by the host with a named reason" — is below, and so is the property that makes
 // it more than a string check: execution is established PER TEST from the runner's own
 // output, so a green suite containing a skipped test is refused exactly as loudly as a red
-// one. The alternate-lane escape hatch is tested from both sides: named completely with a
-// matching candidate sha it works, and every way of being vague about it does not.
+// one. The alternate-lane escape hatch is tested from both sides: named completely — lane,
+// candidate sha, assertion AND that lane's own execution record for it — it works, and every
+// way of being vague about it, including naming a lane with no record, does not.
+//
+// The rule holds ACROSS EVIDENCE KINDS, not just for a cited test: every kind is enforced
+// structurally per kind, and an anchored verification whose step skipped is refused exactly
+// like a skipped regression test.
 //
 // The proportionality half is the other non-negotiable: a `demonstrated` finding cannot be
 // closed by re-inspecting the code (PRD #26), and a `bounded_inspection` must state its
@@ -88,7 +93,26 @@ test("FG-639 / PRD #29 (operator skip-evidence rule): a recheck citing a SKIPPED
   assert.equal(check.coverage, "not_executed", "the coverage is recorded not_executed, never green");
 });
 
-test("FG-639 / PRD #29: the same skipped test IS accepted once a mandatory lane names the executed assertion", () => {
+test("FG-639 / PRD #29: the same skipped test IS accepted once a mandatory lane shows the assertion EXECUTING", () => {
+  const check = validateResolutionEvidence(
+    {
+      kind: "regression_test",
+      test_name: "a blocked environment never resolves a finding",
+      runner_output: TAP_GREEN_WITH_SKIP,
+      alternate_lane: {
+        lane: "test-extended / integration_2",
+        candidate_sha: SHA,
+        executed_assertion: "a blocked environment never resolves a finding",
+        runner_output: "ok 1 - a blocked environment never resolves a finding",
+      },
+    },
+    { candidateSha: SHA, reachability: "demonstrated", findingRef: "RF-4" },
+  );
+  assert.equal(check.ok, true);
+  assert.match(check.ok ? check.detail : "", /mandatory lane 'test-extended \/ integration_2' executed/);
+});
+
+test("FG-639 / PRD #29: an alternate lane named WITHOUT its execution record resolves nothing", () => {
   const check = validateResolutionEvidence(
     {
       kind: "regression_test",
@@ -102,8 +126,46 @@ test("FG-639 / PRD #29: the same skipped test IS accepted once a mandatory lane 
     },
     { candidateSha: SHA, reachability: "demonstrated", findingRef: "RF-4" },
   );
-  assert.equal(check.ok, true);
-  assert.match(check.ok ? check.detail : "", /mandatory lane 'test-extended \/ integration_2' executed/);
+  assert.equal(check.ok, false, "free text naming a lane is not an execution record");
+  if (check.ok) return;
+  assert.match(check.refusal, /carries no execution record/, "the refusal must name what is missing");
+  assert.match(check.refusal, /same per-test identity the primary lane is/);
+  assert.equal(check.coverage, "not_executed");
+});
+
+test("FG-639 / PRD #29: an alternate lane whose record shows the assertion ABSENT is refused for being absent", () => {
+  const check = validateResolutionEvidence(
+    {
+      kind: "regression_test",
+      test_name: "the guard",
+      runner_output: "ok 1 - the guard # SKIP",
+      alternate_lane: {
+        lane: "test-extended",
+        candidate_sha: SHA,
+        executed_assertion: "the guard",
+        runner_output: "ok 1 - something else entirely",
+      },
+    },
+    { candidateSha: SHA, reachability: "supported", findingRef: "RF-9" },
+  );
+  assert.equal(check.ok, false);
+  assert.match(check.ok ? "" : check.refusal, /does not appear in its own output at all/);
+});
+
+test("FG-639 / PRD #29: a blocked environment is not rescued by an alternate lane named without its record", () => {
+  const check = validateResolutionEvidence(
+    {
+      kind: "regression_test",
+      test_name: "the container starts",
+      environment_blocked: "the agent-dev-worker image is not built in this lane",
+      alternate_lane: { lane: "test-extended", candidate_sha: SHA, executed_assertion: "the container starts" },
+    },
+    { candidateSha: SHA, reachability: "demonstrated", findingRef: "RF-7" },
+  );
+  assert.equal(check.ok, false);
+  if (check.ok) return;
+  assert.equal(check.coverage, "blocked_environment", "the coverage outcome the blocked case calls for is kept");
+  assert.match(check.refusal, /carries no execution record/);
 });
 
 test("FG-639 / PRD #29: unnamed \"covered elsewhere\" is refused — the lane, sha and assertion are all required", () => {
@@ -147,6 +209,7 @@ test("FG-639 / PRD #29: an alternate lane whose OWN output shows the assertion s
   );
   assert.equal(check.ok, false);
   assert.match(check.ok ? "" : check.refusal, /its own output shows that assertion skipped/);
+  assert.match(check.ok ? "" : check.refusal, /never evidence, in any lane/);
 });
 
 test("FG-639: a cited test with NO runner output cannot establish execution", () => {
@@ -205,9 +268,14 @@ test("FG-639 / PRD #26: a DEMONSTRATED finding cannot be resolved by bounded ins
   assert.match(check.refusal, /named regression test/);
 });
 
+const EXECUTED_STEP = {
+  ran: "dedup keeps both when the invariants differ",
+  runner_output: TAP_GREEN_WITH_SKIP,
+};
+
 test("FG-639 / PRD #26: a demonstrated finding is not resolved by anchored verification either", () => {
   const check = validateResolutionEvidence(
-    { kind: "anchored_verification", file: "src/a.ts", line: 12, fact: "the guard is now first", verification_step: "npm run typecheck" },
+    { kind: "anchored_verification", file: "src/a.ts", line: 12, fact: "the guard is now first", verification_step: EXECUTED_STEP },
     { candidateSha: SHA, reachability: "demonstrated", findingRef: "RF-3" },
   );
   assert.equal(check.ok, false);
@@ -222,12 +290,79 @@ test("FG-639: a demonstrated finding IS resolved by a replayed reproduction with
   assert.equal(check.ok, true);
 });
 
-test("FG-639: a SUPPORTED finding needs anchored evidence PLUS a verification step", () => {
+// ─── per-kind structural enforcement (the two kinds that used to bypass it) ──
+
+test("FG-639: a replayed reproduction MISSING its command, or its output, is refused writing nothing", () => {
+  for (const partial of [
+    { kind: "replayed_reproduction", output: "ok 1 - the guard" },
+    { kind: "replayed_reproduction", command: "node --test src/store/reviews.test.ts" },
+    { kind: "replayed_reproduction", command: "node --test x", output: "   " },
+  ]) {
+    const check = validateResolutionEvidence(partial, {
+      candidateSha: SHA,
+      reachability: "demonstrated",
+      findingRef: "RF-3",
+    });
+    assert.equal(check.ok, false, `${JSON.stringify(partial)} must not resolve anything`);
+    assert.match(check.ok ? "" : check.refusal, /did not validate/);
+    assert.equal(check.ok ? "" : check.coverage, "not_executed");
+  }
+});
+
+test("FG-639: an anchored verification MISSING file, line or its verification step is refused", () => {
+  for (const partial of [
+    { kind: "anchored_verification", line: 12, fact: "the guard is first", verification_step: EXECUTED_STEP },
+    { kind: "anchored_verification", file: "src/a.ts", fact: "the guard is first", verification_step: EXECUTED_STEP },
+    { kind: "anchored_verification", file: "src/a.ts", line: 0, fact: "the guard is first", verification_step: EXECUTED_STEP },
+    { kind: "anchored_verification", file: "src/a.ts", line: 12, fact: "the guard is first" },
+  ]) {
+    const check = validateResolutionEvidence(partial, {
+      candidateSha: SHA,
+      reachability: "supported",
+      findingRef: "RF-5",
+    });
+    assert.equal(check.ok, false, `${JSON.stringify(partial)} must not resolve anything`);
+    assert.match(check.ok ? "" : check.refusal, /did not validate/);
+  }
+});
+
+test("FG-639: a verification step given as PROSE is refused — the step must carry its executed identity", () => {
+  const check = validateResolutionEvidence(
+    { kind: "anchored_verification", file: "src/a.ts", line: 12, fact: "the guard is first", verification_step: "I ran npm run test:unit" },
+    { candidateSha: SHA, reachability: "supported", findingRef: "RF-5" },
+  );
+  assert.equal(check.ok, false, "a claim that a step ran is not the step's outcome");
+  assert.match(check.ok ? "" : check.refusal, /did not validate/);
+});
+
+test("FG-639 / PRD #29: a verification step citing a SKIPPED check resolves nothing", () => {
+  const check = validateResolutionEvidence(
+    {
+      kind: "anchored_verification",
+      file: "src/a.ts",
+      line: 12,
+      fact: "the guard is first",
+      verification_step: {
+        ran: "a blocked environment never resolves a finding",
+        runner_output: TAP_GREEN_WITH_SKIP,
+      },
+    },
+    { candidateSha: SHA, reachability: "supported", findingRef: "RF-5" },
+  );
+  assert.equal(check.ok, false, "the skip rule is not bypassed by the evidence kind");
+  if (check.ok) return;
+  assert.match(check.refusal, /SKIPPED/);
+  assert.match(check.refusal, /never evidence, in any lane or any evidence kind/);
+  assert.equal(check.coverage, "not_executed");
+});
+
+test("FG-639: a SUPPORTED finding needs anchored evidence PLUS an EXECUTED verification step", () => {
   const complete = validateResolutionEvidence(
-    { kind: "anchored_verification", file: "src/a.ts", line: 12, fact: "the guard is first", verification_step: "npm run test:unit" },
+    { kind: "anchored_verification", file: "src/a.ts", line: 12, fact: "the guard is first", verification_step: EXECUTED_STEP },
     { candidateSha: SHA, reachability: "supported", findingRef: "RF-5" },
   );
   assert.equal(complete.ok, true);
+  assert.match(complete.ok ? complete.detail : "", /which executed/);
 
   const noStep = validateResolutionEvidence(
     { kind: "anchored_verification", file: "src/a.ts", line: 12, fact: "the guard is first" },
