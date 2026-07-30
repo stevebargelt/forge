@@ -6,17 +6,10 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, type Browser, type Page } from "playwright-core";
 import { renderShell } from "../src/shell.js";
+import { requireChrome } from "../../src/util/chrome-bin.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLIENT_DIR = resolve(HERE, "..", "client");
-const CHROME_CANDIDATES = [
-  process.env.CHROME_PATH,
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-  "/usr/bin/google-chrome",
-  "/usr/bin/chromium",
-  "/usr/bin/chromium-browser",
-].filter((candidate): candidate is string => Boolean(candidate));
-const CHROME_PATH = CHROME_CANDIDATES.find(existsSync);
 
 const generatedAt = "2026-07-16T19:00:00.000Z";
 const fullLimits = {
@@ -127,9 +120,7 @@ before(async () => {
   const address = server.address();
   assert.ok(address && typeof address === "object");
   baseUrl = `http://127.0.0.1:${address.port}`;
-  if (CHROME_PATH) {
-    browser = await chromium.launch({ executablePath: CHROME_PATH, headless: true });
-  }
+  browser = await chromium.launch({ executablePath: requireChrome("the dashboard browser tier"), headless: true });
 });
 
 after(async () => {
@@ -138,7 +129,7 @@ after(async () => {
   await new Promise<void>((resolveClosed) => server?.close(() => resolveClosed()));
 });
 
-test("Home is the hashless default and combines plan limits with in-flight work", { skip: !CHROME_PATH }, async () => {
+test("Home is the hashless default and combines plan limits with in-flight work", async () => {
   limitsMode = "full";
   delayLimitsMs = 0;
   refreshFails = false;
@@ -181,7 +172,7 @@ test("Home is the hashless default and combines plan limits with in-flight work"
   await page.close();
 });
 
-test("Home stays contained and reflows in-flight work at a narrow width", { skip: !CHROME_PATH }, async () => {
+test("Home stays contained and reflows in-flight work at a narrow width", async () => {
   limitsMode = "full";
   delayLimitsMs = 0;
   const page = await newPage({ width: 390, height: 844 });
@@ -220,7 +211,7 @@ test("Home stays contained and reflows in-flight work at a narrow width", { skip
   await page.close();
 });
 
-test("In-flight rows copy their task id without opening task detail", { skip: !CHROME_PATH }, async () => {
+test("In-flight rows copy their task id without opening task detail", async () => {
   const page = await newPage({ width: 1200, height: 800 });
   await page.goto(baseUrl);
   const copy = page.getByRole("button", { name: "Copy task id task-home-live" });
@@ -231,7 +222,7 @@ test("In-flight rows copy their task id without opening task detail", { skip: !C
   await page.close();
 });
 
-test("Projects renders one canonical card with subordinate checkouts and preserves exact checkout selection", { skip: !CHROME_PATH }, async () => {
+test("Projects renders one canonical card with subordinate checkouts and preserves exact checkout selection", async () => {
   const page = await newPage({ width: 1200, height: 900 });
   const activityRequests: URL[] = [];
   page.on("request", (request) => {
@@ -262,7 +253,7 @@ test("Projects renders one canonical card with subordinate checkouts and preserv
   await page.close();
 });
 
-test("Backlog renders multi-checkout handoffs as compact list cards with one detail view", { skip: !CHROME_PATH }, async () => {
+test("Backlog renders multi-checkout handoffs as compact list cards with one detail view", async () => {
   const page = await newPage({ width: 1200, height: 900 });
   await page.goto(`${baseUrl}/#projects`);
   await page.getByRole("button", { name: "Open all Forge checkouts" }).click();
@@ -299,7 +290,7 @@ test("Backlog renders multi-checkout handoffs as compact list cards with one det
   await page.close();
 });
 
-test("Usage UI renders provider channels, analytics, refresh failures, and successful refreshes", { skip: !CHROME_PATH }, async () => {
+test("Usage UI renders provider channels, analytics, refresh failures, and successful refreshes", async () => {
   limitsMode = "full";
   delayLimitsMs = 0;
   refreshFails = false;
@@ -334,7 +325,7 @@ test("Usage UI renders provider channels, analytics, refresh failures, and succe
   await page.close();
 });
 
-test("Usage UI covers loading, provider error, and empty states", { skip: !CHROME_PATH }, async () => {
+test("Usage UI covers loading, provider error, and empty states", async () => {
   delayLimitsMs = 350;
   limitsMode = "empty";
   const loadingPage = await newPage({ width: 1200, height: 800 });
@@ -353,7 +344,7 @@ test("Usage UI covers loading, provider error, and empty states", { skip: !CHROM
   await errorPage.close();
 });
 
-test("Usage UI stays contained and keeps analytics visible at a narrow width", { skip: !CHROME_PATH }, async () => {
+test("Usage UI stays contained and keeps analytics visible at a narrow width", async () => {
   limitsMode = "full";
   delayLimitsMs = 0;
   const page = await newPage({ width: 390, height: 844 });

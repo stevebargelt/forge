@@ -9,21 +9,14 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import type { Server } from "node:http";
 import { chromium, type Browser, type Page } from "playwright-core";
+import { requireChrome } from "../../src/util/chrome-bin.js";
 
-const CHROME_CANDIDATES = [
-  process.env.CHROME_PATH,
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-  "/usr/bin/google-chrome",
-  "/usr/bin/chromium",
-  "/usr/bin/chromium-browser",
-].filter((candidate): candidate is string => Boolean(candidate));
-const CHROME_PATH = CHROME_CANDIDATES.find(existsSync);
 const SHOT_DIR = process.env.INACTIVE_SHOT_DIR;
 
 const TEST_PORT = 18774;
@@ -93,7 +86,7 @@ before(async () => {
     }
   }
   if (SHOT_DIR) mkdirSync(SHOT_DIR, { recursive: true });
-  if (CHROME_PATH) browser = await chromium.launch({ executablePath: CHROME_PATH, headless: true });
+  browser = await chromium.launch({ executablePath: requireChrome("the dashboard browser tier"), headless: true });
 });
 
 after(async () => {
@@ -110,7 +103,7 @@ async function newPage(): Promise<Page> {
   return page;
 }
 
-test("Projects view hides the deleted scratchpad but keeps the missing-but-active checkout", { skip: !CHROME_PATH }, async () => {
+test("Projects view hides the deleted scratchpad but keeps the missing-but-active checkout", async () => {
   const page = await newPage();
   await page.goto(`${BASE}/#projects`);
   await page.locator(".project-card").first().waitFor();
@@ -139,7 +132,7 @@ test("Projects view hides the deleted scratchpad but keeps the missing-but-activ
   await page.close();
 });
 
-test("Checkout scope controls omit stale paths and label the missing one", { skip: !CHROME_PATH }, async () => {
+test("Checkout scope controls omit stale paths and label the missing one", async () => {
   const page = await newPage();
   await page.goto(`${BASE}/#projects`);
   // Open the missing-but-active project (label 'Unknown repository') to scope by it.
@@ -156,7 +149,7 @@ test("Checkout scope controls omit stale paths and label the missing one", { ski
   await page.close();
 });
 
-test("Forge scope selector — the project that HAD a stale scratchpad — offers only its on-disk checkout", { skip: !CHROME_PATH }, async () => {
+test("Forge scope selector — the project that HAD a stale scratchpad — offers only its on-disk checkout", async () => {
   // The prior test scopes a project ('Unknown repository') that never carried a
   // scratchpad, so its 'no scratchpad' assertion is trivially true. This one
   // scopes the Forge project, whose grouped scratchpad WAS suppressed, proving

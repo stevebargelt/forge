@@ -6,28 +6,12 @@ import { createInterface } from "node:readline";
 import { get as httpGet } from "node:http";
 import WebSocket from "ws";
 import type { StorageState, StorageStateCookie } from "./auth-profiles.js";
+import { requireChrome } from "./chrome-bin.js";
 
 // #176 Slice 1 capture: launch a real, visible Chrome with a throwaway profile,
 // let the human log in (incl. MFA), then snapshot the session via raw CDP into a
 // Playwright-storageState-shaped object. Zero browser-automation deps — forge is
 // the orchestrator, not a browser harness.
-
-// Common macOS / Linux Chrome locations; override with FORGE_CHROME_BIN.
-const CHROME_CANDIDATES = [
-  process.env.FORGE_CHROME_BIN,
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-  "/Applications/Chromium.app/Contents/MacOS/Chromium",
-  "/usr/bin/google-chrome",
-  "/usr/bin/chromium",
-  "/usr/bin/chromium-browser",
-].filter((p): p is string => !!p);
-
-function findChrome(): string {
-  for (const c of CHROME_CANDIDATES) if (existsSync(c)) return c;
-  throw new Error(
-    "Could not find a Chrome/Chromium binary. Set FORGE_CHROME_BIN to its path.",
-  );
-}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -143,7 +127,7 @@ export interface CaptureResult {
 // Launch Chrome at `url`, wait for the human to finish logging in, then capture
 // localStorage (for the active page's origin) + cookies into a StorageState.
 export async function captureViaBrowser(url: string): Promise<CaptureResult> {
-  const chrome = findChrome();
+  const chrome = requireChrome("browser-based session capture");
   const userDataDir = mkdtempSync(join(tmpdir(), "forge-auth-capture-"));
   let proc: ChildProcess | undefined;
   try {

@@ -9,13 +9,15 @@ name: CI
 # job `test-extended` (FG-495) is the required merge check carrying the
 # integration + worktree tiers moved out of the fast gate — real
 # subprocess/git/DB coverage that's still trust-sensitive. It is now a
-# lightweight FINAL AGGREGATE: the slow work is sharded across seven
+# lightweight FINAL AGGREGATE: the slow work is sharded across eight
 # concurrent jobs — `integration_1`..`integration_5` (root integration tier,
 # FG-624: partitioned by MEASURED per-file duration rather than Node's
 # --test-shard, which split by file index and left one shard at 5m25s
 # against this 6-minute ceiling while its siblings finished in 2.5 min),
-# `worktree` (root worktree tier), and `dashboard_integration` (dashboard
-# workspace's own integration tier). `test-extended` `needs` all seven and, with
+# `worktree` (root worktree tier), `dashboard_integration` (dashboard
+# workspace's own integration tier), and `dashboard_browser` (FG-642: the
+# dashboard's real-Chrome tier, which until then ran in CI nowhere and
+# skipped itself to green everywhere else). `test-extended` `needs` all eight and, with
 # `if: always()`, FAILS CLOSED unless every one reports success — so a
 # failed/cancelled/skipped shard cannot yield a green required check. Branch
 # protection still carries both contexts ("test" and "test-extended"; the
@@ -293,21 +295,62 @@ jobs:
       - name: Test dashboard integration tier
         run: npm run test:integration -w dashboard
 
+  # Dashboard browser tier (FG-642): 5 Playwright-driven suites, 18 tests against
+  # a real Chrome. It ran in CI nowhere until this job, and off a Chrome-carrying
+  # host it reported green by skipping — which is how it hid a live FG-608 red.
+  # The browser is now provisioned explicitly and named to the tier: a runner
+  # without one FAILS on the resolver's precondition (src/util/chrome-bin.ts)
+  # instead of skipping, so an unprovisioned runner is loud, not silently empty.
+  dashboard_browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Rebuild better-sqlite3 native module
+        run: npm rebuild better-sqlite3
+
+      # Same provisioning the agent image uses (docker/agent-dev-worker.Dockerfile),
+      # driven through the pinned playwright-core the tier itself imports — so the
+      # browser always matches the client, with no version bump of either.
+      - name: Install chromium
+        run: npx playwright-core install --with-deps chromium
+
+      # Playwright installs under ~/.cache/ms-playwright, which is not one of the
+      # resolver's system locations; FORGE_CHROME_BIN is the override that names it.
+      - name: Point the tier at the installed chromium
+        run: |
+          set -euo pipefail
+          bin=$(node -p "require('playwright-core').chromium.executablePath()")
+          test -x "$bin"
+          echo "FORGE_CHROME_BIN=$bin" >> "$GITHUB_ENV"
+
+      - name: Test dashboard browser tier
+        run: npm run test:browser -w dashboard
+
   # Lightweight FINAL AGGREGATE — the required branch-protection context
   # `CI / test-extended`. It does no test work itself; it fails closed unless
-  # every one of the six sharded/tiered jobs above reports success, so a
+  # every one of the eight sharded/tiered jobs above reports success, so a
   # failed, cancelled, or skipped dependency cannot yield a green required
   # check.
   test-extended:
     runs-on: ubuntu-latest
-    needs: [integration_1, integration_2, integration_3, integration_4, integration_5, worktree, dashboard_integration]
+    needs: [integration_1, integration_2, integration_3, integration_4, integration_5, worktree, dashboard_integration, dashboard_browser]
     if: always()
     steps:
       - name: Aggregate required extended gate
         if: always()
         run: |
           set -euo pipefail
-          results="${{ needs.integration_1.result }} ${{ needs.integration_2.result }} ${{ needs.integration_3.result }} ${{ needs.integration_4.result }} ${{ needs.integration_5.result }} ${{ needs.worktree.result }} ${{ needs.dashboard_integration.result }}"
+          results="${{ needs.integration_1.result }} ${{ needs.integration_2.result }} ${{ needs.integration_3.result }} ${{ needs.integration_4.result }} ${{ needs.integration_5.result }} ${{ needs.worktree.result }} ${{ needs.dashboard_integration.result }} ${{ needs.dashboard_browser.result }}"
           echo "dependency results: $results"
           for r in $results; do
             if [ "$r" != "success" ]; then
@@ -315,4 +358,4 @@ jobs:
               exit 1
             fi
           done
-          echo "all seven extended-gate dependencies succeeded"
+          echo "all eight extended-gate dependencies succeeded"

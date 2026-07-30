@@ -20,17 +20,10 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, type Browser, type Page } from "playwright-core";
 import { renderShell } from "../src/shell.js";
+import { requireChrome } from "../../src/util/chrome-bin.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLIENT_DIR = resolve(HERE, "..", "client");
-const CHROME_CANDIDATES = [
-  process.env.CHROME_PATH,
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-  "/usr/bin/google-chrome",
-  "/usr/bin/chromium",
-  "/usr/bin/chromium-browser",
-].filter((candidate): candidate is string => Boolean(candidate));
-const CHROME_PATH = CHROME_CANDIDATES.find(existsSync);
 const SHOT_DIR = process.env.BACKLOG_SHOT_DIR;
 
 const projectsFixture = [{
@@ -85,7 +78,7 @@ before(async () => {
   assert.ok(address && typeof address === "object");
   baseUrl = `http://127.0.0.1:${address.port}`;
   if (SHOT_DIR) mkdirSync(SHOT_DIR, { recursive: true });
-  if (CHROME_PATH) browser = await chromium.launch({ executablePath: CHROME_PATH, headless: true });
+  browser = await chromium.launch({ executablePath: requireChrome("the dashboard browser tier"), headless: true });
 });
 
 after(async () => {
@@ -105,7 +98,7 @@ async function countText(page: Page): Promise<string> {
   return (await page.locator(".backlog-result-count").innerText()).trim();
 }
 
-test("Backlog All/All shows the aggregate result count across every type, not the Epic count", { skip: !CHROME_PATH }, async () => {
+test("Backlog All/All shows the aggregate result count across every type, not the Epic count", async () => {
   const page = await newPage({ width: 1200, height: 900 });
   await openBacklog(page);
 
@@ -122,7 +115,7 @@ test("Backlog All/All shows the aggregate result count across every type, not th
   await page.close();
 });
 
-test("Backlog type / status / search selections all recalculate the same result count", { skip: !CHROME_PATH }, async () => {
+test("Backlog type / status / search selections all recalculate the same result count", async () => {
   const page = await newPage({ width: 1200, height: 900 });
   await openBacklog(page);
 
