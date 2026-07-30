@@ -21,6 +21,7 @@ import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 const WORKFLOW: Workflow = {
   name: "fg342-test",
   description: "FG-342 regression test workflow",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {

@@ -1,4 +1,4 @@
-// FG-639 (evidence-led review, Change 2): Stage 9 — the shipping review's seven checks.
+// FG-639 (evidence-led review, Change 2): Stage 9 — the shipping review's eight checks.
 //
 // Each check is a separate named row on purpose. A single boolean "shippable" tells an
 // operator nothing about WHY a review is withheld, and a shipping review that cannot say
@@ -12,6 +12,7 @@
 // sha, and the executed assertion. That is the PRD's eighth bullet, enforced where the
 // mapping is actually decided rather than as a separate box to tick.
 
+import { z } from "zod";
 import { assessAcceptanceClaims, type AcAssessment, type AcClaim } from "./review-evidence.js";
 import { assessContractCoverage, type ContractCoverage } from "./review-contract.js";
 import type { ReviewFinding } from "../store/reviews.js";
@@ -23,7 +24,22 @@ export type ShippingCheckId =
   | "fix_now_resolved"
   | "tip_equality"
   | "identity_continuity"
-  | "contract_covers_diff";
+  | "contract_covers_diff"
+  | "docs_closeout";
+
+/** Validated at the boundary rather than cast. `--docs-closeout` is operator-supplied JSON, and
+ *  an assessment missing `gaps` would otherwise reach the check as `{assessed: true}` and throw
+ *  a TypeError out of the shipping stage — a stack trace where every other malformed input on
+ *  this command gets a named refusal. */
+export const DocsCloseoutSchema = z
+  .object({
+    assessed: z.boolean(),
+    gaps: z.array(z.string().trim().min(1)),
+    detail: z.string().optional(),
+  })
+  .strict();
+
+export type DocsCloseout = z.infer<typeof DocsCloseoutSchema>;
 
 export type ShippingCheck = {
   id: ShippingCheckId;
@@ -69,6 +85,10 @@ export type ShippingInput = {
   /** Findings raised free-form during the shipping review itself. They return to
    *  disposition; they are never settled by the shipping reviewer. */
   newFindings?: readonly { summary: string }[];
+  /** FG-640 duty 6: the ticket-required docs and closeout gaps the reviewer found. Each entry
+   *  is a gap — an empty list is the clean answer, and `assessed: false` is the reviewer not
+   *  having looked, which is not the same thing and does not pass. */
+  docsCloseout?: DocsCloseout;
 };
 
 export type ShippingAssessment = {
@@ -167,6 +187,21 @@ export function assessShippingReview(input: ShippingInput): ShippingAssessment {
   // 7 — the final diff is plausibly covered by the confirmed contract.
   const coverage = assessContractCoverage(input.contractCoverage);
   checks.push({ id: "contract_covers_diff", ok: coverage.ok, detail: coverage.detail });
+
+  // 8 — ticket-required docs and closeout gaps (FG-640 duty 6). Unassessed is not clean: the
+  // shipping reviewer's duty is to LOOK, and a review that skipped the question would
+  // otherwise be indistinguishable from one that asked it and found nothing.
+  const docs = input.docsCloseout;
+  checks.push({
+    id: "docs_closeout",
+    ok: docs !== undefined && docs.assessed && docs.gaps.length === 0,
+    detail:
+      docs === undefined || !docs.assessed
+        ? `ticket-required docs/closeout gaps were not assessed — an unasked question is not a clean answer`
+        : docs.gaps.length === 0
+          ? (docs.detail ?? `no ticket-required docs or closeout gaps`)
+          : `${docs.gaps.length} ticket-required docs/closeout gap(s): ${docs.gaps.join("; ")}`,
+  });
 
   const newFindings = input.newFindings ?? [];
   const blocking = checks.filter((c) => !c.ok).map((c) => `${c.id}: ${c.detail}`);

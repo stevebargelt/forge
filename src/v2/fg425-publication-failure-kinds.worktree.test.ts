@@ -51,6 +51,7 @@ import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 const WORKFLOW: Workflow = {
   name: "fg425-kinds-test",
   description: "FG-425: publication failure kinds through the real dispatch path",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {

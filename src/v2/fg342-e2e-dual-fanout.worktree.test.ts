@@ -36,6 +36,7 @@ import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 const DUAL_FANOUT_WORKFLOW: Workflow = {
   name: "fg342-e2e-dual-fanout",
   description: "FG-342 E2E: two fanout parents feeding one synthesis step",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {
@@ -92,6 +93,7 @@ const DUAL_FANOUT_WORKFLOW: Workflow = {
 const FAIL_PHASE_WORKFLOW: Workflow = {
   name: "fg342-e2e-fail-phase",
   description: "FG-342 E2E: fail-phase aggregate still inspectable on disk",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {

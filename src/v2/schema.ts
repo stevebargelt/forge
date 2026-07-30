@@ -167,6 +167,12 @@ export const WorkflowSchema = z
   .object({
     name: NameSchema,
     description: z.string().min(1),
+    // FG-640: THE EXPLICIT CUTOVER SWITCH. Which authority model settles this workflow's
+    // runs — declared in the workflow file, stamped onto the run row at creation, and never
+    // inferred from which command was typed. An unmigrated workflow omits it and keeps
+    // verdict/blocked_by_red exactly as before; migrating one is a visible, reviewable edit
+    // to this line rather than a behavior change that arrives with a new CLI flag.
+    review_mode: z.enum(["legacy_verdict", "legacy_review_loop", "evidence_led"]).default("legacy_verdict"),
     inputs: z.array(InputDefSchema).default([]),
     steps: z.array(StepSchema).min(1),
   })

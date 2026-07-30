@@ -62,6 +62,7 @@ const PROJECT_CONTAINER_PATH = "/project";
 const WORKFLOW: Workflow = {
   name: "fg628-derivation-test",
   description: "FG-628: the mountpoint set is derived from planDependencyVolumes",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {

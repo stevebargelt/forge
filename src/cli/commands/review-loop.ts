@@ -1006,6 +1006,19 @@ function readScripts(projectDir: string): Record<string, unknown> {
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
 
+/** The deprecation note, as one exported string so the CLI and its guard test cannot drift
+ *  into disagreeing about whether `forge review` is actually named. */
+export function deprecationNote(): string {
+  return (
+    `review-loop: DEPRECATED (FG-640) — the evidence-led review is the default now. Use ` +
+    `\`forge review start <ticket-id> --contract <file>\` and \`forge review continue <review-id>\`, ` +
+    `which keep a DURABLE finding ledger, disposition every finding by name, and settle the ` +
+    `\`review_disposition\` gate. review-loop's output is reviewer input, never a ledger, and its ` +
+    `stop reason is never the completion signal. --max-rounds keeps its existing semantics until ` +
+    `this command is removed.`
+  );
+}
+
 export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void {
   program
     .command("review-loop")
@@ -1019,13 +1032,18 @@ export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void 
     .option("--implement-profile <name>", "model profile for the fixer (engineer)")
     .option("--dry-run", "present the plan (ticket, route, range, rounds, stop conditions) and exit — no dispatch")
     .option("--local-extended", "FG-501: restore the full local verification tier (incl. test:extended) for the CI-unavailable fallback; by default that fallback runs typecheck+test only and delegates extended coverage to CI")
-    .description("Bounded reviewer→fixer loop for a ticket's committed work (#301). Never auto-closes the ticket.")
+    .description("DEPRECATED (FG-640) — use `forge review`. Bounded reviewer→fixer loop for a ticket's committed work (#301). Never auto-closes the ticket.")
     .action(async (ticketIdArg: string, opts: {
       maxRounds: number; since?: string; project?: string; route?: string;
       unrouted?: boolean; reviewProfile?: string; implementProfile?: string; dryRun?: boolean;
       localExtended?: boolean;
     }) => {
       ensureForgeDirs();
+      // FG-640: DEPRECATED, and deprecated LOUDLY rather than by documentation alone — the
+      // operator surface is where a stale default actually gets re-typed. Behavior is
+      // unchanged (`--max-rounds` keeps its old semantics until removal); what changed is
+      // that this is no longer the documented default review transport.
+      console.error(deprecationNote());
       const projectDir = resolve(opts.project ?? process.cwd());
       const ticketId = ticketIdArg.replace(/^#/, "").trim();
 

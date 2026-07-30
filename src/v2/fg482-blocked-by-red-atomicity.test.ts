@@ -45,6 +45,7 @@ function singleStepWorkflow(runtimeName: string, redAgent: string): Workflow {
   return {
     name: runtimeName,
     description: "FG-482 blocked_by_red atomicity — single-step path",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       {
@@ -64,6 +65,7 @@ function fanoutWorkflow(runtimeName: string, redAgent: string): Workflow {
   return {
     name: runtimeName,
     description: "FG-482 blocked_by_red atomicity — fanout path",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       {

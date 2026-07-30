@@ -73,6 +73,7 @@ function workflowFor(name: string, red: RedSpec): Workflow {
   return {
     name,
     description: `FG-628 channel boundary fixture (${red.agent}/${red.authority})`,
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       {

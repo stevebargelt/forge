@@ -132,7 +132,7 @@ export type StageOutcome = {
    *  refused   — the stage did not complete; it will be re-entered, nothing was recorded. */
   status: "advanced" | "stopped" | "refused";
   message: string;
-  /** Set by the shipping-review stage so the caller can render the seven checks. */
+  /** Set by the shipping-review stage so the caller can render the eight checks. */
   shipping?: ShippingAssessment;
 };
 
@@ -645,9 +645,46 @@ async function runShippingReview(reviewId: string, transition: Transition, deps:
   setReviewState(reviewId, "shipping_review", { reason: transition.reason });
 
   const input = await deps.shippingInput({ review: snap.review, candidateSha: candidate });
+
+  // FG-640: PERSIST THE TRUSTED TIP. Tip trust is established live (a bounded fetch of the
+  // remote head), but the `review_disposition` gate is a read of DURABLE state — it cannot
+  // re-fetch, and a trusted head that lives only in this function's local would leave the gate
+  // permanently unable to establish equality and permanently blocked on `tip_not_trusted`.
+  // Recorded only when it IS equality, so the column never carries a head the review did not
+  // actually match; a candidate that moves later stops equalling it, which is correct.
+  if (input.tipTrust.kind === "trusted") {
+    updateReview(reviewId, { trustedRemoteSha: input.tipTrust.remoteSha ?? candidate });
+  }
+
   const assessment = assessShippingReview({ ...input, candidateSha: candidate, findings: snap.findings });
 
   if (!assessment.ok) {
+    // FG-640: A LATE FINDING IS AN ORDINARY FINDING. The shipping reviewer's free-form
+    // findings enter the ledger untriaged and go through the same disposition gate as anything
+    // discovery raised — lateness confers no authority to settle them, and no authority to
+    // block on them past a disposition either. Ingesting rather than only reporting is what
+    // makes that true: reported-only, a free-form finding would hold the review at Stage 9
+    // with nothing an operator could disposition by name.
+    //
+    // INGESTED ONCE PER SUMMARY, because Stage 9 re-runs. `newFindings` non-empty always makes
+    // the assessment refuse, so a reviewer that keeps reporting the same concern would append a
+    // fresh untriaged row on every `continue` — the operator dispositions N, re-enters, and
+    // finds N more. Existing rows are the dedup key: the summary the shipping reviewer used.
+    const seen = new Set(snap.findings.map((f) => f.summary.trim()));
+    const late = (input.newFindings ?? []).filter((f) => !seen.has(f.summary.trim()));
+    if (late.length > 0) {
+      ingestFindings(
+        reviewId,
+        late.map((f) => ({
+          summary: f.summary,
+          severity: "unknown",
+          reachability: "speculative",
+          findingType: "shipping_review_late",
+          discoveredSha: candidate,
+          sources: [{ redRole: "shipping-reviewer", note: "raised free-form during the shipping review" }],
+        })),
+      );
+    }
     if (assessment.returnsToDisposition) {
       setReviewState(reviewId, "awaiting_disposition", {
         reason: `shipping review returns to disposition: ${assessment.blocking.join(" | ")}`,
@@ -656,14 +693,18 @@ async function runShippingReview(reviewId: string, transition: Transition, deps:
     return {
       transition,
       status: "refused",
-      message: `shipping review blocks:\n  - ${assessment.blocking.join("\n  - ")}`,
+      message:
+        `shipping review blocks:\n  - ${assessment.blocking.join("\n  - ")}` +
+        (late.length > 0
+          ? `\n  (${late.length} free-form finding(s) ingested as untriaged ledger findings — disposition them by name)`
+          : ""),
       shipping: assessment,
     };
   }
 
   recordStageEvidence(reviewId, "shipping", {
     sha: candidate,
-    detail: `all seven shipping checks green at ${candidate}`,
+    detail: `all eight shipping checks green at ${candidate}`,
     meta: { checks: assessment.checks, acceptance: assessment.acceptance },
   });
   setReviewState(reviewId, "settled", { reason: `shipping review passed at ${candidate}` });

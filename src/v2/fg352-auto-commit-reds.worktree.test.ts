@@ -41,6 +41,7 @@ import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 const SINGLE_STEP_WORKFLOW: Workflow = {
   name: "fg352-dispatch-test",
   description: "FG-352 auto-commit/reds edge test: single step",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {
@@ -61,6 +62,7 @@ const SINGLE_STEP_WORKFLOW: Workflow = {
 const WORKFLOW_WITH_RED: Workflow = {
   name: "fg352-dispatch-test",
   description: "FG-352 merge-before-reds edge test",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {

@@ -89,6 +89,7 @@ function workflowWithReds(name: string, reds: RedDef[]): Workflow {
   return {
     name,
     description: "FG-523 gate re-check parity",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       { id: "build", agent: "engineer", gate: "verdict", manual: false, depends_on: [], runtime: "claude", reds },

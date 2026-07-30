@@ -39,6 +39,7 @@ import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 const WORKFLOW_WITH_AUTHORITATIVE_RED: Workflow = {
   name: "fg425-red-test",
   description: "FG-425: publication is conditional on the reds",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {

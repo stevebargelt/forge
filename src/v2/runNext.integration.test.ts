@@ -78,6 +78,7 @@ result:
 const LINEAR_WORKFLOW: Workflow = {
   name: "test-linear",
   description: "two-step linear test",
+  review_mode: "legacy_verdict",
   inputs: [{ name: "brief", required: true, type: "text" }],
   steps: [
     { id: "first", agent: "test-agent", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
@@ -88,6 +89,7 @@ const LINEAR_WORKFLOW: Workflow = {
 const PARALLEL_WORKFLOW: Workflow = {
   name: "test-parallel",
   description: "diamond fanout test",
+  review_mode: "legacy_verdict",
   inputs: [{ name: "brief", required: true, type: "text" }],
   steps: [
     { id: "root", agent: "test-agent", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
@@ -100,6 +102,7 @@ const PARALLEL_WORKFLOW: Workflow = {
 const HUMAN_GATE_WORKFLOW: Workflow = {
   name: "test-human-gate",
   description: "step with gate: human pauses",
+  review_mode: "legacy_verdict",
   inputs: [{ name: "brief", required: true, type: "text" }],
   steps: [
     { id: "needs-review", agent: "test-agent", gate: "human", manual: false, depends_on: [], runtime: "claude", reds: [] },
@@ -109,6 +112,7 @@ const HUMAN_GATE_WORKFLOW: Workflow = {
 const MANUAL_WORKFLOW: Workflow = {
   name: "test-manual",
   description: "manual step doesn't dispatch a container",
+  review_mode: "legacy_verdict",
   inputs: [{ name: "brief", required: true, type: "text" }],
   steps: [
     { id: "human-work", manual: true, gate: "human", depends_on: [], runtime: "claude", reds: [] },
@@ -807,6 +811,7 @@ function makeRoutingExec(rules: Array<{ matches: (taskId: string) => boolean; re
 const REDS_AUTH_ALL_PASS_WORKFLOW: Workflow = {
   name: "test-reds-pass",
   description: "primary + 2 authoritative reds, all pass → gate: verdict → awaiting_gate",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {
@@ -827,6 +832,7 @@ const REDS_AUTH_ALL_PASS_WORKFLOW: Workflow = {
 const REDS_AUTH_FAIL_WORKFLOW: Workflow = {
   name: "test-reds-fail",
   description: "primary + 2 authoritative reds, one fails → blocked_by_red",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {
@@ -847,6 +853,7 @@ const REDS_AUTH_FAIL_WORKFLOW: Workflow = {
 const REDS_SPECIALIST_FAIL_WORKFLOW: Workflow = {
   name: "test-reds-spec-fail",
   description: "specialist red fails — should NOT block (advisory only)",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {
@@ -1250,6 +1257,7 @@ test("runNext: reds — specialist fail does NOT block (advisory), primary proce
 const FANOUT_WORKFLOW: Workflow = {
   name: "test-fanout",
   description: "research step fans out per claim from upstream",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {
@@ -1415,6 +1423,7 @@ test("runNext: FG-503 — a completed fanout child's own container reap succeedi
 const FANOUT_WITH_REDS_WORKFLOW: Workflow = {
   name: "fg365-fanout-reds",
   description: "fanout step with reds, for model-policy memoization test",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {
@@ -1826,6 +1835,7 @@ test("runNext: container.started and container.exited emitted on successful step
   const WF: Workflow = {
     name: "test-container-events",
     description: "one step for container event test",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [{ id: "work", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] }],
   };
@@ -1858,6 +1868,7 @@ test("runNext: FG-492 result-missing after a clean container exit carries confir
   const WF: Workflow = {
     name: "test-fg492-container-evidence",
     description: "one step that exits cleanly but writes no result",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [{ id: "work", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] }],
   };
@@ -1897,6 +1908,7 @@ test("runNext: FG-492 finding 2+3 — result_missing from the REAL failTask call
   const WF: Workflow = {
     name: "test-fg492-detect",
     description: "one step that exits cleanly but writes no result",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [{ id: "work", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] }],
   };
@@ -1935,6 +1947,7 @@ test("runNext: container.idle_timeout emitted (not container.exited) on idle tim
   const WF: Workflow = {
     name: "test-idle-timeout-events",
     description: "one step that idle-timeouts",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [{ id: "work", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] }],
   };
@@ -1972,6 +1985,7 @@ test("runNext: writes manifest.json into the task dir on pipeline dispatch", asy
   const WF: Workflow = {
     name: "test-manifest-dispatch",
     description: "one step for manifest test",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [{ id: "work", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] }],
   };
@@ -2094,6 +2108,7 @@ test("runNext: a pipeline task cancelled mid-spawn stays failed; no task.complet
 const FANOUT_REDS_WORKFLOW: Workflow = {
   name: "test-fanout-reds",
   description: "build fanout with authoritative reds on the parent",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     { id: "plan", agent: "planner", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
@@ -2203,6 +2218,7 @@ test("runNext: reds receive force-level anti-prompts as failureModes (forge-site
 const PI_ATTR_WORKFLOW: Workflow = {
   name: "test-pi-attr",
   description: "single pi step",
+  review_mode: "legacy_verdict",
   inputs: [{ name: "brief", required: true, type: "text" }],
   steps: [
     { id: "pi-step", agent: "test-agent", gate: "auto", manual: false, depends_on: [], runtime: "pi-stub", reds: [] },
@@ -2292,6 +2308,7 @@ test("runNext: #264 pi step with no result.json fails with an attributed error, 
 const PI_UPSTREAM_WORKFLOW: Workflow = {
   name: "test-pi-upstream",
   description: "single pi step resolved via model-policy",
+  review_mode: "legacy_verdict",
   inputs: [{ name: "brief", required: true, type: "text" }],
   steps: [
     { id: "pi-step", agent: "test-agent", gate: "auto", manual: false, depends_on: [], runtime: "pi-stub", reds: [] },
@@ -2376,6 +2393,7 @@ result:
 const FG337_NARRATIVE_WORKFLOW: Workflow = {
   name: "test-fg337-narrative",
   description: "single narrative pi step",
+  review_mode: "legacy_verdict",
   inputs: [{ name: "brief", required: true, type: "text" }],
   steps: [
     { id: "research-step", agent: "research-specialist", gate: "auto", manual: false, depends_on: [], runtime: "pi-stub", reds: [] },
@@ -2385,6 +2403,7 @@ const FG337_NARRATIVE_WORKFLOW: Workflow = {
 const FG337_STRUCTURED_WORKFLOW: Workflow = {
   name: "test-fg337-structured",
   description: "single structured pi step",
+  review_mode: "legacy_verdict",
   inputs: [{ name: "brief", required: true, type: "text" }],
   steps: [
     { id: "engineer-step", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "pi-stub", reds: [] },
@@ -2702,6 +2721,7 @@ steps:
   const wf: Workflow = {
     name: wfName,
     description: "FG-484 gate-path finalize vs. concurrent cancel regression test",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       { id: "needs-review", agent: "test-agent", gate: "human", manual: false, depends_on: [], runtime: "claude", reds: [] },
@@ -2809,6 +2829,7 @@ steps:
   const wf: Workflow = {
     name: wfName,
     description: "FG-484 realistic gate-path finalize vs. real forge-cancel regression test",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       { id: "needs-review", agent: "test-agent", gate: "human", manual: false, depends_on: [], runtime: "claude", reds: [] },
@@ -2901,6 +2922,7 @@ steps:
   const wf: Workflow = {
     name: wfName,
     description: "FG-475 gate-reject-with-no-on_reject regression test",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       { id: "needs-review", agent: "test-agent", gate: "human", manual: false, depends_on: [], runtime: "claude", reds: [] },
@@ -2975,6 +2997,7 @@ steps:
   const wf: Workflow = {
     name: wfName,
     description: "FG-475 gate-reject with on_reject targeting an earlier complete step",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       { id: "investigate", agent: "test-agent", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
@@ -3069,6 +3092,7 @@ test("runNext: FG-476 a pending on_reject recovery row in an already-complete ph
   const wf: Workflow = {
     name: "test-fg476-recovery-reuse",
     description: "investigate/audit on_reject shape (security-audit.yml twin)",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       { id: "investigate", agent: "test-agent", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
@@ -3142,6 +3166,7 @@ test("runNext: FG-476 a fanout/red child (parentId-tagged, no rejectedTaskId mar
   const wf: Workflow = {
     name: "test-fg476-no-fanout-reuse",
     description: "complete primary + pending red/fanout child, no marker",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       { id: "build", agent: "test-agent", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
@@ -3183,6 +3208,7 @@ test("runNext: FG-476 a fanout/red child (parentId-tagged, no rejectedTaskId mar
 const FEATURE_FAIL_WORKFLOW: Workflow = {
   name: "feature-fail-test",
   description: "verify then docs; docs depends on verify",
+  review_mode: "legacy_verdict",
   inputs: [{ name: "brief", required: true, type: "text" }],
   steps: [
     { id: "verify", agent: "test-agent", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },

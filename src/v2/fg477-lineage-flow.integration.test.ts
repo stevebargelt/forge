@@ -164,6 +164,7 @@ const PROJECT_DIR = "/tmp/test-project";
 const RECOVERY_WF: Workflow = {
   name: "fg477-recovery",
   description: "FG-477 flow: reject -> on_reject recovery, driven through the real gate",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     step("build"),
@@ -249,6 +250,7 @@ test("FG-477 (a) flow: a REAL gate reject mints an on_reject recovery row, and t
 const BUILD_VERIFY_WF: Workflow = {
   name: "fg477-build-verify",
   description: "FG-477 flow: retry-replacement row reuse",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [step("build"), step("verify", { agent: "test-engineer", depends_on: ["build"] })],
 };
@@ -305,6 +307,7 @@ test("FG-477 (b) flow: with [failed older primary, pending newer replacement] in
 const TASK_STEP_WF: Workflow = {
   name: "fg477-taskstep",
   description: "FG-477 flow: a workflow that declares a step named `task` (the invoke-phase collision)",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [step("task")],
 };
@@ -399,6 +402,7 @@ test("FG-477 (c') frozen-legacy parity: a MARKER-LESS row in the same phase-`tas
 const MIXED_WF: Workflow = {
   name: "fg477-mixed",
   description: "FG-477 flow: mixed run — primary + reds + fanout child + recovery + ad-hoc",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     step("build", {
@@ -609,6 +613,7 @@ test("FG-477 (3) tie, flow level: with TWO pending parent-less rows sharing a cr
 const CROSS_PHASE_WF: Workflow = {
   name: "fg477-crossphase",
   description: "FG-477 flow: a recovery row whose rejectedTaskId points at a task in ANOTHER phase",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     step("build"),

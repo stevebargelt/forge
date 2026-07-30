@@ -911,7 +911,7 @@ forge review continue <review-id> [--dry-run] [--all] [--acceptance <file>]
 | 6 | `docs` | guaranteed docs reconciliation (role `documentation-maintainer`) **before** final verification, since it may itself move the candidate |
 | 7 | `verified_final` | deterministic verification at the final candidate |
 | 8 | `recheck` | exact recheck of known finding ids + bounded review of the post-discovery delta, by [review-rechecker](#review-rechecker) |
-| 9 | `shipping` | the seven shipping checks |
+| 9 | `shipping` | the eight shipping checks |
 
 **`start` opens and stops; `continue` steps.** `start` drives stages 1–3 only and then stops, printing the pending transition and the `forge review continue` command that would drive it — it never fixes anything. `continue` drives exactly **one** transition by default (`--all` keeps going while each advances), and `--dry-run` reports the one valid next transition and exits without dispatching. `--dry-run` reads the same `nextTransition` the real run does *and* goes through the same preconditions — an unknown review id and a malformed `--add-lens` or `--acceptance` refuse identically in both — so the answer it prints cannot drift from the act it previews.
 
@@ -941,7 +941,7 @@ When that diff changed anything, the stage needs one of the **three recorded eva
 
 Only the *silent* auto-confirm is forbidden. An evaluation that concludes there is nothing to widen is a legitimate outcome and advances, because it is recorded: the `contract_confirmed` stage evidence keeps both the evaluator's statement and the summary of the diff it was made against — the same summary the refusal would have shown, so the diff evaluated and the diff recorded cannot diverge. `--evaluated-no-drift` alongside `--add-lens` is refused as a contradiction (a diff that needs a lens is drift, not no-drift), and a blank statement is not an evaluation.
 
-**The seven shipping checks** (Stage 9), each reported by id: `verification_green`, `acceptance_mapped` (every acceptance criterion `met` / `unmet` / `unproven` with cited evidence — supply the claims with `continue --acceptance <file>`), `findings_settled`, `fix_now_resolved`, `tip_equality` (reviewed sha equals the fetched trusted remote head), `identity_continuity`, `contract_covers_diff`. An `unmet` or `unproven` criterion blocks, and free-form new findings return the review to disposition.
+**The eight shipping checks** (Stage 9), each reported by id: `verification_green`, `acceptance_mapped` (every acceptance criterion `met` / `unmet` / `unproven` with cited evidence — supply the claims with `continue --acceptance <file>`), `findings_settled`, `fix_now_resolved`, `tip_equality` (reviewed sha equals the fetched trusted remote head), `identity_continuity`, `contract_covers_diff`, and `docs_closeout` (FG-640 — the ticket-required docs and closeout gaps the reviewer found; supply the assessment with `continue --docs-closeout <file>` as `{assessed, gaps[], detail?}`. **Not assessed is not a clean answer**: an omitted assessment blocks exactly as a named gap does, and there is deliberately no flag meaning "assessed, no gaps" without a file — that flag would be the rubber stamp the check replaces). An `unmet` or `unproven` criterion blocks, and free-form new findings are ingested as ordinary untriaged ledger findings and return the review to disposition — lateness confers no authority to settle them, and none to block harder.
 
 Example: `forge review start FG-700 --contract contract.json --evaluated-no-drift "examined the final diff; it stays inside the paths the wide lens already covers"` prints the review id, the base sha it resolved and its lenses, then runs verification, confirms the contract against that diff, dispatches the lens reds, and stops:
 
@@ -959,6 +959,55 @@ Review review-xxxx — ticket FG-700, candidate 9f2c1ab…
 Drop the `--evaluated-no-drift` and the same command stops one stage earlier instead, at the fail-closed confirmation naming the changed paths — nothing is lost, because that stage records nothing and `forge review continue review-xxxx --evaluated-no-drift <statement>` (or `--add-lens`) re-enters it.
 
 After all three are dispositioned, `forge review continue review-xxxx --dry-run` answers `• next: batch_fix — 2 fix_now finding(s) go to ONE fixer in one batch` without dispatching the fixer.
+
+## `review_disposition` gate
+
+FG-640 (Change 3) moved gate authority. On a run whose **workflow** declares `review_mode: evidence_led`, a reviewed step (`gate: verdict`) is no longer settled by [verdict](#verdict) aggregation — it is settled by the [review ledger](#review-ledger). Unmigrated workflows are untouched: they keep `verdict` and `blocked_by_red` exactly as before.
+
+**The cutover is explicit, and it lives in the workflow file.** `review_mode:` is a workflow-level field (`legacy_verdict` | `legacy_review_loop` | `evidence_led`, defaulting to `legacy_verdict`), stamped onto the run row at creation by `startRun`. No command flag turns it on, and no command behaviour turns it on implicitly. `feature` is migrated as of FG-640; every other shipped workflow is not.
+
+**Exactly one `review_mode` per run, and the two authority models are never combined.** The **workflow's declaration is the source** the gate and `dispatchReds` both read — one value, so a narrowed red panel and the gate that judges it can never disagree about which model applies. The run row is stamped once at creation as the durable per-run record and FG-638's reconciliation anchor; when the two disagree the run was moved between models after creation and `review_mode_drift` refuses by name. A step that still declares (or a verdict that still claims) blocking authority on an evidence-led run is refused as `mixed_authority_model` rather than having one side silently dropped — that shape means a half-migrated workflow, and quietly ignoring the authoritative red is the failure worth refusing over.
+
+**No new task status** (FG-585 vocabulary discipline). An evidence-led step parks at `awaiting_gate` exactly as a verdict step does; what changes is the gate KIND that decides it, which every refusal names and which the `gate.decided` event records as `gateKind: "review_disposition"`.
+
+`forge gate <task> advance` refuses while any of these hold, naming each:
+
+| condition | what it means |
+|---|---|
+| `lens_outcome_missing` | a lens selected by the confirmed contract has no schema-valid, reviewer-authored discovery outcome. Cleared only by retrying the lens, amending the contract through its approving authority, or an authorized risk acceptance that NAMES the missing evidence — never by dispositioning some other finding |
+| `contract_unreadable` | the review carries no readable contract, so which lenses discovery owed an outcome cannot be established. Its own condition rather than an empty lens list, which would read as "nothing to review" — fail-open on exactly the review with the least-established coverage |
+| `finding_untriaged` | a finding still carries `untriaged` |
+| `architecture_question_open` | an open `architecture_question` awaits the operator/architecture conversation |
+| `rejected_premise_unproven` | a `rejected_premise` carries no candidate-bound disproving evidence at the CURRENT sha |
+| `fix_now_unresolved` | a `fix_now` has no `resolved` recheck evidence at the current sha (including one resolved at a sha the candidate has since left) |
+| `fix_now_evidence_insufficient` | a `fix_now` resolution rests on an evidence kind weaker than the finding's original `reachability` requires (see [A skipped test is never evidence](#a-skipped-test-is-never-evidence)); an absent reachability is treated as `demonstrated` |
+| `verification_absent_or_red` | deterministic verification is absent, or recorded at a sha that is not the final candidate. A verification that ran and FAILED records nothing, so it reads here as absent |
+| `acceptance_unmet` | the shipping review reports an unmet or unproven acceptance criterion — **a clean ledger is not evidence that the work was done** |
+| `tip_not_trusted` | reviewed-tip trust is not EQUALITY with the fetched remote head (FG-514) |
+| `review_absent` | the mode moved authority to a ledger and there is no ledger — unestablished evidence, not a clean one |
+| `mixed_authority_model` | the step still DECLARES a blocking red (`authority: authoritative` + `gate_on_verdict: true`), or a verdict on this task still claims blocking authority, on an `evidence_led` run. Keyed on the DECLARATION as well as the outcome: a half-migrated step whose authoritative reds happen to pass would otherwise read settled while carrying two authority models |
+| `review_mode_drift` | the run row and its workflow disagree about `review_mode` — the run was moved between authority models after creation (a mid-run seed change, or a review adopting the run). Refused rather than resolved in one direction: settling a step under a model its reds were never dispatched with is the combination this rule exists to prevent |
+
+And it explicitly does **not** block on — reported as `nonBlocking`, because "we no longer refuse over this" is a claim worth being able to read and test rather than infer from an absence:
+
+- a **raw advisory red `fail`** whose findings are dispositioned. Under the cutover a red's verdict is evidence, not authority;
+- a **settled** `accepted_risk` / `deferred` / `rejected_premise` / `duplicate`;
+- a **historical** verdict or disposition decided against a superseded sha (PRD #11). A disposition is a decision about a finding, not a claim about a tree, so it survives the candidate moving; only the candidate-BOUND halves (a resolution, a disproving-evidence payload) are re-bound to the current sha.
+
+`forge gate --force --rationale "..."` still overrides, and the refusal says so — **it is not the ordinary settlement path.** Settling the ledger is.
+
+**Risk-targeted lens selection.** Under `evidence_led`, a step's declared reds are the *menu*, not the panel: the plan-gate-approved `review_contract` selects which risk lenses actually dispatch, so a backend + security feature does not spend a frontend reviewer (PRD #16). "Plan-gate-approved" is literal — the contract is read from the result of a task whose gate was **advanced**, because a contract in an ungated result is a proposal, and an agent that could narrow its own review by writing two lens names into its output would be selecting its own reviewers. Reds that are not one of the five lenses (the shipping reviewer) are never selected away. With **no** approved contract, selection fails closed WIDER — every declared red runs. And it is not a path classifier: nothing reads the diff to decide a lens (PRD #23); the contract names them, and only a recorded confirmation can change that (PRD #27).
+
+## FG-541 evidence mapping
+
+FG-541 ("local-only fixer commits / exact-head CI / trusted-tip equality") is folded into this lifecycle rather than implemented independently. Each of its requirements maps to a mechanism that ships here, with the enforcing code, test, and gate condition cited — the durable record the operator amendment of 2026-07-28 required before FG-541 may be marked superseded.
+
+| FG-541 requirement | Satisfying mechanism | Enforcing code | Test | Gate condition |
+|---|---|---|---|---|
+| **Local-only fixer commits** | The fixer receives one immutable, candidate-bound FixBatch delivered into its own task mount, works only in the task workspace/branch, and publishes nothing itself — publication runs only through Forge's publication path. The delivered bundle is verified against the batch's persisted `payload_sha256` (and the envelope re-derived from the row) **before** the container starts, so a fixer never acts on bytes the store does not vouch for. | `src/v2/review-fixer.ts` (`parseFixerResult`); `src/store/fix-batches.ts` (`verifyMaterializedPayload`, `verifyMaterializedEnvelope`); `src/cli/commands/review-wiring.ts` `dispatchFixer` | `src/store/fix-batches.test.ts`; `src/cli/commands/review-wiring.test.ts`; `src/v2/review-run.test.ts` ("a fixer result that omits an expected id refuses the stage…") | `fix_now_unresolved` — nothing a fixer claims settles a finding; only a recheck's `resolved` at the current sha does |
+| **No silent publication of unrelated work** | The fixer scope guard reverts paths outside the reviewed range before commit (reporting each with its reason), and the shipping review's `identity_continuity` check requires one identity across candidate → gate → receipt → publication. Result ingestion refuses unknown, duplicated, or omitted finding ids, so a fixer cannot widen its own batch. | `src/v2/review-shipping.ts` (check `identity_continuity`); `src/store/fix-batches.ts` (`ingestFixBatchResults`); `src/v2/integration-publisher.ts` | `src/v2/review-shipping.test.ts` ("broken candidate/gate/receipt/publication continuity blocks"); `src/v2/fg425-publisher-scope.test.ts` | `acceptance_unmet` — a failed `identity_continuity` check is reported by the shipping record the gate reads |
+| **Exact-head CI** | Deterministic verification is bound to the EXACT candidate sha through the existing covering-evidence semantics: a passing row at a different sha, a different command, a dirty tree, or CI that is pending or red never covers. Every required check must have EXECUTED — required coverage no mandatory lane ran is recorded `not_executed`, which is never green. A candidate that moves after verification re-opens it, because stage completion is recorded per sha. | `src/store/host-verifications.ts` (`findCoveringGateEvidence`); `src/v2/review-coordinator.ts` (`classifyVerification`); `src/store/reviews.ts` (`stageCompleteAt`) | `src/v2/review-evidence.test.ts`; `src/v2/fg640-review-disposition-gate.test.ts` ("deterministic verification absent, or recorded at a superseded sha") | `verification_absent_or_red` |
+| **Trusted-tip equality** | Shipping check 5 and the gate condition are the same rule read twice: the reviewed sha must EQUAL the freshly-fetched remote head (FG-514), not merely be an ancestor of it. `local_only`, `remote_ahead`, `diverged`, and `remote_unavailable` each withhold by name, and a failed bounded fetch fails closed — an offline review is never shippable by design. | `src/v2/review-shipping.ts` (check `tip_equality`); `src/v2/review-gate.ts` (`tipTrustState`) | `src/v2/review-shipping.test.ts`; `src/v2/fg640-review-disposition-gate.test.ts` ("reviewed-tip trust that is not EQUALITY with the fetched remote head") | `tip_not_trusted` |
 
 ## A skipped test is never evidence
 

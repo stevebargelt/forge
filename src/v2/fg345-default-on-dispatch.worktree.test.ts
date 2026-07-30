@@ -62,6 +62,7 @@ const RUNTIME = "fg345-default-on-test";
 const SINGLE: Workflow = {
   name: "fg345-default-on",
   description: "FG-345 default-on: one mutating step",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     { id: "build", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: RUNTIME, reds: [] },

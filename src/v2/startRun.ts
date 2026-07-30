@@ -176,10 +176,19 @@ export function startRun(args: StartRunArgs): StartRunResult {
     createdAt: new Date().toISOString(),
     metadata,
     projectDir: args.projectDir,
+    // FG-640: EXACTLY ONE review_mode PER RUN, decided here and never again. Stamped from the
+    // workflow's declared cutover at creation, so the run's authority model is fixed before
+    // any step dispatches — a workflow edited mid-run cannot retroactively move the gate that
+    // already decided a step, and FG-638's reconciliation has one durable value to hold the
+    // run's reviews to.
+    reviewMode: args.workflow.review_mode,
   };
 
   insertRun(run);
-  logEvent("run.created", { runId, payload: { workflow: args.workflow.name, title: args.title } });
+  logEvent("run.created", {
+    runId,
+    payload: { workflow: args.workflow.name, title: args.title, reviewMode: args.workflow.review_mode },
+  });
 
   return { runId };
 }

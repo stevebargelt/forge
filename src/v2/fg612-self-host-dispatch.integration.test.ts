@@ -48,6 +48,7 @@ const RUNTIME = "fg612-selfhost-test";
 const WORKFLOW: Workflow = {
   name: RUNTIME,
   description: "FG-612 self-host dispatch guard integration fixture",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     { id: "build", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: RUNTIME, reds: [] },

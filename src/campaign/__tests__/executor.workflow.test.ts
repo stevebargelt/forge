@@ -61,6 +61,7 @@ afterEach(() => {
 const SIMPLE_WORKFLOW: Workflow = {
   name: "feature",
   description: "simple one-step workflow for tests",
+  review_mode: "legacy_verdict" as const,
   inputs: [],
   steps: [{
     id: "engineer",
@@ -77,6 +78,7 @@ const SIMPLE_WORKFLOW: Workflow = {
 const BRIEF_REQUIRED_WORKFLOW: Workflow = {
   name: "feature",
   description: "workflow requiring brief input for tests",
+  review_mode: "legacy_verdict" as const,
   inputs: [{ name: "brief", required: true, type: "text", help: "What you want built." }],
   steps: [{
     id: "engineer",
@@ -93,6 +95,7 @@ const BRIEF_REQUIRED_WORKFLOW: Workflow = {
 const REQUIRES_UNMET_INPUT_WORKFLOW: Workflow = {
   name: "feature",
   description: "workflow with an unsupplied required input",
+  review_mode: "legacy_verdict" as const,
   inputs: [{ name: "custom_required_input", required: true, type: "text", help: "Never supplied by executor." }],
   steps: [{
     id: "engineer",
@@ -108,6 +111,7 @@ const REQUIRES_UNMET_INPUT_WORKFLOW: Workflow = {
 const VERDICT_GATE_WORKFLOW: Workflow = {
   name: "feature",
   description: "workflow with verdict gate for tests",
+  review_mode: "legacy_verdict" as const,
   inputs: [],
   steps: [{
     id: "engineer",
@@ -123,6 +127,7 @@ const VERDICT_GATE_WORKFLOW: Workflow = {
 const HUMAN_GATE_WORKFLOW: Workflow = {
   name: "feature",
   description: "workflow with human gate for tests",
+  review_mode: "legacy_verdict" as const,
   inputs: [],
   steps: [{
     id: "architect",

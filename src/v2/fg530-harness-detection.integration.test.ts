@@ -557,6 +557,7 @@ function longChain(steps: number): { workflow: unknown; yaml: string } {
   const workflow = {
     name: "fg530-verify-long",
     description: "FG-530 verification: a chain longer than the fixpoint cap",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: ids.map((id, i) => H.step(id, i === 0 ? {} : { depends_on: [ids[i - 1]] })),
   };

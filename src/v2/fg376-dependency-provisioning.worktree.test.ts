@@ -42,6 +42,7 @@ import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 const DISPATCH_TEST_WORKFLOW: Workflow = {
   name: "fg376-dispatch-test",
   description: "FG-376 dispatch-level integration test: single step",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     { id: "build", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "fg376-dispatch-test", reds: [] },
@@ -132,6 +133,7 @@ function makeRepoWithLockContent(lockContent: string): string {
 const DISPATCH_TEST_WORKFLOW_WITH_RED: Workflow = {
   name: "fg376-dispatch-test-red",
   description: "FG-376 dispatch-level integration test: single step with a red",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {

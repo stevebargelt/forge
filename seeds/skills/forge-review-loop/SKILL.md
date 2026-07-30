@@ -1,9 +1,18 @@
 ---
 name: forge-review-loop
-description: Run the bounded reviewer→fixer loop against a ticket's already-committed work via `forge review-loop`. Use after implementation is committed to get an automated red-review + fix-round pass before a human gate, without standing up a full campaign or workflow run.
+description: DEPRECATED (FG-640) — prefer `forge review`. The bounded reviewer→fixer loop against a ticket's already-committed work via `forge review-loop`. Reach for it only when the evidence-led coordinator cannot be used for a named reason; its output is reviewer input, never a durable finding ledger.
 ---
 
 # forge-review-loop
+
+> **DEPRECATED (FG-640) — use `forge review`.** The evidence-led review is the default for landed
+> implementation work: `forge review start <ticket-id> --contract <file>` opens a review with a
+> DURABLE finding ledger, `forge review continue <review-id>` drives the next stage from persisted
+> state (so a crash resumes rather than repeating discovery), and the `review_disposition` gate
+> settles the reviewed step from that ledger. This loop keeps no ledger — its findings live in a
+> markdown note — so its stop reason is never a completion signal and its output must not be
+> represented as the finished model. `--max-rounds` keeps its existing semantics until removal.
+> No new investment here beyond correctness, recovery, and evidence-preservation fixes.
 
 `forge review-loop <ticket-id>` reviews the commit range associated with a ticket's committed work, dispatching a reviewer/fixer round-trip up to a bounded number of rounds. It **never auto-closes the ticket** — it reports whether the work is closeable; closing remains an explicit operator action (`forge backlog close`).
 
@@ -15,8 +24,15 @@ Host/orchestrator skill only. It documents a CLI command run from the terminal. 
 
 ## When to use it
 
+Prefer `forge review` (see the deprecation note above). Reach for this loop only when you can NAME
+why the coordinator cannot be used for this review — and say so when you present the plan. In that
+case:
+
 - Implementation work for a ticket is committed (or you can point `--since <sha>` at the range), and you want an adversarial pass before opening a gate or closing the ticket.
 - You want a self-contained review/fix cycle for one ticket without planning a campaign or a full workflow run.
+
+Whatever it finds is INPUT to a finding ledger you then have to keep — the loop's markdown note is
+not one, and a `passed` stop does not settle anything the evidence-led gate reads.
 
 Check `--dry-run` first if you want to see the resolved plan (ticket, route, commit range, round count, stop conditions) before dispatching.
 

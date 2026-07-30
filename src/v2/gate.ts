@@ -27,6 +27,8 @@ import { getTask, setTaskStatus, setTaskParentId, insertTask, markTaskComplete, 
 import { getDb, writeTransaction } from "../store/db.js";
 import { crashPoint } from "./crash-points.js";
 import { verdictsForTask } from "../store/verdicts.js";
+import { reviewsForTask, reviewsForRun, findingsForReview } from "../store/reviews.js";
+import { assessEvidenceLedGate, renderDispositionRefusal, REVIEW_DISPOSITION_GATE } from "./review-gate.js";
 import { insertGate } from "../store/gates.js";
 import { getRun } from "../store/runs.js";
 import { logEvent, eventsForTask } from "../store/events.js";
@@ -137,8 +139,42 @@ export async function gate(
   const step = findStep(workflow, task.phase);
   if (!step) throw new Error(`Step '${task.phase}' not in workflow '${workflow.name}'`);
 
-  // Verdict re-check on advance.
-  if (decision === "advance" && !opts.force) {
+  // FG-640: WHICH GATE DECIDES THIS STEP. Exactly one authority model per run — an
+  // evidence_led run's reviewed step is settled by the review ledger (`review_disposition`),
+  // a legacy run's by verdict aggregation, and neither ever runs alongside the other.
+  //
+  // THE WORKFLOW'S DECLARATION IS THE SOURCE, because the workflow file is where the explicit
+  // cutover lives and it is the same value `dispatchReds` selects lenses from — one source
+  // read by both sites, so a narrowed panel and the gate that judges it can never disagree.
+  // The run row is the durable per-run record (and FG-638's reconciliation anchor); when the
+  // two disagree the run was moved between models after creation, and `review_mode_drift`
+  // refuses by name rather than silently picking one.
+  //
+  // Scoped to a `gate: verdict` step on purpose: that is the position the disposition gate
+  // REPLACES. A human or auto gate on an evidence-led run keeps its own meaning, so migrating
+  // a workflow does not silently attach a ledger requirement to its architect and plan steps.
+  const evidenceLed = workflow.review_mode === "evidence_led" && step.gate === "verdict";
+
+  if (decision === "advance" && !opts.force && evidenceLed) {
+    const runMode = run.reviewMode ?? "legacy_verdict";
+    const { review, assessment } = assessEvidenceLedGate({
+      taskId,
+      reviews: reviewsForTask(taskId),
+      runReviews: reviewsForRun(task.runId),
+      findingsFor: findingsForReview,
+      verdicts: verdictsForTask(taskId),
+      declaredReds: step.reds,
+      ...(runMode !== workflow.review_mode
+        ? { modeDrift: { runMode, workflowMode: workflow.review_mode } }
+        : {}),
+    });
+    if (assessment.blocked) {
+      throw new Error(renderDispositionRefusal(taskId, review?.id ?? "(none)", assessment));
+    }
+  }
+
+  // Verdict re-check on advance. Legacy authority only — see the evidence_led branch above.
+  if (decision === "advance" && !opts.force && !evidenceLed) {
     const verdicts = verdictsForTask(taskId);
     const agg = aggregateVerdicts(verdicts);
     if (agg.verdict === "fail") {
@@ -174,7 +210,14 @@ export async function gate(
     logEvent("gate.decided", {
       runId: run.id,
       taskId,
-      payload: { decision, rationale, force: opts.force ?? false },
+      payload: {
+        decision,
+        rationale,
+        force: opts.force ?? false,
+        // FG-640: only on the steps the new gate actually decides, so a legacy run's audit
+        // payload is byte-identical to what it has always been.
+        ...(evidenceLed ? { gateKind: REVIEW_DISPOSITION_GATE } : {}),
+      },
     });
   });
   crashPoint("gate:after-decision-write");

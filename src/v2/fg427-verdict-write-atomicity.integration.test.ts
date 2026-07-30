@@ -33,6 +33,7 @@ function workflowWithRed(runtimeName: string, redAgent: string): Workflow {
   return {
     name: runtimeName,
     description: "FG-427 verdict write-path atomicity integration test",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       {

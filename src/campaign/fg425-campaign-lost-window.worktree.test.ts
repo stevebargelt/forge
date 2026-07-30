@@ -175,6 +175,7 @@ steps:
 const WORKFLOW: Workflow = {
   name: WORKFLOW_NAME,
   description: "FG-425 campaign: a single build step whose publication loses the window",
+  review_mode: "legacy_verdict" as const,
   inputs: [],
   steps: [
     {

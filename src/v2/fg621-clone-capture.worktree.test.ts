@@ -54,6 +54,7 @@ const RUNTIME = "fg621-capture-test";
 const SINGLE: Workflow = {
   name: "fg621-capture-single",
   description: "FG-621 capture: one mutating step",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     { id: "build", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: RUNTIME, reds: [] },
@@ -63,6 +64,7 @@ const SINGLE: Workflow = {
 const SINGLE_WITH_RED: Workflow = {
   name: "fg621-capture-single-red",
   description: "FG-621: one mutating step reviewed by an authoritative red",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {
@@ -80,6 +82,7 @@ const SINGLE_WITH_RED: Workflow = {
 const SEQUENTIAL: Workflow = {
   name: "fg621-capture-sequential",
   description: "FG-621 base selection: two sequential mutating steps",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     { id: "build", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: RUNTIME, reds: [] },
@@ -90,6 +93,7 @@ const SEQUENTIAL: Workflow = {
 const FANOUT: Workflow = {
   name: "fg621-capture-fanout",
   description: "FG-621 base selection: one fan-out wave",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     { id: "source", agent: "planner", gate: "auto", manual: false, depends_on: [], runtime: RUNTIME, reds: [] },

@@ -37,6 +37,7 @@ import { runNextStage, type CoordinatorDeps, type StageOutcome } from "../../v2/
 import { validateReviewContract } from "../../v2/review-contract.js";
 import { buildCoordinatorDeps, parseLensWidening, resolveReviewBase } from "./review-wiring.js";
 import type { AcClaim } from "../../v2/review-evidence.js";
+import { DocsCloseoutSchema, type DocsCloseout } from "../../v2/review-shipping.js";
 
 const DASH = "—";
 
@@ -139,6 +140,7 @@ type ContinueOpts = {
   drift?: string;
   evaluatedNoDrift?: string;
   acceptance?: string;
+  docsCloseout?: string;
   all?: boolean;
   dryRun?: boolean;
   json?: boolean;
@@ -167,6 +169,7 @@ function depsFor(
     drift?: string;
     evaluatedNoDrift?: string;
     acceptance?: string;
+    docsCloseout?: string;
   },
 ): { ok: true; deps: CoordinatorDeps } | { ok: false; refusal: string } {
   const review = getReview(reviewId);
@@ -177,6 +180,24 @@ function depsFor(
 
   const acceptance =
     opts.acceptance !== undefined ? (readJsonFile(opts.acceptance, "acceptance claims") as AcClaim[]) : undefined;
+
+  // FG-640 duty 6. Read the same way the acceptance claims are, and — like them — supplying
+  // NOTHING is not the clean answer: the shipping check reads an absent assessment as an
+  // unasked question, which blocks. There is deliberately no flag that means "assessed, no
+  // gaps" without a file, because that flag would be the rubber stamp the check replaces.
+  let docsCloseout: DocsCloseout | undefined;
+  if (opts.docsCloseout !== undefined) {
+    const parsed = DocsCloseoutSchema.safeParse(readJsonFile(opts.docsCloseout, "docs/closeout assessment"));
+    if (!parsed.success) {
+      return {
+        ok: false,
+        refusal:
+          `--docs-closeout must be {"assessed": <bool>, "gaps": [<string>, …], "detail"?: <string>}: ` +
+          parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; "),
+      };
+    }
+    docsCloseout = parsed.data;
+  }
 
   return {
     ok: true,
@@ -190,6 +211,7 @@ function depsFor(
       ...(opts.drift !== undefined ? { unclassifiableDrift: opts.drift } : {}),
       ...(opts.evaluatedNoDrift !== undefined ? { evaluatedNoDrift: opts.evaluatedNoDrift } : {}),
       ...(acceptance !== undefined ? { acceptance } : {}),
+      ...(docsCloseout !== undefined ? { docsCloseout } : {}),
     }),
   };
 }
@@ -353,6 +375,7 @@ export function registerReview(program: Command): void {
       "record that you EXAMINED the final diff and no lens change is needed — the confirmation then advances",
     )
     .option("--acceptance <file>", "acceptance-criterion claims for the shipping review, as JSON")
+    .option("--docs-closeout <file>", "FG-640 shipping duty 6: the ticket-required docs/closeout assessment, as JSON {assessed, gaps[], detail?}. Omitting it reads as NOT assessed, which blocks")
     .option("--all", "keep driving while each transition advances, instead of one transition")
     .option("--dry-run", "report the one valid next transition and exit without running it")
     .option("--json", "emit each stage outcome as JSON")

@@ -61,6 +61,7 @@ import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 const WORKFLOW: Workflow = {
   name: "fg425-ac5-test",
   description: "FG-425 AC5: one truthful disposition after a lost mutex",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {

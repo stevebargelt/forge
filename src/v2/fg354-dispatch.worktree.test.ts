@@ -41,6 +41,7 @@ import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 const DISPATCH_TEST_WORKFLOW: Workflow = {
   name: "fg354-dispatch-test",
   description: "FG-354 dispatch-level integration test: single step",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {

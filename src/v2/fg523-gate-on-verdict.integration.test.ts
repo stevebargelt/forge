@@ -67,6 +67,7 @@ function workflowWithReds(name: string, reds: RedDef[]): Workflow {
   return {
     name,
     description: "gate_on_verdict persistence test",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       { id: "review", agent: "engineer", gate: "verdict", manual: false, depends_on: [], runtime: "claude", reds },

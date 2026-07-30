@@ -49,6 +49,7 @@ import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 const WORKFLOW_AUTH_SHIPPING_REVIEWER: Workflow = {
   name: "fg381-dispatch-test",
   description: "FG-384 guardrail dispatch integration test",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {

@@ -160,6 +160,7 @@ steps:
 const WORKFLOW: Workflow = {
   name: WORKFLOW_NAME,
   description: "FG-476 integration test workflow",
+  review_mode: "legacy_verdict" as const,
   inputs: [],
   steps: [
     {

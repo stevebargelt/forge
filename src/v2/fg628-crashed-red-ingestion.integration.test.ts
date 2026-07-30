@@ -66,6 +66,7 @@ const RUNTIME = "fg628-red-test";
 const WORKFLOW_SPECIALIST_RED: Workflow = {
   name: "fg628-red-test",
   description: "FG-628: a crashed red is not a review outcome",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {

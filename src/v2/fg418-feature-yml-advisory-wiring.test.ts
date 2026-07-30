@@ -74,40 +74,69 @@ test(
   },
 );
 
+// FG-640 SUPERSEDES the FG-420 promotion for this workflow — and the guard keeps its teeth
+// by moving, not by relaxing. `feature` is now `review_mode: evidence_led`, where the
+// shipping reviewer's verdict is EVIDENCE (its findings enter the ledger and are settled
+// through the review_disposition gate) rather than authority. What must never happen is
+// either half alone: an advisory shipping reviewer on a workflow that has NOT declared the
+// cutover is exactly the silent drop of blocking coverage FG-420 guarded against, and an
+// authoritative one on a workflow that HAS declared it combines two authority models in one
+// run (refused by name at the gate — mixed_authority_model). So the two are asserted as a
+// PAIR, and reverting either side alone reddens here.
 test(
-  "(fg418-yml-3) shipping-reviewer red has authority:authoritative (FG-420 promotion — prerequisites FG-418/FG-419/FG-367 are now real)",
+  "(fg418-yml-3) shipping-reviewer's authority is PAIRED with the workflow's declared review_mode",
   () => {
     const wf = loadWorkflow("feature");
     const buildStep = wf.steps.find((s) => s.id === "build");
     assert.ok(buildStep !== undefined, "build step must exist");
 
-    const reds = buildStep!.reds ?? [];
-    const shippingReviewerRed = reds.find((r) => r.agent === "shipping-reviewer");
+    const shippingReviewerRed = (buildStep!.reds ?? []).find((r) => r.agent === "shipping-reviewer");
     assert.ok(shippingReviewerRed !== undefined, "shipping-reviewer red must exist");
 
-    assert.equal(
-      shippingReviewerRed!.authority,
-      "authoritative",
-      "shipping-reviewer authority must be 'authoritative' after FG-420 promotion — reverting to 'specialist' would silently drop blocking coverage",
-    );
+    if (wf.review_mode === "evidence_led") {
+      assert.equal(
+        shippingReviewerRed!.authority,
+        "specialist",
+        "under review_mode: evidence_led the shipping reviewer is advisory — an authoritative one would combine two authority models in one run",
+      );
+      assert.equal(
+        shippingReviewerRed!.gate_on_verdict,
+        false,
+        "under review_mode: evidence_led the shipping reviewer's verdict must not gate — the ledger does",
+      );
+    } else {
+      assert.equal(
+        shippingReviewerRed!.authority,
+        "authoritative",
+        "on a workflow that has NOT declared the evidence-led cutover, reverting the shipping reviewer to 'specialist' silently drops blocking coverage (FG-420)",
+      );
+      assert.equal(
+        shippingReviewerRed!.gate_on_verdict,
+        true,
+        "on a legacy-mode workflow, gate_on_verdict:false would silently allow needs_fix to advance past the build gate (FG-420)",
+      );
+    }
   },
 );
 
+// The other half of the pair, stated as its own guard so a diff that flips ONLY the workflow
+// line reddens with a message about the reds it just orphaned.
 test(
-  "(fg418-yml-4) shipping-reviewer red has gate_on_verdict:true (FG-420 promotion — needs_fix must block the build gate)",
+  "(fg418-yml-4) every build red's authority agrees with the workflow's declared review_mode",
   () => {
     const wf = loadWorkflow("feature");
     const buildStep = wf.steps.find((s) => s.id === "build");
     assert.ok(buildStep !== undefined, "build step must exist");
 
-    const reds = buildStep!.reds ?? [];
-    const shippingReviewerRed = reds.find((r) => r.agent === "shipping-reviewer");
-    assert.ok(shippingReviewerRed !== undefined, "shipping-reviewer red must exist");
-
-    assert.equal(
-      shippingReviewerRed!.gate_on_verdict,
-      true,
-      "shipping-reviewer gate_on_verdict must be true after FG-420 promotion — reverting to false would silently allow needs_fix to advance past the build gate",
-    );
+    const expected = wf.review_mode === "evidence_led" ? "specialist" : "authoritative";
+    for (const red of buildStep!.reds ?? []) {
+      assert.equal(
+        red.authority,
+        expected,
+        `build red '${red.agent}' is ${red.authority} while the workflow declares review_mode: ${wf.review_mode} — one run, one authority model`,
+      );
+      assert.equal(red.gate_on_verdict, expected === "authoritative", `build red '${red.agent}' gate_on_verdict disagrees with review_mode: ${wf.review_mode}`);
+    }
   },
 );
+

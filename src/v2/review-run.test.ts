@@ -24,6 +24,7 @@ import {
   getReview,
   insertReview,
   recordDisposition,
+  type Review,
   type ReviewFinding,
   type ReviewStage,
 } from "../store/reviews.js";
@@ -202,6 +203,9 @@ function harness(over: Partial<CoordinatorDeps> & { findingsPerLens?: number; in
         postConfirmationPaths: [],
         deltaReviewed: true,
       },
+      // FG-640 duty 6: the shipping reviewer looked at the ticket's docs/closeout
+      // requirements and found none outstanding.
+      docsCloseout: { assessed: true, gaps: [], detail: "the ticket requires no doc update" },
     }),
     ...over,
   };
@@ -1795,4 +1799,70 @@ test("FG-639 / PRD #3: the same two lenses at the same anchor naming DIFFERENT i
   assert.deepEqual(findings.map((f) => f.sources.length), [1, 1]);
   assert.equal((getReview(REVIEW)?.stageEvidence?.discovery?.meta?.["merges"] as unknown[]).length, 0);
   assert.deepEqual(pending().blockingFindings, ["RF-1", "RF-2"]);
+});
+
+// ── FG-640 ───────────────────────────────────────────────────────────────────
+
+// Tip trust is established LIVE (a bounded fetch of the remote head), but the
+// `review_disposition` gate is a read of durable state and cannot re-fetch. A trusted head that
+// lived only in the shipping stage's local would leave the gate permanently unable to establish
+// equality — `tip_not_trusted` on a review that just shipped.
+test("FG-640: the shipping stage PERSISTS the trusted remote head so the gate can read it", async () => {
+  const h = harness();
+  await parkAt(h.deps, "shipping_review");
+  const shipping = await runNextStage(REVIEW, h.deps);
+
+  assert.equal(shipping.status, "advanced");
+  const review = getReview(REVIEW) as Review;
+  assert.equal(review.state, "settled");
+  assert.equal(review.trustedRemoteSha, review.candidateSha, "the reviewed tip equals the recorded remote head");
+});
+
+test("FG-640: an UNTRUSTED tip records no remote head — the column never carries a head the review did not match", async () => {
+  const base = harness();
+  const h = harness({
+    shippingInput: async (ctx) => ({
+      ...(await base.deps.shippingInput(ctx)),
+      tipTrust: {
+        kind: "remote_ahead" as const,
+        reviewedSha: ctx.candidateSha,
+        detail: "the remote has 2 commits the reviewer never saw",
+      },
+    }),
+  });
+  await parkAt(h.deps, "shipping_review");
+  const shipping = await runNextStage(REVIEW, h.deps);
+
+  assert.equal(shipping.status, "refused");
+  assert.match(shipping.message, /tip_equality/);
+  assert.equal(getReview(REVIEW)?.trustedRemoteSha, undefined);
+});
+
+// Stage 9 re-runs, and a non-empty newFindings always makes it refuse. Without a dedup key the
+// operator dispositions N late findings, re-enters, and finds N more — the review can never
+// settle.
+test("FG-640: a repeated free-form shipping finding is ingested ONCE, not once per re-entry", async () => {
+  const base = harness();
+  const late = [{ summary: "the publication path is unguarded" }];
+  const h = harness({
+    shippingInput: async (ctx) => ({ ...(await base.deps.shippingInput(ctx)), newFindings: late }),
+  });
+  await parkAt(h.deps, "shipping_review");
+
+  const first = await runNextStage(REVIEW, h.deps);
+  assert.equal(first.status, "refused");
+  const lateRows = () => findingsForReview(REVIEW).filter((f) => f.findingType === "shipping_review_late");
+  assert.equal(lateRows().length, 1, "the late finding entered the ledger as an ordinary untriaged row");
+  assert.equal(lateRows()[0]!.disposition, "untriaged", "lateness confers no authority to settle it");
+  assert.match(first.message, /ingested as untriaged ledger findings/);
+
+  // Disposition it, then re-enter the stage: the reviewer still reports the same concern.
+  recordDisposition(lateRows()[0]!.id, {
+    decision: "accepted_risk",
+    rationale: "the guard exists one layer up; recorded rather than re-fixed",
+    operator: true,
+  });
+  const second = await runNextStage(REVIEW, h.deps);
+  assert.equal(second.status, "refused", "the free-form finding still blocks the stage");
+  assert.equal(lateRows().length, 1, "a second copy was ingested — the review could never settle");
 });

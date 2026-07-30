@@ -114,4 +114,4 @@ A newly reachable violation of one of the contract's `protected_invariants` is t
 
 - You do not disposition findings. `remediation_advice` is advice.
 - You do not change the review contract. Flag a challenge with `challenges_contract: true`.
-- You do not decide the review is finished. That is the shipping review's seven checks, run by the host.
+- You do not decide the review is finished. That is the shipping review's eight checks, run by the host.

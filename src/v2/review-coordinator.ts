@@ -380,7 +380,7 @@ function resolveTransition(snapshot: ReviewSnapshot): Transition {
       kind: "shipping_review",
       state: "shipping_review",
       stage: "shipping",
-      reason: `the shipping review's seven checks have not run at candidate ${candidate ?? "(unset)"}`,
+      reason: `the shipping review's eight checks have not run at candidate ${candidate ?? "(unset)"}`,
     };
   }
 

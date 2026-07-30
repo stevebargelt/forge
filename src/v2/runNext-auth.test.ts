@@ -61,6 +61,7 @@ function oneStepWorkflow(agent: string, runtime: string): Workflow {
   return {
     name: `wf-${agent}`,
     description: "one step",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [{ id: "step", agent, gate: "auto", manual: false, depends_on: [], runtime, reds: [] }],
   };

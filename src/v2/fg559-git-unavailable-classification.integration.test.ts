@@ -40,6 +40,7 @@ import type { Workflow } from "./schema.js";
 const LINEAR_WORKFLOW: Workflow = {
   name: "fg559-linear",
   description: "two-step linear test",
+  review_mode: "legacy_verdict",
   inputs: [{ name: "brief", required: true, type: "text" }],
   steps: [
     { id: "first", agent: "test-agent", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },

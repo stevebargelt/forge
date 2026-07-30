@@ -165,6 +165,7 @@ function makeTmpDir(): string {
 const PLAIN_WF: Workflow = {
   name: "fg530-plain",
   description: "FG-530: plain single-step implementer primary",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [step("build")],
 };
@@ -183,6 +184,7 @@ steps:
 const RED_WF: Workflow = {
   name: "fg530-red",
   description: "FG-530: implementer primary behind an authoritative red",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     step("build", {
@@ -209,6 +211,7 @@ steps:
 const REJECT_WF: Workflow = {
   name: "fg530-reject",
   description: "FG-530: human gate rejected back to build via on_reject",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     step("build"),
@@ -239,6 +242,7 @@ steps:
 const REJECT_DEDUP_WF: Workflow = {
   name: "fg530-reject-dedup",
   description: "FG-530: two human gates rejecting into the same on_reject target",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     step("build"),
@@ -275,6 +279,7 @@ steps:
 const TWO_RED_WF: Workflow = {
   name: "fg530-two-reds",
   description: "FG-530: primary behind TWO authoritative gating reds",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     step("build", {
@@ -311,6 +316,7 @@ steps:
 const FANOUT_WF: Workflow = {
   name: "fg530-fanout",
   description: "FG-530: fanout step behind an authoritative red, force-advanced",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     step("plan"),
@@ -360,6 +366,7 @@ steps:
 const FANOUT_NO_RED_WF: Workflow = {
   name: "fg530-fanout-no-red",
   description: "FG-530: fanout step with an auto gate — the fanout-parent recovery shape",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     step("plan"),
@@ -400,6 +407,7 @@ steps:
 const INVOKE_WF: Workflow = {
   name: "invoke",
   description: "FG-530: an invoke-kind run — the one kind reconcile may complete",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [step("build")],
 };
@@ -422,6 +430,7 @@ steps:
 const INVOKE_STDOUT_WF: Workflow = {
   name: "invoke_chain",
   description: "FG-530: an invoke_chain run whose narrative agent left only stdout",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [step("build", { agent: "research-specialist", runtime: PI_RUNTIME })],
 };

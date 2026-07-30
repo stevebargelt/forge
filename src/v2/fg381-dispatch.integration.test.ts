@@ -38,6 +38,7 @@ import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 const WORKFLOW_WITH_SHIPPING_REVIEWER: Workflow = {
   name: "fg381-dispatch-test",
   description: "FG-381 dispatch-level integration test",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {
@@ -59,6 +60,7 @@ const WORKFLOW_WITH_SHIPPING_REVIEWER: Workflow = {
 const WORKFLOW_ONLY_SHIPPING_REVIEWER: Workflow = {
   name: "fg381-dispatch-test",
   description: "FG-381 dispatch-level integration test: fail-loud",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {
@@ -79,6 +81,7 @@ const WORKFLOW_ONLY_SHIPPING_REVIEWER: Workflow = {
 const WORKFLOW_AUTHORITATIVE_SHIPPING_REVIEWER: Workflow = {
   name: "fg381-dispatch-test",
   description: "FG-381 dispatch-level integration test: authoritative shipping-reviewer (original escape)",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {
@@ -99,6 +102,7 @@ const WORKFLOW_AUTHORITATIVE_SHIPPING_REVIEWER: Workflow = {
 const WORKFLOW_NO_SHIPPING_REVIEWER: Workflow = {
   name: "fg381-nored-test",
   description: "FG-381 dispatch-level integration test: regression guard",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {

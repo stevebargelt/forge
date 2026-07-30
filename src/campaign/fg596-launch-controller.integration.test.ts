@@ -906,6 +906,7 @@ const succeedingLoad = (): Workflow =>
   ({
     name: "feature",
     description: "stub",
+    review_mode: "legacy_verdict" as const,
     inputs: [],
     steps: [{ id: "build", agent: "engineer", gate: "none" as const, depends_on: [], reds: [], runtime: "claude", manual: false }],
   }) as Workflow;

@@ -299,6 +299,9 @@ export function invokeWorkflowShape(
     workflow: {
       name: "invoke",
       description: "Single-agent invocation (forge invoke)",
+      // FG-640: an ad-hoc invoke has no review ledger and no reviewed step, so it carries the
+      // legacy authority model. Naming it beats inheriting it silently.
+      review_mode: "legacy_verdict",
       inputs: [],
       steps: [step],
     },

@@ -38,6 +38,7 @@ import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 const WORKFLOW_AUTH_RED_WIDE: Workflow = {
   name: "fg586-dispatch-test",
   description: "FG-586 fail-closed authoritative red integration test",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {
@@ -59,6 +60,7 @@ const WORKFLOW_AUTH_RED_WIDE: Workflow = {
 const WORKFLOW_SPECIALIST_RED_WIDE: Workflow = {
   name: "fg586-specialist-test",
   description: "FG-586 non-authoritative (specialist) red — unreadable stays non-blocking",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {

@@ -146,6 +146,7 @@ steps:
 const TASK_STEP_WF_OBJ: Workflow = {
   name: TASK_STEP_WORKFLOW,
   description: "a workflow that legitimately owns a step id 'task'",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [{ id: "task", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] }],
 };
@@ -259,6 +260,7 @@ test("FG-512 AC5 (primary + manual): runNext stamps `workflow` on primary and ma
   const wf: Workflow = {
     name: "fg512-primary",
     description: "primary + manual",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       { id: "build", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
@@ -283,6 +285,7 @@ test("FG-512 AC5 (red): dispatchReds stamps `workflow` on the red row", async ()
   const wf: Workflow = {
     name: "fg512-red",
     description: "primary with a red",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       {
@@ -322,6 +325,7 @@ test("FG-512 AC5 (fanout parent + child): dispatchFanoutStep stamps `workflow` o
   const wf: Workflow = {
     name: "fg512-fanout",
     description: "seed then fan out",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       { id: "seed", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
@@ -363,6 +367,7 @@ test("FG-512 AC5 (shipping-reviewer preflight-failure red): the pre-failed revie
   const wf: Workflow = {
     name: "fg512-shipping-preflight",
     description: "step whose only red is shipping-reviewer, which pre-fails on missing context",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       {
@@ -403,6 +408,7 @@ test("FG-512 AC5 (fanout parent, empty upstream): failFanoutParent stamps `workf
   const wf: Workflow = {
     name: "fg512-fanout-empty",
     description: "seed yields an empty array → the fanout parent is minted only to fail",
+    review_mode: "legacy_verdict",
     inputs: [],
     steps: [
       { id: "seed", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },

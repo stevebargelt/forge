@@ -80,6 +80,7 @@ result:
 const FULL_SPEC_WORKFLOW: Workflow = {
   name: "test-spec-full",
   description: "architect + tech-lead + engineer with authoritative red",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {
@@ -118,6 +119,7 @@ const FULL_SPEC_WORKFLOW: Workflow = {
 const BARE_INVOKE_WORKFLOW: Workflow = {
   name: "test-spec-bare",
   description: "engineer with red, no architect/tech-lead",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {

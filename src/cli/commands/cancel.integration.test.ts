@@ -24,6 +24,7 @@ const BASE_RUN: Run = {
 const TWO_STEP_WORKFLOW: Workflow = {
   name: "cancel-test",
   description: "two-step workflow for resurrection-prevention test",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     { id: "step-one", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },

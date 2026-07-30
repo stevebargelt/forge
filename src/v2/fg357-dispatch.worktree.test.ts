@@ -68,6 +68,7 @@ import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 const SINGLE_STEP_WORKFLOW: Workflow = {
   name: "fg357-dispatch-test",
   description: "FG-357 dispatch-level integration test: single step",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {
@@ -88,6 +89,7 @@ const SINGLE_STEP_WORKFLOW: Workflow = {
 const FANOUT_WORKFLOW: Workflow = {
   name: "fg357-fanout-test",
   description: "FG-357 dispatch-level integration test: fanout, no reds",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {
@@ -123,6 +125,7 @@ const FANOUT_WORKFLOW: Workflow = {
 const FANOUT_WITH_RED_WORKFLOW: Workflow = {
   name: "fg357-fanout-red-test",
   description: "FG-357 dispatch-level integration test: fanout with authoritative red",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     {

@@ -257,6 +257,11 @@ export type EventType =
   // answer to "what has this review already done", which is what makes resuming after a
   // crash a read rather than a guess.
   | "review.stage_completed"
+  // FG-640 (Change 3): which risk lenses the plan-gate-approved contract selected, and which
+  // declared reds it therefore did NOT dispatch. Recorded because a narrower panel is a
+  // decision — an operator reading a run with three reds where the workflow declares six must
+  // be able to see that it was selection rather than three reds failing to start.
+  | "review.lenses_selected"
   // What a recheck ESTABLISHED for one finding, per id: resolved | still_present |
   // inconclusive, the evidence kind, and the sha it was proven at. A resolution is
   // candidate-bound; the event says which candidate.

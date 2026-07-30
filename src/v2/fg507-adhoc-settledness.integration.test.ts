@@ -38,6 +38,7 @@ const RUN_ID = "run-fg507-settle";
 const WORKFLOW: Workflow = {
   name: WORKFLOW_NAME,
   description: "fg507 settledness fixture",
+  review_mode: "legacy_verdict",
   inputs: [],
   steps: [
     { id: "build", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
