@@ -1,14 +1,17 @@
 # PRD — Evidence-Led Review Lifecycle
 
-**Status:** confirmed. Change 0 is active; implementation is decomposed serially
-into FG-638 → FG-639 → FG-640. **Changes 1 (FG-638) and 2 (FG-639) have
-shipped** — see their banners under
-[Change 1](#change-1--durable-ledger-and-read-surfaces) and
-[Change 2](#change-2--staged-review-coordinator). Change 2 is a **pilot** through
-the explicit `forge review start` / `forge review continue` verbs only: the
-`feature` workflow is not migrated and no gate authority changed. Change 3 has
-not started, so the Change-0 interim operating policy remains in force as written
-below for any review not driven through the pilot.
+**Status:** DELIVERED. Implementation was decomposed serially into FG-638 →
+FG-639 → FG-640, and **all three changes have shipped** — see their banners under
+[Change 1](#change-1--durable-ledger-and-read-surfaces),
+[Change 2](#change-2--staged-review-coordinator), and
+[Change 3](#change-3--authority-and-workflow-migration). The lifecycle is fully
+live: the ledger is durable, the coordinator drives it, the `feature` workflow
+declares `review_mode: evidence_led`, and its build gate is settled by the
+`review_disposition` gate rather than by verdict aggregation. **Change 0's
+interim operating policy is RETIRED** — Change 3 replaced it with the
+evidence-led default in the orchestrator seed and the rendered `CLAUDE.md` block.
+The Change-0 text below is preserved as the accepted historical record, not as
+current policy. Unmigrated workflows keep `verdict` / `blocked_by_red` unchanged.
 
 **Date:** 2026-07-27
 
@@ -832,6 +835,14 @@ risk-routing syntax is future work only if another consumer needs it.
 
 ### Change 0 — activate the interim operating policy
 
+> **[RETIRED 2026-07-30 by Change 3 (FG-640).]** This was the interim operating
+> policy that held the discipline by hand while the ledger was being built. It is
+> preserved as the accepted historical record. The standing policy is now the
+> evidence-led review as written in the orchestrator seed
+> (`seeds/orchestrator-template.md`) and the rendered `CLAUDE.md` block: the
+> ledger is durable rows rather than session notes, and the `review_disposition`
+> gate reads it.
+
 - update `docs/autonomous-run-prompt.md` and the orchestrator seed to require
   one discovery pass, explicit disposition, one targeted batch fix, and one
   known-finding plus fix-delta recheck;
@@ -879,7 +890,9 @@ This change does not alter gate behavior.
 > `5c772aa0`.]** Every
 > bullet below landed, as a pilot reachable only through the explicit
 > `forge review start` / `forge review continue` verbs: the `feature` workflow is
-> NOT migrated and no gate authority changed, both of which remain Change 3. Five
+> NOT migrated and no gate authority changed, both of which remained Change 3
+> **and have since shipped with it (FG-640) — read this banner as the record of
+> what was true on the day Change 2 landed, not as current behavior.** Five
 > refinements the implementation settled that this scope did not state. (1) Stage
 > completion is recorded **per sha** (`reviews.stage_evidence_json`) rather than as
 > a stage cursor, and is checked three ways: `contract_confirmed`/`discovery`
@@ -936,6 +949,54 @@ Pilot through explicit `forge review`; do not migrate `feature` yet.
 
 ### Change 3 — authority and workflow migration
 
+> **[SHIPPED 2026-07-30 (FG-640) — `2cffe86b` + `0c465b01` + `a2007b8d`.]** Every
+> bullet below landed, and with it the lifecycle is fully live: the `feature`
+> workflow declares `review_mode: evidence_led`, its six build reds are
+> `authority: specialist` / `gate_on_verdict: false`, and its build gate is
+> settled by the ledger. Eight refinements the implementation settled that this
+> scope did not state. (1) The cutover is a **workflow-level `review_mode`
+> field** (`legacy_verdict` | `legacy_review_loop` | `evidence_led`, defaulting
+> to `legacy_verdict`), stamped onto the run row at creation by `startRun`. No
+> command flag turns it on; migrating a workflow is a visible edit to one line.
+> (2) The **workflow's declaration is the source** both `gate()` and
+> `dispatchReds` read, so a narrowed red panel and the gate that judges it can
+> never disagree about which model applies; the run row is the durable per-run
+> record and FG-638's reconciliation anchor. (3) Run/workflow disagreement is
+> assessed **before** the gate branches and refuses **symmetrically** as
+> `review_mode_drift` — reading either side would be the silent fallback the
+> condition exists to refuse, and the reverse direction (a run stamped
+> `evidence_led` under a reverted workflow) is the same defect seen from the
+> other side. (4) Thirteen named blocking conditions, plus an **explicit
+> non-blocking half** (`nonBlocking`) reported rather than implied: an advisory
+> red `fail` whose findings are dispositioned, a settled disposition, and a
+> superseded-sha decision are each things the legacy gate would have blocked on,
+> so "we no longer refuse over this" is testable rather than inferred. Two of
+> the thirteen are facts about the run rather than about any review —
+> `review_absent` and `mixed_authority_model`, the latter keyed on the step's
+> **declaration** as well as on outcomes, because a half-migrated step whose
+> authoritative reds happen to pass would otherwise read settled while carrying
+> two authority models. (5) The gate resolves a **run-scoped** review when no
+> task-scoped one exists: `forge review start` binds a review to a ticket and a
+> run and no verb binds one to a task after the fact, so a task-only lookup
+> would report `review_absent` on every real run. (6) The third absent-lens
+> clearing route is mechanized as an operator verb, `forge review accept-lens`
+> — `--operator` required, the missing evidence named, bound to the confirmed
+> candidate, stored beside the outcomes in its own shape so nothing reads it as
+> a review that happened. (7) The shipping review gained an **eighth** check,
+> `docs_closeout` (the reviewer's sixth duty), where an omitted assessment
+> blocks exactly as a named gap does; free-form late findings are now **ingested
+> as ordinary untriaged ledger rows** rather than only reported, deduplicated by
+> summary so a re-entered Stage 9 does not append the same concern again. (8)
+> Stage 9 persists `trusted_remote_sha` when tip trust is equality, because the
+> gate is a read of durable state and cannot re-fetch — without it the gate
+> would be permanently stuck on `tip_not_trusted`. The scope below is preserved
+> as the accepted record; operator-facing detail is
+> [`review_disposition` gate](../concepts.md#review_disposition-gate),
+> [Review coordinator](../concepts.md#review-coordinator),
+> [Review ledger](../concepts.md#review-ledger),
+> [Shipping Reviewer](../concepts.md#shipping-reviewer), and
+> [SCHEMA-CONTRACT](../SCHEMA-CONTRACT.md#fg-640-gate-and-lens-selection-events).
+
 - add `review_disposition` gate derivation;
 - migrate `feature` from six authoritative build reds to the evidence-led
   lifecycle;
@@ -959,8 +1020,21 @@ actual boundary that cannot ship together.
   correctness, recovery, and evidence-preservation fixes. FG-541 must be
   folded into or explicitly superseded by this lifecycle before independent
   implementation.
-- Change 0 activates the interim policy before ledger implementation begins;
-  Change 3 replaces that temporary policy with the evidence-led default.
+  **SATISFIED as of FG-640.** The condition the operator amendment of
+  2026-07-28 set — a durable mapping from each FG-541 requirement to the
+  mechanism, enforcing code, test, and gate condition that satisfies it — is
+  recorded at
+  [FG-541 evidence mapping](../concepts.md#fg-541-evidence-mapping) in
+  `docs/concepts.md`. All four requirements (local-only fixer commits, no
+  silent publication of unrelated work, exact-head CI, trusted-tip equality)
+  map to shipped mechanisms, so FG-541 may be marked superseded rather than
+  implemented independently.
+- Change 0 activated the interim policy before ledger implementation began;
+  Change 3 has since replaced that temporary policy with the evidence-led
+  default, in the orchestrator seed and the rendered `CLAUDE.md` block. Change 0
+  is **retired** — the text under
+  [Change 0](#change-0--activate-the-interim-operating-policy) is the historical
+  record of what stood in the interim, not current policy.
 
 ## Acceptance scenarios
 
@@ -1060,10 +1134,12 @@ by a second mandatory lane.
 
 `review-loop --max-rounds 1` can be used as a discovery-only stop, but its
 output is not a durable ledger and must not be represented as the finished
-model. This is advisory policy until `docs/autonomous-run-prompt.md` and the
-orchestrator seed are updated; both currently encode the legacy repeated-loop
-behavior and remain authoritative for autonomous runs. Change 0 performs that
-activation before ledger implementation begins.
+model. This was advisory policy until `docs/autonomous-run-prompt.md` and the
+orchestrator seed were updated. **Both now encode the evidence-led review**:
+Change 0 activated the interim sequence in them, and Change 3 (FG-640) replaced
+it with the standing default — `forge review-loop` is deprecated, prints a
+deprecation note naming `forge review`, and is no longer the documented
+discovery transport.
 
 ## Reference architecture alignment
 
