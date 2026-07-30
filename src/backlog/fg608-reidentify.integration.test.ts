@@ -28,6 +28,7 @@ import { registryByKey } from "../store/project-registry.js";
 import { computeRepositoryEvidence } from "../store/project-registry.js";
 import { readBacklogConfig } from "./config.js";
 import { SNAPSHOT_DIR_ENV } from "./container-authority.js";
+import { authorityTestkitEnv, withAuthorityTestkit } from "./container-authority.testkit-spawn.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const entry = resolve(here, "..", "cli", "index.ts");
@@ -40,11 +41,17 @@ let prevHome: string | undefined;
 let prevDbPath: string | undefined;
 
 function runForge(args: string[], extraEnv: Record<string, string> = {}) {
-  return spawnSync(tsx, [entry, ...args], {
+  return spawnSync(tsx, withAuthorityTestkit(entry, args), {
     cwd: projectDir,
     input: "",
     encoding: "utf8",
-    env: { ...process.env, FORGE_HOME: home, FORGE_DB_PATH: join(home, "forge.db"), ...extraEnv },
+    env: {
+      ...process.env,
+      FORGE_HOME: home,
+      FORGE_DB_PATH: join(home, "forge.db"),
+      ...authorityTestkitEnv(),
+      ...extraEnv,
+    },
   });
 }
 
@@ -154,10 +161,15 @@ test("FG-608 reidentify: REFUSES to merge two projects' backlogs", () => {
   try {
     mkdirSync(join(other, "backlog"), { recursive: true });
     spawnSync("git", ["init", "-q", "-b", "main"], { cwd: other });
-    const r = spawnSync(tsx, [entry, "backlog", "import", "--project", other, "--json"], {
+    const r = spawnSync(tsx, withAuthorityTestkit(entry, ["backlog", "import", "--project", other, "--json"]), {
       cwd: other,
       encoding: "utf8",
-      env: { ...process.env, FORGE_HOME: home, FORGE_DB_PATH: join(home, "forge.db") },
+      env: {
+        ...process.env,
+        FORGE_HOME: home,
+        FORGE_DB_PATH: join(home, "forge.db"),
+        ...authorityTestkitEnv(),
+      },
     });
     assert.equal(r.status, 0, r.stderr);
     const otherKey = (JSON.parse(r.stdout) as { projectKey: string }).projectKey;

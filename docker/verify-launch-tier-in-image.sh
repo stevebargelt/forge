@@ -144,17 +144,25 @@ run_tier_in_image() {
   # esbuild / better-sqlite3 bindings) and will not load on the container's platform;
   # `npm ci` below builds the right one. .git is carried in: forge's own tests walk up
   # from cwd looking for a repo.
-  #
-  # NOTE (FG-644): this path still hands the container the HOST's git state verbatim, so
-  # run it from a committed checkout — launch-cli.integration.test.ts builds a real
-  # release, and forge refuses a dirty builder. forge-test no longer has that constraint
-  # (it commits its scratch); this script has not been given the same treatment.
   echo "==> copying the working tree into $DEST (excluding node_modules)"
   docker exec -u agent "$cid" mkdir -p "$DEST"
   tar -cf - -C "$REPO_ROOT" \
     --exclude='*/node_modules' \
     --exclude='*/node_modules/*' \
     . | docker exec -i -u agent "$cid" tar -xf - -C "$DEST"
+
+  # FG-645: the copy above carries the HOST's git state verbatim, so an operator with
+  # work in progress handed the container a DIRTY tree — and
+  # launch-cli.integration.test.ts builds a real release, which forge refuses to do
+  # from a dirty builder. The copy gets its own throwaway repo instead, exactly as
+  # forge-test does for its scratch, so this harness runs from any checkout and
+  # verifies the bytes the operator actually wrote. The copied .git is REPLACED, never
+  # committed through: on a linked worktree it is a pointer into the operator's real
+  # admin dir (FG-575).
+  local branch
+  branch=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)
+  echo "==> committing the copied tree into its own git (branch: $branch)"
+  docker exec -u agent -w "$DEST" "$cid" bash docker/commit-scratch-tree.sh "$DEST" --branch "$branch"
 
   echo "==> npm ci inside the container"
   docker exec -u agent -w "$DEST" "$cid" npm ci

@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { executeHookPlan, planCommitMsgHook } from "./init.js";
+import { authorityTestkitEnv, withAuthorityTestkit } from "../../backlog/container-authority.testkit-spawn.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const entry = resolve(here, "..", "..", "cli", "index.ts");
@@ -24,10 +25,10 @@ const tsx = resolve(here, "..", "..", "..", "node_modules", ".bin", "tsx");
 let projectDir: string;
 
 function runForge(args: string[], cwd?: string, env?: NodeJS.ProcessEnv) {
-  return spawnSync(tsx, [entry, ...args], {
+  return spawnSync(tsx, withAuthorityTestkit(entry, args), {
     cwd: cwd ?? projectDir,
     encoding: "utf8",
-    env: env ?? process.env,
+    env: { ...(env ?? process.env), ...authorityTestkitEnv() },
   });
 }
 

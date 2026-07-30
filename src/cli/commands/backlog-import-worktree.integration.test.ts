@@ -34,6 +34,7 @@ import { getDb } from "../../store/db.js";
 import { getTicket, ticketsForProject } from "../../store/tickets.js";
 import { readBacklogConfig } from "../../backlog/config.js";
 import { computeRepositoryEvidence, registryByEvidence } from "../../store/project-registry.js";
+import { authorityTestkitEnv, withAuthorityTestkit } from "../../backlog/container-authority.testkit-spawn.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const entry = resolve(here, "..", "index.ts");
@@ -99,10 +100,11 @@ type ConflictJson = {
 };
 
 function runImport(projectDir: string) {
-  return spawnSync(tsx, [entry, "backlog", "import", "--project", projectDir, "--json"], {
+  return spawnSync(tsx, withAuthorityTestkit(entry, ["backlog", "import", "--project", projectDir, "--json"]), {
     cwd: projectDir,
     input: "",
     encoding: "utf8",
+    env: { ...process.env, ...authorityTestkitEnv() },
   });
 }
 

@@ -22,6 +22,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { authorityTestkitEnv, withAuthorityTestkit } from "./container-authority.testkit-spawn.js";
+
 const here = dirname(fileURLToPath(import.meta.url));
 const entry = resolve(here, "..", "cli", "index.ts");
 const tsx = resolve(here, "..", "..", "node_modules", ".bin", "tsx");
@@ -29,10 +31,11 @@ const tsx = resolve(here, "..", "..", "node_modules", ".bin", "tsx");
 let projectDir: string;
 
 function runForge(args: string[], input?: string) {
-  return spawnSync(tsx, [entry, ...args], {
+  return spawnSync(tsx, withAuthorityTestkit(entry, args), {
     cwd: projectDir,
     input: input ?? "",
     encoding: "utf8",
+    env: { ...process.env, ...authorityTestkitEnv() },
   });
 }
 
@@ -136,12 +139,16 @@ test("FG-389: forge backlog list ignores BACKLOG.md when backlog/ exists", () =>
   // Write a BACKLOG.md that would yield different results if read
   writeFileSync(join(projectDir, "BACKLOG.md"), LEGACY_BACKLOG_CONTENT);
 
-  const res = runForge(["backlog", "list", "--project", projectDir]);
+  const res = runForge(["backlog", "list", "--json", "--project", projectDir]);
   assert.equal(res.status, 0, `stderr: ${res.stderr}`);
-  // Structured has FG-10 and FG-5; legacy content has #1, #2, #116.
-  // If legacy were read we'd see ticket ids like 1, 2, 116 — not FG- prefixed ids.
-  assert.match(res.stdout, /FG-10/, "should show structured ticket FG-10");
-  assert.doesNotMatch(res.stdout, /#1\b.*first active ticket/, "must not show legacy ticket #1");
+  // Structured has FG-10 and FG-5; legacy content has #1, #2, #116. FG-645: assert
+  // the EXACT set — `match(/FG-10/)` is satisfied by any store that happens to hold
+  // an FG-10, which is every real forge backlog.
+  assert.deepEqual(
+    (JSON.parse(res.stdout) as { id: string }[]).map((t) => t.id).sort(),
+    ["FG-10", "FG-5"],
+    "list must answer from THIS fixture's backlog/, and never from BACKLOG.md",
+  );
 });
 
 test("FG-389: forge backlog show reads from structured backlog/, not BACKLOG.md", () => {
@@ -263,11 +270,20 @@ test("FG-389: after migrate, forge backlog list works on the newly structured ba
   const migrateRes = runForge(["backlog-migrate", "--project", projectDir]);
   assert.equal(migrateRes.status, 0, `migration failed: ${migrateRes.stderr}`);
 
-  // After migration, normal backlog commands should work on the new structured backlog
-  const listRes = runForge(["backlog", "list", "--project", projectDir]);
+  // After migration, normal backlog commands should work on the new structured backlog.
+  // FG-645: assert the ids MIGRATE just minted, not merely that the output says "FG-" —
+  // every forge backlog output does.
+  const listRes = runForge(["backlog", "list", "--json", "--project", projectDir]);
   assert.equal(listRes.status, 0, `list after migrate failed: ${listRes.stderr}`);
-  // Should show FG-prefixed structured tickets
-  assert.match(listRes.stdout, /FG-/, "list should show structured tickets with FG- prefix");
+  const ids = (JSON.parse(listRes.stdout) as { id: string }[]).map((t) => t.id);
+  const base = join(projectDir, "backlog");
+  const migrated = ["ideas", "epics", "stories", "done"]
+    .filter((sub) => existsSync(join(base, sub)))
+    .flatMap((sub) => readdirSync(join(base, sub)))
+    .map((f) => f.split("-").slice(0, 2).join("-"))
+    .sort();
+  assert.ok(migrated.length > 0, "migration must have written structured ticket files");
+  assert.deepEqual(ids.sort(), migrated, "list must report exactly the tickets migrate wrote");
 });
 
 test("FG-389: forge backlog notes shows backlog/notes.md content written during migration", () => {

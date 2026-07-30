@@ -20,6 +20,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getDb } from "../store/db.js";
 import { getIdSequence, getTicket, ticketsForProject, upsertTicket } from "../store/tickets.js";
+import { authorityTestkitEnv, withAuthorityTestkit } from "./container-authority.testkit-spawn.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const entry = resolve(here, "..", "cli", "index.ts");
@@ -52,10 +53,11 @@ function initRepo(dir: string): void {
 }
 
 function forge(projectDir: string, args: string[]) {
-  return spawnSync(tsx, [entry, ...args, "--project", projectDir], {
+  return spawnSync(tsx, withAuthorityTestkit(entry, [...args, "--project", projectDir]), {
     cwd: projectDir,
     input: "",
     encoding: "utf8",
+    env: { ...process.env, ...authorityTestkitEnv() },
   });
 }
 
@@ -64,7 +66,10 @@ function forgeAsync(
   args: string[],
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((res) => {
-    const child = spawn(tsx, [entry, ...args, "--project", projectDir], { cwd: projectDir });
+    const child = spawn(tsx, withAuthorityTestkit(entry, [...args, "--project", projectDir]), {
+      cwd: projectDir,
+      env: { ...process.env, ...authorityTestkitEnv() },
+    });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (c) => (stdout += String(c)));

@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { closeDb, getDb } from "../store/db.js";
 import { getStorageMode, getStorageModeRecord, ticketsForProject } from "../store/tickets.js";
 import { readBacklogConfig } from "./config.js";
+import { authorityTestkitEnv, withAuthorityTestkit } from "./container-authority.testkit-spawn.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const entry = resolve(here, "..", "cli", "index.ts");
@@ -33,11 +34,11 @@ let prevHome: string | undefined;
 let prevDbPath: string | undefined;
 
 function runForge(args: string[], cwd = projectDir) {
-  return spawnSync(tsx, [entry, ...args], {
+  return spawnSync(tsx, withAuthorityTestkit(entry, args), {
     cwd,
     input: "",
     encoding: "utf8",
-    env: { ...process.env, FORGE_HOME: home, FORGE_DB_PATH: join(home, "forge.db") },
+    env: { ...process.env, FORGE_HOME: home, FORGE_DB_PATH: join(home, "forge.db"), ...authorityTestkitEnv() },
   });
 }
 

@@ -9,6 +9,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { authorityTestkitEnv, withAuthorityTestkit } from "../../backlog/container-authority.testkit-spawn.js";
+
 const here = dirname(fileURLToPath(import.meta.url));
 // here = src/cli/commands; entry is src/cli/index.ts; node_modules is at repo root
 const entry = resolve(here, "..", "index.ts");
@@ -17,7 +19,11 @@ const tsx = resolve(here, "..", "..", "..", "node_modules", ".bin", "tsx");
 let projectDir: string;
 
 function runForge(args: string[]) {
-  return spawnSync(tsx, [entry, ...args], { cwd: projectDir, encoding: "utf8" });
+  return spawnSync(tsx, withAuthorityTestkit(entry, args), {
+    cwd: projectDir,
+    encoding: "utf8",
+    env: { ...process.env, ...authorityTestkitEnv() },
+  });
 }
 
 function setupFixtures(): void {

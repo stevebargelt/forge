@@ -8,6 +8,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSyn
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { authorityTestkitEnv, withAuthorityTestkit } from "./container-authority.testkit-spawn.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const entry = resolve(here, "..", "cli", "index.ts");
@@ -17,9 +18,10 @@ const tsx = existsSync(localTsx) ? localTsx : "tsx";
 let projectDir: string;
 
 function runForge(args: string[]) {
-  return spawnSync(tsx, [entry, ...args], {
+  return spawnSync(tsx, withAuthorityTestkit(entry, args), {
     cwd: projectDir,
     encoding: "utf8",
+    env: { ...process.env, ...authorityTestkitEnv() },
   });
 }
 
@@ -115,12 +117,16 @@ test("integ structured: backlog list --type story returns only stories", () => {
 });
 
 test("integ structured: backlog list with no filter returns all tickets", () => {
-  const res = runForge(["backlog", "list", "--project", projectDir]);
+  const res = runForge(["backlog", "list", "--json", "--project", projectDir]);
   assert.equal(res.status, 0, `stderr: ${res.stderr}`);
-  // Should include tickets from ideas, epics, stories, and done
-  assert.match(res.stdout, /FG-10/);
-  assert.match(res.stdout, /FG-20/);
-  assert.match(res.stdout, /FG-30/);
+  // FG-645: the EXACT inventory, not containment. This fixture's ids are ordinary
+  // low numbers that any real forge backlog also has, so `match(/FG-10/)` went green
+  // against a redirected read of 519 host tickets — the a2 shape exactly.
+  assert.deepEqual(
+    (JSON.parse(res.stdout) as { id: string }[]).map((t) => t.id).sort(),
+    ["FG-10", "FG-20", "FG-30", "FG-5"],
+    "list must answer from THIS fixture — ideas, epics, stories and done, and nothing else",
+  );
 });
 
 test("integ structured: backlog list --json returns valid JSON array", () => {
@@ -469,6 +475,7 @@ test("integ structured: backlog show returns done copy for ghost active ticket",
   assert.equal(res.status, 0);
   const ticket = JSON.parse(res.stdout) as Record<string, unknown>;
   assert.equal(ticket["status"], "done", "done copy must be returned, not the ghost active");
+  assert.equal(ticket["title"], "Ghost ticket", "the ghost this test planted, not a same-id ticket from elsewhere");
 });
 
 test("integ structured: backlog list warns on stderr for ghost active ticket", () => {
@@ -487,6 +494,11 @@ test("integ structured: backlog list shows done status for ghost active ticket",
   const ghost = tickets.filter((t) => t.id === "FG-96");
   assert.equal(ghost.length, 1, "ghost ticket must appear exactly once");
   assert.equal(ghost[0]!.status, "done", "ghost ticket must be shown with done status");
+  assert.deepEqual(
+    tickets.map((t) => t.id).sort(),
+    ["FG-10", "FG-20", "FG-30", "FG-5", "FG-96"],
+    "the fixture plus the planted ghost — a list answered from anywhere else is not this test's subject",
+  );
 });
 
 // ─── FG-397: atomicity guarantee — close-then-access cross-step handoffs ─────
@@ -507,12 +519,14 @@ test("integ FG-397: close story then list shows exactly one done copy, no active
 });
 
 test("integ FG-397: close story then show returns done status (atomicity)", () => {
-  runForge(["backlog", "close", "FG-30", "--project", projectDir]);
+  const closed = runForge(["backlog", "close", "FG-30", "--project", projectDir]);
+  assert.equal(closed.status, 0, `close failed: ${closed.stderr}`);
 
   const show = runForge(["backlog", "show", "FG-30", "--json", "--project", projectDir]);
   assert.equal(show.status, 0, `show after close failed: ${show.stderr}`);
   const ticket = JSON.parse(show.stdout) as Record<string, unknown>;
   assert.equal(ticket["status"], "done", "show must return done status after close");
+  assert.equal(ticket["title"], "Implement thing", "the fixture's FG-30, not a same-id ticket from another store");
   assert.equal(warnings(show), "", "no ghost warning expected after atomic close");
 });
 
@@ -540,40 +554,36 @@ test("integ FG-397: close idea then list shows exactly one done copy, no active 
   assert.equal(warnings(list), "", "no ghost warning expected after atomic close");
 });
 
-test("integ FG-397: move story to epic leaves exactly one copy across all dirs", () => {
-  runForge(["backlog", "move", "FG-30", "epic", "--project", projectDir]);
-
+// FG-645: these three counted files and ignored the CLI's exit status, so a move
+// that REFUSED outright still left exactly one copy — where it started — and the
+// test went green. Assert the move succeeded and landed in the DESTINATION.
+function copiesOf(id: string): Record<string, number> {
   const base = join(projectDir, "backlog");
-  let count = 0;
+  const counts: Record<string, number> = {};
   for (const sub of ["stories", "epics", "ideas", "done"]) {
     const d = join(base, sub);
-    if (existsSync(d)) count += readdirSync(d).filter((f) => f.startsWith("FG-30-")).length;
+    const n = existsSync(d) ? readdirSync(d).filter((f) => f.startsWith(`${id}-`)).length : 0;
+    if (n > 0) counts[sub] = n;
   }
-  assert.equal(count, 1, "exactly one copy must exist across all backlog dirs after move");
+  return counts;
+}
+
+test("integ FG-397: move story to epic leaves exactly one copy across all dirs", () => {
+  const res = runForge(["backlog", "move", "FG-30", "epic", "--project", projectDir]);
+  assert.equal(res.status, 0, `move failed: ${res.stderr}`);
+  assert.deepEqual(copiesOf("FG-30"), { epics: 1 }, "exactly one copy, in the destination dir");
 });
 
 test("integ FG-397: move epic to story leaves exactly one copy across all dirs", () => {
-  runForge(["backlog", "move", "FG-20", "story", "--project", projectDir]);
-
-  const base = join(projectDir, "backlog");
-  let count = 0;
-  for (const sub of ["stories", "epics", "ideas", "done"]) {
-    const d = join(base, sub);
-    if (existsSync(d)) count += readdirSync(d).filter((f) => f.startsWith("FG-20-")).length;
-  }
-  assert.equal(count, 1, "exactly one copy must exist across all backlog dirs after move");
+  const res = runForge(["backlog", "move", "FG-20", "story", "--project", projectDir]);
+  assert.equal(res.status, 0, `move failed: ${res.stderr}`);
+  assert.deepEqual(copiesOf("FG-20"), { stories: 1 }, "exactly one copy, in the destination dir");
 });
 
 test("integ FG-397: move story to idea leaves exactly one copy across all dirs", () => {
-  runForge(["backlog", "move", "FG-30", "idea", "--project", projectDir]);
-
-  const base = join(projectDir, "backlog");
-  let count = 0;
-  for (const sub of ["stories", "epics", "ideas", "done"]) {
-    const d = join(base, sub);
-    if (existsSync(d)) count += readdirSync(d).filter((f) => f.startsWith("FG-30-")).length;
-  }
-  assert.equal(count, 1, "exactly one copy must exist across all backlog dirs after move");
+  const res = runForge(["backlog", "move", "FG-30", "idea", "--project", projectDir]);
+  assert.equal(res.status, 0, `move failed: ${res.stderr}`);
+  assert.deepEqual(copiesOf("FG-30"), { ideas: 1 }, "exactly one copy, in the destination dir");
 });
 
 // ─── FG-397: ghost detection in ideas/ directory via CLI ─────────────────────
@@ -610,7 +620,10 @@ test("integ FG-397: ghost in ideas dir — list warns and returns done copy", ()
 
 function runForgeAsync(args: string[], cwd: string): Promise<{ stdout: string; stderr: string; status: number | null }> {
   return new Promise((resolve) => {
-    const proc = spawn(tsx, [entry, ...args], { cwd });
+    const proc = spawn(tsx, withAuthorityTestkit(entry, args), {
+      cwd,
+      env: { ...process.env, ...authorityTestkitEnv() },
+    });
     let stdout = "";
     let stderr = "";
     proc.stdout.on("data", (d: Buffer) => { stdout += d.toString(); });

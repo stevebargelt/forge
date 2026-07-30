@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { findGitRoot } from "../util/git-root.js";
+import { authorityTestkitBinEnv } from "../backlog/container-authority.testkit-spawn.js";
 
 // FG-567 / FG-569 — the LIVE control entry (bin/forge) must report its own fate
 // faithfully: a signalled death is a signal, a numeric exit stays that number,
@@ -47,7 +48,14 @@ function runForge(
   return new Promise((res, rej) => {
     // stdin is a pipe we hold OPEN so a stdin-reading command blocks instead of
     // seeing EOF; stdout/stderr ignored — we only care about the exit fate.
-    const child = spawn(BIN_FORGE, args, { stdio: ["pipe", "ignore", "ignore"], env: process.env });
+    // FG-645: the blocking case below relies on `backlog file` reaching its stdin
+    // read. Inside an agent container the compiled-in authority probe REFUSES that
+    // mutating verb first, so the process was already dead when the signal landed
+    // and this suite reported a numeric exit for a kill it never delivered.
+    const child = spawn(BIN_FORGE, args, {
+      stdio: ["pipe", "ignore", "ignore"],
+      env: { ...process.env, ...authorityTestkitBinEnv() },
+    });
     child.on("exit", (code, signal) => res({ code, signal }));
     child.on("error", rej);
     opts.onSpawn?.(child);

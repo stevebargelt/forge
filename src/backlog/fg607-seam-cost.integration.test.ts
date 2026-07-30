@@ -24,6 +24,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { authorityTestkitEnv, withAuthorityTestkit } from "./container-authority.testkit-spawn.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const entry = resolve(here, "..", "cli", "index.ts");
@@ -54,11 +55,11 @@ afterEach(() => {
 
 function forge(projectDir: string, args: string[], opts?: { realGit?: boolean }) {
   const path = opts?.realGit ? (process.env["PATH"] ?? "") : `${shimDir}:${process.env["PATH"] ?? ""}`;
-  return spawnSync(tsx, [entry, ...args, "--project", projectDir], {
+  return spawnSync(tsx, withAuthorityTestkit(entry, [...args, "--project", projectDir]), {
     cwd: projectDir,
     input: "",
     encoding: "utf8",
-    env: { ...process.env, FORGE_HOME: home, PATH: path },
+    env: { ...process.env, FORGE_HOME: home, PATH: path, ...authorityTestkitEnv() },
   });
 }
 
