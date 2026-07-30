@@ -16,6 +16,8 @@ state lives in the backlog database.
 
 - [Evidence-Led Review Lifecycle](evidence-led-review-lifecycle.md) — Change 0 is
   active; implementation is decomposed serially into FG-638, FG-639, and FG-640.
+  Change 1 (FG-638, the durable review ledger and its read surfaces) shipped
+  2026-07-30; FG-639 and FG-640 have not started.
 
 ## Concept / roadmap
 

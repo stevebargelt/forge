@@ -1,11 +1,14 @@
 # PRD — Evidence-Led Review Lifecycle
 
 **Status:** confirmed. Change 0 is active; implementation is decomposed serially
-into FG-638 → FG-639 → FG-640 and has not started.
+into FG-638 → FG-639 → FG-640. **Change 1 (FG-638) has shipped** — see its
+banner under [Change 1](#change-1--durable-ledger-and-read-surfaces). Changes 2
+and 3 have not started, so the Change-0 interim operating policy remains in
+force exactly as written below.
 
 **Date:** 2026-07-27
 
-**Last revised:** 2026-07-29
+**Last revised:** 2026-07-30
 
 **Backlog linkage:** FG-638 (durable ledger) → FG-639 (pilot coordinator) →
 FG-640 (gate and feature-workflow migration)
@@ -686,6 +689,15 @@ forge review disposition <finding-id> <decision> --rationale "..."
 forge review continue <review-id>
 ```
 
+**Shipped so far (FG-638): `show` and `disposition` only.** `start` and
+`continue` are the coordinator's verbs and land with Change 2 — they do not
+exist yet, so there is currently no command that opens a review. `disposition`
+shipped with the per-value precondition flags this document's authority rules
+imply: `--rationale` (always required), `--evidence`/`--evidence-kind` for
+`rejected_premise`, `--ticket` for `deferred`, `--duplicate-of` for `duplicate`,
+`--operator` for an authority-changing `accepted_risk` or a new deferral
+destination, and `--review` to scope a bare `RF-n` ref.
+
 `start` verifies, confirms the review contract against the final diff, and
 performs discovery, then stops at disposition when findings exist.
 
@@ -814,6 +826,22 @@ Change 0 precedes Change 1 and is independent of ledger code. The interim
 policy becomes active only when both authoritative sources agree.
 
 ### Change 1 — durable ledger and read surfaces
+
+> **[SHIPPED 2026-07-30 (FG-638) — `ee72fdbf` + `e63b6194` + `1b066aa0`.]** Every
+> bullet below landed. Two refinements the implementation settled that this scope
+> did not state: the **run row owns `review_mode`** (a never-marked run adopts its
+> first review's mode atomically; a marked run refuses a conflicting one, so the
+> run and its ledger can never disagree), and `rejected_premise` evidence is
+> validated **structurally** — each kind is defined by required fields
+> (`replayed_command` `{command, output}`, `deterministic_reproduction`
+> `{reproduction, result}`, `anchored_contradiction` `{file, line, fact}`) and
+> stored as that parsed payload. Whether the payload actually *disproves* its
+> finding is a semantic judgement and stays Change 2's. The ledger is not yet
+> populated by anything: no production path opens a review or ingests findings
+> until the Change 2 coordinator lands. Gate behavior is unchanged as promised.
+> The scope below is preserved as the accepted record; operator-facing detail is
+> [Review ledger](../concepts.md#review-ledger) and
+> [SCHEMA-CONTRACT](../SCHEMA-CONTRACT.md#reviews--review_findings-tables-fg-638-dashboard-read-path).
 
 - additive `reviews` and `review_findings` schema/migrations;
 - persisted review mode, confirmed contract SHA, and per-lens outcome
