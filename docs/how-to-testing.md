@@ -38,7 +38,7 @@ Running the aggregate on the host is still normal during local iteration (`forge
 
 The mismatch is manufactured in the **manifest**, never by finding a second interpreter, so the whole file is deterministic under the one `.nvmrc` Node that is always present:
 
-- a manifest ABI **newer than** the running interpreter's (`999`) → refused by name, naming both ABIs;
+- a manifest ABI **newer than** the running interpreter's (`999`) → refused by name, naming both ABIs (string and unquoted-number forms — the numeric one refuses by that same named message rather than `TypeError`-ing on its own manifest's type);
 - a manifest ABI **older than** the running interpreter's (`1`) → refused as a NEWER-actual (the exact case the pre-FG-570 `major >= 24` floor waved through);
 - a manifest ABI **equal to** the running interpreter's → runs, no false refusal (string and unquoted-number forms);
 - **unreadable ABI evidence fails closed** — empty, unparseable, missing `abi`, a truncated/malformed manifest, or a structurally garbage value → refused by name, naming the manifest, never falling back to the pinned constant and never a stack trace;
