@@ -251,7 +251,26 @@ export type EventType =
   // Payload carries disposition, decidedBy (operator | orchestrator), the candidate
   // sha it was decided against, rationale, evidence, and any canonical/followup
   // linkage — the durable record behind the authority rules.
-  | "review.finding_dispositioned";
+  | "review.finding_dispositioned"
+  // FG-639 (Change 2): the coordinator's own audit half.
+  // review.stage_completed names the stage AND the sha it completed against — the durable
+  // answer to "what has this review already done", which is what makes resuming after a
+  // crash a read rather than a guess.
+  | "review.stage_completed"
+  // What a recheck ESTABLISHED for one finding, per id: resolved | still_present |
+  // inconclusive, the evidence kind, and the sha it was proven at. A resolution is
+  // candidate-bound; the event says which candidate.
+  | "review.finding_resolution_recorded"
+  // The candidate moved, so resolutions proven at the old sha stopped being evidence about
+  // the new one. Payload names every finding whose resolution was cleared and why.
+  | "review.resolutions_invalidated"
+  // PRD Appendix A: the FixBatch lifecycle. created carries the revision, the candidate,
+  // the superseded batch and the payload hash; dispatched pairs the batch with the task
+  // that consumed it; ingested records the per-finding results and whether the ingest was
+  // a repeat (delivery is at-least-once, application is idempotent).
+  | "review.fix_batch_created"
+  | "review.fix_batch_dispatched"
+  | "review.fix_batch_ingested";
 
 export type Event = {
   id: number;

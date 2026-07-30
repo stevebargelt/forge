@@ -160,6 +160,36 @@ export type FindingSource = {
   note?: string;
 };
 
+/** FG-639: the lifecycle stages, in order. `reviews.state` says where a review IS;
+ *  stage evidence says what it has already DONE and at which sha. Both are needed —
+ *  `forge review continue` after a crash must resume the persisted NEXT stage without
+ *  repeating a completed one, and a stage recorded against a superseded candidate is
+ *  correctly not complete for the candidate that exists now. */
+export const REVIEW_STAGES = [
+  "verified_entry",
+  "contract_confirmed",
+  "discovery",
+  "fix",
+  "docs",
+  "verified_final",
+  "recheck",
+  "shipping",
+] as const;
+export type ReviewStage = (typeof REVIEW_STAGES)[number];
+
+export type StageRecord = {
+  /** The sha the stage completed against. A stage is complete FOR A SHA, never in the
+   *  abstract. */
+  sha: string;
+  at: string;
+  detail?: string;
+  /** Stage-specific durable detail — the batch id a fix stage consumed, the ids a recheck
+   *  left unresolved, whether a stage was a legitimate no-op. */
+  meta?: Record<string, unknown>;
+};
+
+export type StageEvidence = Partial<Record<ReviewStage, StageRecord>>;
+
 export type Review = {
   id: string;
   runId?: string;
@@ -171,6 +201,7 @@ export type Review = {
   trustedRemoteSha?: string;
   contract?: unknown;
   lensOutcomes?: unknown;
+  stageEvidence?: StageEvidence;
   reviewMode: ReviewMode;
   state: ReviewState;
   createdAt: string;
@@ -225,6 +256,7 @@ type ReviewRow = {
   trusted_remote_sha: string | null;
   contract_json: string | null;
   lens_outcomes_json: string | null;
+  stage_evidence_json: string | null;
   review_mode: string;
   state: string;
   created_at: string;
@@ -280,6 +312,8 @@ function rowToReview(row: ReviewRow): Review {
     trustedRemoteSha: row.trusted_remote_sha ?? undefined,
     contract: row.contract_json !== null ? (JSON.parse(row.contract_json) as unknown) : undefined,
     lensOutcomes: row.lens_outcomes_json !== null ? (JSON.parse(row.lens_outcomes_json) as unknown) : undefined,
+    stageEvidence:
+      row.stage_evidence_json !== null ? (JSON.parse(row.stage_evidence_json) as StageEvidence) : undefined,
     reviewMode: row.review_mode as ReviewMode,
     state: row.state as ReviewState,
     createdAt: row.created_at,
@@ -340,6 +374,7 @@ export type NewReview = {
   trustedRemoteSha?: string;
   contract?: unknown;
   lensOutcomes?: unknown;
+  stageEvidence?: StageEvidence;
   state?: ReviewState;
 };
 
@@ -400,8 +435,8 @@ export function insertReview(r: NewReview): Review {
       .prepare(
         `INSERT INTO reviews (id, run_id, subject_task_id, ticket_id, base_sha, contract_confirmed_sha,
                               candidate_sha, trusted_remote_sha, contract_json, lens_outcomes_json,
-                              review_mode, state, created_at, updated_at, settled_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+                              stage_evidence_json, review_mode, state, created_at, updated_at, settled_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
       )
       .run(
         r.id,
@@ -414,6 +449,7 @@ export function insertReview(r: NewReview): Review {
         r.trustedRemoteSha ?? null,
         r.contract !== undefined ? JSON.stringify(r.contract) : null,
         r.lensOutcomes !== undefined ? JSON.stringify(r.lensOutcomes) : null,
+        r.stageEvidence !== undefined ? JSON.stringify(r.stageEvidence) : null,
         mode,
         state,
         at,
@@ -483,6 +519,7 @@ export type ReviewPatch = {
   trustedRemoteSha?: string;
   contract?: unknown;
   lensOutcomes?: unknown;
+  stageEvidence?: StageEvidence;
 };
 
 /** The mutable-identity fields. Not a state transition, so no lifecycle event —
@@ -492,11 +529,13 @@ export function updateReview(id: string, patch: ReviewPatch): Review {
   if (!before) throw new Error(`forge: no review ${id}`);
   const contract = patch.contract !== undefined ? patch.contract : before.contract;
   const lensOutcomes = patch.lensOutcomes !== undefined ? patch.lensOutcomes : before.lensOutcomes;
+  const stageEvidence = patch.stageEvidence !== undefined ? patch.stageEvidence : before.stageEvidence;
   writeTransaction(() => {
     getDb()
       .prepare(
         `UPDATE reviews SET base_sha = ?, contract_confirmed_sha = ?, candidate_sha = ?,
-                            trusted_remote_sha = ?, contract_json = ?, lens_outcomes_json = ?, updated_at = ?
+                            trusted_remote_sha = ?, contract_json = ?, lens_outcomes_json = ?,
+                            stage_evidence_json = ?, updated_at = ?
          WHERE id = ?`,
       )
       .run(
@@ -506,11 +545,45 @@ export function updateReview(id: string, patch: ReviewPatch): Review {
         patch.trustedRemoteSha ?? before.trustedRemoteSha ?? null,
         contract !== undefined ? JSON.stringify(contract) : null,
         lensOutcomes !== undefined ? JSON.stringify(lensOutcomes) : null,
+        stageEvidence !== undefined ? JSON.stringify(stageEvidence) : null,
         nowIso(),
         id,
       );
   });
   return getReview(id) as Review;
+}
+
+/** Record that a stage completed, at a sha. Emits an event — a completed stage is part of
+ *  the audit history, not only a resume hint. */
+export function recordStageEvidence(
+  id: string,
+  stage: ReviewStage,
+  rec: Omit<StageRecord, "at"> & { at?: string },
+): Review {
+  const before = getReview(id);
+  if (!before) throw new Error(`forge: no review ${id}`);
+  const at = rec.at ?? nowIso();
+  const evidence: StageEvidence = { ...(before.stageEvidence ?? {}), [stage]: { ...rec, at } };
+  writeTransaction(() => {
+    getDb()
+      .prepare(`UPDATE reviews SET stage_evidence_json = ?, updated_at = ? WHERE id = ?`)
+      .run(JSON.stringify(evidence), at, id);
+    logEvent("review.stage_completed", {
+      runId: before.runId,
+      taskId: before.subjectTaskId,
+      payload: { reviewId: id, stage, sha: rec.sha, at, detail: rec.detail, meta: rec.meta },
+    });
+  });
+  return getReview(id) as Review;
+}
+
+/** Is this stage complete for `sha`? A record at another sha is history, not completion —
+ *  which is exactly how a docs phase that moved the candidate re-opens final verification
+ *  and recheck without anyone having to remember to reset a flag. */
+export function stageCompleteAt(review: Review, stage: ReviewStage, sha: string | undefined): boolean {
+  const rec = review.stageEvidence?.[stage];
+  if (rec === undefined || sha === undefined) return false;
+  return rec.sha === sha;
 }
 
 // ─── findings ───────────────────────────────────────────────────────────────
@@ -947,6 +1020,105 @@ function ticketKnown(ticketId: string): boolean {
     | { ok: number }
     | undefined;
   return row !== undefined;
+}
+
+// ─── resolution (FG-639) ────────────────────────────────────────────────────
+
+export const RESOLUTIONS = ["resolved", "still_present", "inconclusive"] as const;
+export type Resolution = (typeof RESOLUTIONS)[number];
+
+export type ResolutionRecord = {
+  resolution: Resolution;
+  evidenceKind?: string;
+  evidence?: string;
+  /** The sha the recheck ran against. A resolution is candidate-BOUND: it means
+   *  "proven at this sha", never "proven". */
+  resolvedSha: string;
+};
+
+/** Record what the recheck established for one finding.
+ *
+ *  DISPOSITION IS NOT TOUCHED HERE. A `still_present` finding stays `fix_now` — the
+ *  decision to fix it was correct and is still standing; what changed is that the fix is
+ *  not proven. Overwriting the disposition would erase the decision and its authority,
+ *  and `summarizeReview` already counts an unresolved `fix_now` as unsettled, so the
+ *  review returns to disposition without the ledger forgetting anything. */
+export function recordResolution(findingId: string, rec: ResolutionRecord): ReviewFinding {
+  const finding = getFinding(findingId);
+  if (!finding) throw new Error(`forge: no finding ${findingId}`);
+  const review = getReview(finding.reviewId);
+  const at = nowIso();
+  writeTransaction(() => {
+    getDb()
+      .prepare(
+        `UPDATE review_findings
+            SET resolution = ?, resolution_evidence_kind = ?, resolution_evidence = ?, resolved_sha = ?, updated_at = ?
+          WHERE id = ?`,
+      )
+      .run(rec.resolution, rec.evidenceKind ?? null, rec.evidence ?? null, rec.resolvedSha, at, findingId);
+    logEvent("review.finding_resolution_recorded", {
+      runId: review?.runId,
+      taskId: review?.subjectTaskId,
+      payload: {
+        reviewId: finding.reviewId,
+        findingId,
+        findingRef: finding.findingRef,
+        resolution: rec.resolution,
+        evidenceKind: rec.evidenceKind ?? null,
+        resolvedSha: rec.resolvedSha,
+      },
+    });
+  });
+  return getFinding(findingId) as ReviewFinding;
+}
+
+export type ResolutionInvalidation = {
+  reviewId: string;
+  fromSha?: string;
+  toSha: string;
+  invalidated: string[];
+};
+
+/** The candidate moved, so every resolution bound to the OLD candidate stops being
+ *  evidence about the new one (PRD "Candidate changes out of band"; scenario #14).
+ *
+ *  Dispositions survive — they are decisions about findings, not claims about a tree.
+ *  Resolutions do not: a `resolved` whose proof executed against a sha that is no longer
+ *  the candidate is exactly the stale-evidence shape the lifecycle refuses. They are
+ *  cleared rather than downgraded so that nothing downstream can read a leftover
+ *  evidence blob as if it still applied. */
+export function invalidateResolutionsForCandidate(reviewId: string, toSha: string): ResolutionInvalidation {
+  const review = getReview(reviewId);
+  if (!review) throw new Error(`forge: no review ${reviewId}`);
+  const stale = findingsForReview(reviewId).filter(
+    (f) => f.resolution !== undefined && f.resolvedSha !== undefined && f.resolvedSha !== toSha,
+  );
+  if (stale.length === 0) return { reviewId, fromSha: review.candidateSha, toSha, invalidated: [] };
+
+  const at = nowIso();
+  writeTransaction(() => {
+    const db = getDb();
+    const clear = db.prepare(
+      `UPDATE review_findings
+          SET resolution = NULL, resolution_evidence_kind = NULL, resolution_evidence = NULL,
+              resolved_sha = NULL, updated_at = ?
+        WHERE id = ?`,
+    );
+    for (const f of stale) clear.run(at, f.id);
+    logEvent("review.resolutions_invalidated", {
+      runId: review.runId,
+      taskId: review.subjectTaskId,
+      payload: {
+        reviewId,
+        fromSha: review.candidateSha ?? null,
+        toSha,
+        findingIds: stale.map((f) => f.id),
+        why: "the candidate changed; candidate-bound resolution and shipping evidence no longer applies",
+      },
+    });
+  });
+
+  return { reviewId, fromSha: review.candidateSha, toSha, invalidated: stale.map((f) => f.id) };
 }
 
 // ─── read-surface projection ────────────────────────────────────────────────

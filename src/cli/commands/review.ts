@@ -1,10 +1,18 @@
 // FG-638 (evidence-led review, Change 1): the operator surfaces over the review
-// ledger — one read verb and one write verb.
+// ledger — reading a review, and recording a disposition with its authority and
+// preconditions enforced.
 //
-// `forge review start` / `continue` (the coordinator) are FG-639. What exists here
-// is deliberately the half that has no behavior to drive: reading a review, and
-// recording a disposition with its authority and preconditions enforced.
+// FG-639 (Change 2) adds the coordinator's two verbs. `start` verifies, confirms the
+// contract against the final diff, discovers, and STOPS at disposition when findings
+// exist — it never fixes. `continue` drives the ONE valid next transition from durable
+// state and never repeats a completed stage; both read what to do next from the ledger
+// rather than from anything the process that started the review was holding.
+//
+// This is a PILOT surface. The `feature` workflow is not migrated and no gate authority
+// changes — both are FG-640.
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import type { Command } from "commander";
 import { ensureForgeDirs } from "../../util/paths.js";
 import { assertStoreForLookup } from "../no-store.js";
@@ -14,10 +22,21 @@ import {
   recordDisposition,
   lookupFinding,
   summarizeReview,
+  insertReview,
+  getReview,
+  findingsForReview,
+  updateReview,
   type Disposition,
   type ReviewFinding,
   type ReviewSummary,
 } from "../../store/reviews.js";
+import { fixBatchesForReview } from "../../store/fix-batches.js";
+import { newReviewId } from "../../util/ids.js";
+import { nextTransition } from "../../v2/review-coordinator.js";
+import { runNextStage, type CoordinatorDeps, type StageOutcome } from "../../v2/review-run.js";
+import { validateReviewContract } from "../../v2/review-contract.js";
+import { buildCoordinatorDeps, parseLensWidening } from "./review-wiring.js";
+import type { AcClaim } from "../../v2/review-evidence.js";
 
 const DASH = "—";
 
@@ -99,10 +118,216 @@ type DispositionOpts = {
   json?: boolean;
 };
 
+type StartOpts = {
+  project?: string;
+  since?: string;
+  contract?: string;
+  run?: string;
+  route?: string;
+  unrouted?: boolean;
+  addLens?: string[];
+  drift?: string;
+  json?: boolean;
+};
+
+type ContinueOpts = {
+  project?: string;
+  route?: string;
+  unrouted?: boolean;
+  addLens?: string[];
+  drift?: string;
+  acceptance?: string;
+  all?: boolean;
+  dryRun?: boolean;
+  json?: boolean;
+};
+
+function readJsonFile(path: string, what: string): unknown {
+  try {
+    return JSON.parse(readFileSync(resolve(path), "utf8")) as unknown;
+  } catch (err) {
+    throw new Error(`forge review: could not read ${what} from ${path}: ${(err as Error).message}`);
+  }
+}
+
+/** Build the deps once per invocation. `--add-lens` / `--drift` are how the widening
+ *  asymmetry is exercised: a lens is ADDED with recorded evidence, and drift the
+ *  coordinator cannot classify is NAMED so the review returns to plan/architecture. There
+ *  is no path classifier and there is no flag that removes a lens. */
+function depsFor(
+  reviewId: string,
+  opts: { project?: string; route?: string; unrouted?: boolean; addLens?: string[]; drift?: string; acceptance?: string },
+): { ok: true; deps: CoordinatorDeps } | { ok: false; refusal: string } {
+  const review = getReview(reviewId);
+  if (!review) return { ok: false, refusal: `no review ${reviewId}` };
+
+  const widening = parseLensWidening(opts.addLens ?? []);
+  if (!widening.ok) return { ok: false, refusal: widening.refusal };
+
+  const acceptance =
+    opts.acceptance !== undefined ? (readJsonFile(opts.acceptance, "acceptance claims") as AcClaim[]) : undefined;
+
+  return {
+    ok: true,
+    deps: buildCoordinatorDeps({
+      projectDir: resolve(opts.project ?? process.cwd()),
+      ticketId: review.ticketId ?? review.id,
+      ...(review.runId !== undefined ? { runId: review.runId } : {}),
+      ...(opts.route !== undefined ? { route: opts.route } : {}),
+      ...(opts.unrouted !== undefined ? { unrouted: opts.unrouted } : {}),
+      ...(widening.widening.length > 0 ? { addLenses: widening.widening } : {}),
+      ...(opts.drift !== undefined ? { unclassifiableDrift: opts.drift } : {}),
+      ...(acceptance !== undefined ? { acceptance } : {}),
+    }),
+  };
+}
+
+function reportStage(outcome: StageOutcome, json: boolean): void {
+  if (json) {
+    console.log(JSON.stringify(outcome, null, 2));
+  } else {
+    const glyph = outcome.status === "advanced" ? "✓" : outcome.status === "stopped" ? "•" : "✗";
+    console.log(`${glyph} ${outcome.transition.kind}: ${outcome.message}`);
+    if (outcome.shipping) {
+      for (const c of outcome.shipping.checks) console.log(`    ${c.ok ? "✓" : "✗"} ${c.id} — ${c.detail}`);
+    }
+  }
+  if (outcome.status === "refused") process.exitCode = 1;
+}
+
+function snapshotFor(reviewId: string) {
+  const review = getReview(reviewId);
+  if (!review) throw new Error(`Not found: ${reviewId}`);
+  return { review, findings: findingsForReview(reviewId), batches: fixBatchesForReview(reviewId) };
+}
+
 export function registerReview(program: Command): void {
   const review = program
     .command("review")
     .description("Read and disposition the durable review ledger (evidence-led review lifecycle)");
+
+  review
+    .command("start")
+    .argument("<ticket-id>", "the ticket whose landed implementation is under review")
+    .option("--project <dir>", "the candidate workspace (default: cwd)")
+    .option("--since <sha>", "the implementation comparison base")
+    .option("--contract <file>", "the approved review contract, as JSON — required to open a review")
+    .option("--run <run-id>", "attach the review to an existing run")
+    .option("--route <route-key>", "the resolved routing-policy key for the dispatches this drives")
+    .option("--unrouted", "acknowledge a deliberately unrouted dispatch")
+    .option(
+      "--add-lens <lens:reason:evidence>",
+      "ADD a risk lens with recorded diff evidence (repeatable). The coordinator may widen the " +
+        "contract; removing a lens or changing any other boundary returns to the approving authority",
+      (v: string, acc: string[] = []) => [...acc, v],
+    )
+    .option("--drift <text>", "name implementation drift you cannot classify — returns to plan/architecture")
+    .option("--json", "emit each stage outcome as JSON")
+    .description("Open a review: verify, confirm the contract against the final diff, discover, stop at disposition")
+    .action(async (ticketId: string, opts: StartOpts) => {
+      ensureForgeDirs();
+      assertStoreForLookup(`review for ${ticketId}`);
+
+      if (opts.contract === undefined) {
+        console.error(
+          `forge review start: --contract <file> is required. The review contract is APPROVED by the plan gate ` +
+            `and persisted with the review; it is never reconstructed from prompts after the fact. Nothing was written.`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+      const validated = validateReviewContract(readJsonFile(opts.contract, "review contract"));
+      if (!validated.ok) {
+        console.error(`forge review start: ${validated.refusal} Nothing was written.`);
+        process.exitCode = 1;
+        return;
+      }
+
+      const reviewId = newReviewId();
+      insertReview({
+        id: reviewId,
+        reviewMode: "evidence_led",
+        ticketId,
+        ...(opts.run !== undefined ? { runId: opts.run } : {}),
+        ...(opts.since !== undefined ? { baseSha: opts.since } : {}),
+        contract: validated.contract,
+        state: "confirming_contract",
+      });
+
+      const built = depsFor(reviewId, opts);
+      if (!built.ok) {
+        console.error(`forge review start: ${built.refusal}`);
+        process.exitCode = 1;
+        return;
+      }
+      const candidate = await built.deps.headSha();
+      updateReview(reviewId, { candidateSha: candidate });
+
+      console.log(`Review ${reviewId} — ticket ${ticketId}, candidate ${candidate}`);
+      console.log(`  lenses: ${validated.contract.risk_lenses.join(", ")}`);
+
+      // start drives stages 1–3 ONLY. It stops at disposition; it never fixes.
+      const startStages = new Set(["verify_entry", "confirm_contract", "discover"]);
+      for (;;) {
+        const pending = nextTransition(snapshotFor(reviewId));
+        if (!startStages.has(pending.kind)) {
+          console.log(`• next: ${pending.kind} — ${pending.reason}`);
+          console.log(`  run \`forge review continue ${reviewId}\` to drive it.`);
+          break;
+        }
+        const outcome = await runNextStage(reviewId, built.deps);
+        reportStage(outcome, opts.json === true);
+        if (outcome.status !== "advanced") break;
+      }
+    });
+
+  review
+    .command("continue")
+    .argument("<review-id>", "review id")
+    .option("--project <dir>", "the candidate workspace (default: cwd)")
+    .option("--route <route-key>", "the resolved routing-policy key for the dispatches this drives")
+    .option("--unrouted", "acknowledge a deliberately unrouted dispatch")
+    .option(
+      "--add-lens <lens:reason:evidence>",
+      "ADD a risk lens with recorded diff evidence (repeatable)",
+      (v: string, acc: string[] = []) => [...acc, v],
+    )
+    .option("--drift <text>", "name implementation drift you cannot classify — returns to plan/architecture")
+    .option("--acceptance <file>", "acceptance-criterion claims for the shipping review, as JSON")
+    .option("--all", "keep driving while each transition advances, instead of one transition")
+    .option("--dry-run", "report the one valid next transition and exit without running it")
+    .option("--json", "emit each stage outcome as JSON")
+    .description("Drive the ONE valid next transition from durable state — never repeats a completed stage")
+    .action(async (reviewId: string, opts: ContinueOpts) => {
+      ensureForgeDirs();
+      assertStoreForLookup(`review ${reviewId}`);
+
+      // --dry-run answers "what would continue do?" without dispatching anything. It reads
+      // the same nextTransition the real run does, so the answer cannot drift from the act.
+      if (opts.dryRun === true) {
+        const pending = nextTransition(snapshotFor(reviewId));
+        console.log(opts.json === true ? JSON.stringify({ transition: pending, status: "dry_run" }, null, 2) : `• next: ${pending.kind} — ${pending.reason}`);
+        return;
+      }
+
+      const built = depsFor(reviewId, opts);
+      if (!built.ok) {
+        console.error(`forge review continue: ${built.refusal}`);
+        process.exitCode = 1;
+        return;
+      }
+
+      for (;;) {
+        const outcome = await runNextStage(reviewId, built.deps);
+        reportStage(outcome, opts.json === true);
+        if (opts.all !== true || outcome.status !== "advanced") break;
+      }
+
+      if (opts.json !== true) {
+        const pending = nextTransition(snapshotFor(reviewId));
+        console.log(`  next: ${pending.kind} — ${pending.reason}`);
+      }
+    });
 
   review
     .command("show")

@@ -1,0 +1,4 @@
+{
+  "tools": ["read"],
+  "notes": "The rechecker is read-only. The host enforces this with -v <project>:/project:ro."
+}

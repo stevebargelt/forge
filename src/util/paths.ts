@@ -151,6 +151,14 @@ export function taskDir(runId: string, taskId: string): string {
   return join(RUNS_DIR, runId, taskId);
 }
 
+// FG-639: the FixBatch delivery snapshot. Keyed on the BATCH, not on a task, because a
+// batch is immutable at a revision and may be delivered to more than one task (delivery is
+// at-least-once): a retry must read back the same bytes that hashed to the persisted value,
+// which a per-task directory could not guarantee.
+export function fixBatchBundleDir(reviewId: string, fixBatchId: string): string {
+  return join(FORGE_HOME, "reviews", reviewId, fixBatchId);
+}
+
 // FG-351: path where a task's git worktree is checked out.
 export function worktreeDir(runId: string, taskId: string): string {
   return join(WORKTREES_DIR, runId, taskId);

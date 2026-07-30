@@ -1,0 +1,238 @@
+// FG-639: Stage 2 discovery completeness and Stage 3 normalization.
+//
+// The discovery half is a FAIL-CLOSED test suite: for each way a lens can fail to produce
+// a review — crash, timeout, missing output, malformed output, forge-synthesized verdict —
+// the assertion is that no pass and no empty finding set appears, and that the panel is
+// reported INCOMPLETE by name. The authored `inconclusive` case is the mirror image: it
+// COUNTS as completion and becomes a finding that has to be dispositioned.
+//
+// The normalization half tests the two directions dedup can be wrong in. Merging two
+// distinct defects is the expensive mistake, so same-anchor-different-invariant stays
+// separate, differing quotes stay separate, and unanchored observations never merge at all.
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import {
+  assessDiscoveryCompleteness,
+  assessLens,
+  collectObservations,
+  normalizeObservations,
+  type DiscoveryFinding,
+  type LensDispatch,
+  type LensOutcome,
+} from "./review-discovery.js";
+
+function finding(over: Partial<DiscoveryFinding> = {}): DiscoveryFinding {
+  return {
+    summary: "the guard is skipped when the map is empty",
+    evidence: "src/store/x.ts:12 returns before the guard",
+    severity: "high",
+    risk_lens: "backend",
+    reachability: "demonstrated",
+    challenges_contract: false,
+    remediation_advice: "advice: move the guard above the early return",
+    ...over,
+  };
+}
+
+function dispatch(over: Partial<LensDispatch> = {}): LensDispatch {
+  return {
+    lens: "backend",
+    role: "red-backend",
+    dispatched: true,
+    result: { outcome: "pass", findings: [] },
+    ...over,
+  };
+}
+
+// ─── fail-closed lens outcomes ──────────────────────────────────────────────
+
+test("FG-639: an authored pass with no findings is a completed outcome", () => {
+  const o = assessLens(dispatch());
+  assert.equal(o.complete, true);
+  if (!o.complete) return;
+  assert.equal(o.outcome, "pass");
+  assert.equal(o.authored, true);
+});
+
+test("FG-639 / PRD #9: a reviewer CRASH yields no pass and no empty finding set", () => {
+  const o = assessLens(dispatch({ dispatched: false, failureKind: "container_crash", result: undefined }));
+  assert.equal(o.complete, false);
+  if (o.complete) return;
+  assert.equal(o.reason, "crashed");
+  assert.equal("outcome" in o, false, "a crashed lens must not carry an outcome at all");
+  assert.equal("findings" in o, false, "a crashed lens must not carry a finding set — not even an empty one");
+});
+
+test("FG-639 / PRD #9: a reviewer TIMEOUT is classified distinctly and is not completion", () => {
+  const o = assessLens(dispatch({ dispatched: false, failureKind: "idle_timeout", result: undefined }));
+  assert.equal(o.complete, false);
+  assert.equal(o.complete ? "" : o.reason, "timed_out");
+});
+
+test("FG-639 / PRD #9: a lens with no result.json at all is missing_output, not a pass", () => {
+  const o = assessLens(dispatch({ result: undefined }));
+  assert.equal(o.complete, false);
+  assert.equal(o.complete ? "" : o.reason, "missing_output");
+});
+
+test("FG-639 / PRD #22: a SYNTHESIZED outcome is never completion, even when it parses", () => {
+  const o = assessLens(dispatch({ synthesized: true, result: { outcome: "inconclusive", inconclusive_reason: "no review" } }));
+  assert.equal(o.complete, false);
+  if (o.complete) return;
+  assert.equal(o.reason, "synthesized");
+  assert.match(o.detail, /synthesized by forge, not authored by a reviewer/);
+});
+
+test("FG-639 / PRD #10: a finding missing a required field invalidates the whole lens result", () => {
+  const o = assessLens(
+    dispatch({
+      result: { outcome: "fail", findings: [{ summary: "something", severity: "high", risk_lens: "backend" }] },
+    }),
+  );
+  assert.equal(o.complete, false);
+  if (o.complete) return;
+  assert.equal(o.reason, "malformed_output");
+  assert.match(o.detail, /reachability|evidence|challenges_contract|remediation_advice/);
+});
+
+test("FG-639: a fail outcome with an EMPTY finding set is malformed — a fail must carry a finding", () => {
+  const o = assessLens(dispatch({ result: { outcome: "fail", findings: [] } }));
+  assert.equal(o.complete, false);
+  assert.equal(o.complete ? "" : o.reason, "malformed_output");
+});
+
+test("FG-639 / PRD #22: an authored inconclusive IS completion and must state why", () => {
+  const withReason = assessLens(
+    dispatch({ result: { outcome: "inconclusive", inconclusive_reason: "could not reach the write path" } }),
+  );
+  assert.equal(withReason.complete, true);
+  assert.equal(withReason.complete ? withReason.outcome : "", "inconclusive");
+
+  const withoutReason = assessLens(dispatch({ result: { outcome: "inconclusive" } }));
+  assert.equal(withoutReason.complete, false, "a reasonless inconclusive is indistinguishable from a synthesized one");
+});
+
+test("FG-639 / PRD #21: one crashed lens leaves discovery incomplete while the others pass", () => {
+  const outcomes: LensOutcome[] = [
+    assessLens(dispatch({ lens: "wide", role: "red-wide" })),
+    assessLens(dispatch({ lens: "security", role: "red-security", dispatched: false, failureKind: "container_crash", result: undefined })),
+  ];
+  const c = assessDiscoveryCompleteness(["wide", "security"], outcomes);
+  assert.equal(c.complete, false);
+  assert.deepEqual(
+    c.missing.map((m) => m.lens),
+    ["security"],
+  );
+  assert.equal(c.missing[0]?.reason, "crashed");
+});
+
+test("FG-639: a selected lens that was never dispatched is reported as having no outcome", () => {
+  const c = assessDiscoveryCompleteness(["wide", "frontend"], [assessLens(dispatch({ lens: "wide", role: "red-wide" }))]);
+  assert.equal(c.complete, false);
+  assert.equal(c.missing[0]?.reason, "no_outcome");
+});
+
+test("FG-639: a RETRIED lens that later authors an outcome clears the earlier failure", () => {
+  const outcomes: LensOutcome[] = [
+    assessLens(dispatch({ lens: "wide", role: "red-wide", dispatched: false, failureKind: "container_crash", result: undefined })),
+    assessLens(dispatch({ lens: "wide", role: "red-wide" })),
+  ];
+  assert.equal(assessDiscoveryCompleteness(["wide"], outcomes).complete, true);
+});
+
+test("FG-639 / PRD #22: an authored inconclusive normalizes into a lens_inconclusive finding", () => {
+  const outcomes = [
+    assessLens(dispatch({ lens: "security", role: "red-security", result: { outcome: "inconclusive", inconclusive_reason: "no reachable path" } })),
+  ];
+  const obs = collectObservations(outcomes);
+  assert.equal(obs.length, 1);
+  assert.equal(obs[0]?.finding.finding_type, "lens_inconclusive");
+  assert.match(obs[0]?.finding.summary ?? "", /security lens returned inconclusive: no reachable path/);
+});
+
+test("FG-639: observations from an INCOMPLETE lens are never collected", () => {
+  const outcomes = [assessLens(dispatch({ synthesized: true, result: { outcome: "fail", findings: [finding()] } }))];
+  assert.deepEqual(collectObservations(outcomes), []);
+});
+
+// ─── normalization / deduplication ──────────────────────────────────────────
+
+test("FG-639 / PRD #2: the same anchored mechanism from two reviewers becomes ONE finding, both sources kept", () => {
+  const r = normalizeObservations([
+    { finding: finding({ file: "src/a.ts", line: 12, invariant_ref: "no partial write" }), source: { redRole: "red-wide" } },
+    {
+      finding: finding({ summary: "worded differently", file: "src/a.ts", line: 12, invariant_ref: "no partial write" }),
+      source: { redRole: "red-backend" },
+    },
+  ]);
+  assert.equal(r.observations.length, 1);
+  assert.equal(r.observations[0]?.mergedFrom, 2);
+  assert.deepEqual(
+    r.observations[0]?.sources?.map((s) => s.redRole),
+    ["red-wide", "red-backend"],
+    "every source reviewer survives the merge as provenance",
+  );
+  assert.equal(r.merges.length, 1);
+});
+
+test("FG-639 / PRD #2: a merge does NOT escalate severity or reachability — correlated is not independent", () => {
+  const r = normalizeObservations([
+    { finding: finding({ file: "src/a.ts", line: 12, severity: "low", reachability: "speculative" }), source: { redRole: "red-wide" } },
+    { finding: finding({ file: "src/a.ts", line: 12, severity: "critical", reachability: "demonstrated" }), source: { redRole: "red-backend" } },
+  ]);
+  assert.equal(r.observations.length, 1);
+  assert.equal(r.observations[0]?.severity, "low", "agreement between correlated reviewers must not raise severity");
+  assert.equal(r.observations[0]?.reachability, "speculative", "nor reachability");
+});
+
+test("FG-639 / PRD #3: superficially similar findings with DIFFERENT invariants stay separate", () => {
+  const r = normalizeObservations([
+    { finding: finding({ file: "src/a.ts", line: 12, invariant_ref: "no partial write" }), source: { redRole: "red-wide" } },
+    { finding: finding({ file: "src/a.ts", line: 12, invariant_ref: "only forge publishes" }), source: { redRole: "red-backend" } },
+  ]);
+  assert.equal(r.observations.length, 2, "different affected invariants are claims about different promises");
+  assert.equal(r.merges.length, 0);
+});
+
+test("FG-639 / PRD #3: same anchor and invariant but DIFFERENT quoted text stays separate — unsure means both", () => {
+  const r = normalizeObservations([
+    { finding: finding({ file: "src/a.ts", line: 12, quoted_text: "if (!guard) return;" }), source: { redRole: "red-wide" } },
+    { finding: finding({ file: "src/a.ts", line: 12, quoted_text: "log.debug(secret)" }), source: { redRole: "red-security" } },
+  ]);
+  assert.equal(r.observations.length, 2);
+});
+
+test("FG-639: quoted text differing only in whitespace still merges", () => {
+  const r = normalizeObservations([
+    { finding: finding({ file: "src/a.ts", line: 12, quoted_text: "if (!guard)   return;" }), source: { redRole: "red-wide" } },
+    { finding: finding({ file: "src/a.ts", line: 12, quoted_text: "if (!guard) return;" }), source: { redRole: "red-backend" } },
+  ]);
+  assert.equal(r.observations.length, 1);
+});
+
+test("FG-639 / PRD #3: UNANCHORED observations never merge — there is no mechanism to compare", () => {
+  const r = normalizeObservations([
+    { finding: finding({ summary: "same words", invariant_ref: "inv" }), source: { redRole: "red-wide" } },
+    { finding: finding({ summary: "same words", invariant_ref: "inv" }), source: { redRole: "red-backend" } },
+  ]);
+  assert.equal(r.observations.length, 2);
+});
+
+test("FG-639: a file-only observation (no line) is unanchored for dedup purposes", () => {
+  const r = normalizeObservations([
+    { finding: finding({ file: "src/a.ts" }), source: { redRole: "red-wide" } },
+    { finding: finding({ file: "src/a.ts" }), source: { redRole: "red-backend" } },
+  ]);
+  assert.equal(r.observations.length, 2);
+});
+
+test("FG-639: the model's own finding id is carried as provenance, never as identity", () => {
+  const obs = collectObservations([
+    assessLens(dispatch({ result: { outcome: "fail", findings: [finding({ finding_id: "CVE-1" })] } })),
+  ]);
+  assert.equal(obs[0]?.source.modelFindingId, "CVE-1");
+  const r = normalizeObservations(obs, { discoveredSha: "sha1" });
+  assert.equal(r.observations[0]?.sources?.[0]?.modelFindingId, "CVE-1");
+  assert.equal(r.observations[0]?.discoveredSha, "sha1");
+});

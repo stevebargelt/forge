@@ -70,6 +70,9 @@ const DEFAULT_ACTIVITY_BY_ROLE: Record<string, string> = {
   "red-frontend": "review",
   "red-backend": "review",
   "red-security": "review",
+  // FG-639: the evidence-led lifecycle's Stage 8 role. Review work, so it resolves the
+  // same activity as the discipline reds rather than falling through to "default".
+  "review-rechecker": "review",
   "architecture-advisor": "reasoning",
   "tech-lead": "reasoning",
   "prompt-author": "design",

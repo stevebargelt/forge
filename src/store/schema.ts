@@ -747,6 +747,13 @@ CREATE TABLE IF NOT EXISTS reviews (
   trusted_remote_sha     TEXT,
   contract_json          TEXT,
   lens_outcomes_json     TEXT,
+  -- FG-639: which lifecycle stages are COMPLETE, and at which sha each completed.
+  -- The state column says where the review is; this says what it has already DONE, which
+  -- is a different question and the one "forge review continue" has to answer after a
+  -- crash: a stage recorded at the current candidate is never repeated merely because the
+  -- process died, and a stage recorded at a SUPERSEDED sha is correctly not complete for
+  -- the candidate that exists now.
+  stage_evidence_json    TEXT,
   -- Copied from the run at creation so a read surface never has to join to answer
   -- "which authority model settles this review".
   review_mode            TEXT NOT NULL DEFAULT 'evidence_led'
@@ -812,6 +819,54 @@ CREATE TABLE IF NOT EXISTS review_findings (
 -- strips every column ADD COLUMN could restore, and an index over a restorable column
 -- would make it undroppable and shrink that guard's coverage.
 CREATE INDEX IF NOT EXISTS idx_review_findings_review ON review_findings(review_id);
+
+-- FG-639 (evidence-led review, Change 2 / PRD Appendix A): the durable FixBatch.
+-- Two more brand-new tables on the additive-only open path; user_version untouched.
+--
+-- A batch is IMMUTABLE AT A REVISION. Nothing updates payload_json or payload_sha256
+-- after insert — a changed disposition set or a changed candidate creates the NEXT
+-- revision and supersedes this one, so a fixer that is already running stays bound to
+-- the scope it was dispatched with. The state and dispatch_task_id columns are the only
+-- mutable ones and neither is part of the payload the fixer sees.
+--
+-- payload_sha256 is what makes the delivery snapshot verifiable: forge materializes
+-- the payload into the task input mount and re-hashes the FILE before container
+-- start. SQLite stays authoritative; the files are a snapshot of it.
+CREATE TABLE IF NOT EXISTS fix_batches (
+  id                  TEXT PRIMARY KEY,
+  review_id           TEXT NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
+  revision            INTEGER NOT NULL,
+  candidate_sha       TEXT NOT NULL,
+  supersedes_batch_id TEXT,
+  payload_json        TEXT NOT NULL,
+  payload_sha256      TEXT NOT NULL,
+  state               TEXT NOT NULL DEFAULT 'open'
+                        CHECK (state IN ('open', 'dispatched', 'ingested', 'superseded')),
+  dispatch_task_id    TEXT,
+  created_at          TEXT NOT NULL,
+  UNIQUE (review_id, revision)
+);
+
+-- One row per (batch, task, finding). The composite primary key IS the idempotence
+-- key: delivery is at-least-once, so re-ingesting the same fixer result must not
+-- apply it twice, and an INSERT that conflicts on this key is a no-op rather than a
+-- second application. Agents never write here — the host ingests from the task's
+-- output area.
+CREATE TABLE IF NOT EXISTS fix_batch_results (
+  batch_id           TEXT NOT NULL REFERENCES fix_batches(id) ON DELETE CASCADE,
+  task_id            TEXT NOT NULL,
+  finding_id         TEXT NOT NULL,
+  result             TEXT NOT NULL
+                       CHECK (result IN ('fixed', 'scope_change', 'not_fixed')),
+  summary            TEXT,
+  files_changed_json TEXT NOT NULL DEFAULT '[]',
+  evidence           TEXT,
+  interaction        TEXT,
+  evidence_path      TEXT,
+  evidence_sha256    TEXT,
+  ingested_at        TEXT NOT NULL,
+  PRIMARY KEY (batch_id, task_id, finding_id)
+);
 `;
 
 // THE ADDITIVE COLUMN LIST — the machine-checked half of the additive-only
@@ -999,6 +1054,7 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   { table: "reviews", column: "trusted_remote_sha", ddl: "ALTER TABLE reviews ADD COLUMN trusted_remote_sha TEXT" },
   { table: "reviews", column: "contract_json", ddl: "ALTER TABLE reviews ADD COLUMN contract_json TEXT" },
   { table: "reviews", column: "lens_outcomes_json", ddl: "ALTER TABLE reviews ADD COLUMN lens_outcomes_json TEXT" },
+  { table: "reviews", column: "stage_evidence_json", ddl: "ALTER TABLE reviews ADD COLUMN stage_evidence_json TEXT" },
   {
     table: "reviews",
     column: "review_mode",
@@ -1050,4 +1106,29 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   { table: "review_findings", column: "resolution_evidence", ddl: "ALTER TABLE review_findings ADD COLUMN resolution_evidence TEXT" },
   { table: "review_findings", column: "discovered_sha", ddl: "ALTER TABLE review_findings ADD COLUMN discovered_sha TEXT" },
   { table: "review_findings", column: "resolved_sha", ddl: "ALTER TABLE review_findings ADD COLUMN resolved_sha TEXT" },
+
+  // FG-639: the FixBatch tables. Only the restorable columns appear — review_id,
+  // revision, candidate_sha, payload_json, payload_sha256 and created_at are NOT NULL
+  // without a DEFAULT, and the fix_batch_results primary key is composite, so
+  // ADD COLUMN could never put any of those back.
+  { table: "fix_batches", column: "supersedes_batch_id", ddl: "ALTER TABLE fix_batches ADD COLUMN supersedes_batch_id TEXT" },
+  {
+    table: "fix_batches",
+    column: "state",
+    ddl:
+      "ALTER TABLE fix_batches ADD COLUMN state TEXT NOT NULL DEFAULT 'open' " +
+      "CHECK (state IN ('open', 'dispatched', 'ingested', 'superseded'))",
+  },
+  { table: "fix_batches", column: "dispatch_task_id", ddl: "ALTER TABLE fix_batches ADD COLUMN dispatch_task_id TEXT" },
+
+  { table: "fix_batch_results", column: "summary", ddl: "ALTER TABLE fix_batch_results ADD COLUMN summary TEXT" },
+  {
+    table: "fix_batch_results",
+    column: "files_changed_json",
+    ddl: "ALTER TABLE fix_batch_results ADD COLUMN files_changed_json TEXT NOT NULL DEFAULT '[]'",
+  },
+  { table: "fix_batch_results", column: "evidence", ddl: "ALTER TABLE fix_batch_results ADD COLUMN evidence TEXT" },
+  { table: "fix_batch_results", column: "interaction", ddl: "ALTER TABLE fix_batch_results ADD COLUMN interaction TEXT" },
+  { table: "fix_batch_results", column: "evidence_path", ddl: "ALTER TABLE fix_batch_results ADD COLUMN evidence_path TEXT" },
+  { table: "fix_batch_results", column: "evidence_sha256", ddl: "ALTER TABLE fix_batch_results ADD COLUMN evidence_sha256 TEXT" },
 ];
