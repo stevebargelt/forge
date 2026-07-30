@@ -25,6 +25,10 @@ export function newReviewId(): string {
   return `review-${shortId()}${shortId()}`;
 }
 
+export function newFixBatchId(): string {
+  return `fix-batch-${shortId()}${shortId()}`;
+}
+
 export function newCampaignId(): string {
   return `campaign-${shortId()}${shortId()}`;
 }

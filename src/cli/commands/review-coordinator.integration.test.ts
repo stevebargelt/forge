@@ -1,0 +1,276 @@
+// FG-639: `forge review start|continue` at the real process boundary.
+//
+// The unit tiers drive the stage machine in-process. This tier spawns the actual CLI,
+// because the claims that matter here are process-level: the verbs EXIST on the real
+// program, a missing or invalid review contract EXITS NON-ZERO and writes no review row,
+// and `continue` reads the persisted stage from the on-disk store rather than from anything
+// the process that opened the review was holding.
+//
+// It deliberately does NOT dispatch containers. `continue` is driven to the point where the
+// next transition is read and reported; the stages that spawn reviewers, fixers and the
+// rechecker are covered by src/v2/review-run.test.ts over injected runners, and by the live
+// pilot. What this tier proves is that the operator surface and the durable store agree.
+//
+// The child goes through the FG-645 authority testkit seam (docs/how-to-testing.md):
+// without it, a spawned forge inherits this process's backlog-authority signals and answers
+// from a mounted snapshot instead of the fixture the test just built.
+
+import { test, before, after } from "node:test";
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import Database from "better-sqlite3";
+import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { SCHEMA_SQL } from "../../store/schema.js";
+import { authorityTestkitEnv, withAuthorityTestkit } from "../../backlog/container-authority.testkit-spawn.js";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const entry = resolve(here, "..", "index.ts");
+const localTsx = resolve(here, "..", "..", "..", "node_modules", ".bin", "tsx");
+const tsx = existsSync(localTsx) ? localTsx : "tsx";
+
+const CONTRACT = {
+  threat_model: "operator_trusted_candidate",
+  protected_invariants: ["no partial write"],
+  acceptance_refs: ["FG-639 AC 1"],
+  risk_lenses: ["wide"],
+  non_goals: ["protect the host from malicious candidate code"],
+};
+
+let homeDir: string;
+let contractPath: string;
+let badContractPath: string;
+
+function runForge(args: string[]) {
+  return spawnSync(tsx, withAuthorityTestkit(entry, args), {
+    cwd: homeDir,
+    encoding: "utf8",
+    env: { ...process.env, FORGE_HOME: homeDir, ...authorityTestkitEnv() },
+  });
+}
+
+function openStore(): Database.Database {
+  return new Database(join(homeDir, "forge.db"));
+}
+
+function reviewCount(): number {
+  const db = openStore();
+  try {
+    return (db.prepare(`SELECT COUNT(*) AS n FROM reviews`).get() as { n: number }).n;
+  } finally {
+    db.close();
+  }
+}
+
+/** A review parked mid-lifecycle: verification and contract confirmation complete, discovery
+ *  complete at the confirmed sha, one untriaged finding. This is the exact state an
+ *  orchestrator crash leaves behind, written directly so the test asserts what `continue`
+ *  READS rather than re-deriving it. */
+function seedParkedReview(): void {
+  const db = openStore();
+  try {
+    db.prepare(`INSERT INTO runs (id, workflow, title, status, created_at, review_mode) VALUES (?, ?, ?, ?, ?, ?)`).run(
+      "run-parked",
+      "feature",
+      "parked",
+      "active",
+      "2026-07-30T00:00:00Z",
+      "evidence_led",
+    );
+    db.prepare(
+      `INSERT INTO reviews (id, run_id, ticket_id, base_sha, contract_confirmed_sha, candidate_sha,
+                            contract_json, stage_evidence_json, lens_outcomes_json, review_mode, state,
+                            created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      "review-parked",
+      "run-parked",
+      "FG-639",
+      "base000",
+      "conf222",
+      "conf222",
+      JSON.stringify(CONTRACT),
+      JSON.stringify({
+        verified_entry: { sha: "conf222", at: "2026-07-30T00:00:01Z" },
+        contract_confirmed: { sha: "conf222", at: "2026-07-30T00:00:02Z" },
+        discovery: { sha: "conf222", at: "2026-07-30T00:00:03Z" },
+      }),
+      // The per-lens outcome provenance a completed panel leaves behind. Recorded here for
+      // the same reason the coordinator records it: the stage record says discovery ran, and
+      // THIS says every selected lens authored an outcome. Either one alone would let an
+      // incomplete panel read as complete.
+      JSON.stringify([
+        { lens: "wide", role: "red-wide", complete: true, outcome: "fail", authored: true, findings: [], taskId: "task-wide" },
+      ]),
+      "evidence_led",
+      "discovering",
+      "2026-07-30T00:00:00Z",
+      "2026-07-30T00:00:03Z",
+    );
+    db.prepare(
+      `INSERT INTO review_findings (id, review_id, ordinal, finding_ref, summary, severity, risk_lens,
+                                    reachability, evidence, sources_json, disposition, discovered_sha,
+                                    created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'untriaged', ?, ?, ?)`,
+    ).run(
+      "review-parked/RF-1",
+      "review-parked",
+      1,
+      "RF-1",
+      "the reconcile path can write partially",
+      "high",
+      "wide",
+      "demonstrated",
+      "src/a.ts:12 returns before the guard",
+      JSON.stringify([{ redRole: "red-wide" }]),
+      "conf222",
+      "2026-07-30T00:00:03Z",
+      "2026-07-30T00:00:03Z",
+    );
+  } finally {
+    db.close();
+  }
+}
+
+before(() => {
+  homeDir = mkdtempSync(join(tmpdir(), "forge-fg639-cli-"));
+  const db = openStore();
+  db.exec(SCHEMA_SQL);
+  db.close();
+
+  contractPath = join(homeDir, "contract.json");
+  writeFileSync(contractPath, JSON.stringify(CONTRACT, null, 2));
+  badContractPath = join(homeDir, "bad-contract.json");
+  writeFileSync(badContractPath, JSON.stringify({ threat_model: "x", risk_lenses: ["wide"] }, null, 2));
+
+  seedParkedReview();
+});
+
+after(() => {
+  rmSync(homeDir, { recursive: true, force: true });
+});
+
+test("FG-639: `forge review` advertises start and continue alongside the FG-638 read/write verbs", () => {
+  const r = runForge(["review", "--help"]);
+  assert.equal(r.status, 0, r.stderr);
+  for (const verb of ["start", "continue", "show", "disposition"]) {
+    assert.match(r.stdout, new RegExp(`\\b${verb}\\b`), `forge review must advertise ${verb}`);
+  }
+});
+
+test("FG-639: `forge review start` without --contract exits non-zero and opens NO review", () => {
+  const before = reviewCount();
+  const r = runForge(["review", "start", "FG-639"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /--contract <file> is required/);
+  assert.match(r.stderr, /never reconstructed from prompts after the fact/);
+  assert.match(r.stderr, /Nothing was written/);
+  assert.equal(reviewCount(), before, "a refused start leaves the store exactly as it found it");
+});
+
+test("FG-639: `forge review start` with an INVALID contract exits non-zero and opens NO review", () => {
+  const before = reviewCount();
+  const r = runForge(["review", "start", "FG-639", "--contract", badContractPath]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /review contract invalid/);
+  assert.match(r.stderr, /protected_invariants/);
+  assert.equal(reviewCount(), before);
+});
+
+test("FG-639: `forge review start` refuses a --add-lens spec that carries no diff evidence", () => {
+  const before = reviewCount();
+  const r = runForge([
+    "review",
+    "start",
+    "FG-639",
+    "--contract",
+    contractPath,
+    "--add-lens",
+    "security",
+    "--project",
+    homeDir,
+  ]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /--add-lens expects <lens>:<reason>:<diff-evidence>/);
+  assert.match(r.stderr, /only with the evidence and reason that made it necessary/);
+  // The review row is opened before the deps are built, so assert the refusal is loud and
+  // the lifecycle did not proceed rather than that nothing at all was written.
+  assert.equal(r.stdout.includes("candidate"), false, "no candidate was resolved and no stage ran");
+  void before;
+});
+
+test("FG-639 / PRD #15: `forge review continue` reads the PERSISTED next stage from the store", () => {
+  const r = runForge(["review", "continue", "review-parked", "--project", homeDir]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(
+    r.stdout,
+    /await_disposition/,
+    "discovery is complete at the confirmed sha, so the persisted next stage is the disposition stop",
+  );
+  assert.match(r.stdout, /RF-1/, "and it names the finding holding the review");
+  assert.doesNotMatch(r.stdout, /discover:/, "continue never repeats a completed discovery");
+
+  const db = openStore();
+  try {
+    const row = db.prepare(`SELECT state FROM reviews WHERE id = ?`).get("review-parked") as { state: string };
+    assert.equal(row.state, "awaiting_disposition", "the durable state moved to the stop it reported");
+  } finally {
+    db.close();
+  }
+});
+
+test("FG-639: `forge review continue` on an unknown review exits non-zero", () => {
+  const r = runForge(["review", "continue", "review-nope"]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /no review review-nope/);
+});
+
+test("FG-639: the disposition stop is idempotent — continue at a stop reports it without advancing", () => {
+  const first = runForge(["review", "continue", "review-parked", "--project", homeDir]);
+  assert.equal(first.status, 0, first.stderr);
+  const second = runForge(["review", "continue", "review-parked", "--project", homeDir]);
+  assert.equal(second.status, 0, second.stderr);
+  assert.match(second.stdout, /await_disposition/);
+});
+
+test("FG-639: `forge review continue --json` emits the stage outcome as a machine-readable object", () => {
+  const r = runForge(["review", "continue", "review-parked", "--project", homeDir, "--json"]);
+  assert.equal(r.status, 0, r.stderr);
+  const parsed = JSON.parse(r.stdout) as { transition: { kind: string; blockingFindings?: string[] }; status: string };
+  assert.equal(parsed.transition.kind, "await_disposition");
+  assert.equal(parsed.status, "stopped");
+  assert.deepEqual(parsed.transition.blockingFindings, ["RF-1"]);
+});
+
+test("FG-639: --dry-run reports the one valid next transition without running it", () => {
+  const r = runForge(["review", "continue", "review-parked", "--project", homeDir, "--dry-run", "--json"]);
+  assert.equal(r.status, 0, r.stderr);
+  const parsed = JSON.parse(r.stdout) as { transition: { kind: string }; status: string };
+  assert.equal(parsed.status, "dry_run");
+  assert.equal(parsed.transition.kind, "await_disposition");
+});
+
+test("FG-639: dispositioning the finding moves the persisted next stage to the batch fix", () => {
+  const d = runForge([
+    "review",
+    "disposition",
+    "review-parked/RF-1",
+    "fix_now",
+    "--rationale",
+    "trust-gate write path — fix before advancing",
+  ]);
+  assert.equal(d.status, 0, d.stderr);
+
+  // --dry-run, deliberately: the batch fix DISPATCHES a container, which this tier does not
+  // do. What it asserts is the transition the coordinator would take, read from the store.
+  const r = runForge(["review", "continue", "review-parked", "--project", homeDir, "--dry-run", "--json"]);
+  assert.equal(r.status, 0, r.stderr);
+  const parsed = JSON.parse(r.stdout) as { transition: { kind: string } };
+  assert.equal(
+    parsed.transition.kind,
+    "batch_fix",
+    "the ONE valid next transition after disposition is the single batch fix",
+  );
+});
