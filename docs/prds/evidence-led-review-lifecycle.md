@@ -707,8 +707,10 @@ authority rules imply: `--rationale` (always required),
 `start` shipped with **`--contract <file>` required** — not sketched above, but it
 follows from this document's rule that the contract is approved by the plan gate
 and never reconstructed from prompts after the fact: without it `start` refuses
-and writes nothing. Both verbs also carry `--add-lens <lens:reason:evidence>`
-(repeatable) and `--drift <text>` for the two halves of the widening asymmetry,
+and writes nothing. Both verbs also carry the three recorded evaluations of the
+final diff — `--add-lens <lens:reason:evidence>` (repeatable) and `--drift <text>`
+for the two halves of the widening asymmetry, plus `--evaluated-no-drift
+<statement>` to record an examined diff that needs no lens change — as well as
 `--route`/`--unrouted` for routing policy, and `--json`. `continue` adds
 `--dry-run` (report the one valid next transition without running it), `--all`
 (keep driving while each transition advances), and `--acceptance <file>` for the
@@ -873,10 +875,11 @@ This change does not alter gate behavior.
 
 ### Change 2 — staged review coordinator
 
-> **[SHIPPED 2026-07-30 (FG-639) — `424c8d8a` + `ecf5750d` + `a5030efb`.]** Every
+> **[SHIPPED 2026-07-30 (FG-639) — `424c8d8a` + `ecf5750d` + `a5030efb` +
+> `5c772aa0`.]** Every
 > bullet below landed, as a pilot reachable only through the explicit
 > `forge review start` / `forge review continue` verbs: the `feature` workflow is
-> NOT migrated and no gate authority changed, both of which remain Change 3. Four
+> NOT migrated and no gate authority changed, both of which remain Change 3. Five
 > refinements the implementation settled that this scope did not state. (1) Stage
 > completion is recorded **per sha** (`reviews.stage_evidence_json`) rather than as
 > a stage cursor, and is checked three ways: `contract_confirmed`/`discovery`
@@ -895,7 +898,15 @@ This change does not alter gate behavior.
 > *under its current decision*, which is what lets scenario #5's four resolved
 > findings proceed while the fifth becomes an architecture question. (4) A finding
 > with no recorded `reachability` is treated as `demonstrated` — the strictest case
-> — so an unknown reachability is not the cheap path to resolution. Note also that
+> — so an unknown reachability is not the cheap path to resolution. (5) The
+> first bullet above — "confirms an unchanged contract when its declared lenses
+> still plausibly cover the implementation" — has no classifier behind it by
+> design, so confirmation is **fail-closed**: it needs a base sha to compute the
+> diff at all, and it needs a *recorded* evaluation of that diff (a widening
+> claim, an explicit `no_drift` statement, or named unclassifiable drift). An
+> evaluation concluding no lens change is needed advances and is persisted with
+> the diff it examined; only the silent unevaluated auto-confirm is forbidden.
+> Note also that
 > resolution invalidation fires only when the coordinator itself advances the
 > candidate (the fix and docs stages); a candidate moved out of band is caught by
 > the `candidate_not_checked_out` refusal and the `identity_continuity` shipping
