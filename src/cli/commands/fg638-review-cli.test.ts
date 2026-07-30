@@ -241,6 +241,49 @@ test("FG-638: `forge show <run>` names the run's review mode and lists its ledge
   assert.match(out, /forge review show review-cli/);
 });
 
+test("FG-638: after a never-marked run adopts its first review's mode, both read surfaces agree — human and JSON", async () => {
+  // The run is written exactly as a pre-FG-638 binary wrote one: no review_mode, so
+  // it reads the column DEFAULT. Its first ledger review marks it, and from then on
+  // `forge show` (the run's view) and `forge review show` (the review's view) are two
+  // renders of ONE fact rather than two records that can drift apart.
+  insertRun({ id: "run-adopting", workflow: "feature", title: "never marked", status: "active", createdAt: "2026-07-30T00:00:00Z" });
+  insertTask({
+    id: "task-adopting",
+    runId: "run-adopting",
+    phase: "engineer",
+    agentRole: "engineer",
+    status: "complete",
+    taskPackage: { taskId: "task-adopting", runId: "run-adopting", phase: "engineer", role: "engineer", inputs: {}, composedSystemPrompt: "P" },
+    createdAt: "2026-07-30T00:00:00Z",
+  });
+  insertReview({
+    id: "review-adopting",
+    runId: "run-adopting",
+    subjectTaskId: "task-adopting",
+    reviewMode: "evidence_led",
+    candidateSha: "candadopt",
+    state: "awaiting_disposition",
+  });
+
+  const runHuman = await runCli(registerShow, ["show", "run-adopting"]);
+  assert.match(runHuman.out, /review:\s+evidence_led/, "forge show must report the mode the run ADOPTED, not the default it was created with");
+  const reviewHuman = await runCli(registerReview, ["review", "show", "review-adopting"]);
+  assert.match(reviewHuman.out, /review mode:\s+evidence_led/);
+
+  const runJson = JSON.parse((await runCli(registerShow, ["show", "run-adopting", "--json"])).out) as {
+    run: { reviewMode: string };
+    diagnostic: { reviewLedger: { review: { reviewMode: string } }[] };
+  };
+  const reviewJson = JSON.parse((await runCli(registerReview, ["review", "show", "review-adopting", "--json"])).out) as {
+    review: { reviewMode: string };
+  };
+  assert.deepEqual(
+    [runJson.run.reviewMode, runJson.diagnostic.reviewLedger[0]!.review.reviewMode, reviewJson.review.reviewMode],
+    ["evidence_led", "evidence_led", "evidence_led"],
+    "the run row, the ledger projection inside forge show, and forge review show must all name one review_mode",
+  );
+});
+
 test("FG-638: `forge show <run> --json` carries the ledger alongside the raw verdict summary", async () => {
   const { out } = await runCli(registerShow, ["show", RUN.id, "--json"]);
   const parsed = JSON.parse(out) as {

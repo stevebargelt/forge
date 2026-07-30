@@ -372,9 +372,23 @@ test("FG-638: re-opening a migrated store is a no-op, and the ledger is usable o
     );
     assert.equal(summarizeReview("review-on-migrated")?.findings.length, 1);
 
-    // A run may carry a ledger review while the RUN's own review_mode stays legacy:
-    // the two are separate records and Change 1 does not rewrite the run's.
-    assert.equal(runReviewMode("run-legacy"), "legacy_verdict");
+    // The migrated run had never been marked — it read 'legacy_verdict' from the
+    // DEFAULT, not from a decision — so its FIRST ledger review marks it, and the run
+    // row moves with the review rather than the two disagreeing about which authority
+    // model settles the run.
+    assert.equal(runReviewMode("run-legacy"), "evidence_led");
+    assert.equal(getRun("run-legacy")?.reviewMode, "evidence_led");
+
+    // And once marked, a conflicting mode is REFUSED on a migrated store exactly as on
+    // a fresh one — the guard travels with the accessor, not with the schema version.
+    const runsBefore = rawRows(migrated, "runs", columnNames(migrated, "runs"));
+    const reviewsBefore = rawRows(migrated, "reviews", columnNames(migrated, "reviews"));
+    assert.throws(
+      () => insertReview({ id: "review-conflicting", runId: "run-legacy", reviewMode: "legacy_verdict" }),
+      /run-legacy is evidence_led/,
+    );
+    assert.deepEqual(rawRows(migrated, "runs", columnNames(migrated, "runs")), runsBefore, "a refused review must not touch the run row");
+    assert.deepEqual(rawRows(migrated, "reviews", columnNames(migrated, "reviews")), reviewsBefore, "a refused review must write no review row");
   } finally {
     setDbForTest(prev as DatabaseInstance);
     closeDb();

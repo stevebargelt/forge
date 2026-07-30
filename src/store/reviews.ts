@@ -11,8 +11,21 @@
 //   - models never mint authoritative ids. An observation may arrive carrying an id
 //     the reviewer invented; it is preserved as provenance inside the source record
 //     and is never the finding's identity.
+//
+// Two things this module is NOT:
+//   - it does not verify that disproving evidence actually disproves anything.
+//     `rejected_premise` requires CANDIDATE-BOUND DISPROVING EVIDENCE; deciding
+//     whether a replay's output contradicts the finding it is attached to is a
+//     SEMANTIC judgement and belongs to FG-639's coordinator. What is enforced HERE
+//     is STRUCTURE: the payload parses, and it carries every field its kind is
+//     defined by. A structurally complete payload that argues the wrong thing is
+//     FG-639's to catch; a payload that is a sentence where a replay's command and
+//     output should be is caught here.
+//   - it does not drive the lifecycle. Change 1 persists states and emits an event
+//     per transition; the stage machine is FG-639's.
 
 import { getDb, writeTransaction } from "./db.js";
+import { getRun } from "./runs.js";
 import { logEvent } from "./events.js";
 import { nowIso } from "../util/ids.js";
 import type { ReviewMode } from "../types/index.js";
@@ -61,6 +74,73 @@ export const DISPROVING_EVIDENCE_KINDS = [
   "anchored_contradiction",
 ] as const;
 export type DisprovingEvidenceKind = (typeof DISPROVING_EVIDENCE_KINDS)[number];
+
+/** What each kind IS, structurally. Each field is required and each is what makes the
+ *  evidence candidate-bound proof rather than a restated opinion: a replay without its
+ *  output is a claim that it was run, a reproduction without its observed result is a
+ *  claim that it reproduced, and a contradiction without a file anchor is a claim that
+ *  the code says something.
+ *
+ *  `line` is a line number; every other field is non-empty text. Semantics — does this
+ *  output actually contradict THIS finding — is FG-639's (see the module header). */
+type EvidenceField = { name: string; type: "text" | "line" };
+
+const EVIDENCE_SHAPES: Record<DisprovingEvidenceKind, readonly EvidenceField[]> = {
+  replayed_command: [
+    { name: "command", type: "text" },
+    { name: "output", type: "text" },
+  ],
+  deterministic_reproduction: [
+    { name: "reproduction", type: "text" },
+    { name: "result", type: "text" },
+  ],
+  anchored_contradiction: [
+    { name: "file", type: "text" },
+    { name: "line", type: "line" },
+    { name: "fact", type: "text" },
+  ],
+};
+
+export type DisprovingEvidence = Record<string, string | number>;
+
+/** Parse `--evidence` as the JSON payload its kind requires. Returns the payload, or
+ *  a refusal naming the fields that are missing and the shape that was expected. */
+function parseDisprovingEvidence(
+  kind: DisprovingEvidenceKind,
+  raw: string,
+): { ok: true; payload: DisprovingEvidence } | { ok: false; refusal: string } {
+  const shape = EVIDENCE_SHAPES[kind];
+  const names = shape.map((f) => f.name);
+  const hasLine = shape.some((f) => f.type === "line");
+  const wanted =
+    `${kind} evidence must be a JSON object carrying ` +
+    `${names.slice(0, -1).join(", ")} and ${names[names.length - 1] as string} ` +
+    `(${hasLine ? "line is a line number, the rest are" : "each"} non-empty text)`;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { ok: false, refusal: `${wanted}, not free text. Nothing was written.` };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return { ok: false, refusal: `${wanted}, not a bare JSON value. Nothing was written.` };
+  }
+
+  const obj = parsed as Record<string, unknown>;
+  const payload: DisprovingEvidence = {};
+  const missing: string[] = [];
+  for (const field of shape) {
+    const v = obj[field.name];
+    const ok = field.type === "line" ? typeof v === "number" && Number.isInteger(v) && v >= 1 : typeof v === "string" && v.trim() !== "";
+    if (ok) payload[field.name] = v as string | number;
+    else missing.push(field.name);
+  }
+  if (missing.length > 0) {
+    return { ok: false, refusal: `${wanted}; missing or empty: ${missing.join(", ")}. Nothing was written.` };
+  }
+  return { ok: true, payload };
+}
 
 export type DecidedBy = "operator" | "orchestrator";
 
@@ -259,10 +339,45 @@ export type NewReview = {
   state?: ReviewState;
 };
 
+/** The RUN row is the single source of authority-model truth, and this is where a
+ *  review is made to agree with it — inside the caller's write transaction, so the
+ *  run row and the review's denormalized copy move together or not at all.
+ *
+ *  A run that has never been marked (still carrying the column's legacy DEFAULT, with
+ *  no ledger review of its own) ADOPTS the first review's mode: that is how an
+ *  evidence-led review starts on a run created before anyone chose. A run that HAS
+ *  been marked — explicitly, or implicitly by already owning a review — refuses a
+ *  conflicting mode rather than letting the run and its ledger disagree.
+ *
+ *  Returns the run's authoritative mode; the review is inserted with THAT value, so
+ *  "the review's review_mode equals its run's" holds by construction rather than by
+ *  the caller passing the right thing. */
+function reconcileRunReviewMode(runId: string | undefined, attempted: ReviewMode): { mode: ReviewMode; adopted: boolean } {
+  if (runId === undefined) return { mode: attempted, adopted: false };
+  const run = getRun(runId);
+  if (!run) return { mode: attempted, adopted: false };
+
+  const runMode = run.reviewMode ?? "legacy_verdict";
+  if (runMode === attempted) return { mode: runMode, adopted: false };
+
+  const hasReview =
+    getDb().prepare(`SELECT 1 AS ok FROM reviews WHERE run_id = ? LIMIT 1`).get(runId) !== undefined;
+  if (runMode !== "legacy_verdict" || hasReview) {
+    throw new Error(
+      `forge: run ${runId} is ${runMode}; a review cannot be ${attempted} — exactly one review_mode per run. ` +
+        `Nothing was written.`,
+    );
+  }
+
+  getDb().prepare(`UPDATE runs SET review_mode = ? WHERE id = ?`).run(attempted, runId);
+  return { mode: attempted, adopted: true };
+}
+
 export function insertReview(r: NewReview): Review {
   const at = nowIso();
   const state: ReviewState = r.state ?? "confirming_contract";
   writeTransaction(() => {
+    const { mode, adopted } = reconcileRunReviewMode(r.runId, r.reviewMode);
     getDb()
       .prepare(
         `INSERT INTO reviews (id, run_id, subject_task_id, ticket_id, base_sha, contract_confirmed_sha,
@@ -281,7 +396,7 @@ export function insertReview(r: NewReview): Review {
         r.trustedRemoteSha ?? null,
         r.contract !== undefined ? JSON.stringify(r.contract) : null,
         r.lensOutcomes !== undefined ? JSON.stringify(r.lensOutcomes) : null,
-        r.reviewMode,
+        mode,
         state,
         at,
         at,
@@ -289,7 +404,16 @@ export function insertReview(r: NewReview): Review {
     logEvent("review.created", {
       runId: r.runId,
       taskId: r.subjectTaskId,
-      payload: { reviewId: r.id, reviewMode: r.reviewMode, state, ticketId: r.ticketId, candidateSha: r.candidateSha },
+      payload: {
+        reviewId: r.id,
+        reviewMode: mode,
+        state,
+        ticketId: r.ticketId,
+        candidateSha: r.candidateSha,
+        // The run row's authority model changed in THIS transaction — the audit
+        // record of a never-marked run adopting its first review's mode.
+        runReviewModeAdopted: adopted,
+      },
     });
   });
   return getReview(r.id) as Review;
@@ -587,6 +711,10 @@ export function dispositionRefusal(
           `(got '${req.evidenceKind}'). Nothing was written.`
         );
       }
+      {
+        const parsed = parseDisprovingEvidence(req.evidenceKind as DisprovingEvidenceKind, req.evidence as string);
+        if (!parsed.ok) return parsed.refusal;
+      }
       return null;
 
     case "deferred":
@@ -661,9 +789,17 @@ export function recordDisposition(findingId: string, req: DispositionRequest): D
 
   const decidedBy: DecidedBy = req.operator ? "operator" : "orchestrator";
   const at = nowIso();
+  // The refusal above already proved this parses to its kind's shape, so the stored
+  // blob is the STRUCTURED payload — a reader never has to re-guess what the text meant.
   const evidence =
     req.decision === "rejected_premise"
-      ? JSON.stringify({ kind: req.evidenceKind, detail: req.evidence, candidateSha: review.candidateSha })
+      ? JSON.stringify({
+          kind: req.evidenceKind,
+          detail: (parseDisprovingEvidence(req.evidenceKind as DisprovingEvidenceKind, req.evidence as string) as {
+            payload: DisprovingEvidence;
+          }).payload,
+          candidateSha: review.candidateSha,
+        })
       : ((req.evidence ?? "").trim() === "" ? null : (req.evidence as string));
 
   writeTransaction(() => {

@@ -132,7 +132,7 @@ function fullyPopulatedReview(): ReviewSummary {
     decision: "rejected_premise",
     rationale: "rationale-for-rejected: the replay contradicts the claim",
     operator: false,
-    evidence: "disposition-evidence-marker: npm test -- admin, 0 failures",
+    evidence: JSON.stringify({ command: "disposition-evidence-marker: npm test -- admin", output: "0 failures" }),
     evidenceKind: "replayed_command",
   });
   assert.equal(disprovedOutcome.ok, true);

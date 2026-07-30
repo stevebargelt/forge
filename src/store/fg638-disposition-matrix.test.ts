@@ -171,7 +171,10 @@ test("FG-638: a finding with NO authority marker does not need the operator — 
 const ROUTINE_DECISIONS: { decision: Disposition; extra: Partial<DispositionRequest> }[] = [
   { decision: "fix_now", extra: {} },
   { decision: "architecture_question", extra: {} },
-  { decision: "rejected_premise", extra: { evidence: "replayed: npm test -- foo, 0 failures", evidenceKind: "replayed_command" } },
+  {
+    decision: "rejected_premise",
+    extra: { evidence: JSON.stringify({ command: "npm test -- foo", output: "0 failures" }), evidenceKind: "replayed_command" },
+  },
 ];
 
 for (const c of ROUTINE_DECISIONS) {
@@ -300,6 +303,113 @@ for (const c of CASES) {
     assert.deepEqual(ledgerSnapshot(), before, `${c.name}: "Nothing was written" must be true of every table, not just the one column`);
   });
 }
+
+// ─── the shape of disproving evidence, kind by kind ─────────────────────────
+
+// The precondition rejected_premise carries is CANDIDATE-BOUND DISPROVING EVIDENCE.
+// Whether a payload actually disproves the finding it is attached to is SEMANTIC and
+// belongs to FG-639's coordinator; what is enforced here is that the payload IS one
+// of the three shapes of proof rather than a sentence wearing their label. Each kind
+// below is driven through every incomplete variant (refused, byte-identical) and its
+// complete one (settles, stored structured).
+type EvidenceShape = {
+  kind: string;
+  complete: Record<string, unknown>;
+  /** Each entry is a payload that is missing or malforms exactly one required field. */
+  incomplete: { label: string; payload: unknown; names: RegExp }[];
+};
+
+const EVIDENCE_SHAPES: EvidenceShape[] = [
+  {
+    kind: "replayed_command",
+    complete: { command: "npm test -- src/store/reviews.test.ts", output: "42 passing, 0 failing" },
+    incomplete: [
+      { label: "the command without its output", payload: { command: "npm test -- src/store" }, names: /missing or empty: output/ },
+      { label: "the output without the command that produced it", payload: { output: "42 passing" }, names: /missing or empty: command/ },
+      { label: "an empty output", payload: { command: "npm test", output: "   " }, names: /missing or empty: output/ },
+      { label: "neither field", payload: { note: "I replayed it" }, names: /missing or empty: command, output/ },
+    ],
+  },
+  {
+    kind: "deterministic_reproduction",
+    complete: { reproduction: "node --test src/store/fg638-review-ledger.test.ts", result: "the claimed failure does not occur" },
+    incomplete: [
+      { label: "the reproduction without its observed result", payload: { reproduction: "node --test x.test.ts" }, names: /missing or empty: result/ },
+      { label: "a result with nothing that produced it", payload: { result: "it passed" }, names: /missing or empty: reproduction/ },
+      { label: "neither field", payload: { detail: "reproduced fine" }, names: /missing or empty: reproduction, result/ },
+    ],
+  },
+  {
+    kind: "anchored_contradiction",
+    complete: { file: "src/store/reviews.ts", line: 284, fact: "insertReview reads the run's mode before writing the copy" },
+    incomplete: [
+      { label: "an anchor with no line", payload: { file: "src/store/reviews.ts", fact: "the guard is right there" }, names: /missing or empty: line/ },
+      { label: "a line with no file", payload: { line: 284, fact: "the guard is right there" }, names: /missing or empty: file/ },
+      { label: "an anchor with no contradicting fact", payload: { file: "src/store/reviews.ts", line: 284 }, names: /missing or empty: fact/ },
+      { label: "a line number that is not a number", payload: { file: "src/store/reviews.ts", line: "284", fact: "x" }, names: /missing or empty: line/ },
+      { label: "a line number that is not a line", payload: { file: "src/store/reviews.ts", line: 0, fact: "x" }, names: /missing or empty: line/ },
+    ],
+  },
+];
+
+for (const shape of EVIDENCE_SHAPES) {
+  for (const bad of shape.incomplete) {
+    test(`FG-638: ${shape.kind} evidence carrying ${bad.label} is refused and the whole ledger stays byte-identical`, () => {
+      const r = review(`review-ev-${shape.kind}-${bad.label.replace(/\W+/g, "-")}`);
+      const finding = ingestOne(r, { summary: `a finding rejected with ${bad.label}` });
+      const before = ledgerSnapshot();
+
+      const outcome = recordDisposition(
+        finding.id,
+        req({ decision: "rejected_premise", evidence: JSON.stringify(bad.payload), evidenceKind: shape.kind }),
+      );
+
+      assert.equal(outcome.ok, false, `${shape.kind} / ${bad.label} must not settle the finding`);
+      assert.ok(outcome.ok === false && bad.names.test(outcome.refusal), `the refusal must name the missing field, got: ${outcome.ok === false ? outcome.refusal : ""}`);
+      assert.ok(outcome.ok === false && outcome.refusal.includes(shape.kind), "the refusal must name the kind whose shape was not met");
+      assert.ok(outcome.ok === false && /Nothing was written/.test(outcome.refusal));
+      assert.deepEqual(ledgerSnapshot(), before, `${shape.kind} / ${bad.label}: a refused disposition must write nothing anywhere`);
+    });
+  }
+
+  test(`FG-638: a complete ${shape.kind} payload settles the finding and is stored structured, bound to the candidate`, () => {
+    const r = review(`review-ev-ok-${shape.kind}`);
+    const finding = ingestOne(r, { summary: `a finding disproved by a ${shape.kind}` });
+
+    const outcome = recordDisposition(
+      finding.id,
+      req({ decision: "rejected_premise", evidence: JSON.stringify(shape.complete), evidenceKind: shape.kind }),
+    );
+    assert.equal(outcome.ok, true, outcome.ok === false ? outcome.refusal : "");
+
+    const after = getFinding(finding.id) as ReviewFinding;
+    assert.equal(after.disposition, "rejected_premise");
+    const stored = JSON.parse(after.dispositionEvidence as string) as { kind: string; detail: unknown; candidateSha: string };
+    assert.equal(stored.kind, shape.kind);
+    assert.deepEqual(stored.detail, shape.complete, "the payload is persisted field-by-field, not as the free text it arrived in");
+    assert.equal(stored.candidateSha, "cand111", "the binding to the candidate the evidence was gathered against survives the shape check");
+  });
+}
+
+test("FG-638: free text labelled with a valid evidence kind no longer settles anything", () => {
+  // The behavior this change closes: before the shape check, ANY nonempty string
+  // labelled replayed_command settled the finding.
+  const r = review("review-ev-freetext");
+  const finding = ingestOne(r, { summary: "settled by assertion alone" });
+  const before = ledgerSnapshot();
+
+  for (const kind of ["replayed_command", "deterministic_reproduction", "anchored_contradiction"]) {
+    const outcome = recordDisposition(finding.id, req({ decision: "rejected_premise", evidence: "I ran it and it was fine", evidenceKind: kind }));
+    assert.equal(outcome.ok, false, `free text labelled ${kind} must not settle the finding`);
+    assert.ok(outcome.ok === false && /not free text/.test(outcome.refusal));
+  }
+  // A JSON scalar or array is not a payload either.
+  for (const raw of ['"just a string"', "42", '["command", "output"]', "null"]) {
+    const outcome = recordDisposition(finding.id, req({ decision: "rejected_premise", evidence: raw, evidenceKind: "replayed_command" }));
+    assert.equal(outcome.ok, false, `${raw} is not an evidence payload`);
+  }
+  assert.deepEqual(ledgerSnapshot(), before);
+});
 
 test("FG-638: an unknown finding id is refused by name and writes nothing", () => {
   const r = review("review-unknown-id");

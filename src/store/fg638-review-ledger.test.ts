@@ -114,6 +114,117 @@ test("FG-638: a legacy run with no reviews row resolves unambiguously to legacy_
 test("FG-638: review_mode is copied onto the review for read surfaces", () => {
   newReview();
   assert.equal(getReview("review-1")!.reviewMode, "evidence_led");
+  assert.equal(
+    getReview("review-1")!.reviewMode,
+    getRun(RUN.id)!.reviewMode,
+    "the review's mode is a DENORMALIZED COPY of the run's, never an independent answer",
+  );
+});
+
+/** Everything a mode conflict could damage, raw. A refusal must move none of it. */
+function authoritySnapshot(): unknown {
+  const d = getDb();
+  return {
+    runs: d.prepare(`SELECT * FROM runs ORDER BY id`).all(),
+    reviews: d.prepare(`SELECT * FROM reviews ORDER BY id`).all(),
+    events: d.prepare(`SELECT * FROM events ORDER BY id`).all(),
+  };
+}
+
+test("FG-638: a never-marked run ADOPTS its first review's mode — run row and review copy move together", () => {
+  getDb()
+    .prepare(`INSERT INTO runs (id, workflow, title, status, created_at) VALUES (?, ?, ?, ?, ?)`)
+    .run("run-adopts", "feature", "unmarked", "active", "2026-01-01T00:00:00Z");
+  assert.equal(getRun("run-adopts")!.reviewMode, "legacy_verdict", "precondition: the run carries the column DEFAULT");
+
+  insertReview({ id: "review-adopts", runId: "run-adopts", reviewMode: "evidence_led", state: "confirming_contract" });
+
+  assert.equal(getRun("run-adopts")!.reviewMode, "evidence_led", "the RUN row is the authority-model truth and must have moved");
+  assert.equal(getReview("review-adopts")!.reviewMode, "evidence_led");
+  assert.equal(runReviewMode("run-adopts"), "evidence_led");
+
+  const created = eventsForRun("run-adopts").filter((e) => e.eventType === "review.created");
+  assert.equal(created.length, 1);
+  assert.equal(
+    (created[0]!.payload as { runReviewModeAdopted: boolean }).runReviewModeAdopted,
+    true,
+    "the adoption is auditable — a run silently changing authority model is exactly what the ledger exists to prevent",
+  );
+});
+
+test("FG-638: a review whose mode conflicts with its run is REFUSED by name, and writes nothing", () => {
+  // The run was marked evidence_led at creation; a legacy_verdict review on it would
+  // make "which authority model settles this run" a question with two answers.
+  const before = authoritySnapshot();
+  assert.throws(
+    () => insertReview({ id: "review-conflict", runId: RUN.id, reviewMode: "legacy_verdict" }),
+    (e: Error) => {
+      assert.match(e.message, new RegExp(RUN.id), "the refusal must name the run");
+      assert.match(e.message, /is evidence_led/, "the refusal must name the run's mode");
+      assert.match(e.message, /cannot be legacy_verdict/, "the refusal must name the attempted mode");
+      assert.match(e.message, /Nothing was written/);
+      return true;
+    },
+  );
+  assert.deepEqual(authoritySnapshot(), before, "a refused review must leave runs, reviews and events byte-identical");
+  assert.equal(getReview("review-conflict"), undefined);
+});
+
+test("FG-638: adoption happens ONCE — the second review may not re-mark the run", () => {
+  getDb()
+    .prepare(`INSERT INTO runs (id, workflow, title, status, created_at) VALUES (?, ?, ?, ?, ?)`)
+    .run("run-once", "feature", "unmarked", "active", "2026-01-01T00:00:00Z");
+  insertReview({ id: "review-once-1", runId: "run-once", reviewMode: "evidence_led" });
+
+  const before = authoritySnapshot();
+  assert.throws(
+    () => insertReview({ id: "review-once-2", runId: "run-once", reviewMode: "legacy_review_loop" }),
+    /run-once is evidence_led/,
+  );
+  assert.deepEqual(authoritySnapshot(), before);
+
+  // A SECOND review agreeing with the adopted mode is ordinary and permitted.
+  insertReview({ id: "review-once-3", runId: "run-once", reviewMode: "evidence_led" });
+  assert.equal(reviewsForRun("run-once").length, 2);
+  assert.equal(getRun("run-once")!.reviewMode, "evidence_led");
+});
+
+test("FG-638: a run that already owns a legacy_verdict review refuses an evidence_led one", () => {
+  // The run still reads the DEFAULT, so "never marked" cannot be decided from the
+  // column alone — an existing review is the other half of the answer.
+  getDb()
+    .prepare(`INSERT INTO runs (id, workflow, title, status, created_at) VALUES (?, ?, ?, ?, ?)`)
+    .run("run-legacy-ledger", "feature", "legacy", "active", "2026-01-01T00:00:00Z");
+  insertReview({ id: "review-legacy-1", runId: "run-legacy-ledger", reviewMode: "legacy_verdict" });
+  assert.equal(getRun("run-legacy-ledger")!.reviewMode, "legacy_verdict");
+
+  const before = authoritySnapshot();
+  assert.throws(
+    () => insertReview({ id: "review-legacy-2", runId: "run-legacy-ledger", reviewMode: "evidence_led" }),
+    /run-legacy-ledger is legacy_verdict/,
+  );
+  assert.deepEqual(authoritySnapshot(), before);
+});
+
+test("FG-638: adoption is ATOMIC with the review insert — a failed insert leaves the run unmarked", () => {
+  // The run row is written BEFORE the review row, so "both rows or neither" is a claim
+  // about the transaction, not about statement order. Forced by re-using an id that
+  // already exists: the run UPDATE lands, then the INSERT violates the primary key.
+  getDb()
+    .prepare(`INSERT INTO runs (id, workflow, title, status, created_at) VALUES (?, ?, ?, ?, ?)`)
+    .run("run-atomic", "feature", "unmarked", "active", "2026-01-01T00:00:00Z");
+  insertReview({ id: "review-taken", reviewMode: "evidence_led" }); // no run — takes the id only
+
+  const before = authoritySnapshot();
+  assert.throws(() => insertReview({ id: "review-taken", runId: "run-atomic", reviewMode: "evidence_led" }));
+  assert.equal(getRun("run-atomic")!.reviewMode, "legacy_verdict", "the run must not keep a mode whose review never landed");
+  assert.deepEqual(authoritySnapshot(), before);
+});
+
+test("FG-638: a review with no owning run is unconstrained — there is no run to disagree with", () => {
+  insertReview({ id: "review-orphan", reviewMode: "evidence_led" });
+  assert.equal(getReview("review-orphan")!.reviewMode, "evidence_led");
+  assert.equal(getReview("review-orphan")!.runId, undefined);
 });
 
 // ─── lifecycle + events ─────────────────────────────────────────────────────
@@ -434,17 +545,39 @@ test("FG-638 / PRD #25: rejected_premise without candidate-bound disproving evid
   assert.match((badKind as { refusal: string }).refusal, /--evidence-kind must be one of/);
   unchanged(id);
 
+  // Structurally incomplete: a replay that names the command but not what it printed
+  // is a claim that it was run, not proof of what it showed.
+  const halfShaped = recordDisposition(id, {
+    decision: "rejected_premise",
+    rationale: "disproved",
+    operator: false,
+    evidence: JSON.stringify({ command: "node --test src/store/x.test.ts" }),
+    evidenceKind: "replayed_command",
+  });
+  assert.equal(halfShaped.ok, false);
+  assert.match((halfShaped as { refusal: string }).refusal, /missing or empty: output/);
+  unchanged(id);
+
   const ok = recordDisposition(id, {
     decision: "rejected_premise",
     rationale: "the premise is disproved",
     operator: false,
-    evidence: "$ node --test src/store/x.test.ts -> 12/12 pass",
+    evidence: JSON.stringify({ command: "node --test src/store/x.test.ts", output: "12/12 pass" }),
     evidenceKind: "replayed_command",
   });
   assert.equal(ok.ok, true);
-  const evidence = JSON.parse(getFinding(id)!.dispositionEvidence!) as { kind: string; candidateSha: string };
+  const evidence = JSON.parse(getFinding(id)!.dispositionEvidence!) as {
+    kind: string;
+    candidateSha: string;
+    detail: { command: string; output: string };
+  };
   assert.equal(evidence.kind, "replayed_command");
   assert.equal(evidence.candidateSha, "cand111", "the evidence is BOUND to the candidate it was gathered against");
+  assert.deepEqual(
+    evidence.detail,
+    { command: "node --test src/store/x.test.ts", output: "12/12 pass" },
+    "the payload is stored STRUCTURED — a reader never re-parses free text to find what was run",
+  );
 });
 
 test("FG-638: rejected_premise is refused when the review has no candidate to bind evidence to", () => {

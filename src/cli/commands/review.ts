@@ -126,7 +126,12 @@ export function registerReview(program: Command): void {
     .argument("<finding-id>", "finding id (review-x/RF-2) or bare ref (RF-2, with --review when ambiguous)")
     .argument("<decision>", DISPOSITIONS.join(" | "))
     .option("--rationale <text>", "why this decision was made — required")
-    .option("--evidence <text>", "disproving evidence for rejected_premise (candidate-bound)")
+    .option(
+      "--evidence <json>",
+      "candidate-bound disproving evidence for rejected_premise, as a JSON payload whose fields " +
+        "are set by --evidence-kind: replayed_command {command, output}, " +
+        "deterministic_reproduction {reproduction, result}, anchored_contradiction {file, line, fact}",
+    )
     .option("--evidence-kind <kind>", DISPROVING_EVIDENCE_KINDS.join(" | "))
     .option("--duplicate-of <finding-id>", "the canonical finding this one duplicates")
     .option("--ticket <ticket-id>", "the durable destination for a deferred finding")
