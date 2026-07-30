@@ -34,7 +34,7 @@ test("FG-636 — the whole FORGE_* namespace is withheld from the verification c
       FORGE_NO_WORKTREES: "1",
       FORGE_WORKTREE_IGNORE_DIRTY: "1",
       FORGE_HOME: "/tmp/fg636-not-the-candidates-business",
-      FORGE_TEST_MISMATCHED_NODE: "/tmp/fg636-mismatched",
+      FORGE_TEST_PRINT_CMD: "1",
     },
     () => {
       const env = pinnedVerificationEnv("fg636");

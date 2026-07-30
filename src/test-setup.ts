@@ -93,12 +93,10 @@ process.env["FORGE_NOTIFY"] = "";
 // variable they assign means their assignment still wins.
 //
 // An explicit named list, deliberately NOT a blanket FORGE_* deletion: harness
-// INPUTS are legitimate and must survive. CI injects FORGE_TEST_MISMATCHED_NODE
-// into all five test-extended shards (.github/workflows/ci.yml) and
-// src/cli/node-preflight.integration.test.ts treats it as a hard requirement;
-// FORGE_TEST_PRINT_CMD is the other one. Only production behavior switches belong
-// below. FORGE_WORKTREES_EPHEMERAL is not here on purpose — it only affects
-// cleanup once worktree mode is already engaged, which these three now prevent.
+// INPUTS are legitimate and must survive — FORGE_TEST_PRINT_CMD is one. Only
+// production behavior switches belong below. FORGE_WORKTREES_EPHEMERAL is not here
+// on purpose — it only affects cleanup once worktree mode is already engaged,
+// which these three now prevent.
 for (const key of ["FORGE_NO_WORKTREES", "FORGE_WORKTREE_IGNORE_DIRTY"]) {
   delete process.env[key];
 }

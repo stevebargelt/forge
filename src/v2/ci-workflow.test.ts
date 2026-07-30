@@ -126,10 +126,9 @@ test("FG-474: .nvmrc pins the Node major version the better-sqlite3 ABI note ref
 // via scripts/run-integration-tests.sh), a `worktree` job, a
 // `dashboard_integration` job, and (FG-642) a `dashboard_browser` job — with the
 // required `test-extended` job reduced to a fail-closed aggregate over all eight. If a future edit drops a shard, mistargets a shard
-// selector, drops the F31 provision step, or lets the aggregate go green on a
-// failed dependency, the trust-sensitive coverage (FG-419/FG-440/FG-474
-// gate-enforcement tests, among others) would stop gating merges without
-// anyone deciding that on purpose.
+// selector, or lets the aggregate go green on a failed dependency, the
+// trust-sensitive coverage (FG-419/FG-440/FG-474 gate-enforcement tests, among
+// others) would stop gating merges without anyone deciding that on purpose.
 
 const INTEGRATION_SHARD_JOBS = [
   "integration_1",
@@ -162,16 +161,20 @@ test("FG-495 (sharded, FG-624 5-way): ci.yml has five integration shard jobs eac
   );
 });
 
-test("FG-495 (sharded): each integration shard job provisions the F31 ABI-incompatible Node (FORGE_TEST_MISMATCHED_NODE)", () => {
+test("FG-647: no CI job provisions a second interpreter — every job runs on the .nvmrc Node alone", () => {
+  // The inverse of the guard this replaces. FG-647 deleted the environment-dependent
+  // F31 arm, so a shard that downloads another Node is now cost and network with no
+  // test behind it — and re-adding one is how the deleted arm would come back.
   const wf = loadWorkflow();
-  for (const name of INTEGRATION_SHARD_JOBS) {
-    const job = wf.jobs?.[name];
-    assert.ok(job, `ci.yml must define the ${name} integration shard job`);
-    const runCommands = (job!.steps ?? []).map((s) => s.run).filter((r): r is string => typeof r === "string");
-    assert.ok(
-      runCommands.some((r) => r.includes("FORGE_TEST_MISMATCHED_NODE")),
-      `${name} must include the F31 provision step — the duration-aware planner can route node-preflight.integration.test.ts to ANY shard, and that test treats FORGE_TEST_MISMATCHED_NODE as a HARD requirement, so every shard needs it`
-    );
+  for (const [name, job] of Object.entries(wf.jobs ?? {})) {
+    const runCommands = (job.steps ?? []).map((s) => s.run).filter((r): r is string => typeof r === "string");
+    for (const r of runCommands) {
+      assert.doesNotMatch(
+        r,
+        /FORGE_TEST_MISMATCHED_NODE|nodejs\.org\/dist/,
+        `${name} provisions a second interpreter. FG-647 removed that arm; the ABI preflight coverage is deterministic under the .nvmrc Node`
+      );
+    }
   }
 });
 

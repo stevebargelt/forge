@@ -75,11 +75,9 @@ jobs:
   # list. All five run concurrently (no `needs` between them). Five, not four:
   # the balanced 4-way partition fits today (~3m54s projected worst shard) but
   # leaves too little room for the failure this ticket came from — ONE new file
-  # landing on the wrong shard. Each job still provisions the ABI-incompatible
-  # Node for the F31 preflight test: the planner assigns
-  # node-preflight.integration.test.ts by cost, so you cannot predict which
-  # shard receives it (and it treats FORGE_TEST_MISMATCHED_NODE as a HARD
-  # requirement), so ALL five shards must have it available.
+  # landing on the wrong shard. Every shard runs on the .nvmrc interpreter alone
+  # (FG-647): the F31 preflight coverage in node-preflight.integration.test.ts is
+  # deterministic under one Node, so no shard downloads a second one.
   integration_1:
     runs-on: ubuntu-latest
     timeout-minutes: 6
@@ -96,26 +94,6 @@ jobs:
 
       - name: Rebuild better-sqlite3 native module
         run: npm rebuild better-sqlite3
-
-      # FG-570 F31: the manifest-mismatch tests fake the expected ABI under one
-      # interpreter — they prove the ordering, not that the guard prevents a
-      # genuinely-doomed native load. Only a real second Node proves that, so
-      # provision one (v26.3.1 = ABI 147, vs .nvmrc's 24 = ABI 137) and name it
-      # in the env. The test treats FORGE_TEST_MISMATCHED_NODE as a HARD
-      # requirement, so this step is what makes the F31 arm gate rather than
-      # skip. The job's active Node stays at 24; only the variable points here.
-      - name: Provision an ABI-incompatible Node for the F31 preflight test
-        run: |
-          set -euo pipefail
-          ver=v26.3.1
-          dest="$RUNNER_TEMP/node-mismatch"
-          mkdir -p "$dest"
-          curl -fsSL "https://nodejs.org/dist/$ver/node-$ver-linux-x64.tar.xz" | tar -xJ -C "$dest" --strip-components=1
-          abi=$("$dest/bin/node" -p process.versions.modules)
-          active=$(node -p process.versions.modules)
-          echo "provisioned $ver -> ABI $abi (active Node $(node -v) -> ABI $active)"
-          test "$abi" != "$active"
-          echo "FORGE_TEST_MISMATCHED_NODE=$dest/bin/node" >> "$GITHUB_ENV"
 
       - name: Test integration (shard 1/5)
         run: bash scripts/run-integration-tests.sh 1/5
@@ -137,19 +115,6 @@ jobs:
       - name: Rebuild better-sqlite3 native module
         run: npm rebuild better-sqlite3
 
-      - name: Provision an ABI-incompatible Node for the F31 preflight test
-        run: |
-          set -euo pipefail
-          ver=v26.3.1
-          dest="$RUNNER_TEMP/node-mismatch"
-          mkdir -p "$dest"
-          curl -fsSL "https://nodejs.org/dist/$ver/node-$ver-linux-x64.tar.xz" | tar -xJ -C "$dest" --strip-components=1
-          abi=$("$dest/bin/node" -p process.versions.modules)
-          active=$(node -p process.versions.modules)
-          echo "provisioned $ver -> ABI $abi (active Node $(node -v) -> ABI $active)"
-          test "$abi" != "$active"
-          echo "FORGE_TEST_MISMATCHED_NODE=$dest/bin/node" >> "$GITHUB_ENV"
-
       - name: Test integration (shard 2/5)
         run: bash scripts/run-integration-tests.sh 2/5
 
@@ -169,19 +134,6 @@ jobs:
 
       - name: Rebuild better-sqlite3 native module
         run: npm rebuild better-sqlite3
-
-      - name: Provision an ABI-incompatible Node for the F31 preflight test
-        run: |
-          set -euo pipefail
-          ver=v26.3.1
-          dest="$RUNNER_TEMP/node-mismatch"
-          mkdir -p "$dest"
-          curl -fsSL "https://nodejs.org/dist/$ver/node-$ver-linux-x64.tar.xz" | tar -xJ -C "$dest" --strip-components=1
-          abi=$("$dest/bin/node" -p process.versions.modules)
-          active=$(node -p process.versions.modules)
-          echo "provisioned $ver -> ABI $abi (active Node $(node -v) -> ABI $active)"
-          test "$abi" != "$active"
-          echo "FORGE_TEST_MISMATCHED_NODE=$dest/bin/node" >> "$GITHUB_ENV"
 
       - name: Test integration (shard 3/5)
         run: bash scripts/run-integration-tests.sh 3/5
@@ -203,19 +155,6 @@ jobs:
       - name: Rebuild better-sqlite3 native module
         run: npm rebuild better-sqlite3
 
-      - name: Provision an ABI-incompatible Node for the F31 preflight test
-        run: |
-          set -euo pipefail
-          ver=v26.3.1
-          dest="$RUNNER_TEMP/node-mismatch"
-          mkdir -p "$dest"
-          curl -fsSL "https://nodejs.org/dist/$ver/node-$ver-linux-x64.tar.xz" | tar -xJ -C "$dest" --strip-components=1
-          abi=$("$dest/bin/node" -p process.versions.modules)
-          active=$(node -p process.versions.modules)
-          echo "provisioned $ver -> ABI $abi (active Node $(node -v) -> ABI $active)"
-          test "$abi" != "$active"
-          echo "FORGE_TEST_MISMATCHED_NODE=$dest/bin/node" >> "$GITHUB_ENV"
-
       - name: Test integration (shard 4/5)
         run: bash scripts/run-integration-tests.sh 4/5
 
@@ -236,24 +175,10 @@ jobs:
       - name: Rebuild better-sqlite3 native module
         run: npm rebuild better-sqlite3
 
-      - name: Provision an ABI-incompatible Node for the F31 preflight test
-        run: |
-          set -euo pipefail
-          ver=v26.3.1
-          dest="$RUNNER_TEMP/node-mismatch"
-          mkdir -p "$dest"
-          curl -fsSL "https://nodejs.org/dist/$ver/node-$ver-linux-x64.tar.xz" | tar -xJ -C "$dest" --strip-components=1
-          abi=$("$dest/bin/node" -p process.versions.modules)
-          active=$(node -p process.versions.modules)
-          echo "provisioned $ver -> ABI $abi (active Node $(node -v) -> ABI $active)"
-          test "$abi" != "$active"
-          echo "FORGE_TEST_MISMATCHED_NODE=$dest/bin/node" >> "$GITHUB_ENV"
-
       - name: Test integration (shard 5/5)
         run: bash scripts/run-integration-tests.sh 5/5
 
-  # Root worktree tier (~23s). No F31 step — the F31 test is an integration
-  # test, not a worktree test.
+  # Root worktree tier (~23s).
   worktree:
     runs-on: ubuntu-latest
     timeout-minutes: 6
