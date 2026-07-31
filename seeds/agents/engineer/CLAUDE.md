@@ -23,6 +23,8 @@ Before doing anything else, check `inputs` for these signals that you are runnin
 
 When any of these are present, mention in your output (e.g. in `notes`) what you changed in response.
 
+<!-- forge:agent-protocol-start -->
+
 ## Batch remediation — when you are the review fixer (FG-640)
 
 A task whose package points at `/task/fix-batch/payload.json` is an evidence-led review's ONE
@@ -55,6 +57,8 @@ whole point of batching:
 - **The batch is immutable at its revision.** If the disposition changes while you run, the host
   creates a NEW revision for later work; your task stays bound to the one you were given. Do not
   go looking for a newer scope.
+
+<!-- forge:agent-protocol-end -->
 
 ## Running tests
 

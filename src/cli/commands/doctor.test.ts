@@ -7,12 +7,14 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { cpSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from "node:fs";
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gatherPolicy, gatherProfileAuth, gatherReleaseInputs, newestBuildInputMtime, type DoctorProbes } from "./doctor.js";
 import { buildReleaseReport, type ImageInputs } from "../../v2/release-doctor.js";
 import { assetRoot } from "../../v2/asset-root.js";
+import { detectProtocolDrift, renderProtocolDrift, detectSeedDrift, renderSeedDrift } from "../../v2/seed-drift.js";
+import { publishAgentProtocolRegions, readProtocolRegion } from "../../v2/agent-protocol.js";
 
 // proj-default is the reachable default; proj-optin is defined but only
 // selectable via --profile (not in defaults/overrides).
@@ -312,4 +314,62 @@ test("FG-577: an explicit ctx.forgeRepoDir still overrides the probe root (upgra
     buildInputMtime: (dir) => { probed = dir; return 42; },
   });
   assert.equal(probed, "/some/release");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FG-654: the Forge-owned protocol region is DISPATCH-COUPLED, so a stale one is
+// a readiness FAIL — while the operator's own prose in the SAME file stays a warn.
+//
+// This is a visible change to a published exit-code contract: a host that has not
+// upgraded goes from green to red. That is the point — such a host cannot review.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("FG-654: a stale Forge-owned region makes doctor's readiness FAIL and prints it as FAIL", () => {
+  const home = mkdtempSync(join(tmpdir(), "forge-fg654-doctor-"));
+  const seeds = join(assetRoot(), "seeds");
+  publishAgentProtocolRegions({ forgeHome: home, seedsDir: seeds });
+
+  const clean = detectProtocolDrift({ forgeHome: home, seedsDir: seeds });
+  assert.equal(clean.ok, true, "a freshly published host is ready");
+  assert.equal(renderProtocolDrift(clean), "", "and prints nothing");
+
+  // Mutate INSIDE the fence — the Forge-owned half.
+  const path = join(home, "agents", "red-wide", "CLAUDE.md");
+  const read = readProtocolRegion(readFileSync(path, "utf8"));
+  assert.equal(read.kind, "fenced");
+  if (read.kind === "fenced") {
+    writeFileSync(path, readFileSync(path, "utf8").replace(read.region, `${read.region}\n\nMUTATED`));
+  }
+
+  const stale = detectProtocolDrift({ forgeHome: home, seedsDir: seeds });
+  assert.equal(stale.ok, false, "a stale region is NOT ready — doctor exits non-zero");
+  assert.equal(stale.stale.length, 1);
+  assert.equal(stale.stale[0]?.role, "red-wide");
+  const rendered = renderProtocolDrift(stale);
+  assert.match(rendered, /\[FAIL\]/);
+  assert.match(rendered, /red-wide/);
+  assert.match(rendered, /forge upgrade/);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("FG-654: OPERATOR-side drift in the same file stays a warn — readiness is unaffected", () => {
+  const home = mkdtempSync(join(tmpdir(), "forge-fg654-doctor-warn-"));
+  const seeds = join(assetRoot(), "seeds");
+  publishAgentProtocolRegions({ forgeHome: home, seedsDir: seeds });
+
+  // Edit OUTSIDE the fence: the operator's own prose, in the very same file.
+  const path = join(home, "agents", "red-wide", "CLAUDE.md");
+  writeFileSync(path, `${readFileSync(path, "utf8")}\n\n## My house rule\n\nAlways read the ledger first.\n`);
+
+  const protocol = detectProtocolDrift({ forgeHome: home, seedsDir: seeds });
+  assert.equal(protocol.ok, true, "the operator's own edit must NOT make the host unready");
+  assert.equal(renderProtocolDrift(protocol), "");
+
+  // The FG-335 detector still reports it — as a warn, exactly as before.
+  const seedDrift = detectSeedDrift(seeds, home, join(home, "skills"));
+  const entry = seedDrift.entries.find((e) => e.path === join("agents", "red-wide", "CLAUDE.md"));
+  assert.equal(entry?.status, "drifted");
+  assert.equal(entry?.coupling, "prose", "the file as a whole is still prose-coupled → warn");
+  assert.match(renderSeedDrift(seedDrift), /\[warn\]\s+drifted\s+agents\/red-wide/);
+  rmSync(home, { recursive: true, force: true });
 });

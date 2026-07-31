@@ -7,6 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  cpSync,
   writeFileSync,
   mkdirSync,
   existsSync,
@@ -23,6 +24,7 @@ import { tasksForRun } from "../store/tasks.js";
 import { taskDir } from "../util/paths.js";
 import type { TaskManifest } from "./task-manifest.js";
 import type { DockerExecFn } from "./docker-exec.js";
+import { assetRoot } from "./asset-root.js";
 import type { Workflow } from "./schema.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
@@ -434,6 +436,11 @@ test("FG-350 fix1: red forceCount reflects primary-role force constraints, not r
   const origForgeHome = process.env.FORGE_HOME;
   const isolatedHome = mkdtempSync(join(tmpdir(), "forge-fg350-fix1-"));
   process.env.FORGE_HOME = isolatedHome;
+  // FG-654: an isolated $FORGE_HOME stands in for a HOST, so it is provisioned with the
+  // agent seeds exactly as install-seeds.sh provisions one. Without them the covered roles
+  // this case dispatches are refused at compose for a missing Forge protocol region — a
+  // true refusal, but not the subject of this test.
+  cpSync(join(assetRoot(), "seeds", "agents"), join(isolatedHome, "agents"), { recursive: true });
   process.env.ANTHROPIC_API_KEY = "sk-stub";
   const projectDir = mkdtempSync(join(tmpdir(), "forge-fg350-fix1-proj-"));
   try {
@@ -510,6 +517,11 @@ test("FG-350 fix2: sentinel 'claude' runtime records the concrete declared name 
   const origForgeHome = process.env.FORGE_HOME;
   const isolatedHome = mkdtempSync(join(tmpdir(), "forge-fg350-fix2-"));
   process.env.FORGE_HOME = isolatedHome;
+  // FG-654: an isolated $FORGE_HOME stands in for a HOST, so it is provisioned with the
+  // agent seeds exactly as install-seeds.sh provisions one. Without them the covered roles
+  // this case dispatches are refused at compose for a missing Forge protocol region — a
+  // true refusal, but not the subject of this test.
+  cpSync(join(assetRoot(), "seeds", "agents"), join(isolatedHome, "agents"), { recursive: true });
   process.env.ANTHROPIC_API_KEY = "sk-stub";
   const projectDir = mkdtempSync(join(tmpdir(), "forge-fg350-fix2-proj-"));
   try {
@@ -585,6 +597,11 @@ test("FG-366: sentinel 'claude' runtime records the concrete declared name on th
   const origForgeHome = process.env.FORGE_HOME;
   const isolatedHome = mkdtempSync(join(tmpdir(), "forge-fg366-pipe-"));
   process.env.FORGE_HOME = isolatedHome;
+  // FG-654: an isolated $FORGE_HOME stands in for a HOST, so it is provisioned with the
+  // agent seeds exactly as install-seeds.sh provisions one. Without them the covered roles
+  // this case dispatches are refused at compose for a missing Forge protocol region — a
+  // true refusal, but not the subject of this test.
+  cpSync(join(assetRoot(), "seeds", "agents"), join(isolatedHome, "agents"), { recursive: true });
   process.env.ANTHROPIC_API_KEY = "sk-stub";
   const projectDir = mkdtempSync(join(tmpdir(), "forge-fg366-pipe-proj-"));
   try {

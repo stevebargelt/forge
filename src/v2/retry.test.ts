@@ -1,6 +1,6 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { join } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
@@ -11,6 +11,8 @@ import { logEvent, eventsForTask } from "../store/events.js";
 import { retry, RetryNotAllowedError, FanoutChildRetryError, reapRetainedContainer } from "./retry.js";
 import { retryPolicy } from "./retry-policy.js";
 import type { Run, Task } from "../types/index.js";
+import { taskDir } from "../util/paths.js";
+import { installedSeedPath, readProtocolRegion } from "./agent-protocol.js";
 
 let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
@@ -357,4 +359,67 @@ test("retry: reaps the OLD failed task's container as part of a successful retry
   // No real docker in this environment — retry() must still succeed; the reap
   // is best-effort and never blocks the retry itself.
   assert.equal(out.newTask.status, "pending");
+});
+
+// FG-654 / D12: A RETRY RE-VERIFIES AND RE-STAMPS; IT NEVER REPLAYS THE ORIGINAL STAMP.
+//
+// `planAdHocRedispatch` recomposes the prompt fresh (it always has), which means it now
+// also re-runs the protocol gate against TODAY's requirement. A retry after a
+// `forge upgrade` genuinely runs a different protocol, so replaying the original task's
+// recorded sha would make the ledger lie in exactly the direction FG-654 exists to
+// prevent. Refused BEFORE any row is written, like every other precondition there — so a
+// retry that cannot dispatch never leaves a stranded pending task behind.
+test("FG-654: retrying an ad-hoc covered-role task re-verifies the protocol and refuses when it is stale", async () => {
+  const pristine = readFileSync(installedSeedPath("red-wide"), "utf8");
+  const read = readProtocolRegion(pristine);
+  assert.equal(read.kind, "fenced");
+
+  const id = "t-fg654-adhoc";
+  const t: Task = {
+    id,
+    runId: RUN.id,
+    phase: "task",
+    agentRole: "red-wide",
+    status: "failed",
+    error: "boom",
+    taskPackage: {
+      taskId: id,
+      runId: RUN.id,
+      phase: "task",
+      role: "red-wide",
+      inputs: { task: "audit the change" },
+      composedSystemPrompt: "PROMPT",
+      dispatchSource: "invoke",
+    },
+    createdAt: "2026-05-30T00:00:00Z",
+  };
+  insertTask(t);
+  logEvent("task.failed", { runId: RUN.id, taskId: id, payload: { failure_kind: "idle_timeout", error: "boom" } });
+  // A manifest recording the projectDir the retry must reproduce.
+  const dir = taskDir(RUN.id, id);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "manifest.json"),
+    JSON.stringify({
+      taskId: id,
+      runId: RUN.id,
+      runtime: { name: "claude" },
+      // The stamp the ORIGINAL dispatch recorded. The retry must not replay it.
+      agentProtocol: { role: "red-wide", sha256: "0".repeat(64), source: installedSeedPath("red-wide") },
+      controlPlane: { projectDir: process.env["FORGE_HOME"], mountMode: "ro" },
+    }),
+  );
+
+  // Now the installed region goes stale under it — as a `forge upgrade` moving the
+  // requirement would leave a host that has not re-published.
+  if (read.kind === "fenced") {
+    writeFileSync(installedSeedPath("red-wide"), pristine.replace(read.region, `${read.region}\n\nSTALE`));
+  }
+  try {
+    await assert.rejects(retry(id), /STALE review protocol|forge upgrade/);
+    // Refused before any row: no new task was written.
+    assert.equal(getTask(id)!.status, "failed", "the original stays failed for audit");
+  } finally {
+    writeFileSync(installedSeedPath("red-wide"), pristine);
+  }
 });

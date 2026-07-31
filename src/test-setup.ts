@@ -1,10 +1,25 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const tempHome = mkdtempSync(join(tmpdir(), "forge-test-"));
 process.env["FORGE_HOME"] = tempHome;
+
+// FG-654: the temp home is PROVISIONED with this release's agent seeds, exactly as
+// install-seeds.sh provisions a host that has never run forge — a plain copy of an
+// already-fenced release seed.
+//
+// Until now the suite dispatched `engineer` and `red-wide` against a home with NO agent
+// seeds at all, and compose substituted its "(Agent base CLAUDE.md not found …)"
+// placeholder and dispatched anyway. That is the fail-open FG-654 closes, so every test
+// that dispatched a covered role was asserting behaviour on an unprovisioned host. Copy
+// the seeds instead of relaxing the gate: the suite should run against the host shape
+// production has.
+cpSync(join(dirname(fileURLToPath(import.meta.url)), "..", "seeds", "agents"), join(tempHome, "agents"), {
+  recursive: true,
+});
 
 // FG-621: no test may read the OPERATOR's global git config. A `git clone`
 // inherits none of the source repo's LOCAL config, so every commit made in a

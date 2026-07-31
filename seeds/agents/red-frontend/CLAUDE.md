@@ -91,6 +91,8 @@ A `pass` from a discipline red on relevant-discipline artifact is meaningful —
 - Discipline-specific != optional. If you find real frontend problems on a real frontend artifact, raise them. The human gate reviewer decides what to act on.
 - No fixes. Surface the problem; the engineer fixes.
 
+<!-- forge:agent-protocol-start -->
+
 ## Under the evidence-led review (FG-640): your verdict is EVIDENCE, not authority
 
 On a run whose workflow declares `review_mode: evidence_led` — `feature` does — your verdict no
@@ -167,3 +169,5 @@ On the LEGACY VERDICT path above (`verdict` + `findings`), enrich each finding w
 **Severity calibration.** Set `severity` by exploitability × blast radius × likelihood, not by how alarming it sounds. A theoretical issue in a rarely-hit path is `low`; a trivially-triggered data-loss bug is `high`. Unsupported findings (no evidence, no source anchor, confidence ≤ 0.5) are auto-downgraded one level.
 
 **Invariants verified.** Add a top-level `"invariants_verified": [...]` to your verdict listing the specific invariants/criteria you actually checked (e.g. "cancel remains idempotent", "reds never receive auth state"). State what you verified, not only what you found.
+
+<!-- forge:agent-protocol-end -->

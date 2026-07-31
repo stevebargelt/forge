@@ -39,6 +39,7 @@ import { join, relative } from "node:path";
 import { CLAUDE_SKILLS_DIR, FORGE_HOME } from "../util/paths.js";
 import { assetRoot } from "./asset-root.js";
 import { sha256OfBytes } from "../util/content-digest.js";
+import { inspectAgentProtocols, type ProtocolPaths } from "./agent-protocol.js";
 
 export type SeedStatus = "current" | "drifted" | "missing";
 
@@ -187,6 +188,45 @@ export function detectSeedDrift(
   // (runtimes or workflows) silently mis-runs → not ok. Prose drift stays a warning.
   const ok = !stale.some((e) => e.coupling === "executable");
   return { entries, stale, ok };
+}
+
+// ─── the Forge-owned protocol region (FG-654) ───────────────────────────────
+
+/** FG-654: a Forge-owned, DISPATCH-COUPLED region inside an operator-authored file has
+ *  no representation in the {ownership × coupling} taxonomy above — SeedSpec's grain is a
+ *  file or a dir, and `agents` is classified operator-authored + prose, so agent drift
+ *  reports without failing. That classification is still right for the operator's own
+ *  prose and now wrong for the region: a host whose region is stale cannot review at all.
+ *
+ *  So the region gets its OWN registration. A stale region is a readiness FAIL (doctor
+ *  exits non-zero); the operator's surrounding prose in the very same file stays a warn.
+ *  This is a visible change to a published exit-code contract for every host that has not
+ *  yet upgraded — see docs/how-to-upgrade.md. */
+export type ProtocolDriftReport = {
+  entries: Array<{ role: string; ok: boolean; detail: string }>;
+  stale: Array<{ role: string; ok: boolean; detail: string }>;
+  ok: boolean;
+};
+
+export function detectProtocolDrift(paths: ProtocolPaths = {}): ProtocolDriftReport {
+  const entries = inspectAgentProtocols(paths).map((r) =>
+    r.ok
+      ? { role: r.role, ok: true, detail: `current (${r.sha256.slice(0, 12)})` }
+      : { role: r.role, ok: false, detail: r.refusal },
+  );
+  const stale = entries.filter((e) => !e.ok);
+  return { entries, stale, ok: stale.length === 0 };
+}
+
+export function renderProtocolDrift(report: ProtocolDriftReport): string {
+  if (report.ok) return "";
+  const lines: string[] = ["Forge-owned agent protocol region (installed ~/.forge/agents vs running code):"];
+  for (const e of report.stale) lines.push(`  [FAIL] ${e.role.padEnd(24)} ${e.detail}`);
+  lines.push("  Every role above is one the review lifecycle DISPATCHES, and each is refused at dispatch by name");
+  lines.push("  until its region is current — a stale reviewer produces plausible output in the wrong shape rather");
+  lines.push("  than failing loudly. Your own edits OUTSIDE the marker fence are untouched by the repair.");
+  lines.push("  Fix: forge upgrade.");
+  return lines.join("\n");
 }
 
 /** Human-readable drift section for `forge doctor`. Empty string when nothing is

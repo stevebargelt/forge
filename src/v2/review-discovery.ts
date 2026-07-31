@@ -20,6 +20,7 @@
 
 import { z } from "zod";
 import { RISK_LENSES, type RiskLens } from "./review-contract.js";
+import { STALE_PROTOCOL_FAILURE_KIND } from "./agent-protocol.js";
 import type { FindingSource, LensAcceptance, Observation } from "../store/reviews.js";
 
 export const REACHABILITY = ["demonstrated", "supported", "speculative"] as const;
@@ -106,6 +107,9 @@ export type LensDispatch = {
   dispatched: boolean;
   /** Set when the dispatch itself failed — `container_crash`, `idle_timeout`, … */
   failureKind?: string;
+  /** FG-654: the dispatcher's own message for the failure, when it has one worth
+   *  carrying into the outcome (a protocol refusal names both shas and the remedy). */
+  detail?: string;
   /** The parsed result.json, or undefined when there was none. */
   result?: unknown;
   /** True when forge (not the reviewer) produced this verdict — the review-missing
@@ -113,8 +117,22 @@ export type LensDispatch = {
   synthesized?: boolean;
   taskId?: string;
   verdictId?: string;
+  /** FG-654: the protocol generation the dispatched agent ran under, read back off its
+   *  task manifest. The manifest is authoritative; this is the ledger's index of it. */
+  protocol?: LensProtocolRecord;
 };
 
+/** FG-654. Deliberately per-DISPATCH, not per stage: `StageEvidence` is one record per
+ *  stage while Stage 2b fans out five lens dispatches, so recording it there would be the
+ *  wrong cardinality — a review that spans a `forge upgrade` legitimately mixes
+ *  generations, and the mix is RECORDED and visible rather than averaged away. */
+export type LensProtocolRecord = { role: string; sha256: string; taskId?: string };
+
+// Invariant 17: this vocabulary only ever GROWS. FG-654 adds `stale_protocol` — the lens
+// was refused at dispatch because the agent's installed Forge-owned review protocol was
+// absent or behind this release. Without its own word it normalized to `no_outcome` /
+// "never dispatched", which reads as a coordinator wiring bug AND is clearable by an
+// operator lens acceptance — re-opening precisely the fail-open being closed here.
 export const LENS_INCOMPLETE_REASONS = [
   "not_dispatched",
   "crashed",
@@ -122,6 +140,7 @@ export const LENS_INCOMPLETE_REASONS = [
   "missing_output",
   "malformed_output",
   "synthesized",
+  "stale_protocol",
 ] as const;
 export type LensIncompleteReason = (typeof LENS_INCOMPLETE_REASONS)[number];
 
@@ -140,6 +159,7 @@ export type LensOutcome =
       toleratedRootKeys?: string[];
       taskId?: string;
       verdictId?: string;
+      protocol?: LensProtocolRecord;
     }
   | {
       lens: RiskLens;
@@ -148,10 +168,14 @@ export type LensOutcome =
       reason: LensIncompleteReason;
       detail: string;
       taskId?: string;
+      protocol?: LensProtocolRecord;
     };
 
 function classifyFailure(failureKind: string | undefined): LensIncompleteReason {
   if (failureKind === undefined) return "not_dispatched";
+  // FG-654: matched on the exact literal the dispatch seam emits, before the loose
+  // regexes below — a refusal is a precondition failure, not a container death.
+  if (failureKind === STALE_PROTOCOL_FAILURE_KIND) return "stale_protocol";
   if (/timeout|idle/i.test(failureKind)) return "timed_out";
   if (/crash|oom|killed|signal/i.test(failureKind)) return "crashed";
   return "crashed";
@@ -161,7 +185,12 @@ function classifyFailure(failureKind: string | undefined): LensIncompleteReason 
  *  produces a pass, and nothing here ever produces an empty finding set as a stand-in
  *  for a review that did not happen. */
 export function assessLens(dispatch: LensDispatch): LensOutcome {
-  const base = { lens: dispatch.lens, role: dispatch.role, taskId: dispatch.taskId };
+  const base = {
+    lens: dispatch.lens,
+    role: dispatch.role,
+    taskId: dispatch.taskId,
+    ...(dispatch.protocol !== undefined ? { protocol: dispatch.protocol } : {}),
+  };
 
   if (dispatch.synthesized === true) {
     return {
@@ -175,6 +204,19 @@ export function assessLens(dispatch: LensDispatch): LensOutcome {
   }
   if (!dispatch.dispatched) {
     const reason = classifyFailure(dispatch.failureKind);
+    if (reason === "stale_protocol") {
+      return {
+        ...base,
+        complete: false,
+        reason,
+        detail:
+          `the ${dispatch.lens} lens was REFUSED at dispatch: ${dispatch.role}'s installed Forge-owned review ` +
+          `protocol is absent or behind this release, so it was never told the contract its findings are judged ` +
+          `by. This is not a narrower review — it is no review under an unstated contract, which is why an ` +
+          `operator lens acceptance cannot clear it. Remedy: run \`forge upgrade\`, then retry the lens` +
+          (dispatch.detail !== undefined ? ` (${dispatch.detail})` : ""),
+      };
+    }
     return {
       ...base,
       complete: false,
@@ -249,6 +291,18 @@ export function assessDiscoveryCompleteness(
     const found = outcomes.filter((o) => o.lens === lens);
     const authored = found.find((o) => o.complete);
     if (authored) continue;
+
+    // FG-654: a stale-protocol refusal is NOT acceptable-away, and it is checked BEFORE
+    // any acceptance is consulted. The acceptance route exists so an operator can
+    // knowingly accept a NARROWER review; a stale-protocol agent did not produce a
+    // narrower review — it produced output under a contract nobody stated, or none at
+    // all. Different facts, and collapsing them recreates the fail-open this closes.
+    // The remedy is `forge upgrade` and then the lens, which is self-service.
+    const last = found[found.length - 1];
+    if (last && !last.complete && last.reason === "stale_protocol") {
+      missing.push({ lens, reason: last.reason, detail: last.detail });
+      continue;
+    }
 
     const forLens = (clearances.acceptances ?? []).filter((a) => a.lens === lens);
     const bound = forLens.filter(

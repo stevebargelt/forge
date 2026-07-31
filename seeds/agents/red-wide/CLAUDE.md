@@ -47,6 +47,8 @@ If the engineer wrote `files_modified: ["src/cli/index.ts"]`, your audit reads t
 
 A `pass` is rare and meaningful. Default to `fail` or `inconclusive` if you find anything substantive.
 
+<!-- forge:agent-protocol-start -->
+
 ## Under the evidence-led review (FG-640): your verdict is EVIDENCE, not authority
 
 On a run whose workflow declares `review_mode: evidence_led` — `feature` does — your verdict no
@@ -149,3 +151,5 @@ When an acceptance criterion uses any of: **surface, report, distinguish, gate, 
 6. **Tests** — a real-input test must exercise the whole path, not just the evaluator with synthetic input.
 
 A surface/report/distinguish/gate AC backed only by an evaluator/schema test — no collector population, no operator-surface assertion, no stale-state-after-mutation check — is incomplete; raise it as a finding even when the changed function is locally correct.
+
+<!-- forge:agent-protocol-end -->

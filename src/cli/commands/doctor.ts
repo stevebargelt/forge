@@ -16,7 +16,7 @@ import { loadRuntime, loadModelPolicy, type LoadContext } from "../../v2/loader.
 import { probeAuth } from "../../v2/provider-doctor.js";
 import { detectAuthMode, type EffectiveAuth } from "../../v2/model-resolution.js";
 import { validateRoutePolicyFile } from "./route.js";
-import { detectSeedDrift, renderSeedDrift } from "../../v2/seed-drift.js";
+import { detectSeedDrift, renderSeedDrift, detectProtocolDrift, renderProtocolDrift } from "../../v2/seed-drift.js";
 import { inspectSeedInstall } from "../../v2/seed-generation.js";
 import {
   buildReleaseReport,
@@ -299,6 +299,10 @@ export function registerDoctor(program: Command): void {
     .action((opts: { json?: boolean }) => {
       const report = buildReleaseReport(gatherReleaseInputs(DEFAULT_IMAGE, { projectDir: process.cwd() }));
       const drift = detectSeedDrift(); // FG-335: installed ~/.forge seeds vs running code
+      // FG-654: the Forge-owned protocol region inside the operator-authored agent seeds.
+      // Separate from `drift` on purpose — the same file's operator-side drift stays a
+      // warn while a stale REGION is a readiness fail, because dispatch refuses on it.
+      const protocolDrift = detectProtocolDrift();
       // FG-583: dispatch reads ONLY a published seed generation — there is no flat
       // dispatch fallback. So ONLY `healthy` (a complete generation is published) is
       // ready. `incomplete` (torn/mid-publish) AND `no-generation` (nothing published
@@ -307,11 +311,13 @@ export function registerDoctor(program: Command): void {
       const seedInstall = inspectSeedInstall();
       const seedInstallOk = seedInstall.kind === "healthy";
       if (opts.json) {
-        console.log(JSON.stringify({ ...report, seedDrift: drift, seedInstall }, null, 2));
+        console.log(JSON.stringify({ ...report, seedDrift: drift, protocolDrift, seedInstall }, null, 2));
       } else {
         console.log(renderReleaseReport(report));
         const driftSection = renderSeedDrift(drift);
         if (driftSection) console.log(`\n${driftSection}`);
+        const protocolSection = renderProtocolDrift(protocolDrift);
+        if (protocolSection) console.log(`\n${protocolSection}`);
         if (seedInstall.kind === "incomplete") {
           console.log(`\nSeed install: INCOMPLETE (repairable) — ${seedInstall.reason}`);
           console.log(`  A partial host-seed install can expose a mixed/torn workflow set — dispatch refuses.`);
@@ -322,6 +328,9 @@ export function registerDoctor(program: Command): void {
           console.log(`  Fix: forge upgrade (publishes a complete atomic seed generation).`);
         }
       }
-      process.exitCode = report.ok && drift.ok && seedInstallOk ? 0 : 1;
+      // FG-654: protocolDrift.ok joins the readiness conjunction. A stale Forge-owned
+      // region is a host that cannot review, so it goes red here even though the file it
+      // lives in is classified prose (which stays a warn via drift.ok).
+      process.exitCode = report.ok && drift.ok && protocolDrift.ok && seedInstallOk ? 0 : 1;
     });
 }
