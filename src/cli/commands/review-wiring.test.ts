@@ -783,6 +783,111 @@ test("FG-649/RF-6: a commit that landed carrying an undeclared path is NOT adopt
   assert.match(commit.kind === "refused" ? commit.detail : "", /infra\/secrets\.tf/);
 });
 
+// ─── FG-649 RF-7: recognition adopts on the SAME terms the commit path does ─
+//
+// RF-2's recovery arm and RF-6's post-commit check both decide the same thing — may this commit
+// become the candidate — and recognition used to decide it on strictly less evidence: a subject
+// match plus an anchor, with neither the exactly-one-parent guard nor the declared-paths guard.
+// That made the RF-6 refusal non-durable. `fix_cycle_commit_raced` tells the operator to reset
+// the checkout and re-run; re-running WITHOUT the reset landed on the recognition arm, which
+// adopted the very commit the previous pass refused — undeclared paths and all — and that sha
+// then anchored every candidate-bound resolution, verification and shipping check.
+
+test("FG-649/RF-7: a RECOGNISED commit carrying an undeclared path is refused, exactly as the authored path refuses it", async () => {
+  const ctx = commitCtx(["src/a.ts"]);
+  // The RF-6 scenario one `continue` later: the smuggled commit is already HEAD, the tree is
+  // clean because it took the changes, and the subject is this batch revision's.
+  const { git, calls } = scriptedGit({
+    status: "",
+    preHead: "postfix9",
+    subject: (s) => (s === "postfix9" ? subjectFor(ctx.batch) : ""),
+    parent: () => "cand111",
+    paths: ["src/a.ts", "infra/secrets.tf"],
+  });
+  const commit = await commitDeps(git).commitFixCycle(ctx);
+
+  assert.equal(commit.kind, "refused", "a refused commit does not become adoptable by being re-read");
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "fix_cycle_commit_raced");
+  assert.match(commit.kind === "refused" ? commit.detail : "", /infra\/secrets\.tf/);
+  assert.equal(calls.some((c) => c[0] === "commit"), false, "and nothing is re-authored on top of it");
+});
+
+test("FG-649/RF-7: a RECOGNISED merge commit is refused — one parent is required of both arms", async () => {
+  const ctx = commitCtx(["src/a.ts"]);
+  // Anchored by its FIRST parent, so the old `parentsOf(at).includes(candidate)` arm adopted it;
+  // the authored path has always refused any commit with parents.length !== 1.
+  const { git } = scriptedGit({
+    status: "",
+    preHead: "postfix9",
+    subject: (s) => (s === "postfix9" ? subjectFor(ctx.batch) : ""),
+    parent: () => "cand111 someforeignbranch",
+    paths: ["src/a.ts"],
+  });
+  const commit = await commitDeps(git).commitFixCycle(ctx);
+
+  assert.equal(commit.kind, "refused");
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "fix_cycle_commit_raced");
+  assert.match(commit.kind === "refused" ? commit.detail : "", /parent is cand111 someforeignbranch/);
+});
+
+test("FG-649/RF-7: sharing the predicate does not lend the AUTHORED path recovery's self-anchor", async () => {
+  // The predicate accepts a commit that IS the candidate, because after the candidate advance the
+  // row points at it. On the authored path the row has not moved, so a HEAD back at the candidate
+  // means a writer rewound the checkout and the commit git just reported is gone. Adopting it
+  // would record the fix cycle complete against a tree the fixes are not in.
+  const { git } = scriptedGit({ status: "M  src/a.ts\0", head: "cand111", paths: ["src/a.ts"] });
+  const commit = await commitDeps(git).commitFixCycle(commitCtx(["src/a.ts"]));
+
+  assert.equal(commit.kind, "refused");
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "fix_cycle_commit_raced");
+  assert.match(commit.kind === "refused" ? commit.detail : "", /HEAD is still the candidate/);
+});
+
+test("FG-649/RF-7: the predicate is CONTAINMENT, so RF-5's partial commit is still recoverable", async () => {
+  // Where the two findings meet. RF-5 commits what moved and names what did not, so a legitimate
+  // fix-cycle commit can carry FEWER paths than the batch declared. Tightening recognition to
+  // declared-set EQUALITY would refuse exactly those commits on the retry after a crash — the
+  // FG-649 stuck loop rebuilt out of a guard meant to close it. `committed ⊆ declared` is the
+  // invariant, in both arms.
+  const ctx = commitCtx(["src/a.ts", "src/b.ts"]);
+  const { git } = scriptedGit({
+    status: "",
+    preHead: "postfix9",
+    subject: (s) => (s === "postfix9" ? subjectFor(ctx.batch) : ""),
+    parent: () => "cand111",
+    paths: ["src/a.ts"],
+  });
+  const commit = await commitDeps(git).commitFixCycle(ctx);
+
+  assert.equal(commit.kind, "committed", commit.kind === "refused" ? commit.detail : "");
+  assert.equal(commit.kind === "committed" ? commit.recognized : undefined, true);
+});
+
+test("FG-649/RF-7: the two arms give the SAME answer about the same commit", async () => {
+  // The coherence statement itself, rather than two facts that happen to agree today: one commit
+  // content, reached through the authored door and through the recovery door.
+  const ctx = commitCtx(["src/a.ts"]);
+  const smuggling = { paths: ["src/a.ts", "infra/secrets.tf"] };
+
+  const authored = await commitDeps(scriptedGit({ status: "M  src/a.ts\0", ...smuggling }).git).commitFixCycle(ctx);
+  const recognised = await commitDeps(
+    scriptedGit({
+      status: "",
+      preHead: "postfix9",
+      subject: (s) => (s === "postfix9" ? subjectFor(ctx.batch) : ""),
+      parent: () => "cand111",
+      ...smuggling,
+    }).git,
+  ).commitFixCycle(ctx);
+
+  assert.equal(authored.kind, recognised.kind);
+  assert.equal(
+    authored.kind === "refused" ? authored.reason : "",
+    recognised.kind === "refused" ? recognised.reason : "",
+    "adoption is one question, so the recovery arm cannot answer it more permissively",
+  );
+});
+
 // ─── the comparison base, resolved AT OPEN ──────────────────────────────────
 //
 // Stage 2 refuses a review that records no base sha, and no verb supplies one afterwards or

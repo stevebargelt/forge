@@ -567,6 +567,61 @@ test("integ FG-649: a tree that moved OUTSIDE the declared set refuses by name a
   assert.match(porcelain(), /sneaky\.ts/, "and the undeclared change is left exactly where it was");
 });
 
+test("integ FG-649 / RF-7: a refused raced commit is STILL refused on the next continue, not adopted by the recovery arm", async () => {
+  // The whole sequence, against a real repository. `fix_cycle_commit_raced` does not un-commit —
+  // it refuses to ADOPT — so the smuggling commit is still sitting at HEAD, carrying the
+  // coordinator's own subject for this batch revision and anchored on the candidate. Its own
+  // refusal text says "reset the checkout to <candidate>, and re-run", and re-running WITHOUT the
+  // reset is what an operator following the general "resolve the named condition and re-run
+  // continue" guidance — or an autonomous run — actually does.
+  //
+  // RED baseline: revert the adoption predicate in `commitFixCycle` and the second pass below
+  // ADVANCES, adopting `infra/secrets.tf` as one of the fix cycle's committedPaths and making
+  // that commit the anchor for every candidate-bound resolution and verification afterwards.
+  const h = harness({
+    fixer: (payload) => {
+      appendFileSync(join(repo, "src", "reconcile.ts"), `\n${GUARD}\n`);
+      // The concurrent writer sharing this checkout. Nothing declares it.
+      mkdirSync(join(repo, "infra"), { recursive: true });
+      writeFileSync(join(repo, "infra", "secrets.tf"), 'resource "aws_iam_policy" "wide" {}\n');
+      return {
+        fix_batch_id: payload.fix_batch_id,
+        revision: payload.revision,
+        findings: payload.findings.map((f) => ({
+          finding_id: f.finding_id,
+          result: "fixed",
+          remediation_summary: "guarded the partial write",
+          files_changed: ["src/reconcile.ts"],
+          evidence: EXECUTED,
+        })),
+      };
+    },
+  });
+  await parkAt(h.deps, "batch_fix");
+  const preFix = getReview(REVIEW)?.candidateSha as string;
+
+  // The pass that raced: the undeclared file rode into a commit carrying forge's subject.
+  // Reconstructed with real git rather than a seam, because what the next pass reads is the
+  // COMMIT, not the race that produced it — and the raced refusal deliberately leaves it there.
+  const first = await runNextStage(REVIEW, h.deps);
+  assert.equal(first.status, "refused", "nothing is recorded and the candidate does not move");
+  const batch = fixBatchesForReview(REVIEW)[0];
+  git(["add", "-A"]);
+  git(["commit", "-qm", `fix(review): fix batch ${batch?.id} revision ${batch?.revision}`]);
+  const raced = head();
+  assert.deepEqual(git(["rev-list", "-1", "--parents", raced]).trim().split(" ").slice(1), [preFix]);
+
+  const again = await runNextStage(REVIEW, h.deps);
+
+  assert.equal(again.status, "refused", "the recovery arm decides adoption on the SAME terms");
+  assert.match(again.message, /fix_cycle_commit_raced/);
+  assert.match(again.message, /infra\/secrets\.tf/);
+  assert.equal(getReview(REVIEW)?.candidateSha, preFix, "the smuggling commit never becomes the candidate");
+  assert.equal(getReview(REVIEW)?.stageEvidence?.fix, undefined, "and no fix stage record names its paths");
+  assert.equal(pending().kind, "batch_fix", "Stage 5 stays open, exactly as the first refusal left it");
+  assert.equal(h.dispatches("engineer").length, 1, "no second fixer container either");
+});
+
 test("integ FG-649: a fixer that COMMITS its own work refuses by name rather than adopting a sha forge did not author", async () => {
   // The fixer prompt never asks for a commit, but an agent that makes one anyway moves HEAD off
   // the candidate. Adopting it would adopt a sha the coordinator did not author — and one that

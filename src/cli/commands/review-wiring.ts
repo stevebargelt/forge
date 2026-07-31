@@ -543,6 +543,48 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
     commitFixCycle: async ({ review, batch, declaredFiles }) => {
       const subject = fixCycleSubject(batch);
       const at = headSha();
+      const declared = new Set(declaredFiles.map((p) => p.replace(/^\.\//, "")));
+
+      // FG-649 RF-7: ONE PREDICATE DECIDES ADOPTION, for every commit that could become the
+      // candidate — the one this pass authors and the one an earlier pass already did. Recognition
+      // used to be a strictly WEAKER test (subject + anchor, nothing else), which made the
+      // post-commit refusal below non-durable: a commit refused `fix_cycle_commit_raced` for
+      // carrying an undeclared path, or for being a merge, was adopted verbatim by the very next
+      // `forge review continue` — the same commit, the same content, a different door. The
+      // refusal's own advice is "reset the checkout and re-run", and re-running WITHOUT the reset
+      // is exactly what converted it. Adoption is one question, so it gets one answer.
+      //
+      // ANCHOR: the review's candidate is the commit's sole parent (a cycle whose ledger writes
+      // have not run yet) or the commit ITSELF (a cycle whose candidate advance already landed —
+      // the row moved, so its pre-fix parent is no longer knowable from it). On the authored path
+      // only the first arm is reachable: a commit that just landed is not the sha it sits on.
+      const adoption = (sha: string): { ok: true; committedPaths: string[] } | { ok: false; why: string } => {
+        const parents = parentsOf(sha);
+        // Exactly one parent: a merge carries a second history the review never saw.
+        if (parents.length !== 1 || !(parents[0] === review.candidateSha || sha === review.candidateSha)) {
+          return {
+            ok: false,
+            why:
+              `its parent is ${parents.join(" ") || "(none)"}, not the candidate ` +
+              `${review.candidateSha ?? "(unset)"}`,
+          };
+        }
+        const committedPaths = pathsOf(sha);
+        const smuggled = committedPaths.filter((p) => !declared.has(p));
+        if (smuggled.length > 0) {
+          return { ok: false, why: `it carries ${smuggled.join(", ")}, which no fix result declared` };
+        }
+        return { ok: true, committedPaths };
+      };
+      const notAdopted = (sha: string, why: string) =>
+        ({
+          kind: "refused",
+          reason: "fix_cycle_commit_raced",
+          detail:
+            `the fix-cycle commit ${sha} in ${ctx.projectDir} did not land as authored — ${why}. ` +
+            `Something else wrote this checkout, so the commit is NOT adopted as the candidate and nothing was ` +
+            `recorded. Inspect ${sha}, reset the checkout to ${review.candidateSha ?? "the candidate"}, and re-run`,
+        }) as const;
 
       // FG-649 RF-2: FIRST, RECOGNISE A COMMIT THIS COORDINATOR ALREADY AUTHORED.
       //
@@ -561,8 +603,14 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
       // be adopted as the candidate; the anchor alone would adopt any commit sitting on the
       // candidate. Together they say: this commit is on the tree under review AND names this
       // batch revision, which is what the coordinator's own commit does and nothing else.
+      //
+      // AND THEY IDENTIFY THE COMMIT, THEY DO NOT VET IT (FG-649 RF-7). Which commit this is and
+      // whether it landed as this coordinator would have authored it are different questions, so
+      // an anchored commit still goes through the one adoption predicate above.
       if (subjectOf(at) === subject && (at === review.candidateSha || parentsOf(at).includes(review.candidateSha ?? ""))) {
-        return { kind: "committed", sha: at, committedPaths: pathsOf(at), recognized: true };
+        const adopted = adoption(at);
+        if (!adopted.ok) return notAdopted(at, adopted.why);
+        return { kind: "committed", sha: at, committedPaths: adopted.committedPaths, recognized: true };
       }
 
       // THE COMMIT GOES ON TOP OF THE CANDIDATE OR NOWHERE. This is the same HEAD-vs-candidate
@@ -592,7 +640,6 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
         };
       }
 
-      const declared = new Set(declaredFiles.map((p) => p.replace(/^\.\//, "")));
       const outside = moved.filter((p) => !declared.has(p));
       if (outside.length > 0) {
         return {
@@ -671,27 +718,19 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
       // it with no window at all. It does not un-commit — it refuses to ADOPT, which is the
       // decision that matters: nothing is recorded and the sha never becomes the candidate.
       const sha = headSha();
-      const parents = parentsOf(sha);
-      const committedPaths = pathsOf(sha);
-      const smuggled = committedPaths.filter((p) => !declared.has(p));
-      if (parents.length !== 1 || parents[0] !== review.candidateSha || smuggled.length > 0) {
-        return {
-          kind: "refused",
-          reason: "fix_cycle_commit_raced",
-          detail:
-            `the fix-cycle commit ${sha} in ${ctx.projectDir} did not land as authored — ` +
-            (parents.length !== 1 || parents[0] !== review.candidateSha
-              ? `its parent is ${parents.join(" ") || "(none)"}, not the candidate ${review.candidateSha ?? "(unset)"}`
-              : `it carries ${smuggled.join(", ")}, which no fix result declared`) +
-            `. Something else wrote this checkout while the cycle was committing, so the commit is NOT adopted as ` +
-            `the candidate and nothing was recorded. Inspect ${sha}, reset the checkout to ` +
-            `${review.candidateSha ?? "the candidate"}, and re-run`,
-        };
+      // The predicate's self-anchor arm belongs to RECOVERY, where the candidate advance already
+      // moved the row onto the commit. On this path the row has not moved, so a HEAD still at the
+      // candidate means the commit git just reported making is not there — a writer rewound the
+      // checkout — and the cycle must not record itself against a tree without the fixes in it.
+      if (sha === review.candidateSha) {
+        return notAdopted(sha, `HEAD is still the candidate, so the commit that was just authored is not there`);
       }
+      const adopted = adoption(sha);
+      if (!adopted.ok) return notAdopted(sha, adopted.why);
       return {
         kind: "committed",
         sha,
-        committedPaths,
+        committedPaths: adopted.committedPaths,
         ...(declaredNotMoved.length > 0 ? { declaredNotMoved } : {}),
       };
     },
