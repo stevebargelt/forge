@@ -1,5 +1,7 @@
 # Operator Surface Addons
 
+**Status:** concept / roadmap. This note has no implementation authority.
+
 Forge's core loop should stay focused on orchestrating work: runs, tasks, gates, agents, routing, verification, and durable state. Operator surfaces are different. They make Forge easier to see, supervise, and enjoy using, but they should not become load-bearing runtime behavior.
 
 An **operator surface addon** is an optional human-control surface around Forge. Examples:

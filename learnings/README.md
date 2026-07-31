@@ -11,7 +11,8 @@ learnings/
 ├── README.md                   — this file
 ├── decisions/
 │   ├── _DECISION_TEMPLATE.md
-│   └── YYYY-MM-DD_<short-name>.md
+│   ├── YYYY-MM-DD_<short-name>.md
+│   └── <historical-design-record>.md
 └── patterns/
     ├── _PATTERN_TEMPLATE.md
     └── YYYY-MM-DD_<short-name>.md
@@ -48,6 +49,20 @@ learnings/
 | FORGE-DEC-027 | 2026-07-13 | [`awaiting_recovery` for a publication whose window was lost after ref advance](decisions/2026-07-13_awaiting-recovery-task-status.md) |
 | FORGE-DEC-028 | 2026-07-03 | [Fail-safe recovery for lost containers: adopt vs. re-drive, gated behind `forge recover` (FG-455 p2/p3)](decisions/2026-07-03_fanout-orphan-recovery-fail-safe.md) |
 | FORGE-DEC-029 | 2026-07-29 | [Agent containers read tickets from a host-published, project-scoped snapshot on a read-only mount (FG-608)](decisions/2026-07-29_container-backlog-snapshot-authority.md) |
+
+## Historical design records
+
+These unnumbered documents preserve the exploration or roadmap that preceded
+shipped decisions. They are not current specifications or additional ADRs.
+
+- [Agentic workflow next steps](decisions/agentic-workflow-next-steps.md) —
+  largely shipped roadmap retained for provenance.
+- [Observability roadmap](decisions/observability.md) — shipped Crawl/Walk/Run
+  plan retained for provenance.
+- [Provider abstraction exploration](decisions/provider-abstraction-design.md)
+  and [provider-agnostic models](decisions/provider-agnostic-models.md) —
+  superseded by the accepted
+  [provider-resolution decision](decisions/2026-05-30_provider-resolution.md).
 
 ## Patterns index
 
