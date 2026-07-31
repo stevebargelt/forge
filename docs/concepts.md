@@ -933,7 +933,7 @@ A new fix cycle also clears the resolutions of the findings it carried, for the 
 - `fix_cycle_declared_changes_absent` — the results declare changed files but the worktree is clean. The fixer's own ledger contradicts the tree; deliberately kept distinct from the legitimate resolved-without-a-code-change case.
 - `fix_cycle_tree_dirty_outside_declared_scope` — paths moved that no result declared. Named, never swept into the commit.
 - `fix_cycle_commit_failed` — the commit itself did not land.
-- `fix_cycle_commit_raced` — the commit landed but not as authored: read back off the commit that actually exists, it has more than one parent, its parent is not the candidate, or it carries a path no result declared. Something else wrote the checkout mid-commit. This one does not un-commit — it refuses to **adopt**, which is the decision that matters: the sha never becomes the candidate and nothing is recorded. **The refusal is durable**: re-running `continue` without the reset it asks for hits the crash-recovery arm, which applies this same test, so the commit is refused again rather than adopted by the other door.
+- `fix_cycle_commit_raced` — the commit landed but not as authored: read back off the commit that actually exists, HEAD is still the candidate right after the cycle authored a commit (git reported one that is not there — a writer rewound the checkout), it does not have exactly one parent, that parent is not the candidate (for a recovered commit, the commit itself may be — see below), or it carries a path no result declared. Something else wrote the checkout mid-commit. This one does not un-commit — it refuses to **adopt**, which is the decision that matters: the sha never becomes the candidate and nothing is recorded. **The refusal is durable**: re-running `continue` without the reset it asks for hits the crash-recovery arm, which applies this same test, so the commit is refused again rather than adopted by the other door.
 
 A cycle whose results declare no files and whose worktree is clean is a legitimate `no_change`: the candidate does not move, and `meta.fixCycleKey` still makes that cycle earn its own recheck. Any of the refusals means **the fix cycle did not complete** — re-run `forge review continue` once the named condition is resolved.
 
@@ -979,10 +979,11 @@ Only the *silent* auto-confirm is forbidden. An evaluation that concludes there 
 
 **The eight shipping checks** (Stage 9), each reported by id: `verification_green`, `acceptance_mapped` (every acceptance criterion `met` / `unmet` / `unproven` with cited evidence — supply the claims with `continue --acceptance <file>`), `findings_settled`, `fix_now_resolved`, `tip_equality` (reviewed sha equals the fetched trusted remote head), `identity_continuity`, `contract_covers_diff`, and `docs_closeout` (FG-640 — the ticket-required docs and closeout gaps the reviewer found; supply the assessment with `continue --docs-closeout <file>` as `{assessed, gaps[], detail?}`. **Not assessed is not a clean answer**: an omitted assessment blocks exactly as a named gap does, and there is deliberately no flag meaning "assessed, no gaps" without a file — that flag would be the rubber stamp the check replaces). An `unmet` or `unproven` criterion blocks, and free-form new findings are ingested as ordinary untriaged ledger findings and return the review to disposition — lateness confers no authority to settle them, and none to block harder.
 
-Example: `forge review start FG-700 --contract contract.json --evaluated-no-drift "examined the final diff; it stays inside the paths the wide lens already covers"` prints the review id, the base sha it resolved and its lenses, then runs verification, confirms the contract against that diff, dispatches the lens reds, and stops:
+Example: `forge review start FG-700 --contract contract.json --evaluated-no-drift "examined the final diff; it stays inside the paths the wide lens already covers"` prints the review id, the workspace it bound, the base sha it resolved and its lenses, then runs verification, confirms the contract against that diff, dispatches the lens reds, and stops:
 
 ```text
 Review review-xxxx — ticket FG-700, candidate 9f2c1ab…
+  workspace: /Users/you/code/my-app (recorded on the review; later stages act on it, not on cwd)
   base sha: 4b81f0c… (inferred from the oldest commit referencing FG-700, 7d3e9a1cc)
   lenses: wide
 ✓ verify_entry: deterministic verification green at 9f2c1ab…
@@ -994,7 +995,7 @@ Review review-xxxx — ticket FG-700, candidate 9f2c1ab…
 
 Drop the `--evaluated-no-drift` and the same command stops one stage earlier instead, at the fail-closed confirmation naming the changed paths — nothing is lost, because that stage records nothing and `forge review continue review-xxxx --evaluated-no-drift <statement>` (or `--add-lens`) re-enters it.
 
-After all three are dispositioned, `forge review continue review-xxxx --dry-run` answers `• next: batch_fix — 2 fix_now finding(s) go to ONE fixer in one batch` without dispatching the fixer.
+After all three are dispositioned, `forge review continue review-xxxx --dry-run` answers `• next: batch_fix — 2 unresolved fix_now finding(s) go to ONE fixer in one batch` without dispatching the fixer. When some of the `fix_now` set is already resolved at the current candidate, the same line says how many are being left out of the batch — `(1 already resolved at 9f2c1ab… and not re-dispatched)`.
 
 ## `review_disposition` gate
 

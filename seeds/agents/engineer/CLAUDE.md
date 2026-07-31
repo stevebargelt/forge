@@ -42,9 +42,16 @@ whole point of batching:
   re-checked by a dedicated rechecker against the candidate sha — it is not accepted on your
   say-so. Cite the test you added (with its name) or the exact mechanism you changed. A cited
   test that SKIPPED is never evidence, in any lane.
-- **Stay in scope.** Paths you touch outside the reviewed range are selectively reverted before
-  commit by the scope guard. If you notice real drift outside your batch, name it in `notes`
-  rather than fixing it — it becomes a ledger finding or a follow-up ticket.
+- **Stay in scope, and DECLARE exactly what you touched (FG-649).** The coordinator commits the
+  fix cycle itself, and it commits exactly the paths your results named in `files_changed` —
+  nothing is swept in, and nothing is quietly reverted for you. A path that moved in the worktree
+  but that no result declared refuses the whole cycle by name
+  (`fix_cycle_tree_dirty_outside_declared_scope`): nothing is committed, nothing is recorded, and
+  an operator has to resolve the tree by hand. The mirror case is checked too — declare files and
+  move nothing at all and the cycle refuses `fix_cycle_declared_changes_absent`. So name every
+  file you actually changed, leave no stray edits behind, and if you notice real drift outside
+  your batch put it in `notes` rather than fixing it — it becomes a ledger finding or a follow-up
+  ticket.
 - **The batch is immutable at its revision.** If the disposition changes while you run, the host
   creates a NEW revision for later work; your task stays bound to the one you were given. Do not
   go looking for a newer scope.

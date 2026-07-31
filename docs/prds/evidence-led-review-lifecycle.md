@@ -1041,7 +1041,14 @@ actual boundary that cannot ship together.
 > subject is ALSO the per-revision idempotency key that lets a crash between the
 > irreversible git commit and the ledger writes recording it be RECOVERED
 > (subject match AND candidate anchor, never either alone) rather than refusing
-> forever — the same stuck loop in a second form. Because the
+> forever — the same stuck loop in a second form. Recognition IDENTIFIES the
+> commit; it does not vet it, so a recognized commit is adopted only on the
+> SAME predicate the post-commit check applies (one parent, that parent — or,
+> once the candidate advance has landed, the commit itself — the candidate, and
+> no undeclared path), and otherwise refuses `fix_cycle_commit_raced` under that
+> name. One question, one answer: a weaker recovery test would make the
+> post-commit refusal reversible by the next `continue`, adopting through the
+> other door exactly what it just refused. Because the
 > advance goes through the single place the candidate ever moves, scenario #14
 > invalidation fires by construction and Stages 6–9 re-anchor through the
 > existing per-sha rules with no new key. The fix stage record's own sha is
