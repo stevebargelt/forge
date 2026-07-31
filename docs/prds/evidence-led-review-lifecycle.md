@@ -1009,6 +1009,92 @@ Pilot through explicit `forge review`; do not migrate `feature` yet.
 Do not create additional implementation children before these three prove an
 actual boundary that cannot ship together.
 
+### FG-649 refinement — fix-cycle commit authority and unresolved-only batches
+
+> **[SHIPPED 2026-07-30 (FG-649).]** A lifecycle correctness defect observed
+> live on `review-29d1000750b0`: the fix stage recorded the candidate the
+> review already had, because the coordinator read HEAD immediately after
+> ingestion while the ORCHESTRATOR did the commit — after the process had
+> exited. Recheck was therefore bound to a tree the fixes were not in, honestly
+> reported `still_present`, and — since an unresolved `fix_now` is a
+> disposition blocker and no verb moves a candidate — the review could only be
+> freed by re-anchoring the row by hand. Four semantics decisions are recorded
+> here so they are not re-derived, or silently regressed, later.
+>
+> **(a) Commit authority for the fix cycle moved from the orchestrator to the
+> coordinator.** Stage 5 now commits the fixer's work itself and advances the
+> candidate to the commit it authored, so the post-fix sha is *known* rather
+> than inferred from a HEAD read that races the committer. It commits ONLY the
+> paths the batch's own results declared (`fix_batch_results.files_changed_json`)
+> — never `git add -A` — and reconciles the worktree against that declared set,
+> refusing by name (`fix_cycle_declared_changes_absent`,
+> `fix_cycle_tree_dirty_outside_declared_scope`, `fix_cycle_commit_failed`,
+> `fix_cycle_commit_raced`) with the stage left open and nothing recorded. The
+> reconciliation is TWO-DIRECTIONAL and its two directions are deliberately not
+> the same stop: a tree that moved beyond the declaration refuses, a wholly
+> unsupported declaration refuses, but a PARTLY supported one commits what moved
+> and NAMES what did not (`meta.fixCommit.declaredNotMoved`) — `committed ⊆
+> declared` still holds, and refusing there would dead-end a converging review
+> whose next cycle honestly declares a file it already committed. Its commit
+> subject deliberately does not reference the ticket, because a later review
+> infers its comparison base from the oldest commit whose subject does; the
+> subject is ALSO the per-revision idempotency key that lets a crash between the
+> irreversible git commit and the ledger writes recording it be RECOVERED
+> (subject match AND candidate anchor, never either alone) rather than refusing
+> forever — the same stuck loop in a second form. Recognition IDENTIFIES the
+> commit; it does not vet it, so a recognized commit is adopted only on the
+> SAME predicate the post-commit check applies (one parent, that parent — or,
+> once the candidate advance has landed, the commit itself — the candidate, and
+> no undeclared path), and otherwise refuses `fix_cycle_commit_raced` under that
+> name. One question, one answer: a weaker recovery test would make the
+> post-commit refusal reversible by the next `continue`, adopting through the
+> other door exactly what it just refused. Because the
+> advance goes through the single place the candidate ever moves, scenario #14
+> invalidation fires by construction and Stages 6–9 re-anchor through the
+> existing per-sha rules with no new key. The fix stage record's own sha is
+> UNCHANGED — still the pre-fix candidate, since coverage is per finding
+> (refinement 3 of Change 2); the post-fix sha is `meta.candidateAfter`, which
+> before this change recorded a read that could not have moved. A companion
+> boundary: `forge review continue` resolves its dispatch workspace from the
+> persisted review row rather than cwd (`review_workspace_unbound` /
+> `review_workspace_unusable` / `review_workspace_identity_mismatch`), because
+> a wrong workspace is no longer a wrong read but a write into a different
+> repository — and a `--dry-run` preview resolves and refuses identically but
+> RECORDS nothing, since rebinding which repository later stages commit into is
+> not a change a preview may make.
+>
+> **(b) A fix batch carries the UNRESOLVED `fix_now` findings only.** RF-8: a
+> `fix_now` already `resolved` at the current candidate is not re-dispatched
+> and its resolution is preserved — preserved by NON-MEMBERSHIP in the batch,
+> since fix-cycle invalidation is scoped to batch membership. No preservation
+> flag and no third invalidation authority were added; invalidation stays
+> exactly the candidate advance and the fix cycle. The narrowing is applied to
+> what goes INTO a payload and never as a filter at ingestion, so the delivered
+> scope and the judged scope (Appendix A) cannot disagree. Scenario #19's text
+> is unchanged and its promise still holds, but it now keys on **the same
+> unresolved `fix_now` set under the same decisions** rather than on "the same
+> finding set": a retry still receives the same immutable revision and payload
+> hash, and it is still a changed DECISION that mints a new one.
+>
+> **(c) The extra recheck the narrowing can cost is ACCEPTED.** Narrowing the
+> set changes the batch's decision fingerprint, which can supersede and mint
+> revision n+1, which grows `fixCycleKey` and earns one more recheck. That is
+> the same monotone-and-converges argument the key already rests on: it may
+> never shrink, the cost is bounded at one cycle, and the sequence converges
+> rather than oscillating.
+>
+> **(d) The pinned-candidate invariant is UNCHANGED.** No path adopts the
+> candidate from a bare HEAD read outside a coordinator-driven stage —
+> including as a migration convenience. `candidate_not_checked_out` and the
+> `identity_continuity` shipping check therefore remain real detectors and not
+> tautologies the coordinator satisfies by construction. Relaxing this would be
+> a change to the lifecycle's stated semantics and returns to this PRD's
+> approving authority.
+>
+> The threat model, the acceptance scenarios, and every scope bullet above are
+> unaltered by this note. Operator-facing detail is
+> [Review coordinator](../concepts.md#review-coordinator).
+
 ### Migration safety
 
 - Persist exactly one `review_mode` per run:

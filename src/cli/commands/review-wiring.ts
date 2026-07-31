@@ -254,6 +254,46 @@ function recheckerTask(ctx: RecheckContextIn): string {
   ].join("\n");
 }
 
+/** FG-649: the paths `git status --porcelain -z --untracked-files=all` reports as moved.
+ *
+ *  `-z` because a NUL-separated record is the only form that cannot be misread on a path
+ *  containing a space, a quote or a newline — the C-quoting of the non-`-z` format would have
+ *  to be un-quoted here, and a scope guard that mis-parses a path is a scope guard that
+ *  commits the wrong file. `--untracked-files=all` because a fixer's new test file is
+ *  untracked and is exactly the evidence the recheck depends on.
+ *
+ *  Porcelain paths are relative to the REPOSITORY ROOT (unlike the human format, which is
+ *  relative to cwd), so they are comparable to the fixer's declared paths without knowing
+ *  where the git seam's cwd sits. A rename reports BOTH its new and its original path, and
+ *  both are returned: staging a rename without its source leaves the deletion uncommitted. */
+function porcelainPaths(out: string): string[] {
+  const fields = out.split("\0").filter((f) => f !== "");
+  const paths: string[] = [];
+  for (let i = 0; i < fields.length; i += 1) {
+    const entry = fields[i] as string;
+    if (entry.length < 4) continue;
+    paths.push(entry.slice(3));
+    // `R`/`C` in either column: the ORIGINAL path is the next NUL-separated field.
+    if (entry[0] === "R" || entry[0] === "C" || entry[1] === "R" || entry[1] === "C") {
+      i += 1;
+      const origin = fields[i];
+      if (origin !== undefined) paths.push(origin);
+    }
+  }
+  return [...new Set(paths)];
+}
+
+/** THE SUBJECT IS AN INTERFACE, NOT A LOG LINE, and since FG-649/RF-2 it is also the fix
+ *  cycle's per-revision IDEMPOTENCY KEY: it is how a retry after a crash recognises the commit
+ *  this coordinator already authored instead of refusing forever. It must not reference the
+ *  ticket — `resolveCommitRange` infers a later review's comparison base from the OLDEST commit
+ *  whose subject references the ticket, and a review whose base is inferred as its own
+ *  remediation commit can never confirm its contract. One definition, because a subject written
+ *  in one place and matched in another is a key that silently stops matching. */
+function fixCycleSubject(batch: { id: string; revision: number }): string {
+  return `fix(review): fix batch ${batch.id} revision ${batch.revision}`;
+}
+
 /** The changed paths, named as far as is useful and counted beyond that. Used both by the
  *  fail-closed refusal and by the recorded `no_drift` evaluation, so the diff an evaluator
  *  is shown and the diff their evaluation is recorded against are the same summary. */
@@ -280,6 +320,33 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
   const git = ctx.git ?? realGit(ctx.projectDir);
   const invokeFn = ctx.invokeFn ?? invoke;
   const headSha = (): string => git(["rev-parse", "HEAD"]).trim();
+
+  // FG-649 RF-2/RF-6: the three reads that describe a commit that already exists. Each answers
+  // "" / [] when git cannot answer, and every caller treats that as NOT RECOGNISED and NOT
+  // VERIFIED — an unreadable commit is never adopted on the strength of a read that failed.
+  const subjectOf = (sha: string): string => {
+    try {
+      return git(["log", "-1", "--format=%s", sha]).trim();
+    } catch {
+      return "";
+    }
+  };
+  const parentsOf = (sha: string): string[] => {
+    try {
+      return git(["rev-list", "-1", "--parents", sha]).trim().split(/\s+/).filter((f) => f !== "").slice(1);
+    } catch {
+      return [];
+    }
+  };
+  const pathsOf = (sha: string): string[] => {
+    try {
+      return [...new Set(git(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", sha]).split("\0"))].filter(
+        (p) => p !== "",
+      );
+    } catch {
+      return [];
+    }
+  };
 
   // review-loop's own verify — covering evidence, CI wait, host-readiness preflight.
   const loop = buildReviewLoopDeps(
@@ -459,6 +526,212 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
         taskId: res.taskId,
         result: res.result,
         ...(res.error !== undefined ? { error: res.error } : {}),
+      };
+    },
+
+    // FG-649 change 1: THE FIX CYCLE'S COMMIT IS THE COORDINATOR'S, so the post-fix sha is one
+    // forge CREATED rather than one it read back and hoped was the right one. The orchestrator
+    // no longer commits a review fix cycle.
+    //
+    // ONLY THE DECLARED PATHS ARE COMMITTED. The expected-changes set is the fixer's own
+    // per-finding `files_changed` claim, read back from the ledger — so a tree that moved
+    // outside it is NAMED rather than swept in by `git add -A`. That matters because this is a
+    // WRITE into an operator checkout that other agents may be editing concurrently.
+    //
+    // THE SUBJECT IS AN INTERFACE, NOT A LOG LINE — see `fixCycleSubject`, which is also the
+    // per-revision idempotency key the recovery arm below matches on.
+    commitFixCycle: async ({ review, batch, declaredFiles }) => {
+      const subject = fixCycleSubject(batch);
+      const at = headSha();
+      const declared = new Set(declaredFiles.map((p) => p.replace(/^\.\//, "")));
+
+      // FG-649 RF-7: ONE PREDICATE DECIDES ADOPTION, for every commit that could become the
+      // candidate — the one this pass authors and the one an earlier pass already did. Recognition
+      // used to be a strictly WEAKER test (subject + anchor, nothing else), which made the
+      // post-commit refusal below non-durable: a commit refused `fix_cycle_commit_raced` for
+      // carrying an undeclared path, or for being a merge, was adopted verbatim by the very next
+      // `forge review continue` — the same commit, the same content, a different door. The
+      // refusal's own advice is "reset the checkout and re-run", and re-running WITHOUT the reset
+      // is exactly what converted it. Adoption is one question, so it gets one answer.
+      //
+      // ANCHOR: the review's candidate is the commit's sole parent (a cycle whose ledger writes
+      // have not run yet) or the commit ITSELF (a cycle whose candidate advance already landed —
+      // the row moved, so its pre-fix parent is no longer knowable from it). On the authored path
+      // only the first arm is reachable: a commit that just landed is not the sha it sits on.
+      const adoption = (sha: string): { ok: true; committedPaths: string[] } | { ok: false; why: string } => {
+        const parents = parentsOf(sha);
+        // Exactly one parent: a merge carries a second history the review never saw.
+        if (parents.length !== 1 || !(parents[0] === review.candidateSha || sha === review.candidateSha)) {
+          return {
+            ok: false,
+            why:
+              `its parent is ${parents.join(" ") || "(none)"}, not the candidate ` +
+              `${review.candidateSha ?? "(unset)"}`,
+          };
+        }
+        const committedPaths = pathsOf(sha);
+        const smuggled = committedPaths.filter((p) => !declared.has(p));
+        if (smuggled.length > 0) {
+          return { ok: false, why: `it carries ${smuggled.join(", ")}, which no fix result declared` };
+        }
+        return { ok: true, committedPaths };
+      };
+      const notAdopted = (sha: string, why: string) =>
+        ({
+          kind: "refused",
+          reason: "fix_cycle_commit_raced",
+          detail:
+            `the fix-cycle commit ${sha} in ${ctx.projectDir} did not land as authored — ${why}. ` +
+            `Something else wrote this checkout, so the commit is NOT adopted as the candidate and nothing was ` +
+            `recorded. Inspect ${sha}, reset the checkout to ${review.candidateSha ?? "the candidate"}, and re-run`,
+        }) as const;
+
+      // FG-649 RF-2: FIRST, RECOGNISE A COMMIT THIS COORDINATOR ALREADY AUTHORED.
+      //
+      // The git commit is an irreversible external write and the three ledger writes that
+      // record it (candidate advance, resolution invalidation, stage record) are separate
+      // SQLite transactions after it. Nothing can make those atomic with git, so the only
+      // way a crash in between is recoverable is for the retry to RECOGNISE the commit. The
+      // subject is already a per-revision idempotency key, and both crash windows land on an
+      // anchored HEAD: crash before the candidate advance leaves HEAD's PARENT at the
+      // candidate, crash after it leaves HEAD AT the candidate. Without this, the first
+      // refuses `candidate_not_checked_out` forever and the second
+      // `fix_cycle_declared_changes_absent` forever — the exact FG-649 stuck loop, whose only
+      // exits were hand re-anchoring or re-dispatching a fixer over already-fixed code.
+      //
+      // BOTH HALVES ARE REQUIRED. The subject alone would let any commit carrying that text
+      // be adopted as the candidate; the anchor alone would adopt any commit sitting on the
+      // candidate. Together they say: this commit is on the tree under review AND names this
+      // batch revision, which is what the coordinator's own commit does and nothing else.
+      //
+      // AND THEY IDENTIFY THE COMMIT, THEY DO NOT VET IT (FG-649 RF-7). Which commit this is and
+      // whether it landed as this coordinator would have authored it are different questions, so
+      // an anchored commit still goes through the one adoption predicate above.
+      if (subjectOf(at) === subject && (at === review.candidateSha || parentsOf(at).includes(review.candidateSha ?? ""))) {
+        const adopted = adoption(at);
+        if (!adopted.ok) return notAdopted(at, adopted.why);
+        return { kind: "committed", sha: at, committedPaths: adopted.committedPaths, recognized: true };
+      }
+
+      // THE COMMIT GOES ON TOP OF THE CANDIDATE OR NOWHERE. This is the same HEAD-vs-candidate
+      // comparison `verify` makes, under the same name, and it is not redundant with it: by the
+      // time Stage 5 commits, that check ran stages ago. A fix-cycle commit authored on a head
+      // the review is not about would produce a candidate whose parent is a foreign tree — a
+      // silently mis-anchored evidence ledger rather than a stop.
+      if (at !== review.candidateSha) {
+        return {
+          kind: "refused",
+          reason: "candidate_not_checked_out",
+          detail:
+            `the workspace at ${ctx.projectDir} is on ${at}, not the candidate ${review.candidateSha ?? "(unset)"} ` +
+            `this fix cycle was dispatched for — refusing to author a commit on a tree the review is not about. ` +
+            `Check the candidate out (or point --project at the workspace that has it) and re-run`,
+        };
+      }
+
+      let moved: string[];
+      try {
+        moved = porcelainPaths(git(["status", "--porcelain", "-z", "--untracked-files=all"]));
+      } catch (err) {
+        return {
+          kind: "refused",
+          reason: "fix_cycle_commit_failed",
+          detail: `the worktree state at ${ctx.projectDir} could not be read: ${(err as Error).message}`,
+        };
+      }
+
+      const outside = moved.filter((p) => !declared.has(p));
+      if (outside.length > 0) {
+        return {
+          kind: "refused",
+          reason: "fix_cycle_tree_dirty_outside_declared_scope",
+          detail:
+            `the worktree at ${ctx.projectDir} has changes no fix result declared: ${outside.slice(0, 10).join(", ")}` +
+            `${outside.length > 10 ? `, +${outside.length - 10} more` : ""} (declared: ` +
+            `${declaredFiles.length > 0 ? declaredFiles.join(", ") : "nothing"}). The fix cycle's commit carries ` +
+            `only what the fixer itself claimed to change, so an undeclared change is never swept into it`,
+        };
+      }
+      // FG-649 RF-5: THE RECONCILIATION IS TWO-DIRECTIONAL. `outside` above catches a tree that
+      // moved beyond the declaration; `absent` catches a DECLARATION that reaches beyond the
+      // tree. It used to be consulted only for an ENTIRELY clean worktree, so a partly-
+      // fabricated `files_changed` went through in silence: declare [a, b], dirty only `a`, and
+      // the cycle committed `a` while the stage record stored declaredFiles [a, b] beside
+      // committedPaths [a] with nothing naming the disagreement.
+      //
+      // THE TWO CASES ARE NOT THE SAME STOP, and deliberately so:
+      //   - nothing moved at all -> refuse. The claim is wholly unsupported, there is nothing to
+      //     commit, and a resolution without a code change must declare no files.
+      //   - something moved -> COMMIT WHAT MOVED and NAME what did not. `committed ⊆ declared`
+      //     still holds, so the commit-only-declared-paths invariant is intact, and the
+      //     discrepancy travels on the outcome into the stage record and the operator's line.
+      //     Refusing here instead would dead-end a converging review: a second fix cycle that
+      //     re-writes a test file it already committed declares it honestly and moves nothing,
+      //     and no re-entry can ever change that — which is the FG-649 stuck loop again, bought
+      //     for a disagreement the recheck is what actually adjudicates.
+      const movedSet = new Set(moved);
+      const declaredNotMoved = [...declared].filter((p) => !movedSet.has(p)).sort();
+      if (moved.length === 0) {
+        if (declaredNotMoved.length > 0) {
+          return {
+            kind: "refused",
+            reason: "fix_cycle_declared_changes_absent",
+            detail:
+              `the fix results declare ${declaredFiles.join(", ")} but the worktree at ${ctx.projectDir} is clean — ` +
+              `the fixer's own ledger claim contradicts the tree, so there is nothing to commit and the claim ` +
+              `cannot be honoured. This is deliberately NOT read as a resolution without a code change: a cycle ` +
+              `that legitimately changed nothing declares no files`,
+          };
+        }
+        // A legitimate no-change cycle. The candidate does not move, and fixCycleKey already
+        // makes this cycle earn its own recheck even at an unmoved candidate.
+        return { kind: "no_change", sha: headSha() };
+      }
+
+      try {
+        // FG-649 RF-6: THE INDEX IS SHARED; THE COMMIT MUST NOT BE. `git add` + a bare `git
+        // commit` commits whatever the INDEX holds at commit time, so a process sharing this
+        // checkout could stage an undeclared file between the porcelain scan and the commit
+        // and have it carried into a review-authored commit. Passing the same pathspecs to
+        // `commit` makes it a partial commit — git builds the tree from HEAD plus exactly
+        // these paths and ignores everything else staged — which closes that window
+        // structurally rather than by narrowing it. The `add` stays because an untracked
+        // path (a fixer's new test file) must be known to git before a pathspec can name it.
+        //
+        // `:/`-prefixed pathspecs are repo-root relative, matching what porcelain reported —
+        // the git seam's cwd need not be the repository root for the add to name the same file.
+        const pathspecs = moved.map((p) => `:/${p}`);
+        git(["add", "--", ...pathspecs]);
+        git(["commit", "-m", subject, "--", ...pathspecs]);
+      } catch (err) {
+        return {
+          kind: "refused",
+          reason: "fix_cycle_commit_failed",
+          detail: `git refused the fix-cycle commit in ${ctx.projectDir}: ${(err as Error).message}`,
+        };
+      }
+
+      // FG-649 RF-6: AND THE COMMIT IS VERIFIED AFTER THE FACT, which no check made before it
+      // can be. A concurrent writer advancing HEAD between the candidate check and the commit
+      // would give the review a candidate whose parent is a foreign tree; reading the parent
+      // and the touched paths off the commit that actually landed is the only statement about
+      // it with no window at all. It does not un-commit — it refuses to ADOPT, which is the
+      // decision that matters: nothing is recorded and the sha never becomes the candidate.
+      const sha = headSha();
+      // The predicate's self-anchor arm belongs to RECOVERY, where the candidate advance already
+      // moved the row onto the commit. On this path the row has not moved, so a HEAD still at the
+      // candidate means the commit git just reported making is not there — a writer rewound the
+      // checkout — and the cycle must not record itself against a tree without the fixes in it.
+      if (sha === review.candidateSha) {
+        return notAdopted(sha, `HEAD is still the candidate, so the commit that was just authored is not there`);
+      }
+      const adopted = adoption(sha);
+      if (!adopted.ok) return notAdopted(sha, adopted.why);
+      return {
+        kind: "committed",
+        sha,
+        committedPaths: adopted.committedPaths,
+        ...(declaredNotMoved.length > 0 ? { declaredNotMoved } : {}),
       };
     },
 

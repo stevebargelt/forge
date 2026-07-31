@@ -446,6 +446,448 @@ test("FG-639: the untampered envelope the wiring delivers IS the row-derived ren
   );
 });
 
+// ─── FG-649: the fix cycle's COMMIT, which the coordinator now owns ─────────
+//
+// The live FG-649 loop: the orchestrator committed the fixer's output AFTER the coordinator
+// process exited, so Stage 5's `headSha()` read was a guaranteed no-op, the fix stage recorded
+// the PRE-fix candidate, and the rechecker was handed a tree without the fixes it was
+// rechecking — it honestly reported still_present forever. The commit is the coordinator's now,
+// which makes the post-fix sha one forge CREATED. These pin the scope guard and the refusals;
+// the end-to-end evidence against a real repository is
+// src/v2/fg649-fix-cycle-candidate.integration.test.ts.
+
+/** A git seam that records every invocation and answers `status`/`rev-parse` from a script.
+ *
+ *  `rev-parse` answers the CANDIDATE until a commit lands and the new head after — the two reads
+ *  commitFixCycle makes are about different moments, and collapsing them into one answer would
+ *  hide whichever of them was wrong.
+ *
+ *  FG-649 RF-2/RF-6 grew three more reads, and the fake answers them ABOUT THE COMMIT IT
+ *  PRETENDS TO HAVE MADE: `log -1 --format=%s` its subject, `rev-list -1 --parents` its parent,
+ *  `diff-tree --name-only` its paths. `subject`/`parent`/`paths` override those for a commit the
+ *  fake did NOT author on this pass — which is exactly the crash-recovery and concurrent-writer
+ *  state the two findings are about. */
+function scriptedGit(script: {
+  status?: string;
+  preHead?: string;
+  head?: string;
+  failOn?: string;
+  /** The subject `log` reports for a sha the fake did not just author. Default: none. */
+  subject?: (sha: string) => string;
+  /** The parent `rev-list` reports for such a sha. Default: none. */
+  parent?: (sha: string) => string;
+  /** The paths `diff-tree` reports. Default: the paths `status` reported. */
+  paths?: string[];
+}) {
+  const calls: string[][] = [];
+  let committed = false;
+  let authoredSubject: string | undefined;
+  const preHead = script.preHead ?? "cand111";
+  const head = script.head ?? "postfix9";
+  // What a real `diff-tree` would report for a commit of everything `status` listed — the
+  // rename ORIGIN is a bare field, so it is taken whole rather than sliced past a status code.
+  const statusPaths = ((): string[] => {
+    const fields = (script.status ?? "").split("\0").filter((f) => f !== "");
+    const out: string[] = [];
+    for (let i = 0; i < fields.length; i += 1) {
+      const entry = fields[i] as string;
+      out.push(entry.slice(3));
+      if (entry[0] === "R" || entry[1] === "R") {
+        i += 1;
+        if (fields[i] !== undefined) out.push(fields[i] as string);
+      }
+    }
+    return out;
+  })();
+  const git = (args: string[]): string => {
+    calls.push(args);
+    if (script.failOn !== undefined && args[0] === script.failOn) {
+      throw new Error(`git ${args[0]} exited 1: nothing to commit`);
+    }
+    if (args[0] === "commit") {
+      authoredSubject = args[2];
+      committed = true;
+    }
+    if (args[0] === "status") return script.status ?? "";
+    if (args[0] === "rev-parse") return `${committed ? head : preHead}\n`;
+    const sha = args[args.length - 1] as string;
+    // An explicit override wins even for the commit the fake just authored — that is how a
+    // race (a foreign parent, a smuggled path) is scripted at all.
+    const isOwn = sha === head && authoredSubject !== undefined;
+    if (args[0] === "log") {
+      return `${script.subject !== undefined ? script.subject(sha) : isOwn ? (authoredSubject as string) : ""}\n`;
+    }
+    if (args[0] === "rev-list") {
+      const parent = script.parent !== undefined ? script.parent(sha) : isOwn ? preHead : "";
+      return `${sha}${parent !== "" ? ` ${parent}` : ""}\n`;
+    }
+    if (args[0] === "diff-tree") return `${(script.paths ?? statusPaths).join("\0")}\0`;
+    return "";
+  };
+  return { git, calls };
+}
+
+function commitDeps(git: (args: string[]) => string): CoordinatorDeps {
+  return buildCoordinatorDeps({ projectDir: "/nonexistent-project", ticketId: "FG-639", git, invokeFn: async () => {
+    throw new Error("a fix-cycle commit dispatches no container");
+  } });
+}
+
+function commitCtx(declaredFiles: string[], candidateSha?: string) {
+  const fixCtx = parkAtFix();
+  const review = candidateSha === undefined ? fixCtx.review : { ...fixCtx.review, candidateSha };
+  return { review, batch: fixCtx.batch, results: [], declaredFiles };
+}
+
+/** The subject the coordinator writes for a batch revision — the per-revision idempotency key
+ *  RF-2's recovery matches on. Spelled out here rather than imported so a change to the shipped
+ *  key has to be made twice, deliberately, instead of silently agreeing with itself. */
+function subjectFor(batch: { id: string; revision: number }): string {
+  return `fix(review): fix batch ${batch.id} revision ${batch.revision}`;
+}
+
+test("FG-649: the fix-cycle commit stages ONLY the declared paths and names the batch, never the ticket", async () => {
+  // RED baseline: there is no commitFixCycle dep before this change — Stage 5 read
+  // deps.headSha() (review-run.ts:470) and committed nothing.
+  const { git, calls } = scriptedGit({
+    status: "M  src/a.ts\0?? src/a.test.ts\0",
+    head: "committed7",
+  });
+  const commit = await commitDeps(git).commitFixCycle(commitCtx(["src/a.ts", "src/a.test.ts"]));
+
+  assert.equal(commit.kind, "committed");
+  assert.equal(commit.kind === "committed" ? commit.sha : "", "committed7", "the sha the commit CREATED");
+  const add = calls.find((c) => c[0] === "add");
+  assert.deepEqual(add, ["add", "--", ":/src/a.ts", ":/src/a.test.ts"], "never `git add -A`, and root-relative");
+  const message = calls.find((c) => c[0] === "commit")?.[2] ?? "";
+  assert.match(message, /^fix\(review\): fix batch .+ revision 1$/);
+  // THE SUBJECT IS AN INTERFACE: resolveCommitRange infers a later review's base from the
+  // OLDEST commit whose subject references the ticket. A ticket id here would make a later
+  // review's base its own remediation commit, and a review with no usable base can never
+  // confirm its contract.
+  assert.doesNotMatch(message, /FG-639/, "the subject must not reference the ticket");
+});
+
+test("FG-649: a tree that moved OUTSIDE the declared set is named, never swept into the commit", async () => {
+  const { git, calls } = scriptedGit({ status: "M  src/a.ts\0 M docs/unrelated.md\0" });
+  const commit = await commitDeps(git).commitFixCycle(commitCtx(["src/a.ts"]));
+
+  assert.equal(commit.kind, "refused");
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "fix_cycle_tree_dirty_outside_declared_scope");
+  assert.match(commit.kind === "refused" ? commit.detail : "", /docs\/unrelated\.md/);
+  assert.equal(calls.some((c) => c[0] === "add" || c[0] === "commit"), false, "nothing was staged or committed");
+});
+
+test("FG-649: results that declare files against a CLEAN tree refuse — the fixer's claim contradicts the tree", async () => {
+  const { git, calls } = scriptedGit({ status: "" });
+  const commit = await commitDeps(git).commitFixCycle(commitCtx(["src/a.ts"]));
+
+  assert.equal(commit.kind, "refused");
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "fix_cycle_declared_changes_absent");
+  assert.equal(calls.some((c) => c[0] === "commit"), false);
+});
+
+test("FG-649: a cycle that declares NOTHING against a clean tree is a legitimate no_change", async () => {
+  const { git, calls } = scriptedGit({ status: "" });
+  const commit = await commitDeps(git).commitFixCycle(commitCtx([]));
+
+  assert.equal(commit.kind, "no_change");
+  assert.equal(commit.kind === "no_change" ? commit.sha : "", "cand111", "the candidate legitimately does not move");
+  assert.equal(calls.some((c) => c[0] === "commit"), false);
+});
+
+test("FG-649: a git commit that fails is a NAMED refusal, not a thrown stack trace", async () => {
+  const { git } = scriptedGit({ status: "M  src/a.ts\0", failOn: "commit" });
+  const commit = await commitDeps(git).commitFixCycle(commitCtx(["src/a.ts"]));
+
+  assert.equal(commit.kind, "refused");
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "fix_cycle_commit_failed");
+  assert.match(commit.kind === "refused" ? commit.detail : "", /nothing to commit/);
+});
+
+test("FG-649: a head that is NOT the candidate refuses BEFORE anything is staged", async () => {
+  // The fix cycle is a WRITE now, so the HEAD-vs-candidate comparison has to be made again at
+  // the moment of the write: a commit authored on a foreign head would give the review a
+  // candidate whose parent is not the tree it reviewed, and mis-anchor the whole ledger
+  // silently instead of stopping. Same name as the verify-stage refusal, on purpose.
+  const { git, calls } = scriptedGit({ status: "M  src/a.ts\0", preHead: "somebodyelse4" });
+  const commit = await commitDeps(git).commitFixCycle(commitCtx(["src/a.ts"]));
+
+  assert.equal(commit.kind, "refused");
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "candidate_not_checked_out");
+  assert.match(commit.kind === "refused" ? commit.detail : "", /is on somebodyelse4, not the candidate cand111/);
+  assert.equal(calls.some((c) => c[0] === "add" || c[0] === "commit"), false, "nothing was staged or committed");
+});
+
+test("FG-649: the porcelain reader survives a path with a space and stages both halves of a rename", async () => {
+  // -z, so no C-quoting to un-quote: a scope guard that mis-parses a path is a scope guard that
+  // commits the wrong file. A rename reports its ORIGINAL path in the next field, and staging
+  // the new name without it would leave the deletion uncommitted.
+  const { git, calls } = scriptedGit({ status: "M  src/a file.ts\0R  src/new.ts\0src/old.ts\0" });
+  const commit = await commitDeps(git).commitFixCycle(commitCtx(["src/a file.ts", "src/new.ts", "src/old.ts"]));
+
+  assert.equal(commit.kind, "committed", commit.kind === "refused" ? commit.detail : "");
+  assert.deepEqual(calls.find((c) => c[0] === "add"), [
+    "add",
+    "--",
+    ":/src/a file.ts",
+    ":/src/new.ts",
+    ":/src/old.ts",
+  ]);
+});
+
+// ─── FG-649 RF-2: recovering the commit the coordinator itself authored ─────
+//
+// The git commit is irreversible and external; the ledger writes that record it (candidate
+// advance, resolution invalidation, stage record) are separate SQLite transactions AFTER it.
+// A crash in between used to be terminal in both directions — refusing `candidate_not_checked_out`
+// forever in one window and `fix_cycle_declared_changes_absent` forever in the other — and the
+// only exits were the hand re-anchoring FG-649 exists to remove or a second real fixer container
+// over already-fixed code. The subject is a per-revision idempotency key; these pin that it is
+// USED as one, and that it is not usable by anything else.
+
+test("FG-649/RF-2: a crash BEFORE the candidate advance is recovered — HEAD's parent is the candidate", async () => {
+  const ctx = commitCtx(["src/a.ts"]);
+  // HEAD is the fix commit an earlier pass authored; the review row still says cand111, and the
+  // tree is clean because that commit took the changes. Pre-RF-2 this refused
+  // `candidate_not_checked_out`, and checking the candidate out then refused
+  // `fix_cycle_declared_changes_absent` — no exit.
+  const { git, calls } = scriptedGit({
+    status: "",
+    preHead: "postfix9",
+    subject: (s) => (s === "postfix9" ? subjectFor(ctx.batch) : ""),
+    parent: (s) => (s === "postfix9" ? "cand111" : ""),
+    paths: ["src/a.ts"],
+  });
+  const commit = await commitDeps(git).commitFixCycle(ctx);
+
+  assert.equal(commit.kind, "committed", commit.kind === "refused" ? commit.detail : "");
+  assert.equal(commit.kind === "committed" ? commit.sha : "", "postfix9");
+  assert.deepEqual(commit.kind === "committed" ? commit.committedPaths : [], ["src/a.ts"]);
+  assert.equal(commit.kind === "committed" ? commit.recognized : undefined, true, "RECOVERED, not re-authored");
+  assert.equal(calls.some((c) => c[0] === "add" || c[0] === "commit"), false, "a second commit is never authored");
+});
+
+test("FG-649/RF-2: a crash AFTER the candidate advance is recovered — HEAD IS the candidate", async () => {
+  const ctx = commitCtx(["src/a.ts"], "postfix9");
+  const { git, calls } = scriptedGit({
+    status: "",
+    preHead: "postfix9",
+    subject: (s) => (s === "postfix9" ? subjectFor(ctx.batch) : ""),
+    parent: () => "cand111",
+    paths: ["src/a.ts"],
+  });
+  const commit = await commitDeps(git).commitFixCycle(ctx);
+
+  assert.equal(commit.kind, "committed", commit.kind === "refused" ? commit.detail : "");
+  assert.equal(commit.kind === "committed" ? commit.recognized : undefined, true);
+  assert.equal(calls.some((c) => c[0] === "commit"), false);
+});
+
+test("FG-649/RF-2: the subject alone recovers NOTHING — the commit must be anchored to the candidate", async () => {
+  const ctx = commitCtx(["src/a.ts"]);
+  // Someone else's head carrying this batch's subject. Adopting it on the subject alone would
+  // let any commit spelling that text re-anchor the review's whole evidence ledger.
+  const { git } = scriptedGit({
+    status: "M  src/a.ts\0",
+    preHead: "somebodyelse4",
+    subject: () => subjectFor(ctx.batch),
+    parent: () => "someotherbase",
+  });
+  const commit = await commitDeps(git).commitFixCycle(ctx);
+
+  assert.equal(commit.kind, "refused");
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "candidate_not_checked_out");
+});
+
+test("FG-649/RF-2: an anchored commit that is NOT this batch revision recovers nothing either", async () => {
+  const ctx = commitCtx(["src/a.ts"]);
+  // The previous revision's fix commit, sitting exactly where this one would go. A key that
+  // ignored the revision would read a completed cycle as this one's.
+  const { git } = scriptedGit({
+    status: "",
+    preHead: "postfix9",
+    subject: () => `fix(review): fix batch ${ctx.batch.id} revision ${ctx.batch.revision + 1}`,
+    parent: () => "cand111",
+  });
+  const commit = await commitDeps(git).commitFixCycle(ctx);
+
+  assert.equal(commit.kind, "refused");
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "candidate_not_checked_out");
+});
+
+// ─── FG-649 RF-5: the declared/tree reconciliation runs BOTH ways ───────────
+
+test("FG-649/RF-5: a declaration that reaches beyond the tree is NAMED on the outcome, not left silent", async () => {
+  // Declared [a, b], only `a` moved. This committed `a` and recorded declaredFiles [a, b]
+  // beside committedPaths [a] with nothing naming the disagreement — a partly-fabricated
+  // files_changed ledger passing as evidence.
+  //
+  // It is named rather than refused ON PURPOSE. `committed ⊆ declared` still holds, so the
+  // commit-only-declared-paths invariant is intact; and a refusal here would dead-end a
+  // converging review — a second fix cycle re-writing a test file it already committed
+  // declares it honestly and moves nothing, and no re-entry could ever change that.
+  const { git } = scriptedGit({ status: "M  src/a.ts\0" });
+  const commit = await commitDeps(git).commitFixCycle(commitCtx(["src/a.ts", "src/b.ts"]));
+
+  assert.equal(commit.kind, "committed", commit.kind === "refused" ? commit.detail : "");
+  assert.deepEqual(commit.kind === "committed" ? commit.committedPaths : [], ["src/a.ts"], "only what moved");
+  assert.deepEqual(
+    commit.kind === "committed" ? commit.declaredNotMoved : undefined,
+    ["src/b.ts"],
+    "and the unsupported half of the declaration travels WITH the outcome",
+  );
+});
+
+test("FG-649/RF-5: a declaration the tree supports in full carries no discrepancy at all", async () => {
+  const { git } = scriptedGit({ status: "M  src/a.ts\0" });
+  const commit = await commitDeps(git).commitFixCycle(commitCtx(["src/a.ts"]));
+
+  assert.equal(commit.kind, "committed");
+  assert.equal(
+    commit.kind === "committed" ? commit.declaredNotMoved : "set",
+    undefined,
+    "an honest ledger is the absence of the field, not an empty-array footnote to read past",
+  );
+});
+
+// ─── FG-649 RF-6: the commit cannot carry what a concurrent writer staged ───
+
+test("FG-649/RF-6: the commit is pathspec-limited, so a concurrently staged file cannot ride along", async () => {
+  const { git, calls } = scriptedGit({ status: "M  src/a.ts\0" });
+  const commit = await commitDeps(git).commitFixCycle(commitCtx(["src/a.ts"]));
+
+  assert.equal(commit.kind, "committed", commit.kind === "refused" ? commit.detail : "");
+  // `git commit -- <paths>` builds the tree from HEAD plus exactly these paths and ignores the
+  // rest of the index. A bare `git commit` would take whatever the shared index held by then.
+  assert.deepEqual(calls.find((c) => c[0] === "commit")?.slice(3), ["--", ":/src/a.ts"]);
+});
+
+test("FG-649/RF-6: a commit that lands on a foreign parent is NOT adopted as the candidate", async () => {
+  // A concurrent writer advanced HEAD between the candidate check and the commit. No check made
+  // BEFORE the write can see this; reading the parent off the commit that actually landed can.
+  const { git } = scriptedGit({ status: "M  src/a.ts\0", parent: () => "somebodyelse4" });
+  const commit = await commitDeps(git).commitFixCycle(commitCtx(["src/a.ts"]));
+
+  assert.equal(commit.kind, "refused");
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "fix_cycle_commit_raced");
+  assert.match(commit.kind === "refused" ? commit.detail : "", /parent is somebodyelse4, not the candidate cand111/);
+});
+
+test("FG-649/RF-6: a commit that landed carrying an undeclared path is NOT adopted either", async () => {
+  const { git } = scriptedGit({ status: "M  src/a.ts\0", paths: ["src/a.ts", "infra/secrets.tf"] });
+  const commit = await commitDeps(git).commitFixCycle(commitCtx(["src/a.ts"]));
+
+  assert.equal(commit.kind, "refused");
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "fix_cycle_commit_raced");
+  assert.match(commit.kind === "refused" ? commit.detail : "", /infra\/secrets\.tf/);
+});
+
+// ─── FG-649 RF-7: recognition adopts on the SAME terms the commit path does ─
+//
+// RF-2's recovery arm and RF-6's post-commit check both decide the same thing — may this commit
+// become the candidate — and recognition used to decide it on strictly less evidence: a subject
+// match plus an anchor, with neither the exactly-one-parent guard nor the declared-paths guard.
+// That made the RF-6 refusal non-durable. `fix_cycle_commit_raced` tells the operator to reset
+// the checkout and re-run; re-running WITHOUT the reset landed on the recognition arm, which
+// adopted the very commit the previous pass refused — undeclared paths and all — and that sha
+// then anchored every candidate-bound resolution, verification and shipping check.
+
+test("FG-649/RF-7: a RECOGNISED commit carrying an undeclared path is refused, exactly as the authored path refuses it", async () => {
+  const ctx = commitCtx(["src/a.ts"]);
+  // The RF-6 scenario one `continue` later: the smuggled commit is already HEAD, the tree is
+  // clean because it took the changes, and the subject is this batch revision's.
+  const { git, calls } = scriptedGit({
+    status: "",
+    preHead: "postfix9",
+    subject: (s) => (s === "postfix9" ? subjectFor(ctx.batch) : ""),
+    parent: () => "cand111",
+    paths: ["src/a.ts", "infra/secrets.tf"],
+  });
+  const commit = await commitDeps(git).commitFixCycle(ctx);
+
+  assert.equal(commit.kind, "refused", "a refused commit does not become adoptable by being re-read");
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "fix_cycle_commit_raced");
+  assert.match(commit.kind === "refused" ? commit.detail : "", /infra\/secrets\.tf/);
+  assert.equal(calls.some((c) => c[0] === "commit"), false, "and nothing is re-authored on top of it");
+});
+
+test("FG-649/RF-7: a RECOGNISED merge commit is refused — one parent is required of both arms", async () => {
+  const ctx = commitCtx(["src/a.ts"]);
+  // Anchored by its FIRST parent, so the old `parentsOf(at).includes(candidate)` arm adopted it;
+  // the authored path has always refused any commit with parents.length !== 1.
+  const { git } = scriptedGit({
+    status: "",
+    preHead: "postfix9",
+    subject: (s) => (s === "postfix9" ? subjectFor(ctx.batch) : ""),
+    parent: () => "cand111 someforeignbranch",
+    paths: ["src/a.ts"],
+  });
+  const commit = await commitDeps(git).commitFixCycle(ctx);
+
+  assert.equal(commit.kind, "refused");
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "fix_cycle_commit_raced");
+  assert.match(commit.kind === "refused" ? commit.detail : "", /parent is cand111 someforeignbranch/);
+});
+
+test("FG-649/RF-7: sharing the predicate does not lend the AUTHORED path recovery's self-anchor", async () => {
+  // The predicate accepts a commit that IS the candidate, because after the candidate advance the
+  // row points at it. On the authored path the row has not moved, so a HEAD back at the candidate
+  // means a writer rewound the checkout and the commit git just reported is gone. Adopting it
+  // would record the fix cycle complete against a tree the fixes are not in.
+  const { git } = scriptedGit({ status: "M  src/a.ts\0", head: "cand111", paths: ["src/a.ts"] });
+  const commit = await commitDeps(git).commitFixCycle(commitCtx(["src/a.ts"]));
+
+  assert.equal(commit.kind, "refused");
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "fix_cycle_commit_raced");
+  assert.match(commit.kind === "refused" ? commit.detail : "", /HEAD is still the candidate/);
+});
+
+test("FG-649/RF-7: the predicate is CONTAINMENT, so RF-5's partial commit is still recoverable", async () => {
+  // Where the two findings meet. RF-5 commits what moved and names what did not, so a legitimate
+  // fix-cycle commit can carry FEWER paths than the batch declared. Tightening recognition to
+  // declared-set EQUALITY would refuse exactly those commits on the retry after a crash — the
+  // FG-649 stuck loop rebuilt out of a guard meant to close it. `committed ⊆ declared` is the
+  // invariant, in both arms.
+  const ctx = commitCtx(["src/a.ts", "src/b.ts"]);
+  const { git } = scriptedGit({
+    status: "",
+    preHead: "postfix9",
+    subject: (s) => (s === "postfix9" ? subjectFor(ctx.batch) : ""),
+    parent: () => "cand111",
+    paths: ["src/a.ts"],
+  });
+  const commit = await commitDeps(git).commitFixCycle(ctx);
+
+  assert.equal(commit.kind, "committed", commit.kind === "refused" ? commit.detail : "");
+  assert.equal(commit.kind === "committed" ? commit.recognized : undefined, true);
+});
+
+test("FG-649/RF-7: the two arms give the SAME answer about the same commit", async () => {
+  // The coherence statement itself, rather than two facts that happen to agree today: one commit
+  // content, reached through the authored door and through the recovery door.
+  const ctx = commitCtx(["src/a.ts"]);
+  const smuggling = { paths: ["src/a.ts", "infra/secrets.tf"] };
+
+  const authored = await commitDeps(scriptedGit({ status: "M  src/a.ts\0", ...smuggling }).git).commitFixCycle(ctx);
+  const recognised = await commitDeps(
+    scriptedGit({
+      status: "",
+      preHead: "postfix9",
+      subject: (s) => (s === "postfix9" ? subjectFor(ctx.batch) : ""),
+      parent: () => "cand111",
+      ...smuggling,
+    }).git,
+  ).commitFixCycle(ctx);
+
+  assert.equal(authored.kind, recognised.kind);
+  assert.equal(
+    authored.kind === "refused" ? authored.reason : "",
+    recognised.kind === "refused" ? recognised.reason : "",
+    "adoption is one question, so the recovery arm cannot answer it more permissively",
+  );
+});
+
 // ─── the comparison base, resolved AT OPEN ──────────────────────────────────
 //
 // Stage 2 refuses a review that records no base sha, and no verb supplies one afterwards or

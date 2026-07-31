@@ -199,6 +199,11 @@ export type Review = {
   contractConfirmedSha?: string;
   candidateSha?: string;
   trustedRemoteSha?: string;
+  /** FG-649: the checkout this review's stages act on, recorded at open and re-recorded
+   *  when an operator overrides it with --project. The review row — not cwd, not the run —
+   *  is the authority for which tree a stage reads and (since the coordinator commits the
+   *  fix cycle) writes. Absent on a row written before FG-649. */
+  workspaceDir?: string;
   contract?: unknown;
   lensOutcomes?: unknown;
   stageEvidence?: StageEvidence;
@@ -254,6 +259,7 @@ type ReviewRow = {
   contract_confirmed_sha: string | null;
   candidate_sha: string | null;
   trusted_remote_sha: string | null;
+  workspace_dir: string | null;
   contract_json: string | null;
   lens_outcomes_json: string | null;
   stage_evidence_json: string | null;
@@ -310,6 +316,7 @@ function rowToReview(row: ReviewRow): Review {
     contractConfirmedSha: row.contract_confirmed_sha ?? undefined,
     candidateSha: row.candidate_sha ?? undefined,
     trustedRemoteSha: row.trusted_remote_sha ?? undefined,
+    workspaceDir: row.workspace_dir ?? undefined,
     contract: row.contract_json !== null ? (JSON.parse(row.contract_json) as unknown) : undefined,
     lensOutcomes: row.lens_outcomes_json !== null ? (JSON.parse(row.lens_outcomes_json) as unknown) : undefined,
     stageEvidence:
@@ -372,6 +379,7 @@ export type NewReview = {
   contractConfirmedSha?: string;
   candidateSha?: string;
   trustedRemoteSha?: string;
+  workspaceDir?: string;
   contract?: unknown;
   lensOutcomes?: unknown;
   stageEvidence?: StageEvidence;
@@ -434,9 +442,10 @@ export function insertReview(r: NewReview): Review {
     getDb()
       .prepare(
         `INSERT INTO reviews (id, run_id, subject_task_id, ticket_id, base_sha, contract_confirmed_sha,
-                              candidate_sha, trusted_remote_sha, contract_json, lens_outcomes_json,
-                              stage_evidence_json, review_mode, state, created_at, updated_at, settled_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+                              candidate_sha, trusted_remote_sha, workspace_dir, contract_json,
+                              lens_outcomes_json, stage_evidence_json, review_mode, state,
+                              created_at, updated_at, settled_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
       )
       .run(
         r.id,
@@ -447,6 +456,7 @@ export function insertReview(r: NewReview): Review {
         r.contractConfirmedSha ?? null,
         r.candidateSha ?? null,
         r.trustedRemoteSha ?? null,
+        r.workspaceDir ?? null,
         r.contract !== undefined ? JSON.stringify(r.contract) : null,
         r.lensOutcomes !== undefined ? JSON.stringify(r.lensOutcomes) : null,
         r.stageEvidence !== undefined ? JSON.stringify(r.stageEvidence) : null,
@@ -464,6 +474,10 @@ export function insertReview(r: NewReview): Review {
         state,
         ticketId: r.ticketId,
         candidateSha: r.candidateSha,
+        // FG-649: WHICH checkout this review's stages will act on, recorded by the same
+        // transaction that creates the row — so the audit history shows the binding a
+        // review was opened with, not only whatever it holds now.
+        workspaceDir: r.workspaceDir,
         // The run row's authority model changed in THIS transaction — the audit
         // record of a never-marked run adopting its first review's mode.
         runReviewModeAdopted: adopted,
@@ -517,38 +531,49 @@ export type ReviewPatch = {
   contractConfirmedSha?: string;
   candidateSha?: string;
   trustedRemoteSha?: string;
+  /** FG-649: patchable ON PURPOSE. An operator who legitimately moved the checkout
+   *  supplies --project and the new binding is RECORDED on the review; it is never
+   *  inferred from wherever the next invocation happens to run. */
+  workspaceDir?: string;
   contract?: unknown;
   lensOutcomes?: unknown;
   stageEvidence?: StageEvidence;
 };
 
 /** The mutable-identity fields. Not a state transition, so no lifecycle event —
- *  a coordinator that advances the candidate emits its own transition around it. */
+ *  a coordinator that advances the candidate emits its own transition around it.
+ *
+ *  FG-649 RF-4: ONLY THE PATCHED COLUMNS ARE WRITTEN. This used to be a read-modify-write
+ *  that rebuilt EVERY mutable column from a snapshot read outside the write lock, so a
+ *  caller patching one field wrote back its stale view of all the others. That is a real
+ *  clobber now that `resolveReviewWorkspace` rebinds `workspace_dir` at the START of every
+ *  stage-driving invocation: the rebind could land while another process was mid-stage and
+ *  put back the candidate_sha, lens outcomes or stage record that process had just written.
+ *  A narrow UPDATE lets SQLite keep the columns nobody patched, so the two writes commute. */
 export function updateReview(id: string, patch: ReviewPatch): Review {
   const before = getReview(id);
   if (!before) throw new Error(`forge: no review ${id}`);
-  const contract = patch.contract !== undefined ? patch.contract : before.contract;
-  const lensOutcomes = patch.lensOutcomes !== undefined ? patch.lensOutcomes : before.lensOutcomes;
-  const stageEvidence = patch.stageEvidence !== undefined ? patch.stageEvidence : before.stageEvidence;
+
+  const sets: string[] = [];
+  const vals: unknown[] = [];
+  const put = (column: string, value: unknown): void => {
+    sets.push(`${column} = ?`);
+    vals.push(value);
+  };
+  if (patch.baseSha !== undefined) put("base_sha", patch.baseSha);
+  if (patch.contractConfirmedSha !== undefined) put("contract_confirmed_sha", patch.contractConfirmedSha);
+  if (patch.candidateSha !== undefined) put("candidate_sha", patch.candidateSha);
+  if (patch.trustedRemoteSha !== undefined) put("trusted_remote_sha", patch.trustedRemoteSha);
+  if (patch.workspaceDir !== undefined) put("workspace_dir", patch.workspaceDir);
+  if (patch.contract !== undefined) put("contract_json", JSON.stringify(patch.contract));
+  if (patch.lensOutcomes !== undefined) put("lens_outcomes_json", JSON.stringify(patch.lensOutcomes));
+  if (patch.stageEvidence !== undefined) put("stage_evidence_json", JSON.stringify(patch.stageEvidence));
+  if (sets.length === 0) return before;
+
   writeTransaction(() => {
     getDb()
-      .prepare(
-        `UPDATE reviews SET base_sha = ?, contract_confirmed_sha = ?, candidate_sha = ?,
-                            trusted_remote_sha = ?, contract_json = ?, lens_outcomes_json = ?,
-                            stage_evidence_json = ?, updated_at = ?
-         WHERE id = ?`,
-      )
-      .run(
-        patch.baseSha ?? before.baseSha ?? null,
-        patch.contractConfirmedSha ?? before.contractConfirmedSha ?? null,
-        patch.candidateSha ?? before.candidateSha ?? null,
-        patch.trustedRemoteSha ?? before.trustedRemoteSha ?? null,
-        contract !== undefined ? JSON.stringify(contract) : null,
-        lensOutcomes !== undefined ? JSON.stringify(lensOutcomes) : null,
-        stageEvidence !== undefined ? JSON.stringify(stageEvidence) : null,
-        nowIso(),
-        id,
-      );
+      .prepare(`UPDATE reviews SET ${sets.join(", ")}, updated_at = ? WHERE id = ?`)
+      .run(...(vals as never[]), nowIso(), id);
   });
   return getReview(id) as Review;
 }
