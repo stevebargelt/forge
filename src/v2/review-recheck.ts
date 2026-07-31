@@ -18,7 +18,7 @@
 // answer, are both refused by construction (there is no "escalate" arm in this schema).
 
 import { z } from "zod";
-import { REACHABILITY, type DiscoveryFinding } from "./review-discovery.js";
+import { REACHABILITY, toleratedRootKeys, type DiscoveryFinding } from "./review-discovery.js";
 import { RISK_LENSES } from "./review-contract.js";
 import {
   validateResolutionEvidence,
@@ -65,14 +65,18 @@ const NewFindingSchema = z
   })
   .strict();
 
-export const RecheckOutputSchema = z
-  .object({
-    review_id: z.string().trim().min(1),
-    candidate_sha: z.string().trim().min(1),
-    rechecked: z.array(PerFindingSchema).default([]),
-    new_findings: z.array(NewFindingSchema).default([]),
-  })
-  .passthrough();
+/** FG-650: the ROOT tolerates unknown keys — the harness output contract mandates `status`
+ *  on every result.json — but they are STRIPPED and their names recorded, not passed
+ *  through unnamed. Every required root field stays required and strictly typed, and the
+ *  per-ID entries above stay `.strict()`. */
+const RECHECK_ROOT_KEYS = ["review_id", "candidate_sha", "rechecked", "new_findings"] as const;
+
+export const RecheckOutputSchema = z.object({
+  review_id: z.string().trim().min(1),
+  candidate_sha: z.string().trim().min(1),
+  rechecked: z.array(PerFindingSchema).default([]),
+  new_findings: z.array(NewFindingSchema).default([]),
+});
 
 export type RecheckOutput = z.infer<typeof RecheckOutputSchema>;
 
@@ -95,6 +99,9 @@ export type RecheckIngestion =
       /** True when at least one result came back `still_present` or `inconclusive` — the
        *  review returns to disposition and NO fixer is dispatched automatically. */
       returnsToDisposition: boolean;
+      /** Unknown ROOT keys the rechecker carried, stripped from the validated value and
+       *  recorded so the tolerance lands in the stage evidence. Empty when there were none. */
+      toleratedRootKeys: string[];
     }
   | { ok: false; refusal: string };
 
@@ -236,6 +243,7 @@ export function ingestRecheck(raw: unknown, ctx: RecheckContext): RecheckIngesti
     applications,
     newFindings: out.new_findings,
     returnsToDisposition: applications.some((a) => a.resolution !== "resolved") || out.new_findings.length > 0,
+    toleratedRootKeys: toleratedRootKeys(raw, RECHECK_ROOT_KEYS),
   };
 }
 

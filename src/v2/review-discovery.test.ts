@@ -113,6 +113,57 @@ test("FG-639 / PRD #22: an authored inconclusive IS completion and must state wh
   assert.equal(withoutReason.complete, false, "a reasonless inconclusive is indistinguishable from a synthesized one");
 });
 
+// ─── FG-650: tolerate-and-record at the root, unchanged strictness everywhere else ──
+
+test("FG-650: extra ROOT keys the harness contract mandates are tolerated, and every finding survives", () => {
+  const o = assessLens(
+    dispatch({
+      result: {
+        status: "complete",
+        verdict: "fail",
+        confidence: 0.9,
+        notes: "reviewed the reconcile path",
+        outcome: "fail",
+        findings: [finding({ file: "src/a.ts", line: 12 })],
+      },
+    }),
+  );
+  assert.equal(o.complete, true, "an honest outcome carrying `status` is not malformed");
+  if (!o.complete) return;
+  assert.equal(o.outcome, "fail");
+  assert.equal(o.findings.length, 1);
+  assert.equal(o.findings[0]?.file, "src/a.ts", "the findings pass through the root tolerance intact");
+  assert.deepEqual(
+    o.toleratedRootKeys,
+    ["confidence", "notes", "status", "verdict"],
+    "tolerance is recorded on the outcome by name, never silent",
+  );
+  assert.equal("status" in (o as Record<string, unknown>), false, "the unknown key is stripped from the validated value");
+});
+
+test("FG-650: an outcome with nothing extra records no tolerance at all", () => {
+  const o = assessLens(dispatch());
+  assert.equal(o.complete ? o.toleratedRootKeys : "unset", undefined);
+});
+
+test("FG-650: root tolerance does NOT relax the required root fields", () => {
+  const o = assessLens(dispatch({ result: { status: "complete", findings: [finding()] } }));
+  assert.equal(o.complete, false, "a missing `outcome` is still malformed");
+  assert.equal(o.complete ? "" : o.reason, "malformed_output");
+  assert.match(o.complete ? "" : o.detail, /outcome/);
+});
+
+test("FG-650: root tolerance does NOT reach inside a finding — an unknown finding key is still refused", () => {
+  const o = assessLens(
+    dispatch({
+      result: { status: "complete", outcome: "fail", findings: [{ ...finding(), certainty: "high" }] },
+    }),
+  );
+  assert.equal(o.complete, false, "nested strictness is the trust surface and must not weaken");
+  assert.equal(o.complete ? "" : o.reason, "malformed_output");
+  assert.match(o.complete ? "" : o.detail, /certainty/);
+});
+
 test("FG-639 / PRD #21: one crashed lens leaves discovery incomplete while the others pass", () => {
   const outcomes: LensOutcome[] = [
     assessLens(dispatch({ lens: "wide", role: "red-wide" })),

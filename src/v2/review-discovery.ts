@@ -55,6 +55,22 @@ const DiscoveryFindingSchema = z
 
 export type DiscoveryFinding = z.infer<typeof DiscoveryFindingSchema>;
 
+/** The unknown ROOT keys a reviewer output carries, for the tolerate-and-record rule.
+ *  Returns them sorted so the durable record is stable across runs. */
+export function toleratedRootKeys(raw: unknown, known: readonly string[]): string[] {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return [];
+  return Object.keys(raw)
+    .filter((k) => !known.includes(k))
+    .sort();
+}
+
+/** FG-650: the ROOT is tolerate-and-record, not strict. The harness output contract every
+ *  agent composes REQUIRES result.json to carry `status`, so a strict root refused every
+ *  honest reviewer outcome for a key the reviewer had no choice about. Unknown ROOT keys
+ *  are stripped and their names recorded on the outcome — never silently swallowed.
+ *  Nested strictness is unchanged: an unknown key inside a finding is still a refusal. */
+const LENS_RESULT_ROOT_KEYS = ["outcome", "findings", "inconclusive_reason"] as const;
+
 const LensResultSchema = z
   .object({
     outcome: z.enum(LENS_OUTCOMES),
@@ -64,7 +80,6 @@ const LensResultSchema = z
      *  one, and the two must never be confusable. */
     inconclusive_reason: z.string().trim().min(1).optional(),
   })
-  .strict()
   .superRefine((v, ctx) => {
     if (v.outcome === "inconclusive" && v.inconclusive_reason === undefined) {
       ctx.addIssue({
@@ -119,6 +134,10 @@ export type LensOutcome =
       authored: true;
       inconclusiveReason?: string;
       findings: DiscoveryFinding[];
+      /** Unknown ROOT keys the reviewer carried, stripped from the validated value and
+       *  kept here so the tolerance is readable back off the persisted outcome. Absent
+       *  when the output carried nothing extra. */
+      toleratedRootKeys?: string[];
       taskId?: string;
       verdictId?: string;
     }
@@ -185,6 +204,7 @@ export function assessLens(dispatch: LensDispatch): LensOutcome {
     };
   }
 
+  const tolerated = toleratedRootKeys(dispatch.result, LENS_RESULT_ROOT_KEYS);
   return {
     ...base,
     complete: true,
@@ -192,6 +212,7 @@ export function assessLens(dispatch: LensDispatch): LensOutcome {
     authored: true,
     inconclusiveReason: parsed.data.inconclusive_reason,
     findings: parsed.data.findings,
+    ...(tolerated.length > 0 ? { toleratedRootKeys: tolerated } : {}),
     verdictId: dispatch.verdictId,
   };
 }
