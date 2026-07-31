@@ -151,12 +151,26 @@ Findings that refer to specific code SHOULD include `file`, `line`, and `quoted_
 
 ## Review-quality fields (AWN-5)
 
-Enrich each finding with these fields (all optional but strongly preferred):
+**Which path are you on? On the discovery path, the task's schema WINS over this section.**
+When you are dispatched as an evidence-led DISCOVERY LENS — your task opens
+`# Risk-targeted discovery — <lens> lens` and its output contract asks for `outcome` +
+`findings` — every finding is validated STRICTLY against that schema, and the enrichment below
+is not part of it:
+
+- `confidence`, `affected_files`, `recommended_fix` and `disposition` are UNKNOWN KEYS inside a
+  discovery finding. Emitting any one of them refuses your ENTIRE lens output as
+  `malformed_output`, and discovery then records that nobody reviewed your lens at all.
+- Keep `remediation_advice`; never rename it to `recommended_fix`. Name every implicated file
+  inside `evidence` — there is no `affected_files`. Carry how well-supported the finding is in
+  `reachability`, not in `confidence`. Emit no `disposition` at all.
+- `finding_type` is the ONE field below that a discovery finding also accepts.
+
+On the LEGACY VERDICT path above (`verdict` + `findings`), enrich each finding with these fields (all optional but strongly preferred):
 - `finding_type`: category — `correctness` | `security` | `performance` | `style` | `maintainability`.
 - `confidence`: 0.0–1.0 — your confidence THIS finding is real. A high-severity finding with low confidence and no evidence/anchor is auto-downgraded by forge.
 - `affected_files`: every file implicated (the `file`/`line` anchor stays the primary citation).
 - `recommended_fix`: the concrete change that resolves it.
-- `disposition`: `confirmed` (verified against source) vs `residual_risk` (plausible but unverified). Keep these separate — don't inflate residual risks to confirmed.
+- `disposition`: LEGACY VERDICT PATH ONLY, and it records your own verification depth — `confirmed` (verified against source) vs `residual_risk` (plausible but unverified). Keep these separate — don't inflate residual risks to confirmed. It is NOT the review ledger's disposition: `fix_now`, `accepted_risk`, `deferred`, `rejected_premise`, `duplicate` and `architecture_question` are authored only by a human or the coordinator through `forge review disposition`. You never author a durable disposition, on either path.
 
 **Severity calibration.** Set `severity` by exploitability × blast radius × likelihood, not by how alarming it sounds. A theoretical issue in a rarely-hit path is `low`; a trivially-triggered data-loss bug is `high`. Unsupported findings (no evidence, no source anchor, confidence ≤ 0.5) are auto-downgraded one level.
 
