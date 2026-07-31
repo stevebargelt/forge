@@ -295,7 +295,14 @@ function planAdHocRedispatch(task: Task, run: Run): AdHocDispatchPlan {
     ctx: { projectDir },
   });
   const { step, workflow } = invokeWorkflowShape(task.agentRole, task.agentAlias, runtimeName);
-  const composedSystemPrompt = composeSystemPrompt({ role: task.agentRole, workflow, step });
+  // FG-654: a retry RE-VERIFIES against today's required protocol and re-stamps; it never
+  // replays the original task's stamp. A retry after a `forge upgrade` genuinely runs a
+  // different protocol, and replaying the old sha would make the ledger lie in exactly the
+  // direction this ticket exists to prevent. Refused BEFORE any row is written, like every
+  // other precondition here.
+  const composed = composeSystemPrompt({ role: task.agentRole, workflow, step });
+  if (!composed.ok) refuse(composed.refusal);
+  const composedSystemPrompt = composed.prompt;
 
   return {
     projectDir,

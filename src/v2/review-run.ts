@@ -38,6 +38,7 @@ import {
   ingestFindings,
   lensAcceptancesOf,
   invalidateResolutionsForCandidate,
+  recordAgentProtocol,
   recordDisposition,
   recordResolution,
   recordStageEvidence,
@@ -166,7 +167,15 @@ export type CoordinatorDeps = {
    *  a task id that does not exist. Any implementation that reaches a container MUST return
    *  the real task id, including when that container then fails (ok: false, taskId set): a
    *  fixer that ran and crashed is a dispatch, and its task is the audit trail. */
-  dispatchFixer: (ctx: FixerContext) => Awaitable<{ ok: boolean; taskId: string; result?: unknown; error?: string }>;
+  dispatchFixer: (ctx: FixerContext) => Awaitable<{
+    ok: boolean;
+    taskId: string;
+    result?: unknown;
+    error?: string;
+    /** FG-654: the protocol generation the fixer ran under, read back off its task
+     *  manifest. Absent when the dispatch was refused before a manifest was written. */
+    protocol?: { role: string; sha256: string };
+  }>;
   /** FG-649 change 1: THE COORDINATOR COMMITS THE FIX CYCLE, so the post-fix sha is known
    *  rather than inferred from a later `headSha()` read the orchestrator may not have reached
    *  yet. Reading HEAD right after ingestion is a guaranteed no-op when the committer acts
@@ -543,6 +552,17 @@ async function runBatchFix(reviewId: string, transition: Transition, deps: Coord
     // container started names no task. Marking the batch dispatched against an empty id would
     // record a delivery that never happened; leaving it open re-enters this revision as-is.
     if (dispatch.taskId !== "") markFixBatchDispatched(batch.id, dispatch.taskId);
+    // FG-654: recorded against the REVISION that was actually delivered, and recorded
+    // BEFORE the ok/parse gates below — a fixer that ran under a protocol and then crashed
+    // still ran under that protocol, and that is exactly the fact a later reader needs.
+    if (dispatch.protocol && dispatch.taskId !== "") {
+      recordAgentProtocol(review.id, {
+        role: dispatch.protocol.role,
+        sha256: dispatch.protocol.sha256,
+        taskId: dispatch.taskId,
+        stage: "fix_batch",
+      });
+    }
     if (!dispatch.ok) {
       // Fixer crash: findings stay fix_now and unresolved. Nothing is recorded.
       return refuse(

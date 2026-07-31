@@ -20,10 +20,12 @@ import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
 import { eventsForRun } from "../store/events.js";
 import {
+  agentProtocolRecordsOf,
   findingsForReview,
   getReview,
   ingestFindings,
   insertReview,
+  lensOutcomeRecordsOf,
   recordDisposition,
   recordResolution,
   type Review,
@@ -2133,4 +2135,58 @@ test("FG-640: a repeated free-form shipping finding is ingested ONCE, not once p
   const second = await runNextStage(REVIEW, h.deps);
   assert.equal(second.status, "refused", "the free-form finding still blocks the stage");
   assert.equal(lateRows().length, 1, "a second copy was ingested — the review could never settle");
+});
+
+// FG-654 / D11: THE LEDGER INDEXES THE MANIFEST, PER DISPATCH — and NOT via StageEvidence.
+//
+// `StageEvidence` is one record per STAGE while Stage 2b fans out five lens dispatches, so
+// the protocol generation cannot live there without lying about cardinality. The fixer's
+// generation rides its own record in `lens_outcomes_json`, which already has per-dispatch
+// cardinality, and is filtered out of `lensOutcomeRecordsOf` so no outcome consumer can
+// mistake it for a review that happened.
+test("FG-654: the fixer's protocol generation is recorded per dispatch, readable, and NOT in StageEvidence", async () => {
+  const h = harness({
+    findingsPerLens: 5,
+    dispatchFixer: (ctx) => ({
+      ok: true,
+      taskId: "task-fixer-fg654",
+      protocol: { role: "engineer", sha256: "b".repeat(64) },
+      result: {
+        fix_batch_id: ctx.batch.id,
+        revision: ctx.batch.revision,
+        findings: ctx.batch.payload.findings.map((f) => ({
+          finding_ref: f.finding_ref,
+          outcome: "resolved",
+          evidence_kind: "test_executed",
+          evidence: "the regression test now passes",
+          files_changed: ["src/x.ts"],
+        })),
+      },
+    }),
+  });
+  await drive(h.deps, "discover");
+  dispositionAll("fix_now", "will be remediated this cycle");
+  const outcome = await runNextStage(REVIEW, h.deps);
+  assert.equal(outcome.transition.kind, "batch_fix");
+
+  const review = getReview(REVIEW)!;
+  const recorded = agentProtocolRecordsOf(review);
+  assert.equal(recorded.length, 1, "one dispatch, one record");
+  assert.equal(recorded[0]?.role, "engineer");
+  assert.equal(recorded[0]?.sha256, "b".repeat(64));
+  assert.equal(recorded[0]?.taskId, "task-fixer-fg654");
+  assert.equal(recorded[0]?.stage, "fix_batch");
+
+  // The negative half, and the one that matters: nothing was written to StageEvidence for
+  // this purpose, and no outcome consumer sees the record.
+  for (const rec of Object.values(review.stageEvidence ?? {})) {
+    assert.ok(
+      !JSON.stringify(rec).includes("b".repeat(64)),
+      "the protocol generation must NOT be recorded on StageEvidence — wrong cardinality",
+    );
+  }
+  assert.ok(
+    !lensOutcomeRecordsOf(review).some((r) => JSON.stringify(r).includes("agent_protocol")),
+    "the protocol record must be filtered out of the reviewer-authored outcomes",
+  );
 });

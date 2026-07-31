@@ -13,11 +13,13 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RESOLUTION_EVIDENCE_KINDS } from "./review-evidence.js";
 import { RECHECK_RESULTS } from "./review-recheck.js";
+import { readProtocolRegion, resolveAgentProtocol } from "./agent-protocol.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const seedDir = join(repoRoot, "seeds", "agents", "review-rechecker");
@@ -131,4 +133,35 @@ test("FG-639: the seed tells the rechecker its new findings land untriaged with 
     md.includes("does not acquire blocking force just because it arrived late"),
     "and lateness confers no blocking force (PRD #7)",
   );
+});
+
+// ─── FG-654: the guards must see the INSTALLED bytes, not only the repo seed ─
+//
+// This is WHY FG-654 shipped green: every assertion above reads
+// repoRoot/seeds/agents/review-rechecker/CLAUDE.md, and they were ALL passing on a host
+// where the dispatched rechecker read 40-lines-behind bytes from $FORGE_HOME. The
+// repo-side assertions stay — they pin the SOURCE — and these pin the EFFECTIVE copy.
+
+test("FG-654: the rechecker's INSTALLED protocol region is current, not just the repo seed's", () => {
+  const resolved = resolveAgentProtocol("review-rechecker");
+  assert.ok(resolved.ok, resolved.ok ? "" : resolved.refusal);
+});
+
+test("FG-654: mutating the INSTALLED copy while the repo seed stays pristine goes RED", () => {
+  // The exact blind spot, exercised: the repo seed is never touched here.
+  const home = mkdtempSync(join(tmpdir(), "forge-fg654-rechecker-"));
+  mkdirSync(join(home, "agents", "review-rechecker"), { recursive: true });
+  const installed = readFileSync(seedPath, "utf8");
+  const read = readProtocolRegion(installed);
+  assert.equal(read.kind, "fenced", "the repo seed must carry a balanced fence to mutate against");
+  if (read.kind === "fenced") {
+    writeFileSync(
+      join(home, "agents", "review-rechecker", "CLAUDE.md"),
+      installed.replace(read.region, `${read.region}\n\nA LOCAL EDIT INSIDE THE FORGE REGION`),
+    );
+  }
+  const resolved = resolveAgentProtocol("review-rechecker", { forgeHome: home });
+  assert.equal(resolved.ok, false, "a mutated INSTALLED region must be detected even with a pristine repo seed");
+  if (!resolved.ok) assert.equal(resolved.reason, "stale");
+  rmSync(home, { recursive: true, force: true });
 });

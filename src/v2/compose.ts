@@ -15,6 +15,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { filterConstraints, loadAllConstraints } from "./constraints.js";
+import { assertAgentProtocolCurrent, type AgentProtocolStamp, type ProtocolPaths } from "./agent-protocol.js";
 import type { Workflow, Step } from "./schema.js";
 
 const FRAMING = `## Output contract
@@ -31,7 +32,19 @@ export type ComposeArgs = {
   // Override defaults for tests.
   agentDir?: string;
   constraintsDir?: string;
+  /** FG-654: override the two roots the protocol check reads (installed seed under
+   *  $FORGE_HOME, required seed in the executing release). Tests only. */
+  protocolPaths?: ProtocolPaths;
 };
+
+/** FG-654: composing is no longer unconditionally possible. THIS is the one seam every
+ *  dispatch entry funnels through — invoke (the whole coordinator family plus the legacy
+ *  review-loop's red-wide), runNext's primary / workflow-red / fanout-child sites, and
+ *  retry — so the refusal lives here rather than being re-implemented, and forgotten,
+ *  at five dispatchers. Same call FG-583 made when it put its refusal in the loader. */
+export type ComposeResult =
+  | { ok: true; prompt: string; protocol?: AgentProtocolStamp }
+  | { ok: false; refusal: string; role: string };
 
 function defaultAgentDir(role: string): string {
   const root = process.env.FORGE_HOME ?? join(homedir(), ".forge");
@@ -43,11 +56,26 @@ function defaultConstraintsDir(): string {
   return join(root, "constraints");
 }
 
-export function composeSystemPrompt(args: ComposeArgs): string {
+export function composeSystemPrompt(args: ComposeArgs): ComposeResult {
   const sections: string[] = [];
 
-  const agentDir = args.agentDir ?? defaultAgentDir(args.role);
+  // FG-654: the protocol check and the prompt MUST read the same installed file, so both
+  // resolve from one home. An explicit agentDir is that file's home by definition; a
+  // protocolPaths.forgeHome override steers both halves; otherwise it is $FORGE_HOME.
+  const forgeHome = args.protocolPaths?.forgeHome;
+  const agentDir = args.agentDir ?? (forgeHome !== undefined ? join(forgeHome, "agents", args.role) : defaultAgentDir(args.role));
   const baseFile = join(agentDir, "CLAUDE.md");
+
+  // For a role the review lifecycle dispatches, the Forge-owned protocol region must be
+  // present AND current before anything is composed. An ABSENT seed and a STALE one are
+  // the same class of unmet precondition: the placeholder below used to fail OPEN,
+  // dispatching a reviewer with no role contract at all.
+  const protocol = assertAgentProtocolCurrent(args.role, {
+    ...(args.protocolPaths ?? {}),
+    forgeHome: forgeHome ?? join(agentDir, "..", ".."),
+  });
+  if (!protocol.ok) return { ok: false, refusal: protocol.refusal, role: args.role };
+
   if (existsSync(baseFile)) {
     sections.push(readFileSync(baseFile, "utf8").trim());
   } else {
@@ -74,5 +102,9 @@ export function composeSystemPrompt(args: ComposeArgs): string {
 
   sections.push(FRAMING);
 
-  return sections.join("\n\n---\n\n") + "\n";
+  return {
+    ok: true,
+    prompt: sections.join("\n\n---\n\n") + "\n",
+    ...(protocol.stamp ? { protocol: protocol.stamp } : {}),
+  };
 }

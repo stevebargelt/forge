@@ -162,7 +162,19 @@ test("FG-583 (Finding 2): BEFORE `forge upgrade`, an installed dispatch entry FA
   assert.equal(currentGenDir(home), null, "no generation is published before upgrade");
   const before = runForge(shim, ["invoke", "engineer", "--task", "probe", "--project", proj, "--unrouted"], home);
   assert.notEqual(before.status, 0, "dispatch refuses before a generation exists");
-  assert.match(before.stderr, /no complete seed generation|refusing to dispatch/i, `the refusal names the no-generation state — got: ${before.stderr.slice(0, 400)}`);
+  // FG-654 widened this alternation DELIBERATELY. A promoted-but-not-upgraded home has TWO
+  // unmet dispatch preconditions, not one: no published seed generation, and no installed
+  // Forge-owned agent protocol region (both are what `forge upgrade` installs). A covered
+  // role now trips the protocol gate first, at the compose read seam, which is a fail-closed
+  // refusal naming the SAME documented remedy. The claim under test — a pre-upgrade home
+  // refuses by name rather than dispatching — is unchanged; only which of the two named
+  // states is reported first moved.
+  assert.match(
+    before.stderr,
+    /no complete seed generation|refusing to dispatch|review protocol this release requires/i,
+    `the refusal names a fail-closed pre-upgrade state — got: ${before.stderr.slice(0, 400)}`,
+  );
+  assert.match(before.stderr, /forge upgrade/, "and names the documented bootstrap as the remedy");
 
   // THE DOCUMENTED BOOTSTRAP, driven through the installed shim. A DIVERGENT
   // FORGE_REPO_DIR (release B's tree) is present but must never become the source.

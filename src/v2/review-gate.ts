@@ -239,11 +239,22 @@ export function assessReviewDisposition(input: ReviewDispositionInput): ReviewDi
       candidateSha: review.contractConfirmedSha,
     });
     if (!completeness.complete) {
+      // FG-654: a stale-protocol refusal gets its remedy named HERE rather than being
+      // folded into the generic missing-lens message. It is the one reason in this list
+      // with a self-service fix that is NOT "retry the lens" — retrying without upgrading
+      // refuses again — and it is the one an operator acceptance deliberately cannot clear.
+      const stale = completeness.missing.filter((m) => m.reason === "stale_protocol");
       conditions.push({
         id: "lens_outcome_missing",
         detail:
           `${completeness.missing.length} selected lens(es) have no schema-valid reviewer-authored outcome: ` +
-          completeness.missing.map((m) => `${m.lens} (${m.reason}: ${m.detail})`).join("; "),
+          completeness.missing.map((m) => `${m.lens} (${m.reason}: ${m.detail})`).join("; ") +
+          (stale.length > 0
+            ? `. ${stale.length} of these (${stale.map((m) => m.lens).join(", ")}) were REFUSED at dispatch for a ` +
+              `stale Forge-owned review protocol — run \`forge upgrade\` and re-run discovery. An operator lens ` +
+              `acceptance cannot clear these: accepting one accepts a review whose reviewer was never told the ` +
+              `contract, which is categorically different from accepting a narrower but informed one.`
+            : ""),
       });
     }
   }

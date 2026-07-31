@@ -22,6 +22,7 @@ import { buildReleaseReport, summarizeProblems, type ReleaseReport } from "../..
 import { gatherReleaseInputs } from "./doctor.js";
 import { assetRoot, devCheckoutDir, executionMode, type ExecutionMode } from "../../v2/asset-root.js";
 import { publishSeedGeneration } from "../../v2/seed-generation.js";
+import { publishAgentProtocolRegions, renderProtocolPublication } from "../../v2/agent-protocol.js";
 
 // Wraps the manual upgrade dance: git pull on forge's own repo, refresh
 // shared seeds at ~/.forge/, optionally re-init the current project's
@@ -172,6 +173,19 @@ export type SeedGenerationOutcome = "published" | "would-publish" | "not-run" | 
  *  a host this upgrade never touched. */
 export type AuthoredRetentionOutcome = "none" | "retained" | "not-run";
 
+/** FG-654: the adopt/publish pass for the Forge-owned protocol region inside the
+ *  operator-authored agent seeds. It runs AFTER install-seeds.sh (which is behaviorally
+ *  untouched and performs no region surgery) and BEFORE anything can observe the new
+ *  dispatch requirement — adoption has to be part of the upgrade that introduces the
+ *  requirement, or the first review after upgrade refuses every lens, the fixer and the
+ *  rechecker at once with no self-service remedy.
+ *
+ *  `needs-repair` is the one manual rung: a seed with a lone or hand-edited marker has a
+ *  genuinely ambiguous boundary, so forge refuses to guess and leaves the file UNTOUCHED
+ *  with the exact repair named. It is unresolved — that host cannot review until it is
+ *  fixed, and reporting it as a clean upgrade would hide the one state that needs hands. */
+export type AgentProtocolOutcome = "published" | "already-current" | "would-publish" | "not-run" | "needs-repair";
+
 // FG-581: `failed` and `failed-not-neutralized` are BOTH compile failures, split
 // on whether the stale policy could be taken off disk. `failed` = neutralized
 // (quarantined or removed) → routing is genuinely fail-closed. `failed-not-neutralized`
@@ -212,6 +226,7 @@ export type UpgradeStepOutcomes = {
   assetInstall: AssetInstallOutcome;
   seedGeneration: SeedGenerationOutcome;
   authoredRetention: AuthoredRetentionOutcome;
+  agentProtocol: AgentProtocolOutcome;
   routingPolicy: RoutingPolicyOutcome;
   projectInit: ProjectInitOutcome;
   slashCommands: SlashCommandsOutcome;
@@ -292,6 +307,16 @@ const AUTHORED_RETENTION: Record<AuthoredRetentionOutcome, Resolution> = {
   "not-run": resolved,
 };
 
+const AGENT_PROTOCOL: Record<AgentProtocolOutcome, Resolution> = {
+  published: resolved,
+  "already-current": resolved,
+  "would-publish": resolved,
+  "not-run": resolved,
+  "needs-repair": unresolvedBecause(
+    "agent protocol region NOT published for one or more roles — a seed carries an ambiguous marker fence, so forge refused to guess at the boundary and left the file untouched. Those roles are refused at dispatch until the markers are repaired by hand (the exact repair is printed above)",
+  ),
+};
+
 const ROUTING_POLICY: Record<RoutingPolicyOutcome, Resolution> = {
   recompiled: resolved,
   "would-recompile": resolved,
@@ -358,6 +383,7 @@ export function classifyStep(step: UpgradeStep): Resolution {
     case "gitPull": return GIT_PULL[step.outcome];
     case "npmInstall": return NPM_INSTALL[step.outcome];
     case "assetInstall": return ASSET_INSTALL[step.outcome];
+    case "agentProtocol": return AGENT_PROTOCOL[step.outcome];
     case "seedGeneration": return SEED_GENERATION[step.outcome];
     case "authoredRetention": return AUTHORED_RETENTION[step.outcome];
     case "routingPolicy": return ROUTING_POLICY[step.outcome];
@@ -428,6 +454,13 @@ export type UpgradeResult = {
    *  is a state half the consumers miss. Informational, never a failure — but it
    *  is the ONLY place this upgrade admits those files are running unrefreshed. */
   authoredRetentions: string[];
+  /** FG-654: the adopt/publish pass for the Forge-owned protocol region inside those
+   *  same authored agent seeds. Distinct from `authoredRetention` on purpose — the two
+   *  halves of one file, and this one forge DOES converge. */
+  agentProtocol: AgentProtocolOutcome;
+  /** Per-role publication lines: what was adopted/appended/replaced, every
+   *  `.forge-pre-fg654.bak` written, and any seed left untouched pending a hand repair. */
+  agentProtocolLines: string[];
   routingPolicy: RoutingPolicyOutcome;
   /** FG-581: on a post-promotion compile FAILURE, the compiler's verbatim reason
    *  for the rejected RACI construct — the same string the human warning carries,
@@ -761,6 +794,41 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         }
       }
 
+      // Step 3 (cont.): FG-654 — adopt and publish the Forge-owned protocol region into
+      // the agent seeds. Ordered strictly AFTER install-seeds.sh (which created any
+      // missing seed from an already-fenced release copy, and retained every existing
+      // one) and BEFORE anything can observe the new dispatch requirement. Every host
+      // that has ever run forge carries an unmarked legacy agent seed by construction,
+      // so this pass IS the migration; deferring it to a later operator step would mean
+      // the first review after upgrade refuses all five lenses, the fixer AND the
+      // rechecker at once.
+      let agentProtocol: AgentProtocolOutcome = "not-run";
+      let agentProtocolLines: string[] = [];
+      if (assetInstall === "not-found") {
+        agentProtocol = "not-run";
+      } else {
+        const publication = publishAgentProtocolRegions({ seedsDir: join(assetsDir, "seeds"), dryRun });
+        agentProtocolLines = renderProtocolPublication(publication);
+        // ONLY `needs-markers` is unresolved. It is the operator's to fix and the host
+        // cannot review until they do. `release-missing` is a different fact — the tree
+        // this process executes FROM carries no fenced seed for a role — and no amount of
+        // re-running upgrade on this host converges it, so classifying it unresolved would
+        // name a remedy that fixes nothing (the FG-578 defect, in miniature). It is still
+        // reported on the line above, refused by name at dispatch, and a doctor FAIL.
+        const repairs = publication.filter((p) => p.action === "needs-markers");
+        agentProtocol = dryRun
+          ? "would-publish"
+          : repairs.length > 0
+            ? "needs-repair"
+            : publication.every((p) => p.action === "unchanged")
+              ? "already-current"
+              : "published";
+        for (const line of agentProtocolLines) {
+          if (line.trimStart().startsWith("⚠")) warn(`        ${line}`);
+          else say(`        → ${line}`);
+        }
+      }
+
       // Step 4: re-init current project — CLAUDE.md orchestrator block + all
       // hook installs (commit-msg, claude session hooks, slash commands).
       // Re-running the install plans is idempotent: already-current entries
@@ -899,6 +967,7 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         assetInstall,
         seedGeneration,
         authoredRetention,
+        agentProtocol,
         routingPolicy,
         projectInit,
         slashCommands,
@@ -943,6 +1012,8 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         seedGenerationError,
         authoredRetention,
         authoredRetentions,
+        agentProtocol,
+        agentProtocolLines,
         routingPolicy,
         routingPolicyError,
         projectInit,

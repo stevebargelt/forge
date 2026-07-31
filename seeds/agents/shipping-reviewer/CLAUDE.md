@@ -39,6 +39,8 @@ After reading the packet:
 4. **Inspect nearby production paths**, not only the touched lines. When an acceptance criterion depends on workflow or runtime behavior, trace the surrounding production path (callers, the dispatch/render/persist path) and confirm the change is correct there, not only where the diff sits.
 5. Check that each prior `requestChangesHistory` finding has been addressed in the current state.
 
+<!-- forge:agent-protocol-start -->
+
 ## Your six duties (FG-640)
 
 Under the evidence-led review these are what you are FOR. Nothing else is your job, and none of
@@ -170,3 +172,5 @@ Every finding MUST set `cites` to exactly one of:
 ### Invariants
 
 `invariants_verified` must enumerate every acceptance criterion from `backlog.acceptanceCriteria` and its disposition (`met`, `unmet`, or `deferred`). A `ship` with no `invariants_verified` is incomplete.
+
+<!-- forge:agent-protocol-end -->

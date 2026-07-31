@@ -41,6 +41,13 @@ import { composeSystemPrompt } from "./compose.js";
 import { SEED_GENERATION_DIRS } from "./seed-generation.js";
 import { upgradeAssetPaths, parseRetainedLine } from "../cli/commands/upgrade.js";
 import { RISK_LENSES, lensRole } from "./review-contract.js";
+import {
+  COVERED_ROLES,
+  fencedBlock,
+  publishAgentProtocolRegions,
+  readProtocolRegion,
+  resolveAgentProtocol,
+} from "./agent-protocol.js";
 import type { Workflow } from "./schema.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -157,11 +164,16 @@ test("integ FG-653: the rule reaches the reviewer's COMPOSED system prompt, reso
     for (const role of LENS_ROLES) {
       // No agentDir override: composeSystemPrompt resolves $FORGE_HOME/agents/<role> itself, which
       // is the same directory install-seeds.sh just wrote. That identity is the propagation claim.
-      const prompt = composeSystemPrompt({
+      // FG-654: compose returns a discriminated result — a lens role whose installed
+      // protocol region is absent or stale REFUSES rather than composing. This suite
+      // installs from the release seeds, so `ok` here is itself the propagation claim.
+      const composed = composeSystemPrompt({
         role,
         workflow: WORKFLOW,
         step: { ...WORKFLOW.steps[0]!, agent: role },
       });
+      assert.ok(composed.ok, composed.ok ? "" : `${role}: ${composed.refusal}`);
+      const prompt = composed.prompt;
       assert.ok(
         !prompt.includes("Agent base CLAUDE.md not found"),
         `${role}: compose fell back to its placeholder — the seed is not where dispatch looks for it`,
@@ -272,6 +284,100 @@ test("integ FG-653: an operator's existing red seed is RETAINED and REPORTED, FO
     assert.ok(
       readFileSync(seedPath(role)).equals(readFileSync(installedPath(role))),
       `${role} still carries this release's bytes`,
+    );
+  }
+});
+
+// ─── FG-654: the SECOND publisher, and what it does NOT touch ───────────────
+//
+// EXTENSION, not amendment. Every assertion above is unchanged and still passes — the
+// installer is behaviorally untouched by FG-654 (no marker surgery, AUTHORED_EXEMPT still
+// `agents constraints raci`), so `FORCE=1` still retains an operator's red-wide copy
+// byte-for-byte and still reports it. What is NEW is a second, ORTHOGONAL seam that the
+// installer does not share: `forge upgrade`'s publish pass, which converges only the
+// marker-fenced Forge-owned protocol region inside those same authored files.
+
+test("integ FG-654: the publish pass converges the Forge region on a host the installer RETAINED", () => {
+  assert.equal(installSeeds().status, 0, "first install seeds the host");
+
+  // The operator's own copy: their prose PLUS a stale protocol region. install-seeds.sh
+  // has just proven (above) that it will retain this verbatim, FORCE or not.
+  const operatorProse = "## My house rule\n\nAlways read the ledger first.";
+  const shipped = readFileSync(seedPath("red-wide"), "utf8");
+  const shippedRegion = readProtocolRegion(shipped);
+  assert.equal(shippedRegion.kind, "fenced", "the shipped red-wide seed must carry a balanced fence");
+  const stale = `# red-wide\n\n${operatorProse}\n\n${
+    shippedRegion.kind === "fenced" ? fencedBlock(`${shippedRegion.region}\n\nAN OLD TRAILING RULE`) : ""
+  }\n`;
+  writeFileSync(installedPath("red-wide"), stale);
+
+  // The installer STILL retains it — the two seams do not fight over the file.
+  const forced = installSeeds({ force: true });
+  assert.equal(readFileSync(installedPath("red-wide"), "utf8"), stale, "the installer must still retain, unchanged");
+
+  // The publish pass converges the region and nothing else.
+  const outcomes = publishAgentProtocolRegions({ forgeHome: home, seedsDir: join(repoRoot, "seeds") });
+  assert.equal(outcomes.find((o) => o.role === "red-wide")?.action, "replaced");
+
+  const after = readFileSync(installedPath("red-wide"), "utf8");
+  assert.ok(after.includes(operatorProse), "the operator's own section survives BYTE-FOR-BYTE");
+  assert.ok(!after.includes("AN OLD TRAILING RULE"), "the stale Forge region is gone");
+  const read = readProtocolRegion(after);
+  assert.ok(read.kind === "fenced");
+  if (read.kind === "fenced" && shippedRegion.kind === "fenced") {
+    assert.equal(read.region, shippedRegion.region, "the region byte-equals this release's");
+  }
+  // Idempotent.
+  assert.equal(
+    publishAgentProtocolRegions({ forgeHome: home, seedsDir: join(repoRoot, "seeds") })
+      .find((o) => o.role === "red-wide")?.action,
+    "unchanged",
+  );
+  // And it did not disturb the FOUR other lens seeds the installer left current.
+  for (const role of LENS_ROLES) {
+    if (role === "red-wide") continue;
+    assert.ok(readFileSync(seedPath(role)).equals(readFileSync(installedPath(role))), `${role} untouched`);
+  }
+  assert.equal(forced.status, 0);
+});
+
+test("integ FG-654: a LEGACY unmarked seed (the measured host's state) adopts with zero operator work", () => {
+  assert.equal(installSeeds().status, 0);
+  // The measured 2026-07-31 state: the installed red seeds carried NO FG-640 section at
+  // all — a pure stale subset, no markers, plus whatever the operator had added.
+  const legacy = "# red-wide\n\n## Reading the project\n\npre-FG-640 prose\n\n## My own note\n\nmine\n";
+  writeFileSync(installedPath("red-wide"), legacy);
+  assert.equal(
+    resolveAgentProtocol("red-wide", { forgeHome: home, seedsDir: join(repoRoot, "seeds") }).ok,
+    false,
+    "an unmarked legacy seed must be REFUSED at dispatch, not silently run",
+  );
+
+  const outcome = publishAgentProtocolRegions({ forgeHome: home, seedsDir: join(repoRoot, "seeds") })
+    .find((o) => o.role === "red-wide");
+  assert.equal(outcome?.action, "appended", "no matching heading → append; nothing can be lost");
+  assert.equal(outcome?.backupPath, undefined, "nothing was excised, so no .bak is warranted");
+
+  const after = readFileSync(installedPath("red-wide"), "utf8");
+  assert.ok(after.startsWith(legacy.trimEnd()), "every legacy byte survives, in order");
+  assert.ok(resolveAgentProtocol("red-wide", { forgeHome: home, seedsDir: join(repoRoot, "seeds") }).ok);
+});
+
+test("integ FG-654: all nine covered roles are converged by ONE publish pass, and each is then dispatchable", () => {
+  assert.equal(installSeeds().status, 0);
+  for (const role of COVERED_ROLES) {
+    // Every role starts legacy: unmarked, with the operator's own prose on it.
+    writeFileSync(installedPath(role), `# ${role}\n\n## Operator note for ${role}\n\nmine\n`);
+  }
+  const outcomes = publishAgentProtocolRegions({ forgeHome: home, seedsDir: join(repoRoot, "seeds") });
+  assert.equal(outcomes.length, COVERED_ROLES.length);
+  for (const role of COVERED_ROLES) {
+    assert.equal(outcomes.find((o) => o.role === role)?.action, "appended", `${role}`);
+    const resolved = resolveAgentProtocol(role, { forgeHome: home, seedsDir: join(repoRoot, "seeds") });
+    assert.ok(resolved.ok, resolved.ok ? "" : resolved.refusal);
+    assert.ok(
+      readFileSync(installedPath(role), "utf8").includes(`## Operator note for ${role}`),
+      `${role}: the operator's prose survived adoption`,
     );
   }
 });

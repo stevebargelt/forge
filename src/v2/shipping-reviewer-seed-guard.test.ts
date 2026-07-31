@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readProtocolRegion, resolveAgentProtocol } from "./agent-protocol.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const seedPath = join(
@@ -213,4 +214,29 @@ test("shipping-reviewer CLAUDE.md: scope guard concept — check bounded to oper
     hasBoundedScope,
     "shipping-reviewer CLAUDE.md must bound the check to tickets making operator-contract claims — concept guard, survives synonym rewrites of test 6 (FG-421)",
   );
+});
+
+// ---------------------------------------------------------------------------
+// FG-654. Every assertion above reads the REPO seed. They were all green on a
+// host whose dispatched shipping-reviewer read a 40-lines-behind copy out of
+// $FORGE_HOME — that gap is exactly how FG-654 shipped. The repo-side assertions
+// stay (they pin the source); these pin the copy that is actually dispatched.
+// ---------------------------------------------------------------------------
+
+test("FG-654: the shipping-reviewer's INSTALLED protocol region is current", () => {
+  const resolved = resolveAgentProtocol("shipping-reviewer");
+  assert.ok(resolved.ok, resolved.ok ? "" : resolved.refusal);
+});
+
+test("FG-654: the rubric this file guards lives INSIDE the Forge-owned region, so upgrade converges it", () => {
+  const read = readProtocolRegion(readFileSync(seedPath, "utf8"));
+  assert.equal(read.kind, "fenced");
+  if (read.kind === "fenced") {
+    const region = read.region.toLowerCase();
+    // If the operator-contract rubric ever moved OUTSIDE the fence it would become
+    // retained-forever operator prose, and this whole guard would go back to pinning
+    // bytes no host is required to have.
+    assert.ok(region.includes("operator-contract") || region.includes("operator contract"));
+    assert.ok(region.includes("done-audit") || region.includes("done audit"));
+  }
 });

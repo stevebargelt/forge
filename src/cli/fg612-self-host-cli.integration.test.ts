@@ -48,6 +48,12 @@ type Run = { status: number | null; stdout: string; stderr: string; home: string
  *  developer's shell can never make a refusal case pass vacuously. */
 function runForge(args: string[], env: Record<string, string> = {}, root = REPO_ROOT): Run {
   const home = temp("forge-fg612-home-");
+  // FG-654: this throwaway home stands in for a HOST, so it is provisioned with the agent
+  // seeds exactly as install-seeds.sh provisions one. Without them the covered roles these
+  // cases dispatch (`engineer`, `red-wide`) are refused at compose for a missing Forge
+  // protocol region — a true refusal, but not the one any case here is about, and it would
+  // preempt the seed-generation stop `assertReachedDispatch` relies on.
+  cpSync(join(root, "seeds", "agents"), join(home, "agents"), { recursive: true });
   const child = spawnSync(join(root, "bin", "forge"), args, {
     encoding: "utf8",
     cwd: home,

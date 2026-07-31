@@ -13,6 +13,7 @@ import {
   type GitPullOutcome, type NpmInstallOutcome, type AssetInstallOutcome, type RoutingPolicyOutcome,
   type ProjectInitOutcome, type SlashCommandsOutcome, type ImageRebuildOutcome, type ReleaseCheckOutcome,
   type AuthoredRetentionOutcome, type UpgradeStepOutcomes, type SeedGenerationOutcome,
+  type AgentProtocolOutcome,
   parseRetainedLine,
 } from "./upgrade.js";
 import { assetRoot } from "../../v2/asset-root.js";
@@ -378,12 +379,24 @@ const SEED_GENERATION: Record<SeedGenerationOutcome, Verdict> = {
   failed: "unresolved",
 };
 
+// FG-654: `needs-repair` is the ONE manual rung — a seed whose marker fence is
+// ambiguous is left untouched and that host cannot review until it is repaired, so it
+// must be unresolved rather than a clean upgrade that quietly bricked the lifecycle.
+const AGENT_PROTOCOL: Record<AgentProtocolOutcome, Verdict> = {
+  published: "resolved",
+  "already-current": "resolved",
+  "would-publish": "resolved",
+  "not-run": "resolved",
+  "needs-repair": "unresolved",
+};
+
 const EXPECTED: { [K in keyof UpgradeStepOutcomes]: Record<UpgradeStepOutcomes[K], Verdict> } = {
   gitPull: GIT_PULL,
   npmInstall: NPM_INSTALL,
   assetInstall: ASSET_INSTALL,
   seedGeneration: SEED_GENERATION,
   authoredRetention: AUTHORED_RETENTION,
+  agentProtocol: AGENT_PROTOCOL,
   routingPolicy: ROUTING_POLICY,
   projectInit: PROJECT_INIT,
   slashCommands: SLASH_COMMANDS,
@@ -407,7 +420,7 @@ test("FG-577 (criterion 10): EVERY variant of EVERY step is classified — no va
     }
   }
   // Guards against the tables silently emptying and the loop vacuously passing.
-  assert.equal(checked, 8 + 7 + 4 + 4 + 3 + 5 + 8 + 5 + 5 + 4);
+  assert.equal(checked, 8 + 7 + 4 + 4 + 3 + 5 + 5 + 8 + 5 + 5 + 4);
 });
 
 test("FG-577 (criterion 10): unresolvedReasons enumerates the outcomes object's own keys", () => {
@@ -416,7 +429,7 @@ test("FG-577 (criterion 10): unresolvedReasons enumerates the outcomes object's 
   const allClean: UpgradeStepOutcomes = {
     gitPull: "pulled", npmInstall: "installed", assetInstall: "installed",
     seedGeneration: "published",
-    authoredRetention: "none", routingPolicy: "recompiled", projectInit: "refreshed",
+    authoredRetention: "none", agentProtocol: "published", routingPolicy: "recompiled", projectInit: "refreshed",
     slashCommands: "installed", imageRebuild: "ran", releaseCheck: "ran",
   };
   assert.deepEqual(unresolvedReasons(allClean), []);
@@ -431,10 +444,11 @@ test("FG-577 (criterion 10): unresolvedReasons enumerates the outcomes object's 
     seedGeneration: "failed",
     // FG-578: `retained` sits in the all-broken row deliberately — even here it
     // must not contribute a reason. The count below is the assertion.
-    authoredRetention: "retained", routingPolicy: "failed", projectInit: "needs-markers",
+    authoredRetention: "retained", agentProtocol: "needs-repair", routingPolicy: "failed", projectInit: "needs-markers",
     slashCommands: "user-override", imageRebuild: "failed", releaseCheck: "failed",
   };
-  assert.equal(unresolvedReasons(allBroken).length, 8);
+  // FG-654 adds a ninth: `needs-repair` is unresolved on its own terms.
+  assert.equal(unresolvedReasons(allBroken).length, 9);
 });
 
 test("FG-577 (cell 3): a dirty dev checkout is NOT an operator-requested skip", () => {

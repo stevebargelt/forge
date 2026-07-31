@@ -16,7 +16,9 @@ import { join } from "node:path";
 import { buildReviewLoopDeps, resolveReviewedTipTrust } from "./review-loop.js";
 import { resolveCommitRange } from "../../v2/review-loop.js";
 import { invoke, type InvokeArgs, type InvokeResult } from "../../v2/invoke.js";
-import { fixBatchBundleDir } from "../../util/paths.js";
+import { fixBatchBundleDir, taskDir } from "../../util/paths.js";
+import { readTaskManifest } from "../../v2/task-manifest.js";
+import type { LensProtocolRecord } from "../../v2/review-discovery.js";
 import { renderFixBatchEnvelope, verifyMaterializedEnvelope, verifyMaterializedPayload } from "../../store/fix-batches.js";
 import { getRun } from "../../store/runs.js";
 import type { CoordinatorDeps, FixerContext, LensContext, RecheckContextIn } from "../../v2/review-run.js";
@@ -367,6 +369,18 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
 
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => invokeFn(args);
 
+  // FG-654: read the dispatched task's RECORDED protocol stamp back off its manifest.
+  // Two independent artifacts by design — the manifest is authoritative (invariant 6),
+  // the ledger row below is an index of it (invariant 20). If they ever disagree, that
+  // drift is stated, never reconciled here. Undefined for a refused/never-dispatched
+  // task (no manifest is written) and for pre-FG-654 manifests.
+  const dispatchedProtocol = (res: InvokeResult): { protocol: LensProtocolRecord } | undefined => {
+    if (!res.taskId || !res.runId) return undefined;
+    const stamp = readTaskManifest(taskDir(res.runId, res.taskId))?.agentProtocol;
+    if (!stamp) return undefined;
+    return { protocol: { role: stamp.role, sha256: stamp.sha256, taskId: res.taskId } };
+  };
+
   return {
     headSha,
 
@@ -477,8 +491,15 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
         role: lensCtx.role,
         dispatched: res.status === "complete",
         ...(failureKind !== undefined ? { failureKind } : {}),
+        // FG-654: a protocol refusal's failureKind is the bare `stale_protocol` literal,
+        // so the message that names both shas and the remedy would otherwise be dropped.
+        ...(res.failureKind !== undefined && res.error !== undefined ? { detail: res.error } : {}),
         result: res.result,
         taskId: res.taskId,
+        // FG-654: WHICH protocol generation this lens actually ran under, read back off
+        // the dispatched task's manifest — the ledger INDEXES the manifest, it does not
+        // restate it. Per DISPATCH, so two lenses on two generations record two shas.
+        ...(dispatchedProtocol(res) ?? {}),
       };
     },
 
@@ -521,11 +542,16 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
         runTitle: `review batch fix ${fixCtx.batch.id} — ${ctx.ticketId}`,
         ...(ctx.route !== undefined ? { routeKey: ctx.route } : {}),
       });
+      const stamp = dispatchedProtocol(res);
       return {
         ok: res.status === "complete",
         taskId: res.taskId,
         result: res.result,
         ...(res.error !== undefined ? { error: res.error } : {}),
+        // FG-654: the fixer's own protocol generation — the `engineer` seed carries the
+        // batch-remediation rules, and a fixer running a seed that never had them is the
+        // measured cause of "named its verification tests but never executed them".
+        ...(stamp ? { protocol: { role: stamp.protocol.role, sha256: stamp.protocol.sha256 } } : {}),
       };
     },
 

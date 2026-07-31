@@ -31,6 +31,13 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { assetRoot } from "./asset-root.js";
 import { authoredCategories, autoRefreshableCategories } from "./seed-drift.js";
+import {
+  COVERED_ROLES,
+  PROTOCOL_START_MARKER,
+  PROTOCOL_END_MARKER,
+  readProtocolRegion,
+} from "./agent-protocol.js";
+import { RISK_LENSES, lensRole } from "./review-contract.js";
 
 const INSTALL_SCRIPT = join(assetRoot(), "scripts", "install-seeds.sh");
 
@@ -101,5 +108,83 @@ test("FG-578: the installer routes every seed category through the ownership pol
       new RegExp(`(install_category|seed_install_file)[^\\n]*\\s${category}\\s*$`, "m"),
       `${category} must be installed THROUGH the ownership-aware writer`,
     );
+  }
+});
+
+// ─── FG-654: the single-publisher gate, and the coverage agreement ──────────
+//
+// Same prior art, one layer down. FG-654 splits an agent seed into an
+// operator-authored outside and a Forge-owned, marker-fenced protocol region. The
+// installer keeps its whole-file, category-granular AUTHORED_EXEMPT and performs NO
+// region surgery — the region has exactly ONE publisher and it is TypeScript. Two
+// publishers with conflicting ownership rules is the hazard; this is the gate.
+
+test("FG-654: install-seeds.sh performs NO marker or region surgery — the region has one publisher, in TypeScript", () => {
+  const script = readFileSync(INSTALL_SCRIPT, "utf8");
+  // Non-comment lines only: the header comment POINTS AT the TS publisher on purpose,
+  // so the next reader is not misled by its "agents are wholly the operator's" framing.
+  const code = script
+    .split("\n")
+    .filter((l) => !/^\s*#/.test(l))
+    .join("\n");
+  for (const marker of [PROTOCOL_START_MARKER, PROTOCOL_END_MARKER, "forge:agent-protocol"]) {
+    assert.ok(
+      !code.includes(marker),
+      `install-seeds.sh must not touch '${marker}' — the protocol region's single publisher is src/v2/agent-protocol.ts`,
+    );
+  }
+  // And the exemption itself is untouched: still whole-file, still these three.
+  assert.deepEqual(parseAuthoredExempt(script), ["agents", "constraints", "raci"]);
+});
+
+test("FG-654: every review-lifecycle dispatch role in the REAL dispatch sites is in COVERED_ROLES", () => {
+  // Parsed out of the artifacts, not restated here — a hand-maintained registry is the
+  // same defect class as a seed that drifts silently. The coordinator family dispatches
+  // through review-wiring's `agentRole:` literals; the shipping-reviewer is a
+  // workflow-declared red, a different family, and is named in runNext.
+  const wiring = readFileSync(join(assetRoot(), "src", "cli", "commands", "review-wiring.ts"), "utf8");
+  const dispatched = new Set<string>();
+  for (const m of wiring.matchAll(/agentRole:\s*"([a-z0-9-]+)"/g)) dispatched.add(m[1]!);
+  // The lens dispatch passes `agentRole: lensCtx.role` (the five lens roles, resolved
+  // from review-contract's own map), so those come from the derived half.
+  assert.ok(
+    /agentRole:\s*lensCtx\.role/.test(wiring),
+    "review-wiring must still dispatch lenses by their contract-resolved role — if this moved, the derived half of COVERED_ROLES is no longer anchored to a real dispatch site",
+  );
+  for (const lens of RISK_LENSES) dispatched.add(lensRole(lens));
+
+  const runNext = readFileSync(join(assetRoot(), "src", "v2", "runNext.ts"), "utf8");
+  assert.ok(
+    /"shipping-reviewer"/.test(runNext),
+    "runNext must still name the shipping-reviewer — it is the workflow-red dispatch family",
+  );
+  dispatched.add("shipping-reviewer");
+
+  for (const role of dispatched) {
+    assert.ok(
+      COVERED_ROLES.includes(role),
+      `${role} is dispatched by the review lifecycle but is NOT in COVERED_ROLES — it would run whatever protocol its seed happens to carry, unchecked and unrecorded`,
+    );
+  }
+  // Guard against the vacuous pass.
+  assert.ok(dispatched.size >= 9, `expected at least the nine covered roles, parsed ${dispatched.size}`);
+});
+
+test("FG-654: every covered role's REPO seed carries exactly one balanced, non-empty fence", () => {
+  for (const role of COVERED_ROLES) {
+    const path = join(assetRoot(), "seeds", "agents", role, "CLAUDE.md");
+    const text = readFileSync(path, "utf8");
+    assert.equal(
+      text.split(PROTOCOL_START_MARKER).length - 1,
+      1,
+      `${role}: exactly one ${PROTOCOL_START_MARKER}`,
+    );
+    assert.equal(text.split(PROTOCOL_END_MARKER).length - 1, 1, `${role}: exactly one ${PROTOCOL_END_MARKER}`);
+    const read = readProtocolRegion(text);
+    assert.equal(read.kind, "fenced", `${role}: the fence must be balanced`);
+    if (read.kind === "fenced") {
+      assert.ok(read.region.length > 0, `${role}: the region must not be empty`);
+      assert.ok(read.region.startsWith("## "), `${role}: the region must start at a section heading`);
+    }
   }
 });
