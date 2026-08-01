@@ -21,8 +21,8 @@ import {
   protocolRelPath,
   resolveAgentProtocol,
 } from "./agent-protocol.js";
-import { RISK_LENSES, lensRole } from "./review-contract.js";
-import { publishTestGeneration } from "./seed-generation.testkit.js";
+import { REVIEW_DISPATCH_ROLES, RISK_LENSES, lensRole } from "./review-contract.js";
+import { fixtureReleaseSeeds, publishTestGeneration } from "./seed-generation.testkit.js";
 import type { SeedGeneration } from "./seed-generation.js";
 import { assetRoot } from "./asset-root.js";
 
@@ -46,8 +46,10 @@ function withGeneration<T>(
 
 // ─── ACCEPTANCE 5: all nine roles, BY ITERATION ─────────────────────────────
 
-test("FG-654: COVERED_ROLES is DERIVED from the lens map plus the four non-lens roles", () => {
+test("FG-654: COVERED_ROLES is DERIVED from the lens map plus the dispatch registry", () => {
   assert.deepEqual(COVERED_ROLES, [...RISK_LENSES.map(lensRole), ...NON_LENS_COVERED_ROLES]);
+  // The non-lens half is the dispatch registry's own values — not a list beside it.
+  assert.deepEqual(NON_LENS_COVERED_ROLES, Object.values(REVIEW_DISPATCH_ROLES));
   assert.equal(COVERED_ROLES.length, 9, "five risk lenses plus four non-lens lifecycle roles");
   assert.equal(new Set(COVERED_ROLES).size, 9, "no duplicates");
   for (const role of COVERED_ROLES) assert.ok(isCoveredRole(role), `${role} must read as covered`);
@@ -143,6 +145,62 @@ test("FG-654: bytes that do not match the manifest refuse as protocol_tampered, 
   }, { engineer: PROTOCOL });
 });
 
+// ─── the STALE arm: the generation is whole, but it is not THIS release's ───
+
+test("FG-654: a manifest-consistent generation BEHIND the executing release refuses as stale", () => {
+  withGeneration(({ gen }) => {
+    // The generation is internally perfect — its bytes match its own manifest — and it
+    // is exactly what a host that installed a newer forge without `forge upgrade` holds.
+    const newerRelease = mkdtempSync(join(tmpdir(), "forge-fg654-newer-"));
+    try {
+      mkdirSync(join(newerRelease, "agent-protocols"), { recursive: true });
+      writeFileSync(join(newerRelease, protocolRelPath("engineer")), "## The review protocol\n\nTHE NEW CONTRACT\n");
+      const resolved = resolveAgentProtocol("engineer", gen, newerRelease);
+      assert.equal(resolved.ok, false, "an old generation must not dispatch under the new release");
+      if (!resolved.ok) {
+        assert.equal(resolved.reason, "stale");
+        assert.ok(resolved.refusal.includes("engineer"), "names the role");
+        assert.ok(resolved.refusal.includes("forge upgrade"), "names the remedy");
+        assert.ok(resolved.refusal.includes(gen.root), "names the generation it read");
+      }
+      // …and the same generation against the release it WAS published from is current.
+      const current = resolveAgentProtocol("engineer", gen, fixtureReleaseSeeds(gen));
+      assert.ok(current.ok, current.ok ? "" : current.refusal);
+    } finally {
+      rmSync(newerRelease, { recursive: true, force: true });
+    }
+  }, { engineer: PROTOCOL });
+});
+
+test("FG-654: a release carrying no protocol for the role is NOT measured stale — publication refuses that", () => {
+  withGeneration(({ gen }) => {
+    const emptyRelease = mkdtempSync(join(tmpdir(), "forge-fg654-empty-"));
+    try {
+      const resolved = resolveAgentProtocol("engineer", gen, emptyRelease);
+      assert.ok(resolved.ok, resolved.ok ? "" : resolved.refusal);
+    } finally {
+      rmSync(emptyRelease, { recursive: true, force: true });
+    }
+  }, { engineer: PROTOCOL });
+});
+
+test("FG-654: doctor's inspection carries the same stale arm, by role", () => {
+  withGeneration(({ home, gen }) => {
+    const newerRelease = mkdtempSync(join(tmpdir(), "forge-fg654-newer-inspect-"));
+    try {
+      mkdirSync(join(newerRelease, "agent-protocols"), { recursive: true });
+      for (const role of COVERED_ROLES) {
+        writeFileSync(join(newerRelease, protocolRelPath(role)), `## ${role}\n\nTHE NEW CONTRACT\n`);
+      }
+      const stale = inspectAgentProtocols({ generation: gen, forgeHome: home, releaseSeedsDir: newerRelease });
+      assert.equal(stale.filter((e) => e.ok).length, 0, "every covered role reads stale, not just the first");
+      assert.ok(stale[0]?.detail.includes("BEHIND the forge"));
+    } finally {
+      rmSync(newerRelease, { recursive: true, force: true });
+    }
+  });
+});
+
 // ─── ACCEPTANCE 6 (unit half): detect and refuse, never migrate ─────────────
 
 test("FG-654: the marker detector fires on the leftover fence, in either half", () => {
@@ -206,10 +264,15 @@ test("FG-654: assertAgentProtocolCurrent returns ok with NO text and NO stamp fo
 test("FG-654: an embedded legacy protocol refuses by name with MANUAL remediation, no rewrite", () => {
   withGeneration(({ gen }) => {
     const path = "/home/op/.forge/agents/engineer/CLAUDE.md";
-    const out = assertAgentProtocolCurrent("engineer", gen, {
-      path,
-      text: `# engineer\n\n${LEGACY_PROTOCOL_MARKER_PREFIX}start -->\n\nold\n\n${LEGACY_PROTOCOL_MARKER_PREFIX}end -->\n`,
-    });
+    const out = assertAgentProtocolCurrent(
+      "engineer",
+      gen,
+      {
+        path,
+        text: `# engineer\n\n${LEGACY_PROTOCOL_MARKER_PREFIX}start -->\n\nold\n\n${LEGACY_PROTOCOL_MARKER_PREFIX}end -->\n`,
+      },
+      fixtureReleaseSeeds(gen),
+    );
     assert.equal(out.ok, false);
     if (!out.ok) {
       assert.equal(out.role, "engineer");
@@ -224,7 +287,7 @@ test("FG-654: an embedded legacy protocol refuses by name with MANUAL remediatio
 
 test("FG-654: an ABSENT operator seed is not a refusal — the contract comes from the generation", () => {
   withGeneration(({ gen }) => {
-    const out = assertAgentProtocolCurrent("engineer", gen, null);
+    const out = assertAgentProtocolCurrent("engineer", gen, null, fixtureReleaseSeeds(gen));
     assert.ok(out.ok, out.ok ? "" : out.refusal);
     if (out.ok) {
       assert.equal(out.text, PROTOCOL);

@@ -2325,3 +2325,55 @@ test("FG-654 RF-26: a re-run discovery preserves agent_protocol records alongsid
     "the record is still filtered out of the reviewer-authored outcomes",
   );
 });
+
+// FG-654 RF-12 at the discovery site: THE WINDOW IS THE FAN-OUT ITSELF.
+//
+// runDiscovery awaits one CONTAINER PER LENS between reading the review and writing the
+// column back. A survivor set derived from the pre-fan-out snapshot silently erases every
+// acceptance and every protocol receipt another process committed during those minutes —
+// the operator's `forge review accept-lens` and the coordinator's own fix-batch receipt
+// are both live in that window. Here the concurrent writer runs INSIDE a lens dispatch,
+// which is exactly where the real one lands.
+test("FG-654 RF-12: a record committed DURING the lens fan-out survives the discovery write", async () => {
+  let wrote = false;
+  const h = harness({
+    findingsPerLens: 1,
+    dispatchLens: (ctx) => {
+      if (!wrote) {
+        wrote = true;
+        recordAgentProtocol(REVIEW, {
+          role: "engineer",
+          sha256: "a".repeat(64),
+          taskId: "task-mid-flight",
+          stage: "fix_batch",
+        });
+        const accepted = recordLensAcceptance(REVIEW, {
+          lens: "backend",
+          missingEvidence: "the backend lens never reviewed the ledger write",
+          rationale: "accepted mid-flight by the operator",
+          operator: true,
+        });
+        assert.ok(accepted.ok, accepted.ok ? "" : accepted.refusal);
+      }
+      return {
+        lens: ctx.lens,
+        role: ctx.role,
+        dispatched: true,
+        taskId: `task-${ctx.lens}`,
+        result: { outcome: "pass", findings: [] },
+      };
+    },
+  });
+
+  await drive(h.deps, "discover");
+
+  const review = getReview(REVIEW)!;
+  assert.equal(
+    agentProtocolRecordsOf(review).length,
+    1,
+    "the receipt of a dispatch that really ran was erased by the discovery write",
+  );
+  assert.equal(agentProtocolRecordsOf(review)[0]?.taskId, "task-mid-flight");
+  assert.equal(lensAcceptancesOf(review).length, 1, "the operator's acceptance was erased by the discovery write");
+  assert.ok(lensOutcomeRecordsOf(review).length > 0, "and discovery still recorded its own outcomes");
+});

@@ -51,6 +51,38 @@ export function lensForRole(role: string): RiskLens | undefined {
   return RISK_LENSES.find((l) => LENS_ROLE[l] === role);
 }
 
+/** THE REVIEW LIFECYCLE'S NON-LENS DISPATCH REGISTRY (FG-654).
+ *
+ *  These four roles cannot be derived from the lens map, so this is where each one is
+ *  SPELLED — and every dispatch site READS its role from here rather than restating a
+ *  literal: review-wiring's fixer/docs/rechecker dispatches, and runNext's recognition of
+ *  the workflow-declared shipping reviewer. It is therefore the registry the dispatch uses,
+ *  not a second copy of it, which is what lets COVERED_ROLES be derived rather than
+ *  hand-maintained — `fg578-ownership-agreement.test.ts` holds the "no bare literal at a
+ *  dispatch site" half. */
+export const REVIEW_DISPATCH_ROLES = {
+  /** review-wiring.ts dispatchFixer — the fix-batch remediation dispatch. */
+  fixBatch: "engineer",
+  /** review-wiring.ts dispatchDocs — the docs reconciliation phase. */
+  docs: "documentation-maintainer",
+  /** review-wiring.ts dispatchRechecker — the evidence recheck. */
+  recheck: "review-rechecker",
+  /** the workflow-declared red runNext dispatches at the authoritative shipping gate. */
+  shippingReview: "shipping-reviewer",
+} as const;
+
+/** Every role the review lifecycle dispatches: the lens half DERIVED from the lens role
+ *  map above, the non-lens half DERIVED from the dispatch registry beside it. Each is one
+ *  the Forge-owned agent protocol covers (FG-654). */
+export const COVERED_ROLES: readonly string[] = [
+  ...RISK_LENSES.map((l) => lensRole(l)),
+  ...Object.values(REVIEW_DISPATCH_ROLES),
+];
+
+export function isCoveredRole(role: string): boolean {
+  return COVERED_ROLES.includes(role);
+}
+
 /** FG-640 / scenario #16: RISK-TARGETED SELECTION. A migrated workflow still DECLARES every
  *  discipline red it might need — the declaration is the menu, not the panel — and the
  *  plan-gate-approved contract picks from it.

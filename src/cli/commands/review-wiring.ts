@@ -24,6 +24,7 @@ import { getRun } from "../../store/runs.js";
 import type { CoordinatorDeps, FixerContext, LensContext, RecheckContextIn } from "../../v2/review-run.js";
 import type { VerificationEntry } from "../../v2/review-coordinator.js";
 import type { ContractProposal, LensWidening, RiskLens } from "../../v2/review-contract.js";
+import { REVIEW_DISPATCH_ROLES } from "../../v2/review-contract.js";
 import type { AcClaim } from "../../v2/review-evidence.js";
 import type { DocsCloseout } from "../../v2/review-shipping.js";
 import type { Review } from "../../store/reviews.js";
@@ -536,7 +537,7 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
       const envelopeVerified = verifyMaterializedEnvelope(fixCtx.batch.id, envelope);
       if (!envelopeVerified.ok) return { ok: false, taskId: "", error: envelopeVerified.refusal };
       const res = await dispatch({
-        agentRole: "engineer",
+        agentRole: REVIEW_DISPATCH_ROLES.fixBatch,
         task: fixerTask(fixCtx),
         taskFiles: {
           [`${FIX_BATCH_TASK_SUBDIR}/payload.json`]: payload,
@@ -768,7 +769,7 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
 
     dispatchDocs: async ({ review, candidateSha }: { review: Review; candidateSha: string }) => {
       const res = await dispatch({
-        agentRole: "documentation-maintainer",
+        agentRole: REVIEW_DISPATCH_ROLES.docs,
         task:
           `Reconcile durable operator-facing docs against the change under review ` +
           `(${review.ticketId ?? "(no ticket)"}) at candidate ${candidateSha}. This phase runs BEFORE final ` +
@@ -787,7 +788,7 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
 
     dispatchRechecker: async (recheckCtx: RecheckContextIn) => {
       const res = await dispatch({
-        agentRole: "review-rechecker",
+        agentRole: REVIEW_DISPATCH_ROLES.recheck,
         task: recheckerTask(recheckCtx),
         projectDir: ctx.projectDir,
         readOnlyProject: true,

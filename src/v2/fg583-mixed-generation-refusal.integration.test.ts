@@ -27,6 +27,7 @@ import {
   resolveSeedGeneration,
   inspectSeedInstall,
 } from "./seed-generation.js";
+import { stageAgentProtocols } from "./seed-generation.testkit.js";
 import { loadWorkflow } from "./loader.js";
 
 // A minimal Zod-valid workflow whose `description` we vary per "release", so a
@@ -67,6 +68,9 @@ function buildAssetRoot(base: string, release: string, workflowNames: string[]):
   mkdirSync(rt, { recursive: true });
   for (const n of workflowNames) writeFileSync(join(wf, `${n}.yml`), workflowYaml(n, release));
   writeFileSync(join(rt, "claude-apikey.yml"), runtimeYaml("claude-apikey"));
+  // FG-654: publication refuses a release carrying no protocol for a covered role, so a
+  // disposable release stages the real ones.
+  stageAgentProtocols(join(root, "seeds"));
   return root;
 }
 

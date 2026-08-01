@@ -12,10 +12,18 @@
 // Not a test file (no `.test.ts`) — imported by tests. Every caller passes a disposable
 // home; the real ~/.forge is never touched.
 
-import { mkdtempSync, mkdirSync, writeFileSync, cpSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, cpSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { publishSeedGeneration, resolveSeedGeneration, type SeedGeneration } from "./seed-generation.js";
+import {
+  GENERATION_MANIFEST_NAME,
+  protocolRelPath,
+  publishSeedGeneration,
+  resolveSeedGeneration,
+  type SeedGeneration,
+  type SeedGenerationManifest,
+} from "./seed-generation.js";
+import { COVERED_ROLES } from "./review-contract.js";
 import { assetRoot } from "./asset-root.js";
 
 export type TestGenerationFixture = {
@@ -25,9 +33,13 @@ export type TestGenerationFixture = {
   runtimes?: Record<string, string>;
   /** FG-654: the forge-owned agent protocols. DEFAULTS to the executing release's real
    *  `seeds/agent-protocols/`, because a generation published without them refuses every
-   *  covered-role dispatch — so the useful default is the one production has. Pass
-   *  `false` to publish a generation with NO protocols, or a role→bytes map to publish
-   *  tampered/partial ones; both are for the negative tests that need exactly that. */
+   *  covered-role dispatch — so the useful default is the one production has.
+   *
+   *  `false` yields a generation carrying NO protocol, and a role→bytes map one carrying
+   *  ONLY those roles (with those bytes). Since RF-13 publication REFUSES to create either
+   *  — a release that cannot dispatch a covered role is unpublishable — both are produced
+   *  by publishing complete and then stripping the published generation, which is the
+   *  shape a host that published under an older, laxer release actually has. */
   agentProtocols?: false | Record<string, string>;
   /** host RACI to compile the derived routing policy from (optional). */
   raciPath?: string;
@@ -44,19 +56,44 @@ function withMd(name: string): string {
   return name.endsWith(".md") ? name : `${name}.md`;
 }
 
-/** Stage `seeds/agent-protocols/` into a disposable asset root. */
-function stageAgentProtocols(seeds: string, spec: false | Record<string, string> | undefined): void {
-  if (spec === false) return;
+/** Stage `seeds/agent-protocols/` into a disposable asset root: always the executing
+ *  release's real set (publication requires every covered role), with the fixture's own
+ *  bytes written over the roles it names. */
+export function stageAgentProtocols(seeds: string, spec?: false | Record<string, string>): void {
   const dst = join(seeds, "agent-protocols");
   mkdirSync(dst, { recursive: true });
-  if (spec === undefined) {
-    const src = join(assetRoot(), "seeds", "agent-protocols");
-    if (existsSync(src)) cpSync(src, dst, { recursive: true });
-    return;
-  }
+  const src = join(assetRoot(), "seeds", "agent-protocols");
+  if (existsSync(src)) cpSync(src, dst, { recursive: true });
+  if (spec === false || spec === undefined) return;
   for (const [role, body] of Object.entries(spec)) {
     writeFileSync(join(dst, withMd(role)), body);
   }
+}
+
+/** Remove from a PUBLISHED generation every covered role's protocol the fixture did not
+ *  ask for — file and manifest entry together, so the result reads as a generation that
+ *  never carried it rather than as a torn one. */
+function stripUnnamedProtocols(home: string, gen: SeedGeneration, spec: false | Record<string, string>): SeedGeneration {
+  const keep = new Set(spec === false ? [] : Object.keys(spec));
+  const manifestPath = join(gen.root, GENERATION_MANIFEST_NAME);
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as SeedGenerationManifest;
+  for (const role of COVERED_ROLES) {
+    if (keep.has(role)) continue;
+    const rel = protocolRelPath(role);
+    rmSync(join(gen.root, rel), { force: true });
+    delete manifest.files[rel];
+  }
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  const stripped = resolveSeedGeneration(home);
+  if (!stripped) throw new Error("publishTestGeneration: generation did not resolve after stripping protocols");
+  return stripped;
+}
+
+/** The seeds/ dir of the disposable release a test generation was published from — the
+ *  staleness baseline for a fixture whose protocol bytes are not the executing release's
+ *  (FG-654: resolution refuses a generation that is behind the running forge). */
+export function fixtureReleaseSeeds(gen: SeedGeneration): string {
+  return join(gen.manifest.sourceAssetRoot, "seeds");
 }
 
 /** Stage + atomically publish a COMPLETE seed generation into `home` from fixture
@@ -84,7 +121,7 @@ export function publishTestGeneration(home: string, fixture: TestGenerationFixtu
   });
   const gen = resolveSeedGeneration(home);
   if (!gen) throw new Error("publishTestGeneration: generation did not resolve after publish");
-  return gen;
+  return fixture.agentProtocols === undefined ? gen : stripUnnamedProtocols(home, gen, fixture.agentProtocols);
 }
 
 /** Migration convenience for tests that already write the flat $FORGE_HOME/{workflows,
@@ -117,5 +154,5 @@ export function publishFlatAsGeneration(
   });
   const gen = resolveSeedGeneration(home);
   if (!gen) throw new Error("publishFlatAsGeneration: generation did not resolve after publish");
-  return gen;
+  return opts.agentProtocols === undefined ? gen : stripUnnamedProtocols(home, gen, opts.agentProtocols);
 }

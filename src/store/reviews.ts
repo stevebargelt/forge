@@ -722,6 +722,28 @@ export function lensOutcomeRecordsOf(review: Review): unknown[] {
   return lensRecordsOf(review).filter((r) => !isLensAcceptance(r) && !isAgentProtocolRecord(r));
 }
 
+/** Replace the reviewer-authored OUTCOMES of `lens_outcomes_json`, preserving everything
+ *  in the column that is not one — operator acceptances and agent_protocol receipts.
+ *
+ *  Discovery's writer, and the third participant in this column's read-modify-write. Its
+ *  read is inside the write lock for the same reason the other two are, and here the window
+ *  is the widest in the system: the caller awaits one CONTAINER PER LENS between deciding to
+ *  run discovery and having outcomes to write, so an operator acceptance or a fix-batch
+ *  protocol receipt landing in those minutes would be erased by a snapshot taken before the
+ *  fan-out. What survives is read HERE, after the dispatches, under BEGIN IMMEDIATE. */
+export function replaceLensOutcomes(reviewId: string, outcomes: unknown[]): Review {
+  const at = nowIso();
+  writeTransaction(() => {
+    const fresh = getReview(reviewId);
+    if (!fresh) return;
+    const surviving = lensRecordsOf(fresh).filter((r) => isLensAcceptance(r) || isAgentProtocolRecord(r));
+    getDb()
+      .prepare(`UPDATE reviews SET lens_outcomes_json = ?, updated_at = ? WHERE id = ?`)
+      .run(JSON.stringify([...surviving, ...outcomes]), at, reviewId);
+  });
+  return getReview(reviewId) as Review;
+}
+
 export type LensAcceptanceRequest = {
   lens: string;
   missingEvidence: string;
@@ -825,15 +847,29 @@ export function recordLensAcceptance(reviewId: string, req: LensAcceptanceReques
     acceptedBy: "operator",
     acceptedAt: at,
   };
-  const records = [...lensRecordsOf(review), acceptance];
-
-  writeTransaction(() => {
+  // THE ARRAY IS BUILT FROM A READ TAKEN INSIDE THE WRITE LOCK. Everything above is
+  // validation of the operator's request against a snapshot — none of it decides which
+  // records survive. That decision is a whole-column read-modify-write on
+  // `lens_outcomes_json`, which has three writers (this one, recordAgentProtocol, and
+  // discovery's replaceLensOutcomes) in as many processes: building the replacement array
+  // from the entry read would blindly overwrite an agent_protocol receipt or a discovery
+  // outcome committed in the window between. writeTransaction is BEGIN IMMEDIATE, so the
+  // read and the write are one atomic step.
+  const refusal = writeTransaction<string | null>(() => {
+    const fresh = getReview(reviewId);
+    if (!fresh) return `review ${reviewId} disappeared before the acceptance could be written. Nothing was written.`;
+    if (fresh.lensOutcomes !== undefined && !Array.isArray(fresh.lensOutcomes)) {
+      return (
+        `review ${reviewId}'s recorded lens outcomes are not a list, so an acceptance cannot be appended ` +
+        `without overwriting them. Nothing was written.`
+      );
+    }
     getDb()
       .prepare(`UPDATE reviews SET lens_outcomes_json = ?, updated_at = ? WHERE id = ?`)
-      .run(JSON.stringify(records), at, reviewId);
+      .run(JSON.stringify([...lensRecordsOf(fresh), acceptance]), at, reviewId);
     logEvent("review.lens_accepted", {
-      runId: review.runId,
-      taskId: review.subjectTaskId,
+      runId: fresh.runId,
+      taskId: fresh.subjectTaskId,
       payload: {
         reviewId,
         lens: req.lens,
@@ -844,7 +880,9 @@ export function recordLensAcceptance(reviewId: string, req: LensAcceptanceReques
         acceptedAt: at,
       },
     });
+    return null;
   });
+  if (refusal !== null) return { ok: false, refusal };
 
   return { ok: true, review: getReview(reviewId) as Review, acceptance };
 }

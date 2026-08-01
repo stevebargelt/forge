@@ -40,6 +40,10 @@ export type ComposeArgs = {
    *  LoadContext — `undefined` resolves the live seed pointer, `null` means none
    *  anchored (and a covered role then refuses). */
   seedGeneration?: SeedGeneration | null;
+  /** FG-654: the executing release's `seeds/`, the baseline a generation is measured
+   *  STALE against. Defaults to the tree this forge runs from; a test that publishes a
+   *  disposable release passes that release's seeds. */
+  releaseSeedsDir?: string;
 };
 
 /** FG-654: composing is no longer unconditionally possible. THIS is the one seam every
@@ -70,14 +74,16 @@ export function composeSystemPrompt(args: ComposeArgs): ComposeResult {
   const installedSeedText = existsSync(baseFile) ? readFileSync(baseFile, "utf8") : null;
 
   // For a role the review lifecycle dispatches, the Forge-owned protocol must resolve
-  // manifest-consistently out of the published generation before anything is composed,
-  // and the operator's file must not still carry an embedded copy of it.
+  // manifest-consistently out of the published generation — and be the EXECUTING
+  // release's, not an older one's — before anything is composed, and the operator's file
+  // must not still carry an embedded copy of it.
   const generation =
     args.seedGeneration !== undefined ? args.seedGeneration : resolveSeedGeneration();
   const protocol = assertAgentProtocolCurrent(
     args.role,
     generation,
     installedSeedText === null ? null : { path: baseFile, text: installedSeedText },
+    args.releaseSeedsDir,
   );
   if (!protocol.ok) return { ok: false, refusal: protocol.refusal, role: args.role };
 

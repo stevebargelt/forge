@@ -33,6 +33,7 @@ import { fileURLToPath } from "node:url";
 import { invoke, dispatchInvokeTask, createInvokeRun } from "./invoke.js";
 import { composeSystemPrompt } from "./compose.js";
 import { publishFlatAsGeneration, publishTestGeneration } from "./seed-generation.testkit.js";
+import { publishSeedGeneration, resolveSeedGeneration } from "./seed-generation.js";
 import { readTaskManifest } from "./task-manifest.js";
 import { getTask, insertTask } from "../store/tasks.js";
 import { newTaskId } from "../util/ids.js";
@@ -254,6 +255,55 @@ test("integ FG-654: a generation whose protocol bytes were TAMPERED refuses the 
   assert.equal(execCalls, 0);
   assert.ok((res.error ?? "").includes("provenance manifest"));
   assert.ok(!existsSync(taskDir(res.runId, res.taskId)), "a refused dispatch mints no task dir");
+});
+
+test("integ FG-654: a generation BEHIND the executing release refuses at dispatch, before any container", async () => {
+  // The generation is published, complete and manifest-consistent — its engineer protocol
+  // is simply an OLDER release's bytes, which is exactly the state of a host that took a
+  // new forge (or re-ran install-seeds.sh) without `forge upgrade`. Nothing else measures
+  // it: there is no flat ~/.forge/agent-protocols for the drift detector to compare.
+  setupHome({ engineer: "## The review protocol\n\nAN OLDER RELEASE'S CONTRACT\n" });
+  const res = await invoke({
+    agentRole: "engineer",
+    task: "fix the batch",
+    projectDir,
+    dockerExec: countingExec(),
+  });
+  assert.equal(res.status, "failed", "an old protocol must not dispatch under the running forge");
+  assert.equal(res.failureKind, STALE_PROTOCOL_FAILURE_KIND);
+  assert.equal(execCalls, 0, "a refused dispatch never reaches a container");
+  assert.ok((res.error ?? "").includes("BEHIND the forge"), "the refusal names WHY, not just that");
+  assert.ok((res.error ?? "").includes("forge upgrade"), "and names the remedy");
+  assert.ok(!existsSync(taskDir(res.runId, res.taskId)), "a refused dispatch mints no task dir");
+});
+
+test("integ FG-654: a release with no protocol for a covered role CANNOT publish a generation", async () => {
+  // RF-13's mechanism: the staging loop manifests only what it finds, so without this gate
+  // such a release publishes a generation that is COMPLETE by construction — upgrade reports
+  // it published and exits 0 — while that role refuses at every dispatch.
+  const home = tmp("fg654-pubgate-home-");
+  const release = tmp("fg654-pubgate-release-");
+  const seeds = join(release, "seeds");
+  mkdirSync(join(seeds, "workflows"), { recursive: true });
+  mkdirSync(join(seeds, "runtimes"), { recursive: true });
+  writeFileSync(join(seeds, "runtimes", "claude.yml"), RUNTIME_STUB);
+  mkdirSync(join(seeds, "agent-protocols"), { recursive: true });
+  const dropped = "review-rechecker";
+  for (const role of COVERED_ROLES) {
+    if (role === dropped) continue;
+    writeFileSync(join(seeds, protocolRelPath(role)), `## ${role}\n\ncontract\n`);
+  }
+
+  assert.throws(
+    () => publishSeedGeneration({ home, assetsDir: release, trustedAssetRoot: () => release }),
+    (e: Error) => {
+      assert.ok(e.message.includes(dropped), "the refusal names the role the release cannot dispatch");
+      assert.ok(e.message.includes(`seeds/${protocolRelPath(dropped)}`), "and the file it expected");
+      assert.ok(/refusing to publish/.test(e.message));
+      return true;
+    },
+  );
+  assert.equal(resolveSeedGeneration(home), null, "nothing was published — no generation to dispatch under");
 });
 
 test("integ FG-654: an UNCOVERED role dispatches exactly as before, and carries no stamp", async () => {

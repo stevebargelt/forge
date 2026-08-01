@@ -36,8 +36,8 @@ import {
   findingsForReview,
   getReview,
   ingestFindings,
-  agentProtocolRecordsOf,
   lensAcceptancesOf,
+  replaceLensOutcomes,
   invalidateResolutionsForCandidate,
   recordAgentProtocol,
   recordDisposition,
@@ -420,15 +420,16 @@ async function runDiscovery(reviewId: string, transition: Transition, deps: Coor
   );
   const outcomes: LensOutcome[] = dispatches.map(assessLens);
   // The acceptances survive a re-dispatch: they are operator decisions about this confirmed
-  // candidate, and a retry that crashes again must not silently erase one.
-  const acceptances = lensAcceptancesOf(review);
-  // RF-26: the agent_protocol records survive too, for exactly the same reason. They are
-  // statements about fix_batch / docs / recheck dispatches that ALREADY HAPPENED, and
-  // `lens_outcomes_json` is replaced wholesale here — so without this a discovery pass
-  // silently erases the receipt of every non-lens dispatch that preceded it.
-  updateReview(reviewId, {
-    lensOutcomes: [...acceptances, ...agentProtocolRecordsOf(review), ...outcomes],
-  });
+  // candidate, and a retry that crashes again must not silently erase one. RF-26: the
+  // agent_protocol records survive too — they are statements about fix_batch / docs /
+  // recheck dispatches that ALREADY HAPPENED.
+  //
+  // WHAT SURVIVES IS READ AFTER THE FAN-OUT, INSIDE THE WRITE LOCK (RF-12's mechanism at
+  // this site). `review` above was read before one container per lens was awaited: deriving
+  // the survivors from it would silently erase any acceptance or protocol receipt another
+  // process committed during those minutes.
+  const updated = replaceLensOutcomes(reviewId, outcomes);
+  const acceptances = lensAcceptancesOf(updated);
 
   const completeness = assessDiscoveryCompleteness(lenses, outcomes, {
     acceptances,

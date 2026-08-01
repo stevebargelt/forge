@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { composeSystemPrompt } from "./compose.js";
 import { createHash } from "node:crypto";
 import { COVERED_ROLES } from "./agent-protocol.js";
-import { publishTestGeneration } from "./seed-generation.testkit.js";
+import { fixtureReleaseSeeds, publishTestGeneration } from "./seed-generation.testkit.js";
 import type { SeedGeneration } from "./seed-generation.js";
 import type { Workflow } from "./schema.js";
 
@@ -198,7 +198,7 @@ function protocolFixture(role: string, protocols?: false | Record<string, string
 
 function composeFor(
   role: string,
-  fx: { agentDir: string; constraintsDir: string },
+  fx: { agentDir: string; constraintsDir: string; gen: SeedGeneration },
   seedGeneration: SeedGeneration | null,
 ) {
   return composeSystemPrompt({
@@ -208,6 +208,9 @@ function composeFor(
     agentDir: fx.agentDir,
     constraintsDir: fx.constraintsDir,
     seedGeneration,
+    // The fixture's protocol bytes ARE its release's, so the staleness baseline is the
+    // disposable release it published from rather than the tree the test runs in.
+    releaseSeedsDir: fixtureReleaseSeeds(fx.gen),
   });
 }
 

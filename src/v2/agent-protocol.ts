@@ -21,41 +21,36 @@
 // whole-operator-file hash would make every customizing host permanently stale; a
 // composed-prompt hash varies with step id / workflow / runTags / the constraint filter,
 // so it is unique per task and answers nothing.
+//
+// AND CURRENCY IS A SECOND, DIFFERENT QUESTION. The manifest only proves a generation is
+// internally whole; it cannot say the generation is THIS release's. So resolution also
+// measures the generation's protocol bytes against the executing release's seeds/ — the
+// `stale` refusal — because a host that installed a newer forge without `forge upgrade`
+// is precisely the silent old-contract dispatch FG-654 exists to prevent.
 
 import { existsSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { RISK_LENSES, lensRole } from "./review-contract.js";
-import { resolveSeedGeneration, type SeedGeneration } from "./seed-generation.js";
+import { COVERED_ROLES, REVIEW_DISPATCH_ROLES, isCoveredRole } from "./review-contract.js";
+import { protocolRelPath, resolveSeedGeneration, type SeedGeneration } from "./seed-generation.js";
+import { assetRoot } from "./asset-root.js";
 import { noCompleteGenerationError } from "./loader.js";
 
 /** The failure kind a refused dispatch carries, and the discovery vocabulary word for
  *  the same fact. One literal so the dispatch seam and the ledger cannot drift. */
 export const STALE_PROTOCOL_FAILURE_KIND = "stale_protocol";
 
-/** The four review-lifecycle dispatch roles that are NOT one of the five risk lenses.
- *  They cannot be derived from a type, so `fg578-ownership-agreement.test.ts` parses the
- *  real dispatch sites (review-wiring.ts's `agentRole:` literals, runNext.ts's
- *  shipping-reviewer literal) and fails naming any role missing from here. */
-export const NON_LENS_COVERED_ROLES = [
-  "engineer",
-  "documentation-maintainer",
-  "review-rechecker",
-  "shipping-reviewer",
-] as const;
+/** The non-lens half of the coverage, DERIVED from the dispatch registry the dispatch
+ *  sites themselves read (review-contract's REVIEW_DISPATCH_ROLES) rather than restated
+ *  here — a second list a future dispatch role could be added to without is the same
+ *  defect class as a seed that drifts silently. */
+export const NON_LENS_COVERED_ROLES: readonly string[] = Object.values(REVIEW_DISPATCH_ROLES);
 
-/** Every role the review lifecycle dispatches. The lens half is DERIVED from
- *  review-contract's own map — a hand-copied lens list is the same defect class as a
- *  seed that drifts silently. */
-export const COVERED_ROLES: readonly string[] = [
-  ...RISK_LENSES.map((l) => lensRole(l)),
-  ...NON_LENS_COVERED_ROLES,
-];
-
-export function isCoveredRole(role: string): boolean {
-  return COVERED_ROLES.includes(role);
-}
+// Coverage and the generation-relative protocol path are owned by the registry and the
+// generation respectively; re-exported so this module stays the one import for the
+// dispatch gate's callers.
+export { COVERED_ROLES, isCoveredRole, protocolRelPath };
 
 function forgeHomeDefault(): string {
   return process.env.FORGE_HOME ?? join(homedir(), ".forge");
@@ -67,9 +62,12 @@ export function installedSeedPath(role: string, forgeHome: string = forgeHomeDef
   return join(forgeHome, "agents", role, "CLAUDE.md");
 }
 
-/** The one place the generation-relative protocol path is spelled. */
-export function protocolRelPath(role: string): string {
-  return `agent-protocols/${role}.md`;
+/** The EXECUTING release's protocol source — the baseline a published generation is
+ *  measured STALE against. A parameter everywhere below so the measure is pure over its
+ *  filesystem inputs (the same shape detectSeedDrift's baseline has), never an ambient
+ *  read a test has to defeat. */
+export function releaseSeedsDirDefault(): string {
+  return join(assetRoot(), "seeds");
 }
 
 // ─── resolution against the published generation ────────────────────────────
@@ -88,15 +86,25 @@ export type ProtocolResolution =
   | {
       ok: false;
       role: string;
-      reason: "no_generation" | "protocol_missing" | "protocol_tampered";
+      reason: "no_generation" | "protocol_missing" | "protocol_tampered" | "stale";
       refusal: string;
     };
 
 const REMEDY = "run `forge upgrade` to publish a complete seed generation, then retry";
 
 /** Resolve a covered role's protocol out of ONE published generation. The file is read
- *  once; the bytes read are the bytes hashed and the bytes returned. */
-export function resolveAgentProtocol(role: string, gen: SeedGeneration | null): ProtocolResolution {
+ *  once; the bytes read are the bytes hashed and the bytes returned.
+ *
+ *  `releaseSeedsDir` is the EXECUTING release's `seeds/`. Manifest consistency alone only
+ *  proves a generation is internally whole — it says nothing about WHICH release published
+ *  it, so a host whose generation predates the running forge would compose an old review
+ *  protocol silently (the flat-copy drift measure that covers workflows/runtimes has no
+ *  agent-protocols entry to catch it). That is the `stale` arm. */
+export function resolveAgentProtocol(
+  role: string,
+  gen: SeedGeneration | null,
+  releaseSeedsDir: string = releaseSeedsDirDefault(),
+): ProtocolResolution {
   // Deferring to the loader's wording on purpose: a host that has never upgraded is
   // missing ONE precondition, and it should read one refusal naming it, not two.
   if (!gen) {
@@ -137,6 +145,33 @@ export function resolveAgentProtocol(role: string, gen: SeedGeneration | null): 
         `Remedy: ${REMEDY}.`,
     };
   }
+
+  // STALE: manifest-consistent, but not this release's protocol. Reached by installing a
+  // newer forge (or re-running install-seeds.sh, which writes no protocol at all) without
+  // `forge upgrade`: the seed pointer still names the older generation, every covered role
+  // composes the older release's contract, and nothing else would say so.
+  //
+  // A release that carries no protocol for this role is NOT measured here — there is no
+  // baseline to measure against, and that release is refused at PUBLICATION instead
+  // (publishSeedGeneration), which is where a missing source belongs.
+  const releaseFile = join(releaseSeedsDir, rel);
+  if (existsSync(releaseFile)) {
+    const releaseSha = createHash("sha256").update(readFileSync(releaseFile)).digest("hex");
+    if (releaseSha !== sha256) {
+      return {
+        ok: false,
+        role,
+        reason: "stale",
+        refusal:
+          `agent role "${role}"'s protocol in the published seed generation (${gen.root}) is BEHIND the forge ` +
+          `that is executing: the generation carries ${sha256.slice(0, 12)}, this release ships ` +
+          `${releaseSha.slice(0, 12)} at ${releaseFile}. The generation was published by another release and ` +
+          `nothing has republished it, so dispatching would judge this reviewer's output by a contract the ` +
+          `running forge no longer states. Remedy: ${REMEDY}.`,
+      };
+    }
+  }
+
   return { ok: true, role, text: bytes.toString("utf8"), sha256, source };
 }
 
@@ -207,9 +242,10 @@ export function assertAgentProtocolCurrent(
   // to edit is not actionable — and re-deriving the path from $FORGE_HOME would name a
   // different file than the one compose actually read.
   installedSeed: { path: string; text: string } | null,
+  releaseSeedsDir: string = releaseSeedsDirDefault(),
 ): ProtocolAssertion {
   if (!isCoveredRole(role)) return { ok: true };
-  const resolved = resolveAgentProtocol(role, gen);
+  const resolved = resolveAgentProtocol(role, gen, releaseSeedsDir);
   if (!resolved.ok) return { ok: false, role, refusal: resolved.refusal };
 
   if (installedSeed !== null) {
@@ -249,6 +285,8 @@ export type ProtocolInspectOptions = {
   /** `undefined` resolves the live seed pointer; `null` means none anchored. */
   generation?: SeedGeneration | null;
   forgeHome?: string;
+  /** the executing release's `seeds/` — the staleness baseline. */
+  releaseSeedsDir?: string;
 };
 
 export type ProtocolInspection = { role: string; ok: boolean; detail: string };
@@ -259,8 +297,9 @@ export type ProtocolInspection = { role: string; ok: boolean; detail: string };
 export function inspectAgentProtocols(opts: ProtocolInspectOptions = {}): ProtocolInspection[] {
   const forgeHome = opts.forgeHome ?? forgeHomeDefault();
   const gen = opts.generation !== undefined ? opts.generation : resolveSeedGeneration(forgeHome);
+  const releaseSeedsDir = opts.releaseSeedsDir ?? releaseSeedsDirDefault();
   return COVERED_ROLES.map((role) => {
-    const resolved = resolveAgentProtocol(role, gen);
+    const resolved = resolveAgentProtocol(role, gen, releaseSeedsDir);
     if (!resolved.ok) return { role, ok: false, detail: resolved.refusal };
     const installed = installedSeedPath(role, forgeHome);
     if (existsSync(installed)) {

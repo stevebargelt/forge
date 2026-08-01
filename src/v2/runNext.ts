@@ -48,7 +48,7 @@ import { crashPoint } from "./crash-points.js";
 import { assembleReviewerContextPacket } from "./reviewer-context-packet.js";
 import { validateVerdict } from "./validate-findings.js";
 import { gradeFindings } from "./review-quality.js";
-import { selectRedsForContract } from "./review-contract.js";
+import { REVIEW_DISPATCH_ROLES, selectRedsForContract } from "./review-contract.js";
 import { approvedReviewContract } from "./review-gate.js";
 import { logEvent, eventsForTask } from "../store/events.js";
 import { taskDir, integrationWorktreeDir, cloneDir } from "../util/paths.js";
@@ -1293,7 +1293,7 @@ async function dispatchReds(args: {
   const spec = buildRedSpec(args.workflow, allTasks);
 
   // FG-381: detect shipping-reviewer and assemble context packet ONCE before dispatch.
-  const shippingReviewerRed = args.step.reds.find((r) => r.agent === "shipping-reviewer");
+  const shippingReviewerRed = args.step.reds.find((r) => r.agent === REVIEW_DISPATCH_ROLES.shippingReview);
   let reviewerContextPacket: ReviewerContextPacket | undefined;
   let shippingReviewerPreFailed = false;
   if (shippingReviewerRed) {
@@ -1356,7 +1356,7 @@ async function dispatchReds(args: {
   // Exclude shipping-reviewer from launches when it was pre-failed above.
   const redsToLaunch =
     shippingReviewerRed && reviewerContextPacket === undefined
-      ? lensSelection.selected.filter((r) => r.agent !== "shipping-reviewer")
+      ? lensSelection.selected.filter((r) => r.agent !== REVIEW_DISPATCH_ROLES.shippingReview)
       : lensSelection.selected;
 
   const launches = redsToLaunch.map((red) =>
@@ -1374,7 +1374,7 @@ async function dispatchReds(args: {
       dockerExec: args.dockerExec,
       getModelPolicy: args.getModelPolicy,
       seedGeneration: args.seedGeneration,
-      reviewerContextPacket: red.agent === "shipping-reviewer" ? reviewerContextPacket : undefined,
+      reviewerContextPacket: red.agent === REVIEW_DISPATCH_ROLES.shippingReview ? reviewerContextPacket : undefined,
     }),
   );
   const results = await Promise.all(launches);
@@ -1506,7 +1506,7 @@ async function dispatchReds(args: {
         ],
       };
     } else if (
-      r.red.agent === "shipping-reviewer" &&
+      r.red.agent === REVIEW_DISPATCH_ROLES.shippingReview &&
       authoritativeGate &&
       finalVerdict.verdict === "inconclusive"
     ) {
@@ -1840,7 +1840,7 @@ async function runOneRed(args: {
   // other success-path reaps in this file — a reap failure here is the same
   // silent, unsweepable leak.
   reapContainerAndReportFailure(result.containerName, redCompleted, args.runId, redTaskId);
-  if (args.red.agent === "shipping-reviewer") {
+  if (args.red.agent === REVIEW_DISPATCH_ROLES.shippingReview) {
     return {
       red: args.red,
       redTaskId,
