@@ -26,7 +26,9 @@
 // internally whole; it cannot say the generation is THIS release's. So resolution also
 // measures the generation's protocol bytes against the executing release's seeds/ — the
 // `stale` refusal — because a host that installed a newer forge without `forge upgrade`
-// is precisely the silent old-contract dispatch FG-654 exists to prevent.
+// is precisely the silent old-contract dispatch FG-654 exists to prevent. That measure is
+// CLOSED: a release carrying no protocol for a covered role leaves no baseline at all, and
+// a currency question nobody can answer is refused rather than skipped.
 
 import { existsSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -86,7 +88,7 @@ export type ProtocolResolution =
   | {
       ok: false;
       role: string;
-      reason: "no_generation" | "protocol_missing" | "protocol_tampered" | "stale";
+      reason: "no_generation" | "protocol_missing" | "protocol_tampered" | "stale" | "release_protocol_missing";
       refusal: string;
     };
 
@@ -151,25 +153,39 @@ export function resolveAgentProtocol(
   // `forge upgrade`: the seed pointer still names the older generation, every covered role
   // composes the older release's contract, and nothing else would say so.
   //
-  // A release that carries no protocol for this role is NOT measured here — there is no
-  // baseline to measure against, and that release is refused at PUBLICATION instead
-  // (publishSeedGeneration), which is where a missing source belongs.
+  // A release carrying no protocol for this role leaves NO BASELINE, and skipping the
+  // measure would fail open on exactly the state this arm exists to catch: publication
+  // only refuses CREATING such a generation, so a host that published under a complete
+  // release and then installed a damaged one keeps dispatching the older contract while
+  // doctor calls it current. There is nothing left to vouch for the generation, so the
+  // dispatch is refused rather than run under a currency nobody can measure.
   const releaseFile = join(releaseSeedsDir, rel);
-  if (existsSync(releaseFile)) {
-    const releaseSha = createHash("sha256").update(readFileSync(releaseFile)).digest("hex");
-    if (releaseSha !== sha256) {
-      return {
-        ok: false,
-        role,
-        reason: "stale",
-        refusal:
-          `agent role "${role}"'s protocol in the published seed generation (${gen.root}) is BEHIND the forge ` +
-          `that is executing: the generation carries ${sha256.slice(0, 12)}, this release ships ` +
-          `${releaseSha.slice(0, 12)} at ${releaseFile}. The generation was published by another release and ` +
-          `nothing has republished it, so dispatching would judge this reviewer's output by a contract the ` +
-          `running forge no longer states. Remedy: ${REMEDY}.`,
-      };
-    }
+  if (!existsSync(releaseFile)) {
+    return {
+      ok: false,
+      role,
+      reason: "release_protocol_missing",
+      refusal:
+        `agent role "${role}" is covered by the Forge-owned review protocol, but the forge that is EXECUTING ` +
+        `carries no ${rel} at ${releaseFile}. The published generation (${gen.root}) may have been published by ` +
+        `an entirely different release and there is no baseline left to measure it against, so dispatching would ` +
+        `run this reviewer under a contract the running forge cannot vouch for. \`forge upgrade\` does not repair ` +
+        `this — publication refuses the same missing file. Remedy: reinstall the release.`,
+    };
+  }
+  const releaseSha = createHash("sha256").update(readFileSync(releaseFile)).digest("hex");
+  if (releaseSha !== sha256) {
+    return {
+      ok: false,
+      role,
+      reason: "stale",
+      refusal:
+        `agent role "${role}"'s protocol in the published seed generation (${gen.root}) is BEHIND the forge ` +
+        `that is executing: the generation carries ${sha256.slice(0, 12)}, this release ships ` +
+        `${releaseSha.slice(0, 12)} at ${releaseFile}. The generation was published by another release and ` +
+        `nothing has republished it, so dispatching would judge this reviewer's output by a contract the ` +
+        `running forge no longer states. Remedy: ${REMEDY}.`,
+    };
   }
 
   return { ok: true, role, text: bytes.toString("utf8"), sha256, source };

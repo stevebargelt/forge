@@ -8,7 +8,8 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   COVERED_ROLES,
   LEGACY_PROTOCOL_MARKER_PREFIX,
@@ -172,14 +173,35 @@ test("FG-654: a manifest-consistent generation BEHIND the executing release refu
   }, { engineer: PROTOCOL });
 });
 
-test("FG-654: a release carrying no protocol for the role is NOT measured stale — publication refuses that", () => {
-  withGeneration(({ gen }) => {
-    const emptyRelease = mkdtempSync(join(tmpdir(), "forge-fg654-empty-"));
+// RF-15: THE STALE MEASURE MUST NOT FAIL OPEN WHEN THERE IS NO BASELINE.
+//
+// The reachable state: a host publishes under release A (protocol present), then installs
+// release B whose `seeds/agent-protocols/<role>.md` is absent. Publication refuses B, so
+// nothing republishes and A's generation stays selected and manifest-consistent — exactly
+// the silent old-contract dispatch this ticket exists to prevent. Delegating the case to
+// publication covers only the generation B would have CREATED, never the one already there.
+test("FG-654 RF-15: a release carrying no protocol for the role REFUSES — the currency measure is closed", () => {
+  withGeneration(({ home, gen }) => {
+    const damagedRelease = mkdtempSync(join(tmpdir(), "forge-fg654-empty-"));
     try {
-      const resolved = resolveAgentProtocol("engineer", gen, emptyRelease);
-      assert.ok(resolved.ok, resolved.ok ? "" : resolved.refusal);
+      const resolved = resolveAgentProtocol("engineer", gen, damagedRelease);
+      assert.equal(resolved.ok, false, "with no baseline the generation's currency is unknowable, not fine");
+      if (!resolved.ok) {
+        assert.equal(resolved.reason, "release_protocol_missing");
+        assert.ok(resolved.refusal.includes("engineer"), "names the role");
+        assert.ok(resolved.refusal.includes(join(damagedRelease, protocolRelPath("engineer"))), "names the file it looked for");
+        assert.ok(/reinstall the release/i.test(resolved.refusal), "names the remedy that actually repairs it");
+      }
+
+      // The dispatch seam refuses on the same state — before any container exists…
+      const dispatch = assertAgentProtocolCurrent("engineer", gen, null, damagedRelease);
+      assert.equal(dispatch.ok, false, "the gate must refuse, not compose an unmeasurable contract");
+
+      // …and doctor cannot report the host healthy while every covered role would refuse.
+      const inspected = inspectAgentProtocols({ generation: gen, forgeHome: home, releaseSeedsDir: damagedRelease });
+      assert.equal(inspected.filter((e) => e.ok).length, 0, "doctor must not read a damaged release as current");
     } finally {
-      rmSync(emptyRelease, { recursive: true, force: true });
+      rmSync(damagedRelease, { recursive: true, force: true });
     }
   }, { engineer: PROTOCOL });
 });
@@ -321,4 +343,95 @@ test("FG-654: inspectAgentProtocols reports one entry per covered role, and name
 
 test("FG-654: the failure-kind literal is the one word the dispatch seam and the ledger share", () => {
   assert.equal(STALE_PROTOCOL_FAILURE_KIND, "stale_protocol");
+});
+
+// ─── the durable docs describe what SHIPPED ─────────────────────────────────
+//
+// Nothing generates these documents from the code, and they are what a maintainer
+// consults to interpret a refusal or a recorded receipt. A doc still describing the
+// DELETED in-place writer — or a refusal set the code no longer has — is read as current
+// behavior, so the agreement is asserted rather than left to review.
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const invariantsDoc = (): string => readFileSync(join(repoRoot, "docs", "invariants.md"), "utf8");
+const upgradeDoc = (): string => readFileSync(join(repoRoot, "docs", "how-to-upgrade.md"), "utf8");
+
+test("FG-654 RF-5: invariant 4 states generation ownership, with no trace of the deleted in-place writer", () => {
+  const doc = invariantsDoc();
+  for (const gone of [
+    /\.forge-pre-fg654/,
+    /publishes it deterministically into the operator's file/,
+    /one marker-fenced region per seed/,
+    /adoption/i,
+  ]) {
+    assert.doesNotMatch(doc, gone, `invariants.md still describes the deleted in-place writer: ${gone}`);
+  }
+  assert.match(doc, /it does not live in the operator's file at all/, "…and states where the protocol DOES live");
+  assert.match(doc, /seeds\/agent-protocols\/<role>\.md/, "…naming the forge-owned seed category");
+  assert.match(doc, /STALE \(manifest-consistent, but not the executing release's bytes/, "…and the stale refusal");
+  // Forge writing an operator-owned file is the invariant itself, so it is stated whole.
+  assert.match(doc, /Forge NEVER writes an operator-owned `~\/\.forge\/agents\/<role>\/CLAUDE\.md`/);
+});
+
+test("FG-654 RF-8: invariant 6 describes the receipt the manifest actually carries", () => {
+  const doc = invariantsDoc();
+  assert.doesNotMatch(
+    doc,
+    /content hash of the Forge-owned region in the seed/,
+    "invariant 6 still describes the region hash of an operator-owned file",
+  );
+  assert.match(doc, /sha256 of the WHOLE Forge-owned protocol file/, "the identity the stamp actually digests");
+  assert.match(doc, /path inside the resolved seed generation/, "…and the source it actually names");
+  // The manifest's own doc comment is the other half of this agreement.
+  const manifest = readFileSync(join(repoRoot, "src", "v2", "task-manifest.ts"), "utf8");
+  assert.match(manifest, /whole protocol file's bytes/);
+  assert.match(manifest, /path inside the resolved seed generation/);
+});
+
+test("FG-654 RF-7: the upgrade doc documents the embedded-legacy refusal most hosts will hit", () => {
+  const doc = upgradeDoc();
+  assert.match(doc, /### The embedded-legacy-protocol refusal/, "the state gets its own operator-facing section");
+  assert.match(doc, /`forge upgrade` will not fix this for you/, "…and says plainly that upgrade does not repair it");
+  assert.match(doc, /delete the marker-fenced region \(markers included\)/, "…with the manual repair spelled out");
+  // The doctor paragraph must not enumerate generation states alone: protocol state exits
+  // non-zero too, and a reader who stops at "only a complete generation is healthy" is
+  // told the opposite of what a legacy-carrying host will see.
+  const doctorPara = doc.split("\n").find((l) => l.includes("Only a **complete published generation** is healthy"));
+  assert.ok(doctorPara, "the doctor paragraph must still exist");
+  assert.match(doctorPara!, /Forge-owned agent protocol/, "…and must say protocol state is part of the verdict");
+  assert.match(doctorPara!, /still embedded in your own agent seed/, "…naming the state upgrade does not repair");
+});
+
+test("FG-654 RF-14: the documented refusal-state count matches the table, which matches the code", () => {
+  const doc = upgradeDoc();
+  const lines = doc.split("\n");
+  const introIdx = lines.findIndex((l) => l.includes("REFUSED at dispatch"));
+  assert.ok(introIdx > 0, "the dispatch-refusal table intro must still exist");
+  const claimed = /in (four|five|six|seven|eight) states/.exec(lines[introIdx]!);
+  assert.ok(claimed, `the intro must still state a count: ${lines[introIdx]}`);
+  const words: Record<string, number> = { four: 4, five: 5, six: 6, seven: 7, eight: 8 };
+
+  let rows = 0;
+  for (let i = introIdx + 1; i < lines.length; i++) {
+    const line = lines[i]!.trim();
+    if (line === "") continue;
+    if (!line.startsWith("|")) break;
+    if (/^\|\s*State\s*\|/.test(line) || /^\|\s*-+/.test(line.replace(/\s/g, " "))) continue;
+    rows++;
+  }
+  assert.equal(words[claimed[1]!], rows, "the prose count and the table's rows must agree");
+
+  // …and the table is the code's refusal set: every resolution reason plus the embedded
+  // legacy arm, which lives in assertAgentProtocolCurrent rather than the union.
+  const source = readFileSync(join(repoRoot, "src", "v2", "agent-protocol.ts"), "utf8");
+  const union = /reason:\s*("[a-z_]+"(?:\s*\|\s*"[a-z_]+")+)/.exec(source);
+  assert.ok(union, "the refusal union must still be a literal union — update this guard if it moved");
+  const reasons = union[1]!.match(/"[a-z_]+"/g) ?? [];
+  assert.equal(rows, reasons.length + 1, "one table row per refusal reason, plus the embedded-legacy arm");
+
+  // The publishing-side paragraph makes no ordinal claim of its own — the drift RF-14
+  // reported was exactly an ordinal that stopped matching the table above it.
+  const publishing = lines.find((l) => l.includes("on the publishing side rather than the dispatching one"));
+  assert.ok(publishing, "the publishing-side refusal must still be documented");
+  assert.doesNotMatch(publishing!, /A (fourth|fifth|sixth|seventh) state/, "no ordinal to drift out of date");
 });

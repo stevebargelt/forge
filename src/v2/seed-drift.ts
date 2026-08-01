@@ -220,7 +220,8 @@ export function renderProtocolDrift(report: ProtocolDriftReport): string {
   lines.push("  Every role above is one the review lifecycle DISPATCHES, and each is refused at dispatch by name");
   lines.push("  until its protocol resolves — a stale reviewer produces plausible output in the wrong shape rather");
   lines.push("  than failing loudly. Your own prose in ~/.forge/agents/ is never rewritten by the repair.");
-  lines.push("  Fix: forge upgrade.");
+  lines.push("  Fix: forge upgrade — except where the detail above names another repair (an embedded copy is");
+  lines.push("  yours to delete; a release carrying no protocol for the role is reinstalled, not republished).");
   return lines.join("\n");
 }
 
