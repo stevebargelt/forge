@@ -52,7 +52,7 @@ Read each finding's `reachability` and pick your evidence kind accordingly. The 
       "evidence_kind": "regression_test",
       "evidence": {
         "kind": "regression_test",
-        "test_name": "the test name as the runner prints it",
+        "test_name": "the test name(s) exactly as the runner prints them, bare; join several with '; '",
         "test_file": "src/store/reviews.test.ts",
         "runner_output": "the runner lines showing THAT test executed"
       },
@@ -74,9 +74,13 @@ The four `evidence` shapes, each field required:
 - `{"kind": "regression_test", "test_name", "runner_output"}` — plus optional `test_file`, `environment_blocked`, `alternate_lane: {lane, candidate_sha, executed_assertion, runner_output}`
 - `{"kind": "replayed_reproduction", "command", "output"}`
 - `{"kind": "anchored_verification", "file", "line", "fact", "verification_step": …}` — the step is ONE of two shapes:
-  - a test step, `{"ran", "runner_output"}`, held to the same per-test identity a cited regression test is;
+  - a test step, `{"ran", "runner_output"}`, held to the same per-test identity a cited regression test is. `ran` names ONE OR MORE tests: prefer the array form, `["first test name", "second test name"]`; the `"; "`-joined string is still accepted and is split on that separator;
   - a non-test step (typecheck, curl, script), `{"command", "output", "exit_status"}` — the exit status is the execution record, so it is required and must be `0`.
 - `{"kind": "bounded_inspection", "inspection", "limitation"}`
+
+**Name ONE OR MORE tests — and EVERY one of them must have EXECUTED.** One finding is often covered by several tests, so cite all of them rather than picking one: a test step's `ran` takes an array (preferred — it removes the delimiter guess at the source) or the `"; "`-joined string, which the host splits on that separator. A cited regression test's `test_name` and an alternate lane's `executed_assertion` are strings, so `"; "` is how those name several. **Naming more does not lower the bar.** Every named test must appear EXECUTED in the runner output you attach; one member that skipped, failed, or never appeared refuses the whole claim exactly as it would on its own — a passing majority establishes nothing about the missing one — and the refusal names WHICH member failed the check, not the list you already had. Failure still dominates: a red member refuses even when a sibling only skipped. An array member is taken literally and never re-split, so a test whose own name contains `"; "` must be cited as an array.
+
+**Write the BARE test name, exactly as the runner prints it.** Matching is exact and per test. `✔ the guard holds (1.6ms)` is the test `the guard holds` — the timing is stripped, and a suite qualifier matches (`reviews > the guard holds` matches `the guard holds`), but nothing else does. A substring does not match. **Do NOT annotate a name with its source file:** `the guard holds (src/v2/reviews.test.ts)` matches no line the runner printed, so a test that genuinely RAN is refused as `absent` and your evidence is lost for a formatting reason. The file belongs in `test_file`, in your `note`, or in a non-test step's `command` — never inside the name.
 
 An alternate lane's `runner_output` is REQUIRED, not optional: naming a lane resolves nothing, so the lane you point at must show the assertion executing in its own output. Same rule for `verification_step` — it names what RAN and carries that runner's own record, never prose like "I ran the typecheck". Prose that looks like a runner does not count either: a markdown bullet is not TAP, and the host parses only runner-emitted shapes. Pick the shape that matches what you ran — a `tsc` run has no TAP in it, so citing it as a test step reads as "never ran". A step whose record shows it skipped, or shows it failing, is refused exactly like a skipped or failing regression test.
 

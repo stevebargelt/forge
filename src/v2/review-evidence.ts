@@ -103,7 +103,16 @@ const ReplayedReproductionSchema = z
  *  own runner has: the command, its output, and the exit status it returned. */
 const TestStepSchema = z
   .object({
-    ran: z.string().trim().min(1),
+    /** ONE FINDING IS OFTEN COVERED BY SEVERAL TESTS, so `ran` names a LIST of test
+     *  identities (FG-657). Both shapes are accepted on purpose: the array is the honest
+     *  form — it removes the delimiter guess at the source — and is what a step should
+     *  carry going forward; the string stays because it is what the rechecker seed
+     *  documents and what every claim recorded so far was written as, and refusing those
+     *  would discard complete evidence for a formatting reason. A string is split on the
+     *  separator agents already join with. Splitting can only ever refuse MORE (a name
+     *  that genuinely contained "; " becomes two names nothing matches), never accept
+     *  more, so the gate cannot widen this way. */
+    ran: z.union([z.string().trim().min(1), z.array(z.string().trim().min(1)).min(1)]),
     runner_output: z.string().trim().min(1),
   })
   .strict();
@@ -128,7 +137,7 @@ function isCommandStep(step: ExecutedStep): step is z.infer<typeof CommandStepSc
 }
 
 function stepLabel(step: ExecutedStep): string {
-  return isCommandStep(step) ? step.command : step.ran;
+  return isCommandStep(step) ? step.command : ranTestNames(step.ran).join("; ");
 }
 
 const AnchoredVerificationSchema = z
@@ -202,10 +211,42 @@ function stripTiming(name: string): string {
  *  test the runner marked RED, and reading it as skipped is not a harmless downgrade: a
  *  skip is a gap an alternate mandatory lane may legitimately fill, while a failure at this
  *  candidate is the finding still being present and refuses before any lane is consulted.
- *  So the failure test runs BEFORE the skip test, not after it. */
-export function testExecution(runnerOutput: string, testName: string): TestExecution {
-  const wanted = testName.trim();
-  if (wanted === "") return "absent";
+ *  So the failure test runs BEFORE the skip test, not after it.
+ *
+ *  A CITED IDENTITY MAY NAME MORE THAN ONE TEST (FG-657), as an array or as the "; "-joined
+ *  string agents write. Every named test must have EXECUTED: one absent, skipped or failed
+ *  member refuses the whole claim, exactly as it does on its own. */
+export function testExecution(runnerOutput: string, ran: string | readonly string[]): TestExecution {
+  return resolveTestExecution(runnerOutput, ran).execution;
+}
+
+/** The tests a cited identity names, in the order it names them. */
+export function ranTestNames(ran: string | readonly string[]): string[] {
+  const parts = typeof ran === "string" ? ran.split(/\s*;\s*/) : ran;
+  return parts.map((p) => p.trim()).filter((p) => p !== "");
+}
+
+/** The same answer as `testExecution`, plus WHICH of the named tests produced it — so a
+ *  refusal can name the one test that failed the check instead of echoing the whole list
+ *  back at a reader who then cannot tell which member was the problem. */
+export function resolveTestExecution(
+  runnerOutput: string,
+  ran: string | readonly string[],
+): { execution: TestExecution; test: string } {
+  const names = ranTestNames(ran);
+  if (names.length === 0) return { execution: "absent", test: typeof ran === "string" ? ran.trim() : "" };
+
+  const perTest = names.map((test) => ({ test, execution: oneTestExecution(runnerOutput, test) }));
+  // Failure dominates the LIST exactly as it dominates one name's own lines: a red
+  // assertion is the finding still being present, and a sibling that merely skipped —
+  // the case an alternate lane may legitimately fill — must not mask it.
+  return (
+    perTest.find((r) => r.execution === "failed") ??
+    perTest.find((r) => r.execution !== "executed") ?? { execution: "executed", test: names.join("; ") }
+  );
+}
+
+function oneTestExecution(runnerOutput: string, wanted: string): TestExecution {
   let sawSkipped = false;
   let sawExecuted = false;
 
@@ -244,12 +285,14 @@ function checkVerificationStep(step: ExecutedStep): { ok: true } | { ok: false; 
     }
     return { ok: true };
   }
-  const execution = testExecution(step.runner_output, step.ran);
+  const named = ranTestNames(step.ran);
+  const { execution, test } = resolveTestExecution(step.runner_output, step.ran);
   if (execution === "executed") return { ok: true };
   return {
     ok: false,
     refusal:
-      `'${step.ran}', but the output it carries shows that step ` +
+      `'${test}'${named.length > 1 ? ` (one of the ${named.length} tests that step names)` : ""}` +
+      `, but the output it carries shows that step ` +
       (execution === "skipped"
         ? `SKIPPED — a skipped check is never evidence, in any lane or any evidence kind`
         : execution === "failed"
@@ -385,7 +428,7 @@ export function validateResolutionEvidence(raw: unknown, ctx: EvidenceContext): 
     };
   }
 
-  const execution = testExecution(ev.runner_output, ev.test_name);
+  const { execution, test } = resolveTestExecution(ev.runner_output, ev.test_name);
   // A RED CITED TEST IS NOT RESCUED BY ANOTHER LANE. A skip or an absence is a gap another
   // mandatory lane can fill; a failure at this candidate is the finding still being
   // present, so it refuses before the alternate-lane arm is ever consulted.
@@ -394,7 +437,7 @@ export function validateResolutionEvidence(raw: unknown, ctx: EvidenceContext): 
       ok: false,
       coverage: "not_executed",
       refusal:
-        `${ctx.findingRef}: ${ev.test_name} FAILED in the cited runner output — a failing test is never ` +
+        `${ctx.findingRef}: ${test} FAILED in the cited runner output — a failing test is never ` +
         `resolution evidence; at ${ctx.candidateSha} it is the finding still being present. Coverage is ` +
         `recorded not_executed. Nothing was resolved.`,
     };
@@ -415,16 +458,16 @@ export function validateResolutionEvidence(raw: unknown, ctx: EvidenceContext): 
       ok: true,
       kind: ev.kind,
       coverage: "executed",
-      detail: `${ev.test_name} ${execution} here, but ${lane.detail}`,
+      detail: `${test} ${execution} here, but ${lane.detail}`,
       evidence: ev,
     };
   }
 
   const why =
     execution === "skipped"
-      ? `${ev.test_name} SKIPPED in the cited runner output — a skipped test is never evidence, even when the ` +
+      ? `${test} SKIPPED in the cited runner output — a skipped test is never evidence, even when the ` +
         `enclosing suite exited green and the skip was named`
-      : `${ev.test_name} does not appear in the cited runner output at all, so it was never established to run`;
+      : `${test} does not appear in the cited runner output at all, so it was never established to run`;
 
   return {
     ok: false,
@@ -466,18 +509,18 @@ function checkAlternateLane(claim: AlternateLaneClaim | undefined, ctx: Evidence
         `lane is held to the same per-test identity the primary lane is.`,
     };
   }
-  const laneExecution = testExecution(claim.runner_output, claim.executed_assertion);
-  if (laneExecution !== "executed") {
+  const assertion = resolveTestExecution(claim.runner_output, claim.executed_assertion);
+  if (assertion.execution !== "executed") {
     return {
       ok: false,
       refusal:
-        laneExecution === "skipped"
-          ? `Alternate lane '${claim.lane}' cites '${claim.executed_assertion}', but its own output shows that ` +
+        assertion.execution === "skipped"
+          ? `Alternate lane '${claim.lane}' cites '${assertion.test}', but its own output shows that ` +
             `assertion skipped — a skip is never evidence, in any lane.`
-          : laneExecution === "failed"
-            ? `Alternate lane '${claim.lane}' cites '${claim.executed_assertion}', but its own output shows that ` +
+          : assertion.execution === "failed"
+            ? `Alternate lane '${claim.lane}' cites '${assertion.test}', but its own output shows that ` +
               `assertion FAILING — a failed check is never evidence, in any lane.`
-            : `Alternate lane '${claim.lane}' cites '${claim.executed_assertion}', but that assertion does not ` +
+            : `Alternate lane '${claim.lane}' cites '${assertion.test}', but that assertion does not ` +
               `appear in its own output at all, so the lane never established it ran.`,
     };
   }

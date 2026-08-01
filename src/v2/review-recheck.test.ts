@@ -407,3 +407,113 @@ test("FG-639: a bare RF-n ref resolves against the expected set, as an operator 
   assert.equal(r.ok, true);
   assert.equal(r.ok ? r.applications[0]?.findingRef : "", "RF-1");
 });
+
+// ─── FG-657: a multi-name citation, at the surface the ledger actually calls ──
+//
+// `validateResolutionEvidence` is where the list rule lives, but `ingestRecheck` is what
+// decides whether a finding LEAVES the ledger. These go through that path: the question is
+// not just "was the claim refused" but "what did the ledger then record" — a refusal that
+// wrote `resolved`, or wrote nothing, would be the trust gate failing open no matter how
+// correct the refusal string was.
+
+const PAIR_657 = ["the reconcile path guards a partial write", "the reconcile path retries once"];
+const PAIR_657_GREEN = [`✔ ${PAIR_657[0]} (1.2ms)`, `✔ ${PAIR_657[1]} (0.4ms)`, "ℹ pass 2", "ℹ fail 0"].join("\n");
+
+function multiNameEntry(runnerOutput: string, over: Record<string, unknown> = {}) {
+  return resolvedEntry("RF-1", {
+    evidence: {
+      kind: "regression_test",
+      test_name: PAIR_657.join("; "),
+      test_file: "src/v2/reconcile.test.ts",
+      runner_output: runnerOutput,
+      ...over,
+    },
+  });
+}
+
+function ingestOne(runnerOutput: string, over: Record<string, unknown> = {}) {
+  return ingestRecheck(output({ rechecked: [multiNameEntry(runnerOutput, over)] }), {
+    reviewId: REVIEW,
+    candidateSha: SHA,
+    expected: [finding({ ordinal: 1 })],
+  });
+}
+
+test("FG-657: a citation naming several tests, all executed, resolves the finding through the ledger", () => {
+  const r = ingestOne(PAIR_657_GREEN);
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  const [a] = r.applications;
+  assert.equal(a?.resolution, "resolved", "a complete passing citation is no longer read as absent");
+  assert.equal(a?.coverage, "executed");
+  assert.equal(a?.evidenceKind, "regression_test");
+  assert.equal(r.returnsToDisposition, false);
+});
+
+test("FG-657: one SKIPPED member is recorded inconclusive + not_executed by the ledger, never resolved", () => {
+  const r = ingestOne([`✔ ${PAIR_657[0]} (1.2ms)`, `﹣ ${PAIR_657[1]} (0ms) # SKIP no agent image`, "ℹ pass 1"].join("\n"));
+  assert.equal(r.ok, true, "the result is ingested; it is the RESOLUTION that is refused");
+  if (!r.ok) return;
+  const [a] = r.applications;
+  assert.equal(a?.resolution, "inconclusive");
+  assert.equal(a?.coverage, "not_executed", "the skip is recorded, not silently dropped");
+  assert.equal(a?.evidenceKind, undefined, "nothing is stored as validated evidence");
+  assert.match(a?.detail ?? "", /the reconcile path retries once SKIPPED/, "the ledger detail names WHICH member");
+  assert.equal(r.returnsToDisposition, true, "the finding returns to disposition");
+});
+
+test("FG-657: one FAILED member is recorded inconclusive + not_executed, and is not masked by a passing sibling", () => {
+  const r = ingestOne([`✔ ${PAIR_657[0]} (1.2ms)`, `✖ ${PAIR_657[1]} (0.4ms)`, "ℹ fail 1"].join("\n"));
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  const [a] = r.applications;
+  assert.equal(a?.resolution, "inconclusive");
+  assert.equal(a?.coverage, "not_executed");
+  assert.match(a?.detail ?? "", /the reconcile path retries once FAILED in the cited runner output/);
+  assert.match(a?.detail ?? "", /it is the finding still being present/);
+  assert.equal(r.returnsToDisposition, true);
+});
+
+test("FG-657: one ABSENT member is recorded inconclusive — a passing majority never carries the missing one", () => {
+  const r = ingestOne([`✔ ${PAIR_657[0]} (1.2ms)`, "ℹ pass 1", "ℹ fail 0"].join("\n"));
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  const [a] = r.applications;
+  assert.equal(a?.resolution, "inconclusive");
+  assert.equal(a?.coverage, "not_executed");
+  assert.match(a?.detail ?? "", /the reconcile path retries once does not appear in the cited runner output at all/);
+  assert.equal(r.returnsToDisposition, true);
+});
+
+test("FG-657: a separator-only test_name resolves nothing through the ledger either", () => {
+  const r = ingestOne(PAIR_657_GREEN, { test_name: " ; ; " });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.applications[0]?.resolution, "inconclusive", "naming no test at all is not a cheaper way past the gate");
+  assert.equal(r.applications[0]?.coverage, "not_executed");
+});
+
+test("FG-657: a finding with NO recorded reachability still gets the strictest rule, multi-name step and all", () => {
+  const r = ingestRecheck(
+    output({
+      rechecked: [
+        resolvedEntry("RF-1", {
+          evidence_kind: "anchored_verification",
+          evidence: {
+            kind: "anchored_verification",
+            file: "src/v2/reconcile.ts",
+            line: 88,
+            fact: "the partial write is guarded first",
+            verification_step: { ran: PAIR_657, runner_output: PAIR_657_GREEN },
+          },
+        }),
+      ],
+    }),
+    { reviewId: REVIEW, candidateSha: SHA, expected: [finding({ ordinal: 1, reachability: undefined })] },
+  );
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.applications[0]?.resolution, "inconclusive", "an unknown reachability is treated as demonstrated");
+  assert.match(r.applications[0]?.detail ?? "", /requires regression_test or replayed_reproduction/);
+  assert.equal(r.applications[0]?.coverage, "not_executed");
+});
