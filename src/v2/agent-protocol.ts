@@ -184,7 +184,11 @@ function regionOwnedHeadings(region: string): Set<string> {
  *  the release region does NOT carry is the operator's, nested under a Forge heading (the
  *  shape 6 of the 9 release seeds invite by using `### ` subsections themselves). Those
  *  runs are left out of the excision, so they stay in the LIVE seed rather than surviving
- *  only in the .bak. A run ends at the next sub-heading the region does own. */
+ *  only in the .bak. A run ends at the next sub-heading the region does own.
+ *
+ *  Where such a run lands is decided by the caller, and it is not free: the region is ONE
+ *  contiguous fenced block, so a run that sat BETWEEN two Forge runs cannot stay between
+ *  them. See the placement note at `insertAt`. */
 function forgeRangesIn(
   from: number,
   to: number,
@@ -279,24 +283,20 @@ export function applyProtocolRegion(existing: string, releaseRegion: string): Pr
     return { action: "appended", content: `${existing}${sep}${block}\n`, excisedChanged: false };
   }
 
-  // A PARTIAL match is ambiguous, and forge refuses it. Nothing in the file proves a
-  // heading is Forge's — a legacy Forge block carries the release region's `## ` headings
-  // as a SET, so a seed matching only some of them is at least as likely to be an operator
-  // section that happens to share a name. Excising that would delete their content with
-  // no provenance for the claim that it was ours.
-  if (matches.length < wanted.size) {
-    const missing = [...wanted].filter((h) => !seen.has(h));
-    return {
-      action: "needs-markers",
-      content: existing,
-      message:
-        `this seed carries ${matches.length} of the ${wanted.size} headings the Forge-owned protocol region ` +
-        `owns (missing: ${missing.join(", ")}), so forge cannot tell whether '${(matches[0] as Heading).line}' is a ` +
-        `legacy Forge section or your own section that shares its name — and will not delete your content on a ` +
-        `guess. Repair by hand: rename your section, or wrap the Forge sections in ` +
-        `'${PROTOCOL_START_MARKER}' / '${PROTOCOL_END_MARKER}' yourself. Nothing was written.`,
-    };
-  }
+  // A PARTIAL heading match ADOPTS, and this is deliberate (RF-16). The refusal that stood
+  // here assumed a legacy Forge block carries the release region's `## ` headings as a SET.
+  // That does not hold ACROSS releases: red-wide's five region headings landed in five
+  // separate commits between 2026-05-26 and 2026-07-30, and under FG-578 a seed is never
+  // rewritten after creation — so a proper SUBSET is exactly what the ORDINARY legacy host
+  // holds. Refusing it left that host unfenced, `forge upgrade` exiting 1, and every
+  // dispatch of the role refused `stale_protocol` with no self-service remedy.
+  //
+  // The risk that refusal aimed at — an operator section that happens to share a Forge
+  // heading's name — is real, unprovable in either direction, and handled the way every
+  // other lossy path here is: the pre-adoption `.bak` is written and NAMED in upgrade's
+  // output. A certain, universal brick is not a defensible price for a rare, recoverable
+  // collision. The genuinely ambiguous shapes still refuse above: a hand-edited fence, and
+  // a duplicated region heading — where forge cannot even tell which occurrence is ours.
 
   // Section extent: the heading line through the line before the next `# `/`## ` at fence
   // depth 0, or EOF. A `### ` does NOT end the section — it is nested content — so the
@@ -311,6 +311,15 @@ export function applyProtocolRegion(existing: string, releaseRegion: string): Pr
   }
   ranges.sort((a, b) => a.from - b.from);
 
+  // PLACEMENT (RF-17). The fence takes the position of the FIRST Forge line it adopted, so
+  // the operator's own top-level sections keep their positions around it and every kept
+  // line keeps its order relative to every other kept line. The one thing that cannot be
+  // held is the position of an operator run that sat strictly BETWEEN two Forge runs: the
+  // region is a single contiguous block, so that run has to come out on one side of it. It
+  // comes out immediately AFTER the closing fence — the nearest legal position, and the one
+  // that still reads after the Forge prose it was written under. A run written at the END of
+  // the adopted span is already there and does not move at all. Documented in
+  // docs/how-to-upgrade.md rather than left for an operator to discover in a diff.
   const excised: string[] = [];
   const kept: string[] = [];
   let insertAt = -1;

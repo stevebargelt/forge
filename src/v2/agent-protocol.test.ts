@@ -202,23 +202,41 @@ test("FG-654: adoption of a byte-identical legacy section needs no backup", () =
   assert.ok(!out.excisedChanged);
 });
 
-// ─── RF-2: a PARTIAL heading match is ambiguous, not Forge's ────────────────
+// ─── RF-16: a heading SUBSET is the ORDINARY legacy host, and it adopts ─────
 
-test("FG-654 RF-2: ONE operator section colliding with a region heading is REFUSED, not excised", () => {
-  // The reported shape: an operator section that happens to share a Forge heading's name.
-  // A legacy Forge block carries the region's headings as a SET; this carries one of two,
-  // so nothing in the file proves the section is Forge's.
-  const existing = "# red-wide\n\n## My preamble\n\nmine\n\n## The protocol\n\nMY OWN CONTENT UNDER A COLLIDING NAME\n";
-  const out = applyProtocolRegion(existing, REGION);
-  assert.equal(out.action, "needs-markers", "an unprovable claim of ownership must refuse");
-  assert.equal(out.content, existing, "and leave the file byte-identical");
-  if (out.action === "needs-markers") {
-    assert.ok(out.message.includes("## More protocol"), "the missing heading is named");
-    assert.ok(out.message.includes("Nothing was written."));
-  }
+test("FG-654 RF-16: a seed carrying only SOME of the region's headings is ADOPTED, not refused", () => {
+  // The real population, not a hypothetical: red-wide's five region headings landed in five
+  // separate commits between 2026-05-26 and 2026-07-30, and FG-578 means a seed created
+  // inside that window was never rewritten. Refusing this shape left the seed unfenced,
+  // `forge upgrade` exiting 1, and every dispatch of the role refused `stale_protocol`.
+  const region = "## One\n\n1\n\n## Two\n\n2\n\n## Three\n\n3";
+  const existing = "# red-wide\n\n## Mine\n\nmine\n\n## One\n\nOLD one\n\n## Two\n\nOLD two\n";
+  const out = applyProtocolRegion(existing, region);
+  assert.equal(out.action, "adopted", "the ordinary legacy host must adopt, not brick");
+  assert.ok(out.content.includes("## Mine\n\nmine"), "the operator's own section survives");
+  assert.ok(out.content.includes("## Three"), "and the sections this release ADDED are published");
+  assert.ok(!out.content.includes("OLD one") && !out.content.includes("OLD two"));
+  assert.ok(out.excisedChanged, "the excised legacy sections differed → the .bak is warranted");
+  // The whole point: the result is dispatchable, and stable.
+  const read = readProtocolRegion(out.content);
+  assert.ok(read.kind === "fenced");
+  if (read.kind === "fenced") assert.equal(read.region, region);
+  assert.equal(applyProtocolRegion(out.content, region).action, "unchanged");
 });
 
-test("FG-654 RF-2: a COMPLETE legacy block still adopts — the refusal is scoped to the ambiguous case", () => {
+test("FG-654 RF-16: a lone colliding heading adopts too — the .bak, not a refusal, is the answer", () => {
+  // The shape RF-2's refusal was aimed at: an operator section that happens to share a Forge
+  // heading's name. It is indistinguishable from a one-section legacy block, so forge takes
+  // the recoverable outcome (adopt, and publish writes the pre-adoption copy) over the
+  // certain one (refuse, and brick every host seeded before this release).
+  const existing = "# red-wide\n\n## My preamble\n\nmine\n\n## The protocol\n\nMY OWN CONTENT UNDER A COLLIDING NAME\n";
+  const out = applyProtocolRegion(existing, REGION);
+  assert.equal(out.action, "adopted");
+  assert.ok(out.content.includes("## My preamble\n\nmine"), "a section that does not collide is untouched");
+  assert.ok(out.excisedChanged, "the excised bytes differed, so publish writes the .bak it names");
+});
+
+test("FG-654: a COMPLETE legacy block adopts, exactly as a partial one does", () => {
   const existing = `# red-wide\n\n## Mine\n\nx\n\n## The protocol\n\nOLD one\n\n## More protocol\n\nOLD two\n`;
   assert.equal(applyProtocolRegion(existing, REGION).action, "adopted");
 });
@@ -250,11 +268,68 @@ test("FG-654 RF-4: an operator's `### ` under a matched Forge heading stays in t
   const out = applyProtocolRegion(existing, region);
   assert.equal(out.action, "adopted");
   assert.ok(
-    out.content.includes("### My house rule") && out.content.includes("operator prose nested under a Forge heading"),
+    out.content.includes("### My house rule\n\noperator prose nested under a Forge heading"),
     "the operator's nested subsection must survive adoption, not merely land in the .bak",
   );
   assert.ok(!out.content.includes("forge's old copy"), "the Forge-owned subsection is still replaced");
   assert.ok(!out.content.includes("OLD one") && !out.content.includes("OLD two"));
+  assert.equal(applyProtocolRegion(out.content, region).action, "unchanged", "and the result is stable");
+});
+
+// ─── RF-17: WHERE that nested subsection lands is pinned, and documented ────
+
+test("FG-654 RF-17: a nested `### ` written BETWEEN two Forge sections lands immediately after the fence", () => {
+  // The region is ONE contiguous block, so a run that sat between two Forge runs cannot stay
+  // between them. It comes out on the near side — immediately after the closing fence, in
+  // its original order relative to the operator's other content. docs/how-to-upgrade.md says
+  // exactly this; the assertions below are what stop the two from drifting apart.
+  const region = "## The protocol\n\nrule one\n\n### Owned subsection\n\nforge's\n\n## More protocol\n\nrule two";
+  const existing = [
+    "# red-wide",
+    "",
+    "## The protocol",
+    "",
+    "OLD one",
+    "",
+    "### My house rule",
+    "",
+    "mine",
+    "",
+    "## More protocol",
+    "",
+    "OLD two",
+    "",
+    "## My trailing section",
+    "",
+    "also mine",
+    "",
+  ].join("\n");
+  const out = applyProtocolRegion(existing, region);
+  assert.equal(out.action, "adopted");
+  const endsAt = out.content.indexOf(PROTOCOL_END_MARKER) + PROTOCOL_END_MARKER.length;
+  const iRule = out.content.indexOf("### My house rule");
+  assert.ok(endsAt < iRule, "the operator's run is on the near side of the fence, not before it");
+  assert.equal(
+    out.content.slice(endsAt, iRule).trim(),
+    "",
+    "and IMMEDIATELY after it — nothing of forge's is interposed",
+  );
+  assert.ok(iRule < out.content.indexOf("## My trailing section"), "operator content keeps its own order");
+  assert.equal(applyProtocolRegion(out.content, region).action, "unchanged");
+});
+
+test("FG-654 RF-17: a nested `### ` written at the END of the adopted span does not move at all", () => {
+  // The commoner shape — an operator appending a house rule under the last Forge section —
+  // is already adjacent to the fence, so `in place` holds for it literally.
+  const existing = "# red-wide\n\n## The protocol\n\nOLD one\n\n### My house rule\n\nmine\n\n## My tail\n\nalso mine\n";
+  const out = applyProtocolRegion(existing, REGION);
+  assert.equal(out.action, "adopted");
+  const before = existing.slice(existing.indexOf("### My house rule")).trimEnd();
+  assert.ok(
+    out.content.trimEnd().endsWith(before),
+    "every byte from the nested run onward survives verbatim, in position",
+  );
+  assert.equal(applyProtocolRegion(out.content, REGION).action, "unchanged");
 });
 
 // ─── RF-1: the append rung removes NO trailing operator bytes ───────────────
