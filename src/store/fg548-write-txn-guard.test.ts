@@ -185,6 +185,26 @@ test("FG-548: writeTransaction is the shared helper the store's write paths rout
   }
 });
 
+// FG-654 RF-12: BEGIN IMMEDIATE only protects a read-modify-write if the READ is
+// inside it. `lens_outcomes_json` is a whole column three writers now serialize
+// wholesale, and recordAgentProtocol appends on a coordinator/background path: with the
+// read taken before the transaction, a concurrent `forge review accept-lens` landing in
+// the window is blindly overwritten by the stale array — a reviewer-authored outcome or
+// an operator acceptance dropped to record an INDEX of one. Single-threaded tests cannot
+// interleave two writers on one connection, so the guard is over the construction.
+test("FG-654 RF-12: recordAgentProtocol takes its lens_outcomes_json READ inside the write transaction", () => {
+  const source = stripCommentsAndStrings(readFileSync(join(SRC, "store", "reviews.ts"), "utf8"));
+  const start = source.indexOf("export function recordAgentProtocol");
+  assert.ok(start > 0, "recordAgentProtocol must still exist — if it was renamed, update this guard");
+  const end = source.indexOf("export function", start + 1);
+  const body = source.slice(start, end > 0 ? end : undefined);
+
+  const txn = body.indexOf("writeTransaction(");
+  const read = body.indexOf("getReview(");
+  assert.ok(txn > 0, "the append must still run in a write transaction");
+  assert.ok(read > txn, "the read must be INSIDE writeTransaction, not before it — a read outside the write lock is the lost update");
+});
+
 // ── can the guard itself be defeated? ────────────────────────────────────────
 //
 // The guard is the only thing stopping a new deferred write txn from landing, so

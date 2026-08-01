@@ -4,9 +4,10 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   tryNpmInstall, maybeRebuildImage, renderReleaseCheckLines, decideDevAdvancement, upgradeAssetPaths, refuseDevAdvance,
   classifyStep, unresolvedReasons,
@@ -18,6 +19,8 @@ import {
 } from "./upgrade.js";
 import { assetRoot } from "../../v2/asset-root.js";
 import { buildReleaseReport } from "../../v2/release-doctor.js";
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
 let dir: string;
 
@@ -154,6 +157,38 @@ test("FG-577: the refusal makes no ordering claim it cannot keep on every path t
     assert.doesNotMatch(text, /already been attempted above|attempted above/, `false on the git/npm path: ${action}`);
     assert.match(text, /refreshed from the executing release regardless/, "still promises the asset half, which is the operator's actual remedy");
   }
+});
+
+// ─── FG-654 RF-6: the documented numbering IS the numbering the CLI prints ───
+//
+// The docs describe a five-step upgrade and call the protocol publish step 4. The CLI
+// printed four, with the publish carrying no step number at all, so a documented step was
+// unfindable in real output. Nothing generates one from the other — they agree by hand —
+// so this reads both files and asserts they still do.
+test("FG-654 RF-6: docs and CLI agree on five numbered steps, and step 4 is the protocol publish", () => {
+  const source = readFileSync(join(repoRoot, "src", "cli", "commands", "upgrade.ts"), "utf8");
+  const doc = readFileSync(join(repoRoot, "docs", "how-to-upgrade.md"), "utf8");
+
+  const denominators = [...new Set([...source.matchAll(/\[(\d+)\/(\d+)\]/g)].map((m) => m[2]))];
+  assert.deepEqual(denominators, ["5"], "every step label the CLI prints must count out of five");
+
+  for (const [n, label] of [
+    ["1", "git pull"],
+    ["2", "npm install"],
+    ["3", "install-seeds.sh"],
+    ["4", "agent protocol region"],
+    ["5", "project init"],
+  ] as const) {
+    assert.ok(source.includes(`[${n}/5] ${label}`), `the CLI must print step ${n} as \`[${n}/5] ${label}\``);
+  }
+
+  assert.match(doc, /This runs five steps in sequence:/, "the doc states the same count");
+  assert.match(doc, /^4\. \*\*Publish the Forge-owned agent protocol region\*\*/m, "…and numbers the publish 4");
+  assert.match(doc, /^5\. \*\*Provision the current project\*\*/m, "…and the project provision 5");
+  // The release-mode refusal names the asset half by its step labels, and the doc names the
+  // same span in prose. A renumbering that missed either would put them back in conflict.
+  assert.ok(source.includes("(steps [3/5], [4/5] and [5/5])"), "the refusal names the asset half by label");
+  assert.ok(doc.includes("steps 3 through 5"), "…and the doc names the same span");
 });
 
 test("FG-577 (criterion 2): with NO dev checkout at all, asset repair is still reachable", () => {

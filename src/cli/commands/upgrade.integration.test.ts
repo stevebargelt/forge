@@ -516,6 +516,55 @@ test("FG-577 (cell 1): a routing-policy recompile FAILURE is unresolved — the 
   }
 });
 
+// ─────────── FG-654: the protocol-publish step cannot close green on a role it
+// did not publish, and cannot take the rest of the run down with it ───────────
+
+test("FG-654 RF-13: a release carrying no seed for a covered role is INCOMPLETE, never `published`", () => {
+  const assets = assetTree("fg654-relmissing-", "CLEAN", { manifest: false });
+  try {
+    // Eight roles unchanged plus ONE the release cannot publish. That used to fall
+    // through to `published` — a step reported successful for a state in which nothing
+    // was published, while that role refuses at every dispatch and fails forge doctor.
+    rmSync(join(assets, "seeds", "agents", "red-wide"), { recursive: true, force: true });
+
+    const r = drive({ skipProject: true, skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets });
+
+    assert.equal(r.result.agentProtocol, "incomplete");
+    assert.match(r.stdout, /\[4\/5\] agent protocol region: incomplete/);
+    assert.match(r.stdout, /red-wide: this release carries no seed/, "the operator is told WHICH role and why");
+    assertUnresolved(r, /agent protocol region NOT published/);
+  } finally {
+    rmSync(assets, { recursive: true, force: true });
+  }
+});
+
+test("FG-654 RF-11: a THROWING protocol publish is a named `failed`, and the rest of the run still happens", () => {
+  const assets = assetTree("fg654-relthrow-", "CLEAN", { manifest: false });
+  try {
+    // An I/O error raised INSIDE the publisher, without depending on file permissions
+    // (the suite runs as root in the container, where a chmod proves nothing): a
+    // DIRECTORY where a role's release seed belongs makes readFileSync throw EISDIR.
+    // install-seeds.sh enumerates `find -type f`, so it skips the directory entirely and
+    // the throw belongs to the publish pass alone.
+    const seed = join(assets, "seeds", "agents", "red-wide", "CLAUDE.md");
+    rmSync(seed);
+    mkdirSync(seed);
+
+    // Reaching this line at all is half the claim: the exception used to escape
+    // runUpgrade, so there was no UpgradeResult to assert on.
+    const r = drive({ skipProject: true, skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets });
+
+    assert.equal(r.result.agentProtocol, "failed");
+    assert.match(r.result.agentProtocolError ?? "", /EISDIR|illegal operation/, "the thrown reason travels on --json");
+    assert.match(r.stdout, /\[4\/5\] agent protocol region: FAILED/);
+    // The other half: the steps after it still ran, and so did the closing summary.
+    assert.match(r.stdout, /\[5\/5\] project init/, "a throw must not take the remaining steps with it");
+    assertUnresolved(r, /agent protocol region/);
+  } finally {
+    rmSync(assets, { recursive: true, force: true });
+  }
+});
+
 // ─────────── FG-581: fail-closed post-promotion RACI compile refusal ───────────
 //
 // The binding invariant: after a promotion, if the promoted runtime cannot
