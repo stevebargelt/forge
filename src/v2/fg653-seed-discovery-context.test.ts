@@ -32,12 +32,17 @@ import { gradeFindings } from "./review-quality.js";
 import type { Finding, Run } from "../types/index.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const seedPath = (role: string): string => join(repoRoot, "seeds", "agents", role, "CLAUDE.md");
+/** FG-654: the Forge-owned protocol — which is where AWN-5 is stated — moved OUT of the
+ *  operator-authored agent seed into its own generation-published file. The contract a
+ *  dispatched agent receives is both halves, in compose order, so that is what is read. */
+const roleContract = (role: string): string =>
+  `${readFileSync(join(repoRoot, "seeds", "agent-protocols", `${role}.md`), "utf8")}\n\n` +
+  `${readFileSync(join(repoRoot, "seeds", "agents", role, "CLAUDE.md"), "utf8")}`;
 
 /** The AWN-5 section only. The rule has to be stated where AWN-5 is stated — a caveat filed
  *  elsewhere in a 160-line seed is one the reviewer reads after it has already emitted. */
 function awn5Section(role: string): string {
-  const md = readFileSync(seedPath(role), "utf8");
+  const md = roleContract(role);
   const start = md.indexOf("## Review-quality fields (AWN-5)");
   assert.notEqual(start, -1, `${role}: the AWN-5 section is missing`);
   const rest = md.slice(start + 1);

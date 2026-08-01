@@ -82,11 +82,6 @@ function assetTree(prefix: string, marker: string, opts: { manifest?: boolean } 
   mkdirSync(join(base, "scripts"), { recursive: true });
   writeFileSync(join(base, "seeds", "runtimes", "pi-apikey.yml"), `# ${marker}\nprovider: ${marker}\n`);
   writeFileSync(join(base, "seeds", "agents", "note.md"), `${marker} agent\n`);
-  // FG-654: a release carries a fenced protocol seed for every covered role, and since
-  // RF-13 an upgrade that publishes nothing for one of them is UNRESOLVED rather than a
-  // green step. A fixture without them is not a release shaped tree — it is a broken
-  // release, and it would make every exit-code assertion in this file test that instead.
-  cpSync(join(assetRoot(), "seeds", "agents"), join(base, "seeds", "agents"), { recursive: true });
   writeFileSync(join(base, "seeds", "constraints", "note.md"), `${marker} constraint\n`);
   writeFileSync(join(base, "seeds", "orchestrator-template.md"), `${marker} TEMPLATE\n`);
   // The real installer, unmodified — it already resolves its own $HERE, so a
@@ -282,7 +277,7 @@ test("FG-577: a FAILED asset install exits nonzero and does not claim completion
       ));
     });
 
-    assert.match(stdout, /\[3\/5\] install-seeds\.sh: FAILED/, "the failure is reported…");
+    assert.match(stdout, /\[3\/4\] install-seeds\.sh: FAILED/, "the failure is reported…");
     assert.equal(exitCode, 1, "…and carried in the exit code, not swallowed");
     assert.ok(!stdout.includes("Upgrade complete."), "a failed sole remedy must not print completion");
     assert.match(stdout, /Upgrade INCOMPLETE — install-seeds\.sh FAILED/);
@@ -465,7 +460,7 @@ test("FG-577 (cell 3): git pull skipped by a DIRTY checkout is unresolved — th
     const r = drive({ skipProject: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets });
 
     // Human surface: NOT the word that makes it read like --skip-git.
-    assert.match(r.stdout, /\[1\/5\] git pull: DID NOT RUN/);
+    assert.match(r.stdout, /\[1\/4\] git pull: DID NOT RUN/);
     assert.equal(r.result.devAdvancement.gitPull, "dirty", "distinguished from an operator skip in --json");
     assertUnresolved(r, /uncommitted changes/);
   } finally {
@@ -478,7 +473,7 @@ test("FG-577 (cell 1): a FAILED npm install is unresolved on every surface", () 
   try {
     writeFileSync(join(assets, "package.json"), "{ this is not valid json");
     const r = drive({ skipProject: true, skipGit: true }, { mode: "dev", assetsDir: assets, devDir: assets });
-    assert.match(r.stdout, /\[2\/5\] npm install: FAILED/);
+    assert.match(r.stdout, /\[2\/4\] npm install: FAILED/);
     assert.equal(r.result.devAdvancement.npmInstall, "failed");
     assertUnresolved(r, /npm install FAILED/);
   } finally {
@@ -491,7 +486,7 @@ test("FG-577 (cell 1): install-seeds.sh NOT FOUND is unresolved — the sole rem
   try {
     rmSync(join(assets, "scripts", "install-seeds.sh"));
     const r = drive({ skipProject: true, skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets });
-    assert.match(r.stdout, /\[3\/5\] install-seeds\.sh: NOT FOUND/);
+    assert.match(r.stdout, /\[3\/4\] install-seeds\.sh: NOT FOUND/);
     assert.equal(r.result.assetInstall, "not-found");
     assertUnresolved(r, /install-seeds\.sh NOT FOUND/);
   } finally {
@@ -512,55 +507,6 @@ test("FG-577 (cell 1): a routing-policy recompile FAILURE is unresolved — the 
     assertUnresolved(r, /routing-policy\.yml INVALIDATED/);
   } finally {
     rmSync(RACI_PATH, { force: true });
-    rmSync(assets, { recursive: true, force: true });
-  }
-});
-
-// ─────────── FG-654: the protocol-publish step cannot close green on a role it
-// did not publish, and cannot take the rest of the run down with it ───────────
-
-test("FG-654 RF-13: a release carrying no seed for a covered role is INCOMPLETE, never `published`", () => {
-  const assets = assetTree("fg654-relmissing-", "CLEAN", { manifest: false });
-  try {
-    // Eight roles unchanged plus ONE the release cannot publish. That used to fall
-    // through to `published` — a step reported successful for a state in which nothing
-    // was published, while that role refuses at every dispatch and fails forge doctor.
-    rmSync(join(assets, "seeds", "agents", "red-wide"), { recursive: true, force: true });
-
-    const r = drive({ skipProject: true, skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets });
-
-    assert.equal(r.result.agentProtocol, "incomplete");
-    assert.match(r.stdout, /\[4\/5\] agent protocol region: incomplete/);
-    assert.match(r.stdout, /red-wide: this release carries no seed/, "the operator is told WHICH role and why");
-    assertUnresolved(r, /agent protocol region NOT published/);
-  } finally {
-    rmSync(assets, { recursive: true, force: true });
-  }
-});
-
-test("FG-654 RF-11: a THROWING protocol publish is a named `failed`, and the rest of the run still happens", () => {
-  const assets = assetTree("fg654-relthrow-", "CLEAN", { manifest: false });
-  try {
-    // An I/O error raised INSIDE the publisher, without depending on file permissions
-    // (the suite runs as root in the container, where a chmod proves nothing): a
-    // DIRECTORY where a role's release seed belongs makes readFileSync throw EISDIR.
-    // install-seeds.sh enumerates `find -type f`, so it skips the directory entirely and
-    // the throw belongs to the publish pass alone.
-    const seed = join(assets, "seeds", "agents", "red-wide", "CLAUDE.md");
-    rmSync(seed);
-    mkdirSync(seed);
-
-    // Reaching this line at all is half the claim: the exception used to escape
-    // runUpgrade, so there was no UpgradeResult to assert on.
-    const r = drive({ skipProject: true, skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets });
-
-    assert.equal(r.result.agentProtocol, "failed");
-    assert.match(r.result.agentProtocolError ?? "", /EISDIR|illegal operation/, "the thrown reason travels on --json");
-    assert.match(r.stdout, /\[4\/5\] agent protocol region: FAILED/);
-    // The other half: the steps after it still ran, and so did the closing summary.
-    assert.match(r.stdout, /\[5\/5\] project init/, "a throw must not take the remaining steps with it");
-    assertUnresolved(r, /agent protocol region/);
-  } finally {
     rmSync(assets, { recursive: true, force: true });
   }
 });
@@ -1394,8 +1340,8 @@ test("FG-577: --skip-git alone on a release classifies the two steps INDEPENDENT
 
     assert.equal(r.result.devAdvancement.gitPull, "skipped", "the operator's skip stands");
     assert.equal(r.result.devAdvancement.npmInstall, "refused", "the unrequested-by-nobody half is still genuinely refused");
-    assert.match(r.stdout, /\[1\/5\] git pull: skipped \(--skip-git\)/);
-    assert.match(r.stdout, /\[2\/5\] npm install: REFUSED/);
+    assert.match(r.stdout, /\[1\/4\] git pull: skipped \(--skip-git\)/);
+    assert.match(r.stdout, /\[2\/4\] npm install: REFUSED/);
     assert.match(r.warnings, /refusing to advance the dev checkout/, "the refusal register still prints — something really was refused");
     assertUnresolved(r, /npm install refused \(release\)/);
     assert.deepEqual(r.result.unresolved, ["npm install refused (release)"], "and ONLY npm — the skip is not on the list");
@@ -1579,7 +1525,7 @@ test("FG-577 (cell 1): a FAILED git pull is unresolved on every surface", () => 
     writeFileSync(join(assets, ".git"), "gitdir: /nonexistent-gitdir-fg577\n");
     const r = drive({ skipProject: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets });
     assert.equal(r.result.devAdvancement.gitPull, "failed");
-    assert.match(r.stdout, /\[1\/5\] git pull: FAILED/);
+    assert.match(r.stdout, /\[1\/4\] git pull: FAILED/);
     assertUnresolved(r, /git pull FAILED/);
   } finally {
     rmSync(assets, { recursive: true, force: true });

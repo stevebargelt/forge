@@ -12,7 +12,9 @@ import { retry, RetryNotAllowedError, FanoutChildRetryError, reapRetainedContain
 import { retryPolicy } from "./retry-policy.js";
 import type { Run, Task } from "../types/index.js";
 import { taskDir } from "../util/paths.js";
-import { installedSeedPath, protocolSha256, readProtocolRegion } from "./agent-protocol.js";
+import { protocolRelPath } from "./agent-protocol.js";
+import { resolveSeedGeneration } from "./seed-generation.js";
+import { createHash } from "node:crypto";
 
 let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
@@ -364,75 +366,19 @@ test("retry: reaps the OLD failed task's container as part of a successful retry
 // FG-654 / D12: A RETRY RE-VERIFIES AND RE-STAMPS; IT NEVER REPLAYS THE ORIGINAL STAMP.
 //
 // `planAdHocRedispatch` recomposes the prompt fresh (it always has), which means it now
-// also re-runs the protocol gate against TODAY's requirement. A retry after a
-// `forge upgrade` genuinely runs a different protocol, so replaying the original task's
-// recorded sha would make the ledger lie in exactly the direction FG-654 exists to
+// also re-runs the protocol gate against the CURRENTLY PUBLISHED generation. A retry
+// after a `forge upgrade` genuinely runs a different protocol, so replaying the original
+// task's recorded sha would make the ledger lie in exactly the direction FG-654 exists to
 // prevent. Refused BEFORE any row is written, like every other precondition there — so a
 // retry that cannot dispatch never leaves a stranded pending task behind.
-test("FG-654: retrying an ad-hoc covered-role task re-verifies the protocol and refuses when it is stale", async () => {
-  const pristine = readFileSync(installedSeedPath("red-wide"), "utf8");
-  const read = readProtocolRegion(pristine);
-  assert.equal(read.kind, "fenced");
 
-  const id = "t-fg654-adhoc";
-  const t: Task = {
-    id,
-    runId: RUN.id,
-    phase: "task",
-    agentRole: "red-wide",
-    status: "failed",
-    error: "boom",
-    taskPackage: {
-      taskId: id,
-      runId: RUN.id,
-      phase: "task",
-      role: "red-wide",
-      inputs: { task: "audit the change" },
-      composedSystemPrompt: "PROMPT",
-      dispatchSource: "invoke",
-    },
-    createdAt: "2026-05-30T00:00:00Z",
-  };
-  insertTask(t);
-  logEvent("task.failed", { runId: RUN.id, taskId: id, payload: { failure_kind: "idle_timeout", error: "boom" } });
-  // A manifest recording the projectDir the retry must reproduce.
-  const dir = taskDir(RUN.id, id);
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(
-    join(dir, "manifest.json"),
-    JSON.stringify({
-      taskId: id,
-      runId: RUN.id,
-      runtime: { name: "claude" },
-      // The stamp the ORIGINAL dispatch recorded. The retry must not replay it.
-      agentProtocol: { role: "red-wide", sha256: "0".repeat(64), source: installedSeedPath("red-wide") },
-      controlPlane: { projectDir: process.env["FORGE_HOME"], mountMode: "ro" },
-    }),
-  );
+const STALE_SHA = "0".repeat(64);
 
-  // Now the installed region goes stale under it — as a `forge upgrade` moving the
-  // requirement would leave a host that has not re-published.
-  if (read.kind === "fenced") {
-    writeFileSync(installedSeedPath("red-wide"), pristine.replace(read.region, `${read.region}\n\nSTALE`));
-  }
-  try {
-    await assert.rejects(retry(id), /STALE review protocol|forge upgrade/);
-    // Refused before any row: no new task was written.
-    assert.equal(getTask(id)!.status, "failed", "the original stays failed for audit");
-  } finally {
-    writeFileSync(installedSeedPath("red-wide"), pristine);
-  }
-});
+function protocolPathIn(role: string): string {
+  return join(resolveSeedGeneration(process.env["FORGE_HOME"]!)!.root, protocolRelPath(role));
+}
 
-// The POSITIVE half of the same claim. The stamp now RIDES the task package from the
-// compose that produced the prompt (it is no longer re-derived at manifest-write time), so
-// the retried row must carry the stamp THIS retry composed — not the one it inherits by
-// spreading the failed attempt's package forward.
-test("FG-654: a retried row carries THIS retry's stamp, never the failed attempt's inherited one", async () => {
-  const region = readProtocolRegion(readFileSync(installedSeedPath("red-wide"), "utf8"));
-  assert.equal(region.kind, "fenced");
-
-  const id = "t-fg654-restamp";
+function adHocFailedTask(id: string, stamp?: { role: string; sha256: string; source: string }): void {
   insertTask({
     id,
     runId: RUN.id,
@@ -448,8 +394,7 @@ test("FG-654: a retried row carries THIS retry's stamp, never the failed attempt
       inputs: { task: "audit the change" },
       composedSystemPrompt: "PROMPT",
       dispatchSource: "invoke",
-      // A generation this host no longer runs — what a pre-upgrade dispatch left behind.
-      agentProtocol: { role: "red-wide", sha256: "0".repeat(64), source: installedSeedPath("red-wide") },
+      ...(stamp ? { agentProtocol: stamp } : {}),
     },
     createdAt: "2026-05-30T00:00:00Z",
   });
@@ -462,14 +407,48 @@ test("FG-654: a retried row carries THIS retry's stamp, never the failed attempt
       taskId: id,
       runId: RUN.id,
       runtime: { name: "claude" },
-      agentProtocol: { role: "red-wide", sha256: "0".repeat(64), source: installedSeedPath("red-wide") },
+      // The stamp the ORIGINAL dispatch recorded. The retry must not replay it.
+      agentProtocol: { role: "red-wide", sha256: STALE_SHA, source: protocolPathIn("red-wide") },
       controlPlane: { projectDir: process.env["FORGE_HOME"], mountMode: "ro" },
     }),
   );
+}
+
+test("FG-654: retrying an ad-hoc covered-role task re-verifies the protocol and refuses when the generation is tampered", async () => {
+  const path = protocolPathIn("red-wide");
+  const pristine = readFileSync(path, "utf8");
+  const id = "t-fg654-adhoc";
+  adHocFailedTask(id);
+
+  // The published generation's protocol goes out of sync with its own manifest — the
+  // torn/tampered state dispatch must refuse rather than run against unknown bytes.
+  writeFileSync(path, `${pristine}\n\nTAMPERED\n`);
+  try {
+    await assert.rejects(retry(id), /provenance manifest|forge upgrade/);
+    assert.equal(getTask(id)!.status, "failed", "the original stays failed for audit");
+  } finally {
+    writeFileSync(path, pristine);
+  }
+});
+
+// The POSITIVE half of the same claim. The stamp now RIDES the task package from the
+// compose that produced the prompt (it is no longer re-derived at manifest-write time), so
+// the retried row must carry the stamp THIS retry composed — not the one it inherits by
+// spreading the failed attempt's package forward.
+test("FG-654: a retried row carries THIS retry's stamp, never the failed attempt's inherited one", async () => {
+  const path = protocolPathIn("red-wide");
+  const id = "t-fg654-restamp";
+  // A generation this host no longer runs — what a pre-upgrade dispatch left behind.
+  adHocFailedTask(id, { role: "red-wide", sha256: STALE_SHA, source: path });
 
   const out = await retry(id);
   const stamp = out.newTask.taskPackage.agentProtocol;
   assert.equal(stamp?.role, "red-wide");
-  assert.notEqual(stamp?.sha256, "0".repeat(64), "the inherited stamp must not survive the retry");
-  if (region.kind === "fenced") assert.equal(stamp?.sha256, protocolSha256(region.region), "today's requirement is recorded");
+  assert.notEqual(stamp?.sha256, STALE_SHA, "the inherited stamp must not survive the retry");
+  assert.equal(
+    stamp?.sha256,
+    createHash("sha256").update(readFileSync(path)).digest("hex"),
+    "the currently published protocol is what gets recorded",
+  );
+  assert.equal(stamp?.source, path, "and the source names the generation, not an installed seed");
 });

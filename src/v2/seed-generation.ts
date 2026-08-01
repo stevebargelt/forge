@@ -76,7 +76,7 @@ function liveForgeHome(): string {
  *  generation. Each is a directory of files copied verbatim from the release's
  *  seeds/. The derived routing policy is committed alongside them (see
  *  publishSeedGeneration) so raw definitions and derived artifact land in ONE swap. */
-export const SEED_GENERATION_DIRS = ["workflows", "runtimes"] as const;
+export const SEED_GENERATION_DIRS = ["workflows", "runtimes", "agent-protocols"] as const;
 
 /** The derived routing policy's filename inside a generation. Committed in the same
  *  rename(2) as the workflows it is compiled from (Risk#3 — no new-workflows/old-policy

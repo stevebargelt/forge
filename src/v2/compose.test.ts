@@ -1,15 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { composeSystemPrompt } from "./compose.js";
-import { COVERED_ROLES, PROTOCOL_START_MARKER, PROTOCOL_END_MARKER } from "./agent-protocol.js";
+import { createHash } from "node:crypto";
+import { COVERED_ROLES } from "./agent-protocol.js";
+import { publishTestGeneration } from "./seed-generation.testkit.js";
+import type { SeedGeneration } from "./seed-generation.js";
 import type { Workflow } from "./schema.js";
 
 /** FG-654: composeSystemPrompt returns a discriminated result now — a covered role with
- *  an absent or stale protocol region REFUSES rather than composing. These cases all use
- *  the uncovered `architect` role, so unwrapping is the whole adaptation. */
+ *  an unresolvable protocol REFUSES rather than composing. These cases all use the
+ *  uncovered `architect` role, so unwrapping is the whole adaptation. */
 function promptOf(args: Parameters<typeof composeSystemPrompt>[0]): string {
   const out = composeSystemPrompt(args);
   assert.ok(out.ok, out.ok ? "" : out.refusal);
@@ -177,87 +180,185 @@ iOS-specific rule.`
 
 // ─── FG-654: the dispatch-time protocol gate lives at THIS read seam ─────────
 
-function protocolFixture(role: string, region: string) {
+const PROTOCOL = "## The review protocol\n\ncurrent generation\n";
+
+function protocolFixture(role: string, protocols?: false | Record<string, string>) {
   const root = mkdtempSync(join(tmpdir(), "forge-v2-protocol-"));
   const home = join(root, "home");
-  const release = join(root, "release");
-  for (const base of [home, release]) mkdirSync(join(base, "agents", role), { recursive: true });
-  mkdirSync(join(home, "constraints"), { recursive: true });
-  writeFileSync(
-    join(release, "agents", role, "CLAUDE.md"),
-    `# ${role}\n\n${PROTOCOL_START_MARKER}\n\n${region}\n\n${PROTOCOL_END_MARKER}\n`,
-  );
-  return { root, home, release, constraintsDir: join(home, "constraints") };
+  const agentDir = join(home, "agents", role);
+  const constraintsDir = join(home, "constraints");
+  mkdirSync(agentDir, { recursive: true });
+  mkdirSync(constraintsDir, { recursive: true });
+  const gen = publishTestGeneration(home, {
+    agentProtocols: protocols ?? { [role]: PROTOCOL },
+    assetsParent: root,
+  });
+  return { root, home, agentDir, constraintsDir, gen };
 }
 
-function composeFor(role: string, fx: { home: string; release: string; constraintsDir: string }) {
+function composeFor(
+  role: string,
+  fx: { agentDir: string; constraintsDir: string },
+  seedGeneration: SeedGeneration | null,
+) {
   return composeSystemPrompt({
     role,
     workflow: WORKFLOW,
     step: { ...WORKFLOW.steps[0]!, agent: role },
+    agentDir: fx.agentDir,
     constraintsDir: fx.constraintsDir,
-    protocolPaths: { forgeHome: fx.home, seedsDir: fx.release },
+    seedGeneration,
   });
 }
 
-test("FG-654: every covered role is refused BY NAME when its installed region is stale", () => {
+test("FG-654: the protocol is composed AHEAD of the operator's own prose", () => {
+  const fx = protocolFixture("engineer");
+  writeFileSync(join(fx.agentDir, "CLAUDE.md"), "# engineer\n\nMY OWN SECTION\n");
+  const out = composeFor("engineer", fx, fx.gen);
+  assert.ok(out.ok, out.ok ? "" : out.refusal);
+  if (out.ok) {
+    const iProtocol = out.prompt.indexOf("## The review protocol");
+    const iOperator = out.prompt.indexOf("MY OWN SECTION");
+    assert.ok(iProtocol >= 0, "the protocol is present");
+    assert.ok(iOperator >= 0, "the operator's own prose is present");
+    assert.ok(iProtocol < iOperator, "the protocol must come FIRST, not be appended after");
+  }
+  rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("FG-654: the recorded sha256 is the hash of the protocol bytes IN the prompt", () => {
+  const fx = protocolFixture("red-wide");
+  writeFileSync(join(fx.agentDir, "CLAUDE.md"), "# red-wide\n\noperator prose\n");
+  const out = composeFor("red-wide", fx, fx.gen);
+  assert.ok(out.ok, out.ok ? "" : out.refusal);
+  if (out.ok) {
+    assert.ok(out.prompt.includes(PROTOCOL), "the exact protocol bytes are in the prompt");
+    const digest = createHash("sha256").update(Buffer.from(PROTOCOL, "utf8")).digest("hex");
+    assert.equal(out.protocol?.sha256, digest, "the stamp digests the composed bytes");
+    assert.equal(out.protocol?.role, "red-wide");
+    assert.ok(out.protocol?.source.startsWith(fx.gen.root), "source names the generation");
+  }
+  rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("FG-654: no published generation refuses every covered role by name", () => {
   for (const role of COVERED_ROLES) {
-    const fx = protocolFixture(role, "## The protocol\n\ncurrent generation");
-    writeFileSync(
-      join(fx.home, "agents", role, "CLAUDE.md"),
-      `# ${role}\n\n${PROTOCOL_START_MARKER}\n\n## The protocol\n\nOLD generation\n\n${PROTOCOL_END_MARKER}\n`,
-    );
-    const out = composeFor(role, fx);
-    assert.equal(out.ok, false, `${role} composed under a stale protocol region`);
+    const fx = protocolFixture(role);
+    writeFileSync(join(fx.agentDir, "CLAUDE.md"), `# ${role}\n`);
+    const out = composeFor(role, fx, null);
+    assert.equal(out.ok, false, `${role} composed with NO generation anchored`);
     if (!out.ok) {
       assert.equal(out.role, role);
       assert.ok(out.refusal.includes(role), "the refusal names the role");
-      assert.ok(/[0-9a-f]{64}/.test(out.refusal), "the refusal names the installed sha");
-      assert.ok(out.refusal.split(/[0-9a-f]{64}/).length >= 3, "the refusal names BOTH shas");
       assert.ok(out.refusal.includes("forge upgrade"), "the refusal names the remedy");
     }
     rmSync(fx.root, { recursive: true, force: true });
   }
 });
 
-test("FG-654: an ABSENT seed for a covered role refuses instead of composing the fail-open placeholder", () => {
-  const fx = protocolFixture("red-wide", "## The protocol\n\ncurrent generation");
-  // No installed copy at all — the state compose.ts used to paper over with
-  // "(Agent base CLAUDE.md not found …)" and dispatch anyway.
-  const out = composeFor("red-wide", fx);
+test("FG-654: a generation MISSING this role's protocol refuses", () => {
+  const fx = protocolFixture("red-security", { engineer: PROTOCOL });
+  writeFileSync(join(fx.agentDir, "CLAUDE.md"), "# red-security\n");
+  const out = composeFor("red-security", fx, fx.gen);
   assert.equal(out.ok, false);
   if (!out.ok) {
-    assert.ok(out.refusal.includes("NO installed seed"));
-    assert.ok(!out.refusal.includes("(Agent base CLAUDE.md not found"));
+    assert.ok(out.refusal.includes("red-security"));
+    assert.ok(out.refusal.includes("agent-protocols/red-security.md"));
+    assert.ok(out.refusal.includes("forge upgrade"));
   }
   rmSync(fx.root, { recursive: true, force: true });
 });
 
-test("FG-654: a covered role whose region matches composes, and carries the stamp", () => {
-  const fx = protocolFixture("engineer", "## The protocol\n\ncurrent generation");
-  writeFileSync(
-    join(fx.home, "agents", "engineer", "CLAUDE.md"),
-    `# engineer\n\nMY OWN SECTION\n\n${PROTOCOL_START_MARKER}\n\n## The protocol\n\ncurrent generation\n\n${PROTOCOL_END_MARKER}\n`,
-  );
-  const out = composeFor("engineer", fx);
-  assert.ok(out.ok);
+test("FG-654: protocol bytes that no longer match the manifest refuse as TAMPERED", () => {
+  const fx = protocolFixture("documentation-maintainer");
+  writeFileSync(join(fx.agentDir, "CLAUDE.md"), "# documentation-maintainer\n");
+  writeFileSync(join(fx.gen.root, "agent-protocols", "documentation-maintainer.md"), "## Something else\n");
+  const out = composeFor("documentation-maintainer", fx, fx.gen);
+  assert.equal(out.ok, false);
+  if (!out.ok) {
+    assert.ok(out.refusal.includes("documentation-maintainer"));
+    assert.ok(out.refusal.includes("provenance manifest"));
+    assert.ok(out.refusal.includes("forge upgrade"));
+  }
+  rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("FG-654: an ABSENT operator seed FAILS OPEN — the contract comes from the generation", () => {
+  const fx = protocolFixture("shipping-reviewer");
+  // No installed CLAUDE.md at all. Pre-FG-654 this composed a placeholder with no
+  // contract; the region-era code refused. Now the contract is guaranteed present, so
+  // the operator's own (absent) customization is not a reason to refuse.
+  const out = composeFor("shipping-reviewer", fx, fx.gen);
+  assert.ok(out.ok, out.ok ? "" : out.refusal);
   if (out.ok) {
-    assert.ok(out.prompt.includes("MY OWN SECTION"), "the operator's own prose is composed too");
-    assert.equal(out.protocol?.role, "engineer");
-    assert.match(out.protocol?.sha256 ?? "", /^[0-9a-f]{64}$/);
+    assert.ok(out.prompt.includes("## The review protocol"), "the protocol still composes");
+    assert.ok(out.prompt.includes("(Agent base CLAUDE.md not found"), "the placeholder is back");
   }
   rmSync(fx.root, { recursive: true, force: true });
 });
 
-test("FG-654: an UNCOVERED role is unaffected — no fence required, no refusal", () => {
+test("FG-654: an UNCOVERED role is unaffected — no protocol required, no refusal", () => {
   for (const role of ["synthesizer", "tech-lead", "architect"]) {
-    const fx = protocolFixture(role, "## The protocol\n\nirrelevant");
-    // Installed seed with NO fence at all. A covered role in this state refuses.
-    mkdirSync(join(fx.home, "agents", role), { recursive: true });
-    writeFileSync(join(fx.home, "agents", role, "CLAUDE.md"), `# ${role}\n\nwhatever\n`);
-    const out = composeFor(role, fx);
+    const fx = protocolFixture(role, false);
+    writeFileSync(join(fx.agentDir, "CLAUDE.md"), `# ${role}\n\nwhatever\n`);
+    const out = composeFor(role, fx, fx.gen);
     assert.ok(out.ok, `${role} must not be gated`);
     if (out.ok) assert.equal(out.protocol, undefined);
     rmSync(fx.root, { recursive: true, force: true });
   }
+});
+
+// ─── FG-654: an embedded legacy protocol is REFUSED, never migrated ──────────
+
+test("FG-654: an installed seed still carrying a marker-fenced region refuses, unmodified", () => {
+  const fx = protocolFixture("engineer");
+  const installed = join(fx.agentDir, "CLAUDE.md");
+  const before =
+    "# engineer\n\nMY OWN SECTION\n\n<!-- forge:agent-protocol-start -->\n\n## Ancient protocol\n\nold\n\n<!-- forge:agent-protocol-end -->\n";
+  writeFileSync(installed, before);
+  const out = composeFor("engineer", fx, fx.gen);
+  assert.equal(out.ok, false, "a leftover marker-fenced region must refuse");
+  if (!out.ok) {
+    assert.ok(out.refusal.includes("engineer"), "names the role");
+    assert.ok(out.refusal.includes(installed), "names the installed path");
+    assert.ok(/by hand/i.test(out.refusal), "gives MANUAL remediation");
+  }
+  assert.equal(readFileSync(installed, "utf8"), before, "the operator's file is untouched");
+  assert.deepEqual(
+    readdirSync(fx.agentDir).sort(),
+    ["CLAUDE.md"],
+    "no .bak, no staging file, nothing new",
+  );
+  rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("FG-654: the pre-FG-654 UNFENCED shape — a heading the protocol owns — refuses too", () => {
+  const fx = protocolFixture("red-narrow");
+  const installed = join(fx.agentDir, "CLAUDE.md");
+  // No markers anywhere; just the legacy section inlined, which is what a host that
+  // never adopted the fence actually holds.
+  const before = "# red-narrow\n\nMY OWN SECTION\n\n## The review protocol\n\nan OLD generation\n";
+  writeFileSync(installed, before);
+  const out = composeFor("red-narrow", fx, fx.gen);
+  assert.equal(out.ok, false, "an unfenced embedded protocol must refuse");
+  if (!out.ok) {
+    assert.ok(out.refusal.includes("red-narrow"));
+    assert.ok(out.refusal.includes(installed));
+    assert.ok(out.refusal.includes("## The review protocol"), "names the colliding section");
+    assert.ok(/by hand/i.test(out.refusal));
+  }
+  assert.equal(readFileSync(installed, "utf8"), before, "the operator's file is untouched");
+  assert.deepEqual(readdirSync(fx.agentDir).sort(), ["CLAUDE.md"]);
+  rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("FG-654: a `## ` heading inside a code fence is content, not an embedded protocol", () => {
+  const fx = protocolFixture("red-backend");
+  writeFileSync(
+    join(fx.agentDir, "CLAUDE.md"),
+    "# red-backend\n\nExample of what NOT to write:\n\n```md\n## The review protocol\n```\n",
+  );
+  const out = composeFor("red-backend", fx, fx.gen);
+  assert.ok(out.ok, out.ok ? "" : out.refusal);
+  rmSync(fx.root, { recursive: true, force: true });
 });

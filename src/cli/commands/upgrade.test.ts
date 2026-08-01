@@ -14,7 +14,6 @@ import {
   type GitPullOutcome, type NpmInstallOutcome, type AssetInstallOutcome, type RoutingPolicyOutcome,
   type ProjectInitOutcome, type SlashCommandsOutcome, type ImageRebuildOutcome, type ReleaseCheckOutcome,
   type AuthoredRetentionOutcome, type UpgradeStepOutcomes, type SeedGenerationOutcome,
-  type AgentProtocolOutcome,
   parseRetainedLine,
 } from "./upgrade.js";
 import { assetRoot } from "../../v2/asset-root.js";
@@ -148,8 +147,8 @@ test("FG-577 (criterion 7): the refusal names both sides, says why, and carries 
 });
 
 test("FG-577: the refusal makes no ordering claim it cannot keep on every path that emits it", () => {
-  // ONE string is emitted from TWO paths: the git/npm refusal prints at [1/5] and
-  // [2/5] — BEFORE install-seeds runs at [3/5] — while the --rebuild-image refusal
+  // ONE string is emitted from TWO paths: the git/npm refusal prints at [1/4] and
+  // [2/4] — BEFORE install-seeds runs at [3/4] — while the --rebuild-image refusal
   // prints last, after both. "has already been attempted above" is true only on
   // the second, so the string may not assert a relative order at all.
   for (const action of ["advance the dev checkout (git pull / npm install)", "rebuild the agent image (--rebuild-image)"]) {
@@ -159,36 +158,34 @@ test("FG-577: the refusal makes no ordering claim it cannot keep on every path t
   }
 });
 
-// ─── FG-654 RF-6: the documented numbering IS the numbering the CLI prints ───
+// ─── RF-6: the documented numbering IS the numbering the CLI prints ─────────
 //
-// The docs describe a five-step upgrade and call the protocol publish step 4. The CLI
-// printed four, with the publish carrying no step number at all, so a documented step was
-// unfindable in real output. Nothing generates one from the other — they agree by hand —
-// so this reads both files and asserts they still do.
-test("FG-654 RF-6: docs and CLI agree on five numbered steps, and step 4 is the protocol publish", () => {
+// Nothing generates one from the other — docs/how-to-upgrade.md and upgrade.ts agree by
+// hand — so a step renumbered in one and not the other leaves a documented step that is
+// unfindable in real output. This reads both files and asserts they still agree.
+test("RF-6: docs and CLI agree on four numbered steps, and on which step is which", () => {
   const source = readFileSync(join(repoRoot, "src", "cli", "commands", "upgrade.ts"), "utf8");
   const doc = readFileSync(join(repoRoot, "docs", "how-to-upgrade.md"), "utf8");
 
   const denominators = [...new Set([...source.matchAll(/\[(\d+)\/(\d+)\]/g)].map((m) => m[2]))];
-  assert.deepEqual(denominators, ["5"], "every step label the CLI prints must count out of five");
+  assert.deepEqual(denominators, ["4"], "every step label the CLI prints must count out of four");
 
   for (const [n, label] of [
     ["1", "git pull"],
     ["2", "npm install"],
-    ["3", "install-seeds.sh"],
-    ["4", "agent protocol region"],
-    ["5", "project init"],
+    ["3", "install-seeds"],
+    ["4", "project init"],
   ] as const) {
-    assert.ok(source.includes(`[${n}/5] ${label}`), `the CLI must print step ${n} as \`[${n}/5] ${label}\``);
+    assert.ok(source.includes(`[${n}/4] ${label}`), `the CLI must print step ${n} as \`[${n}/4] ${label}\``);
   }
 
-  assert.match(doc, /This runs five steps in sequence:/, "the doc states the same count");
-  assert.match(doc, /^4\. \*\*Publish the Forge-owned agent protocol region\*\*/m, "…and numbers the publish 4");
-  assert.match(doc, /^5\. \*\*Provision the current project\*\*/m, "…and the project provision 5");
-  // The release-mode refusal names the asset half by its step labels, and the doc names the
-  // same span in prose. A renumbering that missed either would put them back in conflict.
-  assert.ok(source.includes("(steps [3/5], [4/5] and [5/5])"), "the refusal names the asset half by label");
-  assert.ok(doc.includes("steps 3 through 5"), "…and the doc names the same span");
+  assert.match(doc, /This runs four steps in sequence:/, "the doc states the same count");
+  assert.match(doc, /^3\. \*\*`FORCE=1 \.\/scripts\/install-seeds\.sh`\*\*/m, "…and numbers install-seeds 3");
+  assert.match(doc, /^4\. \*\*Provision the current project\*\*/m, "…and the project provision 4");
+  // The release-mode refusal names the asset half by its step labels, and the doc names
+  // the same span in prose. A renumbering that missed either would put them in conflict.
+  assert.ok(source.includes("(steps [3/4] and [4/4])"), "the refusal names the asset half by label");
+  assert.ok(doc.includes("steps 3 and 4"), "…and the doc names the same span");
 });
 
 test("FG-577 (criterion 2): with NO dev checkout at all, asset repair is still reachable", () => {
@@ -414,28 +411,12 @@ const SEED_GENERATION: Record<SeedGenerationOutcome, Verdict> = {
   failed: "unresolved",
 };
 
-// FG-654: THREE unresolved facts, and none of them may report as a clean upgrade — each
-// leaves at least one of the nine covered roles refusing at every dispatch. `needs-repair`
-// is the manual rung (an ambiguous fence, a heading collision, a symlinked seed) and is
-// the operator's to fix; `incomplete` is a release carrying no fenced seed for a role, and
-// no re-run here converges it; `failed` is the write throwing partway through the nine.
-const AGENT_PROTOCOL: Record<AgentProtocolOutcome, Verdict> = {
-  published: "resolved",
-  "already-current": "resolved",
-  "would-publish": "resolved",
-  "not-run": "resolved",
-  "needs-repair": "unresolved",
-  incomplete: "unresolved",
-  failed: "unresolved",
-};
-
 const EXPECTED: { [K in keyof UpgradeStepOutcomes]: Record<UpgradeStepOutcomes[K], Verdict> } = {
   gitPull: GIT_PULL,
   npmInstall: NPM_INSTALL,
   assetInstall: ASSET_INSTALL,
   seedGeneration: SEED_GENERATION,
   authoredRetention: AUTHORED_RETENTION,
-  agentProtocol: AGENT_PROTOCOL,
   routingPolicy: ROUTING_POLICY,
   projectInit: PROJECT_INIT,
   slashCommands: SLASH_COMMANDS,
@@ -459,7 +440,7 @@ test("FG-577 (criterion 10): EVERY variant of EVERY step is classified — no va
     }
   }
   // Guards against the tables silently emptying and the loop vacuously passing.
-  assert.equal(checked, 8 + 7 + 4 + 4 + 3 + 7 + 5 + 8 + 5 + 5 + 4);
+  assert.equal(checked, 8 + 7 + 4 + 4 + 3 + 5 + 8 + 5 + 5 + 4);
 });
 
 test("FG-577 (criterion 10): unresolvedReasons enumerates the outcomes object's own keys", () => {
@@ -468,7 +449,7 @@ test("FG-577 (criterion 10): unresolvedReasons enumerates the outcomes object's 
   const allClean: UpgradeStepOutcomes = {
     gitPull: "pulled", npmInstall: "installed", assetInstall: "installed",
     seedGeneration: "published",
-    authoredRetention: "none", agentProtocol: "published", routingPolicy: "recompiled", projectInit: "refreshed",
+    authoredRetention: "none", routingPolicy: "recompiled", projectInit: "refreshed",
     slashCommands: "installed", imageRebuild: "ran", releaseCheck: "ran",
   };
   assert.deepEqual(unresolvedReasons(allClean), []);
@@ -483,11 +464,10 @@ test("FG-577 (criterion 10): unresolvedReasons enumerates the outcomes object's 
     seedGeneration: "failed",
     // FG-578: `retained` sits in the all-broken row deliberately — even here it
     // must not contribute a reason. The count below is the assertion.
-    authoredRetention: "retained", agentProtocol: "needs-repair", routingPolicy: "failed", projectInit: "needs-markers",
+    authoredRetention: "retained", routingPolicy: "failed", projectInit: "needs-markers",
     slashCommands: "user-override", imageRebuild: "failed", releaseCheck: "failed",
   };
-  // FG-654 adds a ninth: `needs-repair` is unresolved on its own terms.
-  assert.equal(unresolvedReasons(allBroken).length, 9);
+  assert.equal(unresolvedReasons(allBroken).length, 8);
 });
 
 test("FG-577 (cell 3): a dirty dev checkout is NOT an operator-requested skip", () => {

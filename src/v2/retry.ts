@@ -28,6 +28,7 @@ import { retryPolicy, type RetryDisposition } from "./retry-policy.js";
 import { taskDispatchKind } from "./run-kind.js";
 import { readTaskManifest } from "./task-manifest.js";
 import { composeSystemPrompt } from "./compose.js";
+import { resolveSeedGeneration } from "./seed-generation.js";
 import { resolveModel, taskModelFields, type ModelResolution } from "./model-resolution.js";
 import {
   dispatchInvokeTask,
@@ -303,7 +304,14 @@ function planAdHocRedispatch(task: Task, run: Run): AdHocDispatchPlan {
   // different protocol, and replaying the old sha would make the ledger lie in exactly the
   // direction this ticket exists to prevent. Refused BEFORE any row is written, like every
   // other precondition here.
-  const composed = composeSystemPrompt({ role: task.agentRole, workflow, step });
+  // A retry is its own short-lived invocation with nothing anchored, so it resolves the
+  // live seed pointer once, here, and composes under exactly that generation.
+  const composed = composeSystemPrompt({
+    role: task.agentRole,
+    workflow,
+    step,
+    seedGeneration: resolveSeedGeneration(),
+  });
   if (!composed.ok) refuse(composed.refusal);
   const composedSystemPrompt = composed.prompt;
 

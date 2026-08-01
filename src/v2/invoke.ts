@@ -190,6 +190,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     role: args.agentRole,
     workflow,
     step,
+    seedGeneration,
   });
   const taskPackage: TaskPackage = {
     taskId,

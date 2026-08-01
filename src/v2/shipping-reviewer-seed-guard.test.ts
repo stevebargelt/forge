@@ -10,16 +10,14 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { publishAgentProtocolRegions, readProtocolRegion, resolveAgentProtocol } from "./agent-protocol.js";
+import { resolveAgentProtocol } from "./agent-protocol.js";
+import { publishTestGeneration } from "./seed-generation.testkit.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const seedPath = join(
-  repoRoot,
-  "seeds",
-  "agents",
-  "shipping-reviewer",
-  "CLAUDE.md",
-);
+// FG-654: the rubric this file guards is the FORGE-OWNED protocol, which now lives in
+// its own generation-published file rather than inside the operator's seed.
+const seedPath = join(repoRoot, "seeds", "agent-protocols", "shipping-reviewer.md");
+const operatorSeedPath = join(repoRoot, "seeds", "agents", "shipping-reviewer", "CLAUDE.md");
 
 // ---------------------------------------------------------------------------
 // 1. Operator-contract enforcement language is present
@@ -218,55 +216,48 @@ test("shipping-reviewer CLAUDE.md: scope guard concept — check bounded to oper
 });
 
 // ---------------------------------------------------------------------------
-// FG-654. Every assertion above reads the REPO seed. They were all green on a
-// host whose dispatched shipping-reviewer read a 40-lines-behind copy out of
-// $FORGE_HOME — that gap is exactly how FG-654 shipped.
-//
-// A hermetic suite cannot assert the developer's real ~/.forge is current: the
-// suite's $FORGE_HOME is provisioned by src/test-setup.ts copying these seeds,
-// so `resolveAgentProtocol(role)` against it compares a byte-copy with its own
-// source and is green on every host — including the reporting one. That is the
-// blind spot, not a guard against it. What IS falsifiable is below: the
-// publisher converges a home, and the resolver goes RED on installed drift with
-// the repo seed untouched. `forge doctor` answers it for a real host.
+// FG-654. Every assertion above reads the REPO's protocol file. That is now the
+// right unit: since FG-654 the protocol is forge-owned and published atomically,
+// so a host either has these exact bytes or is refused by name — the repo-vs-
+// installed gap that let a 40-lines-behind reviewer dispatch is closed by
+// construction rather than by a guard. What the repo assertions cannot say is
+// that the refusal actually fires, which is what these assert.
 // ---------------------------------------------------------------------------
 
-test("FG-654: publishing converges a home's region, and the guard goes RED on installed drift", () => {
+test("FG-654: the shipping-reviewer's protocol publishes into a generation and resolves", () => {
   const home = mkdtempSync(join(tmpdir(), "forge-fg654-shipping-"));
-  publishAgentProtocolRegions({ forgeHome: home, seedsDir: join(repoRoot, "seeds") });
-  assert.ok(resolveAgentProtocol("shipping-reviewer", { forgeHome: home }).ok, "after publish, dispatch must resolve");
-
-  // The exact blind spot, exercised: the repo seed is never touched here.
-  const installed = readFileSync(seedPath, "utf8");
-  const read = readProtocolRegion(installed);
-  assert.equal(read.kind, "fenced", "the repo seed must carry a balanced fence to mutate against");
-  if (read.kind === "fenced") {
-    writeFileSync(
-      join(home, "agents", "shipping-reviewer", "CLAUDE.md"),
-      installed.replace(read.region, `${read.region}\n\nA LOCAL EDIT INSIDE THE FORGE REGION`),
-    );
+  const gen = publishTestGeneration(home, { assetsParent: home });
+  const resolved = resolveAgentProtocol("shipping-reviewer", gen);
+  assert.ok(resolved.ok, "after publish, dispatch must resolve the shipping-reviewer's protocol");
+  if (resolved.ok) {
+    assert.equal(resolved.text, readFileSync(seedPath, "utf8"), "the published bytes are the repo's bytes");
   }
-  const mutated = resolveAgentProtocol("shipping-reviewer", { forgeHome: home });
-  assert.equal(mutated.ok, false, "a mutated INSTALLED region must be detected with a pristine repo seed");
-  if (!mutated.ok) assert.equal(mutated.reason, "stale");
-
-  // And the measured 2026-07-31 shape: a pre-FG-654 seed with no fence at all.
-  writeFileSync(join(home, "agents", "shipping-reviewer", "CLAUDE.md"), "# shipping-reviewer\n\n40 lines behind\n");
-  const unfenced = resolveAgentProtocol("shipping-reviewer", { forgeHome: home });
-  assert.equal(unfenced.ok, false);
-  if (!unfenced.ok) assert.equal(unfenced.reason, "installed_unfenced");
   rmSync(home, { recursive: true, force: true });
 });
 
-test("FG-654: the rubric this file guards lives INSIDE the Forge-owned region, so upgrade converges it", () => {
-  const read = readProtocolRegion(readFileSync(seedPath, "utf8"));
-  assert.equal(read.kind, "fenced");
-  if (read.kind === "fenced") {
-    const region = read.region.toLowerCase();
-    // If the operator-contract rubric ever moved OUTSIDE the fence it would become
-    // retained-forever operator prose, and this whole guard would go back to pinning
-    // bytes no host is required to have.
-    assert.ok(region.includes("operator-contract") || region.includes("operator contract"));
-    assert.ok(region.includes("done-audit") || region.includes("done audit"));
-  }
+test("FG-654: protocol bytes edited INSIDE the published generation refuse as tampered", () => {
+  const home = mkdtempSync(join(tmpdir(), "forge-fg654-shipping-tamper-"));
+  const gen = publishTestGeneration(home, { assetsParent: home });
+  writeFileSync(
+    join(gen.root, "agent-protocols", "shipping-reviewer.md"),
+    `${readFileSync(seedPath, "utf8")}\n\nA LOCAL EDIT INSIDE THE FORGE-OWNED PROTOCOL\n`,
+  );
+  const resolved = resolveAgentProtocol("shipping-reviewer", gen);
+  assert.equal(resolved.ok, false, "a hand-edited protocol inside the generation must be refused");
+  if (!resolved.ok) assert.equal(resolved.reason, "protocol_tampered");
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("FG-654: the rubric this file guards lives in the FORGE-OWNED protocol, not the operator seed", () => {
+  // If the operator-contract rubric ever moved into the operator's own file it would
+  // become retained-forever prose no host is required to have, and this whole guard
+  // would go back to pinning bytes that never reach a dispatched reviewer.
+  const protocol = readFileSync(seedPath, "utf8").toLowerCase();
+  assert.ok(protocol.includes("operator-contract") || protocol.includes("operator contract"));
+  assert.ok(protocol.includes("done-audit") || protocol.includes("done audit"));
+  const operator = readFileSync(operatorSeedPath, "utf8");
+  assert.ok(
+    !operator.includes("<!-- forge:agent-protocol-"),
+    "the operator seed must carry no leftover protocol marker",
+  );
 });

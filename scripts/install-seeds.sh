@@ -46,18 +46,6 @@ mkdir -p "$DEST/agents" "$DEST/constraints" "$DEST/runs" "$DEST/runtimes" "$DEST
 # $FORGE_HOME but is DERIVED — its correctness depends on being overwritten;
 # ownership is not location) and the skills dir (unchanged on purpose — see the
 # skills block below).
-#
-# FG-654 — READ THIS BEFORE CONCLUDING "agents are wholly the operator's". Since
-# FG-654 an agent seed has TWO halves: everything outside a marker fence is the
-# operator's exactly as described above, and the marker-fenced Forge-owned review
-# PROTOCOL region inside it is forge's, published deterministically by
-# `forge upgrade`. THIS SCRIPT PERFORMS NO MARKER OR REGION SURGERY and its
-# behavior did not change: it still creates an absent seed (from an
-# already-fenced release copy, so a never-ran-forge host is correct by
-# construction) and still retains an existing one, FORCE or not. The region's
-# SINGLE PUBLISHER is src/v2/agent-protocol.ts — one publisher, in one language,
-# with one set of ownership rules. Do not add a second one here;
-# src/v2/fg578-ownership-agreement.test.ts fails if you do.
 AUTHORED_EXEMPT=(agents constraints raci)
 
 is_authored_exempt() {

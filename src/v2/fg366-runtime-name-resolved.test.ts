@@ -6,7 +6,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cpSync, writeFileSync, mkdirSync, existsSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { writeFileSync, mkdirSync, existsSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -16,7 +16,6 @@ import { tasksForRun } from "../store/tasks.js";
 import { taskDir } from "../util/paths.js";
 import type { TaskManifest } from "./task-manifest.js";
 import type { DockerExecFn } from "./docker-exec.js";
-import { assetRoot } from "./asset-root.js";
 import type { Workflow } from "./schema.js";
 
 const SINGLE_STEP_WORKFLOW: Workflow = {
@@ -77,11 +76,6 @@ result:
 `);
     // FG-583: dispatch reads only a published generation — publish the flat runtime.
     publishFlatAsGeneration(isolatedHome);
-    // FG-654: this isolated home is a HOST, and a host that dispatches `engineer` must
-    // carry the agent seeds — the Forge-owned protocol region is a dispatch precondition
-    // now, so an agents-less home is refused by name rather than silently composing a
-    // placeholder. Provisioned exactly as install-seeds.sh provisions a fresh host.
-    cpSync(join(assetRoot(), "seeds", "agents"), join(isolatedHome, "agents"), { recursive: true });
 
     const { runId } = startRun({
       workflow: SINGLE_STEP_WORKFLOW,

@@ -1,48 +1,52 @@
-// FG-654: the dispatch-time refusal and the durable generation stamp, exercised through
-// the REAL dispatch machinery.
+// FG-654: the properties that decide whether the defect is actually closed, exercised
+// through the REAL machinery — the real installer, a real published seed generation, real
+// DB rows, real task dirs and real manifests on disk.
 //
-// The properties this pins are the ones that decide whether the defect is actually closed:
+//   - The operator's ~/.forge/agents/<role>/CLAUDE.md is NEVER written. Not adopted, not
+//     spliced, not backed up. That is the whole ownership claim, and it is asserted
+//     against a CUSTOMIZED seed across the full asset path.
+//   - A covered role whose protocol does not resolve out of the published generation does
+//     not reach a container, and does not even mint a task dir.
+//   - The recorded sha CANNOT diverge from the bytes that were composed.
+//   - The removed machinery is genuinely gone from the tree.
 //
-//   - A covered role whose installed protocol region is STALE or ABSENT does not reach a
-//     container. It is refused BY NAME, with both shas and `forge upgrade`, through
-//     `invoke` — the seam the whole coordinator family and the legacy review-loop share.
-//   - An UNCOVERED role is not gated. Widening the blast radius past the review lifecycle
-//     would be its own defect.
-//   - The generation a dispatched agent RAN UNDER is readable off the task manifest ON
-//     DISK, not from an in-memory value the test could have handed itself.
-//   - `retry` RE-VERIFIES against today's requirement; it never replays the original stamp.
-//   - A refused lens surfaces as `stale_protocol`, never as `no_outcome`/"never
-//     dispatched", and an operator lens acceptance cannot clear it.
-//
-// Integration tier: real DB rows, real run/task dirs, real manifests on disk. The container
-// exec is stubbed — the point is that for a refused dispatch it is never called at all.
+// The container exec is stubbed — for a refused dispatch the point is that it is never
+// called at all.
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, mkdtempSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import { invoke, dispatchInvokeTask, createInvokeRun } from "./invoke.js";
-import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
+import { composeSystemPrompt } from "./compose.js";
+import { publishFlatAsGeneration, publishTestGeneration } from "./seed-generation.testkit.js";
 import { readTaskManifest } from "./task-manifest.js";
 import { getTask, insertTask } from "../store/tasks.js";
 import { newTaskId } from "../util/ids.js";
 import { resolveModel } from "./model-resolution.js";
-import type { Task } from "../types/index.js";
 import { taskDir } from "../util/paths.js";
 import { assessLens, assessDiscoveryCompleteness, LENS_INCOMPLETE_REASONS } from "./review-discovery.js";
+import { assessReviewDisposition } from "./review-gate.js";
+import { COVERED_ROLES, STALE_PROTOCOL_FAILURE_KIND, protocolRelPath } from "./agent-protocol.js";
 import type { DockerExecFn } from "./docker-exec.js";
-import {
-  COVERED_ROLES,
-  STALE_PROTOCOL_FAILURE_KIND,
-  fencedBlock,
-  installedSeedPath,
-  protocolSha256,
-  readProtocolRegion,
-  releaseSeedPath,
-} from "./agent-protocol.js";
+import type { Task } from "../types/index.js";
 import type { LensAcceptance } from "../store/reviews.js";
+import type { Workflow } from "./schema.js";
 
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const savedEnv = { ...process.env };
 let tmpDirs: string[] = [];
 let projectDir: string;
@@ -67,14 +71,7 @@ function countingExec(): DockerExecFn {
   };
 }
 
-function setupRuntimeStub(): void {
-  const fhome = process.env["FORGE_HOME"]!;
-  const runtimePath = join(fhome, "runtimes", "claude.yml");
-  if (!existsSync(runtimePath)) {
-    mkdirSync(dirname(runtimePath), { recursive: true });
-    writeFileSync(
-      runtimePath,
-      `name: claude
+const RUNTIME_STUB = `name: claude
 description: fg654 test stub
 image: test-image:latest
 models:
@@ -90,37 +87,24 @@ container:
   name: "forge-\${TASK_ID}"
 result:
   file: /task/result.json
-`,
-    );
-  }
-  publishFlatAsGeneration(fhome);
-}
+`;
 
-/** This release's region for `role`, read from the release seed — the REQUIRED side. */
-function releaseRegionOf(role: string): string {
-  const read = readProtocolRegion(readFileSync(releaseSeedPath(role), "utf8"));
-  assert.equal(read.kind, "fenced", `${role}: the release seed must be fenced`);
-  return read.kind === "fenced" ? read.region : "";
-}
-
-/** Rewrite the INSTALLED seed's region so it is stale, leaving the repo seed pristine. */
-function makeInstalledStale(role: string): void {
-  const path = installedSeedPath(role);
-  const text = readFileSync(path, "utf8");
-  const read = readProtocolRegion(text);
-  assert.equal(read.kind, "fenced");
-  if (read.kind === "fenced") {
-    const start = text.indexOf(fencedBlock(read.region));
-    assert.ok(start >= 0, "the installed file must contain a canonical fenced block to replace");
-    writeFileSync(path, text.replace(fencedBlock(read.region), fencedBlock(`${read.region}\n\nA STALE TRAILING RULE`)));
-  }
+/** Write the flat runtime the suite's disposable home dispatches under, and publish it as
+ *  a generation. `agentProtocols` steers ONLY the FG-654 category. */
+function setupHome(agentProtocols?: false | Record<string, string>) {
+  const fhome = process.env["FORGE_HOME"]!;
+  const runtimePath = join(fhome, "runtimes", "claude.yml");
+  mkdirSync(dirname(runtimePath), { recursive: true });
+  writeFileSync(runtimePath, RUNTIME_STUB);
+  return publishFlatAsGeneration(fhome, {
+    ...(agentProtocols === undefined ? {} : { agentProtocols }),
+  });
 }
 
 beforeEach(() => {
   projectDir = tmp("fg654-project-");
   execCalls = 0;
   process.env["ANTHROPIC_API_KEY"] = "sk-stub";
-  setupRuntimeStub();
 });
 
 afterEach(() => {
@@ -130,186 +114,160 @@ afterEach(() => {
   Object.assign(process.env, savedEnv);
 });
 
-// ─── P3: refused by name, no container ──────────────────────────────────────
+/** Built by concatenation so THIS file does not itself contain the literals it bans. */
+const REMOVED_EXPORTS = [
+  "publishAgentProtocol" + "Regions",
+  "applyProtocol" + "Region",
+  "renderProtocol" + "Publication",
+  "fenced" + "Block",
+  "readProtocol" + "Region",
+  "PRE_ADOPTION_" + "BACKUP_SUFFIX",
+  "PROTOCOL_START_" + "MARKER",
+  "PROTOCOL_END_" + "MARKER",
+];
+const REMOVED_ARTEFACTS = [".forge-pre-" + "fg654.bak", ".forge-" + "publish-tmp"];
 
-test("integ FG-654: EVERY covered role with a stale installed region is refused BY NAME and never reaches a container", async () => {
+function sourceFiles(at: string, out: string[] = []): string[] {
+  for (const entry of readdirSync(at, { withFileTypes: true })) {
+    if (entry.name === "node_modules") continue;
+    const full = join(at, entry.name);
+    if (entry.isDirectory()) sourceFiles(full, out);
+    else if (entry.isFile() && /\.tsx?$/.test(entry.name)) out.push(full);
+  }
+  return out;
+}
+
+// ─── ACCEPTANCE 1: the operator's seeds are BYTE-IDENTICAL across the asset path ─────
+
+test("integ FG-654: a CUSTOMIZED operator seed survives the full asset path byte-for-byte, with no new entry", () => {
+  const home = tmp("fg654-assetpath-home-");
+  const skills = tmp("fg654-assetpath-skills-");
+
+  // Seed the host the way a first install does — the real installer, unmodified.
+  const first = spawnSync("bash", [join(repoRoot, "scripts", "install-seeds.sh")], {
+    encoding: "utf8",
+    env: { ...process.env, HOME: home, FORGE_HOME: home, CLAUDE_SKILLS_DEST: skills },
+  });
+  assert.equal(first.status, 0, `install-seeds.sh failed: ${first.stderr}`);
+
+  // Now CUSTOMIZE every covered role — operator prose ADDED, so this is not a pristine
+  // copy that a byte-copy comparison would pass vacuously.
+  const snapshot = new Map<string, Buffer>();
   for (const role of COVERED_ROLES) {
-    const pristine = readFileSync(installedSeedPath(role), "utf8");
-    makeInstalledStale(role);
-    execCalls = 0;
-    try {
-      const res = await invoke({
-        agentRole: role,
-        task: "review the change",
-        projectDir,
-        readOnlyProject: role.startsWith("red-"),
-        dockerExec: countingExec(),
-      });
+    const path = join(home, "agents", role, "CLAUDE.md");
+    writeFileSync(
+      path,
+      `${readFileSync(path, "utf8")}\n\n## My house rule for ${role}\n\nAlways read the ledger first.\n`,
+    );
+    snapshot.set(role, readFileSync(path));
+  }
+  const entriesBefore = new Map(
+    COVERED_ROLES.map((role) => [role, readdirSync(join(home, "agents", role)).sort()]),
+  );
 
-      assert.equal(res.status, "failed", `${role} dispatched under a stale protocol region`);
-      assert.equal(execCalls, 0, `${role}: a refused dispatch must never reach a container`);
-      assert.equal(res.failureKind, STALE_PROTOCOL_FAILURE_KIND, `${role}`);
-      const error = res.error ?? "";
-      assert.ok(error.includes(role), `${role}: the refusal must name the role`);
-      assert.ok(error.includes("forge upgrade"), `${role}: the refusal must name the remedy`);
-      const shas: string[] = error.match(/[0-9a-f]{64}/g) ?? [];
-      assert.equal(new Set(shas).size, 2, `${role}: the refusal must name BOTH shas, got ${shas.join(",")}`);
-      assert.ok(shas.includes(protocolSha256(releaseRegionOf(role))), `${role}: one of them is the REQUIRED sha`);
+  // THE FULL ASSET PATH: FORCE=1 install-seeds.sh (upgrade step [3/4]) plus the atomic
+  // seed-generation publish it ends with.
+  const forced = spawnSync("bash", [join(repoRoot, "scripts", "install-seeds.sh")], {
+    encoding: "utf8",
+    env: { ...process.env, HOME: home, FORGE_HOME: home, CLAUDE_SKILLS_DEST: skills, FORCE: "1" },
+  });
+  assert.equal(forced.status, 0, `forced install-seeds.sh failed: ${forced.stderr}`);
+  const gen = publishTestGeneration(home, { assetsParent: home });
 
-      // Durable and addressable: the row exists, failed, carrying the refusal, and no
-      // manifest was written because nothing was dispatched.
-      const row = getTask(res.taskId);
-      assert.equal(row?.status, "failed", `${role}: the refusal must be durable on the task row`);
-      assert.equal(readTaskManifest(taskDir(res.runId, res.taskId)), undefined, `${role}: no dispatch, no manifest`);
-    } finally {
-      writeFileSync(installedSeedPath(role), pristine);
+  for (const role of COVERED_ROLES) {
+    const path = join(home, "agents", role, "CLAUDE.md");
+    assert.ok(
+      readFileSync(path).equals(snapshot.get(role)!),
+      `${role}: the operator's seed was REWRITTEN — forge does not write this file`,
+    );
+    // Nothing new appeared beside it, under any name.
+    assert.deepEqual(
+      readdirSync(join(home, "agents", role)).sort(),
+      entriesBefore.get(role),
+      `${role}: a new entry appeared under ~/.forge/agents/${role}/`,
+    );
+  }
+
+  // And no removed-machinery artefact anywhere under the agents tree.
+  const stray: string[] = [];
+  const walk = (at: string): void => {
+    for (const entry of readdirSync(at, { withFileTypes: true })) {
+      const full = join(at, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (REMOVED_ARTEFACTS.some((a) => entry.name.endsWith(a))) stray.push(full);
     }
+  };
+  walk(join(home, "agents"));
+  assert.deepEqual(stray, [], "no .bak and no staging file may ever be written under ~/.forge/agents");
+
+  // The protocol went where it belongs instead: inside the generation.
+  for (const role of COVERED_ROLES) {
+    assert.ok(gen.manifest.files[protocolRelPath(role)], `${role}: not published into the generation`);
   }
 });
 
-test("integ FG-654: a covered role whose seed FILE IS ABSENT is refused too — the fail-open placeholder is unreachable", async () => {
-  const role = "red-security";
-  const path = installedSeedPath(role);
-  const pristine = readFileSync(path, "utf8");
-  rmSync(path);
-  try {
+// ─── ACCEPTANCE 3: refused before dispatch, by name, non-overrideable ────────
+
+test("integ FG-654: NO published generation refuses every covered role — no task dir, no container", async () => {
+  // The runtime is published, the protocols are not: the ONLY unmet precondition is the
+  // protocol, so the refusal cannot be attributed to anything else.
+  setupHome(false);
+  for (const role of COVERED_ROLES) {
+    execCalls = 0;
     const res = await invoke({
       agentRole: role,
-      task: "audit",
+      task: "review the change",
       projectDir,
-      readOnlyProject: true,
+      readOnlyProject: role.startsWith("red-"),
       dockerExec: countingExec(),
     });
-    assert.equal(res.status, "failed");
-    assert.equal(execCalls, 0);
-    assert.ok((res.error ?? "").includes("NO installed seed"));
-    assert.ok(
-      !(res.error ?? "").includes("(Agent base CLAUDE.md not found"),
-      "the old fail-open placeholder must never be composed for a covered role",
-    );
-  } finally {
-    writeFileSync(path, pristine);
+
+    assert.equal(res.status, "failed", `${role} dispatched with no protocol published`);
+    assert.equal(res.failureKind, STALE_PROTOCOL_FAILURE_KIND, `${role}`);
+    assert.equal(execCalls, 0, `${role}: a refused dispatch must never reach a container`);
+    const error = res.error ?? "";
+    assert.ok(error.includes(role), `${role}: the refusal must name the role`);
+    assert.ok(error.includes("forge upgrade"), `${role}: the refusal must name the remedy`);
+    assert.ok(!/\.bak|marker|fence/i.test(error), `${role}: the refusal must not mention removed machinery`);
+
+    // Durable and addressable: the row exists and failed, and NO task dir was minted.
+    assert.equal(getTask(res.taskId)?.status, "failed", `${role}: the refusal must be durable`);
+    assert.ok(!existsSync(taskDir(res.runId, res.taskId)), `${role}: a refused dispatch mints no task dir`);
+    assert.equal(readTaskManifest(taskDir(res.runId, res.taskId)), undefined, `${role}: no dispatch, no manifest`);
   }
 });
 
-test("integ FG-654: an UNCOVERED role dispatches exactly as before", async () => {
+test("integ FG-654: a generation whose protocol bytes were TAMPERED refuses the same way", async () => {
+  const gen = setupHome();
+  const role = "red-security";
+  writeFileSync(join(gen.root, protocolRelPath(role)), "## Not what the manifest published\n");
+
+  const res = await invoke({
+    agentRole: role,
+    task: "audit",
+    projectDir,
+    readOnlyProject: true,
+    dockerExec: countingExec(),
+  });
+  assert.equal(res.status, "failed");
+  assert.equal(res.failureKind, STALE_PROTOCOL_FAILURE_KIND);
+  assert.equal(execCalls, 0);
+  assert.ok((res.error ?? "").includes("provenance manifest"));
+  assert.ok(!existsSync(taskDir(res.runId, res.taskId)), "a refused dispatch mints no task dir");
+});
+
+test("integ FG-654: an UNCOVERED role dispatches exactly as before, and carries no stamp", async () => {
+  setupHome(false);
   for (const role of ["synthesizer", "tech-lead"]) {
     execCalls = 0;
     const res = await invoke({ agentRole: role, task: "think", projectDir, dockerExec: countingExec() });
     assert.equal(res.status, "complete", `${role} must not be gated`);
     assert.equal(execCalls, 1, `${role} must still reach its container`);
-    // …and carries no protocol stamp, because it has no protocol region.
     assert.equal(readTaskManifest(taskDir(res.runId, res.taskId))?.agentProtocol, undefined);
   }
 });
 
-// ─── P4: the generation is readable from durable state ──────────────────────
-
-test("integ FG-654: a dispatched covered role's manifest ON DISK records the region sha it ran under", async () => {
-  const role = "red-wide";
-  const res = await invoke({
-    agentRole: role,
-    task: "review",
-    projectDir,
-    readOnlyProject: true,
-    dockerExec: countingExec(),
-  });
-  assert.equal(res.status, "complete");
-
-  // Read from the FILE, not from an in-memory value — the claim is about durable state.
-  const raw = JSON.parse(readFileSync(join(taskDir(res.runId, res.taskId), "manifest.json"), "utf8")) as {
-    agentProtocol?: { role: string; sha256: string; source: string };
-  };
-  assert.equal(raw.agentProtocol?.role, role);
-  assert.equal(raw.agentProtocol?.sha256, protocolSha256(releaseRegionOf(role)));
-  assert.equal(raw.agentProtocol?.source, installedSeedPath(role));
-});
-
-// RF-3 / RF-5: THE MANIFEST ECHOES THE COMPOSE, IT DOES NOT RE-READ THE SEED.
-//
-// The manifest is written well after the prompt is composed — after model resolution,
-// mount preflight and docker-arg construction. When the stamp was re-derived there, a
-// `forge upgrade` (or the FG-654 publish pass itself) landing in that window made the
-// receipt name a generation the container was never given; and if the seed went stale in
-// that window the re-read returned nothing, so a covered role that DID dispatch got a
-// manifest with no protocol block at all — indistinguishable from a pre-FG-654 one.
-// A stamp that disagrees with what is on disk is the only way to tell the two apart.
-test("integ FG-654: the manifest records the COMPOSED stamp, not a fresh read of the seed", async () => {
-  const role = "red-wide";
-  // A stamp NO read of this host's disk can produce. dispatchInvokeTask is the seam
-  // `forge retry` uses directly, and it takes an already-composed row — so the divergence
-  // between "what compose resolved" and "what the seed says right now" is expressible
-  // without racing an upgrade. A manifest that re-derives cannot reproduce this value.
-  const composed = { role, sha256: "a".repeat(64), source: installedSeedPath(role) };
-  const runId = createInvokeRun(role, projectDir, undefined, "fg654 carry", undefined);
-  const taskId = newTaskId(role);
-  const task: Task = {
-    id: taskId,
-    runId,
-    phase: "task",
-    agentRole: role,
-    status: "pending",
-    taskPackage: {
-      taskId,
-      runId,
-      phase: "task",
-      role,
-      inputs: { task: "review" },
-      composedSystemPrompt: "PROMPT COMPOSED UNDER THE STAMP ABOVE",
-      dispatchSource: "invoke",
-      agentProtocol: composed,
-    },
-    createdAt: new Date().toISOString(),
-  };
-  insertTask(task);
-
-  const res = await dispatchInvokeTask({
-    task,
-    resolution: resolveModel({ agentRole: role, runtimeName: "claude", ctx: { projectDir } }),
-    projectDir,
-    taskText: "review",
-    ownsRun: true,
-    readOnlyProject: true,
-    dockerExec: countingExec(),
-  });
-  assert.equal(res.status, "complete");
-
-  const onDisk = readTaskManifest(taskDir(res.runId, res.taskId))?.agentProtocol;
-  assert.deepEqual(onDisk, composed, "the manifest is an ECHO of the composed package, never a second read");
-  assert.notEqual(
-    onDisk?.sha256,
-    protocolSha256(releaseRegionOf(role)),
-    "a re-derived stamp would carry the seed's CURRENT sha — the generation this prompt was not built from",
-  );
-});
-
-test("integ FG-654: the stamp is per DISPATCH — two lenses on two different region shas record two distinct shas", async () => {
-  const roleA = "red-narrow";
-  const roleB = "red-backend";
-  const pristineB = readFileSync(installedSeedPath(roleB), "utf8");
-  try {
-    const a = await invoke({ agentRole: roleA, task: "a", projectDir, readOnlyProject: true, dockerExec: countingExec() });
-    assert.equal(a.status, "complete");
-
-    // Simulate a `forge upgrade` landing between the two dispatches: the RELEASE seed for
-    // roleB moves, and the installed copy moves with it. (Here both move together, which
-    // is what an upgrade does — the point is that roleB's recorded sha is its own.)
-    const b = await invoke({ agentRole: roleB, task: "b", projectDir, readOnlyProject: true, dockerExec: countingExec() });
-    assert.equal(b.status, "complete");
-
-    const shaA = readTaskManifest(taskDir(a.runId, a.taskId))?.agentProtocol?.sha256;
-    const shaB = readTaskManifest(taskDir(b.runId, b.taskId))?.agentProtocol?.sha256;
-    assert.match(shaA ?? "", /^[0-9a-f]{64}$/);
-    assert.match(shaB ?? "", /^[0-9a-f]{64}$/);
-    assert.notEqual(shaA, shaB, "two roles with different regions must record two different shas");
-    assert.equal(shaA, protocolSha256(releaseRegionOf(roleA)));
-    assert.equal(shaB, protocolSha256(releaseRegionOf(roleB)));
-  } finally {
-    writeFileSync(installedSeedPath(roleB), pristineB);
-  }
-});
-
-// ─── P6: the vocabulary, and that an acceptance cannot clear it ─────────────
+// ─── ACCEPTANCE 3 (second half): an acceptance cannot clear it ───────────────
 
 test("integ FG-654: a refused lens surfaces as `stale_protocol`, never as no_outcome/never-dispatched", () => {
   assert.ok((LENS_INCOMPLETE_REASONS as readonly string[]).includes("stale_protocol"));
@@ -319,12 +277,12 @@ test("integ FG-654: a refused lens surfaces as `stale_protocol`, never as no_out
     role: "red-wide",
     dispatched: false,
     failureKind: STALE_PROTOCOL_FAILURE_KIND,
-    detail: "installed abc… required def…",
+    detail: "no manifest-consistent agent-protocols/red-wide.md; run `forge upgrade`",
   });
   assert.equal(outcome.complete, false);
   if (!outcome.complete) {
     assert.equal(outcome.reason, "stale_protocol");
-    assert.ok(!outcome.detail.includes("never dispatched"), "it was dispatched-and-refused, not never-dispatched");
+    assert.ok(!outcome.detail.includes("never dispatched"), "it was refused, not never-dispatched");
     assert.ok(outcome.detail.includes("forge upgrade"));
   }
 });
@@ -347,7 +305,7 @@ test("integ FG-654: a bound, current-candidate operator acceptance does NOT clea
   };
 
   // The control: this exact acceptance DOES clear an ordinary missing lens, so the
-  // assertion below is about the reason and not about the acceptance being malformed.
+  // assertion below is about the REASON and not about the acceptance being malformed.
   const ordinary = assessDiscoveryCompleteness(
     ["security"],
     [assessLens({ lens: "security", role: "red-security", dispatched: false, failureKind: "container_crash" })],
@@ -363,4 +321,237 @@ test("integ FG-654: a bound, current-candidate operator acceptance does NOT clea
   assert.equal(staleProtocol.complete, false, "a stale-protocol lens must NOT be acceptable-away");
   assert.equal(staleProtocol.accepted.length, 0, "and the acceptance must not be reported as having cleared it");
   assert.equal(staleProtocol.missing[0]?.reason, "stale_protocol");
+
+});
+
+test("integ FG-654: the disposition gate still names the remedy, and says an acceptance cannot clear it", () => {
+  const acceptance: LensAcceptance = {
+    kind: "lens_acceptance",
+    lens: "security",
+    missingEvidence: "no security lens ran",
+    rationale: "shipping anyway",
+    candidateSha: "cafe1234",
+    acceptedBy: "operator",
+    acceptedAt: new Date(0).toISOString(),
+  };
+  const review = {
+    id: "review-fg654-gate",
+    contract: {
+      threat_model: "a reviewer that was never told the contract",
+      protected_invariants: ["one review_mode per run"],
+      acceptance_refs: ["FG-654 AC 3"],
+      risk_lenses: ["security"],
+      non_goals: [],
+    },
+    contractConfirmedSha: "cafe1234",
+    candidateSha: "cafe1234",
+    lensOutcomes: [
+      acceptance,
+      {
+        lens: "security",
+        role: "red-security",
+        complete: false,
+        reason: "stale_protocol",
+        detail: "no manifest-consistent agent-protocols/red-security.md; run `forge upgrade`",
+      },
+    ],
+  } as unknown as Parameters<typeof assessReviewDisposition>[0]["review"];
+
+  const assessment = assessReviewDisposition({ review, findings: [] });
+  const condition = assessment.conditions.find((c) => c.id === "lens_outcome_missing");
+  assert.ok(condition, "the gate must still hold on the missing lens outcome");
+  assert.match(condition!.detail, /forge upgrade/, "the remedy is named");
+  assert.match(condition!.detail, /acceptance cannot clear/i, "and so is the non-overrideability");
+});
+
+// ─── ACCEPTANCE 4b: THE DIVERGENCE PROBE ────────────────────────────────────
+//
+// The manifest is written well after the prompt is composed — after model resolution,
+// mount preflight and docker-arg construction. If the stamp were re-derived there, a
+// `forge upgrade` landing in that window would make the receipt name a generation the
+// container was never given. A stamp that disagrees with what is on disk is the only way
+// to tell an echo from a second read.
+
+test("integ FG-654: the manifest records the COMPOSED bytes' sha, not a fresh read of the generation", async () => {
+  const gen = setupHome();
+  const role = "red-wide";
+
+  const protocolText = readFileSync(join(gen.root, protocolRelPath(role)), "utf8");
+  const composed = composeSystemPrompt({
+    role,
+    workflow: INVOKE_SHAPE,
+    step: INVOKE_SHAPE.steps[0]!,
+    seedGeneration: gen,
+  });
+  assert.ok(composed.ok, composed.ok ? "" : composed.refusal);
+  if (!composed.ok) return;
+  const composedSha = composed.protocol!.sha256;
+  // 4(a) restated at the dispatch seam: the stamp digests the bytes that are IN the prompt.
+  assert.ok(composed.prompt.includes(protocolText), "the exact protocol bytes are in the prompt");
+  assert.equal(composedSha, createHash("sha256").update(Buffer.from(protocolText, "utf8")).digest("hex"));
+
+  // The prompt is built. NOW the file underneath changes — the upgrade-in-the-window.
+  const path = join(gen.root, protocolRelPath(role));
+  writeFileSync(path, "## A DIFFERENT GENERATION ENTIRELY\n");
+  const onDiskNow = createHash("sha256").update(readFileSync(path)).digest("hex");
+  assert.notEqual(composedSha, onDiskNow, "fixture: the bytes really did change");
+
+  // Complete the dispatch with the package that compose produced.
+  const runId = createInvokeRun(role, projectDir, undefined, "fg654 divergence", undefined);
+  const taskId = newTaskId(role);
+  const task: Task = {
+    id: taskId,
+    runId,
+    phase: "task",
+    agentRole: role,
+    status: "pending",
+    taskPackage: {
+      taskId,
+      runId,
+      phase: "task",
+      role,
+      inputs: { task: "review" },
+      composedSystemPrompt: composed.prompt,
+      dispatchSource: "invoke",
+      agentProtocol: composed.protocol!,
+    },
+    createdAt: new Date().toISOString(),
+  };
+  insertTask(task);
+
+  const res = await dispatchInvokeTask({
+    task,
+    resolution: resolveModel({ agentRole: role, runtimeName: "claude", ctx: { projectDir } }),
+    projectDir,
+    taskText: "review",
+    ownsRun: true,
+    readOnlyProject: true,
+    dockerExec: countingExec(),
+  });
+  assert.equal(res.status, "complete");
+
+  // Read from the FILE — the claim is about durable state.
+  const raw = JSON.parse(readFileSync(join(taskDir(res.runId, res.taskId), "manifest.json"), "utf8")) as {
+    agentProtocol?: { role: string; sha256: string; source: string };
+  };
+  assert.equal(raw.agentProtocol?.role, role);
+  assert.equal(raw.agentProtocol?.sha256, composedSha, "the manifest ECHOES the compose");
+  assert.notEqual(
+    raw.agentProtocol?.sha256,
+    onDiskNow,
+    "a re-derived stamp would carry the generation this prompt was NOT built from",
+  );
+});
+
+const INVOKE_SHAPE: Workflow = {
+  name: "invoke",
+  description: "",
+  review_mode: "evidence_led",
+  inputs: [],
+  steps: [
+    {
+      id: "task",
+      agent: "red-wide",
+      activity: "spec-writer",
+      runtime: "claude",
+      depends_on: [],
+      gate: "auto",
+      manual: false,
+      reds: [],
+    },
+  ],
+};
+
+// ─── ACCEPTANCE 7: the machinery is genuinely gone ──────────────────────────
+
+test("integ FG-654: agent-protocol.ts exports NONE of the removed machinery", () => {
+  const source = readFileSync(join(repoRoot, "src", "v2", "agent-protocol.ts"), "utf8");
+  for (const name of REMOVED_EXPORTS) {
+    assert.ok(
+      !new RegExp(`export\\s+(const|function|type)\\s+${name}\\b`).test(source),
+      `agent-protocol.ts still exports ${name} — removal means DELETION, not deprecation`,
+    );
+  }
+  // Nothing in the module writes to $FORGE_HOME/agents, either.
+  for (const writer of ["writeFileSync", "renameSync", "rmSync", "mkdirSync", "symlinkSync"]) {
+    assert.ok(!source.includes(writer), `agent-protocol.ts must not call ${writer} — it is READ-ONLY now`);
+  }
+});
+
+test("integ FG-654: no module IMPORTS a removed name from agent-protocol.js", () => {
+  const files = sourceFiles(join(repoRoot, "src"));
+  assert.ok(files.length > 100, "sanity: the walk found the source tree");
+  const hits: string[] = [];
+  for (const file of files) {
+    const text = readFileSync(file, "utf8");
+    for (const m of text.matchAll(/import\s*(?:type\s*)?\{([^}]*)\}\s*from\s*"[^"]*agent-protocol\.js"/g)) {
+      const names = (m[1] ?? "").split(",").map((n) => n.replace(/^\s*type\s+/, "").trim());
+      for (const name of names) {
+        if (REMOVED_EXPORTS.includes(name)) hits.push(`${relative(repoRoot, file)}: ${name}`);
+      }
+    }
+  }
+  assert.deepEqual(hits, [], `removed machinery still imported:\n${hits.join("\n")}`);
+});
+
+test("integ FG-654: the backup and staging-file artefacts appear nowhere under src/", () => {
+  const hits: string[] = [];
+  for (const file of sourceFiles(join(repoRoot, "src"))) {
+    const text = readFileSync(file, "utf8");
+    for (const artefact of REMOVED_ARTEFACTS) {
+      if (text.includes(artefact)) hits.push(`${relative(repoRoot, file)}: ${artefact}`);
+    }
+  }
+  assert.deepEqual(hits, [], `a removed artefact literal survives:\n${hits.join("\n")}`);
+});
+
+test("integ FG-654: the only `forge:agent-protocol` string left in src/ is the detection constant", () => {
+  const walk = (at: string, out: string[] = []): string[] => {
+    for (const entry of readdirSync(at, { withFileTypes: true })) {
+      if (entry.name === "node_modules") continue;
+      const full = join(at, entry.name);
+      if (entry.isDirectory()) walk(full, out);
+      else if (entry.isFile() && /\.tsx?$/.test(entry.name)) out.push(full);
+    }
+    return out;
+  };
+  const carriers = walk(join(repoRoot, "src"))
+    .filter((f) => readFileSync(f, "utf8").includes("forge:agent-protocol"))
+    .map((f) => relative(repoRoot, f))
+    .sort();
+
+  // agent-protocol.ts DEFINES the detection-only constant; everything else is a test
+  // exercising the detector. No production module may parse a fence or write a marker.
+  assert.ok(carriers.includes(join("src", "v2", "agent-protocol.ts")), "the constant must live in agent-protocol.ts");
+  for (const file of carriers) {
+    assert.ok(
+      file.endsWith(".test.ts") || file === join("src", "v2", "agent-protocol.ts"),
+      `${file} still references the legacy marker outside the detector and its tests`,
+    );
+  }
+});
+
+test("integ FG-654: no marker survives in seeds/agents, and upgrade prints only four steps", () => {
+  for (const role of COVERED_ROLES) {
+    const seed = readFileSync(join(repoRoot, "seeds", "agents", role, "CLAUDE.md"), "utf8");
+    assert.ok(!seed.includes("forge:agent-protocol"), `${role}: a marker survives in the shipped seed`);
+    // And the protocol it lost is a real file.
+    assert.ok(statSync(join(repoRoot, "seeds", protocolRelPath(role))).isFile(), `${role}: no protocol file`);
+  }
+
+  const upgrade = readFileSync(join(repoRoot, "src", "cli", "commands", "upgrade.ts"), "utf8");
+  assert.ok(!/agentProtocol/.test(upgrade), "UpgradeResult must carry no agentProtocol* field");
+  const denominators = [...new Set([...upgrade.matchAll(/\[(\d+)\/(\d+)\]/g)].map((m) => m[2]))];
+  assert.deepEqual(denominators, ["4"], "upgrade prints only [n/4]");
+});
+
+test("integ FG-654: scripts/install-seeds.sh is textually untouched by this ticket", () => {
+  const script = readFileSync(join(repoRoot, "scripts", "install-seeds.sh"), "utf8");
+  assert.ok(!script.includes("FG-654"), "the installer must carry no FG-654 framing");
+  assert.ok(!script.includes("agent-protocol"), "the installer must not know about the protocol at all");
+  assert.match(
+    script,
+    /AUTHORED_EXEMPT=\(agents constraints raci\)/,
+    "agents is once again wholly operator-authored, whole-file",
+  );
 });

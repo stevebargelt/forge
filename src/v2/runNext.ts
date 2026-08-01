@@ -659,6 +659,7 @@ async function dispatchSingleStep(args: {
     workflow: args.workflow,
     step,
     runTags: runTagsFromMetadata(args.runMetadata),
+    seedGeneration: args.seedGeneration,
   });
 
   const taskPackage: TaskPackage = {
@@ -1645,6 +1646,7 @@ async function runOneRed(args: {
     workflow: args.workflow,
     step: args.step,
     runTags: runTagsFromMetadata(args.runMetadata),
+    seedGeneration: args.seedGeneration,
   });
   const taskPackage: TaskPackage = {
     taskId: redTaskId,
@@ -2912,6 +2914,7 @@ async function runFanoutChild(args: {
     workflow: args.workflow,
     step,
     runTags: runTagsFromMetadata(args.runMetadata),
+    seedGeneration: args.seedGeneration,
   });
   const taskPackage: TaskPackage = {
     taskId: childTaskId,

@@ -299,9 +299,9 @@ export function registerDoctor(program: Command): void {
     .action((opts: { json?: boolean }) => {
       const report = buildReleaseReport(gatherReleaseInputs(DEFAULT_IMAGE, { projectDir: process.cwd() }));
       const drift = detectSeedDrift(); // FG-335: installed ~/.forge seeds vs running code
-      // FG-654: the Forge-owned protocol region inside the operator-authored agent seeds.
-      // Separate from `drift` on purpose — the same file's operator-side drift stays a
-      // warn while a stale REGION is a readiness fail, because dispatch refuses on it.
+      // FG-654: the Forge-owned protocol, read out of the published seed generation.
+      // Separate from `drift` on purpose — the operator's own agent prose stays a warn
+      // while an unresolvable protocol is a readiness fail, because dispatch refuses on it.
       const protocolDrift = detectProtocolDrift();
       // FG-583: dispatch reads ONLY a published seed generation — there is no flat
       // dispatch fallback. So ONLY `healthy` (a complete generation is published) is
@@ -328,9 +328,9 @@ export function registerDoctor(program: Command): void {
           console.log(`  Fix: forge upgrade (publishes a complete atomic seed generation).`);
         }
       }
-      // FG-654: protocolDrift.ok joins the readiness conjunction. A stale Forge-owned
-      // region is a host that cannot review, so it goes red here even though the file it
-      // lives in is classified prose (which stays a warn via drift.ok).
+      // FG-654: protocolDrift.ok joins the readiness conjunction. A covered role whose
+      // protocol does not resolve is a host that cannot review, so it goes red here even
+      // though the operator's own agent prose stays a warn via drift.ok.
       process.exitCode = report.ok && drift.ok && protocolDrift.ok && seedInstallOk ? 0 : 1;
     });
 }

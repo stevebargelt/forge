@@ -1,6 +1,9 @@
 // forge v2 — system prompt + task package composition.
 //
-// Adapted from src/spine/composeSystemPrompt.ts. Same three-tier shape:
+// Adapted from src/spine/composeSystemPrompt.ts. Tiers, in prompt order:
+//   0. FG-654: for a covered role, the Forge-owned protocol from the published seed
+//      generation — FIRST, so the contract the output is judged by is read before the
+//      operator's customization of the role rather than after it
 //   1. Agent base CLAUDE.md from ~/.forge/agents/<role>/CLAUDE.md
 //   2. step.workflow_additions (if present)
 //   3. suggest-level constraints filtered by role + workflow + step
@@ -15,7 +18,8 @@ import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { filterConstraints, loadAllConstraints } from "./constraints.js";
-import { assertAgentProtocolCurrent, type AgentProtocolStamp, type ProtocolPaths } from "./agent-protocol.js";
+import { assertAgentProtocolCurrent, type AgentProtocolStamp } from "./agent-protocol.js";
+import { resolveSeedGeneration, type SeedGeneration } from "./seed-generation.js";
 import type { Workflow, Step } from "./schema.js";
 
 const FRAMING = `## Output contract
@@ -32,9 +36,10 @@ export type ComposeArgs = {
   // Override defaults for tests.
   agentDir?: string;
   constraintsDir?: string;
-  /** FG-654: override the two roots the protocol check reads (installed seed under
-   *  $FORGE_HOME, required seed in the executing release). Tests only. */
-  protocolPaths?: ProtocolPaths;
+  /** FG-654: the seed generation this invocation is anchored to, mirroring
+   *  LoadContext — `undefined` resolves the live seed pointer, `null` means none
+   *  anchored (and a covered role then refuses). */
+  seedGeneration?: SeedGeneration | null;
 };
 
 /** FG-654: composing is no longer unconditionally possible. THIS is the one seam every
@@ -59,25 +64,35 @@ function defaultConstraintsDir(): string {
 export function composeSystemPrompt(args: ComposeArgs): ComposeResult {
   const sections: string[] = [];
 
-  // FG-654: the protocol check and the prompt MUST read the same installed file, so both
-  // resolve from one home. An explicit agentDir is that file's home by definition; a
-  // protocolPaths.forgeHome override steers both halves; otherwise it is $FORGE_HOME.
-  const forgeHome = args.protocolPaths?.forgeHome;
-  const agentDir = args.agentDir ?? (forgeHome !== undefined ? join(forgeHome, "agents", args.role) : defaultAgentDir(args.role));
+  const agentDir = args.agentDir ?? defaultAgentDir(args.role);
   const baseFile = join(agentDir, "CLAUDE.md");
+  // READ, never written. The operator's file is theirs under exactly the FG-578 rules.
+  const installedSeedText = existsSync(baseFile) ? readFileSync(baseFile, "utf8") : null;
 
-  // For a role the review lifecycle dispatches, the Forge-owned protocol region must be
-  // present AND current before anything is composed. An ABSENT seed and a STALE one are
-  // the same class of unmet precondition: the placeholder below used to fail OPEN,
-  // dispatching a reviewer with no role contract at all.
-  const protocol = assertAgentProtocolCurrent(args.role, {
-    ...(args.protocolPaths ?? {}),
-    forgeHome: forgeHome ?? join(agentDir, "..", ".."),
-  });
+  // For a role the review lifecycle dispatches, the Forge-owned protocol must resolve
+  // manifest-consistently out of the published generation before anything is composed,
+  // and the operator's file must not still carry an embedded copy of it.
+  const generation =
+    args.seedGeneration !== undefined ? args.seedGeneration : resolveSeedGeneration();
+  const protocol = assertAgentProtocolCurrent(
+    args.role,
+    generation,
+    installedSeedText === null ? null : { path: baseFile, text: installedSeedText },
+  );
   if (!protocol.ok) return { ok: false, refusal: protocol.refusal, role: args.role };
 
-  if (existsSync(baseFile)) {
-    sections.push(readFileSync(baseFile, "utf8").trim());
+  // THE NON-DIVERGENCE PROPERTY. ONE local binding: the bytes pushed into `sections` and
+  // the bytes `protocol.stamp.sha256` digests are the same value used twice. Nothing
+  // re-reads the file after compose and nothing recomputes at manifest-write time, so
+  // the recorded hash cannot describe a prompt the container never saw.
+  const protocolText = protocol.text;
+  if (protocolText !== undefined) sections.push(protocolText);
+
+  // The operator seed is FAIL-OPEN when absent: it is operator-owned, and the contract
+  // the reviewer is judged by is now guaranteed present from the generation above, so an
+  // absent operator file is no longer a reason to refuse.
+  if (installedSeedText !== null) {
+    sections.push(installedSeedText.trim());
   } else {
     sections.push(`# ${args.role}\n\n(Agent base CLAUDE.md not found at ${baseFile})`);
   }

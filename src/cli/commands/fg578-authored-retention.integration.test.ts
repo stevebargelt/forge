@@ -78,11 +78,7 @@ function releaseTree(): string {
   mkdirSync(join(base, "seeds", "runtimes"), { recursive: true });
   mkdirSync(join(base, "scripts"), { recursive: true });
   writeFileSync(join(base, "seeds", "forge-raci.md"), raciDoc(SEED_RESPONSIBLE));
-  // FG-654: a release carries a fenced protocol seed for every covered role (`engineer`
-  // among them), and since RF-13 an upgrade that publishes nothing for one of them is
-  // UNRESOLVED. Copying the real seeds keeps this fixture a COMPLETE release, so the
-  // exit-code assertions below stay about retention — the variable this file isolates.
-  cpSync(join(assetRoot(), "seeds", "agents"), join(base, "seeds", "agents"), { recursive: true });
+  writeFileSync(join(base, "seeds", "agents", "engineer", "CLAUDE.md"), "SEED agent prose\n");
   writeFileSync(join(base, "seeds", "constraints", "house-style.md"), "SEED constraint prose\n");
   writeFileSync(join(base, "seeds", "runtimes", "pi-apikey.yml"), "# SEED\nprovider: SEED\n");
   writeFileSync(join(base, "seeds", "orchestrator-template.md"), "SEED TEMPLATE\n");
@@ -352,7 +348,7 @@ test("FG-578: a NEW seed file inside an exempt category is still installed along
 // ─────────── 4. NO FALSE REFRESH — the summary-count trap ───────────
 
 test("FG-578: a retained file is NOT echoed as 'Installing …' and NOT counted as refreshed", () => {
-  // THE TRAP, pinned at its exact seam. upgrade derives "[3/5] N component(s)
+  // THE TRAP, pinned at its exact seam. upgrade derives "[3/4] N component(s)
   // refreshed" by counting installer stdout lines starting with "Installing". Had
   // install-seeds kept echoing "Installing forge-raci.md into $DEST/" while
   // skipping the copy, upgrade would report a refresh that DID NOT HAPPEN — the

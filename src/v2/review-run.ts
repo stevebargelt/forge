@@ -36,6 +36,7 @@ import {
   findingsForReview,
   getReview,
   ingestFindings,
+  agentProtocolRecordsOf,
   lensAcceptancesOf,
   invalidateResolutionsForCandidate,
   recordAgentProtocol,
@@ -421,7 +422,13 @@ async function runDiscovery(reviewId: string, transition: Transition, deps: Coor
   // The acceptances survive a re-dispatch: they are operator decisions about this confirmed
   // candidate, and a retry that crashes again must not silently erase one.
   const acceptances = lensAcceptancesOf(review);
-  updateReview(reviewId, { lensOutcomes: [...acceptances, ...outcomes] });
+  // RF-26: the agent_protocol records survive too, for exactly the same reason. They are
+  // statements about fix_batch / docs / recheck dispatches that ALREADY HAPPENED, and
+  // `lens_outcomes_json` is replaced wholesale here — so without this a discovery pass
+  // silently erases the receipt of every non-lens dispatch that preceded it.
+  updateReview(reviewId, {
+    lensOutcomes: [...acceptances, ...agentProtocolRecordsOf(review), ...outcomes],
+  });
 
   const completeness = assessDiscoveryCompleteness(lenses, outcomes, {
     acceptances,

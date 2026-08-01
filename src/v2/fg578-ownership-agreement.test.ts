@@ -27,16 +27,11 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { assetRoot } from "./asset-root.js";
 import { authoredCategories, autoRefreshableCategories } from "./seed-drift.js";
-import {
-  COVERED_ROLES,
-  PROTOCOL_START_MARKER,
-  PROTOCOL_END_MARKER,
-  readProtocolRegion,
-} from "./agent-protocol.js";
+import { COVERED_ROLES } from "./agent-protocol.js";
 import { RISK_LENSES, lensRole } from "./review-contract.js";
 
 const INSTALL_SCRIPT = join(assetRoot(), "scripts", "install-seeds.sh");
@@ -111,31 +106,15 @@ test("FG-578: the installer routes every seed category through the ownership pol
   }
 });
 
-// ─── FG-654: the single-publisher gate, and the coverage agreement ──────────
+// ─── FG-654: the coverage agreement ─────────────────────────────────────────
 //
-// Same prior art, one layer down. FG-654 splits an agent seed into an
-// operator-authored outside and a Forge-owned, marker-fenced protocol region. The
-// installer keeps its whole-file, category-granular AUTHORED_EXEMPT and performs NO
-// region surgery — the region has exactly ONE publisher and it is TypeScript. Two
-// publishers with conflicting ownership rules is the hazard; this is the gate.
-
-test("FG-654: install-seeds.sh performs NO marker or region surgery — the region has one publisher, in TypeScript", () => {
-  const script = readFileSync(INSTALL_SCRIPT, "utf8");
-  // Non-comment lines only: the header comment POINTS AT the TS publisher on purpose,
-  // so the next reader is not misled by its "agents are wholly the operator's" framing.
-  const code = script
-    .split("\n")
-    .filter((l) => !/^\s*#/.test(l))
-    .join("\n");
-  for (const marker of [PROTOCOL_START_MARKER, PROTOCOL_END_MARKER, "forge:agent-protocol"]) {
-    assert.ok(
-      !code.includes(marker),
-      `install-seeds.sh must not touch '${marker}' — the protocol region's single publisher is src/v2/agent-protocol.ts`,
-    );
-  }
-  // And the exemption itself is untouched: still whole-file, still these three.
-  assert.deepEqual(parseAuthoredExempt(script), ["agents", "constraints", "raci"]);
-});
+// The protocol is no longer a region inside an operator seed — it is a forge-owned seed
+// GENERATION category (seeds/agent-protocols/<role>.md), published by the same atomic
+// mechanism as workflows and runtimes. The installer is therefore untouched by FG-654
+// and `agents` is once again wholly operator-authored, whole-file, which the partition
+// assertions above already hold. What still needs holding is COVERAGE: every role the
+// review lifecycle actually dispatches must have a protocol, or it dispatches a reviewer
+// that was never told the contract its output is judged by.
 
 test("FG-654: every review-lifecycle dispatch role in the REAL dispatch sites is in COVERED_ROLES", () => {
   // Parsed out of the artifacts, not restated here — a hand-maintained registry is the
@@ -168,23 +147,13 @@ test("FG-654: every review-lifecycle dispatch role in the REAL dispatch sites is
   }
   // Guard against the vacuous pass.
   assert.ok(dispatched.size >= 9, `expected at least the nine covered roles, parsed ${dispatched.size}`);
-});
 
-test("FG-654: every covered role's REPO seed carries exactly one balanced, non-empty fence", () => {
+  // And every one of them has a protocol in the release to be dispatched WITH.
   for (const role of COVERED_ROLES) {
-    const path = join(assetRoot(), "seeds", "agents", role, "CLAUDE.md");
+    const path = join(assetRoot(), "seeds", "agent-protocols", `${role}.md`);
+    assert.ok(existsSync(path), `${role}: this release carries no ${path}`);
     const text = readFileSync(path, "utf8");
-    assert.equal(
-      text.split(PROTOCOL_START_MARKER).length - 1,
-      1,
-      `${role}: exactly one ${PROTOCOL_START_MARKER}`,
-    );
-    assert.equal(text.split(PROTOCOL_END_MARKER).length - 1, 1, `${role}: exactly one ${PROTOCOL_END_MARKER}`);
-    const read = readProtocolRegion(text);
-    assert.equal(read.kind, "fenced", `${role}: the fence must be balanced`);
-    if (read.kind === "fenced") {
-      assert.ok(read.region.length > 0, `${role}: the region must not be empty`);
-      assert.ok(read.region.startsWith("## "), `${role}: the region must start at a section heading`);
-    }
+    assert.ok(text.trim().length > 0, `${role}: its protocol file is empty`);
+    assert.ok(text.startsWith("## "), `${role}: its protocol must start at a section heading`);
   }
 });

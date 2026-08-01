@@ -25,7 +25,10 @@ import {
   getReview,
   ingestFindings,
   insertReview,
+  lensAcceptancesOf,
   lensOutcomeRecordsOf,
+  recordAgentProtocol,
+  recordLensAcceptance,
   recordDisposition,
   recordResolution,
   type Review,
@@ -2248,4 +2251,77 @@ test("FG-654: the docs and recheck dispatches record their protocol generation t
   assert.equal(byStage.get("recheck")?.role, "review-rechecker");
   assert.equal(byStage.get("recheck")?.sha256, "c".repeat(64));
   assert.equal(byStage.get("recheck")?.taskId, "task-recheck-rf7");
+});
+
+// FG-654 RF-26: A DISCOVERY PASS MUST NOT ERASE THE RECEIPTS OF DISPATCHES THAT HAPPENED.
+//
+// `runDiscovery` replaces `lens_outcomes_json` WHOLESALE with `[...acceptances,
+// ...outcomes]`. The acceptances are re-injected because they are operator decisions about
+// this candidate; the agent_protocol records need re-injecting for exactly the same reason
+// — they are statements about fix_batch / docs / recheck dispatches that ALREADY RAN. Left
+// out, a second discovery pass silently deletes the answer to "which protocol did the
+// fixer run under", which is the question FG-654 exists to make answerable.
+test("FG-654 RF-26: a re-run discovery preserves agent_protocol records alongside acceptances and fresh outcomes", async () => {
+  // The `wide` lens crashes on the FIRST pass only, so the panel is incomplete and the
+  // review stays in discovering — which is what makes discovery run a SECOND time over the
+  // same review, the wholesale `lens_outcomes_json` replacement this pins.
+  let firstPass = true;
+  const h = harness({
+    findingsPerLens: 1,
+    dispatchLens: (ctx) => {
+      if (firstPass && ctx.lens === "wide") {
+        return { lens: ctx.lens, role: ctx.role, dispatched: false, failureKind: "container_crash" };
+      }
+      return {
+        lens: ctx.lens,
+        role: ctx.role,
+        dispatched: true,
+        taskId: `task-${ctx.lens}`,
+        result:
+          ctx.lens === "backend"
+            ? { outcome: "fail", findings: [discoveryFinding(1)] }
+            : { outcome: "pass", findings: [] },
+      };
+    },
+  });
+  await drive(h.deps, "discover");
+  assert.equal(getReview(REVIEW)!.state, "discovering", "precondition: the panel is incomplete");
+
+  // A receipt of a dispatch that already happened…
+  recordAgentProtocol(REVIEW, {
+    role: "engineer",
+    sha256: "f".repeat(64),
+    taskId: "task-fixer-rf26",
+    stage: "fix_batch",
+  });
+  // …and an operator decision, whose survival is already load-bearing — the control that
+  // makes this test about the RECORD and not about discovery being broken generally.
+  const accepted = recordLensAcceptance(REVIEW, {
+    lens: "backend",
+    missingEvidence: "no backend lens ran",
+    rationale: "shipping anyway",
+    operator: true,
+  });
+  assert.ok(accepted.ok, accepted.ok ? "" : accepted.refusal);
+
+  const before = agentProtocolRecordsOf(getReview(REVIEW)!);
+  assert.equal(before.length, 1, "precondition: the record was written");
+
+  // Re-run discovery over the SAME review — the wholesale replacement.
+  firstPass = false;
+  const outcome = await runNextStage(REVIEW, h.deps);
+  assert.equal(outcome.transition.kind, "discover", "discovery must genuinely re-run");
+
+  const review = getReview(REVIEW)!;
+  const after = agentProtocolRecordsOf(review);
+  assert.equal(after.length, 1, "the agent_protocol record must SURVIVE the discovery pass");
+  assert.deepEqual(after[0], before[0], "…byte-for-byte, not re-derived");
+
+  // And it survives ALONGSIDE the other two populations, not instead of them.
+  assert.equal(lensAcceptancesOf(review).length, 1, "the operator acceptance is still re-injected");
+  assert.ok(lensOutcomeRecordsOf(review).length > 0, "and the fresh lens outcomes are there");
+  assert.ok(
+    !lensOutcomeRecordsOf(review).some((r) => JSON.stringify(r).includes("agent_protocol")),
+    "the record is still filtered out of the reviewer-authored outcomes",
+  );
 });

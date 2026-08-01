@@ -17,16 +17,22 @@ import { deprecationNote } from "../cli/commands/review-loop.js";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const seed = (p: string) => readFileSync(resolve(repoRoot, "seeds", p), "utf8");
 
+/** FG-654: the Forge-owned protocol moved OUT of the operator-authored agent seed and
+ *  into its own generation-published file. The contract a dispatched agent receives is
+ *  both halves, in compose order, so that is the unit these assertions read. */
+const roleContract = (role: string) =>
+  `${seed(`agent-protocols/${role}.md`)}\n\n${seed(`agents/${role}/CLAUDE.md`)}`;
+
 for (const lens of RISK_LENSES) {
   test(`FG-640: the red-${lens} seed says its verdict is EVIDENCE, not authority`, () => {
-    const t = seed(`agents/red-${lens}/CLAUDE.md`);
+    const t = roleContract(`red-${lens}`);
     assert.match(t, /your verdict is EVIDENCE, not authority/i);
     assert.match(t, /gate_on_verdict.*false|`gate_on_verdict: false`/);
     assert.match(t, /disposition/i, "must say its findings go through disposition");
   });
 
   test(`FG-640: the red-${lens} seed carries the discovery fields, and its own lens name`, () => {
-    const t = seed(`agents/red-${lens}/CLAUDE.md`);
+    const t = roleContract(`red-${lens}`);
     for (const field of ["risk_lens", "reachability", "challenges_contract", "remediation_advice"]) {
       assert.match(t, new RegExp(`\`${field}\``), `red-${lens} never names the '${field}' discovery field`);
     }
@@ -37,13 +43,13 @@ for (const lens of RISK_LENSES) {
   });
 
   test(`FG-640: the red-${lens} seed still forbids a synthesized or empty result`, () => {
-    const t = seed(`agents/red-${lens}/CLAUDE.md`);
+    const t = roleContract(`red-${lens}`);
     assert.match(t, /empty or synthesized result/i);
   });
 }
 
 test("FG-640: the shipping-reviewer seed enumerates all six duties and the docs_closeout field", () => {
-  const t = seed("agents/shipping-reviewer/CLAUDE.md");
+  const t = roleContract("shipping-reviewer");
   assert.match(t, /## Your six duties \(FG-640\)/);
   for (const duty of [
     /AC → evidence mapping/,
@@ -62,7 +68,7 @@ test("FG-640: the shipping-reviewer seed enumerates all six duties and the docs_
 });
 
 test("FG-640: the engineer (fixer) seed carries the batch-remediation rules", () => {
-  const t = seed("agents/engineer/CLAUDE.md");
+  const t = roleContract("engineer");
   assert.match(t, /## Batch remediation — when you are the review fixer \(FG-640\)/);
   assert.match(t, /An omission is never read\s*\n?\s*as a resolution|omission is never read as a resolution/i);
   assert.match(t, /scope_change/);
