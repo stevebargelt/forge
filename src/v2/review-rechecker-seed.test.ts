@@ -19,7 +19,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RESOLUTION_EVIDENCE_KINDS } from "./review-evidence.js";
 import { RECHECK_RESULTS } from "./review-recheck.js";
-import { readProtocolRegion, resolveAgentProtocol } from "./agent-protocol.js";
+import { publishAgentProtocolRegions, readProtocolRegion, resolveAgentProtocol } from "./agent-protocol.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const seedDir = join(repoRoot, "seeds", "agents", "review-rechecker");
@@ -139,12 +139,34 @@ test("FG-639: the seed tells the rechecker its new findings land untriaged with 
 //
 // This is WHY FG-654 shipped green: every assertion above reads
 // repoRoot/seeds/agents/review-rechecker/CLAUDE.md, and they were ALL passing on a host
-// where the dispatched rechecker read 40-lines-behind bytes from $FORGE_HOME. The
-// repo-side assertions stay — they pin the SOURCE — and these pin the EFFECTIVE copy.
+// where the dispatched rechecker read 40-lines-behind bytes from $FORGE_HOME.
+//
+// WHAT A HERMETIC SUITE CAN AND CANNOT SAY ABOUT THAT. It cannot assert anything about the
+// developer's real ~/.forge — the suite runs against a temp $FORGE_HOME that src/test-setup.ts
+// provisions by copying these very seeds. An assertion of the form
+// `resolveAgentProtocol(role)` under that home compares a byte-copy against its own source
+// and is true on every host, including the one that reported FG-654: it is the repo-vs-installed
+// blind spot reproduced inside the guard meant to close it. So the guards below assert the two
+// things that ARE falsifiable — the publisher converges a home, and the resolver goes RED on
+// installed drift with the repo seed untouched. `forge doctor` is what answers the question
+// for a real host, and it is a FAIL there since FG-654.
 
-test("FG-654: the rechecker's INSTALLED protocol region is current, not just the repo seed's", () => {
-  const resolved = resolveAgentProtocol("review-rechecker");
-  assert.ok(resolved.ok, resolved.ok ? "" : resolved.refusal);
+test("FG-654: publishing converges a home's region, and the guard goes RED when it has not", () => {
+  const home = mkdtempSync(join(tmpdir(), "forge-fg654-rechecker-publish-"));
+  publishAgentProtocolRegions({ forgeHome: home, seedsDir: join(repoRoot, "seeds") });
+  assert.ok(
+    resolveAgentProtocol("review-rechecker", { forgeHome: home }).ok,
+    "the publish pass is the only thing that maintains the region; after it, dispatch must resolve",
+  );
+
+  // NEGATIVE CONTROL, and the measured 2026-07-31 shape: a pre-FG-654 seed carrying no
+  // fence at all, while the repo seed stays pristine. If this ever passes, the guard above
+  // has stopped reading the installed copy.
+  writeFileSync(join(home, "agents", "review-rechecker", "CLAUDE.md"), "# review-rechecker\n\n40 lines behind\n");
+  const stale = resolveAgentProtocol("review-rechecker", { forgeHome: home });
+  assert.equal(stale.ok, false, "an unfenced installed seed must refuse, not resolve");
+  if (!stale.ok) assert.equal(stale.reason, "installed_unfenced");
+  rmSync(home, { recursive: true, force: true });
 });
 
 test("FG-654: mutating the INSTALLED copy while the repo seed stays pristine goes RED", () => {

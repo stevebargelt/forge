@@ -145,8 +145,8 @@ test("FG-577 (criterion 7): the refusal names both sides, says why, and carries 
 });
 
 test("FG-577: the refusal makes no ordering claim it cannot keep on every path that emits it", () => {
-  // ONE string is emitted from TWO paths: the git/npm refusal prints at [1/4] and
-  // [2/4] — BEFORE install-seeds runs at [3/4] — while the --rebuild-image refusal
+  // ONE string is emitted from TWO paths: the git/npm refusal prints at [1/5] and
+  // [2/5] — BEFORE install-seeds runs at [3/5] — while the --rebuild-image refusal
   // prints last, after both. "has already been attempted above" is true only on
   // the second, so the string may not assert a relative order at all.
   for (const action of ["advance the dev checkout (git pull / npm install)", "rebuild the agent image (--rebuild-image)"]) {
@@ -379,15 +379,19 @@ const SEED_GENERATION: Record<SeedGenerationOutcome, Verdict> = {
   failed: "unresolved",
 };
 
-// FG-654: `needs-repair` is the ONE manual rung — a seed whose marker fence is
-// ambiguous is left untouched and that host cannot review until it is repaired, so it
-// must be unresolved rather than a clean upgrade that quietly bricked the lifecycle.
+// FG-654: THREE unresolved facts, and none of them may report as a clean upgrade — each
+// leaves at least one of the nine covered roles refusing at every dispatch. `needs-repair`
+// is the manual rung (an ambiguous fence, a heading collision, a symlinked seed) and is
+// the operator's to fix; `incomplete` is a release carrying no fenced seed for a role, and
+// no re-run here converges it; `failed` is the write throwing partway through the nine.
 const AGENT_PROTOCOL: Record<AgentProtocolOutcome, Verdict> = {
   published: "resolved",
   "already-current": "resolved",
   "would-publish": "resolved",
   "not-run": "resolved",
   "needs-repair": "unresolved",
+  incomplete: "unresolved",
+  failed: "unresolved",
 };
 
 const EXPECTED: { [K in keyof UpgradeStepOutcomes]: Record<UpgradeStepOutcomes[K], Verdict> } = {
@@ -420,7 +424,7 @@ test("FG-577 (criterion 10): EVERY variant of EVERY step is classified — no va
     }
   }
   // Guards against the tables silently emptying and the loop vacuously passing.
-  assert.equal(checked, 8 + 7 + 4 + 4 + 3 + 5 + 5 + 8 + 5 + 5 + 4);
+  assert.equal(checked, 8 + 7 + 4 + 4 + 3 + 7 + 5 + 8 + 5 + 5 + 4);
 });
 
 test("FG-577 (criterion 10): unresolvedReasons enumerates the outcomes object's own keys", () => {

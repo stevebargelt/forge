@@ -22,7 +22,7 @@
 // per task and answers nothing. REQUIRED is read from the executing release,
 // INSTALLED from $FORGE_HOME — two independent reads, never one restating the other.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -140,11 +140,14 @@ export type ProtocolApplyResult =
     }
   | { action: "needs-markers"; content: string; message: string };
 
-/** Headings (`# ` / `## `) at fence depth 0. A `## ` inside a fenced code block is
- *  content, not a boundary — mis-reading one is how a splice swallows an operator's
- *  section. */
-function headingLines(text: string): Array<{ index: number; line: string }> {
-  const out: Array<{ index: number; line: string }> = [];
+type Heading = { index: number; line: string; depth: number };
+
+/** Headings at fence depth 0, at EVERY markdown depth. A `## ` inside a fenced code
+ *  block is content, not a boundary — mis-reading one is how a splice swallows an
+ *  operator's section. Depth matters twice over: `# `/`## ` bound a section's extent,
+ *  and `### ` and deeper decide which lines INSIDE a matched section are Forge's. */
+function headingLines(text: string): Heading[] {
+  const out: Heading[] = [];
   let inFence = false;
   const lines = text.replace(/\r\n/g, "\n").split("\n");
   for (let i = 0; i < lines.length; i += 1) {
@@ -154,7 +157,8 @@ function headingLines(text: string): Array<{ index: number; line: string }> {
       continue;
     }
     if (inFence) continue;
-    if (/^#{1,2} /.test(line)) out.push({ index: i, line: line.trimEnd() });
+    const m = /^(#{1,6}) /.exec(line);
+    if (m) out.push({ index: i, line: line.trimEnd(), depth: (m[1] as string).length });
   }
   return out;
 }
@@ -163,8 +167,48 @@ function headingLines(text: string): Array<{ index: number; line: string }> {
  *  headings and therefore cannot be excised by adoption. */
 export function regionHeadings(region: string): string[] {
   return headingLines(normalizeRegion(region))
-    .filter((h) => h.line.startsWith("## "))
+    .filter((h) => h.depth === 2)
     .map((h) => h.line);
+}
+
+/** EVERY heading the release's region carries, at every depth. A `## ` match says a
+ *  section is Forge's; this says which lines inside it are. An operator's own `### `
+ *  nested under a Forge `## ` is not in here, and adoption keeps it. */
+function regionOwnedHeadings(region: string): Set<string> {
+  return new Set(headingLines(normalizeRegion(region)).map((h) => h.line));
+}
+
+/** The Forge-owned line ranges inside one matched `## ` section [from, to).
+ *
+ *  The heading matched, so the section is Forge's — but a `### ` inside it whose heading
+ *  the release region does NOT carry is the operator's, nested under a Forge heading (the
+ *  shape 6 of the 9 release seeds invite by using `### ` subsections themselves). Those
+ *  runs are left out of the excision, so they stay in the LIVE seed rather than surviving
+ *  only in the .bak. A run ends at the next sub-heading the region does own. */
+function forgeRangesIn(
+  from: number,
+  to: number,
+  headings: readonly Heading[],
+  owned: ReadonlySet<string>,
+): Array<{ from: number; to: number }> {
+  const subs = headings.filter((h) => h.depth >= 3 && h.index > from && h.index < to);
+  const out: Array<{ from: number; to: number }> = [];
+  let cursor = from;
+  let i = 0;
+  while (i < subs.length) {
+    const s = subs[i] as Heading;
+    if (s.index < cursor || owned.has(s.line)) {
+      i += 1;
+      continue;
+    }
+    if (s.index > cursor) out.push({ from: cursor, to: s.index });
+    let j = i + 1;
+    while (j < subs.length && !owned.has((subs[j] as Heading).line)) j += 1;
+    cursor = j < subs.length ? (subs[j] as Heading).index : to;
+    i = j;
+  }
+  if (cursor < to) out.push({ from: cursor, to });
+  return out;
 }
 
 /** Adopt an unmarked legacy seed, or splice a fenced one. Pure over its inputs;
@@ -192,7 +236,12 @@ export function applyProtocolRegion(existing: string, releaseRegion: string): Pr
     return {
       action: content === existing ? "unchanged" : "replaced",
       content,
-      excisedChanged: false,
+      // The splice DISCARDS whatever was between the markers, and those bytes are Forge's
+      // only if nobody hand-wrapped their own prose inside them — which is exactly what
+      // the needs-markers repair text asks an operator to do. So a region that differed is
+      // a lossy path and gets the same backup adoption gets. An already-current host is
+      // `unchanged` and never reaches here, so this writes no .bak on a no-op upgrade.
+      excisedChanged: read.region !== normalizeRegion(releaseRegion),
     };
   }
 
@@ -221,18 +270,44 @@ export function applyProtocolRegion(existing: string, releaseRegion: string): Pr
   if (matches.length === 0) {
     // Nothing is overwritten, so nothing can be lost. This is the measured common case:
     // a legacy seed that never carried the FG-640 sections at all.
-    const base = existing.replace(/\s*$/, "");
-    const content = base.length === 0 ? `${block}\n` : `${base}\n\n${block}\n`;
-    return { action: "appended", content, excisedChanged: false };
+    //
+    // The separator is DERIVED from what the file already ends with rather than trimmed
+    // off it: trailing spaces, blank lines and a CRLF tail are operator bytes, and this
+    // rung's whole claim is that it removes none. Trimming them here would make the one
+    // path that writes no .bak also the path that silently edits the operator's file.
+    const sep = existing.length === 0 ? "" : existing.endsWith("\n\n") ? "" : existing.endsWith("\n") ? "\n" : "\n\n";
+    return { action: "appended", content: `${existing}${sep}${block}\n`, excisedChanged: false };
+  }
+
+  // A PARTIAL match is ambiguous, and forge refuses it. Nothing in the file proves a
+  // heading is Forge's — a legacy Forge block carries the release region's `## ` headings
+  // as a SET, so a seed matching only some of them is at least as likely to be an operator
+  // section that happens to share a name. Excising that would delete their content with
+  // no provenance for the claim that it was ours.
+  if (matches.length < wanted.size) {
+    const missing = [...wanted].filter((h) => !seen.has(h));
+    return {
+      action: "needs-markers",
+      content: existing,
+      message:
+        `this seed carries ${matches.length} of the ${wanted.size} headings the Forge-owned protocol region ` +
+        `owns (missing: ${missing.join(", ")}), so forge cannot tell whether '${(matches[0] as Heading).line}' is a ` +
+        `legacy Forge section or your own section that shares its name — and will not delete your content on a ` +
+        `guess. Repair by hand: rename your section, or wrap the Forge sections in ` +
+        `'${PROTOCOL_START_MARKER}' / '${PROTOCOL_END_MARKER}' yourself. Nothing was written.`,
+    };
   }
 
   // Section extent: the heading line through the line before the next `# `/`## ` at fence
-  // depth 0, or EOF.
-  const headingIdx = headings.map((h) => h.index);
+  // depth 0, or EOF. A `### ` does NOT end the section — it is nested content — so the
+  // section's own sub-headings decide which of its lines are Forge's (below).
+  const owned = regionOwnedHeadings(releaseRegion);
+  const headingIdx = headings.filter((h) => h.depth <= 2).map((h) => h.index);
   const ranges: Array<{ from: number; to: number }> = [];
   for (const m of matches) {
     const next = headingIdx.find((i) => i > m.index);
-    ranges.push({ from: m.index, to: next === undefined ? lines.length : next });
+    const to = next === undefined ? lines.length : next;
+    ranges.push(...forgeRangesIn(m.index, to, headings, owned));
   }
   ranges.sort((a, b) => a.from - b.from);
 
@@ -408,13 +483,12 @@ export function assertAgentProtocolCurrent(role: string, paths: ProtocolPaths = 
   return { ok: true, stamp: { role, sha256: resolved.sha256, source: resolved.installedPath } };
 }
 
-/** The RECORDED stamp for a task manifest. Undefined for an uncovered role, and for a
- *  covered role whose seed cannot be resolved — a refused dispatch never reaches a
- *  manifest, so the second case is only reachable from a caller that skipped the gate. */
-export function agentProtocolStamp(role: string, paths: ProtocolPaths = {}): AgentProtocolStamp | undefined {
-  const asserted = assertAgentProtocolCurrent(role, paths);
-  return asserted.ok ? asserted.stamp : undefined;
-}
+// There is deliberately NO `agentProtocolStamp(role)` helper here. The stamp a manifest
+// records must be the one the COMPOSE that produced the prompt resolved — it rides
+// TaskPackage.agentProtocol from there to writeTaskManifest. A function that re-derives it
+// from a role is a second disk read minutes later: it can name a generation the container
+// was never given, or return undefined for a covered role that did dispatch, and either
+// way the receipt asserts something untrue about the run.
 
 // ─── reporting + publication ────────────────────────────────────────────────
 
@@ -427,11 +501,40 @@ export function inspectAgentProtocols(paths: ProtocolPaths = {}): ProtocolResolu
 export type PublishOutcome = {
   role: string;
   path: string;
-  action: "created" | "replaced" | "adopted" | "appended" | "unchanged" | "needs-markers" | "release-missing";
+  action:
+    | "created"
+    | "replaced"
+    | "adopted"
+    | "appended"
+    | "unchanged"
+    | "needs-markers"
+    | "release-missing"
+    | "unsafe-path";
   message?: string;
   /** set when a pre-adoption copy was written because an excised section differed */
   backupPath?: string;
 };
+
+/** Commit a seed with a temp file and a single `rename(2)`, the way `publishSeedGeneration`
+ *  commits a generation. A plain truncating write leaves a zero-length or half-written
+ *  CLAUDE.md if the process dies between truncate and write — and `resolveAgentProtocol`
+ *  and `composeSystemPrompt` read this file on EVERY dispatch, so a concurrent `forge next`
+ *  can observe the torn intermediate, not just the interrupted upgrade. */
+function writeSeedAtomically(path: string, content: string): void {
+  const tmp = `${path}.forge-publish-tmp`;
+  writeFileSync(tmp, content);
+  renameSync(tmp, path);
+}
+
+/** A symlink at a path this pass writes redirects the write out of the seed tree, so a
+ *  hostile or salvaged $FORGE_HOME could aim an upgrade at any file the operator can
+ *  write. Refuse rather than resolve: there is no legitimate reason for a seed or its
+ *  backup to be a link, and following one is not a decision forge gets to make silently. */
+function symlinkAt(path: string): boolean {
+  // lstat, and NOT existsSync first: existsSync follows the link, so a dangling one —
+  // the easiest to plant — reads as absent and would take the create path.
+  return lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink() === true;
+}
 
 /** THE SINGLE PUBLISHER. install-seeds.sh performs no marker or region surgery — its
  *  AUTHORED_EXEMPT stays whole-file and category-granular, so forge-raci.md and the
@@ -470,10 +573,24 @@ export function publishAgentProtocolRegions(
       continue;
     }
 
+    const backupPathFor = `${installPath}${PRE_ADOPTION_BACKUP_SUFFIX}`;
+    if (symlinkAt(installPath) || symlinkAt(backupPathFor)) {
+      out.push({
+        role,
+        path: installPath,
+        action: "unsafe-path",
+        message:
+          `${symlinkAt(installPath) ? installPath : backupPathFor} is a symbolic link. Publishing through it ` +
+          `would write this release's protocol region — or a copy of the seed — to wherever it points, outside ` +
+          `the seed tree. Replace the link with a real file. Nothing was written.`,
+      });
+      continue;
+    }
+
     if (!existsSync(installPath)) {
       if (!opts.dryRun) {
         mkdirSync(dirname(installPath), { recursive: true });
-        writeFileSync(installPath, releaseText);
+        writeSeedAtomically(installPath, releaseText);
       }
       out.push({ role, path: installPath, action: "created" });
       continue;
@@ -490,11 +607,11 @@ export function publishAgentProtocolRegions(
       continue;
     }
     // The .bak is part of the safety argument, so it is written on every lossy path —
-    // adoption is the only one that removes bytes, and only when they differed.
-    const backupPath = applied.excisedChanged ? `${installPath}${PRE_ADOPTION_BACKUP_SUFFIX}` : undefined;
+    // adoption AND the fenced splice, each only when the bytes they discard differed.
+    const backupPath = applied.excisedChanged ? backupPathFor : undefined;
     if (!opts.dryRun) {
-      if (backupPath) writeFileSync(backupPath, existing);
-      writeFileSync(installPath, applied.content);
+      if (backupPath) writeSeedAtomically(backupPath, existing);
+      writeSeedAtomically(installPath, applied.content);
     }
     out.push({
       role,
@@ -516,11 +633,11 @@ export function renderProtocolPublication(outcomes: readonly PublishOutcome[]): 
   const summary = [...counts.entries()].map(([k, v]) => `${v} ${k}`).join(", ");
   lines.push(`agent protocol region: ${summary}`);
   for (const o of outcomes) {
-    if (o.backupPath) lines.push(`  pre-adoption copy of ${o.role} saved to ${o.backupPath}`);
+    if (o.backupPath) lines.push(`  pre-publication copy of ${o.role} saved to ${o.backupPath}`);
     // ⚠ is reserved for the state the OPERATOR must act on. `release-missing` is the
     // executing tree's problem, not theirs, and no upgrade on this host converges it — it
     // is reported plainly here, and it is still a doctor FAIL and a dispatch refusal.
-    if (o.action === "needs-markers") lines.push(`  ⚠ ${o.path}: ${o.message}`);
+    if (o.action === "needs-markers" || o.action === "unsafe-path") lines.push(`  ⚠ ${o.path}: ${o.message}`);
     if (o.action === "release-missing") lines.push(`  ${o.role}: ${o.message}`);
   }
   return lines;

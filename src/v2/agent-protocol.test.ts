@@ -9,7 +9,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -111,6 +111,10 @@ test("FG-654 rung (b) ADOPT: an unmarked legacy file's matching sections are exc
     "",
     "an OLD copy of rule one",
     "",
+    "## More protocol",
+    "",
+    "an OLD copy of rule two",
+    "",
     "## My trailing section",
     "",
     "also mine",
@@ -170,6 +174,10 @@ test("FG-654: a `## ` inside an operator's fenced code block is never mistaken f
     "",
     "old",
     "",
+    "## More protocol",
+    "",
+    "also old",
+    "",
     "## My own section",
     "",
     "```md",
@@ -192,6 +200,81 @@ test("FG-654: adoption of a byte-identical legacy section needs no backup", () =
   const out = applyProtocolRegion(existing, REGION);
   assert.equal(out.action, "adopted");
   assert.ok(!out.excisedChanged);
+});
+
+// ─── RF-2: a PARTIAL heading match is ambiguous, not Forge's ────────────────
+
+test("FG-654 RF-2: ONE operator section colliding with a region heading is REFUSED, not excised", () => {
+  // The reported shape: an operator section that happens to share a Forge heading's name.
+  // A legacy Forge block carries the region's headings as a SET; this carries one of two,
+  // so nothing in the file proves the section is Forge's.
+  const existing = "# red-wide\n\n## My preamble\n\nmine\n\n## The protocol\n\nMY OWN CONTENT UNDER A COLLIDING NAME\n";
+  const out = applyProtocolRegion(existing, REGION);
+  assert.equal(out.action, "needs-markers", "an unprovable claim of ownership must refuse");
+  assert.equal(out.content, existing, "and leave the file byte-identical");
+  if (out.action === "needs-markers") {
+    assert.ok(out.message.includes("## More protocol"), "the missing heading is named");
+    assert.ok(out.message.includes("Nothing was written."));
+  }
+});
+
+test("FG-654 RF-2: a COMPLETE legacy block still adopts — the refusal is scoped to the ambiguous case", () => {
+  const existing = `# red-wide\n\n## Mine\n\nx\n\n## The protocol\n\nOLD one\n\n## More protocol\n\nOLD two\n`;
+  assert.equal(applyProtocolRegion(existing, REGION).action, "adopted");
+});
+
+// ─── RF-4: an operator's `### ` nested under a Forge `## ` survives in place ─
+
+test("FG-654 RF-4: an operator's `### ` under a matched Forge heading stays in the LIVE seed", () => {
+  const region = "## The protocol\n\nrule one\n\n### Owned subsection\n\nforge's\n\n## More protocol\n\nrule two";
+  const existing = [
+    "# red-wide",
+    "",
+    "## The protocol",
+    "",
+    "OLD one",
+    "",
+    "### Owned subsection",
+    "",
+    "forge's old copy",
+    "",
+    "### My house rule",
+    "",
+    "operator prose nested under a Forge heading",
+    "",
+    "## More protocol",
+    "",
+    "OLD two",
+    "",
+  ].join("\n");
+  const out = applyProtocolRegion(existing, region);
+  assert.equal(out.action, "adopted");
+  assert.ok(
+    out.content.includes("### My house rule") && out.content.includes("operator prose nested under a Forge heading"),
+    "the operator's nested subsection must survive adoption, not merely land in the .bak",
+  );
+  assert.ok(!out.content.includes("forge's old copy"), "the Forge-owned subsection is still replaced");
+  assert.ok(!out.content.includes("OLD one") && !out.content.includes("OLD two"));
+});
+
+// ─── RF-1: the append rung removes NO trailing operator bytes ───────────────
+
+test("FG-654 RF-1: append retains trailing operator bytes exactly — the file is a strict prefix", () => {
+  for (const existing of [
+    "# red-wide\n\n## Mine\n\nmine   ",
+    "# red-wide\n\n## Mine\n\nmine\n\n\n",
+    "# red-wide\r\n\r\n## Mine\r\n\r\nmine\r\n",
+    "# red-wide\n\n## Mine\n\nmine",
+  ]) {
+    const out = applyProtocolRegion(existing, REGION);
+    assert.equal(out.action, "appended");
+    assert.ok(
+      out.content.startsWith(existing),
+      `every operator byte must survive verbatim: ${JSON.stringify(existing)}`,
+    );
+    assert.ok(!out.excisedChanged, "nothing was removed, so no .bak is warranted");
+    assert.equal(applyProtocolRegion(out.content, REGION).action, "unchanged", "and the result is stable");
+  }
 });
 
 test("FG-654: CRLF input is handled without corrupting the operator's content", () => {
@@ -237,7 +320,7 @@ test("FG-654: publish preserves operator customization BYTE-FOR-BYTE while updat
   mkdirSync(join(fx.home, "agents", role), { recursive: true });
   writeFileSync(
     join(fx.home, "agents", role, "CLAUDE.md"),
-    `# ${role}\n\n${operatorProse}\n\n## The protocol\n\nan OLD generation\n`,
+    `# ${role}\n\n${operatorProse}\n\n## The protocol\n\nan OLD generation\n\n## More protocol\n\nalso old\n`,
   );
 
   const out = publishAgentProtocolRegions({ forgeHome: fx.home, seedsDir: fx.seeds });
@@ -278,6 +361,72 @@ test("FG-654: dryRun writes nothing", () => {
   for (const role of COVERED_ROLES) {
     assert.equal(existsSync(join(fx.home, "agents", role, "CLAUDE.md")), false, `${role} was written on a dry run`);
   }
+  rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("FG-654 RF-9: the fenced SPLICE backs up a differing region — the path that discards Forge bytes", () => {
+  const fx = hostFixture();
+  const role = "red-wide";
+  // The shape forge's own needs-markers remedy produces: the operator hand-wrapped the
+  // markers, and one line too many is inside them.
+  const seedPath = join(fx.home, "agents", role, "CLAUDE.md");
+  const hand = `# ${role}\n\n${fencedBlock(`${REGION}\n\n## Mine, wrapped by mistake\n\nirreplaceable`)}\n`;
+  mkdirSync(join(fx.home, "agents", role), { recursive: true });
+  writeFileSync(seedPath, hand);
+
+  const mine = publishAgentProtocolRegions({ forgeHome: fx.home, seedsDir: fx.seeds }).find((o) => o.role === role);
+  assert.equal(mine?.action, "replaced");
+  assert.equal(mine?.backupPath, seedPath + PRE_ADOPTION_BACKUP_SUFFIX, "a replaced region is a lossy path");
+  assert.equal(readFileSync(mine!.backupPath!, "utf8"), hand, "and the .bak is the file exactly as it was");
+  assert.ok(!readFileSync(seedPath, "utf8").includes("irreplaceable"), "the region is still converged");
+
+  // An already-current seed is `unchanged` and must NOT accumulate a .bak on every upgrade.
+  rmSync(mine!.backupPath!);
+  const again = publishAgentProtocolRegions({ forgeHome: fx.home, seedsDir: fx.seeds }).find((o) => o.role === role);
+  assert.equal(again?.action, "unchanged");
+  assert.equal(again?.backupPath, undefined);
+  assert.equal(existsSync(seedPath + PRE_ADOPTION_BACKUP_SUFFIX), false);
+  rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("FG-654 RF-14: publish REFUSES to write through a symlinked seed or backup", () => {
+  const fx = hostFixture();
+  const outside = join(fx.root, "outside.md");
+  writeFileSync(outside, "NOT A SEED\n");
+
+  const linked = "red-wide";
+  mkdirSync(join(fx.home, "agents", linked), { recursive: true });
+  symlinkSync(outside, join(fx.home, "agents", linked, "CLAUDE.md"));
+
+  // A DANGLING link on the backup path: existsSync follows the link and reads false, so
+  // this is the case a plain existence check would have taken the create path on.
+  const linkedBak = "engineer";
+  mkdirSync(join(fx.home, "agents", linkedBak), { recursive: true });
+  writeFileSync(join(fx.home, "agents", linkedBak, "CLAUDE.md"), `# ${linkedBak}\n\n## The protocol\n\nOLD\n\n## More protocol\n\nOLD\n`);
+  symlinkSync(join(fx.root, "nowhere.md"), join(fx.home, "agents", linkedBak, "CLAUDE.md") + PRE_ADOPTION_BACKUP_SUFFIX);
+
+  const out = publishAgentProtocolRegions({ forgeHome: fx.home, seedsDir: fx.seeds });
+  for (const role of [linked, linkedBak]) {
+    const o = out.find((x) => x.role === role);
+    assert.equal(o?.action, "unsafe-path", `${role} must refuse rather than follow the link`);
+    assert.ok(o?.message?.includes("symbolic link"));
+  }
+  assert.equal(readFileSync(outside, "utf8"), "NOT A SEED\n", "the link target is untouched");
+  assert.equal(existsSync(join(fx.root, "nowhere.md")), false, "and nothing was written through the dangling link");
+  // The refusal is per-role: the other seven are still published.
+  assert.equal(out.filter((o) => o.action === "created").length, COVERED_ROLES.length - 2);
+  rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("FG-654 RF-10: a seed is committed by rename, so no torn file is observable", () => {
+  const fx = hostFixture();
+  const role = "red-wide";
+  mkdirSync(join(fx.home, "agents", role), { recursive: true });
+  writeFileSync(join(fx.home, "agents", role, "CLAUDE.md"), `# ${role}\n\n## Mine\n\nx\n`);
+  publishAgentProtocolRegions({ forgeHome: fx.home, seedsDir: fx.seeds });
+  // The staged file is gone: it was renamed over the seed, never written into it.
+  assert.equal(existsSync(join(fx.home, "agents", role, "CLAUDE.md.forge-publish-tmp")), false);
+  assert.ok(resolveAgentProtocol(role, { forgeHome: fx.home, seedsDir: fx.seeds }).ok);
   rmSync(fx.root, { recursive: true, force: true });
 });
 

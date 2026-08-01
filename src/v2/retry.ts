@@ -116,6 +116,9 @@ export type AdHocDispatchPlan = {
   readOnlyProject: boolean;
   taskText: string;
   composedSystemPrompt: string;
+  /** FG-654: the stamp the compose above resolved, carried to the retried row's package
+   *  so its manifest records the protocol THIS prompt was built from. */
+  agentProtocol?: { role: string; sha256: string; source: string };
   resolution: ModelResolution;
   designDir?: string;
   authProfile?: string;
@@ -309,6 +312,7 @@ function planAdHocRedispatch(task: Task, run: Run): AdHocDispatchPlan {
     readOnlyProject,
     taskText,
     composedSystemPrompt,
+    ...(composed.ok && composed.protocol ? { agentProtocol: composed.protocol } : {}),
     resolution,
     ...(run.metadata?.["designDir"] ? { designDir: String(run.metadata["designDir"]) } : {}),
     ...(authProfile ? { authProfile } : {}),
@@ -471,6 +475,13 @@ export async function retry(taskId: string, opts?: { force?: boolean }): Promise
     },
     createdAt: nowIso(),
   };
+  // FG-654: the stamp is RE-RESOLVED by this retry's own compose above (ad-hoc), or cleared
+  // for a workflow row that re-composes at dispatch. Never inherited from the failed
+  // attempt: a `forge upgrade` between the two makes the original sha a statement about a
+  // prompt this row does not carry, which is the ledger lying in the exact direction this
+  // ticket exists to prevent.
+  delete newTask.taskPackage.agentProtocol;
+  if (adHoc?.agentProtocol) newTask.taskPackage.agentProtocol = adHoc.agentProtocol;
   insertTask(newTask);
   // FG-585: recovery must not WEDGE. A run that already settled terminal
   // (complete or, post-FG-585, failed) has to return to active so `forge next`

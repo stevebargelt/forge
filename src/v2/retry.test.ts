@@ -12,7 +12,7 @@ import { retry, RetryNotAllowedError, FanoutChildRetryError, reapRetainedContain
 import { retryPolicy } from "./retry-policy.js";
 import type { Run, Task } from "../types/index.js";
 import { taskDir } from "../util/paths.js";
-import { installedSeedPath, readProtocolRegion } from "./agent-protocol.js";
+import { installedSeedPath, protocolSha256, readProtocolRegion } from "./agent-protocol.js";
 
 let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
@@ -422,4 +422,54 @@ test("FG-654: retrying an ad-hoc covered-role task re-verifies the protocol and 
   } finally {
     writeFileSync(installedSeedPath("red-wide"), pristine);
   }
+});
+
+// The POSITIVE half of the same claim. The stamp now RIDES the task package from the
+// compose that produced the prompt (it is no longer re-derived at manifest-write time), so
+// the retried row must carry the stamp THIS retry composed — not the one it inherits by
+// spreading the failed attempt's package forward.
+test("FG-654: a retried row carries THIS retry's stamp, never the failed attempt's inherited one", async () => {
+  const region = readProtocolRegion(readFileSync(installedSeedPath("red-wide"), "utf8"));
+  assert.equal(region.kind, "fenced");
+
+  const id = "t-fg654-restamp";
+  insertTask({
+    id,
+    runId: RUN.id,
+    phase: "task",
+    agentRole: "red-wide",
+    status: "failed",
+    error: "boom",
+    taskPackage: {
+      taskId: id,
+      runId: RUN.id,
+      phase: "task",
+      role: "red-wide",
+      inputs: { task: "audit the change" },
+      composedSystemPrompt: "PROMPT",
+      dispatchSource: "invoke",
+      // A generation this host no longer runs — what a pre-upgrade dispatch left behind.
+      agentProtocol: { role: "red-wide", sha256: "0".repeat(64), source: installedSeedPath("red-wide") },
+    },
+    createdAt: "2026-05-30T00:00:00Z",
+  });
+  logEvent("task.failed", { runId: RUN.id, taskId: id, payload: { failure_kind: "idle_timeout", error: "boom" } });
+  const dir = taskDir(RUN.id, id);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "manifest.json"),
+    JSON.stringify({
+      taskId: id,
+      runId: RUN.id,
+      runtime: { name: "claude" },
+      agentProtocol: { role: "red-wide", sha256: "0".repeat(64), source: installedSeedPath("red-wide") },
+      controlPlane: { projectDir: process.env["FORGE_HOME"], mountMode: "ro" },
+    }),
+  );
+
+  const out = await retry(id);
+  const stamp = out.newTask.taskPackage.agentProtocol;
+  assert.equal(stamp?.role, "red-wide");
+  assert.notEqual(stamp?.sha256, "0".repeat(64), "the inherited stamp must not survive the retry");
+  if (region.kind === "fenced") assert.equal(stamp?.sha256, protocolSha256(region.region), "today's requirement is recorded");
 });

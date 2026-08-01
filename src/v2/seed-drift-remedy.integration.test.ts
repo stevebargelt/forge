@@ -50,6 +50,10 @@ function assetTree(prefix: string, marker: string, opts: { manifest?: boolean } 
   // category the detector treats as a hard readiness fail (coupling: executable).
   writeFileSync(join(base, "seeds", "runtimes", "pi-apikey.yml"), `# ${marker}\nprovider: ${marker}\n`);
   writeFileSync(join(base, "seeds", "agents", "note.md"), `${marker} agent\n`);
+  // FG-654: a release carries a fenced protocol seed for every covered role, and since
+  // RF-13 an upgrade that publishes nothing for one of them is UNRESOLVED. Without them
+  // this fixture is a broken release, and the exit-code assertions would test that.
+  cpSync(join(assetRoot(), "seeds", "agents"), join(base, "seeds", "agents"), { recursive: true });
   writeFileSync(join(base, "seeds", "constraints", "note.md"), `${marker} constraint\n`);
   writeFileSync(join(base, "seeds", "orchestrator-template.md"), `${marker} TEMPLATE\n`);
   // The REAL installer, byte-for-byte — it already resolves its own $HERE, so a

@@ -22,10 +22,13 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { invoke } from "./invoke.js";
+import { invoke, dispatchInvokeTask, createInvokeRun } from "./invoke.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { readTaskManifest } from "./task-manifest.js";
-import { getTask } from "../store/tasks.js";
+import { getTask, insertTask } from "../store/tasks.js";
+import { newTaskId } from "../util/ids.js";
+import { resolveModel } from "./model-resolution.js";
+import type { Task } from "../types/index.js";
 import { taskDir } from "../util/paths.js";
 import { assessLens, assessDiscoveryCompleteness, LENS_INCOMPLETE_REASONS } from "./review-discovery.js";
 import type { DockerExecFn } from "./docker-exec.js";
@@ -220,6 +223,64 @@ test("integ FG-654: a dispatched covered role's manifest ON DISK records the reg
   assert.equal(raw.agentProtocol?.role, role);
   assert.equal(raw.agentProtocol?.sha256, protocolSha256(releaseRegionOf(role)));
   assert.equal(raw.agentProtocol?.source, installedSeedPath(role));
+});
+
+// RF-3 / RF-5: THE MANIFEST ECHOES THE COMPOSE, IT DOES NOT RE-READ THE SEED.
+//
+// The manifest is written well after the prompt is composed — after model resolution,
+// mount preflight and docker-arg construction. When the stamp was re-derived there, a
+// `forge upgrade` (or the FG-654 publish pass itself) landing in that window made the
+// receipt name a generation the container was never given; and if the seed went stale in
+// that window the re-read returned nothing, so a covered role that DID dispatch got a
+// manifest with no protocol block at all — indistinguishable from a pre-FG-654 one.
+// A stamp that disagrees with what is on disk is the only way to tell the two apart.
+test("integ FG-654: the manifest records the COMPOSED stamp, not a fresh read of the seed", async () => {
+  const role = "red-wide";
+  // A stamp NO read of this host's disk can produce. dispatchInvokeTask is the seam
+  // `forge retry` uses directly, and it takes an already-composed row — so the divergence
+  // between "what compose resolved" and "what the seed says right now" is expressible
+  // without racing an upgrade. A manifest that re-derives cannot reproduce this value.
+  const composed = { role, sha256: "a".repeat(64), source: installedSeedPath(role) };
+  const runId = createInvokeRun(role, projectDir, undefined, "fg654 carry", undefined);
+  const taskId = newTaskId(role);
+  const task: Task = {
+    id: taskId,
+    runId,
+    phase: "task",
+    agentRole: role,
+    status: "pending",
+    taskPackage: {
+      taskId,
+      runId,
+      phase: "task",
+      role,
+      inputs: { task: "review" },
+      composedSystemPrompt: "PROMPT COMPOSED UNDER THE STAMP ABOVE",
+      dispatchSource: "invoke",
+      agentProtocol: composed,
+    },
+    createdAt: new Date().toISOString(),
+  };
+  insertTask(task);
+
+  const res = await dispatchInvokeTask({
+    task,
+    resolution: resolveModel({ agentRole: role, runtimeName: "claude", ctx: { projectDir } }),
+    projectDir,
+    taskText: "review",
+    ownsRun: true,
+    readOnlyProject: true,
+    dockerExec: countingExec(),
+  });
+  assert.equal(res.status, "complete");
+
+  const onDisk = readTaskManifest(taskDir(res.runId, res.taskId))?.agentProtocol;
+  assert.deepEqual(onDisk, composed, "the manifest is an ECHO of the composed package, never a second read");
+  assert.notEqual(
+    onDisk?.sha256,
+    protocolSha256(releaseRegionOf(role)),
+    "a re-derived stamp would carry the seed's CURRENT sha — the generation this prompt was not built from",
+  );
 });
 
 test("integ FG-654: the stamp is per DISPATCH — two lenses on two different region shas record two distinct shas", async () => {

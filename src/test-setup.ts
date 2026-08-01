@@ -17,6 +17,12 @@ process.env["FORGE_HOME"] = tempHome;
 // that dispatched a covered role was asserting behaviour on an unprovisioned host. Copy
 // the seeds instead of relaxing the gate: the suite should run against the host shape
 // production has.
+//
+// WHAT THIS COPY COSTS, and it is not optional to know: this home is a BYTE-COPY of the
+// repo seeds, so `resolveAgentProtocol(role)` against it compares the source with itself
+// and is green on every host — including one whose real ~/.forge is generations behind.
+// A guard about installed-vs-release drift must build its own home (see
+// shipping-reviewer-seed-guard.test.ts); one written against this default asserts nothing.
 cpSync(join(dirname(fileURLToPath(import.meta.url)), "..", "seeds", "agents"), join(tempHome, "agents"), {
   recursive: true,
 });

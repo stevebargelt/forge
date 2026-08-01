@@ -60,7 +60,7 @@ import { verdictBlocksGate } from "./gate.js";
 import { evaluateValidationContract } from "./validation-contract.js";
 import { deriveUpstream } from "./inputs.js";
 import { composeSystemPrompt } from "./compose.js";
-import { agentProtocolStamp, STALE_PROTOCOL_FAILURE_KIND } from "./agent-protocol.js";
+import { STALE_PROTOCOL_FAILURE_KIND } from "./agent-protocol.js";
 import { filterConstraints, loadAllConstraints } from "./constraints.js";
 import { buildDockerArgs, buildProvisionerDockerArgs, resolveProjectContainerPath, preflightProjectMount, GIT_UNAVAILABLE_EXIT_CODE, type SpawnContext } from "./spawn.js";
 import { assertSelfHostDispatchAllowed } from "./self-host-guard.js";
@@ -672,6 +672,9 @@ async function dispatchSingleStep(args: {
     // FG-654: on a refusal this holds the refusal text, never a prompt — no container
     // starts, so it is never delivered. See the guard below the row insert.
     composedSystemPrompt: composedPrimary.ok ? composedPrimary.prompt : composedPrimary.refusal,
+    // FG-654: the stamp THIS compose resolved, carried to the manifest rather than
+    // re-read there — see TaskPackage.agentProtocol.
+    ...(composedPrimary.ok && composedPrimary.protocol ? { agentProtocol: composedPrimary.protocol } : {}),
   };
 
   // AWN-7: resolve the model once (capability + profile). Computed regardless of
@@ -1658,6 +1661,7 @@ async function runOneRed(args: {
     // below the row insert. This is the workflow-declared red family (the
     // shipping-reviewer's dispatch path), distinct from the coordinator's.
     composedSystemPrompt: composedRed.ok ? composedRed.prompt : composedRed.refusal,
+    ...(composedRed.ok && composedRed.protocol ? { agentProtocol: composedRed.protocol } : {}),
     artifact: args.artifact,
     ...(args.spec ? { spec: args.spec } : {}),
   };
@@ -2919,6 +2923,7 @@ async function runFanoutChild(args: {
     dispatchSource: "workflow",
     // FG-654: refusal text on a refusal — see the guard below the row insert.
     composedSystemPrompt: composedChild.ok ? composedChild.prompt : composedChild.refusal,
+    ...(composedChild.ok && composedChild.protocol ? { agentProtocol: composedChild.protocol } : {}),
   };
 
   const childResolution = resolveModel({
@@ -3442,9 +3447,9 @@ async function runContainer(args: {
     // FG-654: see task-manifest.ts — the RECORDED protocol generation this agent ran
     // under. Per DISPATCH, not per stage: a review that spans a `forge upgrade`
     // legitimately mixes generations, and the mix must be visible rather than averaged.
-    ...(agentProtocolStamp(args.taskPackage.role)
-      ? { agentProtocol: agentProtocolStamp(args.taskPackage.role) }
-      : {}),
+    // Carried from the compose that produced this package's prompt, never re-resolved
+    // here — a second read describes the seed as of now, not the bytes being dispatched.
+    ...(args.taskPackage.agentProtocol ? { agentProtocol: args.taskPackage.agentProtocol } : {}),
   });
 
   // FG-376: resolve the dependency-cache decision BEFORE building docker args

@@ -687,15 +687,22 @@ export function recordAgentProtocol(
   reviewId: string,
   rec: Omit<AgentProtocolRecord, "kind" | "at">,
 ): void {
-  const review = getReview(reviewId);
-  if (!review) return;
-  // An unreadable outcomes array is left alone rather than overwritten — the same refusal
-  // recordLensAcceptance makes. Losing reviewer-authored outcomes to record an index of
-  // them would be a strictly worse trade.
-  if (review.lensOutcomes !== undefined && !Array.isArray(review.lensOutcomes)) return;
   const at = nowIso();
-  const records = [...lensRecordsOf(review), { kind: "agent_protocol", ...rec, at }];
+  // The READ is inside the transaction, not before it. `lens_outcomes_json` is a whole-column
+  // read-modify-write shared by three writers now, and this one runs on a coordinator/background
+  // path: reading the array outside the write lock and serializing it back inside would let a
+  // concurrent `forge review accept-lens` (or another dispatch's record) land in the window and
+  // be blindly overwritten — dropping a reviewer-authored outcome or an operator acceptance to
+  // record an INDEX of one. writeTransaction is BEGIN IMMEDIATE, so taking the read here holds
+  // the write lock across both halves.
   writeTransaction(() => {
+    const review = getReview(reviewId);
+    if (!review) return;
+    // An unreadable outcomes array is left alone rather than overwritten — the same refusal
+    // recordLensAcceptance makes. Losing reviewer-authored outcomes to record an index of
+    // them would be a strictly worse trade.
+    if (review.lensOutcomes !== undefined && !Array.isArray(review.lensOutcomes)) return;
+    const records = [...lensRecordsOf(review), { kind: "agent_protocol", ...rec, at }];
     getDb()
       .prepare(`UPDATE reviews SET lens_outcomes_json = ?, updated_at = ? WHERE id = ?`)
       .run(JSON.stringify(records), at, reviewId);

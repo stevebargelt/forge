@@ -374,7 +374,12 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
   // the ledger row below is an index of it (invariant 20). If they ever disagree, that
   // drift is stated, never reconciled here. Undefined for a refused/never-dispatched
   // task (no manifest is written) and for pre-FG-654 manifests.
-  const dispatchedProtocol = (res: InvokeResult): { protocol: LensProtocolRecord } | undefined => {
+  // The taskId is REQUIRED in this return, unlike LensProtocolRecord's: it is read off the
+  // manifest of a task that demonstrably dispatched, and the ledger record it feeds keys
+  // on it. A record naming no task names no dispatch.
+  const dispatchedProtocol = (
+    res: InvokeResult,
+  ): { protocol: LensProtocolRecord & { taskId: string } } | undefined => {
     if (!res.taskId || !res.runId) return undefined;
     const stamp = readTaskManifest(taskDir(res.runId, res.taskId))?.agentProtocol;
     if (!stamp) return undefined;
@@ -773,7 +778,11 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
         runTitle: `review docs reconciliation — ${ctx.ticketId}`,
         ...(ctx.route !== undefined ? { routeKey: ctx.route } : {}),
       });
-      return { ok: res.status === "complete", ...(res.error !== undefined ? { error: res.error } : {}) };
+      return {
+        ok: res.status === "complete",
+        ...dispatchedProtocol(res),
+        ...(res.error !== undefined ? { error: res.error } : {}),
+      };
     },
 
     dispatchRechecker: async (recheckCtx: RecheckContextIn) => {
@@ -790,6 +799,7 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
         ok: res.status === "complete",
         taskId: res.taskId,
         result: res.result,
+        ...dispatchedProtocol(res),
         ...(res.error !== undefined ? { error: res.error } : {}),
       };
     },

@@ -11,7 +11,7 @@
 // `composeSystemPrompt`'s own default resolution. That is the whole chain, executed:
 //
 //   seeds/agents/red-<lens>/CLAUDE.md
-//     → scripts/install-seeds.sh   (the only writer; `forge upgrade` step [3/4] runs this file)
+//     → scripts/install-seeds.sh   (the only writer; `forge upgrade` step [3/5] runs this file)
 //     → $FORGE_HOME/agents/red-<lens>/CLAUDE.md
 //     → composeSystemPrompt        (default agentDir = $FORGE_HOME/agents/<role>)
 //     → the reviewer's system prompt
@@ -88,7 +88,7 @@ function tmp(prefix: string): string {
   return d;
 }
 
-/** Run the ONE authoritative installer, exactly as `forge upgrade` step [3/4] does. */
+/** Run the ONE authoritative installer, exactly as `forge upgrade` step [3/5] does. */
 function installSeeds(opts: { force?: boolean } = {}): { stdout: string; stderr: string; status: number | null } {
   const res = spawnSync("bash", [join(repoRoot, "scripts", "install-seeds.sh")], {
     encoding: "utf8",

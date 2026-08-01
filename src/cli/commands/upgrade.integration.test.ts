@@ -82,6 +82,11 @@ function assetTree(prefix: string, marker: string, opts: { manifest?: boolean } 
   mkdirSync(join(base, "scripts"), { recursive: true });
   writeFileSync(join(base, "seeds", "runtimes", "pi-apikey.yml"), `# ${marker}\nprovider: ${marker}\n`);
   writeFileSync(join(base, "seeds", "agents", "note.md"), `${marker} agent\n`);
+  // FG-654: a release carries a fenced protocol seed for every covered role, and since
+  // RF-13 an upgrade that publishes nothing for one of them is UNRESOLVED rather than a
+  // green step. A fixture without them is not a release shaped tree — it is a broken
+  // release, and it would make every exit-code assertion in this file test that instead.
+  cpSync(join(assetRoot(), "seeds", "agents"), join(base, "seeds", "agents"), { recursive: true });
   writeFileSync(join(base, "seeds", "constraints", "note.md"), `${marker} constraint\n`);
   writeFileSync(join(base, "seeds", "orchestrator-template.md"), `${marker} TEMPLATE\n`);
   // The real installer, unmodified — it already resolves its own $HERE, so a
@@ -277,7 +282,7 @@ test("FG-577: a FAILED asset install exits nonzero and does not claim completion
       ));
     });
 
-    assert.match(stdout, /\[3\/4\] install-seeds\.sh: FAILED/, "the failure is reported…");
+    assert.match(stdout, /\[3\/5\] install-seeds\.sh: FAILED/, "the failure is reported…");
     assert.equal(exitCode, 1, "…and carried in the exit code, not swallowed");
     assert.ok(!stdout.includes("Upgrade complete."), "a failed sole remedy must not print completion");
     assert.match(stdout, /Upgrade INCOMPLETE — install-seeds\.sh FAILED/);
@@ -460,7 +465,7 @@ test("FG-577 (cell 3): git pull skipped by a DIRTY checkout is unresolved — th
     const r = drive({ skipProject: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets });
 
     // Human surface: NOT the word that makes it read like --skip-git.
-    assert.match(r.stdout, /\[1\/4\] git pull: DID NOT RUN/);
+    assert.match(r.stdout, /\[1\/5\] git pull: DID NOT RUN/);
     assert.equal(r.result.devAdvancement.gitPull, "dirty", "distinguished from an operator skip in --json");
     assertUnresolved(r, /uncommitted changes/);
   } finally {
@@ -473,7 +478,7 @@ test("FG-577 (cell 1): a FAILED npm install is unresolved on every surface", () 
   try {
     writeFileSync(join(assets, "package.json"), "{ this is not valid json");
     const r = drive({ skipProject: true, skipGit: true }, { mode: "dev", assetsDir: assets, devDir: assets });
-    assert.match(r.stdout, /\[2\/4\] npm install: FAILED/);
+    assert.match(r.stdout, /\[2\/5\] npm install: FAILED/);
     assert.equal(r.result.devAdvancement.npmInstall, "failed");
     assertUnresolved(r, /npm install FAILED/);
   } finally {
@@ -486,7 +491,7 @@ test("FG-577 (cell 1): install-seeds.sh NOT FOUND is unresolved — the sole rem
   try {
     rmSync(join(assets, "scripts", "install-seeds.sh"));
     const r = drive({ skipProject: true, skipGit: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets });
-    assert.match(r.stdout, /\[3\/4\] install-seeds\.sh: NOT FOUND/);
+    assert.match(r.stdout, /\[3\/5\] install-seeds\.sh: NOT FOUND/);
     assert.equal(r.result.assetInstall, "not-found");
     assertUnresolved(r, /install-seeds\.sh NOT FOUND/);
   } finally {
@@ -1340,8 +1345,8 @@ test("FG-577: --skip-git alone on a release classifies the two steps INDEPENDENT
 
     assert.equal(r.result.devAdvancement.gitPull, "skipped", "the operator's skip stands");
     assert.equal(r.result.devAdvancement.npmInstall, "refused", "the unrequested-by-nobody half is still genuinely refused");
-    assert.match(r.stdout, /\[1\/4\] git pull: skipped \(--skip-git\)/);
-    assert.match(r.stdout, /\[2\/4\] npm install: REFUSED/);
+    assert.match(r.stdout, /\[1\/5\] git pull: skipped \(--skip-git\)/);
+    assert.match(r.stdout, /\[2\/5\] npm install: REFUSED/);
     assert.match(r.warnings, /refusing to advance the dev checkout/, "the refusal register still prints — something really was refused");
     assertUnresolved(r, /npm install refused \(release\)/);
     assert.deepEqual(r.result.unresolved, ["npm install refused (release)"], "and ONLY npm — the skip is not on the list");
@@ -1525,7 +1530,7 @@ test("FG-577 (cell 1): a FAILED git pull is unresolved on every surface", () => 
     writeFileSync(join(assets, ".git"), "gitdir: /nonexistent-gitdir-fg577\n");
     const r = drive({ skipProject: true, skipNpm: true }, { mode: "dev", assetsDir: assets, devDir: assets });
     assert.equal(r.result.devAdvancement.gitPull, "failed");
-    assert.match(r.stdout, /\[1\/4\] git pull: FAILED/);
+    assert.match(r.stdout, /\[1\/5\] git pull: FAILED/);
     assertUnresolved(r, /git pull FAILED/);
   } finally {
     rmSync(assets, { recursive: true, force: true });

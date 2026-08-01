@@ -182,8 +182,22 @@ export type CoordinatorDeps = {
    *  after this process exits — which is exactly how the live loop recorded a pre-fix candidate
    *  and had the rechecker examine a tree without the fixes it was rechecking. */
   commitFixCycle: (ctx: FixCycleCommitContext) => Awaitable<FixCycleCommit>;
-  dispatchDocs: (ctx: { review: Review; candidateSha: string }) => Awaitable<{ ok: boolean; error?: string }>;
-  dispatchRechecker: (ctx: RecheckContextIn) => Awaitable<{ ok: boolean; taskId?: string; result?: unknown; error?: string }>;
+  /** FG-654: `protocol` carries the same per-dispatch stamp the fixer's does. Both of
+   *  these roles are COVERED, and the rechecker is the one that judges the fixer's
+   *  evidence, so "which protocol was it told" must be answerable from the ledger rather
+   *  than by hand-reading a task manifest. */
+  dispatchDocs: (ctx: { review: Review; candidateSha: string }) => Awaitable<{
+    ok: boolean;
+    error?: string;
+    protocol?: { role: string; sha256: string; taskId: string };
+  }>;
+  dispatchRechecker: (ctx: RecheckContextIn) => Awaitable<{
+    ok: boolean;
+    taskId?: string;
+    result?: unknown;
+    error?: string;
+    protocol?: { role: string; sha256: string; taskId: string };
+  }>;
   shippingInput: (ctx: {
     review: Review;
     candidateSha: string;
@@ -706,6 +720,9 @@ async function runDocs(reviewId: string, transition: Transition, deps: Coordinat
   setReviewState(reviewId, "documenting", { reason: transition.reason });
 
   const result = await deps.dispatchDocs({ review, candidateSha: candidateBefore });
+  // FG-654: recorded BEFORE the ok gate, for the same reason the fixer's is — an agent
+  // that ran and then failed still ran under that protocol.
+  if (result.protocol) recordAgentProtocol(review.id, { ...result.protocol, stage: "docs" });
   if (!result.ok) {
     return {
       transition,
@@ -781,6 +798,7 @@ async function runRecheck(reviewId: string, transition: Transition, deps: Coordi
     lensInstructions,
   });
 
+  if (dispatch.protocol) recordAgentProtocol(review.id, { ...dispatch.protocol, stage: "recheck" });
   if (!dispatch.ok) {
     return {
       transition,

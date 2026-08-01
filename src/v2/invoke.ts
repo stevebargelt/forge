@@ -42,7 +42,7 @@ import { resolveIdleTimeoutMs, IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js
 import { DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE } from "./dependency-provisioning.js";
 import { productionDockerExec, finalizeContainerRetention, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
 import { composeSystemPrompt } from "./compose.js";
-import { agentProtocolStamp, STALE_PROTOCOL_FAILURE_KIND } from "./agent-protocol.js";
+import { STALE_PROTOCOL_FAILURE_KIND } from "./agent-protocol.js";
 import { buildDockerArgs, preflightProjectMount, GIT_UNAVAILABLE_EXIT_CODE, type SpawnContext } from "./spawn.js";
 import { loadRuntimeWithSource, loadModelPolicyWithSource } from "./loader.js";
 import { resolveSeedGeneration, type SeedGeneration } from "./seed-generation.js";
@@ -205,6 +205,11 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     // FG-654: on a refusal this is the refusal text, never a prompt. No container
     // starts, so it is never delivered — it is the row's durable record of WHY.
     composedSystemPrompt: composed.ok ? composed.prompt : composed.refusal,
+    // FG-654: carried from THIS compose, never re-read at manifest-write time. The
+    // manifest is written later inside dispatchInvokeTask (after model resolution, mount
+    // preflight and docker-arg construction); a `forge upgrade` landing in that window
+    // would otherwise stamp a generation this prompt was not composed under.
+    ...(composed.ok && composed.protocol ? { agentProtocol: composed.protocol } : {}),
   };
 
   // AWN-7: resolve the model (capability + profile) before inserting the row, so
@@ -769,8 +774,10 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     controlPlane,
     // FG-654: RECORDED here, at the same dispatch-time seam as every other receipt, so
     // "which protocol did this agent run under" is answerable from durable state after
-    // the fact rather than inferred from whatever is installed when someone asks.
-    ...(agentProtocolStamp(taskPackage.role) ? { agentProtocol: agentProtocolStamp(taskPackage.role) } : {}),
+    // the fact rather than inferred from whatever is installed when someone asks. The
+    // value is the one COMPOSE resolved (TaskPackage.agentProtocol) — recomputing it here
+    // would describe the seed as of now, not the bytes in the prompt below.
+    ...(taskPackage.agentProtocol ? { agentProtocol: taskPackage.agentProtocol } : {}),
   });
 
   // Usage attribution: prefer the resolved capability alias (policy mode); fall

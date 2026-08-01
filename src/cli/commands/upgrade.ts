@@ -83,7 +83,7 @@ export function refuseDevAdvance(action: string, assetsDir: string, devDir: stri
     `Reconciliation is not offered: a release carries no git history to pull into, and advancing`,
     `the checkout would mutate a tree this process is not executing from.`,
     `Host seeds and the project template are refreshed from the executing release regardless —`,
-    `that half needs no checkout and runs in this same command (steps [3/4] and [4/4]).`,
+    `that half needs no checkout and runs in this same command (steps [3/5], [4/5] and [5/5]).`,
     `To advance the dev checkout, drive it from the checkout itself:`,
     `  forge-dev upgrade --skip-project`,
     `  # or, directly:`,
@@ -184,7 +184,17 @@ export type AuthoredRetentionOutcome = "none" | "retained" | "not-run";
  *  genuinely ambiguous boundary, so forge refuses to guess and leaves the file UNTOUCHED
  *  with the exact repair named. It is unresolved — that host cannot review until it is
  *  fixed, and reporting it as a clean upgrade would hide the one state that needs hands. */
-export type AgentProtocolOutcome = "published" | "already-current" | "would-publish" | "not-run" | "needs-repair";
+export type AgentProtocolOutcome =
+  | "published"
+  | "already-current"
+  | "would-publish"
+  | "not-run"
+  | "needs-repair"
+  /** the executing release carries no fenced seed for at least one covered role — nothing
+   *  was published for it, so the step did not do what it says on the tin */
+  | "incomplete"
+  /** the publish threw (EACCES / ENOSPC / read-only $FORGE_HOME) */
+  | "failed";
 
 // FG-581: `failed` and `failed-not-neutralized` are BOTH compile failures, split
 // on whether the stale policy could be taken off disk. `failed` = neutralized
@@ -313,7 +323,13 @@ const AGENT_PROTOCOL: Record<AgentProtocolOutcome, Resolution> = {
   "would-publish": resolved,
   "not-run": resolved,
   "needs-repair": unresolvedBecause(
-    "agent protocol region NOT published for one or more roles — a seed carries an ambiguous marker fence, so forge refused to guess at the boundary and left the file untouched. Those roles are refused at dispatch until the markers are repaired by hand (the exact repair is printed above)",
+    "agent protocol region NOT published for one or more roles — a seed carries an ambiguous marker fence, or a symbolic link stands where the seed belongs, so forge refused to guess at the boundary and left the file untouched. Those roles are refused at dispatch until the seed is repaired by hand (the exact repair is printed above)",
+  ),
+  incomplete: unresolvedBecause(
+    "agent protocol region NOT published for one or more roles — the executing release carries no fenced seed for them, so there was nothing to publish. This is the release's incompleteness rather than anything on this host: re-running upgrade here converges nothing, those roles refuse at every dispatch, and `forge doctor` fails on them. Reinstall or rebuild the release",
+  ),
+  failed: unresolvedBecause(
+    "agent protocol region publication FAILED — the write did not complete, so roles after the failure carry no current region and refuse at dispatch. Each seed is committed by rename, so none is torn. Re-run `forge upgrade` once the cause is cleared (permissions on $FORGE_HOME, disk space)",
   ),
 };
 
@@ -461,6 +477,10 @@ export type UpgradeResult = {
   /** Per-role publication lines: what was adopted/appended/replaced, every
    *  `.forge-pre-fg654.bak` written, and any seed left untouched pending a hand repair. */
   agentProtocolLines: string[];
+  /** On a publish that THREW, the verbatim I/O reason — the same string the human warning
+   *  carries. Null on every other path, including `needs-repair` and `incomplete`, which
+   *  are named states rather than errors and are reported per role in the lines above. */
+  agentProtocolError: string | null;
   routingPolicy: RoutingPolicyOutcome;
   /** FG-581: on a post-promotion compile FAILURE, the compiler's verbatim reason
    *  for the rejected RACI construct — the same string the human warning carries,
@@ -549,8 +569,8 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         const blocked = advance.kind === "refused" ? "refused" as const : "unavailable" as const;
         gitPull = options.skipGit ? "skipped" : blocked;
         npmInstall = options.skipNpm ? "skipped" : blocked;
-        say(`[1/4] git pull: ${options.skipGit ? "skipped (--skip-git)" : label}`);
-        say(`[2/4] npm install: ${options.skipNpm ? "skipped (--skip-npm)" : label}`);
+        say(`[1/5] git pull: ${options.skipGit ? "skipped (--skip-git)" : label}`);
+        say(`[2/5] npm install: ${options.skipNpm ? "skipped (--skip-npm)" : label}`);
         if (advance.kind === "refused" || advance.kind === "missing") {
           for (const line of advance.lines) warn(`        ${line}`);
         }
@@ -558,28 +578,28 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
       } else {
         if (options.skipGit) {
           gitPull = "skipped";
-          say(`[1/4] git pull: skipped (--skip-git)`);
+          say(`[1/5] git pull: skipped (--skip-git)`);
         } else {
           const pullResult = tryGitPull(devDir, dryRun);
           switch (pullResult.kind) {
             case "ok":
               gitPull = dryRun ? "would-pull" : "pulled";
-              say(`[1/4] git pull: ${pullResult.message}`);
+              say(`[1/5] git pull: ${pullResult.message}`);
               break;
             case "no-remote":
               gitPull = "no-remote";
-              say(`[1/4] git pull: skipped (no remote configured — set up upstream when ready)`);
+              say(`[1/5] git pull: skipped (no remote configured — set up upstream when ready)`);
               break;
             case "dirty":
               // NOT an operator skip: advancement was asked for and did not happen.
               gitPull = "dirty";
-              say(`[1/4] git pull: DID NOT RUN (working tree has uncommitted changes in forge repo)`);
+              say(`[1/5] git pull: DID NOT RUN (working tree has uncommitted changes in forge repo)`);
               say(`        Commit or stash in ${devDir}, then re-run.`);
               // Don't return — let the user still refresh seeds + project if they want.
               break;
             case "error":
               gitPull = "failed";
-              say(`[1/4] git pull: FAILED — ${pullResult.message}`);
+              say(`[1/5] git pull: FAILED — ${pullResult.message}`);
               // Don't return — seeds + project may still work.
               break;
           }
@@ -588,21 +608,21 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         // Step 2: npm install (picks up new deps + workspace symlinks)
         if (options.skipNpm) {
           npmInstall = "skipped";
-          say(`[2/4] npm install: skipped (--skip-npm)`);
+          say(`[2/5] npm install: skipped (--skip-npm)`);
         } else {
           const npmResult = tryNpmInstall(devDir, dryRun);
           switch (npmResult.kind) {
             case "ok":
               npmInstall = dryRun ? "would-install" : "installed";
-              say(`[2/4] npm install: ${npmResult.message}`);
+              say(`[2/5] npm install: ${npmResult.message}`);
               break;
             case "no-package-json":
               npmInstall = "no-package-json";
-              say(`[2/4] npm install: SKIPPED (no package.json at ${devDir})`);
+              say(`[2/5] npm install: SKIPPED (no package.json at ${devDir})`);
               break;
             case "error":
               npmInstall = "failed";
-              say(`[2/4] npm install: FAILED — ${npmResult.message}`);
+              say(`[2/5] npm install: FAILED — ${npmResult.message}`);
               // Don't return — seeds + project may still work; user can re-run npm install manually.
               break;
           }
@@ -618,10 +638,10 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
       let authoredRetentions: string[] = [];
       if (!existsSync(installScript)) {
         assetInstall = "not-found";
-        say(`[3/4] install-seeds.sh: NOT FOUND at ${installScript}`);
+        say(`[3/5] install-seeds.sh: NOT FOUND at ${installScript}`);
       } else if (dryRun) {
         assetInstall = "would-install";
-        say(`[3/4] install-seeds.sh: would run with FORCE=1`);
+        say(`[3/5] install-seeds.sh: would run with FORCE=1`);
       } else {
         try {
           const out = execFileSync("bash", [installScript], {
@@ -631,7 +651,7 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
           // Emit a compact summary, not the full output
           const lines = out.trim().split("\n");
           const installedLines = lines.filter((l) => l.startsWith("Installing"));
-          say(`[3/4] install-seeds.sh: ${installedLines.length} component(s) refreshed`);
+          say(`[3/5] install-seeds.sh: ${installedLines.length} component(s) refreshed`);
           for (const line of installedLines) {
             say(`        ${line.replace("Installing ", "")}`);
           }
@@ -663,7 +683,7 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
           }
         } catch (e) {
           assetInstall = "failed";
-          say(`[3/4] install-seeds.sh: FAILED — ${(e as Error).message}`);
+          say(`[3/5] install-seeds.sh: FAILED — ${(e as Error).message}`);
         }
       }
 
@@ -794,42 +814,61 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         }
       }
 
-      // Step 3 (cont.): FG-654 — adopt and publish the Forge-owned protocol region into
-      // the agent seeds. Ordered strictly AFTER install-seeds.sh (which created any
-      // missing seed from an already-fenced release copy, and retained every existing
-      // one) and BEFORE anything can observe the new dispatch requirement. Every host
-      // that has ever run forge carries an unmarked legacy agent seed by construction,
-      // so this pass IS the migration; deferring it to a later operator step would mean
-      // the first review after upgrade refuses all five lenses, the fixer AND the
-      // rechecker at once.
+      // Step 4: FG-654 — adopt and publish the Forge-owned protocol region into the agent
+      // seeds. Ordered strictly AFTER install-seeds.sh (which created any missing seed from
+      // an already-fenced release copy, and retained every existing one) and BEFORE
+      // anything can observe the new dispatch requirement. Every host that has ever run
+      // forge carries an unmarked legacy agent seed by construction, so this pass IS the
+      // migration; deferring it to a later operator step would mean the first review after
+      // upgrade refuses all five lenses, the fixer AND the rechecker at once.
       let agentProtocol: AgentProtocolOutcome = "not-run";
+      let agentProtocolError: string | null = null;
       let agentProtocolLines: string[] = [];
       if (assetInstall === "not-found") {
         agentProtocol = "not-run";
+        say(`[4/5] agent protocol region: DID NOT RUN — host seeds were not refreshed`);
       } else {
-        const publication = publishAgentProtocolRegions({ seedsDir: join(assetsDir, "seeds"), dryRun });
-        agentProtocolLines = renderProtocolPublication(publication);
-        // ONLY `needs-markers` is unresolved. It is the operator's to fix and the host
-        // cannot review until they do. `release-missing` is a different fact — the tree
-        // this process executes FROM carries no fenced seed for a role — and no amount of
-        // re-running upgrade on this host converges it, so classifying it unresolved would
-        // name a remedy that fixes nothing (the FG-578 defect, in miniature). It is still
-        // reported on the line above, refused by name at dispatch, and a doctor FAIL.
-        const repairs = publication.filter((p) => p.action === "needs-markers");
-        agentProtocol = dryRun
-          ? "would-publish"
-          : repairs.length > 0
-            ? "needs-repair"
-            : publication.every((p) => p.action === "unchanged")
-              ? "already-current"
-              : "published";
-        for (const line of agentProtocolLines) {
-          if (line.trimStart().startsWith("⚠")) warn(`        ${line}`);
-          else say(`        → ${line}`);
+        try {
+          const publication = publishAgentProtocolRegions({ seedsDir: join(assetsDir, "seeds"), dryRun });
+          agentProtocolLines = renderProtocolPublication(publication);
+          // Three distinct unresolved facts, and they are NOT collapsed. `needs-repair` is
+          // the operator's to fix (an ambiguous fence, or a symlink where a seed belongs)
+          // and the host cannot review until they do. `incomplete` is the executing tree's
+          // problem — it carries no fenced seed for a covered role — and no re-run on this
+          // host converges it; it is named separately so the remedy points at the release
+          // rather than at the operator's files. What it is NOT is `published`: a pass that
+          // published nothing for one of the nine roles must not close the step green while
+          // that role refuses at every dispatch and fails `forge doctor`.
+          const repairs = publication.filter((p) => p.action === "needs-markers" || p.action === "unsafe-path");
+          const missing = publication.filter((p) => p.action === "release-missing");
+          agentProtocol = dryRun
+            ? "would-publish"
+            : repairs.length > 0
+              ? "needs-repair"
+              : missing.length > 0
+                ? "incomplete"
+                : publication.every((p) => p.action === "unchanged")
+                  ? "already-current"
+                  : "published";
+          say(`[4/5] agent protocol region: ${dryRun ? "would publish" : agentProtocol}`);
+          for (const line of agentProtocolLines) {
+            if (line.trimStart().startsWith("⚠")) warn(`        ${line}`);
+            else say(`        → ${line}`);
+          }
+        } catch (e) {
+          // Every other risky step maps a throw onto a named outcome; this one used to let
+          // the exception escape runUpgrade entirely, taking the remaining steps, the
+          // INCOMPLETE summary and the --json contract with it. On EACCES / ENOSPC / a
+          // read-only $FORGE_HOME the host is now left partially published and SAYS so.
+          agentProtocol = "failed";
+          agentProtocolError = (e as Error).message;
+          say(`[4/5] agent protocol region: FAILED — ${agentProtocolError}`);
+          warn(`        ⚠ roles published before the failure are current; the rest are not, and refuse at dispatch.`);
+          warn(`          Each seed is written by rename, so no seed is torn. Re-run: forge upgrade`);
         }
       }
 
-      // Step 4: re-init current project — CLAUDE.md orchestrator block + all
+      // Step 5: re-init current project — CLAUDE.md orchestrator block + all
       // hook installs (commit-msg, claude session hooks, slash commands).
       // Re-running the install plans is idempotent: already-current entries
       // no-op; updates apply when the template/source has moved.
@@ -842,14 +881,14 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         // project with no forge block has never been `forge init`'d.
         if (options.skipProject) {
           projectInit = "skipped";
-          say(`[4/4] project init: skipped (--skip-project)`);
+          say(`[5/5] project init: skipped (--skip-project)`);
         } else if (!existsSync(projectClaudeMd)) {
           projectInit = "no-claude-md";
-          say(`[4/4] project init: DID NOT RUN — no CLAUDE.md in ${cwd}`);
+          say(`[5/5] project init: DID NOT RUN — no CLAUDE.md in ${cwd}`);
           warn(`        ⚠ this directory has never been initialized for forge. Run \`forge init\` here first (upgrade is for existing projects).`);
         } else {
           projectInit = "no-forge-block";
-          say(`[4/4] project init: DID NOT RUN — CLAUDE.md has no forge orchestrator block`);
+          say(`[5/5] project init: DID NOT RUN — CLAUDE.md has no forge orchestrator block`);
           warn(`        ⚠ this project was never \`forge init\`'d (or you're not in the project root). Run \`forge init\` here to set it up.`);
         }
       } else {
@@ -864,25 +903,25 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         // manual markers — never silently skip, never duplicate.
         if (!existsSync(templatePath)) {
           projectInit = "template-not-found";
-          say(`[4/4] project init: block NOT refreshed — template not found at ${templatePath}`);
+          say(`[5/5] project init: block NOT refreshed — template not found at ${templatePath}`);
         } else {
           const template = readFileSync(templatePath, "utf8");
           const existing = readFileSync(projectClaudeMd, "utf8");
           const result = applyOrchestratorBlock(existing, template);
           if (result.action === "needs-markers") {
             projectInit = "needs-markers";
-            say(`[4/4] project init: orchestrator block needs manual markers`);
+            say(`[5/5] project init: orchestrator block needs manual markers`);
             warn(`        ⚠ ${result.message}`);
           } else if (result.content === existing) {
             projectInit = "already-current";
-            say(`[4/4] project init: orchestrator block already current`);
+            say(`[5/5] project init: orchestrator block already current`);
           } else if (dryRun) {
             projectInit = "would-refresh";
-            say(`[4/4] project init: would ${result.action} orchestrator block in ${projectClaudeMd}`);
+            say(`[5/5] project init: would ${result.action} orchestrator block in ${projectClaudeMd}`);
           } else {
             projectInit = "refreshed";
             writeFileSync(projectClaudeMd, result.content);
-            say(`[4/4] project init: ${result.action} orchestrator block`);
+            say(`[5/5] project init: ${result.action} orchestrator block`);
           }
         }
 
@@ -1014,6 +1053,7 @@ export function runUpgrade(options: UpgradeOptions, env: UpgradeEnv): UpgradeRes
         authoredRetentions,
         agentProtocol,
         agentProtocolLines,
+        agentProtocolError,
         routingPolicy,
         routingPolicyError,
         projectInit,

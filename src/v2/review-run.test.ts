@@ -2190,3 +2190,62 @@ test("FG-654: the fixer's protocol generation is recorded per dispatch, readable
     "the protocol record must be filtered out of the reviewer-authored outcomes",
   );
 });
+
+// FG-654 RF-7: `stage` documents `fix_batch`, `recheck` AND `docs`, and all three must be
+// reachable. documentation-maintainer and review-rechecker are both COVERED roles, and the
+// rechecker is the one that JUDGES the fixer's evidence — "which protocol was the rechecker
+// told" cannot be a question answerable only by hand-reading a task manifest.
+test("FG-654: the docs and recheck dispatches record their protocol generation too, not just the fixer's", async () => {
+  const h = harness({
+    findingsPerLens: 1,
+    dispatchFixer: (ctx) => ({
+      ok: true,
+      taskId: "task-fixer-rf7",
+      protocol: { role: "engineer", sha256: "e".repeat(64), taskId: "task-fixer-rf7" },
+      result: {
+        fix_batch_id: ctx.batch.id,
+        revision: ctx.batch.revision,
+        findings: ctx.batch.payload.findings.map((f) => ({
+          finding_id: f.finding_id,
+          result: "fixed",
+          remediation_summary: "fixed",
+          files_changed: ["src/x.ts"],
+          evidence: "the regression test now passes",
+        })),
+      },
+    }),
+    dispatchDocs: () => ({
+      ok: true,
+      protocol: { role: "documentation-maintainer", sha256: "d".repeat(64), taskId: "task-docs-rf7" },
+    }),
+    dispatchRechecker: (ctx) => ({
+      ok: true,
+      taskId: "task-recheck-rf7",
+      protocol: { role: "review-rechecker", sha256: "c".repeat(64), taskId: "task-recheck-rf7" },
+      result: {
+        review_id: ctx.review.id,
+        candidate_sha: ctx.candidateSha,
+        rechecked: ctx.expected.map((f) => ({
+          finding_id: f.id,
+          result: "resolved",
+          evidence_kind: "regression_test",
+          evidence: { kind: "regression_test", test_name: "the guard holds", runner_output: EXECUTED },
+        })),
+        new_findings: [],
+      },
+    }),
+  });
+
+  await drive(h.deps, "discover");
+  dispositionAll("fix_now", "will be remediated this cycle");
+  await parkAt(h.deps, "recheck");
+  await runNextStage(REVIEW, h.deps);
+
+  const byStage = new Map(agentProtocolRecordsOf(getReview(REVIEW)!).map((r) => [r.stage, r]));
+  assert.deepEqual([...byStage.keys()].sort(), ["docs", "fix_batch", "recheck"], "every stated stage is reachable");
+  assert.equal(byStage.get("docs")?.role, "documentation-maintainer");
+  assert.equal(byStage.get("docs")?.taskId, "task-docs-rf7");
+  assert.equal(byStage.get("recheck")?.role, "review-rechecker");
+  assert.equal(byStage.get("recheck")?.sha256, "c".repeat(64));
+  assert.equal(byStage.get("recheck")?.taskId, "task-recheck-rf7");
+});

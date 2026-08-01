@@ -6,10 +6,11 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readProtocolRegion, resolveAgentProtocol } from "./agent-protocol.js";
+import { publishAgentProtocolRegions, readProtocolRegion, resolveAgentProtocol } from "./agent-protocol.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const seedPath = join(
@@ -219,13 +220,42 @@ test("shipping-reviewer CLAUDE.md: scope guard concept — check bounded to oper
 // ---------------------------------------------------------------------------
 // FG-654. Every assertion above reads the REPO seed. They were all green on a
 // host whose dispatched shipping-reviewer read a 40-lines-behind copy out of
-// $FORGE_HOME — that gap is exactly how FG-654 shipped. The repo-side assertions
-// stay (they pin the source); these pin the copy that is actually dispatched.
+// $FORGE_HOME — that gap is exactly how FG-654 shipped.
+//
+// A hermetic suite cannot assert the developer's real ~/.forge is current: the
+// suite's $FORGE_HOME is provisioned by src/test-setup.ts copying these seeds,
+// so `resolveAgentProtocol(role)` against it compares a byte-copy with its own
+// source and is green on every host — including the reporting one. That is the
+// blind spot, not a guard against it. What IS falsifiable is below: the
+// publisher converges a home, and the resolver goes RED on installed drift with
+// the repo seed untouched. `forge doctor` answers it for a real host.
 // ---------------------------------------------------------------------------
 
-test("FG-654: the shipping-reviewer's INSTALLED protocol region is current", () => {
-  const resolved = resolveAgentProtocol("shipping-reviewer");
-  assert.ok(resolved.ok, resolved.ok ? "" : resolved.refusal);
+test("FG-654: publishing converges a home's region, and the guard goes RED on installed drift", () => {
+  const home = mkdtempSync(join(tmpdir(), "forge-fg654-shipping-"));
+  publishAgentProtocolRegions({ forgeHome: home, seedsDir: join(repoRoot, "seeds") });
+  assert.ok(resolveAgentProtocol("shipping-reviewer", { forgeHome: home }).ok, "after publish, dispatch must resolve");
+
+  // The exact blind spot, exercised: the repo seed is never touched here.
+  const installed = readFileSync(seedPath, "utf8");
+  const read = readProtocolRegion(installed);
+  assert.equal(read.kind, "fenced", "the repo seed must carry a balanced fence to mutate against");
+  if (read.kind === "fenced") {
+    writeFileSync(
+      join(home, "agents", "shipping-reviewer", "CLAUDE.md"),
+      installed.replace(read.region, `${read.region}\n\nA LOCAL EDIT INSIDE THE FORGE REGION`),
+    );
+  }
+  const mutated = resolveAgentProtocol("shipping-reviewer", { forgeHome: home });
+  assert.equal(mutated.ok, false, "a mutated INSTALLED region must be detected with a pristine repo seed");
+  if (!mutated.ok) assert.equal(mutated.reason, "stale");
+
+  // And the measured 2026-07-31 shape: a pre-FG-654 seed with no fence at all.
+  writeFileSync(join(home, "agents", "shipping-reviewer", "CLAUDE.md"), "# shipping-reviewer\n\n40 lines behind\n");
+  const unfenced = resolveAgentProtocol("shipping-reviewer", { forgeHome: home });
+  assert.equal(unfenced.ok, false);
+  if (!unfenced.ok) assert.equal(unfenced.reason, "installed_unfenced");
+  rmSync(home, { recursive: true, force: true });
 });
 
 test("FG-654: the rubric this file guards lives INSIDE the Forge-owned region, so upgrade converges it", () => {
