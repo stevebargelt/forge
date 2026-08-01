@@ -25,6 +25,7 @@ import {
   publishAgentProtocolRegions,
   readProtocolRegion,
   regionHeadings,
+  renderProtocolPublication,
   resolveAgentProtocol,
   inspectAgentProtocols,
 } from "./agent-protocol.js";
@@ -537,6 +538,58 @@ test("FG-654 RF-10: a seed is committed by rename, so no torn file is observable
   // The staged file is gone: it was renamed over the seed, never written into it.
   assert.equal(existsSync(join(fx.home, "agents", role, "CLAUDE.md.forge-publish-tmp")), false);
   assert.ok(resolveAgentProtocol(role, { forgeHome: fx.home, seedsDir: fx.seeds }).ok);
+  rmSync(fx.root, { recursive: true, force: true });
+});
+
+// ─── the report is the other half of every safety claim above ──────────────
+//
+// "adopted, and the .bak is written" is only non-silent if the operator READS the .bak's
+// name; "refused and left untouched" is only actionable if the refusal reaches them. Every
+// lossy and refused rung above defends itself by pointing here, and until now nothing
+// asserted this function at all. One host carrying all four reportable states at once.
+
+test("FG-654: renderProtocolPublication NAMES every backup, refusal and missing seed an operator must act on", () => {
+  const fx = hostFixture();
+  const seedOf = (role: string): string => join(fx.home, "agents", role, "CLAUDE.md");
+  for (const role of ["red-wide", "engineer", "review-rechecker"]) {
+    mkdirSync(join(fx.home, "agents", role), { recursive: true });
+  }
+  // Lossy adopt: a legacy section whose bytes differ, so publish writes the pre-adoption copy.
+  writeFileSync(seedOf("red-wide"), `# red-wide\n\n## The protocol\n\nMY OWN CONTENT UNDER A COLLIDING NAME\n`);
+  // Refused: half a fence.
+  writeFileSync(seedOf("engineer"), `# engineer\n\n${PROTOCOL_START_MARKER}\n\n## The protocol\n\nhalf-edited\n`);
+  // Refused: a link where a seed belongs.
+  symlinkSync(join(fx.root, "outside.md"), seedOf("review-rechecker"));
+  // Release-missing: the executing tree carries no seed for a covered role.
+  rmSync(join(fx.seeds, "agents", "shipping-reviewer", "CLAUDE.md"));
+
+  const out = publishAgentProtocolRegions({ forgeHome: fx.home, seedsDir: fx.seeds });
+  const lines = renderProtocolPublication(out);
+
+  assert.match(lines[0] as string, /^agent protocol region: /);
+  for (const action of ["adopted", "needs-markers", "unsafe-path", "release-missing"]) {
+    assert.ok(lines[0]!.includes(action), `the summary counts ${action}: ${lines[0]}`);
+  }
+
+  const named = (needle: string): string => {
+    const hit = lines.slice(1).find((l) => l.includes(needle));
+    assert.ok(hit, `nothing in the report names ${needle}:\n${lines.join("\n")}`);
+    return hit as string;
+  };
+  assert.ok(named(`${seedOf("red-wide")}${PRE_ADOPTION_BACKUP_SUFFIX}`).includes("red-wide"));
+  // Named by its RELEASE path, not the host's: no re-run here converges it, so the line
+  // has to point at the tree the operator would reinstall.
+  assert.ok(
+    named(join(fx.seeds, "agents", "shipping-reviewer", "CLAUDE.md")).includes("shipping-reviewer"),
+  );
+
+  // upgrade.ts routes a line to warn() vs say() on this exact prefix test, so ⚠ must be the
+  // first non-space character — and must be reserved for the two states the OPERATOR repairs.
+  const warned = lines.filter((l) => l.trimStart().startsWith("⚠"));
+  assert.equal(warned.length, 2, `only the two operator-repairable states warn:\n${lines.join("\n")}`);
+  assert.ok(warned.some((l) => l.includes(seedOf("engineer")) && l.includes(PROTOCOL_END_MARKER)));
+  assert.ok(warned.some((l) => l.includes(seedOf("review-rechecker")) && l.includes("symbolic link")));
+
   rmSync(fx.root, { recursive: true, force: true });
 });
 
