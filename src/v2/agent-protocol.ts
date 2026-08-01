@@ -22,7 +22,7 @@
 // per task and answers nothing. REQUIRED is read from the executing release,
 // INSTALLED from $FORGE_HOME — two independent reads, never one restating the other.
 
-import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -515,13 +515,20 @@ export type PublishOutcome = {
   backupPath?: string;
 };
 
+const PUBLISH_STAGING_SUFFIX = ".forge-publish-tmp";
+
 /** Commit a seed with a temp file and a single `rename(2)`, the way `publishSeedGeneration`
  *  commits a generation. A plain truncating write leaves a zero-length or half-written
  *  CLAUDE.md if the process dies between truncate and write — and `resolveAgentProtocol`
  *  and `composeSystemPrompt` read this file on EVERY dispatch, so a concurrent `forge next`
  *  can observe the torn intermediate, not just the interrupted upgrade. */
 function writeSeedAtomically(path: string, content: string): void {
-  const tmp = `${path}.forge-publish-tmp`;
+  const tmp = `${path}${PUBLISH_STAGING_SUFFIX}`;
+  // Unlink first, so this writes a file we created: writeFileSync FOLLOWS a symlink at
+  // the staging path, and rename(2) would then leave the seed itself a link aimed
+  // outside the tree. The guard below refuses that plant, but the guard runs before
+  // this write; removing the entry closes the window rather than narrowing it.
+  rmSync(tmp, { force: true });
   writeFileSync(tmp, content);
   renameSync(tmp, path);
 }
@@ -574,13 +581,21 @@ export function publishAgentProtocolRegions(
     }
 
     const backupPathFor = `${installPath}${PRE_ADOPTION_BACKUP_SUFFIX}`;
-    if (symlinkAt(installPath) || symlinkAt(backupPathFor)) {
+    // EVERY path this pass may write, not just the two destinations: each write is
+    // committed through a staging file, and a link there redirects the write just as
+    // effectively — with the seed left a link too, since rename(2) moves the link.
+    const writablePaths = [installPath, backupPathFor].flatMap((p) => [
+      p,
+      `${p}${PUBLISH_STAGING_SUFFIX}`,
+    ]);
+    const linked = writablePaths.find(symlinkAt);
+    if (linked !== undefined) {
       out.push({
         role,
         path: installPath,
         action: "unsafe-path",
         message:
-          `${symlinkAt(installPath) ? installPath : backupPathFor} is a symbolic link. Publishing through it ` +
+          `${linked} is a symbolic link. Publishing through it ` +
           `would write this release's protocol region — or a copy of the seed — to wherever it points, outside ` +
           `the seed tree. Replace the link with a real file. Nothing was written.`,
       });

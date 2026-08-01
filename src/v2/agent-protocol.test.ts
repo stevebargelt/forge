@@ -418,6 +418,41 @@ test("FG-654 RF-14: publish REFUSES to write through a symlinked seed or backup"
   rmSync(fx.root, { recursive: true, force: true });
 });
 
+test("FG-654 RF-15: publish REFUSES a symlink at the staging path RF-10's atomic write commits through", () => {
+  const fx = hostFixture();
+  const outside = join(fx.root, "outside.md");
+  writeFileSync(outside, "NOT A SEED\n");
+
+  // The create path: no seed at all, so the RF-14 guard on the seed and its .bak has
+  // nothing to refuse — only the staging path is planted.
+  const staged = "red-wide";
+  mkdirSync(join(fx.home, "agents", staged), { recursive: true });
+  const stagedSeed = join(fx.home, "agents", staged, "CLAUDE.md");
+  symlinkSync(outside, stagedSeed + ".forge-publish-tmp");
+
+  // The reciprocal case: the .bak's staging path, reached only on a lossy replacement.
+  const stagedBak = "engineer";
+  mkdirSync(join(fx.home, "agents", stagedBak), { recursive: true });
+  const bakSeed = join(fx.home, "agents", stagedBak, "CLAUDE.md");
+  writeFileSync(bakSeed, `# ${stagedBak}\n\n## The protocol\n\nOLD\n\n## More protocol\n\nOLD\n`);
+  symlinkSync(join(fx.root, "nowhere.md"), bakSeed + PRE_ADOPTION_BACKUP_SUFFIX + ".forge-publish-tmp");
+
+  const out = publishAgentProtocolRegions({ forgeHome: fx.home, seedsDir: fx.seeds });
+  for (const role of [staged, stagedBak]) {
+    const o = out.find((x) => x.role === role);
+    assert.equal(o?.action, "unsafe-path", `${role} must refuse rather than stage through the link`);
+    assert.ok(o?.message?.includes("symbolic link"));
+    assert.ok(o?.message?.includes(".forge-publish-tmp"), "the refusal names the path actually planted");
+  }
+  assert.equal(readFileSync(outside, "utf8"), "NOT A SEED\n", "the link target is untouched");
+  assert.equal(existsSync(join(fx.root, "nowhere.md")), false, "nothing was written through the dangling link");
+  // rename(2) moves the link, not its target: the seed itself must not have become one.
+  assert.equal(existsSync(stagedSeed), false, "the refused role's seed was not created through the link");
+  assert.ok(readFileSync(bakSeed, "utf8").includes("OLD"), "and the existing seed is byte-for-byte untouched");
+  assert.equal(out.filter((o) => o.action === "created").length, COVERED_ROLES.length - 2);
+  rmSync(fx.root, { recursive: true, force: true });
+});
+
 test("FG-654 RF-10: a seed is committed by rename, so no torn file is observable", () => {
   const fx = hostFixture();
   const role = "red-wide";
