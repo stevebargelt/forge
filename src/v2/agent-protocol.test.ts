@@ -356,6 +356,46 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const invariantsDoc = (): string => readFileSync(join(repoRoot, "docs", "invariants.md"), "utf8");
 const upgradeDoc = (): string => readFileSync(join(repoRoot, "docs", "how-to-upgrade.md"), "utf8");
 
+// RF-2: the four docs an operator reads BEFORE hitting a refusal — the install order, the
+// upgrade paragraph, the how-to for adding a role, and the manifest field reference. Each
+// one used to instruct the reader about a region published into their own agent seed; a
+// reader who follows that today goes looking for a mechanism no code has.
+test("FG-654 RF-2: the durable operator docs name the generation-backed protocol, not the removed in-place region", () => {
+  const docs: Record<string, string> = {};
+  for (const rel of [
+    ["README.md"],
+    ["docs", "quick-start.md"],
+    ["docs", "how-to-new-agent.md"],
+    ["docs", "SCHEMA-CONTRACT.md"],
+  ]) {
+    docs[rel.join("/")] = readFileSync(join(repoRoot, ...rel), "utf8");
+  }
+
+  for (const [name, doc] of Object.entries(docs)) {
+    for (const gone of [
+      /protocol region/i,
+      /marker-fenced/,
+      /region into/,
+      /\.forge-pre-fg654/,
+      /content hash of the Forge-owned region/,
+      /Forge-owned region in the seed/,
+    ]) {
+      assert.doesNotMatch(doc, gone, `${name} still directs the reader to the removed in-place region: ${gone}`);
+    }
+    // …and each one states where the protocol DOES live, so the removal left an answer
+    // rather than a hole.
+    assert.match(doc, /agent-protocols\/<role>\.md/, `${name} must name the forge-owned seed category`);
+  }
+
+  // The two that make an ownership claim must make the whole one: forge does not write the
+  // operator's file at all.
+  assert.match(docs["README.md"]!, /forge never writes that file/i);
+  assert.match(docs["docs/quick-start.md"]!, /not inside your agent seed/);
+  // And the field reference must describe the identity the stamp actually carries.
+  assert.match(docs["docs/SCHEMA-CONTRACT.md"]!, /WHOLE protocol file's bytes/);
+  assert.match(docs["docs/SCHEMA-CONTRACT.md"]!, /path INSIDE the generation/);
+});
+
 test("FG-654 RF-5: invariant 4 states generation ownership, with no trace of the deleted in-place writer", () => {
   const doc = invariantsDoc();
   for (const gone of [
