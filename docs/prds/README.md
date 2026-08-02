@@ -9,8 +9,8 @@ preserved original proposal and can contain point-in-time language.
 - **Shipped / historical:** implemented; retained as decision and design context.
 - **Concept / roadmap:** useful exploration without implementation authority.
 
-Current sequencing lives in [`backlog/PLAN.md`](../../backlog/PLAN.md), and ticket
-state lives in the backlog database.
+Current ticket state lives in the backlog database. The former living plan at
+[`backlog/PLAN.md`](../../backlog/PLAN.md) is a historical sequencing snapshot.
 
 ## Confirmed / in implementation
 

@@ -4,9 +4,10 @@ These are point-in-time implementation plans and closeout evidence artifacts. Th
 explain how a decision was executed; they are not the current source of delivery
 priority or ticket state.
 
-- Current operator intent: [`backlog/PLAN.md`](../../backlog/PLAN.md)
 - Current ticket state: the backlog database and `forge backlog`
 - Product and architecture intent: [`docs/prds/`](../prds/)
+- Historical operator-plan snapshot:
+  [`backlog/PLAN.md`](../../backlog/PLAN.md)
 
 ## Index
 
@@ -18,4 +19,4 @@ priority or ticket state.
 
 Do not “refresh” a historical plan until it resembles current code. Add a short
 lifecycle note when later work supersedes a premise, and put new intent in a PRD,
-ticket, or the living plan.
+or ticket.

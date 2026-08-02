@@ -1,7 +1,5 @@
 # PRD: forge dashboard
 
-**Status:** shipped design foundation; historical original PRD.
-
 > **Lifecycle:** shipped design foundation; historical original PRD. Later dashboard
 > specifications and the current implementation are authoritative for behavior.
 

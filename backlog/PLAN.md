@@ -1,17 +1,24 @@
 # Forge Working Plan
 
+> **Status:** historical working-plan snapshot. It was last revised on
+> 2026-07-30 and is not the current work queue or ticket source of truth. Use
+> `forge backlog` for current ticket state and follow the operator's current
+> direction for sequencing.
+
 **Last revised:** 2026-07-30
 
-This is a mutable statement of current operator intent. It is not an approval boundary, ticket
-specification, execution record, or source of lifecycle truth.
+While maintained, this was a mutable statement of operator intent. It was not
+an approval boundary, ticket specification, execution record, or source of
+lifecycle truth.
 
 Backlog tickets remain authoritative for problem, scope, acceptance criteria, and dependencies. Forge
 runtime state remains authoritative for what is running, blocked, or done. `backlog/notes.md` remains the
-session handoff. This file may be rewritten whenever priorities change; Git is sufficient history.
+session handoff. This file is now retained as history.
 
-**Expected replacement:** the DB-backed priority queue and operator controls in FG-496 and FG-591.
+**Expected replacement at the time:** the DB-backed priority queue and operator
+controls in FG-496 and FG-591.
 
-## Current objective
+## Objective at the last revision
 
 Stabilize the newly-live evidence-led review lifecycle at its measured fix-cycle boundary, then ship
 the dashboard agent-runtime view and return to the FG-496 operator-work-management program.
@@ -31,7 +38,7 @@ the dashboard agent-runtime view and return to the FG-496 operator-work-manageme
   The lifecycle settled its first production review on FG-647. This is not a claim that its known
   FG-649 fix-cycle defect is acceptable.
 
-## Now
+## Now at the last revision
 
 1. **FG-649 — evidence-led candidate re-anchoring.** A post-hoc fixer commit can leave recheck bound
    to the pre-fix SHA; the FG-639 pilot hit this twice and remains parked before shipping review.
@@ -40,7 +47,7 @@ the dashboard agent-runtime view and return to the FG-496 operator-work-manageme
    candidate, and shipping review completes without a manual re-anchor. The same ticket owns
    persisted-workspace resolution and excluding already-resolved findings from later FixBatches.
 
-## Next
+## Next at the last revision
 
 1. **FG-648 — dashboard agent runtime over time:** overall and per-role averages, sample counts, and
    1d/7d/30d/90d/all windows. Dashboard owns the query, UI, and tests; no cross-package test coupling.
@@ -53,15 +60,15 @@ the dashboard agent-runtime view and return to the FG-496 operator-work-manageme
 5. Reconcile and close **FG-496** with its aggregate acceptance walk after the queue primitives and
    operator surface prove the DB-backed objective end to end.
 
-`Next` is deliberately short. Ordering here expresses current intent; it does not override ticket
-dependencies or authorize execution.
+`Next` was deliberately short. Its ordering expressed operator intent at the
+last revision; it did not override ticket dependencies or authorize execution.
 
-## Committed follow-on
+## Committed follow-on at the last revision
 
 - Continue **FG-593** after FG-591 and the FG-496 closeout according to its remaining
   operator-work-management scope.
 
-## Interruption policy
+## Interruption policy recorded at the last revision
 
 An item may move ahead of `Next` only for:
 
@@ -77,7 +84,7 @@ An item may move ahead of `Next` only for:
 A newly discovered hardening opportunity is captured in the backlog but does not automatically become
 `Now` or `Next`.
 
-## Explicitly deferred
+## Explicitly deferred at the last revision
 
 - **FG-650** — strict review schemas rejected honest reviewer payloads with extra legacy keys three
   times. Real, with retry/accepted-lens workarounds, but its ticket is title-only and must become
@@ -105,7 +112,7 @@ A newly discovered hardening opportunity is captured in the backlog but does not
 - Declarative phase mutation contracts and the red/green workflow described in the 2026-07-21 Vjeko
   article.
 
-## Working rules for the live checkout
+## Working rules recorded at the last revision
 
 - Agent work and branch setup happen in the disposable clone (`~/code/forge-fg356`), never in
   `~/code/forge`. Task workspaces are created under `~/.forge/worktrees/clones/` regardless of project
@@ -116,7 +123,7 @@ A newly discovered hardening opportunity is captured in the backlog but does not
   from a Codex session transcript, which is a real recovery surface worth checking before calling
   anything unrecoverable.
 
-## Maintenance rules
+## Historical maintenance rules
 
 - Keep `Next` to roughly five items.
 - Link ticket IDs instead of copying their acceptance criteria here.
