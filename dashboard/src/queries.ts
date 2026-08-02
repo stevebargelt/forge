@@ -723,6 +723,73 @@ function floorToResolution(ms: number, resolution: AgentRuntimeResolution): numb
   return Math.floor(ms / step) * step;
 }
 
+// FG-662: the events the process supervising a container logs at the instant it
+// observed that container stop — the same set reconcile.ts calls
+// `hasContainerExited`. Their timestamp is when the AGENT stopped, independent of
+// whatever later rewrote completed_at. `container.killed` is deliberately NOT
+// here: `forge cancel` logs it around a blind best-effort `docker kill`, so it
+// records when an operator cancelled, not that an agent was still running.
+const AGENT_OBSERVED_EXIT_EVENTS = [
+  "container.exited",
+  "container.idle_timeout",
+  "container.dependency_provisioning_failed",
+  "container.git_unavailable",
+] as const;
+
+// FG-662: failure kinds whose task.failed row is written by a process that was
+// NOT supervising the agent's container — `forge cancel`, `forge gate --reject`,
+// and the reconcile / ops-repair sweeps. For these completed_at records when the
+// terminal was NOTICED, so completed_at − started_at is wall-clock-until-noticed
+// rather than runtime. Every other kind is classified by the supervising process
+// at the agent's own exit and keeps counting in full — idle_timeout above all.
+const ADMINISTRATIVE_TERMINAL_KINDS = new Set([
+  "cancelled",                            // cli/commands/cancel.ts
+  "gate_rejected",                        // v2/gate.ts
+  "orphaned",                             // v2/reconcile.ts, ops/repair.ts
+  "orphaned_work_may_persist",            // v2/reconcile.ts
+  "orphaned_needs_finalize",              // v2/reconcile.ts
+  "fanout_wave_orphaned",                 // v2/reconcile.ts
+  "oom_killed",                           // v2/reconcile.ts — the attached-exit oom_killed carries an exit event and never reaches here
+  "pre_container_crash",                  // v2/reconcile.ts — no container ever ran
+  "verification_environment_unavailable", // v2/reconcile.ts
+]);
+
+type AgentRuntimeRow = {
+  role: string;
+  started: string;
+  completed: string;
+  status: string;
+  agentExit: string | null;
+  failedPayload: string | null;
+};
+
+function failureKindOf(payload: string | null): string | null {
+  if (!payload) return null;
+  try {
+    const parsed = JSON.parse(payload) as Record<string, unknown> | null;
+    return parsed && typeof parsed["failure_kind"] === "string" ? (parsed["failure_kind"] as string) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** FG-662: when the agent actually stopped, or null when nothing on the record
+ *  says. An attached-exit event is the agent-observed end and wins over
+ *  completed_at outright, because a cancel, a sweep or a gate rejection can
+ *  rewrite completed_at long after the container died. With no such event
+ *  completed_at is the end only if the terminal was not written administratively;
+ *  otherwise the row has no defensible end and contributes nothing. */
+function agentObservedEndMs(row: AgentRuntimeRow): number | null {
+  if (row.agentExit !== null) {
+    const exitedMs = Date.parse(row.agentExit);
+    if (Number.isFinite(exitedMs)) return exitedMs;
+  }
+  const kind = row.status === "failed" ? failureKindOf(row.failedPayload) : null;
+  if (kind !== null && ADMINISTRATIVE_TERMINAL_KINDS.has(kind)) return null;
+  const completedMs = Date.parse(row.completed);
+  return Number.isFinite(completedMs) ? completedMs : null;
+}
+
 export function agentRuntimeTrends(
   window: AgentRuntimeWindow,
   scope?: ProjectScope,
@@ -755,22 +822,36 @@ export function agentRuntimeTrends(
 
   // `t.phase IS 'session'` — SQLite's null-safe equality. With plain `=` a NULL
   // phase makes the whole NOT(...) NULL, which drops the row instead of keeping it.
+  // FG-662: `agentExit` and `failedPayload` are correlated subqueries in the shape
+  // opsMetrics already uses for its failure-kind mix — the earliest attached-exit
+  // event for the task, and the payload of its latest task.failed.
+  const exitEvents = AGENT_OBSERVED_EXIT_EVENTS.map((e) => `'${e}'`).join(",");
   const rows = db().prepare(`
-    SELECT t.agent_role AS role, t.started_at AS started, t.completed_at AS completed
+    SELECT t.agent_role AS role, t.started_at AS started, t.completed_at AS completed, t.status AS status,
+      (SELECT MIN(x.created_at) FROM events x
+        WHERE x.task_id = t.id AND x.event_type IN (${exitEvents})) AS agentExit,
+      (SELECT f.payload FROM events f
+        WHERE f.task_id = t.id AND f.event_type = 'task.failed'
+          AND f.created_at = (SELECT MAX(f2.created_at) FROM events f2 WHERE f2.task_id = f.task_id AND f2.event_type = 'task.failed')
+        ORDER BY f.id DESC LIMIT 1) AS failedPayload
     FROM tasks t JOIN runs r ON r.id = t.run_id
     WHERE t.agent_role IS NOT NULL
       AND t.started_at IS NOT NULL
       AND t.completed_at IS NOT NULL
       AND NOT (t.agent_role = 'orchestrator' AND t.phase IS 'session')
       ${clause}
-  `).all(...params) as Array<{ role: string; started: string; completed: string }>;
+  `).all(...params) as AgentRuntimeRow[];
 
   type Observation = { role: string; completedMs: number; durationMs: number };
   const observations: Observation[] = [];
   let earliest = Infinity;
   for (const row of rows) {
     const completedMs = Date.parse(row.completed);
-    const durationMs = completedMs - Date.parse(row.started);
+    // The observation still sits in the bucket its completed_at falls in; only the
+    // DURATION comes off the agent-observed end.
+    const endMs = agentObservedEndMs(row);
+    if (endMs === null) continue;
+    const durationMs = endMs - Date.parse(row.started);
     if (!Number.isFinite(completedMs) || !(durationMs >= 0)) continue;
     observations.push({ role: row.role, completedMs, durationMs });
     if (completedMs < earliest) earliest = completedMs;

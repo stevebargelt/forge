@@ -23,6 +23,7 @@ const NOW = Date.parse("2026-06-10T14:30:00Z");
   db.exec(`
     CREATE TABLE runs (id TEXT PRIMARY KEY, title TEXT, workflow TEXT, project_dir TEXT, status TEXT, created_at TEXT);
     CREATE TABLE tasks (id TEXT PRIMARY KEY, run_id TEXT, phase TEXT, agent_role TEXT, status TEXT, parent_id TEXT, started_at TEXT, completed_at TEXT);
+    CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, task_id TEXT, event_type TEXT, payload TEXT, created_at TEXT);
 
     INSERT INTO runs VALUES ('rA','A','feature','/proj/a','complete','2026-06-08T00:00:00Z');
     INSERT INTO runs VALUES ('rB','B','feature','/proj/b','complete','2026-06-08T00:00:00Z');
@@ -111,6 +112,7 @@ test("agentRuntimeTrends: bucketing is by completed_at, not started_at", () => {
   spanDb.exec(`
     CREATE TABLE runs (id TEXT PRIMARY KEY, title TEXT, workflow TEXT, project_dir TEXT, status TEXT, created_at TEXT);
     CREATE TABLE tasks (id TEXT PRIMARY KEY, run_id TEXT, phase TEXT, agent_role TEXT, status TEXT, parent_id TEXT, started_at TEXT, completed_at TEXT);
+    CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, task_id TEXT, event_type TEXT, payload TEXT, created_at TEXT);
     INSERT INTO runs VALUES ('rS','S','feature','/proj/span','complete','2026-06-08T00:00:00Z');
     INSERT INTO tasks VALUES ('s1','rS','implementation','engineer','complete',NULL,'2026-06-08T23:00:00Z','2026-06-09T01:00:00Z');
   `);
