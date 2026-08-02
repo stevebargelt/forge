@@ -28,6 +28,7 @@ import { retryPolicy, type RetryDisposition } from "./retry-policy.js";
 import { taskDispatchKind } from "./run-kind.js";
 import { readTaskManifest } from "./task-manifest.js";
 import { composeSystemPrompt } from "./compose.js";
+import { resolveSeedGeneration } from "./seed-generation.js";
 import { resolveModel, taskModelFields, type ModelResolution } from "./model-resolution.js";
 import {
   dispatchInvokeTask,
@@ -116,6 +117,9 @@ export type AdHocDispatchPlan = {
   readOnlyProject: boolean;
   taskText: string;
   composedSystemPrompt: string;
+  /** FG-654: the stamp the compose above resolved, carried to the retried row's package
+   *  so its manifest records the protocol THIS prompt was built from. */
+  agentProtocol?: { role: string; sha256: string; source: string };
   resolution: ModelResolution;
   designDir?: string;
   authProfile?: string;
@@ -295,13 +299,28 @@ function planAdHocRedispatch(task: Task, run: Run): AdHocDispatchPlan {
     ctx: { projectDir },
   });
   const { step, workflow } = invokeWorkflowShape(task.agentRole, task.agentAlias, runtimeName);
-  const composedSystemPrompt = composeSystemPrompt({ role: task.agentRole, workflow, step });
+  // FG-654: a retry RE-VERIFIES against today's required protocol and re-stamps; it never
+  // replays the original task's stamp. A retry after a `forge upgrade` genuinely runs a
+  // different protocol, and replaying the old sha would make the ledger lie in exactly the
+  // direction this ticket exists to prevent. Refused BEFORE any row is written, like every
+  // other precondition here.
+  // A retry is its own short-lived invocation with nothing anchored, so it resolves the
+  // live seed pointer once, here, and composes under exactly that generation.
+  const composed = composeSystemPrompt({
+    role: task.agentRole,
+    workflow,
+    step,
+    seedGeneration: resolveSeedGeneration(),
+  });
+  if (!composed.ok) refuse(composed.refusal);
+  const composedSystemPrompt = composed.prompt;
 
   return {
     projectDir,
     readOnlyProject,
     taskText,
     composedSystemPrompt,
+    ...(composed.ok && composed.protocol ? { agentProtocol: composed.protocol } : {}),
     resolution,
     ...(run.metadata?.["designDir"] ? { designDir: String(run.metadata["designDir"]) } : {}),
     ...(authProfile ? { authProfile } : {}),
@@ -464,6 +483,13 @@ export async function retry(taskId: string, opts?: { force?: boolean }): Promise
     },
     createdAt: nowIso(),
   };
+  // FG-654: the stamp is RE-RESOLVED by this retry's own compose above (ad-hoc), or cleared
+  // for a workflow row that re-composes at dispatch. Never inherited from the failed
+  // attempt: a `forge upgrade` between the two makes the original sha a statement about a
+  // prompt this row does not carry, which is the ledger lying in the exact direction this
+  // ticket exists to prevent.
+  delete newTask.taskPackage.agentProtocol;
+  if (adHoc?.agentProtocol) newTask.taskPackage.agentProtocol = adHoc.agentProtocol;
   insertTask(newTask);
   // FG-585: recovery must not WEDGE. A run that already settled terminal
   // (complete or, post-FG-585, failed) has to return to active so `forge next`

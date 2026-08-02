@@ -40,6 +40,7 @@ import { parse as yamlParse } from "yaml";
 import { runUpgrade } from "./upgrade.js";
 import { compilePolicyFile } from "../../raci/host-policy.js";
 import { assetRoot, executionModeFrom } from "../../v2/asset-root.js";
+import { stageAgentProtocols } from "../../v2/seed-generation.testkit.js";
 
 /** A route block the compiler accepts, with `responsible` as the ATTRIBUTABLE
  *  field: the whole point is telling apart a policy compiled from the operator's
@@ -82,6 +83,9 @@ function releaseTree(): string {
   writeFileSync(join(base, "seeds", "constraints", "house-style.md"), "SEED constraint prose\n");
   writeFileSync(join(base, "seeds", "runtimes", "pi-apikey.yml"), "# SEED\nprovider: SEED\n");
   writeFileSync(join(base, "seeds", "orchestrator-template.md"), "SEED TEMPLATE\n");
+  // FG-654: a release with no protocol for a covered role cannot publish a generation —
+  // upgrade's publish step refuses it — so a release-shaped fixture carries the real set.
+  stageAgentProtocols(join(base, "seeds"));
   cpSync(join(assetRoot(), "scripts", "install-seeds.sh"), join(base, "scripts", "install-seeds.sh"));
   writeFileSync(join(base, "forge-release.json"), JSON.stringify({ schema: 1, abi: "137", id: "fg578-fixture" }));
   return base;

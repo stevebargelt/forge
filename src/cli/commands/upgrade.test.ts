@@ -4,9 +4,10 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   tryNpmInstall, maybeRebuildImage, renderReleaseCheckLines, decideDevAdvancement, upgradeAssetPaths, refuseDevAdvance,
   classifyStep, unresolvedReasons,
@@ -17,6 +18,8 @@ import {
 } from "./upgrade.js";
 import { assetRoot } from "../../v2/asset-root.js";
 import { buildReleaseReport } from "../../v2/release-doctor.js";
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
 let dir: string;
 
@@ -153,6 +156,36 @@ test("FG-577: the refusal makes no ordering claim it cannot keep on every path t
     assert.doesNotMatch(text, /already been attempted above|attempted above/, `false on the git/npm path: ${action}`);
     assert.match(text, /refreshed from the executing release regardless/, "still promises the asset half, which is the operator's actual remedy");
   }
+});
+
+// ─── RF-6: the documented numbering IS the numbering the CLI prints ─────────
+//
+// Nothing generates one from the other — docs/how-to-upgrade.md and upgrade.ts agree by
+// hand — so a step renumbered in one and not the other leaves a documented step that is
+// unfindable in real output. This reads both files and asserts they still agree.
+test("RF-6: docs and CLI agree on four numbered steps, and on which step is which", () => {
+  const source = readFileSync(join(repoRoot, "src", "cli", "commands", "upgrade.ts"), "utf8");
+  const doc = readFileSync(join(repoRoot, "docs", "how-to-upgrade.md"), "utf8");
+
+  const denominators = [...new Set([...source.matchAll(/\[(\d+)\/(\d+)\]/g)].map((m) => m[2]))];
+  assert.deepEqual(denominators, ["4"], "every step label the CLI prints must count out of four");
+
+  for (const [n, label] of [
+    ["1", "git pull"],
+    ["2", "npm install"],
+    ["3", "install-seeds"],
+    ["4", "project init"],
+  ] as const) {
+    assert.ok(source.includes(`[${n}/4] ${label}`), `the CLI must print step ${n} as \`[${n}/4] ${label}\``);
+  }
+
+  assert.match(doc, /This runs four steps in sequence:/, "the doc states the same count");
+  assert.match(doc, /^3\. \*\*`FORCE=1 \.\/scripts\/install-seeds\.sh`\*\*/m, "…and numbers install-seeds 3");
+  assert.match(doc, /^4\. \*\*Provision the current project\*\*/m, "…and the project provision 4");
+  // The release-mode refusal names the asset half by its step labels, and the doc names
+  // the same span in prose. A renumbering that missed either would put them in conflict.
+  assert.ok(source.includes("(steps [3/4] and [4/4])"), "the refusal names the asset half by label");
+  assert.ok(doc.includes("steps 3 and 4"), "…and the doc names the same span");
 });
 
 test("FG-577 (criterion 2): with NO dev checkout at all, asset repair is still reachable", () => {

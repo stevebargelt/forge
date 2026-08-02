@@ -62,6 +62,7 @@ import {
 import { atomicSymlinkSwap, realpathContains } from "./promote.js";
 import { assetRoot as executingAssetRoot } from "./asset-root.js";
 import { sha256OfBytes } from "../util/content-digest.js";
+import { COVERED_ROLES } from "./review-contract.js";
 
 // Resolved LIVE from the environment, matching loader.ts's forgeHome() — the seed
 // pointer resolvers and the loaders that consume them MUST agree on which home they
@@ -76,12 +77,19 @@ function liveForgeHome(): string {
  *  generation. Each is a directory of files copied verbatim from the release's
  *  seeds/. The derived routing policy is committed alongside them (see
  *  publishSeedGeneration) so raw definitions and derived artifact land in ONE swap. */
-export const SEED_GENERATION_DIRS = ["workflows", "runtimes"] as const;
+export const SEED_GENERATION_DIRS = ["workflows", "runtimes", "agent-protocols"] as const;
 
 /** The derived routing policy's filename inside a generation. Committed in the same
  *  rename(2) as the workflows it is compiled from (Risk#3 — no new-workflows/old-policy
  *  window). */
 export const GENERATION_ROUTING_POLICY = "routing-policy.yml";
+
+/** The one place the generation-relative protocol path is spelled (FG-654). It lives
+ *  here, beside the category list it names, so publication and resolution cannot drift
+ *  about where a role's protocol is. */
+export function protocolRelPath(role: string): string {
+  return `agent-protocols/${role}.md`;
+}
 
 /** The provenance manifest forge writes LAST into a staged generation, so a
  *  generation dir carrying a valid manifest is by construction COMPLETE. `files`
@@ -395,6 +403,25 @@ export function publishSeedGeneration(opts: PublishSeedGenerationOptions): Publi
         cpSync(src, dst);
         files[`${category}/${rel}`] = sha256OfBytes(dst);
       }
+    }
+
+    // FG-654 / RF-13: COVERAGE IS A PUBLICATION PRECONDITION, not a later discovery.
+    // The staging loop above skips a category the release does not carry and manifests
+    // only what it found, so a release shipping no protocol for a covered role would
+    // otherwise publish a generation that is COMPLETE by construction — `forge upgrade`
+    // reports it published and exits 0 — while every dispatch of that role is refused.
+    // A generation that cannot dispatch the review lifecycle is not publishable: refuse
+    // here, where nothing has been committed and the prior generation stays selectable.
+    const uncovered = COVERED_ROLES.filter((role) => files[protocolRelPath(role)] === undefined);
+    if (uncovered.length > 0) {
+      throw new Error(
+        `forge seed: refusing to publish — this release carries no Forge-owned protocol for ` +
+          `${uncovered.length} role(s) the review lifecycle dispatches.\n` +
+          `  assetRoot: ${trustedRoot}\n` +
+          `  missing:   ${uncovered.map((r) => `seeds/${protocolRelPath(r)}`).join(", ")}\n` +
+          `Publishing would report a complete generation while every dispatch of those roles refused, ` +
+          `so the generation is not published and the current one is left selectable. Fix: reinstall the release.`,
+      );
     }
 
     // Compile the derived routing policy INTO the staging generation so the raw

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { writeTaskManifest, manifestControlPlaneBlock, type TaskManifest, type ControlPlaneReceiptInputs } from "./task-manifest.js";
+import { writeTaskManifest, readTaskManifest, manifestControlPlaneBlock, type TaskManifest, type ControlPlaneReceiptInputs } from "./task-manifest.js";
 
 function makeTmpDir(): string {
   return mkdtempSync(join(tmpdir(), "forge-manifest-test-"));
@@ -231,4 +231,31 @@ test("writeTaskManifest: manifest with controlPlane round-trips correctly", () =
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// FG-654: the protocol stamp is an OPTIONAL manifest block, like every other one added
+// since FG-350 — a pre-FG-654 manifest must stay readable, and a consumer must degrade
+// gracefully rather than assume the block is there.
+test("FG-654: agentProtocol round-trips through the manifest, and a manifest without it still reads", () => {
+  const dir = mkdtempSync(join(tmpdir(), "forge-fg654-manifest-"));
+  const base: TaskManifest = {
+    taskId: "task-x",
+    runId: "run-x",
+    files: { prompt: "CLAUDE.md", package: "package.md", result: "result.json", stdout: "container.stdout.log", stderr: "container.stderr.log" },
+    container: { name: "forge-task-x" },
+    auth: { profileRequested: false, stateMounted: false },
+  };
+
+  writeTaskManifest(dir, base);
+  assert.equal(readTaskManifest(dir)?.agentProtocol, undefined, "a pre-FG-654 manifest reads back with no stamp");
+
+  writeTaskManifest(dir, {
+    ...base,
+    agentProtocol: { role: "red-wide", sha256: "a".repeat(64), source: "/home/.forge/agents/red-wide/CLAUDE.md" },
+  });
+  const back = readTaskManifest(dir);
+  assert.equal(back?.agentProtocol?.role, "red-wide");
+  assert.equal(back?.agentProtocol?.sha256, "a".repeat(64));
+  assert.equal(back?.agentProtocol?.source, "/home/.forge/agents/red-wide/CLAUDE.md");
+  rmSync(dir, { recursive: true, force: true });
 });

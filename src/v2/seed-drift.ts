@@ -39,6 +39,7 @@ import { join, relative } from "node:path";
 import { CLAUDE_SKILLS_DIR, FORGE_HOME } from "../util/paths.js";
 import { assetRoot } from "./asset-root.js";
 import { sha256OfBytes } from "../util/content-digest.js";
+import { inspectAgentProtocols, type ProtocolInspectOptions } from "./agent-protocol.js";
 
 export type SeedStatus = "current" | "drifted" | "missing";
 
@@ -187,6 +188,41 @@ export function detectSeedDrift(
   // (runtimes or workflows) silently mis-runs → not ok. Prose drift stays a warning.
   const ok = !stale.some((e) => e.coupling === "executable");
   return { entries, stale, ok };
+}
+
+// ─── the Forge-owned agent protocol (FG-654) ────────────────────────────────
+
+/** FG-654: the protocol is a SEED GENERATION category, so it has no representation in
+ *  the {ownership × coupling} taxonomy above — SeedSpec measures the FLAT $FORGE_HOME
+ *  layout, and there is no flat copy of a protocol to measure. It gets its own report,
+ *  read out of the published generation.
+ *
+ *  A covered role with no manifest-consistent protocol in the generation — or an
+ *  installed seed still carrying an embedded legacy copy of one — is a readiness FAIL
+ *  (doctor exits non-zero), because dispatch of that role refuses. The operator's own
+ *  prose in `~/.forge/agents/` stays a warn via SeedSpec, as it always has. */
+export type ProtocolDriftReport = {
+  entries: Array<{ role: string; ok: boolean; detail: string }>;
+  stale: Array<{ role: string; ok: boolean; detail: string }>;
+  ok: boolean;
+};
+
+export function detectProtocolDrift(opts: ProtocolInspectOptions = {}): ProtocolDriftReport {
+  const entries = inspectAgentProtocols(opts);
+  const stale = entries.filter((e) => !e.ok);
+  return { entries, stale, ok: stale.length === 0 };
+}
+
+export function renderProtocolDrift(report: ProtocolDriftReport): string {
+  if (report.ok) return "";
+  const lines: string[] = ["Forge-owned agent protocol (published seed generation):"];
+  for (const e of report.stale) lines.push(`  [FAIL] ${e.role.padEnd(24)} ${e.detail}`);
+  lines.push("  Every role above is one the review lifecycle DISPATCHES, and each is refused at dispatch by name");
+  lines.push("  until its protocol resolves — a stale reviewer produces plausible output in the wrong shape rather");
+  lines.push("  than failing loudly. Your own prose in ~/.forge/agents/ is never rewritten by the repair.");
+  lines.push("  Fix: forge upgrade — except where the detail above names another repair (an embedded copy is");
+  lines.push("  yours to delete; a release carrying no protocol for the role is reinstalled, not republished).");
+  return lines.join("\n");
 }
 
 /** Human-readable drift section for `forge doctor`. Empty string when nothing is

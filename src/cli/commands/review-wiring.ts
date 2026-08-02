@@ -16,12 +16,15 @@ import { join } from "node:path";
 import { buildReviewLoopDeps, resolveReviewedTipTrust } from "./review-loop.js";
 import { resolveCommitRange } from "../../v2/review-loop.js";
 import { invoke, type InvokeArgs, type InvokeResult } from "../../v2/invoke.js";
-import { fixBatchBundleDir } from "../../util/paths.js";
+import { fixBatchBundleDir, taskDir } from "../../util/paths.js";
+import { readTaskManifest } from "../../v2/task-manifest.js";
+import type { LensProtocolRecord } from "../../v2/review-discovery.js";
 import { renderFixBatchEnvelope, verifyMaterializedEnvelope, verifyMaterializedPayload } from "../../store/fix-batches.js";
 import { getRun } from "../../store/runs.js";
 import type { CoordinatorDeps, FixerContext, LensContext, RecheckContextIn } from "../../v2/review-run.js";
 import type { VerificationEntry } from "../../v2/review-coordinator.js";
 import type { ContractProposal, LensWidening, RiskLens } from "../../v2/review-contract.js";
+import { REVIEW_DISPATCH_ROLES } from "../../v2/review-contract.js";
 import type { AcClaim } from "../../v2/review-evidence.js";
 import type { DocsCloseout } from "../../v2/review-shipping.js";
 import type { Review } from "../../store/reviews.js";
@@ -367,6 +370,23 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
 
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => invokeFn(args);
 
+  // FG-654: read the dispatched task's RECORDED protocol stamp back off its manifest.
+  // Two independent artifacts by design — the manifest is authoritative (invariant 6),
+  // the ledger row below is an index of it (invariant 20). If they ever disagree, that
+  // drift is stated, never reconciled here. Undefined for a refused/never-dispatched
+  // task (no manifest is written) and for pre-FG-654 manifests.
+  // The taskId is REQUIRED in this return, unlike LensProtocolRecord's: it is read off the
+  // manifest of a task that demonstrably dispatched, and the ledger record it feeds keys
+  // on it. A record naming no task names no dispatch.
+  const dispatchedProtocol = (
+    res: InvokeResult,
+  ): { protocol: LensProtocolRecord & { taskId: string } } | undefined => {
+    if (!res.taskId || !res.runId) return undefined;
+    const stamp = readTaskManifest(taskDir(res.runId, res.taskId))?.agentProtocol;
+    if (!stamp) return undefined;
+    return { protocol: { role: stamp.role, sha256: stamp.sha256, taskId: res.taskId } };
+  };
+
   return {
     headSha,
 
@@ -477,8 +497,15 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
         role: lensCtx.role,
         dispatched: res.status === "complete",
         ...(failureKind !== undefined ? { failureKind } : {}),
+        // FG-654: a protocol refusal's failureKind is the bare `stale_protocol` literal,
+        // so the message that names both shas and the remedy would otherwise be dropped.
+        ...(res.failureKind !== undefined && res.error !== undefined ? { detail: res.error } : {}),
         result: res.result,
         taskId: res.taskId,
+        // FG-654: WHICH protocol generation this lens actually ran under, read back off
+        // the dispatched task's manifest — the ledger INDEXES the manifest, it does not
+        // restate it. Per DISPATCH, so two lenses on two generations record two shas.
+        ...(dispatchedProtocol(res) ?? {}),
       };
     },
 
@@ -510,7 +537,7 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
       const envelopeVerified = verifyMaterializedEnvelope(fixCtx.batch.id, envelope);
       if (!envelopeVerified.ok) return { ok: false, taskId: "", error: envelopeVerified.refusal };
       const res = await dispatch({
-        agentRole: "engineer",
+        agentRole: REVIEW_DISPATCH_ROLES.fixBatch,
         task: fixerTask(fixCtx),
         taskFiles: {
           [`${FIX_BATCH_TASK_SUBDIR}/payload.json`]: payload,
@@ -521,11 +548,16 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
         runTitle: `review batch fix ${fixCtx.batch.id} — ${ctx.ticketId}`,
         ...(ctx.route !== undefined ? { routeKey: ctx.route } : {}),
       });
+      const stamp = dispatchedProtocol(res);
       return {
         ok: res.status === "complete",
         taskId: res.taskId,
         result: res.result,
         ...(res.error !== undefined ? { error: res.error } : {}),
+        // FG-654: the fixer's own protocol generation — the `engineer` seed carries the
+        // batch-remediation rules, and a fixer running a seed that never had them is the
+        // measured cause of "named its verification tests but never executed them".
+        ...(stamp ? { protocol: { role: stamp.protocol.role, sha256: stamp.protocol.sha256 } } : {}),
       };
     },
 
@@ -737,7 +769,7 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
 
     dispatchDocs: async ({ review, candidateSha }: { review: Review; candidateSha: string }) => {
       const res = await dispatch({
-        agentRole: "documentation-maintainer",
+        agentRole: REVIEW_DISPATCH_ROLES.docs,
         task:
           `Reconcile durable operator-facing docs against the change under review ` +
           `(${review.ticketId ?? "(no ticket)"}) at candidate ${candidateSha}. This phase runs BEFORE final ` +
@@ -747,12 +779,16 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
         runTitle: `review docs reconciliation — ${ctx.ticketId}`,
         ...(ctx.route !== undefined ? { routeKey: ctx.route } : {}),
       });
-      return { ok: res.status === "complete", ...(res.error !== undefined ? { error: res.error } : {}) };
+      return {
+        ok: res.status === "complete",
+        ...dispatchedProtocol(res),
+        ...(res.error !== undefined ? { error: res.error } : {}),
+      };
     },
 
     dispatchRechecker: async (recheckCtx: RecheckContextIn) => {
       const res = await dispatch({
-        agentRole: "review-rechecker",
+        agentRole: REVIEW_DISPATCH_ROLES.recheck,
         task: recheckerTask(recheckCtx),
         projectDir: ctx.projectDir,
         readOnlyProject: true,
@@ -764,6 +800,7 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
         ok: res.status === "complete",
         taskId: res.taskId,
         result: res.result,
+        ...dispatchedProtocol(res),
         ...(res.error !== undefined ? { error: res.error } : {}),
       };
     },

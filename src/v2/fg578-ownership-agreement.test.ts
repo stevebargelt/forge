@@ -27,10 +27,12 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { assetRoot } from "./asset-root.js";
 import { authoredCategories, autoRefreshableCategories } from "./seed-drift.js";
+import { COVERED_ROLES } from "./agent-protocol.js";
+import { REVIEW_DISPATCH_ROLES, RISK_LENSES, lensRole } from "./review-contract.js";
 
 const INSTALL_SCRIPT = join(assetRoot(), "scripts", "install-seeds.sh");
 
@@ -101,5 +103,77 @@ test("FG-578: the installer routes every seed category through the ownership pol
       new RegExp(`(install_category|seed_install_file)[^\\n]*\\s${category}\\s*$`, "m"),
       `${category} must be installed THROUGH the ownership-aware writer`,
     );
+  }
+});
+
+// ─── FG-654: the coverage agreement ─────────────────────────────────────────
+//
+// The protocol is no longer a region inside an operator seed — it is a forge-owned seed
+// GENERATION category (seeds/agent-protocols/<role>.md), published by the same atomic
+// mechanism as workflows and runtimes. The installer is therefore untouched by FG-654
+// and `agents` is once again wholly operator-authored, whole-file, which the partition
+// assertions above already hold. What still needs holding is COVERAGE: every role the
+// review lifecycle actually dispatches must have a protocol, or it dispatches a reviewer
+// that was never told the contract its output is judged by.
+
+test("FG-654: every review-lifecycle dispatch role in the REAL dispatch sites is in COVERED_ROLES", () => {
+  // Coverage is DERIVED: the non-lens half of COVERED_ROLES is REVIEW_DISPATCH_ROLES'
+  // own values, and the dispatch sites READ that registry rather than restating a role.
+  // So what this parses is that the sites still go through it — a bare `agentRole: "..."`
+  // literal at a review dispatch site is a role that could be added without coverage,
+  // which is the hand-maintained-list defect this replaced.
+  const wiring = readFileSync(join(assetRoot(), "src", "cli", "commands", "review-wiring.ts"), "utf8");
+  const bareLiterals = [...wiring.matchAll(/agentRole:\s*"([a-z0-9-]+)"/g)].map((m) => m[1]!);
+  assert.deepEqual(
+    bareLiterals,
+    [],
+    "a review dispatch site names a role by literal instead of REVIEW_DISPATCH_ROLES — coverage would not follow it",
+  );
+  const dispatched = new Set<string>();
+  for (const m of wiring.matchAll(/agentRole:\s*REVIEW_DISPATCH_ROLES\.([A-Za-z]+)/g)) {
+    const key = m[1]! as keyof typeof REVIEW_DISPATCH_ROLES;
+    assert.ok(REVIEW_DISPATCH_ROLES[key], `review-wiring dispatches REVIEW_DISPATCH_ROLES.${key}, which does not exist`);
+    dispatched.add(REVIEW_DISPATCH_ROLES[key]);
+  }
+  // The lens dispatch passes `agentRole: lensCtx.role` (the five lens roles, resolved
+  // from review-contract's own map), so those come from the derived half.
+  assert.ok(
+    /agentRole:\s*lensCtx\.role/.test(wiring),
+    "review-wiring must still dispatch lenses by their contract-resolved role — if this moved, the derived half of COVERED_ROLES is no longer anchored to a real dispatch site",
+  );
+  for (const lens of RISK_LENSES) dispatched.add(lensRole(lens));
+
+  const runNext = readFileSync(join(assetRoot(), "src", "v2", "runNext.ts"), "utf8");
+  assert.ok(
+    /REVIEW_DISPATCH_ROLES\.shippingReview/.test(runNext),
+    "runNext must still resolve the shipping reviewer FROM the registry — it is the workflow-red dispatch family",
+  );
+  assert.ok(
+    !/"shipping-reviewer"/.test(runNext),
+    "a bare shipping-reviewer literal is back in runNext — the registry is no longer the one place the role is spelled",
+  );
+  dispatched.add(REVIEW_DISPATCH_ROLES.shippingReview);
+
+  for (const role of dispatched) {
+    assert.ok(
+      COVERED_ROLES.includes(role),
+      `${role} is dispatched by the review lifecycle but is NOT in COVERED_ROLES — it would run whatever protocol its seed happens to carry, unchecked and unrecorded`,
+    );
+  }
+  // Guard against the vacuous pass, and against a registry entry no dispatch site reads.
+  assert.ok(dispatched.size >= 9, `expected at least the nine covered roles, parsed ${dispatched.size}`);
+  assert.deepEqual(
+    [...COVERED_ROLES].sort(),
+    [...dispatched].sort(),
+    "COVERED_ROLES and the parsed dispatch sites must be the SAME set — an entry neither side dispatches is the hand-maintained list again",
+  );
+
+  // And every one of them has a protocol in the release to be dispatched WITH.
+  for (const role of COVERED_ROLES) {
+    const path = join(assetRoot(), "seeds", "agent-protocols", `${role}.md`);
+    assert.ok(existsSync(path), `${role}: this release carries no ${path}`);
+    const text = readFileSync(path, "utf8");
+    assert.ok(text.trim().length > 0, `${role}: its protocol file is empty`);
+    assert.ok(text.startsWith("## "), `${role}: its protocol must start at a section heading`);
   }
 });

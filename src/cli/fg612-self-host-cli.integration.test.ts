@@ -43,6 +43,14 @@ function temp(prefix: string): string {
 
 type Run = { status: number | null; stdout: string; stderr: string; home: string };
 
+/** FG-654: an UNCOVERED role on purpose. The FG-612 guard is role-agnostic — it keys on
+ *  the PROJECT dir — but the covered review-lifecycle roles are refused at COMPOSE when no
+ *  seed generation is published, which is exactly the state these throwaway homes are in.
+ *  That refusal lands before the task dir is minted, so it would preempt the downstream
+ *  seed-generation stop `assertReachedDispatch` uses as its evidence. An uncovered role
+ *  still reaches the stop these cases have always measured. */
+const DISPATCH_ROLE = "tech-lead";
+
 /** Spawn the live control entry with a throwaway $FORGE_HOME. Worktree env is
  *  cleared unless the case sets it, so an ambient FORGE_WORKTREES on the
  *  developer's shell can never make a refusal case pass vacuously. */
@@ -140,7 +148,7 @@ afterEach(() => {
 // ── The refusal, end to end, writing nothing ─────────────────────────────────
 
 test("`forge invoke` against the live forge checkout refuses and leaves no store file and no run directory", () => {
-  const r = runForge(["invoke", "engineer", "--task", "edit forge itself", "--project", REPO_ROOT, "--unrouted"]);
+  const r = runForge(["invoke", DISPATCH_ROLE, "--task", "edit forge itself", "--project", REPO_ROOT, "--unrouted"]);
   assertRefusedAndTraceless("forge invoke", r);
 });
 
@@ -154,7 +162,7 @@ test("`forge new` against the live forge checkout refuses before the run exists"
 // does not isolate an invoke, so an operator who followed it would be back on the
 // live checkout believing it fixed. The refusal now names the clone instead.
 test("the invoke refusal names the source root and the two things that actually work: a clone, or the acknowledged override", () => {
-  const r = runForge(["invoke", "engineer", "--task", "t", "--project", REPO_ROOT, "--unrouted"]);
+  const r = runForge(["invoke", DISPATCH_ROLE, "--task", "t", "--project", REPO_ROOT, "--unrouted"]);
   const out = r.stdout + r.stderr;
   assert.match(out, /forge source root:/);
   assert.match(out, /CLONE of the forge checkout/, `the actual fix must be named\n${out}`);
@@ -173,7 +181,7 @@ test("invoked THROUGH an npm-link style symlinked binary, the guard still fires"
   symlinkSync(FORGE_BIN, link);
 
   const home = temp("forge-fg612-home-");
-  const child = spawnSync(link, ["invoke", "engineer", "--task", "t", "--project", REPO_ROOT, "--unrouted"], {
+  const child = spawnSync(link, ["invoke", DISPATCH_ROLE, "--task", "t", "--project", REPO_ROOT, "--unrouted"], {
     encoding: "utf8",
     cwd: home,
     timeout: 120_000,
@@ -204,7 +212,7 @@ test("a project spelled through a symlinked parent still refuses (the /var → /
   assert.equal(realpathSync(viaLink), REPO_ROOT, "fixture: the alias must spell the SAME tree");
   assertRefusedAndTraceless(
     "symlinked parent",
-    runForge(["invoke", "engineer", "--task", "t", "--project", viaLink, "--unrouted"]),
+    runForge(["invoke", DISPATCH_ROLE, "--task", "t", "--project", viaLink, "--unrouted"]),
   );
 });
 
@@ -213,7 +221,7 @@ test("a project spelled through a symlinked parent still refuses (the /var → /
 test("a parent-dir mount that CONTAINS the forge checkout refuses", () => {
   assertRefusedAndTraceless(
     "parent-dir mount",
-    runForge(["invoke", "engineer", "--task", "t", "--project", dirname(REPO_ROOT), "--unrouted"]),
+    runForge(["invoke", DISPATCH_ROLE, "--task", "t", "--project", dirname(REPO_ROOT), "--unrouted"]),
   );
 });
 
@@ -222,7 +230,7 @@ test("a SUBDIR of the forge checkout (--allow-subproject) refuses", () => {
   assert.ok(existsSync(sub), `fixture: ${sub} must exist`);
   assertRefusedAndTraceless(
     "subproject mount",
-    runForge(["invoke", "engineer", "--task", "t", "--project", sub, "--allow-subproject", "--unrouted"]),
+    runForge(["invoke", DISPATCH_ROLE, "--task", "t", "--project", sub, "--allow-subproject", "--unrouted"]),
   );
 });
 
@@ -254,7 +262,7 @@ test("a sibling directory that merely shares a string prefix with the checkout i
   // The control, through the same spawned entry: the copied tree IS the source root
   // this CLI resolves. Without it the case below could pass because the CLI never
   // ran from the fixture, not because the sibling is allowed.
-  const control = runForge(["invoke", "engineer", "--task", "t", "--project", fixture, "--unrouted"], {}, fixture);
+  const control = runForge(["invoke", DISPATCH_ROLE, "--task", "t", "--project", fixture, "--unrouted"], {}, fixture);
   assertRefusedAndTraceless("test-owned forge root", control);
   assert.match(
     control.stdout + control.stderr,
@@ -264,7 +272,7 @@ test("a sibling directory that merely shares a string prefix with the checkout i
 
   assertReachedDispatch(
     "prefix-colliding sibling of the forge root",
-    runForge(["invoke", "engineer", "--task", "t", "--project", sibling, "--unrouted"], {}, fixture),
+    runForge(["invoke", DISPATCH_ROLE, "--task", "t", "--project", sibling, "--unrouted"], {}, fixture),
   );
 });
 
@@ -274,7 +282,7 @@ test("a sibling directory that merely shares a string prefix with the checkout i
 // provisions no workspace, so the flag only ever silenced the guard here. It
 // remains a way through on the workflow-dispatch path, which does provision one.
 test("FORGE_WORKTREES=1 does NOT let the self-host invoke through — the flag isolates nothing on this path", () => {
-  const r = runForge(["invoke", "engineer", "--task", "t", "--project", REPO_ROOT, "--unrouted"], {
+  const r = runForge(["invoke", DISPATCH_ROLE, "--task", "t", "--project", REPO_ROOT, "--unrouted"], {
     FORGE_WORKTREES: "1",
   });
   assertRefusedAndTraceless("FORGE_WORKTREES=1", r);
@@ -305,7 +313,7 @@ test("`forge new` — the workflow path — is unchanged: FORGE_WORKTREES=1 is s
 });
 
 test("FORGE_NO_WORKTREES=1 lets it through and warns that agents write to the live source", () => {
-  const r = runForge(["invoke", "engineer", "--task", "t", "--project", REPO_ROOT, "--unrouted"], {
+  const r = runForge(["invoke", DISPATCH_ROLE, "--task", "t", "--project", REPO_ROOT, "--unrouted"], {
     FORGE_NO_WORKTREES: "1",
   });
   assertReachedDispatch("FORGE_NO_WORKTREES=1", r);
@@ -336,7 +344,7 @@ test("a DIFFERENT project is untouched by the guard in every env combination", (
   for (const combo of combos) {
     const label = `normal project ${JSON.stringify(combo)}`;
     const r = runForge(
-      ["invoke", "engineer", "--task", "normal work", "--project", project("forge-fg612-other-"), "--unrouted"],
+      ["invoke", DISPATCH_ROLE, "--task", "normal work", "--project", project("forge-fg612-other-"), "--unrouted"],
       combo,
     );
     assertReachedDispatch(label, r);

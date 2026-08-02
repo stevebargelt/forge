@@ -151,6 +151,18 @@ export type TaskManifest = {
   // FG-350: RECORDED dispatch-time control-plane provenance. Optional: pre-FG-350
   // manifests omit it. Consumers must degrade gracefully when absent (legacy path).
   controlPlane?: ControlPlaneReceipt;
+  // FG-654: WHICH GENERATION OF THE FORGE-OWNED REVIEW PROTOCOL THIS AGENT RAN UNDER.
+  // The manifest is AUTHORITATIVE for it (invariant 6: written once at dispatch, never
+  // recomputed); the review ledger's per-lens copy is an INDEX of this. Present only for
+  // the roles the review lifecycle dispatches — an uncovered role has no protocol to
+  // record. Optional, so pre-FG-654 manifests degrade gracefully like every other block.
+  agentProtocol?: {
+    role: string;
+    /** sha256 of the whole protocol file's bytes, as composed into the prompt. */
+    sha256: string;
+    /** the protocol file's path inside the resolved seed generation. */
+    source: string;
+  };
 };
 
 export function writeTaskManifest(dir: string, manifest: TaskManifest): void {

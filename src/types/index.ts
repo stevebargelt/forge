@@ -36,6 +36,14 @@ export type TaskPackage = {
   // distinguish an invoke task from a workflow whose step id is `task`. With FG-512
   // this marker is TOTAL for new rows; only legacy pre-provenance rows are marker-less.
   dispatchSource?: "invoke" | "workflow";
+  // FG-654: the protocol stamp THE COMPOSE THAT PRODUCED composedSystemPrompt resolved.
+  // It rides the package rather than being re-derived at manifest-write time on purpose:
+  // the two reads are minutes and a `forge upgrade` apart, so a fresh read can name a
+  // generation the container was never given — or, if the seed went stale in that window,
+  // name none at all for a covered role that did dispatch. The prompt and its receipt come
+  // from ONE read or they are not a receipt. Undefined for an uncovered role, and for a
+  // package whose prompt is a refusal (no container starts).
+  agentProtocol?: { role: string; sha256: string; source: string };
 };
 
 export type Finding = {

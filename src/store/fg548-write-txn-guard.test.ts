@@ -185,6 +185,46 @@ test("FG-548: writeTransaction is the shared helper the store's write paths rout
   }
 });
 
+// FG-654 RF-12: BEGIN IMMEDIATE only protects a read-modify-write if the READ is
+// inside it. `lens_outcomes_json` is a whole column three writers now serialize
+// wholesale, and recordAgentProtocol appends on a coordinator/background path: with the
+// read taken before the transaction, a concurrent `forge review accept-lens` landing in
+// the window is blindly overwritten by the stale array — a reviewer-authored outcome or
+// an operator acceptance dropped to record an INDEX of one. Single-threaded tests cannot
+// interleave two writers on one connection, so the guard is over the construction.
+// ALL THREE writers, not one: a lost update needs only ONE unsynchronized participant, so
+// hardening the appender while `accept-lens` and discovery still serialize a pre-transaction
+// snapshot delivers none of the protection. The measure is where `lensRecordsOf` — the read
+// that BUILDS the replacement array — sits relative to the write lock. (recordLensAcceptance
+// legitimately reads the review earlier to VALIDATE the operator's request; that read decides
+// nothing about which records survive.)
+for (const fn of ["recordAgentProtocol", "recordLensAcceptance", "replaceLensOutcomes"]) {
+  test(`FG-654 RF-12: ${fn} builds lens_outcomes_json from a read INSIDE the write transaction`, () => {
+    const source = stripCommentsAndStrings(readFileSync(join(SRC, "store", "reviews.ts"), "utf8"));
+    const start = source.indexOf(`export function ${fn}`);
+    assert.ok(start > 0, `${fn} must still exist — if it was renamed, update this guard`);
+    const end = source.indexOf("export function", start + 1);
+    const body = source.slice(start, end > 0 ? end : undefined);
+
+    const txn = body.search(/writeTransaction\s*(<[^>]*>)?\s*\(/);
+    assert.ok(txn > 0, `${fn} must still write inside a write transaction`);
+    assert.ok(/lensRecordsOf\(/.test(body), `${fn} must still build the array from lensRecordsOf — update this guard`);
+    for (const m of body.matchAll(/lensRecordsOf\(/g)) {
+      assert.ok(
+        m.index! > txn,
+        `${fn} reads the outcomes array OUTSIDE the write lock — a concurrent writer's record lands in the window and is blindly overwritten`,
+      );
+    }
+    for (const m of body.matchAll(/getReview\(/g)) {
+      // The refusal-shaped early read is allowed; a read that reaches the UPDATE is not.
+      assert.ok(
+        m.index! > txn || /return \{ ok: false/.test(body.slice(0, txn)),
+        `${fn} takes its record-deciding read before the transaction`,
+      );
+    }
+  });
+}
+
 // ── can the guard itself be defeated? ────────────────────────────────────────
 //
 // The guard is the only thing stopping a new deferred write txn from landing, so

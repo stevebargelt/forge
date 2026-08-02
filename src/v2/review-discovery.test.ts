@@ -17,6 +17,7 @@ import {
   assessLens,
   collectObservations,
   normalizeObservations,
+  LENS_INCOMPLETE_REASONS,
   type DiscoveryFinding,
   type LensDispatch,
   type LensOutcome,
@@ -343,4 +344,49 @@ test("FG-639: the model's own finding id is carried as provenance, never as iden
   const r = normalizeObservations(obs, { discoveredSha: "sha1" });
   assert.equal(r.observations[0]?.sources?.[0]?.modelFindingId, "CVE-1");
   assert.equal(r.observations[0]?.discoveredSha, "sha1");
+});
+
+// ─── FG-654: the `stale_protocol` reason ────────────────────────────────────
+
+test("FG-654: invariant 17 holds — the vocabulary GREW, no existing reason was removed or renamed", () => {
+  for (const reason of ["not_dispatched", "crashed", "timed_out", "missing_output", "malformed_output", "synthesized"]) {
+    assert.ok((LENS_INCOMPLETE_REASONS as readonly string[]).includes(reason), `${reason} must not disappear`);
+  }
+  assert.ok((LENS_INCOMPLETE_REASONS as readonly string[]).includes("stale_protocol"));
+});
+
+test("FG-654: `stale_protocol` is matched on the exact literal, not by the loose crash/timeout regexes", () => {
+  const of = (failureKind: string) =>
+    assessLens({ lens: "wide", role: "red-wide", dispatched: false, failureKind });
+  const stale = of("stale_protocol");
+  assert.equal(stale.complete, false);
+  if (!stale.complete) assert.equal(stale.reason, "stale_protocol");
+  // The neighbours keep their classification.
+  const crash = of("container_crash");
+  if (!crash.complete) assert.equal(crash.reason, "crashed");
+  const idle = of("idle_timeout");
+  if (!idle.complete) assert.equal(idle.reason, "timed_out");
+});
+
+test("FG-654: the per-dispatch protocol record rides the lens OUTCOME, so two lenses carry two shas", () => {
+  const a = assessLens({
+    lens: "wide",
+    role: "red-wide",
+    dispatched: true,
+    result: { outcome: "clean", findings: [] },
+    taskId: "task-a",
+    protocol: { role: "red-wide", sha256: "a".repeat(64), taskId: "task-a" },
+  });
+  const b = assessLens({
+    lens: "backend",
+    role: "red-backend",
+    dispatched: true,
+    result: { outcome: "clean", findings: [] },
+    taskId: "task-b",
+    protocol: { role: "red-backend", sha256: "b".repeat(64), taskId: "task-b" },
+  });
+  assert.equal(a.protocol?.sha256, "a".repeat(64));
+  assert.equal(b.protocol?.sha256, "b".repeat(64));
+  assert.notEqual(a.protocol?.sha256, b.protocol?.sha256);
+  assert.equal(a.protocol?.taskId, "task-a");
 });

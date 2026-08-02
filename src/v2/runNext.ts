@@ -48,7 +48,7 @@ import { crashPoint } from "./crash-points.js";
 import { assembleReviewerContextPacket } from "./reviewer-context-packet.js";
 import { validateVerdict } from "./validate-findings.js";
 import { gradeFindings } from "./review-quality.js";
-import { selectRedsForContract } from "./review-contract.js";
+import { REVIEW_DISPATCH_ROLES, selectRedsForContract } from "./review-contract.js";
 import { approvedReviewContract } from "./review-gate.js";
 import { logEvent, eventsForTask } from "../store/events.js";
 import { taskDir, integrationWorktreeDir, cloneDir } from "../util/paths.js";
@@ -60,6 +60,7 @@ import { verdictBlocksGate } from "./gate.js";
 import { evaluateValidationContract } from "./validation-contract.js";
 import { deriveUpstream } from "./inputs.js";
 import { composeSystemPrompt } from "./compose.js";
+import { STALE_PROTOCOL_FAILURE_KIND } from "./agent-protocol.js";
 import { filterConstraints, loadAllConstraints } from "./constraints.js";
 import { buildDockerArgs, buildProvisionerDockerArgs, resolveProjectContainerPath, preflightProjectMount, GIT_UNAVAILABLE_EXIT_CODE, type SpawnContext } from "./spawn.js";
 import { assertSelfHostDispatchAllowed } from "./self-host-guard.js";
@@ -653,6 +654,14 @@ async function dispatchSingleStep(args: {
     inputs[args.fanoutInput.key] = args.fanoutInput.value;
   }
 
+  const composedPrimary = composeSystemPrompt({
+    role: agentRole,
+    workflow: args.workflow,
+    step,
+    runTags: runTagsFromMetadata(args.runMetadata),
+    seedGeneration: args.seedGeneration,
+  });
+
   const taskPackage: TaskPackage = {
     taskId,
     runId: args.runId,
@@ -661,12 +670,12 @@ async function dispatchSingleStep(args: {
     inputs,
     // FG-512: runner-minted row — total dispatch provenance (see taskDispatchKind).
     dispatchSource: "workflow",
-    composedSystemPrompt: composeSystemPrompt({
-      role: agentRole,
-      workflow: args.workflow,
-      step,
-      runTags: runTagsFromMetadata(args.runMetadata),
-    }),
+    // FG-654: on a refusal this holds the refusal text, never a prompt — no container
+    // starts, so it is never delivered. See the guard below the row insert.
+    composedSystemPrompt: composedPrimary.ok ? composedPrimary.prompt : composedPrimary.refusal,
+    // FG-654: the stamp THIS compose resolved, carried to the manifest rather than
+    // re-read there — see TaskPackage.agentProtocol.
+    ...(composedPrimary.ok && composedPrimary.protocol ? { agentProtocol: composedPrimary.protocol } : {}),
   };
 
   // AWN-7: resolve the model once (capability + profile). Computed regardless of
@@ -700,6 +709,14 @@ async function dispatchSingleStep(args: {
     // show timeline. Emit it here so every task's lifecycle starts with a
     // creation event.
     logEvent("task.created", { runId: args.runId, taskId });
+  }
+
+  // FG-654: a covered role whose installed protocol region is absent or stale is refused
+  // HERE, before any mount, worktree or container. The row is already durable so the
+  // refusal is addressable by task id.
+  if (!composedPrimary.ok) {
+    failTask(taskId, { runId: args.runId, kind: classify({}), error: composedPrimary.refusal });
+    return "failed";
   }
 
   // FG-350: build control-plane receipt inputs from run metadata. routeReceipt
@@ -1276,7 +1293,7 @@ async function dispatchReds(args: {
   const spec = buildRedSpec(args.workflow, allTasks);
 
   // FG-381: detect shipping-reviewer and assemble context packet ONCE before dispatch.
-  const shippingReviewerRed = args.step.reds.find((r) => r.agent === "shipping-reviewer");
+  const shippingReviewerRed = args.step.reds.find((r) => r.agent === REVIEW_DISPATCH_ROLES.shippingReview);
   let reviewerContextPacket: ReviewerContextPacket | undefined;
   let shippingReviewerPreFailed = false;
   if (shippingReviewerRed) {
@@ -1339,7 +1356,7 @@ async function dispatchReds(args: {
   // Exclude shipping-reviewer from launches when it was pre-failed above.
   const redsToLaunch =
     shippingReviewerRed && reviewerContextPacket === undefined
-      ? lensSelection.selected.filter((r) => r.agent !== "shipping-reviewer")
+      ? lensSelection.selected.filter((r) => r.agent !== REVIEW_DISPATCH_ROLES.shippingReview)
       : lensSelection.selected;
 
   const launches = redsToLaunch.map((red) =>
@@ -1357,7 +1374,7 @@ async function dispatchReds(args: {
       dockerExec: args.dockerExec,
       getModelPolicy: args.getModelPolicy,
       seedGeneration: args.seedGeneration,
-      reviewerContextPacket: red.agent === "shipping-reviewer" ? reviewerContextPacket : undefined,
+      reviewerContextPacket: red.agent === REVIEW_DISPATCH_ROLES.shippingReview ? reviewerContextPacket : undefined,
     }),
   );
   const results = await Promise.all(launches);
@@ -1489,7 +1506,7 @@ async function dispatchReds(args: {
         ],
       };
     } else if (
-      r.red.agent === "shipping-reviewer" &&
+      r.red.agent === REVIEW_DISPATCH_ROLES.shippingReview &&
       authoritativeGate &&
       finalVerdict.verdict === "inconclusive"
     ) {
@@ -1624,6 +1641,13 @@ async function runOneRed(args: {
   })
     .map((c) => c.antiPrompt)
     .filter((p): p is string => typeof p === "string" && p.length > 0);
+  const composedRed = composeSystemPrompt({
+    role: args.red.agent,
+    workflow: args.workflow,
+    step: args.step,
+    runTags: runTagsFromMetadata(args.runMetadata),
+    seedGeneration: args.seedGeneration,
+  });
   const taskPackage: TaskPackage = {
     taskId: redTaskId,
     runId: args.runId,
@@ -1635,12 +1659,11 @@ async function runOneRed(args: {
       failureModes,
       ...(args.reviewerContextPacket ? { reviewerContextPacket: args.reviewerContextPacket } : {}),
     },
-    composedSystemPrompt: composeSystemPrompt({
-      role: args.red.agent,
-      workflow: args.workflow,
-      step: args.step,
-      runTags: runTagsFromMetadata(args.runMetadata),
-    }),
+    // FG-654: on a refusal this holds the refusal text, never a prompt — see the guard
+    // below the row insert. This is the workflow-declared red family (the
+    // shipping-reviewer's dispatch path), distinct from the coordinator's.
+    composedSystemPrompt: composedRed.ok ? composedRed.prompt : composedRed.refusal,
+    ...(composedRed.ok && composedRed.protocol ? { agentProtocol: composedRed.protocol } : {}),
     artifact: args.artifact,
     ...(args.spec ? { spec: args.spec } : {}),
   };
@@ -1652,6 +1675,13 @@ async function runOneRed(args: {
     profileSource: "run.profile",
     ctx: { projectDir: args.projectDir },
   });
+  // FG-654: a protocol refusal is decided BEFORE the row is written, so the row is
+  // created in its FINAL state rather than inserted pending and then transitioned. That
+  // keeps the refusal a single write with no window between the two — there is no
+  // container, no work in flight, and nothing a crash here could strand: either the row
+  // exists already-failed with the refusal on it, or it does not exist and dispatchReds
+  // re-enters this function from scratch.
+  const redRefused = composedRed.ok ? undefined : composedRed.refusal;
   insertTask({
     id: redTaskId,
     runId: args.runId,
@@ -1659,11 +1689,32 @@ async function runOneRed(args: {
     phase: args.step.id,
     agentRole: args.red.agent,
     ...taskModelFields(redResolution, args.red.activity),
-    status: "pending",
+    status: redRefused ? "failed" : "pending",
+    ...(redRefused ? { error: redRefused, completedAt: nowIso() } : {}),
     taskPackage,
     createdAt: nowIso(),
   });
   logEvent("task.created", { runId: args.runId, taskId: redTaskId });
+
+  // This lands on the same provenance seam the FG-628 return below uses — no reviewer
+  // authored anything, so the panel is INCOMPLETE and blocks, which is exactly right for
+  // a reviewer that was never told the contract its findings are judged by.
+  if (redRefused !== undefined) {
+    logEvent("task.failed", {
+      runId: args.runId,
+      taskId: redTaskId,
+      payload: { failure_kind: STALE_PROTOCOL_FAILURE_KIND, error: redRefused },
+    });
+    return {
+      red: args.red,
+      redTaskId,
+      verdict: { verdict: "inconclusive", confidence: 0, findings: [] },
+      reviewMissing: true,
+      // No `failureKind`: the FailureKind union is the CONTAINER-death vocabulary and no
+      // container ran. The refusal itself is on the task.failed event's error.
+      containerStarted: false,
+    };
+  }
 
   // FG-350: build control-plane receipt inputs for the RED agent. Constraint
   // counts are scoped to the RED's own role/workflow/step rather than the
@@ -1789,7 +1840,7 @@ async function runOneRed(args: {
   // other success-path reaps in this file — a reap failure here is the same
   // silent, unsweepable leak.
   reapContainerAndReportFailure(result.containerName, redCompleted, args.runId, redTaskId);
-  if (args.red.agent === "shipping-reviewer") {
+  if (args.red.agent === REVIEW_DISPATCH_ROLES.shippingReview) {
     return {
       red: args.red,
       redTaskId,
@@ -2858,6 +2909,13 @@ async function runFanoutChild(args: {
     childInputs["requestedChanges"] = args.requestedChanges;
   }
   for (const key of CONTROL_PLANE_METADATA_KEYS) delete childInputs[key];
+  const composedChild = composeSystemPrompt({
+    role: agentRole,
+    workflow: args.workflow,
+    step,
+    runTags: runTagsFromMetadata(args.runMetadata),
+    seedGeneration: args.seedGeneration,
+  });
   const taskPackage: TaskPackage = {
     taskId: childTaskId,
     runId: args.runId,
@@ -2866,12 +2924,9 @@ async function runFanoutChild(args: {
     inputs: childInputs,
     // FG-512: runner-minted fanout child row — total dispatch provenance.
     dispatchSource: "workflow",
-    composedSystemPrompt: composeSystemPrompt({
-      role: agentRole,
-      workflow: args.workflow,
-      step,
-      runTags: runTagsFromMetadata(args.runMetadata),
-    }),
+    // FG-654: refusal text on a refusal — see the guard below the row insert.
+    composedSystemPrompt: composedChild.ok ? composedChild.prompt : composedChild.refusal,
+    ...(composedChild.ok && composedChild.protocol ? { agentProtocol: composedChild.protocol } : {}),
   };
 
   const childResolution = resolveModel({
@@ -2894,6 +2949,12 @@ async function runFanoutChild(args: {
     createdAt: nowIso(),
   });
   logEvent("task.created", { runId: args.runId, taskId: childTaskId, payload: { fanoutChild: true, index: args.index } });
+
+  // FG-654: refused before any mount, worktree or container — same as primary dispatch.
+  if (!composedChild.ok) {
+    failTask(childTaskId, { runId: args.runId, kind: classify({}), error: composedChild.refusal });
+    return { index: args.index, value: args.value, childTaskId, status: "failed" };
+  }
 
   // FG-350: control-plane receipt for fanout children — same provenance logic as
   // dispatchSingleStep; constraint counts scoped to this child's role/step.
@@ -3386,6 +3447,12 @@ async function runContainer(args: {
     runtime: { name: runtimeName, kind: runtimeMeta.runtimeKind, logFormat: runtimeMeta.logFormat, promptStrategy: runtimeMeta.promptStrategy, authStrategy: runtimeMeta.authStrategy },
     ...(manifestModelBlock(args.resolution) ? { model: manifestModelBlock(args.resolution) } : {}),
     ...(controlPlane ? { controlPlane } : {}),
+    // FG-654: see task-manifest.ts — the RECORDED protocol generation this agent ran
+    // under. Per DISPATCH, not per stage: a review that spans a `forge upgrade`
+    // legitimately mixes generations, and the mix must be visible rather than averaged.
+    // Carried from the compose that produced this package's prompt, never re-resolved
+    // here — a second read describes the seed as of now, not the bytes being dispatched.
+    ...(args.taskPackage.agentProtocol ? { agentProtocol: args.taskPackage.agentProtocol } : {}),
   });
 
   // FG-376: resolve the dependency-cache decision BEFORE building docker args

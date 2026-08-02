@@ -42,6 +42,7 @@ import { resolveIdleTimeoutMs, IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js
 import { DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE } from "./dependency-provisioning.js";
 import { productionDockerExec, finalizeContainerRetention, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
 import { composeSystemPrompt } from "./compose.js";
+import { STALE_PROTOCOL_FAILURE_KIND } from "./agent-protocol.js";
 import { buildDockerArgs, preflightProjectMount, GIT_UNAVAILABLE_EXIT_CODE, type SpawnContext } from "./spawn.js";
 import { loadRuntimeWithSource, loadModelPolicyWithSource } from "./loader.js";
 import { resolveSeedGeneration, type SeedGeneration } from "./seed-generation.js";
@@ -185,6 +186,12 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   // literal phase "task" — newTaskId already prefixes "task-", so passing "task"
   // produced the doubled "task-task-..." id. The row's phase stays "task".
   const taskId = newTaskId(args.agentRole);
+  const composed = composeSystemPrompt({
+    role: args.agentRole,
+    workflow,
+    step,
+    seedGeneration,
+  });
   const taskPackage: TaskPackage = {
     taskId,
     runId,
@@ -196,11 +203,14 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     // `invoke` run and `--run <real-workflow-run>`. renderInvokeTaskPackage reads
     // only taskId/runId/role/inputs, so this stays inert in what the agent sees.
     dispatchSource: "invoke",
-    composedSystemPrompt: composeSystemPrompt({
-      role: args.agentRole,
-      workflow,
-      step,
-    }),
+    // FG-654: on a refusal this is the refusal text, never a prompt. No container
+    // starts, so it is never delivered — it is the row's durable record of WHY.
+    composedSystemPrompt: composed.ok ? composed.prompt : composed.refusal,
+    // FG-654: carried from THIS compose, never re-read at manifest-write time. The
+    // manifest is written later inside dispatchInvokeTask (after model resolution, mount
+    // preflight and docker-arg construction); a `forge upgrade` landing in that window
+    // would otherwise stamp a generation this prompt was not composed under.
+    ...(composed.ok && composed.protocol ? { agentProtocol: composed.protocol } : {}),
   };
 
   // AWN-7: resolve the model (capability + profile) before inserting the row, so
@@ -230,6 +240,15 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   // invoke is forge's main orchestrator primitive; its timelines must start at
   // task.created, not task.started — matching the pipeline path (runNext).
   logEvent("task.created", { runId, taskId });
+
+  // FG-654: the row exists so the refusal is durable and addressable (the review
+  // ledger records this taskId against the lens), and nothing is dispatched. The
+  // failureKind rides the result as a free string — review-wiring maps it onto the
+  // `stale_protocol` discovery reason, which an operator lens acceptance may not clear.
+  if (!composed.ok) {
+    failTask(taskId, { runId, kind: classify({}), error: composed.refusal });
+    return { runId, taskId, status: "failed", error: composed.refusal, failureKind: STALE_PROTOCOL_FAILURE_KIND };
+  }
 
   return dispatchInvokeTask({
     task,
@@ -754,6 +773,12 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     runtime: { name: runtimeName, kind: runtimeMeta.runtimeKind, logFormat: runtimeMeta.logFormat, promptStrategy: runtimeMeta.promptStrategy, authStrategy: runtimeMeta.authStrategy },
     ...(manifestModelBlock(resolution) ? { model: manifestModelBlock(resolution) } : {}),
     controlPlane,
+    // FG-654: RECORDED here, at the same dispatch-time seam as every other receipt, so
+    // "which protocol did this agent run under" is answerable from durable state after
+    // the fact rather than inferred from whatever is installed when someone asks. The
+    // value is the one COMPOSE resolved (TaskPackage.agentProtocol) — recomputing it here
+    // would describe the seed as of now, not the bytes in the prompt below.
+    ...(taskPackage.agentProtocol ? { agentProtocol: taskPackage.agentProtocol } : {}),
   });
 
   // Usage attribution: prefer the resolved capability alias (policy mode); fall

@@ -7,12 +7,15 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { cpSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from "node:fs";
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gatherPolicy, gatherProfileAuth, gatherReleaseInputs, newestBuildInputMtime, type DoctorProbes } from "./doctor.js";
 import { buildReleaseReport, type ImageInputs } from "../../v2/release-doctor.js";
 import { assetRoot } from "../../v2/asset-root.js";
+import { detectProtocolDrift, renderProtocolDrift, detectSeedDrift, renderSeedDrift } from "../../v2/seed-drift.js";
+import { protocolRelPath } from "../../v2/agent-protocol.js";
+import { publishTestGeneration } from "../../v2/seed-generation.testkit.js";
 
 // proj-default is the reachable default; proj-optin is defined but only
 // selectable via --profile (not in defaults/overrides).
@@ -312,4 +315,89 @@ test("FG-577: an explicit ctx.forgeRepoDir still overrides the probe root (upgra
     buildInputMtime: (dir) => { probed = dir; return 42; },
   });
   assert.equal(probed, "/some/release");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FG-654: the Forge-owned protocol is DISPATCH-COUPLED, so a covered role whose
+// protocol does not resolve out of the published generation — or whose installed
+// seed still carries an embedded legacy copy — is a readiness FAIL, while the
+// operator's own prose in ~/.forge/agents stays a warn.
+//
+// This is a visible change to a published exit-code contract: a host that has not
+// upgraded goes from green to red. That is the point — such a host cannot review.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("FG-654: a freshly published generation is ready and prints nothing", () => {
+  const home = mkdtempSync(join(tmpdir(), "forge-fg654-doctor-ok-"));
+  const gen = publishTestGeneration(home, { assetsParent: home });
+  const clean = detectProtocolDrift({ generation: gen, forgeHome: home });
+  assert.equal(clean.ok, true, "a freshly published host is ready");
+  assert.equal(clean.entries.length, 9, "one entry per covered role");
+  assert.equal(renderProtocolDrift(clean), "", "and prints nothing");
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("FG-654: a protocol missing from the generation makes doctor's readiness FAIL", () => {
+  const home = mkdtempSync(join(tmpdir(), "forge-fg654-doctor-"));
+  const gen = publishTestGeneration(home, { assetsParent: home, agentProtocols: false });
+  const stale = detectProtocolDrift({ generation: gen, forgeHome: home });
+  assert.equal(stale.ok, false, "an unresolvable protocol is NOT ready — doctor exits non-zero");
+  assert.equal(stale.stale.length, 9, "every covered role is named, not just the first");
+  const rendered = renderProtocolDrift(stale);
+  assert.match(rendered, /\[FAIL\]/);
+  assert.match(rendered, /red-wide/);
+  assert.match(rendered, /forge upgrade/);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("FG-654: protocol bytes tampered inside the generation make readiness FAIL, by role", () => {
+  const home = mkdtempSync(join(tmpdir(), "forge-fg654-doctor-tamper-"));
+  const gen = publishTestGeneration(home, { assetsParent: home });
+  const path = join(gen.root, protocolRelPath("red-wide"));
+  writeFileSync(path, `${readFileSync(path, "utf8")}\n\nMUTATED\n`);
+  const stale = detectProtocolDrift({ generation: gen, forgeHome: home });
+  assert.equal(stale.ok, false);
+  assert.equal(stale.stale.length, 1);
+  assert.equal(stale.stale[0]?.role, "red-wide");
+  assert.match(renderProtocolDrift(stale), /\[FAIL\]\s+red-wide/);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("FG-654: an installed seed carrying an EMBEDDED legacy protocol is a readiness FAIL", () => {
+  const home = mkdtempSync(join(tmpdir(), "forge-fg654-doctor-legacy-"));
+  const gen = publishTestGeneration(home, { assetsParent: home });
+  const agentDir = join(home, "agents", "red-wide");
+  mkdirSync(agentDir, { recursive: true });
+  writeFileSync(
+    join(agentDir, "CLAUDE.md"),
+    "# red-wide\n\n<!-- forge:agent-protocol-start -->\n\n## Ancient\n\nold\n\n<!-- forge:agent-protocol-end -->\n",
+  );
+  const report = detectProtocolDrift({ generation: gen, forgeHome: home });
+  assert.equal(report.ok, false, "a leftover embedded protocol is a host that cannot dispatch red-wide");
+  assert.equal(report.stale.length, 1);
+  assert.equal(report.stale[0]?.role, "red-wide");
+  assert.match(renderProtocolDrift(report), /\[FAIL\]\s+red-wide/);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("FG-654: OPERATOR-side prose in ~/.forge/agents stays a warn — readiness is unaffected", () => {
+  const home = mkdtempSync(join(tmpdir(), "forge-fg654-doctor-warn-"));
+  const gen = publishTestGeneration(home, { assetsParent: home });
+  const seeds = join(assetRoot(), "seeds");
+  // A customized operator seed, carrying no embedded protocol.
+  cpSync(join(seeds, "agents"), join(home, "agents"), { recursive: true });
+  const path = join(home, "agents", "red-wide", "CLAUDE.md");
+  writeFileSync(path, `${readFileSync(path, "utf8")}\n\n## My house rule\n\nAlways read the ledger first.\n`);
+
+  const protocol = detectProtocolDrift({ generation: gen, forgeHome: home });
+  assert.equal(protocol.ok, true, "the operator's own edit must NOT make the host unready");
+  assert.equal(renderProtocolDrift(protocol), "");
+
+  // The FG-335 detector still reports it — as a warn, exactly as before.
+  const seedDrift = detectSeedDrift(seeds, home, join(home, "skills"));
+  const entry = seedDrift.entries.find((e) => e.path === join("agents", "red-wide", "CLAUDE.md"));
+  assert.equal(entry?.status, "drifted");
+  assert.equal(entry?.coupling, "prose", "the file as a whole is still prose-coupled → warn");
+  assert.match(renderSeedDrift(seedDrift), /\[warn\]\s+drifted\s+agents\/red-wide/);
+  rmSync(home, { recursive: true, force: true });
 });

@@ -20,10 +20,15 @@ import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
 import { eventsForRun } from "../store/events.js";
 import {
+  agentProtocolRecordsOf,
   findingsForReview,
   getReview,
   ingestFindings,
   insertReview,
+  lensAcceptancesOf,
+  lensOutcomeRecordsOf,
+  recordAgentProtocol,
+  recordLensAcceptance,
   recordDisposition,
   recordResolution,
   type Review,
@@ -2133,4 +2138,242 @@ test("FG-640: a repeated free-form shipping finding is ingested ONCE, not once p
   const second = await runNextStage(REVIEW, h.deps);
   assert.equal(second.status, "refused", "the free-form finding still blocks the stage");
   assert.equal(lateRows().length, 1, "a second copy was ingested — the review could never settle");
+});
+
+// FG-654 / D11: THE LEDGER INDEXES THE MANIFEST, PER DISPATCH — and NOT via StageEvidence.
+//
+// `StageEvidence` is one record per STAGE while Stage 2b fans out five lens dispatches, so
+// the protocol generation cannot live there without lying about cardinality. The fixer's
+// generation rides its own record in `lens_outcomes_json`, which already has per-dispatch
+// cardinality, and is filtered out of `lensOutcomeRecordsOf` so no outcome consumer can
+// mistake it for a review that happened.
+test("FG-654: the fixer's protocol generation is recorded per dispatch, readable, and NOT in StageEvidence", async () => {
+  const h = harness({
+    findingsPerLens: 5,
+    dispatchFixer: (ctx) => ({
+      ok: true,
+      taskId: "task-fixer-fg654",
+      protocol: { role: "engineer", sha256: "b".repeat(64) },
+      result: {
+        fix_batch_id: ctx.batch.id,
+        revision: ctx.batch.revision,
+        findings: ctx.batch.payload.findings.map((f) => ({
+          finding_ref: f.finding_ref,
+          outcome: "resolved",
+          evidence_kind: "test_executed",
+          evidence: "the regression test now passes",
+          files_changed: ["src/x.ts"],
+        })),
+      },
+    }),
+  });
+  await drive(h.deps, "discover");
+  dispositionAll("fix_now", "will be remediated this cycle");
+  const outcome = await runNextStage(REVIEW, h.deps);
+  assert.equal(outcome.transition.kind, "batch_fix");
+
+  const review = getReview(REVIEW)!;
+  const recorded = agentProtocolRecordsOf(review);
+  assert.equal(recorded.length, 1, "one dispatch, one record");
+  assert.equal(recorded[0]?.role, "engineer");
+  assert.equal(recorded[0]?.sha256, "b".repeat(64));
+  assert.equal(recorded[0]?.taskId, "task-fixer-fg654");
+  assert.equal(recorded[0]?.stage, "fix_batch");
+
+  // The negative half, and the one that matters: nothing was written to StageEvidence for
+  // this purpose, and no outcome consumer sees the record.
+  for (const rec of Object.values(review.stageEvidence ?? {})) {
+    assert.ok(
+      !JSON.stringify(rec).includes("b".repeat(64)),
+      "the protocol generation must NOT be recorded on StageEvidence — wrong cardinality",
+    );
+  }
+  assert.ok(
+    !lensOutcomeRecordsOf(review).some((r) => JSON.stringify(r).includes("agent_protocol")),
+    "the protocol record must be filtered out of the reviewer-authored outcomes",
+  );
+});
+
+// FG-654 RF-7: `stage` documents `fix_batch`, `recheck` AND `docs`, and all three must be
+// reachable. documentation-maintainer and review-rechecker are both COVERED roles, and the
+// rechecker is the one that JUDGES the fixer's evidence — "which protocol was the rechecker
+// told" cannot be a question answerable only by hand-reading a task manifest.
+test("FG-654: the docs and recheck dispatches record their protocol generation too, not just the fixer's", async () => {
+  const h = harness({
+    findingsPerLens: 1,
+    dispatchFixer: (ctx) => ({
+      ok: true,
+      taskId: "task-fixer-rf7",
+      protocol: { role: "engineer", sha256: "e".repeat(64), taskId: "task-fixer-rf7" },
+      result: {
+        fix_batch_id: ctx.batch.id,
+        revision: ctx.batch.revision,
+        findings: ctx.batch.payload.findings.map((f) => ({
+          finding_id: f.finding_id,
+          result: "fixed",
+          remediation_summary: "fixed",
+          files_changed: ["src/x.ts"],
+          evidence: "the regression test now passes",
+        })),
+      },
+    }),
+    dispatchDocs: () => ({
+      ok: true,
+      protocol: { role: "documentation-maintainer", sha256: "d".repeat(64), taskId: "task-docs-rf7" },
+    }),
+    dispatchRechecker: (ctx) => ({
+      ok: true,
+      taskId: "task-recheck-rf7",
+      protocol: { role: "review-rechecker", sha256: "c".repeat(64), taskId: "task-recheck-rf7" },
+      result: {
+        review_id: ctx.review.id,
+        candidate_sha: ctx.candidateSha,
+        rechecked: ctx.expected.map((f) => ({
+          finding_id: f.id,
+          result: "resolved",
+          evidence_kind: "regression_test",
+          evidence: { kind: "regression_test", test_name: "the guard holds", runner_output: EXECUTED },
+        })),
+        new_findings: [],
+      },
+    }),
+  });
+
+  await drive(h.deps, "discover");
+  dispositionAll("fix_now", "will be remediated this cycle");
+  await parkAt(h.deps, "recheck");
+  await runNextStage(REVIEW, h.deps);
+
+  const byStage = new Map(agentProtocolRecordsOf(getReview(REVIEW)!).map((r) => [r.stage, r]));
+  assert.deepEqual([...byStage.keys()].sort(), ["docs", "fix_batch", "recheck"], "every stated stage is reachable");
+  assert.equal(byStage.get("docs")?.role, "documentation-maintainer");
+  assert.equal(byStage.get("docs")?.taskId, "task-docs-rf7");
+  assert.equal(byStage.get("recheck")?.role, "review-rechecker");
+  assert.equal(byStage.get("recheck")?.sha256, "c".repeat(64));
+  assert.equal(byStage.get("recheck")?.taskId, "task-recheck-rf7");
+});
+
+// FG-654 RF-26: A DISCOVERY PASS MUST NOT ERASE THE RECEIPTS OF DISPATCHES THAT HAPPENED.
+//
+// `runDiscovery` replaces `lens_outcomes_json` WHOLESALE with `[...acceptances,
+// ...outcomes]`. The acceptances are re-injected because they are operator decisions about
+// this candidate; the agent_protocol records need re-injecting for exactly the same reason
+// — they are statements about fix_batch / docs / recheck dispatches that ALREADY RAN. Left
+// out, a second discovery pass silently deletes the answer to "which protocol did the
+// fixer run under", which is the question FG-654 exists to make answerable.
+test("FG-654 RF-26: a re-run discovery preserves agent_protocol records alongside acceptances and fresh outcomes", async () => {
+  // The `wide` lens crashes on the FIRST pass only, so the panel is incomplete and the
+  // review stays in discovering — which is what makes discovery run a SECOND time over the
+  // same review, the wholesale `lens_outcomes_json` replacement this pins.
+  let firstPass = true;
+  const h = harness({
+    findingsPerLens: 1,
+    dispatchLens: (ctx) => {
+      if (firstPass && ctx.lens === "wide") {
+        return { lens: ctx.lens, role: ctx.role, dispatched: false, failureKind: "container_crash" };
+      }
+      return {
+        lens: ctx.lens,
+        role: ctx.role,
+        dispatched: true,
+        taskId: `task-${ctx.lens}`,
+        result:
+          ctx.lens === "backend"
+            ? { outcome: "fail", findings: [discoveryFinding(1)] }
+            : { outcome: "pass", findings: [] },
+      };
+    },
+  });
+  await drive(h.deps, "discover");
+  assert.equal(getReview(REVIEW)!.state, "discovering", "precondition: the panel is incomplete");
+
+  // A receipt of a dispatch that already happened…
+  recordAgentProtocol(REVIEW, {
+    role: "engineer",
+    sha256: "f".repeat(64),
+    taskId: "task-fixer-rf26",
+    stage: "fix_batch",
+  });
+  // …and an operator decision, whose survival is already load-bearing — the control that
+  // makes this test about the RECORD and not about discovery being broken generally.
+  const accepted = recordLensAcceptance(REVIEW, {
+    lens: "backend",
+    missingEvidence: "no backend lens ran",
+    rationale: "shipping anyway",
+    operator: true,
+  });
+  assert.ok(accepted.ok, accepted.ok ? "" : accepted.refusal);
+
+  const before = agentProtocolRecordsOf(getReview(REVIEW)!);
+  assert.equal(before.length, 1, "precondition: the record was written");
+
+  // Re-run discovery over the SAME review — the wholesale replacement.
+  firstPass = false;
+  const outcome = await runNextStage(REVIEW, h.deps);
+  assert.equal(outcome.transition.kind, "discover", "discovery must genuinely re-run");
+
+  const review = getReview(REVIEW)!;
+  const after = agentProtocolRecordsOf(review);
+  assert.equal(after.length, 1, "the agent_protocol record must SURVIVE the discovery pass");
+  assert.deepEqual(after[0], before[0], "…byte-for-byte, not re-derived");
+
+  // And it survives ALONGSIDE the other two populations, not instead of them.
+  assert.equal(lensAcceptancesOf(review).length, 1, "the operator acceptance is still re-injected");
+  assert.ok(lensOutcomeRecordsOf(review).length > 0, "and the fresh lens outcomes are there");
+  assert.ok(
+    !lensOutcomeRecordsOf(review).some((r) => JSON.stringify(r).includes("agent_protocol")),
+    "the record is still filtered out of the reviewer-authored outcomes",
+  );
+});
+
+// FG-654 RF-12 at the discovery site: THE WINDOW IS THE FAN-OUT ITSELF.
+//
+// runDiscovery awaits one CONTAINER PER LENS between reading the review and writing the
+// column back. A survivor set derived from the pre-fan-out snapshot silently erases every
+// acceptance and every protocol receipt another process committed during those minutes —
+// the operator's `forge review accept-lens` and the coordinator's own fix-batch receipt
+// are both live in that window. Here the concurrent writer runs INSIDE a lens dispatch,
+// which is exactly where the real one lands.
+test("FG-654 RF-12: a record committed DURING the lens fan-out survives the discovery write", async () => {
+  let wrote = false;
+  const h = harness({
+    findingsPerLens: 1,
+    dispatchLens: (ctx) => {
+      if (!wrote) {
+        wrote = true;
+        recordAgentProtocol(REVIEW, {
+          role: "engineer",
+          sha256: "a".repeat(64),
+          taskId: "task-mid-flight",
+          stage: "fix_batch",
+        });
+        const accepted = recordLensAcceptance(REVIEW, {
+          lens: "backend",
+          missingEvidence: "the backend lens never reviewed the ledger write",
+          rationale: "accepted mid-flight by the operator",
+          operator: true,
+        });
+        assert.ok(accepted.ok, accepted.ok ? "" : accepted.refusal);
+      }
+      return {
+        lens: ctx.lens,
+        role: ctx.role,
+        dispatched: true,
+        taskId: `task-${ctx.lens}`,
+        result: { outcome: "pass", findings: [] },
+      };
+    },
+  });
+
+  await drive(h.deps, "discover");
+
+  const review = getReview(REVIEW)!;
+  assert.equal(
+    agentProtocolRecordsOf(review).length,
+    1,
+    "the receipt of a dispatch that really ran was erased by the discovery write",
+  );
+  assert.equal(agentProtocolRecordsOf(review)[0]?.taskId, "task-mid-flight");
+  assert.equal(lensAcceptancesOf(review).length, 1, "the operator's acceptance was erased by the discovery write");
+  assert.ok(lensOutcomeRecordsOf(review).length > 0, "and discovery still recorded its own outcomes");
 });

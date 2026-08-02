@@ -10,17 +10,28 @@
 // $FORGE_HOME — and then composes the red system prompt out of what it installed, with
 // `composeSystemPrompt`'s own default resolution. That is the whole chain, executed:
 //
-//   seeds/agents/red-<lens>/CLAUDE.md
+// FG-654 SPLIT THE ROLE'S PROSE IN TWO, and both halves reach the same prompt by their own
+// documented path — so this suite executes BOTH chains rather than one:
+//
+//   seeds/agents/red-<lens>/CLAUDE.md            (the OPERATOR half)
 //     → scripts/install-seeds.sh   (the only writer; `forge upgrade` step [3/4] runs this file)
 //     → $FORGE_HOME/agents/red-<lens>/CLAUDE.md
 //     → composeSystemPrompt        (default agentDir = $FORGE_HOME/agents/<role>)
 //     → the reviewer's system prompt
 //
+//   seeds/agent-protocols/red-<lens>.md          (the FORGE-OWNED half — where AWN-5 lives)
+//     → publishSeedGeneration      (`forge upgrade` step [3/4] publishes it atomically)
+//     → the anchored seed generation
+//     → composeSystemPrompt        (protocol section, composed AHEAD of the operator seed)
+//     → the reviewer's system prompt
+//
 // It also pins the two negatives AC-6 asks for:
-//   - NO NEW PATH. Agent seeds are absent from the atomic seed generation (`SEED_GENERATION_DIRS`
-//     is workflows + runtimes), and `upgradeAssetPaths` resolves exactly one seed installer.
-//   - NO HAND-COPY. No file anywhere in the repo outside `seeds/agents/` is a byte-copy of a red
-//     lens seed — a duplicated seed is how an edit lands in one copy and rots in the other.
+//   - NO NEW PATH. Agent SEEDS are still absent from the atomic seed generation — `agents` is not
+//     in `SEED_GENERATION_DIRS`, so the operator half still has exactly one publisher — and
+//     `upgradeAssetPaths` resolves exactly one seed installer.
+//   - NO HAND-COPY. No file anywhere in the repo outside `seeds/agents/` and
+//     `seeds/agent-protocols/` is a byte-copy of either half — a duplicated seed is how an edit
+//     lands in one copy and rots in the other.
 //
 // And it pins the operator-visible consequence that is easy to assume away: `agents` is
 // AUTHORED_EXEMPT (FG-578), so on a host that ALREADY has the seeds, the installer RETAINS the
@@ -39,6 +50,7 @@ import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { composeSystemPrompt } from "./compose.js";
 import { SEED_GENERATION_DIRS } from "./seed-generation.js";
+import { publishTestGeneration } from "./seed-generation.testkit.js";
 import { upgradeAssetPaths, parseRetainedLine } from "../cli/commands/upgrade.js";
 import { RISK_LENSES, lensRole } from "./review-contract.js";
 import type { Workflow } from "./schema.js";
@@ -97,6 +109,8 @@ function installSeeds(opts: { force?: boolean } = {}): { stdout: string; stderr:
 }
 
 const seedPath = (role: string): string => join(repoRoot, "seeds", "agents", role, "CLAUDE.md");
+/** FG-654: the forge-owned half, where the FG-653 AWN-5 rule now lives. */
+const protocolPath = (role: string): string => join(repoRoot, "seeds", "agent-protocols", `${role}.md`);
 const installedPath = (role: string): string => join(home, "agents", role, "CLAUDE.md");
 
 /** Every regular file under `dir`, as paths relative to it. */
@@ -133,9 +147,16 @@ test("integ FG-653: the authoritative installer propagates all five amended red 
     const shipped = readFileSync(seedPath(role));
     const landed = readFileSync(installedPath(role));
     assert.ok(shipped.equals(landed), `${role}: the installed seed is not the bytes this release ships`);
+    // FG-654: the AWN-5 rule lives in the forge-owned half now, which the installer does
+    // NOT write — it rides the seed generation. Asserted here so the split itself is
+    // pinned: the rule is in exactly one of the two halves, not silently in both.
     assert.ok(
-      landed.toString("utf8").includes(RULE_NEEDLE),
-      `${role}: the FG-653 discovery rule did not reach the host through the install path`,
+      !landed.toString("utf8").includes(RULE_NEEDLE),
+      `${role}: the FG-653 rule must NOT be in the operator half — it is forge-owned`,
+    );
+    assert.ok(
+      readFileSync(protocolPath(role), "utf8").includes(RULE_NEEDLE),
+      `${role}: the FG-653 discovery rule is missing from the forge-owned protocol`,
     );
   }
 
@@ -151,17 +172,25 @@ test("integ FG-653: the authoritative installer propagates all five amended red 
 test("integ FG-653: the rule reaches the reviewer's COMPOSED system prompt, resolved the way dispatch resolves it", () => {
   assert.equal(installSeeds().status, 0);
 
+  // FG-654: the forge-owned half reaches compose through the published generation, which
+  // is the same `forge upgrade` that ran install-seeds.sh above. Publishing it here is
+  // the second half of the chain, not a test shortcut.
+  const gen = publishTestGeneration(home, { assetsParent: home });
+
   const prevForgeHome = process.env.FORGE_HOME;
   process.env.FORGE_HOME = home;
   try {
     for (const role of LENS_ROLES) {
       // No agentDir override: composeSystemPrompt resolves $FORGE_HOME/agents/<role> itself, which
       // is the same directory install-seeds.sh just wrote. That identity is the propagation claim.
-      const prompt = composeSystemPrompt({
+      const composed = composeSystemPrompt({
         role,
         workflow: WORKFLOW,
         step: { ...WORKFLOW.steps[0]!, agent: role },
+        seedGeneration: gen,
       });
+      assert.ok(composed.ok, composed.ok ? "" : `${role}: ${composed.refusal}`);
+      const prompt = composed.ok ? composed.prompt : "";
       assert.ok(
         !prompt.includes("Agent base CLAUDE.md not found"),
         `${role}: compose fell back to its placeholder — the seed is not where dispatch looks for it`,
@@ -187,11 +216,12 @@ test("integ FG-653: the rule reaches the reviewer's COMPOSED system prompt, reso
 
 // ─── no second path ─────────────────────────────────────────────────────────
 
-test("integ FG-653: agent seeds are NOT part of the atomic seed generation — the installer is the only publisher", () => {
-  // If `agents` were ever added to the generation, seeds would have TWO publishers with different
-  // ownership rules (forge-owned overwrite vs operator-authored retain) and a seed edit's fate
-  // would depend on which one ran last.
-  assert.deepEqual([...SEED_GENERATION_DIRS], ["workflows", "runtimes"]);
+test("integ FG-653: agent SEEDS are NOT part of the atomic seed generation — the installer is their only publisher", () => {
+  // If `agents` were ever added to the generation, the OPERATOR half would have TWO publishers
+  // with different ownership rules (forge-owned overwrite vs operator-authored retain) and a
+  // seed edit's fate would depend on which one ran last. FG-654 added `agent-protocols` — a
+  // separate, wholly forge-owned category — precisely so that `agents` did not have to move.
+  assert.deepEqual([...SEED_GENERATION_DIRS], ["workflows", "runtimes", "agent-protocols"]);
   assert.ok(
     !(SEED_GENERATION_DIRS as readonly string[]).includes("agents"),
     "agent seeds must stay out of the generation — their propagation path is install-seeds.sh alone",
@@ -210,10 +240,13 @@ test("integ FG-653: no file outside seeds/agents is a byte-copy of a red lens se
 
   const seeds = new Map<string, string>(); // sha256 → the seed's repo-relative path
   const sizes = new Set<number>();
+  // FG-654: BOTH halves. A hand-copied protocol rots exactly the way a hand-copied seed does.
   for (const role of LENS_ROLES) {
-    const buf = readFileSync(seedPath(role));
-    seeds.set(digest(buf), relative(repoRoot, seedPath(role)));
-    sizes.add(buf.byteLength);
+    for (const path of [seedPath(role), protocolPath(role)]) {
+      const buf = readFileSync(path);
+      seeds.set(digest(buf), relative(repoRoot, path));
+      sizes.add(buf.byteLength);
+    }
   }
 
   const copies: string[] = [];
@@ -235,7 +268,7 @@ test("integ FG-653: no file outside seeds/agents is a byte-copy of a red lens se
   };
   walk(repoRoot);
 
-  assert.deepEqual(copies, [], `a red lens seed is duplicated in the tree: ${copies.join("; ")}`);
+  assert.deepEqual(copies, [], `a red lens seed or protocol is duplicated in the tree: ${copies.join("; ")}`);
 });
 
 // ─── what the install path actually does on an ALREADY-INSTALLED host ───────

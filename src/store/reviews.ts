@@ -641,8 +641,72 @@ export function isLensAcceptance(v: unknown): v is LensAcceptance {
   return typeof v === "object" && v !== null && (v as { kind?: unknown }).kind === "lens_acceptance";
 }
 
+// ─── agent protocol generation (FG-654) ─────────────────────────────────────
+
+/** WHICH generation of the Forge-owned review protocol a dispatched agent ran under.
+ *
+ *  The TASK MANIFEST is authoritative (invariant 6: written once at dispatch, never
+ *  recomputed); this is the ledger's INDEX of it, so "which protocol did this agent run
+ *  under" is answerable from the review after the fact. Per DISPATCH, never per stage —
+ *  `StageEvidence` is one record per stage while Stage 2b fans out five lens dispatches,
+ *  which is the wrong cardinality for this fact. A review that spans a `forge upgrade`
+ *  legitimately mixes generations; the mix is recorded and visible, not prevented.
+ *
+ *  It rides `lens_outcomes_json` for the same reason `lens_acceptance` does — that array
+ *  already has per-dispatch cardinality — and its shape is deliberately not an outcome's,
+ *  so nothing that reads outcomes can mistake it for a review that happened. */
+export type AgentProtocolRecord = {
+  kind: "agent_protocol";
+  /** the dispatched role, e.g. `engineer` for the fix-batch fixer */
+  role: string;
+  sha256: string;
+  taskId: string;
+  /** what this dispatch was FOR — `fix_batch`, `recheck`, `docs`. Lens dispatches carry
+   *  their stamp on the lens outcome itself, where the lens name is already the key. */
+  stage: string;
+  at: string;
+};
+
+export function isAgentProtocolRecord(v: unknown): v is AgentProtocolRecord {
+  return typeof v === "object" && v !== null && (v as { kind?: unknown }).kind === "agent_protocol";
+}
+
 function lensRecordsOf(review: Review): unknown[] {
   return Array.isArray(review.lensOutcomes) ? (review.lensOutcomes as unknown[]) : [];
+}
+
+/** The protocol generations recorded for this review's non-lens dispatches. */
+export function agentProtocolRecordsOf(review: Review): AgentProtocolRecord[] {
+  return lensRecordsOf(review).filter(isAgentProtocolRecord);
+}
+
+/** Append one dispatch's protocol generation. Never overwrites: a second fix cycle after a
+ *  `forge upgrade` adds a second record rather than editing the first, because the first
+ *  is still the true statement about the dispatch it describes. */
+export function recordAgentProtocol(
+  reviewId: string,
+  rec: Omit<AgentProtocolRecord, "kind" | "at">,
+): void {
+  const at = nowIso();
+  // The READ is inside the transaction, not before it. `lens_outcomes_json` is a whole-column
+  // read-modify-write shared by three writers now, and this one runs on a coordinator/background
+  // path: reading the array outside the write lock and serializing it back inside would let a
+  // concurrent `forge review accept-lens` (or another dispatch's record) land in the window and
+  // be blindly overwritten — dropping a reviewer-authored outcome or an operator acceptance to
+  // record an INDEX of one. writeTransaction is BEGIN IMMEDIATE, so taking the read here holds
+  // the write lock across both halves.
+  writeTransaction(() => {
+    const review = getReview(reviewId);
+    if (!review) return;
+    // An unreadable outcomes array is left alone rather than overwritten — the same refusal
+    // recordLensAcceptance makes. Losing reviewer-authored outcomes to record an index of
+    // them would be a strictly worse trade.
+    if (review.lensOutcomes !== undefined && !Array.isArray(review.lensOutcomes)) return;
+    const records = [...lensRecordsOf(review), { kind: "agent_protocol", ...rec, at }];
+    getDb()
+      .prepare(`UPDATE reviews SET lens_outcomes_json = ?, updated_at = ? WHERE id = ?`)
+      .run(JSON.stringify(records), at, reviewId);
+  });
 }
 
 /** The operator acceptances recorded against this review's lenses. */
@@ -653,7 +717,31 @@ export function lensAcceptancesOf(review: Review): LensAcceptance[] {
 /** The reviewer-authored half of the same array. Every consumer that asks "did discovery
  *  happen" reads THIS, so an acceptance can never be counted as an outcome by accident. */
 export function lensOutcomeRecordsOf(review: Review): unknown[] {
-  return lensRecordsOf(review).filter((r) => !isLensAcceptance(r));
+  // FG-654 adds a third record kind to the same array; it is filtered HERE so every
+  // existing outcome consumer keeps seeing only outcomes without having to learn about it.
+  return lensRecordsOf(review).filter((r) => !isLensAcceptance(r) && !isAgentProtocolRecord(r));
+}
+
+/** Replace the reviewer-authored OUTCOMES of `lens_outcomes_json`, preserving everything
+ *  in the column that is not one — operator acceptances and agent_protocol receipts.
+ *
+ *  Discovery's writer, and the third participant in this column's read-modify-write. Its
+ *  read is inside the write lock for the same reason the other two are, and here the window
+ *  is the widest in the system: the caller awaits one CONTAINER PER LENS between deciding to
+ *  run discovery and having outcomes to write, so an operator acceptance or a fix-batch
+ *  protocol receipt landing in those minutes would be erased by a snapshot taken before the
+ *  fan-out. What survives is read HERE, after the dispatches, under BEGIN IMMEDIATE. */
+export function replaceLensOutcomes(reviewId: string, outcomes: unknown[]): Review {
+  const at = nowIso();
+  writeTransaction(() => {
+    const fresh = getReview(reviewId);
+    if (!fresh) return;
+    const surviving = lensRecordsOf(fresh).filter((r) => isLensAcceptance(r) || isAgentProtocolRecord(r));
+    getDb()
+      .prepare(`UPDATE reviews SET lens_outcomes_json = ?, updated_at = ? WHERE id = ?`)
+      .run(JSON.stringify([...surviving, ...outcomes]), at, reviewId);
+  });
+  return getReview(reviewId) as Review;
 }
 
 export type LensAcceptanceRequest = {
@@ -759,15 +847,29 @@ export function recordLensAcceptance(reviewId: string, req: LensAcceptanceReques
     acceptedBy: "operator",
     acceptedAt: at,
   };
-  const records = [...lensRecordsOf(review), acceptance];
-
-  writeTransaction(() => {
+  // THE ARRAY IS BUILT FROM A READ TAKEN INSIDE THE WRITE LOCK. Everything above is
+  // validation of the operator's request against a snapshot — none of it decides which
+  // records survive. That decision is a whole-column read-modify-write on
+  // `lens_outcomes_json`, which has three writers (this one, recordAgentProtocol, and
+  // discovery's replaceLensOutcomes) in as many processes: building the replacement array
+  // from the entry read would blindly overwrite an agent_protocol receipt or a discovery
+  // outcome committed in the window between. writeTransaction is BEGIN IMMEDIATE, so the
+  // read and the write are one atomic step.
+  const refusal = writeTransaction<string | null>(() => {
+    const fresh = getReview(reviewId);
+    if (!fresh) return `review ${reviewId} disappeared before the acceptance could be written. Nothing was written.`;
+    if (fresh.lensOutcomes !== undefined && !Array.isArray(fresh.lensOutcomes)) {
+      return (
+        `review ${reviewId}'s recorded lens outcomes are not a list, so an acceptance cannot be appended ` +
+        `without overwriting them. Nothing was written.`
+      );
+    }
     getDb()
       .prepare(`UPDATE reviews SET lens_outcomes_json = ?, updated_at = ? WHERE id = ?`)
-      .run(JSON.stringify(records), at, reviewId);
+      .run(JSON.stringify([...lensRecordsOf(fresh), acceptance]), at, reviewId);
     logEvent("review.lens_accepted", {
-      runId: review.runId,
-      taskId: review.subjectTaskId,
+      runId: fresh.runId,
+      taskId: fresh.subjectTaskId,
       payload: {
         reviewId,
         lens: req.lens,
@@ -778,7 +880,9 @@ export function recordLensAcceptance(reviewId: string, req: LensAcceptanceReques
         acceptedAt: at,
       },
     });
+    return null;
   });
+  if (refusal !== null) return { ok: false, refusal };
 
   return { ok: true, review: getReview(reviewId) as Review, acceptance };
 }

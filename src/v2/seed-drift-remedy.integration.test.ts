@@ -32,6 +32,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assetRoot, executionModeFrom } from "./asset-root.js";
 import { detectSeedDrift, renderSeedDrift } from "./seed-drift.js";
+import { stageAgentProtocols } from "./seed-generation.testkit.js";
 import { runUpgrade } from "../cli/commands/upgrade.js";
 
 /** A tree shaped like a release: a manifest plus the REQUIRED asset dirs, every
@@ -52,6 +53,9 @@ function assetTree(prefix: string, marker: string, opts: { manifest?: boolean } 
   writeFileSync(join(base, "seeds", "agents", "note.md"), `${marker} agent\n`);
   writeFileSync(join(base, "seeds", "constraints", "note.md"), `${marker} constraint\n`);
   writeFileSync(join(base, "seeds", "orchestrator-template.md"), `${marker} TEMPLATE\n`);
+  // FG-654: a release with no protocol for a covered role cannot publish a generation —
+  // upgrade's publish step refuses it — so a release-shaped fixture carries the real set.
+  stageAgentProtocols(join(base, "seeds"));
   // The REAL installer, byte-for-byte — it already resolves its own $HERE, so a
   // release-bundled copy installs the release's seeds. The bug was purely the
   // caller, so stubbing the installer here would stub out the thing under test.

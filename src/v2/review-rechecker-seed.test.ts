@@ -13,18 +13,26 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RESOLUTION_EVIDENCE_KINDS } from "./review-evidence.js";
 import { RECHECK_RESULTS } from "./review-recheck.js";
+import { resolveAgentProtocol } from "./agent-protocol.js";
+import { publishTestGeneration } from "./seed-generation.testkit.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const seedDir = join(repoRoot, "seeds", "agents", "review-rechecker");
-const seedPath = join(seedDir, "CLAUDE.md");
+// FG-654: the rubric this file guards is the FORGE-OWNED protocol, which now lives in its
+// own generation-published file rather than inside the operator's seed. The content
+// assertions below read it there; the operator seed is only checked for existence.
+const seedPath = join(repoRoot, "seeds", "agent-protocols", "review-rechecker.md");
+const operatorSeedPath = join(seedDir, "CLAUDE.md");
 
 test("FG-639: the review-rechecker seed exists — a missing role degrades to a stub prompt silently", () => {
-  assert.ok(existsSync(seedPath), `expected a role seed at ${seedPath}`);
+  assert.ok(existsSync(operatorSeedPath), `expected a role seed at ${operatorSeedPath}`);
+  assert.ok(existsSync(seedPath), `expected a forge-owned protocol at ${seedPath}`);
   assert.ok(existsSync(join(seedDir, "settings.json")), "the role needs a settings.json like every other seed");
 });
 
@@ -102,7 +110,12 @@ test("FG-639: every evidence kind and every recheck result the host accepts appe
 });
 
 test("FG-639: the seed states the two bounded jobs and refuses the third the model might invent", () => {
-  const md = readFileSync(seedPath, "utf8").toLowerCase();
+  // The role's SCOPE statement is operator-facing framing and stayed in the operator
+  // seed; the resample/panel refusals are protocol. Both halves reach the agent, so
+  // this reads both — which is also the guard that neither half loses its share.
+  const md = (
+    readFileSync(operatorSeedPath, "utf8") + readFileSync(seedPath, "utf8")
+  ).toLowerCase();
   assert.ok(md.includes("exactly two bounded jobs") || md.includes("two bounded jobs"), "the scope must be bounded");
   assert.ok(md.includes("do not resample the repository"), "and the resample explicitly refused");
   assert.ok(md.includes("do not ask for another discovery panel"), "and so must launching another panel");
@@ -131,4 +144,48 @@ test("FG-639: the seed tells the rechecker its new findings land untriaged with 
     md.includes("does not acquire blocking force just because it arrived late"),
     "and lateness confers no blocking force (PRD #7)",
   );
+});
+
+// ─── FG-654: the rubric is published, and a tampered generation goes RED ─────
+//
+// Every assertion above reads the REPO's protocol file. That is now the right unit —
+// since FG-654 the protocol is forge-owned and published atomically, so a host either
+// has these exact bytes or is refused by name. What the repo assertions cannot say is
+// that the refusal actually fires, so that is asserted here against a real generation.
+
+test("FG-654: the rechecker's protocol publishes into a generation and resolves for dispatch", () => {
+  const home = mkdtempSync(join(tmpdir(), "forge-fg654-rechecker-"));
+  const gen = publishTestGeneration(home, { assetsParent: home });
+  const resolved = resolveAgentProtocol("review-rechecker", gen);
+  assert.ok(resolved.ok, "after publish, dispatch must resolve the rechecker's protocol");
+  if (resolved.ok) {
+    assert.equal(resolved.text, readFileSync(seedPath, "utf8"), "the published bytes are the repo's bytes");
+  }
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("FG-654: protocol bytes edited INSIDE the published generation refuse as tampered", () => {
+  const home = mkdtempSync(join(tmpdir(), "forge-fg654-rechecker-tamper-"));
+  const gen = publishTestGeneration(home, { assetsParent: home });
+  writeFileSync(
+    join(gen.root, "agent-protocols", "review-rechecker.md"),
+    `${readFileSync(seedPath, "utf8")}\n\nA LOCAL EDIT INSIDE THE FORGE-OWNED PROTOCOL\n`,
+  );
+  const resolved = resolveAgentProtocol("review-rechecker", gen);
+  assert.equal(resolved.ok, false, "a hand-edited protocol inside the generation must be refused");
+  if (!resolved.ok) assert.equal(resolved.reason, "protocol_tampered");
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("FG-654: a generation published WITHOUT protocols refuses the rechecker by name", () => {
+  const home = mkdtempSync(join(tmpdir(), "forge-fg654-rechecker-none-"));
+  const gen = publishTestGeneration(home, { assetsParent: home, agentProtocols: false });
+  const resolved = resolveAgentProtocol("review-rechecker", gen);
+  assert.equal(resolved.ok, false);
+  if (!resolved.ok) {
+    assert.equal(resolved.reason, "protocol_missing");
+    assert.ok(resolved.refusal.includes("review-rechecker"));
+    assert.ok(resolved.refusal.includes("forge upgrade"));
+  }
+  rmSync(home, { recursive: true, force: true });
 });

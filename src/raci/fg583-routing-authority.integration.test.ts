@@ -30,6 +30,7 @@ import {
   GENERATION_ROUTING_POLICY,
   GENERATION_MANIFEST_NAME,
 } from "../v2/seed-generation.js";
+import { stageAgentProtocols } from "../v2/seed-generation.testkit.js";
 import { compileRaciDocument } from "./compile.js";
 import { resolvePolicyPath } from "./project.js";
 import { governanceView, loadPolicy } from "./governance.js";
@@ -79,6 +80,9 @@ function buildAssetRoot(base: string): string {
   mkdirSync(join(root, "seeds", "runtimes"), { recursive: true });
   writeFileSync(join(root, "seeds", "workflows", "feature.yml"), workflowYaml("feature"));
   writeFileSync(join(root, "seeds", "runtimes", "claude-apikey.yml"), runtimeYaml("claude-apikey"));
+  // FG-654: publication refuses a release carrying no protocol for a covered role, so a
+  // disposable release stages the real ones.
+  stageAgentProtocols(join(root, "seeds"));
   return root;
 }
 

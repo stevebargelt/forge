@@ -33,6 +33,7 @@ import {
   inspectSeedInstall,
   type SeedGeneration,
 } from "./seed-generation.js";
+import { resolveAgentProtocol, type ProtocolResolution } from "./agent-protocol.js";
 
 // Resolved lazily so tests can swap FORGE_HOME between cases. Cheap.
 function forgeHome(): string {
@@ -79,7 +80,7 @@ function workspaceGeneration(ctx: LoadContext): SeedGeneration | null {
 /** The named, repairable refusal raised when a dispatch load needs the host seed
  *  surface but no complete generation is published — distinct wording for an
  *  incomplete (torn/mid-publish) generation vs an absent one, from inspectSeedInstall. */
-function noCompleteGenerationError(category: "workflows" | "runtimes"): Error {
+export function noCompleteGenerationError(category: "workflows" | "runtimes" | "agent-protocols"): Error {
   const home = forgeHome();
   const state = inspectSeedInstall(home);
   const head =
@@ -91,9 +92,22 @@ function noCompleteGenerationError(category: "workflows" | "runtimes"): Error {
       `The forge-owned ${category} surface is published as ONE atomic seed generation; forge will not ` +
       `dispatch under the flat pre-migration layout (kept only for drift detection / doctor, never for ` +
       `dispatch).\n` +
-      `Fix: run \`forge upgrade\` to publish a complete seed generation. A project override at ` +
-      `<project>/.forge/${category}/<name>.yml is always honored and never refused.`,
+      `Fix: run \`forge upgrade\` to publish a complete seed generation.` +
+      (category === "agent-protocols"
+        ? ""
+        : ` A project override at <project>/.forge/${category}/<name>.yml is always honored and never refused.`),
   );
+}
+
+/** FG-654: the protocol read seam, beside loadWorkflow / loadRuntime. It resolves
+ *  through the SAME workspaceGeneration(ctx), so an anchored generation pins the
+ *  protocol for the life of the invocation exactly as it pins the workflow.
+ *
+ *  There is deliberately NO `<project>/.forge/` override for protocols: a project-local
+ *  replacement of the contract an agent's output is judged by is the hazard, not a
+ *  feature. */
+export function loadAgentProtocol(role: string, ctx: LoadContext = {}): ProtocolResolution {
+  return resolveAgentProtocol(role, workspaceGeneration(ctx));
 }
 
 // FG-583: a workflow resolved from within a published generation is measured
