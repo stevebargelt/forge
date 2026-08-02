@@ -15,6 +15,7 @@ process.env.FORGE_HOME = tmpHome;
 const { routingGovernance } = await import("./queries.js");
 const { compileRaciDocument } = await import("../../src/raci/compile.js");
 const { publishSeedGeneration } = await import("../../src/v2/seed-generation.js");
+const { COVERED_ROLES, protocolRelPath } = await import("../../src/v2/agent-protocol.js");
 const { stringify: yamlStringify } = await import("yaml");
 
 const SEED = readFileSync(
@@ -33,6 +34,14 @@ writeFileSync(join(tmpHome, "routing-policy.yml"), compiledYaml(SEED));
 const govAssets = mkdtempSync(join(tmpdir(), "forge-gov-assets-"));
 mkdirSync(join(govAssets, "seeds", "workflows"), { recursive: true });
 mkdirSync(join(govAssets, "seeds", "runtimes"), { recursive: true });
+// FG-654: publication refuses a release carrying no Forge-owned protocol for a role the
+// review lifecycle dispatches, so this asset root carries one per covered role. Derived
+// from COVERED_ROLES rather than listed, so it tracks the set instead of rotting.
+for (const role of COVERED_ROLES) {
+  const dst = join(govAssets, "seeds", protocolRelPath(role));
+  mkdirSync(dirname(dst), { recursive: true });
+  writeFileSync(dst, `# ${role}\n\nFixture protocol text for the ${role} role.\n`);
+}
 publishSeedGeneration({ home: tmpHome, assetsDir: govAssets, trustedAssetRoot: () => govAssets, raciPath: join(tmpHome, "forge-raci.md") });
 
 const IQ = "responsible: engineer\naccountable: human\npath: invoke_chain";
