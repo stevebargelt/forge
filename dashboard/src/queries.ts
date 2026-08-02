@@ -662,6 +662,178 @@ export function opsMetrics(since: string, scope?: ProjectScope): OpsMetrics {
   };
 }
 
+// FG-648: average agent runtime over time, overall and by role. Distinct from
+// opsMetrics's median-by-phase table, which is a single point-in-time roll-up:
+// this one buckets the same durations over a window so a trend is visible.
+export type AgentRuntimeWindow = "1d" | "7d" | "30d" | "90d" | "all";
+export type AgentRuntimeResolution = "hour" | "day" | "week";
+
+/** `averageMs` is null exactly when `sampleCount` is 0 — an empty bucket is
+ *  reported as an observed gap, never fabricated as a zero-duration sample. */
+export type AgentRuntimeBucket = {
+  bucketStart: string;
+  averageMs: number | null;
+  sampleCount: number;
+  partial: boolean;
+};
+
+export type AgentRuntimeRoleSeries = { role: string; buckets: AgentRuntimeBucket[] };
+export type AgentRuntimeRoleSummary = { role: string; averageMs: number; sampleCount: number };
+
+export type AgentRuntimeTrends = {
+  window: AgentRuntimeWindow;
+  resolution: AgentRuntimeResolution;
+  bucketMs: number;
+  rangeStart: string | null;
+  rangeEnd: string;
+  overall: AgentRuntimeBucket[];
+  byRole: AgentRuntimeRoleSeries[];
+  roleSummary: AgentRuntimeRoleSummary[];
+};
+
+export const AGENT_RUNTIME_WINDOWS = ["1d", "7d", "30d", "90d", "all"] as const;
+
+export function isAgentRuntimeWindow(value: string): value is AgentRuntimeWindow {
+  return (AGENT_RUNTIME_WINDOWS as readonly string[]).includes(value);
+}
+
+const AGENT_RUNTIME_RESOLUTION: Record<AgentRuntimeWindow, AgentRuntimeResolution> = {
+  "1d": "hour",
+  "7d": "day",
+  "30d": "day",
+  "90d": "week",
+  all: "week",
+};
+
+const RESOLUTION_MS: Record<AgentRuntimeResolution, number> = {
+  hour: 3_600_000,
+  day: 86_400_000,
+  week: 604_800_000,
+};
+
+// Buckets are aligned to UTC boundaries so the same observation always lands in
+// the same bucket regardless of the reader's timezone. Epoch day 0 is a Thursday,
+// hence the +3 to reach the preceding Monday.
+function floorToResolution(ms: number, resolution: AgentRuntimeResolution): number {
+  if (resolution === "week") {
+    const dayIndex = Math.floor(ms / 86_400_000);
+    return (dayIndex - ((dayIndex + 3) % 7)) * 86_400_000;
+  }
+  const step = RESOLUTION_MS[resolution];
+  return Math.floor(ms / step) * step;
+}
+
+export function agentRuntimeTrends(
+  window: AgentRuntimeWindow,
+  scope?: ProjectScope,
+  nowMs: number = Date.now(),
+): AgentRuntimeTrends {
+  const resolution = AGENT_RUNTIME_RESOLUTION[window];
+  const bucketMs = RESOLUTION_MS[resolution];
+  const floor = (ms: number) => floorToResolution(ms, resolution);
+
+  // The window cutoff is the aligned start of the bucket the raw cutoff falls
+  // in, so the leading bucket covers a whole period rather than a truncated one.
+  const windowDays = window === "all" ? null : parseInt(window, 10);
+  const cutoffStart = windowDays === null ? null : floor(nowMs - windowDays * 86_400_000);
+
+  const params: unknown[] = [];
+  let clause = "";
+  if (cutoffStart !== null) {
+    clause += " AND t.completed_at >= ?";
+    params.push(new Date(cutoffStart).toISOString());
+  }
+  // Every window ends at now. A completed_at in the future (clock skew, a bad
+  // backfill) is outside every window, so it is excluded here rather than left
+  // to stretch the grid past the window the operator asked for — and excluding
+  // it in SQL keeps the chart, the role summary and the sample note agreeing.
+  clause += " AND t.completed_at <= ?";
+  params.push(new Date(nowMs).toISOString());
+  const project = scopeSql("r.project_dir", scope);
+  clause += ` ${project.clause}`;
+  params.push(...project.params);
+
+  // `t.phase IS 'session'` — SQLite's null-safe equality. With plain `=` a NULL
+  // phase makes the whole NOT(...) NULL, which drops the row instead of keeping it.
+  const rows = db().prepare(`
+    SELECT t.agent_role AS role, t.started_at AS started, t.completed_at AS completed
+    FROM tasks t JOIN runs r ON r.id = t.run_id
+    WHERE t.agent_role IS NOT NULL
+      AND t.started_at IS NOT NULL
+      AND t.completed_at IS NOT NULL
+      AND NOT (t.agent_role = 'orchestrator' AND t.phase IS 'session')
+      ${clause}
+  `).all(...params) as Array<{ role: string; started: string; completed: string }>;
+
+  type Observation = { role: string; completedMs: number; durationMs: number };
+  const observations: Observation[] = [];
+  let earliest = Infinity;
+  for (const row of rows) {
+    const completedMs = Date.parse(row.completed);
+    const durationMs = completedMs - Date.parse(row.started);
+    if (!Number.isFinite(completedMs) || !(durationMs >= 0)) continue;
+    observations.push({ role: row.role, completedMs, durationMs });
+    if (completedMs < earliest) earliest = completedMs;
+  }
+
+  // "all" has no fixed start: it begins at the earliest observation actually in
+  // scope. With nothing in scope there is no range at all, and no grid to draw.
+  const gridStart = cutoffStart ?? (observations.length > 0 ? floor(earliest) : null);
+  const rangeEnd = new Date(nowMs).toISOString();
+  if (gridStart === null) {
+    return { window, resolution, bucketMs, rangeStart: null, rangeEnd, overall: [], byRole: [], roleSummary: [] };
+  }
+
+  // The grid ends at the bucket containing now — the same bucket the partial flag
+  // sits on — so the trailing bucket is always the current one, in every window.
+  const partialStart = floor(nowMs);
+  const bucketStarts: number[] = [];
+  for (let start = gridStart; start <= partialStart; start += bucketMs) bucketStarts.push(start);
+
+  const series = (subset: Observation[]): AgentRuntimeBucket[] => {
+    const sums = new Array<number>(bucketStarts.length).fill(0);
+    const counts = new Array<number>(bucketStarts.length).fill(0);
+    for (const obs of subset) {
+      const index = Math.floor((obs.completedMs - gridStart) / bucketMs);
+      if (index < 0 || index >= bucketStarts.length) continue;
+      sums[index] = sums[index]! + obs.durationMs;
+      counts[index] = counts[index]! + 1;
+    }
+    return bucketStarts.map((start, index) => ({
+      bucketStart: new Date(start).toISOString(),
+      averageMs: counts[index]! > 0 ? Math.round(sums[index]! / counts[index]!) : null,
+      sampleCount: counts[index]!,
+      partial: start === partialStart,
+    }));
+  };
+
+  const byRoleObservations = new Map<string, Observation[]>();
+  for (const obs of observations) {
+    const bucket = byRoleObservations.get(obs.role) ?? [];
+    bucket.push(obs);
+    byRoleObservations.set(obs.role, bucket);
+  }
+
+  const roleSummary = [...byRoleObservations.entries()]
+    .map(([role, subset]) => ({
+      role,
+      averageMs: Math.round(subset.reduce((total, obs) => total + obs.durationMs, 0) / subset.length),
+      sampleCount: subset.length,
+    }))
+    .sort((a, b) => b.sampleCount - a.sampleCount || a.role.localeCompare(b.role));
+
+  return {
+    window,
+    resolution,
+    bucketMs,
+    rangeStart: new Date(gridStart).toISOString(),
+    rangeEnd,
+    overall: series(observations),
+    byRole: roleSummary.map(({ role }) => ({ role, buckets: series(byRoleObservations.get(role)!) })),
+    roleSummary,
+  };
+}
+
 export function usageRollup(groupBy: GroupBy, since: string, scope?: ProjectScope, limit = 50): UsageRollupRow[] {
   const groupExpr: Record<GroupBy, string> = {
     role:     "COALESCE(t.agent_role, '(unknown role)')",

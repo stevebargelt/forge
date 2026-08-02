@@ -1,7 +1,7 @@
 // forge-dashboard client. Preact + htm; no build step. Polls every 2s.
 
 import { h, render } from "preact";
-import { useState, useEffect, useCallback } from "preact/hooks";
+import { useState, useEffect, useLayoutEffect, useCallback, useRef } from "preact/hooks";
 import htm from "htm";
 import { renderResultByAgent, md } from "./renderers.js";
 import { UsageView } from "./usage.js";
@@ -18,6 +18,9 @@ import {
 const html = htm.bind(h);
 const POLL_MS = 2000;
 const USAGE_POLL_MS = 30000;
+// Sentinel for the runtime chart's default "All agents" series. Not a role, so
+// it can never collide with a real agent_role coming back from the API.
+const RUNTIME_ALL_ROLES = "__all__";
 
 function projectScopeQuery(project, checkoutDir = null) {
   if (!project) return "";
@@ -59,6 +62,14 @@ function App() {
   const [usageSince, setUsageSince] = useState("30d");
   const [ops, setOps] = useState(null);
   const [opsSince, setOpsSince] = useState("30d");
+  const [runtime, setRuntime] = useState(null);
+  const [runtimeError, setRuntimeError] = useState(null);
+  const [runtimeWindow, setRuntimeWindow] = useState("7d");
+  const [runtimeRole, setRuntimeRole] = useState(RUNTIME_ALL_ROLES);
+  // Sequence token for the runtime read. The server cost varies sharply by
+  // window, so a slower earlier request can resolve after a faster later one;
+  // only the newest request may write the series it belongs to.
+  const runtimeSeq = useRef(0);
   const [governance, setGovernance] = useState(null);
   const [backlog, setBacklog] = useState(null);
   const [reviews, setReviews] = useState(null);
@@ -196,6 +207,42 @@ function App() {
     const id = setInterval(pollOps, USAGE_POLL_MS);
     return () => clearInterval(id);
   }, [pollOps, view]);
+
+  const pollRuntime = useCallback(async () => {
+    const seq = (runtimeSeq.current += 1);
+    try {
+      const res = await fetch(appendScope(`/api/agent-runtime?window=${runtimeWindow}`, projectFilter, checkoutFilter));
+      if (seq !== runtimeSeq.current) return;
+      if (!res.ok) {
+        setRuntimeError(`agent runtime unavailable — HTTP ${res.status}`);
+      } else {
+        setRuntime(await res.json());
+        setRuntimeError(null);
+      }
+      setNow(Date.now());
+    } catch (e) {
+      if (seq !== runtimeSeq.current) return;
+      setRuntimeError(String(e));
+      setError(String(e));
+    }
+  }, [runtimeWindow, projectFilter, checkoutFilter]);
+
+  useEffect(() => {
+    if (view !== "ops") return;
+    pollRuntime();
+    const id = setInterval(pollRuntime, USAGE_POLL_MS);
+    return () => clearInterval(id);
+  }, [pollRuntime, view]);
+
+  // Drop the stale series on a window change so the chart shows its loading
+  // state rather than a grid that silently belongs to the previous window. The
+  // seq bump retires whatever is still in flight for the window being left.
+  const changeRuntimeWindow = (next) => {
+    runtimeSeq.current += 1;
+    setRuntime(null);
+    setRuntimeError(null);
+    setRuntimeWindow(next);
+  };
 
   const pollGovernance = useCallback(async () => {
     if (projectFilter && !checkoutFilter) { setGovernance(null); return; }
@@ -385,7 +432,17 @@ function App() {
             now=${now}
           />`
         : view === "ops"
-        ? html`<${OpsView} data=${ops} since=${opsSince} onSinceChange=${setOpsSince} />`
+        ? html`<${OpsView}
+            data=${ops}
+            since=${opsSince}
+            onSinceChange=${setOpsSince}
+            runtime=${runtime}
+            runtimeError=${runtimeError}
+            runtimeWindow=${runtimeWindow}
+            onRuntimeWindowChange=${changeRuntimeWindow}
+            runtimeRole=${runtimeRole}
+            onRuntimeRoleChange=${setRuntimeRole}
+          />`
         : view === "usage"
         ? html`<${UsageView}
             rollup=${usageRollup}
@@ -491,8 +548,16 @@ function OpsSummary({ data }) {
 
 // RUN-3: operations summary — success rate, failure-kind mix, median durations,
 // operational counts. Reads /api/ops.
-function OpsView({ data, since, onSinceChange }) {
-  if (!data) return html`<div class="muted">loading metrics…</div>`;
+function OpsView({ data, since, onSinceChange, runtime, runtimeError, runtimeWindow, onRuntimeWindowChange, runtimeRole, onRuntimeRoleChange }) {
+  const trends = html`<${AgentRuntimeTrends}
+    data=${runtime}
+    error=${runtimeError}
+    window=${runtimeWindow}
+    onWindowChange=${onRuntimeWindowChange}
+    role=${runtimeRole}
+    onRoleChange=${onRuntimeRoleChange}
+  />`;
+  if (!data) return html`<section class="ops-view"><div class="muted">loading metrics…</div>${trends}</section>`;
   const maxKind = Math.max(1, ...data.failureKinds.map((k) => k.count));
   return html`
     <section class="ops-view">
@@ -510,6 +575,8 @@ function OpsView({ data, since, onSinceChange }) {
       </div>
 
       <${OpsSummary} data=${data} />
+
+      ${trends}
 
       ${data.failureKinds.length > 0 ? html`
         <h2>Failure kinds</h2>
@@ -541,13 +608,288 @@ function OpsView({ data, since, onSinceChange }) {
     </section>
   `;
 }
+// The one duration formatter for the ops view. A null/absent duration is an
+// empty bucket (FG-648), not a zero — it renders as an em dash, never "0s".
 function opsFmtMs(ms) {
+  if (ms === null || ms === undefined || !Number.isFinite(ms)) return "—";
   const s = Math.round(ms / 1000);
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}m${s % 60}s`;
   const h = Math.floor(m / 60);
   return `${h}h${m % 60}m`;
+}
+
+// FG-648: average agent runtime over time. Reads /api/agent-runtime.
+// One series at a time — "All agents" by default, or a single observed role.
+// Rendering every role at once produces an unreadable multi-line chart, so the
+// role breakdown table below carries the cross-role comparison instead.
+const RUNTIME_WINDOWS = ["1d", "7d", "30d", "90d", "all"];
+const RUNTIME_RESOLUTION_WORD = { hour: "hour", day: "day", week: "week" };
+
+// Chart labels are anchored to a viewBox EDGE and offset in em, so the gutter is
+// a multiple of whatever font-size ends up applied rather than a user-unit pad
+// measured against one browser. 1.4em clears any UI font's ascent and 0.6em its
+// descent — Chrome builds disagree by ~0.05em, and a baseline pinned at a fixed y
+// left less than 0.94em of headroom, so the peak label fell off the top edge under
+// the host font's metrics while fitting the container's.
+const RUNTIME_PEAK_LABEL_DY = "1.4em";
+const RUNTIME_AXIS_LABEL_DY = "-0.6em";
+
+// The chart's viewBox is scaled to the width of its column, and scales its label
+// text with it. Sizing the labels in user units off the MEASURED width holds them
+// at this many CSS px whatever that width is — a viewport breakpoint can only be
+// right at the widths it samples, and is a cliff either side of them.
+const RUNTIME_AXIS_TARGET_PX = 11;
+// Conservative average glyph advance for the UI sans stack, plus the clear space
+// kept between two neighbouring labels. Over-estimating either thins one label too
+// many; under-estimating collides. Both are in em, so the reserved width tracks
+// the label size at every width instead of being tuned to one of them.
+const RUNTIME_GLYPH_EM = 0.62;
+const RUNTIME_LABEL_MARGIN_EM = 1.25;
+
+function runtimeBucketLabel(iso, resolution) {
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return String(iso);
+  const monthDay = `${d.getUTCMonth() + 1}/${d.getUTCDate()}`;
+  if (resolution === "hour") return `${String(d.getUTCHours()).padStart(2, "0")}:00`;
+  if (resolution === "week") return `wk ${monthDay}`;
+  return monthDay;
+}
+
+function AgentRuntimeTrends({ data, error, window, onWindowChange, role, onRoleChange }) {
+  const roles = data ? data.roleSummary.map((r) => r.role) : [];
+  const roleObserved = role === RUNTIME_ALL_ROLES || roles.includes(role);
+  // The fallback to "All agents" is written back, not just displayed. Left in
+  // state, the unobserved role would silently re-chart itself on the next window
+  // change — and re-picking "All agents" in the select fires no change event,
+  // because the select already shows it.
+  useEffect(() => {
+    if (data && !roleObserved) onRoleChange(RUNTIME_ALL_ROLES);
+  }, [data, roleObserved, onRoleChange]);
+
+  const controls = html`
+    <div class="runtime-controls">
+      <span class="muted" id="runtime-window-label">runtime window:</span>
+      <div class="runtime-window-btns" role="group" aria-labelledby="runtime-window-label">
+        ${RUNTIME_WINDOWS.map((w) => html`
+          <button
+            key=${w}
+            type="button"
+            class=${"usage-dim-btn " + (window === w ? "usage-dim-btn-active" : "")}
+            aria-pressed=${window === w}
+            onClick=${() => onWindowChange(w)}
+          >${w}</button>
+        `)}
+      </div>
+    </div>
+  `;
+
+  const frame = (body) => html`
+    <section class="runtime-view" aria-labelledby="runtime-heading">
+      <h2 id="runtime-heading">Average agent runtime over time</h2>
+      ${controls}
+      ${body}
+    </section>
+  `;
+
+  if (!data) {
+    return frame(error
+      ? html`<div class="card runtime-error" role="alert">${error}. Retrying every 30s.</div>`
+      : html`<div class="card muted runtime-loading" role="status">loading agent runtime…</div>`);
+  }
+
+  const activeRole = roleObserved ? role : RUNTIME_ALL_ROLES;
+  const isAll = activeRole === RUNTIME_ALL_ROLES;
+  const seriesLabel = isAll ? "All agents" : activeRole;
+  const buckets = isAll ? data.overall : (data.byRole.find((s) => s.role === activeRole)?.buckets ?? []);
+  const observed = buckets.filter((b) => b.sampleCount > 0);
+  const samples = observed.reduce((total, b) => total + b.sampleCount, 0);
+
+  const selector = html`
+    <div class="runtime-selector">
+      <label for="runtime-role">series</label>
+      <select
+        id="runtime-role"
+        class="runtime-role-select"
+        value=${activeRole}
+        onChange=${(e) => onRoleChange(e.currentTarget.value)}
+      >
+        <option value=${RUNTIME_ALL_ROLES}>All agents</option>
+        ${roles.map((r) => html`<option key=${r} value=${r}>${r}</option>`)}
+      </select>
+      <span class="muted runtime-sample-note">${samples} ${samples === 1 ? "run" : "runs"} in ${window}</span>
+    </div>
+  `;
+
+  if (samples === 0) {
+    return frame(html`
+      ${selector}
+      <div class="card runtime-empty">
+        No completed agent runs for ${seriesLabel} in this window. Widen the window, or wait for a run to finish.
+      </div>
+    `);
+  }
+
+  return frame(html`
+    ${selector}
+    <${RuntimeChart} buckets=${buckets} label=${seriesLabel} resolution=${data.resolution} window=${window} />
+    <${RuntimeRoleTable} summary=${data.roleSummary} activeRole=${activeRole} onRoleChange=${onRoleChange} window=${window} />
+  `);
+}
+
+/** The element's rendered width in CSS px, tracked across layout changes. */
+function useRenderedWidthPx(ref) {
+  const [widthPx, setWidthPx] = useState(0);
+  useLayoutEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+    setWidthPx(node.getBoundingClientRect().width);
+    const observer = new ResizeObserver(([entry]) => setWidthPx(entry.contentRect.width));
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [ref]);
+  return widthPx;
+}
+
+function RuntimeChart({ buckets, label, resolution, window }) {
+  const VW = 1000;
+  const VH = 242;
+  const svgRef = useRef(null);
+  const widthPx = useRenderedWidthPx(svgRef);
+  const fontUnits = widthPx > 0 ? (RUNTIME_AXIS_TARGET_PX * VW) / widthPx : RUNTIME_AXIS_TARGET_PX;
+  // PAD_* keeps bars and the baseline clear of the label band. They follow the
+  // label size rather than a fixed largest-font assumption, so the band stays
+  // clear at every width. Containment is the labels' own em offsets
+  // (RUNTIME_*_LABEL_DY), not these.
+  const PAD_TOP = Math.max(58, fontUnits * 1.7);
+  const PAD_BOTTOM = Math.max(52, fontUnits * 1.5);
+  const chartH = VH - PAD_TOP - PAD_BOTTOM;
+  const n = buckets.length;
+  const slot = VW / n;
+  const barW = Math.min(slot * 0.68, 56);
+  const peak = Math.max(...buckets.map((b) => b.averageMs ?? 0), 1);
+  const partial = buckets.find((b) => b.partial && b.sampleCount > 0);
+  const unit = RUNTIME_RESOLUTION_WORD[resolution] ?? resolution;
+
+  const bars = buckets.map((b, i) => {
+    const x = slot * i + (slot - barW) / 2;
+    // An empty bucket draws NO bar. A baseline tick keeps the gap visible as a
+    // gap rather than reading as a missing period.
+    if (b.sampleCount === 0) {
+      return html`<rect key=${b.bucketStart} x=${x} y=${VH - PAD_BOTTOM - 1} width=${barW} height="1" fill="var(--fg-faint)" opacity="0.35" />`;
+    }
+    const h = Math.max(2, Math.round((b.averageMs / peak) * chartH));
+    return html`<rect
+      key=${b.bucketStart}
+      class=${"runtime-bar" + (b.partial ? " runtime-bar-partial" : "")}
+      x=${x} y=${VH - PAD_BOTTOM - h} width=${barW} height=${h}
+      fill=${b.partial ? "url(#runtime-partial-hatch)" : "var(--accent)"}
+      stroke=${b.partial ? "var(--accent)" : "none"}
+      stroke-dasharray=${b.partial ? "4 3" : null}
+    ><title>${runtimeBucketLabel(b.bucketStart, resolution)}: ${opsFmtMs(b.averageMs)} over ${b.sampleCount} ${b.sampleCount === 1 ? "run" : "runs"}${b.partial ? " (partial)" : ""}</title></rect>`;
+  });
+
+  // Thin the axis by LABEL WIDTH, not by bucket count: 25 hourly buckets over a
+  // 1000-unit viewBox leave 40 units each, and an "03:00" label needs far more.
+  // The width is derived from the longest label actually being drawn and the font
+  // size actually applied — a weekly "wk 6/10" is half again as wide as a daily
+  // "6/10", and both grow as the column narrows. Keep the trailing bucket
+  // unconditionally — it is the current period — and drop what would collide.
+  const longestLabel = Math.max(...buckets.map((b) => runtimeBucketLabel(b.bucketStart, resolution).length));
+  const MIN_LABEL_GAP = fontUnits * (RUNTIME_GLYPH_EM * longestLabel + RUNTIME_LABEL_MARGIN_EM);
+  const xAt = (i) => slot * i + slot / 2;
+  const labelIdxs = [];
+  for (let i = 0; i < n - 1; i += 1) {
+    if (labelIdxs.length === 0 || xAt(i) - xAt(labelIdxs[labelIdxs.length - 1]) >= MIN_LABEL_GAP) labelIdxs.push(i);
+  }
+  while (labelIdxs.length > 0 && xAt(n - 1) - xAt(labelIdxs[labelIdxs.length - 1]) < MIN_LABEL_GAP) labelIdxs.pop();
+  labelIdxs.push(n - 1);
+
+  const summaryText = `Average agent runtime for ${label}, by ${unit}, over ${window}. `
+    + buckets.filter((b) => b.sampleCount > 0)
+      .map((b) => `${runtimeBucketLabel(b.bucketStart, resolution)} ${opsFmtMs(b.averageMs)}${b.partial ? " (partial)" : ""}`)
+      .join(", ")
+    + `. Peak ${opsFmtMs(peak)}.`;
+
+  return html`
+    <figure class="runtime-chart">
+      <svg ref=${svgRef} viewBox="0 0 ${VW} ${VH}" preserveAspectRatio="xMidYMid meet" role="img" aria-label=${summaryText}>
+        <defs>
+          <pattern id="runtime-partial-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+            <rect width="6" height="6" fill="var(--bg-elev-2)" />
+            <line x1="0" y1="0" x2="0" y2="6" stroke="var(--accent)" stroke-width="3" />
+          </pattern>
+        </defs>
+        <line x1="0" y1=${VH - PAD_BOTTOM} x2=${VW} y2=${VH - PAD_BOTTOM} stroke="var(--border)" stroke-width="1" />
+        <text x="4" y="0" dy=${RUNTIME_PEAK_LABEL_DY} text-anchor="start" font-size=${fontUnits} fill="var(--fg-dim)">peak: ${opsFmtMs(peak)}</text>
+        ${bars}
+        ${labelIdxs.map((i) => {
+          const x = xAt(i);
+          const anchor = x < VW * 0.06 ? "start" : x > VW * 0.94 ? "end" : "middle";
+          return html`<text key=${buckets[i].bucketStart} x=${x} y=${VH} dy=${RUNTIME_AXIS_LABEL_DY} text-anchor=${anchor} font-size=${fontUnits} fill="var(--fg-dim)">${runtimeBucketLabel(buckets[i].bucketStart, resolution)}</text>`;
+        })}
+      </svg>
+      <figcaption class="runtime-caption">
+        Mean duration of completed agent tasks per ${unit} (UTC), bucketed by completion time. Successful and failed runs both count.
+        ${partial
+          ? html` <span class="runtime-partial-note">The last ${unit} (${runtimeBucketLabel(partial.bucketStart, resolution)}) is hatched — it is still in progress and its average can still move.</span>`
+          : null}
+      </figcaption>
+      <table class="sr-only runtime-text-equivalent">
+        <caption>${`Average agent runtime for ${label} by ${unit}`}</caption>
+        <thead><tr><th scope="col">${unit}</th><th scope="col">average</th><th scope="col">runs</th></tr></thead>
+        <tbody>
+          ${buckets.map((b) => html`
+            <tr key=${b.bucketStart}>
+              <th scope="row">${runtimeBucketLabel(b.bucketStart, resolution)}${b.partial ? " (partial)" : ""}</th>
+              <td>${b.sampleCount === 0 ? "no runs" : opsFmtMs(b.averageMs)}</td>
+              <td>${b.sampleCount}</td>
+            </tr>
+          `)}
+        </tbody>
+      </table>
+    </figure>
+  `;
+}
+
+function RuntimeRoleTable({ summary, activeRole, onRoleChange, window }) {
+  const rows = [{ role: RUNTIME_ALL_ROLES, label: "All agents" }, ...summary.map((r) => ({ ...r, label: r.role }))];
+  const total = summary.reduce((acc, r) => ({
+    samples: acc.samples + r.sampleCount,
+    weighted: acc.weighted + r.averageMs * r.sampleCount,
+  }), { samples: 0, weighted: 0 });
+
+  return html`
+    <table class="runtime-table">
+      <caption>Average runtime by agent role (${window}) — select a row to chart it</caption>
+      <thead>
+        <tr><th scope="col">role</th><th scope="col">average</th><th scope="col">runs</th></tr>
+      </thead>
+      <tbody>
+        ${rows.map((row) => {
+          const isAll = row.role === RUNTIME_ALL_ROLES;
+          const averageMs = isAll ? (total.samples > 0 ? total.weighted / total.samples : null) : row.averageMs;
+          const sampleCount = isAll ? total.samples : row.sampleCount;
+          const selected = activeRole === row.role;
+          return html`
+            <tr key=${row.role} class=${selected ? "runtime-row-active" : ""}>
+              <th scope="row">
+                <button
+                  type="button"
+                  class=${"runtime-role-btn" + (selected ? " runtime-role-btn-active" : "")}
+                  aria-pressed=${selected}
+                  onClick=${() => onRoleChange(row.role)}
+                >${row.label}</button>
+              </th>
+              <td class="mono">${opsFmtMs(averageMs)}</td>
+              <td class="mono">${sampleCount}</td>
+            </tr>
+          `;
+        })}
+      </tbody>
+    </table>
+  `;
 }
 
 function ProjectsView({ projects, onPick }) {

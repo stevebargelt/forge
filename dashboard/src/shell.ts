@@ -867,6 +867,100 @@ section.home-view section.in-flight { margin-top: 0; }
 }
 .usage-timeseries svg { display: block; width: 100%; height: auto; }
 
+/* FG-648: average agent runtime over time (ops view). */
+.runtime-view { margin: 24px 0; }
+.runtime-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.runtime-window-btns { display: flex; gap: 6px; flex-wrap: wrap; }
+.runtime-selector {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.runtime-selector label { font-size: 12px; color: var(--fg-dim); }
+.runtime-role-select {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  max-width: 100%;
+}
+.runtime-sample-note { font-size: 12px; }
+.runtime-loading, .runtime-empty, .runtime-error { padding: 16px; }
+.runtime-error { border-color: var(--err); color: var(--err); }
+.runtime-chart {
+  margin: 0 0 16px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+.runtime-chart svg { display: block; width: 100%; height: auto; }
+.runtime-bar { transition: height 0.2s ease, y 0.2s ease; }
+@media (prefers-reduced-motion: reduce) {
+  .runtime-bar { transition: none; }
+}
+/* No font-size rule for the chart's labels here on purpose. The chart scales its
+ * 1000-unit viewBox down to the column width, which would shrink the labels with
+ * it; a viewport breakpoint only fixes the widths it samples, so client/main.js
+ * measures the rendered width and sizes the labels in user units off it. That
+ * holds them at RUNTIME_AXIS_TARGET_PX at EVERY width. A font-size declared here
+ * would outrank the presentation attribute and break that. */
+.runtime-caption {
+  font-size: 11px;
+  color: var(--fg-dim);
+  margin-top: 8px;
+  line-height: 1.5;
+}
+.runtime-partial-note { color: var(--warn); }
+.runtime-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.runtime-table caption {
+  text-align: left;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-dim);
+  padding-bottom: 8px;
+}
+.runtime-table th, .runtime-table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 400;
+}
+.runtime-table thead th {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-dim);
+}
+.runtime-table td { white-space: nowrap; }
+.runtime-table tbody tr:last-child th, .runtime-table tbody tr:last-child td { border-bottom: none; }
+.runtime-row-active { background: rgba(122, 159, 255, 0.08); }
+.runtime-role-btn {
+  background: transparent;
+  border: none;
+  color: var(--fg);
+  font: inherit;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  border-bottom: 1px dotted var(--fg-faint);
+  overflow-wrap: anywhere;
+}
+.runtime-role-btn:hover { color: var(--accent); }
+.runtime-role-btn-active { color: var(--accent); border-bottom-color: var(--accent); }
+
 .card.stat { cursor: default; }
 .stat-num {
   font-size: 2rem;

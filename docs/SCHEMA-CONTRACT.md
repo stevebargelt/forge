@@ -485,6 +485,7 @@ The dashboard server exposes read-only JSON endpoints. All `GET` — no writes. 
 | `GET /api/task/:id` | — | Full task detail (result + stdout/stderr + verdicts + gates) |
 | `GET /api/governance` | `projectDir` | RACI Workbench panel (`WorkbenchPanel`): source, derived, effective, recorded (see shape below) |
 | `GET /api/ops` | `since` (default `30d`), `projectDir` | Ops metrics rollup |
+| `GET /api/agent-runtime` | `window` (`1d\|7d\|30d\|90d\|all`, default `7d`), `projectKey` or `projectDir` | Average agent runtime over time, overall and per role (`AgentRuntimeTrends` — see shape below). An unrecognized `window` is a `400`, not a silent fallback (FG-648) |
 | `GET /api/usage` | `groupBy` (`role\|workflow\|project\|model\|alias`), `since` (default `30d`), `projectDir`, `limit` (1–200, default 50) | Token usage rollup by dimension |
 | `GET /api/usage/timeseries` | `since` (default `30d`), `projectDir` | Daily token usage time-series |
 | `GET /api/usage/model-mix` | `groupBy` (same as `/api/usage`), `since` (default `30d`), `projectDir` | Model distribution by dimension |
@@ -514,6 +515,19 @@ Read-only (FG-638). Each entry is the `reviews` row camelCased — `id`, `runId`
 - `findings` — `ReviewLedgerFinding[]`, ordered by `ordinal`, each carrying `sources` parsed from `sources_json`.
 
 Disposition controls are deliberately **not** exposed: the ledger's write surface is `forge review disposition` on the CLI, and the dashboard stays read-only until that surface is proven.
+
+### `GET /api/agent-runtime` response shape (`AgentRuntimeTrends`)
+
+Read-only (FG-648). The mean duration of completed agent tasks, bucketed over time, overall and per role. Distinct from `/api/ops`'s median-by-phase table, which is a single point-in-time roll-up: this one buckets the same durations across a window so a trend is visible. Top-level fields:
+
+- `window` — the requested window, echoed back.
+- `resolution` / `bucketMs` — `"hour" | "day" | "week"` and the same period in milliseconds. `1d` is hourly, `7d` and `30d` daily, `90d` and `all` weekly.
+- `rangeStart` / `rangeEnd` — ISO timestamps for the first bucket start and the read time. `rangeStart` is `null` only on `all` with nothing in scope — the one case with no grid to draw, where `overall`, `byRole` and `roleSummary` are all empty. A fixed window with no observations still returns its full grid of empty buckets.
+- `overall` — the ordered bucket series, each `{ bucketStart, averageMs, sampleCount, partial }`. `averageMs` (rounded to whole milliseconds) is `null` **exactly** when `sampleCount` is `0`: an empty bucket is reported as an observed gap, never fabricated as a zero-duration observation. `partial: true` marks the single bucket containing the read time — it is still filling and its average can still move.
+- `byRole` — one `{ role, buckets }` series per role observed in the window, over the **same** bucket grid as `overall`, so switching series cannot shift the x-axis. Ordered as `roleSummary`.
+- `roleSummary` — `{ role, averageMs, sampleCount }` per role over the whole window, most-sampled first, ties broken by role name.
+
+What counts as an observation: a `tasks` row with a non-null `agent_role`, `started_at` **and** `completed_at`. Completed successful and failed agent tasks both count; still-active tasks, interactive orchestrator sessions (`agent_role = 'orchestrator'` with `phase = 'session'`), and negative durations are excluded. Buckets are keyed by `completed_at`, not `started_at` — a task spanning two buckets lands in the one it finished in — on a UTC-aligned grid, so the same observation lands in the same bucket regardless of the reader's timezone. Roles group by `tasks.agent_role`, and project scope is applied through the owning run's `project_dir`. A fixed window starts at the aligned bucket containing `now − N days`, so its leading bucket covers a whole period rather than a truncated one; `all` starts at the earliest included observation in scope, never a hardcoded epoch. Every window **ends** at the aligned bucket containing the read time, so the trailing bucket is always the `partial` one: a row whose `completed_at` is in the future (clock skew, a bad backfill) is outside every window and is excluded from `overall`, `byRole` and `roleSummary` alike rather than stretching the grid past the window that was asked for.
 
 ### `GET /api/task/:id` response shape
 
