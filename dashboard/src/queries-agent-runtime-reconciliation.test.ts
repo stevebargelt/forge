@@ -11,7 +11,13 @@
 //      .dependency_provisioning_failed / .git_unavailable) is when the agent
 //      stopped, and it wins over a later-rewritten completed_at;
 //   2. with no such event, completed_at is the end only when the terminal was
-//      not written administratively — otherwise the row contributes nothing.
+//      not written administratively — an administrative failure_kind, or a
+//      reconcile / recover sweep that moved the task into `complete` — otherwise
+//      the row contributes nothing.
+//
+// And the row must describe the attempt being measured at all: markTaskRunning
+// re-dispatches IN PLACE without clearing completed_at, so a retry still in
+// flight carries the PREVIOUS attempt's terminal and is not an observation.
 //
 // The anti-regression that matters most lives here too: a genuinely long REAL
 // agent run in the same bucket as an excluded artifact still counts in full.
@@ -39,6 +45,8 @@ const DAY_BUCKET = "2026-06-09T00:00:00.000Z";
 const MINUTE = 60_000;
 const HOUR = 3_600_000;
 
+type ReconciledRow = { at: string; payload: string | null };
+
 type TaskRow = {
   id: string;
   role: string;
@@ -51,8 +59,15 @@ type TaskRow = {
   /** an attached-exit event at this timestamp, if the supervisor logged one. */
   exitedAt?: string;
   exitEvent?: string;
+  /** task.reconciled audit rows, in insertion order. */
+  reconciled?: ReconciledRow[];
   project?: string;
 };
+
+const reconciledTo = (from: string, to: string, reason: string, at: string): ReconciledRow => ({
+  at,
+  payload: JSON.stringify({ from, to, reason }),
+});
 
 let storeSeq = 0;
 
@@ -82,6 +97,9 @@ function withTasks<T>(tasks: TaskRow[], fn: () => T): T {
       insertEvent.run(runId, row.id, "task.failed", JSON.stringify({ failure_kind: row.failureKind, error: row.failureKind }), row.completed);
     } else if (status === "complete") {
       insertEvent.run(runId, row.id, "task.completed", null, row.completed);
+    }
+    for (const event of row.reconciled ?? []) {
+      insertEvent.run(runId, row.id, "task.reconciled", event.payload, event.at);
     }
   }
   database.close();
@@ -444,6 +462,170 @@ test("the interactive-orchestrator-session exclusion and project scope still hol
         "unscoped sees both projects' real rows and neither artifact",
       );
     },
+  );
+});
+
+// ── layer 2 on the SUCCESS side: a sweep that COMPLETED the task ──
+
+test("a task the container-gone sweep completed does not contribute its wall-clock-until-noticed span", () => {
+  // reconcile finds the container gone and calls markTaskComplete/markTaskRecovered
+  // with nowIso() — the sweep instant, not an end. That branch runs only BECAUSE no
+  // attached-exit event exists, so layer 1 can never rescue these rows: without the
+  // success-side check they count at the full span, the artifact class AC1 removes.
+  withTasks(
+    [
+      {
+        id: "swept", role: "engineer", status: "complete", ...ending(`${DAY}T12:00:00.000Z`, 341.7 * HOUR),
+        reconciled: [reconciledTo("running", "complete", "container_gone_result_present", `${DAY}T12:00:00.000Z`)],
+      },
+      {
+        id: "swept-stdout", role: "tech-lead", status: "complete", ...ending(`${DAY}T12:30:00.000Z`, 92.7 * HOUR),
+        reconciled: [reconciledTo("running", "complete", "container_gone_result_recovered_from_stdout", `${DAY}T12:30:00.000Z`)],
+      },
+      {
+        id: "recovered", role: "red-wide", status: "complete", ...ending(`${DAY}T13:00:00.000Z`, 200 * HOUR),
+        reconciled: [reconciledTo("failed", "complete", "operator_recovered", `${DAY}T13:00:00.000Z`)],
+      },
+      { id: "real", role: "engineer", ...ending(`${DAY}T14:00:00.000Z`, 11 * MINUTE) },
+    ],
+    () => {
+      const result = trends();
+      assert.deepEqual(result.roleSummary, [{ role: "engineer", averageMs: 11 * MINUTE, sampleCount: 1 }]);
+      assert.equal(totalSamples(result.overall), 1, "no administratively completed row is an observation");
+    },
+  );
+});
+
+test("an attached exit still outranks an administrative COMPLETION", () => {
+  // The layer ordering is unchanged on the success side: a sweep that completed a
+  // task forge had already seen exit is measured off that exit, not dropped.
+  withTasks(
+    [
+      {
+        id: "swept-with-exit", role: "engineer", status: "complete",
+        started: `${DAY}T09:00:00.000Z`, completed: `${DAY}T15:00:00.000Z`, exitedAt: `${DAY}T09:25:00.000Z`,
+        reconciled: [reconciledTo("running", "complete", "container_gone_result_present", `${DAY}T15:00:00.000Z`)],
+      },
+    ],
+    () => {
+      assert.deepEqual(trends().roleSummary, [{ role: "engineer", averageMs: 25 * MINUTE, sampleCount: 1 }]);
+    },
+  );
+});
+
+test("a sweep that only backfilled a result leaves the completion counting", () => {
+  // complete → complete: reconcile wrote the missing result and never touched
+  // completed_at, so the terminal on the record is still the supervisor's.
+  withTasks(
+    [
+      {
+        id: "backfilled", role: "engineer", status: "complete", ...ending(`${DAY}T10:00:00.000Z`, 20 * MINUTE),
+        reconciled: [reconciledTo("complete", "complete", "complete_empty_result_backfilled", `${DAY}T10:05:00.000Z`)],
+      },
+    ],
+    () => assert.deepEqual(trends().roleSummary, [{ role: "engineer", averageMs: 20 * MINUTE, sampleCount: 1 }]),
+  );
+});
+
+test("a later same-status audit row cannot mask the sweep that wrote completed_at", () => {
+  withTasks(
+    [
+      {
+        id: "swept-then-backfilled", role: "engineer", status: "complete", ...ending(`${DAY}T12:00:00.000Z`, 300 * HOUR),
+        reconciled: [
+          reconciledTo("running", "complete", "container_gone_result_present", `${DAY}T12:00:00.000Z`),
+          reconciledTo("complete", "complete", "complete_empty_result_backfilled", `${DAY}T12:05:00.000Z`),
+        ],
+      },
+    ],
+    () => assert.deepEqual(trends().roleSummary, [], "every audit row decides, not just the latest"),
+  );
+});
+
+test("a task.reconciled from a PRIOR attempt does not exclude the attempt being measured", () => {
+  // The row was swept once, then re-dispatched and ran for real. started_at moved
+  // forward; the old audit row describes a span this row no longer describes.
+  withTasks(
+    [
+      {
+        id: "swept-then-retried", role: "engineer", status: "complete",
+        started: `${DAY}T11:00:00.000Z`, completed: `${DAY}T11:18:00.000Z`,
+        reconciled: [reconciledTo("running", "complete", "container_gone_result_present", "2026-06-08T04:00:00.000Z")],
+      },
+    ],
+    () => assert.deepEqual(trends().roleSummary, [{ role: "engineer", averageMs: 18 * MINUTE, sampleCount: 1 }]),
+  );
+});
+
+test("an unreadable task.reconciled payload degrades without throwing or excluding", () => {
+  for (const payload of [null, "", "{", "not json", "[]", "123", '{"reason":"container_gone_result_present"}']) {
+    withTasks(
+      [
+        {
+          id: "t", role: "engineer", status: "complete", ...ending(`${DAY}T10:00:00.000Z`, 25 * MINUTE),
+          reconciled: [{ at: `${DAY}T10:00:00.000Z`, payload }],
+        },
+      ],
+      () => {
+        assert.deepEqual(
+          trends().roleSummary,
+          [{ role: "engineer", averageMs: 25 * MINUTE, sampleCount: 1 }],
+          `${JSON.stringify(payload)} records no non-complete → complete transition`,
+        );
+      },
+    );
+  }
+});
+
+test("a reconciled COMPLETION with no recorded 'from' is still administrative", () => {
+  // Pinned as deliberate: the audit row says a sweep landed this task in
+  // `complete`, and the only transition the rule reads as harmless is the
+  // explicit complete → complete no-op.
+  withTasks(
+    [
+      {
+        id: "fromless", role: "engineer", status: "complete", ...ending(`${DAY}T12:00:00.000Z`, 80 * HOUR),
+        reconciled: [{ at: `${DAY}T12:00:00.000Z`, payload: JSON.stringify({ to: "complete", reason: "container_gone_result_present" }) }],
+      },
+    ],
+    () => assert.deepEqual(trends().roleSummary, []),
+  );
+});
+
+// ── a re-dispatched task still in flight ──
+
+test("a re-dispatched task still IN FLIGHT is not an observation, whatever its exit event says", () => {
+  // markTaskRunning re-dispatches IN PLACE and never clears completed_at, so a
+  // running retry carries attempt 2's started_at beside attempt 1's terminal. Its
+  // exit event is real and layer 1 would derive a positive 30 minutes from it —
+  // plotting a live attempt into the bucket attempt 1's completion owns.
+  withTasks(
+    [
+      {
+        id: "inflight", role: "engineer", status: "running",
+        started: "2026-06-09T11:00:00.000Z", completed: "2026-06-04T10:00:00.000Z",
+        exitedAt: "2026-06-09T11:30:00.000Z",
+      },
+      { id: "real", role: "engineer", ...ending(`${DAY}T13:00:00.000Z`, 10 * MINUTE) },
+    ],
+    () => {
+      const result = trends();
+      assert.equal(at(result.overall, "2026-06-04T00:00:00.000Z").sampleCount, 0, "nothing lands in the prior attempt's bucket");
+      assert.equal(totalSamples(result.overall), 1, "the in-flight retry is not an observation");
+      assert.deepEqual(result.roleSummary, [{ role: "engineer", averageMs: 10 * MINUTE, sampleCount: 1 }]);
+    },
+  );
+});
+
+test("the same retry counts in full once its own terminal write lands", () => {
+  withTasks(
+    [
+      {
+        id: "finished", role: "engineer", status: "complete",
+        started: `${DAY}T11:00:00.000Z`, completed: `${DAY}T11:35:00.000Z`, exitedAt: `${DAY}T11:30:00.000Z`,
+      },
+    ],
+    () => assert.deepEqual(trends().roleSummary, [{ role: "engineer", averageMs: 30 * MINUTE, sampleCount: 1 }]),
   );
 });
 

@@ -370,6 +370,50 @@ test("a prior-attempt exit with no exit of its own leaves the row on layer 2", (
   );
 });
 
+// ── which task.failed classifies the attempt being measured ──
+
+test("a prior attempt's task.failed does not classify the attempt being measured", () => {
+  // `forge retry --force` moves started_at forward and leaves the stream intact.
+  // Attempt 1 was cancelled; attempt 2 crashed without its own task.failed being
+  // written (forge died between the paired writes). Attempt 2 is a real
+  // supervised span, and reading attempt 1's `cancelled` would silently drop it.
+  withTasks(
+    [
+      {
+        id: "retried-cancel", role: "engineer", status: "failed",
+        started: `${DAY}T11:00:00.000Z`, completed: `${DAY}T11:40:00.000Z`,
+        events: [failedWith("cancelled", `${DAY}T09:30:00.000Z`)],
+      },
+    ],
+    () => assert.deepEqual(trends().roleSummary, [{ role: "engineer", averageMs: 40 * MINUTE, sampleCount: 1 }]),
+  );
+});
+
+test("an unparseable task.failed created_at cannot outsort a valid sibling", () => {
+  // As raw TEXT any leading letter sorts above '2', so a MAX over the column would
+  // let a junk row decide. Both directions of that mistake are pinned: it must
+  // neither re-admit an administrative row nor exclude a supervised one.
+  withTasks(
+    [
+      {
+        id: "junk-supervised", role: "engineer", status: "failed",
+        started: `${DAY}T09:00:00.000Z`, completed: `${DAY}T13:00:00.000Z`,
+        events: [failedWith("cancelled", `${DAY}T13:00:00.000Z`), failedWith("container_crash", "not-a-timestamp")],
+      },
+      {
+        id: "junk-administrative", role: "tech-lead", status: "failed",
+        started: `${DAY}T09:00:00.000Z`, completed: `${DAY}T09:30:00.000Z`,
+        events: [failedWith("container_crash", `${DAY}T09:30:00.000Z`), failedWith("cancelled", "not-a-timestamp")],
+      },
+    ],
+    () => {
+      const result = trends();
+      assert.deepEqual(result.roleSummary, [{ role: "tech-lead", averageMs: 30 * MINUTE, sampleCount: 1 }]);
+      assert.equal(totalSamples(result.overall), 1, "the junk row decides neither way");
+    },
+  );
+});
+
 test("a clock-skewed exit with no later sibling falls through to layer 2 instead of going negative", () => {
   // Clock skew on the container host: the only exit is stamped a second before
   // the start. It cannot describe this attempt, so the row is measured exactly
