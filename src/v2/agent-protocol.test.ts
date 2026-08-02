@@ -356,6 +356,16 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const invariantsDoc = (): string => readFileSync(join(repoRoot, "docs", "invariants.md"), "utf8");
 const upgradeDoc = (): string => readFileSync(join(repoRoot, "docs", "how-to-upgrade.md"), "utf8");
 
+/** The arm RF-16/RF-17 are about: the SECOND refusal `forge upgrade` does not repair. Read
+ *  from the code so a doc guard that stops matching the implementation fails loudly rather
+ *  than guarding a state that no longer exists. */
+function assertReleaseMissingArmExists(): void {
+  const source = readFileSync(join(repoRoot, "src", "v2", "agent-protocol.ts"), "utf8");
+  const union = /reason:\s*("[a-z_]+"(?:\s*\|\s*"[a-z_]+")+)/.exec(source);
+  assert.ok(union, "the refusal union must still be a literal union — update this guard if it moved");
+  assert.match(union[1]!, /"release_protocol_missing"/, "the release-missing arm must still be a refusal reason");
+}
+
 // RF-2: the four docs an operator reads BEFORE hitting a refusal — the install order, the
 // upgrade paragraph, the how-to for adding a role, and the manifest field reference. Each
 // one used to instruct the reader about a region published into their own agent seed; a
@@ -474,4 +484,49 @@ test("FG-654 RF-14: the documented refusal-state count matches the table, which 
   const publishing = lines.find((l) => l.includes("on the publishing side rather than the dispatching one"));
   assert.ok(publishing, "the publishing-side refusal must still be documented");
   assert.doesNotMatch(publishing!, /A (fourth|fifth|sixth|seventh) state/, "no ordinal to drift out of date");
+});
+
+// RF-16/RF-17: how-to-upgrade.md's table is not the only place the refusal set is
+// enumerated. The operator-facing glossary and the autonomous-run prompt each restate it in
+// prose, and each one claimed the embedded copy was the ONLY state a bare `forge upgrade`
+// does not clear — so a reader blocked by `release_protocol_missing` was told to re-run the
+// one command whose refusal says it will not repair this. Guarding the claim, not the
+// wording: what must not come back is a universal upgrade remedy.
+test("FG-654 RF-16: the concepts glossary names all six stale_protocol states and both non-upgrade remedies", () => {
+  assertReleaseMissingArmExists();
+  const doc = readFileSync(join(repoRoot, "docs", "concepts.md"), "utf8");
+  const para = doc.split("\n").find((l) => l.includes("`stale_protocol`, the dispatch REFUSED"));
+  assert.ok(para, "the stale_protocol paragraph must still exist");
+  assert.doesNotMatch(
+    para!,
+    /every one but the last clears on a bare `forge upgrade`/,
+    "the falsified universal remedy is back — release_protocol_missing does not clear on an upgrade",
+  );
+  assert.match(para!, /no `seeds\/agent-protocols\/<role>\.md`/, "…the sixth state is named");
+  assert.match(para!, /the last two do not/, "…and the two upgrade cannot repair are called out together");
+  assert.match(para!, /reinstalling the release/, "…with the remedy the refusal actually states");
+  // The remedy paragraph below it made the same universal claim in its own words.
+  const remedy = doc.split("\n").find((l) => l.includes("the one absence an acceptance cannot clear"));
+  assert.ok(remedy, "the acceptance-cannot-clear paragraph must still exist");
+  assert.doesNotMatch(remedy!, /The remedy is self-service and/, "the remedy is self-service for four of six, not all");
+  assert.doesNotMatch(remedy!, /republish the region/, "…and there is no region to republish since FG-654");
+});
+
+test("FG-654 RF-17: the autonomous-run prompt names BOTH refusals upgrade will not fix", () => {
+  assertReleaseMissingArmExists();
+  const doc = readFileSync(join(repoRoot, "docs", "autonomous-run-prompt.md"), "utf8");
+  const step = doc.split("\n").find((l) => l.includes("One absence is outside all three (FG-654)"));
+  assert.ok(step, "step 10 must still carry the stale_protocol exception");
+  assert.doesNotMatch(step!, /One shape of this refusal is the exception/, "there are two, and undercounting loops the orchestrator");
+  assert.match(step!, /TWO shapes are exceptions upgrade will not fix/, "…both are stated as exceptions");
+  assert.match(step!, /reinstall the release/, "…naming the remedy for the release-missing one");
+  // The two orchestrator-facing copies of the same step already had it; they stay in agreement.
+  for (const rel of [["CLAUDE.md"], ["seeds", "orchestrator-template.md"]]) {
+    const sibling = readFileSync(join(repoRoot, ...rel), "utf8");
+    assert.match(
+      sibling,
+      /a release carrying no protocol for a covered role is the executing tree's problem rather than this host's/,
+      `${rel.join("/")} must still name the release-missing exception`,
+    );
+  }
 });
