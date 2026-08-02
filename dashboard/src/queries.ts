@@ -776,9 +776,11 @@ function failureKindOf(payload: string | null): string | null {
 /** FG-662: when the agent actually stopped, or null when nothing on the record
  *  says. An attached-exit event is the agent-observed end and wins over
  *  completed_at outright, because a cancel, a sweep or a gate rejection can
- *  rewrite completed_at long after the container died. With no such event
- *  completed_at is the end only if the terminal was not written administratively;
- *  otherwise the row has no defensible end and contributes nothing. */
+ *  rewrite completed_at long after the container died. With no such event — the
+ *  measured attempt logged none, or every one it has predates its started_at
+ *  (clock skew, a prior attempt's exit) — completed_at is the end only if the
+ *  terminal was not written administratively; otherwise the row has no defensible
+ *  end and contributes nothing. */
 function agentObservedEndMs(row: AgentRuntimeRow): number | null {
   if (row.agentExit !== null) {
     const exitedMs = Date.parse(row.agentExit);
@@ -824,12 +826,20 @@ export function agentRuntimeTrends(
   // phase makes the whole NOT(...) NULL, which drops the row instead of keeping it.
   // FG-662: `agentExit` and `failedPayload` are correlated subqueries in the shape
   // opsMetrics already uses for its failure-kind mix — the earliest attached-exit
-  // event for the task, and the payload of its latest task.failed.
+  // event of the attempt being measured, and the payload of its latest task.failed.
+  // `markTaskRunning` re-dispatches a task IN PLACE: started_at moves to the new
+  // attempt while the previous attempt's container.exited stays on the stream, so
+  // the exit must be taken at or after started_at rather than globally. Ordering on
+  // julianday rather than the raw TEXT also drops an unparseable created_at (NULL,
+  // so the comparison is never true) instead of letting it sort below a valid
+  // sibling and mask it.
   const exitEvents = AGENT_OBSERVED_EXIT_EVENTS.map((e) => `'${e}'`).join(",");
   const rows = db().prepare(`
     SELECT t.agent_role AS role, t.started_at AS started, t.completed_at AS completed, t.status AS status,
-      (SELECT MIN(x.created_at) FROM events x
-        WHERE x.task_id = t.id AND x.event_type IN (${exitEvents})) AS agentExit,
+      (SELECT x.created_at FROM events x
+        WHERE x.task_id = t.id AND x.event_type IN (${exitEvents})
+          AND julianday(x.created_at) >= julianday(t.started_at)
+        ORDER BY julianday(x.created_at), x.id LIMIT 1) AS agentExit,
       (SELECT f.payload FROM events f
         WHERE f.task_id = t.id AND f.event_type = 'task.failed'
           AND f.created_at = (SELECT MAX(f2.created_at) FROM events f2 WHERE f2.task_id = f.task_id AND f2.event_type = 'task.failed')
