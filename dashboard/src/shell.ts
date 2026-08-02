@@ -868,16 +868,6 @@ section.home-view section.in-flight { margin-top: 0; }
 .usage-timeseries svg { display: block; width: 100%; height: auto; }
 
 /* FG-648: average agent runtime over time (ops view). */
-.sr-only {
-  position: absolute;
-  width: 1px; height: 1px;
-  margin: -1px; padding: 0;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  clip-path: inset(50%);
-  white-space: nowrap;
-  border: 0;
-}
 .runtime-view { margin: 24px 0; }
 .runtime-controls {
   display: flex;
@@ -906,7 +896,8 @@ section.home-view section.in-flight { margin-top: 0; }
   max-width: 100%;
 }
 .runtime-sample-note { font-size: 12px; }
-.runtime-loading, .runtime-empty { padding: 16px; }
+.runtime-loading, .runtime-empty, .runtime-error { padding: 16px; }
+.runtime-error { border-color: var(--err); color: var(--err); }
 .runtime-chart {
   margin: 0 0 16px;
   background: var(--bg-elev);
@@ -916,18 +907,18 @@ section.home-view section.in-flight { margin-top: 0; }
 }
 .runtime-chart svg { display: block; width: 100%; height: auto; }
 .runtime-bar { transition: height 0.2s ease, y 0.2s ease; }
-/* The chart scales its 1000-unit viewBox down to the column width, which shrinks
- * the axis text with it. Below ~720px that lands under 4px — unreadable. These
- * are viewBox user units, and CSS outranks the font-size presentation attribute.
- * Changing this size is safe: the chart's labels reserve their gutters in em off
- * a viewBox edge (RUNTIME_PEAK_LABEL_DY / RUNTIME_AXIS_LABEL_DY in client/main.js),
- * so the gutter follows the font size instead of being tuned to it. */
-@media (max-width: 720px) {
-  .runtime-chart svg text { font-size: 32px; }
+@media (prefers-reduced-motion: reduce) {
+  .runtime-bar { transition: none; }
 }
+/* No font-size rule for the chart's labels here on purpose. The chart scales its
+ * 1000-unit viewBox down to the column width, which would shrink the labels with
+ * it; a viewport breakpoint only fixes the widths it samples, so client/main.js
+ * measures the rendered width and sizes the labels in user units off it. That
+ * holds them at RUNTIME_AXIS_TARGET_PX at EVERY width. A font-size declared here
+ * would outrank the presentation attribute and break that. */
 .runtime-caption {
   font-size: 11px;
-  color: var(--fg-faint);
+  color: var(--fg-dim);
   margin-top: 8px;
   line-height: 1.5;
 }
@@ -938,7 +929,7 @@ section.home-view section.in-flight { margin-top: 0; }
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: var(--fg-faint);
+  color: var(--fg-dim);
   padding-bottom: 8px;
 }
 .runtime-table th, .runtime-table td {

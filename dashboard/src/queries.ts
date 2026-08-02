@@ -743,6 +743,12 @@ export function agentRuntimeTrends(
     clause += " AND t.completed_at >= ?";
     params.push(new Date(cutoffStart).toISOString());
   }
+  // Every window ends at now. A completed_at in the future (clock skew, a bad
+  // backfill) is outside every window, so it is excluded here rather than left
+  // to stretch the grid past the window the operator asked for — and excluding
+  // it in SQL keeps the chart, the role summary and the sample note agreeing.
+  clause += " AND t.completed_at <= ?";
+  params.push(new Date(nowMs).toISOString());
   const project = scopeSql("r.project_dir", scope);
   clause += ` ${project.clause}`;
   params.push(...project.params);
@@ -762,14 +768,12 @@ export function agentRuntimeTrends(
   type Observation = { role: string; completedMs: number; durationMs: number };
   const observations: Observation[] = [];
   let earliest = Infinity;
-  let latest = -Infinity;
   for (const row of rows) {
     const completedMs = Date.parse(row.completed);
     const durationMs = completedMs - Date.parse(row.started);
     if (!Number.isFinite(completedMs) || !(durationMs >= 0)) continue;
     observations.push({ role: row.role, completedMs, durationMs });
     if (completedMs < earliest) earliest = completedMs;
-    if (completedMs > latest) latest = completedMs;
   }
 
   // "all" has no fixed start: it begins at the earliest observation actually in
@@ -780,10 +784,11 @@ export function agentRuntimeTrends(
     return { window, resolution, bucketMs, rangeStart: null, rangeEnd, overall: [], byRole: [], roleSummary: [] };
   }
 
-  const gridEnd = floor(Math.max(nowMs, latest === -Infinity ? nowMs : latest));
-  const bucketStarts: number[] = [];
-  for (let start = gridStart; start <= gridEnd; start += bucketMs) bucketStarts.push(start);
+  // The grid ends at the bucket containing now — the same bucket the partial flag
+  // sits on — so the trailing bucket is always the current one, in every window.
   const partialStart = floor(nowMs);
+  const bucketStarts: number[] = [];
+  for (let start = gridStart; start <= partialStart; start += bucketMs) bucketStarts.push(start);
 
   const series = (subset: Observation[]): AgentRuntimeBucket[] => {
     const sums = new Array<number>(bucketStarts.length).fill(0);

@@ -544,6 +544,52 @@ test("every role series shares the overall grid and partitions its counts, in ev
   );
 });
 
+// A completed_at later than `now` is not a real observation — it is clock skew or
+// a bad backfill. The grid is bounded by the window, not by the data, so one such
+// row cannot widen a 7d window into a year of empty buckets, and cannot push the
+// partial flag off the trailing bucket that every other assertion here depends on.
+test("a completed_at in the FUTURE neither stretches the grid nor moves the partial flag", () => {
+  const expectedLast: Record<AgentRuntimeWindow, string> = {
+    "1d": "2026-06-10T14:00:00.000Z",
+    "7d": "2026-06-10T00:00:00.000Z",
+    "30d": "2026-06-10T00:00:00.000Z",
+    "90d": "2026-06-08T00:00:00.000Z",
+    all: "2026-06-08T00:00:00.000Z",
+  };
+
+  withProject(
+    [
+      { id: "e1", role: "engineer", ...ending("2026-06-09T09:00:00.000Z", 4_000) },
+      { id: "skewed", role: "engineer", ...ending("2027-06-10T09:00:00.000Z", 9_000) },
+    ],
+    () => {
+      for (const window of ["1d", "7d", "30d", "90d", "all"] as const) {
+        const result = trends(window);
+        assert.equal(result.overall.at(-1)!.bucketStart, expectedLast[window],
+          `${window}: the grid must end at the bucket containing now, whatever the data says`);
+        assert.equal(result.overall.at(-1)!.partial, true, `${window}: the partial bucket is the trailing one`);
+        assert.deepEqual(result.overall.filter((b) => b.partial).map((b) => b.bucketStart), [expectedLast[window]],
+          `${window}: exactly one bucket is partial`);
+        assert.ok(!result.overall.some((b) => Date.parse(b.bucketStart) > NOW),
+          `${window}: no bucket may start after now — got ${result.overall.length} buckets ending ${result.overall.at(-1)!.bucketStart}`);
+      }
+
+      // The window sizes are the ones the contract fixes, not one row longer.
+      assert.equal(trends("7d").overall.length, 8);
+      assert.equal(trends("30d").overall.length, 31);
+
+      // And the skewed row is excluded from the metric everywhere — the chart, the
+      // role summary and the sample note must count the same observations.
+      for (const window of ["7d", "30d", "90d", "all"] as const) {
+        const result = trends(window);
+        assert.equal(totalSamples(result.overall), 1, `${window}: only the real observation is charted`);
+        assert.deepEqual(result.roleSummary, [{ role: "engineer", averageMs: 4_000, sampleCount: 1 }],
+          `${window}: the role summary must not count a future observation the chart cannot show`);
+      }
+    },
+  );
+});
+
 test("exactly one bucket — the aligned bucket containing now, always the last — is flagged partial in every window", () => {
   const expected: Record<AgentRuntimeWindow, string> = {
     "1d": "2026-06-10T14:00:00.000Z",

@@ -1,7 +1,7 @@
 // forge-dashboard client. Preact + htm; no build step. Polls every 2s.
 
 import { h, render } from "preact";
-import { useState, useEffect, useCallback } from "preact/hooks";
+import { useState, useEffect, useLayoutEffect, useCallback, useRef } from "preact/hooks";
 import htm from "htm";
 import { renderResultByAgent, md } from "./renderers.js";
 import { UsageView } from "./usage.js";
@@ -63,8 +63,13 @@ function App() {
   const [ops, setOps] = useState(null);
   const [opsSince, setOpsSince] = useState("30d");
   const [runtime, setRuntime] = useState(null);
+  const [runtimeError, setRuntimeError] = useState(null);
   const [runtimeWindow, setRuntimeWindow] = useState("7d");
   const [runtimeRole, setRuntimeRole] = useState(RUNTIME_ALL_ROLES);
+  // Sequence token for the runtime read. The server cost varies sharply by
+  // window, so a slower earlier request can resolve after a faster later one;
+  // only the newest request may write the series it belongs to.
+  const runtimeSeq = useRef(0);
   const [governance, setGovernance] = useState(null);
   const [backlog, setBacklog] = useState(null);
   const [reviews, setReviews] = useState(null);
@@ -204,11 +209,22 @@ function App() {
   }, [pollOps, view]);
 
   const pollRuntime = useCallback(async () => {
+    const seq = (runtimeSeq.current += 1);
     try {
       const res = await fetch(appendScope(`/api/agent-runtime?window=${runtimeWindow}`, projectFilter, checkoutFilter));
-      if (res.ok) setRuntime(await res.json());
+      if (seq !== runtimeSeq.current) return;
+      if (!res.ok) {
+        setRuntimeError(`agent runtime unavailable — HTTP ${res.status}`);
+      } else {
+        setRuntime(await res.json());
+        setRuntimeError(null);
+      }
       setNow(Date.now());
-    } catch (e) { setError(String(e)); }
+    } catch (e) {
+      if (seq !== runtimeSeq.current) return;
+      setRuntimeError(String(e));
+      setError(String(e));
+    }
   }, [runtimeWindow, projectFilter, checkoutFilter]);
 
   useEffect(() => {
@@ -219,9 +235,12 @@ function App() {
   }, [pollRuntime, view]);
 
   // Drop the stale series on a window change so the chart shows its loading
-  // state rather than a grid that silently belongs to the previous window.
+  // state rather than a grid that silently belongs to the previous window. The
+  // seq bump retires whatever is still in flight for the window being left.
   const changeRuntimeWindow = (next) => {
+    runtimeSeq.current += 1;
     setRuntime(null);
+    setRuntimeError(null);
     setRuntimeWindow(next);
   };
 
@@ -418,6 +437,7 @@ function App() {
             since=${opsSince}
             onSinceChange=${setOpsSince}
             runtime=${runtime}
+            runtimeError=${runtimeError}
             runtimeWindow=${runtimeWindow}
             onRuntimeWindowChange=${changeRuntimeWindow}
             runtimeRole=${runtimeRole}
@@ -528,9 +548,10 @@ function OpsSummary({ data }) {
 
 // RUN-3: operations summary — success rate, failure-kind mix, median durations,
 // operational counts. Reads /api/ops.
-function OpsView({ data, since, onSinceChange, runtime, runtimeWindow, onRuntimeWindowChange, runtimeRole, onRuntimeRoleChange }) {
+function OpsView({ data, since, onSinceChange, runtime, runtimeError, runtimeWindow, onRuntimeWindowChange, runtimeRole, onRuntimeRoleChange }) {
   const trends = html`<${AgentRuntimeTrends}
     data=${runtime}
+    error=${runtimeError}
     window=${runtimeWindow}
     onWindowChange=${onRuntimeWindowChange}
     role=${runtimeRole}
@@ -607,14 +628,25 @@ const RUNTIME_WINDOWS = ["1d", "7d", "30d", "90d", "all"];
 const RUNTIME_RESOLUTION_WORD = { hour: "hour", day: "day", week: "week" };
 
 // Chart labels are anchored to a viewBox EDGE and offset in em, so the gutter is
-// a multiple of whatever font-size ends up applied (11 user units wide, 32 under
-// the narrow-viewport rule in shell.ts) rather than a user-unit pad measured
-// against one browser. 1.4em clears any UI font's ascent and 0.6em its descent —
-// Chrome builds disagree by ~0.05em, and a baseline pinned at a fixed y left less
-// than 0.94em of headroom, so the peak label fell off the top edge under the host
-// font's metrics while fitting the container's.
+// a multiple of whatever font-size ends up applied rather than a user-unit pad
+// measured against one browser. 1.4em clears any UI font's ascent and 0.6em its
+// descent — Chrome builds disagree by ~0.05em, and a baseline pinned at a fixed y
+// left less than 0.94em of headroom, so the peak label fell off the top edge under
+// the host font's metrics while fitting the container's.
 const RUNTIME_PEAK_LABEL_DY = "1.4em";
 const RUNTIME_AXIS_LABEL_DY = "-0.6em";
+
+// The chart's viewBox is scaled to the width of its column, and scales its label
+// text with it. Sizing the labels in user units off the MEASURED width holds them
+// at this many CSS px whatever that width is — a viewport breakpoint can only be
+// right at the widths it samples, and is a cliff either side of them.
+const RUNTIME_AXIS_TARGET_PX = 11;
+// Conservative average glyph advance for the UI sans stack, plus the clear space
+// kept between two neighbouring labels. Over-estimating either thins one label too
+// many; under-estimating collides. Both are in em, so the reserved width tracks
+// the label size at every width instead of being tuned to one of them.
+const RUNTIME_GLYPH_EM = 0.62;
+const RUNTIME_LABEL_MARGIN_EM = 1.25;
 
 function runtimeBucketLabel(iso, resolution) {
   const d = new Date(iso);
@@ -625,7 +657,17 @@ function runtimeBucketLabel(iso, resolution) {
   return monthDay;
 }
 
-function AgentRuntimeTrends({ data, window, onWindowChange, role, onRoleChange }) {
+function AgentRuntimeTrends({ data, error, window, onWindowChange, role, onRoleChange }) {
+  const roles = data ? data.roleSummary.map((r) => r.role) : [];
+  const roleObserved = role === RUNTIME_ALL_ROLES || roles.includes(role);
+  // The fallback to "All agents" is written back, not just displayed. Left in
+  // state, the unobserved role would silently re-chart itself on the next window
+  // change — and re-picking "All agents" in the select fires no change event,
+  // because the select already shows it.
+  useEffect(() => {
+    if (data && !roleObserved) onRoleChange(RUNTIME_ALL_ROLES);
+  }, [data, roleObserved, onRoleChange]);
+
   const controls = html`
     <div class="runtime-controls">
       <span class="muted" id="runtime-window-label">runtime window:</span>
@@ -651,10 +693,13 @@ function AgentRuntimeTrends({ data, window, onWindowChange, role, onRoleChange }
     </section>
   `;
 
-  if (!data) return frame(html`<div class="card muted runtime-loading" role="status">loading agent runtime…</div>`);
+  if (!data) {
+    return frame(error
+      ? html`<div class="card runtime-error" role="alert">${error}. Retrying every 30s.</div>`
+      : html`<div class="card muted runtime-loading" role="status">loading agent runtime…</div>`);
+  }
 
-  const roles = data.roleSummary.map((r) => r.role);
-  const activeRole = roles.includes(role) ? role : RUNTIME_ALL_ROLES;
+  const activeRole = roleObserved ? role : RUNTIME_ALL_ROLES;
   const isAll = activeRole === RUNTIME_ALL_ROLES;
   const seriesLabel = isAll ? "All agents" : activeRole;
   const buckets = isAll ? data.overall : (data.byRole.find((s) => s.role === activeRole)?.buckets ?? []);
@@ -693,14 +738,32 @@ function AgentRuntimeTrends({ data, window, onWindowChange, role, onRoleChange }
   `);
 }
 
+/** The element's rendered width in CSS px, tracked across layout changes. */
+function useRenderedWidthPx(ref) {
+  const [widthPx, setWidthPx] = useState(0);
+  useLayoutEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+    setWidthPx(node.getBoundingClientRect().width);
+    const observer = new ResizeObserver(([entry]) => setWidthPx(entry.contentRect.width));
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [ref]);
+  return widthPx;
+}
+
 function RuntimeChart({ buckets, label, resolution, window }) {
   const VW = 1000;
   const VH = 242;
-  // PAD_* only keeps bars and the baseline clear of the label band at the largest
-  // font the stylesheet applies. Containment is the labels' own em offsets
+  const svgRef = useRef(null);
+  const widthPx = useRenderedWidthPx(svgRef);
+  const fontUnits = widthPx > 0 ? (RUNTIME_AXIS_TARGET_PX * VW) / widthPx : RUNTIME_AXIS_TARGET_PX;
+  // PAD_* keeps bars and the baseline clear of the label band. They follow the
+  // label size rather than a fixed largest-font assumption, so the band stays
+  // clear at every width. Containment is the labels' own em offsets
   // (RUNTIME_*_LABEL_DY), not these.
-  const PAD_TOP = 58;
-  const PAD_BOTTOM = 52;
+  const PAD_TOP = Math.max(58, fontUnits * 1.7);
+  const PAD_BOTTOM = Math.max(52, fontUnits * 1.5);
   const chartH = VH - PAD_TOP - PAD_BOTTOM;
   const n = buckets.length;
   const slot = VW / n;
@@ -728,10 +791,13 @@ function RuntimeChart({ buckets, label, resolution, window }) {
   });
 
   // Thin the axis by LABEL WIDTH, not by bucket count: 25 hourly buckets over a
-  // 1000-unit viewBox leave 40 units each, and a "03:00" label needs ~90 at the
-  // narrow-viewport font size. Keep the trailing bucket unconditionally — it is
-  // the current period — and drop whatever would collide with it.
-  const MIN_LABEL_GAP = 95;
+  // 1000-unit viewBox leave 40 units each, and an "03:00" label needs far more.
+  // The width is derived from the longest label actually being drawn and the font
+  // size actually applied — a weekly "wk 6/10" is half again as wide as a daily
+  // "6/10", and both grow as the column narrows. Keep the trailing bucket
+  // unconditionally — it is the current period — and drop what would collide.
+  const longestLabel = Math.max(...buckets.map((b) => runtimeBucketLabel(b.bucketStart, resolution).length));
+  const MIN_LABEL_GAP = fontUnits * (RUNTIME_GLYPH_EM * longestLabel + RUNTIME_LABEL_MARGIN_EM);
   const xAt = (i) => slot * i + slot / 2;
   const labelIdxs = [];
   for (let i = 0; i < n - 1; i += 1) {
@@ -748,7 +814,7 @@ function RuntimeChart({ buckets, label, resolution, window }) {
 
   return html`
     <figure class="runtime-chart">
-      <svg viewBox="0 0 ${VW} ${VH}" preserveAspectRatio="xMidYMid meet" role="img" aria-label=${summaryText}>
+      <svg ref=${svgRef} viewBox="0 0 ${VW} ${VH}" preserveAspectRatio="xMidYMid meet" role="img" aria-label=${summaryText}>
         <defs>
           <pattern id="runtime-partial-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
             <rect width="6" height="6" fill="var(--bg-elev-2)" />
@@ -756,12 +822,12 @@ function RuntimeChart({ buckets, label, resolution, window }) {
           </pattern>
         </defs>
         <line x1="0" y1=${VH - PAD_BOTTOM} x2=${VW} y2=${VH - PAD_BOTTOM} stroke="var(--border)" stroke-width="1" />
-        <text x="4" y="0" dy=${RUNTIME_PEAK_LABEL_DY} text-anchor="start" font-size="11" fill="var(--fg-faint)">peak: ${opsFmtMs(peak)}</text>
+        <text x="4" y="0" dy=${RUNTIME_PEAK_LABEL_DY} text-anchor="start" font-size=${fontUnits} fill="var(--fg-dim)">peak: ${opsFmtMs(peak)}</text>
         ${bars}
         ${labelIdxs.map((i) => {
           const x = xAt(i);
           const anchor = x < VW * 0.06 ? "start" : x > VW * 0.94 ? "end" : "middle";
-          return html`<text key=${buckets[i].bucketStart} x=${x} y=${VH} dy=${RUNTIME_AXIS_LABEL_DY} text-anchor=${anchor} font-size="11" fill="var(--fg-faint)">${runtimeBucketLabel(buckets[i].bucketStart, resolution)}</text>`;
+          return html`<text key=${buckets[i].bucketStart} x=${x} y=${VH} dy=${RUNTIME_AXIS_LABEL_DY} text-anchor=${anchor} font-size=${fontUnits} fill="var(--fg-dim)">${runtimeBucketLabel(buckets[i].bucketStart, resolution)}</text>`;
         })}
       </svg>
       <figcaption class="runtime-caption">

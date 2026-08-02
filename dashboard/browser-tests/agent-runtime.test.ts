@@ -108,10 +108,33 @@ const singlePointTrends: Trends = {
   roleSummary: [{ role: "documentation-maintainer", averageMs: 7_384_000, sampleCount: 1 }],
 };
 
-const emptyTrends: Trends = {
+// The real 90d shape: 14 weekly buckets. `wk 6/10` is the WIDEST label form the
+// axis thinning has to survive, so this is the fixture that decides whether the
+// rule holds — a weekly window rendered as an empty payload proves nothing.
+const WEEK = 604_800_000;
+const WEEKLY_START = Date.parse("2026-03-09T00:00:00.000Z");
+const weeklyBuckets = Array.from({ length: 14 }, (_, i) => {
+  const start = new Date(WEEKLY_START + i * WEEK).toISOString();
+  const empty = i === 2 || i === 9;
+  return point(start, empty ? null : 240_000 + i * 30_000, empty ? 0 : 2 + (i % 4), i === 13);
+});
+const weeklySamples = weeklyBuckets.reduce((sum, b) => sum + b.sampleCount, 0);
+
+const weeklyTrends: Trends = {
   window: "90d",
   resolution: "week",
-  bucketMs: 604_800_000,
+  bucketMs: WEEK,
+  rangeStart: weeklyBuckets[0]!.bucketStart,
+  rangeEnd: "2026-06-10T14:30:00.000Z",
+  overall: weeklyBuckets,
+  byRole: [{ role: "engineer", buckets: weeklyBuckets }],
+  roleSummary: [{ role: "engineer", averageMs: 435_000, sampleCount: weeklySamples }],
+};
+
+const emptyTrends: Trends = {
+  window: "all",
+  resolution: "week",
+  bucketMs: WEEK,
   rangeStart: null,
   rangeEnd: "2026-06-10T14:30:00.000Z",
   overall: [],
@@ -131,10 +154,14 @@ const trendsByWindow = new Map<string, Trends>([
   ["1d", hourlyTrends],
   ["7d", dailyTrends],
   ["30d", singlePointTrends],
-  ["90d", emptyTrends],
+  ["90d", weeklyTrends],
   ["all", emptyTrends],
 ]);
 
+// Per-window response delay: the runtime read's cost varies sharply by window, so
+// the out-of-order case is reproduced by making one window slow and another fast.
+const runtimeDelayByWindow = new Map<string, number>();
+let runtimeStatus = 200;
 let runtimeDelayMs = 0;
 let server: Server;
 let browser: Browser;
@@ -270,13 +297,24 @@ test("Window controls switch resolution, and cover the empty and single-point ca
   assert.ok(box.x >= svgBox.x - 1 && box.x + box.width <= svgBox.x + svgBox.width + 1, JSON.stringify({ box, svgBox }));
   assert.match(await page.locator(".runtime-table").innerText(), /2h3m/, "a multi-hour average must format as hours");
 
-  // 90d — no observations at all: an empty state, not an empty chart.
+  // 90d — weekly resolution. The widest label form there is, actually rendered.
   await pick("90d").click();
+  await page.getByRole("img", { name: /by week, over 90d/ }).waitFor();
+  assert.match(await page.locator(".runtime-caption").innerText(), /per week \(UTC\)/);
+  const weekLabels = (await page.locator(".runtime-chart svg text").allTextContents()).filter((t) => t.startsWith("wk "));
+  assert.ok(weekLabels.length > 0, "the weekly axis must actually render weekly labels");
+  assert.match(weekLabels.at(-1) ?? "", /^wk 6\/8$/, "the trailing (current) week is always labelled");
+  assert.equal(await axisLabelsOverlap(page), false, "weekly axis labels must not run into each other");
+  assert.match(await page.locator(".runtime-partial-note").innerText(), /The last week \(wk 6\/8\) is hatched/);
+  assert.equal(await page.locator(".runtime-chart rect.runtime-bar-partial").count(), 1);
+
+  // all — no observations at all: an empty state, not an empty chart.
+  await pick("all").click();
   await page.locator(".runtime-empty").waitFor();
   assert.match(await page.locator(".runtime-empty").innerText(), /No completed agent runs for All agents in this window/);
   assert.equal(await page.locator(".runtime-chart").count(), 0);
   assert.equal(await page.locator(".runtime-table").count(), 0);
-  assert.match(await page.locator(".runtime-selector").innerText(), /0 runs in 90d/);
+  assert.match(await page.locator(".runtime-selector").innerText(), /0 runs in all/);
 
   await pick("7d").click();
   await page.getByRole("img", { name: /Average agent runtime for All agents/ }).waitFor();
@@ -364,19 +402,188 @@ test("The runtime panel stays contained and legible at a narrow viewport", async
   await page.close();
 });
 
-/** True when any two axis labels' rendered boxes intersect horizontally. */
+// The chart's labels live in a viewBox that is scaled to the column width, so
+// their rendered size is a continuous function of the viewport — every width is a
+// case, not just the three this suite used to sample. 721-808px is the band a
+// 720px breakpoint left below the 8px floor asserted above; iPad portrait is in it.
+test("Chart labels hold their size across the whole width range, not just at sampled widths", async () => {
+  runtimeDelayMs = 0;
+  const measured: Array<{ width: number; min: number; max: number }> = [];
+  for (const width of [1440, 1024, 809, 808, 768, 744, 721, 720, 390]) {
+    const page = await newPage({ width, height: 900 });
+    await page.goto(`${baseUrl}/#ops`);
+    await page.locator(".runtime-chart svg").waitFor();
+    const heights = await page.evaluate(() => Array.from(document.querySelectorAll(".runtime-chart svg text"))
+      .map((element) => element.getBoundingClientRect().height));
+    assert.ok(heights.length > 0, `no chart labels rendered at ${width}px`);
+    measured.push({ width, min: Math.min(...heights), max: Math.max(...heights) });
+    assert.ok(Math.min(...heights) >= 8,
+      `axis labels must stay legible at ${width}px: ${JSON.stringify(heights)}`);
+    assert.equal(await axisLabelsOverlap(page), false, `axis labels must not collide at ${width}px`);
+    await page.close();
+  }
+  const smallest = Math.min(...measured.map((m) => m.min));
+  const largest = Math.max(...measured.map((m) => m.max));
+  assert.ok(largest / smallest <= 1.3,
+    `label size must vary continuously with width, not step at a breakpoint: ${JSON.stringify(measured)}`);
+});
+
+test("Chart text meets WCAG AA contrast against the surface it is painted on", async () => {
+  const page = await newPage({ width: 1280, height: 1100 });
+  await page.goto(`${baseUrl}/#ops`);
+  await page.locator(".runtime-chart svg").waitFor();
+
+  // Colours come out of the real cascade; the ratio is computed here, because the
+  // page context has no module helpers.
+  const colors = await page.evaluate(() => ({
+    axisFill: getComputedStyle(document.querySelector(".runtime-chart svg text")!).fill,
+    peakFill: getComputedStyle(document.querySelectorAll(".runtime-chart svg text")[0]!).fill,
+    captionColor: getComputedStyle(document.querySelector(".runtime-caption")!).color,
+    tableCaptionColor: getComputedStyle(document.querySelector(".runtime-table caption")!).color,
+    chartBackground: getComputedStyle(document.querySelector(".runtime-chart")!).backgroundColor,
+    tableBackground: getComputedStyle(document.querySelector(".runtime-table")!).backgroundColor,
+    pageBackground: getComputedStyle(document.body).backgroundColor,
+  }));
+
+  // The table sets no background of its own, so its caption sits on the page's.
+  assert.match(colors.tableBackground, /rgba\(0, 0, 0, 0\)|transparent/);
+  const ratios = {
+    axis: contrastRatio(colors.axisFill, colors.chartBackground),
+    peak: contrastRatio(colors.peakFill, colors.chartBackground),
+    caption: contrastRatio(colors.captionColor, colors.chartBackground),
+    tableCaption: contrastRatio(colors.tableCaptionColor, colors.pageBackground),
+  };
+  for (const [name, ratio] of Object.entries(ratios)) {
+    assert.ok(ratio >= 4.5, `${name} is ${ratio}:1 — AA needs 4.5:1 for text this size (${JSON.stringify(ratios)})`);
+  }
+  await page.close();
+});
+
+test("The bars do not animate when the operator has asked for reduced motion", async () => {
+  const reduced = await newPage({ width: 1280, height: 1100 }, { reducedMotion: "reduce" });
+  await reduced.goto(`${baseUrl}/#ops`);
+  await reduced.locator(".runtime-chart rect.runtime-bar").first().waitFor();
+  const reducedDuration = await reduced.locator(".runtime-chart rect.runtime-bar").first()
+    .evaluate((element) => getComputedStyle(element).transitionDuration);
+  assert.equal(reducedDuration, "0s");
+  await reduced.close();
+
+  // The guard is a preference, not a removal: the default page still animates.
+  const normal = await newPage({ width: 1280, height: 1100 }, { reducedMotion: "no-preference" });
+  await normal.goto(`${baseUrl}/#ops`);
+  await normal.locator(".runtime-chart rect.runtime-bar").first().waitFor();
+  const normalDuration = await normal.locator(".runtime-chart rect.runtime-bar").first()
+    .evaluate((element) => getComputedStyle(element).transitionDuration);
+  assert.match(normalDuration, /0\.2s/);
+  await normal.close();
+});
+
+test("A failing runtime read is reported, not left as a permanent loading state", async () => {
+  const page = await newPage({ width: 1280, height: 1100 });
+  await page.goto(`${baseUrl}/#ops`);
+  await page.locator(".runtime-chart svg").waitFor();
+
+  // The reachable path: an ordinary window switch, which drops the cached series
+  // first, against a store read that is now failing.
+  runtimeStatus = 500;
+  await runtimeWindow(page, "1d").click();
+  const error = page.locator(".runtime-error");
+  await error.waitFor();
+  assert.match(await error.innerText(), /HTTP 500/);
+  assert.equal(await error.getAttribute("role"), "alert");
+  assert.equal(await page.locator(".runtime-loading").count(), 0, "a failed read is not a load in progress");
+
+  runtimeStatus = 200;
+  await runtimeWindow(page, "7d").click();
+  await page.getByRole("img", { name: /by day, over 7d/ }).waitFor();
+  assert.equal(await page.locator(".runtime-error").count(), 0, "the panel recovers once the read succeeds");
+  await page.close();
+});
+
+test("A slow earlier window's response cannot overwrite the window the operator moved to", async () => {
+  const page = await newPage({ width: 1280, height: 1100 });
+  await page.goto(`${baseUrl}/#ops`);
+  await page.locator(".runtime-chart svg").waitFor();
+
+  // 90d answers slowly, 1d immediately — so the FIRST request resolves LAST.
+  runtimeDelayByWindow.set("90d", 700);
+  await runtimeWindow(page, "90d").click();
+  await page.locator(".runtime-loading").waitFor();
+  await runtimeWindow(page, "1d").click();
+  await page.getByRole("img", { name: /by hour, over 1d/ }).waitFor();
+
+  await page.waitForTimeout(1200);
+  const label = await page.locator(".runtime-chart svg").getAttribute("aria-label") ?? "";
+  assert.match(label, /by hour, over 1d/, "the retired 90d response must not re-chart the panel");
+  assert.match(await page.locator(".runtime-selector").innerText(), new RegExp(`${hourlySamples} runs in 1d`));
+  assert.equal(await runtimeWindow(page, "1d").getAttribute("aria-pressed"), "true");
+
+  runtimeDelayByWindow.delete("90d");
+  await page.close();
+});
+
+test("A role with no observations in the new window is written back, not just displayed as All agents", async () => {
+  const page = await newPage({ width: 1440, height: 1200 });
+  await page.goto(`${baseUrl}/#ops`);
+  await page.locator(".runtime-chart svg").waitFor();
+
+  await page.locator(".runtime-role-select").selectOption("red-wide");
+  await page.getByRole("img", { name: /Average agent runtime for red-wide/ }).waitFor();
+
+  // 30d has no red-wide runs, so the panel falls back to All agents. Re-picking
+  // "All agents" in the select would fire no change event — the value is already
+  // that — so the fallback has to be the stored selection, not just the shown one.
+  await runtimeWindow(page, "30d").click();
+  await page.getByRole("img", { name: /Average agent runtime for All agents/ }).waitFor();
+  assert.equal(await page.locator(".runtime-role-select").inputValue(), "__all__");
+
+  await runtimeWindow(page, "7d").click();
+  await page.getByRole("img", { name: /Average agent runtime for All agents/ }).waitFor();
+  assert.equal(await page.locator(".runtime-role-select").inputValue(), "__all__");
+  assert.match(await page.locator(".runtime-selector").innerText(), /14 runs in 7d/,
+    "a role the operator never re-selected must not silently come back");
+  await page.close();
+});
+
+/** WCAG 2.x relative-luminance contrast ratio between two computed CSS colours. */
+function contrastRatio(foreground: string, background: string): number {
+  const luminance = (color: string) => {
+    const [r = 0, g = 0, b = 0] = (color.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number);
+    return [r, g, b].reduce((total, value, index) => {
+      const c = value / 255;
+      const linear = c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+      return total + linear * [0.2126, 0.7152, 0.0722][index]!;
+    }, 0);
+  };
+  const a = luminance(foreground);
+  const b = luminance(background);
+  return +((Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05)).toFixed(2);
+}
+
+/** True when any two axis labels' rendered boxes intersect horizontally. Every
+ *  label but the peak one is an axis label — including the weekly `wk 6/10` form,
+ *  which a digit-prefix filter would silently exclude from the check. */
 async function axisLabelsOverlap(page: Page): Promise<boolean> {
   return page.evaluate(() => {
     const boxes = Array.from(document.querySelectorAll(".runtime-chart svg text"))
-      .filter((element) => /^[0-9]/.test(element.textContent ?? ""))
+      .filter((element) => !(element.textContent ?? "").startsWith("peak"))
       .map((element) => element.getBoundingClientRect())
       .sort((a, b) => a.left - b.left);
     return boxes.some((box, index) => index > 0 && box.left < boxes[index - 1]!.right);
   });
 }
 
-async function newPage(viewport: { width: number; height: number }): Promise<Page> {
-  const page = await browser.newPage({ viewport });
+/** The runtime panel's own window button — distinct from the ops-summary row. */
+function runtimeWindow(page: Page, name: string) {
+  return page.getByRole("group", { name: "runtime window:" }).getByRole("button")
+    .filter({ hasText: new RegExp(`^${name}$`) });
+}
+
+async function newPage(
+  viewport: { width: number; height: number },
+  options: { reducedMotion?: "reduce" | "no-preference" } = {},
+): Promise<Page> {
+  const page = await browser.newPage({ viewport, ...options });
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("close", () => assert.deepEqual(errors, [], `browser errors: ${errors.join("; ")}`));
@@ -404,9 +611,14 @@ function createFixtureServer(): Server {
       return;
     }
     if (url.pathname === "/api/agent-runtime") {
-      if (runtimeDelayMs) await new Promise((wait) => setTimeout(wait, runtimeDelayMs));
-      const trends = trendsByWindow.get(url.searchParams.get("window") ?? "7d") ?? emptyTrends;
-      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(trends));
+      const window = url.searchParams.get("window") ?? "7d";
+      const delay = runtimeDelayByWindow.get(window) ?? runtimeDelayMs;
+      if (delay) await new Promise((wait) => setTimeout(wait, delay));
+      if (runtimeStatus !== 200) {
+        res.writeHead(runtimeStatus, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "store read failed" }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(trendsByWindow.get(window) ?? emptyTrends));
       return;
     }
     if (url.pathname === "/api/ops") {
