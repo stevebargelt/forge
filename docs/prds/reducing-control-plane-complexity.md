@@ -1,7 +1,7 @@
 # Reducing Forge Control-Plane Complexity
 
 **Status:** concept / roadmap. This document has no implementation authority;
-accepted work must be represented in the DB-backed backlog.
+accepted work must be represented in the backlog and living plan.
 
 Forge has accumulated several necessary policy layers: workflow YAML, runtime YAML,
 model policy, RACI routing policy, project overrides, seeds, constraints, docs
