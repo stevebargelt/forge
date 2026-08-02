@@ -1,4 +1,4 @@
-# FG-553 (Slice 1) — architecture + plan. **STOP FOR REVIEW. No children created. No implementation.**
+# FG-553 (Slice 1) — architecture and implementation plan
 
 > **Lifecycle:** shipped and closed. This point-in-time plan is retained as
 > implementation history; its original stop language no longer describes current

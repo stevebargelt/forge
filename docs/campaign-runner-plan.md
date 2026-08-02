@@ -1,5 +1,8 @@
 # Campaign Runner Shipping Plan
 
+**Status:** shipped; historical delivery record. Current behavior is documented
+in [Concepts](concepts.md), and current follow-up scope belongs in the backlog.
+
 This document tracks the deliverables required before Forge can truthfully claim Campaign Runner is shipped.
 
 The goal is not just "run a list." A shipped Campaign Runner must be durable, inspectable, resumable, and honest about blocked work.

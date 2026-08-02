@@ -110,7 +110,7 @@ Shows agent outputs across every project on the host, live-polling every 2s. Rea
 | `dashboard/` | Web dashboard workspace (server + client + design corpus) |
 | `seeds/` | Default agent dirs, constraints, runtimes, workflows (copied into `~/.forge/`), and `forge-*` skills (installed into the user-global Claude Code skills dir) |
 | `docker/agent-dev-worker.Dockerfile` | Agent container image |
-| `docs/` | How-tos and concepts |
+| `docs/` | Operator guides, contracts, and indexed design history |
 | `learnings/` | ADRs and patterns for forge itself |
 | `~/.forge/forge.db` | SQLite blackboard (host-global; one DB across all projects) |
 | `~/.forge/current` | Symlink to the release the machine-wide `forge` runs (`forge release promote` swaps it) |
@@ -142,4 +142,6 @@ Note that `forge upgrade` refreshes `~/.forge/`'s forge-owned seeds — it does 
 
 ## Docs
 
-`docs/concepts.md` (glossary), `docs/quick-start.md` (end-to-end), `docs/how-to-use-forge-across-projects.md` (multi-project setup), `docs/how-to-upgrade.md` (refresh after forge changes), `docs/how-to-backlog-db-cutover.md` (moving a project's backlog from `backlog/*.md` to the DB store), `docs/how-to-set-up-notifications.md` (SMS + push notifications when workflows finish), `docs/how-to-ntfy.md` (self-hosting ntfy for push notifications), `docs/how-to-iterm-tint.md` (auto-tint iTerm2 background per project), and `docs/how-to-*.md` for adding new agents/workflows.
+Start with the [documentation index](docs/README.md). It separates current
+operator guides and contracts from historical PRDs, implementation plans,
+research, and decision records.
