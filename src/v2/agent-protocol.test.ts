@@ -530,3 +530,20 @@ test("FG-654 RF-17: the autonomous-run prompt names BOTH refusals upgrade will n
     );
   }
 });
+
+// RF-18: the same falsified exclusivity claim, in the front-door document. RF-2 already reads
+// README.md but asserts only that the removed in-place region is gone, so nothing here spoke
+// for the refusal set.
+test("FG-654 RF-18: the README's upgrade paragraph names both refusals upgrade cannot repair", () => {
+  assertReleaseMissingArmExists();
+  const doc = readFileSync(join(repoRoot, "README.md"), "utf8");
+  const para = doc.split("\n").find((l) => l.includes("The Forge-owned agent protocols are repaired rather than retained"));
+  assert.ok(para, "the upgrade paragraph must still describe how the protocols are repaired");
+  assert.doesNotMatch(
+    para!,
+    /The one protocol state upgrade cannot repair/,
+    "the falsified exclusivity claim is back — release_protocol_missing is a second one",
+  );
+  assert.match(para!, /Two protocol states upgrade cannot repair/, "…both are stated as exceptions");
+  assert.match(para!, /reinstall the release/, "…naming the remedy for the release-missing one");
+});
