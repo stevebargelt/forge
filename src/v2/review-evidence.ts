@@ -16,7 +16,9 @@
 //     lane is not an execution record: the alternate lane is held to exactly the per-test
 //     identity the primary lane is, so a lane that cannot show its assertion executing
 //     resolves nothing. Unnamed "covered elsewhere" is refused at ingestion, and a lane
-//     whose sha is not this candidate's is refused by name.
+//     whose sha is not this candidate's is refused by name. AND THE LANE MUST COVER EVERY
+//     TEST THE CLAIM NAMES: a lane that executed one of the two assertions a claim names
+//     has rescued one of them, and the other executed nowhere at all.
 //
 // AND RESOLUTION EVIDENCE IS PROPORTIONAL TO THE FINDING'S ORIGINAL REACHABILITY:
 //
@@ -51,6 +53,10 @@ export type ResolutionEvidenceKind = (typeof RESOLUTION_EVIDENCE_KINDS)[number];
  *  required because each one is a thing an unnamed claim leaves out: WHICH lane ran it,
  *  at WHICH candidate, WHICH assertion, and — the one naming alone can never supply —
  *  the lane's OWN runner output establishing that the assertion executed there.
+ *
+ *  `executed_assertion` carries the same list semantics `ran` and `test_name` do, and is
+ *  checked for CORRESPONDENCE as well as execution: it must name every test the claim it
+ *  rescues names.
  *
  *  `runner_output` is optional in the SCHEMA and required by `checkAlternateLane` on
  *  purpose: a claim that omits it must refuse with a reason naming the missing execution
@@ -109,9 +115,11 @@ const TestStepSchema = z
      *  carry going forward; the string stays because it is what the rechecker seed
      *  documents and what every claim recorded so far was written as, and refusing those
      *  would discard complete evidence for a formatting reason. A string is split on the
-     *  separator agents already join with. Splitting can only ever refuse MORE (a name
-     *  that genuinely contained "; " becomes two names nothing matches), never accept
-     *  more, so the gate cannot widen this way. */
+     *  separator agents already join with, and EVERY member the split produces must resolve
+     *  on its own — a blank one included (see `ranTestNames`). That is the mechanism that
+     *  keeps splitting from widening the gate: a name that genuinely contained "; " becomes
+     *  two names nothing matches, and a malformed list like "alpha; ;" refuses on its blank
+     *  member instead of validating on the subset that happened to parse. */
     ran: z.union([z.string().trim().min(1), z.array(z.string().trim().min(1)).min(1)]),
     runner_output: z.string().trim().min(1),
   })
@@ -215,15 +223,39 @@ function stripTiming(name: string): string {
  *
  *  A CITED IDENTITY MAY NAME MORE THAN ONE TEST (FG-657), as an array or as the "; "-joined
  *  string agents write. Every named test must have EXECUTED: one absent, skipped or failed
- *  member refuses the whole claim, exactly as it does on its own. */
+ *  member refuses the whole claim, exactly as it does on its own. A BLANK member is not a
+ *  name, so it is ABSENT and refuses too — a malformed list is never validated on whichever
+ *  of its members happened to parse. */
 export function testExecution(runnerOutput: string, ran: string | readonly string[]): TestExecution {
   return resolveTestExecution(runnerOutput, ran).execution;
 }
 
-/** The tests a cited identity names, in the order it names them. */
+/** The tests a cited identity names, in the order it names them — BLANK MEMBERS INCLUDED.
+ *
+ *  Blanks are kept, not filtered. Filtering them made a malformed list validate on the
+ *  subset that happened to parse: "alpha; ;", "alpha;;", "; alpha" and ["alpha", ""] all
+ *  collapsed to ["alpha"] and passed against output that only ever ran alpha — where the
+ *  unsplit string matched no captured name and was refused. That is splitting ACCEPTING
+ *  MORE, which is the one thing it must never do.
+ *
+ *  Of the two ways to close it — keep the blank and resolve it, or refuse the malformed
+ *  list outright — this keeps it. A blank names no test, so `absent` is already the true
+ *  answer for it, and one rule (every named member must have EXECUTED) then covers a blank
+ *  member, a misspelled one and a deleted one alike, at all three surfaces that resolve a
+ *  list: a step's `ran`, a cited test's `test_name`, and a lane's `executed_assertion`.
+ *  A second "malformed list" vocabulary would have to be threaded through each of them and
+ *  could drift from the rule it exists to serve. Refusals name a blank by its position, so
+ *  a reader can tell it apart from a name the runner never printed. */
 export function ranTestNames(ran: string | readonly string[]): string[] {
   const parts = typeof ran === "string" ? ran.split(/\s*;\s*/) : ran;
-  return parts.map((p) => p.trim()).filter((p) => p !== "");
+  return parts.map((p) => p.trim());
+}
+
+/** How one member of a cited list is named in a refusal. A blank member has no name to
+ *  print, and printing the empty string reads as a test called nothing. */
+function memberLabel(names: readonly string[], index: number): string {
+  const name = names[index];
+  return name === undefined || name === "" ? `(blank member ${index + 1} of ${names.length})` : name;
 }
 
 /** The same answer as `testExecution`, plus WHICH of the named tests produced it — so a
@@ -236,7 +268,13 @@ export function resolveTestExecution(
   const names = ranTestNames(ran);
   if (names.length === 0) return { execution: "absent", test: typeof ran === "string" ? ran.trim() : "" };
 
-  const perTest = names.map((test) => ({ test, execution: oneTestExecution(runnerOutput, test) }));
+  // A blank member is resolved, never matched. Nothing in any output can establish that a
+  // test with no name ran, and handing "" to the matcher would be worse than useless: the
+  // empty string is a suffix of every captured name the runner printed.
+  const perTest = names.map((name, i) => ({
+    test: memberLabel(names, i),
+    execution: name === "" ? ("absent" as const) : oneTestExecution(runnerOutput, name),
+  }));
   // Failure dominates the LIST exactly as it dominates one name's own lines: a red
   // assertion is the finding still being present, and a sibling that merely skipped —
   // the case an alternate lane may legitimately fill — must not mask it.
@@ -398,7 +436,7 @@ export function validateResolutionEvidence(raw: unknown, ctx: EvidenceContext): 
 
   // A cited test. Everything below is the skip-evidence rule.
   if (ev.environment_blocked !== undefined) {
-    const lane = checkAlternateLane(ev.alternate_lane, ctx);
+    const lane = checkAlternateLane(ev.alternate_lane, ctx, ranTestNames(ev.test_name));
     if (lane.ok) {
       return {
         ok: true,
@@ -452,7 +490,7 @@ export function validateResolutionEvidence(raw: unknown, ctx: EvidenceContext): 
     };
   }
 
-  const lane = checkAlternateLane(ev.alternate_lane, ctx);
+  const lane = checkAlternateLane(ev.alternate_lane, ctx, ranTestNames(ev.test_name));
   if (lane.ok) {
     return {
       ok: true,
@@ -481,8 +519,15 @@ type LaneCheck = { ok: true; detail: string } | { ok: false; refusal: string };
 /** A skip is sound ONLY when another mandatory lane EXECUTED the same assertion against
  *  the same candidate. Naming that lane makes the claim checkable; the lane's own runner
  *  output is what makes it checked. Both are required — a lane accepted on its name alone
- *  would be the skip rule with one indirection added. */
-function checkAlternateLane(claim: AlternateLaneClaim | undefined, ctx: EvidenceContext): LaneCheck {
+ *  would be the skip rule with one indirection added.
+ *
+ *  `required` is every test the claim being rescued names. The lane must cover ALL of them:
+ *  a lane is a substitute for the claim, not a discount on it. */
+function checkAlternateLane(
+  claim: AlternateLaneClaim | undefined,
+  ctx: EvidenceContext,
+  required: readonly string[],
+): LaneCheck {
   if (claim === undefined) {
     return {
       ok: false,
@@ -524,6 +569,27 @@ function checkAlternateLane(claim: AlternateLaneClaim | undefined, ctx: Evidence
               `appear in its own output at all, so the lane never established it ran.`,
     };
   }
+
+  // THE LANE MUST COVER EVERY TEST THE CLAIM NAMES. Executing SOME of them is coverage of
+  // some of the finding: "alpha; beta" rescued by a lane that ran only alpha leaves beta
+  // executed in no lane at all, which is this file's guarantee — every named test must have
+  // executed — quietly not holding. Correspondence is by WHOLE NAME, never substring or
+  // prefix. A lane naming a superset passes: running more than was asked for still runs
+  // what was asked for. Coverage is checked over the members the claim names, not over the
+  // subset that failed here, so the lane stands in for the whole claim it rescues.
+  const covered = new Set(ranTestNames(claim.executed_assertion));
+  const uncovered = required.findIndex((name) => !covered.has(name));
+  if (uncovered !== -1) {
+    return {
+      ok: false,
+      refusal:
+        `Alternate lane '${claim.lane}' executed '${claim.executed_assertion}', which does not cover ` +
+        `'${memberLabel(required, uncovered)}' — a lane rescues a claim only by executing EVERY test that ` +
+        `claim names, and that member executed in no lane at all. Covering a subset resolves a subset, ` +
+        `which is not what the claim asserts.`,
+    };
+  }
+
   return {
     ok: true,
     detail:

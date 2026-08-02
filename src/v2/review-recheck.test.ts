@@ -517,3 +517,56 @@ test("FG-657: a finding with NO recorded reachability still gets the strictest r
   assert.match(r.applications[0]?.detail ?? "", /requires regression_test or replayed_reproduction/);
   assert.equal(r.applications[0]?.coverage, "not_executed");
 });
+
+// ─── FG-657: the two closures, at the surface that decides ──────────────────
+//
+// A blank member in a cited list, and an alternate lane that covers only some of what the
+// claim names, are both refused by `validateResolutionEvidence`. What matters here is the
+// consequence: `inconclusive` + `not_executed` + back to disposition, with nothing stored
+// as validated evidence. A refusal the ledger then recorded as `resolved` — or recorded as
+// nothing at all — would be the trust gate failing open however well-worded the refusal.
+
+const LANE_GREEN = [`ok 1 - ${PAIR_657[0]}`, `ok 2 - ${PAIR_657[1]}`].join("\n");
+const LANE_SKIPPED_ONE = [`✔ ${PAIR_657[0]} (1.2ms)`, `﹣ ${PAIR_657[1]} (0ms) # SKIP no agent image`].join("\n");
+
+test("FG-657: a BLANK member sends the finding back to disposition — a malformed list is never resolved on the members that parsed", () => {
+  for (const test_name of [`${PAIR_657[0]}; ; ${PAIR_657[1]}`, `${PAIR_657.join("; ")}; `, `; ${PAIR_657.join("; ")}`]) {
+    const r = ingestOne(PAIR_657_GREEN, { test_name });
+    assert.equal(r.ok, true, "the result is ingested; it is the RESOLUTION that is refused");
+    if (!r.ok) return;
+    const [a] = r.applications;
+    assert.equal(a?.resolution, "inconclusive", `a malformed list closed a finding: ${JSON.stringify(test_name)}`);
+    assert.equal(a?.coverage, "not_executed", "the gap is recorded, never silently dropped");
+    assert.equal(a?.evidenceKind, undefined, "nothing is stored as validated evidence");
+    assert.match(a?.detail ?? "", /\(blank member \d+ of \d+\)/, "the ledger detail names the blank by position");
+    assert.equal(r.returnsToDisposition, true);
+  }
+});
+
+test("FG-657: a lane covering only SOME of the tests the claim names leaves the finding open in the ledger", () => {
+  const r = ingestOne(LANE_SKIPPED_ONE, {
+    alternate_lane: { lane: "ci", candidate_sha: SHA, executed_assertion: PAIR_657[0], runner_output: `ok 1 - ${PAIR_657[0]}` },
+  });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  const [a] = r.applications;
+  assert.equal(a?.resolution, "inconclusive", "the member the lane never ran executed in no lane at all");
+  assert.equal(a?.coverage, "not_executed");
+  assert.equal(a?.evidenceKind, undefined);
+  assert.match(a?.detail ?? "", /does not cover 'the reconcile path retries once'/, "the detail names the UNCOVERED member");
+  assert.equal(r.returnsToDisposition, true);
+});
+
+test("FG-657: a lane covering EVERY test the claim names resolves it through the ledger — the rule refuses subsets, not lanes", () => {
+  const r = ingestOne(LANE_SKIPPED_ONE, {
+    alternate_lane: { lane: "ci", candidate_sha: SHA, executed_assertion: PAIR_657.join("; "), runner_output: LANE_GREEN },
+  });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  const [a] = r.applications;
+  assert.equal(a?.resolution, "resolved", "a complete substitute lane is still a substitute");
+  assert.equal(a?.coverage, "executed");
+  assert.equal(a?.evidenceKind, "regression_test");
+  assert.match(a?.detail ?? "", /mandatory lane 'ci' executed/);
+  assert.equal(r.returnsToDisposition, false);
+});

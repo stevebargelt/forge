@@ -998,28 +998,89 @@ test("FG-657: an ALTERNATE LANE's own multi-name assertion is held to exactly th
   assert.equal(check.coverage, "not_executed");
 });
 
-// PINS TODAY'S BEHAVIOR — NOT AN ENDORSEMENT. `checkAlternateLane` never required the
-// lane's `executed_assertion` to correspond to the member that skipped here; that is the
-// FG-639 lane design, unchanged by FG-657, and it is why the paragraph below reads the way
-// it does rather than asserting a correspondence the code does not check. Recorded so the
-// looseness is visible in the suite instead of being rediscovered as a surprise.
-test("FG-657: a lane rescue is checked for EXECUTION, not for per-member correspondence (pins today's behavior)", () => {
-  const check = validateResolutionEvidence(
+// ─── FG-657: an alternate lane rescues the WHOLE claim or none of it ─────────
+//
+// A lane is a substitute for the claim it stands in for, not a discount on it. Executing
+// SOME of the tests a claim names leaves the rest executed in no lane at all, which is the
+// module's guarantee — every named test must have EXECUTED — quietly not holding. These
+// four cases are the correspondence itself: all, a strict subset, a superset, none.
+
+const ONE_SKIPPED = [`✔ ${PAIR[0]} (1.2ms)`, `﹣ ${PAIR[1]} (0ms) # SKIP no agent image`].join("\n");
+
+function laneRescue(lane: Record<string, unknown>, findingRef: string) {
+  return validateResolutionEvidence(
     citedTest({
       test_name: PAIR.join("; "),
-      runner_output: [`✔ ${PAIR[0]} (1.2ms)`, `﹣ ${PAIR[1]} (0ms) # SKIP no agent image`].join("\n"),
-      alternate_lane: {
-        lane: "ci",
-        candidate_sha: SHA,
-        executed_assertion: PAIR[1],
-        runner_output: `ok 1 - ${PAIR[1]}`,
-      },
+      runner_output: ONE_SKIPPED,
+      alternate_lane: { lane: "ci", candidate_sha: SHA, ...lane },
     }),
-    demonstrated("RF-13"),
+    demonstrated(findingRef),
+  );
+}
+
+test("FG-657: a lane that executed EVERY test the claim names rescues it", () => {
+  const check = laneRescue(
+    { executed_assertion: PAIR.join("; "), runner_output: [`ok 1 - ${PAIR[0]}`, `ok 2 - ${PAIR[1]}`].join("\n") },
+    "RF-13",
   );
   assert.equal(check.ok, true, check.ok ? "" : check.refusal);
-  assert.equal(check.ok ? check.detail : "", `${PAIR[1]} skipped here, but mandatory lane 'ci' executed '${PAIR[1]}' against ${SHA}`);
-  assert.match(check.ok ? check.detail : "", /skipped here, but mandatory lane/, "the detail states the gap it is standing in for");
+  assert.equal(check.ok ? check.coverage : "", "executed");
+  assert.match(check.ok ? check.detail : "", /skipped here, but mandatory lane 'ci' executed/);
+});
+
+test("FG-657: a lane covering a STRICT SUBSET of the claim refuses, and names the member it left uncovered", () => {
+  const check = laneRescue({ executed_assertion: PAIR[1], runner_output: `ok 1 - ${PAIR[1]}` }, "RF-13");
+  assert.equal(check.ok, false, "the member the lane never ran executed in no lane at all");
+  if (check.ok) return;
+  assert.match(check.refusal, /does not cover 'the reconcile path guards a partial write'/, "names the UNCOVERED member");
+  assert.match(check.refusal, /executing EVERY test that claim names/);
+  assert.match(check.refusal, /Covering a subset resolves a subset/);
+  assert.equal(check.coverage, "not_executed");
+});
+
+test("FG-657: a lane covering a SUPERSET of the claim rescues it — running more still runs what was asked for", () => {
+  const check = laneRescue(
+    {
+      executed_assertion: [...PAIR, "a third assertion nobody asked for"].join("; "),
+      runner_output: [`ok 1 - ${PAIR[0]}`, `ok 2 - ${PAIR[1]}`, "ok 3 - a third assertion nobody asked for"].join("\n"),
+    },
+    "RF-13",
+  );
+  assert.equal(check.ok, true, check.ok ? "" : check.refusal);
+  assert.equal(check.ok ? check.coverage : "", "executed");
+});
+
+test("FG-657: a lane covering NONE of the claim's tests refuses, however green its own output is", () => {
+  const check = laneRescue(
+    { executed_assertion: "an unrelated assertion", runner_output: "ok 1 - an unrelated assertion" },
+    "RF-13",
+  );
+  assert.equal(check.ok, false, "a green lane running other tests is not coverage of this claim");
+  if (check.ok) return;
+  assert.match(check.refusal, /does not cover 'the reconcile path guards a partial write'/);
+  assert.equal(check.coverage, "not_executed");
+});
+
+test("FG-657: a BLOCKED ENVIRONMENT is rescued only by a lane covering every test the blocked claim names", () => {
+  const blocked = (executed_assertion: string, runner_output: string) =>
+    validateResolutionEvidence(
+      {
+        kind: "regression_test",
+        test_name: PAIR.join("; "),
+        environment_blocked: "no agent image on this host",
+        alternate_lane: { lane: "ci", candidate_sha: SHA, executed_assertion, runner_output },
+      },
+      demonstrated("RF-13"),
+    );
+
+  const partial = blocked(PAIR[0], `ok 1 - ${PAIR[0]}`);
+  assert.equal(partial.ok, false, "the environment ran neither, and the lane ran only one");
+  if (partial.ok) return;
+  assert.match(partial.refusal, /does not cover 'the reconcile path retries once'/);
+  assert.equal(partial.coverage, "blocked_environment", "a blocked environment is recorded as such, never green");
+
+  const full = blocked(PAIR.join("; "), [`ok 1 - ${PAIR[0]}`, `ok 2 - ${PAIR[1]}`].join("\n"));
+  assert.equal(full.ok, true, full.ok ? "" : full.refusal);
 });
 
 // PINS TODAY'S BEHAVIOR — THE KNOWN FG-658 GAP, filed separately with its own acceptance
@@ -1053,4 +1114,327 @@ test("FG-657: an ARRAY test_name on a cited regression test is refused at the sc
   assert.equal(check.ok, false);
   assert.match(check.ok ? "" : check.refusal, /resolution evidence did not validate: test_name/);
   assert.equal(check.ok ? "" : check.coverage, "not_executed");
+});
+
+// ─── FG-657: a BLANK member is not evidence, and is never silently dropped ───
+//
+// The direction that matters. Filtering blank members out of the split made a MALFORMED
+// list validate on whichever of its members happened to parse: against output that ran
+// only `PAIR[0]`, "alpha; ;" read as EXECUTED where the unsplit string had read absent and
+// refused. Splitting was accepting MORE. Every form below is a way of writing that list —
+// leading, trailing, doubled and interior separators, and the array shapes — and each one
+// has to refuse, naming the blank by position so the reader can tell it from a name the
+// runner never printed.
+
+const MALFORMED_ON_ALPHA = [`${PAIR[0]}; ;`, `${PAIR[0]};;`, `; ${PAIR[0]}`, `${PAIR[0]}; `, `${PAIR[0]};   ;`];
+
+test("FG-657: a blank member makes the whole identity ABSENT — splitting a malformed list never accepts more than the unsplit string did", () => {
+  const alphaOnly = [`✔ ${PAIR[0]} (1.2ms)`, "ℹ pass 1", "ℹ fail 0"].join("\n");
+  assert.equal(testExecution(alphaOnly, PAIR[0]), "executed", "the well-formed single name is unchanged");
+  for (const malformed of MALFORMED_ON_ALPHA) {
+    assert.equal(
+      testExecution(alphaOnly, malformed),
+      "absent",
+      `validated on the subset that parsed: ${JSON.stringify(malformed)}`,
+    );
+  }
+});
+
+test("FG-657: a blank member between two names that BOTH executed still refuses, and the refusal names the blank by position", () => {
+  const ran = `${PAIR[0]}; ; ${PAIR[1]}`;
+  assert.deepEqual(resolveTestExecution(PAIR_GREEN, ran), { execution: "absent", test: "(blank member 2 of 3)" });
+
+  const check = validateResolutionEvidence(citedTest({ test_name: ran }), demonstrated("RF-16"));
+  assert.equal(check.ok, false, "two real members passing says nothing about the third, which names no test");
+  if (check.ok) return;
+  assert.match(check.refusal, /\(blank member 2 of 3\) does not appear in the cited runner output at all/);
+  assert.equal(check.coverage, "not_executed");
+});
+
+test("FG-657: every malformed separator shape is refused at the CITED TEST surface, with coverage recorded", () => {
+  for (const test_name of MALFORMED_ON_ALPHA) {
+    const check = validateResolutionEvidence(
+      citedTest({ test_name, runner_output: `✔ ${PAIR[0]} (1.2ms)` }),
+      demonstrated("RF-16"),
+    );
+    assert.equal(check.ok, false, `a blank member passed the gate: ${JSON.stringify(test_name)}`);
+    assert.match(check.ok ? "" : check.refusal, /\(blank member \d+ of \d+\) does not appear in the cited runner output/);
+    assert.equal(check.ok ? "" : check.coverage, "not_executed");
+  }
+});
+
+test("FG-657: every malformed separator shape is refused at the VERIFICATION STEP surface too", () => {
+  for (const ran of MALFORMED_ON_ALPHA) {
+    const check = validateResolutionEvidence(
+      {
+        kind: "anchored_verification",
+        file: "src/v2/reconcile.ts",
+        line: 88,
+        fact: "the partial write is guarded first",
+        verification_step: { ran, runner_output: `✔ ${PAIR[0]} (1.2ms)` },
+      },
+      { candidateSha: SHA, reachability: "supported", findingRef: "RF-17" },
+    );
+    assert.equal(check.ok, false, `a blank member passed the gate: ${JSON.stringify(ran)}`);
+    assert.match(check.ok ? "" : check.refusal, /\(blank member \d+ of \d+\)/, "the refusal names the blank, not the whole list");
+    assert.match(check.ok ? "" : check.refusal, /nowhere at all, so nothing establishes that it ran/);
+    assert.equal(check.ok ? "" : check.coverage, "not_executed");
+  }
+});
+
+test("FG-657: the ARRAY form has the same hazard and the same answer — an empty or whitespace-only member is ABSENT, never dropped", () => {
+  for (const ran of [[PAIR[0], ""], [PAIR[0], "   "], ["", PAIR[0]], [PAIR[0], "\t", PAIR[1]]]) {
+    assert.equal(testExecution(PAIR_GREEN, ran), "absent", `array member dropped: ${JSON.stringify(ran)}`);
+    assert.match(resolveTestExecution(PAIR_GREEN, ran).test, /^\(blank member \d+ of \d+\)$/);
+  }
+  assert.equal(testExecution(PAIR_GREEN, [...PAIR]), "executed", "and a well-formed array is unchanged");
+});
+
+test("FG-657: a blank ARRAY member is refused at the schema before matching runs — whitespace-only included", () => {
+  for (const ran of [[PAIR[0], ""], [PAIR[0], "   "], [PAIR[0], "\t"]]) {
+    const check = validateResolutionEvidence(
+      {
+        kind: "anchored_verification",
+        file: "src/v2/reconcile.ts",
+        line: 88,
+        fact: "the partial write is guarded first",
+        verification_step: { ran, runner_output: PAIR_GREEN },
+      },
+      { candidateSha: SHA, reachability: "supported", findingRef: "RF-18" },
+    );
+    assert.equal(check.ok, false, `a blank array member passed the schema: ${JSON.stringify(ran)}`);
+    assert.match(check.ok ? "" : check.refusal, /resolution evidence did not validate: verification_step\.ran/);
+    assert.equal(check.ok ? "" : check.coverage, "not_executed");
+  }
+});
+
+test("FG-657: a blank member in a claim an alternate lane is asked to rescue refuses — the lane cannot cover a member that names nothing", () => {
+  const check = validateResolutionEvidence(
+    citedTest({
+      test_name: `${PAIR[0]}; ; ${PAIR[1]}`,
+      runner_output: ONE_SKIPPED,
+      alternate_lane: {
+        lane: "ci",
+        candidate_sha: SHA,
+        executed_assertion: PAIR.join("; "),
+        runner_output: [`ok 1 - ${PAIR[0]}`, `ok 2 - ${PAIR[1]}`].join("\n"),
+      },
+    }),
+    demonstrated("RF-19"),
+  );
+  assert.equal(check.ok, false, "a lane executing both real members does not make the blank one evidence");
+  if (check.ok) return;
+  assert.match(check.refusal, /does not cover '\(blank member 2 of 3\)'/);
+  assert.equal(check.coverage, "not_executed");
+});
+
+// ─── FG-657: where the two closures MEET, and where each one could be undone ──
+//
+// The blank rule and the lane-correspondence rule are one guarantee stated twice — every
+// named test EXECUTED SOMEWHERE — so the way either fails is the other one letting a claim
+// in round the side. These are the seams between them, written as the refactor that would
+// re-open the hole:
+//
+//   - restore the `.filter(p => p !== "")` in `ranTestNames` and a blank on BOTH sides of
+//     the correspondence check cancels out, because a filtered `required` asks for nothing
+//     the filtered `covered` does not already have;
+//   - loosen correspondence from set membership to the prefix/suffix matching
+//     `oneTestExecution` uses on a runner LINE, and a lane covers a claim it never ran;
+//   - check correspondence over the members that failed HERE rather than every member the
+//     claim names, and the subset case comes back wearing the superset case's clothes.
+//
+// Each test below is one of those, asserted from the public surface the ledger calls.
+
+test("FG-657: a LANE whose own cited list carries a blank member rescues nothing — the blank refuses in the lane exactly as in the claim", () => {
+  const laneOutput = [`ok 1 - ${PAIR[0]}`, `ok 2 - ${PAIR[1]}`].join("\n");
+  for (const executed_assertion of [`${PAIR[0]}; ; ${PAIR[1]}`, `${PAIR.join("; ")}; `, `; ${PAIR.join("; ")}`]) {
+    const check = laneRescue({ executed_assertion, runner_output: laneOutput }, "RF-20");
+    assert.equal(check.ok, false, `a malformed lane citation passed the gate: ${JSON.stringify(executed_assertion)}`);
+    if (check.ok) return;
+    assert.match(
+      check.refusal,
+      /Alternate lane 'ci' cites '\(blank member \d+ of \d+\)', but that assertion does not appear in its own output/,
+      "the lane is held to the blank rule by its OWN execution check, before correspondence is ever reached",
+    );
+    assert.equal(check.coverage, "not_executed");
+  }
+});
+
+test("FG-657: a blank on BOTH sides does not cancel out — a lane naming the same blank the claim does covers nothing", () => {
+  // The exact shape a restored blank-filter would let through: filtered, `required` is
+  // ["alpha"] and `covered` is {"alpha"}, correspondence is satisfied, and the lane ran
+  // alpha for real — so the claim resolves on a member that names no test.
+  const check = laneRescue(
+    { executed_assertion: `${PAIR[0]}; ;`, runner_output: [`ok 1 - ${PAIR[0]}`, `ok 2 - ${PAIR[1]}`].join("\n") },
+    "RF-20",
+  );
+  assert.equal(check.ok, false, "two malformed lists do not make one execution record");
+  if (check.ok) return;
+  assert.match(check.refusal, /\(blank member \d+ of \d+\)/, "the blank is named, in whichever list it was found in");
+  assert.equal(check.coverage, "not_executed");
+});
+
+test("FG-657: lane correspondence is by WHOLE NAME — a prefix, a suffix and a suite-qualified spelling all fail to cover", () => {
+  // `oneTestExecution` accepts "suite > test" when matching a runner LINE, because that is
+  // how a reporter prints one test. Correspondence is set membership between two CITED
+  // lists, and stays exact: nothing here is a runner's output, so there is no reporter
+  // convention to honour and a looser rule would only ever let a lane claim a test it did
+  // not name. The suite-qualified pair below therefore errs CLOSED — it refuses a lane that
+  // may well have run the right test, the same false-negative family as FG-658. If a later
+  // change normalises cited names, this is the test to revisit deliberately; it must not
+  // relax by accident into substring matching.
+  // Each lane below genuinely EXECUTED the test it cites — its own output prints that exact
+  // name — so the lane clears the execution check and correspondence is the thing under
+  // test. A lane citing a name its output never printed refuses one layer earlier, which is
+  // the neighbouring property and not this one.
+  const cases: Array<[string, string]> = [
+    ["the reconcile path guards", "a prefix of the claimed name is not the claimed name"],
+    ["guards a partial write", "nor is a suffix"],
+    [`reviews > ${PAIR[0]}`, "nor is the suite-qualified spelling of it"],
+  ];
+  for (const [executed_assertion, why] of cases) {
+    const runner_output = `ok 1 - ${executed_assertion}`;
+    const check = validateResolutionEvidence(
+      citedTest({
+        test_name: PAIR[0],
+        runner_output: `﹣ ${PAIR[0]} (0ms) # SKIP no agent image`,
+        alternate_lane: { lane: "ci", candidate_sha: SHA, executed_assertion, runner_output },
+      }),
+      demonstrated("RF-21"),
+    );
+    assert.equal(check.ok, false, `${why}: ${JSON.stringify(executed_assertion)}`);
+    assert.match(check.ok ? "" : check.refusal, /which does not cover 'the reconcile path guards a partial write'/);
+    assert.equal(check.ok ? "" : check.coverage, "not_executed");
+  }
+});
+
+test("FG-657: a SUPERSET lane must have EXECUTED the extra tests it names — naming more is not running more", () => {
+  // The superset case is accepted for covering everything asked for, not for being long. A
+  // lane that pads its citation with a test its own output never printed is the same claim
+  // the primary lane is refused for.
+  const check = laneRescue(
+    { executed_assertion: [...PAIR, "a third assertion nobody asked for"].join("; "), runner_output: `ok 1 - ${PAIR[0]}` },
+    "RF-22",
+  );
+  assert.equal(check.ok, false, "an unexecuted extra member is not free just because the required ones are covered");
+  if (check.ok) return;
+  assert.match(check.refusal, /Alternate lane 'ci' cites 'the reconcile path retries once', but that assertion does not appear/);
+  assert.equal(check.coverage, "not_executed");
+});
+
+test("FG-657: the ABSENT arm holds the lane to the same correspondence the SKIPPED arm does", () => {
+  // Two call sites reach `checkAlternateLane` from a cited test — one when the environment
+  // was blocked, one when the primary output did not establish execution — and the second
+  // covers a skip AND an absence. A correspondence argument threaded to only some of them
+  // is the hole re-opened at whichever one was missed.
+  const check = validateResolutionEvidence(
+    citedTest({
+      test_name: PAIR.join("; "),
+      runner_output: [`✔ ${PAIR[0]} (1.2ms)`, "ℹ pass 1", "ℹ fail 0"].join("\n"),
+      alternate_lane: { lane: "ci", candidate_sha: SHA, executed_assertion: PAIR[0], runner_output: `ok 1 - ${PAIR[0]}` },
+    }),
+    demonstrated("RF-23"),
+  );
+  assert.equal(check.ok, false, "the member that appeared nowhere here appeared nowhere in the lane either");
+  if (check.ok) return;
+  assert.match(check.refusal, /does not appear in the cited runner output at all/);
+  assert.match(check.refusal, /does not cover 'the reconcile path retries once'/);
+  assert.equal(check.coverage, "not_executed");
+});
+
+test("FG-657: FAILURE still dominates a BLANK sibling — the refusal names the RED member, not the malformed one", () => {
+  // Both members refuse, so the claim is refused either way; WHICH one the refusal names is
+  // what a reader acts on, and a red member is the finding still being present rather than
+  // a citation that needs retyping.
+  const output = [`✔ ${PAIR[0]} (1.2ms)`, `✖ ${PAIR[1]} (0.4ms)`].join("\n");
+  assert.deepEqual(resolveTestExecution(output, `${PAIR[0]}; ; ${PAIR[1]}`), { execution: "failed", test: PAIR[1] });
+
+  const check = validateResolutionEvidence(citedTest({ test_name: `${PAIR[0]}; ; ${PAIR[1]}`, runner_output: output }), demonstrated("RF-24"));
+  assert.equal(check.ok, false);
+  if (check.ok) return;
+  assert.match(check.refusal, /the reconcile path retries once FAILED in the cited runner output/);
+  assert.doesNotMatch(check.refusal, /blank member/, "a red assertion outranks a malformed one in the reason given");
+  assert.equal(check.coverage, "not_executed");
+});
+
+test("FG-657: a TRAILING separator survives the schema's trim, and a lane executing every real member does not launder it", () => {
+  // `z.string().trim()` removes the whitespace and leaves the separator, so "alpha; beta; "
+  // still names three members and the third is blank. This is the malformed list at its most
+  // plausible — a real, complete, passing citation with one stray keystroke — and the answer
+  // has to be the same one every other blank gets.
+  const check = validateResolutionEvidence(
+    citedTest({
+      test_name: `${PAIR.join("; ")}; `,
+      runner_output: ONE_SKIPPED,
+      alternate_lane: {
+        lane: "ci",
+        candidate_sha: SHA,
+        executed_assertion: PAIR.join("; "),
+        runner_output: [`ok 1 - ${PAIR[0]}`, `ok 2 - ${PAIR[1]}`].join("\n"),
+      },
+    }),
+    demonstrated("RF-25"),
+  );
+  assert.equal(check.ok, false, "a stray trailing separator is still a member that names no test");
+  if (check.ok) return;
+  assert.match(check.refusal, /does not cover '\(blank member 3 of 3\)'/);
+  assert.equal(check.coverage, "not_executed");
+});
+
+test("FG-657: a SINGLE valid name still validates at the public surface — neither closure made one name stricter", () => {
+  // The regression the two fixes could most easily have caused: refusing a blank member by
+  // resolving it, and requiring a lane to cover every member, are both no-ops on the
+  // one-name claim that is the common case.
+  const alphaOnly = [`✔ ${PAIR[0]} (1.2ms)`, "ℹ pass 1", "ℹ fail 0"].join("\n");
+  const cited = validateResolutionEvidence(citedTest({ test_name: PAIR[0], runner_output: alphaOnly }), demonstrated("RF-26"));
+  assert.equal(cited.ok, true, cited.ok ? "" : cited.refusal);
+  assert.equal(cited.ok ? cited.coverage : "", "executed");
+
+  const oneMemberArray = validateResolutionEvidence(
+    {
+      kind: "anchored_verification",
+      file: "src/v2/reconcile.ts",
+      line: 88,
+      fact: "the partial write is guarded first",
+      verification_step: { ran: [PAIR[0]], runner_output: alphaOnly },
+    },
+    { candidateSha: SHA, reachability: "supported", findingRef: "RF-26" },
+  );
+  assert.equal(oneMemberArray.ok, true, oneMemberArray.ok ? "" : oneMemberArray.refusal);
+
+  const rescued = laneRescue({ executed_assertion: PAIR.join("; "), runner_output: [`ok 1 - ${PAIR[0]}`, `ok 2 - ${PAIR[1]}`].join("\n") }, "RF-26");
+  assert.equal(
+    rescued.ok,
+    true,
+    rescued.ok ? "" : `a complete lane must still rescue a complete claim: ${rescued.refusal}`,
+  );
+});
+
+test("FG-657: the ACCEPTANCE-CRITERION surface inherits both closures — a blank member and a subset lane are 'unproven', never met", () => {
+  // Stage 9 maps acceptance criteria through the same validator at `speculative`, the
+  // loosest reachability there is. Loosest must still mean every named test executed
+  // somewhere: an AC claimed `met` on a malformed list, or on a lane that ran half of it,
+  // is exactly the finding leaving the ledger that the two fixes exist to stop.
+  const [blank, subset, complete] = assessAcceptanceClaims(
+    [
+      { ref: "AC-1", verdict: "met", evidence: { kind: "regression_test", test_name: `${PAIR[0]}; ;`, runner_output: PAIR_GREEN } },
+      {
+        ref: "AC-2",
+        verdict: "met",
+        evidence: {
+          kind: "regression_test",
+          test_name: PAIR.join("; "),
+          runner_output: ONE_SKIPPED,
+          alternate_lane: { lane: "ci", candidate_sha: SHA, executed_assertion: PAIR[0], runner_output: `ok 1 - ${PAIR[0]}` },
+        },
+      },
+      { ref: "AC-3", verdict: "met", evidence: { kind: "regression_test", test_name: PAIR.join("; "), runner_output: PAIR_GREEN } },
+    ],
+    SHA,
+  );
+  assert.equal(blank?.verdict, "unproven", "a blank member is not met at the loosest reachability either");
+  assert.match(blank?.detail ?? "", /\(blank member \d+ of \d+\)/);
+  assert.equal(subset?.verdict, "unproven", "half a claim covered is not a criterion met");
+  assert.match(subset?.detail ?? "", /does not cover 'the reconcile path retries once'/);
+  assert.equal(complete?.verdict, "met", "and a complete multi-name citation is still met — the surface did not just get stricter");
 });
