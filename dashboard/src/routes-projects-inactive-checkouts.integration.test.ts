@@ -16,7 +16,7 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { SCHEMA_SQL } from "../../src/store/schema.js";
 
-const TEST_PORT = 18773;
+const TEST_PORT = 18775;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
 const testHome = mkdtempSync(join(tmpdir(), "forge-inactive-checkouts-"));
 const forgeHome = join(testHome, ".forge");

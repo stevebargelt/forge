@@ -18,7 +18,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const TEST_PORT = 18771;
+const TEST_PORT = 18774;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
 
 process.env.FORGE_HOME = mkdtempSync(join(tmpdir(), "forge-csp-rt-"));

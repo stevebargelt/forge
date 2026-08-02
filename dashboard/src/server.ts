@@ -10,6 +10,7 @@
 // - GET /api/host-verifications           host_verifications evidence rows, ?ticketId=|&projectDir= or ?itemId= (FG-487)
 // - GET /api/host-verifications/recent    most recent host_verifications rows, unscoped (?limit) (FG-487)
 // - GET /api/reviews                      the review ledger: reviews + their findings, read-only (?limit, FG-638)
+// - GET /api/agent-runtime                average agent runtime over time, overall + per role (?window=1d|7d|30d|90d|all, FG-648)
 //
 // All reads. No writes. Mutating actions (gate/next/retry) shell to the
 // `forge` CLI binary — wired in a later iteration; the MVP is read-only.
@@ -21,7 +22,7 @@ import { fileURLToPath } from "node:url";
 import {
   recentActivity, inFlight, taskDetail, projectsForDashboard, usageRollup, usageTimeSeries, usageModelMix, opsMetrics, routingGovernance,
   inProgressVerifications, reviewLoopRunPhases, hostVerificationsForTicket, hostVerificationsForCampaignItem, recentHostVerifications,
-  resolveProjectScope, backlogTruthForProject, reviewLedger,
+  resolveProjectScope, backlogTruthForProject, reviewLedger, agentRuntimeTrends, isAgentRuntimeWindow, AGENT_RUNTIME_WINDOWS,
 } from "./queries.js";
 import type { BacklogTicket, GroupBy, ProjectScope } from "./queries.js";
 import { renderShell, contentSecurityPolicy, cspNonce } from "./shell.js";
@@ -202,6 +203,18 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   if (path === "/api/ops") {
     const since = url.searchParams.get("since") ?? "30d";
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(opsMetrics(since, scopeFromUrl(url))));
+    return;
+  }
+
+  if (path === "/api/agent-runtime") {
+    const window = url.searchParams.get("window") ?? "7d";
+    if (!isAgentRuntimeWindow(window)) {
+      res.writeHead(400, { "Content-Type": "application/json" }).end(
+        JSON.stringify({ error: `invalid window; expected one of ${AGENT_RUNTIME_WINDOWS.join(", ")}` }),
+      );
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(agentRuntimeTrends(window, scopeFromUrl(url))));
     return;
   }
 
