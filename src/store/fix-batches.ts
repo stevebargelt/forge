@@ -190,10 +190,12 @@ export type EnsureFixBatchOutcome = {
 /** Get the batch for this scope, creating the next revision only when the scope actually
  *  differs from the current one.
  *
- *  This is both halves of scenario #19 in one function: a fixer RETRY re-enters with the
- *  same findings at the same candidate and gets the same revision and hash back, while a
- *  CHANGED disposition set (or a moved candidate) supersedes and gets revision n+1 —
- *  never a mutated payload on the revision a container is bound to. */
+ *  This is both halves of scenario #19 at the STORE boundary: a fixer RETRY re-enters with
+ *  the same findings at the same candidate and gets the same revision and hash back, while a
+ *  CHANGED disposition set (or a moved candidate) supersedes and gets revision n+1 — never
+ *  a mutated payload on the revision a container is bound to. The coordinator permits that
+ *  replacement only before Stage 5 completes; its review-wide guard prevents this helper
+ *  from being called to start a second completed remediation cycle. */
 export function ensureFixBatch(
   reviewId: string,
   candidateSha: string,

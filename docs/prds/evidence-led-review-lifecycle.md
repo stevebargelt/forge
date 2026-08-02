@@ -525,7 +525,13 @@ unless the appropriate authority explicitly accepts the limitation.
 
 The rechecker returns `new_findings` discovered in the bounded remediation
 delta. New findings enter the ledger as `untriaged`; they do not automatically
-dispatch another fixer. A new
+dispatch another fixer. Stage 5 is review-wide: once its single remediation
+batch completes, no later disposition can create another batch or recheck
+cycle inside that review. If no batch was needed, completing recheck closes the
+same window; a late finding cannot become a post-recheck “first” batch. A
+remaining `fix_now` finding stops at disposition
+until the operator chooses a non-`fix_now` disposition and records follow-up
+work where remediation is still required. A new
 demonstrably reachable violation of an explicit invariant returns immediately
 to disposition. Lower-confidence observations are still recorded and
 dispositioned, but do not acquire blocking force from lateness alone.
@@ -805,7 +811,9 @@ risk-routing syntax is future work only if another consumer needs it.
   that role, amend the contract through its approval authority, or record an
   authorized acceptance of the missing evidence. Do not call the panel clean.
 - Fixer crash: preserve its workspace through existing retention rules and
-  leave findings `fix_now`, unresolved.
+  leave findings `fix_now`, unresolved. Retry the same immutable batch; a
+  failed attempt that never completed Stage 5 does not consume the review's
+  single remediation cycle.
 - Verification environment unavailable: `blocked_environment`; no model
   verdict on code.
 - Recheck omission: structural failure; finding remains unresolved.
@@ -1070,18 +1078,20 @@ actual boundary that cannot ship together.
 > flag and no third invalidation authority were added; invalidation stays
 > exactly the candidate advance and the fix cycle. The narrowing is applied to
 > what goes INTO a payload and never as a filter at ingestion, so the delivered
-> scope and the judged scope (Appendix A) cannot disagree. Scenario #19's text
-> is unchanged and its promise still holds, but it now keys on **the same
-> unresolved `fix_now` set under the same decisions** rather than on "the same
-> finding set": a retry still receives the same immutable revision and payload
-> hash, and it is still a changed DECISION that mints a new one.
+> scope and the judged scope (Appendix A) cannot disagree. A retry still
+> receives the same immutable revision and payload hash. A changed decision
+> can mint a replacement revision only while Stage 5 has not completed; once
+> the fix stage record exists, the review-wide one-batch boundary wins and the
+> decision returns to disposition for follow-up.
 >
-> **(c) The extra recheck the narrowing can cost is ACCEPTED.** Narrowing the
-> set changes the batch's decision fingerprint, which can supersede and mint
-> revision n+1, which grows `fixCycleKey` and earns one more recheck. That is
-> the same monotone-and-converges argument the key already rests on: it may
-> never shrink, the cost is bounded at one cycle, and the sequence converges
-> rather than oscillating.
+> **(c) Correction, 2026-08-01: an extra completed fix/recheck cycle is NOT
+> accepted.** The earlier refinement treated “return to disposition, no
+> automatic fixer” as satisfied when a fresh disposition could immediately
+> mint revision n+1. That was the loophole that recreated the open-ended loop
+> this PRD replaced. `fixCycleKey` remains monotone for crash recovery,
+> pre-completion replacement revisions, and legacy rows, but one completed fix
+> stage — or completed recheck when no fix stage was needed — is the
+> cardinality boundary for all new transitions.
 >
 > **(d) The pinned-candidate invariant is UNCHANGED.** No path adopts the
 > candidate from a bare HEAD read outside a coordinator-driven stage —
@@ -1158,8 +1168,9 @@ actual boundary that cannot ship together.
 18. A clean ledger plus green deterministic verification and trusted-tip
     equality can advance without `--force`.
 19. A fixer retry receives the same immutable FixBatch revision and verified
-    payload hash; a changed disposition creates a new revision instead of
-    changing the running task's inputs.
+    payload hash. A changed disposition never changes a running task's inputs;
+    if Stage 5 has not completed it may create a replacement revision, while a
+    completed Stage 5 stops at disposition and cannot dispatch another fixer.
 20. A fixer result that omits an expected finding ID or names a finding outside
     its FixBatch is refused during host ingestion.
 21. One selected risk lens crashes while the others pass; the gate remains
@@ -1264,8 +1275,10 @@ not already exist:
 
 The FixBatch payload contains the ordered finding membership; a separate join
 table is unnecessary for the first consumer. The FixBatch identity and payload
-do not change after creation. A changed disposition or candidate creates a new
-batch revision.
+do not change after creation. Before Stage 5 completes, a changed disposition
+or candidate may create a replacement revision. A completed Stage 5 consumes
+the review's one remediation cycle, so later changes return to disposition
+instead of creating another batch.
 
 Existing task rows and append-only events represent dispatch, consumption,
 completion, retry, and failure. Existing per-task input/output directories hold
@@ -1298,8 +1311,10 @@ SQLite remains authoritative for the batch.
 
 A FixBatch is intentionally not live-mutating. The fixer must see one stable
 scope for its lifetime. If the operator changes disposition while it runs, the
-existing task remains bound to its recorded revision and the coordinator
-creates a superseding revision for subsequent work.
+existing task remains bound to its recorded revision. If that task completes
+Stage 5, the changed decision is follow-up work and no superseding revision is
+created inside the review. If the task fails before Stage 5 completes, the
+coordinator may create a replacement revision for the still-unconsumed cycle.
 
 ### Result ingestion
 
@@ -1325,8 +1340,10 @@ apply the same result twice.
 
 An orchestrator crash resumes from the existing task row/event state and the
 persisted batch. It does not reconstruct the batch from a prior brief or
-reviewer output. A candidate change invalidates the batch for further dispatch
-and requires a new revision.
+reviewer output. Before Stage 5 completes, a candidate change invalidates the
+batch for further dispatch and requires a replacement revision. After Stage 5
+completes, candidate drift cannot authorize another remediation batch in the
+same review.
 
 ### Deliberate boundary
 

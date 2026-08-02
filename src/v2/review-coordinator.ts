@@ -88,8 +88,9 @@ function recordedLensOutcomes(review: Review): LensOutcome[] {
  *  becomes an architecture question): the remaining four were still fixed, and a whole-set
  *  comparison would read the shrunken set as "never fixed" and dispatch a second fixer over
  *  work already done. Containment says the right thing in both directions — a finding ADDED
- *  to fix_now, or RE-DECIDED (a new decidedAt or a new rationale), is not covered and does
- *  get a new batch revision. */
+ *  to fix_now, or RE-DECIDED (a new decidedAt or a new rationale), is not covered. Before
+ *  Stage 5 completes that may require a replacement revision; afterwards the review-wide
+ *  cardinality guard stops it at disposition. */
 function batchCarriesDecision(b: FixBatch, f: ReviewFinding): boolean {
   return b.payload.findings.some(
     (m) =>
@@ -105,21 +106,11 @@ function decisionCoveredByIngestedBatch(batches: readonly FixBatch[], f: ReviewF
   return batches.some((b) => b.state === "ingested" && batchCarriesDecision(b, f));
 }
 
-/** Was this finding's CURRENT decision carried by a fix cycle the LATEST RECHECK covered?
- *
- *  The difference from `decisionCoveredByIngestedBatch` is the whole of the Stage 4 fix. An
- *  unresolved verdict is evidence about the cycle that produced it, so it only holds the
- *  review when the decision it is a verdict ON is the decision that has been rechecked. Once
- *  a NEWER fix cycle has ingested the finding, the recorded verdict predates that cycle and
- *  is not evidence about it — the next step is that cycle's recheck (Stage 8, which is keyed
- *  on exactly these cycles), not a second trip through the disposition gate.
- *
- *  Reading `state === "ingested"` instead deadlocked the live pilot: the re-decided finding
- *  went out in revision 2, revision 2 ingested, and the stale `inconclusive` from revision 1
- *  then read as a verdict on the new decision — so Stage 4 blocked ahead of Stage 8, the
- *  recheck that would have replaced the verdict could never run, and `forge review continue`
- *  returned the same stop forever. Keying on the RECHECKED cycles is also what makes the
- *  gate independent of whether the ingest's resolution invalidation landed. */
+/** Was this finding's CURRENT decision carried by the remediation cycle the latest recheck
+ *  covered? An unresolved verdict only blocks under the decision it adjudicated. A later
+ *  re-decision falls through to Stage 5, where the completed-cycle guard produces the
+ *  explicit follow-up stop instead of dispatching another fixer. The cycle-key lookup also
+ *  preserves correct reads for reviews written before the one-cycle boundary existed. */
 function decisionCoveredByRecheckedCycle(review: Review, batches: readonly FixBatch[], f: ReviewFinding): boolean {
   const covered = new Set(cycleTerms(recheckedFixCycleKey(review)));
   return batches.some((b) => covered.has(`${b.id}@${b.revision}`) && batchCarriesDecision(b, f));
@@ -185,15 +176,42 @@ function fixStageSatisfied(snapshot: ReviewSnapshot): boolean {
   );
 }
 
+/** Has this review's single remediation window closed?
+ *
+ *  A fix stage record is the normal durable cardinality boundary. Batch rows alone cannot be
+ *  that boundary: an `open` or `dispatched` row may be retried after an infrastructure
+ *  failure, and an `ingested` row may still need the coordinator to recover its commit and
+ *  record the SAME cycle. Once Stage 5 records success, however, this review has consumed
+ *  its one batch. A changed rationale, a still-present finding, or a finding discovered by
+ *  the bounded delta recheck belongs to explicit follow-up work, not revision n+1 inside
+ *  the review.
+ *
+ *  Recheck is the other boundary. A review with no initial fix_now findings legitimately
+ *  skips Stage 5, but once Stage 8 has run it must not turn a late finding into a first batch
+ *  and thereby create a second docs / verification / recheck pass.
+ */
+function closedRemediationWindow(
+  review: Review,
+): { kind: "fix"; id?: string; revision?: number } | { kind: "recheck_without_fix" } | undefined {
+  const record = review.stageEvidence?.fix;
+  if (record !== undefined) {
+    const id = typeof record.meta?.["fixBatchId"] === "string" ? record.meta["fixBatchId"] : undefined;
+    const revision = typeof record.meta?.["revision"] === "number" ? record.meta["revision"] : undefined;
+    return { kind: "fix", id, revision };
+  }
+  if (review.stageEvidence?.recheck !== undefined) return { kind: "recheck_without_fix" };
+  return undefined;
+}
+
 /** Findings that hold the review at Stage 4.
  *
  *  TWO shapes, and the second is scenario #6: a `fix_now` whose recheck came back
  *  `still_present` or `inconclusive` AND whose decision that RECHECKED cycle already
  *  consumed. The review returns to disposition and no fixer is dispatched automatically —
  *  re-running the fixer on a decision that demonstrably did not resolve it is exactly the
- *  loop this lifecycle replaced. A NEW decision (a new rationale) changes the decision
- *  fingerprint and lets the fix stage run again; and once that new cycle has INGESTED, the
- *  verdict from before it stops holding the review at all (decisionCoveredByRecheckedCycle).
+ *  loop this lifecycle replaced. Re-dispositioning the finding does not create another fix
+ *  cycle: Stage 5's review-wide remediation-window guard below stops after one completed
+ *  batch, or after recheck when no batch was needed.
  *
  *  AN ARCHITECTURE QUESTION IS DELIBERATELY NOT ONE OF THESE. It leaves the review
  *  UNSETTLED — Stage 9's findings_settled check refuses it, and `awaitingAuthority` reports
@@ -217,30 +235,15 @@ function dispositionBlockers(snapshot: ReviewSnapshot): ReviewFinding[] {
   return out;
 }
 
-/** THE FIX CYCLES A RECHECK COVERED — the second half of Stage 8's completion key.
+/** THE FIX-BATCH REVISIONS A RECHECK COVERED — the second half of Stage 8's completion key.
  *
- *  Stage 8 keyed on the candidate sha alone reads a SECOND fix cycle at an UNMOVED candidate
- *  as already rechecked: a fixer that resolves its batch without committing leaves the sha
- *  matching the previous recheck's record, so the stage is skipped, the finding keeps the
- *  verdict from the cycle before, and the review loops at the disposition stop with no
- *  mechanical path to a resolution. Keying on sha PLUS the batch revisions makes a new cycle
- *  a new key, so it earns its own recheck — while a crash-resume at an unchanged cycle still
- *  reads as complete and is never repeated.
- *
- *  THE KEY MUST BE MONOTONE, and counting only `ingested` batches is not. `ensureFixBatch`
- *  marks the previous batch `superseded` the moment a new revision is created, which clears
- *  the `ingested` marker off a cycle a recheck already covered — so the key SHRANK, and a
- *  shrunken key mismatches for the same reason a grown one does. That re-entered a recheck
- *  that had completed at that very sha with no cycle having ingested anything since: a real
- *  rechecker is dispatched (`recheckIsNoOp` is false whenever the candidate moved off the
- *  confirmed sha, and by then `expected` is empty), and any new finding it reports lands as a
- *  duplicate untriaged row that bounces a review one step from shipping back to Stage 4 —
- *  the exact never-repeat invariant this key exists to protect.
- *
- *  So `superseded` counts too. A batch's state only ever moves open → dispatched → ingested
- *  and any → superseded, and the two counted states are terminal, so the key can only grow.
- *  Growing is the safe direction: it costs at most one extra recheck for a cycle that was
- *  withdrawn before ingesting, and it converges. */
+ *  The review now completes at most one remediation cycle, but that cycle can still have
+ *  replacement revisions before Stage 5 completes, and older persisted reviews may already
+ *  contain multiple completed revisions. Counting `superseded` alongside `ingested` keeps
+ *  the key monotone across both cases: superseding a revision cannot shrink the recorded
+ *  scope and accidentally re-open a completed recheck. The key supports recovery and legacy
+ *  compatibility; it is not authority to start another cycle after the fix stage record
+ *  exists. */
 export function fixCycleKey(batches: readonly FixBatch[]): string {
   return batches
     .filter((b) => b.state === "ingested" || b.state === "superseded")
@@ -372,6 +375,38 @@ function resolveTransition(snapshot: ReviewSnapshot): Transition {
     // The UNRESOLVED ones — the set a fixer would actually be handed (FG-649 change 3).
     const unresolved = unresolvedFixNow(findings, candidate);
     const outstanding = fixCycleAwaitingRecord(snapshot);
+    const closed = closedRemediationWindow(review);
+
+    // ONE REVIEW, ONE REMEDIATION BATCH. Recovery of an ingested-but-unrecorded cycle is
+    // allowed above this boundary because it resumes the SAME work and dispatches no fixer.
+    // Once a fix stage has completed, a changed decision or a late finding must not mint a
+    // second batch revision. That was the semantic loophole behind the review loop: Stage 8
+    // said "return to disposition, no automatic fixer", but a fresh disposition made Stage 5
+    // automatically dispatch revision n+1 anyway.
+    if (outstanding === undefined && closed !== undefined) {
+      const boundary =
+        closed.kind === "fix"
+          ? `the review has already completed its single remediation cycle (` +
+            (closed.id !== undefined
+              ? `fix batch ${closed.id}${closed.revision !== undefined ? ` revision ${closed.revision}` : ""}`
+              : "its fix batch") +
+            ")"
+          : "the review has already completed recheck without needing a remediation batch, closing its single remediation window";
+      const scope =
+        closed.kind === "fix" ? "are outside that immutable batch" : "arrived after that remediation boundary";
+      return {
+        kind: "await_disposition",
+        state: "awaiting_disposition",
+        blockingFindings: unresolved.map((f) => f.findingRef),
+        reason:
+          `${boundary}; ` +
+          `${unresolved.length} unresolved fix_now finding(s) ${scope}: ` +
+          `${unresolved.map((f) => f.findingRef).join(", ")}. This review will not dispatch another fixer or ` +
+          `recheck cycle. Disposition the remaining finding(s) without fix_now and open follow-up work for ` +
+          `any remediation still required.`,
+      };
+    }
+
     return {
       kind: "batch_fix",
       state: "fixing",
