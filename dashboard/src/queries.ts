@@ -723,6 +723,105 @@ function floorToResolution(ms: number, resolution: AgentRuntimeResolution): numb
   return Math.floor(ms / step) * step;
 }
 
+// FG-662: the events the process supervising a container logs at the instant it
+// observed that container stop — the same set reconcile.ts calls
+// `hasContainerExited`. Their timestamp is when the AGENT stopped, independent of
+// whatever later rewrote completed_at. `container.killed` is deliberately NOT
+// here: `forge cancel` logs it around a blind best-effort `docker kill`, so it
+// records when an operator cancelled, not that an agent was still running.
+const AGENT_OBSERVED_EXIT_EVENTS = [
+  "container.exited",
+  "container.idle_timeout",
+  "container.dependency_provisioning_failed",
+  "container.git_unavailable",
+] as const;
+
+// FG-662: failure kinds whose task.failed row is written by a process that was
+// NOT supervising the agent's container — `forge cancel`, `forge gate --reject`,
+// and the reconcile / ops-repair sweeps. For these completed_at records when the
+// terminal was NOTICED, so completed_at − started_at is wall-clock-until-noticed
+// rather than runtime. Every other kind is classified by the supervising process
+// at the agent's own exit and keeps counting in full — idle_timeout above all.
+const ADMINISTRATIVE_TERMINAL_KINDS = new Set([
+  "cancelled",                            // cli/commands/cancel.ts
+  "gate_rejected",                        // v2/gate.ts
+  "orphaned",                             // v2/reconcile.ts, ops/repair.ts
+  "orphaned_work_may_persist",            // v2/reconcile.ts
+  "orphaned_needs_finalize",              // v2/reconcile.ts
+  "fanout_wave_orphaned",                 // v2/reconcile.ts
+  "oom_killed",                           // v2/reconcile.ts — the attached-exit oom_killed carries an exit event and never reaches here
+  "pre_container_crash",                  // v2/reconcile.ts — no container ever ran
+  "verification_environment_unavailable", // v2/reconcile.ts
+]);
+
+type AgentRuntimeRow = {
+  role: string;
+  started: string;
+  completed: string;
+  status: string;
+  agentExit: string | null;
+  failedPayload: string | null;
+  reconciledPayloads: string | null;
+};
+
+// group_concat separator for the task.reconciled payloads below. JSON.stringify
+// escapes control characters, so a literal 0x1E can never occur inside one.
+const RECONCILED_SEPARATOR = "\u001e";
+
+function payloadObject(payload: string | null): Record<string, unknown> | null {
+  if (!payload) return null;
+  try {
+    const parsed = JSON.parse(payload) as unknown;
+    return parsed !== null && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+function failureKindOf(payload: string | null): string | null {
+  const parsed = payloadObject(payload);
+  return typeof parsed?.["failure_kind"] === "string" ? (parsed["failure_kind"] as string) : null;
+}
+
+/** FG-662: true when a process that was NOT supervising the agent's container
+ *  moved this task INTO `complete` — reconcile's container-gone sweeps and
+ *  `forge recover --continue`, which call markTaskComplete / markTaskRecovered
+ *  with nowIso() and audit the transition on task.reconciled. This is the
+ *  success-side twin of ADMINISTRATIVE_TERMINAL_KINDS, and layer 1 can never
+ *  rescue these rows: reconcile's container-gone branch runs only BECAUSE no
+ *  attached-exit event exists. Every audit row is inspected rather than only the
+ *  latest, so a subsequent same-status one (complete_empty_result_backfilled,
+ *  which writes a result and never touches completed_at) cannot mask the
+ *  transition that rewrote it. */
+function reconciledIntoComplete(payloads: string | null): boolean {
+  if (!payloads) return false;
+  return payloads.split(RECONCILED_SEPARATOR).some((payload) => {
+    const parsed = payloadObject(payload);
+    return parsed?.["to"] === "complete" && parsed["from"] !== "complete";
+  });
+}
+
+/** FG-662: when the agent actually stopped, or null when nothing on the record
+ *  says. An attached-exit event is the agent-observed end and wins over
+ *  completed_at outright, because a cancel, a sweep or a gate rejection can
+ *  rewrite completed_at long after the container died. With no such event — the
+ *  measured attempt logged none, or every one it has predates its started_at
+ *  (clock skew, a prior attempt's exit) — completed_at is the end only if the
+ *  terminal was not written administratively, on either the failure side (an
+ *  administrative failure_kind) or the success side (a sweep that completed the
+ *  task); otherwise the row has no defensible end and contributes nothing. */
+function agentObservedEndMs(row: AgentRuntimeRow): number | null {
+  if (row.agentExit !== null) {
+    const exitedMs = Date.parse(row.agentExit);
+    if (Number.isFinite(exitedMs)) return exitedMs;
+  }
+  const kind = row.status === "failed" ? failureKindOf(row.failedPayload) : null;
+  if (kind !== null && ADMINISTRATIVE_TERMINAL_KINDS.has(kind)) return null;
+  if (reconciledIntoComplete(row.reconciledPayloads)) return null;
+  const completedMs = Date.parse(row.completed);
+  return Number.isFinite(completedMs) ? completedMs : null;
+}
+
 export function agentRuntimeTrends(
   window: AgentRuntimeWindow,
   scope?: ProjectScope,
@@ -755,23 +854,59 @@ export function agentRuntimeTrends(
 
   // `t.phase IS 'session'` — SQLite's null-safe equality. With plain `=` a NULL
   // phase makes the whole NOT(...) NULL, which drops the row instead of keeping it.
+  // FG-662: `agentExit`, `failedPayload` and `reconciledPayloads` are correlated
+  // subqueries in the shape opsMetrics already uses for its failure-kind mix — the
+  // earliest attached-exit event of the attempt being measured, the payload of its
+  // latest task.failed, and every task.reconciled audit row it carries.
+  // `markTaskRunning` re-dispatches a task IN PLACE: started_at moves to the new
+  // attempt while the previous attempt's events stay on the stream, so each
+  // subquery is bounded at or after started_at rather than taken globally —
+  // a prior attempt's exit is not this attempt's end, and a prior attempt's
+  // task.failed does not classify this attempt's terminal. Ordering on julianday
+  // rather than the raw TEXT also drops an unparseable created_at (NULL, so the
+  // comparison is never true) instead of letting it sort below — or, for a
+  // latest-wins pick, above — a valid sibling and mask it.
+  const exitEvents = AGENT_OBSERVED_EXIT_EVENTS.map((e) => `'${e}'`).join(",");
   const rows = db().prepare(`
-    SELECT t.agent_role AS role, t.started_at AS started, t.completed_at AS completed
+    SELECT t.agent_role AS role, t.started_at AS started, t.completed_at AS completed, t.status AS status,
+      (SELECT x.created_at FROM events x
+        WHERE x.task_id = t.id AND x.event_type IN (${exitEvents})
+          AND julianday(x.created_at) >= julianday(t.started_at)
+        ORDER BY julianday(x.created_at), x.id LIMIT 1) AS agentExit,
+      (SELECT f.payload FROM events f
+        WHERE f.task_id = t.id AND f.event_type = 'task.failed'
+          AND julianday(f.created_at) >= julianday(t.started_at)
+        ORDER BY julianday(f.created_at) DESC, f.id DESC LIMIT 1) AS failedPayload,
+      (SELECT group_concat(c.payload, char(30)) FROM events c
+        WHERE c.task_id = t.id AND c.event_type = 'task.reconciled'
+          AND julianday(c.created_at) >= julianday(t.started_at)) AS reconciledPayloads
     FROM tasks t JOIN runs r ON r.id = t.run_id
     WHERE t.agent_role IS NOT NULL
       AND t.started_at IS NOT NULL
       AND t.completed_at IS NOT NULL
       AND NOT (t.agent_role = 'orchestrator' AND t.phase IS 'session')
       ${clause}
-  `).all(...params) as Array<{ role: string; started: string; completed: string }>;
+  `).all(...params) as AgentRuntimeRow[];
 
   type Observation = { role: string; completedMs: number; durationMs: number };
   const observations: Observation[] = [];
   let earliest = Infinity;
   for (const row of rows) {
     const completedMs = Date.parse(row.completed);
-    const durationMs = completedMs - Date.parse(row.started);
-    if (!Number.isFinite(completedMs) || !(durationMs >= 0)) continue;
+    const startedMs = Date.parse(row.started);
+    // FG-662: completed_at places the observation, so a row whose completed_at
+    // PREDATES its started_at is not describing the attempt being measured —
+    // markTaskRunning re-dispatches in place without clearing completed_at, so a
+    // retry still in flight carries the previous attempt's terminal. Its own exit
+    // event would hand that live attempt a positive duration, plotted into a
+    // bucket the earlier attempt's completion owns.
+    if (!(completedMs >= startedMs)) continue;
+    // The observation still sits in the bucket its completed_at falls in; only the
+    // DURATION comes off the agent-observed end.
+    const endMs = agentObservedEndMs(row);
+    if (endMs === null) continue;
+    const durationMs = endMs - startedMs;
+    if (!(durationMs >= 0)) continue;
     observations.push({ role: row.role, completedMs, durationMs });
     if (completedMs < earliest) earliest = completedMs;
   }
