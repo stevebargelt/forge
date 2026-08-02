@@ -610,6 +610,74 @@ function describeEvidence(ev: ResolutionEvidence): string {
   }
 }
 
+// ─── coverage of a NON-resolution recheck entry (FG-664, half B) ────────────
+
+/** What coverage did an entry ACTUALLY carry, for the arm that is not claiming resolution?
+ *
+ *  Stage 8 used to record every `still_present`/`inconclusive` entry as `executed` coverage
+ *  unconditionally, so a lane that could not run a single test still wrote "these findings
+ *  were checked by tests that ran" into the ledger (FG-664; it produced three such verdicts
+ *  on FG-662). This answers that one question — did anything execute — and NOTHING else.
+ *
+ *  WHY THIS IS NOT `validateResolutionEvidence`'s coverage. That function is calibrated for
+ *  the RESOLUTION arm, where a cited test that FAILED is recorded `not_executed` because a
+ *  red assertion resolves nothing. Here a red assertion is the honest, expected shape of a
+ *  `still_present` verdict: the test RAN and it failed, and that IS executed coverage. Same
+ *  parser, different arm, so the two calibrations must not be shared.
+ *
+ *  THE CEILING, STATED HONESTLY. This closes the case where the lane DECLARES it could not
+ *  run — `environment_blocked`, or a citation with no runner output behind it. It CANNOT
+ *  detect a substituted engine that produced plausible `not ok` lines: engine-difference
+ *  failures are textually indistinguishable from a real regression, and no rule applied to
+ *  the output can authenticate the engine that emitted it. That determination is host-side
+ *  and pre-dispatch (FG-664 half A); nothing here is a substitution detector, and it must
+ *  not be read or extended as one.
+ *
+ *  It does not touch the VERDICT plane either: the `resolved`/`still_present`/`inconclusive`
+ *  result the rechecker reported is recorded exactly as reported. Only the coverage fact
+ *  changes, and a stage that stops on `blocked_environment` is a separate caller's job. */
+export function classifyRecheckCoverage(raw: unknown): CoverageOutcome {
+  const parsed = ResolutionEvidenceSchema.safeParse(raw);
+  // Evidence that does not even parse establishes no execution. Nothing is `executed` by
+  // default — the default is the absence of a record, which is what `not_executed` means.
+  if (!parsed.success) return "not_executed";
+  const ev = parsed.data;
+
+  switch (ev.kind) {
+    case "regression_test":
+      // A DECLARED environment block dominates, including over an alternate lane. The
+      // declaration is precisely the signal the stage stop consumes, and a lane that says
+      // it could not run must not be recorded as though something here did.
+      if (ev.environment_blocked !== undefined) return "blocked_environment";
+      if (ev.runner_output === undefined || ev.runner_output.trim() === "") return "not_executed";
+      return ranOrWentRed(resolveTestExecution(ev.runner_output, ev.test_name).execution);
+    case "replayed_reproduction":
+      // The schema already requires the command AND the output it produced: a reproduction
+      // that was replayed ran, whatever it showed.
+      return "executed";
+    case "anchored_verification":
+      return stepCoverage(ev.verification_step);
+    case "bounded_inspection":
+      // Reading the source is not running it. An inspection executes nothing, and saying so
+      // is the whole point of recording coverage separately from the verdict.
+      return "not_executed";
+  }
+}
+
+/** Executed coverage is "the check RAN", not "the check was green" — a skip and an absence
+ *  are the only ways nothing ran. */
+function ranOrWentRed(execution: TestExecution): CoverageOutcome {
+  return execution === "executed" || execution === "failed" ? "executed" : "not_executed";
+}
+
+function stepCoverage(step: ExecutedStep): CoverageOutcome {
+  // A non-test step carries its own runner's exit status. A nonzero exit is a step that ran
+  // and went red, which is executed coverage on this arm for the same reason a failing test
+  // is.
+  if (isCommandStep(step)) return "executed";
+  return ranOrWentRed(resolveTestExecution(step.runner_output, step.ran).execution);
+}
+
 // ─── acceptance-criterion evidence (Stage 9 check 2) ────────────────────────
 
 export const AC_VERDICTS = ["met", "unmet", "unproven"] as const;

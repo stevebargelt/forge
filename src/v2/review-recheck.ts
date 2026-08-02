@@ -21,6 +21,7 @@ import { z } from "zod";
 import { REACHABILITY, toleratedRootKeys, type DiscoveryFinding } from "./review-discovery.js";
 import { RISK_LENSES } from "./review-contract.js";
 import {
+  classifyRecheckCoverage,
   validateResolutionEvidence,
   type CoverageOutcome,
   type ResolutionEvidenceKind,
@@ -86,7 +87,9 @@ export type RecheckApplication = {
   resolution: Resolution;
   evidenceKind?: ResolutionEvidenceKind;
   evidence?: string;
-  /** Recorded whenever resolution is NOT `resolved` because coverage did not execute. */
+  /** What the entry's evidence establishes about EXECUTION, on every arm: the resolution
+   *  arm's own coverage outcome, and — since FG-664 — the classified coverage of a
+   *  `still_present`/`inconclusive` entry rather than an assumed `executed`. */
   coverage: CoverageOutcome;
   detail: string;
 };
@@ -180,11 +183,27 @@ export function ingestRecheck(raw: unknown, ctx: RecheckContext): RecheckIngesti
   const applications: RecheckApplication[] = [];
   for (const { finding, entry } of resolved) {
     if (entry.result !== "resolved") {
+      // FG-664: THE COVERAGE RECORDED HERE IS CLASSIFIED, NEVER ASSUMED. This arm used to
+      // push `coverage: "executed"` as a constant, so a lane that could not run a single
+      // test still wrote executed coverage into the ledger for every finding it reported —
+      // which is exactly how three `still_present` verdicts from a rechecker running against
+      // a SUBSTITUTED database engine were recorded as though tests had run (FG-662,
+      // review-6b9e07e48cc6). Every mechanical primitive in this stage sat on the `resolved`
+      // arm; this arm was accepted on a free-text note.
+      //
+      // THE VERDICT IS UNTOUCHED. `entry.result` is recorded exactly as the rechecker
+      // reported it, and the note stays the detail. Only the coverage FACT is now derived
+      // from what the entry actually carries.
+      //
+      // THE CEILING, HONESTLY: this closes the case where the lane DECLARES it could not
+      // run. A substituted engine that emits plausible `not ok` lines is textually
+      // indistinguishable from a real regression, so no ingestion-side rule can catch it —
+      // that is the host-side, pre-dispatch half of FG-664, and this is not it.
       applications.push({
         findingId: finding.id,
         findingRef: finding.findingRef,
         resolution: entry.result,
-        coverage: "executed",
+        coverage: classifyRecheckCoverage(entry.evidence),
         detail: entry.note ?? `rechecker reported ${entry.result}`,
       });
       continue;
