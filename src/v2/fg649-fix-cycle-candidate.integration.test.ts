@@ -686,10 +686,7 @@ test("integ FG-649 / RF-8: an all-resolved fix_now set is never handed to a fixe
 
 // ─── membership, invalidation, convergence ──────────────────────────────────
 
-test("integ FG-649 / RF-8: the batch carries the UNRESOLVED findings only, and a no-change cycle preserves the other's proof", async () => {
-  // RED baseline: drop the resolution term from `unresolvedFixNow` and revision 2's payload
-  // carries RF-1 again — at which point the fix-cycle invalidation, which is scoped to batch
-  // membership, clears the very proof that made it un-dispatchable.
+test("integ FG-649 / RF-8: a completed cycle preserves existing proof and cannot dispatch unresolved findings again", async () => {
   const h = harness({ verdict: (ref) => (ref === "RF-1" ? "resolved" : "still_present") });
   await parkAt(h.deps, "recheck");
   await runNextStage(REVIEW, h.deps);
@@ -701,64 +698,44 @@ test("integ FG-649 / RF-8: the batch carries the UNRESOLVED findings only, and a
   assert.equal(rf1.resolvedSha, candidate);
   assert.equal(rf2.resolution, "still_present");
 
-  // A fresh decision on RF-2 opens revision 2. This cycle changes NOTHING in the tree, so the
-  // candidate legitimately stays put and RF-1's proof is not touched by a candidate advance —
-  // which isolates the RF-8 claim from scenario #14.
+  // A fresh decision on RF-2 does not open revision 2. The completed Stage 5 record is the
+  // review-wide boundary, so RF-1's proof and RF-2's still-present verdict remain visible.
   assert.equal(
     recordDisposition(rf2.id, { decision: "fix_now", rationale: "second attempt: guard the caller", operator: false }).ok,
     true,
   );
-  const noChangeFixer: FixerBehaviour = (payload) => ({
-    fix_batch_id: payload.fix_batch_id,
-    revision: payload.revision,
-    findings: payload.findings.map((f) => ({
-      finding_id: f.finding_id,
-      result: "fixed",
-      remediation_summary: "the existing guard already covers this caller",
-      files_changed: [],
-      evidence: EXECUTED,
-    })),
-  });
-  const h2 = harness({ fixer: noChangeFixer, verdict: () => "resolved" });
-
-  assert.equal(pending().kind, "batch_fix", pending().reason);
-  const secondFix = await runNextStage(REVIEW, h2.deps);
-  assert.equal(secondFix.status, "advanced", secondFix.message);
-
-  const revision2 = fixBatchesForReview(REVIEW).at(-1);
-  assert.equal(revision2?.revision, 2);
-  assert.deepEqual(
-    revision2?.payload.findings.map((f) => f.finding_ref),
-    ["RF-2"],
-    "the batch carries the UNRESOLVED fix_now findings only",
-  );
-  assert.equal(fixRecord().meta?.["candidateAfter"], candidate, "a no-change cycle does not move the candidate");
-  assert.equal((fixRecord().meta?.["fixCommit"] as { kind: string }).kind, "no_change");
-  assert.equal(head(), candidate);
-
+  assert.equal(pending().kind, "await_disposition", pending().reason);
+  assert.match(pending().reason, /already completed its single remediation cycle/);
+  const fixersBefore = h.dispatches("engineer").length;
+  const stopped = await runNextStage(REVIEW, h.deps);
+  assert.equal(stopped.status, "stopped");
+  assert.equal(h.dispatches("engineer").length, fixersBefore, "no second fixer");
+  assert.equal(fixBatchesForReview(REVIEW).length, 1, "no revision 2");
   assert.equal(
     findingsForReview(REVIEW).find((f) => f.findingRef === "RF-1")?.resolution,
     "resolved",
-    "a cycle that did not carry RF-1 cannot clear its proof (RF-8)",
+    "the cardinality stop cannot clear RF-1's proof (RF-8)",
   );
   assert.equal(
     findingsForReview(REVIEW).find((f) => f.findingRef === "RF-2")?.resolution,
-    undefined,
-    "the carried finding's stale verdict IS cleared — that cycle is about it",
+    "still_present",
+    "the recheck verdict remains the evidence for follow-up",
   );
 
-  // Convergence: a second cycle at an unmoved candidate earns its own recheck and the review
-  // settles, with no oscillation between Stage 5 and Stage 8.
-  await settle(h2.deps);
+  assert.equal(
+    recordDisposition(rf2.id, {
+      decision: "accepted_risk",
+      rationale: "remediation is moved to explicit follow-up work",
+      operator: true,
+    }).ok,
+    true,
+  );
+  await settle(h.deps);
   assert.equal(getReview(REVIEW)?.state, "settled");
-  assert.equal(fixBatchesForReview(REVIEW).length, 2, "two revisions, not an unbounded chain");
+  assert.equal(fixBatchesForReview(REVIEW).length, 1);
 });
 
-test("integ FG-649 / PRD #14: a proof from the PRE-fix candidate is invalidated when the cycle's commit moves it, and the review still converges", async () => {
-  // The other half of the same rule: RF-8 preserves a proof a cycle did not touch, and scenario
-  // #14 still invalidates a proof the candidate MOVED away from. The commit the coordinator
-  // authors is what makes that move real — it is the same `advanceCandidate` the docs stage
-  // uses, so no new invalidation key exists.
+test("integ FG-649: post-recheck fix_now cannot move the candidate or invalidate existing proof", async () => {
   const h = harness({ verdict: (ref) => (ref === "RF-1" ? "resolved" : "still_present") });
   await parkAt(h.deps, "recheck");
   await runNextStage(REVIEW, h.deps);
@@ -771,31 +748,28 @@ test("integ FG-649 / PRD #14: a proof from the PRE-fix candidate is invalidated 
     true,
   );
 
-  const h2 = harness({ verdict: () => "resolved" });
-  const secondFix = await runNextStage(REVIEW, h2.deps);
-  assert.equal(secondFix.status, "advanced", secondFix.message);
-  assert.notEqual(getReview(REVIEW)?.candidateSha, provenAt, "the cycle's commit moved the candidate");
+  const stopped = await runNextStage(REVIEW, h.deps);
+  assert.equal(stopped.transition.kind, "await_disposition");
+  assert.equal(stopped.status, "stopped");
+  assert.equal(getReview(REVIEW)?.candidateSha, provenAt, "no second cycle exists to move the candidate");
   assert.equal(
     findingsForReview(REVIEW).find((f) => f.findingRef === "RF-1")?.resolution,
-    undefined,
-    "a proof recorded at the sha the review LEFT is not evidence about the one it is on",
+    "resolved",
+    "the stop has no authority to invalidate proof at the unchanged candidate",
   );
+  assert.equal(fixBatchesForReview(REVIEW).length, 1);
 
-  // It converges: the invalidated finding costs at most one further cycle, and the review ships.
-  const outcomes = await settle(h2.deps);
+  assert.equal(
+    recordDisposition(rf2.id, {
+      decision: "accepted_risk",
+      rationale: "the remaining remediation is moved to separately authorized follow-up",
+      operator: true,
+    }).ok,
+    true,
+  );
+  const outcomes = await settle(h.deps);
   assert.equal(getReview(REVIEW)?.state, "settled");
-  assert.ok(
-    fixBatchesForReview(REVIEW).length <= 3,
-    `bounded fix revisions, got ${fixBatchesForReview(REVIEW).length}`,
-  );
-  assert.ok(
-    outcomes.filter((o) => o.transition.kind === "recheck").length <= 3,
-    "bounded recheck cycles — the key is monotone and converges",
-  );
-  for (const f of findingsForReview(REVIEW)) {
-    assert.equal(f.resolution, "resolved");
-    assert.equal(f.resolvedSha, head());
-  }
+  assert.equal(outcomes.filter((o) => o.transition.kind === "recheck").length, 0, "the completed recheck was not repeated");
 });
 
 test("integ FG-649: this suite proves the done condition WITHOUT re-anchoring anything by hand", () => {
