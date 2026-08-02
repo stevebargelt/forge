@@ -39,11 +39,20 @@ import { resolvePolicyPath, describeNoEffectiveHostPolicy } from "../raci/projec
 import { validateRouteKeyUnder } from "../cli/route-preflight.js";
 import { explainRouteFile } from "../cli/commands/route.js";
 import { resolveIdleTimeoutMs, IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
-import { DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE } from "./dependency-provisioning.js";
+import {
+  DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE,
+  type DependencyEnvironmentReceipt,
+} from "./dependency-provisioning.js";
 import { productionDockerExec, finalizeContainerRetention, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
 import { composeSystemPrompt } from "./compose.js";
 import { STALE_PROTOCOL_FAILURE_KIND } from "./agent-protocol.js";
-import { buildDockerArgs, preflightProjectMount, GIT_UNAVAILABLE_EXIT_CODE, type SpawnContext } from "./spawn.js";
+import {
+  buildDockerArgs,
+  preflightProjectMount,
+  prepareDependencyEnvironmentForDispatch,
+  GIT_UNAVAILABLE_EXIT_CODE,
+  type SpawnContext,
+} from "./spawn.js";
 import { loadRuntimeWithSource, loadModelPolicyWithSource } from "./loader.js";
 import { resolveSeedGeneration, type SeedGeneration } from "./seed-generation.js";
 import { resolveModel, taskModelFields, manifestModelBlock, type ModelResolution } from "./model-resolution.js";
@@ -682,6 +691,66 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
   // manifest so forge show reports the value this task actually ran under.
   const idleTimeoutMs = resolveIdleTimeoutMs(runtime.container.idle_timeout_seconds);
 
+  const exec = args.dockerExec ?? productionDockerExec;
+
+  // FG-664: A READ-ONLY DISPATCH THAT CANNOT EXECUTE THE PROJECT'S DEPENDENCIES IS
+  // REFUSED, HOST-SIDE, BEFORE ANY AGENT CONTAINER EXISTS.
+  //
+  // This is the lane the FG-662 rechecker ran in: `readOnlyProject: true` mounts
+  // the host's darwin-arm64 node_modules through `/project:ro`, the project's real
+  // native driver cannot dlopen in a linux container, and the agent improvised a
+  // `node:sqlite` shim — running the regression suite against a DIFFERENT SQLite
+  // implementation and reporting the engine-difference failures as findings still
+  // present. Two things close that: the real dependencies are made available
+  // (the lockfile-keyed cache, provisioned host-side and mounted `:ro`), and a
+  // dispatch that still cannot load them never starts.
+  //
+  // The requirement is DERIVED FROM `readOnlyProject`, not from a flag the caller
+  // sets: "a red dispatch that cannot execute the project's dependencies is
+  // refused" is a property of the dispatch, not of who asked for it. The blue/rw
+  // path is untouched — it gets a writable shadow volume and installs in-container.
+  //
+  // Nothing here relaxes the read-only project mount, and nothing installs in the
+  // agent's container: installing stays the separate short-lived provisioner's job
+  // under the unchanged FG-376 per-cache-key lock (FG-376 refined — reviewer
+  // CONTAINERS never install; the HOST may provision before one starts).
+  let dependencyEnvironment: DependencyEnvironmentReceipt | undefined;
+  if (args.readOnlyProject) {
+    const resolved = await prepareDependencyEnvironmentForDispatch({
+      runtime,
+      taskId,
+      repoRoot: args.projectDir,
+      canonicalProjectDir: args.projectDir,
+      logDir: dir,
+      exec,
+    });
+    if (resolved.outcome === "refused") {
+      const error =
+        `verification_environment_unavailable (${resolved.reason}): ${resolved.detail}. No agent container was ` +
+        `started. A read-only reviewer that cannot load the project's real native dependencies is refused rather ` +
+        `than run against a substituted implementation — see FG-664.`;
+      // The EXISTING event for "this dispatch's dependency environment could not be
+      // established" — no new vocabulary. `stage: "environment_resolution"` and the
+      // classified `reason` are what distinguish a probe/attestation refusal from the
+      // install failure the event was first minted for.
+      logEvent("container.dependency_provisioning_failed", {
+        runId,
+        taskId,
+        payload: {
+          stage: "environment_resolution",
+          reason: resolved.reason,
+          detail: resolved.detail,
+          projectDir: args.projectDir,
+        },
+      });
+      cleanupStagedAuth(dir); // AWN-8
+      failTask(taskId, { runId, kind: classify({ source: "verification_environment_unavailable" }), error });
+      closeRunIfIdle(false);
+      return { runId, taskId, status: "failed", error, failureKind: "verification_environment_unavailable" };
+    }
+    if (resolved.outcome === "ready") dependencyEnvironment = resolved.receipt;
+  }
+
   // FG-350: assemble the control-plane receipt — records dispatch-time provenance
   // so explain views answer "why did Forge run this task this way" from RECORDED
   // facts, not recomputed from current config. Workflow is always 'synthetic' for
@@ -779,6 +848,11 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     // value is the one COMPOSE resolved (TaskPackage.agentProtocol) — recomputing it here
     // would describe the seed as of now, not the bytes in the prompt below.
     ...(taskPackage.agentProtocol ? { agentProtocol: taskPackage.agentProtocol } : {}),
+    // FG-664: AC3's manifest half — the cache key and the engine identity a
+    // Forge-owned probe container attested for THIS dispatch, recorded at the same
+    // dispatch-time seam as every other receipt. The review ledger records the
+    // same receipt against the recheck stage; they are one fact in two places.
+    ...(dependencyEnvironment ? { dependencyEnvironment } : {}),
   });
 
   // Usage attribution: prefer the resolved capability alias (policy mode); fall
@@ -818,6 +892,12 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     // fg345-default-on-dispatch.worktree.test.ts's (invoke-scope) case.
     CANONICAL_PROJECT_DIR: args.projectDir,
     PROJECT_MODE: args.readOnlyProject ? "ro" : "rw",
+    // FG-664: set ONLY when the host resolved and ATTESTED the environment above.
+    // buildDockerArgs's `projectMode === "ro" && DEPENDENCY_CACHE_MOUNT_RO === "1"`
+    // branch was already correct — it was simply never told the truth on this path
+    // (invoke set neither flag, so every reviewer ran with no dependency mount at
+    // all and saw the host's wrong-platform modules through the `:ro` project bind).
+    ...(dependencyEnvironment ? { DEPENDENCY_CACHE_MOUNT_RO: "1" } : {}),
     MODEL: resolution.model,
     UPSTREAM_PROVIDER: resolution.provider ?? "",
     SYSTEM_PROMPT: systemPrompt,
@@ -849,7 +929,9 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     return { runId, taskId, status: "failed", error };
   }
 
-  const exec = args.dockerExec ?? productionDockerExec;
+  // `exec` is resolved once, above the FG-664 dependency-environment gate — the
+  // probe/provisioner containers go through the SAME injected executor as the
+  // agent container, so a test that injects one is never bypassed by a real docker.
   const stdoutPath = join(dir, "container.stdout.log");
   const stderrPath = join(dir, "container.stderr.log");
   const containerName = `forge-${taskId}`;

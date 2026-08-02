@@ -83,6 +83,7 @@ import {
   type ContractProposal,
   type RiskLens,
 } from "./review-contract.js";
+import type { DependencyEnvironmentReceipt } from "./dependency-provisioning.js";
 import { parseFixerResult } from "./review-fixer.js";
 import { ingestRecheck } from "./review-recheck.js";
 import { assessShippingReview, type ShippingAssessment, type ShippingInput } from "./review-shipping.js";
@@ -197,6 +198,17 @@ export type CoordinatorDeps = {
     taskId?: string;
     result?: unknown;
     error?: string;
+    /** FG-664: the dispatch's CLASSIFIED failure, when the failure site determined
+     *  one. `verification_environment_unavailable` is the environment fault — a lane
+     *  that could not be given the project's real native dependencies — and Stage 8
+     *  routes it to the `blocked_environment` STOP rather than into the verdict plane.
+     *  An environment fault is not a reviewer's opinion and must never become one. */
+    failureKind?: string;
+    /** FG-664 / AC3: the engine identity the host attested for the rechecker's own
+     *  container, read back off its task manifest. Recorded into this stage's evidence
+     *  so a resolution can be tied to the engine that produced it — the SAME receipt in
+     *  two places, never two independently-written facts. */
+    dependencyEnvironment?: DependencyEnvironmentReceipt;
     protocol?: { role: string; sha256: string; taskId: string };
   }>;
   shippingInput: (ctx: {
@@ -808,6 +820,28 @@ async function runRecheck(reviewId: string, transition: Transition, deps: Coordi
 
   if (dispatch.protocol) recordAgentProtocol(review.id, { ...dispatch.protocol, stage: "recheck" });
   if (!dispatch.ok) {
+    // FG-664: AN ENVIRONMENT FAULT IS A STOP, NOT A VERDICT AND NOT A RETRY.
+    //
+    // The host refused this dispatch because it could not give the rechecker the
+    // project's REAL native dependencies (spawn.ts's dependency probe, run before
+    // any agent container). It is the same plane Stage 1 already uses for a
+    // non-runnable candidate: no fixer is dispatched, no review cycle is consumed,
+    // and NOTHING is recorded as still present or resolved. Deliberately NOT the
+    // `refused` arm below — that arm re-enters and re-dispatches, which against an
+    // environment fault would burn rounds on a failure no code change can fix
+    // (the error FG-566 already fixed once for the host lane).
+    if (dispatch.failureKind === "verification_environment_unavailable") {
+      const reason = `the recheck lane could not execute the project's real dependencies: ${dispatch.error ?? "no detail recorded"}`;
+      setReviewState(reviewId, "blocked_environment", { reason });
+      return {
+        transition,
+        status: "stopped",
+        message:
+          `blocked_environment (verification_environment_unavailable): ${dispatch.error ?? "no detail recorded"}. ` +
+          `No fixer was dispatched and no review cycle was consumed; no finding was recorded as still present and ` +
+          `no resolution was written. Fix the environment and re-run \`forge review continue ${reviewId}\`.`,
+      };
+    }
     return {
       transition,
       status: "refused",
@@ -820,6 +854,35 @@ async function runRecheck(reviewId: string, transition: Transition, deps: Coordi
   const ingestion = ingestRecheck(dispatch.result, { reviewId, candidateSha: candidate, expected });
   if (!ingestion.ok) {
     return { transition, status: "refused", message: ingestion.refusal };
+  }
+
+  // FG-664: THE SAME STOP, ONE LAYER IN — a lane that RAN but DECLARED it could not
+  // execute the cited coverage. `blocked_environment` coverage is by construction
+  // never green and never resolved (review-evidence.ts's COVERAGE_OUTCOMES), so a
+  // recheck carrying any of it is not evidence about the code in either direction:
+  // its `still_present` entries are not findings and its `resolved` entries are not
+  // proofs. The whole stage stops with NOTHING written — not the resolutions, not
+  // the new findings, not the stage record — so re-entry is a clean re-dispatch once
+  // the environment is repaired.
+  //
+  // CEILING, stated so it is not later mistaken for a guarantee: this closes the case
+  // where the lane DECLARES it could not run. It cannot detect a substituted engine
+  // that produces plausible `not ok` lines — those are textually indistinguishable
+  // from a real regression, and no ingestion-side rule can authenticate the engine
+  // that emitted them. That is the host-side probe's job, before the container starts.
+  const blocked = ingestion.applications.filter((a) => a.coverage === "blocked_environment");
+  if (blocked.length > 0) {
+    const refs = blocked.map((a) => a.findingRef).join(", ");
+    const reason = `the rechecker reported blocked_environment coverage for ${refs}`;
+    setReviewState(reviewId, "blocked_environment", { reason });
+    return {
+      transition,
+      status: "stopped",
+      message:
+        `blocked_environment: the rechecker declared it could not execute the coverage it cited for ${refs}. ` +
+        `No resolution, no finding and no stage record was written — a lane that could not run is not evidence ` +
+        `that a finding is present OR absent. No fixer was dispatched and no review cycle was consumed.`,
+    };
   }
 
   for (const a of ingestion.applications) {
@@ -858,6 +921,13 @@ async function runRecheck(reviewId: string, transition: Transition, deps: Coordi
       // Half of this stage's completion key: the fix cycles this recheck covered. Without it
       // a later cycle at the same sha reads as already rechecked (see fixCycleKey).
       fixCycleKey: fixCycleKey(snap.batches),
+      // FG-664 / AC3: WHICH ENGINE PRODUCED THESE RESOLUTIONS. The receipt is read
+      // back off the rechecker's own task manifest, so the ledger INDEXES the
+      // manifest rather than restating it — one fact in two places. Absent when the
+      // dispatch resolved no environment (a read-write or not-applicable configuration).
+      ...(dispatch.dependencyEnvironment !== undefined
+        ? { dependencyEnvironment: dispatch.dependencyEnvironment }
+        : {}),
     },
   });
 

@@ -35,6 +35,12 @@ export const DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE = 123;
  *  caller releases the lock, and the next dispatch re-attempts. */
 export const DEPENDENCY_PROVISIONER_IDLE_TIMEOUT_MS = 10 * 60 * 1000; // 10m
 
+/** FG-664: idle timeout for the short-lived dependency PROBE container. The probe
+ *  only stats a few directories and `require()`s whatever ships a compiled
+ *  `.node`, so it is a small fraction of an install; a probe that produces no
+ *  output for this long is hung, not working. */
+export const DEPENDENCY_PROBE_IDLE_TIMEOUT_MS = 2 * 60 * 1000; // 2m
+
 export type WorkspaceMember = {
   /** Relative path from repo root; "" for the repo root itself. */
   relPath: string;
@@ -379,6 +385,11 @@ export type DependencyCacheLockOpts = {
   // the container check above) — mirrors acquireFileLockBlocking's isAlive.
   // Real callers never set this; production always uses the real pid check.
   isAlive?: (pid: number) => boolean;
+  // Test-only seam for the blocked waiter's poll interval, in the same spirit.
+  // Production leaves it at run-lock.ts's default (500ms), which is right for a
+  // waiter whose holder is running `npm ci`; a test proving the contention is
+  // real should not have to spend half a second on a real clock to do it.
+  pollMs?: number;
 };
 
 /** Block until this task is the sole holder of cacheKey's provisioning lock.
@@ -401,6 +412,7 @@ export async function acquireDependencyCacheLock(cacheKey: string, opts?: Depend
   // remove it or make it conditional.
   await acquireFileLockBlocking(path, `dependency-cache:${cacheKey}`, {
     ...(opts?.isAlive ? { isAlive: opts.isAlive } : {}),
+    ...(opts?.pollMs !== undefined ? { pollMs: opts.pollMs } : {}),
     holderId: provisionerContainerName(cacheKey),
     onDeadHolder: (held: LockInfo) => {
       const containerId = held.holderId;
@@ -475,6 +487,253 @@ export async function provisionDependencyCache(
   } finally {
     release();
   }
+}
+
+// ── FG-664: the ONE host-side answer to "can this dispatch execute the
+//    project's dependencies?" ───────────────────────────────────────────────
+//
+// A read-only reviewer/rechecker sees the HOST's node_modules through the
+// `/project:ro` bind. On darwin those are darwin-arm64 bindings and a linux
+// container cannot dlopen them, so the project's real native driver
+// (better-sqlite3, here) fails to load. The lane's response to that was to
+// improvise a `node:sqlite`-backed shim and run the regression suite against a
+// DIFFERENT SQLite implementation, then report the engine-difference failures
+// as the finding still being present (FG-662, review-6b9e07e48cc6). Blue agents
+// never hit it: they get a writable shadow volume and install in-container.
+//
+// The remedy has to be HOST-SIDE and PRE-DISPATCH. Agents have passwordless root
+// (spawn.ts:128), so nothing running inside the agent's container can enforce
+// anything, and engine-difference failures emit genuine `not ok` lines that are
+// textually indistinguishable from real regressions — no output inspection can
+// authenticate the engine that produced them. So Forge answers the question
+// itself, before the agent container exists, with its OWN short-lived probe
+// container running a fixed command.
+//
+// This function stays docker-agnostic, exactly like provisionDependencyCache
+// above: the caller supplies the two container invocations (spawn.ts's
+// prepareDependencyEnvironmentForDispatch) and this module owns the eligibility
+// gates, the cache key, the lock, the marker and the attestation.
+//
+// FG-376 IS REFINED, NOT WEAKENED. "Reviewers never provision" becomes "reviewer
+// CONTAINERS never install and never race an install; the HOST may provision,
+// under the existing per-cache-key lock, before a read-only reviewer starts."
+// The install still happens in the separate short-lived provisioner container
+// with the unchanged exactly-once/no-marker-on-failure/distrust-a-dead-holder
+// semantics; the reviewer still mounts `:ro` and still never writes.
+
+/** One mounted package that ships a compiled `.node` artifact, as the probe
+ *  container reported it. `loaded` is the whole point: it is the container's own
+ *  `require()` of the package, not an inference from the file's existence. */
+export type DependencyEnginePackage = {
+  name: string;
+  version: string;
+  /** The compiled artifact the probe found inside the mounted volume. */
+  artifact?: string;
+  /** What the container's resolver returned for the package entry point. */
+  resolvedPath?: string;
+  loaded: boolean;
+  error?: string;
+};
+
+/** ENGINE IDENTITY, attested by a Forge-owned container. Recorded in the task
+ *  manifest and in the review's recheck stage evidence — ONE fact in two places,
+ *  so a later reader can tell which engine a verdict was produced against. */
+export type DependencyEnvironmentReceipt = {
+  /** The lockfile hash: the dependency-cache key whose volumes were mounted. */
+  cacheKey: string;
+  /** The image the probe ran — the same image the reviewer container will run. */
+  probeImage: string;
+  /** `process.version` inside the probe container. */
+  nodeVersion: string;
+  /** `process.versions.modules` inside the probe container — the NODE ABI the
+   *  mounted bindings had to match to load at all. */
+  abi: string;
+  packages: DependencyEnginePackage[];
+};
+
+/** What the probe container printed, as the caller captured it. */
+export type DependencyProbeRun = { exitCode: number; stdout: string; stderrTail: string };
+
+/** Why a read-only dispatch was refused. Every one of these is reported to the
+ *  caller as the EXISTING `verification_environment_unavailable` FailureKind —
+ *  this is the diagnostic grain underneath it, not new vocabulary. */
+export type DependencyEnvironmentRefusal =
+  | "mountpoints_unavailable"
+  | "provisioning_failed"
+  | "probe_failed"
+  | "probe_unparseable"
+  | "dependencies_absent"
+  | "driver_unloadable";
+
+export type DependencyEnvironmentOutcome =
+  /** The real dependencies are mounted and the probe LOADED every native package. */
+  | { outcome: "ready"; receipt: DependencyEnvironmentReceipt }
+  /** Not a refusal: this configuration never had the hazard, and its pre-existing
+   *  behaviour is unchanged (non-darwin, FORGE_NO_NM_SHADOW=1, no package-lock.json,
+   *  a runtime that mounts no project). */
+  | { outcome: "not_applicable"; reason: string }
+  | { outcome: "refused"; reason: DependencyEnvironmentRefusal; detail: string };
+
+export type ResolveDependencyEnvironmentArgs = {
+  /** The tree that will ACTUALLY be bound at the container's project path — the
+   *  worktree/clone when there is one, never a path the agent could have written. */
+  repoRoot: string;
+  /** The image the probe ran, for the receipt. */
+  image: string;
+  /** Runs the FG-376 provisioner container. Called at most once, only while
+   *  holding the cache-key lock, and only when the key is not already ready. */
+  runProvisioner: () => Promise<{ exitCode: number; stderrTail: string }>;
+  /** Runs Forge's OWN probe container over the reviewer's exact mount shape. */
+  runProbe: () => Promise<DependencyProbeRun>;
+  lockOpts?: DependencyCacheLockOpts;
+  /** Test seam ONLY, mirroring the isContainerAlive/killContainer pattern above:
+   *  the darwin gate is the whole reason this mechanism exists, and the unit tier
+   *  runs on linux. Production callers never set it. */
+  platform?: string;
+};
+
+/** The probe's JSON, as this module reads it back. Deliberately narrow: the
+ *  probe is Forge's own fixed command, so anything that does not parse into
+ *  this shape is a refusal rather than something to interpret. */
+export type DependencyProbeReport = {
+  node: string;
+  abi: string;
+  /** Per mounted node_modules root: how many entries the container saw. The
+   *  install root being EMPTY is the case a ready marker cannot rule out — a
+   *  pruned volume leaves the marker behind — and it is exactly the state that
+   *  reads as "no native packages, nothing to check". */
+  roots: Array<{ path: string; entries: number; installRoot: boolean }>;
+  packages: DependencyEnginePackage[];
+};
+
+/** Read the probe's report out of its stdout. Scans from the END for the last
+ *  line that parses into the expected shape, so an entrypoint warning ahead of
+ *  it (the FG-608 backlog-authority notice, say) does not defeat the read. */
+export function parseDependencyProbeOutput(stdout: string): DependencyProbeReport | undefined {
+  const lines = stdout.split("\n").map((l) => l.trim()).filter((l) => l.startsWith("{"));
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let value: unknown;
+    try {
+      value = JSON.parse(lines[i] as string);
+    } catch {
+      continue;
+    }
+    const r = value as Partial<DependencyProbeReport>;
+    if (typeof r.node !== "string" || typeof r.abi !== "string") continue;
+    if (!Array.isArray(r.packages) || !Array.isArray(r.roots)) continue;
+    return { node: r.node, abi: r.abi, roots: r.roots, packages: r.packages };
+  }
+  return undefined;
+}
+
+export async function resolveDependencyEnvironment(
+  args: ResolveDependencyEnvironmentArgs,
+): Promise<DependencyEnvironmentOutcome> {
+  const platform = args.platform ?? process.platform;
+  if (platform !== "darwin") {
+    // On linux the host's modules are already the right platform, so the
+    // substitution hazard does not arise and nothing about this dispatch changes.
+    return { outcome: "not_applicable", reason: `host platform is ${platform}, not darwin` };
+  }
+  if (process.env.FORGE_NO_NM_SHADOW === "1") {
+    return { outcome: "not_applicable", reason: "FORGE_NO_NM_SHADOW=1 (the operator escape hatch)" };
+  }
+  const cacheKey = safeLockfileHash(args.repoRoot);
+  if (cacheKey === undefined) {
+    return { outcome: "not_applicable", reason: `no package-lock.json at ${args.repoRoot}` };
+  }
+
+  // FG-627/FG-628: every dependency volume binds at a path INSIDE a read-only
+  // project mount, and docker cannot mkdir a mountpoint on a read-only rootfs.
+  // On the rw path a failure here degrades to "mount nothing"; on a read-only
+  // dispatch that degradation IS the defect, so it refuses.
+  try {
+    createDependencyMountpoints(args.repoRoot);
+  } catch (e) {
+    return {
+      outcome: "refused",
+      reason: "mountpoints_unavailable",
+      detail:
+        `the dependency mountpoints could not be created in ${args.repoRoot} (${(e as Error).message}), so the ` +
+        `lockfile-keyed volumes cannot be bound into a read-only project mount`,
+    };
+  }
+
+  let provision: ProvisionDependencyCacheResult;
+  try {
+    provision = await provisionDependencyCache(cacheKey, args.runProvisioner, args.lockOpts);
+  } catch (e) {
+    // The caller's provisioner threw before/instead of exiting — a host-side
+    // mount-plan refusal (FG-559's assertWorktreeGitMountPlanned) reaches here.
+    return { outcome: "refused", reason: "provisioning_failed", detail: (e as Error).message };
+  }
+  if (provision.outcome === "failed") {
+    return { outcome: "refused", reason: "provisioning_failed", detail: provision.error };
+  }
+
+  let probe: DependencyProbeRun;
+  try {
+    probe = await args.runProbe();
+  } catch (e) {
+    return { outcome: "refused", reason: "probe_failed", detail: (e as Error).message };
+  }
+  if (probe.exitCode !== 0) {
+    return {
+      outcome: "refused",
+      reason: "probe_failed",
+      detail:
+        `the dependency probe container exited ${probe.exitCode}` +
+        (probe.stderrTail ? ` — ${probe.stderrTail}` : ""),
+    };
+  }
+  const report = parseDependencyProbeOutput(probe.stdout);
+  if (report === undefined) {
+    return {
+      outcome: "refused",
+      reason: "probe_unparseable",
+      detail:
+        `the dependency probe container exited 0 but printed no readable report — nothing attests which engine ` +
+        `this dispatch would run against` + (probe.stderrTail ? ` (stderr: ${probe.stderrTail})` : ""),
+    };
+  }
+
+  // A ready marker says the INSTALL succeeded once; it cannot say the volume
+  // still holds it (`forge dependency-cache prune`, or a docker volume removed
+  // by hand). An empty install root would otherwise sail through as "no native
+  // packages found, nothing failed to load" — green for the wrong reason.
+  const emptyRoot = report.roots.find((r) => r.installRoot && r.entries === 0);
+  if (emptyRoot !== undefined) {
+    return {
+      outcome: "refused",
+      reason: "dependencies_absent",
+      detail:
+        `cache key ${cacheKey} is marked ready but ${emptyRoot.path} is EMPTY inside the container — the mounted ` +
+        `volume carries no dependency graph, so nothing the dispatch runs would execute the project's real code`,
+    };
+  }
+
+  const unloadable = report.packages.filter((p) => !p.loaded);
+  if (unloadable.length > 0) {
+    return {
+      outcome: "refused",
+      reason: "driver_unloadable",
+      detail:
+        `the project's real native package(s) ${unloadable.map((p) => p.name).join(", ")} could not be loaded in ` +
+        `the reviewer's mount shape (node ${report.node}, ABI ${report.abi}): ` +
+        unloadable.map((p) => `${p.name}: ${p.error ?? "no error recorded"}`).join(" | "),
+    };
+  }
+
+  return {
+    outcome: "ready",
+    receipt: {
+      cacheKey,
+      probeImage: args.image,
+      nodeVersion: report.node,
+      abi: report.abi,
+      packages: report.packages,
+    },
+  };
 }
 
 /** Best-effort removal of every dependency volume a worktree could have

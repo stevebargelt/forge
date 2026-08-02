@@ -33,7 +33,17 @@ import {
   knownApiKeyProviders,
 } from "../util/creds.js";
 import { substitute, substituteOptional, expandTilde, type SubstContext } from "./resolve.js";
-import { planDependencyVolumes, provisionerContainerName, type DependencyVolumePlan } from "./dependency-provisioning.js";
+import {
+  planDependencyVolumes,
+  provisionerContainerName,
+  resolveDependencyEnvironment,
+  DEPENDENCY_PROBE_IDLE_TIMEOUT_MS,
+  DEPENDENCY_PROVISIONER_IDLE_TIMEOUT_MS,
+  type DependencyCacheLockOpts,
+  type DependencyEnvironmentOutcome,
+  type DependencyVolumePlan,
+} from "./dependency-provisioning.js";
+import type { DockerExecFn } from "./docker-exec.js";
 import { resolveBacklogStore } from "../backlog/storage-mode.js";
 import {
   publishSnapshotOnce,
@@ -1298,6 +1308,205 @@ export function buildProvisionerDockerArgs(
   // (a host path holding a `:`) is emitted above and caught here.
   assertWorktreeGitMountPlanned(ctx.PROJECT_DIR, args, ctx.CANONICAL_PROJECT_DIR);
   return args;
+}
+
+// ── FG-664: the dependency PROBE container ───────────────────────────────────
+//
+// A read-only reviewer/rechecker that cannot load the project's real native
+// driver improvises around it. The fix is to make the real driver genuinely
+// available, and to prove it HOST-SIDE before the agent container starts.
+//
+// THIS IS FORGE'S OWN CONTAINER, NOT THE AGENT'S. That is the whole reason its
+// output is trustworthy where an in-container assertion by the agent is not:
+// agents have passwordless root (see the `:ro` note at the top of this file), so
+// anything the agent reports about its own environment is a claim, not evidence.
+// The probe runs a FIXED command Forge authored, over the reviewer's EXACT mount
+// shape, and exits.
+//
+// The command is deliberately dumb: find every mounted package that ships a
+// compiled `.node` artifact, `require()` it, and print what happened plus the
+// container's own node version and ABI. It never reads anything from the project
+// tree and never runs project code beyond a package's own module initializer.
+const DEPENDENCY_PROBE_SCRIPT = [
+  'const fs = require("fs"), path = require("path");',
+  'const { createRequire } = require("module");',
+  'const roots = (process.env.FORGE_PROBE_ROOTS || "").split(":").filter(Boolean);',
+  'const installRoot = process.env.FORGE_PROBE_INSTALL_ROOT || "";',
+  "const seen = new Set(), packages = [], out = [];",
+  "const findArtifact = (dir, depth) => {",
+  "  if (depth > 4) return undefined;",
+  "  let entries;",
+  "  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return undefined; }",
+  "  for (const e of entries) {",
+  '    if (e.isFile() && e.name.endsWith(".node")) return path.join(dir, e.name);',
+  '    if (e.isDirectory() && e.name !== "node_modules") {',
+  "      const hit = findArtifact(path.join(dir, e.name), depth + 1);",
+  "      if (hit) return hit;",
+  "    }",
+  "  }",
+  "  return undefined;",
+  "};",
+  "const consider = (root, name) => {",
+  "  if (seen.has(name)) return;",
+  "  const dir = path.join(root, name);",
+  "  const artifact = findArtifact(dir, 0);",
+  "  if (!artifact) return;",
+  "  seen.add(name);",
+  '  let version = "unknown";',
+  '  try { version = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")).version || "unknown"; } catch (e) {}',
+  '  const req = createRequire(path.join(root, "forge-probe.js"));',
+  "  const entry = { name: name, version: version, artifact: artifact, loaded: false };",
+  "  try { entry.resolvedPath = req.resolve(name); } catch (e) {}",
+  "  try { req(name); entry.loaded = true; } catch (e) { entry.error = String((e && e.message) || e); }",
+  "  packages.push(entry);",
+  "};",
+  "for (const root of roots) {",
+  "  let entries = [];",
+  "  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch (e) { entries = []; }",
+  "  out.push({ path: root, entries: entries.length, installRoot: root === installRoot });",
+  "  for (const e of entries) {",
+  "    if (!e.isDirectory()) continue;",
+  '    if (e.name.startsWith("@")) {',
+  "      let scoped = [];",
+  "      try { scoped = fs.readdirSync(path.join(root, e.name), { withFileTypes: true }); } catch (err) { scoped = []; }",
+  '      for (const s of scoped) if (s.isDirectory()) consider(root, e.name + "/" + s.name);',
+  '    } else if (!e.name.startsWith(".")) {',
+  "      consider(root, e.name);",
+  "    }",
+  "  }",
+  "}",
+  'process.stdout.write(JSON.stringify({ node: process.version, abi: process.versions.modules, roots: out, packages: packages }) + "\\n");',
+].join("\n");
+
+/** Docker args for the FG-664 dependency probe: a SHORT-LIVED, FORGE-OWNED
+ *  `--rm` container with the reviewer's EXACT mount shape — the project `:ro`,
+ *  the lockfile-keyed volumes `:ro`, no read-write dependency mount and no
+ *  `FORGE_NM_INSTALL_ROOT`, so it installs nothing and can write nothing. If
+ *  this container can load the project's real native driver, so can the reviewer
+ *  that follows it; if it cannot, no reviewer starts.
+ *
+ *  Named per TASK (unlike the provisioner, which is named per cache key because
+ *  it is the lock's holder): the probe takes no lock and two dispatches on one
+ *  cache key must be able to probe concurrently. */
+export function buildDependencyProbeDockerArgs(
+  runtime: Runtime,
+  ctx: { TASK_ID: string; PROJECT_DIR: string; CANONICAL_PROJECT_DIR?: string },
+  plan: DependencyVolumePlan,
+): string[] {
+  const projectContainerPath = resolveProjectContainerPath(runtime) ?? "/project";
+  const args: string[] = ["run", "--rm", "-i"];
+  args.push("--name", `forge-depprobe-${ctx.TASK_ID}`);
+  args.push("-e", "FORGE_NO_BROWSER=1");
+  args.push("-v", `${ctx.PROJECT_DIR}:${projectContainerPath}:ro`);
+  // FG-559/FG-621: the same read-only parent-.git (or parent object store) bind
+  // every other container in this dispatch gets — the shared entrypoint's git
+  // probe refuses a worktree project without it.
+  for (const gitPath of planWorktreeGitMounts(ctx.PROJECT_DIR, ctx.CANONICAL_PROJECT_DIR)) {
+    args.push("-v", `${gitPath}:${gitPath}:ro`);
+  }
+  // `:ro`, exactly as the reviewer gets them. The probe is not allowed to repair
+  // what it is measuring.
+  for (const v of plan.volumes) {
+    args.push("-v", `${v.name}:${v.containerPath}:ro`);
+  }
+  args.push("-e", `FORGE_PROBE_ROOTS=${plan.volumes.map((v) => v.containerPath).join(":")}`);
+  args.push("-e", `FORGE_PROBE_INSTALL_ROOT=${plan.installRoot}/node_modules`);
+  args.push("-w", projectContainerPath);
+  args.push(runtime.image);
+  args.push("node", "-e", DEPENDENCY_PROBE_SCRIPT);
+  // FG-559 piece A: a git bind the argv cannot express is a host-side refusal,
+  // and it has to hold for every container this dispatch starts.
+  assertWorktreeGitMountPlanned(ctx.PROJECT_DIR, args, ctx.CANONICAL_PROJECT_DIR);
+  for (let i = 0; i < args.length; i++) {
+    const label = args[i - 1] === "-e" ? `env ${args[i]!.split("=")[0]}` : `argv[${i}] ("${args[i - 1] ?? ""}")`;
+    assertWithinArgLimit(label, args[i]!);
+  }
+  return args;
+}
+
+export type PrepareDependencyEnvironmentArgs = {
+  runtime: Runtime;
+  taskId: string;
+  /** The tree that will ACTUALLY be bound at the container's project path. */
+  repoRoot: string;
+  /** FG-621: Forge's OWN record of the parent a workspace was made from. */
+  canonicalProjectDir?: string;
+  /** Where the provisioner's and probe's container logs land (the task dir). */
+  logDir: string;
+  exec: DockerExecFn;
+  /** Test seam — see resolveDependencyEnvironment. */
+  platform?: string;
+  lockOpts?: DependencyCacheLockOpts;
+};
+
+/** FG-664: the ONE glue between the host-side decision
+ *  (dependency-provisioning.ts's resolveDependencyEnvironment, which owns the
+ *  eligibility gates, the cache key, the FG-376 lock and the attestation) and
+ *  the two containers that answer it. Both read-only dispatch paths — `forge
+ *  invoke` (the review lane) and runNext's workflow reds — call THIS, so there
+ *  is one implementation and two callers rather than two resolutions that can
+ *  drift.
+ *
+ *  Both argvs are built lazily, inside the callbacks, so a dispatch this is not
+ *  applicable to (non-darwin, FORGE_NO_NM_SHADOW=1, no lockfile) builds neither
+ *  and behaves byte-identically to before. A build that throws — FG-559's
+ *  mount-plan refusal — surfaces as the corresponding refusal rather than as an
+ *  unhandled rejection. */
+export async function prepareDependencyEnvironmentForDispatch(
+  args: PrepareDependencyEnvironmentArgs,
+): Promise<DependencyEnvironmentOutcome> {
+  const projectContainerPath = resolveProjectContainerPath(args.runtime);
+  if (projectContainerPath === undefined) {
+    return { outcome: "not_applicable", reason: `runtime ${args.runtime.name} mounts no project directory` };
+  }
+  const containerCtx = {
+    TASK_ID: args.taskId,
+    PROJECT_DIR: args.repoRoot,
+    ...(args.canonicalProjectDir !== undefined ? { CANONICAL_PROJECT_DIR: args.canonicalProjectDir } : {}),
+  };
+  const planOrThrow = (): DependencyVolumePlan => planDependencyVolumes(args.repoRoot, projectContainerPath);
+
+  return resolveDependencyEnvironment({
+    repoRoot: args.repoRoot,
+    image: args.runtime.image,
+    ...(args.platform !== undefined ? { platform: args.platform } : {}),
+    ...(args.lockOpts !== undefined ? { lockOpts: args.lockOpts } : {}),
+    runProvisioner: async () => {
+      const plan = planOrThrow();
+      const provisionerArgs = buildProvisionerDockerArgs(args.runtime, containerCtx, plan);
+      const stdoutPath = join(args.logDir, "container.provision.stdout.log");
+      const stderrPath = join(args.logDir, "container.provision.stderr.log");
+      const exitCode = await args.exec({
+        args: provisionerArgs,
+        stdin: undefined,
+        stdoutPath,
+        stderrPath,
+        idleTimeoutMs: DEPENDENCY_PROVISIONER_IDLE_TIMEOUT_MS,
+        // FG-492 finding 2: the provisioner owns its own --rm lifecycle.
+        isProvisionerExec: true,
+      });
+      return { exitCode, stderrTail: existsSync(stderrPath) ? readFileSync(stderrPath, "utf8").trim() : "" };
+    },
+    runProbe: async () => {
+      const plan = planOrThrow();
+      const probeArgs = buildDependencyProbeDockerArgs(args.runtime, containerCtx, plan);
+      const stdoutPath = join(args.logDir, "container.depprobe.stdout.log");
+      const stderrPath = join(args.logDir, "container.depprobe.stderr.log");
+      const exitCode = await args.exec({
+        args: probeArgs,
+        stdin: undefined,
+        stdoutPath,
+        stderrPath,
+        idleTimeoutMs: DEPENDENCY_PROBE_IDLE_TIMEOUT_MS,
+        isProvisionerExec: true,
+      });
+      return {
+        exitCode,
+        stdout: existsSync(stdoutPath) ? readFileSync(stdoutPath, "utf8") : "",
+        stderrTail: existsSync(stderrPath) ? readFileSync(stderrPath, "utf8").trim() : "",
+      };
+    },
+  });
 }
 
 // FG-374: verify that the resolved projectDir is mountable before exec'ing.

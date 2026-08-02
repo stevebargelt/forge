@@ -3655,6 +3655,23 @@ async function runContainer(args: {
     // mountpoints authorize the mount itself. Both, or neither — this pairing is
     // the whole fix, because readiness is keyed on the lockfile and mountability
     // is a property of this specific checkout.
+    //
+    // FG-664 DELIBERATELY DID NOT CHANGE THIS ARM, and the reason is worth stating
+    // because the two read-only paths now differ.
+    //
+    // The review lifecycle does not come through here. Every review dispatch —
+    // the discovery lenses AND the rechecker — goes through `forge invoke`
+    // (src/cli/commands/review-wiring.ts), which is where FG-664 put the
+    // host-side attestation and the fail-closed refusal. THIS arm serves the
+    // workflow's own pipeline reds, and its contract is deliberately the opposite
+    // of fail-closed: FG-628 (A5/A6b) requires that a checkout forge cannot
+    // prepare DEGRADES the dispatch — no cache mount, no crash, a recorded
+    // `container.dependency_mountpoints_unavailable` — rather than refusing it.
+    // Routing it through the attesting resolver would convert those degradations
+    // into refusals and would make a cold-cache pipeline red block on a
+    // provisioner, both of which are semantic changes to a lane FG-664 did not
+    // scope. Unifying the two is real work with its own acceptance; it is named
+    // here rather than done silently.
     const cacheKey = safeLockfileHash(repoRootForMount);
     if (cacheKey && isDependencyCacheReady(cacheKey) && projectTreeIsMountable()) {
       depSpawnFields.DEPENDENCY_CACHE_MOUNT_RO = "1";

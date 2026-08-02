@@ -19,6 +19,7 @@ import { invoke, type InvokeArgs, type InvokeResult } from "../../v2/invoke.js";
 import { fixBatchBundleDir, taskDir } from "../../util/paths.js";
 import { readTaskManifest } from "../../v2/task-manifest.js";
 import type { LensProtocolRecord } from "../../v2/review-discovery.js";
+import type { DependencyEnvironmentReceipt } from "../../v2/dependency-provisioning.js";
 import { renderFixBatchEnvelope, verifyMaterializedEnvelope, verifyMaterializedPayload } from "../../store/fix-batches.js";
 import { getRun } from "../../store/runs.js";
 import type { CoordinatorDeps, FixerContext, LensContext, RecheckContextIn } from "../../v2/review-run.js";
@@ -385,6 +386,20 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
     const stamp = readTaskManifest(taskDir(res.runId, res.taskId))?.agentProtocol;
     if (!stamp) return undefined;
     return { protocol: { role: stamp.role, sha256: stamp.sha256, taskId: res.taskId } };
+  };
+
+  // FG-664: the same read, for the dependency-environment receipt the host recorded
+  // before this task's container started — cache key plus the node/ABI/native-package
+  // identity a FORGE-OWNED probe container attested in the reviewer's exact mount
+  // shape. Undefined for a refused/never-dispatched task, for a read-write dispatch,
+  // and for the configurations the resolver reports not-applicable (non-darwin,
+  // FORGE_NO_NM_SHADOW=1, no package-lock.json).
+  const dispatchedDependencyEnvironment = (
+    res: InvokeResult,
+  ): { dependencyEnvironment: DependencyEnvironmentReceipt } | undefined => {
+    if (!res.taskId || !res.runId) return undefined;
+    const receipt = readTaskManifest(taskDir(res.runId, res.taskId))?.dependencyEnvironment;
+    return receipt ? { dependencyEnvironment: receipt } : undefined;
   };
 
   return {
@@ -800,6 +815,17 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
         ok: res.status === "complete",
         taskId: res.taskId,
         result: res.result,
+        // FG-664: the CLASSIFIED failure, forwarded so Stage 8 can tell an
+        // environment fault (`verification_environment_unavailable` — the host
+        // refused the dispatch because it could not give this lane the project's
+        // real native dependencies) from a rechecker that ran and crashed. The
+        // first is a STOP; the second is a refusal that re-enters.
+        ...(res.failureKind !== undefined ? { failureKind: res.failureKind } : {}),
+        // FG-664 / AC3: the engine identity the host attested for THIS dispatch,
+        // read back off the task manifest exactly the way the protocol stamp above
+        // is. The manifest is authoritative (invariant 6); the stage evidence the
+        // coordinator writes from this is an index of it.
+        ...dispatchedDependencyEnvironment(res),
         ...dispatchedProtocol(res),
         ...(res.error !== undefined ? { error: res.error } : {}),
       };
