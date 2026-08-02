@@ -57,10 +57,9 @@ but they do not override current behavior or backlog state.
 
 ## Sources of truth
 
+- Current operator sequencing: [`backlog/PLAN.md`](../backlog/PLAN.md)
 - Current ticket state: the backlog database through `forge backlog`
 - Current run and review state: `forge show` and `forge review show`
 - Current implementation behavior: source, tests, and the operator guides above
-- Historical sequencing snapshot: [`backlog/PLAN.md`](../backlog/PLAN.md);
-  it was last revised on 2026-07-30 and is not a live queue
 
 `backlog/notes.md` is a session handoff, not durable product documentation.

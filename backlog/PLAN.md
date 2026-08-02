@@ -1,133 +1,123 @@
 # Forge Working Plan
 
-> **Status:** historical working-plan snapshot. It was last revised on
-> 2026-07-30 and is not the current work queue or ticket source of truth. Use
-> `forge backlog` for current ticket state and follow the operator's current
-> direction for sequencing.
+**Last revised:** 2026-08-01
 
-**Last revised:** 2026-07-30
+This is a mutable statement of current operator intent. It is not an approval
+boundary, ticket specification, execution record, or source of lifecycle
+truth.
 
-While maintained, this was a mutable statement of operator intent. It was not
-an approval boundary, ticket specification, execution record, or source of
-lifecycle truth.
+The DB-backed backlog is authoritative for ticket scope, acceptance criteria,
+dependencies, and lifecycle state. Forge runtime state is authoritative for
+what is running, blocked, or done. `backlog/notes.md` is a session handoff and
+may lag this plan.
 
-Backlog tickets remain authoritative for problem, scope, acceptance criteria, and dependencies. Forge
-runtime state remains authoritative for what is running, blocked, or done. `backlog/notes.md` remains the
-session handoff. This file is now retained as history.
+**Expected replacement:** the DB-backed priority queue and operator controls in
+FG-496 and FG-591.
 
-**Expected replacement at the time:** the DB-backed priority queue and operator
-controls in FG-496 and FG-591.
+## Current objective
 
-## Objective at the last revision
+Return to product feature work after the evidence-led review stabilization
+program. Ship the dashboard runtime-trend feature, then resume the DB-backed
+operator-work-management sequence.
 
-Stabilize the newly-live evidence-led review lifecycle at its measured fix-cycle boundary, then ship
-the dashboard agent-runtime view and return to the FG-496 operator-work-management program.
+Review-infrastructure follow-ups do not consume the feature slot unless a
+deterministic failure directly blocks the current ticket, required CI, or
+correct publication.
 
-**Recently completed:**
+## Recently completed
 
-- **FG-608** — the Forge repo is cut over to the DB-backed backlog (`086f3b4`); Markdown is a frozen
-  snapshot and ticket verbs are DB-authoritative.
-- **FG-345 / FG-621 / FG-628** — managed workflow isolation is default-on with private writable Git
-  for mutators and fail-closed review-artifact handling.
-- **FG-644 / FG-645 / FG-642 / FG-647** — the known zero-red program is closed: in-container CLI
-  suites execute, the dashboard browser tier is mandatory, and the environment-dependent secondary
-  Node arm and its CI provisioning are removed.
-- **FG-638 → FG-639 → FG-640** — the evidence-led review ledger, staged coordinator,
-  `review_disposition` gate, and feature-workflow migration shipped. Change 0 is retired,
-  `forge review-loop` is deprecated, and FG-541 is superseded on its durable evidence mapping.
-  The lifecycle settled its first production review on FG-647. This is not a claim that its known
-  FG-649 fix-cycle defect is acceptable.
+- **FG-649, FG-650, and FG-653** — stabilized candidate re-anchoring and honest
+  reviewer payload handling.
+- **FG-654** — moved Forge-owned review protocols into atomic seed generation
+  and made missing or stale protocol artifacts fail closed.
+- **PR #191 / FG-657 implementation** — multi-test evidence claims now resolve
+  every named test without substring or fuzzy matching. The still-active DB
+  ticket needs administrative closeout reconciliation, not another
+  implementation run.
+- **FG-660** — restored the intended review cardinality: one discovery pass,
+  at most one remediation batch, and one recheck.
+- **PR #193** — added the documentation index and removed stale assessments.
 
-## Now at the last revision
+## Now
 
-1. **FG-649 — evidence-led candidate re-anchoring.** A post-hoc fixer commit can leave recheck bound
-   to the pre-fix SHA; the FG-639 pilot hit this twice and remains parked before shipping review.
-   Treat this as immediate lifecycle stabilization, not optional hardening. Done means an ordinary
-   fix cycle records the candidate containing the fixes automatically, recheck examines that exact
-   candidate, and shipping review completes without a manual re-anchor. The same ticket owns
-   persisted-workspace resolution and excluding already-resolved findings from later FixBatches.
+1. **FG-648 — dashboard agent runtime over time.** Add overall and per-role
+   average runtime trends for 1d, 7d, 30d, 90d, and all windows. Keep the
+   implementation and coverage inside the dashboard workspace. Browser
+   coverage must execute with zero skips.
 
-## Next at the last revision
+   Treat this as the next product-feature slot. Do not substitute review
+   hardening or queue infrastructure unless it demonstrably blocks FG-648.
 
-1. **FG-648 — dashboard agent runtime over time:** overall and per-role averages, sample counts, and
-   1d/7d/30d/90d/all windows. Dashboard owns the query, UI, and tests; no cross-package test coupling.
-2. **FG-609 — FG-496 Slice D:** queue rank, membership, revision-bound readiness, blocker evidence,
-   and event-history primitives.
-3. **FG-610 — FG-496 Slice E:** atomic claims, leases, recovery, capacity accounting, and canonical
-   claim-next.
-4. **FG-591 — operator work queue:** Kanban/CLI/API surface and capacity-limited dispatch over the
-   queue primitives.
-5. Reconcile and close **FG-496** with its aggregate acceptance walk after the queue primitives and
-   operator surface prove the DB-backed objective end to end.
+## Next
 
-`Next` was deliberately short. Its ordering expressed operator intent at the
-last revision; it did not override ticket dependencies or authorize execution.
+1. **FG-609 — FG-496 Slice D:** queue rank, explicit membership,
+   revision-bound readiness, blocker evidence, and event history.
+2. **FG-610 — FG-496 Slice E:** atomic claims, leases, recovery, capacity
+   accounting, and canonical claim-next.
+3. **FG-591 — operator work queue:** Kanban, CLI/API controls, and
+   capacity-limited dispatch over the queue primitives.
+4. **FG-496 aggregate closeout:** reconcile the DB-backed backlog program
+   against its acceptance criteria after FG-609, FG-610, and FG-591 ship.
+5. **FG-576 — provider-neutral interactive orchestrator launcher:** resolve
+   Claude or Codex from model policy after the operator queue program closes.
 
-## Committed follow-on at the last revision
+`Next` is deliberately short. Ordering here expresses current operator intent;
+it does not override ticket dependencies or authorize scope expansion.
 
-- Continue **FG-593** after FG-591 and the FG-496 closeout according to its remaining
-  operator-work-management scope.
+## Captured follow-ups that do not preempt `Now`
 
-## Interruption policy recorded at the last revision
+- **FG-652** — stage-record SHA in the crash-after-advance recovery window.
+- **FG-655** — documentation-stage commit authority. Until fixed, required
+  durable docs must be committed before review; do not rely on a post-review
+  docs stage to rescue uncommitted edits.
+- **FG-656** — fanout model resolution can drift from the held seed
+  generation.
+- **FG-657** — reconcile and close the DB ticket for the already-shipped PR
+  #191 implementation.
+- **FG-658** — test evidence annotated with a source filename is not matched.
+- **FG-659** — guard the remaining `lens_outcomes_json` writer and correct a
+  stale source comment.
+- **FG-545** — add a docs/research-only CI fast path while preserving
+  exact-head required checks.
 
-An item may move ahead of `Next` only for:
+These remain real work. They move ahead only under the interruption policy
+below, not because they are adjacent to recently completed review work.
+
+## Interruption policy
+
+An item may move ahead of `Now` or `Next` only for:
 
 - demonstrated operator-blocking behavior;
 - failing required CI;
-- credible data-loss or wrong-ship risk;
-- a defect blocking the current objective;
-- **ANY persistently red test, or a required tier that silently does not execute, on any supported
-  environment.** Red tests are never a tax. A skip is never evidence: restore execution rather than
-  converting red to skip. An alternate lane only counts when it is mandatory, runs the same
-  assertion at the same candidate SHA, and records that executed identity.
+- credible data-loss, security, or wrong-publication risk;
+- a deterministic defect blocking the current objective;
+- a required test tier that does not execute.
 
-A newly discovered hardening opportunity is captured in the backlog but does not automatically become
-`Now` or `Next`.
+A newly discovered hardening opportunity is recorded in the DB backlog but does
+not automatically become the next task. Do not open speculative follow-up
+tickets for limitations that fail loudly, already belong to a parent ticket,
+or have no demonstrated impact.
 
-## Explicitly deferred at the last revision
+## Execution rules
 
-- **FG-650** — strict review schemas rejected honest reviewer payloads with extra legacy keys three
-  times. Real, with retry/accepted-lens workarounds, but its ticket is title-only and must become
-  implementation-ready before routing. Do not promote it ahead of demonstrated lifecycle
-  correctness work.
-- **FG-641** — behavior-oriented test organization. Its cleanup inventory now includes the
-  ticket-prefixed files added by FG-642/FG-638/FG-639/FG-640/FG-647; sixteen of those were added
-  after the new placement rule took effect. Do not file another cleanup ticket. New ticket-prefixed
-  files require the documented cross-layer capstone exception and its recorded reason.
-- **FG-646** — the one-time migration dry-run write defect is off-queue by operator decision. Forge
-  is single-user and the relevant projects are being cut over; do not polish obsolete migration
-  machinery.
-- **FG-626** — `forge launch run` does not propagate the caller's environment, so every `FORGE_*` gate is
-  inert under the launch pattern the orchestrator template mandates. Real and operator-facing, but it has
-  a working escape (`forge launch run -- env VAR=… <cmd>`), so it is captured rather than promoted. Note
-  the only reason it surfaced is that FG-612 independently refused the dispatch; a safety gate the
-  operator believes is armed and is not is the worst shape this can take, so promote it if it recurs
-  anywhere that guard does not cover.
-- FG-597, FG-598, FG-599, FG-600, FG-601, FG-602, and FG-604 follow-up hardening, unless promoted by the
-  interruption policy.
-- FG-625 remains deferred unless it becomes a demonstrated blocker or required-CI failure.
-- **FG-637** and further worktree/isolation hardening after FG-345, unless a deterministic reproduction
-  exposes data loss, corruption, wrong-candidate behavior, or failure in a supported workflow.
-- Broad provider-adapter and workflow-semantics programs.
-- Declarative phase mutation contracts and the red/green workflow described in the 2026-07-21 Vjeko
-  article.
+- Start implementation from current `main` in an isolated disposable clone or
+  task workspace, never by editing the live checkout.
+- Evidence-led review runs once: one discovery pass, at most one remediation
+  batch, and one recheck. Remaining work becomes an explicit disposition and
+  follow-up, not another internal convergence cycle.
+- Required documentation is committed before review while FG-655 remains open.
+- Merge only when required CI is green at the actual PR head.
+- Close shipped tickets with acceptance-criteria evidence from the merged
+  candidate.
+- A dirty or untracked operator file in the live checkout is not part of an
+  implementation candidate unless the operator explicitly places it in scope.
 
-## Working rules recorded at the last revision
+## Maintenance rules
 
-- Agent work and branch setup happen in the disposable clone (`~/code/forge-fg356`), never in
-  `~/code/forge`. Task workspaces are created under `~/.forge/worktrees/clones/` regardless of project
-  dir, so the clone substrate is still exercised either way.
-- No destructive git command (`reset --hard`, `checkout -f`, `clean`) runs against the live checkout as
-  part of a compound chain. Check the working tree as its own step first. This rule exists because a
-  `reset --hard` here destroyed five files of uncommitted operator work on 2026-07-27; it was recovered
-  from a Codex session transcript, which is a real recovery surface worth checking before calling
-  anything unrecoverable.
-
-## Historical maintenance rules
-
-- Keep `Next` to roughly five items.
-- Link ticket IDs instead of copying their acceptance criteria here.
-- Do not record progress percentages or duplicate live status.
-- Prefer rewriting stale intent over preserving historical wording.
-- Commit plan-only changes as small backlog commits.
-- Retire this file when the DB-backed queue becomes the authoritative expression of operator intent.
+- Keep `Now` to one product objective and `Next` to roughly five items.
+- Update this file when operator sequencing changes; do not preserve stale
+  priorities as if they were current.
+- Link ticket IDs instead of copying full acceptance criteria.
+- Do not duplicate live run state or record progress percentages here.
+- Retire this file only when FG-496/FG-591 provide the authoritative priority
+  queue and operator controls that replace it.

@@ -1,10 +1,8 @@
 # Research
 
 Research records evidence and alternatives; it does not authorize implementation
-or override an accepted decision. Current intent belongs in an accepted PRD or
-DB-backed backlog ticket. The former living plan at
-[`backlog/PLAN.md`](../../backlog/PLAN.md) is retained as a historical sequencing
-snapshot.
+or override an accepted decision. Current intent belongs in a PRD, backlog ticket,
+or [`backlog/PLAN.md`](../../backlog/PLAN.md).
 
 ## Index
 
