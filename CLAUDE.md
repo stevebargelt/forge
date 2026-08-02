@@ -71,7 +71,8 @@ src/
 ├── types/          Authoritative TypeScript types (matches the sketch)
 └── util/           paths, ids, creds, auth-profiles, git-root, run-lock, heartbeats
 
-seeds/              Default agent dirs and constraints; copied into ~/.forge/ by install-seeds.sh
+seeds/              Agent dirs, constraints, workflows, runtimes → ~/.forge/ via install-seeds.sh;
+                    agent-protocols/ has no flat copy — only forge upgrade publishes it (FG-654)
 docker/             Agent image
 docs/               How-tos and concepts
 learnings/          ADRs and patterns for forge itself
