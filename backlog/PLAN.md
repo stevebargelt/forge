@@ -1,6 +1,6 @@
 # Forge Working Plan
 
-**Last revised:** 2026-08-01
+**Last revised:** 2026-08-02
 
 This is a mutable statement of current operator intent. It is not an approval
 boundary, ticket specification, execution record, or source of lifecycle
@@ -37,23 +37,45 @@ correct publication.
 - **FG-660** — restored the intended review cardinality: one discovery pass,
   at most one remediation batch, and one recheck.
 - **PR #193** — added the documentation index and removed stale assessments.
+- **FG-648** (`c866b103`, PR #195) — shipped the dashboard agent-runtime trends,
+  then REOPENED the same day: AC5 was recorded met on evidence that covered how
+  the chart's text looks but never that the chart can be read. See `Now`.
+- **FG-662** (`9f257828`, PR #196) — agent runtime now derives from the agent's
+  own exit rather than a terminal timestamp a sweep rewrote. Closed with an
+  explicit operator override recorded, NOT a mechanically settled ledger; the
+  override's cause is FG-664 below.
 
 ## Now
 
-1. **FG-648 — dashboard agent runtime over time.** Add overall and per-role
-   average runtime trends for 1d, 7d, 30d, 90d, and all windows. Keep the
-   implementation and coverage inside the dashboard workspace. Browser
-   coverage must execute with zero skips.
+1. **FG-664 — the review rechecker substitutes a SQLite engine.** PROMOTED under
+   the interruption policy on operator instruction (2026-08-02), ahead of
+   FG-609 and every other DB-touching review.
 
-   Treat this as the next product-feature slot. Do not substitute review
-   hardening or queue infrastructure unless it demonstrably blocks FG-648.
+   After an ABI mismatch — linux-arm64 container, darwin-arm64 native binding in
+   the mounted `node_modules` — the rechecker's harness silently swaps
+   `better-sqlite3` for a `node:sqlite` shim and runs the suite against a
+   different engine. It already produced three false "still present" verdicts on
+   FG-662, which had to be merged on an operator override. The lane is not
+   conservative in either direction: a test passing only under the shim would
+   recheck as resolved.
+
+   This blocks correct publication and a required verification lane, which is
+   what authorizes the promotion. Until it lands, no DB-touching review can be
+   trusted to settle on its own evidence.
+
+2. **FG-648 — reopened for AC5.** Two legibility failures the operator found on
+   live data: the chart has no y-axis, scale or unit (its SVG carries only a
+   peak annotation and the date labels), and bare date labels on a UTC grid are
+   misread in a non-UTC timezone. New AC8-11. The UTC-aligned grid itself stays.
 
 ## Next
 
 1. **FG-609 — FG-496 Slice D:** queue rank, explicit membership,
-   revision-bound readiness, blocker evidence, and event history.
+   revision-bound readiness, blocker evidence, and event history. **Gated on
+   FG-664** — it is DB-touching and its review cannot be trusted until the
+   rechecker runs the shipping engine.
 2. **FG-610 — FG-496 Slice E:** atomic claims, leases, recovery, capacity
-   accounting, and canonical claim-next.
+   accounting, and canonical claim-next. Same gate.
 3. **FG-591 — operator work queue:** Kanban, CLI/API controls, and
    capacity-limited dispatch over the queue primitives.
 4. **FG-496 aggregate closeout:** reconcile the DB-backed backlog program
@@ -79,9 +101,20 @@ it does not override ticket dependencies or authorize scope expansion.
   stale source comment.
 - **FG-545** — add a docs/research-only CI fast path while preserving
   exact-head required checks.
+- **FG-661** — FG-648 review residue: the WCAG contrast test asserts the peak
+  label twice and never an axis label, and a read that fails after a successful
+  load leaves a frozen chart with no staleness signal.
+- **FG-663** — runs lose their repository identity when a checkout is deleted,
+  orphaning 8.4% of task history as "Unknown repository". The durable project
+  identity is the key and the tag; `.forge/config.yml`'s git-tracked
+  `project_key` already survives cloning and is the preferred source.
+- **FG-665** — the FG-662 attempt-scoping bound drops an unparseable audit
+  timestamp, which on a sole administrative marker re-admits the artifact.
+  Deliberately kept deferred (operator instruction, 2026-08-02).
 
 These remain real work. They move ahead only under the interruption policy
 below, not because they are adjacent to recently completed review work.
+FG-664 was promoted out of this set on 2026-08-02; the rest stay put.
 
 ## Interruption policy
 
