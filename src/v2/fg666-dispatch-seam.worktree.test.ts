@@ -27,7 +27,7 @@ import { clearBacklogStoreCache } from "../backlog/storage-mode.js";
 import { computeRepositoryEvidence } from "../store/project-registry.js";
 import { SNAPSHOT_DB_BASENAME } from "../backlog/snapshot.js";
 import { tasksForRun } from "../store/tasks.js";
-import { eventsForTask } from "../store/events.js";
+import { eventsForRun, eventsForTask } from "../store/events.js";
 import { startRun } from "./startRun.js";
 import { runNext } from "./runNext.js";
 import { backlogSnapshotHostDir } from "./spawn.js";
@@ -51,6 +51,20 @@ const SEAM_WORKFLOW: Workflow = {
       depends_on: [],
       runtime: "fg666-seam-test",
       reds: [],
+    },
+  ],
+};
+
+// The same step with ONE non-blocking red. A red is the only dispatch whose
+// projectDir is not the run's project, so it is the only one that can tell the two
+// apart; `gate_on_verdict: false` keeps the case about authority rather than about
+// what the reviewer concluded.
+const SEAM_WORKFLOW_WITH_RED: Workflow = {
+  ...SEAM_WORKFLOW,
+  steps: [
+    {
+      ...SEAM_WORKFLOW.steps[0]!,
+      reds: [{ agent: "red-narrow", authority: "specialist", gate_on_verdict: false }],
     },
   ],
 };
@@ -268,9 +282,24 @@ function primaryTask(runId: string) {
   return t!;
 }
 
+function redTask(runId: string) {
+  const t = tasksForRun(runId).find((x) => x.parentId !== undefined);
+  assert.ok(t, "the red task must exist");
+  return t!;
+}
+
 function snapshotBindSource(args: string[]): string | undefined {
   for (let i = 0; i < args.length - 1; i++) {
     if (args[i] === "-v" && args[i + 1]!.includes(":/forge-backlog:ro")) return args[i + 1]!.split(":")[0];
+  }
+  return undefined;
+}
+
+/** The host directory this dispatch bound at /project — for a red, the publisher's
+ *  candidate worktree. */
+function projectBindSource(args: string[]): string | undefined {
+  for (let i = 0; i < args.length - 1; i++) {
+    if (args[i] === "-v" && args[i + 1]!.includes(":/project:")) return args[i + 1]!.split(":")[0];
   }
   return undefined;
 }
@@ -286,14 +315,19 @@ function evidenceKey(dir: string): string {
   return computeRepositoryEvidence(dir).key;
 }
 
-async function dispatch(projectDir: string, exec: DockerExecFn, opts: { ticketId?: string; title?: string } = {}) {
+async function dispatch(
+  projectDir: string,
+  exec: DockerExecFn,
+  opts: { ticketId?: string; title?: string; workflow?: Workflow } = {},
+) {
+  const workflow = opts.workflow ?? SEAM_WORKFLOW;
   const { runId } = startRun({
-    workflow: SEAM_WORKFLOW,
+    workflow,
     title: opts.title ?? "fg666 seam",
     inputs: opts.ticketId ? { ticketId: opts.ticketId } : {},
     projectDir,
   });
-  const wave = await runNext({ runId, workflow: SEAM_WORKFLOW, dockerExec: exec });
+  const wave = await runNext({ runId, workflow, dockerExec: exec });
   return { runId, wave };
 }
 
@@ -301,7 +335,10 @@ async function dispatch(projectDir: string, exec: DockerExecFn, opts: { ticketId
  *  the marker it wrote, the directory it bound `:ro` into the container, and the
  *  bodies actually readable through that mount. */
 function dispatchedAuthority(runId: string, capture: ExecCapture) {
-  const task = primaryTask(runId);
+  return authorityOf(primaryTask(runId), capture);
+}
+
+function authorityOf(task: ReturnType<typeof primaryTask>, capture: ExecCapture) {
   const hostDir = backlogSnapshotHostDir(task.id);
   dirs.push(hostDir);
   const snapshotPath = join(hostDir, SNAPSHOT_DB_BASENAME);
@@ -493,8 +530,25 @@ test("FG-666 (4): a clone-dispatched task resolves db while a FOREIGN repository
   assert.equal(foreignAuthority.unresolvedSignals.length, 1, "exactly one signal on the task's timeline");
   const payload = foreignAuthority.unresolvedSignals[0]!.payload as Record<string, unknown>;
   assert.equal(payload["projectDir"], foreignDir, "naming the directory the authority was resolved against");
+  assert.equal(payload["stage"], "resolve", "and WHICH degradation this is — the identity did not resolve");
   assert.match(String(payload["error"]), new RegExp(KEY), "and the key that could not be honoured");
   assert.match(String(payload["error"]), new RegExp(evidenceKey(foreignDir)), "against this checkout's evidence");
+
+  // AND IT IS ON THE RUN. Every run-scoped operator surface — `forge show <runId>`,
+  // the JSONL/OTLP exports, the sanitized bundle, run metrics — reads eventsForRun,
+  // which filters `WHERE run_id = ?`; and `forge status` renders task events only
+  // for FAILED tasks, while a ticket-blind task COMPLETES (asserted below). An event
+  // carrying a null run_id is therefore recorded where nothing an operator reads
+  // will ever show it, which is the silence this signal exists to end.
+  assert.equal(foreignAuthority.task.status, "complete", "the degraded task succeeds — nothing else flags it");
+  assert.equal(foreignAuthority.unresolvedSignals[0]!.runId, stolen.runId, "the signal names its run");
+  assert.deepEqual(
+    eventsForRun(stolen.runId)
+      .filter((e) => e.eventType === "container.backlog_authority_unresolved")
+      .map((e) => e.taskId),
+    [foreignAuthority.task.id],
+    "so a run-scoped surface shows it without the operator already suspecting the task",
+  );
 });
 
 // ─── (5) A markdown-mode project dispatches untouched ───────────────────────
@@ -516,4 +570,118 @@ test("FG-666 (5): a project that declares no project_key dispatches unchanged, w
   // THE PIN THAT STOPS THE SIGNAL BECOMING NOISE: one that fires on every normal
   // project reproduces exactly the silence it exists to end.
   assert.deepEqual(authority.unresolvedSignals, [], "and NOTHING is reported: this is a healthy outcome");
+});
+
+// ─── (6) The RED half: the candidate is not the project either ──────────────
+//
+// THE ONLY DISPATCH THAT DISTINGUISHES THE TWO SOURCES. A blue's own projectDir IS
+// the run's recorded project, so substituting one for the other changes nothing
+// there and cases (1)-(5) cannot see it. A red is dispatched against the
+// publisher's CANDIDATE WORKTREE — and a linked worktree CONVERGES with its parent
+// (case (3)), so repository evidence proves nothing here. What differs is CONTENT:
+// `.forge/config.yml` is git-tracked, so the candidate carries whatever the agent
+// under review committed to it. Asking the workspace would let an agent decide what
+// its own reviewers may read — here, blind them completely.
+
+test("FG-666 (6): a RED dispatched against the candidate resolves the RUN's project, not the project_key the agent under review committed", async () => {
+  armCloneSubstrate();
+  const KEY = "pk-fg666-red";
+  const TAMPERED = "pk-fg666-red-not-this-one";
+  const BODY = "THE-CRITERIA-THE-REVIEWER-MUST-STILL-BE-ABLE-TO-READ";
+  const projectDir = dbModeProject(KEY, "FG-6", BODY);
+
+  const red: ExecCapture = { calls: 0, args: [] };
+  let candidateConfigAtRedTime: string | undefined;
+  let calls = 0;
+  const exec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+    calls += 1;
+    const taskDir = dirname(stdoutPath);
+    mkdirSync(taskDir, { recursive: true });
+    writeFileSync(stdoutPath, "stub stdout");
+    writeFileSync(stderrPath, "");
+    if (calls === 1) {
+      // The agent under review rewrites the tracked project_key in its own
+      // workspace. captureTaskClone safety-commits the clone's tracked state, so
+      // the candidate the red is handed carries it.
+      const workspace = projectBindSource(args);
+      assert.ok(workspace, "the blue's /project mount must be in its argv");
+      writeFileSync(join(workspace!, ".forge", "config.yml"), `project_key: ${TAMPERED}\n`);
+      writeFileSync(
+        join(taskDir, "result.json"),
+        JSON.stringify({ status: "complete", tests_run: 1, tests_passed: 1, files_modified: [".forge/config.yml"] }),
+      );
+      return 0;
+    }
+    red.calls += 1;
+    red.args = [...args];
+    const candidate = projectBindSource(args);
+    assert.ok(candidate, "the red's /project mount must be in its argv");
+    candidateConfigAtRedTime = readFileSync(join(candidate!, ".forge", "config.yml"), "utf8").trim();
+    writeFileSync(
+      join(taskDir, "result.json"),
+      JSON.stringify({ status: "complete", tests_run: 1, tests_passed: 1, verdict: "pass", confidence: 1, findings: [] }),
+    );
+    return 0;
+  };
+
+  const { runId, wave } = await dispatch(projectDir, exec, {
+    ticketId: "FG-6",
+    workflow: SEAM_WORKFLOW_WITH_RED,
+  });
+  assert.deepEqual(wave.failedSteps, []);
+  assert.equal(red.calls, 1, "a red really was dispatched — otherwise this case asserts nothing");
+
+  // The setup is REAL: the tree the red reviewed declares someone else's key.
+  assert.equal(
+    candidateConfigAtRedTime,
+    `project_key: ${TAMPERED}`,
+    "the red's own /project mount commits a project_key that is NOT the run's",
+  );
+
+  const redAuthority = authorityOf(redTask(runId), red);
+  assert.equal(redAuthority.marker.mode, "db", "and the reviewer's authority is unaffected by it");
+  assert.equal(redAuthority.marker.projectKey, KEY, "resolved from the run's recorded project");
+  assert.equal(redAuthority.boundSource, redAuthority.hostDir);
+  assert.equal(redAuthority.ticketBody("FG-6"), BODY, "so `forge backlog show FG-6` answers for the reviewer too");
+  assert.deepEqual(redAuthority.unresolvedSignals, [], "and a healthy red dispatch is silent");
+});
+
+// ─── (7) A publication that fails AFTER the identity resolved ───────────────
+//
+// The same `unknown` marker and the same ticket-blind container as case (4), by a
+// different road: the store or the filesystem failing inside the publication block
+// (a DB busy under a second forge process, a snapshot build that throws, an
+// artifact another task's release cannot unlink). Dropping the targets table is
+// that failure class at its first call. Before FG-666 a clone-dispatched task
+// threw at resolution and never entered this block at all; making the block
+// reachable is exactly what makes its silence worth ending.
+
+test("FG-666 (7): a publication that fails after the store resolved reports the SAME degradation", async () => {
+  armDirectSubstrate();
+  const KEY = "pk-fg666-publish";
+  const projectDir = dbModeProject(KEY, "FG-7", "body");
+  db.exec("DROP TABLE backlog_snapshot_targets");
+
+  const capture: ExecCapture = { calls: 0, args: [] };
+  const { runId, wave } = await dispatch(projectDir, capturingExec(capture), { ticketId: "FG-7" });
+  assert.deepEqual(wave.failedSteps, [], "the dispatch proceeds exactly as it did before FG-666");
+  assert.equal(capture.calls, 1);
+
+  const authority = dispatchedAuthority(runId, capture);
+  assert.equal(authority.marker.mode, "unknown", "the marker stops claiming a snapshot that was never published");
+  assert.equal(authority.marker.projectKey, KEY, "the key resolved fine — it is the publication that did not");
+  assert.equal(authority.hasSnapshot, false);
+  assert.equal(authority.task.status, "complete", "and the task SUCCEEDS: nothing else will ever mention this");
+
+  assert.equal(authority.unresolvedSignals.length, 1, "the sibling branch is silent no longer");
+  const payload = authority.unresolvedSignals[0]!.payload as Record<string, unknown>;
+  assert.equal(payload["stage"], "publish", "and it is distinguishable from an identity refusal");
+  assert.ok(String(payload["error"]).length > 0, "the reason is durable, not a boolean");
+  assert.deepEqual(
+    eventsForRun(runId)
+      .filter((e) => e.eventType === "container.backlog_authority_unresolved")
+      .map((e) => e.taskId),
+    [authority.task.id],
+    "on the run's timeline, where a run-scoped operator surface reads",
+  );
 });

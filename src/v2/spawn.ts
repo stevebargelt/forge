@@ -209,22 +209,41 @@ function writeAuthorityMarkerOrRecord(
  *  twelve consecutive dispatches. The dispatch still proceeds exactly as before;
  *  what changes is that the degradation is now said out loud and recorded.
  *
- *  Called ONLY where resolveBacklogStore THREW — a project_key was declared and
- *  could not be honoured. A project declaring none resolves `markdown` and reaches
- *  none of this, because a signal that fires on every normal project reproduces the
- *  silence it exists to end. */
-function reportUnresolvedAuthority(taskId: string, projectDir: string, e: unknown): void {
+ *  THE RUN ID IS NOT DECORATION. Every run-scoped operator surface — `forge show
+ *  <runId>`, the JSONL/OTLP exports, the sanitized bundle and run metrics — reads
+ *  eventsForRun, which filters `WHERE run_id = ?`; and `forge status` renders task
+ *  events only for FAILED tasks, while a ticket-blind task completes successfully.
+ *  An event logged with the task alone is therefore recorded where no surface an
+ *  operator reads will ever show it, which is the silence this signal exists to end.
+ *
+ *  Called on BOTH paths that dispatch an `unknown` marker with a project_key
+ *  declared: `resolve`, where resolveBacklogStore threw, and `publish`, where it
+ *  resolved `db` and the snapshot publication then failed. The two degrade to the
+ *  same ticket-blind container, so they get the same signal and are told apart by
+ *  `stage`. A project declaring NO key resolves `markdown` and reaches neither,
+ *  because a signal that fires on every normal project reproduces that silence. */
+function reportUnresolvedAuthority(
+  taskId: string,
+  runId: string | undefined,
+  projectDir: string,
+  stage: "resolve" | "publish",
+  e: unknown,
+): void {
   const error = (e as Error).message ?? String(e);
   try {
     logEvent("container.backlog_authority_unresolved", {
+      runId,
       taskId,
-      payload: { taskId, projectDir, error },
+      payload: { taskId, projectDir, stage, error },
     });
   } catch {
     // The store is unreachable too; stderr below is then the only trace.
   }
   console.error(
-    `forge: could not resolve the backlog authority for ${taskId} from ${projectDir} (${error}). ` +
+    (stage === "resolve"
+      ? `forge: could not resolve the backlog authority for ${taskId} from ${projectDir} (${error}). `
+      : `forge: resolved the backlog authority for ${taskId} from ${projectDir} but could not publish its ` +
+        `ticket snapshot (${error}). `) +
       `The container will assert NO ticket authority and refuse backlog reads; the dispatch proceeds.`,
   );
 }
@@ -267,6 +286,7 @@ export function prepareBacklogSnapshotMount(
   projectDir: string,
   taskId: string,
   ticketId?: string,
+  runId?: string,
 ): BacklogSnapshotMount {
   const hostDir = backlogSnapshotHostDir(taskId);
   const base = { hostDir, containerDir: BACKLOG_SNAPSHOT_CONTAINER_PATH };
@@ -274,7 +294,7 @@ export function prepareBacklogSnapshotMount(
   try {
     store = resolveBacklogStore(projectDir);
   } catch (e) {
-    reportUnresolvedAuthority(taskId, projectDir, e);
+    reportUnresolvedAuthority(taskId, runId, projectDir, "resolve", e);
     const markerError = writeAuthorityMarkerOrRecord(hostDir, { mode: "unknown", projectKey: null, taskId });
     return { ...base, mode: "unknown", projectKey: null, ...(markerError ? { markerError } : {}) };
   }
@@ -336,10 +356,20 @@ export function prepareBacklogSnapshotMount(
       projectKey,
       ...(dispatchedTicket ? { dispatchedTicket } : {}),
     };
-  } catch {
+  } catch (e) {
     // The publication failed. The marker must NOT keep claiming a snapshot is
     // there — that would refuse for the wrong reason. Say `unknown` and let the
     // in-container reader refuse on the honest one.
+    //
+    // AND SAY SO. This lands on exactly the `unknown` marker the resolve branch
+    // above lands on — the same ticket-blind container, reached by a store or
+    // filesystem error (a busy DB under a second forge process, a failed snapshot
+    // build, an unlinkable artifact from another task's release) rather than by an
+    // identity refusal. Leaving this half silent while the other half reports would
+    // half-meet the criterion on the sibling path, and it is THIS diff that makes
+    // the block reachable for clone-dispatched tasks at all: before it they threw
+    // at resolveBacklogStore and never entered it.
+    reportUnresolvedAuthority(taskId, runId, projectDir, "publish", e);
     const markerError = writeAuthorityMarkerOrRecord(hostDir, { mode: "unknown", projectKey, taskId });
     return { ...base, mode: "unknown", projectKey, ...(markerError ? { markerError } : {}) };
   }
@@ -920,6 +950,10 @@ export type BuildDockerArgsOpts = {
    *  happens to run in. Absent means "PROJECT_DIR is the project", which is the
    *  pre-FG-666 behaviour and what `forge invoke` still relies on. */
   backlogAuthorityDir?: string;
+  /** FG-666: the run this dispatch belongs to. Carried for the sake of the
+   *  degradation signal alone — an authority event without it lands on no
+   *  run-scoped operator surface. Absent for `forge invoke`, which has no run. */
+  runId?: string;
 };
 
 export function buildDockerArgs(
@@ -1229,6 +1263,7 @@ export function buildDockerArgs(
     opts.backlogAuthorityDir ?? ctx.PROJECT_DIR,
     ctx.TASK_ID,
     ctx.TICKET_ID,
+    opts.runId,
   );
   args.push("-v", `${snapshotMount.hostDir}:${snapshotMount.containerDir}:ro`);
   args.push("-e", `FORGE_BACKLOG_SNAPSHOT_DIR=${snapshotMount.containerDir}`);

@@ -3794,7 +3794,7 @@ async function runContainer(args: {
 
   let dockerArgs;
   try {
-    dockerArgs = buildDockerArgs(runtime, spawnCtx, { backlogAuthorityDir: authorityDir });
+    dockerArgs = buildDockerArgs(runtime, spawnCtx, { backlogAuthorityDir: authorityDir, runId: args.runId });
   } catch (e) {
     const msg = `buildDockerArgs failed: ${(e as Error).message}`;
     cleanupStagedAuth(dir); // AWN-8
