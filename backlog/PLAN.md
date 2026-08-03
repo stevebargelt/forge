@@ -113,6 +113,11 @@ it does not override ticket dependencies or authorize scope expansion.
 - **FG-667** — FG-664 residue: the probe's platform filter prunes a multi-arch
   prebuilds directory, permanently refusing a correct cache; plus a stale
   review-wiring comment.
+- **FG-672** — the review evidence validator scores a deliberate mutation
+  failure as a candidate failure, so mutation-proven resolution evidence is
+  refused. Third false-negative shape after FG-657 and FG-658, and the first to
+  force an operator gate override on a merged ticket (FG-666). Deterministic
+  repro on `task-review-rechecker-fc4801`.
 - **FG-668** — the `fg664-recheck-replay` harness hardcodes the default review
   id in its `in_place` evidence block and pins `REPLAY_REFS` to RF-1/RF-3/RF-4,
   so `--candidate` does not generalize. FG-664's AC4 proof is reproducible only
