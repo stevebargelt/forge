@@ -81,13 +81,6 @@ const POLICY: Record<FailureKind, RetryDisposition> = {
   lane_taken_over:      { retryable: true, reason: "this attempt's publication-lane lease lapsed and a later attempt claimed the lane (AD-2/AD-7). Terminal for this attempt only — nothing was published and nothing needs reaping", advice: "retry to enqueue a NEW publication attempt with a fresh candidate worktree" },
 
   verification_environment_unavailable: { retryable: true, reason: "dependency provisioning failed before the verification could run — the tests never got a verdict", advice: "check the project's dependency install (network, registry auth, lockfile) before retrying" },
-
-  // FG-666 AC4. The split is the point: a re-dispatch re-resolves the authority from
-  // scratch, so the question each of these answers is "can re-resolving possibly
-  // reach a different answer?".
-  backlog_authority_conflict: { retryable: false, reason: "this dispatch is anchored to a ticket, but the project declares a project_key the registry maps to DIFFERENT repository evidence — nothing was started, and re-resolving would refuse identically every time until the declaration or the registration changes", advice: "reconcile `.forge/config.yml`'s project_key with the registered project (the failure names the config, registered and evidence keys), then `forge retry <id>`" },
-  backlog_authority_unresolvable: { retryable: true, reason: "the backlog store could not be resolved, or its snapshot could not be published, so the agent would have run unable to read the ticket it was dispatched for. Nothing was started; a retry re-resolves the authority from scratch rather than reusing this outcome", advice: "check that the forge store is reachable and the project's backlog is intact, then `forge retry <id>`" },
-  backlog_ticket_unreadable: { retryable: true, reason: "the project's backlog store resolved, but the ticket this run is anchored to has no readable row in it (missing, archived, or a failed read) — the snapshot would not have contained the acceptance criteria the work is judged against. Nothing was started", advice: "restore or re-open the ticket named in the error (`forge backlog show <ticket>`), then `forge retry <id>` — the retry re-reads it at dispatch" },
 };
 
 const NO_KIND: RetryDisposition = { retryable: true, reason: "no recorded failure kind; re-dispatch" };

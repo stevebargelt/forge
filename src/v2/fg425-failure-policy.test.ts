@@ -55,9 +55,6 @@ const ALL_FAILURE_KINDS: Record<FailureKind, true> = {
   gate_rejected: true,
   verification_environment_unavailable: true,
   pre_container_crash: true,
-  backlog_authority_conflict: true,
-  backlog_authority_unresolvable: true,
-  backlog_ticket_unreadable: true,
   unknown: true,
 };
 

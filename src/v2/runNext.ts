@@ -62,7 +62,7 @@ import { deriveUpstream } from "./inputs.js";
 import { composeSystemPrompt } from "./compose.js";
 import { STALE_PROTOCOL_FAILURE_KIND } from "./agent-protocol.js";
 import { filterConstraints, loadAllConstraints } from "./constraints.js";
-import { buildDockerArgs, buildProvisionerDockerArgs, prepareDependencyEnvironmentForDispatch, resolveProjectContainerPath, preflightProjectMount, resolveDispatchBacklogAuthority, publishBacklogSnapshot, releaseDispatchBacklogSnapshot, dispatchIsBlind, GIT_UNAVAILABLE_EXIT_CODE, type SpawnContext, type BacklogSnapshotMount, type DispatchBacklogAuthority } from "./spawn.js";
+import { buildDockerArgs, buildProvisionerDockerArgs, prepareDependencyEnvironmentForDispatch, resolveProjectContainerPath, preflightProjectMount, GIT_UNAVAILABLE_EXIT_CODE, type SpawnContext } from "./spawn.js";
 import { assertSelfHostDispatchAllowed } from "./self-host-guard.js";
 import { resolveAuthStateForContainer, AuthProfileError, roleUsesBrowser, cleanupStagedAuth } from "./auth-state.js";
 import { loadProjectAuthProfile, resolveProjectAuthForContainer, ProjectAuthError } from "./project-auth.js";
@@ -3436,155 +3436,6 @@ async function runContainer(args: {
     });
   }
 
-  // The manifest is ASSEMBLED here and COMMITTED at two points: the FG-666 refusal
-  // below (which starts no container and must still leave the recorded reason on
-  // the same surface that answers "why this config"), and the normal pre-spawn
-  // write further down. One writer, so the two can never drift.
-  // ACCUMULATED, not replaced: the AC4 refusal below can commit the manifest a
-  // second time (to land its warning) after the normal pre-spawn write has already
-  // recorded the dependency-environment receipt, and a second write that dropped
-  // that receipt would quietly erase attested evidence.
-  const manifestExtras: { dependencyEnvironment?: DependencyEnvironmentReceipt } = {};
-  const commitTaskManifest = (extra: { dependencyEnvironment?: DependencyEnvironmentReceipt } = {}): void => {
-    Object.assign(manifestExtras, extra);
-    writeTaskManifest(dir, {
-      taskId: args.taskId,
-      runId: args.runId,
-      files: { prompt: "CLAUDE.md", package: "package.md", result: "result.json", stdout: "container.stdout.log", stderr: "container.stderr.log" },
-      container: { name: `forge-${args.taskId}`, idleTimeoutMs },
-      auth: { profileRequested: !!args.authProfile, stateMounted: !!authStateHostPath },
-      // FG-366: name is the resolved concrete runtime (matches controlPlane.runtime.name),
-      // not the requested sentinel — see task-manifest.ts's ManifestRuntime doc comment.
-      runtime: { name: runtimeName, kind: runtimeMeta.runtimeKind, logFormat: runtimeMeta.logFormat, promptStrategy: runtimeMeta.promptStrategy, authStrategy: runtimeMeta.authStrategy },
-      ...(manifestModelBlock(args.resolution) ? { model: manifestModelBlock(args.resolution) } : {}),
-      ...(controlPlane ? { controlPlane } : {}),
-      // FG-654: see task-manifest.ts — the RECORDED protocol generation this agent ran
-      // under. Per DISPATCH, not per stage: a review that spans a `forge upgrade`
-      // legitimately mixes generations, and the mix must be visible rather than averaged.
-      // Carried from the compose that produced this package's prompt, never re-resolved
-      // here — a second read describes the seed as of now, not the bytes being dispatched.
-      ...(args.taskPackage.agentProtocol ? { agentProtocol: args.taskPackage.agentProtocol } : {}),
-      // FG-664 AC3: the cache key and engine identity a Forge-owned probe container
-      // attested for THIS dispatch. Written from the same seam in both lanes.
-      ...(manifestExtras.dependencyEnvironment ? { dependencyEnvironment: manifestExtras.dependencyEnvironment } : {}),
-    });
-  };
-
-  // ─── FG-666: THIS DISPATCH'S BACKLOG AUTHORITY ──────────────────────────────
-  //
-  // Resolved HERE — at the last chokepoint every runNext spawn funnels through —
-  // and NOT inside buildDockerArgs, which holds only the path to MOUNT. On the
-  // FG-621 private-clone substrate those are deliberately different directories,
-  // and the clone derives its own repository evidence, so asking it the identity
-  // question made FG-608's cross-repository guard refuse every clone-dispatched
-  // task's backlog read. The guard is untouched; the question moved.
-  //
-  // The identity question is asked of `run.projectDir` — Forge-owned durable run
-  // state — and NEVER of args.projectDir. Those are the same value for a blue step,
-  // but a RED is dispatched with projectDir = the publisher's candidate WORKTREE
-  // (runRedsAgainst(candidateDir)), whose tracked `.forge/config.yml` is content the
-  // agent under review committed. Resolving from it would let an agent commit a
-  // project_key that makes every one of its own reviewers refuse pre-container — an
-  // identity-forgery vector against the review lane itself. Reds still MOUNT the
-  // candidate (repoRootForMount below); only the identity question moved.
-  //
-  // The workspace is never asked, its `.git` is never read for this, and no path
-  // under ~/.forge/worktrees/clones/ is trusted by prefix — the project directory is
-  // carried forward AS DATA. runNext refuses to dispatch a run with no projectDir,
-  // so it is present for anything that gets this far; a missing one degrades to an
-  // unresolvable authority rather than silently falling back to a workspace.
-  //
-  // Resolution is SIDE-EFFECT-FREE. Publication is committed later, immediately
-  // before the argv is built and the container is spawned.
-  //
-  // TICKET_ID comes from Forge-owned run metadata (FG-472's --ticket, written by
-  // src/cli/commands/new.ts), read once here rather than threaded through the three
-  // dispatch call sites — so no dispatch site can forget it — and NEVER from a
-  // caller-supplied string or anything derived from the workspace.
-  const dispatchRun = getRun(args.runId);
-  const runTicketId = ((): string | undefined => {
-    const v = dispatchRun?.metadata?.["ticketId"];
-    return typeof v === "string" && v.length > 0 ? v : undefined;
-  })();
-  const authorityDir = dispatchRun?.projectDir;
-  const backlogAuthority = resolveDispatchBacklogAuthority(authorityDir, args.taskId, runTicketId);
-
-  // AC4: a TICKETED dispatch must not run blind. `forge new feature` requires
-  // --ticket precisely so the work is anchored to acceptance criteria, and an agent
-  // that cannot read them defeats that silently. Refused BEFORE the dependency
-  // block below, which spawns the FG-376 provisioner and the FG-664 probe/load
-  // containers — refusing after it would satisfy the words of AC4 for the agent
-  // container while having already started containers and possibly run a full
-  // dependency install for a dispatch that was never going to proceed. Same
-  // ordering discipline as assertSelfHostDispatchAllowed at the top of this
-  // function.
-  //
-  // SCOPE, deliberately narrow (dispatchIsBlind): mode `markdown` proceeds (a
-  // project with no project_key declared is a NORMAL outcome, and a refusal that
-  // fires on every normal project reproduces the silence this exists to end); a
-  // db-mode dispatch carrying its ticket's evidence proceeds; an UNTICKETED dispatch
-  // proceeds whatever the mode. Uniform across blue and red — reds resolve `db`
-  // today so it is a no-op for them, and a blue-only predicate would re-create
-  // exactly the substrate-specific blind spot this fix is about.
-  //
-  // The refusal is applied TWICE: here against the resolved value, and again below
-  // against what publication actually produced. Publication can DEGRADE a healthy
-  // resolution (a marker that will not write, a snapshot that will not publish), and
-  // a check that only ever read the resolved value would let a ticketed task start
-  // its container with an `unknown` marker — running blind for the very reason this
-  // refusal exists.
-  const refuseBlindDispatch = (
-    authority: Pick<DispatchBacklogAuthority, "mode" | "reason" | "detail">,
-    stage: "resolve" | "publish",
-    compensate?: () => void,
-  ): { kind: "failed"; error: string } => {
-    const why = authority.reason
-      ? `${authority.reason}${authority.detail ? ` — ${authority.detail}` : ""}`
-      : stage === "publish"
-        ? "the backlog snapshot could not be published"
-        : "the backlog store could not be resolved";
-    // The KIND carries the retry decision; the message carries the explanation. They
-    // are never allowed to disagree, so both come off the same classified reason.
-    const kind: FailureKind =
-      authority.reason === "identity-conflict"
-        ? "backlog_authority_conflict"
-        : authority.reason === "ticket-unreadable"
-          ? "backlog_ticket_unreadable"
-          : "backlog_authority_unresolvable";
-    const msg =
-      `${kind}: this dispatch is anchored to ticket ${runTicketId}, but its backlog authority ` +
-      `${stage === "publish" ? "degraded to" : "resolved to"} '${authority.mode}' against the run's project ` +
-      `directory ${authorityDir ?? "(none recorded)"} (${why}). ` +
-      `No container was started — an agent that cannot read the ticket it was dispatched for would build ` +
-      `against the brief alone and then be judged against acceptance criteria it never saw. See FG-666.`;
-    logEvent("task.backlog_authority_refused", {
-      runId: args.runId,
-      taskId: args.taskId,
-      payload: {
-        ticketId: runTicketId,
-        projectDir: authorityDir ?? null,
-        mode: authority.mode,
-        stage,
-        failureKind: kind,
-        ...(authority.reason ? { reason: authority.reason } : {}),
-        ...(authority.detail ? { detail: authority.detail } : {}),
-      },
-    });
-    // "Why this dispatch did not run" is a dispatch-time fact and belongs on the
-    // same recorded-truth surface as "why this config". The receipt is assembled
-    // above but only written here, so the refusal reaches it.
-    if (controlPlane) controlPlane.warnings = [...(controlPlane.warnings ?? []), msg];
-    commitTaskManifest();
-    compensate?.();
-    cleanupStagedAuth(dir); // AWN-8
-    failTask(args.taskId, { runId: args.runId, kind, error: msg });
-    return { kind: "failed", error: msg };
-  };
-
-  if (dispatchIsBlind(backlogAuthority.mode, backlogAuthority.ticketEvidence !== undefined, runTicketId)) {
-    return refuseBlindDispatch(backlogAuthority, "resolve");
-  }
-
   // FG-376: resolve the dependency-cache decision BEFORE building docker args
   // for the AGENT/reviewer container. FIX1 gates the named-volume path to
   // worktree-mode rw dispatches only (repoRootForMount mirrors the
@@ -3884,7 +3735,27 @@ async function runContainer(args: {
     }
   }
 
-  commitTaskManifest({ ...(dependencyEnvironment ? { dependencyEnvironment } : {}) });
+  writeTaskManifest(dir, {
+    taskId: args.taskId,
+    runId: args.runId,
+    files: { prompt: "CLAUDE.md", package: "package.md", result: "result.json", stdout: "container.stdout.log", stderr: "container.stderr.log" },
+    container: { name: `forge-${args.taskId}`, idleTimeoutMs },
+    auth: { profileRequested: !!args.authProfile, stateMounted: !!authStateHostPath },
+    // FG-366: name is the resolved concrete runtime (matches controlPlane.runtime.name),
+    // not the requested sentinel — see task-manifest.ts's ManifestRuntime doc comment.
+    runtime: { name: runtimeName, kind: runtimeMeta.runtimeKind, logFormat: runtimeMeta.logFormat, promptStrategy: runtimeMeta.promptStrategy, authStrategy: runtimeMeta.authStrategy },
+    ...(manifestModelBlock(args.resolution) ? { model: manifestModelBlock(args.resolution) } : {}),
+    ...(controlPlane ? { controlPlane } : {}),
+    // FG-654: see task-manifest.ts — the RECORDED protocol generation this agent ran
+    // under. Per DISPATCH, not per stage: a review that spans a `forge upgrade`
+    // legitimately mixes generations, and the mix must be visible rather than averaged.
+    // Carried from the compose that produced this package's prompt, never re-resolved
+    // here — a second read describes the seed as of now, not the bytes being dispatched.
+    ...(args.taskPackage.agentProtocol ? { agentProtocol: args.taskPackage.agentProtocol } : {}),
+    // FG-664 AC3: the cache key and engine identity a Forge-owned probe container
+    // attested for THIS dispatch. Written from the same seam in both lanes.
+    ...(dependencyEnvironment ? { dependencyEnvironment } : {}),
+  });
 
   const spawnCtx: SpawnContext = {
     TASK_ID: args.taskId,
@@ -3908,89 +3779,24 @@ async function runContainer(args: {
     TASK_PACKAGE_MARKDOWN: renderTaskPackage(args.taskPackage),
     DESIGN_DIR: args.designDir,
     AUTH_STATE_HOST_PATH: authStateHostPath,
-    // FG-666: recorded for `forge show`/manifest parity with the authority resolved
-    // above. The argv builder does NOT resolve from it on this path — the resolved
-    // descriptor is passed in below — but leaving the context honest about which
-    // ticket this dispatch is anchored to costs nothing.
-    ...(runTicketId ? { TICKET_ID: runTicketId } : {}),
     ...depSpawnFields,
   };
 
-  // FG-666 AC6: the snapshot has NOT been published yet. Everything above this
-  // point — preflight, mountpoints, dependency provisioning, the probe, the six
-  // cleanupStagedAuth sites — ran with nothing registered and no artifact created,
-  // so none of those failure paths can leak a target.
-  let publishedSnapshot: BacklogSnapshotMount | undefined;
-  // Release the ROW, retain the BYTES. See releaseDispatchBacklogSnapshot: no
-  // executor contract surfaces an authoritative "no container was created" fact, so
-  // every EXECUTOR failure is artifact-ambiguous, and deleting the source of a
-  // possibly-live `:ro` bind is the one unrecoverable move. Releasing the row ends
-  // the per-write fan-out AC6 is about; the retained directory is reclaimed by
-  // reclaimReleasedTargets on the project's next dispatch.
-  //
-  // CALL THIS ONLY WHERE NO CONTAINER CAN STILL BE READING THE SNAPSHOT — either
-  // none was ever created, or the one that was has exited. Fan-out to a registered
-  // target is how a post-start ticket amendment reaches a running agent (FG-608), so
-  // releasing the row of a live container silently cuts that agent off from every
-  // later amendment. Each call site below states which of the two facts it has.
-  //
-  // The predicate is `targetRegistered`, NOT the mode. publishBacklogSnapshot never
-  // throws, so a publication that dies AFTER registering the target reports mode
-  // `unknown` over a row that exists; keying off `db` here dropped exactly that case
-  // on the floor and leaked the target for good — and because an `unknown` ticketed
-  // dispatch is then refused, no container was ever started to justify keeping it.
-  const compensatePublishedSnapshot = (): void => {
-    if (!publishedSnapshot?.targetRegistered || !publishedSnapshot.projectKey) return;
-    releaseDispatchBacklogSnapshot(publishedSnapshot.projectKey, publishedSnapshot.hostDir);
-    publishedSnapshot = undefined;
-  };
-
-  // THE PUBLICATION COMMIT POINT (AC6): the last thing before the argv is built and
-  // the container is spawned. It cannot be later — the snapshot directory is the
-  // source of a `:ro` bind, so it must EXIST before `docker run`, and deferring past
-  // container start would also mean a host ticket write in that window never fans
-  // out to this target (fan-out happens only on writes, so a missed write is missed
-  // permanently).
-  //
-  // It sits BEFORE buildDockerArgs, not after, because FORGE_DISPATCHED_TICKET is
-  // built out of what publication PRODUCED. Publication re-reads the ticket adjacent
-  // to writing the snapshot, so the evidence row and the env var name the revision
-  // the container is actually given; deriving the env var from the resolve-time
-  // value instead would let a ticket amendment during the dependency block ship a
-  // container a revision its own provenance contradicts. The cost is that a
-  // buildDockerArgs failure now has something to compensate — which is why the catch
-  // below always did.
-  publishedSnapshot = publishBacklogSnapshot(backlogAuthority, args.taskId);
-
-  // AC4, second application: against what publication PRODUCED, not what resolution
-  // predicted. A marker that would not write, or a snapshot that would not publish,
-  // degrades a healthy `db` resolution to `unknown` — and the container's reader
-  // refuses every backlog read on an `unknown` marker. Checking only the resolved
-  // value would start that container anyway: ticketed, and blind.
-  if (dispatchIsBlind(publishedSnapshot.mode, publishedSnapshot.dispatchedTicket !== undefined, runTicketId)) {
-    // No container exists — exec has not been called — so the row release is
-    // unambiguously safe here.
-    // A db-mode publication that reached this predicate did so for exactly one
-    // reason: it could not name the run's ticket. Anything else degraded the mode.
-    const reason = publishedSnapshot.mode === "db" ? "ticket-unreadable" : backlogAuthority.reason;
-    const detail = publishedSnapshot.markerError ?? backlogAuthority.detail;
-    return refuseBlindDispatch(
-      {
-        mode: publishedSnapshot.mode,
-        ...(reason ? { reason } : {}),
-        ...(detail ? { detail } : {}),
-      },
-      "publish",
-      compensatePublishedSnapshot,
-    );
-  }
+  // FG-666: the directory this task's ticket authority is resolved AGAINST — the
+  // run's recorded projectDir, which is Forge-owned durable state. Never
+  // repoRootForMount (on the FG-621 substrate that is a private clone, whose
+  // repository evidence diverges from its parent's, so FG-608's cross-repository
+  // guard refused every clone-dispatched task's backlog read) and never
+  // args.projectDir (a RED is dispatched with the publisher's candidate WORKTREE,
+  // whose tracked `.forge/config.yml` is content the agent under review committed —
+  // resolving from it would let an agent make its own reviewers refuse).
+  const authorityDir = getRun(args.runId)?.projectDir;
 
   let dockerArgs;
   try {
-    dockerArgs = buildDockerArgs(runtime, spawnCtx, { backlogSnapshot: publishedSnapshot });
+    dockerArgs = buildDockerArgs(runtime, spawnCtx, { backlogAuthorityDir: authorityDir });
   } catch (e) {
     const msg = `buildDockerArgs failed: ${(e as Error).message}`;
-    compensatePublishedSnapshot(); // no container was created: exec is never reached
     cleanupStagedAuth(dir); // AWN-8
     failTask(args.taskId, { runId: args.runId, kind: classify({}), error: msg });
     return { kind: "failed", error: msg };
@@ -4041,33 +3847,11 @@ async function runContainer(args: {
     // WALK-3: ingest progress on the crash path too — last decision/progress
     // records are most valuable in failure cases.
     emitAgentProgressEvents(dir, args.runId, args.taskId);
-    // FG-666 AC6, and the ONE place the row release is conditional. An executor
-    // throw is not evidence that no container exists: the detached executor (the
-    // production default) records the start the instant `docker run -d` returns, so
-    // a throw AFTER that point leaves a container the daemon owns running to
-    // completion — the same span the container-gone sweep recovers a real result
-    // from. Releasing the row there would cut a live agent off from every later
-    // ticket amendment, which is precisely the delivery FG-608 registration exists
-    // to provide. The same unknown that forbids deleting the bytes forbids asserting
-    // the container is gone. So: release only when NO start was ever recorded (no
-    // container was created); otherwise keep fanning out and let the finished-task
-    // sweep reclaim the target once the task's terminal state is settled.
-    if (!containerStartRecorded) compensatePublishedSnapshot();
     cleanupStagedAuth(dir); // AWN-8
     const msg = `docker exec threw: ${(e as Error).message}`;
     failTask(args.taskId, { runId: args.runId, kind: classify({}), error: msg });
     return { kind: "failed", error: msg };
   }
-  // FG-666 AC6: exec RETURNED, so the container is finished — that is the positive
-  // fact the throw path above cannot have, and it holds for an exit 0 and a nonzero
-  // exit alike. Released HERE, once, rather than at each of the eight terminal
-  // returns below: an ordinary nonzero exit is the COMMON failure, and leaving its
-  // target registered means every subsequent host ticket write for this project
-  // fans out to a directory nothing will ever read again — the unbounded per-write
-  // cost AC6 exists to bound — until some later dispatch happens to sweep it, and
-  // there may be no later dispatch. The bytes stay (reclaimReleasedTargets takes
-  // them on the project's next dispatch); only the fan-out membership ends.
-  compensatePublishedSnapshot();
   // #155: capture token usage from the stream-json log. Best-effort.
   captureUsageForTask(stdoutPath, { taskId: args.taskId, ...usageMeta });
   // WALK-3: ingest progress as soon as exec returns — BEFORE the idle-timeout /

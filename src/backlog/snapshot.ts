@@ -171,16 +171,10 @@ export function registerSnapshotTarget(projectKey: string, targetDir: string, ta
  *  THE ROW AND THE DIRECTORY ARE TWO DECISIONS, and FG-608 red F12 is what happens
  *  when they are one. `targetDir` is the SOURCE of a live `:ro` bind mount: deleting
  *  it out from under a running container does not "clean up", it strands that agent
- *  with an unlinked mount for the rest of its task. Releasing the ROW is the lesser
- *  decision but NOT a free one, and NOT unconditional: fan-out to a registered
- *  target is how a post-start ticket amendment reaches a running agent (FG-608), so
- *  releasing the row of a LIVE container silently cuts that agent off from every
- *  later amendment. Call it only where no container can still be reading the target
- *  — none was created, or the one that was has exited. Deleting the ARTIFACT needs
- *  the stronger fact still: positive knowledge that the owning task has finished,
- *  which only the caller has. Default: keep the bytes — reclaimReleasedTargets below is
- *  what reclaims them once that knowledge exists, so keeping them is a deferral
- *  rather than a strand. */
+ *  with an unlinked mount for the rest of its task. Releasing the ROW is always
+ *  safe — it only stops future fan-out — so it is unconditional. Deleting the
+ *  ARTIFACT requires positive knowledge that the owning task has finished, which
+ *  only the caller has. Default: keep the bytes. */
 export function releaseSnapshotTarget(
   projectKey: string,
   targetDir: string,
@@ -217,7 +211,7 @@ export function releaseSnapshotTarget(
  *  row for this task" and "this task finished" are different facts and only the
  *  second one licenses deleting a mount source. An unknown target ages out: its row
  *  is released once it is older than UNKNOWN_TARGET_SWEEP_MS, and its bytes are
- *  never deleted here — reclaimReleasedTargets picks those up on a later dispatch.
+ *  never deleted here.
  *
  *  Returns the target dirs it released. */
 export function releaseFinishedTargets(
@@ -246,73 +240,12 @@ export function releaseFinishedTargets(
   return released;
 }
 
-/** Reclaim the BYTES of targets that have ALREADY been released.
- *
- *  The second half of releaseFinishedTargets, and the reason a released row is not
- *  a permanent strand: releasing a row takes the target out of liveSnapshotTargets,
- *  which is the only thing the sweep above iterates — so before this existed, a
- *  directory holding the project's full ticket bodies was reachable by no sweep at
- *  all once its row had been released (by dispatch compensation, or by the sweep
- *  above's own unknown-target age-out). Called from the same dispatch-time moment,
- *  with the same injected liveness predicate.
- *
- *  The polarity is unchanged from releaseFinishedTargets: bytes are deleted only
- *  against a POSITIVE fact that nothing is reading them. A released row whose task
- *  still reads `live` keeps its bytes — a row is released when the container is
- *  known to be gone, but a task that is somehow still live outranks that. An
- *  unresolvable task ages out on the same UNKNOWN_TARGET_SWEEP_MS bound.
- *
- *  The ROW is deleted with the bytes: it has no reader left, and leaving released
- *  rows behind forever just moves the unbounded growth from disk to the table.
- *
- *  Returns the target dirs it reclaimed. */
-export function reclaimReleasedTargets(
-  projectKey: string,
-  liveness: (taskId: string) => TargetLiveness,
-  now: number = Date.now(),
-): string[] {
-  const reclaimed: string[] = [];
-  for (const target of releasedSnapshotTargets(projectKey)) {
-    const state = target.taskId ? liveness(target.taskId) : "unknown";
-    if (state === "live") continue;
-    if (state === "unknown") {
-      const age = target.createdAt ? now - Date.parse(target.createdAt) : Number.NaN;
-      if (!Number.isFinite(age) || age <= UNKNOWN_TARGET_SWEEP_MS) continue;
-    }
-    try {
-      rmSync(target.targetDir, { recursive: true, force: true });
-    } catch {
-      // Derived bytes; a failed unlink costs disk, not correctness. Leave the row
-      // so the next dispatch tries again rather than losing track of the directory.
-      continue;
-    }
-    getDb()
-      .prepare(`DELETE FROM backlog_snapshot_targets WHERE project_key = ? AND target_dir = ?`)
-      .run(projectKey, target.targetDir);
-    reclaimed.push(target.targetDir);
-  }
-  return reclaimed;
-}
-
 export function liveSnapshotTargets(projectKey: string): SnapshotTarget[] {
-  return targetRows(
-    `SELECT project_key, target_dir, task_id, created_at FROM backlog_snapshot_targets
-      WHERE project_key = ? AND released_at IS NULL ORDER BY target_dir ASC`,
-    projectKey,
-  );
-}
-
-export function releasedSnapshotTargets(projectKey: string): SnapshotTarget[] {
-  return targetRows(
-    `SELECT project_key, target_dir, task_id, created_at FROM backlog_snapshot_targets
-      WHERE project_key = ? AND released_at IS NOT NULL ORDER BY target_dir ASC`,
-    projectKey,
-  );
-}
-
-function targetRows(sql: string, projectKey: string): SnapshotTarget[] {
   const rows = getDb()
-    .prepare(sql)
+    .prepare(
+      `SELECT project_key, target_dir, task_id, created_at FROM backlog_snapshot_targets
+        WHERE project_key = ? AND released_at IS NULL ORDER BY target_dir ASC`,
+    )
     .all(projectKey) as {
     project_key: string;
     target_dir: string;
