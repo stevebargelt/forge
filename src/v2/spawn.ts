@@ -1324,14 +1324,52 @@ export function buildProvisionerDockerArgs(
 // shape, and exits.
 //
 // The command is deliberately dumb: find every mounted package that ships a
-// compiled `.node` artifact, `require()` it, and print what happened plus the
-// container's own node version and ABI. It never reads anything from the project
-// tree and never runs project code beyond a package's own module initializer.
+// compiled `.node` artifact, try to LOAD that artifact, and print what happened
+// plus the container's own node version and ABI. It never reads anything from
+// the project tree.
+//
+// TWO PROPERTIES MAKE THE OUTPUT AN ATTESTATION RATHER THAN A CLAIM.
+//
+// (1) THE REPORTING PROCESS NEVER EXECUTES DEPENDENCY CODE. Each artifact is
+//     loaded in its OWN child process running a fixed Forge one-liner, with its
+//     stdio piped away from the container's stdout. The supervisor decides
+//     `loaded` from the child's EXIT STATUS — something it observes — not from
+//     anything the child printed. The earlier shape `require()`d each package in
+//     the reporting process, so a dependency's module initializer could write a
+//     complete, well-formed report line to the same stdout the host reads back
+//     (an `exit` listener even lands it AFTER the real one, which last-line-wins
+//     then prefers). Nothing a dependency prints reaches that stream now.
+//
+// (2) THE LOAD IS `process.dlopen`, NOT A BARE-NAME `require`. dlopen is exactly
+//     what `require()` does for a `.node` file, minus the package's JavaScript —
+//     so it answers "can this container map and initialize this compiled
+//     artifact", which is the question, and it is indifferent to whether the
+//     package is reachable by bare name at all. `@img/sharp-linux-arm64`, which
+//     the provisioner's own `npm ci` installs here, publishes `exports` with no
+//     `"."` entry: a bare-name require throws ERR_PACKAGE_PATH_NOT_EXPORTED for
+//     it even though its artifact loads perfectly. Under the previous shape that
+//     read as "the driver will not load" and refused every read-only dispatch on
+//     darwin, permanently.
+//
+// The honest ceiling: dependency code CAN still run — inside a child, during the
+// artifact's own initializer — but only once the fact being attested (this
+// artifact loads in this container) is already true. There is nothing left to
+// forge by then. Nothing here can prove the agent then USED the driver.
+const DEPENDENCY_DLOPEN_CHILD = "process.dlopen({ exports: {} }, process.argv[1]);";
+
 const DEPENDENCY_PROBE_SCRIPT = [
   'const fs = require("fs"), path = require("path");',
+  'const { spawnSync } = require("child_process");',
   'const { createRequire } = require("module");',
   'const roots = (process.env.FORGE_PROBE_ROOTS || "").split(":").filter(Boolean);',
   'const installRoot = process.env.FORGE_PROBE_INSTALL_ROOT || "";',
+  // Read once, then removed from the environment the children inherit: the
+  // report's binding to THIS dispatch is not a value any loaded artifact is
+  // handed. (Its stdio is piped away regardless — this is the second lock.)
+  'const nonce = process.env.FORGE_PROBE_NONCE || "";',
+  "delete process.env.FORGE_PROBE_NONCE;",
+  "const childEnv = Object.assign({}, process.env);",
+  `const child = ${JSON.stringify(DEPENDENCY_DLOPEN_CHILD)};`,
   "const seen = new Set(), packages = [], out = [];",
   "const findArtifact = (dir, depth) => {",
   "  if (depth > 4) return undefined;",
@@ -1354,10 +1392,20 @@ const DEPENDENCY_PROBE_SCRIPT = [
   "  seen.add(name);",
   '  let version = "unknown";',
   '  try { version = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")).version || "unknown"; } catch (e) {}',
-  '  const req = createRequire(path.join(root, "forge-probe.js"));',
   "  const entry = { name: name, version: version, artifact: artifact, loaded: false };",
-  "  try { entry.resolvedPath = req.resolve(name); } catch (e) {}",
-  "  try { req(name); entry.loaded = true; } catch (e) { entry.error = String((e && e.message) || e); }",
+  // resolve() walks the resolver without running anything, so it stays in the
+  // supervisor: it is diagnostic only, and a package with no "." export simply
+  // records none.
+  '  try { entry.resolvedPath = createRequire(path.join(root, "forge-probe.js")).resolve(name); } catch (e) {}',
+  '  const r = spawnSync(process.execPath, ["-e", child, artifact], { encoding: "utf8", env: childEnv, stdio: ["ignore", "pipe", "pipe"], timeout: 60000 });',
+  "  if (r.status === 0) entry.loaded = true;",
+  // node prints a version footer after a fatal throw, so the LAST stderr line is
+  // "Node.js vX" rather than the diagnosis. Prefer the first line that names an
+  // error; the tail is the fallback for a child that died without one.
+  '  else {',
+  '    const lines = String(r.stderr || "").split("\\n").map(function (l) { return l.trim(); }).filter(Boolean);',
+  '    entry.error = String(lines.find(function (l) { return /error/i.test(l); }) || lines[0] || (r.error && r.error.message) || ("the load child exited " + r.status));',
+  "  }",
   "  packages.push(entry);",
   "};",
   "for (const root of roots) {",
@@ -1375,8 +1423,15 @@ const DEPENDENCY_PROBE_SCRIPT = [
   "    }",
   "  }",
   "}",
-  'process.stdout.write(JSON.stringify({ node: process.version, abi: process.versions.modules, roots: out, packages: packages }) + "\\n");',
+  'process.stdout.write(JSON.stringify({ nonce: nonce, node: process.version, abi: process.versions.modules, roots: out, packages: packages }) + "\\n");',
 ].join("\n");
+
+/** EXPORTED SO A TEST CAN RUN THE SHIPPED BYTES. FG-664's own review found that
+ *  nothing executed this string: every test fed the resolver a hand-written
+ *  report, and the defect above (a bare-name require refusing every dispatch)
+ *  survived precisely because of it. `src/v2/fg664-dependency-probe.test.ts`
+ *  runs THIS constant, unmodified, against a real fixture `node_modules`. */
+export { DEPENDENCY_PROBE_SCRIPT };
 
 /** Docker args for the FG-664 dependency probe: a SHORT-LIVED, FORGE-OWNED
  *  `--rm` container with the reviewer's EXACT mount shape — the project `:ro`,
@@ -1392,6 +1447,10 @@ export function buildDependencyProbeDockerArgs(
   runtime: Runtime,
   ctx: { TASK_ID: string; PROJECT_DIR: string; CANONICAL_PROJECT_DIR?: string },
   plan: DependencyVolumePlan,
+  /** The host-generated value the report has to carry back. See
+   *  DEPENDENCY_PROBE_SCRIPT: it binds the report to THIS dispatch's probe
+   *  container, which is the only process in the container that ever sees it. */
+  nonce: string,
 ): string[] {
   const projectContainerPath = resolveProjectContainerPath(runtime) ?? "/project";
   const args: string[] = ["run", "--rm", "-i"];
@@ -1411,6 +1470,7 @@ export function buildDependencyProbeDockerArgs(
   }
   args.push("-e", `FORGE_PROBE_ROOTS=${plan.volumes.map((v) => v.containerPath).join(":")}`);
   args.push("-e", `FORGE_PROBE_INSTALL_ROOT=${plan.installRoot}/node_modules`);
+  args.push("-e", `FORGE_PROBE_NONCE=${nonce}`);
   args.push("-w", projectContainerPath);
   args.push(runtime.image);
   args.push("node", "-e", DEPENDENCY_PROBE_SCRIPT);
@@ -1487,9 +1547,9 @@ export async function prepareDependencyEnvironmentForDispatch(
       });
       return { exitCode, stderrTail: existsSync(stderrPath) ? readFileSync(stderrPath, "utf8").trim() : "" };
     },
-    runProbe: async () => {
+    runProbe: async (nonce) => {
       const plan = planOrThrow();
-      const probeArgs = buildDependencyProbeDockerArgs(args.runtime, containerCtx, plan);
+      const probeArgs = buildDependencyProbeDockerArgs(args.runtime, containerCtx, plan, nonce);
       const stdoutPath = join(args.logDir, "container.depprobe.stdout.log");
       const stderrPath = join(args.logDir, "container.depprobe.stderr.log");
       const exitCode = await args.exec({

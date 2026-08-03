@@ -46,7 +46,10 @@ import {
   dependencyVolumeName,
   isDependencyCacheReady,
   lockfileHash,
+  markDependencyCacheReady,
   parseDependencyProbeOutput,
+  readDependencyCacheMarker,
+  repairDisprovenDependencyCache,
   resolveDependencyEnvironment,
   type DependencyEnvironmentReceipt,
 } from "./dependency-provisioning.js";
@@ -81,10 +84,18 @@ function makeTmpDir(prefix = "fg664-"): string {
 }
 
 /** A project whose lockfile is unique per call, so every test gets its own cache
- *  key and no test can be made green by another test's ready marker. */
+ *  key and no test can be made green by another test's ready marker.
+ *
+ *  It DECLARES better-sqlite3 as a direct dependency, because that is what makes
+ *  the driver load-bearing: the refusal is scoped to the natives the project
+ *  itself depends on (declaredDependencyNames), so a fixture with an empty
+ *  manifest would sail past a probe reporting the driver unloadable. */
 function makeProject(lockSalt: string): string {
   const dir = makeTmpDir("fg664-proj-");
-  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "fg664-subject" }));
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({ name: "fg664-subject", dependencies: { "better-sqlite3": "^12.11.1" } }),
+  );
   writeFileSync(join(dir, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, salt: lockSalt }));
   return dir;
 }
@@ -181,6 +192,15 @@ function envArgs(args: string[]): string[] {
   return out;
 }
 
+/** The nonce Forge minted for a probe container, read back off its OWN argv. The
+ *  fixture cannot hard-code one: the resolver generates a fresh value per
+ *  dispatch and only accepts a report that carries it back, so a fake that did
+ *  not read the argv would be refused exactly like a forged line. */
+function probeNonce(args: string[]): string {
+  const e = envArgs(args).find((v) => v.startsWith("FORGE_PROBE_NONCE="));
+  return e ? e.slice("FORGE_PROBE_NONCE=".length) : "";
+}
+
 const PROBE_REPORT = {
   node: "v24.4.0",
   abi: "137",
@@ -199,14 +219,29 @@ const PROBE_REPORT = {
 /** Records every container this dispatch builds and answers each one the way a
  *  healthy host would: the provisioner exits 0, the probe prints a report whose
  *  native package LOADED, the agent writes a result. */
-function makeExec(calls: Call[], over: { probe?: unknown; probeExit?: number; provisionerExit?: number } = {}): DockerExecFn {
+function makeExec(
+  calls: Call[],
+  over: {
+    probe?: unknown;
+    /** Overrides the report body, given the nonce the probe container was handed
+     *  and how many probes this dispatch has already run — a re-probe after a
+     *  stale-cache repair has to be able to answer differently from the probe
+     *  that disproved the marker. */
+    probeReport?: (nonce: string, probeIndex: number) => unknown;
+    probeExit?: number;
+    provisionerExit?: number;
+  } = {},
+): DockerExecFn {
+  let probes = 0;
   return async ({ args, stdoutPath, stderrPath }) => {
     const kind = classifyCall(args);
     calls.push({ kind, args: [...args] });
     mkdirSync(dirname(stdoutPath), { recursive: true });
     writeFileSync(stderrPath, "");
     if (kind === "probe") {
-      const body = over.probe === undefined ? JSON.stringify(PROBE_REPORT) : (over.probe as string);
+      const nonce = probeNonce(args);
+      const report = over.probeReport ? over.probeReport(nonce, probes++) : { nonce, ...PROBE_REPORT };
+      const body = over.probe === undefined ? JSON.stringify(report) : (over.probe as string);
       writeFileSync(stdoutPath, typeof body === "string" ? body : JSON.stringify(body));
       return over.probeExit ?? 0;
     }
@@ -326,7 +361,7 @@ test("fg664 (b): when the probe reports the real driver could not load, ZERO age
     task: "recheck RF-1",
     projectDir: project,
     readOnlyProject: true,
-    dockerExec: makeExec(calls, { probe: JSON.stringify(unloadable) }),
+    dockerExec: makeExec(calls, { probeReport: (nonce) => ({ nonce, ...unloadable }) }),
   });
 
   assert.equal(res.status, "failed");
@@ -361,7 +396,7 @@ test("fg664 (b2): a probe that exits 0 but attests an EMPTY install root is a re
     task: "recheck RF-1",
     projectDir: project,
     readOnlyProject: true,
-    dockerExec: makeExec(calls, { probe: JSON.stringify(emptyRoot) }),
+    dockerExec: makeExec(calls, { probeReport: (nonce) => ({ nonce, ...emptyRoot }) }),
   });
 
   assert.equal(res.failureKind, "verification_environment_unavailable");
@@ -411,9 +446,9 @@ test("fg664 (d): two concurrent read-only resolutions on one cold cache key prov
         provisions += 1;
         return { exitCode: 0, stderrTail: "" };
       },
-      runProbe: async () => {
+      runProbe: async (nonce) => {
         probes += 1;
-        return { exitCode: 0, stdout: JSON.stringify(PROBE_REPORT), stderrTail: "" };
+        return { exitCode: 0, stdout: JSON.stringify({ nonce, ...PROBE_REPORT }), stderrTail: "" };
       },
     });
 
@@ -459,6 +494,210 @@ test("fg664 (d2): a failed provision leaves NO ready marker and refuses the disp
     1,
     "the marker-less cache key must be re-provisioned, not reused",
   );
+});
+
+// ── (k): a DISPROVEN ready marker is repaired, not obeyed forever ────────────
+//
+// THE DEFECT THIS PINS. The ready marker lives under ~/.forge; the volumes it
+// speaks for are docker objects. A Docker Desktop factory reset (or `docker
+// volume prune`, or a `docker volume rm`) wipes the volumes and leaves the
+// marker, so `isDependencyCacheReady` keeps saying yes, the provisioner is never
+// re-run, and the (correct) dependencies_absent refusal below fires on every
+// dispatch forever — every read-only reviewer on the host permanently blocked,
+// with the only escape being an operator who knows to delete a file by hand.
+// Measured on the darwin host by scripts/fg664-reviewer-engine-smoke.sh: cache
+// key 5f33f1ce08f5973b, marker dated Jul 27, volume empty after the Aug 1 reset.
+
+/** A probe report for a cache whose install root is EMPTY inside the container —
+ *  what a marked-ready-but-pruned volume actually looks like. */
+const EMPTY_ROOT_REPORT = {
+  ...PROBE_REPORT,
+  roots: [{ path: "/project/node_modules", entries: 0, installRoot: true }],
+  packages: [],
+};
+
+test("fg664 (k): a ready marker the probe DISPROVES is invalidated and re-provisioned once, and the dispatch then proceeds", async () => {
+  setPlatform("darwin");
+  const project = makeProject("k");
+  const hash = lockfileHash(project);
+  markDependencyCacheReady(hash);
+  const staleMarker = readDependencyCacheMarker(hash) as string;
+  const calls: Call[] = [];
+
+  const res = await invoke({
+    agentRole: "review-rechecker",
+    task: "recheck RF-1",
+    projectDir: project,
+    readOnlyProject: true,
+    // The first probe sees the wiped volume; the re-provisioned one is healthy.
+    dockerExec: makeExec(calls, {
+      probeReport: (nonce, i) => (i === 0 ? { nonce, ...EMPTY_ROOT_REPORT } : { nonce, ...PROBE_REPORT }),
+    }),
+  });
+
+  assert.equal(res.status, "complete", res.error);
+  assert.deepEqual(
+    calls.map((c) => c.kind),
+    ["probe", "provisioner", "probe", "agent"],
+    "the disproof must re-provision and RE-PROBE before the dispatch is decided",
+  );
+  assert.equal(
+    calls.filter((c) => c.kind === "provisioner").length,
+    1,
+    "exactly one re-provision attempt per dispatch — never a retry loop",
+  );
+
+  const marker = readDependencyCacheMarker(hash);
+  assert.ok(marker, "a successful re-provision marks the cache ready again");
+  assert.notEqual(marker, staleMarker, "the DISPROVEN marker must be gone, not merely accompanied");
+
+  const receipt = readTaskManifest(taskDir(res.runId, res.taskId))?.dependencyEnvironment;
+  assert.deepEqual(
+    receipt?.staleCacheRepaired,
+    {
+      disprovenRoot: "/project/node_modules",
+      invalidatedMarker: staleMarker,
+      reprovisionedBy: "this_dispatch",
+    },
+    "the receipt must SAY the marker was invalidated and the cache re-provisioned — not leave the operator to infer it",
+  );
+  assert.equal(receipt?.packages[0]?.loaded, true, "the receipt attests the RE-PROBED environment");
+});
+
+test("fg664 (k2): when re-provisioning a disproven cache FAILS, the dispatch is refused, no marker survives, and no agent starts", async () => {
+  setPlatform("darwin");
+  const project = makeProject("k2");
+  const hash = lockfileHash(project);
+  markDependencyCacheReady(hash);
+  const calls: Call[] = [];
+
+  const res = await invoke({
+    agentRole: "review-rechecker",
+    task: "recheck RF-1",
+    projectDir: project,
+    readOnlyProject: true,
+    dockerExec: makeExec(calls, {
+      probeReport: (nonce) => ({ nonce, ...EMPTY_ROOT_REPORT }),
+      provisionerExit: 123,
+    }),
+  });
+
+  assert.equal(res.failureKind, "verification_environment_unavailable");
+  assert.match(res.error ?? "", /provisioning_failed/);
+  assert.equal(
+    isDependencyCacheReady(hash),
+    false,
+    "a failed repair leaves NO marker — the next dispatch re-provisions rather than inheriting the disproven claim",
+  );
+  assert.equal(calls.filter((c) => c.kind === "agent").length, 0, "fail closed: no agent container on an unproven cache");
+});
+
+test("fg664 (k3): a re-provisioned cache that STILL probes empty is refused rather than re-provisioned again", async () => {
+  setPlatform("darwin");
+  const project = makeProject("k3");
+  const hash = lockfileHash(project);
+  markDependencyCacheReady(hash);
+  const calls: Call[] = [];
+
+  const res = await invoke({
+    agentRole: "review-rechecker",
+    task: "recheck RF-1",
+    projectDir: project,
+    readOnlyProject: true,
+    dockerExec: makeExec(calls, { probeReport: (nonce) => ({ nonce, ...EMPTY_ROOT_REPORT }) }),
+  });
+
+  assert.equal(res.failureKind, "verification_environment_unavailable");
+  assert.match(res.error ?? "", /dependencies_absent/);
+  assert.match(res.error ?? "", /STILL empty/);
+  assert.equal(calls.filter((c) => c.kind === "provisioner").length, 1, "bounded: ONE re-provision, then refuse");
+  assert.equal(calls.filter((c) => c.kind === "probe").length, 2);
+  assert.equal(calls.filter((c) => c.kind === "agent").length, 0);
+});
+
+test("fg664 (k4): two concurrent dispatches discovering ONE stale marker re-provision exactly once", async () => {
+  setPlatform("darwin");
+  const project = makeProject("k4");
+  const hash = lockfileHash(project);
+  markDependencyCacheReady(hash);
+
+  // The volume's real state, as both dispatches' probes read it: empty until the
+  // one provisioner that is allowed to run has run.
+  let installed = false;
+  let provisions = 0;
+  const one = () =>
+    resolveDependencyEnvironment({
+      repoRoot: project,
+      image: RUNTIME_IMAGE,
+      platform: "darwin",
+      lockOpts: { pollMs: 1 },
+      runProvisioner: async () => {
+        provisions += 1;
+        installed = true;
+        return { exitCode: 0, stderrTail: "" };
+      },
+      runProbe: async (nonce) => ({
+        exitCode: 0,
+        stdout: JSON.stringify({ nonce, ...(installed ? PROBE_REPORT : EMPTY_ROOT_REPORT) }),
+        stderrTail: "",
+      }),
+    });
+
+  const [a, b] = await Promise.all([one(), one()]);
+
+  assert.equal(a.outcome, "ready", a.outcome === "refused" ? a.detail : "");
+  assert.equal(b.outcome, "ready", b.outcome === "refused" ? b.detail : "");
+  assert.equal(provisions, 1, "the FG-376 per-cache-key lock still admits exactly one provisioner");
+  assert.ok(isDependencyCacheReady(hash));
+});
+
+test("fg664 (k5): a HEALTHY ready cache is untouched — no re-provision, no marker churn", async () => {
+  setPlatform("darwin");
+  const project = makeProject("k5");
+  const hash = lockfileHash(project);
+  markDependencyCacheReady(hash);
+  const marker = readDependencyCacheMarker(hash);
+  const calls: Call[] = [];
+
+  const res = await invoke({
+    agentRole: "review-rechecker",
+    task: "recheck RF-1",
+    projectDir: project,
+    readOnlyProject: true,
+    dockerExec: makeExec(calls),
+  });
+
+  assert.equal(res.status, "complete", res.error);
+  assert.deepEqual(calls.map((c) => c.kind), ["probe", "agent"], "a ready cache reuses the install, as before");
+  assert.equal(readDependencyCacheMarker(hash), marker, "the marker is not rewritten on the ordinary path");
+  assert.equal(
+    readTaskManifest(taskDir(res.runId, res.taskId))?.dependencyEnvironment?.staleCacheRepaired,
+    undefined,
+    "nothing was repaired, so the receipt claims no repair",
+  );
+});
+
+test("fg664 (k6): a repairer whose marker was replaced while it waited provisions NOTHING and leaves the replacement alone", async () => {
+  // The concurrent case at the primitive: both dispatches disprove marker M, one
+  // repairs and writes M', the other reaches the lock and finds a marker it never
+  // disproved. Tearing that down would restart an install another dispatch just
+  // finished — the double-install the FG-376 lock exists to prevent.
+  const key = "kkkk666666666666";
+  markDependencyCacheReady(key);
+  const disproven = readDependencyCacheMarker(key) as string;
+  markDependencyCacheReady(key); // the concurrent repairer's replacement
+  const replacement = readDependencyCacheMarker(key) as string;
+  assert.notEqual(replacement, disproven, "two markers for one key must be distinguishable");
+
+  let provisions = 0;
+  const result = await repairDisprovenDependencyCache(key, disproven, async () => {
+    provisions += 1;
+    return { exitCode: 0, stderrTail: "" };
+  });
+
+  assert.equal(result.outcome, "already_repaired");
+  assert.equal(provisions, 0);
+  assert.equal(readDependencyCacheMarker(key), replacement, "the newer marker is left exactly as it was");
 });
 
 // ── (e): the not-applicable configurations ───────────────────────────────────
@@ -605,15 +844,216 @@ test("fg664 (j): a read-write invoke dispatch builds NO probe and NO provisioner
   );
 });
 
+// ── (l): the argv-level FG-376 invariant, read off the `-e` entries ──────────
+
+// The smoke script's p3_no_install_root once grepped the FLATTENED P1 argv for
+// /FORGE_NM_INSTALL_ROOT|FORGE_NM_SHADOW/ and reported FAIL on a clean reviewer
+// dispatch: the container script is itself an argv element, and it carries the
+// literal text of the probe that PROVES those variables are empty in the
+// container. The grep matched its own proof. This is the assertion that check
+// was reaching for, stated where it belongs — over buildDockerArgs's actual env
+// entries, with no docker daemon and no container script in the way.
+test("fg664 (l): buildDockerArgs's read-only reviewer arm emits NO FORGE_NM_* env entry at all — no install root, no shadow — while both rw arms still emit the shadow", () => {
+  setPlatform("darwin");
+  const project = makeProject("l");
+  const runtime = loadRuntime("claude-apikey");
+  const base: SpawnContext = {
+    TASK_ID: "task-l",
+    TASK_DIR: makeTmpDir("fg664-taskdir-l-"),
+    PROJECT_DIR: project,
+    CANONICAL_PROJECT_DIR: project,
+    PROJECT_MODE: "ro",
+    MODEL: "test-model",
+    SYSTEM_PROMPT: "sp",
+    TASK_PACKAGE_MARKDOWN: "pkg",
+  };
+
+  // The reviewer arm, in the state the smoke script's P1 reproduces: read-only
+  // project, cache already confirmed ready by the caller.
+  const reviewer = buildDockerArgs(runtime, { ...base, DEPENDENCY_CACHE_MOUNT_RO: "1" });
+  const hash = lockfileHash(project);
+  assert.ok(
+    volumeArgs(reviewer.args).includes(`${dependencyVolumeName(hash, "")}:/project/node_modules:ro`),
+    "the arm under test must actually be the one that mounts the ready cache — otherwise the negative below is vacuous",
+  );
+  assert.deepEqual(
+    envArgs(reviewer.args).filter((e) => e.startsWith("FORGE_NM_")),
+    [],
+    "a read-only reviewer dispatch must carry no FORGE_NM_* entry whatsoever: INSTALL_ROOT and SHADOW_PATHS are the entrypoint's install/chown triggers, and a reviewer never installs",
+  );
+
+  // Both rw arms still do — so the assertion above pins the ro arm specifically
+  // and cannot be satisfied by the shadow having been dropped everywhere.
+  const legacy = buildDockerArgs(runtime, { ...base, PROJECT_MODE: "rw" });
+  assert.ok(envArgs(legacy.args).includes("FORGE_NM_SHADOW=/project/node_modules"));
+
+  const worktree = buildDockerArgs(runtime, {
+    ...base,
+    PROJECT_MODE: "rw",
+    IS_WORKTREE_DISPATCH: "1",
+    DEPENDENCY_CACHE_MOUNT_RO: "1",
+  });
+  assert.ok(envArgs(worktree.args).includes("FORGE_NM_SHADOW=/project/node_modules"));
+  assert.ok(envArgs(worktree.args).includes("FORGE_NM_SHADOW_PATHS=/project/node_modules"));
+  assert.ok(
+    !envArgs(worktree.args).some((e) => e.startsWith("FORGE_NM_INSTALL_ROOT=")),
+    "no agent class ever gets FORGE_NM_INSTALL_ROOT — only the provisioner does",
+  );
+});
+
 // ── the probe report reader ──────────────────────────────────────────────────
 
+const NONCE = "b6f3c1de0000000000000000deadbeef";
+
 test("fg664: the probe report is read from the LAST readable JSON line, so an entrypoint warning ahead of it does not defeat the attestation", () => {
-  const stdout = `forge: WARNING — this task was dispatched with a db ticket authority\n${JSON.stringify(PROBE_REPORT)}\n`;
-  const report = parseDependencyProbeOutput(stdout);
+  const stdout = `forge: WARNING — this task was dispatched with a db ticket authority\n${JSON.stringify({ nonce: NONCE, ...PROBE_REPORT })}\n`;
+  const report = parseDependencyProbeOutput(stdout, NONCE);
   assert.equal(report?.abi, "137");
   assert.equal(report?.packages[0]?.name, "better-sqlite3");
-  assert.equal(parseDependencyProbeOutput("not json at all"), undefined);
-  assert.equal(parseDependencyProbeOutput('{"node":"v24"}'), undefined, "a partial report is no report");
+  assert.equal(parseDependencyProbeOutput("not json at all", NONCE), undefined);
+  assert.equal(parseDependencyProbeOutput('{"node":"v24"}', NONCE), undefined, "a partial report is no report");
+});
+
+test("fg664: a well-formed report that does NOT carry this dispatch's nonce is no report — the attested value is one the probed code was never handed", () => {
+  // The forgery shape the old probe permitted: a well-formed, plausible report
+  // printed onto the SAME stdout the host reads back, arriving AFTER the genuine
+  // one so last-line-wins prefers it. Every field is right except the one thing
+  // the printer could not know.
+  const forged = JSON.stringify({ nonce: "0".repeat(32), ...PROBE_REPORT });
+  const genuine = JSON.stringify({ nonce: NONCE, ...PROBE_REPORT });
+
+  assert.equal(parseDependencyProbeOutput(forged, NONCE), undefined, "a foreign nonce must not be read as this dispatch's attestation");
+  assert.equal(
+    parseDependencyProbeOutput(JSON.stringify({ ...PROBE_REPORT }), NONCE),
+    undefined,
+    "a report with NO nonce at all is not this dispatch's report either",
+  );
+  assert.equal(
+    parseDependencyProbeOutput(`${genuine}\n${forged}\n`, NONCE)?.nonce,
+    NONCE,
+    "the genuine line is still found when a forgery is appended after it",
+  );
+});
+
+test("fg664: a probe whose stdout carries only an unattested report REFUSES the dispatch, and no agent container starts", async () => {
+  setPlatform("darwin");
+  const project = makeProject("nonce");
+  const calls: Call[] = [];
+
+  const res = await invoke({
+    agentRole: "review-rechecker",
+    task: "recheck RF-1",
+    projectDir: project,
+    readOnlyProject: true,
+    // Everything a healthy probe reports, minus the binding to THIS dispatch.
+    dockerExec: makeExec(calls, { probeReport: () => ({ nonce: "0".repeat(32), ...PROBE_REPORT }) }),
+  });
+
+  assert.equal(res.failureKind, "verification_environment_unavailable");
+  assert.match(res.error ?? "", /probe_unparseable/);
+  assert.match(res.error ?? "", /nonce/);
+  assert.equal(calls.filter((c) => c.kind === "agent").length, 0);
+});
+
+test("fg664: a native package the project does NOT depend on cannot refuse the dispatch, and one it DOES depend on still can", async () => {
+  // The gate as first built required every top-level directory carrying a `.node`
+  // to be loadable, with no allowlist. This project's own @img/sharp-linux-arm64
+  // — installed by the provisioner's npm ci, publishing `exports` with no "."
+  // entry — was never loadable that way, so the fail-closed gate refused EVERY
+  // read-only dispatch on darwin. The question is "can this container load the
+  // drivers this project needs", and the project's manifest is what says which
+  // those are.
+  setPlatform("darwin");
+  const incidental = {
+    ...PROBE_REPORT,
+    packages: [
+      ...PROBE_REPORT.packages,
+      {
+        name: "@img/sharp-linux-arm64",
+        version: "0.34.5",
+        loaded: false,
+        error: "Error [ERR_PACKAGE_PATH_NOT_EXPORTED]: No \"exports\" main defined",
+      },
+    ],
+  };
+
+  const okCalls: Call[] = [];
+  const ok = await invoke({
+    agentRole: "review-rechecker",
+    task: "recheck RF-1",
+    projectDir: makeProject("scoped-ok"),
+    readOnlyProject: true,
+    dockerExec: makeExec(okCalls, { probeReport: (nonce) => ({ nonce, ...incidental }) }),
+  });
+  assert.equal(ok.status, "complete", `an undeclared native package must not refuse the dispatch (${ok.error})`);
+  assert.equal(okCalls.filter((c) => c.kind === "agent").length, 1);
+  assert.deepEqual(
+    readTaskManifest(taskDir(ok.runId, ok.taskId))?.dependencyEnvironment?.packages.map((p) => `${p.name}:${p.loaded}`),
+    ["better-sqlite3:true", "@img/sharp-linux-arm64:false"],
+    "the unloadable incidental package is still RECORDED — non-fatal is not unseen",
+  );
+
+  // The fail-closed direction is unchanged: the driver the project declares is
+  // still load-bearing, in the same report shape.
+  const badCalls: Call[] = [];
+  const bad = await invoke({
+    agentRole: "review-rechecker",
+    task: "recheck RF-1",
+    projectDir: makeProject("scoped-bad"),
+    readOnlyProject: true,
+    dockerExec: makeExec(badCalls, {
+      probeReport: (nonce) => ({
+        nonce,
+        ...incidental,
+        packages: incidental.packages.map((p) =>
+          p.name === "better-sqlite3" ? { ...p, loaded: false, error: "invalid ELF header" } : p,
+        ),
+      }),
+    }),
+  });
+  assert.equal(bad.failureKind, "verification_environment_unavailable");
+  assert.match(bad.error ?? "", /driver_unloadable/);
+  assert.match(bad.error ?? "", /better-sqlite3/);
+  assert.ok(
+    !/@img\/sharp-linux-arm64/.test(bad.error ?? ""),
+    "the refusal names the driver the project depends on, not every native-looking package",
+  );
+  assert.equal(badCalls.filter((c) => c.kind === "agent").length, 0);
+});
+
+test("fg664: a BROKEN project mount is diagnosed as the broken mount it is, not as an unavailable dependency cache", async () => {
+  // The FG-664 gate prepares mountpoints INSIDE the project tree and provisions
+  // against it, so while it ran AHEAD of the mount preflight a tree Forge already
+  // knew was broken still got a provisioner and a probe container spent on it —
+  // and whatever those said was the diagnosis the operator saw first. The mount
+  // is the more specific fact; it is checked before anything is built.
+  setPlatform("darwin");
+  const broken = makeProject("broken-mount");
+  // FG-559's shape: a linked worktree whose parent repo is gone. `.git` is a
+  // pointer FILE to a path that does not exist, which is broken on the HOST.
+  writeFileSync(join(broken, ".git"), `gitdir: ${join(broken, "does-not-exist", "worktrees", "gone")}\n`);
+  const calls: Call[] = [];
+
+  const res = await invoke({
+    agentRole: "review-rechecker",
+    task: "recheck RF-1",
+    projectDir: broken,
+    readOnlyProject: true,
+    dockerExec: makeExec(calls),
+  });
+
+  assert.equal(res.status, "failed");
+  assert.match(res.error ?? "", /preflightProjectMount failed/);
+  assert.match(res.error ?? "", /gitdir: pointer/);
+  assert.ok(
+    !/mountpoints_unavailable|provisioning_failed/.test(res.error ?? ""),
+    `a broken project mount must not be reported as a dependency-environment fault; got: ${res.error}`,
+  );
+  assert.deepEqual(
+    calls.map((c) => c.kind),
+    [],
+    "no provisioner and no probe may be spent on a tree Forge already knows cannot be mounted",
+  );
 });
 
 // ── (g) (h) (i): Stage 8 ─────────────────────────────────────────────────────

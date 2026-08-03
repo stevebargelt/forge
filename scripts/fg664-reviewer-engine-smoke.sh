@@ -51,19 +51,31 @@
 #     the environmental CAUSE and the incentive; it does not detect deliberate
 #     fabrication, and nothing here should be read as claiming otherwise.
 #
+# IT RUNS FORGE'S OWN PROBE, NOT A SUBSTITUTE FOR IT. The load decision in P1/P2
+# comes from executing `DEPENDENCY_PROBE_SCRIPT` — the exact string
+# src/v2/spawn.ts hands its probe container — with the same
+# FORGE_PROBE_ROOTS / FORGE_PROBE_INSTALL_ROOT / FORGE_PROBE_NONCE env the real
+# dispatch passes, and adjudicating the report it prints under the nonce this run
+# minted. An earlier cut of this script hand-rolled its own `require()` instead,
+# which meant a green run said nothing about the script that actually gates a
+# dispatch — the same "verification that does not exercise what ships" defect
+# FG-664 exists to close. The hand-rolled round-trip query survives as a SECOND,
+# corroborating probe (it proves the driver answers real SQL, which the shipped
+# probe's dlopen deliberately does not ask); it is no longer the evidence.
+#
 # THE THREE PROBES, AND WHY THE NEGATIVE ONE IS LOAD-BEARING.
 #   P1  With the dependency cache provisioned, run a container with the EXACT
 #       mount shape forge's read-only reviewer planner emits — project `:ro`,
 #       the lockfile-keyed volumes `:ro`, NO read-write dependency mount — and
-#       assert the project's real driver LOADS, executes a real query, and
-#       reports the CONTAINER's `process.versions.modules`, from an artifact
-#       whose magic bytes are ELF.
-#   P2  The same container with the dependency volumes ABSENT: assert the load
-#       FAILS, on a Mach-O artifact seen through the read-only project bind.
-#       This reproduces the live defect that produced FG-662's three false
-#       "still present" verdicts, and it is what makes P1 mean anything: without
-#       it, a green P1 could be the host's darwin-arm64 `node_modules` being
-#       read straight through the project bind.
+#       assert FORGE'S OWN PROBE reports the project's real driver LOADED, that
+#       the driver executes a real query and reports the CONTAINER's
+#       `process.versions.modules`, and that the artifact behind it has ELF magic.
+#   P2  The same container with the dependency volumes ABSENT: assert forge's
+#       probe reports the driver UNLOADED, on a Mach-O artifact seen through the
+#       read-only project bind. This reproduces the live defect that produced
+#       FG-662's three false "still present" verdicts, and it is what makes P1
+#       mean anything: without it, a green P1 could be the host's darwin-arm64
+#       `node_modules` being read straight through the project bind.
 #   P3  Assert the argv carries no read-write dependency mount, no
 #       FORGE_NM_INSTALL_ROOT and no install command, and corroborate that in
 #       the kernel (writes into `/project` and into the mounted `node_modules`
@@ -90,6 +102,12 @@
 #   * on a cold cache key it runs ONE real `npm ci` provisioner container (the
 #     product's own, via buildProvisionerDockerArgs) and, on success, leaves the
 #     ready marker a subsequent real dispatch would have written anyway;
+#   * on a cache key whose ready marker this run DISPROVES — marked ready, install
+#     root empty, which is what a `docker volume prune` or a Docker Desktop
+#     factory reset leaves behind — it invalidates that marker and re-provisions
+#     ONCE through the product's own repairDisprovenDependencyCache, under the
+#     same lock. That is the repair a real dispatch performs on the same
+#     discovery, not something this script does instead of it;
 #   * forge's own createDependencyMountpoints creates EMPTY `node_modules`
 #     mountpoint directories in the project tree (gitignored, invisible to
 #     `git status --porcelain --ignored`) — the same precondition every
@@ -113,6 +131,8 @@
 #
 #   FORGE_SMOKE_RUN_ID   override the generated run id (evidence label)
 #   FORGE_SMOKE_WORKDIR  parent dir for the throwaway work dir (default: mktemp -d)
+#   FORGE_SMOKE_KEEP_WORK=1  keep the work dir (argv + container logs) even on a
+#                  clean pass; it is ALWAYS kept when the run fails
 
 set -euo pipefail
 
@@ -138,7 +158,7 @@ while [ $# -gt 0 ]; do
     --image)       [ $# -ge 2 ] || fatal "--image needs a value";       IMAGE_ARG="$2";       shift 2 ;;
     --package)     [ $# -ge 2 ] || fatal "--package needs a value";     PKG="$2";             shift 2 ;;
     --runtime)     [ $# -ge 2 ] || fatal "--runtime needs a value";     RUNTIME_NAME="$2";    shift 2 ;;
-    -h|--help)     sed -n '2,115p' "$0"; exit "$HELP_EXIT_STATUS" ;;
+    -h|--help)     sed -n '2,135p' "$0"; exit "$HELP_EXIT_STATUS" ;;
     *)             fatal "unknown argument: $1 (see --help)" ;;
   esac
 done
@@ -228,7 +248,20 @@ TASK_ID="task-$RUN_ID"
 
 WORK="$(mktemp -d "${FORGE_SMOKE_WORKDIR:-${TMPDIR:-/tmp}}/fg664-smoke.XXXXXX")" \
   || fatal "cannot create a work dir."
-cleanup() { rm -rf "$WORK" || true; }
+# A proof whose diagnostic evidence deletes itself on failure cannot be acted on:
+# the argv, the plan and both container logs live under $WORK, and a failed
+# assertion is exactly when someone needs to read them. Kept on ANY nonzero exit
+# (a failed assertion or an early fatal), removed only on a clean all-pass run.
+cleanup() {
+  _rc=$?
+  if [ "$_rc" -ne 0 ] || [ "${FAILURES:-0}" -ne 0 ] || [ "${FORGE_SMOKE_KEEP_WORK:-0}" = "1" ]; then
+    echo "$SELF: work dir PRESERVED for diagnosis: $WORK" >&2
+    echo "  P1 argv exactly as handed to docker (one element per line): $WORK/p1.log.argv" >&2
+    echo "  P1/P2 container logs: $WORK/p1.log $WORK/p2.log" >&2
+    return
+  fi
+  rm -rf "$WORK" || true
+}
 trap cleanup EXIT
 
 OUT="$WORK/plan"
@@ -244,15 +277,16 @@ mkdir -p "$OUT"
 # hand-rolled name that drifted from dependencyVolumeName would mount an EMPTY
 # volume, P1 would fail, and the failure would be about this script.
 #
-# It deliberately uses only pre-existing exports, so it is valid against the
-# tree both before and after FG-664's dispatch-side resolver lands.
+# The same reasoning is why DEPENDENCY_PROBE_SCRIPT is read out of spawn.ts here
+# rather than transcribed: a transcription is a copy that can drift, and a copy
+# that drifted would prove something about the copy.
 
 HELPER='
 const projectDir = process.env.FG664_PROJECT_DIR;
 const outDir = process.env.FG664_OUT;
 const fs = await import("node:fs");
 const { loadRuntime } = await import("./src/v2/loader.js");
-const { resolveProjectContainerPath, buildProvisionerDockerArgs } = await import("./src/v2/spawn.js");
+const { resolveProjectContainerPath, buildProvisionerDockerArgs, DEPENDENCY_PROBE_SCRIPT } = await import("./src/v2/spawn.js");
 const deps = await import("./src/v2/dependency-provisioning.js");
 const base = loadRuntime(process.env.FG664_RUNTIME, { projectDir });
 const runtime = process.env.FG664_IMAGE ? { ...base, image: process.env.FG664_IMAGE } : base;
@@ -272,19 +306,41 @@ write("image", runtime.image);
 write("pcp", projectContainerPath);
 write("cache_key", plan.lockfileHash);
 write("ready", deps.isDependencyCacheReady(plan.lockfileHash) ? "1" : "0");
+write("ready-marker", deps.readDependencyCacheMarker(plan.lockfileHash) ?? "");
 write("ro-mounts", plan.volumes.map((v) => v.name + ":" + v.containerPath + ":ro").join("\n"));
 write("volume-names", plan.volumes.map((v) => v.name).join("\n"));
+write("root-volume", plan.volumes.find((v) => v.containerPath === plan.installRoot + "/node_modules")?.name ?? "");
 write("provisioner-argv", provisionerArgs.join("\n"));
-if (process.env.FG664_MODE === "provision") {
+// The SHIPPED probe, and the two env values buildDependencyProbeDockerArgs
+// derives for it. The nonce is minted per run by the caller, as the resolver does.
+write("probe-script", DEPENDENCY_PROBE_SCRIPT);
+write("probe-roots", plan.volumes.map((v) => v.containerPath).join(":"));
+write("probe-install-root", plan.installRoot + "/node_modules");
+const runProvisioner = async () => {
   const { spawnSync } = await import("node:child_process");
-  const outcome = await deps.provisionDependencyCache(plan.lockfileHash, async () => {
-    const r = spawnSync("docker", provisionerArgs, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
-    fs.writeFileSync(process.env.FG664_PROVISION_LOG, (r.stdout || "") + (r.stderr || ""));
-    const tail = (r.stderr || "").trim().split("\n").slice(-8).join(" | ");
-    return { exitCode: r.status === null ? 1 : r.status, stderrTail: tail };
-  });
+  const r = spawnSync("docker", provisionerArgs, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  fs.writeFileSync(process.env.FG664_PROVISION_LOG, (r.stdout || "") + (r.stderr || ""));
+  const tail = (r.stderr || "").trim().split("\n").slice(-8).join(" | ");
+  return { exitCode: r.status === null ? 1 : r.status, stderrTail: tail };
+};
+if (process.env.FG664_MODE === "provision") {
+  const outcome = await deps.provisionDependencyCache(plan.lockfileHash, runProvisioner);
   write("provision-outcome", outcome.outcome);
   write("provision-error", outcome.outcome === "failed" ? outcome.error : "");
+}
+// The marker this run DISPROVED (the caller measured the install root empty for a
+// key marked ready) is repaired through the product itself: the same
+// invalidate-then-reprovision, under the same per-cache-key lock, that
+// resolveDependencyEnvironment runs on a real dispatch. Reimplementing it here
+// would prove something about this script.
+if (process.env.FG664_MODE === "repair") {
+  const outcome = await deps.repairDisprovenDependencyCache(
+    plan.lockfileHash,
+    process.env.FG664_DISPROVEN_MARKER,
+    runProvisioner,
+  );
+  write("repair-outcome", outcome.outcome);
+  write("repair-error", outcome.outcome === "failed" ? outcome.error : "");
 }
 '
 
@@ -297,6 +353,7 @@ run_helper() { # $1 = mode (plan|provision)
          FG664_IMAGE="$IMAGE_ARG" \
          FG664_TASK_ID="$TASK_ID" \
          FG664_MODE="$1" \
+         FG664_DISPROVEN_MARKER="${DISPROVEN_MARKER:-}" \
          FG664_PROVISION_LOG="$WORK/provisioner.log" \
          node --import tsx --input-type=module -e "$HELPER"
   )
@@ -310,7 +367,17 @@ IMAGE="$(cat "$OUT/image")"
 PCP="$(cat "$OUT/pcp")"
 CACHE_KEY="$(cat "$OUT/cache_key")"
 CACHE_READY="$(cat "$OUT/ready")"
+PROBE_SCRIPT="$(cat "$OUT/probe-script")"
+PROBE_ROOTS="$(cat "$OUT/probe-roots")"
+PROBE_INSTALL_ROOT="$(cat "$OUT/probe-install-root")"
 
+# Minted here, per run, exactly as resolveDependencyEnvironment mints it per
+# dispatch. A report that does not carry it back is not this run's report.
+PROBE_NONCE="$(node -p 'require("crypto").randomBytes(16).toString("hex")')" \
+  || fatal "could not mint a probe nonce."
+
+[ -n "$PROBE_SCRIPT" ] || fatal "spawn.ts exported no DEPENDENCY_PROBE_SCRIPT — this proof runs FORGE's probe, not a substitute."
+[ -n "$PROBE_ROOTS" ] || fatal "forge's plan names no dependency container paths for the probe to scan."
 [ -n "$IMAGE" ] || fatal "the resolved runtime declares no image."
 [ -s "$OUT/ro-mounts" ] || fatal "forge's plan for $PROJECT_DIR contains NO dependency volumes — there is no read-only \
 dependency mount to prove anything about."
@@ -340,15 +407,69 @@ if [ "$CACHE_READY" != "1" ]; then
   PROVISIONED="provisioned cold, in this run, by forge's own provisioner container"
 fi
 
-# A ready marker records that an install SUCCEEDED for this lockfile hash; the
-# volumes are separate objects that an operator prune can remove independently.
-# Mounting an absent volume gives docker an EMPTY anonymous one and P1 would
-# fail with a mystery, so check before running rather than diagnose after.
+# ── The ready marker is a claim about the past, and it gets checked ──────────
+#
+# A ready marker records that an install SUCCEEDED for this lockfile hash. The
+# volumes it speaks for are separate docker objects that a `docker volume prune`,
+# a `docker volume rm`, or a Docker Desktop factory reset removes independently —
+# the markers live under ~/.forge and survive all three. Mounting an absent volume
+# gives docker an EMPTY anonymous one, and an empty install root reads to the
+# probe as "no native packages, nothing failed to load": P1 fails with a mystery.
+#
+# So the volume is ASKED, before anything slower runs. A marker the volume
+# disproves is repaired through the product — forge's own
+# repairDisprovenDependencyCache, which invalidates the marker and re-provisions
+# once under the FG-376 per-cache-key lock, exactly as a real dispatch does when
+# its probe finds the same thing. This used to tell the operator to go delete a
+# file under ~/.forge by hand; that instruction was the same closed loop the
+# product had, written down.
+ROOT_VOLUME="$(cat "$OUT/root-volume")"
+[ -n "$ROOT_VOLUME" ] || fatal "forge's plan names no install-root dependency volume — there is nothing to check for emptiness."
+
+# The count is printed behind a marker and read back with sed rather than piped
+# through `tr -cd 0-9`: the image's entrypoint can print its own lines (the FG-608
+# backlog-authority warning, for one), and a digit-scraping read would splice them
+# into the number. Same reason parseDependencyProbeOutput scans for a shape.
+install_root_entries() { # -> the number of entries in the install-root volume
+  docker run --rm -e FORGE_NO_BROWSER=1 -v "$ROOT_VOLUME:/nm:ro" "$IMAGE" \
+    sh -c 'printf "FG664_ENTRIES=%s\n" "$(ls -A /nm 2>/dev/null | wc -l | tr -cd "0-9")"' 2>/dev/null \
+    | sed -n 's/^FG664_ENTRIES=\([0-9][0-9]*\)$/\1/p' \
+    | tail -n 1
+}
+
+if [ "$CACHE_READY" = "1" ]; then
+  ENTRIES="$(install_root_entries)"
+  [ -n "$ENTRIES" ] || fatal "could not count the entries in dependency volume '$ROOT_VOLUME' (docker run failed)."
+  if [ "$ENTRIES" -eq 0 ]; then
+    DISPROVEN_MARKER="$(cat "$OUT/ready-marker")"
+    [ -n "$DISPROVEN_MARKER" ] || fatal "cache key $CACHE_KEY reads ready but carries no marker value to invalidate."
+    echo "==> cache key $CACHE_KEY is marked ready but its install root is EMPTY (the volume was pruned or reset)."
+    echo "==> invalidating the disproven marker and re-provisioning ONCE through forge, under its own lock."
+    run_helper repair || fatal "the repair helper died before it could report an outcome."
+    REPAIR_OUTCOME="$(cat "$OUT/repair-outcome" 2>/dev/null || echo failed)"
+    if [ "$REPAIR_OUTCOME" = "failed" ]; then
+      if [ -f "$WORK/provisioner.log" ]; then
+        echo "$SELF: provisioner output tail:" >&2
+        tail -n 40 "$WORK/provisioner.log" >&2
+      fi
+      fatal "re-provisioning cache key $CACHE_KEY failed: $(cat "$OUT/repair-error" 2>/dev/null || true)"
+    fi
+    ENTRIES="$(install_root_entries)"
+    [ "${ENTRIES:-0}" -gt 0 ] \
+      || fatal "cache key $CACHE_KEY was re-provisioned ($REPAIR_OUTCOME) and its install root is STILL empty — \
+this is not a stale marker, and P1 below could not be attributed to the mounted cache."
+    PROVISIONED="re-provisioned after a DISPROVEN ready marker was invalidated ($REPAIR_OUTCOME)"
+  fi
+fi
+
+# Every OTHER member's volume still has to exist before the reviewer argv binds
+# it; an absent one would silently become a fresh empty anonymous volume.
 while IFS= read -r vol; do
   [ -n "$vol" ] || continue
   docker volume inspect "$vol" >/dev/null 2>&1 \
-    || fatal "cache key $CACHE_KEY is marked ready but docker volume '$vol' does not exist \
-(pruned?). Remove ~/.forge/dependency-cache/$CACHE_KEY.ready and re-run to re-provision."
+    || fatal "cache key $CACHE_KEY is marked ready but docker volume '$vol' does not exist (pruned?), while its \
+install root is populated — so the self-healing repair above does not fire. Run 'forge dependency-cache prune' and \
+re-run to re-provision the whole key."
 done < "$OUT/volume-names"
 
 # ── The reviewer argv, and the probe program it carries ──────────────────────
@@ -418,7 +539,15 @@ probe "${FG664_PROBE}_node_present" 'command -v node'
 # Mach-O (the host's darwin build, seen straight through the project bind).
 probe "${FG664_PROBE}_driver_artifact" 'f=$(find "$FG664_PCP/node_modules/$FG664_PKG" -name "*.node" -type f -print -quit 2>/dev/null); echo "artifact=$f"; od -An -tx1 -N4 < "$f"'
 
-# The load itself: require, open, write, read back, and ask sqlite its version.
+# FORGE'S OWN PROBE — the string spawn.ts hands its probe container, run with
+# the env buildDependencyProbeDockerArgs derives, under this run's nonce. This
+# is the evidence; everything else about the load corroborates it.
+probe "${FG664_PROBE}_forge_probe" 'cd "$FG664_PCP" && node -e "$FG664_PROBE_SCRIPT"'
+
+# Corroboration, not evidence: require, open, write, read back, and ask sqlite
+# its version. Forge's probe deliberately stops at dlopen (it never executes a
+# package entry point), so this is the one assertion that the driver answers
+# real SQL rather than merely mapping into the process.
 probe "${FG664_PROBE}_driver_load" 'cd "$FG664_PCP" && node -e "$FG664_LOADER"'
 
 # FG-376 / the `:ro` enforcement primitive, corroborated in the kernel rather
@@ -448,6 +577,11 @@ run_probe_container() { # $1 = probe prefix (p1|p2), $2 = log path, $3.. = extra
     -e "FG664_PCP=$PCP"
     -e "FG664_PKG=$PKG"
     -e "FG664_LOADER=$LOADER"
+    # Forge's own probe, and the env buildDependencyProbeDockerArgs derives for it.
+    -e "FG664_PROBE_SCRIPT=$PROBE_SCRIPT"
+    -e "FORGE_PROBE_ROOTS=$PROBE_ROOTS"
+    -e "FORGE_PROBE_INSTALL_ROOT=$PROBE_INSTALL_ROOT"
+    -e "FORGE_PROBE_NONCE=$PROBE_NONCE"
     "$@"
     -w "$PCP"
     "$IMAGE"
@@ -468,6 +602,9 @@ P2LOG="$WORK/p2.log"
 echo "==> P1: reviewer mount shape WITH the lockfile-keyed dependency volumes (:ro)"
 P1_RC=0
 run_probe_container p1 "$P1LOG" "${REVIEWER_MOUNTS[@]}" || P1_RC=$?
+# P1's argv as an ARRAY, kept because the P2 run below overwrites PROBE_ARGS.
+# The env assertion has to read elements, not the flattened text — see p3 below.
+P1_ARGS=( "${PROBE_ARGS[@]}" )
 
 echo "==> P2: the same container with the dependency volumes ABSENT (the live defect)"
 P2_RC=0
@@ -589,6 +726,40 @@ expect_host() { # id ok? label detail
   if [ "$2" = "0" ]; then record "$1" PASS "$3"; else record "$1" FAIL "$3 — $4"; fi
 }
 
+# Forge's probe prints ONE JSON line carrying this run's nonce. Everything below
+# reads that line and nothing else — a probe that never ran, exited nonzero, or
+# printed a report bound to some other nonce is a FAIL, never a verdict.
+FORGE_PROBE_REPORT=""
+forge_probe_report() { # id -> sets FORGE_PROBE_REPORT; nonzero (and records FAIL) when unusable
+  local id="$1" label="$2" rc out line
+  FORGE_PROBE_REPORT=""
+  probe_status "$id" "$label" || return 1
+  rc="$PROBE_RC_VALUE"
+  out="$(probe_out "$id")"
+  if [ "$rc" -ne 0 ]; then
+    record "$id" FAIL "forge's probe script exited $rc ($label): $(first_line "$out")"; return 1
+  fi
+  line="$(grep -F "\"nonce\":\"$PROBE_NONCE\"" <<<"$out" || true)"
+  if [ -z "$line" ]; then
+    record "$id" FAIL "forge's probe printed no report carrying THIS run's nonce ($label): $(first_line "$out")"; return 1
+  fi
+  FORGE_PROBE_REPORT="$line"
+  return 0
+}
+
+# Whether the report says $PKG loaded. Deliberately a per-package read rather
+# than "no unloaded packages anywhere": the gate refuses on the natives the
+# PROJECT declares, and this proof is about one named driver.
+forge_probe_says_loaded() { # report -> 0 when $PKG is present with loaded:true
+  node -e '
+    const report = JSON.parse(process.argv[1]);
+    const pkg = (report.packages || []).find((p) => p.name === process.argv[2]);
+    if (!pkg) { console.log("ABSENT"); process.exit(2); }
+    console.log(pkg.loaded ? "LOADED" : "UNLOADED " + (pkg.error || "no error recorded"));
+    process.exit(pkg.loaded ? 0 : 1);
+  ' "$1" "$PKG" 2>&1
+}
+
 if [ "$P1_RC" -eq 122 ]; then
   echo "$SELF: the agent entrypoint's FG-559 git probe refused the project mount (exit 122)." >&2
 fi
@@ -608,8 +779,22 @@ expect_success p1_node_present "CONTROL: node is on PATH in the container"
 expect_success p1_driver_artifact \
   "P1: the resolved $PKG artifact is an ELF binary — it came from the mounted volume, not the darwin host tree" \
   "7f 45 4c 46"
+
+# THE EVIDENCE: forge's own probe, run in the reviewer's mount shape, says the
+# driver loaded. This is the same script, the same env and the same nonce
+# discipline a real read-only dispatch gates on.
+P1_FORGE_STATUS=""
+if forge_probe_report p1_forge_probe "P1: FORGE'S OWN probe attests the engine in the reviewer mount shape"; then
+  P1_FORGE_STATUS="$(forge_probe_says_loaded "$FORGE_PROBE_REPORT")" && P1_FORGE_RC=0 || P1_FORGE_RC=$?
+  if [ "$P1_FORGE_RC" -eq 0 ]; then
+    record p1_forge_probe PASS "forge's probe reports $PKG LOADED under this run's nonce"
+  else
+    record p1_forge_probe FAIL "forge's probe reports $PKG $P1_FORGE_STATUS — the gate that ships would REFUSE this dispatch"
+  fi
+fi
+
 expect_success p1_driver_load \
-  "P1: the project's REAL driver loads, opens a database and answers a query (AC 1)" \
+  "P1 (corroboration): the project's REAL driver opens a database and answers a query (AC 1)" \
   "\"driver\":\"$PKG\""
 
 # The resolution path and the container's ABI are read off the SAME probe record
@@ -663,8 +848,24 @@ else
   record p2_artifact_not_elf FAIL "the artifact reachable without the volumes is neither ELF nor Mach-O — investigate: $(first_line "$P2_ART")"
 fi
 
+# The negative, through the SAME script the positive went through. A probe that
+# reported "loaded" here would mean the shipped gate cannot tell the reviewer's
+# mount shape from the bare project bind — which is the whole distinction.
+if forge_probe_report p2_forge_probe "P2: FORGE'S OWN probe, with the dependency volumes ABSENT"; then
+  P2_FORGE_STATUS="$(forge_probe_says_loaded "$FORGE_PROBE_REPORT")" && P2_FORGE_RC=0 || P2_FORGE_RC=$?
+  if [ "$P2_FORGE_RC" -eq 1 ]; then
+    record p2_forge_probe PASS "forge's probe reports $PKG unloadable without the cache: $P2_FORGE_STATUS"
+  elif [ "$P2_FORGE_RC" -eq 0 ]; then
+    record p2_forge_probe FAIL "forge's probe reports $PKG LOADED WITHOUT the dependency volumes — P1's green would then \
+prove nothing, because the shipped gate cannot distinguish the two mount shapes"
+  else
+    record p2_forge_probe FAIL "forge's probe did not report $PKG at all ($P2_FORGE_STATUS) — a package it never \
+considered is not a load that failed"
+  fi
+fi
+
 expect_load_failed p2_driver_load \
-  "P2: the real driver CANNOT load without the dependency volumes (this is what the rechecker met, and improvised around)"
+  "P2 (corroboration): the real driver CANNOT load without the dependency volumes (this is what the rechecker met, and improvised around)"
 
 # ---- P3, argv half: the FG-376 invariant is visible in what we handed docker
 CLOG="$P1LOG"
@@ -688,10 +889,25 @@ done
 expect_host p3_dependency_mounts_ro "$DEP_RO_OK" \
   "P3: all ${#DEP_MOUNTS[@]} lockfile-keyed dependency volume(s) are mounted :ro and nothing else" "$DEP_DETAIL"
 
-if grep -Eq 'FORGE_NM_INSTALL_ROOT|FORGE_NM_SHADOW' <<<"$P1_ARGV"; then
-  record p3_no_install_root FAIL "the argv carries an install/shadow variable — FG-376 says a reviewer container never installs"
+# Read pairwise off the argv ARRAY, never as a grep over the flattened text. The
+# container script is itself one argv element and it contains the literal string
+# `FORGE_NM_INSTALL_ROOT=[${FORGE_NM_INSTALL_ROOT:-}] FORGE_NM_SHADOW=...` — that
+# is the p1_no_install_env probe, the assertion that proves these are EMPTY in
+# the container. A text grep matches its own proof and reports it as the
+# violation it disproves. Only a real `-e FORGE_NM_*` entry counts.
+P1_NM_ENV=""
+PREV=""
+for a in "${P1_ARGS[@]}"; do
+  if [ "$PREV" = "-e" ] || [ "$PREV" = "--env" ]; then
+    case "$a" in FORGE_NM_*) P1_NM_ENV="$a" ;; esac
+  fi
+  case "$a" in --env=FORGE_NM_*) P1_NM_ENV="$a" ;; esac
+  PREV="$a"
+done
+if [ -n "$P1_NM_ENV" ]; then
+  record p3_no_install_root FAIL "the argv carries an install/shadow env entry (-e $P1_NM_ENV) — FG-376 says a reviewer container never installs"
 else
-  record p3_no_install_root PASS "no FORGE_NM_INSTALL_ROOT and no FORGE_NM_SHADOW* in the argv"
+  record p3_no_install_root PASS "no -e FORGE_NM_INSTALL_ROOT and no -e FORGE_NM_SHADOW* among the argv's env entries"
 fi
 
 if grep -Eq 'npm (ci|install)|yarn install|pnpm install' <<<"$P1_ARGV"; then
@@ -764,9 +980,12 @@ printf '%s' "$RESULTS" | while IFS= read -r line; do
   if [ -n "$cmd" ]; then echo "        \$ $cmd"; fi
 done
 echo
+echo "probe nonce  : $PROBE_NONCE (minted this run; forge's probe report must carry it)"
+echo "forge probe  : the shipped DEPENDENCY_PROBE_SCRIPT from src/v2/spawn.ts, not a substitute"
+echo
 if [ "$FAILURES" -eq 0 ]; then
-  echo "P1 (real driver loads under the read-only reviewer mount shape)      : PASS"
-  echo "P2 (load FAILS without the dependency volumes — defect reproduced)   : PASS"
+  echo "P1 (FORGE'S OWN probe attests the driver loads in the reviewer shape) : PASS"
+  echo "P2 (the same probe reports it unloadable without the volumes)         : PASS"
   echo "P3 (no rw dependency mount, no install: FG-376 invariant holds)      : PASS"
   echo "FG-664 AC 1 : PASS on darwin + npm-lockfile. This says NOTHING about half (B):"
   echo "              that a lane which cannot load the driver is recorded blocked_environment"

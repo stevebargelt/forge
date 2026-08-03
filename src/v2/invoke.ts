@@ -693,6 +693,22 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
 
   const exec = args.dockerExec ?? productionDockerExec;
 
+  // FG-374: verify the resolved projectDir is a mountable project BEFORE anything
+  // downstream tries to prepare a mount inside it. This used to sit below
+  // buildDockerArgs, which put it AFTER the FG-664 gate — so a missing or broken
+  // project directory surfaced as `mountpoints_unavailable`, blaming the
+  // dependency cache for a directory that was never there. The broken mount is
+  // the more specific fact and it is the one that gets named.
+  try {
+    preflightProjectMount(args.projectDir);
+  } catch (e) {
+    const error = `preflightProjectMount failed: ${(e as Error).message}`;
+    cleanupStagedAuth(dir); // AWN-8
+    failTask(taskId, { runId, kind: classify({}), error });
+    closeRunIfIdle(false);
+    return { runId, taskId, status: "failed", error };
+  }
+
   // FG-664: A READ-ONLY DISPATCH THAT CANNOT EXECUTE THE PROJECT'S DEPENDENCIES IS
   // REFUSED, HOST-SIDE, BEFORE ANY AGENT CONTAINER EXISTS.
   //
@@ -911,18 +927,6 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     dockerArgs = buildDockerArgs(runtime, ctx);
   } catch (e) {
     const error = `buildDockerArgs failed: ${(e as Error).message}`;
-    cleanupStagedAuth(dir); // AWN-8
-    failTask(taskId, { runId, kind: classify({}), error });
-    closeRunIfIdle(false);
-    return { runId, taskId, status: "failed", error };
-  }
-
-  // FG-374: verify the resolved projectDir has expected project markers before
-  // exec'ing — a broken mount wastes agent tokens on a bare directory.
-  try {
-    preflightProjectMount(args.projectDir);
-  } catch (e) {
-    const error = `preflightProjectMount failed: ${(e as Error).message}`;
     cleanupStagedAuth(dir); // AWN-8
     failTask(taskId, { runId, kind: classify({}), error });
     closeRunIfIdle(false);

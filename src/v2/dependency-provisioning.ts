@@ -14,7 +14,7 @@
 // verbatim from package.json — glob patterns are not expanded in this cut.
 
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, normalize, relative, sep } from "node:path";
 import { worktreeDir, integrationWorktreeDir } from "../util/paths.js";
@@ -36,9 +36,9 @@ export const DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE = 123;
 export const DEPENDENCY_PROVISIONER_IDLE_TIMEOUT_MS = 10 * 60 * 1000; // 10m
 
 /** FG-664: idle timeout for the short-lived dependency PROBE container. The probe
- *  only stats a few directories and `require()`s whatever ships a compiled
- *  `.node`, so it is a small fraction of an install; a probe that produces no
- *  output for this long is hung, not working. */
+ *  only stats a few directories and dlopens whatever ships a compiled `.node`,
+ *  so it is a small fraction of an install; a probe that produces no output for
+ *  this long is hung, not working. */
 export const DEPENDENCY_PROBE_IDLE_TIMEOUT_MS = 2 * 60 * 1000; // 2m
 
 export type WorkspaceMember = {
@@ -294,9 +294,38 @@ function readyMarkerPath(cacheKey: string): string {
 
 /** True once a provisioner has successfully installed the dependency plan for
  *  this cache key (lockfile hash) — callers reuse the populated volume(s)
- *  instead of re-installing. */
+ *  instead of re-installing.
+ *
+ *  This is a claim ABOUT THE PAST and it stays one: the marker lives under
+ *  ~/.forge and the volumes live in docker, so a `docker volume prune`, a
+ *  `docker volume rm`, or a Docker Desktop factory reset empties the cache
+ *  without touching the marker. Verifying the volume here would mean a container
+ *  probe on every dispatch to answer a question that is almost always yes; the
+ *  cheap alternative is to let the ONE mechanism that already looks inside the
+ *  container disprove it — see resolveDependencyEnvironment, which invalidates a
+ *  marker its probe proves wrong and re-provisions once. */
 export function isDependencyCacheReady(cacheKey: string): boolean {
   return existsSync(readyMarkerPath(cacheKey));
+}
+
+/** The marker's own VALUE, or undefined when the key is not marked ready. The
+ *  identity of one successful install, not merely "some install succeeded" —
+ *  which is what lets a repairer tell the marker it disproved from a newer one a
+ *  concurrent dispatch wrote while it was blocked on the lock. */
+export function readDependencyCacheMarker(cacheKey: string): string | undefined {
+  try {
+    return readFileSync(readyMarkerPath(cacheKey), "utf8").trim();
+  } catch {
+    return undefined;
+  }
+}
+
+/** Drop a ready marker that has been DISPROVEN. Callers must hold the cache-key
+ *  lock (repairDisprovenDependencyCache below is the only one), and must
+ *  re-provision before anything reads the cache again — a key with no marker is
+ *  the ordinary "needs provisioning" state, which every caller already handles. */
+export function invalidateDependencyCacheMarker(cacheKey: string): void {
+  rmSync(readyMarkerPath(cacheKey), { force: true });
 }
 
 /** Record that cacheKey's volume(s) are fully installed. Callers must call
@@ -310,12 +339,18 @@ export function isDependencyCacheReady(cacheKey: string): boolean {
  *  partial/torn marker file for isDependencyCacheReady to misread as ready —
  *  worst case the crash lands before the rename and the marker simply doesn't
  *  exist yet, which is exactly the "needs (re)provisioning" state callers
- *  already handle. */
+ *  already handle.
+ *
+ *  The random suffix makes each marker DISTINGUISHABLE from every other, which
+ *  readDependencyCacheMarker's callers depend on: a timestamp alone can repeat
+ *  when two installs land in the same millisecond, and then a repairer cannot
+ *  tell "the marker I disproved" from "the replacement someone else just
+ *  wrote". */
 export function markDependencyCacheReady(cacheKey: string): void {
   mkdirSync(dependencyCacheDir(), { recursive: true });
   const path = readyMarkerPath(cacheKey);
   const tmp = `${path}.tmp`;
-  writeFileSync(tmp, new Date().toISOString());
+  writeFileSync(tmp, `${new Date().toISOString()} ${randomBytes(8).toString("hex")}`);
   renameSync(tmp, path);
 }
 
@@ -489,6 +524,74 @@ export async function provisionDependencyCache(
   }
 }
 
+export type RepairDependencyCacheResult =
+  /** THIS call invalidated the disproven marker and re-provisioned the cache. */
+  | { outcome: "repaired" }
+  /** Another dispatch had already replaced the disproven marker by the time this
+   *  one took the lock — its install is not the one that was disproved, so it is
+   *  re-probed rather than torn down and installed again. */
+  | { outcome: "already_repaired" }
+  | { outcome: "failed"; error: string };
+
+/** Repair a cache key whose ready marker has been DISPROVEN — the probe found the
+ *  install root EMPTY inside a container for a key marked ready (a pruned volume,
+ *  a `docker volume rm`, a Docker Desktop factory reset: the volumes are docker
+ *  objects, the markers are files under ~/.forge, and only one of the two gets
+ *  wiped). Without this the marker keeps asserting a readiness nothing can
+ *  deliver, the provisioner is never re-run, and every read-only dispatch on the
+ *  host is refused forever — the reuse-only closed loop, reopened by a lie about
+ *  the past instead of by nothing having provisioned.
+ *
+ *  The whole repair happens under the SAME per-cache-key lock the ordinary
+ *  install takes, so FG-376's guarantees are unchanged rather than special-cased:
+ *  exactly one provisioner per cache key, no marker on a failed install, and a
+ *  dead lock holder is still distrusted (acquireDependencyCacheLock's
+ *  onDeadHolder). `disprovenMarker` is what makes the concurrent case exact — two
+ *  dispatches that both probe the same stale cache both arrive here, and the one
+ *  that loses the race finds a marker it never disproved and provisions nothing.
+ *
+ *  ONE attempt. The caller decides what to do with the outcome; this never
+ *  loops. */
+export async function repairDisprovenDependencyCache(
+  cacheKey: string,
+  disprovenMarker: string,
+  runProvisioner: () => Promise<{ exitCode: number; stderrTail: string }>,
+  opts?: DependencyCacheLockOpts,
+): Promise<RepairDependencyCacheResult> {
+  const release = await acquireDependencyCacheLock(cacheKey, opts);
+  try {
+    const current = readDependencyCacheMarker(cacheKey);
+    if (current !== undefined && current !== disprovenMarker) return { outcome: "already_repaired" };
+
+    // The marker goes FIRST: a crash between here and a successful install must
+    // leave no marker at all, never a surviving one that outlived its disproof.
+    try {
+      invalidateDependencyCacheMarker(cacheKey);
+    } catch (e) {
+      return {
+        outcome: "failed",
+        error:
+          `the disproven ready marker for cache key ${cacheKey} could not be invalidated ` +
+          `(${(e as Error).message}) — the cache cannot be re-provisioned while it still claims to be ready`,
+      };
+    }
+
+    const { exitCode, stderrTail } = await runProvisioner();
+    if (exitCode !== 0) {
+      return {
+        outcome: "failed",
+        error:
+          `re-provisioning cache key ${cacheKey} after invalidating its disproven ready marker failed ` +
+          `(provisioner exit ${exitCode})` + (stderrTail ? ` — ${stderrTail}` : ""),
+      };
+    }
+    markDependencyCacheReady(cacheKey);
+    return { outcome: "repaired" };
+  } finally {
+    release();
+  }
+}
+
 // ── FG-664: the ONE host-side answer to "can this dispatch execute the
 //    project's dependencies?" ───────────────────────────────────────────────
 //
@@ -535,6 +638,21 @@ export type DependencyEnginePackage = {
   error?: string;
 };
 
+/** What a dispatch had to REPAIR before it could attest anything. Present only
+ *  when this dispatch found the cache key marked ready and its install root empty
+ *  in the container — so the operator reads that the marker was a lie and that
+ *  Forge re-provisioned, instead of inferring it from a dispatch that took
+ *  minutes longer than the last one. */
+export type DependencyCacheRepairRecord = {
+  /** The install root the probe found EMPTY — the fact that disproved the marker. */
+  disprovenRoot: string;
+  /** The ready-marker value that was invalidated. */
+  invalidatedMarker: string;
+  /** Whether this dispatch ran the re-provisioner, or another dispatch had
+   *  already repaired the key by the time this one reached the lock. */
+  reprovisionedBy: "this_dispatch" | "concurrent_dispatch";
+};
+
 /** ENGINE IDENTITY, attested by a Forge-owned container. Recorded in the task
  *  manifest and in the review's recheck stage evidence — ONE fact in two places,
  *  so a later reader can tell which engine a verdict was produced against. */
@@ -549,6 +667,8 @@ export type DependencyEnvironmentReceipt = {
    *  mounted bindings had to match to load at all. */
   abi: string;
   packages: DependencyEnginePackage[];
+  /** Absent on the ordinary path — a healthy ready cache is reused untouched. */
+  staleCacheRepaired?: DependencyCacheRepairRecord;
 };
 
 /** What the probe container printed, as the caller captured it. */
@@ -566,7 +686,8 @@ export type DependencyEnvironmentRefusal =
   | "driver_unloadable";
 
 export type DependencyEnvironmentOutcome =
-  /** The real dependencies are mounted and the probe LOADED every native package. */
+  /** The real dependencies are mounted and the probe LOADED every native package
+   *  the project declares a dependency on (see declaredDependencyNames). */
   | { outcome: "ready"; receipt: DependencyEnvironmentReceipt }
   /** Not a refusal: this configuration never had the hazard, and its pre-existing
    *  behaviour is unchanged (non-darwin, FORGE_NO_NM_SHADOW=1, no package-lock.json,
@@ -583,8 +704,10 @@ export type ResolveDependencyEnvironmentArgs = {
   /** Runs the FG-376 provisioner container. Called at most once, only while
    *  holding the cache-key lock, and only when the key is not already ready. */
   runProvisioner: () => Promise<{ exitCode: number; stderrTail: string }>;
-  /** Runs Forge's OWN probe container over the reviewer's exact mount shape. */
-  runProbe: () => Promise<DependencyProbeRun>;
+  /** Runs Forge's OWN probe container over the reviewer's exact mount shape.
+   *  The `nonce` is generated here and must reach the probe container; a report
+   *  that does not carry it back is not this dispatch's report. */
+  runProbe: (nonce: string) => Promise<DependencyProbeRun>;
   lockOpts?: DependencyCacheLockOpts;
   /** Test seam ONLY, mirroring the isContainerAlive/killContainer pattern above:
    *  the darwin gate is the whole reason this mechanism exists, and the unit tier
@@ -596,6 +719,9 @@ export type ResolveDependencyEnvironmentArgs = {
  *  probe is Forge's own fixed command, so anything that does not parse into
  *  this shape is a refusal rather than something to interpret. */
 export type DependencyProbeReport = {
+  /** The value Forge generated for THIS dispatch and handed only to the probe
+   *  container. See parseDependencyProbeOutput. */
+  nonce: string;
   node: string;
   abi: string;
   /** Per mounted node_modules root: how many entries the container saw. The
@@ -607,9 +733,17 @@ export type DependencyProbeReport = {
 };
 
 /** Read the probe's report out of its stdout. Scans from the END for the last
- *  line that parses into the expected shape, so an entrypoint warning ahead of
- *  it (the FG-608 backlog-authority notice, say) does not defeat the read. */
-export function parseDependencyProbeOutput(stdout: string): DependencyProbeReport | undefined {
+ *  line that parses into the expected shape AND carries `expectedNonce`, so an
+ *  entrypoint warning ahead of it (the FG-608 backlog-authority notice, say)
+ *  does not defeat the read — and so a JSON line some other process in the
+ *  container wrote is not mistaken for the probe's own.
+ *
+ *  The nonce is the second lock, not the first: the probe supervisor already
+ *  pipes every loaded artifact's stdio away from the container's stdout, so
+ *  dependency code has no route to this stream. What the nonce adds is that a
+ *  report is only ever accepted for the dispatch that minted it — a replayed or
+ *  hand-planted line, from any source, reads as no report at all. */
+export function parseDependencyProbeOutput(stdout: string, expectedNonce: string): DependencyProbeReport | undefined {
   const lines = stdout.split("\n").map((l) => l.trim()).filter((l) => l.startsWith("{"));
   for (let i = lines.length - 1; i >= 0; i--) {
     let value: unknown;
@@ -621,9 +755,44 @@ export function parseDependencyProbeOutput(stdout: string): DependencyProbeRepor
     const r = value as Partial<DependencyProbeReport>;
     if (typeof r.node !== "string" || typeof r.abi !== "string") continue;
     if (!Array.isArray(r.packages) || !Array.isArray(r.roots)) continue;
-    return { node: r.node, abi: r.abi, roots: r.roots, packages: r.packages };
+    if (r.nonce !== expectedNonce) continue;
+    return { nonce: r.nonce, node: r.node, abi: r.abi, roots: r.roots, packages: r.packages };
   }
   return undefined;
+}
+
+/** The native packages whose failure to load REFUSES a read-only dispatch: the
+ *  ones the project itself declares a direct dependency on, across the repo root
+ *  and every workspace member.
+ *
+ *  This is the answer to "can this container load the drivers this project
+ *  actually needs". The probe reports every mounted package that ships a `.node`
+ *  — including platform-specific optional packages npm installed as transitive
+ *  detail (`@img/sharp-linux-arm64` and friends). Those are recorded as observed
+ *  facts, but they are not what the reviewer's verdict depends on, and treating
+ *  every one of them as load-bearing is what turned this gate into a permanent
+ *  refusal.
+ *
+ *  Returns undefined when no manifest could be read at all — a project whose own
+ *  package.json is unreadable gets the fail-closed reading (every native package
+ *  is required), because there is then no basis for narrowing. */
+export function declaredDependencyNames(repoRoot: string): Set<string> | undefined {
+  let read = false;
+  const names = new Set<string>();
+  for (const member of workspaceMembers(repoRoot)) {
+    const pkgPath = join(repoRoot, member.relPath, "package.json");
+    let pkg: { dependencies?: unknown; devDependencies?: unknown };
+    try {
+      pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as typeof pkg;
+    } catch {
+      continue;
+    }
+    read = true;
+    for (const block of [pkg.dependencies, pkg.devDependencies]) {
+      if (block && typeof block === "object") for (const name of Object.keys(block)) names.add(name);
+    }
+  }
+  return read ? names : undefined;
 }
 
 export async function resolveDependencyEnvironment(
@@ -659,6 +828,11 @@ export async function resolveDependencyEnvironment(
     };
   }
 
+  // Read BEFORE provisioning, because it is what the probe below gets to
+  // disprove: a marker that was already there when this dispatch started is a
+  // claim about an install nobody in this dispatch watched succeed.
+  const markerBeforeDispatch = readDependencyCacheMarker(cacheKey);
+
   let provision: ProvisionDependencyCacheResult;
   try {
     provision = await provisionDependencyCache(cacheKey, args.runProvisioner, args.lockOpts);
@@ -671,48 +845,125 @@ export async function resolveDependencyEnvironment(
     return { outcome: "refused", reason: "provisioning_failed", detail: provision.error };
   }
 
-  let probe: DependencyProbeRun;
-  try {
-    probe = await args.runProbe();
-  } catch (e) {
-    return { outcome: "refused", reason: "probe_failed", detail: (e as Error).message };
-  }
-  if (probe.exitCode !== 0) {
-    return {
-      outcome: "refused",
-      reason: "probe_failed",
-      detail:
-        `the dependency probe container exited ${probe.exitCode}` +
-        (probe.stderrTail ? ` — ${probe.stderrTail}` : ""),
-    };
-  }
-  const report = parseDependencyProbeOutput(probe.stdout);
-  if (report === undefined) {
-    return {
-      outcome: "refused",
-      reason: "probe_unparseable",
-      detail:
-        `the dependency probe container exited 0 but printed no readable report — nothing attests which engine ` +
-        `this dispatch would run against` + (probe.stderrTail ? ` (stderr: ${probe.stderrTail})` : ""),
-    };
-  }
+  /** One probe container: mint a nonce, run it, and read back the report it
+   *  alone could have printed. A refusal here is final — the probe is Forge's own
+   *  fixed command, so a probe that will not run or will not attest is not
+   *  something a re-provision could fix. */
+  const attest = async (): Promise<
+    { report: DependencyProbeReport } | { refused: Extract<DependencyEnvironmentOutcome, { outcome: "refused" }> }
+  > => {
+    // Minted here, per probe, and handed to nothing but the probe container.
+    const nonce = createHash("sha256").update(randomBytes(32)).digest("hex").slice(0, 32);
+    let probe: DependencyProbeRun;
+    try {
+      probe = await args.runProbe(nonce);
+    } catch (e) {
+      return { refused: { outcome: "refused", reason: "probe_failed", detail: (e as Error).message } };
+    }
+    if (probe.exitCode !== 0) {
+      return {
+        refused: {
+          outcome: "refused",
+          reason: "probe_failed",
+          detail:
+            `the dependency probe container exited ${probe.exitCode}` +
+            (probe.stderrTail ? ` — ${probe.stderrTail}` : ""),
+        },
+      };
+    }
+    const parsed = parseDependencyProbeOutput(probe.stdout, nonce);
+    if (parsed === undefined) {
+      return {
+        refused: {
+          outcome: "refused",
+          reason: "probe_unparseable",
+          detail:
+            `the dependency probe container exited 0 but printed no readable report carrying this dispatch's probe ` +
+            `nonce — nothing attests which engine this dispatch would run against` +
+            (probe.stderrTail ? ` (stderr: ${probe.stderrTail})` : ""),
+        },
+      };
+    }
+    return { report: parsed };
+  };
 
   // A ready marker says the INSTALL succeeded once; it cannot say the volume
-  // still holds it (`forge dependency-cache prune`, or a docker volume removed
-  // by hand). An empty install root would otherwise sail through as "no native
-  // packages found, nothing failed to load" — green for the wrong reason.
-  const emptyRoot = report.roots.find((r) => r.installRoot && r.entries === 0);
-  if (emptyRoot !== undefined) {
-    return {
-      outcome: "refused",
-      reason: "dependencies_absent",
-      detail:
-        `cache key ${cacheKey} is marked ready but ${emptyRoot.path} is EMPTY inside the container — the mounted ` +
-        `volume carries no dependency graph, so nothing the dispatch runs would execute the project's real code`,
+  // still holds it (`forge dependency-cache prune`, a `docker volume rm`, a
+  // Docker Desktop factory reset — the volumes are docker objects and the markers
+  // are files under ~/.forge, so one can be wiped without the other). An empty
+  // install root would otherwise sail through as "no native packages found,
+  // nothing failed to load" — green for the wrong reason.
+  //
+  // And the refusal alone is not enough: nothing else invalidates that marker, so
+  // a disproven cache would refuse every later dispatch on this host too,
+  // forever, with the only escape being an operator who knows to delete a file
+  // under ~/.forge by hand. A disproof REPAIRS — exactly once, under the existing
+  // per-cache-key lock — and only a cache that is still empty (or whose drivers
+  // still will not load) after that is refused.
+  let repaired: DependencyCacheRepairRecord | undefined;
+  let report: DependencyProbeReport;
+  for (;;) {
+    const attested = await attest();
+    if ("refused" in attested) return attested.refused;
+    const emptyRoot = attested.report.roots.find((r) => r.installRoot && r.entries === 0);
+    if (emptyRoot === undefined) {
+      report = attested.report;
+      break;
+    }
+    if (repaired !== undefined) {
+      return {
+        outcome: "refused",
+        reason: "dependencies_absent",
+        detail:
+          `cache key ${cacheKey} was marked ready, ${emptyRoot.path} probed EMPTY, and the disproven marker was ` +
+          `invalidated and the cache re-provisioned — it is STILL empty inside the container, so the dispatch is ` +
+          `refused rather than re-provisioned again`,
+      };
+    }
+    if (markerBeforeDispatch === undefined) {
+      // Nothing to disprove: this dispatch's own install is what produced the
+      // empty root, so re-running it would just produce the same empty root.
+      return {
+        outcome: "refused",
+        reason: "dependencies_absent",
+        detail:
+          `cache key ${cacheKey} was provisioned for this dispatch but ${emptyRoot.path} is EMPTY inside the ` +
+          `container — the mounted volume carries no dependency graph, so nothing the dispatch runs would execute ` +
+          `the project's real code`,
+      };
+    }
+
+    console.error(
+      `forge: dependency cache ${cacheKey} is marked ready but ${emptyRoot.path} is EMPTY in the container — ` +
+        "invalidating the disproven marker and re-provisioning once before this dispatch is decided",
+    );
+    let repair: RepairDependencyCacheResult;
+    try {
+      repair = await repairDisprovenDependencyCache(
+        cacheKey,
+        markerBeforeDispatch,
+        args.runProvisioner,
+        args.lockOpts,
+      );
+    } catch (e) {
+      repair = { outcome: "failed", error: (e as Error).message };
+    }
+    if (repair.outcome === "failed") {
+      return { outcome: "refused", reason: "provisioning_failed", detail: repair.error };
+    }
+    repaired = {
+      disprovenRoot: emptyRoot.path,
+      invalidatedMarker: markerBeforeDispatch,
+      reprovisionedBy: repair.outcome === "repaired" ? "this_dispatch" : "concurrent_dispatch",
     };
   }
 
-  const unloadable = report.packages.filter((p) => !p.loaded);
+  // The refusal is scoped to the drivers the PROJECT declares it depends on. A
+  // transitive platform package that does not load is recorded in the receipt
+  // and left there: it is not what the reviewer's verdict runs against, and
+  // refusing on it refuses everything (see declaredDependencyNames).
+  const declared = declaredDependencyNames(args.repoRoot);
+  const unloadable = report.packages.filter((p) => !p.loaded && (declared === undefined || declared.has(p.name)));
   if (unloadable.length > 0) {
     return {
       outcome: "refused",
@@ -732,6 +983,7 @@ export async function resolveDependencyEnvironment(
       nodeVersion: report.node,
       abi: report.abi,
       packages: report.packages,
+      ...(repaired ? { staleCacheRepaired: repaired } : {}),
     },
   };
 }

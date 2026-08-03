@@ -20,13 +20,12 @@ import { resolveIdleTimeoutMs, IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js
 import {
   DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE,
   DEPENDENCY_PROVISIONER_IDLE_TIMEOUT_MS,
-  safeLockfileHash,
-  isDependencyCacheReady,
   provisionDependencyCache,
   planDependencyVolumes,
   createDependencyMountpoints,
   provisionerContainerName,
   type DependencyVolumePlan,
+  type DependencyEnvironmentReceipt,
 } from "./dependency-provisioning.js";
 import { productionDockerExec, finalizeContainerRetention, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
 import { join } from "node:path";
@@ -62,7 +61,7 @@ import { deriveUpstream } from "./inputs.js";
 import { composeSystemPrompt } from "./compose.js";
 import { STALE_PROTOCOL_FAILURE_KIND } from "./agent-protocol.js";
 import { filterConstraints, loadAllConstraints } from "./constraints.js";
-import { buildDockerArgs, buildProvisionerDockerArgs, resolveProjectContainerPath, preflightProjectMount, GIT_UNAVAILABLE_EXIT_CODE, type SpawnContext } from "./spawn.js";
+import { buildDockerArgs, buildProvisionerDockerArgs, prepareDependencyEnvironmentForDispatch, resolveProjectContainerPath, preflightProjectMount, GIT_UNAVAILABLE_EXIT_CODE, type SpawnContext } from "./spawn.js";
 import { assertSelfHostDispatchAllowed } from "./self-host-guard.js";
 import { resolveAuthStateForContainer, AuthProfileError, roleUsesBrowser, cleanupStagedAuth } from "./auth-state.js";
 import { loadProjectAuthProfile, resolveProjectAuthForContainer, ProjectAuthError } from "./project-auth.js";
@@ -3436,25 +3435,6 @@ async function runContainer(args: {
     });
   }
 
-  writeTaskManifest(dir, {
-    taskId: args.taskId,
-    runId: args.runId,
-    files: { prompt: "CLAUDE.md", package: "package.md", result: "result.json", stdout: "container.stdout.log", stderr: "container.stderr.log" },
-    container: { name: `forge-${args.taskId}`, idleTimeoutMs },
-    auth: { profileRequested: !!args.authProfile, stateMounted: !!authStateHostPath },
-    // FG-366: name is the resolved concrete runtime (matches controlPlane.runtime.name),
-    // not the requested sentinel — see task-manifest.ts's ManifestRuntime doc comment.
-    runtime: { name: runtimeName, kind: runtimeMeta.runtimeKind, logFormat: runtimeMeta.logFormat, promptStrategy: runtimeMeta.promptStrategy, authStrategy: runtimeMeta.authStrategy },
-    ...(manifestModelBlock(args.resolution) ? { model: manifestModelBlock(args.resolution) } : {}),
-    ...(controlPlane ? { controlPlane } : {}),
-    // FG-654: see task-manifest.ts — the RECORDED protocol generation this agent ran
-    // under. Per DISPATCH, not per stage: a review that spans a `forge upgrade`
-    // legitimately mixes generations, and the mix must be visible rather than averaged.
-    // Carried from the compose that produced this package's prompt, never re-resolved
-    // here — a second read describes the seed as of now, not the bytes being dispatched.
-    ...(args.taskPackage.agentProtocol ? { agentProtocol: args.taskPackage.agentProtocol } : {}),
-  });
-
   // FG-376: resolve the dependency-cache decision BEFORE building docker args
   // for the AGENT/reviewer container. FIX1 gates the named-volume path to
   // worktree-mode rw dispatches only (repoRootForMount mirrors the
@@ -3475,8 +3455,29 @@ async function runContainer(args: {
   const isWorktreeRwDispatch = args.projectMode === "rw" && args.worktreePath !== undefined;
   const dependencyCacheEligible = process.platform === "darwin" && process.env.FORGE_NO_NM_SHADOW !== "1";
   const depSpawnFields: Pick<SpawnContext, "IS_WORKTREE_DISPATCH" | "DEPENDENCY_CACHE_MOUNT_RO"> = {};
+  let dependencyEnvironment: DependencyEnvironmentReceipt | undefined;
 
   const exec = args.dockerExec ?? productionDockerExec;
+
+  // FG-374: verify the resolved projectDir is a non-empty, mountable directory —
+  // mirrors the same guard in invoke.ts.
+  //
+  // FG-559: preflight repoRootForMount, NOT args.projectDir — the worktree is
+  // what gets mounted at /project, so it is the tree whose `.git` pointer has to
+  // resolve. On a non-worktree dispatch the two are the same value.
+  //
+  // FG-664: ahead of the dependency block below, not after buildDockerArgs. A
+  // directory that is missing or broken cannot host a dependency mountpoint
+  // either, and reporting THAT as `mountpoints_unavailable` names the wrong
+  // fault.
+  try {
+    preflightProjectMount(repoRootForMount);
+  } catch (e) {
+    const msg = `preflightProjectMount failed: ${(e as Error).message}`;
+    cleanupStagedAuth(dir); // AWN-8
+    failTask(args.taskId, { runId: args.runId, kind: classify({}), error: msg });
+    return { kind: "failed", error: msg };
+  }
 
   // FG-628: establish the mountpoint precondition against repoRootForMount — the
   // tree that will ACTUALLY be bound at the container's project path — here, at
@@ -3651,32 +3652,102 @@ async function runContainer(args: {
       depSpawnFields.DEPENDENCY_CACHE_MOUNT_RO = "1";
     }
   } else if (dependencyCacheEligible && args.projectMode === "ro") {
-    // FG-628: a ready cache key authorizes the CONTENT of the mount; the
-    // mountpoints authorize the mount itself. Both, or neither — this pairing is
-    // the whole fix, because readiness is keyed on the lockfile and mountability
-    // is a property of this specific checkout.
+    // FG-664: THE SAME RESOLVER AS `forge invoke`, AT THE SEAM BOTH READ-ONLY
+    // DISPATCH PATHS CROSS.
     //
-    // FG-664 DELIBERATELY DID NOT CHANGE THIS ARM, and the reason is worth stating
-    // because the two read-only paths now differ.
+    // This arm serves the workflow's own pipeline reds. It used to mount the
+    // cache only when an already-ready key happened to exist and otherwise start
+    // a red with NO dependency mount at all — which on darwin means the red reads
+    // the host's darwin-arm64 `node_modules` through the `/project:ro` bind, the
+    // exact condition that produced FG-662's three false "still present"
+    // verdicts. Fixing only the invoke lane would have left every
+    // pipeline-dispatched red able to start in a substituted environment.
     //
-    // The review lifecycle does not come through here. Every review dispatch —
-    // the discovery lenses AND the rechecker — goes through `forge invoke`
-    // (src/cli/commands/review-wiring.ts), which is where FG-664 put the
-    // host-side attestation and the fail-closed refusal. THIS arm serves the
-    // workflow's own pipeline reds, and its contract is deliberately the opposite
-    // of fail-closed: FG-628 (A5/A6b) requires that a checkout forge cannot
-    // prepare DEGRADES the dispatch — no cache mount, no crash, a recorded
-    // `container.dependency_mountpoints_unavailable` — rather than refusing it.
-    // Routing it through the attesting resolver would convert those degradations
-    // into refusals and would make a cold-cache pipeline red block on a
-    // provisioner, both of which are semantic changes to a lane FG-664 did not
-    // scope. Unifying the two is real work with its own acceptance; it is named
-    // here rather than done silently.
-    const cacheKey = safeLockfileHash(repoRootForMount);
-    if (cacheKey && isDependencyCacheReady(cacheKey) && projectTreeIsMountable()) {
+    // What that costs, stated plainly: FG-628 (A5/A6b) made an unpreparable
+    // checkout DEGRADE this dispatch rather than refuse it, and a cold cache key
+    // no longer just goes unmounted — the red waits on the provisioner. Both are
+    // superseded here for the READ-ONLY lane specifically, because degrading is
+    // substituting, and FG-664's whole premise is that a reviewer which cannot
+    // load the project's real driver must not run. The rw/blue lane keeps FG-628's
+    // degradation untouched (the arm above), because there the container installs
+    // its own dependencies and no substitution occurs.
+    //
+    // projectTreeIsMountable() runs first so the FG-628 diagnostic event still
+    // lands on the timeline naming the tree and the underlying error; the refusal
+    // is what changed, not the observability.
+    if (!projectTreeIsMountable()) {
+      const error =
+        `verification_environment_unavailable (mountpoints_unavailable): the dependency mountpoints could not be ` +
+        `created in ${repoRootForMount}, so the lockfile-keyed volumes cannot be bound into a read-only project ` +
+        `mount. No agent container was started — see FG-664.`;
+      cleanupStagedAuth(dir); // AWN-8
+      failTask(args.taskId, {
+        runId: args.runId,
+        kind: classify({ source: "verification_environment_unavailable" }),
+        error,
+      });
+      return { kind: "failed", error };
+    }
+    const resolved = await prepareDependencyEnvironmentForDispatch({
+      runtime,
+      taskId: args.taskId,
+      repoRoot: repoRootForMount,
+      canonicalProjectDir: args.projectDir,
+      logDir: dir,
+      exec,
+    });
+    if (resolved.outcome === "refused") {
+      const error =
+        `verification_environment_unavailable (${resolved.reason}): ${resolved.detail}. No agent container was ` +
+        `started. A read-only reviewer that cannot load the project's real native dependencies is refused rather ` +
+        `than run against a substituted implementation — see FG-664.`;
+      // The EXISTING event, with the same `stage`/`reason` grain invoke.ts uses —
+      // one vocabulary for one decision, whichever lane reached it.
+      logEvent("container.dependency_provisioning_failed", {
+        runId: args.runId,
+        taskId: args.taskId,
+        payload: {
+          stage: "environment_resolution",
+          reason: resolved.reason,
+          detail: resolved.detail,
+          projectDir: repoRootForMount,
+        },
+      });
+      cleanupStagedAuth(dir); // AWN-8
+      failTask(args.taskId, {
+        runId: args.runId,
+        kind: classify({ source: "verification_environment_unavailable" }),
+        error,
+      });
+      return { kind: "failed", error };
+    }
+    if (resolved.outcome === "ready") {
+      dependencyEnvironment = resolved.receipt;
       depSpawnFields.DEPENDENCY_CACHE_MOUNT_RO = "1";
     }
   }
+
+  writeTaskManifest(dir, {
+    taskId: args.taskId,
+    runId: args.runId,
+    files: { prompt: "CLAUDE.md", package: "package.md", result: "result.json", stdout: "container.stdout.log", stderr: "container.stderr.log" },
+    container: { name: `forge-${args.taskId}`, idleTimeoutMs },
+    auth: { profileRequested: !!args.authProfile, stateMounted: !!authStateHostPath },
+    // FG-366: name is the resolved concrete runtime (matches controlPlane.runtime.name),
+    // not the requested sentinel — see task-manifest.ts's ManifestRuntime doc comment.
+    runtime: { name: runtimeName, kind: runtimeMeta.runtimeKind, logFormat: runtimeMeta.logFormat, promptStrategy: runtimeMeta.promptStrategy, authStrategy: runtimeMeta.authStrategy },
+    ...(manifestModelBlock(args.resolution) ? { model: manifestModelBlock(args.resolution) } : {}),
+    ...(controlPlane ? { controlPlane } : {}),
+    // FG-654: see task-manifest.ts — the RECORDED protocol generation this agent ran
+    // under. Per DISPATCH, not per stage: a review that spans a `forge upgrade`
+    // legitimately mixes generations, and the mix must be visible rather than averaged.
+    // Carried from the compose that produced this package's prompt, never re-resolved
+    // here — a second read describes the seed as of now, not the bytes being dispatched.
+    ...(args.taskPackage.agentProtocol ? { agentProtocol: args.taskPackage.agentProtocol } : {}),
+    // FG-664 AC3: the cache key and engine identity a Forge-owned probe container
+    // attested for THIS dispatch. Written from the same seam in both lanes.
+    ...(dependencyEnvironment ? { dependencyEnvironment } : {}),
+  });
 
   const spawnCtx: SpawnContext = {
     TASK_ID: args.taskId,
@@ -3708,21 +3779,6 @@ async function runContainer(args: {
     dockerArgs = buildDockerArgs(runtime, spawnCtx);
   } catch (e) {
     const msg = `buildDockerArgs failed: ${(e as Error).message}`;
-    cleanupStagedAuth(dir); // AWN-8
-    failTask(args.taskId, { runId: args.runId, kind: classify({}), error: msg });
-    return { kind: "failed", error: msg };
-  }
-
-  // FG-374: verify the resolved projectDir is a non-empty directory before
-  // exec'ing — mirrors the same guard in invoke.ts.
-  //
-  // FG-559: preflight repoRootForMount, NOT args.projectDir — the worktree is
-  // what gets mounted at /project, so it is the tree whose `.git` pointer has to
-  // resolve. On a non-worktree dispatch the two are the same value.
-  try {
-    preflightProjectMount(repoRootForMount);
-  } catch (e) {
-    const msg = `preflightProjectMount failed: ${(e as Error).message}`;
     cleanupStagedAuth(dir); // AWN-8
     failTask(args.taskId, { runId: args.runId, kind: classify({}), error: msg });
     return { kind: "failed", error: msg };
