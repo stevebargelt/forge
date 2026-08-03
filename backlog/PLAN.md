@@ -1,6 +1,6 @@
 # Forge Working Plan
 
-**Last revised:** 2026-08-02
+**Last revised:** 2026-08-03
 
 This is a mutable statement of current operator intent. It is not an approval
 boundary, ticket specification, execution record, or source of lifecycle
@@ -44,24 +44,31 @@ correct publication.
   own exit rather than a terminal timestamp a sweep rewrote. Closed with an
   explicit operator override recorded, NOT a mechanically settled ledger; the
   override's cause is FG-664 below.
+- **FG-664** (`994f8cac`, PR #197; docs `dcc2f630`) — read-only reviewers now
+  resolve their dependency environment host-side through one shared resolver,
+  mount the cache read-only, and never install; a lane that cannot load the real
+  driver is refused pre-container as `blocked_environment`. The rechecker runs
+  the shipping database engine. This clears the gate that FG-609 and FG-610 were
+  held behind.
 
 ## Now
 
-1. **FG-664 — the review rechecker substitutes a SQLite engine.** PROMOTED under
-   the interruption policy on operator instruction (2026-08-02), ahead of
-   FG-609 and every other DB-touching review.
+1. **FG-666 — pipeline agents in per-task clones cannot read the backlog.**
+   Operator-sequenced ahead of FG-609 (2026-08-03).
 
-   After an ABI mismatch — linux-arm64 container, darwin-arm64 native binding in
-   the mounted `node_modules` — the rechecker's harness silently swaps
-   `better-sqlite3` for a `node:sqlite` shim and runs the suite against a
-   different engine. It already produced three false "still present" verdicts on
-   FG-662, which had to be merged on an operator override. The lane is not
-   conservative in either direction: a test passing only under the shim would
-   recheck as resolved.
+   Per-task clones are created by `git clone <local path>`, so their `origin` is
+   a filesystem path whose derived repository evidence does not match the
+   registered `project_key`; FG-608's cross-repository guard then correctly
+   refuses. Authority markers across 14 dispatches split exactly along the
+   structural line: reds resolve `db`, every worktree/clone task resolves
+   `unknown`.
 
-   This blocks correct publication and a required verification lane, which is
-   what authorizes the promotion. Until it lands, no DB-touching review can be
-   trusted to settle on its own evidence.
+   So the architect, tech-lead and every engineer build from the brief alone,
+   while `forge new feature` requires `--ticket` precisely to anchor them to the
+   acceptance criteria they will be judged against. It fails silently from the
+   operator's side. Shares a root cause with FG-663 — weigh one fix, not two.
+
+   Do not weaken the FG-608 guard; it is doing its job.
 
 2. **FG-648 — reopened for AC5.** Two legibility failures the operator found on
    live data: the chart has no y-axis, scale or unit (its SVG carries only a
@@ -71,11 +78,10 @@ correct publication.
 ## Next
 
 1. **FG-609 — FG-496 Slice D:** queue rank, explicit membership,
-   revision-bound readiness, blocker evidence, and event history. **Gated on
-   FG-664** — it is DB-touching and its review cannot be trusted until the
-   rechecker runs the shipping engine.
+   revision-bound readiness, blocker evidence, and event history. The FG-664
+   gate is cleared.
 2. **FG-610 — FG-496 Slice E:** atomic claims, leases, recovery, capacity
-   accounting, and canonical claim-next. Same gate.
+   accounting, and canonical claim-next.
 3. **FG-591 — operator work queue:** Kanban, CLI/API controls, and
    capacity-limited dispatch over the queue primitives.
 4. **FG-496 aggregate closeout:** reconcile the DB-backed backlog program
@@ -111,10 +117,20 @@ it does not override ticket dependencies or authorize scope expansion.
 - **FG-665** — the FG-662 attempt-scoping bound drops an unparseable audit
   timestamp, which on a sole administrative marker re-admits the artifact.
   Deliberately kept deferred (operator instruction, 2026-08-02).
+- **FG-667** — FG-664 residue: the probe's platform filter prunes a multi-arch
+  prebuilds directory, permanently refusing a correct cache; plus a stale
+  review-wiring comment.
+- **FG-668** — the `fg664-recheck-replay` harness hardcodes the default review
+  id in its `in_place` evidence block and pins `REPLAY_REFS` to RF-1/RF-3/RF-4,
+  so `--candidate` does not generalize. FG-664's AC4 proof is reproducible only
+  once this lands.
 
 These remain real work. They move ahead only under the interruption policy
 below, not because they are adjacent to recently completed review work.
-FG-664 was promoted out of this set on 2026-08-02; the rest stay put.
+FG-663, FG-665, FG-667 and FG-668 are explicitly non-preempting residue
+(operator instruction, 2026-08-03) unless one becomes a deterministic blocker
+under the policy below. FG-664 was promoted out of this set on 2026-08-02 and
+has since shipped.
 
 ## Interruption policy
 
