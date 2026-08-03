@@ -151,6 +151,15 @@ export type FailureKind =
   | "gate_rejected"
   | "verification_environment_unavailable"  // FG-376: dependency provisioning failed before tests could run
   | "pre_container_crash"  // FG-533: the forge process died between markTaskRunning and container.started — no container ran, no work exists; reconcile's pre-container sweep lands this and a plain `forge retry` re-dispatches
+  // FG-666 AC4: the three ways a TICKETED dispatch is refused before its container
+  // starts. Deliberately THREE kinds and not one: they differ in whether a
+  // re-dispatch can possibly succeed, and flattening them into `unknown` advertised
+  // the deterministic identity refusal as retryable while making the two
+  // indistinguishable to forge show / forge retry / forge recover, all of which read
+  // failure_kind and nothing else.
+  | "backlog_authority_conflict"     // the project declares a project_key the registry maps to different repository evidence — deterministic, identical on every re-dispatch until the config or the registration is fixed
+  | "backlog_authority_unresolvable" // the backlog store could not be resolved or its snapshot could not be published — infrastructure, and a retry RE-RESOLVES from scratch rather than reusing this outcome
+  | "backlog_ticket_unreadable"      // the store resolved, but the ticket the run is anchored to has no readable row in it — the snapshot would not contain the ticket the agent is judged against
   | "unknown";
 
 export type FailureContext = {

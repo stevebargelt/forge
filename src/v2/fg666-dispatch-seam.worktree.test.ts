@@ -25,9 +25,11 @@ import { makeInMemoryDb, setDbForTest, writeTransaction } from "../store/db.js";
 import { upsertTicket, setStorageMode, ensureStorageMode } from "../store/tickets.js";
 import { clearBacklogStoreCache } from "../backlog/storage-mode.js";
 import { computeRepositoryEvidence } from "../store/project-registry.js";
-import { SNAPSHOT_DB_BASENAME, liveSnapshotTargets } from "../backlog/snapshot.js";
+import { SNAPSHOT_DB_BASENAME, liveSnapshotTargets, releasedSnapshotTargets } from "../backlog/snapshot.js";
 import { tasksForRun, setTaskStatus } from "../store/tasks.js";
 import { eventsForTask } from "../store/events.js";
+import { failureKindFromEvents } from "./failure-kind.js";
+import { retryPolicy } from "./retry-policy.js";
 import { startRun } from "./startRun.js";
 import { runNext } from "./runNext.js";
 import { invoke } from "./invoke.js";
@@ -54,6 +56,26 @@ const SEAM_WORKFLOW: Workflow = {
       depends_on: [],
       runtime: "fg666-seam-test",
       reds: [],
+    },
+  ],
+};
+
+// Same step, plus one non-blocking specialist red. Reds are dispatched against the
+// PUBLISHER'S CANDIDATE, which is where the identity question can be forged.
+const SEAM_WORKFLOW_WITH_RED: Workflow = {
+  name: "fg666-seam-test",
+  description: "FG-666 dispatch-seam test: single step with a red",
+  review_mode: "legacy_verdict",
+  inputs: [],
+  steps: [
+    {
+      id: "build",
+      agent: "engineer",
+      gate: "auto",
+      manual: false,
+      depends_on: [],
+      runtime: "fg666-seam-test",
+      reds: [{ agent: "red-narrow", authority: "specialist", gate_on_verdict: false }],
     },
   ],
 };
@@ -237,6 +259,27 @@ function unresolvableProject(projectKey: string): string {
   return dir;
 }
 
+/** Register `projectKey` against a DIFFERENT repository, so any checkout declaring
+ *  it resolves `unknown` (identity-conflict). The forgeable half of RF-11's attack:
+ *  the key exists and is registered — just not to the tree that claims it. */
+function registerKeyToForeignRepo(projectKey: string): void {
+  const owner = newDir("fg666-seam-foreign-");
+  git(owner, ["init", "-b", "main"]);
+  git(owner, ["config", "user.email", "test@forge.test"]);
+  git(owner, ["config", "user.name", "Forge Test"]);
+  writeFileSync(join(owner, "README.md"), "# foreign owner\n");
+  git(owner, ["add", "-A"]);
+  git(owner, ["commit", "-m", "initial"]);
+  writeTransaction(() => ensureStorageMode(projectKey, NOW));
+  setStorageMode(projectKey, "db", NOW);
+  const evidence = computeRepositoryEvidence(owner);
+  db.prepare(
+    `INSERT OR REPLACE INTO project_identity (project_key, repo_evidence_key, repo_evidence_source, created_at)
+     VALUES (?, ?, ?, ?)`,
+  ).run(projectKey, evidence.key, evidence.source, NOW);
+  clearBacklogStoreCache();
+}
+
 /** A plain git repository with NO project_key at all — the NORMAL markdown-mode /
  *  non-forge outcome, which must dispatch untouched. */
 function markdownProject(): string {
@@ -286,6 +329,38 @@ function throwingExec(signalsStart: boolean, capture: ExecCapture): DockerExecFn
   return fn;
 }
 
+/** The detached executor's WORST shape: the daemon created the container (the start
+ *  signal fired) and the host-side watcher then died. The container is running. */
+function throwsAfterStartExec(capture: ExecCapture): DockerExecFn {
+  const fn: DockerExecFn = async ({ args, stdoutPath, stderrPath, onContainerStarted }) => {
+    capture.calls += 1;
+    capture.args = [...args];
+    mkdirSync(dirname(stdoutPath), { recursive: true });
+    writeFileSync(stdoutPath, "");
+    writeFileSync(stderrPath, "");
+    onContainerStarted?.("container-id-fg666");
+    throw new Error("fg666: the watcher died AFTER the daemon created the container");
+  };
+  fn.signalsContainerStart = true;
+  return fn;
+}
+
+/** An executor whose container RUNS and exits nonzero with no result — the ordinary
+ *  agent-crash shape, and by far the most common post-publication failure. */
+function crashingExec(capture: ExecCapture): DockerExecFn {
+  const fn: DockerExecFn = async ({ args, stdoutPath, stderrPath, onContainerStarted }) => {
+    capture.calls += 1;
+    capture.args = [...args];
+    mkdirSync(dirname(stdoutPath), { recursive: true });
+    writeFileSync(stdoutPath, "");
+    writeFileSync(stderrPath, "");
+    onContainerStarted?.("container-id-fg666");
+    return 1;
+  };
+  fn.signalsContainerStart = true;
+  return fn;
+}
+
 function primaryTask(runId: string) {
   const t = tasksForRun(runId).find((x) => x.phase === "build" && x.parentId === undefined);
   assert.ok(t, "primary build task must exist");
@@ -295,6 +370,13 @@ function primaryTask(runId: string) {
 function snapshotBindSource(args: string[]): string | undefined {
   for (let i = 0; i < args.length - 1; i++) {
     if (args[i] === "-v" && args[i + 1]!.includes(":/forge-backlog:ro")) return args[i + 1]!.split(":")[0];
+  }
+  return undefined;
+}
+
+function projectMountSource(args: string[]): string | undefined {
+  for (let i = 0; i < args.length - 1; i++) {
+    if (args[i] === "-v" && args[i + 1]!.includes(":/project:")) return args[i + 1]!.split(":")[0];
   }
   return undefined;
 }
@@ -409,13 +491,71 @@ test("FG-666 (7): a TICKETED dispatch with unresolvable authority is refused BEF
   const manifest = readManifest(runId, task.id);
   const warnings = manifest.controlPlane?.warnings ?? [];
   assert.equal(
-    warnings.some((w) => /backlog_authority_unresolvable/.test(w) && /FG-1/.test(w)),
+    warnings.some((w) => /backlog_authority_conflict/.test(w) && /FG-1/.test(w)),
     true,
     `the committed control-plane receipt names the refusal; got ${JSON.stringify(warnings)}`,
   );
 
+  // THE KIND, not just the message. failureKindFromEvents is the single source of
+  // truth every retry/recovery consumer reads — forge show, forge retry, forge
+  // recover, the campaign policy. A refusal recorded as `unknown` would reach all
+  // four as "cause unclear; re-dispatch", advertising a deterministic identity
+  // refusal as retryable and making it indistinguishable from an infrastructure
+  // failure that a retry really could clear.
+  assert.equal(
+    failureKindFromEvents(eventsForTask(task.id)),
+    "backlog_authority_conflict",
+    "the identity refusal is its OWN terminal kind",
+  );
+  assert.equal(
+    retryPolicy("backlog_authority_conflict").retryable,
+    false,
+    "and it is NOT advertised as re-dispatchable: re-resolving reaches the same answer every time",
+  );
+  assert.equal(
+    retryPolicy("backlog_authority_unresolvable").retryable,
+    true,
+    "while the infrastructure refusal IS retryable — the two are never flattened into one terminal state",
+  );
+
   // And nothing was published for a dispatch that never ran.
   assert.deepEqual(liveSnapshotTargets("pk-fg666-copied"), [], "no target registered by a refused dispatch");
+});
+
+// ─── (7b) AC4/AC7: the ticket itself is unreadable ───────────────────────────
+
+test("FG-666 (7b): a ticketed dispatch whose TICKET has no readable row is refused — not dispatched with zero evidence", async () => {
+  armCloneSubstrate();
+  const KEY = "pk-fg666-noticket";
+  // The store resolves perfectly. Only the ticket the run is anchored to is absent —
+  // removed, archived, or unreadable between `forge new --ticket` (which validates
+  // it) and this dispatch.
+  const projectDir = dbModeProject(KEY, "FG-1", "body");
+
+  const capture: ExecCapture = { calls: 0, args: [] };
+  const { runId, wave } = await dispatch(projectDir, capturingExec(capture), { ticketId: "FG-404" });
+
+  assert.deepEqual(wave.failedSteps, ["build"], "a run anchored to a ticket that cannot be read is refused");
+  assert.equal(capture.calls, 0, "no container: the snapshot would not have contained the ticket");
+
+  const task = primaryTask(runId);
+  assert.equal(
+    failureKindFromEvents(eventsForTask(task.id)),
+    "backlog_ticket_unreadable",
+    "and it is refused for the RIGHT reason — the store resolved, the ticket did not",
+  );
+  const payload = eventsForTask(task.id).find((e) => e.eventType === "task.backlog_authority_refused")!
+    .payload as Record<string, unknown>;
+  assert.equal(payload["mode"], "db", "the store's own mode is reported honestly");
+  assert.equal(payload["reason"], "ticket-unreadable");
+  assert.match(String(payload["detail"]), /FG-404/);
+
+  // AC7's exactly-one-evidence-write guarantee: this dispatch wrote NO evidence, and
+  // that is now a recorded refusal rather than a silent zero.
+  const n = db
+    .prepare(`SELECT COUNT(*) AS n FROM ticket_dispatch_evidence WHERE task_id = ?`)
+    .get(task.id) as { n: number };
+  assert.equal(n.n, 0);
 });
 
 // ─── (8) AC4 non-regression: the refusal stays narrow ───────────────────────
@@ -478,38 +618,134 @@ test("FG-666 (8c): an UNTICKETED dispatch with unknown authority proceeds", asyn
   assert.equal(readMarker(hostDir).mode, "unknown", "it still asserts `unknown` — a refusal surface, not a fallback");
 });
 
-// ─── (9)+(10) AC6 lifecycle: both executor contracts RETAIN the artifact ────
+// ─── (9)+(10) AC6 lifecycle: the ROW follows what is KNOWN about the container ─
+//
+// The two halves of AC6 are decided by DIFFERENT facts, and this pair is the proof:
+//
+//   ARTIFACT — deleted only against an authoritative daemon-side no-container-created
+//   fact. No executor contract surfaces one, so the bytes are ALWAYS retained here.
+//
+//   ROW — released only where no container can still be reading the snapshot. That
+//   is a fact the throw path sometimes has (the executor signals start, and no start
+//   was recorded → nothing was created) and sometimes does not (start recorded, or
+//   an executor that never signals). Fan-out to a registered target is how a
+//   post-start ticket amendment reaches a running agent; releasing the row of a
+//   possibly-live container silently cuts that agent off from every later amendment.
 
-for (const signalsStart of [true, false]) {
-  const label = signalsStart ? "DETACHED/ATTACHED (start signalled by the executor)" : "LEGACY/FAKE (start recorded up front)";
-  test(`FG-666 (${signalsStart ? "9" : "10"}): ${label} — an exec throw releases the target ROW and RETAINS the artifact`, async () => {
-    armCloneSubstrate();
-    const KEY = signalsStart ? "pk-fg666-detached" : "pk-fg666-legacy";
-    const projectDir = dbModeProject(KEY, "FG-1", "body");
+test("FG-666 (9): DETACHED/ATTACHED — a throw with NO start recorded releases the ROW and retains the artifact", async () => {
+  armCloneSubstrate();
+  const KEY = "pk-fg666-detached";
+  const projectDir = dbModeProject(KEY, "FG-1", "body");
 
-    const capture: ExecCapture = { calls: 0, args: [] };
-    const { runId, wave } = await dispatch(projectDir, throwingExec(signalsStart, capture), { ticketId: "FG-1" });
+  const capture: ExecCapture = { calls: 0, args: [] };
+  const { runId, wave } = await dispatch(projectDir, throwingExec(true, capture), { ticketId: "FG-1" });
 
-    assert.deepEqual(wave.failedSteps, ["build"]);
-    assert.equal(capture.calls, 1, "the executor really was invoked (so publication had already committed)");
+  assert.deepEqual(wave.failedSteps, ["build"]);
+  assert.equal(capture.calls, 1, "the executor really was invoked (so publication had already committed)");
 
-    const task = primaryTask(runId);
-    const hostDir = backlogSnapshotHostDir(task.id);
-    dirs.push(hostDir);
+  const task = primaryTask(runId);
+  const hostDir = backlogSnapshotHostDir(task.id);
+  dirs.push(hostDir);
 
-    assert.deepEqual(
-      liveSnapshotTargets(KEY).map((t) => t.targetDir),
-      [],
-      "the registration ROW is released — releasing it only stops future fan-out and is always safe",
-    );
-    assert.equal(
-      existsSync(join(hostDir, SNAPSHOT_DB_BASENAME)),
-      true,
-      "and the ARTIFACT is RETAINED: no executor contract surfaces an authoritative no-container-created " +
-        "fact, so deleting here could unlink the source of a live `:ro` bind",
-    );
-  });
-}
+  assert.deepEqual(
+    liveSnapshotTargets(KEY).map((t) => t.targetDir),
+    [],
+    "the ROW is released: this executor signals start, none was recorded, so no container was created",
+  );
+  assert.equal(
+    existsSync(join(hostDir, SNAPSHOT_DB_BASENAME)),
+    true,
+    "and the ARTIFACT is RETAINED: no executor contract surfaces an authoritative no-container-created " +
+      "fact, so deleting here could unlink the source of a live `:ro` bind",
+  );
+});
+
+test("FG-666 (10): LEGACY/FAKE — a throw whose start was recorded up front RETAINS the row: the container may be alive", async () => {
+  armCloneSubstrate();
+  const KEY = "pk-fg666-legacy";
+  const projectDir = dbModeProject(KEY, "FG-1", "body");
+
+  const capture: ExecCapture = { calls: 0, args: [] };
+  const { runId, wave } = await dispatch(projectDir, throwingExec(false, capture), { ticketId: "FG-1" });
+
+  assert.deepEqual(wave.failedSteps, ["build"]);
+  assert.equal(capture.calls, 1);
+
+  const task = primaryTask(runId);
+  const hostDir = backlogSnapshotHostDir(task.id);
+  dirs.push(hostDir);
+
+  assert.deepEqual(
+    liveSnapshotTargets(KEY).map((t) => t.targetDir),
+    [hostDir],
+    "the ROW is RETAINED: this executor never signals start, so the recorded start proves nothing and " +
+      "the container's liveness is unknown — the same unknown that forbids deleting the bytes forbids " +
+      "asserting the container is gone",
+  );
+  assert.equal(existsSync(join(hostDir, SNAPSHOT_DB_BASENAME)), true, "and the artifact is retained");
+});
+
+test("FG-666 (10b): a throw AFTER the daemon created the container keeps fanning out to that live agent", async () => {
+  // The detached executor's real worst case, and the one the ambiguity argument is
+  // actually about: `docker run -d` succeeded, the container is running the task,
+  // and the host-side watcher died. Releasing the row here would cut a LIVE agent
+  // off from every subsequent ticket amendment — the exact delivery FG-608's
+  // registration exists to provide.
+  armCloneSubstrate();
+  const KEY = "pk-fg666-live-throw";
+  const projectDir = dbModeProject(KEY, "FG-1", "body");
+
+  const capture: ExecCapture = { calls: 0, args: [] };
+  const { runId, wave } = await dispatch(projectDir, throwsAfterStartExec(capture), { ticketId: "FG-1" });
+
+  assert.deepEqual(wave.failedSteps, ["build"]);
+  const task = primaryTask(runId);
+  const hostDir = backlogSnapshotHostDir(task.id);
+  dirs.push(hostDir);
+
+  assert.equal(
+    eventsForTask(task.id).some((e) => e.eventType === "container.started"),
+    true,
+    "the fixture really is the post-creation shape — otherwise this test proves nothing",
+  );
+  assert.deepEqual(
+    liveSnapshotTargets(KEY).map((t) => t.targetDir),
+    [hostDir],
+    "the container the daemon created is still running: it stays in the fan-out set",
+  );
+  assert.equal(existsSync(join(hostDir, SNAPSHOT_DB_BASENAME)), true, "and its mount source is retained");
+});
+
+test("FG-666 (10c): an ordinary NONZERO exec return releases the row — exec returning IS the container-is-gone fact", async () => {
+  // The common failure. Before this, only the exec-THROW path compensated, so every
+  // crashed agent left its target registered and every subsequent host ticket write
+  // for the project fanned out to a directory nothing would ever read again —
+  // unbounded work per write, until some later dispatch happened to sweep it. There
+  // may be no later dispatch.
+  armCloneSubstrate();
+  const KEY = "pk-fg666-nonzero";
+  const projectDir = dbModeProject(KEY, "FG-1", "body");
+
+  const capture: ExecCapture = { calls: 0, args: [] };
+  const { runId, wave } = await dispatch(projectDir, crashingExec(capture), { ticketId: "FG-1" });
+
+  assert.deepEqual(wave.failedSteps, ["build"], "a nonzero exit with no result fails the task");
+  const task = primaryTask(runId);
+  const hostDir = backlogSnapshotHostDir(task.id);
+  dirs.push(hostDir);
+  assert.equal(failureKindFromEvents(eventsForTask(task.id)), "container_crash", "through the NORMAL-return path");
+
+  assert.deepEqual(
+    liveSnapshotTargets(KEY).map((t) => t.targetDir),
+    [],
+    "the row is released: exec returned, so the container has exited and can read nothing more",
+  );
+  assert.equal(
+    existsSync(join(hostDir, SNAPSHOT_DB_BASENAME)),
+    true,
+    "the bytes stay for the sweep to reclaim — the dispatch layer never deletes a mount source",
+  );
+});
 
 // ─── (11) AC6: deletion only against a POSITIVE finished fact ───────────────
 
@@ -552,21 +788,17 @@ test("FG-666 (11a): deletion only against a POSITIVE `finished` fact — a REGIS
   );
 });
 
-test("FG-666 (11b): a COMPENSATED target stops fanning out immediately, and its retained directory is NOT reclaimed by the next dispatch", async () => {
-  // MEASURED, not assumed. The plan asserted that compensated bytes would be
-  // reclaimed by releaseFinishedTargets on the project's next dispatch; they are
-  // not, because that sweep iterates liveSnapshotTargets (released_at IS NULL) and
-  // compensation has already released the row. Nothing else reaps
-  // ~/.forge/backlog-snapshots. Pinned HERE, with the reason, so the next person
-  // does not rediscover it as a surprise — and so a future sweep over
-  // released-but-present targets (snapshot.ts's table, snapshot.ts's job) has a
-  // failing-by-design pin to flip.
+test("FG-666 (11b): a COMPENSATED target stops fanning out immediately, and its retained directory IS reclaimed by the next dispatch", async () => {
+  // The two halves of AC6's cost, bounded separately and both MEASURED:
   //
-  // The trade is deliberate: the harm AC6 names is the REGISTERED target, because a
-  // live dead target makes EVERY subsequent host ticket write fan out to it —
-  // unbounded work and unbounded disk PER WRITE. Releasing the row ends that at
-  // once. What is left is one bounded per-task directory, costing disk once and
-  // nothing per write; deleting it eagerly could unlink a live container's mount.
+  //   the per-write cost ends IMMEDIATELY — releasing the row takes the dead target
+  //   out of the fan-out set, so no subsequent host ticket write pays for it;
+  //
+  //   the one-off disk cost ends at the project's NEXT dispatch — reclaimReleasedTargets
+  //   sweeps released-but-present targets, which releaseFinishedTargets cannot see
+  //   (it iterates liveSnapshotTargets, released_at IS NULL). Without that second
+  //   sweep a released-but-present directory holding the project's full ticket
+  //   bodies is reachable by NO sweep, ever.
   armCloneSubstrate();
   const KEY = "pk-fg666-compensated";
   const projectDir = dbModeProject(KEY, "FG-1", "body");
@@ -582,26 +814,66 @@ test("FG-666 (11b): a COMPENSATED target stops fanning out immediately, and its 
     [],
     "fan-out to the dead target stops IMMEDIATELY — this is the unbounded-cost half AC6 names",
   );
-  assert.equal(existsSync(join(failedHostDir, SNAPSHOT_DB_BASENAME)), true, "the bytes are retained");
+  assert.equal(existsSync(join(failedHostDir, SNAPSHOT_DB_BASENAME)), true, "the bytes are retained for now");
+  assert.deepEqual(
+    releasedSnapshotTargets(KEY).map((t) => t.targetDir),
+    [failedHostDir],
+    "and the released row is still on record — which is what makes the directory findable",
+  );
 
-  // The failed task already reads as `finished`, so if the row were still live the
-  // next dispatch's sweep would reclaim it. It is not live, so it does not.
+  // The failed task reads as `finished`, so the next dispatch's released-target sweep
+  // reclaims both the bytes and the row.
   const secondCapture: ExecCapture = { calls: 0, args: [] };
   const second = await dispatch(projectDir, capturingExec(secondCapture), { ticketId: "FG-1", title: "fg666 comp 2" });
   dirs.push(backlogSnapshotHostDir(primaryTask(second.runId).id));
   assert.equal(
-    existsSync(join(failedHostDir, SNAPSHOT_DB_BASENAME)),
-    true,
-    "the retained directory outlives the next dispatch — a bounded disk cost, and NOT a fan-out cost",
+    existsSync(failedHostDir),
+    false,
+    "the compensated directory is reclaimed by the project's next dispatch — not stranded forever",
+  );
+  assert.equal(
+    releasedSnapshotTargets(KEY).some((t) => t.targetDir === failedHostDir),
+    false,
+    "and its row goes with it, so the table stays bounded too",
   );
 });
 
-test("FG-666 (11c): a PRE-publication failure (buildDockerArgs throws) registers no target at all", async () => {
+test("FG-666 (11b-i): a released target whose task still reads LIVE keeps its bytes", async () => {
+  // The reclaim sweep inherits releaseFinishedTargets' polarity exactly: bytes are
+  // deleted against a POSITIVE fact, never against the absence of one. A row is
+  // released when the container is known gone — but if the store still reads the
+  // task as live, that outranks it, because the directory may be a `:ro` mount source.
+  armCloneSubstrate();
+  const KEY = "pk-fg666-released-live";
+  const projectDir = dbModeProject(KEY, "FG-1", "body");
+
+  const failCapture: ExecCapture = { calls: 0, args: [] };
+  const first = await dispatch(projectDir, throwingExec(true, failCapture), { ticketId: "FG-1", title: "fg666 rel 1" });
+  const failedTask = primaryTask(first.runId);
+  const failedHostDir = backlogSnapshotHostDir(failedTask.id);
+  dirs.push(failedHostDir);
+  setTaskStatus(failedTask.id, "running");
+
+  const secondCapture: ExecCapture = { calls: 0, args: [] };
+  const second = await dispatch(projectDir, capturingExec(secondCapture), { ticketId: "FG-1", title: "fg666 rel 2" });
+  dirs.push(backlogSnapshotHostDir(primaryTask(second.runId).id));
+  assert.equal(
+    existsSync(join(failedHostDir, SNAPSHOT_DB_BASENAME)),
+    true,
+    "a released target whose task reads `running` is NOT deleted",
+  );
+});
+
+test("FG-666 (11c): an ARGV failure after the publication commit point compensates, and nothing is stranded", async () => {
+  // The commit point sits immediately BEFORE buildDockerArgs, because
+  // FORGE_DISPATCHED_TICKET is built out of what publication produced (see (14)).
+  // That puts one more failure path after publication, and this is the pin that it
+  // is fully compensated: no container, no live target, and no directory left behind
+  // once the project dispatches again.
   armCloneSubstrate();
   const KEY = "pk-fg666-prepub";
   const projectDir = dbModeProject(KEY, "FG-1", "body");
-  // FG-497's argv guard fires inside buildDockerArgs, before this dispatch has
-  // published anything.
+  // FG-497's argv guard fires inside buildDockerArgs.
   ensureSeamRuntime("fg666-seam-test", { OVERSIZED: "x".repeat(130_000) });
 
   const capture: ExecCapture = { calls: 0, args: [] };
@@ -610,13 +882,16 @@ test("FG-666 (11c): a PRE-publication failure (buildDockerArgs throws) registers
   assert.deepEqual(wave.failedSteps, ["build"]);
   assert.equal(capture.calls, 0, "no container");
   const task = primaryTask(runId);
+  const hostDir = backlogSnapshotHostDir(task.id);
+  dirs.push(hostDir);
   assert.match(task.error ?? "", /buildDockerArgs failed/);
-  assert.deepEqual(liveSnapshotTargets(KEY), [], "nothing was registered, so there is nothing to compensate");
-  assert.equal(
-    existsSync(join(backlogSnapshotHostDir(task.id), SNAPSHOT_DB_BASENAME)),
-    false,
-    "and nothing was published",
-  );
+  assert.deepEqual(liveSnapshotTargets(KEY), [], "the target it published was released — nothing fans out to it");
+
+  ensureSeamRuntime("fg666-seam-test", {});
+  const secondCapture: ExecCapture = { calls: 0, args: [] };
+  const second = await dispatch(projectDir, capturingExec(secondCapture), { ticketId: "FG-1", title: "fg666 prepub 2" });
+  dirs.push(backlogSnapshotHostDir(primaryTask(second.runId).id));
+  assert.equal(existsSync(hostDir), false, "and its bytes are reclaimed by the next dispatch");
 });
 
 // ─── (12) AC7: exactly ONE dispatch-evidence write per dispatch ─────────────
@@ -643,6 +918,204 @@ test("FG-666 (12): one ticketed dispatch records EXACTLY ONE dispatch-evidence r
   const dispatched = capture.args.filter((a) => a.startsWith("FORGE_DISPATCHED_TICKET="));
   assert.equal(dispatched.length, 1, "and exactly one FORGE_DISPATCHED_TICKET in the argv");
   assert.match(dispatched[0]!, /^FORGE_DISPATCHED_TICKET=FG-1:1:/);
+});
+
+// ─── (14) AC7: the evidence names the revision the CONTAINER was given ───────
+
+test("FG-666 (14): a ticket amended between resolve and publish is named by BOTH the evidence row and FORGE_DISPATCHED_TICKET", async () => {
+  // Resolution now happens before the dependency block (image pull plus install —
+  // minutes), and the snapshot is published at the far end of it. A host ticket
+  // amendment in that window lands in the published snapshot, so evidence read at
+  // resolve time would name a revision the container was NOT given — while the
+  // in-container reader asserts the task was BUILT FROM the dispatched revision.
+  //
+  // Driven at the seam by amending the ticket from inside the executor's own
+  // dispatch: the run's FIRST dispatch publishes revision 1, the amendment makes it
+  // 2, and the SECOND dispatch is the one under test — its snapshot, its evidence
+  // row and its argv must agree.
+  armCloneSubstrate();
+  const KEY = "pk-fg666-amend";
+  const projectDir = dbModeProject(KEY, "FG-1", "original body");
+
+  writeTransaction(() =>
+    upsertTicket({
+      projectKey: KEY,
+      ticketId: "FG-1",
+      type: "story",
+      status: "active",
+      title: "title FG-1",
+      body: "AMENDED-ACCEPTANCE-CRITERIA",
+      importedAt: NOW,
+    }),
+  );
+  const amended = db
+    .prepare(`SELECT revision, body_hash AS bodyHash FROM tickets WHERE project_key = ? AND ticket_id = ?`)
+    .get(KEY, "FG-1") as { revision: number; bodyHash: string };
+  assert.equal(amended.revision, 2, "the fixture really amended the ticket");
+
+  const capture: ExecCapture = { calls: 0, args: [] };
+  const { runId } = await dispatch(projectDir, capturingExec(capture), { ticketId: "FG-1" });
+  const task = primaryTask(runId);
+  const hostDir = backlogSnapshotHostDir(task.id);
+  dirs.push(hostDir);
+
+  const row = db
+    .prepare(`SELECT revision, body_hash AS bodyHash FROM ticket_dispatch_evidence WHERE task_id = ?`)
+    .get(task.id) as { revision: number; bodyHash: string };
+  assert.equal(row.revision, amended.revision, "the evidence row names the revision that was published");
+  assert.equal(row.bodyHash, amended.bodyHash);
+
+  const dispatched = capture.args.filter((a) => a.startsWith("FORGE_DISPATCHED_TICKET="));
+  assert.deepEqual(
+    dispatched,
+    [`FORGE_DISPATCHED_TICKET=FG-1:${amended.revision}:${amended.bodyHash}`],
+    "and the container is told the SAME revision the evidence records",
+  );
+
+  // The claim is only worth anything if the mounted snapshot really holds that body.
+  const snap = new Database(join(hostDir, SNAPSHOT_DB_BASENAME), { readonly: true });
+  try {
+    const t = snap.prepare(`SELECT body FROM tickets WHERE ticket_id = ?`).get("FG-1") as { body: string };
+    assert.equal(t.body, "AMENDED-ACCEPTANCE-CRITERIA", "the snapshot the container reads carries that revision");
+  } finally {
+    snap.close();
+  }
+});
+
+// ─── (15) AC4: publication can DEGRADE a healthy resolution ─────────────────
+
+test("FG-666 (15): a ticketed dispatch whose snapshot cannot be PUBLISHED is refused — the refusal re-checks what publication produced", async () => {
+  // The resolution is perfect; the marker/snapshot write is what fails. Publication
+  // converts that into mode `unknown`, and an `unknown` marker makes the container's
+  // reader refuse every backlog read. A refusal decided only against the RESOLVED
+  // value would start that container anyway: ticketed, and blind — the exact
+  // invariant this ticket exists to establish.
+  //
+  // Blocked by making ~/.forge/backlog-snapshots a FILE, so no task's snapshot
+  // directory can be created under it.
+  armCloneSubstrate();
+  const KEY = "pk-fg666-nopublish";
+  const projectDir = dbModeProject(KEY, "FG-1", "body");
+
+  const snapshotsRoot = dirname(backlogSnapshotHostDir("probe"));
+  rmSync(snapshotsRoot, { recursive: true, force: true });
+  mkdirSync(dirname(snapshotsRoot), { recursive: true });
+  writeFileSync(snapshotsRoot, "not a directory");
+  dirs.push(snapshotsRoot);
+
+  const capture: ExecCapture = { calls: 0, args: [] };
+  const { runId, wave } = await dispatch(projectDir, capturingExec(capture), { ticketId: "FG-1" });
+
+  assert.deepEqual(wave.failedSteps, ["build"], "the dispatch is refused");
+  assert.equal(capture.calls, 0, "and no agent container was started");
+
+  const task = primaryTask(runId);
+  assert.equal(
+    failureKindFromEvents(eventsForTask(task.id)),
+    "backlog_authority_unresolvable",
+    "recorded as the RETRYABLE infrastructure refusal — a re-dispatch re-resolves and may well succeed",
+  );
+  const refusal = eventsForTask(task.id).filter((e) => e.eventType === "task.backlog_authority_refused");
+  assert.equal(refusal.length, 1);
+  assert.equal((refusal[0]!.payload as Record<string, unknown>)["stage"], "publish", "at the PUBLICATION stage");
+  assert.equal(
+    eventsForTask(task.id).some((e) => e.eventType === "container.started"),
+    false,
+    "nothing was started for a task that would have run blind",
+  );
+});
+
+// ─── (16) AC5: a RED's authority is not readable out of the tree it reviews ──
+
+test("FG-666 (16): an agent that COMMITS a foreign project_key cannot make its own reviewers refuse", async () => {
+  // The security half of "resolved from Forge-owned run state". A red is dispatched
+  // with projectDir = the publisher's CANDIDATE worktree, whose tracked
+  // .forge/config.yml is content merged out of the agent's private clone. Resolving
+  // the identity question from it means an agent can commit any unregistered or
+  // foreign project_key and make every subsequent red on a ticketed run resolve
+  // `unknown` and be refused before its container starts — an identity-forgery
+  // vector against the review lane itself, with blue steps (resolved against the
+  // run's project directory) unaffected.
+  //
+  // The red still MOUNTS the candidate. Only the identity question is asked
+  // elsewhere.
+  armCloneSubstrate();
+  const KEY = "pk-fg666-red-authority";
+  const FORGED = "pk-fg666-forged";
+  const projectDir = dbModeProject(KEY, "FG-1", "body");
+  registerKeyToForeignRepo(FORGED);
+
+  const { runId } = startRun({
+    workflow: SEAM_WORKFLOW_WITH_RED,
+    title: "fg666 red authority",
+    inputs: { ticketId: "FG-1" },
+    projectDir,
+  });
+
+  let calls = 0;
+  let redProjectMount: string | undefined;
+  let redCandidateConfig: string | undefined;
+  const stubExec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+    calls += 1;
+    const mount = projectMountSource(args);
+    mkdirSync(dirname(stdoutPath), { recursive: true });
+    writeFileSync(stdoutPath, "stub stdout");
+    writeFileSync(stderrPath, "");
+    if (calls === 1) {
+      // The BLUE agent, in its private clone: commit a project_key belonging to
+      // another repository.
+      assert.ok(mount, "the blue agent's /project mount must be in the argv");
+      writeFileSync(join(mount!, ".forge", "config.yml"), `project_key: ${FORGED}\n`);
+      execFileSync("git", ["add", "-A"], { cwd: mount!, stdio: "ignore" });
+      execFileSync(
+        "git",
+        ["-c", "user.name=Agent", "-c", "user.email=agent@forge.test", "commit", "-m", "forge config"],
+        { cwd: mount!, stdio: "ignore" },
+      );
+      writeFileSync(
+        join(dirname(stdoutPath), "result.json"),
+        JSON.stringify({ status: "complete", tests_run: 1, tests_passed: 1, files_modified: [".forge/config.yml"] }),
+      );
+      return 0;
+    }
+    redProjectMount = mount;
+    // Read the candidate's config HERE: the publication worktree is torn down once
+    // the wave finishes, so red time is the only moment it can be observed.
+    redCandidateConfig = mount && existsSync(join(mount, ".forge", "config.yml"))
+      ? readFileSync(join(mount, ".forge", "config.yml"), "utf8")
+      : undefined;
+    writeFileSync(
+      join(dirname(stdoutPath), "result.json"),
+      JSON.stringify({ status: "complete", verdict: "inconclusive", confidence: "low", findings: [] }),
+    );
+    return 0;
+  };
+
+  await runNext({ runId, workflow: SEAM_WORKFLOW_WITH_RED, dockerExec: stubExec });
+
+  const red = tasksForRun(runId).find((t) => t.phase === "build" && t.parentId !== undefined);
+  assert.ok(red, "a red task must have been dispatched");
+  dirs.push(backlogSnapshotHostDir(red!.id));
+  for (const t of tasksForRun(runId)) dirs.push(backlogSnapshotHostDir(t.id));
+
+  // The fixture only proves something if the tree the red reviewed really carries
+  // the forged key.
+  assert.ok(redProjectMount, "the red's /project mount must have been observed");
+  assert.notEqual(redProjectMount, projectDir, "and it really is the candidate, not the project directory");
+  assert.match(
+    redCandidateConfig ?? "",
+    new RegExp(FORGED),
+    "the candidate the red mounts really does declare the agent's forged project_key",
+  );
+
+  assert.deepEqual(
+    eventsForTask(red!.id).filter((e) => e.eventType === "task.backlog_authority_refused"),
+    [],
+    "the red is NOT refused: its authority came from the run's project directory, not from the tree under review",
+  );
+  const marker = readMarker(backlogSnapshotHostDir(red!.id));
+  assert.equal(marker.mode, "db", "and it resolved the REAL project's store");
+  assert.equal(marker.projectKey, KEY, "under the real project_key, not the committed one");
 });
 
 // ─── (13) AC7: `forge invoke` — the OTHER production buildDockerArgs caller ──

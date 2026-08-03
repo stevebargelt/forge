@@ -109,6 +109,14 @@ const BLOCKER_BY_FAILURE_KIND: Record<FailureKind, BlockerKind> = {
   // (a retry enqueues a fresh attempt, AD-7). Pausing the campaign for it would
   // be a self-inflicted stall.
   lane_taken_over: "scope",
+
+  // FG-666 AC4, split the same way the retry policy splits them. The first two are
+  // properties of the PROJECT (its declared project_key, its store) and so hold
+  // identically for every remaining item — SHARED. The third is a property of ONE
+  // item's ticket, which is exactly the item-local shape "scope" is for.
+  backlog_authority_conflict: "campaign_system",
+  backlog_authority_unresolvable: "infrastructure",
+  backlog_ticket_unreadable: "scope",
 };
 
 // Throws are classified as infrastructure (callers handle undefined/null via this function too).

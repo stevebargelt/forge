@@ -49,6 +49,7 @@ import { resolveBacklogStore, type BacklogStore } from "../backlog/storage-mode.
 import { ProjectIdentityConflictError } from "../store/project-registry.js";
 import {
   publishSnapshotOnce,
+  reclaimReleasedTargets,
   registerSnapshotTarget,
   releaseFinishedTargets,
   releaseSnapshotTarget,
@@ -216,19 +217,66 @@ export type DispatchBacklogAuthority = {
   hostDir: string;
   containerDir: string;
   dispatchedTicket?: string;
-  /** Why the authority is `unknown`. Set ONLY on a DEGRADED resolution, never on
-   *  a healthy one: a project with no `project_key` at all resolves cleanly to
+  /** Why the authority is DEGRADED. Set ONLY on a degraded resolution, never on a
+   *  healthy one: a project with no `project_key` at all resolves cleanly to
    *  `markdown` and carries NO reason, because a diagnostic that fires on every
-   *  normal project reproduces the silence FG-666 exists to end. */
-  reason?: "identity-conflict" | "resolve-failed";
+   *  normal project reproduces the silence FG-666 exists to end.
+   *
+   *  `ticket-unreadable` is the one reason that does NOT imply mode `unknown`: the
+   *  STORE resolved (mode stays `db`, and an unticketed dispatch against it is
+   *  perfectly healthy) but the ticket this run is anchored to could not be read out
+   *  of it. See dispatchIsBlind below for the predicate that turns that into AC4's
+   *  refusal. */
+  reason?: "identity-conflict" | "resolve-failed" | "ticket-unreadable";
   /** Operator-facing detail for `reason` — for identity-conflict, the config /
    *  registered / evidence keys, so the surface never flattens to "unknown". */
   detail?: string;
-  /** Read at resolve time, WRITTEN at publication time. Carried rather than
-   *  re-read so the evidence row and the FORGE_DISPATCHED_TICKET the container
-   *  sees can never describe two different revisions. */
+  /** The ticket this dispatch is anchored to, carried so publication can re-read its
+   *  revision at the moment it publishes the snapshot. NOT itself the evidence. */
+  ticketId?: string;
+  /** Read at resolve time — used to DECIDE (refuse / proceed), never to record. The
+   *  evidence that is written, and the FORGE_DISPATCHED_TICKET the container sees,
+   *  are re-read at publication time from the same store the snapshot is published
+   *  out of; see publishBacklogSnapshot. */
   ticketEvidence?: { ticketId: string; revision: number; bodyHash: string };
 };
+
+/** The (ticketId, revision, bodyHash) triple for a ticket, or undefined if it cannot
+ *  be read. NEVER throws: an unreadable ticket is a fact the caller decides about,
+ *  not an exception that aborts a dispatch. */
+function readTicketEvidence(
+  projectKey: string,
+  ticketId: string,
+): { ticketId: string; revision: number; bodyHash: string } | undefined {
+  try {
+    const row = getTicket(projectKey, ticketId);
+    if (!row || !row.bodyHash) return undefined;
+    return { ticketId, revision: row.revision ?? 1, bodyHash: row.bodyHash };
+  } catch {
+    return undefined;
+  }
+}
+
+/** AC4's predicate, in one place: would this dispatch put an agent in front of a
+ *  ticket it cannot read? Applied TWICE — to the resolved authority before anything
+ *  is committed, and again to what publication actually produced.
+ *
+ *  TRUE for an unknown authority (no store at all), and TRUE for a db-mode authority
+ *  carrying no evidence for the run's ticket — the snapshot published out of that
+ *  store does not contain the ticket the run is anchored to, so `forge backlog show`
+ *  in-container answers nothing. That is the same blindness by a quieter route.
+ *
+ *  FALSE for `markdown` (a project with no project_key is a NORMAL outcome and must
+ *  dispatch untouched) and FALSE for an UNTICKETED dispatch whatever the mode. */
+export function dispatchIsBlind(
+  mode: "db" | "markdown" | "unknown",
+  carriesTicketEvidence: boolean,
+  ticketId: string | undefined,
+): boolean {
+  if (!ticketId) return false;
+  if (mode === "unknown") return true;
+  return mode === "db" && !carriesTicketEvidence;
+}
 
 /** Resolve this dispatch's ticket authority. PURE — no marker, no mkdir, no target
  *  registration, no publication, no evidence write. Reads only.
@@ -246,11 +294,28 @@ export type DispatchBacklogAuthority = {
  *  NEVER throws. The refusal AC4 asks for is a decision the DISPATCH LAYER makes
  *  about a resolved value, not a new throw in here — see runNext.ts:runContainer. */
 export function resolveDispatchBacklogAuthority(
-  projectDir: string,
+  projectDir: string | undefined,
   taskId: string,
   ticketId?: string,
 ): DispatchBacklogAuthority {
-  const base = { hostDir: backlogSnapshotHostDir(taskId), containerDir: BACKLOG_SNAPSHOT_CONTAINER_PATH };
+  const base = {
+    hostDir: backlogSnapshotHostDir(taskId),
+    containerDir: BACKLOG_SNAPSHOT_CONTAINER_PATH,
+    ...(ticketId ? { ticketId } : {}),
+  };
+  // The caller had no Forge-owned project directory to hand us. `undefined` is
+  // accepted rather than defaulted, because every default available here is a
+  // WORKSPACE — and resolving identity from the agent-writable workspace is the
+  // exact thing this function exists to stop. Degrade instead.
+  if (!projectDir) {
+    return {
+      ...base,
+      mode: "unknown",
+      projectKey: null,
+      reason: "resolve-failed",
+      detail: "no Forge-owned project directory was recorded for this run",
+    };
+  }
   let store: BacklogStore;
   try {
     store = resolveBacklogStore(projectDir);
@@ -286,29 +351,30 @@ export function resolveDispatchBacklogAuthority(
     return { ...base, mode: "markdown", projectKey: store.projectKey };
   }
   const projectKey = store.projectKey;
-  let dispatchedTicket: string | undefined;
-  let ticketEvidence: DispatchBacklogAuthority["ticketEvidence"];
-  if (ticketId) {
-    try {
-      const row = getTicket(projectKey, ticketId);
-      if (row && row.bodyHash) {
-        const revision = row.revision ?? 1;
-        dispatchedTicket = `${ticketId}:${revision}:${row.bodyHash}`;
-        ticketEvidence = { ticketId, revision, bodyHash: row.bodyHash };
-      }
-    } catch {
-      // A ticket READ that fails does not invalidate a store resolution that
-      // already succeeded — the dispatch keeps its `db` authority and simply
-      // carries no dispatch evidence. If the store is genuinely unreachable,
-      // publication below fails on its own terms and degrades the marker there.
-    }
+  if (!ticketId) return { ...base, mode: "db", projectKey };
+  // A ticket READ that fails does not invalidate a store resolution that already
+  // succeeded — the authority stays `db`. But it is NOT the silent nothing it used
+  // to be: a run anchored to a ticket whose row is missing, archived or unreadable
+  // would dispatch with no evidence, no FORGE_DISPATCHED_TICKET and a snapshot that
+  // does not contain the ticket, and `forge backlog show <ticket>` in-container
+  // would answer nothing. That is the blind dispatch AC4 refuses, so it is RECORDED
+  // here and refused by the caller (dispatchIsBlind), not swallowed.
+  const ticketEvidence = readTicketEvidence(projectKey, ticketId);
+  if (!ticketEvidence) {
+    return {
+      ...base,
+      mode: "db",
+      projectKey,
+      reason: "ticket-unreadable",
+      detail: `ticket '${ticketId}' has no readable row (missing, archived, or a failed read) in the db store for project_key '${projectKey}'`,
+    };
   }
   return {
     ...base,
     mode: "db",
     projectKey,
-    ...(dispatchedTicket ? { dispatchedTicket } : {}),
-    ...(ticketEvidence ? { ticketEvidence } : {}),
+    dispatchedTicket: `${ticketId}:${ticketEvidence.revision}:${ticketEvidence.bodyHash}`,
+    ticketEvidence,
   };
 }
 
@@ -360,16 +426,33 @@ export function publishBacklogSnapshot(
     // task id yields "unknown", which releases nothing yet and — critically —
     // deletes nothing, because that directory may be the live `:ro` mount source of
     // a container this store simply has not caught up on.
-    releaseFinishedTargets(projectKey, (id): TargetLiveness => {
+    const liveness = (id: string): TargetLiveness => {
       const task = getTask(id);
       if (!task) return "unknown";
       return task.status === "complete" || task.status === "failed" || task.status === "blocked_by_red"
         ? "finished"
         : "live";
-    });
+    };
+    releaseFinishedTargets(projectKey, liveness);
+    // The other half of the same sweep: bytes whose ROW was already released — by a
+    // compensated dispatch, or by the age-out above — are invisible to
+    // releaseFinishedTargets (it iterates liveSnapshotTargets). Without this, every
+    // released-but-present directory holding the project's ticket bodies would be
+    // reachable by no sweep at all. Same liveness predicate, same moment.
+    reclaimReleasedTargets(projectKey, liveness);
     registerSnapshotTarget(projectKey, authority.hostDir, taskId);
     publishSnapshotOnce(projectKey, authority.hostDir);
-    const evidence = authority.ticketEvidence;
+    // RE-READ the ticket here, adjacent to the publication, rather than reusing what
+    // resolution read. Resolution now happens BEFORE the dependency block (image
+    // pull plus install — minutes), and a host ticket amendment inside that window
+    // lands in the snapshot published one line above while the resolve-time value
+    // names the revision before it. Recording that value would make the evidence row
+    // and FORGE_DISPATCHED_TICKET name a revision the container was NOT given, and
+    // the in-container reader asserts the task was built FROM the dispatched
+    // revision. Reading after publication closes the window to the two statements
+    // between them, and even a write landing there fans out to the target registered
+    // one line above — so the container gets what the evidence names.
+    const evidence = authority.ticketId ? readTicketEvidence(projectKey, authority.ticketId) : undefined;
     if (evidence) {
       writeTransaction(() =>
         recordDispatchEvidence({
@@ -386,7 +469,7 @@ export function publishBacklogSnapshot(
       ...base,
       mode: "db",
       projectKey,
-      ...(authority.dispatchedTicket ? { dispatchedTicket: authority.dispatchedTicket } : {}),
+      ...(evidence ? { dispatchedTicket: `${evidence.ticketId}:${evidence.revision}:${evidence.bodyHash}` } : {}),
     };
   } catch {
     // The publication failed. The marker must NOT keep claiming a snapshot is
@@ -397,12 +480,16 @@ export function publishBacklogSnapshot(
   }
 }
 
-/** COMPENSATE a published snapshot for a dispatch that failed before its container
- *  could start. Releases the registration ROW and NOTHING ELSE.
+/** COMPENSATE a published snapshot for a dispatch whose container can no longer be
+ *  reading it. Releases the registration ROW and NOTHING ELSE.
  *
  *  FG-666 AC6, stated positively:
- *    1. The ROW is released unconditionally on every pre-start failure path after
- *       publication. It only stops future fan-out, so it is always safe.
+ *    1. The ROW is released exactly when Forge KNOWS no container can still read
+ *       this snapshot — no container was ever created, or the one that was has
+ *       exited. It is NOT unconditional: fan-out to a registered target is how a
+ *       post-start ticket amendment reaches a running agent (FG-608), so releasing
+ *       the row of a container that may still be alive silently cuts that agent off
+ *       from every later amendment. The callers own that fact; see runNext.ts.
  *    2. The ARTIFACT is deleted only against an authoritative daemon-side fact that
  *       NO container was created. The absence of an in-process start record is not
  *       that fact — no executor contract surfaces one. The detached executor (the
@@ -417,18 +504,13 @@ export function publishBacklogSnapshot(
  *  Deliberately takes no deleteArtifact option, so there is no flag to get
  *  backwards.
  *
- *  MEASURED CONSEQUENCE, stated rather than assumed (pinned by
- *  fg666-dispatch-seam.worktree.test.ts): releasing the row takes this target OUT
- *  of releaseFinishedTargets' view — that sweep iterates liveSnapshotTargets
- *  (released_at IS NULL) — so the RETAINED DIRECTORY IS NOT RECLAIMED by the
- *  project's next dispatch, and nothing else reaps ~/.forge/backlog-snapshots.
- *  That is a deliberate trade, not an oversight: the harm AC6 names is the
- *  REGISTERED target (every subsequent host ticket write fanning out to a dead
- *  directory — unbounded work and unbounded disk PER WRITE), and releasing the row
- *  ends that immediately. What remains is one bounded, per-task snapshot directory
- *  per dispatch that died after publication, which costs disk once and nothing
- *  per write. Reclaiming it needs a sweep over RELEASED-but-present targets, which
- *  belongs to snapshot.ts (the owner of that table) and is out of FG-666's scope. */
+ *  The retained bytes are NOT stranded: releasing the row takes this target out of
+ *  releaseFinishedTargets' view (that sweep iterates liveSnapshotTargets), which is
+ *  why reclaimReleasedTargets exists and runs from the same dispatch-time moment —
+ *  it reclaims a released-but-present directory once its task reads finished. The
+ *  two halves of AC6's cost are therefore bounded separately: the per-write fan-out
+ *  ends the instant the row is released, and the one-off disk cost ends at the
+ *  project's next dispatch. */
 export function releaseDispatchBacklogSnapshot(projectKey: string, hostDir: string): void {
   try {
     releaseSnapshotTarget(projectKey, hostDir);
