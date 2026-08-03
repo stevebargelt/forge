@@ -262,6 +262,29 @@ On success it prints a copy-pasteable evidence block (host, docker version, imag
 
 What it proves is that the mount shape is safe on a real kernel. What it does *not* prove is that forge emits that shape; the argv-shape assertions in `src/v2/fg621-clone-git-mount.worktree.test.ts` and `src/v2/fg559-worktree-git-mount.worktree.test.ts` cover that half, and `src/v2/fg621-smoke-script.integration.test.ts` covers the script's own adjudication logic (that a probe which never ran, or a typo'd command, can never be scored as a refusal). The two halves together are AC 2's coverage.
 
+## Proving the reviewer's database engine (FG-664)
+
+`scripts/fg664-reviewer-engine-smoke.sh` is the live proof that a **read-only reviewer container can load the project's real native database driver** — the half of FG-664 that removes the hazard, as opposed to the half that fails closed when the hazard is met. It exists for the same reason as the FG-621 smoke, and is **deliberately outside every npm tier and outside CI** for the same reason: no tier here can run a real container, so the only test that could exist would be skip-capable, and a green skip is a false proof. Here that is doubly true — the defect being closed is a lane reporting a verdict for a suite it never actually executed against the real engine.
+
+```bash
+./scripts/fg664-reviewer-engine-smoke.sh [--project-dir DIR] [--image IMAGE] [--package NAME] [--runtime NAME]
+```
+
+- `--project-dir` — the project whose reviewer environment is under proof (default: the repo the script lives in).
+- `--image` — the candidate agent image (default: `$FORGE_AGENT_IMAGE`, else the resolved runtime's own image; build one with `./docker/build.sh`).
+- `--package` — the native dependency to prove loadable (default: `better-sqlite3`, the shipping driver).
+- `--runtime` — the runtime to resolve the image and project mount path from (default: `claude`, the same auto-detection a dispatch does).
+
+**It runs three probes, and the negative one is what makes the positive one mean anything.** P1 runs a container with the read-only reviewer mount shape — project `:ro`, every lockfile-keyed dependency volume `:ro`, no read-write dependency mount — and asserts the real driver loads, answers a query, and reports the *container's* `process.versions.modules` from an ELF artifact. P2 runs the same container with the dependency volumes **absent** and asserts the load **fails**, on the host's Mach-O artifact seen through the project bind: that reproduces the live defect and is what rules out P1's green having come from the host's darwin `node_modules`. P3 asserts the argv carries no read-write dependency mount, no `FORGE_NM_INSTALL_ROOT` and no install command, and corroborates it in the kernel (writes to `/project` and to the mounted `node_modules` are refused), so FG-376's "reviewer containers never install" invariant is visible in the proof rather than asserted in prose.
+
+**Run it on the macOS host.** It refuses to run anywhere else, and that refusal is the coverage boundary, not a portability gap: on Linux the host's `node_modules` already carry the container's platform, so the ABI mismatch the proof is about does not exist and P2 could not reproduce it. It derives the mount shape and the volume names from forge's **own** `planDependencyVolumes` / `buildProvisionerDockerArgs` (so it needs this repo's `node_modules`), and on a cold cache key it provisions through forge's own provisioner under the real `~/.forge/dependency-cache` lock — deliberately **not** a redirected `FORGE_HOME`, because a different lock would let it race a live dispatch installing into the same volume.
+
+**It fails closed.** Every missing prerequisite — not macOS, no docker binary, no reachable daemon, no image, no node, no lockfile, a project whose `.git` is a worktree pointer, a driver with no host build or a non-darwin one — exits **2** with a `FATAL:` line naming what was missing. A failed assertion exits **1** and dumps both container logs. There is exactly one literal `exit 0`, the last line. Nothing skips.
+
+**What a green run does and does not say.** It closes FG-664 AC 1 on the darwin + npm-lockfile configuration, which is the only configuration where the hazard exists. It says **nothing** about half (B) — that a lane which *cannot* load the driver is recorded `blocked_environment` rather than as a verdict; that holds on every host and is proven by the unit suites, and the two claims must never be quoted for each other. It also does not prove forge *emits* the reviewer mount shape (the argv-shape assertions in `src/v2/fg664-reviewer-dependency-environment.test.ts` cover that half), and it cannot detect an agent that loads the real driver and fabricates output anyway.
+
+Paste the evidence block into FG-664's acceptance grid, citing the candidate SHA and image, and **re-run it whenever the mount planner or the dependency-environment resolver changes** — the same standing instruction the FG-621 smoke carries, for the same reason: acceptance evidence against a superseded SHA is worse than none, because it reads as proof.
+
 ## Timing data and classification history
 
 `docs/test-suite-timing-fg495.md` has the full per-file/per-tier timing measurements behind FG-495's tiering decision, plus a file → old-tier → new-tier → reason table for every test relocated out of the unit tier when the content guard was extended.

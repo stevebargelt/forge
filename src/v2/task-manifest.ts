@@ -1,5 +1,6 @@
 import { writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { DependencyEnvironmentReceipt } from "./dependency-provisioning.js";
 
 // FG-350: RECORDED dispatch-time control-plane provenance. Written once at task
 // dispatch and never recomputed — Explain views read RECORDED truth, not current
@@ -163,6 +164,27 @@ export type TaskManifest = {
     /** the protocol file's path inside the resolved seed generation. */
     source: string;
   };
+  // FG-664: CACHE IDENTITY AND ENGINE IDENTITY for a read-only dispatch — which
+  // dependency-cache key was mounted, and which node/ABI/native packages a
+  // FORGE-OWNED probe container actually LOADED in the reviewer's exact mount
+  // shape, before the agent container started. Recorded so a verdict can be tied
+  // to the engine that produced it rather than to an assumption about it; the
+  // review ledger's recheck stage evidence carries the same receipt, which makes
+  // it one fact in two places rather than two facts that can disagree.
+  //
+  // Present only when the dispatch resolved an environment at all: absent for
+  // every read-write (blue) dispatch and for the not-applicable configurations
+  // (non-darwin, FORGE_NO_NM_SHADOW=1, no package-lock.json). Optional, so every
+  // pre-FG-664 manifest still parses.
+  dependencyEnvironment?: DependencyEnvironmentReceipt;
+
+  // FG-664: WHY this manifest describes a task no container ever ran for. The
+  // FG-664 gate refuses a read-only dispatch before any agent container exists,
+  // and the manifest is still written — `forge retry` recovers the mount mode a
+  // task ran under from this receipt, and with no manifest at all it falls back
+  // to a role-prefix guess that re-dispatches a refused reviewer READ-WRITE.
+  // Present only on that refusal; a manifest without it dispatched.
+  dispatchRefused?: { stage: "dependency_environment"; reason: string; detail: string };
 };
 
 export function writeTaskManifest(dir: string, manifest: TaskManifest): void {
