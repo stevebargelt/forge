@@ -104,6 +104,10 @@ Containerized agents read tickets through a **read-only, project-scoped, backlog
 
 **Watch for `warning: … snapshot(s) are STALE`** under the store banner on host `forge backlog` commands. It means a host ticket write did not reach a running container's snapshot after bounded retries — the host store is still correct and authoritative; what failed is the fan-out, and an agent may be reading an older ticket.
 
+**Watch also for `forge: could not resolve the backlog authority for <task> from <dir>`** on the host during dispatch. After cutover this is the shape an identity problem takes: the project declares a `project_key` the registry maps to different repository evidence, so the dispatch proceeds with no ticket authority and the agent's backlog reads refuse. Settle it exactly as at cutover (`forge backlog reidentify --confirm`, step 1 above) and re-run. Note that authority is resolved against the project directory forge recorded for the run, not the workspace the task runs in, so a task workspace can never be the cause.
+
+The same line has a second shape — **`forge: resolved the backlog authority for <task> from <dir> but could not publish its ticket snapshot`** — which is *not* an identity problem: the key resolved correctly and the snapshot publication then failed, so the container is ticket-blind for a different reason (a busy DB under a second forge process, a snapshot that would not build). `reidentify` is the wrong tool for it; re-run once nothing else is contending for the store. Both shapes are recorded durably as a `container.backlog_authority_unresolved` event on **the run and the task**, with `payload.stage` (`"resolve"` or `"publish"`) naming which one — so `forge show <run-id>` is where to look after the fact. A project that has not cut over declares no key, resolves `markdown`, and never emits any of these.
+
 ## Migrating the rest of a portfolio
 
 Each project cuts over on its own schedule by running `forge backlog migrate` in it. There is no global flip, and there is deliberately no bulk verb — the refusals above are per project and want an operator present for each one.

@@ -249,6 +249,13 @@ export type EventType =
   // dispatch proceeds with no authority asserted — this is the only durable record
   // that it did. Payload: { taskId, hostDir, mode, projectKey, error }.
   | "container.backlog_authority_marker_failed"
+  // FG-666: the dispatch path could not RESOLVE this task's backlog authority — a
+  // project_key was declared and the cross-repository guard would not honour it. The
+  // dispatch proceeds with an `unknown` marker exactly as before; this is what makes
+  // the degradation visible to the operator instead of only to the agent whose reads
+  // then refuse. A project declaring NO project_key resolves markdown and never emits
+  // this. Payload: { taskId, projectDir, error }.
+  | "container.backlog_authority_unresolved"
   // FG-638: the review ledger's append-only audit half. The `reviews` /
   // `review_findings` rows carry CURRENT state; these carry how it got there.
   // review.state_changed is emitted on EVERY lifecycle transition (payload

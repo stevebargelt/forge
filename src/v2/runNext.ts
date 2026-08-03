@@ -3782,9 +3782,19 @@ async function runContainer(args: {
     ...depSpawnFields,
   };
 
+  // FG-666: the directory this task's ticket authority is resolved AGAINST — the
+  // run's recorded projectDir, which is Forge-owned durable state. Never
+  // repoRootForMount (on the FG-621 substrate that is a private clone, whose
+  // repository evidence diverges from its parent's, so FG-608's cross-repository
+  // guard refused every clone-dispatched task's backlog read) and never
+  // args.projectDir (a RED is dispatched with the publisher's candidate WORKTREE,
+  // whose tracked `.forge/config.yml` is content the agent under review committed —
+  // resolving from it would let an agent make its own reviewers refuse).
+  const authorityDir = getRun(args.runId)?.projectDir;
+
   let dockerArgs;
   try {
-    dockerArgs = buildDockerArgs(runtime, spawnCtx);
+    dockerArgs = buildDockerArgs(runtime, spawnCtx, { backlogAuthorityDir: authorityDir, runId: args.runId });
   } catch (e) {
     const msg = `buildDockerArgs failed: ${(e as Error).message}`;
     cleanupStagedAuth(dir); // AWN-8

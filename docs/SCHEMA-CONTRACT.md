@@ -132,6 +132,16 @@ The two outcomes of one pre-container decision — the host resolving a read-onl
 
 **Consequence for [agent runtime](#get-apiagent-runtime-response-shape-agentruntimetrends) below.** `container.dependency_provisioning_failed` is in the attached-exit set, and a gate refusal now emits it with **no container ever having started**. Such a row's derived runtime is the host-side resolution window (the provisioner run plus the probe), not an agent's execution — which is the honest reading of a task that never ran an agent, but it is not a container lifetime and must not be aggregated as one.
 
+#### FG-666: dispatch authority degradation (audit-only)
+
+- `container.backlog_authority_unresolved` — a dispatch whose project declares a `project_key` could not give its container a usable ticket authority, so it proceeded with an `unknown` marker and the container refuses every backlog read (see [Container ticket authority](concepts.md#container-ticket-authority)). Payload: `{ taskId, projectDir, stage, error }`.
+
+`stage` is `"resolve"` — `resolveBacklogStore` threw, which since FG-608 means the declared key maps to different repository evidence — or `"publish"`, where the store resolved `db` cleanly and the snapshot publication then failed. Both land the same `unknown` marker and the same ticket-blind container; `stage` is the only thing that separates an identity problem (settle it with `forge backlog reidentify --confirm`) from a store/filesystem one (retry). `projectDir` is the directory the authority was resolved *against* — since FG-666 the run's recorded `projectDir`, never the per-task workspace — so it is the directory to reconcile against the registry, not the one the task ran in.
+
+Sets **both `run_id` and `task_id`** (FG-666), so it surfaces on the per-task Timeline through a strict `task_id` match *and* on the run-level fold. The run id is load-bearing rather than conventional here: this event's whole purpose is to end a silence, and a ticket-blind task *completes successfully*, so it never reaches `forge status --json`'s failure-derived task fields — with `task_id` alone it would have been readable only by running `forge show` against the very task nothing had given an operator reason to suspect. A project declaring no `project_key` resolves `markdown` and emits nothing, which is what keeps this signal off every normal project. `forge invoke` supplies no run id (it has no run), so its rows carry `task_id` only.
+
+Distinct from `container.backlog_authority_marker_failed` (FG-608), which also ends in an `unknown` authority but records the opposite fact — the authority resolved and the *marker write* failed — and is task-scoped only. No dashboard consumer reads either today; they exist for `forge show` and post-hoc audit.
+
 #### Campaign-item reconcile decision events
 
 Emitted by `forge campaign reconcile`'s (or the drive-time equivalent's) write path the moment an item is shipped, carrying the re-derived evidence in `payload.evidence` for audit purposes. `run_id` is the events-table column, set to the item's `runId` (nullable). No schema/column change accompanies any of these — they differ only in `event_type` and are how the audit trail distinguishes *why* an item was recoverable.
