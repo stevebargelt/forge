@@ -1025,6 +1025,45 @@ test("FG-666 (15): a ticketed dispatch whose snapshot cannot be PUBLISHED is ref
   );
 });
 
+test("FG-666 (15b): a publication that fails AFTER registering the target leaves NO registered row behind", async () => {
+  // (15) fails at the MARKER write, which is before registration — so it cannot see
+  // this. Here publication gets as far as committing a target row and then dies.
+  // publishBacklogSnapshot never throws, so what the dispatch layer receives is mode
+  // `unknown` over a row that EXISTS; compensation keyed on the mode reads that as
+  // "nothing was published" and the row fans out to a directory no container will
+  // ever read — for every subsequent host ticket write, forever. And because an
+  // `unknown` ticketed dispatch is refused, no container was started to justify it.
+  //
+  // The failure is forced at publication's LAST side effect, the dispatch-evidence
+  // write, by removing the table it writes to.
+  armCloneSubstrate();
+  const KEY = "pk-fg666-postreg";
+  const projectDir = dbModeProject(KEY, "FG-1", "body");
+  db.exec(`DROP TABLE ticket_dispatch_evidence`);
+
+  const capture: ExecCapture = { calls: 0, args: [] };
+  const { runId, wave } = await dispatch(projectDir, capturingExec(capture), { ticketId: "FG-1" });
+
+  assert.deepEqual(wave.failedSteps, ["build"], "the dispatch is refused");
+  assert.equal(capture.calls, 0, "and no container was started");
+  const task = primaryTask(runId);
+  const hostDir = backlogSnapshotHostDir(task.id);
+  dirs.push(hostDir);
+  assert.equal(
+    eventsForTask(task.id).some((e) => e.eventType === "container.started"),
+    false,
+    "nothing was started",
+  );
+  assert.deepEqual(liveSnapshotTargets(KEY), [], "no target is left fanning out");
+  // The stronger half: the row was RELEASED, not merely never registered — which is
+  // what distinguishes a compensated leak from a publication that failed earlier.
+  assert.equal(
+    releasedSnapshotTargets(KEY).some((t) => t.targetDir === hostDir),
+    true,
+    "the row publication DID commit was released by compensation",
+  );
+});
+
 // ─── (16) AC5: a RED's authority is not readable out of the tree it reviews ──
 
 test("FG-666 (16): an agent that COMMITS a foreign project_key cannot make its own reviewers refuse", async () => {

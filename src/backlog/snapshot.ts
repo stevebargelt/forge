@@ -171,10 +171,14 @@ export function registerSnapshotTarget(projectKey: string, targetDir: string, ta
  *  THE ROW AND THE DIRECTORY ARE TWO DECISIONS, and FG-608 red F12 is what happens
  *  when they are one. `targetDir` is the SOURCE of a live `:ro` bind mount: deleting
  *  it out from under a running container does not "clean up", it strands that agent
- *  with an unlinked mount for the rest of its task. Releasing the ROW is always
- *  safe — it only stops future fan-out — so it is unconditional. Deleting the
- *  ARTIFACT requires positive knowledge that the owning task has finished, which
- *  only the caller has. Default: keep the bytes — reclaimReleasedTargets below is
+ *  with an unlinked mount for the rest of its task. Releasing the ROW is the lesser
+ *  decision but NOT a free one, and NOT unconditional: fan-out to a registered
+ *  target is how a post-start ticket amendment reaches a running agent (FG-608), so
+ *  releasing the row of a LIVE container silently cuts that agent off from every
+ *  later amendment. Call it only where no container can still be reading the target
+ *  — none was created, or the one that was has exited. Deleting the ARTIFACT needs
+ *  the stronger fact still: positive knowledge that the owning task has finished,
+ *  which only the caller has. Default: keep the bytes — reclaimReleasedTargets below is
  *  what reclaims them once that knowledge exists, so keeping them is a deferral
  *  rather than a strand. */
 export function releaseSnapshotTarget(

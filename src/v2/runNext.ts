@@ -3933,8 +3933,14 @@ async function runContainer(args: {
   // target is how a post-start ticket amendment reaches a running agent (FG-608), so
   // releasing the row of a live container silently cuts that agent off from every
   // later amendment. Each call site below states which of the two facts it has.
+  //
+  // The predicate is `targetRegistered`, NOT the mode. publishBacklogSnapshot never
+  // throws, so a publication that dies AFTER registering the target reports mode
+  // `unknown` over a row that exists; keying off `db` here dropped exactly that case
+  // on the floor and leaked the target for good — and because an `unknown` ticketed
+  // dispatch is then refused, no container was ever started to justify keeping it.
   const compensatePublishedSnapshot = (): void => {
-    if (!publishedSnapshot || publishedSnapshot.mode !== "db" || !publishedSnapshot.projectKey) return;
+    if (!publishedSnapshot?.targetRegistered || !publishedSnapshot.projectKey) return;
     releaseDispatchBacklogSnapshot(publishedSnapshot.projectKey, publishedSnapshot.hostDir);
     publishedSnapshot = undefined;
   };

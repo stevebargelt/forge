@@ -166,6 +166,11 @@ export type BacklogSnapshotMount = {
   /** Set when the authority marker could not be written (N1). The dispatch still
    *  proceeds; this is what it proceeded WITHOUT. */
   markerError?: string;
+  /** Whether this dispatch REGISTERED a fan-out target row. Carried separately from
+   *  `mode` because a publication that fails AFTER registration returns `unknown`
+   *  while the row it registered is still live: compensation (AC6) must key off the
+   *  row that exists, not off the mode publication managed to report. */
+  targetRegistered?: boolean;
 };
 
 /** Write the authority marker, or record why it could not be written. Returns the
@@ -413,6 +418,7 @@ export function publishBacklogSnapshot(
     return { ...base, mode: "markdown", projectKey: authority.projectKey };
   }
   const projectKey = authority.projectKey;
+  let targetRegistered = false;
   try {
     const markerError = writeAuthorityMarkerOrRecord(authority.hostDir, { mode: "db", projectKey, taskId });
     if (markerError) return { ...base, mode: "unknown", projectKey, markerError };
@@ -441,6 +447,10 @@ export function publishBacklogSnapshot(
     // reachable by no sweep at all. Same liveness predicate, same moment.
     reclaimReleasedTargets(projectKey, liveness);
     registerSnapshotTarget(projectKey, authority.hostDir, taskId);
+    // From here on a ROW EXISTS, and every return below must say so — including the
+    // catch's degraded one. A publication that fails after this point still leaks a
+    // registered target if the failure value loses the fact (AC6).
+    targetRegistered = true;
     publishSnapshotOnce(projectKey, authority.hostDir);
     // RE-READ the ticket here, adjacent to the publication, rather than reusing what
     // resolution read. Resolution now happens BEFORE the dependency block (image
@@ -469,14 +479,17 @@ export function publishBacklogSnapshot(
       ...base,
       mode: "db",
       projectKey,
+      targetRegistered,
       ...(evidence ? { dispatchedTicket: `${evidence.ticketId}:${evidence.revision}:${evidence.bodyHash}` } : {}),
     };
   } catch {
     // The publication failed. The marker must NOT keep claiming a snapshot is
     // there — that would refuse for the wrong reason. Say `unknown` and let the
-    // in-container reader refuse on the honest one.
+    // in-container reader refuse on the honest one. The DEGRADED mode is not
+    // permitted to lose `targetRegistered`: this function never throws, so its
+    // return value is the caller's only account of what it committed.
     const markerError = writeAuthorityMarkerOrRecord(authority.hostDir, { mode: "unknown", projectKey, taskId });
-    return { ...base, mode: "unknown", projectKey, ...(markerError ? { markerError } : {}) };
+    return { ...base, mode: "unknown", projectKey, targetRegistered, ...(markerError ? { markerError } : {}) };
   }
 }
 
