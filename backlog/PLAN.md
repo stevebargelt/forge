@@ -50,30 +50,23 @@ correct publication.
   driver is refused pre-container as `blocked_environment`. The rechecker runs
   the shipping database engine. This clears the gate that FG-609 and FG-610 were
   held behind.
+- **FG-666** (`3d00e459`, PR #198) — a clone-dispatched pipeline task now resolves
+  backlog authority from the project directory recorded on the RUN, not from the
+  disposable per-task clone mounted at `/project`. Agents can read their own
+  ticket again: a clone-dispatched architect on merged `main` resolves
+  `mode: db` with the correct `project_key` and `forge backlog show` exits 0.
+  The ticket was widened during implementation and NARROWED BACK by operator
+  scope correction — the pre-container refusal, failure-kind retry taxonomy and
+  snapshot compensation/reclamation lifecycle were removed rather than deferred,
+  taking the diff from 2485 insertions to 759.
 
 ## Now
 
-1. **FG-666 — pipeline agents in per-task clones cannot read the backlog.**
-   Operator-sequenced ahead of FG-609 (2026-08-03).
-
-   Per-task clones are created by `git clone <local path>`, so their `origin` is
-   a filesystem path whose derived repository evidence does not match the
-   registered `project_key`; FG-608's cross-repository guard then correctly
-   refuses. Authority markers across 14 dispatches split exactly along the
-   structural line: reds resolve `db`, every worktree/clone task resolves
-   `unknown`.
-
-   So the architect, tech-lead and every engineer build from the brief alone,
-   while `forge new feature` requires `--ticket` precisely to anchor them to the
-   acceptance criteria they will be judged against. It fails silently from the
-   operator's side. Shares a root cause with FG-663 — weigh one fix, not two.
-
-   Do not weaken the FG-608 guard; it is doing its job.
-
-2. **FG-648 — reopened for AC5.** Two legibility failures the operator found on
+1. **FG-648 — reopened for AC5.** Two legibility failures the operator found on
    live data: the chart has no y-axis, scale or unit (its SVG carries only a
    peak annotation and the date labels), and bare date labels on a UTC grid are
    misread in a non-UTC timezone. New AC8-11. The UTC-aligned grid itself stays.
+   Moved ahead of FG-609 by operator decision (2026-08-03).
 
 ## Next
 
