@@ -249,6 +249,14 @@ export type EventType =
   // dispatch proceeds with no authority asserted — this is the only durable record
   // that it did. Payload: { taskId, hostDir, mode, projectKey, error }.
   | "container.backlog_authority_marker_failed"
+  // FG-666: a TICKETED dispatch was refused BEFORE its container started because
+  // its backlog authority resolved to `unknown` — the agent would have built from
+  // the brief alone and then been judged against acceptance criteria it never saw.
+  // Payload: { ticketId, projectDir, mode, reason?, detail? }. `reason` is set only
+  // for a DEGRADED resolution (identity-conflict / resolve-failed); a project with
+  // no project_key at all resolves to `markdown` and is never refused, so this
+  // event cannot fire on a normal markdown-mode or non-forge project.
+  | "task.backlog_authority_refused"
   // FG-638: the review ledger's append-only audit half. The `reviews` /
   // `review_findings` rows carry CURRENT state; these carry how it got there.
   // review.state_changed is emitted on EVERY lifecycle transition (payload

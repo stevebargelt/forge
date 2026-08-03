@@ -45,11 +45,13 @@ import {
   type DependencyVolumePlan,
 } from "./dependency-provisioning.js";
 import type { DockerExecFn } from "./docker-exec.js";
-import { resolveBacklogStore } from "../backlog/storage-mode.js";
+import { resolveBacklogStore, type BacklogStore } from "../backlog/storage-mode.js";
+import { ProjectIdentityConflictError } from "../store/project-registry.js";
 import {
   publishSnapshotOnce,
   registerSnapshotTarget,
   releaseFinishedTargets,
+  releaseSnapshotTarget,
   type TargetLiveness,
 } from "../backlog/snapshot.js";
 import {
@@ -201,6 +203,242 @@ function writeAuthorityMarkerOrRecord(
   }
 }
 
+/** FG-666: the RESOLVED, not-yet-published ticket authority for one dispatch.
+ *
+ *  This is what "which project does this task belong to" resolves TO, computed
+ *  before any side effect has happened. Everything in it is knowable from the
+ *  project directory and the task id alone, which is what lets the dispatch layer
+ *  decide (refuse / proceed) BEFORE it commits any publication — see
+ *  resolveDispatchBacklogAuthority and publishBacklogSnapshot below. */
+export type DispatchBacklogAuthority = {
+  mode: "db" | "markdown" | "unknown";
+  projectKey: string | null;
+  hostDir: string;
+  containerDir: string;
+  dispatchedTicket?: string;
+  /** Why the authority is `unknown`. Set ONLY on a DEGRADED resolution, never on
+   *  a healthy one: a project with no `project_key` at all resolves cleanly to
+   *  `markdown` and carries NO reason, because a diagnostic that fires on every
+   *  normal project reproduces the silence FG-666 exists to end. */
+  reason?: "identity-conflict" | "resolve-failed";
+  /** Operator-facing detail for `reason` — for identity-conflict, the config /
+   *  registered / evidence keys, so the surface never flattens to "unknown". */
+  detail?: string;
+  /** Read at resolve time, WRITTEN at publication time. Carried rather than
+   *  re-read so the evidence row and the FORGE_DISPATCHED_TICKET the container
+   *  sees can never describe two different revisions. */
+  ticketEvidence?: { ticketId: string; revision: number; bodyHash: string };
+};
+
+/** Resolve this dispatch's ticket authority. PURE — no marker, no mkdir, no target
+ *  registration, no publication, no evidence write. Reads only.
+ *
+ *  FG-666: the input is the PROJECT directory as Forge recorded it, never the
+ *  workspace that happens to host the task. A per-task private clone
+ *  (`git clone --shared`, worktree-lifecycle.ts) derives DIFFERENT repository
+ *  evidence from its parent — a linked worktree converges with its parent's git
+ *  common dir, a private clone gets its own — so asking the clone which project it
+ *  owns made FG-608's cross-repository guard refuse every clone-dispatched task.
+ *  The guard was right; the question was the category error. The clone is a
+ *  disposable materialization of one run's tree and answers MOUNT questions, not
+ *  IDENTITY questions.
+ *
+ *  NEVER throws. The refusal AC4 asks for is a decision the DISPATCH LAYER makes
+ *  about a resolved value, not a new throw in here — see runNext.ts:runContainer. */
+export function resolveDispatchBacklogAuthority(
+  projectDir: string,
+  taskId: string,
+  ticketId?: string,
+): DispatchBacklogAuthority {
+  const base = { hostDir: backlogSnapshotHostDir(taskId), containerDir: BACKLOG_SNAPSHOT_CONTAINER_PATH };
+  let store: BacklogStore;
+  try {
+    store = resolveBacklogStore(projectDir);
+  } catch (e) {
+    // CLASSIFY AT THE THROW SITE. storage-mode.ts throws ProjectIdentityConflictError
+    // ONLY on the declared-key path (storeForConfigKey); the no-key path returns
+    // markdown and never throws. So "a project_key was declared and could not be
+    // honoured" is structurally distinguishable from "no project_key, correctly" —
+    // right here, and only here. A bare catch flattens both to `unknown` and the
+    // distinction cannot be recovered downstream.
+    if (e instanceof ProjectIdentityConflictError) {
+      const d = e.detail;
+      return {
+        ...base,
+        mode: "unknown",
+        projectKey: null,
+        reason: "identity-conflict",
+        detail:
+          `.forge/config.yml declares project_key '${d.configKey ?? "(none)"}'; the registry maps ` +
+          `project_key '${d.registeredKey ?? "(none)"}' to repository evidence ` +
+          `'${d.registeredEvidenceKey ?? "(none)"}', but this checkout's evidence is '${d.evidenceKey}'`,
+      };
+    }
+    return {
+      ...base,
+      mode: "unknown",
+      projectKey: null,
+      reason: "resolve-failed",
+      detail: (e as Error).message ?? String(e),
+    };
+  }
+  if (store.mode !== "db" || !store.projectKey) {
+    return { ...base, mode: "markdown", projectKey: store.projectKey };
+  }
+  const projectKey = store.projectKey;
+  let dispatchedTicket: string | undefined;
+  let ticketEvidence: DispatchBacklogAuthority["ticketEvidence"];
+  if (ticketId) {
+    try {
+      const row = getTicket(projectKey, ticketId);
+      if (row && row.bodyHash) {
+        const revision = row.revision ?? 1;
+        dispatchedTicket = `${ticketId}:${revision}:${row.bodyHash}`;
+        ticketEvidence = { ticketId, revision, bodyHash: row.bodyHash };
+      }
+    } catch {
+      // A ticket READ that fails does not invalidate a store resolution that
+      // already succeeded — the dispatch keeps its `db` authority and simply
+      // carries no dispatch evidence. If the store is genuinely unreachable,
+      // publication below fails on its own terms and degrades the marker there.
+    }
+  }
+  return {
+    ...base,
+    mode: "db",
+    projectKey,
+    ...(dispatchedTicket ? { dispatchedTicket } : {}),
+    ...(ticketEvidence ? { ticketEvidence } : {}),
+  };
+}
+
+/** COMMIT the resolved authority: write the marker and, for a db-mode project,
+ *  publish the snapshot, register the fan-out target and record dispatch evidence.
+ *  Every side effect prepareBacklogSnapshotMount ever had lives here and nowhere
+ *  else, so the caller controls WHEN they happen.
+ *
+ *  recordDispatchEvidence is called from here and from nowhere else — exactly once
+ *  per dispatch.
+ *
+ *  NEVER throws, for the same reasons the doc comment below gives. */
+export function publishBacklogSnapshot(
+  authority: DispatchBacklogAuthority,
+  taskId: string,
+): BacklogSnapshotMount {
+  const base = { hostDir: authority.hostDir, containerDir: authority.containerDir };
+  if (authority.mode === "unknown") {
+    const markerError = writeAuthorityMarkerOrRecord(authority.hostDir, {
+      mode: "unknown",
+      projectKey: authority.projectKey,
+      taskId,
+    });
+    return { ...base, mode: "unknown", projectKey: authority.projectKey, ...(markerError ? { markerError } : {}) };
+  }
+  if (authority.mode !== "db" || !authority.projectKey) {
+    const markerError = writeAuthorityMarkerOrRecord(authority.hostDir, {
+      mode: "markdown",
+      projectKey: authority.projectKey,
+      taskId,
+    });
+    // A marker that was not written asserts nothing, so the dispatched authority is
+    // `unknown` however cleanly the store resolved. Reporting `markdown` here would
+    // claim a marker is in place that a container will not find.
+    if (markerError) return { ...base, mode: "unknown", projectKey: authority.projectKey, markerError };
+    return { ...base, mode: "markdown", projectKey: authority.projectKey };
+  }
+  const projectKey = authority.projectKey;
+  try {
+    const markerError = writeAuthorityMarkerOrRecord(authority.hostDir, { mode: "db", projectKey, taskId });
+    if (markerError) return { ...base, mode: "unknown", projectKey, markerError };
+    // Retire finished tasks' targets first. Without this every ticket write would
+    // keep publishing to the snapshot directory of every task this host has ever
+    // dispatched for the project — unbounded work per write and unbounded disk.
+    // Dispatch is the one moment we are reliably on this project's path, and
+    // docker-exec.ts (which owns container teardown) is not ours to change here.
+    //
+    // FINISHED is a positive fact, not the absence of one (F12): an unresolvable
+    // task id yields "unknown", which releases nothing yet and — critically —
+    // deletes nothing, because that directory may be the live `:ro` mount source of
+    // a container this store simply has not caught up on.
+    releaseFinishedTargets(projectKey, (id): TargetLiveness => {
+      const task = getTask(id);
+      if (!task) return "unknown";
+      return task.status === "complete" || task.status === "failed" || task.status === "blocked_by_red"
+        ? "finished"
+        : "live";
+    });
+    registerSnapshotTarget(projectKey, authority.hostDir, taskId);
+    publishSnapshotOnce(projectKey, authority.hostDir);
+    const evidence = authority.ticketEvidence;
+    if (evidence) {
+      writeTransaction(() =>
+        recordDispatchEvidence({
+          taskId,
+          projectKey,
+          ticketId: evidence.ticketId,
+          revision: evidence.revision,
+          bodyHash: evidence.bodyHash,
+          dispatchedAt: new Date().toISOString(),
+        }),
+      );
+    }
+    return {
+      ...base,
+      mode: "db",
+      projectKey,
+      ...(authority.dispatchedTicket ? { dispatchedTicket: authority.dispatchedTicket } : {}),
+    };
+  } catch {
+    // The publication failed. The marker must NOT keep claiming a snapshot is
+    // there — that would refuse for the wrong reason. Say `unknown` and let the
+    // in-container reader refuse on the honest one.
+    const markerError = writeAuthorityMarkerOrRecord(authority.hostDir, { mode: "unknown", projectKey, taskId });
+    return { ...base, mode: "unknown", projectKey, ...(markerError ? { markerError } : {}) };
+  }
+}
+
+/** COMPENSATE a published snapshot for a dispatch that failed before its container
+ *  could start. Releases the registration ROW and NOTHING ELSE.
+ *
+ *  FG-666 AC6, stated positively:
+ *    1. The ROW is released unconditionally on every pre-start failure path after
+ *       publication. It only stops future fan-out, so it is always safe.
+ *    2. The ARTIFACT is deleted only against an authoritative daemon-side fact that
+ *       NO container was created. The absence of an in-process start record is not
+ *       that fact — no executor contract surfaces one. The detached executor (the
+ *       production default) flattens both of its no-creation branches to `return 1`,
+ *       indistinguishable from a container that ran and exited 1; the attached
+ *       executor signals start after spawning the docker CLIENT, before daemon-side
+ *       creation is known; legacy/fake executors get the record up front. So from
+ *       the dispatch layer EVERY executor failure is artifact-ambiguous.
+ *    3. Therefore: release the row, retain the bytes. Deleting the source of a
+ *       possibly-live `:ro` bind is not recoverable; it strands the agent.
+ *
+ *  Deliberately takes no deleteArtifact option, so there is no flag to get
+ *  backwards.
+ *
+ *  MEASURED CONSEQUENCE, stated rather than assumed (pinned by
+ *  fg666-dispatch-seam.worktree.test.ts): releasing the row takes this target OUT
+ *  of releaseFinishedTargets' view — that sweep iterates liveSnapshotTargets
+ *  (released_at IS NULL) — so the RETAINED DIRECTORY IS NOT RECLAIMED by the
+ *  project's next dispatch, and nothing else reaps ~/.forge/backlog-snapshots.
+ *  That is a deliberate trade, not an oversight: the harm AC6 names is the
+ *  REGISTERED target (every subsequent host ticket write fanning out to a dead
+ *  directory — unbounded work and unbounded disk PER WRITE), and releasing the row
+ *  ends that immediately. What remains is one bounded, per-task snapshot directory
+ *  per dispatch that died after publication, which costs disk once and nothing
+ *  per write. Reclaiming it needs a sweep over RELEASED-but-present targets, which
+ *  belongs to snapshot.ts (the owner of that table) and is out of FG-666's scope. */
+export function releaseDispatchBacklogSnapshot(projectKey: string, hostDir: string): void {
+  try {
+    releaseSnapshotTarget(projectKey, hostDir);
+  } catch {
+    // Compensation for a dispatch that has ALREADY failed. A store that cannot be
+    // reached here must not replace the real dispatch error with a bookkeeping one;
+    // the stale row ages out through releaseFinishedTargets' unknown-target sweep.
+  }
+}
+
 /** Prepare this task's ticket authority: the read-only mount and the UNFORGEABLE
  *  MARKER that says what it is.
  *
@@ -234,86 +472,19 @@ function writeAuthorityMarkerOrRecord(
  *  never a silent fallback to the shared volume. A marker that cannot be WRITTEN
  *  (N1) degrades further, to no authority at all, and is recorded as
  *  container.backlog_authority_marker_failed + `markerError` — but it still does not
- *  abort the dispatch, least of all a markdown-mode one that never needed a snapshot. */
+ *  abort the dispatch, least of all a markdown-mode one that never needed a snapshot.
+ *
+ *  FG-666: resolve-then-publish in one call, with the SAME signature and the SAME
+ *  behaviour it has always had. It is the shape `forge invoke` uses — that seam
+ *  passes the real project directory (it creates no workspace), so its authority
+ *  already resolves correctly and must keep doing so. The runNext seam drives the
+ *  two halves separately because it needs to decide between them. */
 export function prepareBacklogSnapshotMount(
   projectDir: string,
   taskId: string,
   ticketId?: string,
 ): BacklogSnapshotMount {
-  const hostDir = backlogSnapshotHostDir(taskId);
-  const base = { hostDir, containerDir: BACKLOG_SNAPSHOT_CONTAINER_PATH };
-  let store: { mode: string; projectKey: string | null };
-  try {
-    store = resolveBacklogStore(projectDir);
-  } catch {
-    const markerError = writeAuthorityMarkerOrRecord(hostDir, { mode: "unknown", projectKey: null, taskId });
-    return { ...base, mode: "unknown", projectKey: null, ...(markerError ? { markerError } : {}) };
-  }
-  if (store.mode !== "db" || !store.projectKey) {
-    const markerError = writeAuthorityMarkerOrRecord(hostDir, {
-      mode: "markdown",
-      projectKey: store.projectKey,
-      taskId,
-    });
-    // A marker that was not written asserts nothing, so the dispatched authority is
-    // `unknown` however cleanly the store resolved. Reporting `markdown` here would
-    // claim a marker is in place that a container will not find.
-    if (markerError) return { ...base, mode: "unknown", projectKey: store.projectKey, markerError };
-    return { ...base, mode: "markdown", projectKey: store.projectKey };
-  }
-  const projectKey = store.projectKey;
-  try {
-    const markerError = writeAuthorityMarkerOrRecord(hostDir, { mode: "db", projectKey, taskId });
-    if (markerError) return { ...base, mode: "unknown", projectKey, markerError };
-    // Retire finished tasks' targets first. Without this every ticket write would
-    // keep publishing to the snapshot directory of every task this host has ever
-    // dispatched for the project — unbounded work per write and unbounded disk.
-    // Dispatch is the one moment we are reliably on this project's path, and
-    // docker-exec.ts (which owns container teardown) is not ours to change here.
-    //
-    // FINISHED is a positive fact, not the absence of one (F12): an unresolvable
-    // task id yields "unknown", which releases nothing yet and — critically —
-    // deletes nothing, because that directory may be the live `:ro` mount source of
-    // a container this store simply has not caught up on.
-    releaseFinishedTargets(projectKey, (id): TargetLiveness => {
-      const task = getTask(id);
-      if (!task) return "unknown";
-      return task.status === "complete" || task.status === "failed" || task.status === "blocked_by_red"
-        ? "finished"
-        : "live";
-    });
-    registerSnapshotTarget(projectKey, hostDir, taskId);
-    publishSnapshotOnce(projectKey, hostDir);
-    let dispatchedTicket: string | undefined;
-    if (ticketId) {
-      const row = getTicket(projectKey, ticketId);
-      if (row && row.bodyHash) {
-        dispatchedTicket = `${ticketId}:${row.revision ?? 1}:${row.bodyHash}`;
-        writeTransaction(() =>
-          recordDispatchEvidence({
-            taskId,
-            projectKey,
-            ticketId,
-            revision: row.revision ?? 1,
-            bodyHash: row.bodyHash!,
-            dispatchedAt: new Date().toISOString(),
-          }),
-        );
-      }
-    }
-    return {
-      ...base,
-      mode: "db",
-      projectKey,
-      ...(dispatchedTicket ? { dispatchedTicket } : {}),
-    };
-  } catch {
-    // The publication failed. The marker must NOT keep claiming a snapshot is
-    // there — that would refuse for the wrong reason. Say `unknown` and let the
-    // in-container reader refuse on the honest one.
-    const markerError = writeAuthorityMarkerOrRecord(hostDir, { mode: "unknown", projectKey, taskId });
-    return { ...base, mode: "unknown", projectKey, ...(markerError ? { markerError } : {}) };
-  }
+  return publishBacklogSnapshot(resolveDispatchBacklogAuthority(projectDir, taskId, ticketId), taskId);
 }
 
 // FG-608 red F3. Where the in-container backlog reader lives, and where it comes
@@ -885,7 +1056,21 @@ function isIdentityMountPlanned(hostPath: string, args: string[]): boolean {
   return false;
 }
 
-export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsResult {
+/** FG-666: the ALREADY-RESOLVED backlog authority for this dispatch, supplied by a
+ *  caller that resolved it against the PROJECT directory rather than the mounted
+ *  workspace. Only the three fields the argv actually consumes. When absent,
+ *  buildDockerArgs resolves-and-publishes for itself against ctx.PROJECT_DIR —
+ *  byte-identical to its pre-FG-666 behaviour, which is what `forge invoke`
+ *  (no worktree substitution, PROJECT_DIR is the project) still relies on. */
+export type BuildDockerArgsOpts = {
+  backlogSnapshot?: Pick<BacklogSnapshotMount, "hostDir" | "containerDir" | "dispatchedTicket">;
+};
+
+export function buildDockerArgs(
+  runtime: Runtime,
+  ctx: SpawnContext,
+  opts: BuildDockerArgsOpts = {},
+): BuildArgsResult {
   // FG-492: deliberately NO --rm for a task/reviewer agent container. Capturing
   // causal evidence (docker inspect: exit code, signal, OOMKilled, State.Error)
   // requires the container still exist after its process exits — --rm races
@@ -1175,7 +1360,15 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
   // database containing only this project_key's tickets/relations/blocker evidence,
   // and no runs / tasks / events / gates / verdicts tables at all. Project isolation
   // is structural, not a WHERE clause the agent could drop.
-  const snapshotMount = prepareBacklogSnapshotMount(ctx.PROJECT_DIR, ctx.TASK_ID, ctx.TICKET_ID);
+  //
+  // FG-666: ctx.PROJECT_DIR is the path to MOUNT, and on the private-clone
+  // substrate that is deliberately NOT the project (runNext.ts substitutes the
+  // clone). Identity is not answerable from in here, so a caller that knows the
+  // difference resolves it against Forge-owned run state and passes the answer in.
+  // The self-resolving fallback stays for callers whose PROJECT_DIR *is* the
+  // project — `forge invoke`, which creates no workspace.
+  const snapshotMount =
+    opts.backlogSnapshot ?? prepareBacklogSnapshotMount(ctx.PROJECT_DIR, ctx.TASK_ID, ctx.TICKET_ID);
   args.push("-v", `${snapshotMount.hostDir}:${snapshotMount.containerDir}:ro`);
   args.push("-e", `FORGE_BACKLOG_SNAPSHOT_DIR=${snapshotMount.containerDir}`);
   if (snapshotMount.dispatchedTicket) {
