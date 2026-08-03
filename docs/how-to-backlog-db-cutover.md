@@ -104,6 +104,8 @@ Containerized agents read tickets through a **read-only, project-scoped, backlog
 
 **Watch for `warning: … snapshot(s) are STALE`** under the store banner on host `forge backlog` commands. It means a host ticket write did not reach a running container's snapshot after bounded retries — the host store is still correct and authoritative; what failed is the fan-out, and an agent may be reading an older ticket.
 
+**A ticketed dispatch that cannot read its ticket is refused before any container starts**, rather than running an agent that would build from the brief alone (FG-666). After cutover this is the shape an identity problem takes: a task fails immediately with `backlog_authority_conflict` and names the config, registered and evidence keys — settle it exactly as at cutover (`forge backlog reidentify --confirm`, step 1 above), then `forge retry <task-id>`. Two neighbours are retryable without a config change: `backlog_authority_unresolvable` (the store or its snapshot could not be resolved) and `backlog_ticket_unreadable` (the anchoring ticket has no readable row — restore or re-open it, and the retry re-reads it at dispatch). A project that has *not* cut over is unaffected: it resolves `markdown` and dispatches untouched. See [Container ticket authority](concepts.md#container-ticket-authority).
+
 ## Migrating the rest of a portfolio
 
 Each project cuts over on its own schedule by running `forge backlog migrate` in it. There is no global flip, and there is deliberately no bulk verb — the refusals above are per project and want an operator present for each one.
