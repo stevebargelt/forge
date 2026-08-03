@@ -38,7 +38,7 @@ import { DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE, lockfileHash } from "./depend
 import { GIT_UNAVAILABLE_EXIT_CODE } from "./spawn.js";
 import type { Workflow } from "./schema.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
-import { answerDependencyProbe, isDependencyProbeCall } from "./dependency-probe.testkit.js";
+import { answerDependencyLoad, answerDependencyProbe, isDependencyLoadCall, isDependencyProbeCall } from "./dependency-probe.testkit.js";
 
 const DISPATCH_TEST_WORKFLOW: Workflow = {
   name: "fg376-dispatch-test",
@@ -192,7 +192,7 @@ function isProvisionerCall(args: string[]): boolean {
   return typeof name === "string" && name.startsWith("forge-provision-");
 }
 
-type Call = { args: string[]; kind: "provisioner" | "probe" | "agent" };
+type Call = { args: string[]; kind: "provisioner" | "probe" | "load" | "agent" };
 
 // Records EVERY dockerExec call (provisioner and agent alike — both go
 // through the same injected DockerExecFn) into `calls`. Provisioner calls
@@ -252,12 +252,19 @@ function makeMultiCapturingExec(calls: Call[]): DockerExecFn {
   return async ({ args, stdoutPath, stderrPath }) => {
     // FG-664: a read-only reviewer is now preceded by Forge's own probe
     // container, which attests the engine before the reviewer starts.
-    const kind = isProvisionerCall(args) ? "provisioner" : isDependencyProbeCall(args) ? "probe" : "agent";
+    const kind = isProvisionerCall(args)
+      ? "provisioner"
+      : isDependencyProbeCall(args)
+        ? "probe"
+        : isDependencyLoadCall(args)
+          ? "load"
+          : "agent";
     calls.push({ args: [...args], kind });
     const dir = dirname(stdoutPath);
     mkdirSync(dir, { recursive: true });
     writeFileSync(stderrPath, "");
     if (kind === "probe") return answerDependencyProbe(args, stdoutPath);
+    if (kind === "load") return answerDependencyLoad(args);
     writeFileSync(stdoutPath, kind === "provisioner" ? "" : "stub stdout");
     if (kind === "agent") {
       // tests_run satisfies the FG-523 validation contract for the primary
@@ -533,14 +540,19 @@ test("fg376 (e)/FIX4: a read-only red reviewing a task with a populated cache ke
   assert.deepEqual(wave.completedSteps, ["build"]);
   assert.equal(
     calls.length,
-    4,
-    `expected provisioner + primary agent + FG-664 probe + 1 red container dispatch, got ${calls.length}: ${JSON.stringify(calls.map((c) => c.kind))}`,
+    5,
+    `expected provisioner + primary agent + FG-664 probe + 1 load + 1 red container dispatch, got ${calls.length}: ${JSON.stringify(calls.map((c) => c.kind))}`,
   );
   assert.equal(calls.filter((c) => c.kind === "provisioner").length, 1, "exactly one provisioner call across the whole wave");
   assert.equal(
     calls.filter((c) => c.kind === "probe").length,
     1,
     "FG-664: the read-only red is preceded by exactly one Forge-owned probe container",
+  );
+  assert.equal(
+    calls.filter((c) => c.kind === "load").length,
+    1,
+    "FG-664: and by one load container per native artifact the probe found — the load never runs beside the reporter",
   );
 
   const provisionerCall = calls.find((c) => c.kind === "provisioner");

@@ -41,7 +41,7 @@ import { readTaskManifest } from "./task-manifest.js";
 import { taskDir } from "../util/paths.js";
 import type { Workflow } from "./schema.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
-import { answerDependencyProbe, isDependencyProbeCall } from "./dependency-probe.testkit.js";
+import { answerDependencyLoad, answerDependencyProbe } from "./dependency-probe.testkit.js";
 
 const RUNTIME = "fg664-lane-test";
 
@@ -193,7 +193,7 @@ steps:
   publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
 
-type Kind = "provisioner" | "probe" | "agent";
+type Kind = "provisioner" | "probe" | "load" | "agent";
 type Call = { kind: Kind; taskId: string; args: string[] };
 
 function containerName(args: string[]): string {
@@ -205,6 +205,7 @@ function classify(args: string[]): Kind {
   const name = containerName(args);
   if (name.startsWith("forge-provision-")) return "provisioner";
   if (name.startsWith("forge-depprobe-")) return "probe";
+  if (name.startsWith("forge-depload-")) return "load";
   return "agent";
 }
 
@@ -218,7 +219,11 @@ const PASS_VERDICT = { status: "complete", tests_run: 1, verdict: "pass", confid
 
 function makeExec(
   calls: Call[],
-  over: { probe?: (args: string[], stdoutPath: string) => number; provisionerExit?: number } = {},
+  over: {
+    probe?: (args: string[], stdoutPath: string) => number;
+    load?: (args: string[], stderrPath: string) => number;
+    provisionerExit?: number;
+  } = {},
 ): DockerExecFn {
   return async ({ args, stdoutPath, stderrPath }) => {
     const kind = classify(args);
@@ -228,6 +233,9 @@ function makeExec(
     writeFileSync(stderrPath, "");
     if (kind === "probe") {
       return over.probe ? over.probe(args, stdoutPath) : answerDependencyProbe(args, stdoutPath);
+    }
+    if (kind === "load") {
+      return over.load ? over.load(args, stderrPath) : answerDependencyLoad(args);
     }
     writeFileSync(stdoutPath, "stub stdout");
     if (kind === "provisioner") return over.provisionerExit ?? 0;
@@ -260,8 +268,8 @@ test("FG-664: a workflow red on a COLD cache key provisions, probes and mounts t
   // The lane ran Forge's OWN two containers before the reviewer's, in that order.
   assert.deepEqual(
     calls.filter((c) => c.kind !== "agent").map((c) => c.kind),
-    ["provisioner", "probe"],
-    `expected exactly one provisioner and one probe; got ${JSON.stringify(calls.map((c) => c.kind))}`,
+    ["provisioner", "probe", "load"],
+    `expected exactly one provisioner, one probe and one load; got ${JSON.stringify(calls.map((c) => c.kind))}`,
   );
   assert.ok(
     calls.findIndex((c) => c.kind === "probe") < calls.findIndex((c) => c.taskId === red.id),
@@ -296,17 +304,14 @@ test("FG-664: a workflow red whose probe says the real driver will not load is R
     runId,
     workflow: WORKFLOW,
     dockerExec: makeExec(calls, {
-      probe: (args, stdoutPath) =>
-        answerDependencyProbe(args, stdoutPath, {
-          packages: [
-            {
-              name: "better-sqlite3",
-              version: "12.11.1",
-              loaded: false,
-              error: "invalid ELF header",
-            },
-          ],
-        }),
+      // The probe SEES the artifact; the load container is what cannot load it,
+      // and its exit status is the fact the host acts on.
+      load: (args, stderrPath) =>
+        answerDependencyLoad(
+          args,
+          { packages: [{ name: "better-sqlite3", version: "12.11.1", loaded: false, error: "invalid ELF header" }] },
+          stderrPath,
+        ),
     }),
   });
 

@@ -36,10 +36,27 @@ export const DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE = 123;
 export const DEPENDENCY_PROVISIONER_IDLE_TIMEOUT_MS = 10 * 60 * 1000; // 10m
 
 /** FG-664: idle timeout for the short-lived dependency PROBE container. The probe
- *  only stats a few directories and dlopens whatever ships a compiled `.node`,
- *  so it is a small fraction of an install; a probe that produces no output for
- *  this long is hung, not working. */
+ *  walks the mounted roots and executes nothing, so it is a small fraction of an
+ *  install; a probe that produces no output for this long is hung, not working.
+ *
+ *  This is an IDLE budget and the probe is written to make it one: it emits
+ *  rate-limited progress on stderr while it scans (see DEPENDENCY_PROBE_SCRIPT).
+ *  A probe that printed nothing until its final write would be running against a
+ *  total-runtime budget instead, and a slow scan of a large dependency graph
+ *  would be killed as `probe_failed` — a refusal that is FINAL, so every
+ *  read-only dispatch on that project would be blocked with no repair path. */
 export const DEPENDENCY_PROBE_IDLE_TIMEOUT_MS = 2 * 60 * 1000; // 2m
+
+/** FG-664: idle timeout for ONE load container — a single `process.dlopen` of a
+ *  single artifact, which prints nothing at all when it works. So this one IS a
+ *  total-silence budget, deliberately: there is no progress to report, and a load
+ *  that has not exited by now is a driver that hangs on load, which is unloadable
+ *  in the only sense that matters here. It covers container start as well as the
+ *  dlopen, which is why it is the probe's 2m rather than the 60s the in-probe
+ *  load child carried before the load moved into its own container — the cost of
+ *  the extra margin is paid only by an environment that is already broken, and
+ *  the cost of being too tight is a refusal of a dispatch that would have run. */
+export const DEPENDENCY_LOAD_IDLE_TIMEOUT_MS = 2 * 60 * 1000; // 2m
 
 export type WorkspaceMember = {
   /** Relative path from repo root; "" for the repo root itself. */
@@ -624,9 +641,11 @@ export async function repairDisprovenDependencyCache(
 // with the unchanged exactly-once/no-marker-on-failure/distrust-a-dead-holder
 // semantics; the reviewer still mounts `:ro` and still never writes.
 
-/** One mounted package that ships a compiled `.node` artifact, as the probe
- *  container reported it. `loaded` is the whole point: it is the container's own
- *  `require()` of the package, not an inference from the file's existence. */
+/** One mounted package that ships a compiled `.node` artifact — or that declares
+ *  a native build and ships none. `loaded` is the whole point: it is the EXIT
+ *  STATUS of a Forge-owned container that did nothing but `process.dlopen` this
+ *  artifact, not an inference from the file's existence and not a claim the
+ *  loaded code made about itself. */
 export type DependencyEnginePackage = {
   name: string;
   version: string;
@@ -706,13 +725,35 @@ export type ResolveDependencyEnvironmentArgs = {
   runProvisioner: () => Promise<{ exitCode: number; stderrTail: string }>;
   /** Runs Forge's OWN probe container over the reviewer's exact mount shape.
    *  The `nonce` is generated here and must reach the probe container; a report
-   *  that does not carry it back is not this dispatch's report. */
-  runProbe: (nonce: string) => Promise<DependencyProbeRun>;
+   *  that does not carry it back is not this dispatch's report. `declared` is the
+   *  set whose ABSENCE the probe is asked to check (undefined when the project's
+   *  manifests could not be read). */
+  runProbe: (nonce: string, declared?: readonly string[]) => Promise<DependencyProbeRun>;
+  /** Runs ONE load container: dlopen a single artifact the probe found, in the
+   *  same mount shape. The EXIT STATUS is the verdict — this is the one fact
+   *  about a native package that dependency code must not be able to author, so
+   *  it is observed by the host rather than reported from inside. */
+  runLoad: (artifact: string, index: number) => Promise<{ exitCode: number; stderrTail: string }>;
   lockOpts?: DependencyCacheLockOpts;
   /** Test seam ONLY, mirroring the isContainerAlive/killContainer pattern above:
    *  the darwin gate is the whole reason this mechanism exists, and the unit tier
    *  runs on linux. Production callers never set it. */
   platform?: string;
+};
+
+/** One mounted package the probe SAW. It carries no `loaded` field on purpose:
+ *  the probe container runs no dependency code, so it has nothing to say about
+ *  whether an artifact loads. That verdict comes from a load container's exit
+ *  status, observed by the host (see resolveDependencyEnvironment). */
+export type DependencyProbeCandidate = {
+  name: string;
+  version: string;
+  /** The compiled artifact selected for THIS platform, or absent when the
+   *  package declares a native build and the cache holds no artifact for it. */
+  artifact?: string;
+  resolvedPath?: string;
+  /** Why there is nothing to load — set only when `artifact` is absent. */
+  unavailable?: string;
 };
 
 /** The probe's JSON, as this module reads it back. Deliberately narrow: the
@@ -729,36 +770,65 @@ export type DependencyProbeReport = {
    *  pruned volume leaves the marker behind — and it is exactly the state that
    *  reads as "no native packages, nothing to check". */
   roots: Array<{ path: string; entries: number; installRoot: boolean }>;
-  packages: DependencyEnginePackage[];
+  packages: DependencyProbeCandidate[];
+  /** Declared packages whose directory is in NO mounted root. An incomplete
+   *  cache the emptiness test above cannot see: it inspects only the install
+   *  root, and a populated-but-incomplete root passes it. */
+  missing: string[];
 };
 
-/** Read the probe's report out of its stdout. Scans from the END for the last
- *  line that parses into the expected shape AND carries `expectedNonce`, so an
- *  entrypoint warning ahead of it (the FG-608 backlog-authority notice, say)
- *  does not defeat the read — and so a JSON line some other process in the
- *  container wrote is not mistaken for the probe's own.
+/** Read the probe's report out of its stdout, or say why there isn't one.
  *
- *  The nonce is the second lock, not the first: the probe supervisor already
- *  pipes every loaded artifact's stdio away from the container's stdout, so
- *  dependency code has no route to this stream. What the nonce adds is that a
- *  report is only ever accepted for the dispatch that minted it — a replayed or
- *  hand-planted line, from any source, reads as no report at all. */
-export function parseDependencyProbeOutput(stdout: string, expectedNonce: string): DependencyProbeReport | undefined {
-  const lines = stdout.split("\n").map((l) => l.trim()).filter((l) => l.startsWith("{"));
-  for (let i = lines.length - 1; i >= 0; i--) {
+ *  An entrypoint warning ahead of the report (the FG-608 backlog-authority
+ *  notice, say) must not defeat the read, so non-JSON lines are skipped. But
+ *  EXACTLY ONE report-shaped line is required: "last one wins" is a rule an
+ *  attacker only has to write AFTER the genuine line to beat, and a stream
+ *  carrying two reports is a contaminated stream, not a choice to make. The
+ *  nonce then binds the surviving report to the dispatch that minted it, so a
+ *  replayed or hand-planted line reads as no report at all. */
+export function readDependencyProbeReport(
+  stdout: string,
+  expectedNonce: string,
+): { report: DependencyProbeReport } | { refusal: string } {
+  const candidates: Array<Partial<DependencyProbeReport>> = [];
+  for (const line of stdout.split("\n").map((l) => l.trim()).filter((l) => l.startsWith("{"))) {
     let value: unknown;
     try {
-      value = JSON.parse(lines[i] as string);
+      value = JSON.parse(line);
     } catch {
       continue;
     }
     const r = value as Partial<DependencyProbeReport>;
     if (typeof r.node !== "string" || typeof r.abi !== "string") continue;
-    if (!Array.isArray(r.packages) || !Array.isArray(r.roots)) continue;
-    if (r.nonce !== expectedNonce) continue;
-    return { nonce: r.nonce, node: r.node, abi: r.abi, roots: r.roots, packages: r.packages };
+    if (!Array.isArray(r.packages) || !Array.isArray(r.roots) || !Array.isArray(r.missing)) continue;
+    candidates.push(r);
   }
-  return undefined;
+  if (candidates.length === 0) return { refusal: "printed no readable report" };
+  if (candidates.length > 1) {
+    return {
+      refusal:
+        `printed ${candidates.length} report-shaped lines — only the probe container writes that stream, so a ` +
+        `second report means the stream was contaminated and neither line is an attestation`,
+    };
+  }
+  const r = candidates[0] as Partial<DependencyProbeReport>;
+  if (r.nonce !== expectedNonce) return { refusal: "printed a report that does not carry this dispatch's probe nonce" };
+  return {
+    report: {
+      nonce: r.nonce,
+      node: r.node as string,
+      abi: r.abi as string,
+      roots: r.roots as DependencyProbeReport["roots"],
+      packages: r.packages as DependencyProbeCandidate[],
+      missing: r.missing as string[],
+    },
+  };
+}
+
+/** readDependencyProbeReport, for callers that only need the report or nothing. */
+export function parseDependencyProbeOutput(stdout: string, expectedNonce: string): DependencyProbeReport | undefined {
+  const read = readDependencyProbeReport(stdout, expectedNonce);
+  return "report" in read ? read.report : undefined;
 }
 
 /** The native packages whose failure to load REFUSES a read-only dispatch: the
@@ -845,6 +915,14 @@ export async function resolveDependencyEnvironment(
     return { outcome: "refused", reason: "provisioning_failed", detail: provision.error };
   }
 
+  // The refusal is scoped to the drivers the PROJECT declares it depends on. A
+  // transitive platform package that does not load is recorded in the receipt
+  // and left there: it is not what the reviewer's verdict runs against, and
+  // refusing on it refuses everything (see declaredDependencyNames). The probe
+  // gets the same set, because "is this declared package even here" is a
+  // question only something inside the mount shape can answer.
+  const declared = declaredDependencyNames(args.repoRoot);
+
   /** One probe container: mint a nonce, run it, and read back the report it
    *  alone could have printed. A refusal here is final — the probe is Forge's own
    *  fixed command, so a probe that will not run or will not attest is not
@@ -856,7 +934,7 @@ export async function resolveDependencyEnvironment(
     const nonce = createHash("sha256").update(randomBytes(32)).digest("hex").slice(0, 32);
     let probe: DependencyProbeRun;
     try {
-      probe = await args.runProbe(nonce);
+      probe = await args.runProbe(nonce, declared === undefined ? undefined : [...declared]);
     } catch (e) {
       return { refused: { outcome: "refused", reason: "probe_failed", detail: (e as Error).message } };
     }
@@ -871,20 +949,20 @@ export async function resolveDependencyEnvironment(
         },
       };
     }
-    const parsed = parseDependencyProbeOutput(probe.stdout, nonce);
-    if (parsed === undefined) {
+    const parsed = readDependencyProbeReport(probe.stdout, nonce);
+    if ("refusal" in parsed) {
       return {
         refused: {
           outcome: "refused",
           reason: "probe_unparseable",
           detail:
-            `the dependency probe container exited 0 but printed no readable report carrying this dispatch's probe ` +
-            `nonce — nothing attests which engine this dispatch would run against` +
+            `the dependency probe container exited 0 but ${parsed.refusal} — nothing attests which engine this ` +
+            `dispatch would run against` +
             (probe.stderrTail ? ` (stderr: ${probe.stderrTail})` : ""),
         },
       };
     }
-    return { report: parsed };
+    return { report: parsed.report };
   };
 
   // A ready marker says the INSTALL succeeded once; it cannot say the volume
@@ -905,8 +983,19 @@ export async function resolveDependencyEnvironment(
   for (;;) {
     const attested = await attest();
     if ("refused" in attested) return attested.refused;
+    // Two shapes of the SAME disproof: the install root holds nothing, or a
+    // package the project declares is in no mounted root at all. The second is
+    // what the emptiness test cannot see — it never inspects a workspace
+    // member's volume, and a populated-but-incomplete root passes it.
     const emptyRoot = attested.report.roots.find((r) => r.installRoot && r.entries === 0);
-    if (emptyRoot === undefined) {
+    const missing = attested.report.missing;
+    const disproof =
+      emptyRoot !== undefined
+        ? { where: emptyRoot.path, what: `${emptyRoot.path} probed EMPTY` }
+        : missing.length > 0
+          ? { where: missing.join(", "), what: `the declared package(s) ${missing.join(", ")} are in NO mounted root` }
+          : undefined;
+    if (disproof === undefined) {
       report = attested.report;
       break;
     }
@@ -915,26 +1004,26 @@ export async function resolveDependencyEnvironment(
         outcome: "refused",
         reason: "dependencies_absent",
         detail:
-          `cache key ${cacheKey} was marked ready, ${emptyRoot.path} probed EMPTY, and the disproven marker was ` +
-          `invalidated and the cache re-provisioned — it is STILL empty inside the container, so the dispatch is ` +
-          `refused rather than re-provisioned again`,
+          `cache key ${cacheKey} was marked ready, ${disproof.what}, and the disproven marker was invalidated and ` +
+          `the cache re-provisioned — the same is STILL true inside the container, so the dispatch is refused ` +
+          `rather than re-provisioned again`,
       };
     }
     if (markerBeforeDispatch === undefined) {
       // Nothing to disprove: this dispatch's own install is what produced the
-      // empty root, so re-running it would just produce the same empty root.
+      // incomplete cache, so re-running it would just produce the same one.
       return {
         outcome: "refused",
         reason: "dependencies_absent",
         detail:
-          `cache key ${cacheKey} was provisioned for this dispatch but ${emptyRoot.path} is EMPTY inside the ` +
-          `container — the mounted volume carries no dependency graph, so nothing the dispatch runs would execute ` +
+          `cache key ${cacheKey} was provisioned for this dispatch but ${disproof.what} inside the container — the ` +
+          `mounted volumes do not carry the project's dependency graph, so nothing the dispatch runs would execute ` +
           `the project's real code`,
       };
     }
 
     console.error(
-      `forge: dependency cache ${cacheKey} is marked ready but ${emptyRoot.path} is EMPTY in the container — ` +
+      `forge: dependency cache ${cacheKey} is marked ready but ${disproof.what} in the container — ` +
         "invalidating the disproven marker and re-provisioning once before this dispatch is decided",
     );
     let repair: RepairDependencyCacheResult;
@@ -952,18 +1041,41 @@ export async function resolveDependencyEnvironment(
       return { outcome: "refused", reason: "provisioning_failed", detail: repair.error };
     }
     repaired = {
-      disprovenRoot: emptyRoot.path,
+      disprovenRoot: disproof.where,
       invalidatedMarker: markerBeforeDispatch,
       reprovisionedBy: repair.outcome === "repaired" ? "this_dispatch" : "concurrent_dispatch",
     };
   }
 
-  // The refusal is scoped to the drivers the PROJECT declares it depends on. A
-  // transitive platform package that does not load is recorded in the receipt
-  // and left there: it is not what the reviewer's verdict runs against, and
-  // refusing on it refuses everything (see declaredDependencyNames).
-  const declared = declaredDependencyNames(args.repoRoot);
-  const unloadable = report.packages.filter((p) => !p.loaded && (declared === undefined || declared.has(p.name)));
+  // THE VERDICTS. One load container per artifact the probe found, and `loaded`
+  // is the exit status THIS HOST observed — never something the loaded code
+  // printed, and never a fact one package's artifact can author about another's.
+  const packages: DependencyEnginePackage[] = [];
+  for (const [index, candidate] of report.packages.entries()) {
+    const common = {
+      name: candidate.name,
+      version: candidate.version,
+      ...(candidate.resolvedPath !== undefined ? { resolvedPath: candidate.resolvedPath } : {}),
+    };
+    if (candidate.artifact === undefined) {
+      packages.push({ ...common, loaded: false, error: candidate.unavailable ?? "no compiled artifact was found" });
+      continue;
+    }
+    let load: { exitCode: number; stderrTail: string };
+    try {
+      load = await args.runLoad(candidate.artifact, index);
+    } catch (e) {
+      return { outcome: "refused", reason: "probe_failed", detail: (e as Error).message };
+    }
+    packages.push({
+      ...common,
+      artifact: candidate.artifact,
+      loaded: load.exitCode === 0,
+      ...(load.exitCode === 0 ? {} : { error: loaderError(load.exitCode, load.stderrTail) }),
+    });
+  }
+
+  const unloadable = packages.filter((p) => !p.loaded && (declared === undefined || declared.has(p.name)));
   if (unloadable.length > 0) {
     return {
       outcome: "refused",
@@ -982,10 +1094,19 @@ export async function resolveDependencyEnvironment(
       probeImage: args.image,
       nodeVersion: report.node,
       abi: report.abi,
-      packages: report.packages,
+      packages,
       ...(repaired ? { staleCacheRepaired: repaired } : {}),
     },
   };
+}
+
+// node prints a version footer after a fatal throw, so the LAST line of a failed
+// load's stderr is "Node.js vX" rather than the diagnosis. Prefer the first line
+// that names an error; the tail is the fallback for a container that died
+// without one.
+function loaderError(exitCode: number, stderrTail: string): string {
+  const lines = stderrTail.split("\n").map((l) => l.trim()).filter(Boolean);
+  return lines.find((l) => /error/i.test(l)) ?? lines[0] ?? `the load container exited ${exitCode}`;
 }
 
 /** Best-effort removal of every dependency volume a worktree could have

@@ -50,7 +50,7 @@ import {
 } from "./dependency-provisioning.js";
 import type { Workflow } from "./schema.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
-import { answerDependencyProbe, isDependencyProbeCall } from "./dependency-probe.testkit.js";
+import { answerDependencyLoad, answerDependencyProbe, isDependencyLoadCall, isDependencyProbeCall } from "./dependency-probe.testkit.js";
 
 // Two members, deliberately: one ordinary, and one whose name exists nowhere in the
 // product. Nothing hardcoded could know about the second — if the mountpoint set
@@ -360,6 +360,7 @@ test("FG-628 (D2): at dispatch the mountpoints created in the mounted tree are e
     writeFileSync(stderrPath, "");
     // FG-664: the read-only reviewer is preceded by Forge's own probe container.
     if (isDependencyProbeCall(args)) return answerDependencyProbe(args, stdoutPath);
+    if (isDependencyLoadCall(args)) return answerDependencyLoad(args);
     if (taskId.startsWith("provision-")) return 0;
     const mount = projectMount(args)!;
     if (taskId.startsWith("task-red-")) {
@@ -461,6 +462,7 @@ test("FG-628 (D3): repeated and CONCURRENT dispatch over an already-populated no
     writeFileSync(stderrPath, "");
     // FG-664: the read-only reviewer is preceded by Forge's own probe container.
     if (isDependencyProbeCall(args)) return answerDependencyProbe(args, stdoutPath);
+    if (isDependencyLoadCall(args)) return answerDependencyLoad(args);
     if (taskId.startsWith("provision-")) return 0;
     const mount = projectMount(args)!;
     if (taskId.startsWith("task-red-")) {

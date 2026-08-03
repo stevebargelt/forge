@@ -37,6 +37,7 @@ import {
   planDependencyVolumes,
   provisionerContainerName,
   resolveDependencyEnvironment,
+  DEPENDENCY_LOAD_IDLE_TIMEOUT_MS,
   DEPENDENCY_PROBE_IDLE_TIMEOUT_MS,
   DEPENDENCY_PROVISIONER_IDLE_TIMEOUT_MS,
   type DependencyCacheLockOpts,
@@ -1310,79 +1311,123 @@ export function buildProvisionerDockerArgs(
   return args;
 }
 
-// ── FG-664: the dependency PROBE container ───────────────────────────────────
+// ── FG-664: the dependency PROBE and LOAD containers ─────────────────────────
 //
 // A read-only reviewer/rechecker that cannot load the project's real native
 // driver improvises around it. The fix is to make the real driver genuinely
 // available, and to prove it HOST-SIDE before the agent container starts.
 //
-// THIS IS FORGE'S OWN CONTAINER, NOT THE AGENT'S. That is the whole reason its
-// output is trustworthy where an in-container assertion by the agent is not:
-// agents have passwordless root (see the `:ro` note at the top of this file), so
-// anything the agent reports about its own environment is a claim, not evidence.
-// The probe runs a FIXED command Forge authored, over the reviewer's EXACT mount
-// shape, and exits.
+// THESE ARE FORGE'S OWN CONTAINERS, NOT THE AGENT'S. That is the whole reason
+// their outcome is trustworthy where an in-container assertion by the agent is
+// not: agents have passwordless root (see the `:ro` note at the top of this
+// file), so anything the agent reports about its own environment is a claim, not
+// evidence. Both run a FIXED command Forge authored, over the reviewer's EXACT
+// mount shape, and exit.
 //
-// The command is deliberately dumb: find every mounted package that ships a
-// compiled `.node` artifact, try to LOAD that artifact, and print what happened
-// plus the container's own node version and ABI. It never reads anything from
-// the project tree.
+// THE WORK IS SPLIT ACROSS TWO CONTAINER KINDS, AND THE SPLIT IS THE WHOLE
+// SECURITY ARGUMENT.
 //
-// TWO PROPERTIES MAKE THE OUTPUT AN ATTESTATION RATHER THAN A CLAIM.
+// (1) THE PROBE CONTAINER NEVER EXECUTES DEPENDENCY CODE. It walks the mounted
+//     roots and prints what it SAW — which packages ship a compiled artifact for
+//     this platform, which declared packages are absent, the container's own node
+//     version and ABI. Nothing untrusted runs beside it, so nothing in that
+//     container can author, corrupt, or race the line the host reads back.
 //
-// (1) THE REPORTING PROCESS NEVER EXECUTES DEPENDENCY CODE. Each artifact is
-//     loaded in its OWN child process running a fixed Forge one-liner, with its
-//     stdio piped away from the container's stdout. The supervisor decides
-//     `loaded` from the child's EXIT STATUS — something it observes — not from
-//     anything the child printed. The earlier shape `require()`d each package in
-//     the reporting process, so a dependency's module initializer could write a
-//     complete, well-formed report line to the same stdout the host reads back
-//     (an `exit` listener even lands it AFTER the real one, which last-line-wins
-//     then prefers). Nothing a dependency prints reaches that stream now.
+//     An earlier shape ran the loads as CHILD PROCESSES of the reporting process.
+//     Piping a child's stdio away is not enough: the child runs under the same
+//     uid as its supervisor, so it can read the supervisor's environment from
+//     /proc/<pid>/environ (deleting the variable in JS does not rewrite that) and
+//     write a crafted report straight into /proc/<pid>/fd/1. An attestation the
+//     attested code can forge is decorative. The load moved OUT of the reporting
+//     container instead.
 //
-// (2) THE LOAD IS `process.dlopen`, NOT A BARE-NAME `require`. dlopen is exactly
-//     what `require()` does for a `.node` file, minus the package's JavaScript —
-//     so it answers "can this container map and initialize this compiled
-//     artifact", which is the question, and it is indifferent to whether the
-//     package is reachable by bare name at all. `@img/sharp-linux-arm64`, which
-//     the provisioner's own `npm ci` installs here, publishes `exports` with no
-//     `"."` entry: a bare-name require throws ERR_PACKAGE_PATH_NOT_EXPORTED for
-//     it even though its artifact loads perfectly. Under the previous shape that
-//     read as "the driver will not load" and refused every read-only dispatch on
-//     darwin, permanently.
+// (2) EACH LOAD IS ITS OWN SHORT-LIVED CONTAINER, AND ITS VERDICT IS THE EXIT
+//     STATUS THE HOST OBSERVES. Dependency code still runs — that is unavoidable,
+//     it is what "can this artifact load" means — but it runs alone, with no
+//     Forge report stream to reach and no other package's verdict to touch. A
+//     malicious artifact can only lie about ITSELF, and only in the direction of
+//     "I loaded", which is already true by the time its initializer runs.
 //
-// The honest ceiling: dependency code CAN still run — inside a child, during the
-// artifact's own initializer — but only once the fact being attested (this
-// artifact loads in this container) is already true. There is nothing left to
-// forge by then. Nothing here can prove the agent then USED the driver.
-const DEPENDENCY_DLOPEN_CHILD = "process.dlopen({ exports: {} }, process.argv[1]);";
+// THE LOAD IS `process.dlopen`, NOT A BARE-NAME `require`. dlopen is exactly what
+// `require()` does for a `.node` file, minus the package's JavaScript — so it
+// answers "can this container map and initialize this compiled artifact", which
+// is the question, and it is indifferent to whether the package is reachable by
+// bare name at all. `@img/sharp-linux-arm64`, which the provisioner's own
+// `npm ci` installs here, publishes `exports` with no `"."` entry: a bare-name
+// require throws ERR_PACKAGE_PATH_NOT_EXPORTED for it even though its artifact
+// loads perfectly. Under an earlier shape that read as "the driver will not load"
+// and refused every read-only dispatch on darwin, permanently.
+//
+// The honest ceiling: nothing here can prove the agent then USED the driver.
+
+/** The load container's whole command. Exported so a test can run the SHIPPED
+ *  bytes rather than a paraphrase of them. */
+export const DEPENDENCY_LOAD_SCRIPT = "process.dlopen({ exports: {} }, process.argv[1]);";
 
 const DEPENDENCY_PROBE_SCRIPT = [
   'const fs = require("fs"), path = require("path");',
-  'const { spawnSync } = require("child_process");',
   'const { createRequire } = require("module");',
   'const roots = (process.env.FORGE_PROBE_ROOTS || "").split(":").filter(Boolean);',
   'const installRoot = process.env.FORGE_PROBE_INSTALL_ROOT || "";',
-  // Read once, then removed from the environment the children inherit: the
-  // report's binding to THIS dispatch is not a value any loaded artifact is
-  // handed. (Its stdio is piped away regardless — this is the second lock.)
+  // The packages the PROJECT declares. Only these can refuse a dispatch, so only
+  // these are worth checking for absence — see declaredDependencyNames.
+  'const declared = (process.env.FORGE_PROBE_DECLARED || "").split(",").filter(Boolean);',
   'const nonce = process.env.FORGE_PROBE_NONCE || "";',
-  "delete process.env.FORGE_PROBE_NONCE;",
-  "const childEnv = Object.assign({}, process.env);",
-  `const child = ${JSON.stringify(DEPENDENCY_DLOPEN_CHILD)};`,
-  "const seen = new Set(), packages = [], out = [];",
+  // PROGRESS ON STDERR, NOT STDOUT. The idle watchdog measures the GAP between
+  // chunks and arms at spawn, so a probe that printed nothing until its final
+  // write would be running against a TOTAL-runtime budget: a big dependency
+  // graph would be killed as `probe_failed`, which is final, and every read-only
+  // dispatch on that project would be refused forever. Rate-limited so the
+  // stderr tail quoted in a refusal stays readable.
+  "let lastBeat = 0;",
+  "const beat = (msg, force) => {",
+  "  const now = Date.now();",
+  "  if (!force && now - lastBeat < 5000) return;",
+  "  lastBeat = now;",
+  '  try { fs.writeSync(2, "forge-depprobe: " + msg + "\\n"); } catch (e) {}',
+  "};",
+  'beat("probe starting on " + process.version + " (" + roots.length + " mounted root(s))", true);',
+  // PLATFORM SELECTION. `prebuildify`-packaged modules ship EVERY platform's
+  // artifact in the published tarball (prebuilds/darwin-arm64/node.napi.node
+  // beside prebuilds/linux-arm64/node.napi.node) and `node-gyp-build` picks the
+  // right one at require time. Walking in readdir order and taking the first
+  // `.node` would dlopen the DARWIN artifact inside this linux container and
+  // report the package unloadable — a permanent fail-closed refusal of every
+  // read-only dispatch, with no repair path, because the cache is correct.
+  'const platformDir = process.platform + "-" + process.arch;',
+  'const otherPlatform = (name) => /^(darwin|linux|win32|freebsd|openbsd|sunos|android|aix)-/.test(name) && name.split("+")[0] !== platformDir;',
+  "const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);",
   "const findArtifact = (dir, depth) => {",
   "  if (depth > 4) return undefined;",
   "  let entries;",
   "  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return undefined; }",
+  "  entries.sort(byName);",
+  // Shallowest-first, name-ordered: `build/Release/x.node` beats a deeper
+  // `prebuilds/...` copy the same way node-gyp-build prefers it, and the choice
+  // does not depend on the order the filesystem happened to return.
   "  for (const e of entries) {",
   '    if (e.isFile() && e.name.endsWith(".node")) return path.join(dir, e.name);',
-  '    if (e.isDirectory() && e.name !== "node_modules") {',
-  "      const hit = findArtifact(path.join(dir, e.name), depth + 1);",
-  "      if (hit) return hit;",
-  "    }",
+  "  }",
+  "  for (const e of entries) {",
+  '    if (!e.isDirectory() || e.name === "node_modules" || otherPlatform(e.name)) continue;',
+  "    const hit = findArtifact(path.join(dir, e.name), depth + 1);",
+  "    if (hit) return hit;",
   "  }",
   "  return undefined;",
+  "};",
+  "const seen = new Set(), packages = [], out = [], missing = [];",
+  'const versionOf = (dir) => { try { return JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")).version || "unknown"; } catch (e) { return "unknown"; } };',
+  // "This package builds a native addon" — read off the package itself, so a
+  // DECLARED driver whose artifact never made it into the cache is reported as a
+  // package that cannot load rather than as a package that isn't native.
+  "const looksNative = (dir) => {",
+  '  if (fs.existsSync(path.join(dir, "binding.gyp"))) return true;',
+  "  try {",
+  '    const p = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8"));',
+  "    if (p.gypfile === true) return true;",
+  "    const s = p.scripts || {};",
+  '    return /node-gyp|node-pre-gyp|prebuild|cmake-js/.test([s.preinstall, s.install, s.postinstall].filter(Boolean).join(" "));',
+  "  } catch (e) { return false; }",
   "};",
   "const consider = (root, name) => {",
   "  if (seen.has(name)) return;",
@@ -1390,71 +1435,99 @@ const DEPENDENCY_PROBE_SCRIPT = [
   "  const artifact = findArtifact(dir, 0);",
   "  if (!artifact) return;",
   "  seen.add(name);",
-  '  let version = "unknown";',
-  '  try { version = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")).version || "unknown"; } catch (e) {}',
-  "  const entry = { name: name, version: version, artifact: artifact, loaded: false };",
-  // resolve() walks the resolver without running anything, so it stays in the
-  // supervisor: it is diagnostic only, and a package with no "." export simply
-  // records none.
+  "  const entry = { name: name, version: versionOf(dir), artifact: artifact };",
+  // resolve() walks the resolver without running anything: it is diagnostic
+  // only, and a package with no "." export simply records none.
   '  try { entry.resolvedPath = createRequire(path.join(root, "forge-probe.js")).resolve(name); } catch (e) {}',
-  '  const r = spawnSync(process.execPath, ["-e", child, artifact], { encoding: "utf8", env: childEnv, stdio: ["ignore", "pipe", "pipe"], timeout: 60000 });',
-  "  if (r.status === 0) entry.loaded = true;",
-  // node prints a version footer after a fatal throw, so the LAST stderr line is
-  // "Node.js vX" rather than the diagnosis. Prefer the first line that names an
-  // error; the tail is the fallback for a child that died without one.
-  '  else {',
-  '    const lines = String(r.stderr || "").split("\\n").map(function (l) { return l.trim(); }).filter(Boolean);',
-  '    entry.error = String(lines.find(function (l) { return /error/i.test(l); }) || lines[0] || (r.error && r.error.message) || ("the load child exited " + r.status));',
-  "  }",
   "  packages.push(entry);",
   "};",
   "for (const root of roots) {",
   "  let entries = [];",
   "  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch (e) { entries = []; }",
+  '  beat("scanning " + root + " (" + entries.length + " entries)", true);',
   "  out.push({ path: root, entries: entries.length, installRoot: root === installRoot });",
   "  for (const e of entries) {",
-  "    if (!e.isDirectory()) continue;",
+  '    beat("scanning " + root + ": " + e.name);',
+  "    if (!e.isDirectory() && !e.isSymbolicLink()) continue;",
   '    if (e.name.startsWith("@")) {',
   "      let scoped = [];",
   "      try { scoped = fs.readdirSync(path.join(root, e.name), { withFileTypes: true }); } catch (err) { scoped = []; }",
-  '      for (const s of scoped) if (s.isDirectory()) consider(root, e.name + "/" + s.name);',
+  '      for (const s of scoped) if (s.isDirectory() || s.isSymbolicLink()) consider(root, e.name + "/" + s.name);',
   '    } else if (!e.name.startsWith(".")) {',
   "      consider(root, e.name);",
   "    }",
   "  }",
   "}",
-  'process.stdout.write(JSON.stringify({ nonce: nonce, node: process.version, abi: process.versions.modules, roots: out, packages: packages }) + "\\n");',
+  // THE PRESENCE PASS. Everything above reports packages that HAVE an artifact,
+  // so a declared driver that is missing from the cache entirely — or present
+  // with no compiled artifact at all — would leave an empty unloadable set and
+  // resolve READY. The install-root emptiness test cannot cover it: it inspects
+  // only the install root, never a workspace member's volume, and a
+  // populated-but-incomplete root passes it.
+  "for (const name of declared) {",
+  "  if (seen.has(name)) continue;",
+  '  beat("checking declared " + name);',
+  "  let dir;",
+  "  for (const root of roots) {",
+  "    const candidate = path.join(root, name);",
+  '    if (fs.existsSync(path.join(candidate, "package.json"))) { dir = candidate; break; }',
+  "  }",
+  "  if (dir === undefined) { missing.push(name); continue; }",
+  "  if (!looksNative(dir)) continue;",
+  '  packages.push({ name: name, version: versionOf(dir), unavailable: "the package builds a native addon (binding.gyp / gypfile / a node-gyp install script) but the mounted cache holds no compiled .node artifact for " + platformDir + " under " + dir });',
+  "}",
+  'beat("scan complete: " + packages.length + " native package(s), " + missing.length + " declared package(s) absent", true);',
+  'process.stdout.write(JSON.stringify({ nonce: nonce, node: process.version, abi: process.versions.modules, roots: out, packages: packages, missing: missing }) + "\\n");',
 ].join("\n");
 
 /** EXPORTED SO A TEST CAN RUN THE SHIPPED BYTES. FG-664's own review found that
  *  nothing executed this string: every test fed the resolver a hand-written
  *  report, and the defect above (a bare-name require refusing every dispatch)
- *  survived precisely because of it. `src/v2/fg664-dependency-probe.test.ts`
- *  runs THIS constant, unmodified, against a real fixture `node_modules`. */
+ *  survived precisely because of it.
+ *  `src/v2/fg664-dependency-probe.integration.test.ts` runs THIS constant, and
+ *  DEPENDENCY_LOAD_SCRIPT, unmodified, against a real fixture `node_modules`. */
 export { DEPENDENCY_PROBE_SCRIPT };
 
-/** Docker args for the FG-664 dependency probe: a SHORT-LIVED, FORGE-OWNED
- *  `--rm` container with the reviewer's EXACT mount shape — the project `:ro`,
- *  the lockfile-keyed volumes `:ro`, no read-write dependency mount and no
- *  `FORGE_NM_INSTALL_ROOT`, so it installs nothing and can write nothing. If
- *  this container can load the project's real native driver, so can the reviewer
- *  that follows it; if it cannot, no reviewer starts.
+type DependencyContainerCtx = { TASK_ID: string; PROJECT_DIR: string; CANONICAL_PROJECT_DIR?: string };
+
+/** The mount and environment shape BOTH FG-664 containers share: the reviewer's
+ *  EXACT one — the project `:ro`, the lockfile-keyed volumes `:ro`, no read-write
+ *  dependency mount and no `FORGE_NM_INSTALL_ROOT`, so neither installs anything
+ *  and neither can write anything.
  *
  *  Named per TASK (unlike the provisioner, which is named per cache key because
- *  it is the lock's holder): the probe takes no lock and two dispatches on one
- *  cache key must be able to probe concurrently. */
-export function buildDependencyProbeDockerArgs(
+ *  it is the lock's holder): neither takes a lock, and two dispatches on one
+ *  cache key must be able to probe concurrently.
+ *
+ *  runtime.env is FORWARDED, because a reviewer gets it (see buildDockerArgs) and
+ *  a probe that omits it is not attesting the reviewer's environment: a runtime
+ *  LD_LIBRARY_PATH or NODE_OPTIONS changes what the loader does. Two narrowings,
+ *  both deliberate: a value that does not resolve in this smaller context is
+ *  skipped with a warning rather than throwing (an unresolvable MODEL is not a
+ *  loader input, and a throw here would refuse the dispatch), and FORGE_NM_* is
+ *  never forwarded — those are the entrypoint's INSTALL contract, and these
+ *  containers are the two that must never install. */
+function dependencyContainerArgs(
   runtime: Runtime,
-  ctx: { TASK_ID: string; PROJECT_DIR: string; CANONICAL_PROJECT_DIR?: string },
+  ctx: DependencyContainerCtx,
   plan: DependencyVolumePlan,
-  /** The host-generated value the report has to carry back. See
-   *  DEPENDENCY_PROBE_SCRIPT: it binds the report to THIS dispatch's probe
-   *  container, which is the only process in the container that ever sees it. */
-  nonce: string,
-): string[] {
+  containerName: string,
+): { args: string[]; projectContainerPath: string } {
   const projectContainerPath = resolveProjectContainerPath(runtime) ?? "/project";
   const args: string[] = ["run", "--rm", "-i"];
-  args.push("--name", `forge-depprobe-${ctx.TASK_ID}`);
+  args.push("--name", containerName);
+  for (const [k, v] of Object.entries(runtime.env)) {
+    if (k.startsWith("FORGE_NM_")) continue;
+    const resolved = substituteOptional(v, ctx);
+    if (resolved === undefined) {
+      console.error(
+        `forge: FG-664 dependency container ${containerName}: runtime env ${k}="${v}" does not resolve outside an ` +
+          `agent dispatch — omitted from the attested environment`,
+      );
+      continue;
+    }
+    args.push("-e", `${k}=${resolved}`);
+  }
   args.push("-e", "FORGE_NO_BROWSER=1");
   args.push("-v", `${ctx.PROJECT_DIR}:${projectContainerPath}:ro`);
   // FG-559/FG-621: the same read-only parent-.git (or parent object store) bind
@@ -1463,17 +1536,15 @@ export function buildDependencyProbeDockerArgs(
   for (const gitPath of planWorktreeGitMounts(ctx.PROJECT_DIR, ctx.CANONICAL_PROJECT_DIR)) {
     args.push("-v", `${gitPath}:${gitPath}:ro`);
   }
-  // `:ro`, exactly as the reviewer gets them. The probe is not allowed to repair
-  // what it is measuring.
+  // `:ro`, exactly as the reviewer gets them. Neither container is allowed to
+  // repair what it is measuring.
   for (const v of plan.volumes) {
     args.push("-v", `${v.name}:${v.containerPath}:ro`);
   }
-  args.push("-e", `FORGE_PROBE_ROOTS=${plan.volumes.map((v) => v.containerPath).join(":")}`);
-  args.push("-e", `FORGE_PROBE_INSTALL_ROOT=${plan.installRoot}/node_modules`);
-  args.push("-e", `FORGE_PROBE_NONCE=${nonce}`);
-  args.push("-w", projectContainerPath);
-  args.push(runtime.image);
-  args.push("node", "-e", DEPENDENCY_PROBE_SCRIPT);
+  return { args, projectContainerPath };
+}
+
+function finishDependencyContainerArgs(args: string[], ctx: DependencyContainerCtx): string[] {
   // FG-559 piece A: a git bind the argv cannot express is a host-side refusal,
   // and it has to hold for every container this dispatch starts.
   assertWorktreeGitMountPlanned(ctx.PROJECT_DIR, args, ctx.CANONICAL_PROJECT_DIR);
@@ -1482,6 +1553,60 @@ export function buildDependencyProbeDockerArgs(
     assertWithinArgLimit(label, args[i]!);
   }
   return args;
+}
+
+/** Docker args for the FG-664 dependency probe: the SHORT-LIVED, FORGE-OWNED
+ *  `--rm` container that reports what the reviewer's mount shape CONTAINS. It
+ *  executes no dependency code at all — that is what makes its stdout an
+ *  attestation rather than a claim. */
+export function buildDependencyProbeDockerArgs(
+  runtime: Runtime,
+  ctx: DependencyContainerCtx,
+  plan: DependencyVolumePlan,
+  /** The host-generated value the report has to carry back. See
+   *  DEPENDENCY_PROBE_SCRIPT: it binds the report to THIS dispatch's probe
+   *  container. */
+  nonce: string,
+  /** The packages the project declares (declaredDependencyNames). The probe
+   *  answers "is each of these actually in the cache" — undefined when the
+   *  project's manifests could not be read, which has no basis to check. */
+  declared?: readonly string[],
+): string[] {
+  const { args, projectContainerPath } = dependencyContainerArgs(runtime, ctx, plan, `forge-depprobe-${ctx.TASK_ID}`);
+  args.push("-e", `FORGE_PROBE_ROOTS=${plan.volumes.map((v) => v.containerPath).join(":")}`);
+  args.push("-e", `FORGE_PROBE_INSTALL_ROOT=${plan.installRoot}/node_modules`);
+  args.push("-e", `FORGE_PROBE_NONCE=${nonce}`);
+  if (declared !== undefined) args.push("-e", `FORGE_PROBE_DECLARED=${[...declared].join(",")}`);
+  args.push("-w", projectContainerPath);
+  args.push(runtime.image);
+  args.push("node", "-e", DEPENDENCY_PROBE_SCRIPT);
+  return finishDependencyContainerArgs(args, ctx);
+}
+
+/** Docker args for ONE FG-664 load: dlopen a single artifact the probe found, in
+ *  the reviewer's mount shape, and exit. The container's EXIT STATUS is the whole
+ *  answer — nothing it prints is read as evidence, so the dependency code running
+ *  here has no attestation to reach.
+ *
+ *  `index` disambiguates the container name within a task: several artifacts are
+ *  loaded per dispatch, and a `--rm` name must be free before the next one runs. */
+export function buildDependencyLoadDockerArgs(
+  runtime: Runtime,
+  ctx: DependencyContainerCtx,
+  plan: DependencyVolumePlan,
+  artifact: string,
+  index: number,
+): string[] {
+  const { args, projectContainerPath } = dependencyContainerArgs(
+    runtime,
+    ctx,
+    plan,
+    `forge-depload-${ctx.TASK_ID}-${index}`,
+  );
+  args.push("-w", projectContainerPath);
+  args.push(runtime.image);
+  args.push("node", "-e", DEPENDENCY_LOAD_SCRIPT, artifact);
+  return finishDependencyContainerArgs(args, ctx);
 }
 
 export type PrepareDependencyEnvironmentArgs = {
@@ -1547,9 +1672,9 @@ export async function prepareDependencyEnvironmentForDispatch(
       });
       return { exitCode, stderrTail: existsSync(stderrPath) ? readFileSync(stderrPath, "utf8").trim() : "" };
     },
-    runProbe: async (nonce) => {
+    runProbe: async (nonce, declared) => {
       const plan = planOrThrow();
-      const probeArgs = buildDependencyProbeDockerArgs(args.runtime, containerCtx, plan, nonce);
+      const probeArgs = buildDependencyProbeDockerArgs(args.runtime, containerCtx, plan, nonce, declared);
       const stdoutPath = join(args.logDir, "container.depprobe.stdout.log");
       const stderrPath = join(args.logDir, "container.depprobe.stderr.log");
       const exitCode = await args.exec({
@@ -1565,6 +1690,21 @@ export async function prepareDependencyEnvironmentForDispatch(
         stdout: existsSync(stdoutPath) ? readFileSync(stdoutPath, "utf8") : "",
         stderrTail: existsSync(stderrPath) ? readFileSync(stderrPath, "utf8").trim() : "",
       };
+    },
+    runLoad: async (artifact, index) => {
+      const plan = planOrThrow();
+      const loadArgs = buildDependencyLoadDockerArgs(args.runtime, containerCtx, plan, artifact, index);
+      const stdoutPath = join(args.logDir, `container.depload.${index}.stdout.log`);
+      const stderrPath = join(args.logDir, `container.depload.${index}.stderr.log`);
+      const exitCode = await args.exec({
+        args: loadArgs,
+        stdin: undefined,
+        stdoutPath,
+        stderrPath,
+        idleTimeoutMs: DEPENDENCY_LOAD_IDLE_TIMEOUT_MS,
+        isProvisionerExec: true,
+      });
+      return { exitCode, stderrTail: existsSync(stderrPath) ? readFileSync(stderrPath, "utf8").trim() : "" };
     },
   });
 }

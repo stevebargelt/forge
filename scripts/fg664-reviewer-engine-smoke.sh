@@ -51,12 +51,16 @@
 #     the environmental CAUSE and the incentive; it does not detect deliberate
 #     fabrication, and nothing here should be read as claiming otherwise.
 #
-# IT RUNS FORGE'S OWN PROBE, NOT A SUBSTITUTE FOR IT. The load decision in P1/P2
-# comes from executing `DEPENDENCY_PROBE_SCRIPT` — the exact string
-# src/v2/spawn.ts hands its probe container — with the same
-# FORGE_PROBE_ROOTS / FORGE_PROBE_INSTALL_ROOT / FORGE_PROBE_NONCE env the real
-# dispatch passes, and adjudicating the report it prints under the nonce this run
-# minted. An earlier cut of this script hand-rolled its own `require()` instead,
+# IT RUNS FORGE'S OWN PROGRAMS, NOT A SUBSTITUTE FOR THEM. The gate ships as two
+# of them, and P1/P2 run both: `DEPENDENCY_PROBE_SCRIPT` — the exact string
+# src/v2/spawn.ts hands its probe container, with the same FORGE_PROBE_ROOTS /
+# FORGE_PROBE_INSTALL_ROOT / FORGE_PROBE_DECLARED / FORGE_PROBE_NONCE env the real
+# dispatch passes — reports which artifact it selected for the driver, and
+# `DEPENDENCY_LOAD_SCRIPT`, the exact command the load container runs, decides
+# whether that artifact loads. Its EXIT STATUS is what the host records as
+# `loaded`, which is why the load runs as its own program here too and why the
+# probe never decides it: the probe container executes no dependency code at all,
+# so nothing it reports can have been authored by what it was reporting on. An earlier cut of this script hand-rolled its own `require()` instead,
 # which meant a green run said nothing about the script that actually gates a
 # dispatch — the same "verification that does not exercise what ships" defect
 # FG-664 exists to close. The hand-rolled round-trip query survives as a SECOND,
@@ -67,12 +71,13 @@
 #   P1  With the dependency cache provisioned, run a container with the EXACT
 #       mount shape forge's read-only reviewer planner emits — project `:ro`,
 #       the lockfile-keyed volumes `:ro`, NO read-write dependency mount — and
-#       assert FORGE'S OWN PROBE reports the project's real driver LOADED, that
+#       assert FORGE'S OWN PROBE selects the driver's artifact and FORGE'S OWN
+#       LOAD COMMAND loads it, that
 #       the driver executes a real query and reports the CONTAINER's
 #       `process.versions.modules`, and that the artifact behind it has ELF magic.
-#   P2  The same container with the dependency volumes ABSENT: assert forge's
-#       probe reports the driver UNLOADED, on a Mach-O artifact seen through the
-#       read-only project bind. This reproduces the live defect that produced
+#   P2  The same container with the dependency volumes ABSENT: assert forge's own
+#       load command FAILS, on a Mach-O artifact seen through the read-only
+#       project bind. This reproduces the live defect that produced
 #       FG-662's three false "still present" verdicts, and it is what makes P1
 #       mean anything: without it, a green P1 could be the host's darwin-arm64
 #       `node_modules` being read straight through the project bind.
@@ -286,7 +291,7 @@ const projectDir = process.env.FG664_PROJECT_DIR;
 const outDir = process.env.FG664_OUT;
 const fs = await import("node:fs");
 const { loadRuntime } = await import("./src/v2/loader.js");
-const { resolveProjectContainerPath, buildProvisionerDockerArgs, DEPENDENCY_PROBE_SCRIPT } = await import("./src/v2/spawn.js");
+const { resolveProjectContainerPath, buildProvisionerDockerArgs, DEPENDENCY_PROBE_SCRIPT, DEPENDENCY_LOAD_SCRIPT } = await import("./src/v2/spawn.js");
 const deps = await import("./src/v2/dependency-provisioning.js");
 const base = loadRuntime(process.env.FG664_RUNTIME, { projectDir });
 const runtime = process.env.FG664_IMAGE ? { ...base, image: process.env.FG664_IMAGE } : base;
@@ -314,6 +319,10 @@ write("provisioner-argv", provisionerArgs.join("\n"));
 // The SHIPPED probe, and the two env values buildDependencyProbeDockerArgs
 // derives for it. The nonce is minted per run by the caller, as the resolver does.
 write("probe-script", DEPENDENCY_PROBE_SCRIPT);
+// The SHIPPED load command. The probe reports what it SAW and a SEPARATE
+// container decides whether an artifact loads, so proving the gate here means
+// running BOTH shipped programs, not just the first.
+write("load-script", DEPENDENCY_LOAD_SCRIPT);
 write("probe-roots", plan.volumes.map((v) => v.containerPath).join(":"));
 write("probe-install-root", plan.installRoot + "/node_modules");
 const runProvisioner = async () => {
@@ -368,6 +377,7 @@ PCP="$(cat "$OUT/pcp")"
 CACHE_KEY="$(cat "$OUT/cache_key")"
 CACHE_READY="$(cat "$OUT/ready")"
 PROBE_SCRIPT="$(cat "$OUT/probe-script")"
+LOAD_SCRIPT="$(cat "$OUT/load-script")"
 PROBE_ROOTS="$(cat "$OUT/probe-roots")"
 PROBE_INSTALL_ROOT="$(cat "$OUT/probe-install-root")"
 
@@ -377,6 +387,7 @@ PROBE_NONCE="$(node -p 'require("crypto").randomBytes(16).toString("hex")')" \
   || fatal "could not mint a probe nonce."
 
 [ -n "$PROBE_SCRIPT" ] || fatal "spawn.ts exported no DEPENDENCY_PROBE_SCRIPT — this proof runs FORGE's probe, not a substitute."
+[ -n "$LOAD_SCRIPT" ] || fatal "spawn.ts exported no DEPENDENCY_LOAD_SCRIPT — the load verdict is a shipped program too."
 [ -n "$PROBE_ROOTS" ] || fatal "forge's plan names no dependency container paths for the probe to scan."
 [ -n "$IMAGE" ] || fatal "the resolved runtime declares no image."
 [ -s "$OUT/ro-mounts" ] || fatal "forge's plan for $PROJECT_DIR contains NO dependency volumes — there is no read-only \
@@ -511,6 +522,21 @@ console.log(JSON.stringify({
 }));
 '
 
+# Reads the artifact FORGE'S OWN probe selected for $PKG out of its report. The
+# selection is the thing under proof as much as the load is: a package shipping
+# every platform's prebuild must be loaded against THIS container's, never the
+# first one a directory walk happens to return.
+ARTIFACT_PICK='
+const fs = require("fs");
+const lines = fs.readFileSync(0, "utf8").split("\n").filter((l) => l.trim().startsWith("{"));
+if (lines.length !== 1) { console.error("expected exactly one report line, got " + lines.length); process.exit(3); }
+const report = JSON.parse(lines[0]);
+const pkg = (report.packages || []).find((p) => p.name === process.argv[1]);
+if (!pkg) { console.error("ABSENT: forge probe never considered " + process.argv[1]); process.exit(2); }
+if (!pkg.artifact) { console.error("NO ARTIFACT: " + (pkg.unavailable || "none reported")); process.exit(2); }
+process.stdout.write(pkg.artifact);
+'
+
 # Every probe is REPORT-ONLY: it records that it started, what it ran, its
 # output and its exit code, and never decides anything. The host adjudicates
 # from that record. That is what separates "refused" from "never ran" — a probe
@@ -542,7 +568,12 @@ probe "${FG664_PROBE}_driver_artifact" 'f=$(find "$FG664_PCP/node_modules/$FG664
 # FORGE'S OWN PROBE — the string spawn.ts hands its probe container, run with
 # the env buildDependencyProbeDockerArgs derives, under this run's nonce. This
 # is the evidence; everything else about the load corroborates it.
-probe "${FG664_PROBE}_forge_probe" 'cd "$FG664_PCP" && node -e "$FG664_PROBE_SCRIPT"'
+probe "${FG664_PROBE}_forge_probe" 'cd "$FG664_PCP" && node -e "$FG664_PROBE_SCRIPT" > /tmp/fg664-report.json; rc=$?; cat /tmp/fg664-report.json; exit $rc'
+
+# THE SECOND SHIPPED PROGRAM. The probe reports what it saw; the load container
+# decides whether the artifact it named actually loads, and its EXIT STATUS is
+# the verdict the host records. Both run here in the reviewer mount shape.
+probe "${FG664_PROBE}_forge_load" 'cd "$FG664_PCP" && a=$(node -e "$FG664_ARTIFACT_PICK" "$FG664_PKG" < /tmp/fg664-report.json) && echo "artifact=$a" && node -e "$FG664_LOAD_SCRIPT" "$a"'
 
 # Corroboration, not evidence: require, open, write, read back, and ask sqlite
 # its version. Forge's probe deliberately stops at dlopen (it never executes a
@@ -577,11 +608,14 @@ run_probe_container() { # $1 = probe prefix (p1|p2), $2 = log path, $3.. = extra
     -e "FG664_PCP=$PCP"
     -e "FG664_PKG=$PKG"
     -e "FG664_LOADER=$LOADER"
+    -e "FG664_ARTIFACT_PICK=$ARTIFACT_PICK"
+    -e "FG664_LOAD_SCRIPT=$LOAD_SCRIPT"
     # Forge's own probe, and the env buildDependencyProbeDockerArgs derives for it.
     -e "FG664_PROBE_SCRIPT=$PROBE_SCRIPT"
     -e "FORGE_PROBE_ROOTS=$PROBE_ROOTS"
     -e "FORGE_PROBE_INSTALL_ROOT=$PROBE_INSTALL_ROOT"
     -e "FORGE_PROBE_NONCE=$PROBE_NONCE"
+    -e "FORGE_PROBE_DECLARED=$PKG"
     "$@"
     -w "$PCP"
     "$IMAGE"
@@ -747,16 +781,19 @@ forge_probe_report() { # id -> sets FORGE_PROBE_REPORT; nonzero (and records FAI
   return 0
 }
 
-# Whether the report says $PKG loaded. Deliberately a per-package read rather
-# than "no unloaded packages anywhere": the gate refuses on the natives the
-# PROJECT declares, and this proof is about one named driver.
-forge_probe_says_loaded() { # report -> 0 when $PKG is present with loaded:true
+# Whether the report names a loadable artifact for $PKG. Deliberately a
+# per-package read rather than "every package everywhere": the gate refuses on
+# the natives the PROJECT declares, and this proof is about one named driver.
+# The probe no longer decides `loaded` — it reports what it SAW, and the load
+# container's exit status is the verdict (see the _forge_load probe).
+forge_probe_names_artifact() { # report -> 0 when $PKG is present with an artifact
   node -e '
     const report = JSON.parse(process.argv[1]);
     const pkg = (report.packages || []).find((p) => p.name === process.argv[2]);
-    if (!pkg) { console.log("ABSENT"); process.exit(2); }
-    console.log(pkg.loaded ? "LOADED" : "UNLOADED " + (pkg.error || "no error recorded"));
-    process.exit(pkg.loaded ? 0 : 1);
+    if (!pkg) { console.log((report.missing || []).includes(process.argv[2]) ? "ABSENT FROM THE MOUNTED CACHE" : "NOT CONSIDERED"); process.exit(2); }
+    if (!pkg.artifact) { console.log("NO ARTIFACT " + (pkg.unavailable || "none reported")); process.exit(1); }
+    console.log("ARTIFACT " + pkg.artifact);
+    process.exit(0);
   ' "$1" "$PKG" 2>&1
 }
 
@@ -785,13 +822,19 @@ expect_success p1_driver_artifact \
 # discipline a real read-only dispatch gates on.
 P1_FORGE_STATUS=""
 if forge_probe_report p1_forge_probe "P1: FORGE'S OWN probe attests the engine in the reviewer mount shape"; then
-  P1_FORGE_STATUS="$(forge_probe_says_loaded "$FORGE_PROBE_REPORT")" && P1_FORGE_RC=0 || P1_FORGE_RC=$?
+  P1_FORGE_STATUS="$(forge_probe_names_artifact "$FORGE_PROBE_REPORT")" && P1_FORGE_RC=0 || P1_FORGE_RC=$?
   if [ "$P1_FORGE_RC" -eq 0 ]; then
-    record p1_forge_probe PASS "forge's probe reports $PKG LOADED under this run's nonce"
+    record p1_forge_probe PASS "forge's probe reports $PKG's artifact under this run's nonce: $P1_FORGE_STATUS"
   else
     record p1_forge_probe FAIL "forge's probe reports $PKG $P1_FORGE_STATUS — the gate that ships would REFUSE this dispatch"
   fi
 fi
+
+# The verdict half: the SHIPPED load command, on the artifact the SHIPPED probe
+# selected, exiting 0. This is exactly what the host records as `loaded`.
+expect_success p1_forge_load \
+  "P1: FORGE'S OWN load command loads the artifact its probe selected (this exit status IS the attestation)" \
+  "artifact="
 
 expect_success p1_driver_load \
   "P1 (corroboration): the project's REAL driver opens a database and answers a query (AC 1)" \
@@ -852,17 +895,21 @@ fi
 # reported "loaded" here would mean the shipped gate cannot tell the reviewer's
 # mount shape from the bare project bind — which is the whole distinction.
 if forge_probe_report p2_forge_probe "P2: FORGE'S OWN probe, with the dependency volumes ABSENT"; then
-  P2_FORGE_STATUS="$(forge_probe_says_loaded "$FORGE_PROBE_REPORT")" && P2_FORGE_RC=0 || P2_FORGE_RC=$?
-  if [ "$P2_FORGE_RC" -eq 1 ]; then
-    record p2_forge_probe PASS "forge's probe reports $PKG unloadable without the cache: $P2_FORGE_STATUS"
-  elif [ "$P2_FORGE_RC" -eq 0 ]; then
-    record p2_forge_probe FAIL "forge's probe reports $PKG LOADED WITHOUT the dependency volumes — P1's green would then \
-prove nothing, because the shipped gate cannot distinguish the two mount shapes"
+  P2_FORGE_STATUS="$(forge_probe_names_artifact "$FORGE_PROBE_REPORT")" && P2_FORGE_RC=0 || P2_FORGE_RC=$?
+  if [ "$P2_FORGE_RC" -eq 0 ]; then
+    # The probe SEES the host's Mach-O artifact through the project bind — that is
+    # honest, and it is the load below that must refuse it.
+    record p2_forge_probe PASS "forge's probe names the artifact reachable without the cache: $P2_FORGE_STATUS"
   else
-    record p2_forge_probe FAIL "forge's probe did not report $PKG at all ($P2_FORGE_STATUS) — a package it never \
-considered is not a load that failed"
+    record p2_forge_probe PASS "forge's probe reports no loadable artifact for $PKG without the cache: $P2_FORGE_STATUS"
   fi
 fi
+
+# The verdict half of the negative: the SHIPPED load command must FAIL on
+# whatever is reachable without the volumes. A pass here would mean the gate
+# cannot tell the reviewer's mount shape from the bare project bind.
+expect_load_failed p2_forge_load \
+  "P2: FORGE'S OWN load command CANNOT load what is reachable without the dependency volumes"
 
 expect_load_failed p2_driver_load \
   "P2 (corroboration): the real driver CANNOT load without the dependency volumes (this is what the rechecker met, and improvised around)"

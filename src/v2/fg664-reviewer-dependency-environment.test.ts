@@ -42,6 +42,7 @@ import {
 import { fixBatchesForReview } from "../store/fix-batches.js";
 import { failureKindForTask } from "./failure-kind.js";
 import { invoke } from "./invoke.js";
+import { retry } from "./retry.js";
 import {
   dependencyVolumeName,
   isDependencyCacheReady,
@@ -102,9 +103,12 @@ function makeProject(lockSalt: string): string {
 
 const RUNTIME_IMAGE = "agent-dev-worker:fg664";
 
-function writeRuntime(): void {
+function writeRuntime(env: Record<string, string> = {}): void {
   const runtimeDir = join(forgeHome, "runtimes");
   mkdirSync(runtimeDir, { recursive: true });
+  const envBlock = Object.keys(env).length === 0
+    ? "env: {}"
+    : ["env:", ...Object.entries(env).map(([k, v]) => `  ${k}: "${v}"`)].join("\n");
   writeFileSync(
     join(runtimeDir, "claude-apikey.yml"),
     `name: claude-apikey
@@ -114,7 +118,7 @@ models:
   default: test-model
 auth:
   mode: apikey
-env: {}
+${envBlock}
 mounts:
   - host: "\${TASK_DIR}"
     container: /task
@@ -165,7 +169,7 @@ afterEach(() => {
 
 // ── container classification ─────────────────────────────────────────────────
 
-type Kind = "provisioner" | "probe" | "agent";
+type Kind = "provisioner" | "probe" | "load" | "agent";
 type Call = { kind: Kind; args: string[] };
 
 function containerName(args: string[]): string {
@@ -177,6 +181,7 @@ function classifyCall(args: string[]): Kind {
   const name = containerName(args);
   if (name.startsWith("forge-provision-")) return "provisioner";
   if (name.startsWith("forge-depprobe-")) return "probe";
+  if (name.startsWith("forge-depload-")) return "load";
   return "agent";
 }
 
@@ -201,6 +206,9 @@ function probeNonce(args: string[]): string {
   return e ? e.slice("FORGE_PROBE_NONCE=".length) : "";
 }
 
+// The probe reports what it SAW. It says nothing about whether an artifact
+// loads: that verdict is a load container's exit status, which the host
+// observes (see the `load` override below).
 const PROBE_REPORT = {
   node: "v24.4.0",
   abi: "137",
@@ -211,14 +219,20 @@ const PROBE_REPORT = {
       version: "12.11.1",
       artifact: "/project/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
       resolvedPath: "/project/node_modules/better-sqlite3/lib/index.js",
-      loaded: true,
     },
   ],
+  missing: [] as string[],
 };
 
+/** The artifact a load container was told to dlopen — its LAST argv element. */
+function loadArtifact(args: string[]): string {
+  return args[args.length - 1] ?? "";
+}
+
 /** Records every container this dispatch builds and answers each one the way a
- *  healthy host would: the provisioner exits 0, the probe prints a report whose
- *  native package LOADED, the agent writes a result. */
+ *  healthy host would: the provisioner exits 0, the probe prints a report naming
+ *  the project's native artifact, every load container exits 0 (that artifact
+ *  loads), and the agent writes a result. */
 function makeExec(
   calls: Call[],
   over: {
@@ -229,6 +243,10 @@ function makeExec(
      *  that disproved the marker. */
     probeReport?: (nonce: string, probeIndex: number) => unknown;
     probeExit?: number;
+    /** The exit code for ONE load container, by the artifact it was handed. This
+     *  is where "the driver will not load" lives now: the host reads it from a
+     *  container's exit status, never from anything the loaded code printed. */
+    load?: (artifact: string, stderrPath: string) => number;
     provisionerExit?: number;
   } = {},
 ): DockerExecFn {
@@ -244,6 +262,10 @@ function makeExec(
       const body = over.probe === undefined ? JSON.stringify(report) : (over.probe as string);
       writeFileSync(stdoutPath, typeof body === "string" ? body : JSON.stringify(body));
       return over.probeExit ?? 0;
+    }
+    if (kind === "load") {
+      writeFileSync(stdoutPath, "");
+      return over.load ? over.load(loadArtifact(args), stderrPath) : 0;
     }
     writeFileSync(stdoutPath, "");
     if (kind === "provisioner") return over.provisionerExit ?? 0;
@@ -269,8 +291,9 @@ test("fg664 (a): a readOnlyProject invoke resolves the environment and the revie
 
   assert.equal(res.status, "complete", res.error);
 
-  // The host provisioned, then ATTESTED with its own probe, then started the agent.
-  assert.deepEqual(calls.map((c) => c.kind), ["provisioner", "probe", "agent"]);
+  // The host provisioned, ATTESTED with its own probe, LOADED the reported
+  // artifact in its own container, then started the agent.
+  assert.deepEqual(calls.map((c) => c.kind), ["provisioner", "probe", "load", "agent"]);
 
   const agent = calls.find((c) => c.kind === "agent")!;
   const volumes = volumeArgs(agent.args);
@@ -292,6 +315,46 @@ test("fg664 (a): a readOnlyProject invoke resolves the environment and the revie
     "ro",
     "PROJECT_MODE stays ro — the dependency environment is resolved WITHOUT relaxing the mount",
   );
+});
+
+test("fg664: both Forge-owned containers carry the runtime's OWN env — the attested loading environment is the reviewer's, not a subset of it", async () => {
+  // The probe answers "can this container load the driver". A runtime
+  // LD_LIBRARY_PATH / NODE_OPTIONS is an input to that answer, and the reviewer
+  // gets it (buildDockerArgs forwards runtime.env). A gate that omits it can
+  // refuse a reviewer that would have loaded fine, or attest an environment the
+  // reviewer does not run in — either way the receipt names the wrong thing.
+  setPlatform("darwin");
+  writeRuntime({ LD_LIBRARY_PATH: "/opt/forge/lib", NODE_OPTIONS: "--max-old-space-size=512", FORGE_NM_SHADOW: "/nope" });
+  const project = makeProject("runtime-env");
+  const calls: Call[] = [];
+
+  const res = await invoke({
+    agentRole: "review-rechecker",
+    task: "recheck RF-1",
+    projectDir: project,
+    readOnlyProject: true,
+    dockerExec: makeExec(calls),
+  });
+  assert.equal(res.status, "complete", res.error);
+
+  for (const kind of ["probe", "load", "agent"] as const) {
+    const call = calls.find((c) => c.kind === kind);
+    assert.ok(call, `expected a ${kind} container`);
+    const env = envArgs(call.args);
+    assert.ok(env.includes("LD_LIBRARY_PATH=/opt/forge/lib"), `${kind} must carry the runtime's LD_LIBRARY_PATH; got ${env.join(" ")}`);
+    assert.ok(env.includes("NODE_OPTIONS=--max-old-space-size=512"), `${kind} must carry the runtime's NODE_OPTIONS; got ${env.join(" ")}`);
+  }
+
+  // The ONE narrowing: the entrypoint's install contract is never forwarded into
+  // the two containers whose whole guarantee is that they install nothing.
+  for (const kind of ["probe", "load"] as const) {
+    const call = calls.find((c) => c.kind === kind)!;
+    assert.deepEqual(
+      envArgs(call.args).filter((e) => e.startsWith("FORGE_NM_")),
+      [],
+      `the ${kind} container must never be handed a FORGE_NM_* install instruction`,
+    );
+  }
 });
 
 test("fg664 (c): the reviewer container never mounts a dependency volume rw, never gets FORGE_NM_INSTALL_ROOT, and runs no install — the FG-376 invariant holds", async () => {
@@ -338,30 +401,22 @@ test("fg664 (c): the reviewer container never mounts a dependency volume rw, nev
 
 // ── (b): the refusal ─────────────────────────────────────────────────────────
 
-test("fg664 (b): when the probe reports the real driver could not load, ZERO agent containers run and the task fails verification_environment_unavailable", async () => {
+test("fg664 (b): when the real driver's load container exits nonzero, ZERO agent containers run and the task fails verification_environment_unavailable", async () => {
   setPlatform("darwin");
   const project = makeProject("b");
   const calls: Call[] = [];
-  const unloadable = {
-    ...PROBE_REPORT,
-    packages: [
-      {
-        name: "better-sqlite3",
-        version: "12.11.1",
-        loaded: false,
-        error:
-          "Error: /project/node_modules/better-sqlite3/build/Release/better_sqlite3.node: " +
-          "invalid ELF header",
-      },
-    ],
-  };
 
   const res = await invoke({
     agentRole: "review-rechecker",
     task: "recheck RF-1",
     projectDir: project,
     readOnlyProject: true,
-    dockerExec: makeExec(calls, { probeReport: (nonce) => ({ nonce, ...unloadable }) }),
+    dockerExec: makeExec(calls, {
+      load: (artifact, stderrPath) => {
+        writeFileSync(stderrPath, `Error: ${artifact}: invalid ELF header\nNode.js v24.4.0\n`);
+        return 1;
+      },
+    }),
   });
 
   assert.equal(res.status, "failed");
@@ -378,6 +433,11 @@ test("fg664 (b): when the probe reports the real driver could not load, ZERO age
   );
   assert.match(res.error ?? "", /driver_unloadable/);
   assert.match(res.error ?? "", /better-sqlite3/);
+  assert.match(
+    res.error ?? "",
+    /invalid ELF header/,
+    "the refusal carries the real loader error, not just the load container's exit code",
+  );
   assert.equal(getTask(res.taskId)?.status, "failed");
 });
 
@@ -401,6 +461,66 @@ test("fg664 (b2): a probe that exits 0 but attests an EMPTY install root is a re
 
   assert.equal(res.failureKind, "verification_environment_unavailable");
   assert.match(res.error ?? "", /dependencies_absent/);
+  assert.equal(calls.filter((c) => c.kind === "agent").length, 0);
+});
+
+test("fg664 (b4): a DECLARED package absent from every mounted root is a refusal, even though the install root is populated", async () => {
+  // The gate refused only on a declared driver that was present-but-unloadable.
+  // A declared driver MISSING from the cache reported nothing at all, so the
+  // unloadable set was empty and the dispatch resolved READY — the reviewer
+  // started without it, and `require('better-sqlite3')` inside it threw "Could
+  // not locate the bindings file". The install-root emptiness test cannot see
+  // this: the root is populated, just incomplete, and it never inspects a
+  // workspace member's volume at all.
+  setPlatform("darwin");
+  const project = makeProject("b4");
+  const calls: Call[] = [];
+
+  const res = await invoke({
+    agentRole: "review-rechecker",
+    task: "recheck RF-1",
+    projectDir: project,
+    readOnlyProject: true,
+    dockerExec: makeExec(calls, {
+      probeReport: (nonce) => ({ nonce, ...PROBE_REPORT, packages: [], missing: ["better-sqlite3"] }),
+    }),
+  });
+
+  assert.equal(res.failureKind, "verification_environment_unavailable");
+  assert.match(res.error ?? "", /dependencies_absent/);
+  assert.match(res.error ?? "", /better-sqlite3/);
+  assert.equal(calls.filter((c) => c.kind === "agent").length, 0, "no reviewer starts without the driver it needs");
+});
+
+test("fg664 (b5): a DECLARED package that builds a native addon and shipped none is driver_unloadable — there is nothing to load, which is not the same as nothing to check", async () => {
+  setPlatform("darwin");
+  const project = makeProject("b5");
+  const calls: Call[] = [];
+
+  const res = await invoke({
+    agentRole: "review-rechecker",
+    task: "recheck RF-1",
+    projectDir: project,
+    readOnlyProject: true,
+    dockerExec: makeExec(calls, {
+      probeReport: (nonce) => ({
+        nonce,
+        ...PROBE_REPORT,
+        packages: [
+          {
+            name: "better-sqlite3",
+            version: "12.11.1",
+            unavailable: "the package builds a native addon but the mounted cache holds no compiled .node artifact",
+          },
+        ],
+      }),
+    }),
+  });
+
+  assert.equal(res.failureKind, "verification_environment_unavailable");
+  assert.match(res.error ?? "", /driver_unloadable/);
+  assert.match(res.error ?? "", /no compiled \.node artifact/);
+  assert.equal(calls.filter((c) => c.kind === "load").length, 0, "there is no artifact to hand a load container");
   assert.equal(calls.filter((c) => c.kind === "agent").length, 0);
 });
 
@@ -450,6 +570,7 @@ test("fg664 (d): two concurrent read-only resolutions on one cold cache key prov
         probes += 1;
         return { exitCode: 0, stdout: JSON.stringify({ nonce, ...PROBE_REPORT }), stderrTail: "" };
       },
+      runLoad: async () => ({ exitCode: 0, stderrTail: "" }),
     });
 
   const [a, b] = await Promise.all([one(), one()]);
@@ -538,7 +659,7 @@ test("fg664 (k): a ready marker the probe DISPROVES is invalidated and re-provis
   assert.equal(res.status, "complete", res.error);
   assert.deepEqual(
     calls.map((c) => c.kind),
-    ["probe", "provisioner", "probe", "agent"],
+    ["probe", "provisioner", "probe", "load", "agent"],
     "the disproof must re-provision and RE-PROBE before the dispatch is decided",
   );
   assert.equal(
@@ -609,7 +730,8 @@ test("fg664 (k3): a re-provisioned cache that STILL probes empty is refused rath
 
   assert.equal(res.failureKind, "verification_environment_unavailable");
   assert.match(res.error ?? "", /dependencies_absent/);
-  assert.match(res.error ?? "", /STILL empty/);
+  assert.match(res.error ?? "", /probed EMPTY/);
+  assert.match(res.error ?? "", /STILL true/);
   assert.equal(calls.filter((c) => c.kind === "provisioner").length, 1, "bounded: ONE re-provision, then refuse");
   assert.equal(calls.filter((c) => c.kind === "probe").length, 2);
   assert.equal(calls.filter((c) => c.kind === "agent").length, 0);
@@ -641,6 +763,7 @@ test("fg664 (k4): two concurrent dispatches discovering ONE stale marker re-prov
         stdout: JSON.stringify({ nonce, ...(installed ? PROBE_REPORT : EMPTY_ROOT_REPORT) }),
         stderrTail: "",
       }),
+      runLoad: async () => ({ exitCode: 0, stderrTail: "" }),
     });
 
   const [a, b] = await Promise.all([one(), one()]);
@@ -668,7 +791,11 @@ test("fg664 (k5): a HEALTHY ready cache is untouched — no re-provision, no mar
   });
 
   assert.equal(res.status, "complete", res.error);
-  assert.deepEqual(calls.map((c) => c.kind), ["probe", "agent"], "a ready cache reuses the install, as before");
+  assert.deepEqual(
+    calls.map((c) => c.kind),
+    ["probe", "load", "agent"],
+    "a ready cache reuses the install, as before — it is still attested, never assumed",
+  );
   assert.equal(readDependencyCacheMarker(hash), marker, "the marker is not rewritten on the ordinary path");
   assert.equal(
     readTaskManifest(taskDir(res.runId, res.taskId))?.dependencyEnvironment?.staleCacheRepaired,
@@ -747,6 +874,51 @@ test("fg664 (e): non-darwin, FORGE_NO_NM_SHADOW=1 and a project with no package-
 });
 
 // ── (f): the manifest half of AC3 ────────────────────────────────────────────
+
+test("fg664: a REFUSED read-only dispatch still writes its manifest, so `forge retry` re-dispatches it READ-ONLY instead of guessing from the role name", async () => {
+  // THE DEFECT. The gate refuses before the manifest was written, so a refused
+  // task left none. retry.ts recovers the mount from that manifest and, with
+  // none, falls back to `agentRole.startsWith("red-")` — and the recheck lane's
+  // role is `review-rechecker`, which does not. The retry therefore re-dispatched
+  // a reviewer with PROJECT_MODE=rw: a read-WRITE project mount, the legacy
+  // shadow arm (so the container installs), and no FG-664 gate at all, since the
+  // gate is guarded on readOnlyProject. A red with a writable project mount is
+  // the one thing the kernel-enforced `:ro` bind exists to prevent.
+  setPlatform("darwin");
+  const project = makeProject("retry-mount");
+  const calls: Call[] = [];
+
+  const refused = await invoke({
+    agentRole: "review-rechecker",
+    task: "recheck RF-1",
+    projectDir: project,
+    readOnlyProject: true,
+    dockerExec: makeExec(calls, { probeExit: 1 }),
+  });
+  assert.equal(refused.failureKind, "verification_environment_unavailable");
+  assert.equal(calls.filter((c) => c.kind === "agent").length, 0);
+
+  const manifest = readTaskManifest(taskDir(refused.runId, refused.taskId));
+  assert.ok(manifest, "a dispatch decision was made, so the receipt that records it must exist");
+  assert.equal(manifest.controlPlane?.mountMode, "ro", "the mount this task was dispatched under is RECORDED, not inferred");
+  assert.equal(manifest.controlPlane?.projectDir, project);
+  assert.ok(manifest.runtime?.name, "retry refuses a manifest that records no runtime, so the refusal path must record one");
+  assert.equal(manifest.dispatchRefused?.stage, "dependency_environment", "and it says why no container ran");
+  assert.equal(
+    manifest.agentProtocol,
+    undefined,
+    "no container ran, so no protocol was executed — the ledger's protocol stamp means 'this agent ran under'",
+  );
+
+  // The consequence, through the real retry planner: the re-dispatch is read-only.
+  const outcome = await retry(refused.taskId);
+  assert.ok(outcome.adHoc, "an invoke-dispatched row retries ad-hoc");
+  assert.equal(
+    outcome.adHoc.readOnlyProject,
+    true,
+    "the retry of a refused reviewer must keep the kernel-enforced read-only project mount",
+  );
+});
 
 test("fg664 (f): the task manifest records the dependencyEnvironment receipt, and a manifest written without one still parses", async () => {
   setPlatform("darwin");
@@ -928,10 +1100,12 @@ test("fg664: a well-formed report that does NOT carry this dispatch's nonce is n
     undefined,
     "a report with NO nonce at all is not this dispatch's report either",
   );
+  assert.equal(parseDependencyProbeOutput(`${genuine}\n`, NONCE)?.nonce, NONCE, "the genuine line alone is read");
   assert.equal(
-    parseDependencyProbeOutput(`${genuine}\n${forged}\n`, NONCE)?.nonce,
-    NONCE,
-    "the genuine line is still found when a forgery is appended after it",
+    parseDependencyProbeOutput(`${genuine}\n${forged}\n`, NONCE),
+    undefined,
+    "and a stream carrying a SECOND report is refused outright — picking one of two reports is a rule an injected " +
+      "line only has to be positioned to win, so there is no picking",
   );
 });
 
@@ -964,17 +1138,18 @@ test("fg664: a native package the project does NOT depend on cannot refuse the d
   // drivers this project needs", and the project's manifest is what says which
   // those are.
   setPlatform("darwin");
+  const SHARP_ARTIFACT = "/project/node_modules/@img/sharp-linux-arm64/lib/sharp-linux-arm64.node";
   const incidental = {
     ...PROBE_REPORT,
     packages: [
       ...PROBE_REPORT.packages,
-      {
-        name: "@img/sharp-linux-arm64",
-        version: "0.34.5",
-        loaded: false,
-        error: "Error [ERR_PACKAGE_PATH_NOT_EXPORTED]: No \"exports\" main defined",
-      },
+      { name: "@img/sharp-linux-arm64", version: "0.34.5", artifact: SHARP_ARTIFACT },
     ],
+  };
+  const sharpFailsToLoad = (artifact: string, stderrPath: string): number => {
+    if (artifact !== SHARP_ARTIFACT) return 0;
+    writeFileSync(stderrPath, "Error [ERR_DLOPEN_FAILED]: wrong ELF class\n");
+    return 1;
   };
 
   const okCalls: Call[] = [];
@@ -983,7 +1158,7 @@ test("fg664: a native package the project does NOT depend on cannot refuse the d
     task: "recheck RF-1",
     projectDir: makeProject("scoped-ok"),
     readOnlyProject: true,
-    dockerExec: makeExec(okCalls, { probeReport: (nonce) => ({ nonce, ...incidental }) }),
+    dockerExec: makeExec(okCalls, { probeReport: (nonce) => ({ nonce, ...incidental }), load: sharpFailsToLoad }),
   });
   assert.equal(ok.status, "complete", `an undeclared native package must not refuse the dispatch (${ok.error})`);
   assert.equal(okCalls.filter((c) => c.kind === "agent").length, 1);
@@ -1002,13 +1177,12 @@ test("fg664: a native package the project does NOT depend on cannot refuse the d
     projectDir: makeProject("scoped-bad"),
     readOnlyProject: true,
     dockerExec: makeExec(badCalls, {
-      probeReport: (nonce) => ({
-        nonce,
-        ...incidental,
-        packages: incidental.packages.map((p) =>
-          p.name === "better-sqlite3" ? { ...p, loaded: false, error: "invalid ELF header" } : p,
-        ),
-      }),
+      probeReport: (nonce) => ({ nonce, ...incidental }),
+      load: (artifact, stderrPath) => {
+        if (artifact === SHARP_ARTIFACT) return sharpFailsToLoad(artifact, stderrPath);
+        writeFileSync(stderrPath, "Error: invalid ELF header\n");
+        return 1;
+      },
     }),
   });
   assert.equal(bad.failureKind, "verification_environment_unavailable");

@@ -177,6 +177,14 @@ export type TaskManifest = {
   // (non-darwin, FORGE_NO_NM_SHADOW=1, no package-lock.json). Optional, so every
   // pre-FG-664 manifest still parses.
   dependencyEnvironment?: DependencyEnvironmentReceipt;
+
+  // FG-664: WHY this manifest describes a task no container ever ran for. The
+  // FG-664 gate refuses a read-only dispatch before any agent container exists,
+  // and the manifest is still written — `forge retry` recovers the mount mode a
+  // task ran under from this receipt, and with no manifest at all it falls back
+  // to a role-prefix guess that re-dispatches a refused reviewer READ-WRITE.
+  // Present only on that refusal; a manifest without it dispatched.
+  dispatchRefused?: { stage: "dependency_environment"; reason: string; detail: string };
 };
 
 export function writeTaskManifest(dir: string, manifest: TaskManifest): void {

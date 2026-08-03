@@ -57,7 +57,7 @@ import {
 } from "./dependency-provisioning.js";
 import type { Workflow } from "./schema.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
-import { answerDependencyProbe, isDependencyProbeCall } from "./dependency-probe.testkit.js";
+import { answerDependencyLoad, answerDependencyProbe, isDependencyLoadCall, isDependencyProbeCall } from "./dependency-probe.testkit.js";
 
 const MEMBER = "dashboard";
 
@@ -298,6 +298,7 @@ test("FG-628 (A1): the reds' PUBLICATION CANDIDATE carries a mountpoint for ever
     writeFileSync(stderrPath, "");
     // FG-664: the read-only reviewer is preceded by Forge's own probe container.
     if (isDependencyProbeCall(args)) return answerDependencyProbe(args, stdoutPath);
+    if (isDependencyLoadCall(args)) return answerDependencyLoad(args);
     if (taskId.startsWith("provision-")) return 0; // the short-lived provisioner
     const mount = projectMount(args)!;
     if (taskId.startsWith("task-red-")) {
@@ -381,6 +382,7 @@ test("FG-628 (A2): a non-isolated red dispatch prepares the operator's own check
     writeFileSync(stderrPath, "");
     // FG-664: the read-only reviewer is preceded by Forge's own probe container.
     if (isDependencyProbeCall(args)) return answerDependencyProbe(args, stdoutPath);
+    if (isDependencyLoadCall(args)) return answerDependencyLoad(args);
     if (taskId.startsWith("provision-")) return 0;
     const mount = projectMount(args)!;
     if (taskId.startsWith("task-red-")) {
@@ -442,6 +444,7 @@ test("FG-628 (A3): two concurrent dispatches into the SAME non-isolated checkout
     writeFileSync(stderrPath, "");
     // FG-664: the read-only reviewer is preceded by Forge's own probe container.
     if (isDependencyProbeCall(args)) return answerDependencyProbe(args, stdoutPath);
+    if (isDependencyLoadCall(args)) return answerDependencyLoad(args);
     if (taskId.startsWith("provision-")) return 0;
     const mount = projectMount(args)!;
     if (taskId.startsWith("task-red-")) {
@@ -593,6 +596,7 @@ test("FG-628 (A5) / FG-664: a checkout forge cannot write into records dependenc
     writeFileSync(stderrPath, "");
     // FG-664: the read-only reviewer is preceded by Forge's own probe container.
     if (isDependencyProbeCall(args)) return answerDependencyProbe(args, stdoutPath);
+    if (isDependencyLoadCall(args)) return answerDependencyLoad(args);
     if (taskId.startsWith("provision-")) return 0;
     if (taskId.startsWith("task-red-")) {
       redArgs = args;
@@ -747,6 +751,7 @@ test("FG-628 (A6b) / FG-664: the escaping member creates nothing outside the che
     writeFileSync(stderrPath, "");
     // FG-664: the read-only reviewer is preceded by Forge's own probe container.
     if (isDependencyProbeCall(args)) return answerDependencyProbe(args, stdoutPath);
+    if (isDependencyLoadCall(args)) return answerDependencyLoad(args);
     if (taskId.startsWith("provision-")) return 0;
     if (taskId.startsWith("task-red-")) {
       redArgs = args;

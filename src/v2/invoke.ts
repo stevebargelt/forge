@@ -730,42 +730,16 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
   // agent's container: installing stays the separate short-lived provisioner's job
   // under the unchanged FG-376 per-cache-key lock (FG-376 refined — reviewer
   // CONTAINERS never install; the HOST may provision before one starts).
-  let dependencyEnvironment: DependencyEnvironmentReceipt | undefined;
-  if (args.readOnlyProject) {
-    const resolved = await prepareDependencyEnvironmentForDispatch({
-      runtime,
-      taskId,
-      repoRoot: args.projectDir,
-      canonicalProjectDir: args.projectDir,
-      logDir: dir,
-      exec,
-    });
-    if (resolved.outcome === "refused") {
-      const error =
-        `verification_environment_unavailable (${resolved.reason}): ${resolved.detail}. No agent container was ` +
-        `started. A read-only reviewer that cannot load the project's real native dependencies is refused rather ` +
-        `than run against a substituted implementation — see FG-664.`;
-      // The EXISTING event for "this dispatch's dependency environment could not be
-      // established" — no new vocabulary. `stage: "environment_resolution"` and the
-      // classified `reason` are what distinguish a probe/attestation refusal from the
-      // install failure the event was first minted for.
-      logEvent("container.dependency_provisioning_failed", {
-        runId,
-        taskId,
-        payload: {
-          stage: "environment_resolution",
-          reason: resolved.reason,
-          detail: resolved.detail,
-          projectDir: args.projectDir,
-        },
-      });
-      cleanupStagedAuth(dir); // AWN-8
-      failTask(taskId, { runId, kind: classify({ source: "verification_environment_unavailable" }), error });
-      closeRunIfIdle(false);
-      return { runId, taskId, status: "failed", error, failureKind: "verification_environment_unavailable" };
-    }
-    if (resolved.outcome === "ready") dependencyEnvironment = resolved.receipt;
-  }
+  //
+  // THE RECEIPT IS ASSEMBLED FIRST, AND IT IS WRITTEN ON BOTH ARMS. The gate is a
+  // pre-dispatch failure site, and `forge retry` reads the manifest to recover the
+  // mount a task ran under — with no manifest it falls back to a role-prefix
+  // guess, and `review-rechecker` does not start with `red-`, so a refused
+  // rechecker was re-dispatched READ-WRITE: the shadow arm, an in-container
+  // install, and no FG-664 gate at all (it is guarded on readOnlyProject). A red
+  // with a read-write project mount is the one thing the kernel-enforced `:ro`
+  // bind exists to prevent. The invariant retry.ts states — "a task with NO
+  // manifest never reached dispatch" — is restored by writing one here.
 
   // FG-350: assemble the control-plane receipt — records dispatch-time provenance
   // so explain views answer "why did Forge run this task this way" from RECORDED
@@ -847,29 +821,82 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     warnings: receiptWarnings.length > 0 ? receiptWarnings : undefined,
   });
 
-  writeTaskManifest(dir, {
-    taskId,
-    runId,
-    files: { prompt: "CLAUDE.md", package: "package.md", result: "result.json", stdout: "container.stdout.log", stderr: "container.stderr.log" },
-    container: { name: `forge-${taskId}`, idleTimeoutMs },
-    auth: { profileRequested: !!args.authProfile, stateMounted: !!authStateHostPath },
-    // FG-366: name is the resolved concrete runtime (matches controlPlane.runtime.name),
-    // not the requested sentinel — see task-manifest.ts's ManifestRuntime doc comment.
-    runtime: { name: runtimeName, kind: runtimeMeta.runtimeKind, logFormat: runtimeMeta.logFormat, promptStrategy: runtimeMeta.promptStrategy, authStrategy: runtimeMeta.authStrategy },
-    ...(manifestModelBlock(resolution) ? { model: manifestModelBlock(resolution) } : {}),
-    controlPlane,
-    // FG-654: RECORDED here, at the same dispatch-time seam as every other receipt, so
-    // "which protocol did this agent run under" is answerable from durable state after
-    // the fact rather than inferred from whatever is installed when someone asks. The
-    // value is the one COMPOSE resolved (TaskPackage.agentProtocol) — recomputing it here
-    // would describe the seed as of now, not the bytes in the prompt below.
-    ...(taskPackage.agentProtocol ? { agentProtocol: taskPackage.agentProtocol } : {}),
-    // FG-664: AC3's manifest half — the cache key and the engine identity a
-    // Forge-owned probe container attested for THIS dispatch, recorded at the same
-    // dispatch-time seam as every other receipt. The review ledger records the
-    // same receipt against the recheck stage; they are one fact in two places.
-    ...(dependencyEnvironment ? { dependencyEnvironment } : {}),
-  });
+  const writeDispatchManifest = (
+    outcome:
+      | { dependencyEnvironment?: DependencyEnvironmentReceipt }
+      | { refused: { stage: "dependency_environment"; reason: string; detail: string } },
+  ): void => {
+    const refused = "refused" in outcome;
+    writeTaskManifest(dir, {
+      taskId,
+      runId,
+      files: { prompt: "CLAUDE.md", package: "package.md", result: "result.json", stdout: "container.stdout.log", stderr: "container.stderr.log" },
+      container: { name: `forge-${taskId}`, idleTimeoutMs },
+      auth: { profileRequested: !!args.authProfile, stateMounted: !!authStateHostPath },
+      // FG-366: name is the resolved concrete runtime (matches controlPlane.runtime.name),
+      // not the requested sentinel — see task-manifest.ts's ManifestRuntime doc comment.
+      runtime: { name: runtimeName, kind: runtimeMeta.runtimeKind, logFormat: runtimeMeta.logFormat, promptStrategy: runtimeMeta.promptStrategy, authStrategy: runtimeMeta.authStrategy },
+      ...(manifestModelBlock(resolution) ? { model: manifestModelBlock(resolution) } : {}),
+      controlPlane,
+      // FG-654: RECORDED here, at the same dispatch-time seam as every other receipt, so
+      // "which protocol did this agent run under" is answerable from durable state after
+      // the fact rather than inferred from whatever is installed when someone asks. The
+      // value is the one COMPOSE resolved (TaskPackage.agentProtocol) — recomputing it here
+      // would describe the seed as of now, not the bytes in the prompt below. Omitted on
+      // a refusal: no container ran, so no protocol was executed, and the ledger reads
+      // this stamp as "which protocol this agent ran under".
+      ...(!refused && taskPackage.agentProtocol ? { agentProtocol: taskPackage.agentProtocol } : {}),
+      // FG-664: AC3's manifest half — the cache key and the engine identity a
+      // Forge-owned probe container attested for THIS dispatch, recorded at the same
+      // dispatch-time seam as every other receipt. The review ledger records the
+      // same receipt against the recheck stage; they are one fact in two places.
+      ...(!refused && outcome.dependencyEnvironment ? { dependencyEnvironment: outcome.dependencyEnvironment } : {}),
+      // FG-664: why a manifest exists for a task no container ever ran for.
+      ...(refused ? { dispatchRefused: outcome.refused } : {}),
+    });
+  };
+
+  let dependencyEnvironment: DependencyEnvironmentReceipt | undefined;
+  if (args.readOnlyProject) {
+    const resolved = await prepareDependencyEnvironmentForDispatch({
+      runtime,
+      taskId,
+      repoRoot: args.projectDir,
+      canonicalProjectDir: args.projectDir,
+      logDir: dir,
+      exec,
+    });
+    if (resolved.outcome === "refused") {
+      const error =
+        `verification_environment_unavailable (${resolved.reason}): ${resolved.detail}. No agent container was ` +
+        `started. A read-only reviewer that cannot load the project's real native dependencies is refused rather ` +
+        `than run against a substituted implementation — see FG-664.`;
+      // The EXISTING event for "this dispatch's dependency environment could not be
+      // established" — no new vocabulary. `stage: "environment_resolution"` and the
+      // classified `reason` are what distinguish a probe/attestation refusal from the
+      // install failure the event was first minted for.
+      logEvent("container.dependency_provisioning_failed", {
+        runId,
+        taskId,
+        payload: {
+          stage: "environment_resolution",
+          reason: resolved.reason,
+          detail: resolved.detail,
+          projectDir: args.projectDir,
+        },
+      });
+      writeDispatchManifest({
+        refused: { stage: "dependency_environment", reason: resolved.reason, detail: resolved.detail },
+      });
+      cleanupStagedAuth(dir); // AWN-8
+      failTask(taskId, { runId, kind: classify({ source: "verification_environment_unavailable" }), error });
+      closeRunIfIdle(false);
+      return { runId, taskId, status: "failed", error, failureKind: "verification_environment_unavailable" };
+    }
+    if (resolved.outcome === "ready") dependencyEnvironment = resolved.receipt;
+  }
+
+  writeDispatchManifest({ ...(dependencyEnvironment ? { dependencyEnvironment } : {}) });
 
   // Usage attribution: prefer the resolved capability alias (policy mode); fall
   // back to the workflow-declared alias (legacy, where resolution.alias is unset).
