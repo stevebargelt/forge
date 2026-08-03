@@ -41,6 +41,7 @@ import { explainRouteFile } from "../cli/commands/route.js";
 import { resolveIdleTimeoutMs, IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
 import {
   DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE,
+  dependencyEnvironmentResolvedPayload,
   type DependencyEnvironmentReceipt,
 } from "./dependency-provisioning.js";
 import { productionDockerExec, finalizeContainerRetention, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
@@ -893,7 +894,16 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
       closeRunIfIdle(false);
       return { runId, taskId, status: "failed", error, failureKind: "verification_environment_unavailable" };
     }
-    if (resolved.outcome === "ready") dependencyEnvironment = resolved.receipt;
+    if (resolved.outcome === "ready") {
+      dependencyEnvironment = resolved.receipt;
+      // AC3's ledger half. Refusals were already durable here; the SUCCESSFUL
+      // case is the one an auditor checks, and it left no timeline trace at all.
+      logEvent("container.dependency_environment_resolved", {
+        runId,
+        taskId,
+        payload: dependencyEnvironmentResolvedPayload(resolved.receipt),
+      });
+    }
   }
 
   writeDispatchManifest({ ...(dependencyEnvironment ? { dependencyEnvironment } : {}) });

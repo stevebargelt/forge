@@ -24,6 +24,7 @@ import {
   planDependencyVolumes,
   createDependencyMountpoints,
   provisionerContainerName,
+  dependencyEnvironmentResolvedPayload,
   type DependencyVolumePlan,
   type DependencyEnvironmentReceipt,
 } from "./dependency-provisioning.js";
@@ -3724,6 +3725,13 @@ async function runContainer(args: {
     if (resolved.outcome === "ready") {
       dependencyEnvironment = resolved.receipt;
       depSpawnFields.DEPENDENCY_CACHE_MOUNT_RO = "1";
+      // AC3's ledger half, from the same seam and with the same payload the
+      // invoke lane emits — one fact, one vocabulary, whichever lane reached it.
+      logEvent("container.dependency_environment_resolved", {
+        runId: args.runId,
+        taskId: args.taskId,
+        payload: dependencyEnvironmentResolvedPayload(resolved.receipt),
+      });
     }
   }
 

@@ -690,6 +690,42 @@ export type DependencyEnvironmentReceipt = {
   staleCacheRepaired?: DependencyCacheRepairRecord;
 };
 
+/** One native package as the TIMELINE records it: the identity, and the
+ *  host-observed verdict on whether it loaded. No path field — see
+ *  dependencyEnvironmentResolvedPayload. */
+export type DependencyEnvironmentEventPackage = { name: string; version: string; loaded: boolean };
+
+export type DependencyEnvironmentResolvedPayload = {
+  stage: "environment_resolution";
+  cacheKey: string;
+  probeImage: string;
+  nodeVersion: string;
+  abi: string;
+  packages: DependencyEnvironmentEventPackage[];
+};
+
+/** FG-664 AC3: what a SUCCESSFUL resolution puts on the task timeline, from the
+ *  receipt the manifest records. `stage` matches the refusal event's grain, so one
+ *  vocabulary covers both outcomes of one decision.
+ *
+ *  Built by NAMING each field rather than by spreading the receipt. The receipt's
+ *  `artifact`, `resolvedPath` and `staleCacheRepaired.disprovenRoot` are paths, and
+ *  the events table is read far from the dispatch that wrote it — naming the fields
+ *  means a path (or anything else) added to the receipt later cannot reach the
+ *  ledger by default. */
+export function dependencyEnvironmentResolvedPayload(
+  receipt: DependencyEnvironmentReceipt,
+): DependencyEnvironmentResolvedPayload {
+  return {
+    stage: "environment_resolution",
+    cacheKey: receipt.cacheKey,
+    probeImage: receipt.probeImage,
+    nodeVersion: receipt.nodeVersion,
+    abi: receipt.abi,
+    packages: receipt.packages.map((p) => ({ name: p.name, version: p.version, loaded: p.loaded })),
+  };
+}
+
 /** What the probe container printed, as the caller captured it. */
 export type DependencyProbeRun = { exitCode: number; stdout: string; stderrTail: string };
 

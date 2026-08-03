@@ -292,6 +292,22 @@ test("FG-664: a workflow red on a COLD cache key provisions, probes and mounts t
   assert.equal(receipt.cacheKey, hash);
   assert.equal(receipt.abi, process.versions.modules);
   assert.deepEqual(receipt.packages.map((p) => p.name), ["better-sqlite3"]);
+
+  // AC3's LEDGER half, on this lane too: the success case reaches the timeline
+  // with the same event and the same payload the invoke lane emits.
+  const resolvedEvents = eventsForRun(runId).filter(
+    (e) => e.eventType === "container.dependency_environment_resolved",
+  );
+  assert.equal(resolvedEvents.length, 1, "one resolution, one durable record");
+  assert.equal(resolvedEvents[0]!.taskId, red.id);
+  assert.deepEqual(resolvedEvents[0]!.payload, {
+    stage: "environment_resolution",
+    cacheKey: hash,
+    probeImage: receipt.probeImage,
+    nodeVersion: receipt.nodeVersion,
+    abi: receipt.abi,
+    packages: [{ name: "better-sqlite3", version: "12.11.1", loaded: true }],
+  });
 });
 
 test("FG-664: a workflow red whose probe says the real driver will not load is REFUSED — no reviewer container, verification_environment_unavailable", async () => {
@@ -334,6 +350,11 @@ test("FG-664: a workflow red whose probe says the real driver will not load is R
   );
   assert.equal(refusal.length, 1, "the refusal is recorded with the same event and grain the invoke lane uses");
   assert.equal(refusal[0]!.taskId, red.id);
+  assert.equal(
+    eventsForRun(runId).filter((e) => e.eventType === "container.dependency_environment_resolved").length,
+    0,
+    "nothing was attested, so nothing may say which engine ran",
+  );
 });
 
 test("FG-664: a workflow red whose provisioner FAILS is refused, leaves no ready marker, and never reaches the probe", async () => {

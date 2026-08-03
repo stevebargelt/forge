@@ -78,6 +78,17 @@ export type EventType =
   | "container.killed"
   | "container.idle_timeout"
   | "container.dependency_provisioning_failed"
+  // FG-664 AC3's LEDGER half, and the SUCCESS counterpart to the refusal above:
+  // a read-only dispatch's dependency environment resolved, and this is which
+  // engine it resolved to. The manifest carries the whole receipt, but a manifest
+  // is a file beside one dispatch — an auditor asking "which engine did this
+  // verification actually run against" reads the timeline, and before this event
+  // the successful case (the one an audit checks) left no trace there at all.
+  // Payload: { stage: "environment_resolution", cacheKey, probeImage, nodeVersion,
+  // abi, packages: [{ name, version, loaded }] }. Built by naming fields rather
+  // than by spreading the receipt, so no host path can reach the timeline — see
+  // dependencyEnvironmentResolvedPayload.
+  | "container.dependency_environment_resolved"
   // FG-628: the dependency-volume mountpoints could not be created in the tree
   // about to be bound at the container's project path (a read-only or
   // permission-denied checkout). The cache is left unmounted rather than mounted

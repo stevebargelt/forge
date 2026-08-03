@@ -26,9 +26,10 @@ import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
+import { eventsForTask } from "../store/events.js";
 import { insertRun } from "../store/runs.js";
 import { getTask } from "../store/tasks.js";
 import {
@@ -870,6 +871,11 @@ test("fg664 (e): non-darwin, FORGE_NO_NM_SHADOW=1 and a project with no package-
       undefined,
       `${c.label}: a not-applicable dispatch records no environment receipt`,
     );
+    assert.equal(
+      eventsForTask(res.taskId).filter((e) => e.eventType === "container.dependency_environment_resolved").length,
+      0,
+      `${c.label}: nothing was attested, so nothing may claim an engine on the timeline`,
+    );
   }
 });
 
@@ -965,6 +971,143 @@ test("fg664 (f): the task manifest records the dependencyEnvironment receipt, an
   const back = readTaskManifest(legacyDir);
   assert.equal(back?.taskId, "task-legacy");
   assert.equal(back?.dependencyEnvironment, undefined);
+});
+
+// ── (f2): the LEDGER half of AC3 ─────────────────────────────────────────────
+//
+// THE GAP THESE CLOSE. Events were written on REFUSAL only, so a lane that
+// resolved cleanly left `SELECT COUNT(*) FROM events WHERE event_type LIKE
+// '%depend%'` returning 0 — measured on a real read-only dispatch through the
+// repaired lane (run-fg-664-ac4-lane-proof-4889d0, task-red-wide-0ca8fd), whose
+// manifest nevertheless carried a full receipt. The manifest is a file beside one
+// dispatch; the successful case is the one an auditor checks, and it is the one
+// that reached no timeline.
+
+/** Every string anywhere in the payload that is an absolute path. Both kinds are
+ *  refused, not only the host's: the receipt's `artifact` / `resolvedPath` are
+ *  container paths and still have no business in a table read far from the
+ *  dispatch that wrote it. */
+function absolutePathsIn(value: unknown, at = "payload"): string[] {
+  if (typeof value === "string") return value.startsWith("/") ? [`${at}=${value}`] : [];
+  if (Array.isArray(value)) return value.flatMap((v, i) => absolutePathsIn(v, `${at}[${i}]`));
+  if (value && typeof value === "object") {
+    return Object.entries(value).flatMap(([k, v]) => absolutePathsIn(v, `${at}.${k}`));
+  }
+  return [];
+}
+
+test("fg664 (f2): a SUCCESSFUL read-only resolution records the attested engine on the task timeline, with the cache key, node, ABI, image and per-package load verdict", async () => {
+  setPlatform("darwin");
+  const project = makeProject("f2");
+  const calls: Call[] = [];
+
+  const res = await invoke({
+    agentRole: "review-rechecker",
+    task: "recheck RF-1",
+    projectDir: project,
+    readOnlyProject: true,
+    dockerExec: makeExec(calls),
+  });
+  assert.equal(res.status, "complete", res.error);
+
+  const emitted = eventsForTask(res.taskId).filter(
+    (e) => e.eventType === "container.dependency_environment_resolved",
+  );
+  assert.equal(emitted.length, 1, "one resolution, one durable record");
+  assert.equal(emitted[0]!.runId, res.runId);
+
+  const payload = emitted[0]!.payload as {
+    stage: string;
+    cacheKey: string;
+    probeImage: string;
+    nodeVersion: string;
+    abi: string;
+    packages: Array<{ name: string; version: string; loaded: boolean }>;
+  };
+  assert.equal(payload.stage, "environment_resolution", "the refusal event's grain — one vocabulary, one decision");
+  assert.equal(payload.cacheKey, lockfileHash(project));
+  assert.equal(payload.probeImage, RUNTIME_IMAGE);
+  assert.equal(payload.nodeVersion, PROBE_REPORT.node);
+  assert.equal(payload.abi, PROBE_REPORT.abi);
+  assert.deepEqual(
+    payload.packages,
+    [{ name: "better-sqlite3", version: "12.11.1", loaded: true }],
+    "the declared native package and the host-observed verdict on whether it loaded",
+  );
+});
+
+test("fg664 (f2): the resolved-environment payload carries no host path and no path at all — the receipt's own path fields are dropped, not forwarded", async () => {
+  setPlatform("darwin");
+  const project = makeProject("f2-redaction");
+  const calls: Call[] = [];
+
+  const res = await invoke({
+    agentRole: "review-rechecker",
+    task: "recheck RF-1",
+    projectDir: project,
+    readOnlyProject: true,
+    dockerExec: makeExec(calls),
+  });
+  assert.equal(res.status, "complete", res.error);
+
+  const payload = eventsForTask(res.taskId).find(
+    (e) => e.eventType === "container.dependency_environment_resolved",
+  )!.payload as Record<string, unknown>;
+
+  // The field set is CLOSED. This is what makes the redaction survive a later
+  // field being added to the receipt: the payload is built by naming fields, so
+  // a new one cannot arrive here by default, and this pins that.
+  assert.deepEqual(
+    Object.keys(payload).sort(),
+    ["abi", "cacheKey", "nodeVersion", "packages", "probeImage", "stage"],
+  );
+  const pkg = (payload.packages as Array<Record<string, unknown>>)[0]!;
+  assert.deepEqual(Object.keys(pkg).sort(), ["loaded", "name", "version"]);
+
+  assert.deepEqual(absolutePathsIn(payload), [], "no absolute path may reach the events table");
+
+  const receipt = readTaskManifest(taskDir(res.runId, res.taskId))?.dependencyEnvironment;
+  assert.ok(receipt, "the manifest half of AC3 is unchanged and still carries the whole receipt");
+  const probed = receipt.packages[0];
+  assert.ok(probed, "the fixture probes one package");
+  const { artifact, resolvedPath } = probed;
+  assert.ok(artifact, "the receipt itself DOES carry the artifact path — that is the thing dropped here");
+  assert.ok(resolvedPath, "and the resolved entry point");
+
+  const serialized = JSON.stringify(payload);
+  for (const leak of [artifact, resolvedPath, project, forgeHome, tmpdir(), homedir()]) {
+    assert.ok(!serialized.includes(leak), `the payload must not carry ${leak}`);
+  }
+});
+
+test("fg664 (f2): a REFUSED dispatch emits exactly what it emitted before, and nothing claims an engine — the success case ADDS a record, it does not change the failure one", async () => {
+  setPlatform("darwin");
+  const project = makeProject("f2-refusal");
+  const calls: Call[] = [];
+
+  const refused = await invoke({
+    agentRole: "review-rechecker",
+    task: "recheck RF-1",
+    projectDir: project,
+    readOnlyProject: true,
+    dockerExec: makeExec(calls, { probeExit: 1 }),
+  });
+  assert.equal(refused.failureKind, "verification_environment_unavailable");
+
+  const events = eventsForTask(refused.taskId);
+  assert.equal(
+    events.filter((e) => e.eventType === "container.dependency_environment_resolved").length,
+    0,
+    "nothing was attested, so nothing may say which engine ran",
+  );
+
+  const refusal = events.filter((e) => e.eventType === "container.dependency_provisioning_failed");
+  assert.equal(refusal.length, 1);
+  const payload = refusal[0]!.payload as Record<string, unknown>;
+  assert.deepEqual(Object.keys(payload).sort(), ["detail", "projectDir", "reason", "stage"]);
+  assert.equal(payload.stage, "environment_resolution");
+  assert.equal(payload.reason, "probe_failed");
+  assert.equal(payload.projectDir, project);
 });
 
 // ── (j): the rw/blue paths are untouched ─────────────────────────────────────

@@ -68,11 +68,17 @@
 #
 # USAGE
 #   ./scripts/fg664-recheck-replay.sh [--project-dir DIR] [--review ID]
-#                                     [--db PATH] [--route KEY] [--image IMAGE]
+#                                     [--candidate SHA] [--db PATH]
+#                                     [--route KEY] [--image IMAGE]
 #
 #   --project-dir  the checkout the replay dispatches against; must contain the
 #                  candidate as a commit object (default: this repo)
 #   --review       the review to replay (default: review-6b9e07e48cc6)
+#   --candidate    the candidate sha this replay is proving (default:
+#                  593f88bad31813383c53c42a27fd9ef095759db8, FG-662's fix
+#                  candidate). Must be a full 40- or 64-character lowercase hex
+#                  sha, must be present in --project-dir as a commit object, and
+#                  must be the sha the review is bound to
 #   --db           the source ledger (default: $FORGE_DB_PATH, else
 #                  $FORGE_HOME/forge.db, else ~/.forge/forge.db)
 #   --route        the resolved routing-policy key for the dispatch; without it
@@ -84,21 +90,29 @@
 #
 #   FG664_WORKDIR  parent dir for the scratch ledger copy (default: mktemp -d)
 #
-# THE CANDIDATE IS PINNED AND NOT OVERRIDABLE. A replay bound to any other
-# candidate is not evidence about this one — the ingestion path refuses exactly
-# that (src/v2/review-recheck.ts:135-142), and so does this harness.
+# THE CANDIDATE IS ASSERTED, NEVER ASSUMED. A recheck at another candidate is not
+# evidence about this one — the ingestion path refuses exactly that
+# (src/v2/review-recheck.ts:135-142), and so does this harness. `--candidate`
+# says which candidate is being proven; it does NOT relax the assertion. The
+# review must still be bound to the supplied sha, and the sha must still resolve
+# to a commit object in the dispatch checkout. Omit it and the default is
+# FG-662's candidate, exactly as before.
 
 set -euo pipefail
 
 SELF="fg664-recheck-replay"
 
-# The FG-662 fix candidate. Pinned deliberately: see the note above.
+# The FG-662 fix candidate — the DEFAULT, unchanged. `--candidate` overrides it;
+# every assertion about it survives the override. See the note above.
 CANDIDATE="593f88bad31813383c53c42a27fd9ef095759db8"
 # The three findings the substituted engine produced false "still present"
 # verdicts for. AC 4 is adjudicated on exactly these.
 REPLAY_REFS="RF-1,RF-3,RF-4"
 
 REVIEW_ID="review-6b9e07e48cc6"
+# Printed in the evidence block: a reader must be able to tell the pinned default
+# from an operator-supplied candidate without diffing the script.
+CANDIDATE_SOURCE="the pinned default"
 PROJECT_DIR_ARG=""
 DB_ARG=""
 ROUTE=""
@@ -114,13 +128,29 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --project-dir) [ $# -ge 2 ] || fatal "--project-dir needs a value"; PROJECT_DIR_ARG="$2"; shift 2 ;;
     --review)      [ $# -ge 2 ] || fatal "--review needs a value";      REVIEW_ID="$2";       shift 2 ;;
+    --candidate)   [ $# -ge 2 ] || fatal "--candidate needs a value";   CANDIDATE="$2"; CANDIDATE_SOURCE="--candidate"; shift 2 ;;
     --db)          [ $# -ge 2 ] || fatal "--db needs a value";          DB_ARG="$2";          shift 2 ;;
     --route)       [ $# -ge 2 ] || fatal "--route needs a value";       ROUTE="$2";           shift 2 ;;
     --image)       [ $# -ge 2 ] || fatal "--image needs a value";       IMAGE="$2";           shift 2 ;;
-    -h|--help)     sed -n '2,89p' "$0"; exit 2 ;;
+    -h|--help)     sed -n '2,99p' "$0"; exit 2 ;;
     *)             fatal "unknown argument: $1 (see --help)" ;;
   esac
 done
+
+# ── The candidate must LOOK like a sha before anything is asked about it ─────
+#
+# `git cat-file -t` below is the real assertion, but it resolves far more than a
+# sha: a branch, a tag, `HEAD`, `@{-1}` all name a commit, and any of them would
+# then fail the review-binding comparison as a baffling "bound to <sha>, not
+# HEAD" rather than as the malformed argument it is. Full length only — the
+# binding check is a string comparison against the sha the ledger recorded, so an
+# abbreviation can never match it, and saying so here beats saying it there.
+case "$CANDIDATE" in
+  "" | *[!0-9a-f]*)
+    fatal "--candidate '$CANDIDATE' is not a sha: expected 40 (or 64) lowercase hex characters and nothing else." ;;
+esac
+[ ${#CANDIDATE} -eq 40 ] || [ ${#CANDIDATE} -eq 64 ] \
+  || fatal "--candidate '$CANDIDATE' is ${#CANDIDATE} characters; a FULL 40- or 64-character sha is required. The review's recorded candidate is compared as a string, so an abbreviation could never match it."
 
 # ── Prerequisites, in the order that gives the most useful diagnostic ─────────
 
@@ -565,7 +595,7 @@ fi
 echo "repo          : $REPO_ROOT"
 echo "project dir   : $PROJECT_DIR"
 echo "review        : $REVIEW_ID (ticket ${LIVE_TICKET:-unknown}, state before the replay: $LIVE_STATE)"
-echo "candidate     : $CANDIDATE  (git cat-file -t = commit, in $PROJECT_DIR)"
+echo "candidate     : $CANDIDATE  (from $CANDIDATE_SOURCE; git cat-file -t = commit, in $PROJECT_DIR)"
 echo "confirmed sha : $LIVE_CONFIRMED"
 echo "workspace     : recorded ${LIVE_WORKSPACE:-none}; overridden for this replay with --project $PROJECT_DIR"
 echo "route         : ${ROUTE_ARGS[*]}"
