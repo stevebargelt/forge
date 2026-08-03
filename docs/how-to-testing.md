@@ -285,6 +285,25 @@ What it proves is that the mount shape is safe on a real kernel. What it does *n
 
 Paste the evidence block into FG-664's acceptance grid, citing the candidate SHA and image, and **re-run it whenever the mount planner or the dependency-environment resolver changes** — the same standing instruction the FG-621 smoke carries, for the same reason: acceptance evidence against a superseded SHA is worse than none, because it reads as proof.
 
+### Replaying a recheck through the repaired lane
+
+`scripts/fg664-recheck-replay.sh` is the other operator-run half: it re-executes a recheck **through the repaired lane** and prints what the ledger actually recorded, which is how a review whose findings came from a substituted engine is shown to come back differently once the real driver is loadable. It dispatches a real agent container against a real candidate, so it is outside every npm tier and outside CI for the same reason the smoke is.
+
+```bash
+./scripts/fg664-recheck-replay.sh [--project-dir DIR] [--review ID] [--candidate SHA]
+                                  [--db PATH] [--route KEY] [--image IMAGE]
+```
+
+- `--project-dir` — the checkout the replay dispatches against (default: this repo); it must contain the candidate as a commit object.
+- `--review` — the review to replay (default: `review-6b9e07e48cc6`, FG-662's). The finding refs it adjudicates are pinned to `RF-1`, `RF-3`, `RF-4` — the three the substituted engine produced false `still_present` verdicts for — and are not a flag.
+- `--candidate` — the candidate sha being proven (default: `593f88bad31813383c53c42a27fd9ef095759db8`, FG-662's fix candidate). Must be a full 40- or 64-character lowercase hex sha and must resolve to a **commit object** in `--project-dir`.
+- `--db` — the source ledger (default: `$FORGE_DB_PATH`, else `$FORGE_HOME/forge.db`, else `~/.forge/forge.db`). On the copy path below it is checksummed (store **and** `-wal`) before and after and asserted byte-identical, so a replay that was supposed to touch only the copy cannot quietly have written to it.
+- `--route` / `--image` — the routing-policy key for the dispatch (without it the replay runs `--unrouted`, and which was used is printed), and an agent image to assert exists before dispatching.
+
+**`--candidate` selects which candidate is asserted; it never disables the assertion.** The review must still be *bound* to the sha supplied, exactly as recheck ingestion requires — a recheck at another candidate is not evidence about this one, and the harness refuses the replay rather than relaxing it. The flag exists because the pinned default is one specific historical review; a controlled replay of any other review needs to name its own candidate.
+
+**The re-entry question is answered by the product, not by the script.** It asks `forge review continue --dry-run` which transition the row may legitimately take: if the answer is `recheck` the row is replayed in place on the live ledger; otherwise (a `settled` row is terminal, and no verb reverses that) an *equivalent* recheck is materialized over the same finding ids at the same candidate on a **copy** of the ledger, and the divergence is printed — the original row copied byte-for-byte and rewound past Stage 8, never a hand-built fixture. It fails closed the same way the smoke does: a missing prerequisite exits **2**, and the single `exit 0` is reached only when every replayed finding came back `resolved` with `coverage: executed` and non-empty cited runner output. A finding coming back `blocked_environment` is reported as a **failure** — half (A) did not take on this host.
+
 ## Timing data and classification history
 
 `docs/test-suite-timing-fg495.md` has the full per-file/per-tier timing measurements behind FG-495's tiering decision, plus a file → old-tier → new-tier → reason table for every test relocated out of the unit tier when the content guard was extended.
