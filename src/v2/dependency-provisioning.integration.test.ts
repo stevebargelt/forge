@@ -8,7 +8,10 @@ import { join } from "node:path";
 import { worktreeDir, integrationWorktreeDir } from "../util/paths.js";
 import {
   DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE,
+  declaredDependencyNames,
   lockfileHash,
+  readDependencyManifests,
+  resolveDependencyEnvironment,
   safeLockfileHash,
   isSafeWorkspacePath,
   workspaceMembers,
@@ -755,4 +758,194 @@ test("pruneDependencyCache: real dependencyCacheDir marker enumeration finds .re
   assert.ok(!result.markersRemoved.includes(join(dir, `${key}.tmp`)));
   assert.equal(existsSync(join(dir, `${key}.ready`)), false);
   assert.equal(existsSync(join(dir, `${key}.tmp`)), true, "non-marker files must be left alone");
+});
+
+// ── FG-678: the three-way dependency discriminator ───────────────────────────
+//
+// A missing lockfile used to mean exactly one thing to the resolver — "nothing to
+// provision" — and it covers two projects that need opposite answers. The project
+// that declares nothing genuinely has nothing to bind and must dispatch as it
+// always did. The project that declares dependencies it cannot key has something
+// to bind and no reproducible name for it, and calling that "not applicable" is
+// the falsehood that handed an agent an empty workspace and let it improvise. The
+// cases below pin all three outcomes as DISTINCT, and pin the position of the
+// discriminator relative to the two escape hatches.
+
+/** A project fixture for the discriminator: dependencies declared or not,
+ *  lockfile present or not, plus optional workspace members. */
+function makeDiscriminatorRepo(opts: {
+  deps?: Record<string, string>;
+  devDeps?: Record<string, string>;
+  lockfile?: boolean;
+  packageJson?: boolean;
+  workspaces?: Record<string, Record<string, string> | null>;
+}): string {
+  const dir = mkdtempSync(join(tmpdir(), "forge-fg678-"));
+  if (opts.packageJson !== false) {
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({
+        name: "fg678-subject",
+        ...(opts.workspaces ? { workspaces: Object.keys(opts.workspaces) } : {}),
+        ...(opts.deps ? { dependencies: opts.deps } : {}),
+        ...(opts.devDeps ? { devDependencies: opts.devDeps } : {}),
+      }),
+    );
+  }
+  for (const [rel, deps] of Object.entries(opts.workspaces ?? {})) {
+    mkdirSync(join(dir, rel), { recursive: true });
+    writeFileSync(
+      join(dir, rel, "package.json"),
+      JSON.stringify({ name: `fg678-${rel}`, ...(deps ? { dependencies: deps } : {}) }),
+    );
+  }
+  if (opts.lockfile) {
+    writeFileSync(join(dir, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, salt: dir }));
+  }
+  return dir;
+}
+
+/** The resolver over injected containers, counting every one it asked for. A
+ *  refusal decided host-side must ask for NONE. */
+function resolveOver(repoRoot: string, over: { platform?: string } = {}) {
+  const containers: string[] = [];
+  const outcome = resolveDependencyEnvironment({
+    repoRoot,
+    image: "agent-dev-worker:fg678",
+    platform: over.platform ?? "darwin",
+    lockOpts: { pollMs: 1 },
+    runProvisioner: async () => {
+      containers.push("provisioner");
+      return { exitCode: 0, stderrTail: "" };
+    },
+    runProbe: async (nonce) => {
+      containers.push("probe");
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          nonce,
+          node: "v24.4.0",
+          abi: "137",
+          roots: [{ path: "/project/node_modules", entries: 412, installRoot: true }],
+          packages: [],
+          missing: [],
+        }),
+        stderrTail: "",
+      };
+    },
+    runLoad: async () => {
+      containers.push("load");
+      return { exitCode: 0, stderrTail: "" };
+    },
+  });
+  return { outcome, containers };
+}
+
+test("FG-678 (1): a project with NO readable manifest and no lockfile is not_applicable — never refused", async () => {
+  const repo = makeDiscriminatorRepo({ packageJson: false });
+  const { outcome, containers } = resolveOver(repo);
+  const res = await outcome;
+  assert.equal(res.outcome, "not_applicable", res.outcome === "refused" ? res.detail : "");
+  assert.deepEqual(containers, [], "a not-applicable configuration builds no container at all");
+  assert.equal(declaredDependencyNames(repo), undefined, "and this is the 'nothing could be read' case");
+});
+
+test("FG-678 (1): a manifest DECLARING NO DEPENDENCIES with no lockfile is not_applicable — never refused, never degraded", async () => {
+  const repo = makeDiscriminatorRepo({});
+  const { outcome, containers } = resolveOver(repo);
+  const res = await outcome;
+  assert.equal(res.outcome, "not_applicable", res.outcome === "refused" ? res.detail : "");
+  assert.deepEqual(containers, []);
+  // The distinction the outcome rests on: this project really does declare nothing.
+  assert.deepEqual([...(declaredDependencyNames(repo) ?? [])], []);
+});
+
+test("FG-678 (2): declared dependencies WITH a package-lock.json take the pre-existing resolve path, unchanged", async () => {
+  const repo = makeDiscriminatorRepo({ deps: { "better-sqlite3": "^12.11.1" }, lockfile: true });
+  const { outcome, containers } = resolveOver(repo);
+  const res = await outcome;
+  assert.equal(res.outcome, "ready", res.outcome === "refused" ? res.detail : "");
+  assert.deepEqual(containers, ["provisioner", "probe"], "provision then attest, exactly as before");
+  assert.equal(res.outcome === "ready" ? res.receipt.cacheKey : "", lockfileHash(repo));
+});
+
+test("FG-678 (3): declared dependencies WITHOUT a supported lockfile REFUSE as lockfile_absent, before any container", async () => {
+  const repo = makeDiscriminatorRepo({ deps: { "better-sqlite3": "^12.11.1" } });
+  const { outcome, containers } = resolveOver(repo);
+  const res = await outcome;
+  assert.equal(res.outcome, "refused");
+  assert.equal(res.outcome === "refused" ? res.reason : "", "lockfile_absent");
+  assert.deepEqual(containers, [], "the decision is host-side — nothing is dispatched into an unkeyable workspace");
+
+  const detail = res.outcome === "refused" ? res.detail : "";
+  // (a) which manifest declared them, (b) which lockfile Forge supports,
+  // (c) that adding one is what makes the dispatch reproducible.
+  assert.ok(detail.includes(join(repo, "package.json")), `detail must name the declaring manifest: ${detail}`);
+  assert.ok(detail.includes("better-sqlite3"), `detail must name what was declared: ${detail}`);
+  assert.ok(detail.includes("package-lock.json"), `detail must name the supported lockfile: ${detail}`);
+  assert.ok(/reproducib/i.test(detail), `detail must name the remedy's purpose: ${detail}`);
+  // BD-3, explicitly forbidden: this project has dependencies. Nothing may tell
+  // it — or the agent downstream of it — that its workspace has none.
+  assert.ok(!/no dependencies|declare no dependencies/i.test(detail), `must never claim the project has no deps: ${detail}`);
+});
+
+test("FG-678 (3): devDependencies alone put a lockfile-less project on the refusing side", async () => {
+  const repo = makeDiscriminatorRepo({ devDeps: { tsx: "^4.0.0" } });
+  const res = await resolveOver(repo).outcome;
+  assert.equal(res.outcome === "refused" ? res.reason : res.outcome, "lockfile_absent");
+});
+
+test("FG-678 (3): a WORKSPACE MEMBER's declaration refuses too, and the detail names that member's manifest", async () => {
+  const repo = makeDiscriminatorRepo({ workspaces: { dashboard: { "better-sqlite3": "^12.11.1" } } });
+  const res = await resolveOver(repo).outcome;
+  assert.equal(res.outcome, "refused");
+  assert.equal(res.outcome === "refused" ? res.reason : "", "lockfile_absent");
+  assert.ok(
+    (res.outcome === "refused" ? res.detail : "").includes(join(repo, "dashboard", "package.json")),
+    "the manifest that put the project on this side is the one named",
+  );
+});
+
+test("FG-678: the escape hatches short-circuit AHEAD of the discriminator — a declares-deps-no-lockfile project is not_applicable on linux and under FORGE_NO_NM_SHADOW=1", async () => {
+  const repo = makeDiscriminatorRepo({ deps: { "better-sqlite3": "^12.11.1" } });
+
+  const linux = await resolveOver(repo, { platform: "linux" }).outcome;
+  assert.equal(linux.outcome, "not_applicable", "the hazard is darwin-only; a refusal above the gate breaks CI");
+  assert.match(linux.outcome === "not_applicable" ? linux.reason : "", /linux/);
+
+  const saved = process.env.FORGE_NO_NM_SHADOW;
+  process.env.FORGE_NO_NM_SHADOW = "1";
+  try {
+    const hatch = await resolveOver(repo).outcome;
+    assert.equal(hatch.outcome, "not_applicable", "the operator escape hatch must still escape");
+    assert.match(hatch.outcome === "not_applicable" ? hatch.reason : "", /FORGE_NO_NM_SHADOW/);
+  } finally {
+    if (saved === undefined) delete process.env.FORGE_NO_NM_SHADOW;
+    else process.env.FORGE_NO_NM_SHADOW = saved;
+  }
+});
+
+test("FG-678: an unparseable root package.json with no lockfile stays not_applicable — a refusal is never decided on a guess", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "forge-fg678-bad-"));
+  writeFileSync(join(repo, "package.json"), "{ not json");
+  const res = await resolveOver(repo).outcome;
+  assert.equal(res.outcome, "not_applicable", res.outcome === "refused" ? res.detail : "");
+});
+
+test("FG-678: readDependencyManifests reports each readable manifest and what it declared; declaredDependencyNames is its union", () => {
+  const repo = makeDiscriminatorRepo({
+    deps: { a: "1" },
+    devDeps: { b: "1" },
+    workspaces: { dashboard: { c: "1" }, tools: null },
+  });
+  const manifests = readDependencyManifests(repo);
+  assert.deepEqual(
+    manifests.map((m) => [m.path, m.names.sort()]),
+    [
+      [join(repo, "package.json"), ["a", "b"]],
+      [join(repo, "dashboard", "package.json"), ["c"]],
+      [join(repo, "tools", "package.json"), []],
+    ],
+  );
+  assert.deepEqual([...(declaredDependencyNames(repo) ?? [])].sort(), ["a", "b", "c"]);
 });
