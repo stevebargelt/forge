@@ -319,14 +319,21 @@ test("fg376 (a): darwin + worktree mode + workspaces repo → one provisioner co
   });
 
   const calls: Call[] = [];
-  const wave = await runNext({ runId, workflow: DISPATCH_TEST_WORKFLOW, dockerExec: makeTwoPhaseExec(calls) });
+  const wave = await runNext({ runId, workflow: DISPATCH_TEST_WORKFLOW, dockerExec: makeMultiCapturingExec(calls) });
 
   assert.deepEqual(wave.completedSteps, ["build"]);
-  assert.equal(calls.length, 2, `expected exactly one provisioner call + one agent call, got ${calls.length}: ${JSON.stringify(calls.map((c) => c.kind))}`);
-  assert.deepEqual(calls.map((c) => c.kind), ["provisioner", "agent"], "provisioner must run to completion BEFORE the agent container is built");
+  // FG-678: the worktree rw primary resolves through the SAME resolver as every
+  // other lane, so Forge's own probe + load containers now attest this dispatch's
+  // environment too. The FG-376 property under test is unchanged and still first:
+  // one provisioner, run to completion before any agent container is built.
+  assert.deepEqual(
+    calls.map((c) => c.kind),
+    ["provisioner", "probe", "load", "agent"],
+    `every Forge-owned container must precede the agent container; got ${JSON.stringify(calls.map((c) => c.kind))}`,
+  );
 
   const provisionerArgs = calls[0]!.args;
-  const agentArgs = calls[1]!.args;
+  const agentArgs = calls[3]!.args;
 
   // Provisioner: named volumes mounted READ-WRITE, install root set, no agent invocation.
   const provisionerVolumes = pickVolumeArgs(provisionerArgs).filter((v) => v.includes("node_modules"));
@@ -530,6 +537,146 @@ test("fg678 (c): a non-worktree rw dispatch whose environment cannot be establis
   );
 });
 
+// ── FG-678 review RF-1/RF-2/RF-3/RF-5/RF-6: the WORKTREE rw lane, which kept a
+//    resolver of its own ────────────────────────────────────────────────────────
+//
+// FG-678's first cut routed the non-worktree rw shape through the shared resolver
+// and left the worktree rw arm planning volumes for itself. That arm caught every
+// planning failure — including the absence of a package-lock.json — and turned it
+// into `plan = undefined`, which spawn.ts answers with the legacy anonymous
+// shadow. So on the ONE lane a pipeline dispatch actually takes on darwin, a
+// project that DECLARES dependencies and ships no lockfile started an agent
+// behind an empty writable node_modules mask instead of being refused
+// `lockfile_absent`, and left the agent to improvise an install of unpinned
+// dependencies (RF-1/RF-3/RF-5/RF-6). The same arm provisioned and mounted a
+// cache without ever attesting it or recording a receipt, so nothing durable
+// could say which engine that agent ran against (RF-2).
+//
+// The rule is a property of the PROJECT'S STATE, so both cases below are the
+// SAME rule the other two lanes already applied, reached from the worktree shape.
+
+/** A repo that DECLARES dependencies and ships NO package-lock.json — BD-3a's
+ *  refusing state, and the one the worktree arm used to read as "nothing to
+ *  provision". */
+function makeRepoDeclaringDepsWithoutLockfile(): string {
+  const dir = makeTmpDir();
+  execFileSync("git", ["init", "-b", "main"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "test@forge.test"], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["config", "user.name", "Forge Test"], { cwd: dir, stdio: "ignore" });
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({ name: "rf1", private: true, dependencies: { "better-sqlite3": "^12.11.1" } }),
+  );
+  writeFileSync(join(dir, ".gitignore"), "node_modules/\n");
+  execFileSync("git", ["add", "."], { cwd: dir, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "declares deps, ships no lockfile"], { cwd: dir, stdio: "ignore" });
+  return dir;
+}
+
+test("fg678 RF-1: a WORKTREE rw dispatch declaring dependencies with no lockfile is refused lockfile_absent — it no longer falls through to the anonymous shadow", async () => {
+  setPlatform("darwin");
+  process.env.FORGE_WORKTREES = "1";
+  process.env.FORGE_WORKTREE_IGNORE_DIRTY = "1";
+
+  const repo = makeRepoDeclaringDepsWithoutLockfile();
+  const { runId } = startRun({
+    workflow: DISPATCH_TEST_WORKFLOW,
+    title: "fg678 RF-1 worktree lockfile_absent",
+    inputs: {},
+    projectDir: repo,
+  });
+
+  const calls: Call[] = [];
+  const wave = await runNext({ runId, workflow: DISPATCH_TEST_WORKFLOW, dockerExec: makeMultiCapturingExec(calls) });
+
+  assert.deepEqual(wave.failedSteps, ["build"]);
+  const primary = tasksForRun(runId).find((t) => t.phase === "build" && t.parentId === undefined)!;
+
+  // Non-vacuity: this really is the WORKTREE rw shape. Without it the case would
+  // silently re-prove the non-worktree arm, which already refused.
+  assert.ok(primary.worktreePath, "the fixture must dispatch through a worktree — otherwise this proves the wrong lane");
+  assert.notEqual(primary.worktreePath, repo, "the worktree must be a distinct tree from the operator's checkout");
+
+  assert.deepEqual(calls, [], "no container of any kind may start — an unkeyable environment is decided host-side");
+  assert.equal(primary.status, "failed");
+  assert.equal(failureKindForTask(primary.id), "verification_environment_unavailable", "the EXISTING kind — no new vocabulary");
+  assert.match(String(primary.error), /lockfile_absent/);
+  assert.match(String(primary.error), /better-sqlite3/, "the refusal must name what the project declared");
+  assert.match(String(primary.error), /package-lock\.json/, "and the repair the operator has to make");
+
+  const refusal = eventsForTask(primary.id).find(
+    (e) =>
+      e.eventType === "container.dependency_provisioning_failed" &&
+      (e.payload as { stage?: string }).stage === "environment_resolution",
+  );
+  assert.ok(refusal, "the refusal is recorded with the same event and grain the other lanes use");
+  assert.equal((refusal.payload as { reason?: string }).reason, "lockfile_absent");
+  assert.equal(
+    (refusal.payload as { projectDir?: string }).projectDir,
+    primary.worktreePath,
+    "the event must name the tree that would have been bound, not the parent checkout",
+  );
+});
+
+test("fg678 RF-2: a WORKTREE rw dispatch attests the cache it mounts and records a dependencyEnvironment receipt", async () => {
+  setPlatform("darwin");
+  process.env.FORGE_WORKTREES = "1";
+  process.env.FORGE_WORKTREE_IGNORE_DIRTY = "1";
+
+  const repo = makeTmpDir();
+  initGitRepoWithWorkspace(repo);
+  writeFileSync(
+    join(repo, "package.json"),
+    JSON.stringify({ name: "x", workspaces: ["dashboard"], dependencies: { "better-sqlite3": "^12.11.1" } }),
+  );
+  writeFileSync(join(repo, "package-lock.json"), '{"lockfileVersion":3,"fg678-rf2-worktree-receipt":true}');
+  execFileSync("git", ["add", "."], { cwd: repo, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "fg678 RF-2: unique lockfile"], { cwd: repo, stdio: "ignore" });
+
+  const { runId } = startRun({
+    workflow: DISPATCH_TEST_WORKFLOW,
+    title: "fg678 RF-2 worktree receipt",
+    inputs: {},
+    projectDir: repo,
+  });
+
+  const calls: Call[] = [];
+  const wave = await runNext({ runId, workflow: DISPATCH_TEST_WORKFLOW, dockerExec: makeMultiCapturingExec(calls) });
+
+  assert.deepEqual(wave.completedSteps, ["build"]);
+  const primary = tasksForRun(runId).find((t) => t.phase === "build" && t.parentId === undefined)!;
+  assert.ok(primary.worktreePath, "the fixture must dispatch through a worktree");
+
+  // The cache this lane mounts is PROBED before the agent that will use it runs.
+  const agentAt = calls.findIndex((c) => c.kind === "agent");
+  assert.ok(agentAt > 0, "an agent container must have been built");
+  assert.ok(
+    calls.slice(0, agentAt).some((c) => c.kind === "probe") && calls.slice(0, agentAt).some((c) => c.kind === "load"),
+    `the probe and load containers must precede the agent; got ${JSON.stringify(calls.map((c) => c.kind))}`,
+  );
+  const agentVolumes = pickVolumeArgs(calls[agentAt]!.args).filter((v) => v.includes("forge-deps-"));
+  assert.ok(agentVolumes.length > 0 && agentVolumes.every((v) => v.endsWith(":ro")), "the attested cache is what gets mounted, read-only");
+
+  // AC6's durable half: the manifest answers which engine this task ran against.
+  const receipt = readTaskManifest(taskDir(runId, primary.id))?.dependencyEnvironment;
+  assert.ok(receipt, "the worktree rw lane must record its attested environment, exactly as the other lanes do");
+  assert.equal(receipt.cacheKey, lockfileHash(repo));
+  assert.equal(receipt.abi, process.versions.modules);
+  assert.deepEqual(receipt.packages.map((p) => p.name), ["better-sqlite3"]);
+
+  // AC3's ledger half, same event and same payload as every other lane.
+  const resolved = eventsForTask(primary.id).filter((e) => e.eventType === "container.dependency_environment_resolved");
+  assert.equal(resolved.length, 1, "one resolution per dispatch, durably recorded");
+  assert.deepEqual(resolved[0]!.payload, {
+    stage: "environment_resolution",
+    cacheKey: receipt.cacheKey,
+    probeImage: receipt.probeImage,
+    nodeVersion: receipt.nodeVersion,
+    abi: receipt.abi,
+    packages: [{ name: "better-sqlite3", version: "12.11.1", loaded: true }],
+  });
+});
+
 test("fg376 (c): two worktree-mode dispatches sharing the same lockfile — only the first provisions, the second skips straight to the read-only agent mount", async () => {
   setPlatform("darwin");
   process.env.FORGE_WORKTREES = "1";
@@ -542,16 +689,23 @@ test("fg376 (c): two worktree-mode dispatches sharing the same lockfile — only
 
   const run1 = startRun({ workflow: DISPATCH_TEST_WORKFLOW, title: "fix2 serialize dispatch 1", inputs: {}, projectDir: repo1 });
   const calls1: Call[] = [];
-  const wave1 = await runNext({ runId: run1.runId, workflow: DISPATCH_TEST_WORKFLOW, dockerExec: makeTwoPhaseExec(calls1) });
+  const wave1 = await runNext({ runId: run1.runId, workflow: DISPATCH_TEST_WORKFLOW, dockerExec: makeMultiCapturingExec(calls1) });
   assert.deepEqual(wave1.completedSteps, ["build"]);
-  assert.deepEqual(calls1.map((c) => c.kind), ["provisioner", "agent"], "first dispatch is the sole provisioner");
+  assert.deepEqual(calls1.map((c) => c.kind), ["provisioner", "probe", "load", "agent"], "first dispatch is the sole provisioner");
 
   const run2 = startRun({ workflow: DISPATCH_TEST_WORKFLOW, title: "fix2 serialize dispatch 2", inputs: {}, projectDir: repo2 });
   const calls2: Call[] = [];
-  const wave2 = await runNext({ runId: run2.runId, workflow: DISPATCH_TEST_WORKFLOW, dockerExec: makeTwoPhaseExec(calls2) });
+  const wave2 = await runNext({ runId: run2.runId, workflow: DISPATCH_TEST_WORKFLOW, dockerExec: makeMultiCapturingExec(calls2) });
   assert.deepEqual(wave2.completedSteps, ["build"]);
-  assert.deepEqual(calls2.map((c) => c.kind), ["agent"], "second dispatch reuses the ready marker — no provisioner, straight to the agent");
-  const agentVolumes = pickVolumeArgs(calls2[0]!.args).filter((v) => v.includes("forge-deps-"));
+  // The INSTALL is what the marker makes reusable; the attestation is per
+  // dispatch, because a receipt answers "which engine did THIS task run
+  // against". So the second dispatch still probes — it just never re-installs.
+  assert.deepEqual(
+    calls2.map((c) => c.kind),
+    ["probe", "load", "agent"],
+    "second dispatch reuses the ready marker — no provisioner, straight to attesting and the agent",
+  );
+  const agentVolumes = pickVolumeArgs(calls2[2]!.args).filter((v) => v.includes("forge-deps-"));
   assert.ok(agentVolumes.length > 0 && agentVolumes.every((v) => v.endsWith(":ro")), "second dispatch mounts the (shared) named volume read-only for reuse");
 });
 
@@ -588,11 +742,11 @@ test("fg376 (d): a failed provisioner (exit 123) leaves no ready marker, fails t
   const repo2 = makeRepoWithLockContent(lockContent);
   const run2 = startRun({ workflow: DISPATCH_TEST_WORKFLOW, title: "fix2 failure dispatch 2", inputs: {}, projectDir: repo2 });
   const calls2: Call[] = [];
-  const wave2 = await runNext({ runId: run2.runId, workflow: DISPATCH_TEST_WORKFLOW, dockerExec: makeTwoPhaseExec(calls2) });
+  const wave2 = await runNext({ runId: run2.runId, workflow: DISPATCH_TEST_WORKFLOW, dockerExec: makeMultiCapturingExec(calls2) });
   assert.deepEqual(wave2.completedSteps, ["build"]);
   assert.deepEqual(
     calls2.map((c) => c.kind),
-    ["provisioner", "agent"],
+    ["provisioner", "probe", "load", "agent"],
     "no marker was left by the failed attempt, so this dispatch must re-provision, not reuse",
   );
 });
@@ -670,21 +824,25 @@ test("fg376 (e)/FIX4: a read-only red reviewing a task with a populated cache ke
   const wave = await runNext({ runId, workflow: DISPATCH_TEST_WORKFLOW_WITH_RED, dockerExec: makeMultiCapturingExec(calls) });
 
   assert.deepEqual(wave.completedSteps, ["build"]);
-  assert.equal(
-    calls.length,
-    5,
-    `expected provisioner + primary agent + FG-664 probe + 1 load + 1 red container dispatch, got ${calls.length}: ${JSON.stringify(calls.map((c) => c.kind))}`,
+  // FG-678: both dispatches in the wave resolve through the same resolver, so
+  // each is preceded by its OWN probe + load — the primary's mount shape is not
+  // the red's, and a receipt answers "which engine did THIS task run against".
+  // The install is what stays shared: one provisioner for the whole wave.
+  assert.deepEqual(
+    calls.map((c) => c.kind),
+    ["provisioner", "probe", "load", "agent", "probe", "load", "agent"],
+    `expected one provisioner + one probe/load per dispatch + both agent containers, got ${JSON.stringify(calls.map((c) => c.kind))}`,
   );
   assert.equal(calls.filter((c) => c.kind === "provisioner").length, 1, "exactly one provisioner call across the whole wave");
   assert.equal(
     calls.filter((c) => c.kind === "probe").length,
-    1,
-    "FG-664: the read-only red is preceded by exactly one Forge-owned probe container",
+    2,
+    "FG-664/FG-678: every agent container is preceded by exactly one Forge-owned probe container",
   );
   assert.equal(
     calls.filter((c) => c.kind === "load").length,
-    1,
-    "FG-664: and by one load container per native artifact the probe found — the load never runs beside the reporter",
+    2,
+    "and by one load container per native artifact the probe found — the load never runs beside the reporter",
   );
 
   const provisionerCall = calls.find((c) => c.kind === "provisioner");

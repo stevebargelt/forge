@@ -211,12 +211,13 @@ export function planDependencyVolumes(repoRoot: string, projectContainerPath: st
  *  spawn.ts derives what it binds from the same plan, so a skipped member's
  *  volume would still be mounted at a path with no mountpoint — the original
  *  container_crash, silently. Throwing is this function's established failure
- *  signal (mkdirSync already throws on a read-only/permission-denied checkout),
- *  and the caller that owns the mount decision — runNext.ts's
- *  projectTreeIsMountable — already converts it into "mount no dependency
- *  volume at all" plus a `container.dependency_mountpoints_unavailable` event.
- *  So the refusal degrades the dispatch instead of failing it, and the skip is
- *  observable on the run timeline.
+ *  signal (mkdirSync already throws on a read-only/permission-denied checkout).
+ *  FG-664/FG-678 changed what the caller does with it: the sole caller on every
+ *  dispatch lane is now resolveDependencyEnvironment below, which turns the
+ *  throw into a `mountpoints_unavailable` REFUSAL rather than into a degraded
+ *  dispatch that mounts nothing. Degrading was the defect — a reviewer that
+ *  mounts nothing reads the host's wrong-platform modules, and a writable
+ *  dispatch that mounts nothing gets an empty mask it cannot install into.
  *
  *  Returns the created paths; empty when the project has no lockfile, i.e. no
  *  plan and nothing to mount. */

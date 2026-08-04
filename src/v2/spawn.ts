@@ -1733,6 +1733,16 @@ export type PrepareDependencyEnvironmentArgs = {
   /** Where the provisioner's and probe's container logs land (the task dir). */
   logDir: string;
   exec: DockerExecFn;
+  /** FG-437/FG-559, generalized by FG-678: the provisioner CONTAINER's own
+   *  lifecycle. The resolver reports one outcome for the whole environment
+   *  decision; these report the one container inside it that a caller has to
+   *  see separately — its name/cacheKey are what reconcile recovers a
+   *  mid-provision crash from (the worktree may be gone by then), and its exit
+   *  code carries the entrypoint's git-probe diagnosis, which reads as an npm
+   *  failure if it is folded into `provisioning_failed`. Fired only when a
+   *  provisioner actually runs; a ready cache runs none. */
+  onProvisionerStarted?: (cacheKey: string) => void;
+  onProvisionerExited?: (cacheKey: string, exitCode: number, stderrTail: string) => void;
   /** Test seam — see resolveDependencyEnvironment. */
   platform?: string;
   lockOpts?: DependencyCacheLockOpts;
@@ -1775,6 +1785,7 @@ export async function prepareDependencyEnvironmentForDispatch(
       const provisionerArgs = buildProvisionerDockerArgs(args.runtime, containerCtx, plan);
       const stdoutPath = join(args.logDir, "container.provision.stdout.log");
       const stderrPath = join(args.logDir, "container.provision.stderr.log");
+      args.onProvisionerStarted?.(plan.lockfileHash);
       const exitCode = await args.exec({
         args: provisionerArgs,
         stdin: undefined,
@@ -1784,7 +1795,9 @@ export async function prepareDependencyEnvironmentForDispatch(
         // FG-492 finding 2: the provisioner owns its own --rm lifecycle.
         isProvisionerExec: true,
       });
-      return { exitCode, stderrTail: existsSync(stderrPath) ? readFileSync(stderrPath, "utf8").trim() : "" };
+      const stderrTail = existsSync(stderrPath) ? readFileSync(stderrPath, "utf8").trim() : "";
+      args.onProvisionerExited?.(plan.lockfileHash, exitCode, stderrTail);
+      return { exitCode, stderrTail };
     },
     runProbe: async (nonce, declared) => {
       const plan = planOrThrow();

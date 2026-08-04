@@ -561,15 +561,17 @@ test("FG-628 (A4): a real container fails to start on the nested read-only volum
 // darwin "runs anyway" means the red reads the HOST's darwin-arm64 node_modules
 // through the `/project:ro` bind, which is precisely the substitution that
 // produced FG-662's three false verdicts. So the read-only lane now REFUSES:
-// same event, same diagnosis, no reviewer.
+// same diagnosis, carried by the resolver's `container.dependency_provisioning_failed`
+// at the `environment_resolution` grain, and no reviewer.
 //
-// FG-678 THEN SUPERSEDED IT FOR THE WRITABLE NON-WORKTREE LANE TOO, which is why
-// these two cases now settle on the PRIMARY rather than on the red. FG-628 let
-// that lane degrade on the reasoning that the rw container installs its own
-// dependencies, so nothing is substituted — but its node_modules mask is an
-// ANONYMOUS, EMPTY volume, so a degraded rw dispatch has no dependencies and no
-// way to obtain any. Both lanes now refuse, and the primary refuses first, so a
-// tree forge cannot prepare produces no container at all.
+// FG-678 THEN SUPERSEDED IT FOR THE WRITABLE LANES TOO — first the non-worktree
+// shape, then (review RF-1) the worktree one — which is why these two cases now
+// settle on the PRIMARY rather than on the red. FG-628 let those lanes degrade on
+// the reasoning that the rw container installs its own dependencies, so nothing is
+// substituted — but its node_modules mask is an ANONYMOUS, EMPTY volume, so a
+// degraded rw dispatch has no dependencies and no way to obtain any. Every lane
+// now refuses, and the primary refuses first, so a tree forge cannot prepare
+// produces no container at all.
 //
 // What is unchanged, and is still what these cases pin: the mountpoint failure is
 // observable on the timeline against the tree that could not host it, NOTHING is

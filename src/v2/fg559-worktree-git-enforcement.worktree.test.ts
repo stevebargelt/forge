@@ -420,16 +420,24 @@ test("fg559e: the PROVISIONER argv is refused when the parent .git bind cannot b
   );
 });
 
-test("fg559e: runContainer builds (and so asserts) the provisioner argv BEFORE it takes the provisioning lock and execs", () => {
-  const src = readFileSync(join(REPO_ROOT, "src", "v2", "runNext.ts"), "utf8");
-  const runContainerAt = src.indexOf("async function runContainer(");
-  const buildAt = src.indexOf("buildProvisionerDockerArgs(", runContainerAt);
-  const provisionAt = src.indexOf("provisionDependencyCache(", runContainerAt);
+test("fg559e: the shared resolver builds (and so asserts) the provisioner argv BEFORE the exec that would start it", () => {
+  // FG-678 moved the argv build out of runNext and into the ONE seam every
+  // dispatch lane resolves through, so the anchors move with it. What FG-559
+  // pins is unchanged and is the only thing that ever mattered: the mount-plan
+  // assertion runs while there is still nothing to kill. The build is now inside
+  // provisionDependencyCache's lock callback rather than ahead of it, which the
+  // refusal is indifferent to — it throws before `exec`, resolveDependencyEnvironment
+  // catches it and returns `refused: provisioning_failed`, and no container of
+  // any kind has started.
+  const src = readFileSync(join(REPO_ROOT, "src", "v2", "spawn.ts"), "utf8");
+  const seamAt = src.indexOf("export async function prepareDependencyEnvironmentForDispatch(");
+  const buildAt = src.indexOf("buildProvisionerDockerArgs(", seamAt);
+  const execAt = src.indexOf("await args.exec(", seamAt);
 
-  assert.ok(runContainerAt > 0 && buildAt > 0 && provisionAt > 0);
+  assert.ok(seamAt > 0 && buildAt > 0 && execAt > 0);
   assert.ok(
-    buildAt < provisionAt,
-    "the FG-559 refusal must land before any provisioner container starts — build the argv outside the lock callback"
+    buildAt < execAt,
+    "the FG-559 refusal must land before any provisioner container starts — build the argv before the exec"
   );
 });
 

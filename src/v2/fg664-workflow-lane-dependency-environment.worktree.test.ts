@@ -25,7 +25,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
@@ -400,6 +400,82 @@ test("FG-664/FG-678: a dispatch whose provisioner FAILS is refused, leaves no re
   assert.equal(calls.filter((c) => c.kind === "probe").length, 0, "no probe runs against a cache that never installed");
   assert.equal(calls.filter((c) => c.kind === "agent").length, 0, "no agent container of either lane may start");
   assert.equal(redTask(runId), undefined, "the reviewer is never reached: its subject was refused before it existed");
+});
+
+// FG-678 review RF-4: BD-3 case 1 is decided by PROJECT STATE, ahead of anything
+// the tree is asked for.
+//
+// The read-only arm used to run its own `projectTreeIsMountable()` check — and
+// fail the dispatch `verification_environment_unavailable
+// (mountpoints_unavailable)` — BEFORE calling the resolver at all. A mountpoint
+// is a precondition of NEEDING a dependency mount, so consulting it first
+// inverts the dependency: a project that declares nothing to bind has nothing to
+// mount, and BD-3 case 1 says it is `not_applicable` and dispatches normally.
+// The pre-gate is gone; the resolver asks "is there anything to bind" first and
+// only then asks the tree to host it.
+//
+// This is a REGRESSION PIN, not a reproduction. The old pre-gate called
+// createDependencyMountpoints, which returns [] without ever touching the tree
+// when the project has no lockfile — so on this fixture it happened to answer
+// "mountable" and the over-refusal was not reachable through it. What the test
+// holds is that the ordering cannot come back: no property of the CHECKOUT may
+// decide a project the resolver would call not_applicable.
+function makeNoDependencyRepo(): string {
+  const dir = makeTmpDir();
+  git(dir, ["init", "-b", "main"]);
+  git(dir, ["config", "user.email", "test@forge.test"]);
+  git(dir, ["config", "user.name", "Forge Test"]);
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "fg678-rf4", private: true, workspaces: ["member"] }));
+  mkdirSync(join(dir, "member"), { recursive: true });
+  writeFileSync(join(dir, "member", "package.json"), JSON.stringify({ name: "member" }));
+  writeFileSync(join(dir, ".gitignore"), "node_modules/\n");
+  git(dir, ["add", "."]);
+  git(dir, ["commit", "-m", "declares no dependencies, ships no lockfile"]);
+  return dir;
+}
+
+test("fg678 RF-4: a read-only red on a project that declares NO dependencies dispatches normally — even when its checkout cannot host a mountpoint", async (t) => {
+  setPlatform("darwin");
+  const repo = makeNoDependencyRepo();
+
+  // The tree is made unable to host a dependency mountpoint. Nothing about this
+  // project needs one, so nothing about it may decide the dispatch.
+  chmodSync(join(repo, "member"), 0o500);
+  const probe = join(repo, "member", ".forge-perm-probe");
+  try {
+    mkdirSync(probe);
+    rmSync(probe, { recursive: true, force: true });
+    chmodSync(join(repo, "member"), 0o700);
+    t.skip("this process can write through a 0500 directory (running as root?) — the unwritable half is not exercised");
+    return;
+  } catch {
+    /* expected: the member directory really is unwritable */
+  }
+
+  const calls: Call[] = [];
+  const { runId } = startRun({ workflow: WORKFLOW, title: "fg678 RF-4 no-dependency project", inputs: {}, projectDir: repo });
+  try {
+    await runNext({ runId, workflow: WORKFLOW, dockerExec: makeExec(calls) });
+  } finally {
+    chmodSync(join(repo, "member"), 0o700);
+  }
+
+  const red = redTask(runId);
+  assert.ok(red, "the reviewer must be reached — its subject was never refused");
+  assert.equal(red.status, "complete", `a project with nothing to bind is not_applicable, not refused (${red.error})`);
+
+  assert.deepEqual(
+    calls.map((c) => c.kind),
+    ["agent", "agent"],
+    `primary + red, and nothing else — there is no environment to provision or attest; got ${JSON.stringify(calls.map((c) => c.kind))}`,
+  );
+  assert.equal(
+    eventsForRun(runId).filter((e) => e.eventType === "container.dependency_provisioning_failed").length,
+    0,
+    "no refusal of any grain may be recorded for a project BD-3 case 1 calls not_applicable",
+  );
+  assert.equal(readTaskManifest(taskDir(runId, red.id))?.dependencyEnvironment, undefined, "nothing was bound, so nothing is attested");
+  assert.equal(existsSync(join(repo, "member", "node_modules")), false, "and the tree was never asked for a mountpoint it did not need");
 });
 
 test("FG-664: the workflow lane is untouched off the hazard — a non-darwin host builds neither extra container and refuses nothing", async () => {
