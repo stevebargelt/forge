@@ -176,7 +176,7 @@ fi
 #
 # FG-579: seed-drift.ts now covers this dir too. Its `skills` spec compares the
 # installed CLAUDE_SKILLS_DEST tree against seeds/skills (root: "claude-skills"),
-# classified forge-owned + prose — so a drifted forge-* skill is REPORTED by
+# classified forge-owned + prose — so a drifted host skill is REPORTED by
 # `forge doctor` and `forge upgrade` (FORCE=1) is named as the converging remedy,
 # exactly as for runtimes/workflows. The historical contract is unchanged; it is
 # now detected rather than trusted to operator discipline.

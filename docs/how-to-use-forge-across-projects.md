@@ -26,7 +26,7 @@ For live source, `~/code/forge/src/` is still no-rebuild-needed through `tsx` �
 
 Do not use `npm link` here. It symlinks a live-checkout `forge` onto `$PATH`, which defeats the stable/dev split, the `current` pointer, and the pinned-interpreter and env-sanitization guarantees, and can shadow or overwrite the shim.
 
-`install-seeds.sh` also installs the `forge-*` workflow skills (`forge-campaign`, `forge-review-loop`, `forge-backlog`, `forge-research-synthesis`) into the user-global Claude skills dir (`~/.claude/skills` by default; override with `CLAUDE_SKILLS_DEST` or `CLAUDE_CONFIG_DIR`). Because that's a Claude Code user setting rather than a forge project setting, the skills become available in **every** project on the machine after a single install — no per-project step needed. These are host/orchestrator skills; container agents don't see them (they use the separate container-only skill mount in `src/v2/spawn.ts`).
+`install-seeds.sh` also installs the Forge host/orchestrator skills (`forge-campaign`, `forge-review-loop`, `forge-backlog`, `forge-research-synthesis`, and `/status`) into the user-global Claude skills dir (`~/.claude/skills` by default; override with `CLAUDE_SKILLS_DEST` or `CLAUDE_CONFIG_DIR`). Because that's a Claude Code user setting rather than a forge project setting, the skills become available in **every** project on the machine after a single install — no per-project step needed. These are host/orchestrator skills; container agents don't see them (they use the separate container-only skill mount in `src/v2/spawn.ts`).
 
 To remove the machine-wide `forge`: delete the shim you installed (e.g. `rm /usr/local/bin/forge`). The releases under `~/.forge/releases/` and the `current` pointer stay until you remove them yourself — forge never deletes a release, because live processes may still be anchored to one.
 
@@ -87,7 +87,7 @@ Both modes write to the same `~/.forge/forge.db` and the same `~/.forge/runs/<ru
 | `~/.forge/constraints/*.md` | Suggest- and force-level constraints | Host-global |
 | `~/.forge/workflows/*.yml` | Default workflow definitions | Host-global |
 | `~/.forge/forge-raci.md` | RACI table the orchestrator uses to route work | Host-global |
-| `~/.claude/skills/forge-*/` | Host/orchestrator workflow skills | Host-global; not seen by container agents |
+| `~/.claude/skills/forge-*/`, `~/.claude/skills/status/` | Host/orchestrator workflow and status skills | Host-global; not seen by container agents |
 | `<project>/CLAUDE.md` | Orchestrator block (installed by `forge init`) | Per-project |
 | `<project>/.forge/workflows/*.yml` | Per-project workflow override | Per-project |
 
