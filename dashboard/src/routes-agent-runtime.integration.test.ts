@@ -13,7 +13,12 @@ const TEST_PORT = 18791;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
 const tmpHome = mkdtempSync(join(tmpdir(), "forge-runtime-route-"));
 
-const iso = (msAgo: number) => new Date(Date.now() - msAgo).toISOString();
+// FG-673: one clock reading for the whole fixture. Reading Date.now() per call
+// made a row's started_at and completed_at two different instants, so a
+// millisecond ticking over between them stretched the duration by 1ms — a
+// 60_000/30_000 pair averaged to 45_000.5 and Math.round reported 45001.
+const SEEDED_AT = Date.now();
+const iso = (msAgo: number) => new Date(SEEDED_AT - msAgo).toISOString();
 const HOUR = 3_600_000;
 const DAY = 86_400_000;
 
