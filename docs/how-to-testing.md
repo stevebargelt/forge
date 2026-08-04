@@ -55,7 +55,7 @@ What neither arm sees is an arm that consults the environment and returns green 
 
 ## The dashboard browser tier (FG-642)
 
-`dashboard/browser-tests/*.test.ts` is five suites / 18 tests that drive a **real Chrome** through `playwright-core` against a fixture HTTP server serving the dashboard's actual shell and client bundle. It is the only tier that proves the rendered UI, so it is where UI regressions (the backlog aggregate count, the FG-608 cutover labels, offline boot of the released client) are pinned.
+`dashboard/browser-tests/*.test.ts` is seven suites / 48 tests that drive a **real Chrome** through `playwright-core` against a fixture HTTP server serving the dashboard's actual shell and client bundle. It is the only tier that proves the rendered UI, so it is where UI regressions (the backlog aggregate count, the FG-608 cutover labels, offline boot of the released client) are pinned.
 
 ```bash
 npm run test:browser -w dashboard      # the whole tier, ~6.5s with a browser present
@@ -75,7 +75,7 @@ A candidate must be a **file**. Symlinks are followed deliberately — the agent
 
 ### It fails, it never skips
 
-A Chrome-less environment takes every one of the 18 tests **red** on a file-wide `before` hook, with a precondition that names what is missing and how to supply it:
+A Chrome-less environment takes every one of the 48 tests **red** on a file-wide `before` hook, with a precondition that names what is missing and how to supply it:
 
 ```
 chrome precondition: the dashboard browser tier requires a real Chrome/Chromium binary and none was
@@ -85,7 +85,7 @@ MacOS/Google Chrome; ubuntu: npx playwright-core install --with-deps chromium). 
 environment must FAIL this tier, never skip to green (FG-642).
 ```
 
-Modeled on the FG-551 tmux tier: an environment that cannot run the work fails loudly instead of reporting a green nothing. `dashboard/src/fg642-browser-tier-fail-first.integration.test.ts` pins it by spawning the real tier with the override pointed at an absent path and asserting 18 failures / 0 passes / 0 skips — reproducible on a laptop, a runner, or a container alike, precisely because the override outranks a working `CHROME_PATH`.
+Modeled on the FG-551 tmux tier: an environment that cannot run the work fails loudly instead of reporting a green nothing. `dashboard/src/fg642-browser-tier-fail-first.integration.test.ts` pins it by spawning the real tier with the override pointed at an absent path and asserting 48 failures / 0 passes / 0 skips — reproducible on a laptop, a runner, or a container alike, precisely because the override outranks a working `CHROME_PATH`.
 
 ### Running it in an agent container
 
@@ -151,8 +151,8 @@ npm run test:worktree
 # any root aggregate script; run it explicitly (next).
 npm run test:extended
 
-# Dashboard browser tier: 5 suites / 18 tests against a real Chrome (FG-642).
-# Needs a browser — a Chrome-less environment FAILS all 18, it never skips.
+# Dashboard browser tier: 7 suites / 48 tests against a real Chrome (FG-642).
+# Needs a browser — a Chrome-less environment FAILS all 48, it never skips.
 npm run test:browser -w dashboard
 
 # Canonical deterministic gate: unit tier + dashboard workspace

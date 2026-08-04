@@ -876,7 +876,7 @@ section.home-view section.in-flight { margin-top: 0; }
   flex-wrap: wrap;
   margin-bottom: 10px;
 }
-.runtime-window-btns { display: flex; gap: 6px; flex-wrap: wrap; }
+.runtime-window-btns, .runtime-tz-btns { display: flex; gap: 6px; flex-wrap: wrap; }
 .runtime-selector {
   display: flex;
   align-items: center;
@@ -896,8 +896,11 @@ section.home-view section.in-flight { margin-top: 0; }
   max-width: 100%;
 }
 .runtime-sample-note { font-size: 12px; }
-.runtime-loading, .runtime-empty, .runtime-error { padding: 16px; }
+.runtime-loading, .runtime-empty, .runtime-error, .runtime-stale { padding: 16px; }
 .runtime-error { border-color: var(--err); color: var(--err); }
+/* FG-661/RF-15: the series on screen is real, just no longer current — warn, not
+ * error, and never in place of the chart it is warning about. */
+.runtime-stale { border-color: var(--warn); color: var(--warn); margin-bottom: 12px; }
 .runtime-chart {
   margin: 0 0 16px;
   background: var(--bg-elev);
@@ -934,9 +937,11 @@ section.home-view section.in-flight { margin-top: 0; }
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 2px 6px;
-  white-space: nowrap;
 }
-.runtime-bucket-values .mono { color: var(--fg); }
+/* The chip carries a full local range now, which is too wide to hold on one line
+ * at a phone width. The RANGE itself must not break — half a range names no
+ * bucket — so the chip wraps between the range and the value instead. */
+.runtime-bucket-values .mono { color: var(--fg); white-space: nowrap; }
 .runtime-caption {
   font-size: 11px;
   color: var(--fg-dim);
@@ -1082,6 +1087,10 @@ section.home-view section.in-flight { margin-top: 0; }
 .backlog-ticket-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .backlog-type-badge { background: rgba(122, 159, 255, 0.12); color: var(--accent); }
 .backlog-id { user-select: all; }
+/* Wrap a TABLE in this rather than putting it on the table: a table's used width is
+ * its min-content width whatever the width declaration says, so an sr-only table of
+ * bucket ranges sets the document's scroll width from behind the visible layout and
+ * puts a horizontal scrollbar on a phone. A block wrapper clips it for real. */
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 
 /* FG-638: review ledger view */

@@ -115,6 +115,18 @@ const spiky = trends("1d", "hour", HOUR, series(25, HOUR, "2026-08-01T14:00:00.0
 const dstSpanning = trends("30d", "day", DAY, series(14, DAY, "2026-03-01T00:00:00.000Z",
   (i) => point("", 600_000 + i * 30_000, 3)));
 
+// Chatham is deliberately unlike the zones in the original runtime tests: its
+// standard and daylight offsets both include 45 minutes, and its DST transition
+// is not the usual US 02:00 local-time story. These four UTC-aligned day buckets
+// cover its 2026 fall-back and spring-forward directions without changing the
+// grid underneath the chart.
+const chathamDst = trends("7d", "day", DAY, [
+  point("2026-04-04T00:00:00.000Z", 91_000, 1),
+  point("2026-04-05T00:00:00.000Z", 182_000, 2),
+  point("2026-09-26T00:00:00.000Z", 273_000, 3),
+  point("2026-09-27T00:00:00.000Z", 364_000, 4),
+]);
+
 // 30 daily buckets: the longest daily window, with gaps.
 const monthly = trends("30d", "day", DAY, series(30, DAY, "2026-07-04T00:00:00.000Z",
   (i) => (i % 7 === 3 ? null : point("", 60_000 + i * 90_000, 1 + (i % 9), i === 29))));
@@ -283,7 +295,8 @@ test("FG-648 AC8/FG-662: the 64.7h artifact draws at its real height, and the ax
   );
   // And the reader is told what it is, on the plot and in the tooltip, in both forms.
   assert.ok((await page.locator(".runtime-chart svg .runtime-value").allTextContents()).includes("65h"));
-  assert.match(await page.locator(".runtime-chart svg rect.runtime-bar").last().innerHTML(), /8\/2 UTC: 64h42m over 27 runs \(partial\)/);
+  assert.match(await page.locator(".runtime-chart svg rect.runtime-bar").last().innerHTML(),
+    /Aug 2 00:00 – Aug 3 00:00 UTC: 64h42m over 27 runs \(partial\)/);
 
   // Every other bar is a minute-scale mean against a 72h axis: they stand on the
   // em floor rather than vanishing, and the floor is the same handful of pixels
@@ -376,32 +389,95 @@ test("FG-648 AC8/AC9: a bar's value is never painted onto the bar beside it", as
   }
 });
 
-test("FG-648 AC10: the offset note is true of the WINDOW, not of the instant the page was opened", async () => {
-  // The note derived its offset from `new Date()` and then stated it as the start
-  // of "each UTC day here" — for the pre-transition part of this window that is an
-  // hour wrong, stated confidently, on the surface that exists to stop a reader
-  // misattributing a bar to the wrong local day.
+// FG-661 AC5/AC6. The sentence these lines used to check is gone. It stated ONE
+// offset for a whole window and was wrong across a clock change twice, from two
+// different derivations — the second of which read the offset from the window's own
+// bucket starts and STILL could not say what a bucket containing the transition
+// covers. The range form does not state an offset at all: it names both real
+// endpoints, so a bucket containing the change carries a different abbreviation at
+// each end. That is the case the prose could not express, so it is the case that
+// has to be right here, in a real browser, in a real non-UTC zone.
+test("FG-661 AC5: a bucket containing a DST transition names both of its actual endpoints", async () => {
   override = dstSpanning;
-  const page = await newPage({ width: 1280, height: 1100 }, { timezoneId: "America/Los_Angeles" });
-  await page.goto(`${baseUrl}/#ops`);
-  await page.locator(".runtime-chart svg").waitFor();
-  const note = await page.locator(".runtime-tz-note").innerText();
-  await page.close();
-  override = null;
+  const page = await newPage({ width: 1440, height: 1200 }, { timezoneId: "America/Los_Angeles" });
+  try {
+    await page.goto(`${baseUrl}/#ops`);
+    await page.locator(".runtime-chart svg").waitFor();
 
-  assert.doesNotMatch(note, /each UTC day here starts/,
-    `this window's UTC days do not share one local start time: ${note}`);
-  assert.match(note, /16:00 on the previous local day at UTC-8/, note);
-  assert.match(note, /17:00 on the previous local day at UTC-7/, note);
+    // US Pacific moves to PDT at 2026-03-08T10:00Z, inside the UTC day that opens
+    // at 2026-03-08T00:00Z — bucket 7 of this window.
+    const rows = await page.locator(".runtime-text-equivalent tbody th").allTextContents();
+    assert.equal(rows.length, 14);
+    assert.equal(rows[7], "Mar 7 16:00 PST – Mar 8 17:00 PDT");
+    // Its neighbours lie wholly one side of the change and claim only that.
+    assert.equal(rows[6], "Mar 6 16:00 – Mar 7 16:00 PST");
+    assert.equal(rows[8], "Mar 8 17:00 – Mar 9 17:00 PDT");
+    // The bar's own tooltip carries it too — not only the screen-reader table.
+    assert.match(await page.locator(".runtime-chart svg rect.runtime-bar").nth(7).innerHTML(),
+      /Mar 7 16:00 PST – Mar 8 17:00 PDT: /);
 
-  // And a window that does NOT span a change keeps the single, direct sentence —
-  // the fix is to the claim, not to the disclosure.
-  const summer = await newPage({ width: 1280, height: 1100 }, { timezoneId: "America/Los_Angeles" });
-  await summer.goto(`${baseUrl}/#ops`);
-  await summer.locator(".runtime-chart svg").waitFor();
-  assert.equal(await summer.locator(".runtime-tz-note").innerText(),
-    "You are UTC-7, so each UTC day here starts at 17:00 on the previous local day.");
-  await summer.close();
+    // The axis carries the compact form, which is all that fits — and the moving
+    // abbreviation is what it discloses across the change.
+    const ticks = await page.locator(".runtime-chart svg .runtime-x-tick").allTextContents();
+    assert.ok(ticks.some((tick) => /^3\/\d+ PST$/.test(tick)), ticks.join(","));
+    assert.ok(ticks.some((tick) => /^3\/\d+ PDT$/.test(tick)), ticks.join(","));
+
+    // AC6: no surface asks the reader to apply an offset any more.
+    const panel = await page.locator(".runtime-view").innerText();
+    assert.doesNotMatch(panel, /You are UTC/, panel);
+    assert.doesNotMatch(panel, /each UTC day here starts/, panel);
+    assert.doesNotMatch(panel, /previous local day/, panel);
+    assert.equal(await page.locator(".runtime-tz-note").count(), 0);
+  } finally {
+    await page.close();
+    override = null;
+  }
+});
+
+test("FG-661 AC5/AC8: Chatham's 45-minute DST endpoints are exact and the toggle changes no bucket data", async () => {
+  override = chathamDst;
+  const page = await newPage({ width: 1440, height: 1200 }, { timezoneId: "Pacific/Chatham" });
+  try {
+    await page.goto(`${baseUrl}/#ops`);
+    await page.locator(".runtime-chart svg").waitFor();
+
+    // These are independently-derived calendar facts, not merely two unequal
+    // strings: Pacific/Chatham falls back from GMT+13:45 to GMT+12:45 inside
+    // 2026-04-04Z and springs forward the other way inside 2026-09-26Z.
+    const localRows = await page.locator(".runtime-text-equivalent tbody th").allTextContents();
+    assert.deepEqual(localRows, [
+      "Apr 4 13:45 GMT+13:45 – Apr 5 12:45 GMT+12:45",
+      "Apr 5 12:45 – Apr 6 12:45 GMT+12:45",
+      "Sep 26 12:45 GMT+12:45 – Sep 27 13:45 GMT+13:45",
+      "Sep 27 13:45 – Sep 28 13:45 GMT+13:45",
+    ]);
+
+    // The fall-back endpoint is also on the visible tooltip. A screen-reader
+    // table alone would let the on-chart affordance drift undetected.
+    assert.match(await page.locator(".runtime-chart rect.runtime-bar").first().innerHTML(),
+      /Apr 4 13:45 GMT\+13:45 – Apr 5 12:45 GMT\+12:45: 1m31s over 1 run/);
+
+    const before = {
+      bars: await page.locator(".runtime-chart rect.runtime-bar").count(),
+      values: await page.locator(".runtime-chart svg .runtime-value").allTextContents(),
+      runs: await page.locator(".runtime-chart svg .runtime-count").allTextContents(),
+    };
+    await page.getByRole("group", { name: "times:" }).getByRole("button", { name: "UTC", exact: true }).click();
+    assert.deepEqual(await page.locator(".runtime-text-equivalent tbody th").allTextContents(), [
+      "Apr 4 00:00 – Apr 5 00:00 UTC",
+      "Apr 5 00:00 – Apr 6 00:00 UTC",
+      "Sep 26 00:00 – Sep 27 00:00 UTC",
+      "Sep 27 00:00 – Sep 28 00:00 UTC",
+    ]);
+    assert.deepEqual({
+      bars: await page.locator(".runtime-chart rect.runtime-bar").count(),
+      values: await page.locator(".runtime-chart svg .runtime-value").allTextContents(),
+      runs: await page.locator(".runtime-chart svg .runtime-count").allTextContents(),
+    }, before, "the Local/UTC control must only change presentation, not the UTC-aligned buckets");
+  } finally {
+    await page.close();
+    override = null;
+  }
 });
 
 test("FG-648 AC9: whenever the plot drops a bar's labels, the list beneath carries every bucket", async () => {
@@ -444,43 +520,80 @@ test("FG-648 AC9: whenever the plot drops a bar's labels, the list beneath carri
   }
 });
 
-test("FG-648 AC10: no period a reader can read off the PLOT is bare — the caption is not the only disclosure", async () => {
-  // Los Angeles, the operator's own timezone. The shipped defect was a bare `8/2`
-  // on the axis with `(UTC)` only in the figcaption below it, so this asserts over
-  // the SVG alone — the figcaption is not part of it.
+// FG-661 AC7 — FG-648's AC10 invariant, carried through the new presentation and
+// now owed in BOTH toggle modes. The shipped defect was a bare `8/2` on the axis
+// with the disclosure only in the figcaption below it, so this still asserts over
+// the SVG alone; the figcaption is not part of it. What changed is that "the zone"
+// is no longer always UTC, and that the plot now carries full ranges in its bar
+// tooltips as well as compact ticks — a well-formed range is recognised and set
+// aside, so a MALFORMED one (an endpoint that lost its abbreviation) falls through
+// to the bare-period scan rather than being waved past by a looser pattern.
+const ZONE = String.raw`(?:GMT[+-]\d{1,2}(?::\d{2})?|[A-Z]{2,5})`;
+const RANGE = new RegExp(
+  String.raw`[A-Z][a-z]{2} \d{1,2} \d{2}:\d{2}(?: ${ZONE})? – [A-Z][a-z]{2} \d{1,2} \d{2}:\d{2} ${ZONE}`,
+  "g",
+);
+
+test("FG-661 AC7: no period a reader can read off the PLOT is bare, in EITHER toggle mode", async () => {
   const page = await newPage({ width: 1440, height: 1200 }, { timezoneId: "America/Los_Angeles" });
   await page.goto(`${baseUrl}/#ops`);
   await page.locator(".runtime-chart svg").waitFor();
+  const tz = (name: string) => page.getByRole("group", { name: "times:" }).getByRole("button")
+    .filter({ hasText: new RegExp(`^${name}$`) });
 
-  for (const window of ["7d", "1d", "30d", "90d"]) {
-    if (window !== "7d") {
-      await runtimeWindow(page, window).click();
-      await page.getByRole("img", { name: new RegExp(`over ${window}\\.`) }).waitFor();
+  // Re-clicking the window already in force retires the in-flight read and never
+  // issues a replacement, so the panel would sit on a null series forever. Track
+  // what is charted and only move when the target differs.
+  let charted = "7d";
+  for (const mode of ["Local", "UTC"]) {
+    await tz(mode).click();
+    for (const window of ["7d", "1d", "30d", "90d"]) {
+      if (window !== charted) {
+        await runtimeWindow(page, window).click();
+        await page.getByRole("img", { name: new RegExp(`over ${window}\\.`) }).waitFor();
+        charted = window;
+      }
+      const plotText = await page.locator(".runtime-chart svg").textContent() ?? "";
+      assert.ok(plotText.length > 0, `${mode}/${window}: the plot must carry text`);
+      // Full ranges are the tooltip's form and are checked by shape above; strip
+      // them, then require every remaining date and clock time to be followed by
+      // its zone. A date may be qualifying the clock time after it (`8/1 14:00
+      // PDT`) or carrying its own year (`wk 3/4/24 UTC`); the marker still has to
+      // be at the end of the run.
+      const rest = plotText.replace(RANGE, "⟨range⟩");
+      const bare = [
+        ...rest.matchAll(new RegExp(String.raw`\d{1,2}/\d{1,2}(?!\d)(?!/\d)(?! (?:\d{2}:\d{2} )?${ZONE})`, "g")),
+        ...rest.matchAll(new RegExp(String.raw`\d{2}:\d{2}(?! ${ZONE})`, "g")),
+        // The full-range form spells its dates as `Mar 8`, not `3/8`. If a
+        // renderer ever stops halfway through an endpoint, it must not evade the
+        // numeric-axis scan merely by using that longer month form.
+        ...rest.matchAll(new RegExp(String.raw`\b[A-Z][a-z]{2} \d{1,2}(?! \d{2}:\d{2}(?: ${ZONE})?)`, "g")),
+        ...rest.matchAll(/–\s*(?=$)/g),
+      ].map((match) => rest.slice(Math.max(0, match.index - 12), match.index + 18));
+      assert.deepEqual(bare, [],
+        `${mode}/${window}: a bare period reads as whichever clock the reader in America/Los_Angeles is holding`);
     }
-    const plotText = await page.locator(".runtime-chart svg").textContent() ?? "";
-    assert.ok(plotText.length > 0, `${window}: the plot must carry text`);
-    // Every date and every clock time inside the plot — axis ticks, bar tooltips,
-    // the list's own periods — is followed by its timezone. Dropping the marker
-    // from any ONE of those rows fails here. A date may also be qualifying the
-    // clock time after it (`8/1 14:00 UTC`) or carrying its own year
-    // (`wk 3/4/24 UTC`); the marker still has to be at the end of the run.
-    const bare = [
-      ...plotText.matchAll(/\d{1,2}\/\d{1,2}(?!\d)(?!\/\d)(?! (?:\d{2}:\d{2} )?UTC)/g),
-      ...plotText.matchAll(/\d{2}:\d{2}(?! UTC)/g),
-    ].map((match) => plotText.slice(Math.max(0, match.index - 12), match.index + 18));
-    assert.deepEqual(bare, [], `${window}: a bare period reads as a LOCAL date to a reader in America/Los_Angeles`);
   }
 
-  // The ticket's demonstrated misattribution, end to end: at 07:40 PDT on 8/2 the
-  // `8/2` bar looked like "this morning, when nothing has run". It covers 17:00 PDT
-  // on 8/1 onward. The label now says which 8/2 it means, and the caption converts
-  // that into the reader's own clock.
+  // The ticket's demonstrated misattribution, end to end. At 07:40 PDT on 8/2 the
+  // `8/2 UTC` bar looked like "this morning, when nothing has run"; it actually
+  // covers 17:00 PDT on 8/1 onward. In Local — the default — that bar is labelled
+  // `8/1 PDT` and its tooltip states the hours outright, so there is no offset left
+  // to apply and nothing to get wrong.
+  await tz("Local").click();
   await runtimeWindow(page, "7d").click();
   await page.getByRole("img", { name: /over 7d\./ }).waitFor();
   assert.deepEqual(await page.locator(".runtime-chart svg .runtime-x-tick").allTextContents(),
+    ["7/25 PDT", "7/26 PDT", "7/27 PDT", "7/28 PDT", "7/29 PDT", "7/30 PDT", "7/31 PDT", "8/1 PDT"]);
+  assert.match(await page.locator(".runtime-chart svg rect.runtime-bar").last().innerHTML(),
+    /Aug 1 17:00 – Aug 2 17:00 PDT: 64h42m over 27 runs \(partial\)/);
+  assert.match(await page.locator(".runtime-partial-note").innerText(), /The last day \(8\/1 PDT\) is hatched/);
+
+  // ...and the same window in UTC keeps FG-648's shipped labels exactly. This
+  // design supersedes that presentation; it does not withdraw it.
+  await tz("UTC").click();
+  assert.deepEqual(await page.locator(".runtime-chart svg .runtime-x-tick").allTextContents(),
     ["7/26 UTC", "7/27 UTC", "7/28 UTC", "7/29 UTC", "7/30 UTC", "7/31 UTC", "8/1 UTC", "8/2 UTC"]);
-  assert.match(await page.locator(".runtime-tz-note").innerText(),
-    /You are UTC-[78], so each UTC day here starts at 1[67]:00 on the previous local day\./);
   assert.match(await page.locator(".runtime-partial-note").innerText(), /The last day \(8\/2 UTC\) is hatched/);
   await page.close();
 });
@@ -526,7 +639,7 @@ test("FG-648: an empty bucket is not a zero-duration observation — not in the 
   assert.deepEqual(gapped.values, solid.values, "an empty bucket contributes no mean to the value row");
   assert.deepEqual(gapped.counts, ["5", "0", "5", "0", "5", "0", "5", "0"], "an empty bucket's run count is zero runs, not a zero-length run");
   assert.doesNotMatch(gapped.label, /7\/27 UTC/, "an empty bucket must not appear as a plotted value in the accessible name");
-  assert.match(gapped.equivalent, /7\/27 UTC\s+no runs\s+0/, "the text equivalent reads 'no runs', never 0s");
+  assert.match(gapped.equivalent, /Jul 27 00:00 – Jul 28 00:00 UTC\s+no runs\s+0/, "the text equivalent reads 'no runs', never 0s");
   for (const entry of gapped.list) assert.doesNotMatch(entry, /\b0s\b/, `an empty bucket must never render as a 0s mean: ${entry}`);
 });
 
@@ -706,7 +819,11 @@ async function newPage(
 ): Promise<Page> {
   // reducedMotion is not a preference under test here — it is what stops the bars'
   // 0.2s height transition from being what these geometry reads measure.
-  const page = await browser.newPage({ viewport, reducedMotion: "reduce", ...options });
+  // timezoneId is pinned, not inherited: the chart's default mode is Local and it
+  // renders through Intl, so the runner's own zone would otherwise decide what
+  // every assertion here reads. UTC makes the two modes coincide; the tests that
+  // need them to DIFFER pass a real non-UTC zone of their own.
+  const page = await browser.newPage({ viewport, reducedMotion: "reduce", timezoneId: "UTC", ...options });
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("close", () => assert.deepEqual(errors, [], `browser errors: ${errors.join("; ")}`));

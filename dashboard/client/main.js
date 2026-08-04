@@ -686,38 +686,92 @@ function runtimeAxisGutterEm(tickLabels) {
   return Math.max(RUNTIME_AXIS_GUTTER_MIN_EM, RUNTIME_TICK_INSET_EM + widest * RUNTIME_TICK_GLYPH_EM);
 }
 
-function runtimeBucketLabel(iso, resolution, qualified) {
-  const d = new Date(iso);
-  if (!Number.isFinite(d.getTime())) return String(iso);
-  const monthDay = `${d.getUTCMonth() + 1}/${d.getUTCDate()}`;
-  if (resolution === "hour") {
-    const hour = `${String(d.getUTCHours()).padStart(2, "0")}:00`;
-    return qualified ? `${monthDay} ${hour}` : hour;
-  }
-  const dated = qualified ? `${monthDay}/${String(d.getUTCFullYear() % 100).padStart(2, "0")}` : monthDay;
-  return resolution === "week" ? `wk ${dated}` : dated;
+// FG-661: the two period presentations the chart's toggle switches between. The
+// grid stays UTC-aligned underneath both of them — a local grid would put the same
+// run in different buckets for different readers — but Local is the default,
+// because the reader's own clock is what they are trying to read the chart against.
+const RUNTIME_TZ_MODES = [
+  { mode: "local", label: "Local" },
+  { mode: "utc", label: "UTC" },
+];
+
+// The IANA zone a mode renders in. `Intl` is the source of truth for both the clock
+// values and the abbreviation. Nothing here computes an offset and nothing formats
+// from a stored one: the offset the chart used to state was wrong across a DST
+// transition twice, from two different derivations, because a single offset cannot
+// describe a window that contains a clock change however carefully it is derived.
+function runtimeZoneFor(mode) {
+  return mode === "utc" ? "UTC" : Intl.DateTimeFormat().resolvedOptions().timeZone;
 }
 
-// Every period label the operator reads carries UTC in the label itself. A bare
-// `8/2` on a UTC-aligned grid reads as a LOCAL date: at 07:40 PDT that bar looks
-// like "this morning" when it actually opened at 17:00 the previous local day.
-// The grid stays UTC on purpose — a local grid would put the same run in
-// different buckets for different readers — so the label is what has to say so.
-//
-// The labels also have to be unique WITHIN the window, or a value cannot be
-// attributed back to its bucket: a 1d window is 25 hourly buckets and therefore
-// always spans two UTC dates, so a bare `14:00` names two of them, and an `all`
-// window longer than a year repeats `wk 6/8`. The compact form is kept while it is
-// unambiguous, and the whole row escalates together when it is not — a row mixing
-// the two forms leaves the bare labels attributable only by their neighbours,
-// which is exactly what the thinned plot and the wrapped fallback list cannot
-// guarantee a reader.
-function runtimeAxisLabels(buckets, resolution) {
-  const compact = buckets.map((b) => runtimeBucketLabel(b.bucketStart, resolution, false));
-  const labels = new Set(compact).size === compact.length
+function runtimeZoneParts(ms, zone, options) {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: zone, ...options }).formatToParts(new Date(ms));
+  const named = {};
+  for (const part of parts) named[part.type] = part.value;
+  return named;
+}
+
+const RUNTIME_COMPACT_OPTS = {
+  month: "numeric", day: "numeric", year: "2-digit",
+  hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  timeZoneName: "short",
+};
+const RUNTIME_RANGE_OPTS = {
+  month: "short", day: "numeric",
+  hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  timeZoneName: "short",
+};
+
+// The axis form: as narrow as a 25-bucket window needs, and never bare about the
+// zone it means. A bare `7/25` reads as whichever clock the reader is holding, and
+// the toggle sitting above the plot is not carried by a cropped screenshot of it —
+// so the abbreviation rides on the label itself in BOTH modes. It also does real
+// work on a fall-back DST day, where it is the only thing separating the two 01:00
+// buckets from each other.
+function runtimeBucketLabel(iso, resolution, zone, qualified) {
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return String(iso);
+  const at = runtimeZoneParts(ms, zone, RUNTIME_COMPACT_OPTS);
+  const monthDay = `${at.month}/${at.day}`;
+  const clock = `${at.hour}:${at.minute}`;
+  if (resolution === "hour") {
+    return `${qualified ? `${monthDay} ${clock}` : clock} ${at.timeZoneName}`;
+  }
+  const dated = qualified ? `${monthDay}/${at.year}` : monthDay;
+  return `${resolution === "week" ? `wk ${dated}` : dated} ${at.timeZoneName}`;
+}
+
+// The labels have to be unique WITHIN the window, or a value cannot be attributed
+// back to its bucket: a 1d window is 25 hourly buckets and therefore always spans
+// two dates, so a bare `14:00` names two of them, and an `all` window longer than a
+// year repeats `wk 6/8`. The compact form is kept while it is unambiguous, and the
+// whole row escalates together when it is not — a row mixing the two forms leaves
+// the bare labels attributable only by their neighbours, which is exactly what the
+// thinned plot and the wrapped fallback list cannot guarantee a reader.
+function runtimeAxisLabels(buckets, resolution, zone) {
+  const compact = buckets.map((b) => runtimeBucketLabel(b.bucketStart, resolution, zone, false));
+  return new Set(compact).size === compact.length
     ? compact
-    : buckets.map((b) => runtimeBucketLabel(b.bucketStart, resolution, true));
-  return labels.map((label) => `${label} UTC`);
+    : buckets.map((b) => runtimeBucketLabel(b.bucketStart, resolution, zone, true));
+}
+
+// The bucket's REAL endpoints, wherever there is room for both of them — the bar's
+// tooltip, the per-bucket list and the screen-reader table. This is what tells the
+// reader which of their own hours a bar covers, instead of handing them an offset
+// to apply to a UTC label. Each end is formatted independently, so a bucket
+// containing a clock change carries a different abbreviation at each end
+// (`Mar 7 16:00 PST – Mar 8 17:00 PDT`) — the case no single stated offset could
+// express. On a UTC-aligned grid a local day legitimately opens at an odd local
+// hour; saying which one is the point, not an artifact.
+function runtimeBucketRange(iso, bucketMs, zone) {
+  const startMs = Date.parse(iso);
+  if (!Number.isFinite(startMs) || !Number.isFinite(bucketMs)) return String(iso);
+  const from = runtimeZoneParts(startMs, zone, RUNTIME_RANGE_OPTS);
+  const to = runtimeZoneParts(startMs + bucketMs, zone, RUNTIME_RANGE_OPTS);
+  const at = (part) => `${part.month} ${part.day} ${part.hour}:${part.minute}`;
+  return from.timeZoneName === to.timeZoneName
+    ? `${at(from)} – ${at(to)} ${from.timeZoneName}`
+    : `${at(from)} ${from.timeZoneName} – ${at(to)} ${to.timeZoneName}`;
 }
 
 // The on-chart duration: one unit, at most one decimal, so it fits above a bar at
@@ -749,38 +803,9 @@ function runtimeAxisScale(peakMs) {
   return { max, ticks };
 }
 
-function runtimeUtcOffsetName(offsetMin) {
-  const abs = Math.abs(offsetMin);
-  const hhmm = abs % 60 === 0 ? `${abs / 60}` : `${Math.floor(abs / 60)}:${String(abs % 60).padStart(2, "0")}`;
-  return `UTC${offsetMin < 0 ? "-" : "+"}${hhmm}`;
-}
-
-function runtimeUtcDayStart(offsetMin) {
-  const startMin = ((offsetMin % 1440) + 1440) % 1440;
-  const clock = `${String(Math.floor(startMin / 60)).padStart(2, "0")}:${String(startMin % 60).padStart(2, "0")}`;
-  return `${clock} on ${offsetMin < 0 ? "the previous local day" : "the same local day"}`;
-}
-
-// Naming the reader's own offset is the other half of the UTC labels: it converts
-// "7/26 UTC" into a local span without moving the grid under anyone. The offset is
-// read at each BUCKET's own instant, not at the current one: a 30d/90d/all window
-// can span a clock change, and one sentence stating today's offset for all of it
-// is a confidently-stated wrong conversion on the surface that exists to prevent
-// day misattribution.
-function runtimeUtcOffsetNote(buckets) {
-  const offsets = [...new Set(buckets.map((b) => -new Date(b.bucketStart).getTimezoneOffset()))]
-    .sort((a, b) => a - b);
-  if (offsets.length === 0) return null;
-  if (offsets.length === 1) {
-    return offsets[0] === 0
-      ? null
-      : `You are ${runtimeUtcOffsetName(offsets[0])}, so each UTC day here starts at ${runtimeUtcDayStart(offsets[0])}.`;
-  }
-  const spans = offsets.map((offset) => `${runtimeUtcDayStart(offset)} at ${runtimeUtcOffsetName(offset)}`);
-  return `Your local clock changes inside this window, so a UTC day here starts at ${spans.join(", or ")}.`;
-}
-
 function AgentRuntimeTrends({ data, error, window, onWindowChange, role, onRoleChange }) {
+  const [tzMode, setTzMode] = useState("local");
+  const zone = runtimeZoneFor(tzMode);
   const roles = data ? data.roleSummary.map((r) => r.role) : [];
   const roleObserved = role === RUNTIME_ALL_ROLES || roles.includes(role);
   // The fallback to "All agents" is written back, not just displayed. Left in
@@ -805,13 +830,37 @@ function AgentRuntimeTrends({ data, error, window, onWindowChange, role, onRoleC
           >${w}</button>
         `)}
       </div>
+      <span class="muted" id="runtime-tz-label">times:</span>
+      <div class="runtime-tz-btns" role="group" aria-labelledby="runtime-tz-label">
+        ${RUNTIME_TZ_MODES.map(({ mode, label }) => html`
+          <button
+            key=${mode}
+            type="button"
+            class=${"usage-dim-btn " + (tzMode === mode ? "usage-dim-btn-active" : "")}
+            aria-pressed=${tzMode === mode}
+            onClick=${() => setTzMode(mode)}
+          >${label}</button>
+        `)}
+      </div>
     </div>
   `;
+
+  // FG-661/RF-15: a read that starts failing AFTER a load leaves the last series
+  // on screen, so the error card below (which only renders when there is nothing
+  // to show) is unreachable and the operator watches frozen numbers believing they
+  // are current. The series is kept — stale numbers beat no numbers — and said to
+  // be stale, beside the chart still showing them.
+  const staleNotice = data && error ? html`
+    <div class="card runtime-stale" role="alert">
+      ${error}. Showing the last successful read — these numbers are stale. Retrying every 30s.
+    </div>
+  ` : null;
 
   const frame = (body) => html`
     <section class="runtime-view" aria-labelledby="runtime-heading">
       <h2 id="runtime-heading">Average agent runtime over time</h2>
       ${controls}
+      ${staleNotice}
       ${body}
     </section>
   `;
@@ -856,7 +905,15 @@ function AgentRuntimeTrends({ data, error, window, onWindowChange, role, onRoleC
 
   return frame(html`
     ${selector}
-    <${RuntimeChart} buckets=${buckets} label=${seriesLabel} resolution=${data.resolution} window=${window} />
+    <${RuntimeChart}
+      buckets=${buckets}
+      label=${seriesLabel}
+      resolution=${data.resolution}
+      window=${window}
+      bucketMs=${data.bucketMs}
+      zone=${zone}
+      mode=${tzMode}
+    />
     <${RuntimeRoleTable} summary=${data.roleSummary} activeRole=${activeRole} onRoleChange=${onRoleChange} window=${window} />
   `);
 }
@@ -875,7 +932,7 @@ function useRenderedWidthPx(ref) {
   return widthPx;
 }
 
-function RuntimeChart({ buckets, label, resolution, window }) {
+function RuntimeChart({ buckets, label, resolution, window, bucketMs, zone, mode }) {
   const VW = 1000;
   const svgRef = useRef(null);
   const widthPx = useRenderedWidthPx(svgRef);
@@ -905,7 +962,11 @@ function RuntimeChart({ buckets, label, resolution, window }) {
   const barW = Math.min(slot * 0.68, 56);
   const partialIdx = buckets.findIndex((b) => b.partial && b.sampleCount > 0);
   const unit = RUNTIME_RESOLUTION_WORD[resolution] ?? resolution;
-  const periodTexts = runtimeAxisLabels(buckets, resolution);
+  // The compact form goes on the plot, where a tick is 40 user units wide; the full
+  // range goes everywhere there is room for it. Both switch with the toggle, so no
+  // surface is ever left reading the mode the operator just moved away from.
+  const periodTexts = runtimeAxisLabels(buckets, resolution, zone);
+  const rangeTexts = buckets.map((b) => runtimeBucketRange(b.bucketStart, bucketMs, zone));
   // A floor in em, not user units: a bar three orders of magnitude under the peak
   // still has to be visible at a phone width, where a user unit is a third of a pixel.
   const barH = (b) => Math.max(fontUnits * 0.25, Math.round((b.averageMs / scale.max) * chartH));
@@ -926,7 +987,7 @@ function RuntimeChart({ buckets, label, resolution, window }) {
       fill=${b.partial ? "url(#runtime-partial-hatch)" : "var(--accent)"}
       stroke=${b.partial ? "var(--accent)" : "none"}
       stroke-dasharray=${b.partial ? "4 3" : null}
-    ><title>${periodTexts[i]}: ${opsFmtMs(b.averageMs)} over ${b.sampleCount} ${b.sampleCount === 1 ? "run" : "runs"}${b.partial ? " (partial)" : ""}</title></rect>`;
+    ><title>${rangeTexts[i]}: ${opsFmtMs(b.averageMs)} over ${b.sampleCount} ${b.sampleCount === 1 ? "run" : "runs"}${b.partial ? " (partial)" : ""}</title></rect>`;
   });
 
   // Thin a label row by LABEL WIDTH, not by bucket count: 25 hourly buckets over a
@@ -999,7 +1060,7 @@ function RuntimeChart({ buckets, label, resolution, window }) {
       .filter(Boolean)
       .join(", ")
     + `. Peak ${opsFmtMs(peak)}.`;
-  const offsetNote = runtimeUtcOffsetNote(buckets);
+  const zoneLabel = mode === "utc" ? "UTC" : `your local time (${zone})`;
 
   return html`
     <figure class="runtime-chart">
@@ -1036,32 +1097,34 @@ function RuntimeChart({ buckets, label, resolution, window }) {
         <ul class="runtime-bucket-values" aria-hidden="true">
           ${buckets.map((b, i) => html`
             <li key=${b.bucketStart}>
-              <span class="mono">${periodTexts[i]}</span>
+              <span class="mono">${rangeTexts[i]}</span>
               ${b.sampleCount === 0 ? " no runs" : ` ${valueTexts[i]} · ${b.sampleCount} ${b.sampleCount === 1 ? "run" : "runs"}`}
             </li>
           `)}
         </ul>
       `}
       <figcaption class="runtime-caption">
-        Mean duration of completed agent tasks per ${unit} (UTC), bucketed by completion time. Successful and failed runs both count.
-        ${offsetNote ? html` <span class="runtime-tz-note">${offsetNote}</span>` : null}
+        Mean duration of completed agent tasks per ${unit}, bucketed by completion time. Successful and failed runs both count.
+        ${html` <span class="runtime-zone-note">The bucket grid is UTC-aligned; periods are shown in ${zoneLabel}.</span>`}
         ${partialIdx >= 0
           ? html` <span class="runtime-partial-note">The last ${unit} (${periodTexts[partialIdx]}) is hatched — it is still in progress and its average can still move.</span>`
           : null}
       </figcaption>
-      <table class="sr-only runtime-text-equivalent">
-        <caption>${`Average agent runtime for ${label} by ${unit}`}</caption>
-        <thead><tr><th scope="col">${unit}</th><th scope="col">average</th><th scope="col">runs</th></tr></thead>
-        <tbody>
-          ${buckets.map((b, i) => html`
-            <tr key=${b.bucketStart}>
-              <th scope="row">${periodTexts[i]}${b.partial ? " (partial)" : ""}</th>
-              <td>${b.sampleCount === 0 ? "no runs" : opsFmtMs(b.averageMs)}</td>
-              <td>${b.sampleCount}</td>
-            </tr>
-          `)}
-        </tbody>
-      </table>
+      <div class="sr-only">
+        <table class="runtime-text-equivalent">
+          <caption>${`Average agent runtime for ${label} by ${unit}`}</caption>
+          <thead><tr><th scope="col">${unit}</th><th scope="col">average</th><th scope="col">runs</th></tr></thead>
+          <tbody>
+            ${buckets.map((b, i) => html`
+              <tr key=${b.bucketStart}>
+                <th scope="row">${rangeTexts[i]}${b.partial ? " (partial)" : ""}</th>
+                <td>${b.sampleCount === 0 ? "no runs" : opsFmtMs(b.averageMs)}</td>
+                <td>${b.sampleCount}</td>
+              </tr>
+            `)}
+          </tbody>
+        </table>
+      </div>
     </figure>
   `;
 }

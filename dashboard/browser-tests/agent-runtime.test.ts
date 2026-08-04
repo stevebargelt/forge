@@ -207,8 +207,10 @@ test("Ops defaults to the All agents series and renders an accessible, labelled 
   assert.equal(await page.locator(".runtime-chart rect.runtime-bar-partial").count(), 1);
 
   const equivalent = await page.locator(".runtime-text-equivalent").innerText();
-  assert.match(equivalent, /6\/8 UTC\s+no runs\s+0/, "an empty bucket reads as 'no runs', never 0s");
-  assert.match(equivalent, /6\/10 UTC \(partial\)/);
+  // The screen-reader table carries the bucket's real endpoints, not the axis's
+  // compact form: it is one of the surfaces there is room for the full range on.
+  assert.match(equivalent, /Jun 8 00:00 – Jun 9 00:00 UTC\s+no runs\s+0/, "an empty bucket reads as 'no runs', never 0s");
+  assert.match(equivalent, /Jun 10 00:00 – Jun 11 00:00 UTC \(partial\)/);
   await page.close();
 });
 
@@ -244,7 +246,7 @@ test("Selecting an observed role recharts that role, from the selector and the b
   assert.equal(await page.locator(".runtime-role-select").inputValue(), "engineer");
   assert.equal(await page.getByRole("button", { name: "engineer", exact: true }).getAttribute("aria-pressed"), "true");
   assert.match(await page.locator(".runtime-selector").innerText(), /8 runs in 7d/);
-  assert.match(await page.locator(".runtime-text-equivalent").innerText(), /6\/9 UTC\s+5h0m\s+2/);
+  assert.match(await page.locator(".runtime-text-equivalent").innerText(), /Jun 9 00:00 – Jun 10 00:00 UTC\s+5h0m\s+2/);
 
   await page.locator(".runtime-role-select").selectOption("red-wide");
   await page.getByRole("img", { name: /Average agent runtime for red-wide/ }).waitFor();
@@ -276,7 +278,7 @@ test("Window controls switch resolution, and cover the empty and single-point ca
   await page.getByRole("img", { name: /by hour, over 1d/ }).waitFor();
   assert.equal(await page.locator(".runtime-chart rect.runtime-bar").count(), 19, "6 of 25 hourly buckets are empty");
   assert.match(await page.locator(".runtime-chart svg").textContent() ?? "", /14:00/);
-  assert.match(await page.locator(".runtime-caption").innerText(), /per hour \(UTC\)/);
+  assert.match(await page.locator(".runtime-caption").innerText(), /per hour, bucketed by completion time/);
   // 25 buckets in a 1000-unit viewBox cannot all be labelled without colliding.
   const hourLabels = await page.locator(".runtime-chart svg .runtime-x-tick").allTextContents();
   assert.ok(hourLabels.length < 25, `the hourly axis must thin its labels: ${hourLabels.length}`);
@@ -302,7 +304,7 @@ test("Window controls switch resolution, and cover the empty and single-point ca
   // 90d — weekly resolution. The widest label form there is, actually rendered.
   await pick("90d").click();
   await page.getByRole("img", { name: /by week, over 90d/ }).waitFor();
-  assert.match(await page.locator(".runtime-caption").innerText(), /per week \(UTC\)/);
+  assert.match(await page.locator(".runtime-caption").innerText(), /per week, bucketed by completion time/);
   const weekLabels = await page.locator(".runtime-chart svg .runtime-x-tick").allTextContents();
   assert.ok(weekLabels.length > 0, "the weekly axis must actually render weekly labels");
   assert.match(weekLabels.at(-1) ?? "", /^wk 6\/8 UTC$/, "the trailing (current) week is always labelled");
@@ -643,18 +645,19 @@ test("A window too dense to label every bar lists every bucket's value beneath i
   // The list is a wrapped flex with no ordinal cue, so the period text is the only
   // thing naming a chip's bucket: the first and last chip are both the 14:00 hour,
   // of two different UTC days, and each says which.
-  assert.match(await listed.first().innerText(), /6\/9 14:00 UTC\s+30s\s+·\s+1 run/);
-  assert.match(await listed.nth(1).innerText(), /6\/9 15:00 UTC\s+no runs/);
-  assert.match(await listed.last().innerText(), /6\/10 14:00 UTC\s+2\.1m\s+·\s+1 run/);
+  assert.match(await listed.first().innerText(), /Jun 9 14:00 – Jun 9 15:00 UTC\s+30s\s+·\s+1 run/);
+  assert.match(await listed.nth(1).innerText(), /Jun 9 15:00 – Jun 9 16:00 UTC\s+no runs/);
+  assert.match(await listed.last().innerText(), /Jun 10 14:00 – Jun 10 15:00 UTC\s+2\.1m\s+·\s+1 run/);
   const periods = await page.locator(".runtime-bucket-values li .mono").allTextContents();
   assert.equal(new Set(periods).size, periods.length, `two chips naming the same period name no bucket: ${periods.join(", ")}`);
   await page.close();
 });
 
-// AC10: a bare `7/26` on a UTC grid reads as a LOCAL date. At 07:40 PDT the
-// operator read the `8/2` bar as "this morning"; it actually opened at 17:00 the
-// previous local day, and every one of its runs completed on 8/1 local.
-test("Period labels name UTC in the label itself, so a non-UTC reader cannot misattribute a bar", async () => {
+// FG-661 AC7 (FG-648's AC10 invariant, carried through the new presentation): a
+// bare `7/26` reads as whichever clock the reader is holding. FG-648 answered that
+// by naming UTC in the label; FG-661 answers it by rendering the reader's OWN zone
+// and naming that. Either way the label may not be bare, in either mode.
+test("Period labels name their own zone in the label itself, so a reader cannot misattribute a bar", async () => {
   runtimeDelayMs = 0;
   const page = await newPage({ width: 1440, height: 1200 }, { timezoneId: "America/Los_Angeles" });
   await page.goto(`${baseUrl}/#ops`);
@@ -663,46 +666,126 @@ test("Period labels name UTC in the label itself, so a non-UTC reader cannot mis
   const ticks = await page.locator(".runtime-chart svg .runtime-x-tick").allTextContents();
   assert.ok(ticks.length > 0, "the axis must render period labels");
   for (const tick of ticks) {
-    assert.match(tick, /^\d+\/\d+ UTC$/, `a bare date is read as a local date: ${JSON.stringify(ticks)}`);
+    assert.match(tick, /^\d+\/\d+ PDT$/, `a bare date is read as some other clock: ${JSON.stringify(ticks)}`);
   }
-  // The grid itself is unchanged: the labels are the UTC days, not local ones.
-  assert.deepEqual(ticks, ["6/6 UTC", "6/7 UTC", "6/8 UTC", "6/9 UTC", "6/10 UTC"]);
-  assert.match(await page.locator(".runtime-partial-note").innerText(), /The last day \(6\/10 UTC\)/);
-  assert.match(await page.locator(".runtime-text-equivalent").innerText(), /6\/10 UTC \(partial\)/);
+  // The grid is unchanged and still UTC-aligned — which is exactly why the local
+  // dates are a day BEHIND the UTC ones the same buckets carried before. That is
+  // the fact the deleted caption was trying, and failing, to convey.
+  assert.deepEqual(ticks, ["6/5 PDT", "6/6 PDT", "6/7 PDT", "6/8 PDT", "6/9 PDT"]);
+  assert.match(await page.locator(".runtime-partial-note").innerText(), /The last day \(6\/9 PDT\)/);
+  assert.match(await page.locator(".runtime-text-equivalent").innerText(), /Jun 9 17:00 – Jun 10 17:00 PDT \(partial\)/);
 
-  // Hourly labels carry it too — the case the operator was actually reading.
+  // Hourly labels carry it too — the case the operator was actually reading. 25
+  // buckets span two local dates, so the row escalates and every label is dated.
   await runtimeWindow(page, "1d").click();
   await page.getByRole("img", { name: /by hour, over 1d/ }).waitFor();
   for (const tick of await page.locator(".runtime-chart svg .runtime-x-tick").allTextContents()) {
-    assert.match(tick, /^\d+\/\d+ \d\d:00 UTC$/);
+    assert.match(tick, /^\d+\/\d+ \d\d:00 PDT$/);
   }
   await page.close();
 });
 
-test("The caption names the reader's own offset, in both directions from UTC", async () => {
+// FG-661 AC3/AC4/AC6/AC7. The computed `You are UTC-X …` sentence is gone; what
+// replaces it is a real range in a real zone on every surface that has room for
+// one, and a toggle that moves ALL of them at once. A toggle that moved the axis
+// and left the screen-reader table in the other mode would be the same
+// two-sources-of-truth defect wearing a different hat.
+test("The chart defaults to Local, states which mode is active, and switches every period surface together", async () => {
   runtimeDelayMs = 0;
-  const west = await newPage({ width: 1280, height: 1100 }, { timezoneId: "America/Los_Angeles" });
-  await west.goto(`${baseUrl}/#ops`);
-  await west.locator(".runtime-chart svg").waitFor();
-  assert.match(await west.locator(".runtime-tz-note").innerText(),
-    /You are UTC-[78], so each UTC day here starts at 1[67]:00 on the previous local day\./);
-  await west.close();
+  const page = await newPage({ width: 1440, height: 1200 }, { timezoneId: "America/Los_Angeles" });
+  await page.goto(`${baseUrl}/#ops`);
+  await page.locator(".runtime-chart svg").waitFor();
 
-  // A positive, half-hour offset: the UTC day opens later on the SAME local day.
-  const east = await newPage({ width: 1280, height: 1100 }, { timezoneId: "Asia/Kolkata" });
-  await east.goto(`${baseUrl}/#ops`);
-  await east.locator(".runtime-chart svg").waitFor();
-  assert.equal(await east.locator(".runtime-tz-note").innerText(),
-    "You are UTC+5:30, so each UTC day here starts at 05:30 on the same local day.");
-  await east.close();
+  const tz = (name: string) => page.getByRole("group", { name: "times:" }).getByRole("button")
+    .filter({ hasText: new RegExp(`^${name}$`) });
+  // The active mode is disclosed with the chart, not inferred from the numbers.
+  assert.deepEqual(await page.getByRole("group", { name: "times:" }).getByRole("button").allTextContents(), ["Local", "UTC"]);
+  assert.equal(await tz("Local").getAttribute("aria-pressed"), "true");
+  assert.equal(await tz("UTC").getAttribute("aria-pressed"), "false");
 
-  // A reader already in UTC is told nothing they do not already know.
-  const utc = await newPage({ width: 1280, height: 1100 }, { timezoneId: "UTC" });
-  await utc.goto(`${baseUrl}/#ops`);
-  await utc.locator(".runtime-chart svg").waitFor();
-  assert.equal(await utc.locator(".runtime-tz-note").count(), 0);
-  assert.match(await utc.locator(".runtime-caption").innerText(), /per day \(UTC\)/);
-  await utc.close();
+  // Local by default, on all four period surfaces: axis, tooltip, screen-reader
+  // table, caption. Each bar is TOLD which local hours it covers.
+  assert.deepEqual(await page.locator(".runtime-chart svg .runtime-x-tick").allTextContents(),
+    ["6/5 PDT", "6/6 PDT", "6/7 PDT", "6/8 PDT", "6/9 PDT"]);
+  assert.match(await page.locator(".runtime-chart rect.runtime-bar").first().innerHTML(),
+    /Jun 5 17:00 – Jun 6 17:00 PDT: 1m30s over 4 runs/);
+  assert.match(await page.locator(".runtime-text-equivalent").innerText(),
+    /Jun 8 17:00 – Jun 9 17:00 PDT\s+3h30m\s+3/);
+  assert.match(await page.locator(".runtime-caption").innerText(),
+    /The bucket grid is UTC-aligned; periods are shown in your local time \(America\/Los_Angeles\)\./);
+
+  // AC6: the offset arithmetic is gone from the panel, not merely moved.
+  const panel = await page.locator(".runtime-view").innerText();
+  assert.doesNotMatch(panel, /You are UTC/, panel);
+  assert.doesNotMatch(panel, /previous local day/, panel);
+  assert.equal(await page.locator(".runtime-tz-note").count(), 0);
+
+  await tz("UTC").click();
+  await page.locator(".runtime-chart svg").waitFor();
+  assert.equal(await tz("UTC").getAttribute("aria-pressed"), "true");
+  assert.equal(await tz("Local").getAttribute("aria-pressed"), "false");
+  assert.deepEqual(await page.locator(".runtime-chart svg .runtime-x-tick").allTextContents(),
+    ["6/6 UTC", "6/7 UTC", "6/8 UTC", "6/9 UTC", "6/10 UTC"]);
+  assert.match(await page.locator(".runtime-chart rect.runtime-bar").first().innerHTML(),
+    /Jun 6 00:00 – Jun 7 00:00 UTC: 1m30s over 4 runs/);
+  assert.match(await page.locator(".runtime-text-equivalent").innerText(),
+    /Jun 9 00:00 – Jun 10 00:00 UTC\s+3h30m\s+3/);
+  assert.match(await page.locator(".runtime-partial-note").innerText(), /The last day \(6\/10 UTC\)/);
+  assert.match(await page.locator(".runtime-caption").innerText(), /periods are shown in UTC\./);
+
+  // The per-bucket value list is the surface a dense window falls back to, and it
+  // is the one most easily left behind in the other mode.
+  await runtimeWindow(page, "1d").click();
+  await page.getByRole("img", { name: /by hour, over 1d/ }).waitFor();
+  assert.match(await page.locator(".runtime-bucket-values li").first().innerText(), /Jun 9 14:00 – Jun 9 15:00 UTC/);
+  await tz("Local").click();
+  await page.locator(".runtime-chart svg").waitFor();
+  assert.match(await page.locator(".runtime-bucket-values li").first().innerText(), /Jun 9 07:00 – Jun 9 08:00 PDT/);
+  assert.match(await page.locator(".runtime-bucket-values li").last().innerText(), /Jun 10 07:00 – Jun 10 08:00 PDT/);
+  for (const tick of await page.locator(".runtime-chart svg .runtime-x-tick").allTextContents()) {
+    assert.match(tick, /^\d+\/\d+ \d\d:00 PDT$/, "an hourly local label is bare about neither its date nor its zone");
+  }
+  await page.close();
+});
+
+// FG-661/RF-15. The already-fixed sibling case reaches the error card by CLICKING
+// a window, which nulls the series first and so takes the `!data` branch. This one
+// must not: the whole defect is that a read failing UNDER a loaded series had no
+// surface at all, because the only consumer of the error sat inside `if (!data)`.
+test("A read that starts failing under a loaded series says so, and keeps the series it is warning about", async () => {
+  runtimeDelayMs = 0;
+  const page = await newPage({ width: 1280, height: 1100 });
+  // The operator's actual path: the panel is left open and the 30s poll is what
+  // fails. A faked clock runs that interval without the suite waiting on it.
+  await page.clock.install();
+  await page.goto(`${baseUrl}/#ops`);
+  await page.locator(".runtime-chart svg").waitFor();
+  assert.equal(await page.locator(".runtime-stale").count(), 0, "a healthy read is not stale");
+
+  runtimeStatus = 500;
+  await page.clock.runFor(31_000);
+
+  const stale = page.locator(".runtime-stale");
+  await stale.waitFor();
+  assert.equal(await stale.getAttribute("role"), "alert");
+  assert.match(await stale.innerText(), /HTTP 500/);
+  assert.match(await stale.innerText(), /these numbers are stale/);
+
+  // ...and the chart is still there, still showing the last good read. Discarding
+  // it would trade stale numbers for no numbers, which is the worse of the two.
+  assert.equal(await page.locator(".runtime-chart rect.runtime-bar").count(), 4);
+  assert.deepEqual(await page.locator(".runtime-chart svg .runtime-value").allTextContents(),
+    ["1.5m", "2.5m", "3.5h", "45s"]);
+  assert.equal(await page.locator(".runtime-error").count(), 0,
+    "the error card replaces the chart — this path must not reach it, or the series is gone");
+  assert.equal(await runtimeWindow(page, "7d").getAttribute("aria-pressed"), "true",
+    "no window was clicked: the series was never dropped, which is what makes this the RF-15 path");
+
+  runtimeStatus = 200;
+  await page.clock.runFor(31_000);
+  await stale.waitFor({ state: "detached" });
+  assert.equal(await page.locator(".runtime-chart rect.runtime-bar").count(), 4);
+  await page.close();
 });
 
 /** WCAG 2.x relative-luminance contrast ratio between two computed CSS colours. */
@@ -760,7 +843,12 @@ async function newPage(
   viewport: { width: number; height: number },
   options: { reducedMotion?: "reduce" | "no-preference"; timezoneId?: string } = {},
 ): Promise<Page> {
-  const page = await browser.newPage({ viewport, reducedMotion: "reduce", ...options });
+  // timezoneId is pinned, not inherited: the chart's default mode is Local, so a
+  // suite that let the runner's own zone through would assert whatever box it ran
+  // on. UTC here makes the local presentation and the UTC one coincide, which is
+  // what keeps these assertions about the chart rather than about the clock. The
+  // cases where they must DIFFER pass a real non-UTC zone of their own.
+  const page = await browser.newPage({ viewport, reducedMotion: "reduce", timezoneId: "UTC", ...options });
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("close", () => assert.deepEqual(errors, [], `browser errors: ${errors.join("; ")}`));
