@@ -265,15 +265,21 @@ test("FG-664: a workflow red on a COLD cache key provisions, probes and mounts t
   assert.ok(red, "the reviewer task must exist");
   assert.equal(red.status, "complete", `the red must run once its environment is attested (${red.error})`);
 
-  // The lane ran Forge's OWN two containers before the reviewer's, in that order.
+  // The lane ran Forge's OWN containers before each agent container. FG-678: the
+  // rw PRIMARY resolves through the same resolver on this shape too, so it
+  // provisions the cold key and attests first; the red then reuses the marker the
+  // primary left and only re-attests. Exactly one install across the wave — the
+  // per-cache-key lock is what makes that true, not dispatch ordering.
   assert.deepEqual(
     calls.filter((c) => c.kind !== "agent").map((c) => c.kind),
-    ["provisioner", "probe", "load"],
-    `expected exactly one provisioner, one probe and one load; got ${JSON.stringify(calls.map((c) => c.kind))}`,
+    ["provisioner", "probe", "load", "probe", "load"],
+    `expected one provisioner and one probe+load per resolving dispatch; got ${JSON.stringify(calls.map((c) => c.kind))}`,
   );
+  assert.equal(calls.filter((c) => c.kind === "provisioner").length, 1, "the shared cache is installed once per key, not once per dispatch");
+  const redContainerIndex = calls.findIndex((c) => c.taskId === red.id);
   assert.ok(
-    calls.findIndex((c) => c.kind === "probe") < calls.findIndex((c) => c.taskId === red.id),
-    "the probe must precede the reviewer container it attests for",
+    calls.filter((c) => c.kind === "probe").every((c) => calls.indexOf(c) < redContainerIndex),
+    "every probe must precede the reviewer container — the environment is established before any agent runs",
   );
 
   // The reviewer got the real dependencies, read-only, with /project still :ro.
@@ -298,9 +304,13 @@ test("FG-664: a workflow red on a COLD cache key provisions, probes and mounts t
   const resolvedEvents = eventsForRun(runId).filter(
     (e) => e.eventType === "container.dependency_environment_resolved",
   );
-  assert.equal(resolvedEvents.length, 1, "one resolution, one durable record");
-  assert.equal(resolvedEvents[0]!.taskId, red.id);
-  assert.deepEqual(resolvedEvents[0]!.payload, {
+  // One record per RESOLVING DISPATCH (FG-678: the writable primary is now one of
+  // them), never one per wave — a receipt answers "which engine did THIS task
+  // run against", so it cannot be shared between two tasks.
+  assert.equal(resolvedEvents.length, 2, "one resolution per dispatch, each durably recorded");
+  const redResolved = resolvedEvents.filter((e) => e.taskId === red.id);
+  assert.equal(redResolved.length, 1, "the reviewer's own resolution must be recorded against the reviewer");
+  assert.deepEqual(redResolved[0]!.payload, {
     stage: "environment_resolution",
     cacheKey: hash,
     probeImage: receipt.probeImage,
@@ -322,12 +332,21 @@ test("FG-664: a workflow red whose probe says the real driver will not load is R
     dockerExec: makeExec(calls, {
       // The probe SEES the artifact; the load container is what cannot load it,
       // and its exit status is the fact the host acts on.
+      //
+      // Scoped to the REVIEWER's own load containers. Since FG-678 the rw primary
+      // resolves through the same resolver on this shape, so an unconditional
+      // failure here would refuse the primary and the red would never be reached
+      // — proving nothing about the read-only lane, which is what this case is
+      // for. The two dispatches have different mount shapes, so a per-lane answer
+      // is the fixture being specific, not being lenient.
       load: (args, stderrPath) =>
-        answerDependencyLoad(
-          args,
-          { packages: [{ name: "better-sqlite3", version: "12.11.1", loaded: false, error: "invalid ELF header" }] },
-          stderrPath,
-        ),
+        containerName(args).includes("red")
+          ? answerDependencyLoad(
+              args,
+              { packages: [{ name: "better-sqlite3", version: "12.11.1", loaded: false, error: "invalid ELF header" }] },
+              stderrPath,
+            )
+          : answerDependencyLoad(args),
     }),
   });
 
@@ -351,13 +370,15 @@ test("FG-664: a workflow red whose probe says the real driver will not load is R
   assert.equal(refusal.length, 1, "the refusal is recorded with the same event and grain the invoke lane uses");
   assert.equal(refusal[0]!.taskId, red.id);
   assert.equal(
-    eventsForRun(runId).filter((e) => e.eventType === "container.dependency_environment_resolved").length,
+    eventsForRun(runId).filter(
+      (e) => e.eventType === "container.dependency_environment_resolved" && e.taskId === red.id,
+    ).length,
     0,
-    "nothing was attested, so nothing may say which engine ran",
+    "nothing was attested FOR THE RED, so nothing may say which engine its verdict ran against",
   );
 });
 
-test("FG-664: a workflow red whose provisioner FAILS is refused, leaves no ready marker, and never reaches the probe", async () => {
+test("FG-664/FG-678: a dispatch whose provisioner FAILS is refused, leaves no ready marker, and never reaches the probe", async () => {
   setPlatform("darwin");
   const repo = makeRepo("lane-provision-fail");
 
@@ -365,13 +386,20 @@ test("FG-664: a workflow red whose provisioner FAILS is refused, leaves no ready
   const { runId } = startRun({ workflow: WORKFLOW, title: "fg664 lane provision fail", inputs: {}, projectDir: repo });
   await runNext({ runId, workflow: WORKFLOW, dockerExec: makeExec(calls, { provisionerExit: 123 }) });
 
-  const red = redTask(runId);
-  assert.ok(red);
-  assert.equal(failureKindForTask(red.id), "verification_environment_unavailable");
-  assert.match(String(red.error), /provisioning_failed/);
+  // The install is keyed on the LOCKFILE and shared by every dispatch over this
+  // tree, so since FG-678 — where the rw primary resolves through the same
+  // resolver — the primary is the dispatch that meets the failing provisioner
+  // first. WHICH task carries the refusal moved; the refusal itself, the absent
+  // marker and the un-run probe are exactly as FG-664 left them.
+  const primary = tasksForRun(runId).find((t) => t.phase === "build" && t.parentId === undefined);
+  assert.ok(primary);
+  assert.equal(primary.status, "failed");
+  assert.equal(failureKindForTask(primary.id), "verification_environment_unavailable");
+  assert.match(String(primary.error), /provisioning_failed/);
   assert.equal(isDependencyCacheReady(lockfileHash(repo)), false, "FG-376: a failed provision leaves no ready marker");
   assert.equal(calls.filter((c) => c.kind === "probe").length, 0, "no probe runs against a cache that never installed");
-  assert.equal(calls.filter((c) => c.taskId === red.id).length, 0);
+  assert.equal(calls.filter((c) => c.kind === "agent").length, 0, "no agent container of either lane may start");
+  assert.equal(redTask(runId), undefined, "the reviewer is never reached: its subject was refused before it existed");
 });
 
 test("FG-664: the workflow lane is untouched off the hazard — a non-darwin host builds neither extra container and refuses nothing", async () => {
