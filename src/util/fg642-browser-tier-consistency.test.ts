@@ -32,13 +32,17 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const TIER_DIR = join(ROOT, "dashboard", "browser-tests");
 const RESOLVER = join("src", "util", "chrome-bin.ts");
 
-// The tier as FG-642 restored it (5 suites, 18 tests), plus the FG-648 runtime
-// suite — grown by the FG-648 review fixes to cover the weekly resolution, the
-// width band a viewport breakpoint left illegible, contrast, reduced motion, the
-// error state, out-of-order responses and the role write-back. Growing or pruning
-// the tier is fine — update this map in the same commit, on purpose.
+// The tier as FG-642 restored it (5 suites, 18 tests), plus the two FG-648 runtime
+// suites — `agent-runtime` grown by the FG-648 review fixes to cover the weekly
+// resolution, the width band a viewport breakpoint left illegible, contrast,
+// reduced motion, the error state, out-of-order responses and the role write-back;
+// `agent-runtime-legibility` added by the reopened ticket's verify phase to attack
+// AC8-AC10 (axis truthfulness at the scale edges, mean-and-count pairing swept
+// across twelve widths, UTC disclosure on the plot rather than only the caption).
+// Growing or pruning the tier is fine — update this map in the same commit, on purpose.
 const TIER_TESTS: Readonly<Record<string, number>> = {
-  "agent-runtime.test.ts": 12,
+  "agent-runtime-legibility.test.ts": 9,
+  "agent-runtime.test.ts": 17,
   "backlog-count.test.ts": 2,
   "fg608-backlog-cutover.test.ts": 3,
   "inactive-checkouts.test.ts": 3,
@@ -57,7 +61,7 @@ test("FG-642 (exact set): the browser tier is exactly the suites TIER_TESTS name
   );
 });
 
-test("FG-642 (exact set): every suite keeps its own test count, and the tier keeps all 30", () => {
+test("FG-642 (exact set): every suite keeps its own test count, and the tier keeps all 44", () => {
   let total = 0;
   for (const [file, expected] of Object.entries(TIER_TESTS)) {
     const found = (tierSource(file).match(/^test\(/gm) ?? []).length;
@@ -68,7 +72,7 @@ test("FG-642 (exact set): every suite keeps its own test count, and the tier kee
     );
     total += found;
   }
-  assert.equal(total, 30, "the tier must carry FG-642's 18 real-browser tests plus FG-648's 12");
+  assert.equal(total, 44, "the tier must carry FG-642's 18 real-browser tests plus FG-648's 26");
 });
 
 test("FG-642 (launch site): every chromium.launch() in the tier takes executablePath from the shared resolver", () => {

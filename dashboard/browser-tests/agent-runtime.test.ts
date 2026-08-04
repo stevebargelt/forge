@@ -198,8 +198,8 @@ test("Ops defaults to the All agents series and renders an accessible, labelled 
   assert.equal(await chart.count(), 1);
   const label = await chart.getAttribute("aria-label") ?? "";
   assert.match(label, /by day, over 7d/);
-  assert.match(label, /6\/9 3h30m/, "a multi-hour average must read as hours, not raw ms");
-  assert.match(label, /6\/10 45s \(partial\)/);
+  assert.match(label, /6\/9 UTC 3h30m over 3 runs/, "a multi-hour average must read as hours, not raw ms");
+  assert.match(label, /6\/10 UTC 45s over 1 run \(partial\)/);
   assert.doesNotMatch(label, /6\/8/, "the empty bucket must not appear as a plotted value");
 
   // Four bars for four observed buckets; the empty bucket draws no bar.
@@ -207,8 +207,8 @@ test("Ops defaults to the All agents series and renders an accessible, labelled 
   assert.equal(await page.locator(".runtime-chart rect.runtime-bar-partial").count(), 1);
 
   const equivalent = await page.locator(".runtime-text-equivalent").innerText();
-  assert.match(equivalent, /6\/8\s+no runs\s+0/, "an empty bucket reads as 'no runs', never 0s");
-  assert.match(equivalent, /6\/10 \(partial\)/);
+  assert.match(equivalent, /6\/8 UTC\s+no runs\s+0/, "an empty bucket reads as 'no runs', never 0s");
+  assert.match(equivalent, /6\/10 UTC \(partial\)/);
   await page.close();
 });
 
@@ -219,7 +219,7 @@ test("The partial bucket is visibly identified in the chart affordance", async (
 
   const note = page.locator(".runtime-partial-note");
   assert.equal(await note.count(), 1);
-  assert.match(await note.innerText(), /The last day \(6\/10\) is hatched/);
+  assert.match(await note.innerText(), /The last day \(6\/10 UTC\) is hatched/);
   const partialFill = await page.locator(".runtime-chart rect.runtime-bar-partial").getAttribute("fill");
   assert.equal(partialFill, "url(#runtime-partial-hatch)");
   const solidFill = await page.locator(".runtime-chart rect.runtime-bar:not(.runtime-bar-partial)").first().getAttribute("fill");
@@ -244,7 +244,7 @@ test("Selecting an observed role recharts that role, from the selector and the b
   assert.equal(await page.locator(".runtime-role-select").inputValue(), "engineer");
   assert.equal(await page.getByRole("button", { name: "engineer", exact: true }).getAttribute("aria-pressed"), "true");
   assert.match(await page.locator(".runtime-selector").innerText(), /8 runs in 7d/);
-  assert.match(await page.locator(".runtime-text-equivalent").innerText(), /6\/9\s+5h0m\s+2/);
+  assert.match(await page.locator(".runtime-text-equivalent").innerText(), /6\/9 UTC\s+5h0m\s+2/);
 
   await page.locator(".runtime-role-select").selectOption("red-wide");
   await page.getByRole("img", { name: /Average agent runtime for red-wide/ }).waitFor();
@@ -278,11 +278,11 @@ test("Window controls switch resolution, and cover the empty and single-point ca
   assert.match(await page.locator(".runtime-chart svg").textContent() ?? "", /14:00/);
   assert.match(await page.locator(".runtime-caption").innerText(), /per hour \(UTC\)/);
   // 25 buckets in a 1000-unit viewBox cannot all be labelled without colliding.
-  const hourLabels = await page.locator(".runtime-chart svg text").allTextContents();
+  const hourLabels = await page.locator(".runtime-chart svg .runtime-x-tick").allTextContents();
   assert.ok(hourLabels.length < 25, `the hourly axis must thin its labels: ${hourLabels.length}`);
-  assert.equal(await axisLabelsOverlap(page), false, "hourly axis labels must not run into each other");
+  assert.equal(await anyChartRowOverlaps(page), null, "hourly chart labels must not run into each other");
   // The trailing (current) bucket is always labelled, whatever the thinning drops.
-  assert.match(hourLabels.at(-1) ?? "", /^14:00$/);
+  assert.match(hourLabels.at(-1) ?? "", /^14:00 UTC$/);
 
   // 30d — a single point, still a legible bar inside the plot area.
   await pick("30d").click();
@@ -301,11 +301,11 @@ test("Window controls switch resolution, and cover the empty and single-point ca
   await pick("90d").click();
   await page.getByRole("img", { name: /by week, over 90d/ }).waitFor();
   assert.match(await page.locator(".runtime-caption").innerText(), /per week \(UTC\)/);
-  const weekLabels = (await page.locator(".runtime-chart svg text").allTextContents()).filter((t) => t.startsWith("wk "));
+  const weekLabels = await page.locator(".runtime-chart svg .runtime-x-tick").allTextContents();
   assert.ok(weekLabels.length > 0, "the weekly axis must actually render weekly labels");
-  assert.match(weekLabels.at(-1) ?? "", /^wk 6\/8$/, "the trailing (current) week is always labelled");
-  assert.equal(await axisLabelsOverlap(page), false, "weekly axis labels must not run into each other");
-  assert.match(await page.locator(".runtime-partial-note").innerText(), /The last week \(wk 6\/8\) is hatched/);
+  assert.match(weekLabels.at(-1) ?? "", /^wk 6\/8 UTC$/, "the trailing (current) week is always labelled");
+  assert.equal(await anyChartRowOverlaps(page), null, "weekly chart labels must not run into each other");
+  assert.match(await page.locator(".runtime-partial-note").innerText(), /The last week \(wk 6\/8 UTC\) is hatched/);
   assert.equal(await page.locator(".runtime-chart rect.runtime-bar-partial").count(), 1);
 
   // all — no observations at all: an empty state, not an empty chart.
@@ -343,7 +343,41 @@ test("The runtime panel stays contained and legible at a narrow viewport", async
   await page.goto(`${baseUrl}/#ops`);
   await page.locator(".runtime-chart svg").waitFor();
 
-  const layout = await page.evaluate(() => {
+  const layout = await measureNarrowLayout(page);
+  const textInsideSvg = layout.clippedLabels.length === 0;
+  assert.ok(layout.documentWidth <= layout.innerWidth, JSON.stringify(layout));
+  assert.ok(layout.bodyWidth <= layout.innerWidth, JSON.stringify(layout));
+  assert.ok(layout.svgRight <= layout.innerWidth, JSON.stringify(layout));
+  assert.ok(layout.svgWidth > 200, JSON.stringify(layout));
+  assert.ok(layout.tableRight <= layout.innerWidth, JSON.stringify(layout));
+  assert.ok(layout.selectRight <= layout.innerWidth, JSON.stringify(layout));
+  assert.equal(layout.barsVisible, true, JSON.stringify(layout));
+  // The viewBox scales the axis text down with the column. It must still be readable.
+  assert.ok(layout.axisTextPx.length > 0, JSON.stringify(layout));
+  assert.ok(Math.min(...layout.axisTextPx) >= 8, `axis labels must stay legible: ${JSON.stringify(layout.axisTextPx)}`);
+  assert.equal(textInsideSvg, true,
+    `no chart label may be clipped by the viewBox — clipped: ${JSON.stringify(layout.clippedLabels)}`);
+  assert.equal(await anyChartRowOverlaps(page), null, "chart labels must not collide at a narrow width");
+
+  // Long durations must not overflow their cell at this width.
+  assert.match(await page.locator(".runtime-table").innerText(), /1h16m/);
+
+  // The densest window at the narrowest width — 25 hourly buckets, a y-axis, a
+  // value row and a run-count row, all inside a 390px column.
+  await runtimeWindow(page, "1d").click();
+  await page.getByRole("img", { name: /by hour, over 1d/ }).waitFor();
+  const dense = await measureNarrowLayout(page);
+  assert.ok(dense.documentWidth <= dense.innerWidth, JSON.stringify(dense));
+  assert.equal(dense.barsVisible, true, JSON.stringify(dense));
+  assert.ok(Math.min(...dense.axisTextPx) >= 8, `axis labels must stay legible: ${JSON.stringify(dense.axisTextPx)}`);
+  assert.deepEqual(dense.clippedLabels, [], "no chart label may be clipped by the viewBox at the densest window");
+  assert.equal(await anyChartRowOverlaps(page), null, "chart labels must not collide at 1d/390px");
+  await page.close();
+});
+
+/** Containment, legibility and clipping of the runtime panel as currently rendered. */
+async function measureNarrowLayout(page: Page) {
+  return page.evaluate(() => {
     const svg = document.querySelector(".runtime-chart svg")?.getBoundingClientRect();
     const table = document.querySelector(".runtime-table")?.getBoundingClientRect();
     const select = document.querySelector(".runtime-role-select")?.getBoundingClientRect();
@@ -360,47 +394,26 @@ test("The runtime panel stays contained and legible at a narrow viewport", async
       // The rendered (post-viewBox-scale) axis text height in CSS pixels.
       axisTextPx: Array.from(document.querySelectorAll(".runtime-chart svg text"))
         .map((element) => element.getBoundingClientRect().height),
-      // Nothing may be clipped off the top or bottom of the scaled viewBox. Each
-      // offender carries its measured overflow so a failure names the label and
-      // the pixels instead of reading "false !== true".
+      // Nothing may be clipped off ANY edge of the scaled viewBox — a value label
+      // centred over the trailing bar runs off the right edge as readily as the
+      // peak label used to run off the top. Each offender carries its measured
+      // overflow so a failure names the label and the pixels instead of reading
+      // "false !== true".
       clippedLabels: Array.from(document.querySelectorAll(".runtime-chart svg text")).flatMap((element) => {
         const svgBox = document.querySelector(".runtime-chart svg")!.getBoundingClientRect();
         const box = element.getBoundingClientRect();
-        const overflowTopPx = +(svgBox.top - box.top).toFixed(2);
-        const overflowBottomPx = +(box.bottom - svgBox.bottom).toFixed(2);
-        if (overflowTopPx <= 0.5 && overflowBottomPx <= 0.5) return [];
-        return [{
-          text: element.textContent ?? "",
-          escapes: overflowTopPx > 0.5 ? "top" : "bottom",
-          overflowTopPx,
-          overflowBottomPx,
-          textTop: +box.top.toFixed(2),
-          textBottom: +box.bottom.toFixed(2),
-          svgTop: +svgBox.top.toFixed(2),
-          svgBottom: +svgBox.bottom.toFixed(2),
-        }];
+        const overflow = {
+          top: +(svgBox.top - box.top).toFixed(2),
+          bottom: +(box.bottom - svgBox.bottom).toFixed(2),
+          left: +(svgBox.left - box.left).toFixed(2),
+          right: +(box.right - svgBox.right).toFixed(2),
+        };
+        const escapes = Object.entries(overflow).filter(([, px]) => px > 0.5).map(([edge]) => edge);
+        return escapes.length === 0 ? [] : [{ text: element.textContent ?? "", escapes, overflow }];
       }),
     };
   });
-  const textInsideSvg = layout.clippedLabels.length === 0;
-  assert.ok(layout.documentWidth <= layout.innerWidth, JSON.stringify(layout));
-  assert.ok(layout.bodyWidth <= layout.innerWidth, JSON.stringify(layout));
-  assert.ok(layout.svgRight <= layout.innerWidth, JSON.stringify(layout));
-  assert.ok(layout.svgWidth > 200, JSON.stringify(layout));
-  assert.ok(layout.tableRight <= layout.innerWidth, JSON.stringify(layout));
-  assert.ok(layout.selectRight <= layout.innerWidth, JSON.stringify(layout));
-  assert.equal(layout.barsVisible, true, JSON.stringify(layout));
-  // The viewBox scales the axis text down with the column. It must still be readable.
-  assert.ok(layout.axisTextPx.length > 0, JSON.stringify(layout));
-  assert.ok(Math.min(...layout.axisTextPx) >= 8, `axis labels must stay legible: ${JSON.stringify(layout.axisTextPx)}`);
-  assert.equal(textInsideSvg, true,
-    `no chart label may be clipped by the viewBox — clipped: ${JSON.stringify(layout.clippedLabels)}`);
-  assert.equal(await axisLabelsOverlap(page), false, "axis labels must not collide at a narrow width");
-
-  // Long durations must not overflow their cell at this width.
-  assert.match(await page.locator(".runtime-table").innerText(), /1h16m/);
-  await page.close();
-});
+}
 
 // The chart's labels live in a viewBox that is scaled to the column width, so
 // their rendered size is a continuous function of the viewport — every width is a
@@ -419,7 +432,7 @@ test("Chart labels hold their size across the whole width range, not just at sam
     measured.push({ width, min: Math.min(...heights), max: Math.max(...heights) });
     assert.ok(Math.min(...heights) >= 8,
       `axis labels must stay legible at ${width}px: ${JSON.stringify(heights)}`);
-    assert.equal(await axisLabelsOverlap(page), false, `axis labels must not collide at ${width}px`);
+    assert.equal(await anyChartRowOverlaps(page), null, `chart labels must not collide at ${width}px`);
     await page.close();
   }
   const smallest = Math.min(...measured.map((m) => m.min));
@@ -435,9 +448,15 @@ test("Chart text meets WCAG AA contrast against the surface it is painted on", a
 
   // Colours come out of the real cascade; the ratio is computed here, because the
   // page context has no module helpers.
+  // Each row of chart text is selected by its OWN class. Selecting two of them by
+  // document order made both resolve to the same element, so one of the two was
+  // asserted by nothing (FG-661/RF-14).
   const colors = await page.evaluate(() => ({
-    axisFill: getComputedStyle(document.querySelector(".runtime-chart svg text")!).fill,
-    peakFill: getComputedStyle(document.querySelectorAll(".runtime-chart svg text")[0]!).fill,
+    xTickFill: getComputedStyle(document.querySelector(".runtime-chart svg .runtime-x-tick")!).fill,
+    yTickFill: getComputedStyle(document.querySelector(".runtime-chart svg .runtime-y-tick")!).fill,
+    valueFill: getComputedStyle(document.querySelector(".runtime-chart svg .runtime-value")!).fill,
+    countFill: getComputedStyle(document.querySelector(".runtime-chart svg .runtime-count")!).fill,
+    countHeadFill: getComputedStyle(document.querySelector(".runtime-chart svg .runtime-count-head")!).fill,
     captionColor: getComputedStyle(document.querySelector(".runtime-caption")!).color,
     tableCaptionColor: getComputedStyle(document.querySelector(".runtime-table caption")!).color,
     chartBackground: getComputedStyle(document.querySelector(".runtime-chart")!).backgroundColor,
@@ -448,8 +467,11 @@ test("Chart text meets WCAG AA contrast against the surface it is painted on", a
   // The table sets no background of its own, so its caption sits on the page's.
   assert.match(colors.tableBackground, /rgba\(0, 0, 0, 0\)|transparent/);
   const ratios = {
-    axis: contrastRatio(colors.axisFill, colors.chartBackground),
-    peak: contrastRatio(colors.peakFill, colors.chartBackground),
+    xTick: contrastRatio(colors.xTickFill, colors.chartBackground),
+    yTick: contrastRatio(colors.yTickFill, colors.chartBackground),
+    value: contrastRatio(colors.valueFill, colors.chartBackground),
+    count: contrastRatio(colors.countFill, colors.chartBackground),
+    countHead: contrastRatio(colors.countHeadFill, colors.chartBackground),
     caption: contrastRatio(colors.captionColor, colors.chartBackground),
     tableCaption: contrastRatio(colors.tableCaptionColor, colors.pageBackground),
   };
@@ -545,6 +567,137 @@ test("A role with no observations in the new window is written back, not just di
   await page.close();
 });
 
+// FG-648 (reopened), AC8: the chart shipped with nine text elements — one `peak:`
+// annotation and eight dates. A reader could not get a scale, a unit, or any bar's
+// value but the tallest off it.
+test("The y-axis carries duration ticks and gridlines that the bars are drawn against", async () => {
+  runtimeDelayMs = 0;
+  const page = await newPage({ width: 1440, height: 1200 });
+  await page.goto(`${baseUrl}/#ops`);
+  await page.locator(".runtime-chart svg").waitFor();
+
+  // The peak is 3h30m, so the axis tops out at the next whole hour above it.
+  assert.deepEqual(await page.locator(".runtime-chart svg .runtime-y-tick").allTextContents(),
+    ["0s", "1h", "2h", "3h", "4h"]);
+  assert.equal(await page.locator(".runtime-chart svg .runtime-gridline").count(), 5);
+
+  // The axis is truthful: the tallest bar is drawn at its real fraction of the
+  // axis top, not clamped to it, not compressed onto a log scale.
+  const geometry = await page.evaluate(() => {
+    const tops = Array.from(document.querySelectorAll(".runtime-chart svg .runtime-gridline"))
+      .map((element) => element.getBoundingClientRect().top);
+    const bars = Array.from(document.querySelectorAll(".runtime-chart rect.runtime-bar"))
+      .map((element) => element.getBoundingClientRect());
+    const tallest = bars.reduce((a, b) => (b.height > a.height ? b : a));
+    return { axisTop: Math.min(...tops), axisBase: Math.max(...tops), barTop: tallest.top, barHeight: tallest.height };
+  });
+  const plotHeight = geometry.axisBase - geometry.axisTop;
+  assert.ok(geometry.barTop >= geometry.axisTop - 1, `no bar may escape the axis: ${JSON.stringify(geometry)}`);
+  assert.ok(Math.abs(geometry.barHeight / plotHeight - 12_600_000 / 14_400_000) < 0.03,
+    `the tallest bar must measure its own value against the axis: ${JSON.stringify({ ...geometry, plotHeight })}`);
+  await page.close();
+});
+
+// AC9: the mean and the run count of EVERY bucket, on the chart itself. The
+// screen-reader table alone was the defect, not the fix.
+test("Every bucket's mean and run count are on the chart surface, not only in the screen-reader table", async () => {
+  runtimeDelayMs = 0;
+  const page = await newPage({ width: 1440, height: 1200 });
+  await page.goto(`${baseUrl}/#ops`);
+  await page.locator(".runtime-chart svg").waitFor();
+
+  assert.deepEqual(await page.locator(".runtime-chart svg .runtime-value").allTextContents(),
+    ["1.5m", "2.5m", "3.5h", "45s"], "the empty bucket carries no value label");
+  assert.deepEqual(await page.locator(".runtime-chart svg .runtime-count").allTextContents(),
+    ["4", "6", "0", "3", "1"]);
+  assert.equal(await page.locator(".runtime-chart svg .runtime-count-head").textContent(), "RUNS",
+    "a bare row of numbers under the dates is not a run count");
+  assert.equal(await page.locator(".runtime-bucket-values").count(), 0,
+    "with every bar labelled on the plot there is nothing to spell out beneath it");
+
+  // The single-point case keeps both labels — it is the degenerate chart, not an
+  // exception to reading a value off it.
+  await runtimeWindow(page, "30d").click();
+  await page.getByRole("button", { name: "documentation-maintainer" }).waitFor();
+  assert.deepEqual(await page.locator(".runtime-chart svg .runtime-value").allTextContents(), ["2.1h"]);
+  assert.deepEqual(await page.locator(".runtime-chart svg .runtime-count").allTextContents(), ["1"]);
+  await page.close();
+});
+
+test("A window too dense to label every bar lists every bucket's value beneath it", async () => {
+  runtimeDelayMs = 0;
+  const page = await newPage({ width: 1280, height: 1100 });
+  await page.goto(`${baseUrl}/#ops`);
+  await page.locator(".runtime-chart svg").waitFor();
+
+  await runtimeWindow(page, "1d").click();
+  await page.getByRole("img", { name: /by hour, over 1d/ }).waitFor();
+  const plotted = await page.locator(".runtime-chart svg .runtime-count").count();
+  assert.ok(plotted < 25, `25 hourly bars cannot all carry a label: ${plotted}`);
+
+  // ...so the same numbers are spelled out under the chart, every bucket of them.
+  const listed = page.locator(".runtime-bucket-values li");
+  assert.equal(await listed.count(), 25);
+  assert.match(await listed.first().innerText(), /14:00 UTC\s+30s\s+·\s+1 run/);
+  assert.match(await listed.nth(1).innerText(), /15:00 UTC\s+no runs/);
+  assert.match(await listed.last().innerText(), /14:00 UTC\s+2\.1m\s+·\s+1 run/);
+  await page.close();
+});
+
+// AC10: a bare `7/26` on a UTC grid reads as a LOCAL date. At 07:40 PDT the
+// operator read the `8/2` bar as "this morning"; it actually opened at 17:00 the
+// previous local day, and every one of its runs completed on 8/1 local.
+test("Period labels name UTC in the label itself, so a non-UTC reader cannot misattribute a bar", async () => {
+  runtimeDelayMs = 0;
+  const page = await newPage({ width: 1440, height: 1200 }, { timezoneId: "America/Los_Angeles" });
+  await page.goto(`${baseUrl}/#ops`);
+  await page.locator(".runtime-chart svg").waitFor();
+
+  const ticks = await page.locator(".runtime-chart svg .runtime-x-tick").allTextContents();
+  assert.ok(ticks.length > 0, "the axis must render period labels");
+  for (const tick of ticks) {
+    assert.match(tick, /^\d+\/\d+ UTC$/, `a bare date is read as a local date: ${JSON.stringify(ticks)}`);
+  }
+  // The grid itself is unchanged: the labels are the UTC days, not local ones.
+  assert.deepEqual(ticks, ["6/6 UTC", "6/7 UTC", "6/8 UTC", "6/9 UTC", "6/10 UTC"]);
+  assert.match(await page.locator(".runtime-partial-note").innerText(), /The last day \(6\/10 UTC\)/);
+  assert.match(await page.locator(".runtime-text-equivalent").innerText(), /6\/10 UTC \(partial\)/);
+
+  // Hourly labels carry it too — the case the operator was actually reading.
+  await runtimeWindow(page, "1d").click();
+  await page.getByRole("img", { name: /by hour, over 1d/ }).waitFor();
+  for (const tick of await page.locator(".runtime-chart svg .runtime-x-tick").allTextContents()) {
+    assert.match(tick, /^\d\d:00 UTC$/);
+  }
+  await page.close();
+});
+
+test("The caption names the reader's own offset, in both directions from UTC", async () => {
+  runtimeDelayMs = 0;
+  const west = await newPage({ width: 1280, height: 1100 }, { timezoneId: "America/Los_Angeles" });
+  await west.goto(`${baseUrl}/#ops`);
+  await west.locator(".runtime-chart svg").waitFor();
+  assert.match(await west.locator(".runtime-tz-note").innerText(),
+    /You are UTC-[78], so each UTC day here starts at 1[67]:00 on the previous local day\./);
+  await west.close();
+
+  // A positive, half-hour offset: the UTC day opens later on the SAME local day.
+  const east = await newPage({ width: 1280, height: 1100 }, { timezoneId: "Asia/Kolkata" });
+  await east.goto(`${baseUrl}/#ops`);
+  await east.locator(".runtime-chart svg").waitFor();
+  assert.equal(await east.locator(".runtime-tz-note").innerText(),
+    "You are UTC+5:30, so each UTC day here starts at 05:30 on the same local day.");
+  await east.close();
+
+  // A reader already in UTC is told nothing they do not already know.
+  const utc = await newPage({ width: 1280, height: 1100 }, { timezoneId: "UTC" });
+  await utc.goto(`${baseUrl}/#ops`);
+  await utc.locator(".runtime-chart svg").waitFor();
+  assert.equal(await utc.locator(".runtime-tz-note").count(), 0);
+  assert.match(await utc.locator(".runtime-caption").innerText(), /per day \(UTC\)/);
+  await utc.close();
+});
+
 /** WCAG 2.x relative-luminance contrast ratio between two computed CSS colours. */
 function contrastRatio(foreground: string, background: string): number {
   const luminance = (color: string) => {
@@ -560,17 +713,28 @@ function contrastRatio(foreground: string, background: string): number {
   return +((Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05)).toFixed(2);
 }
 
-/** True when any two axis labels' rendered boxes intersect horizontally. Every
- *  label but the peak one is an axis label — including the weekly `wk 6/10` form,
- *  which a digit-prefix filter would silently exclude from the check. */
-async function axisLabelsOverlap(page: Page): Promise<boolean> {
-  return page.evaluate(() => {
-    const boxes = Array.from(document.querySelectorAll(".runtime-chart svg text"))
-      .filter((element) => !(element.textContent ?? "").startsWith("peak"))
+/** True when any two labels in ONE row intersect horizontally. Rows are checked
+ *  separately and by class: the chart now stacks a value row, a period row and a
+ *  run-count row over the same bar centres, so a document-wide check would report
+ *  every column as a collision with itself. */
+async function labelsOverlap(page: Page, classes: string[]): Promise<boolean> {
+  const selector = classes.map((c) => `.runtime-chart svg ${c}`).join(", ");
+  return page.evaluate((sel) => {
+    const boxes = Array.from(document.querySelectorAll(sel))
       .map((element) => element.getBoundingClientRect())
       .sort((a, b) => a.left - b.left);
     return boxes.some((box, index) => index > 0 && box.left < boxes[index - 1]!.right);
-  });
+  }, selector);
+}
+
+const CHART_LABEL_ROWS = [[".runtime-x-tick"], [".runtime-value"], [".runtime-count", ".runtime-count-head"]];
+
+/** The first label row whose labels collide, or null when none do. */
+async function anyChartRowOverlaps(page: Page): Promise<string | null> {
+  for (const row of CHART_LABEL_ROWS) {
+    if (await labelsOverlap(page, row)) return row.join(",");
+  }
+  return null;
 }
 
 /** The runtime panel's own window button — distinct from the ops-summary row. */
@@ -579,11 +743,17 @@ function runtimeWindow(page: Page, name: string) {
     .filter({ hasText: new RegExp(`^${name}$`) });
 }
 
+// reducedMotion defaults to "reduce" because the bars carry a 0.2s height
+// transition: a geometry read taken right after the chart appears measures an
+// animation frame, not the chart. Measured mid-transition, a 4-bar fixture at
+// 1280px returns every bar at ~23.7% of its settled height — a ratio assertion
+// passes on the wrong numbers, or fails spuriously on a slower CI box. The test
+// that pins the transition itself passes its own preference and overrides this.
 async function newPage(
   viewport: { width: number; height: number },
-  options: { reducedMotion?: "reduce" | "no-preference" } = {},
+  options: { reducedMotion?: "reduce" | "no-preference"; timezoneId?: string } = {},
 ): Promise<Page> {
-  const page = await browser.newPage({ viewport, ...options });
+  const page = await browser.newPage({ viewport, reducedMotion: "reduce", ...options });
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("close", () => assert.deepEqual(errors, [], `browser errors: ${errors.join("; ")}`));
