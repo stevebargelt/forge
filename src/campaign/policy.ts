@@ -67,6 +67,11 @@ const BLOCKER_BY_FAILURE_KIND: Record<FailureKind, BlockerKind> = {
 
   model_error: "scope",
   tool_error: "scope",
+  // FG-678 (BD-10): the agent declared ITS OWN work failed. That is a statement
+  // about one item's task, never about the host, the auth, or a shared target —
+  // so it is item-local and must never pause a whole campaign. Same bucket as
+  // gate_rejected: a scoped, addressable outcome, not a system fault.
+  agent_reported_failure: "scope",
   red_blocked: "scope",
   gate_rejected: "scope",
   // FG-426: the merge itself was clean — the integration gate (FG-357) caught a
