@@ -1242,6 +1242,20 @@ test("FG-674: the default branch is RESOLVED, not assumed to be `main`", () => {
   assert.equal(base.ok && base.baseSha, point);
 });
 
+test("FG-674: an unresolvable default branch degrades to ticket-range inference", () => {
+  // No origin/HEAD, main, or master ref is available. This must be a fall-through, not an
+  // exception (or a hidden assumption that every repository calls its default `main`).
+  const base = resolveReviewBase({
+    projectDir: "/repo",
+    ticketId: "FG-609",
+    git: fg609History({ refs: { HEAD: IMPL, [`${IMPL}^`]: CHART }, originHead: undefined }),
+  });
+
+  assert.equal(base.ok, true, base.ok ? "" : base.refusal);
+  assert.equal(base.ok && base.basis, "ticket-range");
+  assert.equal(base.ok && base.baseSha, CHART);
+});
+
 test("FG-674: already-merged work does NOT take the merge-base rule — it would compute an empty range", () => {
   // HEAD is the default branch, so its merge base with the default branch IS HEAD. Rule 2 must
   // fall through to ticket-range inference rather than returning HEAD..HEAD.
@@ -1283,6 +1297,80 @@ test("FG-674: a conventional `FG-NNN:` subject prefix outranks an incidental mid
 
   assert.equal(base.ok && base.inferredFrom, prefixed, "the drive-by mention is not where the ticket's work began");
   assert.equal(base.ok && base.baseSha, mention);
+});
+
+test("FG-674: planning filtering narrows only on positive path evidence", () => {
+  const code = "1111111111111111111111111111111111111111";
+  const plan = "2222222222222222222222222222222222222222";
+  const prior = "3333333333333333333333333333333333333333";
+  const fixture = {
+    commits: [
+      { sha: code, subject: "FG-674: implementation also updates the plan", paths: ["backlog/FG-674.md", "src/review.ts"] },
+      { sha: plan, subject: "FG-674: planning only", paths: ["backlog/FG-674.md"] },
+      { sha: prior, subject: "chore: before", paths: ["README.md"] },
+    ],
+    refs: { HEAD: code, [`${code}^`]: plan, [`${plan}^`]: prior },
+  };
+  const mixed = resolveReviewBase({ projectDir: "/repo", ticketId: "FG-674", git: historyGit(fixture) });
+  assert.equal(mixed.ok && mixed.inferredFrom, code, "a commit touching source is not planning-only merely because it also touches backlog/");
+  assert.equal(mixed.ok && mixed.baseSha, plan);
+
+  const pathless = resolveReviewBase({
+    projectDir: "/repo",
+    ticketId: "FG-674",
+    git: historyGit({
+      commits: [{ sha: code, subject: "FG-674: merge implementation", paths: [] }, { sha: prior, subject: "chore: before", paths: ["README.md"] }],
+      refs: { HEAD: code, [`${code}^`]: prior },
+    }),
+  });
+  assert.equal(pathless.ok && pathless.inferredFrom, code, "a path-less merge read is not positive evidence of planning-only work");
+
+  const showFails = historyGit(fixture);
+  const unreadable = resolveReviewBase({
+    projectDir: "/repo",
+    ticketId: "FG-674",
+    git: (args) => (args[0] === "show" && args[3] === code ? (() => { throw new Error("show failed"); })() : showFails(args)),
+  });
+  assert.equal(unreadable.ok && unreadable.inferredFrom, code, "an unreadable path list must degrade, never silently exclude code");
+});
+
+test("FG-674: prefix and ticket matching reject numeric and hyphen continuations", () => {
+  const actual = "1111111111111111111111111111111111111111";
+  const before = "2222222222222222222222222222222222222222";
+  const base = resolveReviewBase({
+    projectDir: "/repo",
+    ticketId: "FG-674",
+    git: historyGit({
+      commits: [
+        { sha: "3333333333333333333333333333333333333333", subject: "FG-6740: a different ticket", paths: ["src/other.ts"] },
+        { sha: "4444444444444444444444444444444444444444", subject: "FG-674-a: a different ticket", paths: ["src/other.ts"] },
+        { sha: actual, subject: "FG-674: actual implementation", paths: ["src/review.ts"] },
+        { sha: before, subject: "chore: before", paths: ["README.md"] },
+      ],
+      refs: { HEAD: actual, [`${actual}^`]: before },
+    }),
+  });
+
+  assert.equal(base.ok && base.inferredFrom, actual);
+  assert.equal(base.ok && base.baseSha, before);
+});
+
+test("FG-674: failed symbolic-ref and merge-base probes degrade instead of escaping the resolver", () => {
+  const ticketFallback = resolveReviewBase({ projectDir: "/repo", ticketId: "FG-609", git: fg609History({ originHead: undefined }) });
+  assert.equal(ticketFallback.ok && ticketFallback.basis, "ticket-range", "symbolic-ref failure falls through");
+
+  const mergeFails = historyGit({
+    commits: [
+      { sha: IMPL, subject: "FG-609: implementation", paths: ["src/queue.ts"] },
+      { sha: CHART, subject: "chore: before", paths: ["README.md"] },
+    ],
+    refs: { HEAD: IMPL, [`${IMPL}^`]: CHART, "refs/heads/main": CHART },
+    currentBranch: "feature/fg-609",
+    originHead: "origin/main",
+  });
+  const base = resolveReviewBase({ projectDir: "/repo", ticketId: "FG-609", git: mergeFails });
+  assert.equal(base.ok, true, base.ok ? "" : base.refusal);
+  assert.equal(base.ok && base.basis, "ticket-range", "merge-base failure falls through rather than throwing");
 });
 
 test("FG-674: --since wins over the branch point, and the basis says so", () => {
