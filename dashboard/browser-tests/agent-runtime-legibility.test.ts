@@ -99,6 +99,22 @@ const liveDaily = trends("7d", "day", DAY, series(8, DAY, "2026-07-26T00:00:00.0
 const hourly = trends("1d", "hour", HOUR, series(25, HOUR, "2026-08-01T14:00:00.000Z",
   (i) => (i % 4 === 1 ? null : point("", 30_000 + i * 4_000, 1 + (i % 3), i === 24))));
 
+// The same density, with the shape that puts a label on a neighbour's fill: a
+// quiet hour (45s — a bar on the height floor, so its label sits a hair above the
+// baseline) beside a busy one (1h — a bar the full height of the plot). The label
+// is bounded horizontally by the viewBox alone, so at a phone width it reaches
+// across the slot and lands ON the tall bar, where --fg #e5e5e7 over --accent
+// #7a9fff is 2.03:1. The near-flat `hourly` fixture cannot produce this: no
+// neighbour there is tall enough to reach the label above the bar beside it.
+const spiky = trends("1d", "hour", HOUR, series(25, HOUR, "2026-08-01T14:00:00.000Z",
+  (i) => point("", i % 3 === 0 ? 45_000 : HOUR, 1 + (i % 3), i === 24)));
+
+// A window spanning a local clock change: US Pacific moves to PDT at
+// 2026-03-08T10:00Z, so the UTC days here open at 16:00 local before it and 17:00
+// after it. One current offset cannot be the start time for all of them.
+const dstSpanning = trends("30d", "day", DAY, series(14, DAY, "2026-03-01T00:00:00.000Z",
+  (i) => point("", 600_000 + i * 30_000, 3)));
+
 // 30 daily buckets: the longest daily window, with gaps.
 const monthly = trends("30d", "day", DAY, series(30, DAY, "2026-07-04T00:00:00.000Z",
   (i) => (i % 7 === 3 ? null : point("", 60_000 + i * 90_000, 1 + (i % 9), i === 29))));
@@ -170,6 +186,20 @@ test("FG-648 AC8: every bar measures against the axis at all four scale edges �
       );
       assert.ok(geometry.bars[i]!.top >= geometry.axisTopPx - 1, `${edge.name}: bar ${i} escapes the top of the axis`);
     });
+
+    if (edge.name === "a sub-second peak") {
+      // ...and it is readable as well as drawn to scale. Rounded to whole seconds
+      // every one of these means renders `0s`, the one string the metric contract
+      // reserves for a bucket that holds nothing — on the plot, in the tooltip and
+      // in the screen-reader table alike. Only the axis origin may read `0s`.
+      assert.deepEqual(await page.locator(".runtime-chart svg .runtime-value").allTextContents(),
+        ["400ms", "250ms", "120ms", "40ms"]);
+      assert.match(await page.locator(".runtime-chart svg rect.runtime-bar").first().innerHTML(), /400ms over 3 runs/);
+      const equivalent = await page.locator(".runtime-text-equivalent").innerText();
+      assert.doesNotMatch(equivalent, /\b0s\b/, `a real sub-second mean must not read as the zero an empty bucket is denied: ${equivalent}`);
+      const origin = await page.locator(".runtime-chart svg .runtime-y-tick").allTextContents();
+      assert.equal(origin[0], "0s", "the axis origin keeps its zero");
+    }
     await page.close();
   }
   override = null;
@@ -294,10 +324,84 @@ test("FG-648 AC9: a bar's mean and its run count are drawn together, at every wi
 
       assert.equal(await anyRowOverlaps(page), null, `${where}: chart labels collide`);
       assert.deepEqual(await clippedLabels(page), [], `${where}: a chart label is clipped by the viewBox`);
+      assert.deepEqual(await valuesPaintedOnBars(page), [], `${where}: a value label is painted on a bar's fill`);
       assert.ok(rows.minTextPx >= 8, `${where}: chart text must stay legible — ${rows.minTextPx}px`);
+
+      // A period may name only one bucket — on the plot and, since the list is a
+      // wrapped flex with no ordinal cue, in the list especially.
+      const ticks = await page.locator(".runtime-chart svg .runtime-x-tick").allTextContents();
+      assert.equal(new Set(ticks).size, ticks.length, `${where}: two x-ticks carry the same period: ${ticks.join(", ")}`);
+      const periods = await page.locator(".runtime-bucket-values li .mono").allTextContents();
+      assert.equal(new Set(periods).size, periods.length, `${where}: two chips carry the same period: ${periods.join(", ")}`);
     }
     await page.close();
   }
+});
+
+test("FG-648 AC8/AC9: a bar's value is never painted onto the bar beside it", async () => {
+  // A value label is drawn above its OWN bar. Nothing in the shipped thinning
+  // bounded it against the neighbouring bars: the rows are compared against each
+  // other and against the viewBox frame, never against `rect.runtime-bar`. So the
+  // `45s` above a floor-height bar was drawn across the 1h bar next to it, 159px
+  // deep at 390px — the number is still in the DOM, and unreadable on the plot.
+  override = spiky;
+  // A failing assertion leaves the fixture served to every window that follows, so
+  // one red test reports as several: the fixture is cleared on the way out.
+  try {
+    for (const width of [320, 360, 390, 414, 480, 768, 1280, 1920]) {
+      const page = await newPage({ width, height: 1000 });
+      await page.goto(`${baseUrl}/#ops`);
+      await page.locator(".runtime-chart svg").waitFor();
+
+      assert.deepEqual(await valuesPaintedOnBars(page), [],
+        `at ${width}px a value label is painted on a neighbouring bar's fill, where --fg over --accent is 2.03:1`);
+
+      // ...and what that costs a label, the list beneath pays back: no bucket loses
+      // its mean, it just moves to the surface that can carry it.
+      // (On this shape the plot may legitimately place none of them at a phone
+      // width: every label the thinning keeps is a floor-height bar's, and every one
+      // of those stands between two full-height bars.)
+      const plotted = await page.locator(".runtime-chart svg .runtime-value").count();
+      const listed = await page.locator(".runtime-bucket-values li").allTextContents();
+      if (plotted < 25) {
+        assert.equal(listed.length, 25, `at ${width}px a value the plot cannot place must be spelled out beneath it`);
+        for (const entry of listed) assert.match(entry, /(45s|1h) · \d+ runs?$/, `a listed bucket must carry its mean: ${entry}`);
+      }
+      assert.equal(await anyRowOverlaps(page), null, `labels collide at ${width}px`);
+      assert.deepEqual(await clippedLabels(page), [], `a label is clipped at ${width}px`);
+      await page.close();
+    }
+  } finally {
+    override = null;
+  }
+});
+
+test("FG-648 AC10: the offset note is true of the WINDOW, not of the instant the page was opened", async () => {
+  // The note derived its offset from `new Date()` and then stated it as the start
+  // of "each UTC day here" — for the pre-transition part of this window that is an
+  // hour wrong, stated confidently, on the surface that exists to stop a reader
+  // misattributing a bar to the wrong local day.
+  override = dstSpanning;
+  const page = await newPage({ width: 1280, height: 1100 }, { timezoneId: "America/Los_Angeles" });
+  await page.goto(`${baseUrl}/#ops`);
+  await page.locator(".runtime-chart svg").waitFor();
+  const note = await page.locator(".runtime-tz-note").innerText();
+  await page.close();
+  override = null;
+
+  assert.doesNotMatch(note, /each UTC day here starts/,
+    `this window's UTC days do not share one local start time: ${note}`);
+  assert.match(note, /16:00 on the previous local day at UTC-8/, note);
+  assert.match(note, /17:00 on the previous local day at UTC-7/, note);
+
+  // And a window that does NOT span a change keeps the single, direct sentence —
+  // the fix is to the claim, not to the disclosure.
+  const summer = await newPage({ width: 1280, height: 1100 }, { timezoneId: "America/Los_Angeles" });
+  await summer.goto(`${baseUrl}/#ops`);
+  await summer.locator(".runtime-chart svg").waitFor();
+  assert.equal(await summer.locator(".runtime-tz-note").innerText(),
+    "You are UTC-7, so each UTC day here starts at 17:00 on the previous local day.");
+  await summer.close();
 });
 
 test("FG-648 AC9: whenever the plot drops a bar's labels, the list beneath carries every bucket", async () => {
@@ -357,9 +461,11 @@ test("FG-648 AC10: no period a reader can read off the PLOT is bare — the capt
     assert.ok(plotText.length > 0, `${window}: the plot must carry text`);
     // Every date and every clock time inside the plot — axis ticks, bar tooltips,
     // the list's own periods — is followed by its timezone. Dropping the marker
-    // from any ONE of those rows fails here.
+    // from any ONE of those rows fails here. A date may also be qualifying the
+    // clock time after it (`8/1 14:00 UTC`) or carrying its own year
+    // (`wk 3/4/24 UTC`); the marker still has to be at the end of the run.
     const bare = [
-      ...plotText.matchAll(/\d{1,2}\/\d{1,2}(?!\d)(?! UTC)/g),
+      ...plotText.matchAll(/\d{1,2}\/\d{1,2}(?!\d)(?!\/\d)(?! (?:\d{2}:\d{2} )?UTC)/g),
       ...plotText.matchAll(/\d{2}:\d{2}(?! UTC)/g),
     ].map((match) => plotText.slice(Math.max(0, match.index - 12), match.index + 18));
     assert.deepEqual(bare, [], `${window}: a bare period reads as a LOCAL date to a reader in America/Los_Angeles`);
@@ -520,6 +626,36 @@ async function measureLabelRows(page: Page) {
       headClearancePx: firstCount ? +(firstCount.left - head.right).toFixed(2) : 1,
       minTextPx: Math.min(...Array.from(svg.querySelectorAll("text")).map((text) => text.getBoundingClientRect().height)),
     };
+  });
+}
+
+/** Every value label whose glyphs land on a bar that is not its own, with how deep
+ *  it reaches. A label's own bar is matched by anchor x in viewBox units — the same
+ *  number the bar centre is drawn from — and excluded: a value sits above its own
+ *  bar by construction. The allowance is the descent band under the baseline: a
+ *  duration label is digits and `s`/`m`/`h`/`.`, none of which descend, but an SVG
+ *  text box extends below the baseline by the font's descent, so the bottom of the
+ *  BOX overlapping by a fraction of a line is empty space, not ink on the fill. */
+async function valuesPaintedOnBars(page: Page) {
+  return page.evaluate(() => {
+    const svg = document.querySelector(".runtime-chart svg")!;
+    const bars = Array.from(svg.querySelectorAll("rect.runtime-bar")).map((bar) => ({
+      centre: Number(bar.getAttribute("x")) + Number(bar.getAttribute("width")) / 2,
+      box: bar.getBoundingClientRect(),
+    }));
+    return Array.from(svg.querySelectorAll(".runtime-value")).flatMap((label) => {
+      const box = label.getBoundingClientRect();
+      const x = Number(label.getAttribute("x"));
+      const depths = bars
+        .filter((bar) => Math.abs(bar.centre - x) > 0.5
+          && box.left < bar.box.right && box.right > bar.box.left
+          && box.top < bar.box.bottom && box.bottom > bar.box.top)
+        .map((bar) => box.bottom - bar.box.top);
+      const deepest = Math.max(0, ...depths);
+      return deepest > box.height * 0.25
+        ? [{ text: label.textContent ?? "", depthPx: +deepest.toFixed(2), labelHeightPx: +box.height.toFixed(2) }]
+        : [];
+    });
   });
 }
 

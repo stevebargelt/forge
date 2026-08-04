@@ -613,6 +613,10 @@ function OpsView({ data, since, onSinceChange, runtime, runtimeError, runtimeWin
 function opsFmtMs(ms) {
   if (ms === null || ms === undefined || !Number.isFinite(ms)) return "—";
   const s = Math.round(ms / 1000);
+  // The same reservation the chart's compact form makes, so the tooltip, the role
+  // table and the screen-reader table cannot read `0s` for a mean the plot draws
+  // as `400ms`: `0s` is the zero, not a sub-second observation rounded away.
+  if (s === 0 && ms > 0) return `${Math.max(1, Math.round(ms))}ms`;
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}m${s % 60}s`;
@@ -682,13 +686,16 @@ function runtimeAxisGutterEm(tickLabels) {
   return Math.max(RUNTIME_AXIS_GUTTER_MIN_EM, RUNTIME_TICK_INSET_EM + widest * RUNTIME_TICK_GLYPH_EM);
 }
 
-function runtimeBucketLabel(iso, resolution) {
+function runtimeBucketLabel(iso, resolution, qualified) {
   const d = new Date(iso);
   if (!Number.isFinite(d.getTime())) return String(iso);
   const monthDay = `${d.getUTCMonth() + 1}/${d.getUTCDate()}`;
-  if (resolution === "hour") return `${String(d.getUTCHours()).padStart(2, "0")}:00`;
-  if (resolution === "week") return `wk ${monthDay}`;
-  return monthDay;
+  if (resolution === "hour") {
+    const hour = `${String(d.getUTCHours()).padStart(2, "0")}:00`;
+    return qualified ? `${monthDay} ${hour}` : hour;
+  }
+  const dated = qualified ? `${monthDay}/${String(d.getUTCFullYear() % 100).padStart(2, "0")}` : monthDay;
+  return resolution === "week" ? `wk ${dated}` : dated;
 }
 
 // Every period label the operator reads carries UTC in the label itself. A bare
@@ -696,8 +703,21 @@ function runtimeBucketLabel(iso, resolution) {
 // like "this morning" when it actually opened at 17:00 the previous local day.
 // The grid stays UTC on purpose — a local grid would put the same run in
 // different buckets for different readers — so the label is what has to say so.
-function runtimeAxisLabel(iso, resolution) {
-  return `${runtimeBucketLabel(iso, resolution)} UTC`;
+//
+// The labels also have to be unique WITHIN the window, or a value cannot be
+// attributed back to its bucket: a 1d window is 25 hourly buckets and therefore
+// always spans two UTC dates, so a bare `14:00` names two of them, and an `all`
+// window longer than a year repeats `wk 6/8`. The compact form is kept while it is
+// unambiguous, and the whole row escalates together when it is not — a row mixing
+// the two forms leaves the bare labels attributable only by their neighbours,
+// which is exactly what the thinned plot and the wrapped fallback list cannot
+// guarantee a reader.
+function runtimeAxisLabels(buckets, resolution) {
+  const compact = buckets.map((b) => runtimeBucketLabel(b.bucketStart, resolution, false));
+  const labels = new Set(compact).size === compact.length
+    ? compact
+    : buckets.map((b) => runtimeBucketLabel(b.bucketStart, resolution, true));
+  return labels.map((label) => `${label} UTC`);
 }
 
 // The on-chart duration: one unit, at most one decimal, so it fits above a bar at
@@ -705,7 +725,15 @@ function runtimeAxisLabel(iso, resolution) {
 function runtimeCompactMs(ms) {
   if (!Number.isFinite(ms)) return "—";
   const s = ms / 1000;
-  if (s < 60) return `${Math.round(s)}s`;
+  // Zero is the axis origin and the only thing that may read `0s`. Rounded to
+  // whole seconds a real sub-500ms observation reads `0s` too, which is the one
+  // string this chart reserves for "no duration at all" — so under a second the
+  // label switches unit rather than rounding the observation away.
+  if (s < 60) {
+    const whole = Math.round(s);
+    if (whole > 0 || ms === 0) return `${whole}s`;
+    return `${Math.max(1, Math.round(ms))}ms`;
+  }
   const m = s / 60;
   if (m < 60) return `${m < 10 ? Math.round(m * 10) / 10 : Math.round(m)}m`;
   const h = m / 60;
@@ -721,17 +749,35 @@ function runtimeAxisScale(peakMs) {
   return { max, ticks };
 }
 
-// Naming the reader's own offset is the other half of the UTC labels: it converts
-// "7/26 UTC" into a local span without moving the grid under anyone.
-function runtimeUtcOffsetNote() {
-  const offsetMin = -new Date().getTimezoneOffset();
-  if (offsetMin === 0) return null;
+function runtimeUtcOffsetName(offsetMin) {
   const abs = Math.abs(offsetMin);
   const hhmm = abs % 60 === 0 ? `${abs / 60}` : `${Math.floor(abs / 60)}:${String(abs % 60).padStart(2, "0")}`;
+  return `UTC${offsetMin < 0 ? "-" : "+"}${hhmm}`;
+}
+
+function runtimeUtcDayStart(offsetMin) {
   const startMin = ((offsetMin % 1440) + 1440) % 1440;
   const clock = `${String(Math.floor(startMin / 60)).padStart(2, "0")}:${String(startMin % 60).padStart(2, "0")}`;
-  const day = offsetMin < 0 ? "the previous local day" : "the same local day";
-  return `You are UTC${offsetMin < 0 ? "-" : "+"}${hhmm}, so each UTC day here starts at ${clock} on ${day}.`;
+  return `${clock} on ${offsetMin < 0 ? "the previous local day" : "the same local day"}`;
+}
+
+// Naming the reader's own offset is the other half of the UTC labels: it converts
+// "7/26 UTC" into a local span without moving the grid under anyone. The offset is
+// read at each BUCKET's own instant, not at the current one: a 30d/90d/all window
+// can span a clock change, and one sentence stating today's offset for all of it
+// is a confidently-stated wrong conversion on the surface that exists to prevent
+// day misattribution.
+function runtimeUtcOffsetNote(buckets) {
+  const offsets = [...new Set(buckets.map((b) => -new Date(b.bucketStart).getTimezoneOffset()))]
+    .sort((a, b) => a - b);
+  if (offsets.length === 0) return null;
+  if (offsets.length === 1) {
+    return offsets[0] === 0
+      ? null
+      : `You are ${runtimeUtcOffsetName(offsets[0])}, so each UTC day here starts at ${runtimeUtcDayStart(offsets[0])}.`;
+  }
+  const spans = offsets.map((offset) => `${runtimeUtcDayStart(offset)} at ${runtimeUtcOffsetName(offset)}`);
+  return `Your local clock changes inside this window, so a UTC day here starts at ${spans.join(", or ")}.`;
 }
 
 function AgentRuntimeTrends({ data, error, window, onWindowChange, role, onRoleChange }) {
@@ -857,8 +903,9 @@ function RuntimeChart({ buckets, label, resolution, window }) {
   const n = buckets.length;
   const slot = plotW / n;
   const barW = Math.min(slot * 0.68, 56);
-  const partial = buckets.find((b) => b.partial && b.sampleCount > 0);
+  const partialIdx = buckets.findIndex((b) => b.partial && b.sampleCount > 0);
   const unit = RUNTIME_RESOLUTION_WORD[resolution] ?? resolution;
+  const periodTexts = runtimeAxisLabels(buckets, resolution);
   // A floor in em, not user units: a bar three orders of magnitude under the peak
   // still has to be visible at a phone width, where a user unit is a third of a pixel.
   const barH = (b) => Math.max(fontUnits * 0.25, Math.round((b.averageMs / scale.max) * chartH));
@@ -879,7 +926,7 @@ function RuntimeChart({ buckets, label, resolution, window }) {
       fill=${b.partial ? "url(#runtime-partial-hatch)" : "var(--accent)"}
       stroke=${b.partial ? "var(--accent)" : "none"}
       stroke-dasharray=${b.partial ? "4 3" : null}
-    ><title>${runtimeAxisLabel(b.bucketStart, resolution)}: ${opsFmtMs(b.averageMs)} over ${b.sampleCount} ${b.sampleCount === 1 ? "run" : "runs"}${b.partial ? " (partial)" : ""}</title></rect>`;
+    ><title>${periodTexts[i]}: ${opsFmtMs(b.averageMs)} over ${b.sampleCount} ${b.sampleCount === 1 ? "run" : "runs"}${b.partial ? " (partial)" : ""}</title></rect>`;
   });
 
   // Thin a label row by LABEL WIDTH, not by bucket count: 25 hourly buckets over a
@@ -912,13 +959,32 @@ function RuntimeChart({ buckets, label, resolution, window }) {
     return kept;
   };
 
-  const periodTexts = buckets.map((b) => runtimeAxisLabel(b.bucketStart, resolution));
   const valueTexts = buckets.map((b) => (b.sampleCount === 0 ? "" : runtimeCompactMs(b.averageMs)));
   const countTexts = buckets.map((b) => String(b.sampleCount));
   const periodIdxs = thin(periodTexts);
+
+  // The thinning above keeps labels off each OTHER; this keeps them off the BARS.
+  // A value label is drawn above its own bar and bounded horizontally only by the
+  // viewBox, so above a short bar standing beside a tall one it lands on the
+  // neighbour's fill, where --fg on --accent is 2:1 and the number is gone. A
+  // duration label carries no descender, so its lowest ink is its baseline: it
+  // clears a bar whose top is at or below that. What this drops, the per-bucket
+  // list beneath the plot carries — the same path a thinned label takes.
+  const valueClearsBars = (i) => {
+    const span = placeLabel(i, valueTexts[i]);
+    const baseline = baseY - barH(buckets[i]) - fontUnits * 0.45;
+    return buckets.every((b, j) => {
+      if (j === i || b.sampleCount === 0) return true;
+      const barLeft = xAt(j) - barW / 2;
+      if (span.right <= barLeft || span.left >= barLeft + barW) return true;
+      return baseY - barH(b) >= baseline;
+    });
+  };
+
   // A bar carries its mean and its run count together or not at all — a lone
   // number under a bar with no value above it is worse than no label.
-  const valueIdxs = thin(buckets.map((b, i) => (valueTexts[i].length >= countTexts[i].length ? valueTexts[i] : countTexts[i])));
+  const valueIdxs = thin(buckets.map((b, i) => (valueTexts[i].length >= countTexts[i].length ? valueTexts[i] : countTexts[i])))
+    .filter((i) => buckets[i].sampleCount === 0 || valueClearsBars(i));
   // Both rows, not just the values. The period row is far wider (`wk 6/8 UTC` vs
   // `3`), so it thins FIRST and independently: gated on the value row alone, the
   // list vanished exactly when every bar carried a number and only some carried a
@@ -927,11 +993,13 @@ function RuntimeChart({ buckets, label, resolution, window }) {
   const labelledEveryBucket = periodIdxs.length === n && valueIdxs.length === n;
 
   const summaryText = `Average agent runtime for ${label}, by ${unit}, over ${window}. `
-    + buckets.filter((b) => b.sampleCount > 0)
-      .map((b) => `${runtimeAxisLabel(b.bucketStart, resolution)} ${opsFmtMs(b.averageMs)} over ${b.sampleCount} ${b.sampleCount === 1 ? "run" : "runs"}${b.partial ? " (partial)" : ""}`)
+    + buckets
+      .map((b, i) => (b.sampleCount === 0 ? null
+        : `${periodTexts[i]} ${opsFmtMs(b.averageMs)} over ${b.sampleCount} ${b.sampleCount === 1 ? "run" : "runs"}${b.partial ? " (partial)" : ""}`))
+      .filter(Boolean)
       .join(", ")
     + `. Peak ${opsFmtMs(peak)}.`;
-  const offsetNote = runtimeUtcOffsetNote();
+  const offsetNote = runtimeUtcOffsetNote(buckets);
 
   return html`
     <figure class="runtime-chart">
@@ -977,17 +1045,17 @@ function RuntimeChart({ buckets, label, resolution, window }) {
       <figcaption class="runtime-caption">
         Mean duration of completed agent tasks per ${unit} (UTC), bucketed by completion time. Successful and failed runs both count.
         ${offsetNote ? html` <span class="runtime-tz-note">${offsetNote}</span>` : null}
-        ${partial
-          ? html` <span class="runtime-partial-note">The last ${unit} (${runtimeAxisLabel(partial.bucketStart, resolution)}) is hatched — it is still in progress and its average can still move.</span>`
+        ${partialIdx >= 0
+          ? html` <span class="runtime-partial-note">The last ${unit} (${periodTexts[partialIdx]}) is hatched — it is still in progress and its average can still move.</span>`
           : null}
       </figcaption>
       <table class="sr-only runtime-text-equivalent">
         <caption>${`Average agent runtime for ${label} by ${unit}`}</caption>
         <thead><tr><th scope="col">${unit}</th><th scope="col">average</th><th scope="col">runs</th></tr></thead>
         <tbody>
-          ${buckets.map((b) => html`
+          ${buckets.map((b, i) => html`
             <tr key=${b.bucketStart}>
-              <th scope="row">${runtimeAxisLabel(b.bucketStart, resolution)}${b.partial ? " (partial)" : ""}</th>
+              <th scope="row">${periodTexts[i]}${b.partial ? " (partial)" : ""}</th>
               <td>${b.sampleCount === 0 ? "no runs" : opsFmtMs(b.averageMs)}</td>
               <td>${b.sampleCount}</td>
             </tr>

@@ -41,7 +41,7 @@ const RESOLVER = join("src", "util", "chrome-bin.ts");
 // across twelve widths, UTC disclosure on the plot rather than only the caption).
 // Growing or pruning the tier is fine — update this map in the same commit, on purpose.
 const TIER_TESTS: Readonly<Record<string, number>> = {
-  "agent-runtime-legibility.test.ts": 9,
+  "agent-runtime-legibility.test.ts": 11,
   "agent-runtime.test.ts": 17,
   "backlog-count.test.ts": 2,
   "fg608-backlog-cutover.test.ts": 3,
@@ -61,7 +61,7 @@ test("FG-642 (exact set): the browser tier is exactly the suites TIER_TESTS name
   );
 });
 
-test("FG-642 (exact set): every suite keeps its own test count, and the tier keeps all 44", () => {
+test("FG-642 (exact set): every suite keeps its own test count, and the tier keeps all 46", () => {
   let total = 0;
   for (const [file, expected] of Object.entries(TIER_TESTS)) {
     const found = (tierSource(file).match(/^test\(/gm) ?? []).length;
@@ -72,7 +72,7 @@ test("FG-642 (exact set): every suite keeps its own test count, and the tier kee
     );
     total += found;
   }
-  assert.equal(total, 44, "the tier must carry FG-642's 18 real-browser tests plus FG-648's 26");
+  assert.equal(total, 46, "the tier must carry FG-642's 18 real-browser tests plus FG-648's 28");
 });
 
 test("FG-642 (launch site): every chromium.launch() in the tier takes executablePath from the shared resolver", () => {

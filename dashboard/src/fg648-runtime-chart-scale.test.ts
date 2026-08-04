@@ -55,6 +55,8 @@ type Chart = {
   runtimeAxisScale: (peakMs: number) => Scale;
   runtimeCompactMs: (ms: number) => string;
   runtimeAxisGutterEm: (tickLabels: string[]) => number;
+  runtimeAxisLabels: (buckets: Array<{ bucketStart: string }>, resolution: string) => string[];
+  opsFmtMs: (ms: number | null) => string;
   RUNTIME_TICK_STEPS_MS: number[];
   RUNTIME_TICK_TARGET: number;
   RUNTIME_AXIS_GUTTER_MIN_EM: number;
@@ -75,7 +77,10 @@ function loadChart(): Chart {
       functionSource("runtimeAxisScale"),
       functionSource("runtimeCompactMs"),
       functionSource("runtimeAxisGutterEm"),
-      "globalThis.exported = { runtimeAxisScale, runtimeCompactMs, runtimeAxisGutterEm,"
+      functionSource("runtimeBucketLabel"),
+      functionSource("runtimeAxisLabels"),
+      functionSource("opsFmtMs"),
+      "globalThis.exported = { runtimeAxisScale, runtimeCompactMs, runtimeAxisGutterEm, runtimeAxisLabels, opsFmtMs,"
       + " RUNTIME_TICK_STEPS_MS, RUNTIME_TICK_TARGET, RUNTIME_AXIS_GUTTER_MIN_EM, RUNTIME_TICK_INSET_EM };",
     ].join("\n"),
     context,
@@ -84,6 +89,7 @@ function loadChart(): Chart {
   assert.equal(typeof exported.runtimeAxisScale, "function");
   assert.equal(typeof exported.runtimeCompactMs, "function");
   assert.equal(typeof exported.runtimeAxisGutterEm, "function");
+  assert.equal(typeof exported.runtimeAxisLabels, "function");
   assert.ok(Array.isArray(exported.RUNTIME_TICK_STEPS_MS) && exported.RUNTIME_TICK_STEPS_MS.length > 0);
   return exported;
 }
@@ -259,6 +265,33 @@ test("FG-648: an absent duration formats as an em dash — an empty bucket is ne
   // Zero is a real point on the axis (the origin), and only there.
   assert.equal(chart.runtimeCompactMs(0), "0s");
   assert.equal(chart.runtimeCompactMs(45_000), "45s");
+  // ...which is what makes rounding a real sub-500ms observation to whole seconds
+  // a defect and not a display choice: `0s` would be the same string an empty
+  // bucket's mean is forbidden from producing, on the plot AND in the value list.
+  // Every observation the metric can hold reads as its own duration instead.
+  for (const ms of [0.4, 1, 40, 120, 250, 400, 499]) {
+    assert.notEqual(chart.runtimeCompactMs(ms), "0s", `${ms}ms must not read as the zero the empty bucket is denied`);
+    assert.match(chart.runtimeCompactMs(ms), /^\d+ms$/, `${ms}ms must read as a duration a human uses`);
+  }
+  assert.equal(chart.runtimeCompactMs(400), "400ms");
+  assert.equal(chart.runtimeCompactMs(40), "40ms");
+  // The unit switches at the point whole seconds stop losing the observation, and
+  // the tick ladder (which never carries a sub-second value) is untouched.
+  assert.equal(chart.runtimeCompactMs(500), "1s");
+  assert.equal(chart.runtimeCompactMs(999), "1s");
+  assert.equal(chart.runtimeCompactMs(1_000), "1s");
+
+  // The exact form the tooltip, the role table and the screen-reader table use
+  // makes the same reservation — otherwise the plot reads `400ms` and its own
+  // tooltip reads `0s` for the same bar.
+  assert.equal(chart.opsFmtMs(null), "—");
+  assert.equal(chart.opsFmtMs(0), "0s");
+  assert.equal(chart.opsFmtMs(400), "400ms");
+  assert.equal(chart.opsFmtMs(40), "40ms");
+  assert.equal(chart.opsFmtMs(499), "499ms");
+  assert.equal(chart.opsFmtMs(500), "1s");
+  assert.equal(chart.opsFmtMs(45_000), "45s");
+  assert.equal(chart.opsFmtMs(FG662_ARTIFACT_MS), "64h42m");
   assert.equal(chart.runtimeCompactMs(90_000), "1.5m");
   // Above 10 units the decimal is dropped, so FG-662's 64h42m reads "65h" on the
   // plot. The bar's tooltip and the screen-reader table keep the exact 64h42m.
@@ -269,22 +302,36 @@ test("FG-648: an absent duration formats as an em dash — an empty bucket is ne
 // what converts "8/2 UTC" into the reader's own clock. If its arithmetic is wrong
 // it is worse than absent — the operator who misread the 8/2 bar would be handed a
 // confident, wrong conversion.
-test("FG-648 AC10: the UTC-offset note is arithmetically true at every real-world offset", () => {
-  const noteSource = functionSource("runtimeUtcOffsetNote");
+const NOTE_SOURCE = [
+  functionSource("runtimeUtcOffsetName"),
+  functionSource("runtimeUtcDayStart"),
+  functionSource("runtimeUtcOffsetNote"),
+].join("\n");
 
-  const noteAt = (offsetMinutes: number): string | null => {
-    const context: Record<string, unknown> = {};
-    createContext(context);
-    // The function reads its offset from `new Date().getTimezoneOffset()`, which is
-    // the OPPOSITE sign of the UTC offset — the stub keeps that convention.
-    context["Date"] = class {
-      getTimezoneOffset(): number {
-        return -offsetMinutes;
-      }
-    };
-    runInContext(`${noteSource}\nglobalThis.note = runtimeUtcOffsetNote();`, context);
-    return context["note"] as string | null;
+/** The note a reader gets for a window, with the browser's own offset table
+ *  replaced by `offsetAt` — the real one is the container's TZ, which is not
+ *  a fixture. `getTimezoneOffset` is the OPPOSITE sign of the UTC offset, and
+ *  the stub keeps that convention. */
+function noteFor(bucketStarts: string[], offsetAt: (iso: string) => number): string | null {
+  const context: Record<string, unknown> = {};
+  createContext(context);
+  context["Date"] = class {
+    iso: string;
+    constructor(iso: string) {
+      this.iso = iso;
+    }
+    getTimezoneOffset(): number {
+      return -offsetAt(this.iso);
+    }
   };
+  context["buckets"] = bucketStarts.map((bucketStart) => ({ bucketStart }));
+  runInContext(`${NOTE_SOURCE}\nglobalThis.note = runtimeUtcOffsetNote(buckets);`, context);
+  return context["note"] as string | null;
+}
+
+test("FG-648 AC10: the UTC-offset note is arithmetically true at every real-world offset", () => {
+  const noteAt = (offsetMinutes: number): string | null =>
+    noteFor(["2026-08-02T00:00:00.000Z"], () => offsetMinutes);
 
   assert.equal(noteAt(0), null, "a reader already in UTC is told nothing they do not know");
 
@@ -312,4 +359,105 @@ test("FG-648 AC10: the UTC-offset note is arithmetically true at every real-worl
   // The two the operator and the ticket actually name, spelled out.
   assert.equal(noteAt(-420), "You are UTC-7, so each UTC day here starts at 17:00 on the previous local day.");
   assert.equal(noteAt(330), "You are UTC+5:30, so each UTC day here starts at 05:30 on the same local day.");
+});
+
+// The other half of AC10's conversion sentence: it has to be true of the WINDOW it
+// is printed under, not of the instant the page was opened. A 30d/90d/all window
+// routinely spans a local clock change, and the shipped note read the offset from
+// `new Date()` — so for the part of the window before the change it stated a UTC
+// day start that is an hour wrong, confidently, on the surface added to stop day
+// misattribution. Offsets are stubbed per instant: the container's own TZ is not
+// a fixture, and a note that is right only where the suite happens to run is not
+// tested at all.
+test("FG-648 AC10: a window spanning a clock change is not given one offset as the whole truth", () => {
+  // US Pacific, 2026: PST until 2026-03-08T10:00Z, PDT after it.
+  const pacific = (iso: string) => (Date.parse(iso) >= Date.parse("2026-03-08T10:00:00.000Z") ? -420 : -480);
+  const days = (count: number, startIso: string) =>
+    Array.from({ length: count }, (_, i) => new Date(Date.parse(startIso) + i * DAY).toISOString());
+
+  // Either side of the change, the sentence is the one the reader already has.
+  assert.equal(noteFor(days(7, "2026-02-01T00:00:00.000Z"), pacific),
+    "You are UTC-8, so each UTC day here starts at 16:00 on the previous local day.");
+  assert.equal(noteFor(days(7, "2026-07-26T00:00:00.000Z"), pacific),
+    "You are UTC-7, so each UTC day here starts at 17:00 on the previous local day.");
+
+  // Across it, both starts are named and neither is stated as the window's own.
+  const spanning = noteFor(days(30, "2026-02-24T00:00:00.000Z"), pacific);
+  assert.ok(spanning, "a window spanning a clock change must still disclose the offset");
+  assert.doesNotMatch(spanning!, /each UTC day here starts/,
+    `one clock time cannot be "each UTC day" of a window containing two of them — ${spanning}`);
+  for (const fragment of ["16:00 on the previous local day at UTC-8", "17:00 on the previous local day at UTC-7"]) {
+    assert.ok(spanning!.includes(fragment), `the note must name ${fragment} — ${spanning}`);
+  }
+
+  // London: the reader is in UTC for part of the window and UTC+1 for the rest, so
+  // "you are already in UTC, nothing to say" is wrong for that window even though
+  // it is right today. BST 2026: 2026-03-29T01:00Z to 2026-10-25T02:00Z.
+  const london = (iso: string) => {
+    const t = Date.parse(iso);
+    return t >= Date.parse("2026-03-29T01:00:00.000Z") && t < Date.parse("2026-10-25T02:00:00.000Z") ? 60 : 0;
+  };
+  assert.equal(noteFor(days(7, "2026-01-05T00:00:00.000Z"), london), null, "a reader wholly in UTC is told nothing they do not know");
+  const bst = noteFor(days(30, "2026-03-15T00:00:00.000Z"), london);
+  assert.ok(bst, "a window that is partly UTC+1 must be disclosed to a reader who is in UTC today");
+  assert.ok(bst!.includes("01:00 on the same local day at UTC+1"), bst!);
+});
+
+// AC9/AC10's attribution invariant, at the label layer: a value is only readable
+// if the period naming it names ONE bucket. A 1d window is 25 hourly buckets and
+// therefore always spans two UTC dates, so a bare `14:00` labelled two bars — on
+// the x-tick row and, worse, as two identical chips in the fallback list, which
+// carries no other positional cue.
+test("FG-648 AC9/AC10: every bucket in a window carries its own period label", () => {
+  const series = (count: number, stepMs: number, startIso: string) =>
+    Array.from({ length: count }, (_, i) => ({ bucketStart: new Date(Date.parse(startIso) + i * stepMs).toISOString() }));
+  const WEEK = 7 * DAY;
+
+  const windows: Array<{ name: string; buckets: Array<{ bucketStart: string }>; resolution: string }> = [];
+  // Every hour of the day as a starting point, plus a month and a year rollover:
+  // the 25th bucket repeats the first bucket's hour wherever the window opens.
+  for (let hour = 0; hour < 24; hour += 1) {
+    windows.push({ name: `1d from ${hour}:00`, buckets: series(25, HOUR, `2026-08-01T${String(hour).padStart(2, "0")}:00:00.000Z`), resolution: "hour" });
+  }
+  windows.push({ name: "1d over a month end", buckets: series(25, HOUR, "2026-07-31T09:00:00.000Z"), resolution: "hour" });
+  windows.push({ name: "1d over a year end", buckets: series(25, HOUR, "2026-12-31T09:00:00.000Z"), resolution: "hour" });
+  windows.push({ name: "7d", buckets: series(8, DAY, "2026-07-26T00:00:00.000Z"), resolution: "day" });
+  windows.push({ name: "30d", buckets: series(31, DAY, "2026-07-04T00:00:00.000Z"), resolution: "day" });
+  windows.push({ name: "90d", buckets: series(14, WEEK, "2026-04-27T00:00:00.000Z"), resolution: "week" });
+  // `all` is weekly and unbounded: past a year, `wk 6/8` comes round again.
+  windows.push({ name: "all, three years", buckets: series(157, WEEK, "2023-06-05T00:00:00.000Z"), resolution: "week" });
+  windows.push({ name: "all, five years", buckets: series(261, WEEK, "2021-01-04T00:00:00.000Z"), resolution: "week" });
+  // Week starts drift a day or two a year, so `wk M/D` survives a good while
+  // before it comes round — from 2019-01-07 the 270th bucket is the second `3/4`.
+  windows.push({ name: "all, to a repeated week", buckets: series(270, WEEK, "2019-01-07T00:00:00.000Z"), resolution: "week" });
+
+  for (const { name, buckets, resolution } of windows) {
+    const labels = chart.runtimeAxisLabels(buckets, resolution);
+    assert.equal(labels.length, buckets.length, `${name}: every bucket must be labelled`);
+    const repeated = labels.filter((label, i) => labels.indexOf(label) !== i);
+    assert.deepEqual(repeated, [], `${name}: two buckets carry the same period label, so neither bar is attributable`);
+    for (const label of labels) {
+      assert.match(label, / UTC$/, `${name}: a bare period reads as a local one — ${label}`);
+    }
+  }
+
+  // The escalation is per-window and uniform: a window whose compact labels are
+  // already unique keeps them (they are the narrow form the thinning is sized
+  // against), and one that needs qualifying qualifies EVERY label, so no chip is
+  // left attributable only by the chips beside it.
+  const daily = chart.runtimeAxisLabels(series(8, DAY, "2026-07-26T00:00:00.000Z"), "day");
+  assert.equal(daily.join(","), "7/26 UTC,7/27 UTC,7/28 UTC,7/29 UTC,7/30 UTC,7/31 UTC,8/1 UTC,8/2 UTC");
+  const weekly = chart.runtimeAxisLabels(series(3, WEEK, "2026-05-25T00:00:00.000Z"), "week");
+  assert.equal(weekly.join(","), "wk 5/25 UTC,wk 6/1 UTC,wk 6/8 UTC");
+
+  const hourly = chart.runtimeAxisLabels(series(25, HOUR, "2026-08-01T14:00:00.000Z"), "hour");
+  assert.equal(hourly[0], "8/1 14:00 UTC");
+  assert.equal(hourly[24], "8/2 14:00 UTC");
+  assert.equal(hourly.filter((label) => !/^\d+\/\d+ \d\d:00 UTC$/.test(label)).join(","), "",
+    `a qualified row qualifies all of it: ${hourly.join(",")}`);
+  const longRun = chart.runtimeAxisLabels(series(270, WEEK, "2019-01-07T00:00:00.000Z"), "week");
+  assert.equal(longRun[8], "wk 3/4/19 UTC");
+  assert.equal(longRun[269], "wk 3/4/24 UTC");
+  assert.equal(longRun.filter((label) => !/^wk \d+\/\d+\/\d\d UTC$/.test(label)).length, 0,
+    "a weekly row that needs the year takes it everywhere, not only on the repeat");
 });

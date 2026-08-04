@@ -282,7 +282,9 @@ test("Window controls switch resolution, and cover the empty and single-point ca
   assert.ok(hourLabels.length < 25, `the hourly axis must thin its labels: ${hourLabels.length}`);
   assert.equal(await anyChartRowOverlaps(page), null, "hourly chart labels must not run into each other");
   // The trailing (current) bucket is always labelled, whatever the thinning drops.
-  assert.match(hourLabels.at(-1) ?? "", /^14:00 UTC$/);
+  // 25 hourly buckets span two UTC dates, so the hour alone would name two of them
+  // — the label carries the date it belongs to.
+  assert.match(hourLabels.at(-1) ?? "", /^6\/10 14:00 UTC$/);
 
   // 30d — a single point, still a legible bar inside the plot area.
   await pick("30d").click();
@@ -638,9 +640,14 @@ test("A window too dense to label every bar lists every bucket's value beneath i
   // ...so the same numbers are spelled out under the chart, every bucket of them.
   const listed = page.locator(".runtime-bucket-values li");
   assert.equal(await listed.count(), 25);
-  assert.match(await listed.first().innerText(), /14:00 UTC\s+30s\s+·\s+1 run/);
-  assert.match(await listed.nth(1).innerText(), /15:00 UTC\s+no runs/);
-  assert.match(await listed.last().innerText(), /14:00 UTC\s+2\.1m\s+·\s+1 run/);
+  // The list is a wrapped flex with no ordinal cue, so the period text is the only
+  // thing naming a chip's bucket: the first and last chip are both the 14:00 hour,
+  // of two different UTC days, and each says which.
+  assert.match(await listed.first().innerText(), /6\/9 14:00 UTC\s+30s\s+·\s+1 run/);
+  assert.match(await listed.nth(1).innerText(), /6\/9 15:00 UTC\s+no runs/);
+  assert.match(await listed.last().innerText(), /6\/10 14:00 UTC\s+2\.1m\s+·\s+1 run/);
+  const periods = await page.locator(".runtime-bucket-values li .mono").allTextContents();
+  assert.equal(new Set(periods).size, periods.length, `two chips naming the same period name no bucket: ${periods.join(", ")}`);
   await page.close();
 });
 
@@ -667,7 +674,7 @@ test("Period labels name UTC in the label itself, so a non-UTC reader cannot mis
   await runtimeWindow(page, "1d").click();
   await page.getByRole("img", { name: /by hour, over 1d/ }).waitFor();
   for (const tick of await page.locator(".runtime-chart svg .runtime-x-tick").allTextContents()) {
-    assert.match(tick, /^\d\d:00 UTC$/);
+    assert.match(tick, /^\d+\/\d+ \d\d:00 UTC$/);
   }
   await page.close();
 });
