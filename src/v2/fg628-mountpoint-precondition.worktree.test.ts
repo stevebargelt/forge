@@ -563,13 +563,21 @@ test("FG-628 (A4): a real container fails to start on the nested read-only volum
 // produced FG-662's three false verdicts. So the read-only lane now REFUSES:
 // same event, same diagnosis, no reviewer.
 //
+// FG-678 THEN SUPERSEDED IT FOR THE WRITABLE NON-WORKTREE LANE TOO, which is why
+// these two cases now settle on the PRIMARY rather than on the red. FG-628 let
+// that lane degrade on the reasoning that the rw container installs its own
+// dependencies, so nothing is substituted — but its node_modules mask is an
+// ANONYMOUS, EMPTY volume, so a degraded rw dispatch has no dependencies and no
+// way to obtain any. Both lanes now refuse, and the primary refuses first, so a
+// tree forge cannot prepare produces no container at all.
+//
 // What is unchanged, and is still what these cases pin: the mountpoint failure is
 // observable on the timeline against the tree that could not host it, NOTHING is
 // created outside the checkout, and no dependency volume is ever mounted into a
-// tree that could not be prepared. The rw/blue lane keeps FG-628's degradation
-// (it installs in-container, so no substitution occurs) — covered by (1)-(4).
+// tree that could not be prepared. Successful creation on the rw/blue lane is
+// covered by (1)-(4).
 
-test("FG-628 (A5) / FG-664: a checkout forge cannot write into records dependency_mountpoints_unavailable, mounts NO dependency volume, and REFUSES the read-only dispatch", async (t) => {
+test("FG-628 (A5) / FG-664 / FG-678: a checkout forge cannot write into records the refusal against that tree, mounts NO dependency volume, and starts NO container", async (t) => {
   setPlatform("darwin");
   process.env.FORGE_NO_WORKTREES = "1";
 
@@ -588,19 +596,17 @@ test("FG-628 (A5) / FG-664: a checkout forge cannot write into records dependenc
     return;
   }
 
-  let redArgs: string[] | undefined;
-  let redTaskId: string | undefined;
+  const containers: string[] = [];
 
   const stubExec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
     const taskId = extractTaskId(args);
+    containers.push(taskId);
     writeFileSync(stderrPath, "");
     // FG-664: the read-only reviewer is preceded by Forge's own probe container.
     if (isDependencyProbeCall(args)) return answerDependencyProbe(args, stdoutPath);
     if (isDependencyLoadCall(args)) return answerDependencyLoad(args);
     if (taskId.startsWith("provision-")) return 0;
     if (taskId.startsWith("task-red-")) {
-      redArgs = args;
-      redTaskId = taskId;
       writeTaskResult(stdoutPath, PASS_VERDICT);
       return 0;
     }
@@ -615,30 +621,41 @@ test("FG-628 (A5) / FG-664: a checkout forge cannot write into records dependenc
     chmodSync(join(repo, MEMBER), 0o700);
   }
 
+  // FG-678 moved WHERE this refusal lands, not whether it happens. The rw primary
+  // now resolves its own dependency environment host-side before the red is ever
+  // reached, so the unpreparable tree is caught one dispatch EARLIER — and the
+  // diagnosis arrives through the shared resolver's refusal rather than through
+  // runNext's own lazy mountpoint check. What FG-628 pins is unchanged: the
+  // failure is observable against the tree that could not host the mount, with
+  // the underlying error, and nothing is created anywhere.
+  //
+  // Why the primary refuses at all, where FG-628 let it degrade: that degradation
+  // rested on "the rw container installs its own dependencies, so nothing is
+  // substituted". It cannot — the node_modules mask is anonymous and empty, so a
+  // degraded rw dispatch has no dependencies and no way to get any (FG-678).
+
   // Property 1 — the failure is recorded, against the tree that could not host the
-  // mount, with the underlying error. Unchanged by FG-664: the diagnosis is what
-  // the operator needs either way.
-  const unavailable = eventsForRun(runId).filter((e) => e.eventType === "container.dependency_mountpoints_unavailable");
-  assert.equal(unavailable.length, 1, "exactly one mountpoints-unavailable event must be recorded for the reviewer dispatch");
-  const payload = unavailable[0]!.payload as { repoRoot?: string; error?: string };
-  assert.equal(payload.repoRoot, repo, "the event must name the tree that would have been bound");
-  assert.match(String(payload.error), /EACCES|permission denied/i, `the underlying error must be carried; got: ${payload.error}`);
+  // mount, with the underlying error.
+  const refusals = eventsForRun(runId).filter(
+    (e) =>
+      e.eventType === "container.dependency_provisioning_failed" &&
+      (e.payload as { stage?: string }).stage === "environment_resolution",
+  );
+  assert.equal(refusals.length, 1, "exactly one environment-resolution refusal must be recorded for this dispatch");
+  const payload = refusals[0]!.payload as { projectDir?: string; reason?: string; detail?: string };
+  assert.equal(payload.projectDir, repo, "the event must name the tree that would have been bound");
+  assert.equal(payload.reason, "mountpoints_unavailable");
+  assert.match(String(payload.detail), /EACCES|permission denied/i, `the underlying error must be carried; got: ${payload.detail}`);
 
   // Property 2 — NO dependency-cache volume was mounted into a tree that could not
-  // host one. Mounting one anyway is the crash FG-628 closed, and FG-664 does not
-  // reopen it: the way it is not mounted is that no reviewer container is built.
-  assert.equal(
-    redArgs,
-    undefined,
-    `FG-664: a read-only reviewer that cannot be given the project's real dependencies must not start; ` +
-      `got a container with ${JSON.stringify(redArgs)}`,
+  // host one. Mounting one anyway is the crash FG-628 closed, and neither FG-664
+  // nor FG-678 reopens it: the way it is not mounted is that no container is built.
+  assert.deepEqual(
+    containers,
+    [],
+    `no container may start against a tree forge cannot prepare — neither the writable primary nor the reviewer; ` +
+      `got ${JSON.stringify(containers)}`,
   );
-  const red = tasksForRun(runId).find((t2) => t2.agentRole.startsWith("red-"));
-  assert.ok(red, "the reviewer task row must exist — it was dispatched and then refused, not skipped");
-  assert.equal(red.status, "failed");
-  assert.equal(failureKindForTask(red.id), "verification_environment_unavailable");
-  assert.match(String(red.error), /mountpoints_unavailable/);
-  assert.equal(redTaskId, undefined, "no reviewer container was ever handed to docker");
 
   // Non-vacuity: those mounts were genuinely planned for this tree — the refusal
   // is the precondition firing, not a project that had nothing to mount in the
@@ -650,12 +667,15 @@ test("FG-628 (A5) / FG-664: a checkout forge cannot write into records dependenc
   );
   assert.equal(existsSync(join(repo, MEMBER, "node_modules")), false, "the mountpoint really was never created");
 
-  // The rw/blue lane is untouched — the primary's OWN container ran and returned a
-  // complete result. It parks at blocked_by_red because its reviewer never
-  // reviewed it, which is runNext's existing posture for a red that produced no
-  // verdict: an unreviewed artifact waits for an operator, it does not advance.
   const primary = tasksForRun(runId).find((t2) => t2.phase === "build" && t2.parentId === undefined);
-  assert.equal(primary!.status, "blocked_by_red", "the rw primary ran; it is its unreviewed state that holds it");
+  assert.equal(primary!.status, "failed", "the writable primary is refused, not degraded into an empty workspace");
+  assert.equal(failureKindForTask(primary!.id), "verification_environment_unavailable", "the EXISTING kind — no new vocabulary");
+  assert.match(String(primary!.error), /mountpoints_unavailable/);
+  assert.equal(
+    tasksForRun(runId).find((t2) => t2.agentRole.startsWith("red-")),
+    undefined,
+    "the reviewer is never reached: its subject was refused before it existed",
+  );
 });
 
 // ─── (6) a workspace member that SYMLINKS out of the checkout ─────────────────
@@ -734,7 +754,7 @@ test("FG-628 (A6): a workspace member symlinked out of the checkout creates NOTH
   );
 });
 
-test("FG-628 (A6b) / FG-664: the escaping member creates nothing outside the checkout, mounts no cache volume, and REFUSES the read-only dispatch", async () => {
+test("FG-628 (A6b) / FG-664 / FG-678: the escaping member creates nothing outside the checkout, mounts no cache volume, and REFUSES the dispatch", async () => {
   setPlatform("darwin");
   process.env.FORGE_NO_WORKTREES = "1";
 
@@ -743,19 +763,17 @@ test("FG-628 (A6b) / FG-664: the escaping member creates nothing outside the che
   // mount into a tree that cannot host one.
   markDependencyCacheReady(lockfileHash(repo));
 
-  let redArgs: string[] | undefined;
-  let redTaskId: string | undefined;
+  const containers: string[] = [];
 
   const stubExec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
     const taskId = extractTaskId(args);
+    containers.push(taskId);
     writeFileSync(stderrPath, "");
     // FG-664: the read-only reviewer is preceded by Forge's own probe container.
     if (isDependencyProbeCall(args)) return answerDependencyProbe(args, stdoutPath);
     if (isDependencyLoadCall(args)) return answerDependencyLoad(args);
     if (taskId.startsWith("provision-")) return 0;
     if (taskId.startsWith("task-red-")) {
-      redArgs = args;
-      redTaskId = taskId;
       writeTaskResult(stdoutPath, PASS_VERDICT);
       return 0;
     }
@@ -766,27 +784,38 @@ test("FG-628 (A6b) / FG-664: the escaping member creates nothing outside the che
   const { runId } = startRun({ workflow: WORKFLOW, title: "fg628 A6b", inputs: {}, projectDir: repo });
   await runNext({ runId, workflow: WORKFLOW, dockerExec: stubExec });
 
-  const unavailable = eventsForRun(runId).filter((e) => e.eventType === "container.dependency_mountpoints_unavailable");
-  assert.equal(unavailable.length, 1, "the refusal must be observable on the timeline, not silent");
-  const payload = unavailable[0]!.payload as { repoRoot?: string; error?: string };
-  assert.equal(payload.repoRoot, repo, "the event must name the tree that would have been bound");
-  assert.match(String(payload.error), /outside/i, `the escape must be carried as the reason; got: ${payload.error}`);
+  // As in A5: FG-678 moved the refusal one dispatch earlier (the writable primary
+  // resolves the same environment through the same resolver), so the escape is
+  // now carried by that refusal's detail rather than by runNext's own lazy
+  // mountpoint check. The property is the same one: the escape refuses, it is
+  // never followed, and it is never silent.
+  const refusals = eventsForRun(runId).filter(
+    (e) =>
+      e.eventType === "container.dependency_provisioning_failed" &&
+      (e.payload as { stage?: string }).stage === "environment_resolution",
+  );
+  assert.equal(refusals.length, 1, "the refusal must be observable on the timeline, not silent");
+  const payload = refusals[0]!.payload as { projectDir?: string; reason?: string; detail?: string };
+  assert.equal(payload.projectDir, repo, "the event must name the tree that would have been bound");
+  assert.equal(payload.reason, "mountpoints_unavailable");
+  assert.match(String(payload.detail), /outside/i, `the escape must be carried as the reason; got: ${payload.detail}`);
 
   // The skip and the mount decision stay consistent: a skipped member whose volume
-  // was mounted anyway is the container_crash this ticket closed. FG-664: the way
-  // it is not mounted is that no reviewer container is built at all.
-  assert.equal(redArgs, undefined, `no read-only reviewer may start without its dependencies; got ${JSON.stringify(redArgs)}`);
-  assert.equal(redTaskId, undefined);
-  const red = tasksForRun(runId).find((t) => t.agentRole.startsWith("red-"));
-  assert.ok(red);
-  assert.equal(red.status, "failed");
-  assert.equal(failureKindForTask(red.id), "verification_environment_unavailable");
-  assert.match(String(red.error), /mountpoints_unavailable/);
+  // was mounted anyway is the container_crash this ticket closed. The way it is
+  // not mounted is that no container is built at all.
+  assert.deepEqual(containers, [], `no container may start against an escaping tree; got ${JSON.stringify(containers)}`);
 
   assert.equal(existsSync(join(outsideMember, "node_modules")), false, "no directory was created outside the checkout");
 
   const primary = tasksForRun(runId).find((t) => t.phase === "build" && t.parentId === undefined);
-  assert.equal(primary!.status, "blocked_by_red", "the rw primary ran; it is its unreviewed state that holds it");
+  assert.equal(primary!.status, "failed", "the writable primary is refused, not degraded into an empty workspace");
+  assert.equal(failureKindForTask(primary!.id), "verification_environment_unavailable");
+  assert.match(String(primary!.error), /mountpoints_unavailable/);
+  assert.equal(
+    tasksForRun(runId).find((t) => t.agentRole.startsWith("red-")),
+    undefined,
+    "the reviewer is never reached: its subject was refused before it existed",
+  );
 });
 
 /** Whether this process can actually create a directory under `dir` — root ignores

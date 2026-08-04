@@ -20,6 +20,15 @@
 //   (e) No agent/reviewer/red container — worktree-rw primary or ro red —
 //       ever mounts a shared dependency-cache volume read-write; only the
 //       dedicated provisioner container does.
+//
+// FG-678 adds the WRITABLE NON-WORKTREE shape, which had no provisioning at all
+// and fell through to an empty anonymous shadow:
+//   (fg678 a) it resolves host-side before the agent container and mounts the
+//       same lockfile-keyed volumes :ro, recording the receipt;
+//   (fg678 b) an rw dispatch with nothing to key a cache on still takes the
+//       legacy anonymous shadow (FIX1's surviving half);
+//   (fg678 c) an environment that cannot be established REFUSES the dispatch
+//       pre-container rather than starting an agent that cannot execute.
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -34,8 +43,10 @@ import { eventsForTask } from "../store/events.js";
 import { startRun } from "./startRun.js";
 import { runNext, type DockerExecFn } from "./runNext.js";
 import { failureKindForTask } from "./failure-kind.js";
-import { DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE, lockfileHash } from "./dependency-provisioning.js";
+import { DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE, dependencyVolumeName, lockfileHash } from "./dependency-provisioning.js";
 import { GIT_UNAVAILABLE_EXIT_CODE } from "./spawn.js";
+import { readTaskManifest } from "./task-manifest.js";
+import { taskDir } from "../util/paths.js";
 import type { Workflow } from "./schema.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { answerDependencyLoad, answerDependencyProbe, isDependencyLoadCall, isDependencyProbeCall } from "./dependency-probe.testkit.js";
@@ -366,36 +377,157 @@ test("fg376 (b): container exit 123 → task fails with failure_kind=verificatio
   assert.match(task!.error ?? "", /npm ci failed: EACCES/, "captured stderr must be surfaced in the failure message");
 });
 
-test("fg376 FIX1: darwin + non-worktree mode (FORGE_WORKTREES unset) → legacy anonymous shadow volume only, one container call, no provisioner", async () => {
+// ── FG-678: the WRITABLE non-worktree shape, which had no provisioning at all ──
+//
+// These three replace FIX1's dispatch-level case. FIX1 pinned that a plain rw
+// bind-mount dispatch behaves byte-for-byte like pre-FG-376 — legacy anonymous
+// shadow, no provisioner — on the reasoning that a container-local SHARED cache
+// over a live shared project directory would be the FG-376 race. FG-678 keeps
+// the property and drops the reasoning's conclusion: what removes the race is
+// that no agent container can WRITE the cache (still pinned, in (e) below and in
+// spawn.test.ts), not that the cache is withheld from this shape. Withholding it
+// is what left the agent with an EMPTY node_modules mask over a project directory
+// the operator had already `npm ci`'d, and made "does the agent notice and
+// install for itself" a per-dispatch coin flip.
+//
+// FIX1's surviving half — an rw dispatch with NO resolvable environment still
+// takes the legacy anonymous shadow — is (fg678 b).
+
+test("fg678 (a): darwin + non-worktree rw dispatch → resolves host-side BEFORE the agent container and mounts the lockfile-keyed volumes READ-ONLY", async () => {
   setPlatform("darwin");
   // FORGE_WORKTREES is pinned off in beforeEach — the bind-mount lane on darwin,
-  // where FG-345 would otherwise default it ON.
+  // where FG-345 would otherwise default it ON. This is `forge next` against the
+  // operator's live checkout, the same shape `forge invoke --project` takes.
 
   const repo = makeTmpDir();
   initGitRepoWithWorkspace(repo);
+  // A unique lockfile so this case gets its own COLD cache key (test (a) above
+  // provisions initGitRepoWithWorkspace's fixed one earlier in this process).
+  writeFileSync(join(repo, "package-lock.json"), '{"lockfileVersion":3,"fg678-writable-shape":true}');
+  execFileSync("git", ["add", "."], { cwd: repo, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "fg678: unique lockfile"], { cwd: repo, stdio: "ignore" });
 
   const { runId } = startRun({
     workflow: DISPATCH_TEST_WORKFLOW,
-    title: "fg376 FIX1 non-worktree dispatch test",
+    title: "fg678 non-worktree writable dispatch test",
     inputs: {},
     projectDir: repo,
   });
 
   const calls: Call[] = [];
-  const wave = await runNext({ runId, workflow: DISPATCH_TEST_WORKFLOW, dockerExec: makeTwoPhaseExec(calls) });
+  const wave = await runNext({ runId, workflow: DISPATCH_TEST_WORKFLOW, dockerExec: makeMultiCapturingExec(calls) });
 
   assert.deepEqual(wave.completedSteps, ["build"]);
-  assert.equal(calls.length, 1, "no lockfile-keyed cache in play → no provisioner call, just the agent");
+  assert.deepEqual(
+    calls.map((c) => c.kind),
+    ["provisioner", "probe", "load", "agent"],
+    "the platform establishes the environment BEFORE the agent container — the agent never improvises it",
+  );
+
+  const agentArgs = calls.at(-1)!.args;
+  const volumeArgs = pickVolumeArgs(agentArgs);
+  const hash = lockfileHash(repo);
+  for (const relPath of ["", "dashboard"]) {
+    const containerPath = relPath === "" ? "/project/node_modules" : `/project/${relPath}/node_modules`;
+    assert.ok(
+      volumeArgs.includes(`${dependencyVolumeName(hash, relPath)}:${containerPath}:ro`),
+      `expected the lockfile-keyed volume for '${relPath || "<root>"}' mounted :ro; got ${JSON.stringify(volumeArgs)}`,
+    );
+  }
+  assert.ok(
+    !volumeArgs.includes("/project/node_modules"),
+    "the EMPTY anonymous shadow — the defect — must be gone from this shape",
+  );
+  assert.deepEqual(pickEnvValues(agentArgs, "FORGE_NM_INSTALL_ROOT"), [], "no agent container installs, in any shape");
+  assert.deepEqual(pickEnvValues(agentArgs, "FORGE_NM_LOCKFILE_HASH"), [hash]);
+
+  // AC6: the dependency identity is answerable from durable state, not inferred
+  // from container logs.
+  const primary = tasksForRun(runId).find((t) => t.phase === "build" && t.parentId === undefined)!;
+  const receipt = readTaskManifest(taskDir(runId, primary.id))?.dependencyEnvironment;
+  assert.ok(receipt, "a writable dispatch must record the environment it was given");
+  assert.equal(receipt.cacheKey, hash);
+  const resolvedEvents = eventsForTask(primary.id).filter((e) => e.eventType === "container.dependency_environment_resolved");
+  assert.equal(resolvedEvents.length, 1, "one resolution, one durable record");
+});
+
+test("fg678 (b): a non-worktree rw dispatch with NO resolvable environment (no lockfile) still takes the legacy anonymous shadow, one container call, no provisioner", async () => {
+  setPlatform("darwin");
+
+  // No package.json / package-lock.json at all: nothing to key a cache on, so
+  // the resolver is not applicable and the pre-FG-376 fallback stands.
+  const repo = makeTmpDir();
+  execFileSync("git", ["init", "-b", "main"], { cwd: repo, stdio: "ignore" });
+  writeFileSync(join(repo, "README.md"), "# no lockfile\n");
+
+  const { runId } = startRun({
+    workflow: DISPATCH_TEST_WORKFLOW,
+    title: "fg678 unresolvable environment dispatch test",
+    inputs: {},
+    projectDir: repo,
+  });
+
+  const calls: Call[] = [];
+  const wave = await runNext({ runId, workflow: DISPATCH_TEST_WORKFLOW, dockerExec: makeMultiCapturingExec(calls) });
+
+  assert.deepEqual(wave.completedSteps, ["build"]);
+  assert.equal(calls.length, 1, "nothing to provision → no provisioner, no probe, just the agent");
   assert.equal(calls[0]!.kind, "agent");
 
   const volumeArgs = pickVolumeArgs(calls[0]!.args);
-  assert.ok(volumeArgs.includes("/project/node_modules"), "non-worktree rw dispatch must still shadow via the legacy anonymous volume");
-  assert.equal(volumeArgs.filter((v) => v.includes("forge-deps-")).length, 0, "non-worktree dispatch must mount no named dependency-cache volumes");
+  assert.ok(volumeArgs.includes("/project/node_modules"), "an unresolved rw dispatch must still shadow via the legacy anonymous volume");
+  assert.equal(volumeArgs.filter((v) => v.includes("forge-deps-")).length, 0, "no named volume for an environment nobody resolved");
+  assert.deepEqual(pickEnvValues(calls[0]!.args, "FORGE_NM_INSTALL_ROOT"), []);
+  assert.deepEqual(pickEnvValues(calls[0]!.args, "FORGE_NM_SHADOW_PATHS"), []);
+  assert.deepEqual(pickEnvValues(calls[0]!.args, "FORGE_NM_LOCKFILE_HASH"), []);
+  assert.deepEqual(pickEnvValues(calls[0]!.args, "FORGE_NM_SHADOW"), ["/project/node_modules"], "the mask itself is load-bearing and stays");
+});
 
-  assert.deepEqual(pickEnvValues(calls[0]!.args, "FORGE_NM_INSTALL_ROOT"), [], "non-worktree dispatch must never emit FORGE_NM_INSTALL_ROOT");
-  assert.deepEqual(pickEnvValues(calls[0]!.args, "FORGE_NM_SHADOW_PATHS"), [], "non-worktree dispatch must never emit FORGE_NM_SHADOW_PATHS");
-  assert.deepEqual(pickEnvValues(calls[0]!.args, "FORGE_NM_LOCKFILE_HASH"), [], "non-worktree dispatch must never emit FORGE_NM_LOCKFILE_HASH");
-  assert.deepEqual(pickEnvValues(calls[0]!.args, "FORGE_NM_SHADOW"), ["/project/node_modules"], "legacy FORGE_NM_SHADOW is still emitted — byte-for-byte pre-FG-376 behavior");
+test("fg678 (c): a non-worktree rw dispatch whose environment cannot be established is REFUSED pre-container — no agent container, verification_environment_unavailable", async () => {
+  setPlatform("darwin");
+
+  const repo = makeTmpDir();
+  initGitRepoWithWorkspace(repo);
+  writeFileSync(join(repo, "package-lock.json"), '{"lockfileVersion":3,"fg678-writable-refusal":true}');
+  execFileSync("git", ["add", "."], { cwd: repo, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "fg678: refusal lockfile"], { cwd: repo, stdio: "ignore" });
+
+  const { runId } = startRun({
+    workflow: DISPATCH_TEST_WORKFLOW,
+    title: "fg678 writable refusal dispatch test",
+    inputs: {},
+    projectDir: repo,
+  });
+
+  const calls: Call[] = [];
+  const wave = await runNext({
+    runId,
+    workflow: DISPATCH_TEST_WORKFLOW,
+    // The install fails, so nothing can attest this dispatch's environment.
+    dockerExec: makeProvisionerFailingExec("npm ci failed: ENOSPC", calls),
+  });
+
+  assert.deepEqual(wave.failedSteps, ["build"]);
+  assert.deepEqual(calls.map((c) => c.kind), ["provisioner"], "the agent container must NEVER be built into an unusable workspace");
+
+  const primary = tasksForRun(runId).find((t) => t.phase === "build" && t.parentId === undefined)!;
+  assert.equal(primary.status, "failed");
+  assert.equal(failureKindForTask(primary.id), "verification_environment_unavailable", "the EXISTING kind — no new vocabulary");
+  assert.match(String(primary.error), /provisioning_failed/);
+  assert.match(String(primary.error), /ENOSPC/, "the container's own stderr tail must reach the operator");
+
+  const refusal = eventsForTask(primary.id).find(
+    (e) =>
+      e.eventType === "container.dependency_provisioning_failed" &&
+      (e.payload as { stage?: string }).stage === "environment_resolution",
+  );
+  assert.ok(refusal, "the refusal is recorded with the same event and grain both other lanes use");
+  assert.equal((refusal.payload as { reason?: string }).reason, "provisioning_failed");
+  assert.equal(
+    eventsForTask(primary.id).filter((e) => e.eventType === "container.dependency_environment_resolved").length,
+    0,
+    "nothing was attested, so nothing may claim an environment this dispatch received",
+  );
 });
 
 test("fg376 (c): two worktree-mode dispatches sharing the same lockfile — only the first provisions, the second skips straight to the read-only agent mount", async () => {

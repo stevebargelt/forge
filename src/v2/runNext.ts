@@ -3437,9 +3437,12 @@ async function runContainer(args: {
   }
 
   // FG-376: resolve the dependency-cache decision BEFORE building docker args
-  // for the AGENT/reviewer container. FIX1 gates the named-volume path to
-  // worktree-mode rw dispatches only (repoRootForMount mirrors the
-  // PROJECT_DIR the container will actually see, below).
+  // for the AGENT/reviewer container (repoRootForMount mirrors the PROJECT_DIR
+  // the container will actually see, below). FG-678: EVERY eligible dispatch
+  // shape resolves here — worktree rw, non-worktree rw, and read-only alike —
+  // and spawn.ts's planner keys the mount on DEPENDENCY_CACHE_MOUNT_RO, which
+  // only a resolution that actually succeeded sets. A receipt is evidence of a
+  // mount, never a substitute for one.
   //
   // Provisioning (installing into the shared cache) now runs as a SEPARATE,
   // short-lived container to completion HERE — before the agent/reviewer
@@ -3527,9 +3530,22 @@ async function runContainer(args: {
   // anyway is what crashes the container.
   //
   // Lazy + memoized so it runs exactly when a volume is about to be bound into
-  // this tree and never otherwise: a plain rw non-worktree primary takes the
-  // legacy anonymous shadow and mounts none of these, so it has no business
-  // writing into the operator's checkout.
+  // this tree and never otherwise.
+  //
+  // FG-678 corrects what "never otherwise" used to mean here. The old note read
+  // that a plain rw non-worktree primary "has no business writing into the
+  // operator's checkout" — written when that shape took the legacy anonymous
+  // shadow and bound no dependency volume at all. It now binds them like every
+  // other eligible shape, and it reaches createDependencyMountpoints through
+  // resolveDependencyEnvironment rather than through this closure, which is why
+  // it is not a caller below. Creating a mountpoint in a LIVE checkout is
+  // settled, not a hazard to be avoided: FG-628's analysis (A2/A3/A4, and the
+  // long note above) established that the only thing created is an empty
+  // directory under an already-gitignored path, invisible to `status
+  // --porcelain [--ignored]` and `ls-files --others`, and idempotent under
+  // concurrency. Going through the resolver also means a project with nothing
+  // to key a cache on is still touched by nothing at all — the resolver decides
+  // that before it ever asks for a mountpoint.
   let mountpointsReady: boolean | undefined;
   const projectTreeIsMountable = (): boolean => {
     if (mountpointsReady === undefined) {
@@ -3546,6 +3562,34 @@ async function runContainer(args: {
       }
     }
     return mountpointsReady;
+  };
+
+  /** FG-664/FG-678: what BOTH resolver-backed lanes do with a refusal. One
+   *  vocabulary for one decision — the EXISTING
+   *  `container.dependency_provisioning_failed` event at the
+   *  `stage: "environment_resolution"` grain invoke.ts uses, and the EXISTING
+   *  `verification_environment_unavailable` FailureKind. No agent container is
+   *  ever built past this point. The caller supplies only the operator-facing
+   *  message, because what a refusal MEANS differs by lane (a reviewer would run
+   *  against a substituted implementation; a writable dispatch would be unable
+   *  to execute the project at all) even though the mechanism does not. */
+  const refuseForDependencyEnvironment = (
+    reason: string,
+    detail: string,
+    error: string,
+  ): { kind: "failed"; error: string } => {
+    logEvent("container.dependency_provisioning_failed", {
+      runId: args.runId,
+      taskId: args.taskId,
+      payload: { stage: "environment_resolution", reason, detail, projectDir: repoRootForMount },
+    });
+    cleanupStagedAuth(dir); // AWN-8
+    failTask(args.taskId, {
+      runId: args.runId,
+      kind: classify({ source: "verification_environment_unavailable" }),
+      error,
+    });
+    return { kind: "failed", error };
   };
 
   if (dependencyCacheEligible && isWorktreeRwDispatch && projectTreeIsMountable()) {
@@ -3652,6 +3696,67 @@ async function runContainer(args: {
       }
       depSpawnFields.DEPENDENCY_CACHE_MOUNT_RO = "1";
     }
+  } else if (dependencyCacheEligible && args.projectMode === "rw" && !isWorktreeRwDispatch) {
+    // FG-678: THE SAME RESOLVER, ON THE WRITABLE SHAPE THAT HAD NO PROVISIONING
+    // AT ALL.
+    //
+    // This arm serves every rw dispatch that is NOT a worktree primary:
+    // FORGE_NO_WORKTREES=1, a tree the worktree path could not use, a fanout
+    // child dispatched against the live checkout. Until now it fell through to
+    // spawn.ts's anonymous-volume fallback, which starts EMPTY and MASKS
+    // whatever the bind mount has at that path — so a host-side `npm ci` run
+    // before dispatch never reached the container, and whether the agent
+    // recovered by installing for itself was left to the agent. Two identical
+    // test-engineer dispatches diverged on exactly that: one reasoned its way to
+    // `npm ci` and validated; the other collected 1020 ERR_MODULE_NOT_FOUND and
+    // reported honestly that it could not validate anything. The platform, not
+    // the agent, has to decide this.
+    //
+    // Keyed on the dispatch SHAPE (rw, no worktree), never on the entrypoint: a
+    // workflow dispatch under FORGE_NO_WORKTREES=1 lands here for the same
+    // reason `forge invoke --project` does, and is fixed with it.
+    //
+    // Deliberately NOT gated on projectTreeIsMountable() the way the read-only
+    // arm below is. The resolver creates the mountpoints itself, AFTER it has a
+    // cache key — so a project it has nothing to key on is touched by nothing,
+    // and a tree that cannot host a mountpoint is refused by the resolver with
+    // `mountpoints_unavailable` through the one seam below instead of by a
+    // second, lane-local copy of the same check.
+    //
+    // Fail-closed, and that is a deliberate change from FG-628's rw posture: it
+    // let an unpreparable checkout DEGRADE this lane on the reasoning that the
+    // container installs its own dependencies, so nothing is substituted. That
+    // reasoning does not survive this ticket — the container cannot install into
+    // a masked, empty shadow, so degrading here is exactly the measured defect
+    // rather than a safe fallback. The worktree rw lane above keeps FG-628's
+    // degradation untouched; it has a provisioner of its own.
+    const resolved = await prepareDependencyEnvironmentForDispatch({
+      runtime,
+      taskId: args.taskId,
+      repoRoot: repoRootForMount,
+      canonicalProjectDir: args.projectDir,
+      logDir: dir,
+      exec,
+    });
+    if (resolved.outcome === "refused") {
+      return refuseForDependencyEnvironment(
+        resolved.reason,
+        resolved.detail,
+        `verification_environment_unavailable (${resolved.reason}): ${resolved.detail}. No agent container was ` +
+          `started. A writable dispatch whose dependency environment cannot be established would receive an EMPTY ` +
+          `node_modules shadow masking whatever is installed in the project directory, and could not execute the ` +
+          `project at all — see FG-678.`,
+      );
+    }
+    if (resolved.outcome === "ready") {
+      dependencyEnvironment = resolved.receipt;
+      depSpawnFields.DEPENDENCY_CACHE_MOUNT_RO = "1";
+      logEvent("container.dependency_environment_resolved", {
+        runId: args.runId,
+        taskId: args.taskId,
+        payload: dependencyEnvironmentResolvedPayload(resolved.receipt),
+      });
+    }
   } else if (dependencyCacheEligible && args.projectMode === "ro") {
     // FG-664: THE SAME RESOLVER AS `forge invoke`, AT THE SEAM BOTH READ-ONLY
     // DISPATCH PATHS CROSS.
@@ -3669,9 +3774,9 @@ async function runContainer(args: {
     // no longer just goes unmounted — the red waits on the provisioner. Both are
     // superseded here for the READ-ONLY lane specifically, because degrading is
     // substituting, and FG-664's whole premise is that a reviewer which cannot
-    // load the project's real driver must not run. The rw/blue lane keeps FG-628's
-    // degradation untouched (the arm above), because there the container installs
-    // its own dependencies and no substitution occurs.
+    // load the project's real driver must not run. (FG-678 then superseded it for
+    // the non-worktree rw lane too — see that arm. What still keeps FG-628's
+    // degradation is the WORKTREE rw lane, which provisions for itself.)
     //
     // projectTreeIsMountable() runs first so the FG-628 diagnostic event still
     // lands on the timeline naming the tree and the underlying error; the refusal
@@ -3698,29 +3803,13 @@ async function runContainer(args: {
       exec,
     });
     if (resolved.outcome === "refused") {
-      const error =
+      return refuseForDependencyEnvironment(
+        resolved.reason,
+        resolved.detail,
         `verification_environment_unavailable (${resolved.reason}): ${resolved.detail}. No agent container was ` +
-        `started. A read-only reviewer that cannot load the project's real native dependencies is refused rather ` +
-        `than run against a substituted implementation — see FG-664.`;
-      // The EXISTING event, with the same `stage`/`reason` grain invoke.ts uses —
-      // one vocabulary for one decision, whichever lane reached it.
-      logEvent("container.dependency_provisioning_failed", {
-        runId: args.runId,
-        taskId: args.taskId,
-        payload: {
-          stage: "environment_resolution",
-          reason: resolved.reason,
-          detail: resolved.detail,
-          projectDir: repoRootForMount,
-        },
-      });
-      cleanupStagedAuth(dir); // AWN-8
-      failTask(args.taskId, {
-        runId: args.runId,
-        kind: classify({ source: "verification_environment_unavailable" }),
-        error,
-      });
-      return { kind: "failed", error };
+          `started. A read-only reviewer that cannot load the project's real native dependencies is refused rather ` +
+          `than run against a substituted implementation — see FG-664.`,
+      );
     }
     if (resolved.outcome === "ready") {
       dependencyEnvironment = resolved.receipt;

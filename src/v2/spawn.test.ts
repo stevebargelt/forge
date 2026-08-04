@@ -5,10 +5,19 @@ import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { Runtime } from "./schema.js";
-import { buildDockerArgs, buildProvisionerDockerArgs, resolveProjectContainerPath, _internal, type SpawnContext } from "./spawn.js";
+import {
+  buildDockerArgs,
+  buildProvisionerDockerArgs,
+  prepareDependencyEnvironmentForDispatch,
+  resolveProjectContainerPath,
+  _internal,
+  type SpawnContext,
+} from "./spawn.js";
 import { lockfileHash, planDependencyVolumes } from "./dependency-provisioning.js";
+import { answerDependencyLoad, answerDependencyProbe, isDependencyLoadCall, isDependencyProbeCall } from "./dependency-probe.testkit.js";
+import type { DockerExecFn } from "./docker-exec.js";
 
 // A browser-tools dir that actually contains the auth injector (#181 pin check).
 const BT_DIR_WITH_INJECTOR = mkdtempSync(join(tmpdir(), "forge-bt-"));
@@ -300,36 +309,136 @@ test("buildDockerArgs: FG-376 worktree-mode WITHOUT DEPENDENCY_CACHE_MOUNT_RO (c
   }
 });
 
-// FIX1 (FG-376 review): the named-volume path used to fire on EVERY macOS rw
-// dispatch. It must now be worktree-mode ONLY — a plain rw dispatch (no
-// IS_WORKTREE_DISPATCH) must behave byte-for-byte like pre-FG-376: legacy
-// anonymous shadow volume only, none of the FG-376 provisioning env vars, no
-// named forge-deps-* volumes — even when a real lockfile+workspaces repo is
-// mounted.
-test("buildDockerArgs: FIX1 non-worktree rw dispatch never takes the named-volume/auto-install path, even with a real lockfile (byte-for-byte legacy behavior)", () => {
+// ── FG-678: the mount gate is READ-ONLY-ness, not worktree-ness ───────────────
+//
+// These three replace FIX1's "the named-volume path is worktree-mode ONLY"
+// claim, which FG-678 falsified. FIX1's two halves are kept and separated: the
+// half that pins NO SHARED WRITABLE CACHE is preserved and strengthened across
+// every rw shape (it is what carries FG-678 AC5 from here on), while the half
+// that pinned "an rw dispatch with a lockfile takes the anonymous shadow" is
+// re-keyed to what actually decides it — whether the CALLER resolved an
+// environment, signalled by DEPENDENCY_CACHE_MOUNT_RO.
+//
+// Why the old gate was wrong: IS_WORKTREE_DISPATCH is set by exactly one caller
+// (runNext's worktree arm), so every other rw shape — `forge invoke --project`,
+// a workflow dispatch under FORGE_NO_WORKTREES=1 — got the ANONYMOUS volume,
+// which starts empty and masks whatever the bind mount has at that path. A
+// host-side `npm ci` therefore could not reach the container, and whether the
+// agent noticed and installed for itself was left to the agent.
+
+test("buildDockerArgs: FG-678 a NON-worktree rw dispatch whose caller resolved an environment mounts the named lockfile-keyed volumes READ-ONLY, one per workspace member", () => {
   process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t";
   const realPlatform = process.platform;
   setPlatform("darwin");
-  const repo = mkdtempSync(join(tmpdir(), "forge-fg376-nonworktree-"));
+  const repo = mkdtempSync(join(tmpdir(), "forge-fg678-nonworktree-"));
   writeFileSync(join(repo, "package.json"), JSON.stringify({ name: "x", workspaces: ["dashboard"] }));
   writeFileSync(join(repo, "package-lock.json"), '{"lockfileVersion":3}');
   mkdirSync(join(repo, "dashboard"), { recursive: true });
   try {
-    // No IS_WORKTREE_DISPATCH field at all — mirrors a normal `forge invoke` /
-    // non-worktree runNext dispatch.
+    // NO IS_WORKTREE_DISPATCH field at all — a plain `forge invoke --project` /
+    // non-worktree runNext dispatch. DEPENDENCY_CACHE_MOUNT_RO is what the
+    // caller sets once it has resolved and attested the environment host-side.
+    const { args } = buildDockerArgs(BASE_RUNTIME, {
+      ...BASE_CTX,
+      PROJECT_DIR: repo,
+      DEPENDENCY_CACHE_MOUNT_RO: "1",
+    });
+    const volumeArgs = pickAllVolumeArgs(args);
+
+    // The MOUNT itself, named exactly: one forge-deps-<key>:<containerPath>:ro
+    // per workspace member. A receipt is evidence of a mount, never a substitute
+    // for one, so this asserts the argv rather than the caller's bookkeeping.
+    const plan = planDependencyVolumes(repo, "/project");
+    assert.equal(plan.volumes.length, 2, "test setup: root + the 'dashboard' member");
+    for (const v of plan.volumes) {
+      assert.ok(
+        volumeArgs.includes(`${v.name}:${v.containerPath}:ro`),
+        `expected ${v.name}:${v.containerPath}:ro in the argv; got: ${JSON.stringify(volumeArgs)}`,
+      );
+    }
+    assert.ok(
+      !volumeArgs.includes("/project/node_modules"),
+      "a resolved environment must not also take the empty anonymous shadow",
+    );
+
+    const env = pickEnv(args);
+    assert.equal(env.FORGE_NM_SHADOW, "/project/node_modules");
+    assert.equal(env.FORGE_NM_LOCKFILE_HASH, lockfileHash(repo));
+    assert.deepEqual(
+      env.FORGE_NM_SHADOW_PATHS!.split(":").sort(),
+      ["/project/dashboard/node_modules", "/project/node_modules"].sort(),
+    );
+    assert.equal(env.FORGE_NM_INSTALL_ROOT, undefined, "the agent container must never install — that's the provisioner's job");
+  } finally {
+    setPlatform(realPlatform);
+  }
+});
+
+test("buildDockerArgs: FG-678 an rw dispatch with NO resolved environment still takes the legacy anonymous shadow, even with a real lockfile", () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t";
+  const realPlatform = process.platform;
+  setPlatform("darwin");
+  const repo = mkdtempSync(join(tmpdir(), "forge-fg678-unresolved-"));
+  writeFileSync(join(repo, "package.json"), JSON.stringify({ name: "x", workspaces: ["dashboard"] }));
+  writeFileSync(join(repo, "package-lock.json"), '{"lockfileVersion":3}');
+  mkdirSync(join(repo, "dashboard"), { recursive: true });
+  try {
+    // No DEPENDENCY_CACHE_MOUNT_RO: the caller resolved nothing (a configuration
+    // the resolver excludes, or a project it cannot key a cache on). The mask
+    // still goes on — the defect FG-678 fixes is that this shadow starts EMPTY,
+    // not that it exists (unmasking would expose the host's wrong-platform
+    // modules to a container that can write back through grpcfuse).
     const { args } = buildDockerArgs(BASE_RUNTIME, { ...BASE_CTX, PROJECT_DIR: repo });
     const volumeArgs = pickAllVolumeArgs(args);
-    assert.ok(volumeArgs.includes("/project/node_modules"), "non-worktree rw dispatch must still shadow via the legacy anonymous volume");
+    assert.ok(volumeArgs.includes("/project/node_modules"), "an unresolved rw dispatch must still shadow via the legacy anonymous volume");
     assert.equal(
       volumeArgs.filter((v) => v.includes("forge-deps-")).length,
       0,
-      "non-worktree rw dispatch must mount no named dependency-cache volumes",
+      "no named dependency-cache volume may be mounted for an environment nobody resolved",
     );
     const env = pickEnv(args);
-    assert.equal(env.FORGE_NM_SHADOW, "/project/node_modules", "legacy FORGE_NM_SHADOW is still emitted (pre-FG-376 behavior)");
-    assert.equal(env.FORGE_NM_INSTALL_ROOT, undefined, "non-worktree dispatch must never emit FORGE_NM_INSTALL_ROOT");
-    assert.equal(env.FORGE_NM_SHADOW_PATHS, undefined, "non-worktree dispatch must never emit FORGE_NM_SHADOW_PATHS");
-    assert.equal(env.FORGE_NM_LOCKFILE_HASH, undefined, "non-worktree dispatch must never emit FORGE_NM_LOCKFILE_HASH");
+    assert.equal(env.FORGE_NM_SHADOW, "/project/node_modules", "legacy FORGE_NM_SHADOW is still emitted");
+    assert.equal(env.FORGE_NM_INSTALL_ROOT, undefined);
+    assert.equal(env.FORGE_NM_SHADOW_PATHS, undefined, "no plan was mounted → no multi-path diagnostic");
+    assert.equal(env.FORGE_NM_LOCKFILE_HASH, undefined, "no plan was mounted → no cache-key diagnostic");
+  } finally {
+    setPlatform(realPlatform);
+  }
+});
+
+// FG-678 AC5, the half FIX1 was really protecting: whatever gates the mount, NO
+// agent container of ANY rw shape may write the shared cache. That — not
+// worktree-ness — is what removes the writer and therefore the FG-376 race
+// between concurrent tasks over one live shared project directory.
+test("buildDockerArgs: FG-678/AC5 no rw dispatch of any shape mounts a forge-deps-* volume read-write, emits FORGE_NM_INSTALL_ROOT, or starts a provisioner", () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t";
+  const realPlatform = process.platform;
+  setPlatform("darwin");
+  const repo = mkdtempSync(join(tmpdir(), "forge-fg678-ac5-"));
+  writeFileSync(join(repo, "package.json"), JSON.stringify({ name: "x", workspaces: ["dashboard"] }));
+  writeFileSync(join(repo, "package-lock.json"), '{"lockfileVersion":3}');
+  mkdirSync(join(repo, "dashboard"), { recursive: true });
+  const shapes: Array<[string, SpawnContext]> = [
+    ["worktree rw, resolved", { ...BASE_CTX, PROJECT_DIR: repo, IS_WORKTREE_DISPATCH: "1", DEPENDENCY_CACHE_MOUNT_RO: "1" }],
+    ["worktree rw, unresolved", { ...BASE_CTX, PROJECT_DIR: repo, IS_WORKTREE_DISPATCH: "1" }],
+    ["non-worktree rw, resolved", { ...BASE_CTX, PROJECT_DIR: repo, DEPENDENCY_CACHE_MOUNT_RO: "1" }],
+    ["non-worktree rw, unresolved", { ...BASE_CTX, PROJECT_DIR: repo }],
+  ];
+  try {
+    for (const [label, ctx] of shapes) {
+      const { args } = buildDockerArgs(BASE_RUNTIME, ctx);
+      const named = pickAllVolumeArgs(args).filter((v) => v.includes("forge-deps-"));
+      assert.ok(
+        named.every((v) => v.endsWith(":ro")),
+        `${label}: an agent container may only ever mount the shared cache read-only, got: ${JSON.stringify(named)}`,
+      );
+      assert.equal(pickEnv(args).FORGE_NM_INSTALL_ROOT, undefined, `${label}: an agent container must never install`);
+      const nameIdx = args.indexOf("--name");
+      assert.ok(
+        !String(args[nameIdx + 1] ?? "").startsWith("forge-provision-"),
+        `${label}: buildDockerArgs builds agent containers only — provisioning is buildProvisionerDockerArgs's job`,
+      );
+    }
   } finally {
     setPlatform(realPlatform);
   }
@@ -405,6 +514,98 @@ test("buildDockerArgs: FIX5 a traversal/absolute workspaces entry is excluded �
     assert.ok(warnings.some((w) => w.includes("../../etc")), "the rejection must be logged, not silent");
   } finally {
     console.error = origError;
+    setPlatform(realPlatform);
+  }
+});
+
+// FG-678 AC5, DEMONSTRATED rather than asserted, over the WRITABLE shape the
+// ticket is about (the worktree shape's version of this lives in
+// fg376-dependency-provisioning.worktree.test.ts). The hard constraint is that a
+// dispatch against a LIVE SHARED project directory must not reopen the FG-376
+// write race, and the property that closes it is that the only writer is the
+// Forge-owned provisioner, serialized host-side on the per-cache-key lock.
+//
+// The provisioner here BLOCKS on a gate the test opens only after all N calls
+// are in flight, so without the lock every caller would see the cold key and
+// install into the same rw volumes concurrently — which is the race itself. With
+// it, exactly one runs and the rest resolve off the marker it left. A gate rather
+// than a sleep: the contention is then deterministic rather than timing-
+// dependent, and the unit tier stays free of wall-clock waits.
+test("buildDockerArgs: FG-678/AC5 N concurrent WRITABLE dispatches over one live project dir serialize on the cache-key lock — one provisioner, and every argv mounts the cache read-only", async () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t";
+  const realPlatform = process.platform;
+  setPlatform("darwin");
+  // ONE live project directory, shared by every concurrent dispatch — no
+  // worktree, no per-dispatch copy. The unique lockfile gives this test its own
+  // cold cache key so the provisioning step is genuinely exercised.
+  const repo = mkdtempSync(join(tmpdir(), "forge-fg678-concurrent-"));
+  writeFileSync(join(repo, "package.json"), JSON.stringify({ name: "x", dependencies: { "better-sqlite3": "^12.11.1" } }));
+  writeFileSync(join(repo, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, salt: "fg678-concurrency" }));
+
+  const N = 4;
+  let provisionerRuns = 0;
+  let provisionersInFlight = 0;
+  let maxProvisionersInFlight = 0;
+  let openTheGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { openTheGate = resolve; });
+  const makeExec = (): DockerExecFn => async ({ args, stdoutPath, stderrPath }) => {
+    mkdirSync(dirname(stdoutPath), { recursive: true });
+    writeFileSync(stderrPath, "");
+    if (isDependencyProbeCall(args)) return answerDependencyProbe(args, stdoutPath);
+    if (isDependencyLoadCall(args)) return answerDependencyLoad(args);
+    writeFileSync(stdoutPath, "");
+    provisionerRuns++;
+    provisionersInFlight++;
+    maxProvisionersInFlight = Math.max(maxProvisionersInFlight, provisionersInFlight);
+    await gate;
+    provisionersInFlight--;
+    return 0;
+  };
+
+  try {
+    const dispatches = Array.from({ length: N }, (_, i) =>
+      prepareDependencyEnvironmentForDispatch({
+        runtime: BASE_RUNTIME,
+        taskId: `task-fg678-concurrent-${i}`,
+        repoRoot: repo,
+        logDir: mkdtempSync(join(tmpdir(), `forge-fg678-log-${i}-`)),
+        exec: makeExec(),
+        platform: "darwin",
+        lockOpts: { pollMs: 5 },
+      }),
+    );
+    // Every dispatch is now in flight and contending for the one cache key; the
+    // holder is parked inside its provisioner. Let it finish.
+    openTheGate();
+    const outcomes = await Promise.all(dispatches);
+
+    assert.equal(provisionerRuns, 1, `the shared cache must be installed at most once, got ${provisionerRuns} provisioner runs`);
+    assert.equal(maxProvisionersInFlight, 1, "two provisioners may never write the shared volumes at the same time");
+
+    const cacheKeys = new Set<string>();
+    for (const [i, outcome] of outcomes.entries()) {
+      assert.equal(outcome.outcome, "ready", `dispatch ${i} must resolve: ${JSON.stringify(outcome)}`);
+      if (outcome.outcome !== "ready") continue;
+      cacheKeys.add(outcome.receipt.cacheKey);
+      // Every dispatch that resolved gets the SAME shared volumes, mounted
+      // read-only into a WRITABLE (rw) project mount — no copy, no writer.
+      const { args } = buildDockerArgs(BASE_RUNTIME, {
+        ...BASE_CTX,
+        TASK_ID: `task-fg678-concurrent-${i}`,
+        PROJECT_DIR: repo,
+        PROJECT_MODE: "rw",
+        DEPENDENCY_CACHE_MOUNT_RO: "1",
+      });
+      const named = pickAllVolumeArgs(args).filter((v) => v.includes("forge-deps-"));
+      assert.ok(named.length > 0, `dispatch ${i} must actually mount the shared cache, got: ${JSON.stringify(named)}`);
+      assert.ok(
+        named.every((v) => v.endsWith(":ro")),
+        `dispatch ${i} must mount every shared volume read-only, got: ${JSON.stringify(named)}`,
+      );
+      assert.equal(pickEnv(args).FORGE_NM_INSTALL_ROOT, undefined, `dispatch ${i}: no agent container may install`);
+    }
+    assert.deepEqual([...cacheKeys], [lockfileHash(repo)], "all N dispatches bind the one lockfile-keyed environment");
+  } finally {
     setPlatform(realPlatform);
   }
 });
