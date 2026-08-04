@@ -1247,9 +1247,16 @@ test("fg664 (f2): a REFUSED dispatch emits exactly what it emitted before, and n
   assert.equal(payload.projectDir, project);
 });
 
-// ── (j): the rw/blue paths are untouched ─────────────────────────────────────
+// ── (j): the rw/blue path after FG-678, and the two argv arms that still stand ─
+//
+// FG-664 gave the read-only reviewer lane a host-resolved environment and left the
+// writable one alone; FG-678 closed that gap, so the blue path now resolves and
+// attests exactly as this file's (a) does. What FG-664 pinned here that FG-678 did
+// NOT change is the mount planner's fallback: an rw dispatch whose caller resolved
+// NO environment still takes the legacy anonymous shadow rather than a shared
+// writable cache over a live project directory (AC5).
 
-test("fg664 (j): a read-write invoke dispatch builds NO probe and NO provisioner, and buildDockerArgs's two rw arms emit the pre-change argv", async () => {
+test("fg664 (j): a read-write invoke dispatch resolves and attests its dependency environment BEFORE the agent (FG-678), while buildDockerArgs's no-environment rw arm still emits the legacy anonymous shadow", async () => {
   setPlatform("darwin");
   const project = makeProject("j");
   const calls: Call[] = [];
@@ -1261,8 +1268,24 @@ test("fg664 (j): a read-write invoke dispatch builds NO probe and NO provisioner
     dockerExec: makeExec(calls),
   });
   assert.equal(res.status, "complete", res.error);
-  assert.deepEqual(calls.map((c) => c.kind), ["agent"], "the blue path resolves no dependency environment at all");
-  assert.equal(readTaskManifest(taskDir(res.runId, res.taskId))?.dependencyEnvironment, undefined);
+  assert.deepEqual(
+    calls.map((c) => c.kind),
+    ["provisioner", "probe", "load", "agent"],
+    "the blue path provisions and attests ahead of the agent, exactly as the read-only lane does",
+  );
+
+  // The ordering property, stated on the ledger as well as on the container
+  // sequence: the agent container starts only after the environment it was given
+  // was resolved AND recorded. An agent that ran first would have improvised one.
+  const types = eventsForTask(res.taskId).map((e) => e.eventType);
+  const resolvedAt = types.indexOf("container.dependency_environment_resolved");
+  const startedAt = types.indexOf("container.started");
+  assert.ok(resolvedAt >= 0, `expected a resolution on the timeline; got ${types.join(", ")}`);
+  assert.ok(startedAt > resolvedAt, "the resolution is recorded BEFORE the agent container starts");
+
+  const receipt = readTaskManifest(taskDir(res.runId, res.taskId))?.dependencyEnvironment;
+  assert.ok(receipt, "a writable dispatch that resolved an environment carries its receipt");
+  assert.equal(receipt.cacheKey, lockfileHash(project), "and the receipt is keyed to the lockfile it was built from");
 
   const runtime = loadRuntime("claude-apikey");
   const base: SpawnContext = {
@@ -1276,7 +1299,9 @@ test("fg664 (j): a read-write invoke dispatch builds NO probe and NO provisioner
     TASK_PACKAGE_MARKDOWN: "pkg",
   };
 
-  // The legacy anonymous shadow (DEC-019): a plain rw dispatch.
+  // The legacy anonymous shadow (DEC-019): an rw dispatch whose caller resolved
+  // no environment (no DEPENDENCY_CACHE_MOUNT_RO). This arm is what keeps a shared
+  // writable cache off a live shared project directory, and FG-678 kept it.
   const legacy = buildDockerArgs(runtime, base);
   assert.ok(volumeArgs(legacy.args).includes("/project/node_modules"), "the anonymous shadow volume must survive");
   assert.ok(envArgs(legacy.args).includes("FORGE_NM_SHADOW=/project/node_modules"));
