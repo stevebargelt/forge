@@ -38,6 +38,11 @@ import type { Database as DatabaseInstance } from "better-sqlite3";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { SNAPSHOT_DB_BASENAME } from "./snapshot.js";
+// FG-609: the canonical status-bearing-evidence literal. ../store/blocked-source.js
+// is a ZERO-IMPORT LEAF — it pulls in no getDb, no better-sqlite3 handle, no
+// registry — so importing it here does not weaken the boundary this module's
+// header states.
+import { LEGACY_BLOCKED_SOURCE } from "../store/blocked-source.js";
 import type { StructuredTicket, TicketStatus, TicketType } from "./structured.js";
 
 /** The mount pointer. Set by spawn.ts alongside the read-only directory mount.
@@ -365,12 +370,20 @@ function hydrate(db: DatabaseInstance, row: SnapshotTicketRow): ContainerTicket 
       .all(row.ticket_id) as { related_id: string }[]
   ).map((r) => r.related_id);
   // Same reconstruction the host seam performs: 'blocked' is not a stored status,
-  // it is active + durable blocker evidence.
+  // it is active + durable STATUS-BEARING blocker evidence.
+  //
+  // FG-609 surface (ii) of four, and one of the two that were UNFILTERED. Before
+  // this, any blocker_evidence row at all flipped a container to reporting the
+  // ticket as status 'blocked' while the host seam still said 'active'. Slice D
+  // adds dependency / campaign / run-derived kinds, so the FIRST such row would
+  // have shipped that divergence to every live container on the next publish, with
+  // no code change here. The filter is the canonical predicate's literal, imported
+  // from the zero-import leaf so there is one declaration, not two.
   const blocked =
     row.status === "active" &&
-    (db.prepare(`SELECT 1 FROM blocker_evidence WHERE ticket_id = ? LIMIT 1`).get(row.ticket_id) as
-      | unknown
-      | undefined) !== undefined;
+    (db
+      .prepare(`SELECT 1 FROM blocker_evidence WHERE ticket_id = ? AND source = ? LIMIT 1`)
+      .get(row.ticket_id, LEGACY_BLOCKED_SOURCE) as unknown | undefined) !== undefined;
   const status: TicketStatus = blocked ? "blocked" : (row.status as TicketStatus);
   return {
     id: row.ticket_id,

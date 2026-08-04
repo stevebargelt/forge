@@ -93,6 +93,21 @@ forge backlog forget-source --list          # this project's live sources
 forge backlog forget-source --source <id>
 ```
 
+## What cutover unlocks: the operator queue
+
+Four verbs become available once a project is in db mode, and they are **db-mode only** — before cutover all four refuse by name, because the DB tickets table is a write-only shadow there and queue state written into it is state nothing reads.
+
+```bash
+forge backlog rank FG-123 --position 1     # stack rank (--clear to unrank)
+forge backlog enqueue FG-123               # select for execution
+forge backlog dequeue FG-123               # unselect; the rank is RETAINED
+forge backlog reorder FG-123 --to 2        # or: --order FG-9,FG-3,FG-123
+```
+
+The executable queue is *queued **and** active **and** ranked*, in rank order. `enqueue` refuses unless the ticket's **current** revision is ready (or exploratory), naming what is missing; re-running it after an edit **is** the recheck. Editing a ticket marks its stored readiness `STALE` until then. Blocked tickets keep their rank and stay in the queue, visibly blocked; done and deferred ones leave the executable queue but keep their rank, membership and full queue history, so reactivating one restores the identical order. The queue's `blocked` flag reads **every** kind of blocker evidence — legacy blocked, plus dependency / campaign / run-derived rows recorded as blocking — while the ticket's own `status` stays legacy-only, so a dependency blocker is visible where you act on it without changing what a container reads.
+
+Queue state is **host-only**: it never reaches a container, never joins `list`/`show` output, and a queue write publishes no snapshot — so ranking a ticket costs nothing to the containers already running. Full operator reference: the [`forge-backlog` skill](../seeds/skills/forge-backlog/SKILL.md); the model is in [concepts](concepts.md#operator-queue).
+
 ## Agents and containers after cutover
 
 Containerized agents read tickets through a **read-only, project-scoped, backlog-only** snapshot mounted into the container — `forge backlog list` / `show` inside a container resolve that, not the mounted checkout's frozen Markdown.

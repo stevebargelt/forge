@@ -23,6 +23,10 @@ forge backlog close <id> [--commit <sha>]
 forge backlog edit  <id> [--body <text>|-]
 forge backlog retitle <id> "<new title>"
 forge backlog move  <id> <type>
+forge backlog rank    <id> [--position <n>] [--clear]
+forge backlog enqueue <id> [--note <text>]
+forge backlog dequeue <id>
+forge backlog reorder <id> --to <n> | --order <id,id,...>
 forge backlog import [--project <dir>] [--json]
 forge backlog migrate [--dry-run] [--force] [--project <dir>] [--json]
 forge backlog mode  [--set markdown|db] [--allow-orphaned-tickets] [--accept-frozen-markdown-loss] [--json]
@@ -40,6 +44,7 @@ forge backlog notes replace [text|-]
 - `edit` replaces a ticket's body wholesale — it is not a patch/append operation.
 - `retitle` changes a ticket's title (frontmatter + heading) in place — in markdown mode without moving or renaming its file.
 - `move` moves a ticket between the idea/epic/story types (in markdown mode, between the type directories).
+- `rank`, `enqueue`, `dequeue`, `reorder` are **the operator queue** — see **The operator queue** below. All four are **db-mode only** and refuse by name on a markdown-mode project.
 - `notes` reads/writes the project's `backlog/notes.md` "notes for next session" block — `add` appends a paragraph, `replace` overwrites the whole file. Notes are **not** part of the ticket seam: they stay a file in `backlog/` in both storage modes.
 - `import` copies the project's `backlog/*.md` into DB ticket rows. While the project is in `markdown` mode those rows are a **non-authoritative** shadow — Markdown stays the source of truth and nothing reads them for behavior. Import seeds the `(project_key, prefix)` id sequence past the ids the project already uses (which is why `mode --set db` requires one first; `migrate` runs it for you). It is idempotent — re-running upserts rather than duplicating — and on first run it records a durable `project_key` in `.forge/config.yml` so the DB backlog stays single across a project's clones and linked worktrees. It does not require a `backlog/` directory — importing an empty project is how a fresh one claims its `project_key`. If two configs/worktrees present conflicting project identities for one project it **refuses** (exit code 1, structured object under `--json`) rather than splitting the backlog. Two behaviors are worth knowing before you re-import a project that already has DB rows:
   - **Removals propagate** (they no longer accumulate). A ticket, relation, or blocker marker deleted from Markdown is deleted from the DB — but only when **no live source still claims it**. Each physical checkout is a *source*, identified by a random id minted once and kept in that checkout's git admin dir (never git-tracked, moves with the repo), so removing a ticket in one worktree while a sibling worktree still has it keeps the ticket. Rows that predate this bookkeeping are never pruned, and an import that can see no live source at all **refuses** rather than treating "observed nothing" as "everything was removed".
@@ -80,6 +85,39 @@ forge backlog migrate               # the cutover: import + validate + flip, ato
 - `reidentify --confirm` is a **precondition**, not a follow-up: migrate is what first commits a `project_key`, which is what makes the identity refusal reachable at all.
 
 Full operator runbook, including the agent-image step and rollback: `docs/how-to-backlog-db-cutover.md`.
+
+## The operator queue
+
+Four verbs — `rank`, `enqueue`, `dequeue`, `reorder` — over three **orthogonal** facts about a ticket. Keeping them orthogonal is the whole design; collapsing any two is what makes a backlog priority and a queue position drift apart.
+
+| fact | what it answers | verb |
+| --- | --- | --- |
+| **rank** (`priority_rank`) | *where* the ticket sits in the operator's stack rank | `rank` |
+| **queue membership** | *whether* the operator selected it for execution | `enqueue` / `dequeue` |
+| **lifecycle status** | active / done / deferred — unchanged, and untouched by these verbs | `close`, `move` |
+
+The **executable queue** is the intersection: queued **and** active **and** ranked, in rank order.
+
+```
+forge backlog rank FG-123                  # append to the stack rank
+forge backlog rank FG-123 --position 1     # put it at the top
+forge backlog rank FG-123 --clear          # unrank (still a valid backlog item)
+forge backlog enqueue FG-123               # select it for execution
+forge backlog dequeue FG-123               # unselect it — the rank is RETAINED
+forge backlog reorder FG-123 --to 2        # move one ticket within the queue
+forge backlog reorder --order FG-9,FG-3    # set the whole queue order at once
+```
+
+- **There is ONE canonical rank.** Not a P0–P4 score and not a separate queue position: dense contiguous integers 1..N across the project's ranked tickets, and every rank-changing verb renumbers the whole set atomically. So a rank *value* is not stable across moves — read the ordering, never a number.
+- **Unranked is normal.** A ticket with no rank is a perfectly valid backlog item, not a deprioritized one. `rank --clear` refuses on a *queued* ticket (the queue is ordered by rank, so it would leave the ticket queued with no position) — `dequeue` first.
+- **Enqueue is refused unless the ticket's CURRENT revision is ready**, or is exploratory (a spike/research ticket queues without acceptance criteria). The refusal is concrete — it names the missing sections — and it is computed on the spot, never quoted from a stored row. **Re-running `enqueue` after editing the ticket IS the recheck**; there is nothing else to clear.
+- **Editing a ticket invalidates its stored readiness.** The assessment is bound to the ticket's content hash, so any edit to the body, title, type, status, dates or epic makes it read back as `(STALE)` until it is re-evaluated.
+- **A blocked ticket keeps its rank and its membership.** `blocked` is *derived* from blocker evidence, not stored as a status; it is reported in the queue output and does not eject the ticket. Resolving the blocker returns it to exactly the same position. The queue's flag reads **every** kind of blocker evidence — legacy blocked plus dependency / campaign / run-derived rows recorded as blocking — while the ticket's own `status` stays legacy-only, so a dependency blocker never changes what a container reads.
+- **A malformed `--position` / `--to` is refused, never guessed.** `--to 2x`, `--to 1.9`, `--to 0` and friends are rejected by name quoting what was received, and nothing is written; ordering verbs do not silently reinterpret a typo into a different, valid-looking move.
+- **A done or deferred ticket leaves the executable queue but keeps everything else** — its rank, its membership and its full queue history. Reactivating it restores the identical queue order.
+- **Every enqueue / dequeue / rank / reorder / readiness transition appends a queue event**, in the same transaction as the change it records, so the order and the history can never disagree. A done ticket's history stays readable.
+- **Queue state is host-only.** It never reaches an agent container, never appears in `list`/`show` output, and a queue write publishes no snapshot — so a rank nudge costs nothing to every live container on the host.
+- **`--json` on any of the four** emits the action's result plus the resulting `executableQueue`.
 
 ## Reading tickets inside an agent container
 

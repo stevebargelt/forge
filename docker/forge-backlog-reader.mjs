@@ -38,6 +38,18 @@ import { DatabaseSync } from "node:sqlite";
 const MOUNT = "/forge-backlog";
 const MARKER_BASENAME = "authority.json";
 const DB_BASENAME = "backlog.db";
+
+// FG-609: THE PARITY PIN. This is the canonical status-bearing-evidence source,
+// declared once in src/store/blocked-source.ts. This file runs inside the container
+// with no TypeScript build and no bundler, so it structurally CANNOT share that
+// import — the copy is unavoidable, so it is PINNED BY TEST to the canonical value
+// (src/backlog/fg609-blocked-predicate-parity.test.ts) rather than assumed to match.
+//
+// The filter itself is load-bearing, not defensive: Slice D adds dependency /
+// campaign / run-derived blocker_evidence kinds, and the unfiltered query this
+// replaced would have reported any of them to the agent as ticket status 'blocked'
+// while the host said 'active'.
+const LEGACY_BLOCKED_SOURCE = "import-legacy-blocked";
 const SNAPSHOT_DIR_ENV = "FORGE_BACKLOG_SNAPSHOT_DIR";
 const DISPATCHED_TICKET_ENV = "FORGE_DISPATCHED_TICKET";
 
@@ -134,10 +146,13 @@ function hydrate(db, row) {
     .prepare(`SELECT related_id FROM ticket_relations WHERE ticket_id = ? AND rel_type = 'related' ORDER BY related_id`)
     .all(row.ticket_id)
     .map((r) => r.related_id);
-  // 'blocked' is not a stored status — it is active + durable blocker evidence.
+  // 'blocked' is not a stored status — it is active + durable STATUS-BEARING
+  // blocker evidence. See LEGACY_BLOCKED_SOURCE above for why the filter is pinned.
   const blocked =
     row.status === "active" &&
-    db.prepare(`SELECT 1 FROM blocker_evidence WHERE ticket_id = ? LIMIT 1`).get(row.ticket_id) !== undefined;
+    db
+      .prepare(`SELECT 1 FROM blocker_evidence WHERE ticket_id = ? AND source = ? LIMIT 1`)
+      .get(row.ticket_id, LEGACY_BLOCKED_SOURCE) !== undefined;
   return {
     id: row.ticket_id,
     type: row.type,

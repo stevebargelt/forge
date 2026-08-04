@@ -49,6 +49,17 @@ import {
   ticketsForProject,
   type StorageMode,
 } from "../../store/tickets.js";
+import {
+  dequeueTicket,
+  enqueueTicket,
+  executableQueue,
+  moveQueuePosition,
+  rankTicket,
+  setQueueOrder,
+  unrankTicket,
+  QueueRefusal,
+  type QueueEntry,
+} from "../../store/queue.js";
 import { describeStalePublications } from "../../backlog/snapshot.js";
 import {
   assertNoHostStoreInContainer,
@@ -142,7 +153,15 @@ export function registerBacklog(program: Command): void {
   // refuse when the dispatched authority is a read-only snapshot; under a markdown
   // dispatch they write backlog/*.md in the mounted checkout exactly as on the
   // host, which is unchanged behavior.
-  const CONTAINER_STORE_VERBS = new Set(["import", "mode", "migrate", "reidentify", "forget-source"]);
+  // FG-609: the four queue verbs join the STORE set, not the TICKET set. They write
+  // host-operator state (rank, membership, readiness, queue history) that lives only
+  // in the host store — there is no snapshot representation of it and no container
+  // consumer — so they refuse under EVERY container authority mode, markdown
+  // dispatch included.
+  const CONTAINER_STORE_VERBS = new Set([
+    "import", "mode", "migrate", "reidentify", "forget-source",
+    "rank", "enqueue", "dequeue", "reorder",
+  ]);
   const CONTAINER_TICKET_VERBS = new Set(["file", "close", "edit", "retitle", "move"]);
   backlog.hook("preAction", (_thisCommand, actionCommand) => {
     if (actionCommand.parent?.name() === "notes") return;
@@ -533,6 +552,152 @@ export function registerBacklog(program: Command): void {
         return;
       }
       console.log(`Forgot source ${sourceId} for ${projectKey}.`);
+    });
+
+  // ----- FG-609 (FG-496 Slice D): the operator queue verbs -----
+  //
+  // rank / enqueue / dequeue / reorder. All four REFUSE BY NAME on a markdown-mode
+  // or unkeyed project (see requireQueueProject) rather than operating on the
+  // write-only DB shadow: in markdown mode the tickets table is a shadow of the
+  // last import, so a readiness refusal would quote content the operator no longer
+  // has on disk. None of them touches list/show output — queue state stays behind
+  // these explicit verbs, so an upgrade changes nothing for a project that never
+  // opted in.
+
+  backlog
+    .command("rank")
+    .argument("<id>", "ticket id (e.g. FG-123)")
+    .description(
+      "Set or clear a ticket's stack rank. Ranks are dense 1..N per project and every rank change " +
+        "renumbers the whole ranked set atomically.",
+    )
+    .option("--position <n>", "1-based position in the stack rank (default: the back)")
+    .option("--clear", "remove this ticket's rank (it stays a valid backlog item)")
+    .option("--project <dir>", "project directory (default: cwd)")
+    .option("--json", "emit JSON result")
+    .action((idArg: string, opts: { position?: string; clear?: boolean; project?: string; json?: boolean }) => {
+      runQueueVerb("rank", opts, (projectKey) => {
+        if (opts.clear) {
+          if (opts.position !== undefined) {
+            throw new QueueRefusal(
+              `forge: backlog rank refuses — --clear and --position are mutually exclusive.`,
+              "rank",
+              idArg,
+            );
+          }
+          const { order } = unrankTicket(projectKey, idArg);
+          return { action: "unrank", ticketId: idArg, rankedOrder: order, message: `Unranked ${idArg}` };
+        }
+        const position = opts.position === undefined ? undefined : parsePosition(opts.position, "rank");
+        const res = rankTicket(projectKey, idArg, position);
+        return {
+          action: "rank",
+          ticketId: idArg,
+          position: res.position,
+          rankedOrder: res.order,
+          message: `Ranked ${idArg} at position ${res.position} of ${res.order.length}`,
+        };
+      });
+    });
+
+  backlog
+    .command("enqueue")
+    .argument("<id>", "ticket id (e.g. FG-123)")
+    .description(
+      "Add a ticket to the operator queue. Refused unless its CURRENT revision evaluates ready (or " +
+        "exploratory); the readiness assessment is recorded either way.",
+    )
+    .option("--note <text>", "operator note recorded with the membership")
+    .option("--project <dir>", "project directory (default: cwd)")
+    .option("--json", "emit JSON result")
+    .action((idArg: string, opts: { note?: string; project?: string; json?: boolean }) => {
+      runQueueVerb("enqueue", opts, (projectKey) => {
+        const res = enqueueTicket(projectKey, idArg, opts.note ? { note: opts.note } : {});
+        if (!res.ok) {
+          // A refusal is NOT an error to swallow: the assessment committed, so the
+          // operator's next read shows why, and the exit code says it did not queue.
+          return {
+            action: "enqueue",
+            ticketId: idArg,
+            enqueued: false,
+            reason: res.reason,
+            readiness: res.readiness,
+            refusal: res.reason,
+          };
+        }
+        return {
+          action: "enqueue",
+          ticketId: idArg,
+          enqueued: true,
+          position: res.position,
+          queue: res.queue,
+          readiness: res.readiness,
+          message: `Queued ${idArg} at position ${res.position} (readiness: ${res.readiness.outcome})`,
+        };
+      });
+    });
+
+  backlog
+    .command("dequeue")
+    .argument("<id>", "ticket id (e.g. FG-123)")
+    .description("Remove a ticket from the operator queue. Its rank is RETAINED.")
+    .option("--project <dir>", "project directory (default: cwd)")
+    .option("--json", "emit JSON result")
+    .action((idArg: string, opts: { project?: string; json?: boolean }) => {
+      runQueueVerb("dequeue", opts, (projectKey) => {
+        const res = dequeueTicket(projectKey, idArg);
+        return {
+          action: "dequeue",
+          ticketId: idArg,
+          queue: res.queue,
+          message: `Dequeued ${idArg} (rank retained)`,
+        };
+      });
+    });
+
+  backlog
+    .command("reorder")
+    .argument("[id]", "ticket id to move (with --to)")
+    .description(
+      "Reorder the operator queue, atomically. Either move one ticket with --to, or set the whole " +
+        "order with --order.",
+    )
+    .option("--to <n>", "1-based position in the queue to move <id> to")
+    .option("--order <ids>", "comma-separated exact permutation of the current queue")
+    .option("--project <dir>", "project directory (default: cwd)")
+    .option("--json", "emit JSON result")
+    .action((idArg: string | undefined, opts: { to?: string; order?: string; project?: string; json?: boolean }) => {
+      runQueueVerb("reorder", opts, (projectKey) => {
+        if (opts.order !== undefined) {
+          if (idArg !== undefined || opts.to !== undefined) {
+            throw new QueueRefusal(
+              `forge: backlog reorder refuses — --order sets the whole queue, so it cannot be combined ` +
+                `with a ticket id or --to.`,
+              "reorder",
+              idArg ?? null,
+            );
+          }
+          const desired = opts.order.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+          const res = setQueueOrder(projectKey, desired);
+          return { action: "reorder", queue: res.queue, message: `Queue order: ${res.queue.join(" → ")}` };
+        }
+        if (idArg === undefined || opts.to === undefined) {
+          throw new QueueRefusal(
+            `forge: backlog reorder refuses — pass either \`<id> --to <n>\` to move one ticket, or ` +
+              `\`--order <id,id,...>\` to set the whole queue order.`,
+            "reorder",
+            idArg ?? null,
+          );
+        }
+        const res = moveQueuePosition(projectKey, idArg, parsePosition(opts.to, "reorder"));
+        return {
+          action: "reorder",
+          ticketId: idArg,
+          position: res.position,
+          queue: res.queue,
+          message: `Moved ${idArg} to queue position ${res.position}`,
+        };
+      });
     });
 
   // ----- config -----
@@ -1099,6 +1264,115 @@ function setBacklogMode(
 
   clearBacklogStoreCache();
   return { mode, projectKey, orphanedTickets, advancedSequences };
+}
+
+// ─── FG-609: the operator queue verbs' shared plumbing ───────────────────────
+
+/** THE MARKDOWN-MODE REFUSAL, by name, for all four queue verbs.
+ *
+ *  In markdown mode the DB tickets table is a WRITE-ONLY SHADOW of the last
+ *  import: silently succeeding against it would rank and queue rows nobody reads,
+ *  and — worse — an enqueue refusal would quote readiness gaps computed from
+ *  last-imported content the operator no longer has on disk. So refuse, name the
+ *  verb, and name the way forward. */
+function requireQueueProject(verb: string, projectDir: string): string {
+  const store = resolveBacklogStore(projectDir);
+  if (store.mode !== "db" || !store.projectKey) {
+    const why =
+      store.projectKey === null
+        ? `this project has no resolvable project_key`
+        : `this project's backlog is in markdown mode (project_key=${store.projectKey})`;
+    throw new QueueRefusal(
+      `forge: backlog ${verb} refuses — ${why}. The operator queue is durable DB state (rank, ` +
+        `membership, readiness, queue history) and there is no Markdown representation of it, so ` +
+        `running it here would write rows nothing reads. Cut this project over with ` +
+        `\`forge backlog migrate\` first.`,
+      verb,
+      null,
+    );
+  }
+  return store.projectKey;
+}
+
+/** Positions are parsed STRICTLY, not with parseInt. parseInt accepts trailing
+ *  garbage and partial numerics — '2x' is 2, '1.9' is 1, '3 4' is 3 — so a typed
+ *  position that means nothing would silently become a different, valid-looking
+ *  MOVE. For verbs whose whole purpose is deterministic ordering, that is a
+ *  wrong-order write the operator has no way to notice. Refuse by name instead,
+ *  quoting exactly what was received. */
+function parsePosition(raw: string, verb: string): number {
+  if (!/^[1-9][0-9]*$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
+    throw new QueueRefusal(
+      `forge: backlog ${verb} refuses — position must be a whole positive number (1, 2, 3, …), ` +
+        `got '${raw}'. Nothing was written.`,
+      verb,
+      null,
+    );
+  }
+  return Number(raw);
+}
+
+type QueueVerbResult = Record<string, unknown> & { message?: string; refusal?: string };
+
+/** One shape for all four verbs: resolve + refuse by name, run, then render the
+ *  resulting queue. A refusal exits non-zero with the concrete reason on stderr. */
+function runQueueVerb(
+  verb: string,
+  opts: { project?: string; json?: boolean },
+  run: (projectKey: string) => QueueVerbResult,
+): void {
+  const dir = resolve(opts.project ?? process.cwd());
+  let projectKey: string;
+  try {
+    projectKey = requireQueueProject(verb, dir);
+  } catch (e) {
+    if (!(e instanceof QueueRefusal)) throw e;
+    process.stderr.write(`${e.message}\n`);
+    process.exitCode = 1;
+    return;
+  }
+
+  let result: QueueVerbResult;
+  try {
+    result = run(projectKey);
+  } catch (e) {
+    if (!(e instanceof QueueRefusal)) throw e;
+    process.stderr.write(`${e.message}\n`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const queue = executableQueue(projectKey);
+  if (opts.json) {
+    console.log(JSON.stringify({ projectKey, ...result, executableQueue: queue }, null, 2));
+  } else {
+    if (result.refusal) process.stderr.write(`${String(result.refusal)}\n`);
+    if (result.message) console.log(String(result.message));
+    printQueue(queue);
+  }
+  if (result.refusal) process.exitCode = 1;
+}
+
+/** The queue as an operator reads it. Readiness is reported with its FRESHNESS —
+ *  a stale assessment is never rendered as though it described the current
+ *  revision. */
+function printQueue(queue: QueueEntry[]): void {
+  if (queue.length === 0) {
+    console.log("  (executable queue is empty)");
+    return;
+  }
+  console.log("  queue:");
+  for (const e of queue) {
+    const flags = [
+      e.blocked ? "blocked" : null,
+      e.inProgress ? "in-progress" : null,
+      e.readiness ? `readiness=${e.readiness.outcome}${e.readiness.stale ? " (STALE)" : ""}` : null,
+    ].filter((f): f is string => f !== null);
+    console.log(
+      `    ${String(e.rank).padStart(3)}  ${e.ticketId}  ${e.title}` +
+        (flags.length > 0 ? `  [${flags.join(", ")}]` : ""),
+    );
+  }
 }
 
 // Cap the operator-facing id list so a 400-ticket project doesn't print a wall.

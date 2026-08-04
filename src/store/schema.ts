@@ -553,6 +553,24 @@ CREATE TABLE IF NOT EXISTS tickets (
   frontmatter   TEXT,
   imported_at   TEXT NOT NULL,
   imported_from TEXT,
+  -- FG-609 (FG-496 Slice D): the CANONICAL operator stack rank. Nullable — an
+  -- unranked ticket is a perfectly valid backlog item, not a deprioritized one.
+  -- This is a STACK RANK across the project's ranked tickets (dense contiguous
+  -- integers, renumbered whole by every rank-changing verb), NOT a P0-P4 score and
+  -- NOT a queue position: there is exactly ONE rank, so a backlog priority and a
+  -- queue position can never drift apart.
+  --
+  -- DELIBERATELY UNINDEXED. An index would pin the column undroppable and shrink
+  -- the FG-608 parity guard's coverage (its UNDROPPABLE set). The queue-ordering
+  -- index lives on queue_membership, a brand-new table that never travels the
+  -- ALTER path. Ordering reads are per-project over a few hundred rows.
+  --
+  -- NO UNIQUE constraint. SQLite has no deferrable unique index, so an
+  -- in-transaction renumber would transit duplicate states and abort. Read order
+  -- is made TOTAL instead — rank ASC, then ticket_id ASC — so equal ranks are
+  -- deterministic rather than arbitrary. A rank VALUE is not stable across moves;
+  -- nothing durable may key off one, only off the ordering.
+  priority_rank INTEGER,
   PRIMARY KEY (project_key, ticket_id)
 );
 
@@ -602,6 +620,17 @@ CREATE TABLE IF NOT EXISTS ticket_id_sequence (
 -- the Slice C cutover (which precedes Slice D). The UNIQUE natural key
 -- (project_key, ticket_id, source) makes re-import idempotent. Slice D ENRICHES
 -- this table; it does not introduce it.
+--
+-- FG-609 (Slice D) ENRICHES this table with four ADDITIVE columns. The UNIQUE
+-- natural key is NOT widened and the table is NOT rebuilt: every enriched kind
+-- folds its discriminating identity into the 'source' value instead (see
+-- blocked-source.ts), so two distinct dependency blockers on one ticket are two
+-- rows rather than one silently overwriting the other.
+--
+-- kind carries a DEFAULT so every Slice A row reads back 'legacy_blocked' with no
+-- backfill — its original fact, reason, source and created_at are preserved
+-- untouched. It is free TEXT with NO CHECK (enum-as-convention, FG-585): an
+-- in-flight older writer's inserts must never fight a constraint it doesn't know.
 CREATE TABLE IF NOT EXISTS blocker_evidence (
   id          TEXT PRIMARY KEY,
   project_key TEXT NOT NULL,
@@ -609,6 +638,18 @@ CREATE TABLE IF NOT EXISTS blocker_evidence (
   reason      TEXT,
   source      TEXT NOT NULL,
   created_at  TEXT NOT NULL,
+  kind        TEXT NOT NULL DEFAULT 'legacy_blocked',
+  -- Free-form JSON describing the blocker (the dependency's id, the campaign, the
+  -- run). Never parsed for a status decision — only rendered.
+  detail      TEXT,
+  -- READINESS BINDING: the ticket body hash this evidence was observed against, so
+  -- an operator can see that a blocker predates the ticket's current revision.
+  body_hash   TEXT,
+  -- The QUEUE PROJECTION this row feeds ('blocked' | 'not_ready' | NULL). This is
+  -- a derived-projection hint for the operator queue, NOT a status: it never makes
+  -- a ticket read back as status 'blocked' on any surface, and it never makes a
+  -- ticket queue-eligible.
+  queue_projection TEXT,
   UNIQUE (project_key, ticket_id, source),
   FOREIGN KEY (project_key, ticket_id)
     REFERENCES tickets(project_key, ticket_id) ON DELETE CASCADE
@@ -876,6 +917,92 @@ CREATE TABLE IF NOT EXISTS fix_batch_results (
   ingested_at        TEXT NOT NULL,
   PRIMARY KEY (batch_id, task_id, finding_id)
 );
+
+-- FG-609 (FG-496 Slice D): the durable OPERATOR QUEUE primitives. Three brand-new
+-- tables arriving whole via CREATE TABLE IF NOT EXISTS on the ordinary open path —
+-- the same additive-only BD-15 contract as every table above. user_version is NOT
+-- bumped, so an older forge binary sharing ~/.forge/forge.db is never broken.
+--
+-- THE MODEL, in three orthogonal facts about a ticket:
+--   tickets.priority_rank  — WHERE it sits in the operator's stack rank (above)
+--   queue_membership       — WHETHER the operator selected it for execution
+--   lifecycle status       — active/done/deferred, unchanged and untouched here
+-- The EXECUTABLE QUEUE is the intersection: queued AND active AND ranked, ordered
+-- by rank ASC then ticket_id ASC. in_progress and blocked are COMPUTED from
+-- other tables on every read and are NEVER stored — they are not a second mutable
+-- status vocabulary alongside the lifecycle one.
+
+-- Explicit queue membership. An operator-selected SUBSET, orthogonal to both rank
+-- and lifecycle: dequeuing does not unrank, and a lifecycle change never clears
+-- membership (so a deferred-then-reactivated ticket returns to the same position).
+CREATE TABLE IF NOT EXISTS queue_membership (
+  project_key TEXT NOT NULL,
+  ticket_id   TEXT NOT NULL,
+  enqueued_at TEXT NOT NULL,
+  enqueued_by TEXT,
+  note        TEXT,
+  PRIMARY KEY (project_key, ticket_id),
+  FOREIGN KEY (project_key, ticket_id)
+    REFERENCES tickets(project_key, ticket_id) ON DELETE CASCADE
+);
+-- THE queue-ordering index, and the only one this slice adds. It is here rather
+-- than on tickets(priority_rank) on purpose: this table is born whole from the
+-- CREATE above and never travels the ALTER path, so indexing it cannot pin any
+-- ALTER-restorable column undroppable.
+CREATE INDEX IF NOT EXISTS idx_queue_membership_project
+  ON queue_membership(project_key, ticket_id);
+
+-- Revision-bound readiness. The outcome of the EXISTING evaluateReadiness
+-- (src/readiness/readiness.ts, FG-382) — no new readiness vocabulary — bound to
+-- the ticket's body_hash at evaluation time. Editing a ticket changes that hash,
+-- so the stored row goes STALE by comparison and every read surface says so.
+--
+-- This row is a CACHE PLUS AN AUDIT RECORD and is NEVER the authority for an
+-- enqueue decision: enqueue re-evaluates the CURRENT revision and stores that
+-- outcome, so a refusal reason can never be quoted from stale content and a stale
+-- assessment is never a dead end. One row per ticket; the transition HISTORY lives
+-- in queue_events.
+CREATE TABLE IF NOT EXISTS readiness_assessments (
+  project_key         TEXT NOT NULL,
+  ticket_id           TEXT NOT NULL,
+  body_hash           TEXT NOT NULL,
+  outcome             TEXT NOT NULL,
+  gaps_json           TEXT NOT NULL DEFAULT '[]',
+  refinement_proposal TEXT,
+  revision            INTEGER,
+  evaluated_at        TEXT NOT NULL,
+  PRIMARY KEY (project_key, ticket_id),
+  FOREIGN KEY (project_key, ticket_id)
+    REFERENCES tickets(project_key, ticket_id) ON DELETE CASCADE
+);
+
+-- Append-only queue history: enqueue, dequeue, rank, unrank, reorder and readiness
+-- transitions each append exactly one row, INSIDE the same write transaction as
+-- the state change they record, so order and history cannot diverge.
+--
+-- DELIBERATELY NOT ticket_events. That table is import-reconstructable,
+-- UPSERT-idempotent by a deterministic event key, and subject to
+-- rebuildTicketEventsIfDivergent; queue events are host-OPERATOR facts with no
+-- Markdown provenance, and collapsing two identical operator actions into one row
+-- by event key would destroy exactly the history this table exists to keep.
+--
+-- NO FOREIGN KEY to tickets, deliberately: the audit record must survive its
+-- subject through FG-608 removal reconciliation ("a done ticket leaves the active
+-- queue while its queue history remains auditable"). The precedent is
+-- ticket_source_membership / ticket_dispatch_evidence. Membership and readiness
+-- assessments above are live state about a live ticket and DO cascade.
+CREATE TABLE IF NOT EXISTS queue_events (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_key TEXT NOT NULL,
+  ticket_id   TEXT NOT NULL,
+  event_type  TEXT NOT NULL,
+  payload     TEXT,
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_queue_events_ticket
+  ON queue_events(project_key, ticket_id);
+CREATE INDEX IF NOT EXISTS idx_queue_events_project
+  ON queue_events(project_key, id);
 `;
 
 // THE ADDITIVE COLUMN LIST — the machine-checked half of the additive-only
@@ -1019,6 +1146,12 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   // cannot answer it (it advances for an import too).
   { table: "tickets", column: "body_hash", ddl: "ALTER TABLE tickets ADD COLUMN body_hash TEXT" },
   { table: "tickets", column: "import_basis_hash", ddl: "ALTER TABLE tickets ADD COLUMN import_basis_hash TEXT" },
+  // FG-609 (Slice D): the operator stack rank. Nullable with no default — an
+  // unranked ticket is a valid backlog item, and every DB whose `tickets` predates
+  // Slice D reads back NULL, which is exactly "not ranked yet". Left UNINDEXED so
+  // it stays ALTER-droppable and the FG-608 parity guard's UNDROPPABLE set is
+  // untouched.
+  { table: "tickets", column: "priority_rank", ddl: "ALTER TABLE tickets ADD COLUMN priority_rank INTEGER" },
 
   { table: "ticket_events", column: "payload", ddl: "ALTER TABLE ticket_events ADD COLUMN payload TEXT" },
 
@@ -1037,6 +1170,15 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   { table: "ticket_storage_mode", column: "flipped_by_revision", ddl: "ALTER TABLE ticket_storage_mode ADD COLUMN flipped_by_revision TEXT" },
 
   { table: "blocker_evidence", column: "reason", ddl: "ALTER TABLE blocker_evidence ADD COLUMN reason TEXT" },
+  // FG-609 (Slice D): the enrichment. `kind` is NOT NULL WITH A DEFAULT, which is
+  // what makes the enrichment lossless: every Slice A row on the aged host DB
+  // reads back 'legacy_blocked' without a backfill, keeping its original fact,
+  // reason, source and created_at exactly as written. No CHECK — an older writer's
+  // inserts must never fight a constraint it does not know about.
+  { table: "blocker_evidence", column: "kind", ddl: "ALTER TABLE blocker_evidence ADD COLUMN kind TEXT NOT NULL DEFAULT 'legacy_blocked'" },
+  { table: "blocker_evidence", column: "detail", ddl: "ALTER TABLE blocker_evidence ADD COLUMN detail TEXT" },
+  { table: "blocker_evidence", column: "body_hash", ddl: "ALTER TABLE blocker_evidence ADD COLUMN body_hash TEXT" },
+  { table: "blocker_evidence", column: "queue_projection", ddl: "ALTER TABLE blocker_evidence ADD COLUMN queue_projection TEXT" },
 
   { table: "backlog_sources", column: "last_path", ddl: "ALTER TABLE backlog_sources ADD COLUMN last_path TEXT" },
   { table: "backlog_sources", column: "last_scanned_at", ddl: "ALTER TABLE backlog_sources ADD COLUMN last_scanned_at TEXT" },
@@ -1144,4 +1286,21 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   { table: "fix_batch_results", column: "interaction", ddl: "ALTER TABLE fix_batch_results ADD COLUMN interaction TEXT" },
   { table: "fix_batch_results", column: "evidence_path", ddl: "ALTER TABLE fix_batch_results ADD COLUMN evidence_path TEXT" },
   { table: "fix_batch_results", column: "evidence_sha256", ddl: "ALTER TABLE fix_batch_results ADD COLUMN evidence_sha256 TEXT" },
+
+  // FG-609: the queue tables. All three are brand-new, so a real old DB gets them
+  // whole from CREATE TABLE IF NOT EXISTS and none of these ALTERs ever fires
+  // there. They exist because the FG-608 parity guard strips a fresh DB back to the
+  // oldest shape SQLite permits and demands the migration path restore it — the
+  // check that would have caught tickets.imported_from. Only the RESTORABLE columns
+  // appear: the primary-key columns and the NOT-NULL-without-DEFAULT ones
+  // (enqueued_at, body_hash, outcome, evaluated_at, event_type, created_at) can
+  // never be put back by ADD COLUMN, so listing them would be a lie.
+  { table: "queue_membership", column: "enqueued_by", ddl: "ALTER TABLE queue_membership ADD COLUMN enqueued_by TEXT" },
+  { table: "queue_membership", column: "note", ddl: "ALTER TABLE queue_membership ADD COLUMN note TEXT" },
+
+  { table: "readiness_assessments", column: "gaps_json", ddl: "ALTER TABLE readiness_assessments ADD COLUMN gaps_json TEXT NOT NULL DEFAULT '[]'" },
+  { table: "readiness_assessments", column: "refinement_proposal", ddl: "ALTER TABLE readiness_assessments ADD COLUMN refinement_proposal TEXT" },
+  { table: "readiness_assessments", column: "revision", ddl: "ALTER TABLE readiness_assessments ADD COLUMN revision INTEGER" },
+
+  { table: "queue_events", column: "payload", ddl: "ALTER TABLE queue_events ADD COLUMN payload TEXT" },
 ];

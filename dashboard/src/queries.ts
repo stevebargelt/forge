@@ -16,6 +16,7 @@ import { resolveProjectMeta } from "@forge/project-meta";
 import { listProjects, sortProjects, type ProjectRecord } from "@forge/projects";
 import { repositoryCheckoutIdentity } from "@forge/repository-identity";
 import { governanceView, type GovernanceView } from "@forge/governance";
+import { LEGACY_BLOCKED_SOURCE } from "@forge/blocked-source";
 import {
   findReconcileCandidates,
   type LivenessProbe,
@@ -1254,13 +1255,19 @@ export type BacklogTruth = {
 
 const NO_TICKET_TRUTH: BacklogTruth = { projectKey: null, storageMode: null, tickets: [] };
 
-// src/store/tickets.ts:309. The DB status vocabulary is exactly
+// FG-609 surface (iii) of four. The DB status vocabulary is exactly
 // active/done/deferred; legacy `blocked` is stored as active + a blocker_evidence
-// row and reconstructed on the way out (src/backlog/structured.ts:519). The
-// dashboard reconstructs it identically or it would render an unblocked-looking
-// board the CLI disagrees with. Hardcoded like every other column name here —
-// the schema-contract drift surface documented at the top of this file.
-const LEGACY_BLOCKED_SOURCE = "import-legacy-blocked";
+// row and reconstructed on the way out. The dashboard reconstructs it identically
+// or it would render an unblocked-looking board the CLI disagrees with.
+//
+// This literal used to be a PRIVATE COPY here — the one exception to "hardcoded
+// like every other column name", because it is not a column name but a VALUE two
+// independent code paths must agree on, and each side's own tests wrote the string
+// they read, so a drift in either copy stayed green on both suites. Slice D
+// collapses it: the sole declaration is src/store/blocked-source.ts, a ZERO-IMPORT
+// leaf reached through the @forge/blocked-source path alias. Routing it through
+// src/store/tickets.ts instead was not an option — that module imports getDb, which
+// would drag better-sqlite3 and the whole store handle into this typecheck.
 
 /** Host-wide ticket truth for one resolved project. Throws if the store cannot
  *  be read — the caller decides what a failed read means to its payload. */
