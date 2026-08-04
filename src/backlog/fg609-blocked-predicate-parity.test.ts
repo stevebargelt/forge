@@ -33,6 +33,7 @@ import {
   type TicketRow,
 } from "../store/tickets.js";
 import { dependencyBlockerSource } from "../store/blocked-source.js";
+import { enqueueTicket, executableQueue } from "../store/queue.js";
 import { listTickets } from "./structured.js";
 import { clearBacklogStoreCache } from "./storage-mode.js";
 import { publishSnapshotOnce, SNAPSHOT_DB_BASENAME } from "./snapshot.js";
@@ -46,6 +47,18 @@ import {
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PK = "pk-parity";
 const NOW = "2026-08-01T00:00:00Z";
+
+// A body evaluateReadiness (FG-382) calls READY, so the D7 test below can enqueue.
+const READY_BODY = [
+  "## Problem",
+  "Something is wrong.",
+  "",
+  "## Goal",
+  "Make it right.",
+  "",
+  "## Acceptance Criteria",
+  "- it works",
+].join("\n");
 
 let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
@@ -285,6 +298,70 @@ test("A11 (iv) .mjs reader: the pinned predicate produces the same verdicts on a
   } finally {
     snap.close();
   }
+});
+
+// ─── D7 whole: ONE ticket, both predicates, all four surfaces ──────────────
+
+test("FG-609 D7: an enriched blocker blocks the QUEUE while all four legacy surfaces still read active", () => {
+  // The ticket needs a READY body to be enqueueable; everything else about the
+  // fixture is the same FG-ENRICHED the four surface tests above use.
+  writeTransaction(() => {
+    upsertTicket(ticket("FG-ENRICHED", { body: READY_BODY }));
+    upsertBlockerEvidence({
+      projectKey: PK,
+      ticketId: "FG-ENRICHED",
+      reason: "waits on FG-99",
+      source: dependencyBlockerSource("FG-99"),
+      createdAt: NOW,
+      kind: "dependency",
+      detail: { dependency: "FG-99" },
+      queueProjection: "blocked",
+    });
+  });
+  assert.equal(enqueueTicket(PK, "FG-ENRICHED").ok, true);
+
+  // (a) the QUEUE projection reads the enriched evidence...
+  const entry = executableQueue(PK).find((e) => e.ticketId === "FG-ENRICHED");
+  assert.ok(entry, "blocked must not remove the entry from the executable queue");
+  assert.equal(entry.blocked, true, "D7: enriched evidence MUST move the queue projection");
+
+  // (b) ...and no legacy surface moves. (i) the host seam:
+  const seam = listTickets(projectDir).find((t) => t.id === "FG-ENRICHED")!;
+  assert.equal(seam.status, "active", "surface (i): StructuredTicket.status must stay active");
+
+  const target = join(scratch, "d7-published");
+  publishSnapshotOnce(PK, target);
+  writeAuthorityMarker(target, { mode: "db", projectKey: PK, taskId: "task-d7" });
+  setAuthorityMountForTest(target);
+  closeContainerAuthorityForTest();
+  try {
+    // (ii) the container authority, over the artifact a live container would get:
+    assert.equal(containerReadTicket("FG-ENRICHED").status, "active");
+    // (iv) the .mjs reader's pinned predicate, over the same artifact:
+    const snap = new Database(join(target, SNAPSHOT_DB_BASENAME), { readonly: true });
+    try {
+      assert.equal(
+        snap
+          .prepare(`SELECT 1 FROM blocker_evidence WHERE ticket_id = ? AND source = ? LIMIT 1`)
+          .get("FG-ENRICHED", LEGACY_BLOCKED_SOURCE),
+        undefined,
+      );
+    } finally {
+      snap.close();
+    }
+  } finally {
+    setAuthorityMountForTest(null);
+    closeContainerAuthorityForTest();
+  }
+
+  // (iii) the dashboard's query text, against the host DB:
+  assert.equal(
+    db
+      .prepare(`SELECT ticket_id FROM blocker_evidence WHERE project_key = ? AND source = ?`)
+      .all(PK, LEGACY_BLOCKED_SOURCE).length,
+    0,
+    "surface (iii): the enriched row must not appear in the dashboard's blocked set",
+  );
 });
 
 // ─── the publisher's evidence copy ─────────────────────────────────────────

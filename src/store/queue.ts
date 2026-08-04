@@ -122,7 +122,9 @@ export type QueueEntry = {
   status: string;
   rank: number | null;
   queued: boolean;
-  /** DERIVED from status-bearing blocker evidence. Never stored. */
+  /** DERIVED by isQueueBlocked over ALL evidence kinds — legacy status-bearing
+   *  evidence OR an enriched row whose queue_projection blocks. Never stored, and
+   *  NOT the same predicate as the ticket's legacy blocked status. */
   blocked: boolean;
   /** DERIVED from dispatch evidence + non-terminal task status. Never stored. */
   inProgress: boolean;
@@ -722,14 +724,52 @@ export function moveQueuePosition(
 
 // ─── derived projections (COMPUTED, never stored) ────────────────────────────
 
-/** Blocked, derived. Only STATUS-BEARING evidence counts — the enriched
- *  dependency / campaign / run-derived kinds feed the queue projection and are
- *  excluded here, exactly as they are on the other three surfaces. */
+/** Blocked as the TICKET STATUS vocabulary means it. Only STATUS-BEARING evidence
+ *  counts — the enriched dependency / campaign / run-derived kinds are excluded
+ *  here, exactly as they are on the other three surfaces, and are read instead by
+ *  isQueueBlocked below. Feeds hydrateForReadiness, so an enriched blocker can
+ *  never reach StructuredTicket.status. */
 export function isBlocked(projectKey: string, ticketId: string): boolean {
   const rows = getDb()
     .prepare(`SELECT source FROM blocker_evidence WHERE project_key = ? AND ticket_id = ?`)
     .all(projectKey, ticketId) as { source: string }[];
   return rows.some((r) => isStatusBearingEvidenceSource(r.source));
+}
+
+/** The queue projection value that means "this evidence blocks execution". The
+ *  other value the column carries, 'not_ready', is a READINESS hint and is
+ *  deliberately not blocking: readiness has its own reported projection, and
+ *  folding it into `blocked` would report one fact twice under two names. */
+const QUEUE_BLOCKING_PROJECTION = "blocked";
+
+/** THE QUEUE'S OWN blocked derivation, over ALL supported evidence kinds — the
+ *  second, deliberately WIDER predicate of the two (D7).
+ *
+ *  It is separate from isBlocked rather than a widening of it, because they answer
+ *  different questions and only one of them is container-visible:
+ *    isBlocked      — may this evidence make the ticket READ BACK as status
+ *                     'blocked' on the host seam, the container authority, the
+ *                     snapshot and the dashboard? Legacy only, forever, via the
+ *                     zero-import leaf predicate.
+ *    isQueueBlocked — does the OPERATOR QUEUE show this entry as blocked? Legacy
+ *                     evidence OR any enriched row whose stored queue_projection
+ *                     says it blocks.
+ *  Collapsing them would make the first enriched dependency row flip every
+ *  container's view of that ticket's status, which is the exact defect the leaf
+ *  predicate exists to prevent.
+ *
+ *  Blocked here is REPORTED, not enforced: it does not remove the entry from the
+ *  executable queue (see executableQueue). Deferred is the ineligible case. */
+export function isQueueBlocked(projectKey: string, ticketId: string): boolean {
+  const rows = getDb()
+    .prepare(
+      `SELECT source, queue_projection FROM blocker_evidence WHERE project_key = ? AND ticket_id = ?`,
+    )
+    .all(projectKey, ticketId) as { source: string; queue_projection: string | null }[];
+  return rows.some(
+    (r) =>
+      isStatusBearingEvidenceSource(r.source) || r.queue_projection === QUEUE_BLOCKING_PROJECTION,
+  );
 }
 
 /** In progress, derived: the ticket has dispatch evidence for a task that has not
@@ -791,7 +831,7 @@ export function queueView(projectKey: string): QueueEntry[] {
     status: r.status,
     rank: r.priority_rank,
     queued: r.queued === 1,
-    blocked: isBlocked(projectKey, r.ticket_id),
+    blocked: isQueueBlocked(projectKey, r.ticket_id),
     inProgress: isInProgress(projectKey, r.ticket_id),
     readiness: readinessView(projectKey, r.ticket_id),
   }));

@@ -1294,16 +1294,22 @@ function requireQueueProject(verb: string, projectDir: string): string {
   return store.projectKey;
 }
 
+/** Positions are parsed STRICTLY, not with parseInt. parseInt accepts trailing
+ *  garbage and partial numerics — '2x' is 2, '1.9' is 1, '3 4' is 3 — so a typed
+ *  position that means nothing would silently become a different, valid-looking
+ *  MOVE. For verbs whose whole purpose is deterministic ordering, that is a
+ *  wrong-order write the operator has no way to notice. Refuse by name instead,
+ *  quoting exactly what was received. */
 function parsePosition(raw: string, verb: string): number {
-  const n = Number.parseInt(raw, 10);
-  if (!Number.isFinite(n) || n < 1) {
+  if (!/^[1-9][0-9]*$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
     throw new QueueRefusal(
-      `forge: backlog ${verb} refuses — position must be a positive integer, got '${raw}'.`,
+      `forge: backlog ${verb} refuses — position must be a whole positive number (1, 2, 3, …), ` +
+        `got '${raw}'. Nothing was written.`,
       verb,
       null,
     );
   }
-  return n;
+  return Number(raw);
 }
 
 type QueueVerbResult = Record<string, unknown> & { message?: string; refusal?: string };

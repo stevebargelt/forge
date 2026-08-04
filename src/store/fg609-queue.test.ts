@@ -1,6 +1,6 @@
 // FG-609 (FG-496 Slice D): the operator-queue primitives, against a real
 // in-memory SQLite DB running the REAL store code. Covers A1, A3, A4, A5, A6, A7,
-// A8, A9, A13 and A17.
+// A8, A9, A13, A17 and the queue half of D7.
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -19,8 +19,14 @@ import {
   LEGACY_BLOCKED_SOURCE,
   type TicketRow,
 } from "./tickets.js";
-import { dependencyBlockerSource } from "./blocked-source.js";
 import {
+  campaignBlockerSource,
+  dependencyBlockerSource,
+  runDerivedBlockerSource,
+} from "./blocked-source.js";
+import {
+  hydrateForReadiness,
+  isBlocked,
   rankTicket,
   unrankTicket,
   enqueueTicket,
@@ -367,9 +373,20 @@ test("FG-609 A7: a blocked queued ticket keeps its rank; resolving returns an ID
   assert.equal(executableQueue(PK).find((e) => e.ticketId === "FG-2")!.blocked, false);
 });
 
-test("FG-609 A7: a non-status-bearing enriched blocker does NOT mark a queue entry blocked", () => {
+// ─── D7: the queue projection reads ALL evidence kinds; status reads none ────
+//
+// The two predicates, on ONE ticket: an enriched dependency blocker whose stored
+// queue_projection blocks must show up as `blocked` in the operator queue, and
+// must leave the ticket's reconstructed StructuredTicket.status alone. The four
+// legacy surfaces get the same ticket in
+// src/backlog/fg609-blocked-predicate-parity.test.ts, which has the container
+// authority, the published snapshot and the .mjs reader wired up.
+
+test("FG-609 D7: an enriched dependency blocker marks the QUEUE entry blocked, and the SAME ticket's StructuredTicket.status stays active", () => {
   seed(["FG-1"]);
   assert.equal(enqueueTicket(PK, "FG-1").ok, true);
+  assert.equal(executableQueue(PK)[0]!.blocked, false, "control: unblocked before the evidence lands");
+
   writeTransaction(() =>
     upsertBlockerEvidence({
       projectKey: PK,
@@ -378,10 +395,112 @@ test("FG-609 A7: a non-status-bearing enriched blocker does NOT mark a queue ent
       source: dependencyBlockerSource("FG-99"),
       createdAt: NOW,
       kind: "dependency",
+      detail: { dependency: "FG-99" },
       queueProjection: "blocked",
     }),
   );
-  assert.equal(executableQueue(PK)[0]!.blocked, false);
+
+  const entry = executableQueue(PK)[0]!;
+  assert.equal(entry.blocked, true, "the queue projection must read the enriched evidence");
+  // Blocked is REPORTED, not enforced: rank and membership are untouched.
+  assert.equal(entry.ticketId, "FG-1");
+  assert.equal(entry.rank, 1);
+  assert.equal(entry.queued, true);
+
+  // The other half of D7, on the same ticket and the same evidence row.
+  assert.equal(
+    hydrateForReadiness(getTicket(PK, "FG-1")!).status,
+    "active",
+    "an enriched blocker must never reach the container-visible status vocabulary",
+  );
+  assert.equal(isBlocked(PK, "FG-1"), false, "the status-bearing predicate stays legacy-only");
+  assert.equal(
+    (db.prepare(`SELECT status FROM tickets WHERE ticket_id = 'FG-1'`).get() as { status: string }).status,
+    "active",
+  );
+});
+
+test("FG-609 D7: campaign and run-derived blockers move the queue projection too", () => {
+  for (const [source, kind] of [
+    [campaignBlockerSource("camp-7"), "campaign"],
+    [runDerivedBlockerSource("run-7"), "run_derived"],
+  ] as const) {
+    seed(["FG-1"]);
+    assert.equal(enqueueTicket(PK, "FG-1").ok, true);
+    writeTransaction(() =>
+      upsertBlockerEvidence({
+        projectKey: PK,
+        ticketId: "FG-1",
+        reason: `blocked by ${source}`,
+        source,
+        createdAt: NOW,
+        kind,
+        queueProjection: "blocked",
+      }),
+    );
+    assert.equal(executableQueue(PK)[0]!.blocked, true, `${kind} must move the queue projection`);
+    assert.equal(isBlocked(PK, "FG-1"), false, `${kind} must not move the legacy status predicate`);
+    writeTransaction(() => deleteBlockerEvidence(PK, "FG-1", source));
+    assert.equal(executableQueue(PK)[0]!.blocked, false, `removing the ${kind} row unblocks the queue`);
+  }
+});
+
+test("FG-609 D7: an enriched row whose queue_projection does NOT block leaves the entry unblocked", () => {
+  seed(["FG-1"]);
+  assert.equal(enqueueTicket(PK, "FG-1").ok, true);
+  writeTransaction(() => {
+    // No projection at all — evidence recorded for the audit trail, blocking nothing.
+    upsertBlockerEvidence({
+      projectKey: PK, ticketId: "FG-1", reason: "noted, not blocking",
+      source: dependencyBlockerSource("FG-98"), createdAt: NOW, kind: "dependency",
+    });
+    // 'not_ready' is a READINESS hint, reported through readiness — not blocked.
+    upsertBlockerEvidence({
+      projectKey: PK, ticketId: "FG-1", reason: "needs refinement",
+      source: campaignBlockerSource("camp-8"), createdAt: NOW, kind: "campaign",
+      queueProjection: "not_ready",
+    });
+  });
+  assert.equal(
+    executableQueue(PK)[0]!.blocked,
+    false,
+    "only a queue_projection of 'blocked' blocks — otherwise the read path is a rubber stamp",
+  );
+
+  // ...and the SAME row flipped to blocking does block, so the negative case above
+  // is about the projection value and not about the read path being dead.
+  writeTransaction(() =>
+    upsertBlockerEvidence({
+      projectKey: PK, ticketId: "FG-1", reason: "noted, now blocking",
+      source: dependencyBlockerSource("FG-98"), createdAt: NOW, kind: "dependency",
+      queueProjection: "blocked",
+    }),
+  );
+  assert.equal(executableQueue(PK)[0]!.blocked, true);
+});
+
+test("FG-609 D7: enriching a ticket leaves the legacy row's fact, source and timestamp untouched", () => {
+  seed(["FG-1"]);
+  const LEGACY_AT = "2026-07-01T00:00:00Z";
+  writeTransaction(() =>
+    upsertBlockerEvidence({
+      projectKey: PK, ticketId: "FG-1", reason: "blocked on an upstream decision",
+      source: LEGACY_BLOCKED_SOURCE, createdAt: LEGACY_AT,
+    }),
+  );
+  writeTransaction(() =>
+    upsertBlockerEvidence({
+      projectKey: PK, ticketId: "FG-1", reason: "waits on FG-99",
+      source: dependencyBlockerSource("FG-99"), createdAt: NOW, kind: "dependency",
+      queueProjection: "blocked",
+    }),
+  );
+
+  const legacy = blockerEvidenceForTicket(PK, "FG-1").find((r) => r.source === LEGACY_BLOCKED_SOURCE)!;
+  assert.equal(legacy.reason, "blocked on an upstream decision");
+  assert.equal(legacy.createdAt, LEGACY_AT, "the original 'blocked since' fact survives enrichment");
+  assert.equal(legacy.kind, "legacy_blocked");
+  assert.equal(legacy.queueProjection, null);
 });
 
 // ─── A8 / A9: done and deferred leave the ACTIVE queue, history survives ────

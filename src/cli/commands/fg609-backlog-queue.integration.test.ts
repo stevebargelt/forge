@@ -205,6 +205,39 @@ test("FG-609 A2/A5: editing the ticket to be ready lets the very next enqueue su
   assert.equal(parsed.readiness.stale, false);
 });
 
+// ─── RF-1: a malformed position is REFUSED, never reinterpreted ────────────
+
+test("FG-609 RF-1: every malformed position is refused BY NAME and writes nothing", () => {
+  migrate();
+  assert.equal(forge(["backlog", "rank", "FG-1"]).status, 0);
+  assert.equal(forge(["backlog", "rank", "FG-2"]).status, 0);
+  assert.equal(forge(["backlog", "enqueue", "FG-1"]).status, 0);
+  assert.equal(forge(["backlog", "enqueue", "FG-2"]).status, 0);
+  const orderBefore = queueOrder();
+  assert.deepEqual(orderBefore, ["FG-1", "FG-2"]);
+
+  // Every shape parseInt would have SILENTLY reinterpreted as a different, valid
+  // move — plus the shapes it rejected outright, so the refusal is one rule.
+  for (const raw of ["2x", "1.9", "2 3", "0x2", "+2", " 2", "2.", "1e1", "abc", "0", "-1", ""]) {
+    const moved = forge(["backlog", "reorder", "FG-1", "--to", raw]);
+    assert.equal(moved.status, 1, `reorder --to '${raw}' must refuse, not reinterpret`);
+    assert.match(moved.stderr, /backlog reorder refuses/, `--to '${raw}': ${moved.stderr}`);
+    assert.match(moved.stderr, /whole positive number/);
+    assert.match(moved.stderr, new RegExp(`got '${raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}'`));
+    assert.deepEqual(queueOrder(), orderBefore, `--to '${raw}' must write NOTHING`);
+
+    const ranked = forge(["backlog", "rank", "FG-2", "--position", raw]);
+    assert.equal(ranked.status, 1, `rank --position '${raw}' must refuse, not reinterpret`);
+    assert.match(ranked.stderr, /backlog rank refuses/);
+    assert.deepEqual(queueOrder(), orderBefore, `--position '${raw}' must write NOTHING`);
+  }
+
+  // The control: a well-formed position still moves the queue.
+  const ok = forge(["backlog", "reorder", "FG-1", "--to", "2", "--json"]);
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.deepEqual(queueOrder(), ["FG-2", "FG-1"]);
+});
+
 // ─── A17 at the CLI boundary ───────────────────────────────────────────────
 
 test("FG-609 A17: a queue verb publishes no snapshot to a registered live target", () => {
@@ -245,6 +278,26 @@ test("FG-609 A17: a queue verb publishes no snapshot to a registered live target
     "a rank nudge must not republish a snapshot to every live container on the host",
   );
 });
+
+/** The executable queue read STRAIGHT FROM THE STORE, so "the refusal wrote
+ *  nothing" is asserted against durable state and not against CLI output. */
+function queueOrder(): string[] {
+  const store = new Database(join(home, "forge.db"), { readonly: true });
+  try {
+    return (
+      store
+        .prepare(
+          `SELECT t.ticket_id FROM tickets t
+             JOIN queue_membership m ON m.project_key = t.project_key AND m.ticket_id = t.ticket_id
+            WHERE t.project_key = ? AND t.priority_rank IS NOT NULL
+            ORDER BY t.priority_rank ASC, t.ticket_id ASC`,
+        )
+        .all(readProjectKey()) as { ticket_id: string }[]
+    ).map((r) => r.ticket_id);
+  } finally {
+    store.close();
+  }
+}
 
 /** The project_key `forge backlog migrate` committed to .forge/config.yml. */
 function readProjectKey(): string {
