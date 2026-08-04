@@ -30,6 +30,7 @@ import {
   upsertSeamTicket,
   upsertTicketRelation,
   LEGACY_BLOCKED_SOURCE,
+  isStatusBearingEvidenceSource,
   type BlockerEvidence,
   type DbTicketStatus,
   type TicketRow,
@@ -538,8 +539,13 @@ function relatedIds(projectKey: string, ticketId: string): string[] {
     .map((r) => r.relatedId);
 }
 
+// FG-609 surface (i) of four. The predicate is the canonical one from the
+// zero-import leaf — the enriched dependency / campaign / run-derived kinds feed
+// the operator queue projection and must NEVER flip a ticket to status 'blocked'.
 function legacyBlockerEvidence(projectKey: string, ticketId: string): BlockerEvidence | undefined {
-  return blockerEvidenceForTicket(projectKey, ticketId).find((b) => b.source === LEGACY_BLOCKED_SOURCE);
+  return blockerEvidenceForTicket(projectKey, ticketId).find((b) =>
+    isStatusBearingEvidenceSource(b.source),
+  );
 }
 
 function isBlockedInDb(projectKey: string, ticketId: string): boolean {
@@ -604,6 +610,10 @@ function writeTicketRow(projectKey: string, ticket: StructuredTicket, now: strin
       createdAt: existingEvidence?.createdAt ?? now,
     });
   } else {
+    // SOURCE-SCOPED, and FG-609 does NOT widen it. Unblocking a ticket removes the
+    // LEGACY row and nothing else: the enriched dependency / campaign / run-derived
+    // rows are queue-projection facts with their own lifecycles, and a status edit
+    // is not evidence that a dependency was resolved.
     deleteBlockerEvidence(projectKey, ticket.id, LEGACY_BLOCKED_SOURCE);
   }
 }

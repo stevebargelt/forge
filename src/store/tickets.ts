@@ -10,6 +10,7 @@
 
 import { createHash } from "node:crypto";
 import { getDb, registerPublishBarrier } from "./db.js";
+import { LEGACY_BLOCKED_KIND, type BlockerEvidenceKind } from "./blocked-source.js";
 import {
   beginPublishBarrier,
   endPublishBarrier,
@@ -49,6 +50,11 @@ export type TicketRow = {
   revision?: number;
   bodyHash?: string | null;
   importBasisHash?: string | null;
+  // FG-609: read-back ONLY. The operator stack rank is HOST-AUTHORED state owned by
+  // src/store/queue.ts; neither writer below names it, so an import or a seam edit
+  // can never silently drop an operator's queue position. See the note on the
+  // UPSERTs and the fg609-import-isolation guard that pins it.
+  priorityRank?: number | null;
 };
 
 // FG-608: the CONTENT basis. Hashes exactly the authoritative content of a ticket
@@ -99,6 +105,7 @@ type TicketDbRow = {
   revision: number;
   body_hash: string | null;
   import_basis_hash: string | null;
+  priority_rank: number | null;
 };
 
 function rowToTicket(row: TicketDbRow): TicketRow {
@@ -106,6 +113,7 @@ function rowToTicket(row: TicketDbRow): TicketRow {
     revision: row.revision,
     bodyHash: row.body_hash,
     importBasisHash: row.import_basis_hash,
+    priorityRank: row.priority_rank,
     projectKey: row.project_key,
     ticketId: row.ticket_id,
     type: row.type,
@@ -124,6 +132,12 @@ function rowToTicket(row: TicketDbRow): TicketRow {
 
 // UPSERT keyed by the (project_key, ticket_id) primary key. Re-importing the same
 // ticket overwrites every mutable field; it never inserts a duplicate row.
+//
+// FG-609: this UPSERT is COLUMN-EXPLICIT and its DO UPDATE SET deliberately does
+// NOT name priority_rank. Operator queue state is host-authored and survives
+// re-import only because of that. Adding rank to the SET clause — or replacing
+// this with a delete-then-insert refresh — would drop an operator's stack rank
+// with no error and no queue event. Pinned by src/store/fg609-import-isolation.test.ts.
 //
 // FG-608: this is the IMPORT writer, so it stamps BOTH revision semantics — the
 // monotonic counter advances (an import IS an authoritative write) and the content
@@ -367,6 +381,16 @@ export type BlockerEvidence = {
   reason?: string | null;
   source: string;
   createdAt: string;
+  // FG-609 enrichment. Every field is optional so every Slice A call site is
+  // unchanged and every Slice A row reads back exactly what it was written with:
+  // `kind` falls back to the column DEFAULT 'legacy_blocked', the rest to null.
+  kind?: BlockerEvidenceKind;
+  detail?: Record<string, unknown> | null;
+  // The ticket body hash this blocker was observed against (readiness binding).
+  bodyHash?: string | null;
+  // The operator QUEUE PROJECTION this row feeds. Never a status: it does not make
+  // the ticket read back as 'blocked' anywhere, and it never makes one queue-eligible.
+  queueProjection?: "blocked" | "not_ready" | null;
 };
 
 // UPSERT on the natural key (project_key, ticket_id, source). The id is a
@@ -379,11 +403,16 @@ export function blockerEvidenceId(projectKey: string, ticketId: string, source: 
 export function upsertBlockerEvidence(b: BlockerEvidence): void {
   getDb()
     .prepare(
-      `INSERT INTO blocker_evidence (id, project_key, ticket_id, reason, source, created_at)
-       VALUES (@id, @projectKey, @ticketId, @reason, @source, @createdAt)
+      `INSERT INTO blocker_evidence
+         (id, project_key, ticket_id, reason, source, created_at, kind, detail, body_hash, queue_projection)
+       VALUES (@id, @projectKey, @ticketId, @reason, @source, @createdAt, @kind, @detail, @bodyHash, @queueProjection)
        ON CONFLICT(project_key, ticket_id, source) DO UPDATE SET
          reason = excluded.reason,
-         created_at = excluded.created_at`,
+         created_at = excluded.created_at,
+         kind = excluded.kind,
+         detail = excluded.detail,
+         body_hash = excluded.body_hash,
+         queue_projection = excluded.queue_projection`,
     )
     .run({
       id: blockerEvidenceId(b.projectKey, b.ticketId, b.source),
@@ -392,16 +421,28 @@ export function upsertBlockerEvidence(b: BlockerEvidence): void {
       reason: b.reason ?? null,
       source: b.source,
       createdAt: b.createdAt,
+      // A caller that predates the enrichment gets the legacy kind, which is what
+      // the column DEFAULT gives an aged row too — one classification, one place.
+      kind: b.kind ?? LEGACY_BLOCKED_KIND,
+      detail: b.detail ? JSON.stringify(b.detail) : null,
+      bodyHash: b.bodyHash ?? null,
+      queueProjection: b.queueProjection ?? null,
     });
   markBacklogDirty(b.projectKey);
 }
 
 // The evidence source both writers use for a legacy `status: blocked` ticket: the
 // import (Markdown -> DB) and the FG-607 seam (a ticket written with status
-// 'blocked' in db mode). Defined HERE so there is exactly ONE constant — two
-// writers with two copies of this string drift silently, and a blocked ticket
-// would round-trip as active.
-export const LEGACY_BLOCKED_SOURCE = "import-legacy-blocked";
+// 'blocked' in db mode). There is exactly ONE constant — two writers with two
+// copies of this string drift silently, and a blocked ticket would round-trip as
+// active.
+//
+// FG-609 MOVED THE DECLARATION to the zero-import leaf ./blocked-source.ts, and
+// this is a RE-EXPORT so every existing importer is unchanged. The move is
+// load-bearing rather than tidy: line 12 of this module imports getDb, so the
+// dashboard (the fourth blocked-derivation surface) could not reach the literal
+// through here without dragging the store handle into its typecheck and bundle.
+export { LEGACY_BLOCKED_SOURCE, isStatusBearingEvidenceSource } from "./blocked-source.js";
 
 // The inverse of upsertBlockerEvidence — used by the seam for the
 // blocked -> unblocked transition. Silently no-ops when no row exists.
@@ -412,26 +453,43 @@ export function deleteBlockerEvidence(projectKey: string, ticketId: string, sour
   markBacklogDirty(projectKey);
 }
 
-export function blockerEvidenceForTicket(projectKey: string, ticketId: string): BlockerEvidence[] {
-  const rows = getDb()
-    .prepare(
-      `SELECT project_key, ticket_id, reason, source, created_at
-         FROM blocker_evidence WHERE project_key = ? AND ticket_id = ? ORDER BY source ASC`,
-    )
-    .all(projectKey, ticketId) as {
-    project_key: string;
-    ticket_id: string;
-    reason: string | null;
-    source: string;
-    created_at: string;
-  }[];
-  return rows.map((r) => ({
+type BlockerEvidenceDbRow = {
+  project_key: string;
+  ticket_id: string;
+  reason: string | null;
+  source: string;
+  created_at: string;
+  kind: string;
+  detail: string | null;
+  body_hash: string | null;
+  queue_projection: string | null;
+};
+
+const BLOCKER_EVIDENCE_COLUMNS =
+  "project_key, ticket_id, reason, source, created_at, kind, detail, body_hash, queue_projection";
+
+function rowToBlockerEvidence(r: BlockerEvidenceDbRow): BlockerEvidence {
+  return {
     projectKey: r.project_key,
     ticketId: r.ticket_id,
     reason: r.reason,
     source: r.source,
     createdAt: r.created_at,
-  }));
+    kind: r.kind as BlockerEvidenceKind,
+    detail: r.detail ? (JSON.parse(r.detail) as Record<string, unknown>) : null,
+    bodyHash: r.body_hash,
+    queueProjection: (r.queue_projection as "blocked" | "not_ready" | null) ?? null,
+  };
+}
+
+export function blockerEvidenceForTicket(projectKey: string, ticketId: string): BlockerEvidence[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT ${BLOCKER_EVIDENCE_COLUMNS}
+         FROM blocker_evidence WHERE project_key = ? AND ticket_id = ? ORDER BY source ASC`,
+    )
+    .all(projectKey, ticketId) as BlockerEvidenceDbRow[];
+  return rows.map(rowToBlockerEvidence);
 }
 
 // ─── storage mode (keyed by project_key, default 'markdown') ─────────────────
@@ -772,23 +830,9 @@ export function allRelationsForProject(projectKey: string): TicketRelation[] {
 
 export function allBlockerEvidenceForProject(projectKey: string): BlockerEvidence[] {
   const rows = getDb()
-    .prepare(
-      `SELECT project_key, ticket_id, reason, source, created_at FROM blocker_evidence WHERE project_key = ?`,
-    )
-    .all(projectKey) as {
-    project_key: string;
-    ticket_id: string;
-    reason: string | null;
-    source: string;
-    created_at: string;
-  }[];
-  return rows.map((r) => ({
-    projectKey: r.project_key,
-    ticketId: r.ticket_id,
-    reason: r.reason,
-    source: r.source,
-    createdAt: r.created_at,
-  }));
+    .prepare(`SELECT ${BLOCKER_EVIDENCE_COLUMNS} FROM blocker_evidence WHERE project_key = ?`)
+    .all(projectKey) as BlockerEvidenceDbRow[];
+  return rows.map(rowToBlockerEvidence);
 }
 
 // ─── FG-608: dispatch evidence ───────────────────────────────────────────────

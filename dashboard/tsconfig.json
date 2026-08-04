@@ -21,7 +21,8 @@
       "@forge/heartbeats": ["../src/util/orchestrator-heartbeats.ts"],
       "@forge/governance": ["../src/raci/governance.ts"],
       "@forge/reconcile-candidate": ["../src/ops/reconcile-candidate.ts"],
-      "@forge/backlog": ["../src/backlog/structured.ts"]
+      "@forge/backlog": ["../src/backlog/structured.ts"],
+      "@forge/blocked-source": ["../src/store/blocked-source.ts"]
     }
   },
   "include": ["src/**/*.ts", "browser-tests/**/*.ts"]

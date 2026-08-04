@@ -62,6 +62,8 @@ import { existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { getDb } from "../store/db.js";
+// FG-609: the canonical status-bearing-evidence literal, from the zero-import leaf.
+import { LEGACY_BLOCKED_SOURCE } from "../store/blocked-source.js";
 
 /** The snapshot database's basename inside the published directory. The container
  *  resolves exactly this name under its mount pointer. */
@@ -419,12 +421,18 @@ function buildSnapshot(projectKey: string, path: string): SnapshotStamp {
           WHERE project_key = ? ORDER BY ticket_id ASC`,
       )
       .all(projectKey) as { ticket_id: string; related_id: string; rel_type: string }[],
+    // FG-609: STATUS-BEARING evidence only. The enriched dependency / campaign /
+    // run-derived kinds are host-operator queue-projection facts with no container
+    // consumer in this slice, and the two in-container derivations reconstruct
+    // 'blocked' from what is in this table — so copying a non-status-bearing row
+    // into the published artifact would be the same silent status reinterpretation
+    // the source filters exist to prevent, one layer down.
     evidence: src
       .prepare(
         `SELECT ticket_id, reason, source, created_at FROM blocker_evidence
-          WHERE project_key = ? ORDER BY ticket_id ASC`,
+          WHERE project_key = ? AND source = ? ORDER BY ticket_id ASC`,
       )
-      .all(projectKey) as {
+      .all(projectKey, LEGACY_BLOCKED_SOURCE) as {
       ticket_id: string;
       reason: string | null;
       source: string;
