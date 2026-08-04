@@ -1,6 +1,6 @@
 # Forge Working Plan
 
-**Last revised:** 2026-08-03
+**Last revised:** 2026-08-04
 
 This is a mutable statement of current operator intent. It is not an approval
 boundary, ticket specification, execution record, or source of lifecycle
@@ -25,6 +25,13 @@ deterministic failure directly blocks the current ticket, required CI, or
 correct publication.
 
 ## Recently completed
+
+- **FG-609, FG-673, FG-674** — FG-496 Slice D queue primitives shipped
+  (`de6c6d62`); the dashboard agent-runtime fixture is deterministic
+  (`119043a4`); and a review's comparison base now resolves by the first rule
+  that applies and names which one (`bdd94753`). FG-674 was reviewed against an
+  explicitly supplied base, because the defect it fixes was live in the forge
+  performing that review.
 
 - **FG-649, FG-650, and FG-653** — stabilized candidate re-anchoring and honest
   reviewer payload handling.
@@ -70,9 +77,13 @@ correct publication.
 
 ## Next
 
-1. **FG-609 — FG-496 Slice D:** queue rank, explicit membership,
-   revision-bound readiness, blocker evidence, and event history. The FG-664
-   gate is cleared.
+1. **FG-678 — writable-invoke dependency contract.** Operator-placed AHEAD of
+   feature work that relies on writable validator dispatches (2026-08-04). A
+   writable `forge invoke` gets an empty anonymous `node_modules` shadow that
+   also masks the host's, so a required `test-engineer` followup may silently
+   not execute — measured twice, with identical dispatches producing opposite
+   outcomes. Until it lands, any feature whose acceptance rests on writable
+   validation is resting on an environment that is not guaranteed to exist.
 2. **FG-610 — FG-496 Slice E:** atomic claims, leases, recovery, capacity
    accounting, and canonical claim-next.
 3. **FG-591 — operator work queue:** Kanban, CLI/API controls, and
