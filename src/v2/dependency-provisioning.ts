@@ -738,15 +738,21 @@ export type DependencyEnvironmentRefusal =
   | "probe_failed"
   | "probe_unparseable"
   | "dependencies_absent"
-  | "driver_unloadable";
+  | "driver_unloadable"
+  /** FG-678: the project DECLARES dependencies but ships no supported lockfile,
+   *  so there is no key to bind an environment to. Unlike the refusals above,
+   *  this one is decided host-side before any container: it is the difference
+   *  between "this project has nothing to provision" and "this project has
+   *  something to provision and no reproducible way to name it". */
+  | "lockfile_absent";
 
 export type DependencyEnvironmentOutcome =
   /** The real dependencies are mounted and the probe LOADED every native package
    *  the project declares a dependency on (see declaredDependencyNames). */
   | { outcome: "ready"; receipt: DependencyEnvironmentReceipt }
   /** Not a refusal: this configuration never had the hazard, and its pre-existing
-   *  behaviour is unchanged (non-darwin, FORGE_NO_NM_SHADOW=1, no package-lock.json,
-   *  a runtime that mounts no project). */
+   *  behaviour is unchanged (non-darwin, FORGE_NO_NM_SHADOW=1, a project that
+   *  declares no dependencies at all, a runtime that mounts no project). */
   | { outcome: "not_applicable"; reason: string }
   | { outcome: "refused"; reason: DependencyEnvironmentRefusal; detail: string };
 
@@ -883,8 +889,25 @@ export function parseDependencyProbeOutput(stdout: string, expectedNonce: string
  *  package.json is unreadable gets the fail-closed reading (every native package
  *  is required), because there is then no basis for narrowing. */
 export function declaredDependencyNames(repoRoot: string): Set<string> | undefined {
-  let read = false;
+  const manifests = readDependencyManifests(repoRoot);
+  if (manifests.length === 0) return undefined;
   const names = new Set<string>();
+  for (const m of manifests) for (const name of m.names) names.add(name);
+  return names;
+}
+
+/** One READABLE package.json under the repo root, and the direct dependencies it
+ *  declares. `path` is the manifest that declared them — the fact
+ *  declaredDependencyNames drops when it unions the names together, and the one
+ *  a `lockfile_absent` refusal has to name so the operator knows which manifest
+ *  put the project on the refusing side. */
+export type DependencyManifest = { path: string; names: string[] };
+
+/** Every readable manifest across the repo root and its workspace members, in
+ *  workspaceMembers order. An empty array means NO manifest could be read at all
+ *  — the same fact declaredDependencyNames reports as undefined. */
+export function readDependencyManifests(repoRoot: string): DependencyManifest[] {
+  const manifests: DependencyManifest[] = [];
   for (const member of workspaceMembers(repoRoot)) {
     const pkgPath = join(repoRoot, member.relPath, "package.json");
     let pkg: { dependencies?: unknown; devDependencies?: unknown };
@@ -893,12 +916,13 @@ export function declaredDependencyNames(repoRoot: string): Set<string> | undefin
     } catch {
       continue;
     }
-    read = true;
+    const names = new Set<string>();
     for (const block of [pkg.dependencies, pkg.devDependencies]) {
       if (block && typeof block === "object") for (const name of Object.keys(block)) names.add(name);
     }
+    manifests.push({ path: pkgPath, names: [...names] });
   }
-  return read ? names : undefined;
+  return manifests;
 }
 
 export async function resolveDependencyEnvironment(
@@ -913,9 +937,52 @@ export async function resolveDependencyEnvironment(
   if (process.env.FORGE_NO_NM_SHADOW === "1") {
     return { outcome: "not_applicable", reason: "FORGE_NO_NM_SHADOW=1 (the operator escape hatch)" };
   }
+  // FG-678: three outcomes, not two. A missing lockfile used to mean one thing —
+  // "nothing to provision" — and it covers two projects that need opposite
+  // answers: one that declares no dependencies (there is genuinely nothing to
+  // bind, and it must dispatch exactly as it always did), and one that declares
+  // dependencies it cannot key (there IS something to bind and no reproducible
+  // name for it). Telling the second one it has no dependencies is the falsehood
+  // that let an agent be handed an empty workspace and left to improvise.
+  //
+  // Deliberately BELOW the darwin and FORGE_NO_NM_SHADOW short-circuits: both are
+  // "this host never had the hazard", and a refusal above them would fail
+  // dispatches on every linux host and defeat the operator's escape hatch.
   const cacheKey = safeLockfileHash(args.repoRoot);
   if (cacheKey === undefined) {
-    return { outcome: "not_applicable", reason: `no package-lock.json at ${args.repoRoot}` };
+    // A manifest that will not parse is not a manifest that declares
+    // dependencies — there is no basis for reading one out of it, so this stays
+    // on the pre-existing not-applicable side rather than refusing on a guess.
+    let manifests: DependencyManifest[];
+    try {
+      manifests = readDependencyManifests(args.repoRoot);
+    } catch {
+      manifests = [];
+    }
+    const declaring = manifests.filter((m) => m.names.length > 0);
+    if (declaring.length === 0) {
+      return {
+        outcome: "not_applicable",
+        reason:
+          manifests.length === 0
+            ? `no readable package.json at ${args.repoRoot}, and no package-lock.json`
+            : `no package-lock.json at ${args.repoRoot}, and its manifest(s) declare no dependencies`,
+      };
+    }
+    const first = declaring[0] as DependencyManifest;
+    const sample = first.names.slice(0, 3).join(", ");
+    return {
+      outcome: "refused",
+      reason: "lockfile_absent",
+      detail:
+        `${first.path} declares ${first.names.length} dependenc${first.names.length === 1 ? "y" : "ies"} ` +
+        `(${sample}${first.names.length > 3 ? ", …" : ""})` +
+        (declaring.length > 1 ? `, as do ${declaring.length - 1} other workspace manifest(s)` : "") +
+        `, but ${args.repoRoot} ships no package-lock.json — the only lockfile Forge supports. A dependency ` +
+        `environment is keyed by lockfile content, so there is nothing to bind this project's declared ` +
+        `dependencies to and no way to give two dispatches the same one. Commit a package-lock.json (npm ` +
+        `install --package-lock-only) so the dispatch is reproducible.`,
+    };
   }
 
   // FG-627/FG-628: every dependency volume binds at a path INSIDE a read-only
