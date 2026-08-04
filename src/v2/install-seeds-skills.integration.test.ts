@@ -1,5 +1,5 @@
 // FG-422: install-seeds.sh must distribute the host/orchestrator workflow
-// skills (seeds/skills/forge-*) to the user-global Claude skills dir
+// skills (seeds/skills/*) to the user-global Claude skills dir
 // (~/.claude/skills, overridable via CLAUDE_SKILLS_DEST / CLAUDE_CONFIG_DIR)
 // so every project using forge picks them up — not just the forge repo.
 //
@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const INSTALL_SCRIPT = join(REPO_ROOT, "scripts", "install-seeds.sh");
-const EXPECTED_SKILLS = ["forge-campaign", "forge-review-loop", "forge-backlog", "forge-research-synthesis"];
+const EXPECTED_SKILLS = ["forge-campaign", "forge-review-loop", "forge-backlog", "forge-research-synthesis", "status"];
 
 let root: string;
 let forgeHome: string;
@@ -41,7 +41,7 @@ function runInstall(extraEnv: Record<string, string> = {}): string {
   });
 }
 
-test("install-seeds.sh: installs every seeds/skills/forge-* SKILL.md into CLAUDE_SKILLS_DEST", () => {
+test("install-seeds.sh: installs every seeds/skills/* SKILL.md into CLAUDE_SKILLS_DEST", () => {
   const out = runInstall();
   assert.match(out, new RegExp(`Installing skills into ${skillsDest}/`));
   for (const skill of EXPECTED_SKILLS) {
