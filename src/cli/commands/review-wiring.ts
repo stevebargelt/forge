@@ -883,24 +883,71 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
   };
 }
 
+/** Which rule produced the base. Stated in `forge review start`'s output (FG-674) so an
+ *  operator reads WHY this base was chosen rather than inferring it from a parenthetical. */
+export type ReviewBaseBasis = "since" | "merge-base" | "ticket-range";
+
 export type ReviewBase =
-  | { ok: true; baseSha: string; inferredFrom?: string; spansUnmatched?: boolean }
+  | {
+      ok: true;
+      baseSha: string;
+      basis: ReviewBaseBasis;
+      /** The default branch the branch point was computed against — `merge-base` basis only. */
+      defaultBranch?: string;
+      inferredFrom?: string;
+      spansUnmatched?: boolean;
+    }
   | { ok: false; refusal: string };
 
-/** The review's comparison base, resolved AT OPEN.
+/** A CONVENTIONAL subject prefix — the subject OPENS with the ticket id and a colon
+ *  ("FG-674: …", "#301: …"), rather than mentioning it mid-sentence. Same right boundary as
+ *  `ticketSubjectPattern` so FG-674 never also matches FG-6740 or FG-674-a. */
+function ticketSubjectPrefixPattern(ticketId: string): RegExp {
+  const id = ticketId.replace(/^#/, "").trim();
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^#?${escaped}(?![0-9]|-[A-Za-z0-9])\\s*:`);
+}
+
+/** True when every path this commit changed is backlog/planning material, which by construction
+ *  cannot be an implementation commit. This is the FG-674 defect in one predicate: an
+ *  orchestrator's own session hygiene ("plan: FG-666 shipped; FG-648 to Now ahead of FG-609")
+ *  names a ticket as a QUEUE POSITION long before any code exists, so those commits are the
+ *  OLDEST ones mentioning it and anchored the base three commits too early.
+ *
+ *  Unreadable or empty (a merge commit shows no paths) reads as NOT planning-only: this filter
+ *  may only ever narrow the candidate set on positive evidence. */
+function changesOnlyPlanningPaths(sha: string, git: (args: string[]) => string): boolean {
+  let out: string;
+  try {
+    out = git(["show", "--name-only", "--format=", sha]);
+  } catch {
+    return false;
+  }
+  const paths = out.split("\n").map((l) => l.trim()).filter((l) => l !== "");
+  return paths.length > 0 && paths.every((p) => p.startsWith("backlog/"));
+}
+
+/** The review's comparison base, resolved AT OPEN by the FIRST RULE THAT APPLIES (FG-674):
+ *
+ *    1. `--since` — the operator named it.
+ *    2. merge-base with the default branch, when the candidate is on a feature branch. The
+ *       branch point needs no text heuristics at all.
+ *    3. ticket-range inference — the oldest commit whose SUBJECT references the ticket AND
+ *       which changes something other than backlog/planning paths, minus one.
+ *    4. otherwise refuse, naming `--since`. Never silently widen.
  *
  *  Stage 2 refuses a review that records no base sha — correctly, since an empty diff there
  *  would auto-confirm the approved contract over a change nobody computed. But no verb
  *  supplies a base after the fact and no verb removes a review, so a review OPENED without
  *  one is stuck at contract confirmation permanently. The base is therefore resolved here,
- *  where a refusal still means "nothing was written": `--since` names it, and otherwise it
- *  is INFERRED from the ticket's landed commit range by the same `resolveCommitRange` that
- *  gives `forge review-loop` its range — the oldest commit whose SUBJECT references the
- *  ticket, minus one.
+ *  where a refusal still means "nothing was written". Rule 3 keeps using the same
+ *  `resolveCommitRange` that gives `forge review-loop` its range — that contract is shared, so
+ *  the planning-commit filtering lives HERE, at the review-base layer, and review-loop's range
+ *  is unchanged.
  *
- *  When inference is impossible (no commit references the ticket, the range starts at a root
- *  commit, or the log cannot be read) this refuses and names `--since`. A review never opens
- *  into a state it cannot advance out of. */
+ *  When no rule can produce a base (no commit references the ticket, every commit that does is
+ *  planning material, the range starts at a root commit, or the log cannot be read) this
+ *  refuses and names `--since`. A review never opens into a state it cannot advance out of. */
 export function resolveReviewBase(ctx: {
   projectDir: string;
   ticketId: string;
@@ -928,7 +975,7 @@ export function resolveReviewBase(ctx: {
   if (ctx.since !== undefined) {
     const sha = revParseCommit(ctx.since);
     return sha !== undefined
-      ? { ok: true, baseSha: sha }
+      ? { ok: true, baseSha: sha, basis: "since" }
       : {
           ok: false,
           refusal:
@@ -937,6 +984,11 @@ export function resolveReviewBase(ctx: {
             `in this repository is refused here for the same reason: bare rev-parse echoes it back, but every ` +
             `later diff against it fails. Nothing was written.`,
         };
+  }
+
+  const branchPoint = mergeBaseWithDefaultBranch(git, revParseCommit);
+  if (branchPoint !== undefined) {
+    return { ok: true, baseSha: branchPoint.baseSha, basis: "merge-base", defaultBranch: branchPoint.branch };
   }
 
   let range;
@@ -960,7 +1012,27 @@ export function resolveReviewBase(ctx: {
         `Nothing was written.`,
     };
   }
-  const oldest = range.shas[range.shas.length - 1] as string;
+  const implementation = range.shas.filter((sha) => !changesOnlyPlanningPaths(sha, git));
+  if (implementation.length === 0) {
+    return {
+      ok: false,
+      refusal:
+        `every commit whose subject references ${ctx.ticketId} in ${ctx.projectDir} changes only backlog/ ` +
+        `paths, so none of them implements it and the comparison base cannot be inferred — name it with ` +
+        `--since <sha>. Widening to the oldest of them would anchor the review on planning material and pull ` +
+        `unrelated shipped work into the confirmation diff, so it is refused HERE. Nothing was written.`,
+    };
+  }
+
+  // Newest-first, so the LAST entry is the oldest. A conventional `FG-NNN:` subject prefix is a
+  // stronger claim to be the ticket's implementation than an incidental mid-sentence mention, so
+  // the oldest prefixed commit anchors the base when any exists.
+  const subjects = commitSubjects(git);
+  const prefixRe = ticketSubjectPrefixPattern(ctx.ticketId);
+  const prefixed = implementation.filter((sha) => prefixRe.test(subjects.get(sha) ?? ""));
+  const preferred = prefixed.length > 0 ? prefixed : implementation;
+  const oldest = preferred[preferred.length - 1] as string;
+
   const baseSha = revParseCommit(`${oldest}^`);
   if (baseSha === undefined) {
     return {
@@ -970,7 +1042,96 @@ export function resolveReviewBase(ctx: {
         `compare the implementation against — name a base with --since <sha>. Nothing was written.`,
     };
   }
-  return { ok: true, baseSha, inferredFrom: oldest, spansUnmatched: range.spansUnmatched };
+  return {
+    ok: true,
+    baseSha,
+    basis: "ticket-range",
+    inferredFrom: oldest,
+    spansUnmatched: spansUnmatchedFrom(oldest, range, git),
+  };
+}
+
+/** Rule 2: the branch point. Undefined — fall through to ticket-range inference — whenever the
+ *  candidate is NOT on a feature branch off the default branch: HEAD is the default branch
+ *  itself, the merge base IS HEAD (already-merged work, where this rule would compute an empty
+ *  range), or the default branch cannot be resolved at all. */
+function mergeBaseWithDefaultBranch(
+  git: (args: string[]) => string,
+  revParseCommit: (rev: string) => string | undefined,
+): { baseSha: string; branch: string } | undefined {
+  const head = revParseCommit("HEAD");
+  if (head === undefined) return undefined;
+  const def = resolveDefaultBranch(git, revParseCommit);
+  if (def === undefined) return undefined;
+  const current = tryGit(git, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  if (current === def.name) return undefined;
+  const mergeBase = tryGit(git, ["merge-base", "HEAD", def.ref]);
+  if (mergeBase === undefined) return undefined;
+  const sha = revParseCommit(mergeBase);
+  // A merge base is an ancestor of HEAD by construction; PROPER is the part that matters, and
+  // it is exactly what excludes already-merged work whose merge base is its own tip.
+  if (sha === undefined || sha === head) return undefined;
+  return { baseSha: sha, branch: def.name };
+}
+
+/** The default branch, resolved rather than assumed to be `main`: origin/HEAD names it when the
+ *  remote published one, otherwise the conventional names are tried. The local branch is
+ *  preferred over its remote-tracking ref — the branch point is where the feature branch left
+ *  the checkout's own default branch. */
+function resolveDefaultBranch(
+  git: (args: string[]) => string,
+  revParseCommit: (rev: string) => string | undefined,
+): { name: string; ref: string } | undefined {
+  const published = tryGit(git, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]);
+  const names = [...(published !== undefined ? [published.replace(/^origin\//, "")] : []), "main", "master"];
+  for (const name of names) {
+    if (name === "") continue;
+    for (const ref of [`refs/heads/${name}`, `refs/remotes/origin/${name}`]) {
+      if (revParseCommit(ref) !== undefined) return { name, ref };
+    }
+  }
+  return undefined;
+}
+
+function tryGit(git: (args: string[]) => string, args: string[]): string | undefined {
+  try {
+    const out = git(args).trim();
+    return out === "" ? undefined : out;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Every commit's subject, by sha. Same `%H %s` read `resolveCommitRange` does — `%s` is
+ *  newline-free, so one line per commit. */
+function commitSubjects(git: (args: string[]) => string): Map<string, string> {
+  const subjects = new Map<string, string>();
+  const log = tryGit(git, ["log", "--format=%H %s"]);
+  if (log === undefined) return subjects;
+  for (const line of log.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed === "") continue;
+    const sp = trimmed.indexOf(" ");
+    subjects.set(sp === -1 ? trimmed : trimmed.slice(0, sp), sp === -1 ? "" : trimmed.slice(sp + 1));
+  }
+  return subjects;
+}
+
+/** Does the span from the chosen anchor still include commits that do not reference the ticket?
+ *  `resolveCommitRange` already answered that for ITS oldest match; when the planning filter or
+ *  the prefix preference moved the anchor later, the span shrank and the answer is recomputed. */
+function spansUnmatchedFrom(
+  anchor: string,
+  range: { shas: string[]; spansUnmatched: boolean },
+  git: (args: string[]) => string,
+): boolean {
+  const at = range.shas.indexOf(anchor);
+  if (at === range.shas.length - 1) return range.spansUnmatched;
+  const newest = range.shas[0] as string;
+  const span = tryGit(git, ["log", "--format=%H", `${anchor}^..${newest}`]);
+  if (span === undefined) return range.spansUnmatched;
+  const count = span.split("\n").filter((l) => l.trim() !== "").length;
+  return count !== at + 1;
 }
 
 export function parseLensWidening(specs: readonly string[]): { ok: true; widening: LensWidening[] } | { ok: false; refusal: string } {

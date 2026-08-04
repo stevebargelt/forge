@@ -25,7 +25,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import Database from "better-sqlite3";
-import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -228,6 +228,65 @@ test("FG-639: `forge review start` refuses AT OPEN when the comparison base cann
   assert.match(r.stderr, /--since <sha>/);
   assert.match(r.stderr, /Nothing was written/);
   assert.equal(reviewCount(), before, "a review that could never confirm its contract is never opened");
+});
+
+test("FG-674: planning-only ticket history refuses at the real CLI boundary and writes no review", () => {
+  const repo = mkdtempSync(join(tmpdir(), "forge-fg674-planning-"));
+  try {
+    const g = (args: string[]): void => void execFileSync("git", ["-c", "user.email=t@example.com", "-c", "user.name=t", ...args], { cwd: repo });
+    g(["init", "-q"]);
+    writeFileSync(join(repo, "README.md"), "fixture\n");
+    g(["add", "README.md"]);
+    g(["commit", "-q", "-m", "chore: fixture base"]);
+    mkdirSync(join(repo, "backlog"));
+    writeFileSync(join(repo, "backlog", "FG-674.md"), "planning only\n");
+    g(["add", "backlog/FG-674.md"]);
+    g(["commit", "-q", "-m", "FG-674: planning only"]);
+
+    const before = reviewCount();
+    const r = runForge(["review", "start", "FG-674", "--contract", contractPath, "--project", repo]);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /every commit whose subject references FG-674.*changes only backlog\//);
+    assert.match(r.stderr, /--since <sha>/);
+    assert.match(r.stderr, /Nothing was written/);
+    assert.equal(reviewCount(), before, "the resolver refuses before insertReview at the real process boundary");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+// FG-674: the basis is operator-facing. A base an operator cannot explain is a base nobody
+// checks — the incident's `note:` line about a widened range was easy to miss in a launch log.
+test("FG-674: on a feature branch `forge review start` takes the BRANCH POINT and names the rule", () => {
+  const repo = mkdtempSync(join(tmpdir(), "forge-fg674-branch-"));
+  try {
+    const g = (args: string[]): string =>
+      execFileSync("git", ["-c", "user.email=t@example.com", "-c", "user.name=t", ...args], {
+        cwd: repo,
+        encoding: "utf8",
+      });
+    g(["init", "-q"]);
+    writeFileSync(join(repo, "README.md"), "fixture\n");
+    g(["add", "README.md"]);
+    g(["commit", "-q", "-m", "chore: fixture base"]);
+    const defaultBranch = g(["symbolic-ref", "--short", "HEAD"]).trim();
+    const branchPoint = g(["rev-parse", "HEAD"]).trim();
+
+    g(["checkout", "-q", "-b", "feature/fg-674"]);
+    writeFileSync(join(repo, "impl.ts"), "export const x = 1;\n");
+    g(["add", "impl.ts"]);
+    g(["commit", "-q", "-m", "FG-674: implement it"]);
+
+    const r = runForge(["review", "start", "FG-674", "--contract", contractPath, "--project", repo]);
+    assert.match(
+      r.stdout,
+      new RegExp(`base sha: ${branchPoint} \\(basis: merge-base with ${defaultBranch} `),
+      `start must state WHICH rule produced the base:\n${r.stdout}\n${r.stderr}`,
+    );
+    assert.doesNotMatch(r.stdout, /inferred from the oldest commit/, "the branch point is not a text heuristic");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
 });
 
 test("FG-639 / PRD #15: `forge review continue` reads the PERSISTED next stage from the store", () => {

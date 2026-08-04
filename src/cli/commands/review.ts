@@ -535,12 +535,15 @@ export function registerReview(program: Command): void {
 
       console.log(`Review ${reviewId} — ticket ${ticketId}, candidate ${candidate}`);
       console.log(`  workspace: ${workspace.dir} (recorded on the review; later stages act on it, not on cwd)`);
-      console.log(
-        `  base sha: ${base.baseSha}` +
-          (base.inferredFrom !== undefined
-            ? ` (inferred from the oldest commit referencing ${ticketId}, ${base.inferredFrom.slice(0, 9)})`
-            : ` (--since)`),
-      );
+      // FG-674: the BASIS is stated, not implied — which of the three rules produced this base.
+      const basis =
+        base.basis === "since"
+          ? `--since`
+          : base.basis === "merge-base"
+            ? `merge-base with ${base.defaultBranch} — the branch point of this feature branch`
+            : `ticket-range inference — inferred from the oldest commit referencing ${ticketId} that changes ` +
+              `implementation files, ${(base.inferredFrom ?? "").slice(0, 9)}`;
+      console.log(`  base sha: ${base.baseSha} (basis: ${basis})`);
       if (base.spansUnmatched === true) {
         console.log(
           `  note: that range also spans commits which do not reference ${ticketId}, so the confirmation diff ` +
