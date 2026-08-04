@@ -81,6 +81,13 @@ const POLICY: Record<FailureKind, RetryDisposition> = {
   lane_taken_over:      { retryable: true, reason: "this attempt's publication-lane lease lapsed and a later attempt claimed the lane (AD-2/AD-7). Terminal for this attempt only — nothing was published and nothing needs reaping", advice: "retry to enqueue a NEW publication attempt with a fresh candidate worktree" },
 
   verification_environment_unavailable: { retryable: true, reason: "dependency provisioning failed before the verification could run — the tests never got a verdict", advice: "check the project's dependency install (network, registry auth, lockfile) before retrying" },
+
+  // FG-678 (AC3): the agent ran, wrote a well-formed result, and declared its own
+  // work failed. NOT retryable by default: a blind re-dispatch re-runs identical
+  // inputs against whatever the agent reported as the obstacle, which is the same
+  // reasoning that makes gate_rejected and red_blocked non-retryable. The agent's
+  // own stated reason is on the task's error, so the remediation starts there.
+  agent_reported_failure: { retryable: false, reason: "the agent reported its own work as failed (result.json declared status: failed); a retry would re-dispatch identical inputs against the obstacle the agent named", advice: "read the agent's reported reason (`forge show <id>`) and address it — or pass --force to re-dispatch unchanged if the obstacle was transient" },
 };
 
 const NO_KIND: RetryDisposition = { retryable: true, reason: "no recorded failure kind; re-dispatch" };

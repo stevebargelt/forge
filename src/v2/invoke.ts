@@ -857,8 +857,20 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     });
   };
 
+  // FG-678 (BD-1, AC1): shape-agnostic. Both mount modes resolve through the SAME
+  // call, because the defect this fixes is that ONLY the read-only lane had one: a
+  // writable `forge invoke` fell through to spawn.ts's anonymous node_modules
+  // shadow, which starts empty, masks whatever the project bind carries at that
+  // path, and dies with the container. Whether an agent then noticed and
+  // self-installed was left to the agent — the platform decided nothing, so two
+  // interchangeable dispatches got different worlds. The environment is
+  // established by the platform BEFORE the container, or the dispatch is refused.
+  //
+  // The escape hatches are unchanged and still short-circuit inside the resolver:
+  // non-darwin, FORGE_NO_NM_SHADOW=1 and a runtime that mounts no project all
+  // return `not_applicable`, dispatch normally, and record no receipt.
   let dependencyEnvironment: DependencyEnvironmentReceipt | undefined;
-  if (args.readOnlyProject) {
+  {
     const resolved = await prepareDependencyEnvironmentForDispatch({
       runtime,
       taskId,
@@ -870,8 +882,10 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     if (resolved.outcome === "refused") {
       const error =
         `verification_environment_unavailable (${resolved.reason}): ${resolved.detail}. No agent container was ` +
-        `started. A read-only reviewer that cannot load the project's real native dependencies is refused rather ` +
-        `than run against a substituted implementation — see FG-664.`;
+        `started. A dispatch that cannot be given the project's real native dependencies is refused rather than ` +
+        `run against a substituted or absent implementation — a read-only reviewer would verify the wrong ` +
+        `implementation (FG-664), and a writable agent would be handed a workspace whose declared dependencies ` +
+        `are simply not there (FG-678).`;
       // The EXISTING event for "this dispatch's dependency environment could not be
       // established" — no new vocabulary. `stage: "environment_resolution"` and the
       // classified `reason` are what distinguish a probe/attestation refusal from the
@@ -907,6 +921,24 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
   }
 
   writeDispatchManifest({ ...(dependencyEnvironment ? { dependencyEnvironment } : {}) });
+
+  // FG-678: the package was materialized above, BEFORE the environment resolved —
+  // so the receipt-bearing section can only be rendered here. Re-render both
+  // copies from one string: /task/package.md and the TASK_PACKAGE_MARKDOWN the
+  // runtime delivers must not be able to disagree about what the agent was told.
+  const taskPackageMarkdown = renderInvokeTaskPackage(taskPackage, args.taskText, dependencyEnvironment);
+  try {
+    writeFileSync(join(dir, "package.md"), taskPackageMarkdown);
+  } catch (e) {
+    const error =
+      `the task package could not be re-written with this dispatch's dependency-environment contract ` +
+      `(${(e as Error).message}) — refused rather than start a container whose /task/package.md and delivered ` +
+      `prompt disagree. No container started.`;
+    cleanupStagedAuth(dir); // AWN-8
+    failTask(taskId, { runId, kind: classify({}), error });
+    closeRunIfIdle(false);
+    return { runId, taskId, status: "failed", error };
+  }
 
   // Usage attribution: prefer the resolved capability alias (policy mode); fall
   // back to the workflow-declared alias (legacy, where resolution.alias is unset).
@@ -950,11 +982,15 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     // branch was already correct — it was simply never told the truth on this path
     // (invoke set neither flag, so every reviewer ran with no dependency mount at
     // all and saw the host's wrong-platform modules through the `:ro` project bind).
+    // FG-678: the flag is now set on BOTH mount modes, from the same fact — a
+    // receipt exists, so the host attested an environment for this dispatch. It is
+    // the mount planner's business what to do with that on an rw dispatch; this
+    // file's business is only to state, truthfully, that an environment was bound.
     ...(dependencyEnvironment ? { DEPENDENCY_CACHE_MOUNT_RO: "1" } : {}),
     MODEL: resolution.model,
     UPSTREAM_PROVIDER: resolution.provider ?? "",
     SYSTEM_PROMPT: systemPrompt,
-    TASK_PACKAGE_MARKDOWN: renderInvokeTaskPackage(taskPackage, args.taskText),
+    TASK_PACKAGE_MARKDOWN: taskPackageMarkdown,
     DESIGN_DIR: args.designDir,
     AUTH_STATE_HOST_PATH: authStateHostPath,
   };
@@ -1224,6 +1260,35 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
     }
   }
 
+  // FG-678 (AC3, BD-4): honour the agent's OWN declared outcome. Everything above
+  // classifies what happened TO a dispatch (crash, timeout, missing/malformed
+  // result); this is the one case where the container ran, wrote a well-formed
+  // result, and said in it that the work did not succeed. That statement used to
+  // be dropped on the floor — markTaskComplete below was unconditional — so a
+  // test-engineer that reported "validation is blocked, I could not execute
+  // anything" landed a `complete` task row and the run finished looking healthy.
+  //
+  // Deliberately BEFORE the persistence assertion: an agent that failed partway
+  // may well name files it never landed, and #254's "the work was discarded"
+  // message would then replace the agent's own, more accurate reason. A task that
+  // says it failed fails for the reason it gave.
+  //
+  // BOUNDED per BD-4: this reads the agent's declared `status` and nothing else.
+  // It does not consult the validation contract — IMPLEMENTER_ROLES, the tests_run
+  // gate and invoke's ungated ad-hoc completions are untouched (FG-524/FG-525 stay
+  // undecided). Blast radius stated plainly: this is every invoke role, reds,
+  // research and architect dispatches included.
+  if (agentDeclaredFailure(result)) {
+    const error = agentReportedFailureMessage(result);
+    failTask(taskId, { runId, kind: "agent_reported_failure", error, result });
+    // The result is preserved on the row (failTask carries it), so the agent's
+    // own reasoning survives for `forge show`. Retain the container: a failed
+    // task is still something an operator may want to look inside.
+    finalizeContainerRetention(containerName, false);
+    closeRunIfIdle(false);
+    return { runId, taskId, status: "failed", result, error, failureKind: "agent_reported_failure" };
+  }
+
   // #254: persistence assertion (rw project only — a read-only mount can't
   // persist by design, so files_modified there isn't loss). If the result claims
   // files but none reached the host, the work was discarded; fail loudly.
@@ -1260,6 +1325,32 @@ export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<
 }
 
 // --- Helpers ---
+
+/** FG-678 (AC3): does this parsed result declare its OWN work failed?
+ *
+ *  Deliberately narrow — the LITERAL string "failed" on a top-level `status`, the
+ *  exact field every invoke role's output contract already asks for ("Write a
+ *  single JSON object … {"status": "complete"|"failed", …}"). Nothing is inferred
+ *  from an `error` key, a falsy `ok`, or a nested verdict: a result that never
+ *  claimed to fail must not be failed on its behalf, and roles whose schemas use
+ *  other fields for other meanings are untouched. */
+function agentDeclaredFailure(result: unknown): boolean {
+  if (typeof result !== "object" || result === null) return false;
+  return (result as { status?: unknown }).status === "failed";
+}
+
+/** The task's error line for an agent-declared failure. Prefers whatever reason
+ *  the agent itself recorded — that text is the whole point of honouring the
+ *  declaration — and falls back to naming the declaration alone when the result
+ *  carries no readable reason. */
+function agentReportedFailureMessage(result: unknown): string {
+  const r = result as Record<string, unknown>;
+  const reason = [r["error"], r["reason"], r["notes"]].find(
+    (v): v is string => typeof v === "string" && v.trim().length > 0,
+  );
+  const base = `agent_reported_failure: the agent's result.json declared status: "failed"`;
+  return reason === undefined ? `${base} (no reason recorded in the result).` : `${base} — ${reason.trim()}`;
+}
 
 // FG-487: exported so callers that must create the run row EAGERLY — before any
 // task dispatch — can reuse the exact same run-creation primitive `invoke()`
@@ -1316,7 +1407,36 @@ function previousFailureSection(tp: TaskPackage): string[] {
   ];
 }
 
-function renderInvokeTaskPackage(tp: TaskPackage, task: string): string {
+// FG-678: the agent is TOLD what its dependency environment is, rather than left
+// to discover it. The section is emitted only when the host actually bound one —
+// there is no honest sentence to write about a dispatch that resolved
+// `not_applicable`, and inventing one is how "the workspace has no deps" gets
+// asserted about a workspace nobody checked. Read-only and read-write dispatches
+// get the same text: the environment is immutable on both, because the volumes are
+// mounted `:ro` either way (the writable bind is the PROJECT, not its
+// node_modules).
+function dependencyEnvironmentSection(receipt: DependencyEnvironmentReceipt | undefined): string[] {
+  if (!receipt) return [];
+  return [
+    `## Dependency environment`,
+    ``,
+    `Forge resolved and attested this dispatch's dependency environment on the host BEFORE your container ` +
+      `started: the project's declared dependencies, keyed to its lockfile (cacheKey ${receipt.cacheKey}, ` +
+      `node ${receipt.nodeVersion}, ABI ${receipt.abi}), mounted read-only over the project's node_modules.`,
+    ``,
+    `It is IMMUTABLE for this dispatch. Do not run \`npm ci\` / \`npm install\` / \`yarn\` / \`pnpm install\` — the ` +
+      `mount is read-only, so an install cannot write into it, and nothing you install could outlive this ` +
+      `container anyway. If the work genuinely requires a dependency this environment does not carry, say so in ` +
+      `result.json and fail the task rather than improvising an install.`,
+    ``,
+  ];
+}
+
+function renderInvokeTaskPackage(
+  tp: TaskPackage,
+  task: string,
+  dependencyEnvironment?: DependencyEnvironmentReceipt,
+): string {
   return [
     `# Task ${tp.taskId}`,
     ``,
@@ -1328,6 +1448,7 @@ function renderInvokeTaskPackage(tp: TaskPackage, task: string): string {
     task,
     ``,
     ...previousFailureSection(tp),
+    ...dependencyEnvironmentSection(dependencyEnvironment),
     `## Output contract`,
     ``,
     `Write a single JSON object to /task/result.json. At minimum: {"status": "complete"|"failed", ...your role-specific output}.`,

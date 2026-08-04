@@ -150,6 +150,7 @@ export type FailureKind =
   | "red_blocked"
   | "gate_rejected"
   | "verification_environment_unavailable"  // FG-376: dependency provisioning failed before tests could run
+  | "agent_reported_failure"  // FG-678 (AC3): the agent's own result.json declared `status: "failed"`. The container ran and wrote a well-formed result — the work simply did not succeed, and the agent said so. Terminal for the task; the agent's stated reason is the error. Distinct from every kind above, which describe what happened TO a dispatch rather than what the agent reported about it.
   | "pre_container_crash"  // FG-533: the forge process died between markTaskRunning and container.started — no container ran, no work exists; reconcile's pre-container sweep lands this and a plain `forge retry` re-dispatches
   | "unknown";
 
