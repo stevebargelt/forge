@@ -41,7 +41,7 @@ test("no viewport breakpoint sizes the chart's labels — that is measured in th
 
 test("the chart's caption text is not painted in the sub-AA --fg-faint token", () => {
   const shell = renderShell();
-  for (const selector of [".runtime-caption", ".runtime-table caption"]) {
+  for (const selector of [".runtime-caption", ".runtime-table caption", ".runtime-bucket-values"]) {
     const body = ruleBody(shell, selector);
     assert.match(body, /color: var\(--fg-dim\)/, `${selector} must use the AA-contrast token`);
     assert.doesNotMatch(body, /color: var\(--fg-faint\)/, `${selector} is 2.74:1 on --bg-elev in --fg-faint`);

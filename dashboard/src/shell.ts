@@ -916,6 +916,27 @@ section.home-view section.in-flight { margin-top: 0; }
  * measures the rendered width and sizes the labels in user units off it. That
  * holds them at RUNTIME_AXIS_TARGET_PX at EVERY width. A font-size declared here
  * would outrank the presentation attribute and break that. */
+/* The per-bucket values, shown only when the chart is too dense to label every
+ * bar on the plot itself. aria-hidden: the sr-only table below already carries
+ * the same rows, and a screen reader should hear them once. */
+.runtime-bucket-values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+.runtime-bucket-values li {
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  white-space: nowrap;
+}
+.runtime-bucket-values .mono { color: var(--fg); }
 .runtime-caption {
   font-size: 11px;
   color: var(--fg-dim);
