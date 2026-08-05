@@ -647,6 +647,151 @@ describe("a refused claim writes nothing", () => {
     assert.equal(liveClaimCount("host", PK), 1, "the ceiling held under the in-transaction recount");
   });
 
+  test("lost: a BETTER-RANKED ticket that becomes eligible between the scan and the claim is never jumped", () => {
+    seedQueued(["FG-1", "FG-2"]);
+    writeTransaction(() => upsertTicket(ticket("FG-1", { status: "deferred" })));
+
+    let afterHook = "";
+    setClaimPhaseHookForTest((candidate) => {
+      setClaimPhaseHookForTest(null);
+      assert.equal(candidate, "FG-2", "the scan legitimately chose FG-2 — FG-1 was deferred when it looked");
+      // The operator un-defers the canonical head while our scan is unlocked. Its
+      // content hash returns to what the stored assessment is bound to, so FG-1 is
+      // eligible again — ahead of the candidate we are about to claim.
+      writeTransaction(() => upsertTicket(ticket("FG-1")));
+      afterHook = fullDump();
+    });
+
+    const candidateRevisionAtScan = getTicket(PK, "FG-2")!.revision;
+    const out = claimNext();
+    assert.equal(out.claimed, null);
+    assert.equal(out.reason, "lost", "the SCAN went stale, not merely the candidate");
+    assert.equal(fullDump(), afterHook, "the refused claim wrote NOTHING");
+
+    // FALSIFICATION: every fact a CANDIDATE-ONLY re-validation re-reads is still
+    // exactly as the scan saw it, so the pre-fix phase 2 grants FG-2 and the grant
+    // silently jumps the operator's canonical order.
+    assert.equal(getTicket(PK, "FG-2")!.revision, candidateRevisionAtScan, "FALSIFICATION: the candidate's revision never moved");
+    assert.equal(readinessView(PK, "FG-2")!.stale, false, "FALSIFICATION: the candidate's readiness never moved");
+    assert.equal(getTicket(PK, "FG-2")!.status, "active", "FALSIFICATION: nor its status, membership or rank");
+    assert.equal(liveClaims(PK).length, 0, "FALSIFICATION: nor was it claimed by anyone");
+
+    // And the refusal is a RESTART, not a deadlock: the very next scan grants the
+    // head of the canonical order.
+    const again = claimNext();
+    assert.equal(again.claimed?.ticketId, "FG-1", "the re-scan claims the ticket that became eligible");
+  });
+
+  test("lost: a ticket ENQUEUED at a better rank between the scan and the claim also restarts the scan", () => {
+    seedQueued(["FG-2"]);
+    // FG-1 is ranked ahead of FG-2 but was never selected for execution, so the scan
+    // names it not_a_queue_member and moves on.
+    writeTransaction(() => upsertTicket(ticket("FG-1")));
+    rankTicket(PK, "FG-1", 1);
+
+    setClaimPhaseHookForTest(() => {
+      setClaimPhaseHookForTest(null);
+      assert.equal(enqueueTicket(PK, "FG-1").ok, true, "the operator selects the higher-ranked ticket mid-scan");
+    });
+    const out = claimNext();
+    assert.equal(out.reason, "lost");
+    assert.equal(reasonFor(out.scanned, "FG-1"), "not_a_queue_member", "which is what the stale scan believed");
+    assert.equal(liveClaims(PK).length, 0, "nothing was claimed out of order");
+    assert.equal(claimNext().claimed?.ticketId, "FG-1", "and the re-scan honours the new membership");
+  });
+
+  test("the rank re-check never fires on an exclusion the STORE cannot re-derive: a predicate-rejected head does not deadlock the queue", () => {
+    seedQueued(["FG-1", "FG-2"]);
+    // The predicate is not re-run inside the write transaction (it is caller code, and
+    // the write lock is machine-wide), so FG-1 looks plainly eligible to any SQL the
+    // re-check could run. Treating it as an intruder would refuse EVERY attempt
+    // forever — the scan's own named reason is what keeps this a hardening rather
+    // than a livelock.
+    const rejectFg1 = {
+      isCompatible: (candidate: { ticketId: string }) =>
+        candidate.ticketId === "FG-1"
+          ? ({ compatible: false, reason: "touches the same migration as an active run" } as const)
+          : ({ compatible: true } as const),
+    };
+    const first = claimNext(rejectFg1);
+    assert.equal(first.claimed?.ticketId, "FG-2");
+    releaseClaim({ projectKey: PK, claimId: first.claimed!.id, owner: "ctl-1", generation: 1, outcome: "done" });
+    assert.equal(claimNext(rejectFg1).claimed?.ticketId, "FG-2", "and again, and again — the queue still moves");
+  });
+
+  test("the rank re-check never fires on a CAPACITY exclusion either: recovery still works at a full ceiling", () => {
+    seedQueued(["FG-1", "FG-2"]);
+    const a = claimNext({ owner: "ctl-a", capacity: 2 });
+    const b = claimNext({ owner: "ctl-b", capacity: 2 });
+    assert.equal(a.claimed?.ticketId, "FG-1");
+    assert.equal(b.claimed?.ticketId, "FG-2");
+    releaseClaim({ projectKey: PK, claimId: a.claimed!.id, owner: "ctl-a", generation: 1, outcome: "done" });
+    setPublicationClockOffsetForTest(TTL + 1); // ctl-b crashed: FG-2's lease lapsed.
+
+    // FG-1 is now free and ranked FIRST, but the ceiling of 1 has no room to admit it;
+    // the only grant available is the CAPACITY-NEUTRAL takeover of FG-2. A rank
+    // re-check that counted the capacity-excluded head as an intruder would make the
+    // full ceiling a permanent deadlock instead of an admission test.
+    const out = claimNext({ owner: "ctl-c", capacity: 1 });
+    assert.equal(out.reason, "granted");
+    assert.equal(out.claimed?.ticketId, "FG-2");
+    assert.ok(out.takenOverFrom, "the grant recovered rather than admitted");
+    assert.equal(reasonFor(out.scanned, "FG-1"), "capacity");
+  });
+
+  test("lost: the ACTIVE-CLAIM SET moving under a compatibility predicate refuses rather than admitting", () => {
+    seedQueued(["FG-1"], PK);
+    seedQueued(["FG-9"], PK2);
+    let afterHook = "";
+    setClaimPhaseHookForTest(() => {
+      setClaimPhaseHookForTest(null);
+      // A rival dispatcher takes a host-scope slot on ANOTHER project's ticket. Our
+      // candidate is untouched, the ceiling is nowhere near — what moved is the set
+      // the predicate was shown, and its verdict is now about a host that no longer
+      // exists. Two dispatchers each seeing "no conflicting claim" and then
+      // serializing their writes is how two incompatible tickets both get admitted.
+      assert.ok(
+        claimNextEligible({ projectKey: PK2, owner: "rival", capacity: 10, capacityScope: "host", leaseTtlMs: TTL }).claimed,
+      );
+      afterHook = fullDump();
+    });
+
+    let sawActive = -1;
+    const out = claimNextEligible({
+      projectKey: PK,
+      owner: "late",
+      capacity: 10,
+      capacityScope: "host",
+      leaseTtlMs: TTL,
+      isCompatible: (_candidate, active) => {
+        sawActive = active.length;
+        return { compatible: true };
+      },
+    });
+    assert.equal(out.claimed, null);
+    assert.equal(out.reason, "lost");
+    assert.equal(sawActive, 0, "the predicate was shown an EMPTY active set — precisely the fact that moved");
+    assert.equal(fullDump(), afterHook, "the refused claim wrote NOTHING");
+    assert.equal(liveClaims(PK).length, 0, "no incompatible second admission");
+  });
+
+  test("a caller with NO predicate is not refused for an active-claim set it never consulted", () => {
+    seedQueued(["FG-1"], PK);
+    seedQueued(["FG-9"], PK2);
+    setClaimPhaseHookForTest(() => {
+      setClaimPhaseHookForTest(null);
+      assert.ok(
+        claimNextEligible({ projectKey: PK2, owner: "rival", capacity: 10, capacityScope: "host", leaseTtlMs: TTL }).claimed,
+      );
+    });
+    // Same race, same moving set — but the only way the set entered this decision is
+    // the ceiling, which is recounted in the transaction. Refusing here would be a
+    // gratuitous restart on the busiest path in the system.
+    const out = claimNextEligible({ projectKey: PK, owner: "late", capacity: 10, capacityScope: "host", leaseTtlMs: TTL });
+    assert.equal(out.reason, "granted");
+    assert.equal(out.claimed?.ticketId, "FG-1");
+  });
+
   test("the store-level backstop: idx_queue_claims_live rejects a second live claim even without the CAS", () => {
     seedQueued(["FG-1"]);
     const first = claimNext();
@@ -885,6 +1030,114 @@ describe("lease, fencing and takeover", () => {
         .run(successor.id, PK, successor.owner, successor.generation).changes,
       1,
       "FALSIFICATION: without the expiry term a dead lease renews itself back out of the recovery set",
+    );
+  });
+
+  test("the expired-lease fence covers the WHOLE owner-authorized surface, one audit rather than one verb at a time", () => {
+    seedQueued(["FG-1"]);
+    const claim = claimNext().claimed!;
+    setPublicationClockOffsetForTest(10 * TTL);
+
+    const before = fullDump();
+    const fenced = { projectKey: PK, claimId: claim.id, owner: "ctl-1", generation: 1 };
+    assert.equal(claimIsStillHeld(fenced), false, "the pre-work fence");
+    assert.equal(heartbeatClaim({ ...fenced, leaseTtlMs: TTL }), null, "the renewal");
+    assert.equal(recordClaimLaunch({ ...fenced, launchId: "launch-A" }), null, "the durable pre-launch stamp");
+    assert.equal(releaseClaim({ ...fenced, outcome: "completed" }), null, "the retirement");
+    assert.equal(fullDump(), before, "not one of the four wrote a row");
+    assert.equal(
+      recoverableClaims("project", PK).length,
+      1,
+      "and at that same instant the row is takeable — the authorization and recovery surfaces never contradict",
+    );
+  });
+
+  test("an EXPIRED owner cannot STAMP a launch: the pre-launch record fails closed exactly like the heartbeat", () => {
+    seedQueued(["FG-1"]);
+    const claim = claimNext().claimed!;
+    setPublicationClockOffsetForTest(10 * TTL);
+
+    const before = fullDump();
+    assert.equal(
+      recordClaimLaunch({ projectKey: PK, claimId: claim.id, owner: "ctl-1", generation: 1, launchId: "launch-A", runId: "run-A" }),
+      null,
+      "a lapsed lease authorizes nothing, and this is the act a physical launch follows",
+    );
+    assert.equal(fullDump(), before, "the refused stamp changed zero rows");
+    assert.equal(getClaim(PK, claim.id)!.launchId, null);
+
+    // FALSIFICATION: the pre-fix CAS — owner + generation + state, no lease term —
+    // stamps it, so an expired owner is recorded as launching a container for a claim
+    // the recovery surface is offering for takeover at that same instant.
+    assert.equal(
+      db
+        .prepare(
+          `UPDATE queue_claims SET launch_id = ?
+            WHERE id = ? AND project_key = ? AND owner = ? AND generation = ? AND state = 'live'`,
+        )
+        .run("launch-A", claim.id, PK, "ctl-1", 1).changes,
+      1,
+      "FALSIFICATION: without the lease term an expired owner stamps the launch it is not authorized to make",
+    );
+    assert.equal(recoverableClaims("project", PK).length, 1, "...while the same row is takeable");
+  });
+
+  test("an EXPIRED owner cannot RELEASE: retiring the row would delete the recovery record for a container that may still be running", () => {
+    seedQueued(["FG-1"]);
+    const claim = claimNext().claimed!;
+    recordClaimLaunch({ projectKey: PK, claimId: claim.id, owner: "ctl-1", generation: 1, launchId: "launch-A", runId: "run-A" });
+    setPublicationClockOffsetForTest(10 * TTL);
+    assert.equal(recoverableClaims("project", PK).length, 1, "precondition: the claim is the recovery record");
+
+    const before = fullDump();
+    assert.equal(
+      releaseClaim({ projectKey: PK, claimId: claim.id, owner: "ctl-1", generation: 1, outcome: "completed" }),
+      null,
+      "the ORIGINAL owner at the CURRENT generation fails closed once its lease has lapsed",
+    );
+    assert.equal(fullDump(), before, "the refused release changed zero rows");
+    assert.equal(recoverableClaims("project", PK).length, 1, "and the recovery record survives");
+
+    // FALSIFICATION, in two halves. (a) The pre-fix CAS matches and retires the row.
+    assert.equal(
+      db
+        .prepare(
+          `UPDATE queue_claims SET state = 'released', outcome = ?, released_at = ?
+            WHERE id = ? AND project_key = ? AND owner = ? AND generation = ? AND state = 'live'`,
+        )
+        .run("completed", NOW, claim.id, PK, "ctl-1", 1).changes,
+      1,
+      "FALSIFICATION: without the lease term an expired owner retires its own claim",
+    );
+    // (b) The consequence, which is the whole finding: the next claimant is admitted
+    // as a FRESH claim — no takenOverFrom, no prior launch identity — so it launches a
+    // second container for work whose first container may still be running. Expiry
+    // proves heartbeating stopped, never that the process stopped.
+    const successor = claimNext({ owner: "ctl-2" });
+    assert.equal(successor.reason, "granted");
+    assert.equal(successor.takenOverFrom, null, "FALSIFICATION: recovery was bypassed — no predecessor to adopt");
+    assert.equal(successor.claimed!.launchId, null, "FALSIFICATION: and no pointer to the container still holding launch-A");
+  });
+
+  test("the way back in for an expired owner is a TAKEOVER, which preserves the record it would have erased", () => {
+    seedQueued(["FG-1"]);
+    const claim = claimNext().claimed!;
+    recordClaimLaunch({ projectKey: PK, claimId: claim.id, owner: "ctl-1", generation: 1, launchId: "launch-A" });
+    setPublicationClockOffsetForTest(10 * TTL);
+
+    const recovered = takeoverExpiredClaim({ projectKey: PK, claimId: claim.id, owner: "ctl-1", leaseTtlMs: TTL });
+    assert.equal(recovered.claimed?.generation, 2, "the fencing generation is bumped, even for the same owner");
+    assert.equal(recovered.claimed !== null ? recovered.takenOverFrom.launchId : null, "launch-A", "the prior launch is handed over, not erased");
+    assert.ok(
+      releaseClaim({ projectKey: PK, claimId: recovered.claimed!.id, owner: "ctl-1", generation: 2, outcome: "completed" }),
+      "and the recoverer, holding a LIVE lease, releases normally",
+    );
+    assert.deepEqual(
+      claimHistoryForTicket(PK, "FG-1").map((c) => [c.generation, c.state, c.outcome]),
+      [
+        [1, "released", TAKEOVER_OUTCOME],
+        [2, "released", "completed"],
+      ],
     );
   });
 

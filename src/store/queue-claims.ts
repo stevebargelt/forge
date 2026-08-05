@@ -46,6 +46,29 @@
 // because publications.ts calls this lane the highest-contention cross-process write
 // path in the system.
 //
+// WHAT PHASE 2 RE-VALIDATES IS THE WHOLE DECISION, NOT THE CHOSEN ROW. The scan's
+// answer is "the FIRST eligible entry in canonical rank order, compatible with the
+// active claims it was shown". Re-checking only the chosen candidate would prove the
+// weaker claim "this row is still eligible", so phase 2 re-checks all three legs:
+//   * the candidate's own durable facts (revision, membership, rank, status, queue
+//     blocked, readiness, holder, ceiling);
+//   * that no STRICTLY BETTER-RANKED queue member became eligible while the scan ran
+//     unlocked (an un-defer, an enqueue, a reorder, an unblock, a readiness recheck,
+//     a lease that lapsed) — otherwise a grant silently jumps the canonical order;
+//   * that the ACTIVE-CLAIM SET the compatibility predicate was shown is unchanged —
+//     otherwise two dispatchers each see "no conflicting claim", both get
+//     compatible=true, and serialize their writes into two incompatible grants.
+// Any of the three moving is a `lost` refusal: the SCAN is stale, so the caller
+// re-scans. Nothing is written on that path.
+//
+// The predicate itself is still NOT re-run inside the transaction. Detecting that the
+// active set CHANGED is a cheap store read; re-running caller code under the
+// machine-wide write lock is the thing phase 1 exists to avoid, and the difference
+// between the two is why this hardening does not cost the purity contract. The
+// accepted cost, stated rather than discovered: a claim that races an unrelated
+// grant/release in its capacity scope refuses instead of admitting, so a busy host
+// trades a few extra scans for never admitting against a snapshot that moved.
+//
 // ─── DURABLE EVIDENCE IS BOUND TO A DECISION, NOT TO A POLL ──────────────────
 // A GRANTED claim persists the scan evidence that produced it (scan_evidence) and
 // appends one `claim` queue_event in the SAME transaction. A scan that grants
@@ -66,13 +89,21 @@
 // claim that republished snapshots machine-wide would be pure blast radius.
 //
 // ─── AN EXPIRED LEASE AUTHORIZES NOTHING, AND RENEWS NOTHING ─────────────────
-// Two predicates decide whether a controller may drive: claimIsStillHeld (the
-// pre-work fence) and heartbeatClaim's CAS (the renewal). BOTH carry
-// `lease_expires_at_ms >= now` alongside the owner+generation fence, exactly as
-// campaign-controller.ts:campaignLeaseHeldBy and renewCampaignLease do, and for the
-// same reason stated there: an expired former owner — stale generation OR a lease
-// that merely lapsed — is fenced and the caller FAILS CLOSED rather than driving
-// under a dead lease.
+// EVERY entry point that reads or writes claim state under an owner+generation fence
+// carries `lease_expires_at_ms >= now` on the STORE clock beside it — claimIsStillHeld
+// (the pre-work fence), heartbeatClaim (the renewal), recordClaimLaunch (the durable
+// pre-launch stamp) and releaseClaim (the retirement). That list is the audit, not a
+// sample: the fence is a property of the OWNER-AUTHORIZED surface, so it is stated
+// once over the whole surface rather than added to one path at a time. It is
+// campaign-controller.ts:campaignLeaseHeldBy and renewCampaignLease's predicate, for
+// the reason stated there: an expired former owner — stale generation OR a lease that
+// merely lapsed — is fenced and the caller FAILS CLOSED rather than driving under a
+// dead lease.
+//
+// The two takeover CASes carry the MIRROR term (`lease_expires_at_ms < now`), because
+// they are the recovery direction rather than the authorization direction. Between
+// them the surface is total: at any instant a claim is either drivable by its owner or
+// takeable by a recoverer, never both and never neither.
 //
 // Dropping either term is a duplicate-execution vector, not a nicety. Without it
 // recoverableClaims and claimIsStillHeld CONTRADICT each other over the same row at
@@ -80,6 +111,15 @@
 // still authorized" — and a heartbeat can RESURRECT a claim out of the recovery set
 // after a recovery controller has already decided to adopt it. The two surfaces are
 // tested to be mutually exclusive at every instant.
+//
+// releaseClaim is on that list for the same reason as the rest, and the consequence is
+// worth naming because it reads like over-refusal until it is: an expired owner CANNOT
+// retire its own claim. Releasing sets state='released' and thereby DELETES the
+// recovery record — the successor would then find no live predecessor, get no
+// takenOverFrom and no prior launch identity, and start a second container for work
+// whose first container may still be running (expiry proves only that heartbeating
+// stopped). An expired owner's way back in is takeoverExpiredClaim, which bumps the
+// fencing generation and PRESERVES the retired row as history.
 //
 // ─── THE LAUNCH IDENTITY IS WRITE-ONCE PER GENERATION ────────────────────────
 // recordClaimLaunch stamps ONLY the fields it was given: a call carrying just a
@@ -589,6 +629,87 @@ function scanDomain(projectKey: string): CandidateRow[] {
  *  FG-382 assessment and its staleness, and evaluateReadiness is NOT re-run. */
 const EXECUTABLE_OUTCOMES = new Set(["ready", "exploratory"]);
 
+/** THE RANK-ORDER RE-CHECK. The first STRICTLY better-ranked queue member that is
+ *  plainly eligible now, or null. Called inside the write transaction, so it re-reads
+ *  what the store says at THIS instant rather than what the unlocked scan saw.
+ *
+ *  Ordering is FG-609's total order — `(rank ASC, ticket_id ASC)` — so "better ranked"
+ *  is the same relation the scan walked, and a ticket that appeared or moved between
+ *  the phases is covered as well as one whose exclusion lapsed.
+ *
+ *  ONLY STORE-COMPUTABLE EXCLUSIONS ARE APPLIED, and that is the load-bearing part:
+ *  the caller's predicate is not re-run here (it must not run under the write lock),
+ *  so a candidate the predicate REJECTED in phase 1 would look "eligible" to this
+ *  query and abort every attempt forever. The scan's own named reasons are what
+ *  prevent that livelock: an entry the scan excluded as `incompatible` (the predicate's
+ *  verdict) or `capacity` (the ceiling, re-tested separately below) is skipped, and
+ *  everything else — deferred, not_active, unranked, not_a_queue_member, queue_blocked,
+ *  readiness_ineligible, already_claimed — is a DURABLE fact that may genuinely have
+ *  moved, so it is re-derived.
+ *
+ *  The SQL narrows to rows that could possibly qualify; the exclusions that are not
+ *  expressible in one statement (the queue-blocked derivation over all evidence kinds,
+ *  and readiness STALENESS, which is a content hash) are then answered by queue.ts's
+ *  own predicates — never by a second copy of that vocabulary living in this file. */
+function firstBetterRankedEligible(
+  projectKey: string,
+  candidate: { ticketId: string; rank: number },
+  scanReasonByTicket: Map<string, ScanReason>,
+  txnNow: number,
+): string | null {
+  const outcomes = [...EXECUTABLE_OUTCOMES];
+  const rows = getDb()
+    .prepare(
+      `SELECT t.ticket_id
+         FROM tickets t
+         JOIN queue_membership m
+           ON m.project_key = t.project_key AND m.ticket_id = t.ticket_id
+         JOIN readiness_assessments r
+           ON r.project_key = t.project_key AND r.ticket_id = t.ticket_id
+         LEFT JOIN queue_claims c
+           ON c.project_key = t.project_key AND c.ticket_id = t.ticket_id AND c.state = 'live'
+        WHERE t.project_key = ?
+          AND t.status = 'active'
+          AND t.priority_rank IS NOT NULL
+          AND (t.priority_rank < ? OR (t.priority_rank = ? AND t.ticket_id < ?))
+          AND r.outcome IN (${outcomes.map(() => "?").join(", ")})
+          AND (c.id IS NULL OR c.lease_expires_at_ms < ?)
+        ORDER BY t.priority_rank ASC, t.ticket_id ASC`,
+    )
+    .all(projectKey, candidate.rank, candidate.rank, candidate.ticketId, ...outcomes, txnNow) as {
+    ticket_id: string;
+  }[];
+
+  for (const row of rows) {
+    const scanned = scanReasonByTicket.get(row.ticket_id);
+    if (scanned === "incompatible" || scanned === "capacity") continue;
+    if (isQueueBlocked(projectKey, row.ticket_id)) continue;
+    const readiness = readinessView(projectKey, row.ticket_id);
+    if (!readiness || readiness.stale || !EXECUTABLE_OUTCOMES.has(readiness.outcome)) continue;
+    return row.ticket_id;
+  }
+  return null;
+}
+
+/** THE IDENTITY of the active-claim set a compatibility predicate was shown — what
+ *  changing it would invalidate the predicate's verdict, in one comparable string.
+ *
+ *  It covers WHICH claims exist and what they are (claim id, ticket, owner, fencing
+ *  generation, launch identity) and deliberately NOT `leaseExpiresAtMs` /
+ *  `heartbeatAtMs`. Every live claim's lease moves every heartbeat interval, and a
+ *  claim waiting on the machine-wide write lock can wait seconds — folding the lease
+ *  in would make an ordinary heartbeat elsewhere on the host refuse this claim, which
+ *  is contention converted into starvation. A lease moving does not change WHAT is
+ *  reserved; a claim appearing, being taken over, being released or being stamped
+ *  does. Sorted by claim id so two reads of the same set always compare equal. */
+function activeSetFingerprint(active: readonly ActiveClaimSummary[]): string {
+  return JSON.stringify(
+    active
+      .map((a) => [a.claimId, a.projectKey, a.ticketId, a.owner, a.generation, a.launchId, a.runId])
+      .sort((x, y) => String(x[0]).localeCompare(String(y[0]))),
+  );
+}
+
 // ─── claim-next (THE canonical atomic claim-next query) ──────────────────────
 
 export function claimNextEligible(req: ClaimNextRequest): ClaimNextResult {
@@ -609,6 +730,10 @@ export function claimNextEligible(req: ClaimNextRequest): ClaimNextResult {
   const liveByTicket = new Map(live.map((c) => [c.ticketId, c]));
   const activeInScope = liveClaimsInScopeFor(capacityScope, projectKey).map(toSummary);
   const usedSlots = liveClaimCountFor(capacityScope, projectKey);
+  // Only taken when a predicate exists: the active set enters the DECISION through the
+  // predicate and nowhere else (the ceiling is a COUNT, recounted in the transaction),
+  // so a caller with no predicate must not be refused for a set it never consulted.
+  const scanActiveFingerprint = req.isCompatible ? activeSetFingerprint(activeInScope) : null;
 
   const scanned: ScanEntry[] = [];
   let winner: { row: CandidateRow; predecessor: QueueClaim | null } | null = null;
@@ -711,6 +836,7 @@ export function claimNextEligible(req: ClaimNextRequest): ClaimNextResult {
   // write lock is exactly what phase 1 exists to avoid. ────────────────────────
   const candidateId = winner.row.ticket_id;
   const scanRevision = winner.row.revision;
+  const scanReasons = new Map(scanned.map((s) => [s.ticketId, s.reason]));
   _betweenPhasesHook?.(candidateId);
 
   return writeTransaction((): ClaimNextResult => {
@@ -752,6 +878,27 @@ export function claimNextEligible(req: ClaimNextRequest): ClaimNextResult {
     // A LIVE lease is NOT stealable — re-checked here against the store clock as it
     // stands INSIDE the transaction, not as the scan saw it.
     if (held && held.leaseExpiresAtMs >= txnNow) return refuse("lost", scanned);
+
+    // THE ORDER ITSELF, re-validated. The scan promised the FIRST eligible entry in
+    // canonical order; if a better-ranked member became eligible while the scan ran
+    // unlocked, this grant would jump the operator's order. The SCAN is what went
+    // stale, so the whole scan is refused and the caller re-scans.
+    if (firstBetterRankedEligible(projectKey, { ticketId: candidateId, rank: fresh.priority_rank }, scanReasons, txnNow) !== null) {
+      return refuse("lost", scanned);
+    }
+
+    // THE COMPATIBILITY SNAPSHOT, re-validated. The predicate ran in phase 1 against
+    // the active claims as they stood then; if that set has moved, its verdict is
+    // about a host that no longer exists — two dispatchers must not both read "no
+    // conflicting claim" and then serialize their writes into two incompatible grants.
+    // The predicate is NOT re-run: detecting the change is a store read, re-running
+    // caller code here would hold the machine-wide write lock.
+    if (
+      scanActiveFingerprint !== null &&
+      activeSetFingerprint(liveClaimsInScopeFor(capacityScope, projectKey).map(toSummary)) !== scanActiveFingerprint
+    ) {
+      return refuse("lost", scanned);
+    }
 
     // THE CEILING, counted inside the transaction. A count taken outside it is the
     // over-admission defect: nothing in SQLite can enforce a COUNT.
@@ -1012,7 +1159,12 @@ export function heartbeatClaim(req: {
  *  duplicate-execution hazard rather than a nicety). The `IS NULL OR = ?` terms in
  *  the CAS make that structural rather than only pre-checked.
  *
- *  Owner+generation fenced: a superseded owner stamps nothing and gets null. */
+ *  Owner+generation AND LEASE fenced: a superseded owner — a stale generation, or a
+ *  lease that merely lapsed — stamps nothing and gets null. The lease term is not
+ *  optional here because this is the durable act a physical launch follows: an expired
+ *  owner that stamped would hold a non-null stamped claim while the recovery surface
+ *  concurrently offers the same claim for takeover, which is a second container for
+ *  work the first may still be doing. */
 export function recordClaimLaunch(req: {
   projectKey: string;
   claimId: string;
@@ -1037,13 +1189,20 @@ export function recordClaimLaunch(req: {
   }
 
   return writeTransaction((): QueueClaim | null => {
+    const now = storeNowMs();
     const held = readClaim(req.claimId);
+    // The lease term sits with the owner+generation fence, not after it: an EXPIRED
+    // owner is not authorized to make ANYTHING durable, and this is the most
+    // consequential of the fenced verbs — the stamp is what a physical launch follows.
+    // An expired owner that stamped here would be recorded as launching a container
+    // for a claim the recovery surface is, at that same instant, offering for takeover.
     if (
       !held ||
       held.projectKey !== req.projectKey ||
       held.owner !== req.owner ||
       held.generation !== req.generation ||
-      held.state !== "live"
+      held.state !== "live" ||
+      held.leaseExpiresAtMs < now
     ) {
       return null;
     }
@@ -1066,6 +1225,7 @@ export function recordClaimLaunch(req: {
       .prepare(
         `UPDATE queue_claims SET ${stamps.map((s) => `${s.column} = ?`).join(", ")}
           WHERE id = ? AND project_key = ? AND owner = ? AND generation = ? AND state = 'live'
+            AND lease_expires_at_ms >= ?
             AND ${stamps.map((s) => `(${s.column} IS NULL OR ${s.column} = ?)`).join(" AND ")}`,
       )
       .run(
@@ -1074,6 +1234,7 @@ export function recordClaimLaunch(req: {
         req.projectKey,
         req.owner,
         req.generation,
+        now,
         ...stamps.map((s) => s.value),
       );
     return res.changes === 1 ? (readClaim(req.claimId) ?? null) : null;
@@ -1118,7 +1279,17 @@ export function claimIsStillHeld(req: {
  *  CHECK on the additive-only path.
  *
  *  Owner+generation fenced, so a taken-over owner releases nothing (and in
- *  particular cannot retire the successor's claim). */
+ *  particular cannot retire the successor's claim).
+ *
+ *  LEASE-FENCED for the same reason as heartbeatClaim and claimIsStillHeld, and the
+ *  consequence is the point rather than a side effect: an EXPIRED owner cannot retire
+ *  its own claim. Releasing is what removes the row from the recovery set, so an
+ *  expired owner allowed to release would delete the evidence that a container may
+ *  still be running — the next claimant would then find no live predecessor, receive
+ *  no takenOverFrom and no launch identity, and start a SECOND container. Expiry
+ *  proves that heartbeating stopped, never that the process stopped. An owner in that
+ *  position re-enters through takeoverExpiredClaim, which bumps the fencing generation
+ *  and RETIRES the row as history rather than erasing what it pointed at. */
 export function releaseClaim(req: {
   projectKey: string;
   claimId: string;
@@ -1133,9 +1304,10 @@ export function releaseClaim(req: {
     const res = getDb()
       .prepare(
         `UPDATE queue_claims SET state = 'released', outcome = ?, released_at = ?
-          WHERE id = ? AND project_key = ? AND owner = ? AND generation = ? AND state = 'live'`,
+          WHERE id = ? AND project_key = ? AND owner = ? AND generation = ? AND state = 'live'
+            AND lease_expires_at_ms >= ?`,
       )
-      .run(req.outcome, at, req.claimId, req.projectKey, req.owner, req.generation);
+      .run(req.outcome, at, req.claimId, req.projectKey, req.owner, req.generation, now);
     if (res.changes !== 1) return null;
     const released = readClaim(req.claimId) ?? null;
     if (released) {

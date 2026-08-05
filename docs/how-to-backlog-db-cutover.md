@@ -108,6 +108,16 @@ The executable queue is *queued **and** active **and** ranked*, in rank order. `
 
 Queue state is **host-only**: it never reaches a container, never joins `list`/`show` output, and a queue write publishes no snapshot — so ranking a ticket costs nothing to the containers already running. Full operator reference: the [`forge-backlog` skill](../seeds/skills/forge-backlog/SKILL.md); the model is in [concepts](concepts.md#operator-queue).
 
+### Queue claims land in the same db-only bucket
+
+Cutover is also what makes **queue claims** (FG-610) reachable — the durable reservation, lease, fencing generation and launch identity that let a dispatcher say "I am executing this queue entry" and let a recoverer tell a crashed controller from a slow one. There is no operator verb for it yet: FG-610 ships the store primitives, and the dispatcher that consumes them is FG-591. Three things are worth knowing at cutover time anyway:
+
+- **They are db-mode only, for the same reason the four queue verbs are** — a lease, a fencing generation and a launch identity have no Markdown representation, so every claim entry point (reads included) refuses by name on a markdown-mode or unkeyed project rather than reserving rows nothing reads.
+- **They are additive and inert until something claims.** The `queue_claims` table appears machine-wide on the next writable open like the rest of the schema, and no CLI verb, API route, dashboard payload or container snapshot exposes it. A project that never opted in sees no behavior change.
+- **A claim never touches ticket state.** Claiming, taking over and releasing write the claim row only — no `tickets.status`, no rank, no membership, no readiness row. Dequeue, unrank or defer a *claimed* ticket and the claim is left byte-unchanged: the operator queue and the execution reservation are separate facts, and the claim is the recovery record for a container that may still be running.
+
+The model, including why an expired lease authorizes nothing and why recovery adopts a prior launch instead of duplicating it, is in [concepts](concepts.md#queue-claims); the table is in `docs/SCHEMA-CONTRACT.md` → **queue_claims**.
+
 ## Agents and containers after cutover
 
 Containerized agents read tickets through a **read-only, project-scoped, backlog-only** snapshot mounted into the container — `forge backlog list` / `show` inside a container resolve that, not the mounted checkout's frozen Markdown.
