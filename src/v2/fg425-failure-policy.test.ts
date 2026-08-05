@@ -55,6 +55,7 @@ const ALL_FAILURE_KINDS: Record<FailureKind, true> = {
   gate_rejected: true,
   verification_environment_unavailable: true,
   pre_container_crash: true,
+  agent_reported_failure: true,
   unknown: true,
 };
 
@@ -172,6 +173,20 @@ test("dirty_publish_target holds the campaign: the dirt is in the SHARED publish
 test("publish_base_churn and publication_refused hold the campaign (target-level contention)", () => {
   assert.equal(classifyFailureKind("publish_base_churn"), "git_state");
   assert.equal(classifyFailureKind("publication_refused"), "git_state");
+});
+
+test("agent_reported_failure is item-local (FG-678 BD-10) and is not blindly retryable", () => {
+  // The agent declared its OWN work failed. That says nothing about the host,
+  // the auth, or a shared publish target — pausing a whole campaign for it
+  // would stall every unrelated item behind one item's outcome.
+  const kind = classifyFailureKind("agent_reported_failure");
+  assert.equal(kind, "scope");
+  assert.equal(isSharedBlocker(kind), false);
+
+  const d = retryPolicy("agent_reported_failure", "t-abc");
+  assert.equal(d.retryable, false, "a retry re-dispatches identical inputs against the obstacle the agent named");
+  assert.ok(d.advice);
+  assert.doesNotMatch(d.advice!, /<id>/, "the advice must interpolate the task id");
 });
 
 test("lane_taken_over does NOT hold the campaign — it is the lane working, scoped to one item", () => {

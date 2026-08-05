@@ -85,24 +85,30 @@ export type SpawnContext = SubstContext & {
   // browser-tools injector at it so the agent operates authenticated without
   // ever seeing the credential. Undefined = no auth profile for this task.
   AUTH_STATE_HOST_PATH?: string;
-  // FG-376 FIX1: true only when this dispatch's PROJECT_DIR is a task-scoped
-  // git worktree (runNext.ts sets this when a worktree was created for this
-  // task). Gates the named lockfile-keyed dependency-volume path so a normal
-  // (non-worktree) rw dispatch — which shares the live host project directory
-  // across concurrent tasks — keeps its pre-FG-376 legacy single anonymous
-  // shadow-volume behavior byte-for-byte. invoke.ts never creates worktrees
-  // and never sets this, so `forge invoke` is unaffected.
+  // True only when this dispatch's PROJECT_DIR is a task-scoped git worktree
+  // (runNext.ts sets this when a worktree was created for this task).
+  //
+  // DIAGNOSTIC, NOT A GATE, since FG-678. FG-376 FIX1 used it to gate the named
+  // lockfile-keyed dependency-volume path, on the reasoning that a non-worktree
+  // rw dispatch shares the live host project directory across concurrent tasks.
+  // The mount is safe for that shape too — it is read-only-ness, not
+  // worktree-ness, that removes the writer (see the dependency-volume block in
+  // buildDockerArgs) — and gating on it left every non-worktree rw dispatch with
+  // an empty anonymous shadow and no dependencies at all. It is kept because
+  // WHICH SHAPE dispatched is worth knowing when reading a task back; nothing
+  // reads it to decide anything.
   // String "1" (not boolean) — SpawnContext extends SubstContext, whose index
   // signature is Record<string, string | undefined>.
   IS_WORKTREE_DISPATCH?: string;
   // FG-376: set by the caller once it has confirmed (host-side, via
-  // dependency-provisioning.ts:isDependencyCacheReady / provisionDependencyCache)
-  // that this lockfile-hash cache key is populated — "1" mounts the SAME
-  // lockfile-keyed volume(s) READ-ONLY for both a worktree-rw primary and a
-  // ro reviewer/red dispatch. Installing is exclusively the short-lived
-  // provisioner container's job (see buildProvisionerDockerArgs below) — an
-  // agent/reviewer container built by buildDockerArgs NEVER installs and
-  // NEVER mounts these volumes read-write, regardless of PROJECT_MODE.
+  // dependency-provisioning.ts:isDependencyCacheReady / provisionDependencyCache
+  // / resolveDependencyEnvironment) that this lockfile-hash cache key is
+  // populated — "1" mounts the SAME lockfile-keyed volume(s) READ-ONLY for every
+  // dispatch shape: worktree rw, non-worktree rw (FG-678) and ro reviewer/red
+  // alike. Installing is exclusively the short-lived provisioner container's job
+  // (see buildProvisionerDockerArgs below) — an agent/reviewer container built by
+  // buildDockerArgs NEVER installs and NEVER mounts these volumes read-write,
+  // regardless of PROJECT_MODE.
   DEPENDENCY_CACHE_MOUNT_RO?: string;
   // FG-621: the CANONICAL project directory — the parent repository a private
   // clone workspace was made from, as FORGE recorded it (the run's projectDir),
@@ -1152,8 +1158,8 @@ export function buildDockerArgs(
   // buildDockerArgs builds AGENT/reviewer containers ONLY — it never installs
   // and never mounts a named dependency volume read-write. Installing is
   // exclusively buildProvisionerDockerArgs's short-lived container's job
-  // (below); by the time this function runs, the caller (runNext.ts) has
-  // already confirmed the cache key is populated and sets
+  // (below); by the time this function runs, the caller (runNext.ts or
+  // invoke.ts) has already confirmed the cache key is populated and sets
   // DEPENDENCY_CACHE_MOUNT_RO accordingly. FORGE_NM_INSTALL_ROOT is never
   // emitted here — an agent/reviewer container has no reason to write into
   // the shared cache, ever.
@@ -1164,10 +1170,16 @@ export function buildDockerArgs(
   ) {
     const legacyShadowPath = `${projectContainerPath}/node_modules`;
 
-    if (projectMode === "rw" && ctx.IS_WORKTREE_DISPATCH === "1" && ctx.DEPENDENCY_CACHE_MOUNT_RO === "1") {
-      // Worktree-mode primary, cache already provisioned host-side (the
-      // caller never sets DEPENDENCY_CACHE_MOUNT_RO otherwise) — mount the
-      // named lockfile-keyed volumes READ-ONLY, same as a reviewer below.
+    if (projectMode === "rw" && ctx.DEPENDENCY_CACHE_MOUNT_RO === "1") {
+      // An rw dispatch whose CALLER resolved the dependency environment
+      // host-side — the caller never sets DEPENDENCY_CACHE_MOUNT_RO otherwise —
+      // mounts the named lockfile-keyed volumes READ-ONLY, same as a reviewer
+      // below. FG-678 dropped `IS_WORKTREE_DISPATCH === "1"` from this gate:
+      // worktree-ness was never what made the mount safe (see the fallback arm),
+      // and keying on it left every OTHER rw shape — `forge invoke --project`,
+      // a workflow dispatch under FORGE_NO_WORKTREES=1, a tree with no
+      // mountable worktree — with the empty anonymous shadow below. That flag
+      // survives as a DIAGNOSTIC of which shape dispatched, not as a gate.
       let plan;
       try {
         plan = planDependencyVolumes(ctx.PROJECT_DIR, projectContainerPath);
@@ -1190,12 +1202,25 @@ export function buildDockerArgs(
         args.push("-e", `FORGE_NM_SHADOW=${legacyShadowPath}`);
       }
     } else if (projectMode === "rw") {
-      // FIX1 (FG-376 review): the named, lockfile-keyed multi-volume path is
-      // worktree-mode ONLY. A normal rw bind-mount dispatch shares the live
-      // host project directory across concurrent tasks — a container-local
-      // shared-cache mount here would BE the race this review exists to fix.
-      // Also covers the (should-not-happen) case of a worktree dispatch whose
-      // caller never resolved a cache key (no lockfile) — same legacy fallback.
+      // An rw dispatch whose caller resolved NO environment (not applicable:
+      // no lockfile, or a configuration the resolver excludes) — the legacy
+      // anonymous shadow, unchanged.
+      //
+      // FG-678 replaces FIX1's claim that the named-volume path above is
+      // worktree-mode ONLY. What removes the FG-376 write race is READ-ONLY-ness,
+      // not worktree-ness: concurrent tasks sharing one live project directory
+      // race only if one of them can WRITE the shared cache, and no agent
+      // container ever can — every arm here mounts `forge-deps-*` `:ro`, never
+      // emits FORGE_NM_INSTALL_ROOT, and never starts a provisioner. Installing
+      // is exclusively buildProvisionerDockerArgs's short-lived container's job,
+      // serialized host-side on the per-cache-key lock. A worktree gate would
+      // have been neither necessary nor sufficient for that property.
+      //
+      // The node_modules mask itself stays in EVERY arm (FG-678 BD-5): the
+      // defect was that this shadow starts EMPTY and masks the host's install,
+      // not that it exists. Unmasking would expose the host's wrong-platform
+      // (macOS-arm64) modules to a container that can write back through
+      // grpcfuse — the #245 hazard this whole block exists to close.
       args.push("-v", legacyShadowPath);
       args.push("-e", `FORGE_NM_SHADOW=${legacyShadowPath}`);
     } else if (projectMode === "ro" && ctx.DEPENDENCY_CACHE_MOUNT_RO === "1") {
@@ -1708,6 +1733,16 @@ export type PrepareDependencyEnvironmentArgs = {
   /** Where the provisioner's and probe's container logs land (the task dir). */
   logDir: string;
   exec: DockerExecFn;
+  /** FG-437/FG-559, generalized by FG-678: the provisioner CONTAINER's own
+   *  lifecycle. The resolver reports one outcome for the whole environment
+   *  decision; these report the one container inside it that a caller has to
+   *  see separately — its name/cacheKey are what reconcile recovers a
+   *  mid-provision crash from (the worktree may be gone by then), and its exit
+   *  code carries the entrypoint's git-probe diagnosis, which reads as an npm
+   *  failure if it is folded into `provisioning_failed`. Fired only when a
+   *  provisioner actually runs; a ready cache runs none. */
+  onProvisionerStarted?: (cacheKey: string) => void;
+  onProvisionerExited?: (cacheKey: string, exitCode: number, stderrTail: string) => void;
   /** Test seam — see resolveDependencyEnvironment. */
   platform?: string;
   lockOpts?: DependencyCacheLockOpts;
@@ -1750,6 +1785,7 @@ export async function prepareDependencyEnvironmentForDispatch(
       const provisionerArgs = buildProvisionerDockerArgs(args.runtime, containerCtx, plan);
       const stdoutPath = join(args.logDir, "container.provision.stdout.log");
       const stderrPath = join(args.logDir, "container.provision.stderr.log");
+      args.onProvisionerStarted?.(plan.lockfileHash);
       const exitCode = await args.exec({
         args: provisionerArgs,
         stdin: undefined,
@@ -1759,7 +1795,9 @@ export async function prepareDependencyEnvironmentForDispatch(
         // FG-492 finding 2: the provisioner owns its own --rm lifecycle.
         isProvisionerExec: true,
       });
-      return { exitCode, stderrTail: existsSync(stderrPath) ? readFileSync(stderrPath, "utf8").trim() : "" };
+      const stderrTail = existsSync(stderrPath) ? readFileSync(stderrPath, "utf8").trim() : "";
+      args.onProvisionerExited?.(plan.lockfileHash, exitCode, stderrTail);
+      return { exitCode, stderrTail };
     },
     runProbe: async (nonce, declared) => {
       const plan = planOrThrow();

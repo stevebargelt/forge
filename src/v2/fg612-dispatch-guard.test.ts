@@ -234,7 +234,11 @@ test("runContainer's guard precedes the dependency-provisioner container spawn",
   const src = readFileSync(join(SRC, "v2", "runNext.ts"), "utf8");
   const runContainerAt = src.indexOf("async function runContainer(");
   const guardAt = src.indexOf("assertSelfHostDispatchAllowed(", runContainerAt);
-  const provisionerAt = src.indexOf("buildProvisionerDockerArgs(", runContainerAt);
+  // FG-678: runNext no longer builds the provisioner argv itself — every lane
+  // reaches the provisioner (and the probe/load containers) through the shared
+  // resolver, so THAT call is the first thing in runContainer that can start a
+  // container of any kind. Same property, moved anchor.
+  const provisionerAt = src.indexOf("prepareDependencyEnvironmentForDispatch(", runContainerAt);
 
   assert.ok(runContainerAt > 0 && guardAt > 0 && provisionerAt > 0);
   assert.ok(guardAt < provisionerAt, "the refusal must land before ANY container starts, provisioner included");

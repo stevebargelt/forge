@@ -879,6 +879,143 @@ test("fg664 (e): non-darwin, FORGE_NO_NM_SHADOW=1 and a project with no package-
   }
 });
 
+// ── FG-678: the third outcome, through this same read-only gate ──────────────
+//
+// The (e) case above holds "no package-lock.json" as not-applicable, and its
+// fixture declares no dependencies — that is still exactly right, and it stays
+// green unchanged. What FG-678 separates out is the OTHER lockfile-less project:
+// one that declares dependencies it has no reproducible way to key. That project
+// has something to provision and no name to bind it to, and it now refuses
+// rather than dispatching a reviewer into a workspace nothing provisioned.
+//
+// BD-3a's stated consequence, proved here rather than asserted: the discriminator
+// lives in the ONE shared resolver, with no read-only/writable branch, so the
+// refusal reaches this read-only reviewer lane too. A darwin reviewer against a
+// declares-dependencies-no-lockfile project REFUSES where it previously
+// dispatched — bounded by the darwin gate and FORGE_NO_NM_SHADOW, both of which
+// still short-circuit ahead of it.
+
+/** (e)'s fixture with dependencies added and the lockfile still absent — the
+ *  one dimension the two outcomes differ on. */
+function makeLockfilelessProjectDeclaringDependencies(): string {
+  const dir = makeTmpDir("fg664-nolock-deps-");
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({ name: "fg678-subject", dependencies: { "better-sqlite3": "^12.11.1" } }),
+  );
+  return dir;
+}
+
+test("fg678 (BD-3a): a read-only reviewer against a project that DECLARES dependencies with no lockfile is refused lockfile_absent — no agent container, and the refusal is durable", async () => {
+  setPlatform("darwin");
+  const project = makeLockfilelessProjectDeclaringDependencies();
+  const calls: Call[] = [];
+
+  const res = await invoke({
+    agentRole: "review-rechecker",
+    task: "recheck RF-1",
+    projectDir: project,
+    readOnlyProject: true,
+    dockerExec: makeExec(calls),
+  });
+
+  assert.equal(res.status, "failed");
+  assert.equal(res.failureKind, "verification_environment_unavailable", res.error);
+  assert.deepEqual(
+    calls.map((c) => c.kind),
+    [],
+    "the decision is host-side: nothing is dispatched, not even a provisioner, into an unkeyable workspace",
+  );
+  assert.equal(failureKindForTask(res.taskId), "verification_environment_unavailable");
+
+  const refusal = eventsForTask(res.taskId).filter((e) => e.eventType === "container.dependency_provisioning_failed");
+  assert.equal(refusal.length, 1, "the EXISTING refusal event carries this — no new vocabulary on the task plane");
+  const payload = refusal[0]!.payload as Record<string, unknown>;
+  assert.equal(payload.stage, "environment_resolution");
+  assert.equal(payload.reason, "lockfile_absent");
+  assert.equal(payload.projectDir, project);
+
+  const manifest = readTaskManifest(taskDir(res.runId, res.taskId));
+  assert.equal(manifest?.dispatchRefused?.stage, "dependency_environment");
+  assert.equal(
+    manifest?.dispatchRefused?.reason,
+    "lockfile_absent",
+    "the reason is answerable from the manifest, not inferred from a container log",
+  );
+  assert.equal(manifest?.dependencyEnvironment, undefined, "nothing was bound, so nothing may claim it was");
+
+  // BD-3, explicitly forbidden: this project HAS dependencies. Neither the
+  // operator-facing error nor the durable detail may say otherwise, and both
+  // must say what to do about it.
+  const detail = manifest?.dispatchRefused?.detail ?? "";
+  for (const [label, text] of [["error", res.error ?? ""], ["detail", detail]] as const) {
+    assert.ok(text.includes("package-lock.json"), `${label} must name the supported lockfile: ${text}`);
+    assert.ok(text.includes("better-sqlite3"), `${label} must name what the project declared: ${text}`);
+    assert.ok(!/no dependencies/i.test(text), `${label} must never claim the workspace has none: ${text}`);
+  }
+  assert.ok(detail.includes(join(project, "package.json")), `the detail must name the declaring manifest: ${detail}`);
+});
+
+test("fg678: the two lockfile-less projects diverge on ONE fact — whether a manifest declares dependencies", async () => {
+  setPlatform("darwin");
+
+  // Declares nothing: (e)'s case, unchanged — one agent container, no receipt.
+  const bare = makeTmpDir("fg664-nolock-bare-");
+  writeFileSync(join(bare, "package.json"), JSON.stringify({ name: "bare" }));
+  const bareCalls: Call[] = [];
+  const bareRes = await invoke({
+    agentRole: "review-rechecker",
+    task: "recheck RF-1",
+    projectDir: bare,
+    readOnlyProject: true,
+    dockerExec: makeExec(bareCalls),
+  });
+  assert.equal(bareRes.status, "complete", bareRes.error);
+  assert.deepEqual(bareCalls.map((c) => c.kind), ["agent"]);
+
+  // Declares dependencies: refused.
+  const declaring = makeLockfilelessProjectDeclaringDependencies();
+  const declaringCalls: Call[] = [];
+  const declaringRes = await invoke({
+    agentRole: "review-rechecker",
+    task: "recheck RF-1",
+    projectDir: declaring,
+    readOnlyProject: true,
+    dockerExec: makeExec(declaringCalls),
+  });
+  assert.equal(declaringRes.failureKind, "verification_environment_unavailable");
+  assert.deepEqual(declaringCalls.map((c) => c.kind), []);
+});
+
+test("fg678: the escape hatches still short-circuit ahead of the discriminator on this lane — a declares-deps-no-lockfile project dispatches on linux and under FORGE_NO_NM_SHADOW=1", async () => {
+  for (const c of [
+    { label: "linux host", platform: "linux", noShadow: false },
+    { label: "FORGE_NO_NM_SHADOW=1", platform: "darwin", noShadow: true },
+  ]) {
+    setPlatform(c.platform);
+    if (c.noShadow) process.env.FORGE_NO_NM_SHADOW = "1";
+    else delete process.env.FORGE_NO_NM_SHADOW;
+
+    const project = makeLockfilelessProjectDeclaringDependencies();
+    const calls: Call[] = [];
+    const res = await invoke({
+      agentRole: "review-rechecker",
+      task: "recheck RF-1",
+      projectDir: project,
+      readOnlyProject: true,
+      dockerExec: makeExec(calls),
+    });
+
+    assert.equal(res.status, "complete", `${c.label}: must not be refused (${res.error})`);
+    assert.deepEqual(
+      calls.map((k) => k.kind),
+      ["agent"],
+      `${c.label}: the pre-existing behaviour is exactly one agent container and nothing else`,
+    );
+  }
+  delete process.env.FORGE_NO_NM_SHADOW;
+});
+
 // ── (f): the manifest half of AC3 ────────────────────────────────────────────
 
 test("fg664: a REFUSED read-only dispatch still writes its manifest, so `forge retry` re-dispatches it READ-ONLY instead of guessing from the role name", async () => {
@@ -1110,9 +1247,16 @@ test("fg664 (f2): a REFUSED dispatch emits exactly what it emitted before, and n
   assert.equal(payload.projectDir, project);
 });
 
-// ── (j): the rw/blue paths are untouched ─────────────────────────────────────
+// ── (j): the rw/blue path after FG-678, and the two argv arms that still stand ─
+//
+// FG-664 gave the read-only reviewer lane a host-resolved environment and left the
+// writable one alone; FG-678 closed that gap, so the blue path now resolves and
+// attests exactly as this file's (a) does. What FG-664 pinned here that FG-678 did
+// NOT change is the mount planner's fallback: an rw dispatch whose caller resolved
+// NO environment still takes the legacy anonymous shadow rather than a shared
+// writable cache over a live project directory (AC5).
 
-test("fg664 (j): a read-write invoke dispatch builds NO probe and NO provisioner, and buildDockerArgs's two rw arms emit the pre-change argv", async () => {
+test("fg664 (j): a read-write invoke dispatch resolves and attests its dependency environment BEFORE the agent (FG-678), while buildDockerArgs's no-environment rw arm still emits the legacy anonymous shadow", async () => {
   setPlatform("darwin");
   const project = makeProject("j");
   const calls: Call[] = [];
@@ -1124,8 +1268,24 @@ test("fg664 (j): a read-write invoke dispatch builds NO probe and NO provisioner
     dockerExec: makeExec(calls),
   });
   assert.equal(res.status, "complete", res.error);
-  assert.deepEqual(calls.map((c) => c.kind), ["agent"], "the blue path resolves no dependency environment at all");
-  assert.equal(readTaskManifest(taskDir(res.runId, res.taskId))?.dependencyEnvironment, undefined);
+  assert.deepEqual(
+    calls.map((c) => c.kind),
+    ["provisioner", "probe", "load", "agent"],
+    "the blue path provisions and attests ahead of the agent, exactly as the read-only lane does",
+  );
+
+  // The ordering property, stated on the ledger as well as on the container
+  // sequence: the agent container starts only after the environment it was given
+  // was resolved AND recorded. An agent that ran first would have improvised one.
+  const types = eventsForTask(res.taskId).map((e) => e.eventType);
+  const resolvedAt = types.indexOf("container.dependency_environment_resolved");
+  const startedAt = types.indexOf("container.started");
+  assert.ok(resolvedAt >= 0, `expected a resolution on the timeline; got ${types.join(", ")}`);
+  assert.ok(startedAt > resolvedAt, "the resolution is recorded BEFORE the agent container starts");
+
+  const receipt = readTaskManifest(taskDir(res.runId, res.taskId))?.dependencyEnvironment;
+  assert.ok(receipt, "a writable dispatch that resolved an environment carries its receipt");
+  assert.equal(receipt.cacheKey, lockfileHash(project), "and the receipt is keyed to the lockfile it was built from");
 
   const runtime = loadRuntime("claude-apikey");
   const base: SpawnContext = {
@@ -1139,7 +1299,9 @@ test("fg664 (j): a read-write invoke dispatch builds NO probe and NO provisioner
     TASK_PACKAGE_MARKDOWN: "pkg",
   };
 
-  // The legacy anonymous shadow (DEC-019): a plain rw dispatch.
+  // The legacy anonymous shadow (DEC-019): an rw dispatch whose caller resolved
+  // no environment (no DEPENDENCY_CACHE_MOUNT_RO). This arm is what keeps a shared
+  // writable cache off a live shared project directory, and FG-678 kept it.
   const legacy = buildDockerArgs(runtime, base);
   assert.ok(volumeArgs(legacy.args).includes("/project/node_modules"), "the anonymous shadow volume must survive");
   assert.ok(envArgs(legacy.args).includes("FORGE_NM_SHADOW=/project/node_modules"));
