@@ -25,9 +25,14 @@ import {
   ingestFindings,
   insertReview,
   invalidateResolutionsForCandidate,
+  getDocsDispatch,
+  markDocsDispatchDelivered,
+  openDocsDispatch,
+  pendingDocsDispatch,
   recordDisposition,
   recordResolution,
   recordStageEvidence,
+  retireDocsDispatch,
   stageCompleteAt,
   summarizeReview,
   updateReview,
@@ -234,4 +239,69 @@ test("stage evidence survives an unrelated updateReview — a patch must not era
 
 test("a review created with no stage evidence reads back undefined, not an empty object to guess about", () => {
   assert.equal(getReview(REVIEW)?.stageEvidence, undefined);
+});
+
+// ─── FG-655: the docs stage's durable dispatch binding ──────────────────────
+
+test("FG-655: a docs dispatch is created OPEN, bound to the candidate, and carries no identity yet", () => {
+  const b = openDocsDispatch(REVIEW, "cand111");
+  assert.match(b.id, /^docs-dispatch-/);
+  assert.equal(b.reviewId, REVIEW);
+  assert.equal(b.candidateSha, "cand111");
+  assert.equal(b.state, "open");
+  assert.equal(b.taskId, undefined, "the host mints the task id; the binding does not invent one");
+  assert.equal(b.runId, undefined);
+  assert.deepEqual(getDocsDispatch(b.id), b, "and it is durable before anything is dispatched");
+});
+
+test("FG-655: opening twice returns the SAME live binding rather than a second one", () => {
+  const first = openDocsDispatch(REVIEW, "cand111");
+  const again = openDocsDispatch(REVIEW, "cand111");
+  assert.equal(again.id, first.id, "a caller that reached here twice owns one binding, not two");
+});
+
+test("FG-655: marking a dispatch delivered records BOTH the task and the run that locate its delivery", () => {
+  // Run AND task together: the delivery lives under the run's task dir, and a review may hold
+  // no run id at dispatch time — a task id alone cannot find it.
+  const b = markDocsDispatchDelivered(openDocsDispatch(REVIEW, "cand111").id, {
+    taskId: "task-docs-1",
+    runId: RUN.id,
+  });
+  assert.equal(b.state, "dispatched");
+  assert.equal(b.taskId, "task-docs-1");
+  assert.equal(b.runId, RUN.id);
+});
+
+test("FG-655: a delivered dispatch with no explicit run falls back to the REVIEW's run", () => {
+  const b = markDocsDispatchDelivered(openDocsDispatch(REVIEW, "cand111").id, { taskId: "task-docs-1" });
+  assert.equal(b.runId, RUN.id);
+});
+
+test("FG-655: the pending read is keyed on the REVIEW, so a candidate that moved under it is still found", () => {
+  // The crash window between the candidate advance and the stage record moves the candidate
+  // out from under a live binding. A per-candidate read would find nothing there and dispatch
+  // a second docs agent over the coordinator's own commit.
+  const b = markDocsDispatchDelivered(openDocsDispatch(REVIEW, "cand111").id, { taskId: "task-docs-1" });
+  updateReview(REVIEW, { candidateSha: "afterdocs2" });
+  const live = pendingDocsDispatch(REVIEW);
+  assert.equal(live?.id, b.id);
+  assert.equal(live?.candidateSha, "cand111", "and it still says which candidate it was dispatched for");
+});
+
+test("FG-655: a retired dispatch is no longer pending, and a fresh one may then be opened", () => {
+  const first = markDocsDispatchDelivered(openDocsDispatch(REVIEW, "cand111").id, { taskId: "task-docs-1" });
+  const retired = retireDocsDispatch(first.id, "stage 6 completed at cand111");
+  assert.equal(retired.state, "retired");
+  assert.equal(retired.retiredReason, "stage 6 completed at cand111");
+  assert.notEqual(retired.retiredAt, undefined);
+  assert.equal(pendingDocsDispatch(REVIEW), undefined, "a spent binding does not short-circuit re-entry");
+
+  const second = openDocsDispatch(REVIEW, "cand111");
+  assert.notEqual(second.id, first.id, "and a dead delivery's replacement is a NEW binding, not a revived one");
+  assert.equal(pendingDocsDispatch(REVIEW)?.id, second.id);
+});
+
+test("FG-655: a review with no docs dispatch reads back undefined, not a fabricated one", () => {
+  assert.equal(pendingDocsDispatch(REVIEW), undefined);
+  assert.equal(getDocsDispatch("docs-dispatch-nope"), undefined);
 });

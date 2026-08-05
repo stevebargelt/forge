@@ -37,6 +37,8 @@ import {
   getReview,
   ingestFindings,
   insertReview,
+  markDocsDispatchDelivered,
+  openDocsDispatch,
   recordDisposition,
   type ReviewFinding,
 } from "../store/reviews.js";
@@ -1568,6 +1570,15 @@ const RECEIPT: DependencyEnvironmentReceipt = {
  *  pattern review-run.test.ts uses. Only `dispatchRechecker` is under test here; the
  *  stages ahead of Stage 8 are stubbed just well enough to reach it honestly, because a
  *  hand-written row set could park the review in a state the machine would never produce. */
+/** FG-655: the durable docs-dispatch binding a stubbed `dispatchDocs` must create, exactly as
+ *  the real wiring does — the row exists before the dispatch, and the host-minted task
+ *  identity is written onto it. The re-entry short-circuit reads this row, so a stub that
+ *  returned a binding the store does not hold would be a stub that cannot be re-entered. */
+function docsBinding(reviewId: string, candidateSha: string, taskId = "task-docs-1") {
+  const opened = openDocsDispatch(reviewId, candidateSha);
+  return markDocsDispatchDelivered(opened.id, { taskId });
+}
+
 function harness(over: Partial<CoordinatorDeps> = {}): { deps: CoordinatorDeps; calls: { fixer: number } } {
   const calls = { fixer: 0 };
   let head = CANDIDATE;
@@ -1627,7 +1638,12 @@ function harness(over: Partial<CoordinatorDeps> = {}): { deps: CoordinatorDeps; 
       declaredFiles.length > 0
         ? { kind: "committed", sha: head, committedPaths: [...declaredFiles] }
         : { kind: "no_change", sha: head },
-    dispatchDocs: () => ({ ok: true }),
+    // FG-655: the docs stage's seams. This fixture's docs agent declares nothing and leaves
+    // a clean tree, so Stage 6 is the legitimate no-op and the candidate stays where the fix
+    // cycle left it.
+    dispatchDocs: ({ review, candidateSha }) => ({ ok: true, binding: docsBinding(review.id, candidateSha) }),
+    docsDelivery: ({ binding }) => ({ kind: "delivered", taskId: binding.taskId ?? "task-docs", docsUpdated: [] }),
+    commitDocsCycle: () => ({ kind: "no_change", sha: head }),
     dispatchRechecker: () => ({ ok: true, taskId: "task-recheck-664", result: {} }),
     shippingInput: () => assert.fail("these cases never reach the shipping review"),
     ...over,

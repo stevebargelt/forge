@@ -28,6 +28,8 @@ import {
   getReview,
   ingestFindings,
   insertReview,
+  markDocsDispatchDelivered,
+  openDocsDispatch,
   recordDisposition,
   type Review,
 } from "../../store/reviews.js";
@@ -886,6 +888,163 @@ test("FG-649/RF-7: the two arms give the SAME answer about the same commit", asy
     recognised.kind === "refused" ? recognised.reason : "",
     "adoption is one question, so the recovery arm cannot answer it more permissively",
   );
+});
+
+// ─── FG-655: the docs cycle's COMMIT, and AC4's dirty-tree guard ────────────
+//
+// The live FG-655 failure: Stage 6 read HEAD after the docs agent returned, and when the agent
+// had not committed, that read was a guaranteed no-op — the stage said "candidate unchanged"
+// and advanced while the docs edits sat in the worktree. The commit is the coordinator's now,
+// authored from the agent's own `docs_updated` declaration. These pin the scope guard, the
+// named refusals and the recognition arm; the end-to-end evidence against a real repository is
+// src/v2/fg655-docs-cycle-candidate.integration.test.ts.
+
+function docsDeps(git: (args: string[]) => string): CoordinatorDeps {
+  return buildCoordinatorDeps({ projectDir: "/nonexistent-project", ticketId: "FG-655", git, invokeFn: async () => {
+    throw new Error("a docs-cycle commit dispatches no container");
+  } });
+}
+
+function docsCtx(declaredFiles: string[], candidateSha?: string) {
+  const fixCtx = parkAtFix();
+  const review = candidateSha === undefined ? fixCtx.review : { ...fixCtx.review, candidateSha };
+  const binding = markDocsDispatchDelivered(openDocsDispatch(fixCtx.review.id, "cand111").id, { taskId: "task-docs-1" });
+  return { review, binding, declaredFiles };
+}
+
+/** The subject the coordinator writes for a docs cycle — the stage-scoped idempotency key the
+ *  recovery arm matches on. Spelled out here rather than imported, for the same reason the fix
+ *  cycle's is: a change to the shipped key has to be made twice, deliberately. */
+function docsSubjectFor(binding: { id: string }): string {
+  return `docs(review): docs cycle ${binding.id}`;
+}
+
+test("FG-655: the docs-cycle commit carries ONLY the declared paths and names the cycle, never the ticket", async () => {
+  const { git, calls } = scriptedGit({ status: "M  docs/concepts.md\0?? docs/new.md\0", head: "postdocs7" });
+  const ctx = docsCtx(["docs/concepts.md", "docs/new.md"]);
+  const commit = await docsDeps(git).commitDocsCycle(ctx);
+
+  assert.equal(commit.kind, "committed");
+  assert.equal(commit.kind === "committed" ? commit.sha : "", "postdocs7", "the sha the commit CREATED");
+  const commitCall = calls.find((c) => c[0] === "commit") as string[];
+  assert.equal(commitCall[2], docsSubjectFor(ctx.binding));
+  assert.doesNotMatch(commitCall[2] as string, /FG-655/, "resolveReviewBase infers a LATER review's base from a ticket subject");
+  // THE PATHS REACH `commit` ITSELF, not merely `add` — the index is shared with whatever else
+  // is running in the operator's checkout.
+  assert.deepEqual(commitCall.slice(3), ["--", ":/docs/concepts.md", ":/docs/new.md"]);
+  assert.ok(!commitCall.includes("-A") && !commitCall.includes("--all"), "never `git commit -a`");
+  const addCall = calls.find((c) => c[0] === "add") as string[];
+  assert.deepEqual(addCall.slice(1), ["--", ":/docs/concepts.md", ":/docs/new.md"]);
+});
+
+test("FG-655: a worktree that moved OUTSIDE the declared set refuses by name, names the paths, and stages nothing", async () => {
+  const { git, calls } = scriptedGit({ status: "M  docs/concepts.md\0?? src/sneaky.ts\0" });
+  const commit = await docsDeps(git).commitDocsCycle(docsCtx(["docs/concepts.md"]));
+
+  assert.equal(commit.kind, "refused");
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "docs_cycle_tree_dirty_outside_declared_scope");
+  assert.match(commit.kind === "refused" ? commit.detail : "", /src\/sneaky\.ts/);
+  assert.equal(calls.find((c) => c[0] === "add"), undefined, "nothing is staged");
+  assert.equal(calls.find((c) => c[0] === "commit"), undefined);
+});
+
+test("FG-655: an undeclared-path refusal caps the list it names with a +N more", async () => {
+  const status = Array.from({ length: 14 }, (_, i) => `?? docs/stray${i}.md`).join("\0") + "\0";
+  const commit = await docsDeps(scriptedGit({ status }).git).commitDocsCycle(docsCtx([]));
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "docs_cycle_tree_dirty_outside_declared_scope");
+  assert.match(commit.kind === "refused" ? commit.detail : "", /\+4 more/);
+  assert.match(commit.kind === "refused" ? commit.detail : "", /declared: nothing/);
+});
+
+test("FG-655: a DECLARATION against a clean tree refuses, and names the soft reset that recovers it", async () => {
+  const commit = await docsDeps(scriptedGit({ status: "" }).git).commitDocsCycle(docsCtx(["docs/concepts.md"]));
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "docs_cycle_declared_changes_absent");
+  assert.match(commit.kind === "refused" ? commit.detail : "", /git reset --soft cand111/);
+});
+
+test("FG-655: a declaration that reaches beyond the tree commits what moved and NAMES what did not", async () => {
+  const { git } = scriptedGit({ status: "M  docs/concepts.md\0", head: "postdocs7", paths: ["docs/concepts.md"] });
+  const commit = await docsDeps(git).commitDocsCycle(docsCtx(["docs/concepts.md", "docs/never-written.md"]));
+  assert.equal(commit.kind, "committed");
+  assert.deepEqual(commit.kind === "committed" ? commit.committedPaths : [], ["docs/concepts.md"]);
+  assert.deepEqual(commit.kind === "committed" ? commit.declaredNotMoved : [], ["docs/never-written.md"]);
+});
+
+test("FG-655: nothing declared and nothing moved is the LEGITIMATE no-op, at a clean tree", async () => {
+  const commit = await docsDeps(scriptedGit({ status: "" }).git).commitDocsCycle(docsCtx([]));
+  assert.equal(commit.kind, "no_change");
+  assert.equal(commit.kind === "no_change" ? commit.sha : "", "cand111");
+});
+
+test("FG-655: a head that is not the candidate refuses candidate_not_checked_out with the soft-reset remedy", async () => {
+  // Where a docs agent that COMMITTED ITS OWN WORK lands. Its commit is left alone; the remedy
+  // names the reset that returns those edits to the worktree so the coordinator authors the
+  // commit itself.
+  const { git, calls } = scriptedGit({ status: "", preHead: "someoneelse9" });
+  const commit = await docsDeps(git).commitDocsCycle(docsCtx([]));
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "candidate_not_checked_out");
+  assert.match(commit.kind === "refused" ? commit.detail : "", /git reset --soft cand111/);
+  assert.equal(calls.find((c) => c[0] === "commit"), undefined, "and it authors nothing on a foreign tree");
+});
+
+test("FG-655: a commit an earlier crashed pass authored is RECOGNIZED, not re-authored", async () => {
+  // Both crash windows land on an anchored HEAD: before the candidate advance the commit's
+  // PARENT is the candidate; after it, HEAD IS the candidate.
+  const ctx = docsCtx([]);
+  const subject = docsSubjectFor(ctx.binding);
+  for (const window of [
+    { label: "before the advance", preHead: "postdocs7", parent: () => "cand111", candidate: undefined },
+    { label: "after the advance", preHead: "postdocs7", parent: () => "older000", candidate: "postdocs7" },
+  ]) {
+    const { git, calls } = scriptedGit({
+      status: "",
+      preHead: window.preHead,
+      subject: () => subject,
+      parent: window.parent,
+      paths: ["docs/concepts.md"],
+    });
+    const at = { ...ctx, declaredFiles: ["docs/concepts.md"] };
+    const review = window.candidate === undefined ? at.review : { ...at.review, candidateSha: window.candidate };
+    const commit = await docsDeps(git).commitDocsCycle({ ...at, review });
+    assert.equal(commit.kind, "committed", `${window.label}: ${commit.kind === "refused" ? commit.detail : ""}`);
+    assert.equal(commit.kind === "committed" ? commit.recognized : false, true, window.label);
+    assert.equal(calls.find((c) => c[0] === "commit"), undefined, `${window.label}: no SECOND commit was authored`);
+  }
+});
+
+test("FG-655: recognition decides adoption on the SAME terms — an anchored commit carrying an undeclared path is still refused", async () => {
+  // FG-649 RF-7, one stage over: a recognition test weaker than the adoption test is a refusal
+  // one `forge review continue` away from being reversed.
+  const ctx = docsCtx(["docs/concepts.md"]);
+  const { git } = scriptedGit({
+    status: "",
+    preHead: "postdocs7",
+    subject: () => docsSubjectFor(ctx.binding),
+    parent: () => "cand111",
+    paths: ["docs/concepts.md", "infra/secrets.tf"],
+  });
+  const commit = await docsDeps(git).commitDocsCycle(ctx);
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "docs_cycle_commit_raced");
+  assert.match(commit.kind === "refused" ? commit.detail : "", /infra\/secrets\.tf/);
+  assert.match(commit.kind === "refused" ? commit.detail : "", /git reset --soft cand111/);
+});
+
+test("FG-655 / AC4: the verify seam refuses a DIRTY tree at the right candidate, naming the paths and the action", async () => {
+  // The seam checked head-vs-candidate ONLY, so a dirty tree at the right head passed it and
+  // review-loop degraded to a local run — a green verification line computed against a tree
+  // nobody reviewed. Stages 1 and 7 share this seam.
+  const { git } = scriptedGit({ status: "M  docs/concepts.md\0?? docs/stranded.md\0" });
+  const entry = await docsDeps(git).verify("cand111");
+  assert.equal(entry.ok, false);
+  assert.equal(entry.environmentRefusal?.reason, "workspace_dirty_at_candidate");
+  assert.match(entry.environmentRefusal?.message ?? "", /docs\/stranded\.md/);
+  assert.match(entry.environmentRefusal?.message ?? "", /Commit those changes/);
+});
+
+test("FG-655 / AC4: a head that is not the candidate keeps its OWN name at the verify seam", async () => {
+  const { git } = scriptedGit({ status: "", preHead: "someoneelse9" });
+  const entry = await docsDeps(git).verify("cand111");
+  assert.equal(entry.environmentRefusal?.reason, "candidate_not_checked_out", "the two conditions stay distinct");
 });
 
 // ─── the comparison base, resolved AT OPEN ──────────────────────────────────
