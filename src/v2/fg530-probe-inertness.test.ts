@@ -440,6 +440,7 @@ const STORE_CONNECTION_MODULE = "store/db.ts";
  *  mutator. Asserted below to actually do so, so this list cannot rot into a lie. */
 const LOCAL_WRITE_WRAPPERS: Record<string, string> = {
   failTask: "v2/failure-kind.ts",
+  failTaskIfNotTerminal: "v2/failure-kind.ts",
   finalizeRunIfSettled: "v2/run-finalize.ts",
 };
 
@@ -948,12 +949,14 @@ const ALLOWLIST: Allow[] = [
   {
     file: "v2/runNext.ts",
     fn: "reconcilePublicationRecoveries",
-    call: "failTask",
+    call: "failTaskIfNotTerminal",
     reason:
       "the terminal failure for a task whose attempt AD-5 recovery converged to a NON-published disposition — the target ref " +
       "provably does not carry its candidate, so nothing of it was published. A crash before this write leaves the task in the " +
       "non-terminal awaiting_recovery state with the attempt already settled, and the next wave re-derives exactly this landing " +
-      "from that same settled record. The failure kind is READ from the converged record, never guessed.",
+      "from that same settled record. The failure kind is READ from the converged record, never guessed. FG-676 made it a CAS: " +
+      "it settles only a row that is still non-terminal, so a crash cannot strand a HALF-written settlement over a decision " +
+      "another writer made in the same window either.",
   },
   {
     file: "v2/runNext.ts",

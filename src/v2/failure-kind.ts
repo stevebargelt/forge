@@ -1,6 +1,6 @@
 import { AuthProfileError } from "./auth-state.js";
 import { IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
-import { markTaskFailed } from "../store/tasks.js";
+import { markTaskFailed, markTaskFailedIfNotTerminal } from "../store/tasks.js";
 import { logEvent, eventsForTask } from "../store/events.js";
 import type { Event } from "../store/events.js";
 
@@ -224,6 +224,25 @@ export function failTask(
       ...(opts.evidence ? { evidence: opts.evidence } : {}),
     },
   });
+}
+
+/** FG-676 (AC2): failTask for a BACKGROUND settlement — the same row + event pair,
+ *  refused whole when the row went terminal underneath the caller. The publication
+ *  reconcile sweep reads a task, converges its attempt and only then settles it; a
+ *  `forge cancel` (which accepts every non-terminal task, and `awaiting_recovery`
+ *  is non-terminal) can win that window. A refused CAS is its OWN outcome: no row
+ *  write, no task.failed, and the caller is told so it emits nothing either. */
+export function failTaskIfNotTerminal(
+  taskId: string,
+  opts: { runId: string; kind: FailureKind; error: string; result?: unknown },
+): boolean {
+  if (!markTaskFailedIfNotTerminal(taskId, opts.error, opts.result)) return false;
+  logEvent("task.failed", {
+    runId: opts.runId,
+    taskId,
+    payload: { failure_kind: opts.kind, error: opts.error },
+  });
+  return true;
 }
 
 // ── Read side: recover a task's current failure_kind from its event stream ──

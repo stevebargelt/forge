@@ -34,7 +34,7 @@ import { getRun } from "../store/runs.js";
 import { finalizeRunIfSettled } from "./run-finalize.js";
 import { notifyOnTaskBlockedByRed, notifyOnGateAwaiting } from "../notify/trigger.js";
 import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskAwaitingRecovery, markTaskHeldForGate, markTaskBlockedByRed, markTaskFailed, setTaskStatus, reopenFailedTaskForRecovery, setTaskWorkspace, clearTaskWorkspace } from "../store/tasks.js";
-import { failTask, classify, failureKindFromEvents, ORPHAN_EVIDENCE_KINDS } from "./failure-kind.js";
+import { failTask, failTaskIfNotTerminal, classify, failureKindFromEvents, ORPHAN_EVIDENCE_KINDS } from "./failure-kind.js";
 import type { FailureKind, OrphanEvidence, ContainerCausalEvidence } from "./failure-kind.js";
 import { captureUsageForTask } from "../store/model-calls.js";
 import { insertVerdict, verdictsForTask } from "../store/verdicts.js";
@@ -1084,7 +1084,7 @@ async function dispatchSingleStep(args: {
     if (!reds.ok) return await landBlockedByRed();
   }
 
-  const finalStatus = finalizePrimary(taskId, args.runId, step.gate, result);
+  const { status: finalStatus } = finalizePrimary(taskId, args.runId, step.gate, result);
   // FG-492 review: reap only on the real "complete" outcome — gate=human/verdict
   // returns "awaiting_gate" (paused, not failed, but not done either), and a lost
   // CAS race reports the task's actual terminal status. Anything else retains.
@@ -1246,13 +1246,23 @@ function holdIfValidationContractFails(taskId: string, runId: string, result: un
   return null;
 }
 
+/** FG-676: BOTH halves of the finalizer's terminal-state CAS.
+ *
+ *  `status` is the row's ACTUAL status either way — a refused CAS reports what the
+ *  row really says, never what this call wanted it to say. `landed` is the half a
+ *  caller needs before it may append a state event of its OWN: "complete" returned
+ *  by a refused CAS (a concurrent wave or `forge publish recover` got there first)
+ *  is indistinguishable from "complete" returned by a landing, and an event
+ *  appended over a refusal claims a transition this call did not make. */
+type Finalization = { landed: boolean; status: string };
+
 // Final status write for a primary task (no reds path, or reds passed).
 function finalizePrimary(
   taskId: string,
   runId: string,
   gate: Step["gate"],
   result: unknown,
-): string {
+): Finalization {
   crashPoint("finalizePrimary:before-status-write");
   switch (gate) {
     case "auto":
@@ -1261,11 +1271,11 @@ function finalizePrimary(
       // marked failed. The CAS only completes a non-terminal task; if it didn't,
       // report the task's actual (cancelled/failed) terminal status.
       if (!markTaskComplete(taskId, result)) {
-        return getTask(taskId)?.status ?? "failed";
+        return { landed: false, status: getTask(taskId)?.status ?? "failed" };
       }
       crashPoint("finalizePrimary:between-complete-status-and-event");
       logEvent("task.completed", { runId, taskId });
-      return "complete";
+      return { landed: true, status: "complete" };
     case "human":
       // FG-676: same AWN-2 shape as the CAS above, on the gate side. A landing
       // here is a BACKGROUND write (a wave, or the reconcile sweep) and it can
@@ -1277,24 +1287,24 @@ function finalizePrimary(
       // event, no push, and the row's actual terminal status is what's returned,
       // so the row, the return value and the event stream agree.
       if (!markTaskHeldForGate(taskId, result)) {
-        return getTask(taskId)?.status ?? "failed";
+        return { landed: false, status: getTask(taskId)?.status ?? "failed" };
       }
       crashPoint("finalizePrimary:between-awaiting-gate-status-and-event");
       logEvent("task.awaiting_gate", { runId, taskId });
       notifyGateAwaiting(taskId);
-      return "awaiting_gate";
+      return { landed: true, status: "awaiting_gate" };
     case "verdict":
       // Schema enforces reds.length > 0 for gate=verdict, so this is reached
       // only when all reds passed (or none authoritative-failed). Aggregate
       // outcome is the orchestrator's call; pause for it. CAS'd and branched
       // for the same reason as the human branch above.
       if (!markTaskHeldForGate(taskId, result)) {
-        return getTask(taskId)?.status ?? "failed";
+        return { landed: false, status: getTask(taskId)?.status ?? "failed" };
       }
       crashPoint("finalizePrimary:between-awaiting-gate-status-and-event");
       logEvent("task.awaiting_gate", { runId, taskId });
       notifyGateAwaiting(taskId);
-      return "awaiting_gate";
+      return { landed: true, status: "awaiting_gate" };
   }
 }
 
@@ -2485,7 +2495,7 @@ async function dispatchFanoutStep(args: {
     if (!reds.ok) return await landFanoutBlockedByRed();
   }
 
-  return finalizePrimary(parentId, args.runId, step.gate, parentResult);
+  return finalizePrimary(parentId, args.runId, step.gate, parentResult).status;
 }
 
 /** FG-425: the fan-out validate-then-publish step.
@@ -2761,7 +2771,17 @@ function reconcilePublicationRecoveries(runId: string, workflow: Workflow, proje
       // exactly as it would have had the window never been lost — through the same
       // gate its step declares (a lost mutex is not a reason to skip a human gate).
       const step = workflow.steps.find((s) => s.id === task.phase);
-      const status = finalizePrimary(task.id, runId, step?.gate ?? "auto", task.result);
+      const { landed, status } = finalizePrimary(task.id, runId, step?.gate ?? "auto", task.result);
+      // FG-676 (BD-4): a refused CAS is its own outcome, and this sweep is the last
+      // place it can occur. The reopen above deliberately steps the row AROUND the
+      // finalizer's terminal guard, which means a `forge cancel` or a gate rejection
+      // landing in that window is the ONLY thing that can refuse it — and it decided
+      // this task. Nothing was reconciled, so nothing may say it was: an event
+      // asserting a reconciliation after the human's decision is the same lie about
+      // the same record every operator surface derives from. The decision is on the
+      // row; the next sweep re-derives from it (and makes the published-after-cancel
+      // announcement this branch skipped).
+      if (!landed) continue;
       logEvent("task.publication_reconciled", {
         runId,
         taskId: task.id,
@@ -2789,7 +2809,15 @@ function reconcilePublicationRecoveries(runId: string, workflow: Workflow, proje
     const kind: FailureKind = attempt.state === "parked" && attempt.parkReason
       ? attempt.parkReason
       : "publication_refused";
-    failTask(task.id, {
+    // FG-676 (AC2): CAS'd, for the same reason the published arm above is. The
+    // human-decision guard read this task when the sweep reached it, and a `forge
+    // cancel` can land between that read and this write — performCancel accepts
+    // every non-terminal task, and `awaiting_recovery` is non-terminal. The bare
+    // UPDATE this replaced would overwrite the human's error, result and
+    // completed_at with a publication failure and append a task.failed AFTER their
+    // decision. The invariant does not hold only on the arm the candidate happened
+    // to land on: a refused CAS settles nothing here either, so it says nothing.
+    const settled = failTaskIfNotTerminal(task.id, {
       runId,
       kind,
       error:
@@ -2798,6 +2826,7 @@ function reconcilePublicationRecoveries(runId: string, workflow: Workflow, proje
         `published and the target is unchanged.`,
       result: task.result,
     });
+    if (!settled) continue;
     logEvent("task.publication_reconciled", {
       runId,
       taskId: task.id,

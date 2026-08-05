@@ -10,6 +10,7 @@ import {
   markTaskComplete,
   markTaskBlockedByRed,
   markTaskFailed,
+  markTaskFailedIfNotTerminal,
   setTaskStatus,
   reopenFailedTaskForRecovery,
   restoreTaskFailed,
@@ -176,6 +177,39 @@ test("setTaskStatus REFUSES to move a complete row off terminal, and reports tru
   insertTask(task({ id: "task-live", status: "running" }));
   assert.equal(setTaskStatus("task-live", "awaiting_red"), true, "a non-terminal row still moves");
   assert.equal(getTask("task-live")!.status, "awaiting_red");
+});
+
+// FG-676 (AC2): the background-settlement writer. markTaskFailed above is the LANDING
+// writer and overwrites deliberately; this one arrives after the fact, so the row a
+// human's decision put there has to survive it — error, result and completed_at whole.
+test("markTaskFailedIfNotTerminal REFUSES a row a human's decision already made terminal, and never touches its record", () => {
+  insertTask(task({ id: "task-settle-cancelled", status: "awaiting_recovery" }));
+  markTaskFailed("task-settle-cancelled", "cancelled via forge cancel", { artifact: "the human's" });
+  const decided = getTask("task-settle-cancelled")!;
+
+  assert.equal(
+    markTaskFailedIfNotTerminal("task-settle-cancelled", "publication attempt was converged to `abandoned`", { other: 1 }),
+    false,
+    "a background settlement may not move a terminal row",
+  );
+  const after = getTask("task-settle-cancelled")!;
+  assert.equal(after.error, "cancelled via forge cancel", "the human's error is never replaced");
+  assert.deepEqual(after.result, decided.result, "nor their result");
+  assert.equal(after.completedAt, decided.completedAt, "nor the time they decided");
+
+  insertTask(task({ id: "task-settle-live", status: "awaiting_recovery" }));
+  assert.equal(
+    markTaskFailedIfNotTerminal("task-settle-live", "publication attempt was converged to `abandoned`"),
+    true,
+    "a row nobody has decided still settles — the guard must not make failures unfalsifiable",
+  );
+  assert.equal(getTask("task-settle-live")!.status, "failed");
+  assert.equal(getTask("task-settle-live")!.error, "publication attempt was converged to `abandoned`");
+
+  insertTask(task({ id: "task-settle-complete", status: "running" }));
+  markTaskComplete("task-settle-complete", { status: "complete" });
+  assert.equal(markTaskFailedIfNotTerminal("task-settle-complete", "too late"), false, "and a complete row is terminal too");
+  assert.equal(getTask("task-settle-complete")!.status, "complete");
 });
 
 test("reopenFailedTaskForRecovery is the ONE deliberate terminal exit — failed only, awaiting_recovery only", () => {

@@ -223,6 +223,26 @@ export function markTaskFailed(id: string, error: string, result?: unknown): voi
     .run(error, result ? JSON.stringify(result) : null, nowIso(), id);
 }
 
+// FG-676: the CAS'd counterpart of markTaskFailed, for a BACKGROUND settlement
+// that arrives after the fact and must never move a row that is already terminal.
+// markTaskFailed above is the LANDING writer — a container's own failure, on a row
+// this process holds — and it overwrites deliberately. A sweep settling a task it
+// selected some milliseconds earlier is the opposite case: a `forge cancel` or a
+// gate rejection can land in that window, and the bare UPDATE would replace the
+// human's error, result and completed_at with a publication failure of its own.
+//
+// Returns true iff this call failed the row. Callers MUST branch on it: appending
+// task.failed over a refused CAS makes the event stream disagree with the row.
+export function markTaskFailedIfNotTerminal(id: string, error: string, result?: unknown): boolean {
+  const info = getDb()
+    .prepare(
+      `UPDATE tasks SET status = 'failed', error = ?, result = ?, completed_at = ?
+       WHERE id = ? AND status NOT IN ('complete', 'failed')`
+    )
+    .run(error, result ? JSON.stringify(result) : null, nowIso(), id);
+  return info.changes === 1;
+}
+
 // FG-676: reinstate a terminal row the resurrection moved off terminal, CAS'd on
 // the status the caller's shape check actually OBSERVED, and stamped with the
 // TRUE terminal time (the task.failed event's), never the repair's. Distinct from
