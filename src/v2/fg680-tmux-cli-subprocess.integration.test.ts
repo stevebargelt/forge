@@ -55,8 +55,24 @@ test("FG-680: a real forge launch subprocess cannot inherit and use a pane's TMU
     assert.equal(child.status, 0, `forge launch run must create its own tmux session, not act as a client of inherited TMUX: ${child.stderr}`);
     assert.match(child.stdout, /"tmuxSession":\s*"forge-launch-fg680-cli-/, "the real CLI reported the launch it submitted");
 
-    const alive = spawnSync("tmux", ["-S", sentinel, "has-session", "-t", "fg680-cli-sentinel"], { encoding: "utf8", env: { ...process.env } });
-    assert.equal(alive.status, 0, "the real forge CLI subprocess must not reach the server named by inherited TMUX");
+    // WHERE the session landed is the whole differential. Asking only whether the sentinel
+    // SURVIVED proves nothing: `forge launch run` kills no server, and with TMUX retained the
+    // exit hook skips its own kill-server because the private socket dir stays empty — so the
+    // sentinel is alive in BOTH arms and the check passes against an unfixed harness. What
+    // separates them is the pane: defaultTmux spreads the inherited env, so an unfixed harness
+    // creates `forge-launch-fg680-cli-*` on the server named by TMUX — the operator's, whenever
+    // the suite runs inside a pane. startLaunch sets remain-on-exit, so the session outlives the
+    // launched command and is still there to be found.
+    const sessions = spawnSync("tmux", ["-S", sentinel, "list-sessions", "-F", "#{session_name}"], { encoding: "utf8", env: { ...process.env } });
+    assert.equal(sessions.status, 0, `the sentinel server must still be alive to be inspected: ${sessions.stderr}`);
+    assert.match(sessions.stdout, /fg680-cli-sentinel/, "and the session it was holding is still there");
+    assert.doesNotMatch(
+      sessions.stdout,
+      /forge-launch-fg680-cli-/,
+      "the real forge CLI subprocess put its pane on the server named by the INHERITED TMUX. That is the operator's " +
+        "server whenever the suite runs inside a pane, and the suite's own exit hook then kills it (FG-680). " +
+        "src/test-setup.ts must delete TMUX so the CLI's bare tmux client resolves the private TMUX_TMPDIR socket instead.",
+    );
   } finally {
     spawnSync("tmux", ["-S", sentinel, "kill-server"], { stdio: "ignore", env: { ...process.env } });
     rmSync(sentinelDir, { recursive: true, force: true });
