@@ -234,19 +234,19 @@ export function setTaskParentId(id: string, parentId: string): void {
 // Write captured result and transition to awaiting_gate before the human gate.
 // Distinct from markTaskComplete: gate completion still has to happen via the
 // human's gate decision; this is just the data-capture step before the gate.
-export function markTaskAwaitingGate(id: string, result: unknown): void {
-  getDb()
-    .prepare(
-      `UPDATE tasks SET status = 'awaiting_gate', result = ?, completed_at = NULL, error = NULL WHERE id = ?`
-    )
-    .run(JSON.stringify(result), id);
-}
-
-// FG-523: compare-and-set variant of markTaskAwaitingGate for the validation-
-// contract hold. The hold fires on the gate: auto/none path too, where a
-// concurrent `forge cancel` may already have marked the task failed — the
-// unconditional write above would resurrect it (the AWN-2 race markTaskComplete
-// guards against). Returns true iff this call held the task.
+//
+// Compare-and-set, and the ONLY writer of `awaiting_gate` (FG-523 added the CAS
+// for the validation-contract hold; FG-676 deleted the unconditional variant
+// that used to sit above it). A terminal row is never overwritten: a concurrent
+// `forge cancel`, or a `gate reject`/`request-changes` that already failed this
+// task, is a HUMAN's decision, and this write is a background one — resurrecting
+// it to awaiting_gate NULLs the error and parks the task on a decision no agent
+// will ever run for and no gate can resolve. That is the AWN-2 race
+// markTaskComplete guards against, arriving on the gate side.
+//
+// Returns true iff this call held the task. Callers MUST branch on it: emitting
+// task.awaiting_gate or an operator notification over a refused CAS would make
+// the event stream disagree with the row it describes.
 export function markTaskHeldForGate(id: string, result: unknown): boolean {
   const info = getDb()
     .prepare(
