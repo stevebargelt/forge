@@ -500,6 +500,84 @@ export function detectContainerReapFailed(db: DatabaseInstance, opts: OpsCheckOp
   });
 }
 
+type ResurrectedGateRow = { taskId: string; runId: string; phase: string; payload: string | null };
+
+/** FG-676: a task row at `awaiting_gate` whose latest TERMINAL lifecycle event is
+ *  a `gate_rejected` task.failed — the contradiction `forge show` prints on
+ *  adjacent lines (status: awaiting_gate / failure: gate_rejected). A human
+ *  decided this task; a later write moved it back to a state no agent will ever
+ *  run for and no legitimate gate decision resolves, and NULLed the row's error
+ *  on the way. It is a phantom blocker: it parks there permanently.
+ *
+ *  db-confirmed — the row's status and its own event stream are both plain DB
+ *  facts, no external probe involved. Repaired by `forge ops repair <taskId>`,
+ *  which reconstructs the terminal row from the event stream (autonomy "ask",
+ *  same as retry_orphan/stuck_run).
+ *
+ *  The corruption is FORWARD-ONLY: `awaiting_gate` is in neither of
+ *  reconcilePublicationRecoveries' selection sets, so no future wave revisits
+ *  such a row — a fix to the resurrecting path does not clear rows already
+ *  carrying it, which is exactly why this detector + repair exist.
+ *
+ *  Reads only the LATEST task.failed/task.completed event per task (mirroring
+ *  detectOrphanedWorkMayPersist's correlated subquery) — the same
+ *  newest-terminal-wins rule failureKindFromEvents applies, so a task that later
+ *  RECOVERED (a task.completed after the rejection) is not this shape and never
+ *  fires here. A task.awaiting_gate event between them is not terminal and is
+ *  correctly walked past by both. */
+export function detectResurrectedGateDecision(db: DatabaseInstance, opts: OpsCheckOptions = {}): Incident[] {
+  const rows = db
+    .prepare(
+      `SELECT t.id AS taskId, t.run_id AS runId, t.phase AS phase, e.payload AS payload
+       FROM tasks t
+       JOIN runs r ON r.id = t.run_id
+       JOIN events e ON e.id = (
+         SELECT e2.id FROM events e2
+         WHERE e2.task_id = t.id AND e2.event_type IN ('task.failed', 'task.completed')
+         ORDER BY e2.created_at DESC, e2.id DESC
+         LIMIT 1
+       )
+       WHERE t.status = 'awaiting_gate'
+         AND e.event_type = 'task.failed'
+         AND (? IS NULL OR r.project_dir = ?)`
+    )
+    .all(opts.projectDir ?? null, opts.projectDir ?? null) as ResurrectedGateRow[];
+
+  const incidents: Incident[] = [];
+  for (const row of rows) {
+    const payload = row.payload ? (JSON.parse(row.payload) as Record<string, unknown>) : null;
+    // Only a GATE REJECTION is a human decision. Any other latest failure kind
+    // over an awaiting_gate row is a different (or unclassified) contradiction —
+    // this repair has no authority over it and must not claim one.
+    if (payload?.["failure_kind"] !== "gate_rejected") continue;
+    const recordedError = typeof payload["error"] === "string" ? payload["error"] : undefined;
+    incidents.push(
+      makeIncident({
+        kind: "resurrected_gate_decision",
+        severity: "high",
+        confidence: "db-confirmed",
+        runId: row.runId,
+        taskId: row.taskId,
+        evidence: [
+          `task ${row.taskId} (${row.phase}) is awaiting_gate, but the newest terminal event on its own stream is a task.failed with failure_kind gate_rejected`,
+          recordedError
+            ? `the gate decision that settled it is still the newest terminal fact: "${recordedError}" — the row's status was overwritten and its error NULLed after that decision`
+            : "the row's status was overwritten after that decision (the task.failed event records no error string)",
+          "no agent will dispatch for this row (its phase already has a decision) and no gate decision resolves it — it blocks the run permanently",
+        ],
+        recommendedAction: {
+          type: "repair",
+          autonomy: "ask",
+          command: `forge ops repair ${row.taskId}`,
+          reason:
+            "a human-decided terminal state was overwritten by a later write; `forge ops repair` restores the terminal row from the event stream (which is authoritative), preserving the rejected artifact as audit history. Nothing self-heals this — `awaiting_gate` is in neither reconcile selection set, so it will not clear on the next wave. Run with `--dry-run` first. Autonomy is 'ask' — confirm before running.",
+        },
+      })
+    );
+  }
+  return incidents;
+}
+
 const DETECTORS: Array<(db: DatabaseInstance, opts: OpsCheckOptions) => Incident[]> = [
   detectRetryOrphan,
   detectInconsistentRunState,
@@ -507,6 +585,7 @@ const DETECTORS: Array<(db: DatabaseInstance, opts: OpsCheckOptions) => Incident
   detectOrphanedWorkMayPersist,
   detectStuckRun,
   detectContainerReapFailed,
+  detectResurrectedGateDecision,
 ];
 
 /** Run every detector over a read-only handle and return the flat incident list.
