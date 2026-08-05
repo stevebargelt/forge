@@ -56,7 +56,7 @@ knows they are **known rather than missed**.
 Every `/api/in-flight` request classifies running containerized tasks by liveness, at a 2-second client
 poll:
 
-- `dashboard/src/queries.ts:236` (and `:238` for the scoped form) → `findReconcileCandidates(db(), …, probe)`
+- `dashboard/src/queries.ts:253` (and `:255` for the scoped form) → `findReconcileCandidates(db(), …, probe)`
 - → `probeContainerLiveness` at `src/ops/reconcile-candidate.ts:63`
 - → `execFileSync("docker", ["inspect", "-f", "{{.State.Running}}", name], …)`
 
@@ -70,11 +70,11 @@ criterion unassertable.
 BD-13 named one exception; there are two. Project presentation shells `git` on the serving path, which
 BD-7 names by word:
 
-- `dashboard/src/queries.ts:1354` `projectPresentation(projectDir)`
+- `dashboard/src/queries.ts:1371` `projectPresentation(projectDir)`
 - → `repositoryCheckoutIdentity(projectDir)` (`src/util/repository-identity.ts`)
 - → `src/util/repository-identity.ts:13` `const defaultGit: GitRunner = (args) => execFileSync("git", args, …)`
 
-It is reached from `/api/in-flight` (`queries.ts:246`), the task view (`:403`) and the run view (`:1790`),
+It is reached from `/api/in-flight` (`queries.ts:263`), the task view (`:420`) and the run view (`:1807`),
 behind a 5-second presentation cache.
 
 **FG-679's new sections avoid subprocess-backed presentation entirely.** They carry a weaker project
@@ -140,7 +140,7 @@ measured against them:
   exposed or linked. Launch detail is addressed by launch **identity**, validated against the same
   charset guard that `launchDir` uses before it becomes a path, and the log response is a **bounded
   tail** — the log file is unbounded host-command output served by a server with no authentication and
-  an env-overridable bind address (`dashboard/src/server.ts:33`). Identity-only addressing constrains
+  an env-overridable bind address (`dashboard/src/server.ts:35`). Identity-only addressing constrains
   path traversal; the tail bound is what constrains content exposure.
 
 ## Explicitly out of scope
