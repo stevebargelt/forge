@@ -16,15 +16,15 @@ FG-496 and FG-591.
 
 ## Current objective
 
-Clear two bounded safety prerequisites, then return to product feature work:
-dashboard visibility for non-task work, then the DB-backed
-operator-work-management sequence.
+Run the operator-sequenced series FG-676 → FG-679 → FG-610 (sequencing recorded
+2026-08-05). Each item starts only after the preceding one is merged, closed
+with acceptance evidence, and the live checkout is synchronized to current
+`main`.
 
-The two prerequisites in `Now` are NOT a return to review-infrastructure
-stabilization. Each qualifies under the interruption policy below on its own
-terms — one is a required test tier that cannot execute under the mandated
-launch path, the other leaves runs permanently unrecoverable — and both were
-demonstrated during FG-678 rather than inferred. Everything else in
+FG-676 is the last of the two bounded safety prerequisites and is NOT a return
+to review-infrastructure stabilization: it qualifies under the interruption
+policy below on its own terms — it leaves runs permanently unrecoverable — and
+was demonstrated during FG-678 rather than inferred. Everything else in
 review-infrastructure stays non-preempting.
 
 ## Recently completed
@@ -47,9 +47,9 @@ review-infrastructure stays non-preempting.
 - **FG-660** — restored the intended review cardinality: one discovery pass,
   at most one remediation batch, and one recheck.
 - **PR #193** — added the documentation index and removed stale assessments.
-- **FG-648** (`c866b103`, PR #195) — shipped the dashboard agent-runtime trends,
-  then REOPENED the same day: AC5 was recorded met on evidence that covered how
-  the chart's text looks but never that the chart can be read. See `Now`.
+- **FG-648** (`c866b103`, PR #195) — shipped the dashboard agent-runtime trends;
+  reopened the same day over AC5 (evidence covered how the chart's text looks,
+  never that the chart can be read) and since CLOSED.
 - **FG-662** (`9f257828`, PR #196) — agent runtime now derives from the agent's
   own exit rather than a terminal timestamp a sweep rewrote. Closed with an
   explicit operator override recorded, NOT a mechanically settled ledger; the
@@ -60,10 +60,22 @@ review-infrastructure stays non-preempting.
   driver is refused pre-container as `blocked_environment`. The rechecker runs
   the shipping database engine. This clears the gate that FG-609 and FG-610 were
   held behind.
-- **FG-648** (`c866b103`, PR #195) — the dashboard agent-runtime trends; reopened
-  the same day for AC5 and since CLOSED. It is no longer `Now`.
 - **FG-671** — `reclaimReleasedTargets` no longer deletes bytes of an
   unknown-liveness target on age-out.
+- **FG-680** (`dc91e93f`, PR #207) — the test harness can no longer kill the
+  operator's tmux server. `src/test-setup.ts` relocated `TMUX_TMPDIR` but never
+  deleted `TMUX`, and a tmux client given neither `-L` nor `-S` resolves its
+  socket from `$TMUX` FIRST — so inside a launch pane the exit hook's bare
+  `kill-server` destroyed the shared server. Blast radius was wider than the
+  exit hook (two FG-614 teardowns and `launch.ts`'s own exec all spread
+  `process.env`); one deletion fixes them all. Shipped a clean 8/8 shipping
+  review with NO overrides. Two vacuity traps were closed on the way: with
+  `TMUX` set a bare client never creates the `TMUX_TMPDIR` socket dir, so the
+  exit hook's `readdirSync` guard skips `kill-server` and a naive test passes
+  against an unfixed harness (the tests use `-L default` instead); and the
+  real-CLI test originally asserted only that the sentinel server SURVIVED,
+  true in both arms — review finding RF-1 — now corrected to assert WHERE the
+  session landed.
 - **FG-678** (`39380bb1`, PR #206) — the writable-dispatch dependency contract.
   All three dispatch shapes now cross ONE shared resolver: a three-way
   discriminator (no declared dependencies → not applicable; declared + supported
@@ -91,21 +103,7 @@ review-infrastructure stays non-preempting.
 
 ## Now
 
-Two bounded prerequisites, in this order (operator sequencing, 2026-08-05).
-Neither is a feature; both are small and both were demonstrated, not inferred.
-
-1. **FG-680 — `test:integration` under `forge launch run` kills its own tmux
-   server.** `src/test-setup.ts` sets `TMUX_TMPDIR` but never unsets `TMUX`, so
-   inside a launch pane the suite's exit-time `tmux kill-server` resolves the
-   OPERATOR's default socket instead of the private one. FG-614's isolation
-   therefore holds in a plain shell and is defeated in exactly the environment
-   Forge mandates. It took out only its own job on 2026-08-04 because nothing
-   else was running; every `forge launch run` on the host shares that one tmux
-   server, so a concurrent live review would go with it. Qualifies under the
-   interruption policy as a required test tier that does not execute. **Until it
-   lands, do not run `npm run test:integration` under `forge launch run`** — use
-   a plain shell or let CI carry the tier.
-2. **FG-676 — publication reconcile resurrects a gate-failed task to
+1. **FG-676 — publication reconcile resurrects a gate-failed task to
    `awaiting_gate`.** Every `request-changes` leaves a permanent phantom blocker
    and the run can never complete. Two independent reproductions now (FG-609's
    run, four phantoms; FG-678's run, one). The demonstrated impact is larger
@@ -130,10 +128,23 @@ Neither is a feature; both are small and both were demonstrated, not inferred.
    outstanding". Both data sources already exist and are durable
    (`forge launch list/show` plus `host_verifications`; `probeCiGateStatus` for
    exact-SHA required checks), so this is a projection gap, not instrumentation.
+   **Amended 2026-08-05 with explicit acceptance criteria and eleven binding
+   decisions (BD-1…BD-11)** — one `Current activity` surface with distinct
+   Agents / Host verification / Required CI sections; association from
+   submission-time structured metadata only, never from launch names, argv or
+   log text; the launch status vocabulary preserved exactly; CI observations
+   bound to an exact candidate sha with old-sha evidence disappearing on
+   candidate change; no GitHub/shell/git/CLI call from the dashboard's serving
+   or polling path; `/status` and the dashboard must agree. Those are settled
+   inputs — an implementer who disagrees stops and reports.
 2. **FG-610 — FG-496 Slice E:** atomic claims, leases, recovery, capacity
    accounting, and canonical claim-next. Unblocked: it was held behind FG-678
    because its concurrency guarantees need host stress-loops on the writable
-   dispatch path, which is now deterministic.
+   dispatch path, which is now deterministic. Starts only after FG-676 and
+   FG-679 ship cleanly; builds on the FG-609 primitives without inventing a
+   second rank, readiness, blocker or lifecycle vocabulary; concurrency-critical
+   throughout, so transaction-level tests PLUS a repeated host stress loop are
+   required — a single green execution is not evidence.
 3. **FG-591 — operator work queue:** Kanban, CLI/API controls, and
    capacity-limited dispatch over the queue primitives.
 4. **FG-496 aggregate closeout:** reconcile the DB-backed backlog program
