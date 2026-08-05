@@ -42,9 +42,11 @@ operator's instruction to report decisions at the end rather than stop at gates.
 
 - **Scrubbing an AI-attribution trailer mid-run orphans pipeline task-branch lineage.** An agent commit
   landed with `Co-Authored-By: Claude Opus 5`; the only remedy was a history rewrite, and the squash
-  orphaned the verify task's base (`abe0e7bc`), so publication failed `merge_conflict`, the docs phase
-  never ran, and the run recorded `failed` even though the work shipped clean and CI was green. This is
-  the concrete cost behind FG-685 — fix the hook coverage and the whole chain disappears.
+  orphaned the verify task's base (`abe0e7bc`), so publication failed `merge_conflict` and the run
+  CORRECTLY recorded `failed`; the independently reviewed PR then shipped. **This is NOT FG-635** — the
+  run did not falsely complete, and docs was explicitly recorded unreachable rather than silently
+  skipped. This is the concrete cost behind FG-685 — fix the hook coverage and the whole chain
+  disappears.
 - **A `rejected_premise` must be RE-BOUND after a fix cycle moves the candidate.** RF-1's evidence was
   recorded at `0c227970`; the batch fix moved the candidate to `1a90bb6d` and the gate then refused with
   `rejected_premise_unproven`. Re-running the same experiment at the new candidate and re-recording
