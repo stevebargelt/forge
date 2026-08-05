@@ -19,18 +19,29 @@ FG-496 and FG-591.
 Run the operator-sequenced series FG-676 → FG-679 → FG-610 (sequencing recorded
 2026-08-05). Each item starts only after the preceding one is merged, closed
 with acceptance evidence, and the live checkout is synchronized to current
-`main`. **FG-680 and FG-676 have both shipped**; the series resumes at FG-679.
+`main`. **FG-680, FG-676 and FG-679 have all shipped**; the series resumes at
+FG-610, which has not been started.
 
 Both bounded safety prerequisites are now closed, so what remains is product
 feature work. Everything in review-infrastructure stays non-preempting.
 
-**FG-655 is now a measured tax, not a theoretical one.** Its docs stage stranded
-correct, uncommitted work on BOTH shipped tickets this session — FG-680's
-`how-to-testing` section and FG-676's ADR writer-name correction — and each
-survived only because the tree was inspected by hand before verification. Each
-also dirtied the tree, which blocked CI-evidence reuse and forced a local
-verification. It is still non-preempting under the operator sequence, but it
-should be reconsidered for promotion once FG-610 lands.
+**FG-655 is now a measured tax, and it cost an override.** Its docs stage
+stranded correct, uncommitted work FOUR times this session — FG-680's
+`how-to-testing` section, FG-676's ADR writer-name correction, FG-679's
+falsified `SCHEMA-CONTRACT.md` response row, and the FG-684 closeout's
+declared-vs-channel separation. Each survived only because the tree was
+inspected by hand before verification, and each dirtied the tree, which blocks
+CI-evidence reuse and forces a slower local verification. The FG-679 instance
+is the one that cost something irreversible: it was the sole `docs_closeout`
+gap, so shipping required an operator-authorized OVERRIDE plus a whole second
+PR to discharge it.
+
+It DOES terminate — the FG-684 closeout's second docs stage reconciled to
+nothing once the docs matched the code — so it fires when a fix batch moves
+documented behavior, not unconditionally. Still non-preempting under the
+operator sequence, but it has now demonstrably cost an override and an extra
+delivery, which is past the "measured impact" bar. Reconsider for promotion
+once FG-610 lands.
 
 ## Recently completed
 
@@ -84,6 +95,30 @@ should be reconsidered for promotion once FG-610 lands.
   phantom evidence is stale (the store now has ZERO `awaiting_gate` rows, so the
   reserved dogfood had nothing to demonstrate on), and BD-11 was withdrawn as
   disproven after being wrongly recorded as a must-fix.
+- **FG-679** (`ba0d87e1` PR #211 + `a7154386` PR #212) — the dashboard now answers
+  "is host verification running right now?" from durable state. The ticket's
+  premise was CORRECTED at the architect gate before any code: it framed itself
+  as a pure projection gap, true for CI and false for launches, because
+  `readLaunch` derives status from a live tmux probe and launches emit no
+  events. Durable launch instrumentation was ruled in scope; a
+  terminal-only-plus-unobserved projection was rejected by the operator. No
+  daemon was needed — `buildWrapperCommand` already embeds a recorder in the
+  command the tmux pane runs, so every launch's exit record is durable without a
+  waiter, and promotion is opportunistic from existing forge invocations.
+  **Shipped across TWO merges by design:** the feature merged with
+  `docs_closeout` OVERRIDDEN (operator-authorized, FG-655 stranded the contract
+  correction), FG-679 was held OPEN, and the closeout discharged it. Carries one
+  operator-authorized `accepted_risk`: the launch-log endpoint serves raw host
+  command output, bounded and labeled but not access-gated — revisit if the
+  dashboard ever leaves loopback.
+- **FG-684** (`a7154386`, PR #212) — a declared association now outranks cwd when
+  placing a launch. Introduced by FG-679's own RF-1 fix, which added the
+  association fallback for the GAP case but ordered it so cwd won the CONFLICT,
+  filing explicitly-associated launches under unrelated projects. Its bounded
+  review then caught a second defect that would have shipped PINNED BY A PASSING
+  TEST: `associationKindFor` reported the authority HELD rather than the channel
+  that DECIDED placement, and the closeout's own new fallback test asserted that
+  mislabeling as correct.
 - **FG-680** (`dc91e93f`, PR #207) — the test harness can no longer kill the
   operator's tmux server. `src/test-setup.ts` relocated `TMUX_TMPDIR` but never
   deleted `TMUX`, and a tmux client given neither `-L` nor `-S` resolves its
@@ -125,7 +160,19 @@ should be reconsidered for promotion once FG-610 lands.
 
 ## Now
 
-1. **FG-679 — dashboard: surface in-flight host verification and PR checks.**
+1. **FG-610 — FG-496 Slice E:** atomic claims, leases, recovery, capacity
+   accounting, and canonical claim-next. NOT started. Build on the FG-609
+   primitives without inventing a second rank, readiness, blocker or lifecycle
+   vocabulary; preserve the queue position and active/deferred eligibility
+   decisions FG-609 already records. Treat atomic claims, lease expiry/recovery
+   and capacity accounting as concurrency-critical: transaction-level tests PLUS
+   a repeated host stress loop are required, because a single green execution is
+   not evidence. If its architect surfaces a genuinely unresolved operator
+   policy choice, STOP at that gate and report rather than guessing.
+
+## Superseded (kept briefly for context)
+
+1. **FG-679 — SHIPPED, see Recently completed.**
    The next substantive FEATURE. Non-task work is invisible to the dashboard, so
    a run with verification running reads as idle. Demonstrated 2026-08-04:
    `/api/in-flight` returned only an FG-676 phantom `awaiting_gate` row while
