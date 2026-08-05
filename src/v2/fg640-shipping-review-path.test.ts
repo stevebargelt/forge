@@ -32,7 +32,14 @@ import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
 import { insertTask, getTask } from "../store/tasks.js";
-import { findingsForReview, getReview, insertReview, recordDisposition } from "../store/reviews.js";
+import {
+  findingsForReview,
+  getReview,
+  insertReview,
+  markDocsDispatchDelivered,
+  openDocsDispatch,
+  recordDisposition,
+} from "../store/reviews.js";
 import { runNextStage, type CoordinatorDeps } from "./review-run.js";
 import { gate } from "./gate.js";
 import type { AcClaim } from "./review-evidence.js";
@@ -91,6 +98,15 @@ type ShippingOverrides = {
 
 /** Every side effect injected, exactly as review-run.test.ts does. Discovery finds NOTHING, so
  *  the ledger reaches Stage 9 with zero findings — which is the whole point of #17. */
+/** FG-655: the durable docs-dispatch binding a stubbed `dispatchDocs` must create, exactly as
+ *  the real wiring does — the row exists before the dispatch, and the host-minted task
+ *  identity is written onto it. The re-entry short-circuit reads this row, so a stub that
+ *  returned a binding the store does not hold would be a stub that cannot be re-entered. */
+function docsBinding(reviewId: string, candidateSha: string, taskId = "task-docs-1") {
+  const opened = openDocsDispatch(reviewId, candidateSha);
+  return markDocsDispatchDelivered(opened.id, { taskId });
+}
+
 function deps(over: ShippingOverrides = {}): CoordinatorDeps {
   return {
     headSha: () => SHA,
@@ -110,7 +126,12 @@ function deps(over: ShippingOverrides = {}): CoordinatorDeps {
     // FG-649: Stage 5 owns the fix-cycle commit. This path has no findings, so it is never
     // reached — a no-change commit at the one sha this fixture has is the only honest stub.
     commitFixCycle: () => ({ kind: "no_change", sha: SHA }),
-    dispatchDocs: () => ({ ok: true }),
+    // FG-655: the docs stage binds its dispatch durably and commits what the agent DECLARED.
+    // This fixture's docs agent declares nothing and leaves a clean tree — the legitimate
+    // no-op, which records candidate-unchanged.
+    dispatchDocs: ({ review, candidateSha }) => ({ ok: true, binding: docsBinding(review.id, candidateSha) }),
+    docsDelivery: ({ binding }) => ({ kind: "delivered", taskId: binding.taskId ?? "task-docs", docsUpdated: [] }),
+    commitDocsCycle: () => ({ kind: "no_change", sha: SHA }),
     dispatchRechecker: (ctx) => ({
       ok: true,
       taskId: "task-recheck",

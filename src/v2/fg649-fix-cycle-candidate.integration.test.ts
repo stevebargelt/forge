@@ -39,6 +39,7 @@ import { join } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
+import { insertTask, markTaskComplete } from "../store/tasks.js";
 import {
   findingsForReview,
   getReview,
@@ -200,10 +201,33 @@ function harness(over: { fixer?: FixerBehaviour; verdict?: RecheckVerdict; deps?
         return done(fixer(JSON.parse(raw) as FixPayload));
       }
 
-      case "documentation-maintainer":
-        // Reconciles nothing in this fixture, and — like the real docs phase when there is
-        // nothing to write — leaves the worktree alone.
+      case "documentation-maintainer": {
+        // FG-655: Stage 6 binds its dispatch to the HOST-MINTED identity at mint time, and
+        // reads the agent's own `docs_updated` declaration off the DURABLE task record — so
+        // the stub honours both halves of the invoke contract it stands in for. Reconciles
+        // nothing in this fixture and, like the real docs phase when there is nothing to
+        // write, leaves the worktree alone: an empty declaration against a clean tree is the
+        // legitimate no-op, so the candidate correctly does not move.
+        args.onTaskMinted?.({ runId: RUN_ID, taskId });
+        insertTask({
+          id: taskId,
+          runId: RUN_ID,
+          phase: "task",
+          agentRole: args.agentRole,
+          status: "pending",
+          taskPackage: {
+            taskId,
+            runId: RUN_ID,
+            phase: "task",
+            role: args.agentRole,
+            inputs: { task: args.task },
+            composedSystemPrompt: "(stubbed container)",
+          },
+          createdAt: RUN.createdAt,
+        });
+        markTaskComplete(taskId, {});
         return done({});
+      }
 
       case "review-rechecker": {
         // The candidate the stub answers under is THE ONE THE PROMPT NAMED, not one it looked

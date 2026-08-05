@@ -110,6 +110,19 @@ export type InvokeArgs = {
    *  on a recovery instead of duplicating it. Only honored when invoke OWNS the run
    *  (no --run attach) — an attached run already has its identity. */
   dispatchKey?: string;
+  /** FG-655: the HOST-MINTED identity, surfaced AT MINT TIME — after the task row and its
+   *  `task.created` event are durable, and before anything can start a container.
+   *
+   *  The host stays the sole minter of task identity; this is how a caller that must be
+   *  durably BOUND to the dispatch it is about to make (the review coordinator's docs stage,
+   *  whose re-entry after a crash must not run a second agent) writes that binding while
+   *  there is still nothing to be bound to but a row. Reading the identity off the returned
+   *  InvokeResult is not a substitute: the return is exactly what a crash during the
+   *  dispatch destroys.
+   *
+   *  It throws THROUGH — a caller whose binding could not be persisted must not get a
+   *  container, so this is deliberately not wrapped. */
+  onTaskMinted?: (identity: { runId: string; taskId: string }) => void;
   // Injected for tests; real callers leave undefined → docker is used.
   dockerExec?: DockerExecFn;
 };
@@ -250,6 +263,12 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   // invoke is forge's main orchestrator primitive; its timelines must start at
   // task.created, not task.started — matching the pipeline path (runNext).
   logEvent("task.created", { runId, taskId });
+
+  // FG-655: THE BINDING POINT. The row is durable and its creation is on the timeline; no
+  // task dir, no manifest and no docker argument has been built yet, so nothing that could
+  // write into a container has happened. A caller that needs to be durably bound to this
+  // dispatch binds HERE, ahead of every container write, including the refusal path below.
+  args.onTaskMinted?.({ runId, taskId });
 
   // FG-654: the row exists so the refusal is durable and addressable (the review
   // ledger records this taskId against the lens), and nothing is dispatched. The

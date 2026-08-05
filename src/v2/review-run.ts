@@ -40,11 +40,14 @@ import {
   replaceLensOutcomes,
   invalidateResolutionsForCandidate,
   recordAgentProtocol,
+  pendingDocsDispatch,
   recordDisposition,
   recordResolution,
   recordStageEvidence,
+  retireDocsDispatch,
   setReviewState,
   updateReview,
+  type DocsDispatch,
   type Review,
   type ReviewFinding,
 } from "../store/reviews.js";
@@ -152,6 +155,40 @@ export type FixCycleCommitContext = {
   declaredFiles: readonly string[];
 };
 
+/** FG-655: what the coordinator's own DOCS-cycle commit did.
+ *
+ *  Deliberately the same three outcomes and the same vocabulary as `FixCycleCommit`, for the
+ *  same reasons: `committed` names the sha the coordinator CREATED (or, with `recognized`,
+ *  the one it authored on a pass that crashed before the ledger writes and is now recovering
+ *  rather than re-authoring); `no_change` is a docs cycle that legitimately moved nothing, at
+ *  a clean tree, and the candidate correctly does not move; `refused` is NAMED and records
+ *  nothing. Two similar shapes are better than one generalized one — the fix cycle's
+ *  behaviour must not move because the docs stage acquired the same authority. */
+export type DocsCycleCommit =
+  | { kind: "committed"; sha: string; committedPaths: string[]; recognized?: boolean; declaredNotMoved?: string[] }
+  | { kind: "no_change"; sha: string }
+  | { kind: "refused"; reason: string; detail: string };
+
+export type DocsCycleCommitContext = {
+  review: Review;
+  /** The durable binding whose id is the stage-scoped idempotency key in the commit subject. */
+  binding: DocsDispatch;
+  /** The docs agent's OWN `docs_updated` declaration, read back off its durable task result.
+   *  The worktree is never a source of scope — not on the authored path, and not in recovery. */
+  declaredFiles: readonly string[];
+};
+
+/** FG-655: the docs agent's declaration, read off the DURABLE task record its binding names.
+ *
+ *  One read for both paths — the pass that just dispatched and the pass recovering after a
+ *  crash — so the scope the commit carries cannot depend on which pass is asking. An
+ *  `unreadable` delivery is absent, non-terminal or unparseable; it is a refusal, never an
+ *  empty declaration, because "the agent said it changed nothing" and "nobody can tell what
+ *  the agent said" are different facts and only one of them may advance a stage. */
+export type DocsDelivery =
+  | { kind: "delivered"; taskId: string; docsUpdated: readonly string[] }
+  | { kind: "unreadable"; detail: string };
+
 export type CoordinatorDeps = {
   headSha: () => Awaitable<string>;
   verify: (sha: string) => Awaitable<VerificationEntry>;
@@ -192,7 +229,23 @@ export type CoordinatorDeps = {
     ok: boolean;
     error?: string;
     protocol?: { role: string; sha256: string; taskId: string };
+    /** FG-655: the durable binding this dispatch was made under, created BEFORE the call
+     *  reached anything that could start a container and completed with the host-minted task
+     *  identity at mint time. Returned so the pass that dispatched uses the same row the
+     *  re-entry short-circuit reads, rather than a second lookup that could disagree. */
+    binding: DocsDispatch;
   }>;
+  /** FG-655: the docs agent's own `docs_updated` declaration, read off the durable task
+   *  record the binding names. The manifest / task record stays AUTHORITATIVE and the ledger
+   *  binding is an index of identity only — the declaration is never copied into the ledger,
+   *  so the two can never drift into disagreeing about scope. */
+  docsDelivery: (ctx: { review: Review; binding: DocsDispatch }) => Awaitable<DocsDelivery>;
+  /** FG-655: THE COORDINATOR COMMITS THE DOCS CYCLE, exactly as FG-649 made it commit the fix
+   *  cycle, so Stage 6 advances to a sha it AUTHORED instead of adopting whatever the worktree
+   *  head happens to be. REQUIRED and not optional, for the reason `dispatchFixer`'s contract
+   *  gives: an optional seam is a seam some caller silently does without, and this one is the
+   *  candidate-movement write path. */
+  commitDocsCycle: (ctx: DocsCycleCommitContext) => Awaitable<DocsCycleCommit>;
   dispatchRechecker: (ctx: RecheckContextIn) => Awaitable<{
     ok: boolean;
     taskId?: string;
@@ -734,41 +787,196 @@ async function runBatchFix(reviewId: string, transition: Transition, deps: Coord
 
 // ─── stage 6 ────────────────────────────────────────────────────────────────
 
+// FG-655: THE DOCS STAGE COMMITS WHAT THE DOCS AGENT DECLARED, and the candidate advances
+// only to the sha the coordinator itself authored.
+//
+// This stage used to end with `const head = await deps.headSha(); advanceCandidate(...)` —
+// the bare-HEAD read the fix cycle's own comment at :665 forbids in as many words. When the
+// docs agent did not commit, that read was a guaranteed no-op: the stage reported "candidate
+// unchanged at <sha>" and ADVANCED, which is a true statement about HEAD and a false one
+// about the work, and the work sat in the worktree. Downstream, final verification silently
+// degraded to a dirty-tree local run, and committing the stranded edits by hand moved HEAD
+// while the ledger candidate stayed put — so the next stage refused
+// `candidate_not_checked_out` and the review could only proceed by DISCARDING the docs work.
+// Documentation asserting the opposite of shipped behaviour reached the tree that way, and
+// one stranded fragment was lost outright.
+//
+// THE ORDER BELOW IS THE CORRECTNESS ARGUMENT, not a style:
+//   (a) the re-entry short-circuit consults the DURABLE BINDING before the decision to
+//       dispatch — a short-circuit evaluated after dispatch has been called is a second
+//       container plus an apology;
+//   (b) dispatch only when no live binding exists;
+//   (c) read the agent's own declaration off its durable task record;
+//   (d) commit ONLY the declared paths;
+//   (e) advance through `advanceCandidate` and only to a sha the commit reports the
+//       coordinator authored or recognized, so the invalidation at :665 fires by construction
+//       and the per-sha stage rules need no new key;
+//   (f) record the stage, then retire the spent binding.
+//
+// THE RECORD'S SHA IS THE POST-ADVANCE ONE, unlike the fix stage's. Stage 6 selection is
+// per-sha (review-coordinator.ts), so a record at the pre-docs candidate leaves the stage
+// incomplete at the new one and the review loops on its own docs stage. The fix stage is
+// exempt only because its completeness is decided per finding by ingested-batch membership,
+// and docs has no such per-item ledger to appeal to.
 async function runDocs(reviewId: string, transition: Transition, deps: CoordinatorDeps): Promise<StageOutcome> {
   const review = getReview(reviewId) as Review;
   const candidateBefore = review.candidateSha as string;
+
+  // Every refusal past this point puts the state back, exactly as Stage 5's does (FG-649
+  // RF-1): a row parked in `documenting` for a stage that recorded nothing tells an operator
+  // a docs agent is running when none is.
+  const stateBefore = review.state;
+  const refuse = (message: string): StageOutcome => {
+    if (stateBefore !== "documenting") {
+      setReviewState(reviewId, stateBefore, {
+        reason: `stage 6 refused with nothing recorded; the row returns to ${stateBefore}`,
+      });
+    }
+    return { transition, status: "refused", message };
+  };
+  const reEnter = `Resolve the named condition and re-run \`forge review continue ${reviewId}\`; the docs dispatch stays bound, so no second documentation-maintainer is started.`;
+
   setReviewState(reviewId, "documenting", { reason: transition.reason });
 
-  const result = await deps.dispatchDocs({ review, candidateSha: candidateBefore });
-  // FG-654: recorded BEFORE the ok gate, for the same reason the fixer's is — an agent
-  // that ran and then failed still ran under that protocol.
-  if (result.protocol) recordAgentProtocol(review.id, { ...result.protocol, stage: "docs" });
-  if (!result.ok) {
-    return {
-      transition,
-      status: "refused",
-      message: `docs reconciliation failed (${result.error ?? "no error recorded"}) — nothing was recorded.`,
-    };
+  // (a) THE RE-ENTRY SHORT-CIRCUIT, BEFORE THE DISPATCH DECISION.
+  let binding = pendingDocsDispatch(reviewId);
+  let dispatchedNow = false;
+  // The declaration this pass already read, so the re-entry probe and the commit below cannot
+  // be looking at two different reads of the same durable record.
+  let known: DocsDelivery | undefined;
+
+  if (binding !== undefined) {
+    const delivery = await deps.docsDelivery({ review, binding });
+    known = delivery;
+    if (delivery.kind === "unreadable") {
+      // A delivery that is absent, non-terminal or unparseable. The remedy is NOT a new
+      // operator verb: a CLEAN TREE AT THE CANDIDATE is provable evidence the dead
+      // delivery's edits are gone, and that is what authorises retiring a spent binding and
+      // dispatching once more. The probe is `commitDocsCycle` against an EMPTY declaration —
+      // deliberately the same predicate the commit path uses rather than a second, weaker
+      // clean-tree test that could disagree with it.
+      const probe = await deps.commitDocsCycle({ review, binding, declaredFiles: [] });
+      if (probe.kind !== "no_change") {
+        const named =
+          probe.kind === "refused"
+            ? `${probe.reason}: ${probe.detail}`
+            : `docs_cycle_commit_raced: ${probe.sha} carries this docs cycle's subject, but the delivery that ` +
+              `authorised its scope cannot be read, so its paths cannot be reconciled against any declaration`;
+        return refuse(
+          `${named} — and the docs delivery for ${binding.id} could not be read (${delivery.detail}), so the ` +
+            `stage cannot tell what that agent claims it changed. Nothing was recorded and the candidate stays ` +
+            `at ${candidateBefore}. Restore the checkout to ${candidateBefore} with a clean tree (\`git stash\` ` +
+            `the uncommitted work you want to keep, or \`git reset --soft ${candidateBefore}\` if the docs agent ` +
+            `committed) — a clean tree at the candidate is what lets the next pass retire the dead dispatch and ` +
+            `run ONE more docs agent. ${reEnter}`,
+        );
+      }
+      retireDocsDispatch(
+        binding.id,
+        `the delivery could not be read (${delivery.detail}) and the checkout is clean at ${candidateBefore}, ` +
+          `so the dead dispatch left nothing behind`,
+      );
+      binding = undefined;
+      known = undefined;
+    }
   }
 
-  // The docs phase MAY change the candidate; that is exactly why it runs before final
-  // verification. The stage is recorded at the sha it PRODUCED, so verification and recheck
-  // bind to the post-docs candidate and never to a pre-docs one.
-  const head = await deps.headSha();
-  advanceCandidate(reviewId, head);
+  // (b) DISPATCH ONLY IF NO LIVE BINDING EXISTS.
+  if (binding === undefined) {
+    const result = await deps.dispatchDocs({ review, candidateSha: candidateBefore });
+    dispatchedNow = true;
+    binding = result.binding;
+    // FG-654: recorded BEFORE the ok gate, for the same reason the fixer's is — an agent
+    // that ran and then failed still ran under that protocol.
+    if (result.protocol) recordAgentProtocol(review.id, { ...result.protocol, stage: "docs" });
+    if (!result.ok) {
+      return refuse(
+        `docs reconciliation failed (${result.error ?? "no error recorded"}) — nothing was recorded, the candidate ` +
+          `stays at ${candidateBefore}, and the dispatch stays bound as ${binding.id}. ${reEnter}`,
+      );
+    }
+  }
+
+  // (c) THE AGENT'S OWN DECLARATION, off the durable task record. One read for the pass that
+  // dispatched and the pass recovering from a crash, so the commit's scope cannot depend on
+  // which pass is asking.
+  const delivery = known ?? (await deps.docsDelivery({ review, binding }));
+  if (delivery.kind === "unreadable") {
+    return refuse(
+      `docs_cycle_declared_changes_absent: the docs dispatch ${binding.id} produced no readable declaration ` +
+        `(${delivery.detail}), so the coordinator cannot know which paths it may commit — and the worktree is ` +
+        `never a source of scope. Nothing was recorded and the candidate stays at ${candidateBefore}. ${reEnter}`,
+    );
+  }
+
+  const declaredFiles = [...new Set(delivery.docsUpdated.map((p) => p.replace(/^\.\//, "").trim()).filter((p) => p !== ""))].sort();
+
+  // (d) COMMIT ONLY THE DECLARED PATHS. The same reconciliation the fix cycle runs, in both
+  // directions: a tree that moved beyond the declaration is a stop that NAMES the undeclared
+  // paths, and a declaration that reaches beyond the tree commits what moved and names what
+  // did not. An EMPTY declaration is the no-op CLAIM, and this is where it is adjudicated
+  // against the tree — a clean tree is the legitimate no-op (AC2), a dirty one is the
+  // stranding shape this ticket exists to name.
+  const commit = await deps.commitDocsCycle({ review, binding, declaredFiles });
+  if (commit.kind === "refused") {
+    return refuse(
+      `${commit.reason}: ${commit.detail} — the docs stage recorded NOTHING, the candidate stays at ` +
+        `${candidateBefore}, and the dispatch stays bound as ${binding.id}. ${reEnter}`,
+    );
+  }
+
+  // (e) THE CANDIDATE MOVES ONLY TO A SHA THE COORDINATOR AUTHORED OR RECOGNIZED, through
+  // the one place it moves at all.
+  const candidateAfter = commit.kind === "committed" ? commit.sha : candidateBefore;
+  if (commit.kind === "committed") advanceCandidate(reviewId, commit.sha);
+
+  // (f) The record, at the POST-advance sha, then the spent binding.
+  const detail =
+    commit.kind === "committed"
+      ? (commit.recognized === true
+          ? `the docs cycle's commit ${commit.sha} (${commit.committedPaths.length} path(s)) was authored by an ` +
+            `earlier pass that crashed before recording it, and was RECOVERED rather than re-authored`
+          : `docs moved the candidate ${candidateBefore} → ${commit.sha}; the coordinator committed ` +
+            `${commit.committedPaths.length} declared path(s)`) +
+        (commit.declaredNotMoved !== undefined
+          ? `; the agent DECLARED ${commit.declaredNotMoved.join(", ")}, which the worktree never moved`
+          : "")
+      : `docs reconciliation changed nothing and left a clean tree — the candidate stays at ${candidateBefore}`;
+
   recordStageEvidence(reviewId, "docs", {
-    sha: head,
-    detail: head === candidateBefore ? `docs reconciliation left the candidate at ${head}` : `docs moved the candidate ${candidateBefore} → ${head}`,
+    sha: candidateAfter,
+    detail,
+    meta: {
+      docsDispatchId: binding.id,
+      taskId: delivery.taskId,
+      resumedFromBinding: !dispatchedNow,
+      candidateAfter,
+      declaredFiles,
+      docsCommit: {
+        kind: commit.kind,
+        sha: commit.sha,
+        committedPaths: commit.kind === "committed" ? commit.committedPaths : [],
+        recognized: commit.kind === "committed" && commit.recognized === true,
+        declaredNotMoved: commit.kind === "committed" ? (commit.declaredNotMoved ?? []) : [],
+      },
+    },
   });
+  retireDocsDispatch(binding.id, `stage 6 completed at ${candidateAfter}`);
 
   return {
     transition,
     status: "advanced",
     message:
-      head === candidateBefore
-        ? `docs reconciliation complete; candidate unchanged at ${head}`
-        : `docs reconciliation moved the candidate ${candidateBefore} → ${head}; final verification and recheck ` +
-          `now bind to the post-docs candidate`,
+      commit.kind === "committed"
+        ? `docs reconciliation moved the candidate ${candidateBefore} → ${commit.sha}; the coordinator committed ` +
+          `${commit.committedPaths.length} declared path(s) and final verification and recheck now bind to the ` +
+          `post-docs candidate` +
+          (commit.declaredNotMoved !== undefined
+            ? `. NOTE: the docs agent declared ${commit.declaredNotMoved.join(", ")}, which the worktree never moved ` +
+              `— the commit carries only what did`
+            : "")
+        : `docs reconciliation complete; the docs agent changed nothing, the tree is clean, and the candidate is ` +
+          `unchanged at ${candidateBefore}`,
   };
 }
 

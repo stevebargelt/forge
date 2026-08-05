@@ -769,6 +769,82 @@ test("invoke: FG-639 taskFiles land in the task dir BEFORE the container runs", 
   );
 });
 
+test("invoke: FG-655 onTaskMinted fires with the host-minted identity BEFORE any container write", async () => {
+  // The review coordinator's docs stage binds its dispatch durably through this hook, and the
+  // whole value of the binding is that a crash mid-dispatch still leaves behind the fact that
+  // an agent WAS dispatched. That is only true if the hook runs ahead of everything a
+  // container could write — asserted by OBSERVING the world from inside the hook, not by
+  // reading the order of source lines.
+  //
+  // RED baseline: move the `args.onTaskMinted?.(...)` call below dispatchInvokeTask and
+  // `sawTaskDir` reads true / `dockerRan` reads true, i.e. the binding would have been written
+  // after the container could already have edited the checkout.
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  let dockerRan = false;
+  let minted: { runId: string; taskId: string } | undefined;
+  let sawTaskDir: boolean | undefined;
+  let sawDockerRun: boolean | undefined;
+  let sawRow: string | undefined;
+
+  const res = await invoke({
+    agentRole: "documentation-maintainer",
+    task: "reconcile the docs",
+    projectDir: "/tmp/x",
+    onTaskMinted: (identity) => {
+      minted = identity;
+      sawTaskDir = existsSync(taskDir(identity.runId, identity.taskId));
+      sawDockerRun = dockerRan;
+      // The identity is DURABLE at this point, not merely in hand: a fresh process reading
+      // the store finds the row this hook is being told about.
+      sawRow = getTask(identity.taskId)?.id;
+    },
+    dockerExec: async ({ stdoutPath, stderrPath }) => {
+      dockerRan = true;
+      const dir = dirname(stdoutPath);
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", docs_updated: ["docs/x.md"] }));
+      writeFileSync(stdoutPath, "");
+      writeFileSync(stderrPath, "");
+      return 0;
+    },
+  });
+
+  assert.deepEqual(minted, { runId: res.runId, taskId: res.taskId }, "the hook is told the identity invoke returns");
+  assert.equal(sawTaskDir, false, "no task dir existed yet — nothing had been written for a container to read");
+  assert.equal(sawDockerRun, false, "and no container had been started");
+  assert.equal(sawRow, res.taskId, "the task row was already durable, so a crash here leaves the identity behind");
+  assert.equal(dockerRan, true, "the dispatch itself still ran");
+  assert.equal(res.status, "complete");
+});
+
+test("invoke: FG-655 a binding that cannot be persisted throws THROUGH and starts no container", async () => {
+  // Fail-closed: a caller whose durable binding failed must not get a container, because the
+  // container is what edits the checkout and the binding is the only record that it did.
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  let dockerRan = false;
+  await assert.rejects(
+    () =>
+      invoke({
+        agentRole: "documentation-maintainer",
+        task: "reconcile the docs",
+        projectDir: "/tmp/x",
+        onTaskMinted: () => {
+          throw new Error("the docs dispatch binding could not be persisted");
+        },
+        dockerExec: async () => {
+          dockerRan = true;
+          return 0;
+        },
+      }),
+    /binding could not be persisted/,
+  );
+  assert.equal(dockerRan, false, "no container was started for a dispatch nothing is bound to");
+});
+
 // FG-639 F1: the confinement is screened at the invoke layer, so it holds for every
 // caller of taskFiles and not just the fix-batch one that introduced it. Each refusal is
 // pre-WRITE and pre-container: no task dir, no docker.

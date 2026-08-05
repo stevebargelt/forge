@@ -22,6 +22,8 @@ import type { LensProtocolRecord } from "../../v2/review-discovery.js";
 import type { DependencyEnvironmentReceipt } from "../../v2/dependency-provisioning.js";
 import { renderFixBatchEnvelope, verifyMaterializedEnvelope, verifyMaterializedPayload } from "../../store/fix-batches.js";
 import { getRun } from "../../store/runs.js";
+import { getTask } from "../../store/tasks.js";
+import { getDocsDispatch, markDocsDispatchDelivered, openDocsDispatch } from "../../store/reviews.js";
 import type { CoordinatorDeps, FixerContext, LensContext, RecheckContextIn } from "../../v2/review-run.js";
 import type { VerificationEntry } from "../../v2/review-coordinator.js";
 import type { ContractProposal, LensWidening, RiskLens } from "../../v2/review-contract.js";
@@ -298,6 +300,20 @@ function fixCycleSubject(batch: { id: string; revision: number }): string {
   return `fix(review): fix batch ${batch.id} revision ${batch.revision}`;
 }
 
+/** FG-655: the docs cycle's subject, and — like the fix cycle's — its STAGE-SCOPED
+ *  IDEMPOTENCY KEY. The docs dispatch binding's id is what makes it per-cycle, so a retry
+ *  after a crash recognises the commit this coordinator already authored instead of
+ *  authoring a second one.
+ *
+ *  It does NOT reference the ticket, for the same reason `fixCycleSubject` does not:
+ *  `resolveReviewBase` infers a later review's comparison base from the OLDEST commit whose
+ *  subject references the ticket, and it does not filter docs/ paths out of that inference, so
+ *  a ticket-referencing docs commit would anchor a later review on its own documentation.
+ *  Written and matched in ONE place. */
+function docsCycleSubject(binding: { id: string }): string {
+  return `docs(review): docs cycle ${binding.id}`;
+}
+
 /** The changed paths, named as far as is useful and counted beyond that. Used both by the
  *  fail-closed refusal and by the recorded `no_drift` evaluation, so the diff an evaluator
  *  is shown and the diff their evaluation is recorded against are the same summary. */
@@ -402,25 +418,65 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
     return receipt ? { dependencyEnvironment: receipt } : undefined;
   };
 
+  // FG-655 AC4: IS THE CHECKOUT CLEAN, AT THE CANDIDATE? One predicate, and it is installed
+  // at BOTH in-lifecycle verification readers — the coordinator's verify seam (Stages 1 and
+  // 7) and the Stage 9 shipping reader, which calls loop verification directly and bypasses
+  // that seam entirely. The head-vs-candidate half already existed; the dirty half is new,
+  // and without it a dirty tree at the RIGHT head passed, review-loop degraded to a
+  // `dirty tree -- local verification` run, and a green verification line was computed
+  // against a tree nobody reviewed. A stage that leaves a dirty tree is a NAMED refusal in
+  // its own right, not a silent degradation.
+  //
+  // IT IS DELIBERATELY NOT INSTALLED IN review-loop.ts. That module's dirty-tree local arm is
+  // the STANDALONE loop's intended behaviour for operators with uncommitted work; refusing
+  // there would change behaviour for every non-coordinator caller to fix an invariant that
+  // belongs to the review lifecycle.
+  const workspaceRefusal = (sha: string): { reason: string; message: string } | undefined => {
+    const head = headSha();
+    if (head !== sha) {
+      return {
+        reason: "candidate_not_checked_out",
+        message:
+          `verification cannot run at candidate ${sha}: the workspace at ${ctx.projectDir} is on ${head}. ` +
+          `Check the candidate out (or point --project at the workspace that has it) and re-run.`,
+      };
+    }
+    let dirty: string[];
+    try {
+      dirty = porcelainPaths(git(["status", "--porcelain", "-z", "--untracked-files=all"]));
+    } catch (err) {
+      return {
+        reason: "workspace_unreadable",
+        message: `the worktree state at ${ctx.projectDir} could not be read: ${(err as Error).message}`,
+      };
+    }
+    if (dirty.length === 0) return undefined;
+    return {
+      reason: "workspace_dirty_at_candidate",
+      message:
+        `verification cannot run at candidate ${sha}: the workspace at ${ctx.projectDir} is ON that candidate but ` +
+        `carries uncommitted changes — ${dirty.slice(0, 10).join(", ")}${dirty.length > 10 ? `, +${dirty.length - 10} more` : ""}. ` +
+        `A verification run here would silently be about a tree the candidate does not name, and its result would ` +
+        `be recorded as evidence about the candidate. Commit those changes (a review stage that produced them ` +
+        `should have committed them itself — say so), stash them, or discard them, then re-run.`,
+    };
+  };
+
   return {
     headSha,
 
     verify: async (sha: string): Promise<VerificationEntry> => {
-      // review-loop's verify resolves HEAD itself. If HEAD is not the candidate the
-      // coordinator asked about, its answer is about a different tree — say so rather than
-      // stamping the requested sha onto someone else's result.
-      const head = headSha();
-      if (head !== sha) {
+      // review-loop's verify resolves HEAD itself and tolerates a dirty tree by degrading to
+      // a local run. If HEAD is not the candidate the coordinator asked about, or the tree is
+      // dirty, its answer is about a different tree — say so rather than stamping the
+      // requested sha onto someone else's result.
+      const refusal = workspaceRefusal(sha);
+      if (refusal !== undefined) {
         return {
           ok: false,
           sha,
-          detail: `the workspace head is ${head}, not the candidate ${sha} under review`,
-          environmentRefusal: {
-            reason: "candidate_not_checked_out",
-            message:
-              `verification cannot run at candidate ${sha}: the workspace at ${ctx.projectDir} is on ${head}. ` +
-              `Check the candidate out (or point --project at the workspace that has it) and re-run.`,
-          },
+          detail: refusal.message,
+          environmentRefusal: refusal,
         };
       }
       const result = await loop.deps.verify();
@@ -782,20 +838,235 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
       };
     },
 
+    // FG-655: THE DOCS CYCLE'S COMMIT IS THE COORDINATOR'S TOO.
+    //
+    // Same shape as `commitFixCycle` above and deliberately NOT generalized with it: three
+    // similar functions beat a premature base class, and the fix cycle's behaviour must not
+    // move because the docs stage acquired the same authority. Every property below is one
+    // the fix cycle already justifies in its own comments — one predicate decides adoption
+    // for a commit this pass authors and one an earlier pass already made; identity is two
+    // terms TOGETHER (the stage-scoped subject key AND an anchored head) and never
+    // substitutes for adoption; the declared paths go to `git commit` ITSELF because the
+    // index is shared; and the reconciliation runs in both directions.
+    commitDocsCycle: async ({ review, binding, declaredFiles }) => {
+      const subject = docsCycleSubject(binding);
+      const at = headSha();
+      const declared = new Set(declaredFiles.map((p) => p.replace(/^\.\//, "")));
+
+      const adoption = (sha: string): { ok: true; committedPaths: string[] } | { ok: false; why: string } => {
+        const parents = parentsOf(sha);
+        if (parents.length !== 1 || !(parents[0] === review.candidateSha || sha === review.candidateSha)) {
+          return {
+            ok: false,
+            why: `its parent is ${parents.join(" ") || "(none)"}, not the candidate ${review.candidateSha ?? "(unset)"}`,
+          };
+        }
+        const committedPaths = pathsOf(sha);
+        const smuggled = committedPaths.filter((p) => !declared.has(p));
+        if (smuggled.length > 0) {
+          return { ok: false, why: `it carries ${smuggled.join(", ")}, which the docs agent never declared` };
+        }
+        return { ok: true, committedPaths };
+      };
+      const notAdopted = (sha: string, why: string) =>
+        ({
+          kind: "refused",
+          reason: "docs_cycle_commit_raced",
+          detail:
+            `the docs-cycle commit ${sha} in ${ctx.projectDir} did not land as authored — ${why}. ` +
+            `Something else wrote this checkout, so the commit is NOT adopted as the candidate and nothing was ` +
+            `recorded. Inspect ${sha}, return the checkout to ${review.candidateSha ?? "the candidate"} ` +
+            `(\`git reset --soft ${review.candidateSha ?? "<candidate>"}\` puts its content back in the worktree ` +
+            `so the coordinator can author the commit itself), and re-run`,
+        }) as const;
+
+      // RECOGNISE A COMMIT THIS COORDINATOR ALREADY AUTHORED, first. The git commit is
+      // irreversible and the two ledger writes that record it (candidate advance, stage
+      // record) are separate transactions after it, so the only way a crash in between is
+      // recoverable is for the retry to recognise the commit. Both crash windows land on an
+      // anchored HEAD: before the advance, HEAD's PARENT is the candidate; after it, HEAD IS
+      // the candidate. The subject key says WHICH commit; adoption still decides WHETHER —
+      // a recognition test weaker than the adoption test is a refusal one `continue` away
+      // from being reversed (FG-649 RF-7).
+      if (subjectOf(at) === subject && (at === review.candidateSha || parentsOf(at).includes(review.candidateSha ?? ""))) {
+        const adopted = adoption(at);
+        if (!adopted.ok) return notAdopted(at, adopted.why);
+        return { kind: "committed", sha: at, committedPaths: adopted.committedPaths, recognized: true };
+      }
+
+      // THE COMMIT GOES ON TOP OF THE CANDIDATE OR NOWHERE — and this is also where a docs
+      // agent that COMMITTED ITS OWN WORK lands. Its commit is left exactly where it is; the
+      // remedy names the soft reset that returns those edits to the worktree so the
+      // coordinator authors the commit itself on re-entry.
+      if (at !== review.candidateSha) {
+        return {
+          kind: "refused",
+          reason: "candidate_not_checked_out",
+          detail:
+            `the workspace at ${ctx.projectDir} is on ${at}, not the candidate ${review.candidateSha ?? "(unset)"} ` +
+            `this docs cycle was dispatched for — refusing to author a commit on a tree the review is not about. ` +
+            `If the docs agent committed its own work, leave that commit alone and run ` +
+            `\`git reset --soft ${review.candidateSha ?? "<candidate>"}\` to return its edits to the worktree, so ` +
+            `the coordinator authors the docs-cycle commit itself. Otherwise check the candidate out (or point ` +
+            `--project at the workspace that has it) and re-run`,
+        };
+      }
+
+      let moved: string[];
+      try {
+        moved = porcelainPaths(git(["status", "--porcelain", "-z", "--untracked-files=all"]));
+      } catch (err) {
+        return {
+          kind: "refused",
+          reason: "docs_cycle_commit_failed",
+          detail: `the worktree state at ${ctx.projectDir} could not be read: ${(err as Error).message}`,
+        };
+      }
+
+      // THE TREE MOVED BEYOND THE DECLARATION. Named, never swept in — and with an EMPTY
+      // declaration this is exactly the FG-655 stranding shape: an agent that claims it
+      // changed nothing while its edits sit in the worktree. That is why a legitimate no-op
+      // (clean tree) stays distinguishable from a stranded one (this refusal).
+      const outside = moved.filter((p) => !declared.has(p));
+      if (outside.length > 0) {
+        return {
+          kind: "refused",
+          reason: "docs_cycle_tree_dirty_outside_declared_scope",
+          detail:
+            `the worktree at ${ctx.projectDir} has changes the docs agent never declared: ` +
+            `${outside.slice(0, 10).join(", ")}${outside.length > 10 ? `, +${outside.length - 10} more` : ""} ` +
+            `(declared: ${declaredFiles.length > 0 ? declaredFiles.join(", ") : "nothing"}). The docs cycle's ` +
+            `commit carries only what the agent itself claimed to change, so an undeclared change is never swept ` +
+            `into it. Either have the agent declare every path it touched — an incomplete \`docs_updated\` is a ` +
+            `stop, not a tidier answer — or commit/stash/discard the undeclared paths yourself, then re-run`,
+        };
+      }
+
+      // THE RECONCILIATION IS TWO-DIRECTIONAL, exactly as the fix cycle's is: `outside`
+      // catches a tree beyond the declaration, `declaredNotMoved` a declaration beyond the
+      // tree. Nothing moved at all is a stop — the claim is wholly unsupported. Something
+      // moved is a commit of what moved, NAMING what did not, so `committed ⊆ declared`
+      // still holds and the disagreement travels rather than being reconciled away.
+      const movedSet = new Set(moved);
+      const declaredNotMoved = [...declared].filter((p) => !movedSet.has(p)).sort();
+      if (moved.length === 0) {
+        if (declaredNotMoved.length > 0) {
+          return {
+            kind: "refused",
+            reason: "docs_cycle_declared_changes_absent",
+            detail:
+              `the docs agent declares ${declaredFiles.join(", ")} but the worktree at ${ctx.projectDir} is clean — ` +
+              `its own declaration contradicts the tree, so there is nothing to commit and the claim cannot be ` +
+              `honoured. This is deliberately NOT read as a docs cycle that changed nothing: a cycle that ` +
+              `legitimately changed nothing declares no paths. If the agent already committed its own work, run ` +
+              `\`git reset --soft ${review.candidateSha ?? "<candidate>"}\` to return those edits to the worktree; ` +
+              `otherwise correct the declaration and re-run`,
+          };
+        }
+        // THE LEGITIMATE NO-OP (AC2): nothing declared, nothing moved, clean tree. The
+        // candidate does not move and the stage records candidate-unchanged.
+        return { kind: "no_change", sha: at };
+      }
+
+      try {
+        // THE INDEX IS SHARED; THE COMMIT MUST NOT BE (FG-649 RF-6). Passing the same
+        // pathspecs to `commit` makes it a partial commit — git builds the tree from HEAD
+        // plus exactly these paths and ignores everything else staged — which closes the
+        // stage-then-commit window structurally rather than by narrowing it. The `add` stays
+        // because a new docs file is untracked and must be known to git before a pathspec
+        // can name it. `:/` makes the pathspecs repo-root relative, matching porcelain.
+        const pathspecs = moved.map((p) => `:/${p}`);
+        git(["add", "--", ...pathspecs]);
+        git(["commit", "-m", subject, "--", ...pathspecs]);
+      } catch (err) {
+        return {
+          kind: "refused",
+          reason: "docs_cycle_commit_failed",
+          detail: `git refused the docs-cycle commit in ${ctx.projectDir}: ${(err as Error).message}`,
+        };
+      }
+
+      // AND THE COMMIT IS VERIFIED AFTER THE FACT, which no check made before it can be.
+      const sha = headSha();
+      if (sha === review.candidateSha) {
+        return notAdopted(sha, `HEAD is still the candidate, so the commit that was just authored is not there`);
+      }
+      const adopted = adoption(sha);
+      if (!adopted.ok) return notAdopted(sha, adopted.why);
+      return {
+        kind: "committed",
+        sha,
+        committedPaths: adopted.committedPaths,
+        ...(declaredNotMoved.length > 0 ? { declaredNotMoved } : {}),
+      };
+    },
+
+    // FG-655: the declaration, read off the DURABLE task record the binding names. The task
+    // record is authoritative (invariant 6) and the binding row is an index of identity only
+    // — the declaration is deliberately NOT copied into the ledger, so the two can never
+    // drift into disagreeing about what the commit's scope was.
+    //
+    // A delivery that is absent, non-terminal or unparseable is `unreadable`, never an empty
+    // declaration: "the agent said it changed nothing" and "nobody can tell what the agent
+    // said" are different facts and only the first may advance a stage.
+    docsDelivery: ({ binding }) => {
+      if (binding.taskId === undefined) {
+        return { kind: "unreadable", detail: `the docs dispatch ${binding.id} never bound a task id` };
+      }
+      const task = getTask(binding.taskId);
+      if (task === undefined) {
+        return { kind: "unreadable", detail: `no task ${binding.taskId} exists for docs dispatch ${binding.id}` };
+      }
+      if (task.status !== "complete") {
+        return {
+          kind: "unreadable",
+          detail: `task ${binding.taskId} is ${task.status}, not a terminal successful delivery`,
+        };
+      }
+      const result = task.result;
+      if (result === null || typeof result !== "object") {
+        return { kind: "unreadable", detail: `task ${binding.taskId} recorded no result object` };
+      }
+      // The SAME `docs_updated` read `assessRunDocsImpact` makes — the documentation
+      // maintainer's contract already returns it, so the coordinator does not have to invent
+      // a second declaration channel for the same fact.
+      const raw = (result as Record<string, unknown>)["docs_updated"];
+      if (raw !== undefined && !Array.isArray(raw)) {
+        return { kind: "unreadable", detail: `task ${binding.taskId} recorded a non-array docs_updated` };
+      }
+      const docsUpdated = Array.isArray(raw) ? raw.filter((p): p is string => typeof p === "string") : [];
+      return { kind: "delivered", taskId: binding.taskId, docsUpdated };
+    },
+
     dispatchDocs: async ({ review, candidateSha }: { review: Review; candidateSha: string }) => {
+      // CREATE THE BINDING BEFORE THE DISPATCH, AND COMPLETE IT AT MINT TIME. The row exists
+      // before `invoke` is even called, and the host-minted task identity is written onto it
+      // from invoke's mint-time hook — after the task row and its `task.created` event are
+      // durable and before anything can start a container. NO CONTAINER WRITE MAY PRECEDE
+      // THE BINDING: a crash mid-dispatch must leave behind the fact that a docs agent WAS
+      // dispatched, or re-entry runs a second one over its own output.
+      const binding = openDocsDispatch(review.id, candidateSha);
       const res = await dispatch({
         agentRole: REVIEW_DISPATCH_ROLES.docs,
         task:
           `Reconcile durable operator-facing docs against the change under review ` +
           `(${review.ticketId ?? "(no ticket)"}) at candidate ${candidateSha}. This phase runs BEFORE final ` +
-          `verification and recheck, so it may change the candidate.`,
+          `verification and recheck, so it may change the candidate.\n\n` +
+          `DO NOT COMMIT. The review coordinator authors this cycle's commit from your declaration: list EVERY ` +
+          `path you touched in \`docs_updated\`, including adjacent ones (an index, a cross-reference, a rendered ` +
+          `block) a narrative summary would omit. A path you touched but did not declare STOPS the review; a path ` +
+          `you declare but did not change is named too. Committing your own work refuses candidate_not_checked_out.`,
         projectDir: ctx.projectDir,
         ...(runIdFor() !== undefined ? { runId: runIdFor() as string } : {}),
         runTitle: `review docs reconciliation — ${ctx.ticketId}`,
         ...(ctx.route !== undefined ? { routeKey: ctx.route } : {}),
+        onTaskMinted: (identity) => {
+          markDocsDispatchDelivered(binding.id, identity);
+        },
       });
       return {
         ok: res.status === "complete",
+        binding: getDocsDispatch(binding.id) ?? binding,
         ...dispatchedProtocol(res),
         ...(res.error !== undefined ? { error: res.error } : {}),
       };
@@ -832,7 +1103,13 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
     },
 
     shippingInput: async ({ review, candidateSha }) => {
-      const verification = await loop.deps.verify();
+      // FG-655 AC4, THE SECOND READER. Stage 9 calls loop verification DIRECTLY and bypasses
+      // the `verify` seam above entirely, and its result is the verification block operators
+      // read as authoritative — so the same predicate is installed here, ahead of the run.
+      // Without it a dirty tree at the candidate produced a green-looking shipping check
+      // computed against a tree the candidate does not name.
+      const refusal = workspaceRefusal(candidateSha);
+      const verification = refusal !== undefined ? undefined : await loop.deps.verify();
       const trust = resolveReviewedTipTrust(ctx.projectDir, candidateSha);
       const head = headSha();
       // Identity continuity, as far as this pilot can establish it deterministically: the
@@ -843,14 +1120,22 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
       const runOk = review.runId === undefined || getRun(review.runId) !== undefined;
       const continuous = head === candidateSha && runOk;
       return {
-        verification: {
-          ok: verification.ok,
-          sha: candidateSha,
-          executedRequiredChecks: verification.reusedEvidence !== undefined || verification.steps.length > 0,
-          detail:
-            verification.reusedEvidence ??
-            verification.steps.map((s) => `${s.name}: ${s.ok ? "ok" : "FAILED"}`).join(", "),
-        },
+        verification:
+          verification === undefined
+            ? {
+                ok: false,
+                sha: candidateSha,
+                executedRequiredChecks: false,
+                detail: `${(refusal as { reason: string }).reason}: ${(refusal as { message: string }).message}`,
+              }
+            : {
+                ok: verification.ok,
+                sha: candidateSha,
+                executedRequiredChecks: verification.reusedEvidence !== undefined || verification.steps.length > 0,
+                detail:
+                  verification.reusedEvidence ??
+                  verification.steps.map((s) => `${s.name}: ${s.ok ? "ok" : "FAILED"}`).join(", "),
+              },
         acceptance: ctx.acceptance ?? [],
         ...(ctx.docsCloseout !== undefined ? { docsCloseout: ctx.docsCloseout } : {}),
         tipTrust: {
