@@ -19,13 +19,18 @@ FG-496 and FG-591.
 Run the operator-sequenced series FG-676 → FG-679 → FG-610 (sequencing recorded
 2026-08-05). Each item starts only after the preceding one is merged, closed
 with acceptance evidence, and the live checkout is synchronized to current
-`main`.
+`main`. **FG-680 and FG-676 have both shipped**; the series resumes at FG-679.
 
-FG-676 is the last of the two bounded safety prerequisites and is NOT a return
-to review-infrastructure stabilization: it qualifies under the interruption
-policy below on its own terms — it leaves runs permanently unrecoverable — and
-was demonstrated during FG-678 rather than inferred. Everything else in
-review-infrastructure stays non-preempting.
+Both bounded safety prerequisites are now closed, so what remains is product
+feature work. Everything in review-infrastructure stays non-preempting.
+
+**FG-655 is now a measured tax, not a theoretical one.** Its docs stage stranded
+correct, uncommitted work on BOTH shipped tickets this session — FG-680's
+`how-to-testing` section and FG-676's ADR writer-name correction — and each
+survived only because the tree was inspected by hand before verification. Each
+also dirtied the tree, which blocked CI-evidence reuse and forced a local
+verification. It is still non-preempting under the operator sequence, but it
+should be reconsidered for promotion once FG-610 lands.
 
 ## Recently completed
 
@@ -62,6 +67,23 @@ review-infrastructure stays non-preempting.
   held behind.
 - **FG-671** — `reclaimReleasedTargets` no longer deletes bytes of an
   unknown-liveness target on age-out.
+- **FG-676** (`6fbd1481`, PR #209) — publication reconcile no longer resurrects a
+  gate-failed task, so a `request-changes` no longer leaves a phantom blocker
+  that makes an otherwise-recoverable run unrecoverable. The fix this ticket
+  ORIGINALLY prescribed does not work and the architect proved it: the reconcile
+  path launders `failed` to `awaiting_recovery` immediately before
+  `finalizePrimary`, so the compare-and-set writer's guard passes and the
+  resurrection proceeds anyway. The authoritative fix is the reconcile SELECTION
+  predicate — a terminal state a human CHOSE is not damage to repair — placed
+  BEFORE the laundering write. `markTaskAwaitingGate` is deleted rather than
+  bypassed, and `setTaskStatus` is compare-and-set too (it could launder a
+  terminal row via `awaiting_red`). `forge ops check` / `forge ops repair` add an
+  operator-invoked, dry-runnable repair for already-corrupted rows, since the
+  corruption is forward-only and no future sweep revisits it. Clean 8/8 shipping
+  review, no overrides. Two corrections recorded on the ticket: its cited
+  phantom evidence is stale (the store now has ZERO `awaiting_gate` rows, so the
+  reserved dogfood had nothing to demonstrate on), and BD-11 was withdrawn as
+  disproven after being wrongly recorded as a must-fix.
 - **FG-680** (`dc91e93f`, PR #207) — the test harness can no longer kill the
   operator's tmux server. `src/test-setup.ts` relocated `TMUX_TMPDIR` but never
   deleted `TMUX`, and a tmux client given neither `-L` nor `-S` resolves its
@@ -103,22 +125,6 @@ review-infrastructure stays non-preempting.
 
 ## Now
 
-1. **FG-676 — publication reconcile resurrects a gate-failed task to
-   `awaiting_gate`.** Every `request-changes` leaves a permanent phantom blocker
-   and the run can never complete. Two independent reproductions now (FG-609's
-   run, four phantoms; FG-678's run, one). The demonstrated impact is larger
-   than an audit-record defect: it makes an otherwise-recoverable run
-   UNRECOVERABLE, which is what forced FG-678's integrated work to be branched
-   out of its pipeline rather than repaired in place. The fix is the
-   compare-and-set writer that already exists (`markTaskHeldForGate`, added by
-   FG-523 for this exact race); the regression test must assert the ENFORCEMENT
-   half — a reconcile write against an already-`gate_rejected` task must not
-   transition it or null its error. **Read FG-681 before fixing this** (see
-   follow-ups): five campaign integration tests may be green in CI *because of*
-   this resurrection, in which case fixing it turns them red.
-
-## Next
-
 1. **FG-679 — dashboard: surface in-flight host verification and PR checks.**
    The next substantive FEATURE. Non-task work is invisible to the dashboard, so
    a run with verification running reads as idle. Demonstrated 2026-08-04:
@@ -137,7 +143,9 @@ review-infrastructure stays non-preempting.
    candidate change; no GitHub/shell/git/CLI call from the dashboard's serving
    or polling path; `/status` and the dashboard must agree. Those are settled
    inputs — an implementer who disagrees stops and reports.
-2. **FG-610 — FG-496 Slice E:** atomic claims, leases, recovery, capacity
+## Next
+
+1. **FG-610 — FG-496 Slice E:** atomic claims, leases, recovery, capacity
    accounting, and canonical claim-next. Unblocked: it was held behind FG-678
    because its concurrency guarantees need host stress-loops on the writable
    dispatch path, which is now deterministic. Starts only after FG-676 and
