@@ -26,6 +26,11 @@ test("FG-614: the test process runs against its OWN tmux socket, never the defau
   assert.ok(dir, "src/test-setup.ts must set TMUX_TMPDIR — without it every tmux test shares the operator's server");
   assert.match(dir!, /forge-test-tmux-/, `TMUX_TMPDIR must be a per-test-process directory, got ${dir}`);
   assert.ok(existsSync(dir!) && statSync(dir!).isDirectory(), "and it must exist, or tmux falls back to the default socket");
+  // FG-680: TMUX_TMPDIR decides nothing while TMUX is set — a client naming no socket reads
+  // TMUX first. This line only has teeth when the suite runs inside a pane (which is how
+  // `forge launch run` runs it); `fg680-tmux-client-env.integration.test.ts` proves the
+  // enforcement on any host by handing a test process a TMUX it must not reach.
+  assert.equal(process.env["TMUX"], undefined, "src/test-setup.ts must DELETE TMUX — left set, every tmux client here reaches the operator's server");
 });
 
 function testFiles(dir: string, out: string[] = []): string[] {
@@ -82,15 +87,16 @@ test("FG-614: every tmux-touching test inherits the isolated socket — no hand-
     if (!touchesTmux.test(text)) continue;
     for (const expr of envExpressions(text)) {
       const inherits = expr.includes("process.env") || expr.includes("TMUX_TMPDIR");
-      if (!inherits) violations.push(`${file.slice(srcRoot.length + 1)}: env ${expr.replace(/\s+/g, " ").slice(0, 90)}`);
+      const reintroducesTmux = /\bTMUX\s*:/.test(expr);
+      if (!inherits || reintroducesTmux) violations.push(`${file.slice(srcRoot.length + 1)}: env ${expr.replace(/\s+/g, " ").slice(0, 90)}`);
     }
   }
 
   assert.deepEqual(
     violations,
     [],
-    "a tmux-touching test built a subprocess environment that neither inherits process.env nor sets TMUX_TMPDIR — " +
-      "that subprocess reaches the DEFAULT tmux socket and can brick the host's server (FG-614). " +
-      "Spread ...process.env, or set TMUX_TMPDIR to a directory the test owns and kills on teardown.",
+    "a tmux-touching test built a subprocess environment that neither inherits process.env nor sets TMUX_TMPDIR, or explicitly reintroduced TMUX — " +
+      "that subprocess can reach the DEFAULT tmux socket and brick the host's server (FG-614/FG-680). " +
+      "Spread ...process.env, set TMUX_TMPDIR to a directory the test owns and kills on teardown, and never set TMUX.",
   );
 });
