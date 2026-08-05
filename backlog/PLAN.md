@@ -16,17 +16,13 @@ FG-496 and FG-591.
 
 ## Current objective
 
-**FG-610 SHIPPED** 2026-08-05 (merge `6b01d3c5`, PR #215), closed with a 16-row
-acceptance grid. The sequence now resumes at **FG-584, which comes before
-FG-591**. FG-610 demonstrated FG-584 live rather than merely arguing for it: the
-runner fanned both plan steps in parallel even though the plan declared step 2
+**FG-584 comes before FG-591.** FG-610 demonstrated FG-584 live: the runner
+fanned both plan steps in parallel even though the plan declared step 2
 sequenced after step 1, so the docs child correctly self-failed rather than
-document a schema that was not committed yet. The latest feature plan
-again proved that Forge flattens semantically dependent implementation steps
-into isolated parallel siblings. File-disjointness does not make those children
-executable: each starts from the same committed base, so consumers cannot see a
-primitive another child creates and composition tests cannot see the behavior
-they are meant to verify.
+document a schema that was not committed yet. File-disjointness does not make
+semantically dependent children executable: each starts from the same committed
+base, so consumers cannot see a primitive another child creates and composition
+tests cannot see the behavior they are meant to verify.
 
 FG-584 is not a new scheduler design. It completes the Gas City-aligned
 controller / durable-work / Refinery contract that FG-116 and FG-139 claimed:
@@ -41,212 +37,33 @@ Until FG-584 lands, collapsing dependent implementation steps is the safe
 workaround, explicitly not the target architecture. Everything in
 review-infrastructure stays non-preempting.
 
-**FG-655 SHIPPED 2026-08-05** (`c93e13af`, PR #213; docs follow-up `389eb744`,
-PR #214) — it was promoted ahead of FG-610 on operator instruction rather than
-deferred until after it, and the promotion question below is settled. The record
-of why is kept because it is the evidence that justified promoting it.
-
-Its docs stage stranded correct, uncommitted work FOUR times in the prior session — FG-680's
-`how-to-testing` section, FG-676's ADR writer-name correction, FG-679's
-falsified `SCHEMA-CONTRACT.md` response row, and the FG-684 closeout's
-declared-vs-channel separation. Each survived only because the tree was
-inspected by hand before verification, and each dirtied the tree, which blocks
-CI-evidence reuse and forces a slower local verification. The FG-679 instance
-is the one that cost something irreversible: it was the sole `docs_closeout`
-gap, so shipping required an operator-authorized OVERRIDE plus a whole second
-PR to discharge it.
-
-It DOES terminate — the FG-684 closeout's second docs stage reconciled to
-nothing once the docs matched the code — so it fired when a fix batch moved
-documented behavior, not unconditionally.
-
-**A tenth occurrence happened live during FG-655's own review** and cost the same
-pair again: the review's docs stage reported `candidate unchanged` while a
-correct `concepts.md` correction sat uncommitted, which forced an operator
-`docs_closeout` override and a second PR (#214). It ran on the installed forge,
-which had no `commitDocsCycle` yet. With #213 merged and the linked checkout
-updated, the docs stage now commits its own work and this class of stranding is
-closed.
-
-**Two adjacent tickets demonstrated themselves in that same review and remain
-open:** FG-682 (a correction found after the docs stage records has no amendment
-path into a settled candidate — this is what forced the override) and FG-630
-(`request-changes` does not pass the rejected artifact into the retry inputs, so
-each of three plan-gate rejections re-derived the artifact from scratch).
-
 ## Recently completed
 
-- **FG-609, FG-673, FG-674** — FG-496 Slice D queue primitives shipped
-  (`de6c6d62`); the dashboard agent-runtime fixture is deterministic
-  (`119043a4`); and a review's comparison base now resolves by the first rule
-  that applies and names which one (`bdd94753`). FG-674 was reviewed against an
-  explicitly supplied base, because the defect it fixes was live in the forge
-  performing that review.
-
-- **FG-649, FG-650, and FG-653** — stabilized candidate re-anchoring and honest
-  reviewer payload handling.
-- **FG-654** — moved Forge-owned review protocols into atomic seed generation
-  and made missing or stale protocol artifacts fail closed.
-- **PR #191 / FG-657 implementation** — multi-test evidence claims now resolve
-  every named test without substring or fuzzy matching. The still-active DB
-  ticket needs administrative closeout reconciliation, not another
-  implementation run.
-- **FG-660** — restored the intended review cardinality: one discovery pass,
-  at most one remediation batch, and one recheck.
-- **PR #193** — added the documentation index and removed stale assessments.
-- **FG-648** (`c866b103`, PR #195) — shipped the dashboard agent-runtime trends;
-  reopened the same day over AC5 (evidence covered how the chart's text looks,
-  never that the chart can be read) and since CLOSED.
-- **FG-662** (`9f257828`, PR #196) — agent runtime now derives from the agent's
-  own exit rather than a terminal timestamp a sweep rewrote. Closed with an
-  explicit operator override recorded, NOT a mechanically settled ledger; the
-  override's cause is FG-664 below.
-- **FG-664** (`994f8cac`, PR #197; docs `dcc2f630`) — read-only reviewers now
-  resolve their dependency environment host-side through one shared resolver,
-  mount the cache read-only, and never install; a lane that cannot load the real
-  driver is refused pre-container as `blocked_environment`. The rechecker runs
-  the shipping database engine. This clears the gate that FG-609 and FG-610 were
-  held behind.
-- **FG-671** — `reclaimReleasedTargets` no longer deletes bytes of an
-  unknown-liveness target on age-out.
-- **FG-676** (`6fbd1481`, PR #209) — publication reconcile no longer resurrects a
-  gate-failed task, so a `request-changes` no longer leaves a phantom blocker
-  that makes an otherwise-recoverable run unrecoverable. The fix this ticket
-  ORIGINALLY prescribed does not work and the architect proved it: the reconcile
-  path launders `failed` to `awaiting_recovery` immediately before
-  `finalizePrimary`, so the compare-and-set writer's guard passes and the
-  resurrection proceeds anyway. The authoritative fix is the reconcile SELECTION
-  predicate — a terminal state a human CHOSE is not damage to repair — placed
-  BEFORE the laundering write. `markTaskAwaitingGate` is deleted rather than
-  bypassed, and `setTaskStatus` is compare-and-set too (it could launder a
-  terminal row via `awaiting_red`). `forge ops check` / `forge ops repair` add an
-  operator-invoked, dry-runnable repair for already-corrupted rows, since the
-  corruption is forward-only and no future sweep revisits it. Clean 8/8 shipping
-  review, no overrides. Two corrections recorded on the ticket: its cited
-  phantom evidence is stale (the store now has ZERO `awaiting_gate` rows, so the
-  reserved dogfood had nothing to demonstrate on), and BD-11 was withdrawn as
-  disproven after being wrongly recorded as a must-fix.
-- **FG-679** (`ba0d87e1` PR #211 + `a7154386` PR #212) — the dashboard now answers
-  "is host verification running right now?" from durable state. The ticket's
-  premise was CORRECTED at the architect gate before any code: it framed itself
-  as a pure projection gap, true for CI and false for launches, because
-  `readLaunch` derives status from a live tmux probe and launches emit no
-  events. Durable launch instrumentation was ruled in scope; a
-  terminal-only-plus-unobserved projection was rejected by the operator. No
-  daemon was needed — `buildWrapperCommand` already embeds a recorder in the
-  command the tmux pane runs, so every launch's exit record is durable without a
-  waiter, and promotion is opportunistic from existing forge invocations.
-  **Shipped across TWO merges by design:** the feature merged with
-  `docs_closeout` OVERRIDDEN (operator-authorized, FG-655 stranded the contract
-  correction), FG-679 was held OPEN, and the closeout discharged it. Carries one
-  operator-authorized `accepted_risk`: the launch-log endpoint serves raw host
-  command output, bounded and labeled but not access-gated — revisit if the
-  dashboard ever leaves loopback.
-- **FG-684** (`a7154386`, PR #212) — a declared association now outranks cwd when
-  placing a launch. Introduced by FG-679's own RF-1 fix, which added the
-  association fallback for the GAP case but ordered it so cwd won the CONFLICT,
-  filing explicitly-associated launches under unrelated projects. Its bounded
-  review then caught a second defect that would have shipped PINNED BY A PASSING
-  TEST: `associationKindFor` reported the authority HELD rather than the channel
-  that DECIDED placement, and the closeout's own new fallback test asserted that
-  mislabeling as correct.
-- **FG-680** (`dc91e93f`, PR #207) — the test harness can no longer kill the
-  operator's tmux server. `src/test-setup.ts` relocated `TMUX_TMPDIR` but never
-  deleted `TMUX`, and a tmux client given neither `-L` nor `-S` resolves its
-  socket from `$TMUX` FIRST — so inside a launch pane the exit hook's bare
-  `kill-server` destroyed the shared server. Blast radius was wider than the
-  exit hook (two FG-614 teardowns and `launch.ts`'s own exec all spread
-  `process.env`); one deletion fixes them all. Shipped a clean 8/8 shipping
-  review with NO overrides. Two vacuity traps were closed on the way: with
-  `TMUX` set a bare client never creates the `TMUX_TMPDIR` socket dir, so the
-  exit hook's `readdirSync` guard skips `kill-server` and a naive test passes
-  against an unfixed harness (the tests use `-L default` instead); and the
-  real-CLI test originally asserted only that the sentinel server SURVIVED,
-  true in both arms — review finding RF-1 — now corrected to assert WHERE the
-  session landed.
-- **FG-678** (`39380bb1`, PR #206) — the writable-dispatch dependency contract.
-  All three dispatch shapes now cross ONE shared resolver: a three-way
-  discriminator (no declared dependencies → not applicable; declared + supported
-  lockfile → resolve; declared WITHOUT one → refuse pre-container as
-  `lockfile_absent`), the mount planner re-keyed off worktree-ness onto the
-  resolved environment, an agent's self-declared `status: failed` honoured at the
-  invoke ingestion seam under the new `agent_reported_failure` kind, and the
-  dependency receipt recorded for every lane. The review found the DEFAULT
-  pipeline lane still exempt; the operator ruled it in scope (BD-3 defines one
-  rule by project STATE, not per lane) and one batch fix collapsed all three
-  lanes. **Merged with `tip_equality` and `docs_closeout` recorded as explicit
-  OVERRIDES, not passes** (BD-13, scoped to that candidate only) — six of eight
-  shipping checks were genuinely green, including `acceptance_mapped` and
-  `fix_now_resolved` on executed evidence. Do not read it as a clean 8/8. Its
-  pipeline run is deliberately `abandoned`, not complete.
-- **FG-666** (`3d00e459`, PR #198) — a clone-dispatched pipeline task now resolves
-  backlog authority from the project directory recorded on the RUN, not from the
-  disposable per-task clone mounted at `/project`. Agents can read their own
-  ticket again: a clone-dispatched architect on merged `main` resolves
-  `mode: db` with the correct `project_key` and `forge backlog show` exits 0.
-  The ticket was widened during implementation and NARROWED BACK by operator
-  scope correction — the pre-container refusal, failure-kind retry taxonomy and
-  snapshot compensation/reclamation lifecycle were removed rather than deferred,
-  taking the diff from 2485 insertions to 759.
+- **FG-610** (`6b01d3c5`, PR #215) — shipped the FG-496 Slice E claim,
+  lease, recovery and capacity-accounting primitives.
+- **FG-655** (`c93e13af`, PR #213; docs follow-up `389eb744`, PR #214) —
+  documentation stages now commit their declared paths and advance the review
+  candidate.
 
 ## Now
 
-1. **FG-610 — FG-496 Slice E:** SHIPPED 2026-08-05 (merge `6b01d3c5`, PR #215). Atomic claims, leases,
-   recovery, capacity accounting and the canonical claim-next query, built on the
-   FG-609 primitives with no second rank, readiness, blocker or lifecycle
-   vocabulary. Verified by a four-process cross-process race with falsification
-   mutants each demonstrated to fail, a 200-iteration host stress loop per race,
-   and a hand-authored aged-constraint-shape migration fixture. Two operator
-   policy questions were answered as binding decisions in the ticket body: the
-   capacity counting SCOPE is a required defaultless caller argument rather than
-   a baked-in policy (FG-591 picks it), and an operator dequeue/unrank/defer
-   never releases a live claim.
+1. **FG-584 — semantic dependencies in feature build fanout:** complete the
+   unfinished FG-116/FG-139 Gas City-aligned controller contract. Durable
+   dependency edges control readiness; dependent workers start from the
+   integrated prerequisite candidate; independent ready work remains parallel;
+   and merge conflicts are typed integration outcomes.
 
 ## Next
 
-1. **FG-584 — semantic dependencies in feature build fanout:** REOPENED after
-   repeated live reproductions invalidated its 2026-07-17 recovery-mode
-   withdrawal. Complete the unfinished FG-116/FG-139 contract using Forge's
-   existing Gas City-aligned primitives, not a parallel wave scheduler:
-   materialize plan steps as durable dependent work; use the controller and
-   ready queue for dispatch; integrate each completed private worker branch
-   through the serialized publisher; and start dependents from the integrated
-   prerequisite candidate. Independent ready items remain parallel. Ordered
-   items may touch the same files; concurrently ready siblings may not. A merge
-   conflict becomes a typed integration outcome with a bounded resolution path.
-   The load-bearing regression is the recurring shape: A creates a primitive,
-   B/C consume it, and D verifies the composition. No downstream child may
-   dispatch before its prerequisite is durably integrated.
-2. **FG-591 — operator work queue:** Kanban, CLI/API controls, and
+1. **FG-591 — operator work queue:** Kanban, CLI/API controls, and
    capacity-limited dispatch over the queue primitives.
-3. **FG-496 aggregate closeout:** reconcile the DB-backed backlog program
+2. **FG-496 aggregate closeout:** reconcile the DB-backed backlog program
    against its acceptance criteria after FG-609, FG-610, and FG-591 ship.
-4. **FG-576 — provider-neutral interactive orchestrator launcher:** resolve
+3. **FG-576 — provider-neutral interactive orchestrator launcher:** resolve
    Claude or Codex from model policy after the operator queue program closes.
 
 `Next` is deliberately short. Ordering here expresses current operator intent;
 it does not override ticket dependencies or authorize scope expansion.
-
-## Superseded (kept briefly for context)
-
-1. **FG-679 — SHIPPED, see Recently completed.**
-   The next substantive FEATURE. Non-task work is invisible to the dashboard, so
-   a run with verification running reads as idle. Demonstrated 2026-08-04:
-   `/api/in-flight` returned only an FG-676 phantom `awaiting_gate` row while
-   `test:worktree` was actively running under a launch — the card said "waiting
-   on a plan gate" when the truth was "verification running, no gate
-   outstanding". Both data sources already exist and are durable
-   (`forge launch list/show` plus `host_verifications`; `probeCiGateStatus` for
-   exact-SHA required checks), so this is a projection gap, not instrumentation.
-   **Amended 2026-08-05 with explicit acceptance criteria and eleven binding
-   decisions (BD-1…BD-11)** — one `Current activity` surface with distinct
-   Agents / Host verification / Required CI sections; association from
-   submission-time structured metadata only, never from launch names, argv or
-   log text; the launch status vocabulary preserved exactly; CI observations
-   bound to an exact candidate sha with old-sha evidence disappearing on
-   candidate change; no GitHub/shell/git/CLI call from the dashboard's serving
-   or polling path; `/status` and the dashboard must agree. Those are settled
-   inputs — an implementer who disagrees stops and reports.
 
 ## Captured follow-ups that do not preempt `Now`
 
@@ -354,6 +171,8 @@ or have no demonstrated impact.
 ## Maintenance rules
 
 - Keep `Now` to one product objective and `Next` to roughly five items.
+- Keep `Recently completed` to the latest one or two shipped items; Git and the
+  DB backlog are the durable history.
 - Update this file when operator sequencing changes; do not preserve stale
   priorities as if they were current.
 - Link ticket IDs instead of copying full acceptance criteria.
