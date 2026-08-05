@@ -33,7 +33,7 @@ import { tasksForRun } from "../store/tasks.js";
 import { getRun } from "../store/runs.js";
 import { finalizeRunIfSettled } from "./run-finalize.js";
 import { notifyOnTaskBlockedByRed, notifyOnGateAwaiting } from "../notify/trigger.js";
-import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskAwaitingGate, markTaskAwaitingRecovery, markTaskHeldForGate, markTaskBlockedByRed, markTaskFailed, setTaskStatus, setTaskWorkspace, clearTaskWorkspace } from "../store/tasks.js";
+import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskAwaitingRecovery, markTaskHeldForGate, markTaskBlockedByRed, markTaskFailed, setTaskStatus, setTaskWorkspace, clearTaskWorkspace } from "../store/tasks.js";
 import { failTask, classify, failureKindFromEvents, ORPHAN_EVIDENCE_KINDS } from "./failure-kind.js";
 import type { FailureKind, OrphanEvidence, ContainerCausalEvidence } from "./failure-kind.js";
 import { captureUsageForTask } from "../store/model-calls.js";
@@ -1240,7 +1240,18 @@ function finalizePrimary(
       logEvent("task.completed", { runId, taskId });
       return "complete";
     case "human":
-      markTaskAwaitingGate(taskId, result);
+      // FG-676: same AWN-2 shape as the CAS above, on the gate side. A landing
+      // here is a BACKGROUND write (a wave, or the reconcile sweep) and it can
+      // arrive after a human already decided this task terminally — a `forge
+      // cancel`, or a `gate reject`/`request-changes` that failed it. The
+      // unconditional writer this replaced resurrected such a row to
+      // awaiting_gate with its error NULLed, parking it on a decision no agent
+      // runs for and no gate resolves. A refused CAS is its OWN outcome: no
+      // event, no push, and the row's actual terminal status is what's returned,
+      // so the row, the return value and the event stream agree.
+      if (!markTaskHeldForGate(taskId, result)) {
+        return getTask(taskId)?.status ?? "failed";
+      }
       crashPoint("finalizePrimary:between-awaiting-gate-status-and-event");
       logEvent("task.awaiting_gate", { runId, taskId });
       notifyGateAwaiting(taskId);
@@ -1248,8 +1259,11 @@ function finalizePrimary(
     case "verdict":
       // Schema enforces reds.length > 0 for gate=verdict, so this is reached
       // only when all reds passed (or none authoritative-failed). Aggregate
-      // outcome is the orchestrator's call; pause for it.
-      markTaskAwaitingGate(taskId, result);
+      // outcome is the orchestrator's call; pause for it. CAS'd and branched
+      // for the same reason as the human branch above.
+      if (!markTaskHeldForGate(taskId, result)) {
+        return getTask(taskId)?.status ?? "failed";
+      }
       crashPoint("finalizePrimary:between-awaiting-gate-status-and-event");
       logEvent("task.awaiting_gate", { runId, taskId });
       notifyGateAwaiting(taskId);
@@ -2585,17 +2599,43 @@ function awaitPublicationRecovery(
  *  a second process converging that from underneath the live one would be the race the
  *  lease exists to prevent. Crash-stranded `running` rows are reconcile.ts's, and they
  *  arrive here as `failed` on the pass after it lands them. */
-/** FG-425: was this task's terminal state CHOSEN by a human, or inflicted on it?
+type HumanDecision = "cancelled" | "gate_rejected";
+
+/** FG-425 / FG-676: was this task's terminal state CHOSEN by a human, or inflicted on it?
  *
- *  `failed` alone cannot answer that — `forge cancel` and a crash-stranded publication
- *  land in the same status — so this reads the evidence `forge cancel` durably writes
- *  and a crash cannot: the `task.cancelled` event, and the `cancelled` failure kind on
- *  the task.failed event beside it. Both are written by cancel.ts and nothing else.
- *  Either one is proof; the reconciler needs proof of the ABSENCE of a cancel before it
- *  may touch a terminal row, so it fails closed on either. */
-function taskWasCancelled(taskId: string): boolean {
+ *  `failed` alone cannot answer that — a cancel, a gate rejection and a crash-stranded
+ *  publication all land in the same status — so this reads the evidence a HUMAN's
+ *  decision durably writes and a crash cannot:
+ *
+ *    cancel        — the `task.cancelled` event, and the `cancelled` failure kind on
+ *                    the task.failed event beside it. Both written by cancel.ts.
+ *    gate rejection — the `gate.decided` event carrying `reject` or `request-changes`,
+ *                    and the `gate_rejected` failure kind on the task.failed event
+ *                    beside it. Both written by gate.ts.
+ *
+ *  Within each pair either signal is proof: the reconciler needs proof of the ABSENCE
+ *  of a decision before it may touch a terminal row, so it fails closed on either.
+ *
+ *  THE DIRECTION MATTERS (FG-676). This asks for proof of a DECISION, never proof of
+ *  DAMAGE. A row with no decision evidence is still reconciled — that is the AC5 default
+ *  and the whole of the crash-stranded repair, including a row a crash left `failed`
+ *  with no task.failed event at all. Inverting it ("reconcile only what it can prove was
+ *  inflicted") would silently stop repairing exactly the shape AC5 exists for. */
+function humanDecidedTerminalState(taskId: string): HumanDecision | undefined {
   const events = eventsForTask(taskId);
-  return events.some((e) => e.eventType === "task.cancelled") || failureKindFromEvents(events) === "cancelled";
+  const kind = failureKindFromEvents(events);
+  if (events.some((e) => e.eventType === "task.cancelled") || kind === "cancelled") return "cancelled";
+  if (kind === "gate_rejected" || events.some(isGateRejection)) return "gate_rejected";
+  return undefined;
+}
+
+/** The two gate decisions that terminate a task by a human's choice. `advance` completes
+ *  it (never terminal-by-rejection), and `request-changes-dedup` is logged against the
+ *  REPLACEMENT row, not the rejected one. */
+function isGateRejection(e: { eventType: string; payload: unknown }): boolean {
+  if (e.eventType !== "gate.decided") return false;
+  const decision = (e.payload as Record<string, unknown> | null)?.["decision"];
+  return decision === "reject" || decision === "request-changes";
 }
 
 /** FG-425: the cancel stands — and the candidate is on the target anyway.
@@ -2635,14 +2675,28 @@ function reconcilePublicationRecoveries(runId: string, workflow: Workflow, proje
     const attempt = attempts.find((a) => a.state === "published") ?? attempts.find((a) => a.state !== "intent");
     if (!attempt || attempt.state === "publishing") continue;
 
-    // A CANCEL IS TERMINAL AND WINS. `forge cancel` writes the same `failed` row a
-    // crash-stranded task ends up in, and the two are opposite things: one is damage
-    // to repair, the other is a human's decision to stop. Reconciling a cancelled task
-    // would override that decision — and a cancel a background sweep can undo is not a
-    // cancel. So the CONTRADICTION rule above applies only where the failure was NOT
-    // chosen, and this task is left exactly where the operator put it.
-    if (taskWasCancelled(task.id)) {
-      if (attempt.state === "published") announcePublicationAfterCancel(runId, task.id, attempt);
+    // A HUMAN'S DECISION IS TERMINAL AND WINS. `forge cancel` and `forge gate
+    // reject`/`request-changes` write the same `failed` row a crash-stranded task ends
+    // up in, and they are opposite things: one is damage to repair, the other is a
+    // human's decision to stop. Reconciling a decided task would override that decision
+    // — and a decision a background sweep can undo is not a decision. So the
+    // CONTRADICTION rule above applies only where the failure was NOT chosen, and this
+    // task is left exactly where the human put it.
+    //
+    // This sits BEFORE the awaiting_recovery laundering below on purpose (FG-676). That
+    // write exists to step a row AROUND finalizePrimary's terminal-state CAS, so a guard
+    // placed after it is no guard at all: the CAS would see `awaiting_recovery`, pass,
+    // and resurrect the decided row to awaiting_gate with its error NULLed — a phantom
+    // blocker no agent runs for and no gate resolves.
+    const decided = humanDecidedTerminalState(task.id);
+    if (decided) {
+      // The cancel case still owes the operator the announcement: they stopped this
+      // task and the candidate is on the target anyway. A gate rejection needs no
+      // counterpart — the human was looking at this task's artifact when they rejected
+      // it, and `forge show` already renders its publication attempts.
+      if (decided === "cancelled" && attempt.state === "published") {
+        announcePublicationAfterCancel(runId, task.id, attempt);
+      }
       continue;
     }
 
@@ -2782,7 +2836,7 @@ export function recoverPublicationByHand(attemptId: string): HandRecovery {
   // reconciled here (the cancel stands), so reporting a reconciliation would be a
   // second lie on top of the one this guard exists to prevent.
   const settled = getPublicationAttempt(attemptId);
-  if (taskWasCancelled(task.id) && settled?.state === "published" && settled.publishedSha) {
+  if (humanDecidedTerminalState(task.id) === "cancelled" && settled?.state === "published" && settled.publishedSha) {
     return {
       outcome,
       publishedAfterCancel: {

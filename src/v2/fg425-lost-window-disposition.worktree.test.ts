@@ -20,6 +20,31 @@
 // paused container, a long GC stall), through the AD-5 seam, inside a REAL runNext
 // dispatch against a REAL git target. Nothing here is probed, signalled, or reaped:
 // the steal is a durable-lease takeover, which is the only mechanism AD-7 permits.
+//
+// ─── FG-676 (BD-9): was anything in this file GREEN BECAUSE OF THE RESURRECTION? ───
+//
+// FG-681 records tests failing with `expected awaiting_gate, actual failed` — the same
+// state pair FG-676's resurrection produces — that are red on the darwin host and green
+// in CI at the same commit. So it was possible that a currently-green assertion here was
+// green only because reconciliation resurrected a terminal row, and that removing the
+// resurrection would turn it red. That had to be DETERMINED, not assumed.
+//
+// DETERMINED, by running both FG-425 worktree files before and after the fix:
+//
+//   src/v2/fg425-lost-window-disposition.worktree.test.ts — UNAFFECTED. Every test here
+//   drives a `gate: auto` step (the WORKFLOW below), and the resurrection only ever fired
+//   through finalizePrimary's `human`/`verdict` branches. Nothing in this file expected
+//   `awaiting_gate` at all before FG-676; the new test below is the first. The two
+//   cancel-stands tests (6) were already protected by the cancel half of the same guard,
+//   and the crash-stranded repair test (4) — which fabricates its contradiction with a
+//   bare `UPDATE tasks SET status='failed'` and NO task.failed event — is exactly the
+//   no-evidence default the FG-676 guard leaves untouched. It still reconciles.
+//
+//   src/campaign/fg425-campaign-lost-window.worktree.test.ts — UNAFFECTED, same reason:
+//   `gate: auto` throughout, no awaiting_gate expectation anywhere in it. Left unchanged.
+//
+// NO ASSERTION IN EITHER FILE WAS ADJUSTED. Both were green before the fix and green
+// after it, with the same assertions.
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -68,6 +93,27 @@ const WORKFLOW: Workflow = {
       id: "build",
       agent: "engineer",
       gate: "auto",
+      manual: false,
+      depends_on: [],
+      runtime: "fg425-ac5-test",
+      reds: [],
+    },
+  ],
+};
+
+/** FG-676: the same shape, on a HUMAN-GATED step — the only shape the defect fires on.
+ *  A `gate: auto` primary lands through markTaskComplete, whose CAS has refused a
+ *  terminal row since AWN-2; the resurrection lived on the `human`/`verdict` branches. */
+const HUMAN_GATE_WORKFLOW: Workflow = {
+  name: "fg676-gate-human-test",
+  description: "FG-676: a human-gated step whose publication reconcile must not resurrect a gate rejection",
+  review_mode: "legacy_verdict",
+  inputs: [],
+  steps: [
+    {
+      id: "build",
+      agent: "engineer",
+      gate: "human",
       manual: false,
       depends_on: [],
       runtime: "fg425-ac5-test",
@@ -179,18 +225,18 @@ result:
 /** `forge publish recover` runs OUTSIDE a wave: it has an attempt id and nothing else,
  *  so it reloads the run's workflow from disk exactly as `forge next` does. The
  *  installed YAML is therefore part of the production shape this test drives. */
-function ensureWorkflowOnDisk(): void {
-  const path = join(process.env.FORGE_HOME!, "workflows", `${WORKFLOW.name}.yml`);
+function ensureWorkflowOnDisk(wf: Workflow = WORKFLOW): void {
+  const path = join(process.env.FORGE_HOME!, "workflows", `${wf.name}.yml`);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(
     path,
-    `name: ${WORKFLOW.name}
-description: ${JSON.stringify(WORKFLOW.description)}
+    `name: ${wf.name}
+description: ${JSON.stringify(wf.description)}
 inputs: []
 steps:
   - id: build
     agent: engineer
-    gate: auto
+    gate: ${wf.steps[0]!.gate}
     runtime: fg425-ac5-test
 `,
   );
@@ -780,3 +826,152 @@ test("FG-425: `forge publish recover` on a CANCELLED task converges the attempt 
     "and no reconciliation was recorded over the cancel",
   );
 });
+
+// ─── (7) FG-676: a GATE REJECTION is a decision too, and reconcile may not undo it ──
+//
+// THE DEFECT THIS PINS. (6) established the rule for a cancel; this is the same rule
+// arriving through the other human verb, and it was NOT covered. `forge gate <task>
+// request-changes` fails the superseded task — and then a later publication-reconcile
+// sweep walked it back through awaiting_recovery and landed it, through the step's own
+// `human` gate, at `awaiting_gate` with its error NULLed. The row then contradicted its
+// own event stream (`status: awaiting_gate` beside `failure: gate_rejected`), and it was
+// a PHANTOM BLOCKER: no agent ever runs for a task in that state and no gate decision
+// resolves it, so a run that took one request-changes could never reach `complete`.
+// Observed 4/4 times on run run-fg-609-…-99204e and once on run-fg-678-…-6745ba.
+//
+// The writer swap the ticket originally named would NOT have caught it: the reconcile
+// path deliberately launders `failed` to `awaiting_recovery` before the finalizer's CAS
+// can see it, so the CAS passes. The fix is in the SELECTION predicate, and only a test
+// that drives the SWEEP proves it — a writer-level unit test passes against an unfixed
+// system.
+//
+// Repeated reconciliation is not optional here. Today the second sweep is a no-op only
+// because the first already moved the row out of the selection set, so a test asserting
+// "still terminal" after ONE sweep proves less than it appears to. This drives two waves
+// AND the hand door, then lets the replacement primary finish the run.
+
+function buildPrimaries(runId: string) {
+  return tasksForRun(runId).filter((t) => t.phase === "build" && t.parentId === undefined);
+}
+
+function awaitingADecision(runId: string): string[] {
+  return tasksForRun(runId).filter((t) => t.status === "awaiting_gate").map((t) => t.id);
+}
+
+/** Every event index of `type` that falls AFTER the task's last task.failed. The
+ *  resurrection was invisible in a bare `includes` check — the rejected task legitimately
+ *  carries a task.awaiting_gate from BEFORE the human decided. */
+function eventsAfterLastFailure(taskId: string, type: string): number {
+  const types = eventTypes(taskId);
+  const failedAt = types.lastIndexOf("task.failed");
+  assert.notEqual(failedAt, -1, `precondition: ${taskId} must carry a task.failed`);
+  return types.slice(failedAt + 1).filter((t) => t === type).length;
+}
+
+test("FG-676: a gate `request-changes` task whose publication is `published` STAYS terminal across repeated reconciliation — and its run still reaches complete through the replacement", async () => {
+  ensureWorkflowOnDisk(HUMAN_GATE_WORKFLOW);
+  const repo = makeRepo();
+  const target = localTargetFor(projectIdentity(repo).canonicalDir);
+  const { runId } = startRun({ workflow: HUMAN_GATE_WORKFLOW, title: "fg676-request-changes", projectDir: repo, inputs: {} });
+
+  // ── WAVE 1: the production sequence, not a fabrication. A real dispatch against a
+  //    real git repo, a real candidate published to the real target, and the
+  //    human-gated step parking on it.
+  const wave1 = await runNext({ runId, workflow: HUMAN_GATE_WORKFLOW, dockerExec: stubExec("src/feature.ts") });
+  assert.deepEqual(wave1.awaitingGate, ["build"], "precondition: the human gate parked the primary");
+
+  const rejected = buildPrimaries(runId)[0]!;
+  const attempt = publicationAttemptsForTask(rejected.id)[0]!;
+  assert.equal(attempt.state, "published", "precondition: a REAL publication attempt, published — nothing fabricated");
+  assert.equal(readTargetSha(target), attempt.publishedSha, "precondition: the target ref carries the candidate");
+  assert.equal(getTask(rejected.id)!.status, "awaiting_gate", "precondition: parked for the human");
+  const publishedResult = getTask(rejected.id)!.result;
+
+  // ── THE HUMAN DECIDES: request-changes. The superseded task is failed with its
+  //    rationale, and a replacement primary is minted in the SAME step.
+  const { nextTasks } = await doGate(rejected.id, "request-changes", "the migration is missing");
+  const replacement = nextTasks[0]!;
+  const decided = getTask(rejected.id)!;
+  assert.equal(decided.status, "failed", "precondition: request-changes fails the superseded task");
+  assert.equal(decided.error, "request-changes; superseded", "precondition: with the error on the row");
+  assert.equal(failureKindForTask(rejected.id), "gate_rejected", "precondition: recorded as a gate rejection");
+  assert.deepEqual(decided.result, publishedResult, "precondition: and the rejected ARTIFACT is preserved on the row");
+  assert.notEqual(replacement.id, rejected.id, "precondition: a distinct replacement primary was minted");
+  // The row is now in reconcile's selection set — `failed` beside a `published`
+  // attempt — which is precisely how the resurrection got its hands on it.
+  assert.equal(publicationAttemptsForTask(rejected.id)[0]!.state, "published");
+
+  // ── SWEEP 1 (a wave). It also dispatches the replacement, which publishes its own
+  //    candidate — the run carries on exactly as it does in production.
+  await runNext({ runId, workflow: HUMAN_GATE_WORKFLOW, dockerExec: stubExec("src/revision.ts") });
+  assertRejectedRowIntact(rejected.id, publishedResult, "after the first reconcile sweep");
+
+  // ── SWEEP 2 (a second wave). NOT redundant: after the fix the row is still IN the
+  //    selection set on every sweep, so this is the pass that would have caught a guard
+  //    that only worked because the first sweep moved the row out of it.
+  await runNext({ runId, workflow: HUMAN_GATE_WORKFLOW, dockerExec: stubExec("src/never-dispatched.ts") });
+  assertRejectedRowIntact(rejected.id, publishedResult, "after the second reconcile sweep");
+
+  // ── THE HAND DOOR. `forge publish recover` runs the SAME reconciliation from outside
+  //    a wave; a guard that only lives on the wave path is half a guard.
+  const hand = recoverPublicationByHand(attempt.attemptId);
+  assert.equal(hand.outcome.kind, "published", "the attempt is settled — the hand path re-derives nothing");
+  assert.equal(hand.publishedAfterCancel, undefined, "this was not a cancel, so no published-after-cancel report");
+  assert.equal(hand.task?.status, "failed", "and what it reports about the task is the TRUTH, not a resurrection");
+  assertRejectedRowIntact(rejected.id, publishedResult, "after `forge publish recover`");
+
+  // ── EXACTLY ONE TASK AWAITING A DECISION. The whole operational cost of the defect:
+  //    `forge show <run>` listed the superseded revision under Blockers alongside the
+  //    live one, so an operator saw two decisions owed where only one was real.
+  assert.deepEqual(
+    awaitingADecision(runId),
+    [replacement.id],
+    "exactly ONE task awaits a human decision — the live replacement, never the superseded revision",
+  );
+
+  // ── THE REPLACEMENT COMPLETES, and the run reaches `complete` WITH the rejected row
+  //    still terminal beside it. Preserving the audit record and unblocking the run are
+  //    both required; neither may be traded for the other.
+  await doGate(replacement.id, "advance", undefined);
+  const finalWave = await runNext({ runId, workflow: HUMAN_GATE_WORKFLOW, dockerExec: stubExec("src/never-dispatched.ts") });
+  assert.equal(getTask(replacement.id)!.status, "complete", "the replacement finished");
+  assert.equal(getRun(runId)!.status, "complete", "and the RUN reached complete — no phantom blocker held it open");
+  assert.equal(finalWave.runStatus, "complete");
+  assert.deepEqual(awaitingADecision(runId), [], "nothing is left awaiting a decision");
+
+  // ── THE AUDIT RECORD SURVIVED ALL OF IT, one last time, at the end state.
+  assertRejectedRowIntact(rejected.id, publishedResult, "after the run completed");
+  assert.equal(
+    buildPrimaries(runId).filter((t) => t.status === "complete").length,
+    1,
+    "exactly one primary in the phase is complete — the replacement, not the superseded revision",
+  );
+  assert.equal(publicationAttemptsForTask(rejected.id).length, 1, "and nothing was published a second time for it");
+});
+
+/** The rejected row is IMMUTABLE AUDIT HISTORY. Every field the resurrection touched,
+ *  plus the event stream that has to keep agreeing with it. Re-asserted after each sweep
+ *  rather than once at the end: "still terminal at the end" would pass a system that
+ *  resurrected the row and then happened to put it back. */
+function assertRejectedRowIntact(taskId: string, expectedResult: unknown, when: string): void {
+  const row = getTask(taskId)!;
+  assert.equal(row.status, "failed", `${when}: the gate-rejected row must still be terminal`);
+  assert.equal(row.error, "request-changes; superseded", `${when}: its error must never be NULLed`);
+  assert.deepEqual(row.result, expectedResult, `${when}: the rejected artifact must be carried through unchanged`);
+  assert.equal(failureKindForTask(taskId), "gate_rejected", `${when}: still a gate rejection`);
+  assert.equal(
+    eventsAfterLastFailure(taskId, "task.awaiting_gate"),
+    0,
+    `${when}: NO awaiting-gate event may be appended after the rejection — that is the phantom blocker`,
+  );
+  assert.equal(
+    eventsAfterLastFailure(taskId, "task.publication_reconciled"),
+    0,
+    `${when}: and no reconciliation may be recorded over a human's decision`,
+  );
+  assert.equal(
+    eventTypes(taskId).includes("task.completed"),
+    false,
+    `${when}: the superseded revision was never completed`,
+  );
+}
