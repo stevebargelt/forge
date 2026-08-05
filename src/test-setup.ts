@@ -37,8 +37,18 @@ process.env["GIT_CONFIG_GLOBAL"] = gitConfigGlobal;
 // — including the CLI subprocesses tests spawn, which inherit this env — reaches a
 // server private to this process. `/tmp` rather than os.tmpdir() on purpose: a unix
 // socket path has a ~104-char limit and macOS's per-user tmpdir eats most of it.
+//
+// FG-680: TMUX_TMPDIR is only HALF of that. A tmux client given neither -L nor -S resolves
+// its socket from $TMUX FIRST and consults TMUX_TMPDIR only when $TMUX is unset. Inside a
+// tmux pane — which is what `forge launch run` creates, and the dispatch pattern forge
+// REQUIRES for long-running work — $TMUX is inherited and names the OPERATOR's DEFAULT
+// socket, so every bare `tmux …` in this process reached the operator's server and the
+// relocation above bought nothing. Deleting it is what makes the private socket the ONLY
+// server anything here can resolve. A named deletion, never a blanket TMUX_* scrub:
+// TMUX_PANE is informational and selects no server, and -L/-S are flags, not environment.
 const tmuxTmpdir = mkdtempSync("/tmp/forge-test-tmux-");
 process.env["TMUX_TMPDIR"] = tmuxTmpdir;
+delete process.env["TMUX"];
 
 // FG-374: integration tests use hardcoded /tmp/<name> project dirs as
 // placeholders. With preflightProjectMount now active on both invoke and
@@ -108,11 +118,13 @@ process.on("exit", () => {
   } catch {
     // best-effort cleanup
   }
-  // FG-614: this process's OWN tmux server dies with this process. Killing it here is
-  // safe precisely because the socket is private — it can never reach the operator's
-  // server, which is the whole point of the isolation above. tmux creates its
-  // `tmux-<uid>/` socket dir on first use, so an empty dir means no server was ever
-  // started and the subprocess is skipped (most test files never touch tmux).
+  // FG-614: this process's OWN tmux server dies with this process. This kill-server names
+  // no socket, so it reaches the private one ONLY because BOTH halves of the isolation
+  // above hold: TMUX_TMPDIR is relocated AND TMUX is deleted. TMUX_TMPDIR alone does not
+  // decide which server a client reaches — with TMUX set, this line kills the OPERATOR's
+  // server instead, which is exactly the FG-680 incident. tmux creates its `tmux-<uid>/`
+  // socket dir on first use, so an empty dir means no server was ever started and the
+  // subprocess is skipped (most test files never touch tmux).
   try {
     if (readdirSync(tmuxTmpdir).length > 0) {
       spawnSync("tmux", ["kill-server"], { stdio: "ignore", env: { ...process.env, TMUX_TMPDIR: tmuxTmpdir } });

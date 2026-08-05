@@ -61,6 +61,15 @@ const COMPLIANT = [
   `}`,
 ].join("\n");
 
+/** Even an otherwise inherited environment is unsafe when it puts a foreign tmux
+ *  socket back. FG-680 requires TMUX to remain absent, not merely TMUX_TMPDIR present. */
+const REINTRODUCES_TMUX = [
+  `import { spawnSync } from "node:child_process";`,
+  `export function escapesAgain(): void {`,
+  `  spawnSync("tmux", ["new-session", "-d", "-s", "again", "cat"], { ${KEY}: { ...process.env, TMUX: "/tmp/operator.sock,1,0" } });`,
+  `}`,
+].join("\n");
+
 /** A copy of the REAL guard in its own scan root, plus whatever synthetic test files
  *  the case needs. The guard walks `<root>` (it resolves `..` from its own directory),
  *  so the copy lives one level down exactly as the original does under src/v2. */
@@ -112,6 +121,15 @@ test("FG-614: the guard PASSES a tmux-touching test whose subprocess environment
 
   assert.equal(run.status, 0, `a compliant tmux-touching test must not be flagged — a guard that fires on everything gets deleted:\n${run.output}`);
   assert.match(run.output, /pass 2/, "both halves of the guard actually ran");
+});
+
+test("FG-680: the socket-isolation guard FAILS when a tmux-touching test reintroduces TMUX into an inherited environment", () => {
+  const guardCopy = guardTreeWith({ "reintroduced/tmux-again.test.ts": REINTRODUCES_TMUX }, "reintroduced-tmux");
+  const run = runGuard(guardCopy, armed);
+
+  assert.notEqual(run.status, 0, `an explicit TMUX must be rejected even when TMUX_TMPDIR is inherited:\n${run.output}`);
+  assert.match(run.output, /tmux-again\.test\.ts/, "the guard names the unsafe test file");
+  assert.match(run.output, /explicitly reintroduced TMUX/, "the failure states the FG-680-specific escape hatch");
 });
 
 test("FG-614: the guard's arming assertion has teeth too — with TMUX_TMPDIR absent it fails and names where it should be set", () => {
