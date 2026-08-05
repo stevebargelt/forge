@@ -3,6 +3,7 @@ import { basename } from "node:path";
 import { readFileSync } from "node:fs";
 import { controlRuntimeProfile, listLaunches, readLaunch, removeLaunch, startLaunch, statusLine, tmuxServerCwdDiagnosis, type ControlRuntime, type LaunchView, type WorkloadNestedShell, type WorkloadTopLevel } from "../../v2/launch.js";
 import { waitAndRender } from "./launch-wait.js";
+import { recordLaunchStart } from "../../store/launch-observations.js";
 
 // FG-535: `forge launch` — the supported durable launch path for long-running
 // forge commands (`forge invoke`, `forge next`, `forge review-loop`, …) when
@@ -121,10 +122,29 @@ export function registerLaunch(program: Command): void {
       "--require-control-toolchain",
       "FG-555: declare the launch-environment contract — pin the workload's PATH to forge's own control-runtime node and REFUSE before executing if the resolved toolchain's ABI does not match (for Forge-owned unattended verification callers; do not depend on ambient login-shell PATH)",
     )
+    // FG-679 (BD-2): the ONLY channel that associates a launch with forge work.
+    // Forge never infers ownership from the launch name, the argv, or anything the
+    // command logs — FG-492 records that agent argv carries conversation text that
+    // false-matches unrelated run and ticket ids. A launch submitted WITHOUT these
+    // is placed at project level only and labeled `unassociated`, or lands in the
+    // host-level "Unassociated activity" bucket if its cwd is under no registered
+    // project home (which is where a per-task worktree lands).
+    .option("--run <run-id>", "FG-679: associate this launch with a forge run — the only thing that places it on that run's Current activity surface")
+    .option("--task <task-id>", "FG-679: associate this launch with a forge task")
+    .option("--ticket <ticket-id>", "FG-679: associate this launch with a ticket")
     .argument("<command...>", "the command to run (prefix with -- to stop option parsing)")
-    .action((command: string[], opts: { name?: string; json?: boolean; requireControlToolchain?: boolean }) => {
+    .action((command: string[], opts: { name?: string; json?: boolean; requireControlToolchain?: boolean; run?: string; task?: string; ticket?: string }) => {
       const profile = opts.requireControlToolchain ? controlRuntimeProfile({ label: "control-runtime" }) : undefined;
+      const association = {
+        ...(opts.run ? { runId: opts.run } : {}),
+        ...(opts.task ? { taskId: opts.task } : {}),
+        ...(opts.ticket ? { ticketId: opts.ticket } : {}),
+      };
       const meta = startLaunch(command, { name: opts.name, profile });
+      // FG-679 (BD-12): the durable start observation, written AFTER the command is
+      // already running. Best-effort by construction — a store forge cannot write
+      // leaves the launch running and merely unobserved, never refused.
+      recordLaunchStart(meta, Object.keys(association).length > 0 ? association : undefined);
       // FG-614: the launch is unaffected (the wrapper enters the recorded cwd itself),
       // but a bricked tmux server is a host-wide condition the operator needs named —
       // with the remedy and what the remedy costs. On stderr, so --json stays clean.

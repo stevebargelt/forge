@@ -1003,6 +1003,65 @@ CREATE INDEX IF NOT EXISTS idx_queue_events_ticket
   ON queue_events(project_key, ticket_id);
 CREATE INDEX IF NOT EXISTS idx_queue_events_project
   ON queue_events(project_key, id);
+
+-- FG-679 (BD-12): the durable record of what was OBSERVED about a forge launch,
+-- so a read-only reader (the dashboard, forge status) can answer "is host
+-- verification running?" WITHOUT probing tmux. Before this table a launch's status
+-- was derived at read time from a LIVE tmux probe (readLaunch/listLaunches), which
+-- no serving path may do.
+--
+-- Brand-new table via CREATE TABLE IF NOT EXISTS on the ordinary open path — the
+-- additive-only contract (FG-568/BD-15): an older binary that knows nothing of it
+-- reads and ignores it. No CHECK and no UNIQUE beyond the primary key, so an
+-- old/new binary never fights a constraint the other does not share.
+--
+-- EXACTLY ONE MUTABLE ROW PER LAUNCH. Current-state-per-launch is bounded by the
+-- number of launches; append-only per-interval rows would instead grow without
+-- bound and tax the FG-487 event surfaces that already scan events.
+--
+-- state is the canonical LaunchStatus.state STRUCTURED value
+-- ('running'|'exited_ok'|'exited_error'|'signaled'|'terminated_unattributed'|
+-- 'owner_gone'|'unknown') — NEVER a pre-rendered string and never a collapsed
+-- label. src/v2/launch.ts's statusLine stays the ONE human rendering (BD-4), so
+-- the four distinct facts it prints stay four facts on every surface.
+--
+-- association_kind is the PLACEMENT AUTHORITY, recorded in the data rather than
+-- re-derived by each reader (BD-2/BD-3/BD-14):
+--   'explicit' — submission-time structured metadata. The ONLY thing that
+--                authorizes RUN-level placement.
+--   'cwd'      — the launch's cwd resolved to a registered project home. May place
+--                at PROJECT level only, and is labeled unassociated.
+--   'none'     — no registered project home; host-level "Unassociated activity".
+-- Ownership is NEVER inferred from the launch name, argv, or log text (FG-492).
+--
+-- observed_at is what makes freshness a FACT rather than an inference: a row
+-- older than the reader's cutoff renders unobserved since <t>, never running
+-- and never terminal.
+CREATE TABLE IF NOT EXISTS launch_observations (
+  launch_id        TEXT PRIMARY KEY,
+  name             TEXT,
+  command          TEXT NOT NULL,
+  cwd              TEXT NOT NULL,
+  project_dir      TEXT,
+  association_kind TEXT NOT NULL,
+  run_id           TEXT,
+  task_id          TEXT,
+  ticket_id        TEXT,
+  campaign_id      TEXT,
+  item_id          TEXT,
+  started_at       TEXT NOT NULL,
+  observed_at      TEXT NOT NULL,
+  state            TEXT NOT NULL,
+  exit_code        INTEGER,
+  signal           TEXT,
+  terminal         INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_launch_observations_run
+  ON launch_observations(run_id);
+CREATE INDEX IF NOT EXISTS idx_launch_observations_project
+  ON launch_observations(project_dir);
+CREATE INDEX IF NOT EXISTS idx_launch_observations_observed
+  ON launch_observations(observed_at);
 `;
 
 // THE ADDITIVE COLUMN LIST — the machine-checked half of the additive-only
@@ -1117,6 +1176,24 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   { table: "continuations", column: "dispatched_run_id", ddl: "ALTER TABLE continuations ADD COLUMN dispatched_run_id TEXT" },
   { table: "continuations", column: "dispatched_task_id", ddl: "ALTER TABLE continuations ADD COLUMN dispatched_task_id TEXT" },
   { table: "continuations", column: "last_observed_status", ddl: "ALTER TABLE continuations ADD COLUMN last_observed_status TEXT" },
+
+  // FG-679: launch_observations arrives WHOLE as a brand-new table, so every entry
+  // here is a no-op on every DB that exists today. They are declared anyway because
+  // the additive-only invariant is only CHECKABLE if the list is exhaustive
+  // (fg608-migration-parity strips a fresh DB to the oldest shape SQLite permits and
+  // demands table_info parity) — a list curated by memory is how FG-608's
+  // "no column named imported_from" reached the dogfood host. The NOT NULL columns
+  // with no default (command, cwd, association_kind, started_at, observed_at, state,
+  // terminal) are deliberately absent: ADD COLUMN cannot restore them.
+  { table: "launch_observations", column: "name", ddl: "ALTER TABLE launch_observations ADD COLUMN name TEXT" },
+  { table: "launch_observations", column: "project_dir", ddl: "ALTER TABLE launch_observations ADD COLUMN project_dir TEXT" },
+  { table: "launch_observations", column: "run_id", ddl: "ALTER TABLE launch_observations ADD COLUMN run_id TEXT" },
+  { table: "launch_observations", column: "task_id", ddl: "ALTER TABLE launch_observations ADD COLUMN task_id TEXT" },
+  { table: "launch_observations", column: "ticket_id", ddl: "ALTER TABLE launch_observations ADD COLUMN ticket_id TEXT" },
+  { table: "launch_observations", column: "campaign_id", ddl: "ALTER TABLE launch_observations ADD COLUMN campaign_id TEXT" },
+  { table: "launch_observations", column: "item_id", ddl: "ALTER TABLE launch_observations ADD COLUMN item_id TEXT" },
+  { table: "launch_observations", column: "exit_code", ddl: "ALTER TABLE launch_observations ADD COLUMN exit_code INTEGER" },
+  { table: "launch_observations", column: "signal", ddl: "ALTER TABLE launch_observations ADD COLUMN signal TEXT" },
 
   { table: "continuation_lost_signal_recoveries", column: "dispatch_key", ddl: "ALTER TABLE continuation_lost_signal_recoveries ADD COLUMN dispatch_key TEXT" },
   { table: "continuation_lost_signal_recoveries", column: "dispatched_run_id", ddl: "ALTER TABLE continuation_lost_signal_recoveries ADD COLUMN dispatched_run_id TEXT" },

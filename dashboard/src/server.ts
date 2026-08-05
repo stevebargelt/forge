@@ -23,8 +23,10 @@ import {
   recentActivity, inFlight, taskDetail, projectsForDashboard, usageRollup, usageTimeSeries, usageModelMix, opsMetrics, routingGovernance,
   inProgressVerifications, reviewLoopRunPhases, hostVerificationsForTicket, hostVerificationsForCampaignItem, recentHostVerifications,
   resolveProjectScope, backlogTruthForProject, reviewLedger, agentRuntimeTrends, isAgentRuntimeWindow, AGENT_RUNTIME_WINDOWS,
+  currentActivity, launchDetail, launchLogTail,
 } from "./queries.js";
 import type { BacklogTicket, GroupBy, ProjectScope } from "./queries.js";
+import { isLaunchId } from "@forge/current-activity";
 import { renderShell, contentSecurityPolicy, cspNonce } from "./shell.js";
 import { getPlanUsage } from "./plan-usage.js";
 import { finishUnhandledRequest } from "./http-error.js";
@@ -89,6 +91,58 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   if (path === "/api/in-flight") {
     const data = inFlight(scopeFromUrl(url));
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
+    return;
+  }
+
+  // FG-679. THREE NEW SERVING PATHS, DELIBERATELY SEPARATE FROM /api/in-flight.
+  //
+  // BD-7 forbids any outbound call — GitHub, shell, `git`, tmux, Forge CLI — from a
+  // serving or polling path, and the criterion has to be provable by a RUNTIME GUARD
+  // rather than by inspection. `/api/in-flight` already `execFileSync`s `docker
+  // inspect` per running task (FG-290's reconcile-candidate annotation, a recorded
+  // pre-existing exception — BD-13), so folding these in would make that guard
+  // unassertable. They stay separate so the guard can be scoped to exactly the paths
+  // this ticket adds — and it must not be widened to cover /api/in-flight, nor
+  // narrowed to pass over a path that does shell out.
+  if (path === "/api/current-activity") {
+    const runId = url.searchParams.get("runId") ?? undefined;
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(currentActivity(scopeFromUrl(url), runId)));
+    return;
+  }
+
+  // BD-10: addressed by launch IDENTITY. No host filesystem path is accepted here,
+  // and none is returned — an id outside the launch charset (`..`, a separator, an
+  // absolute path) is refused with a 400 BEFORE it can become a path, by the same
+  // definition src/v2/launch.ts's launchDir enforces.
+  const launchLogMatch = path.match(/^\/api\/launches\/([^/]+)\/log$/);
+  if (launchLogMatch) {
+    const id = decodeURIComponent(launchLogMatch[1]!);
+    if (!isLaunchId(id)) {
+      res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "invalid launch id" }));
+      return;
+    }
+    const tail = launchLogTail(id);
+    if (!tail) {
+      res.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "not found" }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(tail));
+    return;
+  }
+
+  const launchMatch = path.match(/^\/api\/launches\/([^/]+)$/);
+  if (launchMatch) {
+    const id = decodeURIComponent(launchMatch[1]!);
+    if (!isLaunchId(id)) {
+      res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "invalid launch id" }));
+      return;
+    }
+    const detail = launchDetail(id);
+    if (!detail) {
+      res.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "not found" }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(detail));
     return;
   }
 

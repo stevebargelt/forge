@@ -9,6 +9,7 @@ import { classifyRunTerminalState, formatRunFailure } from "../../v2/ready-queue
 import type { Run } from "../../types/index.js";
 import { withRunLock, RunBusyError } from "../../util/run-lock.js";
 import { renderResearchReport } from "../../v2/report.js";
+import { promoteLaunchObservations } from "../../store/launch-observations.js";
 
 // FG-585: a truthful one-line failure detail for a run that gating settled to
 // `failed` — names the failed + unreachable phases. Falls back to a generic
@@ -40,6 +41,11 @@ export function registerGate(program: Command): void {
       }
       const dec = decision; // narrowed to GateDecision; preserved into the closure
       ensureForgeDirs();
+      // FG-679 (BD-16): promote any launch whose exit record has landed on disk into
+      // the observation store. Opportunistic and best-effort — no daemon, no resident
+      // observer, and never fatal to the command that hosts it. Mirrors the
+      // publication reconcile sweep at the top of every wave.
+      try { promoteLaunchObservations(); } catch { /* the sweep is never the point of this command */ }
 
       // AWN-2: serialize the gate mutation per run so it can't race a concurrent
       // gate/next on the same run. --all → the id is the run; single → the

@@ -117,7 +117,16 @@ function isRestorable(c: Col): boolean {
 // Columns an index references, so SQLite refuses to DROP them. Not a waiver: the
 // list-completeness test below covers them, and a DB missing one would already have
 // died in SCHEMA_SQL's CREATE INDEX, before applyMigrations ever ran.
-const UNDROPPABLE = new Set(["events.run_id", "events.task_id", "continuations.dispatch_key"]);
+// FG-679 added launch_observations with indexes on run_id and project_dir, so both
+// join this list. Deliberate, not a waiver: both carry ADDITIVE_COLUMNS entries, so
+// the completeness test below still covers them.
+const UNDROPPABLE = new Set([
+  "events.run_id",
+  "events.task_id",
+  "continuations.dispatch_key",
+  "launch_observations.run_id",
+  "launch_observations.project_dir",
+]);
 
 function freshDb(): DatabaseInstance {
   const db = new Database(":memory:");

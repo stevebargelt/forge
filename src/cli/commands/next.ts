@@ -8,6 +8,7 @@ import { loadWorkflow } from "../../v2/loader.js";
 import { runNext, type RunNextResult } from "../../v2/runNext.js";
 import { formatRunFailure } from "../../v2/ready-queue.js";
 import { resolveSeedGeneration } from "../../v2/seed-generation.js";
+import { promoteLaunchObservations } from "../../store/launch-observations.js";
 
 // FG-585: a truthful one-line failure detail for `forge next` — names the
 // phase(s) that failed and the phase(s) that could never dispatch as a result.
@@ -25,6 +26,11 @@ export function registerNext(program: Command): void {
     .description("Dispatch one wave of ready steps in the run. Re-run to advance further.")
     .action(async (runId: string, options) => {
       ensureForgeDirs();
+      // FG-679 (BD-16): promote any launch whose exit record has landed on disk into
+      // the observation store. Opportunistic and best-effort — no daemon, no resident
+      // observer, and never fatal to the command that hosts it. Mirrors the
+      // publication reconcile sweep at the top of every wave.
+      try { promoteLaunchObservations(); } catch { /* the sweep is never the point of this command */ }
       validateCredsForNewRun();
 
       // AWN-2: serialize dispatch per run — a second concurrent `forge next` on

@@ -149,7 +149,11 @@ test("Home is the hashless default and combines plan limits with in-flight work"
   assert.equal(await page.getByRole("heading", { name: "Plan limits & windows" }).count(), 1);
   assert.equal(await page.getByRole("heading", { name: "In flight" }).count(), 1);
   assert.equal(await page.getByRole("heading", { name: "Operations" }).count(), 1);
-  assert.deepEqual(await page.locator(".home-section-kicker").allTextContents(), ["Tasks", "Forge activity"]);
+  // FG-679 added the `Current activity` surface (kicker "Right now") above the task
+  // panel: the three-section Agents / Host verification / Required CI projection that
+  // answers "is something happening?" for work that is not a task row.
+  assert.deepEqual(await page.locator(".home-section-kicker").allTextContents(), ["Right now", "Tasks", "Forge activity"]);
+  assert.equal(await page.getByRole("heading", { name: "Current activity" }).count(), 1);
   assert.equal(await page.locator(".home-in-flight-group > .in-flight > h2").count(), 0, "Home heading belongs above the panel");
   assert.deepEqual(await page.locator(".home-ops-summary .stat-num").allTextContents(), ["85%", "1157", "2269", "3", "67", "13", "41"]);
   assert.match(await page.locator(".home-ops-summary").innerText(), /30d/);
