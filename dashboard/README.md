@@ -21,7 +21,7 @@ Under the v2 / RACI-driven model, forge sessions are mostly agent-driven — the
 
 Navigation tabs:
 
-- **home** — the default landing view, combining live host plan-limit windows with work currently in flight.
+- **home** — the default landing view, combining live host plan-limit windows with work currently in flight, including the **Current activity** surface described below.
 - **activity** — chronological agent outputs across every project on the host, rendered as markdown cards (not raw JSON). In-flight runs remain visible at the top via live poll.
 - **projects** — one summary per canonical repository. Standalone clones and linked worktrees are nested as checkout/branch context; click the project for all-checkout activity or a checkout row for an exact-path operational filter. The registry surfaces only checkouts that still exist on disk or are operationally actionable: a missing checkout stays visible only while it has in-flight work or a live session, and is labeled missing/unavailable. A missing, idle checkout with no live session is suppressed, and a project whose checkouts are all suppressed drops off the view entirely — but its aggregate counts, last activity, and full historical `projectDirs` scope are preserved untouched for historical queries.
 - **usage** — host Claude/Codex plan-limit windows plus token usage rollup and time-series, grouped by role / workflow / project / model. Claude OAuth limits come from an observed Anthropic usage integration; it is not treated as a stable public API contract. Current Codex limits come from the documented local Codex App Server `account/rateLimits/read` method, not a public provider HTTPS endpoint. A bounded scan of recent local rollout files is retained only as a compatibility fallback, and fallback data is labeled stale with its observation time. Coexisting Claude, Anthropic API, Bedrock, Codex subscription, and OpenAI API channels render independently when configuration or an observation proves they exist. Bedrock and API-key channels use explicit non-subscription states rather than invented quota numbers.
@@ -31,6 +31,29 @@ Navigation tabs:
 
 Click any activity card to see the full result.json + container stdout + related verdicts/gates.
 
+## Current activity
+
+One surface answering one question — *is something happening, or is this stuck?* — with three **distinct** sections (FG-679). It is a projection of durable state and nothing else; the concept model lives in `docs/concepts.md` → **Current activity**, and the design record in `docs/plans/fg679-current-activity-architecture.md`.
+
+- **Agents** — Forge task rows.
+- **Host verification** — durable launches (`forge launch run`), read from persisted observations. A launch is **never** rendered as an agent task, however long it runs.
+- **Required CI** — the required checks at the exact candidate sha, from observations the review-loop's existing CI observer persists. The dashboard asks GitHub nothing.
+
+Before this existed, a run whose only in-flight work was host verification or a pending check read as though nothing was happening, because neither is a task row.
+
+**Launch statuses are projected exactly as `forge launch show` prints them.** These are four different facts, and none of them is a generic `failed`:
+
+- `terminated by SIGTERM (signal sender not recorded — origin unknown)` — the kernel proved a signal landed; who sent it is recorded nowhere.
+- `exited 143 (signal-range code, no signal evidence — origin unknown)` — a bare exit code in the signal range with **no** signal evidence. **Exit 143 alone is never attribution evidence**: a command may deliberately return 143, so it is reported as the code it is and never upgraded into a kill claim.
+- `owner gone without an exit record (wrapper killed, or failed before recording — cause and sender not recorded)` — a live session holding a dead pane; durable evidence the wrapper never finished its last act, not that it was killed.
+- `unknown (no exit record, owner gone — e.g. host reboot)` — no exit record and no live owner.
+
+**A persisted observation is evidence of what was observed and when — never a claim about the present.** A stale or incomplete observation renders `unobserved since <time>`, never fabricated as `running` and never as terminal; the absence of a fresh observation is a fact about the observer, not about the work. A hand-run launch's freshness comes only from opportunistic promotion at the next `forge next` / `gate` / `continue` / `status` (there is no daemon), so a gap between them reads `unobserved since <time>`.
+
+For required CI, three states are deliberately distinguishable: **`CI not observed`** (no observation exists — nobody looked, which is not evidence CI is idle), **`CI not running`** (the newest observation resolved and enumerates no pending contexts), and **`stale`** (an observation exists but is past the freshness cutoff, labeled as such rather than shown as current). Each observation names the exact candidate sha and enumerates every required context with state, URL, and observation time; when the candidate moves, old-sha evidence disappears rather than being carried forward or relabeled.
+
+Read-only: no start, stop, or retry affordance, and launch detail is addressed by launch **identity** — no host filesystem path is accepted, exposed, or linked, and the log view is a bounded tail.
+
 ## HTTP API
 
 The server exposes read-only JSON endpoints at `http://127.0.0.1:8024/api/…`. All `GET`. Notable surfaces:
@@ -39,7 +62,11 @@ The server exposes read-only JSON endpoints at `http://127.0.0.1:8024/api/…`. 
 - **`/api/usage`**, **`/api/usage/timeseries`**, **`/api/usage/model-mix`** — token usage metrics
 - **`/api/usage/limits`** — normalized host provider channels and plan windows; add `?refresh=1` to bypass the 30-second provider cache. Credentials and raw provider/App Server records remain server-side.
 - **`/api/agent-runtime`** — average agent runtime over time, overall and per role, for the ops view's trend panel. `?window=1d|7d|30d|90d|all` (default `7d`); an unrecognized window is a `400`, never a silent fallback. Empty buckets report `sampleCount: 0` with a null average rather than a zero duration.
+- **`/api/current-activity`** — the three-section Current activity projection for a scope. Reads persisted rows only: task rows, `launch_observations`, and the newest `review_loop.ci_observed` observation. Backed by the SAME exported derivation (`src/v2/current-activity.ts`) that `forge status` renders, so the two surfaces agree structurally rather than by convention.
+- **`/api/launches/:id`**, **`/api/launches/:id/log`** — launch detail and a **bounded** log tail, addressed by launch identity. The id is validated against the launch-id charset before it is ever used as a path; `..`, absolute paths, and anything outside that charset are rejected `4xx`, and no response body or rendered link carries a host filesystem path.
 - **`/api/backlog`** — accepts canonical `?projectKey=<key>` or exact `?projectDir=<dir>`. Tickets come from the host store, scoped by the `project_key` the server derives from its **own** registry resolution of that request (the request's `projectKey` parameter is never used as a store key — trusting it would turn a per-project board into a cross-project one). Both request shapes therefore answer identically for one repository, and no branch-local ticket file is read. The response carries `ticketsProjectKey` (null when the repository has no ticket truth), `ticketsStorageMode` (`db` | `markdown` | null) and an optional `ticketsError` alongside `tickets`. Session handoff notes stay per-selection and per-checkout: a canonical response exposes every checkout's notes via `notesByCheckout`, and an exact single-checkout response also fills the legacy `notes` field. Read-only.
+
+The FG-679 endpoints (`/api/current-activity`, `/api/launches/:id`, `/api/launches/:id/log`) make **no outbound call while serving or polling** — no GitHub, no shell, no `git`, no Forge CLI, no tmux — and never call `readLaunch` or `listLaunches`, whose status classification is a live tmux probe rather than a read of durable state. A runtime guard proves it, rather than inspection. Two pre-existing serving paths elsewhere in the server *do* shell out (FG-290's `docker inspect` on `/api/in-flight`, and project presentation's `git`); they are recorded as named exceptions in `docs/plans/fg679-current-activity-architecture.md`, and the guard is deliberately scoped to the new paths rather than widened over them.
 
 Project-aware read endpoints accept either `?projectKey=<canonical-key>` to include every observed member path or `?projectDir=/exact/path` for an exact operational checkout. If both are present, the exact path wins. Unknown canonical keys match nothing. Metrics endpoints also accept `?since=30d` — except `/api/agent-runtime`, which takes a fixed `?window=` instead. Full parameter and response-shape reference: `docs/SCHEMA-CONTRACT.md` (which needs a follow-up update for this expanded read model).
 
