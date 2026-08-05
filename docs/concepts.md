@@ -148,6 +148,74 @@ Delivery is advisory and cleanly separated from the work. The waiter's **exit st
 
 Operational guidance: `docs/quick-start.md` §13.
 
+## Current activity
+
+The answer to one operator question — *"is something happening, or is this stuck?"* — projected from durable state alone (FG-679). The dashboard and `forge status` both render it, and they render it from the **same exported derivation** (`src/v2/current-activity.ts`) over the same persisted rows, so agreement between the two surfaces is structural rather than something that has to be kept in sync by hand.
+
+It exists because the dashboard used to project Forge **tasks** and nothing else. Two load-bearing kinds of in-flight work are not task rows — host verification running under `forge launch run`, and the required CI checks running at the candidate sha — so a run with either in flight read as though nothing was happening. Observed 2026-08-04: the in-flight surface showed one stale `awaiting_gate` row while `npm run test:worktree` was actively running under a launch, so the card read "waiting on a plan gate" when the truth was "verification running, no gate outstanding".
+
+### The three sections
+
+One `Current activity` surface, three **distinct** sections. Verification is never represented as an agent task, and the surface never implies an agent is working when the only activity is a launch or a pending check.
+
+- **Agents** — Forge task rows: the agent work the control plane dispatched and owns.
+- **Host verification** — [durable launches](#durable-launch) with a persisted observation. A launch is *never* rendered under Agents, however long it runs and whoever submitted it.
+- **Required CI** — the required checks at the exact candidate sha, from observations the review-loop's existing CI observer persists. The dashboard never asks GitHub anything; it reads what the observer already recorded.
+
+### Where a launch appears, and what authorizes that
+
+Launch-to-run association is **explicit structured metadata captured at submission** — `forge launch run --run <run-id> [--task <task-id>] [--ticket <id>] -- <command…>`. There are three placements, by what is actually known:
+
+- **Explicitly associated** — appears on BOTH its run and its project.
+- **CWD-associated** — the launch's cwd maps to a registered project home, so it may appear at **project level only**, labeled `unassociated` and marked as derived. It is never attributed to a run.
+- **No registered project home** — appears in a host-level **Unassociated activity** bucket. This is the common shape for a launch run inside a per-task worktree under `~/.forge/worktrees`, and it is what lets `/status` (which enumerates every launch host-wide) and the dashboard agree without inventing ownership.
+
+**Ownership is never inferred from a launch's name, its argv, or its log text.** This is not a style preference: FG-492 records that long-lived agent processes carry conversation text in argv and therefore falsely match unrelated role and ticket names — which is exactly how a launch gets attributed to a run it has nothing to do with. `forge launch show` / `list --json` still publish `forgeIds`, the `run-…` / `task-…` ids `extractForgeIds` regexes out of raw log output; that field is retained for compatibility and diagnostics and **authorizes nothing** — it never decides placement or ownership.
+
+### What each launch status means, as printed
+
+The [durable launch](#durable-launch) status vocabulary is projected exactly as `forge launch show` prints it, through the persisted observation rather than flattened into it. `statusLine` (`src/v2/launch.ts`) stays the one human rendering, so the same strings appear on the CLI and the dashboard:
+
+| Rendered exactly as | What it proves |
+|---|---|
+| `running` | A fresh observation says the launch began and is believed live. |
+| `exited 0` / `exited N` | The command finished on its own with that code. |
+| `terminated by SIGTERM (signal sender not recorded — origin unknown)` | The kernel proved a signal landed. *Who* sent it is recorded nowhere. |
+| `exited 143 (signal-range code, no signal evidence — origin unknown)` | A bare exit code in the signal range, with **no** signal evidence. |
+| `owner gone without an exit record (wrapper killed, or failed before recording — cause and sender not recorded)` | A live session holding a dead pane and no exit record — durable evidence the wrapper never completed its last act, but not that it was killed. |
+| `unknown (no exit record, owner gone — e.g. host reboot)` | No exit record *and* no live owner. |
+| `unobserved since <time>` | The observation is stale or incomplete. See below. |
+
+**Those are four different facts, not four spellings of one.** A SIGTERM-terminated launch, a bare signal-range `exited 143`, `owner gone`, and `unknown` each say something different about what the record proves, and **exit 143 alone is never attribution evidence** — a command may deliberately return 143, so the code is reported as the code it is and never upgraded into a kill claim. Collapsing any of them into a generic `failed` badge is a regression in honesty, and the surface is tested against it (FG-535 / FG-592 / FG-679).
+
+### What the surface does not claim
+
+**A persisted observation is evidence of what was observed and when. It is never a claim about the present**, and the absence of a fresh observation is a fact about the **observer**, not about the work.
+
+So a row whose freshness has lapsed renders `unobserved since <time>` — never fabricated as `running`, and never fabricated as terminal. That is the honest shape and it stays reachable; a launch with no exit record on disk keeps it indefinitely.
+
+The honest limitation that follows: a **hand-run** launch's freshness comes only from **opportunistic promotion**. `promoteLaunchObservations()` reads the exit record the launch wrapper's own recorder already wrote to disk, and it runs at the next `forge next`, `forge gate`, `forge continue` or `forge status` — there is no daemon and no resident observer, because the terminal record is already durable and one would buy nothing. A launch that reached a terminal disposition is promoted at that point, stops appearing as in-flight, and keeps the exact vocabulary above. Between promotions, a gap reads `unobserved since <time>` rather than `running`. Promotion never fabricates: no exit record on disk leaves the row exactly as it was.
+
+### Required CI: not observed vs. not running vs. stale
+
+Three different states, deliberately distinguishable — an operator reading "nothing pending" needs to know whether that means *checked and idle* or *never looked*:
+
+- **`CI not observed`** — no observation exists for this run and project at all. Nobody has looked. This is not evidence that CI is idle.
+- **`CI not running`** — the newest observation resolved (`success`, `failed`, or `unavailable`) and enumerates no pending contexts. Someone looked, and nothing is in flight.
+- **`stale`** — an observation exists but is older than the freshness cutoff. It is labeled stale and presented as what it is: a past observation, not a current one.
+
+Each observation names the **exact candidate sha** the observer probed and enumerates **every** required context with its own state, URL, and observation time. A summary verdict without that per-context detail does not satisfy the contract, and neither does a short sha.
+
+Evidence bound to a superseded candidate **disappears** rather than being carried forward or relabeled. The mechanism is deliberately boring: the observer declares the sha it probed, the reader presents only the newest observation, and never derives the candidate itself — so when the candidate moves, the old-sha observation simply stops being the newest.
+
+### Read-only, and identity-addressed
+
+The surface takes no action: there is no start, stop, or retry affordance for a launch or for CI. Launch detail and logs are addressed by **launch identity**, never by host path — no arbitrary filesystem path is accepted, exposed, or linked, and the log view is a bounded tail rather than the whole file.
+
+The dashboard's FG-679 serving and polling paths make no outbound call of any kind — no GitHub, no shell, no `git`, no Forge CLI, no tmux — and never call `readLaunch` or `listLaunches`. That is enforced by a runtime guard over those paths, not by inspection. Two *pre-existing* serving paths elsewhere in the dashboard do shell out; they are recorded by name in `docs/plans/fg679-current-activity-architecture.md` rather than absorbed into this rule.
+
+Architecture record: `docs/plans/fg679-current-activity-architecture.md`. Schema: `docs/SCHEMA-CONTRACT.md` → **launch_observations**.
+
 ## Design corpus
 
 The per-project shared design directory (#67). Default location: `<project>/designs/` — version-controlled with the project, treated as a project artifact rather than a peer dir. Every design-touching workflow run (`ui-design`, `ui-design-revise`, `feature-ui-design-needed`) targets the SAME corpus, which grows monotonically across runs.

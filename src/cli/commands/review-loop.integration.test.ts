@@ -792,11 +792,18 @@ test("FG-487: forge review-loop creates its run row eagerly at loop entry — be
 
   const events = eventsForRun(run.id);
   const types = events.map((e) => e.eventType);
-  assert.deepEqual(
-    types.slice(0, 3),
-    ["run.created", "review_loop.verification_started", "review_loop.verification_finished"],
-    "run.created and the verification start/finish events must exist, in order, with no task-shaped event ever appearing in this run",
-  );
+  // FG-679 interleaves review_loop.ci_observed between the start and finish
+  // events (this projectDir has no CI workflow at all, so the observer durably
+  // records the `unavailable` observation it actually made). The invariant this
+  // test guards is unchanged and asserted directly instead of positionally:
+  // run.created first, the verification pair in order, and no task-shaped event
+  // in a run that never dispatched a task.
+  assert.equal(types[0], "run.created");
+  const startedAt = types.indexOf("review_loop.verification_started");
+  const finishedAt = types.indexOf("review_loop.verification_finished");
+  assert.equal(startedAt, 1, "the verification start event must immediately follow run.created");
+  assert.ok(finishedAt > startedAt, "the verification finish event must follow its start");
+  assert.deepEqual(types.filter((t) => t.startsWith("task.")), [], "no task-shaped event may appear in a run that dispatched no task");
 });
 
 test("FG-487: an exception escaping the loop finalizes the eager run — no permanent zero-task active run", async () => {

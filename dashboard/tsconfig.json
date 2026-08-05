@@ -22,7 +22,9 @@
       "@forge/governance": ["../src/raci/governance.ts"],
       "@forge/reconcile-candidate": ["../src/ops/reconcile-candidate.ts"],
       "@forge/backlog": ["../src/backlog/structured.ts"],
-      "@forge/blocked-source": ["../src/store/blocked-source.ts"]
+      "@forge/blocked-source": ["../src/store/blocked-source.ts"],
+      "@forge/current-activity": ["../src/v2/current-activity.ts"],
+      "@forge/launch-observations": ["../src/store/launch-observations.ts"]
     }
   },
   "include": ["src/**/*.ts", "browser-tests/**/*.ts"]

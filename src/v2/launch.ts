@@ -42,6 +42,23 @@ import { FORGE_HOME } from "../util/paths.js";
 import { checkAbi } from "../cli/node-abi.js";
 import { readReleaseManifest } from "./release.js";
 
+// FG-679: THE DURABLE OBSERVATION IS DELIBERATELY NOT WRITTEN FROM THIS MODULE.
+//
+// FG-552 (F33) makes this module's transitive import graph load-bearing: `forge
+// launch wait` is dispatched before the command registry precisely so the observer
+// still observes and reports when better-sqlite3 cannot load under the running
+// interpreter, and src/cli/commands/launch-wait.ts states the rule outright — "do
+// not add an import that reaches the store". A static store import here reddens
+// that suite, and rightly: it would make the ONE command whose job is to report a
+// terminal disposition fail on a broken native binding.
+//
+// So the observation write and the opportunistic promoter live in
+// src/store/launch-observations.ts, which imports FROM this module (LAUNCHES_DIR,
+// isLaunchId, parseExitRecord, classifyExit) rather than the other way round. Both
+// submission sites — `forge launch run` (src/cli/commands/launch.ts) and the
+// campaign drive-item launcher — already load the registry, so coverage is
+// identical and the fast path stays native-free.
+
 export const LAUNCHES_DIR = join(FORGE_HOME, "launches");
 
 // FG-569 (R1): the release identity of the SUBMITTING forge CLI, derived from
@@ -849,7 +866,17 @@ export function assertProfileToolchain(profile: LaunchProfile, argv: string[], o
   return toolchainRefusal(profile, a0, "argv[0] is not a name-resolved control tool (forge/npm/npx/node) — a shell, script, explicit-path wrapper, or unknown binary the contract cannot prove runs the control toolchain");
 }
 
-/** Forge run/task ids, opportunistically, from whatever the command logged. */
+/** Forge run/task ids, opportunistically, from whatever the command logged.
+ *
+ *  QUARANTINED (FG-679 / BD-15). This is INFERENCE from raw LOG TEXT and it
+ *  AUTHORIZES NOTHING. It stays published on `LaunchView` for compatibility and
+ *  human diagnostics only. It must NEVER decide which run, task, or project a
+ *  launch is placed under: FG-492 records that long-lived agent processes carry
+ *  conversation text in their argv and logs, which false-matches unrelated role and
+ *  ticket names — that is precisely how a launch gets attributed to a run it has
+ *  nothing to do with. Placement is authorized ONLY by the explicit submission-time
+ *  metadata recorded in `launch_observations.association_kind`, and
+ *  src/v2/current-activity.ts neither imports nor consults this function. */
 export function extractForgeIds(log: string): { runIds: string[]; taskIds: string[] } {
   const uniq = (re: RegExp): string[] => [...new Set(log.match(re) ?? [])];
   return {
@@ -886,11 +913,20 @@ export function statusLine(s: LaunchStatus): string {
   }
 }
 
+/** The launch-id charset. A launch is addressed by IDENTITY, never by path: an id
+ *  that matches this contains no separator and no `..`, so it can only ever name a
+ *  direct child of LAUNCHES_DIR (BD-10). Exported so a second consumer — the
+ *  dashboard's identity-addressed launch endpoints — validates against THIS
+ *  definition rather than a hand-copied regex that could drift looser. */
+export function isLaunchId(id: string): boolean {
+  return /^[a-z0-9][a-z0-9-]*$/i.test(id);
+}
+
 function launchDir(id: string): string {
   // Every path under LAUNCHES_DIR is derived here; ids come from operator
   // input (show/rm) as well as startLaunch, so the traversal guard lives at
   // the single chokepoint rather than per caller.
-  if (!/^[a-z0-9][a-z0-9-]*$/i.test(id)) throw new Error(`forge launch: invalid launch id '${id}'`);
+  if (!isLaunchId(id)) throw new Error(`forge launch: invalid launch id '${id}'`);
   return join(LAUNCHES_DIR, id);
 }
 

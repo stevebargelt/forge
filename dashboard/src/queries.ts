@@ -23,6 +23,23 @@ import {
   type ReconcileClassification,
   type ReconcileReason,
 } from "@forge/reconcile-candidate";
+import {
+  LAUNCH_OBSERVATION_COLUMNS,
+  rowToLaunchObservation,
+  type LaunchObservationRow,
+} from "@forge/launch-observations";
+// FG-679: the ONE shared derivation and the ONE human rendering of the launch status
+// vocabulary, imported rather than reimplemented — `statusLine` is what keeps the four
+// BD-4 facts four distinct facts on this surface too.
+import {
+  LAUNCH_OBSERVATION_FRESH_MS,
+  deriveCurrentActivity,
+  isLaunchId,
+  observationIsFresh,
+  statusLine,
+  type CurrentActivity,
+  type CurrentActivityScope,
+} from "@forge/current-activity";
 
 export { type ProjectRecord };
 
@@ -2091,4 +2108,153 @@ export function reviewLedger(scope?: ProjectScope, limit = 25): ReviewLedgerEntr
       findings: own,
     };
   });
+}
+
+// ── FG-679: Current activity — a READ-ONLY projection, and nothing else ──
+//
+// These entry points exist so the dashboard can answer "is something happening, or
+// is this stuck?" from PERSISTED state alone. They are deliberately separate from
+// `/api/in-flight`: that endpoint already `execFileSync`s `docker inspect` per
+// running task through FG-290's reconcile-candidate annotation (a pre-existing,
+// RECORDED exception — BD-13), so folding these in would make BD-7's
+// no-outbound-call criterion unassertable. Nothing below shells out, probes tmux,
+// calls `readLaunch`/`listLaunches`, or reaches for `projectPresentation` (which
+// resolves its label through repositoryCheckoutIdentity → `execFileSync("git", …)`,
+// the second recorded exception — BD-18). The new sections carry a weaker,
+// basename-derived project label instead of acquiring a second subprocess.
+
+export type { CurrentActivity };
+
+function activityScope(scope: ProjectScope, runId?: string): CurrentActivityScope {
+  if (runId !== undefined && runId !== "") return { runId };
+  if (scope === undefined) return {};
+  return { projectDirs: typeof scope === "string" ? [scope] : [...scope] };
+}
+
+/** The ONE shared derivation `forge status` also calls (BD-9). The dashboard adds
+ *  no interpretation of its own — agreement is structural, not asserted. */
+export function currentActivity(scope?: ProjectScope, runId?: string, nowMs: number = Date.now()): CurrentActivity {
+  return deriveCurrentActivity(db(), { now: new Date(nowMs), scope: activityScope(scope, runId) });
+}
+
+/** BD-10: launch detail addressed by IDENTITY. The id is validated against the same
+ *  charset `launchDir` enforces BEFORE it can become a path, and the response
+ *  deliberately carries NO host filesystem path — not the cwd, not the log path, not
+ *  the project dir. The operator reaches the log through `/api/launches/:id/log`,
+ *  which is likewise addressed by id. */
+export type LaunchDetail = {
+  launchId: string;
+  name: string | null;
+  command: string[];
+  commandLine: string;
+  startedAt: string;
+  observedAt: string;
+  statusLabel: string;
+  state: string;
+  observation: "fresh" | "unobserved";
+  terminal: boolean;
+  associationKind: string;
+  unassociated: boolean;
+  runId: string | null;
+  taskId: string | null;
+  ticketId: string | null;
+  campaignId: string | null;
+  itemId: string | null;
+  projectLabel: string | null;
+};
+
+export function launchDetail(launchId: string, nowMs: number = Date.now()): LaunchDetail | null {
+  if (!isLaunchId(launchId)) return null;
+  const row = db()
+    .prepare(`SELECT ${LAUNCH_OBSERVATION_COLUMNS} FROM launch_observations WHERE launch_id = ?`)
+    .get(launchId) as LaunchObservationRow | undefined;
+  if (!row) return null;
+  const obs = rowToLaunchObservation(row);
+  const observedMs = Date.parse(obs.observedAt);
+  // The SAME range predicate the shared derivation applies — a future-dated
+  // observation is unusable, not maximally fresh.
+  const fresh = observationIsFresh(Number.isFinite(observedMs) ? observedMs : null, nowMs, LAUNCH_OBSERVATION_FRESH_MS);
+  // A terminal disposition is evidence that does not decay — it already happened.
+  // Only a NON-terminal observation goes stale, and when it does it reads
+  // `unobserved since <t>`: never `running`, never a fabricated terminal (BD-12).
+  const stale = !obs.terminal && !fresh;
+  return {
+    launchId: obs.launchId,
+    name: obs.name,
+    command: obs.command,
+    commandLine: obs.command.join(" "),
+    startedAt: obs.startedAt,
+    observedAt: obs.observedAt,
+    statusLabel: stale ? `unobserved since ${obs.observedAt}` : statusLine(obs.status),
+    state: stale ? "unknown" : obs.status.state,
+    observation: stale ? "unobserved" : "fresh",
+    terminal: obs.terminal,
+    associationKind: obs.associationKind,
+    unassociated: obs.associationKind !== "explicit",
+    runId: obs.runId,
+    taskId: obs.taskId,
+    ticketId: obs.ticketId,
+    campaignId: obs.campaignId,
+    itemId: obs.itemId,
+    projectLabel: obs.projectDir === null ? null : basename(obs.projectDir),
+  };
+}
+
+/** The launch log is UNBOUNDED host-command output, served by a process with no
+ *  authentication (dashboard/src/server.ts binds an env-overridable address, defaulting
+ *  to loopback). So the response is a BOUNDED TAIL by construction — id-only addressing
+ *  constrains path traversal, not content volume, and only this bound constrains the
+ *  latter. The bound matches the container-log surface's discipline; it is deliberately
+ *  tighter than that surface's 64 KiB because a launch log is the operator's OWN shell
+ *  environment (FG-626's reproduction is literally `forge launch run -- env`). */
+export const LAUNCH_LOG_TAIL_BYTES = 16 * 1024;
+
+/** What this response IS, stated in the response itself. There is no redactor here and
+ *  there will not be one: docs/redaction.md establishes ALLOWLIST discipline for this
+ *  codebase, and a denylist secret-scrubber over arbitrary command output would provide
+ *  false assurance rather than safety. So the surface says plainly what it renders —
+ *  raw stdout/stderr of a host command, in the operator's own environment — and a
+ *  reader is never left to infer that something sanitized it. */
+export const LAUNCH_LOG_CONTENT_NOTICE =
+  "raw stdout/stderr of a host command, unredacted — it may contain environment variables, tokens or other secrets the command printed";
+
+export type LaunchLogTail = {
+  launchId: string;
+  text: string;
+  bytes: number;
+  truncated: boolean;
+  /** Always `raw`. A field rather than prose so a consumer must handle it. */
+  content: "raw";
+  notice: string;
+  /** The tail bound in bytes, so a reader knows WHAT it is looking at without
+   *  reverse-engineering it from `bytes` vs `text.length`. */
+  maxBytes: number;
+};
+
+export function launchLogTail(launchId: string, maxBytes = LAUNCH_LOG_TAIL_BYTES): LaunchLogTail | null {
+  if (!isLaunchId(launchId)) return null;
+  // The id has no separator and no `..` (isLaunchId), so this can only ever name a
+  // direct child of the launches dir. FORGE_HOME is resolved PER CALL (FG-616), never
+  // snapshotted at module eval.
+  const logPath = join(forgeHome(), "launches", launchId, "out.log");
+  if (!existsSync(logPath)) return null;
+  const size = statSync(logPath).size;
+  const start = Math.max(0, size - maxBytes);
+  const length = size - start;
+  const buf = Buffer.alloc(length);
+  const fd = openSync(logPath, "r");
+  try {
+    readSync(fd, buf, 0, length, start);
+  } finally {
+    closeSync(fd);
+  }
+  return {
+    launchId,
+    text: buf.toString("utf8"),
+    bytes: size,
+    truncated: start > 0,
+    content: "raw",
+    notice: LAUNCH_LOG_CONTENT_NOTICE,
+    maxBytes,
+  };
 }

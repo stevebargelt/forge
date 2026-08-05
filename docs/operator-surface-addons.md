@@ -70,6 +70,9 @@ Forge can store a host-local pointer to that repo under `~/.forge`, but project 
 - Destructive or judgment-heavy actions should open a decision screen with context, not execute on one tap.
 - Do not put secrets, private profile exports, or machine-specific credentials in the public Forge repo.
 - Forge must remain operable without any addon installed.
+- An addon that surfaces **current activity** reads Forge's own read-only surfaces (`forge status`, the dashboard's `/api/current-activity`) rather than re-deriving activity from `forge launch list`, `tmux`, `docker`, or a GitHub token of its own. Those all exist; the point is that Forge already answers this question from durable state, and a second derivation is a second thing to be wrong.
+- An addon must not compress the launch status vocabulary. `terminated by SIGTERM (signal sender not recorded — origin unknown)`, `exited 143 (signal-range code, no signal evidence — origin unknown)`, `owner gone`, and `unknown` are four different facts, and **exit 143 alone is never attribution evidence**. A red button that means "failed" for all four is a worse surface than no button — see `docs/concepts.md` → Current activity.
+- A stale observation is not a green light and not a red one. Render `unobserved since <time>` as itself; it is a fact about the observer, not about the work. The same discipline applies to required CI, where `not observed` (nobody looked), `not running` (looked, nothing pending), and `stale` (an old observation) are three different answers an addon must not merge into one lamp.
 
 ## Stream Deck First Page Ideas
 

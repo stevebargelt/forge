@@ -528,26 +528,113 @@ export function probeCiGateStatus(opts: {
   command: string;
   checkStatusProvider?: CheckStatusProvider;
 }): CiGateStatus {
-  if (!SHA_LOOKUP_RE.test(opts.sha)) return { kind: "unavailable", reason: `sha "${opts.sha}" is not a valid lookup sha` };
+  return observeCiGate(opts).status;
+}
+
+// ── FG-679: the SAME probe, keeping the per-context detail CiGateStatus drops ─
+//
+// BD-5 requires a CI observation to name the exact candidate sha and enumerate
+// EVERY required context with its own state, URL and observation time. A
+// CiGateStatus cannot carry that and is deliberately not being changed to:
+// `success` carries no checks at all, `failed` carries only the FIRST failing
+// context, `pending` only the pending ones, and none of them carries an
+// observation time. So the detail is captured HERE, at the provider boundary
+// where it still exists — from the CiCheckStatus each provider call returns —
+// rather than reconstructed downstream from a verdict that already discarded it.
+//
+// This is NOT a second poller (BD-7). probeCiGateStatus is now a thin projection
+// of this function, so one call to EITHER performs exactly one pass over the
+// required jobs, through the identical resolveCiPairing trust chain — same
+// fail-closed preconditions, same disagreement priority, same provider, same
+// credential path. There is one observer.
+
+/** Per-context state as OBSERVED. The four provider states, plus the two facts
+ *  a CiCheckStatus expresses by its absence: the provider reported nothing for
+ *  this context, and the provider reported on a DIFFERENT sha than the one
+ *  probed. Both are honest observations about the observer, and neither may be
+ *  collapsed into a check state the provider never reported. */
+export type CiContextObservationState = CiCheckState | "not_reported" | "sha_mismatch";
+
+export type CiContextObservation = {
+  context: string;
+  state: CiContextObservationState;
+  url: string | null;
+  /** when THIS context was observed — not when the pass finished. */
+  observedAt: string;
+};
+
+export type CiObservationOutcome = "pending" | "success" | "failed" | "unavailable";
+
+export type CiGateObservation = {
+  /** the exact sha this pass probed. The observer DECLARES the candidate;
+   *  no reader ever derives it (BD-6 supersession rests on this). */
+  candidateSha: string;
+  observedAt: string;
+  outcome: CiObservationOutcome;
+  unavailableReason: string | null;
+  /** every required context enumerated by the trust chain — never a summary,
+   *  and never a context the pass did not actually enumerate. */
+  contexts: CiContextObservation[];
+};
+
+// An injected clock (tests) must never be able to throw INTO the verification
+// path it instruments — an unusable timestamp degrades to the real one.
+function isoFromEpochMs(ms: number): string {
+  const d = new Date(ms);
+  return Number.isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString();
+}
+
+/** Probe the required CI gate for (projectDir, sha, command) ONCE and return
+ *  both the CiGateStatus the caller decides on AND the per-context observation
+ *  of what was seen. opts.now is an injectable epoch-ms clock (defaults to
+ *  Date.now) — every timestamp comes from it, so a pass's context times and its
+ *  own observedAt are non-decreasing. */
+export function observeCiGate(opts: {
+  projectDir: string;
+  sha: string;
+  command: string;
+  checkStatusProvider?: CheckStatusProvider;
+  now?: () => number;
+}): { status: CiGateStatus; observation: CiGateObservation } {
+  const clock = opts.now ?? Date.now;
+  const stamp = (): string => isoFromEpochMs(clock());
+
+  const unavailable = (reason: string, contexts: CiContextObservation[]): { status: CiGateStatus; observation: CiGateObservation } => ({
+    status: { kind: "unavailable", reason },
+    observation: { candidateSha: opts.sha, observedAt: stamp(), outcome: "unavailable", unavailableReason: reason, contexts },
+  });
+
+  // Nothing was probed on either of these paths, so nothing is enumerated: an
+  // empty `contexts` is the honest record of "the required set could not even be
+  // established", never an assertion that zero checks are required.
+  if (!SHA_LOOKUP_RE.test(opts.sha)) return unavailable(`sha "${opts.sha}" is not a valid lookup sha`, []);
 
   const pairing = resolveCiPairing(opts.projectDir, opts.command);
-  if ("unavailableReason" in pairing) return { kind: "unavailable", reason: pairing.unavailableReason };
+  if ("unavailableReason" in pairing) return unavailable(pairing.unavailableReason, []);
 
   const provider = opts.checkStatusProvider ?? defaultCheckStatusProvider;
   let failing: { context: string; url?: string } | null = null;
   let unavailableReason: string | null = null;
   const pending: { context: string; url?: string }[] = [];
+  const contexts: CiContextObservation[] = [];
   for (const jobId of pairing.jobIds) {
     const checkContext = `${pairing.workflowName} / ${jobId}`;
     const status = provider({ projectDir: opts.projectDir, sha: opts.sha, checkContext });
+    const observedAt = stamp();
     if (!status) {
       unavailableReason ??= `no CI status available for check "${checkContext}" at sha ${opts.sha}`;
+      contexts.push({ context: checkContext, state: "not_reported", url: null, observedAt });
       continue;
     }
     if (status.sha !== opts.sha) {
       unavailableReason ??= `CI status for "${checkContext}" reported a different sha than the one requested`;
+      // Deliberately no url: that URL points at a run for ANOTHER sha, and
+      // publishing it under this candidate would present foreign-sha evidence
+      // as if it covered this one.
+      contexts.push({ context: checkContext, state: "sha_mismatch", url: null, observedAt });
       continue;
     }
+    contexts.push({ context: checkContext, state: status.state, url: status.detailsUrl ?? null, observedAt });
     if (status.state === "failure" || status.state === "other") {
       failing ??= { context: checkContext, ...(status.detailsUrl ? { url: status.detailsUrl } : {}) };
       continue;
@@ -558,10 +645,23 @@ export function probeCiGateStatus(opts: {
   // must not be masked by an earlier one the provider couldn't report on), and
   // unavailable still wins over pending/success since coverage cannot be proven
   // for a job the provider never confirmed.
-  if (failing) return { kind: "failed", failing };
-  if (unavailableReason) return { kind: "unavailable", reason: unavailableReason };
-  if (pending.length > 0) return { kind: "pending", checks: pending };
-  return { kind: "success" };
+  if (failing) {
+    return {
+      status: { kind: "failed", failing },
+      observation: { candidateSha: opts.sha, observedAt: stamp(), outcome: "failed", unavailableReason: null, contexts },
+    };
+  }
+  if (unavailableReason) return unavailable(unavailableReason, contexts);
+  if (pending.length > 0) {
+    return {
+      status: { kind: "pending", checks: pending },
+      observation: { candidateSha: opts.sha, observedAt: stamp(), outcome: "pending", unavailableReason: null, contexts },
+    };
+  }
+  return {
+    status: { kind: "success" },
+    observation: { candidateSha: opts.sha, observedAt: stamp(), outcome: "success", unavailableReason: null, contexts },
+  };
 }
 
 /** Human-readable description of WHAT covered a reuse — used in place of raw run

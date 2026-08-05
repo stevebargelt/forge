@@ -23,8 +23,10 @@ import {
   recentActivity, inFlight, taskDetail, projectsForDashboard, usageRollup, usageTimeSeries, usageModelMix, opsMetrics, routingGovernance,
   inProgressVerifications, reviewLoopRunPhases, hostVerificationsForTicket, hostVerificationsForCampaignItem, recentHostVerifications,
   resolveProjectScope, backlogTruthForProject, reviewLedger, agentRuntimeTrends, isAgentRuntimeWindow, AGENT_RUNTIME_WINDOWS,
+  currentActivity, launchDetail, launchLogTail,
 } from "./queries.js";
 import type { BacklogTicket, GroupBy, ProjectScope } from "./queries.js";
+import { isLaunchId } from "@forge/current-activity";
 import { renderShell, contentSecurityPolicy, cspNonce } from "./shell.js";
 import { getPlanUsage } from "./plan-usage.js";
 import { finishUnhandledRequest } from "./http-error.js";
@@ -89,6 +91,58 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   if (path === "/api/in-flight") {
     const data = inFlight(scopeFromUrl(url));
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
+    return;
+  }
+
+  // FG-679. THREE NEW SERVING PATHS, DELIBERATELY SEPARATE FROM /api/in-flight.
+  //
+  // BD-7 forbids any outbound call — GitHub, shell, `git`, tmux, Forge CLI — from a
+  // serving or polling path, and the criterion has to be provable by a RUNTIME GUARD
+  // rather than by inspection. `/api/in-flight` already `execFileSync`s `docker
+  // inspect` per running task (FG-290's reconcile-candidate annotation, a recorded
+  // pre-existing exception — BD-13), so folding these in would make that guard
+  // unassertable. They stay separate so the guard can be scoped to exactly the paths
+  // this ticket adds — and it must not be widened to cover /api/in-flight, nor
+  // narrowed to pass over a path that does shell out.
+  if (path === "/api/current-activity") {
+    const runId = url.searchParams.get("runId") ?? undefined;
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(currentActivity(scopeFromUrl(url), runId)));
+    return;
+  }
+
+  // BD-10: addressed by launch IDENTITY. No host filesystem path is accepted here,
+  // and none is returned — an id outside the launch charset (`..`, a separator, an
+  // absolute path) is refused with a 400 BEFORE it can become a path, by the same
+  // definition src/v2/launch.ts's launchDir enforces.
+  const launchLogMatch = path.match(/^\/api\/launches\/([^/]+)\/log$/);
+  if (launchLogMatch) {
+    const id = decodeLaunchId(launchLogMatch[1]!);
+    if (!isLaunchId(id)) {
+      res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "invalid launch id" }));
+      return;
+    }
+    const tail = launchLogTail(id);
+    if (!tail) {
+      res.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "not found" }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(tail));
+    return;
+  }
+
+  const launchMatch = path.match(/^\/api\/launches\/([^/]+)$/);
+  if (launchMatch) {
+    const id = decodeLaunchId(launchMatch[1]!);
+    if (!isLaunchId(id)) {
+      res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "invalid launch id" }));
+      return;
+    }
+    const detail = launchDetail(id);
+    if (!detail) {
+      res.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "not found" }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(detail));
     return;
   }
 
@@ -351,6 +405,21 @@ function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
 }
 
+/** Percent-decode a captured launch id, or return a sentinel `isLaunchId` refuses.
+ *
+ *  `decodeURIComponent` THROWS on a malformed encoding — `/api/launches/%`,
+ *  `/api/launches/%E0%A4%A` — and an uncaught throw here became a 500 instead of the
+ *  4xx an identity-addressed surface owes a bad identity (BD-10). A bad id is a bad
+ *  request whether or not it happens to be decodable, so an undecodable one is refused
+ *  through the SAME charset guard as everything else rather than a second code path. */
+function decodeLaunchId(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return "";
+  }
+}
+
 /** The path underneath the read is gone — the one ticket-read failure
  *  /api/backlog is entitled to report as an empty backlog rather than as a
  *  named error. Since FG-608 that path is the host store, not a checkout. */
@@ -368,4 +437,15 @@ function scopeFromUrl(url: URL): ProjectScope {
 
 server.listen(PORT, HOST, () => {
   console.log(`forge-dashboard listening at http://${HOST}:${PORT}`);
+  // The surface is READ-ONLY and unauthenticated by design, and one of the things it
+  // reads is a bounded tail of RAW host-command output (`/api/launches/:id/log`). On
+  // the default loopback bind that is a local operator surface; on any other address
+  // it is reachable by a network peer, and the operator is told so rather than left to
+  // infer it from the absence of a login screen.
+  if (!/^(127\.|::1$|localhost$)/.test(HOST)) {
+    console.error(
+      `forge-dashboard: bound to ${HOST}, NOT loopback. This surface has no authentication and serves ` +
+        `raw, unredacted output of host commands (/api/launches/<id>/log). Any peer that can reach ${HOST}:${PORT} can read it.`,
+    );
+  }
 });
