@@ -949,6 +949,15 @@ CREATE TABLE IF NOT EXISTS review_docs_dispatches (
   retired_reason   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_review_docs_dispatches_review ON review_docs_dispatches(review_id);
+-- FG-655 RF-4: AT MOST ONE LIVE BINDING PER REVIEW, enforced by the store rather than by
+-- call-site ordering. openDocsDispatch reads for a live binding and then inserts, and two
+-- concurrent "forge review continue" processes can both read nothing and both insert — each
+-- then dispatching a documentation-maintainer into the same checkout. Partial over the LIVE
+-- state (retired rows are history and there are many of them per review), matching
+-- idx_continuations_dispatch_key's precedent. Additive-only open path: the table is FG-655's
+-- own, so no aged database carries rows this could reject, and user_version is untouched.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_review_docs_dispatches_live
+  ON review_docs_dispatches(review_id) WHERE state != 'retired';
 
 -- FG-609 (FG-496 Slice D): the durable OPERATOR QUEUE primitives. Three brand-new
 -- tables arriving whole via CREATE TABLE IF NOT EXISTS on the ordinary open path —

@@ -120,12 +120,16 @@ function isRestorable(c: Col): boolean {
 // FG-679 added launch_observations with indexes on run_id and project_dir, so both
 // join this list. Deliberate, not a waiver: both carry ADDITIVE_COLUMNS entries, so
 // the completeness test below still covers them.
+// FG-655 RF-4 joins review_docs_dispatches.state for the same reason: the partial UNIQUE
+// index that holds "at most one LIVE docs binding per review" names it in its WHERE
+// clause, and it carries an ADDITIVE_COLUMNS entry.
 const UNDROPPABLE = new Set([
   "events.run_id",
   "events.task_id",
   "continuations.dispatch_key",
   "launch_observations.run_id",
   "launch_observations.project_dir",
+  "review_docs_dispatches.state",
 ]);
 
 function freshDb(): DatabaseInstance {

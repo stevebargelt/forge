@@ -167,7 +167,18 @@ export type FixCycleCommitContext = {
 export type DocsCycleCommit =
   | { kind: "committed"; sha: string; committedPaths: string[]; recognized?: boolean; declaredNotMoved?: string[] }
   | { kind: "no_change"; sha: string }
-  | { kind: "refused"; reason: string; detail: string };
+  | {
+      kind: "refused";
+      reason: string;
+      detail: string;
+      /** FG-655 RF-1: set ONLY by a refusal the committer reached with HEAD at the candidate
+       *  and the worktree WHOLLY CLEAN. That is provable evidence that nothing of this
+       *  delivery is present in the worktree, which is the same authorisation the dead-delivery
+       *  arm already retires on — so the caller may retire the spent binding here without
+       *  stranding anything. A refusal that cannot prove a clean tree never sets it, and
+       *  retires nothing. */
+      treeCleanAtCandidate?: boolean;
+    };
 
 export type DocsCycleCommitContext = {
   review: Review;
@@ -182,11 +193,18 @@ export type DocsCycleCommitContext = {
  *
  *  One read for both paths — the pass that just dispatched and the pass recovering after a
  *  crash — so the scope the commit carries cannot depend on which pass is asking. An
- *  `unreadable` delivery is absent, non-terminal or unparseable; it is a refusal, never an
- *  empty declaration, because "the agent said it changed nothing" and "nobody can tell what
- *  the agent said" are different facts and only one of them may advance a stage. */
+ *  `unreadable` delivery is absent or unparseable; it is a refusal, never an empty
+ *  declaration, because "the agent said it changed nothing" and "nobody can tell what the
+ *  agent said" are different facts and only one of them may advance a stage.
+ *
+ *  FG-655 RF-2: a delivery that has not reached a TERMINAL state is `in_flight` and is
+ *  deliberately NOT in the `unreadable` set. The clean-tree probe that authorises retiring an
+ *  unreadable delivery proves a DEAD one left nothing behind; it cannot tell a dead agent from
+ *  a live one that has not written yet, so folding a `running` task into `unreadable` is how a
+ *  second documentation-maintainer gets dispatched into a checkout the first is still writing. */
 export type DocsDelivery =
   | { kind: "delivered"; taskId: string; docsUpdated: readonly string[] }
+  | { kind: "in_flight"; taskId: string; status: string; detail: string }
   | { kind: "unreadable"; detail: string };
 
 export type CoordinatorDeps = {
@@ -836,6 +854,19 @@ async function runDocs(reviewId: string, transition: Transition, deps: Coordinat
   };
   const reEnter = `Resolve the named condition and re-run \`forge review continue ${reviewId}\`; the docs dispatch stays bound, so no second documentation-maintainer is started.`;
 
+  // FG-655 RF-2: the dispatch is STILL IN FLIGHT. Named separately from a dead delivery
+  // because the two authorise opposite things: a dead one over a clean tree may be retired, a
+  // live one may not be — a clean tree cannot distinguish an agent that left nothing behind
+  // from one that has not written yet. The binding is never retired here, so no second
+  // maintainer is dispatched while the first container may still be writing.
+  const inFlight = (bindingId: string, delivery: { taskId: string; status: string; detail: string }): string =>
+    `docs_dispatch_in_flight: ${delivery.detail} — the docs dispatch ${bindingId} bound task ${delivery.taskId}, ` +
+    `which is ${delivery.status}, so a documentation-maintainer may still be writing into this checkout. Nothing ` +
+    `was recorded, the candidate stays at ${candidateBefore}, and NO second docs agent is started. Confirm what ` +
+    `that task is doing with \`forge show ${delivery.taskId}\`; if its container is gone, \`forge cancel ` +
+    `${delivery.taskId}\` marks it failed, and a failed delivery over a clean tree at ${candidateBefore} is what ` +
+    `lets the next pass retire the dead dispatch and run ONE more docs agent. ${reEnter}`;
+
   setReviewState(reviewId, "documenting", { reason: transition.reason });
 
   // (a) THE RE-ENTRY SHORT-CIRCUIT, BEFORE THE DISPATCH DECISION.
@@ -848,8 +879,9 @@ async function runDocs(reviewId: string, transition: Transition, deps: Coordinat
   if (binding !== undefined) {
     const delivery = await deps.docsDelivery({ review, binding });
     known = delivery;
+    if (delivery.kind === "in_flight") return refuse(inFlight(binding.id, delivery));
     if (delivery.kind === "unreadable") {
-      // A delivery that is absent, non-terminal or unparseable. The remedy is NOT a new
+      // A DEAD delivery — absent, unparseable, or terminally failed. The remedy is NOT a new
       // operator verb: a CLEAN TREE AT THE CANDIDATE is provable evidence the dead
       // delivery's edits are gone, and that is what authorises retiring a spent binding and
       // dispatching once more. The probe is `commitDocsCycle` against an EMPTY declaration —
@@ -901,6 +933,7 @@ async function runDocs(reviewId: string, transition: Transition, deps: Coordinat
   // dispatched and the pass recovering from a crash, so the commit's scope cannot depend on
   // which pass is asking.
   const delivery = known ?? (await deps.docsDelivery({ review, binding }));
+  if (delivery.kind === "in_flight") return refuse(inFlight(binding.id, delivery));
   if (delivery.kind === "unreadable") {
     return refuse(
       `docs_cycle_declared_changes_absent: the docs dispatch ${binding.id} produced no readable declaration ` +
@@ -919,6 +952,29 @@ async function runDocs(reviewId: string, transition: Transition, deps: Coordinat
   // stranding shape this ticket exists to name.
   const commit = await deps.commitDocsCycle({ review, binding, declaredFiles });
   if (commit.kind === "refused") {
+    // FG-655 RF-1: A REFUSAL AT A CLEAN TREE MUST NOT WEDGE THE REVIEW. The declaration is
+    // read off the IMMUTABLE task record every pass, so a refusal that leaves the binding
+    // live reproduces itself verbatim on every subsequent `forge review continue` — no
+    // operator verb can change what that agent declared. `treeCleanAtCandidate` is set only
+    // where the committer proved HEAD is the candidate AND the worktree is wholly clean,
+    // which is the SAME evidence the dead-delivery arm above retires on: nothing of this
+    // delivery is present in the worktree, so retiring the spent binding strands nothing.
+    // Every refusal that cannot prove that — a dirty tree, a foreign head — leaves the
+    // binding live, so the "no second docs agent while work may be stranded" guarantee is
+    // untouched.
+    if (commit.treeCleanAtCandidate === true) {
+      retireDocsDispatch(
+        binding.id,
+        `${commit.reason}: the declaration (${declaredFiles.join(", ") || "nothing"}) contradicts a clean tree at ` +
+          `${candidateBefore}, so the spent dispatch left nothing behind`,
+      );
+      return refuse(
+        `${commit.reason}: ${commit.detail} — the docs stage recorded NOTHING and the candidate stays at ` +
+          `${candidateBefore}. The spent dispatch ${binding.id} is RETIRED (a clean tree at the candidate is ` +
+          `provable evidence it left nothing behind), so \`forge review continue ${reviewId}\` runs exactly ONE ` +
+          `more documentation-maintainer rather than reproducing this refusal.`,
+      );
+    }
     return refuse(
       `${commit.reason}: ${commit.detail} — the docs stage recorded NOTHING, the candidate stays at ` +
         `${candidateBefore}, and the dispatch stays bound as ${binding.id}. ${reEnter}`,

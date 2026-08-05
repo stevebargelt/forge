@@ -301,6 +301,44 @@ test("FG-655: a retired dispatch is no longer pending, and a fresh one may then 
   assert.equal(pendingDocsDispatch(REVIEW)?.id, second.id);
 });
 
+test("FG-655 RF-4: the STORE refuses a second live binding for a review — the invariant is not call-site ordering", () => {
+  // `openDocsDispatch` reads for a live binding and then inserts, and the two are not one
+  // atomic step: two concurrent `forge review continue` processes can each observe none and
+  // each create one, then each dispatch a docs agent. The raw insert below is that losing
+  // process's — it is what the read-then-insert degenerates to under concurrency.
+  const live = openDocsDispatch(REVIEW, "cand111");
+  assert.throws(
+    () =>
+      db
+        .prepare(
+          `INSERT INTO review_docs_dispatches (id, review_id, candidate_sha, state, created_at)
+           VALUES ('docs-dispatch-racer', ?, 'cand111', 'open', '2026-08-05T00:00:00Z')`,
+        )
+        .run(REVIEW),
+    /UNIQUE constraint failed/,
+    "at most one live binding per review, enforced by the DB",
+  );
+  assert.equal(pendingDocsDispatch(REVIEW)?.id, live.id, "and the winner's binding is untouched");
+
+  // A `dispatched` row collides with an `open` one too — both are LIVE. Only retirement frees
+  // the slot, and retired rows are history: many per review, so the index is partial.
+  markDocsDispatchDelivered(live.id, { taskId: "task-docs-1" });
+  assert.throws(
+    () =>
+      db
+        .prepare(
+          `INSERT INTO review_docs_dispatches (id, review_id, candidate_sha, state, created_at)
+           VALUES ('docs-dispatch-racer2', ?, 'cand111', 'open', '2026-08-05T00:00:00Z')`,
+        )
+        .run(REVIEW),
+    /UNIQUE constraint failed/,
+  );
+  retireDocsDispatch(live.id, "stage 6 completed at cand111");
+  const second = openDocsDispatch(REVIEW, "cand111");
+  retireDocsDispatch(second.id, "stage 6 completed again");
+  assert.equal(openDocsDispatch(REVIEW, "cand111").state, "open", "retired rows accumulate freely");
+});
+
 test("FG-655: a review with no docs dispatch reads back undefined, not a fabricated one", () => {
   assert.equal(pendingDocsDispatch(REVIEW), undefined);
   assert.equal(getDocsDispatch("docs-dispatch-nope"), undefined);

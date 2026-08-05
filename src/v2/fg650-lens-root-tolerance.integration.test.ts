@@ -299,8 +299,10 @@ function harness(over: { lens?: LensBehaviour; recheck?: RecheckBehaviour } = {}
           },
           createdAt: RUN.createdAt,
         });
-        markTaskComplete(taskId, {});
-        return done({});
+        // The declaration is EXPLICIT: an absent `docs_updated` is a contract violation the
+        // coordinator refuses by name, not a claim that nothing changed (FG-655 RF-3).
+        markTaskComplete(taskId, { docs_updated: [] });
+        return done({ docs_updated: [] });
       }
 
       case "review-rechecker": {

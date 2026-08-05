@@ -1568,13 +1568,29 @@ export function openDocsDispatch(reviewId: string, candidateSha: string): DocsDi
   // No bespoke event type: the dispatch's own `task.created` is already on the timeline, and
   // the completed stage record names this binding id beside that task id — so the audit
   // trail is a join over facts that exist rather than a fourth restatement of them.
-  getDb()
-    .prepare(
-      `INSERT INTO review_docs_dispatches (id, review_id, candidate_sha, state, dispatch_task_id, dispatch_run_id,
-                                           created_at, retired_at, retired_reason)
-       VALUES (?, ?, ?, 'open', NULL, NULL, ?, NULL, NULL)`,
-    )
-    .run(id, reviewId, candidateSha, at);
+  // FG-655 RF-4: the read above and this insert are not one atomic step, so the DB holds the
+  // invariant — idx_review_docs_dispatches_live is UNIQUE over the live rows of a review. A
+  // concurrent process that won the race makes this throw, and the loser refuses HERE, before
+  // it can start a container. Returning the winner's binding instead would be worse than the
+  // race: the loser would dispatch a second maintainer onto it and overwrite its task id.
+  try {
+    getDb()
+      .prepare(
+        `INSERT INTO review_docs_dispatches (id, review_id, candidate_sha, state, dispatch_task_id, dispatch_run_id,
+                                             created_at, retired_at, retired_reason)
+         VALUES (?, ?, ?, 'open', NULL, NULL, ?, NULL, NULL)`,
+      )
+      .run(id, reviewId, candidateSha, at);
+  } catch (err) {
+    const raced = pendingDocsDispatch(reviewId);
+    if (raced !== undefined) {
+      throw new Error(
+        `forge: review ${reviewId} already has a live docs dispatch ${raced.id} — a concurrent ` +
+          `\`forge review continue\` opened it, so this pass starts NO second documentation-maintainer`,
+      );
+    }
+    throw err;
+  }
   return getDocsDispatch(id) as DocsDispatch;
 }
 

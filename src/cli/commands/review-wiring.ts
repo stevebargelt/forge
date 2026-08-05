@@ -289,6 +289,39 @@ function porcelainPaths(out: string): string[] {
   return [...new Set(paths)];
 }
 
+/** FG-655 RF-5: stage the paths the commit is about to name, tolerating one git cannot MATCH
+ *  because the index already fully represents it.
+ *
+ *  `git mv` is the idiomatic way for an agent to rename a file, and it leaves the rename
+ *  STAGED: the original is gone from the worktree AND from the index, so `git add --
+ *  :/<original>` matches nothing anywhere and fails with exit 128 — taking the whole batch
+ *  with it, since git validates every pathspec before staging anything. The partial `commit`
+ *  that follows would have carried that rename whole straight off the index, and the original
+ *  must stay in the COMMIT pathspecs or the deletion is left behind, so the tolerance belongs
+ *  in the `add` and nowhere else. (An UNSTAGED rename is a plain deletion git adds happily;
+ *  that case never reaches the retry.)
+ *
+ *  It is narrow by construction: a path is excused only when `git diff --cached` proves the
+ *  index ALREADY differs from HEAD for it, which is precisely "there is nothing left to stage".
+ *  A path git does not know at all shows nothing there and its error is re-thrown, so a genuine
+ *  add failure is still a named refusal rather than silence. Nothing here widens the pathspecs:
+ *  the declared-paths-only guarantee is the caller's `moved` set, untouched. */
+function stageDeclaredPaths(git: (args: string[]) => string, paths: string[]): void {
+  try {
+    git(["add", "--", ...paths.map((p) => `:/${p}`)]);
+    return;
+  } catch {
+    // Nothing was staged, so the retry judges each path on its own.
+  }
+  for (const path of paths) {
+    try {
+      git(["add", "--", `:/${path}`]);
+    } catch (err) {
+      if (git(["diff", "--cached", "--name-only", "--no-renames", "-z", "--", `:/${path}`]) === "") throw err;
+    }
+  }
+}
+
 /** THE SUBJECT IS AN INTERFACE, NOT A LOG LINE, and since FG-649/RF-2 it is also the fix
  *  cycle's per-revision IDEMPOTENCY KEY: it is how a retry after a crash recognises the commit
  *  this coordinator already authored instead of refusing forever. It must not reference the
@@ -803,9 +836,8 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
         //
         // `:/`-prefixed pathspecs are repo-root relative, matching what porcelain reported —
         // the git seam's cwd need not be the repository root for the add to name the same file.
-        const pathspecs = moved.map((p) => `:/${p}`);
-        git(["add", "--", ...pathspecs]);
-        git(["commit", "-m", subject, "--", ...pathspecs]);
+        stageDeclaredPaths(git, moved);
+        git(["commit", "-m", subject, "--", ...moved.map((p) => `:/${p}`)]);
       } catch (err) {
         return {
           kind: "refused",
@@ -919,7 +951,12 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
         return {
           kind: "refused",
           reason: "docs_cycle_commit_failed",
-          detail: `the worktree state at ${ctx.projectDir} could not be read: ${(err as Error).message}`,
+          detail:
+            `the worktree state at ${ctx.projectDir} could not be read: ${(err as Error).message} — with no ` +
+            `porcelain scan there is no declared-path scope, so nothing was staged or committed. Make ` +
+            `\`git status\` answer there again (a stale \`.git/index.lock\` from a killed git is the usual cause), ` +
+            `or point --project at the checkout that holds the candidate ${review.candidateSha ?? "(unset)"}, then ` +
+            `re-run`,
         };
       }
 
@@ -951,16 +988,26 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
       const declaredNotMoved = [...declared].filter((p) => !movedSet.has(p)).sort();
       if (moved.length === 0) {
         if (declaredNotMoved.length > 0) {
+          // THE REMEDY MUST BE REACHABLE FROM THIS BRANCH. This is only reached with HEAD AT
+          // the candidate (a foreign head refuses candidate_not_checked_out above) and the
+          // tree wholly clean, so the soft reset the sibling refusals name would be a no-op
+          // here — and the declaration itself is immutable, read off the durable task record
+          // every pass, so "correct the declaration" names nothing an operator can do. Both
+          // remedies would have made this refusal terminal. `treeCleanAtCandidate` is the
+          // caller's authorisation to retire the spent binding instead: a clean tree at the
+          // candidate proves nothing of this delivery is in the worktree, so retiring it
+          // strands nothing and the next pass runs exactly one more docs agent.
           return {
             kind: "refused",
             reason: "docs_cycle_declared_changes_absent",
+            treeCleanAtCandidate: true,
             detail:
-              `the docs agent declares ${declaredFiles.join(", ")} but the worktree at ${ctx.projectDir} is clean — ` +
-              `its own declaration contradicts the tree, so there is nothing to commit and the claim cannot be ` +
-              `honoured. This is deliberately NOT read as a docs cycle that changed nothing: a cycle that ` +
-              `legitimately changed nothing declares no paths. If the agent already committed its own work, run ` +
-              `\`git reset --soft ${review.candidateSha ?? "<candidate>"}\` to return those edits to the worktree; ` +
-              `otherwise correct the declaration and re-run`,
+              `the docs agent declares ${declaredFiles.join(", ")} but the worktree at ${ctx.projectDir} is clean ` +
+              `at the candidate ${review.candidateSha ?? "(unset)"} — its own declaration contradicts the tree, so ` +
+              `there is nothing to commit and the claim cannot be honoured. This is deliberately NOT read as a ` +
+              `docs cycle that changed nothing: a cycle that legitimately changed nothing declares no paths. The ` +
+              `clean tree is also what makes this recoverable — nothing of that delivery is present here to ` +
+              `strand, so the spent dispatch is retired and one more docs agent runs`,
           };
         }
         // THE LEGITIMATE NO-OP (AC2): nothing declared, nothing moved, clean tree. The
@@ -975,14 +1022,28 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
         // stage-then-commit window structurally rather than by narrowing it. The `add` stays
         // because a new docs file is untracked and must be known to git before a pathspec
         // can name it. `:/` makes the pathspecs repo-root relative, matching porcelain.
-        const pathspecs = moved.map((p) => `:/${p}`);
-        git(["add", "--", ...pathspecs]);
-        git(["commit", "-m", subject, "--", ...pathspecs]);
+        // A path the index already fully represents — the far side of a `git mv` — is
+        // staged-and-done, and `stageDeclaredPaths` is what keeps that from failing the batch.
+        stageDeclaredPaths(git, moved);
+        git(["commit", "-m", subject, "--", ...moved.map((p) => `:/${p}`)]);
       } catch (err) {
+        // THE REMEDY MUST TERMINATE, not just describe (FG-655 RF-5). This refusal retires
+        // nothing and cannot use the clean-tree authorisation — the tree is dirty by
+        // definition here — so git's own error text alone would reproduce itself on every
+        // subsequent `continue` forever. Both arms below leave the review somewhere a further
+        // pass makes progress: a staged tree commits, and a clean tree at the candidate is
+        // what `docs_cycle_declared_changes_absent` retires the spent dispatch on.
         return {
           kind: "refused",
           reason: "docs_cycle_commit_failed",
-          detail: `git refused the docs-cycle commit in ${ctx.projectDir}: ${(err as Error).message}`,
+          detail:
+            `git refused the docs-cycle commit in ${ctx.projectDir}: ${(err as Error).message}. The docs agent's ` +
+            `edits are still in the worktree, so nothing is lost: resolve what git reported — staging the paths ` +
+            `yourself (\`git add -- ${moved.slice(0, 5).map((p) => `'${p}'`).join(" ")}\`) is enough, since the ` +
+            `commit is taken from the index — and re-run. If those edits cannot be made committable at all, ` +
+            `\`git stash\` (or discard) them so the tree is CLEAN at the candidate ` +
+            `${review.candidateSha ?? "(unset)"}: a clean tree retires this spent docs dispatch and runs one more ` +
+            `documentation-maintainer, so the review moves rather than reproducing this refusal`,
         };
       }
 
@@ -1006,9 +1067,9 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
     // — the declaration is deliberately NOT copied into the ledger, so the two can never
     // drift into disagreeing about what the commit's scope was.
     //
-    // A delivery that is absent, non-terminal or unparseable is `unreadable`, never an empty
-    // declaration: "the agent said it changed nothing" and "nobody can tell what the agent
-    // said" are different facts and only the first may advance a stage.
+    // A delivery that is absent or unparseable is `unreadable`, never an empty declaration:
+    // "the agent said it changed nothing" and "nobody can tell what the agent said" are
+    // different facts and only the first may advance a stage.
     docsDelivery: ({ binding }) => {
       if (binding.taskId === undefined) {
         return { kind: "unreadable", detail: `the docs dispatch ${binding.id} never bound a task id` };
@@ -1016,6 +1077,20 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
       const task = getTask(binding.taskId);
       if (task === undefined) {
         return { kind: "unreadable", detail: `no task ${binding.taskId} exists for docs dispatch ${binding.id}` };
+      }
+      // FG-655 RF-2: NON-TERMINAL IS NOT DEAD. A task that failed is a dead delivery and joins
+      // the unreadable set, where a clean tree at the candidate proves it left nothing behind.
+      // Anything else non-terminal — a `running` row a CLI killed mid-dispatch leaves behind
+      // permanently, since nothing reaps it — is a dispatch that may still be WRITING, and a
+      // clean tree cannot tell that apart from a dead one. Retiring it would dispatch a second
+      // maintainer over a live one's checkout, so it gets its own refusal instead.
+      if (task.status !== "complete" && task.status !== "failed") {
+        return {
+          kind: "in_flight",
+          taskId: binding.taskId,
+          status: task.status,
+          detail: `task ${binding.taskId} is ${task.status}, which is neither a terminal delivery nor a dead one`,
+        };
       }
       if (task.status !== "complete") {
         return {
@@ -1030,11 +1105,24 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
       // The SAME `docs_updated` read `assessRunDocsImpact` makes — the documentation
       // maintainer's contract already returns it, so the coordinator does not have to invent
       // a second declaration channel for the same fact.
+      //
+      // FG-655 RF-3: an ABSENT field is unreadable, not an empty declaration. The contract
+      // REQUIRES `docs_updated`, so its omission is a contract violation — reading it as the
+      // agent's positive claim that it changed nothing is exactly the conflation the
+      // unreadable/delivered split exists to prevent.
       const raw = (result as Record<string, unknown>)["docs_updated"];
-      if (raw !== undefined && !Array.isArray(raw)) {
+      if (raw === undefined) {
+        return {
+          kind: "unreadable",
+          detail:
+            `task ${binding.taskId} recorded no docs_updated at all — the documentation-maintainer contract ` +
+            `requires the field, so its absence is a contract violation, not a claim that nothing changed`,
+        };
+      }
+      if (!Array.isArray(raw)) {
         return { kind: "unreadable", detail: `task ${binding.taskId} recorded a non-array docs_updated` };
       }
-      const docsUpdated = Array.isArray(raw) ? raw.filter((p): p is string => typeof p === "string") : [];
+      const docsUpdated = raw.filter((p): p is string => typeof p === "string");
       return { kind: "delivered", taskId: binding.taskId, docsUpdated };
     },
 

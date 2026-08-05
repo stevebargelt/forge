@@ -40,7 +40,7 @@ import { join } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
-import { insertTask, markTaskComplete, markTaskFailed } from "../store/tasks.js";
+import { getTask, insertTask, markTaskComplete, markTaskFailed, markTaskRunning } from "../store/tasks.js";
 import { getReview, pendingDocsDispatch, type Review } from "../store/reviews.js";
 import { buildCoordinatorDeps } from "../cli/commands/review-wiring.js";
 import { runNextStage, type CoordinatorDeps } from "./review-run.js";
@@ -153,7 +153,9 @@ function noopDocsAgent(): { docs_updated: string[] } {
   return { docs_updated: [] };
 }
 
-function harness(over: { docs?: DocsBehaviour; deps?: Partial<CoordinatorDeps>; failDocs?: boolean } = {}): Harness {
+function harness(
+  over: { docs?: DocsBehaviour; deps?: Partial<CoordinatorDeps>; failDocs?: boolean; killDocsMidDispatch?: boolean } = {},
+): Harness {
   const calls: InvokeArgs[] = [];
   const docs = over.docs ?? declaringDocsAgent;
 
@@ -193,6 +195,12 @@ function harness(over: { docs?: DocsBehaviour; deps?: Partial<CoordinatorDeps>; 
       }
 
       case "documentation-maintainer": {
+        // A CLI killed between the mint and the container's return. The task row is left
+        // `running` and nothing reaps it, which is the durable state RF-2 is about.
+        if (over.killDocsMidDispatch === true) {
+          markTaskRunning(taskId);
+          throw new Error("the CLI was killed mid-dispatch");
+        }
         const result = docs();
         if (over.failDocs === true) {
           markTaskFailed(taskId, "the maintainer container crashed", result);
@@ -426,7 +434,15 @@ test("integ FG-655: a declaration that reaches BEYOND the tree commits what move
   assert.notEqual(head(), preDocs);
 });
 
-test("integ FG-655: a declaration against a wholly CLEAN tree refuses by name and records nothing", async () => {
+test("integ FG-655 / RF-1: a declaration against a wholly CLEAN tree refuses by name, RETIRES the spent dispatch, and the review still makes progress", async () => {
+  // THE WEDGE THIS ARM USED TO BE. The refusal retired nothing and the declaration is read
+  // off the IMMUTABLE task record every pass, so every subsequent `forge review continue`
+  // reproduced this refusal verbatim — forever. Both remedies it printed were unreachable:
+  // the branch is only entered with HEAD already at the candidate and the tree clean, so
+  // `git reset --soft <candidate>` is a no-op, and no verb can edit a task result.
+  //
+  // RED baseline: drop the `treeCleanAtCandidate` retire in runDocs and the dispatch count
+  // below stays at 1 while the second outcome is the identical refusal.
   const h = harness({ docs: () => ({ docs_updated: ["docs/concepts.md"] }) });
   await parkAt(h.deps, "docs");
   const at = getReview(REVIEW)?.candidateSha as string;
@@ -434,9 +450,103 @@ test("integ FG-655: a declaration against a wholly CLEAN tree refuses by name an
   const out = await runNextStage(REVIEW, h.deps);
   assert.equal(out.status, "refused");
   assert.match(out.message, /docs_cycle_declared_changes_absent/);
-  assert.match(out.message, /git reset --soft/, "the remedy is concrete");
+  assert.doesNotMatch(out.message, /git reset --soft/, "a remedy that is a no-op in the branch that prints it is worse than none");
+  assert.match(out.message, /RETIRED/, "the refusal says what it did instead");
+  assert.equal(head(), at, "nothing was committed");
+  assert.equal(porcelain(), "", "and the tree was clean throughout — nothing is stranded by the retire");
+  assert.equal(docsRecord(), undefined, "a refused stage records no evidence");
+  assert.equal(getReview(REVIEW)?.candidateSha, at, "and moves the candidate nowhere");
+  assert.equal(pending().kind, "docs", "Stage 6 stays open — `forge review continue` re-enters it");
+  assert.equal(h.dispatches("documentation-maintainer").length, 1, "the refusing pass started exactly one agent");
+  assert.equal(
+    pendingDocsDispatch(REVIEW),
+    undefined,
+    "the SPENT binding is retired: a clean tree at the candidate proves that delivery left nothing behind",
+  );
+
+  // AND THE FOLLOWING `continue` MAKES PROGRESS. Same misbehaving agent, driven through the
+  // real sequence again: it runs exactly ONE more docs agent rather than reproducing the
+  // identical refusal against a binding no operator action can clear.
+  const second = await runNextStage(REVIEW, h.deps);
+  assert.equal(second.status, "refused");
+  assert.equal(h.dispatches("documentation-maintainer").length, 2, "one MORE docs agent — the state moved");
+
+  // And a docs agent that behaves closes the stage, with no operator surgery anywhere.
+  const good = harness();
+  const third = await runNextStage(REVIEW, good.deps);
+  assert.equal(third.status, "advanced", third.message);
+  assert.equal(good.dispatches("documentation-maintainer").length, 1);
+  assert.notEqual(head(), at, "the coordinator authored the docs commit");
+  assert.equal(getReview(REVIEW)?.candidateSha, head());
+  assert.deepEqual(pathsAt("HEAD"), ["docs/concepts.md", "docs/review-docs-stage.md"]);
+  assert.equal(porcelain(), "");
+  assert.equal(pendingDocsDispatch(REVIEW), undefined);
+  assert.notEqual(pending().kind, "docs", "the review walks on");
+});
+
+test("integ FG-655 / RF-2: a docs task still RUNNING is not a dead delivery — re-entry refuses in flight and starts NO second agent", async () => {
+  // A clean tree proves a DEAD delivery left nothing behind. It cannot tell a dead agent from
+  // a LIVE one that has not written yet — and a `running` row is durable and unreaped, so a
+  // CLI killed mid-dispatch leaves one behind permanently.
+  //
+  // RED baseline: classify a non-terminal task as `unreadable` again and the clean-tree probe
+  // below retires the binding and dispatches a SECOND documentation-maintainer into a checkout
+  // the first container may still be writing.
+  const h = harness({ docs: noopDocsAgent, killDocsMidDispatch: true });
+  await parkAt(h.deps, "docs");
+  const at = getReview(REVIEW)?.candidateSha as string;
+
+  await assert.rejects(() => runNextStage(REVIEW, h.deps), /killed mid-dispatch/);
+  const binding = pendingDocsDispatch(REVIEW);
+  assert.notEqual(binding, undefined, "the dispatch is bound before anything can start a container");
+  assert.equal(getTask(binding?.taskId as string)?.status, "running", "and its task row stays `running` — nothing reaps it");
+  assert.equal(porcelain(), "", "the tree is CLEAN, which is exactly what used to authorise retiring it");
+
+  const resumed = harness({ docs: noopDocsAgent });
+  const out = await runNextStage(REVIEW, resumed.deps);
+  assert.equal(out.status, "refused");
+  assert.match(out.message, /docs_dispatch_in_flight/);
+  assert.match(out.message, /forge cancel/, "the remedy names how the operator confirms or clears it");
+  assert.equal(resumed.dispatches("documentation-maintainer").length, 0, "no second agent over a live one");
+  assert.equal(h.dispatches("documentation-maintainer").length, 1, "exactly ONE docs dispatch across the re-entry");
+  assert.equal(pendingDocsDispatch(REVIEW)?.id, binding?.id, "and the live binding was NOT retired");
+  assert.equal(docsRecord(), undefined);
+  assert.equal(getReview(REVIEW)?.candidateSha, at);
   assert.equal(head(), at);
+  assert.equal(pending().kind, "docs");
+
+  // Once the operator clears it — `forge cancel <task>` marks it failed — it becomes a DEAD
+  // delivery, and the clean-tree arm retires it and runs ONE more docs agent. The in-flight
+  // refusal is a stop, not a gravestone.
+  markTaskFailed(binding?.taskId as string, "forge cancel: the container was gone");
+  const after = await runNextStage(REVIEW, resumed.deps);
+  assert.equal(after.status, "advanced", after.message);
+  assert.equal(resumed.dispatches("documentation-maintainer").length, 1, "exactly one more, and only after the operator cleared it");
+  assert.equal(pendingDocsDispatch(REVIEW), undefined);
+});
+
+test("integ FG-655 / RF-3: a docs result that OMITS docs_updated is a contract violation, never a no-op declaration", async () => {
+  // `docs_updated: []` is the agent's positive claim that it changed nothing (AC2 above, which
+  // ADVANCES). An absent field is nobody being able to tell what the agent claims — the
+  // documentation-maintainer contract requires it — so it fails closed by name instead.
+  const h = harness({ docs: () => ({ status: "complete" }) });
+  await parkAt(h.deps, "docs");
+  const at = getReview(REVIEW)?.candidateSha as string;
+
+  const out = await runNextStage(REVIEW, h.deps);
+  assert.equal(out.status, "refused");
+  assert.match(out.message, /no docs_updated/);
+  assert.match(out.message, /requires the field/, "the refusal says WHICH contract was violated");
+  assert.equal(head(), at, "nothing is committed against a declaration nobody can read");
   assertRefusedCleanly(h, at);
+
+  // And it terminates: the delivery is unreadable over a clean tree, so the next pass retires
+  // the dead dispatch and runs ONE more docs agent, exactly as a crashed container does.
+  const resumed = harness();
+  const after = await runNextStage(REVIEW, resumed.deps);
+  assert.equal(after.status, "advanced", after.message);
+  assert.equal(resumed.dispatches("documentation-maintainer").length, 1);
+  assert.deepEqual(pathsAt("HEAD"), ["docs/concepts.md", "docs/review-docs-stage.md"]);
 });
 
 test("integ FG-655: a docs agent that COMMITS its own work refuses candidate_not_checked_out and its commit is left alone", async () => {

@@ -480,6 +480,11 @@ function scriptedGit(script: {
   parent?: (sha: string) => string;
   /** The paths `diff-tree` reports. Default: the paths `status` reported. */
   paths?: string[];
+  /** Paths `git add` cannot MATCH — a staged rename's original, or a path git never knew. */
+  unaddable?: string[];
+  /** Paths `git diff --cached` reports as already fully staged, which is the ONLY excuse the
+   *  committer accepts for an add that matched nothing. */
+  staged?: string[];
 }) {
   const calls: string[][] = [];
   let committed = false;
@@ -505,6 +510,14 @@ function scriptedGit(script: {
     calls.push(args);
     if (script.failOn !== undefined && args[0] === script.failOn) {
       throw new Error(`git ${args[0]} exited 1: nothing to commit`);
+    }
+    if (args[0] === "add") {
+      const unmatched = (script.unaddable ?? []).find((p) => args.includes(`:/${p}`));
+      if (unmatched !== undefined) throw new Error(`fatal: pathspec ':/${unmatched}' did not match any files`);
+    }
+    if (args[0] === "diff") {
+      const probed = (args[args.length - 1] as string).replace(/^:\//, "");
+      return (script.staged ?? []).includes(probed) ? `${probed}\0` : "";
     }
     if (args[0] === "commit") {
       authoredSubject = args[2];
@@ -636,6 +649,45 @@ test("FG-649: the porcelain reader survives a path with a space and stages both 
     ":/src/new.ts",
     ":/src/old.ts",
   ]);
+});
+
+test("FG-655/RF-5: a STAGED rename's original is unaddable but already in the index — staged, not refused", async () => {
+  // `git mv` leaves the rename staged, so the original is gone from the worktree AND the index
+  // and `git add -- :/src/old.ts` matches nothing anywhere — which failed the whole batch, and
+  // with it a cycle whose commit would have carried the rename whole off the index.
+  const { git, calls } = scriptedGit({
+    status: "M  src/a.ts\0R  src/new.ts\0src/old.ts\0",
+    unaddable: ["src/old.ts"],
+    staged: ["src/old.ts"],
+  });
+  const ctx = commitCtx(["src/a.ts", "src/new.ts", "src/old.ts"]);
+  const commit = await commitDeps(git).commitFixCycle(ctx);
+
+  assert.equal(commit.kind, "committed", commit.kind === "refused" ? commit.detail : "");
+  const adds = calls.filter((c) => c[0] === "add");
+  assert.deepEqual(adds[0], ["add", "--", ":/src/a.ts", ":/src/new.ts", ":/src/old.ts"], "the batch add is still tried first");
+  assert.deepEqual(adds.slice(1).map((c) => c[2]), [":/src/a.ts", ":/src/new.ts", ":/src/old.ts"], "then each path on its own");
+  assert.deepEqual(
+    calls.find((c) => c[0] === "commit"),
+    ["commit", "-m", subjectFor(ctx.batch), "--", ":/src/a.ts", ":/src/new.ts", ":/src/old.ts"],
+    "the ORIGINAL stays in the commit pathspecs — dropping it would leave the deletion behind",
+  );
+});
+
+test("FG-655/RF-5: an add that fails for a path the index does NOT hold is still a NAMED refusal", async () => {
+  // The tolerance is not silence: the index probe is what separates "already staged" from
+  // "git has never heard of this path", and only the first is excused.
+  const { git, calls } = scriptedGit({
+    status: "M  src/a.ts\0?? src/ghost.ts\0",
+    unaddable: ["src/ghost.ts"],
+    staged: [],
+  });
+  const commit = await commitDeps(git).commitFixCycle(commitCtx(["src/a.ts", "src/ghost.ts"]));
+
+  assert.equal(commit.kind, "refused");
+  assert.equal(commit.kind === "refused" ? commit.reason : "", "fix_cycle_commit_failed");
+  assert.match(commit.kind === "refused" ? commit.detail : "", /src\/ghost\.ts/);
+  assert.equal(calls.some((c) => c[0] === "commit"), false, "nothing was committed");
 });
 
 // ─── FG-649 RF-2: recovering the commit the coordinator itself authored ─────
@@ -956,10 +1008,38 @@ test("FG-655: an undeclared-path refusal caps the list it names with a +N more",
   assert.match(commit.kind === "refused" ? commit.detail : "", /declared: nothing/);
 });
 
-test("FG-655: a DECLARATION against a clean tree refuses, and names the soft reset that recovers it", async () => {
+test("FG-655 RF-1: a DECLARATION against a clean tree refuses, authorises the retire, and names NO no-op remedy", async () => {
+  // The soft reset the sibling refusals name is a no-op HERE — this branch is only reached
+  // with HEAD already at the candidate and the tree clean — and the declaration is immutable,
+  // so "correct the declaration" names nothing either. Both would have made the refusal
+  // terminal, which is why the remedy is the caller's retire instead.
   const commit = await docsDeps(scriptedGit({ status: "" }).git).commitDocsCycle(docsCtx(["docs/concepts.md"]));
   assert.equal(commit.kind === "refused" ? commit.reason : "", "docs_cycle_declared_changes_absent");
-  assert.match(commit.kind === "refused" ? commit.detail : "", /git reset --soft cand111/);
+  assert.equal(
+    commit.kind === "refused" ? commit.treeCleanAtCandidate : undefined,
+    true,
+    "the clean tree at the candidate is what authorises retiring the spent binding",
+  );
+  assert.doesNotMatch(
+    commit.kind === "refused" ? commit.detail : "",
+    /git reset --soft/,
+    "a remedy that is a no-op in the branch that prints it is worse than no remedy",
+  );
+  assert.doesNotMatch(commit.kind === "refused" ? commit.detail : "", /correct the declaration/);
+});
+
+test("FG-655 RF-1: every refusal that CANNOT prove a clean tree at the candidate withholds the retire authorisation", async () => {
+  // The safety argument rests specifically on the tree being clean AT the candidate. A dirty
+  // tree may hold that agent's stranded work, and a foreign head says nothing about it at all
+  // — retiring on either would authorise a second docs agent over work nobody can attribute.
+  const ctx = docsCtx(["docs/concepts.md"]);
+  const dirty = await docsDeps(scriptedGit({ status: "?? src/sneaky.ts\0" }).git).commitDocsCycle(ctx);
+  assert.equal(dirty.kind === "refused" ? dirty.reason : "", "docs_cycle_tree_dirty_outside_declared_scope");
+  assert.equal(dirty.kind === "refused" ? dirty.treeCleanAtCandidate : undefined, undefined);
+
+  const foreign = await docsDeps(scriptedGit({ status: "", preHead: "someoneelse9" }).git).commitDocsCycle(ctx);
+  assert.equal(foreign.kind === "refused" ? foreign.reason : "", "candidate_not_checked_out");
+  assert.equal(foreign.kind === "refused" ? foreign.treeCleanAtCandidate : undefined, undefined);
 });
 
 test("FG-655: a declaration that reaches beyond the tree commits what moved and NAMES what did not", async () => {
