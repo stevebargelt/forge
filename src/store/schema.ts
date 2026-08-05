@@ -1045,6 +1045,73 @@ CREATE INDEX IF NOT EXISTS idx_queue_events_ticket
 CREATE INDEX IF NOT EXISTS idx_queue_events_project
   ON queue_events(project_key, id);
 
+-- FG-610 (FG-496 Slice E): the durable CLAIM / LEASE / RECOVERY ledger. ONE more
+-- brand-new table arriving whole via CREATE TABLE IF NOT EXISTS on the ordinary
+-- open path — the same additive-only BD-15 contract as every table above.
+-- user_version is NOT bumped, so an older forge binary sharing ~/.forge/forge.db
+-- opens this store and is never broken by the table's existence.
+--
+-- WHAT A ROW IS. A claim is a durable SCHEDULING RESERVATION over a queue entry:
+-- "this owner intends to execute this ticket, and holds the right to until its
+-- lease lapses". It is NOT execution evidence and NOT a ticket lifecycle status.
+-- blocked and in_progress remain COMPUTED (see queue.ts) and are still never
+-- stored; a release outcome describes the RESERVATION, never the work.
+--
+-- NO CHECK ON outcome, deliberately. FG-591 (the dispatcher) owns the release
+-- vocabulary, and SQLite cannot WIDEN a CHECK on an additive-only path — the
+-- constraint would have to be rebuilt, which this contract forbids. runs.status and
+-- campaign_controller_leases.owner are the precedent for free TEXT here.
+-- fix_batches.state is NOT the precedent: its vocabulary shipped complete in its own
+-- ticket. state DOES carry no CHECK for the same reason plus one more — it is
+-- named by the partial index below, and an aged binary must never fight it.
+--
+-- NO FOREIGN KEY to tickets or queue_membership, deliberately — queue_events'
+-- precedent. An operator dequeue, an unrank, or FG-608 removal reconciliation must
+-- never CASCADE-delete the recovery record for a container that is still executing.
+-- Losing that row is how a takeover finds an empty slot and launches a duplicate.
+--
+-- THE LEASE. lease_expires_at_ms / heartbeat_at_ms are epoch ms on the STORE's own
+-- clock (storeNowMs, publications.ts), never a process clock — two forge processes
+-- with skewed clocks must not disagree about expiry. generation is the fencing
+-- token: a takeover inserts a SUCCESSOR row with generation+1 and RETIRES its
+-- predecessor (state='released'), so a stale owner can never heartbeat, stamp a
+-- launch, or release after being taken over, and the takeover history survives.
+--
+-- launch_id / run_id are the born-under launch linkage, stamped BEFORE the physical
+-- launch (campaign_item_launches' precedent) so recovery discovers a prior launch
+-- DIRECTLY rather than by parsing names, argv or timestamps.
+CREATE TABLE IF NOT EXISTS queue_claims (
+  id                  TEXT PRIMARY KEY,
+  project_key         TEXT NOT NULL,
+  ticket_id           TEXT NOT NULL,
+  owner               TEXT NOT NULL,
+  generation          INTEGER NOT NULL,
+  ticket_revision     INTEGER NOT NULL,
+  lease_expires_at_ms INTEGER NOT NULL,
+  heartbeat_at_ms     INTEGER NOT NULL,
+  launch_id           TEXT,
+  run_id              TEXT,
+  state               TEXT NOT NULL,
+  outcome             TEXT,
+  scan_evidence       TEXT,
+  claimed_at          TEXT NOT NULL,
+  released_at         TEXT
+);
+-- AT MOST ONE LIVE CLAIM PER TICKET, enforced by the STORE rather than by call-site
+-- ordering. Two processes that both read "no live claim" and both insert cannot both
+-- win: the second INSERT is rejected by this index even if a code path ever forgets
+-- its transaction. idx_review_docs_dispatches_live is the precedent. Partial over the
+-- LIVE state because released rows are history and there are many per ticket.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_claims_live
+  ON queue_claims(project_key, ticket_id) WHERE state = 'live';
+-- The capacity count's index. BOTH indexes are on this BRAND-NEW table only: it is
+-- born whole from the CREATE above and never travels the ALTER path, so indexing it
+-- cannot pin an ALTER-restorable column undroppable and the FG-608 parity guard's
+-- UNDROPPABLE set does not grow. Every column named here (project_key, ticket_id,
+-- state) is NOT NULL with NO DEFAULT, so ADD COLUMN could not restore it anyway.
+CREATE INDEX IF NOT EXISTS idx_queue_claims_scope
+  ON queue_claims(project_key, state);
+
 -- FG-679 (BD-12): the durable record of what was OBSERVED about a forge launch,
 -- so a read-only reader (the dashboard, forge status) can answer "is host
 -- verification running?" WITHOUT probing tmux. Before this table a launch's status
@@ -1440,4 +1507,23 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   { table: "readiness_assessments", column: "revision", ddl: "ALTER TABLE readiness_assessments ADD COLUMN revision INTEGER" },
 
   { table: "queue_events", column: "payload", ddl: "ALTER TABLE queue_events ADD COLUMN payload TEXT" },
+
+  // FG-610 (Slice E): queue_claims. Brand-new, so a real old DB gets it whole from
+  // CREATE TABLE IF NOT EXISTS and none of these ALTERs ever fires there. They are
+  // declared anyway for the SAME reason FG-609's, FG-655's and FG-679's brand-new
+  // tables are: the additive-only invariant is only CHECKABLE if this list is
+  // EXHAUSTIVE, and fg608-migration-parity.test.ts enforces exhaustiveness by
+  // stripping a fresh DB to the oldest shape SQLite permits and demanding parity. A
+  // restorable column with no entry here fails that test — that is the mechanism
+  // that would have caught tickets.imported_from.
+  //
+  // Only the RESTORABLE columns appear. id is the primary key, and project_key,
+  // ticket_id, owner, generation, ticket_revision, lease_expires_at_ms,
+  // heartbeat_at_ms, state and claimed_at are NOT NULL with NO DEFAULT, so ADD
+  // COLUMN could never put any of them back and listing them would be a lie.
+  { table: "queue_claims", column: "launch_id", ddl: "ALTER TABLE queue_claims ADD COLUMN launch_id TEXT" },
+  { table: "queue_claims", column: "run_id", ddl: "ALTER TABLE queue_claims ADD COLUMN run_id TEXT" },
+  { table: "queue_claims", column: "outcome", ddl: "ALTER TABLE queue_claims ADD COLUMN outcome TEXT" },
+  { table: "queue_claims", column: "scan_evidence", ddl: "ALTER TABLE queue_claims ADD COLUMN scan_evidence TEXT" },
+  { table: "queue_claims", column: "released_at", ddl: "ALTER TABLE queue_claims ADD COLUMN released_at TEXT" },
 ];
