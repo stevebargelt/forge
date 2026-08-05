@@ -56,6 +56,11 @@ export type VerificationState = {
   /** Every required check actually executed rather than skipped. */
   executedRequiredChecks: boolean;
   detail: string;
+  /** FG-655 AC4: set when the ENVIRONMENT could not run verification at the candidate
+   *  at all — the same refusal shape Stage 1/7's `VerificationEntry` carries. Stage 9 reads it
+   *  BEFORE it assesses anything, so a dirty workspace stops the review as `blocked_environment`
+   *  rather than arriving here as an ordinary not-green check 1. */
+  environmentRefusal?: { reason: string; message: string };
 };
 
 /** Continuity of the identity chain around the candidate. Supplied by the caller from the

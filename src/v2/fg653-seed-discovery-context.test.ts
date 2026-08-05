@@ -25,7 +25,13 @@ import { fileURLToPath } from "node:url";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
-import { findingsForReview, getReview, insertReview } from "../store/reviews.js";
+import {
+  findingsForReview,
+  getReview,
+  insertReview,
+  markDocsDispatchDelivered,
+  openDocsDispatch,
+} from "../store/reviews.js";
 import { RISK_LENSES, lensRole } from "./review-contract.js";
 import { runNextStage, type CoordinatorDeps } from "./review-run.js";
 import { gradeFindings } from "./review-quality.js";
@@ -303,6 +309,15 @@ function seedCompliantResult(lens: string, over: Record<string, unknown>): unkno
   };
 }
 
+/** FG-655: the durable docs-dispatch binding a stubbed `dispatchDocs` must create, exactly as
+ *  the real wiring does — the row exists before the dispatch, and the host-minted task
+ *  identity is written onto it. The re-entry short-circuit reads this row, so a stub that
+ *  returned a binding the store does not hold would be a stub that cannot be re-entered. */
+function docsBinding(reviewId: string, candidateSha: string, taskId = "task-docs-1") {
+  const opened = openDocsDispatch(reviewId, candidateSha);
+  return markDocsDispatchDelivered(opened.id, { taskId });
+}
+
 function harness(opts: { findingOver?: Record<string, unknown> } = {}): { deps: CoordinatorDeps; calls: string[] } {
   const calls: string[] = [];
   const deps: CoordinatorDeps = {
@@ -324,7 +339,12 @@ function harness(opts: { findingOver?: Record<string, unknown> } = {}): { deps: 
     materializeFixBatch: (ctx) => ctx.payload,
     dispatchFixer: () => ({ ok: false, taskId: "", error: "not reached" }),
     commitFixCycle: () => ({ kind: "no_change", sha: CANDIDATE }),
-    dispatchDocs: () => ({ ok: true }),
+    // FG-655: a durably-bound docs dispatch whose agent declares nothing against a clean
+    // tree — the legitimate no-op. This suite never reaches Stage 6, but the seams are
+    // required members, so a stub that lied about them would be worse than none.
+    dispatchDocs: ({ review, candidateSha }) => ({ ok: true, binding: docsBinding(review.id, candidateSha) }),
+    docsDelivery: ({ binding }) => ({ kind: "delivered", taskId: binding.taskId ?? "task-docs", docsUpdated: [] }),
+    commitDocsCycle: () => ({ kind: "no_change", sha: CANDIDATE }),
     dispatchRechecker: () => ({ ok: false, error: "not reached" }),
     shippingInput: () => {
       throw new Error("the shipping stage is not reached by this suite");

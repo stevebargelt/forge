@@ -63,7 +63,9 @@ export function lensForRole(role: string): RiskLens | undefined {
 export const REVIEW_DISPATCH_ROLES = {
   /** review-wiring.ts dispatchFixer — the fix-batch remediation dispatch. */
   fixBatch: "engineer",
-  /** review-wiring.ts dispatchDocs — the docs reconciliation phase. */
+  /** review-wiring.ts dispatchDocs — the docs reconciliation phase. Since FG-655 that
+   *  dispatch is bound to a durable row BEFORE it can start a container, and the coordinator
+   *  — not this agent — commits what the agent DECLARES in `docs_updated`. */
   docs: "documentation-maintainer",
   /** review-wiring.ts dispatchRechecker — the evidence recheck. */
   recheck: "review-rechecker",

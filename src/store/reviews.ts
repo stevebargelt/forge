@@ -24,6 +24,7 @@
 //   - it does not drive the lifecycle. Change 1 persists states and emits an event
 //     per transition; the stage machine is FG-639's.
 
+import { randomBytes } from "node:crypto";
 import { getDb, writeTransaction } from "./db.js";
 import { getRun } from "./runs.js";
 import { logEvent } from "./events.js";
@@ -1480,6 +1481,141 @@ export function clearFixCycleResolutions(
   });
 
   return stale.map((f) => f.id);
+}
+
+// ─── FG-655: the docs stage's durable dispatch binding ──────────────────────
+
+/** ONE docs dispatch, bound to the review and the candidate it was dispatched FOR.
+ *
+ *  The coordinator does not mint task identity — the host does (src/v2/invoke.ts). This row
+ *  is the coordinator's BINDING to that identity, created before the dispatch and completed
+ *  from invoke's mint-time hook, which runs after the task row is durable and before
+ *  anything can start a container. That ordering is the whole point: a binding written
+ *  after the dispatch returns cannot survive a crash during it, and the crash is exactly the
+ *  case a second documentation-maintainer must not be dispatched for.
+ *
+ *  `taskId`/`runId` are BOTH how the delivery is located: the task result lives under the
+ *  run's task dir, and a review may hold no run id at dispatch time. */
+export type DocsDispatch = {
+  id: string;
+  reviewId: string;
+  candidateSha: string;
+  state: "open" | "dispatched" | "retired";
+  taskId?: string;
+  runId?: string;
+  createdAt: string;
+  retiredAt?: string;
+  retiredReason?: string;
+};
+
+type DocsDispatchRow = {
+  id: string;
+  review_id: string;
+  candidate_sha: string;
+  state: string;
+  dispatch_task_id: string | null;
+  dispatch_run_id: string | null;
+  created_at: string;
+  retired_at: string | null;
+  retired_reason: string | null;
+};
+
+function rowToDocsDispatch(row: DocsDispatchRow): DocsDispatch {
+  return {
+    id: row.id,
+    reviewId: row.review_id,
+    candidateSha: row.candidate_sha,
+    state: row.state as DocsDispatch["state"],
+    ...(row.dispatch_task_id ? { taskId: row.dispatch_task_id } : {}),
+    ...(row.dispatch_run_id ? { runId: row.dispatch_run_id } : {}),
+    createdAt: row.created_at,
+    ...(row.retired_at ? { retiredAt: row.retired_at } : {}),
+    ...(row.retired_reason ? { retiredReason: row.retired_reason } : {}),
+  };
+}
+
+export function getDocsDispatch(id: string): DocsDispatch | undefined {
+  const row = getDb().prepare(`SELECT * FROM review_docs_dispatches WHERE id = ?`).get(id) as DocsDispatchRow | undefined;
+  return row ? rowToDocsDispatch(row) : undefined;
+}
+
+/** THE LIVE BINDING FOR THIS REVIEW, or undefined. Deliberately keyed on the REVIEW rather
+ *  than on (review, candidate): the candidate moves out from under a binding in the crash
+ *  window between the candidate advance and the stage record, and a per-candidate read there
+ *  would find nothing and dispatch a second docs agent over the coordinator's own commit.
+ *  The row carries the candidate it was dispatched for, so the caller can still see the
+ *  difference rather than having it hidden by the lookup. */
+export function pendingDocsDispatch(reviewId: string): DocsDispatch | undefined {
+  const row = getDb()
+    .prepare(
+      `SELECT * FROM review_docs_dispatches WHERE review_id = ? AND state != 'retired'
+       ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    )
+    .get(reviewId) as DocsDispatchRow | undefined;
+  return row ? rowToDocsDispatch(row) : undefined;
+}
+
+/** CREATE BEFORE DISPATCH. Returns the live binding if one already exists — the caller's
+ *  re-entry short-circuit is what normally prevents a second one, and this makes a caller
+ *  that reached here twice idempotent rather than the owner of two bindings. */
+export function openDocsDispatch(reviewId: string, candidateSha: string): DocsDispatch {
+  const live = pendingDocsDispatch(reviewId);
+  if (live !== undefined) return live;
+  const review = getReview(reviewId);
+  if (!review) throw new Error(`forge: no review ${reviewId}`);
+  const id = `docs-dispatch-${randomBytes(3).toString("hex")}${randomBytes(3).toString("hex")}`;
+  const at = nowIso();
+  // No bespoke event type: the dispatch's own `task.created` is already on the timeline, and
+  // the completed stage record names this binding id beside that task id — so the audit
+  // trail is a join over facts that exist rather than a fourth restatement of them.
+  // FG-655 RF-4: the read above and this insert are not one atomic step, so the DB holds the
+  // invariant — idx_review_docs_dispatches_live is UNIQUE over the live rows of a review. A
+  // concurrent process that won the race makes this throw, and the loser refuses HERE, before
+  // it can start a container. Returning the winner's binding instead would be worse than the
+  // race: the loser would dispatch a second maintainer onto it and overwrite its task id.
+  try {
+    getDb()
+      .prepare(
+        `INSERT INTO review_docs_dispatches (id, review_id, candidate_sha, state, dispatch_task_id, dispatch_run_id,
+                                             created_at, retired_at, retired_reason)
+         VALUES (?, ?, ?, 'open', NULL, NULL, ?, NULL, NULL)`,
+      )
+      .run(id, reviewId, candidateSha, at);
+  } catch (err) {
+    const raced = pendingDocsDispatch(reviewId);
+    if (raced !== undefined) {
+      throw new Error(
+        `forge: review ${reviewId} already has a live docs dispatch ${raced.id} — a concurrent ` +
+          `\`forge review continue\` opened it, so this pass starts NO second documentation-maintainer`,
+      );
+    }
+    throw err;
+  }
+  return getDocsDispatch(id) as DocsDispatch;
+}
+
+/** Bind the HOST-MINTED identity. Called from invoke's mint-time hook, i.e. after the task
+ *  row and its `task.created` event are durable and before any container write. */
+export function markDocsDispatchDelivered(id: string, identity: { taskId: string; runId?: string }): DocsDispatch {
+  const binding = getDocsDispatch(id);
+  if (!binding) throw new Error(`forge: no docs dispatch ${id}`);
+  const review = getReview(binding.reviewId);
+  getDb()
+    .prepare(`UPDATE review_docs_dispatches SET state = 'dispatched', dispatch_task_id = ?, dispatch_run_id = ? WHERE id = ?`)
+    .run(identity.taskId, identity.runId ?? review?.runId ?? null, id);
+  return getDocsDispatch(id) as DocsDispatch;
+}
+
+/** SPENT, not refused. A binding is retired when Stage 6 has completed, or when a clean tree
+ *  at the candidate proves an unreadable delivery left nothing behind. A refusal retires
+ *  nothing — that is what keeps "re-entry dispatches no second docs agent" true. */
+export function retireDocsDispatch(id: string, reason: string): DocsDispatch {
+  const binding = getDocsDispatch(id);
+  if (!binding) throw new Error(`forge: no docs dispatch ${id}`);
+  getDb()
+    .prepare(`UPDATE review_docs_dispatches SET state = 'retired', retired_at = ?, retired_reason = ? WHERE id = ?`)
+    .run(nowIso(), reason, id);
+  return getDocsDispatch(id) as DocsDispatch;
 }
 
 // ─── read-surface projection ────────────────────────────────────────────────

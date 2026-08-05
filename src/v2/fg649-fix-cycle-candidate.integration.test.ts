@@ -39,6 +39,7 @@ import { join } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
+import { insertTask, markTaskComplete } from "../store/tasks.js";
 import {
   findingsForReview,
   getReview,
@@ -165,7 +166,9 @@ function editingFixer(payload: FixPayload): unknown {
   };
 }
 
-function harness(over: { fixer?: FixerBehaviour; verdict?: RecheckVerdict; deps?: Partial<CoordinatorDeps> } = {}): Harness {
+function harness(
+  over: { fixer?: FixerBehaviour; verdict?: RecheckVerdict; deps?: Partial<CoordinatorDeps>; statusExtraPath?: string } = {},
+): Harness {
   const calls: InvokeArgs[] = [];
   const fixer = over.fixer ?? editingFixer;
   const verdict = over.verdict ?? (() => "resolved" as const);
@@ -200,10 +203,35 @@ function harness(over: { fixer?: FixerBehaviour; verdict?: RecheckVerdict; deps?
         return done(fixer(JSON.parse(raw) as FixPayload));
       }
 
-      case "documentation-maintainer":
-        // Reconciles nothing in this fixture, and — like the real docs phase when there is
-        // nothing to write — leaves the worktree alone.
-        return done({});
+      case "documentation-maintainer": {
+        // FG-655: Stage 6 binds its dispatch to the HOST-MINTED identity at mint time, and
+        // reads the agent's own `docs_updated` declaration off the DURABLE task record — so
+        // the stub honours both halves of the invoke contract it stands in for. Reconciles
+        // nothing in this fixture and, like the real docs phase when there is nothing to
+        // write, leaves the worktree alone: an empty declaration against a clean tree is the
+        // legitimate no-op, so the candidate correctly does not move.
+        args.onTaskMinted?.({ runId: RUN_ID, taskId });
+        insertTask({
+          id: taskId,
+          runId: RUN_ID,
+          phase: "task",
+          agentRole: args.agentRole,
+          status: "pending",
+          taskPackage: {
+            taskId,
+            runId: RUN_ID,
+            phase: "task",
+            role: args.agentRole,
+            inputs: { task: args.task },
+            composedSystemPrompt: "(stubbed container)",
+          },
+          createdAt: RUN.createdAt,
+        });
+        // The declaration is EXPLICIT: an absent `docs_updated` is a contract violation the
+        // coordinator refuses by name, not a claim that nothing changed (FG-655 RF-3).
+        markTaskComplete(taskId, { docs_updated: [] });
+        return done({ docs_updated: [] });
+      }
 
       case "review-rechecker": {
         // The candidate the stub answers under is THE ONE THE PROMPT NAMED, not one it looked
@@ -237,11 +265,23 @@ function harness(over: { fixer?: FixerBehaviour; verdict?: RecheckVerdict; deps?
     }
   };
 
+  // The coordinator only accepts moved paths from porcelain, so this is the narrow seam that
+  // lets the real `git add` path exercise an unknown declaration. The staging command and its
+  // cached-index proof remain real git: only the status observation carries the impossible
+  // path, matching the docs-cycle boundary fixture.
+  const gitSeam = (args: string[]): string => {
+    const result = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(result.stderr || `git ${args.join(" ")} failed`);
+    const out = result.stdout;
+    return over.statusExtraPath !== undefined && args[0] === "status" ? `${out}?? ${over.statusExtraPath}\0` : out;
+  };
+
   const wiring = buildCoordinatorDeps({
     projectDir: repo,
     ticketId: TICKET,
     runId: RUN_ID,
     invokeFn,
+    git: gitSeam,
     evaluatedNoDrift: "the implementation diff touches src/reconcile.ts only; the backend lens already covers it",
   });
 
@@ -565,6 +605,41 @@ test("integ FG-649: a tree that moved OUTSIDE the declared set refuses by name a
   assert.equal(getReview(REVIEW)?.stageEvidence?.fix, undefined);
   assert.equal(staged(), "", "forge staged NOTHING — an undeclared change is never swept in");
   assert.match(porcelain(), /sneaky\.ts/, "and the undeclared change is left exactly where it was");
+});
+
+test("integ FG-655: the fix-cycle staging helper refuses a path git genuinely cannot know", async () => {
+  const unknown = "src/never-existed.ts";
+  const h = harness({
+    statusExtraPath: unknown,
+    fixer: (payload) => {
+      appendFileSync(join(repo, "src", "reconcile.ts"), `\n${GUARD}\n`);
+      return {
+        fix_batch_id: payload.fix_batch_id,
+        revision: payload.revision,
+        findings: payload.findings.map((f) => ({
+          finding_id: f.finding_id,
+          result: "fixed",
+          remediation_summary: "guarded the partial write",
+          files_changed: ["src/reconcile.ts", unknown],
+          evidence: EXECUTED,
+        })),
+      };
+    },
+  });
+  await parkAt(h.deps, "batch_fix");
+  const preFix = getReview(REVIEW)?.candidateSha as string;
+
+  const out = await runNextStage(REVIEW, h.deps);
+
+  // `stageDeclaredPaths` may excuse the source side of a staged rename because the index
+  // proves it already differs from HEAD. It must not excuse an entirely unknown path: the
+  // per-path add fails and the cached-index probe is empty, so the named refusal survives.
+  assert.equal(out.status, "refused", out.message);
+  assert.match(out.message, /fix_cycle_commit_failed/);
+  assert.match(out.message, /never-existed\.ts/);
+  assert.equal(head(), preFix, "the failed staging batch authored no partial commit");
+  assert.equal(getReview(REVIEW)?.stageEvidence?.fix, undefined);
+  assert.equal(h.dispatches("engineer").length, 1, "the failed helper did not silently consume the delivery");
 });
 
 test("integ FG-649 / RF-7: a refused raced commit is STILL refused on the next continue, not adopted by the recovery arm", async () => {

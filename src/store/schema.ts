@@ -918,6 +918,47 @@ CREATE TABLE IF NOT EXISTS fix_batch_results (
   PRIMARY KEY (batch_id, task_id, finding_id)
 );
 
+-- FG-655: the docs stage's DURABLE DISPATCH BINDING. One more brand-new table on the
+-- additive-only open path; user_version untouched.
+--
+-- Stage 6 authors a git commit — an irreversible external write — and the ledger writes
+-- that record it (candidate advance, stage record) are separate SQLite transactions after
+-- it. The only thing that makes a crash in that window recoverable is being able to say,
+-- from durable state alone, "a docs agent was ALREADY dispatched for this review". Without
+-- that fact the re-entry runs a second documentation-maintainer over its own committed
+-- output. state and dispatch_task_id are the two columns that matter for re-entry, exactly
+-- as they are for fix_batches above.
+--
+-- dispatch_run_id rides beside dispatch_task_id because the delivery is located by BOTH: a
+-- review may hold no run id at dispatch time, and a task id alone cannot find the task dir.
+--
+-- The row is created BEFORE the dispatch and marked delivered from invoke's mint-time hook,
+-- so no container write can precede the binding. It is retired only when the stage
+-- COMPLETES, or when a clean tree at the candidate proves a dead delivery left nothing
+-- behind. A refusal retires nothing.
+CREATE TABLE IF NOT EXISTS review_docs_dispatches (
+  id               TEXT PRIMARY KEY,
+  review_id        TEXT NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
+  candidate_sha    TEXT NOT NULL,
+  state            TEXT NOT NULL DEFAULT 'open'
+                     CHECK (state IN ('open', 'dispatched', 'retired')),
+  dispatch_task_id TEXT,
+  dispatch_run_id  TEXT,
+  created_at       TEXT NOT NULL,
+  retired_at       TEXT,
+  retired_reason   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_review_docs_dispatches_review ON review_docs_dispatches(review_id);
+-- FG-655 RF-4: AT MOST ONE LIVE BINDING PER REVIEW, enforced by the store rather than by
+-- call-site ordering. openDocsDispatch reads for a live binding and then inserts, and two
+-- concurrent "forge review continue" processes can both read nothing and both insert — each
+-- then dispatching a documentation-maintainer into the same checkout. Partial over the LIVE
+-- state (retired rows are history and there are many of them per review), matching
+-- idx_continuations_dispatch_key's precedent. Additive-only open path: the table is FG-655's
+-- own, so no aged database carries rows this could reject, and user_version is untouched.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_review_docs_dispatches_live
+  ON review_docs_dispatches(review_id) WHERE state != 'retired';
+
 -- FG-609 (FG-496 Slice D): the durable OPERATOR QUEUE primitives. Three brand-new
 -- tables arriving whole via CREATE TABLE IF NOT EXISTS on the ordinary open path —
 -- the same additive-only BD-15 contract as every table above. user_version is NOT
@@ -1365,6 +1406,23 @@ export const ADDITIVE_COLUMNS: AdditiveColumn[] = [
   { table: "fix_batch_results", column: "interaction", ddl: "ALTER TABLE fix_batch_results ADD COLUMN interaction TEXT" },
   { table: "fix_batch_results", column: "evidence_path", ddl: "ALTER TABLE fix_batch_results ADD COLUMN evidence_path TEXT" },
   { table: "fix_batch_results", column: "evidence_sha256", ddl: "ALTER TABLE fix_batch_results ADD COLUMN evidence_sha256 TEXT" },
+
+  // FG-655: the docs dispatch binding. Brand-new, so a real old DB gets it whole from the
+  // CREATE above and none of these ever fires there — they exist for the FG-608 parity
+  // guard. id, review_id, candidate_sha and created_at are the primary key and the
+  // NOT-NULL-without-DEFAULT columns, so ADD COLUMN could never restore them and listing
+  // them would be a lie.
+  {
+    table: "review_docs_dispatches",
+    column: "state",
+    ddl:
+      "ALTER TABLE review_docs_dispatches ADD COLUMN state TEXT NOT NULL DEFAULT 'open' " +
+      "CHECK (state IN ('open', 'dispatched', 'retired'))",
+  },
+  { table: "review_docs_dispatches", column: "dispatch_task_id", ddl: "ALTER TABLE review_docs_dispatches ADD COLUMN dispatch_task_id TEXT" },
+  { table: "review_docs_dispatches", column: "dispatch_run_id", ddl: "ALTER TABLE review_docs_dispatches ADD COLUMN dispatch_run_id TEXT" },
+  { table: "review_docs_dispatches", column: "retired_at", ddl: "ALTER TABLE review_docs_dispatches ADD COLUMN retired_at TEXT" },
+  { table: "review_docs_dispatches", column: "retired_reason", ddl: "ALTER TABLE review_docs_dispatches ADD COLUMN retired_reason TEXT" },
 
   // FG-609: the queue tables. All three are brand-new, so a real old DB gets them
   // whole from CREATE TABLE IF NOT EXISTS and none of these ALTERs ever fires

@@ -27,6 +27,8 @@ import {
   insertReview,
   lensAcceptancesOf,
   lensOutcomeRecordsOf,
+  markDocsDispatchDelivered,
+  openDocsDispatch,
   recordAgentProtocol,
   recordLensAcceptance,
   recordDisposition,
@@ -121,13 +123,27 @@ type Harness = {
   /** Set the head the next headSha() returns — simulates a fixer or docs commit. */
   setHead: (sha: string) => void;
   head: () => string;
+  /** FG-655: what the stubbed docs agent DECLARES in `docs_updated`. Empty (the default) is
+   *  the legitimate no-op against a clean tree; non-empty makes the docs cycle commit, and
+   *  the simulated commit lands at whatever `setHead` says. */
+  setDocsDeclared: (paths: string[]) => void;
 };
+
+/** FG-655: the durable docs-dispatch binding a stubbed `dispatchDocs` must create, exactly as
+ *  the real wiring does — the row exists before the dispatch, and the host-minted task
+ *  identity is written onto it. The re-entry short-circuit reads this row, so a stub that
+ *  returned a binding the store does not hold would be a stub that cannot be re-entered. */
+function docsBinding(reviewId: string, candidateSha: string, taskId = "task-docs-1") {
+  const opened = openDocsDispatch(reviewId, candidateSha);
+  return markDocsDispatchDelivered(opened.id, { taskId });
+}
 
 function harness(over: Partial<CoordinatorDeps> & { findingsPerLens?: number; initialHead?: string } = {}): Harness {
   const calls: Calls = { lens: [], fixer: 0, docs: 0, rechecker: 0, verify: 0, commit: 0 };
   // `initialHead` is what a FRESH process sees: the orchestrator that died held the head in
   // a variable, so a resuming process starts from wherever the repository actually is.
   let head = over.initialHead ?? "cand111";
+  let docsDeclared: string[] = [];
   const perLens = over.findingsPerLens ?? 1;
 
   const deps: CoordinatorDeps = {
@@ -184,10 +200,25 @@ function harness(over: Partial<CoordinatorDeps> & { findingsPerLens?: number; in
         ? { kind: "committed", sha: head, committedPaths: [...declaredFiles] }
         : { kind: "no_change", sha: head };
     },
-    dispatchDocs: () => {
+    // FG-655: the docs stage's three seams. `dispatchDocs` binds the dispatch durably before
+    // it returns; `docsDelivery` is the agent's own declaration read back; `commitDocsCycle`
+    // stands in for the git write and returns the sha the "commit" produced. Note what this
+    // tier therefore CANNOT prove — `head` is a closure variable, which is exactly why the
+    // FG-655 defect (a HEAD read that was a guaranteed no-op) survived a suite like this one.
+    // The real-repository evidence is fg655-docs-cycle-candidate.integration.test.ts.
+    dispatchDocs: ({ review, candidateSha }) => {
       calls.docs += 1;
-      return { ok: true };
+      return { ok: true, binding: docsBinding(review.id, candidateSha) };
     },
+    docsDelivery: ({ binding }) => ({
+      kind: "delivered",
+      taskId: binding.taskId ?? "task-docs-1",
+      docsUpdated: [...docsDeclared],
+    }),
+    commitDocsCycle: ({ declaredFiles }) =>
+      declaredFiles.length > 0
+        ? { kind: "committed", sha: head, committedPaths: [...declaredFiles] }
+        : { kind: "no_change", sha: head },
     dispatchRechecker: (ctx) => {
       calls.rechecker += 1;
       return {
@@ -238,7 +269,13 @@ function harness(over: Partial<CoordinatorDeps> & { findingsPerLens?: number; in
     ...over,
   };
 
-  return { deps, calls, setHead: (s) => { head = s; }, head: () => head };
+  return {
+    deps,
+    calls,
+    setHead: (s) => { head = s; },
+    head: () => head,
+    setDocsDeclared: (paths) => { docsDeclared = [...paths]; },
+  };
 }
 
 async function drive(deps: CoordinatorDeps, until: string, max = 12): Promise<string[]> {
@@ -525,7 +562,11 @@ test("FG-639 / PRD #15: resuming twice at the same boundary drives the stage onc
 
 test("FG-639 / PRD #15: re-entering a stage that did NOT complete re-runs it — only completion is recorded", async () => {
   const h = harness({
-    dispatchDocs: () => ({ ok: false, error: "the maintainer container crashed" }),
+    dispatchDocs: ({ review, candidateSha }) => ({
+      ok: false,
+      error: "the maintainer container crashed",
+      binding: docsBinding(review.id, candidateSha),
+    }),
   });
   await drive(h.deps, "discover");
   dispositionAll("deferred", "broader lifecycle scope");
@@ -971,16 +1012,15 @@ test("FG-639 / RF-8: the store-level guard still holds — a scope_change cannot
 // ─── stage order, docs before final verification ────────────────────────────
 
 test("FG-639: docs reconciliation runs BEFORE final verification, and a docs commit re-binds both", async () => {
-  const h = harness({
-    dispatchDocs: () => ({ ok: true }),
-  });
+  const h = harness();
   await drive(h.deps, "discover");
   dispositionAll("deferred", "broader lifecycle scope than this ticket");
 
-  const docs = await runNextStage(
-    REVIEW,
-    { ...h.deps, dispatchDocs: () => { h.setHead("afterdocs3"); return { ok: true }; } },
-  );
+  // FG-655: the docs agent DECLARES a path, so the coordinator commits it and the candidate
+  // advances to the sha that commit produced — never to a bare HEAD read.
+  h.setDocsDeclared(["docs/concepts.md"]);
+  h.setHead("afterdocs3");
+  const docs = await runNextStage(REVIEW, h.deps);
   assert.equal(docs.transition.kind, "docs");
   assert.match(docs.message, /moved the candidate cand111 → afterdocs3/);
   assert.equal(getReview(REVIEW)?.candidateSha, "afterdocs3");
@@ -1037,10 +1077,7 @@ test("FG-639 / PRD #14: a candidate change after recheck invalidates candidate-b
 
   // Anything that advances the candidate goes through advanceCandidate; docs is the
   // in-lifecycle path, so re-run it with a moved head.
-  const docs = await runNextStage(
-    REVIEW,
-    { ...h.deps, dispatchDocs: () => ({ ok: true }) },
-  );
+  const docs = await runNextStage(REVIEW, h.deps);
   assert.equal(docs.transition.kind, "shipping_review", "shipping runs first at the unchanged candidate");
 
   // Now really move it and drive the stage that re-binds the candidate.
@@ -1498,13 +1535,9 @@ test("FG-639: recheck closes the remediation window even when discovery needed n
 
   await drive(h.deps, "discover");
   assert.equal(fixBatchesForReview(REVIEW).length, 0);
-  await runNextStage(REVIEW, {
-    ...h.deps,
-    dispatchDocs: () => {
-      h.setHead("afterdocs-no-fix");
-      return { ok: true };
-    },
-  });
+  h.setDocsDeclared(["docs/concepts.md"]);
+  h.setHead("afterdocs-no-fix");
+  await runNextStage(REVIEW, h.deps);
   await runNextStage(REVIEW, h.deps); // verify_final
   const recheck = await runNextStage(REVIEW, h.deps);
   assert.equal(recheck.transition.kind, "recheck");
@@ -2063,6 +2096,56 @@ test("FG-640: the shipping stage PERSISTS the trusted remote head so the gate ca
   assert.equal(review.trustedRemoteSha, review.candidateSha, "the reviewed tip equals the recorded remote head");
 });
 
+// FG-655 AC4: Stage 9 is the lifecycle's SECOND verification reader, and it bypasses the
+// verify seam entirely. An environment refusal there means verification COULD NOT RUN, which is
+// the same `blocked_environment` stop Stage 1 makes above — not a shipping refusal that
+// consumes a cycle and can send a fixer to remediate an unfit environment.
+test("FG-655 AC4: an environment refusal at the shipping reader STOPS blocked_environment, records nothing", async () => {
+  const base = harness();
+  const h = harness({
+    shippingInput: async (ctx) => ({
+      ...(await base.deps.shippingInput(ctx)),
+      verification: {
+        ok: false,
+        sha: ctx.candidateSha,
+        executedRequiredChecks: false,
+        detail: "workspace_dirty_at_candidate: docs/left-behind.md",
+        environmentRefusal: {
+          reason: "workspace_dirty_at_candidate",
+          message: "the workspace is ON the candidate but carries uncommitted changes — docs/left-behind.md",
+        },
+      },
+    }),
+  });
+  await parkAt(h.deps, "shipping_review");
+  const shipping = await runNextStage(REVIEW, h.deps);
+
+  assert.equal(shipping.status, "stopped", shipping.message);
+  assert.match(shipping.message, /blocked_environment \(workspace_dirty_at_candidate\)/);
+  assert.match(shipping.message, /no review cycle was consumed/);
+  assert.equal(getReview(REVIEW)?.state, "blocked_environment");
+  assert.equal(getReview(REVIEW)?.stageEvidence?.shipping, undefined, "nothing was recorded as shipped");
+  assert.equal(getReview(REVIEW)?.trustedRemoteSha, undefined, "no tip is trusted off a tree nobody could verify");
+  assert.equal(shipping.shipping, undefined, "and no eight-check assessment was computed at all");
+  assert.equal(pending().kind, "shipping_review", "a stop, not a gravestone — Stage 9 re-enters");
+});
+
+test("FG-655 AC4: a verification that RAN and failed is still the ordinary shipping refusal, not a stop", async () => {
+  const base = harness();
+  const h = harness({
+    shippingInput: async (ctx) => ({
+      ...(await base.deps.shippingInput(ctx)),
+      verification: { ok: false, sha: ctx.candidateSha, executedRequiredChecks: true, detail: "unit: FAILED" },
+    }),
+  });
+  await parkAt(h.deps, "shipping_review");
+  const shipping = await runNextStage(REVIEW, h.deps);
+
+  assert.equal(shipping.status, "refused");
+  assert.match(shipping.message, /verification_green: deterministic verification is not green/);
+  assert.notEqual(getReview(REVIEW)?.state, "blocked_environment", "the WORK failed review — the environment was fit");
+});
+
 test("FG-640: an UNTRUSTED tip records no remote head — the column never carries a head the review did not match", async () => {
   const base = harness();
   const h = harness({
@@ -2189,8 +2272,9 @@ test("FG-654: the docs and recheck dispatches record their protocol generation t
         })),
       },
     }),
-    dispatchDocs: () => ({
+    dispatchDocs: ({ review, candidateSha }) => ({
       ok: true,
+      binding: docsBinding(review.id, candidateSha, "task-docs-rf7"),
       protocol: { role: "documentation-maintainer", sha256: "d".repeat(64), taskId: "task-docs-rf7" },
     }),
     dispatchRechecker: (ctx) => ({
