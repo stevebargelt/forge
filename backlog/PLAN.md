@@ -1,6 +1,6 @@
 # Forge Working Plan
 
-**Last revised:** 2026-08-04
+**Last revised:** 2026-08-05
 
 This is a mutable statement of current operator intent. It is not an approval
 boundary, ticket specification, execution record, or source of lifecycle
@@ -16,13 +16,16 @@ FG-496 and FG-591.
 
 ## Current objective
 
-Return to product feature work after the evidence-led review stabilization
-program. Ship the dashboard runtime-trend feature, then resume the DB-backed
+Clear two bounded safety prerequisites, then return to product feature work:
+dashboard visibility for non-task work, then the DB-backed
 operator-work-management sequence.
 
-Review-infrastructure follow-ups do not consume the feature slot unless a
-deterministic failure directly blocks the current ticket, required CI, or
-correct publication.
+The two prerequisites in `Now` are NOT a return to review-infrastructure
+stabilization. Each qualifies under the interruption policy below on its own
+terms — one is a required test tier that cannot execute under the mandated
+launch path, the other leaves runs permanently unrecoverable — and both were
+demonstrated during FG-678 rather than inferred. Everything else in
+review-infrastructure stays non-preempting.
 
 ## Recently completed
 
@@ -57,6 +60,25 @@ correct publication.
   driver is refused pre-container as `blocked_environment`. The rechecker runs
   the shipping database engine. This clears the gate that FG-609 and FG-610 were
   held behind.
+- **FG-648** (`c866b103`, PR #195) — the dashboard agent-runtime trends; reopened
+  the same day for AC5 and since CLOSED. It is no longer `Now`.
+- **FG-671** — `reclaimReleasedTargets` no longer deletes bytes of an
+  unknown-liveness target on age-out.
+- **FG-678** (`39380bb1`, PR #206) — the writable-dispatch dependency contract.
+  All three dispatch shapes now cross ONE shared resolver: a three-way
+  discriminator (no declared dependencies → not applicable; declared + supported
+  lockfile → resolve; declared WITHOUT one → refuse pre-container as
+  `lockfile_absent`), the mount planner re-keyed off worktree-ness onto the
+  resolved environment, an agent's self-declared `status: failed` honoured at the
+  invoke ingestion seam under the new `agent_reported_failure` kind, and the
+  dependency receipt recorded for every lane. The review found the DEFAULT
+  pipeline lane still exempt; the operator ruled it in scope (BD-3 defines one
+  rule by project STATE, not per lane) and one batch fix collapsed all three
+  lanes. **Merged with `tip_equality` and `docs_closeout` recorded as explicit
+  OVERRIDES, not passes** (BD-13, scoped to that candidate only) — six of eight
+  shipping checks were genuinely green, including `acceptance_mapped` and
+  `fix_now_resolved` on executed evidence. Do not read it as a clean 8/8. Its
+  pipeline run is deliberately `abandoned`, not complete.
 - **FG-666** (`3d00e459`, PR #198) — a clone-dispatched pipeline task now resolves
   backlog authority from the project directory recorded on the RUN, not from the
   disposable per-task clone mounted at `/project`. Agents can read their own
@@ -69,23 +91,49 @@ correct publication.
 
 ## Now
 
-1. **FG-648 — reopened for AC5.** Two legibility failures the operator found on
-   live data: the chart has no y-axis, scale or unit (its SVG carries only a
-   peak annotation and the date labels), and bare date labels on a UTC grid are
-   misread in a non-UTC timezone. New AC8-11. The UTC-aligned grid itself stays.
-   Moved ahead of FG-609 by operator decision (2026-08-03).
+Two bounded prerequisites, in this order (operator sequencing, 2026-08-05).
+Neither is a feature; both are small and both were demonstrated, not inferred.
+
+1. **FG-680 — `test:integration` under `forge launch run` kills its own tmux
+   server.** `src/test-setup.ts` sets `TMUX_TMPDIR` but never unsets `TMUX`, so
+   inside a launch pane the suite's exit-time `tmux kill-server` resolves the
+   OPERATOR's default socket instead of the private one. FG-614's isolation
+   therefore holds in a plain shell and is defeated in exactly the environment
+   Forge mandates. It took out only its own job on 2026-08-04 because nothing
+   else was running; every `forge launch run` on the host shares that one tmux
+   server, so a concurrent live review would go with it. Qualifies under the
+   interruption policy as a required test tier that does not execute. **Until it
+   lands, do not run `npm run test:integration` under `forge launch run`** — use
+   a plain shell or let CI carry the tier.
+2. **FG-676 — publication reconcile resurrects a gate-failed task to
+   `awaiting_gate`.** Every `request-changes` leaves a permanent phantom blocker
+   and the run can never complete. Two independent reproductions now (FG-609's
+   run, four phantoms; FG-678's run, one). The demonstrated impact is larger
+   than an audit-record defect: it makes an otherwise-recoverable run
+   UNRECOVERABLE, which is what forced FG-678's integrated work to be branched
+   out of its pipeline rather than repaired in place. The fix is the
+   compare-and-set writer that already exists (`markTaskHeldForGate`, added by
+   FG-523 for this exact race); the regression test must assert the ENFORCEMENT
+   half — a reconcile write against an already-`gate_rejected` task must not
+   transition it or null its error. **Read FG-681 before fixing this** (see
+   follow-ups): five campaign integration tests may be green in CI *because of*
+   this resurrection, in which case fixing it turns them red.
 
 ## Next
 
-1. **FG-678 — writable-invoke dependency contract.** Operator-placed AHEAD of
-   feature work that relies on writable validator dispatches (2026-08-04). A
-   writable `forge invoke` gets an empty anonymous `node_modules` shadow that
-   also masks the host's, so a required `test-engineer` followup may silently
-   not execute — measured twice, with identical dispatches producing opposite
-   outcomes. Until it lands, any feature whose acceptance rests on writable
-   validation is resting on an environment that is not guaranteed to exist.
+1. **FG-679 — dashboard: surface in-flight host verification and PR checks.**
+   The next substantive FEATURE. Non-task work is invisible to the dashboard, so
+   a run with verification running reads as idle. Demonstrated 2026-08-04:
+   `/api/in-flight` returned only an FG-676 phantom `awaiting_gate` row while
+   `test:worktree` was actively running under a launch — the card said "waiting
+   on a plan gate" when the truth was "verification running, no gate
+   outstanding". Both data sources already exist and are durable
+   (`forge launch list/show` plus `host_verifications`; `probeCiGateStatus` for
+   exact-SHA required checks), so this is a projection gap, not instrumentation.
 2. **FG-610 — FG-496 Slice E:** atomic claims, leases, recovery, capacity
-   accounting, and canonical claim-next.
+   accounting, and canonical claim-next. Unblocked: it was held behind FG-678
+   because its concurrency guarantees need host stress-loops on the writable
+   dispatch path, which is now deterministic.
 3. **FG-591 — operator work queue:** Kanban, CLI/API controls, and
    capacity-limited dispatch over the queue primitives.
 4. **FG-496 aggregate closeout:** reconcile the DB-backed backlog program
@@ -102,6 +150,22 @@ it does not override ticket dependencies or authorize scope expansion.
 - **FG-655** — documentation-stage commit authority. Until fixed, required
   durable docs must be committed before review; do not rely on a post-review
   docs stage to rescue uncommitted edits.
+- **FG-682** — a documentation correction discovered AFTER the docs stage has
+  completed has no supported amendment path. Adjacent to FG-655 but distinct:
+  FG-655 is a stage that produced edits and could not commit them; this is a
+  correction that arrives once no stage remains to carry it. Scoped as a bounded
+  late-docs amendment (declared documentation paths only; code/tests/config and
+  undeclared dirty files refused by name; the COORDINATOR commits and advances
+  the candidate; SHA-bound verification invalidated and CI required at the new
+  candidate; docs closeout plus a bounded delta check, never full re-discovery).
+  FG-678's two overrides are its demonstrated impact.
+- **FG-681** — five campaign integration tests (FG-475/FG-476/FG-485) fail
+  reproducibly on the host and pass in CI at the same commit, so host
+  integration runs produce false reds. Not caused by any current change:
+  identical 5/7 on `main` and on the FG-678 branch via an equivalent runner.
+  Carries a hypothesis worth checking BEFORE FG-676 is fixed — the failing
+  assertion is `expected 'awaiting_gate', actual 'failed'`, the same state pair
+  FG-676 resurrects, so these may be green in CI for the wrong reason.
 - **FG-656** — fanout model resolution can drift from the held seed
   generation.
 - **FG-657** — reconcile and close the DB ticket for the already-shipped PR
@@ -164,6 +228,13 @@ or have no demonstrated impact.
   batch, and one recheck. Remaining work becomes an explicit disposition and
   follow-up, not another internal convergence cycle.
 - Required documentation is committed before review while FG-655 remains open.
+- The review coordinator owns candidate movement for ANY commit during a review,
+  not only a fixer's output. While FG-682 remains open there is no supported way
+  to amend a documentation correction found after the docs stage: committing it
+  by hand pins the candidate behind the branch tip and fails both `tip_equality`
+  and `docs_closeout`. Reconcile durable docs BEFORE the review where possible,
+  and if a correction is found late, surface it as an explicit override decision
+  rather than an ad-hoc commit.
 - Merge only when required CI is green at the actual PR head.
 - Close shipped tickets with acceptance-criteria evidence from the merged
   candidate.
