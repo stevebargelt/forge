@@ -6,7 +6,7 @@ import { insertRun } from "../store/runs.js";
 import { insertTask } from "../store/tasks.js";
 import { logEvent } from "../store/events.js";
 import type { Run, Task, TaskStatus, RunStatus } from "../types/index.js";
-import { detectRetryOrphan, detectInconsistentRunState, detectOrphanedWorkMayPersist, detectStuckRun, detectContainerReapFailed, runOpsCheck } from "./detect.js";
+import { detectRetryOrphan, detectInconsistentRunState, detectOrphanedWorkMayPersist, detectStuckRun, detectContainerReapFailed, detectResurrectedGateDecision, runOpsCheck } from "./detect.js";
 import { makeIncident } from "./incident.js";
 import { renderHuman } from "../cli/commands/ops.js";
 
@@ -843,4 +843,122 @@ test("FG-492 finding 4 (state 4 negative): result_missing with NO recorded evide
   });
 
   assert.deepEqual(detectOrphanedWorkMayPersist(db), []);
+});
+
+// ── detectResurrectedGateDecision (FG-676) ──────────────────────────────────
+//
+// The shape: the row says awaiting_gate while its own event stream says a human
+// already decided it (gate reject / request-changes → gate_rejected). Fixtures
+// replay the production event order — gate.decided, then task.failed, then the
+// resurrecting task.awaiting_gate — so the "walks past a non-terminal event"
+// property is exercised, not assumed.
+
+function replayGateRejection(runId: string, taskId: string, error: string): void {
+  logEvent("gate.decided", { runId, taskId, payload: { decision: "request-changes", rationale: error } });
+  logEvent("task.failed", { runId, taskId, payload: { failure_kind: "gate_rejected", error } });
+}
+
+test("detectResurrectedGateDecision: flags an awaiting_gate row whose newest terminal event is a gate rejection", () => {
+  insertRun(mkRun("run-res", "active"));
+  insertTask(mkTask("task-res", "run-res", "awaiting_gate"));
+  replayGateRejection("run-res", "task-res", "request-changes; superseded");
+  // the resurrection itself: a non-terminal event written AFTER the decision
+  logEvent("task.awaiting_gate", { runId: "run-res", taskId: "task-res", payload: {} });
+
+  const incidents = detectResurrectedGateDecision(db);
+  assert.equal(incidents.length, 1);
+  const i = incidents[0]!;
+  assert.equal(i.kind, "resurrected_gate_decision");
+  assert.equal(i.severity, "high");
+  assert.equal(i.confidence, "db-confirmed");
+  assert.equal(i.runId, "run-res");
+  assert.equal(i.taskId, "task-res");
+  assert.equal(i.recommendedAction.type, "repair");
+  assert.equal(i.recommendedAction.autonomy, "ask");
+  assert.equal(i.recommendedAction.command, "forge ops repair task-res");
+  assert.match(i.evidence.join(" "), /awaiting_gate.*failure_kind gate_rejected/);
+  assert.match(i.evidence.join(" "), /request-changes; superseded/);
+  assert.match(i.recommendedAction.reason, /will not clear on the next wave/);
+});
+
+test("detectResurrectedGateDecision: one incident per resurrected task, across runs", () => {
+  insertRun(mkRun("run-res-a", "active"));
+  insertTask(mkTask("task-res-a1", "run-res-a", "awaiting_gate"));
+  insertTask(mkTask("task-res-a2", "run-res-a", "awaiting_gate"));
+  replayGateRejection("run-res-a", "task-res-a1", "rejected 1");
+  replayGateRejection("run-res-a", "task-res-a2", "rejected 2");
+  insertRun(mkRun("run-res-b", "complete"));
+  insertTask(mkTask("task-res-b1", "run-res-b", "awaiting_gate"));
+  replayGateRejection("run-res-b", "task-res-b1", "rejected 3");
+
+  const incidents = detectResurrectedGateDecision(db);
+  assert.equal(incidents.length, 3);
+  assert.deepEqual(
+    incidents.map((i) => i.taskId).sort(),
+    ["task-res-a1", "task-res-a2", "task-res-b1"],
+  );
+});
+
+test("detectResurrectedGateDecision: a legitimately awaiting_gate task raises nothing", () => {
+  insertRun(mkRun("run-legit", "active"));
+  insertTask(mkTask("task-legit", "run-legit", "awaiting_gate"));
+  logEvent("task.awaiting_gate", { runId: "run-legit", taskId: "task-legit", payload: {} });
+
+  assert.deepEqual(detectResurrectedGateDecision(db), [], "no prior gate rejection — this row is simply waiting on a human");
+});
+
+test("detectResurrectedGateDecision: a gate-rejected task that STAYED failed is healthy — the fixed world raises nothing", () => {
+  insertRun(mkRun("run-fixed", "active"));
+  insertTask(mkTask("task-fixed", "run-fixed", "failed"));
+  replayGateRejection("run-fixed", "task-fixed", "request-changes; superseded");
+
+  assert.deepEqual(detectResurrectedGateDecision(db), []);
+});
+
+test("detectResurrectedGateDecision: a later task.completed means recovered — no incident", () => {
+  insertRun(mkRun("run-recovered", "active"));
+  insertTask(mkTask("task-recovered", "run-recovered", "awaiting_gate"));
+  replayGateRejection("run-recovered", "task-recovered", "rejected then recovered");
+  logEvent("task.completed", { runId: "run-recovered", taskId: "task-recovered", payload: {} });
+  logEvent("task.awaiting_gate", { runId: "run-recovered", taskId: "task-recovered", payload: {} });
+
+  assert.deepEqual(detectResurrectedGateDecision(db), [], "newest terminal event wins — a recovery is not a resurrection");
+});
+
+test("detectResurrectedGateDecision: a non-gate failure kind under awaiting_gate is a different contradiction — not claimed here", () => {
+  insertRun(mkRun("run-otherkind", "active"));
+  insertTask(mkTask("task-otherkind", "run-otherkind", "awaiting_gate"));
+  logEvent("task.failed", {
+    runId: "run-otherkind", taskId: "task-otherkind",
+    payload: { failure_kind: "container_crash", error: "exit 1" },
+  });
+
+  assert.deepEqual(detectResurrectedGateDecision(db), [], "this repair has no authority over a non-decided terminal state");
+});
+
+test("detectResurrectedGateDecision: honors projectDir scoping", () => {
+  insertRun(mkRun("run-scoped-in", "active", "/proj/a"));
+  insertTask(mkTask("task-scoped-in", "run-scoped-in", "awaiting_gate"));
+  replayGateRejection("run-scoped-in", "task-scoped-in", "rejected in scope");
+  insertRun(mkRun("run-scoped-out", "active", "/proj/b"));
+  insertTask(mkTask("task-scoped-out", "run-scoped-out", "awaiting_gate"));
+  replayGateRejection("run-scoped-out", "task-scoped-out", "rejected out of scope");
+
+  const scoped = detectResurrectedGateDecision(db, { projectDir: "/proj/a" });
+  assert.equal(scoped.length, 1);
+  assert.equal(scoped[0]!.taskId, "task-scoped-in");
+  assert.equal(detectResurrectedGateDecision(db).length, 2, "unscoped sees both");
+});
+
+test("resurrected_gate_decision flows through runOpsCheck and renders human-readably", () => {
+  insertRun(mkRun("run-res-e2e", "active"));
+  insertTask(mkTask("task-res-e2e", "run-res-e2e", "awaiting_gate"));
+  replayGateRejection("run-res-e2e", "task-res-e2e", "request-changes; superseded");
+
+  const incidents = runOpsCheck();
+  const mine = incidents.filter((i) => i.kind === "resurrected_gate_decision");
+  assert.equal(mine.length, 1, "registered in DETECTORS");
+  const rendered = renderHuman(mine);
+  assert.match(rendered, /\[high\] resurrected_gate_decision {2}\(db-confirmed\)/);
+  assert.match(rendered, /forge ops repair task-res-e2e/);
 });

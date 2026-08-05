@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import {
   classify,
   failTask,
+  failTaskIfNotTerminal,
   failureKindFromEvents,
   getOrphanEvidenceFromEvents,
   getContainerCausalEvidenceFromEvents,
@@ -220,6 +221,56 @@ test("failTask: covers all FailureKind values in payload", () => {
     assert.ok(failedEv, `task.failed must be emitted for kind=${kind}`);
     assert.equal((failedEv!.payload as Record<string, unknown>)["failure_kind"], kind, `failure_kind must be ${kind}`);
   }
+});
+
+// --- FG-676: failTaskIfNotTerminal — the background-settlement half ---
+//
+// The reconcile sweep settles a task it selected some milliseconds earlier, and a
+// `forge cancel` can land in that window (`awaiting_recovery` is non-terminal, so
+// performCancel accepts it). The pair must be refused WHOLE: a row write with no
+// event is a lie, and an event with no row write is the same lie the other way up.
+
+test("failTaskIfNotTerminal: settles a live row with its task.failed, exactly as failTask does", () => {
+  const runId = newRunId("test-settle-live");
+  const taskId = newTaskId("engineer");
+  makeRun(runId);
+  makeTask(taskId, runId);
+
+  assert.equal(
+    failTaskIfNotTerminal(taskId, { runId, kind: "publication_refused", error: "the ref does not carry the candidate" }),
+    true,
+  );
+  const failedEv = eventsForTask(taskId).find((e) => e.eventType === "task.failed");
+  assert.ok(failedEv, "the settlement that LANDED still records itself");
+  assert.equal((failedEv!.payload as Record<string, unknown>)["failure_kind"], "publication_refused");
+  assert.equal(getTask(taskId)!.status, "failed");
+});
+
+test("failTaskIfNotTerminal: a human's decision that won the window refuses the settlement WHOLE — no row write, no task.failed", () => {
+  const runId = newRunId("test-settle-decided");
+  const taskId = newTaskId("engineer");
+  makeRun(runId);
+  makeTask(taskId, runId);
+
+  // The human decided first — the row and the event stream the reconcile sweep is
+  // about to arrive behind.
+  failTask(taskId, { runId, kind: "cancelled", error: "cancelled via forge cancel" });
+  const decided = getTask(taskId)!;
+
+  assert.equal(
+    failTaskIfNotTerminal(taskId, { runId, kind: "publication_refused", error: "the ref does not carry the candidate" }),
+    false,
+    "the settlement is refused — the caller must be told so it emits nothing of its own either",
+  );
+  const after = getTask(taskId)!;
+  assert.equal(after.error, "cancelled via forge cancel", "the human's error is intact");
+  assert.equal(after.completedAt, decided.completedAt, "and the time they decided is not restamped");
+  assert.equal(failureKindFromEvents(eventsForTask(taskId)), "cancelled", "still recorded as the decision it was");
+  assert.equal(
+    eventsForTask(taskId).filter((e) => e.eventType === "task.failed").length,
+    1,
+    "and NO second task.failed was appended after the human's decision",
+  );
 });
 
 // --- Integration: invoke() paths emit task.failed with failure_kind ---

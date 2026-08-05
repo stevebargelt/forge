@@ -58,7 +58,7 @@ import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
-import { insertTask, tasksForRun, getTask, setTaskStatus, setTaskWorktreePath } from "../store/tasks.js";
+import { insertTask, tasksForRun, getTask, setTaskWorktreePath } from "../store/tasks.js";
 import { insertVerdict, verdictsForRun, verdictsForTask } from "../store/verdicts.js";
 import { eventsForRun, eventsForTask, logEvent } from "../store/events.js";
 import { getRun, updateRunStatus } from "../store/runs.js";
@@ -127,6 +127,15 @@ void recoveryPass;
 let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
 const tmpDirs: string[] = [];
+
+/** Fabricate a status a crash left behind, including the terminal -> non-terminal
+ *  moves no production transition may make. setTaskStatus is CAS'd against exactly
+ *  those (FG-676), which is the point of it — so the strands below reconstruct their
+ *  crash states in SQL, the way fg425-lost-window-disposition already fabricates its
+ *  crash-stranded contradiction. Reconstructing a crash is not a transition. */
+function forceStatus(id: string, status: TaskStatus): void {
+  db.prepare(`UPDATE tasks SET status = ? WHERE id = ?`).run(status, id);
+}
 let savedApiKey: string | undefined;
 
 beforeEach(() => {
@@ -559,7 +568,7 @@ const SCENARIOS: Scenario[] = [
       // reconcile.ts — so the state is reconstructed here rather than crashed into.
       // It is the exact precondition of the fanout-parent recovery, and nothing else
       // in the run is touched.
-      setTaskStatus(parent.id, "running");
+      forceStatus(parent.id, "running");
     },
   },
   {
@@ -584,8 +593,8 @@ const SCENARIOS: Scenario[] = [
       // Same reconstruction as fanout-parent-orphaned above (and the same reason it
       // is reconstructed rather than crashed into), with one child left FAILED: the
       // wave that partly died, whose parent never got to finalize.
-      setTaskStatus(children[0]!.id, "failed");
-      setTaskStatus(parent.id, "running");
+      forceStatus(children[0]!.id, "failed");
+      forceStatus(parent.id, "running");
     },
   },
   {
@@ -1112,7 +1121,7 @@ test("FG-585 cancel race: a genuinely-completed run refuses a racing abandon and
     // RUN active, not complete (the run-complete finalize runs strictly after).
     const primary = primaryOf(runId, "build");
     assert.ok(primary, "the primary must exist to reopen");
-    setTaskStatus(primary.id, "running");
+    forceStatus(primary.id, "running");
     updateRunStatus(runId, "active");
 
     updateRunStatus(runId, "abandoned"); // operator cancel on the in-flight run

@@ -20,6 +20,31 @@
 // paused container, a long GC stall), through the AD-5 seam, inside a REAL runNext
 // dispatch against a REAL git target. Nothing here is probed, signalled, or reaped:
 // the steal is a durable-lease takeover, which is the only mechanism AD-7 permits.
+//
+// ─── FG-676 (BD-9): was anything in this file GREEN BECAUSE OF THE RESURRECTION? ───
+//
+// FG-681 records tests failing with `expected awaiting_gate, actual failed` — the same
+// state pair FG-676's resurrection produces — that are red on the darwin host and green
+// in CI at the same commit. So it was possible that a currently-green assertion here was
+// green only because reconciliation resurrected a terminal row, and that removing the
+// resurrection would turn it red. That had to be DETERMINED, not assumed.
+//
+// DETERMINED, by running both FG-425 worktree files before and after the fix:
+//
+//   src/v2/fg425-lost-window-disposition.worktree.test.ts — UNAFFECTED. Every test here
+//   drives a `gate: auto` step (the WORKFLOW below), and the resurrection only ever fired
+//   through finalizePrimary's `human`/`verdict` branches. Nothing in this file expected
+//   `awaiting_gate` at all before FG-676; the new test below is the first. The two
+//   cancel-stands tests (6) were already protected by the cancel half of the same guard,
+//   and the crash-stranded repair test (4) — which fabricates its contradiction with a
+//   bare `UPDATE tasks SET status='failed'` and NO task.failed event — is exactly the
+//   no-evidence default the FG-676 guard leaves untouched. It still reconciles.
+//
+//   src/campaign/fg425-campaign-lost-window.worktree.test.ts — UNAFFECTED, same reason:
+//   `gate: auto` throughout, no awaiting_gate expectation anywhere in it. Left unchanged.
+//
+// NO ASSERTION IN EITHER FILE WAS ADJUSTED. Both were green before the fix and green
+// after it, with the same assertions.
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -55,6 +80,7 @@ import {
 import { localTargetFor, readTargetSha } from "./publication-target.js";
 import { deriveNextCommandForTask, deriveNextCommandForRun, publicationRecoveryMessage, publicationAfterCancelMessage } from "../cli/commands/show.js";
 import { performCancel } from "../cli/commands/cancel.js";
+import { setCrashHookForTest } from "./crash-points.js";
 import type { Workflow } from "./schema.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 
@@ -68,6 +94,27 @@ const WORKFLOW: Workflow = {
       id: "build",
       agent: "engineer",
       gate: "auto",
+      manual: false,
+      depends_on: [],
+      runtime: "fg425-ac5-test",
+      reds: [],
+    },
+  ],
+};
+
+/** FG-676: the same shape, on a HUMAN-GATED step — the only shape the defect fires on.
+ *  A `gate: auto` primary lands through markTaskComplete, whose CAS has refused a
+ *  terminal row since AWN-2; the resurrection lived on the `human`/`verdict` branches. */
+const HUMAN_GATE_WORKFLOW: Workflow = {
+  name: "fg676-gate-human-test",
+  description: "FG-676: a human-gated step whose publication reconcile must not resurrect a gate rejection",
+  review_mode: "legacy_verdict",
+  inputs: [],
+  steps: [
+    {
+      id: "build",
+      agent: "engineer",
+      gate: "human",
       manual: false,
       depends_on: [],
       runtime: "fg425-ac5-test",
@@ -104,6 +151,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setCrashHookForTest(undefined);
   setPublisherSeamsForTest({});
   setPublicationClockOffsetForTest(0);
   setDbForTest(prev as DatabaseInstance);
@@ -179,20 +227,25 @@ result:
 /** `forge publish recover` runs OUTSIDE a wave: it has an attempt id and nothing else,
  *  so it reloads the run's workflow from disk exactly as `forge next` does. The
  *  installed YAML is therefore part of the production shape this test drives. */
-function ensureWorkflowOnDisk(): void {
-  const path = join(process.env.FORGE_HOME!, "workflows", `${WORKFLOW.name}.yml`);
+function ensureWorkflowOnDisk(wf: Workflow = WORKFLOW): void {
+  const path = join(process.env.FORGE_HOME!, "workflows", `${wf.name}.yml`);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(
     path,
-    `name: ${WORKFLOW.name}
-description: ${JSON.stringify(WORKFLOW.description)}
+    `name: ${wf.name}
+description: ${JSON.stringify(wf.description)}
 inputs: []
 steps:
-  - id: build
+${wf.steps
+  .map(
+    (s) =>
+      `  - id: ${s.id}
     agent: engineer
-    gate: auto
+    gate: ${s.gate}
     runtime: fg425-ac5-test
-`,
+${s.depends_on.length > 0 ? `    depends_on: [${s.depends_on.join(", ")}]\n` : ""}`,
+  )
+  .join("")}`,
   );
   publishFlatAsGeneration(process.env.FORGE_HOME!);
 }
@@ -779,4 +832,388 @@ test("FG-425: `forge publish recover` on a CANCELLED task converges the attempt 
     false,
     "and no reconciliation was recorded over the cancel",
   );
+});
+
+// ─── (7) FG-676: a GATE REJECTION is a decision too, and reconcile may not undo it ──
+//
+// THE DEFECT THIS PINS. (6) established the rule for a cancel; this is the same rule
+// arriving through the other human verb, and it was NOT covered. `forge gate <task>
+// request-changes` fails the superseded task — and then a later publication-reconcile
+// sweep walked it back through awaiting_recovery and landed it, through the step's own
+// `human` gate, at `awaiting_gate` with its error NULLed. The row then contradicted its
+// own event stream (`status: awaiting_gate` beside `failure: gate_rejected`), and it was
+// a PHANTOM BLOCKER: no agent ever runs for a task in that state and no gate decision
+// resolves it, so a run that took one request-changes could never reach `complete`.
+// Observed 4/4 times on run run-fg-609-…-99204e and once on run-fg-678-…-6745ba.
+//
+// The writer swap the ticket originally named would NOT have caught it: the reconcile
+// path deliberately launders `failed` to `awaiting_recovery` before the finalizer's CAS
+// can see it, so the CAS passes. The fix is in the SELECTION predicate, and only a test
+// that drives the SWEEP proves it — a writer-level unit test passes against an unfixed
+// system.
+//
+// Repeated reconciliation is not optional here. Today the second sweep is a no-op only
+// because the first already moved the row out of the selection set, so a test asserting
+// "still terminal" after ONE sweep proves less than it appears to. This drives two waves
+// AND the hand door, then lets the replacement primary finish the run.
+
+function buildPrimaries(runId: string) {
+  return tasksForRun(runId).filter((t) => t.phase === "build" && t.parentId === undefined);
+}
+
+function awaitingADecision(runId: string): string[] {
+  return tasksForRun(runId).filter((t) => t.status === "awaiting_gate").map((t) => t.id);
+}
+
+/** Every event index of `type` that falls AFTER the task's last task.failed. The
+ *  resurrection was invisible in a bare `includes` check — the rejected task legitimately
+ *  carries a task.awaiting_gate from BEFORE the human decided. */
+function eventsAfterLastFailure(taskId: string, type: string): number {
+  const types = eventTypes(taskId);
+  const failedAt = types.lastIndexOf("task.failed");
+  assert.notEqual(failedAt, -1, `precondition: ${taskId} must carry a task.failed`);
+  return types.slice(failedAt + 1).filter((t) => t === type).length;
+}
+
+test("FG-676: a gate `request-changes` task whose publication is `published` STAYS terminal across repeated reconciliation — and its run still reaches complete through the replacement", async () => {
+  ensureWorkflowOnDisk(HUMAN_GATE_WORKFLOW);
+  const repo = makeRepo();
+  const target = localTargetFor(projectIdentity(repo).canonicalDir);
+  const { runId } = startRun({ workflow: HUMAN_GATE_WORKFLOW, title: "fg676-request-changes", projectDir: repo, inputs: {} });
+
+  // ── WAVE 1: the production sequence, not a fabrication. A real dispatch against a
+  //    real git repo, a real candidate published to the real target, and the
+  //    human-gated step parking on it.
+  const wave1 = await runNext({ runId, workflow: HUMAN_GATE_WORKFLOW, dockerExec: stubExec("src/feature.ts") });
+  assert.deepEqual(wave1.awaitingGate, ["build"], "precondition: the human gate parked the primary");
+
+  const rejected = buildPrimaries(runId)[0]!;
+  const attempt = publicationAttemptsForTask(rejected.id)[0]!;
+  assert.equal(attempt.state, "published", "precondition: a REAL publication attempt, published — nothing fabricated");
+  assert.equal(readTargetSha(target), attempt.publishedSha, "precondition: the target ref carries the candidate");
+  assert.equal(getTask(rejected.id)!.status, "awaiting_gate", "precondition: parked for the human");
+  const publishedResult = getTask(rejected.id)!.result;
+
+  // ── THE HUMAN DECIDES: request-changes. The superseded task is failed with its
+  //    rationale, and a replacement primary is minted in the SAME step.
+  const { nextTasks } = await doGate(rejected.id, "request-changes", "the migration is missing");
+  const replacement = nextTasks[0]!;
+  const decided = getTask(rejected.id)!;
+  assert.equal(decided.status, "failed", "precondition: request-changes fails the superseded task");
+  assert.equal(decided.error, "request-changes; superseded", "precondition: with the error on the row");
+  assert.equal(failureKindForTask(rejected.id), "gate_rejected", "precondition: recorded as a gate rejection");
+  assert.deepEqual(decided.result, publishedResult, "precondition: and the rejected ARTIFACT is preserved on the row");
+  assert.notEqual(replacement.id, rejected.id, "precondition: a distinct replacement primary was minted");
+  // The row is now in reconcile's selection set — `failed` beside a `published`
+  // attempt — which is precisely how the resurrection got its hands on it.
+  assert.equal(publicationAttemptsForTask(rejected.id)[0]!.state, "published");
+
+  // ── SWEEP 1 (a wave). It also dispatches the replacement, which publishes its own
+  //    candidate — the run carries on exactly as it does in production.
+  await runNext({ runId, workflow: HUMAN_GATE_WORKFLOW, dockerExec: stubExec("src/revision.ts") });
+  assertRejectedRowIntact(rejected.id, publishedResult, "after the first reconcile sweep");
+
+  // ── SWEEP 2 (a second wave). NOT redundant: after the fix the row is still IN the
+  //    selection set on every sweep, so this is the pass that would have caught a guard
+  //    that only worked because the first sweep moved the row out of it.
+  await runNext({ runId, workflow: HUMAN_GATE_WORKFLOW, dockerExec: stubExec("src/never-dispatched.ts") });
+  assertRejectedRowIntact(rejected.id, publishedResult, "after the second reconcile sweep");
+
+  // ── THE HAND DOOR. `forge publish recover` runs the SAME reconciliation from outside
+  //    a wave; a guard that only lives on the wave path is half a guard.
+  const hand = recoverPublicationByHand(attempt.attemptId);
+  assert.equal(hand.outcome.kind, "published", "the attempt is settled — the hand path re-derives nothing");
+  assert.equal(hand.publishedAfterCancel, undefined, "this was not a cancel, so no published-after-cancel report");
+  // The guard REFUSED to reconcile this task, so the command may not report one. The
+  // CLI renders `task` as "reconciled onto it: <status>" — reporting a status there
+  // at the exact moment nothing was reconciled is the same lie the guard exists to
+  // prevent, one line further down.
+  assert.equal(hand.task, undefined, "nothing was reconciled, so there is no reconciliation to report");
+  assert.equal(hand.notReconciled?.taskId, rejected.id, "the refusal is reported instead");
+  assert.equal(hand.notReconciled?.status, "failed", "naming the status the task actually stays at");
+  assert.match(hand.notReconciled!.reason, /REJECTED/, "and why: a human decided it");
+  assertRejectedRowIntact(rejected.id, publishedResult, "after `forge publish recover`");
+
+  // ── EXACTLY ONE TASK AWAITING A DECISION. The whole operational cost of the defect:
+  //    `forge show <run>` listed the superseded revision under Blockers alongside the
+  //    live one, so an operator saw two decisions owed where only one was real.
+  assert.deepEqual(
+    awaitingADecision(runId),
+    [replacement.id],
+    "exactly ONE task awaits a human decision — the live replacement, never the superseded revision",
+  );
+
+  // ── THE REPLACEMENT COMPLETES, and the run reaches `complete` WITH the rejected row
+  //    still terminal beside it. Preserving the audit record and unblocking the run are
+  //    both required; neither may be traded for the other.
+  await doGate(replacement.id, "advance", undefined);
+  const finalWave = await runNext({ runId, workflow: HUMAN_GATE_WORKFLOW, dockerExec: stubExec("src/never-dispatched.ts") });
+  assert.equal(getTask(replacement.id)!.status, "complete", "the replacement finished");
+  assert.equal(getRun(runId)!.status, "complete", "and the RUN reached complete — no phantom blocker held it open");
+  assert.equal(finalWave.runStatus, "complete");
+  assert.deepEqual(awaitingADecision(runId), [], "nothing is left awaiting a decision");
+
+  // ── THE AUDIT RECORD SURVIVED ALL OF IT, one last time, at the end state.
+  assertRejectedRowIntact(rejected.id, publishedResult, "after the run completed");
+  assert.equal(
+    buildPrimaries(runId).filter((t) => t.status === "complete").length,
+    1,
+    "exactly one primary in the phase is complete — the replacement, not the superseded revision",
+  );
+  assert.equal(publicationAttemptsForTask(rejected.id).length, 1, "and nothing was published a second time for it");
+});
+
+/** The rejected row is IMMUTABLE AUDIT HISTORY. Every field the resurrection touched,
+ *  plus the event stream that has to keep agreeing with it. Re-asserted after each sweep
+ *  rather than once at the end: "still terminal at the end" would pass a system that
+ *  resurrected the row and then happened to put it back. */
+function assertRejectedRowIntact(taskId: string, expectedResult: unknown, when: string): void {
+  const row = getTask(taskId)!;
+  assert.equal(row.status, "failed", `${when}: the gate-rejected row must still be terminal`);
+  assert.equal(row.error, "request-changes; superseded", `${when}: its error must never be NULLed`);
+  assert.deepEqual(row.result, expectedResult, `${when}: the rejected artifact must be carried through unchanged`);
+  assert.equal(failureKindForTask(taskId), "gate_rejected", `${when}: still a gate rejection`);
+  assert.equal(
+    eventsAfterLastFailure(taskId, "task.awaiting_gate"),
+    0,
+    `${when}: NO awaiting-gate event may be appended after the rejection — that is the phantom blocker`,
+  );
+  assert.equal(
+    eventsAfterLastFailure(taskId, "task.publication_reconciled"),
+    0,
+    `${when}: and no reconciliation may be recorded over a human's decision`,
+  );
+  assert.equal(
+    eventTypes(taskId).includes("task.completed"),
+    false,
+    `${when}: the superseded revision was never completed`,
+  );
+}
+
+// ─── (8) FG-676 (BD-4): the decision that lands INSIDE the reconcile window ───
+//
+// THE DEFECT THIS PINS. (6) and (7) both hand the sweep a decision it can SEE: the
+// task is already terminal-by-human when the sweep selects it, so the guard skips it.
+// This is the other half of the same rule, and the guard cannot reach it. The sweep
+// steps a crash-stranded row `failed -> awaiting_recovery` — deliberately, to get it
+// around finalizePrimary's terminal-state CAS — and that write makes the row
+// CANCELLABLE for the instant before the finalizer lands it. `forge cancel` accepts
+// every non-terminal task, so a cancel arriving in that instant wins the CAS.
+//
+// finalizePrimary already reports the refusal correctly (it returns the row's actual
+// status). The sweep then appended `task.publication_reconciled` ANYWAY, so the
+// durable row said the cancel won while the audit stream said a reconciliation
+// happened after it — and the event stream is the exact record failureKindFromEvents
+// and every operator surface derive from. BD-4 is verbatim on this: a refused CAS is
+// its own outcome everywhere it can occur, and no state event is emitted.
+//
+// The race is driven at the ONE instant it exists, with the REAL `forge cancel`
+// (performCancel) — the crash-point probe is used only as a clock, to say WHEN, and
+// the assertion below proves the cancel really landed inside the window.
+
+test("FG-676 (BD-4): a cancel landing between the reconcile reopen and the finalizer's CAS emits NO task.publication_reconciled — the refused CAS reconciled nothing and claims nothing", async () => {
+  ensureWorkflowOnDisk(HUMAN_GATE_WORKFLOW);
+  const repo = makeRepo();
+  const target = localTargetFor(projectIdentity(repo).canonicalDir);
+  const { runId } = startRun({ workflow: HUMAN_GATE_WORKFLOW, title: "fg676-cancel-in-window", projectDir: repo, inputs: {} });
+
+  // ── WAVE 1: a real dispatch, a real candidate published to the real target.
+  await runNext({ runId, workflow: HUMAN_GATE_WORKFLOW, dockerExec: stubExec("src/feature.ts") });
+  const task = buildPrimaries(runId)[0]!;
+  const attempt = publicationAttemptsForTask(task.id)[0]!;
+  assert.equal(attempt.state, "published", "precondition: a REAL published attempt — nothing fabricated");
+  assert.equal(readTargetSha(target), attempt.publishedSha, "precondition: the target ref carries the candidate");
+
+  // The crash-stranded shape, with NO task.failed event: no human decided this, so the
+  // guard passes it through to the repair — and this is the ONLY shape that reaches
+  // reopenFailedTaskForRecovery, which is where the window opens.
+  db.prepare(`UPDATE tasks SET status = 'failed', error = ? WHERE id = ?`).run("container vanished", task.id);
+  db.prepare(`UPDATE runs SET status = 'active' WHERE id = ?`).run(runId);
+  assert.equal(getTask(task.id)!.status, "failed", "precondition: the contradiction is in the DB, undecided");
+
+  // ── THE RACE. The sweep has just stepped this row around the finalizer's terminal
+  //    guard and is about to write the gate landing. The human cancels, right there.
+  let cancelledInWindow: string | undefined;
+  setCrashHookForTest((point) => {
+    if (point !== "finalizePrimary:before-status-write" || cancelledInWindow) return;
+    const row = getTask(task.id);
+    if (row?.status !== "awaiting_recovery") return; // not our window
+    cancelledInWindow = row.status;
+    cancelTask(task.id);
+  });
+  try {
+    await runNext({ runId, workflow: HUMAN_GATE_WORKFLOW, dockerExec: stubExec("src/feature.ts") });
+  } finally {
+    setCrashHookForTest(undefined);
+  }
+  assert.equal(
+    cancelledInWindow,
+    "awaiting_recovery",
+    "precondition: the cancel must have landed INSIDE the reopen -> finalize window, or this test proves nothing",
+  );
+
+  // ── THE INVARIANT. The row, the event stream and the operator's record agree.
+  const after = getTask(task.id)!;
+  assert.equal(after.status, "failed", "the cancel WON — the finalizer's refused CAS left the row exactly where it put it");
+  assert.equal(after.error, "cancelled via forge cancel", "with the human's error on it, not NULLed by an awaiting_gate write");
+  assert.equal(failureKindForTask(task.id), "cancelled", "and still recorded as the decision it was");
+
+  assert.equal(
+    eventTypes(task.id).filter((e) => e === "task.publication_reconciled").length,
+    0,
+    "NO reconciliation was recorded: the CAS was refused, so nothing was reconciled and nothing may say it was",
+  );
+  assert.equal(
+    eventsAfterLastFailure(task.id, "task.awaiting_gate"),
+    0,
+    "and no awaiting-gate event over the terminal row either — that is the phantom blocker",
+  );
+  assert.equal(eventTypes(task.id).includes("task.completed"), false, "the cancelled task was never completed");
+  assert.deepEqual(awaitingADecision(runId), [], "so no human is told they owe a decision on a task they just cancelled");
+
+  // ── AND THE PUBLICATION RECORD STILL TELLS THE TRUTH.
+  const settledAttempt = publicationAttemptsForTask(task.id)[0]!;
+  assert.equal(settledAttempt.state, "published", "the attempt is untouched — the target does carry the candidate");
+  assert.equal(readTargetSha(target), settledAttempt.publishedSha, "and the ref still carries it");
+  assert.equal(publicationAttemptsForTask(task.id).length, 1, "nothing was published a second time");
+
+  // ── SELF-HEALING. Refusing the reconcile is not the same as dropping the operator's
+  //    account of it: the next sweep re-derives from the row the cancel left behind and
+  //    makes the published-after-cancel announcement this pass skipped. (The run settled
+  //    when its only step went terminal — a one-step workflow has nothing left to do —
+  //    so it is reactivated here to model the ordinary case: a run that carries on and
+  //    sweeps again.)
+  db.prepare(`UPDATE runs SET status = 'active' WHERE id = ?`).run(runId);
+  await runNext({ runId, workflow: HUMAN_GATE_WORKFLOW, dockerExec: stubExec("src/never-dispatched.ts") });
+  assert.equal(getTask(task.id)!.status, "failed", "still terminal after another wave");
+  assert.equal(
+    eventTypes(task.id).filter((e) => e === "task.publication_reconciled").length,
+    0,
+    "and still no reconciliation over the human's decision",
+  );
+  assert.equal(
+    eventTypes(task.id).filter((e) => e === "task.published_after_cancel").length,
+    1,
+    "the operator IS told, once, that the candidate landed anyway",
+  );
+  assertNoFalseUnpublishedClaim([...operatorSurfaces(runId, task.id), publicationAfterCancelMessage(settledAttempt)]);
+});
+
+// ─── (9) FG-676 (AC2): the SETTLEMENT arm is guarded too ─────────────────────
+//
+// THE DEFECT THIS PINS. (8) closed the published arm. The sweep's OTHER arm — the
+// task whose attempt converged to a NON-published disposition — settled with a bare
+// `UPDATE tasks SET status='failed'`, which moves ANY row, terminal or not. The two
+// arms of one sweep had two different rules, and an invariant that holds only where
+// the candidate happened to land is not an invariant: a task decided in the sweep's
+// own read -> settle window had its error, result and completed_at replaced by a
+// publication failure, with a task.failed appended AFTER the decision.
+//
+// The window is entered through the door forge itself documents as concurrent: the
+// reconciliation has TWO callers — a wave and `forge publish recover` — and the run
+// lock is stealable (`forge cancel` takes it with { steal: true }), so a second
+// reconciler settling this run while this one is mid-sweep is a shape the sweep's own
+// comments anticipate ("a refusal means the row moved since this sweep read it").
+// Here the second reconciler is the REAL hand command, driven at the one instant that
+// matters: after the outer sweep read the verify task and before it settles it.
+//
+// It exercises BOTH arms at once, because the inner reconciler settles both tasks:
+// the outer sweep's finalizePrimary CAS is refused on `build` and its settlement CAS
+// is refused on `verify`. Neither refusal may append an event.
+
+const TWO_STEP_WORKFLOW: Workflow = {
+  name: "fg676-two-step-test",
+  description: "FG-676: two published primaries, so one sweep covers both of its arms",
+  review_mode: "legacy_verdict",
+  inputs: [],
+  steps: [
+    { id: "build", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "fg425-ac5-test", reds: [] },
+    { id: "verify", agent: "engineer", gate: "auto", manual: false, depends_on: ["build"], runtime: "fg425-ac5-test", reds: [] },
+  ],
+};
+
+function taskInPhase(runId: string, phase: string) {
+  return tasksForRun(runId).find((t) => t.phase === phase && t.parentId === undefined)!;
+}
+
+function countEvents(taskId: string, type: string): number {
+  return eventTypes(taskId).filter((e) => e === type).length;
+}
+
+test("FG-676 (AC2): a second reconciler settling this run mid-sweep is refused on BOTH arms — one reconciliation each, and the terminal record it wrote is never rewritten", async () => {
+  ensureWorkflowOnDisk(TWO_STEP_WORKFLOW);
+  const repo = makeRepo();
+  const target = localTargetFor(projectIdentity(repo).canonicalDir);
+  const { runId } = startRun({ workflow: TWO_STEP_WORKFLOW, title: "fg676-both-arms", projectDir: repo, inputs: {} });
+
+  // ── Two REAL waves: two primaries, each with its own real published attempt.
+  await runNext({ runId, workflow: TWO_STEP_WORKFLOW, dockerExec: stubExec("src/feature.ts") });
+  await runNext({ runId, workflow: TWO_STEP_WORKFLOW, dockerExec: stubExec("src/verified.ts") });
+  const build = taskInPhase(runId, "build");
+  const verify = taskInPhase(runId, "verify");
+  const buildAttempt = publicationAttemptsForTask(build.id)[0]!;
+  const verifyAttempt = publicationAttemptsForTask(verify.id)[0]!;
+  assert.equal(buildAttempt.state, "published", "precondition: build published for real");
+  assert.equal(verifyAttempt.state, "published", "precondition: and so did verify");
+
+  // ── build takes the PUBLISHED arm: the crash-stranded contradiction, undecided
+  //    (a bare status write, no task.failed event) — test (4)'s shape.
+  db.prepare(`UPDATE tasks SET status = 'failed', error = ? WHERE id = ?`).run("container vanished", build.id);
+  // ── verify takes the NON-PUBLISHED arm: its attempt is back inside the window and
+  //    the ref does not carry its candidate, so AD-5 converges it to `abandoned`.
+  db.prepare(`UPDATE publication_attempts SET state = 'publishing', published_sha = NULL WHERE attempt_id = ?`)
+    .run(verifyAttempt.attemptId);
+  db.prepare(`UPDATE tasks SET status = 'awaiting_recovery' WHERE id = ?`).run(verify.id);
+  db.prepare(`UPDATE runs SET status = 'active' WHERE id = ?`).run(runId);
+  git(repo, ["reset", "--hard", buildAttempt.publishedSha!]);
+  assert.equal(readTargetSha(target), buildAttempt.publishedSha, "precondition: the ref carries build's candidate, not verify's");
+
+  // ── THE RACE. The outer sweep is inside build's finalizer, having already read
+  //    verify. `forge publish recover` — a second process, a second reconciler —
+  //    settles the whole run right there.
+  let raced = false;
+  setCrashHookForTest((point) => {
+    if (point !== "finalizePrimary:before-status-write" || raced) return;
+    raced = true;
+    recoverPublicationByHand(verifyAttempt.attemptId);
+  });
+  try {
+    await runNext({ runId, workflow: TWO_STEP_WORKFLOW, dockerExec: stubExec("src/never-dispatched.ts") });
+  } finally {
+    setCrashHookForTest(undefined);
+  }
+  assert.equal(raced, true, "precondition: the second reconciler must have run INSIDE the outer sweep");
+
+  // ── THE PUBLISHED ARM. The inner reconciler landed build; the outer's CAS was
+  //    refused, and a refused CAS reconciles nothing and says nothing.
+  assert.equal(getTask(build.id)!.status, "complete", "build was reconciled onto its publication — once");
+  assert.equal(countEvents(build.id, "task.publication_reconciled"), 1, "and exactly ONE reconciliation is on the record");
+  // Two completions: the original dispatch's, and the ONE the reconciliation added.
+  // A third would be the outer sweep landing a row the inner one had already landed.
+  assert.equal(countEvents(build.id, "task.completed"), 2, "and the reconciliation added exactly one completion, not two");
+
+  // ── THE NON-PUBLISHED ARM. Same rule, other arm: the inner reconciler settled
+  //    verify terminally, and the outer sweep's settlement was refused WHOLE — the
+  //    row it wrote is untouched and no second task.failed sits after it.
+  const settled = getTask(verify.id)!;
+  assert.equal(settled.status, "failed", "verify is terminal — nothing landed for it");
+  assert.equal(failureKindForTask(verify.id), "publication_refused", "with the truthful converged kind");
+  assert.equal(countEvents(verify.id, "task.failed"), 1, "exactly ONE terminal failure — the settlement is not written twice");
+  assert.equal(
+    countEvents(verify.id, "task.publication_reconciled"),
+    1,
+    "and exactly ONE reconciliation: the refused CAS settled nothing, so it recorded nothing",
+  );
+  assert.equal(publicationAttemptsForTask(verify.id)[0]!.state, "abandoned", "the attempt is settled, not left publishing");
+  assert.equal(publicationAttemptsForTask(verify.id).length, 1, "and nothing was published a second time");
+
+  // ── AND THE TERMINAL RECORD IS IMMUTABLE. This is the field the bare UPDATE
+  //    restamped on every re-settlement: the row must say when it was settled, once.
+  db.prepare(`UPDATE runs SET status = 'active' WHERE id = ?`).run(runId);
+  await runNext({ runId, workflow: TWO_STEP_WORKFLOW, dockerExec: stubExec("src/never-dispatched.ts") });
+  const after = getTask(verify.id)!;
+  assert.equal(after.completedAt, settled.completedAt, "a later sweep does not restamp the time it settled");
+  assert.equal(after.error, settled.error, "nor rewrite the error it settled with");
+  assert.equal(countEvents(verify.id, "task.failed"), 1, "nor append a second failure on every wave forever");
+  assert.equal(countEvents(verify.id, "task.publication_reconciled"), 1, "nor a second reconciliation");
 });

@@ -10,7 +10,10 @@ import {
   markTaskComplete,
   markTaskBlockedByRed,
   markTaskFailed,
+  markTaskFailedIfNotTerminal,
   setTaskStatus,
+  reopenFailedTaskForRecovery,
+  restoreTaskFailed,
   pendingTasksForRun,
   tasksForRunPhase,
 } from "./tasks.js";
@@ -148,6 +151,108 @@ test("setTaskStatus blocked_by_red transitions correctly", () => {
   insertTask(task({ id: "task-f", status: "running" }));
   setTaskStatus("task-f", "blocked_by_red");
   assert.equal(getTask("task-f")!.status, "blocked_by_red");
+});
+
+// FG-676: the laundering guard, at the writer. A bare UPDATE here moves a terminal
+// row off terminal, and markTaskHeldForGate's CAS then passes over it — which is how
+// a human's decision gets resurrected to awaiting_gate with its error NULLed. The
+// guard has to be structural, or the next caller re-opens the hole.
+
+test("setTaskStatus REFUSES to move a terminal row off terminal — a failed row is not laundered to awaiting_red", () => {
+  insertTask(task({ id: "task-term-f", status: "running" }));
+  markTaskFailed("task-term-f", "cancelled via forge cancel");
+
+  assert.equal(setTaskStatus("task-term-f", "awaiting_red"), false, "the CAS refuses");
+  const t = getTask("task-term-f")!;
+  assert.equal(t.status, "failed", "the row stays terminal");
+  assert.equal(t.error, "cancelled via forge cancel", "with its error intact");
+});
+
+test("setTaskStatus REFUSES to move a complete row off terminal, and reports true when it does move one", () => {
+  insertTask(task({ id: "task-term-c", status: "running" }));
+  markTaskComplete("task-term-c", { status: "complete" });
+  assert.equal(setTaskStatus("task-term-c", "pending"), false);
+  assert.equal(getTask("task-term-c")!.status, "complete");
+
+  insertTask(task({ id: "task-live", status: "running" }));
+  assert.equal(setTaskStatus("task-live", "awaiting_red"), true, "a non-terminal row still moves");
+  assert.equal(getTask("task-live")!.status, "awaiting_red");
+});
+
+// FG-676 (AC2): the background-settlement writer. markTaskFailed above is the LANDING
+// writer and overwrites deliberately; this one arrives after the fact, so the row a
+// human's decision put there has to survive it — error, result and completed_at whole.
+test("markTaskFailedIfNotTerminal REFUSES a row a human's decision already made terminal, and never touches its record", () => {
+  insertTask(task({ id: "task-settle-cancelled", status: "awaiting_recovery" }));
+  markTaskFailed("task-settle-cancelled", "cancelled via forge cancel", { artifact: "the human's" });
+  const decided = getTask("task-settle-cancelled")!;
+
+  assert.equal(
+    markTaskFailedIfNotTerminal("task-settle-cancelled", "publication attempt was converged to `abandoned`", { other: 1 }),
+    false,
+    "a background settlement may not move a terminal row",
+  );
+  const after = getTask("task-settle-cancelled")!;
+  assert.equal(after.error, "cancelled via forge cancel", "the human's error is never replaced");
+  assert.deepEqual(after.result, decided.result, "nor their result");
+  assert.equal(after.completedAt, decided.completedAt, "nor the time they decided");
+
+  insertTask(task({ id: "task-settle-live", status: "awaiting_recovery" }));
+  assert.equal(
+    markTaskFailedIfNotTerminal("task-settle-live", "publication attempt was converged to `abandoned`"),
+    true,
+    "a row nobody has decided still settles — the guard must not make failures unfalsifiable",
+  );
+  assert.equal(getTask("task-settle-live")!.status, "failed");
+  assert.equal(getTask("task-settle-live")!.error, "publication attempt was converged to `abandoned`");
+
+  insertTask(task({ id: "task-settle-complete", status: "running" }));
+  markTaskComplete("task-settle-complete", { status: "complete" });
+  assert.equal(markTaskFailedIfNotTerminal("task-settle-complete", "too late"), false, "and a complete row is terminal too");
+  assert.equal(getTask("task-settle-complete")!.status, "complete");
+});
+
+test("reopenFailedTaskForRecovery is the ONE deliberate terminal exit — failed only, awaiting_recovery only", () => {
+  insertTask(task({ id: "task-reopen", status: "running" }));
+  markTaskFailed("task-reopen", "publication window lost");
+  assert.equal(reopenFailedTaskForRecovery("task-reopen"), true);
+  assert.equal(getTask("task-reopen")!.status, "awaiting_recovery");
+
+  insertTask(task({ id: "task-reopen-c", status: "running" }));
+  markTaskComplete("task-reopen-c", { status: "complete" });
+  assert.equal(reopenFailedTaskForRecovery("task-reopen-c"), false, "a complete row is not reopenable");
+  assert.equal(getTask("task-reopen-c")!.status, "complete");
+});
+
+test("restoreTaskFailed reinstates a terminal row only from the status the caller observed", () => {
+  insertTask(task({ id: "task-restore", status: "awaiting_gate", result: { a: 1 } }));
+
+  assert.equal(
+    restoreTaskFailed("task-restore", {
+      error: "request-changes; superseded",
+      result: { a: 1 },
+      completedAt: "2026-06-02T05:00:29Z",
+      expectedStatus: "running",
+    }),
+    false,
+    "a status other than the observed one refuses",
+  );
+  assert.equal(getTask("task-restore")!.status, "awaiting_gate", "and writes nothing");
+
+  assert.equal(
+    restoreTaskFailed("task-restore", {
+      error: "request-changes; superseded",
+      result: { a: 1 },
+      completedAt: "2026-06-02T05:00:29Z",
+      expectedStatus: "awaiting_gate",
+    }),
+    true,
+  );
+  const t = getTask("task-restore")!;
+  assert.equal(t.status, "failed");
+  assert.equal(t.error, "request-changes; superseded");
+  assert.equal(t.completedAt, "2026-06-02T05:00:29Z", "the time it was given, never nowIso()");
+  assert.deepEqual(t.result, { a: 1 });
 });
 
 test("pendingTasksForRun returns only pending rows for the given run", () => {

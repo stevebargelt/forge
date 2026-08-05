@@ -5,9 +5,10 @@ import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
 import { insertTask, getTask } from "../store/tasks.js";
 import { getRun } from "../store/runs.js";
-import { eventsForTask, eventsForRun } from "../store/events.js";
+import { eventsForTask, eventsForRun, logEvent } from "../store/events.js";
 import type { Run, Task, TaskStatus, RunStatus } from "../types/index.js";
 import type { LivenessState } from "./reconcile-candidate.js";
+import { failureKindForTask } from "../v2/failure-kind.js";
 import { performOpsRepair } from "./repair.js";
 
 let db: DatabaseInstance;
@@ -207,4 +208,284 @@ test("performOpsRepair: refuses a run with no tasks", () => {
   const outcome = performOpsRepair("run-no-tasks", {}, NEVER_ALIVE);
   assert.equal(outcome.kind, "refused");
   assert.match((outcome as { reason: string }).reason, /no tasks/);
+});
+
+// ── resurrected_gate_decision repair (FG-676) ───────────────────────────────
+//
+// The row says awaiting_gate; its own event stream says a human already decided
+// it. The event stream is authoritative (the resurrection NULLed the row's
+// error), so the repair reconstructs the terminal row from it — and refuses by
+// name whenever the events do not prove the shape.
+
+const REJECTED_ARTIFACT = { status: "complete", diff_summary: "the rejected work", files_modified: ["src/a.ts"] };
+
+function mkResurrectedTask(id: string, runId: string, result?: unknown): Task {
+  return { ...mkTask(id, runId, "awaiting_gate"), result };
+}
+
+/** Replay the production order: gate.decided → task.failed(gate_rejected) →
+ *  the resurrecting task.awaiting_gate. The row itself is left as the
+ *  resurrection left it: awaiting_gate, error NULL, result carried. */
+function replayResurrection(runId: string, taskId: string, error: string): void {
+  logEvent("gate.decided", { runId, taskId, payload: { decision: "request-changes", rationale: error } });
+  logEvent("task.failed", { runId, taskId, payload: { failure_kind: "gate_rejected", error } });
+  logEvent("task.awaiting_gate", { runId, taskId, payload: {} });
+}
+
+test("performOpsRepair: restores a resurrected gate decision to failed, with the error recovered from the event stream", () => {
+  insertRun(mkRun("run-res", "active"));
+  insertTask(mkResurrectedTask("t-res", "run-res", REJECTED_ARTIFACT));
+  replayResurrection("run-res", "t-res", "request-changes; superseded");
+  const rawResultBefore = (db.prepare("SELECT result FROM tasks WHERE id = ?").get("t-res") as { result: string }).result;
+
+  const outcome = performOpsRepair("t-res");
+  assert.equal(outcome.kind, "gate-decision-restored");
+  assert.equal((outcome as { dryRun: boolean }).dryRun, false);
+  assert.equal((outcome as { restoredError: string }).restoredError, "request-changes; superseded");
+
+  const task = getTask("t-res")!;
+  assert.equal(task.status, "failed");
+  assert.equal(task.error, "request-changes; superseded", "error restored from the task.failed payload, not NULL");
+  assert.ok(task.completedAt, "completed_at set");
+  // AC2: the rejected artifact survives BYTE-IDENTICALLY.
+  const rawResultAfter = (db.prepare("SELECT result FROM tasks WHERE id = ?").get("t-res") as { result: string | null }).result;
+  assert.equal(rawResultAfter, rawResultBefore, "result column byte-identical — never NULLed, never re-shaped");
+  assert.deepEqual(task.result, REJECTED_ARTIFACT);
+});
+
+test("performOpsRepair: appends exactly ONE audit event (task.reconciled) and no second failure kind", () => {
+  insertRun(mkRun("run-res-ev", "active"));
+  insertTask(mkResurrectedTask("t-res-ev", "run-res-ev", REJECTED_ARTIFACT));
+  replayResurrection("run-res-ev", "t-res-ev", "request-changes; superseded");
+  const before = eventsForTask("t-res-ev").length;
+
+  performOpsRepair("t-res-ev");
+
+  const events = eventsForTask("t-res-ev");
+  assert.equal(events.length, before + 1, "exactly one event appended");
+  const appended = events[events.length - 1]!;
+  assert.equal(appended.eventType, "task.reconciled");
+  assert.deepEqual(appended.payload, {
+    from: "awaiting_gate",
+    to: "failed",
+    reason: "resurrected_gate_decision_repaired",
+  });
+  assert.equal(events.filter((e) => e.eventType === "task.failed").length, 1, "no second, contradictory task.failed");
+  // AC3: the ORIGINAL decision still reads as the task's failure kind.
+  assert.equal(failureKindForTask("t-res-ev"), "gate_rejected");
+});
+
+test("performOpsRepair: --dry-run on a resurrected gate decision writes nothing", () => {
+  insertRun(mkRun("run-res-dry", "active"));
+  insertTask(mkResurrectedTask("t-res-dry", "run-res-dry", REJECTED_ARTIFACT));
+  replayResurrection("run-res-dry", "t-res-dry", "request-changes; superseded");
+  const before = eventsForTask("t-res-dry").length;
+
+  const outcome = performOpsRepair("t-res-dry", { dryRun: true });
+  assert.equal(outcome.kind, "gate-decision-restored");
+  assert.equal((outcome as { dryRun: boolean }).dryRun, true);
+  assert.equal((outcome as { restoredError: string }).restoredError, "request-changes; superseded");
+
+  const task = getTask("t-res-dry")!;
+  assert.equal(task.status, "awaiting_gate", "row untouched");
+  assert.equal(task.error, undefined, "error still NULL");
+  assert.equal(eventsForTask("t-res-dry").length, before, "no events written");
+});
+
+test("performOpsRepair: a gate `reject` decision restores identically to request-changes", () => {
+  insertRun(mkRun("run-res-reject", "active"));
+  insertTask(mkResurrectedTask("t-res-reject", "run-res-reject", REJECTED_ARTIFACT));
+  logEvent("gate.decided", { runId: "run-res-reject", taskId: "t-res-reject", payload: { decision: "reject", rationale: "wrong approach" } });
+  logEvent("task.failed", { runId: "run-res-reject", taskId: "t-res-reject", payload: { failure_kind: "gate_rejected", error: "wrong approach" } });
+  logEvent("task.awaiting_gate", { runId: "run-res-reject", taskId: "t-res-reject", payload: {} });
+
+  const outcome = performOpsRepair("t-res-reject");
+  assert.equal(outcome.kind, "gate-decision-restored");
+  assert.equal(getTask("t-res-reject")!.error, "wrong approach");
+});
+
+// ── refusals: each names the fact that blocked it ──────────────────────────
+
+test("performOpsRepair: refuses an awaiting_gate row with NO terminal event — legitimately waiting on a human", () => {
+  insertRun(mkRun("run-legit", "active"));
+  insertTask(mkResurrectedTask("t-legit", "run-legit", REJECTED_ARTIFACT));
+  logEvent("task.awaiting_gate", { runId: "run-legit", taskId: "t-legit", payload: {} });
+
+  const outcome = performOpsRepair("t-legit");
+  assert.equal(outcome.kind, "refused");
+  assert.match((outcome as { reason: string }).reason, /legitimately awaiting a gate decision/);
+  assert.equal(getTask("t-legit")!.status, "awaiting_gate", "unchanged");
+  assert.equal(eventsForTask("t-legit").length, 1, "no events written");
+});
+
+test("performOpsRepair: refuses when the newest terminal failure is not a gate rejection", () => {
+  insertRun(mkRun("run-otherkind", "active"));
+  insertTask(mkResurrectedTask("t-otherkind", "run-otherkind"));
+  logEvent("task.failed", { runId: "run-otherkind", taskId: "t-otherkind", payload: { failure_kind: "container_crash", error: "exit 1" } });
+
+  const outcome = performOpsRepair("t-otherkind");
+  assert.equal(outcome.kind, "refused");
+  assert.match((outcome as { reason: string }).reason, /container_crash, not gate_rejected/);
+  assert.equal(getTask("t-otherkind")!.status, "awaiting_gate", "unchanged");
+});
+
+test("performOpsRepair: refuses when a later task.completed means the task recovered", () => {
+  insertRun(mkRun("run-recovered", "active"));
+  insertTask(mkResurrectedTask("t-recovered", "run-recovered"));
+  replayResurrection("run-recovered", "t-recovered", "rejected once");
+  logEvent("task.completed", { runId: "run-recovered", taskId: "t-recovered", payload: {} });
+  logEvent("task.awaiting_gate", { runId: "run-recovered", taskId: "t-recovered", payload: {} });
+
+  const outcome = performOpsRepair("t-recovered");
+  assert.equal(outcome.kind, "refused");
+  assert.match((outcome as { reason: string }).reason, /task\.completed.*recovered/);
+  assert.equal(getTask("t-recovered")!.status, "awaiting_gate", "unchanged");
+});
+
+test("performOpsRepair: refuses when the gate_rejected event records no error string — never fabricates a reason", () => {
+  insertRun(mkRun("run-noerr", "active"));
+  insertTask(mkResurrectedTask("t-noerr", "run-noerr"));
+  logEvent("task.failed", { runId: "run-noerr", taskId: "t-noerr", payload: { failure_kind: "gate_rejected" } });
+
+  const outcome = performOpsRepair("t-noerr");
+  assert.equal(outcome.kind, "refused");
+  assert.match((outcome as { reason: string }).reason, /no error string.*fabricated reason/);
+  assert.equal(getTask("t-noerr")!.status, "awaiting_gate", "unchanged");
+});
+
+test("performOpsRepair: refuses when the result column cannot be reproduced byte-for-byte — audit history is never re-shaped", () => {
+  insertRun(mkRun("run-bytes", "active"));
+  insertTask(mkResurrectedTask("t-bytes", "run-bytes", REJECTED_ARTIFACT));
+  replayResurrection("run-bytes", "t-bytes", "request-changes; superseded");
+  // A stored artifact whose JSON.parse → JSON.stringify round trip does NOT
+  // reproduce the stored bytes (pretty-printed whitespace).
+  const pretty = JSON.stringify(REJECTED_ARTIFACT, null, 2);
+  db.prepare("UPDATE tasks SET result = ? WHERE id = ?").run(pretty, "t-bytes");
+
+  const outcome = performOpsRepair("t-bytes");
+  assert.equal(outcome.kind, "refused");
+  assert.match((outcome as { reason: string }).reason, /cannot be reproduced byte-for-byte/);
+  const after = db.prepare("SELECT status, result FROM tasks WHERE id = ?").get("t-bytes") as { status: string; result: string };
+  assert.equal(after.status, "awaiting_gate", "row left untouched");
+  assert.equal(after.result, pretty, "artifact left untouched");
+});
+
+test("performOpsRepair: resurrected repair is idempotent — the second call refuses (the row is terminal again)", () => {
+  insertRun(mkRun("run-twice", "active"));
+  insertTask(mkResurrectedTask("t-twice", "run-twice", REJECTED_ARTIFACT));
+  replayResurrection("run-twice", "t-twice", "request-changes; superseded");
+
+  assert.equal(performOpsRepair("t-twice").kind, "gate-decision-restored");
+  const second = performOpsRepair("t-twice");
+  assert.equal(second.kind, "refused");
+  assert.match((second as { reason: string }).reason, /not pending/, "a restored row is failed — no longer either task shape");
+  assert.equal(getTask("t-twice")!.error, "request-changes; superseded", "still the restored terminal row");
+  assert.equal(eventsForTask("t-twice").filter((e) => e.eventType === "task.reconciled").length, 1);
+});
+
+// ── the repair may not become the defect it repairs (FG-676 build-gate reds) ──
+
+/** Interleave a write into the window between the repair's shape checks and its
+ *  own UPDATE. `prepare` of the terminal write is the last instant before it runs,
+ *  so a race fired there is exactly "a human decided this task after the shape was
+ *  checked" — the interleaving `forge gate` really produces, since nothing holds a
+ *  lock across the two. Fires once; every other statement passes straight through. */
+function raceOnTerminalWrite(real: DatabaseInstance, race: () => void): DatabaseInstance {
+  let fired = false;
+  return new Proxy(real, {
+    get(target, prop) {
+      if (prop !== "prepare") {
+        const v = Reflect.get(target, prop) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      }
+      return (sql: string) => {
+        if (!fired && /UPDATE tasks SET status = 'failed'/.test(sql)) {
+          fired = true;
+          race();
+        }
+        return target.prepare(sql);
+      };
+    },
+  }) as DatabaseInstance;
+}
+
+test("performOpsRepair: REFUSES when a human decides the task between the shape check and the write — the newer decision is never overwritten", () => {
+  insertRun(mkRun("run-race", "active"));
+  insertTask(mkResurrectedTask("t-race", "run-race", REJECTED_ARTIFACT));
+  replayResurrection("run-race", "t-race", "request-changes; superseded");
+
+  // The human force-advances the task while the repair is mid-flight. It is the
+  // most damaging shape of the race: an unconditional write turns a task the human
+  // just COMPLETED back into a failure.
+  setDbForTest(
+    raceOnTerminalWrite(db, () => {
+      db.prepare(`UPDATE tasks SET status = 'complete', error = NULL, completed_at = ? WHERE id = ?`)
+        .run("2026-06-02T09:00:00Z", "t-race");
+      logEvent("task.completed", { runId: "run-race", taskId: "t-race", payload: {} });
+    }),
+  );
+
+  const outcome = performOpsRepair("t-race");
+
+  assert.equal(outcome.kind, "refused", "the repair refuses rather than silently losing the race");
+  assert.match((outcome as { reason: string }).reason, /changed underneath the repair/);
+  assert.match((outcome as { reason: string }).reason, /nothing was written/);
+
+  const task = getTask("t-race")!;
+  assert.equal(task.status, "complete", "the NEWER decision stands — the repair did not overwrite it");
+  assert.equal(task.error, undefined, "and no rejection error was written back over it");
+  assert.equal(
+    eventsForTask("t-race").filter((e) => e.eventType === "task.reconciled").length,
+    0,
+    "and NO repair event was logged for a repair that did not happen",
+  );
+});
+
+test("performOpsRepair: the restore and its audit event are ATOMIC — a failing event write rolls the row back", () => {
+  insertRun(mkRun("run-atomic", "active"));
+  insertTask(mkResurrectedTask("t-atomic", "run-atomic", REJECTED_ARTIFACT));
+  replayResurrection("run-atomic", "t-atomic", "request-changes; superseded");
+  // Fail the events-table write only, which is the crash window: the row write and
+  // the audit append are separate statements, and a repair that can lose its own
+  // audit event is self-defeating (gate.ts wraps insertGate + gate.decided for this
+  // exact reason — FG-427 makes the events table the sole source for derivation).
+  db.exec(`CREATE TRIGGER no_reconciled BEFORE INSERT ON events WHEN NEW.event_type = 'task.reconciled'
+           BEGIN SELECT RAISE(ABORT, 'events write failed'); END;`);
+
+  assert.throws(() => performOpsRepair("t-atomic"), /events write failed/);
+
+  const task = getTask("t-atomic")!;
+  assert.equal(task.status, "awaiting_gate", "the row write rolled back with the event — no half-repair");
+  assert.equal(task.error, undefined, "no restored error stranded without a record of the repair");
+  assert.equal(eventsForTask("t-atomic").filter((e) => e.eventType === "task.reconciled").length, 0);
+});
+
+test("performOpsRepair: restores the TRUE terminal time from the decision's event, not the moment of repair", () => {
+  insertRun(mkRun("run-when", "active"));
+  insertTask(mkResurrectedTask("t-when", "run-when", REJECTED_ARTIFACT));
+  replayResurrection("run-when", "t-when", "request-changes; superseded");
+  // The resurrection NULLed completed_at, so the event is the only surviving copy
+  // of when the human actually decided.
+  const decidedAt = "2026-06-02T05:00:29.000Z";
+  const failedEvent = eventsForTask("t-when").find((e) => e.eventType === "task.failed")!;
+  db.prepare(`UPDATE events SET created_at = ? WHERE id = ?`).run(decidedAt, failedEvent.id);
+
+  assert.equal(performOpsRepair("t-when").kind, "gate-decision-restored");
+  assert.equal(
+    getTask("t-when")!.completedAt,
+    decidedAt,
+    "completed_at is the decision's time — a repair restoring audit fidelity may not stamp its own",
+  );
+});
+
+test("performOpsRepair: an awaiting_gate row is never mistaken for a retry_orphan, even under a terminal run", () => {
+  insertRun(mkRun("run-term-res", "complete"));
+  insertTask(mkResurrectedTask("t-term-res", "run-term-res", REJECTED_ARTIFACT));
+  replayResurrection("run-term-res", "t-term-res", "request-changes; superseded");
+
+  const outcome = performOpsRepair("t-term-res");
+  assert.equal(outcome.kind, "gate-decision-restored", "routed by status, not by the run's terminality");
+  assert.equal(getTask("t-term-res")!.error, "request-changes; superseded");
+  const runStatus = db.prepare("SELECT status FROM runs WHERE id = ?").get("run-term-res") as { status: string };
+  assert.equal(runStatus.status, "complete", "run status deliberately untouched");
 });

@@ -2101,6 +2101,180 @@ test("runNext: a pipeline task cancelled mid-spawn stays failed; no task.complet
 });
 
 // ---------------------------------------------------------------------------
+// FG-676: the AWN-2 race on the GATE side of finalizePrimary.
+//
+// The `none`/`auto` branch has been CAS'd since AWN-2 — a concurrent terminal
+// transition wins and the finalizer reports the row's actual status. The `human`
+// and `verdict` branches were not: they wrote `awaiting_gate` unconditionally,
+// NULLing the error, and then emitted task.awaiting_gate, pushed an operator
+// notification and returned "awaiting_gate" regardless. The row said one thing
+// and the event stream said another, and the row was a phantom blocker: no agent
+// ever runs for it, and no gate decision resolves it.
+//
+// So the CAS alone is not the fix — its BOOLEAN is. These two tests assert the
+// three records AGREE when a terminal transition wins the race: the stored
+// status, the status finalizePrimary returned (via the wave's step buckets), and
+// the events. One test per branch, because they are separate `case`s.
+// ---------------------------------------------------------------------------
+
+test("FG-676: a gate: human task failed mid-spawn is NOT resurrected to awaiting_gate — stored status, returned status and events all agree", async () => {
+  const { failTask } = await import("./failure-kind.js");
+  const { basename } = await import("node:path");
+  ensureRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const { runId } = startRun({ workflow: HUMAN_GATE_WORKFLOW, title: "gate-human cas", inputs: { brief: "x" }, projectDir: "/tmp/test-project" });
+
+  // The human decides terminally while the container is still running, then the
+  // container returns success. finalizePrimary's `human` branch lands next.
+  const cancelMidSpawn: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    failTask(basename(dir), { runId, kind: "cancelled", error: "cancelled via forge cancel" });
+    writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete" }));
+    writeFileSync(stdoutPath, ""); writeFileSync(stderrPath, "");
+    return 0;
+  };
+
+  const wave = await runNext({ runId, workflow: HUMAN_GATE_WORKFLOW, dockerExec: cancelMidSpawn });
+
+  const task = tasksForRun(runId).find((t) => t.phase === "needs-review" && t.parentId === undefined)!;
+  // (1) THE ROW. Terminal, with the error the human's decision wrote still on it —
+  //     markTaskHeldForGate NULLs `error`, so a resurrection is visible here even
+  //     if nothing else changed.
+  assert.equal(task.status, "failed", "the terminal row must stand — the gate landing may not resurrect it");
+  assert.equal(task.error, "cancelled via forge cancel", "and its error is intact, not NULLed by the awaiting_gate write");
+  assert.equal(failureKindForTask(task.id), "cancelled", "still recorded as the decision it was");
+
+  // (2) THE RETURNED STATUS, as the wave reports it. `awaiting_gate` here would be
+  //     the finalizer telling `forge next` a human owes a decision on a dead row.
+  assert.deepEqual(wave.awaitingGate, [], "the step is NOT reported as awaiting a gate decision");
+  assert.deepEqual(wave.failedSteps, ["needs-review"], "it is reported as what it is");
+
+  // (3) THE EVENTS.
+  const types = eventsForTask(task.id).map((e) => e.eventType);
+  assert.ok(types.includes("task.failed"), "task.failed emitted");
+  assert.ok(!types.includes("task.awaiting_gate"), "NO awaiting-gate event over a terminal row");
+  assert.ok(!types.includes("task.completed"), "and nothing completed it either");
+});
+
+test("FG-676: a gate: verdict task failed mid-spawn is NOT resurrected to awaiting_gate — the verdict branch is CAS'd too", async () => {
+  const { failTask } = await import("./failure-kind.js");
+  const { basename } = await import("node:path");
+  ensureRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const { runId } = startRun({ workflow: REDS_AUTH_ALL_PASS_WORKFLOW, title: "gate-verdict cas", inputs: {}, projectDir: "/tmp/test-project" });
+
+  // Only the PRIMARY is decided terminally — the reds run and pass as normal, so
+  // finalizePrimary reaches its `verdict` branch exactly as it does on the happy
+  // path. A gate rejection is the FG-676 shape; the CAS keys on the terminal
+  // status, not on which human verb produced it.
+  //
+  // The decision has to land from inside a RED's container, not the primary's:
+  // dispatchReds writes `awaiting_red` over the primary on its way in, so a
+  // decision taken before that would be laundered off the row by a DIFFERENT write
+  // and would prove nothing about this branch. Inside a red, the window is the real
+  // one — after the last write to the primary, before finalizePrimary lands it.
+  const exec = makeRoutingExec([
+    {
+      matches: (id) => id.startsWith("task-review-"),
+      result: { status: "complete", artifact: "the thing" },
+    },
+    {
+      matches: (id) => id.startsWith("task-red-review-"),
+      result: { status: "complete", verdict: "pass", confidence: 0.9, findings: [] },
+    },
+  ]);
+  let decided = false;
+  const rejectPrimaryMidReds: DockerExecFn = async (opts) => {
+    const code = await exec(opts);
+    if (basename(dirname(opts.stdoutPath)).startsWith("task-red-review-") && !decided) {
+      decided = true;
+      const primaryId = tasksForRun(runId).find((t) => t.phase === "review" && t.parentId === undefined)!.id;
+      failTask(primaryId, { runId, kind: "gate_rejected", error: "request-changes; superseded" });
+    }
+    return code;
+  };
+
+  const wave = await runNext({ runId, workflow: REDS_AUTH_ALL_PASS_WORKFLOW, dockerExec: rejectPrimaryMidReds });
+
+  const primary = tasksForRun(runId).find((t) => t.phase === "review" && t.parentId === undefined)!;
+  assert.equal(primary.status, "failed", "the terminal row must stand");
+  assert.equal(primary.error, "request-changes; superseded", "with its rejection rationale still on the row");
+  assert.equal(failureKindForTask(primary.id), "gate_rejected", "and still recorded as a gate rejection");
+
+  assert.deepEqual(wave.awaitingGate, [], "the step is NOT reported as awaiting a verdict gate decision");
+  assert.deepEqual(wave.failedSteps, ["review"], "it is reported as what it is");
+
+  const types = eventsForTask(primary.id).map((e) => e.eventType);
+  assert.ok(!types.includes("task.awaiting_gate"), "NO awaiting-gate event over a terminal row");
+  assert.ok(!types.includes("task.completed"), "and nothing completed it either");
+});
+
+// ---------------------------------------------------------------------------
+// FG-676: the SAME laundering, one write earlier — through `awaiting_red`.
+//
+// The CAS on markTaskHeldForGate is only a guard while the row it reads is still
+// terminal. runRedsAgainst's `setTaskStatus(taskId, "awaiting_red")` was a bare
+// UPDATE, so a decision taken BEFORE the reds dispatch was moved off terminal by
+// that write; the CAS then passed over `awaiting_red` and finalizePrimary
+// resurrected the task, NULLed its error and emitted task.awaiting_gate. The window
+// is reachable: `forge cancel` takes the run lock with { steal: true }.
+//
+// So the guard has to be at the writer. The test decides the primary from INSIDE
+// its own container — before the awaiting_red write, which is the case the verdict
+// test above deliberately could NOT cover.
+// ---------------------------------------------------------------------------
+
+test("FG-676: a task decided before its reds dispatch is NOT laundered off terminal through awaiting_red", async () => {
+  const { failTask } = await import("./failure-kind.js");
+  const { basename } = await import("node:path");
+  ensureRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const { runId } = startRun({ workflow: REDS_AUTH_ALL_PASS_WORKFLOW, title: "awaiting_red laundering", inputs: {}, projectDir: "/tmp/test-project" });
+
+  // The human rejects at the gate while the primary's container is still running —
+  // the row is terminal by the time the container returns and the reds are about to
+  // be dispatched.
+  const rejectMidSpawn: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const id = basename(dir);
+    if (id.startsWith("task-review-")) {
+      failTask(id, { runId, kind: "gate_rejected", error: "request-changes; superseded" });
+    }
+    writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", verdict: "pass", confidence: 0.9, findings: [] }));
+    writeFileSync(stdoutPath, ""); writeFileSync(stderrPath, "");
+    return 0;
+  };
+
+  const wave = await runNext({ runId, workflow: REDS_AUTH_ALL_PASS_WORKFLOW, dockerExec: rejectMidSpawn });
+
+  const primary = tasksForRun(runId).find((t) => t.phase === "review" && t.parentId === undefined)!;
+  // (1) THE ROW — the whole point. `awaiting_gate` here is the phantom blocker.
+  assert.equal(primary.status, "failed", "the decided row stays terminal — awaiting_red may not move it");
+  assert.equal(primary.error, "request-changes; superseded", "with its rejection rationale intact, not NULLed");
+  assert.equal(failureKindForTask(primary.id), "gate_rejected");
+
+  // (2) THE EVENTS agree with it: nothing announced a transition that never happened.
+  const types = eventsForTask(primary.id).map((e) => e.eventType);
+  assert.ok(!types.includes("task.awaiting_red"), "no awaiting-red event over a terminal row");
+  assert.ok(!types.includes("task.awaiting_gate"), "and therefore no resurrection to awaiting_gate");
+  assert.ok(!types.includes("task.completed"), "and nothing completed it");
+
+  // (3) NO REDS. Spending a red container on a task a human already decided is the
+  //     visible symptom of the same laundering.
+  assert.deepEqual(
+    tasksForRun(runId).filter((t) => t.parentId === primary.id).map((t) => t.id),
+    [],
+    "no red was dispatched against a decided task",
+  );
+
+  // (4) THE RETURNED STATUS.
+  assert.deepEqual(wave.awaitingGate, [], "the step is NOT reported as awaiting a gate decision");
+  assert.deepEqual(wave.failedSteps, ["review"], "it is reported as what it is");
+});
+
+// ---------------------------------------------------------------------------
 // forge-site regression: reds aren't fed the artifact, and fanout build reds
 // never dispatch. Three independent gaps in the v2 red-feed path.
 // ---------------------------------------------------------------------------

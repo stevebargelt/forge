@@ -223,8 +223,77 @@ export function markTaskFailed(id: string, error: string, result?: unknown): voi
     .run(error, result ? JSON.stringify(result) : null, nowIso(), id);
 }
 
-export function setTaskStatus(id: string, status: TaskStatus): void {
-  getDb().prepare(`UPDATE tasks SET status = ? WHERE id = ?`).run(status, id);
+// FG-676: the CAS'd counterpart of markTaskFailed, for a BACKGROUND settlement
+// that arrives after the fact and must never move a row that is already terminal.
+// markTaskFailed above is the LANDING writer — a container's own failure, on a row
+// this process holds — and it overwrites deliberately. A sweep settling a task it
+// selected some milliseconds earlier is the opposite case: a `forge cancel` or a
+// gate rejection can land in that window, and the bare UPDATE would replace the
+// human's error, result and completed_at with a publication failure of its own.
+//
+// Returns true iff this call failed the row. Callers MUST branch on it: appending
+// task.failed over a refused CAS makes the event stream disagree with the row.
+export function markTaskFailedIfNotTerminal(id: string, error: string, result?: unknown): boolean {
+  const info = getDb()
+    .prepare(
+      `UPDATE tasks SET status = 'failed', error = ?, result = ?, completed_at = ?
+       WHERE id = ? AND status NOT IN ('complete', 'failed')`
+    )
+    .run(error, result ? JSON.stringify(result) : null, nowIso(), id);
+  return info.changes === 1;
+}
+
+// FG-676: reinstate a terminal row the resurrection moved off terminal, CAS'd on
+// the status the caller's shape check actually OBSERVED, and stamped with the
+// TRUE terminal time (the task.failed event's), never the repair's. Distinct from
+// markTaskFailed because a repair is not a failure landing: it may not invent a
+// completed_at, and it may not overwrite a decision made between the shape check
+// and this write — the row moving underneath it means a NEWER decision won, and
+// silently losing that race is the exact defect the repair exists to remove.
+// Returns true iff this call reinstated the row.
+export function restoreTaskFailed(
+  id: string,
+  opts: { error: string; result: unknown; completedAt: string; expectedStatus: TaskStatus }
+): boolean {
+  const info = getDb()
+    .prepare(
+      `UPDATE tasks SET status = 'failed', error = ?, result = ?, completed_at = ?
+       WHERE id = ? AND status = ?`
+    )
+    .run(opts.error, opts.result ? JSON.stringify(opts.result) : null, opts.completedAt, id, opts.expectedStatus);
+  return info.changes === 1;
+}
+
+// FG-676: compare-and-set, like every other status writer here. It was a bare
+// UPDATE, and a bare UPDATE moves a TERMINAL row off terminal — which launders it
+// past markTaskHeldForGate's `status NOT IN ('complete','failed')` guard and
+// resurrects a human's decision to awaiting_gate with its error NULLed. Making
+// the guard structural is what BD-3 asks for: the one deliberate terminal ->
+// non-terminal move in the codebase is named below, and every other caller is
+// refused rather than trusted.
+//
+// Returns true iff this call moved the row. Callers MUST branch on it: emitting a
+// status event over a refused CAS makes the event stream disagree with the row.
+export function setTaskStatus(id: string, status: TaskStatus): boolean {
+  const info = getDb()
+    .prepare(`UPDATE tasks SET status = ? WHERE id = ? AND status NOT IN ('complete', 'failed')`)
+    .run(status, id);
+  return info.changes === 1;
+}
+
+// FG-425 (AC5) / FG-676: the ONE deliberate terminal -> non-terminal transition,
+// named so it cannot be reached by accident. reconcilePublicationRecoveries clears
+// a `failed` claim that a crash left standing over an attempt AD-5 recovery has
+// since converged to `published`, so finalizePrimary's completion CAS (which
+// refuses to overwrite a failed row on purpose) can land it. Narrowed to exactly
+// that source status: only `failed` is reopenable, and only into awaiting_recovery.
+// The caller must already have proven the terminal state was NOT a human's
+// decision — this writer cannot tell the difference.
+export function reopenFailedTaskForRecovery(id: string): boolean {
+  const info = getDb()
+    .prepare(`UPDATE tasks SET status = 'awaiting_recovery' WHERE id = ? AND status = 'failed'`)
+    .run(id);
+  return info.changes === 1;
 }
 
 export function setTaskParentId(id: string, parentId: string): void {
@@ -234,19 +303,19 @@ export function setTaskParentId(id: string, parentId: string): void {
 // Write captured result and transition to awaiting_gate before the human gate.
 // Distinct from markTaskComplete: gate completion still has to happen via the
 // human's gate decision; this is just the data-capture step before the gate.
-export function markTaskAwaitingGate(id: string, result: unknown): void {
-  getDb()
-    .prepare(
-      `UPDATE tasks SET status = 'awaiting_gate', result = ?, completed_at = NULL, error = NULL WHERE id = ?`
-    )
-    .run(JSON.stringify(result), id);
-}
-
-// FG-523: compare-and-set variant of markTaskAwaitingGate for the validation-
-// contract hold. The hold fires on the gate: auto/none path too, where a
-// concurrent `forge cancel` may already have marked the task failed — the
-// unconditional write above would resurrect it (the AWN-2 race markTaskComplete
-// guards against). Returns true iff this call held the task.
+//
+// Compare-and-set, and the ONLY writer of `awaiting_gate` (FG-523 added the CAS
+// for the validation-contract hold; FG-676 deleted the unconditional variant
+// that used to sit above it). A terminal row is never overwritten: a concurrent
+// `forge cancel`, or a `gate reject`/`request-changes` that already failed this
+// task, is a HUMAN's decision, and this write is a background one — resurrecting
+// it to awaiting_gate NULLs the error and parks the task on a decision no agent
+// will ever run for and no gate can resolve. That is the AWN-2 race
+// markTaskComplete guards against, arriving on the gate side.
+//
+// Returns true iff this call held the task. Callers MUST branch on it: emitting
+// task.awaiting_gate or an operator notification over a refused CAS would make
+// the event stream disagree with the row it describes.
 export function markTaskHeldForGate(id: string, result: unknown): boolean {
   const info = getDb()
     .prepare(
