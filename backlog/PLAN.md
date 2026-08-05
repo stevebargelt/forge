@@ -16,17 +16,37 @@ FG-496 and FG-591.
 
 ## Current objective
 
-Run the operator-sequenced series FG-676 → FG-679 → FG-610 (sequencing recorded
-2026-08-05). Each item starts only after the preceding one is merged, closed
-with acceptance evidence, and the live checkout is synchronized to current
-`main`. **FG-680, FG-676 and FG-679 have all shipped**; the series resumes at
-FG-610, which has not been started.
+**FG-610 SHIPPED** 2026-08-05 (merge `6b01d3c5`, PR #215), closed with a 16-row
+acceptance grid. The sequence now resumes at **FG-584, which comes before
+FG-591**. FG-610 demonstrated FG-584 live rather than merely arguing for it: the
+runner fanned both plan steps in parallel even though the plan declared step 2
+sequenced after step 1, so the docs child correctly self-failed rather than
+document a schema that was not committed yet. The latest feature plan
+again proved that Forge flattens semantically dependent implementation steps
+into isolated parallel siblings. File-disjointness does not make those children
+executable: each starts from the same committed base, so consumers cannot see a
+primitive another child creates and composition tests cannot see the behavior
+they are meant to verify.
 
-Both bounded safety prerequisites are now closed, so what remains is product
-feature work. Everything in review-infrastructure stays non-preempting.
+FG-584 is not a new scheduler design. It completes the Gas City-aligned
+controller / durable-work / Refinery contract that FG-116 and FG-139 claimed:
+plan-step dependencies are durable work dependencies; the controller dispatches
+only ready work; mutating workers use private writable workspaces; completed
+worker commits enter Forge's deterministic integration publisher; and dependent
+work starts from the candidate containing its integrated prerequisites. Merge
+conflicts are visible integration outcomes, not a reason to collapse every
+dependent plan into one worker.
 
-**FG-655 is now a measured tax, and it cost an override.** Its docs stage
-stranded correct, uncommitted work FOUR times this session — FG-680's
+Until FG-584 lands, collapsing dependent implementation steps is the safe
+workaround, explicitly not the target architecture. Everything in
+review-infrastructure stays non-preempting.
+
+**FG-655 SHIPPED 2026-08-05** (`c93e13af`, PR #213; docs follow-up `389eb744`,
+PR #214) — it was promoted ahead of FG-610 on operator instruction rather than
+deferred until after it, and the promotion question below is settled. The record
+of why is kept because it is the evidence that justified promoting it.
+
+Its docs stage stranded correct, uncommitted work FOUR times in the prior session — FG-680's
 `how-to-testing` section, FG-676's ADR writer-name correction, FG-679's
 falsified `SCHEMA-CONTRACT.md` response row, and the FG-684 closeout's
 declared-vs-channel separation. Each survived only because the tree was
@@ -37,11 +57,22 @@ gap, so shipping required an operator-authorized OVERRIDE plus a whole second
 PR to discharge it.
 
 It DOES terminate — the FG-684 closeout's second docs stage reconciled to
-nothing once the docs matched the code — so it fires when a fix batch moves
-documented behavior, not unconditionally. Still non-preempting under the
-operator sequence, but it has now demonstrably cost an override and an extra
-delivery, which is past the "measured impact" bar. Reconsider for promotion
-once FG-610 lands.
+nothing once the docs matched the code — so it fired when a fix batch moved
+documented behavior, not unconditionally.
+
+**A tenth occurrence happened live during FG-655's own review** and cost the same
+pair again: the review's docs stage reported `candidate unchanged` while a
+correct `concepts.md` correction sat uncommitted, which forced an operator
+`docs_closeout` override and a second PR (#214). It ran on the installed forge,
+which had no `commitDocsCycle` yet. With #213 merged and the linked checkout
+updated, the docs stage now commits its own work and this class of stranding is
+closed.
+
+**Two adjacent tickets demonstrated themselves in that same review and remain
+open:** FG-682 (a correction found after the docs stage records has no amendment
+path into a settled candidate — this is what forced the override) and FG-630
+(`request-changes` does not pass the rejected artifact into the retry inputs, so
+each of three plan-gate rejections re-derived the artifact from scratch).
 
 ## Recently completed
 
@@ -160,15 +191,41 @@ once FG-610 lands.
 
 ## Now
 
-1. **FG-610 — FG-496 Slice E:** atomic claims, leases, recovery, capacity
-   accounting, and canonical claim-next. NOT started. Build on the FG-609
-   primitives without inventing a second rank, readiness, blocker or lifecycle
-   vocabulary; preserve the queue position and active/deferred eligibility
-   decisions FG-609 already records. Treat atomic claims, lease expiry/recovery
-   and capacity accounting as concurrency-critical: transaction-level tests PLUS
-   a repeated host stress loop are required, because a single green execution is
-   not evidence. If its architect surfaces a genuinely unresolved operator
-   policy choice, STOP at that gate and report rather than guessing.
+1. **FG-610 — FG-496 Slice E:** SHIPPED 2026-08-05 (merge `6b01d3c5`, PR #215). Atomic claims, leases,
+   recovery, capacity accounting and the canonical claim-next query, built on the
+   FG-609 primitives with no second rank, readiness, blocker or lifecycle
+   vocabulary. Verified by a four-process cross-process race with falsification
+   mutants each demonstrated to fail, a 200-iteration host stress loop per race,
+   and a hand-authored aged-constraint-shape migration fixture. Two operator
+   policy questions were answered as binding decisions in the ticket body: the
+   capacity counting SCOPE is a required defaultless caller argument rather than
+   a baked-in policy (FG-591 picks it), and an operator dequeue/unrank/defer
+   never releases a live claim.
+
+## Next
+
+1. **FG-584 — semantic dependencies in feature build fanout:** REOPENED after
+   repeated live reproductions invalidated its 2026-07-17 recovery-mode
+   withdrawal. Complete the unfinished FG-116/FG-139 contract using Forge's
+   existing Gas City-aligned primitives, not a parallel wave scheduler:
+   materialize plan steps as durable dependent work; use the controller and
+   ready queue for dispatch; integrate each completed private worker branch
+   through the serialized publisher; and start dependents from the integrated
+   prerequisite candidate. Independent ready items remain parallel. Ordered
+   items may touch the same files; concurrently ready siblings may not. A merge
+   conflict becomes a typed integration outcome with a bounded resolution path.
+   The load-bearing regression is the recurring shape: A creates a primitive,
+   B/C consume it, and D verifies the composition. No downstream child may
+   dispatch before its prerequisite is durably integrated.
+2. **FG-591 — operator work queue:** Kanban, CLI/API controls, and
+   capacity-limited dispatch over the queue primitives.
+3. **FG-496 aggregate closeout:** reconcile the DB-backed backlog program
+   against its acceptance criteria after FG-609, FG-610, and FG-591 ship.
+4. **FG-576 — provider-neutral interactive orchestrator launcher:** resolve
+   Claude or Codex from model policy after the operator queue program closes.
+
+`Next` is deliberately short. Ordering here expresses current operator intent;
+it does not override ticket dependencies or authorize scope expansion.
 
 ## Superseded (kept briefly for context)
 
@@ -190,32 +247,14 @@ once FG-610 lands.
    candidate change; no GitHub/shell/git/CLI call from the dashboard's serving
    or polling path; `/status` and the dashboard must agree. Those are settled
    inputs — an implementer who disagrees stops and reports.
-## Next
-
-1. **FG-610 — FG-496 Slice E:** atomic claims, leases, recovery, capacity
-   accounting, and canonical claim-next. Unblocked: it was held behind FG-678
-   because its concurrency guarantees need host stress-loops on the writable
-   dispatch path, which is now deterministic. Starts only after FG-676 and
-   FG-679 ship cleanly; builds on the FG-609 primitives without inventing a
-   second rank, readiness, blocker or lifecycle vocabulary; concurrency-critical
-   throughout, so transaction-level tests PLUS a repeated host stress loop are
-   required — a single green execution is not evidence.
-3. **FG-591 — operator work queue:** Kanban, CLI/API controls, and
-   capacity-limited dispatch over the queue primitives.
-4. **FG-496 aggregate closeout:** reconcile the DB-backed backlog program
-   against its acceptance criteria after FG-609, FG-610, and FG-591 ship.
-5. **FG-576 — provider-neutral interactive orchestrator launcher:** resolve
-   Claude or Codex from model policy after the operator queue program closes.
-
-`Next` is deliberately short. Ordering here expresses current operator intent;
-it does not override ticket dependencies or authorize scope expansion.
 
 ## Captured follow-ups that do not preempt `Now`
 
 - **FG-652** — stage-record SHA in the crash-after-advance recovery window.
-- **FG-655** — documentation-stage commit authority. Until fixed, required
-  durable docs must be committed before review; do not rely on a post-review
-  docs stage to rescue uncommitted edits.
+- ~~**FG-655** — documentation-stage commit authority.~~ SHIPPED 2026-08-05
+  (`c93e13af`). The docs stage now commits its declared paths itself and advances
+  the candidate to the sha it authored, so the workaround this entry carried —
+  commit required durable docs before review — is no longer needed.
 - **FG-682** — a documentation correction discovered AFTER the docs stage has
   completed has no supported amendment path. Adjacent to FG-655 but distinct:
   FG-655 is a stage that produced edits and could not commit them; this is a
@@ -293,7 +332,12 @@ or have no demonstrated impact.
 - Evidence-led review runs once: one discovery pass, at most one remediation
   batch, and one recheck. Remaining work becomes an explicit disposition and
   follow-up, not another internal convergence cycle.
-- Required documentation is committed before review while FG-655 remains open.
+- The docs stage commits its own declared paths (FG-655, shipped `c93e13af`), so
+  required documentation no longer has to be committed before review. It still
+  must be DECLARED: the coordinator commits exactly the paths the agent lists in
+  `docs_updated`, an undeclared path is a named refusal rather than a silent
+  sweep, and a `docs_updated` that is missing, non-array, or carrying a
+  non-string member is a contract violation, never a claim that nothing changed.
 - The review coordinator owns candidate movement for ANY commit during a review,
   not only a fixer's output. While FG-682 remains open there is no supported way
   to amend a documentation correction found after the docs stage: committing it
