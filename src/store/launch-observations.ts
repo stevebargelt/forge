@@ -346,14 +346,17 @@ export function resolveRegisteredProjectDir(cwd: string): string | null {
 /** The project home a DECLARED association belongs to, read out of the store's own
  *  run registry — never guessed.
  *
- *  Explicit submission metadata is the STRONGEST authority (BD-3), so it must not
- *  lose to a cwd lookup that happens to fail. A per-task worktree is deliberately
+ *  Explicit submission metadata is the STRONGEST authority (BD-3), so it is consulted
+ *  FIRST and cwd only when it yields nothing (FG-684). Ordering these the other way
+ *  round made cwd win the CONFLICT, not just the gap: the orchestrator dispatches
+ *  `forge launch run --run <id>` from the forge checkout while the run belongs to a
+ *  disposable clone, so cwd resolved to forge and the launch was placed under an
+ *  unrelated project. The gap case matters too — a per-task worktree is deliberately
  *  outside every registered project home, so an otherwise explicit `--run` launch
- *  resolved to project_dir null and then vanished from its project's Current activity
- *  — defeating the ticket's own motivating case. The declared run (or the run its
- *  declared task belongs to) says which project it is, and that answer is at least as
- *  authoritative as the cwd one. A ticket id alone names no project; it stays null
- *  rather than being resolved by some looser channel. */
+ *  resolved to project_dir null and then vanished from its project's Current activity.
+ *  The declared run (or the run its declared task belongs to) says which project it
+ *  is. A ticket id alone names no project; it stays null rather than being resolved
+ *  by some looser channel. */
 function projectDirForAssociation(association: LaunchAssociation | undefined): string | null {
   const runId = association?.runId;
   const taskId = association?.taskId;
@@ -411,7 +414,7 @@ export function recordLaunchStart(meta: LaunchMeta, association?: LaunchAssociat
         name: meta.id,
         command: meta.command,
         cwd: meta.cwd,
-        projectDir: resolveRegisteredProjectDir(meta.cwd) ?? projectDirForAssociation(association),
+        projectDir: projectDirForAssociation(association) ?? resolveRegisteredProjectDir(meta.cwd),
         ...(association ? { association } : {}),
         startedAt: meta.startedAt,
         observedAt: meta.startedAt,

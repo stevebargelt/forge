@@ -148,6 +148,54 @@ describe("FG-679 BD-2/BD-15 — name, argv and log text authorize NOTHING", () =
     rmSync(worktree, { recursive: true, force: true });
   });
 
+  test("FG-684: when the declared run and the cwd name DIFFERENT registered projects, the declaration decides", () => {
+    // The orchestrator's own dispatch shape: `forge launch run --run <id>` is issued
+    // from the forge checkout while the run belongs to a disposable clone. Both
+    // resolve to a registered project, so this is a CONFLICT, not a fallback — and
+    // the weaker channel used to win it, placing the launch under an unrelated
+    // project. Explicit submission metadata is the strongest authority (BD-3).
+    const PROJECT_A = "/repos/clone-of-run-real";
+    const PROJECT_B = process.cwd();
+    getDb().prepare(`INSERT INTO runs (id, workflow, title, status, created_at, project_dir) VALUES ('run-real', 'feature', 'real', 'active', ?, ?)`)
+      .run("2026-08-05T09:00:00.000Z", PROJECT_A);
+    getDb().prepare(`INSERT INTO runs (id, workflow, title, status, created_at, project_dir) VALUES ('run-elsewhere', 'feature', 'elsewhere', 'active', ?, ?)`)
+      .run("2026-08-05T09:00:00.000Z", PROJECT_B);
+
+    const meta = startLaunch(["npm", "run", "test:all"], { name: "verify", cwd: PROJECT_B, tmux: tmuxStub() });
+    recordLaunchStart(meta, { runId: "run-real", ticketId: "FG-679" });
+
+    const obs = getLaunchObservation(meta.id);
+    assert.equal(obs?.projectDir, PROJECT_A, "the DECLARED run's project, not the one the cwd happens to sit in");
+    assert.equal(obs?.associationKind, "explicit", "the label names the channel that actually decided the placement");
+
+    const onRun = deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-real" } });
+    assert.deepEqual(onRun.hostVerification.map((l) => l.launchId), [meta.id], "on its declared run");
+
+    const onA = deriveCurrentActivity(db, { now: NOW, scope: { projectDirs: [PROJECT_A] } });
+    assert.deepEqual(onA.hostVerification.map((l) => l.launchId), [meta.id], "and on that run's project");
+    assert.equal(onA.hostVerification[0]!.unassociated, false);
+
+    const onB = deriveCurrentActivity(db, { now: NOW, scope: { projectDirs: [PROJECT_B] } });
+    assert.deepEqual(onB.hostVerification.map((l) => l.launchId), [], "and NOT on the unrelated project its cwd resolved to");
+  });
+
+  test("FG-684: an unregistered declared run falls back to its registered cwd project", () => {
+    const PROJECT = process.cwd();
+    getDb().prepare(`INSERT INTO runs (id, workflow, title, status, created_at, project_dir) VALUES ('run-cwd-owner', 'feature', 'cwd owner', 'active', ?, ?)`)
+      .run("2026-08-05T09:00:00.000Z", PROJECT);
+
+    const meta = startLaunch(["npm", "run", "test:all"], { name: "verify", cwd: PROJECT, tmux: tmuxStub() });
+    recordLaunchStart(meta, { runId: "run-unregistered", ticketId: "FG-679" });
+
+    const obs = getLaunchObservation(meta.id);
+    assert.equal(obs?.projectDir, PROJECT, "an unknown declared run does not discard a registered cwd fallback");
+    assert.equal(obs?.associationKind, "explicit", "the submitted association remains provenance even when cwd supplies placement");
+
+    const onProject = deriveCurrentActivity(db, { now: NOW, scope: { projectDirs: [PROJECT] } });
+    assert.deepEqual(onProject.hostVerification.map((l) => l.launchId), [meta.id]);
+    assert.equal(onProject.hostVerification[0]!.unassociated, false);
+  });
+
   test("a campaign drive-item launch — campaign and item identity, no run — is labeled `unassociated` at project level", () => {
     // The campaign launcher supplies exactly what it knows: no run exists yet (the
     // drive-item child dispatches its own). Recording that identity must not render
