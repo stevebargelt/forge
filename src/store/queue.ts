@@ -88,7 +88,12 @@ export type QueueEventType =
   | "enqueue"
   | "dequeue"
   | "reorder"
-  | "readiness";
+  | "readiness"
+  // FG-610 (Slice E): the claim/lease/recovery history lands in THIS history, not a
+  // second one. A claim and its release are operator-queue facts about the same
+  // subject as every type above, so one append-only table stays the whole story.
+  | "claim"
+  | "release";
 
 export type QueueEvent = {
   id: number;
@@ -187,7 +192,11 @@ function renumber(projectKey: string, orderedIds: string[]): void {
   }
 }
 
-function appendQueueEvent(
+/** Append one row to THE queue history. Exported since FG-610 so the claim
+ *  primitives write claim/release history into this same table rather than
+ *  opening a second one. The CALLER holds the write transaction — the event and
+ *  the state change it records must commit together or not at all. */
+export function appendQueueEvent(
   projectKey: string,
   ticketId: string,
   eventType: QueueEventType,
