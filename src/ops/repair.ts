@@ -28,10 +28,10 @@
 // the events do not PROVE the shape. It is operator-invoked by design: nothing in
 // a wave or any autonomous path performs it, because these rows are audit history.
 
-import { getTask, tasksForRun, markTaskFailed } from "../store/tasks.js";
+import { getTask, tasksForRun, markTaskFailed, restoreTaskFailed } from "../store/tasks.js";
 import { getRun, updateRunStatus } from "../store/runs.js";
 import { logEvent, eventsForTask, type Event } from "../store/events.js";
-import { getDb } from "../store/db.js";
+import { getDb, writeTransaction } from "../store/db.js";
 import { probeContainerLiveness, type LivenessProbe } from "./reconcile-candidate.js";
 import type { Run, Task } from "../types/index.js";
 
@@ -196,18 +196,50 @@ function repairResurrectedGateDecision(task: Task, opts: { dryRun?: boolean }): 
     return { kind: "gate-decision-restored", taskId: task.id, runId: task.runId, dryRun: true, restoredError };
   }
 
-  markTaskFailed(task.id, restoredError, task.result);
-  // Exactly ONE event. Deliberately NOT a second task.failed: the original one
-  // already carries `gate_rejected` and failureKindFromEvents reads it correctly
-  // past the task.awaiting_gate the resurrection wrote, so a new terminal failure
-  // would fabricate a second, contradictory disposition for one decision. This
-  // records the reconciliation itself, mirroring reconcile.ts and the
-  // retry_orphan repair above.
-  logEvent("task.reconciled", {
-    runId: task.runId,
-    taskId: task.id,
-    payload: { from: "awaiting_gate", to: "failed", reason: RESURRECTED_GATE_REASON },
+  // Atomic, for the same reason gate.ts:221 wraps insertGate + gate.decided: a
+  // crash between the two would leave a restored terminal row with no record that
+  // a repair touched it, and FG-427 makes the events table the sole source for
+  // outcome derivation. An audit repair that can lose its own audit event is
+  // self-defeating.
+  //
+  // CAS'd on the status the shape checks above actually OBSERVED. Every one of
+  // them read a snapshot; a human can decide this task in the window between them
+  // and this write, and an unconditional UPDATE would overwrite that newer
+  // decision — which is precisely the defect FG-676 exists to eliminate, arriving
+  // through the repair meant to clean it up. On refusal: no write, NO event, and
+  // the operator is told the row moved.
+  let restored = false;
+  writeTransaction(() => {
+    restored = restoreTaskFailed(task.id, {
+      error: restoredError,
+      result: task.result,
+      // FG-676: the TRUE terminal time, off the decision's own event. The
+      // resurrection NULLed completed_at, so this event is the only surviving
+      // copy — and a repair restoring audit fidelity must not stamp the row with
+      // the moment of repair.
+      completedAt: terminal.createdAt,
+      expectedStatus: task.status,
+    });
+    if (!restored) return;
+    // Exactly ONE event. Deliberately NOT a second task.failed: the original one
+    // already carries `gate_rejected` and failureKindFromEvents reads it correctly
+    // past the task.awaiting_gate the resurrection wrote, so a new terminal failure
+    // would fabricate a second, contradictory disposition for one decision. This
+    // records the reconciliation itself, mirroring reconcile.ts and the
+    // retry_orphan repair above.
+    logEvent("task.reconciled", {
+      runId: task.runId,
+      taskId: task.id,
+      payload: { from: "awaiting_gate", to: "failed", reason: RESURRECTED_GATE_REASON },
+    });
   });
+  if (!restored) {
+    return {
+      kind: "refused",
+      id: task.id,
+      reason: `task ${task.id} changed underneath the repair — it was ${task.status} when the shape was checked and is ${getTask(task.id)?.status ?? "gone"} now, so a newer decision won the race; nothing was written and no repair was recorded`,
+    };
+  }
   // Run status deliberately untouched — restoring the rejected task changes
   // nothing about whether its replacement settled the phase.
   return { kind: "gate-decision-restored", taskId: task.id, runId: task.runId, dryRun: false, restoredError };

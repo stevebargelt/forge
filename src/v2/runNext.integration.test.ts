@@ -2211,6 +2211,70 @@ test("FG-676: a gate: verdict task failed mid-spawn is NOT resurrected to awaiti
 });
 
 // ---------------------------------------------------------------------------
+// FG-676: the SAME laundering, one write earlier — through `awaiting_red`.
+//
+// The CAS on markTaskHeldForGate is only a guard while the row it reads is still
+// terminal. runRedsAgainst's `setTaskStatus(taskId, "awaiting_red")` was a bare
+// UPDATE, so a decision taken BEFORE the reds dispatch was moved off terminal by
+// that write; the CAS then passed over `awaiting_red` and finalizePrimary
+// resurrected the task, NULLed its error and emitted task.awaiting_gate. The window
+// is reachable: `forge cancel` takes the run lock with { steal: true }.
+//
+// So the guard has to be at the writer. The test decides the primary from INSIDE
+// its own container — before the awaiting_red write, which is the case the verdict
+// test above deliberately could NOT cover.
+// ---------------------------------------------------------------------------
+
+test("FG-676: a task decided before its reds dispatch is NOT laundered off terminal through awaiting_red", async () => {
+  const { failTask } = await import("./failure-kind.js");
+  const { basename } = await import("node:path");
+  ensureRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const { runId } = startRun({ workflow: REDS_AUTH_ALL_PASS_WORKFLOW, title: "awaiting_red laundering", inputs: {}, projectDir: "/tmp/test-project" });
+
+  // The human rejects at the gate while the primary's container is still running —
+  // the row is terminal by the time the container returns and the reds are about to
+  // be dispatched.
+  const rejectMidSpawn: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const id = basename(dir);
+    if (id.startsWith("task-review-")) {
+      failTask(id, { runId, kind: "gate_rejected", error: "request-changes; superseded" });
+    }
+    writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", verdict: "pass", confidence: 0.9, findings: [] }));
+    writeFileSync(stdoutPath, ""); writeFileSync(stderrPath, "");
+    return 0;
+  };
+
+  const wave = await runNext({ runId, workflow: REDS_AUTH_ALL_PASS_WORKFLOW, dockerExec: rejectMidSpawn });
+
+  const primary = tasksForRun(runId).find((t) => t.phase === "review" && t.parentId === undefined)!;
+  // (1) THE ROW — the whole point. `awaiting_gate` here is the phantom blocker.
+  assert.equal(primary.status, "failed", "the decided row stays terminal — awaiting_red may not move it");
+  assert.equal(primary.error, "request-changes; superseded", "with its rejection rationale intact, not NULLed");
+  assert.equal(failureKindForTask(primary.id), "gate_rejected");
+
+  // (2) THE EVENTS agree with it: nothing announced a transition that never happened.
+  const types = eventsForTask(primary.id).map((e) => e.eventType);
+  assert.ok(!types.includes("task.awaiting_red"), "no awaiting-red event over a terminal row");
+  assert.ok(!types.includes("task.awaiting_gate"), "and therefore no resurrection to awaiting_gate");
+  assert.ok(!types.includes("task.completed"), "and nothing completed it");
+
+  // (3) NO REDS. Spending a red container on a task a human already decided is the
+  //     visible symptom of the same laundering.
+  assert.deepEqual(
+    tasksForRun(runId).filter((t) => t.parentId === primary.id).map((t) => t.id),
+    [],
+    "no red was dispatched against a decided task",
+  );
+
+  // (4) THE RETURNED STATUS.
+  assert.deepEqual(wave.awaitingGate, [], "the step is NOT reported as awaiting a gate decision");
+  assert.deepEqual(wave.failedSteps, ["review"], "it is reported as what it is");
+});
+
+// ---------------------------------------------------------------------------
 // forge-site regression: reds aren't fed the artifact, and fanout build reds
 // never dispatch. Three independent gaps in the v2 red-feed path.
 // ---------------------------------------------------------------------------

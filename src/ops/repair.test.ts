@@ -383,6 +383,101 @@ test("performOpsRepair: resurrected repair is idempotent — the second call ref
   assert.equal(eventsForTask("t-twice").filter((e) => e.eventType === "task.reconciled").length, 1);
 });
 
+// ── the repair may not become the defect it repairs (FG-676 build-gate reds) ──
+
+/** Interleave a write into the window between the repair's shape checks and its
+ *  own UPDATE. `prepare` of the terminal write is the last instant before it runs,
+ *  so a race fired there is exactly "a human decided this task after the shape was
+ *  checked" — the interleaving `forge gate` really produces, since nothing holds a
+ *  lock across the two. Fires once; every other statement passes straight through. */
+function raceOnTerminalWrite(real: DatabaseInstance, race: () => void): DatabaseInstance {
+  let fired = false;
+  return new Proxy(real, {
+    get(target, prop) {
+      if (prop !== "prepare") {
+        const v = Reflect.get(target, prop) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      }
+      return (sql: string) => {
+        if (!fired && /UPDATE tasks SET status = 'failed'/.test(sql)) {
+          fired = true;
+          race();
+        }
+        return target.prepare(sql);
+      };
+    },
+  }) as DatabaseInstance;
+}
+
+test("performOpsRepair: REFUSES when a human decides the task between the shape check and the write — the newer decision is never overwritten", () => {
+  insertRun(mkRun("run-race", "active"));
+  insertTask(mkResurrectedTask("t-race", "run-race", REJECTED_ARTIFACT));
+  replayResurrection("run-race", "t-race", "request-changes; superseded");
+
+  // The human force-advances the task while the repair is mid-flight. It is the
+  // most damaging shape of the race: an unconditional write turns a task the human
+  // just COMPLETED back into a failure.
+  setDbForTest(
+    raceOnTerminalWrite(db, () => {
+      db.prepare(`UPDATE tasks SET status = 'complete', error = NULL, completed_at = ? WHERE id = ?`)
+        .run("2026-06-02T09:00:00Z", "t-race");
+      logEvent("task.completed", { runId: "run-race", taskId: "t-race", payload: {} });
+    }),
+  );
+
+  const outcome = performOpsRepair("t-race");
+
+  assert.equal(outcome.kind, "refused", "the repair refuses rather than silently losing the race");
+  assert.match((outcome as { reason: string }).reason, /changed underneath the repair/);
+  assert.match((outcome as { reason: string }).reason, /nothing was written/);
+
+  const task = getTask("t-race")!;
+  assert.equal(task.status, "complete", "the NEWER decision stands — the repair did not overwrite it");
+  assert.equal(task.error, undefined, "and no rejection error was written back over it");
+  assert.equal(
+    eventsForTask("t-race").filter((e) => e.eventType === "task.reconciled").length,
+    0,
+    "and NO repair event was logged for a repair that did not happen",
+  );
+});
+
+test("performOpsRepair: the restore and its audit event are ATOMIC — a failing event write rolls the row back", () => {
+  insertRun(mkRun("run-atomic", "active"));
+  insertTask(mkResurrectedTask("t-atomic", "run-atomic", REJECTED_ARTIFACT));
+  replayResurrection("run-atomic", "t-atomic", "request-changes; superseded");
+  // Fail the events-table write only, which is the crash window: the row write and
+  // the audit append are separate statements, and a repair that can lose its own
+  // audit event is self-defeating (gate.ts wraps insertGate + gate.decided for this
+  // exact reason — FG-427 makes the events table the sole source for derivation).
+  db.exec(`CREATE TRIGGER no_reconciled BEFORE INSERT ON events WHEN NEW.event_type = 'task.reconciled'
+           BEGIN SELECT RAISE(ABORT, 'events write failed'); END;`);
+
+  assert.throws(() => performOpsRepair("t-atomic"), /events write failed/);
+
+  const task = getTask("t-atomic")!;
+  assert.equal(task.status, "awaiting_gate", "the row write rolled back with the event — no half-repair");
+  assert.equal(task.error, undefined, "no restored error stranded without a record of the repair");
+  assert.equal(eventsForTask("t-atomic").filter((e) => e.eventType === "task.reconciled").length, 0);
+});
+
+test("performOpsRepair: restores the TRUE terminal time from the decision's event, not the moment of repair", () => {
+  insertRun(mkRun("run-when", "active"));
+  insertTask(mkResurrectedTask("t-when", "run-when", REJECTED_ARTIFACT));
+  replayResurrection("run-when", "t-when", "request-changes; superseded");
+  // The resurrection NULLed completed_at, so the event is the only surviving copy
+  // of when the human actually decided.
+  const decidedAt = "2026-06-02T05:00:29.000Z";
+  const failedEvent = eventsForTask("t-when").find((e) => e.eventType === "task.failed")!;
+  db.prepare(`UPDATE events SET created_at = ? WHERE id = ?`).run(decidedAt, failedEvent.id);
+
+  assert.equal(performOpsRepair("t-when").kind, "gate-decision-restored");
+  assert.equal(
+    getTask("t-when")!.completedAt,
+    decidedAt,
+    "completed_at is the decision's time — a repair restoring audit fidelity may not stamp its own",
+  );
+});
+
 test("performOpsRepair: an awaiting_gate row is never mistaken for a retry_orphan, even under a terminal run", () => {
   insertRun(mkRun("run-term-res", "complete"));
   insertTask(mkResurrectedTask("t-term-res", "run-term-res", REJECTED_ARTIFACT));

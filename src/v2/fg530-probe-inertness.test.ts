@@ -938,7 +938,7 @@ const ALLOWLIST: Allow[] = [
   {
     file: "v2/runNext.ts",
     fn: "reconcilePublicationRecoveries",
-    call: "setTaskStatus",
+    call: "reopenFailedTaskForRecovery",
     reason:
       "clears a terminal `failed` claim that a crash (or a pre-fix build) left standing over an attempt AD-5 recovery has since " +
       "converged to `published`, moving it to awaiting_recovery so finalizePrimary's completion CAS — which refuses to overwrite " +

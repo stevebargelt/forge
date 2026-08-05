@@ -140,7 +140,8 @@ export function registerPublish(program: Command): void {
       // Both halves, or this command settles the publication and leaves the task that
       // owns it stuck in `awaiting_recovery`: converge the attempt, then reconcile the
       // task from it — the same reconciliation `forge next` runs.
-      const { outcome, task, unreconciled, publishedAfterCancel } = recoverPublicationByHand(attemptId);
+      const { outcome, task, unreconciled, publishedAfterCancel, notReconciled } =
+        recoverPublicationByHand(attemptId);
       if (outcome.kind === "blocked") {
         console.error(outcome.error);
         process.exitCode = 1;
@@ -177,6 +178,14 @@ export function registerPublish(program: Command): void {
       }
       if (task) {
         console.log(`  task ${task.taskId} (run ${task.runId}) reconciled onto it: ${task.status}`);
+      }
+      // FG-676: the reconciliation REFUSED this task. Nothing was reconciled, so it
+      // is reported as a refusal with its cause — never as a reconciliation.
+      if (notReconciled) {
+        console.log(
+          `  task ${notReconciled.taskId} (run ${notReconciled.runId}) was NOT reconciled onto it and stays ` +
+            `${notReconciled.status}: ${notReconciled.reason}.`,
+        );
       }
       // FG-425: the task was cancelled and its candidate landed anyway. Recovery
       // settles the publication and leaves the cancel standing — say both, or an

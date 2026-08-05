@@ -33,7 +33,7 @@ import { tasksForRun } from "../store/tasks.js";
 import { getRun } from "../store/runs.js";
 import { finalizeRunIfSettled } from "./run-finalize.js";
 import { notifyOnTaskBlockedByRed, notifyOnGateAwaiting } from "../notify/trigger.js";
-import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskAwaitingRecovery, markTaskHeldForGate, markTaskBlockedByRed, markTaskFailed, setTaskStatus, setTaskWorkspace, clearTaskWorkspace } from "../store/tasks.js";
+import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskAwaitingRecovery, markTaskHeldForGate, markTaskBlockedByRed, markTaskFailed, setTaskStatus, reopenFailedTaskForRecovery, setTaskWorkspace, clearTaskWorkspace } from "../store/tasks.js";
 import { failTask, classify, failureKindFromEvents, ORPHAN_EVIDENCE_KINDS } from "./failure-kind.js";
 import type { FailureKind, OrphanEvidence, ContainerCausalEvidence } from "./failure-kind.js";
 import { captureUsageForTask } from "../store/model-calls.js";
@@ -898,6 +898,11 @@ async function dispatchSingleStep(args: {
   // non-worktree path is byte-for-byte unchanged: no lane, no lock, no gate.
   let publicationAttemptId: string | undefined;
   let redAggregate: RedAggregate | undefined;
+  // FG-676: set when the awaiting_red CAS below refused because the task reached a
+  // terminal status while its candidate was validating. The publisher only learns
+  // "validation said no"; the caller needs to know it was a DECISION, so it neither
+  // publishes nor writes a disposition over the row.
+  let terminalDuringReds = false;
 
   // Reds against a given tree. Called with the CANDIDATE worktree when publishing
   // (so the reds review exactly what will land, and an AD-1 rebuild re-runs them
@@ -906,7 +911,17 @@ async function dispatchSingleStep(args: {
     if (step.reds.length === 0) return { ok: true };
     // Per FORGE-DEC-017: blue is done, reds are about to run.
     crashPoint("dispatchSingleStep:before-awaiting-red");
-    setTaskStatus(taskId, "awaiting_red");
+    // FG-676: CAS'd. `forge cancel` steals the run lock, so a task can go terminal
+    // right here — and a bare write would move it OFF terminal, which is all
+    // markTaskHeldForGate's CAS needs to pass later and resurrect the decision.
+    // Refused means the row is terminal: no event, no reds, nothing published.
+    if (!setTaskStatus(taskId, "awaiting_red")) {
+      terminalDuringReds = true;
+      return {
+        ok: false,
+        error: `task ${taskId} reached ${getTask(taskId)?.status ?? "a terminal status"} while its candidate was validating — refusing to run reds against, or publish, a task that is already decided`,
+      };
+    }
     crashPoint("dispatchSingleStep:between-awaiting-red-status-and-event");
     logEvent("task.awaiting_red", { runId: args.runId, taskId });
     crashPoint("dispatchSingleStep:after-awaiting-red");
@@ -1014,6 +1029,14 @@ async function dispatchSingleStep(args: {
     });
 
     if (publication.kind !== "published") {
+      // FG-676: validation refused because the task was DECIDED mid-flight, not
+      // because the candidate is bad. Nothing was published, and the row already
+      // says what it says — writing a disposition over it would overwrite the
+      // human's. Report the row's actual status and touch nothing.
+      if (terminalDuringReds) {
+        finalizeContainerRetention(containerName, false);
+        return getTask(taskId)?.status ?? "failed";
+      }
       // FG-425 (AC5): the ref advance landed and the window was lost. There is no
       // terminal truth to write yet — least of all a failure telling the operator
       // nothing was published. Land the task RECOVERABLE and leave it there.
@@ -1054,6 +1077,10 @@ async function dispatchSingleStep(args: {
     // Non-worktree mode: no candidate, no publisher. Reds run against the project
     // directory exactly as they always did.
     const reds = await runRedsAgainst(args.projectDir);
+    if (terminalDuringReds) {
+      finalizeContainerRetention(containerName, false);
+      return getTask(taskId)?.status ?? "failed";
+    }
     if (!reds.ok) return await landBlockedByRed();
   }
 
@@ -2384,11 +2411,19 @@ async function dispatchFanoutStep(args: {
   //     for the NEW candidateSha. Re-running only the gate would publish a rebuilt
   //     tree that no red ever saw.
   let redAggregate: RedAggregate | undefined;
+  // FG-676: the fanout twin of dispatchSingleStep's flag — same CAS, same reason.
+  let terminalDuringReds = false;
 
   const runFanoutRedsAgainst = async (dir: string): Promise<ValidationResult> => {
     if (step.reds.length === 0) return { ok: true };
     crashPoint("dispatchFanoutStep:before-awaiting-red");
-    setTaskStatus(parentId, "awaiting_red");
+    if (!setTaskStatus(parentId, "awaiting_red")) {
+      terminalDuringReds = true;
+      return {
+        ok: false,
+        error: `task ${parentId} reached ${getTask(parentId)?.status ?? "a terminal status"} while its candidate was validating — refusing to run reds against, or publish, a task that is already decided`,
+      };
+    }
     crashPoint("dispatchFanoutStep:between-awaiting-red-status-and-event");
     logEvent("task.awaiting_red", { runId: args.runId, taskId: parentId });
     crashPoint("dispatchFanoutStep:after-awaiting-red");
@@ -2436,6 +2471,7 @@ async function dispatchFanoutStep(args: {
     const published = await publishFanoutIntegration(args, parentId, parentResult, childOutcomes, {
       alsoValidate: (candidateDir) => runFanoutRedsAgainst(candidateDir),
       redRejected: () => redAggregate?.authoritativeFail === true,
+      terminallyDecided: () => terminalDuringReds,
     });
     if (published === "red_rejected") return await landFanoutBlockedByRed();
     if (published !== "complete") return published;
@@ -2443,6 +2479,9 @@ async function dispatchFanoutStep(args: {
     // Non-worktree mode: no integration branch, no candidate, no publisher. Reds
     // run against the project directory, exactly as they always did.
     const reds = await runFanoutRedsAgainst(args.projectDir);
+    // FG-676: decided mid-flight — the row is terminal and stays exactly as the
+    // human left it.
+    if (terminalDuringReds) return getTask(parentId)?.status ?? "failed";
     if (!reds.ok) return await landFanoutBlockedByRed();
   }
 
@@ -2479,6 +2518,10 @@ async function publishFanoutIntegration(
      *  one refusal that is a human decision (blocked_by_red) from every other one
      *  (a task failure). */
     redRejected?: () => boolean;
+    /** FG-676: true once the parent went TERMINAL mid-validation (a human decided
+     *  it). Nothing was published and the row already carries a decision, so no
+     *  disposition may be written over it. */
+    terminallyDecided?: () => boolean;
     reEntry?: boolean;
   } = {},
 ): Promise<string> {
@@ -2518,6 +2561,7 @@ async function publishFanoutIntegration(
     // The caller distinguishes a RED rejection (blocked_by_red — a human decision)
     // from every other refusal (a task failure). Nothing was published either way;
     // the integration branch and child worktrees are retained for inspection.
+    if (opts.terminallyDecided?.()) return getTask(parentId)?.status ?? "failed";
     if (opts.redRejected?.()) return "red_rejected";
     failTask(parentId, {
       runId: args.runId,
@@ -2706,7 +2750,13 @@ function reconcilePublicationRecoveries(runId: string, workflow: Workflow, proje
       // completion CAS refuses to overwrite a `failed` row on purpose (it guards a
       // completing container against a concurrent cancel) — and that guard must not be
       // relaxed, so the repair steps through awaiting_recovery rather than around it.
-      if (task.status === "failed") setTaskStatus(task.id, "awaiting_recovery");
+      //
+      // FG-676: through the ONE writer that may do this, narrowed to failed ->
+      // awaiting_recovery. A refusal means the row moved since this sweep read it,
+      // so the snapshot this repair was derived from is stale — leave it for the
+      // next sweep to re-derive rather than landing a decision on a row that has
+      // since changed.
+      if (task.status === "failed" && !reopenFailedTaskForRecovery(task.id)) continue;
       // The candidate LANDED. The task's work is on the target, so the task finishes
       // exactly as it would have had the window never been lost — through the same
       // gate its step declares (a lost mutex is not a reason to skip a human gate).
@@ -2794,6 +2844,11 @@ export type HandRecovery = {
    *  Nothing was reconciled — a cancel is terminal — but the candidate IS on the target,
    *  and the operator who cancelled it may not be left thinking otherwise. */
   publishedAfterCancel?: { taskId: string; runId: string; publishedSha: string; target: string };
+  /** FG-676: set when the reconciliation REFUSED this task because a human had already
+   *  decided it. Mutually exclusive with `task`: reporting a status under "reconciled
+   *  onto it" at the moment the guard refused to reconcile is the same lie the guard
+   *  exists to prevent, one line further down. */
+  notReconciled?: { taskId: string; runId: string; status: string; reason: string };
 };
 
 export function recoverPublicationByHand(attemptId: string): HandRecovery {
@@ -2833,10 +2888,13 @@ export function recoverPublicationByHand(attemptId: string): HandRecovery {
   if (!task) return { outcome };
   // The hand path goes through the same reconciliation as a wave, so it refuses the
   // same resurrection — and it owes the operator the same account of it. Nothing was
-  // reconciled here (the cancel stands), so reporting a reconciliation would be a
-  // second lie on top of the one this guard exists to prevent.
+  // reconciled here (the human's decision stands), so reporting a reconciliation would
+  // be a second lie on top of the one this guard exists to prevent. That is true of a
+  // gate rejection exactly as it is of a cancel (FG-676): both fall past this point
+  // un-reconciled, so neither may be reported as reconciled.
   const settled = getPublicationAttempt(attemptId);
-  if (humanDecidedTerminalState(task.id) === "cancelled" && settled?.state === "published" && settled.publishedSha) {
+  const decided = humanDecidedTerminalState(task.id);
+  if (decided === "cancelled" && settled?.state === "published" && settled.publishedSha) {
     return {
       outcome,
       publishedAfterCancel: {
@@ -2844,6 +2902,20 @@ export function recoverPublicationByHand(attemptId: string): HandRecovery {
         runId: attempt.runId,
         publishedSha: settled.publishedSha,
         target: settled.target,
+      },
+    };
+  }
+  if (decided) {
+    return {
+      outcome,
+      notReconciled: {
+        taskId: task.id,
+        runId: attempt.runId,
+        status: task.status,
+        reason:
+          decided === "cancelled"
+            ? "it was CANCELLED — a human's decision is terminal and recovery leaves it standing"
+            : "a human REJECTED it at its gate — that decision is terminal and recovery leaves it standing",
       },
     };
   }

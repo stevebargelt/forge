@@ -223,8 +223,57 @@ export function markTaskFailed(id: string, error: string, result?: unknown): voi
     .run(error, result ? JSON.stringify(result) : null, nowIso(), id);
 }
 
-export function setTaskStatus(id: string, status: TaskStatus): void {
-  getDb().prepare(`UPDATE tasks SET status = ? WHERE id = ?`).run(status, id);
+// FG-676: reinstate a terminal row the resurrection moved off terminal, CAS'd on
+// the status the caller's shape check actually OBSERVED, and stamped with the
+// TRUE terminal time (the task.failed event's), never the repair's. Distinct from
+// markTaskFailed because a repair is not a failure landing: it may not invent a
+// completed_at, and it may not overwrite a decision made between the shape check
+// and this write — the row moving underneath it means a NEWER decision won, and
+// silently losing that race is the exact defect the repair exists to remove.
+// Returns true iff this call reinstated the row.
+export function restoreTaskFailed(
+  id: string,
+  opts: { error: string; result: unknown; completedAt: string; expectedStatus: TaskStatus }
+): boolean {
+  const info = getDb()
+    .prepare(
+      `UPDATE tasks SET status = 'failed', error = ?, result = ?, completed_at = ?
+       WHERE id = ? AND status = ?`
+    )
+    .run(opts.error, opts.result ? JSON.stringify(opts.result) : null, opts.completedAt, id, opts.expectedStatus);
+  return info.changes === 1;
+}
+
+// FG-676: compare-and-set, like every other status writer here. It was a bare
+// UPDATE, and a bare UPDATE moves a TERMINAL row off terminal — which launders it
+// past markTaskHeldForGate's `status NOT IN ('complete','failed')` guard and
+// resurrects a human's decision to awaiting_gate with its error NULLed. Making
+// the guard structural is what BD-3 asks for: the one deliberate terminal ->
+// non-terminal move in the codebase is named below, and every other caller is
+// refused rather than trusted.
+//
+// Returns true iff this call moved the row. Callers MUST branch on it: emitting a
+// status event over a refused CAS makes the event stream disagree with the row.
+export function setTaskStatus(id: string, status: TaskStatus): boolean {
+  const info = getDb()
+    .prepare(`UPDATE tasks SET status = ? WHERE id = ? AND status NOT IN ('complete', 'failed')`)
+    .run(status, id);
+  return info.changes === 1;
+}
+
+// FG-425 (AC5) / FG-676: the ONE deliberate terminal -> non-terminal transition,
+// named so it cannot be reached by accident. reconcilePublicationRecoveries clears
+// a `failed` claim that a crash left standing over an attempt AD-5 recovery has
+// since converged to `published`, so finalizePrimary's completion CAS (which
+// refuses to overwrite a failed row on purpose) can land it. Narrowed to exactly
+// that source status: only `failed` is reopenable, and only into awaiting_recovery.
+// The caller must already have proven the terminal state was NOT a human's
+// decision — this writer cannot tell the difference.
+export function reopenFailedTaskForRecovery(id: string): boolean {
+  const info = getDb()
+    .prepare(`UPDATE tasks SET status = 'awaiting_recovery' WHERE id = ? AND status = 'failed'`)
+    .run(id);
+  return info.changes === 1;
 }
 
 export function setTaskParentId(id: string, parentId: string): void {

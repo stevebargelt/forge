@@ -917,7 +917,14 @@ test("FG-676: a gate `request-changes` task whose publication is `published` STA
   const hand = recoverPublicationByHand(attempt.attemptId);
   assert.equal(hand.outcome.kind, "published", "the attempt is settled — the hand path re-derives nothing");
   assert.equal(hand.publishedAfterCancel, undefined, "this was not a cancel, so no published-after-cancel report");
-  assert.equal(hand.task?.status, "failed", "and what it reports about the task is the TRUTH, not a resurrection");
+  // The guard REFUSED to reconcile this task, so the command may not report one. The
+  // CLI renders `task` as "reconciled onto it: <status>" — reporting a status there
+  // at the exact moment nothing was reconciled is the same lie the guard exists to
+  // prevent, one line further down.
+  assert.equal(hand.task, undefined, "nothing was reconciled, so there is no reconciliation to report");
+  assert.equal(hand.notReconciled?.taskId, rejected.id, "the refusal is reported instead");
+  assert.equal(hand.notReconciled?.status, "failed", "naming the status the task actually stays at");
+  assert.match(hand.notReconciled!.reason, /REJECTED/, "and why: a human decided it");
   assertRejectedRowIntact(rejected.id, publishedResult, "after `forge publish recover`");
 
   // ── EXACTLY ONE TASK AWAITING A DECISION. The whole operational cost of the defect:
