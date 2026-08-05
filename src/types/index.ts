@@ -222,7 +222,12 @@ export type RecommendedAction = {
   reason: string;
 };
 
-export type IncidentKind = "retry_orphan" | "inconsistent_run_state" | "reconcile_candidate" | "orphaned_work_may_persist" | "oom_killed" | "orphaned_needs_finalize" | "stuck_run" | "container_reap_failed";
+// FG-676: `resurrected_gate_decision` — a task row sitting at `awaiting_gate`
+// whose event stream's latest terminal fact is a gate rejection. The row
+// contradicts its own history: a human decided the task, and a later write moved
+// it back to a state no agent runs for and no gate decision resolves. Repaired by
+// `forge ops repair <taskId>` (operator-invoked; nothing self-heals it).
+export type IncidentKind = "retry_orphan" | "inconsistent_run_state" | "reconcile_candidate" | "orphaned_work_may_persist" | "oom_killed" | "orphaned_needs_finalize" | "stuck_run" | "container_reap_failed" | "resurrected_gate_decision";
 
 export type VerificationCommand = {
   command: string;

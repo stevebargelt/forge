@@ -322,12 +322,17 @@ export function registerOps(program: Command): void {
 
   ops
     .command("repair")
-    .argument("<id>", "the orphaned task id (retry_orphan) or stuck run id (stuck_run) to repair")
+    .argument(
+      "<id>",
+      "the orphaned task id (retry_orphan), the resurrected task id (resurrected_gate_decision), or the stuck run id (stuck_run) to repair"
+    )
     .option("--dry-run", "report what would change; write nothing")
     .option("--json", "emit JSON result")
     .description(
-      "Repair a retry_orphan (pending task stranded under a terminal run → marked failed) or a stuck_run " +
-        "(active run whose tasks are all terminal → marked abandoned). Refuses anything that is not a genuine orphan."
+      "Repair a retry_orphan (pending task stranded under a terminal run → marked failed), a " +
+        "resurrected_gate_decision (task sitting at awaiting_gate over its own gate rejection → terminal row " +
+        "restored from the event stream, rejected artifact preserved), or a stuck_run (active run whose tasks " +
+        "are all terminal → marked abandoned). Refuses anything that is not one of those exact shapes."
     )
     .action((id: string, opts: { dryRun?: boolean; json?: boolean }) => {
       ensureForgeDirs();
@@ -355,6 +360,18 @@ export function registerOps(program: Command): void {
       if (outcome.kind === "refused") {
         process.stderr.write(`forge ops repair: refused — ${outcome.reason}\n`);
         process.exit(1);
+      }
+      // FG-676: distinct wording — this repair REINSTATES a human's decision from
+      // the event stream; "marked task X failed (orphaned)" would name the wrong
+      // cause and hide that the rejected artifact was preserved.
+      if (outcome.kind === "gate-decision-restored") {
+        const verb = outcome.dryRun ? "(dry-run) would restore" : "Restored";
+        console.log(
+          `${verb} task ${outcome.taskId} to failed (resurrected_gate_decision) — gate decision reinstated from the event stream: "${outcome.restoredError}".`
+        );
+        console.log(`  result (the rejected artifact) preserved unchanged; run ${outcome.runId} left untouched.`);
+        if (outcome.dryRun) console.log("No writes.");
+        return;
       }
       if (outcome.kind === "run-repaired") {
         const verb = outcome.dryRun ? "(dry-run) would mark" : "Marked";
