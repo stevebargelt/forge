@@ -1025,13 +1025,15 @@ CREATE INDEX IF NOT EXISTS idx_queue_events_project
 -- label. src/v2/launch.ts's statusLine stays the ONE human rendering (BD-4), so
 -- the four distinct facts it prints stay four facts on every surface.
 --
--- association_kind is the PLACEMENT AUTHORITY, recorded in the data rather than
--- re-derived by each reader (BD-2/BD-3/BD-14):
---   'explicit' — submission-time structured metadata. The ONLY thing that
---                authorizes RUN-level placement.
---   'cwd'      — the launch's cwd resolved to a registered project home. May place
---                at PROJECT level only, and is labeled unassociated.
+-- association_kind is WHICH CHANNEL DECIDED the project home, recorded in the data
+-- rather than re-derived by each reader (BD-2/BD-3/BD-14/FG-684):
+--   'explicit' — submission-time structured metadata resolved it.
+--   'cwd'      — the launch's cwd resolved to a registered project home. Also what
+--                an explicitly associated launch reads when its declared run
+--                resolved no project and the cwd supplied one.
 --   'none'     — no registered project home; host-level "Unassociated activity".
+-- RUN-level placement and the unassociated label follow the DECLARED run/task/
+-- ticket ids on the row, not this label.
 -- Ownership is NEVER inferred from the launch name, argv, or log text (FG-492).
 --
 -- observed_at is what makes freshness a FACT rather than an inference: a row

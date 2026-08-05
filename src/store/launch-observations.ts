@@ -20,12 +20,16 @@
 // DIFFERENT FACTS on every surface instead of collapsing into a generic `failed`.
 //
 // PLACEMENT AUTHORITY LIVES IN THE DATA (BD-2/BD-3/BD-14/BD-15). `association_kind`
-// records HOW the launch was placed, decided once at submission:
-//   'explicit' — structured metadata the submitter supplied. The ONLY authority for
-//                RUN-level placement.
-//   'cwd'      — the cwd resolved to a registered project home. PROJECT level only,
-//                and labeled `unassociated`.
+// records WHICH CHANNEL DECIDED the project home, decided once at submission:
+//   'explicit' — the structured metadata the submitter supplied resolved it.
+//   'cwd'      — the cwd resolved to a registered project home. Also what an
+//                explicitly associated launch reads when its declared run resolved
+//                no project and the cwd supplied one (FG-684 AC4): the label names
+//                the channel that ACTUALLY decided, never the strongest one present.
 //   'none'     — no registered project home. Host-level "Unassociated activity".
+// RUN-level placement and the `unassociated` label follow the DECLARED submission
+// ids (`hasPlacementAuthority`), not this label — a launch that named its run is
+// associated with it whichever channel resolved its project home.
 // Nothing here ever consults a launch NAME, ARGV, or LOG TEXT. FG-492 records that
 // long-lived agent processes carry conversation text in argv and falsely match
 // unrelated run/ticket names; `extractForgeIds` is quarantined for exactly that
@@ -197,6 +201,9 @@ export type RecordLaunchObservationInput = {
   command: string[];
   cwd: string;
   projectDir?: string | null;
+  /** The project home the ASSOCIATION resolved, when the caller resolved the two
+   *  channels separately — see associationKindFor. */
+  associationProjectDir?: string | null;
   association?: LaunchAssociation | undefined;
   startedAt: string;
   observedAt: string;
@@ -212,16 +219,40 @@ export type RecordLaunchObservationInput = {
  *  still recorded in full; it just does not decide where the launch is placed. */
 const PLACEMENT_AUTHORIZING_FIELDS = ["runId", "taskId", "ticketId"] as const;
 
-function hasPlacementAuthority(association: LaunchAssociation | undefined): boolean {
-  if (association === undefined) return false;
-  return PLACEMENT_AUTHORIZING_FIELDS.some((f) => typeof association[f] === "string" && association[f] !== "");
+/** Whether the SUBMITTER declared placement-authorizing metadata. Takes the
+ *  association or a recorded observation alike, so the two readers of this fact (the
+ *  shared derivation and the dashboard's launch detail) ask the ONE question rather
+ *  than each re-deriving it from `association_kind` — which since FG-684 answers a
+ *  DIFFERENT question (which channel decided the project placement). */
+export function hasPlacementAuthority(
+  declared: { runId?: string | null; taskId?: string | null; ticketId?: string | null } | undefined,
+): boolean {
+  if (declared === undefined) return false;
+  return PLACEMENT_AUTHORIZING_FIELDS.some((f) => typeof declared[f] === "string" && declared[f] !== "");
 }
 
-/** Decide the placement AUTHORITY from what is actually known. Explicit metadata
- *  wins; a resolved project home is the weaker `cwd` channel; nothing else places
- *  anywhere but the host-level bucket. */
-export function associationKindFor(association: LaunchAssociation | undefined, projectDir: string | null): LaunchAssociationKind {
-  if (hasPlacementAuthority(association)) return "explicit";
+/** Decide the placement AUTHORITY from what is actually known — the channel that
+ *  ACTUALLY DECIDED the recorded project home (FG-684 AC4), not merely the strongest
+ *  channel present. Explicit metadata wins when it resolved the project; a project
+ *  home resolved from the cwd is the weaker `cwd` channel; nothing else places
+ *  anywhere but the host-level bucket.
+ *
+ *  `associationProjectDir` is what the declared association itself resolved. It
+ *  defaults to `projectDir` — a caller that resolved the placement through one
+ *  channel and does not distinguish them is taken at its word. `recordLaunchStart`
+ *  DOES distinguish them: an explicit association naming a run the store does not
+ *  know resolves nothing, cwd supplies the project, and the row must say `cwd`
+ *  rather than claim the declaration put it there. The declared ids stay on the row
+ *  either way — demoting the label demotes provenance nowhere. */
+export function associationKindFor(
+  association: LaunchAssociation | undefined,
+  projectDir: string | null,
+  associationProjectDir: string | null = projectDir,
+): LaunchAssociationKind {
+  // With NO project home at all, nothing placed this launch anywhere; a declared
+  // association is still the only channel that spoke, so the label stays `explicit`
+  // and the host-level bucket keeps its own rule (project_dir is null).
+  if (hasPlacementAuthority(association)) return associationProjectDir !== null || projectDir === null ? "explicit" : "cwd";
   return projectDir === null ? "none" : "cwd";
 }
 
@@ -229,7 +260,7 @@ export function associationKindFor(association: LaunchAssociation | undefined, p
  *  BEST-EFFORT: an unwritable store must never become a launch refusal. */
 export function recordLaunchObservation(input: RecordLaunchObservationInput): void {
   const projectDir = input.projectDir ?? null;
-  const kind = associationKindFor(input.association, projectDir);
+  const kind = associationKindFor(input.association, projectDir, input.associationProjectDir);
   const { state, exitCode, signal } = encodeLaunchStatus(input.status);
   const terminal = isTerminalObservationState(input.status.state) ? 1 : 0;
   writeTransaction(() => {
@@ -409,12 +440,16 @@ export function recordLaunchStart(meta: LaunchMeta, association?: LaunchAssociat
     const priorBusyTimeout = db.pragma("busy_timeout", { simple: true }) as number;
     db.pragma(`busy_timeout = ${LAUNCH_OBSERVATION_BUSY_TIMEOUT_MS}`);
     try {
+      // Both channels are resolved SEPARATELY because the row records not just WHERE
+      // the launch was placed but WHICH channel put it there (FG-684 AC4).
+      const associationProjectDir = projectDirForAssociation(association);
       recordLaunchObservation({
         launchId: meta.id,
         name: meta.id,
         command: meta.command,
         cwd: meta.cwd,
-        projectDir: projectDirForAssociation(association) ?? resolveRegisteredProjectDir(meta.cwd),
+        projectDir: associationProjectDir ?? resolveRegisteredProjectDir(meta.cwd),
+        associationProjectDir,
         ...(association ? { association } : {}),
         startedAt: meta.startedAt,
         observedAt: meta.startedAt,

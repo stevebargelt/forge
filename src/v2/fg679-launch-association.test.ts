@@ -189,11 +189,42 @@ describe("FG-679 BD-2/BD-15 — name, argv and log text authorize NOTHING", () =
 
     const obs = getLaunchObservation(meta.id);
     assert.equal(obs?.projectDir, PROJECT, "an unknown declared run does not discard a registered cwd fallback");
-    assert.equal(obs?.associationKind, "explicit", "the submitted association remains provenance even when cwd supplies placement");
+    // FG-684 AC4: the label names the channel that ACTUALLY decided the placement.
+    // The declared run resolved NOTHING here, so claiming `explicit` would tell an
+    // operator the metadata put the launch here when the cwd did. The declared ids
+    // are still on the row, and the launch is still associated with the run it named
+    // — the label is demoted, the association is not.
+    assert.equal(obs?.associationKind, "cwd", "cwd supplied the project home, so cwd is what decided");
+    assert.equal(obs?.runId, "run-unregistered", "the declared association is recorded verbatim regardless");
 
     const onProject = deriveCurrentActivity(db, { now: NOW, scope: { projectDirs: [PROJECT] } });
     assert.deepEqual(onProject.hostVerification.map((l) => l.launchId), [meta.id]);
-    assert.equal(onProject.hostVerification[0]!.unassociated, false);
+    assert.equal(onProject.hostVerification[0]!.unassociated, false, "it declared a run — `unassociated` follows the declaration, not the label");
+  });
+
+  test("FG-684: a declared run registered with NO project home keeps its run placement while cwd supplies the project", () => {
+    // The case the AC4 relabeling must not break: the declaration resolves nothing
+    // (the run row carries no project_dir), so cwd decides the PROJECT — but the
+    // launch still named its run and must stay on that run's Current activity.
+    const PROJECT = process.cwd();
+    getDb().prepare(`INSERT INTO runs (id, workflow, title, status, created_at, project_dir) VALUES ('run-homeless', 'feature', 'homeless', 'active', ?, NULL)`)
+      .run("2026-08-05T09:00:00.000Z");
+    getDb().prepare(`INSERT INTO runs (id, workflow, title, status, created_at, project_dir) VALUES ('run-cwd-owner', 'feature', 'cwd owner', 'active', ?, ?)`)
+      .run("2026-08-05T09:00:00.000Z", PROJECT);
+
+    const meta = startLaunch(["npm", "run", "test:all"], { name: "verify", cwd: PROJECT, tmux: tmuxStub() });
+    recordLaunchStart(meta, { runId: "run-homeless" });
+
+    const obs = getLaunchObservation(meta.id);
+    assert.equal(obs?.associationKind, "cwd");
+    assert.equal(obs?.projectDir, PROJECT);
+
+    const onRun = deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-homeless" } });
+    assert.deepEqual(onRun.hostVerification.map((l) => l.launchId), [meta.id], "still on the run it declared");
+    assert.equal(onRun.hostVerification[0]!.unassociated, false);
+
+    const hostWide = deriveCurrentActivity(db, { now: NOW });
+    assert.deepEqual(hostWide.unassociated, [], "and never in the host-level bucket — something placed it");
   });
 
   test("a campaign drive-item launch — campaign and item identity, no run — is labeled `unassociated` at project level", () => {

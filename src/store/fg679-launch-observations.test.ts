@@ -122,6 +122,18 @@ describe("FG-679 launch_observations — placement authority (BD-2/BD-3/BD-14)",
     assert.equal(associationKindFor({}, null), "none");
   });
 
+  test("FG-684 AC4: the label names the channel that DECIDED the placement, not the strongest one present", () => {
+    // The association resolved the project home -> the declaration decided.
+    assert.equal(associationKindFor({ runId: "run-abc" }, "/repos/clone", "/repos/clone"), "explicit");
+    // The association resolved NOTHING and cwd supplied the project -> cwd decided,
+    // even though explicit metadata is present and is still recorded on the row.
+    assert.equal(associationKindFor({ runId: "run-abc" }, "/repos/forge", null), "cwd");
+    // Neither channel resolved anything: nothing placed it, so the declared channel
+    // is the only one that spoke and the host-level bucket rule (project_dir null)
+    // is what keeps it out of a project.
+    assert.equal(associationKindFor({ runId: "run-abc" }, null, null), "explicit");
+  });
+
   test("campaign/item identity is PROVENANCE, not placement authority — it never renders a run-less launch as associated", () => {
     // The campaign drive-item launcher records campaign + item precisely BECAUSE no
     // run exists yet, and documents that such a launch is labeled `unassociated`.
