@@ -314,6 +314,47 @@ Columns: `id` (PK, autoincrement), `continuation_id`, `source_launch_id`, `curre
 
 Additive-only (`CREATE TABLE IF NOT EXISTS` on the ordinary open path), the same BD-15 contract as its siblings — only a new binary ever writes it, so an old binary that predates it is never broken.
 
+### `launch_observations` table (FG-679 dashboard read path)
+
+The durable record of **what forge observed about a `forge launch`, and when**. One MUTABLE row per launch, keyed by `launch_id`.
+
+**Why it exists.** Before FG-679, a launch's status was DERIVED at read time from a **live tmux probe** — `readLaunch` probes the session per record and `listLaunches` fans that probe over every record. BD-7/BD-12 forbid the dashboard's serving and polling paths from doing that, so "is host verification running right now?" was unanswerable from durable state. This table is that state. **The dashboard reads it and never calls `readLaunch`, `listLaunches`, or tmux.**
+
+Columns: `launch_id` (PK), `name`, `command` (JSON array — the argv), `cwd`, `project_dir` (nullable), `association_kind`, `run_id`, `task_id`, `ticket_id`, `campaign_id`, `item_id` (all nullable), `started_at`, `observed_at`, `state`, `exit_code` (nullable), `signal` (nullable), `terminal` (0/1). Indexes: `idx_launch_observations_run` on `run_id`, `idx_launch_observations_project` on `project_dir`, `idx_launch_observations_observed` on `observed_at`.
+
+- `state` is the canonical **`LaunchStatus.state` STRUCTURED value** — `running | exited_ok | exited_error | signaled | terminated_unattributed | owner_gone | unknown` — never a pre-rendered string and never a collapsed label. `src/v2/launch.ts`'s `statusLine` remains the ONE human rendering, so `terminated by SIGTERM (signal sender not recorded — origin unknown)`, a bare signal-range `exited 143 (signal-range code, no signal evidence — origin unknown)`, `owner gone …` and `unknown …` stay **four different facts** on every surface. Flattening any of them into a generic `failed` badge is prohibited (BD-4). Unconstrained TEXT with no CHECK (FG-585 enum-as-convention).
+- `association_kind` is the **placement authority**, decided once at submission and recorded in the DATA rather than re-derived per reader: `explicit` (submission-time structured metadata — the ONLY authority for run-level placement), `cwd` (the launch cwd resolved to a registered project home — PROJECT level only, and labeled `unassociated`), `none` (no registered project home — the host-level "Unassociated activity" bucket). Ownership is **never** inferred from the launch name, its argv, or its log text; `extractForgeIds`/`forgeIds` is quarantined and authorizes nothing (FG-492 / BD-2 / BD-15).
+- `observed_at` is what makes freshness a fact rather than an inference. A reader past its cutoff (`LAUNCH_OBSERVATION_FRESH_MS`, 30 minutes) renders `unobserved since <t>` — **never `running` and never terminal**. A persisted observation is evidence of what was observed and when; it is never a claim about the present, and its absence is a fact about the OBSERVER, not about the work (BD-12).
+
+Written best-effort by `startLaunch` after the command is already running (the instrumentation must never join the refuse-before-execute sequence: an unwritable store leaves the launch running and merely unobserved, never refused), and promoted to a terminal disposition by `promoteLaunchObservations()` — an opportunistic sweep called from `forge next` / `gate` / `continue` / `status` that reads ONLY the on-disk exit record the wrapper's own recorder wrote. It never probes tmux and never fabricates: no exit record on disk leaves the row exactly as it was (BD-16). No daemon is introduced.
+
+Additive-only (`CREATE TABLE IF NOT EXISTS` on the ordinary open path), the same BD-15 contract as its siblings — an older binary reads and ignores it.
+
+### `review_loop.ci_observed` event (FG-679 — Contract B, dashboard read path)
+
+Required-CI progress is **persisted by extending the ONE existing Forge-owned CI observer** (`src/cli/commands/review-loop.ts`'s CI wait loop). No second poller, no dashboard-side credential, and no schema change: the `events` table takes an arbitrary `event_type`, and `idx_events_type_created` already covers the read.
+
+`event_type` = `review_loop.ci_observed`, `run_id` = the review-loop run id, payload:
+
+```json
+{
+  "attemptId": "string",
+  "ticketId": "string|null",
+  "projectDir": "string",
+  "candidateSha": "string (full 40 chars)",
+  "observedAt": "string (ISO 8601)",
+  "outcome": "pending | success | failed | unavailable",
+  "unavailableReason": "string|null",
+  "contexts": [{ "context": "string", "state": "string", "url": "string|null", "observedAt": "string" }]
+}
+```
+
+`contexts` enumerates **EVERY** required context at that sha with its own state, URL and observation time. A summary verdict without the per-context enumeration does not satisfy BD-5.
+
+**The observer DECLARES the candidate; no reader ever derives it** (the dashboard has neither git nor a GitHub credential). BD-6 supersession therefore needs no supersession column: every observation carries the sha it was bound to, and the reader presents ONLY the newest per `(run_id, projectDir)` — so an observation for an advanced candidate simply stops being the newest and disappears from the surface rather than being carried forward or relabeled.
+
+Three states the reader distinguishes and must not conflate (BD-8): **`CI not observed`** (no event at all — a fact about the observer), **`CI not running`** (the newest observation found nothing pending), and **stale** (the newest observation is older than `CI_OBSERVATION_FRESH_MS`, 15 minutes — not evidence about now).
+
 ## Filesystem contract
 
 Per-task workspace at `~/.forge/runs/<runId>/<taskId>/`:
@@ -533,6 +574,9 @@ The dashboard server exposes read-only JSON endpoints. All `GET` — no writes. 
 | `GET /api/host-verifications` | `ticketId` + optional `projectDir`, or `itemId` | host_verifications evidence rows scoped to a ticket or campaign item (FG-487) |
 | `GET /api/host-verifications/recent` | `limit` (1–500, default 50) | Most recent host_verifications rows across all tickets — after-the-fact discoverability of bare host gates (FG-487) |
 | `GET /api/reviews` | `limit` (1–200, default 25), `projectKey` or `projectDir` | The [review ledger](concepts.md#review-ledger), read-only: reviews most-recently-touched first, each with its findings **embedded** (not a second round trip — a summary whose counts disagree with the rows below it is the failure that avoids). Returns `{reviews: ReviewLedgerEntry[], error?}`. Scoped through the owning run's `project_dir`; a review with no run is unscoped and always listed. `error` is set — with `reviews: []` and still HTTP `200` — when the read failed, notably a store whose last writable open predates FG-638 and therefore has no `reviews` table (`no such table: reviews`); a read-only open never migrates one into existence, so that is a legitimate state to report, not a server fault (FG-638) |
+| `GET /api/current-activity` | `projectKey` or `projectDir`, `runId` | FG-679: the three-section **Current activity** projection — `agents`, `hostVerification`, `requiredCi`, plus the host-level `unassociated` bucket (host-wide scope only). Derived by `deriveCurrentActivity` (`src/v2/current-activity.ts`), the SAME exported function `forge status` calls, so `/status` and the dashboard agree structurally rather than by assertion (BD-9). **Makes no outbound call of any kind** — no GitHub, no shell, no `git`, no tmux, no Forge CLI, and never `readLaunch`/`listLaunches` (BD-7/BD-12). A `runId` scope shows only EXPLICITLY associated launches |
+| `GET /api/launches/:id` | — | FG-679: one launch's observed record, addressed by launch **IDENTITY**. The id is validated against `isLaunchId` (the same charset `launchDir` enforces) BEFORE it can become a path — `..`, a separator, or an absolute path is a `400`. **No host filesystem path is accepted or returned**: no `cwd`, no log path, no project dir (BD-10) |
+| `GET /api/launches/:id/log` | — | FG-679: a **BOUNDED TAIL** (last 16 KiB) of that launch's log, same identity addressing and the same `400` for a non-conforming id. Returns `{launchId, text, bytes, truncated}`. The bound is load-bearing: the log is unbounded host-command output served by a process with no authentication, and id-only addressing constrains path traversal, not content volume |
 | `GET /api/backlog` | `projectKey` or `projectDir` | One project's tickets from the host store plus its per-checkout session notes. Returns `{notes, notesByCheckout, tickets, ticketsProjectKey, ticketsStorageMode, ticketsError?}` — `ticketsProjectKey: null` means the repository has no ticket truth (never imported), and `ticketsError` means the read failed and the count is unknown, never zero (FG-608) |
 
 ### `GET /api/governance` response shape (`WorkbenchPanel`)

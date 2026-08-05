@@ -13,6 +13,8 @@ import { failureKindFromEvents, getOrphanEvidenceFromEvents, getContainerCausalE
 import { taskHasPipelineFinalize } from "../../v2/run-kind.js";
 import { loadWorkflow } from "../../v2/loader.js";
 import { classifyRunTerminalState, formatRunFailure, type RunTerminalClassification } from "../../v2/ready-queue.js";
+import { promoteLaunchObservations } from "../../store/launch-observations.js";
+import { deriveCurrentActivity, renderCurrentActivityLines } from "../../v2/current-activity.js";
 
 export function registerStatus(program: Command): void {
   program
@@ -31,6 +33,19 @@ export function registerStatus(program: Command): void {
       const reconcileEnabled = !opts.readOnly;
       if (opts.readOnly) getDb({ readOnly: true });
 
+      // FG-679 (BD-16): opportunistic terminal promotion, on the WRITABLE path only —
+      // a --read-only status must not mutate the store to answer a question. Best
+      // effort: a launch record forge cannot read never fails `forge status`.
+      if (reconcileEnabled) {
+        try { promoteLaunchObservations(); } catch { /* unobserved, never unreported */ }
+      }
+
+      // FG-679 (BD-9): `forge status` and the dashboard answer from the SAME exported
+      // derivation over the SAME persisted state, so agreement is structural rather
+      // than two renderers that happen to say the same thing today.
+      const currentActivity = (scope: { runId?: string; projectDirs?: readonly string[] }) =>
+        deriveCurrentActivity(getDb(opts.readOnly ? { readOnly: true } : undefined), { scope });
+
       // AWN-1: reconcile crash/Docker state before reporting (writable path only).
       // Scope it to EXACTLY the runs this command will display — a workspace-
       // scoped `forge status` must not reconcile (and mutate) other workspaces'
@@ -47,6 +62,10 @@ export function registerStatus(program: Command): void {
         }
         // Re-read post-reconcile so the display reflects any state changes.
         const runs = selectRuns();
+        // Host-wide when --all (so the BD-14 "Unassociated activity" bucket is
+        // reachable and /status can enumerate every launch on the host), otherwise
+        // scoped to the same workspace the run list is scoped to.
+        const activity = currentActivity(opts.all ? {} : { projectDirs: [workspace] });
         if (opts.json) {
           console.log(JSON.stringify({ runs: runs.map((r) => ({
             id: r.id,
@@ -55,7 +74,7 @@ export function registerStatus(program: Command): void {
             status: r.status,
             createdAt: r.createdAt,
             completedAt: r.completedAt ?? null,
-          })) }, null, 2));
+          })), currentActivity: activity }, null, 2));
           return;
         }
         if (runs.length === 0) {
@@ -64,11 +83,17 @@ export function registerStatus(program: Command): void {
           } else {
             console.log("No runs in this workspace. Use --all to see runs from other projects.");
           }
+          // A host with no run rows can still have work in flight — that is exactly
+          // the blind spot FG-679 closes, so the surface is printed either way.
+          console.log("");
+          for (const line of renderCurrentActivityLines(activity)) console.log(line);
           return;
         }
         for (const r of runs) {
           console.log(`${r.id}  [${r.status}]  ${r.workflow}  —  ${r.title}`);
         }
+        console.log("");
+        for (const line of renderCurrentActivityLines(activity)) console.log(line);
         return;
       }
 
@@ -95,6 +120,8 @@ export function registerStatus(program: Command): void {
           if (c && c.status === "failed") runFailure = c;
         } catch { /* leave undefined */ }
       }
+
+      const runActivity = currentActivity({ runId });
 
       if (opts.json) {
         // Structured output for the orchestrator. One JSON object per call.
@@ -159,6 +186,7 @@ export function registerStatus(program: Command): void {
           // the only place `status --json` names a phase that never dispatched.
           runFailure: runFailure ?? null,
           tasks: tasksJson,
+          currentActivity: runActivity,
         }, null, 2));
         return;
       }
@@ -222,6 +250,9 @@ export function registerStatus(program: Command): void {
           }
         }
       }
+
+      console.log("");
+      for (const line of renderCurrentActivityLines(runActivity)) console.log(line);
     });
 }
 

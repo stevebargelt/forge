@@ -28,6 +28,7 @@ import { startRun } from "../../v2/startRun.js";
 import { runNext } from "../../v2/runNext.js";
 import { loadWorkflow } from "../../v2/loader.js";
 import { resolveSeedGeneration } from "../../v2/seed-generation.js";
+import { promoteLaunchObservations } from "../../store/launch-observations.js";
 
 type ContinueOpts = {
   continuationId?: string;
@@ -62,6 +63,11 @@ export function registerContinue(program: Command): void {
     .option("--json", "emit the structured outcome as JSON")
     .action(async (launchId: string | undefined, opts: ContinueOpts) => {
       ensureForgeDirs();
+      // FG-679 (BD-16): promote any launch whose exit record has landed on disk into
+      // the observation store. Opportunistic and best-effort — no daemon, no resident
+      // observer, and never fatal to the command that hosts it. Mirrors the
+      // publication reconcile sweep at the top of every wave.
+      try { promoteLaunchObservations(); } catch { /* the sweep is never the point of this command */ }
 
       // FAIL CLOSED (HIGH-3): `forge continue` — including --recover — always MUTATES a
       // continuation (claim/adopt/advance/renew/audit-write). Resolve a stable controller

@@ -507,6 +507,79 @@ section.home-view { margin-top: 20px; }
 section.home-view .plan-usage { margin-bottom: 0; }
 .home-in-flight-group { margin-top: 28px; }
 section.home-view section.in-flight { margin-top: 0; }
+
+/* FG-679 — the Current activity surface: Agents / Host verification / Required CI.
+   The three sections are visually DISTINCT on purpose (their own heading and their
+   own bordered block), because BD-1 turns on an operator being able to tell "an
+   agent is working" from "host verification is running" from "a check is pending"
+   at a glance. The launch badges are keyed on the structured status state and none
+   of them is a generic failed: SIGTERM-terminated, a bare signal-range exited
+   143, owner-gone and unknown are four different facts (BD-4). */
+section.current-activity { margin-top: 28px; }
+.ca-section {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-top: 10px;
+  overflow: hidden;
+}
+.ca-heading {
+  margin: 0;
+  padding: 10px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  border-bottom: 1px solid var(--border);
+}
+.ca-empty { padding: 12px 14px; color: var(--fg-faint); font-style: italic; }
+.ca-section .item.ca-row {
+  display: grid;
+  grid-template-columns: minmax(0, auto) 1fr auto;
+  gap: 12px;
+  align-items: start;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.ca-section .item.ca-row:last-child { border-bottom: none; }
+.ca-launch-row .badge, .ca-ci-row .badge { white-space: normal; text-align: left; max-width: 30ch; }
+.ca-assoc-badge {
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: rgba(154, 154, 163, 0.18);
+  color: var(--fg-dim);
+}
+.ca-sha { word-break: break-all; }
+.ca-ci-contexts { margin-top: 4px; display: flex; flex-direction: column; gap: 3px; }
+.ca-ci-context { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; font-size: 11px; }
+.ca-ctx-name { color: var(--fg); }
+.ca-ctx-state { padding: 0 5px; border-radius: 4px; }
+.ca-ctx-observed { color: var(--fg-faint); }
+.ca-ctx-pending { background: rgba(250, 204, 21, 0.15); color: var(--warn); }
+.ca-ctx-success { background: rgba(74, 222, 128, 0.15); color: var(--ok); }
+.ca-ctx-failure { background: rgba(248, 113, 113, 0.15); color: var(--err); }
+.ca-ctx-unknown { background: rgba(154, 154, 163, 0.15); color: var(--fg-dim); }
+
+/* One class per STRUCTURED launch state. Deliberately no failed class: flattening
+   any of these into a generic failure badge is the honesty regression BD-4 bans. */
+.badge.launch-state-running { background: rgba(96, 165, 250, 0.15); color: var(--info); }
+.badge.launch-state-exited_ok { background: rgba(74, 222, 128, 0.15); color: var(--ok); }
+.badge.launch-state-exited_error { background: rgba(248, 113, 113, 0.15); color: var(--err); }
+.badge.launch-state-signaled { background: rgba(192, 132, 252, 0.18); color: var(--magenta); }
+.badge.launch-state-terminated_unattributed { background: rgba(250, 204, 21, 0.15); color: var(--warn); }
+.badge.launch-state-owner_gone { background: rgba(250, 204, 21, 0.18); color: var(--warn); }
+.badge.launch-state-unknown { background: rgba(154, 154, 163, 0.15); color: var(--fg-dim); }
+.badge.launch-state-unobserved { background: rgba(154, 154, 163, 0.15); color: var(--fg-dim); font-style: italic; }
+
+.badge.ci-state-running { background: rgba(96, 165, 250, 0.15); color: var(--info); }
+.badge.ci-state-not_running { background: rgba(154, 154, 163, 0.15); color: var(--fg-dim); }
+.badge.ci-state-stale { background: rgba(250, 204, 21, 0.15); color: var(--warn); }
+.badge.ci-state-not_observed { background: rgba(154, 154, 163, 0.15); color: var(--fg-dim); }
 .home-ops-summary { margin-top: 28px; }
 .home-section-heading {
   display: flex;

@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { recordLaunchStart } from "../store/launch-observations.js";
 import {
   startLaunch,
   waitForLaunchTerminal,
@@ -2934,7 +2935,14 @@ export function launchDriveItemUnderForge(
     let meta;
     let outcome;
     try {
+      // FG-679 (BD-2): supply EXACTLY what the campaign actually knows at submission
+      // — the campaign and the item. A run association is NOT manufactured here: the
+      // drive-item child dispatches its own run, so no run id exists yet to declare,
+      // and inventing one would attribute this launch to a run it was never
+      // associated with. Absent an explicit run, the launch is placed at project
+      // level (from its cwd) and labeled `unassociated`, which is the honest answer.
       meta = startLaunch(argv, { name: `campaign-drive-${itemId}`, ...(cwd ? { cwd } : {}), ...(seams.tmux ? { tmux: seams.tmux } : {}) });
+      recordLaunchStart(meta, { campaignId, itemId });
       // FG-564 (AC10 / P1-F): make the item-attempt -> launch linkage durable as a REQUIRED
       // ordered step BEFORE arming the waiter, so a crash between here and the child's
       // continuation-record is recoverable by direct linkage discovery (C7). If it cannot
