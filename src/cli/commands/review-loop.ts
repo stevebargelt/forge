@@ -27,8 +27,8 @@ import { resolveModel } from "../../v2/model-resolution.js";
 import { loadModelPolicy } from "../../v2/loader.js";
 import { getRequiredHostGate } from "../../campaign/reconcile-collect.js";
 import {
-  findCoveringGateEvidence, describeGateEvidence, deriveRequiredGateList, probeCiGateStatus,
-  type CheckStatusProvider, type CiGateStatus,
+  findCoveringGateEvidence, describeGateEvidence, deriveRequiredGateList, observeCiGate,
+  type CheckStatusProvider, type CiGateStatus, type CiGateObservation, type CiObservationOutcome,
 } from "../../store/host-verifications.js";
 import { logEvent } from "../../store/events.js";
 import { newAttemptId } from "../../util/ids.js";
@@ -131,6 +131,22 @@ type VerificationResultWithDetail = VerificationResult & {
   checkContexts?: string[];
   command?: string;
   tier?: "fast" | "extended";
+};
+
+// FG-679 CONTRACT B — the durable required-CI observation, pinned by the FG-679
+// plan and consumed VERBATIM by the dashboard's current-activity reader. Do not
+// rename, reshape or extend these keys without changing that reader in lockstep;
+// the type exists so a drift is a compile error here rather than a silently
+// empty section there.
+type CiObservedPayload = {
+  attemptId: string;
+  ticketId: string | null;
+  projectDir: string;
+  candidateSha: string;
+  observedAt: string;
+  outcome: CiObservationOutcome;
+  unavailableReason: string | null;
+  contexts: { context: string; state: string; url: string | null; observedAt: string }[];
 };
 
 function tierFromSteps(steps: { name: string }[]): "fast" | "extended" | undefined {
@@ -593,7 +609,33 @@ export function buildReviewLoopDeps(
     ...(readiness.command ? { command: readiness.command } : {}),
   });
 
-  const verifyWithReuse = async (): Promise<VerificationResultWithDetail> => {
+  // FG-679: observation timestamps come from the REAL clock, never from ctx.now.
+  // ctx.now is the CI wait's elapsed/timeout accounting source and tests inject
+  // tick-per-call counters into it — drawing observation stamps from it would
+  // make instrumentation silently move the loop's own elapsed/timeout arithmetic.
+  const observationTimestamp = (): string => new Date().toISOString();
+
+  // FG-679: the durable record of what the CI observer saw. Written ONLY from
+  // the probe path below — this is the one Forge-owned CI observer being
+  // extended, not a second poller (BD-7), so an observation exists exactly when
+  // a real probe produced it and never otherwise.
+  const emitCiObservation = (attemptId: string, observation: CiGateObservation): void => {
+    const payload: CiObservedPayload = {
+      attemptId,
+      ticketId: ctx.ticketId,
+      // canonical, matching how host_verifications rows record project_dir —
+      // the reader joins on it and must not miss a row over `./` vs absolute.
+      projectDir: resolve(ctx.projectDir),
+      candidateSha: observation.candidateSha,
+      observedAt: observation.observedAt,
+      outcome: observation.outcome,
+      unavailableReason: observation.unavailableReason,
+      contexts: observation.contexts,
+    };
+    logEvent("review_loop.ci_observed", { runId, payload });
+  };
+
+  const verifyWithReuse = async (attemptId: string): Promise<VerificationResultWithDetail> => {
     const dirty = gitInDir(["status", "--porcelain"]).trim().length > 0;
     if (dirty) {
       console.log("review-loop: dirty tree — local verification");
@@ -627,9 +669,33 @@ export function buildReviewLoopDeps(
     const immediate = tryReuse();
     if (immediate) return checkContexts ? { ...immediate, checkContexts } : immediate;
 
-    const probe = (): CiGateStatus => probeCiGateStatus({
-      projectDir: ctx.projectDir, sha: headSha, command: requiredGate, checkStatusProvider: ctx.checkStatusProvider,
-    });
+    // FG-679: every probe of the required gate also PERSISTS what it saw, per
+    // required context, bound to the exact sha it probed. Same single pass over
+    // the required jobs probeCiGateStatus always made (observeCiGate is what
+    // probeCiGateStatus now projects), so no extra API call and no second
+    // credential path is introduced.
+    let lastObservation: CiGateObservation | null = null;
+    const probe = (): CiGateStatus => {
+      const { status, observation } = observeCiGate({
+        projectDir: ctx.projectDir, sha: headSha, command: requiredGate,
+        checkStatusProvider: ctx.checkStatusProvider,
+      });
+      lastObservation = observation;
+      emitCiObservation(attemptId, observation);
+      return status;
+    };
+
+    // The round's FINAL disposition, recorded once the loop stops polling. The
+    // contexts and their per-context observation times are copied VERBATIM from
+    // the last real probe — nothing is re-observed and nothing is invented; only
+    // `outcome` (and the payload's own observedAt, which records when the
+    // observer last spoke) reflect the resolution. Emitted only when a probe
+    // actually happened: a round that resolved via instant reuse observed no
+    // per-context CI state and must not claim to have.
+    const resolveCiObservation = (outcome: CiObservationOutcome, unavailableReason: string | null): void => {
+      if (!lastObservation) return;
+      emitCiObservation(attemptId, { ...lastObservation, outcome, unavailableReason, observedAt: observationTimestamp() });
+    };
 
     const shortSha = headSha.slice(0, 9);
     const startedAt = now();
@@ -655,6 +721,7 @@ export function buildReviewLoopDeps(
     if (status.kind === "success") {
       const reused = tryReuse();
       if (reused) {
+        resolveCiObservation("success", null);
         return waited ? { ...reused, ciOutcome: { kind: "reused_after_wait" }, checkContexts } : { ...reused, checkContexts };
       }
       // CI reports every job green but the covering-evidence lookup still fails
@@ -664,6 +731,7 @@ export function buildReviewLoopDeps(
     }
 
     if (status.kind === "failed") {
+      resolveCiObservation("failed", null);
       checkContexts = [status.failing.context];
       const urlSuffix = status.failing.url ? ` — ${status.failing.url}` : "";
       const message = `required CI check "${status.failing.context}" failed for ${shortSha}${urlSuffix}`;
@@ -676,6 +744,10 @@ export function buildReviewLoopDeps(
       };
     }
 
+    // Recorded BEFORE the local fallback runs (which can take many minutes), so
+    // the surface carries the round's real CI disposition rather than going
+    // quiet for the whole local run.
+    resolveCiObservation("unavailable", status.reason);
     console.log(`review-loop: CI unavailable: ${status.reason} — falling back to local verification.`);
     const extendedDelegatedToCi = !ctx.localExtended;
     const fallbackScripts = localFallbackScripts();
@@ -719,7 +791,7 @@ export function buildReviewLoopDeps(
       runId,
       payload: { attemptId, round: verificationRound, ticketId: ctx.ticketId, sha, mode },
     });
-    const result = await verifyWithReuse();
+    const result = await verifyWithReuse(attemptId);
     logEvent("review_loop.verification_finished", {
       runId,
       payload: {

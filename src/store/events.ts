@@ -226,6 +226,17 @@ export type EventType =
   // fallback profile — payload carries {ticketId, round, failedProfile?,
   // retryProfile?, cause}. Emitted whether or not the retry then succeeded.
   | "review_loop.reviewer_model_error_retry"
+  // FG-679: what the ONE Forge-owned CI observer actually saw at the exact
+  // candidate sha it probed — one event per poll iteration plus one at round
+  // resolution, so a reader can tell a fresh observation from a stale one
+  // without probing anything itself. Payload (Contract B, pinned by the FG-679
+  // plan and consumed verbatim by the dashboard's current-activity reader):
+  //   {attemptId, ticketId, projectDir, candidateSha, observedAt, outcome,
+  //    unavailableReason, contexts: [{context, state, url, observedAt}]}
+  // `candidateSha` is DECLARED by the observer and is always the full sha it
+  // probed — no reader derives the candidate, which is what makes an
+  // advanced-candidate observation simply stop being the newest (BD-6).
+  | "review_loop.ci_observed"
   // FG-566: the SHARED readiness contract for Forge-owned host-side verification
   // (src/v2/host-readiness.ts), emitted by BOTH consumers — the review loop's
   // local fallback and the FG-357/FG-425 integration gate — so a preparation is
