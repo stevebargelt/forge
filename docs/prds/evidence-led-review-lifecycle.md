@@ -439,6 +439,12 @@ This phase may update the candidate, so its output must precede final
 verification and recheck rather than relying on evidence bound to an earlier
 SHA.
 
+The **coordinator** commits this phase's work — the docs agent does not, and
+neither does the orchestrator. It commits only the paths the agent's own result
+declared and advances the candidate to the commit it authored, so the post-docs
+SHA is known rather than read; see the FG-655 correction to refinement (d)
+below.
+
 ### Stage 7 — deterministic verification
 
 Run the full required verification against the final candidate, including
@@ -1100,6 +1106,43 @@ actual boundary that cannot ship together.
 > tautologies the coordinator satisfies by construction. Relaxing this would be
 > a change to the lifecycle's stated semantics and returns to this PRD's
 > approving authority.
+>
+> **Correction, 2026-08-05 (FG-655): the invariant above was UNCHANGED and is
+> still unchanged — what was wrong is that Stage 6's code did not honour it.**
+> (d) described intent accurately and Stage 5's code accurately, and described
+> the docs stage not at all: Stage 6 read HEAD after the documentation-maintainer
+> returned and adopted whatever it found. A docs agent that edited files and did
+> not commit them therefore advanced the stage on a statement that was true about
+> HEAD and false about the work, leaving the edits in the workspace — where final
+> verification silently degraded to a dirty-tree local run, and where committing
+> them by hand moved HEAD while the ledger candidate stayed put, so the next
+> stage refused `candidate_not_checked_out` and the review could only proceed by
+> DISCARDING the docs work. Observed nine or more times across three docs agents;
+> one occurrence shipped documentation asserting the opposite of shipped
+> behaviour and one stranded fragment was lost outright. FG-655 closed the gap by
+> giving Stage 6 the same commit authority (a) gave Stage 5, on the same terms
+> and with its own refusal names rather than a second vocabulary: declared paths
+> only, passed to `git commit` itself; two-directional reconciliation whose only
+> stop is a tree that moved beyond the declaration
+> (`docs_cycle_tree_dirty_outside_declared_scope`,
+> `docs_cycle_declared_changes_absent`, `docs_cycle_commit_failed`,
+> `docs_cycle_commit_raced`, and the reused `candidate_not_checked_out` for an
+> agent that committed its own work); nothing recorded and the candidate unmoved
+> on any refusal; and a durable dispatch binding consulted before the decision to
+> dispatch, so re-entry after a crash recognizes the commit it already authored
+> instead of authoring a second one or dispatching a second docs agent. Two
+> consequences are recorded here so they are not re-derived. A docs stage that
+> genuinely changed nothing records candidate-unchanged with a CLEAN tree, and a
+> stage claiming that with a dirty tree refuses — the legitimate no-op and the
+> stranded stage must not render identically. And a dirty tree at the candidate
+> is now a named refusal at both review-lifecycle readers, the coordinator's
+> verification seam (Stages 1 and 7) and the Stage 9 shipping reader, rather than
+> a silent fall-through to local verification; it is deliberately not installed
+> in `forge review-loop`, whose dirty-tree local arm is intended behaviour for
+> standalone callers with uncommitted work. The docs stage record's own sha is
+> the POST-advance one — unlike the fix stage's, per refinement 3 of Change 2 —
+> because Stage 6 completeness is checked against the current candidate and a
+> pre-docs record would loop the review on its own docs stage.
 >
 > The threat model, the acceptance scenarios, and every scope bullet above are
 > unaltered by this note. Operator-facing detail is
