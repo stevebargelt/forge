@@ -1223,6 +1223,24 @@ async function runShippingReview(reviewId: string, transition: Transition, deps:
 
   const input = await deps.shippingInput({ review: snap.review, candidateSha: candidate });
 
+  // FG-655 AC4: THE ENVIRONMENT FAULT IS READ FIRST, through the SAME classifier Stages
+  // 1 and 7 use — Stage 9 is the lifecycle's second verification reader and the two must speak
+  // one vocabulary. A workspace that could not be verified at the candidate means verification
+  // COULD NOT RUN, which is the `blocked_environment` stop: no cycle consumed, nobody
+  // dispatched, nothing recorded. Reading it as an ordinary not-ok verification instead says
+  // the WORK failed review, and can send a fixer to remediate a dirty tree.
+  const verdict = classifyVerification({ ...input.verification, sha: input.verification.sha ?? candidate });
+  if (verdict.kind === "blocked_environment") {
+    setReviewState(reviewId, "blocked_environment", { reason: `${verdict.reason}: ${verdict.message}` });
+    return {
+      transition,
+      status: "stopped",
+      message:
+        `blocked_environment (${verdict.reason}): ${verdict.message}. The shipping review did not run: nothing was ` +
+        `recorded, no reviewer or fixer was dispatched, and no review cycle was consumed.`,
+    };
+  }
+
   // FG-640: PERSIST THE TRUSTED TIP. Tip trust is established live (a bounded fetch of the
   // remote head), but the `review_disposition` gate is a read of DURABLE state — it cannot
   // re-fetch, and a trusted head that lives only in this function's local would leave the gate

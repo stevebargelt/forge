@@ -549,6 +549,32 @@ test("integ FG-655 / RF-3: a docs result that OMITS docs_updated is a contract v
   assert.deepEqual(pathsAt("HEAD"), ["docs/concepts.md", "docs/review-docs-stage.md"]);
 });
 
+test("integ FG-655 / AC2: a MALFORMED docs_updated member is a contract violation, never an empty declaration", async () => {
+  // The ABSENT and NON-ARRAY cases already fail closed. A malformed MEMBER was silently
+  // filtered away instead, so `docs_updated: [42]` became `[]` — the positive no-op claim the
+  // arm above ADVANCES on — and a contract violation reached the clean-tree no_change path as
+  // a legitimate no-op. RED baseline: restore `raw.filter((p) => typeof p === "string")` in
+  // review-wiring's `docsDelivery` and this arm advances instead of refusing.
+  const h = harness({ docs: () => ({ docs_updated: [42] }) });
+  await parkAt(h.deps, "docs");
+  const at = getReview(REVIEW)?.candidateSha as string;
+
+  const out = await runNextStage(REVIEW, h.deps);
+  assert.equal(out.status, "refused");
+  assert.match(out.message, /non-string member/);
+  assert.match(out.message, /\[0\]=42/, "the refusal names the member nobody can read");
+  assert.match(out.message, /requires a list of paths/, "and WHICH contract was violated");
+  assert.equal(head(), at, "nothing is committed against a declaration nobody can read");
+  assertRefusedCleanly(h, at);
+
+  // And it terminates on the same clean-tree evidence every unreadable delivery does.
+  const resumed = harness();
+  const after = await runNextStage(REVIEW, resumed.deps);
+  assert.equal(after.status, "advanced", after.message);
+  assert.equal(resumed.dispatches("documentation-maintainer").length, 1);
+  assert.deepEqual(pathsAt("HEAD"), ["docs/concepts.md", "docs/review-docs-stage.md"]);
+});
+
 test("integ FG-655: a docs agent that COMMITS its own work refuses candidate_not_checked_out and its commit is left alone", async () => {
   // The prompt tells the agent not to commit, but one that does anyway moves HEAD off the
   // candidate. Adopting it would adopt a sha the coordinator did not author — and one that may
@@ -781,6 +807,35 @@ test("integ FG-655 / AC4: the Stage 9 shipping reader REFUSES a dirty tree too �
   assert.equal(input.verification.executedRequiredChecks, false);
   assert.match(input.verification.detail, /workspace_dirty_at_candidate/);
   assert.match(input.verification.detail, /docs\/left-behind\.md/);
+  // FG-655 AC4: and it keeps its NAME across the seam, so the stage can tell an environment
+  // that could not run verification from work that failed it.
+  assert.equal(input.verification.environmentRefusal?.reason, "workspace_dirty_at_candidate");
+});
+
+test("integ FG-655 / AC4: a dirty candidate STOPS Stage 9 as blocked_environment — it is not an ordinary shipping refusal", async () => {
+  // The two readers must be symmetric. Stage 1/7 above stops `blocked_environment` on this
+  // exact condition; Stage 9 turned the same refusal into a not-ok verification, which reads
+  // as the WORK having failed review — a review cycle, a disposition, and a fixer sent to
+  // remediate a dirty tree.
+  //
+  // RED baseline: drop the `classifyVerification` read at the top of `runShippingReview` and
+  // this arm returns `refused` with `verification_green:` in its message instead of stopping.
+  const h = harness({ docs: noopDocsAgent });
+  await parkAt(h.deps, "shipping_review");
+  const at = getReview(REVIEW)?.candidateSha as string;
+  writeFileSync(join(repo, "docs", "left-behind.md"), "# a prior stage left this here\n");
+
+  const real: CoordinatorDeps = { ...h.deps, shippingInput: h.wiring.shippingInput };
+  const out = await runNextStage(REVIEW, real);
+  assert.equal(out.status, "stopped", out.message);
+  assert.match(out.message, /blocked_environment \(workspace_dirty_at_candidate\)/);
+  assert.match(out.message, /docs\/left-behind\.md/, "the stop names the paths");
+  assert.doesNotMatch(out.message, /verification_green/, "an unfit environment is not a failed check");
+  assert.equal(getReview(REVIEW)?.state, "blocked_environment");
+  assert.equal(getReview(REVIEW)?.stageEvidence?.shipping, undefined, "nothing was recorded as shipped");
+  assert.equal(getReview(REVIEW)?.trustedRemoteSha, undefined, "and no tip was trusted off an unverifiable tree");
+  assert.equal(getReview(REVIEW)?.candidateSha, at);
+  assert.equal(pending().kind, "shipping_review", "it is a stop, not a gravestone — Stage 9 re-enters");
 });
 
 // ─── the done condition, asserted mechanically ──────────────────────────────

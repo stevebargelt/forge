@@ -1122,7 +1122,25 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
       if (!Array.isArray(raw)) {
         return { kind: "unreadable", detail: `task ${binding.taskId} recorded a non-array docs_updated` };
       }
-      const docsUpdated = raw.filter((p): p is string => typeof p === "string");
+      // FG-655 AC2, the same class as the absent case above: a MALFORMED MEMBER fails closed
+      // by name too. Filtering the non-strings away turned `docs_updated: [42]` into `[]` —
+      // which the stage reads as the agent's positive claim that it changed nothing — so a
+      // contract violation reached the clean-tree no_change path as the legitimate no-op.
+      const docsUpdated: string[] = [];
+      const malformed: string[] = [];
+      raw.forEach((p, i) => {
+        if (typeof p === "string") docsUpdated.push(p);
+        else malformed.push(`[${i}]=${JSON.stringify(p) ?? String(p)}`);
+      });
+      if (malformed.length > 0) {
+        return {
+          kind: "unreadable",
+          detail:
+            `task ${binding.taskId} recorded a docs_updated with ${malformed.length} non-string member(s) ` +
+            `(${malformed.join(", ")}) — the documentation-maintainer contract requires a list of paths, so ` +
+            `nobody can tell which paths that agent claims it changed`,
+        };
+      }
       return { kind: "delivered", taskId: binding.taskId, docsUpdated };
     },
 
@@ -1215,6 +1233,11 @@ export function buildCoordinatorDeps(ctx: WiringContext): CoordinatorDeps {
                 sha: candidateSha,
                 executedRequiredChecks: false,
                 detail: `${(refusal as { reason: string }).reason}: ${(refusal as { message: string }).message}`,
+                // FG-655 AC4: the refusal keeps its NAME across the seam. A workspace that
+                // could not be verified means verification COULD NOT RUN — the lifecycle's
+                // `blocked_environment` stop — and Stage 9 can only tell that apart from a
+                // failed check if the refusal reaches it as one.
+                environmentRefusal: refusal as { reason: string; message: string },
               }
             : {
                 ok: verification.ok,

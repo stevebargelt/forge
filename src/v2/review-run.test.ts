@@ -2096,6 +2096,56 @@ test("FG-640: the shipping stage PERSISTS the trusted remote head so the gate ca
   assert.equal(review.trustedRemoteSha, review.candidateSha, "the reviewed tip equals the recorded remote head");
 });
 
+// FG-655 AC4: Stage 9 is the lifecycle's SECOND verification reader, and it bypasses the
+// verify seam entirely. An environment refusal there means verification COULD NOT RUN, which is
+// the same `blocked_environment` stop Stage 1 makes above — not a shipping refusal that
+// consumes a cycle and can send a fixer to remediate an unfit environment.
+test("FG-655 AC4: an environment refusal at the shipping reader STOPS blocked_environment, records nothing", async () => {
+  const base = harness();
+  const h = harness({
+    shippingInput: async (ctx) => ({
+      ...(await base.deps.shippingInput(ctx)),
+      verification: {
+        ok: false,
+        sha: ctx.candidateSha,
+        executedRequiredChecks: false,
+        detail: "workspace_dirty_at_candidate: docs/left-behind.md",
+        environmentRefusal: {
+          reason: "workspace_dirty_at_candidate",
+          message: "the workspace is ON the candidate but carries uncommitted changes — docs/left-behind.md",
+        },
+      },
+    }),
+  });
+  await parkAt(h.deps, "shipping_review");
+  const shipping = await runNextStage(REVIEW, h.deps);
+
+  assert.equal(shipping.status, "stopped", shipping.message);
+  assert.match(shipping.message, /blocked_environment \(workspace_dirty_at_candidate\)/);
+  assert.match(shipping.message, /no review cycle was consumed/);
+  assert.equal(getReview(REVIEW)?.state, "blocked_environment");
+  assert.equal(getReview(REVIEW)?.stageEvidence?.shipping, undefined, "nothing was recorded as shipped");
+  assert.equal(getReview(REVIEW)?.trustedRemoteSha, undefined, "no tip is trusted off a tree nobody could verify");
+  assert.equal(shipping.shipping, undefined, "and no eight-check assessment was computed at all");
+  assert.equal(pending().kind, "shipping_review", "a stop, not a gravestone — Stage 9 re-enters");
+});
+
+test("FG-655 AC4: a verification that RAN and failed is still the ordinary shipping refusal, not a stop", async () => {
+  const base = harness();
+  const h = harness({
+    shippingInput: async (ctx) => ({
+      ...(await base.deps.shippingInput(ctx)),
+      verification: { ok: false, sha: ctx.candidateSha, executedRequiredChecks: true, detail: "unit: FAILED" },
+    }),
+  });
+  await parkAt(h.deps, "shipping_review");
+  const shipping = await runNextStage(REVIEW, h.deps);
+
+  assert.equal(shipping.status, "refused");
+  assert.match(shipping.message, /verification_green: deterministic verification is not green/);
+  assert.notEqual(getReview(REVIEW)?.state, "blocked_environment", "the WORK failed review — the environment was fit");
+});
+
 test("FG-640: an UNTRUSTED tip records no remote head — the column never carries a head the review did not match", async () => {
   const base = harness();
   const h = harness({
