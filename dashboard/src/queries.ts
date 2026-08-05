@@ -25,6 +25,7 @@ import {
 } from "@forge/reconcile-candidate";
 import {
   LAUNCH_OBSERVATION_COLUMNS,
+  hasPlacementAuthority,
   rowToLaunchObservation,
   type LaunchObservationRow,
 } from "@forge/launch-observations";
@@ -2190,7 +2191,10 @@ export function launchDetail(launchId: string, nowMs: number = Date.now()): Laun
     observation: stale ? "unobserved" : "fresh",
     terminal: obs.terminal,
     associationKind: obs.associationKind,
-    unassociated: obs.associationKind !== "explicit",
+    // The DECLARED submission ids, matching the shared derivation exactly:
+    // `association_kind` names which channel resolved the project home (FG-684 AC4),
+    // which is a different question from whether the launch was associated at all.
+    unassociated: !hasPlacementAuthority(obs),
     runId: obs.runId,
     taskId: obs.taskId,
     ticketId: obs.ticketId,

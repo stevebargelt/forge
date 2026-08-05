@@ -26,7 +26,8 @@
 //     bound to a superseded candidate simply stops being the newest and disappears
 //     rather than being carried forward or relabeled (BD-6).
 //   - It never consults a launch name, argv, log text, or the quarantined
-//     `forgeIds`. Placement is authorized by `association_kind` alone (BD-2/BD-15).
+//     `forgeIds`. Placement is authorized by the persisted association alone — the
+//     DECLARED submission ids and `project_dir` (BD-2/BD-15).
 //   - It never renders the launch status itself: `statusLine` (src/v2/launch.ts) is
 //     the ONE human rendering, so the four BD-4 facts stay four facts here too.
 
@@ -35,6 +36,7 @@ import type { Database as DatabaseInstance } from "better-sqlite3";
 import { isLaunchId, statusLine, type LaunchStatus } from "./launch.js";
 import {
   LAUNCH_OBSERVATION_COLUMNS,
+  hasPlacementAuthority,
   rowToLaunchObservation,
   type LaunchAssociationKind,
   type LaunchObservation,
@@ -97,8 +99,11 @@ export type HostLaunchActivity = {
   projectDir: string | null;
   projectLabel: string | null;
   associationKind: LaunchAssociationKind;
-  /** True unless submission-time metadata authorized the placement. Rendered as
-   *  the literal `unassociated` label (BD-3). */
+  /** True unless the SUBMITTER declared placement-authorizing metadata. Rendered as
+   *  the literal `unassociated` label (BD-3). Deliberately NOT `associationKind !==
+   *  "explicit"`: since FG-684 that label names which channel resolved the project
+   *  home, so a launch that declared `--run` and took its project from the cwd reads
+   *  `cwd` and is still associated with the run it named. */
   unassociated: boolean;
   placement: "run" | "project" | "host";
   runId: string | null;
@@ -259,7 +264,7 @@ function toHostLaunch(obs: LaunchObservation, placement: "run" | "project" | "ho
     projectDir: obs.projectDir,
     projectLabel: projectLabelOf(obs.projectDir),
     associationKind: obs.associationKind,
-    unassociated: obs.associationKind !== "explicit",
+    unassociated: !hasPlacementAuthority(obs),
     placement,
     runId: obs.runId,
     taskId: obs.taskId,
@@ -393,8 +398,13 @@ export function deriveCurrentActivity(db: DatabaseInstance, opts: { now?: Date; 
   // carries conversation text that false-matches unrelated run and ticket ids.
   let hostVerification: HostLaunchActivity[];
   if (scope.runId !== undefined) {
+    // The DECLARED run id, not `association_kind`: a row's run id is only ever what
+    // the submitter declared (BD-15 — nothing is inferred), while the label names
+    // which channel resolved the PROJECT home. A launch whose declared run is
+    // registered without a project home takes its project from the cwd and reads
+    // `cwd`; it still belongs on the run it named.
     hostVerification = open
-      .filter((o) => o.associationKind === "explicit" && o.runId === scope.runId)
+      .filter((o) => o.runId === scope.runId)
       .map((o) => toHostLaunch(o, "run", nowMs));
   } else if (scope.projectDirs !== undefined) {
     hostVerification = open
@@ -408,13 +418,13 @@ export function deriveCurrentActivity(db: DatabaseInstance, opts: { now?: Date; 
     // run but happened to run in a per-task worktree (the ticket's own 2026-08-04
     // case, which lands ON ITS RUN once `--run` is supplied).
     hostVerification = open
-      .filter((o) => o.projectDir !== null || o.associationKind === "explicit")
+      .filter((o) => o.projectDir !== null || hasPlacementAuthority(o))
       .map((o) => toHostLaunch(o, o.runId !== null ? "run" : o.projectDir !== null ? "project" : "host", nowMs));
   }
 
   const unassociated = hostWide
     ? open
-      .filter((o) => o.projectDir === null && o.associationKind !== "explicit")
+      .filter((o) => o.projectDir === null && !hasPlacementAuthority(o))
       .map((o) => toHostLaunch(o, "host", nowMs))
     : [];
 

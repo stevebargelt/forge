@@ -68,7 +68,7 @@ The server exposes read-only JSON endpoints at `http://127.0.0.1:8024/api/…`. 
 
 The FG-679 endpoints (`/api/current-activity`, `/api/launches/:id`, `/api/launches/:id/log`) make **no outbound call while serving or polling** — no GitHub, no shell, no `git`, no Forge CLI, no tmux — and never call `readLaunch` or `listLaunches`, whose status classification is a live tmux probe rather than a read of durable state. A runtime guard proves it, rather than inspection. Two pre-existing serving paths elsewhere in the server *do* shell out (FG-290's `docker inspect` on `/api/in-flight`, and project presentation's `git`); they are recorded as named exceptions in `docs/plans/fg679-current-activity-architecture.md`, and the guard is deliberately scoped to the new paths rather than widened over them.
 
-Project-aware read endpoints accept either `?projectKey=<canonical-key>` to include every observed member path or `?projectDir=/exact/path` for an exact operational checkout. If both are present, the exact path wins. Unknown canonical keys match nothing. Metrics endpoints also accept `?since=30d` — except `/api/agent-runtime`, which takes a fixed `?window=` instead. Full parameter and response-shape reference: `docs/SCHEMA-CONTRACT.md` (which needs a follow-up update for this expanded read model).
+Project-aware read endpoints accept either `?projectKey=<canonical-key>` to include every observed member path or `?projectDir=/exact/path` for an exact operational checkout. If both are present, the exact path wins. Unknown canonical keys match nothing. Metrics endpoints also accept `?since=30d` — except `/api/agent-runtime`, which takes a fixed `?window=` instead. Full parameter and response-shape reference: `docs/SCHEMA-CONTRACT.md`.
 
 ## Validation
 
