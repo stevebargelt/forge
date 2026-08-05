@@ -112,12 +112,40 @@ describe("FG-679 launch_observations — the status codec", () => {
 
 describe("FG-679 launch_observations — placement authority (BD-2/BD-3/BD-14)", () => {
   test("explicit submission metadata is the only thing that yields `explicit`", () => {
+    // The published submission vocabulary (invariant 22): --run / --task / --ticket.
     assert.equal(associationKindFor({ runId: "run-abc" }, null), "explicit");
-    assert.equal(associationKindFor({ campaignId: "camp-1", itemId: "item-1" }, null), "explicit");
+    assert.equal(associationKindFor({ taskId: "task-plan-51d71e" }, null), "explicit");
+    assert.equal(associationKindFor({ ticketId: "FG-679" }, null), "explicit");
     assert.equal(associationKindFor(undefined, "/repos/forge"), "cwd");
     assert.equal(associationKindFor({}, "/repos/forge"), "cwd");
     assert.equal(associationKindFor(undefined, null), "none");
     assert.equal(associationKindFor({}, null), "none");
+  });
+
+  test("campaign/item identity is PROVENANCE, not placement authority — it never renders a run-less launch as associated", () => {
+    // The campaign drive-item launcher records campaign + item precisely BECAUSE no
+    // run exists yet, and documents that such a launch is labeled `unassociated`.
+    // Classifying that identity as `explicit` contradicted the launcher's own record.
+    assert.equal(associationKindFor({ campaignId: "camp-1", itemId: "item-1" }, "/repos/forge"), "cwd");
+    assert.equal(associationKindFor({ campaignId: "camp-1", itemId: "item-1" }, null), "none");
+    // …and it is still RECORDED in full: provenance demoted, not discarded.
+    recordLaunchObservation({
+      launchId: "launch-campaign-drive-item1-aaaaaa",
+      name: "campaign-drive-item-1",
+      command: ["forge", "campaign", "drive-item", "camp-1", "item-1"],
+      cwd: "/repos/forge",
+      projectDir: "/repos/forge",
+      association: { campaignId: "camp-1", itemId: "item-1" },
+      startedAt: "2026-08-05T10:00:00.000Z",
+      observedAt: "2026-08-05T10:00:00.000Z",
+      status: { state: "running" },
+    });
+    const obs = getLaunchObservation("launch-campaign-drive-item1-aaaaaa");
+    assert.ok(obs);
+    assert.equal(obs.associationKind, "cwd");
+    assert.equal(obs.campaignId, "camp-1");
+    assert.equal(obs.itemId, "item-1");
+    assert.equal(obs.runId, null, "no run was ever declared, and none is manufactured");
   });
 
   test("a launch recorded with NO association keeps run_id null even when its name and argv are full of ids (BD-15)", () => {

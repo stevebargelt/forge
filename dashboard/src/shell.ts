@@ -543,6 +543,9 @@ section.current-activity { margin-top: 28px; }
   border-bottom: 1px solid var(--border);
 }
 .ca-section .item.ca-row:last-child { border-bottom: none; }
+/* The agent row navigates to its task — it is a control, so it takes focus and shows it. */
+.ca-section .item.ca-agent-row { cursor: pointer; }
+.ca-section .item.ca-agent-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .ca-launch-row .badge, .ca-ci-row .badge { white-space: normal; text-align: left; max-width: 30ch; }
 .ca-assoc-badge {
   margin-left: 8px;

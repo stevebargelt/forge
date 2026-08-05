@@ -2939,8 +2939,10 @@ export function launchDriveItemUnderForge(
       // — the campaign and the item. A run association is NOT manufactured here: the
       // drive-item child dispatches its own run, so no run id exists yet to declare,
       // and inventing one would attribute this launch to a run it was never
-      // associated with. Absent an explicit run, the launch is placed at project
-      // level (from its cwd) and labeled `unassociated`, which is the honest answer.
+      // associated with. Campaign/item identity is PROVENANCE, not placement
+      // authority (associationKindFor), so this launch is placed at project level
+      // from its cwd and labeled `unassociated` — which is the honest answer, and the
+      // one this comment has always claimed.
       meta = startLaunch(argv, { name: `campaign-drive-${itemId}`, ...(cwd ? { cwd } : {}), ...(seams.tmux ? { tmux: seams.tmux } : {}) });
       recordLaunchStart(meta, { campaignId, itemId });
       // FG-564 (AC10 / P1-F): make the item-attempt -> launch linkage durable as a REQUIRED

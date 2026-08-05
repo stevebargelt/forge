@@ -85,10 +85,10 @@ test("FG-642: a Chrome-less run of the real browser tier FAILS every test with t
   assert.ok(output.includes("Set FORGE_CHROME_BIN to its path"), "the failure must name the remedy");
   assert.ok(output.includes("must FAIL this tier, never skip to green"), "the failure must name the rule it enforces");
 
-  // Every one of the 57 tests is RED and none is skipped — a file-wide `before` hook
+  // Every one of the 58 tests is RED and none is skipped — a file-wide `before` hook
   // failure, not one gating test with 53 passes behind it.
-  assert.equal(total(output, "tests"), 57, "all 57 tier tests must be accounted for");
-  assert.equal(total(output, "fail"), 57, "every tier test must fail without a browser");
+  assert.equal(total(output, "tests"), 58, "all 58 tier tests must be accounted for");
+  assert.equal(total(output, "fail"), 58, "every tier test must fail without a browser");
   assert.equal(total(output, "pass"), 0, "no tier test may pass without a browser");
   assert.equal(total(output, "skipped"), 0, "a skip is the exact regression FG-642 closed — the tier must go red, not quiet");
   assert.equal(total(output, "todo"), 0);

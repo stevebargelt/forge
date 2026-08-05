@@ -333,6 +333,48 @@ test("FG-679 BD-10: no host filesystem path is rendered or linked, and the surfa
   await page.close();
 });
 
+test("FG-679: an agent row is reachable and activatable BY KEYBOARD, not by mouse only", async () => {
+  // The row navigates to its task, so it is a control. Shipping a new interactive
+  // surface that only a pointer can reach is a defect in the surface being shipped.
+  served = base({
+    agents: [{
+      runId: "run-fg679",
+      runTitle: "surface in-flight host verification",
+      workflow: "feature",
+      projectDir: null,
+      projectLabel: "forge",
+      taskId: "task-build-aef6ae",
+      agentRole: "engineer",
+      agentModel: null,
+      phase: "build",
+      status: "running",
+      startedAt: "2026-08-05T11:50:00.000Z",
+    }],
+  });
+  const page = await open();
+  const row = page.locator("section.current-activity .ca-agent-row").first();
+  await row.waitFor();
+
+  assert.equal(await row.getAttribute("role"), "button", "the row announces itself as a control");
+  assert.equal(await row.getAttribute("tabindex"), "0", "…and is in the tab order");
+  assert.match(await row.getAttribute("aria-label") ?? "", /task-build-aef6ae/, "…with a name that says where it goes");
+
+  // Reached by the KEYBOARD, from the document, not by a programmatic .focus().
+  await page.keyboard.press("Tab");
+  for (let i = 0; i < 40 && !(await row.evaluate((el) => el === document.activeElement)); i++) {
+    await page.keyboard.press("Tab");
+  }
+  assert.ok(await row.evaluate((el) => el === document.activeElement), "the row is reachable by tabbing");
+
+  assert.equal(await page.locator(".detail-overlay").count(), 0);
+  await page.keyboard.press("Enter");
+  await page.locator(".detail-overlay").waitFor({ timeout: 5000 });
+  assert.equal(await page.locator(".detail-overlay").count(), 1, "Enter does what a click does");
+
+  await page.screenshot({ path: join(SHOTS, "fg679-agent-row-keyboard.png"), fullPage: true });
+  await page.close();
+});
+
 test("FG-679: the screenshots for the populated, empty and stale states exist", () => {
   for (const name of ["fg679-populated.png", "fg679-empty.png", "fg679-stale.png", "fg679-four-statuses.png"]) {
     assert.ok(existsSync(join(SHOTS, name)), `expected screenshot ${join(SHOTS, name)}`);

@@ -121,6 +121,20 @@ test("FG-679 BD-10: `..`, separators and absolute paths are refused with a 4xx B
   }
 });
 
+test("FG-679 BD-10: a MALFORMED percent-encoding is a 4xx refusal, not a 500", async () => {
+  // decodeURIComponent THROWS on these, and an uncaught throw on a serving path this
+  // ticket introduces became a server error — an identity-addressed surface owes a bad
+  // identity a refusal, and a bad id is a bad request whether or not it decodes.
+  for (const id of ["%", "%E0%A4%A", "%zz", "launch-abc%"]) {
+    for (const suffix of ["", "/log"]) {
+      const res = await fetch(`${BASE}/api/launches/${id}${suffix}`);
+      assert.ok(res.status >= 400 && res.status < 500, `${id}${suffix} -> ${res.status} (must be 4xx, never 5xx)`);
+      const raw = await res.text();
+      assert.equal(raw.includes(tmpHome), false, `${id}${suffix}: no host path may leak in the refusal`);
+    }
+  }
+});
+
 test("FG-679 BD-10: an unknown but well-formed id is a 404, distinct from a refused id", async () => {
   const res = await fetch(`${BASE}/api/launches/launch-does-not-exist-000000`);
   assert.equal(res.status, 404);
@@ -136,6 +150,20 @@ test("FG-679 BD-10: the log response is a BOUNDED TAIL, not the whole file", asy
   assert.ok(body.bytes > 40 * 1024, "the true size is reported honestly even though the body is trimmed");
   assert.equal(body.text.includes("SECRET-HEAD-LINE-THAT-MUST-BE-TRIMMED"), false, "the head of an unbounded log is not served");
   assert.match(body.text, /FINAL-LINE/, "the TAIL is what an operator needs, and it is what is served");
+});
+
+test("FG-679: the log response STATES what it is — raw, unredacted host-command output", async () => {
+  // The endpoint serves stdout of an arbitrary host command in the operator's own
+  // environment (FG-626's reproduction is `forge launch run -- env`). There is no
+  // redactor and there will not be one — docs/redaction.md is allowlist discipline and
+  // a denylist scrubber would be false assurance — so the surface says so plainly and
+  // bounds what it serves.
+  const body = await (await fetch(`${BASE}/api/launches/launch-worktree-abc123/log`)).json() as Record<string, unknown>;
+  assert.equal(body["content"], "raw");
+  assert.match(String(body["notice"]), /unredacted/);
+  assert.match(String(body["notice"]), /secret/i);
+  assert.equal(body["maxBytes"], 16 * 1024, "the bound is declared, not left to be inferred");
+  assert.equal(body["truncated"], true);
 });
 
 test("FG-679 BD-10: a launch with no log file on disk is a 404, not an empty success", async () => {

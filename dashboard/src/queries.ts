@@ -35,6 +35,7 @@ import {
   LAUNCH_OBSERVATION_FRESH_MS,
   deriveCurrentActivity,
   isLaunchId,
+  observationIsFresh,
   statusLine,
   type CurrentActivity,
   type CurrentActivityScope,
@@ -2170,7 +2171,9 @@ export function launchDetail(launchId: string, nowMs: number = Date.now()): Laun
   if (!row) return null;
   const obs = rowToLaunchObservation(row);
   const observedMs = Date.parse(obs.observedAt);
-  const fresh = Number.isFinite(observedMs) && nowMs - observedMs <= LAUNCH_OBSERVATION_FRESH_MS;
+  // The SAME range predicate the shared derivation applies — a future-dated
+  // observation is unusable, not maximally fresh.
+  const fresh = observationIsFresh(Number.isFinite(observedMs) ? observedMs : null, nowMs, LAUNCH_OBSERVATION_FRESH_MS);
   // A terminal disposition is evidence that does not decay — it already happened.
   // Only a NON-terminal observation goes stale, and when it does it reads
   // `unobserved since <t>`: never `running`, never a fabricated terminal (BD-12).
@@ -2198,12 +2201,35 @@ export function launchDetail(launchId: string, nowMs: number = Date.now()): Laun
 }
 
 /** The launch log is UNBOUNDED host-command output, served by a process with no
- *  authentication (dashboard/src/server.ts binds an env-overridable address). So the
- *  response is a BOUNDED TAIL by construction — id-only addressing constrains path
- *  traversal, not content volume, and only this bound constrains the latter. */
+ *  authentication (dashboard/src/server.ts binds an env-overridable address, defaulting
+ *  to loopback). So the response is a BOUNDED TAIL by construction — id-only addressing
+ *  constrains path traversal, not content volume, and only this bound constrains the
+ *  latter. The bound matches the container-log surface's discipline; it is deliberately
+ *  tighter than that surface's 64 KiB because a launch log is the operator's OWN shell
+ *  environment (FG-626's reproduction is literally `forge launch run -- env`). */
 export const LAUNCH_LOG_TAIL_BYTES = 16 * 1024;
 
-export type LaunchLogTail = { launchId: string; text: string; bytes: number; truncated: boolean };
+/** What this response IS, stated in the response itself. There is no redactor here and
+ *  there will not be one: docs/redaction.md establishes ALLOWLIST discipline for this
+ *  codebase, and a denylist secret-scrubber over arbitrary command output would provide
+ *  false assurance rather than safety. So the surface says plainly what it renders —
+ *  raw stdout/stderr of a host command, in the operator's own environment — and a
+ *  reader is never left to infer that something sanitized it. */
+export const LAUNCH_LOG_CONTENT_NOTICE =
+  "raw stdout/stderr of a host command, unredacted — it may contain environment variables, tokens or other secrets the command printed";
+
+export type LaunchLogTail = {
+  launchId: string;
+  text: string;
+  bytes: number;
+  truncated: boolean;
+  /** Always `raw`. A field rather than prose so a consumer must handle it. */
+  content: "raw";
+  notice: string;
+  /** The tail bound in bytes, so a reader knows WHAT it is looking at without
+   *  reverse-engineering it from `bytes` vs `text.length`. */
+  maxBytes: number;
+};
 
 export function launchLogTail(launchId: string, maxBytes = LAUNCH_LOG_TAIL_BYTES): LaunchLogTail | null {
   if (!isLaunchId(launchId)) return null;
@@ -2222,5 +2248,13 @@ export function launchLogTail(launchId: string, maxBytes = LAUNCH_LOG_TAIL_BYTES
   } finally {
     closeSync(fd);
   }
-  return { launchId, text: buf.toString("utf8"), bytes: size, truncated: start > 0 };
+  return {
+    launchId,
+    text: buf.toString("utf8"),
+    bytes: size,
+    truncated: start > 0,
+    content: "raw",
+    notice: LAUNCH_LOG_CONTENT_NOTICE,
+    maxBytes,
+  };
 }

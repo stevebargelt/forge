@@ -154,6 +154,21 @@ describe("FG-679 queries.currentActivity — the read model", () => {
     assert.equal(launchDetail("/etc/passwd", NOW), null);
     assert.equal(launchDetail("with/slash", NOW), null);
   });
+
+  test("a FUTURE-dated observation reads `unobserved since <t>` on launch detail too — the same range predicate, not a second one-sided copy", () => {
+    insertLaunch({ id: "launch-future-ffffff", kind: "explicit", runId: "run-1", observedAt: new Date(NOW + 6 * 3_600_000).toISOString() });
+    const detail = launchDetail("launch-future-ffffff", NOW)!;
+    assert.equal(detail.observation, "unobserved");
+    assert.equal(detail.state, "unknown");
+    assert.notEqual(detail.statusLabel, "running");
+    assert.match(detail.statusLabel, /^unobserved since /);
+    // And the shared derivation agrees — one predicate, two surfaces.
+    const entry = currentActivity(undefined, "run-1", NOW).hostVerification.find((l) => l.launchId === "launch-future-ffffff")!;
+    assert.equal(entry.observation, "unobserved");
+    // This row is this test's own fixture; the module-level set is what the later
+    // count assertions read.
+    db.prepare(`DELETE FROM launch_observations WHERE launch_id = 'launch-future-ffffff'`).run();
+  });
 });
 
 describe("FG-679 BD-4 — the render layer keeps four facts four facts", () => {

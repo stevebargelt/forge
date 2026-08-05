@@ -50,7 +50,7 @@ const TIER_TESTS: Readonly<Record<string, number>> = {
   "agent-runtime-legibility.test.ts": 12,
   "agent-runtime.test.ts": 18,
   "backlog-count.test.ts": 2,
-  "fg679-current-activity.test.ts": 9,
+  "fg679-current-activity.test.ts": 10,
   "fg608-backlog-cutover.test.ts": 3,
   "inactive-checkouts.test.ts": 3,
   "offline-boot.test.ts": 2,
@@ -68,7 +68,7 @@ test("FG-642 (exact set): the browser tier is exactly the suites TIER_TESTS name
   );
 });
 
-test("FG-642 (exact set): every suite keeps its own test count, and the tier keeps all 57", () => {
+test("FG-642 (exact set): every suite keeps its own test count, and the tier keeps all 58", () => {
   let total = 0;
   for (const [file, expected] of Object.entries(TIER_TESTS)) {
     const found = (tierSource(file).match(/^test\(/gm) ?? []).length;
@@ -79,7 +79,7 @@ test("FG-642 (exact set): every suite keeps its own test count, and the tier kee
     );
     total += found;
   }
-  assert.equal(total, 57, "the tier must carry FG-642's 18 real-browser tests plus the 30 FG-648/FG-661 added and FG-679's 9");
+  assert.equal(total, 58, "the tier must carry FG-642's 18 real-browser tests plus the 30 FG-648/FG-661 added and FG-679's 10");
 });
 
 test("FG-642 (launch site): every chromium.launch() in the tier takes executablePath from the shared resolver", () => {

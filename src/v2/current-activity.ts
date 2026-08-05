@@ -180,6 +180,22 @@ function parseMs(iso: string | null): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
+/** Freshness is a RANGE, never a ceiling, and that is a correctness property rather
+ *  than a nicety. `now - observed <= cutoff` is trivially TRUE for a NEGATIVE
+ *  difference, so a FUTURE-dated observation — clock skew, a corrected system clock,
+ *  an imported row — read as maximally fresh and the surface asserted `running` from
+ *  evidence whose observation time has not occurred. Nothing is ever fabricated: an
+ *  observation dated ahead of the reader is UNUSABLE, exactly like one too old, and
+ *  renders `unobserved since <t>` / `stale`.
+ *
+ *  Exported so the dashboard's launch detail applies the SAME predicate rather than a
+ *  second hand-written comparison that can drift back to one-sided. */
+export function observationIsFresh(observedMs: number | null, nowMs: number, freshMs: number): boolean {
+  if (observedMs === null) return false;
+  const age = nowMs - observedMs;
+  return age >= 0 && age <= freshMs;
+}
+
 function inProjectScope(projectDir: string | null, projectDirs: readonly string[] | undefined): boolean {
   if (projectDirs === undefined) return true;
   if (projectDir === null) return false;
@@ -232,7 +248,8 @@ function toHostLaunch(obs: LaunchObservation, placement: "run" | "project" | "ho
   const observedMs = parseMs(obs.observedAt);
   // An UNPARSEABLE observation time is not fresh evidence either — it is an
   // observation we cannot date, which is the same absence of freshness as an old one.
-  const fresh = observedMs !== null && nowMs - observedMs <= LAUNCH_OBSERVATION_FRESH_MS;
+  // Nor is a FUTURE-dated one: see observationIsFresh.
+  const fresh = observationIsFresh(observedMs, nowMs, LAUNCH_OBSERVATION_FRESH_MS);
   const status: LaunchStatus = fresh ? obs.status : { state: "unknown" };
   return {
     launchId: obs.launchId,
@@ -332,7 +349,7 @@ function readNewestCiObservations(db: DatabaseInstance, scope: CurrentActivitySc
     const contexts = parseContexts(payload.contexts);
     const outcome = typeof payload.outcome === "string" ? payload.outcome : "unavailable";
     const observedMs = parseMs(observedAt);
-    const stale = observedMs === null || nowMs - observedMs > CI_OBSERVATION_FRESH_MS;
+    const stale = !observationIsFresh(observedMs, nowMs, CI_OBSERVATION_FRESH_MS);
     // `pending` is the observer's own word for "checks are still running at this
     // sha". A per-context `pending`/`queued`/`in_progress` says the same thing even
     // when the summary outcome has not caught up.

@@ -1311,6 +1311,16 @@ function ProjectChip({ entry }) {
 // READ-ONLY. There is no start, stop, or retry affordance here for a launch or for
 // CI, and no host filesystem path is rendered or linked: a launch is addressed by
 // its identity.
+// An agent row navigates to its task, so it is a control and must be reachable as
+// one: focusable, with Enter/Space activating it. Same shape as ProjectCard's — a
+// mouse-only affordance on a new surface is a defect in the surface.
+function caRowKey(event, activate) {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    activate();
+  }
+}
+
 function CurrentActivitySection({ activity, now, onTaskClick }) {
   const agents = (activity && activity.agents) || [];
   const launches = (activity && activity.hostVerification) || [];
@@ -1333,7 +1343,15 @@ function CurrentActivitySection({ activity, now, onTaskClick }) {
         ${agents.length === 0
           ? html`<div class="ca-empty">No agent task in flight.</div>`
           : agents.map((a) => html`
-            <div class="item ca-row" key=${a.taskId} onClick=${() => onTaskClick && onTaskClick(a.taskId)}>
+            <div
+              class="item ca-row ca-agent-row"
+              key=${a.taskId}
+              role="button"
+              tabIndex="0"
+              aria-label=${`Open task ${a.taskId} — ${a.agentRole}, ${a.runTitle}`}
+              onClick=${() => onTaskClick && onTaskClick(a.taskId)}
+              onKeyDown=${(event) => caRowKey(event, () => onTaskClick && onTaskClick(a.taskId))}
+            >
               <span class="badge status-${a.status}">${a.status.replace(/_/g, " ")}</span>
               <div>
                 <div><strong>${a.agentRole}</strong> <span class="faint"> ·</span> <span class="muted">${a.runTitle}</span></div>

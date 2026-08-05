@@ -11,7 +11,8 @@
 
 import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest, getDb } from "../store/db.js";
@@ -111,6 +112,65 @@ describe("FG-679 BD-2/BD-15 — name, argv and log text authorize NOTHING", () =
     const activity = deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-real" } });
     assert.deepEqual(activity.hostVerification.map((l) => l.launchId), [meta.id]);
     assert.equal(activity.hostVerification[0]!.unassociated, false);
+  });
+
+  test("an explicitly run-associated launch started from a PER-TASK WORKTREE appears on its run AND on its project", () => {
+    // The ticket's own motivating shape: forge's own per-task worktrees live under
+    // ~/.forge/worktrees, deliberately outside every registered project home, so the
+    // cwd lookup yields NOTHING. Explicit metadata is the STRONGEST authority and must
+    // not lose to a cwd lookup that happens to fail — the launch's project comes from
+    // the run it declared.
+    const PROJECT = "/repos/forge";
+    getDb().prepare(`INSERT INTO runs (id, workflow, title, status, created_at, project_dir) VALUES ('run-real', 'feature', 'real', 'active', ?, ?)`)
+      .run("2026-08-05T09:00:00.000Z", PROJECT);
+    // A real directory that is NOT under any registered project home.
+    const worktree = mkdtempSync(join(tmpdir(), "fg679-worktree-"));
+
+    const meta = startLaunch(["npm", "run", "test:worktree"], { name: "verify", cwd: worktree, tmux: tmuxStub() });
+    recordLaunchStart(meta, { runId: "run-real", ticketId: "FG-679" });
+
+    const obs = getLaunchObservation(meta.id);
+    assert.equal(obs?.associationKind, "explicit");
+    assert.equal(obs?.projectDir, PROJECT, "the declared run says which project this is");
+
+    const onRun = deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-real" } });
+    assert.deepEqual(onRun.hostVerification.map((l) => l.launchId), [meta.id], "on its run");
+
+    const onProject = deriveCurrentActivity(db, { now: NOW, scope: { projectDirs: [PROJECT] } });
+    assert.deepEqual(onProject.hostVerification.map((l) => l.launchId), [meta.id], "and on its project");
+    assert.equal(onProject.hostVerification[0]!.unassociated, false);
+
+    // And it is NOT ALSO in the host-level bucket — placed is placed.
+    const hostWide = deriveCurrentActivity(db, { now: NOW });
+    assert.deepEqual(hostWide.unassociated, []);
+    assert.deepEqual(hostWide.hostVerification.map((l) => l.launchId), [meta.id]);
+
+    rmSync(worktree, { recursive: true, force: true });
+  });
+
+  test("a campaign drive-item launch — campaign and item identity, no run — is labeled `unassociated` at project level", () => {
+    // The campaign launcher supplies exactly what it knows: no run exists yet (the
+    // drive-item child dispatches its own). Recording that identity must not render
+    // the launch as ASSOCIATED, which is what the launcher's own comment promises.
+    const PROJECT = process.cwd();
+    getDb().prepare(`INSERT INTO runs (id, workflow, title, status, created_at, project_dir) VALUES ('run-other', 'feature', 'other', 'active', ?, ?)`)
+      .run("2026-08-05T09:00:00.000Z", PROJECT);
+
+    const meta = startLaunch(["forge", "campaign", "drive-item", "camp-1", "item-1"], { name: "campaign-drive-item-1", cwd: PROJECT, tmux: tmuxStub() });
+    recordLaunchStart(meta, { campaignId: "camp-1", itemId: "item-1" });
+
+    const obs = getLaunchObservation(meta.id);
+    assert.equal(obs?.associationKind, "cwd", "campaign/item identity is provenance, not placement authority");
+    assert.equal(obs?.campaignId, "camp-1", "…and it is still recorded");
+    assert.equal(obs?.itemId, "item-1");
+    assert.equal(obs?.runId, null);
+
+    const onProject = deriveCurrentActivity(db, { now: NOW, scope: { projectDirs: [PROJECT] } });
+    assert.deepEqual(onProject.hostVerification.map((l) => l.launchId), [meta.id], "project level, from its cwd");
+    assert.equal(onProject.hostVerification[0]!.unassociated, true, "labeled `unassociated`, as the launcher documents");
+
+    // And it never reaches a run surface, since it declared no run.
+    assert.equal(deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-other" } }).hostVerification.length, 0);
   });
 
   test("the observation write is BEST-EFFORT: an unwritable store leaves the launch RUNNING and merely unobserved", () => {

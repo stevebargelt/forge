@@ -185,6 +185,21 @@ describe("FG-679 BD-12 — freshness is a fact about the observer, not about the
     assert.equal(entry.observation, "unobserved");
   });
 
+  test("a FUTURE-dated observation is unusable evidence, not maximally fresh — the surface never asserts `running` from a time that has not occurred", () => {
+    // Clock skew, a corrected system clock, an imported row. `now - observed <= cutoff`
+    // is trivially true for a NEGATIVE difference, so a one-sided bound rendered this
+    // as the freshest possible evidence of a running launch.
+    const observedAt = new Date(NOW.getTime() + 6 * 60 * 60_000).toISOString();
+    addLaunch({ id: "launch-future-hhhhh1", association: { runId: "run-fg679" }, observedAt });
+    const entry = deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-fg679" } }).hostVerification[0]!;
+
+    assert.equal(entry.observation, "unobserved");
+    assert.notEqual(entry.statusLabel, statusLine({ state: "running" }), "never `running` from an observation time in the future");
+    assert.equal(entry.statusLabel, `unobserved since ${observedAt}`);
+    assert.deepEqual(entry.status, { state: "unknown" });
+    assert.deepEqual(entry.recordedStatus, { state: "running" }, "the row still says what it said");
+  });
+
   test("a TERMINAL row has left the in-flight set entirely (BD-16)", () => {
     addLaunch({ id: "launch-done-iiiiii", association: { runId: "run-fg679" }, status: { state: "exited_ok", code: 0 } });
     const activity = deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-fg679" } });
@@ -352,6 +367,17 @@ describe("FG-679 BD-5/BD-6/BD-8 — required CI", () => {
     assert.match(obs.label, /^stale — CI last observed /);
     assert.notEqual(obs.label, CI_RUNNING_LABEL, "a stale pending observation is not a claim that CI is running now");
     assert.match(renderCurrentActivityLines(activity).join("\n"), /stale — CI last observed/);
+  });
+
+  test("BD-8: a FUTURE-dated CI observation is stale evidence, not current — `CI running` is never asserted from a time that has not occurred", () => {
+    const observedAt = new Date(NOW.getTime() + 2 * 60 * 60_000).toISOString();
+    addCiEvent({
+      attemptId: "attempt-1", ticketId: "FG-679", projectDir: PROJECT, candidateSha: "f".repeat(40),
+      observedAt, outcome: "pending", unavailableReason: null, contexts: contexts("pending"),
+    }, observedAt);
+    const obs = deriveCurrentActivity(db, { now: NOW, scope: { runId: "run-fg679" } }).requiredCi.observations[0]!;
+    assert.equal(obs.state, "stale");
+    assert.notEqual(obs.label, CI_RUNNING_LABEL);
   });
 
   test("an `unavailable` outcome states its reason rather than reading as a pass", () => {

@@ -203,12 +203,25 @@ export type RecordLaunchObservationInput = {
   status: LaunchStatus;
 };
 
+/** The fields whose presence AUTHORIZES placement — the submission vocabulary
+ *  invariant 22 publishes (`--run`, `--task`, `--ticket`). `campaignId`/`itemId` are
+ *  deliberately NOT here: they are PROVENANCE. A campaign drive-item launch knows its
+ *  campaign and its item and has no run at all (the child dispatches its own), so
+ *  treating that identity as placement authority rendered a run-less launch as
+ *  ASSOCIATED — the exact opposite of what the campaign launcher documents. It is
+ *  still recorded in full; it just does not decide where the launch is placed. */
+const PLACEMENT_AUTHORIZING_FIELDS = ["runId", "taskId", "ticketId"] as const;
+
+function hasPlacementAuthority(association: LaunchAssociation | undefined): boolean {
+  if (association === undefined) return false;
+  return PLACEMENT_AUTHORIZING_FIELDS.some((f) => typeof association[f] === "string" && association[f] !== "");
+}
+
 /** Decide the placement AUTHORITY from what is actually known. Explicit metadata
  *  wins; a resolved project home is the weaker `cwd` channel; nothing else places
  *  anywhere but the host-level bucket. */
 export function associationKindFor(association: LaunchAssociation | undefined, projectDir: string | null): LaunchAssociationKind {
-  const explicit = association !== undefined && Object.values(association).some((v) => typeof v === "string" && v !== "");
-  if (explicit) return "explicit";
+  if (hasPlacementAuthority(association)) return "explicit";
   return projectDir === null ? "none" : "cwd";
 }
 
@@ -311,9 +324,11 @@ export function listLaunchObservations(limit = 500): LaunchObservation[] {
  *  matching prefix wins, so a checkout nested inside another resolves to itself.
  *
  *  A cwd under `~/.forge/worktrees` (a per-task worktree — the 2026-08-04 case this
- *  ticket was filed on) matches no registered home and returns null, which is what
- *  puts it in the host-level "Unassociated activity" bucket rather than inventing an
- *  owner for it (BD-14). */
+ *  ticket was filed on) matches no registered home and returns null. For a launch
+ *  submitted with NO association that is what puts it in the host-level "Unassociated
+ *  activity" bucket rather than inventing an owner for it (BD-14); an EXPLICITLY
+ *  associated launch takes its project from the run it declared instead — see
+ *  projectDirForAssociation. */
 export function resolveRegisteredProjectDir(cwd: string): string | null {
   const target = resolve(cwd);
   let best: string | null = null;
@@ -328,6 +343,29 @@ export function resolveRegisteredProjectDir(cwd: string): string | null {
   return best;
 }
 
+/** The project home a DECLARED association belongs to, read out of the store's own
+ *  run registry — never guessed.
+ *
+ *  Explicit submission metadata is the STRONGEST authority (BD-3), so it must not
+ *  lose to a cwd lookup that happens to fail. A per-task worktree is deliberately
+ *  outside every registered project home, so an otherwise explicit `--run` launch
+ *  resolved to project_dir null and then vanished from its project's Current activity
+ *  — defeating the ticket's own motivating case. The declared run (or the run its
+ *  declared task belongs to) says which project it is, and that answer is at least as
+ *  authoritative as the cwd one. A ticket id alone names no project; it stays null
+ *  rather than being resolved by some looser channel. */
+function projectDirForAssociation(association: LaunchAssociation | undefined): string | null {
+  const runId = association?.runId;
+  const taskId = association?.taskId;
+  const row = runId
+    ? getDb().prepare(`SELECT project_dir FROM runs WHERE id = ?`).get(runId) as { project_dir: string | null } | undefined
+    : taskId
+      ? getDb().prepare(`SELECT r.project_dir FROM tasks t JOIN runs r ON r.id = t.run_id WHERE t.id = ?`).get(taskId) as { project_dir: string | null } | undefined
+      : undefined;
+  const dir = row?.project_dir;
+  return dir === undefined || dir === null || dir === "" ? null : dir;
+}
+
 // ── FG-679: the submission-time write, and the opportunistic terminal promoter ──
 //
 // BOTH LIVE HERE RATHER THAN IN src/v2/launch.ts, and that placement is
@@ -339,6 +377,15 @@ export function resolveRegisteredProjectDir(cwd: string): string | null {
 // the launch primitives — and the two submission sites (`forge launch run` and the
 // campaign drive-item launcher) both already load the registry, so nothing is lost.
 
+/** How long the START observation may wait on a BUSY store before giving up. The
+ *  host's default is 5s, which is the right wait for WORK; it is the wrong wait for
+ *  instrumentation that runs on the launch-RETURN path. The command is already
+ *  running by the time this is called, so a concurrent writer (this host runs several
+ *  forge processes against one store — FG-29) must not be able to hold up returning
+ *  control to the submitter. Past this bound the write fails, is swallowed, and the
+ *  launch is simply unobserved. */
+const LAUNCH_OBSERVATION_BUSY_TIMEOUT_MS = 250;
+
 /** Record the START of a launch that is ALREADY RUNNING.
  *
  *  BEST-EFFORT IN BOTH DIRECTIONS, AND THAT IS THE POINT. `startLaunch` is
@@ -346,27 +393,36 @@ export function resolveRegisteredProjectDir(cwd: string): string | null {
  *  anything is written) and this instrumentation MUST NOT join that sequence: the
  *  work is the thing, the record is only about the work. Callers invoke this AFTER
  *  the command is running, and a store that cannot be written leaves the launch
- *  running and merely UNOBSERVED — never refused. Returns whether the observation
- *  was recorded, so a caller can say so rather than assume it.
+ *  running and merely UNOBSERVED — never refused. It can no more DELAY the launch
+ *  than refuse it: the write runs under its own short busy timeout, restored on every
+ *  exit. Returns whether the observation was recorded, so a caller can say so rather
+ *  than assume it.
  *
  *  The association is the SUBMITTER's declared metadata, verbatim. Nothing is
  *  derived from the launch name, from argv, or from anything the command logs. */
 export function recordLaunchStart(meta: LaunchMeta, association?: LaunchAssociation): boolean {
   try {
-    recordLaunchObservation({
-      launchId: meta.id,
-      name: meta.id,
-      command: meta.command,
-      cwd: meta.cwd,
-      projectDir: resolveRegisteredProjectDir(meta.cwd),
-      ...(association ? { association } : {}),
-      startedAt: meta.startedAt,
-      observedAt: meta.startedAt,
-      status: { state: "running" },
-    });
+    const db = getDb();
+    const priorBusyTimeout = db.pragma("busy_timeout", { simple: true }) as number;
+    db.pragma(`busy_timeout = ${LAUNCH_OBSERVATION_BUSY_TIMEOUT_MS}`);
+    try {
+      recordLaunchObservation({
+        launchId: meta.id,
+        name: meta.id,
+        command: meta.command,
+        cwd: meta.cwd,
+        projectDir: resolveRegisteredProjectDir(meta.cwd) ?? projectDirForAssociation(association),
+        ...(association ? { association } : {}),
+        startedAt: meta.startedAt,
+        observedAt: meta.startedAt,
+        status: { state: "running" },
+      });
+    } finally {
+      db.pragma(`busy_timeout = ${priorBusyTimeout}`);
+    }
     return true;
   } catch {
-    return false; // unobserved, not unlaunched
+    return false; // unobserved, not unlaunched — and never delayed
   }
 }
 
