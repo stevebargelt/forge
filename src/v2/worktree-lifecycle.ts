@@ -392,9 +392,11 @@ export function createTaskClone(
   // hooks. Installed at the same moment, and for the same reason, as the identity
   // above: the substrate that took it away is what has to hand it back, before
   // the container can reach the workspace. Provisioning then PROVES the hook will
-  // run (self-contained regular file, executable, bundled bytes, at the directory
-  // git actually consults); anything else refuses the clone by a named error
-  // rather than yielding a workspace whose guard silently never fires.
+  // run (self-contained regular file, executable, bundled bytes, at a hooks
+  // directory pinned in the clone's OWN config so the pin travels with the
+  // workspace across the container mount instead of depending on the image's git
+  // configuration); anything else refuses the clone by a named error rather than
+  // yielding a workspace whose guard silently never fires.
   //
   // THREAT MODEL (FG-685 D4), so nobody later reads more into this than it is:
   // it defends against the DEFAULT attribution behavior of a COOPERATING agent —

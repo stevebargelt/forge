@@ -27,8 +27,11 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import {
+  CommitMsgHookUnenforceableError,
+  assertWorkspaceHookEnforceable,
   executeWorkspaceCommitMsgHook,
   planWorkspaceCommitMsgHook,
+  provisionWorkspaceCommitMsgHook,
 } from "../util/commit-msg-hook.js";
 import { captureTaskClone, createTaskClone, createWorktree } from "./worktree-lifecycle.js";
 
@@ -44,15 +47,16 @@ const BUNDLED = join(
   "commit-msg-no-ai-attribution"
 );
 
+/** One refused message on its own, for the tests about WHERE git looks for the
+ *  hook rather than about which messages it rejects. */
+const ATTRIBUTED_MESSAGE = "feat: add the widget\n\nCo-Authored-By: Claude Opus 5 <noreply@anthropic.com>\n";
+
 /** The three variants the hook claims to refuse. Every one of them is exercised
  *  in every workspace kind — a single representative would leave two thirds of
  *  the policy unproven, and a GNU-vs-BSD regex divergence degrades to a false
  *  NEGATIVE, silently. */
 const REFUSED_MESSAGES: ReadonlyArray<readonly [string, string]> = [
-  [
-    "co-authored-by trailer",
-    "feat: add the widget\n\nCo-Authored-By: Claude Opus 5 <noreply@anthropic.com>\n",
-  ],
+  ["co-authored-by trailer", ATTRIBUTED_MESSAGE],
   ["generated-with boilerplate", "feat: add the widget\n\n🤖 Generated with Claude Code\n"],
   ["bare prose mention", "feat: add the widget\n\nThis change was pair-written with Claude.\n"],
 ];
@@ -113,14 +117,15 @@ function agentEnv(): NodeJS.ProcessEnv {
 function attemptCommit(
   workspace: string,
   file: string,
-  message: string
+  message: string,
+  env: NodeJS.ProcessEnv = agentEnv()
 ): { status: number | null; stderr: string; headBefore: string; headAfter: string } {
   const headBefore = git(workspace, "rev-parse", "HEAD").trim();
   writeFileSync(join(workspace, file), `touched by ${file}\n`);
-  spawnSync("git", ["add", "-A"], { cwd: workspace, env: agentEnv() });
+  spawnSync("git", ["add", "-A"], { cwd: workspace, env });
   const r = spawnSync("git", ["commit", "-m", message], {
     cwd: workspace,
-    env: agentEnv(),
+    env,
     encoding: "utf8",
   });
   return {
@@ -216,6 +221,69 @@ test("fg685 (D3, clone): the installed hook is SELF-CONTAINED and sits where git
     git(clone.clonePath, "rev-parse", "--git-path", "hooks").trim()
   );
   assert.equal(effective, dirname(target));
+});
+
+test("fg685 (D3, clone): a core.hooksPath the agent CONTAINER carries cannot un-enforce a provisioned clone", () => {
+  const repo = makeRepo();
+  const clone = createTaskClone(repo.dir, RUN_ID, "t-clone-container-hookspath", repo.head);
+  workspaces.push(clone.clonePath);
+
+  // The asymmetry a host-side `git rev-parse --git-path hooks` cannot see: git
+  // configuration that exists only on the CONTAINER side of the mount, aiming
+  // hooks at a directory whose commit-msg approves everything. Today's agent image
+  // carries none, which is exactly why this must not depend on the image.
+  const decoy = tmpRoot("decoy-hooks");
+  writeFileSync(join(decoy, "commit-msg"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const imageConfig = join(tmpRoot("image-gitconfig"), "config");
+  writeFileSync(imageConfig, `[core]\n\thooksPath = ${decoy}\n`);
+  const containerEnv: NodeJS.ProcessEnv = {
+    ...agentEnv(),
+    GIT_CONFIG_GLOBAL: imageConfig,
+    GIT_CONFIG_SYSTEM: imageConfig,
+  };
+
+  const blocked = attemptCommit(clone.clonePath, "container-hookspath.txt", ATTRIBUTED_MESSAGE, containerEnv);
+  assert.notEqual(blocked.status, 0, "the workspace's own pin must outrank the image's global/system core.hooksPath");
+  assert.equal(blocked.headAfter, blocked.headBefore, "the commit was written despite the pin");
+  resetWorkspace(clone.clonePath);
+
+  // ...and the decoy is genuinely reachable, so the refusal above is the pin doing
+  // work rather than a config git never consulted.
+  git(clone.clonePath, "config", "--local", "--unset", "core.hooksPath");
+  const unpinned = attemptCommit(clone.clonePath, "container-hookspath.txt", ATTRIBUTED_MESSAGE, containerEnv);
+  assert.equal(
+    unpinned.status,
+    0,
+    `unpinned, the image's hooksPath must win — otherwise this test proves nothing\n${unpinned.stderr}`
+  );
+});
+
+test("fg685 (D3, clone): the hooks-path pin is workspace-relative, refused when it would not survive the mount, and re-pinned when lost", () => {
+  const repo = makeRepo();
+  const clone = createTaskClone(repo.dir, RUN_ID, "t-clone-pin", repo.head);
+  workspaces.push(clone.clonePath);
+
+  assert.equal(
+    git(clone.clonePath, "config", "--local", "--get", "core.hooksPath").trim(),
+    ".git/hooks",
+    "an absolute pin names a host path the container has not got; relative resolves against the worktree top on both sides"
+  );
+
+  // An absolute pin resolves fine on the host and to nothing inside the container.
+  // Someone else's value, so it is refused by name rather than silently rewritten.
+  git(clone.clonePath, "config", "--local", "core.hooksPath", join(clone.clonePath, ".git", "hooks"));
+  assert.throws(
+    () => provisionWorkspaceCommitMsgHook(clone.clonePath),
+    (e: unknown) =>
+      e instanceof CommitMsgHookUnenforceableError &&
+      e.reason === "commit_msg_hook_unenforceable" &&
+      /absolute path/.test(e.message)
+  );
+
+  git(clone.clonePath, "config", "--local", "--unset", "core.hooksPath");
+  assert.throws(() => assertWorkspaceHookEnforceable(clone.clonePath), /not pinned/);
+  provisionWorkspaceCommitMsgHook(clone.clonePath);
+  assert.equal(git(clone.clonePath, "config", "--local", "--get", "core.hooksPath").trim(), ".git/hooks");
 });
 
 test("fg685 (AC3, clone): re-running the installer over a provisioned clone is a byte-identical no-op that still refuses", () => {

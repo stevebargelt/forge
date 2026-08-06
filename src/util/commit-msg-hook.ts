@@ -39,7 +39,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // ── The bundled hook source (moved verbatim from init.ts) ─────────────────────
@@ -206,6 +206,59 @@ function atomicWriteHook(target: string, bytes: Buffer): void {
   renameSync(tmp, target);
 }
 
+// ── The hooks-path pin (makes "git will consult it" structural) ───────────────
+
+/** The pinned value. WORKSPACE-RELATIVE on purpose: the clone's host path is NOT
+ *  the path it is mounted at inside the agent container, so an absolute pin would
+ *  name a directory that does not exist there. Git resolves a relative
+ *  core.hooksPath against the top of the working tree, which is the same
+ *  directory on both sides of the mount. */
+const PINNED_HOOKS_PATH = ".git/hooks";
+
+function readLocalHooksPath(workspacePath: string): string | undefined {
+  let out: string;
+  try {
+    out = execFileSync("git", ["config", "--local", "--get-all", "core.hooksPath"], {
+      cwd: workspacePath,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch {
+    return undefined; // exit 1 = unset; anything else = not a repo we can read
+  }
+  // Multi-valued is legal in the file and git honors the LAST one, so that is
+  // the value that decides where hooks come from.
+  const values = out.split("\n").filter((v) => v.trim().length > 0);
+  return values.at(-1)?.trim();
+}
+
+/** Pin the effective hooks directory in the workspace's OWN (--local) config.
+ *
+ *  Without this, "git will consult this directory" is only true because the agent
+ *  image happens to carry no git configuration: core.hooksPath resolved on the
+ *  HOST at provisioning time says nothing about what a global or system config
+ *  inside the container resolves it to, and a base-image change that set one would
+ *  silently un-enforce every provisioned clone. Local config outranks both global
+ *  and system, and it lives inside the workspace, so the pin travels with the
+ *  clone across the mount and the property becomes structural rather than
+ *  contingent on the image.
+ *
+ *  Clone-scoped, so AC4 is untouched: this writes the workspace's own
+ *  .git/config, never the operator checkout's shared one. Only ever called for a
+ *  workspace whose `.git` is a DIRECTORY — a linked worktree's --local config IS
+ *  the parent's shared config.
+ *
+ *  An existing value is left alone, the same refuse-to-clobber posture the file
+ *  installer takes; assertWorkspaceHookEnforceable then refuses the workspace by
+ *  name if it does not point at the hook we installed. */
+function pinWorkspaceHooksPath(workspacePath: string): void {
+  if (readLocalHooksPath(workspacePath) !== undefined) return;
+  execFileSync("git", ["config", "--local", "core.hooksPath", PINNED_HOOKS_PATH], {
+    cwd: workspacePath,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+}
+
 /** Prove — after installing — that this workspace will ACTUALLY refuse an
  *  AI-attribution commit message. Every check below is a way the guard can
  *  degrade to "no hook" with no diagnostic, which a bare existence check passes
@@ -216,6 +269,10 @@ function atomicWriteHook(target: string, bytes: Buffer): void {
  *    • bytes that are not the bundled hook (a foreign or truncated script)
  *    • a core.hooksPath override moving the effective hooks dir out of the
  *      workspace (`git rev-parse --git-path hooks` honors it, so it is the check)
+ *    • that same override arriving from the CONTAINER's global or system config
+ *      instead of the host's, which the rev-parse above cannot see at all — so the
+ *      workspace's own --local pin is checked directly, and checked for being
+ *      relative, since an absolute pin names a host path the container has not got
  *
  *  Throws CommitMsgHookUnenforceableError. */
 export function assertWorkspaceHookEnforceable(workspacePath: string): void {
@@ -272,16 +329,37 @@ export function assertWorkspaceHookEnforceable(workspacePath: string): void {
       `git consults ${effective} for hooks, not ${installed} — a core.hooksPath override would make the guard never run`
     );
   }
+
+  const pin = readLocalHooksPath(workspacePath);
+  if (pin === undefined) {
+    return fail(
+      `core.hooksPath is not pinned in ${workspacePath}'s own --local config, so the effective hooks directory is decided by whatever global or system git config the agent container carries rather than by this workspace`
+    );
+  }
+  if (isAbsolute(pin)) {
+    return fail(
+      `core.hooksPath is pinned to the absolute path ${pin}; the workspace is mounted at a different path inside the agent container, where that names something else or nothing at all`
+    );
+  }
+  if (resolve(workspacePath, pin) !== resolve(installed)) {
+    return fail(
+      `core.hooksPath is pinned to ${pin} (${resolve(workspacePath, pin)}), not to the installed hooks directory ${installed}`
+    );
+  }
 }
 
 /** Install the hook into a Forge-PROVISIONED workspace and prove it will run.
- *  The one entry point provisioning calls: plan → execute → assert, with every
- *  failure surfacing as CommitMsgHookUnenforceableError rather than as a
+ *  The one entry point provisioning calls: plan → execute → pin → assert, with
+ *  every failure surfacing as CommitMsgHookUnenforceableError rather than as a
  *  quietly unguarded workspace. */
 export function provisionWorkspaceCommitMsgHook(workspacePath: string): string {
   let outcome: string;
   try {
-    outcome = executeWorkspaceCommitMsgHook(planWorkspaceCommitMsgHook(workspacePath));
+    const plan = planWorkspaceCommitMsgHook(workspacePath);
+    outcome = executeWorkspaceCommitMsgHook(plan);
+    if (plan.action === "install" || plan.action === "already-installed") {
+      pinWorkspaceHooksPath(workspacePath);
+    }
   } catch (e) {
     if (e instanceof CommitMsgHookUnenforceableError) throw e;
     throw new CommitMsgHookUnenforceableError(workspacePath, `installing the hook failed: ${String(e)}`);
