@@ -8,6 +8,7 @@ import { UsageView } from "./usage.js";
 import { UsageLimits } from "./usage-limits.js";
 import { GovernanceView } from "./governance.js";
 import { BacklogView } from "./backlog.js";
+import { QueueBoardView } from "./queue-board.js";
 import { ReviewsView } from "./reviews.js";
 import { initialView, hashForView } from "./view-routing.js";
 import {
@@ -76,6 +77,7 @@ function App() {
   const runtimeSeq = useRef(0);
   const [governance, setGovernance] = useState(null);
   const [backlog, setBacklog] = useState(null);
+  const [queue, setQueue] = useState(null);
   const [reviews, setReviews] = useState(null);
   // FG-487: review-loop verification / CI-wait windows and campaign reconcile
   // host-gate execs, in progress right now — polled alongside feed/in-flight
@@ -302,6 +304,26 @@ function App() {
     return () => clearInterval(id);
   }, [pollBacklog, view]);
 
+  // FG-591: the operator work queue board. Polled like every other view, and
+  // re-read explicitly after a mutation the CLI accepted — a refusal never triggers
+  // a reload, because re-fetching over a refused move hides the reason it was refused.
+  const pollQueue = useCallback(async () => {
+    if (!projectFilter) { setQueue(null); return; }
+    try {
+      const q = projectScopeQuery(projectFilter, checkoutFilter);
+      const res = await fetch(`/api/queue${q}`);
+      if (res.ok) setQueue(await res.json());
+      setNow(Date.now());
+    } catch (e) { setError(String(e)); }
+  }, [projectFilter, checkoutFilter]);
+
+  useEffect(() => {
+    if (view !== "queue") return;
+    pollQueue();
+    const id = setInterval(pollQueue, USAGE_POLL_MS);
+    return () => clearInterval(id);
+  }, [pollQueue, view]);
+
   const pollVerifyRecent = useCallback(async () => {
     try {
       const res = await fetch(appendScope(`/api/host-verifications/recent?limit=50`, projectFilter, checkoutFilter));
@@ -370,6 +392,7 @@ function App() {
             <button class=${"tab " + (view === "ops" ? "tab-active" : "")} onClick=${() => switchView("ops")}>ops</button>
             <button class=${"tab " + (view === "governance" ? "tab-active" : "")} onClick=${() => switchView("governance")}>workbench</button>
             <button class=${"tab " + (view === "backlog" ? "tab-active" : "")} onClick=${() => switchView("backlog")}>backlog</button>
+            <button class=${"tab " + (view === "queue" ? "tab-active" : "")} onClick=${() => switchView("queue")}>queue</button>
             <button class=${"tab " + (view === "reviews" ? "tab-active" : "")} onClick=${() => switchView("reviews")}>reviews</button>
           </nav>
         </h1>
@@ -427,6 +450,13 @@ function App() {
           : html`<${GovernanceView} data=${governance} />`
         : view === "backlog"
         ? html`<${BacklogView} data=${backlog} projectFilter=${projectFilter} />`
+        : view === "queue"
+        ? html`<${QueueBoardView}
+            data=${queue}
+            projectFilter=${projectFilter}
+            checkoutFilter=${checkoutFilter}
+            onReload=${pollQueue}
+          />`
         : view === "reviews"
         ? html`<${ReviewsView} data=${reviews} />`
         : view === "verify"
