@@ -309,7 +309,8 @@ function makeExec(
     const row = tasksForRun(runIdOf(taskId)).find((t) => t.id === taskId);
     const item = row ? planItemIdOf(row) : undefined;
     const outcome = behavior({ item: item ?? "", workspace, taskId }) ?? { ok: true };
-    // A small real delay so concurrent siblings genuinely overlap in wall-clock.
+    // A small real delay so the recorded intervals are distinguishable at ms
+    // resolution for the ORDER assertions.
     await new Promise((r) => setTimeout(r, 25));
     const endedAt = Date.now();
     runs.push({ taskId, ...(item !== undefined ? { planItemId: item } : {}), workspace, startedAt, endedAt });
@@ -631,12 +632,29 @@ test("fg584 (AC2/AC5/AC4/AC10): A → {B,C} → D, proven end to end", async () 
   assert.ok(by("D").startedAt >= by("B").endedAt, "D must not start before B finished");
   assert.ok(by("D").startedAt >= by("C").endedAt, "D must not start before C finished");
 
-  // (AC2) …and independent siblings STILL run concurrently. B and C have no path
-  // between them, so they overlap in wall-clock — ordering must not serialize what
-  // was never ordered.
-  assert.ok(
-    by("B").startedAt < by("C").endedAt && by("C").startedAt < by("B").endedAt,
-    "B and C are independent siblings and must overlap in wall-clock",
+  // (AC2) …and independent siblings STILL run concurrently — ordering must not
+  // serialize what was never ordered. Proven from what the wave DURABLY recorded,
+  // not from wall-clock: two stubs scheduled back to back under load can fail to
+  // overlap while the controller dispatched them as one group, so an overlap check
+  // measures the runner, not the property. A wave resolves ONE base per
+  // concurrently-dispatched group and gates that group's prerequisites ONCE, after
+  // they are merged — so siblings dispatched together recorded the SAME base, that
+  // base is the candidate gated after A, and no gate of B's output stands between
+  // B's dispatch and C's.
+  const parentTaskId = buildParent(runId)!.id;
+  const baseShaOf = (id: string) => buildChildren(runId).find((t) => planItemIdOf(t) === id)!.baseSha;
+  const gatedGroups = eventsForTask(parentTaskId)
+    .filter((e) => e.eventType === "integration.prerequisites_gated")
+    .map((e) => e.payload as { ok: boolean; items: string[]; candidateSha?: string });
+
+  assert.equal(baseShaOf("B"), baseShaOf("C"), "B and C recorded ONE base — the signature of a single dispatch group");
+  const afterA = gatedGroups.find((g) => g.items.includes("A"));
+  assert.ok(afterA?.ok, "A's output was integrated and gated");
+  assert.equal(baseShaOf("B"), afterA!.candidateSha, "and that shared base IS the candidate gated after A integrated");
+  assert.deepEqual(
+    gatedGroups.map((g) => g.items.slice().sort()),
+    [["A"], ["B", "C"]],
+    "B and C were gated as ONE group: no prerequisite gate of B separates B's dispatch from C's",
   );
 
   // (AC5) THE POINT. Each consumer's WORKSPACE carried what it consumes.
