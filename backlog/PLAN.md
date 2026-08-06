@@ -11,10 +11,13 @@ dependencies, and lifecycle state. Forge runtime state is authoritative for
 what is running, blocked, or done. `backlog/notes.md` is a session handoff and
 may lag this plan.
 
-**Expected replacement:** the DB-backed priority queue and operator controls in
-FG-496 and FG-591.
+**Expected replacement:** the operator controls and running dispatcher in
+FG-591. FG-496's DB-backed backlog and queue primitives are complete.
 
 ## Current objective
+
+FG-685 → FG-584 → FG-591. **FG-685 shipped 2026-08-06** (`ee303508`, PR #216);
+the sequence resumes at FG-584.
 
 **FG-584 comes before FG-591.** FG-610 demonstrated FG-584 live: the runner
 fanned both plan steps in parallel even though the plan declared step 2
@@ -39,11 +42,12 @@ review-infrastructure stays non-preempting.
 
 ## Recently completed
 
+- **FG-685** (`ee303508`, PR #216) — the no-AI-attribution hook is now
+  materialized into every Forge-provisioned task clone at provisioning time,
+  with `core.hooksPath` pinned workspace-relative so the guard survives the
+  container mount, and refusal proven by real commits in both workspace kinds.
 - **FG-610** (`6b01d3c5`, PR #215) — shipped the FG-496 Slice E claim,
   lease, recovery and capacity-accounting primitives.
-- **FG-655** (`c93e13af`, PR #213; docs follow-up `389eb744`, PR #214) —
-  documentation stages now commit their declared paths and advance the review
-  candidate.
 
 ## Now
 
@@ -57,10 +61,10 @@ review-infrastructure stays non-preempting.
 
 1. **FG-591 — operator work queue:** Kanban, CLI/API controls, and
    capacity-limited dispatch over the queue primitives.
-2. **FG-496 aggregate closeout:** reconcile the DB-backed backlog program
-   against its acceptance criteria after FG-609, FG-610, and FG-591 ship.
-3. **FG-576 — provider-neutral interactive orchestrator launcher:** resolve
-   Claude or Codex from model policy after the operator queue program closes.
+2. **FG-576 — provider-neutral interactive orchestrator launcher:** resolve
+   Claude or Codex from model policy after the operator queue program closes;
+   includes the policy-driven `forge claude` path and provider-specific live
+   session capabilities absorbed from FG-554 and FG-448.
 
 `Next` is deliberately short. Ordering here expresses current operator intent;
 it does not override ticket dependencies or authorize scope expansion.
@@ -92,9 +96,9 @@ it does not override ticket dependencies or authorize scope expansion.
   generation.
 - **FG-657** — reconcile and close the DB ticket for the already-shipped PR
   #191 implementation.
-- **FG-658** — test evidence annotated with a source filename is not matched.
-- **FG-659** — guard the remaining `lens_outcomes_json` writer and correct a
-  stale source comment.
+- **FG-658** — consolidate the evidence-validator false-negative family:
+  narrowly normalized source annotations, exact semicolon-bearing test names,
+  and candidate-baseline evidence separated from deliberate mutation output.
 - **FG-545** — add a docs/research-only CI fast path while preserving
   exact-head required checks.
 - **FG-661** — FG-648 review residue: the WCAG contrast test asserts the peak
@@ -104,28 +108,15 @@ it does not override ticket dependencies or authorize scope expansion.
   orphaning 8.4% of task history as "Unknown repository". The durable project
   identity is the key and the tag; `.forge/config.yml`'s git-tracked
   `project_key` already survives cloning and is the preferred source.
-- **FG-665** — the FG-662 attempt-scoping bound drops an unparseable audit
-  timestamp, which on a sole administrative marker re-admits the artifact.
-  Deliberately kept deferred (operator instruction, 2026-08-02).
 - **FG-667** — FG-664 residue: the probe's platform filter prunes a multi-arch
   prebuilds directory, permanently refusing a correct cache; plus a stale
   review-wiring comment.
-- **FG-672** — the review evidence validator scores a deliberate mutation
-  failure as a candidate failure, so mutation-proven resolution evidence is
-  refused. Third false-negative shape after FG-657 and FG-658, and the first to
-  force an operator gate override on a merged ticket (FG-666). Deterministic
-  repro on `task-review-rechecker-fc4801`.
-- **FG-668** — the `fg664-recheck-replay` harness hardcodes the default review
-  id in its `in_place` evidence block and pins `REPLAY_REFS` to RF-1/RF-3/RF-4,
-  so `--candidate` does not generalize. FG-664's AC4 proof is reproducible only
-  once this lands.
 
 These remain real work. They move ahead only under the interruption policy
 below, not because they are adjacent to recently completed review work.
-FG-663, FG-665, FG-667 and FG-668 are explicitly non-preempting residue
-(operator instruction, 2026-08-03) unless one becomes a deterministic blocker
-under the policy below. FG-664 was promoted out of this set on 2026-08-02 and
-has since shipped.
+FG-663 and FG-667 are explicitly non-preempting residue (operator instruction,
+2026-08-03) unless one becomes a deterministic blocker under the policy below.
+FG-664 was promoted out of this set on 2026-08-02 and has since shipped.
 
 ## Interruption policy
 
@@ -177,5 +168,5 @@ or have no demonstrated impact.
   priorities as if they were current.
 - Link ticket IDs instead of copying full acceptance criteria.
 - Do not duplicate live run state or record progress percentages here.
-- Retire this file only when FG-496/FG-591 provide the authoritative priority
-  queue and operator controls that replace it.
+- Retire this file when FG-591 provides the authoritative operator controls and
+  running dispatcher that replace it.
