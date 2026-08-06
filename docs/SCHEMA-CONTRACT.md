@@ -195,7 +195,7 @@ The snapshot database mounted into agent containers is a *different*, derived ar
 
 ### operator-queue tables (FG-609 — dashboard read path since FG-591)
 
-The durable [operator queue](concepts.md#operator-queue). Three brand-new tables plus additive columns on two existing ones, all on the additive-only open path; `user_version` is not bumped. **Nothing reads these for a markdown-mode project and they are not copied into the container snapshot** — so they appear machine-wide on the next writable open and change nothing for a project that never opted in. FG-609 shipped them host-only; since FG-591 they are also a dashboard READ path (`GET /api/queue` renders rank, membership and readiness as the board's durable fields). Nothing on the dashboard writes them: mutations shell out to the `forge` CLI (FORGE-DEC-015).
+The durable [operator queue](concepts.md#operator-queue). Three brand-new tables plus additive columns on two existing ones, all on the additive-only open path; `user_version` is not bumped. **Nothing reads these for a markdown-mode project and they are not copied into the container snapshot** — so they appear machine-wide on the next writable open and change nothing for a project that never opted in. FG-609 shipped them host-only; since FG-591 they are also a dashboard READ path (`GET /api/queue` renders rank, membership and readiness as the board's durable fields). Nothing on the dashboard writes them **directly**: since FG-591 the board's enqueue / dequeue / rank / reorder controls are `POST` routes that shell exactly one named `forge queue` verb (FORGE-DEC-015 — see [`POST /api/queue/*`](#post-apiqueue--the-queue-planning-writes-fg-591)), so every row here is still written by the CLI, through its own validation, refusals and queue events.
 
 - **`tickets.priority_rank`** (`INTEGER`, nullable, added by guarded ALTER) — the ONE canonical stack rank. Dense contiguous 1..N per project across the ranked set; every rank-changing verb renumbers the whole set inside one `writeTransaction`. **Deliberately unindexed and non-`UNIQUE`**: an index would pin the column undroppable and shrink the FG-608 parity guard's coverage, and SQLite has no deferrable unique index, so an in-transaction renumber would transit duplicate states and abort. Ordering reads are therefore `ORDER BY priority_rank ASC, ticket_id ASC`, which is *total* — a tie is deterministic rather than arbitrary, and the next rank-changing verb renumbers it away. **A rank value is not stable across moves; nothing durable may key off one.** Neither ticket writer in `src/store/tickets.ts` names this column, which is what makes operator queue state survive a re-import.
 - **`queue_membership`** (`project_key`, `ticket_id` PK; `enqueued_at`, `enqueued_by`, `note`) — the operator-selected subset, orthogonal to rank and to lifecycle. Cascades with its ticket. Carries the one index this slice adds, `idx_queue_membership_project`, deliberately on this brand-new table rather than on `tickets`.
@@ -605,9 +605,11 @@ role's ordinary result shape — the agent's own JSON object, recovered from the
 stream — never this one. The dashboard falls back to
 JSON pretty-print for this shape — there is no per-role renderer for it.
 
-## HTTP API surface (read-only)
+## HTTP API surface
 
-The dashboard server exposes read-only JSON endpoints. All `GET` — no writes. Default base URL: `http://127.0.0.1:8024` (port overridable via `PORT` env var or `--port <n>` — `forge dashboard start` from a promoted release, or `./bin/forge-dev dashboard start` from a source checkout; the dashboard is bundled into the release as of FG-580).
+The dashboard server exposes JSON endpoints. Default base URL: `http://127.0.0.1:8024` (port overridable via `PORT` env var or `--port <n>` — `forge dashboard start` from a promoted release, or `./bin/forge-dev dashboard start` from a source checkout; the dashboard is bundled into the release as of FG-580).
+
+**Every `GET` is a read.** The only non-`GET` routes on the whole surface are the four `POST /api/queue/*` queue-planning routes (FG-591, below), and they do not write the DB either — each shells exactly one named `forge queue` verb, which is the path [FORGE-DEC-015](#cli-surface-for-mutations) chose. Everything else, including a CORS preflight for those four paths, is a `405`, and **no `Access-Control-Allow-*` header is emitted anywhere on this surface** — that absence is what makes a cross-origin preflight fail closed.
 
 ### Core endpoints
 
@@ -633,6 +635,10 @@ The dashboard server exposes read-only JSON endpoints. All `GET` — no writes. 
 | `GET /api/launches/:id/log` | — | FG-679: a **BOUNDED TAIL** (last 16 KiB) of that launch's log, same identity addressing and the same `400` for a non-conforming id. Returns `{launchId, text, bytes, truncated, content: "raw", notice, maxBytes}` — `content`/`notice` state plainly that this is unredacted raw command output (no secret scrubber exists in this codebase; see `docs/redaction.md`). The bound is load-bearing: the log is unbounded host-command output served by a process with no authentication, and id-only addressing constrains path traversal, not content volume |
 | `GET /api/backlog` | `projectKey` or `projectDir` | One project's tickets from the host store plus its per-checkout session notes. Returns `{notes, notesByCheckout, tickets, ticketsProjectKey, ticketsStorageMode, ticketsError?}` — `ticketsProjectKey: null` means the repository has no ticket truth (never imported), and `ticketsError` means the read failed and the count is unknown, never zero (FG-608) |
 | `GET /api/queue` | `projectKey` or `projectDir` | FG-591: the operator work-queue **board** — the five projections plus the dispatcher panel and the host-scoped capacity context (see shape below). READ-ONLY: no route on this surface arms autonomous dispatch or sets `max_active_runs` (D2), and the board's own reads spawn nothing |
+| `POST /api/queue/enqueue` | `projectKey` or `projectDir` | FG-591: select a ticket for execution. Body `{ticketId, note?}` → `forge queue enqueue <id> --project <checkout> --json [--note <text>]` |
+| `POST /api/queue/dequeue` | `projectKey` or `projectDir` | FG-591: unselect a ticket. Body `{ticketId}` → `forge queue dequeue <id> --project <checkout> --json`. A **planning** act: the rank is retained and a live claim is never released (D4) — stopping work is `forge queue cancel`, which is CLI-only and unreachable from here |
+| `POST /api/queue/rank` | `projectKey` or `projectDir` | FG-591: relative rank. Body `{ticketId, reference, placement: "before"\|"after", expectVersion}` → `forge queue rank-before\|rank-after <id> <reference> --expect-version <n> --project <checkout> --json` |
+| `POST /api/queue/reorder` | `projectKey` or `projectDir` | FG-591: reorder, either one move (`{ticketId, to, expectVersion}`) or the whole order (`{order: [...], expectVersion}`) → `forge queue reorder … --expect-version <n> --project <checkout> --json`. The two forms are mutually exclusive |
 
 ### `GET /api/queue` response shape (`QueueBoard`)
 
@@ -662,6 +668,28 @@ Each row carries `ticketId`, `title`, `type`, `status` (the lifecycle value verb
 `dispatcher` — `armed`, `configured` (false = every value below is a default, not an operator choice), `maxActiveRuns`, `capacityScope`, `leaseTtlMs`, `heartbeatMs`, `defaultWorkflow`, `updatedAt`/`updatedBy` (arming records who and when), `lease` + `leaseLive` / `leaseExpired` / `msSinceHeartbeatMs`, `lastEvaluation`, `nextWatchdogAtMs`, `pendingWakes`, and `controlSurface: "cli-only"` (arming and the ceiling are CLI-only in this story, so the board renders an affordance rather than a disabled button). `state` makes the no-run answers **distinguishable** rather than collapsing them into "nothing is running": `dispatching | disarmed | no_capacity | no_eligible_work | incompatible_only | lost | stale_dispatcher | no_dispatcher | not_evaluated`, each read from a durable record with `stateDetail` naming the particulars. **A dead or stale lease outranks the last evaluation** — an expired lease means nobody is looking at this queue, and reporting the last pass's reasonable-sounding outcome there is exactly how a correct-looking board hides a dead controller.
 
 `capacity` — `scope`, `limit`, `queueOwnedActive` (live claim rows **reported** at read time; the count that *bounds admission* is the one taken inside `claimNextEligible`'s write transaction, and nothing here re-derives or replaces it), `holders[]` each naming `projectKey`, `projectLabel` and `thisProject` (under a host-scoped ceiling this is what lets a per-project board explain a refusal caused by another project), `otherProjectHolders`, `notCounted` (the stated capacity policy plus the host-wide active-task figure it reports but never subtracts), and `lastRefusal` — the holder list **as it was** when the ceiling last refused, since by the time an operator looks the holder may have finished.
+
+### `POST /api/queue/*` — the queue planning writes (FG-591)
+
+The dashboard's **only** write surface, and it still writes nothing itself: each route shells exactly one named `forge queue` verb and no other command, which is the path [FORGE-DEC-015](#cli-surface-for-mutations) prescribed. The dashboard's own DB handle is opened `{readonly: true}` and `dashboard/src/queue-mutation.ts` imports no store module. Implementation: `dashboard/src/queue-mutation.ts`; guard suite: `dashboard/src/fg591-queue-mutation.integration.test.ts`.
+
+**What is NOT here, and why (FG-591 D2).** Arming autonomous dispatch, `--max-active-runs`, `--lease-ttl`, `forge queue dispatcher run` and `forge queue cancel` are absent and unreachable: the route table and the verb set are closed exported constants, the argv builder can emit nothing outside them, and a test asserts both over the table rather than over the prose. Authorizing (or stopping) unattended repo-writing containers from an unauthenticated localhost `POST` is a materially larger capability than reordering a list, and it stays CLI-only. Queue membership is planning intent, never execution authorization.
+
+**Request guards, in the order they run — every one of them before any subprocess is even resolved:**
+
+1. **Method + path.** `POST` to one of the four paths above. Anything else, preflight included, is the surface's ordinary `405`/`404`.
+2. **Bind address.** `HOST` is env-overridable, and this surface has no authentication, so the WRITE half **fails closed off loopback**: a non-loopback bind refuses every mutation with a `403` naming the reason (reads are unaffected — they already were what the boot warning is about). An operator running a shared dashboard behind their own authentication opts out with `FORGE_DASHBOARD_ALLOW_REMOTE_MUTATIONS=1`; the default is deny because the default is the case nobody thought about.
+3. **Provenance.** `Sec-Fetch-Site` must be `same-origin` or `none` if present (a browser sets it and page script cannot); `Origin`, if present, must equal `http(s)://<this request's Host>`. Both absent — a `curl` or a script — is allowed, which is the same trust position every other route on this unauthenticated loopback surface already has.
+4. **A non-simple content type.** `Content-Type: application/json` is **required**. This is the load-bearing CSRF guard: a cross-site form cannot set it, and a cross-origin `fetch` that does must preflight, which fails closed. A `415` names the reason.
+5. **Body.** At most 64 KiB, parsed as a JSON object.
+6. **Payload.** Ticket ids must match `^[A-Za-z][A-Za-z0-9]{0,23}-[0-9]{1,9}$`; `note` is ≤ 500 characters with no control characters; `expectVersion`/`to` are parsed strictly (never `parseInt`, under which `"2x"` is `2`). `rank` and `reorder` **require** `expectVersion` (D11) — a move composed against an order the board has since lost refuses rather than clobbers. Every caller-derived value is re-checked for a leading `-` before it becomes argv: the child is spawned with an argv array and no shell, so quoting is not the risk — an operand the CLI reads as a flag is.
+7. **Project.** `--project` is **never** a caller-supplied path. The project is resolved through the dashboard's own registry exactly as `GET /api/queue` resolves it, and the checkout handed to the child is one the registry already observed; a `projectDir` parameter may only *select* among that project's checkouts. An unregistered path is a `404`.
+
+**The child.** `execFile`, argv array, no shell, `cwd` pinned to the resolved checkout, 60 s timeout, bounded output, and at most 4 mutations in flight at once (an unauthenticated local surface must not become a fork bomb). The binary is resolved most-specific-first: `FORGE_BIN` if the operator set it (absolute and existing, or a named refusal — a typo must not silently fall through to a different binary), then the entry co-located with this dashboard (`<root>/forge` in a release, `<root>/bin/forge` in a dev checkout), then `forge` on `$PATH`. The co-located entry is preferred over `$PATH` deliberately: it is the forge this dashboard shipped with and cannot be shadowed by an earlier one on the PATH of whatever shell started the server.
+
+**Responses.** `200 {ok: true, verb, result}` where `result` is the CLI's own `--json` object, verbatim. `400` a payload refusal, `403` cross-origin, `404` unknown project, `409` **the CLI's own refusal passed through concretely** (a stale `--expect-version`, a markdown-mode project, a not-ready ticket with its refinement proposal) with `{ok: false, verb, exitCode, error}`, `413` an oversize body, `415` a forgeable content type, `503` too many mutations in flight, `504` the child outran its timeout. Every response carries `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, and none carries a CORS header.
+
+**Relationship to the FG-679 BD-7 guard.** BD-7 governs the *serving and polling* paths — the endpoints a browser hits on a timer, where an outbound call is a surprise. A named, guarded, operator-initiated mutation route is the case DEC-015 already accepted. `dashboard/src/fg679-serving-path-no-subprocess.integration.test.ts` is therefore neither **widened** to cover these routes (it would simply be red — they spawn a process by design) nor **narrowed** to excuse them; it keeps its own three paths and its `/api/in-flight` negative control, and a test in this ticket's suite asserts that over the guard's own source.
 
 ### `GET /api/governance` response shape (`WorkbenchPanel`)
 
@@ -720,9 +748,17 @@ Returns `404` if the task is not found. On success, returns a JSON object with t
 
 ## CLI surface (for mutations)
 
-The dashboard does NOT write to the DB or filesystem. All mutating actions shell out to the `forge` binary, which must be on `$PATH` on the host running the dashboard.
+The dashboard does NOT write to the DB or filesystem. All mutating actions shell out to the `forge` binary — the entry co-located with the dashboard, or `FORGE_BIN`, or `forge` on `$PATH` (see [`POST /api/queue/*`](#post-apiqueue--the-queue-planning-writes-fg-591) for the resolution order).
 
-Mutating commands the dashboard might invoke:
+Mutating commands the dashboard actually invokes today — the four FG-591 queue-planning routes, and nothing else:
+- `forge queue enqueue <id> --project <dir> --json [--note <text>]`
+- `forge queue dequeue <id> --project <dir> --json`
+- `forge queue rank-before | rank-after <id> <reference> --expect-version <n> --project <dir> --json`
+- `forge queue reorder <id> --to <n> | --order <id,id,…> --expect-version <n> --project <dir> --json`
+
+Deliberately NOT invokable from the dashboard (FG-591 D2): `forge queue dispatcher arm | disarm | run`, `--max-active-runs`, `--lease-ttl`, and `forge queue cancel`. Those authorize or stop unattended container execution and stay CLI-only.
+
+Mutating commands the dashboard might invoke in future:
 - `forge gate <taskId> advance | reject | request-changes [--rationale <text>] [--force]`
 - `forge next <runId>`
 - `forge retry <taskId>` — note that on an ad-hoc (`forge invoke`-attached) task this re-dispatches the agent in-process and does not return until it finishes, the same as `forge invoke` (FG-507; see [Task retry](concepts.md#task-retry)). On a workflow-step task it still returns immediately, leaving the new row for `forge next`.
