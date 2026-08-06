@@ -16,9 +16,10 @@ FG-591. FG-496's DB-backed backlog and queue primitives are complete.
 
 ## Current objective
 
-FG-584 → FG-591
+FG-591 → FG-576. **FG-584 shipped 2026-08-06** (`00000e76`, PR #217), its
+AC14 dogfood proven on the production path; the sequence resumes at FG-591.
 
-**FG-584 comes before FG-591.** FG-610 demonstrated FG-584 live: the runner
+**Why FG-584 came first (retained for context).** FG-610 demonstrated it live: the runner
 fanned both plan steps in parallel even though the plan declared step 2
 sequenced after step 1, so the docs child correctly self-failed rather than
 document a schema that was not committed yet. File-disjointness does not make
@@ -41,26 +42,24 @@ review-infrastructure stays non-preempting.
 
 ## Recently completed
 
-- **FG-685** (`ee303508`, PR #216) — the no-AI-attribution hook is now
-  materialized into every Forge-provisioned task clone at provisioning time,
-  with `core.hooksPath` pinned workspace-relative so the guard survives the
-  container mount, and refusal proven by real commits in both workspace kinds.
-- **FG-610** (`6b01d3c5`, PR #215) — shipped the FG-496 Slice E claim,
-  lease, recovery and capacity-accounting primitives.
+- **FG-584** (`00000e76`, PR #217) — plan-step `depends_on` is now executable
+  controller data: dependency-ready dispatch, per-group bases cut from the gated
+  candidate, a mid-wave prerequisite gate, typed merge-conflict blocks, and
+  four-boundary crash convergence. Proven end to end by a production-path dogfood
+  whose plan the tech-lead ordered unprompted.
+- **FG-685** (`ee303508`, PR #216) — the no-AI-attribution hook is materialized
+  into every Forge-provisioned task clone at provisioning time, with
+  `core.hooksPath` pinned workspace-relative so the guard survives the container
+  mount.
 
 ## Now
 
-1. **FG-584 — semantic dependencies in feature build fanout:** complete the
-   unfinished FG-116/FG-139 Gas City-aligned controller contract. Durable
-   dependency edges control readiness; dependent workers start from the
-   integrated prerequisite candidate; independent ready work remains parallel;
-   and merge conflicts are typed integration outcomes.
+1. **FG-591 — operator work queue:** Kanban, CLI/API controls, and
+   capacity-limited dispatch over the FG-496/FG-610 queue primitives.
 
 ## Next
 
-1. **FG-591 — operator work queue:** Kanban, CLI/API controls, and
-   capacity-limited dispatch over the queue primitives.
-2. **FG-576 — provider-neutral interactive orchestrator launcher:** resolve
+1. **FG-576 — provider-neutral interactive orchestrator launcher:** resolve
    Claude or Codex from model policy after the operator queue program closes;
    includes the policy-driven `forge claude` path and provider-specific live
    session capabilities absorbed from FG-554 and FG-448.
@@ -105,6 +104,12 @@ it does not override ticket dependencies or authorize scope expansion.
 - **FG-667** — FG-664 residue: the probe's platform filter prunes a multi-arch
   prebuilds directory, permanently refusing a correct cache; plus a stale
   review-wiring comment.
+- **FG-686** — FG-685 residue: `fg352 (11)` no longer induces a failure at the
+  `git commit` invocation, because the `--no-verify` capture exemption made its
+  hook-based device inert and the replacement wedge fails at `git add`.
+- **FG-687** — FG-584 residue: `renewRunLock` reports success after a superseded
+  write to an unlinked inode. The compare-and-set protects the successor; only the
+  return value lies, and its sole caller discards it.
 
 These remain real work. They move ahead only under the interruption policy
 below, not because they are adjacent to recently completed review work.
