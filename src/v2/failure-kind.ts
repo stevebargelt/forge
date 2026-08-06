@@ -152,6 +152,13 @@ export type FailureKind =
   | "verification_environment_unavailable"  // FG-376: dependency provisioning failed before tests could run
   | "agent_reported_failure"  // FG-678 (AC3): the agent's own result.json declared `status: "failed"`. The container ran and wrote a well-formed result — the work simply did not succeed, and the agent said so. Terminal for the task; the agent's stated reason is the error. Distinct from every kind above, which describe what happened TO a dispatch rather than what the agent reported about it.
   | "pre_container_crash"  // FG-533: the forge process died between markTaskRunning and container.started — no container ran, no work exists; reconcile's pre-container sweep lands this and a plain `forge retry` re-dispatches
+  // ── FG-584: the ordered fan-out's four refusals/blocks. All four are decided
+  // by the CONTROLLER, and the first two are decided BEFORE any child row is
+  // minted and before any container, mount or task dir exists.
+  | "plan_dependency_invalid" // FG-584 (AC1/AC6): the plan's declared work-item graph is not executable — a `depends_on` that names an unknown item, an item that depends on itself, a cycle, a duplicate declared id, or two CONCURRENTLY-RUNNABLE items claiming the same path. Refused before any build child starts; the message names the offending edge or path
+  | "ordered_fanout_unavailable" // FG-584 (AC12/D5): the plan declares dependency edges but the ordered path CANNOT BE HONORED in this configuration (workspace isolation off — there is no private workspace to integrate between items, so ordering has no meaning). A controller-CAPABILITY refusal, never a plan-quality judgement. Refused before any build child starts, naming the dependency
+  | "integration_blocked"  // FG-584 (AC8/D2): an ordered worker's captured commit conflicts with the run's candidate. A typed, named PARK carrying the conflicting worker, the target candidate and the conflicting paths. No downstream dependent dispatches and no target branch is published while it stands; no automated or agent-driven resolution runs
+  | "prerequisite_blocked" // FG-584 (AC7/D3): a prerequisite work item failed, or its integration was refused, so every TRANSITIVE dependent was blocked and never dispatched. Independent ready work ran to completion first; the phase then failed naming the blocking item and each blocked dependent
   | "unknown";
 
 export type FailureContext = {

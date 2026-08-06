@@ -303,7 +303,88 @@ The fanout step's `agent_map: Record<discipline, agentRole>` optionally routes e
 
 Example: the `feature` workflow's `build` step fans out one child per tech-lead plan-step. Each plan-step carries `discipline: frontend | backend | infosec | platform | general`; the `agent_map` routes to `frontend-specialist`, `backend-specialist`, `security-advisor`, `agentic-platform-builder` respectively. `general` (or any unmapped value) falls back to `engineer`.
 
-A fanout parent never gets its own container (`dispatchFanoutStep` only spawns the children), so it can be left `running` forever if the process that would have finalized it dies mid-wave. Reconcile (FG-455 p2, extended FG-479) closes that gap: once every child is terminal, a parent still `running` with no `container.started` event is always failed with `failure_kind: "fanout_wave_orphaned"` — reconcile never completes it, even when every child completed, since all-children-complete only proves the wave finished, not that the parent's own host-side finalize (candidate merge → integration gate → reds → publish, `dispatchFanoutStep` in `runNext.ts`) ever ran; completing the parent from child aggregation alone would silently skip that whole sequence. The all-complete case gets a distinct `reason: "fanout_wave_unfinalized"` and message so an operator isn't told children failed or never finished when every one of them succeeded; otherwise it's the ordinary `reason: "fanout_wave_orphaned"` M/N-complete message. Either way, recovery is `forge recover <parent> --re-drive` (see [Orphaned task recovery](#orphaned-task-recovery)). A non-terminal child leaves the parent alone, since the wave may still be in flight.
+A fanout parent never gets its own container (`dispatchFanoutStep` only spawns the children), so it can be left `running` forever if the process that would have finalized it dies mid-wave. Reconcile (FG-455 p2, extended FG-479) closes that gap: once every child is terminal, a parent still `running` with no `container.started` event is always failed with `failure_kind: "fanout_wave_orphaned"` — reconcile never completes it, even when every child completed, since all-children-complete only proves the wave finished, not that the parent's own host-side finalize (candidate merge → integration gate → reds → publish, `dispatchFanoutStep` in `runNext.ts`) ever ran; completing the parent from child aggregation alone would silently skip that whole sequence. The all-complete case gets a distinct `reason: "fanout_wave_unfinalized"` and message so an operator isn't told children failed or never finished when every one of them succeeded; otherwise it's the ordinary `reason: "fanout_wave_orphaned"` M/N-complete message. Either way, recovery is `forge recover <parent> --re-drive` (see [Orphaned task recovery](#orphaned-task-recovery)). A non-terminal child leaves the parent alone, since the wave may still be in flight. **An ORDERED wave (below) is the one exception, and it is a deliberate renegotiation of this contract** — see [Ordered fanout: dependency-aware build execution](#ordered-fanout-dependency-aware-build-execution).
+
+## Ordered fanout: dependency-aware build execution
+
+A fanout's upstream array is untyped, LLM-authored output, and before FG-584 the runner read only "is it a non-empty array" and dispatched every element as a sibling from one committed base. That is correct for genuinely independent work and wrong the moment a plan declares that one item consumes another's output: **file-disjointness is necessary for concurrent writers and says nothing about build independence.** A child cannot import a primitive a sibling created if that sibling's commit is absent from its base, and a composition test cannot verify behavior absent from its workspace.
+
+### The vocabulary
+
+Each element of the fanout array is a **work item**. A work item may declare:
+
+- **`id`** — its declared identity. Dependency edges resolve against **this**, never against the array index. A request-changes replan or a `--re-drive` re-reads the plan result, and an index-bound edge would silently re-bind to a different child. The declared id is recorded on the child row as durable work data (`taskPackage.inputs.planItemId`); `fanoutIndex` stays what it always was — ordering and diagnostics.
+- **`depends_on: string[]`** — the ids of the work items this one is built on. **Executable controller data, not advisory prose.** Forge schedules from it.
+- **`files: string[]`** — the paths it claims. Used only for the concurrent-overlap refusal below.
+
+An array whose elements declare no `depends_on` at all — including an array of bare strings, which is what most fanouts are — is **unordered**, and takes the pre-FG-584 path unchanged: same parallelism, same `agent_map` routing, same `max_concurrency`, same `failure_mode`, same result aggregation.
+
+### How an ordered wave runs
+
+Work items are grouped into **concurrently-dispatchable groups** by their edges. One closed loop per group:
+
+1. **Readiness.** Recomputed from durable state at the top of every group, never accumulated in memory. An item dispatches only when *every* id in its `depends_on` is satisfied.
+2. **Dispatch.** The group's ready items go out concurrently, up to `max_concurrency` — which is still a *width* limit, not an ordering one. Independent siblings still run in parallel.
+3. **Integrate.** Each completed worker's captured commit is merged into the run-scoped candidate (the FG-353 integration branch), in item order. This is the same artifact the unordered path builds; what changed is **when** — it is built up as items land rather than assembled at the end.
+4. **Gate (D1).** If the group contains an item something else depends on, the candidate is run through the integration gate, and the `refs/forge/<runId>/<parentId>/gated` ref advances to it on a pass. Leaf items — nothing depends on them — ride the single composed gate at the end of the phase; gating them mid-wave buys nothing and costs a full unit-tier run while the wave waits.
+5. The next group's workspaces are cut from the candidate that results.
+
+**A prerequisite is satisfied only when its exact captured commit is an ancestor of the gated-candidate ref.** A child's own `complete` status is a precondition, never the fact — completion proves a container exited, and the readiness question is whether the work is in the tree the dependent will receive *and* that tree builds. Merged-but-not-gated would fix the missing-import failure and leave the signature-mismatch one a layer down: a dependent building against a prerequisite that is present but broken.
+
+Readiness is a ref-ancestry question on purpose. It is self-verifying (the object graph is the evidence), needs no new table, is idempotent to re-ask, and gives the same answer to a process that did not record it — which is what makes crash recovery converge instead of needing an ordering rule of its own.
+
+### Publication authority is unchanged
+
+Ordered workers integrate into the **run-scoped candidate** and nothing else. Only Forge publishes, **once**, at the end of the phase, through the same serialized publisher (see [Publication](#publication-integration-publisher)). No worker is ever pushed to the target branch as it completes: that would break the atomicity `failure_mode: fail-phase` guarantees, and would take the project-scoped publication lane once per work item. Reds and the final integration gate still evaluate the fully composed candidate exactly once, at phase granularity, under the existing review contract.
+
+### Refusals and blocks
+
+Everything in the first group happens **before any child row is minted and before any container, mount or task dir exists** — after that window, a bad edge costs N containers plus a failed phase.
+
+| What | `failure_kind` | When |
+| --- | --- | --- |
+| `depends_on` naming an unknown item, an item depending on itself, a cycle, a duplicate declared `id`, or a malformed `depends_on` | `plan_dependency_invalid` | pre-dispatch |
+| Two **concurrently-runnable** items declaring the same path | `plan_dependency_invalid` | pre-dispatch |
+| The plan declares edges but the ordered path cannot be honored | `ordered_fanout_unavailable` | pre-dispatch |
+| A worker's captured commit conflicts with the candidate | `integration_blocked` | mid-wave |
+| A prerequisite failed, or its integration was refused | `prerequisite_blocked` | end of phase |
+
+**Ordered items MAY share a path.** Overlap is refused *only* between items that can run concurrently — meaning no dependency path between them in either direction, which is a property of the plan rather than of one scheduling strategy. An ordered pair sharing a path has no race: the later one's workspace already contains the earlier one's edit.
+
+**The flat-fanout guard (`ordered_fanout_unavailable`) is a controller CAPABILITY question, not a plan-quality judgement.** Its permanently-reachable trigger is workspace isolation being off: children then share one checkout, no private workspace is provisioned, no base is resolved, and there is nothing to integrate between items — so a dependent could only ever start from a base missing its prerequisite. The plan is refused before any child spawns, naming the dependency and telling the tech lead to collapse the items. This is why it is a permanent contract and not dead code the ordering path makes unreachable.
+
+**A merge conflict PARKS (D2).** It is recorded as a typed integration block carrying the conflicting worker, the target candidate and the conflicting paths, on both an `integration.blocked` event and the parent's result. No downstream dependent dispatches and no target branch is published while it stands. **Forge does not resolve merge conflicts** — there is no automated or agent-driven resolution lane, by design.
+
+### Fail-phase timing changed, deliberately (D3)
+
+The pre-FG-584 wave short-circuited: `failure_mode: fail-phase` aborted the remaining batches the moment any child failed. An ordered wave does **not** abort mid-wave. When a prerequisite fails or its integration is refused:
+
+- every **transitive** dependent is blocked and **named** (it never gets a child row at all), and
+- **independent ready work runs to completion first** — including work in *later* groups whose own prerequisites succeeded —
+- and only then does the phase fail, with `prerequisite_blocked` naming each blocked item and its blocker.
+
+This is an observable behavior change: an operator watching a failing ordered build will see unrelated items keep running after the first failure. Nothing is published either way.
+
+### Crash recovery is a RESUME, not a re-drive
+
+This renegotiates the whole-wave contract documented above, and it has to. An ordered wave is a serialized chain of worker+integration cycles rather than one short parallel burst, so by the time a crash lands, prerequisites are typically already captured, already merged into the candidate and already gated. Failing the parent closed and waiting for `forge recover <parent> --re-drive` would re-run every one of them from the start — the exact duplication the ticket forbids — and would require an operator to say so.
+
+So: reconcile puts a crash-stranded **ordered** parent back to `pending` (`reason: "ordered_fanout_resumable"`) and the controller resumes it on the next `forge next`. No new status and no new lane — `pending` is what a re-drive produces, and `dispatchFanoutStep`'s existing pending-primary reuse is what picks it up. The reset is CAS'd and guarded on no live run-lock holder, because an ordered wave legitimately sits with every child of a *group* terminal while the live process merges and gates.
+
+Resumption is safe because it is not a replay. Every decision is recomputed from durable state:
+
+- a work item whose child row is `complete` **and** whose branch is captured is **adopted** — no container re-runs (`fanout.item_adopted`);
+- a commit already an ancestor of the candidate is not re-merged;
+- the candidate branch is **adopted, never pruned** — it *is* the wave's progress;
+- and a dependent whose prerequisite is absent from the gated ref is still refused.
+
+Adoption is keyed on the **declared item id and the phase**, not on the parent, so a `forge recover --re-drive` (which mints a fresh parent) resumes just as well as a plain `forge next`. Convergence holds across the four boundaries a crash can land on: worker commit captured before integration; integration completed before readiness recording; prerequisite integrated before dependent dispatch; dependent dispatched before its task-state write completes. Recovery neither duplicates completed work nor skips a dependency.
+
+An **unordered** wave keeps the fail-closed whole-wave landing described in [Fanout](#fanout), unchanged.
+
+### The installer caveat
+
+`seeds/agents/` is operator-authored (see `docs/invariants.md` invariant 4): an edited seed does **not** reach an existing `~/.forge/agents/tech-lead/`, even under `FORCE=1`. A run executed against a stale host seed will produce a plan with no `depends_on` at all, which exercises none of this and proves nothing. Confirm the installed seed carries the `depends_on` contract before treating a run as evidence for it.
 
 ## Red agent
 
@@ -732,7 +813,7 @@ The reason is that **a worktree isolates the working tree, not the repository.**
 
 **The clone is also where the no-AI-attribution commit-msg hook has to live (FG-685), and it gets there by a different mechanism than the operator's own checkout.** `forge init`'s installer (above, under [Slash commands](#slash-commands)) symlinks *through* `$FORGE_HOME/current`, which is right for a checkout that lives on the host next to `$FORGE_HOME` — but `$FORGE_HOME` is not mounted inside the agent container, so that same symlink inside a clone would dangle, and a dangling `commit-msg` hook is git reporting no hook at all, with no diagnostic. `createTaskClone` instead installs the hook as a **self-contained regular file** — the bundled bytes copied in, executable, no symlink, no host path — at the moment it creates the clone, before the container can reach the workspace, and pins `core.hooksPath` in the clone's own `--local` git config (`.git/hooks`, workspace-relative, since an absolute pin would name a path that does not exist inside the container) so the effective hooks directory is decided by the workspace itself rather than by whatever global or system git config the agent image happens to carry. Ownership of an existing target is then decided by **content identity, not link identity** — bytes equal to the bundled hook are Forge's to repair (e.g. a stripped executable bit); a foreign regular file, any symlink, or an unreadable target is someone else's and is left untouched. Before handing the clone to the container, `assertWorkspaceHookEnforceable` *proves* rather than assumes the hook will run — regular file, executable, bundled bytes, and the pinned `core.hooksPath` resolving to the directory it was installed into — and provisioning refuses the clone by name (`CommitMsgHookUnenforceableError`) rather than silently handing an agent a workspace whose guard never fires. This is a **layered mitigation, not an adversarial boundary**, and is scoped deliberately no wider than that: it defends against the *default* attribution behavior of a *cooperating* agent — the FG-610 failure this closes, where a `Co-Authored-By` trailer reached the publish HEAD and the only remedy, a history rewrite, orphaned the run's task-branch lineage. It defends against nothing adversarial — `git commit --no-verify` bypasses it, same as it bypasses the operator's own hook, and the agent is root in its own container — the same posture the [private-clone substrate](#the-private-clone-substrate-the-object-store-and-nothing-else-fg-621)'s read-only mount takes as an actual boundary, which this is not.
 
-**The base is a receipt, not a guess.** A task's clone is created from the last accepted publication receipt for its run (`publication_attempts.published_sha`), falling back to the resolved `projectDir` `HEAD` only when the run has published nothing yet. So a sequential task starts from the exact candidate its predecessor published — including on a `remote:` target, which never advances local `HEAD` — and every sibling of one fan-out wave records the same base, resolved once before any child is spawned.
+**The base is a receipt, not a guess.** A task's clone is created from the last accepted publication receipt for its run (`publication_attempts.published_sha`), falling back to the resolved `projectDir` `HEAD` only when the run has published nothing yet. So a sequential task starts from the exact candidate its predecessor published — including on a `remote:` target, which never advances local `HEAD` — and every sibling of one **concurrently-dispatched group** records the same base, resolved once before any of them is spawned. For an unordered fan-out the whole wave is one group, so that is the same rule it has always been; for an [ordered fan-out](#ordered-fanout-dependency-aware-build-execution) FG-584 narrowed it exactly as far as ordering requires and no further — a dependent's base is the run's candidate *after* its prerequisites integrated, which necessarily differs from theirs, while two items that can run at the same time still start from the same commit (resolving per-child would let a concurrent publication move the base underneath a live group).
 
 **Capture is a fixed ordering**, and it is a contract rather than an implementation detail. On completion Forge: safety-commits whatever the agent left dirty, **tracked and untracked** (untracked output exists nowhere else) — through `git commit --no-verify`, deliberately bypassing the FG-685 hook above, because the safety-commit is Forge-authored with a fixed message, not agent-authored, and routing a known-clean string through the hook would only risk turning an unrelated hook failure (a userland regex quirk, a missing interpreter, an agent that replaced the hook) into a lost capture, since capture fails **before** the branch is fetched into the parent; resolves the clone's branch tip; fetches that branch into the parent's ref namespace under the same deterministic name — a real durable ref, never `FETCH_HEAD`, because it is simultaneously the gc anchor, the publisher's input and the reaper's reachability input; verifies the fetched ref **equals** the resolved tip; and only then hands it to the [integration publisher](#integration-publisher). Nothing commits into the clone afterwards: the candidate source is handed over *without* a workspace path, so the publisher's auto-commit cannot reach it. That omission is what makes the rule structural — the clone and the parent are different repositories, so a post-fetch commit in the clone would advance only the clone's ref and be silently absent from the published candidate. A capture that fails at any step fails the task and **retains** the clone; nothing is disposed of on an unverified capture.
 

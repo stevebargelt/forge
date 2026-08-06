@@ -143,6 +143,27 @@ export type EventType =
   // target BEFORE it was validated — the defect FG-425 removes. The payload
   // carries the durable {target, baseSha, candidateSha, publishedSha} record.
   | "integration.published"
+  // ── FG-584: the ordered fan-out's durable record. These four exist because
+  // readiness must be recomputable by ANY process, before and after a crash — an
+  // in-memory accumulator owned by one dispatchFanoutStep invocation cannot be
+  // read by the process that resumes the wave.
+  //
+  // The candidate passed (or failed) the D1 integration gate for the named work
+  // items. `ok: true` is HALF THE READINESS PREDICATE — a dependent is released
+  // only when its prerequisite's commit is an ancestor of the candidate AND that
+  // candidate is named here. `ok: false` is recorded too and never counts as
+  // satisfaction: it is the evidence a blocked dependent is named from.
+  | "integration.prerequisites_gated"
+  // An ordered worker's captured commit conflicted with the candidate (AC8/D2).
+  // The typed block: the conflicting worker, the candidate, and the conflicting
+  // paths. No dependent dispatches and nothing publishes while it stands.
+  | "integration.blocked"
+  // A work item never dispatched because a prerequisite failed or its integration
+  // was refused (AC7/D3), naming what blocked it.
+  | "fanout.item_blocked"
+  // A resumed wave found this item's work already complete AND already captured,
+  // and did NOT re-dispatch it (AC9: recovery duplicates no completed work).
+  | "fanout.item_adopted"
   // The publisher's own lifecycle, per attempt. requested: intent recorded (AD-5),
   // before any target mutation. base_moved: the CAS found the target off its
   // validated base — one rebuild follows (AD-1). parked: a named blocker

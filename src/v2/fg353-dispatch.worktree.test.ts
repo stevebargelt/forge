@@ -648,7 +648,19 @@ test("fg353 (1b): NO worktree switch set on darwin => fan-out isolates, red revi
     assert.equal(capture!.projectMount, child.worktreePath, "/project must be mounted from the child's workspace");
     assert.notEqual(capture!.projectMount, repo, "the operator's checkout must NOT be what a child got");
   }
-  assert.equal(children[0]!.baseSha, children[1]!.baseSha, "FG-621: one base for the whole wave");
+  // FG-621's invariant, as FG-584 narrowed it in the commit that made the
+  // narrowing necessary: ONE BASE PER CONCURRENTLY-DISPATCHED GROUP, not one per
+  // wave. An ordered plan item's workspace has to be cut from a candidate that
+  // already contains its prerequisite, so a dependent's base necessarily differs
+  // from its prerequisite's. This fan-out declares no `depends_on` edges, so it is
+  // exactly ONE group and the two rules coincide here — which is why the assertion
+  // itself is unchanged. The ordered case is covered by
+  // fg584-ordered-fanout.worktree.test.ts.
+  assert.equal(
+    children[0]!.baseSha,
+    children[1]!.baseSha,
+    "FG-621 (narrowed by FG-584): one base per concurrently-dispatched group — and an unordered wave is one group",
+  );
 
   // The red reviewed the publication candidate, never the publish target.
   const redCapture = capturedMounts.find((c) => c.taskId.startsWith("task-red-build-"));
