@@ -1684,9 +1684,11 @@ export function gatedCandidateRef(runId: string, parentTaskId: string): string {
 }
 
 /** Advance the gated-candidate ref to `sha` — the durable record that this exact
- *  candidate passed the gate. MONOTONIC by construction: the candidate branch only
- *  ever moves forward (merges, never resets), so each advance strictly contains
- *  every prerequisite the previous one did. */
+ *  candidate passed the gate. MONOTONIC in what it contains: every sha recorded
+ *  here is a descendant of the last one, so each advance strictly contains every
+ *  prerequisite the previous one did. The candidate branch is rewound exactly once
+ *  per resume, and only back to the prerequisite-only view this ref is already an
+ *  ancestor of (see rewindCandidateToPrerequisites). */
 export function recordGatedCandidate(
   projectDir: string,
   runId: string,
@@ -1708,6 +1710,70 @@ export function gatedCandidateTip(
   parentTaskId: string
 ): string | undefined {
   return resolveCommit(projectDir, gatedCandidateRef(runId, parentTaskId));
+}
+
+/** FG-584 (AC4/AC9): the ref naming the candidate as it stood with PREREQUISITES
+ *  ONLY — recorded immediately before the wave folds in its deferred leaves.
+ *
+ *  Mid-wave the candidate deliberately holds prerequisites and nothing else: an item
+ *  nothing depends on is never provisioned FROM, so merging it early would put
+ *  unrelated unpublished worker output into every later dependent's base and into
+ *  the D1 gate that decides whether they may start. The fold at the end of the wave
+ *  is what makes that a change of WHEN rather than WHETHER — and it is the one
+ *  moment the candidate stops being prerequisite-only. A crash after it (and before
+ *  the parent finalizes) leaves a candidate a RESUMED wave would otherwise re-gate
+ *  and hand to a dependent, leaf and all. This ref is how a resuming process finds
+ *  its way back to the same view a first pass had. */
+export function prerequisiteCandidateRef(runId: string, parentTaskId: string): string {
+  return `refs/forge/${runId}/${parentTaskId}/prerequisites`;
+}
+
+/** Record the candidate's prerequisite-only tip. Written before the first deferred
+ *  leaf is folded in, so it is always a commit the gated ref is an ancestor of. */
+export function recordPrerequisiteCandidate(
+  projectDir: string,
+  runId: string,
+  parentTaskId: string,
+  sha: string
+): void {
+  execFileSync("git", ["update-ref", prerequisiteCandidateRef(runId, parentTaskId), sha], {
+    cwd: projectDir,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+}
+
+/** FG-584 (AC4/AC9): rewind an ADOPTED candidate to its prerequisite-only view.
+ *
+ *  Called once, before a resumed wave re-enters its group loop, so that the sha it
+ *  gates and the base it cuts dependents from are derived from the same view a first
+ *  pass derived them from. Without it a resume re-gates the RAW tip — which after a
+ *  crash mid-fold contains leaves — records that as the gated candidate, and cuts a
+ *  dependent's workspace from it.
+ *
+ *  Bounded and reversible by construction: it only ever moves back to a commit the
+ *  candidate already contains, and the only commits it discards are leaf merges,
+ *  every one of which is re-derived from a durable captured branch at the end of the
+ *  wave. Refuses anything else — an unresolvable ref, a tip that already IS the
+ *  recorded view, or a recorded view that is not an ancestor of the tip (a candidate
+ *  that has been re-cut under it) — because a rewind that is not a strict undo of
+ *  the fold is not one this function can prove safe.
+ *
+ *  Returns the sha it rewound to, or undefined when it left the candidate alone. */
+export function rewindCandidateToPrerequisites(
+  projectDir: string,
+  runId: string,
+  parentTaskId: string,
+  integrationPath: string
+): string | undefined {
+  const prereq = resolveCommit(projectDir, prerequisiteCandidateRef(runId, parentTaskId));
+  const tip = integrationBranchTip(projectDir, runId, parentTaskId);
+  if (prereq === undefined || tip === undefined || prereq === tip) return undefined;
+  if (!isCommitIntegrated(projectDir, prereq, integrationBranchName(runId, parentTaskId))) return undefined;
+  execFileSync("git", ["reset", "--hard", prereq], {
+    cwd: integrationPath,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  return prereq;
 }
 
 /** FG-584: OPEN the run's candidate, creating it only if it does not exist yet.
@@ -1908,13 +1974,15 @@ export function cleanupIntegrationWorktree(
       stdio: ["ignore", "ignore", "ignore"],
     });
   } catch { /* best-effort */ }
-  // FG-584: the ordered wave's gated-candidate ref goes with the candidate it
-  // names. Only reached after a PROVEN publication, so nothing is still deciding
-  // readiness against it.
-  try {
-    execFileSync("git", ["update-ref", "-d", gatedCandidateRef(runId, parentTaskId)], {
-      cwd: projectDir,
-      stdio: ["ignore", "ignore", "ignore"],
-    });
-  } catch { /* best-effort */ }
+  // FG-584: the ordered wave's candidate refs go with the candidate they name.
+  // Only reached after a PROVEN publication, so nothing is still deciding readiness
+  // against the gated one or resuming against the prerequisite-only one.
+  for (const ref of [gatedCandidateRef(runId, parentTaskId), prerequisiteCandidateRef(runId, parentTaskId)]) {
+    try {
+      execFileSync("git", ["update-ref", "-d", ref], {
+        cwd: projectDir,
+        stdio: ["ignore", "ignore", "ignore"],
+      });
+    } catch { /* best-effort */ }
+  }
 }

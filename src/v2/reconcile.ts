@@ -1246,7 +1246,18 @@ export function reconcileRun(
     // sits with every child of a GROUP terminal while the live process merges and
     // gates, so "all children terminal" alone does not mean the process is gone.
     // A live foreign lock holder means the wave is in flight; leave it alone.
-    if (isOrderedFanoutWave(parent.id) && liveRunLockHolder(runId) === null) {
+    //
+    // RF-3: "leave it alone" means EXACTLY that — not "fall through to the
+    // fail-closed landing below". An ordered wave that is merely in flight was being
+    // failed as fanout_wave_orphaned on this arm, and the operator verb that failure
+    // prints (`forge recover <parent> --re-drive`) mints a FRESH parent, which cannot
+    // adopt this parent's captured children and therefore re-dispatches prerequisite
+    // work that is already complete, integrated and gated — the duplication AC9
+    // forbids, reached by following the advice the failure message itself gives. So
+    // an ordered wave has exactly two outcomes here: resumed on its own row, or left
+    // running for the process that is driving it.
+    if (isOrderedFanoutWave(parent.id)) {
+      if (liveRunLockHolder(runId) !== null) continue;
       try {
         const summary = { total: children.length, complete: children.filter((c) => c.status === "complete").length };
         // reason: ordered_fanout_resumable

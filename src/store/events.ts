@@ -143,7 +143,7 @@ export type EventType =
   // target BEFORE it was validated — the defect FG-425 removes. The payload
   // carries the durable {target, baseSha, candidateSha, publishedSha} record.
   | "integration.published"
-  // ── FG-584: the ordered fan-out's durable record. These four exist because
+  // ── FG-584: the ordered fan-out's durable record. These exist because
   // readiness must be recomputable by ANY process, before and after a crash — an
   // in-memory accumulator owned by one dispatchFanoutStep invocation cannot be
   // read by the process that resumes the wave.
@@ -164,6 +164,11 @@ export type EventType =
   // A resumed wave found this item's work already complete AND already captured,
   // and did NOT re-dispatch it (AC9: recovery duplicates no completed work).
   | "fanout.item_adopted"
+  // A resumed wave rewound an adopted candidate to its PREREQUISITE-ONLY view
+  // (AC4/AC9). The deferred leaves were already folded in when the process died, so
+  // the raw tip carries work no dependent may be cut from and no D1 gate may be
+  // asked about; the leaves are re-folded at the end of the resumed wave.
+  | "integration.candidate_rewound"
   // The publisher's own lifecycle, per attempt. requested: intent recorded (AD-5),
   // before any target mutation. base_moved: the CAS found the target off its
   // validated base — one rebuild follows (AD-1). parked: a named blocker

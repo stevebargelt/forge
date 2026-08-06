@@ -47,6 +47,7 @@ import {
 } from "./worktree-lifecycle.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
 import { gate } from "./gate.js";
+import { runDir } from "../util/paths.js";
 
 const RUNTIME = "fg584-ordered-test";
 
@@ -57,6 +58,7 @@ function orderedWorkflow(opts: {
   reds?: boolean;
   maxConcurrency?: number;
   buildGate?: "auto" | "human";
+  failureMode?: "fail-phase" | "continue" | "retry-once";
 }): Workflow {
   return {
     name: opts.name,
@@ -78,7 +80,7 @@ function orderedWorkflow(opts: {
         fanout: {
           from_upstream: { step: "plan", array_key: "steps", input_key: "step" },
           max_concurrency: opts.maxConcurrency ?? 4,
-          failure_mode: "fail-phase",
+          failure_mode: opts.failureMode ?? "fail-phase",
         },
       },
     ],
@@ -842,6 +844,58 @@ test("fg584 (AC7/D3): a failed prerequisite blocks its transitive dependents by 
   assert.ok(f.startedAt >= a.endedAt, "F was dispatched AFTER A had already failed, and still ran to completion");
 });
 
+test("fg584 (AC7/D3): failure_mode: continue does NOT buy a publication past blocked dependents", async () => {
+  // `continue` is a policy about tolerating a WORK ITEM's failure — an unrelated
+  // item may fail without taking the phase down. A blocked dependent is a different
+  // fact: it is work that NEVER RAN, on a base a human asked for it to be built on.
+  // Publishing the candidate anyway ships a phase with its declared dependents
+  // silently missing, and it does so on the ONE mode where nobody is watching for a
+  // failure. AC7/D3 is a property of the ordering, not of the failure policy.
+  armWorktreeMode();
+  const repo = makeRepo();
+  const wf = orderedWorkflow({ name: "fg584-ac7-continue", failureMode: "continue" });
+  const { runId } = startRun({ workflow: wf, title: "fg584 ac7 continue", inputs: {}, projectDir: repo });
+  CURRENT_RUN = runId;
+  const runs: ChildRun[] = [];
+  const items: PlanItem[] = [
+    { id: "A", files: ["src/a.ts"] },                    // fails
+    { id: "E", files: ["src/e.ts"] },                    // independent — completes, and IS publishable
+    { id: "B", files: ["src/b.ts"], depends_on: ["A"] }, // blocked, never dispatched
+  ];
+  const exec = makeExec(
+    items,
+    ({ item, workspace }) => {
+      if (item === "A") return { ok: false };
+      mkdirSync(join(workspace, "src"), { recursive: true });
+      writeFileSync(join(workspace, "src", `${item.toLowerCase()}.ts`), `export const ${item} = 1;\n`);
+      return { ok: true };
+    },
+    runs,
+  );
+
+  await runNext({ runId, workflow: wf, dockerExec: exec });
+  const wave = await runNext({ runId, workflow: wf, dockerExec: exec });
+
+  assert.deepEqual(wave.completedSteps, [], "the phase does not complete on a blocked dependent, whatever the mode");
+  assert.deepEqual(runs.map((r) => r.planItemId).sort(), ["A", "E"], "independent ready work still ran to completion");
+
+  const parent = buildParent(runId)!;
+  assert.equal(parent.status, "failed");
+  const kind = eventsForTask(parent.id)
+    .filter((e) => e.eventType === "task.failed")
+    .map((e) => (e.payload as Record<string, unknown>)["failure_kind"])
+    .pop();
+  assert.equal(kind, "prerequisite_blocked", "…and it fails for the ordering reason, not a generic child failure");
+  assert.match(parent.error ?? "", /'B' \(index 2\) blocked by 'A'/);
+
+  assert.deepEqual(publicationAttemptsForTask(parent.id), [], "nothing was published");
+  assert.equal(
+    existsSync(join(repo, "src", "e.ts")),
+    false,
+    "E completed, but it is not published while a dependent of the same wave never ran",
+  );
+});
+
 // ══════════════════════════════════════════════════════════════════════════════
 // AC8 / D2 — a merge conflict is a typed integration block.
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1149,6 +1203,167 @@ test("fg584 (AC9 boundary 4): crash after the dependent is dispatched and before
     1,
     "exactly one completed dependent — recovery neither duplicated nor skipped",
   );
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// AC9 — the boundary AFTER the wave: every child is complete, the deferred leaves
+// are folded into the candidate, and the parent's own finalize never ran.
+//
+// It is the one window in which the candidate is NOT prerequisite-only, and it is
+// reachable at a REGISTERED probe: the parent's reds run inside the publisher, so
+// killing at `dispatchFanoutStep:before-awaiting-red` lands with runOrderedWave
+// already returned and the parent still `running`.
+// ══════════════════════════════════════════════════════════════════════════════
+
+/** prereq → dependent, plus a LEAF nothing depends on — the item whose merge is
+ *  deferred to the end of the wave, and therefore the one a crash can strand
+ *  inside the candidate. */
+const POST_WAVE_ITEMS: PlanItem[] = [
+  { id: "prereq", files: ["src/prereq.ts"] },
+  { id: "leaf", files: ["src/leaf.ts"] },
+  { id: "dependent", files: ["src/dependent.ts"], depends_on: ["prereq"] },
+];
+
+function postWaveExec(runs: ChildRun[], saw: Record<string, string[]> = {}): DockerExecFn {
+  return makeExec(
+    POST_WAVE_ITEMS,
+    ({ item, workspace }) => {
+      mkdirSync(join(workspace, "src"), { recursive: true });
+      saw[item] = ["prereq", "leaf"].filter((f) => existsSync(join(workspace, "src", `${f}.ts`)));
+      writeFileSync(join(workspace, "src", `${item}.ts`), `export const ${item} = 1;\n`);
+      return { ok: true };
+    },
+    runs,
+  );
+}
+
+/** Drive the wave and kill it in the post-wave window. Returns once the parent is
+ *  `running` with every child complete and the leaves already folded in. */
+async function crashAfterWaveBeforeFinalize(runId: string, wf: Workflow, exec: DockerExecFn): Promise<void> {
+  await runNext({ runId, workflow: wf, dockerExec: exec });
+  let armed = true;
+  setCrashHookForTest((point) => {
+    if (!armed) return;
+    if (point !== "dispatchFanoutStep:before-awaiting-red") return;
+    armed = false;
+    throw new Error("simulated host crash");
+  });
+  await assert.rejects(() => runNext({ runId, workflow: wf, dockerExec: exec }), /simulated host crash/);
+  setCrashHookForTest(undefined);
+}
+
+test("fg584 (AC9/RF-3): an ordered wave with a LIVE lock holder is left running — never failed as fanout_wave_orphaned", async () => {
+  // The comment on the liveness guard says a live foreign holder means the wave is
+  // in flight and should be left alone; the code fell THROUGH to the fail-closed
+  // landing and failed it as fanout_wave_orphaned anyway. That kind's operator verb
+  // is `forge recover <parent> --re-drive`, which mints a FRESH parent — and
+  // adoption is scoped to the parent, so the fresh one cannot adopt these captured
+  // children and re-dispatches prerequisite work that is already complete,
+  // integrated and gated. The duplication AC9 forbids, reached by following the
+  // advice the failure message itself prints.
+  armWorktreeMode();
+  const repo = makeRepo();
+  const wf = orderedWorkflow({ name: "fg584-rf3-liveholder", reds: true });
+  const { runId } = startRun({ workflow: wf, title: "fg584 rf3", inputs: {}, projectDir: repo });
+  CURRENT_RUN = runId;
+  const runs: ChildRun[] = [];
+  await crashAfterWaveBeforeFinalize(runId, wf, postWaveExec(runs));
+
+  const parent = buildParent(runId)!;
+  assert.equal(parent.status, "running", "precondition: the parent is stranded mid-finalize");
+  assert.ok(
+    buildChildren(runId).every((c) => c.status === "complete"),
+    "precondition: EVERY child completed — the arm that fell through to the allComplete landing",
+  );
+
+  // A second forge process is driving this run: a live, fresh, foreign lock holder.
+  mkdirSync(runDir(runId), { recursive: true });
+  const lock = join(runDir(runId), ".dispatch.lock");
+  writeFileSync(
+    lock,
+    JSON.stringify({ pid: process.ppid, command: "next", acquiredAtMs: Date.now(), acquiredAt: new Date().toISOString() }),
+  );
+
+  reconcileRun(runId, () => false, () => "not_found" as const);
+
+  const afterLive = buildParent(runId)!;
+  assert.equal(afterLive.status, "running", "in flight → left exactly as it was");
+  assert.deepEqual(
+    eventsForTask(parent.id)
+      .filter((e) => e.eventType === "task.failed")
+      .map((e) => (e.payload as Record<string, unknown>)["failure_kind"]),
+    [],
+    "…and NOT failed as fanout_wave_orphaned, which would send the operator to a re-drive that re-runs the wave",
+  );
+
+  // The holder goes away — now, and only now, the wave is resumable on its own row.
+  rmSync(lock);
+  reconcileRun(runId, () => false, () => "not_found" as const);
+  assert.equal(buildParent(runId)!.status, "pending", "with nobody driving it, the SAME parent resumes");
+});
+
+test("fg584 (AC4/AC9/RF-4): a resumed wave re-gates the PREREQUISITE-ONLY candidate — a folded leaf never becomes a gated base", async () => {
+  // A leaf's merge is deferred to the end of the wave precisely so that no
+  // dependent's base and no D1 gate ever sees it. A crash after that fold leaves an
+  // adopted candidate whose RAW tip carries the leaf — and the resumed wave re-gates
+  // that raw tip and records it as the gated candidate, which is the ref every later
+  // dependent is cut from. The AC4 exclusion the deferral establishes on a first
+  // pass has to hold on the resume path too, or it holds exactly where it is least
+  // likely to be noticed.
+  armWorktreeMode();
+  const repo = makeRepo();
+  const wf = orderedWorkflow({ name: "fg584-rf4-resume-gate", reds: true });
+  const { runId } = startRun({ workflow: wf, title: "fg584 rf4", inputs: {}, projectDir: repo });
+  CURRENT_RUN = runId;
+  const runs: ChildRun[] = [];
+  const saw: Record<string, string[]> = {};
+  await crashAfterWaveBeforeFinalize(runId, wf, postWaveExec(runs, saw));
+
+  const parent = buildParent(runId)!;
+  const leaf = buildChildren(runId).find((t) => planItemIdOf(t) === "leaf")!;
+  const leafTip = capturedBranchTip(repo, runId, leaf.id)!;
+  assert.ok(
+    isCommitIntegrated(repo, leafTip, integrationBranchName(runId, parent.id)),
+    "precondition: the deferred leaf WAS folded into the candidate before the crash",
+  );
+  assert.equal(
+    isCommitIntegrated(repo, leafTip, gatedCandidateRef(runId, parent.id)),
+    false,
+    "precondition: and it was never part of anything gated",
+  );
+
+  await recoverToFixpoint(runId, wf, postWaveExec(runs, saw));
+
+  assert.equal(buildParent(runId)!.status, "complete", `recovery must converge; error: ${buildParent(runId)!.error}`);
+
+  const gates = eventsForTask(parent.id)
+    .filter((e) => e.eventType === "integration.prerequisites_gated")
+    .map((e) => e.payload as Record<string, unknown>);
+  assert.ok(gates.length >= 2, "the resumed wave re-proved the prerequisite — that is the pass under test");
+  for (const g of gates) {
+    const sha = g["candidateSha"];
+    assert.equal(typeof sha, "string");
+    assert.equal(
+      isCommitIntegrated(repo, leafTip, sha as string),
+      false,
+      "NO gated candidate — first pass or resumed — contains the deferred leaf",
+    );
+  }
+
+  assert.ok(
+    eventsForTask(parent.id).some((e) => e.eventType === "integration.candidate_rewound"),
+    "the resume rewound the adopted candidate to the view a first pass had",
+  );
+
+  // The rewind changes WHEN the leaf lands, never WHETHER: the same items reach the
+  // publisher, and nothing was re-run to get there.
+  assert.equal(existsSync(join(repo, "src", "leaf.ts")), true, "the deferred leaf still published");
+  assert.equal(existsSync(join(repo, "src", "prereq.ts")), true);
+  assert.equal(existsSync(join(repo, "src", "dependent.ts")), true);
+  for (const item of ["prereq", "leaf", "dependent"]) {
+    assert.equal(dispatchCount(runs, item), 1, `${item} was adopted, not re-run`);
+  }
+  assert.deepEqual(saw["dependent"], ["prereq"], "and the dependent's workspace never held the unrelated leaf");
 });
 
 // ══════════════════════════════════════════════════════════════════════════════

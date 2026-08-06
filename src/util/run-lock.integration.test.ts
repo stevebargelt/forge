@@ -146,6 +146,52 @@ test("renewRunLock: re-stamps OUR lock so a long-running holder is not stolen as
   );
 });
 
+// FG-584 RF-2: renewal is a COMPARE-AND-SET on the acquisition, not a
+// check-then-write on the pid. Verifying `held.pid === process.pid` and then
+// writing by pathname is two operations: a holder that goes stale can have its
+// lock legitimately stolen in between, and the renewal then overwrites the new
+// holder's record while both callers proceed — two processes each believing they
+// hold the run, over one candidate worktree.
+
+test("renewRunLock: a lock stolen and re-created is not ours to renew — even when the successor's record carries our own pid", () => {
+  const runId = freshRunId();
+  const t0 = 1_000_000_000_000;
+  acquireRunLock(runId, "next", { nowMs: t0 });
+
+  // The takeover, byte for byte what acquireRunLock's steal does: unlink the stale
+  // lock, atomically create a NEW one. The successor's record carries OUR pid, so
+  // the pid is no evidence at all — which is the point. (A pid is not an
+  // acquisition: it is reused, and it is identical across a stale-then-stolen
+  // handover within one process.)
+  unlinkSync(lockFile(runId));
+  const successor = { pid: process.pid, command: "gate", acquiredAtMs: t0 + 3 * 3600_000, acquiredAt: "y", token: "some-other-acquisition" };
+  writeFileSync(lockFile(runId), JSON.stringify(successor));
+
+  assert.equal(renewRunLock(runId, t0 + 3 * 3600_000 + 60_000), false, "our claim was superseded → the renewal FAILS");
+  assert.deepEqual(
+    JSON.parse(readFileSync(lockFile(runId), "utf8")),
+    successor,
+    "…and the successor's record is left byte-identical — a superseded renewal never clobbers",
+  );
+
+  releaseRunLock(runId);
+  assert.equal(existsSync(lockFile(runId)), true, "release is keyed the same way: we don't own it, so we don't remove it");
+  unlinkSync(lockFile(runId));
+});
+
+test("renewRunLock: a renewal that lost its claim never RESURRECTS the lock at the pathname", () => {
+  // The other half of writing through the pathname: with the lock gone (stolen and
+  // released, or swept), a pathname write re-creates a lock file naming a holder
+  // that is no longer holding anything — and the next `forge next` reads it as a
+  // live foreign holder and refuses the run.
+  const runId = freshRunId();
+  acquireRunLock(runId, "next");
+  unlinkSync(lockFile(runId));
+  assert.equal(renewRunLock(runId), false);
+  assert.equal(existsSync(lockFile(runId)), false, "no lock file was written back");
+  releaseRunLock(runId);
+});
+
 test("renewRunLock: never re-stamps a lock we do not hold, and reports so", () => {
   const runId = freshRunId();
   mkdirSync(runDir(runId), { recursive: true });

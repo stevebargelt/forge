@@ -110,6 +110,8 @@ import {
   gatedCandidateRef,
   gatedCandidateTip,
   recordGatedCandidate,
+  recordPrerequisiteCandidate,
+  rewindCandidateToPrerequisites,
 } from "./worktree-lifecycle.js";
 // FG-425: every merge→publish path in this file routes through the serialized
 // integration publisher. runIntegrationGate is deliberately NOT imported here any
@@ -2755,7 +2757,15 @@ async function dispatchFanoutStep(args: {
   // already RAN TO COMPLETION above — that is the deliberate timing change versus
   // the pre-FG-584 abort-mid-wave, and it is why this failure lands here rather than
   // inside the dispatch loop.
-  if (ordered && ordered.blocked.length > 0 && fanout.failure_mode !== "continue") {
+  //
+  // NOT CONDITIONED ON failure_mode, for the same reason the no-verdict branch above
+  // is not. `continue` is a policy about tolerating a WORK ITEM's failure — it says
+  // an unrelated item may fail without taking the phase with it. A blocked dependent
+  // is not that: it is work that NEVER RAN, and publishing the candidate anyway
+  // ships a phase whose declared dependents are simply missing, on a base a human
+  // asked for them to be built on. AC7/D3 is a property of the ordering, not of the
+  // failure policy.
+  if (ordered && ordered.blocked.length > 0) {
     const named = ordered.blocked
       .map((b) => `${b.item.label} blocked by ${b.blockers.map((x) => `'${x}'`).join(", ")}`)
       .join("; ");
@@ -3110,6 +3120,22 @@ async function runOrderedWave(args: {
   // pruned when it already exists — after a crash the branch IS the wave's
   // progress, and re-cutting it would re-run every prerequisite already in it.
   const { integrationPath, adopted } = openIntegrationWorktree(projectDir, runId, parentId, args.waveBaseSha);
+  // AC4 on the RESUME path. Mid-wave the candidate holds prerequisites only, and
+  // every decision below depends on that: the sha handed to the D1 gate and then
+  // recorded as gated, and the base the next group's dependents are cut from. The
+  // one moment it is NOT prerequisite-only is after the deferred leaves are folded
+  // in at the end of the wave — and a crash there is exactly what an adopted
+  // candidate can be carrying. Rewinding first is what makes a resumed wave derive
+  // both facts from the same view a first pass derived them from; the leaves are
+  // re-folded at the end, from the same durable captured branches.
+  const rewoundTo = adopted ? rewindCandidateToPrerequisites(projectDir, runId, parentId, integrationPath) : undefined;
+  if (rewoundTo) {
+    logEvent("integration.candidate_rewound", {
+      runId,
+      taskId: parentId,
+      payload: { branch: candidateBranch, to: rewoundTo, reason: "deferred_leaves_folded_before_crash" },
+    });
+  }
   logEvent("integration.worktree_created", {
     runId,
     taskId: parentId,
@@ -3371,6 +3397,14 @@ async function runOrderedWave(args: {
 
   // The deferred leaves, folded in once no dependent can be cut from the result.
   // The candidate handed to the publisher is the SAME set of items it always was.
+  //
+  // The prerequisite-only view is recorded FIRST, and that ordering is the whole
+  // crash-safety argument: the ref must exist before the candidate stops matching
+  // it, or a crash mid-fold leaves a resumed wave with no way back to it. Recording
+  // it and never folding costs nothing — the rewind is a no-op when the tip already
+  // is the recorded view.
+  const prereqTip = integrationBranchTip(projectDir, runId, parentId);
+  if (deferred.length > 0 && prereqTip) recordPrerequisiteCandidate(projectDir, runId, parentId, prereqTip);
   const block = mergeIntoCandidate(deferred);
   if (block) return { outcomes, integrationPath, blocked, integrationBlock: block };
 
