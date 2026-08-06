@@ -18,6 +18,7 @@ import { registerContinue } from "./commands/continue.js";
 import { registerLostSignals } from "./commands/lost-signals.js";
 import { registerContinuation } from "./commands/continuation.js";
 import { registerBacklog } from "./commands/backlog.js";
+import { registerQueue } from "./commands/queue.js";
 import { registerBacklogMigrate } from "./commands/backlog-migrate.js";
 import { registerDashboard } from "./commands/dashboard.js";
 import { registerNotify } from "./commands/notify.js";
@@ -92,6 +93,7 @@ export function buildProgram(): Command {
   registerLostSignals(program);
   registerContinuation(program);
   registerBacklog(program);
+  registerQueue(program);
   registerBacklogMigrate(program);
   registerDashboard(program);
   registerNotify(program);
