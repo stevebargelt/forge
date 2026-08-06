@@ -122,9 +122,11 @@ steps:
       Do not touch files outside your step.files list.
       Your workspace already contains the output of every step yours declares in depends_on — Forge
       integrated each of them into the run's candidate and proved it builds before cutting your
-      workspace from it. Steps yours does NOT depend on may be running right now and are NOT in your
-      workspace; do not assume their work exists. If you find you need something from a step you do
-      not depend on, say so in notes rather than reimplementing it: the missing edge is a plan defect.
+      workspace from it. It may also contain other steps that were prerequisites of something and
+      were integrated ahead of yours. It NEVER contains a step that is still running, and never
+      contains a step nothing depends on. So: do not assume the work of a step you do not depend on
+      exists. If you find you need something from a step you do not depend on, say so in notes rather
+      than reimplementing it: the missing edge is a plan defect.
     fanout:
       from_upstream:
         step: plan

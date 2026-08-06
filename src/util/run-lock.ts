@@ -9,7 +9,7 @@
 // is implausibly old has its lock stolen — so a crashed forge process never
 // wedges a run, dovetailing with the AWN-1 crash-recovery model.
 
-import { openSync, writeSync, closeSync, readFileSync, unlinkSync, mkdirSync } from "node:fs";
+import { openSync, writeSync, closeSync, readFileSync, unlinkSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { runDir } from "./paths.js";
 
@@ -123,6 +123,33 @@ export function liveRunLockHolder(
   return held;
 }
 
+/** FG-584: re-stamp OUR lock's acquisition time, if we still hold it.
+ *
+ *  DEFAULT_STALE_MS is a bound on "held without a sign of life", not on how long a
+ *  legitimate operation may take, and without renewal it was the latter. An ordered
+ *  fan-out wave is a serialized chain of container dispatches, integrations and
+ *  10-minute gates — far longer than the flat wave this lock was sized for — and at
+ *  the hour mark a second `forge next` would steal the lock from a live, working
+ *  holder while `liveRunLockHolder` simultaneously started answering "nobody is
+ *  driving this run", which is what lets reconcile hand the same wave to the second
+ *  process. Two ordered waves over one candidate worktree.
+ *
+ *  Renewal makes the staleness window mean what its comment always claimed: a
+ *  holder that has stopped making progress. A crashed holder renews nothing and
+ *  goes stale on the same schedule as before (and a dead pid is stolen immediately,
+ *  as before). */
+export function renewRunLock(runId: string, nowMs: number = Date.now()): boolean {
+  const path = lockPath(runId);
+  const held = readLock(path);
+  if (!held || held.pid !== process.pid) return false;
+  try {
+    writeFileSync(path, JSON.stringify({ ...held, acquiredAtMs: nowMs, acquiredAt: new Date(nowMs).toISOString() }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Release the lock if (and only if) WE still hold it — never unlink a holder
  *  that stole it from us. */
 export function releaseRunLock(runId: string): void {
@@ -132,17 +159,27 @@ export function releaseRunLock(runId: string): void {
   }
 }
 
-/** Run fn while holding the run lock; always release. */
+/** How often a held lock re-stamps itself. Comfortably inside DEFAULT_STALE_MS even
+ *  across the integration gate's 10-minute synchronous ceiling, during which no
+ *  timer can fire at all. */
+const RENEW_INTERVAL_MS = 5 * 60 * 1000;
+
+/** Run fn while holding the run lock; renew it for as long as we hold it; always
+ *  release. */
 export async function withRunLock<T>(
   runId: string,
   command: string,
   fn: () => Promise<T> | T,
-  opts?: { staleMs?: number; steal?: boolean },
+  opts?: { staleMs?: number; steal?: boolean; renewIntervalMs?: number },
 ): Promise<T> {
   acquireRunLock(runId, command, opts);
+  // unref'd: the heartbeat must never be the reason the process stays alive.
+  const heartbeat = setInterval(() => renewRunLock(runId), opts?.renewIntervalMs ?? RENEW_INTERVAL_MS);
+  heartbeat.unref();
   try {
     return await fn();
   } finally {
+    clearInterval(heartbeat);
     releaseRunLock(runId);
   }
 }

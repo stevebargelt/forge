@@ -46,12 +46,18 @@ import {
   isCommitIntegrated,
 } from "./worktree-lifecycle.js";
 import { publishFlatAsGeneration } from "./seed-generation.testkit.js";
+import { gate } from "./gate.js";
 
 const RUNTIME = "fg584-ordered-test";
 
 // ─── Workflow fixtures ────────────────────────────────────────────────────────
 
-function orderedWorkflow(opts: { name: string; reds?: boolean; maxConcurrency?: number }): Workflow {
+function orderedWorkflow(opts: {
+  name: string;
+  reds?: boolean;
+  maxConcurrency?: number;
+  buildGate?: "auto" | "human";
+}): Workflow {
   return {
     name: opts.name,
     description: "FG-584 ordered fan-out fixture",
@@ -62,7 +68,7 @@ function orderedWorkflow(opts: { name: string; reds?: boolean; maxConcurrency?: 
       {
         id: "build",
         agent: "engineer",
-        gate: "auto",
+        gate: opts.buildGate ?? "auto",
         manual: false,
         depends_on: ["plan"],
         runtime: RUNTIME,
@@ -79,6 +85,46 @@ function orderedWorkflow(opts: { name: string; reds?: boolean; maxConcurrency?: 
   };
 }
 
+/** `gate()` re-loads the workflow from FORGE_HOME by NAME, so a test that drives a
+ *  real gate decision has to publish the same shape as YAML. */
+function publishWorkflowYaml(wf: Workflow): void {
+  const path = join(process.env.FORGE_HOME!, "workflows", `${wf.name}.yml`);
+  mkdirSync(dirname(path), { recursive: true });
+  const build = wf.steps[1]!;
+  writeFileSync(
+    path,
+    `name: ${wf.name}
+description: "FG-584 ordered fan-out fixture"
+inputs: []
+steps:
+  - id: plan
+    agent: tech-lead
+    gate: auto
+    manual: false
+    depends_on: []
+    runtime: ${RUNTIME}
+    reds: []
+  - id: build
+    agent: engineer
+    gate: ${build.gate}
+    manual: false
+    depends_on: [plan]
+    runtime: ${RUNTIME}
+    reds: []
+    fanout:
+      from_upstream:
+        step: plan
+        array_key: steps
+        input_key: step
+      max_concurrency: ${build.fanout!.max_concurrency}
+      failure_mode: fail-phase
+`,
+  );
+  // The loader reads the published GENERATION, not the flat home ensureRuntime
+  // wrote — republish so this workflow is visible where gate() looks for it.
+  publishFlatAsGeneration(process.env.FORGE_HOME!);
+}
+
 // ─── Harness ──────────────────────────────────────────────────────────────────
 
 let db: DatabaseInstance;
@@ -86,6 +132,8 @@ let prev: DatabaseInstance | null;
 const tmpDirs: string[] = [];
 
 const ENV_VARS = [
+  "FORGE_HOST_VERIFICATION_SETUP",
+  "FORGE_INTEGRATION_GATE_TIMEOUT_MS",
   "FORGE_WORKTREES",
   "FORGE_NO_WORKTREES",
   "FORGE_WORKTREE_IGNORE_DIRTY",
@@ -798,36 +846,17 @@ test("fg584 (AC7/D3): a failed prerequisite blocks its transitive dependents by 
 // AC8 / D2 — a merge conflict is a typed integration block.
 // ══════════════════════════════════════════════════════════════════════════════
 
-test("fg584 (AC8/D2): a conflicting ordered worker parks as a typed integration block — no downstream dispatch, no publication, no auto-resolution", async () => {
-  armWorktreeMode();
-  const repo = makeRepo();
-  const wf = orderedWorkflow({ name: "fg584-ac8" });
-  const { runId } = startRun({ workflow: wf, title: "fg584 ac8", inputs: {}, projectDir: repo });
-  CURRENT_RUN = runId;
-  const runs: ChildRun[] = [];
-  // The two group-0 items declare DISJOINT paths — so AC6's concurrent-overlap
-  // refusal correctly does not fire — and then both write `collide.ts` anyway.
-  // `files` is a declaration; the workspace is real. This is the shape a textual
-  // conflict actually arrives in.
-  const items: PlanItem[] = [
-    { id: "left", files: ["src/left.ts"] },
-    { id: "right", files: ["src/right.ts"] },
-    { id: "after", files: ["src/after.ts"], depends_on: ["left"] },
-  ];
-  const exec = makeExec(
-    items,
-    ({ item, workspace }) => {
-      mkdirSync(join(workspace, "src"), { recursive: true });
-      writeFileSync(join(workspace, "src", "collide.ts"), `export const owner = "${item}";\n`);
-      return { ok: true };
-    },
-    runs,
-  );
+/** Both items declare DISJOINT paths — so AC6's concurrent-overlap refusal
+ *  correctly does not fire — and then both write `collide.ts` anyway. `files` is a
+ *  declaration; the workspace is real. This is the shape a textual conflict
+ *  actually arrives in. */
+function collidingBehavior({ item, workspace }: { item: string; workspace: string }) {
+  mkdirSync(join(workspace, "src"), { recursive: true });
+  writeFileSync(join(workspace, "src", "collide.ts"), `export const owner = "${item}";\n`);
+  return { ok: true };
+}
 
-  await runNext({ runId, workflow: wf, dockerExec: exec });
-  const wave = await runNext({ runId, workflow: wf, dockerExec: exec });
-
-  assert.deepEqual(wave.completedSteps, []);
+function blockAssertions(runId: string, repo: string) {
   const parent = buildParent(runId)!;
   assert.equal(parent.status, "failed");
 
@@ -849,14 +878,70 @@ test("fg584 (AC8/D2): a conflicting ordered worker parks as a typed integration 
   const result = parent.result as Record<string, unknown>;
   assert.ok(result["integration_block"], "the typed block is on the parent's result too");
 
-  // No downstream dependent started, and nothing reached the target.
-  assert.equal(
-    buildChildren(runId).some((t) => planItemIdOf(t) === "after"),
-    false,
-    "the dependent of the conflicting worker never dispatched",
-  );
   assert.deepEqual(publicationAttemptsForTask(parent.id), [], "no publication attempt reached the target branch");
   assert.equal(existsSync(join(repo, "src", "collide.ts")), false, "and the target is untouched");
+  return { parent, payload };
+}
+
+test("fg584 (AC8/D2): a conflicting PREREQUISITE parks as a typed integration block — its dependents never dispatch, nothing is published, nothing auto-resolves", async () => {
+  // The case AC8's "no downstream dependent starts" is actually about: the worker
+  // that conflicts is one something DEPENDS ON. Both group-0 items are
+  // prerequisites, so both are merged into the candidate in the same group and the
+  // second one collides. Neither's dependent may start.
+  armWorktreeMode();
+  const repo = makeRepo();
+  const wf = orderedWorkflow({ name: "fg584-ac8-prereq" });
+  const { runId } = startRun({ workflow: wf, title: "fg584 ac8 prereq", inputs: {}, projectDir: repo });
+  CURRENT_RUN = runId;
+  const runs: ChildRun[] = [];
+  const items: PlanItem[] = [
+    { id: "P1", files: ["src/p1.ts"] },
+    { id: "P2", files: ["src/p2.ts"] },
+    { id: "X", files: ["src/x.ts"], depends_on: ["P1"] },
+    { id: "Y", files: ["src/y.ts"], depends_on: ["P2"] },
+  ];
+  const exec = makeExec(items, collidingBehavior, runs);
+
+  await runNext({ runId, workflow: wf, dockerExec: exec });
+  const wave = await runNext({ runId, workflow: wf, dockerExec: exec });
+
+  assert.deepEqual(wave.completedSteps, []);
+  blockAssertions(runId, repo);
+
+  const dispatched = buildChildren(runId).map(planItemIdOf).sort();
+  assert.deepEqual(dispatched, ["P1", "P2"], "no dependent of either prerequisite dispatched");
+});
+
+test("fg584 (AC8/D2): a conflicting LEAF parks the same way — the wave stops at the conflict and publishes nothing", async () => {
+  // A leaf's merge is DEFERRED to the end of the wave (AC4's exclusion clause: an
+  // item nothing depends on must not be in any dependent's base, nor in the D1 gate
+  // that releases them). So its conflict surfaces at the end rather than in its own
+  // group, and `after` — a dependent of the NON-conflicting `left` — legitimately
+  // runs first. That is D3's "independent ready work runs to completion", and it is
+  // the deliberate consequence of deferring the merge: the conflicting worker
+  // `right` has no dependents of its own for AC8 to protect. Nothing was published
+  // either way, which is the guarantee that matters.
+  armWorktreeMode();
+  const repo = makeRepo();
+  const wf = orderedWorkflow({ name: "fg584-ac8-leaf" });
+  const { runId } = startRun({ workflow: wf, title: "fg584 ac8 leaf", inputs: {}, projectDir: repo });
+  CURRENT_RUN = runId;
+  const runs: ChildRun[] = [];
+  const items: PlanItem[] = [
+    { id: "left", files: ["src/left.ts"] },
+    { id: "right", files: ["src/right.ts"] },
+    { id: "after", files: ["src/after.ts"], depends_on: ["left"] },
+  ];
+  const exec = makeExec(items, collidingBehavior, runs);
+
+  await runNext({ runId, workflow: wf, dockerExec: exec });
+  const wave = await runNext({ runId, workflow: wf, dockerExec: exec });
+
+  assert.deepEqual(wave.completedSteps, []);
+  const { payload } = blockAssertions(runId, repo);
+
+  const right = buildChildren(runId).find((t) => planItemIdOf(t) === "right")!;
+  assert.equal(payload["childTaskId"], right.id, "the conflicting worker is the deferred LEAF, not the prerequisite");
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1064,4 +1149,318 @@ test("fg584 (AC9 boundary 4): crash after the dependent is dispatched and before
     1,
     "exactly one completed dependent — recovery neither duplicated nor skipped",
   );
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// D1 READINESS — the mid-wave gate must PREPARE the candidate before it runs, the
+// same FG-566 way the publisher does.
+//
+// WHY THESE FIXTURES CARRY A REAL DEPENDENCY. Every other fixture in this file
+// either has no package.json at all or sets `test:unit` to something that passes
+// (or fails) on its own — so the gate returns the same verdict whether or not
+// anything prepared the candidate, and the whole readiness question is invisible
+// to them. It is invisible in exactly the way it was invisible in production: the
+// candidate is a bare `git worktree add`, `node_modules` is gitignored, and on any
+// project that declares a `test:unit` needing an installed module the gate resolves
+// nothing to run against. Here `test:unit` REQUIRES an installed module, so a gate
+// that runs without preparation fails and takes these tests with it.
+// ══════════════════════════════════════════════════════════════════════════════
+
+/** A repo that gitignores node_modules — required, because readiness refuses to
+ *  proceed when setup MOVES the tree under test (`workspace_dirtied_by_setup`), and
+ *  an untracked node_modules is a moved tree. */
+function makeRepoWithIgnore(): string {
+  const dir = makeRepo();
+  writeFileSync(join(dir, ".gitignore"), "node_modules/\n");
+  git(dir, "add", ".");
+  git(dir, "-c", "user.email=test@forge.test", "-c", "user.name=Forge Test", "commit", "-q", "-m", "gitignore");
+  return dir;
+}
+
+/** The operator-declared setup contract, pointed at a script rather than a real
+ *  `npm ci`: this suite must not reach the network, and what is under test is that
+ *  preparation RAN against the candidate, not which installer it was. */
+function setupContract(body: string): void {
+  const script = join(tmpRoot("setup"), "setup.cjs");
+  writeFileSync(script, body);
+  process.env.FORGE_HOST_VERIFICATION_SETUP = JSON.stringify(["node", script]);
+}
+
+const INSTALLER = `
+const { mkdirSync, writeFileSync } = require("node:fs");
+const { join } = require("node:path");
+const dir = join(process.cwd(), "node_modules", "fg584-dep");
+mkdirSync(dir, { recursive: true });
+writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "fg584-dep", version: "1.0.0", main: "index.js" }));
+writeFileSync(join(dir, "index.js"), "module.exports = 42;\\n");
+`;
+
+/** A package.json whose test:unit CANNOT pass without an installed dependency. */
+const NEEDS_DEP = JSON.stringify({
+  name: "fg584-readiness",
+  private: true,
+  dependencies: { "fg584-dep": "1.0.0" },
+  scripts: { "test:unit": "node -e \"require('fg584-dep')\"" },
+});
+
+const READINESS_ITEMS: PlanItem[] = [
+  { id: "prereq", files: ["src/p.ts"] },
+  { id: "dependent", files: ["src/d.ts"], depends_on: ["prereq"] },
+];
+
+function readinessExec(runs: ChildRun[]): DockerExecFn {
+  return makeExec(
+    READINESS_ITEMS,
+    ({ item, workspace }) => {
+      mkdirSync(join(workspace, "src"), { recursive: true });
+      writeFileSync(join(workspace, "src", `${item[0]}.ts`), `export const ${item} = 1;\n`);
+      // The prerequisite is what turns this project into one whose gate needs an
+      // installed dependency — exactly how a real first step lands a package.json.
+      if (item === "prereq") writeFileSync(join(workspace, "package.json"), NEEDS_DEP);
+      return { ok: true };
+    },
+    runs,
+  );
+}
+
+test("fg584 (D1/FG-566): the mid-wave gate PREPARES the candidate first — a test:unit that needs an installed dependency passes, and the dependent is released", async () => {
+  armWorktreeMode();
+  setupContract(INSTALLER);
+  const repo = makeRepoWithIgnore();
+  const wf = orderedWorkflow({ name: "fg584-readiness-ok" });
+  const { runId } = startRun({ workflow: wf, title: "fg584 readiness ok", inputs: {}, projectDir: repo });
+  CURRENT_RUN = runId;
+  const runs: ChildRun[] = [];
+
+  await runNext({ runId, workflow: wf, dockerExec: readinessExec(runs) });
+  await runNext({ runId, workflow: wf, dockerExec: readinessExec(runs) });
+
+  const parent = buildParent(runId)!;
+  const gated = eventsForTask(parent.id).find((e) => e.eventType === "integration.prerequisites_gated");
+  assert.ok(gated, "the D1 gate ran");
+  const payload = gated!.payload as Record<string, unknown>;
+  assert.equal(payload["ok"], true, `the gate PASSED against a prepared candidate; error: ${String(payload["error"])}`);
+  assert.equal(payload["readiness"], "prepared", "…and it passed because readiness prepared it, not by accident");
+
+  const dependent = buildChildren(runId).find((t) => planItemIdOf(t) === "dependent");
+  assert.ok(dependent, "so the dependent was released and dispatched");
+  git(repo, "cat-file", "-e", `${dependent!.baseSha}:src/p.ts`);
+});
+
+test("fg584 (D1/FG-566): a readiness REFUSAL is verification_environment_unavailable — never a gate verdict on the prerequisite's code", async () => {
+  armWorktreeMode();
+  setupContract("process.exit(3);\n");
+  const repo = makeRepoWithIgnore();
+  const wf = orderedWorkflow({ name: "fg584-readiness-refused" });
+  const { runId } = startRun({ workflow: wf, title: "fg584 readiness refused", inputs: {}, projectDir: repo });
+  CURRENT_RUN = runId;
+  const runs: ChildRun[] = [];
+
+  await runNext({ runId, workflow: wf, dockerExec: readinessExec(runs) });
+  const wave = await runNext({ runId, workflow: wf, dockerExec: readinessExec(runs) });
+
+  assert.deepEqual(wave.completedSteps, []);
+  const parent = buildParent(runId)!;
+  assert.equal(parent.status, "failed");
+
+  const kind = eventsForTask(parent.id)
+    .filter((e) => e.eventType === "task.failed")
+    .map((e) => (e.payload as Record<string, unknown>)["failure_kind"])
+    .pop();
+  assert.equal(kind, "verification_environment_unavailable", "the environment failed, not the code");
+  assert.match(parent.error ?? "", /NOT a verdict on prereq/);
+
+  assert.equal(
+    eventsForTask(parent.id).some((e) => e.eventType === "integration.prerequisites_gated"),
+    false,
+    "no gate result was recorded, because the gate never ran",
+  );
+  const refusal = eventsForTask(parent.id).find((e) => e.eventType === "host_readiness.refused");
+  assert.ok(refusal, "the refusal itself is the durable record");
+  assert.equal((refusal!.payload as Record<string, unknown>)["reason"], "setup_failed");
+
+  assert.equal(
+    buildChildren(runId).some((t) => planItemIdOf(t) === "dependent"),
+    false,
+    "the dependent was not provisioned from a candidate nothing could be proven about",
+  );
+  assert.deepEqual(publicationAttemptsForTask(parent.id), [], "and nothing was published");
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// AC4 — a dependent's base includes every integrated prerequisite and EXCLUDES
+// unrelated unpublished worker output.
+// ══════════════════════════════════════════════════════════════════════════════
+
+test("fg584 (AC4): a dependent is cut from the GATED candidate — every prerequisite present, an unrelated sibling's unpublished output absent", async () => {
+  armWorktreeMode();
+  const repo = makeRepo();
+  const wf = orderedWorkflow({ name: "fg584-ac4-exclusion" });
+  const { runId } = startRun({ workflow: wf, title: "fg584 ac4", inputs: {}, projectDir: repo });
+  CURRENT_RUN = runId;
+  const runs: ChildRun[] = [];
+  const items: PlanItem[] = [
+    { id: "prereq", files: ["src/prereq.ts"] },
+    // Nothing depends on this one. It runs concurrently with `prereq` in group 0
+    // purely because it has no prerequisites of its own — which is exactly the
+    // "merely happened to land in an earlier group" case AC4 excludes.
+    { id: "unrelated", files: ["src/unrelated.ts"] },
+    { id: "dependent", files: ["src/dependent.ts"], depends_on: ["prereq"] },
+  ];
+  const saw: Record<string, string[]> = {};
+  const exec = makeExec(
+    items,
+    ({ item, workspace }) => {
+      mkdirSync(join(workspace, "src"), { recursive: true });
+      saw[item] = ["prereq", "unrelated"].filter((f) => existsSync(join(workspace, "src", `${f}.ts`)));
+      writeFileSync(join(workspace, "src", `${item}.ts`), `export const ${item} = 1;\n`);
+      return { ok: true };
+    },
+    runs,
+  );
+
+  await runNext({ runId, workflow: wf, dockerExec: exec });
+  const wave = await runNext({ runId, workflow: wf, dockerExec: exec });
+  assert.deepEqual(wave.completedSteps, ["build"], "the wave still completes");
+
+  const parent = buildParent(runId)!;
+  const dependent = buildChildren(runId).find((t) => planItemIdOf(t) === "dependent")!;
+
+  assert.deepEqual(saw["dependent"], ["prereq"], "the dependent's WORKSPACE held its prerequisite and nothing else");
+  git(repo, "cat-file", "-e", `${dependent.baseSha}:src/prereq.ts`);
+  assert.throws(
+    () => git(repo, "cat-file", "-e", `${dependent.baseSha}:src/unrelated.ts`),
+    "an unrelated sibling's unpublished output is NOT in the dependent's base",
+  );
+
+  // …and the base is the GATED candidate, not the raw candidate tip: the whole
+  // point of gating a prerequisite is that nothing is cut from an unproven tree.
+  const gatedAt = eventsForTask(parent.id)
+    .filter((e) => e.eventType === "integration.prerequisites_gated")
+    .map((e) => e.payload as Record<string, unknown>);
+  assert.equal(gatedAt.length, 1, "one gate, for the one item something depends on");
+  assert.equal(gatedAt[0]!["ok"], true);
+  assert.equal(
+    dependent.baseSha,
+    gatedAt[0]!["candidateSha"],
+    "the recorded base IS the commit the D1 gate passed — not the raw candidate tip",
+  );
+
+  // Deferring the unrelated item's merge changes WHEN it lands, never WHETHER:
+  // the composed candidate the publisher saw carries it.
+  assert.equal(existsSync(join(repo, "src", "unrelated.ts")), true, "the deferred sibling's work still published");
+  assert.equal(existsSync(join(repo, "src", "dependent.ts")), true);
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// D6 — child identity resolves against the DECLARED plan-item id in a way a
+// replan or re-drive cannot silently re-bind.
+// ══════════════════════════════════════════════════════════════════════════════
+
+test("fg584 (D6): a request-changes replacement parent DISPATCHES the wave with the rationale — it never adopts the superseded parent's children", async () => {
+  armWorktreeMode();
+  const repo = makeRepo();
+  const wf = orderedWorkflow({ name: "fg584-d6-replan", buildGate: "human" });
+  publishWorkflowYaml(wf);
+  const { runId } = startRun({ workflow: wf, title: "fg584 d6", inputs: {}, projectDir: repo });
+  CURRENT_RUN = runId;
+  const runs: ChildRun[] = [];
+  const exec = makeExec(
+    AC3_ITEMS,
+    ({ item, workspace }) => {
+      mkdirSync(join(workspace, "src"), { recursive: true });
+      writeFileSync(join(workspace, "src", `${item[0]}.ts`), `export const ${item} = 1;\n`);
+      return { ok: true };
+    },
+    runs,
+  );
+
+  await runNext({ runId, workflow: wf, dockerExec: exec });
+  await runNext({ runId, workflow: wf, dockerExec: exec });
+  const superseded = buildParent(runId)!;
+  assert.equal(superseded.status, "awaiting_gate", "the wave ran and is waiting on the human");
+  assert.equal(runs.length, 2, "both items ran the first time");
+
+  // The real decision path: the old primary becomes an audit record and a NEW
+  // pending primary is minted for the same phase, carrying the rationale.
+  await gate(superseded.id, "request-changes", "redo it: the primitive has the wrong signature", {});
+
+  await runNext({ runId, workflow: wf, dockerExec: exec });
+
+  const replacement = tasksForRun(runId).find(
+    (t) => t.phase === "build" && t.parentId === undefined && t.id !== superseded.id,
+  )!;
+  assert.ok(replacement, "request-changes minted a replacement primary");
+  const redone = tasksForRun(runId).filter((t) => t.parentId === replacement.id && !t.agentRole.startsWith("red-"));
+  assert.deepEqual(
+    redone.map(planItemIdOf).sort(),
+    ["dependent", "prereq"],
+    "the replacement wave dispatched BOTH items itself, rather than adopting the rejected lineage",
+  );
+  assert.equal(runs.length, 4, "…as real containers, not adopted rows");
+  for (const child of redone) {
+    assert.match(
+      String(child.taskPackage.inputs["requestedChanges"] ?? ""),
+      /wrong signature/,
+      `the human's rationale reached ${planItemIdOf(child)}`,
+    );
+  }
+  assert.equal(
+    eventsForTask(replacement.id).some((e) => e.eventType === "fanout.item_adopted"),
+    false,
+    "nothing from the superseded lineage was adopted",
+  );
+  // The dependent was still ORDERED behind its prerequisite in the redone wave —
+  // scoping adoption must not cost the ordering it exists to serve.
+  const dependent = redone.find((t) => planItemIdOf(t) === "dependent")!;
+  git(repo, "cat-file", "-e", `${dependent.baseSha}:src/p.ts`);
+});
+
+test("fg584 (FG-424): a mid-wave gate that TIMES OUT is integration_gate_timeout, not a verdict on the prerequisite", async () => {
+  // The shape host contention takes. The mid-wave gate runs a full suite outside
+  // every project-wide serialization mechanism by design (D1 costed and rejected
+  // holding the publication lane per prerequisite), so K concurrent runs on one
+  // machine really do run K suites — and a suite that would have passed can be
+  // starved past the ceiling. What must NOT happen is that being read as "the
+  // prerequisite is broken" and blamed on the code.
+  armWorktreeMode();
+  process.env.FORGE_INTEGRATION_GATE_TIMEOUT_MS = "300";
+  const repo = makeRepo();
+  const wf = orderedWorkflow({ name: "fg584-gate-timeout" });
+  const { runId } = startRun({ workflow: wf, title: "fg584 gate timeout", inputs: {}, projectDir: repo });
+  CURRENT_RUN = runId;
+  const runs: ChildRun[] = [];
+  const exec = makeExec(
+    AC3_ITEMS,
+    ({ item, workspace }) => {
+      mkdirSync(join(workspace, "src"), { recursive: true });
+      writeFileSync(join(workspace, "src", `${item[0]}.ts`), `export const ${item} = 1;\n`);
+      if (item === "prereq") {
+        writeFileSync(
+          join(workspace, "package.json"),
+          JSON.stringify({ name: "fg584-slow", private: true, scripts: { "test:unit": "node -e \"setTimeout(() => {}, 30000)\"" } }),
+        );
+      }
+      return { ok: true };
+    },
+    runs,
+  );
+
+  await runNext({ runId, workflow: wf, dockerExec: exec });
+  const wave = await runNext({ runId, workflow: wf, dockerExec: exec });
+
+  assert.deepEqual(wave.completedSteps, []);
+  const parent = buildParent(runId)!;
+  const kind = eventsForTask(parent.id)
+    .filter((e) => e.eventType === "task.failed")
+    .map((e) => (e.payload as Record<string, unknown>)["failure_kind"])
+    .pop();
+  assert.equal(kind, "integration_gate_timeout", "a starved gate is transient, not a verdict");
+  assert.match(parent.error ?? "", /NOT a verdict on prereq/);
+  assert.equal(
+    buildChildren(runId).some((t) => planItemIdOf(t) === "dependent"),
+    false,
+    "and the dependent is still not cut from an unproven candidate",
+  );
+  assert.deepEqual(publicationAttemptsForTask(parent.id), []);
 });

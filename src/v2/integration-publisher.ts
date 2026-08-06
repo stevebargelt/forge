@@ -58,7 +58,13 @@ import {
   startLeaseHeartbeat,
   type LaneWaitOpts,
 } from "./publication-lane.js";
-import { integrationGateCommandSet, prepareHostVerification } from "./host-readiness.js";
+import {
+  integrationGateCommandSet,
+  prepareHostVerification,
+  readinessNote,
+  type HostReadinessRefusalReason,
+  type ReadinessNote,
+} from "./host-readiness.js";
 import {
   CheckoutSyncError,
   DirtyPublishTargetError,
@@ -1162,6 +1168,24 @@ export function recoverUnfinishedPublications(projectDir: string, runId?: string
   }
 }
 
+/** The mid-wave gate's outcome. THREE arms, not two, for the reason the publisher
+ *  already separates `readiness_failed` from a failed `validate`: an environment
+ *  that could not be established is not a verdict on the code. `unavailable` is
+ *  classified `verification_environment_unavailable` by the caller and must never
+ *  be recorded as a gate result — the gate did not run. */
+export type OrderedPrerequisiteGate =
+  | { ok: true; output: string; readiness: ReadinessNote }
+  | { ok: false; unavailable: true; reason: HostReadinessRefusalReason; error: string }
+  | {
+      ok: false;
+      unavailable: false;
+      error: string;
+      output: string;
+      status: number | null;
+      signal: string | null;
+      timedOut: boolean;
+    };
+
 /** FG-584 (D1): the ordered fan-out's MID-WAVE prerequisite gate.
  *
  *  A prerequisite that HAS dependents must be merged into the run's candidate AND
@@ -1173,19 +1197,48 @@ export function recoverUnfinishedPublications(projectDir: string, runId?: string
  *  the phase: nothing is provisioned from them mid-wave, so gating them early buys
  *  nothing and costs a full unit-tier run under a 10-minute ceiling.
  *
+ *  READINESS FIRST, exactly as `publishIntegration` establishes it — same FG-566
+ *  call, same host-level setup contract, same per-workspace lock, same evidence
+ *  record and therefore the same reuse. The candidate is a bare `git worktree add`
+ *  and `node_modules` is gitignored, so on any project that declares a `test:unit`
+ *  script the gate resolves nothing to run against and reports ERR_MODULE_NOT_FOUND
+ *  — a readiness gap indistinguishable, to every caller, from the prerequisite
+ *  being broken. Reusing the publisher's path rather than inventing a second notion
+ *  of dependency readiness is what keeps one answer to "is this tree runnable".
+ *
  *  IT LIVES HERE, not in runNext.ts, for the FG-425 reason: the gate is reachable
  *  only through this module, and this module only ever points it at a candidate
  *  worktree. Nothing about this call touches the publication lane, the mutex, the
  *  attempt record or the publish target — it is validation of a candidate in
- *  isolation, exactly as `validate` above runs it, and NOTHING here publishes.
+ *  isolation, exactly as `validate` above runs it, and NOTHING here publishes. No
+ *  lease is renewed either, because none is HELD: there is no attempt to renew.
  *
  *  This is deliberately NOT the whole validation set: the reds and the review gate
  *  stay at PHASE granularity, once, against the fully composed candidate (AC10). */
-export function gateOrderedPrerequisites(dir: string): ValidationResult {
+export async function gateOrderedPrerequisites(
+  dir: string,
+  ctx: { candidateSha: string; runId: string; taskId: string },
+): Promise<OrderedPrerequisiteGate> {
+  const readiness = await prepareHostVerification({
+    workspace: dir,
+    treeSha: ctx.candidateSha,
+    // No configDir, for the reason the publication path states: the setup command
+    // is HOST-LEVEL operator config only, never anything reachable from inside the
+    // tree under test — and a merged agent branch is inside it.
+    coveredCommandSet: integrationGateCommandSet(dir),
+    label: "ordered-prerequisite-candidate",
+    runId: ctx.runId,
+    taskId: ctx.taskId,
+  });
+  if (readiness.kind === "refused") {
+    return { ok: false, unavailable: true, reason: readiness.refusal.reason, error: readiness.refusal.message };
+  }
+
   const gate = runIntegrationGate(dir);
-  if (gate.ok) return { ok: true, output: gate.output };
+  if (gate.ok) return { ok: true, output: gate.output, readiness: readinessNote(readiness) };
   return {
     ok: false,
+    unavailable: false,
     error: `${gate.error}\n${gate.output}`,
     output: gate.output,
     status: gate.status,

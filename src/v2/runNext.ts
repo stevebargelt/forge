@@ -108,6 +108,7 @@ import {
   capturedBranchTip,
   isCommitIntegrated,
   gatedCandidateRef,
+  gatedCandidateTip,
   recordGatedCandidate,
 } from "./worktree-lifecycle.js";
 // FG-425: every merge→publish path in this file routes through the serialized
@@ -2693,6 +2694,7 @@ async function dispatchFanoutStep(args: {
       ? { blocked_items: ordered.blocked.map((b) => ({ item: b.item.label, blocked_by: b.blockers })) }
       : {}),
     ...(ordered?.integrationBlock ? { integration_block: ordered.integrationBlock } : {}),
+    ...(ordered?.unavailable ? { verification_unavailable: ordered.unavailable } : {}),
   };
 
   // No container runs for the parent — write result.json explicitly so
@@ -2717,6 +2719,29 @@ async function dispatchFanoutStep(args: {
         `conflicts with candidate ${block.candidateBranch}${block.candidateSha ? ` at ${block.candidateSha}` : ""}` +
         `${block.conflictPaths.length > 0 ? ` on ${block.conflictPaths.join(", ")}` : ""}. ` +
         `No dependent was dispatched and nothing was published. ${block.error}`,
+      result: parentResult,
+    });
+    return "failed";
+  }
+
+  // FG-584: the mid-wave D1 gate reached NO VERDICT — the environment could not be
+  // established, or the gate timed out, or it was signal-killed. Reported BEFORE the
+  // blocked-dependent branch below because it is the more accurate fact about the
+  // same dependents: they were refused because nothing could be proven, not because
+  // a prerequisite was proven bad. Independent ready work already ran to completion
+  // (D3).
+  //
+  // Not conditioned on failure_mode: `continue` is about tolerating a WORK ITEM's
+  // failure, and this is not one. The publisher would reach the same wall a moment
+  // later anyway — failing here just names the reason precisely.
+  if (ordered?.unavailable) {
+    failTask(parentId, {
+      runId: args.runId,
+      kind: ordered.unavailable.kind,
+      error:
+        `fanout: the ordered wave's prerequisite gate reached no verdict (${ordered.unavailable.reason}) — ` +
+        `${ordered.unavailable.error} This is NOT a verdict on ${ordered.unavailable.items.join(", ")}. ` +
+        `Dependents were not dispatched and nothing was published.`,
       result: parentResult,
     });
     return "failed";
@@ -2940,29 +2965,62 @@ type IntegrationBlock = {
   error: string;
 };
 
+/** The mid-wave gate did not PRODUCE A VERDICT. Three ways that happens, and none
+ *  of them says anything about the prerequisites' code:
+ *
+ *    - readiness refused: forge could not establish an execution-ready verification
+ *      environment for the candidate (FG-566), so nothing ran;
+ *    - the gate TIMED OUT: it hit its own ceiling. FG-424 already treats this as
+ *      transient rather than a verdict, and it is the shape host contention takes —
+ *      concurrent runs each execute their own suite on one machine, and a suite
+ *      that would have passed can be starved past the ceiling;
+ *    - the gate was SIGNAL-KILLED: an abrupt death outside the timeout path, after
+ *      which FG-424 does not trust the tree enough to blame it.
+ *
+ *  Kept separate from a real gate failure for the reason the publisher keeps
+ *  `readiness_failed` separate from a failed validation. `kind` is the existing
+ *  FailureKind the caller reports; no new vocabulary. */
+type VerificationUnavailable = { kind: FailureKind; reason: string; error: string; items: string[] };
+
 type OrderedWaveOutcome = {
   outcomes: ChildOutcome[];
   integrationPath: string;
   blocked: BlockedItem[];
   integrationBlock?: IntegrationBlock;
+  unavailable?: VerificationUnavailable;
 };
 
-/** Every child row in this PHASE that carries a DECLARED plan-item id, keyed on
- *  that id (D6).
+/** THIS PARENT's child rows that carry a DECLARED plan-item id, keyed on that id
+ *  (D6).
  *
- *  Keyed on the declared id and scoped to the PHASE — deliberately not to the
- *  parent. `forge recover --re-drive` mints a NEW parent for the same phase, so a
- *  parent-scoped lookup would find nothing after a re-drive and re-run every
- *  prerequisite whose commit is already integrated: exactly the duplication AC9
- *  forbids. The declared id is what survives both a re-drive and a replan; the
- *  array index survives neither.
+ *  Keyed on the DECLARED id, never the fan-out array index — the index survives
+ *  neither a replan nor a re-drive, and rebinding an edge to whatever child now
+ *  sits at position 2 is precisely the silent re-binding D6 forbids.
+ *
+ *  SCOPED TO THE PARENT, and that scope is load-bearing in both directions:
+ *
+ *    - A CRASH RESUME keeps the same parent row. reconcile returns a stranded
+ *      ordered parent to `pending` (it does NOT fail it as fanout_wave_orphaned,
+ *      which is the only path that ever minted a fresh parent for a wave), and
+ *      dispatchFanoutStep reuses that pending primary — so every already-captured
+ *      child is still found here and ADOPTED rather than re-run. AC9 holds.
+ *
+ *    - A NEW PARENT MEANS A NEW WAVE. `gate request-changes` mints a fresh pending
+ *      primary carrying the human's rationale, and the superseded parent's children
+ *      are audit rows on a dead lineage. Phase-scoping adopted every one of them:
+ *      nothing dispatched, the rationale reached no agent, and the wave re-composed
+ *      a byte-identical candidate out of the work the human had just rejected. It
+ *      also silently crossed candidates — readiness is ancestry in THIS parent's
+ *      gated ref, and a foreign parent's captured commit is not in it, so a
+ *      prerequisite adopted across the boundary would then read as unintegrated and
+ *      block its own dependents.
  *
  *  A `complete` row wins over any other for the same id: a failed first attempt
  *  followed by a successful re-dispatch is two rows and one outcome. */
-function adoptablePlanItemChildren(runId: string, phase: string): Map<string, Task> {
+function adoptablePlanItemChildren(runId: string, phase: string, parentId: string): Map<string, Task> {
   const out = new Map<string, Task>();
   for (const t of tasksForRun(runId)) {
-    if (t.phase !== phase || t.parentId === undefined) continue;
+    if (t.phase !== phase || t.parentId !== parentId) continue;
     if (t.agentRole.startsWith("red-")) continue;
     const id = t.taskPackage.inputs["planItemId"];
     if (typeof id !== "string" || id.length === 0) continue;
@@ -3067,6 +3125,19 @@ async function runOrderedWave(args: {
 
   const outcomes: ChildOutcome[] = [];
   const blocked: BlockedItem[] = [];
+  let unavailable: VerificationUnavailable | undefined;
+  /** AC4's EXCLUSION clause. An item nothing depends on is never provisioned FROM,
+   *  so merging it mid-wave puts unrelated unpublished worker output into every
+   *  later dependent's base and into the D1 gate that decides whether they may
+   *  start at all. Both consequences are defects: the base violates AC4, and one
+   *  broken leaf then blocks the dependents of prerequisites it has nothing to do
+   *  with (AC7). So a leaf's merge is DEFERRED to the end of the wave — a change of
+   *  WHEN, not of WHETHER: the same branch, with the same items, reaches the same
+   *  publisher, gated and reviewed once at phase granularity (AC10/D4). */
+  const deferred: { item: PlanItemNode; outcome: ChildOutcome }[] = [];
+
+  const isPrerequisite = (item: PlanItemNode): boolean =>
+    item.declaredId !== undefined && graph.hasDependents.has(item.declaredId);
 
   const dispatchItem = (item: PlanItemNode, baseSha: string): Promise<ChildOutcome> =>
     runFanoutChild({
@@ -3088,11 +3159,56 @@ async function runOrderedWave(args: {
       planItem: item,
     });
 
+  /** Merge these workers' CAPTURED branches into the candidate, in the order given.
+   *  Returns the typed block on the first conflict (AC8/D2) and undefined otherwise.
+   *  A commit already an ancestor is skipped, which is what makes a resumed wave
+   *  cost nothing here and produce the identical candidate. */
+  const mergeIntoCandidate = (
+    entries: { item: PlanItemNode; outcome: ChildOutcome }[],
+  ): IntegrationBlock | undefined => {
+    for (const { item, outcome } of entries) {
+      const tip = capturedBranchTip(projectDir, runId, outcome.childTaskId);
+      if (tip === undefined) continue;
+      if (isCommitIntegrated(projectDir, tip, candidateBranch)) continue;
+      // FG-621: the child workspace path is deliberately NOT passed — the branch
+      // this merge resolves is final, and committing into the clone now would
+      // advance only the clone's own ref.
+      const merge = mergeChildIntoIntegration(integrationPath, runId, outcome.childTaskId);
+      logEvent("integration.child_merged", {
+        runId,
+        taskId: parentId,
+        payload: {
+          childTaskId: outcome.childTaskId,
+          childIndex: outcome.index,
+          item: item.label,
+          ok: merge.ok,
+          error: !merge.ok ? merge.error : undefined,
+        },
+      });
+      if (!merge.ok) {
+        const block: IntegrationBlock = {
+          item: item.label,
+          childTaskId: outcome.childTaskId,
+          branch: worktreeBranchName(runId, outcome.childTaskId),
+          candidateBranch,
+          ...(integrationBranchTip(projectDir, runId, parentId)
+            ? { candidateSha: integrationBranchTip(projectDir, runId, parentId) }
+            : {}),
+          conflictPaths: merge.conflictPaths ?? [],
+          error: merge.error,
+        };
+        logEvent("integration.blocked", { runId, taskId: parentId, payload: { ...block } });
+        return block;
+      }
+    }
+    return undefined;
+  };
+
   for (const group of graph.groups) {
     // (a) READINESS. Recomputed from durable state at the top of every group —
     //     never carried forward from the previous iteration. A resumed wave and a
     //     fresh one therefore take exactly the same decisions here.
-    const priorChildren = adoptablePlanItemChildren(runId, step.id);
+    const priorChildren = adoptablePlanItemChildren(runId, step.id, parentId);
     const ready: PlanItemNode[] = [];
     for (const item of group) {
       const unmet = item.dependsOn.filter(
@@ -3137,9 +3253,21 @@ async function runOrderedWave(args: {
 
     // (c) DISPATCH. ONE base per concurrently-dispatched group — FG-621's
     //     one-base-per-wave, narrowed exactly as far as ordering requires and no
-    //     further. The base is read off the candidate REF rather than remembered,
-    //     so it is the same value a resuming process would compute.
-    const groupBase = integrationBranchTip(projectDir, runId, parentId) ?? args.waveBaseSha;
+    //     further.
+    //
+    //     THE GATED REF, NOT THE CANDIDATE TIP. The candidate tip is every merge
+    //     made so far, gated or not; the gated ref is the last candidate the D1
+    //     gate PASSED. Cutting from the tip hands a dependent a prerequisite that
+    //     may never have been proven to build, which defeats the whole point of
+    //     gating prerequisites — and it is not the same ref the readiness predicate
+    //     tests ancestry against, so a dependent could be released against one
+    //     commit and provisioned from another. Read off the ref rather than
+    //     remembered, so a resuming process computes the same value.
+    //
+    //     Before anything is gated there is nothing to inherit and the wave's own
+    //     resolved base is correct: group 0's items have no prerequisites, which is
+    //     what put them in group 0.
+    const groupBase = gatedCandidateTip(projectDir, runId, parentId) ?? args.waveBaseSha;
     const dispatched: ChildOutcome[] = [];
     const queue = dispatchable.slice();
     while (queue.length > 0) {
@@ -3162,56 +3290,60 @@ async function runOrderedWave(args: {
     // (d) INTEGRATE. Each completed worker's CAPTURED branch, in item index order,
     //     into the candidate. Skipping a commit that is already an ancestor is what
     //     makes a resumed group cost nothing and produce the same candidate.
+    //
+    //     PREREQUISITES ONLY. A leaf's merge is deferred — see `deferred` above.
     const landed = group
       .map((item) => ({ item, outcome: outcomes.find((o) => o.index === item.index && o.status === "complete") }))
       .filter((x): x is { item: PlanItemNode; outcome: ChildOutcome } => x.outcome !== undefined);
-    for (const { item, outcome } of landed) {
-      const tip = capturedBranchTip(projectDir, runId, outcome.childTaskId);
-      if (tip === undefined) continue;
-      if (isCommitIntegrated(projectDir, tip, candidateBranch)) continue;
-      // FG-621: the child workspace path is deliberately NOT passed — the branch
-      // this merge resolves is final, and committing into the clone now would
-      // advance only the clone's own ref.
-      const merge = mergeChildIntoIntegration(integrationPath, runId, outcome.childTaskId);
-      logEvent("integration.child_merged", {
-        runId,
-        taskId: parentId,
-        payload: {
-          childTaskId: outcome.childTaskId,
-          childIndex: outcome.index,
-          item: item.label,
-          ok: merge.ok,
-          error: !merge.ok ? merge.error : undefined,
-        },
-      });
-      if (!merge.ok) {
-        const block: IntegrationBlock = {
-          item: item.label,
-          childTaskId: outcome.childTaskId,
-          branch: worktreeBranchName(runId, outcome.childTaskId),
-          candidateBranch,
-          ...(integrationBranchTip(projectDir, runId, parentId)
-            ? { candidateSha: integrationBranchTip(projectDir, runId, parentId) }
-            : {}),
-          conflictPaths: merge.conflictPaths ?? [],
-          error: merge.error,
-        };
-        logEvent("integration.blocked", { runId, taskId: parentId, payload: { ...block } });
-        // PARK. No further group runs, no dependent dispatches, and the caller
-        // publishes nothing — D2's bounded outcome, with no resolution lane.
-        return { outcomes, integrationPath, blocked, integrationBlock: block };
-      }
-    }
-    // (e) GATE (D1) — only for items something else DEPENDS ON. A leaf rides the
-    //     single composed gate at the end of the phase: nothing is provisioned
-    //     from it mid-wave, so gating it early buys nothing and costs a full
-    //     unit-tier run while the wave waits.
-    const gateItems = landed
-      .map((x) => x.item.declaredId)
-      .filter((id): id is string => id !== undefined && graph.hasDependents.has(id));
+    const now = landed.filter((x) => isPrerequisite(x.item));
+    deferred.push(...landed.filter((x) => !isPrerequisite(x.item)));
+    const block = mergeIntoCandidate(now);
+    // PARK. No further group runs, no dependent dispatches, and the caller
+    // publishes nothing — D2's bounded outcome, with no resolution lane.
+    if (block) return { outcomes, integrationPath, blocked, integrationBlock: block };
+
+    // (e) GATE (D1) — only for items something else DEPENDS ON, which is exactly
+    //     what is in the candidate at this point. A leaf rides the single composed
+    //     gate at the end of the phase: nothing is provisioned from it mid-wave, so
+    //     gating it early buys nothing and costs a full unit-tier run while the
+    //     wave waits.
+    const gateItems = now.map((x) => x.item.declaredId).filter((id): id is string => id !== undefined);
     if (gateItems.length > 0) {
       const candidateSha = integrationBranchTip(projectDir, runId, parentId);
-      const gate = gateOrderedPrerequisites(integrationPath);
+      const gate = await gateOrderedPrerequisites(integrationPath, {
+        candidateSha: candidateSha ?? args.waveBaseSha,
+        runId,
+        taskId: parentId,
+      });
+      if (!gate.ok && gate.unavailable) {
+        // THE GATE DID NOT RUN. Recording this as a gate result would report a
+        // missing verification environment as a verdict on the prerequisites'
+        // code, so no `integration.prerequisites_gated` is written at all — the
+        // refusal's own `host_readiness.refused` event is the record. The gated
+        // ref does not advance, so dependents are still blocked by name, and the
+        // wave still lets independent ready work finish (D3) before the caller
+        // fails the phase as verification_environment_unavailable.
+        unavailable ??= {
+          kind: "verification_environment_unavailable",
+          reason: gate.reason,
+          error: gate.error,
+          items: gateItems,
+        };
+        continue;
+      }
+      if (!gate.ok && (gate.timedOut || gate.signal)) {
+        // IT RAN BUT REACHED NO VERDICT (FG-424's two non-verdict arms). Same
+        // channel, same reason: the gated ref must not advance, and the code must
+        // not be blamed for it. Recorded as a gate event, unlike the readiness
+        // refusal — the gate really did execute, and its exit evidence is the
+        // record an operator needs.
+        unavailable ??= {
+          kind: gate.timedOut ? "integration_gate_timeout" : "integration_gate_crashed",
+          reason: gate.timedOut ? "gate_timed_out" : `gate_killed_by_${gate.signal}`,
+          error: gate.error,
+          items: gateItems,
+        };
+      }
       // THE REF IS THE FACT, and it is written only on a PASS. The event beside it
       // is evidence for an operator; nothing reads it to decide a transition, so a
       // crash on either side of the event changes nothing. A crash between the gate
@@ -3227,6 +3359,7 @@ async function runOrderedWave(args: {
           items: gateItems,
           candidateSha,
           error: gate.ok ? undefined : gate.error,
+          readiness: gate.ok ? gate.readiness.outcome : undefined,
         },
       });
       // A REFUSED integration is not handled here. The gated ref simply does not
@@ -3236,7 +3369,12 @@ async function runOrderedWave(args: {
     }
   }
 
-  return { outcomes, integrationPath, blocked };
+  // The deferred leaves, folded in once no dependent can be cut from the result.
+  // The candidate handed to the publisher is the SAME set of items it always was.
+  const block = mergeIntoCandidate(deferred);
+  if (block) return { outcomes, integrationPath, blocked, integrationBlock: block };
+
+  return { outcomes, integrationPath, blocked, ...(unavailable ? { unavailable } : {}) };
 }
 
 /** FG-425: the fan-out validate-then-publish step.

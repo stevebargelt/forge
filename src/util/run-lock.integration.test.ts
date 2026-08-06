@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, writeFileSync, mkdirSync, unlinkSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { acquireRunLock, releaseRunLock, withRunLock, RunBusyError, acquireFileLockBlocking, releaseFileLock } from "./run-lock.js";
+import { acquireRunLock, releaseRunLock, renewRunLock, liveRunLockHolder, withRunLock, RunBusyError, acquireFileLockBlocking, releaseFileLock } from "./run-lock.js";
 import { runDir } from "./paths.js";
 
 let n = 0;
@@ -90,6 +90,91 @@ test("withRunLock: releases the lock on success AND on throw", async () => {
 
   await assert.rejects(withRunLock(runId, "next", () => { throw new Error("boom"); }), /boom/);
   assert.equal(existsSync(lockFile(runId)), false, "released even when fn throws");
+});
+
+// ── FG-584: renewal. The staleness window bounds "held without a sign of life",
+// and until it was renewed it bounded "held", full stop — so an ordered fan-out
+// wave (a serialized chain of dispatches, integrations and 10-minute gates) could
+// legitimately outlive it and be TAKEN OVER while still working. Two waves over one
+// candidate worktree.
+
+test("renewRunLock: re-stamps OUR lock so a long-running holder is not stolen as stale", () => {
+  const runId = freshRunId();
+  const t0 = 1_000_000_000_000;
+  acquireRunLock(runId, "next", { nowMs: t0 });
+
+  // Two hours of work later, with a 1h stale window: without a renewal, a second
+  // process steals it out from under us.
+  const stolen = freshRunId();
+  acquireRunLock(stolen, "next", { nowMs: t0 });
+  assert.equal(
+    acquireRunLock(stolen, "next", { isAlive: ALIVE, nowMs: t0 + 2 * 3600_000, staleMs: 3600_000 }),
+    true,
+    "precondition: an unrenewed live holder IS stolen at the stale threshold",
+  );
+  releaseRunLock(stolen);
+
+  // The heartbeat kept re-stamping it through those two hours; the last tick landed
+  // five minutes ago, so the same holder is still live at the 2h mark.
+  const now = t0 + 2 * 3600_000;
+  assert.equal(renewRunLock(runId, now - 5 * 60_000), true);
+  assert.throws(
+    () => acquireRunLock(runId, "next", { isAlive: ALIVE, nowMs: now, staleMs: 3600_000 }),
+    RunBusyError,
+    "a renewed holder is NOT stale and is not stolen",
+  );
+  releaseRunLock(runId);
+
+  // The same stamp is what reconcile's liveness probe reads. An ordered wave's
+  // stranded-parent resume is guarded on "no live foreign holder", so an unrenewed
+  // stamp does not merely permit a takeover — it actively tells the second process
+  // that nobody is driving the run.
+  const foreign = freshRunId();
+  mkdirSync(runDir(foreign), { recursive: true });
+  const write = (atMs: number) =>
+    writeFileSync(lockFile(foreign), JSON.stringify({ pid: 999999, command: "next", acquiredAtMs: atMs, acquiredAt: "x" }));
+  write(t0);
+  assert.equal(
+    liveRunLockHolder(foreign, { isAlive: ALIVE, nowMs: now, staleMs: 3600_000 }),
+    null,
+    "an unrenewed 2h-old holder reads as 'nobody is driving this run' — the resume window",
+  );
+  write(now - 5 * 60_000);
+  assert.ok(
+    liveRunLockHolder(foreign, { isAlive: ALIVE, nowMs: now, staleMs: 3600_000 }),
+    "…and a renewed one keeps reading as live, so the wave is left alone",
+  );
+});
+
+test("renewRunLock: never re-stamps a lock we do not hold, and reports so", () => {
+  const runId = freshRunId();
+  mkdirSync(runDir(runId), { recursive: true });
+  const foreign = { pid: 999999, command: "next", acquiredAtMs: 1_000, acquiredAt: "x" };
+  writeFileSync(lockFile(runId), JSON.stringify(foreign));
+  assert.equal(renewRunLock(runId), false, "not ours → refused");
+  assert.deepEqual(JSON.parse(readFileSync(lockFile(runId), "utf8")), foreign, "…and left byte-identical");
+
+  const absent = freshRunId();
+  assert.equal(renewRunLock(absent), false, "no lock at all → nothing to renew");
+});
+
+test("withRunLock: renews while it holds, so a long fn is never taken over mid-flight", async () => {
+  const runId = freshRunId();
+  const stamps: number[] = [];
+  await withRunLock(
+    runId,
+    "next",
+    async () => {
+      for (let i = 0; i < 3; i++) {
+        await new Promise((r) => setTimeout(r, 12));
+        stamps.push((JSON.parse(readFileSync(lockFile(runId), "utf8")) as { acquiredAtMs: number }).acquiredAtMs);
+      }
+    },
+    { renewIntervalMs: 5 },
+  );
+  assert.ok(stamps.length === 3, "the fn observed the lock three times");
+  assert.ok(stamps[2]! > stamps[0]!, `the lock's acquisition stamp advanced while held (${stamps.join(", ")})`);
+  assert.equal(existsSync(lockFile(runId)), false, "and the heartbeat is torn down with the lock");
 });
 
 // ── acquireFileLockBlocking (FG-376): dead-holder theft only, NO stale-time theft ──
