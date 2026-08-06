@@ -45,9 +45,18 @@
 // ─── ATOMICITY ───────────────────────────────────────────────────────────────
 // Every mutating verb runs in ONE writeTransaction (src/store/db.ts: BEGIN
 // IMMEDIATE, whole-database write lock, the single host write path). No new
-// transaction mode, no new locking primitive, no optimistic-concurrency scheme.
-// The renumber AND its queue event are ONE commit, so a partially-renumbered queue
-// is not a reachable state and a rank change without its event is not either.
+// transaction mode and no new locking primitive. The renumber AND its queue event
+// are ONE commit, so a partially-renumbered queue is not a reachable state and a
+// rank change without its event is not either.
+//
+// FG-591 adds ONE thing on top, and only for the reorder verbs: an OPTIONAL
+// expectedVersion compare-and-set (see "the reorder concurrency guard" below). It
+// is not a second concurrency scheme — it introduces no lock and no retry, and the
+// comparison is read under the same BEGIN IMMEDIATE as the write it guards. It
+// exists because the write lock makes a reorder ATOMIC, which was never the same
+// claim as making it CORRECT: a whole-queue permutation computed from a view the
+// operator read a minute ago commits perfectly and still overwrites whatever moved
+// in between.
 //
 // ─── READINESS ───────────────────────────────────────────────────────────────
 // evaluateReadiness (src/readiness/readiness.ts, FG-382) is reused VERBATIM — no
@@ -668,15 +677,150 @@ function assertReorderable(projectKey: string, verb: string): string[] {
   return queue;
 }
 
+// ─── the reorder concurrency guard (FG-591 D11) ──────────────────────────────
+//
+// A reorder is submitted against a view the operator read some time ago — a board
+// render, a `queue list`, a drag that started three seconds and one dispatch ago.
+// Every reorder verb below rewrites the WHOLE queue order, so a submission built on
+// a stale view does not merge with what happened meanwhile: it OVERWRITES it. The
+// classic loss is an enqueue that lands between the read and the write and is then
+// silently dropped back out of position by a permutation that never knew about it.
+//
+// THE VERSION IS queue_events' OWN AUTOINCREMENT id — the project's highest
+// ORDER-AFFECTING event. No new column, no new counter, no vector clock: this table
+// already appends exactly one row per committed order change, in the same
+// transaction as the change (see appendQueueEvent), which is precisely the property
+// a version needs and the only one it needs.
+//
+// WHY A FILTERED MAX rather than the plain max id. queue_events is ONE history for
+// the whole operator queue, and since FG-610 it also carries `claim` and `release`
+// — and `readiness`, which records an assessment, not a move. None of those change
+// membership or order, so counting them would refuse an operator's drag every time
+// the dispatcher claimed something. That is a false refusal with a real cost and no
+// safety return. What IS counted is every verb that can change WHICH tickets are in
+// the queue or WHAT ORDER they are in: rank, unrank, enqueue, dequeue, reorder.
+//
+// Known blind spot, stated rather than papered over: a lifecycle status change
+// (closing a ticket, deferring it) appends no queue event, so it does not move the
+// version. It also changes neither membership nor rank order — the ticket keeps
+// both — so a reorder submitted across one still permutes exactly the set it read.
+//
+// The check is a genuine compare-and-set because it is READ INSIDE the caller's
+// writeTransaction: BEGIN IMMEDIATE already holds the whole-database write lock, so
+// no third party can append between the comparison and the renumber.
+export const QUEUE_ORDER_EVENT_TYPES: readonly QueueEventType[] = [
+  "rank",
+  "unrank",
+  "enqueue",
+  "dequeue",
+  "reorder",
+];
+
+/** The project's current queue version: the id of its most recent order-affecting
+ *  queue event, or 0 for a project whose queue has never moved. Monotonic, since
+ *  queue_events.id is AUTOINCREMENT and this set only ever gains rows. */
+export function queueVersion(projectKey: string): number {
+  const placeholders = QUEUE_ORDER_EVENT_TYPES.map(() => "?").join(", ");
+  const row = getDb()
+    .prepare(
+      `SELECT MAX(id) AS version FROM queue_events
+        WHERE project_key = ? AND event_type IN (${placeholders})`,
+    )
+    .get(projectKey, ...QUEUE_ORDER_EVENT_TYPES) as { version: number | null } | undefined;
+  return row?.version ?? 0;
+}
+
+/** What moved since the caller's view, named concretely. "The queue changed" is not
+ *  an answer an operator can act on; "FG-7 was enqueued" is. */
+function changesSince(projectKey: string, version: number): string {
+  const placeholders = QUEUE_ORDER_EVENT_TYPES.map(() => "?").join(", ");
+  const db = getDb();
+  const count = (
+    db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM queue_events
+          WHERE project_key = ? AND id > ? AND event_type IN (${placeholders})`,
+      )
+      .get(projectKey, version, ...QUEUE_ORDER_EVENT_TYPES) as { n: number }
+  ).n;
+  const rows = db
+    .prepare(
+      `SELECT event_type, ticket_id FROM queue_events
+        WHERE project_key = ? AND id > ? AND event_type IN (${placeholders})
+        ORDER BY id ASC LIMIT 5`,
+    )
+    .all(projectKey, version, ...QUEUE_ORDER_EVENT_TYPES) as {
+    event_type: string;
+    ticket_id: string;
+  }[];
+  const shown = rows.map((r) => `${r.event_type} ${r.ticket_id}`).join(", ");
+  const more = count > rows.length ? `, and ${count - rows.length} more` : "";
+  return `${count} change${count === 1 ? "" : "s"} since: ${shown}${more}`;
+}
+
+/** How each verb is spelled ON THE OPERATOR'S COMMAND LINE. `reorder` shipped under
+ *  `forge backlog` in FG-609 and stays there; the relative forms are `forge queue`
+ *  verbs. A refusal that names a command the operator cannot type is a worse answer
+ *  than one that names none. */
+function verbSurface(verb: string): string {
+  return verb === "rank-before" || verb === "rank-after" ? `queue ${verb}` : `backlog ${verb}`;
+}
+
+/** The optimistic-concurrency opt-in carried by every reorder verb. */
+export type ReorderOptions = {
+  /** The queue version the caller's view was built from (see queueVersion). When
+   *  present, the verb refuses BY NAME rather than clobbering a queue that moved
+   *  underneath it. OMITTED means "apply unconditionally" — that is today's
+   *  behaviour and stays the default, because a CLI operator typing a reorder
+   *  against a queue they just listed is not the racing caller this guards. */
+  expectedVersion?: number;
+};
+
+/** Compare-and-set on the queue version. Runs FIRST inside the verb's transaction
+ *  and before any mutation, so a refusal writes nothing at all. */
+function assertQueueVersion(projectKey: string, verb: string, opts: ReorderOptions): void {
+  const expected = opts.expectedVersion;
+  if (expected === undefined) return;
+  if (!Number.isInteger(expected) || expected < 0) {
+    throw new QueueRefusal(
+      `forge: ${verbSurface(verb)} refuses — the expected queue version must be a non-negative integer ` +
+        `(see \`forge queue list\`), got '${String(expected)}'. Nothing was written.`,
+      verb,
+      null,
+    );
+  }
+  const actual = queueVersion(projectKey);
+  if (actual === expected) return;
+  if (expected > actual) {
+    throw new QueueRefusal(
+      `forge: ${verbSurface(verb)} refuses — this ${verb} was submitted against queue version ${expected}, ` +
+        `but project_key '${projectKey}' has never been past version ${actual}. That version did not ` +
+        `come from this queue. Nothing was written.`,
+      verb,
+      null,
+    );
+  }
+  throw new QueueRefusal(
+    `forge: ${verbSurface(verb)} refuses — the queue moved underneath this ${verb}. It was submitted ` +
+      `against queue version ${expected} and project_key '${projectKey}' is now at version ${actual} ` +
+      `(${changesSince(projectKey, expected)}). Applying it would silently overwrite that change. ` +
+      `Nothing was written — re-read the queue and resubmit.`,
+    verb,
+    null,
+  );
+}
+
 /** Set the queue's order to an exact permutation of its current members. ATOMIC:
  *  the whole renumber and its event are one commit, so a crash mid-renumber leaves
  *  the previous order byte-identical rather than partially renumbered. */
 export function setQueueOrder(
   projectKey: string,
   desired: string[],
+  opts: ReorderOptions = {},
   at: string = nowIso(),
-): { queue: string[] } {
+): { queue: string[]; version: number } {
   return writeTransaction(() => {
+    assertQueueVersion(projectKey, "reorder", opts);
     const queue = assertReorderable(projectKey, "reorder");
     if (queue.length === 0) {
       throw new QueueRefusal(
@@ -700,7 +844,7 @@ export function setQueueOrder(
     // no single subject, and an event row with an empty ticket_id would be an
     // unattributable line in an audit log.
     appendQueueEvent(projectKey, wanted[0]!, "reorder", { before, after: wanted }, at);
-    return { queue: queuedOrder(projectKey) };
+    return { queue: queuedOrder(projectKey), version: queueVersion(projectKey) };
   });
 }
 
@@ -710,9 +854,11 @@ export function moveQueuePosition(
   projectKey: string,
   ticketId: string,
   position: number,
+  opts: ReorderOptions = {},
   at: string = nowIso(),
-): { queue: string[]; position: number } {
+): { queue: string[]; position: number; version: number } {
   return writeTransaction(() => {
+    assertQueueVersion(projectKey, "reorder", opts);
     const queue = assertReorderable(projectKey, "reorder");
     if (!queue.includes(ticketId)) {
       throw new QueueRefusal(
@@ -727,8 +873,104 @@ export function moveQueuePosition(
     const wanted = [...without.slice(0, target), ticketId, ...without.slice(target)];
     applyQueuePermutation(projectKey, wanted);
     appendQueueEvent(projectKey, ticketId, "reorder", { before, after: wanted, position: target + 1 }, at);
-    return { queue: queuedOrder(projectKey), position: target + 1 };
+    return { queue: queuedOrder(projectKey), position: target + 1, version: queueVersion(projectKey) };
   });
+}
+
+// ─── relative ranking (FG-591) ───────────────────────────────────────────────
+//
+// WHY A RELATIVE FORM AT ALL, given moveQueuePosition already exists. A position
+// is not what the operator means. "Put FG-7 above FG-3" is intent that survives the
+// queue moving; "put FG-7 at position 4" is a coordinate that silently means
+// something else the moment anything else is enqueued, dequeued or reordered. A
+// drag on the board, and an operator at a terminal reading a list, are both
+// expressing the first thing. Position 4 is what an unguarded replay of a stale
+// view looks like — which is exactly what the version guard above exists to catch,
+// and why the relative form and the guard land together.
+//
+// SCOPE: these permute THE QUEUE, exactly like setQueueOrder and moveQueuePosition,
+// so every non-queued ranked ticket keeps the slot it already occupied (see
+// applyQueuePermutation). Ranking a ticket that is NOT a queue member relative to
+// another is `rankTicket` with a position over the whole ranked domain; these
+// verbs refuse it by name rather than quietly widening their domain, because the
+// two operate on different sets and collapsing them would make "leave the rest of
+// the backlog where it is" depend on an argument the caller did not pass.
+
+function rankRelative(
+  projectKey: string,
+  ticketId: string,
+  referenceId: string,
+  placement: "before" | "after",
+  opts: ReorderOptions,
+  at: string,
+): { queue: string[]; position: number; version: number } {
+  const verb = `rank-${placement}`;
+  return writeTransaction(() => {
+    assertQueueVersion(projectKey, verb, opts);
+    if (ticketId === referenceId) {
+      throw new QueueRefusal(
+        `forge: ${verbSurface(verb)} refuses — ${ticketId} cannot be ranked relative to itself.`,
+        verb,
+        ticketId,
+      );
+    }
+    const queue = assertReorderable(projectKey, verb);
+    for (const [id, role] of [
+      [ticketId, "the ticket being moved"],
+      [referenceId, "the reference ticket"],
+    ] as const) {
+      if (!queue.includes(id)) {
+        requireTicket(projectKey, id, verb);
+        throw new QueueRefusal(
+          `forge: ${verbSurface(verb)} refuses — ${id} (${role}) is not in the operator queue, and ` +
+            `${verb} permutes the queue. Enqueue it first, or use \`forge backlog rank ${id} ` +
+            `--position <n>\` to place it in the stack rank without queueing it.`,
+          verb,
+          id,
+        );
+      }
+    }
+
+    const before = [...queue];
+    const without = queue.filter((id) => id !== ticketId);
+    const referenceIndex = without.indexOf(referenceId);
+    const target = placement === "before" ? referenceIndex : referenceIndex + 1;
+    const wanted = [...without.slice(0, target), ticketId, ...without.slice(target)];
+    applyQueuePermutation(projectKey, wanted);
+    // Recorded as a `reorder` event — the fact IS a reorder, and a second event type
+    // for the same fact would be a second vocabulary for it. The operator's INTENT
+    // is preserved in the payload, so the history says "before FG-3", not "to 4".
+    appendQueueEvent(
+      projectKey,
+      ticketId,
+      "reorder",
+      { before, after: wanted, position: target + 1, placement, relativeTo: referenceId },
+      at,
+    );
+    return { queue: queuedOrder(projectKey), position: target + 1, version: queueVersion(projectKey) };
+  });
+}
+
+/** Move a queued ticket to immediately BEFORE `referenceId` in the queue. */
+export function rankBefore(
+  projectKey: string,
+  ticketId: string,
+  referenceId: string,
+  opts: ReorderOptions = {},
+  at: string = nowIso(),
+): { queue: string[]; position: number; version: number } {
+  return rankRelative(projectKey, ticketId, referenceId, "before", opts, at);
+}
+
+/** Move a queued ticket to immediately AFTER `referenceId` in the queue. */
+export function rankAfter(
+  projectKey: string,
+  ticketId: string,
+  referenceId: string,
+  opts: ReorderOptions = {},
+  at: string = nowIso(),
+): { queue: string[]; position: number; version: number } {
+  return rankRelative(projectKey, ticketId, referenceId, "after", opts, at);
 }
 
 // ─── derived projections (COMPUTED, never stored) ────────────────────────────
