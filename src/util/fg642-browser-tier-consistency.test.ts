@@ -41,6 +41,11 @@ const RESOLVER = join("src", "util", "chrome-bin.ts");
 // across twelve widths, UTC disclosure on the plot rather than only the caption).
 // FG-661 then added one test to `agent-runtime` for the stale-read affordance
 // (RF-15) and re-pointed the timezone tests in both suites at the Local/UTC toggle.
+// FG-591 then added `fg591-queue-board` (6 tests): the operator work-queue board as an
+// operator drives it — a real browser drag-reorder that reaches the durable rank through
+// the CLI, the same move by keyboard, a stale-version refusal surfaced rather than
+// swallowed, a not-ready enqueue's concrete refinement proposal on screen, blocked vs.
+// waiting-to-overlap kept visibly distinct, and the CLI-only dispatcher panel.
 // FG-679 added `fg679-current-activity` (9 tests): the rendered Current activity
 // surface — three distinct sections, the four BD-4 launch statuses as four distinct
 // strings, `unobserved since <t>`, per-context required CI, old-sha evidence
@@ -50,6 +55,7 @@ const TIER_TESTS: Readonly<Record<string, number>> = {
   "agent-runtime-legibility.test.ts": 12,
   "agent-runtime.test.ts": 18,
   "backlog-count.test.ts": 2,
+  "fg591-queue-board.test.ts": 6,
   "fg679-current-activity.test.ts": 10,
   "fg608-backlog-cutover.test.ts": 3,
   "inactive-checkouts.test.ts": 3,
@@ -68,7 +74,7 @@ test("FG-642 (exact set): the browser tier is exactly the suites TIER_TESTS name
   );
 });
 
-test("FG-642 (exact set): every suite keeps its own test count, and the tier keeps all 58", () => {
+test("FG-642 (exact set): every suite keeps its own test count, and the tier keeps all 64", () => {
   let total = 0;
   for (const [file, expected] of Object.entries(TIER_TESTS)) {
     const found = (tierSource(file).match(/^test\(/gm) ?? []).length;
@@ -79,7 +85,11 @@ test("FG-642 (exact set): every suite keeps its own test count, and the tier kee
     );
     total += found;
   }
-  assert.equal(total, 58, "the tier must carry FG-642's 18 real-browser tests plus the 30 FG-648/FG-661 added and FG-679's 10");
+  assert.equal(
+    total,
+    64,
+    "the tier must carry FG-642's 18 real-browser tests plus the 30 FG-648/FG-661 added, FG-679's 10 and FG-591's 6"
+  );
 });
 
 test("FG-642 (launch site): every chromium.launch() in the tier takes executablePath from the shared resolver", () => {

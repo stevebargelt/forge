@@ -407,6 +407,38 @@ export function runForgeVerb(
   });
 }
 
+/**
+ * THE CLI'S OWN REFUSAL, whichever channel it used.
+ *
+ * A `--json` verb that REPORTS a refusal (rather than throwing one) writes its whole
+ * envelope — `refusal` and `reason` included — to STDOUT and exits non-zero with an
+ * EMPTY stderr. A not-ready `queue enqueue` is exactly that shape, and its `reason`
+ * carries the concrete refinement proposal, which is the one sentence that tells the
+ * operator what to do. Falling through to `execFile`'s synthesized "Command failed:
+ * <argv>" there hands them the only string in the exchange that contains no reason at
+ * all — the operator blindness this ticket exists to close (found by the browser-tier
+ * AC4 case in browser-tests/fg591-queue-board.test.ts).
+ *
+ * A THROWN refusal (a stale `--expect-version`, a markdown-mode project) still lands
+ * on stderr with no stdout, and is still passed through verbatim.
+ */
+export function cliRefusal(result: ForgeRunResult, verb: string): string {
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch {
+    parsed = null;
+  }
+  if (parsed && typeof parsed === "object") {
+    for (const key of ["refusal", "reason", "error"]) {
+      const value = (parsed as Record<string, unknown>)[key];
+      if (typeof value === "string" && value.trim() !== "") return value.trim();
+    }
+  }
+  const raw = result.stderr.trim() || result.stdout.trim();
+  return raw !== "" ? raw : `\`forge queue ${verb}\` exited ${result.code}`;
+}
+
 // ─── the handler ─────────────────────────────────────────────────────────────
 
 async function readBody(req: IncomingMessage): Promise<{ ok: true; text: string } | MutationRefusal> {
@@ -578,7 +610,7 @@ export async function handleQueueMutation(
       ok: false,
       verb: built.verb,
       exitCode: result.code,
-      error: (result.stderr || result.stdout || `\`forge queue ${built.verb}\` exited ${result.code}`).slice(-MAX_REPORTED_STDERR).trim(),
+      error: cliRefusal(result, built.verb).slice(-MAX_REPORTED_STDERR).trim(),
     });
     return;
   }
